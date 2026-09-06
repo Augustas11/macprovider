@@ -1,6 +1,61 @@
 # SPEC-025 — Native Mac App (signed `.dmg` + menu bar wrapper)
 
-Status: DRAFT v0.25 · Owner: augstar · Target: 2026 Q3
+Status: DRAFT v0.28 · Owner: augstar · Target: 2026 Q3
+
+**Change log v0.28 (2026-09-05, F5 §5.4 dwell-state enumeration correction from
+the Opus pre-merge review).** Corrects the `last_restart_dwell_state` enumeration
+to match the IMPL: `flap` is **not** a persisted dwell-state value. In the
+single-row model the beacon that supersedes a prior pending restart is the same
+beacon that starts the next restart, so the column always reflects the current
+restart; a flap is recorded by incrementing `flaps_total` and setting
+`last_flap_observed_at`. The enum is {`unknown`, `correlated_pending`, `held`,
+`artifact_confounded`}; flap-loop queries use the two flap counter columns.
+Documentation-only clarification; no behavior change.
+
+**Change log v0.27 (2026-09-05, F5 §5.4 hardening reconciliation from the
+adversarial pre-merge review).** Reconciles §5.4 with the IMPL hardening: the
+beacon file/dir ownership rule now defines BOTH topologies (consumer
+provider-UID `0700`/`0600`; headless root-owned `0755` dir / `0644` file — root
+stays sole writer, never chowned to the provider) and the reader enforces
+"owned by reader-uid or root, not group/other-writable" in place of the old
+uid-`0600`-only text; adds the internal-consistency rule
+(`restarts_total + deferrals_total ≤ seq`), scopes the anti-pinning step ceiling
+to subsequent beacons (a first insert / long-uptime first contact is bounded only
+by the absolute cap + the ratio), and adds the state-reset carve-out (the one
+permitted `seq` regression, for a mid-boot watchdog-state wipe). No behavior added
+beyond the F5 IMPL; observability-only and redaction non-negotiables unchanged.
+
+**Change log v0.26 (2026-09-05, supervisor telemetry contract — RFC-001 §7 / F5,
+#1386).** Adds §5.4: a **separate** supervisor telemetry contract
+(`macprovider.supervisor-event.v1`) so provider liveness recovery is observable
+coordinator-side (the #1189 blind spot). The companion watchdog publishes a
+**best-effort latest-state beacon** to a single overwrite-OK trusted-root file
+`supervisor-beacon.json`: `kind` ∈ {`restart`,`deferral`,`beacon`} naming the
+latest event, always-present topology (allowlisted `supervisor_label` class +
+version) and **monotonic recovery counters** (`restarts_total`/`deferrals_total`),
+plus **sticky** `last_restart`/`last_deferral` detail subobjects (reason=wedge,
+targeted service_instance, cooldown_state, §5.2 model-liveness / deferral_reason)
+carried on **every** beacon so a topology tick never erases restart evidence. There
+is no append-log and no acknowledgement protocol: the fire-and-forget heartbeat has
+no coordinator ack, so recovery observability rides the counters (a jump >1 shows
+missed events without losing the signal). The CLI is **strictly read-only** (writes
+nothing, owns no cursor) and, after hardened reads, **projects the beacon to the
+allowlisted schema locally** (dropping unknown keys before uplink) into a heartbeat
+field **`last_supervisor_event`**, distinct from `last_autoupdate_event`. The
+coordinator ingests best-effort/non-blocking, orders by `seq` alone per
+`(provider_id, boot_id)` (provider `ts` is diagnostic-only, never gates/orders, so
+a stepped-back Mac clock cannot suppress telemetry), upserts one row (with explicit
+derived-state columns incl. `last_restart_observed_at`) into a separate
+`provider_supervisor_events` store, and **derives** sustained-serving dwell as its
+own wall-clock observation of the post-restart new-`service_instance_id` instance
+staying serving-eligible in its pool view (reset on staleness/disconnect/
+replacement; no new heartbeat `serving` field). The acceptance signal keys on the
+**sticky `last_restart`** advancing (not on observing a `kind=restart` beacon) and
+requires both old/new instance ids known, with the window anchored on the
+coordinator-derived `last_restart_observed_at`. MUST NOT overload the SPEC-020
+autoupdate event model. Redaction non-negotiables apply.
+Behavior lands via cited follow-up code (watchdog emit + CLI uplink + coordinator
+ingest).
 
 **Change log v0.25 (2026-09-05, watchdog exit-restart fence + model-liveness token).**
 Locks in RFC-001 §5.1/§3 (#1203; follow-ups #1382/#1383). Aligns with SPEC-020
@@ -765,11 +820,14 @@ writes only its own boot-arm and cooldown markers. Consuming the new §5.2
 deferred follow-up, not part of this version.
 
 The watchdog is **installer-owned and non-self-restoring** (RFC-001 §5.1): beyond
-its boot-arm/cooldown markers it MUST NOT write, restore, rename, or delete any
-provider **or supervisor** artifact — provider binary/resources/config/plist, or
-the watchdog script, its plist/LaunchAgent/LaunchDaemon, or any current or legacy
-supervisor label (including `live.streamvc.macprovider-watchdog`) — and MUST NOT
-own or perform update or rollback. Only the installer/Malibu-repair/CLI
+its boot-arm/cooldown markers and its own private supervisor-telemetry state files
+(§5.4 — non-executable, non-config diagnostic markers, never a provider or
+supervisor artifact and never update/rollback authority) it MUST NOT write,
+restore, rename, or delete any provider **or supervisor** artifact — provider
+binary/resources/config/plist, or the watchdog script, its
+plist/LaunchAgent/LaunchDaemon, or any current or legacy supervisor label
+(including `live.streamvc.macprovider-watchdog`) — and MUST NOT own or perform
+update or rollback. Only the installer/Malibu-repair/CLI
 transaction owner writes the supervisor. This removes the second, mutable
 exit-restart authority whose stale, self-restoring form caused the #1189
 stranding, so a stale watchdog can no longer resurrect or fight the provider.
@@ -793,6 +851,324 @@ What the app actually does around lifecycle:
   drains or signals the launchd provider. Update/uninstall drain is owned by the CLI
   transaction.
 - **Uninstall:** delegate to `malibu-cli uninstall --yes` (§3.4).
+
+### 5.4 Supervisor telemetry (RFC-001 §7 / F5)
+
+Provider liveness recovery must be observable from the coordinator, not only by
+SSH — the #1189 blind spot. This defines a **supervisor telemetry contract** that
+is **separate** from the SPEC-020 autoupdate-event model: supervisor/liveness
+signals MUST NOT be smuggled into `last_autoupdate_event` (SPEC-020's event model
+is autoupdate-specific and its coordinator aggregation was explicitly deferred,
+`specs/SPEC-020-provider-autoupdate.md`). Supervisor telemetry is its own event
+type, its own heartbeat field, and its own coordinator store.
+
+**Observability-only invariant (MUST).** Supervisor telemetry — the
+`last_supervisor_event` wire field and the coordinator `provider_supervisor_events`
+store — is **diagnostic only**. It MUST NOT gate or change admission, trust tier,
+buyer routing/serving, rewards, sanctions, autoupdate eligibility, rollback, or any
+local mutation authority. It records what the supervisor did; it never decides
+anything (mirrors the §5.2 model-liveness no-authority rule).
+
+**Event schema — a single latest-state beacon, not a delivery queue.** Supervisor
+telemetry is a **best-effort latest-state beacon**, not a guaranteed event stream.
+This is deliberate: the provider heartbeat is fire-and-forget with no
+coordinator→CLI acknowledgement, so a per-event at-least-once channel cannot be
+built on it honestly. Recovery observability — "is this node's watchdog
+restarting it, and how often" — is instead carried by **monotonic counters** in
+the beacon, so it survives dropped heartbeats without any replay/ack machinery: a
+counter that advances by more than one between two observed beacons tells the
+coordinator events occurred even when individual beacons were missed.
+
+The value of the heartbeat field `last_supervisor_event` is exactly this object
+(no wrapper), a single JSON object size-bounded ≤ 4096 wire bytes (matching the
+autoupdate-event cap; because it is always exactly one object, the CLI's
+whole-file size check below is well-defined). `kind` names the **latest**
+supervisory event the beacon reflects; the counters, topology fields, and the
+**sticky last-action detail subobjects** (below) are present on every beacon
+regardless of `kind`. Unknown keys are dropped by readers.
+
+Common (every beacon): `schema` = `"macprovider.supervisor-event.v1"`; `ts`
+(RFC3339, the wall-clock of this beacon write); `kind` ∈
+{`"restart"`,`"deferral"`,`"beacon"`}; `boot_id` (string, current
+`kern.bootsessionuuid`); `seq` (uint64, monotonic within a boot, bumped on every
+beacon write, for ordering/latest-wins); `supervisor_version` (string, ≤64); and
+the recovery-observability counters `restarts_total` and `deferrals_total` (uint64,
+monotonic-nondecreasing within a `boot_id`, reset only on reboot) — the count of
+wedge restarts and autoupdate deferrals the watchdog has performed this boot.
+
+`supervisor_label` (string, ≤64) is topology and always present, but is **not** a
+free-form launchd label: to satisfy redaction it MUST be one of an explicit public
+allowlist — `"provider-watchdog"` (current, from `live.malibu.provider-watchdog`)
+or `"legacy-watchdog"` (from the legacy `live.streamvc.macprovider-watchdog`) — and
+any unrecognized label is emitted as `"unknown"`. The raw launchd label is never
+stored or forwarded. A stale legacy watchdog is therefore visible fleet-wide as
+`"legacy-watchdog"` without leaking operator/host naming.
+
+**`kind`** names the latest event *type* for this write, but the authoritative
+per-action detail lives in two **sticky** subobjects that are carried on **every**
+beacon (including a topology-only `kind:"beacon"`) once the action has occurred
+this boot, and are cleared only on reboot (new `boot_id`). This is the fix for the
+overwrite hazard: a topology tick can never erase restart evidence before the
+coordinator observes it.
+
+- `last_restart` (object|null; null until the first wedge restart this boot) — the
+  most recent wedge restart: `seq` (the `seq` at which it was recorded), `ts`
+  (RFC3339 of the restart), `reason` = `"wedge"` (the only watchdog-owned restart
+  reason post-F1; SPEC-020 R-4.14 — exit-restart is launchd's, never reported
+  here), `cooldown_state` (enum: `"armed"` | `"cooldown_active"`),
+  `service_instance` (string|null; the **old** provider instance the kick
+  targeted), and `model_liveness` (object|null; see below).
+- `last_deferral` (object|null; null until the first deferral this boot) — the most
+  recent deferral (watchdog observed a pending autoupdate marker and deferred to the
+  transaction owner, R-4.14, **no restart performed**): `seq`, `ts`, and
+  `deferral_reason` = `"pending_autoupdate_marker"`.
+
+`kind:"restart"` means `last_restart` was just (re)written this tick;
+`kind:"deferral"` means `last_deferral` was; `kind:"beacon"` means neither changed
+(topology + counters + whatever sticky detail already exists). `restart`-only
+`reason`/`cooldown_state`/`model_liveness` live **inside** `last_restart`, never at
+top level; `deferral_reason` lives **inside** `last_deferral`.
+
+`model_liveness` (inside `last_restart`, from §5.2, so a stalled token is
+interpretable and idle providers are never mis-read as wedged):
+`{ "token_age_ms": <uint64|null>, "active_inference": <bool>,
+"active_inference_age_ms": <uint64|null> }`. A rising `token_age_ms` is
+wedge evidence **only while `active_inference` is true** (§5.2); the coordinator
+MUST NOT read token age alone as a wedge.
+
+**Redaction (non-negotiable, RFC-001 §Non-Negotiables).** No field may carry
+provider names, hostnames, full provider ids, wallet details, local home paths, or
+raw diagnostics. Every string is bounded and redacted with the same rules the
+autoupdate event uses; `service_instance` is an opaque CLI instance identifier and
+`supervisor_label` is the allowlisted class above — never a path or PII.
+
+**Watchdog → CLI bridge — storage & ownership.** The companion watchdog is the
+**sole writer** of the published beacon and its private supervisor-telemetry
+state files (the sticky/counter sidecars from which the beacon is regenerated),
+kept in a supervisor-telemetry directory under the watchdog's provider state root
+with the ancestry hardening SPEC-020 R-4.9 applies to autoupdate state. Ownership
+depends on the install topology, and both are enforced by the reader:
+- **Consumer (GUI):** the watchdog and provider share the uid, so the directory
+  is provider-UID-owned `0700` (symlink-free, no non-owner-write ACLs) and the
+  beacon file is `0600`.
+- **Headless (system LaunchDaemon):** the watchdog runs as root (it needs
+  `/bin/launchctl` in the system domain) while the provider runs as the fleet
+  user, so the directory is root-owned `0755` (world-traversable but
+  not-others-writable) and the beacon is root-owned `0644` (world-readable so the
+  provider can read it; **never chowned to the provider** — root stays the sole
+  writer). The beacon carries only redacted/allowlisted, non-sensitive fields.
+The invariant the reader enforces (below) is that the containing directory and
+the file are owned by the reader's uid or root and are not group/other-writable;
+a failed ancestry check is fail-closed (the telemetry is skipped, never the
+heartbeat). Writes are exclusive-create-temp + `rename` + `sync`:
+- `$STATE_DIR/supervisor-beacon.json` — the single latest beacon object
+  (**overwrite-OK**). On every tick, and immediately after any wedge restart or
+  deferral, the watchdog bumps `seq`, updates the counters and `kind`/detail
+  fields for the latest event, and rewrites this one file. There is no append-log,
+  no per-event retention, and no acknowledgement protocol: losing an intermediate
+  beacon only means the coordinator sees the counters advance by more than one on
+  the next beacon it does observe, which is still a faithful recovery signal.
+
+**Delivery — CLI is strictly read-only.** The CLI **writes nothing** for
+supervisor telemetry; it owns no cursor or ack file (the earlier ack-cursor design
+is removed — it could not be honest without a coordinator ack, and it forced the
+watchdog into an unbounded append-log). When the CLI builds a heartbeat it reads
+`supervisor-beacon.json` with hardened I/O: it first `stat`s the containing
+directory and requires it be a directory owned by the reader's uid or root with
+no group/other write; then opens the file `O_NOFOLLOW` and `fstat`s it, requiring
+a single-link regular file, size ≤ the wire cap, and **either** owner = the
+reader's uid with mode `0600` (consumer) **or** owner = root with no group/other
+write bit (headless root-owned `0644`) — so the file is never writable by a
+non-owner in either topology. It then parses fail-closed. The CLI does **not** forward raw JSON: it **projects the parsed
+object to the allowlisted `macprovider.supervisor-event.v1` schema before uplink**
+— unknown keys are dropped **locally**, string lengths are capped, and
+`supervisor_label` is mapped to the allowlisted class — and carries only that
+validated projection as `last_supervisor_event`. (Relying on the coordinator to
+drop unknown keys is too late for the redaction invariant.) A missing, malformed,
+oversized, wrong-owner, symlinked, or wrong-boot (`boot_id` ≠ the current
+`kern.bootsessionuuid`) file is ignored: absence never blocks a heartbeat and never
+fabricates a restart signal.
+
+**Sustained-serving dwell is coordinator-derived; correlation needs a
+coordinator-visible instance id.** The watchdog cannot know at restart time
+whether the restart held, so dwell is not a watchdog field. To correlate soundly,
+the provider heartbeat/`state_update` carries a bounded `service_instance_id`
+(the opaque `/v1/status` `service_instance.instance_id`; SPEC-001 §6.15.2). The
+`last_restart.service_instance` names the **old** targeted instance; the
+coordinator measures dwell only after it observes heartbeats from a **new**
+instance whose `service_instance_id` differs from the one the restart targeted —
+proving a new process, not a reconnect. **Dwell is coordinator wall-clock, not a
+provider field:** it is the duration the coordinator itself observes the new
+`service_instance_id` as continuously **serving-eligible in its own pool view** —
+using the coordinator's existing per-provider serving/liveness status, not any new
+`serving` heartbeat field (the heartbeat carries `status`, not a `serving` flag;
+`network_state` lives only on local `/v1/status`, so F5 adds no serving field and
+reuses the coordinator's own serving determination). Dwell accrues only while the
+coordinator keeps receiving fresh heartbeats (within its own staleness threshold)
+from that `service_instance_id` **and** its pool view of the provider stays
+serving-eligible; it **resets to zero / is marked unknown** on any heartbeat-miss
+past the staleness threshold, disconnect, session replacement, absent
+`service_instance_id`, or any non-serving state — a later heartbeat after silence
+never back-fills dwell across the gap. It does **not** read the provider's
+`uptime_s` (whose producer/semantics F5 does not extend).
+
+**Correlation requires both instances be known.** The acceptance signal (below)
+requires **both** the old targeted `last_restart.service_instance` **and** the new
+heartbeat `service_instance_id` to be non-null and to differ; a new id merely
+differing from `null` does not prove a new process replaced the targeted one. If
+`last_restart.service_instance` is null, the coordinator still stores and counts the
+restart, but classifies dwell correlation as **unknown / non-accepting** — it does
+not assert recovery-held. A restart followed by a correlated new instance whose
+serving dwell stays below a coordinator-owned threshold before another restart is a
+**flap**; a correlated dwell above threshold with no artifact-write event (below) is
+the recovery-held signal.
+
+**Coordinator ingest & store.** The coordinator ingests `last_supervisor_event` on
+heartbeat and state-update **best-effort and non-blocking**: a rejected value is
+**discarded while the heartbeat/state_update is still accepted** (it MUST NOT reject
+the frame the way the autoupdate parser rejects a bad `last_autoupdate_event`), and
+the coordinator MUST NOT synthesize a restart event from absent or invalid
+telemetry. Whole-beacon discard at the coordinator is limited to: a
+malformed/missing required field, an oversized payload, a wrong `schema`, or a
+`seq`/counter sanity violation (below). **Wrong-boot rejection is CLI-side, not
+coordinator-side:** the coordinator receives `boot_id` only *inside* the beacon and
+has no independent current-boot signal (the heartbeat carries `service_instance_id`,
+not a boot id), so it cannot and does not re-verify "is this the current boot" — it
+treats `boot_id` as a **declared partition key** for the `(provider_id, boot_id)`
+row. Staleness across boots is already fully defended at the CLI, which drops any
+beacon file whose `boot_id` ≠ the live `kern.bootsessionuuid` before uplink (above);
+after reboot the watchdog writes a fresh `boot_id` with `seq` reset, so a new row is
+created and prior-boot rows are retained as history. Timestamp skew is likewise
+**never** a whole-beacon discard — provider `ts` is diagnostic-only and is
+normalized at the field level (below), so a stepped clock can never suppress a valid
+higher-`seq` counter advance.
+
+*Ordering — `seq` is the sole same-boot authority; `ts` never gates.* Because the
+beacon is latest-state (not a replay queue), ordering is **latest-wins by `seq`,
+not dedup and not time**: per `(provider_id, boot_id)` the coordinator keeps the
+beacon with the highest `seq`. Provider `ts` (and `last_restart.ts`/
+`last_deferral.ts`) are **diagnostic display fields only** — they never gate
+acceptance, never order beacons, and never bound the acceptance window (which is
+anchored on the coordinator-derived `last_restart_observed_at`, below). This is
+deliberate: a Mac wall clock can step backward across sleep/NTP/manual correction,
+so a `ts`-based anti-backdating rule would wrongly drop real higher-`seq` beacons
+and suppress exactly the counter advance the contract relies on. A `ts` (or nested
+action `ts`) more than `5m` in the future is not used to reject the beacon; the
+offending timestamp field is nulled/flagged, the rest of the beacon is still
+ingested by `seq`. A beacon is discarded (frame still accepted) only if a required
+field is malformed. Every accepted beacon MUST be internally consistent:
+`restarts_total + deferrals_total ≤ seq` and each nested action `seq ≤` the top
+`seq` (the watchdog bumps `seq` once per tick and once per event), else it is
+dropped non-blockingly. A `seq` **≤** the stored `seq` is a **full no-op** — it
+neither replaces detail nor advances counters — **except** the state-reset
+carve-out below. For a `seq` **>** the stored `seq`, the counters MUST be **≥** the
+stored counters (monotonic within a boot); a higher-`seq` beacon that regresses a
+counter, or whose `seq`/counters jump beyond a coordinator-owned per-boot sanity
+ceiling, is treated as malformed and is **quarantined/discarded non-blockingly**
+rather than adopted, so a single corrupt/forged write cannot pin state. The step
+ceiling applies to **subsequent** beacons only, **not** to a first insert or a
+reset: a legitimate first contact (a long-uptime Mac, or a row pruned while still
+up) can carry a large `seq`, bounded only by an absolute cap and the
+internal-consistency ratio. The ceiling and cap are **implementation-owned
+constants**; the normative contract is only that they exist, apply non-blockingly,
+and never adopt an over-limit beacon as high-water.
+
+*State-reset carve-out (the one permitted `seq` regression).* If the watchdog's
+state directory is wiped mid-boot (the `uninstall.sh`→`install.sh` repair flow, or
+an operator `rm`), it re-emits a low `seq` with counters restarted at 0 under the
+**same** `boot_id`. Without a carve-out the latest-wins no-op would discard every
+beacon for the rest of the boot — a blind spot exactly during repair. So a
+regressing beacon that is a **plausible fresh state** — `seq` at or below a small
+implementation-owned bound AND internally consistent (`restarts_total +
+deferrals_total ≤ seq`) AND both counters at or below the stored high-water — is
+**adopted** as a new baseline (resetting `seq`/counters/sticky/dwell) while
+`flaps_total` and `first_seen_at` are preserved. This is safe against a stale
+replay: if it was not a genuine reset, the real watchdog's next higher-`seq`
+beacon re-advances the row.
+
+*Store.* Valid beacons upsert into a **separate** `provider_supervisor_events`
+table (never merged into `provider_autoupdate_events`), **one row per
+`(provider_id, boot_id)`**, with an **allowlisted, bounded** column set (schema
+fields only; unknown keys dropped; string lengths capped), operator/analytics-only
+grants (no buyer/provider-portal read), and pruning/retention parallel to
+`provider_autoupdate_events` (migration 026). To make frequency and flap history
+reconstructable without a per-event log, the row carries explicit
+coordinator-derived state, not just current totals: `first_seen_at`,
+`last_observed_at`, `last_seq`, the high-water `restarts_total`/`deferrals_total`
+**and** the `prev_restarts_total`/`prev_deferrals_total` **with** `prev_observed_at`
+(the counters and observation time of the prior accepted beacon) — so the
+single-step delta `restarts_total − prev_restarts_total` over the interval
+`last_observed_at − prev_observed_at` is a real observation-time rate, not just a
+count — `supervisor_label`/`supervisor_version`, the sticky
+`last_restart`/`last_deferral` detail, and — the acceptance-window anchor —
+`last_restart_observed_at`: the coordinator wall-clock time at which it **first**
+accepted a beacon whose `last_restart.seq` advanced beyond the stored value (i.e.
+first observation of a new restart). Longer-horizon frequency across boots is a
+query over retained rows.
+
+*Flap history is a coordinator-derived rollup (not a per-event log).* Because
+`last_restart` is overwritten by the next restart, raw `restarts_total` alone
+cannot show which restarts were flaps (a restart whose correlated instance never
+held past the dwell threshold before the next restart) — and RFC-001 §7 requires
+restart-loop flaps to be observable, not just total restart frequency. The row
+therefore also carries coordinator-derived rollup columns: `flaps_total` (uint64),
+`last_flap_observed_at`, and `last_restart_dwell_state` ∈ {`unknown`,
+`correlated_pending`, `held`, `artifact_confounded`}. Note that `flap` is **not** a
+`last_restart_dwell_state` value: in the single-row model the beacon that supersedes
+a prior pending restart is the same beacon that starts the next restart, so the
+column always reflects the current restart's state; a flap is recorded instead by
+incrementing `flaps_total` and setting `last_flap_observed_at`. Query flap loops on
+those two columns, not on `last_restart_dwell_state`. Update rule: when a new
+`last_restart.seq` advances, the coordinator finalizes the **prior** restart — if
+its correlated new instance reached the dwell threshold with no artifact-write event
+the prior restart was `held`; if it did not, that is a flap (increment `flaps_total`,
+set `last_flap_observed_at`); if an artifact-write event fell in its window the prior
+restart is `artifact_confounded` (so a flap is not misattributed to a wedge loop when
+an update/rollback was actually in play); correlation that was never established
+(null old/new instance id) stays `unknown`. The new restart's own
+`last_restart_dwell_state` then begins at `correlated_pending` (or `unknown`). This
+preserves flap observability durably without reintroducing an event queue.
+
+**Acceptance signal.** The signal keys on the **sticky `last_restart` state, not on
+observing a `kind=restart` beacon** — since `kind` names only the latest write, the
+coordinator may first observe the restart via a later `kind:"beacon"` (or
+`kind:"deferral"`) beacon that still carries the sticky `last_restart`, and that
+MUST count. Concretely: for a `(provider_id, boot_id)` the coordinator has observed
+`last_restart != null` with `last_restart.reason = "wedge"`, an advanced
+`last_restart.seq` (and correspondingly advanced high-water `restarts_total`)
+setting `last_restart_observed_at`; then a **correlated** new `service_instance_id`
+instance (both old `last_restart.service_instance` and new id non-null and
+differing, per correlation above) whose coordinator-derived sustained-serving dwell
+exceeds threshold, and **no coordinator-visible artifact-write event** in the window
+`[last_restart_observed_at, last_restart_observed_at + dwell_threshold]`, evaluated
+against the autoupdate table's **`provider_autoupdate_events.observed_at`**
+(migration 026) — the coordinator-observation timestamp that ingest populates — as
+the authoritative time column for the window (not `recorded_at`, and not any
+provider-reported time). The window start is the **coordinator-derived**
+`last_restart_observed_at` above, never the provider's self-reported `ts` (which
+cannot narrow the window). An artifact-write event is precisely a
+`provider_autoupdate_events` row whose `phase` ∈ {`backup`, `swap`, `rollback`} (the
+SPEC-020 R-6.4 phases that mutate the on-disk provider binary) with `outcome` ∈
+{`success`, `in_progress`}. **`outcome=failure` is deliberately excluded, matching
+producer ground truth:** the existing autoupdate producer emits a
+`phase:rollback`/`backup`/`swap` + `outcome:failure` event on a *pre-mutation*
+abort — e.g. `reason:"reload_helper_fence_failed"` is recorded when the reload-helper
+fence throws *before* any rollback/marker mutation runs
+(`CoordinatorClient.swift`) — so a `failure` does **not** imply the artifact was
+touched, and counting it would falsely mark a clean supervisor-recovery window as
+`artifact_confounded`. `skipped`/`noop` (no mutation) and the non-artifact phases
+(`detection`…`self_test`, `restart`, `post_start`) likewise never count. (If a
+producer-backed "mutation actually began" signal is ever added to the autoupdate
+event schema, the predicate can be widened to it then; until such a field exists,
+`{success, in_progress}` is the only sound artifact-mutation evidence.) This proves
+liveness recovery happened, held, and involved no rollback/update authority
+(R-4.14). Absence is asserted against that exactly defined coordinator-visible
+stream, not an undefined signal.
+
+Behavior lands only via the cited follow-up code (watchdog emit + CLI uplink +
+coordinator ingest/store); this section defines the contract. The new
+`last_supervisor_event` provider-wire field is also recorded in the SPEC-001
+provider-wire protocol.
 
 ## 6. Signing & notarization
 
@@ -1108,11 +1484,15 @@ These are the things I'd flag as **must-decide before P0**, in priority order:
 
 ## 14. What this SPEC does NOT change
 
-- Coordinator protocol.
+- Coordinator protocol — **except** the additive, observability-only
+  `last_supervisor_event` provider-wire extension and the separate
+  `provider_supervisor_events` store defined in §5.4 (F5). No routing, admission,
+  billing, or existing-frame semantics change.
 - Receipt shape, signing, or verification (`macprovider-verify` still works against both tracks).
 - On-chain flows, payout logic, $MALIBU emissions, staking.
 - CLI-track `install.sh` / `uninstall.sh` — unchanged except for the watchdog's
-  SPEC-020 v0.1.13 authority reduction.
+  SPEC-020 v0.1.13 authority reduction and the single §5.4
+  `supervisor-beacon.json` it writes to its own trusted state dir.
 - Existing CLI signing/notarization pipeline in `release.yml`. This spec **adds** steps that consume its output; it does not modify the CLI substeps or their secrets.
 - Existing signed `.pkg` delivery container (`live.malibu.provider.cli`, preinstall blocks GUI install). The App-track `.dmg` is a completely separate artifact.
 - Portal (SPEC-014) surface — **unchanged (reconciled v0.2).** v0.1 proposed a

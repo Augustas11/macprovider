@@ -628,6 +628,7 @@ func main() {
 		// registrants.
 		wsOpts = append(wsOpts, providerws.WithHardwareProfileRefresher(onboardingStore))
 		wsOpts = append(wsOpts, providerws.WithAutoupdateOutcomeSink(onboardingStore))
+		wsOpts = append(wsOpts, providerws.WithSupervisorEventSink(onboardingStore))
 	}
 	var autotuneEvidenceStore autotune.EvidenceStore
 	if autotuneCatalog != nil && onboardingStore != nil && onboardingStore.DB() != nil {

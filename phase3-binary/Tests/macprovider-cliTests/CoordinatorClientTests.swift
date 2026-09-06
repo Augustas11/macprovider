@@ -2696,6 +2696,17 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertTrue(["normal", "warning", "critical"].contains(try XCTUnwrap(safetyTelemetry["memory_pressure"] as? String)))
         XCTAssertTrue(["nominal", "fair", "serious", "critical"].contains(try XCTUnwrap(safetyTelemetry["thermal_state"] as? String)))
         XCTAssertNotNil(safetyTelemetry["observation_id"] as? String)
+        // RFC-001 §7 / F5 (SPEC-001 §6.15.2, SPEC-025 §5.4): service_instance_id is
+        // ALWAYS carried on the heartbeat — an opaque per-process UUID correlation
+        // nonce that gates nothing. Strip its random value before the golden-frame
+        // equality (asserting it is present and UUID-shaped), and confirm the
+        // observability-only last_supervisor_event is omitted when no beacon exists.
+        let serviceInstanceID = try XCTUnwrap(
+            heartbeatWithoutHardware.removeValue(forKey: "service_instance_id") as? String,
+            "heartbeat must always carry service_instance_id"
+        )
+        XCTAssertNotNil(UUID(uuidString: serviceInstanceID), "service_instance_id must be a UUID: \(serviceInstanceID)")
+        XCTAssertNil(heartbeatWithoutHardware["last_supervisor_event"], "no beacon → last_supervisor_event omitted")
         let heartbeatJSON = Self.jsonString(heartbeatWithoutHardware)
         let helloJSON = Self.jsonString(await client.helloMessage())
         let expectedHeartbeat = """

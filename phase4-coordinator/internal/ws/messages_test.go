@@ -693,6 +693,39 @@ func TestParseStateUpdateAcceptsLastAutoupdateEvent(t *testing.T) {
 	}
 }
 
+// RFC-001 §7 / F5: a valid last_supervisor_event + service_instance_id parse
+// onto the heartbeat.
+func TestParseHeartbeatAcceptsLastSupervisorEvent(t *testing.T) {
+	payload := []byte(`{"type":"heartbeat","status":"ready","model_id":"model-a","model_params_b":7.0,"ram_gb":16,"max_context_tokens":32768,"max_concurrency":2,"slots_free":1,"slots_total":2,"throughput_tps_estimate":19.8,"requests_served_since_last":0,"avg_latency_ms_since_last":0.0,"throughput_tps_since_last":0.0,"last_supervisor_event":{"schema":"macprovider.supervisor-event.v1","kind":"beacon","boot_id":"BOOT-A","seq":2,"supervisor_label":"provider-watchdog","supervisor_version":"1.0","restarts_total":0,"deferrals_total":0,"last_restart":null,"last_deferral":null},"service_instance_id":"inst-1"}`)
+
+	hb, _, field, err := ParseHeartbeat(payload)
+	if err != nil {
+		t.Fatalf("ParseHeartbeat field=%q err=%v", field, err)
+	}
+	if !json.Valid(hb.LastSupervisorEvent) || !strings.Contains(string(hb.LastSupervisorEvent), "supervisor-event.v1") {
+		t.Fatalf("last_supervisor_event = %s", hb.LastSupervisorEvent)
+	}
+	if hb.ServiceInstanceID != "inst-1" {
+		t.Fatalf("service_instance_id = %q", hb.ServiceInstanceID)
+	}
+}
+
+// A malformed last_supervisor_event MUST NOT reject the heartbeat (best-effort,
+// observability-only) — unlike last_autoupdate_event. The field is dropped and
+// the frame is still accepted.
+func TestParseHeartbeatDropsMalformedSupervisorEventWithoutRejecting(t *testing.T) {
+	// A JSON array in place of the event object, plus an oversized service id.
+	payload := []byte(`{"type":"heartbeat","status":"ready","model_id":"model-a","model_params_b":7.0,"ram_gb":16,"max_context_tokens":32768,"max_concurrency":2,"slots_free":1,"slots_total":2,"throughput_tps_estimate":19.8,"requests_served_since_last":0,"avg_latency_ms_since_last":0.0,"throughput_tps_since_last":0.0,"last_supervisor_event":[1,2,3]}`)
+
+	hb, _, field, err := ParseHeartbeat(payload)
+	if err != nil {
+		t.Fatalf("malformed last_supervisor_event rejected frame: field=%q err=%v", field, err)
+	}
+	if len(hb.LastSupervisorEvent) != 0 {
+		t.Fatalf("expected dropped supervisor event, got %s", hb.LastSupervisorEvent)
+	}
+}
+
 func TestParseDrainStatusAcceptsAutoupdateTimeoutSkipped(t *testing.T) {
 	status, field, err := ParseDrainStatus([]byte(`{"type":"drain_status","phase":"timeout_skipped","inflight_requests":1,"estimated_drain_seconds":0}`))
 	if err != nil {

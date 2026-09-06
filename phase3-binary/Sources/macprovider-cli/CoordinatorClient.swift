@@ -5237,6 +5237,14 @@ actor CoordinatorClient {
         if let event = await AutoUpdateEventStore.shared.lastWireObject() {
             payload["last_autoupdate_event"] = event
         }
+        // SPEC-025 §5.4 / SPEC-001 §6.15.2 (F5): supervisor telemetry, separate
+        // from last_autoupdate_event and observability-only. service_instance_id
+        // is always carried so the coordinator can correlate a supervisor restart
+        // (which names the OLD instance) with this NEW post-restart instance.
+        payload["service_instance_id"] = RouterHandler.serviceInstanceID
+        if let supervisorEvent = SupervisorBeaconReader.lastWireObject() {
+            payload["last_supervisor_event"] = supervisorEvent
+        }
         let observedAt = Date()
         payload["safety_telemetry"] = snapshot.safetyTelemetry(
             providerID: providerID,
@@ -5399,6 +5407,14 @@ actor CoordinatorClient {
         ]
         if let event = await AutoUpdateEventStore.shared.lastWireObject() {
             payload["last_autoupdate_event"] = event
+        }
+        // SPEC-025 §5.4 / SPEC-001 §6.15.2 (F5): supervisor telemetry, separate
+        // from last_autoupdate_event and observability-only. service_instance_id
+        // is always carried so the coordinator can correlate a supervisor restart
+        // (which names the OLD instance) with this NEW post-restart instance.
+        payload["service_instance_id"] = RouterHandler.serviceInstanceID
+        if let supervisorEvent = SupervisorBeaconReader.lastWireObject() {
+            payload["last_supervisor_event"] = supervisorEvent
         }
         try await send(payload)
         if coordinatorSessionAccepted {

@@ -316,6 +316,8 @@ type Heartbeat struct {
 	WeightsHashAlgorithm    string                        `json:"weights_manifest_algorithm,omitempty"`
 	Loading                 bool                          `json:"loading,omitempty"`
 	LastAutoupdateEvent     json.RawMessage               `json:"last_autoupdate_event,omitempty"`
+	LastSupervisorEvent     json.RawMessage               `json:"last_supervisor_event,omitempty"`
+	ServiceInstanceID       string                        `json:"service_instance_id,omitempty"`
 	HardwareSummary         *HardwareSummary              `json:"hardware_summary,omitempty"`
 	SafetyTelemetry         *pool.ProviderSafetyTelemetry `json:"safety_telemetry,omitempty"`
 }
@@ -374,6 +376,8 @@ type StateUpdate struct {
 	Since               string          `json:"since"`
 	MetricsSnapshot     MetricsSnapshot `json:"metrics_snapshot"`
 	LastAutoupdateEvent json.RawMessage `json:"last_autoupdate_event,omitempty"`
+	LastSupervisorEvent json.RawMessage `json:"last_supervisor_event,omitempty"`
+	ServiceInstanceID   string          `json:"service_instance_id,omitempty"`
 }
 
 type PreflightAck struct {
@@ -1277,6 +1281,20 @@ func ParseHeartbeat(payload []byte) (Heartbeat, HeartbeatPresence, string, error
 		}
 		hb.LastAutoupdateEvent = append([]byte(nil), v...)
 	}
+	// SPEC-025 §5.4 / SPEC-001 §6.15.2 (F5): last_supervisor_event is
+	// observability-only and best-effort — unlike last_autoupdate_event it MUST
+	// NOT reject the frame. A malformed/oversized/non-object value is simply
+	// dropped while the heartbeat is still accepted. service_instance_id is a
+	// bounded opaque correlation nonce (never gates anything).
+	if v, ok := raw["last_supervisor_event"]; ok && string(v) != "null" && validAutoupdateEventObject(v) {
+		hb.LastSupervisorEvent = append([]byte(nil), v...)
+	}
+	if v, ok := raw["service_instance_id"]; ok {
+		var sid string
+		if err := json.Unmarshal(v, &sid); err == nil && len(sid) <= 128 && !containsControlChar(sid) {
+			hb.ServiceInstanceID = sid
+		}
+	}
 	if v, ok := raw["hardware_summary"]; ok && string(v) != "null" {
 		var summary HardwareSummary
 		if err := json.Unmarshal(v, &summary); err == nil {
@@ -1582,6 +1600,17 @@ func ParseStateUpdate(payload []byte) (StateUpdate, string, error) {
 			return StateUpdate{}, "last_autoupdate_event", fieldError{Field: "last_autoupdate_event"}
 		}
 		update.LastAutoupdateEvent = append([]byte(nil), v...)
+	}
+	// SPEC-025 §5.4 (F5): observability-only, best-effort, non-rejecting (see
+	// ParseHeartbeat).
+	if v, ok := raw["last_supervisor_event"]; ok && string(v) != "null" && validAutoupdateEventObject(v) {
+		update.LastSupervisorEvent = append([]byte(nil), v...)
+	}
+	if v, ok := raw["service_instance_id"]; ok {
+		var sid string
+		if err := json.Unmarshal(v, &sid); err == nil && len(sid) <= 128 && !containsControlChar(sid) {
+			update.ServiceInstanceID = sid
+		}
 	}
 	return update, "", nil
 }

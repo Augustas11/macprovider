@@ -1,6 +1,6 @@
 # SPEC-001 — Phase 3 Binary: Mac Provider Inference CLI
 
-**Version:** 1.9.5 (2026-09-05, RFC-001 F1/F2: FR-12 exit-code gating for unsolicited SIGTERM + `model_liveness_token_v1` local-status capability)
+**Version:** 1.9.6 (2026-09-05, RFC-001 F5: `last_supervisor_event` provider-wire extension — separate supervisor telemetry, best-effort/non-rejecting; SPEC-025 §5.4)
 **Revision note (historical, superseded by v1.7):** v1.3.1 added the `provider_token` (yaml, top-level) /
 `MACPROVIDER_PROVIDER_TOKEN` (env) / `--provider-token` (CLI) config key
 and mandates the binary attach `Authorization: Bearer <token>` on the
@@ -14,6 +14,14 @@ handshake starts. Backwards-compatible: a v1.3.1 binary with no
 behavior, so a coordinator running with `auth.require_provider_tokens=false`
 continues to accept tokenless legacy fleets. Flag flip on the
 coordinator is the compatibility cutoff for old binaries.
+
+**Change log v1.9.6 (2026-09-05, RFC-001 F5 — #1386):** Documents the
+`last_supervisor_event` provider-wire extension (§6.15.2): a SEPARATE supervisor
+telemetry object (`macprovider.supervisor-event.v1`; SPEC-025 §5.4) on the
+heartbeat and `state_update`, distinct from `last_autoupdate_event` and never
+merged into it. Observability-only; the coordinator treats it best-effort — an
+invalid/oversized/stale value is discarded while the frame is still accepted (it
+does not reject the frame). Behavior lands via the cited follow-up code.
 
 **Change log v1.9.5 (2026-09-05, RFC-001 F1/F2 — #1203/#1382/#1383):** Two
 watchdog-architecture surfaces. (1) **FR-12** now gates the exit code: a
@@ -3307,6 +3315,28 @@ Builder: `CoordinatorClient.swift` heartbeat frame.
   wire-schema extension** (SPEC-020 R-6.3 consumes it) emitted on **both** the
   heartbeat **and** `state_update` payloads (`CoordinatorClient.swift`); the
   value is a structured object ≤4096 UTF-8 bytes.
+- `last_supervisor_event` — last companion-watchdog supervisor event
+  (`macprovider.supervisor-event.v1`; SPEC-025 §5.4). A **separate** SPEC-001
+  wire-schema extension emitted on the heartbeat **and** `state_update`, distinct
+  from `last_autoupdate_event` and never merged into it; the value is a structured
+  object ≤4096 UTF-8 bytes. Observability-only (no admission/routing/serving/trust
+  authority). The coordinator treats it best-effort: a value that is malformed,
+  oversized, wrong-schema, or a `seq`/counter sanity violation is discarded while
+  the heartbeat/state_update is still accepted (it does NOT reject the frame the way
+  a malformed `last_autoupdate_event` does). The coordinator treats `boot_id` as a
+  declared partition key (wrong-boot staleness is dropped CLI-side before uplink,
+  not re-checked here); ordering is by `seq` alone and provider timestamps never
+  gate acceptance — SPEC-025 §5.4 is authoritative for the precise ingest/ordering
+  rules.
+- `service_instance_id` — the opaque per-process `/v1/status`
+  `service_instance.instance_id` (bounded string), carried on the heartbeat **and**
+  `state_update` so the coordinator can distinguish a genuinely new post-restart
+  process instance from a reconnect. It MUST be a random, process-lifetime
+  identifier (UUID-style) and MUST NOT encode or derive from the PID, hostname,
+  provider id, filesystem path, wallet, or any user data — it is an opaque
+  correlation nonce. Diagnostic/correlation only; it gates nothing. Used by
+  SPEC-025 §5.4 to correlate a supervisor `restart` event (which targets the old
+  instance) with the new instance's sustained-serving dwell.
 
 These are additive to the §6.10 opt-in-gated `model_hash` / `loading` fields.
 **Correction (v1.7):** unlike the §6.10 warm-swap fields, several of these ride
