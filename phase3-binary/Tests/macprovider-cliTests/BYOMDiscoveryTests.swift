@@ -5,6 +5,49 @@ import XCTest
 @testable import macprovider_cli
 
 final class BYOMDiscoveryTests: XCTestCase {
+    // #1381 F8 cause 2: the hermetic BYOM E2E harness supplies a RAM value so
+    // the fixture model's advisory local-fit signal does not report
+    // does_not_fit on CI/dev hardware. The override is honored only for a
+    // positive integer; anything else falls back to real detection.
+    func testBYOMFitEnvironmentHonorsScopedRAMOverride() {
+        XCTAssertEqual(
+            BYOMFitEnvironment.detectedRAMGB(environment: [BYOMFitEnvironment.overrideEnvVar: "64"]),
+            64
+        )
+        XCTAssertEqual(
+            BYOMFitEnvironment.detectedRAMGB(environment: [BYOMFitEnvironment.overrideEnvVar: " 48 "]),
+            48
+        )
+        let real = BYOMFitEnvironment.detectedRAMGB(environment: [:])
+        for invalid in ["0", "-4", "abc", ""] {
+            XCTAssertEqual(
+                BYOMFitEnvironment.detectedRAMGB(environment: [BYOMFitEnvironment.overrideEnvVar: invalid]),
+                real,
+                "invalid override \(invalid.debugDescription) should fall back to real detection"
+            )
+        }
+        XCTAssertEqual(BYOMFitEnvironment.detectedRAMGB(environment: [:]), real)
+    }
+
+    // #1381 F2/F5: operator-facing guidance must name the action that actually
+    // resolves the blocker, not a dead end.
+    func testBYOMModelAdmissionGuidancePointsToRecoveryActions() {
+        // F2: not-offerable names the digest input canSubmit requires.
+        XCTAssertTrue(
+            BYOMModelAdmissionError.candidateNotOfferable.description.contains("--evaluation-digest-sha256"),
+            "not-offerable guidance must name --evaluation-digest-sha256"
+        )
+        // F5: unstable / not-found point at the served_model_ref recovery target.
+        XCTAssertTrue(
+            BYOMModelAdmissionError.candidateUnstable.description.contains("served_model_ref"),
+            "unstable guidance must name served_model_ref"
+        )
+        XCTAssertTrue(
+            BYOMModelAdmissionError.candidateNotFound.description.contains("served_model_ref"),
+            "not-found guidance must name served_model_ref"
+        )
+    }
+
     func testDiscoverCommandEmitsClosedSchemaWithNullableAdvisoryFields() async throws {
         let root = try temporaryDirectory("byom-schema")
         let cache = root.appendingPathComponent("hf", isDirectory: true)
