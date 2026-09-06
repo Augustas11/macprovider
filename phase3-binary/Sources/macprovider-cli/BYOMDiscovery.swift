@@ -1211,11 +1211,11 @@ enum BYOMModelAdmissionError: Error, Equatable, CustomStringConvertible {
         case .missingAdmissionIdentity(let providerID):
             return "provider admission signing identity is missing for \(providerID); start provider enrollment before offering BYOM models"
         case .candidateNotFound:
-            return "BYOM candidate was not found in local discovery"
+            return "BYOM candidate was not found in local discovery; target the offer by its served_model_ref (for example ollama:llama3.2:3b) rather than a candidate id. models offer provisions the local namespace and re-resolves a stable id, so an id copied from a first discover on a fresh namespace (a byom_unstable_… value) will no longer match"
         case .candidateUnstable:
-            return "BYOM candidate id is unstable; run models discover --json to initialize the local namespace"
+            return "BYOM candidate id is unstable; target the offer by its served_model_ref (for example ollama:llama3.2:3b) instead of the byom_unstable_… id. models offer provisions the local discovery namespace and resolves a stable id; re-running models discover alone will not, because discovery is read-only (SPEC-046-R001)"
         case .candidateNotOfferable:
-            return "BYOM candidate is not offerable; run models evaluate and models offer --dry-run --json before submitting"
+            return "BYOM candidate is not offerable; run models evaluate <ref> --json and pass the returned evaluation_digest_sha256 to models offer via --evaluation-digest-sha256. models evaluate does not persist state, so the evaluation_required warning clears only when you supply that digest; also resolve any blocking readiness warning"
         case .invalidEvaluationDigest:
             return "evaluation digest must be a 64-character lowercase SHA-256 hex value"
         case .invalidWithdrawalReason:
@@ -2849,6 +2849,36 @@ struct BYOMCatalogMatcher: Sendable {
     }
 }
 
+/// RAM detection for BYOM discovery's **advisory local-fit signal** only.
+///
+/// Production reads real hardware via `ModelFit.detectRAMGB()`. The
+/// hermetic BYOM E2E harness (`make test-byom-e2e`, #1381) drives the
+/// offer/economics flow with a fixed catalog fixture (`qwen3-8b`, ~16 GB
+/// estimate) that would report `does_not_fit` on a CI runner or an ordinary
+/// dev Mac and block the flow before the assertions under test. This override
+/// lets the harness supply a RAM value so the *fit logic still runs* (it is not
+/// bypassed) against a machine large enough for the fixture.
+///
+/// Deliberately scoped to BYOM discovery's local readiness signal, which is
+/// advisory QoS and — in v0.1 — cannot affect earning. It does NOT touch
+/// `ModelFit.detectRAMGB()` or autotune's global fit gating. A provider who set
+/// it in production could only mislead their own local BYOM readiness display
+/// (and risk OOMing their own machine); no money-path or coordinator decision
+/// consumes it.
+enum BYOMFitEnvironment {
+    static let overrideEnvVar = "MACPROVIDER_BYOM_E2E_DETECTED_RAM_GB"
+
+    static func detectedRAMGB(
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> Int {
+        if let raw = environment[overrideEnvVar]?.trimmingCharacters(in: .whitespaces),
+           let gb = Int(raw), gb > 0 {
+            return gb
+        }
+        return ModelFit.detectRAMGB()
+    }
+}
+
 struct BYOMMLXCacheDiscovery {
     private let cacheRoot: URL
     private let namespace: Data?
@@ -3099,7 +3129,7 @@ struct BYOMMLXCacheDiscovery {
     }
 
     private func fitState(modelID: String) -> String {
-        switch ModelFit.evaluate(modelID: modelID, ramGB: ModelFit.detectRAMGB()) {
+        switch ModelFit.evaluate(modelID: modelID, ramGB: BYOMFitEnvironment.detectedRAMGB()) {
         case .fits, .tight:
             return "fits"
         case .wontFit:
@@ -3254,7 +3284,7 @@ struct BYOMOllamaDiscovery: Sendable {
     }
 
     private func fitState(modelID: String) -> String {
-        switch ModelFit.evaluate(modelID: modelID, ramGB: ModelFit.detectRAMGB()) {
+        switch ModelFit.evaluate(modelID: modelID, ramGB: BYOMFitEnvironment.detectedRAMGB()) {
         case .fits, .tight:
             return "fits"
         case .wontFit:

@@ -377,6 +377,16 @@ def main():
         home.mkdir(mode=0o700)
         protected_root = temp_root / "protected-credentials"
         namespace = temp_root / "local-discovery.namespace"
+        # Seed the CLI-owned discovery salt before any command runs. `models
+        # discover` is read-only by SPEC-046-R001 and deliberately will not
+        # provision this salt itself; without it discovery emits byom_unstable_*
+        # ids carrying candidate_id_unstable (admission_state "local_only"), and
+        # the id changes again once `models evaluate` provisions the salt -- so
+        # discover and the dry-run would resolve different candidates. temp_root
+        # is an 0700 mkdtemp, so the CLI's private-parent and 0600-file checks
+        # both pass. (#1381 F8, cause 1)
+        namespace.write_bytes(secrets.token_bytes(32))
+        namespace.chmod(0o600)
         hf_cache = temp_root / "hf-cache"
         config = temp_root / "config.yaml"
         config.write_text(
@@ -396,6 +406,13 @@ def main():
             "MACPROVIDER_CONFIG": str(config),
             "MACPROVIDER_PROTECTED_CREDENTIAL_ROOT": str(protected_root),
             "MACPROVIDER_BYOM_ALLOW_INSECURE_LOOPBACK_COORDINATOR": "1",
+            # The catalog fixture (qwen3-8b, ~16 GB estimate) reports
+            # does_not_fit on CI runners and ordinary dev Macs, which would
+            # block the offer/economics flow this harness actually tests. Supply
+            # a RAM value so BYOM discovery's advisory local-fit signal treats
+            # the fixture as fitting; the fit logic still runs. Scoped to BYOM
+            # discovery only -- not autotune. (#1381 F8, cause 2)
+            "MACPROVIDER_BYOM_E2E_DETECTED_RAM_GB": "64",
         })
 
         common_discovery_args = [
