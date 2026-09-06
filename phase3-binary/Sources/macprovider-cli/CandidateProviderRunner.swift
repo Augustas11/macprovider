@@ -1,3 +1,4 @@
+import CryptoKit
 import Darwin
 import Foundation
 import MacProviderCore
@@ -464,7 +465,43 @@ final class CandidateProviderRunner {
         // 8 chars of a UUID gives ~32 bits of disambiguation per second.
         let timestamp = Int(Date().timeIntervalSince1970)
         let suffix = UUID().uuidString.prefix(8)
-        return directory.appendingPathComponent("\(safeModelName(model))-\(port)-\(timestamp)-\(suffix).log")
+        return directory.appendingPathComponent("\(boundedLogModelComponent(model))-\(port)-\(timestamp)-\(suffix).log")
+    }
+
+    /// Upper bound, in bytes, on the model component of a candidate log
+    /// filename. The remaining `-<port>-<timestamp>-<uuid8>.log` suffix is
+    /// ~31 bytes, so a 160-byte model component keeps the whole name well
+    /// under the 255-byte POSIX `NAME_MAX`.
+    static let maxLogModelComponentBytes = 160
+
+    /// Filesystem-safe, length-bounded rendering of `model` for a log
+    /// filename. Autotune passes a fully-qualified model identity that
+    /// flattens the absolute artifact path plus two SHA-256 digests; on a Mac
+    /// whose (Apple-ID-derived) username is long, the verbatim `safeModelName`
+    /// form overran `NAME_MAX` and the `.atomic` log write failed with a Cocoa
+    /// "file name is invalid" error — aborting `autotune --recommend --apply`
+    /// and blocking provider onboarding (#1397). Short identities are used
+    /// verbatim; long ones keep a readable prefix and append a stable short
+    /// digest of the full identity so distinct models never collide.
+    static func boundedLogModelComponent(_ model: String) -> String {
+        let safe = safeModelName(model)
+        guard safe.utf8.count > maxLogModelComponentBytes else { return safe }
+        let digest = SHA256.hash(data: Data(model.utf8))
+            .prefix(8)
+            .map { String(format: "%02x", $0) }
+            .joined()
+        let prefixBudget = maxLogModelComponentBytes - 1 - digest.count
+        // Append whole UTF-8 scalars until the next would exceed the byte
+        // budget; never split a multi-byte sequence.
+        var prefix = ""
+        var used = 0
+        for scalar in safe.unicodeScalars {
+            let width = String(scalar).utf8.count
+            if used + width > prefixBudget { break }
+            prefix.unicodeScalars.append(scalar)
+            used += width
+        }
+        return "\(prefix)-\(digest)"
     }
 
     private static func makeCandidateConfigRoot() throws -> URL {

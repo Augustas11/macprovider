@@ -300,6 +300,44 @@ final class CandidateProviderRunnerTests: XCTestCase {
         XCTAssertNotEqual(urlA.lastPathComponent, urlB.lastPathComponent)
     }
 
+    /// #1397 regression: autotune passes a fully-qualified model identity
+    /// (flattened absolute artifact path + two SHA-256 digests). On a Mac with
+    /// a long (Apple-ID-derived) username the verbatim filename exceeded
+    /// `NAME_MAX` and the `.atomic` log write failed, aborting
+    /// `autotune --recommend --apply` and blocking onboarding. The filename
+    /// MUST stay under NAME_MAX regardless of identity length.
+    func testLogFileURLStaysUnderNameMaxForLongModelIdentity() throws {
+        let longHome = "/Users/a-twenty-eight-char-username-x/Library/Application Support/macprovider/models"
+        let model = "\(longHome)/mlx-community/Llama-3.2-3B-Instruct-4bit/"
+            + String(repeating: "7f0dc925", count: 5)   // 40-char commit-sha stand-in
+            + "/"
+            + String(repeating: "e7e5bff4", count: 8)   // 64-char artifact-sha stand-in
+        let url = CandidateProviderRunner.logFileURLForTesting(model: model, port: 18_080)
+        let nameBytes = Data(url.lastPathComponent.utf8).count
+        XCTAssertLessThanOrEqual(
+            nameBytes, 255,
+            "log filename is \(nameBytes)B, over NAME_MAX for a long model identity"
+        )
+        XCTAssertTrue(url.lastPathComponent.hasSuffix(".log"))
+    }
+
+    /// Distinct long model identities that share a prefix MUST still produce
+    /// distinct bounded components — the appended digest disambiguates.
+    func testBoundedLogModelComponentDisambiguatesLongIdentities() {
+        let base = String(repeating: "mlx-community-model-", count: 20) // exceeds the byte budget
+        let a = CandidateProviderRunner.boundedLogModelComponent(base + "alpha")
+        let b = CandidateProviderRunner.boundedLogModelComponent(base + "beta")
+        XCTAssertLessThanOrEqual(Data(a.utf8).count, CandidateProviderRunner.maxLogModelComponentBytes)
+        XCTAssertLessThanOrEqual(Data(b.utf8).count, CandidateProviderRunner.maxLogModelComponentBytes)
+        XCTAssertNotEqual(a, b, "distinct long identities collided after length-bounding")
+    }
+
+    /// A short model identity is passed through verbatim (no digest suffix),
+    /// preserving the existing readable filenames.
+    func testBoundedLogModelComponentPassesShortIdentityVerbatim() {
+        XCTAssertEqual(CandidateProviderRunner.boundedLogModelComponent("mlx/test-model"), "mlx-test-model")
+    }
+
     func testServeArgumentsRejectInvalidKnobs() throws {
         XCTAssertThrowsError(
             try CandidateProviderRunner.serveArguments(
