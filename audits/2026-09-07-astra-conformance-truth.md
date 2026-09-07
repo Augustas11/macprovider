@@ -311,3 +311,18 @@ than independent enforcement of each cap. That enforcement is not the new
 test's claim. There are no Low findings on the final diff. The remaining
 runtime and SPEC-010 governance findings above are unresolved and are not covered
 by the three-lane acceptance of this narrow test change.
+
+## Post-audit Follow-up
+
+The High SPEC-045 ambiguous-send budget finding was fixed separately in
+[PR #1407](https://github.com/Augustas11/macprovider/pull/1407), which is open
+and unmerged at this follow-up. That PR retains conservative local exposure
+after uncertain sends and demotes four affected conformance rows pending fresh
+matching evidence. No part of that implementation is copied into this branch.
+
+For PR preparation, the unchanged audit and replay test were rebased onto
+`afe6b12e`. Upstream `92c7c7cc` separately demoted SPEC-010-R002 after selector
+drift; the governance failure above records the original audit result, not a
+new failure on this updated base. The original requirement matrix remains
+pinned to its stated audited base. No production or signed-evidence claim is
+promoted by this follow-up.
