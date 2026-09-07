@@ -912,6 +912,182 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         )
     }
 
+    func testLocalPollMissHoldDoesNotInvalidateWhileLaunchdPidAliveInsideRetention() {
+        let origin = Date(timeIntervalSince1970: 1_800_000_000)
+        XCTAssertFalse(
+            LocalStatusObservationPolicy.shouldInvalidateAfterLocalPollMiss(
+                missStartedAt: nil,
+                now: origin,
+                launchdPID: 4242
+            )
+        )
+        XCTAssertFalse(
+            LocalStatusObservationPolicy.shouldInvalidateAfterLocalPollMiss(
+                missStartedAt: origin,
+                now: origin.addingTimeInterval(LocalStatusObservationPolicy.displayRetentionSeconds - 0.1),
+                launchdPID: 4242
+            )
+        )
+        XCTAssertTrue(
+            LocalStatusObservationPolicy.shouldInvalidateAfterLocalPollMiss(
+                missStartedAt: origin,
+                now: origin.addingTimeInterval(LocalStatusObservationPolicy.displayRetentionSeconds),
+                launchdPID: 4242
+            )
+        )
+        XCTAssertTrue(
+            LocalStatusObservationPolicy.shouldInvalidateAfterLocalPollMiss(
+                missStartedAt: nil,
+                now: origin,
+                launchdPID: nil
+            )
+        )
+    }
+
+    func testIdentityMismatchInvalidatesImmediatelyWhilePollMissMayHold() {
+        let origin = Date(timeIntervalSince1970: 1_800_000_000)
+        XCTAssertTrue(
+            LocalStatusObservationPolicy.shouldInvalidateAfterLocalStatusRefreshFailure(
+                fetchedStatus: true,
+                identityMatched: false,
+                missStartedAt: nil,
+                now: origin,
+                launchdPID: 4242
+            )
+        )
+        XCTAssertFalse(
+            LocalStatusObservationPolicy.shouldInvalidateAfterLocalStatusRefreshFailure(
+                fetchedStatus: false,
+                identityMatched: false,
+                missStartedAt: nil,
+                now: origin,
+                launchdPID: 4242
+            )
+        )
+        XCTAssertFalse(
+            LocalStatusObservationPolicy.shouldInvalidateAfterLocalStatusRefreshFailure(
+                fetchedStatus: false,
+                identityMatched: false,
+                missStartedAt: origin,
+                now: origin.addingTimeInterval(LocalStatusObservationPolicy.displayRetentionSeconds - 0.1),
+                launchdPID: 4242
+            )
+        )
+        XCTAssertTrue(
+            LocalStatusObservationPolicy.shouldInvalidateAfterLocalStatusRefreshFailure(
+                fetchedStatus: false,
+                identityMatched: false,
+                missStartedAt: origin,
+                now: origin.addingTimeInterval(LocalStatusObservationPolicy.displayRetentionSeconds),
+                launchdPID: 4242
+            )
+        )
+    }
+
+    func testStaleServeUnresponsiveDoesNotOverrideReadyPublicStatus() {
+        var snapshot = buyerServingObservationSnapshot(observedAt: Date().addingTimeInterval(-6))
+        snapshot.diagnosticFindings = [
+            ProviderDiagnosticFinding(
+                signatureID: .serveUnresponsive,
+                source: .status,
+                userMessage: "Provider local status is unavailable or stale.",
+                evidence: "observation.id=observation-a",
+                observedAt: Date()
+            )
+        ]
+
+        XCTAssertTrue(AgentSnapshotPresenter.isNetworkReady(snapshot))
+        XCTAssertEqual(AgentSnapshotPresenter.publicStatus(snapshot).title, "Provider is ready")
+        XCTAssertEqual(AgentSnapshotPresenter.consolidatedStatus(snapshot).phase, .live)
+        XCTAssertNotEqual(
+            AgentSnapshotPresenter.consolidatedStatus(snapshot).label,
+            "Provider status is unavailable"
+        )
+    }
+
+    func testStatusServeUnresponsiveWithoutObservationIDDoesNotHoldLive() {
+        var snapshot = buyerServingObservationSnapshot(observedAt: Date().addingTimeInterval(-6))
+        snapshot.diagnosticFindings = [
+            ProviderDiagnosticFinding(
+                signatureID: .serveUnresponsive,
+                source: .status,
+                userMessage: "Provider local status is unavailable or stale.",
+                evidence: nil,
+                observedAt: Date()
+            )
+        ]
+
+        XCTAssertTrue(AgentSnapshotPresenter.isNetworkReady(snapshot))
+        XCTAssertEqual(
+            AgentSnapshotPresenter.publicStatus(snapshot).title,
+            "Provider status is unavailable"
+        )
+        XCTAssertEqual(AgentSnapshotPresenter.consolidatedStatus(snapshot).phase, .needsAttention)
+    }
+
+    func testHeldStaleServeUnresponsiveDoesNotHideLowerRankedDiagnostic() {
+        var snapshot = buyerServingObservationSnapshot(observedAt: Date().addingTimeInterval(-6))
+        snapshot.diagnosticFindings = [
+            ProviderDiagnosticFinding(
+                signatureID: .serveUnresponsive,
+                source: .status,
+                userMessage: "Provider local status is unavailable or stale.",
+                evidence: "observation.id=observation-a",
+                observedAt: Date()
+            ),
+            ProviderDiagnosticFinding(
+                signatureID: .autoupdateDisabled,
+                source: .status,
+                userMessage: "Provider automatic updates are disabled.",
+                evidence: nil,
+                observedAt: Date()
+            ),
+        ]
+
+        XCTAssertTrue(AgentSnapshotPresenter.isNetworkReady(snapshot))
+        XCTAssertEqual(
+            AgentSnapshotPresenter.publicStatus(snapshot).title,
+            "Provider automatic updates are disabled"
+        )
+        XCTAssertEqual(AgentSnapshotPresenter.consolidatedStatus(snapshot).phase, .needsAttention)
+        XCTAssertEqual(
+            AgentSnapshotPresenter.consolidatedStatus(snapshot).label,
+            "Provider automatic updates are disabled"
+        )
+    }
+
+    func testDoctorServeDeadStillDrivesPublicStatusDuringDisplayRetention() {
+        var snapshot = buyerServingObservationSnapshot(observedAt: Date().addingTimeInterval(-6))
+        snapshot.diagnosticFindings = [
+            ProviderDiagnosticFinding(
+                signatureID: .serveUnresponsive,
+                source: .status,
+                userMessage: "Provider local status is unavailable or stale.",
+                evidence: "observation.id=observation-a",
+                observedAt: Date()
+            ),
+            ProviderDiagnosticFinding(
+                signatureID: .serveUnresponsive,
+                source: .doctorReport,
+                userMessage: "doctor report found serve dead",
+                evidence: "serve_dead=true",
+                observedAt: Date()
+            ),
+        ]
+
+        XCTAssertTrue(AgentSnapshotPresenter.isNetworkReady(snapshot))
+        XCTAssertFalse(snapshot.hasFreshContractValidatedStatusObservation())
+        XCTAssertEqual(
+            AgentSnapshotPresenter.publicStatus(snapshot).title,
+            "Provider status is unavailable"
+        )
+        XCTAssertEqual(AgentSnapshotPresenter.consolidatedStatus(snapshot).phase, .needsAttention)
+        XCTAssertEqual(
+            AgentSnapshotPresenter.consolidatedStatus(snapshot).label,
+            "Provider status is unavailable"
+        )
+    }
+
     @MainActor
     func testObservationExpiryDiagnosticEmitsOnPresentedServingToConnectedTransition() {
         PublicStatusTransitionDiagnostics.resetForTests()
