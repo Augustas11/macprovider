@@ -616,7 +616,7 @@ func (s *Server) admitRelayBlindWalletMetadata(w http.ResponseWriter, r *http.Re
 
 func (s *Server) admitRelayBlindMetadataWrite(w http.ResponseWriter, r *http.Request, accountID string) bool {
 	limit := s.relayBlindMetadataRequestsPerMinute()
-	decision := s.relayBlindMetadataLimits.allow(accountID, limit, s.now())
+	decision := s.relayBlindMetadataLimits.allowPerMinute(accountID, limit, s.now())
 	if decision.Admitted {
 		return true
 	}
