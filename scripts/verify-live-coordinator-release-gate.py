@@ -311,14 +311,18 @@ def main() -> int:
         choices=("pre-publication", "post-publication"),
         default="post-publication",
         help=(
-            "pre-publication verifies release-bound feed bytes without requiring "
-            "the live recommendation; post-publication requires exact recommendation "
-            "equality (default)"
+            "pre-publication verifies release-bound feed bytes and that Pearl still "
+            "advertises the expected CLI pin; post-publication requires exact "
+            "recommendation equality with the published release (default)"
         ),
     )
     parser.add_argument(
         "--expected-previous-recommendation",
-        help="pre-publication recommendation that must remain live until publication",
+        help=(
+            "CLI version Pearl must advertise during pre-publication. Staged "
+            "releases pass the previous stable; non-staged releases pass the "
+            "candidate. If omitted, the gate requires the candidate/release version."
+        ),
     )
     parser.add_argument(
         "--now",
@@ -392,88 +396,49 @@ def main() -> int:
             fail("/healthz response is not a JSON object")
         if healthz.get("status") != "ok":
             fail(f"/healthz status is {healthz.get('status')!r}, expected 'ok'")
-        live_version = parse_semver(healthz.get("version"), "/healthz version")
+        # /healthz "version" is the Pearl-runtime coordinator's own binary.
+        # Coordinator and provider CLI share the vX.Y.Z tag space but ship on
+        # independent cadences, so this value is identity only — never compared
+        # to a CLI release or previous-stable pin.
+        parse_semver(healthz.get("version"), "/healthz version")
         required_version = parse_semver(expected_version, "release version")
-        # Pre-publication /healthz may already be at or above the candidate
-        # (Pearl deployed first). The branch below only constrains the case
-        # where Pearl is still older than the CLI being published.
-        if live_version < required_version:
-            # /healthz "version" is the Pearl-runtime coordinator's OWN binary
-            # version. The coordinator and the provider CLI share the vX.Y.Z tag
-            # space but ship on independent cadences, so the coordinator may
-            # legitimately be older than the CLI release it advertises. Post-
-            # publication correctness is enforced by the
-            # recommended_binary_version == release check below (the coordinator
-            # must advertise the released CLI), NOT by the coordinator's own
-            # binary version. Pre-publication still guards against a coordinator
-            # that has regressed below the previously-advertised stable.
-            if args.publication_phase == "pre-publication":
-                previous_version = None
-                if args.expected_previous_recommendation is not None:
-                    previous_version = parse_advertised_version(
-                        args.expected_previous_recommendation,
-                        "expected previous recommendation",
-                    )
-                if previous_version is None:
-                    fail(
-                        f"/healthz version {healthz.get('version')!r} is older than "
-                        f"release {expected_version}"
-                    )
-                if live_version < previous_version:
-                    fail(
-                        f"/healthz version {healthz.get('version')!r} is older than "
-                        f"previous stable {args.expected_previous_recommendation}"
-                    )
-                # previous_version <= live_version < required_version is allowed:
-                # Pearl runtime-only patches may advance /healthz without moving
-                # the advertised CLI recommendation.
-            # post-publication: the coordinator's binary version is decoupled
-            # from the CLI release version; the recommended_binary_version ==
-            # release check below is authoritative.
         recommended_value = healthz.get("recommended_binary_version")
-        if (
-            args.publication_phase == "pre-publication"
-            and args.expected_previous_recommendation is not None
-            and recommended_value is None
-        ):
-            fail("/healthz recommended_binary_version is missing or not the expected previous stable version")
-        if recommended_value is None and args.publication_phase == "post-publication":
+        expected_recommendation = args.expected_previous_recommendation
+        if args.publication_phase == "pre-publication":
+            if expected_recommendation is None:
+                expected_recommendation = expected_version
+            if recommended_value is None:
+                fail(
+                    "/healthz recommended_binary_version is missing or not the "
+                    "expected pre-publication recommendation"
+                )
+        elif recommended_value is None:
             fail("/healthz recommended_binary_version is missing or not a version string")
-        if recommended_value is not None:
-            recommended_version = parse_advertised_version(
-                recommended_value,
-                "/healthz recommended_binary_version",
+        recommended_version = parse_advertised_version(
+            recommended_value,
+            "/healthz recommended_binary_version",
+        )
+        if args.publication_phase == "post-publication" and (
+            recommended_version != required_version
+            or recommended_value != expected_version
+        ):
+            fail(
+                f"/healthz recommended_binary_version {recommended_value!r} "
+                f"does not match release {expected_version}"
             )
-            if (
-                args.publication_phase == "post-publication"
-                and (
-                    recommended_version != required_version
-                    or recommended_value != expected_version
-                )
-            ):
-                fail(
-                    f"/healthz recommended_binary_version {recommended_value!r} "
-                    f"does not match release {expected_version}"
-                )
-            if (
-                args.publication_phase == "pre-publication"
-                and args.expected_previous_recommendation is not None
-                and (
-                    recommended_value != args.expected_previous_recommendation
-                    or recommended_version
-                    != parse_advertised_version(
-                        args.expected_previous_recommendation,
-                        "expected previous recommendation",
-                    )
-                )
-            ):
-                fail(
-                    f"/healthz recommended_binary_version {recommended_value!r} "
-                    f"does not match expected previous stable "
-                    f"{args.expected_previous_recommendation}"
-                )
-        else:
-            recommended_value = "<not advertised>"
+        if args.publication_phase == "pre-publication" and (
+            recommended_value != expected_recommendation
+            or recommended_version
+            != parse_advertised_version(
+                expected_recommendation,
+                "expected pre-publication recommendation",
+            )
+        ):
+            fail(
+                f"/healthz recommended_binary_version {recommended_value!r} "
+                f"does not match expected pre-publication recommendation "
+                f"{expected_recommendation}"
+            )
 
         print(
             "[verify-live-coordinator-release-gate] ok: "

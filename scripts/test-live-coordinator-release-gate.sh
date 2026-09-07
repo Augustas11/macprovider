@@ -178,15 +178,18 @@ run_guard_phase() {
   local directory="$1"
   local phase="$2"
   local previous="${3:-1.8.67}"
-  python3 "$guard" \
+  set -- python3 "$guard" \
     --tag v1.8.68 \
     --pearl-release-json "$directory/pearl-release.json" \
     --trusted-keys "$directory/trusted-keys.json" \
     --coordinator-url https://coordinator.fixture.invalid \
     --coordinator-dir "$directory/live" \
     --now 2026-07-30T12:05:00Z \
-    ${phase:+--expected-previous-recommendation "$previous"} \
     --publication-phase "$phase"
+  if [[ "$phase" == "pre-publication" && "$previous" != "__omit__" ]]; then
+    set -- "$@" --expected-previous-recommendation "$previous"
+  fi
+  "$@"
 }
 
 make_fixture "$work/ok"
@@ -229,14 +232,14 @@ grep -q 'fixture coordinator response is missing for /v1/rate-card.sig' "$work/m
 make_fixture "$work/older-coordinator-post" v1.8.68 v1.8.67
 run_guard "$work/older-coordinator-post" | grep -q 'ok: https://coordinator.fixture.invalid serves v1.8.68 feed set'
 
-# Pre-publication still guards against a coordinator that has regressed BELOW the
-# previously-advertised stable (a genuine coordinator rollback), independent of
-# the CLI release being staged.
-make_fixture "$work/older-than-previous-pre" v1.8.68 v1.8.66
-if run_guard_phase "$work/older-than-previous-pre" pre-publication >"$work/older-than-previous-pre.out" 2>&1; then
-  fail "pre-publication accepted a coordinator older than the previous stable"
+# Pre-publication: Pearl runtime binary may be older than the previous advertised
+# CLI. The CLI pin is recommended_binary_version, not /healthz version.
+make_fixture "$work/older-than-previous-pre" v1.8.68 v1.8.66 2026-07-30T12:00:00Z 2026-07-30T12:00:00Z streamvc-autotune-static-v4 1.8.67
+if ! run_guard_phase "$work/older-than-previous-pre" pre-publication >"$work/older-than-previous-pre.out" 2>&1; then
+  fail "pre-publication rejected an older Pearl runtime that still advertises the previous CLI"
 fi
-grep -q "is older than previous stable 1.8.67" "$work/older-than-previous-pre.out"
+grep -q 'healthz_version=v1.8.66 recommended_binary_version=1.8.67 publication_phase=pre-publication' \
+  "$work/older-than-previous-pre.out"
 
 make_fixture "$work/missing-recommended" v1.8.68 v1.8.68 2026-07-30T12:00:00Z 2026-07-30T12:00:00Z streamvc-autotune-static-v4 __absent__
 if run_guard "$work/missing-recommended" >"$work/missing-recommended.out" 2>&1; then
@@ -246,7 +249,7 @@ grep -q '/healthz recommended_binary_version is missing or not a version string'
 if run_guard_phase "$work/missing-recommended" pre-publication >"$work/missing-recommended-pre.out" 2>&1; then
   fail "pre-publication gate accepted a coordinator without the previous recommendation"
 fi
-grep -q 'recommended_binary_version is missing or not the expected previous stable version' \
+grep -q 'recommended_binary_version is missing or not the expected pre-publication recommendation' \
   "$work/missing-recommended-pre.out"
 
 make_fixture "$work/previous-recommended" v1.8.68 v1.8.68 2026-07-30T12:00:00Z 2026-07-30T12:00:00Z streamvc-autotune-static-v4 1.8.67
@@ -264,10 +267,10 @@ grep -q 'healthz_version=v1.8.67 recommended_binary_version=1.8.67 publication_p
   "$work/previous-healthz-and-recommended.out"
 
 make_fixture "$work/too-old-prepublication-healthz" v1.8.68 v1.8.66 2026-07-30T12:00:00Z 2026-07-30T12:00:00Z streamvc-autotune-static-v4 1.8.67
-if run_guard_phase "$work/too-old-prepublication-healthz" pre-publication >"$work/too-old-prepublication-healthz.out" 2>&1; then
-  fail "pre-publication gate accepted a coordinator older than the previous stable version"
+if ! run_guard_phase "$work/too-old-prepublication-healthz" pre-publication >"$work/too-old-prepublication-healthz.out" 2>&1; then
+  fail "pre-publication gate rejected a Pearl runtime older than the previous advertised CLI"
 fi
-grep -q "/healthz version 'v1.8.66' is older than previous stable 1.8.67" \
+grep -q 'healthz_version=v1.8.66 recommended_binary_version=1.8.67 publication_phase=pre-publication' \
   "$work/too-old-prepublication-healthz.out"
 
 make_fixture "$work/pearl-runtime-ahead" v1.8.68 v1.8.67 2026-07-30T12:00:00Z 2026-07-30T12:00:00Z streamvc-autotune-static-v4 1.8.66
@@ -282,8 +285,35 @@ if run_guard_phase "$work/pearl-runtime-ahead-wrong-recommendation" pre-publicat
   >"$work/pearl-runtime-ahead-wrong-recommendation.out" 2>&1; then
   fail "pre-publication gate accepted a Pearl-ahead healthz that also moved the advertised CLI"
 fi
-grep -q "/healthz recommended_binary_version '1.8.67' does not match expected previous stable 1.8.66" \
+grep -q "/healthz recommended_binary_version '1.8.67' does not match expected pre-publication recommendation 1.8.66" \
   "$work/pearl-runtime-ahead-wrong-recommendation.out"
+
+# Non-staged pre-publication: if --expected-previous-recommendation is omitted,
+# the CLI pin is the candidate/release version. Pearl runtime may still be
+# older than that candidate.
+make_fixture "$work/unstaged-older-runtime" v1.8.68 v1.8.66 2026-07-30T12:00:00Z 2026-07-30T12:00:00Z streamvc-autotune-static-v4 1.8.68
+if ! run_guard_phase "$work/unstaged-older-runtime" pre-publication __omit__ \
+  >"$work/unstaged-older-runtime.out" 2>&1; then
+  fail "non-staged pre-publication rejected an older Pearl runtime advertising the candidate"
+fi
+grep -q 'healthz_version=v1.8.66 recommended_binary_version=1.8.68 publication_phase=pre-publication' \
+  "$work/unstaged-older-runtime.out"
+
+make_fixture "$work/unstaged-missing-recommended" v1.8.68 v1.8.68 2026-07-30T12:00:00Z 2026-07-30T12:00:00Z streamvc-autotune-static-v4 __absent__
+if run_guard_phase "$work/unstaged-missing-recommended" pre-publication __omit__ \
+  >"$work/unstaged-missing-recommended.out" 2>&1; then
+  fail "non-staged pre-publication accepted a coordinator without recommended_binary_version"
+fi
+grep -q 'recommended_binary_version is missing or not the expected pre-publication recommendation' \
+  "$work/unstaged-missing-recommended.out"
+
+make_fixture "$work/unstaged-stale-recommended" v1.8.68 v1.8.69 2026-07-30T12:00:00Z 2026-07-30T12:00:00Z streamvc-autotune-static-v4 1.8.67
+if run_guard_phase "$work/unstaged-stale-recommended" pre-publication __omit__ \
+  >"$work/unstaged-stale-recommended.out" 2>&1; then
+  fail "non-staged pre-publication accepted a coordinator that still advertised the previous CLI"
+fi
+grep -q "/healthz recommended_binary_version '1.8.67' does not match expected pre-publication recommendation 1.8.68" \
+  "$work/unstaged-stale-recommended.out"
 
 make_fixture "$work/malformed-recommended" v1.8.68 v1.8.68 2026-07-30T12:00:00Z 2026-07-30T12:00:00Z streamvc-autotune-static-v4 latest
 if run_guard "$work/malformed-recommended" >"$work/malformed-recommended.out" 2>&1; then
@@ -556,7 +586,7 @@ def require_stable_gate(
         "--openssl \"$OPENSSL_BIN\"",
         "scripts/release-staged-version-policy.sh",
         "prepublication_recommendation_args",
-        "--expected-previous-recommendation \"$MACPROVIDER_RELEASE_PREVIOUS_STABLE_VERSION\"",
+        "--expected-previous-recommendation \"$MACPROVIDER_RELEASE_COORDINATOR_RECOMMENDATION\"",
         "env -u GH_TOKEN -u RELEASE_POSTURE_TOKEN",
     ):
         if required not in publish[pre_gate_label:]:
