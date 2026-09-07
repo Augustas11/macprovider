@@ -1,7 +1,7 @@
 {
   "schema_version": "macprovider-removed-exception-tombstones-v1",
-  "updated_at": "2026-08-09T00:00:00Z",
-  "updated_by": "fix/960-permanent-referral-posture",
+  "updated_at": "2026-09-07T00:00:00Z",
+  "updated_by": "ops/retire-stale-production-exceptions",
   "environment": "pearl-production",
   "tombstones": [
     {
@@ -21,6 +21,24 @@
       "removed_at": "2026-08-09T00:00:00Z",
       "removal_evidence": "https://github.com/Augustas11/macprovider/issues/960",
       "authority_surface": "Pearl public provider waitlist/invite flags, Vercel /j referral landing flow, referral validation/join endpoints, and associated X/social campaign posture."
+    },
+    {
+      "id": "exc-cli-identity-signature-exemption",
+      "removed_at": "2026-09-07T00:00:00Z",
+      "removal_evidence": "https://github.com/Augustas11/macprovider/issues/585",
+      "authority_surface": "Postgres table `provider_auth_policy` fields `signature_exempt_until` and `granted_by`; coordinator path `verifyIdentitySignature` generic exemption branch."
+    },
+    {
+      "id": "exc-v1840-coordinator-admission-bridge",
+      "removed_at": "2026-09-07T00:00:00Z",
+      "removal_evidence": "https://github.com/Augustas11/macprovider/issues/585",
+      "authority_surface": "Coordinator keys `autotune.enforce_provider_admission=false` and `autotune.provider_admission_bridge_deadline`; pool field `catalog_admission_mode=legacy_bridge`; compatibility-set `admission_rollout.mode=bridge_required`."
+    },
+    {
+      "id": "exc-v1848-first-hop-update-bridge",
+      "removed_at": "2026-09-07T00:00:00Z",
+      "removal_evidence": "https://github.com/Augustas11/macprovider/issues/610",
+      "authority_surface": "Pearl overlay `coordinator.compatibility_set.first_hop_bridge_ids` plus `target_id` / `accepted_ids` / `coordinator_advertised_version.latest_binary_version` alignment; runtime `catalog_admission_mode=update_bridge`."
     }
   ],
   "notes": "IDs listed here were removed from production authority. Config sync, overlay merge, rollback restore, or register edits must not recreate them as active/planned/expired without a new reviewed exception ID."
