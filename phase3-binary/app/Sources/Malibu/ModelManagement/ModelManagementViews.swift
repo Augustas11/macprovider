@@ -338,28 +338,33 @@ private struct ModelRowView: View {
                 }
                 .font(.caption)
                 .foregroundStyle(.secondary)
-                if let completion = row.providerCompletionPayoutUSDPerMillionTokens {
-                    let formattedCompletion = completion.formatted(.number.precision(.significantDigits(2...4)))
-                    Text(String(localized: "Provider share rate: completion $\(formattedCompletion) per 1M tokens.", comment: "Provider completion payout rate"))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                if let prompt = row.providerPromptPayoutUSDPerMillionTokens {
-                    let formattedPrompt = prompt.formatted(.number.precision(.significantDigits(2...4)))
-                    Text(String(localized: "Provider share rate: prompt $\(formattedPrompt) per 1M tokens.", comment: "Provider prompt payout rate"))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                if let nonEarningDisclosure = row.nonEarningDisclosure {
-                    // Shown beside the rates regardless of whether the row is
-                    // switchable/actionable, so catalog_priced (non-settlement)
-                    // rates are never presented without the non-earning caveat.
-                    Text(nonEarningDisclosure)
-                        .font(.caption.weight(.medium))
-                        .foregroundStyle(.orange)
-                        .fixedSize(horizontal: false, vertical: true)
+                if let economicsAccessibilityLabel = row.economicsAccessibilityLabel {
+                    // Rates and the non-earning caveat are one accessibility
+                    // element voiced as a single announcement, so a catalog_priced
+                    // (non-settlement) row's rates can never be read by VoiceOver
+                    // without the "No provider credit yet …" caveat. The visible
+                    // rows keep their individual styling; children are ignored for
+                    // accessibility in favour of the composed label.
+                    VStack(alignment: .leading, spacing: 3) {
+                        // Visible rate rows derive from the same economicsRateLines
+                        // source as economicsAccessibilityLabel, so the shown copy
+                        // and the VoiceOver announcement cannot drift apart.
+                        ForEach(row.economicsRateLines, id: \.self) { rateLine in
+                            Text(rateLine)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        if let nonEarningDisclosure = row.nonEarningDisclosure {
+                            Text(nonEarningDisclosure)
+                                .font(.caption.weight(.medium))
+                                .foregroundStyle(.orange)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel(Text(economicsAccessibilityLabel))
+                    .accessibilityIdentifier("byom.economics.summary")
                 }
                 if let blockReason = row.blockReason {
                     Text(blockReason)
