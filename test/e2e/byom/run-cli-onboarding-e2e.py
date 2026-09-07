@@ -328,6 +328,29 @@ def find_candidate(document):
     raise HarnessFailure("candidate not found in discovery output")
 
 
+def assert_catalog_offer_dry_run(document, candidate_id, coordinator_requests):
+    assert_true(document.get("schema") == "model_admission_offer_dry_run.v1", "wrong dry-run schema")
+    assert_true(document.get("candidate_id") == candidate_id, "dry-run resolved a different candidate")
+    assert_true(document.get("served_model_ref") == SERVED_MODEL_REF, "dry-run changed served model")
+    assert_true(document.get("catalog_model_key") == CATALOG_MODEL_KEY, "dry-run changed catalog key")
+    # SPEC-047-R002 makes evaluation advisory for explicitly non-earning offers.
+    # would_submit is local eligibility, not proof of submission or admission.
+    assert_true(document.get("would_submit") is True, "offerable fixture was blocked by dry-run")
+    assert_true(document.get("reason_code") == "catalog_binding_unverified", "dry-run lost unverified binding reason")
+    assert_true(document.get("likely_admission_state") == "offerable", "dry-run promoted local admission state")
+    assert_true(document.get("likely_admission_state_source") == "local_default", "dry-run claimed coordinator authority")
+    warnings = document.get("warnings")
+    assert_true(isinstance(warnings, list), "dry-run warnings missing")
+    assert_true("evaluation_required" in warnings, "dry-run lost advisory evaluation warning")
+    assert_true("catalog_match_unverified" in warnings, "dry-run lost unverified catalog warning")
+    guidance = document.get("provider_guidance") or {}
+    assert_true(guidance.get("state_meaning_key") == "byom.offer_dry_run.catalog_path_missing_trusted_binding", "dry-run overstated catalog binding")
+    assert_true(guidance.get("earning_path_class") == "not_earning_yet_catalog_or_receipt_path_exists", "dry-run overstated earning eligibility")
+    assert_true(guidance.get("transition_reason_code") == "catalog_binding_unverified", "dry-run guidance lost binding reason")
+    assert_true(guidance.get("next_action") == "submit_offer", "dry-run lost explicit submission step")
+    assert_true(coordinator_requests == [], "dry-run contacted coordinator")
+
+
 def assert_null_money(row):
     null_fields = [
         "prompt_rate_usd_per_million_tokens",
@@ -466,11 +489,7 @@ def main():
             env,
             root,
         ))
-        assert_true(dry_run.get("schema") == "model_admission_offer_dry_run.v1", "wrong dry-run schema")
-        assert_true(dry_run.get("candidate_id") == candidate_id, "dry-run resolved a different candidate")
-        assert_true(dry_run.get("would_submit") is False, "dry-run unexpectedly submits without evaluation digest")
-        assert_true(dry_run.get("reason_code") == "evaluation_required", "dry-run did not explain evaluation gate")
-        assert_true(coordinator.state["requests"] == [], "dry-run contacted coordinator")
+        assert_catalog_offer_dry_run(dry_run, candidate_id, coordinator.state["requests"])
 
         offer = parse_json_output(run_cli(
             cli,
