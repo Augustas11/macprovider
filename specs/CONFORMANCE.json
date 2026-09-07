@@ -6819,7 +6819,7 @@
     {
       "requirement_id": "SPEC-045-R002",
       "spec_id": "SPEC-045",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:final class ConsumeLocalHandler",
         "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:private func validatePreAuthBoundsAndFraming",
@@ -6851,7 +6851,12 @@
           "expires_at": "2027-08-24"
         }
       ],
-      "gap": null
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/927",
+        "rationale": "The ambiguous-send budget safety fix changes the mapped local handler beyond the historical dc63ecec candidate. Existing evidence is retained as historical provenance only; full requirement conformance requires refreshed matching commit and signed journey evidence."
+      }
     },
     {
       "requirement_id": "SPEC-045-R003",
@@ -6927,7 +6932,7 @@
     {
       "requirement_id": "SPEC-045-R005",
       "spec_id": "SPEC-045",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:final class ConsumeBudgetLedger",
         "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:struct ConsumeBudgetStatusCommand",
@@ -6940,7 +6945,9 @@
         "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase3BudgetedUnpricedRequestIsHeldUntilRelease",
         "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase3LedgerRejectsMalformedJSONAndUnsupportedTransitions",
         "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase3LedgerRejectsRunIDAndAmountMutation",
-        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase3GStreamingResponseRelaysAfterDoneAndSettlesUsage"
+        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase3GStreamingResponseRelaysAfterDoneAndSettlesUsage",
+        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase3DAmbiguousSendFailureHoldsReservationAcrossRestart",
+        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase3GAmbiguousSendFailureAccountsEstimateAcrossRestart"
       ],
       "journeys": [
         "JOURNEY-LOCAL-CONSUMER-ENDPOINT"
@@ -6959,7 +6966,12 @@
           "expires_at": "2027-08-24"
         }
       ],
-      "gap": null
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/927",
+        "rationale": "Ambiguous-send failures now retain local exposure rather than settling to zero. The mapped settlement implementation has changed beyond the historical dc63ecec candidate; local regression coverage does not replace refreshed matching commit and signed restart/recovery journey evidence."
+      }
     },
     {
       "requirement_id": "SPEC-045-R006",
@@ -6999,7 +7011,7 @@
     {
       "requirement_id": "SPEC-045-R007",
       "spec_id": "SPEC-045",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:private func writeLocalError",
         "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:private static func classifyUpstreamFailure",
@@ -7011,7 +7023,8 @@
         "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase3GStreamingUpstreamErrorResponseIsPreservedAndSettlesEstimate",
         "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase3FInvalidCompressedUpstreamResponseWithLedgerWriteFailureKeepsForwardedProvenance",
         "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase4FakeGatewayRedirectStatusIsPreservedWithoutLocationOrSecondDispatch",
-        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase3GCompressedStreamingResponseFailsBeforeLocalSuccessAndSettlesEstimate"
+        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase3GCompressedStreamingResponseFailsBeforeLocalSuccessAndSettlesEstimate",
+        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase3DSendFailuresAreAmbiguous"
       ],
       "journeys": [
         "JOURNEY-LOCAL-CONSUMER-ENDPOINT"
@@ -7030,12 +7043,17 @@
           "expires_at": "2027-08-24"
         }
       ],
-      "gap": null
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/927",
+        "rationale": "The transport classifier now separates uncertain send exposure from confirmed forwarded_upstream provenance. This changes the mapped classifier beyond the historical dc63ecec candidate; existing evidence remains historical and full conformance requires refreshed matching commit and signed journey evidence."
+      }
     },
     {
       "requirement_id": "SPEC-045-R008",
       "spec_id": "SPEC-045",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:final class ConsumeLocalHandler",
         "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:final class ConsumePinnedUpstreamClient",
@@ -7047,7 +7065,10 @@
         "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase4FakeGatewayStreamingSDKPayloadEmitsOpenAICompatibleSSE",
         "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase4FakeGatewayRedirectStatusIsPreservedWithoutLocationOrSecondDispatch",
         "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase4PinnedUpstreamGeneratedHeadersAreClosedAndSanitized",
-        "scripts/test-signed-local-consumer-endpoint-journey-workflow.sh:required_workflow = ["
+        "scripts/test-signed-local-consumer-endpoint-journey-workflow.sh:required_workflow = [",
+        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase3DSendFailuresAreAmbiguous",
+        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase3DAmbiguousSendFailureHoldsReservationAcrossRestart",
+        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase3GAmbiguousSendFailureAccountsEstimateAcrossRestart"
       ],
       "journeys": [
         "JOURNEY-LOCAL-CONSUMER-ENDPOINT"
@@ -7066,7 +7087,12 @@
           "expires_at": "2027-08-24"
         }
       ],
-      "gap": null
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/927",
+        "rationale": "The mapped pinned upstream client and local handler changed for ambiguous-send budget safety after the historical dc63ecec candidate. New local negative tests cover exposure retention, denial, and ledger reopen, but the unchanged signed journey does not attest this implementation; refreshed matching commit and signed journey evidence remain required."
+      }
     },
     {
       "requirement_id": "SPEC-046-R001",
