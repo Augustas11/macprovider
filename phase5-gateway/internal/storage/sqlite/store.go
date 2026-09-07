@@ -2154,6 +2154,17 @@ func (s *Store) AdmitWalletSessionMetadata(ctx context.Context, req storage.Wall
 			return err
 		}
 		if count >= req.RateLimit {
+			if req.RelayBlindReplay != nil {
+				replay := *req.RelayBlindReplay
+				replay.AccountID, replay.WalletSessionID = req.AccountID, req.SessionID
+				seen, err := retainedRelayBlindReplaySeenTx(ctx, tx, replay, now)
+				if err != nil {
+					return err
+				}
+				if seen {
+					return storage.ErrRelayBlindReplay
+				}
+			}
 			return storage.ErrRateLimit
 		}
 	}
@@ -2176,7 +2187,7 @@ func (s *Store) RecordRelayBlindReplay(ctx context.Context, replay storage.Relay
 	if replay.RetentionExpiresAt.IsZero() || !replay.RetentionExpiresAt.After(now) {
 		return storage.ErrRelayBlindReplay
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM relay_blind_replays WHERE retention_expires_at <= ?`, encodeTime(now)); err != nil {
+	if err := deleteExpiredRelayBlindReplaysTx(ctx, tx, now); err != nil {
 		return err
 	}
 	seen, err := relayBlindReplaySeenTx(ctx, tx, replay)
@@ -2227,7 +2238,7 @@ func (s *Store) RelayBlindReplaySeen(ctx context.Context, replay storage.RelayBl
 		replay.CreatedAt = time.Now().UTC()
 	}
 	now := replay.CreatedAt.UTC()
-	if _, err := tx.ExecContext(ctx, `DELETE FROM relay_blind_replays WHERE retention_expires_at <= ?`, encodeTime(now)); err != nil {
+	if err := deleteExpiredRelayBlindReplaysTx(ctx, tx, now); err != nil {
 		return false, err
 	}
 	seen, err := relayBlindReplaySeenTx(ctx, tx, replay)
@@ -2238,6 +2249,47 @@ func (s *Store) RelayBlindReplaySeen(ctx context.Context, replay storage.RelayBl
 		return false, err
 	}
 	return seen, nil
+}
+
+// The four scoped unique replay identities bound the result set. Parse expiry
+// instead of sorting RFC3339Nano text, whose fractional precision can vary.
+func retainedRelayBlindReplaySeenTx(ctx context.Context, tx *immediateTx, replay storage.RelayBlindReplayMaterial, now time.Time) (bool, error) {
+	rows, err := tx.QueryContext(ctx, `
+		SELECT retention_expires_at FROM relay_blind_replays
+		WHERE account_id = ? AND wallet_session_id = ?
+			AND (request_id = ? OR request_replay_nonce_digest = ?
+				OR buyer_ephemeral_public_key_digest = ? OR envelope_digest = ?)`,
+		replay.AccountID, replay.WalletSessionID, replay.RequestID, replay.RequestReplayNonceDigest,
+		replay.BuyerEphemeralPublicKeyDigest, replay.EnvelopeDigest)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	seen := false
+	for rows.Next() {
+		var rawExpiry string
+		if err := rows.Scan(&rawExpiry); err != nil {
+			return false, err
+		}
+		expiry, err := time.Parse(time.RFC3339Nano, rawExpiry)
+		if err != nil {
+			return false, errors.New("invalid relay-blind replay retention timestamp")
+		}
+		seen = seen || expiry.After(now)
+	}
+	return seen, rows.Err()
+}
+
+const deleteExpiredRelayBlindReplaysSQL = `DELETE FROM relay_blind_replays
+	WHERE retention_expires_at <= ? AND rtrim(retention_expires_at, 'Z') <= ?`
+
+func deleteExpiredRelayBlindReplaysTx(ctx context.Context, tx *immediateTx, now time.Time) error {
+	// Stored expiries are UTC RFC3339Nano ending in Z. The whole-second bound
+	// uses the expiry index; stripping Z and using a fixed-nine-digit cutoff
+	// orders variable fractional precision correctly, including exact expiry.
+	_, err := tx.ExecContext(ctx, deleteExpiredRelayBlindReplaysSQL,
+		encodeTime(now.Truncate(time.Second)), now.UTC().Format("2006-01-02T15:04:05.000000000"))
+	return err
 }
 
 func relayBlindReplaySeenTx(ctx context.Context, tx *immediateTx, replay storage.RelayBlindReplayMaterial) (bool, error) {

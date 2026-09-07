@@ -36,6 +36,14 @@ func newRequestRateLimiter() *requestRateLimiter {
 }
 
 func (l *requestRateLimiter) allow(key string, limit int, now time.Time) requestRateDecision {
+	return l.allowWithRefillPeriod(key, limit, now, time.Second)
+}
+
+func (l *requestRateLimiter) allowPerMinute(key string, limit int, now time.Time) requestRateDecision {
+	return l.allowWithRefillPeriod(key, limit, now, time.Minute)
+}
+
+func (l *requestRateLimiter) allowWithRefillPeriod(key string, limit int, now time.Time, period time.Duration) requestRateDecision {
 	if limit <= 0 || key == "" {
 		return requestRateDecision{Admitted: true, Limit: limit}
 	}
@@ -49,14 +57,19 @@ func (l *requestRateLimiter) allow(key string, limit int, now time.Time) request
 		bucket = &requestRateBucket{tokens: capacity, last: now}
 		l.buckets[key] = bucket
 	}
-	if elapsed := now.Sub(bucket.last).Seconds(); elapsed > 0 {
-		bucket.tokens = math.Min(capacity, bucket.tokens+elapsed*capacity)
-		bucket.last = now
+	tokens := bucket.tokens
+	elapsed := math.Max(0, now.Sub(bucket.last).Seconds())
+	if elapsed > 0 {
+		tokens = math.Min(capacity, tokens+elapsed*capacity/period.Seconds())
 	}
 	bucket.lastSeen = now
 
-	if bucket.tokens >= 1 {
-		bucket.tokens--
+	if tokens >= 1 {
+		// Commit refill only on consumption so denied probes cannot accumulate rounding error.
+		bucket.tokens = tokens - 1
+		if now.After(bucket.last) {
+			bucket.last = now
+		}
 		return requestRateDecision{
 			Admitted:  true,
 			Limit:     limit,
@@ -64,7 +77,7 @@ func (l *requestRateLimiter) allow(key string, limit int, now time.Time) request
 		}
 	}
 
-	retryAfter := int(math.Ceil((1 - bucket.tokens) / capacity))
+	retryAfter := int(math.Ceil((1-bucket.tokens)*period.Seconds()/capacity - elapsed))
 	if retryAfter < 1 {
 		retryAfter = 1
 	}

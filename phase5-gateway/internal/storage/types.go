@@ -333,6 +333,10 @@ type WalletSessionMetadataAdmissionRequest struct {
 	MaxReplayRows  int
 	MaxReplayBytes int64
 	CreatedAt      time.Time
+
+	// Validated, fresh required envelope; only classifies a temporal rejection.
+	// Admission's account/session and time remain authoritative for the lookup.
+	RelayBlindReplay *RelayBlindReplayMaterial
 }
 
 type WalletSessionDispatchArm struct {
