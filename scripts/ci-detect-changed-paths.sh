@@ -57,7 +57,10 @@ classify() {
       # AND the shared cross-language fixtures the Swift parity/losslessness/
       # settlement suites read from other modules. Keep this list in sync with
       # the Swift tests under phase3-binary/Tests and phase3-binary/app/Tests.
+      # test/e2e/byom/* is the hermetic BYOM CLI onboarding harness the Swift
+      # job runs via `make test-byom-e2e`; a harness-only edit must still gate.
       phase3-binary/*|scripts/*|Makefile|.gitattributes|.github/workflows/ci.yml|\
+      test/e2e/byom/*|\
       phase7-verify/testdata/*|phase4-coordinator/test/jcs_fixtures/*|testdata/*)
         swift=true
         matched_swift=$((matched_swift + 1)) ;;

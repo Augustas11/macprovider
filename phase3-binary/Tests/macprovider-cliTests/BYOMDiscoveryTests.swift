@@ -32,10 +32,12 @@ final class BYOMDiscoveryTests: XCTestCase {
     // #1381 F2/F5: operator-facing guidance must name the action that actually
     // resolves the blocker, not a dead end.
     func testBYOMModelAdmissionGuidancePointsToRecoveryActions() {
-        // F2: not-offerable names the digest input canSubmit requires.
+        // Not-offerable guidance still names the advisory strengthening flag
+        // (--evaluation-digest-sha256); the digest is optional per SPEC-047-R002,
+        // not a hard requirement.
         XCTAssertTrue(
             BYOMModelAdmissionError.candidateNotOfferable.description.contains("--evaluation-digest-sha256"),
-            "not-offerable guidance must name --evaluation-digest-sha256"
+            "not-offerable guidance must name the advisory --evaluation-digest-sha256 flag"
         )
         // F5: unstable / not-found point at the served_model_ref recovery target.
         XCTAssertTrue(

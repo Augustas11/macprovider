@@ -468,8 +468,16 @@ def main():
         ))
         assert_true(dry_run.get("schema") == "model_admission_offer_dry_run.v1", "wrong dry-run schema")
         assert_true(dry_run.get("candidate_id") == candidate_id, "dry-run resolved a different candidate")
-        assert_true(dry_run.get("would_submit") is False, "dry-run unexpectedly submits without evaluation digest")
-        assert_true(dry_run.get("reason_code") == "evaluation_required", "dry-run did not explain evaluation gate")
+        # SPEC-047-R002: a non-earning (local_inventory_only) v0.1 candidate MAY be
+        # submitted without the evaluation digest, so the dry-run reports would_submit
+        # true. It must match the real submit gate (canSubmit) and may not over-promise.
+        assert_true(dry_run.get("would_submit") is True, "clean non-earning candidate should dry-run as submittable (evaluation_required is advisory, SPEC-047-R002)")
+        # The top advisory reason for a provider-asserted candidate is the unverified
+        # catalog binding (SPEC-047-R003: a provider-asserted catalog_model_key is never
+        # sufficient), which outranks evaluation_required. Both remain surfaced: the
+        # honest reason_code plus evaluation_required in the advisory warnings.
+        assert_true(dry_run.get("reason_code") == "catalog_binding_unverified", "dry-run did not surface the unverified catalog binding as the top advisory reason")
+        assert_true("evaluation_required" in (dry_run.get("warnings") or []), "dry-run dropped the advisory evaluation warning")
         assert_true(coordinator.state["requests"] == [], "dry-run contacted coordinator")
 
         offer = parse_json_output(run_cli(

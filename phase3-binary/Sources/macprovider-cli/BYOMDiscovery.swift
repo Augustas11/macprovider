@@ -18,6 +18,29 @@ enum BYOMDiscoveryWarning: String, Codable, Sendable {
     case namespacePermissionInvalid = "namespace_permission_invalid"
 }
 
+extension BYOMDiscoveryWarning {
+    /// Hard blockers for a BYOM offer submission, highest-priority first.
+    ///
+    /// Single source of truth so the real submit gate
+    /// (`BYOMOfferSubmissionBuilder.canSubmit`), the dry-run predictor
+    /// (`canSubmitLocalDryRun`), and the dry-run `reason_code` selector
+    /// (`reasonCode(for:)`) cannot drift: a truthful dry-run preflight MUST reject
+    /// exactly what the real submit rejects (SPEC-047-R002). `evaluation_required`
+    /// is deliberately absent — it is advisory for non-earning v0.1 candidates.
+    static let submitBlockingWarnings: [BYOMDiscoveryWarning] = [
+        .candidateIDUnstable,
+        .namespacePermissionInvalid,
+        .adapterRejectedNonLoopback,
+        .adapterMalformedResponse,
+        .adapterResponseTruncated,
+        .adapterUnavailable,
+        .adapterTimeout,
+        .requiresPreparation,
+    ]
+
+    static let submitBlockingWarningCodes: Set<String> = Set(submitBlockingWarnings.map(\.rawValue))
+}
+
 struct BYOMDiscoveryWire: Codable, Equatable, Sendable {
     struct Adapter: Codable, Equatable, Sendable {
         let runtimeSource: String
@@ -1215,7 +1238,7 @@ enum BYOMModelAdmissionError: Error, Equatable, CustomStringConvertible {
         case .candidateUnstable:
             return "BYOM candidate id is unstable; target the offer by its served_model_ref (for example ollama:llama3.2:3b) instead of the byom_unstable_… id. models offer provisions the local discovery namespace and resolves a stable id; re-running models discover alone will not, because discovery is read-only (SPEC-046-R001)"
         case .candidateNotOfferable:
-            return "BYOM candidate is not offerable; run models evaluate <ref> --json and pass the returned evaluation_digest_sha256 to models offer via --evaluation-digest-sha256. models evaluate does not persist state, so the evaluation_required warning clears only when you supply that digest; also resolve any blocking readiness warning"
+            return "BYOM candidate is not offerable; resolve the blocking local readiness, fit, or adapter warning first — the candidate must be local_default offerable, ready, fit, and free of adapter faults to submit. Evaluation is advisory for non-earning v0.1 offers (SPEC-047-R002): you may submit without it, but running models evaluate <ref> --json and passing the returned evaluation_digest_sha256 to models offer via --evaluation-digest-sha256 strengthens the offer"
         case .invalidEvaluationDigest:
             return "evaluation digest must be a 64-character lowercase SHA-256 hex value"
         case .invalidWithdrawalReason:
@@ -1267,7 +1290,7 @@ struct BYOMOfferSubmissionBuilder {
         if !evaluationDigest.isEmpty, !Self.isLowercaseSHA256(evaluationDigest) {
             throw BYOMModelAdmissionError.invalidEvaluationDigest
         }
-        guard Self.canSubmit(candidate: candidate, evaluationDigestSHA256: evaluationDigest) else {
+        guard Self.canSubmit(candidate: candidate) else {
             throw BYOMModelAdmissionError.candidateNotOfferable
         }
         let publicKey = admissionIdentity.publicKey.rawRepresentation
@@ -1329,21 +1352,21 @@ struct BYOMOfferSubmissionBuilder {
         value.range(of: #"^[0-9a-f]{64}$"#, options: .regularExpression) != nil
     }
 
-    private static func canSubmit(candidate: BYOMDiscoveryWire.Candidate, evaluationDigestSHA256: String) -> Bool {
+    private static func canSubmit(candidate: BYOMDiscoveryWire.Candidate) -> Bool {
         guard candidate.admissionStateSource == "local_default",
               candidate.admissionState == "offerable",
               candidate.readinessState == "ready",
               candidate.fitState != "does_not_fit" else {
             return false
         }
-        let warnings = Set(candidate.warningCodes)
-        if warnings.contains(BYOMDiscoveryWarning.adapterRejectedNonLoopback.rawValue) ||
-            warnings.contains(BYOMDiscoveryWarning.adapterMalformedResponse.rawValue) ||
-            warnings.contains(BYOMDiscoveryWarning.adapterResponseTruncated.rawValue) ||
-            warnings.contains(BYOMDiscoveryWarning.requiresPreparation.rawValue) {
-            return false
-        }
-        return !evaluationDigestSHA256.isEmpty || !warnings.contains(BYOMDiscoveryWarning.evaluationRequired.rawValue)
+        // `evaluation_required` is advisory, NOT a hard submit blocker: SPEC-047-R002
+        // permits omitting the evaluation digest for a non-earning (local_inventory_only)
+        // v0.1 candidate. The hard blockers are the single shared
+        // BYOMDiscoveryWarning.submitBlockingWarningCodes set, so this real gate cannot
+        // drift from the dry-run predictor (canSubmitLocalDryRun) — the dry-run neither
+        // over- nor under-promises the real submit. Unstable-id / namespace faults are
+        // additionally rejected by the caller (makePackage) before canSubmit.
+        return Set(candidate.warningCodes).isDisjoint(with: BYOMDiscoveryWarning.submitBlockingWarningCodes)
     }
 }
 
@@ -2551,7 +2574,7 @@ struct BYOMOfferDryRunRunner: Sendable {
 
         let warnings = candidate.warningCodes.sorted()
         let reason = reasonCode(for: candidate, warnings: Set(warnings))
-        let wouldSubmit = canSubmitLocalDryRun(candidate: candidate, reasonCode: reason)
+        let wouldSubmit = canSubmitLocalDryRun(candidate: candidate)
         return BYOMOfferDryRunWire(
             candidateID: candidate.candidateID,
             servedModelRef: candidate.servedModelRef,
@@ -2579,7 +2602,7 @@ struct BYOMOfferDryRunRunner: Sendable {
         }
     }
 
-    private func canSubmitLocalDryRun(candidate: BYOMDiscoveryWire.Candidate, reasonCode: String?) -> Bool {
+    private func canSubmitLocalDryRun(candidate: BYOMDiscoveryWire.Candidate) -> Bool {
         guard candidate.candidateID.hasPrefix("byom_"),
               !candidate.candidateID.hasPrefix("byom_unstable_"),
               candidate.admissionStateSource == "local_default",
@@ -2588,15 +2611,13 @@ struct BYOMOfferDryRunRunner: Sendable {
               candidate.fitState != "does_not_fit" else {
             return false
         }
-        // `evaluation_required` is advisory, NOT a hard blocker: SPEC-047-R002
-        // permits submitting an offer without the evaluation digest when the
-        // dry-run labels it more likely to be rejected or confined to
-        // non-earning states (which every v0.1 local_inventory_only candidate
-        // is). Treating it as a hard block made would_submit unreachable, since
-        // a freshly discovered candidate always carries evaluation_required.
-        return !Set(candidate.warningCodes).contains(BYOMDiscoveryWarning.candidateIDUnstable.rawValue)
-            && !Set(candidate.warningCodes).contains(BYOMDiscoveryWarning.namespacePermissionInvalid.rawValue)
-            && reasonCode != BYOMDiscoveryWarning.requiresPreparation.rawValue
+        // `evaluation_required` is advisory, NOT a hard blocker (SPEC-047-R002): a
+        // fresh non-earning candidate always carries it, so treating it as a hard
+        // block made would_submit unreachable. The hard blockers are the single
+        // shared BYOMDiscoveryWarning.submitBlockingWarningCodes set — identical to
+        // the real submit gate (BYOMOfferSubmissionBuilder.canSubmit) — so this
+        // preflight cannot over- or under-promise the real submit.
+        return Set(candidate.warningCodes).isDisjoint(with: BYOMDiscoveryWarning.submitBlockingWarningCodes)
     }
 
     private func localDefaultAdmissionState(_ state: String) -> String {
@@ -2612,14 +2633,9 @@ struct BYOMOfferDryRunRunner: Sendable {
         // evaluation_required is intentionally NOT a hard blocker here (it is
         // advisory per SPEC-047-R002); it remains available as a lower-priority
         // fallback reason below when nothing harder applies.
-        let blockingReasons = [
-            BYOMDiscoveryWarning.candidateIDUnstable.rawValue,
-            BYOMDiscoveryWarning.namespacePermissionInvalid.rawValue,
-            BYOMDiscoveryWarning.adapterRejectedNonLoopback.rawValue,
-            BYOMDiscoveryWarning.adapterMalformedResponse.rawValue,
-            BYOMDiscoveryWarning.adapterResponseTruncated.rawValue,
-            BYOMDiscoveryWarning.requiresPreparation.rawValue,
-        ]
+        // Same ordered source of truth the submit gates use, so the surfaced
+        // reason_code names the exact warning that blocks submission.
+        let blockingReasons = BYOMDiscoveryWarning.submitBlockingWarnings.map(\.rawValue)
         if let blocker = blockingReasons.first(where: warnings.contains) {
             return blocker
         }

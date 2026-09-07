@@ -107,6 +107,15 @@ setup_external_fixture_testdata() {
 }
 assert_detect "root testdata fixture" setup_external_fixture_testdata true true
 
+# The hermetic BYOM CLI onboarding harness is run by the Swift job via
+# `make test-byom-e2e`; a harness-only edit must still gate the Swift job.
+setup_byom_e2e_harness() {
+  mkdir -p test/e2e/byom; echo x >test/e2e/byom/run-cli-onboarding-e2e.py
+  commit_all base >/dev/null; git rev-parse HEAD
+  echo y >test/e2e/byom/run-cli-onboarding-e2e.py; commit_all change >/dev/null
+}
+assert_detect "byom e2e harness (run swift)" setup_byom_e2e_harness true true
+
 # A normal coordinator .go change must NOT drag in swift (savings preserved).
 setup_coordinator_go() {
   mkdir -p phase4-coordinator/internal; echo x >phase4-coordinator/internal/ws.go

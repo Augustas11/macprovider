@@ -424,6 +424,14 @@ jobs:
         working-directory: phase3-binary
         run: swift test --parallel
 
+      - name: Run BYOM CLI onboarding E2E (hermetic)
+        # #1381 F8: this hermetic harness (fake Ollama loopback + in-process
+        # coordinator) is the only automated cover for the CLI-owned BYOM
+        # admission surface end to end. It was manual-only and silently
+        # regressed; gate it here so canSubmit/dry-run drift fails a required
+        # check. Reuses the SwiftPM build warmed by the swift test step above.
+        run: make test-byom-e2e
+
       - name: Install reviewed XcodeGen artifact
         shell: bash
         run: |
