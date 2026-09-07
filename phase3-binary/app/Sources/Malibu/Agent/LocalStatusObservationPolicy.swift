@@ -25,6 +25,38 @@ enum LocalStatusObservationPolicy {
         max(Double(reportedValidForMS) / 1_000.0, displayRetentionSeconds)
     }
 
+    /// First local `/v1/health` or `/v1/status` miss must not wipe a trusted
+    /// observation while launchd still owns a pid. Invalidate only when the
+    /// service is gone or misses span the display retention window.
+    static func shouldInvalidateAfterLocalPollMiss(
+        missStartedAt: Date?,
+        now: Date = Date(),
+        launchdPID: Int?
+    ) -> Bool {
+        if launchdPID == nil { return true }
+        guard let missStartedAt else { return false }
+        return now.timeIntervalSince(missStartedAt) >= displayRetentionSeconds
+    }
+
+    /// A fetched `/v1/status` whose service identity does not match is a hard
+    /// fail. Only a missing HTTP response may hold through display retention.
+    static func shouldInvalidateAfterLocalStatusRefreshFailure(
+        fetchedStatus: Bool,
+        identityMatched: Bool,
+        missStartedAt: Date?,
+        now: Date = Date(),
+        launchdPID: Int?
+    ) -> Bool {
+        if fetchedStatus {
+            return !identityMatched
+        }
+        return shouldInvalidateAfterLocalPollMiss(
+            missStartedAt: missStartedAt,
+            now: now,
+            launchdPID: launchdPID
+        )
+    }
+
     /// Bounded diagnostic when public status demotes solely because the
     /// observation retention window elapsed (not a harder failure).
     static let observationExpiryDiagnostic = "public_status_transition cause=status_observation_expired"
