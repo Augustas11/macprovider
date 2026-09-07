@@ -122,6 +122,31 @@ class BYOMContractLockTests(unittest.TestCase):
             with self.subTest(required=required):
                 self.assertIn(required, spec047)
 
+    def test_discovery_redaction_provenance_contract(self):
+        spec046 = read_text("specs/SPEC-046-provider-byom-discovery.md")
+        for pairing in (
+            "`capabilities.family` | `capability_family_redacted`",
+            "`capabilities.quantization` | `capability_quantization_redacted`",
+            "`capabilities.runtime_version` | `capability_runtime_version_redacted`",
+            "Unsafe model reference | `model_reference_redacted`",
+        ):
+            with self.subTest(pairing=pairing):
+                self.assertTrue(pairing in spec046, f"Missing redaction mapping: {pairing}")
+        for required in (
+            "Missing fields and explicit JSON nulls MUST NOT emit a redaction warning",
+            "MUST remain null; a literal redaction sentinel MUST NOT replace it",
+            "MUST NOT include the withheld value, its hash, its length, a record index, or a count",
+            "Optional-label redaction warnings MUST NOT be admission blockers",
+            "MUST NOT be substituted with `adapter_malformed_response`",
+            "MUST NOT synthesize a candidate id, display name, or served model reference",
+            "MUST deduplicate warning codes within each warning array",
+            "MUST NOT add redaction fields to a SPEC-047 offer package",
+            "MUST NOT treat the affected projection as actionable, whether or not they display the unknown codes",
+            "Runtime implementation and signed journey evidence remain pending",
+        ):
+            with self.subTest(required=required):
+                self.assertTrue(required in spec046, f"Missing redaction contract: {required}")
+
     def test_withdrawal_request_is_current_key_signed_and_idempotent(self):
         spec047 = read_text("specs/SPEC-047-network-model-admission.md")
 
