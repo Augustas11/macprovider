@@ -719,6 +719,7 @@ final class ConsumeUpstreamCancellationHandle: @unchecked Sendable {
 
 enum ConsumeUpstreamForwardError: Error {
     case preDispatchUnavailable
+    case possiblyDispatchedUnavailable
     case dispatchedUnavailable
 }
 
@@ -742,6 +743,7 @@ struct ConsumeUpstreamTimeouts: Sendable {
 private struct ConsumeUpstreamFailureClassification {
     let status: HTTPResponseStatus
     let forwardedUpstream: Bool
+    let mayHaveDispatched: Bool
 }
 
 private final class ConsumeChunkedBodyDecoder: @unchecked Sendable {
@@ -1350,7 +1352,7 @@ final class ConsumePinnedUpstreamClient: ConsumeUpstreamClient, @unchecked Senda
             }
             deadline.schedule(nanoseconds: timeoutNanoseconds) {
                 connection.cancel()
-                finish(.failure(ConsumeUpstreamForwardError.preDispatchUnavailable))
+                finish(.failure(ConsumeUpstreamForwardError.possiblyDispatchedUnavailable))
             }
             connection.send(content: data, completion: .contentProcessed { error in
                 if let error {
@@ -1363,7 +1365,9 @@ final class ConsumePinnedUpstreamClient: ConsumeUpstreamClient, @unchecked Senda
     }
 
     private static func classifySendFailure(_ error: Error) -> ConsumeUpstreamForwardError {
-        .preDispatchUnavailable
+        // After submitting content, neither an error nor cancellation proves that
+        // no bytes were sent. Retain exposure without claiming confirmed forwarding.
+        .possiblyDispatchedUnavailable
     }
 
     static func sendFailureClassificationForTesting(_ error: Error) -> ConsumeUpstreamForwardError {
@@ -5656,7 +5660,7 @@ final class ConsumeLocalHandler: ChannelInboundHandler, @unchecked Sendable {
                             estimate: estimate.amount
                         )
                         return
-                    } else if failure.forwardedUpstream {
+                    } else if failure.mayHaveDispatched {
                         try ledger.hold(
                             runID: self.runtime.launchID,
                             reservationID: reservationID,
@@ -5873,7 +5877,7 @@ final class ConsumeLocalHandler: ChannelInboundHandler, @unchecked Sendable {
                             settledAmount: estimate.amount,
                             reason: "settled_to_admission_estimate"
                         )
-                    } else if failure.forwardedUpstream {
+                    } else if failure.mayHaveDispatched {
                         try ledger.settle(
                             runID: self.runtime.launchID,
                             reservationID: reservationID,
@@ -6022,18 +6026,28 @@ final class ConsumeLocalHandler: ChannelInboundHandler, @unchecked Sendable {
         if case ConsumeUpstreamForwardError.preDispatchUnavailable = error {
             return ConsumeUpstreamFailureClassification(
                 status: .serviceUnavailable,
-                forwardedUpstream: false
+                forwardedUpstream: false,
+                mayHaveDispatched: false
+            )
+        }
+        if case ConsumeUpstreamForwardError.possiblyDispatchedUnavailable = error {
+            return ConsumeUpstreamFailureClassification(
+                status: .serviceUnavailable,
+                forwardedUpstream: false,
+                mayHaveDispatched: true
             )
         }
         if case ConsumeUpstreamForwardError.dispatchedUnavailable = error {
             return ConsumeUpstreamFailureClassification(
                 status: HTTPResponseStatus(statusCode: 502),
-                forwardedUpstream: true
+                forwardedUpstream: true,
+                mayHaveDispatched: true
             )
         }
         return ConsumeUpstreamFailureClassification(
             status: .serviceUnavailable,
-            forwardedUpstream: false
+            forwardedUpstream: false,
+            mayHaveDispatched: false
         )
     }
 

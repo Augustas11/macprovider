@@ -3,6 +3,7 @@ import Darwin
 import Dispatch
 import Foundation
 import MacProviderCore
+import Network
 import NIOCore
 import NIOEmbedded
 import NIOHTTP1
@@ -1648,12 +1649,33 @@ final class ConsumeCommandTests: XCTestCase {
         XCTAssertEqual(resourceSnapshot.upstreamSocketDescriptors, 0)
     }
 
-    func testPhase3DSendFailureIsPreDispatch() throws {
-        let classification = ConsumePinnedUpstreamClient.sendFailureClassificationForTesting(
-            ConsumeUpstreamForwardError.dispatchedUnavailable
-        )
-        guard case .preDispatchUnavailable = classification else {
-            return XCTFail("send failure must not be treated as forwarded upstream")
+    func testPhase3DSendFailuresAreAmbiguous() throws {
+        let errors: [Error] = [
+            NWError.posix(.ECONNRESET),
+            NWError.posix(.ETIMEDOUT),
+            NWError.posix(.ECANCELED),
+            CancellationError(),
+            ConsumeUpstreamForwardError.preDispatchUnavailable,
+            ConsumeUpstreamForwardError.possiblyDispatchedUnavailable,
+            ConsumeUpstreamForwardError.dispatchedUnavailable,
+        ]
+        for error in errors {
+            let classification = ConsumePinnedUpstreamClient.sendFailureClassificationForTesting(error)
+            guard case .possiblyDispatchedUnavailable = classification else {
+                return XCTFail("send failure must retain exposure without claiming confirmed forwarding")
+            }
+        }
+    }
+
+    func testPhase3DAmbiguousSendFailureHoldsReservationAcrossRestart() throws {
+        for code in [POSIXErrorCode.ECONNRESET, .ETIMEDOUT, .ECANCELED] {
+            try assertAmbiguousSendPreservesExposure(streaming: false, error: NWError.posix(code))
+        }
+    }
+
+    func testPhase3GAmbiguousSendFailureAccountsEstimateAcrossRestart() throws {
+        for code in [POSIXErrorCode.ECONNRESET, .ETIMEDOUT, .ECANCELED] {
+            try assertAmbiguousSendPreservesExposure(streaming: true, error: NWError.posix(code))
         }
     }
 
@@ -5695,6 +5717,122 @@ final class ConsumeCommandTests: XCTestCase {
     private func localError(from body: String) throws -> [String: Any] {
         let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(body.utf8)) as? [String: Any])
         return try XCTUnwrap(object["error"] as? [String: Any])
+    }
+
+    private func assertAmbiguousSendPreservesExposure(streaming: Bool, error: Error) throws {
+        let token = try ConsumeLocalToken.generate()
+        let home = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let ledgerURL = home.appendingPathComponent("budget.jsonl")
+        let trustedRateCard = phase3CTrustedRateCard(
+            promptRatePerMtok: 1_000_000,
+            completionRatePerMtok: 2_000_000,
+            usdPerMillionCredits: 1.0
+        )
+        let body = streaming
+            ? #"{"model":"llama-test","messages":[],"max_tokens":10,"stream":true}"#
+            : #"{"model":"llama-test","messages":[],"max_tokens":10}"#
+        let expected = try ConsumePricedExposureEstimator.estimate(
+            bodyByteCount: Data(body.utf8).count,
+            request: StrictJSONParser.parse(body),
+            match: XCTUnwrap(trustedRateCard.match(model: "llama-test")),
+            projection: trustedRateCard.projection
+        ).amount
+        let failure = ConsumePinnedUpstreamClient.sendFailureClassificationForTesting(error)
+        let recorder = ConsumeUpstreamRequestRecorder()
+        let counter = ConsumeEndpointRequestCounter()
+        let upstreamClient = ConsumeStubUpstreamClient { request, eventLoop in
+            recorder.append(request)
+            return eventLoop.makeFailedFuture(failure)
+        }
+        var headers = HTTPHeaders()
+        headers.add(name: "Authorization", value: "Bearer \(token.value)")
+        let head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/v1/chat/completions", headers: headers)
+
+        func assertExposure(_ ledger: ConsumeBudgetLedger) throws {
+            let summary = try ledger.summary()
+            XCTAssertEqual(summary.reserved.rawValue, 0)
+            XCTAssertEqual(summary.held.rawValue, streaming ? 0 : expected.rawValue)
+            XCTAssertEqual(summary.settled.rawValue, streaming ? expected.rawValue : 0)
+            XCTAssertEqual(summary.released.rawValue, 0)
+            XCTAssertEqual(summary.heldReservationCount, streaming ? 0 : 1)
+            XCTAssertEqual(try summary.committedExposure(), expected)
+        }
+
+        // End the runtime and ledger lifetimes before reopening the same locked file.
+        do {
+            let ledger = try ConsumeBudgetLedger.open(ledgerPath: ledgerURL.path, homeDirectory: home, startupDirectory: home)
+            let budget = ConsumeBudgetConfig(
+                mode: .budget(expected),
+                maxRequestMicroUSD: nil,
+                allowUnpriced: false,
+                ledger: ledger,
+                ledgerPathClass: ledger.pathClass
+            )
+            let runtime = consumeRuntime(
+                token: token,
+                credentialStatus: .environmentLoaded,
+                credentialCustody: consumeCredentialCustody("buyer-token"),
+                budget: budget,
+                trustedPricing: .available(trustedRateCard),
+                upstreamClient: upstreamClient,
+                now: { ConsumeCommandTests.phase3CTestNow },
+                requestCounter: counter
+            )
+            let failed = try response(from: runtime, head: head, body: Data(body.utf8))
+            XCTAssertEqual(failed.status, .serviceUnavailable)
+            XCTAssertEqual(try localError(from: failed.body)["code"] as? String, "local_upstream_unavailable")
+            XCTAssertFalse(try localForwardedFlag(from: failed.body))
+            XCTAssertEqual(recorder.snapshot().count, 1)
+            XCTAssertEqual(recorder.snapshot().first?.streaming, streaming)
+            try assertExposure(ledger)
+
+            let persisted = try Data(contentsOf: ledgerURL)
+            let rows = try persisted.split(separator: 0x0a).map {
+                try XCTUnwrap(JSONSerialization.jsonObject(with: Data($0)) as? [String: Any])
+            }
+            XCTAssertEqual(rows.count, 2)
+            let reserved = try XCTUnwrap(rows.first)
+            let terminal = try XCTUnwrap(rows.last)
+            XCTAssertEqual(reserved["state"] as? String, "reserved")
+            XCTAssertEqual(terminal["state"] as? String, streaming ? "settled" : "held")
+            XCTAssertEqual(terminal["reason"] as? String, streaming ? "settled_to_admission_estimate" : "upstream_proxy_failed")
+            XCTAssertEqual(terminal["admission_estimate_micro_usd"] as? String, "\(expected.rawValue)")
+            XCTAssertEqual(terminal["reservation_id"] as? String, try XCTUnwrap(reserved["reservation_id"] as? String))
+            XCTAssertEqual(terminal["run_id"] as? String, runtime.launchID)
+            if streaming {
+                XCTAssertEqual(terminal["settled_exposure_micro_usd"] as? String, "\(expected.rawValue)")
+            } else {
+                XCTAssertNil(terminal["settled_exposure_micro_usd"])
+            }
+
+            let denied = try response(from: runtime, head: head, body: Data(body.utf8))
+            XCTAssertEqual(denied.status, .paymentRequired)
+            XCTAssertEqual(try localError(from: denied.body)["code"] as? String, "local_budget_exceeded")
+            XCTAssertFalse(try localForwardedFlag(from: denied.body))
+            XCTAssertEqual(recorder.snapshot().count, 1)
+            XCTAssertEqual(try Data(contentsOf: ledgerURL), persisted)
+            let resources = counter.resourceSnapshot()
+            XCTAssertEqual(resources.responseSpoolBytes, 0)
+            XCTAssertEqual(resources.upstreamWorkerTasks, 0)
+            XCTAssertEqual(resources.upstreamSocketDescriptors, 0)
+            XCTAssertEqual(resources.openStreamingResponses, 0)
+        }
+
+        let reopened = try ConsumeBudgetLedger.open(ledgerPath: ledgerURL.path, homeDirectory: home, startupDirectory: home)
+        let persisted = try Data(contentsOf: ledgerURL)
+        try reopened.markHeldReservationsForRestart(excludingRunID: "next-launch")
+        try assertExposure(reopened)
+        let admission = try reopened.reservePricedEstimateForForwarding(
+            runID: "next-launch",
+            budget: expected,
+            estimate: expected,
+            maxRequest: nil
+        )
+        guard case .budgetExceeded = admission else {
+            return XCTFail("ambiguous send exposure must still consume budget after restart")
+        }
+        XCTAssertEqual(try Data(contentsOf: ledgerURL), persisted)
     }
 
     private func localForwardedFlag(from body: String) throws -> Bool {
