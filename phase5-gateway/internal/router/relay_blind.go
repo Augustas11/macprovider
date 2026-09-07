@@ -582,8 +582,9 @@ func (s *Server) admitRelayBlindWalletMetadata(w http.ResponseWriter, r *http.Re
 		return false
 	}
 	err = s.store.AdmitWalletSessionMetadata(r.Context(), storage.WalletSessionMetadataAdmissionRequest{
-		SessionID: sessionAuth.Session.SessionID,
-		AccountID: sessionAuth.Session.AccountID,
+		RelayBlindReplay: s.walletMetadataRelayReplayCandidate(r, sessionAuth.Session, rawBody),
+		SessionID:        sessionAuth.Session.SessionID,
+		AccountID:        sessionAuth.Session.AccountID,
 		Replay: storage.WalletSessionReplayMaterial{
 			SessionID:           sessionAuth.Session.SessionID,
 			RequestID:           requestID(r),
@@ -603,13 +604,49 @@ func (s *Server) admitRelayBlindWalletMetadata(w http.ResponseWriter, r *http.Re
 	if err == nil {
 		return true
 	}
+	reason := walletSessionAdmissionAuditReason(err)
+	if errors.Is(err, storage.ErrRelayBlindReplay) {
+		reason = "relay_blind_replay"
+	}
 	s.recordWalletSessionAudit(r.Context(), sessionAuth.Session.AccountID, sessionAuth.Session.SessionID, "wallet_session_rejected", "gateway", map[string]any{
 		"request_id":      requestID(r),
 		"canonical_route": walletCanonicalRouteForRequest(r),
-		"reason":          walletSessionAdmissionAuditReason(err),
+		"reason":          reason,
 	})
+	if errors.Is(err, storage.ErrRelayBlindReplay) {
+		writeError(w, http.StatusConflict, "invalid_request_error", "relay_blind_replay", "Relay-blind request envelope was already seen in the replay retention window")
+		return false
+	}
 	s.writeWalletAdmissionError(w, err, storage.WalletSessionAdmissionDecision{})
 	return false
+}
+
+func (s *Server) walletMetadataRelayReplayCandidate(r *http.Request, session storage.WalletSession, body []byte) *storage.RelayBlindReplayMaterial {
+	if r.Method != http.MethodPost {
+		return nil
+	}
+	// Disabled adapters have no endpoint context. Bind to the signed public route,
+	// and never interpret route-reservation metadata as an inference envelope.
+	var family string
+	switch walletCanonicalRouteForRequest(r) {
+	case "/v1/chat/completions":
+		family = "chat_completions"
+	case "/v1/responses":
+		family = "responses"
+	case "/v1/messages":
+		family = "messages"
+	default:
+		return nil
+	}
+	env, err := s.validateRelayBlindRequestEnvelope(body, family, s.cfg.Features.RelayBlindRequests.Enabled)
+	if err != nil || !s.relayBlindEnvelopeFresh(env) {
+		return nil
+	}
+	if _, allowed := walletModelAllowlist(session)[env.Model]; !allowed || relayBlindWalletSessionCapExceeded(session.PerRequestTokenCap, env.InputTokenUpperBound, env.MaxOutputTokens, env.ReservationTokenCap) {
+		return nil
+	}
+	replay := s.relayBlindReplayMaterial(session.AccountID, session.SessionID, env, body)
+	return &replay
 }
 
 func (s *Server) admitRelayBlindMetadataWrite(w http.ResponseWriter, r *http.Request, accountID string) bool {
