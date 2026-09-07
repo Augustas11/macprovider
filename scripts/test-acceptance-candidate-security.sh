@@ -220,6 +220,27 @@ for value in (
 ):
     if value not in signer:
         raise SystemExit(f"acceptance Malibu.app omits bundled repair payload: {value}")
+# The bundled CLI loads MLX Metal kernels and SwiftPM resources from files
+# adjacent to it in Contents/MacOS; the app must ship them like the tarball or
+# app-installed providers cannot run Metal inference (regression that shipped a
+# metallib-less Malibu.app in v1.8.120).
+for value in (
+    'install -m 0644 "$cli_work/mlx.metallib" "$app/Contents/MacOS/mlx.metallib"',
+    'cp -R "$cli_work/$provider_bundle" "$app/Contents/MacOS/$provider_bundle"',
+):
+    if value not in signer:
+        raise SystemExit(f"acceptance Malibu.app omits adjacent MLX Metal resource: {value}")
+# The nested MLX Metal library and SwiftPM resource bundles must be signed with
+# the Developer ID identity BEFORE the non-deep outer app sign, or
+# `codesign --verify --strict --deep` and Apple notarization reject the app
+# (the copied payloads are otherwise unsigned nested bundles). mlx.metallib
+# appears three times once signed: install, codesign, post-staple assertion.
+if signer.count('"$app/Contents/MacOS/mlx.metallib"') < 3:
+    raise SystemExit("acceptance signer must codesign the copied mlx.metallib before the outer app sign")
+if 'find "$app/Contents/MacOS" -mindepth 1 -maxdepth 1 -type d -name \'*.bundle\' -print0' not in signer:
+    raise SystemExit("acceptance signer must codesign every nested SwiftPM resource bundle before the outer app sign")
+if 'die "signed Malibu.app lacks adjacent mlx.metallib' not in signer:
+    raise SystemExit("acceptance signer must fail closed when the signed app lacks the adjacent MLX Metal library")
 for value in (
     'keychain="acceptance-signing-${run_id}-${run_attempt}-${keychain_nonce}.keychain"',
     'acceptance_keychain_capture_default || die',

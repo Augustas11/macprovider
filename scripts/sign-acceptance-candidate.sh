@@ -223,6 +223,41 @@ cmp "$cli_work/compatibility-set.json" "$app/Contents/Resources/compatibility-se
 rm -rf "$app/Contents/Resources/compatibility-set-local" "$app/Contents/Resources/catalog-release"
 cp -R "$cli_work/compatibility-set-local" "$app/Contents/Resources/compatibility-set-local"
 cp -R "$cli_work/catalog-release" "$app/Contents/Resources/catalog-release"
+# Malibu.app's bundled macprovider-cli loads MLX Metal kernels and SwiftPM
+# resources from files adjacent to it in Contents/MacOS, exactly like the
+# standalone tarball payload assembled below. Copy them in before the app is
+# signed/notarized/stapled so they are sealed into the shipped bundle; without
+# them the app-bundled CLI cannot run MLX Metal inference.
+[[ -f "$cli_work/mlx.metallib" && ! -L "$cli_work/mlx.metallib" ]] ||
+  die "provider payload lacks mlx.metallib for the Malibu.app bundle"
+install -m 0644 "$cli_work/mlx.metallib" "$app/Contents/MacOS/mlx.metallib"
+app_resource_bundle_count=0
+for provider_bundle in mlx-swift_Cmlx.bundle swift-nio_NIOPosix.bundle; do
+  if [[ -d "$cli_work/$provider_bundle" && ! -L "$cli_work/$provider_bundle" ]]; then
+    rm -rf "$app/Contents/MacOS/$provider_bundle"
+    cp -R "$cli_work/$provider_bundle" "$app/Contents/MacOS/$provider_bundle"
+    app_resource_bundle_count=$((app_resource_bundle_count + 1))
+  fi
+done
+[[ "$app_resource_bundle_count" -gt 0 ]] ||
+  die "Malibu.app payload lacks a SwiftPM resource bundle"
+# Sign the copied MLX Metal library and every nested SwiftPM resource bundle
+# with the Developer ID identity BEFORE the outer app sign, matching release.yml.
+# The outer app sign is non-deep (to preserve the already-signed embedded CLI
+# bytes), so these nested payloads must carry their own signatures or
+# `codesign --verify --strict --deep` and Apple notarization reject the app.
+codesign --force \
+  --timestamp \
+  --keychain "$keychain" \
+  --sign "$signing_identity" \
+  "$app/Contents/MacOS/mlx.metallib"
+while IFS= read -r -d '' nested_bundle; do
+  codesign --force \
+    --timestamp \
+    --keychain "$keychain" \
+    --sign "$signing_identity" \
+    "$nested_bundle"
+done < <(find "$app/Contents/MacOS" -mindepth 1 -maxdepth 1 -type d -name '*.bundle' -print0)
 embedded_cli_sha256="$(shasum -a 256 "$app/Contents/MacOS/macprovider-cli" | awk '{print $1}')"
 codesign --force \
   --options runtime \
@@ -246,6 +281,11 @@ rm -f "$app_notary"
 xcrun stapler staple "$app"
 xcrun stapler validate "$app"
 spctl -a -vvv -t exec "$app"
+# Fail closed if the shipped app bundle is missing the adjacent MLX Metal
+# library the bundled CLI needs (mirrors verify-tier2-provider-release.sh so a
+# packaging regression can never reach a published DMG again).
+[[ -f "$app/Contents/MacOS/mlx.metallib" ]] ||
+  die "signed Malibu.app lacks adjacent mlx.metallib for the bundled macprovider-cli"
 
 mkdir "$output_dir"
 provider_asset="$output_dir/macprovider-cli-${tag}-darwin-arm64.tar.gz"
