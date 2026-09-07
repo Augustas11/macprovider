@@ -749,7 +749,11 @@ class ProductionExceptionsTests(unittest.TestCase):
             if entry["id"] == "exc-canary-disabled-enable-gate"
         )
         self.assertEqual(canary["status"], "active")
-        self.assertTrue(canary["blocks_stable_promotion"])
+        # Waived for the 1.8.120 stable promotion (#1396): still a live
+        # relaxation, but carried (blocks_stable_promotion=false) with a bounded
+        # remediation deadline rather than held against an unrelated release.
+        self.assertFalse(canary["blocks_stable_promotion"])
+        self.assertIsNotNone(canary["expires_at"])
         result = pe.validate_register(doc, now=NOW, tombstones=tombstones)
         self.assertEqual(result.errors, [], [f.format() for f in result.errors])
 

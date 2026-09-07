@@ -124,12 +124,61 @@ python3 scripts/check-production-exceptions.py \
   gate --mode=deploy --no-enforce \
   || fail "default-safe deploy gate failed unexpectedly"
 
-# Promote mode must fail closed while expired/unbounded exceptions remain.
+# Promote mode must fail closed on an unbounded/expired blocks_stable_promotion
+# exception. Use a synthetic fixture so this negative test is self-contained and
+# does not depend on the committed register carrying debt — the committed
+# register is expected to be clean once resolved exceptions are tombstoned.
+neg="$(mktemp -d "${TMPDIR:-/tmp}/exception-neg.XXXXXX")"
+python3 - "$neg" <<'PY'
+import json, pathlib, sys
+work = pathlib.Path(sys.argv[1])
+doc = {
+  "$schema": "./production-exceptions.schema.json",
+  "schema_version": "macprovider-production-exceptions-v1",
+  "updated_at": "2026-07-22T00:00:00Z",
+  "updated_by": "test",
+  "environment": "pearl-production",
+  "exceptions": [{
+    "id": "exc-neg-unbounded-blocking",
+    "status": "active",
+    "environment": "pearl-production",
+    "component": "other",
+    "policy_delta": "synthetic unbounded blocks_stable_promotion exception",
+    "authority_surface": "test",
+    "reason": "negative promote-gate test",
+    "owner": "test",
+    "issue": "https://github.com/Augustas11/macprovider/issues/615",
+    "created_at": "2026-07-01T00:00:00Z",
+    "expires_at": None,
+    "expiry_unknown_reason": "synthetic fixture; intentionally unbounded",
+    "scope": "test",
+    "removal_condition": "test",
+    "rollback_command": "echo",
+    "post_removal_validation": "echo",
+    "evidence": ["https://github.com/Augustas11/macprovider/issues/615"],
+    "blocks_stable_promotion": True,
+  }],
+  "open_questions": [],
+}
+tombs = {
+  "schema_version": "macprovider-removed-exception-tombstones-v1",
+  "updated_at": "2026-07-22T00:00:00Z",
+  "updated_by": "test",
+  "environment": "pearl-production",
+  "tombstones": [],
+}
+(work / "reg.json").write_text(json.dumps(doc))
+(work / "tombs.json").write_text(json.dumps(tombs))
+PY
 if python3 scripts/check-production-exceptions.py \
+  --register "$neg/reg.json" \
+  --tombstones "$neg/tombs.json" \
   --now 2026-07-22T12:00:00Z \
   gate --mode=promote; then
-  fail "promote gate unexpectedly passed while expired/unbounded exceptions remain"
+  rm -rf "$neg"
+  fail "promote gate unexpectedly passed on an unbounded blocks_stable_promotion exception"
 fi
+rm -rf "$neg"
 
 # Deploy tooling must invoke the exception gate.
 grep -qF 'check-production-exceptions.py' \
