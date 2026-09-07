@@ -1,6 +1,17 @@
 # SPEC-003 — Open Onboarding: Distribution, Lifecycle & Onboarding UX
 
-**Version:** 0.11.1 (2026-08-16, hosted agent onboarding skill)
+**Version:** 0.11.2 (2026-09-07, installer coordinator host override scoping)
+
+**Change log v0.11.2:** Clarifies that `MACPROVIDER_COORDINATOR_HOST` is
+watchdog-only and is not an installer coordinator override. The public
+installer (`phase3-binary/dist/install.sh`) selects the coordinator from
+`MACPROVIDER_COORDINATOR_URL`, the interactive prompt, or the production
+default. When `MACPROVIDER_COORDINATOR_HOST` is set and disagrees with the
+host of the chosen URL, the installer MUST warn and continue with that URL.
+`MACPROVIDER_NO_PROMPT=1` without a URL still uses the production default
+(GUI onboarding and unattended production installs). Closes the
+documentation-scoping footgun in issue #1401 without creating a second
+coordinator authority.
 
 **Change log v0.11.1:** Adds FR-C1b and AC-6 for the hosted
 agent-readable onboarding skill requested in issue #926. The canonical public
@@ -447,6 +458,14 @@ that:
 | `MACPROVIDER_INSTALL_DIR` | Override `~/macprovider` support directory |
 | `MACPROVIDER_NO_LAUNCHD` | Skip launchd prompt (no plist) |
 | `MACPROVIDER_NO_PROMPT` | Non-interactive mode (uses all defaults) |
+
+`MACPROVIDER_COORDINATOR_HOST` is a watchdog-only override consumed by
+`ops/macprovider-watchdog/install.sh` and the watchdog LaunchAgent. The
+public installer does not read it. Staging and self-hosted installs MUST
+set `MACPROVIDER_COORDINATOR_URL`. If `MACPROVIDER_COORDINATOR_HOST` is
+set and disagrees with the host of the chosen coordinator URL, the
+installer MUST warn and continue with that URL. `MACPROVIDER_NO_PROMPT=1`
+without `MACPROVIDER_COORDINATOR_URL` uses the production default.
 
 **FR-C3. malibu-cli update subcommand.**
 `malibu-cli update` performs an atomic self-update:

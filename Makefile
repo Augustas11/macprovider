@@ -191,6 +191,7 @@ test-dist:
 	bash phase3-binary/dist/test/install_bundled_repair.test.sh
 	bash phase3-binary/dist/test/install_headless_fleet.test.sh
 	bash phase3-binary/dist/test/install_port_validation.test.sh
+	bash phase3-binary/dist/test/install_coordinator_url.test.sh
 	bash phase3-binary/dist/test/install_prefix.test.sh
 	bash phase3-binary/dist/test/uninstall_path_safety.test.sh
 	bash scripts/test-watchdog-inline-drift.sh

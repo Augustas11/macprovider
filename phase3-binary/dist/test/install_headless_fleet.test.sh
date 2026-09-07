@@ -42,6 +42,7 @@ names = [
     "read_config_provider_token_line",
     "scrub_config_provider_token",
     "render_plist",
+    "coordinator_host_from_url",
     "render_watchdog_plist",
     "install_plist",
     "install_watchdog",
