@@ -1488,7 +1488,9 @@ enum AgentSnapshotPresenter {
         }
 
         let primaryDiagnostic = primaryDiagnosticFinding(s)
-        if let primaryDiagnostic, primaryDiagnostic.signatureID != .autoupdateInProgress {
+        if let primaryDiagnostic,
+           primaryDiagnostic.signatureID != .autoupdateInProgress,
+           !shouldHoldLiveThroughStaleServeUnresponsive(primaryDiagnostic, snapshot: s) {
             let context = diagnosticContext(primaryDiagnostic, snapshot: s)
             let meaning = ([publicS.detail ?? "Malibu found a provider issue that needs attention."] + context)
                 .joined(separator: " ")
@@ -2741,6 +2743,9 @@ enum AgentSnapshotPresenter {
                 safeNextAction: "Keep Malibu open. You do not need a new invite."
             )
         case .serveUnresponsive:
+            if shouldHoldLiveThroughStaleServeUnresponsive(finding, snapshot: s) {
+                return nil
+            }
             return PublicStatus(
                 title: serveUnresponsiveTitle(finding),
                 detail: serveUnresponsiveDetail(finding),
@@ -2799,6 +2804,7 @@ enum AgentSnapshotPresenter {
     private static func topDiagnosticFinding(_ s: AgentSnapshot) -> ProviderDiagnosticFinding? {
         s.diagnosticFindings
             .filter { canUseAsPrimaryDiagnosticStatus($0, snapshot: s) }
+            .filter { !shouldHoldLiveThroughStaleServeUnresponsive($0, snapshot: s) }
             .sorted(by: diagnosticPrecedes)
             .first
     }
@@ -2875,6 +2881,32 @@ enum AgentSnapshotPresenter {
         hasNetworkStateEvidence(finding)
             ? "Customer availability is interrupted"
             : "Provider status is unavailable"
+    }
+
+    /// #1338 ranked availability diagnostics ahead of ready copy. A stale local
+    /// status poll (`serve_unresponsive` from `/v1/status` with
+    /// `observation.id=` evidence and no `network_state=`) must not steal Live
+    /// while the display-retained observation is still `buyer_serving`.
+    /// Doctor/app-polling `serve_dead` findings and missing evidence stay primary.
+    private static func shouldHoldLiveThroughStaleServeUnresponsive(
+        _ finding: ProviderDiagnosticFinding,
+        snapshot s: AgentSnapshot,
+        at now: Date = Date()
+    ) -> Bool {
+        finding.signatureID == .serveUnresponsive
+            && finding.source == .status
+            && isStaleLocalPollServeUnresponsiveEvidence(finding)
+            && isNetworkReady(s, at: now)
+    }
+
+    private static func isStaleLocalPollServeUnresponsiveEvidence(
+        _ finding: ProviderDiagnosticFinding
+    ) -> Bool {
+        let prefix = "observation.id="
+        guard let evidence = finding.evidence, evidence.hasPrefix(prefix) else {
+            return false
+        }
+        return evidence.count > prefix.count
     }
 
     private static func serveUnresponsiveDetail(_ finding: ProviderDiagnosticFinding) -> String {

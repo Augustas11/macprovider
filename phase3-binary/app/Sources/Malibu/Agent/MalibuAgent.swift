@@ -46,6 +46,9 @@ final class MalibuAgent: ObservableObject {
     /// passes both the local readiness and service-identity checks.
     private var providerProjectionEligible = false
     private var lastRequestsRateSample: (total: Int, date: Date)?
+    /// First timestamp of the current local health/status miss streak.
+    /// Cleared on a successful `/v1/status` refresh.
+    private var localStatusMissStartedAt: Date?
     private var latestReleaseFetchedAt: Date?
     private var cliUpdateTask: Task<Void, Never>?
     private var providerSoftwareRepairTask: Task<Void, Never>?
@@ -745,14 +748,19 @@ final class MalibuAgent: ObservableObject {
         if !localReady {
             invalidateProviderProjectionFreshness()
         }
-        if let status = await InstalledProviderMonitor.fetchStatus(port: port),
-           let expectedProviderID = ProviderConfig.readProviderID(),
-           InstalledProviderMonitor.serviceIdentityMatches(
-               status,
-               expectedProviderID: expectedProviderID,
-               launchdPID: InstalledProviderMonitor.launchdServicePID(),
-               liveCodeMatches: ProviderCredentialHandoffRunner.validatedInstalledProcessMatches(pid:)
-           ) {
+        let status = await InstalledProviderMonitor.fetchStatus(port: port)
+        let expectedProviderID = ProviderConfig.readProviderID()
+        let identityMatched = status.map { fetched in
+            guard let expectedProviderID else { return false }
+            return InstalledProviderMonitor.serviceIdentityMatches(
+                fetched,
+                expectedProviderID: expectedProviderID,
+                launchdPID: InstalledProviderMonitor.launchdServicePID(),
+                liveCodeMatches: ProviderCredentialHandoffRunner.validatedInstalledProcessMatches(pid:)
+            )
+        } ?? false
+        if let status, let expectedProviderID, identityMatched {
+            localStatusMissStartedAt = nil
             snapshot.localProviderID = expectedProviderID
             snapshot.localStatusContractVersion = status.contractVersion
             snapshot.localStatusMinimumReaderVersion = status.minimumReaderVersion
@@ -844,15 +852,36 @@ final class MalibuAgent: ObservableObject {
                 snapshot.referralLastError = nil
                 finishReferralAction()
             }
-        } else {
-            // Never carry a prior authoritative serving verdict across a
-            // failed status/readiness refresh.
+        } else if LocalStatusObservationPolicy.shouldInvalidateAfterLocalStatusRefreshFailure(
+            fetchedStatus: status != nil,
+            identityMatched: identityMatched,
+            missStartedAt: localStatusMissStartedAt,
+            launchdPID: monitorsLaunchdProvider ? InstalledProviderMonitor.launchdServicePID() : nil
+        ) {
+            // Identity mismatch is a hard fail. A missing HTTP response may
+            // hold until launchd is gone or misses span display retention.
             snapshot.invalidateLocalStatusObservation()
             invalidateProviderProjectionFreshness()
+        } else {
+            noteLocalStatusPollMiss()
         }
         reconcileNetworkState(localReady: localReady)
         await refreshLatestReleaseIfNeeded()
         refreshDiagnosticFindings()
+    }
+
+    private func noteLocalStatusPollMiss(now: Date = Date()) {
+        if localStatusMissStartedAt == nil {
+            localStatusMissStartedAt = now
+        }
+    }
+
+    private func shouldInvalidateHeldLocalStatus(now: Date = Date()) -> Bool {
+        LocalStatusObservationPolicy.shouldInvalidateAfterLocalPollMiss(
+            missStartedAt: localStatusMissStartedAt,
+            now: now,
+            launchdPID: monitorsLaunchdProvider ? InstalledProviderMonitor.launchdServicePID() : nil
+        )
     }
 
     private func refreshCredentialDiagnosis() async {
@@ -1058,17 +1087,22 @@ final class MalibuAgent: ObservableObject {
                     await self.requestReferralStatusIfDue()
                 } else if self.monitorsLaunchdProvider {
                     await MainActor.run {
-                        self.snapshot.invalidateLocalStatusObservation()
-                        self.invalidateProviderProjectionFreshness()
-                        if let failure = self.diagnosedProviderFailure(includingLaunchdState: true) {
-                            self.providerStartFailure = failure
-                            self.snapshot.state = .error
-                            self.snapshot.lastError = failure
+                        if self.shouldInvalidateHeldLocalStatus() {
+                            self.snapshot.invalidateLocalStatusObservation()
+                            self.invalidateProviderProjectionFreshness()
+                            if let failure = self.diagnosedProviderFailure(includingLaunchdState: true) {
+                                self.providerStartFailure = failure
+                                self.snapshot.state = .error
+                                self.snapshot.lastError = failure
+                            } else {
+                                self.snapshot.state = .reconnecting
+                                self.snapshot.lastError = ProviderLogDiagnostics.timeoutMessage(
+                                    logHint: ProviderLogDiagnostics.logHint()
+                                )
+                            }
                         } else {
-                            self.snapshot.state = .reconnecting
-                            self.snapshot.lastError = ProviderLogDiagnostics.timeoutMessage(
-                                logHint: ProviderLogDiagnostics.logHint()
-                            )
+                            self.noteLocalStatusPollMiss()
+                            self.refreshDiagnosticFindings()
                         }
                     }
                 }

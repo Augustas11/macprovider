@@ -555,6 +555,55 @@ final class RewardVerdictContractTests: XCTestCase {
         interrupted.networkState = "not_buyer_serving"
         XCTAssertEqual(AgentSnapshotPresenter.consolidatedStatus(interrupted).phase, .needsAttention)
 
+        var stalePoll = trustedServing()
+        stalePoll.diagnosticFindings = [
+            diagnostic(
+                .serveUnresponsive,
+                message: "Provider local status is unavailable or stale.",
+                evidence: "observation.id=stale-observation"
+            )
+        ]
+        let stalePollStatus = AgentSnapshotPresenter.consolidatedStatus(stalePoll)
+        XCTAssertNotEqual(stalePollStatus.phase, .needsAttention)
+        XCTAssertNotEqual(stalePollStatus.label, "Provider status is unavailable")
+
+        var stalePollWithLowerRanked = trustedServing()
+        stalePollWithLowerRanked.diagnosticFindings = [
+            diagnostic(
+                .serveUnresponsive,
+                message: "Provider local status is unavailable or stale.",
+                evidence: "observation.id=stale-observation"
+            ),
+            diagnostic(
+                .autoupdateDisabled,
+                source: .status,
+                message: "Provider automatic updates are disabled."
+            ),
+        ]
+        let stalePollNextStatus = AgentSnapshotPresenter.consolidatedStatus(stalePollWithLowerRanked)
+        XCTAssertEqual(stalePollNextStatus.phase, .needsAttention)
+        XCTAssertEqual(stalePollNextStatus.label, "Provider automatic updates are disabled")
+
+        var doctorServeDead = trustedServing()
+        doctorServeDead.statusObservedAt = Date().addingTimeInterval(-6)
+        doctorServeDead.statusObservationValidForMS = 5_000
+        doctorServeDead.diagnosticFindings = [
+            diagnostic(
+                .serveUnresponsive,
+                message: "Provider local status is unavailable or stale.",
+                evidence: "observation.id=stale-observation"
+            ),
+            diagnostic(
+                .serveUnresponsive,
+                source: .doctorReport,
+                message: "doctor report found serve dead",
+                evidence: "serve_dead=true"
+            ),
+        ]
+        let doctorServeDeadStatus = AgentSnapshotPresenter.consolidatedStatus(doctorServeDead)
+        XCTAssertEqual(doctorServeDeadStatus.phase, .needsAttention)
+        XCTAssertEqual(doctorServeDeadStatus.label, "Provider status is unavailable")
+
         var autoupdate = trustedServing()
         autoupdate.diagnosticFindings = [
             diagnostic(.autoupdateInProgress, message: "Provider software update is in progress.")
