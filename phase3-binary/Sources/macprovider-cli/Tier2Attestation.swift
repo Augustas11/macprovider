@@ -93,12 +93,16 @@ struct SecureEnclaveAttestationGenerator: Tier2AttestationTokenGenerating {
         }
 
         let issuedAt = now()
-        // Keep claimed compact: model/weights hashes already ride on hello.
-        // Extra 64-hex fields here push a realistic envelope over 1024 bytes.
+        // Keep claimed compact so the whole attestation_token JSON stays
+        // ≤ SPEC-008 §7.4's 1024-byte handshake cap. Model identity already
+        // rides on hello. claimed.model_id is unused on this SE path
+        // (Pillar C's tokenClaimedModelID fallback is gated on
+        // claimed.model_hash, which this generator omits). A 40-char
+        // model_id plus 70–72 byte DER signatures overflowed 1024 by 4–6
+        // bytes (#1400).
         let claimed: [String: Any] = [
             "hardware_family": "apple_silicon",
             "ram_gb": snapshot.capacity.ramGB,
-            "model_id": snapshot.modelID ?? "",
         ]
 
         var envelope: [String: Any] = [

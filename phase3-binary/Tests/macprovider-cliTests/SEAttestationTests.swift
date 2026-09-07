@@ -176,7 +176,9 @@ final class SEAttestationGeneratorEnvelopeTests: XCTestCase {
 
         let claimed = try XCTUnwrap(env["claimed"] as? [String: Any])
         XCTAssertEqual(claimed["hardware_family"] as? String, "apple_silicon")
-        XCTAssertEqual(claimed["model_id"] as? String, "model-test")
+        XCTAssertEqual(claimed["ram_gb"] as? Int, snapshot.capacity.ramGB)
+        XCTAssertNil(claimed["model_id"])
+        XCTAssertNil(claimed["model_hash"])
 
         // Token must be base64url-encoded SignedSEAttestation JSON
         let tokenB64 = try XCTUnwrap(env["token"] as? String)
@@ -347,8 +349,11 @@ final class SEAttestationGeneratorEnvelopeTests: XCTestCase {
             builder: builder,
             now: { Date(timeIntervalSince1970: 1_716_768_000) }
         )
+        // #1400: a ~40-char model_id overflowed 1024; 2000 chars used to omit
+        // the token. Envelope size must no longer depend on model_id.
+        let longModelID = "mlx-community/" + String(repeating: "m", count: 2000)
         let status = ProviderStatus(
-            modelID: "mlx-community/Qwen3-8B-4bit",
+            modelID: longModelID,
             modelLoaded: true,
             capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
         )
@@ -367,10 +372,11 @@ final class SEAttestationGeneratorEnvelopeTests: XCTestCase {
         let encoded = try JSONSerialization.data(withJSONObject: env, options: [.withoutEscapingSlashes])
         XCTAssertLessThanOrEqual(
             encoded.count,
-            SecureEnclaveAttestationGenerator.maxHandshakeTokenBytes,
-            "SE attestation_token must fit coordinator maxHandshakeMetadataBytes"
+            SecureEnclaveAttestationGenerator.maxHandshakeTokenBytes - 32,
+            "SE attestation_token must keep 32 bytes of headroom under coordinator maxHandshakeMetadataBytes even with a long model_id (got \(encoded.count))"
         )
         let claimed = try XCTUnwrap(env["claimed"] as? [String: Any])
+        XCTAssertNil(claimed["model_id"])
         XCTAssertNil(claimed["model_hash"])
         XCTAssertNil(claimed["weights_manifest_sha256"])
         let tokenB64 = try XCTUnwrap(env["token"] as? String)
@@ -380,7 +386,7 @@ final class SEAttestationGeneratorEnvelopeTests: XCTestCase {
         XCTAssertNil(inner["chipName"])
     }
 
-    func testBindingClaimedHashLeavesModelIDSlashLiteral() async throws {
+    func testBindingClaimedHashOmitsSlashyModelID() async throws {
         let signer = MockSEBlobSigner()
         let builder = SEAttestationBuilder(serialNumberOverride: { "H2XX74T43X" })
         let generator = SecureEnclaveAttestationGenerator(
@@ -404,8 +410,9 @@ final class SEAttestationGeneratorEnvelopeTests: XCTestCase {
         )
         let env = try XCTUnwrap(envelope)
         let claimed = try XCTUnwrap(env["claimed"] as? [String: Any])
+        XCTAssertNil(claimed["model_id"])
         let claimedJSON = String(data: try Spec008CanonicalJSON.marshal(claimed), encoding: .utf8) ?? ""
-        XCTAssertTrue(claimedJSON.contains("mlx-community/Qwen3-8B-4bit"))
+        XCTAssertFalse(claimedJSON.contains("mlx-community/Qwen3-8B-4bit"))
         XCTAssertFalse(claimedJSON.contains("\\/"))
 
         let payload = try ManagedDeviceAttestationGenerator.buildBindingPayload(
@@ -417,7 +424,7 @@ final class SEAttestationGeneratorEnvelopeTests: XCTestCase {
         XCTAssertTrue(payloadStr.contains(claimedHash))
     }
 
-    func testOversizedClaimedOmitsTokenRatherThanExceedCap() async throws {
+    func testOversizedBinaryVersionOmitsTokenRatherThanExceedCap() async throws {
         let signer = MockSEBlobSigner()
         let builder = SEAttestationBuilder(serialNumberOverride: { "H2XX74T43X" })
         let generator = SecureEnclaveAttestationGenerator(signer: signer, builder: builder)
@@ -431,7 +438,7 @@ final class SEAttestationGeneratorEnvelopeTests: XCTestCase {
             challengeBase64URL: Data(repeating: 0x11, count: 32).base64URLUnpadded(),
             authAttemptID: "a",
             providerID: "mp-26592d710fc97aa7c07b260665c67cf6",
-            binaryVersion: "1.8.99",
+            binaryVersion: String(repeating: "1", count: 2000),
             snapshot: snapshot,
             providerECDHPublicKey: Data(repeating: 0x22, count: 32).base64URLUnpadded()
         )
