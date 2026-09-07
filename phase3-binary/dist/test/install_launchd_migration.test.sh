@@ -22,6 +22,7 @@ names = [
     "reclaim_launchd_service",
     "reclaim_legacy_launchd_service",
     "render_plist",
+    "coordinator_host_from_url",
     "render_watchdog_plist",
     "install_plist",
     "install_watchdog",
@@ -253,6 +254,9 @@ HOME="$TMP/home" \
     [ "$LAUNCHD_INSTALLED" -eq 1 ]
     install_watchdog "https://coordinator.example"
     [ "$WATCHDOG_INSTALLED" -eq 1 ]
+    expected_host="$(coordinator_host_from_url "https://coordinator.example")"
+    grep -A1 MACPROVIDER_COORDINATOR_HOST "$WATCHDOG_PLIST_PATH" \
+      | grep -qF "<string>$expected_host</string>"
   '
 grep -F 'enable gui/' "$TMP/launchd.log" | grep -F 'live.malibu.provider' >/dev/null
 grep -F 'bootstrap gui/' "$TMP/launchd.log" | grep -F 'live.malibu.provider.plist' >/dev/null

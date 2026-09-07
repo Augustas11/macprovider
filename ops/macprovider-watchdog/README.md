@@ -47,7 +47,7 @@ operator without any hardcoded provider id.
 |---|---|
 | `watchdog.sh` | The poll script source (installed as `macprovider-health-monitor`). Idempotent; safe to invoke repeatedly. |
 | `live.malibu.provider-watchdog.template.plist` | LaunchAgent template; substituted by `install.sh`. |
-| `install.sh` | Idempotent installer. Invoked by both the main `get.malibu.tech/install.sh` flow and by an operator running this directory by hand. |
+| `install.sh` | Idempotent standalone watchdog installer (`ops/macprovider-watchdog/install.sh`). The public provider installer inlines the watchdog; it does not invoke this file. |
 | `uninstall.sh` | Removes the LaunchAgent and the `~/.local/share/macprovider-watchdog` directory. |
 
 ## Operator runbook
@@ -105,7 +105,17 @@ remains the process owner.
 
 ## Environment overrides (advanced)
 
-Both `install.sh` and `watchdog.sh` accept env overrides for testing:
+`ops/macprovider-watchdog/install.sh` and `watchdog.sh` accept env
+overrides for testing. These apply **only** to the standalone watchdog
+installer and the watchdog process. They are **not** read by the public
+provider installer (`phase3-binary/dist/install.sh` /
+`get.malibu.tech/install.sh`).
+
+To point a **provider install** at staging or a self-hosted coordinator,
+set `MACPROVIDER_COORDINATOR_URL` (for example
+`wss://127.0.0.1:18445/ws/provider`). `MACPROVIDER_COORDINATOR_HOST` does
+not change that installer's coordinator URL; the public installer derives
+the watchdog host from the chosen URL.
 
 | Variable | Default |
 |---|---|
@@ -118,5 +128,6 @@ Both `install.sh` and `watchdog.sh` accept env overrides for testing:
 | `MACPROVIDER_WATCHDOG_KICK_GRACE_SECONDS` | `300` |
 | `MACPROVIDER_LAUNCHCTL` | `launchctl` |
 
-These let an operator point the watchdog at a staging coordinator or
-verify the install path before rolling to production.
+These let an operator point the **standalone watchdog** at a staging
+coordinator or verify the watchdog install path before rolling to
+production.

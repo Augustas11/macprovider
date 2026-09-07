@@ -62,7 +62,7 @@
     {
       "spec_id": "SPEC-003",
       "title": "Open Onboarding: Distribution, Lifecycle & Onboarding UX",
-      "version": "0.11.1",
+      "version": "0.11.2",
       "path": "specs/SPEC-003-open-onboarding.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -5450,6 +5450,29 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/926",
         "rationale": "The repo now contains the Malibu-domain hosted agent onboarding skill source, discovery index, and drift validator; the requirement remains pending until the public get.malibu.tech route is published and byte-compared against the repo artifact."
+      }
+    },
+    {
+      "requirement_id": "SPEC-003-R002",
+      "spec_id": "SPEC-003",
+      "state": "pending",
+      "implementation": [
+        "phase3-binary/dist/install.sh:choose_coordinator_url",
+        "phase3-binary/dist/install.sh:warn_if_coordinator_host_ignored",
+        "phase3-binary/dist/install.sh:coordinator_host_from_url",
+        "phase3-binary/dist/install.sh:usage"
+      ],
+      "tests": [
+        "phase3-binary/dist/test/install_coordinator_url.test.sh:MACPROVIDER_COORDINATOR_HOST is ignored by the public installer",
+        "Makefile:test-dist"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "CODE_BUG",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1401",
+        "rationale": "Repo installer now warns when MACPROVIDER_COORDINATOR_HOST disagrees with the chosen URL and documents HOST as watchdog-only. Requirement remains pending until the curl-channel get.malibu.tech/install.sh is republished from a release that includes this warning."
       }
     },
     {
