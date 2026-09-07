@@ -67,9 +67,6 @@
         "2026-07-22 Pearl: unexpired exemption count=0 before mutation; 6 historical expired rows present.",
         "2026-07-22 Pearl: UPDATE cleared signature_exempt_until to NULL for those 6 rows; remaining_exempt=0.",
         "2026-07-22 Pearl: 48h coordinator journal count of provider_auth_policy_exempt_used=0."
-      ],
-      "still_blocked_for_clearance": [
-        "Mark removed only after physical restart/reboot reconnect proves durable admission signatures on both Macs (#585/#613) with no exempt_used events."
       ]
     },
     {
@@ -248,9 +245,6 @@
       "partial_progress": [
         "2026-07-22 Pearl: deployed autotune YAML lacks enforce_provider_admission / bridge_deadline keys.",
         "2026-07-22 Pearl: coordinator binary reports v1.8.49; advertised latest_binary_version=1.8.49."
-      ],
-      "still_blocked_for_clearance": [
-        "Authenticated /poolz legacy_bridge count == 0 and reviewed strict admission re-enable."
       ]
     },
     {
