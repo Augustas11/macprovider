@@ -220,11 +220,23 @@ if run_guard "$work/missing-sig" >"$work/missing-sig.out" 2>&1; then
 fi
 grep -q 'fixture coordinator response is missing for /v1/rate-card.sig' "$work/missing-sig.out"
 
-make_fixture "$work/stale-healthz" v1.8.68 v1.8.67
-if run_guard "$work/stale-healthz" >"$work/stale-healthz.out" 2>&1; then
-  fail "accepted a coordinator older than the shipped CLI release"
+# Post-publication: the coordinator's own /healthz binary version is an
+# independent Pearl-runtime artifact that shares the vX.Y.Z tag space with the
+# provider CLI but ships on its own cadence. A coordinator OLDER than the shipped
+# CLI release is accepted as long as it advertises the release
+# (recommended_binary_version == release); the coordinator does not need to be
+# rebuilt in lockstep with every CLI release.
+make_fixture "$work/older-coordinator-post" v1.8.68 v1.8.67
+run_guard "$work/older-coordinator-post" | grep -q 'ok: https://coordinator.fixture.invalid serves v1.8.68 feed set'
+
+# Pre-publication still guards against a coordinator that has regressed BELOW the
+# previously-advertised stable (a genuine coordinator rollback), independent of
+# the CLI release being staged.
+make_fixture "$work/older-than-previous-pre" v1.8.68 v1.8.66
+if run_guard_phase "$work/older-than-previous-pre" pre-publication >"$work/older-than-previous-pre.out" 2>&1; then
+  fail "pre-publication accepted a coordinator older than the previous stable"
 fi
-grep -q "/healthz version 'v1.8.67' is older than release 1.8.68" "$work/stale-healthz.out"
+grep -q "is older than previous stable 1.8.67" "$work/older-than-previous-pre.out"
 
 make_fixture "$work/missing-recommended" v1.8.68 v1.8.68 2026-07-30T12:00:00Z 2026-07-30T12:00:00Z streamvc-autotune-static-v4 __absent__
 if run_guard "$work/missing-recommended" >"$work/missing-recommended.out" 2>&1; then
