@@ -521,21 +521,23 @@ final class BYOMDiscoveryTests: XCTestCase {
         XCTAssertEqual(candidate.admissionState, "offerable")
         XCTAssertFalse(candidate.warningCodes.contains("model_reference_redacted"))
         XCTAssertTrue(candidate.warningCodes.contains("evaluation_required"))
-        XCTAssertThrowsError(try BYOMOfferSubmissionBuilder.makePackage(
+        let packageWithoutEvaluation = try BYOMOfferSubmissionBuilder.makePackage(
             providerID: "provider-test", candidate: candidate, admissionIdentity: Curve25519.Signing.PrivateKey(),
             evaluationDigestSHA256: nil, requestedDisclosureClass: "non_earning_provider_asserted"
-        )) { XCTAssertEqual($0 as? BYOMModelAdmissionError, .candidateNotOfferable) }
-        let package = try BYOMOfferSubmissionBuilder.makePackage(
+        )
+        let packageWithEvaluation = try BYOMOfferSubmissionBuilder.makePackage(
             providerID: "provider-test", candidate: candidate, admissionIdentity: Curve25519.Signing.PrivateKey(),
             evaluationDigestSHA256: String(repeating: "a", count: 64), requestedDisclosureClass: "non_earning_provider_asserted"
         )
-        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: package.encodedRequest) as? [String: Any])
-        let capabilities = try XCTUnwrap(object["advisory_capabilities"] as? [String: Any])
-        XCTAssertTrue(capabilities["family"] is NSNull)
-        XCTAssertTrue(capabilities["quantization"] is NSNull)
-        XCTAssertTrue(capabilities["runtime_version"] is NSNull)
-        XCTAssertFalse(String(decoding: package.encodedRequest, as: UTF8.self).contains("redacted"))
-        XCTAssertFalse(String(decoding: package.encodedRequest, as: UTF8.self).contains("hidden"))
+        for package in [packageWithoutEvaluation, packageWithEvaluation] {
+            let object = try XCTUnwrap(JSONSerialization.jsonObject(with: package.encodedRequest) as? [String: Any])
+            let capabilities = try XCTUnwrap(object["advisory_capabilities"] as? [String: Any])
+            XCTAssertTrue(capabilities["family"] is NSNull)
+            XCTAssertTrue(capabilities["quantization"] is NSNull)
+            XCTAssertTrue(capabilities["runtime_version"] is NSNull)
+            XCTAssertFalse(String(decoding: package.encodedRequest, as: UTF8.self).contains("redacted"))
+            XCTAssertFalse(String(decoding: package.encodedRequest, as: UTF8.self).contains("hidden"))
+        }
         let unstable = await redactionDiscovery(body: body, namespace: nil)
         let blocked = try XCTUnwrap(unstable.candidates.first)
         XCTAssertEqual(blocked.admissionState, "local_only")
