@@ -483,22 +483,26 @@ final class BYOMAdmissionTests: XCTestCase {
         }
     }
 
-    func testOfferPackageRequiresEvaluationDigestWhenDiscoveryStillRequiresEvaluation() throws {
+    func testOfferPackageAllowsMissingEvaluationDigestForNonEarningCandidate() throws {
+        // SPEC-047-R002: evaluation_required is advisory, NOT a hard submit blocker,
+        // for a non-earning (local_inventory_only) v0.1 candidate -- "offer submission
+        // MAY omit the evaluation digest ... confined to non-earning states." So a
+        // clean offerable candidate carrying only evaluation_required submits with or
+        // without a digest, matching canSubmitLocalDryRun so the dry-run does not
+        // over-promise the real submit.
         let identity = Curve25519.Signing.PrivateKey()
         let candidate = byomAdmissionCandidate(
             candidateID: stableBYOMAdmissionCandidateID("f"),
             servedModelRef: "ollama:qwen3-8b",
             warningCodes: ["evaluation_required"]
         )
-        XCTAssertThrowsError(try BYOMOfferSubmissionBuilder.makePackage(
+        XCTAssertNoThrow(try BYOMOfferSubmissionBuilder.makePackage(
             providerID: "provider-byom-a",
             candidate: candidate,
             admissionIdentity: identity,
             evaluationDigestSHA256: nil,
             requestedDisclosureClass: "non_earning_provider_asserted"
-        )) { error in
-            XCTAssertEqual(error as? BYOMModelAdmissionError, .candidateNotOfferable)
-        }
+        ))
         XCTAssertNoThrow(try BYOMOfferSubmissionBuilder.makePackage(
             providerID: "provider-byom-a",
             candidate: candidate,
@@ -506,6 +510,49 @@ final class BYOMAdmissionTests: XCTestCase {
             evaluationDigestSHA256: String(repeating: "b", count: 64),
             requestedDisclosureClass: "non_earning_provider_asserted"
         ))
+    }
+
+    func testOfferPackageStillRejectsHardLocalBlockers() throws {
+        // The advisory-evaluation relaxation must not turn canSubmit into a no-op:
+        // every hard local blocker still fails closed with candidateNotOfferable,
+        // including the adapter faults that were previously inconsistently gated
+        // (adapter_unavailable / adapter_timeout) and every other code in the shared
+        // submitBlockingWarningCodes set.
+        let identity = Curve25519.Signing.PrivateKey()
+        let hardBlockers = [
+            "requires_preparation",
+            "adapter_rejected_non_loopback",
+            "adapter_malformed_response",
+            "adapter_response_truncated",
+            "adapter_unavailable",
+            "adapter_timeout",
+        ]
+        for code in hardBlockers {
+            let candidate = byomAdmissionCandidate(
+                candidateID: stableBYOMAdmissionCandidateID("g"),
+                servedModelRef: "ollama:qwen3-8b",
+                warningCodes: [code, "evaluation_required"]
+            )
+            XCTAssertThrowsError(try BYOMOfferSubmissionBuilder.makePackage(
+                providerID: "provider-byom-a",
+                candidate: candidate,
+                admissionIdentity: identity,
+                evaluationDigestSHA256: nil,
+                requestedDisclosureClass: "non_earning_provider_asserted"
+            ), "hard blocker \(code) must fail closed") { error in
+                XCTAssertEqual(error as? BYOMModelAdmissionError, .candidateNotOfferable, "wrong error for \(code)")
+            }
+            // A supplied evaluation digest must NOT override a hard local blocker.
+            XCTAssertThrowsError(try BYOMOfferSubmissionBuilder.makePackage(
+                providerID: "provider-byom-a",
+                candidate: candidate,
+                admissionIdentity: identity,
+                evaluationDigestSHA256: String(repeating: "b", count: 64),
+                requestedDisclosureClass: "non_earning_provider_asserted"
+            ), "hard blocker \(code) must fail closed even with a digest") { error in
+                XCTAssertEqual(error as? BYOMModelAdmissionError, .candidateNotOfferable, "wrong error for \(code) with digest")
+            }
+        }
     }
 
     func testWithdrawalPackageRejectsUnstableCandidateAndInvalidReason() throws {
