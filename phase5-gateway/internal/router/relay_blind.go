@@ -157,18 +157,14 @@ func decodeRelayBlindRouteReservation(body []byte) (relayBlindRouteReservationRe
 
 func (s *Server) rejectRelayBlindEnvelopeIfRequired(w http.ResponseWriter, r *http.Request, body []byte, accountID string, walletSession *walletSessionAuth) bool {
 	probe, ok, malformed := parseRelayBlindEnvelopeProbe(body)
-	if !ok {
-		if malformed {
-			writeError(w, http.StatusBadRequest, "invalid_request_error", "relay_blind_envelope_invalid", "Relay-blind request envelope is malformed")
-			return true
-		}
+	if !ok && !malformed {
 		return false
 	}
 	if walletSession != nil && !s.admitRelayBlindWalletMetadata(w, r, walletSession, body) {
 		return true
 	}
 	if malformed || probe.Mode == "" {
-		writeError(w, http.StatusBadRequest, "invalid_request_error", "relay_blind_envelope_invalid", "Relay-blind request envelope is malformed")
+		s.rejectRelayBlindEnvelopePrecheck(w, r, accountID, walletSession, relayBlindEndpointFamilyFromRequest(r), body, http.StatusBadRequest, "relay_blind_envelope_invalid", "Relay-blind request envelope is malformed")
 		return true
 	}
 	if probe.Mode != "required" {
@@ -186,18 +182,21 @@ func (s *Server) rejectRelayBlindEnvelopeIfRequired(w http.ResponseWriter, r *ht
 	enforceEncryptedSizeLimit := s.cfg.Features.RelayBlindRequests.Enabled
 	env, err := s.validateRelayBlindRequestEnvelope(body, endpointFamily, enforceEncryptedSizeLimit)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_request_error", "relay_blind_envelope_invalid", err.Error())
+		s.rejectRelayBlindEnvelopePrecheck(w, r, accountID, walletSession, endpointFamily, body, http.StatusBadRequest, "relay_blind_envelope_invalid", err.Error())
 		return true
 	}
-	if walletSession != nil && !writeRelayBlindWalletSessionPrecheck(w, walletSession.Session, env.Model, env.InputTokenUpperBound, env.MaxOutputTokens, env.ReservationTokenCap) {
-		return true
+	if walletSession != nil {
+		if status, code, message := relayBlindWalletSessionPrecheckError(walletSession.Session, env.Model, env.InputTokenUpperBound, env.MaxOutputTokens, env.ReservationTokenCap); code != "" {
+			s.rejectRelayBlindEnvelopePrecheck(w, r, accountID, walletSession, endpointFamily, body, status, code, message)
+			return true
+		}
 	}
 	if walletSession == nil && relayBlindTokenBoundsInvalid(env.InputTokenUpperBound, env.MaxOutputTokens, env.ReservationTokenCap, relayBlindMaxOutputTokensForRequest(s, r)) {
-		writeError(w, http.StatusBadRequest, "invalid_request_error", "relay_blind_envelope_invalid", "Invalid relay-blind request envelope")
+		s.rejectRelayBlindEnvelopePrecheck(w, r, accountID, walletSession, endpointFamily, body, http.StatusBadRequest, "relay_blind_envelope_invalid", "Invalid relay-blind request envelope")
 		return true
 	}
 	if !s.relayBlindEnvelopeFresh(env) {
-		writeError(w, http.StatusBadRequest, "invalid_request_error", "relay_blind_envelope_invalid", "Relay-blind request envelope timestamp is outside the accepted freshness window")
+		s.rejectRelayBlindEnvelopePrecheck(w, r, accountID, walletSession, endpointFamily, body, http.StatusBadRequest, "relay_blind_envelope_invalid", "Relay-blind request envelope timestamp is outside the accepted freshness window")
 		return true
 	}
 	walletSessionID := ""
@@ -311,7 +310,7 @@ func (s *Server) handleRelayBlindEndpointDisabledBody(w http.ResponseWriter, r *
 			if authn.WalletSession != nil && !s.admitRelayBlindWalletMetadata(w, r, authn.WalletSession, body) {
 				return
 			}
-			writeError(w, http.StatusBadRequest, "invalid_request_error", "relay_blind_envelope_invalid", "Relay-blind request envelope is malformed")
+			s.rejectRelayBlindEnvelopePrecheck(w, r, relayBlindAccountID(authn), authn.WalletSession, endpointFamily, body, http.StatusBadRequest, "relay_blind_envelope_invalid", "Relay-blind request envelope is malformed")
 			return
 		}
 		s.handleNotFound(w, r)
@@ -329,7 +328,7 @@ func (s *Server) handleRelayBlindEndpointDisabledBody(w http.ResponseWriter, r *
 		if authn.WalletSession != nil && !s.admitRelayBlindWalletMetadata(w, r, authn.WalletSession, body) {
 			return
 		}
-		writeError(w, http.StatusBadRequest, "invalid_request_error", "relay_blind_envelope_invalid", "Relay-blind request envelope is malformed")
+		s.rejectRelayBlindEnvelopePrecheck(w, r, relayBlindAccountID(authn), authn.WalletSession, endpointFamily, body, http.StatusBadRequest, "relay_blind_envelope_invalid", "Relay-blind request envelope is malformed")
 		return
 	}
 	authn, authed := s.authenticateAny(w, r)
@@ -350,7 +349,7 @@ func (s *Server) handleRelayBlindEndpointDisabledBody(w http.ResponseWriter, r *
 	}
 	if probe.Mode != "required" {
 		if probe.Mode == "" || malformed {
-			writeError(w, http.StatusBadRequest, "invalid_request_error", "relay_blind_envelope_invalid", "Relay-blind request envelope is malformed")
+			s.rejectRelayBlindEnvelopePrecheck(w, r, relayBlindAccountID(authn), authn.WalletSession, endpointFamily, body, http.StatusBadRequest, "relay_blind_envelope_invalid", "Relay-blind request envelope is malformed")
 			return
 		}
 		if authn.WalletSession == nil && !s.admitRelayBlindMetadataWrite(w, r, relayBlindAccountID(authn)) {
@@ -365,18 +364,21 @@ func (s *Server) handleRelayBlindEndpointDisabledBody(w http.ResponseWriter, r *
 	}
 	env, err := s.validateRelayBlindRequestEnvelope(body, endpointFamily, s.cfg.Features.RelayBlindRequests.Enabled)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_request_error", "relay_blind_envelope_invalid", err.Error())
+		s.rejectRelayBlindEnvelopePrecheck(w, r, relayBlindAccountID(authn), authn.WalletSession, endpointFamily, body, http.StatusBadRequest, "relay_blind_envelope_invalid", err.Error())
 		return
 	}
-	if authn.WalletSession != nil && !writeRelayBlindWalletSessionPrecheck(w, authn.WalletSession.Session, env.Model, env.InputTokenUpperBound, env.MaxOutputTokens, env.ReservationTokenCap) {
-		return
+	if authn.WalletSession != nil {
+		if status, code, message := relayBlindWalletSessionPrecheckError(authn.WalletSession.Session, env.Model, env.InputTokenUpperBound, env.MaxOutputTokens, env.ReservationTokenCap); code != "" {
+			s.rejectRelayBlindEnvelopePrecheck(w, r, relayBlindAccountID(authn), authn.WalletSession, endpointFamily, body, status, code, message)
+			return
+		}
 	}
 	if authn.WalletSession == nil && relayBlindTokenBoundsInvalid(env.InputTokenUpperBound, env.MaxOutputTokens, env.ReservationTokenCap, relayBlindMaxOutputTokensForAuth(s, authn)) {
-		writeError(w, http.StatusBadRequest, "invalid_request_error", "relay_blind_envelope_invalid", "Invalid relay-blind request envelope")
+		s.rejectRelayBlindEnvelopePrecheck(w, r, relayBlindAccountID(authn), authn.WalletSession, endpointFamily, body, http.StatusBadRequest, "relay_blind_envelope_invalid", "Invalid relay-blind request envelope")
 		return
 	}
 	if !s.relayBlindEnvelopeFresh(env) {
-		writeError(w, http.StatusBadRequest, "invalid_request_error", "relay_blind_envelope_invalid", "Relay-blind request envelope timestamp is outside the accepted freshness window")
+		s.rejectRelayBlindEnvelopePrecheck(w, r, relayBlindAccountID(authn), authn.WalletSession, endpointFamily, body, http.StatusBadRequest, "relay_blind_envelope_invalid", "Relay-blind request envelope timestamp is outside the accepted freshness window")
 		return
 	}
 	walletSessionID := ""
@@ -736,13 +738,62 @@ func (s *Server) recordRelayBlindRequiredAudit(r *http.Request, accountID, walle
 	})
 }
 
-func writeRelayBlindWalletSessionPrecheck(w http.ResponseWriter, session storage.WalletSession, model string, inputTokenUpperBound, maxOutputTokens, reservationTokenCap int64) bool {
+// Wallet callers must complete signed metadata admission before reaching this path.
+func (s *Server) rejectRelayBlindEnvelopePrecheck(w http.ResponseWriter, r *http.Request, accountID string, walletSession *walletSessionAuth, endpointFamily string, body []byte, status int, code, message string) {
+	if walletSession == nil && !s.admitRelayBlindMetadataWrite(w, r, accountID) {
+		return
+	}
+	walletSessionID := ""
+	if walletSession != nil {
+		walletSessionID = walletSession.Session.SessionID
+	}
+	// Even partially decoded envelope fields are untrusted; persist only a digest
+	// and gateway-derived correlation, never the decoder error or raw identifiers.
+	digest := sha256.Sum256(body)
+	payload, err := json.Marshal(map[string]any{
+		"endpoint_family":        endpointFamily,
+		"mode_class":             "unvalidated",
+		"requested_privacy_mode": "relay_blind_required",
+		"effective_outcome":      "relay_blind_unavailable",
+		"wallet_session_id":      walletSessionID,
+		"envelope_digest":        hex.EncodeToString(digest[:]),
+		"reason_code":            code,
+	})
+	if err == nil {
+		err = s.store.InsertAuditEvent(r.Context(), storage.AuditEvent{
+			EventID: mustID("audit"), RequestID: requestID(r), AccountID: accountID,
+			Actor: "gateway", Type: "relay_blind_required_rejected", Payload: string(payload), CreatedAt: s.now().UTC(),
+		})
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "server_error", "internal_error", "Could not record relay-blind rejection audit")
+		return
+	}
+	errorType := "invalid_request_error"
+	if status == http.StatusForbidden {
+		errorType = "permission_error"
+	}
+	writeError(w, status, errorType, code, message)
+}
+
+func relayBlindWalletSessionPrecheckError(session storage.WalletSession, model string, inputTokenUpperBound, maxOutputTokens, reservationTokenCap int64) (int, string, string) {
 	if _, ok := walletModelAllowlist(session)[model]; !ok {
-		writeError(w, http.StatusForbidden, "permission_error", "wallet_session_model_not_allowed", "Wallet session does not allow this model")
-		return false
+		return http.StatusForbidden, "wallet_session_model_not_allowed", "Wallet session does not allow this model"
 	}
 	if relayBlindWalletSessionCapExceeded(session.PerRequestTokenCap, inputTokenUpperBound, maxOutputTokens, reservationTokenCap) {
-		writeError(w, http.StatusBadRequest, "invalid_request_error", "wallet_session_request_cap_exceeded", "Wallet-session per-request cap exceeded")
+		return http.StatusBadRequest, "wallet_session_request_cap_exceeded", "Wallet-session per-request cap exceeded"
+	}
+	return 0, "", ""
+}
+
+func writeRelayBlindWalletSessionPrecheck(w http.ResponseWriter, session storage.WalletSession, model string, inputTokenUpperBound, maxOutputTokens, reservationTokenCap int64) bool {
+	status, code, message := relayBlindWalletSessionPrecheckError(session, model, inputTokenUpperBound, maxOutputTokens, reservationTokenCap)
+	if code != "" {
+		errorType := "invalid_request_error"
+		if status == http.StatusForbidden {
+			errorType = "permission_error"
+		}
+		writeError(w, status, errorType, code, message)
 		return false
 	}
 	return true
