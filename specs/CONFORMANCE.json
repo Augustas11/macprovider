@@ -4890,7 +4890,7 @@
     {
       "requirement_id": "SPEC-016-R002",
       "spec_id": "SPEC-016",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
         "phase4-coordinator/internal/payout/addresses.go:AddressesService",
         "phase4-coordinator/internal/payout/addresses.go:ServePayoutChallenge",
@@ -4925,21 +4925,13 @@
       "journeys": [
         "JOURNEY-SPEC-016-PAYOUT-ADDRESS-REGISTRATION"
       ],
-      "evidence": [
-        {
-          "artifact": "commit:57d9813957b1421199b59e5b3f09488f7c9644cd",
-          "source": null,
-          "captured_at": "2026-08-05",
-          "expires_at": "2026-09-05"
-        },
-        {
-          "artifact": "sha256:cce4916a7a89b4edccb350b53cb6c1d48bb0a0e0d4479446d63634d4c8f8c90d",
-          "source": "journeys/evidence/spec016-r002-payout-address-20260805T054857Z.journey-result.signed.json",
-          "captured_at": "2026-08-05",
-          "expires_at": "2026-09-05"
-        }
-      ],
-      "gap": null
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "The previously consumed signed SPEC-016-R002 journey evidence (spec016-r002-payout-address-20260805T054857Z) expired on 2026-09-05, so this row is no longer claimed conformant. Implementation and journey mappings remain as local coverage only. Restore conformant only after a fresh signed JOURNEY-SPEC-016-PAYOUT-ADDRESS-REGISTRATION envelope is produced by the protected promote-signed-payout-journey.yml workflow on main and consumed into CONFORMANCE."
+      }
     },
     {
       "requirement_id": "SPEC-016-R003",
