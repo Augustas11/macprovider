@@ -1204,6 +1204,9 @@ Environment overrides:
   MACPROVIDER_ACCEPTANCE_RUN_ATTEMPT
                                  exact positive GitHub Actions run attempt
   MACPROVIDER_COORDINATOR_URL    coordinator WebSocket URL
+                                 (staging/self-hosted override)
+  MACPROVIDER_COORDINATOR_HOST   watchdog-only; ignored by this installer.
+                                 Use MACPROVIDER_COORDINATOR_URL instead.
   MACPROVIDER_PORT               local HTTP port
   MACPROVIDER_INSTALL_DIR        support dir for binary + bundles
   MACPROVIDER_RELEASE_FORMAT     auto, pkg, or tar (default: auto)
@@ -9289,6 +9292,30 @@ choose_coordinator_url() {
   printf "%s" "${value:-$COORDINATOR_URL_DEFAULT}"
 }
 
+# Host portion of a coordinator WebSocket URL, including an optional :port
+# (self-hosted coordinators). Same derivation the watchdog plist uses.
+coordinator_host_from_url() {
+  printf "%s" "$1" | sed -E 's#^wss?://##; s#/.*##'
+}
+
+# MACPROVIDER_COORDINATOR_HOST is a watchdog knob, not an installer input.
+# Warn when it is set and disagrees with the URL this installer will use.
+warn_if_coordinator_host_ignored() {
+  coordinator_url="$1"
+  host_override="${MACPROVIDER_COORDINATOR_HOST:-}"
+  if [ -z "$host_override" ]; then
+    return 0
+  fi
+  derived="$(coordinator_host_from_url "$coordinator_url")"
+  if [ "$host_override" = "$derived" ]; then
+    return 0
+  fi
+  # Collapse CR/LF so a hostile HOST cannot forge extra installer log lines.
+  safe_host="$(printf "%s" "$host_override" | tr '\n\r' '  ')"
+  safe_url="$(printf "%s" "$coordinator_url" | tr '\n\r' '  ')"
+  log "WARNING: MACPROVIDER_COORDINATOR_HOST=$safe_host is ignored by this installer (watchdog-only). Using coordinator URL $safe_url. Set MACPROVIDER_COORDINATOR_URL to point at a staging or self-hosted coordinator."
+}
+
 validate_inputs() {
   model="$1"
   provider_id="$2"
@@ -12101,7 +12128,7 @@ render_watchdog_plist() {
   config_path="$(xml_escape "$CONFIG_PATH")"
   binary_path="$(xml_escape "$INSTALL_DIR/macprovider-cli")"
   protected_credential_root="$(xml_escape "$CONFIG_DIR/protected-credentials")"
-  coord_host="$(xml_escape "$(printf "%s" "$1" | sed -E 's#^wss?://##; s#/.*##')")"
+  coord_host="$(xml_escape "$(coordinator_host_from_url "$1")")"
   credential_store="keychain"
   watchdog_search_path="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
   launchctl_environment_entry=""
@@ -13696,6 +13723,7 @@ main() {
   coordinator_url="$(choose_coordinator_url)"
   coordinator_base="$(coordinator_http_base "$coordinator_url")"
   validate_inputs "$model" "$provider_id" "$coordinator_url"
+  warn_if_coordinator_host_ignored "$coordinator_url"
   log "Model selection: signed catalog recommendation after release verification"
   log "Provider ID: $provider_id"
   log "Coordinator: $coordinator_url"

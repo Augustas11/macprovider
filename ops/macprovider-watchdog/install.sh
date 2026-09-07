@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Standalone installer for the macprovider-watchdog LaunchAgent.
 #
-# This script is also invoked by the main installer
-# (phase3-binary/dist/install.sh) — it MUST be idempotent so a
-# re-install does not double-load the LaunchAgent or leak the
+# The public provider installer (phase3-binary/dist/install.sh) inlines the
+# watchdog via write_watchdog_script(); it does not invoke this file. This
+# script is for operators re-installing the watchdog by hand. It MUST be
+# idempotent so a re-install does not double-load the LaunchAgent or leak the
 # previous plist.
 
 set -euo pipefail
