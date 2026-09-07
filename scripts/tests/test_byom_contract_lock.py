@@ -142,7 +142,8 @@ class BYOMContractLockTests(unittest.TestCase):
             "MUST deduplicate warning codes within each warning array",
             "MUST NOT add redaction fields to a SPEC-047 offer package",
             "MUST NOT treat the affected projection as actionable, whether or not they display the unknown codes",
-            "Runtime implementation and signed journey evidence remain pending",
+            "Signed journey evidence remains pending",
+            "current adapters do not collect runtime version labels",
         ):
             with self.subTest(required=required):
                 self.assertTrue(required in spec046, f"Missing redaction contract: {required}")

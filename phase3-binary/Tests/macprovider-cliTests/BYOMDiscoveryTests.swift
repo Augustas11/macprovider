@@ -1,4 +1,5 @@
 import ArgumentParser
+import CryptoKit
 import Darwin
 import Foundation
 import XCTest
@@ -416,6 +417,12 @@ final class BYOMDiscoveryTests: XCTestCase {
         let safeNameCandidate = try XCTUnwrap(document.candidates.first { $0.servedModelRef == "ollama:safe-name" })
         XCTAssertNil(safeNameCandidate.capabilities.family)
         XCTAssertNil(safeNameCandidate.capabilities.quantization)
+        XCTAssertTrue(safeNameCandidate.warningCodes.contains("capability_family_redacted"))
+        XCTAssertTrue(safeNameCandidate.warningCodes.contains("capability_quantization_redacted"))
+        XCTAssertEqual(document.adapters.first { $0.runtimeSource == "ollama_loopback" }?.warningCodes, ["model_reference_redacted"])
+        for warning in ["capability_family_redacted", "capability_quantization_redacted", "model_reference_redacted"] {
+            XCTAssertTrue(document.warnings.contains(warning))
+        }
         XCTAssertFalse(encoded.contains(leakedEndpoint))
         XCTAssertFalse(encoded.contains(secret))
         XCTAssertFalse(encoded.contains("/Users/augstar"))
@@ -423,6 +430,159 @@ final class BYOMDiscoveryTests: XCTestCase {
         XCTAssertFalse(encoded.contains("ghp_"))
         XCTAssertFalse(encoded.contains("eyJhbGci"))
         XCTAssertFalse(encoded.lowercased().contains("<script>"))
+    }
+
+    func testOllamaOptionalLabelsDistinguishAbsentSafeRedactedAndMalformed() async throws {
+        let fields = [("family", "capability_family_redacted"), ("quantization_level", "capability_quantization_redacted")]
+        for (field, warning) in fields {
+            for value in [nil, NSNull(), "llama", "", "   ", String(repeating: "x", count: 65), "api_key=hidden", 7, true, ["bad"], ["bad": "value"]] as [Any?] {
+                var details: [String: Any] = [:]
+                if let value { details[field] = value }
+                let body = try JSONSerialization.data(withJSONObject: ["models": [["name": "Tiny-Ollama-1B-Q4", "details": details]]])
+                let result = await redactionDiscovery(body: body)
+                let malformed = value != nil && !(value is NSNull) && !(value is String)
+                if malformed {
+                    XCTAssertEqual(result.adapter.status, "malformed", field)
+                    XCTAssertEqual(result.adapter.warningCodes, ["adapter_malformed_response"], field)
+                    XCTAssertTrue(result.candidates.isEmpty, field)
+                    continue
+                }
+                let candidate = try XCTUnwrap(result.candidates.first)
+                let redacted = (value as? String).map { $0 != "llama" } ?? false
+                let label = field == "family" ? candidate.capabilities.family : candidate.capabilities.quantization
+                XCTAssertEqual(label, (value as? String) == "llama" ? "llama" : nil, field)
+                XCTAssertEqual(candidate.warningCodes.contains(warning), redacted, field)
+                XCTAssertFalse(candidate.warningCodes.contains("adapter_malformed_response"), field)
+                XCTAssertFalse(candidate.warningCodes.contains("capability_runtime_version_redacted"), field)
+                XCTAssertNil(candidate.capabilities.runtimeVersion)
+                XCTAssertEqual(candidate.admissionState, "offerable", field)
+                XCTAssertEqual(candidate.admissionStateSource, "local_default", field)
+                XCTAssertEqual(candidate.providerGuidance.earningPathClass, "local_inventory_only", field)
+            }
+        }
+    }
+
+    func testOllamaWithheldInventoryIsDistinctFromEmptyAndMalformedInventory() async throws {
+        for (body, status, warnings) in [
+            (#"{"models":[]}"#, "ok", [String]()),
+            (#"{"models":[{"name":"/Users/private/model"},{"name":"api_key=hidden"}]}"#, "ok", ["model_reference_redacted"]),
+            (#"{"models":[{}]}"#, "malformed", ["adapter_malformed_response"]),
+            (#"{"models":[{"name":null}]}"#, "malformed", ["adapter_malformed_response"]),
+            (#"{"models":[{"name":7}]}"#, "malformed", ["adapter_malformed_response"]),
+            (#"{"models":[false]}"#, "malformed", ["adapter_malformed_response"]),
+            (#"{"models":[{"name":"safe-model","details":7}]}"#, "malformed", ["adapter_malformed_response"]),
+            (#"{"models":[{"name":"/Users/private/model","details":7}]}"#, "malformed", ["adapter_malformed_response"]),
+            (#"{"models":[{"name":"/Users/private/model","details":{"family":7}}]}"#, "malformed", ["adapter_malformed_response"]),
+            (#"{"models":[{"name":"/Users/private/model","details":{"quantization_level":false}}]}"#, "malformed", ["adapter_malformed_response"]),
+        ] {
+            let result = await redactionDiscovery(body: Data(body.utf8))
+            XCTAssertEqual(result.adapter.status, status)
+            XCTAssertEqual(result.adapter.warningCodes, warnings)
+            XCTAssertTrue(result.candidates.isEmpty)
+        }
+    }
+
+    func testOllamaRedactionDoesNotInspectPastExistingRecordBound() async throws {
+        for withheldFirst in [false, true] {
+            let first = withheldFirst ? "/Users/private/model" : "Tiny-Ollama-1B-Q4"
+            let last = withheldFirst ? "Tiny-Ollama-1B-Q4" : "/Users/private/model"
+            let records = Array(repeating: ["name": first], count: 100) + [["name": last]]
+            let body = try JSONSerialization.data(withJSONObject: ["models": records])
+            let result = await redactionDiscovery(body: body)
+            XCTAssertEqual(result.adapter.status, "ok")
+            XCTAssertEqual(result.candidates.count, withheldFirst ? 0 : 100)
+            XCTAssertEqual(result.adapter.warningCodes, withheldFirst ? ["model_reference_redacted"] : [])
+        }
+    }
+
+    func testMLXWithheldReferenceIsReportedWithoutInventingCandidate() async throws {
+        let root = try temporaryDirectory("byom-mlx-redaction")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let discovery = BYOMMLXCacheDiscovery(cacheRoot: root, namespace: Data(repeating: 0x37, count: 32), catalogMatcher: BYOMCatalogMatcher())
+        XCTAssertEqual(discovery.discover().adapter.warningCodes, [])
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("models--mlx--api_key=hidden"), withIntermediateDirectories: true)
+        let withheld = discovery.discover()
+        XCTAssertEqual(withheld.adapter.status, "ok")
+        XCTAssertEqual(withheld.adapter.warningCodes, ["model_reference_redacted"])
+        XCTAssertTrue(withheld.candidates.isEmpty)
+        try createMLXSnapshot(cacheRoot: root, modelID: "mlx-community/Tiny-1B-4bit")
+        let mixed = discovery.discover()
+        XCTAssertEqual(mixed.adapter.warningCodes, ["model_reference_redacted"])
+        XCTAssertEqual(mixed.candidates.count, 1)
+        XCTAssertEqual(mixed.candidates.first?.admissionState, "offerable")
+        XCTAssertFalse(try ModelSwitchingWireCodec.encode(mixed.candidates).contains("hidden"))
+    }
+
+    func testOllamaOptionalRedactionPreservesOfferNullsAndIndependentBlockers() async throws {
+        let body = Data(#"{"models":[{"name":"Tiny-Ollama-1B-Q4","details":{"family":"/Users/private/hidden","quantization_level":"api_key=hidden"}},{"name":"/Users/private/omitted"}]}"#.utf8)
+        let stable = await redactionDiscovery(body: body)
+        let candidate = try XCTUnwrap(stable.candidates.first)
+        XCTAssertEqual(stable.candidates.count, 1)
+        XCTAssertEqual(candidate.admissionState, "offerable")
+        XCTAssertFalse(candidate.warningCodes.contains("model_reference_redacted"))
+        XCTAssertTrue(candidate.warningCodes.contains("evaluation_required"))
+        XCTAssertThrowsError(try BYOMOfferSubmissionBuilder.makePackage(
+            providerID: "provider-test", candidate: candidate, admissionIdentity: Curve25519.Signing.PrivateKey(),
+            evaluationDigestSHA256: nil, requestedDisclosureClass: "non_earning_provider_asserted"
+        )) { XCTAssertEqual($0 as? BYOMModelAdmissionError, .candidateNotOfferable) }
+        let package = try BYOMOfferSubmissionBuilder.makePackage(
+            providerID: "provider-test", candidate: candidate, admissionIdentity: Curve25519.Signing.PrivateKey(),
+            evaluationDigestSHA256: String(repeating: "a", count: 64), requestedDisclosureClass: "non_earning_provider_asserted"
+        )
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: package.encodedRequest) as? [String: Any])
+        let capabilities = try XCTUnwrap(object["advisory_capabilities"] as? [String: Any])
+        XCTAssertTrue(capabilities["family"] is NSNull)
+        XCTAssertTrue(capabilities["quantization"] is NSNull)
+        XCTAssertTrue(capabilities["runtime_version"] is NSNull)
+        XCTAssertFalse(String(decoding: package.encodedRequest, as: UTF8.self).contains("redacted"))
+        XCTAssertFalse(String(decoding: package.encodedRequest, as: UTF8.self).contains("hidden"))
+        let unstable = await redactionDiscovery(body: body, namespace: nil)
+        let blocked = try XCTUnwrap(unstable.candidates.first)
+        XCTAssertEqual(blocked.admissionState, "local_only")
+        XCTAssertTrue(blocked.warningCodes.contains("candidate_id_unstable"))
+        XCTAssertTrue(blocked.warningCodes.contains("capability_family_redacted"))
+        XCTAssertThrowsError(try BYOMOfferSubmissionBuilder.makePackage(
+            providerID: "provider-test", candidate: blocked, admissionIdentity: Curve25519.Signing.PrivateKey(),
+            evaluationDigestSHA256: String(repeating: "a", count: 64), requestedDisclosureClass: "non_earning_provider_asserted"
+        )) { XCTAssertEqual($0 as? BYOMModelAdmissionError, .candidateUnstable) }
+    }
+
+    func testDiscoverRedactionWarningsMatchStderrWithoutRawContent() async throws {
+        let root = try temporaryDirectory("byom-redaction-stderr")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let body = Data(#"{"models":[{"name":"Tiny-Ollama-1B-Q4","details":{"family":"api_key=hidden","quantization_level":"/Users/private/hidden"}},{"name":"/Users/private/omitted"},{"name":"/Users/private/omitted-again"}]}"#.utf8)
+        let runtime = try OneShotHTTPServer(body: body)
+        let origin = "http://127.0.0.1:\(try XCTUnwrap(runtime.url.port))"
+        let command = try ModelsDiscoverCommand.parse([
+            "--json", "--local-discovery-namespace-path", root.appendingPathComponent("ns").path,
+            "--mlx-cache-dir", root.appendingPathComponent("hf").path,
+            "--ollama-origin", origin,
+        ])
+        let capture = await captureBYOMOutput { try await command.run() }
+        XCTAssertNil(capture.error)
+        XCTAssertEqual(runtime.requestCount, 1)
+        let object = try jsonObject(capture.stdout)
+        let warnings = try XCTUnwrap(object["warnings"] as? [String])
+        let stderrCodes = capture.stderr.split(whereSeparator: \.isNewline).map { String($0).replacingOccurrences(of: "models discover warning: ", with: "") }
+        XCTAssertEqual(stderrCodes, warnings.sorted())
+        XCTAssertEqual(Set(warnings).count, warnings.count)
+        for warning in ["capability_family_redacted", "capability_quantization_redacted", "model_reference_redacted"] {
+            XCTAssertTrue(warnings.contains(warning))
+        }
+        for raw in ["api_key", "hidden", "/Users/private", "omitted", origin] {
+            XCTAssertFalse((capture.stdout + capture.stderr).contains(raw))
+        }
+    }
+
+    private func redactionDiscovery(
+        body: Data,
+        namespace: Data? = Data(repeating: 0x37, count: 32)
+    ) async -> (adapter: BYOMDiscoveryWire.Adapter, candidates: [BYOMDiscoveryWire.Candidate]) {
+        await BYOMOllamaDiscovery(
+            origin: "http://127.0.0.1:11434", namespace: namespace,
+            catalogMatcher: BYOMCatalogMatcher(),
+            httpClient: StubBYOMHTTPClient(response: BYOMHTTPResponse(statusCode: 200, headers: [], body: body))
+        ).discover()
     }
 
     func testRejectedAdapterOriginIsReportedWithoutEndpointLeak() async throws {
