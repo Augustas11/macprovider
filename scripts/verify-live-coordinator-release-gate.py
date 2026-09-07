@@ -398,28 +398,38 @@ def main() -> int:
         # (Pearl deployed first). The branch below only constrains the case
         # where Pearl is still older than the CLI being published.
         if live_version < required_version:
-            previous_version = None
-            if (
-                args.publication_phase == "pre-publication"
-                and args.expected_previous_recommendation is not None
-            ):
-                previous_version = parse_advertised_version(
-                    args.expected_previous_recommendation,
-                    "expected previous recommendation",
-                )
-            if previous_version is None:
-                fail(
-                    f"/healthz version {healthz.get('version')!r} is older than "
-                    f"release {expected_version}"
-                )
-            if live_version < previous_version:
-                fail(
-                    f"/healthz version {healthz.get('version')!r} is older than "
-                    f"previous stable {args.expected_previous_recommendation}"
-                )
-            # previous_version <= live_version < required_version is allowed:
-            # Pearl runtime-only patches may advance /healthz without moving
-            # the advertised CLI recommendation.
+            # /healthz "version" is the Pearl-runtime coordinator's OWN binary
+            # version. The coordinator and the provider CLI share the vX.Y.Z tag
+            # space but ship on independent cadences, so the coordinator may
+            # legitimately be older than the CLI release it advertises. Post-
+            # publication correctness is enforced by the
+            # recommended_binary_version == release check below (the coordinator
+            # must advertise the released CLI), NOT by the coordinator's own
+            # binary version. Pre-publication still guards against a coordinator
+            # that has regressed below the previously-advertised stable.
+            if args.publication_phase == "pre-publication":
+                previous_version = None
+                if args.expected_previous_recommendation is not None:
+                    previous_version = parse_advertised_version(
+                        args.expected_previous_recommendation,
+                        "expected previous recommendation",
+                    )
+                if previous_version is None:
+                    fail(
+                        f"/healthz version {healthz.get('version')!r} is older than "
+                        f"release {expected_version}"
+                    )
+                if live_version < previous_version:
+                    fail(
+                        f"/healthz version {healthz.get('version')!r} is older than "
+                        f"previous stable {args.expected_previous_recommendation}"
+                    )
+                # previous_version <= live_version < required_version is allowed:
+                # Pearl runtime-only patches may advance /healthz without moving
+                # the advertised CLI recommendation.
+            # post-publication: the coordinator's binary version is decoupled
+            # from the CLI release version; the recommended_binary_version ==
+            # release check below is authoritative.
         recommended_value = healthz.get("recommended_binary_version")
         if (
             args.publication_phase == "pre-publication"
