@@ -138,7 +138,7 @@ for requirement in (
     "--openssl \"$OPENSSL_BIN\"",
     "scripts/release-staged-version-policy.sh",
     "prepublication_recommendation_args",
-    "--expected-previous-recommendation \"$MACPROVIDER_RELEASE_PREVIOUS_STABLE_VERSION\"",
+    "--expected-previous-recommendation \"$MACPROVIDER_RELEASE_COORDINATOR_RECOMMENDATION\"",
 ):
     if requirement not in publish_step[pre_gate_label:]:
         raise SystemExit(f"promotion live coordinator gate omits: {requirement}")
