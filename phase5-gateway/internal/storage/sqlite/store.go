@@ -2187,7 +2187,7 @@ func (s *Store) RecordRelayBlindReplay(ctx context.Context, replay storage.Relay
 	if replay.RetentionExpiresAt.IsZero() || !replay.RetentionExpiresAt.After(now) {
 		return storage.ErrRelayBlindReplay
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM relay_blind_replays WHERE retention_expires_at <= ?`, encodeTime(now)); err != nil {
+	if err := deleteExpiredRelayBlindReplaysTx(ctx, tx, now); err != nil {
 		return err
 	}
 	seen, err := relayBlindReplaySeenTx(ctx, tx, replay)
@@ -2238,7 +2238,7 @@ func (s *Store) RelayBlindReplaySeen(ctx context.Context, replay storage.RelayBl
 		replay.CreatedAt = time.Now().UTC()
 	}
 	now := replay.CreatedAt.UTC()
-	if _, err := tx.ExecContext(ctx, `DELETE FROM relay_blind_replays WHERE retention_expires_at <= ?`, encodeTime(now)); err != nil {
+	if err := deleteExpiredRelayBlindReplaysTx(ctx, tx, now); err != nil {
 		return false, err
 	}
 	seen, err := relayBlindReplaySeenTx(ctx, tx, replay)
@@ -2278,6 +2278,18 @@ func retainedRelayBlindReplaySeenTx(ctx context.Context, tx *immediateTx, replay
 		seen = seen || expiry.After(now)
 	}
 	return seen, rows.Err()
+}
+
+const deleteExpiredRelayBlindReplaysSQL = `DELETE FROM relay_blind_replays
+	WHERE retention_expires_at <= ? AND rtrim(retention_expires_at, 'Z') <= ?`
+
+func deleteExpiredRelayBlindReplaysTx(ctx context.Context, tx *immediateTx, now time.Time) error {
+	// Stored expiries are UTC RFC3339Nano ending in Z. The whole-second bound
+	// uses the expiry index; stripping Z and using a fixed-nine-digit cutoff
+	// orders variable fractional precision correctly, including exact expiry.
+	_, err := tx.ExecContext(ctx, deleteExpiredRelayBlindReplaysSQL,
+		encodeTime(now.Truncate(time.Second)), now.UTC().Format("2006-01-02T15:04:05.000000000"))
+	return err
 }
 
 func relayBlindReplaySeenTx(ctx context.Context, tx *immediateTx, replay storage.RelayBlindReplayMaterial) (bool, error) {
