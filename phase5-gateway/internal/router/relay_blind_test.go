@@ -1486,8 +1486,8 @@ func TestRelayBlindDisabledFamilyPrechecksModelAndCapsBeforeReplayAudit(t *testi
 	}
 	assertErrorCode(t, resp.Body.String(), "relay_blind_envelope_invalid")
 	assertBodyRetryable(t, resp.Body.String(), false)
-	if got := countAuditEvents(t, dbPath, "relay_blind_required_rejected"); got != 0 {
-		t.Fatalf("required audit events=%d want 0", got)
+	if got := countAuditEvents(t, dbPath, "relay_blind_required_rejected"); got != 1 {
+		t.Fatalf("required audit events=%d want 1", got)
 	}
 	assertNoDailyUsage(t, store, "acct_relay_blind_disabled_family_cap")
 }
@@ -1519,8 +1519,8 @@ func TestRelayBlindDisabledFamilyWalletPrecheckStillRecordsWalletReplay(t *testi
 	}
 	assertErrorCode(t, resp.Body.String(), "wallet_session_model_not_allowed")
 	assertBodyRetryable(t, resp.Body.String(), false)
-	if got := countAuditEvents(t, dbPath, "relay_blind_required_rejected"); got != 0 {
-		t.Fatalf("required audit events=%d want 0", got)
+	if got := countAuditEvents(t, dbPath, "relay_blind_required_rejected"); got != 1 {
+		t.Fatalf("required audit events=%d want 1", got)
 	}
 
 	replay := httptest.NewRecorder()
@@ -1902,7 +1902,7 @@ type relayBlindAuditFailStore struct {
 }
 
 func (s relayBlindAuditFailStore) InsertAuditEvent(ctx context.Context, event storage.AuditEvent) error {
-	if event.Type == "relay_blind_downgrade_rejected" {
+	if event.Type == "relay_blind_downgrade_rejected" || event.Type == "relay_blind_required_rejected" {
 		return errors.New("audit insert failed")
 	}
 	return s.Store.InsertAuditEvent(ctx, event)
