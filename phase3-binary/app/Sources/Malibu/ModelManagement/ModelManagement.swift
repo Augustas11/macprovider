@@ -2731,6 +2731,37 @@ struct MalibuModelRow: Identifiable, Equatable, Sendable {
         }
     }
 
+    /// The provider rate lines shown in the economics block, in display order.
+    /// Single source of truth: both the visible `Text` rows and the composed
+    /// VoiceOver label (`economicsAccessibilityLabel`) derive from this, so the
+    /// visible copy and the accessibility announcement cannot drift apart.
+    var economicsRateLines: [String] {
+        var lines: [String] = []
+        if let completion = providerCompletionPayoutUSDPerMillionTokens {
+            let formatted = completion.formatted(.number.precision(.significantDigits(2...4)))
+            lines.append(String(localized: "Provider share rate: completion $\(formatted) per 1M tokens.", comment: "Provider completion payout rate"))
+        }
+        if let prompt = providerPromptPayoutUSDPerMillionTokens {
+            let formatted = prompt.formatted(.number.precision(.significantDigits(2...4)))
+            lines.append(String(localized: "Provider share rate: prompt $\(formatted) per 1M tokens.", comment: "Provider prompt payout rate"))
+        }
+        return lines
+    }
+
+    /// The single VoiceOver announcement for the economics block: the provider
+    /// rate lines and the non-earning caveat are composed into ONE accessibility
+    /// label, so a catalog_priced (non-settlement) row's rates can never be
+    /// voiced without "No provider credit yet …" (SPEC-047-R004 / #1381 Part C).
+    /// The view applies this verbatim as the economics element's accessibility
+    /// label; a `nil` result means there is no economics content to announce.
+    var economicsAccessibilityLabel: String? {
+        var parts = economicsRateLines
+        if let nonEarningDisclosure {
+            parts.append(nonEarningDisclosure)
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: " ")
+    }
+
     func reclassified(currentModelID: String?, warmSwapAvailable: Bool) -> MalibuModelRow {
         if isCatalogEconomicsProjectionRow {
             return catalogActionSuspendedAfterSwitch(currentModelID: currentModelID)

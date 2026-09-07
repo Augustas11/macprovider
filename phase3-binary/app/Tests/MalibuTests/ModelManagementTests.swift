@@ -266,6 +266,64 @@ final class ModelManagementTests: XCTestCase {
         XCTAssertNil(settlement.first?.nonEarningDisclosure)
     }
 
+    func testCatalogPricedEconomicsAccessibilityLabelVoicesRatesWithFullDisclosure() throws {
+        // #1381 Part C (VoiceOver): a screen-reader user must hear the
+        // catalog_priced rates AND the non-earning caveat as one announcement --
+        // the caveat can never be dropped from the accessibility label when the
+        // rates are voiced. The view applies row.economicsAccessibilityLabel as a
+        // single accessibility element (children ignored), so this pins exactly
+        // what VoiceOver reads for a non-settlement priced row.
+        let switchAction = availableActionJSON(kind: "switch_model", timeout: 20)
+        let rows = try JSONDecoder().decode(
+            MalibuModelCatalogEconomicsDocument.self,
+            from: Data(catalogEconomicsJSON(rows: [trustedEconomicsRowJSON(switchAction: switchAction)]).utf8)
+        )
+        .rowsForMalibu(currentModelID: "other/model", warmSwapAvailable: true)
+        let row = try XCTUnwrap(rows.first)
+        let label = try XCTUnwrap(
+            row.economicsAccessibilityLabel,
+            "a catalog_priced row that shows rates must expose a VoiceOver economics label"
+        )
+        // The rates are voiced (decimal separator is locale-dependent, so match
+        // the locale-independent phrasing, not a hard-coded "0.36") ...
+        XCTAssertTrue(label.contains("Provider share rate: completion"), "label must voice the completion rate: \(label)")
+        XCTAssertTrue(label.contains("Provider share rate: prompt"), "label must voice the prompt rate: \(label)")
+        XCTAssertTrue(label.contains("per 1M tokens."), "label must voice the rate unit: \(label)")
+        // The visible rate rows and the VoiceOver label share one source: every
+        // visible rate line is present, verbatim, in the announcement.
+        XCTAssertFalse(row.economicsRateLines.isEmpty, "a priced row must have visible rate lines")
+        for rateLine in row.economicsRateLines {
+            XCTAssertTrue(label.contains(rateLine), "VoiceOver label must include visible rate line '\(rateLine)': \(label)")
+        }
+        // ... and the FULL non-earning disclosure, verbatim, together with them.
+        let disclosure = "No provider credit yet; catalog and receipt checks are still required."
+        XCTAssertTrue(label.contains(disclosure), "VoiceOver label must include the full non-earning disclosure: \(label)")
+        XCTAssertEqual(row.nonEarningDisclosure, disclosure, "the disclosure text drifted from the fixture")
+        // The announcement is EXACTLY the visible rate lines in order followed by
+        // the caveat last -- so any regression that interleaved or reordered them
+        // (e.g. completion, caveat, prompt) fails, not just one that moved it
+        // before the first rate.
+        let expected = (row.economicsRateLines + [disclosure]).joined(separator: " ")
+        XCTAssertEqual(label, expected, "VoiceOver announcement must be the rate lines in order followed by the caveat")
+    }
+
+    func testSettlementCapableEconomicsAccessibilityLabelHasRatesWithoutDisclosure() throws {
+        // The settlement_capable counterpart voices its rates but carries NO
+        // non-earning caveat -- the caveat is specific to non-settlement rows.
+        let rows = try JSONDecoder().decode(
+            MalibuModelCatalogEconomicsDocument.self,
+            from: Data(catalogEconomicsJSON(rows: [
+                trustedEconomicsRowJSON(admissionState: "settlement_capable", settlementCapable: true, warningCodesJSON: "[]")
+            ]).utf8)
+        )
+        .rowsForMalibu(currentModelID: "other/model", warmSwapAvailable: true)
+        let row = try XCTUnwrap(rows.first)
+        let label = try XCTUnwrap(row.economicsAccessibilityLabel)
+        XCTAssertTrue(label.contains("Provider share rate: completion"), "label must voice the completion rate: \(label)")
+        XCTAssertFalse(label.contains("No provider credit yet"), "settlement_capable must NOT carry the non-earning caveat: \(label)")
+        XCTAssertNil(row.nonEarningDisclosure)
+    }
+
     func testCatalogEconomicsDegradesUnsafeActionDescriptor() throws {
         let unsafeAction = availableActionJSON(kind: "switch_model", timeout: 20, requiresConfirmation: false)
         let json = trustedEconomicsRowJSON(switchAction: unsafeAction)
