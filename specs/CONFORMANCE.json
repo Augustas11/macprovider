@@ -1621,7 +1621,7 @@
     {
       "requirement_id": "SPEC-010-R002",
       "spec_id": "SPEC-010",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:authInitialMessage",
         "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:sendHeartbeat",
@@ -1635,21 +1635,13 @@
       "journeys": [
         "JOURNEY-PROVIDER-PREBETA-ADMISSION"
       ],
-      "evidence": [
-        {
-          "artifact": "commit:6a2278f4f678abcc91361d0d6f008649e63b6fc3",
-          "source": null,
-          "captured_at": "2026-07-27",
-          "expires_at": "2026-10-27"
-        },
-        {
-          "artifact": "sha256:288348caef7f3c92f3028cbc34cb92b5697e14d8b85c5f329f4d7145ddb1253a",
-          "source": "journeys/evidence/provider-prebeta-admission-air5-qwen-20260727T042339Z.journey-result.signed.json",
-          "captured_at": "2026-07-27",
-          "expires_at": "2026-10-27"
-        }
-      ],
-      "gap": null
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "Commit evidence 6a2278f4f678abcc91361d0d6f008649e63b6fc3 no longer matches the current CoordinatorClient.swift:sendHeartbeat declaration fragment (the heartbeat path has since gained F5 supervisor telemetry, warm-swap runtime identity, and catalog wire model id handling), so the consumed 2026-07-27 signed JOURNEY-PROVIDER-PREBETA-ADMISSION envelope no longer pins the code it attested and this row cannot stay conformant. Implementation, test, and journey mappings remain as local coverage only. Restore conformant only after a fresh signed JOURNEY-PROVIDER-PREBETA-ADMISSION promotion produced by the protected main workflow .github/workflows/promote-signed-provider-prebeta-journey.yml, whose repository.commit rematches every live mapped implementation and test selector fragment for this row, including sendHeartbeat."
+      }
     },
     {
       "requirement_id": "SPEC-010-R003",
@@ -4890,7 +4882,7 @@
     {
       "requirement_id": "SPEC-016-R002",
       "spec_id": "SPEC-016",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
         "phase4-coordinator/internal/payout/addresses.go:AddressesService",
         "phase4-coordinator/internal/payout/addresses.go:ServePayoutChallenge",
@@ -4925,21 +4917,13 @@
       "journeys": [
         "JOURNEY-SPEC-016-PAYOUT-ADDRESS-REGISTRATION"
       ],
-      "evidence": [
-        {
-          "artifact": "commit:57d9813957b1421199b59e5b3f09488f7c9644cd",
-          "source": null,
-          "captured_at": "2026-08-05",
-          "expires_at": "2026-09-05"
-        },
-        {
-          "artifact": "sha256:cce4916a7a89b4edccb350b53cb6c1d48bb0a0e0d4479446d63634d4c8f8c90d",
-          "source": "journeys/evidence/spec016-r002-payout-address-20260805T054857Z.journey-result.signed.json",
-          "captured_at": "2026-08-05",
-          "expires_at": "2026-09-05"
-        }
-      ],
-      "gap": null
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "The previously consumed signed SPEC-016-R002 journey evidence (spec016-r002-payout-address-20260805T054857Z) expired on 2026-09-05, so this row is no longer claimed conformant. Implementation and journey mappings remain as local coverage only. Restore conformant only after a fresh signed JOURNEY-SPEC-016-PAYOUT-ADDRESS-REGISTRATION envelope is produced by the protected promote-signed-payout-journey.yml workflow on main and consumed into CONFORMANCE."
+      }
     },
     {
       "requirement_id": "SPEC-016-R003",
