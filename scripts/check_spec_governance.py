@@ -2839,31 +2839,30 @@ def _validate_byom_journey_artifacts(
     *,
     root: Path | None = None,
 ) -> None:
-    observed: set[str] = set()
-    for index, artifact in enumerate(artifacts):
-        if not isinstance(artifact, dict):
-            continue
-        artifact_id = artifact.get("id")
-        if isinstance(artifact_id, str):
-            observed.add(artifact_id)
-        source = artifact.get("source")
-        if not isinstance(source, str) or not source.startswith(prefix) or not source.endswith(".redacted.json"):
-            result.error(
-                f"{location}.signed.artifacts[{index}].source",
-                f"must match {prefix}*.redacted.json",
-            )
-            continue
-        if root is not None and artifact_id == primary_artifact_id:
-            _validate_byom_journey_source(
-                root,
-                artifact,
-                signed,
-                journey_id,
-                f"{location}.signed.artifacts[{index}]",
-                result,
-            )
-    if primary_artifact_id not in observed:
-        result.error(f"{location}.signed.artifacts", f"must include the reviewed artifact {primary_artifact_id!r}")
+    # Mirror the sibling journey validators: the BYOM builder emits exactly one
+    # hash-bound redacted-evidence artifact with exactly {id, sha256, source}, so a
+    # signed payload carrying any other artifact record -- or any extra field on
+    # the one record -- is not a builder projection and must not promote.
+    if len(artifacts) != 1 or not isinstance(artifacts[0], dict):
+        result.error(
+            f"{location}.signed.artifacts",
+            f"{journey_id} journey-result must contain exactly one redacted evidence artifact",
+        )
+        return
+    artifact = artifacts[0]
+    artifact_location = f"{location}.signed.artifacts[0]"
+    if set(artifact) != {"id", "sha256", "source"}:
+        result.error(artifact_location, "must carry exactly the builder artifact fields id, sha256, source")
+        return
+    if artifact.get("id") != primary_artifact_id:
+        result.error(f"{artifact_location}.id", f"must equal the reviewed artifact {primary_artifact_id!r}")
+        return
+    source = artifact.get("source")
+    if not isinstance(source, str) or not source.startswith(prefix) or not source.endswith(".redacted.json"):
+        result.error(f"{artifact_location}.source", f"must match {prefix}*.redacted.json")
+        return
+    if root is not None:
+        _validate_byom_journey_source(root, artifact, signed, journey_id, artifact_location, result)
 
 
 def _validate_provider_byom_discovery_journey_result(

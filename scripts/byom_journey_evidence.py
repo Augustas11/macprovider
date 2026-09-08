@@ -523,6 +523,9 @@ def _digest_document(manifest_dir: Path, entry: Any, step_id: str, index: int) -
     # for raw-document fields -- a CLI document that legitimately needs an
     # endpoint or a path in it is a document the operator redacts before capture.
     reject_unredacted_text(decoded, f"{location}.path")
+    # JSON string escapes (\u002f, \u002e, ...) can hide a URL, path, or hostname
+    # from the serialized-text scan, so the decoded values are scanned as well.
+    _walk_redaction(parsed, f"{location}.document")
     return {
         "id": document_id,
         "schema": schema,

@@ -267,6 +267,15 @@ class BYOMJourneyCaptureTests(unittest.TestCase):
 
         self.assert_capture_fails("discovery", mutator, "must not contain duplicate JSON keys")
 
+    def test_rejects_captured_document_hiding_a_url_behind_json_escapes(self) -> None:
+        def mutator(_manifest, root):
+            (root / "captures" / "discover-mlx-cache.json").write_text(
+                '{"schema": "provider_byom_discovery.v1", "note": "http:\\u002f\\u002fruntime\\u002einvalid\\u002fapi"}',
+                encoding="utf-8",
+            )
+
+        self.assert_capture_fails("discovery", mutator, ".document")
+
     def test_rejects_captured_document_containing_a_url(self) -> None:
         self.assert_captured_document_rejected(
             {"schema": "provider_byom_discovery.v1", "note": "http://runtime.invalid/api/tags"},
@@ -1069,6 +1078,18 @@ class BYOMJourneyGovernanceSourceTests(unittest.TestCase):
         del signed["observations"]
         errors = self.validate(signed)
         self.assertTrue(any("must carry exactly the builder key set" in error for error in errors), errors)
+
+    def test_rejects_signed_payload_with_an_extra_artifact_record(self) -> None:
+        signed = self.signed()
+        signed["artifacts"] = signed["artifacts"] + [copy.deepcopy(signed["artifacts"][0])]
+        errors = self.validate(signed)
+        self.assertTrue(any("exactly one redacted evidence artifact" in error for error in errors), errors)
+
+    def test_rejects_signed_artifact_record_with_an_extra_field(self) -> None:
+        signed = self.signed()
+        signed["artifacts"][0]["note"] = "unbound"
+        errors = self.validate(signed)
+        self.assertTrue(any("exactly the builder artifact fields" in error for error in errors), errors)
 
     def test_rejects_signed_step_that_disagrees_with_the_source(self) -> None:
         signed = self.signed()
