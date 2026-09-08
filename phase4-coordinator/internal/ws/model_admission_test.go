@@ -826,6 +826,200 @@ func TestModelAdmissionDecisionRejectsInvalidCatalogAndReasonTransitions(t *test
 	}
 }
 
+func TestModelAdmissionSyntheticProbeWorkflowKeepsNonSettlementBoundaryAcrossStores(t *testing.T) {
+	run := func(t *testing.T, store providerws.ModelAdmissionStore) {
+		offer := providerws.ModelAdmissionEvent{
+			ProviderID:               "provider-byom-a",
+			CandidateID:              stableModelAdmissionCandidateID("p"),
+			ServedModelRef:           "ollama:qwen3-8b",
+			DiscoveryDigestSHA256:    stringsOf("a", 64),
+			EvaluationDigestSHA256:   stringsOf("b", 64),
+			RequestedDisclosureClass: "non_earning_provider_asserted",
+			ReasonCode:               "provider_offer_submitted",
+			RequestID:                "request_offer_probe_workflow",
+			Nonce:                    "nonce_offer_probe_workflow",
+			PayloadDigestSHA256:      stringsOf("c", 64),
+			SignatureDigestSHA256:    stringsOf("d", 64),
+			CreatedAt:                time.Unix(1800000200, 0).UTC(),
+		}
+		submitted, replay, err := store.AppendModelAdmissionOffer(context.Background(), offer)
+		if err != nil || replay {
+			t.Fatalf("append offer replay=%v err=%v", replay, err)
+		}
+		probeOnlyDecision, ok := providerws.ModelAdmissionSandboxProbeDecision(submitted, "synthetic_probe_required", time.Unix(1800000210, 0).UTC())
+		if !ok {
+			t.Fatal("submitted offer did not produce sandbox probe decision")
+		}
+		probeOnly, err := store.AppendModelAdmissionDecision(context.Background(), probeOnlyDecision)
+		if err != nil {
+			t.Fatalf("sandbox probe decision: %v", err)
+		}
+		if probeOnly.State != "sandbox_probe_only" ||
+			providerws.ModelAdmissionSettlementStateCandidate(probeOnly) {
+			t.Fatalf("sandbox probe decision leaked settlement state: %+v", probeOnly)
+		}
+
+		admitDecision, ok := providerws.ModelAdmissionSyntheticProbeDecision(probeOnly, providerws.ModelAdmissionSyntheticProbeResult{
+			ProviderWireRequestID: "provider_wire_probe_1",
+			Passed:                true,
+			TargetState:           "network_admitted_unsettled",
+			ReasonCode:            "synthetic_probe_passed",
+			CreatedAt:             time.Unix(1800000220, 0).UTC(),
+		})
+		if !ok {
+			t.Fatal("sandbox probe result did not produce network admission decision")
+		}
+		admitted, err := store.AppendModelAdmissionDecision(context.Background(), admitDecision)
+		if err != nil {
+			t.Fatalf("network admission decision: %v", err)
+		}
+		if admitted.State != "network_admitted_unsettled" ||
+			admitted.RequestID == "" ||
+			admitted.Nonce == "" ||
+			admitted.PayloadDigestSHA256 == "" ||
+			providerws.ModelAdmissionSettlementStateCandidate(admitted) {
+			t.Fatalf("unexpected admitted event: %+v", admitted)
+		}
+		events, err := store.SettlementCapableModelAdmissionStatusesForServedModel(context.Background(), admitted.ProviderID, admitted.ServedModelRef)
+		if err != nil {
+			t.Fatalf("settlement route set: %v", err)
+		}
+		if len(events) != 0 {
+			t.Fatalf("non-settlement probe workflow produced settlement route events: %+v", events)
+		}
+		predicate := providerws.ModelAdmissionPaidRoutingPredicate{
+			ProviderID:             admitted.ProviderID,
+			CandidateID:            admitted.CandidateID,
+			ServedModelRef:         admitted.ServedModelRef,
+			DiscoveryDigestSHA256:  admitted.DiscoveryDigestSHA256,
+			EvaluationDigestSHA256: admitted.EvaluationDigestSHA256,
+		}
+		if providerws.ModelAdmissionDefaultPaidRoutingEligible(admitted, predicate) {
+			t.Fatal("network_admitted_unsettled probe outcome must not be default paid-routing eligible")
+		}
+
+		replayed, err := store.AppendModelAdmissionDecision(context.Background(), admitDecision)
+		if err != nil {
+			t.Fatalf("probe decision replay: %v", err)
+		}
+		if replayed.CoordinatorEventID != admitted.CoordinatorEventID || replayed.State != admitted.State {
+			t.Fatalf("probe decision replay returned different event: %+v", replayed)
+		}
+	}
+	t.Run("memory", func(t *testing.T) { run(t, providerws.NewMemoryModelAdmissionStore()) })
+	t.Run("sqlite", func(t *testing.T) {
+		db, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer db.Close()
+		store, err := providerws.NewSQLiteModelAdmissionStore(db.DB())
+		if err != nil {
+			t.Fatal(err)
+		}
+		run(t, store)
+	})
+}
+
+func TestModelAdmissionSyntheticProbeDecisionRejectsUnsafeEdges(t *testing.T) {
+	store := providerws.NewMemoryModelAdmissionStore()
+	offer := providerws.ModelAdmissionEvent{
+		ProviderID:               "provider-byom-a",
+		CandidateID:              stableModelAdmissionCandidateID("q"),
+		ServedModelRef:           "ollama:qwen3-8b",
+		CatalogModelKey:          "qwen3-8b",
+		DiscoveryDigestSHA256:    stringsOf("a", 64),
+		EvaluationDigestSHA256:   stringsOf("b", 64),
+		RequestedDisclosureClass: "catalog_binding_requested",
+		ReasonCode:               "provider_offer_submitted",
+		RequestID:                "request_offer_probe_rejects",
+		Nonce:                    "nonce_offer_probe_rejects",
+		PayloadDigestSHA256:      stringsOf("c", 64),
+		SignatureDigestSHA256:    stringsOf("d", 64),
+		CreatedAt:                time.Unix(1800000230, 0).UTC(),
+	}
+	submitted, _, err := store.AppendModelAdmissionOffer(context.Background(), offer)
+	if err != nil {
+		t.Fatalf("append offer: %v", err)
+	}
+	if _, ok := providerws.ModelAdmissionSyntheticProbeDecision(submitted, providerws.ModelAdmissionSyntheticProbeResult{
+		ProviderWireRequestID: "provider_wire_probe_before_sandbox",
+		Passed:                true,
+		TargetState:           "network_admitted_unsettled",
+		ReasonCode:            "synthetic_probe_passed",
+	}); ok {
+		t.Fatal("probe result from offer_submitted must require sandbox_probe_only first")
+	}
+	probeOnlyDecision, ok := providerws.ModelAdmissionSandboxProbeDecision(submitted, "synthetic_probe_required", time.Unix(1800000240, 0).UTC())
+	if !ok {
+		t.Fatal("submitted offer did not produce sandbox decision")
+	}
+	probeOnly, err := store.AppendModelAdmissionDecision(context.Background(), probeOnlyDecision)
+	if err != nil {
+		t.Fatalf("sandbox decision: %v", err)
+	}
+	for _, target := range []string{"catalog_priced", "settlement_capable", "offer_submitted"} {
+		if _, ok := providerws.ModelAdmissionSyntheticProbeDecision(probeOnly, providerws.ModelAdmissionSyntheticProbeResult{
+			ProviderWireRequestID: "provider_wire_probe_" + target,
+			Passed:                true,
+			TargetState:           target,
+			ReasonCode:            "synthetic_probe_passed",
+		}); ok {
+			t.Fatalf("probe result must not produce %q", target)
+		}
+	}
+	if _, ok := providerws.ModelAdmissionSyntheticProbeDecision(probeOnly, providerws.ModelAdmissionSyntheticProbeResult{
+		ProviderWireRequestID: "provider_wire_probe_visible_unpriced_denied",
+		Passed:                true,
+		TargetState:           "network_visible_unpriced",
+		ReasonCode:            "synthetic_probe_passed",
+	}); ok {
+		t.Fatal("probe result produced network_visible_unpriced without explicit visibility authorization")
+	}
+	if _, ok := providerws.ModelAdmissionSyntheticProbeDecision(probeOnly, providerws.ModelAdmissionSyntheticProbeResult{
+		ProviderWireRequestID:            "provider_wire_probe_visible_unpriced_allowed",
+		Passed:                           true,
+		TargetState:                      "network_visible_unpriced",
+		ExperimentalVisibilityAuthorized: true,
+		ReasonCode:                       "synthetic_probe_passed",
+	}); !ok {
+		t.Fatal("probe result with explicit visibility authorization did not produce network_visible_unpriced")
+	}
+	if _, ok := providerws.ModelAdmissionSyntheticProbeDecision(probeOnly, providerws.ModelAdmissionSyntheticProbeResult{
+		ProviderWireRequestID: "http://127.0.0.1:11434/v1/chat/completions",
+		Passed:                true,
+		TargetState:           "network_admitted_unsettled",
+		ReasonCode:            "synthetic_probe_passed",
+	}); ok {
+		t.Fatal("probe result accepted endpoint material as provider wire request id")
+	}
+	if _, ok := providerws.ModelAdmissionSyntheticProbeDecision(probeOnly, providerws.ModelAdmissionSyntheticProbeResult{
+		ProviderWireRequestID: "provider_wire_probe_missing_reason",
+		Passed:                true,
+		TargetState:           "network_admitted_unsettled",
+	}); ok {
+		t.Fatal("probe result without reason produced a decision")
+	}
+
+	revocationDecision, ok := providerws.ModelAdmissionSyntheticProbeDecision(probeOnly, providerws.ModelAdmissionSyntheticProbeResult{
+		ProviderWireRequestID: "provider_wire_probe_failed",
+		Passed:                false,
+		TargetState:           "settlement_capable",
+		ReasonCode:            "synthetic_probe_failed",
+		CreatedAt:             time.Unix(1800000250, 0).UTC(),
+	})
+	if !ok {
+		t.Fatal("failed probe did not produce revocation decision")
+	}
+	revoked, err := store.AppendModelAdmissionDecision(context.Background(), revocationDecision)
+	if err != nil {
+		t.Fatalf("failed probe revocation: %v", err)
+	}
+	if revoked.State != "revoked" || providerws.ModelAdmissionSettlementStateCandidate(revoked) {
+		t.Fatalf("failed probe leaked unsafe state: %+v", revoked)
+	}
+}
+
 func TestModelAdmissionStatusGuidanceForRejectedAndDemotion(t *testing.T) {
 	db, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
 	if err != nil {

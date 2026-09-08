@@ -1001,6 +1001,92 @@ func fillCoordinatorModelAdmissionReplayKeys(event ModelAdmissionEvent) ModelAdm
 	return event
 }
 
+// ModelAdmissionSyntheticProbeResult is the coordinator-side result of a
+// bounded synthetic probe dispatched through the provider wire protocol.
+type ModelAdmissionSyntheticProbeResult struct {
+	ProviderWireRequestID            string
+	Passed                           bool
+	TargetState                      string
+	ExperimentalVisibilityAuthorized bool
+	ReasonCode                       string
+	CreatedAt                        time.Time
+}
+
+// ModelAdmissionSandboxProbeDecision builds the coordinator decision that moves
+// a submitted offer into the bounded probe-only state. It does not imply buyer
+// routing, catalog pricing, or settlement eligibility.
+func ModelAdmissionSandboxProbeDecision(current ModelAdmissionEvent, reasonCode string, now time.Time) (ModelAdmissionEvent, bool) {
+	reasonCode = strings.TrimSpace(reasonCode)
+	if current.State != modelAdmissionOfferSubmitted || reasonCode == "" {
+		return ModelAdmissionEvent{}, false
+	}
+	return modelAdmissionCoordinatorDecisionFromCurrent(current, "sandbox_probe_only", reasonCode, "macprovider.model_admission.sandbox_probe_decision.v1", "", now), true
+}
+
+// ModelAdmissionSyntheticProbeDecision builds a non-settlement coordinator
+// decision from a probe result. Positive probe outcomes can only admit the
+// candidate to explicit non-settlement visibility/routing states; failed probes
+// revoke the admission with a reason. Catalog-priced and settlement-capable
+// states remain owned by the trusted catalog and receipt paths, not probes.
+func ModelAdmissionSyntheticProbeDecision(current ModelAdmissionEvent, result ModelAdmissionSyntheticProbeResult) (ModelAdmissionEvent, bool) {
+	reasonCode := strings.TrimSpace(result.ReasonCode)
+	wireRequestID := strings.TrimSpace(result.ProviderWireRequestID)
+	if current.State != "sandbox_probe_only" || reasonCode == "" || !validModelAdmissionToken(wireRequestID) {
+		return ModelAdmissionEvent{}, false
+	}
+	targetState := modelAdmissionRevoked
+	if result.Passed {
+		targetState = strings.TrimSpace(result.TargetState)
+		switch targetState {
+		case "network_visible_unpriced":
+			if !result.ExperimentalVisibilityAuthorized {
+				return ModelAdmissionEvent{}, false
+			}
+		case "network_admitted_unsettled":
+		default:
+			return ModelAdmissionEvent{}, false
+		}
+	}
+	return modelAdmissionCoordinatorDecisionFromCurrent(current, targetState, reasonCode, "macprovider.model_admission.synthetic_probe_decision.v1", wireRequestID, result.CreatedAt), true
+}
+
+func modelAdmissionCoordinatorDecisionFromCurrent(current ModelAdmissionEvent, targetState, reasonCode, domain, evidence string, now time.Time) ModelAdmissionEvent {
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	reasonCode = strings.TrimSpace(reasonCode)
+	targetState = strings.TrimSpace(targetState)
+	sum := sha256.Sum256([]byte(strings.Join([]string{
+		domain,
+		current.ProviderID,
+		current.CandidateID,
+		current.ServedModelRef,
+		current.CatalogModelKey,
+		current.DiscoveryDigestSHA256,
+		current.EvaluationDigestSHA256,
+		current.RequestedDisclosureClass,
+		current.State,
+		current.CoordinatorEventID,
+		targetState,
+		reasonCode,
+		evidence,
+	}, "\x00")))
+	digest := hex.EncodeToString(sum[:])
+	event := current
+	event.State = targetState
+	event.ReasonCode = reasonCode
+	event.RequestID = "coordinator_" + targetState + "_" + digest[:32]
+	event.Nonce = "coordinator_nonce_" + targetState + "_" + digest[:32]
+	event.PayloadDigestSHA256 = digest
+	event.SignatureDigestSHA256 = ""
+	event.CreatedAt = now.UTC()
+	event.CoordinatorEventID = ""
+	event.Actor = ""
+	event.PreviousState = ""
+	event.NextState = ""
+	return event
+}
+
 func ModelAdmissionSettlementStateCandidate(event ModelAdmissionEvent) bool {
 	return event.State == "settlement_capable" &&
 		event.ProviderID != "" &&
