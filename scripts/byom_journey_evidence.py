@@ -476,7 +476,17 @@ def _digest_document(manifest_dir: Path, entry: Any, step_id: str, index: int) -
     schema = require_string(document.get("schema"), DOCUMENT_SCHEMA_RE, f"{location}.schema")
     raw_path = require_string(document.get("path"), None, f"{location}.path")
     candidate = Path(raw_path)
-    path = candidate if candidate.is_absolute() else (manifest_dir / candidate)
+    # Raw CLI documents live beside the run manifest; the operator contract says
+    # paths are manifest-relative, so an absolute path or a parent traversal is a
+    # manifest-authoring error, not a file to go and hash.
+    if candidate.is_absolute() or ".." in candidate.parts:
+        fail(f"{location}.path must be relative to the run manifest directory")
+    manifest_root = manifest_dir.resolve()
+    path = (manifest_root / candidate).resolve()
+    try:
+        path.relative_to(manifest_root)
+    except ValueError:
+        fail(f"{location}.path must stay under the run manifest directory")
     if path.is_symlink() or not path.is_file():
         fail(f"{location}.path is absent or unsafe")
     try:
@@ -488,9 +498,21 @@ def _digest_document(manifest_dir: Path, entry: Any, step_id: str, index: int) -
     except UnicodeDecodeError:
         fail(f"{location}.path must be a UTF-8 CLI JSON document")
     try:
-        json.loads(decoded)
+        parsed = json.loads(decoded)
     except json.JSONDecodeError as exc:
         fail(f"{location}.path must be a JSON document: {exc}")
+    # The raw document is never committed, so this is the only point at which
+    # the manifest's claimed schema can be checked against what was actually
+    # digested. A signed step must not claim `model_admission_status.v1` backing
+    # while the bytes under the digest are some other document.
+    if not isinstance(parsed, dict):
+        fail(f"{location}.path must be a JSON object document")
+    actual_schema = parsed.get("schema")
+    if not isinstance(actual_schema, str) or actual_schema != schema:
+        fail(
+            f"{location}.schema {schema!r} does not match the captured document's "
+            f"top-level schema {actual_schema!r}"
+        )
     # The document itself is never embedded, but its digest is what the signed
     # journey-result binds to, so the redaction claim has to hold for the bytes we
     # digest: a captured document that still carries a URL, an absolute or

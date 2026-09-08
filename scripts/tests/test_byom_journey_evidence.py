@@ -212,6 +212,52 @@ class BYOMJourneyCaptureTests(unittest.TestCase):
 
         self.assert_capture_fails("discovery", mutator, fragment)
 
+    def test_rejects_captured_document_whose_schema_differs_from_the_manifest(self) -> None:
+        self.assert_captured_document_rejected(
+            {"schema": "model_admission_status.v1", "candidates": []},
+            "does not match the captured document's top-level schema",
+        )
+
+    def test_rejects_captured_document_without_a_top_level_schema(self) -> None:
+        self.assert_captured_document_rejected(
+            {"candidates": []},
+            "does not match the captured document's top-level schema",
+        )
+
+    def test_rejects_captured_document_that_is_not_a_json_object(self) -> None:
+        def mutator(_manifest, root):
+            (root / "captures" / "discover-mlx-cache.json").write_text(
+                json.dumps(["provider_byom_discovery.v1"]), encoding="utf-8"
+            )
+
+        self.assert_capture_fails("discovery", mutator, "must be a JSON object document")
+
+    def test_rejects_captured_document_with_an_absolute_path(self) -> None:
+        def mutator(manifest, root):
+            for step in manifest["steps"]:
+                for document in step.get("documents", []):
+                    document["path"] = str((root / document["path"]).resolve())
+                    break
+                else:
+                    continue
+                break
+
+        self.assert_capture_fails("discovery", mutator, "must be relative to the run manifest directory")
+
+    def test_rejects_captured_document_path_escaping_the_manifest_directory(self) -> None:
+        def mutator(manifest, root):
+            escaped = root.parent / "escaped-capture.json"
+            escaped.write_text(json.dumps({"schema": "provider_byom_discovery.v1"}), encoding="utf-8")
+            for step in manifest["steps"]:
+                for document in step.get("documents", []):
+                    document["path"] = "../escaped-capture.json"
+                    break
+                else:
+                    continue
+                break
+
+        self.assert_capture_fails("discovery", mutator, "must be relative to the run manifest directory")
+
     def test_rejects_captured_document_containing_a_url(self) -> None:
         self.assert_captured_document_rejected(
             {"schema": "provider_byom_discovery.v1", "note": "http://runtime.invalid/api/tags"},
