@@ -498,7 +498,9 @@ def _digest_document(manifest_dir: Path, entry: Any, step_id: str, index: int) -
     except UnicodeDecodeError:
         fail(f"{location}.path must be a UTF-8 CLI JSON document")
     try:
-        parsed = json.loads(decoded)
+        parsed = json.loads(decoded, object_pairs_hook=_unique_json_object)
+    except DuplicateJSONKeyError as exc:
+        fail(f"{location}.path must not contain duplicate JSON keys: {exc}")
     except json.JSONDecodeError as exc:
         fail(f"{location}.path must be a JSON document: {exc}")
     # The raw document is never committed, so this is the only point at which
@@ -886,7 +888,7 @@ def build_journey_result_payload(
         for step in validated_steps
     ]
 
-    return {
+    payload = {
         "schema_version": JOURNEY_RESULT_PAYLOAD_SCHEMA,
         "journey_id": contract.journey_id,
         "requirement_ids": selected,
@@ -909,6 +911,36 @@ def build_journey_result_payload(
         "execution_mode": contract.execution_mode,
         "observations": observations,
     }
+    if set(payload) != BYOM_JOURNEY_RESULT_PAYLOAD_KEYS:
+        fail("builder payload keys drifted from BYOM_JOURNEY_RESULT_PAYLOAD_KEYS")
+    return payload
+
+
+# The closed key set of a BYOM journey-result payload. The builder emits exactly
+# these keys, and governance requires a signed BYOM payload to carry exactly
+# these keys: the generic signed-result schema permits optional fields such as
+# `harness`, `config_before`, `candidate`, or `eip712`, but nothing binds those to
+# the redacted evidence, so a hand-signed BYOM payload must not be able to smuggle
+# them past source re-validation.
+BYOM_JOURNEY_RESULT_PAYLOAD_KEYS = frozenset(
+    {
+        "schema_version",
+        "journey_id",
+        "requirement_ids",
+        "repository",
+        "captured_at",
+        "expires_at",
+        "operator",
+        "environment",
+        "artifacts",
+        "result",
+        "steps",
+        "redaction",
+        "run_id",
+        "execution_mode",
+        "observations",
+    }
+)
 
 
 def run_builder_cli(contract: JourneyContract, argv: list[str] | None, program: str) -> int:

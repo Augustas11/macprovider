@@ -2751,6 +2751,18 @@ def _validate_byom_journey_source(
     if path is None:
         return
     module = _byom_evidence_module()
+    # The generic signed-result schema tolerates optional fields that nothing
+    # here binds to the source evidence; a BYOM payload must carry exactly the
+    # builder's closed key set so a hand-signed payload cannot add unbound data.
+    extra_keys = sorted(set(signed) - module.BYOM_JOURNEY_RESULT_PAYLOAD_KEYS)
+    missing_keys = sorted(module.BYOM_JOURNEY_RESULT_PAYLOAD_KEYS - set(signed))
+    if extra_keys or missing_keys:
+        result.error(
+            f"{location}.source.keys",
+            "signed BYOM payload must carry exactly the builder key set"
+            f" (extra={extra_keys}, missing={missing_keys})",
+        )
+        return
     try:
         contract = module.contract_for(journey_id)
         evidence = module.load_json_object(path, "BYOM redacted evidence")

@@ -258,6 +258,15 @@ class BYOMJourneyCaptureTests(unittest.TestCase):
 
         self.assert_capture_fails("discovery", mutator, "must be relative to the run manifest directory")
 
+    def test_rejects_captured_document_with_duplicate_json_keys(self) -> None:
+        def mutator(_manifest, root):
+            (root / "captures" / "discover-mlx-cache.json").write_text(
+                '{"schema": "provider_byom_discovery.v1", "schema": "model_admission_status.v1"}',
+                encoding="utf-8",
+            )
+
+        self.assert_capture_fails("discovery", mutator, "must not contain duplicate JSON keys")
+
     def test_rejects_captured_document_containing_a_url(self) -> None:
         self.assert_captured_document_rejected(
             {"schema": "provider_byom_discovery.v1", "note": "http://runtime.invalid/api/tags"},
@@ -983,6 +992,7 @@ class BYOMJourneyGovernanceSourceTests(unittest.TestCase):
         evidence = self.evidence if evidence is None else evidence
         return copy.deepcopy(
             {
+                "schema_version": evidence_module.JOURNEY_RESULT_PAYLOAD_SCHEMA,
                 "journey_id": evidence["journey_id"],
                 "requirement_ids": evidence["requirement_ids"],
                 "repository": evidence["repository"],
@@ -1043,6 +1053,22 @@ class BYOMJourneyGovernanceSourceTests(unittest.TestCase):
         self.write_evidence(evidence)
         errors = self.validate(self.signed())
         self.assertTrue(any("must equal the union" in error for error in errors), errors)
+
+    def test_rejects_signed_payload_carrying_generic_optional_fields(self) -> None:
+        for extra in ("harness", "config_before", "candidate", "candidate_identity", "eip712", "signer"):
+            with self.subTest(extra=extra):
+                signed = self.signed()
+                signed[extra] = {"unbound": "value"}
+                errors = self.validate(signed)
+                self.assertTrue(
+                    any("must carry exactly the builder key set" in error for error in errors), errors
+                )
+
+    def test_rejects_signed_payload_missing_a_builder_key(self) -> None:
+        signed = self.signed()
+        del signed["observations"]
+        errors = self.validate(signed)
+        self.assertTrue(any("must carry exactly the builder key set" in error for error in errors), errors)
 
     def test_rejects_signed_step_that_disagrees_with_the_source(self) -> None:
         signed = self.signed()
