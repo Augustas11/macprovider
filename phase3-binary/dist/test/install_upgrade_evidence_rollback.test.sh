@@ -1248,7 +1248,14 @@ assert_recovery_preserved() {
   [ -x "$recovery/observe.sh" ]
   grep -F 'REC_INSTALL_RECOVERY_LABEL=live.malibu.provider-install-recovery' "$recovery/state.sh" >/dev/null
   grep -F 'fcntl.flock(lock_fd, fcntl.LOCK_EX)' "$recovery/observe.sh" >/dev/null
-  grep -F "Run exactly: bash '$recovery/recover.sh'" "$root/stderr.log" >/dev/null
+  # Issue #1421: when automatic rollback did not complete on this attempt the
+  # operator must still be pointed at a remedy that works. The preserved
+  # recover.sh path is surfaced (only valid while it exists, because the armed
+  # recovery agent retires the directory once it succeeds), alongside the
+  # durable `macprovider-cli recover-update` fallback that survives the
+  # directory being removed.
+  grep -F "bash '$recovery/recover.sh'" "$root/stderr.log" >/dev/null
+  grep -F 'macprovider-cli recover-update' "$root/stderr.log" >/dev/null
 }
 
 # Happy rollback: every old path and the active service are verified before the
