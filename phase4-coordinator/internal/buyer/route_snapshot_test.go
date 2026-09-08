@@ -829,6 +829,107 @@ func TestBYOMCatalogPricedIsHiddenFromDefaultPaidModelsAndRouting(t *testing.T) 
 	}
 }
 
+func TestBYOMNonSettlementStatesAreHiddenFromDefaultPaidModelsAndRouting(t *testing.T) {
+	states := []string{
+		"not_offered",
+		"offer_submitted",
+		"offer_rejected",
+		"sandbox_probe_only",
+		"network_visible_unpriced",
+		"network_admitted_unsettled",
+		"catalog_priced",
+		"withdrawn",
+		"revoked",
+	}
+	for _, state := range states {
+		t.Run(state, func(t *testing.T) {
+			tier2.ResetForTest()
+			t.Cleanup(tier2.ResetForTest)
+			raw, pubkey := routeSnapshotCatalogFixture(t, "byom-nonsettlement-"+state, time.Now().UTC().Add(time.Hour))
+			if err := tier2.Configure(config.Tier2Config{
+				ObserveEnabled:      true,
+				CatalogPath:         writeRouteSnapshotCatalog(t, raw),
+				CatalogPublicKey:    pubkey,
+				RequireHashVerified: true,
+			}, zerolog.Nop()); err != nil {
+				t.Fatalf("tier2.Configure: %v", err)
+			}
+
+			reqLog, dbPath := openBuyerRequestLog(t)
+			t.Cleanup(func() { _ = reqLog.Close() })
+			billingStore, err := billing.NewStore(reqLog.DB())
+			if err != nil {
+				t.Fatalf("billing.NewStore: %v", err)
+			}
+			setSettlementModeForTest(billingStore, billing.RouteSnapshotModeEnforce)
+			cfg := config.Default().Rewards
+			snapshotID, err := billingStore.InsertConfigSnapshot(context.Background(), cfg, time.Unix(1716768000, 0).UTC())
+			if err != nil {
+				t.Fatalf("InsertConfigSnapshot: %v", err)
+			}
+
+			var reachedProvider bool
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				reachedProvider = true
+				writeProviderOK(w)
+			}))
+			defer upstream.Close()
+
+			registry := pool.NewRegistry(nil)
+			registerSettlementProvider(registry, "p1", "session-1", upstream.URL, 30, bytes.Repeat([]byte{0x78}, 32))
+			provider := byomAdmissionProvider(t, registry.Snapshot()[0])
+			store := providerws.NewMemoryModelAdmissionStore()
+			if state != "not_offered" {
+				seedBYOMNonSettlementAdmissionState(t, store, provider, state)
+			}
+			routeProvider := clearBYOMAdmissionFields(provider)
+			if state == "not_offered" {
+				routeProvider = provider
+			}
+			registry.Register(&routeProvider, nil)
+			server := buyer.NewServer(
+				registry,
+				zerolog.Nop(),
+				time.Unix(1716768000, 0),
+				buyer.WithRequestLog(reqLog),
+				buyer.WithBilling(billingStore, cfg),
+				buyer.WithBillingSnapshotID(snapshotID),
+				buyer.WithModelAdmissionStore(store),
+			)
+
+			modelsRR := httptest.NewRecorder()
+			server.Handler().ServeHTTP(modelsRR, httptest.NewRequest(http.MethodGet, "/v1/models", nil))
+			if modelsRR.Code != http.StatusOK {
+				t.Fatalf("models status=%d body=%s", modelsRR.Code, modelsRR.Body.String())
+			}
+			var models struct {
+				Data []map[string]any `json:"data"`
+			}
+			if err := json.Unmarshal(modelsRR.Body.Bytes(), &models); err != nil {
+				t.Fatalf("models json: %v", err)
+			}
+			if len(models.Data) != 0 {
+				t.Fatalf("%s BYOM leaked into default /v1/models: %s", state, modelsRR.Body.String())
+			}
+
+			rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`), nil)
+			if rr.Code != http.StatusServiceUnavailable {
+				t.Fatalf("status=%d body=%s, want no provider available", rr.Code, rr.Body.String())
+			}
+			assertOpenAIErrorEnvelope(t, rr, "byom_non_settlement_unavailable", "server_error")
+			if reachedProvider {
+				t.Fatalf("%s BYOM provider was reached by default paid routing", state)
+			}
+			if got := routeSnapshotCount(t, dbPath); got != 0 {
+				t.Fatalf("route snapshots=%d want 0 for %s BYOM", got, state)
+			}
+			if got := ledgerCreditCount(t, dbPath); got != 0 {
+				t.Fatalf("ledger credits=%d want 0 for %s BYOM", got, state)
+			}
+		})
+	}
+}
+
 func TestBYOMHiddenProviderDoesNotShadowModelClassAlias(t *testing.T) {
 	var reachedHidden bool
 	hiddenUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1727,6 +1828,64 @@ func clearBYOMAdmissionFields(provider pool.Provider) pool.Provider {
 func seedBYOMAdmissionState(t *testing.T, store providerws.ModelAdmissionStore, provider pool.Provider, state string) providerws.ModelAdmissionEvent {
 	t.Helper()
 	return seedBYOMAdmissionStateWithSuffix(t, store, provider, state, state)
+}
+
+func seedBYOMNonSettlementAdmissionState(t *testing.T, store providerws.ModelAdmissionStore, provider pool.Provider, state string) providerws.ModelAdmissionEvent {
+	t.Helper()
+	suffix := "nonsettlement-" + strings.NewReplacer("_", "-").Replace(state)
+	offer := providerws.ModelAdmissionEvent{
+		ProviderID:               provider.ProviderID,
+		CandidateID:              provider.ModelAdmissionCandidateID,
+		ServedModelRef:           provider.ModelAdmissionServedModelRef,
+		CatalogModelKey:          provider.ModelAdmissionCatalogModelKey,
+		DiscoveryDigestSHA256:    provider.ModelAdmissionDiscoveryDigestSHA256,
+		EvaluationDigestSHA256:   provider.ModelAdmissionEvaluationDigestSHA256,
+		RequestedDisclosureClass: "network_admitted_unsettled",
+		RequestID:                "offer-" + suffix,
+		Nonce:                    "nonce-offer-" + suffix,
+		PayloadDigestSHA256:      strings.Repeat("d", 64),
+		SignatureDigestSHA256:    strings.Repeat("e", 64),
+		CreatedAt:                time.Unix(1800000000, 0).UTC(),
+	}
+	stored, _, err := store.AppendModelAdmissionOffer(context.Background(), offer)
+	if err != nil {
+		t.Fatalf("AppendModelAdmissionOffer: %v", err)
+	}
+	if state == "offer_submitted" {
+		return stored
+	}
+	switch state {
+	case "withdrawn":
+		withdrawal := stored
+		withdrawal.State = state
+		withdrawal.ReasonCode = "provider_requested"
+		withdrawal.RequestID = "withdraw-" + suffix
+		withdrawal.Nonce = "nonce-withdraw-" + suffix
+		withdrawal.PayloadDigestSHA256 = strings.Repeat("f", 64)
+		withdrawal.SignatureDigestSHA256 = strings.Repeat("1", 64)
+		withdrawal.CreatedAt = time.Unix(1800000010, 0).UTC()
+		stored, _, err = store.AppendModelAdmissionWithdrawal(context.Background(), withdrawal)
+	default:
+		decision := stored
+		decision.State = state
+		decision.RequestID = "decision-" + suffix
+		decision.Nonce = "nonce-decision-" + suffix
+		decision.PayloadDigestSHA256 = strings.Repeat("f", 64)
+		decision.CreatedAt = time.Unix(1800000010, 0).UTC()
+		switch state {
+		case "offer_rejected":
+			decision.ReasonCode = "policy_failed"
+		case "revoked":
+			decision.ReasonCode = "runtime_identity_drift"
+		case "catalog_priced":
+			decision = withBYOMTrustedCatalogDecisionFields(t, decision, provider)
+		}
+		stored, err = store.AppendModelAdmissionDecision(context.Background(), decision)
+	}
+	if err != nil {
+		t.Fatalf("append %s admission state: %v", state, err)
+	}
+	return stored
 }
 
 func seedBYOMAdmissionStateWithSuffix(t *testing.T, store providerws.ModelAdmissionStore, provider pool.Provider, state, suffix string) providerws.ModelAdmissionEvent {
