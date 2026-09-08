@@ -55,6 +55,7 @@ const (
 const (
 	autotuneEvidenceLookupTimeout          = 2 * time.Second
 	modelAdmissionRuntimeRevocationTimeout = 2 * time.Second
+	modelAdmissionSyntheticProbeTimeout    = 5 * time.Second
 	admissionCeilingEventCooldown          = 5 * time.Minute
 	admissionCeilingEventStateTTL          = 24 * time.Hour
 	admissionCeilingEventStateMaxKeys      = 4096
@@ -4188,6 +4189,89 @@ func providerProbeModelID(provider pool.Provider) string {
 		return modelKey
 	}
 	return provider.ModelID
+}
+
+func (s *Server) runModelAdmissionSyntheticProbe(ctx context.Context, current ModelAdmissionEvent, provider pool.Provider, targetState string, experimentalVisibilityAuthorized bool) (ModelAdmissionEvent, error) {
+	if s.modelAdmissions == nil {
+		return ModelAdmissionEvent{}, errors.New("model admission store is required")
+	}
+	if provider.ProviderID != current.ProviderID || !provider.IsWSTunneled() {
+		return ModelAdmissionEvent{}, errors.New("model admission synthetic probe requires matching provider wire session")
+	}
+	switch current.State {
+	case modelAdmissionOfferSubmitted:
+		decision, ok := modelAdmissionSandboxProbeDecision(current, "synthetic_probe_required", s.now())
+		if !ok {
+			return ModelAdmissionEvent{}, errors.New("invalid model admission sandbox probe transition")
+		}
+		stored, err := s.modelAdmissions.AppendModelAdmissionDecision(ctx, decision)
+		if err != nil {
+			return ModelAdmissionEvent{}, err
+		}
+		current = stored
+	case "sandbox_probe_only":
+	default:
+		return ModelAdmissionEvent{}, errors.New("model admission synthetic probe requires sandbox_probe_only state")
+	}
+
+	body, err := json.Marshal(map[string]any{
+		"model": current.ServedModelRef,
+		"messages": []map[string]string{{
+			"role":    "user",
+			"content": "Reply with ok.",
+		}},
+		"max_tokens": 4,
+		"stream":     false,
+	})
+	if err != nil {
+		return ModelAdmissionEvent{}, err
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, modelAdmissionSyntheticProbeTimeout)
+	defer cancel()
+	requestID := "model-admission-probe-" + s.newUUID()
+	relay, err := s.DispatchInference(probeCtx, provider, requestID, body, false)
+	if err != nil {
+		return current, err
+	}
+	passed := false
+	chunks := relay.Chunks
+	for {
+		select {
+		case chunk, ok := <-chunks:
+			if !ok {
+				chunks = nil
+				continue
+			}
+			if warmupChunkHasOutput(chunk.Data) {
+				passed = true
+			}
+		case end := <-relay.Done:
+			return s.appendModelAdmissionSyntheticProbeResult(ctx, current, relay.RequestID, end.Status == "complete" && passed, targetState, experimentalVisibilityAuthorized)
+		case <-relay.Errors:
+			return s.appendModelAdmissionSyntheticProbeResult(ctx, current, relay.RequestID, false, targetState, experimentalVisibilityAuthorized)
+		case <-probeCtx.Done():
+			return s.appendModelAdmissionSyntheticProbeResult(ctx, current, relay.RequestID, false, targetState, experimentalVisibilityAuthorized)
+		}
+	}
+}
+
+func (s *Server) appendModelAdmissionSyntheticProbeResult(ctx context.Context, current ModelAdmissionEvent, providerWireRequestID string, passed bool, targetState string, experimentalVisibilityAuthorized bool) (ModelAdmissionEvent, error) {
+	reasonCode := "synthetic_probe_failed"
+	if passed {
+		reasonCode = "synthetic_probe_passed"
+	}
+	decision, ok := modelAdmissionSyntheticProbeDecision(current, modelAdmissionSyntheticProbeResult{
+		ProviderWireRequestID:            providerWireRequestID,
+		Passed:                           passed,
+		TargetState:                      targetState,
+		ExperimentalVisibilityAuthorized: experimentalVisibilityAuthorized,
+		ReasonCode:                       reasonCode,
+		CreatedAt:                        s.now(),
+	})
+	if !ok {
+		return ModelAdmissionEvent{}, errors.New("invalid model admission synthetic probe result")
+	}
+	return s.modelAdmissions.AppendModelAdmissionDecision(ctx, decision)
 }
 
 func (s *Server) runWSWarmupGateAttempt(ctx context.Context, provider pool.Provider, attempt int, body []byte) bool {
