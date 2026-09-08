@@ -42,6 +42,11 @@ const (
 	modelAdmissionMaxEvents              = 256
 	modelAdmissionMaxCandidates          = 64
 	modelAdmissionMaxClockSkew           = 5 * time.Minute
+	// modelAdmissionSubmissionsDisabledCode is the closed, non-leaking
+	// rejection reason returned while the #1248 offer-submit policy gate is
+	// engaged. It is a transport-level error code, not a SPEC-047-R001
+	// admission state or a SPEC-046-R003 provider_guidance value.
+	modelAdmissionSubmissionsDisabledCode = "submissions_disabled"
 )
 
 var (
@@ -1171,6 +1176,13 @@ func (s *Server) handleProviderModelAdmissionOffer(w http.ResponseWriter, r *htt
 	}
 	providerID, ok := s.authenticateProviderReadOnly(w, r)
 	if !ok {
+		return
+	}
+	// #1248 offer-submit disablement: reject new submissions before any
+	// parsing or state append. Status readback and withdrawals stay live so
+	// disabling submissions never loses or deletes provider state.
+	if s.modelAdmissionSubmitDisabled {
+		writeJSON(w, http.StatusServiceUnavailable, modelAdmissionError(modelAdmissionSubmissionsDisabledCode, "model admission offer submissions are disabled"))
 		return
 	}
 	if !s.allowModelAdmissionAttempt(providerID) {

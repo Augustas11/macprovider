@@ -177,6 +177,7 @@ type Server struct {
 	capacityOverClaimMetrics       CapacityOverClaimMetrics
 	connectionEvents               ConnectionEventStore
 	modelAdmissions                ModelAdmissionStore
+	modelAdmissionSubmitDisabled   bool
 	modelAdmissionAttemptMu        sync.Mutex
 	modelAdmissionAttempts         map[string][]time.Time
 	connectionEventMetrics         ConnectionEventMetrics
@@ -775,6 +776,17 @@ func WithModelAdmissionStore(store ModelAdmissionStore) Option {
 		if store != nil {
 			s.modelAdmissions = store
 		}
+	}
+}
+
+// WithModelAdmissionSubmissionsDisabled is the #1248 "offer submit" staged
+// rollout switch. When set, the coordinator rejects NEW SPEC-047 offer
+// submissions with a closed reason and writes no admission event, while status
+// readback and provider withdrawals of already-recorded offers keep working.
+// Default (unset) is the current behaviour: submissions enabled.
+func WithModelAdmissionSubmissionsDisabled(disabled bool) Option {
+	return func(s *Server) {
+		s.modelAdmissionSubmitDisabled = disabled
 	}
 }
 
