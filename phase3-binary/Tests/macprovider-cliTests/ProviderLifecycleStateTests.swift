@@ -166,6 +166,67 @@ final class ProviderLifecycleStateTests: XCTestCase {
         XCTAssertNotEqual(resumed.previousTransitionID, restarting.transitionID)
     }
 
+    func testInstallerRecordsRollbackFromUninstalledForFailedReinstall() throws {
+        // #1421: a reinstall after an uninstall tombstone whose cutover fails
+        // before the `installing` checkpoint must still be able to persist the
+        // `rollback_in_progress` intermediate state, so the installer's rollback
+        // records its intent instead of silently failing (the wedge precondition).
+        let fixture = try Fixture()
+        let store = ProviderLifecycleStateStore(url: fixture.recordURL)
+        _ = try store.transition(
+            to: .uninstalled,
+            reasonCode: "uninstall_services_stopped",
+            writer: .installer,
+            operationID: "uninstall-1"
+        )
+        let rolledBack = try store.transition(
+            to: .rollbackInProgress,
+            reasonCode: "install_admission_failed",
+            writer: .installer,
+            operationID: "reinstall-1"
+        )
+        XCTAssertEqual(rolledBack.state, .rollbackInProgress)
+        XCTAssertEqual(try store.current()?.state, .rollbackInProgress)
+    }
+
+    func testUninstalledStaysFailClosedForNonInstallerAndForeignTargets() throws {
+        // The fail-closed guard must still reject every non-installer writer out
+        // of `uninstalled`, and reject installer transitions to states other
+        // than `installing`/`rollback_in_progress`.
+        let fixture = try Fixture()
+        let store = ProviderLifecycleStateStore(url: fixture.recordURL)
+        _ = try store.transition(
+            to: .uninstalled,
+            reasonCode: "uninstall_services_stopped",
+            writer: .installer,
+            operationID: "uninstall-1"
+        )
+        XCTAssertThrowsError(
+            try store.transition(
+                to: .rollbackInProgress,
+                reasonCode: "update_rollback",
+                writer: .updater,
+                operationID: "update-1"
+            )
+        )
+        XCTAssertThrowsError(
+            try store.transition(
+                to: .startingProvider,
+                reasonCode: "serve_invoked",
+                writer: .serve,
+                operationID: "serve-1"
+            )
+        )
+        XCTAssertThrowsError(
+            try store.transition(
+                to: .pausedByOperator,
+                reasonCode: "operator_pause_confirmed",
+                writer: .installer,
+                operationID: "installer-1"
+            )
+        )
+    }
+
     func testPausedStartupCanRestorePauseAfterModelLoad() throws {
         let fixture = try Fixture()
         let store = ProviderLifecycleStateStore(url: fixture.recordURL)

@@ -6118,6 +6118,22 @@ stop_loaded_service() {
     || recovery_failed "$failure_message has an unexpected launchd identity"
   recovery_launchctl bootout "$REC_LAUNCHD_DOMAIN/$service_label" >/dev/null 2>&1 \
     || recovery_failed "$failure_message could not be stopped"
+  # launchd keeps reporting a just-booted-out service as loaded for a short
+  # window while it tears the job down. Wait for the unload to settle so the
+  # callers' post-bootout "still loaded" assertions -- and any re-bootstrap of
+  # the same label further down -- observe the true final state instead of
+  # racing the teardown. Without this, a failed first install (nothing was
+  # loaded before it) would boot out its own just-created service and then
+  # immediately fail recovery with "provider service is active even though it
+  # was inactive before the failed install", turning a clean rollback into a
+  # reported rollback failure. Mirrors the repair-preflight quiesce settle loop.
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+    service_loaded "$service_label" || return 0
+    sleep 0.1
+  done
+  service_loaded "$service_label" \
+    && recovery_failed "$failure_message remained loaded after bootout"
+  return 0
 }
 
 # Before the durable cutover marker exists, the installer has not touched the
@@ -7476,7 +7492,11 @@ rollback_install_transaction() {
   INSTALL_TX_ROLLING_BACK=1
   record_lifecycle_state rollback_in_progress install_admission_failed \
     || log "WARNING: could not persist rollback lifecycle state before restoring the previous install"
-  log "Install did not pass admission; restoring the previous provider installation."
+  if [ "$EXISTING_INSTALL_WAS_PRESENT" -eq 1 ]; then
+    log "Install did not pass admission; restoring the previous provider installation."
+  else
+    log "Install did not pass admission; removing the staged files from this failed first install (no previous installation to restore)."
+  fi
   if [ -n "$MANUAL_PID" ] && pid_is_live_non_zombie "$MANUAL_PID"; then
     if ! stop_owned_manual_provider "$MANUAL_PID" "$INSTALL_DIR/macprovider-cli"; then
       log "ERROR: could not stop and prove death of the failed manual provider process; recovery data was preserved at $INSTALL_TX_BACKUP"
@@ -7487,8 +7507,22 @@ rollback_install_transaction() {
   verify_headless_recovery_trust "$INSTALL_TX_BACKUP" \
     || die 70 "headless rollback recovery did not match its root-owned trust receipt"
   if ! bash "$INSTALL_TX_BACKUP/recover.sh"; then
-    log "ERROR: automatic rollback failed; recovery data was preserved at $INSTALL_TX_BACKUP"
-    log "Run exactly: bash '$INSTALL_TX_BACKUP/recover.sh'"
+    if [ "$EXISTING_INSTALL_WAS_PRESENT" -eq 1 ]; then
+      log "ERROR: automatic rollback did not complete on this attempt; recovery data was preserved at $INSTALL_TX_BACKUP"
+    else
+      log "ERROR: cleanup of this failed first install did not complete on this attempt; recovery data was preserved at $INSTALL_TX_BACKUP"
+    fi
+    # The interrupted-install recovery agent armed before cutover retries this
+    # recovery automatically once this installer exits, and removes the recovery
+    # directory once it succeeds -- so the path below is only valid while it
+    # still exists. Do not disarm it here; automatic retry is the recovery net.
+    log "An interrupted-install recovery agent is armed and will retry automatically after this installer exits; it removes the recovery data once recovery succeeds."
+    if [ "$EXISTING_INSTALL_WAS_PRESENT" -eq 1 ]; then
+      log "If the provider is still not restored after that, run: macprovider-cli recover-update"
+    else
+      log "If cleanup has not completed after that, re-running the installer is safe and will retire this recovery data and finish it."
+    fi
+    log "While it still exists, the preserved recovery script can also be run directly: bash '$INSTALL_TX_BACKUP/recover.sh'"
     INSTALL_TX_ROLLING_BACK=0
     return 70
   fi
@@ -7508,7 +7542,11 @@ rollback_install_transaction() {
     INSTALL_TX_ROLLING_BACK=0
     return 70
   fi
-  log "Previous provider files and service state were restored and verified."
+  if [ "$EXISTING_INSTALL_WAS_PRESENT" -eq 1 ]; then
+    log "Previous provider files and service state were restored and verified."
+  else
+    log "Staged files from the failed first install were removed and verified; no previous provider installation existed to restore."
+  fi
   INSTALL_TX_ACTIVE=0
   INSTALL_TX_ROLLING_BACK=0
 }

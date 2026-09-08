@@ -261,7 +261,18 @@ struct ProviderLifecycleStateRecord: Codable, Equatable, Sendable {
 
         guard let previous else { return }
         if previous.state == .uninstalled {
-            guard writer == .installer, state == .installing else {
+            // A prior uninstall left an `uninstalled` tombstone. The installer is
+            // the only writer allowed to drive lifecycle out of that state:
+            // normally it records `installing` to begin a fresh install, but a
+            // reinstall whose cutover fails before it reaches the `installing`
+            // checkpoint must still be able to persist the `rollback_in_progress`
+            // intermediate state. Forbidding it made the installer's own rollback
+            // silently fail to record its intent on exactly a reinstall-after-
+            // uninstall -- the precondition for the wedge class recovery exists to
+            // clear (#1421). Every other writer, and every other target state,
+            // stays fail-closed.
+            guard writer == .installer,
+                  state == .installing || state == .rollbackInProgress else {
                 throw ProviderLifecycleStateError.invalidTransition(from: previous.state.rawValue, to: state.rawValue)
             }
         }
