@@ -1313,6 +1313,9 @@ func (s *Server) handleProviderModelAdmissionOffer(w http.ResponseWriter, r *htt
 		writeJSON(w, status, modelAdmissionError(code, "model admission offer rejected"))
 		return
 	}
+	probeCtx, cancel := modelAdmissionOfferProbeContext(r.Context())
+	defer cancel()
+	stored = s.maybeRunModelAdmissionSyntheticProbeForOffer(probeCtx, stored, replay)
 	writeJSON(w, http.StatusOK, s.modelAdmissionStatusResponseFromEvent(stored, replay))
 }
 

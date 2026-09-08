@@ -4191,6 +4191,47 @@ func providerProbeModelID(provider pool.Provider) string {
 	return provider.ModelID
 }
 
+func modelAdmissionOfferProbeContext(parent context.Context) (context.Context, context.CancelFunc) {
+	if parent == nil {
+		parent = context.Background()
+	}
+	return context.WithTimeout(context.WithoutCancel(parent), modelAdmissionSyntheticProbeTimeout+modelAdmissionRuntimeRevocationTimeout)
+}
+
+func (s *Server) maybeRunModelAdmissionSyntheticProbeForOffer(ctx context.Context, current ModelAdmissionEvent, replay bool) ModelAdmissionEvent {
+	if replay {
+		return current
+	}
+	provider, ok := s.modelAdmissionSyntheticProbeProvider(current.ProviderID)
+	if !ok {
+		return current
+	}
+	probed, err := s.runModelAdmissionSyntheticProbe(ctx, current, provider, "network_admitted_unsettled", false)
+	if err != nil {
+		s.log.Warn().
+			Err(err).
+			Str("provider_id", current.ProviderID).
+			Str("candidate_id", current.CandidateID).
+			Msg("model admission synthetic probe did not complete")
+		if probed.CoordinatorEventID != "" {
+			return probed
+		}
+		return current
+	}
+	return probed
+}
+
+func (s *Server) modelAdmissionSyntheticProbeProvider(providerID string) (pool.Provider, bool) {
+	provider, ok := s.pool.Resolve(providerID, "")
+	if !ok || !provider.IsWSTunneled() {
+		return pool.Provider{}, false
+	}
+	if _, ok := s.sessionFor(provider.ProviderID, provider.AssignedID); !ok {
+		return pool.Provider{}, false
+	}
+	return provider, true
+}
+
 func (s *Server) runModelAdmissionSyntheticProbe(ctx context.Context, current ModelAdmissionEvent, provider pool.Provider, targetState string, experimentalVisibilityAuthorized bool) (ModelAdmissionEvent, error) {
 	if s.modelAdmissions == nil {
 		return ModelAdmissionEvent{}, errors.New("model admission store is required")
