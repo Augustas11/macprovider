@@ -389,6 +389,8 @@ actor ProviderStatus {
     private var windowCompletionTokens = 0
     private var windowGenerationSeconds = 0.0
     private var coordinatorConnected = false
+    private var lastConfirmedCoordinatorBuyerServingTrue = false
+    private var lastConfirmedCoordinatorBuyerServingAssignedID: String?
     private var coordinatorAssignedID: String?
     private var coordinatorTier: String?
     private var coordinatorIdentityAdmissionMode: String?
@@ -582,6 +584,35 @@ actor ProviderStatus {
         transition(to: newState, reason: reason)
     }
 
+    func applyCoordinatorBuyerServing(
+        _ latest: Bool?,
+        forAssignedID fetchedAssignedID: String? = nil
+    ) -> Bool? {
+        if let fetchedAssignedID, fetchedAssignedID != coordinatorAssignedID {
+            return CoordinatorBuyerServingHold.resolve(
+                latest: nil,
+                lastConfirmedTrue: lastConfirmedCoordinatorBuyerServingTrue
+            ).verdict
+        }
+        if let current = coordinatorAssignedID,
+           let held = lastConfirmedCoordinatorBuyerServingAssignedID,
+           current != held {
+            lastConfirmedCoordinatorBuyerServingTrue = false
+        }
+        let resolved = CoordinatorBuyerServingHold.resolve(
+            latest: latest,
+            lastConfirmedTrue: lastConfirmedCoordinatorBuyerServingTrue
+        )
+        lastConfirmedCoordinatorBuyerServingTrue = resolved.lastConfirmedTrue
+        if let current = coordinatorAssignedID {
+            lastConfirmedCoordinatorBuyerServingAssignedID = current
+        }
+        if resolved.lastConfirmedTrue == false {
+            lastConfirmedCoordinatorBuyerServingAssignedID = coordinatorAssignedID
+        }
+        return resolved.verdict
+    }
+
     func setCoordinatorSession(
         connected: Bool,
         assignedID: String? = nil,
@@ -595,6 +626,10 @@ actor ProviderStatus {
             coordinatorIdentityAdmissionMode = nil
         }
         if let assignedID {
+            if let previous = coordinatorAssignedID, previous != assignedID {
+                lastConfirmedCoordinatorBuyerServingTrue = false
+                lastConfirmedCoordinatorBuyerServingAssignedID = nil
+            }
             coordinatorAssignedID = assignedID
         }
         if let tier {

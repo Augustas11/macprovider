@@ -1457,52 +1457,51 @@ func (s *Server) handlePoolCheck(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "unauthorized", "Deployment pool evidence requires coordinator authorization")
 		return
 	}
-	for _, p := range s.pool.Snapshot() {
-		if p.ProviderID != providerID {
-			continue
-		}
-		if assignedID != "" && p.AssignedID != assignedID {
-			continue
-		}
-		state := p.State
-		if state == pool.StateBusy {
-			state = pool.StateDegraded
-		}
-		s.log.Info().Str("provider_id", providerID).Str("state", string(state)).Msg("pool check hit")
+	// Resolve is O(1) and does not copy the full pool. Snapshot clones every
+	// provider, including hardware/safety telemetry, while holding the registry
+	// lock. CLI /v1/status awaits this on a 2s timeout; a full-pool copy was
+	// turning readiness checks into buyer_serving_unknown flaps.
+	p, ok := s.pool.Resolve(providerID, assignedID)
+	if !ok {
+		s.log.Info().Str("provider_id", providerID).Msg("pool check miss")
 		w.Header().Set("Content-Type", "application/json")
-		response := poolCheckResponse{
-			ProviderID: p.ProviderID,
-			AssignedID: p.AssignedID,
-			Tier:       p.Tier,
-			State:      state,
-		}
-		if includeDeploymentEvidence || includeReadinessEvidence {
-			buyerServing := s.providerBuyerServing(p)
-			response.BuyerServing = &buyerServing
-			response.CatalogAdmissionMode = p.CatalogAdmissionMode
-			response.CatalogReleaseID = p.CatalogReleaseID
-			response.CatalogPolicyVersion = p.CatalogPolicyVersion
-			response.CandidateCatalogSHA256 = p.CandidateCatalogSHA256
-			response.CatalogSignerKeyID = p.CatalogSignerKeyID
-			response.CandidateRowIdentity = p.CandidateRowIdentity
-			// Catalog values are the exact envelope admitted from the provider
-			// session. The coordinator validates them against its verified
-			// catalog, but they are still provider-reported evidence rather than
-			// an independent observation of files installed on that Mac.
-			response.CatalogEvidenceSource = "provider_reported"
-		}
-		if err := json.NewEncoder(w).Encode(response); err != nil {
-			s.log.Warn().Err(err).Str("provider_id", providerID).Msg("write pool check response failed")
-		}
+		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"error":       "provider_not_found",
+			"provider_id": providerID,
+		})
 		return
 	}
-	s.log.Info().Str("provider_id", providerID).Msg("pool check miss")
+	state := p.State
+	if state == pool.StateBusy {
+		state = pool.StateDegraded
+	}
+	s.log.Info().Str("provider_id", providerID).Str("state", string(state)).Msg("pool check hit")
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusNotFound)
-	_ = json.NewEncoder(w).Encode(map[string]any{
-		"error":       "provider_not_found",
-		"provider_id": providerID,
-	})
+	response := poolCheckResponse{
+		ProviderID: p.ProviderID,
+		AssignedID: p.AssignedID,
+		Tier:       p.Tier,
+		State:      state,
+	}
+	if includeDeploymentEvidence || includeReadinessEvidence {
+		buyerServing := s.providerBuyerServing(p)
+		response.BuyerServing = &buyerServing
+		response.CatalogAdmissionMode = p.CatalogAdmissionMode
+		response.CatalogReleaseID = p.CatalogReleaseID
+		response.CatalogPolicyVersion = p.CatalogPolicyVersion
+		response.CandidateCatalogSHA256 = p.CandidateCatalogSHA256
+		response.CatalogSignerKeyID = p.CatalogSignerKeyID
+		response.CandidateRowIdentity = p.CandidateRowIdentity
+		// Catalog values are the exact envelope admitted from the provider
+		// session. The coordinator validates them against its verified
+		// catalog, but they are still provider-reported evidence rather than
+		// an independent observation of files installed on that Mac.
+		response.CatalogEvidenceSource = "provider_reported"
+	}
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		s.log.Warn().Err(err).Str("provider_id", providerID).Msg("write pool check response failed")
+	}
 }
 
 func (s *Server) providerBuyerServing(p pool.Provider) bool {

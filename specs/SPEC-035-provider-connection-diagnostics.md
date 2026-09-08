@@ -1,6 +1,6 @@
 # SPEC-035 — Provider connection diagnostics and failure history
 
-Version: v0.4.2
+Version: v0.4.3
 Status: draft (Partial #535 coordinator journal + provider diagnostic snapshot + monitor alerts + admission-ceiling drift diagnostics; #1267 operator onboarding funnel join; #1314 local diagnostic signature schema)
 Owner: coordinator operator observability
 Issue: https://github.com/Augustas11/macprovider/issues/535
@@ -20,6 +20,14 @@ Changelog:
 - v0.4.2 (2026-09-01): adds the closed local diagnostic `signature_id`
   taxonomy, source precedence, and redacted diagnostics bundle v2 contract for
   [#1314](https://github.com/Augustas11/macprovider/issues/1314).
+- v0.4.3 (2026-09-08): Malibu MUST still emit `serve_unresponsive` for
+  indeterminate `network_state` (`buyer_serving_unknown`,
+  `coordinator_unavailable`), but MUST NOT promote that finding as the public
+  Live / menu-bar title while a last-confirmed buyer-serving hold is active.
+  Authoritative `not_buyer_serving` and `network_offline` remain interrupting.
+  First join with no hold still waits for approval. A live launchd pid plus a
+  missed `/v1/health` MUST NOT by itself demote Live or wipe last-known
+  earnings.
 
 ## 1. Purpose and scope
 
@@ -224,6 +232,19 @@ lines, absolute paths, usernames, hostnames, IP addresses, and C0/C1 control
 characters. Redaction is a no-secrets/no-private-path guarantee; it is not an
 anonymity guarantee.
 
+**SPEC-035-R013 — Last-confirmed Live hold for indeterminate availability.**
+Malibu's public dashboard title, consolidated Live phase, and menu-bar short
+status MUST hold a last-confirmed buyer-serving projection across:
+(1) stale local `/v1/status` polls with `observation.id=` evidence while
+launchd still owns a pid; (2) fresh `serve_unresponsive` findings whose
+evidence is `network_state=buyer_serving_unknown` or
+`network_state=coordinator_unavailable`. The hold MUST clear on authoritative
+`not_buyer_serving`, `network_offline`, operator pause, identity mismatch,
+launchd pid gone, or doctor `serve_dead`. First join with no last-confirmed
+buyer-serving evidence MUST NOT fake Live. A single `/v1/health` miss while
+the serve process is still launchd-owned MUST NOT wipe last-known earnings or
+force reconnect copy.
+
 ## 4. Rollout
 
 v0.4 ships coordinator-side journal/admin GETs, provider `status --json`,
@@ -231,5 +252,6 @@ authenticated WSS `diagnostic_status` snapshots, Pearl monitor diagnostic
 alerts, and coordinator observe-only admission-ceiling drift events. v0.4.1
 adds the operator onboarding funnel join (`GET /admin/onboarding` and
 `coordinator-cli list-onboarding`). v0.4.2 adds the local diagnostic signature
-schema and redacted bundle v2. CLI inspect wrappers and any HTTPS beacon remain
+schema and redacted bundle v2. v0.4.3 adds last-confirmed Live hold for
+indeterminate customer-availability diagnostics. CLI inspect wrappers and any HTTPS beacon remain
 deferred under #535.

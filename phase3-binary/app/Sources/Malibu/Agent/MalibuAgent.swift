@@ -49,6 +49,7 @@ final class MalibuAgent: ObservableObject {
     /// First timestamp of the current local health/status miss streak.
     /// Cleared on a successful `/v1/status` refresh.
     private var localStatusMissStartedAt: Date?
+    private var dashboardObservationFileURLForTest: URL?
     private var latestReleaseFetchedAt: Date?
     private var cliUpdateTask: Task<Void, Never>?
     private var providerSoftwareRepairTask: Task<Void, Never>?
@@ -744,11 +745,10 @@ final class MalibuAgent: ObservableObject {
     }
 
     private func applyProviderSnapshot(port: Int) async {
-        let localReady = await applyHealthSnapshot(port: port)
-        if !localReady {
-            invalidateProviderProjectionFreshness()
-        }
+        async let healthTask = InstalledProviderMonitor.fetchHealth(port: port)
         let status = await InstalledProviderMonitor.fetchStatus(port: port)
+        let healthReady = applyHealthCounters(await healthTask)
+        let launchdPID = monitorsLaunchdProvider ? InstalledProviderMonitor.launchdServicePID() : nil
         let expectedProviderID = ProviderConfig.readProviderID()
         let identityMatched = status.map { fetched in
             guard let expectedProviderID else { return false }
@@ -759,6 +759,8 @@ final class MalibuAgent: ObservableObject {
                 liveCodeMatches: ProviderCredentialHandoffRunner.validatedInstalledProcessMatches(pid:)
             )
         } ?? false
+        var hardFailClosed = false
+        let identityMismatch = status != nil && !identityMatched
         if let status, let expectedProviderID, identityMatched {
             localStatusMissStartedAt = nil
             snapshot.localProviderID = expectedProviderID
@@ -824,7 +826,7 @@ final class MalibuAgent: ObservableObject {
             snapshot.coordinatorIdentityAdmissionMode = status.coordinatorIdentityAdmissionMode
             snapshot.coordinatorConnected = status.coordinatorConnected
             snapshot.networkState = status.networkState
-            providerProjectionEligible = localReady
+            providerProjectionEligible = true
             snapshot.advertisedMaxConcurrency = status.advertisedMaxConcurrency
             snapshot.catalogState = status.catalogState
             snapshot.catalogReleaseID = status.catalogReleaseID
@@ -856,16 +858,28 @@ final class MalibuAgent: ObservableObject {
             fetchedStatus: status != nil,
             identityMatched: identityMatched,
             missStartedAt: localStatusMissStartedAt,
-            launchdPID: monitorsLaunchdProvider ? InstalledProviderMonitor.launchdServicePID() : nil
+            launchdPID: launchdPID
         ) {
-            // Identity mismatch is a hard fail. A missing HTTP response may
-            // hold until launchd is gone or misses span display retention.
-            snapshot.invalidateLocalStatusObservation()
-            invalidateProviderProjectionFreshness()
+            // Identity mismatch and a missing launchd pid are hard fails.
+            // HTTP misses with a live pid keep last-confirmed Live.
+            let pidGone = launchdPID == nil
+            hardFailClosed = pidGone || identityMismatch
+            snapshot.invalidateLocalStatusObservation(clearBuyerServingHold: hardFailClosed)
+            if hardFailClosed {
+                invalidateProviderProjectionFreshness()
+            }
         } else {
             noteLocalStatusPollMiss()
         }
-        reconcileNetworkState(localReady: localReady)
+        let localReady = !hardFailClosed && ((status != nil && identityMatched) || healthReady)
+        if !localReady && (hardFailClosed || launchdPID == nil) {
+            invalidateProviderProjectionFreshness()
+        }
+        reconcileNetworkState(
+            localReady: localReady,
+            hardFailClosed: hardFailClosed,
+            identityMismatch: hardFailClosed && identityMismatch
+        )
         await refreshLatestReleaseIfNeeded()
         refreshDiagnosticFindings()
     }
@@ -937,7 +951,12 @@ final class MalibuAgent: ObservableObject {
     /// Local /v1/health readiness only — coordinator session is reconciled separately.
     @discardableResult
     private func applyHealthSnapshot(port: Int) async -> Bool {
-        guard let health = await InstalledProviderMonitor.fetchHealth(port: port) else { return false }
+        applyHealthCounters(await InstalledProviderMonitor.fetchHealth(port: port))
+    }
+
+    @discardableResult
+    private func applyHealthCounters(_ health: InstalledProviderMonitor.HealthSnapshot?) -> Bool {
+        guard let health else { return false }
         if let model = health.model, !model.isEmpty, !snapshot.hasFreshServeOwnedModelStatus() {
             snapshot.currentModelID = model
             snapshot.currentModelIDFromStatus = false
@@ -977,7 +996,11 @@ final class MalibuAgent: ObservableObject {
 
     /// Serving requires the CLI's coordinator-authoritative buyer-serving
     /// state. A WebSocket connection proves transport only, not admission.
-    private func reconcileNetworkState(localReady: Bool) {
+    private func reconcileNetworkState(
+        localReady: Bool,
+        hardFailClosed: Bool = false,
+        identityMismatch: Bool = false
+    ) {
         if snapshot.lifecycleRecordState == "valid",
            (snapshot.lifecycleState == "paused_by_operator" || snapshot.lifecycleOperatorPaused == true) {
             snapshot.state = .paused
@@ -991,6 +1014,9 @@ final class MalibuAgent: ObservableObject {
             // authoritative. Once it advances, clear the local paused view.
             snapshot.state = localReady ? .reconnecting : .starting
             snapshot.pauseAcknowledged = false
+        }
+        if hardFailClosed {
+            demoteSnapshotAfterHardFail(identityMismatch: identityMismatch)
         }
         snapshot.updateBuyerServingHold()
         persistDashboardObservation()
@@ -1006,6 +1032,25 @@ final class MalibuAgent: ObservableObject {
             snapshot.state = .reconnecting
             snapshot.lastError = coordinatorDisconnectMessage()
             return
+        }
+    }
+
+    private func demoteSnapshotAfterHardFail(identityMismatch: Bool) {
+        snapshot.lastBuyerServingAt = nil
+        if identityMismatch {
+            snapshot.state = .error
+            snapshot.lastError = "Installed provider identity does not match this Mac."
+            return
+        }
+        if let failure = diagnosedProviderFailure(includingLaunchdState: true) {
+            providerStartFailure = failure
+            snapshot.state = .error
+            snapshot.lastError = failure
+        } else {
+            snapshot.state = .reconnecting
+            snapshot.lastError = ProviderLogDiagnostics.timeoutMessage(
+                logHint: ProviderLogDiagnostics.logHint()
+            )
         }
     }
 
@@ -1087,18 +1132,23 @@ final class MalibuAgent: ObservableObject {
                     await self.requestReferralStatusIfDue()
                 } else if self.monitorsLaunchdProvider {
                     await MainActor.run {
+                        let pidGone = InstalledProviderMonitor.launchdServicePID() == nil
                         if self.shouldInvalidateHeldLocalStatus() {
-                            self.snapshot.invalidateLocalStatusObservation()
-                            self.invalidateProviderProjectionFreshness()
-                            if let failure = self.diagnosedProviderFailure(includingLaunchdState: true) {
-                                self.providerStartFailure = failure
-                                self.snapshot.state = .error
-                                self.snapshot.lastError = failure
+                            self.snapshot.invalidateLocalStatusObservation(clearBuyerServingHold: pidGone)
+                            if pidGone {
+                                self.invalidateProviderProjectionFreshness()
+                                if let failure = self.diagnosedProviderFailure(includingLaunchdState: true) {
+                                    self.providerStartFailure = failure
+                                    self.snapshot.state = .error
+                                    self.snapshot.lastError = failure
+                                } else {
+                                    self.snapshot.state = .reconnecting
+                                    self.snapshot.lastError = ProviderLogDiagnostics.timeoutMessage(
+                                        logHint: ProviderLogDiagnostics.logHint()
+                                    )
+                                }
                             } else {
-                                self.snapshot.state = .reconnecting
-                                self.snapshot.lastError = ProviderLogDiagnostics.timeoutMessage(
-                                    logHint: ProviderLogDiagnostics.logHint()
-                                )
+                                self.refreshDiagnosticFindings()
                             }
                         } else {
                             self.noteLocalStatusPollMiss()
@@ -1399,9 +1449,10 @@ final class MalibuAgent: ObservableObject {
               !providerID.isEmpty else {
             return
         }
-        let fileURL = DashboardObservationStore.fileURL()
+        let fileURL = dashboardObservationFileURLForTest ?? DashboardObservationStore.fileURL()
         var record = snapshot.dashboardObservationRecord(providerID: providerID)
         if record.lastBuyerServingAt == nil,
+           snapshot.state == .serving,
            !snapshot.shouldClearBuyerServingHold,
            let held = DashboardObservationStore.load(providerID: providerID, fileURL: fileURL)?.lastBuyerServingAt {
             record = DashboardObservationStore.Record(
@@ -1742,6 +1793,22 @@ final class MalibuAgent: ObservableObject {
 
     func allowHomeACLAutoRepairForTest() {
         homeACLAutoRepairAllowed = true
+    }
+
+    func setDashboardObservationFileURLForTest(_ url: URL) {
+        dashboardObservationFileURLForTest = url
+    }
+
+    func reconcileNetworkStateForTest(
+        localReady: Bool,
+        hardFailClosed: Bool,
+        identityMismatch: Bool
+    ) {
+        reconcileNetworkState(
+            localReady: localReady,
+            hardFailClosed: hardFailClosed,
+            identityMismatch: identityMismatch
+        )
     }
 
     var providerSoftwareRepairTaskScheduledForTest: Bool {
