@@ -1001,9 +1001,9 @@ func fillCoordinatorModelAdmissionReplayKeys(event ModelAdmissionEvent) ModelAdm
 	return event
 }
 
-// ModelAdmissionSyntheticProbeResult is the coordinator-side result of a
+// modelAdmissionSyntheticProbeResult is the coordinator-side result of a
 // bounded synthetic probe dispatched through the provider wire protocol.
-type ModelAdmissionSyntheticProbeResult struct {
+type modelAdmissionSyntheticProbeResult struct {
 	ProviderWireRequestID            string
 	Passed                           bool
 	TargetState                      string
@@ -1012,10 +1012,10 @@ type ModelAdmissionSyntheticProbeResult struct {
 	CreatedAt                        time.Time
 }
 
-// ModelAdmissionSandboxProbeDecision builds the coordinator decision that moves
+// modelAdmissionSandboxProbeDecision builds the coordinator decision that moves
 // a submitted offer into the bounded probe-only state. It does not imply buyer
 // routing, catalog pricing, or settlement eligibility.
-func ModelAdmissionSandboxProbeDecision(current ModelAdmissionEvent, reasonCode string, now time.Time) (ModelAdmissionEvent, bool) {
+func modelAdmissionSandboxProbeDecision(current ModelAdmissionEvent, reasonCode string, now time.Time) (ModelAdmissionEvent, bool) {
 	reasonCode = strings.TrimSpace(reasonCode)
 	if current.State != modelAdmissionOfferSubmitted || reasonCode == "" {
 		return ModelAdmissionEvent{}, false
@@ -1023,12 +1023,12 @@ func ModelAdmissionSandboxProbeDecision(current ModelAdmissionEvent, reasonCode 
 	return modelAdmissionCoordinatorDecisionFromCurrent(current, "sandbox_probe_only", reasonCode, "macprovider.model_admission.sandbox_probe_decision.v1", "", now), true
 }
 
-// ModelAdmissionSyntheticProbeDecision builds a non-settlement coordinator
+// modelAdmissionSyntheticProbeDecision builds a non-settlement coordinator
 // decision from a probe result. Positive probe outcomes can only admit the
 // candidate to explicit non-settlement visibility/routing states; failed probes
 // revoke the admission with a reason. Catalog-priced and settlement-capable
 // states remain owned by the trusted catalog and receipt paths, not probes.
-func ModelAdmissionSyntheticProbeDecision(current ModelAdmissionEvent, result ModelAdmissionSyntheticProbeResult) (ModelAdmissionEvent, bool) {
+func modelAdmissionSyntheticProbeDecision(current ModelAdmissionEvent, result modelAdmissionSyntheticProbeResult) (ModelAdmissionEvent, bool) {
 	reasonCode := strings.TrimSpace(result.ReasonCode)
 	wireRequestID := strings.TrimSpace(result.ProviderWireRequestID)
 	if current.State != "sandbox_probe_only" || reasonCode == "" || !validModelAdmissionToken(wireRequestID) {
