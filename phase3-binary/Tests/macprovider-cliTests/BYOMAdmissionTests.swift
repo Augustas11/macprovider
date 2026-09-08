@@ -660,6 +660,82 @@ final class BYOMAdmissionTests: XCTestCase {
         }
     }
 
+    // #1248 old-client compatibility: a current CLI pointed at a pre-BYOM
+    // coordinator (no SPEC-047 admission endpoints -> 404/405, or an unknown
+    // response schema) must fail closed and never fabricate a coordinator
+    // admission state. The provider stays on local_default inventory state.
+    func testAdmissionStatusAgainstPreBYOMCoordinatorFailsClosedWithoutFabricatingState() async throws {
+        for status in [404, 405] {
+            let session = makeBYOMAdmissionSession { _ in
+                BYOMAdmissionMockHTTPResponse(statusCode: status, body: "not found")
+            }
+            let client = BYOMModelAdmissionClient(baseURL: URL(string: "https://coordinator.test")!, session: session)
+            do {
+                _ = try await client.status(candidateID: stableBYOMAdmissionCandidateID("p"), bearerToken: "token")
+                XCTFail("pre-BYOM coordinator HTTP \(status) produced a status")
+            } catch let error as BYOMModelAdmissionError {
+                XCTAssertEqual(error, .httpStatus(status))
+                XCTAssertTrue(error.description.contains("local_default"))
+                XCTAssertTrue(error.description.contains("wait_for_coordinator"))
+            }
+        }
+
+        // An older coordinator that answers 200 with a schema this release does
+        // not know is rejected before it can become an admission state.
+        let unknownSchema = makeBYOMAdmissionSession { _ in
+            BYOMAdmissionMockHTTPResponse(
+                statusCode: 200,
+                body: #"{"schema":"models_browse.v1","rows":[]}"#
+            )
+        }
+        let client = BYOMModelAdmissionClient(baseURL: URL(string: "https://coordinator.test")!, session: unknownSchema)
+        do {
+            _ = try await client.status(candidateID: stableBYOMAdmissionCandidateID("p"), bearerToken: "token")
+            XCTFail("unknown coordinator schema produced a status")
+        } catch let error as BYOMModelAdmissionError {
+            XCTAssertEqual(error, .invalidStatusSchema)
+        }
+    }
+
+    // #1248 disablement matrix, "Offer submit" row, provider side: the
+    // coordinator's submissions_disabled rejection maps to the existing
+    // wait_for_coordinator guidance and invents no new fields or states.
+    func testOfferSubmitRejectedByDisabledCoordinatorMapsToWaitForCoordinator() async throws {
+        let root = try temporaryBYOMAdmissionDirectory("byom-admission-disabled")
+        let namespace = root.appendingPathComponent("ns")
+        let cache = root.appendingPathComponent("hf", isDirectory: true)
+        try writeBYOMAdmissionNamespace(at: namespace)
+        try createBYOMAdmissionMLXSnapshot(cacheRoot: cache, modelID: "mlx-community/Tiny-1B-4bit")
+
+        let session = makeBYOMAdmissionSession { _ in
+            BYOMAdmissionMockHTTPResponse(
+                statusCode: 503,
+                body: #"{"error":{"code":"submissions_disabled","message":"model admission offer submissions are disabled"}}"#
+            )
+        }
+        let runtime = BYOMModelAdmissionRuntime(
+            environment: BYOMDiscoveryEnvironment(namespaceURL: namespace, mlxCacheRoot: cache, ollamaOrigin: nil),
+            credentialStore: BYOMAdmissionCredentialStore(token: "provider-token-test"),
+            identityStore: BYOMAdmissionIdentityStore(identity: Curve25519.Signing.PrivateKey()),
+            client: BYOMModelAdmissionClient(baseURL: URL(string: "https://coordinator.test")!, session: session),
+            httpClient: BYOMAdmissionDiscoveryHTTPClient()
+        )
+
+        do {
+            _ = try await runtime.submitOffer(
+                providerID: "provider-byom-a",
+                target: "mlx-community/Tiny-1B-4bit",
+                evaluationDigestSHA256: String(repeating: "b", count: 64),
+                requestedDisclosureClass: "non_earning_provider_asserted"
+            )
+            XCTFail("a disabled coordinator accepted an offer submission")
+        } catch let error as BYOMModelAdmissionError {
+            XCTAssertEqual(error, .httpStatus(503))
+            XCTAssertTrue(error.description.contains("wait_for_coordinator"))
+            XCTAssertTrue(error.description.contains("unchanged"))
+        }
+    }
+
     private func temporaryBYOMAdmissionDirectory(_ name: String) throws -> URL {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("\(name)-\(UUID().uuidString)", isDirectory: true)
