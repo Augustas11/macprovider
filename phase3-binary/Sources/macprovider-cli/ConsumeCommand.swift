@@ -4079,6 +4079,7 @@ struct ConsumeEndpointRuntime: Sendable {
     let pricingAdmissionGate: ConsumePricingAdmissionGate
     let now: @Sendable () -> Date
     let requestCounter: ConsumeEndpointRequestCounter
+    let diagnostics: ConsumeStatusDiagnostics
 
     init(
         launchID: String,
@@ -4109,6 +4110,7 @@ struct ConsumeEndpointRuntime: Sendable {
         self.pricingAdmissionGate = pricingAdmissionGate
         self.now = now
         self.requestCounter = requestCounter
+        self.diagnostics = ConsumeStatusDiagnostics()
     }
 
     func beginIncompleteConnection() -> Bool {
@@ -4155,6 +4157,7 @@ struct ConsumeEndpointRuntime: Sendable {
 
     func statusPayload() -> [String: Any] {
         let resourceSnapshot = requestCounter.resourceSnapshot()
+        let diagnosticSnapshot = diagnostics.snapshot()
         var payload: [String: Any] = [
             "schema_version": "local_consumer_endpoint.status.v1",
             "process_launch_id": launchID,
@@ -4170,8 +4173,8 @@ struct ConsumeEndpointRuntime: Sendable {
             "upstream_worker_task_count": resourceSnapshot.upstreamWorkerTasks,
             "upstream_socket_descriptor_count": resourceSnapshot.upstreamSocketDescriptors,
             "open_streaming_response_count": resourceSnapshot.openStreamingResponses,
-            "last_successful_upstream_contact_at": NSNull(),
-            "error_ring": [],
+            "last_successful_upstream_contact_at": diagnosticSnapshot.lastSuccessfulUpstreamContactAt ?? NSNull(),
+            "error_ring": diagnosticSnapshot.errorRing,
         ]
         for (key, value) in budget.statusFields(
             trustedPricing: trustedPricing.revalidated(now: now()),
@@ -4180,6 +4183,151 @@ struct ConsumeEndpointRuntime: Sendable {
             payload[key] = value
         }
         return payload
+    }
+}
+
+final class ConsumeStatusDiagnostics: @unchecked Sendable {
+    private let lock = NSLock()
+    private var lastSuccessfulUpstreamContactAt: String?
+    private var errorRing: [[String: Any]] = []
+
+    private static let maxErrorEntries = 100
+    private static let minErrorEntries = 5
+    private static let maxTotalBytes = 8 * 1024
+    private static let maxDiagnosticBodyBytes = 64 * 1024
+    private static let maxFieldBytes = [
+        "error_type": 48,
+        "error_code": 64,
+        "canonical_request_id": 40,
+    ]
+
+    func recordLocalError(code: String) {
+        append(errorType: "macprovider_local_error", errorCode: code, canonicalRequestID: nil)
+    }
+
+    func recordUpstreamContact(at date: Date) {
+        lock.lock()
+        lastSuccessfulUpstreamContactAt = ConsumeEndpointStatus.iso8601(date)
+        lock.unlock()
+    }
+
+    func recordUpstreamError(response: ConsumeUpstreamResponse) {
+        guard response.statusCode >= 400 else { return }
+        let headerRequestID = Self.firstRequestID(in: response.headers)
+        guard response.body.count <= Self.maxDiagnosticBodyBytes else {
+            append(
+                errorType: "upstream_error",
+                errorCode: "upstream_http_error",
+                canonicalRequestID: Self.canonicalRequestID(headerRequestID)
+            )
+            return
+        }
+        let parsed = Self.upstreamErrorFields(response.body)
+        append(
+            errorType: Self.safeErrorClass(parsed.errorType, fallback: "upstream_error"),
+            errorCode: Self.safeErrorClass(parsed.errorCode, fallback: "upstream_http_error"),
+            canonicalRequestID: Self.canonicalRequestID(headerRequestID ?? parsed.requestID)
+        )
+    }
+
+    func snapshot() -> (lastSuccessfulUpstreamContactAt: String?, errorRing: [[String: Any]]) {
+        lock.lock()
+        defer { lock.unlock() }
+        return (lastSuccessfulUpstreamContactAt, errorRing)
+    }
+
+    private func append(errorType: String, errorCode: String, canonicalRequestID: String?) {
+        var truncated = false
+        var entry: [String: Any] = [
+            "error_type": Self.boundedField(errorType, key: "error_type", truncated: &truncated),
+            "error_code": Self.boundedField(errorCode, key: "error_code", truncated: &truncated),
+        ]
+        if let canonicalRequestID {
+            entry["canonical_request_id"] = Self.boundedField(
+                canonicalRequestID,
+                key: "canonical_request_id",
+                truncated: &truncated
+            )
+        }
+        entry["truncated"] = truncated
+
+        lock.lock()
+        errorRing.append(entry)
+        pruneLocked()
+        lock.unlock()
+    }
+
+    private func pruneLocked() {
+        while errorRing.count > Self.maxErrorEntries {
+            errorRing.removeFirst()
+        }
+        while errorRing.count > Self.minErrorEntries && Self.encodedBytes(errorRing) > Self.maxTotalBytes {
+            errorRing.removeFirst()
+        }
+    }
+
+    private static func boundedField(_ value: String, key: String, truncated: inout Bool) -> String {
+        let maximum = maxFieldBytes[key] ?? 64
+        guard value.utf8.count > maximum else { return value }
+        truncated = true
+        var output = ""
+        output.reserveCapacity(maximum)
+        for scalar in value.unicodeScalars {
+            let next = String(scalar)
+            guard output.utf8.count + next.utf8.count <= maximum else { break }
+            output.append(next)
+        }
+        return output
+    }
+
+    private static func encodedBytes(_ ring: [[String: Any]]) -> Int {
+        (try? JSONSerialization.data(withJSONObject: ring, options: []).count) ?? Int.max
+    }
+
+    private static func upstreamErrorFields(_ body: Data) -> (errorType: String?, errorCode: String?, requestID: String?) {
+        guard let text = String(data: body, encoding: .utf8),
+              case .object(let root) = try? StrictJSONParser.parse(text),
+              case .object(let error)? = root["error"] else {
+            return (nil, nil, nil)
+        }
+        let errorType = stringValue(error["type"])
+        let errorCode = stringValue(error["code"])
+        let requestID = stringValue(error["request_id"])
+        return (errorType, errorCode, requestID)
+    }
+
+    private static func stringValue(_ value: JSONValue?) -> String? {
+        guard case .string(let string)? = value else { return nil }
+        return string.isEmpty ? nil : string
+    }
+
+    private static func firstRequestID(in headers: [(String, String)]) -> String? {
+        for preferred in ["x-macprovider-request-id", "x-request-id", "openai-request-id"] {
+            if let value = headers.first(where: { name, _ in name.caseInsensitiveCompare(preferred) == .orderedSame })?.1,
+               !value.isEmpty {
+                return value
+            }
+        }
+        return nil
+    }
+
+    private static func canonicalRequestID(_ requestID: String?) -> String? {
+        guard let requestID, !requestID.isEmpty else { return nil }
+        let digest = SHA256.hash(data: Data(requestID.utf8))
+        return "sha256:" + digest.prefix(16).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func safeErrorClass(_ value: String?, fallback: String) -> String {
+        guard let value,
+              !value.isEmpty,
+              value.unicodeScalars.allSatisfy({ scalar in
+                scalar.value == 95 || scalar.value == 45 || scalar.value == 46 ||
+                    (97...122).contains(scalar.value) ||
+                    (48...57).contains(scalar.value)
+              }) else {
+            return fallback
+        }
+        return value
     }
 }
 
@@ -4747,7 +4895,7 @@ final class ConsumeLocalHandler: ChannelInboundHandler, @unchecked Sendable {
 
     private func handleHead(_ head: HTTPRequestHead, context: ChannelHandlerContext) {
         if head.method == .HEAD {
-            writeHeadOnly(context: context, status: .methodNotAllowed)
+            writeHeadOnly(context: context, status: .methodNotAllowed, code: "local_endpoint_unsupported")
             return
         }
         if let error = validatePreAuthBoundsAndFraming(head) {
@@ -6490,6 +6638,7 @@ final class ConsumeLocalHandler: ChannelInboundHandler, @unchecked Sendable {
         forwardedUpstream: Bool = false,
         extraHeaders: [(String, String)] = []
     ) {
+        runtime.diagnostics.recordLocalError(code: code)
         writeJSON(
             context: context,
             status: status,
@@ -6566,6 +6715,7 @@ final class ConsumeLocalHandler: ChannelInboundHandler, @unchecked Sendable {
         extraHeaders: [(String, String)]
     ) {
         guard !responseStarted else { return }
+        runtime.diagnostics.recordUpstreamContact(at: runtime.now())
         var headers = HTTPHeaders()
         for (name, value) in responseHeaders {
             let normalized = name.lowercased()
@@ -6614,6 +6764,8 @@ final class ConsumeLocalHandler: ChannelInboundHandler, @unchecked Sendable {
         context: ChannelHandlerContext,
         extraHeaders: [(String, String)]
     ) {
+        runtime.diagnostics.recordUpstreamContact(at: runtime.now())
+        runtime.diagnostics.recordUpstreamError(response: response)
         var headers = HTTPHeaders()
         for (name, value) in response.headers {
             let normalized = name.lowercased()
@@ -6718,7 +6870,10 @@ final class ConsumeLocalHandler: ChannelInboundHandler, @unchecked Sendable {
         }
     }
 
-    private func writeHeadOnly(context: ChannelHandlerContext, status: HTTPResponseStatus) {
+    private func writeHeadOnly(context: ChannelHandlerContext, status: HTTPResponseStatus, code: String? = nil) {
+        if let code {
+            runtime.diagnostics.recordLocalError(code: code)
+        }
         var headers = HTTPHeaders()
         headers.add(name: "content-length", value: "0")
         headers.add(name: "connection", value: "close")

@@ -7039,16 +7039,19 @@
     {
       "requirement_id": "SPEC-045-R006",
       "spec_id": "SPEC-045",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:struct ConsumeStatusCommand",
         "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:func statusPayload",
+        "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:final class ConsumeStatusDiagnostics",
         "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:struct ConsumeEndpointDescriptor",
         "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:struct ConsumeStatusClient"
       ],
       "tests": [
         "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testStatusCommandNoEndpointUsesRedactedError",
         "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testStatusHandlerRequiresAuthSetsNoStoreAndRedacts",
+        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testStatusDiagnosticsRecordBoundedRedactedErrorsAndContact",
+        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testStatusDiagnosticsBoundEntryCountAndFieldBytes",
         "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testDescriptorWriteIsUserPrivateAndStatusPayloadIsRedacted",
         "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase3NoBudgetStatusUsesNullBudgetAmounts"
       ],
@@ -7057,19 +7060,18 @@
       ],
       "evidence": [
         {
-          "artifact": "commit:dc63ecec59593235593b3de003e567e007ddcdc8",
-          "source": null,
-          "captured_at": "2026-08-24",
-          "expires_at": "2027-08-24"
-        },
-        {
           "artifact": "sha256:991c30ba0f34377ec66c993e27e2a3dd6b47705acc2799f5cf973d2ebd434161",
           "source": "journeys/evidence/local-consumer-endpoint-20260824T060103Z.spec-045-r001-spec-045-r002-spec-045-r003-spec-045-r004-spec-045-r005-spec-045-r006-spec-045-r007-spec-045-r008.journey-result.signed.json",
           "captured_at": "2026-08-24",
           "expires_at": "2027-08-24"
         }
       ],
-      "gap": null
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/927",
+        "rationale": "Status diagnostics now report bounded local/upstream error classes and last upstream contact instead of placeholders. Local regression coverage does not replace refreshed commit evidence and signed local-consumer endpoint journey evidence for the changed status implementation."
+      }
     },
     {
       "requirement_id": "SPEC-045-R007",
