@@ -20,27 +20,30 @@ const defaultSettlementReconcileLimit = 100
 const maxSettlementReconcileLimit = 500
 
 type coordinatorRequestSettlementFinality struct {
-	RequestID             string `json:"request_id"`
-	PolicyVersion         string `json:"policy_version"`
-	Mode                  string `json:"mode"`
-	Outcome               string `json:"outcome"`
-	ReceiptResult         string `json:"receipt_result"`
-	Reason                string `json:"reason"`
-	Closed                bool   `json:"closed"`
-	PendingDeadlineUnixMS int64  `json:"pending_deadline_unix_ms"`
-	PromptTokens          int64  `json:"prompt_tokens"`
-	CompletionTokens      int64  `json:"completion_tokens"`
-	TotalTokens           int64  `json:"total_tokens"`
-	TokenSource           string `json:"token_source"`
-	VerifiedAttempts      int64  `json:"verified_attempts"`
-	PendingAttempts       int64  `json:"pending_attempts"`
-	QuarantinedAttempts   int64  `json:"quarantined_attempts"`
-	ZeroSettledAttempts   int64  `json:"zero_settled_attempts"`
+	RequestID                 string `json:"request_id"`
+	RequiredInternalRequestID string `json:"required_internal_request_id"`
+	PolicyVersion             string `json:"policy_version"`
+	Mode                      string `json:"mode"`
+	ModeScopeComplete         bool   `json:"mode_scope_complete"`
+	Outcome                   string `json:"outcome"`
+	ReceiptResult             string `json:"receipt_result"`
+	Reason                    string `json:"reason"`
+	Closed                    bool   `json:"closed"`
+	PendingDeadlineUnixMS     int64  `json:"pending_deadline_unix_ms"`
+	PromptTokens              int64  `json:"prompt_tokens"`
+	CompletionTokens          int64  `json:"completion_tokens"`
+	TotalTokens               int64  `json:"total_tokens"`
+	TokenSource               string `json:"token_source"`
+	VerifiedAttempts          int64  `json:"verified_attempts"`
+	PendingAttempts           int64  `json:"pending_attempts"`
+	QuarantinedAttempts       int64  `json:"quarantined_attempts"`
+	ZeroSettledAttempts       int64  `json:"zero_settled_attempts"`
 }
 
 type SettlementReconcileSummary struct {
 	Scanned        int `json:"scanned"`
 	Verified       int `json:"verified"`
+	Observed       int `json:"observed"`
 	Refunded       int `json:"refunded"`
 	Expired        int `json:"expired"`
 	StaleHeld      int `json:"stale_held"`
@@ -112,6 +115,8 @@ func (s *Server) ReconcileSettlementHolds(ctx context.Context, limit int) (Settl
 		switch result {
 		case "verified":
 			summary.Verified++
+		case "observed":
+			summary.Observed++
 		case "refunded":
 			summary.Refunded++
 		case "held":
@@ -122,6 +127,9 @@ func (s *Server) ReconcileSettlementHolds(ctx context.Context, limit int) (Settl
 		case "coordinator_404":
 			summary.Coordinator404++
 			summary.Skipped++
+		case "coordinator_404_held":
+			summary.Coordinator404++
+			summary.Held++
 		default:
 			summary.Skipped++
 		}
@@ -144,28 +152,48 @@ func parseSettlementReconcileLimit(raw string) (int, error) {
 }
 
 func (s *Server) reconcileSettlementReservation(ctx context.Context, reservation storage.ActiveReservation) (string, error) {
-	finality, found, err := s.fetchCoordinatorRequestSettlementFinality(ctx, reservation)
-	if err != nil || !found {
-		if !found {
-			now := s.now()
-			if !reservation.ExpiresAt.IsZero() && !now.Before(reservation.ExpiresAt) {
-				var err error
-				if reservation.WalletSessionID != "" {
-					err = s.store.MarkWalletSessionReservationStaleHeld(ctx, reservation.AccountID, reservation.WalletSessionID, reservation.RequestID, now)
-				} else {
-					err = s.store.MarkReservationStaleHeld(ctx, reservation.AccountID, reservation.RequestID, now)
-				}
-				if err != nil {
-					if errors.Is(err, storage.ErrReservationNotFound) || errors.Is(err, storage.ErrReservationTerminal) {
-						return "already_terminal", nil
-					}
-					return "", err
-				}
-				return "coordinator_404_expired", nil
-			}
-			return "coordinator_404", nil
+	if err := s.store.MarkSettlementReconcileAttempt(ctx, reservation); err != nil {
+		if errors.Is(err, storage.ErrReservationNotFound) || errors.Is(err, storage.ErrReservationTerminal) {
+			return "already_terminal", nil
 		}
 		return "", err
+	}
+	candidate, candidateErr := s.store.LookupSettlementFallbackCandidate(ctx, reservation)
+	if errors.Is(candidateErr, storage.ErrNotFound) {
+		// Reconciliation without the coordinator-owned current-attempt binding
+		// could apply an earlier retry's otherwise valid finality to this hold.
+		// Legacy and persistence-failure rows remain quarantined until an
+		// operator can establish that binding through a separate recovery path.
+		return "held", nil
+	}
+	if candidateErr != nil {
+		return "", candidateErr
+	}
+	if candidate.RequiredInternalRequestID == "" {
+		// A missing trusted header quarantines this delivery. An unbound
+		// lookup could return a previous retry's otherwise valid finality.
+		return "held", nil
+	}
+	finality, found, err := s.fetchCoordinatorRequestSettlementFinality(ctx, reservation, candidate.RequiredInternalRequestID)
+	if err != nil {
+		return "", err
+	}
+	if !found {
+		// A missing coordinator lookup is not authority to discard local
+		// delivered usage. Keep this specific hold discoverable for retry.
+		return "coordinator_404_held", nil
+	}
+	if finality.RequiredInternalRequestID != candidate.RequiredInternalRequestID {
+		return "held", nil
+	}
+	if finality.RequestID == reservation.RequestID && !reservation.CreatedAt.IsZero() && coordinatorObserveFallbackAllowed(finality) {
+		if err := s.settleObserveFallbackCandidate(ctx, candidate); err != nil {
+			if errors.Is(err, storage.ErrReservationNotFound) || errors.Is(err, storage.ErrReservationTerminal) {
+				return "already_terminal", nil
+			}
+			return "", err
+		}
+		return "observed", nil
 	}
 	action := coordinatorSettlementFinalityFromHeaders(finalityHeaders(finality))
 	switch action.Action {
@@ -177,29 +205,39 @@ func (s *Server) reconcileSettlementReservation(ctx context.Context, reservation
 			return "", err
 		}
 		settlement := storage.ReservationSettlement{
-			AccountID:        reservation.AccountID,
-			RequestID:        reservation.RequestID,
-			PromptTokens:     prompt,
-			CompletionTokens: completion,
-			TotalTokens:      total,
-			MaxTotalTokens:   reservation.ReservedTokens,
-			TokenSource:      finality.TokenSource,
-			Outcome:          "spec022_verified",
-			SettledAt:        s.now(),
+			ExpectedReservationCreatedAt: reservation.CreatedAt,
+			AccountID:                    reservation.AccountID,
+			RequestID:                    reservation.RequestID,
+			PromptTokens:                 prompt,
+			CompletionTokens:             completion,
+			TotalTokens:                  total,
+			MaxTotalTokens:               reservation.ReservedTokens,
+			TokenSource:                  finality.TokenSource,
+			Outcome:                      "spec022_verified",
+			SettledAt:                    s.now(),
 		}
 		var settleErr error
 		if reservation.WalletSessionID != "" {
 			settleErr = s.store.FinalizeWalletSessionReservation(ctx, storage.WalletSessionReservationSettlement{
-				AccountID:        settlement.AccountID,
-				SessionID:        reservation.WalletSessionID,
-				RequestID:        settlement.RequestID,
-				PromptTokens:     settlement.PromptTokens,
-				CompletionTokens: settlement.CompletionTokens,
-				TotalTokens:      settlement.TotalTokens,
-				MaxTotalTokens:   settlement.MaxTotalTokens,
-				TokenSource:      settlement.TokenSource,
-				Outcome:          settlement.Outcome,
-				SettledAt:        settlement.SettledAt,
+				ExpectedReservationCreatedAt: reservation.CreatedAt,
+				AccountID:                    settlement.AccountID,
+				SessionID:                    reservation.WalletSessionID,
+				RequestID:                    settlement.RequestID,
+				PromptTokens:                 settlement.PromptTokens,
+				CompletionTokens:             settlement.CompletionTokens,
+				TotalTokens:                  settlement.TotalTokens,
+				MaxTotalTokens:               settlement.MaxTotalTokens,
+				TokenSource:                  settlement.TokenSource,
+				Outcome:                      settlement.Outcome,
+				SettledAt:                    settlement.SettledAt,
+			})
+		} else if candidate.DemoIdentity != "" {
+			settleErr = s.store.SettleDemoReservation(ctx, settlement, storage.DemoUsageEvent{
+				RequestID:     candidate.RequestID,
+				ClientIP:      candidate.DemoIdentity,
+				DemoTokenHash: candidate.DemoTokenHash,
+				WindowDate:    candidate.WindowDate,
+				CreatedAt:     settlement.SettledAt,
 			})
 		} else {
 			settleErr = s.store.SettleReservation(ctx, settlement)
@@ -239,7 +277,58 @@ func (s *Server) reconcileSettlementReservation(ctx context.Context, reservation
 	}
 }
 
-func (s *Server) fetchCoordinatorRequestSettlementFinality(ctx context.Context, reservation storage.ActiveReservation) (coordinatorRequestSettlementFinality, bool, error) {
+// Observe recovery needs positive, complete request-scoped mode authority.
+// Older coordinators omit the completeness flag and remain fail-closed.
+func coordinatorObserveFallbackAllowed(finality coordinatorRequestSettlementFinality) bool {
+	if !finality.ModeScopeComplete || finality.RequestID == "" || strings.TrimSpace(finality.RequiredInternalRequestID) == "" || finality.Mode != "observe" ||
+		(finality.PolicyVersion != settlementPolicyVersion && finality.PolicyVersion != legacySettlementPolicyVersion) ||
+		finality.Reason == "mixed_settlement_policy_snapshot" || finality.Reason == "missing_current_settlement_finality" {
+		return false
+	}
+	if finality.Outcome == "pending" {
+		return !finality.Closed && finality.ReceiptResult == "inconclusive" &&
+			finality.Reason == "receipt_verdict_pending" && finality.PendingAttempts > 0
+	}
+	if finality.PendingAttempts != 0 {
+		return false
+	}
+	finality.Mode = "enforce"
+	action := coordinatorSettlementFinalityFromHeaders(finalityHeaders(finality)).Action
+	return action == settlementFinalityDebit || action == settlementFinalityRefund
+}
+
+// The caller must first establish observe authority. Only the persisted local
+// tuple is used here; coordinator receipt totals cannot replace legacy usage.
+func (s *Server) settleObserveFallbackCandidate(ctx context.Context, candidate storage.SettlementFallbackCandidate) error {
+	if candidate.ReservationCreatedAt.IsZero() || strings.TrimSpace(candidate.RequiredInternalRequestID) == "" {
+		return fmt.Errorf("observe fallback reservation creation time and current internal request ID are required")
+	}
+	settlement := storage.ReservationSettlement{
+		ExpectedReservationCreatedAt: candidate.ReservationCreatedAt,
+		AccountID:                    candidate.AccountID, RequestID: candidate.RequestID,
+		PromptTokens: candidate.PromptTokens, CompletionTokens: candidate.CompletionTokens,
+		MaxTotalTokens: candidate.MaxTotalTokens,
+		TokenSource:    candidate.TokenSource, Outcome: candidate.Outcome, SettledAt: s.now(),
+	}
+	if candidate.WalletSessionID != "" {
+		return s.store.FinalizeWalletSessionReservation(ctx, storage.WalletSessionReservationSettlement{
+			ExpectedReservationCreatedAt: candidate.ReservationCreatedAt,
+			AccountID:                    candidate.AccountID, SessionID: candidate.WalletSessionID, RequestID: candidate.RequestID,
+			PromptTokens: settlement.PromptTokens, CompletionTokens: settlement.CompletionTokens,
+			TotalTokens: settlement.TotalTokens, MaxTotalTokens: settlement.MaxTotalTokens,
+			TokenSource: settlement.TokenSource, Outcome: settlement.Outcome, SettledAt: settlement.SettledAt,
+		})
+	}
+	if candidate.DemoIdentity != "" {
+		return s.store.SettleDemoReservation(ctx, settlement, storage.DemoUsageEvent{
+			RequestID: candidate.RequestID, ClientIP: candidate.DemoIdentity, DemoTokenHash: candidate.DemoTokenHash,
+			WindowDate: candidate.WindowDate, CreatedAt: settlement.SettledAt,
+		})
+	}
+	return s.store.SettleReservation(ctx, settlement)
+}
+
+func (s *Server) fetchCoordinatorRequestSettlementFinality(ctx context.Context, reservation storage.ActiveReservation, requiredInternalRequestID ...string) (coordinatorRequestSettlementFinality, bool, error) {
 	base := strings.TrimRight(s.cfg.Coordinator.OperatorURL, "/")
 	if base == "" {
 		return coordinatorRequestSettlementFinality{}, false, fmt.Errorf("coordinator operator URL is not configured")
@@ -251,6 +340,9 @@ func (s *Server) fetchCoordinatorRequestSettlementFinality(ctx context.Context, 
 	q := u.Query()
 	q.Set("account_id", reservation.AccountID)
 	q.Set("request_id", reservation.RequestID)
+	if len(requiredInternalRequestID) > 0 && strings.TrimSpace(requiredInternalRequestID[0]) != "" {
+		q.Set("required_internal_request_id", requiredInternalRequestID[0])
+	}
 	if !reservation.CreatedAt.IsZero() {
 		q.Set("reservation_created_at_unix_ms", strconv.FormatInt(reservation.CreatedAt.UTC().UnixMilli(), 10))
 	}

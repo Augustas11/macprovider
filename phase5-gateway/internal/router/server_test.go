@@ -2437,10 +2437,11 @@ func TestSPEC022GatewayStreamingSettlementTrailersControlBuyerDebit(t *testing.T
 			wantExpiresAt:  pendingDeadlineUnixMS,
 		},
 		{
-			name:          "declared-missing-trailer-settles-unverified",
-			declareOnly:   true,
-			wantUsageRows: 1,
-			wantSettled:   1,
+			name:           "declared-missing-trailer-holds-without-debit",
+			declareOnly:    true,
+			wantActive:     1,
+			wantActiveHold: promptCapTokens([]byte(body)) + 20,
+			wantExpiresAt:  fixedNow().Add(settlementHoldFallbackTTL).UnixMilli(),
 		},
 	}
 	for _, tc := range cases {
@@ -2534,6 +2535,7 @@ func TestSPEC022GatewayStreamingNonOKFinalityBoundsHold(t *testing.T) {
 func TestSPEC022GatewaySettlementReconcileFinalizesHeldReservation(t *testing.T) {
 	accountID := "acct_spec022_reconcile_verified"
 	requestID := "req_spec022_reconcile_verified"
+	internalRequestID := "internal_spec022_reconcile_verified"
 	var captured http.Header
 	coordinator := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		captured = r.Header.Clone()
@@ -2549,19 +2551,23 @@ func TestSPEC022GatewaySettlementReconcileFinalizesHeldReservation(t *testing.T)
 		if got, want := r.URL.Query().Get("reservation_created_at_unix_ms"), strconv.FormatInt(fixedNow().UnixMilli(), 10); got != want {
 			t.Fatalf("reservation_created_at_unix_ms query=%q want %q", got, want)
 		}
+		if got := r.URL.Query().Get("required_internal_request_id"); got != internalRequestID {
+			t.Fatalf("required_internal_request_id query=%q want %q", got, internalRequestID)
+		}
 		writeJSON(w, http.StatusOK, map[string]any{
-			"request_id":        requestID,
-			"policy_version":    settlementPolicyVersion,
-			"mode":              "enforce",
-			"outcome":           "verified",
-			"receipt_result":    "valid",
-			"reason":            "verified_settlement",
-			"closed":            true,
-			"prompt_tokens":     8,
-			"completion_tokens": 4,
-			"total_tokens":      12,
-			"token_source":      "coordinator_observed",
-			"verified_attempts": 1,
+			"request_id":                   requestID,
+			"required_internal_request_id": internalRequestID,
+			"policy_version":               settlementPolicyVersion,
+			"mode":                         "enforce",
+			"outcome":                      "verified",
+			"receipt_result":               "valid",
+			"reason":                       "verified_settlement",
+			"closed":                       true,
+			"prompt_tokens":                8,
+			"completion_tokens":            4,
+			"total_tokens":                 12,
+			"token_source":                 "coordinator_observed",
+			"verified_attempts":            1,
 		})
 	}))
 	defer coordinator.Close()
@@ -2584,6 +2590,7 @@ func TestSPEC022GatewaySettlementReconcileFinalizesHeldReservation(t *testing.T)
 	if err := store.ClampReservationExpiry(context.Background(), accountID, requestID, fixedNow().Add(4*time.Minute)); err != nil {
 		t.Fatalf("ClampReservationExpiry: %v", err)
 	}
+	seedBoundSettlementCandidate(t, store, accountID, requestID, internalRequestID, fixedNow(), 20, "")
 
 	req := httptest.NewRequest(http.MethodPost, "/admin/settlement/reconcile?limit=10", nil)
 	req.Header.Set("Authorization", "Bearer operator-key")
@@ -2615,6 +2622,7 @@ func TestSPEC022GatewaySettlementReconcileFinalizesHeldReservation(t *testing.T)
 func TestSPEC022GatewayStreamingReconcileConsumesCoordinatorVerifiedFinality(t *testing.T) {
 	accountID := "acct_spec022_streaming_contract"
 	requestID := "req_spec015_v04_streaming_tool_call_nonzero_prefix"
+	internalRequestID := "internal_spec022_streaming_contract"
 	const promptTokens int64 = 11
 	const completionTokens int64 = 7
 	coordinator := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -2630,19 +2638,23 @@ func TestSPEC022GatewayStreamingReconcileConsumesCoordinatorVerifiedFinality(t *
 		if got := r.Header.Get("Authorization"); got != "Bearer service-token" {
 			t.Fatalf("coordinator Authorization=%q want service token", got)
 		}
+		if got := r.URL.Query().Get("required_internal_request_id"); got != internalRequestID {
+			t.Fatalf("required_internal_request_id query=%q want %q", got, internalRequestID)
+		}
 		writeJSON(w, http.StatusOK, map[string]any{
-			"request_id":        requestID,
-			"policy_version":    settlementPolicyVersion,
-			"mode":              "enforce",
-			"outcome":           "verified",
-			"receipt_result":    "valid",
-			"reason":            "verified_settlement",
-			"closed":            true,
-			"prompt_tokens":     promptTokens,
-			"completion_tokens": completionTokens,
-			"total_tokens":      promptTokens + completionTokens,
-			"token_source":      "coordinator_observed",
-			"verified_attempts": 1,
+			"request_id":                   requestID,
+			"required_internal_request_id": internalRequestID,
+			"policy_version":               settlementPolicyVersion,
+			"mode":                         "enforce",
+			"outcome":                      "verified",
+			"receipt_result":               "valid",
+			"reason":                       "verified_settlement",
+			"closed":                       true,
+			"prompt_tokens":                promptTokens,
+			"completion_tokens":            completionTokens,
+			"total_tokens":                 promptTokens + completionTokens,
+			"token_source":                 "coordinator_observed",
+			"verified_attempts":            1,
 		})
 	}))
 	defer coordinator.Close()
@@ -2665,6 +2677,7 @@ func TestSPEC022GatewayStreamingReconcileConsumesCoordinatorVerifiedFinality(t *
 	if err := store.ClampReservationExpiry(context.Background(), accountID, requestID, fixedNow().Add(4*time.Minute)); err != nil {
 		t.Fatalf("ClampReservationExpiry: %v", err)
 	}
+	seedBoundSettlementCandidate(t, store, accountID, requestID, internalRequestID, fixedNow(), 32, "")
 
 	req := httptest.NewRequest(http.MethodPost, "/admin/settlement/reconcile?limit=10", nil)
 	req.Header.Set("Authorization", "Bearer operator-key")
@@ -2694,22 +2707,24 @@ func TestSPEC022GatewayStreamingReconcileConsumesCoordinatorVerifiedFinality(t *
 func TestSPEC022GatewaySettlementReconcileRejectsMissingTokenSource(t *testing.T) {
 	accountID := "acct_spec022_missing_token_source"
 	requestID := "req_spec022_missing_token_source"
+	internalRequestID := "internal_spec022_missing_token_source"
 	coordinator := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/internal/settlement/finality" {
 			t.Fatalf("coordinator path=%s", r.URL.Path)
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
-			"request_id":        requestID,
-			"policy_version":    settlementPolicyVersion,
-			"mode":              "enforce",
-			"outcome":           "verified",
-			"receipt_result":    "valid",
-			"reason":            "verified_settlement",
-			"closed":            true,
-			"prompt_tokens":     11,
-			"completion_tokens": 7,
-			"total_tokens":      18,
-			"verified_attempts": 1,
+			"request_id":                   requestID,
+			"required_internal_request_id": internalRequestID,
+			"policy_version":               settlementPolicyVersion,
+			"mode":                         "enforce",
+			"outcome":                      "verified",
+			"receipt_result":               "valid",
+			"reason":                       "verified_settlement",
+			"closed":                       true,
+			"prompt_tokens":                11,
+			"completion_tokens":            7,
+			"total_tokens":                 18,
+			"verified_attempts":            1,
 		})
 	}))
 	defer coordinator.Close()
@@ -2732,6 +2747,7 @@ func TestSPEC022GatewaySettlementReconcileRejectsMissingTokenSource(t *testing.T
 	if err := store.ClampReservationExpiry(context.Background(), accountID, requestID, fixedNow().Add(4*time.Minute)); err != nil {
 		t.Fatalf("ClampReservationExpiry: %v", err)
 	}
+	seedBoundSettlementCandidate(t, store, accountID, requestID, internalRequestID, fixedNow(), 32, "")
 
 	req := httptest.NewRequest(http.MethodPost, "/admin/settlement/reconcile?limit=10", nil)
 	req.Header.Set("Authorization", "Bearer operator-key")
@@ -2758,23 +2774,25 @@ func TestSPEC022GatewaySettlementReconcileRefundsAndHolds(t *testing.T) {
 	pendingDeadlineUnixMS := now.Add(2 * time.Minute).UnixMilli()
 	finalities := map[string]map[string]any{
 		"req_refund": {
-			"request_id":     "req_refund",
-			"policy_version": settlementPolicyVersion,
-			"mode":           "enforce",
-			"outcome":        "quarantined",
-			"receipt_result": "invalid",
-			"reason":         "signature_verify_failed",
-			"closed":         true,
+			"request_id":                   "req_refund",
+			"required_internal_request_id": "internal_req_refund",
+			"policy_version":               settlementPolicyVersion,
+			"mode":                         "enforce",
+			"outcome":                      "quarantined",
+			"receipt_result":               "invalid",
+			"reason":                       "signature_verify_failed",
+			"closed":                       true,
 		},
 		"req_hold": {
-			"request_id":               "req_hold",
-			"policy_version":           settlementPolicyVersion,
-			"mode":                     "enforce",
-			"outcome":                  "pending",
-			"receipt_result":           "inconclusive",
-			"reason":                   "receipt_verdict_pending",
-			"closed":                   false,
-			"pending_deadline_unix_ms": pendingDeadlineUnixMS,
+			"request_id":                   "req_hold",
+			"required_internal_request_id": "internal_req_hold",
+			"policy_version":               settlementPolicyVersion,
+			"mode":                         "enforce",
+			"outcome":                      "pending",
+			"receipt_result":               "inconclusive",
+			"reason":                       "receipt_verdict_pending",
+			"closed":                       false,
+			"pending_deadline_unix_ms":     pendingDeadlineUnixMS,
 		},
 	}
 	coordinator := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -2809,6 +2827,7 @@ func TestSPEC022GatewaySettlementReconcileRefundsAndHolds(t *testing.T) {
 		if err := store.ClampReservationExpiry(context.Background(), "acct_spec022_reconcile", requestID, expiresAt); err != nil {
 			t.Fatalf("ClampReservationExpiry %s: %v", requestID, err)
 		}
+		seedBoundSettlementCandidate(t, store, "acct_spec022_reconcile", requestID, "internal_"+requestID, now, 20, "")
 	}
 	if _, err := store.ReserveQuota(context.Background(), storage.ReservationRequest{
 		AccountID:       "acct_spec022_reconcile",
@@ -2833,12 +2852,12 @@ func TestSPEC022GatewaySettlementReconcileRefundsAndHolds(t *testing.T) {
 	if err := json.Unmarshal(resp.Body.Bytes(), &summary); err != nil {
 		t.Fatalf("decode summary: %v", err)
 	}
-	if summary.Scanned != 3 || summary.Refunded != 1 || summary.StaleHeld != 1 || summary.Held != 1 || summary.Coordinator404 != 1 || summary.Skipped != 0 || summary.Errors != 0 {
-		t.Fatalf("summary=%+v, want refund/hold/stale-held coordinator-404 split", summary)
+	if summary.Scanned != 3 || summary.Refunded != 1 || summary.StaleHeld != 0 || summary.Held != 2 || summary.Coordinator404 != 1 || summary.Skipped != 0 || summary.Errors != 0 {
+		t.Fatalf("summary=%+v, want one refund and two safely held reservations", summary)
 	}
 	got := gatewaySettlementSnapshot(t, dbPath, "acct_spec022_reconcile")
-	if got.usageRows != 0 || got.settledRows != 0 || got.refundedRows != 1 || got.activeRows != 2 || got.expiredRows != 0 || got.staleHeldRows != 1 || got.activeReserved != 40 {
-		t.Fatalf("settlement snapshot=%+v, want one refund, one stale-held coordinator-404 hold, one held pending reservation, and one ordinary active reservation", got)
+	if got.usageRows != 0 || got.settledRows != 0 || got.refundedRows != 1 || got.activeRows != 3 || got.expiredRows != 0 || got.staleHeldRows != 0 || got.activeReserved != 60 {
+		t.Fatalf("settlement snapshot=%+v, want one refund, two held reservations, and one ordinary active reservation", got)
 	}
 	if got := gatewayReservationExpiresAtUnixMSForRequest(t, dbPath, "acct_spec022_reconcile", "req_hold"); got != pendingDeadlineUnixMS {
 		t.Fatalf("held reservation expires_at=%d want %d", got, pendingDeadlineUnixMS)
@@ -2959,7 +2978,7 @@ func TestSPEC022GatewayStreamingVerifiedHoldIgnoresBuyerCanceledContext(t *testi
 		Action:  settlementFinalityDebit,
 		Outcome: "verified",
 		Reason:  "verified_settlement",
-	})
+	}, nil, 0, 0, 0, "", "", "")
 
 	if wrapped.markCtxErr != nil {
 		t.Fatalf("MarkReservationSettlementHold ctx err=%v want nil despite canceled buyer context", wrapped.markCtxErr)
@@ -6949,6 +6968,25 @@ type gatewaySettlementState struct {
 	activeRows     int64
 	activeReserved int64
 	heldRows       int64
+}
+
+func seedBoundSettlementCandidate(t *testing.T, store *sqlite.Store, accountID, requestID, internalRequestID string,
+	createdAt time.Time, maxTotalTokens int64, walletSessionID string,
+) {
+	t.Helper()
+	if err := store.SaveSettlementFallbackCandidate(context.Background(), storage.SettlementFallbackCandidate{
+		AccountID:                 accountID,
+		RequestID:                 requestID,
+		RequiredInternalRequestID: internalRequestID,
+		ReservationCreatedAt:      createdAt,
+		WalletSessionID:           walletSessionID,
+		WindowDate:                createdAt.UTC().Format("2006-01-02"),
+		MaxTotalTokens:            maxTotalTokens,
+		TokenSource:               "gateway_estimated",
+		Outcome:                   "reconcile_test_hold",
+	}); err != nil {
+		t.Fatalf("SaveSettlementFallbackCandidate: %v", err)
+	}
 }
 
 func gatewaySettlementSnapshot(t *testing.T, dbPath, accountID string) gatewaySettlementState {

@@ -244,6 +244,46 @@ BEGIN
 END;
 `
 
+const settlementFallbackCandidatesDDL = `
+CREATE TABLE IF NOT EXISTS settlement_reconcile_attempts (
+	attempt_sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+	account_id TEXT NOT NULL,
+	request_id TEXT NOT NULL,
+	reservation_created_at TEXT NOT NULL,
+	UNIQUE (account_id, request_id),
+	FOREIGN KEY (account_id, request_id) REFERENCES quota_reservations(account_id, request_id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS settlement_fallback_candidates (
+	account_id TEXT NOT NULL,
+	request_id TEXT NOT NULL,
+	required_internal_request_id TEXT NOT NULL CHECK (length(required_internal_request_id) <= 128),
+	reservation_created_at TEXT NOT NULL,
+	wallet_session_id TEXT NOT NULL DEFAULT '',
+	demo_identity TEXT NOT NULL DEFAULT '',
+	demo_token_hash TEXT NOT NULL DEFAULT '',
+	window_date TEXT NOT NULL,
+	prompt_tokens INTEGER NOT NULL CHECK (prompt_tokens >= 0),
+	completion_tokens INTEGER NOT NULL CHECK (completion_tokens >= 0),
+	max_total_tokens INTEGER NOT NULL CHECK (max_total_tokens > 0),
+	token_source TEXT NOT NULL CHECK (token_source IN ('provider_reported', 'gateway_estimated')),
+	outcome TEXT NOT NULL,
+	PRIMARY KEY (account_id, request_id, reservation_created_at),
+	FOREIGN KEY (account_id, request_id) REFERENCES quota_reservations(account_id, request_id) ON DELETE CASCADE
+);
+`
+
+const oauthHandoffsTableDDL = `
+CREATE TABLE IF NOT EXISTS oauth_handoffs (
+	token_hash BLOB PRIMARY KEY,
+	account_id TEXT NOT NULL REFERENCES accounts(account_id),
+	action TEXT NOT NULL DEFAULT '' CHECK (action IN ('', 'mint')),
+	created_at TEXT NOT NULL,
+	expires_at TEXT NOT NULL,
+	consumed_at TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_oauth_handoffs_expires ON oauth_handoffs(expires_at);
+`
+
 const schemaSQL = `
 PRAGMA foreign_keys = ON;
 
@@ -283,16 +323,7 @@ CREATE TABLE IF NOT EXISTS oauth_states (
 	action TEXT NOT NULL DEFAULT ''
 );
 
-CREATE TABLE IF NOT EXISTS oauth_handoffs (
-	token_hash BLOB PRIMARY KEY,
-	api_key TEXT NOT NULL,
-	created_at TEXT NOT NULL,
-	expires_at TEXT NOT NULL,
-	consumed_at TEXT NOT NULL DEFAULT ''
-);
-
-CREATE INDEX IF NOT EXISTS idx_oauth_handoffs_expires ON oauth_handoffs(expires_at);
-
+` + oauthHandoffsTableDDL + `
 CREATE TABLE IF NOT EXISTS public_issuance_events (
 	event_id INTEGER PRIMARY KEY AUTOINCREMENT,
 	surface TEXT NOT NULL,

@@ -9,9 +9,15 @@ import (
 )
 
 type RequestSettlementFinality struct {
-	RequestID                string `json:"request_id"`
-	PolicyVersion            string `json:"policy_version"`
-	Mode                     string `json:"mode"`
+	RequestID     string `json:"request_id"`
+	PolicyVersion string `json:"policy_version"`
+	Mode          string `json:"mode"`
+	// Present only after the required internal request is included in the
+	// account/generation-scoped external lookup, never a direct-ID lookup.
+	RequiredInternalRequestID string `json:"required_internal_request_id,omitempty"`
+	// Scope completeness covers policy/mode, not receipt verification. It binds
+	// the selected internal request, or every linked request for an external ID.
+	ModeScopeComplete        bool   `json:"mode_scope_complete"`
 	Outcome                  string `json:"outcome"`
 	ReceiptResult            string `json:"receipt_result"`
 	Reason                   string `json:"reason"`
@@ -44,13 +50,26 @@ const externalRequestFinalityLookupSkew = 5 * time.Minute
 const SettlementOutcomeOverlapBlockedTerminal = "overlap_blocked_terminal"
 
 func (s *Store) RequestSettlementFinalityForAccount(ctx context.Context, accountID, requestID string, nowUnixMS int64, notBeforeUnixMS ...int64) (RequestSettlementFinality, bool, error) {
-	accountScope := AccountScopeForSettlement(accountID)
 	notBefore := int64(0)
 	if len(notBeforeUnixMS) > 0 {
 		notBefore = notBeforeUnixMS[0]
 	}
-	directLookupAllowed := true
-	if notBefore > 0 {
+	return s.requestSettlementFinalityForAccount(ctx, accountID, requestID, "", nowUnixMS, notBefore)
+}
+
+// RequestSettlementFinalityForAccountBound prevents a prior logged retry from
+// authorizing recovery while the current stream has not written its request log.
+func (s *Store) RequestSettlementFinalityForAccountBound(ctx context.Context, accountID, requestID, requiredInternalRequestID string, nowUnixMS, notBeforeUnixMS int64) (RequestSettlementFinality, bool, error) {
+	if requiredInternalRequestID == "" || notBeforeUnixMS <= 0 {
+		return RequestSettlementFinality{}, false, fmt.Errorf("required internal request id and reservation timestamp are required")
+	}
+	return s.requestSettlementFinalityForAccount(ctx, accountID, requestID, requiredInternalRequestID, nowUnixMS, notBeforeUnixMS)
+}
+
+func (s *Store) requestSettlementFinalityForAccount(ctx context.Context, accountID, requestID, requiredInternalRequestID string, nowUnixMS, notBefore int64) (RequestSettlementFinality, bool, error) {
+	accountScope := AccountScopeForSettlement(accountID)
+	directLookupAllowed := requiredInternalRequestID == ""
+	if directLookupAllowed && notBefore > 0 {
 		var err error
 		directLookupAllowed, err = s.directRequestIDWithinReservationWindow(ctx, accountID, requestID, notBefore)
 		if err != nil {
@@ -66,6 +85,18 @@ func (s *Store) RequestSettlementFinalityForAccount(ctx context.Context, account
 	internalRequestIDs, err := s.requestIDsForExternalRequest(ctx, accountID, requestID, notBefore)
 	if err != nil || len(internalRequestIDs) == 0 {
 		return RequestSettlementFinality{}, false, err
+	}
+	if requiredInternalRequestID != "" {
+		included := false
+		for _, internalRequestID := range internalRequestIDs {
+			if internalRequestID == requiredInternalRequestID {
+				included = true
+				break
+			}
+		}
+		if !included {
+			return RequestSettlementFinality{}, false, nil
+		}
 	}
 	finalities := make([]RequestSettlementFinality, 0, len(internalRequestIDs))
 	missingFinality := false
@@ -84,7 +115,9 @@ func (s *Store) RequestSettlementFinalityForAccount(ctx context.Context, account
 		return RequestSettlementFinality{}, false, nil
 	}
 	finality := aggregateExternalRequestFinality(requestID, finalities)
-	if missingFinality && finality.Outcome == SettlementOutcomeVerified && finality.Closed {
+	finality.RequiredInternalRequestID = requiredInternalRequestID
+	if missingFinality {
+		finality.ModeScopeComplete = false
 		finality.Outcome = SettlementOutcomePending
 		finality.ReceiptResult = SettlementReceiptResultInconclusive
 		finality.Reason = "missing_current_settlement_finality"
@@ -189,6 +222,23 @@ func (s *Store) RequestSettlementFinality(ctx context.Context, accountScope, req
 			finality.PendingDeadlineUnixMS = minPositiveDeadline(finality.PendingDeadlineUnixMS, row.pendingDeadlineUnixMS)
 		}
 	}
+	scopeReason, err := s.requestSettlementScopeReason(ctx, accountScope, requestID, rows)
+	if err != nil {
+		return RequestSettlementFinality{}, false, err
+	}
+	if scopeReason != "" {
+		finality.Outcome = SettlementOutcomePending
+		finality.ReceiptResult = SettlementReceiptResultInconclusive
+		finality.Reason = scopeReason
+		finality.Closed = false
+		finality.TokenSource = ""
+		finality.PromptTokens = 0
+		finality.CompletionTokens = 0
+		finality.TotalTokens = 0
+		finality.PendingAttempts++
+		return finality, true, nil
+	}
+	finality.ModeScopeComplete = true
 	if finality.PendingAttempts > 0 {
 		finality.Outcome = SettlementOutcomePending
 		finality.ReceiptResult = SettlementReceiptResultInconclusive
@@ -275,6 +325,57 @@ SELECT attempt_n, provider_id, receipt_result, settlement_outcome, reason, close
 		out = append(out, row)
 	}
 	return out, rows.Err()
+}
+
+// Snapshots exist before pending verdicts do. Looking only at verdict rows can
+// hide a later attempt's policy or mode while advertising earlier observe scope.
+func (s *Store) requestSettlementScopeReason(ctx context.Context, accountScope, requestID string, verdicts []requestSettlementVerdictRow) (string, error) {
+	if len(verdicts) == 0 {
+		return "missing_current_settlement_finality", nil
+	}
+	type attemptKey struct {
+		attemptN   int64
+		providerID string
+	}
+	remaining := make(map[attemptKey]requestSettlementVerdictRow, len(verdicts))
+	for _, verdict := range verdicts {
+		remaining[attemptKey{verdict.attemptN, verdict.providerID}] = verdict
+	}
+	rows, err := s.db.QueryContext(ctx, `
+SELECT attempt_n, provider_id, route_snapshot_policy_version, route_snapshot_mode
+  FROM settlement_route_snapshots
+ WHERE account_scope = ? AND request_id = ?`, accountScope, requestID)
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+	reason := ""
+	for rows.Next() {
+		var key attemptKey
+		var policy, mode string
+		if err := rows.Scan(&key.attemptN, &key.providerID, &policy, &mode); err != nil {
+			return "", err
+		}
+		if policy != verdicts[0].policyVersion || mode != verdicts[0].mode {
+			return "mixed_settlement_policy_snapshot", nil
+		}
+		verdict, found := remaining[key]
+		if !found {
+			reason = "missing_current_settlement_finality"
+			continue
+		}
+		if verdict.policyVersion != policy || verdict.mode != mode {
+			return "mixed_settlement_policy_snapshot", nil
+		}
+		delete(remaining, key)
+	}
+	if err := rows.Err(); err != nil {
+		return "", err
+	}
+	if len(remaining) > 0 {
+		return "missing_current_settlement_finality", nil
+	}
+	return reason, nil
 }
 
 func (s *Store) requestSettlementUsage(ctx context.Context, accountScope, requestID string, attemptN int64, providerID string) (SettlementUsage, bool, error) {
@@ -385,15 +486,20 @@ SELECT request_id
 
 func aggregateExternalRequestFinality(externalRequestID string, finalities []RequestSettlementFinality) RequestSettlementFinality {
 	out := RequestSettlementFinality{
-		RequestID:     externalRequestID,
-		PolicyVersion: finalities[0].PolicyVersion,
-		Mode:          finalities[0].Mode,
+		RequestID:         externalRequestID,
+		PolicyVersion:     finalities[0].PolicyVersion,
+		Mode:              finalities[0].Mode,
+		ModeScopeComplete: true,
 	}
 	var firstTerminalRefund RequestSettlementFinality
 	hasTerminalRefund := false
 	for i := range finalities {
 		finality := finalities[i]
+		if !finality.ModeScopeComplete {
+			out.ModeScopeComplete = false
+		}
 		if finality.PolicyVersion != out.PolicyVersion || finality.Mode != out.Mode {
+			out.ModeScopeComplete = false
 			out.Outcome = SettlementOutcomePending
 			out.ReceiptResult = SettlementReceiptResultInconclusive
 			out.Reason = "mixed_settlement_policy_snapshot"

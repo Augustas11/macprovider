@@ -109,6 +109,7 @@ func (s *Store) Ping(ctx context.Context) error {
 //	v9 — oauth return_to + oauth_handoffs support.
 //	v10 — SPEC-040 wallet-native buyer session tables.
 //	v11 — SPEC-041 relay-blind replay ledger.
+//	v12 — OAuth issuance intent and reservation-bound observe recovery candidates.
 //
 // At Open time the store reads the current applied version; if it
 // exceeds this constant the binary is older than the DB and refuses
@@ -119,7 +120,7 @@ func (s *Store) Ping(ctx context.Context) error {
 // Operators rolling back the gateway binary on a DB at a higher
 // version must restore /var/lib/macprovider/gateway.db from the
 // pre-deploy snapshot (deploy-pearl-vps.sh step 5b writes one).
-const maxKnownSchemaVersion = 11
+const maxKnownSchemaVersion = 12
 
 func (s *Store) Migrate(ctx context.Context) error {
 	if err := s.checkSchemaVersionGate(ctx); err != nil {
@@ -190,6 +191,9 @@ func (s *Store) Migrate(ctx context.Context) error {
 	if err := s.ensureQuotaReservationStaleHeldStatus(ctx); err != nil {
 		return err
 	}
+	if _, err := s.db.ExecContext(ctx, settlementFallbackCandidatesDDL); err != nil {
+		return err
+	}
 	// Stamp the schema version. We always insert v1 (preserves
 	// historical behavior for any tooling that checked exactly that
 	// row) AND the post-#196 marker v2. INSERT OR IGNORE keeps it
@@ -232,6 +236,9 @@ func (s *Store) Migrate(ctx context.Context) error {
 		return err
 	}
 	if _, err := s.db.ExecContext(ctx, "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(11, ?)", now); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(12, ?)", now); err != nil {
 		return err
 	}
 	return nil
@@ -370,17 +377,31 @@ func (s *Store) ensureOAuthStateReturnToColumn(ctx context.Context) error {
 }
 
 func (s *Store) ensureOAuthHandoffsTable(ctx context.Context) error {
-	_, err := s.db.ExecContext(ctx, `
-		CREATE TABLE IF NOT EXISTS oauth_handoffs (
-			token_hash BLOB PRIMARY KEY,
-			api_key TEXT NOT NULL,
-			created_at TEXT NOT NULL,
-			expires_at TEXT NOT NULL,
-			consumed_at TEXT NOT NULL DEFAULT ''
-		);
-		CREATE INDEX IF NOT EXISTS idx_oauth_handoffs_expires ON oauth_handoffs(expires_at);
-	`)
-	return err
+	var legacyColumns int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('oauth_handoffs') WHERE name = 'api_key'`).Scan(&legacyColumns); err != nil {
+		return err
+	}
+	if legacyColumns == 0 {
+		return nil
+	}
+	tx, err := s.beginImmediate(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	// Legacy tokens cannot be converted into issuance intent safely. Expire
+	// every old handoff and remove its plaintext column atomically with the
+	// version fence. Historical WAL/backups still need operator remediation.
+	if _, err := tx.ExecContext(ctx, `DROP TABLE oauth_handoffs`); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, oauthHandoffsTableDDL); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(12, ?)`, encodeTime(time.Now().UTC())); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // ensureUsageEventsCompositePK upgrades pre-issue-#196 gateway.db files
@@ -1095,39 +1116,48 @@ func (s *Store) StoreOAuthHandoff(ctx context.Context, handoff storage.OAuthHand
 		consumedAt = encodeTime(handoff.ConsumedAt)
 	}
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO oauth_handoffs(token_hash, api_key, created_at, expires_at, consumed_at)
-		VALUES(?, ?, ?, ?, ?)`,
-		handoff.TokenHash, handoff.APIKey, encodeTime(handoff.CreatedAt), encodeTime(handoff.ExpiresAt), consumedAt)
+		INSERT INTO oauth_handoffs(token_hash, account_id, action, created_at, expires_at, consumed_at)
+		VALUES(?, ?, ?, ?, ?, ?)`,
+		handoff.TokenHash, handoff.AccountID, handoff.Action, encodeTime(handoff.CreatedAt), encodeTime(handoff.ExpiresAt), consumedAt)
 	return err
 }
 
-func (s *Store) ConsumeOAuthHandoff(ctx context.Context, tokenHash []byte, now time.Time) (string, error) {
+// ConsumeOAuthHandoff binds a generated key hash to the stored account and
+// commits issuance together with consumption. The reusable secret never enters
+// storage, and a failed issuance leaves the intent available for a retry.
+func (s *Store) ConsumeOAuthHandoff(ctx context.Context, tokenHash []byte, key storage.APIKey, now time.Time) (storage.OAuthHandoff, error) {
 	tx, err := s.beginImmediate(ctx)
 	if err != nil {
-		return "", err
+		return storage.OAuthHandoff{}, err
 	}
 	defer tx.Rollback()
-	var apiKey string
+	var handoff storage.OAuthHandoff
 	var expiresAt string
 	var consumedAt string
 	if err := tx.QueryRowContext(ctx, `
-		SELECT api_key, expires_at, consumed_at
-		FROM oauth_handoffs
-		WHERE token_hash = ?`,
-		tokenHash).Scan(&apiKey, &expiresAt, &consumedAt); err != nil {
+		SELECT h.account_id, h.action, h.expires_at, h.consumed_at
+		FROM oauth_handoffs h JOIN accounts a ON a.account_id = h.account_id
+		WHERE h.token_hash = ? AND a.status = 'active'`,
+		tokenHash).Scan(&handoff.AccountID, &handoff.Action, &expiresAt, &consumedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return "", storage.ErrNotFound
+			return storage.OAuthHandoff{}, storage.ErrNotFound
 		}
-		return "", err
+		return storage.OAuthHandoff{}, err
 	}
 	if consumedAt != "" || !now.Before(decodeTime(expiresAt)) {
-		return "", storage.ErrNotFound
+		return storage.OAuthHandoff{}, storage.ErrNotFound
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO api_keys(key_id, account_id, key_hash, key_hash_prefix, status, created_at)
+		VALUES(?, ?, ?, ?, 'active', ?)`,
+		key.KeyID, handoff.AccountID, key.KeyHash, key.KeyHashPrefix, encodeTime(now.UTC())); err != nil {
+		return storage.OAuthHandoff{}, err
 	}
 	_, err = tx.ExecContext(ctx, `UPDATE oauth_handoffs SET consumed_at = ? WHERE token_hash = ?`, encodeTime(now.UTC()), tokenHash)
 	if err != nil {
-		return "", err
+		return storage.OAuthHandoff{}, err
 	}
-	return apiKey, tx.Commit()
+	return handoff, tx.Commit()
 }
 
 func (s *Store) PruneExpiredOAuthHandoffs(ctx context.Context, now time.Time) (int64, error) {
@@ -1342,13 +1372,17 @@ func (s *Store) SettleReservation(ctx context.Context, settlement storage.Reserv
 	defer tx.Rollback()
 	var windowDate string
 	var status string
+	var createdAt string
 	if err := tx.QueryRowContext(ctx, `
-		SELECT window_date, status FROM quota_reservations
-		WHERE account_id = ? AND request_id = ?`, settlement.AccountID, settlement.RequestID).Scan(&windowDate, &status); err != nil {
+		SELECT window_date, status, created_at FROM quota_reservations
+		WHERE account_id = ? AND request_id = ?`, settlement.AccountID, settlement.RequestID).Scan(&windowDate, &status, &createdAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return storage.ErrReservationNotFound
 		}
 		return err
+	}
+	if !settlement.ExpectedReservationCreatedAt.IsZero() && createdAt != encodeTime(settlement.ExpectedReservationCreatedAt.UTC()) {
+		return storage.ErrReservationNotFound
 	}
 	if status != "active" {
 		return fmt.Errorf("%w: reservation %s is %s", storage.ErrReservationTerminal, settlement.RequestID, status)
@@ -1386,13 +1420,17 @@ func (s *Store) SettleDemoReservation(ctx context.Context, settlement storage.Re
 	defer tx.Rollback()
 	var windowDate string
 	var status string
+	var createdAt string
 	if err := tx.QueryRowContext(ctx, `
-		SELECT window_date, status FROM quota_reservations
-		WHERE account_id = ? AND request_id = ?`, settlement.AccountID, settlement.RequestID).Scan(&windowDate, &status); err != nil {
+		SELECT window_date, status, created_at FROM quota_reservations
+		WHERE account_id = ? AND request_id = ?`, settlement.AccountID, settlement.RequestID).Scan(&windowDate, &status, &createdAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return storage.ErrReservationNotFound
 		}
 		return err
+	}
+	if !settlement.ExpectedReservationCreatedAt.IsZero() && createdAt != encodeTime(settlement.ExpectedReservationCreatedAt.UTC()) {
+		return storage.ErrReservationNotFound
 	}
 	if status != "active" {
 		// Wraps the sentinel exactly like SettleReservation does. A caller
@@ -1603,8 +1641,10 @@ func (s *Store) ListSettlementHeldReservations(ctx context.Context, limit int) (
 		FROM quota_reservations qr
 		LEFT JOIN wallet_session_request_map wrm
 			ON wrm.account_id = qr.account_id AND wrm.request_id = qr.request_id
+		LEFT JOIN settlement_reconcile_attempts sra
+			ON sra.account_id = qr.account_id AND sra.request_id = qr.request_id AND sra.reservation_created_at = qr.created_at
 		WHERE qr.status = 'active' AND qr.settlement_hold = 1
-		ORDER BY qr.expires_at ASC, qr.created_at ASC
+		ORDER BY COALESCE(sra.attempt_sequence, 0) ASC, qr.expires_at ASC, qr.created_at ASC
 		LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
@@ -2475,17 +2515,20 @@ func (s *Store) FinalizeWalletSessionReservation(ctx context.Context, settlement
 	if err := normalizeSettlementTokens(&accountSettlement); err != nil {
 		return err
 	}
-	var windowDate, quotaStatus, sessionStatus string
+	var windowDate, quotaStatus, sessionStatus, reservationCreatedAt string
 	if err := tx.QueryRowContext(ctx, `
-		SELECT qr.window_date, qr.status, sr.status
+		SELECT qr.window_date, qr.status, sr.status, qr.created_at
 		FROM quota_reservations qr
 		JOIN wallet_session_reservations sr ON sr.account_id = qr.account_id AND sr.request_id = qr.request_id
 		WHERE qr.account_id = ? AND qr.request_id = ? AND sr.session_id = ?`,
-		settlement.AccountID, settlement.RequestID, settlement.SessionID).Scan(&windowDate, &quotaStatus, &sessionStatus); err != nil {
+		settlement.AccountID, settlement.RequestID, settlement.SessionID).Scan(&windowDate, &quotaStatus, &sessionStatus, &reservationCreatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return storage.ErrReservationNotFound
 		}
 		return err
+	}
+	if !settlement.ExpectedReservationCreatedAt.IsZero() && reservationCreatedAt != encodeTime(settlement.ExpectedReservationCreatedAt.UTC()) {
+		return storage.ErrReservationNotFound
 	}
 	if quotaStatus != "active" || (sessionStatus != "active" && sessionStatus != "held") {
 		return fmt.Errorf("%w: wallet reservation %s is %s/%s", storage.ErrReservationTerminal, settlement.RequestID, quotaStatus, sessionStatus)

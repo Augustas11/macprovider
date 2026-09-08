@@ -360,21 +360,27 @@ func TestOAuthStateReturnToRoundTrip(t *testing.T) {
 func TestOAuthHandoffStoreConsumeReplay(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t)
+	createAccount(t, store, "acct_handoff")
 	now := fixedTime()
 	tokenHash := keyHash("handoff-token")
 	if err := store.StoreOAuthHandoff(ctx, storage.OAuthHandoff{
-		TokenHash: tokenHash[:], APIKey: "mp_abc123", CreatedAt: now, ExpiresAt: now.Add(5 * time.Minute),
+		TokenHash: tokenHash[:], AccountID: "acct_handoff", Action: "mint", CreatedAt: now, ExpiresAt: now.Add(5 * time.Minute),
 	}); err != nil {
 		t.Fatalf("StoreOAuthHandoff: %v", err)
 	}
-	apiKey, err := store.ConsumeOAuthHandoff(ctx, tokenHash[:], now.Add(time.Minute))
+	key := oauthHandoffTestKey("first")
+	handoff, err := store.ConsumeOAuthHandoff(ctx, tokenHash[:], key, now.Add(time.Minute))
 	if err != nil {
 		t.Fatalf("ConsumeOAuthHandoff: %v", err)
 	}
-	if apiKey != "mp_abc123" {
-		t.Fatalf("apiKey=%q want mp_abc123", apiKey)
+	if handoff.AccountID != "acct_handoff" || handoff.Action != "mint" {
+		t.Fatalf("handoff=%+v", handoff)
 	}
-	if _, err := store.ConsumeOAuthHandoff(ctx, tokenHash[:], now.Add(2*time.Minute)); !errors.Is(err, storage.ErrNotFound) {
+	validation, err := store.ValidateAPIKeyHash(ctx, key.KeyHash)
+	if err != nil || validation.AccountID != "acct_handoff" {
+		t.Fatalf("issued key account=%q err=%v", validation.AccountID, err)
+	}
+	if _, err := store.ConsumeOAuthHandoff(ctx, tokenHash[:], oauthHandoffTestKey("replay"), now.Add(2*time.Minute)); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("replay err=%v want ErrNotFound", err)
 	}
 }
@@ -382,14 +388,15 @@ func TestOAuthHandoffStoreConsumeReplay(t *testing.T) {
 func TestOAuthHandoffExpiredReturnsNotFound(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t)
+	createAccount(t, store, "acct_handoff")
 	now := fixedTime()
 	tokenHash := keyHash("handoff-expired")
 	if err := store.StoreOAuthHandoff(ctx, storage.OAuthHandoff{
-		TokenHash: tokenHash[:], APIKey: "mp_expired", CreatedAt: now, ExpiresAt: now.Add(time.Minute),
+		TokenHash: tokenHash[:], AccountID: "acct_handoff", CreatedAt: now, ExpiresAt: now.Add(time.Minute),
 	}); err != nil {
 		t.Fatalf("StoreOAuthHandoff: %v", err)
 	}
-	if _, err := store.ConsumeOAuthHandoff(ctx, tokenHash[:], now.Add(2*time.Minute)); !errors.Is(err, storage.ErrNotFound) {
+	if _, err := store.ConsumeOAuthHandoff(ctx, tokenHash[:], oauthHandoffTestKey("expired"), now.Add(time.Minute)); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("expired err=%v want ErrNotFound", err)
 	}
 }
@@ -397,11 +404,12 @@ func TestOAuthHandoffExpiredReturnsNotFound(t *testing.T) {
 func TestPruneExpiredOAuthHandoffs(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t)
+	createAccount(t, store, "acct_handoff")
 	now := fixedTime()
 	for i := 0; i < 3; i++ {
 		hash := keyHash(fmt.Sprintf("handoff-fresh-%d", i))
 		if err := store.StoreOAuthHandoff(ctx, storage.OAuthHandoff{
-			TokenHash: hash[:], APIKey: fmt.Sprintf("mp_fresh_%d", i), CreatedAt: now, ExpiresAt: now.Add(10 * time.Minute),
+			TokenHash: hash[:], AccountID: "acct_handoff", CreatedAt: now, ExpiresAt: now.Add(10 * time.Minute),
 		}); err != nil {
 			t.Fatalf("StoreOAuthHandoff fresh %d: %v", i, err)
 		}
@@ -409,7 +417,7 @@ func TestPruneExpiredOAuthHandoffs(t *testing.T) {
 	for i := 0; i < 2; i++ {
 		hash := keyHash(fmt.Sprintf("handoff-stale-%d", i))
 		if err := store.StoreOAuthHandoff(ctx, storage.OAuthHandoff{
-			TokenHash: hash[:], APIKey: fmt.Sprintf("mp_stale_%d", i), CreatedAt: now, ExpiresAt: now.Add(time.Minute),
+			TokenHash: hash[:], AccountID: "acct_handoff", CreatedAt: now, ExpiresAt: now.Add(time.Minute),
 		}); err != nil {
 			t.Fatalf("StoreOAuthHandoff stale %d: %v", i, err)
 		}

@@ -43,20 +43,22 @@ type tokenUsage struct {
 }
 
 type usageSubject struct {
-	AccountID       string
-	DemoIdentity    string
-	DemoTokenHash   string
-	WalletSessionID string
+	AccountID            string
+	DemoIdentity         string
+	DemoTokenHash        string
+	WalletSessionID      string
+	ReservationCreatedAt time.Time
 }
 
 const (
-	settlementOutcomeHeader       = "X-MacProvider-Settlement-Outcome"
-	settlementReceiptResultHeader = "X-MacProvider-Settlement-Receipt-Result"
-	settlementReasonHeader        = "X-MacProvider-Settlement-Reason"
-	settlementClosedHeader        = "X-MacProvider-Settlement-Closed"
-	settlementModeHeader          = "X-MacProvider-Settlement-Mode"
-	settlementPolicyVersionHeader = "X-MacProvider-Settlement-Policy-Version"
-	settlementPendingUntilHeader  = "X-MacProvider-Settlement-Pending-Deadline-Unix-Ms"
+	settlementOutcomeHeader            = "X-MacProvider-Settlement-Outcome"
+	settlementReceiptResultHeader      = "X-MacProvider-Settlement-Receipt-Result"
+	settlementReasonHeader             = "X-MacProvider-Settlement-Reason"
+	settlementClosedHeader             = "X-MacProvider-Settlement-Closed"
+	settlementModeHeader               = "X-MacProvider-Settlement-Mode"
+	settlementPolicyVersionHeader      = "X-MacProvider-Settlement-Policy-Version"
+	settlementPendingUntilHeader       = "X-MacProvider-Settlement-Pending-Deadline-Unix-Ms"
+	coordinatorInternalRequestIDHeader = "X-MacProvider-Internal-Request-ID"
 	// settlementNoPriorDispatchHeader mirrors the coordinator constant of the
 	// same name (separate Go module, intentionally duplicated). The coordinator
 	// sets it on a route_snapshot_failed ONLY when it is the genuine first
@@ -452,18 +454,19 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request_error", "token_limit_overflow", "Requested token reservation overflows")
 		return
 	}
-	window := s.now().UTC().Format("2006-01-02")
+	subject.ReservationCreatedAt = s.now().UTC()
+	window := subject.ReservationCreatedAt.Format("2006-01-02")
 	reservationMaxAge := time.Duration(s.cfg.Quotas.ReservationMaxAgeHours) * time.Hour
 	var decision storage.QuotaDecision
 	var sessionDecision storage.WalletSessionAdmissionDecision
 	if authn.WalletSession != nil {
-		sessionDecision, err = s.admitWalletSessionInference(r, authn.WalletSession, originalBody, model, reservationTokens, dailyQuota, window, s.now().Add(reservationMaxAge))
+		sessionDecision, err = s.admitWalletSessionInference(r, authn.WalletSession, originalBody, model, reservationTokens, dailyQuota, window, subject.ReservationCreatedAt, s.now().Add(reservationMaxAge))
 		decision = sessionDecision.AccountQuota
 	} else {
 		decision, err = s.store.ReserveQuota(r.Context(), storage.ReservationRequest{
 			AccountID: subject.AccountID, RequestID: requestID(r), WindowDate: window,
 			RequestedTokens: reservationTokens, DailyQuota: dailyQuota,
-			CreatedAt: s.now(), ExpiresAt: s.now().Add(reservationMaxAge),
+			CreatedAt: subject.ReservationCreatedAt, ExpiresAt: s.now().Add(reservationMaxAge),
 		})
 	}
 	if errors.Is(err, storage.ErrQuotaExceeded) {
@@ -674,7 +677,13 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if authn.WalletSession != nil && err == nil && resp != nil {
 		if markErr := s.store.MarkWalletSessionDispatched(context.Background(), authn.WalletSession.Session.SessionID, requestID(r), s.now().UTC()); markErr != nil {
 			_ = resp.Body.Close()
-			_ = s.store.HoldWalletSessionReservation(context.Background(), subject.AccountID, subject.WalletSessionID, requestID(r), s.now().UTC())
+			holdCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = s.boundStreamingSettlementHoldWithCandidate(holdCtx, r, subject, coordinatorSettlementFinality{
+				Action:  settlementFinalityHold,
+				Outcome: "wallet_dispatch_persist_failed",
+				Reason:  "gateway_wallet_dispatch_persist_failed",
+			}, resp.Header, promptEstimate, 0, maxUsageTokens, "gateway_estimated", "wallet_dispatch_persist_failed", window)
 			writeError(w, http.StatusInternalServerError, "server_error", "settlement_failed", "Settlement failed")
 			return
 		}
@@ -1235,14 +1244,14 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 		// This is a gateway-authored terminal SSE error. The gateway cancels
 		// the coordinator stream before EOF, so declared settlement trailers
 		// may be unavailable and must not rewrite the buyer-visible outcome.
-		if hasSettlementFinalityTrailerDeclaration(resp) {
+		if hasSettlementFinalityTrailerDeclaration(resp) || coordinatorSettlementFinalityFromHeaders(resp.Header).Action != settlementFinalityLegacy {
 			holdCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			if !s.boundStreamingSettlementHold(holdCtx, r, subject, coordinatorSettlementFinality{
+			if !s.boundStreamingSettlementHoldWithCandidate(holdCtx, r, subject, coordinatorSettlementFinality{
 				Action:  settlementFinalityHold,
 				Outcome: "stream_output_exceeded",
 				Reason:  "gateway_stream_output_exceeded",
-			}) {
+			}, resp.Header, promptEstimate, completion, maxUsageTokens, "gateway_estimated", "stream_output_exceeded", reservationWindow) {
 				slog.Error("gateway failed to persist output-exceeded streaming settlement hold",
 					"request_id", requestID(r),
 					"account_id", subject.AccountID,
@@ -1263,14 +1272,14 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 		if estimateTokensFromBytes(emitted) > maxStreamingCompletionTokens(maxTokens) {
 			outcome = "stream_output_exceeded"
 		}
-		if hasSettlementFinalityTrailerDeclaration(resp) {
+		if hasSettlementFinalityTrailerDeclaration(resp) || coordinatorSettlementFinalityFromHeaders(resp.Header).Action != settlementFinalityLegacy {
 			holdCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			if !s.boundStreamingSettlementHold(holdCtx, r, subject, coordinatorSettlementFinality{
+			if !s.boundStreamingSettlementHoldWithCandidate(holdCtx, r, subject, coordinatorSettlementFinality{
 				Action:  settlementFinalityHold,
 				Outcome: outcome,
 				Reason:  "gateway_" + outcome,
-			}) {
+			}, resp.Header, promptEstimate, gatewayContentEstimatedCompletion(), maxUsageTokens, "gateway_estimated", outcome, reservationWindow) {
 				slog.Error("gateway failed to persist local terminal streaming settlement hold",
 					"request_id", requestID(r),
 					"account_id", subject.AccountID,
@@ -1504,6 +1513,10 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 			return false
 		}
 		if adapter := anthropicMessagesAdapterFromContext(r.Context()); adapter != nil && adapter.streamDone && terminalStructuredErrorCode == "" {
+			if flusher != nil {
+				flusher.Flush()
+			}
+			drainFacadeSettlementTrailers(r.Context(), reader, resp, cancelCoordinator)
 			if reported != nil && !invalidReportedUsage {
 				settleReported(adapter.settlementOutcome("ok"))
 			} else {
@@ -1517,6 +1530,10 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 			return false
 		}
 		if adapter := responsesAdapterFromContext(r.Context()); adapter != nil && adapter.streamTerminal && terminalStructuredErrorCode == "" {
+			if flusher != nil {
+				flusher.Flush()
+			}
+			drainFacadeSettlementTrailers(r.Context(), reader, resp, cancelCoordinator)
 			if reported != nil && !invalidReportedUsage {
 				settleReported(adapter.settlementOutcome("ok"))
 			} else {
@@ -1692,6 +1709,28 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 type streamingReadResult struct {
 	line []byte
 	err  error
+}
+
+// The facade terminal event is not HTTP EOF. Read only a bounded tail so the
+// transport can publish finality, without forwarding or accounting later data.
+func drainFacadeSettlementTrailers(ctx context.Context, reader *bufio.Reader, resp *http.Response, cancel func()) {
+	if !hasSettlementFinalityTrailerDeclaration(resp) || hasAnySettlementFinalityHeader(resp.Trailer) {
+		return
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	remaining := maxStreamingLineBytes
+	for remaining > 0 {
+		line, err := readStreamingLineWithIdleTimeout(ctx, reader, deadline, cancel, resp.Body)
+		remaining -= len(line)
+		if err == io.EOF {
+			return
+		}
+		if err != nil {
+			cancel()
+			return
+		}
+	}
+	cancel()
 }
 
 // streamingProgressDeadline converts the configured idle budget into the
@@ -1913,7 +1952,8 @@ func (s *Server) passThroughReceiptEligibleProviderError(w http.ResponseWriter, 
 	case settlementFinalityDebit:
 		holdCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		if !s.boundStreamingSettlementHold(holdCtx, r, subject, finality) {
+		if !s.boundStreamingSettlementHoldWithCandidate(holdCtx, r, subject, finality, resp.Header,
+			promptEstimate, 0, maxUsageTokens, "gateway_estimated", "upstream_error", "") {
 			writeError(w, http.StatusInternalServerError, "server_error", "settlement_failed", "Could not settle usage")
 			return
 		}
@@ -1926,7 +1966,8 @@ func (s *Server) passThroughReceiptEligibleProviderError(w http.ResponseWriter, 
 	case settlementFinalityHold:
 		holdCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		if !s.boundStreamingSettlementHold(holdCtx, r, subject, finality) {
+		if !s.boundStreamingSettlementHoldWithCandidate(holdCtx, r, subject, finality, resp.Header,
+			promptEstimate, 0, maxUsageTokens, "gateway_estimated", "upstream_error", "") {
 			writeError(w, http.StatusInternalServerError, "server_error", "settlement_failed", "Could not settle usage")
 			return
 		}
@@ -2212,9 +2253,6 @@ func (s *Server) settleBeforeStreamingResponseWithCoordinatorFinality(w http.Res
 }
 
 func (s *Server) settleBeforeResponseWithCoordinatorFinalityPolicy(w http.ResponseWriter, r *http.Request, subject usageSubject, prompt, completion, maxTotal int64, source, outcome string, h http.Header, boundHold bool) bool {
-	if gatewayInvalidResponseOverridesCoordinatorFinality(outcome) {
-		return s.settleBeforeResponse(w, r, subject, prompt, completion, maxTotal, source, outcome)
-	}
 	finality := coordinatorSettlementFinalityFromHeaders(h)
 	switch finality.Action {
 	case settlementFinalityLegacy:
@@ -2222,7 +2260,8 @@ func (s *Server) settleBeforeResponseWithCoordinatorFinalityPolicy(w http.Respon
 	case settlementFinalityDebit:
 		holdCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		if !s.boundStreamingSettlementHold(holdCtx, r, subject, finality) {
+		if !s.boundStreamingSettlementHoldWithCandidate(holdCtx, r, subject, finality, h,
+			prompt, completion, maxTotal, source, outcome, "") {
 			writeError(w, http.StatusInternalServerError, "server_error", "settlement_failed", "Could not settle usage")
 			return false
 		}
@@ -2250,7 +2289,8 @@ func (s *Server) settleBeforeResponseWithCoordinatorFinalityPolicy(w http.Respon
 	case settlementFinalityHold:
 		holdCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		if !s.boundStreamingSettlementHold(holdCtx, r, subject, finality) {
+		if !s.boundStreamingSettlementHoldWithCandidate(holdCtx, r, subject, finality, h,
+			prompt, completion, maxTotal, source, outcome, "") {
 			writeError(w, http.StatusInternalServerError, "server_error", "settlement_failed", "Could not settle usage")
 			return false
 		}
@@ -2268,11 +2308,37 @@ func (s *Server) settleBeforeResponseWithCoordinatorFinalityPolicy(w http.Respon
 }
 
 func (s *Server) settleStreamingAfterCommitWithCoordinatorFinality(r *http.Request, subject usageSubject, prompt, completion, maxTotal int64, source, outcome, reservationWindow string, resp *http.Response) {
-	if gatewayInvalidResponseOverridesCoordinatorFinality(outcome) {
-		s.settleAfterCommit(r, subject, prompt, completion, maxTotal, source, outcome, reservationWindow)
-		return
-	}
 	finality := coordinatorStreamingSettlementFinality(resp)
+	internalRequestID := strings.TrimSpace(resp.Header.Get(coordinatorInternalRequestIDHeader))
+	if finality.Reason == "missing_settlement_finality_trailer" && !subject.ReservationCreatedAt.IsZero() && coordinatorHeadersPermitObserveFallback(resp.Header) {
+		fallbackOutcome := outcome
+		if fallbackOutcome == "ok" {
+			fallbackOutcome = "unverified_streaming"
+		}
+		if reservationWindow == "" {
+			reservationWindow = subject.ReservationCreatedAt.UTC().Format("2006-01-02")
+		}
+		candidate := storage.SettlementFallbackCandidate{
+			RequiredInternalRequestID: internalRequestID,
+			AccountID:                 subject.AccountID, RequestID: requestID(r), ReservationCreatedAt: subject.ReservationCreatedAt,
+			WalletSessionID: subject.WalletSessionID, DemoIdentity: subject.DemoIdentity, DemoTokenHash: subject.DemoTokenHash,
+			WindowDate: reservationWindow, PromptTokens: prompt, CompletionTokens: completion,
+			MaxTotalTokens: maxTotal, TokenSource: source, Outcome: fallbackOutcome,
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		err := s.store.SaveSettlementFallbackCandidate(ctx, candidate)
+		cancel()
+		if err != nil {
+			slog.Error("gateway could not persist unknown-mode settlement candidate", "request_id", requestID(r), "error", err)
+		} else if s.resolveMissingFinalityAsObserve(r, subject, resp) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := s.settleObserveFallbackCandidate(ctx, candidate); err != nil {
+				slog.Error("gateway deferred observe fallback to durable reconciliation", "request_id", requestID(r), "error", err)
+			}
+			return
+		}
+	}
 	switch finality.Action {
 	case settlementFinalityLegacy:
 		if outcome == "ok" {
@@ -2280,7 +2346,8 @@ func (s *Server) settleStreamingAfterCommitWithCoordinatorFinality(r *http.Reque
 		}
 		s.settleAfterCommit(r, subject, prompt, completion, maxTotal, source, outcome, reservationWindow)
 	case settlementFinalityDebit:
-		s.markStreamingSettlementHoldForReconciliation(r, subject, finality)
+		s.markStreamingSettlementHoldForReconciliation(r, subject, finality, resp.Header,
+			prompt, completion, maxTotal, source, outcome, reservationWindow)
 	case settlementFinalityRefund:
 		if err := s.refundWalletAwareReservation(subject, requestID(r)); err != nil && !errors.Is(err, storage.ErrReservationNotFound) {
 			slog.Error("gateway streaming settlement refund failed after coordinator receipt finality",
@@ -2292,13 +2359,16 @@ func (s *Server) settleStreamingAfterCommitWithCoordinatorFinality(r *http.Reque
 			)
 		}
 	case settlementFinalityHold:
-		if finality.Reason == "missing_settlement_finality_trailer" {
-			s.settleAfterCommit(r, subject, prompt, completion, maxTotal, source, "unverified_streaming", reservationWindow)
-			return
-		}
+		// A facade may finish before HTTP EOF makes trailers available. Keep
+		// receipt authority in the reconciler; missing finality is not a debit.
 		holdCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		if !s.boundStreamingSettlementHold(holdCtx, r, subject, finality) {
+		reconcileOutcome := outcome
+		if reconcileOutcome == "ok" {
+			reconcileOutcome = "unverified_streaming"
+		}
+		if !s.boundStreamingSettlementHoldWithCandidate(holdCtx, r, subject, finality, resp.Header,
+			prompt, completion, maxTotal, source, reconcileOutcome, reservationWindow) {
 			slog.Error("gateway failed to persist streaming settlement hold after coordinator finality",
 				"request_id", requestID(r),
 				"account_id", subject.AccountID,
@@ -2311,13 +2381,41 @@ func (s *Server) settleStreamingAfterCommitWithCoordinatorFinality(r *http.Reque
 	}
 }
 
-func gatewayInvalidResponseOverridesCoordinatorFinality(outcome string) bool {
-	return outcome == "invalid_provider_response"
+// Only request-scoped coordinator authority can release an unknown-mode hold
+// into legacy accounting. Use the local usage tuple, not receipt-only totals.
+func (s *Server) resolveMissingFinalityAsObserve(r *http.Request, subject usageSubject, resp *http.Response) bool {
+	internalRequestID := strings.TrimSpace(resp.Header.Get(coordinatorInternalRequestIDHeader))
+	if subject.ReservationCreatedAt.IsZero() || s.cfg.Coordinator.OperatorURL == "" || internalRequestID == "" {
+		return false
+	}
+	if !coordinatorHeadersPermitObserveFallback(resp.Header) {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	finality, found, err := s.fetchCoordinatorRequestSettlementFinality(ctx, storage.ActiveReservation{
+		AccountID: subject.AccountID, RequestID: requestID(r), CreatedAt: subject.ReservationCreatedAt,
+	}, internalRequestID)
+	if err != nil || !found || finality.RequestID != requestID(r) || finality.RequiredInternalRequestID != internalRequestID {
+		return false
+	}
+	return coordinatorObserveFallbackAllowed(finality)
 }
 
-func (s *Server) markStreamingSettlementHoldForReconciliation(r *http.Request, subject usageSubject, finality coordinatorSettlementFinality) {
+func coordinatorHeadersPermitObserveFallback(h http.Header) bool {
+	mode := strings.TrimSpace(h.Get(settlementModeHeader))
+	policy := strings.TrimSpace(h.Get(settlementPolicyVersionHeader))
+	return (mode == "" || mode == "observe") &&
+		(policy == "" || policy == settlementPolicyVersion || policy == legacySettlementPolicyVersion)
+}
+
+func (s *Server) markStreamingSettlementHoldForReconciliation(r *http.Request, subject usageSubject, finality coordinatorSettlementFinality,
+	h http.Header, prompt, completion, maxTotal int64, source, outcome, reservationWindow string,
+) {
 	holdCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+	s.persistSettlementReconcileCandidate(holdCtx, r, subject, finality, h,
+		prompt, completion, maxTotal, source, outcome, reservationWindow)
 	if err := s.holdWalletAwareReservation(holdCtx, subject, requestID(r)); err != nil {
 		if errors.Is(err, storage.ErrReservationNotFound) || errors.Is(err, storage.ErrReservationTerminal) {
 			slog.Info("gateway skipped streaming settlement hold after coordinator finality because reservation is not active",
@@ -2367,6 +2465,56 @@ func (s *Server) markStreamingSettlementHoldForReconciliation(r *http.Request, s
 		"settlement_outcome", finality.Outcome,
 		"settlement_reason", finality.Reason,
 	)
+}
+
+func (s *Server) boundStreamingSettlementHoldWithCandidate(ctx context.Context, r *http.Request, subject usageSubject,
+	finality coordinatorSettlementFinality, h http.Header, prompt, completion, maxTotal int64, source, outcome, reservationWindow string,
+) bool {
+	s.persistSettlementReconcileCandidate(ctx, r, subject, finality, h,
+		prompt, completion, maxTotal, source, outcome, reservationWindow)
+	return s.boundStreamingSettlementHold(ctx, r, subject, finality)
+}
+
+func (s *Server) persistSettlementReconcileCandidate(ctx context.Context, r *http.Request, subject usageSubject,
+	finality coordinatorSettlementFinality, h http.Header, prompt, completion, maxTotal int64, source, outcome, reservationWindow string,
+) {
+	if subject.ReservationCreatedAt.IsZero() {
+		slog.Error("gateway could not persist current-attempt settlement binding",
+			"request_id", requestID(r),
+			"account_id", subject.AccountID,
+			"settlement_outcome", finality.Outcome,
+			"settlement_reason", finality.Reason,
+			"error", "reservation creation time is unavailable",
+		)
+		return
+	}
+	if reservationWindow == "" && !subject.ReservationCreatedAt.IsZero() {
+		reservationWindow = subject.ReservationCreatedAt.UTC().Format("2006-01-02")
+	}
+	candidate := storage.SettlementFallbackCandidate{
+		AccountID:                 subject.AccountID,
+		RequestID:                 requestID(r),
+		RequiredInternalRequestID: strings.TrimSpace(h.Get(coordinatorInternalRequestIDHeader)),
+		ReservationCreatedAt:      subject.ReservationCreatedAt,
+		WalletSessionID:           subject.WalletSessionID,
+		DemoIdentity:              subject.DemoIdentity,
+		DemoTokenHash:             subject.DemoTokenHash,
+		WindowDate:                reservationWindow,
+		PromptTokens:              prompt,
+		CompletionTokens:          completion,
+		MaxTotalTokens:            maxTotal,
+		TokenSource:               source,
+		Outcome:                   outcome,
+	}
+	if err := s.store.SaveSettlementFallbackCandidate(ctx, candidate); err != nil {
+		slog.Error("gateway could not persist current-attempt settlement binding",
+			"request_id", requestID(r),
+			"account_id", subject.AccountID,
+			"settlement_outcome", finality.Outcome,
+			"settlement_reason", finality.Reason,
+			"error", err,
+		)
+	}
 }
 
 func (s *Server) boundStreamingSettlementHold(ctx context.Context, r *http.Request, subject usageSubject, finality coordinatorSettlementFinality) bool {
@@ -2440,7 +2588,7 @@ func coordinatorStreamingSettlementFinality(resp *http.Response) coordinatorSett
 	if hasSettlementFinalityTrailerDeclaration(resp) {
 		return coordinatorSettlementFinality{Action: settlementFinalityHold, Reason: "missing_settlement_finality_trailer"}
 	}
-	return coordinatorSettlementFinality{Action: settlementFinalityLegacy}
+	return coordinatorSettlementFinalityFromHeaders(resp.Header)
 }
 
 func coordinatorSettlementFinalityFromHeaders(h http.Header) coordinatorSettlementFinality {
@@ -3400,6 +3548,9 @@ func writeProviderDisconnectedSSE(w http.ResponseWriter) {
 
 func parseChatRequest(body []byte) (chatRequest, error) {
 	var req chatRequest
+	if err := validateChatRequestFieldNames(body); err != nil {
+		return req, err
+	}
 	if err := json.Unmarshal(body, &req); err != nil {
 		return chatRequest{}, errors.New("Malformed JSON")
 	}

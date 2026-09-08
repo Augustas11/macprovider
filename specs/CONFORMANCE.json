@@ -4313,7 +4313,7 @@
     {
       "requirement_id": "SPEC-006-R003",
       "spec_id": "SPEC-006",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
         "phase5-gateway/internal/storage/sqlite/store.go:ReserveQuota",
         "phase5-gateway/internal/storage/sqlite/store.go:SettleReservation",
@@ -4342,7 +4342,12 @@
           "expires_at": "2026-09-16"
         }
       ],
-      "gap": null
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1433",
+        "rationale": "The security fixes change mapped quota settlement selectors beyond the historical 5ed5d719 candidate. Existing implementation mappings, tests, journeys, and evidence are retained as historical provenance; full requirement conformance requires refreshed matching candidate and signed paid-path journey evidence. Local regression results do not renew the historical attestation."
+      }
     },
     {
       "requirement_id": "SPEC-006-R004",
@@ -4708,7 +4713,7 @@
     {
       "requirement_id": "SPEC-022-R005",
       "spec_id": "SPEC-022",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
         "phase5-gateway/internal/router/chat_proxy.go:forwardStreamingChat",
         "phase4-coordinator/internal/billing/settlement_receipts.go:IngestSettlementReceipt"
@@ -4734,7 +4739,12 @@
           "expires_at": "2026-09-16"
         }
       ],
-      "gap": null
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1433",
+        "rationale": "The security fixes change the mapped streaming finality selector beyond the historical 5ed5d719 candidate, including missing-trailer holds and request-bound observe recovery. Existing implementation mappings, tests, journeys, and evidence are retained as historical provenance; full requirement conformance requires refreshed matching candidate and signed paid-path journey evidence. Local regression results do not renew the historical attestation."
+      }
     },
     {
       "requirement_id": "SPEC-022-R006",
@@ -4805,7 +4815,7 @@
     {
       "requirement_id": "SPEC-022-R008",
       "spec_id": "SPEC-022",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
         "phase5-gateway/internal/storage/sqlite/store.go:ReserveQuota",
         "phase5-gateway/internal/storage/sqlite/store.go:SettleReservation",
@@ -4833,7 +4843,12 @@
           "expires_at": "2026-09-17"
         }
       ],
-      "gap": null
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1433",
+        "rationale": "The security fixes change mapped reservation settlement selectors beyond the historical caa6ae4a candidate, including generation-bound reconciliation. Existing implementation mappings, tests, journeys, and evidence are retained as historical provenance; full requirement conformance requires refreshed matching candidate and signed enforce journey evidence. Local regression results do not renew the historical attestation."
+      }
     },
     {
       "requirement_id": "SPEC-022-R009",
