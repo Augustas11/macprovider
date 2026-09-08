@@ -11,13 +11,17 @@ provider state**. "Rollback exists" is not enough — each row names the switch.
 
 There is **no** single BYOM feature flag, by design. v0.1 ships discovery +
 evaluation + honest non-earning disclosure + a coordinator settlement-evidence
-gate, and **earning is impossible regardless of state**. The money-path
-backstops are fail-closed **by construction** — paid routing is gated on a
-settlement-binding predicate that no BYOM v0.1 admission row can satisfy (not a
-single hardcoded return that a later change might flip) — so the disablement
-points below are defense-in-depth for individual surfaces, not the thing
-standing between BYOM and provider payouts (nothing here can pay a provider in
-v0.1).
+gate, and **no v0.1 promotion path emits a settlement-capable row**. The
+money-path backstops are fail-closed **by construction** — paid routing is gated
+on a settlement-binding predicate (`settlement_capable` state + full trusted
+catalog binding + coordinator event id), not a single hardcoded return that a
+later change might flip. The state machine does allow a `settlement_capable`
+row to route and credit under billing `enforce` mode with valid SPEC-022
+receipts (`route_snapshot_test.go:TestBYOMSettlementCapableBindsAdmissionEventIntoRouteSnapshot`),
+but providers can only reach `offer_submitted`/`withdrawn`, and no v0.1
+coordinator path mints the trusted catalog binding — so the disablement points
+below are defense-in-depth for individual surfaces, not the thing standing
+between BYOM and provider payouts.
 
 ## Disablement matrix (#1248, nine rows)
 
