@@ -133,6 +133,169 @@ func TestObserveFallbackRecoverySurvivesOutageAndRestart(t *testing.T) {
 	}
 }
 
+func TestSettlementReconcileWithoutCurrentAttemptBindingRejectsPriorFinality(t *testing.T) {
+	for _, outcome := range []string{"verified", "quarantined"} {
+		t.Run(outcome, func(t *testing.T) {
+			var coordinatorCalls atomic.Int32
+			coordinator := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				coordinatorCalls.Add(1)
+				_ = json.NewEncoder(w).Encode(coordinatorRequestSettlementFinality{
+					RequestID:                 "req_unbound_current_attempt",
+					RequiredInternalRequestID: "internal_prior_attempt",
+					Mode:                      "enforce",
+					PolicyVersion:             settlementPolicyVersion,
+					Outcome:                   outcome,
+					ReceiptResult:             "valid",
+					Reason:                    "prior_attempt_finality",
+					Closed:                    true,
+					PromptTokens:              4,
+					CompletionTokens:          5,
+					TotalTokens:               9,
+					TokenSource:               "coordinator_observed",
+					VerifiedAttempts:          1,
+				})
+			}))
+			defer coordinator.Close()
+
+			h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+				cfg.Coordinator.OperatorURL = coordinator.URL
+				cfg.Coordinator.OperatorKey = "operator-key"
+				cfg.Coordinator.ServiceToken = "service-token"
+			}, WithHTTPClient(coordinator.Client()))
+			createdAt := fixedNow()
+			if _, err := store.ReserveQuota(context.Background(), storage.ReservationRequest{
+				AccountID:       "acct_unbound_current_attempt",
+				RequestID:       "req_unbound_current_attempt",
+				WindowDate:      createdAt.UTC().Format("2006-01-02"),
+				RequestedTokens: 10,
+				DailyQuota:      cfg.Quotas.AccountDailyTokens,
+				CreatedAt:       createdAt,
+				ExpiresAt:       createdAt.Add(time.Minute),
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.MarkReservationSettlementHold(context.Background(), "acct_unbound_current_attempt", "req_unbound_current_attempt"); err != nil {
+				t.Fatal(err)
+			}
+
+			req := httptest.NewRequest(http.MethodPost, "/admin/settlement/reconcile?limit=10", nil)
+			req.Header.Set("Authorization", "Bearer operator-key")
+			resp := httptest.NewRecorder()
+			h.ServeHTTP(resp, req)
+			if resp.Code != http.StatusOK {
+				t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+			}
+			var summary settlementReconcileSummary
+			if err := json.Unmarshal(resp.Body.Bytes(), &summary); err != nil {
+				t.Fatal(err)
+			}
+			if summary.Scanned != 1 || summary.Held != 1 || summary.Verified != 0 || summary.Refunded != 0 || summary.Errors != 0 {
+				t.Fatalf("summary=%+v, want unbound reservation held without finality", summary)
+			}
+			if calls := coordinatorCalls.Load(); calls != 0 {
+				t.Fatalf("coordinator calls=%d want 0 for unbound current attempt", calls)
+			}
+			state := gatewaySettlementSnapshot(t, dbPath, "acct_unbound_current_attempt")
+			if state.activeRows != 1 || state.heldRows != 1 || state.usageRows != 0 || state.settledRows != 0 || state.refundedRows != 0 {
+				t.Fatalf("settlement state=%+v, want current reservation quarantined", state)
+			}
+		})
+	}
+}
+
+func TestSettlementReconcileVerifiedDemoWritesDemoAuditRow(t *testing.T) {
+	const (
+		accountID         = "demo:192.0.2.25"
+		requestID         = "req_demo_verified_reconcile"
+		internalRequestID = "internal_demo_verified_reconcile"
+		demoIdentity      = "192.0.2.25"
+		demoTokenHash     = "demo-token-hash-verified"
+	)
+	coordinator := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query().Get("required_internal_request_id"); got != internalRequestID {
+			t.Fatalf("required_internal_request_id=%q want %q", got, internalRequestID)
+		}
+		_ = json.NewEncoder(w).Encode(coordinatorRequestSettlementFinality{
+			RequestID:                 requestID,
+			RequiredInternalRequestID: internalRequestID,
+			Mode:                      "enforce",
+			PolicyVersion:             settlementPolicyVersion,
+			Outcome:                   "verified",
+			ReceiptResult:             "valid",
+			Reason:                    "verified_settlement",
+			Closed:                    true,
+			PromptTokens:              4,
+			CompletionTokens:          5,
+			TotalTokens:               9,
+			TokenSource:               "coordinator_observed",
+			VerifiedAttempts:          1,
+		})
+	}))
+	defer coordinator.Close()
+
+	h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.OperatorURL = coordinator.URL
+		cfg.Coordinator.OperatorKey = "operator-key"
+		cfg.Coordinator.ServiceToken = "service-token"
+	}, WithHTTPClient(coordinator.Client()))
+	createdAt := fixedNow()
+	window := createdAt.UTC().Format("2006-01-02")
+	if _, err := store.ReserveQuota(context.Background(), storage.ReservationRequest{
+		AccountID:       accountID,
+		RequestID:       requestID,
+		WindowDate:      window,
+		RequestedTokens: 10,
+		DailyQuota:      cfg.Quotas.DemoDailyTokensPerIP,
+		CreatedAt:       createdAt,
+		ExpiresAt:       createdAt.Add(time.Minute),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveSettlementFallbackCandidate(context.Background(), storage.SettlementFallbackCandidate{
+		AccountID:                 accountID,
+		RequestID:                 requestID,
+		RequiredInternalRequestID: internalRequestID,
+		ReservationCreatedAt:      createdAt,
+		DemoIdentity:              demoIdentity,
+		DemoTokenHash:             demoTokenHash,
+		WindowDate:                window,
+		PromptTokens:              2,
+		CompletionTokens:          3,
+		MaxTotalTokens:            10,
+		TokenSource:               "gateway_estimated",
+		Outcome:                   "unverified_streaming",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/admin/settlement/reconcile?limit=10", nil)
+	req.Header.Set("Authorization", "Bearer operator-key")
+	resp := httptest.NewRecorder()
+	h.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	var summary settlementReconcileSummary
+	if err := json.Unmarshal(resp.Body.Bytes(), &summary); err != nil {
+		t.Fatal(err)
+	}
+	if summary.Verified != 1 || summary.Errors != 0 {
+		t.Fatalf("summary=%+v want one verified demo reconciliation", summary)
+	}
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var count, total int64
+	if err := db.QueryRow(`SELECT COUNT(*), COALESCE(SUM(total_tokens), 0) FROM demo_usage_events WHERE request_id = ? AND demo_token_hash = ?`, requestID, demoTokenHash).Scan(&count, &total); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 || total != 9 {
+		t.Fatalf("demo audit rows=%d total=%d want 1/9", count, total)
+	}
+}
+
 func TestObserveFallbackAuthorityIsCompleteAndClosed(t *testing.T) {
 	base := coordinatorRequestSettlementFinality{
 		RequestID: "req", Mode: "observe", ModeScopeComplete: true, PolicyVersion: settlementPolicyVersion,
@@ -427,12 +590,6 @@ func TestObserveFallbackReconciliationRotatesPastBatchLimitAcrossRestarts(t *tes
 			DailyQuota: 10000, CreatedAt: reservationCreated, ExpiresAt: reservationCreated.Add(time.Minute),
 		}); err != nil {
 			t.Fatal(err)
-		}
-		if requestID == "recover_enforce" {
-			if err := store.MarkReservationSettlementHold(ctx, accountID, requestID); err != nil {
-				t.Fatal(err)
-			}
-			continue
 		}
 		if err := store.SaveSettlementFallbackCandidate(ctx, storage.SettlementFallbackCandidate{
 			AccountID: accountID, RequestID: requestID, ReservationCreatedAt: reservationCreated,

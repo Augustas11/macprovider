@@ -1,6 +1,8 @@
 # Security High Findings: Implementation Verification
 
-Base: `b63ccb465fa9ae6fab2084e45e703103efe40a9e` (fetched `origin/main`).
+Initial base: `b63ccb465fa9ae6fab2084e45e703103efe40a9e` (fetched `origin/main`).
+Final landing base: `00984a3105dc09d899ae6dd5d14d39f197124215`
+(fetched `origin/main` after the adversarial correction round).
 Branch: `codex/security-high-fixes-2026-09-08`.
 Scope: F01-F04 from the 2026-09-07 security boundary audit. This record captures
 implementation verification before PR publication. No deployment, production
@@ -17,6 +19,10 @@ credentials, or signed journey operation was performed.
   gateway restarts. An initial coordinator attempt ID, persisted with the
   candidate, fences the lookup and must be echoed after membership validation;
   an earlier logged retry cannot substitute for a current unlogged attempt.
+  Every production path that leaves a reconcileable hold now persists this
+  binding first. Legacy rows and persistence failures without a candidate stay
+  held without contacting the coordinator. Verified demo recovery also writes
+  the paired `demo_usage_events` audit row.
 - F03: exchange a hashed, single-use issuance intent for an in-memory API key;
   transactionally store only the key hash and consume the intent. Schema 12
   invalidates legacy plaintext handoffs and stores settlement recovery state.
@@ -37,6 +43,22 @@ Commands run from the named package in this worktree unless otherwise stated.
 | Coordinator | `go vet ./internal/billing ./internal/buyer` | Exit 0 |
 | Swift | `swift test --scratch-path /tmp/macprovider-security-high-fixes-20260908-cli-swift-build --disable-automatic-resolution --filter ConsumeCommandTests` | 127 tests passed, zero failures |
 | Worktree | `git diff --check` | Exit 0 |
+
+After the final adversarial correction and clean rebase onto `00984a31`:
+
+| Package | Command | Result |
+| --- | --- | --- |
+| Gateway | `go test -count=1 -timeout 8m ./... && go vet ./...` | Exit 0; router 33.260s, SQLite 4.199s; all packages and vet passed |
+| Gateway | `go test -race -count=1 -timeout 5m ./internal/router -run '^(TestSettlementReconcileWithoutCurrentAttemptBindingRejectsPriorFinality\|TestSettlementReconcileVerifiedDemoWritesDemoAuditRow)$'` | Exit 0; 1.940s |
+| Coordinator | `go test -count=1 -timeout 8m ./... && go vet ./...` | Exit 0; all packages and vet passed |
+| Integration | `go test -race -count=1 -timeout 5m -run '^TestSpec022V04StreamingSettlementReconcilerE2E$' .` | Isolated rerun exit 0; 5.204s |
+| Swift | `swift test --scratch-path /tmp/macprovider-pr1431-final-swift-20260908 --disable-automatic-resolution --filter ConsumeCommandTests` | 130 tests passed, zero failures |
+| Worktree | `git diff --check origin/main...HEAD` | Exit 0 |
+
+The first post-rebase integration invocation ran concurrently with three heavy
+build/test commands and failed before the reconciler assertion because its seed
+gateway did not create the accounts schema. The exact isolated rerun above
+passed; the failed invocation is not represented as a pass.
 
 Final recovery/scheduling additions also passed:
 `go test ./internal/storage/sqlite ./internal/router -run 'TestSettlementFallback|TestObserveFallback|TestSPEC022GatewaySettlementReconcile|TestWalletSessionSettlementReconcile|TestSecurity' -race -count=1`
@@ -90,16 +112,21 @@ passed in 4.244s. Its timing assertion was not relaxed.
 ## Review Gate
 
 Independent code, security and architecture lanes reviewed the complete combined
-tracked/untracked fix against the base SHA, including current-attempt binding and
-empty-binding compatibility closure. All three reported zero introduced Critical,
-High or Medium findings. Review-discovered observe outage recovery, retry
-starvation, incomplete snapshot scope and unlogged-current scope gaps were fixed
-and re-reviewed. The LOW drain-bound note and test limitations below remain.
+fix. The final adversarial cross-check found one Medium current-attempt gap: a
+candidate-less hold still performed an unbound coordinator lookup. The correction
+requires a persisted candidate before any remote lookup and adds verified/refund
+prior-finality substitution regressions. A subsequent security lane found one Low
+demo audit-integrity gap; enforce reconciliation now uses atomic demo settlement
+and has a paired-row regression. The complete rebased landing diff was then
+re-reviewed. All three final lanes reported zero Critical, High or Medium findings.
+The inherited/operational limitations below remain.
 
 ## PR Publication Follow-Up
 
-PR #1431 rebased the fix onto `58fcd226078438d4c10fa5204496812f9f0f53a7`
-without changing its patch bytes. CI correctly rejected stale historical selector
+PR #1431 was initially rebased onto
+`58fcd226078438d4c10fa5204496812f9f0f53a7`, then rebased cleanly after the
+adversarial correction onto `00984a3105dc09d899ae6dd5d14d39f197124215`.
+CI correctly rejected stale historical selector
 evidence for SPEC-006-R003, SPEC-022-R005 and SPEC-022-R008. These mappings are
 demoted to pending, retaining historical evidence; issue #1433 tracks a separately
 authorized evidence refresh before re-promotion. No signed journey was created.
@@ -123,6 +150,4 @@ authorized evidence refresh before re-promotion. No signed journey was created.
   a wallet-specific outage/restart/reconcile end-to-end scenario remains untested.
 - These fixes do not establish full conformance or production readiness.
 - The trailer-tail drain is line-granular (potentially nearly 2 MiB, not an exact
-  1 MiB budget); it remains time- and per-line-bounded. Headerless quarantine
-  restart tests seed the stored candidate; the live caller persistence condition
-  was reviewed statically rather than through a new full HTTP regression.
+  1 MiB budget); it remains time- and per-line-bounded.

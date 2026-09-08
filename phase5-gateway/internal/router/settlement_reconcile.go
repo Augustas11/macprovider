@@ -159,10 +159,17 @@ func (s *Server) reconcileSettlementReservation(ctx context.Context, reservation
 		return "", err
 	}
 	candidate, candidateErr := s.store.LookupSettlementFallbackCandidate(ctx, reservation)
-	if candidateErr != nil && !errors.Is(candidateErr, storage.ErrNotFound) {
+	if errors.Is(candidateErr, storage.ErrNotFound) {
+		// Reconciliation without the coordinator-owned current-attempt binding
+		// could apply an earlier retry's otherwise valid finality to this hold.
+		// Legacy and persistence-failure rows remain quarantined until an
+		// operator can establish that binding through a separate recovery path.
+		return "held", nil
+	}
+	if candidateErr != nil {
 		return "", candidateErr
 	}
-	if candidateErr == nil && candidate.RequiredInternalRequestID == "" {
+	if candidate.RequiredInternalRequestID == "" {
 		// A missing trusted header quarantines this delivery. An unbound
 		// lookup could return a previous retry's otherwise valid finality.
 		return "held", nil
@@ -172,36 +179,14 @@ func (s *Server) reconcileSettlementReservation(ctx context.Context, reservation
 		return "", err
 	}
 	if !found {
-		if candidateErr == nil {
-			// A missing coordinator lookup is not authority to discard local
-			// delivered usage. Keep this specific hold discoverable for retry.
-			return "coordinator_404_held", nil
-		}
-		now := s.now()
-		if !reservation.ExpiresAt.IsZero() && !now.Before(reservation.ExpiresAt) {
-			var err error
-			if reservation.WalletSessionID != "" {
-				err = s.store.MarkWalletSessionReservationStaleHeld(ctx, reservation.AccountID, reservation.WalletSessionID, reservation.RequestID, now)
-			} else {
-				err = s.store.MarkReservationStaleHeld(ctx, reservation.AccountID, reservation.RequestID, now)
-			}
-			if err != nil {
-				if errors.Is(err, storage.ErrReservationNotFound) || errors.Is(err, storage.ErrReservationTerminal) {
-					return "already_terminal", nil
-				}
-				return "", err
-			}
-			return "coordinator_404_expired", nil
-		}
-		return "coordinator_404", nil
+		// A missing coordinator lookup is not authority to discard local
+		// delivered usage. Keep this specific hold discoverable for retry.
+		return "coordinator_404_held", nil
 	}
-	if candidateErr == nil && finality.RequiredInternalRequestID != candidate.RequiredInternalRequestID {
+	if finality.RequiredInternalRequestID != candidate.RequiredInternalRequestID {
 		return "held", nil
 	}
 	if finality.RequestID == reservation.RequestID && !reservation.CreatedAt.IsZero() && coordinatorObserveFallbackAllowed(finality) {
-		if candidateErr != nil {
-			return "held", nil
-		}
 		if err := s.settleObserveFallbackCandidate(ctx, candidate); err != nil {
 			if errors.Is(err, storage.ErrReservationNotFound) || errors.Is(err, storage.ErrReservationTerminal) {
 				return "already_terminal", nil
@@ -245,6 +230,14 @@ func (s *Server) reconcileSettlementReservation(ctx context.Context, reservation
 				TokenSource:                  settlement.TokenSource,
 				Outcome:                      settlement.Outcome,
 				SettledAt:                    settlement.SettledAt,
+			})
+		} else if candidate.DemoIdentity != "" {
+			settleErr = s.store.SettleDemoReservation(ctx, settlement, storage.DemoUsageEvent{
+				RequestID:     candidate.RequestID,
+				ClientIP:      candidate.DemoIdentity,
+				DemoTokenHash: candidate.DemoTokenHash,
+				WindowDate:    candidate.WindowDate,
+				CreatedAt:     settlement.SettledAt,
 			})
 		} else {
 			settleErr = s.store.SettleReservation(ctx, settlement)

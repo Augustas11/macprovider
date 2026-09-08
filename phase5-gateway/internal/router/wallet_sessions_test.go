@@ -350,12 +350,12 @@ func TestWalletSessionSettlementReconcileClosesWalletHeldReservations(t *testing
 			},
 		},
 		{
-			name:            "expired_404_stale_held",
+			name:            "expired_404_remains_held",
 			requestID:       "req_wallet_reconcile_404",
 			coordinatorCode: http.StatusNotFound,
 			expireBeforeRun: true,
 			wantSummary: func(s settlementReconcileSummary) bool {
-				return s.Scanned == 1 && s.Coordinator404 == 1 && s.StaleHeld == 1 && s.Errors == 0
+				return s.Scanned == 1 && s.Coordinator404 == 1 && s.Held == 1 && s.StaleHeld == 0 && s.Errors == 0
 			},
 			wantUsage: func(u storage.WalletSessionUsage) bool {
 				return u.SettledTokens == 0 && u.HeldTokens == 20 && u.RemainingTokens == 80
@@ -397,11 +397,18 @@ func TestWalletSessionSettlementReconcileClosesWalletHeldReservations(t *testing
 				if got := r.URL.Query().Get("account_id"); got != accountID {
 					t.Fatalf("account_id query=%q want %q", got, accountID)
 				}
+				internalRequestID := "internal_" + tc.requestID
+				if got := r.URL.Query().Get("required_internal_request_id"); got != internalRequestID {
+					t.Fatalf("required_internal_request_id query=%q want %q", got, internalRequestID)
+				}
 				if tc.coordinatorCode == http.StatusNotFound {
 					w.WriteHeader(http.StatusNotFound)
 					return
 				}
-				body := map[string]any{"request_id": tc.requestID}
+				body := map[string]any{
+					"request_id":                   tc.requestID,
+					"required_internal_request_id": internalRequestID,
+				}
 				for k, v := range tc.finality {
 					body[k] = v
 				}
@@ -450,6 +457,7 @@ func TestWalletSessionSettlementReconcileClosesWalletHeldReservations(t *testing
 			if err := store.HoldWalletSessionReservation(context.Background(), accountID, sessionID, tc.requestID, fixedNow().Add(time.Minute)); err != nil {
 				t.Fatalf("HoldWalletSessionReservation: %v", err)
 			}
+			seedBoundSettlementCandidate(t, store, accountID, tc.requestID, "internal_"+tc.requestID, fixedNow(), 20, sessionID)
 			if tc.expireBeforeRun {
 				if err := store.ClampReservationExpiry(context.Background(), accountID, tc.requestID, fixedNow().Add(-time.Minute)); err != nil {
 					t.Fatalf("ClampReservationExpiry: %v", err)
