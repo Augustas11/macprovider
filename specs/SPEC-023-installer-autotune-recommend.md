@@ -1,11 +1,19 @@
 # SPEC-023 — Installer-Integrated Autotune Recommend
 
-version: v0.9.5
+version: v0.10.0
 status: LOCKED
 owner: operator (a11)
-last-locked: 2026-08-29
+last-locked: 2026-09-08
 
 ## Change log
+
+- **v0.10.0 (2026-09-08)** — Catalog as a pipeline: artifact sets, class rate rows, listed-tier intake (BYOM v0.2 prerequisite).
+  1. **A catalog model key now carries a SET of verified artifacts, not one.** New §3.7 defines a separate signed static feed (`autotune-artifacts.json`, served at `/v1/catalog-artifacts` with a detached `.sig`) whose per-model artifact entries each carry their own runtime format, quantization, immutable source reference, hash + hash algorithm, size, per-artifact `min_ram_gb`, allowed SPEC-046 runtime sources, and a `declared` / `verified` / `blocked` verification status. Settlement binds to an artifact hash; pricing binds to the model key. `mlx_safetensors` (hash = the existing SnapshotManifestV1 manifest digest) and `gguf` (hash = SHA-256 of the GGUF file bytes, which is what Ollama exposes as its layer digest) are the v0.10.0 formats. Only `verified` artifacts may bind settlement.
+  2. **The artifact set is a SEPARATE signed feed, never a new field in the candidate-catalog bytes.** §12.2 already documents the #813 forward-incompatibility trap: deployed coordinator Go validators and the CLI Swift strict decoders (`AutotuneStrictJSON.validateCandidate`) reject unknown candidate-row keys and would fail-close the fleet. §3.7 therefore binds the artifact feed to the candidate-catalog `release_id` and body digest instead, keeps the existing top-level `model_id` / `model_revision` / `model_sha256` unchanged as each row's primary MLX artifact for every v0.1 consumer, and requires that primary artifact to reappear in the artifact feed with an identical hash (consistency checked at generation and at consumption). A missing, stale, or untrusted artifact feed suppresses only the new artifact-derived capabilities; it MUST NOT block the v0.1 paid-recommendation or coordinator-join paths.
+  3. **Pricing gains market-pegged model classes without touching billing.** New §3.3.1 adds a closed `rate_class` enum, carried on the artifact feed's model entry (for the same forward-compatibility reason as point 2) and expanded by the catalog release generator into the existing per-model `rows` of the PUBLISHED rate-card feed and the coordinator inline fallback rows. The published §3.3 rate-card schema is unchanged, so SPEC-005 §5.5 rate resolution (exact → normalized → `default`) is untouched and is NOT amended by this revision. An explicit model row always wins over class expansion, and the first release that introduces class expansion MUST publish byte-identical rate-card `rows`.
+  4. **`listed` becomes the cheap intake tier.** §3.2 and new §16 make `listed` mean identity plus at least one verified artifact: discoverable, BYOM catalog-matchable, probe-eligible, and eligible for SPEC-047 `network_visible_unpriced` — but never a paid default and never requiring a rate class. `recommendable` additionally requires a `rate_class` that resolves to a rate row, plus the existing operator admission. Bench-provenance rules are unchanged and the §12 Stage-2 oMLX automation stays defined-but-deferred.
+  5. **Catalog intake is a defined pipeline with named signals and thresholds.** §16 defines a monthly release cadence (out-of-band releases only for `blocked` transitions), three intake signals — buyer demand (the §3.4 OpenRouter demand-rank snapshot plus a new SPEC-017 aggregated unknown-model-key request count, specified here and to be implemented under SPEC-017 authority), aggregated provider supply from SPEC-047 admission events, and fleet hardware fit against per-artifact `min_ram_gb` — and an operator-tunable admission rule with stated defaults. It states how the `listed` tier and rank floors mitigate `RESEARCH_229` FM-1 (winner-take-all herding) and FM-2 (cold-start exclusion), and restates the non-goal: no open marketplace, no provider-set prices, non-catalog models stay non-earning (SPEC-047 §1).
+  6. **New requirements and criteria.** `SPEC-023-R004` (artifact feed), `SPEC-023-R005` (class rate expansion), and `SPEC-023-R006` (listed-tier intake) are added with acceptance criteria AC-CAT-1..AC-CAT-12, three new §15 threat-model rows (artifact substitution, class mis-declaration, intake-signal gaming), and §13 annotations. This is a docs-and-governance revision: it changes no catalog JSON, no generator code, and no Go/Swift code.
 
 - **v0.9.5 (2026-08-30)** — Guarded interactive-context calibration (#1201).
   1. Adds an explicit `--calibrate-context` post-selection probe that measures uncached prefill TTFT for the selected signed model artifact before config emission/application.
@@ -371,6 +379,19 @@ Field rules:
 - Semantic seed failures fail closed on the CATALOG/CLIENT paths only. A `.dev` `board_release_tag`, undiscounted MTP/speculative-decode source rows (`mtp_discounted` false while accelerated rows were used), duplicate or cross-bucket cells, an invalid/out-of-order/future `seeded_at` or `measured_at` timestamp, a stale-beyond-window seed, or a seed-formula mismatch is a catalog-integrity failure. Such a row MUST fail closed at catalog authoring, lint, and signing, and at CLI catalog decode, and MUST NOT be downloaded, benchmarked, donor-committed, or recommended (paid-default or donor selection). It is not merely "does not seed a gate" — it fails closed on every one of those paths. A row-level oMLX `gate_seed` integrity failure MUST NOT affect or block any provider's SPEC-032 verified-hardware coordinator admission: oMLX data (valid or invalid) NEVER hard-blocks a provider. Provider admission is governed solely by verified-hardware evidence (SPEC-032), which does not read `bench_gate` advisory/seed fields.
 - `runtime_status` is one of `candidate`, `listed`, `recommendable`, or `blocked`. Only `recommendable` rows may become paid defaults, and the demand-rank row must also have `recommendable: true`.
 
+**Ladder semantics (amended v0.10.0).** The four `runtime_status` values are a graduation ladder, not four unrelated labels. This revision makes `listed` the cheap intake tier so a model key can be admitted to the catalog for identity and discovery long before the operator is ready to make it a paid default:
+
+|| `runtime_status` | Minimum requirements | What it grants | What it never grants |
+||---|---|---|---|
+|| `candidate` | Row identity only (`model_id` plus, for downloadable rows, `model_revision` and `model_sha256`). | Local diagnostics; operator staging of a row before its artifacts are verified. | Not BYOM catalog-matchable, not probe-eligible, never a paid default. |
+|| `listed` | Row identity, **plus at least one artifact with `verification_status == "verified"` in the §3.7 artifact feed**, plus the §16 intake rule. No `rate_class` and no rate row are required. | Buyer-visible discovery of the model key; SPEC-047 `catalog_matched` identity for a BYOM candidate whose artifact hash matches a verified artifact of this row; SPEC-047 `sandbox_probe_only` and `network_visible_unpriced` admission; donor-mode selection subject to §5 and AC-22. | Never a paid default, never `catalog_priced`, never `settlement_capable`, never priced buyer routing. A `listed` row carries no earning claim. |
+|| `recommendable` | Everything `listed` requires, **plus a `rate_class` (§3.3.1) that resolves to a published rate-card row**, plus demand-rank `recommendable: true`, plus the existing operator admission and §5 gates. | Paid-default eligibility for `autotune --recommend`; SPEC-047 `catalog_priced` and, when SPEC-022 route-time and receipt preconditions hold, `settlement_capable`. | Nothing in this ladder relaxes §5, SPEC-022, SPEC-032, or SPEC-044 gates. |
+|| `blocked` | Operator withdrawal for safety, licensing, runtime, or economics reasons. | Diagnostic display only. | Never downloaded, benchmarked, donor-committed, or recommended. |
+
+Graduation is monotonic in privilege but not in direction: a row may be demoted from `recommendable` to `listed`, or moved to `blocked` out of band, at any time (§16). Promotion from `listed` to `recommendable` for an `omlx_seeded` row remains governed by §5 and §12 and remains PROHIBITED in Stage 1; the v0.10.0 intake rule does not activate the §12 Stage-2 automation and does not create a second promotion authority.
+
+**The candidate catalog gains no new fields in this revision.** `rate_class`, artifact sets, and intake metadata are deliberately NOT added to the candidate-catalog rows. The deployed CLI Swift strict decoder (`AutotuneStrictJSON.validateCandidate`) and the coordinator/generator validators enumerate the exact allowed row keys and fail closed on anything else, so a new candidate-row field would reproduce the #813 forward-incompatibility trap documented in §12.2 and fail-close the fleet. Those fields live in the separate signed artifact feed defined in §3.7, which every v0.1 consumer simply never fetches.
+
 The table below lists the current `published-2026-07-29-inband-provenance-v1` signed candidate-catalog rows and gate values. The baked JSON release artifact MUST also include a release-pinned `model_revision` and `model_sha256` for every non-`blocked` row; the long immutable bindings are omitted from this table for readability.
 
 The baked and served static candidate catalog MUST contain at least these rows:
@@ -444,6 +465,23 @@ The v0.1 rate-card JSON schema is:
 3. Serialize JSON with sorted object keys, no insignificant whitespace, decimal integers for all rates/BPS/PPM values, and decimal number syntax for `usd_per_million_credits`.
 4. Exclude unrelated config and ledger fields, including `policy_version`, `generated_at`, quarantine/force-void state, request-log state, operator settings, and settlement runtime state.
 
+#### 3.3.1 Class rate rows (v0.10.0)
+
+Pricing is expressed by **model class**, market-pegged per the `RESEARCH_224` executive recommendation (anchor USD to buyer market price rather than to provider USD, with market-pegged completion credits per class). The mechanism is an authoring-time expansion. It changes no published feed schema and no billing code.
+
+**SPEC-023-R005:** A catalog release MUST support class-declared pricing under all of the following rules.
+
+1. **Closed class enum.** `rate_class` is one of `class-3b`, `class-8b`, `class-20b-moe`, `class-30b-moe`, `class-32b`, `class-70b`, `class-120b-moe`. The enum keys on parameter scale and dense-vs-small-active-MoE shape, because those two properties are what both the buyer market price and the §5 hardware gates actually track. Extending the enum is a SPEC-023 revision, not an operator edit. A `recommendable` row MUST declare a `rate_class`; a `candidate` or `listed` row MAY omit it.
+2. **Where `rate_class` lives.** The model key's `rate_class` is carried on its §3.7 artifact-feed model entry. It MUST NOT be added to the candidate-catalog rows for the forward-compatibility reason stated in §3.2 and §12.2. If a future activation gate, mirroring §12.2, establishes that every deployed candidate-catalog consumer accepts unknown row keys, `rate_class` MAY additionally be mirrored into the candidate row; until then the artifact feed is its sole carrier.
+3. **The rate-card SOURCE gains a `classes` block; the PUBLISHED feed does not.** The rate-card authoring source document (the catalog release generator's input) MAY carry a `classes` object mapping each `rate_class` to the same field set a §3.3 row carries (`prompt_rate_per_mtok`, `prompt_cache_hit_rate_per_mtok`, `completion_rate_per_mtok`, `provider_share_bps`, `global_multiplier_ppm`). That block is an authoring input only. The published, signed `rate-card.json` served at `/v1/rate-card` MUST remain exactly the §3.3 schema — `version`, `policy_version`, `generated_at`, `usd_per_million_credits`, and a flat `rows` map — with no `classes` key and no per-row class field.
+4. **Expansion is the generator's job.** For every model key whose artifact-feed entry declares a `rate_class`, the catalog release generator MUST emit a concrete per-model row into the published `rate-card.json` `rows` map and into the coordinator inline fallback rows (`phase4-coordinator/dist/coordinator.yaml` `rate_card:`), materialised from that class's values. The expansion MUST be deterministic and MUST be reproducible from the release inputs alone.
+5. **Precedence: explicit model row beats class expansion.** When the rate-card source declares an explicit row for a model key, that row is published verbatim and the class expansion for that key MUST be discarded. Class expansion fills only keys that have no explicit row. The generator MUST fail closed on a key whose explicit row and class expansion disagree only through an ambiguous or partial override; an override is all-or-nothing per model key.
+6. **Billing is untouched.** Because the published rate card still contains one concrete row per model key, SPEC-005 §5.5 rate resolution — exact key, then `NormalizeModelKey`, then the `default` row — resolves exactly as it does today. **This revision does not amend SPEC-005 and no billing, settlement, ledger, or receipt behavior changes.** `rate_class` is never sent on the wire, never stored on a ledger row, and never read by `RateFor`.
+7. **Invariant: a `recommendable` row MUST resolve to a rate row.** For every candidate-catalog row with `runtime_status == "recommendable"`, the published rate card MUST contain a row reachable by exact key or by `NormalizeModelKey` for that model key. Reaching only the `default` row does not satisfy this invariant at authoring time, even though §3.3 and AC-15 keep the `default` fallback available at runtime for fresh-install recovery. A release that violates this invariant MUST fail closed at generation.
+8. **No silent repricing.** The first catalog release that introduces class expansion MUST publish a `rate-card.json` whose `rows` map is byte-identical to the immediately preceding release's `rows` map. Class expansion is a refactor of how rows are authored, never a repricing event; any intended price change is a separate, explicitly reviewed release.
+
+The intended v0.10.0 class assignment for the current signed catalog is recorded here as an illustrative operator mapping, not as normative catalog content: `class-3b` — `meta-llama/llama-3.2-3b-instruct`; `class-8b` — `meta-llama/llama-3.1-8b-instruct`, `qwen3-8b`; `class-20b-moe` — `openai/gpt-oss-20b`; `class-30b-moe` — `google-gemma-4-26b-a4b-it`, `qwen3-coder-30b-a3b-instruct`, `nvidia/nemotron-3-nano-30b-a3b`; `class-32b` — `qwen3-32b`, `qwen2.5-coder-32b-instruct`; `class-120b-moe` — `openai/gpt-oss-120b`; `class-70b` is reserved and currently unpopulated, held for the `RESEARCH_224` 70B peg. Several current rows price differently from their class peers (notably `qwen2.5-coder-32b-instruct` against `qwen3-32b`, and the three `class-30b-moe` rows against each other). Rule 8 means those rows stay explicit model overrides until the operator deliberately reconciles them in a separate priced release; class expansion MUST NOT be the vehicle that quietly moves a live money-path rate.
+
 ### 3.4 Demand signal
 
 The recommendation engine fetches `https://coordinator.malibu.tech/v1/demand-rank` and falls back to a baked snapshot when the signed feed fetch fails, times out, fails Ed25519 detached-signature verification, or fails schema validation. The demand signal is operator-curated OpenRouter-prior metadata, not a coordinator demand endpoint.
@@ -512,6 +550,7 @@ Fetched `rate-card.json`, `demand-rank.json`, and `autotune-candidates.json` MUS
 10. Reject the fetched file and emit update-required when `generated_at` is more than 30 days old.
 11. Candidate and demand feeds selected as one live release MUST share `version`, `generated_at`, and `policy_version`; mixed releases fail closed.
 12. `rate-card.json` is release-manifest-bound but versioned by the §3.3 recommendation projection hash, so its `version` MAY differ from the candidate/demand release ID. It MUST share the policy version expected by the baked rate-card snapshot.
+13. **[v0.10.0]** `autotune-artifacts.json` (§3.7) is fetched from `https://coordinator.malibu.tech/v1/catalog-artifacts` with its detached sidecar at `.../v1/catalog-artifacts.sig` and is verified through steps 2-5 above verbatim, using the same static-feed keyring. It shares the candidate release's `version`, `generated_at`, and `policy_version`, so rule 11 applies to it as well. Its failure classes are defined in §3.7.6 and differ from the feeds above in exactly one respect: an artifact-feed failure fails closed for artifact-derived capabilities only and MUST NOT block paid recommendation or coordinator join.
 
 oMLX schema and the whole-catalog integrity rule are phase-qualified by the §12.2
 activation state. PRE-activation (before the oMLX schema is supported by every
@@ -561,6 +600,136 @@ target adjustment) does not invalidate an otherwise-valid verified admission. Th
 implementation that computes `admission_policy_sha256` and matches admission on it
 is Stage-2 prerequisite §12.2(b)(i); this section is the normative contract it
 must satisfy.
+
+### 3.7 Catalog artifact feed (v0.10.0)
+
+A catalog model key is one priced identity that MAY be served from more than one verified binary artifact. The `mlx-community/*-4bit` safetensors snapshot is one artifact; a GGUF blob served by a local Ollama or llama.cpp runtime under SPEC-046 is a different artifact of the same model. They have different bytes and different hashes, so a single `model_sha256` per row can never match both, and SPEC-047-R003's catalog binding is unreachable for every non-MLX BYOM candidate. §3.7 fixes that by giving each model key a SET of verified artifacts.
+
+**Settlement binds to an artifact hash; pricing binds to the model key.** Those two bindings are deliberately different objects: two artifacts of one model key are priced identically and settle against different hashes.
+
+#### 3.7.1 Why a separate feed, and not a candidate-catalog field
+
+§12.2 records the #813 forward-incompatibility trap. The deployed CLI Swift strict decoder enumerates the exact allowed candidate-row keys (`model_id`, `model_revision`, `model_sha256`, `min_ram_gb`, `min_bandwidth_tier`, `bench_gate`, `runtime_status`, `notes`, `draft_candidates`, `workload_profiles`) and throws on any other key; the release generator and the coordinator feed validators enforce the same closed set. Publishing an artifact set as a new candidate-row field would therefore fail-close every deployed provider — integrity failure on the whole catalog, blocking autoupdate and coordinator join — which is the exact failure the oMLX activation gate exists to prevent.
+
+The artifact set is consequently a **separate signed static feed**. Existing consumers never fetch it and are byte-for-byte unaffected; the candidate catalog keeps `model_id`, `model_revision`, and `model_sha256` unchanged as the row's primary MLX artifact for all v0.1 consumers.
+
+#### 3.7.2 Feed identity, transport, and trust
+
+```text
+primary:   https://coordinator.malibu.tech/v1/catalog-artifacts
+sidecar:   https://coordinator.malibu.tech/v1/catalog-artifacts.sig
+file name: autotune-artifacts.json
+fallback:  baked autotune-artifacts snapshot compiled into the installer/CLI release
+```
+
+The feed is signed by the same static-feed key as `autotune-candidates.json`, `demand-rank.json`, and `rate-card.json`, and it is verified through the §3.5 procedure verbatim: detached `{key_id, alg, signature}` sidecar, base64 Ed25519 over the exact UTF-8 bytes, `key_id` resolved through the release-embedded trusted verifier keyring, parse only after verification succeeds, and the same future/expired/older-than-baked rules. Nginx MUST expose exact `location = /v1/catalog-artifacts` and `location = /v1/catalog-artifacts.sig` allow-through blocks before the generic `location /v1/ { return 404; }` block, proxying to the coordinator buyer mux (`buyer_port: 8443`) with no `Authorization` requirement, exactly as §3.3 requires for the rate-card routes.
+
+`artifact_feed_sha256` is the lowercase hex SHA-256 over the exact selected feed JSON bytes, taken after fetched/baked selection and before parsing normalization. It is the "exact catalog body digest" that SPEC-047-R003 requires when an admission binds to an artifact from this feed.
+
+#### 3.7.3 Schema
+
+```json
+{
+  "version": "published-2026-09-02-gpt-oss-120b-v1",
+  "generated_at": "RFC3339 timestamp",
+  "policy_version": "autotune-policy-v1",
+  "source": "operator_curated_autotune_artifact_catalog",
+  "release_id": "published-2026-09-02-gpt-oss-120b-v1",
+  "candidate_catalog_sha256": "<64-hex digest of the candidate-catalog bytes of this release>",
+  "models": {
+    "<model_key>": {
+      "rate_class": "class-8b",
+      "primary_artifact_id": "mlx-4bit",
+      "artifacts": {
+        "<artifact_id>": {
+          "runtime_format": "mlx_safetensors",
+          "quantization": "4bit",
+          "source_ref": {
+            "kind": "huggingface_revision",
+            "repo_id": "mlx-community/Qwen3-8B-4bit",
+            "revision": "545dc4251c05440727734bcd94334791f6ab0192"
+          },
+          "hash_algorithm": "macprovider.snapshot-manifest.v1",
+          "hash": "1f591f9c4fb38d05ea2d879d89a6eeab485c23a04eb75e3e0a289db9d95ec877",
+          "size_bytes": 4900000000,
+          "min_ram_gb": 12,
+          "allowed_runtime_sources": ["mlx_cache"],
+          "verification_status": "verified",
+          "verified_at": "2026-09-08",
+          "notes": "string"
+        },
+        "gguf-q4-k-m": {
+          "runtime_format": "gguf",
+          "quantization": "Q4_K_M",
+          "source_ref": {
+            "kind": "ollama_library_tag",
+            "library_tag": "qwen3:8b",
+            "digest": "sha256:<64-hex GGUF layer digest>"
+          },
+          "hash_algorithm": "macprovider.gguf-file.v1",
+          "hash": "<64-hex sha256 of the GGUF file bytes>",
+          "size_bytes": 4900000000,
+          "min_ram_gb": 12,
+          "allowed_runtime_sources": ["ollama_loopback", "llamacpp_loopback"],
+          "verification_status": "declared",
+          "verified_at": null,
+          "notes": "string"
+        }
+      }
+    }
+  }
+}
+```
+
+All values above are illustrative, not normative catalog content.
+
+#### 3.7.4 Field rules
+
+- `source` MUST equal `operator_curated_autotune_artifact_catalog`. `policy_version` MUST equal the candidate catalog's `policy_version`.
+- `version` and `release_id` MUST both equal the candidate catalog's `version` for the same release, and `generated_at` MUST equal the candidate catalog's `generated_at`. `candidate_catalog_sha256` MUST equal the full `candidate_catalog_sha256` (§3.6, §9) of the candidate-catalog bytes of that release. A feed that disagrees with the selected candidate catalog on any of these is a mixed release and MUST fail closed for every artifact-derived use (§3.7.6).
+- `models.<model_key>` keys MUST use the same normalized model-key form as the candidate catalog and the rate card. A model key present in the artifact feed but absent from the candidate catalog is a feed-integrity failure.
+- `rate_class`, when present, MUST be one of the §3.3.1 enum values. It MUST be present for every model key whose candidate row is `recommendable`.
+- `primary_artifact_id` MUST name an entry in that model's `artifacts` map whose `runtime_format` is `mlx_safetensors` and whose `verification_status` is `verified`.
+- `artifact_id` is a stable, lowercase, operator-assigned identifier within one model key. It MUST NOT be reused for different bytes: changing an artifact's `hash` requires a new `artifact_id`.
+- `runtime_format` is a closed enum. v0.10.0 values are `mlx_safetensors` and `gguf`.
+- `quantization` is an operator-curated label such as `4bit`, `8bit`, `MXFP4-Q8`, or `Q4_K_M`. It is descriptive metadata for display and fit reasoning; it is never an identity or trust input on its own.
+- `source_ref` is a closed, content-addressed reference. `kind: "huggingface_revision"` requires `repo_id` and an immutable 40-hex `revision`. `kind: "ollama_library_tag"` requires `library_tag` and an immutable `digest`. Mutable branches, tags without a digest, and any network location the coordinator could dereference are forbidden; `source_ref` is an identity descriptor, exactly as SPEC-047-R002 requires of `served_model_ref`.
+- `hash_algorithm` is a closed enum. `macprovider.snapshot-manifest.v1` is the existing SPEC-010-R001 identifier, and its `hash` is the §3.2 canonical artifact-set manifest digest for the snapshot at `source_ref.revision` — for the primary artifact this is byte-identical to the candidate row's `model_sha256`. `macprovider.gguf-file.v1` is RESERVED by this SPEC and its `hash` is the lowercase hex SHA-256 of the GGUF file bytes, which is the value Ollama exposes as the model layer digest. `hash` MUST be lowercase 64-hex.
+- `size_bytes` is a positive integer count of the artifact's on-disk bytes, used for preparation estimates and SPEC-044 confirmation copy only.
+- `min_ram_gb` is per-artifact, not per-model, because resident memory follows the quantization, not the parameter count. It has the same §5 semantics as the candidate row's `min_ram_gb`: it is the resident-fit floor excluding the fixed `safety_margin_gb = 4`. The primary artifact's `min_ram_gb` MUST equal the candidate row's `min_ram_gb`. A non-primary artifact MAY declare a different value.
+- `allowed_runtime_sources` is a non-empty array drawn from the SPEC-046-R002 adapter enum (`mlx_cache`, `ollama_loopback`, `lmstudio_loopback`, `llamacpp_loopback`, `openai_compatible_loopback`). It names which SPEC-046 discovery adapters MAY produce a candidate that matches this artifact. An `mlx_safetensors` artifact MUST allow only `mlx_cache`. An artifact MUST NOT allow `openai_compatible_loopback` while carrying `verification_status: "verified"`, because an opaque OpenAI-compatible endpoint supplies no artifact bytes to hash.
+- `verification_status` is a closed enum: `declared`, `verified`, or `blocked`. `declared` means the operator has recorded the artifact's identity but has not confirmed the hash against real bytes. `verified` means the operator has confirmed that the recorded `hash` is the digest of the artifact obtained from `source_ref` under `hash_algorithm`. `blocked` means the artifact is withdrawn for safety, licensing, runtime, or economics reasons. `verified_at` is an RFC3339 date and MUST be non-null exactly when `verification_status == "verified"`.
+- **Only `verified` may bind settlement.** A `declared` artifact MAY be displayed and MAY inform intake, but it MUST NOT satisfy SPEC-047 `catalog_matched`, MUST NOT support `catalog_priced` or `settlement_capable`, and MUST NOT be downloaded or prepared as a catalog artifact. A `blocked` artifact MUST NOT be matched, displayed as available, downloaded, prepared, probed, or settled.
+
+#### 3.7.5 Consistency with the candidate catalog
+
+For every candidate-catalog row whose `runtime_status` is not `blocked`, the artifact feed MUST contain a model entry under the same model key, whose `primary_artifact_id` artifact satisfies all of:
+
+- `runtime_format == "mlx_safetensors"`;
+- `hash_algorithm == "macprovider.snapshot-manifest.v1"`;
+- `hash` exactly equal to the candidate row's `model_sha256`;
+- `source_ref.kind == "huggingface_revision"`, `source_ref.repo_id` equal to the candidate row's `model_id`, and `source_ref.revision` equal to the candidate row's `model_revision`;
+- `min_ram_gb` equal to the candidate row's `min_ram_gb`;
+- `verification_status == "verified"`.
+
+This consistency check MUST run at generation (the catalog release generator fails closed before signing) **and** at consumption (a consumer that fetches both feeds fails closed for artifact-derived use before binding anything). A model key whose primary artifact disagrees with its candidate row is an artifact-feed integrity failure for that release; the operator MUST NOT paper over it by publishing a second hash under the same identity.
+
+#### 3.7.6 Fallback, baked snapshot, and failure classes
+
+The artifact feed follows the §3.5 failure-class separation, with one deliberate asymmetry: **artifact-feed failures never fail-close the v0.1 path.**
+
+1. Transport failure, timeout, or an unavailable HTTP response MAY select the baked artifact-feed snapshot and MUST emit `catalog_artifact_feed_fallback_used`. Like every baked feed, the baked snapshot is part of the release artifact and is trusted only for that binary version.
+2. A missing sidecar, malformed sidecar, unknown `key_id`, non-`ed25519` `alg`, invalid signature, or invalid schema MUST emit `catalog_artifact_feed_integrity_failure`.
+3. A cryptographically valid but older-than-baked, future, expired, policy-incompatible, or release-mismatched feed (§3.7.4 binding rules, §3.7.5 consistency) MUST emit `catalog_artifact_feed_update_required`.
+4. A `generated_at` between 14 and 30 days old is allowed with `catalog_artifact_feed_stale`.
+5. `catalog_artifact_feed_integrity_failure` and `catalog_artifact_feed_update_required` are **fail-closed for every artifact-derived capability**: no artifact from the feed may be matched, displayed as catalog-verified, downloaded, prepared, probed, priced, or settled while either warning is present. The consumer falls back to the candidate row's primary artifact identity, which the candidate catalog already carries.
+6. Those same warnings **MUST NOT block paid recommendation, coordinator join, model download by the candidate row's own `model_revision`/`model_sha256`, or any other behavior the v0.1 feeds already authorize.** An absent artifact feed is indistinguishable from a v0.1 release for every existing code path. This is the whole reason the artifact set is a separate feed: a new capability may fail closed without taking the fleet with it.
+
+The artifact feed is a first-class release-manifest member. `release.json` MUST bind `autotune-artifacts.json` by `sha256`, `bytes`, `version`, and `signer_key_id` alongside the existing feeds, and it participates in the §9 release ledger exactly as the candidate and demand feeds do.
+
+#### 3.7.7 Requirement
+
+**SPEC-023-R004:** A catalog release MUST publish a signed artifact feed satisfying §3.7.2 through §3.7.6. Every non-`blocked` candidate-catalog row MUST have a model entry whose primary artifact is `verified` and byte-identical in identity to that row (§3.7.5), checked at generation and at consumption. Only artifacts with `verification_status == "verified"` may satisfy a SPEC-047 catalog match, support `catalog_priced`, or bind settlement, and settlement MUST bind the artifact `hash` together with its `hash_algorithm`. An artifact whose `hash_algorithm` is not a value SPEC-010-R002 names as a canonical wire pair MUST NOT be used as the SPEC-010 provider `model_hash`/`model_hash_algorithm` pair or as a SPEC-022 route-time settlement binding; in v0.10.0 that scopes `macprovider.gguf-file.v1` artifacts to identity, discovery, `listed` intake, probe-only, and unpriced network visibility, and holds GGUF settlement closed until SPEC-010 names the algorithm. Artifact-feed transport failure, integrity failure, update-required, or staleness MUST fail closed for every artifact-derived capability and MUST NOT block any behavior the §3.2/§3.3/§3.4 feeds already authorize.
 
 ## 4. Formula (updated v0.8)
 
@@ -966,7 +1135,7 @@ Automatic installer use of this requirement is not authorized by v0.9.5. It rema
 |---|---|---|
 | M1 | Deterministic diversification | **[deferred v0.5]** v0.4's 85% pool + `stable_hash(...) % len(pool)` is suspended for beta supply growth. v0.5 uses strict payout-first argmax + tiebreakers; re-enable diversification when supply exceeds demand. |
 | M3 | Cold-start floor | §3.4 and §4 lock `cold_start_floor = 0.15` as a demand-weight tiebreaker floor in v0.5. |
-| M4 | Row lifecycle states | §3.2 and §3.4 lock `runtime_status` and `recommendable`; §5 requires both before default recommendations. |
+| M4 | Row lifecycle states | §3.2 and §3.4 lock `runtime_status` and `recommendable`; §5 requires both before default recommendations. **[extended v0.10.0]** §3.2's ladder table and §16 make `listed` the cheap intake tier — identity plus a verified artifact, never a paid default — so a new row accumulates evidence while visible and matchable but unpriced; §16.6 records how that tier plus rank floors address `RESEARCH_229` FM-1 and FM-2. |
 | M7 | Rate-card version binding | §3.3, §6, and §9 persist `rate_card_version`. |
 | M8 | Retune hint | §9 defines upgrade/manual triggers and stale status text. |
 | M12 | Hard eligibility gates | §5 requires RAM, benchmark, no-swap, no-thermal, and rate-card gates before scoring. |
@@ -1097,6 +1266,30 @@ AC-OMLX-14 (seed↔row binding): An `omlx_seeded` row whose `gate_seed.target_ce
 AC-OMLX-15 (row-scoped quarantine, not fleet-blocking): POST-activation (§12.3), a single semantically-invalid `omlx_seeded` row is row-scoped quarantined — excluded from download, benchmark, donor selection, and recommendation — and does NOT cause a whole-catalog decode/integrity failure, does NOT block coordinator join, and does NOT affect SPEC-032 admission. PRE-activation, by contrast, any oMLX schema in a served catalog is a whole-catalog fail-closed integrity failure (the gate). Whole-catalog `candidate_catalog_integrity_failure` (AC-6) remains reserved for signature failure, global-schema failure, a non-oMLX-row integrity failure, or the pre-activation presence of the unsupported oMLX schema.
 
 AC-OMLX-16 (no-oMLX-derivation gate — anti-erasure-laundering): Before the §12.2 activation gate is satisfied, a signed or served catalog row whose value is DERIVED from oMLX data is a gate violation regardless of its `provenance.source` label — including a row labeled `policy`, `measured_single_host`, or any non-`omlx_seeded` value with `gate_seed` removed. The signer attests no row was oMLX-derived pre-activation; post-activation, immutable provenance lineage (§12.2(b)(v)) records any oMLX origin so an oMLX-derived value cannot be relabeled to escape the oMLX restrictions, and may transition only to evidence-bound `verified_provider_matrix`.
+
+AC-CAT-1 (`SPEC-023-R004`, feed trust): A fetched `autotune-artifacts.json` whose sidecar is missing or malformed, whose `key_id` is unknown to the release-pinned keyring, whose `alg` is not `ed25519`, whose signature fails, or whose schema is invalid emits `catalog_artifact_feed_integrity_failure`; no artifact from that feed is matched, displayed as catalog-verified, downloaded, prepared, probed, priced, or settled while the warning is present. Transport/HTTP unavailability instead selects the baked artifact snapshot with `catalog_artifact_feed_fallback_used`.
+
+AC-CAT-2 (`SPEC-023-R004`, no fleet fail-close): With the artifact feed absent, stale, integrity-failed, or update-required, `autotune --recommend` produces exactly the recommendation, JSON shape, warnings, and coordinator-join outcome it produces on a v0.9.5 release for the same inputs, apart from the artifact-feed warning itself. No artifact-feed failure class blocks paid recommendation, coordinator join, or model download by the candidate row's own `model_revision`/`model_sha256`.
+
+AC-CAT-3 (`SPEC-023-R004`, no candidate-row schema change): The published candidate catalog of a v0.10.0 release contains no `rate_class`, artifact-set, or intake field, and decodes without error under the pre-v0.10.0 CLI Swift strict decoder's exact allowed row-key set. A release whose candidate catalog carries any additional row key is rejected at generation.
+
+AC-CAT-4 (`SPEC-023-R004`, release binding): An artifact feed whose `version`, `release_id`, `generated_at`, `policy_version`, or `candidate_catalog_sha256` disagrees with the selected candidate catalog is a mixed release, emits `catalog_artifact_feed_update_required`, and fails closed for every artifact-derived capability.
+
+AC-CAT-5 (`SPEC-023-R004`, primary-artifact consistency): For every non-`blocked` candidate row, the artifact feed's `primary_artifact_id` artifact is `mlx_safetensors`, `macprovider.snapshot-manifest.v1`, `verified`, and equal to that row's `model_sha256`, `model_id`, `model_revision`, and `min_ram_gb`. A release violating this fails closed at generation before signing, and a consumer holding both feeds fails closed for artifact-derived use before binding anything.
+
+AC-CAT-6 (`SPEC-023-R004`, verified-only settlement): A `declared` or `blocked` artifact never satisfies a SPEC-047 catalog match, never supports `catalog_priced` or `settlement_capable`, and is never downloaded or prepared as a catalog artifact. A settlement binding records the artifact `hash` together with its `hash_algorithm`, never the hash alone.
+
+AC-CAT-7 (`SPEC-023-R004`, GGUF is identity-only in v0.10.0): An artifact with `hash_algorithm == "macprovider.gguf-file.v1"` reaches `catalog_matched`, `listed` intake, `sandbox_probe_only`, and `network_visible_unpriced`, and is refused as a SPEC-010 provider `model_hash`/`model_hash_algorithm` wire pair and as a SPEC-022 route-time settlement binding, until SPEC-010-R002 names the algorithm.
+
+AC-CAT-8 (`SPEC-023-R005`, published schema unchanged): The published `rate-card.json` of a class-expanded release validates against the §3.3 schema with no `classes` key and no per-row class field, and its recommendation-projection `version` is computed by the unchanged §3.3 algorithm.
+
+AC-CAT-9 (`SPEC-023-R005`, precedence and expansion): A model key with an explicit rate-card source row publishes that row verbatim and discards its class expansion; a model key with only a `rate_class` publishes a concrete row materialised from that class into both the published rate card and the coordinator inline fallback rows. Expansion is deterministic and reproducible from the release inputs alone.
+
+AC-CAT-10 (`SPEC-023-R005`, no silent repricing and no orphan `recommendable`): The first release introducing class expansion publishes a `rate-card.json` whose `rows` map is byte-identical to the preceding release's `rows` map. A release in which any `recommendable` candidate row resolves to no rate-card row by exact key or `NormalizeModelKey` fails closed at generation. SPEC-005 §5.5 resolution behavior is unchanged and SPEC-005 is not amended.
+
+AC-CAT-11 (`SPEC-023-R006`, tier boundary): A key admitted as `listed` is discoverable, is SPEC-047 `catalog_matched` when a BYOM candidate's artifact hash equals one of its verified artifacts, is eligible for `sandbox_probe_only` and `network_visible_unpriced`, requires no `rate_class` and no rate row, and is never selected as `recommended_model` and never reaches `catalog_priced` or `settlement_capable`. A key lacking any `verified` artifact is admitted at no tier.
+
+AC-CAT-12 (`SPEC-023-R006`, signals are floors and promotion is manual): Each intake signal is evaluated as a threshold test whose result is boolean; no signal value orders admitted keys, contributes to `raw_score`, or promotes a row. `distinct_provider_offer_count` counts distinct providers, excludes sanctioned providers, and is reported as suppressed below the k-anonymity floor. Promotion from `listed` to `recommendable` requires an explicit operator admission in addition to every threshold, and no `omlx_seeded` row is promoted.
 
 ## 12. oMLX-seeded provisional catalog gates
 
@@ -1331,6 +1524,8 @@ Therefore `N = 3` is adopted as a conservative verification policy rather than a
 
 Q1: Live coordinator `/v1/demand-signal` endpoint and switch trigger. v0.2 may use local attempted-demand stats only after at least 60 days history, 50M paid or auth-valid requested completion-token equivalent, 5 buyer accounts or partner keys with non-test traffic, and no single buyer contributing more than 50% of model demand.
 
+Q1 **[partially answered v0.10.0]**: §16.2(a) introduces `unmatched_model_request_count`, an aggregated coordinator count of buyer requests for unknown model keys, specified here and owned by SPEC-017. It is an INTAKE input only — it admits a key to `listed`, and it never enters `raw_score`, `demand_weight`, or any recommendation or switch decision. The original question, whether a live coordinator demand endpoint should become a recommendation input under the history/volume/concentration bar above, remains OPEN and unchanged.
+
 Q2: Tier-specific `tier_weight` calibration. v0.4 locks all tier weights to `1.0`.
 
 Q3: Provider TPS reputation downweighting from production traffic.
@@ -1351,9 +1546,15 @@ Q10: Static JSON key rotation policy after the release-pinned Ed25519 v0.4 key a
 
 Q11: How to represent model quality and buyer-acceptance scores without creating a new Goodhart target.
 
-Q12: Whether minimum provider coverage targets should become an active recommendation input once provider-count telemetry exists.
+Q12 **[scoped v0.10.0]**: Whether minimum provider coverage targets should become an active recommendation input once provider-count telemetry exists. v0.10.0 uses aggregated provider-supply counts (§16.2(b)) as a catalog INTAKE floor only; they do not enter §4 scoring or §5 eligibility. The recommendation-input question remains OPEN.
 
 Q13: Adaptive `N` for oMLX-seeded promotion. Replace fixed `N = 3` with a minimum and maximum of verified provider autotune runs. The promoted gate would still be recomputed solely from the verified sustained-TPS distribution (never from, nor tested against, the provisional oMLX seed — consistent with §12 and AC-OMLX-4); promotion would trigger once a one-sided ~95% lower confidence bound on the verified sustained-TPS distribution is high enough to set the recomputed `verified_provider_matrix` gate with confidence. If unmet after 7 runs, the row remains `listed`. (Like fixed `N`, this remains subject to the Stage-1 prohibition until the Stage-2 evidence-record mechanism exists.)
+
+Q14 **[new v0.10.0]**: Naming a GGUF artifact hash algorithm in SPEC-010-R002 so a `gguf` artifact can bind a SPEC-010 provider `model_hash`/`model_hash_algorithm` wire pair and a SPEC-022 route-time settlement snapshot. v0.10.0 deliberately scopes `macprovider.gguf-file.v1` to identity, discovery, `listed` intake, probe-only, and unpriced visibility precisely so SPEC-010 needs no amendment in this revision (§3.7.7). GGUF settlement is blocked until that amendment lands, and it is a SPEC-010 decision, not a SPEC-023 one.
+
+Q15 **[new v0.10.0]**: Reconciling the catalog rows that currently price away from their §3.3.1 class peers — `qwen2.5-coder-32b-instruct` against `qwen3-32b` within `class-32b`, and the three `class-30b-moe` rows against each other. §3.3.1 rule 8 keeps them as explicit model overrides so class expansion cannot silently reprice live money-path traffic. Whether to converge them onto class rates, and at which release, is an operator pricing decision that needs its own reviewed release.
+
+Q16 **[new v0.10.0]**: Whether to mirror `rate_class` (and eventually artifact identity) into the candidate-catalog rows behind an activation gate mirroring §12.2, once every deployed candidate-catalog consumer accepts unknown row keys. That would collapse two feeds back into one at the cost of a fleet-wide forward-compat rollout; v0.10.0 takes the separate-feed path specifically to avoid that rollout.
 
 ## 14. Differentiation framing
 
@@ -1377,3 +1578,105 @@ This will not create demand where none exists. SPEC-023 answers "which model sho
 | Fingerprint leakage | Stable hardware identity links provider across runs or support bundles | §3.1 and §9 require per-install-secret, domain-separated HMAC-derived identities only; AC-28 and AC-33 ban raw fingerprints and HMAC secrets in persisted/output paths | Formal privacy review if identities become network-visible |
 | Misleading earnings claims | Provider interprets displayed tokens/sec as guaranteed realized income | §6 and §7 show per-token rate and per-token formula only; AC-29 enforces transparency | Utilization-adjusted realized projection in v0.2 |
 | Clean-room violation | Competitive framing accidentally depends on Darkbloom source | §2 and §14 restrict Darkbloom references to public surfaces only | None; source inspection remains prohibited |
+| Artifact substitution **[v0.10.0]** | An operator error, a compromised authoring host, or a mutable upstream reference binds a model key to bytes that are not the intended model — a second artifact published under an existing `artifact_id`, a GGUF whose declared hash is not the digest of the served file, or a `declared` artifact promoted to `verified` without confirmation | §3.7.4 requires content-addressed immutable `source_ref`s (40-hex HF revision or an immutable Ollama digest), forbids `artifact_id` reuse across differing bytes, and admits only `verified` artifacts to matching/pricing/settlement; §3.7.5 requires the primary artifact to be byte-identical in identity to the signed candidate row and checks it at generation AND consumption; §3.7.6 fails closed for every artifact-derived capability on integrity/update-required; SPEC-047-R003 still requires exact catalog-body digest plus artifact hash and algorithm before `catalog_priced`/`settlement_capable`; §3.7.7 holds non-SPEC-010-named hash algorithms out of the settlement wire pair entirely | Artifact transparency log and multi-party artifact attestation in a later revision |
+| Class mis-declaration **[v0.10.0]** | A `rate_class` is assigned to the wrong class — by operator error or by an authoring-path compromise — so a model is published at another class's price, silently repricing live money-path traffic | §3.3.1 rule 1 closes the class enum in this SPEC so classes cannot be invented at authoring time; rule 5 makes an explicit model row always win, so no class edit can move a key that carries an override; rule 7 fails the release closed when a `recommendable` row resolves to no rate row; rule 8 requires the first class-expansion release to publish byte-identical rate-card `rows`, so the mechanism cannot itself be a repricing event; the published rate card is signed and release-bound (§3.3, §3.5), and §3.3.1 rule 6 keeps `rate_class` off the wire and out of the ledger entirely | Per-class price-change review gate and a rate-card diff attestation in the release runbook |
+| Intake-signal gaming **[v0.10.0]** | A provider or buyer inflates an intake signal to force a model into the catalog — mass BYOM offers for one key, synthetic buyer requests for an unknown model key, or coordinated rank manipulation upstream | §16.2 counts distinct providers rather than offers, excludes sanctioned providers, caps each signal's contribution, and treats every signal as an admission FLOOR rather than a weight, so no amount of signal ranks a row above another; §16.3 admits only to `listed`, which is never a paid default and carries no earning claim, so a gamed intake buys discovery and probe eligibility, not revenue; §16.3 keeps `recommendable` behind the unchanged operator admission, `rate_class` assignment, and §5 gates, so no automated signal can promote a row; §16.1 requires a verified artifact before any intake, so a model with no real bytes cannot enter at all | Buyer-side abuse scoring on unmatched-model-key requests, and per-account request-count caps, once SPEC-017 implements the signal |
+
+## 16. Catalog intake pipeline (v0.10.0)
+
+§16 defines how a model key gets INTO the catalog, on what evidence, and on what cadence. Before this revision the answer was "the operator adds a row when the operator decides to," and each addition was a full signed release cut. The mechanism below does not automate that decision — it makes the inputs to it explicit, bounded, and auditable, and it gives the operator a cheap tier (`listed`) that admits identity without committing to price.
+
+**Non-goal, restated.** This is not an open marketplace. Providers do not set prices, do not admit models, and do not gain an earning path by supplying a signal. Non-catalog models remain non-earning exactly as SPEC-047 §1 and SPEC-047-R004 require: a genuinely novel non-catalog model has no earning path in v0.1, and only a later billing-owner pricing-conversion spec can change that. §16 widens *which models the operator can cheaply admit as catalog identities*; it does not widen *who decides*.
+
+### 16.1 Intake preconditions
+
+No model key may be admitted at any tier unless all of the following hold. These are preconditions, not signals; no amount of demand or supply substitutes for them.
+
+- **P1 — Verified artifact.** At least one artifact for the key has `verification_status == "verified"` in the §3.7 artifact feed, with an immutable content-addressed `source_ref` and a hash under a §3.7.4 algorithm.
+- **P2 — Runtime support.** The current CLI release can load at least one verified artifact of the key through an `allowed_runtime_sources` adapter that SPEC-046-R002 permits.
+- **P3 — Licensing and safety.** The operator has recorded that the model's licence permits paid third-party serving, and the key is not `blocked`.
+- **P4 — Identity hygiene.** The normalized model key does not collide with, shadow, or normalize onto an existing catalog key under SPEC-005 §5.5 `NormalizeModelKey`, and the release generator's existing shadowing and conflicting-hash checks pass.
+
+### 16.2 Intake signals
+
+Three signals feed the intake decision. Each is an aggregate; none carries provider or buyer identity, and none is a score that ranks rows against each other.
+
+**(a) Buyer demand.**
+
+- `openrouter_demand_rank` — the existing §3.4 operator-curated OpenRouter completion-token rank for the key, or `null` when the key is unranked. This is an EXTERNAL prior: it measures buyer demand in the wider market, not macprovider's own served traffic, which is what makes it usable for a key macprovider has never served.
+- `unmatched_model_request_count` — **a new signal, specified here and to be implemented under SPEC-017 authority.** It is the count of buyer requests whose requested model string resolved to no admitted catalog key, aggregated per normalized requested model key over the SPEC-017 rollup window. It MUST be implemented as a SPEC-017 stats field under that SPEC's existing redaction rules: aggregated counts only, no buyer account, key, IP, prompt, or completion content, no per-request rows, and a k-anonymity floor below which the bucket is reported as suppressed rather than as a small number. Until SPEC-017 implements it, this signal is simply absent and the intake rule falls through to its other terms; its absence MUST NOT block intake.
+
+**(b) Provider supply.**
+
+- `distinct_provider_offer_count` — the number of DISTINCT providers whose SPEC-047 admission events record an offer naming this catalog key or a served model reference that matches one of its verified artifacts, over the trailing 30 days. Derived from coordinator admission events, aggregated only: no provider id, pseudonym, hardware fingerprint, or per-provider row may appear in the intake record. Offers from providers under an active route, trust, payout, or registration sanction MUST be excluded (SPEC-047-R007). The count MUST be reported as suppressed below the same k-anonymity floor the SPEC-017 signal uses, so a two-provider interest cannot be read back as an identification of those providers.
+
+**(c) Hardware fit.**
+
+- `fleet_fit_fraction(artifact)` — the fraction of providers active in the trailing 30 days whose reported `ram_gb` satisfies the §5 headroom rule for that artifact: `artifact.min_ram_gb <= ram_gb - safety_margin_gb`, with `safety_margin_gb = 4`. Computed per artifact, because §3.7.4 makes `min_ram_gb` per-artifact. A key's fit is the maximum over its verified artifacts.
+- `tier_target` — the operator's named hardware-tier target for the release, an explicit statement of which part of the fleet the release is trying to serve. Its default is stated in §16.4.
+
+### 16.3 The intake rule
+
+**SPEC-023-R006:** Catalog intake MUST follow this rule. Its thresholds are operator-tunable release policy; the rule's shape, its preconditions, and its tier boundary are normative.
+
+**Admission to `listed`.** A model key MAY be admitted as `listed` in a release when P1-P4 hold AND at least one of the following demand-or-supply terms is satisfied:
+
+- `openrouter_demand_rank != null AND openrouter_demand_rank <= INTAKE_DEMAND_RANK_MAX`; or
+- `distinct_provider_offer_count >= INTAKE_OFFER_FLOOR`; or
+- `unmatched_model_request_count >= INTAKE_BUYER_REQUEST_FLOOR`;
+
+AND at least one of the following fit terms is satisfied:
+
+- `fleet_fit_fraction >= INTAKE_FLEET_FIT_MIN_PCT`; or
+- the key's best-fitting verified artifact fits the release's declared `tier_target`.
+
+`listed` grants exactly what §3.2's ladder table says it grants: discovery, SPEC-047 `catalog_matched` identity against a verified artifact hash, `sandbox_probe_only` and `network_visible_unpriced` admission, and nothing that pays. **No `rate_class` and no rate-card row is required to be `listed`.** This is the point of the tier: identity is cheap, price is a commitment.
+
+**Promotion to `recommendable`.** A `listed` key MAY be promoted only when all of:
+
+- it has been `listed` for at least `INTAKE_MIN_LISTED_DAYS`;
+- it declares a §3.3.1 `rate_class` that resolves, by explicit row or class expansion, to a published rate-card row (§3.3.1 rule 7);
+- its demand-rank row carries `recommendable: true` (§3.4, §5);
+- the §3.2 bench-provenance rules and the §5 eligibility gates are satisfied unchanged — in particular an `omlx_seeded` row MUST NOT be promoted, and the §12 Stage-2 promotion automation remains defined-but-deferred and is NOT activated by this revision;
+- the operator explicitly admits it. **Promotion is an operator decision. No combination of §16.2 signals promotes a row automatically.**
+
+**Demotion and blocking.** The operator MAY demote `recommendable` to `listed`, or move any row to `blocked`, at any time and for any reason, without satisfying any threshold. Withdrawal is always cheaper than admission.
+
+### 16.4 Thresholds and defaults
+
+| Knob | Default | Rationale |
+|---|---:|---|
+| `INTAKE_DEMAND_RANK_MAX` | `100` | An external-market rank floor generous enough to admit real buyer demand for models macprovider has never served (FM-2), narrow enough to exclude the long tail. Rank is a floor, never a weight. |
+| `INTAKE_OFFER_FLOOR` | `3` | Three DISTINCT providers independently offering the same key is real supply-side signal and is above the k-anonymity floor. One or two providers is an anecdote and is reported as suppressed. |
+| `INTAKE_BUYER_REQUEST_FLOOR` | `250` | Roughly 0.2% of the trailing-30-day paid request volume at the time of this revision (~130k requests). Low enough to notice a real unserved model, high enough that incidental typos and single-integration probing do not clear it. |
+| `INTAKE_FLEET_FIT_MIN_PCT` | `25%` | A key must be servable by a meaningful minority of the active fleet, or it is a catalog row nobody can fill. |
+| `tier_target` | `<= 16 GB` | The live fleet is dominated by 8-16 GB Macs (13 of 24 observed hardware profiles), while only 3 catalog rows fit at or under 16 GB. The default target is therefore the under-covered small-RAM tier until that is no longer true. |
+| `INTAKE_COLDSTART_SLOTS` | `1` | Per release, at least one new `listed` row MAY be admitted on P1-P4 plus the fit term alone, with no demand-or-supply term, when the declared `tier_target` is under-covered. This is the explicit cold-start escape hatch (FM-2). |
+| `INTAKE_MIN_LISTED_DAYS` | `30` | One release cycle of `listed` observation before a key can carry a price. |
+
+Every threshold above is release policy the operator may change; each change MUST be recorded in the release notes for the release that applies it, so an intake decision is reconstructible from the release record alone.
+
+### 16.5 Cadence
+
+Catalog releases that ADD or PROMOTE rows run on a **fixed monthly cadence**. Batching intake into one dated release keeps the expensive part of a catalog change — the signed release cut, the fixture churn documented in the release runbook, the fleet-wide feed rollout — to a predictable twelve times a year instead of once per model.
+
+**Out-of-band releases are permitted only for `blocked` transitions** — withdrawing a row for safety, licensing, runtime breakage, or economics. An out-of-band release MUST NOT add a new row, promote a row, change a `rate_class`, or change a published rate. Withdrawal must never wait for a cadence; admission must never jump one.
+
+### 16.6 Goodhart mitigations for intake
+
+`RESEARCH_229` names the two failure modes an intake signal is most likely to reproduce. Both are addressed structurally, not by tuning.
+
+**FM-1 — winner-take-all herding on rank.** The memo's scenario is that a strong rank signal collapses every provider's recommendation onto one row and destroys catalog coverage. Intake cannot reproduce it, because every §16.2 signal is a **floor, not a weight**: a key either clears `INTAKE_DEMAND_RANK_MAX` or it does not, and clearing it by a wide margin buys nothing extra. Intake produces a SET of admitted keys, never an ordering, and it never touches §4's `raw_score`. The existing M3 cold-start floor and M4 lifecycle-state mitigations are unchanged. Most importantly, intake admits to `listed`, and a `listed` row is never a paid default — so even a fully gamed intake signal cannot herd a single provider's recommendation, let alone the fleet's. The one place rank could still herd is promotion to `recommendable`, and that is gated on an explicit operator decision (§16.3) rather than on any threshold.
+
+**FM-2 — cold-start exclusion for new rows.** The memo's scenario is a demand signal defined as macprovider's own served traffic, which is structurally zero for any model the fleet cannot yet serve, so the row is never installed, never served, and never demanded — a self-fulfilling exclusion. Four properties of §16 break that loop:
+
+1. The primary demand term is `openrouter_demand_rank`, an EXTERNAL market prior. A model macprovider has never served can clear it on day one.
+2. `unmatched_model_request_count` counts requests the fleet **could not** serve. It is the inverse of a served-traffic metric: it goes UP precisely for the models the cold-start loop would otherwise silence.
+3. The demand-or-supply terms are a disjunction, so provider-side interest alone (`distinct_provider_offer_count`) can admit a key with no buyer history at all — which is exactly how a BYOM candidate becomes a catalog identity.
+4. `INTAKE_COLDSTART_SLOTS` reserves at least one `listed` admission per release for hardware-fit and verified-artifact evidence alone, so an under-covered hardware tier can be filled with no demand evidence whatsoever.
+
+The `listed` tier is itself the deepest mitigation for both modes: it lets a model accumulate real evidence — providers offering it, buyers requesting it, probes exercising it — while it is visible and matchable but not yet priced. That is the observation window the cold-start loop previously had no way to open.
+
+### 16.7 Ownership boundary
+
+§16 is catalog-admission policy owned by SPEC-023. It does not create a routing rule (SPEC-002), a billing rule (SPEC-005), an admission state (SPEC-047-R001), a receipt or settlement rule (SPEC-022), or a buyer-visibility rule (SPEC-006, SPEC-047-R005). The `unmatched_model_request_count` signal is specified here but is OWNED by SPEC-017: its wire shape, redaction, k-anonymity floor, rollup window, and endpoint are that SPEC's to define, and this section is the contract that implementation must satisfy.

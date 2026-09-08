@@ -659,7 +659,7 @@
     {
       "spec_id": "SPEC-023",
       "title": "Installer-Integrated Autotune Recommend",
-      "version": "v0.9.5",
+      "version": "v0.10.0",
       "path": "specs/SPEC-023-installer-autotune-recommend.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -1411,7 +1411,7 @@
     {
       "spec_id": "SPEC-047",
       "title": "Network Model Admission",
-      "version": "0.1.2",
+      "version": "0.1.3",
       "path": "specs/SPEC-047-network-model-admission.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -2201,6 +2201,57 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1201",
         "rationale": "The guarded CLI implementation and deterministic tests exist, but automatic installer activation requires a signed physical journey proving selected-model context, uncached TTFT, restart-safe config application, and buyer-serving recovery across representative Mac tiers."
+      }
+    },
+    {
+      "requirement_id": "SPEC-023-R004",
+      "spec_id": "SPEC-023",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [
+        "JOURNEY-PROVIDER-PREBETA-ADMISSION"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1240",
+        "rationale": "SPEC-023 v0.10.0 specifies the signed catalog artifact feed, its release binding, primary-artifact consistency, verified-only settlement binding, and its fail-closed-without-fleet-fail-close failure classes, but no generator, coordinator, or CLI implementation exists yet. Owner is the BYOM v0.2 epic; issue #1240 is the placeholder until the v0.2 epic issue exists."
+      }
+    },
+    {
+      "requirement_id": "SPEC-023-R005",
+      "spec_id": "SPEC-023",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [
+        "JOURNEY-PROVIDER-PREBETA-ADMISSION"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1240",
+        "rationale": "SPEC-023 v0.10.0 specifies the closed rate-class enum, the rate-card source classes block, generator expansion into the published rate-card rows and coordinator inline fallback rows, explicit-row precedence, and the no-silent-repricing invariant, but the generator does not implement class expansion yet. Owner is the BYOM v0.2 epic; issue #1240 is the placeholder until the v0.2 epic issue exists."
+      }
+    },
+    {
+      "requirement_id": "SPEC-023-R006",
+      "spec_id": "SPEC-023",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [
+        "JOURNEY-PROVIDER-PREBETA-ADMISSION"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1240",
+        "rationale": "SPEC-023 v0.10.0 specifies the listed-tier intake preconditions, the three aggregated intake signals including a SPEC-017-owned unknown-model-key request count that is not yet implemented, the intake rule with operator-tunable defaults, the monthly cadence, and the manual promotion gate, but no intake tooling or stats field exists yet. Owner is the BYOM v0.2 epic; issue #1240 is the placeholder until the v0.2 epic issue exists."
       }
     },
     {
