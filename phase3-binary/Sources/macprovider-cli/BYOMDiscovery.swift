@@ -1252,6 +1252,17 @@ enum BYOMModelAdmissionError: Error, Equatable, CustomStringConvertible {
         case .invalidCoordinatorURL:
             return "invalid coordinator URL; use wss:// or https://"
         case .httpStatus(let status):
+            if status == 404 || status == 405 {
+                // A pre-BYOM coordinator has no SPEC-047 admission endpoints.
+                // Stay local_default rather than inventing a coordinator state.
+                return "coordinator model admission request failed with HTTP \(status); this coordinator does not serve BYOM model admission — local inventory state (admission_state_source local_default) is all that is available; next action: wait_for_coordinator"
+            }
+            if status == 503 {
+                // #1248 offer-submit disablement, or provider tokens not yet
+                // enabled. Both are coordinator-side and resolve without any
+                // provider change; existing admission state is unaffected.
+                return "coordinator model admission request failed with HTTP \(status); coordinator model admission submissions are unavailable right now and existing admission state is unchanged; next action: wait_for_coordinator"
+            }
             return "coordinator model admission request failed with HTTP \(status)"
         case .invalidStatusSchema:
             return "coordinator returned an invalid model admission status schema"
