@@ -3928,8 +3928,8 @@ final class AutoUpdateTests: XCTestCase {
     }
 
     // Rejected tier is a hard-refuse from the coordinator; acceptProvisional
-    // must not turn it into eligible. Only "pinned" and "provisional+opt-in"
-    // pass the gate.
+    // must not turn it into eligible. Only "pinned", "trusted", and
+    // "provisional+opt-in" pass the gate.
     func testAcceptProvisionalDoesNotEscalateRejectedTier() {
         let state = AutoUpdateTrustState(
             v2Accepted: true,
@@ -3946,8 +3946,8 @@ final class AutoUpdateTests: XCTestCase {
         XCTAssertEqual(state.verdict, .provisional)
     }
 
-    // Pinned providers must remain eligible with or without the flag — flag
-    // affects only the provisional tier gate.
+    // Pinned and trusted providers must remain eligible with or without the
+    // flag — flag affects only the provisional tier gate.
     func testPinnedRemainsEligibleWhenAcceptProvisionalIsFalse() {
         let state = AutoUpdateTrustState(
             v2Accepted: true,
@@ -3962,6 +3962,85 @@ final class AutoUpdateTests: XCTestCase {
             acceptProvisional: false
         )
         XCTAssertEqual(state.verdict, .eligible)
+    }
+
+    func testTrustVerdictTrustedDefaultsToEligible() {
+        let state = AutoUpdateTrustState(
+            v2Accepted: true,
+            tier: "trusted",
+            encryptedLegValid: true,
+            attestationRequired: false,
+            attestationSatisfied: true,
+            tokenConfigured: false,
+            tokenValidated: true,
+            bearerlessDuplicate: false,
+            connected: true
+        )
+        XCTAssertEqual(state.verdict, .eligible)
+        XCTAssertTrue(state.isEligible)
+    }
+
+    func testTrustedRemainsEligibleWhenAcceptProvisionalIsFalse() {
+        let state = AutoUpdateTrustState(
+            v2Accepted: true,
+            tier: "trusted",
+            encryptedLegValid: true,
+            attestationRequired: false,
+            attestationSatisfied: true,
+            tokenConfigured: false,
+            tokenValidated: true,
+            bearerlessDuplicate: false,
+            connected: true,
+            acceptProvisional: false
+        )
+        XCTAssertEqual(state.verdict, .eligible)
+        XCTAssertTrue(state.isEligible)
+    }
+
+    func testTrustedDoesNotBypassEncryptedLegGate() {
+        let state = AutoUpdateTrustState(
+            v2Accepted: true,
+            tier: "trusted",
+            encryptedLegValid: false,
+            attestationRequired: false,
+            attestationSatisfied: true,
+            tokenConfigured: false,
+            tokenValidated: true,
+            bearerlessDuplicate: false,
+            connected: true
+        )
+        XCTAssertEqual(state.verdict, .encryptedLegFailed)
+        XCTAssertFalse(state.isEligible)
+    }
+
+    func testFromCoordinatorPayloadTrustedTierIsEligible() throws {
+        let payload: [String: Any] = [
+            "type": "auth_response",
+            "status": "accepted",
+            "tier": "trusted",
+            "auth_state": "bearer_validated",
+        ]
+        let session = try Tier2ProviderSession(
+            providerID: "provider-test",
+            assignedID: "assigned-test",
+            selectedAEAD: Tier2ProviderSession.aeadSuite,
+            keyID: "kid-test",
+            c2pKey: Data(repeating: 0x11, count: 32),
+            p2cKey: Data(repeating: 0x22, count: 32),
+            c2pNonceBase: Data([0x01, 0x02, 0x03, 0x04]),
+            p2cNonceBase: Data([0x05, 0x06, 0x07, 0x08])
+        )
+        let state = AutoUpdateTrustState.fromCoordinatorPayload(
+            payload,
+            isV2: true,
+            session: session,
+            providerToken: "token",
+            assignedProviderTokenAdopted: false,
+            acceptProvisional: false
+        )
+        XCTAssertEqual(state.tier, "trusted")
+        XCTAssertEqual(state.verdict, .eligible)
+        XCTAssertTrue(state.isEligible)
     }
 
     // fromCoordinatorPayload must forward the flag intact. Prior version
