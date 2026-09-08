@@ -1206,6 +1206,52 @@ func TestModelAdmissionRouteStatusUsesAppendOrderAcrossStores(t *testing.T) {
 	})
 }
 
+func TestModelAdmissionSettlementCapableRouteSetIgnoresShadowingNonSettlementCandidates(t *testing.T) {
+	run := func(t *testing.T, store providerws.ModelAdmissionStore) {
+		catalogPriced, _ := modelAdmissionDecisionLifecycle(t, store, "shd")
+		settlement, found, err := store.LatestModelAdmissionStatus(context.Background(), catalogPriced.ProviderID, catalogPriced.CandidateID)
+		if err != nil || !found || settlement.State != "settlement_capable" {
+			t.Fatalf("latest settlement found=%v state=%q err=%v", found, settlement.State, err)
+		}
+		shadow := settlement
+		shadow.CandidateID = stableModelAdmissionCandidateID("t")
+		shadow.State = "offer_submitted"
+		shadow.RequestID = "request_shadow_shd"
+		shadow.Nonce = "nonce_shadow_shd"
+		shadow.PayloadDigestSHA256 = stringsOf("6", 64)
+		shadow.SignatureDigestSHA256 = stringsOf("7", 64)
+		shadow.CreatedAt = time.Unix(1800000050, 0).UTC()
+		if _, replay, err := store.AppendModelAdmissionOffer(context.Background(), shadow); err != nil || replay {
+			t.Fatalf("append shadow offer replay=%v err=%v", replay, err)
+		}
+
+		events, err := store.SettlementCapableModelAdmissionStatusesForServedModel(context.Background(), settlement.ProviderID, settlement.ServedModelRef)
+		if err != nil {
+			t.Fatalf("settlement-capable route set: %v", err)
+		}
+		if len(events) != 1 {
+			t.Fatalf("settlement-capable route set len=%d want 1: %+v", len(events), events)
+		}
+		if events[0].CandidateID != settlement.CandidateID || events[0].State != "settlement_capable" {
+			t.Fatalf("settlement-capable route set event = %+v", events[0])
+		}
+	}
+
+	t.Run("memory", func(t *testing.T) { run(t, providerws.NewMemoryModelAdmissionStore()) })
+	t.Run("sqlite", func(t *testing.T) {
+		db, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer db.Close()
+		store, err := providerws.NewSQLiteModelAdmissionStore(db.DB())
+		if err != nil {
+			t.Fatal(err)
+		}
+		run(t, store)
+	})
+}
+
 func TestSQLiteModelAdmissionStorePersistsRouteStatusLookup(t *testing.T) {
 	db, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
 	if err != nil {

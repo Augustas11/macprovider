@@ -53,11 +53,12 @@ const (
 )
 
 const (
-	autotuneEvidenceLookupTimeout       = 2 * time.Second
-	admissionCeilingEventCooldown       = 5 * time.Minute
-	admissionCeilingEventStateTTL       = 24 * time.Hour
-	admissionCeilingEventStateMaxKeys   = 4096
-	admissionCeilingDiagnosticValueRune = 48
+	autotuneEvidenceLookupTimeout          = 2 * time.Second
+	modelAdmissionRuntimeRevocationTimeout = 2 * time.Second
+	admissionCeilingEventCooldown          = 5 * time.Minute
+	admissionCeilingEventStateTTL          = 24 * time.Hour
+	admissionCeilingEventStateMaxKeys      = 4096
+	admissionCeilingDiagnosticValueRune    = 48
 )
 
 type admissionCeilingEventRateState struct {
@@ -5131,6 +5132,7 @@ func (s *Server) handleHeartbeat(conn net.Conn, providerID, assignedID string, p
 	}
 	if heartbeatResult.ModelIDChanged {
 		s.observeAdmissionCeilingDrift(*entry, heartbeatResult.PriorModelID)
+		s.revokeSettlementAdmissionForHeartbeatModelDrift(*entry, heartbeatResult.PriorModelID)
 	}
 	s.applyAdmissionCeilingRouteExclusion(entry, "heartbeat")
 	s.rememberProviderSnapshotCoalesced(*entry)
@@ -5187,6 +5189,63 @@ func (s *Server) handleHeartbeat(conn net.Conn, providerID, assignedID string, p
 		// telemetry_drift.quarantine_missing_benchmark are set, in which case
 		// the verdict is Unknown and routing is untouched.
 		s.applyBenchmarkQuarantine(providerID, assignedID, entry.ModelID, verdict, telemetryGeneration)
+	}
+}
+
+func (s *Server) revokeSettlementAdmissionForHeartbeatModelDrift(provider pool.Provider, priorModelID string) {
+	if s == nil || s.modelAdmissions == nil {
+		return
+	}
+	priorModelID = strings.TrimSpace(priorModelID)
+	currentModelID := strings.TrimSpace(provider.ModelID)
+	if priorModelID == "" || currentModelID == "" || strings.EqualFold(priorModelID, currentModelID) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), modelAdmissionRuntimeRevocationTimeout)
+	defer cancel()
+	currentAdmissions, err := s.modelAdmissions.SettlementCapableModelAdmissionStatusesForServedModel(ctx, provider.ProviderID, priorModelID)
+	if err != nil {
+		s.log.Warn().
+			Err(err).
+			Str("provider_id", provider.ProviderID).
+			Str("prior_model_id", priorModelID).
+			Msg("model admission runtime-drift lookup failed")
+		return
+	}
+	for _, current := range currentAdmissions {
+		revocation, drifted := ModelAdmissionRevocationForRuntimeDrift(current, ModelAdmissionPaidRoutingPredicate{
+			ProviderID:                        current.ProviderID,
+			CandidateID:                       current.CandidateID,
+			ServedModelRef:                    currentModelID,
+			CatalogModelKey:                   current.CatalogModelKey,
+			DiscoveryDigestSHA256:             current.DiscoveryDigestSHA256,
+			EvaluationDigestSHA256:            current.EvaluationDigestSHA256,
+			CatalogID:                         current.CatalogID,
+			CatalogBodyDigest:                 current.CatalogBodyDigest,
+			CatalogSignatureKeyID:             current.CatalogSignatureKeyID,
+			CatalogSignaturePubkeyFingerprint: current.CatalogSignaturePubkeyFingerprint,
+			ExpectedCatalogModelHash:          current.ExpectedCatalogModelHash,
+			ExpectedCatalogModelHashAlgorithm: current.ExpectedCatalogModelHashAlgorithm,
+		}, "runtime_identity_drift", s.now())
+		if !drifted {
+			continue
+		}
+		if _, err := s.modelAdmissions.AppendModelAdmissionDecision(ctx, revocation); err != nil {
+			s.log.Warn().
+				Err(err).
+				Str("provider_id", provider.ProviderID).
+				Str("candidate_id", current.CandidateID).
+				Str("prior_model_id", priorModelID).
+				Str("current_model_id", currentModelID).
+				Msg("model admission runtime-drift revocation failed")
+			continue
+		}
+		s.log.Warn().
+			Str("provider_id", provider.ProviderID).
+			Str("candidate_id", current.CandidateID).
+			Str("prior_model_id", priorModelID).
+			Str("current_model_id", currentModelID).
+			Msg("model admission revoked after heartbeat model drift")
 	}
 }
 
