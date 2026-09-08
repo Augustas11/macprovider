@@ -918,12 +918,15 @@ hashes, checksum contents, and EdDSA signature to match the immutable release.
 
 This is an old-client compatibility surface, not a restored update subsystem.
 Malibu has no Sparkle package/framework, `SUFeedURL`, automatic-check setting,
-or updater runtime. Its final signed bundle retains the exact frozen
-`SUPublicEDKey` from Malibu 1.8.32 because Sparkle 2.6.4 rejects a target that
-removes the old key after extraction. The protected workflow injects that inert
-public trust anchor before protected bundle writes, re-verifies the completed
-bundle before codesigning, and requires the exact key with no Sparkle runtime or
-feed in the final DMG. Later provider/CLI updates are owned by the signed CLI
+or updater runtime. Only the one-time v1.8.39 bridge bundle retains the exact
+frozen `SUPublicEDKey` from Malibu 1.8.32, because Sparkle 2.6.4 rejects a target
+that removes the old key after extraction for the stranded 1.8.32 cohort; the
+source app and every signed build after v1.8.39 ship key-free (DECISION_CRITERIA
+Entry 156/158/243). For the v1.8.39 bridge the protected workflow injects that
+inert public trust anchor before protected bundle writes, re-verifies the
+completed bundle before codesigning, and requires the exact key with no Sparkle
+runtime or feed in the final DMG; for every other tag the same helper requires
+the anchor's absence. Later provider/CLI updates are owned by the signed CLI
 compatibility transaction.
 
 If publication stops before draft-to-public transition, inspect or delete the

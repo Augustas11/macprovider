@@ -130,6 +130,9 @@ assert document["SUPublicEDKey"] == values[0]
 assert sorted(key for key in document if key.startswith("SU")) == ["SUPublicEDKey"]
 PY
 
+# Builds after the one-time v1.8.39 bridge ship key-free (DECISION_CRITERIA
+# Entry 156/158): prepare must not inject the anchor and must leave the bundle
+# byte-identical, and verify must accept the key-free posture.
 create_test_app "$work/later.app" 1.8.65 65
 cp "$work/later.app/Contents/Info.plist" "$work/later.Info.plist"
 python3 "$trust_anchor_helper" preflight v1.8.65 \
@@ -138,22 +141,26 @@ cmp "$work/later.Info.plist" "$work/later.app/Contents/Info.plist" ||
   fail "candidate preflight mutated independently versioned Malibu"
 python3 "$trust_anchor_helper" prepare v1.8.65 \
   "$work/later.app" "$legacy_key" >/dev/null
+cmp "$work/later.Info.plist" "$work/later.app/Contents/Info.plist" ||
+  fail "later-tag prepare must not mutate the key-free bundle"
 python3 "$trust_anchor_helper" verify \
   "$work/later.app" "$legacy_key" >/dev/null
-python3 - "$work/later.app/Contents/Info.plist" "$legacy_key" <<'PY'
+python3 - "$work/later.app/Contents/Info.plist" <<'PY'
 import pathlib
 import plistlib
 import sys
 
 document = plistlib.loads(pathlib.Path(sys.argv[1]).read_bytes())
-values = [
-    line.strip()
-    for line in pathlib.Path(sys.argv[2]).read_text(encoding="ascii").splitlines()
-    if line.strip() and not line.lstrip().startswith("#")
-]
-assert document["SUPublicEDKey"] == values[0]
-assert sorted(key for key in document if key.startswith("SU")) == ["SUPublicEDKey"]
+assert "SUPublicEDKey" not in document
+assert [key for key in document if key.startswith("SU")] == []
 PY
+
+# A later-tag build that smuggles in the frozen anchor must be rejected by
+# verify, so the anchor cannot leak past the v1.8.39 bridge.
+frozen_key_value="$(grep -v '^[[:space:]]*#' "$legacy_key" | sed '/^[[:space:]]*$/d')"
+create_test_app "$work/later-with-key.app" 1.8.65 65 "$frozen_key_value"
+expect_anchor_failure later-with-key 'must ship free of Sparkle update keys' \
+  verify "$work/later-with-key.app" "$legacy_key"
 
 create_test_app "$work/wrong-bridge-version.app" 1.8.45 45
 expect_anchor_failure wrong-bridge-version 'bundle version 1.8.45 does not match release tag v1.8.39' \

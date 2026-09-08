@@ -1,6 +1,27 @@
 # SPEC-025 — Native Mac App (signed `.dmg` + menu bar wrapper)
 
-Status: DRAFT v0.28 · Owner: augstar · Target: 2026 Q3
+Status: DRAFT v0.29 · Owner: augstar · Target: 2026 Q3
+
+**Change log v0.29 (2026-09-08, issue #1445 frozen-Sparkle-bridge confinement).**
+Restores the code and this spec to DECISION_CRITERIA Entry 156/158: the frozen
+Malibu 1.8.32 `SUPublicEDKey` trust anchor is **confined to the one-time v1.8.39
+bridge**, and the source app plus every signed build after v1.8.39 ship key-free.
+`scripts/prepare-malibu-bootstrap-trust-anchor.py` now injects the anchor only for
+`v1.8.39` and its `verify` requires the anchor's absence on every other version,
+so the unconditional anchor `prepare`/`verify` calls in `release.yml` and
+`malibu-release.yml` are correct for all tags and the mirror-publish gate
+(`verify-malibu-release-artifacts.sh`) stops rejecting keyless
+acceptance-promoted releases. This changes only the Sparkle trust-anchor
+posture; the independent `malibu-release.yml` Pearl publication path is
+unchanged and still frozen-bridge-only (its `verify-malibu-bootstrap-publication.sh`
+gate requires the committed frozen bridge appcast for every tag other than
+v1.8.39), so dispatching that workflow for a later tag remains an unsupported,
+pre-existing limitation tracked with the bridge-removal follow-up. This removes
+the earlier v0.14/v0.18 generalization
+that had every signed target retain the key — a drift from Entry 156 that never
+carried its own decision entry and that froze `download.malibu.tech` at v1.8.117.
+The immutable v1.8.39 bridge, its frozen appcast, and the live download endpoint
+are unchanged; retiring that now-inert machinery is tracked separately.
 
 **Change log v0.28 (2026-09-05, F5 §5.4 dwell-state enumeration correction from
 the Opus pre-merge review).** Corrects the `last_restart_dwell_state` enumeration
@@ -604,9 +625,12 @@ time (60–240 s for the first model) in the background.
   Removing the Sparkle dependency/runtime and feed settings eliminates the prior
   second update authority. Independent Malibu release publication still emits a signed
   public appcast and `latest.dmg` compatibility surface for already-installed Sparkle
-  clients. Every signed Malibu target retains only the frozen 1.8.32 `SUPublicEDKey`
-  because Sparkle 2.6.4 requires key continuity after extraction; without Sparkle code
-  or a feed URL in the target bundle, this public key cannot initiate future updates.
+  clients. The frozen 1.8.32 `SUPublicEDKey` trust anchor is confined to the
+  one-time v1.8.39 bridge, where Sparkle 2.6.4 requires key continuity after
+  extraction for the stranded 1.8.32 cohort; the source app and every signed build
+  after v1.8.39 ship key-free (DECISION_CRITERIA Entry 156/158). Even on the
+  bridge, without Sparkle code or a feed URL in the target bundle, the public key
+  cannot initiate future updates.
 - The updater acquires the maintenance lease, persists a phase journal and exact
   typed rollback plan, stages and validates the target, drains buyer work,
   installs the whole set, restarts launchd, and commits only after exact signed
@@ -1395,9 +1419,11 @@ provider and watchdog remain LaunchAgents, and Malibu remains a separate
 - The CLI verifies the catalog/release trust chain, artifact-index signature, exact set
   identity, per-role uniqueness, hashes, Developer ID identity/team where applicable,
   launchd labels, and target coordinator policy before any drain or replacement.
-- Malibu carries no feed URL or independent in-app discovery channel. Signed
-  release targets carry the frozen v1.8.32 public key as inert trust-continuity
-  metadata for old Sparkle clients; they have no Sparkle runtime or feed URL.
+- Malibu carries no feed URL or independent in-app discovery channel. Only the
+  one-time v1.8.39 bridge target carries the frozen v1.8.32 public key as inert
+  trust-continuity metadata for the stranded 1.8.32 cohort; the source app and
+  every signed build after v1.8.39 ship key-free. No signed target has a Sparkle
+  runtime or feed URL.
   Failure to verify or fetch any required member leaves the current set running and
   emits a typed redacted update state. A staged target that fails exact signed-set
   identity, launch, or local provider health enters SPEC-020 rollback recovery.

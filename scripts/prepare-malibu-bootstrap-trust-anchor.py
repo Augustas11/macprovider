@@ -17,6 +17,13 @@ import tempfile
 EXPECTED_PUBLIC_KEY = "JkTDWnRJfOI3YIlpfJKvasWkxb0O1j/7ObGYiIA7big="
 TAG_PATTERN = re.compile(r"^v[0-9]+\.[0-9]+\.[0-9]+$")
 
+# The frozen Sparkle trust anchor is confined to the one-time v1.8.39 bridge for
+# the stranded Malibu 1.8.32 cohort. Per DECISION_CRITERIA Entry 156/158 the
+# source app and every build after v1.8.39 ship key-free, so `prepare` only
+# injects the anchor for v1.8.39 and `verify` requires its absence otherwise.
+BRIDGE_TAG = "v1.8.39"
+BRIDGE_VERSION = "1.8.39"
+
 
 def fail(message: str) -> "NoReturn":
     raise SystemExit(f"malibu bootstrap trust anchor: {message}")
@@ -198,6 +205,14 @@ def prepare(tag: str, app: pathlib.Path, key_path: pathlib.Path) -> None:
         key_path,
     )
 
+    if tag != BRIDGE_TAG:
+        # Builds after the one-time v1.8.39 bridge ship key-free. Preflight has
+        # already proven the source app carries no legacy update keys; reverify
+        # that key-free posture and leave the bundle untouched.
+        verify(app, key_path)
+        print(f"kept {tag} free of the frozen Malibu Sparkle trust anchor")
+        return
+
     document["SUPublicEDKey"] = key
     atomic_write_plist(contents / "Info.plist", document, plist_format, mode)
     verify(app, key_path)
@@ -211,12 +226,21 @@ def verify(app: pathlib.Path, key_path: pathlib.Path) -> None:
     version, build = validate_identity(document, None)
     found = legacy_update_keys(document)
 
-    if found != ["SUPublicEDKey"] or document.get("SUPublicEDKey") != key:
+    if version == BRIDGE_VERSION:
+        if found != ["SUPublicEDKey"] or document.get("SUPublicEDKey") != key:
+            fail(
+                f"Malibu {version} must contain only the exact frozen "
+                "SUPublicEDKey trust anchor"
+            )
+        print(f"verified Malibu {version} Sparkle trust anchor")
+        return
+
+    if found:
         fail(
-            f"Malibu {version} must contain only the exact frozen "
-            "SUPublicEDKey trust anchor"
+            f"Malibu {version} must ship free of Sparkle update keys; the frozen "
+            "trust anchor is confined to the one-time v1.8.39 bridge"
         )
-    print(f"verified Malibu {version} Sparkle trust anchor")
+    print(f"verified Malibu {version} ships free of the frozen Sparkle trust anchor")
 
 
 def parse_args() -> argparse.Namespace:
