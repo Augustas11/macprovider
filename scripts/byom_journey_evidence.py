@@ -449,9 +449,14 @@ def _digest_document(manifest_dir: Path, entry: Any, step_id: str, index: int) -
         json.loads(decoded)
     except json.JSONDecodeError as exc:
         fail(f"{location}.path must be a JSON document: {exc}")
-    # The document itself is never embedded, but a captured document that still
-    # carries a credential must not be archived at all.
-    reject_secret_like_text(decoded, f"{location}.path")
+    # The document itself is never embedded, but its digest is what the signed
+    # journey-result binds to, so the redaction claim has to hold for the bytes we
+    # digest: a captured document that still carries a URL, an absolute or
+    # home-relative path, a hostname, an IP literal, a localhost reference, or a
+    # credential must not be archived at all. There is deliberately no allowlist
+    # for raw-document fields -- a CLI document that legitimately needs an
+    # endpoint or a path in it is a document the operator redacts before capture.
+    reject_unredacted_text(decoded, f"{location}.path")
     return {
         "id": document_id,
         "schema": schema,
@@ -460,20 +465,32 @@ def _digest_document(manifest_dir: Path, entry: Any, step_id: str, index: int) -
     }
 
 
-def _require_manifest_steps(manifest_dir: Path, contract: JourneyContract, value: Any) -> list[dict[str, Any]]:
-    steps = require_list(value, "steps")
+def validate_evidence_steps(
+    contract: JourneyContract, value: Any, *, location: str = "steps"
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Validate redacted-evidence steps against one journey contract.
+
+    This is the only step validator. Capture runs it on the steps it derives from
+    the run manifest, and the journey-result builders run it again on the
+    committed redacted evidence, so hand-authored evidence cannot claim a
+    requirement its steps do not actually exercise. It requires the exact step-key
+    set for the journey, validates every per-step requirement id against
+    `allowed_step_requirement_ids()`, and returns the steps in contract order plus
+    the recomputed union of those requirement ids.
+    """
+    steps = require_list(value, location)
     by_id: dict[str, dict[str, Any]] = {}
     covered: set[str] = set()
     for index, item in enumerate(steps):
-        location = f"steps[{index}]"
-        step = require_object(item, location)
+        step_location = f"{location}[{index}]"
+        step = require_object(item, step_location)
         require_exact_keys(
             step,
-            {"id", "status", "assertion", "requirement_ids", "documents"},
-            {"id", "status", "assertion", "requirement_ids", "documents"},
-            location,
+            {"id", "status", "assertion", "artifacts", "requirement_ids", "documents"},
+            {"id", "status", "assertion", "artifacts", "requirement_ids", "documents"},
+            step_location,
         )
-        step_id = require_string(step.get("id"), None, f"{location}.id")
+        step_id = require_string(step.get("id"), None, f"{step_location}.id")
         if step_id not in contract.step_requirement_ids:
             fail(f"unknown {contract.journey_id} step id: {step_id}")
         if step_id in by_id:
@@ -481,6 +498,8 @@ def _require_manifest_steps(manifest_dir: Path, contract: JourneyContract, value
         if step.get("status") != "pass":
             fail(f"{step_id}.status must equal 'pass'")
         assertion = require_string(step.get("assertion"), None, f"{step_id}.assertion")
+        if step.get("artifacts") != [contract.artifact_id]:
+            fail(f"{step_id}.artifacts must reference {contract.artifact_id}")
         requirement_ids = require_list(step.get("requirement_ids"), f"{step_id}.requirement_ids")
         if not requirement_ids:
             fail(f"{step_id}.requirement_ids must not be empty")
@@ -502,11 +521,30 @@ def _require_manifest_steps(manifest_dir: Path, contract: JourneyContract, value
         documents = require_list(step.get("documents"), f"{step_id}.documents")
         if not documents:
             fail(f"{step_id}.documents must reference at least one captured CLI JSON document")
-        digested = [
-            _digest_document(manifest_dir, document, step_id, document_index)
-            for document_index, document in enumerate(documents)
-        ]
-        document_ids = [document["id"] for document in digested]
+        normalized_documents: list[dict[str, Any]] = []
+        for document_index, document in enumerate(documents):
+            document_location = f"{step_id}.documents[{document_index}]"
+            entry = require_object(document, document_location)
+            require_exact_keys(
+                entry,
+                {"id", "schema", "sha256", "bytes"},
+                {"id", "schema", "sha256", "bytes"},
+                document_location,
+            )
+            size = entry.get("bytes")
+            if isinstance(size, bool) or not isinstance(size, int) or size <= 0:
+                fail(f"{document_location}.bytes must be a positive integer")
+            normalized_documents.append(
+                {
+                    "id": require_string(entry.get("id"), SAFE_LABEL_RE, f"{document_location}.id"),
+                    "schema": require_string(
+                        entry.get("schema"), DOCUMENT_SCHEMA_RE, f"{document_location}.schema"
+                    ),
+                    "sha256": require_string(entry.get("sha256"), SHA256_RE, f"{document_location}.sha256"),
+                    "bytes": size,
+                }
+            )
+        document_ids = [document["id"] for document in normalized_documents]
         if len(set(document_ids)) != len(document_ids):
             fail(f"{step_id}.documents ids must be unique")
         by_id[step_id] = {
@@ -515,7 +553,7 @@ def _require_manifest_steps(manifest_dir: Path, contract: JourneyContract, value
             "assertion": assertion,
             "artifacts": [contract.artifact_id],
             "requirement_ids": sorted(normalized_requirements),
-            "documents": digested,
+            "documents": normalized_documents,
         }
     missing = [step_id for step_id in contract.step_id_order if step_id not in by_id]
     if missing:
@@ -523,7 +561,40 @@ def _require_manifest_steps(manifest_dir: Path, contract: JourneyContract, value
     uncovered = sorted(contract.promotable_requirement_ids - covered)
     if uncovered:
         fail(f"steps do not cover every mapped requirement: {', '.join(uncovered)}")
-    return [by_id[step_id] for step_id in contract.step_id_order]
+    return [by_id[step_id] for step_id in contract.step_id_order], sorted(covered)
+
+
+def _require_manifest_steps(
+    manifest_dir: Path, contract: JourneyContract, value: Any
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Digest the manifest's captured documents, then apply the shared step validator."""
+    steps = require_list(value, "steps")
+    candidates: list[dict[str, Any]] = []
+    for index, item in enumerate(steps):
+        location = f"steps[{index}]"
+        step = require_object(item, location)
+        require_exact_keys(
+            step,
+            {"id", "status", "assertion", "requirement_ids", "documents"},
+            {"id", "status", "assertion", "requirement_ids", "documents"},
+            location,
+        )
+        step_id = require_string(step.get("id"), None, f"{location}.id")
+        documents = require_list(step.get("documents"), f"{step_id}.documents")
+        candidates.append(
+            {
+                "id": step_id,
+                "status": step.get("status"),
+                "assertion": step.get("assertion"),
+                "artifacts": [contract.artifact_id],
+                "requirement_ids": step.get("requirement_ids"),
+                "documents": [
+                    _digest_document(manifest_dir, document, step_id, document_index)
+                    for document_index, document in enumerate(documents)
+                ],
+            }
+        )
+    return validate_evidence_steps(contract, candidates)
 
 
 def _require_manifest_observations(contract: JourneyContract, value: Any) -> dict[str, Any]:
@@ -613,9 +684,10 @@ def build_evidence(
     if harness.get("status") != "pass":
         fail("harness.status must equal 'pass'")
 
-    steps = _require_manifest_steps(manifest_path.parent.resolve(), contract, manifest.get("steps"))
+    steps, requirement_ids = _require_manifest_steps(
+        manifest_path.parent.resolve(), contract, manifest.get("steps")
+    )
     observations = _require_manifest_observations(contract, manifest.get("observations"))
-    requirement_ids = sorted({item for step in steps for item in step["requirement_ids"]})
 
     captured = _parse_captured_at(captured_at)
     evidence = {
@@ -683,8 +755,19 @@ def build_journey_result_payload(
         fail("repository.commit must exactly match --source-sha")
     require_git_file_matches(root, evidence_sha, normalized_source, evidence_bytes)
 
-    covered = require_list(evidence.get("requirement_ids"), "requirement_ids")
-    covered_ids = [require_string(item, REQUIREMENT_RE, "requirement_ids[]") for item in covered]
+    # Committed redacted evidence is input, not truth: re-run the same step
+    # validator capture used and recompute the requirement union from the steps
+    # rather than trusting the top-level list a hand-authored artifact declares.
+    validated_steps, covered_ids = validate_evidence_steps(contract, evidence.get("steps"))
+    declared = require_list(evidence.get("requirement_ids"), "requirement_ids")
+    declared_ids = [require_string(item, REQUIREMENT_RE, "requirement_ids[]") for item in declared]
+    if len(set(declared_ids)) != len(declared_ids):
+        fail("requirement_ids must be unique")
+    if sorted(declared_ids) != covered_ids:
+        fail(
+            "requirement_ids must equal the union of the evidence step requirement ids: "
+            f"expected {', '.join(covered_ids)}"
+        )
     selected = parse_requirement_ids(requirement_ids, covered_ids, contract)
     mapped = load_mapped_pending_requirements(root, contract)
     not_mapped = [item for item in selected if item not in mapped]
@@ -720,41 +803,18 @@ def build_journey_result_payload(
         if redaction.get(field) is not True:
             fail(f"redaction.{field} must be true")
 
-    evidence_steps = require_list(evidence.get("steps"), "steps")
-    by_id: dict[str, dict[str, Any]] = {}
-    for index, item in enumerate(evidence_steps):
-        step = require_object(item, f"steps[{index}]")
-        step_id = require_string(step.get("id"), None, f"steps[{index}].id")
-        if step_id not in contract.step_requirement_ids:
-            fail(f"unknown {contract.journey_id} step id: {step_id}")
-        if step_id in by_id:
-            fail(f"duplicate step id: {step_id}")
-        if step.get("status") != "pass":
-            fail(f"{step_id}.status must equal 'pass'")
-        assertion = require_string(step.get("assertion"), None, f"{step_id}.assertion")
-        artifacts = step.get("artifacts")
-        if artifacts != [contract.artifact_id]:
-            fail(f"{step_id}.artifacts must reference {contract.artifact_id}")
-        documents = require_list(step.get("documents"), f"{step_id}.documents")
-        if not documents:
-            fail(f"{step_id}.documents must reference at least one captured CLI JSON document")
-        for document_index, document in enumerate(documents):
-            location = f"{step_id}.documents[{document_index}]"
-            entry = require_object(document, location)
-            require_exact_keys(entry, {"id", "schema", "sha256", "bytes"}, {"id", "schema", "sha256", "bytes"}, location)
-            require_string(entry.get("sha256"), SHA256_RE, f"{location}.sha256")
-        # Steps in the signed payload carry only the governance-closed keys; the
-        # per-step requirement ids and captured-document digests stay in the
-        # hash-bound evidence artifact.
-        by_id[step_id] = {
-            "id": step_id,
+    # Steps in the signed payload carry only the governance-closed keys; the
+    # per-step requirement ids and captured-document digests stay in the
+    # hash-bound evidence artifact.
+    steps_payload = [
+        {
+            "id": step["id"],
             "status": "pass",
-            "assertion": assertion,
+            "assertion": step["assertion"],
             "artifacts": [contract.artifact_id],
         }
-    missing = [step_id for step_id in contract.step_id_order if step_id not in by_id]
-    if missing:
-        fail(f"missing {contract.journey_id} step(s): {', '.join(missing)}")
+        for step in validated_steps
+    ]
 
     return {
         "schema_version": JOURNEY_RESULT_PAYLOAD_SCHEMA,
@@ -773,7 +833,7 @@ def build_journey_result_payload(
             }
         ],
         "result": run_result,
-        "steps": [by_id[step_id] for step_id in contract.step_id_order],
+        "steps": steps_payload,
         "redaction": redaction,
         "run_id": require_string(evidence.get("run_id"), SAFE_LABEL_RE, "run_id"),
         "execution_mode": contract.execution_mode,

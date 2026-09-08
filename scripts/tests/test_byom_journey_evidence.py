@@ -199,6 +199,45 @@ class BYOMJourneyCaptureTests(unittest.TestCase):
 
         self.assert_capture_fails("discovery", mutator, "credential-like value")
 
+    def write_capture(self, root, payload: dict) -> None:
+        (root / "captures" / "discover-mlx-cache.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    def assert_captured_document_rejected(self, payload: dict, fragment: str) -> None:
+        def mutator(_manifest, root):
+            self.write_capture(root, payload)
+
+        self.assert_capture_fails("discovery", mutator, fragment)
+
+    def test_rejects_captured_document_containing_a_url(self) -> None:
+        self.assert_captured_document_rejected(
+            {"schema": "provider_byom_discovery.v1", "note": "http://runtime.invalid/api/tags"},
+            "contains a url",
+        )
+
+    def test_rejects_captured_document_containing_an_absolute_path(self) -> None:
+        self.assert_captured_document_rejected(
+            {"schema": "provider_byom_discovery.v1", "note": "/Users/operator/.cache/huggingface"},
+            "contains an absolute path",
+        )
+
+    def test_rejects_captured_document_containing_a_hostname(self) -> None:
+        self.assert_captured_document_rejected(
+            {"schema": "provider_byom_discovery.v1", "note": "read back from coordinator.malibu.tech"},
+            "contains a hostname",
+        )
+
+    def test_rejects_captured_document_containing_an_ip_literal(self) -> None:
+        self.assert_captured_document_rejected(
+            {"schema": "provider_byom_discovery.v1", "note": "bound 10.11.12.13"},
+            "contains an ipv4 literal",
+        )
+
+    def test_rejects_captured_document_containing_a_localhost_reference(self) -> None:
+        self.assert_captured_document_rejected(
+            {"schema": "provider_byom_discovery.v1", "note": "adapter answered on localhost"},
+            "contains a localhost reference",
+        )
+
     def test_rejects_secret_bearing_observation_key(self) -> None:
         def mutator(manifest, _root):
             manifest["observations"]["provider_token_seen"] = False
@@ -388,6 +427,90 @@ class BYOMJourneyRoundTripTests(unittest.TestCase):
                 requirement_ids="SPEC-047-R001",
             )
         self.assertIn("must be covered by evidence.requirement_ids", str(caught.exception))
+
+    def commit_and_build(self, mutator, selector: str = "discovery"):
+        """Build a payload from committed evidence a mutator was allowed to hand-edit."""
+        root = self.make_repo()
+        source_sha = self.git(root, "rev-parse", "HEAD")
+        contract = evidence_module.contract_for(selector)
+        evidence = evidence_module.build_evidence(
+            root,
+            contract,
+            FIXTURES / selector / "run-manifest.json",
+            source_sha=source_sha,
+            operator_role="release-operator",
+            operator_identity_fingerprint=OPERATOR_FINGERPRINT,
+            hardware_profile="ci-hermetic-runner",
+            candidate="cli-fixture",
+            captured_at="2026-09-08T00:00:00Z",
+            expires_at=None,
+            summary="fixture journey run",
+        )
+        mutator(evidence)
+        source = f"journeys/evidence/{contract.evidence_prefix.split('/')[-1]}20260908T000000Z.redacted.json"
+        evidence_module.write_json_atomically(root / source, evidence)
+        self.git(root, "add", source)
+        self.git(root, "commit", "-qm", "evidence")
+        evidence_sha = self.git(root, "rev-parse", "HEAD")
+        return evidence_module.build_journey_result_payload(
+            root,
+            contract,
+            source,
+            source_sha=source_sha,
+            evidence_sha=evidence_sha,
+            requirement_ids=None,
+        )
+
+    def assert_builder_rejects(self, mutator, fragment: str, selector: str = "discovery") -> None:
+        with self.assertRaises(BYOMEvidenceError) as caught:
+            self.commit_and_build(mutator, selector)
+        self.assertIn(fragment, str(caught.exception))
+
+    def test_builder_rejects_an_extra_evidence_step(self) -> None:
+        def mutator(evidence):
+            extra = copy.deepcopy(evidence["steps"][0])
+            extra["id"] = "step-99-invented"
+            evidence["steps"].append(extra)
+
+        self.assert_builder_rejects(mutator, "unknown JOURNEY-PROVIDER-BYOM-DISCOVERY step id")
+
+    def test_builder_rejects_a_missing_evidence_step(self) -> None:
+        def mutator(evidence):
+            del evidence["steps"][2]
+
+        self.assert_builder_rejects(mutator, "missing JOURNEY-PROVIDER-BYOM-DISCOVERY step(s)")
+
+    def test_builder_rejects_a_step_requirement_outside_the_allowed_set(self) -> None:
+        def mutator(evidence):
+            evidence["steps"][0]["requirement_ids"] = ["SPEC-046-R005"]
+
+        self.assert_builder_rejects(mutator, "is not a requirement this step exercises")
+
+    def test_builder_rejects_top_level_requirement_ids_that_are_not_the_step_union(self) -> None:
+        def mutator(evidence):
+            evidence["requirement_ids"] = [
+                item for item in evidence["requirement_ids"] if item != "SPEC-046-R004"
+            ]
+
+        self.assert_builder_rejects(mutator, "must equal the union of the evidence step requirement ids")
+
+    def test_builder_rejects_padded_top_level_requirement_ids(self) -> None:
+        def mutator(evidence):
+            evidence["requirement_ids"] = sorted(evidence["requirement_ids"] + ["SPEC-047-R001"])
+
+        self.assert_builder_rejects(mutator, "must equal the union of the evidence step requirement ids")
+
+    def test_builder_rejects_evidence_that_stops_covering_every_requirement(self) -> None:
+        def mutator(evidence):
+            for step in evidence["steps"]:
+                step["requirement_ids"] = [
+                    item for item in step["requirement_ids"] if item != "SPEC-046-R006"
+                ] or ["SPEC-046-R008"]
+            evidence["requirement_ids"] = sorted(
+                {item for step in evidence["steps"] for item in step["requirement_ids"]}
+            )
+
+        self.assert_builder_rejects(mutator, "steps do not cover every mapped requirement: SPEC-046-R006")
 
     def test_builder_rejects_evidence_outside_the_journey_prefix(self) -> None:
         root = self.make_repo()

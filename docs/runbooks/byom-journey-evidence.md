@@ -43,8 +43,11 @@ to the journey, or capture fails.
 
 The capture tool fails closed. It refuses to emit evidence that contains a URL, an
 absolute or `~/`-relative path, a hostname, an IP literal, a `localhost`
-reference, or anything shaped like a credential, in either a key or a value. It
-also refuses to record a captured CLI document that still contains a credential.
+reference, or anything shaped like a credential, in either a key or a value. The
+same fail-closed scan runs over every captured CLI document before it is digested,
+because the digest is what the signed result binds to. There is no allowlist: a
+document that legitimately contains an endpoint or a local path is one you redact
+before capture, or capture refuses the whole run.
 
 Captured CLI JSON documents are **never** copied into the repository. Only their
 SHA-256 digest, byte count, declared schema, and a short id are recorded. Keep the
@@ -153,14 +156,21 @@ resolve at `--source-sha`. Fix drift here rather than after signing.
 **This is the only step that needs the acceptance signing key**, and it is the
 only step an agent must not perform on the operator's behalf.
 
+`MACPROVIDER_ACCEPTANCE_SIGNING_KEY_PEM` must already hold the **PEM contents** of
+the acceptance signing key — `read_private_key()` reads the variable itself, not a
+path to a key file and not the name of another variable. In the
+`production-release` environment it comes straight from the repository secret of
+the same name, exactly as the sibling `promote-signed-*-journey.yml` workflows set
+it.
+
 ```bash
-MACPROVIDER_ACCEPTANCE_SIGNING_KEY_PEM=<path-or-env-indirect> \
 python3 scripts/sign-journey-result.py \
-  /tmp/byom-discovery-journey-result.unsigned.json \
+  --input /tmp/byom-discovery-journey-result.unsigned.json \
   --output journeys/evidence/provider-byom-discovery-<UTC>.<requirement-slug>.journey-result.signed.json
 ```
 
-The signature is `ecdsa-p256-sha256` under key id
+`--input` and `--output` are both required, and `--output` must resolve under
+`journeys/evidence/`. The signature is `ecdsa-p256-sha256` under key id
 `macprovider-acceptance-p256-v1`, verified against
 `security/acceptance-candidate-signing-public.pem`. Never print, echo, copy, or
 commit the private key. Prefer running this in the `production-release`
@@ -171,8 +181,9 @@ laptop.
 
 ```bash
 python3 scripts/promote-signed-journey-result.py \
-  journeys/evidence/provider-byom-discovery-<UTC>.<requirement-slug>.journey-result.signed.json \
-  --requirement-ids SPEC-046-R001,...
+  --base-ref origin/main \
+  --requirement-ids SPEC-046-R001,... \
+  journeys/evidence/provider-byom-discovery-<UTC>.<requirement-slug>.journey-result.signed.json
 
 python3 scripts/check_spec_governance.py --base-ref origin/main
 ```
