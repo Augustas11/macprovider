@@ -1,0 +1,13 @@
+{
+  "rows": [
+    {
+      "admission": {
+        "catalog_economics_permitted": false,
+        "settlement_capable": false
+      },
+      "economics_state": "blocked",
+      "rate_source": "none"
+    }
+  ],
+  "schema": "model_catalog_economics.v1"
+}

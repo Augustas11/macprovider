@@ -1,0 +1,9 @@
+{
+  "admission_state": "settlement_capable",
+  "admission_state_source": "coordinator",
+  "catalog_model_key": null,
+  "provider_guidance": {
+    "earning_path_class": "settlement_capable"
+  },
+  "schema": "model_admission_status.v1"
+}

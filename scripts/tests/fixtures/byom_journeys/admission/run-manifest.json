@@ -1,0 +1,239 @@
+{
+  "schema_version": "macprovider.byom-journey-run.v1",
+  "journey_id": "JOURNEY-NETWORK-MODEL-ADMISSION",
+  "run_id": "network-model-admission-fixture",
+  "environment_class": "hermetic-loopback",
+  "cli_version": "0.0.0-fixture",
+  "harness": {
+    "name": "test/e2e/byom/run-cli-onboarding-e2e.py",
+    "status": "pass"
+  },
+  "steps": [
+    {
+      "id": "step-01-offer-dry-run",
+      "status": "pass",
+      "assertion": "Dry run produced model_admission_offer_dry_run.v1 and made no coordinator request.",
+      "requirement_ids": [
+        "SPEC-047-R002"
+      ],
+      "documents": [
+        {
+          "id": "offer-dry-run",
+          "schema": "model_admission_offer_dry_run.v1",
+          "path": "captures/offer-dry-run.json"
+        }
+      ]
+    },
+    {
+      "id": "step-02-submit-signed-offer",
+      "status": "pass",
+      "assertion": "Provider-signed offer authenticated, nonce-bound, and accepted as offer_submitted.",
+      "requirement_ids": [
+        "SPEC-047-R002",
+        "SPEC-047-R007"
+      ],
+      "documents": [
+        {
+          "id": "offer-submitted-status",
+          "schema": "model_admission_status.v1",
+          "path": "captures/admission-status-offer-submitted.json"
+        }
+      ]
+    },
+    {
+      "id": "step-03-reject-opaque-endpoint",
+      "status": "pass",
+      "assertion": "Opaque candidate was rejected with no catalog economics and no provider credit.",
+      "requirement_ids": [
+        "SPEC-047-R003",
+        "SPEC-047-R007"
+      ],
+      "documents": [
+        {
+          "id": "opaque-endpoint-rejected-status",
+          "schema": "model_admission_status.v1",
+          "path": "captures/admission-status-offer-rejected.json"
+        }
+      ]
+    },
+    {
+      "id": "step-04-sandbox-probe-only",
+      "status": "pass",
+      "assertion": "sandbox_probe_only stayed out of default paid routing; the probe used the provider channel.",
+      "requirement_ids": [
+        "SPEC-047-R001",
+        "SPEC-047-R003",
+        "SPEC-047-R005",
+        "SPEC-047-R007"
+      ],
+      "documents": [
+        {
+          "id": "sandbox-probe-only-status",
+          "schema": "model_admission_status.v1",
+          "path": "captures/admission-status-sandbox-probe-only.json"
+        }
+      ]
+    },
+    {
+      "id": "step-05-network-visible-unpriced",
+      "status": "pass",
+      "assertion": "network_visible_unpriced disclosed explicitly with every money field null.",
+      "requirement_ids": [
+        "SPEC-047-R004",
+        "SPEC-047-R005"
+      ],
+      "documents": [
+        {
+          "id": "network-visible-unpriced-economics",
+          "schema": "model_catalog_economics.v1",
+          "path": "captures/catalog-economics-unpriced.json"
+        }
+      ]
+    },
+    {
+      "id": "step-06-catalog-matched-not-settlement",
+      "status": "pass",
+      "assertion": "catalog_priced showed signed economics with settlement_capable false and no ledger row.",
+      "requirement_ids": [
+        "SPEC-047-R003",
+        "SPEC-047-R004"
+      ],
+      "documents": [
+        {
+          "id": "catalog-matched-economics",
+          "schema": "model_catalog_economics.v1",
+          "path": "captures/catalog-economics-catalog-priced.json"
+        }
+      ]
+    },
+    {
+      "id": "step-07-revocation-on-drift",
+      "status": "pass",
+      "assertion": "Drifted admitted predicate demoted to revoked and failed closed for routing.",
+      "requirement_ids": [
+        "SPEC-047-R006"
+      ],
+      "documents": [
+        {
+          "id": "revoked-status",
+          "schema": "model_admission_status.v1",
+          "path": "captures/admission-status-revoked.json"
+        }
+      ]
+    },
+    {
+      "id": "step-08-withdrawal",
+      "status": "pass",
+      "assertion": "Provider withdrawal returned withdrawn and deleted no local model artifact.",
+      "requirement_ids": [
+        "SPEC-047-R006"
+      ],
+      "documents": [
+        {
+          "id": "withdrawal-response",
+          "schema": "model_admission_withdraw.v1",
+          "path": "captures/admission-withdraw.json"
+        }
+      ]
+    },
+    {
+      "id": "step-09-settlement-capable-case",
+      "status": "pass",
+      "assertion": "settlement_capable required the route-time snapshot and receipt verification to hold.",
+      "requirement_ids": [
+        "SPEC-047-R003",
+        "SPEC-047-R005"
+      ],
+      "documents": [
+        {
+          "id": "settlement-capable-status",
+          "schema": "model_admission_status.v1",
+          "path": "captures/admission-status-settlement-capable.json"
+        }
+      ]
+    },
+    {
+      "id": "step-10-admission-status-presentation",
+      "status": "pass",
+      "assertion": "Status distinguished catalog/receipt path from no_earning_path_in_v0_1.",
+      "requirement_ids": [
+        "SPEC-047-R002",
+        "SPEC-047-R004"
+      ],
+      "documents": [
+        {
+          "id": "novel-non-catalog-status",
+          "schema": "model_admission_status.v1",
+          "path": "captures/admission-status-novel-non-catalog.json"
+        }
+      ]
+    },
+    {
+      "id": "step-11-transition-validity",
+      "status": "pass",
+      "assertion": "Invalid transition rejected; rejected, withdrawn, and revoked re-entry each demanded fresh evidence.",
+      "requirement_ids": [
+        "SPEC-047-R001",
+        "SPEC-047-R006"
+      ],
+      "documents": [
+        {
+          "id": "re-entry-status",
+          "schema": "model_admission_status.v1",
+          "path": "captures/admission-status-reentry.json"
+        }
+      ]
+    },
+    {
+      "id": "step-12-redaction-review",
+      "status": "pass",
+      "assertion": "Offer packages, coordinator events, and status output carried no secret, prompt, or endpoint material.",
+      "requirement_ids": [
+        "SPEC-047-R007",
+        "SPEC-047-R008"
+      ],
+      "documents": [
+        {
+          "id": "redaction-review-status",
+          "schema": "model_admission_status.v1",
+          "path": "captures/admission-status-offer-submitted.json"
+        }
+      ]
+    }
+  ],
+  "observations": {
+    "catalog_matched_not_settlement_verified": true,
+    "default_buyer_invisibility_verified": true,
+    "dry_run_did_not_submit": true,
+    "earning_path_disclosure_verified": true,
+    "money_path_zero_rows": {
+      "ledger_operator_credits": 0,
+      "ledger_payout_ready": 0,
+      "ledger_quarantine_resolutions": 0,
+      "ledger_request_credits": 0,
+      "payout_attempts": 0,
+      "request_log": 0,
+      "settlement_attempt_outputs": 0,
+      "settlement_receipt_verdicts": 0,
+      "settlement_route_snapshots": 0,
+      "spec022_payable_request_credits": 0
+    },
+    "network_visible_unpriced_disclosed": true,
+    "non_settlement_state_created_provider_credit": false,
+    "provider_price_treated_as_catalog_rate": false,
+    "provider_signature_verified": true,
+    "raw_completion_logged": false,
+    "raw_prompt_logged": false,
+    "rejected_opaque_endpoint_verified": true,
+    "rejected_reoffer_required_fresh_evidence": true,
+    "revocation_on_drift_verified": true,
+    "revoked_reoffer_required_fresh_evidence": true,
+    "sandbox_probe_only_blocked_from_paid_routing": true,
+    "secret_field_persisted": false,
+    "settlement_capable_case_verified": true,
+    "synthetic_probe_used_provider_channel": true,
+    "transition_matrix_enforced": true,
+    "withdrawal_verified": true,
+    "withdrawn_reoffer_required_fresh_evidence": true
+  }
+}

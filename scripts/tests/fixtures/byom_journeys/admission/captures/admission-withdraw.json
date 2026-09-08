@@ -1,0 +1,5 @@
+{
+  "reason_code": "provider_requested",
+  "resulting_admission_state": "withdrawn",
+  "schema": "model_admission_withdraw.v1"
+}

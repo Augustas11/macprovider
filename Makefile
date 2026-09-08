@@ -64,6 +64,7 @@ test-integration:
 test-dist:
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_upstream_watch
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_byom_contract_lock
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_byom_journey_evidence
 	node --test phase3-binary/app/Tests/MalibuTests/payout-signer-chain.test.mjs
 	bash scripts/test-production-exceptions.sh
 	bash scripts/test-coordinator-advertised-version-test.sh
