@@ -13,6 +13,8 @@ import unittest
 from pathlib import Path
 
 from scripts.check_spec_governance import (
+    CREDENTIAL_SHAPE_PATTERN_FRAGMENTS,
+    LOCAL_CONSUMER_ENDPOINT_FORBIDDEN_METADATA_RE,
     NETWORK_MODEL_ADMISSION_ARTIFACT_ID,
     NETWORK_MODEL_ADMISSION_EXECUTION_MODE,
     NETWORK_MODEL_ADMISSION_JOURNEY_ID,
@@ -67,7 +69,9 @@ class BYOMJourneyCaptureTests(unittest.TestCase):
         self.source_sha = head_commit(REPO_ROOT)
 
     def staged_manifest(self, selector: str) -> tuple[Path, dict]:
-        staged = self.temp / selector
+        # A fresh staging directory per call, so a subTest loop over rejection
+        # cases never inherits the previous iteration's mutated capture files.
+        staged = Path(tempfile.mkdtemp(prefix=f"{selector}-", dir=self.temp)) / selector
         shutil.copytree(FIXTURES / selector, staged)
         manifest_path = staged / "run-manifest.json"
         return manifest_path, json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -237,6 +241,86 @@ class BYOMJourneyCaptureTests(unittest.TestCase):
             {"schema": "provider_byom_discovery.v1", "note": "adapter answered on localhost"},
             "contains a localhost reference",
         )
+
+    # The hostname rule is shape-based rather than a fixed suffix allowlist, so a
+    # suffix the old list never enumerated must still fail closed -- in a manifest
+    # assertion and in the bytes of a captured document.
+    HOSTNAMES_OUTSIDE_THE_OLD_SUFFIX_LIST = (
+        "provider-mac.xyz",
+        "pool.example.co.uk",
+        "provider-mac.lan",
+        "mac-mini.home",
+        "provider-mac.corp",
+        "runtime.invalid",
+    )
+
+    def test_rejects_hostname_with_a_suffix_outside_the_old_fixed_list(self) -> None:
+        for hostname in self.HOSTNAMES_OUTSIDE_THE_OLD_SUFFIX_LIST:
+            with self.subTest(hostname=hostname):
+
+                def mutator(manifest, _root, hostname=hostname):
+                    manifest["steps"][1]["assertion"] = f"status readback came from {hostname}"
+
+                self.assert_capture_fails("admission", mutator, "contains a hostname")
+
+    def test_rejects_captured_document_hostname_outside_the_old_fixed_list(self) -> None:
+        for hostname in self.HOSTNAMES_OUTSIDE_THE_OLD_SUFFIX_LIST:
+            with self.subTest(hostname=hostname):
+                self.assert_captured_document_rejected(
+                    {"schema": "provider_byom_discovery.v1", "note": f"read back from {hostname}"},
+                    "contains a hostname",
+                )
+
+    def test_rejects_captured_document_containing_an_ipv6_literal(self) -> None:
+        for literal in ("2001:0db8:85a3:0000:0000:8a2e:0370:7334", "fe80::1ff:fe23:4567:890a", "::1"):
+            with self.subTest(literal=literal):
+                self.assert_captured_document_rejected(
+                    {"schema": "provider_byom_discovery.v1", "note": f"bound {literal}"},
+                    "contains an ipv6 literal",
+                )
+
+    # Token shapes the sibling governance scanner already covered while the BYOM
+    # scanner did not: `sk-proj-`, `sk-` carrying `_`/`-`, and a lowercase AKIA.
+    TOKEN_SHAPES_FROM_THE_GOVERNANCE_SIBLING = (
+        "sk-proj-ABCDEFGHIJKLMNOPQRSTUVWX",
+        "sk-ABCDEFGHIJ_KLMNOPQRSTUV-WX",
+        "akiaabcdefghijklmnop",
+        "github_pat_" + "a" * 24,
+        "xoxb-" + "a" * 24,
+        "mp_" + "a" * 20,
+    )
+
+    def test_rejects_token_shapes_covered_by_the_governance_sibling(self) -> None:
+        for token in self.TOKEN_SHAPES_FROM_THE_GOVERNANCE_SIBLING:
+            with self.subTest(token=token):
+
+                def mutator(manifest, _root, token=token):
+                    manifest["steps"][1]["assertion"] = f"offer echoed {token}"
+
+                self.assert_capture_fails("admission", mutator, "credential-like value")
+
+    def test_rejects_captured_document_token_shapes_covered_by_the_sibling(self) -> None:
+        for token in self.TOKEN_SHAPES_FROM_THE_GOVERNANCE_SIBLING:
+            with self.subTest(token=token):
+                self.assert_captured_document_rejected(
+                    {"schema": "provider_byom_discovery.v1", "note": f"echoed {token}"},
+                    "credential-like value",
+                )
+
+    def test_legitimate_dns_shaped_values_still_capture(self) -> None:
+        # The tightened rule must not reject the DNS-shaped value shapes the
+        # contract legitimately emits, so prove them through a real capture.
+        def mutator(manifest, _root):
+            manifest["steps"][0]["assertion"] = (
+                "schema macprovider.provider-byom-discovery-evidence.v1 with document "
+                "provider_byom_discovery.v1, harness run-cli-onboarding-e2e.py, "
+                "SnapshotManifestV1 at 1.8.117 for SPEC-046-R001 in step-01-discover-mlx-cache"
+            )
+
+        manifest, manifest_path = self.mutate("discovery", mutator)
+        evidence = self.capture("discovery", manifest, manifest_path)
+        self.assertIn("SnapshotManifestV1", evidence["steps"][0]["assertion"])
+        self.assertEqual("test/e2e/byom/run-cli-onboarding-e2e.py", evidence["harness"]["name"])
 
     def test_rejects_secret_bearing_observation_key(self) -> None:
         def mutator(manifest, _root):
@@ -708,6 +792,261 @@ class BYOMJourneyGovernanceValidatorTests(unittest.TestCase):
         signed = copy.deepcopy(self.signed("admission"))
         errors = self.validate("admission", signed, "SPEC-047-R003", journeys=["JOURNEY-BUYER-PAID-PATH"])
         self.assertTrue(any("must include" in error for error in errors), errors)
+
+
+class BYOMRedactionScannerTests(unittest.TestCase):
+    """The fail-closed scanner must be as broad as it claims, and no broader."""
+
+    def assert_rejected(self, text: str) -> None:
+        with self.assertRaises(BYOMEvidenceError):
+            evidence_module.reject_unredacted_text(text, "$")
+
+    def assert_accepted(self, text: str) -> None:
+        evidence_module.reject_unredacted_text(text, "$")
+
+    def test_rejects_any_dns_shaped_hostname(self) -> None:
+        for hostname in (
+            "provider-mac.xyz",
+            "pool.example.co.uk",
+            "provider-mac.lan",
+            "mac-mini.home",
+            "provider-mac.corp",
+            "a.b.museum",
+            "coordinator.malibu.tech",
+            "gateway.internal",
+        ):
+            with self.subTest(hostname=hostname):
+                self.assert_rejected(f"read back from {hostname}")
+
+    def test_rejects_urls_paths_and_ip_literals(self) -> None:
+        for text in (
+            "https://gateway.example/v1",
+            "unix:///var/run/thing.sock",
+            "wrote  /Users/operator/.cache/huggingface",
+            "wrote  ~/byom-run/captures",
+            "bound 10.11.12.13",
+            "bound 2001:0db8:85a3:0000:0000:8a2e:0370:7334",
+            "bound fe80::1ff:fe23:4567:890a",
+            "bound ::1",
+            "answered on localhost",
+        ):
+            with self.subTest(text=text):
+                self.assert_rejected(text)
+
+    def test_credential_shapes_are_at_least_the_governance_siblings(self) -> None:
+        # Single source of truth: the BYOM scanner compiles the governance
+        # module's credential-shape fragments, so it can never drift narrower.
+        byom_patterns = {pattern.pattern for pattern in evidence_module.FORBIDDEN_SECRET_VALUE_PATTERNS}
+        self.assertTrue(
+            set(CREDENTIAL_SHAPE_PATTERN_FRAGMENTS).issubset(byom_patterns),
+            sorted(set(CREDENTIAL_SHAPE_PATTERN_FRAGMENTS) - byom_patterns),
+        )
+        for fragment in CREDENTIAL_SHAPE_PATTERN_FRAGMENTS:
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, LOCAL_CONSUMER_ENDPOINT_FORBIDDEN_METADATA_RE.pattern)
+
+    def test_rejects_token_shapes(self) -> None:
+        for token in (
+            "sk-proj-ABCDEFGHIJKLMNOPQRSTUVWX",
+            "sk-ABCDEFGHIJ_KLMNOPQRSTUV-WX",
+            "AKIAABCDEFGHIJKLMNOP",
+            "akiaabcdefghijklmnop",
+            "ghp_" + "a" * 24,
+            "github_pat_" + "a" * 24,
+            "xoxb-" + "a" * 24,
+            "mp_" + "a" * 20,
+            "provider-token-abcdefgh",
+            "Bearer " + "a" * 24,
+            # Assembled at runtime so the repository secret preflight does not
+            # read this test fixture as a real PEM header.
+            "-----BEGIN EC PRIVATE " + "KEY-----",
+        ):
+            with self.subTest(token=token):
+                self.assert_rejected(f"value {token} seen")
+
+    def test_accepts_the_allowlisted_and_non_dns_value_shapes(self) -> None:
+        # These are the shapes the evidence contract legitimately emits. The
+        # schema ids, step ids, requirement ids, run ids and versions are not
+        # DNS-shaped at all; the repository source file names are, and are the
+        # only entries the hostname allowlist covers.
+        for value in (
+            "macprovider.provider-byom-discovery-evidence.v1",
+            "macprovider.network-model-admission-evidence.v1",
+            "macprovider.byom-journey-run.v1",
+            "provider_byom_discovery.v1",
+            "model_admission_status.v1",
+            "step-01-discover-mlx-cache",
+            "step-12-redaction-review",
+            "SPEC-046-R008",
+            "SPEC-047-R003",
+            "SnapshotManifestV1",
+            "1.8.117",
+            "v1.2.3",
+            "0.0.0-fixture",
+            "byom-discovery-fixture",
+            "JOURNEY-PROVIDER-BYOM-DISCOVERY",
+            "Augustas11/macprovider",
+            "macprovider-acceptance-p256-v1",
+            "2026-09-08T00:00:00Z",
+            "a" * 64,
+            "test/e2e/byom/run-cli-onboarding-e2e.py",
+            "run-manifest.json",
+            "docs/runbooks/byom-journey-evidence.md",
+            "10/10 steps pass. No money-path rows were written.",
+        ):
+            with self.subTest(value=value):
+                self.assert_accepted(value)
+
+    def test_a_file_name_shape_with_an_unlisted_extension_still_fails_closed(self) -> None:
+        self.assert_rejected("harness at run-cli-onboarding-e2e.zz")
+
+
+class BYOMJourneyGovernanceSourceTests(unittest.TestCase):
+    """Governance re-opens the referenced evidence instead of trusting the signature."""
+
+    def setUp(self) -> None:
+        self.temp = Path(tempfile.mkdtemp(prefix="byom-journey-source-"))
+        self.addCleanup(shutil.rmtree, self.temp, True)
+        self.source = "journeys/evidence/provider-byom-discovery-20260908T000000Z.redacted.json"
+        self.evidence = self.build_evidence()
+        self.write_evidence(self.evidence)
+
+    def build_evidence(self) -> dict:
+        staged = self.temp / "capture"
+        shutil.copytree(FIXTURES / "discovery", staged)
+        return evidence_module.build_evidence(
+            REPO_ROOT,
+            evidence_module.contract_for("discovery"),
+            staged / "run-manifest.json",
+            source_sha=head_commit(REPO_ROOT),
+            operator_role="release-operator",
+            operator_identity_fingerprint=OPERATOR_FINGERPRINT,
+            hardware_profile="ci-hermetic-runner",
+            candidate="cli-fixture",
+            captured_at="2026-09-08T00:00:00Z",
+            expires_at=None,
+            summary="fixture journey run",
+        )
+
+    def write_evidence(self, evidence: dict) -> None:
+        path = self.temp / self.source
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
+
+    def signed(self, evidence: dict | None = None) -> dict:
+        evidence = self.evidence if evidence is None else evidence
+        return copy.deepcopy(
+            {
+                "journey_id": evidence["journey_id"],
+                "requirement_ids": evidence["requirement_ids"],
+                "repository": evidence["repository"],
+                "captured_at": evidence["captured_at"],
+                "expires_at": evidence["expires_at"],
+                "operator": evidence["operator"],
+                "environment": evidence["environment"],
+                "result": evidence["result"],
+                "redaction": evidence["redaction"],
+                "run_id": evidence["run_id"],
+                "execution_mode": evidence["execution_mode"],
+                "observations": evidence["observations"],
+                "steps": [
+                    {
+                        "id": step["id"],
+                        "status": "pass",
+                        "assertion": step["assertion"],
+                        "artifacts": step["artifacts"],
+                    }
+                    for step in evidence["steps"]
+                ],
+                "artifacts": [
+                    {
+                        "id": PROVIDER_BYOM_DISCOVERY_ARTIFACT_ID,
+                        "sha256": "0" * 64,
+                        "source": self.source,
+                    }
+                ],
+            }
+        )
+
+    def validate(self, signed: dict, requirement_id: str = "SPEC-046-R008") -> list[str]:
+        result = ValidationResult()
+        _validate_provider_byom_discovery_journey_result(
+            signed,
+            requirement_id,
+            [PROVIDER_BYOM_DISCOVERY_JOURNEY_ID],
+            signed.get("artifacts", []),
+            signed.get("steps", []),
+            "evidence[0]",
+            result,
+            root=self.temp,
+        )
+        return result.errors
+
+    def test_payload_projected_from_its_source_passes(self) -> None:
+        self.assertEqual([], self.validate(self.signed()))
+
+    def test_rejects_signed_requirement_id_the_source_does_not_cover(self) -> None:
+        signed = self.signed()
+        signed["requirement_ids"] = signed["requirement_ids"] + ["SPEC-047-R001"]
+        errors = self.validate(signed)
+        self.assertTrue(any("must cover every signed requirement ID" in error for error in errors), errors)
+
+    def test_rejects_source_requirement_ids_that_are_not_the_step_union(self) -> None:
+        evidence = copy.deepcopy(self.evidence)
+        evidence["requirement_ids"] = evidence["requirement_ids"] + ["SPEC-046-R002"]
+        self.write_evidence(evidence)
+        errors = self.validate(self.signed())
+        self.assertTrue(any("must equal the union" in error for error in errors), errors)
+
+    def test_rejects_signed_step_that_disagrees_with_the_source(self) -> None:
+        signed = self.signed()
+        signed["steps"][0]["assertion"] = "a claim the source evidence never made"
+        errors = self.validate(signed)
+        self.assertTrue(any("signed steps must match" in error for error in errors), errors)
+
+    def test_rejects_signed_step_dropped_from_the_projection(self) -> None:
+        signed = self.signed()
+        signed["steps"] = signed["steps"][:-1]
+        errors = self.validate(signed)
+        self.assertTrue(any("signed steps must match" in error for error in errors), errors)
+
+    def test_rejects_tampered_signed_observation(self) -> None:
+        signed = self.signed()
+        signed["observations"]["mlx_cache_discovered"] = False
+        errors = self.validate(signed)
+        self.assertTrue(any("signed observations must match" in error for error in errors), errors)
+
+    def test_rejects_tampered_source_observation(self) -> None:
+        evidence = copy.deepcopy(self.evidence)
+        evidence["observations"]["raw_prompt_logged"] = True
+        self.write_evidence(evidence)
+        errors = self.validate(self.signed())
+        self.assertTrue(any("must be false" in error for error in errors), errors)
+
+    def test_rejects_source_evidence_step_outside_the_contract(self) -> None:
+        evidence = copy.deepcopy(self.evidence)
+        evidence["steps"][0]["id"] = "step-00-invented"
+        self.write_evidence(evidence)
+        errors = self.validate(self.signed())
+        self.assertTrue(any("unknown" in error and "step id" in error for error in errors), errors)
+
+    def test_rejects_source_evidence_that_is_not_redacted(self) -> None:
+        evidence = copy.deepcopy(self.evidence)
+        evidence["steps"][0]["assertion"] = "read back from provider-mac.xyz"
+        self.write_evidence(evidence)
+        errors = self.validate(self.signed())
+        self.assertTrue(any("contains a hostname" in error for error in errors), errors)
+
+    def test_rejects_signed_operator_that_disagrees_with_the_source(self) -> None:
+        signed = self.signed()
+        signed["operator"]["role"] = "someone-else"
+        errors = self.validate(signed)
+        self.assertTrue(any("operator" in error and "must match" in error for error in errors), errors)
+
+    def test_rejects_absent_source_artifact(self) -> None:
+        (self.temp / self.source).unlink()
+        errors = self.validate(self.signed())
+        self.assertTrue(any("rejected" in error for error in errors), errors)
 
 
 class BYOMJourneyConformanceMappingTests(unittest.TestCase):

@@ -42,12 +42,36 @@ to the journey, or capture fails.
 ## Redaction posture
 
 The capture tool fails closed. It refuses to emit evidence that contains a URL, an
-absolute or `~/`-relative path, a hostname, an IP literal, a `localhost`
+absolute or `~/`-relative path, a hostname, an IPv4 or IPv6 literal, a `localhost`
 reference, or anything shaped like a credential, in either a key or a value. The
 same fail-closed scan runs over every captured CLI document before it is digested,
-because the digest is what the signed result binds to. There is no allowlist: a
-document that legitimately contains an endpoint or a local path is one you redact
-before capture, or capture refuses the whole run.
+because the digest is what the signed result binds to. A document that legitimately
+contains an endpoint or a local path is one you redact before capture, or capture
+refuses the whole run.
+
+The hostname rule is shape-based, not a suffix list: **any** DNS-shaped token —
+one or more `label.` groups ending in an alphabetic label — is rejected, whatever
+the TLD. Credential shapes are compiled from `CREDENTIAL_SHAPE_PATTERN_FRAGMENTS`
+in `scripts/check_spec_governance.py`, so this scanner can never be narrower than
+the sibling signed-journey scanner.
+
+The one allowlist is `HOSTNAME_ALLOWLISTED_VALUE_SHAPES` in
+`scripts/byom_journey_evidence.py`: a repository source **file name**
+(`run-cli-onboarding-e2e.py`, `run-manifest.json`) is `<name>.<ext>` and therefore
+DNS-shaped by coincidence, and the evidence records `harness.name` verbatim. An
+unlisted extension still fails closed. Every other value the contract emits —
+evidence and document schema ids, step ids, requirement ids, run ids, CLI and
+semantic versions — ends in a label that is not purely alphabetic and so never
+reaches the allowlist at all.
+
+Governance does not take the signed payload's word for any of this.
+`_validate_byom_journey_source()` in `scripts/check_spec_governance.py` re-opens
+the referenced redacted evidence and re-runs the same shared contract — the
+redaction scan, `validate_evidence_steps()`, and `validate_evidence_observations()`
+(money-path zero rows included) — then compares the signed requirement ids, step
+projection, observations, and metadata against it. A hand-authored payload with a
+valid acceptance signature is rejected if it disagrees with its own source
+artifact.
 
 Captured CLI JSON documents are **never** copied into the repository. Only their
 SHA-256 digest, byte count, declared schema, and a short id are recorded. Keep the

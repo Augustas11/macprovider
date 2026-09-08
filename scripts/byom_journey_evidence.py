@@ -27,6 +27,7 @@ from typing import Any
 
 from check_spec_governance import (
     BYOM_JOURNEY_ENVIRONMENT_CLASSES,
+    CREDENTIAL_SHAPE_PATTERN_FRAGMENTS,
     DuplicateJSONKeyError,
     JOURNEY_RESULT_PAYLOAD_SCHEMA,
     NETWORK_MODEL_ADMISSION_ARTIFACT_ID,
@@ -73,33 +74,62 @@ REPO_RELATIVE_FILE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][
 # absolute or home-relative path, a hostname, an IP literal, or anything shaped
 # like a credential. Captured CLI documents are digested, never embedded, so the
 # operator's raw endpoints and paths never reach the repository.
+#
+# The hostname rule is shape-based, not a suffix allowlist: anything that looks
+# like DNS -- one or more `label.` groups followed by an alphabetic final label --
+# is rejected, whatever the TLD. A handful of legitimate evidence values are
+# DNS-shaped by coincidence, and they are handled by the explicit
+# `HOSTNAME_ALLOWLISTED_VALUE_SHAPES` below rather than by weakening the rule.
+DNS_HOSTNAME_RE = re.compile(
+    r"(?i)(?<![A-Za-z0-9_.-])"
+    r"(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+"
+    r"[A-Za-z]{2,63}"
+    r"(?![A-Za-z0-9_-])"
+)
+IPV6_LITERAL_RE = re.compile(
+    r"(?<![0-9A-Za-z:])"
+    r"(?:"
+    r"(?:[0-9A-Fa-f]{1,4}:){7}[0-9A-Fa-f]{1,4}"
+    r"|(?:[0-9A-Fa-f]{1,4}:){1,7}:"
+    r"|(?:[0-9A-Fa-f]{1,4}:){1,6}:[0-9A-Fa-f]{1,4}"
+    r"|(?:[0-9A-Fa-f]{1,4}:){1,5}(?::[0-9A-Fa-f]{1,4}){1,2}"
+    r"|(?:[0-9A-Fa-f]{1,4}:){1,4}(?::[0-9A-Fa-f]{1,4}){1,3}"
+    r"|(?:[0-9A-Fa-f]{1,4}:){1,3}(?::[0-9A-Fa-f]{1,4}){1,4}"
+    r"|(?:[0-9A-Fa-f]{1,4}:){1,2}(?::[0-9A-Fa-f]{1,4}){1,5}"
+    r"|[0-9A-Fa-f]{1,4}:(?::[0-9A-Fa-f]{1,4}){1,6}"
+    r"|:(?::[0-9A-Fa-f]{1,4}){1,7}"
+    r")"
+    r"(?![0-9A-Za-z:])"
+)
+# The only DNS-shaped strings this evidence is allowed to carry. A repository
+# source file name (`run-cli-onboarding-e2e.py`, `run-manifest.json`) is
+# `<name>.<ext>`, which is indistinguishable from a two-label hostname by shape,
+# and the evidence records `harness.name` verbatim. Every other value the contract
+# emits -- evidence and document schema ids (`...-evidence.v1`, `..._status.v1`),
+# step ids, requirement ids, run ids, CLI/semantic versions -- ends in a label
+# that is not purely alphabetic, so it never reaches this allowlist at all.
+HOSTNAME_ALLOWLISTED_VALUE_SHAPES: tuple[re.Pattern[str], ...] = (
+    re.compile(
+        r"(?i)^[A-Za-z0-9][A-Za-z0-9._-]*"
+        r"\.(?:go|json|jsonl|md|mjs|py|sh|swift|toml|ts|txt|yaml|yml)$"
+    ),
+)
 FORBIDDEN_VALUE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("a url", re.compile(r"(?i)[a-z][a-z0-9+.-]*://")),
     ("an absolute path", re.compile(r"(?:^|[\s\"'=,;(\[])(?:/[A-Za-z0-9._~-]+){2,}")),
     ("a home-relative path", re.compile(r"(?:^|[\s\"'=,;(\[])~/")),
     ("an ipv4 literal", re.compile(r"\b[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\b")),
-    ("an ipv6 loopback literal", re.compile(r"(?:^|[^0-9A-Fa-f:])::1(?:[^0-9A-Fa-f:]|$)")),
+    ("an ipv6 literal", IPV6_LITERAL_RE),
     ("a localhost reference", re.compile(r"(?i)\blocalhost\b")),
-    (
-        "a hostname",
-        re.compile(
-            r"(?i)\b[a-z0-9](?:[a-z0-9-]*[a-z0-9])?"
-            r"(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*"
-            r"\.(?:com|net|org|io|ai|app|dev|cloud|tech|local|internal)\b"
-        ),
-    ),
 )
-FORBIDDEN_SECRET_VALUE_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----"),
+# Credential shapes come from the governance module so this scanner can never be
+# narrower than the sibling signed-journey scanner; the two extras below are
+# BYOM-specific and have no counterpart there.
+FORBIDDEN_SECRET_VALUE_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
+    re.compile(fragment, re.IGNORECASE) for fragment in CREDENTIAL_SHAPE_PATTERN_FRAGMENTS
+) + (
     re.compile(r"(?i)\bauthorization\s*:\s*bearer\s+(?!redacted\b)[A-Za-z0-9._~+/=-]{8,}"),
-    re.compile(r"(?i)\bbearer\s+(?!redacted\b)[A-Za-z0-9._~+/=-]{20,}"),
-    re.compile(r"\bghp_[A-Za-z0-9_]{20,}\b"),
-    re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b"),
-    re.compile(r"\bsk-[A-Za-z0-9]{20,}\b"),
-    re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{20,}\b"),
-    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
-    re.compile(r"\bmp_[A-Za-z0-9_-]{16,}\b"),
-    re.compile(r"\bprovider-token-[A-Za-z0-9_-]{8,}\b"),
+    re.compile(r"(?i)\bprovider-token-[A-Za-z0-9_-]{8,}\b"),
 )
 FORBIDDEN_KEY_FRAGMENTS: tuple[str, ...] = (
     "absolute_path",
@@ -301,11 +331,23 @@ def reject_secret_like_text(text: str, location: str) -> None:
             fail(f"{location} contains a credential-like value")
 
 
+def _is_allowlisted_hostname_shape(candidate: str) -> bool:
+    return any(pattern.fullmatch(candidate) for pattern in HOSTNAME_ALLOWLISTED_VALUE_SHAPES)
+
+
+def reject_hostname_like_text(text: str, location: str) -> None:
+    """Fail closed on any DNS-shaped token that is not an allowlisted value shape."""
+    for match in DNS_HOSTNAME_RE.finditer(text):
+        if not _is_allowlisted_hostname_shape(match.group(0)):
+            fail(f"{location} contains a hostname; evidence must stay redacted")
+
+
 def reject_unredacted_text(text: str, location: str) -> None:
     reject_secret_like_text(text, location)
     for label, pattern in FORBIDDEN_VALUE_PATTERNS:
         if pattern.search(text):
             fail(f"{location} contains {label}; evidence must stay redacted")
+    reject_hostname_like_text(text, location)
 
 
 def assert_redacted(value: Any, location: str = "$") -> None:
@@ -597,7 +639,13 @@ def _require_manifest_steps(
     return validate_evidence_steps(contract, candidates)
 
 
-def _require_manifest_observations(contract: JourneyContract, value: Any) -> dict[str, Any]:
+def validate_evidence_observations(contract: JourneyContract, value: Any) -> dict[str, Any]:
+    """Validate and normalize the observation block, including the money-path zero rows.
+
+    Shared by capture, the builders, and the governance source re-validation so the
+    required-true/required-false names and the money-path zero-row rule have one
+    implementation.
+    """
     observations = require_object(value, "observations")
     required = set(contract.true_observations) | set(contract.false_observations)
     allowed = set(required)
@@ -687,7 +735,7 @@ def build_evidence(
     steps, requirement_ids = _require_manifest_steps(
         manifest_path.parent.resolve(), contract, manifest.get("steps")
     )
-    observations = _require_manifest_observations(contract, manifest.get("observations"))
+    observations = validate_evidence_observations(contract, manifest.get("observations"))
 
     captured = _parse_captured_at(captured_at)
     evidence = {
@@ -797,7 +845,7 @@ def build_journey_result_payload(
         fail("result.status must equal 'pass'")
     require_exact_keys(run_result, {"status"}, {"status", "summary"}, "result")
 
-    observations = _require_manifest_observations(contract, evidence.get("observations"))
+    observations = validate_evidence_observations(contract, evidence.get("observations"))
     redaction = deepcopy(require_object(evidence.get("redaction"), "redaction"))
     for field in ("secrets_redacted", "operator_identity_redacted", "local_account_names_redacted"):
         if redaction.get(field) is not True:

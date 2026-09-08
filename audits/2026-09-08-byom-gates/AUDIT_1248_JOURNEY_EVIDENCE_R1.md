@@ -120,4 +120,7 @@ No SPEC file and no `specs/CONFORMANCE.json` row was touched by this pass.
 VERDICT: 0 CRITICAL / 0 HIGH / 0 MEDIUM / 0 LOW / 0 INFO (architecture lane, R1
 findings resolved)
 
-code-reviewer and security-reviewer lanes: pending
+code-reviewer and security-reviewer lanes: run in R2. All three R2 lanes
+(architecture, security, code review), their two MEDIUM findings, and the
+resolutions are recorded in
+`audits/2026-09-08-byom-gates/AUDIT_1248_JOURNEY_EVIDENCE_R2.md`.
