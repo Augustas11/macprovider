@@ -679,6 +679,157 @@ final class ConsumeCommandTests: XCTestCase {
         XCTAssertEqual(head.body, "")
     }
 
+    func testStatusDiagnosticsRecordBoundedRedactedErrorsAndContact() throws {
+        let token = try ConsumeLocalToken.generate()
+        let rawUpstreamRequestID = "upstream-request-id-that-must-not-appear-in-status"
+        let secretMessage = "buyer-token prompt and completion must stay out of diagnostics"
+        let upstreamClient = ConsumeStubUpstreamClient { _, eventLoop in
+            eventLoop.makeSucceededFuture(ConsumeUpstreamResponse(
+                statusCode: 429,
+                headers: [
+                    ("content-type", "application/json"),
+                    ("x-request-id", rawUpstreamRequestID),
+                ],
+                body: Data("""
+                {"error":{"message":"\(secretMessage)","type":"rate_limit_exceeded","param":null,"code":"UPSTREAM SECRET CODE","request_id":"body-request-id"}}
+                """.utf8)
+            ))
+        }
+        let fixedNow = ISO8601DateFormatter.autotuneInternet.date(from: "2026-08-23T12:34:56Z")!
+        let runtime = consumeRuntime(
+            token: token,
+            credentialStatus: .environmentLoaded,
+            credentialCustody: consumeCredentialCustody("buyer-token"),
+            budget: ConsumeBudgetConfig(mode: .noBudget, maxRequestMicroUSD: nil, allowUnpriced: false, ledger: nil, ledgerPathClass: nil),
+            trustedPricing: .available(phase3CTrustedRateCard(
+                promptRatePerMtok: 1,
+                completionRatePerMtok: 1,
+                usdPerMillionCredits: 1.0
+            )),
+            upstreamClient: upstreamClient,
+            now: { fixedNow }
+        )
+        var headers = HTTPHeaders()
+        headers.add(name: "Authorization", value: "Bearer \(token.value)")
+
+        let localFailure = try response(
+            from: runtime,
+            head: HTTPRequestHead(version: .http1_1, method: .POST, uri: "/v1/chat/completions", headers: headers),
+            body: Data(#"{"model":"not-allowed","messages":[],"max_tokens":1}"#.utf8)
+        )
+        XCTAssertEqual(localFailure.status, .badRequest)
+
+        let upstreamFailure = try response(
+            from: runtime,
+            head: HTTPRequestHead(version: .http1_1, method: .POST, uri: "/v1/chat/completions", headers: headers),
+            body: Data(#"{"model":"llama-test","messages":[],"max_tokens":1}"#.utf8)
+        )
+        XCTAssertEqual(upstreamFailure.status, HTTPResponseStatus(statusCode: 429))
+
+        let headFailure = try response(
+            from: runtime,
+            head: HTTPRequestHead(version: .http1_1, method: .HEAD, uri: "/v1/status", headers: headers)
+        )
+        XCTAssertEqual(headFailure.status, .methodNotAllowed)
+        XCTAssertEqual(headFailure.body, "")
+
+        let status = try response(
+            from: runtime,
+            head: HTTPRequestHead(version: .http1_1, method: .GET, uri: "/v1/status", headers: headers)
+        )
+        XCTAssertEqual(status.status, .ok)
+        XCTAssertEqual(status.headers.first(name: "cache-control"), "no-store")
+        XCTAssertFalse(status.body.contains(token.value))
+        XCTAssertFalse(status.body.contains("buyer-token"))
+        XCTAssertFalse(status.body.contains(secretMessage))
+        XCTAssertFalse(status.body.contains(rawUpstreamRequestID))
+        XCTAssertFalse(status.body.contains("body-request-id"))
+        XCTAssertFalse(status.body.contains("UPSTREAM SECRET CODE"))
+
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(status.body.utf8)) as? [String: Any])
+        XCTAssertEqual(object["last_successful_upstream_contact_at"] as? String, ConsumeEndpointStatus.iso8601(fixedNow))
+        let ring = try XCTUnwrap(object["error_ring"] as? [[String: Any]])
+        XCTAssertEqual(ring.count, 3)
+        XCTAssertEqual(ring[0]["error_type"] as? String, "macprovider_local_error")
+        XCTAssertEqual(ring[0]["error_code"] as? String, "local_model_not_allowed")
+        XCTAssertEqual(ring[0]["truncated"] as? Bool, false)
+        XCTAssertNil(ring[0]["canonical_request_id"])
+        XCTAssertEqual(ring[1]["error_type"] as? String, "rate_limit_exceeded")
+        XCTAssertEqual(ring[1]["error_code"] as? String, "upstream_http_error")
+        XCTAssertEqual(ring[1]["truncated"] as? Bool, false)
+        let canonicalRequestID = try XCTUnwrap(ring[1]["canonical_request_id"] as? String)
+        XCTAssertTrue(canonicalRequestID.hasPrefix("sha256:"))
+        XCTAssertEqual(canonicalRequestID.utf8.count, 39)
+        XCTAssertEqual(ring[2]["error_type"] as? String, "macprovider_local_error")
+        XCTAssertEqual(ring[2]["error_code"] as? String, "local_endpoint_unsupported")
+        XCTAssertNil(ring[2]["canonical_request_id"])
+    }
+
+    func testStatusDiagnosticsBoundEntryCountAndFieldBytes() throws {
+        let diagnostics = ConsumeStatusDiagnostics()
+        for index in 0..<105 {
+            diagnostics.recordLocalError(code: "local_error_\(index)")
+        }
+
+        var snapshot = diagnostics.snapshot()
+        XCTAssertGreaterThanOrEqual(snapshot.errorRing.count, 5)
+        XCTAssertLessThanOrEqual(snapshot.errorRing.count, 100)
+        XCTAssertEqual(snapshot.errorRing.last?["error_code"] as? String, "local_error_104")
+        let encodedRing = try JSONSerialization.data(withJSONObject: snapshot.errorRing, options: [])
+        XCTAssertLessThanOrEqual(encodedRing.count, 8 * 1024)
+
+        diagnostics.recordLocalError(code: String(repeating: "a", count: 200))
+        snapshot = diagnostics.snapshot()
+        let last = try XCTUnwrap(snapshot.errorRing.last)
+        let errorCode = try XCTUnwrap(last["error_code"] as? String)
+        XCTAssertLessThanOrEqual(errorCode.utf8.count, 64)
+        XCTAssertEqual(last["truncated"] as? Bool, true)
+        let encodedEntry = try JSONSerialization.data(withJSONObject: last, options: [])
+        XCTAssertLessThanOrEqual(encodedEntry.count, 256)
+
+        let longSafeCode = String(repeating: "a", count: 200)
+        let upstreamDiagnostics = ConsumeStatusDiagnostics()
+        upstreamDiagnostics.recordUpstreamError(response: ConsumeUpstreamResponse(
+            statusCode: 429,
+            headers: [],
+            body: Data("""
+            {"error":{"type":"\(longSafeCode)","code":"\(longSafeCode)"}}
+            """.utf8)
+        ))
+        var upstreamRing = upstreamDiagnostics.snapshot().errorRing
+        XCTAssertEqual(upstreamRing.count, 1)
+        XCTAssertEqual(upstreamRing[0]["error_type"] as? String, String(repeating: "a", count: 48))
+        XCTAssertEqual(upstreamRing[0]["error_code"] as? String, String(repeating: "a", count: 64))
+        XCTAssertEqual(upstreamRing[0]["truncated"] as? Bool, true)
+
+        upstreamDiagnostics.recordUpstreamError(response: ConsumeUpstreamResponse(
+            statusCode: 429,
+            headers: [("x-request-id", "oversized-request-id-that-must-not-appear")],
+            body: Data("""
+            {"error":{"message":"\(String(repeating: "a", count: 5 * 1024))","type":"rate_limit_exceeded","code":"rate_limit_exceeded"}}
+            """.utf8)
+        ))
+        upstreamRing = upstreamDiagnostics.snapshot().errorRing
+        XCTAssertEqual(upstreamRing.count, 2)
+        XCTAssertEqual(upstreamRing[1]["error_type"] as? String, "rate_limit_exceeded")
+        XCTAssertEqual(upstreamRing[1]["error_code"] as? String, "rate_limit_exceeded")
+        let oversizedCanonicalRequestID = try XCTUnwrap(upstreamRing[1]["canonical_request_id"] as? String)
+        XCTAssertTrue(oversizedCanonicalRequestID.hasPrefix("sha256:"))
+        XCTAssertEqual(oversizedCanonicalRequestID.utf8.count, 39)
+
+        upstreamDiagnostics.recordUpstreamError(response: ConsumeUpstreamResponse(
+            statusCode: 429,
+            headers: [],
+            body: Data("""
+            {"error":{"message":"\(String(repeating: "a", count: 70 * 1024))","type":"rate_limit_exceeded","code":"rate_limit_exceeded"}}
+            """.utf8)
+        ))
+        upstreamRing = upstreamDiagnostics.snapshot().errorRing
+        XCTAssertEqual(upstreamRing.count, 3)
+        XCTAssertEqual(upstreamRing[2]["error_type"] as? String, "upstream_error")
+        XCTAssertEqual(upstreamRing[2]["error_code"] as? String, "upstream_http_error")
+    }
+
     func testPhase2RejectsUnsafeTargetsFramingAndBrowserOrigins() throws {
         let token = try ConsumeLocalToken.generate()
         let runtime = consumeRuntime(token: token)
