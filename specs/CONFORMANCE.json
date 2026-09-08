@@ -2217,7 +2217,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1240",
-        "rationale": "SPEC-023 v0.10.0 specifies the signed catalog artifact feed, its closed artifact-identity matrix, its release.json binding and release-ledger feed-set evolution, the Stage-A/Stage-B activation that keeps the compatibility-set manifest's file map unchanged until a bridge CLI ships, primary-artifact consistency, primary-artifact-only settlement identity, and its fail-closed-without-fleet-fail-close failure classes, but no generator, coordinator, or CLI implementation exists yet. Owner is the BYOM v0.2 epic; issue #1240 is the placeholder until the v0.2 epic issue exists."
+        "rationale": "SPEC-023 v0.10.0 specifies the signed catalog artifact feed, its closed artifact-identity matrix, its release.json binding and release-ledger feed-set evolution, the Stage-A/Stage-B activation that keeps the compatibility-set manifest's file map unchanged until a bridge CLI ships, primary-artifact consistency scoped to `listed`/`recommendable` rows, primary-artifact-only settlement identity, global `(hash_algorithm, hash)` uniqueness within a feed, GGUF source-digest equality, the closed `artifact_id` grammar with its ledger-backed cross-release rebinding check, and its fail-closed-without-fleet-fail-close failure classes, but no generator, coordinator, or CLI implementation exists yet. Owner is the BYOM v0.2 epic; issue #1240 is the placeholder until the v0.2 epic issue exists."
       }
     },
     {
