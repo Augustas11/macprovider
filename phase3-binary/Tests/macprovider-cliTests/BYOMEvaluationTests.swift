@@ -307,6 +307,64 @@ final class BYOMEvaluationTests: XCTestCase {
         XCTAssertNotNil(document.diagnosticHashes.responseBodySHA256)
     }
 
+    // #1246 / SPEC-046-R002: bounded JSON nesting and parser work on the
+    // EVALUATION half of the shared safety layer. A chat-completions body that
+    // stays under the 256KiB byte cap but is pathologically nested must fail
+    // closed with adapter_malformed_response — no stack overflow, no fabricated
+    // health result, and no raw body reflected into the evaluation document.
+    func testEvaluationParserRejectsPathologicalJSONNestingWithoutCrashing() async throws {
+        let openBrackets = Data(String(repeating: "[", count: 50_000).utf8)
+        let openBraces = Data(String(repeating: "{", count: 50_000).utf8)
+        for hostile in [openBrackets, openBraces] {
+            XCTAssertLessThan(hostile.count, BYOMDiscoveryHTTPBounds.maxBodyBytes)
+            XCTAssertThrowsError(try BYOMEvaluationJSON.parseChatCompletions(hostile, maxCompletionTokens: 8)) { error in
+                guard case BYOMDiscoveryAdapterError.malformed = error else {
+                    return XCTFail("expected malformed, got \(error)")
+                }
+            }
+        }
+
+        let depth = 20_000
+        let nested = Data((
+            #"{"choices":["# + String(repeating: "[", count: depth)
+                + String(repeating: "]", count: depth) + "]}"
+        ).utf8)
+        XCTAssertLessThan(nested.count, BYOMDiscoveryHTTPBounds.maxBodyBytes)
+        XCTAssertLessThan(nested.count, BYOMEvaluationLimits.standard.maxOutputBytes)
+        XCTAssertThrowsError(try BYOMEvaluationJSON.parseChatCompletions(nested, maxCompletionTokens: 8)) { error in
+            guard case BYOMDiscoveryAdapterError.malformed = error else {
+                return XCTFail("expected malformed, got \(error)")
+            }
+        }
+
+        let root = try temporaryBYOMEvaluationDirectory("byom-eval-nesting")
+        let client = BYOMEvaluationStubHTTPClient(
+            tagsBody: #"{"models":[{"name":"Tiny-Ollama-1B-Q4"}]}"#,
+            postResponse: BYOMHTTPResponse(statusCode: 200, headers: [], body: nested)
+        )
+
+        let document = await BYOMEvaluationRunner(
+            target: "ollama:Tiny-Ollama-1B-Q4",
+            environment: BYOMDiscoveryEnvironment(
+                namespaceURL: root.appendingPathComponent("ns"),
+                mlxCacheRoot: root.appendingPathComponent("hf", isDirectory: true),
+                ollamaOrigin: "http://127.0.0.1:11434"
+            ),
+            httpClient: client
+        ).evaluate()
+
+        XCTAssertEqual(client.postCount, 1)
+        XCTAssertEqual(document.healthResult, "failed")
+        XCTAssertTrue(document.warnings.contains("adapter_malformed_response"))
+        XCTAssertTrue(document.warnings.contains("evaluation_failed"))
+        XCTAssertFalse(document.offerPreconditionsAppearSatisfied)
+        XCTAssertEqual(document.mutationSummary, .none)
+        XCTAssertNotNil(document.diagnosticHashes.responseBodySHA256)
+        let encoded = String(decoding: try JSONEncoder().encode(document), as: UTF8.self)
+        XCTAssertFalse(encoded.contains("[[["))
+        XCTAssertFalse(encoded.contains("\"choices\""))
+    }
+
     func testEvaluateMalformedNonemptyChoicesFailClosed() async throws {
         let malformedBodies = [
             #"{"choices":[{}]}"#,
