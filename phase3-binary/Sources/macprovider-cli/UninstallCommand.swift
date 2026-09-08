@@ -9,7 +9,7 @@ struct UninstallCommand: AsyncParsableCommand {
         abstract: "Stop macprovider-cli and remove installed artifacts."
     )
 
-    @Flag(help: "Accepted for compatibility; support files and logs are always removed.")
+    @Flag(help: "Accepted for compatibility; support files, logs, and pending-update residue are always removed. The provider identity (config provider_id + CLI credential, in Keychain or protected-file custody) is preserved for safe reinstall per SPEC-001; a future full-identity-reset is required to destroy it.")
     var removeConfigAndLogs = false
 
     @Flag(help: "Accepted for compatibility; uninstall is non-interactive.")
@@ -123,6 +123,20 @@ struct UninstallCommand: AsyncParsableCommand {
         for dataDir in manifest.dataDirs {
             removeIfPresent(URL(fileURLWithPath: dataDir), allowed: allowed.dataDirs, label: "data directory", warnings: &warnings)
         }
+        // Clear the autoupdate transaction residue (`pending.json`, `update.lock`)
+        // under the provider state root. Both launchd jobs are proven absent by
+        // this point, so no updater owns these markers; leaving `pending.json`
+        // makes the next `install.sh` falsely report "a provider update is
+        // awaiting coordinator admission or recovery" and refuse to install
+        // (issue #1420). Preserves the rest of the state root and the identity.
+        if let residue = allowed.autoupdateResidue {
+            removeIfPresent(
+                URL(fileURLWithPath: residue),
+                allowed: [residue],
+                label: "autoupdate transaction residue",
+                warnings: &warnings
+            )
+        }
         removeIfPresent(paths.manifest, allowed: [paths.manifest.path], label: "manifest", warnings: &warnings)
         Self.cleanupApplicationSupportPreservingLifecycleState(
             paths.applicationSupportDirectory,
@@ -131,7 +145,10 @@ struct UninstallCommand: AsyncParsableCommand {
 
         try removePathMarker(from: home.appendingPathComponent(".zshrc"))
         if FileManager.default.fileExists(atPath: paths.cacheDirectory.path) {
-            warnings.append("left cache directory in place: \(paths.cacheDirectory.path)")
+            warnings.append(
+                "left cache directory in place: \(paths.cacheDirectory.path)"
+                + " — this does not block reinstall; remove it with"
+                + " `rm -rf \(paths.cacheDirectory.path)` for a full wipe.")
         }
         for warning in warnings {
             print("warning: \(warning)")
@@ -205,9 +222,14 @@ struct UninstallCommand: AsyncParsableCommand {
         var description: String {
             switch self {
             case .serviceStillLoaded(let label):
-                return "refusing to remove provider artifacts while launchd service remains loaded: \(label)"
+                return "refusing to remove provider artifacts while launchd service remains loaded: \(label). "
+                    + "Remedy: stop it and re-run uninstall — `launchctl bootout gui/$(id -u)/\(label)` "
+                    + "(or reboot), then `malibu-cli uninstall`."
             case .serviceAbsenceVerificationFailed(let label, let status):
-                return "refusing to remove provider artifacts because launchd service absence could not be verified: \(label) (launchctl print exited \(status))"
+                return "refusing to remove provider artifacts because launchd service absence could not be verified: "
+                    + "\(label) (launchctl print exited \(status)). "
+                    + "Remedy: inspect with `launchctl print gui/$(id -u)/\(label)`, boot it out with "
+                    + "`launchctl bootout gui/$(id -u)/\(label)` (or reboot), then re-run `malibu-cli uninstall`."
             case .unexpectedServiceLabel(let label):
                 return "refusing to use an unrecognized launchd service label from the install manifest: \(label)"
             case .unsupportedHeadlessInstallProfile:
@@ -230,11 +252,21 @@ struct UninstallCommand: AsyncParsableCommand {
         "live.streamvc.macprovider",
     ]
 
+    // `bootout` is asynchronous: it can return while the job is still in its
+    // exiting state, during which `launchctl print` still reports status 0
+    // ("loaded"). SPEC-001 still requires proving absence before removing
+    // artifacts, so we re-check for a bounded grace window and treat a
+    // persistent status 0 as still-loaded (fail closed) only after it elapses.
+    // Any other non-absent result is indeterminate and fails closed at once.
+    static let serviceAbsenceMaxAttempts = 20
+    static let serviceAbsencePollIntervalMicroseconds: useconds_t = 100_000
+
     static func stopLaunchdServices(
         labels: [String],
         uid: uid_t,
         run: ([String]) throws -> Int32,
-        beforeBootout: (String) -> Void = { _ in }
+        beforeBootout: (String) -> Void = { _ in },
+        sleep: (useconds_t) -> Void = { _ = usleep($0) }
     ) throws {
         let managedLabels = Set(managedLaunchdStopOrder)
         for label in Set(labels) where !managedLabels.contains(label) {
@@ -254,13 +286,13 @@ struct UninstallCommand: AsyncParsableCommand {
             // `bootout` returns nonzero both for an absent job and for real
             // failures. A follow-up `print` is the stop proof: only a missing
             // job is safe before deleting the executable and plist.
-            try verifyServiceAbsent(label: label, uid: uid, run: run)
+            try verifyServiceAbsent(label: label, uid: uid, run: run, sleep: sleep)
         }
 
         // Recheck the complete managed set only after every restart-capable job
         // has stopped. This closes the provider-first/watchdog-restart race.
         for label in managedLaunchdStopOrder {
-            try verifyServiceAbsent(label: label, uid: uid, run: run)
+            try verifyServiceAbsent(label: label, uid: uid, run: run, sleep: sleep)
         }
     }
 
@@ -294,15 +326,28 @@ struct UninstallCommand: AsyncParsableCommand {
     private static func verifyServiceAbsent(
         label: String,
         uid: uid_t,
-        run: ([String]) throws -> Int32
+        run: ([String]) throws -> Int32,
+        sleep: (useconds_t) -> Void = { _ = usleep($0) }
     ) throws {
         let target = "gui/\(uid)/\(label)"
-        let printStatus = try run(["print", target])
-        guard printStatus != 0 else {
-            throw UninstallError.serviceStillLoaded(label)
-        }
-        guard isLaunchdAbsentStatus(printStatus) else {
-            throw UninstallError.serviceAbsenceVerificationFailed(label, printStatus)
+        var attempt = 0
+        while true {
+            let printStatus = try run(["print", target])
+            if isLaunchdAbsentStatus(printStatus) {
+                return
+            }
+            // Status 0 == still loaded. Immediately after `bootout` this may just
+            // be the asynchronous teardown finishing, so poll for a bounded grace
+            // window before failing closed. Every other non-absent result is
+            // indeterminate per SPEC-001 and fails closed without retry.
+            guard printStatus == 0 else {
+                throw UninstallError.serviceAbsenceVerificationFailed(label, printStatus)
+            }
+            attempt += 1
+            if attempt >= serviceAbsenceMaxAttempts {
+                throw UninstallError.serviceStillLoaded(label)
+            }
+            sleep(serviceAbsencePollIntervalMicroseconds)
         }
     }
 
@@ -357,6 +402,12 @@ struct UninstallCommand: AsyncParsableCommand {
         let launchdPlists: [String]
         let installProfile: String?
         let launchdDomain: String?
+        /// Root of the provider's `~/.local/share/macprovider` state tree. Its
+        /// `autoupdate/` subdirectory holds in-flight update transaction residue
+        /// (`pending.json`, `update.lock`) that must be cleared on uninstall so a
+        /// subsequent install is not falsely told an update is awaiting
+        /// admission. Optional for backward compatibility with older manifests.
+        let providerStateRoot: String?
 
         enum CodingKeys: String, CodingKey {
             case installPrefix = "install_prefix"
@@ -368,6 +419,35 @@ struct UninstallCommand: AsyncParsableCommand {
             case launchdPlists = "launchd_plists"
             case installProfile = "install_profile"
             case launchdDomain = "launchd_domain"
+            case providerStateRoot = "provider_state_root"
+        }
+
+        // Explicit memberwise initializer with a default for `providerStateRoot`
+        // so existing constructors (and older tests) remain source-compatible.
+        // Codable's synthesized `init(from:)` is unaffected and decodes a missing
+        // `provider_state_root` key as nil.
+        init(
+            installPrefix: String,
+            launchdLabels: [String],
+            dataDirs: [String],
+            version: String?,
+            binaryPath: String?,
+            symlinkPath: String?,
+            launchdPlists: [String],
+            installProfile: String?,
+            launchdDomain: String?,
+            providerStateRoot: String? = nil
+        ) {
+            self.installPrefix = installPrefix
+            self.launchdLabels = launchdLabels
+            self.dataDirs = dataDirs
+            self.version = version
+            self.binaryPath = binaryPath
+            self.symlinkPath = symlinkPath
+            self.launchdPlists = launchdPlists
+            self.installProfile = installProfile
+            self.launchdDomain = launchdDomain
+            self.providerStateRoot = providerStateRoot
         }
     }
 
@@ -414,7 +494,8 @@ struct UninstallCommand: AsyncParsableCommand {
                 home.appendingPathComponent("Library/LaunchAgents/live.streamvc.macprovider-watchdog.plist").path,
             ],
             installProfile: nil,
-            launchdDomain: nil
+            launchdDomain: nil,
+            providerStateRoot: home.appendingPathComponent(".local/share/macprovider").path
         )
     }
 
@@ -463,11 +544,35 @@ struct UninstallCommand: AsyncParsableCommand {
         let symlinks: [String]
         let binaries: [String]
         let dataDirs: [String]
+        /// The single `<provider_state_root>/autoupdate` directory holding update
+        /// transaction residue, or nil when no safe state root can be resolved.
+        let autoupdateResidue: String?
+    }
+
+    /// Canonical provider state root when the manifest does not record one
+    /// (older manifests predate `provider_state_root`); matches install.sh's
+    /// `$HOME/.local/share/macprovider`.
+    static func defaultProviderStateRoot(home: URL) -> URL {
+        home.appendingPathComponent(".local/share/macprovider", isDirectory: true)
     }
 
     static func allowedRemovalPaths(home: URL, manifest: InstallManifest) throws -> AllowedRemovalPaths {
         let paths = artifactPaths(home: home)
         let installPrefix = URL(fileURLWithPath: manifest.installPrefix)
+        // Only honor a manifest-supplied provider_state_root when it is exactly
+        // the canonical location. A corrupt or tampered manifest must not be able
+        // to redirect the recursive autoupdate-residue removal at an arbitrary
+        // path (audit finding). install.sh only ever writes the canonical
+        // `~/.local/share/macprovider`, so this loses nothing in practice and
+        // fails safe to the canonical path for any other value.
+        let canonicalStateRoot = defaultProviderStateRoot(home: home)
+        let stateRoot: URL
+        if let declared = manifest.providerStateRoot.map({ URL(fileURLWithPath: $0) }),
+           declared.standardizedFileURL.path == canonicalStateRoot.standardizedFileURL.path {
+            stateRoot = declared
+        } else {
+            stateRoot = canonicalStateRoot
+        }
         return AllowedRemovalPaths(
             plists: [
                 paths.plist.path,
@@ -486,7 +591,8 @@ struct UninstallCommand: AsyncParsableCommand {
                 installPrefix.path,
                 paths.logsDirectory.path,
                 paths.watchdogDirectory.path,
-            ]
+            ],
+            autoupdateResidue: stateRoot.appendingPathComponent("autoupdate", isDirectory: true).path
         )
     }
 

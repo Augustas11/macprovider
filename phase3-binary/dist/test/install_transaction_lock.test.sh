@@ -171,17 +171,46 @@ kill "$mutation_holder_pid"
 wait "$mutation_holder_pid" >/dev/null 2>&1 || true
 mutation_holder_pid=""
 
-# A durable pending updater marker remains an active transaction even after the
-# updater process restarted and released its kernel locks. Installer must wait
-# for coordinator admission or rollback recovery instead of overwriting it.
-printf '{}\n' > "$TMP/home/.local/share/macprovider/autoupdate/pending.json"
-chmod 600 "$TMP/home/.local/share/macprovider/autoupdate/pending.json"
+# A durable pending updater marker with a future recovery deadline remains an
+# active transaction even after the updater process restarted and released its
+# kernel locks. Installer must wait for coordinator admission or rollback
+# recovery instead of overwriting it, and must name recover-update as the escape
+# hatch if it never completes (#1420).
+python3 - "$TMP/home/.local/share/macprovider/autoupdate/pending.json" future <<'PY'
+import datetime, json, os, sys
+path, kind = sys.argv[1], sys.argv[2]
+delta = datetime.timedelta(minutes=10) if kind == "future" else datetime.timedelta(minutes=-10)
+deadline = (datetime.datetime.now(datetime.timezone.utc) + delta).strftime("%Y-%m-%dT%H:%M:%SZ")
+fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+os.write(fd, (json.dumps({"marker_deadline": deadline}) + "\n").encode("utf-8"))
+os.close(fd)
+PY
 set +e
 run_lock_shell once > "$TMP/mutation-pending.out" 2> "$TMP/mutation-pending.err"
 mutation_pending_rc=$?
 set -e
 [ "$mutation_pending_rc" -eq 73 ]
 grep -F 'awaiting coordinator admission or recovery' "$TMP/mutation-pending.err" >/dev/null
+grep -F 'recover-update' "$TMP/mutation-pending.err" >/dev/null
+rm -f "$TMP/home/.local/share/macprovider/autoupdate/pending.json"
+
+# An expired or malformed marker is an abandoned transaction that nothing is
+# finishing. The installer must stop telling the operator to "wait" and instead
+# point at recover-update to clear the stale marker (#1420, acceptance 3). An
+# empty/malformed marker (no parseable marker_deadline) is treated as stale.
+printf '{}\n' > "$TMP/home/.local/share/macprovider/autoupdate/pending.json"
+chmod 600 "$TMP/home/.local/share/macprovider/autoupdate/pending.json"
+set +e
+run_lock_shell once > "$TMP/mutation-stale.out" 2> "$TMP/mutation-stale.err"
+mutation_stale_rc=$?
+set -e
+[ "$mutation_stale_rc" -eq 73 ]
+grep -F 'recover-update' "$TMP/mutation-stale.err" >/dev/null
+grep -F 'has passed' "$TMP/mutation-stale.err" >/dev/null
+if grep -F 'wait for it to finish' "$TMP/mutation-stale.err" >/dev/null; then
+  echo "stale marker message must not tell the operator to wait" >&2
+  exit 1
+fi
 rm -f "$TMP/home/.local/share/macprovider/autoupdate/pending.json"
 run_lock_shell once
 

@@ -137,7 +137,8 @@ final class UninstallCommandTests: XCTestCase {
                 run: { arguments in
                     guard arguments.first == "print" else { return 0 }
                     return arguments.last?.hasSuffix("/live.malibu.provider-watchdog") == true ? 113 : 0
-                }
+                },
+                sleep: { _ in }
             )
         ) { error in
             XCTAssertEqual(
@@ -145,6 +146,29 @@ final class UninstallCommandTests: XCTestCase {
                 .serviceStillLoaded("live.malibu.provider")
             )
         }
+    }
+
+    // A `bootout` that returns before the job finishes tearing down leaves
+    // `launchctl print` reporting status 0 for a brief window. The absence check
+    // must poll through that grace window rather than immediately refusing, so a
+    // job that becomes absent on a later poll is accepted (issue #1420, Claim 1).
+    func testStopLaunchdServicesToleratesBootoutTeardownLag() throws {
+        var providerPrints = 0
+        var sleeps = 0
+        try UninstallCommand.stopLaunchdServices(
+            labels: ["live.malibu.provider"],
+            uid: 501,
+            run: { arguments in
+                guard arguments.first == "print" else { return 3 }
+                guard arguments.last?.hasSuffix("/live.malibu.provider") == true else { return 113 }
+                providerPrints += 1
+                // First poll: still tearing down (0); second poll: gone (113).
+                return providerPrints >= 2 ? 113 : 0
+            },
+            sleep: { _ in sleeps += 1 }
+        )
+        XCTAssertGreaterThanOrEqual(providerPrints, 2)
+        XCTAssertGreaterThanOrEqual(sleeps, 1)
     }
 
     func testStopLaunchdServicesRejectsIndeterminatePrintFailure() {
@@ -180,10 +204,15 @@ final class UninstallCommandTests: XCTestCase {
                     guard arguments.first == "print" else { return 0 }
                     if arguments.last?.hasSuffix("/live.malibu.provider") == true {
                         providerPrints += 1
+                        // Absent at the per-label stop proof, then persistently
+                        // re-loaded (status 0) once the watchdog restarts it — the
+                        // final recheck polls through the grace window and still
+                        // fails closed.
                         return providerPrints == 1 ? 113 : 0
                     }
                     return 113
-                }
+                },
+                sleep: { _ in }
             )
         ) { error in
             XCTAssertEqual(
@@ -192,10 +221,11 @@ final class UninstallCommandTests: XCTestCase {
             )
         }
 
-        XCTAssertEqual(Array(calls.suffix(2)), [
-            ["print", "gui/501/live.malibu.provider-watchdog"],
-            ["print", "gui/501/live.malibu.provider"],
-        ])
+        // The final recheck detects the restarted provider; the last launchctl
+        // call is a print of the provider label (repeated across the grace-window
+        // polls before failing closed).
+        XCTAssertEqual(calls.last, ["print", "gui/501/live.malibu.provider"])
+        XCTAssertGreaterThan(providerPrints, 2)
     }
 
     func testStopLaunchdServicesRejectsUnexpectedManifestLabelBeforeLaunchctl() {
@@ -246,6 +276,7 @@ final class UninstallCommandTests: XCTestCase {
           "launchd_labels": ["live.malibu.provider", "live.malibu.provider-watchdog"],
           "launchd_plists": ["\(root.path)/Library/LaunchAgents/live.malibu.provider.plist"],
           "data_dirs": ["\(root.path)/custom", "\(root.path)/Library/Logs/macprovider"],
+          "provider_state_root": "\(root.path)/.local/share/macprovider",
           "version": "v1.8.10"
         }
         """.write(to: manifest, atomically: true, encoding: .utf8)
@@ -258,8 +289,65 @@ final class UninstallCommandTests: XCTestCase {
         XCTAssertEqual(loaded.launchdLabels, ["live.malibu.provider", "live.malibu.provider-watchdog"])
         XCTAssertEqual(loaded.dataDirs, ["\(root.path)/custom", "\(root.path)/Library/Logs/macprovider"])
         XCTAssertEqual(loaded.symlinkPath, "\(root.path)/.local/bin/macprovider-cli")
+        XCTAssertEqual(loaded.providerStateRoot, "\(root.path)/.local/share/macprovider")
         XCTAssertNil(loaded.installProfile)
         XCTAssertNil(loaded.launchdDomain)
+
+        // The autoupdate transaction residue removed on uninstall lives under
+        // the manifest's provider_state_root (issue #1420, Claim 2).
+        let allowed = try UninstallCommand.allowedRemovalPaths(home: root, manifest: loaded)
+        XCTAssertEqual(
+            allowed.autoupdateResidue,
+            "\(root.path)/.local/share/macprovider/autoupdate"
+        )
+    }
+
+    func testAllowedRemovalPathsFallsBackToCanonicalStateRootWhenManifestOmitsIt() throws {
+        let home = URL(fileURLWithPath: "/Users/tester")
+        // Older manifests predate `provider_state_root`; uninstall must still
+        // clear the canonical autoupdate residue so reinstall is not blocked.
+        let manifest = UninstallCommand.InstallManifest(
+            installPrefix: "/Users/tester/macprovider",
+            launchdLabels: ["live.malibu.provider", "live.malibu.provider-watchdog"],
+            dataDirs: ["/Users/tester/macprovider"],
+            version: "v1.8.10",
+            binaryPath: nil,
+            symlinkPath: "/Users/tester/.local/bin/macprovider-cli",
+            launchdPlists: [],
+            installProfile: nil,
+            launchdDomain: nil
+        )
+        XCTAssertNil(manifest.providerStateRoot)
+        let allowed = try UninstallCommand.allowedRemovalPaths(home: home, manifest: manifest)
+        XCTAssertEqual(
+            allowed.autoupdateResidue,
+            "/Users/tester/.local/share/macprovider/autoupdate"
+        )
+    }
+
+    func testAllowedRemovalPathsRejectsOffTreeManifestStateRoot() throws {
+        let home = URL(fileURLWithPath: "/Users/tester")
+        // A corrupt/tampered manifest must not redirect recursive residue removal
+        // at an arbitrary path; a non-canonical provider_state_root falls back to
+        // the canonical location instead of being honored (issue #1420 audit).
+        let manifest = UninstallCommand.InstallManifest(
+            installPrefix: "/Users/tester/macprovider",
+            launchdLabels: ["live.malibu.provider", "live.malibu.provider-watchdog"],
+            dataDirs: ["/Users/tester/macprovider"],
+            version: "v1.8.10",
+            binaryPath: nil,
+            symlinkPath: "/Users/tester/.local/bin/macprovider-cli",
+            launchdPlists: [],
+            installProfile: nil,
+            launchdDomain: nil,
+            providerStateRoot: "/Users/tester/Documents"
+        )
+        let allowed = try UninstallCommand.allowedRemovalPaths(home: home, manifest: manifest)
+        XCTAssertEqual(
+            allowed.autoupdateResidue,
+            "/Users/tester/.local/share/macprovider/autoupdate"
+        )
+        XCTAssertNotEqual(allowed.autoupdateResidue, "/Users/tester/Documents/autoupdate")
     }
 
     func testLoadManifestFailsClosedOnMalformedManifest() throws {

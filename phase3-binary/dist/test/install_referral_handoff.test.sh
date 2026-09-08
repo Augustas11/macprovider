@@ -335,4 +335,55 @@ set -e
 }
 printf '%s' "$stale_output" | grep -Fq "invite code is required"
 
+# A routine uninstall preserves the provider identity (config provider_id +
+# credential) but removes the binary/manifest/plist. On reinstall, with a
+# surviving provider_id, no installed binary, and neither a referral code nor a
+# replace request, prepare_fresh_referral_code must DEFER the invite demand
+# (not die 20) so the staged CLI can verify and reuse the preserved credential
+# (#1420) instead of redeeming an unrelated fresh code and conflicting.
+surviving_dir="$workdir/surviving"
+mkdir -p "$surviving_dir/config"
+INSTALL_DIR="$surviving_dir/macprovider"
+BINARY_PATH="$surviving_dir/bin/macprovider-cli"
+MANIFEST_PATH="$surviving_dir/install_manifest.json"
+PLIST_PATH="$surviving_dir/live.malibu.provider.plist"
+PROVIDER_ID_PATH="$surviving_dir/provider_id"
+CONFIG_PATH="$surviving_dir/config/config.yaml"
+printf '%s\n' 'provider_id: "mp-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"' > "$CONFIG_PATH"
+NO_PROMPT=1
+REFERRAL_CODE_SOURCE_FILE=""
+CREATED_REFERRAL_CODE_SOURCE_FILE=0
+FRESH_REFERRAL_BOOTSTRAP=0
+REFERRAL_REPLACE_INCUMBENT=0
+SURVIVING_IDENTITY_REINSTALL=0
+prepare_fresh_referral_code
+[ "$SURVIVING_IDENTITY_REINSTALL" -eq 1 ] || {
+  echo "surviving-identity reinstall did not defer the referral demand" >&2
+  exit 1
+}
+[ -z "$REFERRAL_CODE_SOURCE_FILE" ] || {
+  echo "surviving-identity reinstall must not create a referral file" >&2
+  exit 1
+}
+[ "$CREATED_REFERRAL_CODE_SOURCE_FILE" -eq 0 ]
+[ "$FRESH_REFERRAL_BOOTSTRAP" -eq 0 ]
+
+# The same surviving-identity state WITH an explicit invite code must NOT defer:
+# the operator explicitly asked for a fresh referral, so honor it.
+explicit_file="$workdir/surviving-explicit-referral"
+printf '%s' "$valid_code" > "$explicit_file"
+chmod 600 "$explicit_file"
+REFERRAL_CODE_SOURCE_FILE="$explicit_file"
+CREATED_REFERRAL_CODE_SOURCE_FILE=0
+FRESH_REFERRAL_BOOTSTRAP=0
+SURVIVING_IDENTITY_REINSTALL=0
+prepare_fresh_referral_code
+[ "$SURVIVING_IDENTITY_REINSTALL" -eq 0 ] || {
+  echo "explicit invite code must not trigger the surviving-identity defer" >&2
+  exit 1
+}
+[ "$REFERRAL_CODE_SOURCE_FILE" = "$explicit_file" ]
+[ "$FRESH_REFERRAL_BOOTSTRAP" -eq 1 ]
+rm -f "$explicit_file"
+
 echo "install_referral_handoff: PASS"

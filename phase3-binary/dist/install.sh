@@ -17,6 +17,10 @@ set -euo pipefail
 REFERRAL_CODE_SOURCE_FILE="${MACPROVIDER_REFERRAL_CODE_FILE:-}"
 CREATED_REFERRAL_CODE_SOURCE_FILE=0
 FRESH_REFERRAL_BOOTSTRAP=0
+# Set when a provider identity (config provider_id) survives a routine uninstall
+# but no binary/manifest/plist remains, so the referral demand is deferred until
+# the staged CLI can authoritatively verify the preserved credential (#1420).
+SURVIVING_IDENTITY_REINSTALL=0
 REFERRAL_REPLACE_INCUMBENT="${MACPROVIDER_REFERRAL_REPLACE_INCUMBENT:-0}"
 REPAIR_EXISTING_INSTALL="${MACPROVIDER_REPAIR_EXISTING_INSTALL:-0}"
 BUNDLED_CLI="${MACPROVIDER_BUNDLED_CLI:-}"
@@ -1392,6 +1396,7 @@ acquire_install_lock() {
     "${REPAIR_EXISTING_INSTALL:-0}" <<'PY' &
 import fcntl
 import ctypes
+import datetime
 import errno
 import grp
 import json
@@ -1626,7 +1631,28 @@ try:
     if pending_info is not None:
         if not stat.S_ISREG(pending_info.st_mode) or stat.S_ISLNK(pending_info.st_mode) or pending_info.st_uid != uid or pending_info.st_nlink != 1 or pending_info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
             raise RuntimeError("pending provider mutation marker is unsafe")
-        write_status("mutation-pending")
+        # Classify the marker so the installer can give a truthful remedy instead
+        # of always telling the operator to "wait" (#1420). A marker whose
+        # `marker_deadline` is still in the future is a genuine in-progress
+        # update/rollback; an expired or malformed/unparseable deadline is an
+        # abandoned transaction that nothing is finishing, which `recover-update`
+        # is the tool to clear (mirrors recover-update treating an unparseable
+        # deadline as expired).
+        marker_stale = True
+        try:
+            marker_fd = os.open(mutation_pending_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+            try:
+                marker_raw = os.read(marker_fd, 1024 * 1024)
+            finally:
+                os.close(marker_fd)
+            marker = json.loads(marker_raw.decode("utf-8"))
+            deadline = datetime.datetime.strptime(
+                marker["marker_deadline"], "%Y-%m-%dT%H:%M:%SZ"
+            ).replace(tzinfo=datetime.timezone.utc)
+            marker_stale = deadline < datetime.datetime.now(datetime.timezone.utc)
+        except (KeyError, ValueError, TypeError, OSError):
+            marker_stale = True
+        write_status("mutation-pending-stale" if marker_stale else "mutation-pending-active")
         raise SystemExit(73)
     token = secrets.token_hex(32)
     parent_start = process_start(owner_pid)
@@ -1697,10 +1723,15 @@ PY
       INSTALL_LOCK_HOLDER_PID=""
       die 73 "another provider update is active; wait for it to finish"
       ;;
-    mutation-pending)
+    mutation-pending-active)
       wait "$INSTALL_LOCK_HOLDER_PID" >/dev/null 2>&1 || true
       INSTALL_LOCK_HOLDER_PID=""
-      die 73 "a provider update is awaiting coordinator admission or recovery; wait for it to finish"
+      die 73 "a provider update is awaiting coordinator admission or recovery; wait for it to finish, then re-run. If it does not complete, clear it with: macprovider-cli recover-update"
+      ;;
+    mutation-pending-stale|mutation-pending)
+      wait "$INSTALL_LOCK_HOLDER_PID" >/dev/null 2>&1 || true
+      INSTALL_LOCK_HOLDER_PID=""
+      die 73 "a previous provider update did not finish and its recovery deadline has passed; nothing is running now. Clear the stale marker with: macprovider-cli recover-update (reinstall the CLI first if it was removed), then re-run the installer"
       ;;
     *)
       kill -TERM "$INSTALL_LOCK_HOLDER_PID" >/dev/null 2>&1 || true
@@ -8309,6 +8340,25 @@ prepare_fresh_referral_code() {
     fi
     log "Fresh provider replacement requested; incumbent files and config stay unchanged until replacement cutover."
   fi
+  # A routine uninstall preserves the provider identity (config provider_id +
+  # Keychain/protected-file credential) for safe reinstall per SPEC-001, but
+  # removes the binary, manifest, and plist -- so restart_safe_incumbent_present
+  # cannot see it (it needs an installed binary). Without this, a plain reinstall
+  # demands a fresh invite code and later redeems it against the surviving
+  # onboarding journal, which fails with referral_conflict (#1420). When a
+  # provider_id survives but no binary is installed and the operator supplied
+  # neither a referral code nor a replace request, defer the referral decision:
+  # ensure_provider_credentials runs the freshly-staged CLI's `credentials
+  # verify` as the authoritative check. An intact credential is reused with no
+  # referral; a missing/invalid one fails closed there with a named remedy.
+  if [ "$REFERRAL_REPLACE_INCUMBENT" != "1" ] \
+    && [ -z "$REFERRAL_CODE_SOURCE_FILE" ] \
+    && [ -z "$(installed_provider_binary_path)" ] \
+    && [ -n "$(read_config_provider_id || true)" ]; then
+    SURVIVING_IDENTITY_REINSTALL=1
+    log "Found a preserved provider identity with no installed binary; will verify the preserved credential with the staged CLI before requesting an invite code."
+    return 0
+  fi
   if [ -n "$REFERRAL_CODE_SOURCE_FILE" ]; then
     validate_supplied_referral_code_file
     FRESH_REFERRAL_BOOTSTRAP=1
@@ -10519,8 +10569,11 @@ ensure_provider_credentials() {
         if headless_acceptance_repair_mode; then
           die 6 "headless acceptance repair credential custody changed after incumbent verification; refusing to bootstrap over protected-file state"
         fi
+        if [ "${SURVIVING_IDENTITY_REINSTALL:-0}" -eq 1 ]; then
+          die 6 "a preserved provider identity ($(read_config_provider_id || true)) is present in $CONFIG_DIR but its credential is missing or unreadable, so this reinstall cannot reuse it. Remedy: restore the preserved credential, or replace this identity with a new one by re-running with MACPROVIDER_REFERRAL_REPLACE_INCUMBENT=1 and an invite code (MACPROVIDER_REFERRAL_CODE_FILE=...). A plain invite code alone will not help: the preserved provider_id is reused, so it would conflict again."
+        fi
         ;;
-      *) die 6 "existing CLI Keychain credential is unavailable or invalid; refusing unsafe bootstrap" ;;
+      *) die 6 "existing CLI credential is unavailable or invalid; refusing unsafe bootstrap. Remedy: inspect it with \`macprovider-cli credentials verify\`; if it cannot be recovered, restore it, or replace the identity by re-running with MACPROVIDER_REFERRAL_REPLACE_INCUMBENT=1 and an invite code." ;;
     esac
   fi
   if [ "$credential_already_present" -eq 0 ]; then
@@ -10630,6 +10683,16 @@ run_autotune_recommend_apply() {
   fi
   if [ ! -x "${MACPROVIDER_CLI_EXECUTABLE:-$INSTALL_DIR/macprovider-cli}" ]; then
     die 5 "staged macprovider-cli missing before autotune recommendation"
+  fi
+  # #1420: a surviving-identity reinstall deferred the referral demand to the
+  # staged CLI's `credentials verify`. That authoritative check must run before
+  # ANY commit reachable from this function -- including the donor and
+  # start-declined no-start branches below, not only the paid-start path -- so a
+  # missing/invalid preserved credential fails closed with its remedy instead of
+  # silently committing a half-identity install. On the reuse path (verify=0,
+  # no referral supplied) this is an idempotent no-op verify.
+  if [ "${SURVIVING_IDENTITY_REINSTALL:-0}" -eq 1 ]; then
+    ensure_provider_credentials
   fi
   autotune_candidate_args=()
   upgrade_candidate_model_id="${AUTOTUNE_UPGRADE_CANDIDATE_MODEL_ID:-}"
