@@ -9,7 +9,7 @@
     {
       "spec_id": "SPEC-001",
       "title": "Phase 3 Binary: Mac Provider Inference CLI",
-      "version": "1.9.6",
+      "version": "1.9.7",
       "path": "specs/SPEC-001-phase3-binary.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -997,7 +997,7 @@
     {
       "spec_id": "SPEC-035",
       "title": "Provider connection diagnostics and failure history",
-      "version": "v0.4.2",
+      "version": "v0.4.3",
       "path": "specs/SPEC-035-provider-connection-diagnostics.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1471,6 +1471,34 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/854",
         "rationale": "Provider serving continuity across coordinator disconnect, reconnect backoff, and coordinator drain (\u00a76.5 / FR-13 / FR-15 / AC-16): PR #853 binds the macOS sleep assertion to serving intent under regression tests, but production physical uptime evidence remains pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-001-R002",
+      "spec_id": "SPEC-001",
+      "state": "pending",
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/CoordinatorReadinessClient.swift:enum CoordinatorBuyerServingHold",
+        "phase3-binary/Sources/macprovider-cli/ProviderStatus.swift:func applyCoordinatorBuyerServing",
+        "phase3-binary/Sources/macprovider-cli/HTTPServer.swift:private func handleStatus",
+        "phase4-coordinator/internal/buyer/server.go:func (s *Server) handlePoolCheck"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/ProviderStatusTests.swift:testCoordinatorBuyerServingHoldKeepsLastTrueOnIndeterminate",
+        "phase3-binary/Tests/macprovider-cliTests/ProviderStatusTests.swift:testProviderStatusAppliesLastConfirmedBuyerServingOnUnknown",
+        "phase3-binary/Tests/macprovider-cliTests/ProviderStatusTests.swift:testCoordinatorBuyerServingHoldDoesNotCrossAssignedSessions",
+        "phase3-binary/Tests/macprovider-cliTests/ProviderStatusTests.swift:testCoordinatorBuyerServingHoldIgnoresStaleInFlightAssignedSession",
+        "phase3-binary/Tests/macprovider-cliTests/ProviderStatusTests.swift:testStatusNeverInfersBuyerServingWhenCoordinatorVerdictIsUnknownOrFalse",
+        "phase4-coordinator/internal/buyer/server_test.go:TestPoolCheckReturnsProviderStateAnd404",
+        "phase4-coordinator/internal/buyer/server_test.go:TestPoolCheckReadinessRequiresExactAssignedSession"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "CODE_BUG",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "Last-confirmed buyer_serving on indeterminate /v1/pool/check is implemented under CLI and coordinator unit tests; production Live-hold evidence remains pending until 1.8.123 is on the fleet."
       }
     },
     {
@@ -2667,6 +2695,37 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1316",
         "rationale": "Diagnostics bundle v2 and LogTailBuffer v2 redaction are implemented under Malibu app unit tests; Malibu now auto-assembles the existing v2 redacted bundle on recovery failures without introducing a new diagnostics schema. The CLI doctor report emits schema_version/minimum_reader_version, redacts report tails by construction, omits config_path/provider_id, and verifies read-only collection under Doctor tests. Production bundle collection evidence remains deferred."
+      }
+    },
+    {
+      "requirement_id": "SPEC-035-R013",
+      "spec_id": "SPEC-035",
+      "state": "pending",
+      "implementation": [
+        "phase3-binary/app/Sources/Malibu/Agent/AgentSnapshot.swift:func isHoldingBuyerServingReady",
+        "phase3-binary/app/Sources/Malibu/Agent/AgentSnapshot.swift:private static func shouldHoldLiveThroughTransientServeUnresponsive",
+        "phase3-binary/app/Sources/Malibu/Agent/MalibuAgent.swift:private func applyProviderSnapshot"
+      ],
+      "tests": [
+        "phase3-binary/app/Tests/MalibuTests/AgentSnapshotPresenterTests.swift:testPublicStatusHoldsReadyAcrossBuyerServingUnknown",
+        "phase3-binary/app/Tests/MalibuTests/AgentSnapshotPresenterTests.swift:testPublicStatusHoldsReadyAcrossCoordinatorUnavailableWithLastServing",
+        "phase3-binary/app/Tests/MalibuTests/AgentSnapshotPresenterTests.swift:testNotBuyerServingDiagnosticDoesNotHoldLive",
+        "phase3-binary/app/Tests/MalibuTests/AgentSnapshotPresenterTests.swift:testBuyerServingHoldSurvivesPollMissInvalidationWhileLaunchdAlive",
+        "phase3-binary/app/Tests/MalibuTests/AgentSnapshotPresenterTests.swift:testObservationExpiryWithLastServingHoldKeepsServing",
+        "phase3-binary/app/Tests/MalibuTests/AgentSnapshotPresenterTests.swift:testHardFailInvalidationDoesNotReholdFromIncumbentEarnings",
+        "phase3-binary/app/Tests/MalibuTests/AgentSnapshotPresenterTests.swift:testHardFailIdentityMismatchDemotesServingSnapshotState",
+        "phase3-binary/app/Tests/MalibuTests/AgentSnapshotPresenterTests.swift:testHardFailMissingLaunchdPidDemotesServingSnapshotState",
+        "phase3-binary/app/Tests/MalibuTests/AgentSnapshotPresenterTests.swift:testHardFailDoesNotRepersistDashboardBuyerServingHold",
+        "phase3-binary/app/Tests/MalibuTests/AgentSnapshotPresenterTests.swift:testBuyerServingHoldClearsOnLifecycleNetworkOffline",
+        "phase3-binary/app/Tests/MalibuTests/AgentSnapshotPresenterTests.swift:testDoctorServeDeadStillDrivesPublicStatusDuringDisplayRetention"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "CODE_BUG",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/535",
+        "rationale": "Presenter hold for indeterminate serve_unresponsive is implemented under Malibu unit tests that attach production diagnostic findings; production Live-hold evidence remains pending until 1.8.123 is on the fleet."
       }
     },
     {

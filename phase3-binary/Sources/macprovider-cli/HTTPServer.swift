@@ -458,31 +458,36 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
             let snapshot = await providerStatus.snapshot()
             let credentialStatus = await credentialStatusRuntime.snapshot()
             let admissionIdentityStatus = await admissionIdentityStatusRuntime.snapshot()
-            async let coordinatorBuyerServing = CoordinatorReadinessClient.fetch(
+            let checkedAssignedID = snapshot.coordinatorAssignedID
+            async let latestBuyerServing = CoordinatorReadinessClient.fetch(
                 coordinatorURL: coordinatorURL,
                 providerID: providerID,
-                assignedID: snapshot.coordinatorAssignedID
+                assignedID: checkedAssignedID
             )
             let runtimeSnapshot = warmSwapEnabled ? await modelRuntime.currentSnapshot() : nil
             let telemetryMatchesRuntime = runtimeSnapshot.map { $0.specDecodeGeneration == snapshot.specDecodeGeneration } ?? true
             let telemetryRuntimeEligible = runtimeSnapshot.map { $0.state == .ready && $0.hasTargetCompatibleDraft } ?? true
+            let coordinatorBuyerServing = await providerStatus.applyCoordinatorBuyerServing(
+                await latestBuyerServing,
+                forAssignedID: checkedAssignedID
+            )
             writer.writeJSON(
                 status: .ok,
                 body: Self.statusResponse(
-	                    snapshot,
-	                    providerID: providerID,
-	                    coordinatorURL: coordinatorURL,
-	                    runtimeSnapshot: runtimeSnapshot,
-	                    specDecodeTelemetryMatchesRuntime: telemetryMatchesRuntime,
-	                    specDecodeTelemetryRuntimeEligible: telemetryRuntimeEligible,
-	                    catalogStatus: catalogStatus,
-	                    coordinatorBuyerServing: await coordinatorBuyerServing,
-	                    credentialStatus: credentialStatus,
-	                    admissionIdentityStatus: admissionIdentityStatus,
-	                    lifecycleStateInspection: lifecycleStateStore.inspect(),
-	                    lifecycleLeaseInspection: lifecycleLeaseStore.inspect(),
-	                    compatibilitySetManifest: compatibilitySetManifest
-	                )
+                    snapshot,
+                    providerID: providerID,
+                    coordinatorURL: coordinatorURL,
+                    runtimeSnapshot: runtimeSnapshot,
+                    specDecodeTelemetryMatchesRuntime: telemetryMatchesRuntime,
+                    specDecodeTelemetryRuntimeEligible: telemetryRuntimeEligible,
+                    catalogStatus: catalogStatus,
+                    coordinatorBuyerServing: coordinatorBuyerServing,
+                    credentialStatus: credentialStatus,
+                    admissionIdentityStatus: admissionIdentityStatus,
+                    lifecycleStateInspection: lifecycleStateStore.inspect(),
+                    lifecycleLeaseInspection: lifecycleLeaseStore.inspect(),
+                    compatibilitySetManifest: compatibilitySetManifest
+                )
             )
         }
     }

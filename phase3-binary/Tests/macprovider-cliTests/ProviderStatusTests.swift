@@ -617,6 +617,66 @@ final class ProviderStatusTests: XCTestCase {
         XCTAssertEqual(rejected["buyer_serving_authority"] as? String, "coordinator")
     }
 
+    func testCoordinatorBuyerServingHoldKeepsLastTrueOnIndeterminate() {
+        XCTAssertEqual(
+            CoordinatorBuyerServingHold.resolve(latest: true, lastConfirmedTrue: false).verdict,
+            true
+        )
+        XCTAssertEqual(
+            CoordinatorBuyerServingHold.resolve(latest: nil, lastConfirmedTrue: true).verdict,
+            true
+        )
+        XCTAssertNil(CoordinatorBuyerServingHold.resolve(latest: nil, lastConfirmedTrue: false).verdict)
+        XCTAssertEqual(
+            CoordinatorBuyerServingHold.resolve(latest: false, lastConfirmedTrue: true).verdict,
+            false
+        )
+        XCTAssertNil(CoordinatorBuyerServingHold.resolve(latest: nil, lastConfirmedTrue: false).verdict)
+        let afterFalse = CoordinatorBuyerServingHold.resolve(latest: false, lastConfirmedTrue: true)
+        XCTAssertEqual(afterFalse.lastConfirmedTrue, false)
+        XCTAssertNil(CoordinatorBuyerServingHold.resolve(latest: nil, lastConfirmedTrue: afterFalse.lastConfirmedTrue).verdict)
+    }
+
+    func testProviderStatusAppliesLastConfirmedBuyerServingOnUnknown() async {
+        let status = ProviderStatus(modelID: "m", modelLoaded: true, capacity: makeCapacity())
+        let confirmedTrue = await status.applyCoordinatorBuyerServing(true)
+        let heldTrue = await status.applyCoordinatorBuyerServing(nil)
+        let authoritativeFalse = await status.applyCoordinatorBuyerServing(false)
+        let unknownAfterFalse = await status.applyCoordinatorBuyerServing(nil)
+        XCTAssertEqual(confirmedTrue, true)
+        XCTAssertEqual(heldTrue, true)
+        XCTAssertEqual(authoritativeFalse, false)
+        XCTAssertNil(unknownAfterFalse)
+    }
+
+    func testCoordinatorBuyerServingHoldDoesNotCrossAssignedSessions() async {
+        let status = ProviderStatus(modelID: "m", modelLoaded: true, capacity: makeCapacity())
+        await status.setCoordinatorSession(connected: true, assignedID: "session-a")
+        let sessionATrue = await status.applyCoordinatorBuyerServing(true)
+        let sessionAHeld = await status.applyCoordinatorBuyerServing(nil)
+        await status.setCoordinatorSession(connected: true, assignedID: "session-b")
+        let sessionBUnknown = await status.applyCoordinatorBuyerServing(nil)
+        let sessionBTrue = await status.applyCoordinatorBuyerServing(true)
+        let sessionBHeld = await status.applyCoordinatorBuyerServing(nil)
+        XCTAssertEqual(sessionATrue, true)
+        XCTAssertEqual(sessionAHeld, true)
+        XCTAssertNil(sessionBUnknown)
+        XCTAssertEqual(sessionBTrue, true)
+        XCTAssertEqual(sessionBHeld, true)
+    }
+
+    func testCoordinatorBuyerServingHoldIgnoresStaleInFlightAssignedSession() async {
+        let status = ProviderStatus(modelID: "m", modelLoaded: true, capacity: makeCapacity())
+        await status.setCoordinatorSession(connected: true, assignedID: "session-a")
+        let sessionATrue = await status.applyCoordinatorBuyerServing(true, forAssignedID: "session-a")
+        await status.setCoordinatorSession(connected: true, assignedID: "session-b")
+        let staleATrue = await status.applyCoordinatorBuyerServing(true, forAssignedID: "session-a")
+        let sessionBUnknown = await status.applyCoordinatorBuyerServing(nil, forAssignedID: "session-b")
+        XCTAssertEqual(sessionATrue, true)
+        XCTAssertNil(staleATrue)
+        XCTAssertNil(sessionBUnknown)
+    }
+
     func testStatusKeepsPoolVerdictWhenCoordinatorSocketDrops() async {
         let status = ProviderStatus(modelID: "m", modelLoaded: true, capacity: makeCapacity())
         await status.setCoordinatorSession(connected: false, assignedID: "session-a")

@@ -2894,7 +2894,7 @@ enum UpdateError: Error, CustomStringConvertible {
 }
 
 struct LocalStatusClient {
-    static func fetch(port: Int, timeoutSeconds: TimeInterval = 1.0) async throws -> [String: Any] {
+    static func fetch(port: Int, timeoutSeconds: TimeInterval = 5.0) async throws -> [String: Any] {
         let url = URL(string: "http://127.0.0.1:\(port)/v1/status")!
         var request = URLRequest(url: url)
         request.timeoutInterval = timeoutSeconds

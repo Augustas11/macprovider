@@ -1,6 +1,6 @@
 # SPEC-001 — Phase 3 Binary: Mac Provider Inference CLI
 
-**Version:** 1.9.6 (2026-09-05, RFC-001 F5: `last_supervisor_event` provider-wire extension — separate supervisor telemetry, best-effort/non-rejecting; SPEC-025 §5.4)
+**Version:** 1.9.7 (2026-09-08, last-confirmed buyer-serving on indeterminate `/v1/pool/check`)
 **Revision note (historical, superseded by v1.7):** v1.3.1 added the `provider_token` (yaml, top-level) /
 `MACPROVIDER_PROVIDER_TOKEN` (env) / `--provider-token` (CLI) config key
 and mandates the binary attach `Authorization: Bearer <token>` on the
@@ -14,6 +14,19 @@ handshake starts. Backwards-compatible: a v1.3.1 binary with no
 behavior, so a coordinator running with `auth.require_provider_tokens=false`
 continues to accept tokenless legacy fleets. Flag flip on the
 coordinator is the compatibility cutoff for old binaries.
+
+**Change log v1.9.7 (2026-09-08, last-confirmed buyer-serving):** `GET /v1/status`
+`network_state` is coordinator-authoritative via `/v1/pool/check` readiness.
+An indeterminate result (timeout, 404 assigned-session miss, 429 retry
+exhaustion, or other `nil` verdict) MUST keep the last confirmed
+`buyer_serving=true` for that process lifetime rather than rewriting the
+provider to `buyer_serving_unknown`. An authoritative `buyer_serving=false`
+MUST still publish `not_buyer_serving`. First join with no confirmed true
+remains `buyer_serving_unknown`. Local `malibu-cli status` MUST wait at least
+as long as Malibu's `/v1/status` client (5s) so a 2s pool/check does not look
+like a local HTTP failure. Coordinator `GET /v1/pool/check` MUST look up the
+registered provider by `provider_id` (and `assigned_id` when supplied) without
+copying the full pool on each request.
 
 **Change log v1.9.6 (2026-09-05, RFC-001 F5 — #1386):** Documents the
 `last_supervisor_event` provider-wire extension (§6.15.2): a SEPARATE supervisor
@@ -1116,6 +1129,13 @@ object (a monotonic model-thread progress token + monotonic age; SPEC-025 §5.2)
 advisory observability signal that carries no buyer-serving authority. A reader MUST suppress a typed field when its capability
 is absent and MUST suppress all typed fields when the minimum reader exceeds its
 supported version. An absent envelope is the legacy-reader path.
+
+`network_state` for a catalog-verified, locally ready serve process is
+`buyer_serving` when `/v1/pool/check?details=readiness` returns
+`buyer_serving=true`, `not_buyer_serving` when it returns `false`, and
+`buyer_serving_unknown` only when the verdict is indeterminate **and** this
+process has never confirmed `true`. After a confirmed `true`, an indeterminate
+refresh MUST keep `buyer_serving` until an authoritative `false`.
 
 The capability names enumerated in this paragraph are only the subset owned by
 this section; a build also advertises other local-status and command capability

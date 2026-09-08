@@ -1,5 +1,23 @@
 import Foundation
 
+/// Last-confirmed coordinator `true` survives indeterminate `/v1/pool/check`
+/// results (timeout, 404, 429-exhaustion). Authoritative `false` still demotes.
+enum CoordinatorBuyerServingHold {
+    static func resolve(
+        latest: Bool?,
+        lastConfirmedTrue: Bool
+    ) -> (verdict: Bool?, lastConfirmedTrue: Bool) {
+        switch latest {
+        case .some(true):
+            return (true, true)
+        case .some(false):
+            return (false, false)
+        case .none:
+            return lastConfirmedTrue ? (true, true) : (nil, false)
+        }
+    }
+}
+
 /// Reads the coordinator's buyer-routing verdict. A provider WebSocket session
 /// proves transport, while this endpoint applies the coordinator's full pool,
 /// catalog, capacity, and routing eligibility checks.

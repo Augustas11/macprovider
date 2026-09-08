@@ -136,8 +136,9 @@ struct AgentSnapshot: Equatable {
     /// only state backed by the coordinator's routing-readiness verdict.
     var networkState: String?
     /// Last time Malibu observed a current `buyer_serving` verdict. Holds the
-    /// dashboard on "Provider is ready" across WebSocket blips that rewrite
-    /// `network_state` to `live_verified` / `buyer_serving_unknown`.
+    /// dashboard on "Provider is ready" across WebSocket blips and indeterminate
+    /// coordinator readiness (`live_verified` / `buyer_serving_unknown` /
+    /// `coordinator_unavailable`) while launchd still owns the serve process.
     var lastBuyerServingAt: Date? = nil
     /// Last-known USDC/MALIBU values may be shown across a Malibu relaunch
     /// until a fresh projection arrives. Distinct from `providerEarningsFresh`.
@@ -209,6 +210,9 @@ struct AgentSnapshot: Equatable {
         if state == .paused || state == .idle || state == .error {
             return true
         }
+        if lifecycleState == "network_offline" {
+            return true
+        }
         switch networkState {
         case "not_buyer_serving",
              "catalog_update_required",
@@ -235,10 +239,10 @@ struct AgentSnapshot: Equatable {
 
     func isHoldingBuyerServingReady(at now: Date = Date()) -> Bool {
         guard !shouldClearBuyerServingHold else { return false }
-        guard isLocalStatusObservationCurrent(at: now) else { return false }
+        guard lastBuyerServingAt != nil else { return false }
         switch networkState {
-        case "buyer_serving_unknown", "live_verified":
-            return lastBuyerServingAt != nil || hasIncumbentBuyerServingEvidence
+        case "buyer_serving", "buyer_serving_unknown", "live_verified", "coordinator_unavailable":
+            return true
         default:
             return false
         }
@@ -321,8 +325,10 @@ struct AgentSnapshot: Equatable {
             && localProviderID != nil
     }
 
-    mutating func invalidateLocalStatusObservation() {
-        lastBuyerServingAt = nil
+    mutating func invalidateLocalStatusObservation(clearBuyerServingHold: Bool = true) {
+        if clearBuyerServingHold {
+            lastBuyerServingAt = nil
+        }
         if localStatusCapabilities.contains("status_observation_v1") {
             statusObservationFresh = false
         }
@@ -1442,10 +1448,19 @@ enum AgentSnapshotPresenter {
 
     static func isNetworkReady(_ s: AgentSnapshot, at now: Date = Date()) -> Bool {
         guard s.state == .serving else { return false }
+        if hasDoctorServeDead(s) { return false }
         if s.isLocalStatusObservationCurrent(at: now) && s.networkState == "buyer_serving" {
             return true
         }
         return s.isHoldingBuyerServingReady(at: now)
+    }
+
+    private static func hasDoctorServeDead(_ s: AgentSnapshot) -> Bool {
+        s.diagnosticFindings.contains { finding in
+            finding.signatureID == .serveUnresponsive
+                && finding.source == .doctorReport
+                && (finding.evidence?.contains("serve_dead") == true)
+        }
     }
 
     private static func isLocalOnly(_ s: AgentSnapshot) -> Bool {
@@ -1490,7 +1505,7 @@ enum AgentSnapshotPresenter {
         let primaryDiagnostic = primaryDiagnosticFinding(s)
         if let primaryDiagnostic,
            primaryDiagnostic.signatureID != .autoupdateInProgress,
-           !shouldHoldLiveThroughStaleServeUnresponsive(primaryDiagnostic, snapshot: s) {
+           !shouldHoldLiveThroughTransientServeUnresponsive(primaryDiagnostic, snapshot: s) {
             let context = diagnosticContext(primaryDiagnostic, snapshot: s)
             let meaning = ([publicS.detail ?? "Malibu found a provider issue that needs attention."] + context)
                 .joined(separator: " ")
@@ -1504,7 +1519,7 @@ enum AgentSnapshotPresenter {
             )
         }
 
-        if isNetworkOutage(s) {
+        if isNetworkOutage(s), !isNetworkReady(s) {
             let localOffline = isLocalLinkOffline(s)
             return ConsolidatedStatus(
                 phase: .needsAttention,
@@ -2360,7 +2375,13 @@ enum AgentSnapshotPresenter {
         switch s.networkState {
         case "buyer_serving":
             return "\(capacity) · available to customers"
-        case "buyer_serving_unknown", nil:
+        case "buyer_serving_unknown", "coordinator_unavailable", nil:
+            if isNetworkReady(s) {
+                return "\(capacity) · available to customers"
+            }
+            if s.networkState == "coordinator_unavailable" {
+                return "\(capacity) · not available to customers"
+            }
             return "\(capacity) · availability unconfirmed"
         default:
             return "\(capacity) · not available to customers"
@@ -2743,7 +2764,7 @@ enum AgentSnapshotPresenter {
                 safeNextAction: "Keep Malibu open. You do not need a new invite."
             )
         case .serveUnresponsive:
-            if shouldHoldLiveThroughStaleServeUnresponsive(finding, snapshot: s) {
+            if shouldHoldLiveThroughTransientServeUnresponsive(finding, snapshot: s) {
                 return nil
             }
             return PublicStatus(
@@ -2804,7 +2825,7 @@ enum AgentSnapshotPresenter {
     private static func topDiagnosticFinding(_ s: AgentSnapshot) -> ProviderDiagnosticFinding? {
         s.diagnosticFindings
             .filter { canUseAsPrimaryDiagnosticStatus($0, snapshot: s) }
-            .filter { !shouldHoldLiveThroughStaleServeUnresponsive($0, snapshot: s) }
+            .filter { !shouldHoldLiveThroughTransientServeUnresponsive($0, snapshot: s) }
             .sorted(by: diagnosticPrecedes)
             .first
     }
@@ -2883,20 +2904,38 @@ enum AgentSnapshotPresenter {
             : "Provider status is unavailable"
     }
 
-    /// #1338 ranked availability diagnostics ahead of ready copy. A stale local
-    /// status poll (`serve_unresponsive` from `/v1/status` with
-    /// `observation.id=` evidence and no `network_state=`) must not steal Live
-    /// while the display-retained observation is still `buyer_serving`.
-    /// Doctor/app-polling `serve_dead` findings and missing evidence stay primary.
-    private static func shouldHoldLiveThroughStaleServeUnresponsive(
+    /// #1338 ranked availability diagnostics ahead of ready copy. Hold Live
+    /// through (1) a stale local poll (`observation.id=` evidence) and (2) a
+    /// fresh indeterminate coordinator verdict (`buyer_serving_unknown` or
+    /// `coordinator_unavailable`) while a last-confirmed buyer-serving hold is
+    /// active. Authoritative `not_buyer_serving` / `network_offline`, doctor
+    /// `serve_dead`, and missing evidence stay primary.
+    private static func shouldHoldLiveThroughTransientServeUnresponsive(
         _ finding: ProviderDiagnosticFinding,
         snapshot s: AgentSnapshot,
         at now: Date = Date()
     ) -> Bool {
-        finding.signatureID == .serveUnresponsive
-            && finding.source == .status
-            && isStaleLocalPollServeUnresponsiveEvidence(finding)
-            && isNetworkReady(s, at: now)
+        guard finding.signatureID == .serveUnresponsive,
+              finding.source == .status,
+              isNetworkReady(s, at: now) else {
+            return false
+        }
+        if isStaleLocalPollServeUnresponsiveEvidence(finding) {
+            return true
+        }
+        return isIndeterminateNetworkStateServeUnresponsiveEvidence(finding)
+    }
+
+    private static func isIndeterminateNetworkStateServeUnresponsiveEvidence(
+        _ finding: ProviderDiagnosticFinding
+    ) -> Bool {
+        switch finding.evidence {
+        case "network_state=buyer_serving_unknown",
+             "network_state=coordinator_unavailable":
+            return true
+        default:
+            return false
+        }
     }
 
     private static func isStaleLocalPollServeUnresponsiveEvidence(

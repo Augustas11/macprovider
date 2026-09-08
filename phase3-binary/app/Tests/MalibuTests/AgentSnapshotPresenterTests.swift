@@ -149,8 +149,84 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         snapshot.coordinatorConnected = true
         snapshot.lastBuyerServingAt = Date()
         snapshot.statusObservationFresh = true
+        snapshot.diagnosticFindings = [
+            ProviderDiagnosticFinding(
+                signatureID: .serveUnresponsive,
+                source: .status,
+                userMessage: "Provider is not confirmed available for customer work.",
+                evidence: "network_state=buyer_serving_unknown",
+                observedAt: Date()
+            )
+        ]
 
+        XCTAssertTrue(AgentSnapshotPresenter.isNetworkReady(snapshot))
         XCTAssertEqual(AgentSnapshotPresenter.publicStatus(snapshot).title, "Provider is ready")
+        XCTAssertEqual(AgentSnapshotPresenter.consolidatedStatus(snapshot).phase, .live)
+        XCTAssertNotEqual(
+            AgentSnapshotPresenter.consolidatedStatus(snapshot).label,
+            "Customer availability is interrupted"
+        )
+        XCTAssertEqual(AgentSnapshotPresenter.short(snapshot), "Serving")
+        XCTAssertEqual(AgentSnapshotPresenter.dashboardHeadline(snapshot), "Provider is ready")
+    }
+
+    func testPublicStatusHoldsReadyAcrossCoordinatorUnavailableWithLastServing() {
+        var snapshot = AgentSnapshot.empty
+        snapshot.state = .serving
+        snapshot.currentModelID = "qwen3-8b"
+        snapshot.networkState = "coordinator_unavailable"
+        snapshot.coordinatorConnected = false
+        snapshot.lastBuyerServingAt = Date()
+        snapshot.diagnosticFindings = [
+            ProviderDiagnosticFinding(
+                signatureID: .serveUnresponsive,
+                source: .status,
+                userMessage: "Provider is not confirmed available for customer work.",
+                evidence: "network_state=coordinator_unavailable",
+                observedAt: Date()
+            )
+        ]
+
+        XCTAssertTrue(AgentSnapshotPresenter.isNetworkReady(snapshot))
+        XCTAssertEqual(AgentSnapshotPresenter.publicStatus(snapshot).title, "Provider is ready")
+        XCTAssertEqual(AgentSnapshotPresenter.consolidatedStatus(snapshot).phase, .live)
+        XCTAssertNotEqual(
+            AgentSnapshotPresenter.consolidatedStatus(snapshot).label,
+            "Customer availability is interrupted"
+        )
+        XCTAssertNotEqual(
+            AgentSnapshotPresenter.consolidatedStatus(snapshot).label,
+            "Network unavailable"
+        )
+        XCTAssertEqual(AgentSnapshotPresenter.short(snapshot), "Serving")
+        XCTAssertTrue(
+            AgentSnapshotPresenter.advertisedCapacityLine(snapshot).contains("available to customers")
+        )
+    }
+
+    func testNotBuyerServingDiagnosticDoesNotHoldLive() {
+        var snapshot = AgentSnapshot.empty
+        snapshot.state = .serving
+        snapshot.currentModelID = "qwen3-8b"
+        snapshot.networkState = "not_buyer_serving"
+        snapshot.lastBuyerServingAt = Date()
+        snapshot.updateBuyerServingHold()
+        snapshot.diagnosticFindings = [
+            ProviderDiagnosticFinding(
+                signatureID: .serveUnresponsive,
+                source: .status,
+                userMessage: "Provider is not confirmed available for customer work.",
+                evidence: "network_state=not_buyer_serving",
+                observedAt: Date()
+            )
+        ]
+
+        XCTAssertNil(snapshot.lastBuyerServingAt)
+        XCTAssertFalse(AgentSnapshotPresenter.isNetworkReady(snapshot))
+        XCTAssertEqual(
+            AgentSnapshotPresenter.publicStatus(snapshot).title,
+            "Customer availability is interrupted"
+        )
     }
 
     func testPublicStatusStillWaitsForApprovalOnFirstJoin() {
@@ -165,6 +241,28 @@ final class AgentSnapshotPresenterTests: XCTestCase {
             AgentSnapshotPresenter.publicStatus(snapshot).title,
             "Waiting for network approval"
         )
+    }
+
+    func testFirstJoinUnknownDiagnosticDoesNotFakeLive() {
+        var snapshot = AgentSnapshot.empty
+        snapshot.state = .serving
+        snapshot.currentModelID = "qwen3-8b"
+        snapshot.networkState = "buyer_serving_unknown"
+        snapshot.coordinatorConnected = true
+        snapshot.lastBuyerServingAt = nil
+        snapshot.diagnosticFindings = [
+            ProviderDiagnosticFinding(
+                signatureID: .serveUnresponsive,
+                source: .status,
+                userMessage: "Provider is not confirmed available for customer work.",
+                evidence: "network_state=buyer_serving_unknown",
+                observedAt: Date()
+            )
+        ]
+
+        XCTAssertFalse(AgentSnapshotPresenter.isNetworkReady(snapshot))
+        XCTAssertNotEqual(AgentSnapshotPresenter.publicStatus(snapshot).title, "Provider is ready")
+        XCTAssertNotEqual(AgentSnapshotPresenter.consolidatedStatus(snapshot).phase, .live)
     }
 
     func testPersistedBuyerServingHoldKeepsReadyAfterRelaunchBlip() {
@@ -256,6 +354,24 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         )
     }
 
+    func testBuyerServingHoldClearsOnLifecycleNetworkOffline() {
+        var snapshot = buyerServingObservationSnapshot(
+            observedAt: Date().addingTimeInterval(
+                -(LocalStatusObservationPolicy.displayRetentionSeconds + 1)
+            )
+        )
+        snapshot.lastBuyerServingAt = Date().addingTimeInterval(-30)
+        XCTAssertTrue(snapshot.isHoldingBuyerServingReady())
+        XCTAssertTrue(AgentSnapshotPresenter.isNetworkReady(snapshot))
+
+        snapshot.lifecycleState = "network_offline"
+        snapshot.updateBuyerServingHold()
+
+        XCTAssertNil(snapshot.lastBuyerServingAt)
+        XCTAssertFalse(snapshot.isHoldingBuyerServingReady())
+        XCTAssertFalse(AgentSnapshotPresenter.isNetworkReady(snapshot))
+    }
+
     func testBuyerServingHoldClearsOnStatusInvalidation() {
         var snapshot = buyerServingObservationSnapshot(observedAt: Date())
         snapshot.updateBuyerServingHold()
@@ -269,7 +385,197 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         XCTAssertNotEqual(AgentSnapshotPresenter.publicStatus(snapshot).title, "Provider is ready")
     }
 
-    func testBuyerServingHoldRequiresCurrentObservation() {
+    func testHardFailInvalidationDoesNotReholdFromIncumbentEarnings() {
+        var snapshot = buyerServingObservationSnapshot(observedAt: Date())
+        snapshot.updateBuyerServingHold()
+        snapshot.requestsServedAllTime = 12
+        snapshot.earningsUsdcLifetime = 18.4
+        XCTAssertNotNil(snapshot.lastBuyerServingAt)
+
+        snapshot.invalidateLocalStatusObservation(clearBuyerServingHold: true)
+
+        XCTAssertNil(snapshot.lastBuyerServingAt)
+        XCTAssertTrue(snapshot.hasIncumbentBuyerServingEvidence)
+        XCTAssertFalse(snapshot.isHoldingBuyerServingReady())
+        XCTAssertFalse(AgentSnapshotPresenter.isNetworkReady(snapshot))
+        XCTAssertNotEqual(AgentSnapshotPresenter.publicStatus(snapshot).title, "Provider is ready")
+    }
+
+    @MainActor
+    func testHardFailIdentityMismatchDemotesServingSnapshotState() {
+        var snapshot = buyerServingObservationSnapshot(observedAt: Date())
+        snapshot.currentModelID = "qwen3-8b"
+        snapshot.updateBuyerServingHold()
+        snapshot.invalidateLocalStatusObservation(clearBuyerServingHold: true)
+        let agent = MalibuAgent(initialSnapshot: snapshot)
+        XCTAssertEqual(agent.snapshot.state, .serving)
+
+        agent.reconcileNetworkStateForTest(
+            localReady: false,
+            hardFailClosed: true,
+            identityMismatch: true
+        )
+
+        XCTAssertEqual(agent.snapshot.state, .error)
+        XCTAssertNotEqual(AgentSnapshotPresenter.short(agent.snapshot), "Serving")
+        XCTAssertEqual(
+            agent.snapshot.lastError,
+            "Installed provider identity does not match this Mac."
+        )
+    }
+
+    @MainActor
+    func testHardFailMissingLaunchdPidDemotesServingSnapshotState() {
+        var snapshot = buyerServingObservationSnapshot(observedAt: Date())
+        snapshot.currentModelID = "qwen3-8b"
+        snapshot.updateBuyerServingHold()
+        snapshot.invalidateLocalStatusObservation(clearBuyerServingHold: true)
+        let agent = MalibuAgent(initialSnapshot: snapshot)
+        XCTAssertEqual(agent.snapshot.state, .serving)
+
+        agent.reconcileNetworkStateForTest(
+            localReady: false,
+            hardFailClosed: true,
+            identityMismatch: false
+        )
+
+        XCTAssertNotEqual(agent.snapshot.state, .serving)
+        XCTAssertNotEqual(AgentSnapshotPresenter.short(agent.snapshot), "Serving")
+    }
+
+    @MainActor
+    func testIndeterminateLocalMissDoesNotDemoteHeldServingState() {
+        var snapshot = buyerServingObservationSnapshot(observedAt: Date())
+        snapshot.currentModelID = "qwen3-8b"
+        snapshot.updateBuyerServingHold()
+        let agent = MalibuAgent(initialSnapshot: snapshot)
+        XCTAssertEqual(agent.snapshot.state, .serving)
+
+        agent.reconcileNetworkStateForTest(
+            localReady: false,
+            hardFailClosed: false,
+            identityMismatch: false
+        )
+
+        XCTAssertEqual(agent.snapshot.state, .serving)
+        XCTAssertEqual(AgentSnapshotPresenter.short(agent.snapshot), "Serving")
+    }
+
+    @MainActor
+    func testHardFailDoesNotRepersistDashboardBuyerServingHold() {
+        let fileURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("dashboard-observation-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+        let providerID = "mp-hardfail-hold-\(UUID().uuidString.prefix(8))"
+        let servedAt = Date().addingTimeInterval(-90)
+        DashboardObservationStore.save(
+            DashboardObservationStore.Record(
+                providerID: providerID,
+                lastBuyerServingAt: servedAt,
+                hasObservedProviderEarnings: true,
+                earningsUsdcToday: 0.04,
+                earningsUsdcWeek: 0.12,
+                earningsUsdcPending: 0.01,
+                earningsUsdcLifetime: 18.4,
+                malibuAccruedToday: 2,
+                malibuAccruedAllTime: 8,
+                malibuWithdrawable: 8,
+                malibuHeld: 0,
+                walletBound: true,
+                recordedAt: Date()
+            ),
+            fileURL: fileURL
+        )
+
+        var snapshot = buyerServingObservationSnapshot(observedAt: Date())
+        snapshot.localProviderID = providerID
+        snapshot.currentModelID = "qwen3-8b"
+        snapshot.updateBuyerServingHold()
+        snapshot.invalidateLocalStatusObservation(clearBuyerServingHold: true)
+        let agent = MalibuAgent(initialSnapshot: snapshot)
+        agent.setDashboardObservationFileURLForTest(fileURL)
+
+        agent.reconcileNetworkStateForTest(
+            localReady: false,
+            hardFailClosed: true,
+            identityMismatch: true
+        )
+
+        XCTAssertEqual(agent.snapshot.state, .error)
+        XCTAssertNil(agent.snapshot.lastBuyerServingAt)
+        XCTAssertNil(DashboardObservationStore.load(providerID: providerID, fileURL: fileURL)?.lastBuyerServingAt)
+    }
+
+    @MainActor
+    func testPidGoneHardFailDoesNotRepersistDashboardBuyerServingHold() {
+        let fileURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("dashboard-observation-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+        let providerID = "mp-pidgone-hold-\(UUID().uuidString.prefix(8))"
+        DashboardObservationStore.save(
+            DashboardObservationStore.Record(
+                providerID: providerID,
+                lastBuyerServingAt: Date().addingTimeInterval(-90),
+                hasObservedProviderEarnings: true,
+                earningsUsdcToday: 0.04,
+                earningsUsdcWeek: 0.12,
+                earningsUsdcPending: 0.01,
+                earningsUsdcLifetime: 18.4,
+                malibuAccruedToday: 2,
+                malibuAccruedAllTime: 8,
+                malibuWithdrawable: 8,
+                malibuHeld: 0,
+                walletBound: true,
+                recordedAt: Date()
+            ),
+            fileURL: fileURL
+        )
+
+        var snapshot = buyerServingObservationSnapshot(observedAt: Date())
+        snapshot.localProviderID = providerID
+        snapshot.currentModelID = "qwen3-8b"
+        snapshot.updateBuyerServingHold()
+        snapshot.networkState = "buyer_serving_unknown"
+        snapshot.invalidateLocalStatusObservation(clearBuyerServingHold: true)
+        let agent = MalibuAgent(initialSnapshot: snapshot)
+        agent.setDashboardObservationFileURLForTest(fileURL)
+
+        agent.reconcileNetworkStateForTest(
+            localReady: false,
+            hardFailClosed: true,
+            identityMismatch: false
+        )
+
+        XCTAssertNotEqual(agent.snapshot.state, .serving)
+        XCTAssertNil(agent.snapshot.lastBuyerServingAt)
+        XCTAssertNil(DashboardObservationStore.load(providerID: providerID, fileURL: fileURL)?.lastBuyerServingAt)
+    }
+
+    func testBuyerServingHoldSurvivesPollMissInvalidationWhileLaunchdAlive() {
+        var snapshot = buyerServingObservationSnapshot(observedAt: Date())
+        snapshot.updateBuyerServingHold()
+        XCTAssertNotNil(snapshot.lastBuyerServingAt)
+        XCTAssertTrue(AgentSnapshotPresenter.isNetworkReady(snapshot))
+
+        snapshot.invalidateLocalStatusObservation(clearBuyerServingHold: false)
+        snapshot.diagnosticFindings = [
+            ProviderDiagnosticFinding(
+                signatureID: .serveUnresponsive,
+                source: .status,
+                userMessage: "Provider is not confirmed available for customer work.",
+                evidence: "network_state=buyer_serving_unknown",
+                observedAt: Date()
+            )
+        ]
+
+        XCTAssertNotNil(snapshot.lastBuyerServingAt)
+        XCTAssertTrue(AgentSnapshotPresenter.isNetworkReady(snapshot))
+        XCTAssertEqual(AgentSnapshotPresenter.publicStatus(snapshot).title, "Provider is ready")
+        XCTAssertEqual(AgentSnapshotPresenter.consolidatedStatus(snapshot).phase, .live)
+        XCTAssertEqual(AgentSnapshotPresenter.short(snapshot), "Serving")
+    }
+
+    func testBuyerServingHoldSurvivesExpiredObservation() {
         var snapshot = buyerServingObservationSnapshot(
             observedAt: Date().addingTimeInterval(
                 -(LocalStatusObservationPolicy.displayRetentionSeconds + 1)
@@ -279,8 +585,10 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         snapshot.networkState = "live_verified"
 
         XCTAssertFalse(snapshot.isLocalStatusObservationCurrent())
-        XCTAssertFalse(snapshot.isHoldingBuyerServingReady())
-        XCTAssertFalse(AgentSnapshotPresenter.isNetworkReady(snapshot))
+        XCTAssertTrue(snapshot.isHoldingBuyerServingReady())
+        XCTAssertTrue(AgentSnapshotPresenter.isNetworkReady(snapshot))
+        XCTAssertEqual(AgentSnapshotPresenter.publicStatus(snapshot).title, "Provider is ready")
+        XCTAssertEqual(AgentSnapshotPresenter.short(snapshot), "Serving")
     }
 
     func testPublicStatusDistinguishesHardwareVerificationFromGenericReconnect() {
@@ -1075,7 +1383,7 @@ final class AgentSnapshotPresenterTests: XCTestCase {
             ),
         ]
 
-        XCTAssertTrue(AgentSnapshotPresenter.isNetworkReady(snapshot))
+        XCTAssertFalse(AgentSnapshotPresenter.isNetworkReady(snapshot))
         XCTAssertFalse(snapshot.hasFreshContractValidatedStatusObservation())
         XCTAssertEqual(
             AgentSnapshotPresenter.publicStatus(snapshot).title,
@@ -1086,10 +1394,11 @@ final class AgentSnapshotPresenterTests: XCTestCase {
             AgentSnapshotPresenter.consolidatedStatus(snapshot).label,
             "Provider status is unavailable"
         )
+        XCTAssertNotEqual(AgentSnapshotPresenter.short(snapshot), "Serving")
     }
 
     @MainActor
-    func testObservationExpiryDiagnosticEmitsOnPresentedServingToConnectedTransition() {
+    func testObservationExpiryWithoutHoldDemotesServingToConnected() {
         PublicStatusTransitionDiagnostics.resetForTests()
         let fresh = buyerServingObservationSnapshot(observedAt: Date())
         XCTAssertFalse(PublicStatusTransitionDiagnostics.notePresentedSnapshot(fresh))
@@ -1102,8 +1411,18 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         )
         XCTAssertEqual(AgentSnapshotPresenter.short(expired), "Connected")
         XCTAssertTrue(PublicStatusTransitionDiagnostics.notePresentedSnapshot(expired))
-        // Rate-limited: immediate repeat must not emit again.
         XCTAssertFalse(PublicStatusTransitionDiagnostics.notePresentedSnapshot(expired))
+    }
+
+    func testObservationExpiryWithLastServingHoldKeepsServing() {
+        var expired = buyerServingObservationSnapshot(
+            observedAt: Date().addingTimeInterval(
+                -(LocalStatusObservationPolicy.displayRetentionSeconds + 1)
+            )
+        )
+        expired.lastBuyerServingAt = Date().addingTimeInterval(-30)
+        XCTAssertEqual(AgentSnapshotPresenter.short(expired), "Serving")
+        XCTAssertEqual(AgentSnapshotPresenter.publicStatus(expired).title, "Provider is ready")
     }
 
     func testHardFailuresDemoteEvenWhenObservationWouldStillBeWithinRetention() {
