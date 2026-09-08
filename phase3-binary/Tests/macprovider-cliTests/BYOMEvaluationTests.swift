@@ -90,6 +90,43 @@ final class BYOMEvaluationTests: XCTestCase {
         XCTAssertEqual(before, after)
     }
 
+    func testEvaluateRetainsRedactionWarningsWithoutBlockingSafeCandidate() async throws {
+        let root = try temporaryBYOMEvaluationDirectory("byom-eval-redaction")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let runtime = try BYOMEvaluationLoopbackRuntime(
+            tagsBody: #"{"models":[{"name":"Tiny-Ollama-1B-Q4","details":{"family":"api_key=hidden","quantization_level":"/Users/private/hidden"}},{"name":"/Users/private/omitted"}]}"#,
+            chatStatusCode: 200,
+            chatBody: #"{"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"completion_tokens":2}}"#
+        )
+        let command = try ModelsEvaluateCommand.parse([
+            "ollama:Tiny-Ollama-1B-Q4", "--json",
+            "--local-discovery-namespace-path", root.appendingPathComponent("ns").path,
+            "--mlx-cache-dir", root.appendingPathComponent("hf").path,
+            "--ollama-origin", runtime.origin,
+        ])
+        let capture = await captureBYOMEvaluationOutput { try await command.run() }
+        XCTAssertNil(capture.error)
+        let object = try jsonObject(capture.stdout)
+        XCTAssertEqual(object["health_result"] as? String, "passed")
+        XCTAssertEqual(object["offer_preconditions_appear_satisfied"] as? Bool, true)
+        let warnings = try XCTUnwrap(object["warnings"] as? [String])
+        XCTAssertTrue(warnings.contains("capability_family_redacted"))
+        XCTAssertTrue(warnings.contains("capability_quantization_redacted"))
+        XCTAssertFalse(warnings.contains("model_reference_redacted"))
+        XCTAssertFalse(warnings.contains("adapter_malformed_response"))
+        XCTAssertFalse(warnings.contains("evaluation_required"))
+        XCTAssertEqual(Set(warnings).count, warnings.count)
+        let stderrCodes = capture.stderr.split(whereSeparator: \.isNewline).map { String($0).replacingOccurrences(of: "models evaluate warning: ", with: "") }
+        XCTAssertEqual(stderrCodes, warnings.sorted())
+        let guidance = try XCTUnwrap(object["provider_guidance"] as? [String: Any])
+        XCTAssertEqual(guidance["earning_path_class"] as? String, "local_inventory_only")
+        XCTAssertEqual(guidance["next_action"] as? String, "offer_dry_run")
+        for raw in ["api_key", "hidden", "/Users/private", "omitted", runtime.origin] {
+            XCTAssertFalse((capture.stdout + capture.stderr).contains(raw))
+        }
+        XCTAssertEqual(runtime.requestPaths, ["/api/tags", "/v1/chat/completions"])
+    }
+
     func testEvaluateRuntimeTimeoutFailsClosed() async throws {
         let root = try temporaryBYOMEvaluationDirectory("byom-eval-timeout")
         let client = BYOMEvaluationStubHTTPClient(

@@ -12,6 +12,10 @@ enum BYOMDiscoveryWarning: String, Codable, Sendable {
     case adapterResponseTruncated = "adapter_response_truncated"
     case catalogMatchUnverified = "catalog_match_unverified"
     case capabilityUnevaluated = "capability_unevaluated"
+    case capabilityFamilyRedacted = "capability_family_redacted"
+    case capabilityQuantizationRedacted = "capability_quantization_redacted"
+    case capabilityRuntimeVersionRedacted = "capability_runtime_version_redacted"
+    case modelReferenceRedacted = "model_reference_redacted"
     case evaluationRequired = "evaluation_required"
     case evaluationFailed = "evaluation_failed"
     case requiresPreparation = "requires_preparation"
@@ -2984,9 +2988,14 @@ struct BYOMMLXCacheDiscovery {
         }
 
         var candidates: [BYOMDiscoveryWire.Candidate] = []
+        var warnings = Set<String>()
         for entry in entries.prefix(200) {
             guard (try? entry.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true,
                   let modelID = modelID(fromHFCacheDirectoryName: entry.lastPathComponent) else {
+                continue
+            }
+            guard BYOMDiscoveryPrivacy.isSafeModelReference(modelID) else {
+                warnings.insert(BYOMDiscoveryWarning.modelReferenceRedacted.rawValue)
                 continue
             }
             let snapshotSummary = summarizeSnapshots(repoDirectory: entry)
@@ -3005,7 +3014,7 @@ struct BYOMMLXCacheDiscovery {
                 runtimeSource: "mlx_cache",
                 status: "ok",
                 originClass: nil,
-                warningCodes: []
+                warningCodes: Array(warnings).sorted()
             ),
             candidates
         )
@@ -3015,9 +3024,7 @@ struct BYOMMLXCacheDiscovery {
         guard name.hasPrefix("models--") else { return nil }
         let modelID = String(name.dropFirst("models--".count))
             .replacingOccurrences(of: "--", with: "/")
-        guard !modelID.isEmpty,
-              BYOMDiscoveryPrivacy.isSafeModelReference(modelID),
-              modelID.lowercased().contains("mlx") else {
+        guard modelID.lowercased().contains("mlx") else {
             return nil
         }
         return modelID
@@ -3205,15 +3212,15 @@ struct BYOMOllamaDiscovery: Sendable {
             guard response.body.count <= BYOMDiscoveryHTTPBounds.maxBodyBytes else {
                 return adapterFailure(.adapterResponseTruncated, status: "truncated")
             }
-            let models = try BYOMDiscoveryJSON.parseOllamaTags(response.body)
+            let inventory = try BYOMDiscoveryJSON.parseOllamaTags(response.body)
             return (
                 BYOMDiscoveryWire.Adapter(
                     runtimeSource: "ollama_loopback",
                     status: "ok",
                     originClass: "loopback_http",
-                    warningCodes: []
+                    warningCodes: inventory.warningCodes.map(\.rawValue).sorted()
                 ),
-                models.map(buildCandidate)
+                inventory.models.map(buildCandidate)
             )
         } catch is CancellationError {
             return adapterFailure(.adapterTimeout, status: "timeout")
@@ -3256,7 +3263,7 @@ struct BYOMOllamaDiscovery: Sendable {
             servedModelRef: servedModelRef
         )
         let catalogKey = catalogMatcher.catalogKey(for: model.name)
-        var warnings = Set((namespaceWarnings + idWarnings + [.capabilityUnevaluated, .evaluationRequired]).map(\.rawValue))
+        var warnings = Set((namespaceWarnings + idWarnings + model.warningCodes + [.capabilityUnevaluated, .evaluationRequired]).map(\.rawValue))
         if catalogKey != nil {
             warnings.insert(BYOMDiscoveryWarning.catalogMatchUnverified.rawValue)
         }
@@ -3285,8 +3292,8 @@ struct BYOMOllamaDiscovery: Sendable {
                 jsonMode: nil,
                 usageReporting: nil,
                 maxContextTokens: nil,
-                quantization: BYOMDiscoveryPrivacy.safeOptionalLabel(model.quantization),
-                family: BYOMDiscoveryPrivacy.safeOptionalLabel(model.family),
+                quantization: model.quantization,
+                family: model.family,
                 runtimeVersion: nil
             ),
             readinessState: "ready",
@@ -3372,32 +3379,52 @@ enum BYOMDiscoveryJSON {
         let name: String
         let family: String?
         let quantization: String?
+        let warningCodes: [BYOMDiscoveryWarning]
     }
 
-    static func parseOllamaTags(_ data: Data) throws -> [OllamaModel] {
+    struct OllamaInventory {
+        let models: [OllamaModel]
+        let warningCodes: [BYOMDiscoveryWarning]
+    }
+
+    static func parseOllamaTags(_ data: Data) throws -> OllamaInventory {
         guard let text = String(data: data, encoding: .utf8),
               case .object(let root) = try? StrictJSONParser.parse(text),
               case .array(let rawModels)? = root["models"] else {
             throw BYOMDiscoveryAdapterError.malformed
         }
-        return rawModels.prefix(100).compactMap { value in
+        var models: [OllamaModel] = []
+        var withheldReference = false
+        for value in rawModels.prefix(100) {
             guard case .object(let object) = value,
-                  case .string(let name)? = object["name"],
-                  BYOMDiscoveryPrivacy.isSafeRuntimeModelReference(name) else {
-                return nil
+                  case .string(let name)? = object["name"] else {
+                throw BYOMDiscoveryAdapterError.malformed
             }
             let details: [String: JSONValue]
-            if case .object(let detailObject)? = object["details"] {
+            switch object["details"] {
+            case .object(let detailObject)?:
                 details = detailObject
-            } else {
+            case nil, .null?:
                 details = [:]
+            default:
+                throw BYOMDiscoveryAdapterError.malformed
             }
-            return OllamaModel(
+            var warnings: [BYOMDiscoveryWarning] = []
+            // Retain only sanitized labels and fixed provenance, never the rejected text.
+            let family = try optionalLabel("family", in: details, redactionWarning: .capabilityFamilyRedacted, warnings: &warnings)
+            let quantization = try optionalLabel("quantization_level", in: details, redactionWarning: .capabilityQuantizationRedacted, warnings: &warnings)
+            guard BYOMDiscoveryPrivacy.isSafeRuntimeModelReference(name) else {
+                withheldReference = true
+                continue
+            }
+            models.append(OllamaModel(
                 name: name,
-                family: stringField("family", in: details),
-                quantization: stringField("quantization_level", in: details)
-            )
+                family: family,
+                quantization: quantization,
+                warningCodes: warnings
+            ))
         }
+        return OllamaInventory(models: models, warningCodes: withheldReference ? [.modelReferenceRedacted] : [])
     }
 
     static func contextWindowTokens(from data: Data) -> Int? {
@@ -3413,9 +3440,22 @@ enum BYOMDiscoveryJSON {
         return nil
     }
 
-    private static func stringField(_ key: String, in object: [String: JSONValue]) -> String? {
-        guard case .string(let value)? = object[key] else { return nil }
-        return value
+    private static func optionalLabel(
+        _ key: String,
+        in object: [String: JSONValue],
+        redactionWarning: BYOMDiscoveryWarning,
+        warnings: inout [BYOMDiscoveryWarning]
+    ) throws -> String? {
+        switch object[key] {
+        case nil, .null?:
+            return nil
+        case .string(let value)?:
+            let safeValue = BYOMDiscoveryPrivacy.safeOptionalLabel(value)
+            if safeValue == nil { warnings.append(redactionWarning) }
+            return safeValue
+        default:
+            throw BYOMDiscoveryAdapterError.malformed
+        }
     }
 
     private static func intField(_ key: String, in object: [String: JSONValue]) -> Int? {
