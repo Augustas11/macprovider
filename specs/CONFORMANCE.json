@@ -2216,7 +2216,7 @@
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/1240",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1453",
         "rationale": "SPEC-023 v0.10.0 specifies the signed catalog artifact feed, its closed artifact-identity matrix, its release.json binding and release-ledger feed-set evolution, the Stage-A/Stage-B activation that keeps the compatibility-set manifest's file map unchanged until a bridge CLI ships, primary-artifact consistency scoped to `listed`/`recommendable` rows, primary-artifact-only settlement identity, global `(hash_algorithm, hash)` uniqueness within a feed, GGUF source-digest equality, the closed `artifact_id` grammar with its ledger-backed cross-release rebinding check, artifact-feed signer-identity equality against the release binding and the candidate-feed signer, artifact evidence bound into the immutable SPEC-022 route-time record with settlement failing closed on missing, changed, cross-release, or wrong-signer evidence (a SPEC-047-owned optional record that leaves SPEC-022's minimum snapshot fields unchanged), release-ledger schema version 3 with its closed artifact-bound row and canonically ordered `artifact_bindings` array, and its fail-closed-without-fleet-fail-close failure classes, but no generator, coordinator, or CLI implementation exists yet. Owner is the BYOM v0.2 epic; issue #1240 is the placeholder until the v0.2 epic issue exists."
       }
     },
@@ -2233,7 +2233,7 @@
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/1240",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1453",
         "rationale": "SPEC-023 v0.10.0 specifies the closed rate-class enum, the rate-card source classes block, generator expansion into the published rate-card rows and coordinator inline fallback rows under an exact JSON-to-YAML field mapping with release-global share and multiplier, explicit-row precedence, the no-silent-repricing invariant, and the generated-feed / billing-config parity release gate, but the generator does not implement class expansion yet. Owner is the BYOM v0.2 epic; issue #1240 is the placeholder until the v0.2 epic issue exists."
       }
     },
@@ -2250,7 +2250,7 @@
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/1240",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1453",
         "rationale": "SPEC-023 v0.10.0 specifies the listed-tier intake preconditions, the three aggregated intake signals including a SPEC-017-owned unknown-model-key request count that is not yet implemented and whose bounded aggregation model (Space-Saving summary, conservative lower-bound floor semantics, saturating overflow counters, and bounded opaque window-scoped principal tokens) is specified here, the closed four-field `other_suppressed` bucket with per-counter saturation flags and transient-only raw principal identifiers, the SPEC-023-owned `INTAKE_K_ANONYMITY_MIN` floor applying to both the provider-offer and unknown-key signals, the intake rule with operator-tunable defaults, the monthly cadence, the manual promotion gate, and the release-bound closed `intake-decision.json` manifest that makes an intake decision reconstructible from the release record, but no intake tooling or stats field exists yet. Owner is the BYOM v0.2 epic; issue #1240 is the placeholder until the v0.2 epic issue exists."
       }
     },
