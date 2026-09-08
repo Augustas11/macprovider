@@ -377,8 +377,8 @@ class BYOMJourneyCaptureTests(unittest.TestCase):
         def mutator(manifest, _root):
             manifest["steps"][0]["assertion"] = (
                 "schema macprovider.provider-byom-discovery-evidence.v1 with document "
-                "provider_byom_discovery.v1, harness run-cli-onboarding-e2e.py, "
-                "SnapshotManifestV1 at 1.8.117 for SPEC-046-R001 in step-01-discover-mlx-cache"
+                "provider_byom_discovery.v1, SnapshotManifestV1 at 1.8.117 "
+                "for SPEC-046-R001 in step-01-discover-mlx-cache"
             )
 
         manifest, manifest_path = self.mutate("discovery", mutator)
@@ -953,16 +953,47 @@ class BYOMRedactionScannerTests(unittest.TestCase):
             "macprovider-acceptance-p256-v1",
             "2026-09-08T00:00:00Z",
             "a" * 64,
-            "test/e2e/byom/run-cli-onboarding-e2e.py",
-            "run-manifest.json",
-            "docs/runbooks/byom-journey-evidence.md",
             "10/10 steps pass. No money-path rows were written.",
         ):
             with self.subTest(value=value):
                 self.assert_accepted(value)
 
-    def test_a_file_name_shape_with_an_unlisted_extension_still_fails_closed(self) -> None:
-        self.assert_rejected("harness at run-cli-onboarding-e2e.zz")
+    def test_file_name_shapes_are_hostnames_everywhere_except_the_harness_name_field(self) -> None:
+        # `.sh`, `.md`, `.py` are file extensions AND look like TLDs. The global
+        # scanner has no allowlist, so those tokens fail closed in assertions and
+        # captured values; only the structurally validated `$.harness.name` field
+        # may carry a repository source file name.
+        for value in (
+            "test/e2e/byom/run-cli-onboarding-e2e.py",
+            "run-manifest.json",
+            "docs/runbooks/byom-journey-evidence.md",
+            "provider-mac.sh",
+            "read back from coordinator.md",
+        ):
+            with self.subTest(value=value):
+                self.assert_rejected(value)
+        for value in (
+            "test/e2e/byom/run-cli-onboarding-e2e.py",
+            "docs/runbooks/byom-journey-evidence.md",
+        ):
+            with self.subTest(harness=value):
+                evidence_module.assert_redacted({"harness": {"name": value, "status": "pass"}})
+
+    def test_harness_name_field_still_requires_a_repository_source_file_name(self) -> None:
+        for value in (
+            "run-cli-onboarding-e2e.zz",
+            "provider-mac.sh/../secrets.sh",
+            "/Users/operator/harness.py",
+            "coordinator.malibu.tech",
+            "http://runtime.invalid/harness.py",
+        ):
+            with self.subTest(harness=value):
+                with self.assertRaises(BYOMEvidenceError):
+                    evidence_module.assert_redacted({"harness": {"name": value, "status": "pass"}})
+
+    def test_a_file_name_shape_in_a_captured_document_value_fails_closed(self) -> None:
+        with self.assertRaises(BYOMEvidenceError):
+            evidence_module.assert_redacted({"note": "see provider-mac.sh"})
 
 
 class BYOMJourneyGovernanceSourceTests(unittest.TestCase):

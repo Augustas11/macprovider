@@ -78,8 +78,9 @@ REPO_RELATIVE_FILE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][
 # The hostname rule is shape-based, not a suffix allowlist: anything that looks
 # like DNS -- one or more `label.` groups followed by an alphabetic final label --
 # is rejected, whatever the TLD. A handful of legitimate evidence values are
-# DNS-shaped by coincidence, and they are handled by the explicit
-# `HOSTNAME_ALLOWLISTED_VALUE_SHAPES` below rather than by weakening the rule.
+# DNS-shaped by coincidence (repository source file names); they are permitted
+# only in the structurally validated `REPO_SOURCE_FILE_FIELDS` below, never by a
+# global allowlist, so `provider-mac.sh` in free text still fails closed.
 DNS_HOSTNAME_RE = re.compile(
     r"(?i)(?<![A-Za-z0-9_.-])"
     r"(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+"
@@ -101,19 +102,21 @@ IPV6_LITERAL_RE = re.compile(
     r")"
     r"(?![0-9A-Za-z:])"
 )
-# The only DNS-shaped strings this evidence is allowed to carry. A repository
-# source file name (`run-cli-onboarding-e2e.py`, `run-manifest.json`) is
-# `<name>.<ext>`, which is indistinguishable from a two-label hostname by shape,
-# and the evidence records `harness.name` verbatim. Every other value the contract
-# emits -- evidence and document schema ids (`...-evidence.v1`, `..._status.v1`),
-# step ids, requirement ids, run ids, CLI/semantic versions -- ends in a label
-# that is not purely alphabetic, so it never reaches this allowlist at all.
-HOSTNAME_ALLOWLISTED_VALUE_SHAPES: tuple[re.Pattern[str], ...] = (
-    re.compile(
-        r"(?i)^[A-Za-z0-9][A-Za-z0-9._-]*"
-        r"\.(?:go|json|jsonl|md|mjs|py|sh|swift|toml|ts|txt|yaml|yml)$"
-    ),
+# Repository source file names (`test/e2e/byom/run-cli-onboarding-e2e.py`,
+# `run-manifest.json`) are `<name>.<ext>` and therefore DNS-shaped by
+# coincidence. They are accepted ONLY at the JSON paths in
+# `REPO_SOURCE_FILE_FIELDS`, which capture validates structurally; the global
+# hostname rule has no allowlist, so a `.sh`/`.md`/`.py`-suffixed token in an
+# assertion or a captured value is still a hostname and fails closed. Every
+# other value the contract emits -- evidence and document schema ids
+# (`...-evidence.v1`, `..._status.v1`), step ids, requirement ids, run ids,
+# CLI/semantic versions -- ends in a label that is not purely alphabetic, so it
+# is not DNS-shaped at all.
+REPO_SOURCE_FILE_NAME_RE = re.compile(
+    r"(?i)^[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)*"
+    r"\.(?:go|json|jsonl|md|mjs|py|sh|swift|toml|ts|txt|yaml|yml)$"
 )
+REPO_SOURCE_FILE_FIELDS = frozenset({"$.harness.name"})
 FORBIDDEN_VALUE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("a url", re.compile(r"(?i)[a-z][a-z0-9+.-]*://")),
     ("an absolute path", re.compile(r"(?:^|[\s\"'=,;(\[])(?:/[A-Za-z0-9._~-]+){2,}")),
@@ -331,15 +334,24 @@ def reject_secret_like_text(text: str, location: str) -> None:
             fail(f"{location} contains a credential-like value")
 
 
-def _is_allowlisted_hostname_shape(candidate: str) -> bool:
-    return any(pattern.fullmatch(candidate) for pattern in HOSTNAME_ALLOWLISTED_VALUE_SHAPES)
-
-
 def reject_hostname_like_text(text: str, location: str) -> None:
-    """Fail closed on any DNS-shaped token that is not an allowlisted value shape."""
-    for match in DNS_HOSTNAME_RE.finditer(text):
-        if not _is_allowlisted_hostname_shape(match.group(0)):
-            fail(f"{location} contains a hostname; evidence must stay redacted")
+    """Fail closed on any DNS-shaped token; there is no value-shape allowlist."""
+    if DNS_HOSTNAME_RE.search(text):
+        fail(f"{location} contains a hostname; evidence must stay redacted")
+
+
+def reject_unredacted_repo_source_file(value: str, location: str) -> None:
+    """Scoped rule for the repository source file-name fields.
+
+    Runs every scan except the hostname rule, then requires the whole value to be
+    a repository-relative source file name with a known extension.
+    """
+    reject_secret_like_text(value, location)
+    for label, pattern in FORBIDDEN_VALUE_PATTERNS:
+        if pattern.search(value):
+            fail(f"{location} contains {label}; evidence must stay redacted")
+    if ".." in Path(value).parts or not REPO_SOURCE_FILE_NAME_RE.fullmatch(value):
+        fail(f"{location} must be a repository-relative source file name")
 
 
 def reject_unredacted_text(text: str, location: str) -> None:
@@ -365,7 +377,10 @@ def _walk_redaction(value: Any, location: str) -> None:
         for index, item in enumerate(value):
             _walk_redaction(item, f"{location}[{index}]")
     elif isinstance(value, str):
-        reject_unredacted_text(value, location)
+        if location in REPO_SOURCE_FILE_FIELDS:
+            reject_unredacted_repo_source_file(value, location)
+        else:
+            reject_unredacted_text(value, location)
 
 
 def repository_relative(root: Path, value: str, label: str) -> str:

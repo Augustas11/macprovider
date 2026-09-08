@@ -55,11 +55,13 @@ the TLD. Credential shapes are compiled from `CREDENTIAL_SHAPE_PATTERN_FRAGMENTS
 in `scripts/check_spec_governance.py`, so this scanner can never be narrower than
 the sibling signed-journey scanner.
 
-The one allowlist is `HOSTNAME_ALLOWLISTED_VALUE_SHAPES` in
-`scripts/byom_journey_evidence.py`: a repository source **file name**
+There is no global allowlist. A repository source **file name**
 (`run-cli-onboarding-e2e.py`, `run-manifest.json`) is `<name>.<ext>` and therefore
-DNS-shaped by coincidence, and the evidence records `harness.name` verbatim. An
-unlisted extension still fails closed. Every other value the contract emits —
+DNS-shaped by coincidence; it is accepted only at the structurally validated
+`harness.name` field (`REPO_SOURCE_FILE_FIELDS` / `REPO_SOURCE_FILE_NAME_RE` in
+`scripts/byom_journey_evidence.py`). The same token in a step assertion or a
+captured document value is a hostname and fails closed, and an unlisted
+extension fails closed even in `harness.name`. Every other value the contract emits —
 evidence and document schema ids, step ids, requirement ids, run ids, CLI and
 semantic versions — ends in a label that is not purely alphabetic and so never
 reaches the allowlist at all.
