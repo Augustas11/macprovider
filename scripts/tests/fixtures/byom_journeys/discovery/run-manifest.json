@@ -1,0 +1,190 @@
+{
+  "schema_version": "macprovider.byom-journey-run.v1",
+  "journey_id": "JOURNEY-PROVIDER-BYOM-DISCOVERY",
+  "run_id": "byom-discovery-fixture",
+  "environment_class": "hermetic-loopback",
+  "cli_version": "0.0.0-fixture",
+  "harness": {
+    "name": "test/e2e/byom/run-cli-onboarding-e2e.py",
+    "status": "pass"
+  },
+  "steps": [
+    {
+      "id": "step-01-discover-mlx-cache",
+      "status": "pass",
+      "assertion": "MLX-cache candidate discovered read-only with a stable namespace-scoped candidate id.",
+      "requirement_ids": [
+        "SPEC-046-R001",
+        "SPEC-046-R002",
+        "SPEC-046-R003"
+      ],
+      "documents": [
+        {
+          "id": "discover-mlx-cache",
+          "schema": "provider_byom_discovery.v1",
+          "path": "captures/discover-mlx-cache.json"
+        }
+      ]
+    },
+    {
+      "id": "step-02-discover-loopback-runtime",
+      "status": "pass",
+      "assertion": "Loopback Ollama adapter enumerated one candidate without leaving the host.",
+      "requirement_ids": [
+        "SPEC-046-R001",
+        "SPEC-046-R002",
+        "SPEC-046-R003"
+      ],
+      "documents": [
+        {
+          "id": "discover-loopback-runtime",
+          "schema": "provider_byom_discovery.v1",
+          "path": "captures/discover-loopback-runtime.json"
+        }
+      ]
+    },
+    {
+      "id": "step-03-discover-opaque-endpoint",
+      "status": "pass",
+      "assertion": "Opaque OpenAI-compatible candidate reported identity_state opaque_endpoint and stayed local_only.",
+      "requirement_ids": [
+        "SPEC-046-R002",
+        "SPEC-046-R003",
+        "SPEC-046-R004"
+      ],
+      "documents": [
+        {
+          "id": "discover-opaque-endpoint",
+          "schema": "provider_byom_discovery.v1",
+          "path": "captures/discover-opaque-endpoint.json"
+        }
+      ]
+    },
+    {
+      "id": "step-04-reject-non-loopback",
+      "status": "pass",
+      "assertion": "Non-loopback adapter origin rejected before any request was issued.",
+      "requirement_ids": [
+        "SPEC-046-R002",
+        "SPEC-046-R007"
+      ],
+      "documents": [
+        {
+          "id": "discover-non-loopback-rejected",
+          "schema": "provider_byom_discovery.v1",
+          "path": "captures/discover-non-loopback-rejected.json"
+        }
+      ]
+    },
+    {
+      "id": "step-05-handle-adapter-failure",
+      "status": "pass",
+      "assertion": "Malformed adapter response surfaced as a warning, not a trust claim.",
+      "requirement_ids": [
+        "SPEC-046-R002",
+        "SPEC-046-R004"
+      ],
+      "documents": [
+        {
+          "id": "discover-adapter-failure",
+          "schema": "provider_byom_discovery.v1",
+          "path": "captures/discover-adapter-failure.json"
+        }
+      ]
+    },
+    {
+      "id": "step-06-evaluate-candidate",
+      "status": "pass",
+      "assertion": "models evaluate ran the bounded local harness and reported health_result passed.",
+      "requirement_ids": [
+        "SPEC-046-R001",
+        "SPEC-046-R005"
+      ],
+      "documents": [
+        {
+          "id": "evaluate-candidate",
+          "schema": "provider_byom_evaluation.v1",
+          "path": "captures/evaluate-candidate.json"
+        }
+      ]
+    },
+    {
+      "id": "step-07-no-production-mutation",
+      "status": "pass",
+      "assertion": "mutation_summary reported no config, cache, weight, or coordinator mutation.",
+      "requirement_ids": [
+        "SPEC-046-R006"
+      ],
+      "documents": [
+        {
+          "id": "evaluate-mutation-summary",
+          "schema": "provider_byom_evaluation.v1",
+          "path": "captures/evaluate-candidate.json"
+        }
+      ]
+    },
+    {
+      "id": "step-08-redaction-review",
+      "status": "pass",
+      "assertion": "JSON and stderr carried no prompt, completion, credential, or local path material.",
+      "requirement_ids": [
+        "SPEC-046-R007"
+      ],
+      "documents": [
+        {
+          "id": "discover-redaction-review",
+          "schema": "provider_byom_discovery.v1",
+          "path": "captures/discover-opaque-endpoint.json"
+        }
+      ]
+    },
+    {
+      "id": "step-09-state-boundary",
+      "status": "pass",
+      "assertion": "Evaluated candidate stayed non-routable and non-earning with no coordinator state.",
+      "requirement_ids": [
+        "SPEC-046-R003"
+      ],
+      "documents": [
+        {
+          "id": "offer-dry-run-state-boundary",
+          "schema": "model_admission_offer_dry_run.v1",
+          "path": "captures/offer-dry-run.json"
+        }
+      ]
+    },
+    {
+      "id": "step-10-local-state-ladder",
+      "status": "pass",
+      "assertion": "local_only, offerable, and local-default not_offered each reported their next action and reason.",
+      "requirement_ids": [
+        "SPEC-046-R003",
+        "SPEC-046-R008"
+      ],
+      "documents": [
+        {
+          "id": "discover-state-ladder",
+          "schema": "provider_byom_discovery.v1",
+          "path": "captures/discover-state-ladder.json"
+        }
+      ]
+    }
+  ],
+  "observations": {
+    "adapter_failure_warned": true,
+    "buyer_traffic_sent": false,
+    "candidate_evaluated": true,
+    "local_state_ladder_verified": true,
+    "loopback_runtime_discovered": true,
+    "mlx_cache_discovered": true,
+    "non_loopback_rejected": true,
+    "opaque_endpoint_candidate_discovered": true,
+    "provider_credit_created": false,
+    "raw_completion_logged": false,
+    "raw_prompt_logged": false,
+    "redacted_artifacts_reviewed": true,
+    "runtime_installed": false,
+    "state_boundary_preserved": true,
+    "weights_downloaded": false
+  }
+}

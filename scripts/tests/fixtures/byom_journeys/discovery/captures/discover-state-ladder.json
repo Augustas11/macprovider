@@ -1,0 +1,10 @@
+{
+  "candidates": [
+    {
+      "admission_state": "offerable",
+      "admission_state_source": "local_default",
+      "candidate_id": "byom_fixture_candidate"
+    }
+  ],
+  "schema": "provider_byom_discovery.v1"
+}

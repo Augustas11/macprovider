@@ -1,0 +1,6 @@
+{
+  "likely_admission_state": "offerable",
+  "likely_admission_state_source": "local_default",
+  "schema": "model_admission_offer_dry_run.v1",
+  "would_submit": true
+}

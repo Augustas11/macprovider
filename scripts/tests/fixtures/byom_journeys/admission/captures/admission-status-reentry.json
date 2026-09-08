@@ -1,0 +1,9 @@
+{
+  "admission_state": "withdrawn",
+  "admission_state_source": "coordinator",
+  "catalog_model_key": null,
+  "provider_guidance": {
+    "earning_path_class": "no_earning_path_in_v0_1"
+  },
+  "schema": "model_admission_status.v1"
+}

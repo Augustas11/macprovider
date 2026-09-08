@@ -1,0 +1,8 @@
+{
+  "health_result": "passed",
+  "mutation_summary": {
+    "coordinator_state_mutated": false,
+    "production_config_mutated": false
+  },
+  "schema": "provider_byom_evaluation.v1"
+}

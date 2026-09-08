@@ -262,25 +262,36 @@ LOCAL_CONSUMER_ENDPOINT_CANDIDATE_IDENTITY_SDK_NAMES = {
     "openai-python",
     "openai-ruby",
 }
+# The shapes credential *material* takes, independent of the field carrying it.
+# This is the single source of truth for token-shaped detection on the signed
+# journey surfaces: the local-consumer metadata scanner below composes it with its
+# own credential-bearing field-name fragments, and
+# `scripts/byom_journey_evidence.py` compiles the same fragments, so the BYOM
+# redaction scanner can never drift narrower than this one.
+CREDENTIAL_SHAPE_PATTERN_FRAGMENTS: tuple[str, ...] = (
+    r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----",
+    r"\bbearer\s+(?!redacted\b)[A-Za-z0-9._~+/=-]{20,}",
+    r"\bghp_[A-Za-z0-9_]{20,}\b",
+    r"\bgithub_pat_[A-Za-z0-9_]{20,}\b",
+    r"\bsk-(?:proj-)?[A-Za-z0-9_-]{20,}\b",
+    r"\bxox[baprs]-[A-Za-z0-9-]{20,}\b",
+    r"\bAKIA[0-9A-Z]{16}\b",
+    r"\bmp_[A-Za-z0-9_-]{16,}\b",
+)
+LOCAL_CONSUMER_ENDPOINT_FORBIDDEN_FIELD_NAME_FRAGMENTS: tuple[str, ...] = (
+    r"\bauthorization\s*[:=]",
+    r"\blocal[_-]?token\s*[:=]",
+    r"\bapi[_-]?key\s*[:=]",
+    r"\bx-api-key\s*[:=]",
+    r"\bbuyer[_-]?credential\s*[:=]",
+    r"\bupstream[_-]?credential\s*[:=]",
+    r"\braw[_ -]?prompt\s*[:=]",
+    r"\braw[_ -]?completion\s*[:=]",
+)
 LOCAL_CONSUMER_ENDPOINT_FORBIDDEN_METADATA_RE = re.compile(
-    r"(?i)("
-    r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----|"
-    r"\bauthorization\s*[:=]|"
-    r"\bbearer\s+(?!redacted\b)[A-Za-z0-9._~+/=-]{20,}|"
-    r"\blocal[_-]?token\s*[:=]|"
-    r"\bapi[_-]?key\s*[:=]|"
-    r"\bx-api-key\s*[:=]|"
-    r"\bbuyer[_-]?credential\s*[:=]|"
-    r"\bupstream[_-]?credential\s*[:=]|"
-    r"\braw[_ -]?prompt\s*[:=]|"
-    r"\braw[_ -]?completion\s*[:=]|"
-    r"\bghp_[A-Za-z0-9_]{20,}\b|"
-    r"\bgithub_pat_[A-Za-z0-9_]{20,}\b|"
-    r"\bsk-(?:proj-)?[A-Za-z0-9_-]{20,}\b|"
-    r"\bxox[baprs]-[A-Za-z0-9-]{20,}\b|"
-    r"\bAKIA[0-9A-Z]{16}\b|"
-    r"\bmp_[A-Za-z0-9_-]{16,}\b"
-    r")"
+    "(?i)("
+    + "|".join(LOCAL_CONSUMER_ENDPOINT_FORBIDDEN_FIELD_NAME_FRAGMENTS + CREDENTIAL_SHAPE_PATTERN_FRAGMENTS)
+    + ")"
 )
 LOCAL_CONSUMER_ENDPOINT_STEP_ID_ORDER = (
     "step-01-capture-local-endpoint",
@@ -303,6 +314,148 @@ LOCAL_CONSUMER_ENDPOINT_EVIDENCE_REQUIREMENT_IDS = {
     "SPEC-045-R007",
     "SPEC-045-R008",
 }
+PROVIDER_BYOM_DISCOVERY_JOURNEY_ID = "JOURNEY-PROVIDER-BYOM-DISCOVERY"
+PROVIDER_BYOM_DISCOVERY_EXECUTION_MODE = "local-provider-discovery"
+PROVIDER_BYOM_DISCOVERY_ARTIFACT_ID = "redacted-provider-byom-discovery"
+PROVIDER_BYOM_DISCOVERY_EVIDENCE_SCHEMA = "macprovider.provider-byom-discovery-evidence.v1"
+PROVIDER_BYOM_DISCOVERY_EVIDENCE_PREFIX = "journeys/evidence/provider-byom-discovery-"
+# Step ids are the normative list in journeys/JOURNEY-PROVIDER-BYOM-DISCOVERY.md
+# ("Required Steps"); they are not invented here.
+PROVIDER_BYOM_DISCOVERY_STEP_ID_ORDER = (
+    "step-01-discover-mlx-cache",
+    "step-02-discover-loopback-runtime",
+    "step-03-discover-opaque-endpoint",
+    "step-04-reject-non-loopback",
+    "step-05-handle-adapter-failure",
+    "step-06-evaluate-candidate",
+    "step-07-no-production-mutation",
+    "step-08-redaction-review",
+    "step-09-state-boundary",
+    "step-10-local-state-ladder",
+)
+PROVIDER_BYOM_DISCOVERY_STEP_IDS = set(PROVIDER_BYOM_DISCOVERY_STEP_ID_ORDER)
+PROVIDER_BYOM_DISCOVERY_PROMOTABLE_REQUIREMENT_IDS = {
+    f"SPEC-046-R{index:03d}" for index in range(1, 9)
+}
+# SPEC-046-R008 is the release-evidence requirement the whole journey proves, so
+# it is admissible on every step; the other ids are the requirement subjects each
+# step actually exercises (SPEC-046 §3 requirement headings).
+PROVIDER_BYOM_DISCOVERY_STEP_REQUIREMENT_IDS = {
+    "step-01-discover-mlx-cache": {"SPEC-046-R001", "SPEC-046-R002", "SPEC-046-R003"},
+    "step-02-discover-loopback-runtime": {"SPEC-046-R001", "SPEC-046-R002", "SPEC-046-R003"},
+    "step-03-discover-opaque-endpoint": {"SPEC-046-R002", "SPEC-046-R003", "SPEC-046-R004"},
+    "step-04-reject-non-loopback": {"SPEC-046-R002", "SPEC-046-R007"},
+    "step-05-handle-adapter-failure": {"SPEC-046-R002", "SPEC-046-R004"},
+    "step-06-evaluate-candidate": {"SPEC-046-R001", "SPEC-046-R005"},
+    "step-07-no-production-mutation": {"SPEC-046-R006"},
+    "step-08-redaction-review": {"SPEC-046-R007"},
+    "step-09-state-boundary": {"SPEC-046-R003"},
+    "step-10-local-state-ladder": {"SPEC-046-R003"},
+}
+PROVIDER_BYOM_DISCOVERY_TRUE_OBSERVATIONS = {
+    "adapter_failure_warned",
+    "candidate_evaluated",
+    "loopback_runtime_discovered",
+    "local_state_ladder_verified",
+    "mlx_cache_discovered",
+    "non_loopback_rejected",
+    "opaque_endpoint_candidate_discovered",
+    "redacted_artifacts_reviewed",
+    "state_boundary_preserved",
+}
+PROVIDER_BYOM_DISCOVERY_FALSE_OBSERVATIONS = {
+    "buyer_traffic_sent",
+    "provider_credit_created",
+    "raw_completion_logged",
+    "raw_prompt_logged",
+    "runtime_installed",
+    "weights_downloaded",
+}
+NETWORK_MODEL_ADMISSION_JOURNEY_ID = "JOURNEY-NETWORK-MODEL-ADMISSION"
+NETWORK_MODEL_ADMISSION_EXECUTION_MODE = "provider-byom-network-admission"
+NETWORK_MODEL_ADMISSION_ARTIFACT_ID = "redacted-network-model-admission"
+NETWORK_MODEL_ADMISSION_EVIDENCE_SCHEMA = "macprovider.network-model-admission-evidence.v1"
+NETWORK_MODEL_ADMISSION_EVIDENCE_PREFIX = "journeys/evidence/network-model-admission-"
+# Step ids are the normative list in journeys/JOURNEY-NETWORK-MODEL-ADMISSION.md
+# ("Required Steps"); they are not invented here.
+NETWORK_MODEL_ADMISSION_STEP_ID_ORDER = (
+    "step-01-offer-dry-run",
+    "step-02-submit-signed-offer",
+    "step-03-reject-opaque-endpoint",
+    "step-04-sandbox-probe-only",
+    "step-05-network-visible-unpriced",
+    "step-06-catalog-matched-not-settlement",
+    "step-07-revocation-on-drift",
+    "step-08-withdrawal",
+    "step-09-settlement-capable-case",
+    "step-10-admission-status-presentation",
+    "step-11-transition-validity",
+    "step-12-redaction-review",
+)
+NETWORK_MODEL_ADMISSION_STEP_IDS = set(NETWORK_MODEL_ADMISSION_STEP_ID_ORDER)
+NETWORK_MODEL_ADMISSION_PROMOTABLE_REQUIREMENT_IDS = {
+    f"SPEC-047-R{index:03d}" for index in range(1, 9)
+}
+# SPEC-047-R008 is the release-evidence requirement the whole journey proves, so
+# it is admissible on every step; the other ids are the requirement subjects each
+# step actually exercises (SPEC-047 §3 requirement headings).
+NETWORK_MODEL_ADMISSION_STEP_REQUIREMENT_IDS = {
+    "step-01-offer-dry-run": {"SPEC-047-R002"},
+    "step-02-submit-signed-offer": {"SPEC-047-R002", "SPEC-047-R007"},
+    "step-03-reject-opaque-endpoint": {"SPEC-047-R003", "SPEC-047-R007"},
+    "step-04-sandbox-probe-only": {"SPEC-047-R001", "SPEC-047-R003", "SPEC-047-R005", "SPEC-047-R007"},
+    "step-05-network-visible-unpriced": {"SPEC-047-R004", "SPEC-047-R005"},
+    "step-06-catalog-matched-not-settlement": {"SPEC-047-R003", "SPEC-047-R004"},
+    "step-07-revocation-on-drift": {"SPEC-047-R006"},
+    "step-08-withdrawal": {"SPEC-047-R006"},
+    "step-09-settlement-capable-case": {"SPEC-047-R003", "SPEC-047-R005"},
+    "step-10-admission-status-presentation": {"SPEC-047-R002", "SPEC-047-R004"},
+    "step-11-transition-validity": {"SPEC-047-R001", "SPEC-047-R006"},
+    "step-12-redaction-review": {"SPEC-047-R007"},
+}
+NETWORK_MODEL_ADMISSION_TRUE_OBSERVATIONS = {
+    "catalog_matched_not_settlement_verified",
+    "default_buyer_invisibility_verified",
+    "dry_run_did_not_submit",
+    "network_visible_unpriced_disclosed",
+    "earning_path_disclosure_verified",
+    "provider_signature_verified",
+    "rejected_opaque_endpoint_verified",
+    "revocation_on_drift_verified",
+    "sandbox_probe_only_blocked_from_paid_routing",
+    "synthetic_probe_used_provider_channel",
+    "settlement_capable_case_verified",
+    "transition_matrix_enforced",
+    "rejected_reoffer_required_fresh_evidence",
+    "withdrawn_reoffer_required_fresh_evidence",
+    "revoked_reoffer_required_fresh_evidence",
+    "withdrawal_verified",
+}
+NETWORK_MODEL_ADMISSION_FALSE_OBSERVATIONS = {
+    "non_settlement_state_created_provider_credit",
+    "provider_price_treated_as_catalog_rate",
+    "raw_completion_logged",
+    "raw_prompt_logged",
+    "secret_field_persisted",
+}
+# SPEC-047-R003 forbids any settlement, ledger, payout, or request-log row for a
+# non-settlement BYOM lifecycle. These are the coordinator tables read directly
+# for the #1248 money-path assertion; every count must be exactly zero.
+NETWORK_MODEL_ADMISSION_MONEY_PATH_TABLES = (
+    "ledger_operator_credits",
+    "ledger_payout_ready",
+    "ledger_quarantine_resolutions",
+    "ledger_request_credits",
+    "payout_attempts",
+    "request_log",
+    "settlement_attempt_outputs",
+    "settlement_receipt_verdicts",
+    "settlement_route_snapshots",
+    "spec022_payable_request_credits",
+)
+# Both BYOM journeys may be executed against the hermetic loopback harness or a
+# physical provider Mac; the run class is recorded in environment.class.
+BYOM_JOURNEY_ENVIRONMENT_CLASSES = ("hermetic-loopback", "physical-provider")
 SIGNED_JOURNEY_RESULT_REQUIRED_KEYS = {
     "schema_version",
     "journey_id",
@@ -2499,6 +2652,335 @@ def _validate_spec016_payout_journey_result(
             _validate_spec016_payout_artifact(root, artifact, f"{location}.signed.artifacts[{index}]", result)
 
 
+def _validate_byom_journey_observations(
+    signed: dict[str, Any],
+    true_fields: set[str],
+    false_fields: set[str],
+    location: str,
+    result: ValidationResult,
+) -> dict[str, Any]:
+    observations = signed.get("observations")
+    if not _expect_object(observations, f"{location}.signed.observations", result):
+        return {}
+    for field_name in sorted(true_fields):
+        if observations.get(field_name) is not True:
+            result.error(f"{location}.signed.observations.{field_name}", "must be true")
+    for field_name in sorted(false_fields):
+        if observations.get(field_name) is not False:
+            result.error(f"{location}.signed.observations.{field_name}", "must be false")
+    return observations
+
+
+def _validate_byom_journey_requirement_ids(
+    signed: dict[str, Any],
+    requirement_id: str,
+    promotable: set[str],
+    label: str,
+    location: str,
+    result: ValidationResult,
+) -> None:
+    signed_requirement_ids = signed.get("requirement_ids")
+    if not isinstance(signed_requirement_ids, list) or requirement_id not in signed_requirement_ids:
+        result.error(f"{location}.signed.requirement_ids", f"must include the requirement being promoted: {requirement_id}")
+    unexpected = [
+        item
+        for item in (signed_requirement_ids or [])
+        if isinstance(item, str) and item not in promotable
+    ]
+    if unexpected:
+        result.error(
+            f"{location}.signed.requirement_ids",
+            f"{label} journey-result cannot promote " + ", ".join(sorted(unexpected)),
+        )
+    if requirement_id not in promotable:
+        result.error(f"{location}.signed.requirement_ids", f"{label} journey-result cannot promote {requirement_id}")
+
+
+_BYOM_EVIDENCE_MODULE: Any = None
+
+
+def _byom_evidence_module() -> Any:
+    """Load the BYOM evidence contract module lazily.
+
+    `scripts/byom_journey_evidence.py` imports this module for the journey
+    constants, so the import has to stay function-local. That module owns the
+    shared step, observation, and redaction rules, and governance re-runs exactly
+    those rules over the referenced evidence artifact instead of reimplementing
+    them.
+    """
+    global _BYOM_EVIDENCE_MODULE
+    if _BYOM_EVIDENCE_MODULE is None:
+        scripts_dir = str(Path(__file__).resolve().parent)
+        inserted = scripts_dir not in sys.path
+        if inserted:
+            sys.path.insert(0, scripts_dir)
+        # Bind the child module to this exact module object rather than letting it
+        # execute a second copy of this file under the bare name.
+        sys.modules.setdefault("check_spec_governance", sys.modules[__name__])
+        try:
+            import byom_journey_evidence
+        finally:
+            if inserted:
+                sys.path.remove(scripts_dir)
+        _BYOM_EVIDENCE_MODULE = byom_journey_evidence
+    return _BYOM_EVIDENCE_MODULE
+
+
+def _validate_byom_journey_source(
+    root: Path,
+    artifact: dict[str, Any],
+    signed: dict[str, Any],
+    journey_id: str,
+    location: str,
+    result: ValidationResult,
+) -> None:
+    """Re-validate the redacted evidence a BYOM signed payload names as its source.
+
+    The builder validates committed evidence deeply, but a hand-authored payload
+    can still carry a valid acceptance signature, so promotion must not trust the
+    signed projection on its own. This re-opens the hash-bound artifact and re-runs
+    the same shared contract -- the redaction scan, `validate_evidence_steps`, and
+    `validate_evidence_observations` (money-path zero rows included) -- then
+    compares the signed requirement ids and step projection against it. It is the
+    BYOM counterpart of `_validate_local_consumer_endpoint_source()`.
+    """
+    source = artifact.get("source")
+    if not isinstance(source, str):
+        return
+    path = _repository_path(root, source, f"{location}.source", result)
+    if path is None:
+        return
+    module = _byom_evidence_module()
+    # The generic signed-result schema tolerates optional fields that nothing
+    # here binds to the source evidence; a BYOM payload must carry exactly the
+    # builder's closed key set so a hand-signed payload cannot add unbound data.
+    extra_keys = sorted(set(signed) - module.BYOM_JOURNEY_RESULT_PAYLOAD_KEYS)
+    missing_keys = sorted(module.BYOM_JOURNEY_RESULT_PAYLOAD_KEYS - set(signed))
+    if extra_keys or missing_keys:
+        result.error(
+            f"{location}.source.keys",
+            "signed BYOM payload must carry exactly the builder key set"
+            f" (extra={extra_keys}, missing={missing_keys})",
+        )
+        return
+    try:
+        contract = module.contract_for(journey_id)
+        evidence = module.load_json_object(path, "BYOM redacted evidence")
+        module.assert_redacted(evidence)
+        if evidence.get("schema_version") != contract.evidence_schema:
+            module.fail(f"schema_version must equal {contract.evidence_schema!r}")
+        if evidence.get("journey_id") != contract.journey_id:
+            module.fail(f"journey_id must equal {contract.journey_id!r}")
+        if evidence.get("execution_mode") != contract.execution_mode:
+            module.fail(f"execution_mode must equal {contract.execution_mode!r}")
+        environment = module.require_object(evidence.get("environment"), "environment")
+        if environment.get("class") not in BYOM_JOURNEY_ENVIRONMENT_CLASSES:
+            module.fail(f"environment.class must be one of {sorted(BYOM_JOURNEY_ENVIRONMENT_CLASSES)}")
+        source_steps, covered_ids = module.validate_evidence_steps(contract, evidence.get("steps"))
+        source_observations = module.validate_evidence_observations(contract, evidence.get("observations"))
+        declared_ids = [
+            module.require_string(item, module.REQUIREMENT_RE, "requirement_ids[]")
+            for item in module.require_list(evidence.get("requirement_ids"), "requirement_ids")
+        ]
+        if len(set(declared_ids)) != len(declared_ids) or sorted(declared_ids) != covered_ids:
+            module.fail(
+                "requirement_ids must equal the union of the evidence step requirement ids: "
+                + ", ".join(covered_ids)
+            )
+    except module.BYOMEvidenceError as exc:
+        result.error(f"{location}.source", str(exc))
+        return
+
+    signed_requirement_ids = [item for item in (signed.get("requirement_ids") or []) if isinstance(item, str)]
+    overclaimed = sorted(set(signed_requirement_ids) - set(covered_ids))
+    if overclaimed:
+        result.error(
+            f"{location}.source.requirement_ids",
+            f"must cover every signed requirement ID: {overclaimed}",
+        )
+
+    expected_steps = [
+        {
+            "id": step["id"],
+            "status": "pass",
+            "assertion": step["assertion"],
+            "artifacts": step["artifacts"],
+        }
+        for step in source_steps
+    ]
+    signed_steps = [
+        {
+            "id": step.get("id"),
+            "status": step.get("status"),
+            "assertion": step.get("assertion"),
+            "artifacts": step.get("artifacts"),
+        }
+        for step in signed.get("steps", [])
+        if isinstance(step, dict)
+    ]
+    if signed_steps != expected_steps:
+        result.error(f"{location}.source.steps", "signed steps must match the source evidence steps")
+
+    if signed.get("observations") != source_observations:
+        result.error(f"{location}.source.observations", "signed observations must match the source evidence")
+    for field_name in ("run_id", "captured_at", "expires_at", "repository", "operator", "environment", "result", "redaction"):
+        if signed.get(field_name) != evidence.get(field_name):
+            result.error(f"{location}.source.{field_name}", "signed payload must match the source evidence")
+
+
+def _validate_byom_journey_artifacts(
+    artifacts: list[Any],
+    primary_artifact_id: str,
+    prefix: str,
+    journey_id: str,
+    signed: dict[str, Any],
+    location: str,
+    result: ValidationResult,
+    *,
+    root: Path | None = None,
+) -> None:
+    # Mirror the sibling journey validators: the BYOM builder emits exactly one
+    # hash-bound redacted-evidence artifact with exactly {id, sha256, source}, so a
+    # signed payload carrying any other artifact record -- or any extra field on
+    # the one record -- is not a builder projection and must not promote.
+    if len(artifacts) != 1 or not isinstance(artifacts[0], dict):
+        result.error(
+            f"{location}.signed.artifacts",
+            f"{journey_id} journey-result must contain exactly one redacted evidence artifact",
+        )
+        return
+    artifact = artifacts[0]
+    artifact_location = f"{location}.signed.artifacts[0]"
+    if set(artifact) != {"id", "sha256", "source"}:
+        result.error(artifact_location, "must carry exactly the builder artifact fields id, sha256, source")
+        return
+    if artifact.get("id") != primary_artifact_id:
+        result.error(f"{artifact_location}.id", f"must equal the reviewed artifact {primary_artifact_id!r}")
+        return
+    source = artifact.get("source")
+    if not isinstance(source, str) or not source.startswith(prefix) or not source.endswith(".redacted.json"):
+        result.error(f"{artifact_location}.source", f"must match {prefix}*.redacted.json")
+        return
+    if root is not None:
+        _validate_byom_journey_source(root, artifact, signed, journey_id, artifact_location, result)
+
+
+def _validate_provider_byom_discovery_journey_result(
+    signed: dict[str, Any],
+    requirement_id: str,
+    journeys: list[str],
+    artifacts: list[Any],
+    steps: list[Any],
+    location: str,
+    result: ValidationResult,
+    *,
+    root: Path | None = None,
+) -> None:
+    if signed.get("journey_id") != PROVIDER_BYOM_DISCOVERY_JOURNEY_ID:
+        result.error(f"{location}.signed.journey_id", f"must equal {PROVIDER_BYOM_DISCOVERY_JOURNEY_ID!r}")
+    if PROVIDER_BYOM_DISCOVERY_JOURNEY_ID not in journeys:
+        result.error(location, f"provider BYOM discovery requirement journeys must include {PROVIDER_BYOM_DISCOVERY_JOURNEY_ID!r}")
+    if signed.get("execution_mode") != PROVIDER_BYOM_DISCOVERY_EXECUTION_MODE:
+        result.error(f"{location}.signed.execution_mode", f"must equal {PROVIDER_BYOM_DISCOVERY_EXECUTION_MODE!r}")
+    environment = signed.get("environment")
+    if isinstance(environment, dict) and environment.get("class") not in BYOM_JOURNEY_ENVIRONMENT_CLASSES:
+        result.error(
+            f"{location}.signed.environment.class",
+            f"must be one of {sorted(BYOM_JOURNEY_ENVIRONMENT_CLASSES)}",
+        )
+    _validate_byom_journey_requirement_ids(
+        signed,
+        requirement_id,
+        set(PROVIDER_BYOM_DISCOVERY_PROMOTABLE_REQUIREMENT_IDS),
+        "provider BYOM discovery",
+        location,
+        result,
+    )
+    _validate_byom_journey_artifacts(
+        artifacts,
+        PROVIDER_BYOM_DISCOVERY_ARTIFACT_ID,
+        PROVIDER_BYOM_DISCOVERY_EVIDENCE_PREFIX,
+        PROVIDER_BYOM_DISCOVERY_JOURNEY_ID,
+        signed,
+        location,
+        result,
+        root=root,
+    )
+    _validate_byom_journey_observations(
+        signed,
+        PROVIDER_BYOM_DISCOVERY_TRUE_OBSERVATIONS,
+        PROVIDER_BYOM_DISCOVERY_FALSE_OBSERVATIONS,
+        location,
+        result,
+    )
+    _validate_named_journey_steps(steps, PROVIDER_BYOM_DISCOVERY_STEP_IDS, location, result, "provider BYOM discovery")
+
+
+def _validate_network_model_admission_journey_result(
+    signed: dict[str, Any],
+    requirement_id: str,
+    journeys: list[str],
+    artifacts: list[Any],
+    steps: list[Any],
+    location: str,
+    result: ValidationResult,
+    *,
+    root: Path | None = None,
+) -> None:
+    if signed.get("journey_id") != NETWORK_MODEL_ADMISSION_JOURNEY_ID:
+        result.error(f"{location}.signed.journey_id", f"must equal {NETWORK_MODEL_ADMISSION_JOURNEY_ID!r}")
+    if NETWORK_MODEL_ADMISSION_JOURNEY_ID not in journeys:
+        result.error(location, f"network model admission requirement journeys must include {NETWORK_MODEL_ADMISSION_JOURNEY_ID!r}")
+    if signed.get("execution_mode") != NETWORK_MODEL_ADMISSION_EXECUTION_MODE:
+        result.error(f"{location}.signed.execution_mode", f"must equal {NETWORK_MODEL_ADMISSION_EXECUTION_MODE!r}")
+    environment = signed.get("environment")
+    if isinstance(environment, dict) and environment.get("class") not in BYOM_JOURNEY_ENVIRONMENT_CLASSES:
+        result.error(
+            f"{location}.signed.environment.class",
+            f"must be one of {sorted(BYOM_JOURNEY_ENVIRONMENT_CLASSES)}",
+        )
+    _validate_byom_journey_requirement_ids(
+        signed,
+        requirement_id,
+        set(NETWORK_MODEL_ADMISSION_PROMOTABLE_REQUIREMENT_IDS),
+        "network model admission",
+        location,
+        result,
+    )
+    _validate_byom_journey_artifacts(
+        artifacts,
+        NETWORK_MODEL_ADMISSION_ARTIFACT_ID,
+        NETWORK_MODEL_ADMISSION_EVIDENCE_PREFIX,
+        NETWORK_MODEL_ADMISSION_JOURNEY_ID,
+        signed,
+        location,
+        result,
+        root=root,
+    )
+    observations = _validate_byom_journey_observations(
+        signed,
+        NETWORK_MODEL_ADMISSION_TRUE_OBSERVATIONS,
+        NETWORK_MODEL_ADMISSION_FALSE_OBSERVATIONS,
+        location,
+        result,
+    )
+    money_path = observations.get("money_path_zero_rows")
+    money_path_location = f"{location}.signed.observations.money_path_zero_rows"
+    if _expect_object(money_path, money_path_location, result):
+        _expect_keys(
+            money_path,
+            set(NETWORK_MODEL_ADMISSION_MONEY_PATH_TABLES),
+            set(NETWORK_MODEL_ADMISSION_MONEY_PATH_TABLES),
+            money_path_location,
+            result,
+        )
+        for table in NETWORK_MODEL_ADMISSION_MONEY_PATH_TABLES:
+            count = money_path.get(table)
+            if count != 0 or isinstance(count, bool):
+                result.error(f"{money_path_location}.{table}", "must be the integer 0")
+    _validate_named_journey_steps(steps, NETWORK_MODEL_ADMISSION_STEP_IDS, location, result, "network model admission")
+
+
 def _validate_signed_journey_result(
     root: Path,
     source: str,
@@ -2789,6 +3271,29 @@ def _validate_signed_journey_result(
         )
     if journey_id == LOCAL_CONSUMER_ENDPOINT_JOURNEY_ID:
         _validate_local_consumer_endpoint_journey_result(
+            signed,
+            requirement_id,
+            [item for item in journeys if isinstance(item, str)],
+            artifact_records,
+            steps,
+            location,
+            result,
+            root=root,
+        )
+
+    if journey_id == PROVIDER_BYOM_DISCOVERY_JOURNEY_ID:
+        _validate_provider_byom_discovery_journey_result(
+            signed,
+            requirement_id,
+            [item for item in journeys if isinstance(item, str)],
+            artifact_records,
+            steps,
+            location,
+            result,
+            root=root,
+        )
+    if journey_id == NETWORK_MODEL_ADMISSION_JOURNEY_ID:
+        _validate_network_model_admission_journey_result(
             signed,
             requirement_id,
             [item for item in journeys if isinstance(item, str)],

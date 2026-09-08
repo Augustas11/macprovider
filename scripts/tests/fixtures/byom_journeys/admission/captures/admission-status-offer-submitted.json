@@ -1,0 +1,9 @@
+{
+  "admission_state": "offer_submitted",
+  "admission_state_source": "coordinator",
+  "catalog_model_key": null,
+  "provider_guidance": {
+    "earning_path_class": "not_earning_yet_catalog_or_receipt_path_exists"
+  },
+  "schema": "model_admission_status.v1"
+}
