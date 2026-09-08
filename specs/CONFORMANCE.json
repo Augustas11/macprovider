@@ -1395,17 +1395,17 @@
         "SPEC-045",
         "SPEC-047"
       ],
-      "implementation_status": "pending-reconciliation",
+      "implementation_status": "partial",
       "production_status": "not-deployed",
-      "last_reconciled_commit": null,
-      "last_reconciled_at": null,
+      "last_reconciled_commit": "b8109e5ff4031894bfd610436a519356d7974a4f",
+      "last_reconciled_at": "2026-09-08",
       "evidence": [],
       "requirement_id_migration": "complete",
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1240",
-        "rationale": "Issue #1240 changes the Malibu model strategy from catalog-first discovery to provider-local BYOM discovery while keeping paid network admission separate. No provider-side discovery/evaluation contract exists today."
+        "rationale": "Local CLI discovery/evaluation/offer dry-run code and regression tests now exist and are mapped, but Issue #1240 still needs full workflow completion and signed JOURNEY-PROVIDER-BYOM-DISCOVERY evidence before conformance or production status can be claimed."
       }
     },
     {
@@ -1435,17 +1435,17 @@
         "SPEC-033",
         "SPEC-046"
       ],
-      "implementation_status": "pending-reconciliation",
+      "implementation_status": "partial",
       "production_status": "not-deployed",
-      "last_reconciled_commit": null,
-      "last_reconciled_at": null,
+      "last_reconciled_commit": "b8109e5ff4031894bfd610436a519356d7974a4f",
+      "last_reconciled_at": "2026-09-08",
       "evidence": [],
       "requirement_id_migration": "complete",
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1240",
-        "rationale": "Issue #1240 requires a self-service path from provider-local BYOM candidates to network offer/admission states without weakening signed catalog economics, route-time verification, receipt, billing, or payout gates."
+        "rationale": "Local CLI/coordinator/routing/buyer safeguards now exist and are mapped, but Issue #1240 still needs the full admission policy/probe lifecycle and signed JOURNEY-NETWORK-MODEL-ADMISSION evidence before conformance or production status can be claimed."
       }
     }
   ],
@@ -7163,8 +7163,19 @@
       "requirement_id": "SPEC-046-R001",
       "spec_id": "SPEC-046",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/ModelsSubcommand.swift:struct ModelsCommand",
+        "phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:BYOMDiscoveryWire",
+        "phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:BYOMEvaluationWire",
+        "phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:BYOMOfferDryRunWire"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/BYOMDiscoveryTests.swift:testDiscoverCommandEmitsClosedSchemaWithNullableAdvisoryFields",
+        "phase3-binary/Tests/macprovider-cliTests/BYOMEvaluationTests.swift:testEvaluateCommandRequiresJSONFlag",
+        "phase3-binary/Tests/macprovider-cliTests/BYOMEvaluationTests.swift:testEvaluateCommandRunsHermeticLoopbackRuntimeWithoutMutation",
+        "phase3-binary/Tests/macprovider-cliTests/BYOMOfferDryRunTests.swift:testOfferCommandRequiresDryRunJSONFlags",
+        "scripts/tests/test_byom_contract_lock.py:class BYOMContractLockTests"
+      ],
       "journeys": [
         "JOURNEY-PROVIDER-BYOM-DISCOVERY"
       ],
@@ -7172,15 +7183,27 @@
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/1240"
+        "issue": "https://github.com/Augustas11/macprovider/issues/1240",
+        "rationale": "Local CLI discover/evaluate/offer dry-run schemas and command routing are implemented and tested, but the row remains pending because no signed JOURNEY-PROVIDER-BYOM-DISCOVERY evidence has been captured or consumed."
       }
     },
     {
       "requirement_id": "SPEC-046-R002",
       "spec_id": "SPEC-046",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:struct BYOMMLXCacheDiscovery",
+        "phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:struct BYOMOllamaDiscovery",
+        "phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:BYOMLoopbackOriginValidator",
+        "phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:BYOMURLSessionHTTPClient"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/BYOMDiscoveryTests.swift:testLoopbackOriginValidatorAcceptsOnlyLiteralLoopbackHTTPOrigins",
+        "phase3-binary/Tests/macprovider-cliTests/BYOMDiscoveryTests.swift:testOllamaDiscoveryUsesHermeticLoopbackResponseAndRedactsUnsafeFields",
+        "phase3-binary/Tests/macprovider-cliTests/BYOMDiscoveryTests.swift:testOversizedOllamaResponseIsTruncatedNotParsed",
+        "phase3-binary/Tests/macprovider-cliTests/BYOMDiscoveryTests.swift:testURLSessionClientRefusesRedirects",
+        "phase3-binary/Tests/macprovider-cliTests/BYOMDiscoveryTests.swift:testMalformedOllamaResponseEmitsWarningNotCandidate"
+      ],
       "journeys": [
         "JOURNEY-PROVIDER-BYOM-DISCOVERY"
       ],
@@ -7188,15 +7211,27 @@
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/1240"
+        "issue": "https://github.com/Augustas11/macprovider/issues/1240",
+        "rationale": "Bounded MLX-cache and literal-loopback Ollama adapters are mapped with local negative tests, but full adapter workflow evidence and a signed discovery journey remain absent."
       }
     },
     {
       "requirement_id": "SPEC-046-R003",
       "spec_id": "SPEC-046",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:struct BYOMDiscoveryWire",
+        "phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:struct BYOMCandidateIdentity",
+        "phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:BYOMDiscoveryNamespaceStore",
+        "phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:enum BYOMDiscoveryGuidance"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/BYOMDiscoveryTests.swift:testDiscoverCommandEmitsClosedSchemaWithNullableAdvisoryFields",
+        "phase3-binary/Tests/macprovider-cliTests/BYOMDiscoveryTests.swift:testCandidateIDIsStableWithinNamespaceAndScopedByRuntimeSource",
+        "phase3-binary/Tests/macprovider-cliTests/BYOMDiscoveryTests.swift:testInvalidNamespacePermissionsKeepCandidateLocalOnly",
+        "phase3-binary/Tests/macprovider-cliTests/BYOMAdmissionTests.swift:testAdmissionRuntimeStatusPreservesLocalIdentityForNotOfferedCandidate",
+        "phase3-binary/Tests/macprovider-cliTests/BYOMAdmissionTests.swift:testOfferPackageRejectsUnstableCandidateAndBadEvaluationDigest"
+      ],
       "journeys": [
         "JOURNEY-PROVIDER-BYOM-DISCOVERY"
       ],
@@ -7204,15 +7239,26 @@
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/1240"
+        "issue": "https://github.com/Augustas11/macprovider/issues/1240",
+        "rationale": "Candidate identity, local state/source, and guidance structures have local coverage, but coordinator readback ladder coverage and signed discovery evidence are incomplete."
       }
     },
     {
       "requirement_id": "SPEC-046-R004",
       "spec_id": "SPEC-046",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:struct BYOMDiscoveryWire",
+        "phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:struct BYOMMLXCacheDiscovery",
+        "phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:struct BYOMOllamaDiscovery",
+        "phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:struct BYOMEvaluationRunner"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/BYOMDiscoveryTests.swift:testDiscoverCommandEmitsClosedSchemaWithNullableAdvisoryFields",
+        "phase3-binary/Tests/macprovider-cliTests/BYOMDiscoveryTests.swift:testOllamaOptionalLabelsDistinguishAbsentSafeRedactedAndMalformed",
+        "phase3-binary/Tests/macprovider-cliTests/BYOMEvaluationTests.swift:testEvaluateCommandRunsHermeticLoopbackRuntimeWithoutMutation",
+        "phase3-binary/Tests/macprovider-cliTests/ModelCatalogEconomicsTests.swift:testLocalOnlyCandidateEncodesExplicitNullMoneyFields"
+      ],
       "journeys": [
         "JOURNEY-PROVIDER-BYOM-DISCOVERY"
       ],
@@ -7220,15 +7266,28 @@
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/1240"
+        "issue": "https://github.com/Augustas11/macprovider/issues/1240",
+        "rationale": "Advisory nullable capabilities and non-earning economics are locally covered; pending status is retained until the BYOM discovery journey proves the full workflow."
       }
     },
     {
       "requirement_id": "SPEC-046-R005",
       "spec_id": "SPEC-046",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:BYOMEvaluationLimits",
+        "phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:struct BYOMEvaluationRunner",
+        "phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:evaluateOpenAICompatible",
+        "phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:private func diagnosticHashes(responseBody: Data?)"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/BYOMEvaluationTests.swift:testEvaluateCommandRunsHermeticLoopbackRuntimeWithoutMutation",
+        "phase3-binary/Tests/macprovider-cliTests/BYOMEvaluationTests.swift:testEvaluateMLXCandidateBlocksWithoutCacheMutation",
+        "phase3-binary/Tests/macprovider-cliTests/BYOMEvaluationTests.swift:testEvaluateRuntimeTimeoutFailsClosed",
+        "phase3-binary/Tests/macprovider-cliTests/BYOMEvaluationTests.swift:testEvaluateStalledRuntimePostHitsEvaluationDeadline",
+        "phase3-binary/Tests/macprovider-cliTests/BYOMEvaluationTests.swift:testEvaluateOutputByteCapFailsClosedAndRedactsBody",
+        "phase3-binary/Tests/macprovider-cliTests/BYOMEvaluationTests.swift:testEvaluateRejectsMalformedOrOverLimitUsageTokens"
+      ],
       "journeys": [
         "JOURNEY-PROVIDER-BYOM-DISCOVERY"
       ],
@@ -7236,15 +7295,27 @@
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/1240"
+        "issue": "https://github.com/Augustas11/macprovider/issues/1240",
+        "rationale": "Local evaluation deadlines, caps, no-mutation behavior, and redacted diagnostic hashes are tested, but real runtime oracle coverage and signed evidence remain incomplete."
       }
     },
     {
       "requirement_id": "SPEC-046-R006",
       "spec_id": "SPEC-046",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:struct BYOMDiscoveryRunner",
+        "phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:struct BYOMMLXCacheDiscovery",
+        "phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:struct BYOMDiscoveryNamespaceStore",
+        "phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:final class BYOMURLSessionHTTPClient"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/BYOMDiscoveryTests.swift:testDiscoverIsReadOnlyWhenNamespaceMissing",
+        "phase3-binary/Tests/macprovider-cliTests/BYOMDiscoveryTests.swift:testDiscoveryDoesNotMutateModelCache",
+        "phase3-binary/Tests/macprovider-cliTests/BYOMDiscoveryTests.swift:testMLXWeightSymlinkIntoBlobsIsResolvedAndCounted",
+        "phase3-binary/Tests/macprovider-cliTests/BYOMOfferDryRunTests.swift:testOfferDryRunDoesNotCreateMissingNamespace",
+        "phase3-binary/Tests/macprovider-cliTests/BYOMEvaluationTests.swift:testEvaluateMLXCandidateBlocksWithoutCacheMutation"
+      ],
       "journeys": [
         "JOURNEY-PROVIDER-BYOM-DISCOVERY"
       ],
@@ -7252,15 +7323,28 @@
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/1240"
+        "issue": "https://github.com/Augustas11/macprovider/issues/1240",
+        "rationale": "Read-only discovery and no-cache-mutation controls have local regression coverage, but journey-level proof across adapters remains missing."
       }
     },
     {
       "requirement_id": "SPEC-046-R007",
       "spec_id": "SPEC-046",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:BYOMDiscoveryPrivacy",
+        "phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:struct BYOMOllamaDiscovery",
+        "phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:struct BYOMMLXCacheDiscovery",
+        "phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:struct BYOMEvaluationRunner"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/BYOMDiscoveryTests.swift:testRuntimeModelReferenceRejectsHostnameAndHostPortShapes",
+        "phase3-binary/Tests/macprovider-cliTests/BYOMDiscoveryTests.swift:testOllamaOptionalLabelsDistinguishAbsentSafeRedactedAndMalformed",
+        "phase3-binary/Tests/macprovider-cliTests/BYOMDiscoveryTests.swift:testOllamaWithheldInventoryIsDistinctFromEmptyAndMalformedInventory",
+        "phase3-binary/Tests/macprovider-cliTests/BYOMDiscoveryTests.swift:testDiscoverRedactionWarningsMatchStderrWithoutRawContent",
+        "phase3-binary/Tests/macprovider-cliTests/BYOMEvaluationTests.swift:testEvaluateMalformedRuntimeResponseFailsClosedAndHashesBody",
+        "phase3-binary/Tests/macprovider-cliTests/BYOMEvaluationTests.swift:testEvaluateUnknownCandidateDoesNotReflectUnsafeTarget"
+      ],
       "journeys": [
         "JOURNEY-PROVIDER-BYOM-DISCOVERY"
       ],
@@ -7268,15 +7352,28 @@
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/1240"
+        "issue": "https://github.com/Augustas11/macprovider/issues/1240",
+        "rationale": "Redaction and no-raw-value diagnostics are locally tested for discovery and evaluation, but full signed multi-adapter privacy evidence is not present."
       }
     },
     {
       "requirement_id": "SPEC-046-R008",
       "spec_id": "SPEC-046",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:BYOMDiscoveryRunner",
+        "phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:BYOMEvaluationRunner",
+        "phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:BYOMOfferDryRunRunner",
+        "test/e2e/byom/run-cli-onboarding-e2e.py:assert_catalog_offer_dry_run"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/BYOMDiscoveryTests.swift:testDiscoverCommandEmitsClosedSchemaWithNullableAdvisoryFields",
+        "phase3-binary/Tests/macprovider-cliTests/BYOMEvaluationTests.swift:testEvaluateCommandRunsHermeticLoopbackRuntimeWithoutMutation",
+        "phase3-binary/Tests/macprovider-cliTests/BYOMOfferDryRunTests.swift:testOfferDryRunEmitsExactClosedTopLevelSchema",
+        "phase3-binary/Tests/macprovider-cliTests/BYOMAdmissionTests.swift:testOfferSubmissionPackageBindsAdmissionIdentityAndCandidate",
+        "test/e2e/byom/run-cli-onboarding-e2e.py:assert_catalog_offer_dry_run",
+        "scripts/tests/test_byom_contract_lock.py:class BYOMContractLockTests"
+      ],
       "journeys": [
         "JOURNEY-PROVIDER-BYOM-DISCOVERY"
       ],
@@ -7284,15 +7381,28 @@
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/1240"
+        "issue": "https://github.com/Augustas11/macprovider/issues/1240",
+        "rationale": "Local unit coverage and the unsigned E2E harness exist, but the complete opaque/ladder/timing/redaction matrix and signed JOURNEY-PROVIDER-BYOM-DISCOVERY result are still missing."
       }
     },
     {
       "requirement_id": "SPEC-047-R001",
       "spec_id": "SPEC-047",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase4-coordinator/internal/ws/model_admission.go:type ModelAdmissionStore",
+        "phase4-coordinator/internal/ws/model_admission.go:func (s *memoryModelAdmissionStore) AppendModelAdmissionOffer",
+        "phase4-coordinator/internal/ws/model_admission.go:func (s *memoryModelAdmissionStore) AppendModelAdmissionDecision",
+        "phase4-coordinator/internal/ws/model_admission.go:modelAdmissionAllowedNextState",
+        "phase4-coordinator/internal/ws/model_admission.go:ModelAdmissionRevocationForRuntimeDrift"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/ws/model_admission_test.go:TestModelAdmissionDecisionStateMachineAndRoutingGate",
+        "phase4-coordinator/internal/ws/model_admission_test.go:TestModelAdmissionStoreRequiresFreshEvidenceForReEntry",
+        "phase4-coordinator/internal/ws/model_admission_test.go:TestSQLiteModelAdmissionStorePersistsAppendOnlyStatus",
+        "phase4-coordinator/internal/ws/model_admission_test.go:TestModelAdmissionRouteStatusUsesAppendOrderAcrossStores",
+        "phase4-coordinator/internal/ws/server_test.go:TestHeartbeatModelDriftRevokesSettlementCapableModelAdmission"
+      ],
       "journeys": [
         "JOURNEY-NETWORK-MODEL-ADMISSION"
       ],
@@ -7300,15 +7410,29 @@
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/1240"
+        "issue": "https://github.com/Augustas11/macprovider/issues/1240",
+        "rationale": "Coordinator state-machine storage, transition ordering, re-entry freshness, and drift revocation helpers are locally tested, but the full policy/probe workflow and signed admission journey remain incomplete."
       }
     },
     {
       "requirement_id": "SPEC-047-R002",
       "spec_id": "SPEC-047",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:struct BYOMOfferSubmissionBuilder",
+        "phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:struct BYOMWithdrawalBuilder",
+        "phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:BYOMModelAdmissionClient",
+        "phase4-coordinator/internal/ws/model_admission.go:handleProviderModelAdmissionOffer",
+        "phase4-coordinator/internal/ws/model_admission.go:handleProviderModelAdmissionWithdrawal"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/BYOMOfferDryRunTests.swift:testOfferDryRunEmitsExactClosedTopLevelSchema",
+        "phase3-binary/Tests/macprovider-cliTests/BYOMAdmissionTests.swift:testOfferSubmissionPackageBindsAdmissionIdentityAndCandidate",
+        "phase3-binary/Tests/macprovider-cliTests/BYOMAdmissionTests.swift:testWithdrawalPackageBindsAdmissionIdentityAndNullableCatalogKey",
+        "phase3-binary/Tests/macprovider-cliTests/BYOMAdmissionTests.swift:testAdmissionRuntimeWithdrawRejectsSubstitutedResponseTuple",
+        "phase4-coordinator/internal/ws/model_admission_test.go:TestModelAdmissionOfferSubmitAndStatusStayNonEarning",
+        "phase4-coordinator/internal/ws/model_admission_test.go:TestModelAdmissionWithdrawalSubmitReplayConflictAndStatus"
+      ],
       "journeys": [
         "JOURNEY-NETWORK-MODEL-ADMISSION"
       ],
@@ -7316,15 +7440,28 @@
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/1240"
+        "issue": "https://github.com/Augustas11/macprovider/issues/1240",
+        "rationale": "Offer, status, and withdrawal schemas have local CLI and coordinator coverage, but full live workflow evidence and admission journey coverage are absent."
       }
     },
     {
       "requirement_id": "SPEC-047-R003",
       "spec_id": "SPEC-047",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase4-coordinator/internal/ws/model_admission.go:ModelAdmissionDefaultPaidRoutingEligible",
+        "phase4-coordinator/internal/ws/model_admission.go:ModelAdmissionSettlementBindingForRouteSnapshot",
+        "phase4-coordinator/internal/routing/filter.go:EligibleCandidates",
+        "phase4-coordinator/internal/buyer/route_snapshot.go:func (b *billingRecorder) recordRouteSnapshot"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/buyer/route_snapshot_test.go:TestBYOMNonSettlementStatesAreHiddenFromDefaultPaidModelsAndRouting",
+        "phase4-coordinator/internal/buyer/route_snapshot_test.go:TestBYOMCatalogPricedIsHiddenFromDefaultPaidModelsAndRouting",
+        "phase4-coordinator/internal/buyer/route_snapshot_test.go:TestBYOMSettlementCapableBindsAdmissionEventIntoRouteSnapshot",
+        "phase4-coordinator/internal/buyer/route_snapshot_test.go:TestBYOMSettlementCapableRequiresValidReceiptKeyBeforeRouting",
+        "phase4-coordinator/internal/buyer/route_snapshot_test.go:TestBYOMCatalogKeyMismatchFailsClosed",
+        "phase5-gateway/internal/router/server_test.go:TestBYOMNonSettlementCoordinatorUnavailableDoesNotChargeOrClaimVerified"
+      ],
       "journeys": [
         "JOURNEY-NETWORK-MODEL-ADMISSION"
       ],
@@ -7332,15 +7469,29 @@
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/1240"
+        "issue": "https://github.com/Augustas11/macprovider/issues/1240",
+        "rationale": "Default paid routing and route-snapshot settlement binding are covered locally, but signed multi-state admission evidence is still missing."
       }
     },
     {
       "requirement_id": "SPEC-047-R004",
       "spec_id": "SPEC-047",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/ModelCatalogEconomics.swift:struct ModelCatalogEconomicsBuilder",
+        "phase3-binary/Sources/macprovider-cli/ModelCatalogEconomics.swift:economicsFields",
+        "phase3-binary/Sources/macprovider-cli/ModelCatalogEconomics.swift:nullEconomics",
+        "phase4-coordinator/internal/ws/model_admission.go:modelAdmissionProviderGuidance",
+        "phase4-coordinator/internal/ws/model_admission.go:modelAdmissionNonSettlementEarningPath"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/ModelCatalogEconomicsTests.swift:testLocalOnlyCandidateEncodesExplicitNullMoneyFields",
+        "phase3-binary/Tests/macprovider-cliTests/ModelCatalogEconomicsTests.swift:testCatalogPricedFreshSignedRateCardPermitsEconomicsWithoutSettlement",
+        "phase3-binary/Tests/macprovider-cliTests/ModelCatalogEconomicsTests.swift:testSettlementCapableRequiresCoordinatorSettlementState",
+        "phase3-binary/Tests/macprovider-cliTests/ModelCatalogEconomicsTests.swift:testCoordinatorPricingRequiresMatchingCatalogIdentity",
+        "phase3-binary/Tests/macprovider-cliTests/BYOMOfferDryRunTests.swift:testOfferDryRunForNonCatalogCandidateDoesNotSubmitAndHasNoEarningPath",
+        "phase3-binary/Tests/macprovider-cliTests/BYOMOfferDryRunTests.swift:testOfferDryRunForCatalogCandidateReportsMissingTrustedBindingWithoutRates"
+      ],
       "journeys": [
         "JOURNEY-NETWORK-MODEL-ADMISSION"
       ],
@@ -7348,15 +7499,27 @@
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/1240"
+        "issue": "https://github.com/Augustas11/macprovider/issues/1240",
+        "rationale": "Advisory economics, null money fields, and trusted-rate gating have local coverage, but production disclosure/economics journey evidence remains absent."
       }
     },
     {
       "requirement_id": "SPEC-047-R005",
       "spec_id": "SPEC-047",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase4-coordinator/internal/routing/filter.go:EligibleCandidates",
+        "phase4-coordinator/internal/buyer/server.go:handleModels",
+        "phase4-coordinator/internal/buyer/server.go:func (c *eligibilityCtx) ProviderBYOMSettlementEligible",
+        "phase5-gateway/internal/router/chat_proxy.go:func (s *Server) handleChatCompletions"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/routing/filter_test.go:TestEligibleCandidates_BYOMNonSettlementExcluded",
+        "phase4-coordinator/internal/buyer/route_snapshot_test.go:TestBYOMNonSettlementStatesAreHiddenFromDefaultPaidModelsAndRouting",
+        "phase4-coordinator/internal/buyer/route_snapshot_test.go:TestBYOMHiddenProviderDoesNotShadowModelClassAlias",
+        "phase5-gateway/internal/router/server_test.go:TestBYOMNonSettlementUnavailableIsPermanent",
+        "phase5-gateway/internal/router/server_test.go:TestBYOMNonSettlementCoordinatorUnavailableDoesNotChargeOrClaimVerified"
+      ],
       "journeys": [
         "JOURNEY-NETWORK-MODEL-ADMISSION"
       ],
@@ -7364,15 +7527,29 @@
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/1240"
+        "issue": "https://github.com/Augustas11/macprovider/issues/1240",
+        "rationale": "Default buyer invisibility for non-settlement BYOM states is locally covered; explicit experimental publication and full lifecycle evidence are not implemented."
       }
     },
     {
       "requirement_id": "SPEC-047-R006",
       "spec_id": "SPEC-047",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:struct BYOMWithdrawalBuilder",
+        "phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:struct BYOMModelAdmissionRuntime",
+        "phase4-coordinator/internal/ws/model_admission.go:func (s *memoryModelAdmissionStore) AppendModelAdmissionWithdrawal",
+        "phase4-coordinator/internal/ws/model_admission.go:ModelAdmissionRevocationForRuntimeDrift",
+        "phase4-coordinator/internal/ws/server.go:handleHeartbeat"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/BYOMAdmissionTests.swift:testWithdrawalPackageBindsAdmissionIdentityAndNullableCatalogKey",
+        "phase3-binary/Tests/macprovider-cliTests/BYOMAdmissionTests.swift:testAdmissionRuntimeWithdrawPostsPackageAndPreservesNonEarningStatus",
+        "phase3-binary/Tests/macprovider-cliTests/BYOMAdmissionTests.swift:testAdmissionRuntimeWithdrawFallsBackToCoordinatorStatusWhenRuntimeUnavailable",
+        "phase4-coordinator/internal/ws/model_admission_test.go:TestModelAdmissionWithdrawalRejectsInvalidTransitionAndTupleDrift",
+        "phase4-coordinator/internal/ws/model_admission_test.go:TestModelAdmissionRuntimeDriftRevocationRequiresSettlementState",
+        "phase4-coordinator/internal/ws/server_test.go:TestHeartbeatModelDriftRevokesSettlementCapableModelAdmission"
+      ],
       "journeys": [
         "JOURNEY-NETWORK-MODEL-ADMISSION"
       ],
@@ -7380,15 +7557,30 @@
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/1240"
+        "issue": "https://github.com/Augustas11/macprovider/issues/1240",
+        "rationale": "Signed withdrawal and heartbeat drift revocation slices are covered locally, but broader policy/probe/staleness workflows and signed journey evidence remain incomplete."
       }
     },
     {
       "requirement_id": "SPEC-047-R007",
       "spec_id": "SPEC-047",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase4-coordinator/internal/ws/model_admission.go:verifyModelAdmissionOffer",
+        "phase4-coordinator/internal/ws/model_admission.go:verifyModelAdmissionWithdrawal",
+        "phase4-coordinator/internal/ws/model_admission.go:allowModelAdmissionAttempt",
+        "phase4-coordinator/internal/ws/model_admission.go:providerModelAdmissionSanctioned",
+        "phase4-coordinator/internal/ws/model_admission.go:unsafeModelAdmissionMaterial"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/ws/model_admission_test.go:TestModelAdmissionOfferRejectsWrongOrMissingCurrentIdentity",
+        "phase4-coordinator/internal/ws/model_admission_test.go:TestModelAdmissionWithdrawalRejectsWrongOrMissingCurrentIdentity",
+        "phase4-coordinator/internal/ws/model_admission_test.go:TestModelAdmissionInvalidOfferAttemptsAreRateLimited",
+        "phase4-coordinator/internal/ws/model_admission_test.go:TestModelAdmissionOfferRejectsSanctionedProvider",
+        "phase4-coordinator/internal/ws/model_admission_test.go:TestModelAdmissionOfferReplayAndConflict",
+        "phase4-coordinator/internal/ws/model_admission_test.go:TestModelAdmissionOfferRejectsClosedSchemaAndUnsafeMaterial",
+        "phase4-coordinator/internal/ws/model_admission_test.go:TestSQLiteModelAdmissionProviderReplayRejectsSplitKey"
+      ],
       "journeys": [
         "JOURNEY-NETWORK-MODEL-ADMISSION"
       ],
@@ -7396,15 +7588,30 @@
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/1240"
+        "issue": "https://github.com/Augustas11/macprovider/issues/1240",
+        "rationale": "Current-key auth, replay/idempotency, rate, sanction, closed-schema, and unsafe-material negative tests are mapped; signed journey and full cross-state parser matrix remain incomplete."
       }
     },
     {
       "requirement_id": "SPEC-047-R008",
       "spec_id": "SPEC-047",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase4-coordinator/internal/ws/model_admission.go:type ModelAdmissionStore",
+        "phase4-coordinator/internal/routing/filter.go:func EligibleCandidates",
+        "phase4-coordinator/internal/buyer/route_snapshot.go:func (b *billingRecorder) recordRouteSnapshot",
+        "phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:struct BYOMDiscoveryWire",
+        "test/e2e/byom/run-cli-onboarding-e2e.py:assert_catalog_offer_dry_run"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/ws/model_admission_test.go:TestModelAdmissionDecisionStateMachineAndRoutingGate",
+        "phase4-coordinator/internal/buyer/route_snapshot_test.go:TestBYOMNonSettlementStatesAreHiddenFromDefaultPaidModelsAndRouting",
+        "phase4-coordinator/internal/routing/filter_test.go:TestEligibleCandidates_BYOMNonSettlementExcluded",
+        "phase5-gateway/internal/router/server_test.go:TestBYOMNonSettlementUnavailableIsPermanent",
+        "phase5-gateway/internal/router/server_test.go:TestBYOMNonSettlementCoordinatorUnavailableDoesNotChargeOrClaimVerified",
+        "phase3-binary/Tests/macprovider-cliTests/BYOMAdmissionTests.swift:testOfferSubmissionPackageBindsAdmissionIdentityAndCandidate",
+        "test/e2e/byom/run-cli-onboarding-e2e.py:assert_catalog_offer_dry_run"
+      ],
       "journeys": [
         "JOURNEY-NETWORK-MODEL-ADMISSION"
       ],
@@ -7412,7 +7619,8 @@
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/1240"
+        "issue": "https://github.com/Augustas11/macprovider/issues/1240",
+        "rationale": "Local negative matrices now cover many CLI, coordinator, router, and buyer boundaries, but no signed JOURNEY-NETWORK-MODEL-ADMISSION result or production promotion workflow has been captured."
       }
     }
   ]
