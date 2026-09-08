@@ -2159,15 +2159,25 @@ for marker in (
 ):
     if marker not in runbook:
         raise SystemExit(f"release runbook omits independent appcast recovery control: {marker}")
+# The download endpoint stays live under the gated bridge (issue #1445), so the
+# spec/runbook must not claim it was retired. The generalized "every build keeps
+# the key" wording that drifted from DECISION_CRITERIA Entry 156/158 is the stale
+# contract now and must not return. Flatten whitespace so wrapped markdown lines
+# cannot smuggle a forbidden phrase past a literal substring check.
+spec_flat = " ".join(spec.split())
+runbook_flat = " ".join(runbook.split())
 for stale in (
-    "Later app updates are\nowned by the signed CLI compatibility transaction",
-    "every later Malibu build\nmust omit the key",
-    "version must omit the key again",
     "the `download.malibu.tech` endpoint is retired",
     "a retired mutable endpoint",
+    "Every signed Malibu target retains",
+    "later Malibu build retains",
 ):
-    if stale in spec or stale in runbook:
-        raise SystemExit(f"Malibu appcast contract still contains stale v1.8.39-only wording: {stale}")
+    if stale in spec_flat or stale in runbook_flat:
+        raise SystemExit(f"Malibu appcast contract still contains stale wording: {stale}")
+# The frozen anchor is confined to the one-time v1.8.39 bridge; the spec must say
+# so and must not re-generalize key retention to every build.
+if "confined to the one-time v1.8.39 bridge" not in spec_flat:
+    raise SystemExit("SPEC-025 must confine the frozen Sparkle anchor to the v1.8.39 bridge")
 PY
 
 echo "release security posture regression checks passed"
