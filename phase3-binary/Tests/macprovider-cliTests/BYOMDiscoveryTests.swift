@@ -326,6 +326,263 @@ final class BYOMDiscoveryTests: XCTestCase {
         XCTAssertNil(BYOMLoopbackOriginValidator.validatedHTTPOrigin("unix:///tmp/ollama.sock"))
     }
 
+    // #1246 / SPEC-046-R002: the closing rejection matrix for the shared adapter
+    // safety layer. Every rejection class the BYOM epic gate names is asserted
+    // against BOTH admission points so a new adapter cannot reintroduce its own
+    // URL policy: `validatedHTTPOrigin` admits an operator-supplied origin, and
+    // `isSafeLoopbackHTTPURL` re-admits every request URL inside the shared HTTP
+    // client. The only accepted shapes are a literal dotted-quad in 127.0.0.0/8
+    // and literal `::1`, each with an explicit port.
+    func testLoopbackOriginRejectionMatrixCoversEveryNonLoopbackClass() {
+        struct OriginCase {
+            let raw: String
+            let rejectionClass: String
+            let acceptsOrigin: Bool
+            let acceptsRequestURL: Bool
+
+            init(
+                _ raw: String,
+                _ rejectionClass: String,
+                acceptsOrigin: Bool = false,
+                acceptsRequestURL: Bool? = nil
+            ) {
+                self.raw = raw
+                self.rejectionClass = rejectionClass
+                self.acceptsOrigin = acceptsOrigin
+                self.acceptsRequestURL = acceptsRequestURL ?? acceptsOrigin
+            }
+        }
+
+        let cases: [OriginCase] = [
+            // Accepted: literal loopback only.
+            OriginCase("http://127.0.0.1:11434", "loopback ipv4", acceptsOrigin: true),
+            OriginCase("http://127.255.255.254:11434", "loopback ipv4 high", acceptsOrigin: true),
+            OriginCase("http://[::1]:11434", "loopback ipv6", acceptsOrigin: true),
+
+            // LAN / private non-loopback.
+            OriginCase("http://192.168.1.10:11434", "lan rfc1918"),
+            OriginCase("http://10.0.0.5:11434", "lan rfc1918"),
+            OriginCase("http://172.16.0.1:11434", "lan rfc1918"),
+
+            // Public.
+            OriginCase("http://8.8.8.8:11434", "public ipv4"),
+            OriginCase("http://[2606:4700::1111]:11434", "public ipv6"),
+
+            // Wildcard / any-address bind targets.
+            OriginCase("http://0.0.0.0:11434", "wildcard ipv4"),
+            OriginCase("http://[::]:11434", "wildcard ipv6"),
+
+            // Link-local (including a percent-encoded zone id).
+            OriginCase("http://169.254.1.1:11434", "link-local ipv4"),
+            OriginCase("http://[fe80::1]:11434", "link-local ipv6"),
+            OriginCase("http://[fe80::1%25lo0]:11434", "link-local ipv6 zone id"),
+
+            // Multicast.
+            OriginCase("http://224.0.0.1:11434", "multicast ipv4"),
+            OriginCase("http://[ff02::1]:11434", "multicast ipv6"),
+
+            // IPv4-mapped / IPv4-compatible / uncompressed loopback spellings.
+            // These name the loopback host but are NOT the two literal forms the
+            // validator admits, so they stay rejected (fail-closed): admitting
+            // them would mean parsing IPv6 address semantics in the CLI.
+            OriginCase("http://[::ffff:127.0.0.1]:11434", "ipv4-mapped loopback"),
+            OriginCase("http://[::ffff:7f00:1]:11434", "ipv4-mapped hex loopback"),
+            OriginCase("http://[0:0:0:0:0:0:0:1]:11434", "uncompressed ipv6 loopback"),
+
+            // Shorthand / alternate-encoded loopback.
+            OriginCase("http://127.1:11434", "shorthand ipv4 loopback"),
+            OriginCase("http://0177.0.0.1:11434", "octal-encoded loopback"),
+            OriginCase("http://2130706433:11434", "decimal dword loopback"),
+            OriginCase("http://0x7f000001:11434", "hex dword loopback"),
+            OriginCase("http://127.0.0.1.:11434", "trailing-dot loopback"),
+
+            // Hostname-expanded (DNS resolution is never trusted).
+            OriginCase("http://localhost:11434", "hostname-expanded"),
+            OriginCase("http://ip6-localhost:11434", "hostname-expanded ipv6 alias"),
+            OriginCase("http://127.0.0.1.nip.io:11434", "hostname-expanded wildcard dns"),
+            OriginCase("http://my-mac.local:11434", "mDNS .local name"),
+
+            // Credentials / query / fragment / path.
+            OriginCase("http://user:pass@127.0.0.1:11434", "embedded credentials"),
+            OriginCase("http://127.0.0.1:11434?next=http://192.168.1.10", "query string"),
+            OriginCase("http://127.0.0.1:11434#fragment", "fragment"),
+            // A path is rejected as an ORIGIN (operators supply origins only) but
+            // is admissible as a request URL, because the shared client appends
+            // the adapter's fixed path to an already-validated origin.
+            OriginCase("http://127.0.0.1:11434/api/tags", "path in origin", acceptsRequestURL: true),
+
+            // Scheme.
+            OriginCase("https://127.0.0.1:11434", "https scheme"),
+
+            // Port bounds.
+            OriginCase("http://127.0.0.1", "missing port"),
+            OriginCase("http://127.0.0.1:0", "port 0"),
+            OriginCase("http://127.0.0.1:65536", "port above 65535"),
+
+            // Unix-domain sockets.
+            OriginCase("unix:///tmp/ollama.sock", "unix socket"),
+            OriginCase("http+unix://%2Ftmp%2Follama.sock/api/tags", "http+unix socket"),
+        ]
+
+        for originCase in cases {
+            XCTAssertEqual(
+                BYOMLoopbackOriginValidator.validatedHTTPOrigin(originCase.raw) != nil,
+                originCase.acceptsOrigin,
+                "origin admission (\(originCase.rejectionClass)): \(originCase.raw)"
+            )
+            let admitsRequestURL = URL(string: originCase.raw)
+                .map(BYOMLoopbackOriginValidator.isSafeLoopbackHTTPURL) ?? false
+            XCTAssertEqual(
+                admitsRequestURL,
+                originCase.acceptsRequestURL,
+                "request-URL admission (\(originCase.rejectionClass)): \(originCase.raw)"
+            )
+        }
+    }
+
+    // #1246 / SPEC-046-R002: "The CLI MUST NOT scan ports or networks; an adapter
+    // endpoint is either a well-known loopback default for that runtime or an
+    // operator-supplied loopback origin." Proven on the recorded request log of
+    // the hermetic client: exactly one request, to exactly the configured origin,
+    // in the reachable, operator-overridden, and unreachable cases alike.
+    func testDiscoveryContactsOnlyConfiguredLoopbackOriginAndNeverScans() async throws {
+        // The shipped default is a single well-known loopback origin, not a range.
+        XCTAssertEqual(try ModelsDiscoverCommand.parse(["--json"]).ollamaOrigin, "http://127.0.0.1:11434")
+
+        let root = try temporaryDirectory("byom-no-scan")
+
+        let defaultClient = RecordingBYOMHTTPClient()
+        _ = await BYOMDiscoveryRunner(
+            environment: BYOMDiscoveryEnvironment(
+                namespaceURL: root.appendingPathComponent("ns"),
+                mlxCacheRoot: root.appendingPathComponent("hf", isDirectory: true),
+                ollamaOrigin: "http://127.0.0.1:11434"
+            ),
+            httpClient: defaultClient
+        ).discover()
+        XCTAssertEqual(defaultClient.requestLog, ["GET http://127.0.0.1:11434/api/tags"])
+
+        // An operator-supplied loopback origin is honored verbatim — no probing
+        // of the default port, no neighbouring ports, no other loopback address.
+        let operatorClient = RecordingBYOMHTTPClient()
+        _ = await BYOMDiscoveryRunner(
+            environment: BYOMDiscoveryEnvironment(
+                namespaceURL: root.appendingPathComponent("ns"),
+                mlxCacheRoot: root.appendingPathComponent("hf", isDirectory: true),
+                ollamaOrigin: "http://127.4.5.6:39999"
+            ),
+            httpClient: operatorClient
+        ).discover()
+        XCTAssertEqual(operatorClient.requestLog, ["GET http://127.4.5.6:39999/api/tags"])
+
+        // An unreachable default fails closed with adapter_unavailable and does
+        // NOT fall back to any other host or port.
+        let unreachableClient = RecordingBYOMHTTPClient(error: URLError(.cannotConnectToHost))
+        let document = await BYOMDiscoveryRunner(
+            environment: BYOMDiscoveryEnvironment(
+                namespaceURL: root.appendingPathComponent("ns"),
+                mlxCacheRoot: root.appendingPathComponent("hf", isDirectory: true),
+                ollamaOrigin: "http://127.0.0.1:11434"
+            ),
+            httpClient: unreachableClient
+        ).discover()
+        XCTAssertEqual(unreachableClient.requestLog, ["GET http://127.0.0.1:11434/api/tags"])
+        XCTAssertEqual(
+            document.adapters.first { $0.runtimeSource == "ollama_loopback" }?.warningCodes,
+            ["adapter_unavailable"]
+        )
+        XCTAssertEqual(document.adapters.first { $0.runtimeSource == "ollama_loopback" }?.status, "unavailable")
+        XCTAssertTrue(document.candidates.isEmpty)
+    }
+
+    // #1246 / SPEC-046-R002: discovery uses short timeouts. A loopback listener
+    // that completes the TCP handshake and then never answers must surface
+    // adapter_timeout on the discovery path (evaluation is covered by
+    // testEvaluateRuntimeTimeoutFailsClosed), fabricate no candidate, and leak no
+    // endpoint into stdout JSON or stderr diagnostics.
+    func testDiscoveryTimeoutFailsClosedWithoutEndpointLeak() async throws {
+        let root = try temporaryDirectory("byom-discovery-timeout")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let listener = try SilentLoopbackListener()
+        let command = try ModelsDiscoverCommand.parse([
+            "--json",
+            "--local-discovery-namespace-path", root.appendingPathComponent("ns").path,
+            "--mlx-cache-dir", root.appendingPathComponent("hf", isDirectory: true).path,
+            "--ollama-origin", listener.origin,
+        ])
+        let capture = await captureBYOMOutput { try await command.run() }
+
+        XCTAssertNil(capture.error)
+        let object = try jsonObject(capture.stdout)
+        let warnings = try XCTUnwrap(object["warnings"] as? [String])
+        XCTAssertTrue(warnings.contains("adapter_timeout"), "warnings: \(warnings)")
+        XCTAssertTrue(capture.stderr.contains("models discover warning: adapter_timeout"))
+        let adapters = try XCTUnwrap(object["adapters"] as? [[String: Any]])
+        let ollama = try XCTUnwrap(adapters.first { $0["runtime_source"] as? String == "ollama_loopback" })
+        XCTAssertEqual(ollama["status"] as? String, "timeout")
+        XCTAssertEqual(ollama["warning_codes"] as? [String], ["adapter_timeout"])
+        XCTAssertEqual((object["candidates"] as? [Any])?.count, 0)
+
+        let emitted = capture.stdout + capture.stderr
+        for leak in [listener.origin, String(listener.port), "/api/tags", root.path] {
+            XCTAssertFalse(emitted.contains(leak), "timeout diagnostics leaked \(leak)")
+        }
+    }
+
+    // #1246 / SPEC-046-R002: "bounded JSON nesting/parser work". A body well under
+    // the 256KiB byte cap can still be pathologically nested. The shared parsing
+    // layer (StrictJSONParser, depth cap 32, enforced BEFORE the next recursion)
+    // must turn that into the closed adapter_malformed_response code rather than
+    // a stack overflow. Asserted on the shared parser entry points used by
+    // discovery, and end-to-end through the Ollama adapter.
+    func testBoundedJSONNestingFailsClosedWithoutStackOverflow() async throws {
+        let openBrackets = Data(String(repeating: "[", count: 50_000).utf8)
+        let openBraces = Data(String(repeating: "{", count: 50_000).utf8)
+        for hostile in [openBrackets, openBraces] {
+            XCTAssertLessThan(hostile.count, BYOMDiscoveryHTTPBounds.maxBodyBytes)
+            XCTAssertThrowsError(try BYOMDiscoveryJSON.parseOllamaTags(hostile)) { error in
+                guard case BYOMDiscoveryAdapterError.malformed = error else {
+                    return XCTFail("expected malformed, got \(error)")
+                }
+            }
+            XCTAssertNil(BYOMDiscoveryJSON.contextWindowTokens(from: hostile))
+        }
+
+        // Well-formed JSON, under the byte cap, with a pathologically nested
+        // `models` array.
+        let depth = 20_000
+        let nested = Data((
+            #"{"models":["# + String(repeating: "[", count: depth)
+                + String(repeating: "]", count: depth) + "]}"
+        ).utf8)
+        XCTAssertLessThan(nested.count, BYOMDiscoveryHTTPBounds.maxBodyBytes)
+        XCTAssertThrowsError(try BYOMDiscoveryJSON.parseOllamaTags(nested)) { error in
+            guard case BYOMDiscoveryAdapterError.malformed = error else {
+                return XCTFail("expected malformed, got \(error)")
+            }
+        }
+
+        let root = try temporaryDirectory("byom-nesting")
+        let document = await BYOMDiscoveryRunner(
+            environment: BYOMDiscoveryEnvironment(
+                namespaceURL: root.appendingPathComponent("ns"),
+                mlxCacheRoot: root.appendingPathComponent("hf", isDirectory: true),
+                ollamaOrigin: "http://127.0.0.1:11434"
+            ),
+            httpClient: StubBYOMHTTPClient(response: BYOMHTTPResponse(
+                statusCode: 200,
+                headers: [("content-type", "application/json")],
+                body: nested
+            ))
+        ).discover()
+
+        XCTAssertTrue(document.warnings.contains("adapter_malformed_response"))
+        XCTAssertEqual(document.adapters.first { $0.runtimeSource == "ollama_loopback" }?.status, "malformed")
+        XCTAssertTrue(document.candidates.isEmpty)
+        let encoded = try ModelSwitchingWireCodec.encode(document)
+        XCTAssertFalse(encoded.contains("[[["))
+    }
+
     func testAdmissionClientAllowsInsecureHTTPOnlyForExplicitLoopbackTesting() {
         XCTAssertNil(BYOMModelAdmissionClient.httpBaseURL(
             from: "http://127.0.0.1:11434",
@@ -802,6 +1059,87 @@ private final class StubBYOMHTTPClient: BYOMDiscoveryHTTPClient, @unchecked Send
             throw error
         }
         return try XCTUnwrap(response)
+    }
+}
+
+/// Hermetic client that records every request URL the shared safety layer
+/// dispatches, so a test can prove the closed endpoint allowlist (no port or
+/// network scanning) from the request log rather than from adapter internals.
+private final class RecordingBYOMHTTPClient: BYOMDiscoveryHTTPClient, @unchecked Sendable {
+    private let lock = NSLock()
+    private var log: [String] = []
+    private let response: BYOMHTTPResponse?
+    private let error: Error?
+
+    var requestLog: [String] {
+        lock.withLock { log }
+    }
+
+    init(response: BYOMHTTPResponse? = nil, error: Error? = nil) {
+        self.response = response
+        self.error = error
+    }
+
+    func get(_ url: URL, maxHeaderBytes: Int, maxBodyBytes: Int) async throws -> BYOMHTTPResponse {
+        lock.withLock { log.append("GET \(url.absoluteString)") }
+        if let error { throw error }
+        return response ?? BYOMHTTPResponse(
+            statusCode: 200,
+            headers: [("content-type", "application/json")],
+            body: Data(#"{"models":[]}"#.utf8)
+        )
+    }
+
+    func post(_ url: URL, jsonBody: Data, maxHeaderBytes: Int, maxBodyBytes: Int) async throws -> BYOMHTTPResponse {
+        lock.withLock { log.append("POST \(url.absoluteString)") }
+        throw BYOMDiscoveryAdapterError.rejectedNonLoopback
+    }
+}
+
+/// Loopback listener that completes the TCP handshake (kernel backlog) and then
+/// never answers, so a request against it hits the shared client's short request
+/// timeout instead of failing to connect.
+private final class SilentLoopbackListener {
+    let port: UInt16
+    private let socketFD: Int32
+
+    var origin: String { "http://127.0.0.1:\(port)" }
+
+    init() throws {
+        let fd = Darwin.socket(AF_INET, SOCK_STREAM, 0)
+        guard fd >= 0 else { throw POSIXError(.init(rawValue: errno) ?? .EIO) }
+        socketFD = fd
+
+        var reuse: Int32 = 1
+        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &reuse, socklen_t(MemoryLayout<Int32>.size))
+
+        var address = sockaddr_in()
+        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_port = in_port_t(0).bigEndian
+        address.sin_addr = in_addr(s_addr: inet_addr("127.0.0.1"))
+
+        let bindResult = withUnsafePointer(to: &address) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { rebound in
+                Darwin.bind(fd, rebound, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        guard bindResult == 0 else { throw POSIXError(.init(rawValue: errno) ?? .EIO) }
+        guard Darwin.listen(fd, 8) == 0 else { throw POSIXError(.init(rawValue: errno) ?? .EIO) }
+
+        var bound = sockaddr_in()
+        var boundLength = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let nameResult = withUnsafeMutablePointer(to: &bound) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { rebound in
+                Darwin.getsockname(fd, rebound, &boundLength)
+            }
+        }
+        guard nameResult == 0 else { throw POSIXError(.init(rawValue: errno) ?? .EIO) }
+        port = UInt16(bigEndian: bound.sin_port)
+    }
+
+    deinit {
+        Darwin.close(socketFD)
     }
 }
 
