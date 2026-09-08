@@ -5592,6 +5592,71 @@ final class ConsumeCommandTests: XCTestCase {
         XCTAssertEqual(summary.heldReservationCount, 1)
     }
 
+    func testPhase3StartupRecoveryHoldsPriorRunReservationsBeforeAdmission() throws {
+        let home = try makeTemporaryDirectory()
+        let ledgerURL = home.appendingPathComponent("budget.jsonl")
+        let crashedRunID = "crashed-run"
+        let restartRunID = "restart-run"
+        let exposure = ConsumeMicroUSD(rawValue: 1_000_000)
+        let reservationID: String
+
+        do {
+            let crashedLedger = try ConsumeBudgetLedger.open(
+                ledgerPath: ledgerURL.path,
+                homeDirectory: home,
+                startupDirectory: home
+            )
+            reservationID = try crashedLedger.reserve(
+                runID: crashedRunID,
+                amount: exposure,
+                reason: "priced_proxy_forwarding"
+            )
+            let summary = try crashedLedger.summary()
+            XCTAssertEqual(summary.reserved.rawValue, exposure.rawValue)
+            XCTAssertEqual(summary.held.rawValue, 0)
+            XCTAssertEqual(summary.heldReservationCount, 0)
+        }
+
+        let recovered = try ConsumeBudgetConfig.parse(
+            budgetUSD: "1.00",
+            maxRequestUSD: nil,
+            noBudget: false,
+            ledgerPath: ledgerURL.path,
+            allowUnpriced: false,
+            runID: restartRunID,
+            homeDirectory: home,
+            startupDirectory: home
+        )
+        let recoveredLedger = try XCTUnwrap(recovered.ledger)
+        let summary = try recoveredLedger.summary()
+        XCTAssertEqual(summary.reserved.rawValue, 0)
+        XCTAssertEqual(summary.held.rawValue, exposure.rawValue)
+        XCTAssertEqual(summary.heldReservationCount, 1)
+        XCTAssertEqual(try summary.committedExposure().rawValue, exposure.rawValue)
+
+        let admission = try recoveredLedger.reservePricedEstimateForForwarding(
+            runID: restartRunID,
+            budget: exposure,
+            estimate: exposure,
+            maxRequest: nil
+        )
+        guard case .budgetExceeded = admission else {
+            return XCTFail("restart-held exposure must prevent spending the same local budget")
+        }
+
+        let rows = try Data(contentsOf: ledgerURL).split(separator: 0x0a).map {
+            try XCTUnwrap(JSONSerialization.jsonObject(with: Data($0)) as? [String: Any])
+        }
+        XCTAssertEqual(rows.count, 2)
+        XCTAssertEqual(rows[0]["state"] as? String, "reserved")
+        XCTAssertEqual(rows[0]["run_id"] as? String, crashedRunID)
+        XCTAssertEqual(rows[0]["reservation_id"] as? String, reservationID)
+        XCTAssertEqual(rows[1]["state"] as? String, "held")
+        XCTAssertEqual(rows[1]["reason"] as? String, "restart_recovery")
+        XCTAssertEqual(rows[1]["run_id"] as? String, crashedRunID)
+        XCTAssertEqual(rows[1]["reservation_id"] as? String, reservationID)
+    }
+
     func testPhase3BudgetedUnpricedRequestIsHeldUntilRelease() throws {
         let token = try ConsumeLocalToken.generate()
         let home = try makeTemporaryDirectory()
