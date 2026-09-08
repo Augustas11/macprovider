@@ -151,6 +151,109 @@ final class BYOMEvaluationTests: XCTestCase {
         XCTAssertEqual(document.mutationSummary.coordinatorStateMutated, false)
     }
 
+    func testEvaluateStalledRuntimePostHitsEvaluationDeadline() async throws {
+        let root = try temporaryBYOMEvaluationDirectory("byom-eval-stalled-deadline")
+        let productionConfig = try createBYOMEvaluationSentinel(root: root)
+        let productionConfigBefore = try recursiveBYOMEvaluationFileSnapshot(productionConfig)
+        let client = BYOMEvaluationStubHTTPClient(
+            tagsBody: #"{"models":[{"name":"Tiny-Ollama-1B-Q4"}]}"#,
+            postDelayNanoseconds: 500_000_000
+        )
+        let limits = BYOMEvaluationLimits(
+            timeoutSeconds: 0.02,
+            maxRequestBytes: 16 * 1024,
+            maxHeaderBytes: BYOMDiscoveryHTTPBounds.maxHeaderBytes,
+            maxBodyBytes: 256 * 1024,
+            maxOutputBytes: 64 * 1024,
+            maxTokens: 8,
+            requestCount: 1
+        )
+
+        let started = Date()
+        let document = await BYOMEvaluationRunner(
+            target: "ollama:Tiny-Ollama-1B-Q4",
+            environment: BYOMDiscoveryEnvironment(
+                namespaceURL: root.appendingPathComponent("ns"),
+                mlxCacheRoot: root.appendingPathComponent("hf", isDirectory: true),
+                ollamaOrigin: "http://127.0.0.1:11434"
+            ),
+            limits: limits,
+            httpClient: client
+        ).evaluate()
+        let elapsed = Date().timeIntervalSince(started)
+
+        XCTAssertLessThan(elapsed, 0.3)
+        XCTAssertEqual(client.postCount, 1)
+        XCTAssertEqual(client.requestLog, [
+            "GET http://127.0.0.1:11434/api/tags",
+            "POST http://127.0.0.1:11434/v1/chat/completions",
+        ])
+        XCTAssertEqual(document.healthResult, "timed_out")
+        XCTAssertEqual(document.requestCount, 1)
+        XCTAssertEqual(document.outputBytes, 0)
+        XCTAssertNil(document.diagnosticHashes.responseBodySHA256)
+        XCTAssertFalse(document.offerPreconditionsAppearSatisfied)
+        XCTAssertEqual(document.mutationSummary, .none)
+        XCTAssertTrue(document.warnings.contains("adapter_timeout"))
+        XCTAssertTrue(document.warnings.contains("evaluation_failed"))
+        XCTAssertEqual(document.providerGuidance.nextAction, "fix_local_blocker")
+        XCTAssertEqual(document.providerGuidance.earningPathClass, "local_inventory_only")
+        XCTAssertEqual(try recursiveBYOMEvaluationFileSnapshot(productionConfig), productionConfigBefore)
+    }
+
+    func testEvaluateOutputByteCapFailsClosedAndRedactsBody() async throws {
+        let root = try temporaryBYOMEvaluationDirectory("byom-eval-output-cap")
+        let productionConfig = try createBYOMEvaluationSentinel(root: root)
+        let productionConfigBefore = try recursiveBYOMEvaluationFileSnapshot(productionConfig)
+        let oversizedContent = String(repeating: "A", count: 96)
+        let body = #"{"choices":[{"message":{"role":"assistant","content":""# + oversizedContent + #""},"finish_reason":"stop"}],"usage":{"completion_tokens":2}}"#
+        let client = BYOMEvaluationStubHTTPClient(
+            tagsBody: #"{"models":[{"name":"Tiny-Ollama-1B-Q4"}]}"#,
+            postResponse: BYOMHTTPResponse(statusCode: 200, headers: [], body: Data(body.utf8))
+        )
+        let limits = BYOMEvaluationLimits(
+            timeoutSeconds: 1.0,
+            maxRequestBytes: 16 * 1024,
+            maxHeaderBytes: BYOMDiscoveryHTTPBounds.maxHeaderBytes,
+            maxBodyBytes: 256 * 1024,
+            maxOutputBytes: 64,
+            maxTokens: 8,
+            requestCount: 1
+        )
+
+        let document = await BYOMEvaluationRunner(
+            target: "ollama:Tiny-Ollama-1B-Q4",
+            environment: BYOMDiscoveryEnvironment(
+                namespaceURL: root.appendingPathComponent("ns"),
+                mlxCacheRoot: root.appendingPathComponent("hf", isDirectory: true),
+                ollamaOrigin: "http://127.0.0.1:11434"
+            ),
+            limits: limits,
+            httpClient: client
+        ).evaluate()
+
+        XCTAssertEqual(client.postCount, 1)
+        XCTAssertEqual(client.requestLog, [
+            "GET http://127.0.0.1:11434/api/tags",
+            "POST http://127.0.0.1:11434/v1/chat/completions",
+        ])
+        XCTAssertEqual(document.healthResult, "failed")
+        XCTAssertGreaterThan(document.outputBytes, limits.maxOutputBytes)
+        XCTAssertNil(document.completionTokens)
+        XCTAssertNil(document.tokensPerSecond)
+        XCTAssertEqual(document.usageReportingSource, "not_evaluated")
+        XCTAssertEqual(document.capabilityResults["chat_completions"]?.result, "not_tested")
+        XCTAssertFalse(document.offerPreconditionsAppearSatisfied)
+        XCTAssertEqual(document.mutationSummary, .none)
+        XCTAssertNotNil(document.diagnosticHashes.responseBodySHA256)
+        XCTAssertTrue(document.warnings.contains("adapter_response_truncated"))
+        XCTAssertTrue(document.warnings.contains("evaluation_failed"))
+        let encoded = String(decoding: try JSONEncoder().encode(document), as: UTF8.self)
+        XCTAssertFalse(encoded.contains(oversizedContent))
+        XCTAssertFalse(encoded.contains("\"choices\""))
+        XCTAssertEqual(try recursiveBYOMEvaluationFileSnapshot(productionConfig), productionConfigBefore)
+    }
+
     func testProvisioningDoesNotChmodExistingParentDirectory() throws {
         let root = try temporaryBYOMEvaluationDirectory("byom-provision-parent")
         let parent = root.appendingPathComponent("operator-supplied", isDirectory: true)
@@ -402,6 +505,25 @@ final class BYOMEvaluationTests: XCTestCase {
         return result.sorted()
     }
 
+    private func createBYOMEvaluationSentinel(root: URL) throws -> URL {
+        let productionConfig = root.appendingPathComponent("production-config", isDirectory: true)
+        try FileManager.default.createDirectory(at: productionConfig, withIntermediateDirectories: true)
+        try Data(#"{"serving_model":"catalog:stable","admission":"unchanged"}"#.utf8)
+            .write(to: productionConfig.appendingPathComponent("serving.json"))
+        return productionConfig
+    }
+
+    private func recursiveBYOMEvaluationFileSnapshot(_ root: URL) throws -> [String: Data] {
+        guard let enumerator = FileManager.default.enumerator(at: root, includingPropertiesForKeys: [.isRegularFileKey]) else {
+            return [:]
+        }
+        var result: [String: Data] = [:]
+        for case let url as URL in enumerator {
+            result[String(url.path.dropFirst(root.path.count + 1))] = try Data(contentsOf: url)
+        }
+        return result
+    }
+
     private func jsonObject(_ stdout: String) throws -> [String: Any] {
         let line = try XCTUnwrap(stdout.split(whereSeparator: \.isNewline).first { line in
             line.trimmingCharacters(in: .whitespaces).hasPrefix("{")
@@ -415,28 +537,47 @@ private final class BYOMEvaluationStubHTTPClient: BYOMDiscoveryHTTPClient, @unch
     private let tagsBody: String
     private let postResponse: BYOMHTTPResponse?
     private let postError: Error?
+    private let postDelayNanoseconds: UInt64?
     private var posts = 0
+    private var requests: [String] = []
 
     var postCount: Int {
         lock.withLock { posts }
     }
 
-    init(tagsBody: String, postResponse: BYOMHTTPResponse? = nil, postError: Error? = nil) {
+    var requestLog: [String] {
+        lock.withLock { requests }
+    }
+
+    init(
+        tagsBody: String,
+        postResponse: BYOMHTTPResponse? = nil,
+        postError: Error? = nil,
+        postDelayNanoseconds: UInt64? = nil
+    ) {
         self.tagsBody = tagsBody
         self.postResponse = postResponse
         self.postError = postError
+        self.postDelayNanoseconds = postDelayNanoseconds
     }
 
     func get(_ url: URL, maxHeaderBytes: Int, maxBodyBytes: Int) async throws -> BYOMHTTPResponse {
-        BYOMHTTPResponse(statusCode: 200, headers: [("content-type", "application/json")], body: Data(tagsBody.utf8))
+        lock.withLock {
+            requests.append("GET \(url.absoluteString)")
+        }
+        return BYOMHTTPResponse(statusCode: 200, headers: [("content-type", "application/json")], body: Data(tagsBody.utf8))
     }
 
     func post(_ url: URL, jsonBody: Data, maxHeaderBytes: Int, maxBodyBytes: Int) async throws -> BYOMHTTPResponse {
         lock.withLock {
             posts += 1
+            requests.append("POST \(url.absoluteString)")
         }
         if let postError {
             throw postError
+        }
+        if let postDelayNanoseconds {
+            try await Task.sleep(nanoseconds: postDelayNanoseconds)
         }
         return postResponse ?? BYOMHTTPResponse(statusCode: 200, headers: [], body: Data())
     }
