@@ -258,6 +258,14 @@ func main() {
 		fmt.Fprintf(os.Stderr, "BYOM offer storage: %v\n", err)
 		os.Exit(1)
 	}
+	// #1248 disablement matrix, "Offer submit" row. Unset/"enabled" keeps the
+	// current behaviour; "disabled" rejects new SPEC-047 offer submissions
+	// while status readback and withdrawals stay served from the same store.
+	byomSubmissionsDisabled, err := modelAdmissionSubmissionsDisabled(os.Getenv(modelAdmissionSubmissionsEnv))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "BYOM offer submissions policy: %v\n", err)
+		os.Exit(1)
+	}
 	connectionEventStore, err := providerevents.Open(providerevents.DefaultDBPath(cfg.Storage.DBPath))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "provider connection events storage: %v\n", err)
@@ -537,6 +545,7 @@ func main() {
 	wsOpts = append(wsOpts, providerws.WithReferralPolicy(referralPolicy))
 	wsOpts = append(wsOpts, providerws.WithAdmissionStore(admissionStore))
 	wsOpts = append(wsOpts, providerws.WithModelAdmissionStore(byomOfferStore))
+	wsOpts = append(wsOpts, providerws.WithModelAdmissionSubmissionsDisabled(byomSubmissionsDisabled))
 	wsOpts = append(wsOpts, providerws.WithConnectionEventStore(connectionEventStore))
 	wsOpts = append(wsOpts, providerws.WithConnectionEventMetrics(metricsHandle))
 	if canaryStore != nil {
@@ -3027,6 +3036,23 @@ func sameFilePath(a, b string) bool {
 		return filepath.Clean(absA) == filepath.Clean(absB)
 	}
 	return filepath.Clean(a) == filepath.Clean(b)
+}
+
+// modelAdmissionSubmissionsEnv is the #1248 staged-rollout switch for the
+// SPEC-047 offer-submit surface. Accepted values are "" (unset), "enabled",
+// and "disabled"; any other value is a misconfiguration and refuses to boot
+// rather than silently leaving submissions on.
+const modelAdmissionSubmissionsEnv = "MACPROVIDER_MODEL_ADMISSION_SUBMISSIONS"
+
+func modelAdmissionSubmissionsDisabled(raw string) (bool, error) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "", "enabled":
+		return false, nil
+	case "disabled":
+		return true, nil
+	default:
+		return false, fmt.Errorf("%s must be \"enabled\" or \"disabled\"", modelAdmissionSubmissionsEnv)
+	}
 }
 
 func walletMutationGuardHandler() http.Handler {
