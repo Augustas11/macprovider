@@ -96,6 +96,14 @@ High or Medium findings. Review-discovered observe outage recovery, retry
 starvation, incomplete snapshot scope and unlogged-current scope gaps were fixed
 and re-reviewed. The LOW drain-bound note and test limitations below remain.
 
+## PR Publication Follow-Up
+
+PR #1431 rebased the fix onto `58fcd226078438d4c10fa5204496812f9f0f53a7`
+without changing its patch bytes. CI correctly rejected stale historical selector
+evidence for SPEC-006-R003, SPEC-022-R005 and SPEC-022-R008. These mappings are
+demoted to pending, retaining historical evidence; issue #1433 tracks a separately
+authorized evidence refresh before re-promotion. No signed journey was created.
+
 ## Rollout and Residual Risks
 
 - Deploy the coordinator completeness signal first; older coordinator responses
