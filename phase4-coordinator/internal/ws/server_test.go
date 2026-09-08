@@ -1403,6 +1403,92 @@ func TestWarmupProbeTimeoutLeavesProviderRoutable(t *testing.T) {
 	})
 }
 
+func TestHeartbeatModelDriftRevokesSettlementCapableModelAdmission(t *testing.T) {
+	store := providerws.NewMemoryModelAdmissionStore()
+	priorModelID := validHello("m4-anon")["model_id"].(string)
+	offer := providerws.ModelAdmissionEvent{
+		ProviderID:               "m4-anon",
+		CandidateID:              stableModelAdmissionCandidateID("h"),
+		ServedModelRef:           priorModelID,
+		CatalogModelKey:          "qwen2-5-7b",
+		DiscoveryDigestSHA256:    stringsOf("a", 64),
+		EvaluationDigestSHA256:   stringsOf("b", 64),
+		RequestedDisclosureClass: "catalog_binding_requested",
+		ReasonCode:               "provider_offer_submitted",
+		RequestID:                "request_offer_heartbeat_model_drift",
+		Nonce:                    "nonce_offer_heartbeat_model_drift",
+		PayloadDigestSHA256:      stringsOf("c", 64),
+		SignatureDigestSHA256:    stringsOf("d", 64),
+		CreatedAt:                time.Unix(1800000020, 0).UTC(),
+	}
+	submitted, replay, err := store.AppendModelAdmissionOffer(context.Background(), offer)
+	if err != nil || replay {
+		t.Fatalf("append offer replay=%v err=%v", replay, err)
+	}
+	catalogPriced := withTrustedCatalogDecisionFields(submitted)
+	catalogPriced.State = "catalog_priced"
+	catalogPriced.ReasonCode = ""
+	catalogPriced.RequestID = "request_catalog_heartbeat_model_drift"
+	catalogPriced.Nonce = "nonce_catalog_heartbeat_model_drift"
+	catalogPriced.PayloadDigestSHA256 = stringsOf("e", 64)
+	catalogPriced.CreatedAt = time.Unix(1800000030, 0).UTC()
+	catalogPriced, err = store.AppendModelAdmissionDecision(context.Background(), catalogPriced)
+	if err != nil {
+		t.Fatalf("append catalog_priced: %v", err)
+	}
+	settlement := catalogPriced
+	settlement.State = "settlement_capable"
+	settlement.RequestID = "request_settlement_heartbeat_model_drift"
+	settlement.Nonce = "nonce_settlement_heartbeat_model_drift"
+	settlement.PayloadDigestSHA256 = stringsOf("f", 64)
+	settlement.CreatedAt = time.Unix(1800000040, 0).UTC()
+	if _, err := store.AppendModelAdmissionDecision(context.Background(), settlement); err != nil {
+		t.Fatalf("append settlement_capable: %v", err)
+	}
+	shadow := offer
+	shadow.CandidateID = stableModelAdmissionCandidateID("i")
+	shadow.RequestID = "request_shadow_heartbeat_model_drift"
+	shadow.Nonce = "nonce_shadow_heartbeat_model_drift"
+	shadow.PayloadDigestSHA256 = stringsOf("9", 64)
+	shadow.CreatedAt = time.Unix(1800000050, 0).UTC()
+	if _, replay, err := store.AppendModelAdmissionOffer(context.Background(), shadow); err != nil || replay {
+		t.Fatalf("append shadow offer replay=%v err=%v", replay, err)
+	}
+
+	h := newProviderHarnessWithServerOptions(t, nil, []providerws.Option{
+		providerws.WithModelAdmissionStore(store),
+	})
+	defer h.HTTP.Close()
+	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	assignedID := assertHelloAck(t, conn)
+
+	hb := heartbeat()
+	hb["model_id"] = "mlx-community/Qwen3-8B-Instruct-4bit"
+	if err := wsutil.WriteClientText(conn, mustJSON(hb)); err != nil {
+		t.Fatalf("write heartbeat: %v", err)
+	}
+	eventually(t, func() bool {
+		provider, ok := h.Registry.Resolve("m4-anon", assignedID)
+		if !ok || provider.ModelID != hb["model_id"] {
+			return false
+		}
+		latest, found, err := store.LatestModelAdmissionStatus(context.Background(), offer.ProviderID, offer.CandidateID)
+		return err == nil &&
+			found &&
+			latest.State == "revoked" &&
+			latest.PreviousState == "settlement_capable" &&
+			latest.ReasonCode == "runtime_identity_drift"
+	})
+	shadowLatest, found, err := store.LatestModelAdmissionStatus(context.Background(), shadow.ProviderID, shadow.CandidateID)
+	if err != nil || !found || shadowLatest.State != "offer_submitted" {
+		t.Fatalf("shadow candidate latest found=%v state=%q err=%v", found, shadowLatest.State, err)
+	}
+}
+
 // #1354: a zero-token completion records a negative fitness verdict but must not
 // change routing state (replaces TestWarmupGateRejectsZeroTokenCompletion).
 func TestWarmupProbeZeroTokenLeavesProviderRoutable(t *testing.T) {

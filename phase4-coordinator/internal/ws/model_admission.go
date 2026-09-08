@@ -59,6 +59,7 @@ type ModelAdmissionStore interface {
 	AppendModelAdmissionDecision(context.Context, ModelAdmissionEvent) (ModelAdmissionEvent, error)
 	LatestModelAdmissionStatus(context.Context, string, string) (ModelAdmissionEvent, bool, error)
 	LatestModelAdmissionRouteStatus(context.Context, string, string, string) (ModelAdmissionEvent, bool, error)
+	SettlementCapableModelAdmissionStatusesForServedModel(context.Context, string, string) ([]ModelAdmissionEvent, error)
 }
 
 type ModelAdmissionEvent struct {
@@ -270,6 +271,30 @@ func (s *memoryModelAdmissionStore) LatestModelAdmissionRouteStatus(_ context.Co
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return latestModelAdmissionRouteStatusFromEvents(s.events, providerID, servedModelRef, catalogModelKey)
+}
+
+func (s *memoryModelAdmissionStore) SettlementCapableModelAdmissionStatusesForServedModel(_ context.Context, providerID, servedModelRef string) ([]ModelAdmissionEvent, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	servedModelRef = strings.TrimSpace(servedModelRef)
+	seen := map[string]struct{}{}
+	events := make([]ModelAdmissionEvent, 0)
+	for i := len(s.events) - 1; i >= 0; i-- {
+		event := s.events[i]
+		if event.ProviderID != providerID || event.ServedModelRef != servedModelRef {
+			continue
+		}
+		key := event.ProviderID + "|" + event.CandidateID
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		latest := s.latest[key]
+		if ModelAdmissionSettlementStateCandidate(latest) {
+			events = append(events, latest)
+		}
+	}
+	return events, nil
 }
 
 type SQLiteModelAdmissionStore struct {
@@ -692,6 +717,38 @@ func (s *SQLiteModelAdmissionStore) LatestModelAdmissionRouteStatus(ctx context.
  LIMIT 1`), providerID, servedModelRef, catalogModelKey)
 }
 
+func (s *SQLiteModelAdmissionStore) SettlementCapableModelAdmissionStatusesForServedModel(ctx context.Context, providerID, servedModelRef string) ([]ModelAdmissionEvent, error) {
+	servedModelRef = strings.TrimSpace(servedModelRef)
+	rows, err := s.db.QueryContext(ctx, modelAdmissionEventSelect(`
+  FROM model_admission_events e
+  JOIN (
+       SELECT MAX(id) AS latest_id
+         FROM model_admission_events
+        WHERE provider_id = ? AND served_model_ref = ?
+        GROUP BY provider_id, candidate_id
+  ) latest ON latest.latest_id = e.id
+ WHERE e.state = 'settlement_capable'
+ ORDER BY e.id DESC`), providerID, servedModelRef)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var events []ModelAdmissionEvent
+	for rows.Next() {
+		event, err := scanModelAdmissionEventRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		if ModelAdmissionSettlementStateCandidate(event) {
+			events = append(events, event)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return events, nil
+}
+
 // latestModelAdmissionRouteStatusFromEvents mirrors the SQLite store's
 // `ORDER BY id DESC LIMIT 1` route-status semantics: it walks the append-ordered
 // event log from newest to oldest and returns the LAST-APPENDED event matching
@@ -723,10 +780,25 @@ type modelAdmissionQueryer interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 }
 
+type modelAdmissionScanner interface {
+	Scan(...any) error
+}
+
 func scanModelAdmissionEvent(ctx context.Context, q modelAdmissionQueryer, query string, args ...any) (ModelAdmissionEvent, bool, error) {
+	event, err := scanModelAdmissionEventRow(q.QueryRowContext(ctx, query, args...))
+	if err == sql.ErrNoRows {
+		return ModelAdmissionEvent{}, false, nil
+	}
+	if err != nil {
+		return ModelAdmissionEvent{}, false, err
+	}
+	return event, true, nil
+}
+
+func scanModelAdmissionEventRow(row modelAdmissionScanner) (ModelAdmissionEvent, error) {
 	var event ModelAdmissionEvent
 	var createdAt string
-	err := q.QueryRowContext(ctx, query, args...).Scan(
+	err := row.Scan(
 		&event.CoordinatorEventID,
 		&event.Actor,
 		&event.ProviderID,
@@ -752,18 +824,15 @@ func scanModelAdmissionEvent(ctx context.Context, q modelAdmissionQueryer, query
 		&event.SignatureDigestSHA256,
 		&createdAt,
 	)
-	if err == sql.ErrNoRows {
-		return ModelAdmissionEvent{}, false, nil
-	}
 	if err != nil {
-		return ModelAdmissionEvent{}, false, err
+		return ModelAdmissionEvent{}, err
 	}
 	parsed, err := time.Parse(time.RFC3339Nano, createdAt)
 	if err != nil {
-		return ModelAdmissionEvent{}, false, err
+		return ModelAdmissionEvent{}, err
 	}
 	event.CreatedAt = parsed.UTC()
-	return event, true, nil
+	return event, nil
 }
 
 func modelAdmissionEventSelect(tail string) string {
