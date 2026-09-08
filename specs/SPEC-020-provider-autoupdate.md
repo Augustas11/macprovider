@@ -1,6 +1,6 @@
 # SPEC-020 - Provider autoupdate
 
-Version: v0.1.18
+Version: v0.1.19
 Status: Normative; coordinator-independent recovery is reconciled and
 implementation remains nonconformant under issue #610. The production path ran
 the 2026-07-10 incident-recovery
@@ -37,6 +37,10 @@ v0.1.13 removes watchdog rollback ownership. The companion watchdog remains a
 local liveness monitor only; installer, Malibu repair, and CLI startup recovery
 are the only transaction owners allowed to mutate pending markers, rollback
 backups, live release bytes, watchdog scripts, plists, or Malibu app artifacts.
+v0.1.19 adds coordinator wire tier `trusted` to the autoupdate eligibility
+table as a pinned-equivalent pass (encrypted-leg, attestation, and token
+guards still apply). Production MALIBU-verified providers emit `trusted`, not
+`pinned`; the previous table treated that label as notify-only.
 
 ## Goal
 
@@ -137,6 +141,22 @@ The following trust-state table is normative for autoupdate eligibility:
 | v2 accepted | pinned | succeeded with matching AEAD/KID | failed | * | notify-only |
 | v2 accepted | pinned | succeeded with matching AEAD/KID | satisfied or not-required | rejected | notify-only |
 | v2 accepted | pinned | succeeded with matching AEAD/KID | satisfied or not-required | validated or not-configured | **eligible** |
+| v2 accepted | trusted | failed | * | * | notify-only |
+| v2 accepted | trusted | succeeded with matching AEAD/KID | failed | * | notify-only |
+| v2 accepted | trusted | succeeded with matching AEAD/KID | satisfied or not-required | rejected | notify-only |
+| v2 accepted | trusted | succeeded with matching AEAD/KID | satisfied or not-required | validated or not-configured | **eligible** |
+
+**Rationale for `trusted` eligibility.** The coordinator wire domain
+(`phase4-coordinator/internal/pool/provider.go`) emits `pinned` for operator
+pin-list members and `trusted` for earned MALIBU trust. `trusted` is strictly
+stronger than `provisional` and is not an unknown/rejected label. The v0.1.5
+tier gate implemented `if tier != "pinned" { require provisional+opt-in }`, so
+a provider that graduated from provisional to trusted became notify-only for
+coordinator-driven autoupdate and could not receive coordinator-triggered
+automatic updates without SSH.
+`trusted` therefore uses the same autoupdate eligibility as `pinned`. The
+`auto_update_accept_provisional` opt-out does not apply to `trusted` or
+`pinned`. Unrecognized tiers, including `rejected`, remain notify-only.
 
 **Rationale for provisional eligibility.** 100% of the production fleet is
 provisional by design: the coordinator ships with an empty `providers: []`
@@ -1136,8 +1156,10 @@ hello_ack-only, unauthenticated, a notify-only provisional sub-state
 token guards is eligible per the normative trust-state table, not
 notify-only, whether or not it holds a validated token), failed
 encrypted-leg, failed
-attestation, rejected token, or otherwise notify-only coordinator state from
-the normative trust-state table, a newer `recommended_binary_version` does not
+attestation, rejected token, unrecognized coordinator tier (not `pinned`,
+`trusted`, or opted-in `provisional`), or otherwise notify-only coordinator
+state from the normative trust-state table, a newer `recommended_binary_version`
+does not
 trigger download, drain, swap, marker creation, or cooldown. The provider
 records the current table result in an explicit `autoupdate_trust_state` field
 for the coordinator session and re-evaluates that field before each
@@ -1504,6 +1526,13 @@ Deferred to v0.3.0 or later:
 
 ## Change log
 
+- v0.1.19 (2026-09-08): Trust-table amendment: coordinator wire tier `trusted`
+  is autoupdate-eligible on the same encrypted-leg, attestation, and token
+  guards as `pinned`. Closes the production skip where MALIBU-verified
+  providers recorded `reason:provisional` and stayed notify-only after
+  graduating from provisional. Unrecognized tiers remain notify-only. Binary
+  replacement remains independently crypto-gated; this change does not cut a
+  CLI release by itself.
 - v0.1.18 (2026-09-05): R-4.14 write-fence carve-out for supervisor telemetry
   (RFC-001 §7 / F5, #1386). The watchdog may additionally write its own private
   single `supervisor-beacon.json` (a non-executable, non-config diagnostic

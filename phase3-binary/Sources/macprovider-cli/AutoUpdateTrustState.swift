@@ -61,18 +61,23 @@ struct AutoUpdateTrustState: Sendable {
         guard connected else { return .coordinatorDisconnected }
         guard v2Accepted else { return .legacyHelloAck }
         if bearerlessDuplicate { return .bearerlessDuplicate }
-        // Tier gate: pinned always passes. Provisional passes when
-        // acceptProvisional is true (the default; config opts out via
+        // Tier gate: pinned and trusted always pass. The coordinator wire
+        // domain includes `trusted` (earned MALIBU trust; pool.TierTrusted)
+        // as a distinct label from operator `pinned`. Treating unknown
+        // non-provisional tiers as notify-only made production trusted
+        // machines skip coordinator-driven autoupdate after graduating from
+        // provisional. Provisional passes when acceptProvisional is true
+        // (the default; config opts out via
         // `auto_update_accept_provisional: false`). Passing this gate is
         // necessary but not sufficient — the encrypted-leg, attestation, and
         // token-validation guards below still apply. A provisional session
         // reaches `.eligible` whether or not it holds a validated token: the
         // token guard (`!tokenConfigured || tokenValidated`) only blocks a
         // session with a configured-but-invalid token, and passes trivially
-        // when no token is configured at all (SPEC-020 v0.1.5 trust table;
-        // see "Eligible does not always mean bearer-validated").
-        if tier != "pinned" {
-            guard tier == "provisional" && acceptProvisional else { return .provisional }
+        // when no token is configured at all (SPEC-020 v0.1.5/v0.1.19 trust
+        // table; see "Eligible does not always mean bearer-validated").
+        guard Self.tierPassesAutoupdateGate(tier, acceptProvisional: acceptProvisional) else {
+            return .provisional
         }
         guard encryptedLegValid else { return .encryptedLegFailed }
         guard !attestationRequired || attestationSatisfied else { return .attestationFailed }
@@ -86,6 +91,21 @@ struct AutoUpdateTrustState: Sendable {
 
     var lossReason: String {
         stableReason ?? verdict.rawValue
+    }
+
+    /// Coordinator wire tiers that may proceed past the autoupdate tier gate.
+    /// `trusted` is not an alias of `pinned`; it is the earned-trust label the
+    /// coordinator actually emits for MALIBU-verified providers. Unknown
+    /// values (including `rejected`) stay notify-only.
+    static func tierPassesAutoupdateGate(_ tier: String?, acceptProvisional: Bool) -> Bool {
+        switch tier {
+        case "pinned", "trusted":
+            return true
+        case "provisional":
+            return acceptProvisional
+        default:
+            return false
+        }
     }
 
     static func fromCoordinatorPayload(
