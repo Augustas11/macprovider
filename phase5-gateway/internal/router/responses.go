@@ -248,6 +248,9 @@ func (a *responsesAdapter) prepareNonStreamingResponse(body []byte) error {
 }
 
 func (a *responsesAdapter) translateRequest(body []byte) ([]byte, *responsesTranslationError) {
+	if err := validateResponsesRequestFieldNames(body); err != nil {
+		return nil, &responsesTranslationError{code: "invalid_request", message: err.Error()}
+	}
 	var req struct {
 		Model              string           `json:"model"`
 		Input              json.RawMessage  `json:"input"`

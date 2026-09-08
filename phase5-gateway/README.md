@@ -16,7 +16,8 @@ Phase 5 gateway implementation for SPEC-006 v0.9.13. The gateway is intentionall
 - OpenAI-shaped chat forwarding to `coordinator.buyer_url`, including SSE pass-through and buyer disconnect cancellation.
 - `/v1/models`, `/v1/usage`, `/v1/chat/completions`, optional stateless `/v1/responses`, `/v1/status`, `/v1/feedback`, `/healthz`.
 - OpenAI-shaped chat forwarding to `coordinator.buyer_url`, including SSE pass-through and buyer disconnect cancellation; the optional Responses facade translates into the same billed path.
-- Quota reservation/settlement for success, 503 refund, 502/504 prompt-only or partial usage, demo chat usage, provider-reported streaming actuals, and byte-estimation fallback.
+- Quota reservation/settlement for success, 503 refund, 502/504 prompt-only or partial usage, demo chat usage, provider-reported streaming actuals, and byte-estimation fallback for legacy/observe traffic. Covered SPEC-022 enforce traffic retains receipt authority: missing declared finality holds the reservation for reconciliation, and facade validation errors cannot authorize a fallback debit.
+- Chat/Responses admission rejects duplicate or noncanonical recognized request fields before reservation and dispatch, preventing case-dependent token-cap interpretation across services.
 - Storage-backed per-account concurrency caps.
 - Inbound and outbound `X-MacProvider-*` stripping plus UUID-v4 `X-Request-ID` generation/forwarding.
 - Buyer-safe `/v1/status` from coordinator `/poolz` with redaction and 10-second cache.
@@ -24,6 +25,56 @@ Phase 5 gateway implementation for SPEC-006 v0.9.13. The gateway is intentionall
 - Deployment templates in `dist/` and AC status matrix in `docs/AC_STATUS.md`.
 
 Known gaps before production are documented in `docs/AC_STATUS.md`: live GitHub OAuth, live OpenAI SDK smoke, Pearl nginx/systemd verification, and front-door migration/docs checks.
+
+## OAuth Handoff Custody
+
+OAuth `return_to` redirects carry a five-minute, single-use handoff token. The
+database stores its hash and account-bound issuance intent, not an API key.
+Exchange generates the key in memory and atomically stores only its hash while
+consuming the intent. The handoff callback does not also deliver a key cookie.
+Direct `/account` delivery remains available, including when intent persistence
+fails; failed or expired handoffs require a fresh OAuth flow with `action=mint`.
+
+Schema version 12 invalidates every legacy plaintext handoff, including consumed
+rows, and replaces the table without its `api_key` column. Stop the old gateway
+before upgrading and migrate before serving requests; do not run old and new
+binaries against the same database. In-flight legacy handoffs must restart OAuth.
+Older binaries refuse the version-12 database. A rollback must follow the existing
+snapshot/drain/reconciliation policy, not simply restore a snapshot after new
+auth or billing traffic has occurred.
+
+This migration does not revoke existing API keys or erase historical database
+pages, WAL files, snapshots or backups containing old handoffs. Assess those
+copies and authorize any necessary key revocation or retention cleanup separately;
+do not print recovered keys or assume logical row deletion erased old secrets.
+
+## Receipt Finality Recovery
+
+Missing declared settlement trailers do not authorize a local debit. The gateway
+holds the reservation and persists its local usage candidate, bound to the exact
+reservation generation, before attempting observe-mode recovery. Reconciliation
+can recover that candidate after an authority outage or gateway restart without
+substituting receipt totals for locally observed usage.
+Retry order is persisted so unavailable older requests cannot monopolize bounded
+reconciliation batches across restarts.
+
+Deploy the coordinator update first: recovery requires its authenticated
+`mode_scope_complete` signal, a matching request scope containing the current
+`X-MacProvider-Internal-Request-ID`, and the recognized observe policy. The
+`required_internal_request_id` lookup fence prevents an earlier logged retry from
+authorizing recovery before the current attempt is visible. Older coordinator
+responses, incomplete or mixed scopes, and unavailable
+authority leave the candidate held. Enforce-mode receipt finality remains
+authoritative; local facade validation cannot replace it. Observe fallback is not
+a verified-receipt or privacy-conformance claim.
+
+Schema version 12 also stores recovery candidates. Historical holds created before
+candidate persistence are not automatically reconstructed; assess those through
+the existing reconciliation and operator procedures.
+Requests without the current-attempt header also cannot create an automatically
+recoverable observe candidate. Their empty binding is persisted as a hold that
+cannot enter unbound reconciliation; deploy the coordinator first to avoid these
+holds.
 
 ## Local Development
 

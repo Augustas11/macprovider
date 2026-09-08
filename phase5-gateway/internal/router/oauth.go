@@ -120,74 +120,46 @@ func (s *Server) handleGitHubCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var fullKey string
+	issueKey := false
+	keyAction := ""
 	account, err := s.store.LookupAccountByIdentity(r.Context(), "github", identity.ProviderUserID)
 	if errors.Is(err, storage.ErrNotFound) {
 		account, err = s.createSignupAccount(w, r.Context(), r, identity)
 		if err != nil {
 			return
 		}
-		fullKey, _, err = s.keyMgr.Issue(r.Context(), s.store, account.AccountID)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "server_error", "api_key_issuance_failed", "Could not issue API key")
-			return
-		}
+		issueKey = true
 	} else if err != nil {
 		writeError(w, http.StatusInternalServerError, "server_error", "account_lookup_failed", "Could not load account")
 		return
 	} else if action == "mint" {
-		// Existing account, operator-initiated mint. Issue a fresh API key
-		// and deliver via the same one-shot cookie the signup path uses.
-		// keyMgr.Issue stores the new key alongside existing ones; the user
-		// can revoke older keys via POST /auth/api-keys/{key_id}/revoke once
-		// they have a working bearer. Re-issuing (not rotating) preserves
-		// any other still-in-use keys the operator has elsewhere.
-		var summary storage.APIKey
-		fullKey, summary, err = s.keyMgr.Issue(r.Context(), s.store, account.AccountID)
+		issueKey = true
+		keyAction = "mint"
+	}
+	if returnTo != "" {
+		if !issueKey {
+			s.redirectOAuthReturn(w, r, returnTo, "no_key")
+			return
+		}
+		if err := s.redirectOAuthHandoff(r.Context(), w, r, returnTo, account.AccountID, keyAction); err == nil {
+			return
+		}
+		// No key exists yet. If intent persistence fails, issue directly to
+		// the gateway's one-shot /account cookie instead of persisting a key.
+	}
+	if issueKey {
+		fullKey, summary, err := s.keyMgr.Issue(r.Context(), s.store, account.AccountID)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "server_error", "api_key_issuance_failed", "Could not issue API key")
 			return
 		}
-		// Audit payload includes key_id and key_prefix so the lifecycle of
-		// each minted key is traceable end-to-end alongside the revoke/rotate
-		// events in api_key_events. account_id is in Actor; the action label
-		// is in Type so it is filterable without parsing payload.
-		_ = s.store.InsertAuditEvent(r.Context(), storage.AuditEvent{
-			EventID: mustID("audit"), RequestID: requestID(r), Actor: account.AccountID,
-			Type: "api_key_minted_via_oauth",
-			Payload: fmt.Sprintf(`{"action":"mint","key_id":%q,"key_prefix":%q}`,
-				summary.KeyID, summary.KeyHashPrefix),
-			CreatedAt: s.now(),
-		})
-	}
-	// The mp_new_api_key cookie is scoped to the gateway origin's /account
-	// path, so it is not readable by any Malibu return_to page. Setting it
-	// on every fullKey!="" path (not just the legacy /account redirect)
-	// keeps the fallback: if the handoff persistence fails after we have
-	// already consumed the OAuth state and issued the key, the user can
-	// still recover the key by visiting api.malibu.tech/account.
-	if fullKey != "" {
+		if keyAction == "mint" {
+			s.recordOAuthKeyMint(r, account.AccountID, summary)
+		}
 		http.SetCookie(w, &http.Cookie{
 			Name: "mp_new_api_key", Value: fullKey, Path: "/account", HttpOnly: true,
 			Secure: s.secureCookies(), SameSite: http.SameSiteLaxMode, MaxAge: 300,
 		})
-	}
-	if returnTo != "" {
-		if fullKey == "" {
-			s.redirectOAuthReturn(w, r, returnTo, "no_key")
-			return
-		}
-		if err := s.redirectOAuthHandoff(r.Context(), w, r, returnTo, fullKey); err != nil {
-			// Handoff-token persistence failed AFTER the OAuth state was
-			// consumed and a fresh API key was minted. The Malibu handoff
-			// contract can no longer complete (there is no token to
-			// exchange), so we anchor the recovery UX in the gateway itself:
-			// redirect to /account, which reads the mp_new_api_key cookie
-			// set above and shows the key. This keeps the recovery path
-			// stable regardless of what the paired client does on error.
-			http.Redirect(w, r, s.cfg.Public.AccountPath, http.StatusFound)
-		}
-		return
 	}
 	http.Redirect(w, r, s.cfg.Public.AccountPath, http.StatusFound)
 }
@@ -209,13 +181,31 @@ func (s *Server) handleHandoffExchange(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request_error", "invalid_handoff", "Handoff token is invalid")
 		return
 	}
-	apiKey, err := s.store.ConsumeOAuthHandoff(r.Context(), auth.StateHash(req.Handoff), s.now())
+	apiKey, key, err := s.keyMgr.Generate("")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "server_error", "api_key_issuance_failed", "Could not issue API key")
+		return
+	}
+	handoff, err := s.store.ConsumeOAuthHandoff(r.Context(), auth.StateHash(req.Handoff), key, s.now())
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request_error", "invalid_handoff", "Handoff token is invalid")
 		return
 	}
+	if handoff.Action == "mint" {
+		s.recordOAuthKeyMint(r, handoff.AccountID, key)
+	}
 	setNoStoreHeaders(w.Header())
 	writeJSON(w, http.StatusOK, map[string]any{"api_key": apiKey})
+}
+
+func (s *Server) recordOAuthKeyMint(r *http.Request, accountID string, key storage.APIKey) {
+	_ = s.store.InsertAuditEvent(r.Context(), storage.AuditEvent{
+		EventID: mustID("audit"), RequestID: requestID(r), Actor: accountID,
+		Type: "api_key_minted_via_oauth",
+		Payload: fmt.Sprintf(`{"action":"mint","key_id":%q,"key_prefix":%q}`,
+			key.KeyID, key.KeyHashPrefix),
+		CreatedAt: s.now(),
+	})
 }
 
 func (s *Server) createSignupAccount(w http.ResponseWriter, ctx context.Context, r *http.Request, identity auth.OAuthIdentity) (storage.Account, error) {
@@ -360,7 +350,7 @@ func (s *Server) callbackAllowed(callback string) bool {
 	return false
 }
 
-func (s *Server) redirectOAuthHandoff(ctx context.Context, w http.ResponseWriter, r *http.Request, returnTo, apiKey string) error {
+func (s *Server) redirectOAuthHandoff(ctx context.Context, w http.ResponseWriter, r *http.Request, returnTo, accountID, action string) error {
 	token, err := auth.StateToken()
 	if err != nil {
 		return err
@@ -368,7 +358,8 @@ func (s *Server) redirectOAuthHandoff(ctx context.Context, w http.ResponseWriter
 	now := s.now()
 	if err := s.store.StoreOAuthHandoff(ctx, storage.OAuthHandoff{
 		TokenHash: auth.StateHash(token),
-		APIKey:    apiKey,
+		AccountID: accountID,
+		Action:    action,
 		CreatedAt: now,
 		ExpiresAt: now.Add(5 * time.Minute),
 	}); err != nil {

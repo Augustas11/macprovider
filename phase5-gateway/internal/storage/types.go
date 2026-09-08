@@ -66,7 +66,8 @@ type OAuthState struct {
 
 type OAuthHandoff struct {
 	TokenHash  []byte
-	APIKey     string
+	AccountID  string
+	Action     string
 	CreatedAt  time.Time
 	ExpiresAt  time.Time
 	ConsumedAt time.Time
@@ -136,6 +137,24 @@ type ActiveReservation struct {
 	CreatedAt       time.Time
 }
 
+// SettlementFallbackCandidate preserves local usage while request-scoped
+// coordinator mode is unavailable. It is not authority to debit on its own.
+type SettlementFallbackCandidate struct {
+	AccountID                 string
+	RequestID                 string
+	RequiredInternalRequestID string
+	ReservationCreatedAt      time.Time
+	WalletSessionID           string
+	DemoIdentity              string
+	DemoTokenHash             string
+	WindowDate                string
+	PromptTokens              int64
+	CompletionTokens          int64
+	MaxTotalTokens            int64
+	TokenSource               string
+	Outcome                   string
+}
+
 type QuotaDecision struct {
 	Admitted        bool
 	LimitTokens     int64
@@ -146,15 +165,16 @@ type QuotaDecision struct {
 }
 
 type ReservationSettlement struct {
-	AccountID        string
-	RequestID        string
-	PromptTokens     int64
-	CompletionTokens int64
-	TotalTokens      int64
-	MaxTotalTokens   int64
-	TokenSource      string
-	Outcome          string
-	SettledAt        time.Time
+	ExpectedReservationCreatedAt time.Time
+	AccountID                    string
+	RequestID                    string
+	PromptTokens                 int64
+	CompletionTokens             int64
+	TotalTokens                  int64
+	MaxTotalTokens               int64
+	TokenSource                  string
+	Outcome                      string
+	SettledAt                    time.Time
 }
 
 type ConcurrencyRequest struct {
@@ -348,16 +368,17 @@ type WalletSessionDispatchArm struct {
 }
 
 type WalletSessionReservationSettlement struct {
-	SessionID        string
-	AccountID        string
-	RequestID        string
-	PromptTokens     int64
-	CompletionTokens int64
-	TotalTokens      int64
-	MaxTotalTokens   int64
-	TokenSource      string
-	Outcome          string
-	SettledAt        time.Time
+	ExpectedReservationCreatedAt time.Time
+	SessionID                    string
+	AccountID                    string
+	RequestID                    string
+	PromptTokens                 int64
+	CompletionTokens             int64
+	TotalTokens                  int64
+	MaxTotalTokens               int64
+	TokenSource                  string
+	Outcome                      string
+	SettledAt                    time.Time
 }
 
 type FeedbackEvent struct {

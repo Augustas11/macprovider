@@ -8,9 +8,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/augstar/macprovider-gateway/internal/auth"
 	"github.com/augstar/macprovider-gateway/internal/config"
@@ -19,11 +23,7 @@ import (
 )
 
 // failingHandoffStore wraps a Store and forces StoreOAuthHandoff to fail.
-// The wrapper is used to pin the recovery UX when handoff persistence
-// breaks after the OAuth state has been consumed and the API key issued —
-// the callback must redirect to the gateway /account page (which reads the
-// mp_new_api_key cookie) so the user can retrieve the newly minted key
-// without depending on the paired client's error-handling behavior.
+// Recovery issues directly to /account only after intent persistence fails.
 type failingHandoffStore struct {
 	Store
 }
@@ -81,7 +81,7 @@ func TestReturnToAllowedRejectsPrefixAndTraversal(t *testing.T) {
 
 func TestOAuthHandoffFlowRoundTrip(t *testing.T) {
 	identity := auth.OAuthIdentity{ProviderUserID: "handoff-user", Scopes: []string{"read:user"}}
-	h, _, _, _ := newTestHarnessConfig(t, fakeOAuth{identity: identity}, withMalibuReturnTo)
+	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{identity: identity}, withMalibuReturnTo)
 	returnTo := "https://malibu.tech/console/auth/callback.html"
 
 	startPath := "/auth/github/start?redirect_uri=" + url.QueryEscape("https://api.malibu.tech/auth/github/callback") + "&return_to=" + url.QueryEscape(returnTo)
@@ -126,9 +126,15 @@ func TestOAuthHandoffFlowRoundTrip(t *testing.T) {
 	if got := callbackResp.Header().Get("Cache-Control"); got != "no-store" {
 		t.Fatalf("Cache-Control=%q want no-store", got)
 	}
-	// Fallback cookie is set so /account still works if Malibu is unreachable.
-	if findCookie(callbackResp, "mp_new_api_key") == "" {
-		t.Fatal("mp_new_api_key fallback cookie missing on handoff callback")
+	if findCookie(callbackResp, "mp_new_api_key") != "" {
+		t.Fatal("handoff callback must not issue or expose a key before exchange")
+	}
+	account, err := store.LookupAccountByIdentity(context.Background(), "github", identity.ProviderUserID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if keys, err := store.ListAPIKeys(context.Background(), account.AccountID); err != nil || len(keys) != 0 {
+		t.Fatalf("keys before exchange=%d err=%v", len(keys), err)
 	}
 
 	body, _ := json.Marshal(map[string]string{"handoff": handoff})
@@ -151,6 +157,22 @@ func TestOAuthHandoffFlowRoundTrip(t *testing.T) {
 	if !strings.HasPrefix(reply.APIKey, "mp_") {
 		t.Fatalf("api_key=%q must start with mp_", reply.APIKey)
 	}
+	manager := auth.NewKeyManager(cfg.Auth.KeyPrefix, cfg.Auth.KeyHash, cfg.Auth.KeyHashSecret)
+	if validation, err := manager.Validate(context.Background(), store, reply.APIKey); err != nil || validation.AccountID != account.AccountID {
+		t.Fatalf("exchanged key account=%q err=%v", validation.AccountID, err)
+	}
+	for _, path := range []string{cfg.Storage.DBPath, cfg.Storage.DBPath + "-wal"} {
+		data, err := os.ReadFile(path)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bytes.Contains(data, []byte(reply.APIKey)) || bytes.Contains(data, []byte(handoff)) {
+			t.Fatal("OAuth flow persisted a raw credential")
+		}
+	}
 
 	// Replay must fail with the same generic error surface.
 	replayReq := httptest.NewRequest(http.MethodPost, "/auth/handoff/exchange", bytes.NewReader(body))
@@ -163,14 +185,14 @@ func TestOAuthHandoffFlowRoundTrip(t *testing.T) {
 	if !strings.Contains(replayResp.Body.String(), "invalid_handoff") {
 		t.Fatalf("replay body=%q want invalid_handoff", replayResp.Body.String())
 	}
+	if keys, err := store.ListAPIKeys(context.Background(), account.AccountID); err != nil || len(keys) != 1 {
+		t.Fatalf("keys after replay=%d err=%v", len(keys), err)
+	}
 }
 
 // TestOAuthHandoffPersistenceFailureRedirectsToAccount pins the recovery
-// contract when StoreOAuthHandoff fails after the OAuth state is consumed
-// and the API key is minted. The callback must NOT redirect back to
-// Malibu (there is no handoff token to exchange) — it must anchor the
-// recovery UX inside the gateway by redirecting to Public.AccountPath so
-// the pre-set mp_new_api_key cookie can hand the user their key.
+// contract when intent persistence fails: issue once to the gateway cookie
+// and redirect to /account, without requiring a handoff exchange.
 func TestOAuthHandoffPersistenceFailureRedirectsToAccount(t *testing.T) {
 	identity := auth.OAuthIdentity{ProviderUserID: "handoff-fail-user", Scopes: []string{"read:user"}}
 	cfg := config.Default()
@@ -250,6 +272,124 @@ func TestHandoffExchangeErrorSurface(t *testing.T) {
 	h.ServeHTTP(unknownResp, unknownReq)
 	if unknownResp.Code != http.StatusBadRequest || !strings.Contains(unknownResp.Body.String(), "invalid_handoff") {
 		t.Fatalf("unknown token status=%d body=%s", unknownResp.Code, unknownResp.Body.String())
+	}
+}
+
+func TestOAuthHandoffConcurrentHTTPExchange(t *testing.T) {
+	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, withMalibuReturnTo)
+	ctx := context.Background()
+	if err := store.CreateAccount(ctx, storage.Account{
+		AccountID: "acct_handoff", Status: "active", QuotaClass: "default", ConcurrencyClass: "default", CreatedAt: fixedNow(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	token, err := auth.StateToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.StoreOAuthHandoff(ctx, storage.OAuthHandoff{
+		TokenHash: auth.StateHash(token), AccountID: "acct_handoff", Action: "mint",
+		CreatedAt: fixedNow(), ExpiresAt: fixedNow().Add(5 * time.Minute),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	body, _ := json.Marshal(map[string]string{"handoff": token})
+	var succeeded atomic.Int32
+	var rejected atomic.Int32
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			response := httptest.NewRecorder()
+			h.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/auth/handoff/exchange", bytes.NewReader(body)))
+			switch response.Code {
+			case http.StatusOK:
+				succeeded.Add(1)
+				var reply struct {
+					APIKey string `json:"api_key"`
+				}
+				if err := json.Unmarshal(response.Body.Bytes(), &reply); err != nil {
+					t.Errorf("decode: %v", err)
+					return
+				}
+				manager := auth.NewKeyManager(cfg.Auth.KeyPrefix, cfg.Auth.KeyHash, cfg.Auth.KeyHashSecret)
+				if validation, err := manager.Validate(ctx, store, reply.APIKey); err != nil || validation.AccountID != "acct_handoff" {
+					t.Errorf("issued key account=%q err=%v", validation.AccountID, err)
+				}
+			case http.StatusBadRequest:
+				rejected.Add(1)
+				if !strings.Contains(response.Body.String(), "invalid_handoff") {
+					t.Error("replay response did not use generic invalid_handoff")
+				}
+			default:
+				t.Errorf("exchange status=%d", response.Code)
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	if succeeded.Load() != 1 || rejected.Load() != 15 {
+		t.Fatalf("succeeded=%d rejected=%d", succeeded.Load(), rejected.Load())
+	}
+	if keys, err := store.ListAPIKeys(ctx, "acct_handoff"); err != nil || len(keys) != 1 {
+		t.Fatalf("issued keys=%d err=%v", len(keys), err)
+	}
+}
+
+func TestOAuthHandoffExistingAccountIntent(t *testing.T) {
+	for _, action := range []string{"", "mint"} {
+		t.Run("action_"+action, func(t *testing.T) {
+			ctx := context.Background()
+			identity := auth.OAuthIdentity{ProviderUserID: "existing-handoff", Scopes: []string{"read:user"}}
+			h, store, _, _ := newTestHarnessConfig(t, fakeOAuth{identity: identity}, withMalibuReturnTo)
+			completeOAuth(t, h, "", "https://api.malibu.tech/auth/github/callback")
+			account, err := store.LookupAccountByIdentity(ctx, "github", identity.ProviderUserID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			query := url.Values{"action": {action}, "return_to": {"https://malibu.tech/console/auth/callback.html"}}
+			start := httptest.NewRecorder()
+			h.ServeHTTP(start, httptest.NewRequest(http.MethodGet, "/auth/github/start?"+query.Encode(), nil))
+			location, err := url.Parse(start.Header().Get("Location"))
+			if err != nil || start.Code != http.StatusFound {
+				t.Fatalf("start status=%d err=%v", start.Code, err)
+			}
+			callback := httptest.NewRequest(http.MethodGet, "/auth/github/callback?code=ok&state="+url.QueryEscape(location.Query().Get("state")), nil)
+			for _, cookie := range start.Result().Cookies() {
+				callback.AddCookie(cookie)
+			}
+			response := httptest.NewRecorder()
+			h.ServeHTTP(response, callback)
+			if response.Code != http.StatusFound || findCookie(response, "mp_new_api_key") != "" {
+				t.Fatalf("callback status=%d or premature key cookie", response.Code)
+			}
+			if keys, err := store.ListAPIKeys(ctx, account.AccountID); err != nil || len(keys) != 1 {
+				t.Fatalf("keys before exchange=%d err=%v", len(keys), err)
+			}
+			target, err := url.Parse(response.Header().Get("Location"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			token := target.Query().Get("handoff")
+			if action == "" {
+				if token != "" || target.Query().Get("error") != "no_key" {
+					t.Fatal("plain sign-in unexpectedly created an issuance intent")
+				}
+				return
+			}
+			body, _ := json.Marshal(map[string]string{"handoff": token})
+			exchange := httptest.NewRecorder()
+			h.ServeHTTP(exchange, httptest.NewRequest(http.MethodPost, "/auth/handoff/exchange", bytes.NewReader(body)))
+			if exchange.Code != http.StatusOK {
+				t.Fatalf("exchange status=%d", exchange.Code)
+			}
+			if keys, err := store.ListAPIKeys(ctx, account.AccountID); err != nil || len(keys) != 2 {
+				t.Fatalf("keys after mint=%d err=%v", len(keys), err)
+			}
+		})
 	}
 }
 

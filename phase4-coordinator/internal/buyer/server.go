@@ -1124,6 +1124,14 @@ func (s *Server) handleInternalSettlementFinality(w http.ResponseWriter, r *http
 		writeError(w, http.StatusBadRequest, "invalid_request", "account_id and request_id are required")
 		return
 	}
+	requiredInternalRequestID := ""
+	if values, present := r.URL.Query()["required_internal_request_id"]; present {
+		if len(values) != 1 || sanitizeExternalRequestID(values[0]) == "" {
+			writeError(w, http.StatusBadRequest, "invalid_request", "required_internal_request_id must be a single valid request id")
+			return
+		}
+		requiredInternalRequestID = sanitizeExternalRequestID(values[0])
+	}
 	reservationCreatedAtUnixMS := int64(0)
 	if raw := strings.TrimSpace(r.URL.Query().Get("reservation_created_at_unix_ms")); raw != "" {
 		parsed, err := strconv.ParseInt(raw, 10, 64)
@@ -1133,12 +1141,23 @@ func (s *Server) handleInternalSettlementFinality(w http.ResponseWriter, r *http
 		}
 		reservationCreatedAtUnixMS = parsed
 	}
+	if requiredInternalRequestID != "" && reservationCreatedAtUnixMS == 0 {
+		writeError(w, http.StatusBadRequest, "invalid_request", "A required internal request id requires a positive reservation_created_at_unix_ms")
+		return
+	}
 	billingStore, _, _ := s.billingState()
 	if billingStore == nil {
 		writeError(w, http.StatusNotFound, "not_found", "Settlement finality is unavailable")
 		return
 	}
-	finality, found, err := billingStore.RequestSettlementFinalityForAccount(r.Context(), accountID, requestID, s.now().UnixMilli(), reservationCreatedAtUnixMS)
+	var finality billing.RequestSettlementFinality
+	var found bool
+	var err error
+	if requiredInternalRequestID != "" {
+		finality, found, err = billingStore.RequestSettlementFinalityForAccountBound(r.Context(), accountID, requestID, requiredInternalRequestID, s.now().UnixMilli(), reservationCreatedAtUnixMS)
+	} else {
+		finality, found, err = billingStore.RequestSettlementFinalityForAccount(r.Context(), accountID, requestID, s.now().UnixMilli(), reservationCreatedAtUnixMS)
+	}
 	if err != nil {
 		s.log.Warn().Err(err).Str("request_id", requestID).Str("account_id", accountID).Msg("internal settlement finality lookup failed")
 		writeError(w, http.StatusInternalServerError, "settlement_finality_failed", "Could not load settlement finality")
@@ -2343,6 +2362,9 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// Coordinator-owned initial metadata binds recovery independently of
+	// settlement trailers and follows any idempotency-assigned internal ID.
+	w.Header().Set("X-MacProvider-Internal-Request-ID", requestID)
 	if !s.pool.ModelKnown(req.Model) && s.resolveModelClass(req.Model) == nil {
 		rec.logBuyerFailure(http.StatusNotFound, "No provider has advertised model "+req.Model)
 		writeError(w, http.StatusNotFound, "model_not_found", "No provider has advertised model "+req.Model)

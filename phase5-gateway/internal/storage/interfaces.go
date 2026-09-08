@@ -20,7 +20,7 @@ type AuthStore interface {
 	StoreOAuthStateWithCap(ctx context.Context, state OAuthState, maxPerIP int, now time.Time) error
 	ConsumeOAuthState(ctx context.Context, stateHash []byte, sessionID string, now time.Time) (redirectURI, action, returnTo string, err error)
 	StoreOAuthHandoff(ctx context.Context, handoff OAuthHandoff) error
-	ConsumeOAuthHandoff(ctx context.Context, tokenHash []byte, now time.Time) (apiKey string, err error)
+	ConsumeOAuthHandoff(ctx context.Context, tokenHash []byte, key APIKey, now time.Time) (OAuthHandoff, error)
 	PruneExpiredOAuthHandoffs(ctx context.Context, now time.Time) (int64, error)
 	PruneExpiredOAuthState(ctx context.Context, now time.Time) (int64, error)
 	ReservePublicIssuance(ctx context.Context, reservation PublicIssuanceReservation) error
@@ -54,7 +54,7 @@ type OAuthStateStore interface {
 	StoreOAuthStateWithCap(ctx context.Context, state OAuthState, maxPerIP int, now time.Time) error
 	ConsumeOAuthState(ctx context.Context, stateHash []byte, sessionID string, now time.Time) (redirectURI, action, returnTo string, err error)
 	StoreOAuthHandoff(ctx context.Context, handoff OAuthHandoff) error
-	ConsumeOAuthHandoff(ctx context.Context, tokenHash []byte, now time.Time) (apiKey string, err error)
+	ConsumeOAuthHandoff(ctx context.Context, tokenHash []byte, key APIKey, now time.Time) (OAuthHandoff, error)
 	PruneExpiredOAuthHandoffs(ctx context.Context, now time.Time) (int64, error)
 	PruneExpiredOAuthState(ctx context.Context, now time.Time) (int64, error)
 }
@@ -74,6 +74,9 @@ type UsageStore interface {
 	MarkReservationSettlementHold(ctx context.Context, accountID, requestID string) error
 	ClampReservationExpiry(ctx context.Context, accountID, requestID string, expiresAt time.Time) error
 	ListSettlementHeldReservations(ctx context.Context, limit int) ([]ActiveReservation, error)
+	MarkSettlementReconcileAttempt(ctx context.Context, reservation ActiveReservation) error
+	SaveSettlementFallbackCandidate(ctx context.Context, candidate SettlementFallbackCandidate) error
+	LookupSettlementFallbackCandidate(ctx context.Context, reservation ActiveReservation) (SettlementFallbackCandidate, error)
 	InsertUsageEvent(ctx context.Context, event UsageEvent) error
 	// EnsureUsageEvent inserts a usage_events row idempotently. The
 	// idempotency key is the composite (account_id, request_id), matching

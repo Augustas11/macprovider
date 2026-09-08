@@ -472,7 +472,7 @@ func TestAnthropicMessagesNonStreamingContentFilterMapsToRefusal(t *testing.T) {
 	}
 }
 
-func TestAnthropicMessagesNonStreamingInvalidProviderResponseIgnoresVerifiedFinalityDebit(t *testing.T) {
+func TestAnthropicMessagesNonStreamingInvalidProviderResponsePreservesVerifiedFinality(t *testing.T) {
 	finality := settlementFinalityTrailerForTest("enforce", settlementPolicyVersion, "verified", "valid", "true", "receipt_verified")
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		body := `{"id":"chatcmpl_bad_verified","object":"chat.completion","created":1,"model":"claude",` +
@@ -494,13 +494,9 @@ func TestAnthropicMessagesNonStreamingInvalidProviderResponseIgnoresVerifiedFina
 	if resp.Code != http.StatusBadGateway {
 		t.Fatalf("status=%d want 502 body=%s", resp.Code, resp.Body.String())
 	}
-	outcome, source, completion, prompt := usageEventOutcomeAndTokens(t, dbPath, "acct_anthropic_bad_verified_finality")
-	if outcome != "invalid_provider_response" || source != "provider_reported" || completion != 7 || prompt != 5 {
-		t.Fatalf("usage outcome/source/completion/prompt=%s/%s/%d/%d want invalid_provider_response/provider_reported/7/5", outcome, source, completion, prompt)
-	}
 	snap := gatewaySettlementSnapshot(t, dbPath, "acct_anthropic_bad_verified_finality")
-	if snap.heldRows != 0 || snap.activeRows != 0 || snap.settledRows != 1 {
-		t.Fatalf("settlement snapshot=%+v want settled invalid-provider row with no finality hold", snap)
+	if snap.usageRows != 0 || snap.activeRows != 1 || snap.settledRows != 0 || snap.refundedRows != 0 {
+		t.Fatalf("settlement snapshot=%+v want coordinator finality hold without facade debit", snap)
 	}
 }
 
@@ -1589,7 +1585,7 @@ func TestAnthropicMessagesStreamingRefusalMapsToText(t *testing.T) {
 	}
 }
 
-func TestAnthropicMessagesStreamingInvalidProviderResponseIgnoresVerifiedFinalityDebit(t *testing.T) {
+func TestAnthropicMessagesStreamingInvalidProviderResponsePreservesVerifiedFinality(t *testing.T) {
 	stream := `data: {"id":"chatcmpl_refusal_verified","model":"claude-stream","choices":[{"delta":{"unsupported_output":"no"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":7,"total_tokens":12}}`
 	stream += "\n\ndata: [DONE]\n\n"
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
@@ -1615,13 +1611,9 @@ func TestAnthropicMessagesStreamingInvalidProviderResponseIgnoresVerifiedFinalit
 	if !strings.Contains(resp.Body.String(), "event: error") || !strings.Contains(resp.Body.String(), `"code":"invalid_provider_response"`) {
 		t.Fatalf("stream did not fail closed:\n%s", resp.Body.String())
 	}
-	outcome, source, completion, prompt := usageEventOutcomeAndTokens(t, dbPath, "acct_anthropic_stream_bad_verified_finality")
-	if outcome != "invalid_provider_response" || source != "gateway_estimated" || completion != 0 || prompt <= 0 {
-		t.Fatalf("usage outcome/source/completion/prompt=%s/%s/%d/%d want invalid_provider_response/gateway_estimated/0/nonzero", outcome, source, completion, prompt)
-	}
 	snap := gatewaySettlementSnapshot(t, dbPath, "acct_anthropic_stream_bad_verified_finality")
-	if snap.heldRows != 0 || snap.activeRows != 0 || snap.settledRows != 1 {
-		t.Fatalf("settlement snapshot=%+v want settled invalid-provider row with no finality hold", snap)
+	if snap.usageRows != 0 || snap.activeRows != 1 || snap.settledRows != 0 || snap.refundedRows != 0 {
+		t.Fatalf("settlement snapshot=%+v want coordinator finality hold without facade debit", snap)
 	}
 }
 

@@ -597,7 +597,7 @@ func (s *Server) admitWalletSessionMetadata(w http.ResponseWriter, r *http.Reque
 	return false
 }
 
-func (s *Server) admitWalletSessionInference(r *http.Request, sessionAuth *walletSessionAuth, rawBody []byte, model string, reservationTokens, dailyQuota int64, window string, expiresAt time.Time) (storage.WalletSessionAdmissionDecision, error) {
+func (s *Server) admitWalletSessionInference(r *http.Request, sessionAuth *walletSessionAuth, rawBody []byte, model string, reservationTokens, dailyQuota int64, window string, createdAt, expiresAt time.Time) (storage.WalletSessionAdmissionDecision, error) {
 	bodyHash := sha256.Sum256(rawBody)
 	headersHash, err := auth.SemanticHeadersSHA256Base64URL(walletCanonicalRouteForRequest(r), r.Header)
 	if err != nil {
@@ -616,7 +616,7 @@ func (s *Server) admitWalletSessionInference(r *http.Request, sessionAuth *walle
 			CanonicalRoute: walletCanonicalRouteForRequest(r), SemanticHeadersHash: headersHashBytes,
 			RawBodyHash: bodyHash[:], BodyBytes: int64(len(rawBody)),
 		},
-		CreatedAt: s.now().UTC(), ExpiresAt: expiresAt.UTC(),
+		CreatedAt: createdAt.UTC(), ExpiresAt: expiresAt.UTC(),
 	})
 }
 

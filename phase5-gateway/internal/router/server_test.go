@@ -2437,10 +2437,11 @@ func TestSPEC022GatewayStreamingSettlementTrailersControlBuyerDebit(t *testing.T
 			wantExpiresAt:  pendingDeadlineUnixMS,
 		},
 		{
-			name:          "declared-missing-trailer-settles-unverified",
-			declareOnly:   true,
-			wantUsageRows: 1,
-			wantSettled:   1,
+			name:           "declared-missing-trailer-holds-without-debit",
+			declareOnly:    true,
+			wantActive:     1,
+			wantActiveHold: promptCapTokens([]byte(body)) + 20,
+			wantExpiresAt:  fixedNow().Add(settlementHoldFallbackTTL).UnixMilli(),
 		},
 	}
 	for _, tc := range cases {
