@@ -267,6 +267,89 @@ func TestModelAdmissionOfferRejectsWrongOrMissingCurrentIdentity(t *testing.T) {
 	}
 }
 
+func TestModelAdmissionWithdrawalRejectsWrongOrMissingCurrentIdentity(t *testing.T) {
+	h, bearer, currentPriv, authStore := newModelAdmissionHarnessWithStore(t, "provider-byom-a")
+	defer h.HTTP.Close()
+	candidateID := stableModelAdmissionCandidateID("x")
+	offer := signedModelAdmissionOffer(t, "provider-byom-a", candidateID, "ollama:qwen3-8b", currentPriv, nil)
+	if status, body := postModelAdmissionOffer(t, h.HTTP.URL, bearer, offer); status != http.StatusOK {
+		t.Fatalf("offer status=%d body=%s", status, body)
+	}
+	_, wrongPriv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	withdrawal := signedModelAdmissionWithdrawal(t, "provider-byom-a", candidateID, "ollama:qwen3-8b", wrongPriv, map[string]any{
+		"idempotency_key": "withdraw_request_wrong_key",
+		"nonce":           "withdraw_nonce_wrong_key",
+	})
+	if status, _ := postModelAdmissionWithdrawal(t, h.HTTP.URL, bearer, withdrawal); status != http.StatusUnauthorized {
+		t.Fatalf("wrong withdrawal signing key status=%d, want 401", status)
+	}
+
+	nextPub, nextPriv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := authStore.RotateAdmissionIdentity(context.Background(), "provider-byom-a", bearer, currentPriv.Public().(ed25519.PublicKey), nextPub, 1, time.Now().UTC()); err != nil {
+		t.Fatalf("rotate admission identity: %v", err)
+	}
+	withdrawal = signedModelAdmissionWithdrawal(t, "provider-byom-a", candidateID, "ollama:qwen3-8b", currentPriv, map[string]any{
+		"idempotency_key": "withdraw_request_previous_key",
+		"nonce":           "withdraw_nonce_previous_key",
+	})
+	if status, _ := postModelAdmissionWithdrawal(t, h.HTTP.URL, bearer, withdrawal); status != http.StatusUnauthorized {
+		t.Fatalf("previous withdrawal signing key status=%d, want 401", status)
+	}
+
+	recoveryPub, recoveryPriv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	approveModelAdmissionRecoveryAuthorization(t, authStore, "provider-byom-a", nextPub, recoveryPub, 2, time.Now().UTC())
+	withdrawal = signedModelAdmissionWithdrawal(t, "provider-byom-a", candidateID, "ollama:qwen3-8b", recoveryPriv, map[string]any{
+		"idempotency_key": "withdraw_request_recovery_key",
+		"nonce":           "withdraw_nonce_recovery_key",
+	})
+	if status, _ := postModelAdmissionWithdrawal(t, h.HTTP.URL, bearer, withdrawal); status != http.StatusUnauthorized {
+		t.Fatalf("recovery-not-current withdrawal signing key status=%d, want 401", status)
+	}
+
+	status, body := getModelAdmissionStatus(t, h.HTTP.URL, bearer, candidateID)
+	if status != http.StatusOK {
+		t.Fatalf("status readback=%d body=%s", status, body)
+	}
+	if readback := decodeMap(t, body); readback["admission_state"] != "offer_submitted" {
+		t.Fatalf("rejected withdrawals mutated admission state: %#v", readback)
+	}
+
+	withdrawal = signedModelAdmissionWithdrawal(t, "provider-byom-a", candidateID, "ollama:qwen3-8b", nextPriv, map[string]any{
+		"idempotency_key": "withdraw_request_current_key",
+		"nonce":           "withdraw_nonce_current_key",
+	})
+	if status, body := postModelAdmissionWithdrawal(t, h.HTTP.URL, bearer, withdrawal); status != http.StatusOK {
+		t.Fatalf("current withdrawal signing key status=%d body=%s, want 200", status, body)
+	}
+
+	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator-unbound.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	_, unboundBearer, err := store.IssueToken(context.Background(), "provider-unbound", "unbound")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h2 := newProviderHarnessWithServerOptions(t, store, nil, func(cfg *config.Config) {
+		cfg.Auth.RequireProviderTokens = true
+	})
+	defer h2.HTTP.Close()
+	withdrawal = signedModelAdmissionWithdrawal(t, "provider-unbound", stableModelAdmissionCandidateID("y"), "ollama:qwen3-8b", wrongPriv, nil)
+	if status, _ := postModelAdmissionWithdrawal(t, h2.HTTP.URL, unboundBearer, withdrawal); status != http.StatusUnauthorized {
+		t.Fatalf("missing admission identity withdrawal status=%d, want 401", status)
+	}
+}
+
 func TestModelAdmissionInvalidOfferAttemptsAreRateLimited(t *testing.T) {
 	h, bearer, currentPriv := newModelAdmissionHarness(t, "provider-byom-a")
 	defer h.HTTP.Close()
@@ -286,6 +369,28 @@ func TestModelAdmissionInvalidOfferAttemptsAreRateLimited(t *testing.T) {
 	}
 	if status, _ := postModelAdmissionOffer(t, h.HTTP.URL, bearer, request); status != http.StatusTooManyRequests {
 		t.Fatalf("invalid attempt after limit status=%d, want 429", status)
+	}
+}
+
+func TestModelAdmissionInvalidWithdrawalAttemptsAreRateLimited(t *testing.T) {
+	h, bearer, currentPriv := newModelAdmissionHarness(t, "provider-byom-a")
+	defer h.HTTP.Close()
+	_, wrongPriv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	currentDigest := sha256.Sum256(currentPriv.Public().(ed25519.PublicKey))
+	request := signedModelAdmissionWithdrawal(t, "provider-byom-a", stableModelAdmissionCandidateID("r"), "ollama:qwen3-8b", wrongPriv, map[string]any{
+		"signing_key_digest": hex.EncodeToString(currentDigest[:]),
+	})
+
+	for i := 0; i < 256; i++ {
+		if status, _ := postModelAdmissionWithdrawal(t, h.HTTP.URL, bearer, request); status != http.StatusUnauthorized {
+			t.Fatalf("invalid withdrawal attempt %d status=%d, want 401 before attempt limit", i, status)
+		}
+	}
+	if status, _ := postModelAdmissionWithdrawal(t, h.HTTP.URL, bearer, request); status != http.StatusTooManyRequests {
+		t.Fatalf("invalid withdrawal attempt after limit status=%d, want 429", status)
 	}
 }
 
@@ -317,6 +422,54 @@ func TestModelAdmissionOfferRejectsSanctionedProvider(t *testing.T) {
 	request = signedModelAdmissionOffer(t, "provider-byom-rejected", stableModelAdmissionCandidateID("q"), "ollama:qwen3-8b", privRejected, nil)
 	if status, _ := postModelAdmissionOffer(t, h.HTTP.URL, bearerRejected, request); status != http.StatusUnauthorized {
 		t.Fatalf("operator-rejected provider status=%d, want 401", status)
+	}
+}
+
+func TestModelAdmissionWithdrawalRejectsSanctionedProvider(t *testing.T) {
+	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	_, bearer, priv := bindAdmissionIdentityForTest(t, store, "provider-byom-a")
+	h := newProviderHarnessWithServerOptions(t, store, []providerws.Option{
+		providerws.WithModelAdmissionStore(providerws.NewMemoryModelAdmissionStore()),
+	}, func(cfg *config.Config) {
+		cfg.Auth.RequireProviderTokens = true
+	})
+	defer h.HTTP.Close()
+
+	candidateID := stableModelAdmissionCandidateID("m")
+	offer := signedModelAdmissionOffer(t, "provider-byom-a", candidateID, "ollama:qwen3-8b", priv, nil)
+	if status, body := postModelAdmissionOffer(t, h.HTTP.URL, bearer, offer); status != http.StatusOK {
+		t.Fatalf("offer status=%d body=%s", status, body)
+	}
+	h.Registry.LoadCanarySanctions([]pool.CanarySanctionSnapshot{{
+		ProviderID: "provider-byom-a",
+		FailCount:  1,
+	}})
+	withdrawal := signedModelAdmissionWithdrawal(t, "provider-byom-a", candidateID, "ollama:qwen3-8b", priv, nil)
+	if status, _ := postModelAdmissionWithdrawal(t, h.HTTP.URL, bearer, withdrawal); status != http.StatusUnauthorized {
+		t.Fatalf("sanctioned withdrawal status=%d, want 401", status)
+	}
+	status, body := getModelAdmissionStatus(t, h.HTTP.URL, bearer, candidateID)
+	if status != http.StatusOK {
+		t.Fatalf("sanctioned status readback=%d body=%s", status, body)
+	}
+	if readback := decodeMap(t, body); readback["admission_state"] != "offer_submitted" {
+		t.Fatalf("sanctioned withdrawal mutated admission state: %#v", readback)
+	}
+
+	_, bearerRejected, privRejected := bindAdmissionIdentityForTest(t, store, "provider-byom-rejected")
+	rejectedCandidateID := stableModelAdmissionCandidateID("n")
+	offer = signedModelAdmissionOffer(t, "provider-byom-rejected", rejectedCandidateID, "ollama:qwen3-8b", privRejected, nil)
+	if status, body := postModelAdmissionOffer(t, h.HTTP.URL, bearerRejected, offer); status != http.StatusOK {
+		t.Fatalf("rejected-provider setup offer status=%d body=%s", status, body)
+	}
+	h.Provider.Admission().Reject("provider-byom-rejected", "operator rejected provider")
+	withdrawal = signedModelAdmissionWithdrawal(t, "provider-byom-rejected", rejectedCandidateID, "ollama:qwen3-8b", privRejected, nil)
+	if status, _ := postModelAdmissionWithdrawal(t, h.HTTP.URL, bearerRejected, withdrawal); status != http.StatusUnauthorized {
+		t.Fatalf("operator-rejected withdrawal status=%d, want 401", status)
 	}
 }
 
