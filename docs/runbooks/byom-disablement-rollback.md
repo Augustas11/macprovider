@@ -127,4 +127,10 @@ directions.
 3. This disablement/rollback map reviewed and current.
 4. Coordinator admission endpoints deployed from a tag (Go).
 5. Malibu.app + CLI release cut passing provider-CLI-release-verification.
-6. Signed journey evidence where the governance process requires it.
+6. Signed journey evidence where the governance process requires it:
+   `JOURNEY-PROVIDER-BYOM-DISCOVERY` (SPEC-046) and
+   `JOURNEY-NETWORK-MODEL-ADMISSION` (SPEC-047), captured, built, signed,
+   preflighted, and promoted through
+   `docs/runbooks/byom-journey-evidence.md`. Signing needs the operator
+   acceptance key; conformance rows change only via
+   `scripts/promote-signed-journey-result.py`, never by hand.
