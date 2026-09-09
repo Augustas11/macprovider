@@ -103,9 +103,12 @@ python3 scripts/catalog-release.py status
 `--activate-artifact-feed` refuses while any generator-side prerequisite it
 lists is unmet.
 
-### What later slices must land before activation
+### Distribution surfaces (all landed)
 
-`status` prints these as pending. Stage A is not servable until each is done:
+Every surface Stage A needs has landed; this table is the single map of
+where each one lives and what it enforces. `status` reports the generator-side
+prerequisites and the activation-deploy step that still gate the first
+artifact-bound cut, and would list any future surface here as pending:
 
 | Surface | File | Change | Status |
 |---|---|---|---|
