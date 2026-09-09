@@ -580,6 +580,8 @@ func TestAutotuneFeedsDisabledWhenUnset(t *testing.T) {
 		"/v1/demand-rank.sig",
 		"/v1/autotune-candidates",
 		"/v1/autotune-candidates.sig",
+		"/v1/catalog-artifacts",
+		"/v1/catalog-artifacts.sig",
 		"/v1/autotune-release",
 	} {
 		req := httptest.NewRequest(http.MethodGet, path, nil)
@@ -836,6 +838,8 @@ func TestNginxAutotuneFeedsAllowThroughBeforeV1CatchAll(t *testing.T) {
 		"location = /v1/demand-rank.sig",
 		"location = /v1/autotune-candidates",
 		"location = /v1/autotune-candidates.sig",
+		"location = /v1/catalog-artifacts",
+		"location = /v1/catalog-artifacts.sig",
 	} {
 		if !strings.Contains(beforeCatchAll, location) {
 			t.Fatalf("%s missing before /v1/ catch-all", location)

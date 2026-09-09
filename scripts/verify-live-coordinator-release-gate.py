@@ -25,6 +25,17 @@ FEEDS = {
 PRIMARY_FEEDS = ("autotune-candidates.json", "demand-rank.json", "rate-card.json")
 SIG_FEEDS = ("autotune-candidates.json.sig", "demand-rank.json.sig", "rate-card.json.sig")
 RELEASE_CATALOG_FILES = tuple(FEEDS) + ("trusted-keys.json",)
+# SPEC-023 §3.7 artifact feed (BYOM v0.2, #1453 slice 2b). Bound by a release
+# only once it is artifact-bound, so the gate reads its presence from the
+# release metadata and checks the live coordinator AGREES: a bound feed must be
+# served with the bound digest, a valid signature by the SAME signer as the
+# candidate catalog (§3.7.2), and the §3.7.4 release binding; an unbound
+# release must NOT be served an artifact feed at all.
+ARTIFACT_FEED = "autotune-artifacts.json"
+ARTIFACT_FEEDS = {
+    ARTIFACT_FEED: "/v1/catalog-artifacts",
+    ARTIFACT_FEED + ".sig": "/v1/catalog-artifacts.sig",
+}
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 VERSION_COMPONENT = r"(0|[1-9][0-9]*)"
 TAG_RE = re.compile(rf"^v{VERSION_COMPONENT}\.{VERSION_COMPONENT}\.{VERSION_COMPONENT}$")
@@ -121,6 +132,39 @@ def load_endpoint(args: argparse.Namespace, path: str) -> bytes:
         fail(f"{url} could not be fetched: {exc.reason}")
     except TimeoutError:
         fail(f"{url} timed out")
+
+
+def endpoint_is_served(args: argparse.Namespace, path: str) -> bool:
+    """Presence probe for a route the release does NOT bind: True on a 200 body,
+    False on 404 (or a missing fixture file). Any other outcome is a gate error —
+    "not served" must be established, never inferred from a transport failure."""
+    if args.coordinator_dir:
+        return (pathlib.Path(args.coordinator_dir) / endpoint_file_name(path)).is_file()
+    base = args.coordinator_url.rstrip("/")
+    if not base.startswith("https://"):
+        fail("--coordinator-url must use https:// for live verification")
+    url = base + path
+    request = urllib.request.Request(
+        url,
+        headers={"User-Agent": "", "Cache-Control": "no-cache", "Pragma": "no-cache"},
+    )
+    opener = urllib.request.build_opener(NoRedirectHandler)
+    try:
+        with opener.open(request, timeout=args.timeout_s) as response:
+            if getattr(response, "status", None) != 200:
+                fail(f"{url} returned HTTP {getattr(response, 'status', None)}, expected 200 or 404")
+            return True
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return False
+        if exc.code in (301, 302, 303, 307, 308):
+            fail(f"{url} redirected with HTTP {exc.code}, expected direct coordinator response")
+        fail(f"{url} returned HTTP {exc.code}, expected 200 or 404")
+    except urllib.error.URLError as exc:
+        fail(f"{url} could not be fetched: {exc.reason}")
+    except TimeoutError:
+        fail(f"{url} timed out")
+    return False
 
 
 def sha256(data: bytes) -> str:
@@ -274,6 +318,14 @@ def validate_metadata(args: argparse.Namespace) -> tuple[str, dict[str, str]]:
         if not isinstance(digest, str) or SHA256_RE.fullmatch(digest) is None:
             fail(f"pearl-release.json catalog hash is missing or invalid for {name}")
         expected[name] = digest
+    bound_artifact_names = [name for name in ARTIFACT_FEEDS if name in files]
+    if bound_artifact_names and len(bound_artifact_names) != len(ARTIFACT_FEEDS):
+        fail("pearl-release.json binds the artifact feed without its signature sidecar (or the sidecar alone)")
+    for name in bound_artifact_names:
+        digest = files.get(name)
+        if not isinstance(digest, str) or SHA256_RE.fullmatch(digest) is None:
+            fail(f"pearl-release.json catalog hash is missing or invalid for {name}")
+        expected[name] = digest
     trusted_keys_digest = sha256(pathlib.Path(args.trusted_keys).read_bytes())
     if trusted_keys_digest != expected["trusted-keys.json"]:
         fail(
@@ -382,6 +434,7 @@ def main() -> int:
             ):
                 fail("live coordinator feed set is not mutually paired by generated_at and policy_version")
 
+        signer_key_ids: dict[str, str] = {}
         for name in SIG_FEEDS:
             key_id, signature = parse_signature_sidecar(parsed[name], name)
             if key_id not in trusted:
@@ -390,6 +443,58 @@ def main() -> int:
             if signed_name not in bodies:
                 fail(f"{name} does not correspond to a fetched feed body")
             verify_ed25519(args.openssl, trusted[key_id], bodies[signed_name], signature, name)
+            signer_key_ids[signed_name] = key_id
+
+        artifact_bound = ARTIFACT_FEED in expected_hashes
+        if artifact_bound:
+            for name, endpoint in ARTIFACT_FEEDS.items():
+                body = load_endpoint(args, endpoint)
+                if len(body) > args.max_bytes:
+                    fail(f"{endpoint} response exceeds {args.max_bytes} bytes")
+                digest = sha256(body)
+                if digest != expected_hashes[name]:
+                    fail(
+                        f"live coordinator {endpoint} sha256 {digest} does not match "
+                        f"release metadata {expected_hashes[name]}"
+                    )
+                bodies[name] = body
+                parsed[name] = parse_json_bytes(body, name)
+            sig_name = ARTIFACT_FEED + ".sig"
+            key_id, signature = parse_signature_sidecar(parsed[sig_name], sig_name)
+            if key_id not in trusted:
+                fail(f"{sig_name} key_id {key_id!r} is not in the release trusted keyring")
+            verify_ed25519(args.openssl, trusted[key_id], bodies[ARTIFACT_FEED], signature, sig_name)
+            candidate_key_id = signer_key_ids["autotune-candidates.json"]
+            if key_id != candidate_key_id:
+                fail(
+                    f"{sig_name} signer {key_id!r} is not the autotune-candidates.json signer "
+                    f"{candidate_key_id!r} (SPEC-023 §3.7.2 signer identity equality)"
+                )
+            feed = parsed[ARTIFACT_FEED]
+            candidate = parsed["autotune-candidates.json"]
+            if not isinstance(feed, dict):
+                fail(f"{ARTIFACT_FEED} response is not a JSON object")
+            for field in ("version", "generated_at", "policy_version"):
+                if feed.get(field) != candidate.get(field):
+                    fail(
+                        f"{ARTIFACT_FEED} {field} {feed.get(field)!r} does not match "
+                        f"autotune-candidates.json {field} {candidate.get(field)!r}"
+                    )
+            if feed.get("release_id") != feed.get("version"):
+                fail(f"{ARTIFACT_FEED} release_id {feed.get('release_id')!r} does not equal its version")
+            candidate_digest = sha256(bodies["autotune-candidates.json"])
+            if feed.get("candidate_catalog_sha256") != candidate_digest:
+                fail(
+                    f"{ARTIFACT_FEED} candidate_catalog_sha256 {feed.get('candidate_catalog_sha256')!r} "
+                    f"does not match the served autotune-candidates.json bytes {candidate_digest}"
+                )
+        else:
+            for endpoint in ARTIFACT_FEEDS.values():
+                if endpoint_is_served(args, endpoint):
+                    fail(
+                        f"live coordinator serves {endpoint} but the release binds no artifact feed; "
+                        "the served feed set must equal the release's feed set"
+                    )
 
         healthz = parse_json_bytes(load_endpoint(args, "/healthz"), "healthz")
         if not isinstance(healthz, dict):
@@ -446,7 +551,8 @@ def main() -> int:
             f"generated_at={generated_at} policy_version={policy_version} "
             f"healthz_version={healthz.get('version')} "
             f"recommended_binary_version={recommended_value} "
-            f"publication_phase={args.publication_phase}"
+            f"publication_phase={args.publication_phase} "
+            f"artifact_feed={'bound' if artifact_bound else 'absent'}"
         )
         return 0
     except GateError as exc:

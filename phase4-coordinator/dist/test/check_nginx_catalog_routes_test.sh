@@ -206,6 +206,8 @@ SIGNED_FEED_ROUTES=(
   /v1/demand-rank.sig
   /v1/autotune-candidates
   /v1/autotune-candidates.sig
+  /v1/catalog-artifacts
+  /v1/catalog-artifacts.sig
 )
 
 extract_exact_location_body() {
@@ -528,6 +530,6 @@ if [ -n "$V1_CATCHALL_LINE" ]; then
 fi
 
 if [ "$FAIL" -eq 0 ]; then
-  ok "coordinator public catalog, pool-check, and signed feed routes present in nginx conf"
+  ok "coordinator public catalog, pool-check, and signed feed routes (incl. /v1/catalog-artifacts) present in nginx conf"
 fi
 exit "$FAIL"

@@ -382,6 +382,18 @@ type AutotuneFeedsConfig struct {
 	DemandRankSigPath         string `yaml:"demand_rank_sig_path"`
 	AutotuneCandidatesPath    string `yaml:"autotune_candidates_path"`
 	AutotuneCandidatesSigPath string `yaml:"autotune_candidates_sig_path"`
+	// CatalogArtifactsPath / CatalogArtifactsSigPath point at the SPEC-023 §3.7
+	// artifact feed served at /v1/catalog-artifacts (+ .sig). The pair is
+	// OPTIONAL and release-bound: unset, both routes answer 404 and the served
+	// set is the rate-card-bound four-feed release (§3.7.6 rule 6); set, it
+	// requires the three base feeds and is verified against the candidate
+	// catalog of the SAME release at load — signer key equality (§3.7.2),
+	// version/generated_at/policy equality and candidate-digest binding
+	// (§3.7.4), and primary-artifact consistency (§3.7.5). A configured path
+	// whose file is missing fails startup and SIGHUP reload closed; it is set
+	// only by the deploy that installs an artifact-bound release.
+	CatalogArtifactsPath    string `yaml:"catalog_artifacts_path"`
+	CatalogArtifactsSigPath string `yaml:"catalog_artifacts_sig_path"`
 	// EnforceProviderAdmission is the shared strict-mode switch for signed
 	// catalog compatibility and challenge-bound provider identity. Disabling it
 	// opens only the deadline-bounded migration bridge below.
@@ -3263,6 +3275,16 @@ func (c Config) validateAutotuneFeeds() error {
 	if configured && len(missingPairs) > 0 {
 		label := missingPairs[0]
 		return fmt.Errorf("autotune.%s_path and autotune.%s_sig_path are required when any autotune feed is configured", label, label)
+	}
+	artifactsPath := strings.TrimSpace(a.CatalogArtifactsPath)
+	artifactsSigPath := strings.TrimSpace(a.CatalogArtifactsSigPath)
+	if artifactsPath != "" || artifactsSigPath != "" {
+		if artifactsPath == "" || artifactsSigPath == "" {
+			return fmt.Errorf("autotune.catalog_artifacts_path and autotune.catalog_artifacts_sig_path must both be set")
+		}
+		if !configured {
+			return fmt.Errorf("autotune.catalog_artifacts_path requires the rate_card, demand_rank, and autotune_candidates feeds of the same release to be configured")
+		}
 	}
 	keyring, err := a.DecodePublicKeyring()
 	if err != nil {
