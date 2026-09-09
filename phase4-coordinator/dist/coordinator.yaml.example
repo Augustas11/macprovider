@@ -189,6 +189,13 @@ autotune:
   demand_rank_sig_path: "/opt/macprovider/autotune/demand-rank.json.sig"
   autotune_candidates_path: "/opt/macprovider/autotune/autotune-candidates.json"
   autotune_candidates_sig_path: "/opt/macprovider/autotune/autotune-candidates.json.sig"
+  # SPEC-023 §3.7 artifact feed (/v1/catalog-artifacts + .sig). OPTIONAL and
+  # release-bound: set BOTH only in the deploy that installs an artifact-bound
+  # release — a configured path whose file is missing fails startup closed,
+  # and unset both routes answer 404. Loaded with the three feeds above and
+  # bound to the candidate catalog of the same release at load.
+  # catalog_artifacts_path: "/opt/macprovider/autotune/autotune-artifacts.json"
+  # catalog_artifacts_sig_path: "/opt/macprovider/autotune/autotune-artifacts.json.sig"
 
 # Rewards / rate-card configuration (Entry 92 v2 pricing thesis; Wave 1 hot-reload surface).
 #
