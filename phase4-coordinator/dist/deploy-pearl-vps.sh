@@ -692,6 +692,8 @@ STATIC_AUTOTUNE_JSON="$STATIC_FEEDS_DIR/autotune-candidates.json"
 STATIC_AUTOTUNE_SIG="$STATIC_FEEDS_DIR/autotune-candidates.json.sig"
 STATIC_RATE_CARD_JSON="$STATIC_FEEDS_DIR/rate-card.json"
 STATIC_RATE_CARD_SIG="$STATIC_FEEDS_DIR/rate-card.json.sig"
+STATIC_ARTIFACTS_JSON="$STATIC_FEEDS_DIR/autotune-artifacts.json"
+STATIC_ARTIFACTS_SIG="$STATIC_FEEDS_DIR/autotune-artifacts.json.sig"
 AUTOTUNE_RELEASE_MANIFEST="$PINNED_AUTOTUNE_DIR/release.json"
 AUTOTUNE_TRUSTED_KEYS="$PINNED_AUTOTUNE_DIR/trusted-keys.json"
 AUTOTUNE_TIER2_JSON="$PINNED_AUTOTUNE_DIR/tier2-catalog.json"
@@ -700,6 +702,27 @@ AUTOTUNE_TIER2_VERIFIER="$PINNED_SCRIPTS_DIR/sign-catalog.go"
 CATALOG_SOURCE="${CATALOG_SOURCE:-$AUTOTUNE_TIER2_JSON}"
 
 python3 "$AUTOTUNE_RELEASE_VERIFY" verify
+# SPEC-023 §3.7.8 Stage A: release.json decides whether the artifact feed and
+# its sidecar are members of the immutable release envelope. verify-directory
+# rejects a five-feed release.json beside nine files (and nine-file bytes
+# beside a stray pair), so presence must follow the binding exactly, and a
+# bound release whose feed is missing from the checkout aborts here.
+AUTOTUNE_ARTIFACT_BOUND="$(python3 - "$AUTOTUNE_RELEASE_MANIFEST" <<'PY'
+import json, pathlib, sys
+feeds = json.loads(pathlib.Path(sys.argv[1]).read_text())["feeds"]
+print("bound" if "autotune-artifacts.json" in feeds else "unbound")
+PY
+)"
+AUTOTUNE_ARTIFACT_CONTENT_JSON=""
+AUTOTUNE_ARTIFACT_CONTENT_SIG=""
+if [ "$AUTOTUNE_ARTIFACT_BOUND" = "bound" ]; then
+  [ -f "$STATIC_ARTIFACTS_JSON" ] && [ -f "$STATIC_ARTIFACTS_SIG" ] || {
+    echo "aborting deploy: release.json binds autotune-artifacts.json but $STATIC_FEEDS_DIR lacks the feed or its sidecar" >&2
+    exit 1
+  }
+  AUTOTUNE_ARTIFACT_CONTENT_JSON="$STATIC_ARTIFACTS_JSON"
+  AUTOTUNE_ARTIFACT_CONTENT_SIG="$STATIC_ARTIFACTS_SIG"
+fi
 AUTOTUNE_RELEASE_ID="$(python3 - "$AUTOTUNE_RELEASE_MANIFEST" <<'PY'
 import json, pathlib, sys
 print(json.loads(pathlib.Path(sys.argv[1]).read_text())["release_id"])
@@ -734,7 +757,9 @@ AUTOTUNE_RELEASE_CONTENT_SHA256="$(python3 - \
   "$STATIC_DEMAND_JSON" \
   "$STATIC_DEMAND_SIG" \
   "$STATIC_RATE_CARD_JSON" \
-  "$STATIC_RATE_CARD_SIG" <<'PY'
+  "$STATIC_RATE_CARD_SIG" \
+  "$AUTOTUNE_ARTIFACT_CONTENT_JSON" \
+  "$AUTOTUNE_ARTIFACT_CONTENT_SIG" <<'PY'
 import hashlib
 import pathlib
 import sys
@@ -750,6 +775,13 @@ assets = (
     ("rate-card.json", pathlib.Path(sys.argv[8])),
     ("rate-card.json.sig", pathlib.Path(sys.argv[9])),
 )
+# Artifact-bound release (SPEC-023 §3.7.8): the pair is part of the
+# content-addressed envelope; both arguments are empty otherwise.
+if sys.argv[10] or sys.argv[11]:
+    assets += (
+        ("autotune-artifacts.json", pathlib.Path(sys.argv[10])),
+        ("autotune-artifacts.json.sig", pathlib.Path(sys.argv[11])),
+    )
 digest = hashlib.sha256()
 for name, path in assets:
     asset_digest = hashlib.sha256(path.read_bytes()).hexdigest()
@@ -3187,6 +3219,10 @@ for _deploy_input in \
   "$AUTOTUNE_TIER2_VERIFIER=scripts/sign-catalog.go"; do
   _append_deploy_input_digest "${_deploy_input%%=*}" "${_deploy_input#*=}"
 done
+if [ "$AUTOTUNE_ARTIFACT_BOUND" = "bound" ]; then
+  _append_deploy_input_digest "$STATIC_ARTIFACTS_JSON" "autotune-artifacts.json"
+  _append_deploy_input_digest "$STATIC_ARTIFACTS_SIG" "autotune-artifacts.json.sig"
+fi
 if [ -n "$CATALOG_REMOTE_PATH" ]; then
   _append_deploy_input_digest "$TMP_CATALOG_PINNED" "tier2-catalog.json"
   _append_deploy_input_digest "$TMP_CATALOG_PUBKEY" "tier2-catalog.pub"
@@ -3240,6 +3276,16 @@ $SCP "$STATIC_AUTOTUNE_JSON"   "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/autotune-candida
 $SCP "$STATIC_AUTOTUNE_SIG"    "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/autotune-candidates.json.sig"
 $SCP "$STATIC_RATE_CARD_JSON"  "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/rate-card.json"
 $SCP "$STATIC_RATE_CARD_SIG"   "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/rate-card.json.sig"
+AUTOTUNE_ARTIFACT_INSTALL_LINES=""
+if [ "$AUTOTUNE_ARTIFACT_BOUND" = "bound" ]; then
+  $SCP "$STATIC_ARTIFACTS_JSON"  "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/autotune-artifacts.json"
+  $SCP "$STATIC_ARTIFACTS_SIG"   "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/autotune-artifacts.json.sig"
+  # Staged into the immutable envelope beside the other feeds (remote script
+  # below); the coordinator serves the pair only once its config names it.
+  AUTOTUNE_ARTIFACT_INSTALL_LINES="
+  install -o root -g macprovider -m 0640 $DEPLOY_TMP/autotune-artifacts.json \$_autotune_stage/autotune-artifacts.json
+  install -o root -g macprovider -m 0640 $DEPLOY_TMP/autotune-artifacts.json.sig \$_autotune_stage/autotune-artifacts.json.sig"
+fi
 $SCP "$AUTOTUNE_RELEASE_MANIFEST" "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/release.json"
 $SCP "$AUTOTUNE_TRUSTED_KEYS"     "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/trusted-keys.json"
 $SCP "$AUTOTUNE_TIER2_JSON"       "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/tier2-catalog.json"
@@ -3416,7 +3462,7 @@ $SSH "set -e
   install -o root -g macprovider -m 0640 $DEPLOY_TMP/autotune-candidates.json \$_autotune_stage/autotune-candidates.json
   install -o root -g macprovider -m 0640 $DEPLOY_TMP/autotune-candidates.json.sig \$_autotune_stage/autotune-candidates.json.sig
   install -o root -g macprovider -m 0640 $DEPLOY_TMP/rate-card.json \$_autotune_stage/rate-card.json
-  install -o root -g macprovider -m 0640 $DEPLOY_TMP/rate-card.json.sig \$_autotune_stage/rate-card.json.sig
+  install -o root -g macprovider -m 0640 $DEPLOY_TMP/rate-card.json.sig \$_autotune_stage/rate-card.json.sig$AUTOTUNE_ARTIFACT_INSTALL_LINES
   install -o root -g macprovider -m 0640 $DEPLOY_TMP/tier2-catalog.json \$_autotune_stage/tier2-catalog.json
   install -o root -g macprovider -m 0640 $DEPLOY_TMP/release.json \$_autotune_stage/release.json
   install -o root -g macprovider -m 0640 $DEPLOY_TMP/trusted-keys.json \$_autotune_stage/trusted-keys.json
