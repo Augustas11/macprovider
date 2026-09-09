@@ -3187,8 +3187,7 @@ def artifact_feed_activation_state(
 # read as "ready to publish". Coordinator serving (/v1/catalog-artifacts route,
 # nginx allow-through) and the live release gate landed with slice 2b.
 PENDING_DISTRIBUTION_SURFACES = (
-    ("CLI release payload", "phase3-binary/dist/package.sh (~196): copy autotune-artifacts.json + .sig"),
-    ("GitHub release assets", ".github/workflows/release.yml (~1385, ~1418): publish both artifact files"),
+    ("coordinator deploy", "phase4-coordinator/dist/deploy-pearl-vps.sh: upload + stage autotune-artifacts.json + .sig into the release envelope when release.json binds them (verify-directory rejects a five-feed release.json beside nine files)"),
     ("scheduled renewal", ".github/workflows/renew-autotune-static-feed-signed.yml: supply AUTOTUNE_PREVIOUS_RELEASE_DIR (the previous signed release directory) or the monthly freshness renewal fails closed at generate after activation"),
 )
 # Operator step at the activation deploy (not a code surface): the coordinator
