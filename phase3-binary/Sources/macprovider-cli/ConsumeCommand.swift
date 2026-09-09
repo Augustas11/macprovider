@@ -988,6 +988,7 @@ extension ConsumeUpstreamClient {
 
 final class ConsumePinnedUpstreamClient: ConsumeUpstreamClient, @unchecked Sendable {
     private static let trustedMetadataMaxReadNanoseconds: UInt64 = 10_000_000_000
+    private typealias TrustedMetadataParametersFactory = @Sendable (_ serverName: String) -> NWParameters
 
     private let maxBodyBytes: Int
     private let timeouts: ConsumeUpstreamTimeouts
@@ -1174,6 +1175,37 @@ final class ConsumePinnedUpstreamClient: ConsumeUpstreamClient, @unchecked Senda
         endpoint: String,
         timeouts: ConsumeUpstreamTimeouts
     ) async throws -> Data {
+        try await performTrustedMetadataConnection(
+            url: url,
+            endpoint: endpoint,
+            timeouts: timeouts,
+            allowTestEndpoint: false,
+            parametersFactory: nil
+        )
+    }
+
+    static func fetchTestTrustedMetadata(
+        url: URL,
+        endpoint: String,
+        timeouts: ConsumeUpstreamTimeouts,
+        parametersFactory: @escaping @Sendable (_ serverName: String) -> NWParameters
+    ) async throws -> Data {
+        try await performTrustedMetadataConnection(
+            url: url,
+            endpoint: endpoint,
+            timeouts: timeouts,
+            allowTestEndpoint: true,
+            parametersFactory: parametersFactory
+        )
+    }
+
+    private static func performTrustedMetadataConnection(
+        url: URL,
+        endpoint: String,
+        timeouts: ConsumeUpstreamTimeouts,
+        allowTestEndpoint: Bool,
+        parametersFactory: TrustedMetadataParametersFactory?
+    ) async throws -> Data {
         guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
               components.scheme == "https",
               let host = components.host,
@@ -1189,13 +1221,14 @@ final class ConsumePinnedUpstreamClient: ConsumeUpstreamClient, @unchecked Senda
         let portValue = components.port ?? 443
         guard (1...65_535).contains(portValue),
               let port = NWEndpoint.Port(rawValue: UInt16(portValue)),
-              ConsumeEndpointConfig.isValidatedGlobalEndpoint(endpoint) else {
+              allowTestEndpoint || ConsumeEndpointConfig.isValidatedGlobalEndpoint(endpoint) else {
             throw ConsumeTrustedPricingError(.fetchFailed)
         }
+        let parameters = parametersFactory?(host) ?? tlsParameters(serverName: host)
         let connection = NWConnection(
             host: NWEndpoint.Host(endpoint),
             port: port,
-            using: tlsParameters(serverName: host)
+            using: parameters
         )
         let queue = DispatchQueue(label: "macprovider.consume.pricing.\(UUID().uuidString)")
         connection.start(queue: queue)
@@ -1384,12 +1417,44 @@ final class ConsumePinnedUpstreamClient: ConsumeUpstreamClient, @unchecked Senda
         }
     }
 
-    private static func tlsParameters(serverName: String) -> NWParameters {
+    static func trustedMetadataTLSParametersForTesting(
+        serverName: String,
+        trustAnchors: [SecCertificate],
+        allowLoopback: Bool
+    ) -> NWParameters {
+        tlsParameters(
+            serverName: serverName,
+            trustAnchors: trustAnchors,
+            prohibitLoopback: !allowLoopback
+        )
+    }
+
+    private static func tlsParameters(
+        serverName: String,
+        trustAnchors: [SecCertificate] = [],
+        prohibitLoopback: Bool = true
+    ) -> NWParameters {
         let tls = NWProtocolTLS.Options()
         sec_protocol_options_set_tls_server_name(tls.securityProtocolOptions, serverName)
+        if !trustAnchors.isEmpty {
+            let anchors = trustAnchors as CFArray
+            sec_protocol_options_set_verify_block(tls.securityProtocolOptions, { _, trust, complete in
+                let secTrust = sec_trust_copy_ref(trust).takeRetainedValue()
+                let anchorStatus = SecTrustSetAnchorCertificates(secTrust, anchors)
+                let anchorOnlyStatus = SecTrustSetAnchorCertificatesOnly(secTrust, true)
+                guard anchorStatus == errSecSuccess, anchorOnlyStatus == errSecSuccess else {
+                    complete(false)
+                    return
+                }
+                var error: CFError?
+                complete(SecTrustEvaluateWithError(secTrust, &error))
+            }, DispatchQueue(label: "macprovider.consume.pricing.trust.\(UUID().uuidString)"))
+        }
         let parameters = NWParameters(tls: tls)
         parameters.prohibitExpensivePaths = true
-        parameters.prohibitedInterfaceTypes = [.loopback]
+        if prohibitLoopback {
+            parameters.prohibitedInterfaceTypes = [.loopback]
+        }
         return parameters
     }
 
