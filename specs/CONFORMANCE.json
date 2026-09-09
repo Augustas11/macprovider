@@ -4379,25 +4379,12 @@
       "journeys": [
         "JOURNEY-BUYER-PAID-PATH"
       ],
-      "evidence": [
-        {
-          "artifact": "commit:5ed5d7190bd878fe3623fff9a5684e71eddfb8f1",
-          "source": null,
-          "captured_at": "2026-08-17",
-          "expires_at": "2026-09-16"
-        },
-        {
-          "artifact": "sha256:77b9de93bbbdc7a853e1196379769bb25d93c0bd1d683c1ca62a80038237d389",
-          "source": "journeys/evidence/buyer-paid-path-20260817T045519Z.spec-005-r001-spec-005-r002-spec-006-r001-spec-006-r002-spec-006-r003-spec-015-r001-spec-022-r001-spec-022-r002-spec-022-r003-spec-022-r004-spec-022-r005-spec-022-r010.journey-result.signed.json",
-          "captured_at": "2026-08-17",
-          "expires_at": "2026-09-16"
-        }
-      ],
+      "evidence": [],
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1433",
-        "rationale": "The security fixes change mapped quota settlement selectors beyond the historical 5ed5d719 candidate. Existing implementation mappings, tests, journeys, and evidence are retained as historical provenance; full requirement conformance requires refreshed matching candidate and signed paid-path journey evidence. Local regression results do not renew the historical attestation."
+        "rationale": "The security fixes change mapped quota settlement selectors beyond the historical 5ed5d719 candidate. Historical artifacts remain available in Git/audits but are removed from the active ledger; full requirement conformance requires refreshed matching candidate and signed paid-path journey evidence. Local regression results do not renew the historical attestation."
       }
     },
     {
@@ -4776,25 +4763,12 @@
       "journeys": [
         "JOURNEY-BUYER-PAID-PATH"
       ],
-      "evidence": [
-        {
-          "artifact": "commit:5ed5d7190bd878fe3623fff9a5684e71eddfb8f1",
-          "source": null,
-          "captured_at": "2026-08-17",
-          "expires_at": "2026-09-16"
-        },
-        {
-          "artifact": "sha256:77b9de93bbbdc7a853e1196379769bb25d93c0bd1d683c1ca62a80038237d389",
-          "source": "journeys/evidence/buyer-paid-path-20260817T045519Z.spec-005-r001-spec-005-r002-spec-006-r001-spec-006-r002-spec-006-r003-spec-015-r001-spec-022-r001-spec-022-r002-spec-022-r003-spec-022-r004-spec-022-r005-spec-022-r010.journey-result.signed.json",
-          "captured_at": "2026-08-17",
-          "expires_at": "2026-09-16"
-        }
-      ],
+      "evidence": [],
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1433",
-        "rationale": "The security fixes change the mapped streaming finality selector beyond the historical 5ed5d719 candidate, including missing-trailer holds and request-bound observe recovery. Existing implementation mappings, tests, journeys, and evidence are retained as historical provenance; full requirement conformance requires refreshed matching candidate and signed paid-path journey evidence. Local regression results do not renew the historical attestation."
+        "rationale": "The security fixes change the mapped streaming finality selector beyond the historical 5ed5d719 candidate, including missing-trailer holds and request-bound observe recovery. Historical artifacts remain available in Git/audits but are removed from the active ledger; full requirement conformance requires refreshed matching candidate and signed paid-path journey evidence. Local regression results do not renew the historical attestation."
       }
     },
     {
@@ -4814,25 +4788,12 @@
       "journeys": [
         "JOURNEY-BUYER-PAID-PATH"
       ],
-      "evidence": [
-        {
-          "artifact": "commit:f6c61a785347c4dcd61a42f3925cd1cd161d0480",
-          "source": null,
-          "captured_at": "2026-08-18",
-          "expires_at": "2026-09-17"
-        },
-        {
-          "artifact": "sha256:8a1d088f8decc1f57c5799d18474cbf54936dda9f044d1919b958be55e23feeb",
-          "source": "journeys/evidence/buyer-paid-path-20260818T051813Z.spec-022-r006.journey-result.signed.json",
-          "captured_at": "2026-08-18",
-          "expires_at": "2026-09-17"
-        }
-      ],
+      "evidence": [],
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1433",
-        "rationale": "The wallet-session receipt authorization fix changes the mapped gateway receipt selector beyond the historical f6c61a78 candidate. Existing implementation mappings, tests, journeys, and evidence are retained as historical provenance; full requirement conformance requires a refreshed matching candidate and signed paid-path journey evidence. Local regression results do not renew the historical attestation."
+        "rationale": "The wallet-session receipt authorization fix changes the mapped gateway receipt selector beyond the historical f6c61a78 candidate. Historical artifacts remain available in Git/audits but are removed from the active ledger; full requirement conformance requires a refreshed matching candidate and signed paid-path journey evidence. Local regression results do not renew the historical attestation."
       }
     },
     {
@@ -4885,25 +4846,12 @@
       "journeys": [
         "JOURNEY-BUYER-ENFORCE"
       ],
-      "evidence": [
-        {
-          "artifact": "commit:caa6ae4aec712c5d6353a3d307aab551911bea65",
-          "source": null,
-          "captured_at": "2026-08-18",
-          "expires_at": "2026-09-17"
-        },
-        {
-          "artifact": "sha256:5ede794fefc03470f1e3e5c0c401e95c8b9842c2c4aa0ac0fb7fcefd0ee39e14",
-          "source": "journeys/evidence/buyer-enforce-20260818T065941Z.spec-022-r007-spec-022-r008-spec-022-r009-spec-022-r011.journey-result.signed.json",
-          "captured_at": "2026-08-18",
-          "expires_at": "2026-09-17"
-        }
-      ],
+      "evidence": [],
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1433",
-        "rationale": "The security fixes change mapped reservation settlement selectors beyond the historical caa6ae4a candidate, including generation-bound reconciliation. Existing implementation mappings, tests, journeys, and evidence are retained as historical provenance; full requirement conformance requires refreshed matching candidate and signed enforce journey evidence. Local regression results do not renew the historical attestation."
+        "rationale": "The security fixes change mapped reservation settlement selectors beyond the historical caa6ae4a candidate, including generation-bound reconciliation. Historical artifacts remain available in Git/audits but are removed from the active ledger; full requirement conformance requires refreshed matching candidate and signed enforce journey evidence. Local regression results do not renew the historical attestation."
       }
     },
     {
@@ -6971,20 +6919,7 @@
       "journeys": [
         "JOURNEY-LOCAL-CONSUMER-ENDPOINT"
       ],
-      "evidence": [
-        {
-          "artifact": "commit:dc63ecec59593235593b3de003e567e007ddcdc8",
-          "source": null,
-          "captured_at": "2026-08-24",
-          "expires_at": "2027-08-24"
-        },
-        {
-          "artifact": "sha256:991c30ba0f34377ec66c993e27e2a3dd6b47705acc2799f5cf973d2ebd434161",
-          "source": "journeys/evidence/local-consumer-endpoint-20260824T060103Z.spec-045-r001-spec-045-r002-spec-045-r003-spec-045-r004-spec-045-r005-spec-045-r006-spec-045-r007-spec-045-r008.journey-result.signed.json",
-          "captured_at": "2026-08-24",
-          "expires_at": "2027-08-24"
-        }
-      ],
+      "evidence": [],
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
@@ -7003,6 +6938,8 @@
         "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:private static func httpRequestBytes",
         "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:static func resolveGlobalEndpoint",
         "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:static func fetchTrustedMetadata",
+        "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:private static func fetch(",
+        "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:private static func fetchStreaming",
         "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:private static func trustedMetadataRequestBytes"
       ],
       "tests": [
@@ -7012,30 +6949,18 @@
         "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testCredentialFileRejectsExtendedACLAndRevalidatesDeletion",
         "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase4PinnedUpstreamGeneratedHeadersAreClosedAndSanitized",
         "phase3-binary/Tests/macprovider-cliTests/ConsumeTrustedPricingTests.swift:testPinnedMetadataRequestIsCredentialFreeAndHeadersRemainBounded",
-        "phase3-binary/Tests/macprovider-cliTests/ConsumeTrustedPricingTests.swift:testPinnedMetadataTransportRejectsNonGlobalEndpointBeforeConnecting"
+        "phase3-binary/Tests/macprovider-cliTests/ConsumeTrustedPricingTests.swift:testPinnedMetadataTransportRejectsNonGlobalEndpointBeforeConnecting",
+        "phase3-binary/Tests/macprovider-cliTests/ConsumeTrustedMetadataTransportMatrixTests.swift:testTrustedMetadataTransportMatrixUsesRealTLSAndFailsClosed"
       ],
       "journeys": [
         "JOURNEY-LOCAL-CONSUMER-ENDPOINT"
       ],
-      "evidence": [
-        {
-          "artifact": "commit:dc63ecec59593235593b3de003e567e007ddcdc8",
-          "source": null,
-          "captured_at": "2026-08-24",
-          "expires_at": "2027-08-24"
-        },
-        {
-          "artifact": "sha256:991c30ba0f34377ec66c993e27e2a3dd6b47705acc2799f5cf973d2ebd434161",
-          "source": "journeys/evidence/local-consumer-endpoint-20260824T060103Z.spec-045-r001-spec-045-r002-spec-045-r003-spec-045-r004-spec-045-r005-spec-045-r006-spec-045-r007-spec-045-r008.journey-result.signed.json",
-          "captured_at": "2026-08-24",
-          "expires_at": "2027-08-24"
-        }
-      ],
+      "evidence": [],
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1433",
-        "rationale": "The pinned upstream transport has changed beyond the historical dc63ecec candidate, and that signed journey does not prove the required negative TLS, repeated-DNS, connected-peer, proxy, redirect, or zero-credential-byte boundary matrix. Existing evidence is retained as historical provenance; refreshed matching implementation evidence and separately authorized signed journey evidence remain required."
+        "rationale": "The pinned upstream transport has changed beyond the historical dc63ecec candidate, and that signed journey does not prove the required negative TLS, repeated-DNS, connected-peer, proxy, redirect, or zero-credential-byte boundary matrix. Historical artifacts remain available in Git/audits but are removed from the active ledger; refreshed matching implementation evidence and separately authorized signed journey evidence remain required."
       }
     },
     {
@@ -7056,30 +6981,18 @@
         "phase3-binary/Tests/macprovider-cliTests/ConsumeTrustedPricingTests.swift:testPinnedMetadataTransportRejectsNonGlobalEndpointBeforeConnecting",
         "phase3-binary/Tests/macprovider-cliTests/ConsumeTrustedPricingTests.swift:testPinnedMetadataReadDeadlineIsAbsoluteUnderSlowDripProgress",
         "phase3-binary/Tests/macprovider-cliTests/ConsumeTrustedPricingTests.swift:testPricingFetchRejectsPrivateResolutionBeforeRateCardRequest",
-        "phase3-binary/Tests/macprovider-cliTests/ConsumeTrustedPricingTests.swift:testPricingFetchRepeatsResolutionAndRejectsPrivateSidecarRebinding"
+        "phase3-binary/Tests/macprovider-cliTests/ConsumeTrustedPricingTests.swift:testPricingFetchRepeatsResolutionAndRejectsPrivateSidecarRebinding",
+        "phase3-binary/Tests/macprovider-cliTests/ConsumeTrustedMetadataTransportMatrixTests.swift:testTrustedMetadataTransportMatrixUsesRealTLSAndFailsClosed"
       ],
       "journeys": [
         "JOURNEY-LOCAL-CONSUMER-ENDPOINT"
       ],
-      "evidence": [
-        {
-          "artifact": "commit:dc63ecec59593235593b3de003e567e007ddcdc8",
-          "source": null,
-          "captured_at": "2026-08-24",
-          "expires_at": "2027-08-24"
-        },
-        {
-          "artifact": "sha256:991c30ba0f34377ec66c993e27e2a3dd6b47705acc2799f5cf973d2ebd434161",
-          "source": "journeys/evidence/local-consumer-endpoint-20260824T060103Z.spec-045-r001-spec-045-r002-spec-045-r003-spec-045-r004-spec-045-r005-spec-045-r006-spec-045-r007-spec-045-r008.journey-result.signed.json",
-          "captured_at": "2026-08-24",
-          "expires_at": "2027-08-24"
-        }
-      ],
+      "evidence": [],
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1433",
-        "rationale": "Trusted pricing metadata now repeats global-address validation and pins each body and sidecar connection, changing the mapped pricing loader beyond the historical dc63ecec candidate. Local rebinding regression tests do not replace refreshed matching commit and signed journey evidence."
+        "rationale": "Trusted pricing metadata now repeats global-address validation and pins each body and sidecar connection, changing the mapped pricing loader beyond the historical dc63ecec candidate. Historical artifacts remain available in Git/audits but are removed from the active ledger; local rebinding regression tests do not replace refreshed matching commit and signed journey evidence."
       }
     },
     {
@@ -7105,20 +7018,7 @@
       "journeys": [
         "JOURNEY-LOCAL-CONSUMER-ENDPOINT"
       ],
-      "evidence": [
-        {
-          "artifact": "commit:dc63ecec59593235593b3de003e567e007ddcdc8",
-          "source": null,
-          "captured_at": "2026-08-24",
-          "expires_at": "2027-08-24"
-        },
-        {
-          "artifact": "sha256:991c30ba0f34377ec66c993e27e2a3dd6b47705acc2799f5cf973d2ebd434161",
-          "source": "journeys/evidence/local-consumer-endpoint-20260824T060103Z.spec-045-r001-spec-045-r002-spec-045-r003-spec-045-r004-spec-045-r005-spec-045-r006-spec-045-r007-spec-045-r008.journey-result.signed.json",
-          "captured_at": "2026-08-24",
-          "expires_at": "2027-08-24"
-        }
-      ],
+      "evidence": [],
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
@@ -7228,30 +7128,18 @@
         "scripts/test-signed-local-consumer-endpoint-journey-workflow.sh:required_workflow = [",
         "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase3DSendFailuresAreAmbiguous",
         "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase3DAmbiguousSendFailureHoldsReservationAcrossRestart",
-        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase3GAmbiguousSendFailureAccountsEstimateAcrossRestart"
+        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase3GAmbiguousSendFailureAccountsEstimateAcrossRestart",
+        "phase3-binary/Tests/macprovider-cliTests/ConsumeTrustedMetadataTransportMatrixTests.swift:testTrustedMetadataTransportMatrixUsesRealTLSAndFailsClosed"
       ],
       "journeys": [
         "JOURNEY-LOCAL-CONSUMER-ENDPOINT"
       ],
-      "evidence": [
-        {
-          "artifact": "commit:dc63ecec59593235593b3de003e567e007ddcdc8",
-          "source": null,
-          "captured_at": "2026-08-24",
-          "expires_at": "2027-08-24"
-        },
-        {
-          "artifact": "sha256:991c30ba0f34377ec66c993e27e2a3dd6b47705acc2799f5cf973d2ebd434161",
-          "source": "journeys/evidence/local-consumer-endpoint-20260824T060103Z.spec-045-r001-spec-045-r002-spec-045-r003-spec-045-r004-spec-045-r005-spec-045-r006-spec-045-r007-spec-045-r008.journey-result.signed.json",
-          "captured_at": "2026-08-24",
-          "expires_at": "2027-08-24"
-        }
-      ],
+      "evidence": [],
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1433",
-        "rationale": "The mapped pinned transports and local handler changed after the historical dc63ecec candidate. Local tests now cover pricing rebinding denial and credential-free metadata requests, plus ambiguous-send exposure retention and ledger reopen; however, the required production-transport negative TLS, connected-peer, proxy, redirect, and zero-credential-byte matrix remains incomplete, and the unchanged signed journey does not attest the current implementation. Existing evidence is historical provenance only; refreshed matching implementation evidence and separately authorized signed journey evidence remain required."
+        "rationale": "The mapped pinned transports and local handler changed after the historical dc63ecec candidate. Local tests now cover pricing rebinding denial and credential-free metadata requests, plus ambiguous-send exposure retention and ledger reopen; however, the required production-transport negative TLS, connected-peer, proxy, redirect, and zero-credential-byte matrix remains incomplete, and the unchanged signed journey does not attest the current implementation. Historical artifacts remain available in Git/audits but are removed from the active ledger; refreshed matching implementation evidence and separately authorized signed journey evidence remain required."
       }
     },
     {

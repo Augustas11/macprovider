@@ -31,9 +31,43 @@ from check_spec_governance import (
 
 
 EVIDENCE_SCHEMA = "macprovider.local-consumer-endpoint-evidence.v1"
+EVIDENCE_SCHEMA_V2 = "macprovider.local-consumer-endpoint-evidence.v2"
+TRANSPORT_MATRIX_SCHEMA = "macprovider.trusted-metadata-transport-matrix.v1"
 JOURNEY_ID = "JOURNEY-LOCAL-CONSUMER-ENDPOINT"
 REPOSITORY = "Augustas11/macprovider"
 ARTIFACT_ID = "redacted-local-consumer-endpoint"
+TRANSPORT_MATRIX_ARTIFACT_ID = "trusted_metadata_transport_matrix"
+TRANSPORT_MATRIX_TARGET_REQUIREMENT_IDS = {
+    "SPEC-045-R003",
+    "SPEC-045-R004",
+    "SPEC-045-R008",
+}
+TRANSPORT_MATRIX_SCENARIO_IDS = (
+    "valid_pinned_peer_with_sni",
+    "streaming_valid_pinned_peer_with_sni",
+    "connected_peer_in_validated_set",
+    "streaming_connected_peer_in_validated_set",
+    "untrusted_root_rejected",
+    "streaming_untrusted_root_rejected",
+    "expired_certificate_rejected",
+    "streaming_expired_certificate_rejected",
+    "invalid_chain_rejected",
+    "streaming_invalid_chain_rejected",
+    "hostname_mismatch_rejected",
+    "streaming_hostname_mismatch_rejected",
+    "dns_reresolved_per_connection",
+    "environment_proxy_ignored",
+    "streaming_environment_proxy_ignored",
+    "redirect_not_followed",
+    "streaming_redirect_not_followed",
+    "zero_credential_bytes",
+    "slow_drip_absolute_timeout",
+)
+TRANSPORT_MATRIX_SOURCE_FILES = (
+    "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift",
+    "phase3-binary/Sources/macprovider-cli/ConsumeTrustedPricing.swift",
+    "phase3-binary/Tests/macprovider-cliTests/ConsumeTrustedMetadataTransportMatrixTests.swift",
+)
 REQUIREMENT_RE = re.compile(r"^SPEC-[0-9]{3}-R[0-9]{3}$")
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 DATETIME_Z_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
@@ -168,12 +202,15 @@ SUPPORT_ARTIFACT_IDS = {
     "rate_card_capture",
     "status_capture",
 }
+BASE_SUPPORT_ARTIFACT_IDS = set(SUPPORT_ARTIFACT_IDS)
+SUPPORT_ARTIFACT_IDS.add(TRANSPORT_MATRIX_ARTIFACT_ID)
 SUPPORT_ARTIFACT_ROLES = {
     "cli_binary": "cli-binary",
     "ledger_capture": "redacted-ledger-capture",
     "log_capture": "redacted-log-capture",
     "rate_card_capture": "redacted-rate-card-capture",
     "status_capture": "redacted-status-capture",
+    TRANSPORT_MATRIX_ARTIFACT_ID: "trusted-metadata-transport-matrix",
 }
 REVIEW_FIELDS = {
     "reviewed_at",
@@ -313,6 +350,10 @@ def normalize_framed_scalar(value: str) -> str:
     return normalized.rstrip("]})").strip().strip("\"'")
 
 
+def canonical_report_bytes(value: dict[str, Any]) -> bytes:
+    return (json.dumps(value, indent=2, sort_keys=False) + "\n").encode("utf-8")
+
+
 def reject_bad_allowed_evidence_text_key_value(key: str, value: str, location: str) -> None:
     normalized_key = normalize_evidence_key(key)
     normalized_value = normalize_framed_scalar(value).lower()
@@ -380,17 +421,85 @@ def require_safe_metadata(value: Any, location: str, *, run_id: bool = False, lo
     return text
 
 
-def require_support_artifacts_reviewed(value: Any, location: str) -> list[str]:
+def require_support_artifacts_reviewed(value: Any, location: str, expected_ids: set[str] | None = None) -> list[str]:
     if not isinstance(value, list):
         die(f"{location} must be an array")
     if any(not isinstance(item, str) for item in value):
         die(f"{location} must contain only strings")
     if len(set(value)) != len(value):
         die(f"{location} must not contain duplicate artifact ids")
-    expected = sorted(SUPPORT_ARTIFACT_IDS)
+    expected = sorted(expected_ids or SUPPORT_ARTIFACT_IDS)
     if sorted(value) != expected:
         die(f"{location} must equal {expected}")
     return expected
+
+
+def selected_support_artifact_ids(requirement_ids: list[str]) -> set[str]:
+    if any(requirement_id in TRANSPORT_MATRIX_TARGET_REQUIREMENT_IDS for requirement_id in requirement_ids):
+        return set(SUPPORT_ARTIFACT_IDS)
+    return set(BASE_SUPPORT_ARTIFACT_IDS)
+
+
+def require_transport_matrix_report(value: Any, *, source_sha: str) -> None:
+    matrix = require_object(value, "support_artifacts.trusted_metadata_transport_matrix.report")
+    required = {"schema_version", "repository", "transport", "scenarios", "redaction"}
+    require_exact_keys(matrix, required, required, "support_artifacts.trusted_metadata_transport_matrix.report")
+    if matrix.get("schema_version") != TRANSPORT_MATRIX_SCHEMA:
+        die(f"support_artifacts.trusted_metadata_transport_matrix.report.schema_version must equal {TRANSPORT_MATRIX_SCHEMA!r}")
+    repository = require_object(matrix.get("repository"), "support_artifacts.trusted_metadata_transport_matrix.report.repository")
+    require_exact_keys(repository, {"name", "commit"}, {"name", "commit"}, "support_artifacts.trusted_metadata_transport_matrix.report.repository")
+    if repository.get("name") != REPOSITORY:
+        die(f"support_artifacts.trusted_metadata_transport_matrix.report.repository.name must equal {REPOSITORY!r}")
+    if repository.get("commit") != source_sha:
+        die("support_artifacts.trusted_metadata_transport_matrix.report.repository.commit must match repository.commit")
+    transport = require_object(matrix.get("transport"), "support_artifacts.trusted_metadata_transport_matrix.report.transport")
+    require_exact_keys(
+        transport,
+        {"production_path", "real_sockets", "connection_api", "source_files"},
+        {"production_path", "real_sockets", "connection_api", "source_files"},
+        "support_artifacts.trusted_metadata_transport_matrix.report.transport",
+    )
+    if transport.get("production_path") is not True:
+        die("support_artifacts.trusted_metadata_transport_matrix.report.transport.production_path must be true")
+    if transport.get("real_sockets") is not True:
+        die("support_artifacts.trusted_metadata_transport_matrix.report.transport.real_sockets must be true")
+    if transport.get("connection_api") != "NWConnection":
+        die("support_artifacts.trusted_metadata_transport_matrix.report.transport.connection_api must equal 'NWConnection'")
+    if transport.get("source_files") != list(TRANSPORT_MATRIX_SOURCE_FILES):
+        die(
+            "support_artifacts.trusted_metadata_transport_matrix.report.transport.source_files "
+            f"must equal {list(TRANSPORT_MATRIX_SOURCE_FILES)}"
+        )
+    scenarios = matrix.get("scenarios")
+    if not isinstance(scenarios, list):
+        die("support_artifacts.trusted_metadata_transport_matrix.report.scenarios must be an array")
+    by_id: dict[str, Any] = {}
+    for index, scenario in enumerate(scenarios):
+        item = require_object(scenario, f"support_artifacts.trusted_metadata_transport_matrix.report.scenarios[{index}]")
+        require_exact_keys(
+            item,
+            {"id", "status"},
+            {"id", "status"},
+            f"support_artifacts.trusted_metadata_transport_matrix.report.scenarios[{index}]",
+        )
+        scenario_id = require_string(item.get("id"), None, f"support_artifacts.trusted_metadata_transport_matrix.report.scenarios[{index}].id")
+        if scenario_id in by_id:
+            die(f"duplicate trusted metadata transport scenario: {scenario_id}")
+        if item.get("status") != "pass":
+            die(f"support_artifacts.trusted_metadata_transport_matrix.report.scenarios[{index}].status must equal pass")
+        by_id[scenario_id] = item
+    missing = [scenario_id for scenario_id in TRANSPORT_MATRIX_SCENARIO_IDS if scenario_id not in by_id]
+    extra = [scenario_id for scenario_id in by_id if scenario_id not in TRANSPORT_MATRIX_SCENARIO_IDS]
+    if missing:
+        die(f"support_artifacts.trusted_metadata_transport_matrix.report.scenarios missing scenarios: {missing}")
+    if extra:
+        die(f"support_artifacts.trusted_metadata_transport_matrix.report.scenarios has unexpected scenarios: {extra}")
+    redaction = require_object(matrix.get("redaction"), "support_artifacts.trusted_metadata_transport_matrix.report.redaction")
+    redaction_fields = {"payload_bytes_omitted", "sensitive_material_omitted", "transcript_material_omitted"}
+    require_exact_keys(redaction, redaction_fields, redaction_fields, "support_artifacts.trusted_metadata_transport_matrix.report.redaction")
+    for field in sorted(redaction_fields):
+        if redaction.get(field) is not True:
+            die(f"support_artifacts.trusted_metadata_transport_matrix.report.redaction.{field} must be true")
 
 
 def require_candidate_identity_metadata(value: Any, location: str, *, field: str) -> str:
@@ -480,7 +589,7 @@ def require_git_file_matches(root: Path, commit: str, source: str, expected: byt
         die("redacted evidence source bytes must match --evidence-sha")
 
 
-def require_steps(value: Any) -> list[dict[str, Any]]:
+def require_steps(value: Any, expected_support_artifacts: set[str]) -> list[dict[str, Any]]:
     if not isinstance(value, list):
         die("steps must be an array")
     by_id: dict[str, dict[str, Any]] = {}
@@ -496,7 +605,7 @@ def require_steps(value: Any) -> list[dict[str, Any]]:
         if not isinstance(artifacts, list) or not artifacts or any(item != ARTIFACT_ID for item in artifacts):
             die(f"{step_id}.artifacts must reference {ARTIFACT_ID}")
         support = step.get("support_artifacts")
-        if not isinstance(support, list) or not support or any(item not in SUPPORT_ARTIFACT_IDS for item in support):
+        if not isinstance(support, list) or not support or any(item not in expected_support_artifacts for item in support):
             die(f"{step_id}.support_artifacts must reference known support artifacts")
         by_id[step_id] = {"id": step_id, "status": "pass", "artifacts": [ARTIFACT_ID]}
     missing = [step_id for step_id in LOCAL_CONSUMER_ENDPOINT_STEP_ID_ORDER if step_id not in by_id]
@@ -625,9 +734,9 @@ def require_candidate_identity(value: Any) -> dict[str, Any]:
     return deepcopy(identity)
 
 
-def require_support_artifacts(value: Any, candidate_identity: dict[str, Any]) -> dict[str, Any]:
+def require_support_artifacts(value: Any, candidate_identity: dict[str, Any], expected_support_artifacts: set[str], source_sha: str) -> dict[str, Any]:
     support = require_object(value, "support_artifacts")
-    require_exact_keys(support, SUPPORT_ARTIFACT_IDS, SUPPORT_ARTIFACT_IDS, "support_artifacts")
+    require_exact_keys(support, expected_support_artifacts, expected_support_artifacts, "support_artifacts")
     expected_hashes = {
         "cli_binary": candidate_identity["cli_binary_sha256"],
         "ledger_capture": candidate_identity["ledger_sha256"],
@@ -636,27 +745,39 @@ def require_support_artifacts(value: Any, candidate_identity: dict[str, Any]) ->
         "status_capture": candidate_identity["status_capture_sha256"],
     }
     normalized: dict[str, Any] = {}
-    for artifact_id in sorted(SUPPORT_ARTIFACT_IDS):
+    for artifact_id in sorted(expected_support_artifacts):
         artifact = require_object(support.get(artifact_id), f"support_artifacts.{artifact_id}")
-        require_exact_keys(artifact, {"role", "sha256", "bytes"}, {"role", "sha256", "bytes"}, f"support_artifacts.{artifact_id}")
+        allowed_keys = {"role", "sha256", "bytes"}
+        if artifact_id == TRANSPORT_MATRIX_ARTIFACT_ID:
+            allowed_keys.add("report")
+        require_exact_keys(artifact, allowed_keys, allowed_keys, f"support_artifacts.{artifact_id}")
         if artifact.get("role") != SUPPORT_ARTIFACT_ROLES[artifact_id]:
             die(f"support_artifacts.{artifact_id}.role has invalid value")
         artifact_sha = require_string(artifact.get("sha256"), FINGERPRINT_RE, f"support_artifacts.{artifact_id}.sha256")
-        if artifact_sha != expected_hashes[artifact_id]:
+        if artifact_id in expected_hashes and artifact_sha != expected_hashes[artifact_id]:
             die(f"support_artifacts.{artifact_id}.sha256 must match candidate_identity")
         byte_count = artifact.get("bytes")
         if not isinstance(byte_count, int) or isinstance(byte_count, bool) or byte_count <= 0:
             die(f"support_artifacts.{artifact_id}.bytes must be a positive integer")
         normalized[artifact_id] = {"role": artifact["role"], "sha256": artifact_sha, "bytes": byte_count}
+        if artifact_id == TRANSPORT_MATRIX_ARTIFACT_ID:
+            require_transport_matrix_report(artifact.get("report"), source_sha=source_sha)
+            expected_report_sha = hashlib.sha256(canonical_report_bytes(artifact["report"])).hexdigest()
+            expected_report_bytes = len(canonical_report_bytes(artifact["report"]))
+            if artifact_sha != expected_report_sha:
+                die("support_artifacts.trusted_metadata_transport_matrix.sha256 must match canonical report bytes")
+            if byte_count != expected_report_bytes:
+                die("support_artifacts.trusted_metadata_transport_matrix.bytes must match canonical report bytes")
+            normalized[artifact_id]["report"] = deepcopy(artifact["report"])
     return normalized
 
 
-def require_review(value: Any) -> dict[str, Any]:
+def require_review(value: Any, expected_support_artifacts: set[str]) -> dict[str, Any]:
     review = require_object(value, "review")
     require_exact_keys(review, REVIEW_FIELDS, REVIEW_FIELDS, "review")
     reviewed_at = require_string(review.get("reviewed_at"), DATETIME_Z_RE, "review.reviewed_at")
     reviewer_role = require_safe_metadata(review.get("reviewer_role"), "review.reviewer_role", local=True)
-    support_reviewed = require_support_artifacts_reviewed(review.get("support_artifacts_reviewed"), "review.support_artifacts_reviewed")
+    support_reviewed = require_support_artifacts_reviewed(review.get("support_artifacts_reviewed"), "review.support_artifacts_reviewed", expected_support_artifacts)
     if review.get("real_gateway_basis") != "staging-or-production-gateway":
         die("review.real_gateway_basis must equal 'staging-or-production-gateway'")
     if review.get("sdk_client_basis") != "openai-sdk-local-token-api-key":
@@ -678,6 +799,15 @@ def build_payload(root: Path, source: str, *, source_sha: str, evidence_sha: str
     require_string(evidence_sha, COMMIT_RE, "--evidence-sha")
     source, path = require_evidence_source(root, source)
     evidence, evidence_bytes = load_object_bytes(path, "local-consumer endpoint redacted evidence")
+    source_requirement_ids_raw = evidence.get("requirement_ids")
+    source_requirement_ids = source_requirement_ids_raw if isinstance(source_requirement_ids_raw, list) else []
+    selected_requirements = parse_requirement_ids(requirement_ids, evidence)
+    source_transport_contract = any(
+        item in TRANSPORT_MATRIX_TARGET_REQUIREMENT_IDS for item in source_requirement_ids if isinstance(item, str)
+    )
+    expected_support_artifacts = selected_support_artifact_ids(
+        [item for item in source_requirement_ids if isinstance(item, str)]
+    )
     require_exact_keys(
         evidence,
         {
@@ -719,8 +849,11 @@ def build_payload(root: Path, source: str, *, source_sha: str, evidence_sha: str
         "evidence",
     )
     reject_forbidden_secret_keys(evidence)
-    if evidence.get("schema_version") != EVIDENCE_SCHEMA:
-        die(f"schema_version must equal {EVIDENCE_SCHEMA!r}")
+    required_schema = EVIDENCE_SCHEMA_V2 if source_transport_contract else EVIDENCE_SCHEMA
+    if evidence.get("schema_version") != required_schema:
+        die(f"schema_version must equal {required_schema!r}")
+    if evidence.get("schema_version") == EVIDENCE_SCHEMA and source_transport_contract:
+        die("v1 local-consumer endpoint evidence cannot cover SPEC-045-R003/R004/R008")
     if evidence.get("journey_id") != JOURNEY_ID:
         die(f"journey_id must equal {JOURNEY_ID!r}")
     if JOURNEY_ID != LOCAL_CONSUMER_ENDPOINT_JOURNEY_ID:
@@ -741,7 +874,6 @@ def build_payload(root: Path, source: str, *, source_sha: str, evidence_sha: str
         die("repository.commit must exactly match --source-sha")
     require_git_file_matches(root, evidence_sha, source, evidence_bytes)
 
-    selected_requirements = parse_requirement_ids(requirement_ids, evidence)
     mapped = load_mapped_local_consumer_requirements(root)
     not_mapped = [item for item in selected_requirements if item not in mapped]
     if not_mapped:
@@ -768,12 +900,12 @@ def build_payload(root: Path, source: str, *, source_sha: str, evidence_sha: str
     require_exact_keys(result, {"status"}, {"status"}, "result")
     if result.get("status") != "pass":
         die("result.status must equal 'pass'")
-    steps = require_steps(evidence.get("steps"))
+    steps = require_steps(evidence.get("steps"), expected_support_artifacts)
     redaction = require_redaction(evidence.get("redaction"))
     observations = require_observations(evidence.get("observations"))
     candidate_identity = require_candidate_identity(evidence.get("candidate_identity"))
-    require_support_artifacts(evidence.get("support_artifacts"), candidate_identity)
-    require_review(evidence.get("review"))
+    require_support_artifacts(evidence.get("support_artifacts"), candidate_identity, expected_support_artifacts, source_sha)
+    require_review(evidence.get("review"), expected_support_artifacts)
     artifact_sha = hashlib.sha256(evidence_bytes).hexdigest()
     run_id = require_safe_metadata(evidence.get("run_id"), "run_id", run_id=True)
 

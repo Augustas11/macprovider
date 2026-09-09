@@ -21,6 +21,28 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 FINGERPRINT = "a" * 64
 NON_ALLOWLISTED_GATEWAY_ORIGIN_SHA256 = "b" * 64
 STAGING_GATEWAY_ORIGIN_SHA256 = sorted(LOCAL_CONSUMER_ENDPOINT_ALLOWED_GATEWAY_ORIGIN_SHA256["staging"])[0]
+TRANSPORT_MATRIX_ARTIFACT_ID = "trusted_metadata_transport_matrix"
+TRANSPORT_MATRIX_SCENARIOS = (
+    "valid_pinned_peer_with_sni",
+    "streaming_valid_pinned_peer_with_sni",
+    "connected_peer_in_validated_set",
+    "streaming_connected_peer_in_validated_set",
+    "untrusted_root_rejected",
+    "streaming_untrusted_root_rejected",
+    "expired_certificate_rejected",
+    "streaming_expired_certificate_rejected",
+    "invalid_chain_rejected",
+    "streaming_invalid_chain_rejected",
+    "hostname_mismatch_rejected",
+    "streaming_hostname_mismatch_rejected",
+    "dns_reresolved_per_connection",
+    "environment_proxy_ignored",
+    "streaming_environment_proxy_ignored",
+    "redirect_not_followed",
+    "streaming_redirect_not_followed",
+    "zero_credential_bytes",
+    "slow_drip_absolute_timeout",
+)
 
 
 def load_builder():
@@ -123,9 +145,39 @@ def complete_signed_payload() -> dict[str, object]:
     return signed
 
 
+def valid_transport_matrix(commit: str) -> dict[str, object]:
+    return {
+        "schema_version": "macprovider.trusted-metadata-transport-matrix.v1",
+        "repository": {"name": "Augustas11/macprovider", "commit": commit},
+        "transport": {
+            "production_path": True,
+            "real_sockets": True,
+            "connection_api": "NWConnection",
+            "source_files": [
+                "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift",
+                "phase3-binary/Sources/macprovider-cli/ConsumeTrustedPricing.swift",
+                "phase3-binary/Tests/macprovider-cliTests/ConsumeTrustedMetadataTransportMatrixTests.swift",
+            ],
+        },
+        "scenarios": [{"id": scenario_id, "status": "pass"} for scenario_id in TRANSPORT_MATRIX_SCENARIOS],
+        "redaction": {
+            "payload_bytes_omitted": True,
+            "sensitive_material_omitted": True,
+            "transcript_material_omitted": True,
+        },
+    }
+
+
 def write_redacted_source(root: Path, signed: dict[str, object], source: str) -> None:
+    has_transport_requirements = any(
+        requirement_id in {"SPEC-045-R003", "SPEC-045-R004", "SPEC-045-R008"}
+        for requirement_id in signed["requirement_ids"]
+    )
+    support_artifact_ids = ["cli_binary", "ledger_capture", "log_capture", "rate_card_capture", "status_capture"]
+    if has_transport_requirements:
+        support_artifact_ids.append(TRANSPORT_MATRIX_ARTIFACT_ID)
     evidence = {
-        "schema_version": "macprovider.local-consumer-endpoint-evidence.v1",
+        "schema_version": "macprovider.local-consumer-endpoint-evidence.v2" if has_transport_requirements else "macprovider.local-consumer-endpoint-evidence.v1",
         "journey_id": LOCAL_CONSUMER_ENDPOINT_JOURNEY_ID,
         "requirement_ids": signed["requirement_ids"],
         "repository": signed["repository"],
@@ -139,7 +191,7 @@ def write_redacted_source(root: Path, signed: dict[str, object], source: str) ->
                 "id": step_id,
                 "status": "pass",
                 "artifacts": [LOCAL_CONSUMER_ENDPOINT_ARTIFACT_ID],
-                "support_artifacts": ["cli_binary", "ledger_capture", "log_capture", "rate_card_capture", "status_capture"],
+                "support_artifacts": support_artifact_ids,
             }
             for step_id in LOCAL_CONSUMER_ENDPOINT_STEP_ID_ORDER
         ],
@@ -156,13 +208,22 @@ def write_redacted_source(root: Path, signed: dict[str, object], source: str) ->
         "review": {
             "reviewed_at": "2026-08-24T00:01:00Z",
             "reviewer_role": "release-operator",
-            "support_artifacts_reviewed": ["cli_binary", "ledger_capture", "log_capture", "rate_card_capture", "status_capture"],
+            "support_artifacts_reviewed": support_artifact_ids,
             "real_gateway_basis": "staging-or-production-gateway",
             "sdk_client_basis": "openai-sdk-local-token-api-key",
             "redaction_basis": "redacted-support-artifacts-reviewed",
         },
         "run_id": signed["run_id"],
     }
+    if has_transport_requirements:
+        report = valid_transport_matrix(signed["repository"]["commit"])
+        report_bytes = (json.dumps(report, indent=2) + "\n").encode("utf-8")
+        evidence["support_artifacts"][TRANSPORT_MATRIX_ARTIFACT_ID] = {
+            "role": "trusted-metadata-transport-matrix",
+            "sha256": hashlib.sha256(report_bytes).hexdigest(),
+            "bytes": len(report_bytes),
+            "report": report,
+        }
     path = root / source
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = (json.dumps(evidence, indent=2) + "\n").encode("utf-8")
@@ -474,6 +535,131 @@ class LocalConsumerEndpointJourneyResultTests(unittest.TestCase):
             )
             self.assertTrue(any("reviewer_role" in error and "must equal one of" in error for error in result.errors))
 
+    def test_transport_requirements_require_v2_matrix_contract(self) -> None:
+        for requirement_id in ("SPEC-045-R003", "SPEC-045-R004", "SPEC-045-R008"):
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory).resolve()
+                signed = complete_signed_payload()
+                signed["requirement_ids"] = [requirement_id]
+                source = "journeys/evidence/local-consumer-endpoint-staging.redacted.json"
+                write_redacted_source(root, signed, source)
+                payload = json.loads((root / source).read_text(encoding="utf-8"))
+                payload["schema_version"] = "macprovider.local-consumer-endpoint-evidence.v1"
+                del payload["support_artifacts"][TRANSPORT_MATRIX_ARTIFACT_ID]
+                payload["review"]["support_artifacts_reviewed"] = [
+                    "cli_binary",
+                    "ledger_capture",
+                    "log_capture",
+                    "rate_card_capture",
+                    "status_capture",
+                ]
+                for step in payload["steps"]:
+                    step["support_artifacts"] = payload["review"]["support_artifacts_reviewed"]
+                raw = (json.dumps(payload, indent=2) + "\n").encode("utf-8")
+                (root / source).write_bytes(raw)
+                signed["artifacts"][0]["sha256"] = hashlib.sha256(raw).hexdigest()
+
+                result = ValidationResult()
+                _validate_local_consumer_endpoint_journey_result(
+                    signed,
+                    requirement_id,
+                    [LOCAL_CONSUMER_ENDPOINT_JOURNEY_ID],
+                    signed["artifacts"],
+                    signed["steps"],
+                    "evidence[0]",
+                    result,
+                    root=root,
+                )
+                self.assertTrue(any("v1 local-consumer endpoint evidence cannot cover" in error for error in result.errors), requirement_id)
+
+    def test_unaffected_requirements_still_accept_v1_source_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            signed = complete_signed_payload()
+            signed["requirement_ids"] = ["SPEC-045-R001"]
+            signed["steps"] = [
+                {"id": step_id, "status": "pass", "artifacts": [LOCAL_CONSUMER_ENDPOINT_ARTIFACT_ID]}
+                for step_id in LOCAL_CONSUMER_ENDPOINT_STEP_ID_ORDER
+            ]
+            source = "journeys/evidence/local-consumer-endpoint-staging.redacted.json"
+            write_redacted_source(root, signed, source)
+            result = ValidationResult()
+            _validate_local_consumer_endpoint_journey_result(
+                signed,
+                "SPEC-045-R001",
+                [LOCAL_CONSUMER_ENDPOINT_JOURNEY_ID],
+                signed["artifacts"],
+                signed["steps"],
+                "evidence[0]",
+                result,
+                root=root,
+            )
+            self.assertEqual([], result.errors)
+
+    def test_governance_rejects_transport_matrix_adversarial_shapes(self) -> None:
+        cases = {
+            "missing_scenario": lambda report: report["scenarios"].pop(),
+            "extra_scenario": lambda report: report["scenarios"].append({"id": "unexpected", "status": "pass"}),
+            "false_result": lambda report: report["scenarios"][0].update({"status": "fail"}),
+            "commit_mismatch": lambda report: report["repository"].update({"commit": "2" * 40}),
+            "fake_transport": lambda report: report["transport"].update({"real_sockets": False}),
+            "incomplete_source_binding": lambda report: report["transport"]["source_files"].pop(1),
+            "request_bytes": lambda report: report.update({"raw_request": "Authorization: Bearer secret-value-1234567890"}),
+        }
+        for name, mutate in cases.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory).resolve()
+                signed = complete_signed_payload()
+                source = "journeys/evidence/local-consumer-endpoint-staging.redacted.json"
+                write_redacted_source(root, signed, source)
+                payload = json.loads((root / source).read_text(encoding="utf-8"))
+                mutate(payload["support_artifacts"][TRANSPORT_MATRIX_ARTIFACT_ID]["report"])
+                report = payload["support_artifacts"][TRANSPORT_MATRIX_ARTIFACT_ID]["report"]
+                report_bytes = (json.dumps(report, indent=2) + "\n").encode("utf-8")
+                payload["support_artifacts"][TRANSPORT_MATRIX_ARTIFACT_ID]["sha256"] = hashlib.sha256(report_bytes).hexdigest()
+                payload["support_artifacts"][TRANSPORT_MATRIX_ARTIFACT_ID]["bytes"] = len(report_bytes)
+                raw = (json.dumps(payload, indent=2) + "\n").encode("utf-8")
+                (root / source).write_bytes(raw)
+                signed["artifacts"][0]["sha256"] = hashlib.sha256(raw).hexdigest()
+
+                result = ValidationResult()
+                _validate_local_consumer_endpoint_journey_result(
+                    signed,
+                    "SPEC-045-R008",
+                    [LOCAL_CONSUMER_ENDPOINT_JOURNEY_ID],
+                    signed["artifacts"],
+                    signed["steps"],
+                    "evidence[0]",
+                    result,
+                    root=root,
+                )
+                self.assertNotEqual([], result.errors, name)
+
+    def test_governance_rejects_transport_matrix_hash_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            signed = complete_signed_payload()
+            source = "journeys/evidence/local-consumer-endpoint-staging.redacted.json"
+            write_redacted_source(root, signed, source)
+            payload = json.loads((root / source).read_text(encoding="utf-8"))
+            payload["support_artifacts"][TRANSPORT_MATRIX_ARTIFACT_ID]["sha256"] = "b" * 64
+            raw = (json.dumps(payload, indent=2) + "\n").encode("utf-8")
+            (root / source).write_bytes(raw)
+            signed["artifacts"][0]["sha256"] = hashlib.sha256(raw).hexdigest()
+
+            result = ValidationResult()
+            _validate_local_consumer_endpoint_journey_result(
+                signed,
+                "SPEC-045-R008",
+                [LOCAL_CONSUMER_ENDPOINT_JOURNEY_ID],
+                signed["artifacts"],
+                signed["steps"],
+                "evidence[0]",
+                result,
+                root=root,
+            )
+            self.assertTrue(any("canonical report bytes" in error for error in result.errors))
+
     def test_governance_rejects_malformed_support_artifacts_reviewed_when_source_matches_signed(self) -> None:
         cases = {
             "object": {
@@ -660,7 +846,8 @@ class LocalConsumerEndpointJourneyResultTests(unittest.TestCase):
                         "assertion": "prompt: hello",
                         "artifacts": [LOCAL_CONSUMER_ENDPOINT_ARTIFACT_ID],
                     }
-                ]
+                ],
+                {"cli_binary", "ledger_capture", "log_capture", "rate_card_capture", "status_capture"},
             )
         self.assertEqual(
             ["SPEC-045-R001", "SPEC-045-R008"],
@@ -674,8 +861,18 @@ class LocalConsumerEndpointJourneyResultTests(unittest.TestCase):
         builder = load_builder()
         source_sha = "1" * 40
         evidence_sha = "2" * 40
+        support_artifact_ids = [
+            "cli_binary",
+            "ledger_capture",
+            "log_capture",
+            "rate_card_capture",
+            "status_capture",
+            TRANSPORT_MATRIX_ARTIFACT_ID,
+        ]
+        matrix_report = valid_transport_matrix(source_sha)
+        matrix_bytes = (json.dumps(matrix_report, indent=2) + "\n").encode("utf-8")
         evidence = {
-            "schema_version": "macprovider.local-consumer-endpoint-evidence.v1",
+            "schema_version": "macprovider.local-consumer-endpoint-evidence.v2",
             "journey_id": LOCAL_CONSUMER_ENDPOINT_JOURNEY_ID,
             "requirement_ids": ["SPEC-045-R001", "SPEC-045-R008"],
             "repository": {"name": "Augustas11/macprovider", "commit": source_sha},
@@ -693,7 +890,7 @@ class LocalConsumerEndpointJourneyResultTests(unittest.TestCase):
                     "id": step_id,
                     "status": "pass",
                     "artifacts": [LOCAL_CONSUMER_ENDPOINT_ARTIFACT_ID],
-                    "support_artifacts": ["cli_binary", "ledger_capture", "log_capture", "rate_card_capture", "status_capture"],
+                    "support_artifacts": support_artifact_ids,
                 }
                 for step_id in LOCAL_CONSUMER_ENDPOINT_STEP_ID_ORDER
             ],
@@ -710,11 +907,17 @@ class LocalConsumerEndpointJourneyResultTests(unittest.TestCase):
                 "log_capture": {"role": "redacted-log-capture", "sha256": FINGERPRINT, "bytes": 12},
                 "rate_card_capture": {"role": "redacted-rate-card-capture", "sha256": FINGERPRINT, "bytes": 12},
                 "status_capture": {"role": "redacted-status-capture", "sha256": FINGERPRINT, "bytes": 12},
+                TRANSPORT_MATRIX_ARTIFACT_ID: {
+                    "role": "trusted-metadata-transport-matrix",
+                    "sha256": hashlib.sha256(matrix_bytes).hexdigest(),
+                    "bytes": len(matrix_bytes),
+                    "report": matrix_report,
+                },
             },
             "review": {
                 "reviewed_at": "2026-08-24T00:01:00Z",
                 "reviewer_role": "release-operator",
-                "support_artifacts_reviewed": ["cli_binary", "ledger_capture", "log_capture", "rate_card_capture", "status_capture"],
+                "support_artifacts_reviewed": support_artifact_ids,
                 "real_gateway_basis": "staging-or-production-gateway",
                 "sdk_client_basis": "openai-sdk-local-token-api-key",
                 "redaction_basis": "redacted-support-artifacts-reviewed",
@@ -812,7 +1015,7 @@ class LocalConsumerEndpointJourneyResultTests(unittest.TestCase):
                 "real_gateway_basis": "staging-or-production-gateway",
                 "sdk_client_basis": "openai-sdk-local-token-api-key",
                 "redaction_basis": "redacted-support-artifacts-reviewed",
-            })
+            }, {"cli_binary", "ledger_capture", "log_capture", "rate_card_capture", "status_capture"})
         with self.assertRaises(SystemExit):
             builder.require_review({
                 "reviewed_at": "2026-08-24T00:01:00Z",
@@ -821,7 +1024,7 @@ class LocalConsumerEndpointJourneyResultTests(unittest.TestCase):
                 "real_gateway_basis": "staging-or-production-gateway",
                 "sdk_client_basis": "openai-sdk-local-token-api-key",
                 "redaction_basis": "redacted-support-artifacts-reviewed",
-            })
+            }, {"cli_binary", "ledger_capture", "log_capture", "rate_card_capture", "status_capture"})
 
     def test_builder_rejects_malformed_support_artifacts_reviewed(self) -> None:
         builder = load_builder()
@@ -845,7 +1048,7 @@ class LocalConsumerEndpointJourneyResultTests(unittest.TestCase):
                     "real_gateway_basis": "staging-or-production-gateway",
                     "sdk_client_basis": "openai-sdk-local-token-api-key",
                     "redaction_basis": "redacted-support-artifacts-reviewed",
-                })
+                }, {"cli_binary", "ledger_capture", "log_capture", "rate_card_capture", "status_capture"})
 
 
 if __name__ == "__main__":

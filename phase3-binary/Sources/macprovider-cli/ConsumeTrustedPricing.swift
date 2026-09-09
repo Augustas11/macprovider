@@ -150,6 +150,7 @@ struct ConsumeTrustedPricingLoader: Sendable {
     var trustedPublicKeys: [String: String]
     var expectedPolicyVersion: String
     var minimumGeneratedAt: Date
+    var endpointValidator: @Sendable (String) -> Bool
     var now: @Sendable () -> Date
 
     init(
@@ -169,6 +170,7 @@ struct ConsumeTrustedPricingLoader: Sendable {
         trustedPublicKeys: [String: String] = AutotuneStaticInputs.defaultTrustedPublicKeys,
         expectedPolicyVersion: String = Self.defaultExpectedPolicyVersion(),
         minimumGeneratedAt: Date = Self.defaultMinimumGeneratedAt(),
+        endpointValidator: @escaping @Sendable (String) -> Bool = { ConsumeEndpointConfig.isValidatedGlobalEndpoint($0) },
         now: @escaping @Sendable () -> Date = { Date() }
     ) {
         self.resolveEndpoint = resolveEndpoint
@@ -176,6 +178,7 @@ struct ConsumeTrustedPricingLoader: Sendable {
         self.trustedPublicKeys = trustedPublicKeys
         self.expectedPolicyVersion = expectedPolicyVersion
         self.minimumGeneratedAt = minimumGeneratedAt
+        self.endpointValidator = endpointValidator
         self.now = now
     }
 
@@ -247,7 +250,7 @@ struct ConsumeTrustedPricingLoader: Sendable {
             throw ConsumeTrustedPricingError(.fetchFailed)
         }
         let endpoint = try await resolveEndpoint(host)
-        guard ConsumeEndpointConfig.isValidatedGlobalEndpoint(endpoint) else {
+        guard endpointValidator(endpoint) else {
             throw ConsumeTrustedPricingError(.fetchFailed)
         }
         return try await fetch(url, endpoint)

@@ -95,11 +95,22 @@ The reviewed redacted evidence artifact MUST be committed under:
 journeys/evidence/local-consumer-endpoint-*.redacted.json
 ```
 
-It MUST use:
+For SPEC-045-R001, SPEC-045-R002, SPEC-045-R005, SPEC-045-R006, and
+SPEC-045-R007-only captures it MUST use:
 
 ```json
 {
   "schema_version": "macprovider.local-consumer-endpoint-evidence.v1",
+  "journey_id": "JOURNEY-LOCAL-CONSUMER-ENDPOINT"
+}
+```
+
+For any capture that covers SPEC-045-R003, SPEC-045-R004, or SPEC-045-R008 it
+MUST use:
+
+```json
+{
+  "schema_version": "macprovider.local-consumer-endpoint-evidence.v2",
   "journey_id": "JOURNEY-LOCAL-CONSUMER-ENDPOINT"
 }
 ```
@@ -124,8 +135,72 @@ journey-result envelope only after:
   `specs/CONFORMANCE.json`;
 - selector preflight confirms each requirement's mapped implementation/test
   fragments still match `--source-sha`;
+- for SPEC-045-R003, SPEC-045-R004, or SPEC-045-R008, an unprivileged macOS
+  verification job checks out the exact source SHA, runs the named real-socket
+  XCTest, and byte-compares its canonical report with the reviewed embedded
+  report before the protected signing job can start;
 - the workflow is manually dispatched from current `origin/main`;
 - redaction, no-secret, real-gateway, and required-observation checks pass.
+
+### Trusted Metadata Transport Matrix
+
+SPEC-045-R003, SPEC-045-R004, and SPEC-045-R008 require a v2-only support
+artifact named:
+
+```text
+trusted_metadata_transport_matrix
+```
+
+That support artifact MUST have role `trusted-metadata-transport-matrix`, bind
+the canonical SHA-256 and byte count of an embedded report, and use report
+schema:
+
+```text
+macprovider.trusted-metadata-transport-matrix.v1
+```
+
+The report MUST bind `repository.name = Augustas11/macprovider`,
+`repository.commit = <source-sha>`, `transport.production_path = true`,
+`transport.real_sockets = true`, `transport.connection_api = NWConnection`,
+and `transport.source_files` equal to the production loader, production
+connection path, and real-socket matrix test files:
+
+```text
+phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift
+phase3-binary/Sources/macprovider-cli/ConsumeTrustedPricing.swift
+phase3-binary/Tests/macprovider-cliTests/ConsumeTrustedMetadataTransportMatrixTests.swift
+```
+
+It MUST contain exactly these passing scenarios and no others:
+
+- `valid_pinned_peer_with_sni`
+- `streaming_valid_pinned_peer_with_sni`
+- `connected_peer_in_validated_set`
+- `streaming_connected_peer_in_validated_set`
+- `untrusted_root_rejected`
+- `streaming_untrusted_root_rejected`
+- `expired_certificate_rejected`
+- `streaming_expired_certificate_rejected`
+- `invalid_chain_rejected`
+- `streaming_invalid_chain_rejected`
+- `hostname_mismatch_rejected`
+- `streaming_hostname_mismatch_rejected`
+- `dns_reresolved_per_connection`
+- `environment_proxy_ignored`
+- `streaming_environment_proxy_ignored`
+- `redirect_not_followed`
+- `streaming_redirect_not_followed`
+- `zero_credential_bytes`
+- `slow_drip_absolute_timeout`
+
+The TLS, connected-peer, environment-proxy, and redirect cases MUST drive the
+credential-bearing non-streaming and streaming chat connection paths with only
+loopback endpoint and test trust-anchor seams. Failed TLS peers MUST receive no
+HTTP request bytes. Metadata requests MUST contain zero buyer-credential bytes.
+
+The report MUST omit payload bytes, sensitive material, and transcript material.
+It records only reviewed matrix facts, source paths, hashes, byte counts, and
+pass/fail booleans.
 
 ## Required Observations
 

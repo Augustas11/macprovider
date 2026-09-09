@@ -27,6 +27,20 @@ required_workflow = [
     "\n  workflow_dispatch:\n",
     "environment: production-release",
     "contents: read",
+    "verify_transport_matrix:",
+    "runs-on: macos-15",
+    "needs: verify_transport_matrix",
+    "Execute exact-source trusted transport matrix",
+    "ConsumeTrustedMetadataTransportMatrixTests/testTrustedMetadataTransportMatrixUsesRealTLSAndFailsClosed",
+    "executed transport report bytes do not match reviewed redacted evidence",
+    "transport verification changed tracked files beyond Package.resolved",
+    "':(exclude)phase3-binary/Package.resolved'",
+    'git -C "$source_tree" restore -- phase3-binary/Package.resolved',
+    "transport verification changed tracked source bytes",
+    "macprovider.trusted-metadata-transport-verification.v1",
+    "Verify transport matrix attestation before signing",
+    "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c",
+    "transport_verification_sha256",
     "redacted_evidence_path",
     "requirement_ids",
     '[[ "$GITHUB_REF" == refs/heads/main ]]',
@@ -83,10 +97,13 @@ if "pathlib.Path(\"journeys/evidence\").glob" not in workflow:
 posture_index = workflow.find("scripts/verify-github-release-posture.sh")
 preflight_index = workflow.find("scripts/preflight-signed-journey-promotion.py")
 signing_key_index = workflow.find("MACPROVIDER_ACCEPTANCE_SIGNING_KEY_PEM")
+matrix_attestation_index = workflow.find("Verify transport matrix attestation before signing")
 if posture_index == -1 or signing_key_index == -1 or posture_index > signing_key_index:
     raise SystemExit("workflow must verify release posture before importing the acceptance signing key")
 if preflight_index == -1 or signing_key_index == -1 or preflight_index > signing_key_index:
     raise SystemExit("workflow must reject stale selector evidence before importing the acceptance signing key")
+if matrix_attestation_index == -1 or signing_key_index == -1 or matrix_attestation_index > signing_key_index:
+    raise SystemExit("workflow must bind the executed transport matrix before importing the acceptance signing key")
 
 def extract_step_blocks(text):
     blocks = []

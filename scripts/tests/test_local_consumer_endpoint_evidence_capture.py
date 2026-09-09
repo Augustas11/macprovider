@@ -85,7 +85,55 @@ def write_capture_inputs(root: Path) -> dict[str, Path]:
     files["log"].write_text("local endpoint log redacted\n", encoding="utf-8")
     files["rate"].write_text('{"rate_card":"redacted","sha_only":true}\n', encoding="utf-8")
     files["status"].write_text('{"status":"ready","redacted":true}\n', encoding="utf-8")
+    files["matrix"] = inputs / "trusted-metadata-transport-matrix.json"
+    files["matrix"].write_text(json.dumps(valid_transport_matrix("0" * 40), indent=2) + "\n", encoding="utf-8")
     return files
+
+
+def valid_transport_matrix(commit: str) -> dict[str, object]:
+    return {
+        "schema_version": "macprovider.trusted-metadata-transport-matrix.v1",
+        "repository": {"name": "Augustas11/macprovider", "commit": commit},
+        "transport": {
+            "production_path": True,
+            "real_sockets": True,
+            "connection_api": "NWConnection",
+            "source_files": [
+                "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift",
+                "phase3-binary/Sources/macprovider-cli/ConsumeTrustedPricing.swift",
+                "phase3-binary/Tests/macprovider-cliTests/ConsumeTrustedMetadataTransportMatrixTests.swift",
+            ],
+        },
+        "scenarios": [
+            {"id": scenario_id, "status": "pass"}
+            for scenario_id in (
+                "valid_pinned_peer_with_sni",
+                "streaming_valid_pinned_peer_with_sni",
+                "connected_peer_in_validated_set",
+                "streaming_connected_peer_in_validated_set",
+                "untrusted_root_rejected",
+                "streaming_untrusted_root_rejected",
+                "expired_certificate_rejected",
+                "streaming_expired_certificate_rejected",
+                "invalid_chain_rejected",
+                "streaming_invalid_chain_rejected",
+                "hostname_mismatch_rejected",
+                "streaming_hostname_mismatch_rejected",
+                "dns_reresolved_per_connection",
+                "environment_proxy_ignored",
+                "streaming_environment_proxy_ignored",
+                "redirect_not_followed",
+                "streaming_redirect_not_followed",
+                "zero_credential_bytes",
+                "slow_drip_absolute_timeout",
+            )
+        ],
+        "redaction": {
+            "payload_bytes_omitted": True,
+            "sensitive_material_omitted": True,
+            "transcript_material_omitted": True,
+        },
+    }
 
 
 def file_record(path: Path) -> dict[str, int | str]:
@@ -94,6 +142,9 @@ def file_record(path: Path) -> dict[str, int | str]:
 
 
 def write_review_manifest(root: Path, files: dict[str, Path], run_id: str = "local-consumer-endpoint-20260824T000000Z") -> Path:
+    support_artifact_ids = ["cli_binary", "ledger_capture", "log_capture", "rate_card_capture", "status_capture"]
+    if "matrix" in files:
+        support_artifact_ids.append("trusted_metadata_transport_matrix")
     manifest = {
         "schema_version": "macprovider.local-consumer-endpoint-capture-review.v1",
         "journey_id": LOCAL_CONSUMER_ENDPOINT_JOURNEY_ID,
@@ -104,7 +155,7 @@ def write_review_manifest(root: Path, files: dict[str, Path], run_id: str = "loc
                 "id": step_id,
                 "status": "pass",
                 "artifacts": [LOCAL_CONSUMER_ENDPOINT_ARTIFACT_ID],
-                "support_artifacts": ["cli_binary", "ledger_capture", "log_capture", "rate_card_capture", "status_capture"],
+                "support_artifacts": support_artifact_ids,
             }
             for step_id in LOCAL_CONSUMER_ENDPOINT_STEP_ID_ORDER
         ],
@@ -141,12 +192,14 @@ def write_review_manifest(root: Path, files: dict[str, Path], run_id: str = "loc
         "review": {
             "reviewed_at": "2026-08-24T00:01:00Z",
             "reviewer_role": "release-operator",
-            "support_artifacts_reviewed": ["cli_binary", "ledger_capture", "log_capture", "rate_card_capture", "status_capture"],
+            "support_artifacts_reviewed": support_artifact_ids,
             "real_gateway_basis": "staging-or-production-gateway",
             "sdk_client_basis": "openai-sdk-local-token-api-key",
             "redaction_basis": "redacted-support-artifacts-reviewed",
         },
     }
+    if "matrix" in files:
+        manifest["support_artifacts"]["trusted_metadata_transport_matrix"] = file_record(files["matrix"])
     path = root / "capture-inputs" / "review-manifest.json"
     path.parent.mkdir(exist_ok=True)
     path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
@@ -154,8 +207,15 @@ def write_review_manifest(root: Path, files: dict[str, Path], run_id: str = "loc
 
 
 def base_argv(root: Path, commit: str, files: dict[str, Path], output: str) -> list[str]:
+    if "matrix" in files:
+        try:
+            matrix = json.loads(files["matrix"].read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            matrix = {}
+        if isinstance(matrix, dict) and matrix.get("repository", {}).get("commit") == "0" * 40:
+            files["matrix"].write_text(json.dumps(valid_transport_matrix(commit), indent=2) + "\n", encoding="utf-8")
     review_manifest = write_review_manifest(root, files)
-    return [
+    argv = [
         "--root",
         str(root),
         "--output",
@@ -209,6 +269,9 @@ def base_argv(root: Path, commit: str, files: dict[str, Path], output: str) -> l
         "--status-capture",
         str(files["status"]),
     ]
+    if "matrix" in files:
+        argv.extend(["--trusted-metadata-transport-matrix", str(files["matrix"])])
+    return argv
 
 
 class LocalConsumerEndpointEvidenceCaptureTests(unittest.TestCase):
@@ -224,7 +287,6 @@ class LocalConsumerEndpointEvidenceCaptureTests(unittest.TestCase):
             evidence_path = root / output
             evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
 
-            self.assertEqual("macprovider.local-consumer-endpoint-evidence.v1", evidence["schema_version"])
             self.assertEqual(LOCAL_CONSUMER_ENDPOINT_JOURNEY_ID, evidence["journey_id"])
             self.assertEqual(LOCAL_CONSUMER_ENDPOINT_EXECUTION_MODE, evidence["environment"]["class"])
             self.assertEqual(["step-01-capture-local-endpoint", "step-02-openai-sdk-local-client"], [step["id"] for step in evidence["steps"][:2]])
@@ -235,12 +297,17 @@ class LocalConsumerEndpointEvidenceCaptureTests(unittest.TestCase):
             self.assertEqual("production", evidence["candidate_identity"]["gateway_kind"])
             self.assertEqual("mlx-community/Llama-3.2-3B-Instruct-4bit", evidence["candidate_identity"]["model_id"])
             self.assertEqual(
-                sorted(["cli_binary", "ledger_capture", "log_capture", "rate_card_capture", "status_capture"]),
+                sorted(["cli_binary", "ledger_capture", "log_capture", "rate_card_capture", "status_capture", "trusted_metadata_transport_matrix"]),
                 sorted(evidence["support_artifacts"]),
             )
             self.assertEqual(
-                ["cli_binary", "ledger_capture", "log_capture", "rate_card_capture", "status_capture"],
+                ["cli_binary", "ledger_capture", "log_capture", "rate_card_capture", "status_capture", "trusted_metadata_transport_matrix"],
                 evidence["review"]["support_artifacts_reviewed"],
+            )
+            self.assertEqual("macprovider.local-consumer-endpoint-evidence.v2", evidence["schema_version"])
+            self.assertEqual(
+                "macprovider.trusted-metadata-transport-matrix.v1",
+                evidence["support_artifacts"]["trusted_metadata_transport_matrix"]["report"]["schema_version"],
             )
 
             subprocess.run(["git", "add", output], cwd=root, check=True)
@@ -260,6 +327,56 @@ class LocalConsumerEndpointEvidenceCaptureTests(unittest.TestCase):
                 builder.load_mapped_local_consumer_requirements = original_mapped
             self.assertEqual(["SPEC-045-R001", "SPEC-045-R008"], payload["requirement_ids"])
             self.assertEqual(LOCAL_CONSUMER_ENDPOINT_STEP_ID_ORDER[0], payload["steps"][0]["id"])
+
+    def test_capture_rejects_transport_requirements_without_matrix(self) -> None:
+        capture = load_capture()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            commit = git_init(root)
+            files = write_capture_inputs(root)
+            argv = base_argv(root, commit, files, "journeys/evidence/local-consumer-endpoint-missing-matrix.redacted.json")
+            index = argv.index("--trusted-metadata-transport-matrix")
+            del argv[index : index + 2]
+            with self.assertRaises(SystemExit):
+                capture.main(argv)
+
+    def test_capture_preserves_v1_for_non_transport_requirements(self) -> None:
+        capture = load_capture()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            commit = git_init(root)
+            files = write_capture_inputs(root)
+            del files["matrix"]
+            output = "journeys/evidence/local-consumer-endpoint-r001.redacted.json"
+            argv = base_argv(root, commit, files, output)
+            argv[argv.index("--requirement-ids") + 1] = "SPEC-045-R001"
+            self.assertEqual(0, capture.main(argv))
+            evidence = json.loads((root / output).read_text(encoding="utf-8"))
+            self.assertEqual("macprovider.local-consumer-endpoint-evidence.v1", evidence["schema_version"])
+            self.assertNotIn("trusted_metadata_transport_matrix", evidence["support_artifacts"])
+
+    def test_capture_rejects_bad_transport_matrix_reports(self) -> None:
+        capture = load_capture()
+        cases = {
+            "missing_scenario": lambda report: report["scenarios"].pop(),
+            "extra_scenario": lambda report: report["scenarios"].append({"id": "extra", "status": "pass"}),
+            "false_result": lambda report: report["scenarios"][0].update({"status": "fail"}),
+            "commit_mismatch": lambda report: report["repository"].update({"commit": "2" * 40}),
+            "fake_transport": lambda report: report["transport"].update({"connection_api": "URLSession"}),
+            "incomplete_source_binding": lambda report: report["transport"]["source_files"].pop(1),
+            "secret_bearing_report": lambda report: report.update({"raw_request": "Authorization: Bearer secret-value-1234567890"}),
+        }
+        for name, mutate in cases.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory).resolve()
+                commit = git_init(root)
+                files = write_capture_inputs(root)
+                report = valid_transport_matrix(commit)
+                mutate(report)
+                files["matrix"].write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+                write_review_manifest(root, files)
+                with self.assertRaises(SystemExit):
+                    capture.main(base_argv(root, commit, files, f"journeys/evidence/local-consumer-endpoint-bad-{name}.redacted.json"))
 
     def test_capture_allows_redacted_authorization_header(self) -> None:
         capture = load_capture()

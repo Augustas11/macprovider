@@ -28,7 +28,9 @@ from check_spec_governance import (
 
 
 EVIDENCE_SCHEMA = "macprovider.local-consumer-endpoint-evidence.v1"
+EVIDENCE_SCHEMA_V2 = "macprovider.local-consumer-endpoint-evidence.v2"
 REVIEW_SCHEMA = "macprovider.local-consumer-endpoint-capture-review.v1"
+TRANSPORT_MATRIX_SCHEMA = "macprovider.trusted-metadata-transport-matrix.v1"
 REPOSITORY = "Augustas11/macprovider"
 REQUIREMENT_RE = re.compile(r"^SPEC-[0-9]{3}-R[0-9]{3}$")
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -205,6 +207,39 @@ SUPPORT_ARTIFACT_IDS = (
     "rate_card_capture",
     "status_capture",
 )
+TRANSPORT_MATRIX_ARTIFACT_ID = "trusted_metadata_transport_matrix"
+TRANSPORT_MATRIX_TARGET_REQUIREMENT_IDS = {
+    "SPEC-045-R003",
+    "SPEC-045-R004",
+    "SPEC-045-R008",
+}
+TRANSPORT_MATRIX_SCENARIO_IDS = (
+    "valid_pinned_peer_with_sni",
+    "streaming_valid_pinned_peer_with_sni",
+    "connected_peer_in_validated_set",
+    "streaming_connected_peer_in_validated_set",
+    "untrusted_root_rejected",
+    "streaming_untrusted_root_rejected",
+    "expired_certificate_rejected",
+    "streaming_expired_certificate_rejected",
+    "invalid_chain_rejected",
+    "streaming_invalid_chain_rejected",
+    "hostname_mismatch_rejected",
+    "streaming_hostname_mismatch_rejected",
+    "dns_reresolved_per_connection",
+    "environment_proxy_ignored",
+    "streaming_environment_proxy_ignored",
+    "redirect_not_followed",
+    "streaming_redirect_not_followed",
+    "zero_credential_bytes",
+    "slow_drip_absolute_timeout",
+)
+TRANSPORT_MATRIX_SOURCE_FILES = (
+    "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift",
+    "phase3-binary/Sources/macprovider-cli/ConsumeTrustedPricing.swift",
+    "phase3-binary/Tests/macprovider-cliTests/ConsumeTrustedMetadataTransportMatrixTests.swift",
+)
+TRANSPORT_MATRIX_SUPPORT_ROLE = "trusted-metadata-transport-matrix"
 ALLOWED_GATEWAY_ORIGINS = {
     kind: set(origins)
     for kind, origins in LOCAL_CONSUMER_ENDPOINT_ALLOWED_GATEWAY_ORIGINS.items()
@@ -271,17 +306,92 @@ def require_safe_metadata(value: str, label: str, *, run_id: bool = False, local
     return value
 
 
-def require_support_artifacts_reviewed(value: Any, label: str) -> list[str]:
+def require_support_artifacts_reviewed(value: Any, label: str, expected: tuple[str, ...] = SUPPORT_ARTIFACT_IDS) -> list[str]:
     if not isinstance(value, list):
         die(f"{label} must be an array")
     if any(not isinstance(item, str) for item in value):
         die(f"{label} must contain only strings")
     if len(set(value)) != len(value):
         die(f"{label} must not contain duplicate artifact ids")
-    expected = list(SUPPORT_ARTIFACT_IDS)
-    if sorted(value) != sorted(expected):
-        die(f"{label} must equal {expected}")
-    return expected
+    expected_list = list(expected)
+    if sorted(value) != sorted(expected_list):
+        die(f"{label} must equal {expected_list}")
+    return expected_list
+
+
+def required_support_artifact_ids(requirement_ids: list[str]) -> tuple[str, ...]:
+    if any(requirement_id in TRANSPORT_MATRIX_TARGET_REQUIREMENT_IDS for requirement_id in requirement_ids):
+        return SUPPORT_ARTIFACT_IDS + (TRANSPORT_MATRIX_ARTIFACT_ID,)
+    return SUPPORT_ARTIFACT_IDS
+
+
+def validate_transport_matrix_report(value: Any, *, source_sha: str) -> None:
+    if not isinstance(value, dict):
+        die("trusted metadata transport matrix must be a JSON object")
+    required = {"schema_version", "repository", "transport", "scenarios", "redaction"}
+    require_exact_keys(value, required, required, "trusted_metadata_transport_matrix")
+    if value.get("schema_version") != TRANSPORT_MATRIX_SCHEMA:
+        die(f"trusted_metadata_transport_matrix.schema_version must equal {TRANSPORT_MATRIX_SCHEMA!r}")
+    repository = value.get("repository")
+    if not isinstance(repository, dict):
+        die("trusted_metadata_transport_matrix.repository must be an object")
+    require_exact_keys(repository, {"name", "commit"}, {"name", "commit"}, "trusted_metadata_transport_matrix.repository")
+    if repository.get("name") != REPOSITORY:
+        die(f"trusted_metadata_transport_matrix.repository.name must equal {REPOSITORY!r}")
+    if repository.get("commit") != source_sha:
+        die("trusted_metadata_transport_matrix.repository.commit must match --source-sha")
+    transport = value.get("transport")
+    if not isinstance(transport, dict):
+        die("trusted_metadata_transport_matrix.transport must be an object")
+    require_exact_keys(
+        transport,
+        {"production_path", "real_sockets", "connection_api", "source_files"},
+        {"production_path", "real_sockets", "connection_api", "source_files"},
+        "trusted_metadata_transport_matrix.transport",
+    )
+    if transport.get("production_path") is not True:
+        die("trusted_metadata_transport_matrix.transport.production_path must be true")
+    if transport.get("real_sockets") is not True:
+        die("trusted_metadata_transport_matrix.transport.real_sockets must be true")
+    if transport.get("connection_api") != "NWConnection":
+        die("trusted_metadata_transport_matrix.transport.connection_api must equal 'NWConnection'")
+    if transport.get("source_files") != list(TRANSPORT_MATRIX_SOURCE_FILES):
+        die(f"trusted_metadata_transport_matrix.transport.source_files must equal {list(TRANSPORT_MATRIX_SOURCE_FILES)}")
+    scenarios = value.get("scenarios")
+    if not isinstance(scenarios, list):
+        die("trusted_metadata_transport_matrix.scenarios must be an array")
+    by_id: dict[str, dict[str, Any]] = {}
+    for index, scenario in enumerate(scenarios):
+        if not isinstance(scenario, dict):
+            die(f"trusted_metadata_transport_matrix.scenarios[{index}] must be an object")
+        require_exact_keys(
+            scenario,
+            {"id", "status"},
+            {"id", "status"},
+            f"trusted_metadata_transport_matrix.scenarios[{index}]",
+        )
+        scenario_id = scenario.get("id")
+        if not isinstance(scenario_id, str):
+            die(f"trusted_metadata_transport_matrix.scenarios[{index}].id must be a string")
+        if scenario_id in by_id:
+            die(f"duplicate trusted metadata transport scenario: {scenario_id}")
+        if scenario.get("status") != "pass":
+            die(f"trusted_metadata_transport_matrix.scenarios[{index}].status must equal pass")
+        by_id[scenario_id] = scenario
+    missing = [scenario_id for scenario_id in TRANSPORT_MATRIX_SCENARIO_IDS if scenario_id not in by_id]
+    extra = [scenario_id for scenario_id in by_id if scenario_id not in TRANSPORT_MATRIX_SCENARIO_IDS]
+    if missing:
+        die(f"trusted_metadata_transport_matrix.scenarios missing scenarios: {missing}")
+    if extra:
+        die(f"trusted_metadata_transport_matrix.scenarios has unexpected scenarios: {extra}")
+    redaction = value.get("redaction")
+    if not isinstance(redaction, dict):
+        die("trusted_metadata_transport_matrix.redaction must be an object")
+    required_redaction = {"payload_bytes_omitted", "sensitive_material_omitted", "transcript_material_omitted"}
+    require_exact_keys(redaction, required_redaction, required_redaction, "trusted_metadata_transport_matrix.redaction")
+    for field in sorted(required_redaction):
+        if redaction.get(field) is not True:
+            die(f"trusted_metadata_transport_matrix.redaction.{field} must be true")
 
 
 def require_candidate_identity_metadata(value: str, label: str, *, field: str) -> str:
@@ -385,6 +495,10 @@ def sha256_bytes(payload: bytes) -> str:
 
 def sha256_text(value: str) -> str:
     return sha256_bytes(value.encode("utf-8"))
+
+
+def canonical_report_bytes(value: dict[str, Any]) -> bytes:
+    return (json.dumps(value, indent=2, sort_keys=False) + "\n").encode("utf-8")
 
 
 def sha256_file(path: Path, label: str, *, binary: bool = False) -> tuple[str, int]:
@@ -592,7 +706,7 @@ def require_bool_map(value: Any, true_fields: set[str], false_fields: set[str], 
     return result
 
 
-def require_steps_from_review(value: Any) -> list[dict[str, Any]]:
+def require_steps_from_review(value: Any, expected_support_artifacts: tuple[str, ...]) -> list[dict[str, Any]]:
     if not isinstance(value, list):
         die("review.steps must be an array")
     by_id: dict[str, dict[str, Any]] = {}
@@ -608,7 +722,7 @@ def require_steps_from_review(value: Any) -> list[dict[str, Any]]:
         if item.get("artifacts") != [LOCAL_CONSUMER_ENDPOINT_ARTIFACT_ID]:
             die(f"review step {step_id} artifacts must reference {LOCAL_CONSUMER_ENDPOINT_ARTIFACT_ID}")
         support = item.get("support_artifacts")
-        if not isinstance(support, list) or not support or any(artifact not in SUPPORT_ARTIFACT_IDS for artifact in support):
+        if not isinstance(support, list) or not support or any(artifact not in expected_support_artifacts for artifact in support):
             die(f"review step {step_id} must bind to known support artifacts")
         by_id[step_id] = {"id": step_id, "status": "pass", "artifacts": [LOCAL_CONSUMER_ENDPOINT_ARTIFACT_ID], "support_artifacts": sorted(set(support))}
     missing = [step_id for step_id in LOCAL_CONSUMER_ENDPOINT_STEP_ID_ORDER if step_id not in by_id]
@@ -620,12 +734,16 @@ def require_steps_from_review(value: Any) -> list[dict[str, Any]]:
     return [by_id[step_id] for step_id in LOCAL_CONSUMER_ENDPOINT_STEP_ID_ORDER]
 
 
-def require_review(value: Any) -> dict[str, Any]:
+def require_review(value: Any, expected_support_artifacts: tuple[str, ...]) -> dict[str, Any]:
     if not isinstance(value, dict):
         die("review.review must be an object")
     require_exact_keys(value, REVIEW_FIELDS, REVIEW_FIELDS, "review.review")
     reviewed_at = require_string(value.get("reviewed_at"), DATETIME_Z_RE, "review.reviewed_at")
-    support = require_support_artifacts_reviewed(value.get("support_artifacts_reviewed"), "review.support_artifacts_reviewed")
+    support = require_support_artifacts_reviewed(
+        value.get("support_artifacts_reviewed"),
+        "review.support_artifacts_reviewed",
+        expected_support_artifacts,
+    )
     reviewer_role = require_safe_metadata(value.get("reviewer_role"), "review.reviewer_role", local=True)
     if value.get("real_gateway_basis") != "staging-or-production-gateway":
         die("review.real_gateway_basis must equal 'staging-or-production-gateway'")
@@ -643,11 +761,11 @@ def require_review(value: Any) -> dict[str, Any]:
     }
 
 
-def require_manifest_support_artifacts(value: Any, expected: dict[str, Any]) -> None:
+def require_manifest_support_artifacts(value: Any, expected: dict[str, Any], expected_support_artifacts: tuple[str, ...]) -> None:
     if not isinstance(value, dict):
         die("review.support_artifacts must be an object")
-    require_exact_keys(value, set(SUPPORT_ARTIFACT_IDS), set(SUPPORT_ARTIFACT_IDS), "review.support_artifacts")
-    for artifact_id in SUPPORT_ARTIFACT_IDS:
+    require_exact_keys(value, set(expected_support_artifacts), set(expected_support_artifacts), "review.support_artifacts")
+    for artifact_id in expected_support_artifacts:
         artifact = value.get(artifact_id)
         if not isinstance(artifact, dict):
             die(f"review.support_artifacts.{artifact_id} must be an object")
@@ -660,7 +778,13 @@ def require_manifest_support_artifacts(value: Any, expected: dict[str, Any]) -> 
             die(f"review.support_artifacts.{artifact_id} must match the reviewed artifact bytes")
 
 
-def require_review_manifest(value: dict[str, Any], *, run_id: str, support_artifacts: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, bool], dict[str, bool], dict[str, Any]]:
+def require_review_manifest(
+    value: dict[str, Any],
+    *,
+    run_id: str,
+    support_artifacts: dict[str, Any],
+    expected_support_artifacts: tuple[str, ...],
+) -> tuple[list[dict[str, Any]], dict[str, bool], dict[str, bool], dict[str, Any]]:
     required = {"schema_version", "journey_id", "run_id", "result", "steps", "redaction", "observations", "support_artifacts", "review"}
     require_exact_keys(value, required, required, "review")
     if value.get("schema_version") != REVIEW_SCHEMA:
@@ -669,17 +793,17 @@ def require_review_manifest(value: dict[str, Any], *, run_id: str, support_artif
         die(f"review.journey_id must equal {LOCAL_CONSUMER_ENDPOINT_JOURNEY_ID!r}")
     if value.get("run_id") != run_id:
         die("review.run_id must match --run-id")
-    require_manifest_support_artifacts(value.get("support_artifacts"), support_artifacts)
+    require_manifest_support_artifacts(value.get("support_artifacts"), support_artifacts, expected_support_artifacts)
     result = value.get("result")
     if not isinstance(result, dict):
         die("review.result must be an object")
     require_exact_keys(result, {"status"}, {"status"}, "review.result")
     if result.get("status") != "pass":
         die("review.result.status must equal pass")
-    steps = require_steps_from_review(value.get("steps"))
+    steps = require_steps_from_review(value.get("steps"), expected_support_artifacts)
     redaction = require_bool_map(value.get("redaction"), REDACTION_FIELDS, set(), "review.redaction")
     observations = require_bool_map(value.get("observations"), TRUE_OBSERVATION_FIELDS, FALSE_OBSERVATION_FIELDS, "review.observations")
-    review = require_review(value.get("review"))
+    review = require_review(value.get("review"), expected_support_artifacts)
     return steps, redaction, observations, review
 
 
@@ -762,11 +886,17 @@ def build_evidence(args: argparse.Namespace) -> dict[str, Any]:
         die("--gateway-kind must equal 'staging' or 'production'")
 
     requirement_ids = parse_requirement_ids(args.requirement_ids)
+    expected_support_artifacts = required_support_artifact_ids(requirement_ids)
     cli_binary_sha256, cli_binary_bytes = sha256_file(Path(args.cli_binary), "--cli-binary", binary=True)
     ledger_sha256, ledger_bytes = sha256_file(Path(args.ledger_capture), "--ledger-capture")
     log_capture_sha256, log_bytes = sha256_file(Path(args.log_capture), "--log-capture")
     rate_card_sha256, rate_card_bytes = sha256_file(Path(args.rate_card_capture), "--rate-card-capture")
     status_capture_sha256, status_bytes = sha256_file(Path(args.status_capture), "--status-capture")
+    transport_matrix_required = TRANSPORT_MATRIX_ARTIFACT_ID in expected_support_artifacts
+    if transport_matrix_required and not args.trusted_metadata_transport_matrix:
+        die("--trusted-metadata-transport-matrix is required for SPEC-045-R003/R004/R008 captures")
+    if not transport_matrix_required and args.trusted_metadata_transport_matrix:
+        die("--trusted-metadata-transport-matrix is only accepted for SPEC-045-R003/R004/R008 captures")
     if args.local_endpoint_base_url_sha256:
         die("--local-endpoint-base-url-sha256 is not accepted for capture; pass --local-endpoint-base-url")
     if args.upstream_gateway_origin_sha256:
@@ -796,13 +926,36 @@ def build_evidence(args: argparse.Namespace) -> dict[str, Any]:
         "rate_card_capture": {"role": "redacted-rate-card-capture", "sha256": rate_card_sha256, "bytes": rate_card_bytes},
         "status_capture": {"role": "redacted-status-capture", "sha256": status_capture_sha256, "bytes": status_bytes},
     }
-    steps, redaction, observations, review = require_review_manifest(review_manifest, run_id=run_id, support_artifacts=support_artifacts)
+    if transport_matrix_required:
+        matrix_path = require_regular_file(Path(args.trusted_metadata_transport_matrix), "--trusted-metadata-transport-matrix")
+        matrix_payload = matrix_path.read_bytes()
+        scan_redacted_artifact_payload(matrix_payload, "--trusted-metadata-transport-matrix")
+        try:
+            matrix = json.loads(matrix_payload.decode("utf-8"), object_pairs_hook=_unique_json_object)
+        except DuplicateJSONKeyError as exc:
+            die(f"--trusted-metadata-transport-matrix contains duplicate JSON object key {exc.args[0]!r}")
+        except json.JSONDecodeError as exc:
+            die(f"--trusted-metadata-transport-matrix contains malformed JSON: {exc}")
+        validate_transport_matrix_report(matrix, source_sha=source_sha)
+        matrix_canonical = canonical_report_bytes(matrix)
+        support_artifacts[TRANSPORT_MATRIX_ARTIFACT_ID] = {
+            "role": TRANSPORT_MATRIX_SUPPORT_ROLE,
+            "sha256": sha256_bytes(matrix_canonical),
+            "bytes": len(matrix_canonical),
+            "report": matrix,
+        }
+    steps, redaction, observations, review = require_review_manifest(
+        review_manifest,
+        run_id=run_id,
+        support_artifacts=support_artifacts,
+        expected_support_artifacts=expected_support_artifacts,
+    )
     candidate = require_safe_metadata(args.candidate, "--candidate")
     if candidate != f"commit:{source_sha}":
         die("--candidate must equal commit:<source-sha>")
 
     evidence = {
-        "schema_version": EVIDENCE_SCHEMA,
+        "schema_version": EVIDENCE_SCHEMA_V2 if transport_matrix_required else EVIDENCE_SCHEMA,
         "journey_id": LOCAL_CONSUMER_ENDPOINT_JOURNEY_ID,
         "requirement_ids": requirement_ids,
         "repository": {"name": REPOSITORY, "commit": source_sha},
@@ -893,6 +1046,7 @@ def parser() -> argparse.ArgumentParser:
     parser.add_argument("--log-capture", required=True)
     parser.add_argument("--rate-card-capture", required=True)
     parser.add_argument("--status-capture", required=True)
+    parser.add_argument("--trusted-metadata-transport-matrix", default=None)
     return parser
 
 
