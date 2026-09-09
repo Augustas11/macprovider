@@ -463,8 +463,17 @@ struct ModelsCatalogEconomicsCommand: AsyncParsableCommand {
             ollamaOrigin: skipOllama ? nil : ollamaOrigin,
             openAICompatibleOrigin: skipOpenaiCompatible ? nil : openaiCompatibleOrigin
         )
-        let discovery = await BYOMDiscoveryRunner(environment: environment).discover()
+        // The artifact-feed selection is made ONCE, before discovery, and the
+        // matcher discovery runs with is built from that qualified selection:
+        // under integrity / update-required / stale the feed is nil and no
+        // artifact-only reference can become `catalog_matched` (SPEC-023
+        // §3.7.6 rule 5). Candidate-row identity is unaffected (rule 6).
         let inputs = await AutotuneStaticInputs().loadRecommendationInputs()
+        let catalogMatcher = BYOMCatalogMatcher(
+            candidateBytes: inputs.candidate.selectedBytes,
+            artifactFeed: inputs.artifactFeed.value
+        )
+        let discovery = await BYOMDiscoveryRunner(environment: environment, catalogMatcher: catalogMatcher).discover()
         let admissions = await readAdmissionStatuses(
             discovery: discovery
         )
@@ -476,6 +485,13 @@ struct ModelsCatalogEconomicsCommand: AsyncParsableCommand {
             candidateCatalog: inputs.candidate,
             rateCard: inputs.rateCard
         )
+        // SPEC-044's projection warning codes are a closed enum of v0.1 feed
+        // classes; the artifact-feed classes are reported beside them here
+        // rather than mapped onto codes that would misattribute the failure to
+        // a v0.1 feed.
+        for warning in inputs.artifactFeed.warnings.map(\.rawValue).sorted() {
+            writeStderr("models catalog-economics warning: \(warning)")
+        }
         for warning in document.warnings.sorted() {
             writeStderr("models catalog-economics warning: \(warning)")
         }

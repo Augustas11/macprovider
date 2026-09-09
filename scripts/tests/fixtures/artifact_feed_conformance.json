@@ -758,6 +758,125 @@
         }
       ],
       "spec": "\u00a73.7.3 model key grammar"
+    },
+    {
+      "expect": "reject",
+      "name": "generated_at with fractional seconds",
+      "ops": [
+        {
+          "op": "set",
+          "path": [
+            "generated_at"
+          ],
+          "value": "2026-07-10T00:00:00.000Z"
+        }
+      ],
+      "spec": "\u00a73.7.3 \u2014 one timestamp grammar in every consumer (seconds precision)"
+    },
+    {
+      "expect": "reject",
+      "name": "generated_at with a comma fraction",
+      "ops": [
+        {
+          "op": "set",
+          "path": [
+            "generated_at"
+          ],
+          "value": "2026-07-10T00:00:00,000Z"
+        }
+      ],
+      "spec": "\u00a73.7.3 \u2014 one timestamp grammar in every consumer"
+    },
+    {
+      "expect": "reject",
+      "name": "verified_at is an impossible calendar date",
+      "ops": [
+        {
+          "op": "set",
+          "path": [
+            "models",
+            "test-model",
+            "artifacts",
+            "mlx-4bit",
+            "verified_at"
+          ],
+          "value": "2026-02-30"
+        }
+      ],
+      "spec": "\u00a73.7.3 \u2014 verified_at is a real RFC3339 full-date"
+    },
+    {
+      "expect": "reject",
+      "name": "version with surrounding whitespace",
+      "ops": [
+        {
+          "op": "set",
+          "path": [
+            "version"
+          ],
+          "value": " test-release"
+        },
+        {
+          "op": "set",
+          "path": [
+            "release_id"
+          ],
+          "value": " test-release"
+        }
+      ],
+      "spec": "\u00a73.7.3 \u2014 trimmed release strings"
+    },
+    {
+      "expect": "accept",
+      "name": "artifact notes present as a string",
+      "ops": [
+        {
+          "op": "set",
+          "path": [
+            "models",
+            "test-model",
+            "artifacts",
+            "mlx-4bit",
+            "notes"
+          ],
+          "value": "curated"
+        }
+      ],
+      "spec": "\u00a73.7.3 \u2014 notes is the one optional artifact field"
+    },
+    {
+      "expect": "accept",
+      "name": "second verified mlx artifact under another repo id",
+      "ops": [
+        {
+          "op": "set",
+          "path": [
+            "models",
+            "test-model",
+            "artifacts",
+            "mlx-8bit"
+          ],
+          "value": {
+            "allowed_runtime_sources": [
+              "mlx_cache"
+            ],
+            "hash": "5555555555555555555555555555555555555555555555555555555555555555",
+            "hash_algorithm": "macprovider.snapshot-manifest.v1",
+            "min_ram_gb": 8,
+            "quantization": "8bit",
+            "runtime_format": "mlx_safetensors",
+            "size_bytes": 234567,
+            "source_ref": {
+              "kind": "huggingface_revision",
+              "repo_id": "mlx-community/Test-Model-8bit",
+              "revision": "3333333333333333333333333333333333333333"
+            },
+            "verification_status": "verified",
+            "verified_at": "2026-09-01"
+          }
+        }
+      ],
+      "spec": "\u00a73.7.4 \u2014 several artifacts per model, distinct hashes"
     }
   ],
   "description": "Shared SPEC-023 \u00a73.7 artifact-feed conformance corpus (BYOM v0.2 slice 2c). One candidate catalog, one valid feed, and mutation cases applied by the Python generator tests, the Go coordinator tests, and the Swift CLI tests, so the three consumers cannot drift on the closed schema, the identity matrix, release binding, or primary consistency. Mutation ops: {op: set, path: [...], value} and {op: delete, path: [...]}. The feed's candidate_catalog_sha256 is computed by each consumer from the canonical candidate bytes it signs or bakes before ops are applied; a case that sets it wins.",

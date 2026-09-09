@@ -12,7 +12,7 @@ import Foundation
 /// signer identity equality (§3.7.2) and primary-artifact consistency (§3.7.5).
 /// Its failure classes (§3.7.6) fail closed for artifact-derived capabilities
 /// only and never block paid recommendation or coordinator join (rule 6): an
-/// absent feed — `bakedArtifactFeedJSON == nil` — is indistinguishable from v0.1.
+/// absent feed — `bakedArtifactFeedBase64 == nil` — is indistinguishable from v0.1.
 ///
 /// The schema, identity matrix, uniqueness, and binding rules here mirror the
 /// generator (`scripts/catalog-release.py`) and the coordinator
@@ -159,8 +159,13 @@ extension ArtifactFeed {
         guard !policyVersion.isEmpty, policyVersion == policyVersion.trimmingCharacters(in: .whitespacesAndNewlines) else {
             throw ArtifactFeedError.integrity("policy_version must be a non-empty trimmed string")
         }
-        guard let generatedAt = ISO8601DateFormatter.autotuneInternet.date(from: rawGeneratedAt) else {
-            throw ArtifactFeedError.integrity("generated_at must be RFC3339")
+        // One timestamp grammar in every consumer (generator, coordinator, CLI):
+        // the form the generator stamps — seconds precision, `Z` or an explicit
+        // `±HH:MM` offset, no fractional seconds.
+        guard rawGeneratedAt.range(of: Self.timestampGrammar, options: .regularExpression) != nil,
+              let generatedAt = ISO8601DateFormatter.autotuneInternet.date(from: rawGeneratedAt)
+        else {
+            throw ArtifactFeedError.integrity("generated_at must be RFC3339 at seconds precision with an explicit timezone")
         }
         guard source == Self.source else {
             throw ArtifactFeedError.integrity("source must be \(Self.source)")
@@ -330,6 +335,8 @@ extension ArtifactFeed {
         )
     }
 
+    static let timestampGrammar = #"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:Z|[+-]\d{2}:\d{2})$"#
+
     static func rawGeneratedAt(in data: Data) -> String? {
         guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
         return object["generated_at"] as? String
@@ -468,26 +475,60 @@ extension AutotuneStaticInputs {
         bakedArtifactFeedBase64.flatMap { Data(base64Encoded: $0) }
     }
 
-    /// The artifact feed the compiled-in snapshot carries, bound to the
+    /// §3.7.6 rules 3–4 for whichever artifact bytes were SELECTED — the live
+    /// bytes or the compiled-in fallback alike: a future or expired stamp is
+    /// update-required; 14–30 days is stale. Both fail closed for every
+    /// artifact-derived capability (rule 5).
+    static func artifactFeedFreshnessWarnings(generatedAt: Date, now: Date) -> Set<AutotuneRecommendWarning> {
+        let age = now.timeIntervalSince(generatedAt)
+        if generatedAt > now.addingTimeInterval(10 * 60) || age > 30 * 24 * 3600 {
+            return [.catalogArtifactFeedUpdateRequired]
+        }
+        if age >= 14 * 24 * 3600 {
+            return [.catalogArtifactFeedStale]
+        }
+        return []
+    }
+
+    /// The ONE qualified artifact selection for an offline consumer (BYOM
+    /// discovery, which never fetches): the compiled-in bytes bound to the
     /// compiled-in candidate catalog with the three-way signer identity
-    /// (manifest-bound artifact signer, candidate signer, artifact signer), or
-    /// nil for a rate-card-bound release.
-    static func bakedBoundArtifactFeed() -> ArtifactFeed? {
-        guard let bytes = bakedArtifactFeedBytes else { return nil }
-        let candidateBytes = Data(bakedCandidateCatalogJSON.utf8)
-        guard let feed = try? decodeArtifactFeed(bytes),
+    /// (manifest-bound artifact signer, candidate signer, artifact signer) AND
+    /// fresh at `now`. Nil for a rate-card-bound release, an unbound snapshot,
+    /// or a stale / expired snapshot — exactly the cases in which
+    /// `loadArtifactFeed` would yield no usable feed for the same bytes.
+    static func usableArtifactFeed(
+        bakedBytes: Data?,
+        bakedSignerKeyID: String?,
+        candidateBytes: Data,
+        candidateSignerKeyID: String?,
+        now: Date
+    ) -> ArtifactFeed? {
+        guard let bytes = bakedBytes,
+              let feed = try? decodeArtifactFeed(bytes),
               let catalog = try? decodeSignedStaticCandidateCatalog(candidateBytes),
               (try? feed.bind(
                   to: catalog,
                   candidateBytes: candidateBytes,
-                  candidateSignerKeyID: bakedCatalogSignerKeyID,
-                  artifactSignerKeyID: bakedArtifactFeedSignerKeyID,
-                  manifestSignerKeyID: bakedArtifactFeedSignerKeyID
-              )) != nil
+                  candidateSignerKeyID: candidateSignerKeyID,
+                  artifactSignerKeyID: bakedSignerKeyID,
+                  manifestSignerKeyID: bakedSignerKeyID
+              )) != nil,
+              artifactFeedFreshnessWarnings(generatedAt: feed.generatedAt, now: now).isEmpty
         else {
             return nil
         }
         return feed
+    }
+
+    static func bakedUsableArtifactFeed(now: Date = Date()) -> ArtifactFeed? {
+        usableArtifactFeed(
+            bakedBytes: bakedArtifactFeedBytes,
+            bakedSignerKeyID: bakedArtifactFeedSignerKeyID,
+            candidateBytes: Data(bakedCandidateCatalogJSON.utf8),
+            candidateSignerKeyID: bakedCatalogSignerKeyID,
+            now: now
+        )
     }
 
     /// Load the §3.7 artifact feed for the release whose candidate catalog was
@@ -511,6 +552,12 @@ extension AutotuneStaticInputs {
             staleWarning: .catalogArtifactFeedStale
         ) { try Self.decodeArtifactFeed($0) }
         var warnings = selection.warnings
+        if selection.usedFallback {
+            // The shared loader applies freshness only to fetched bytes (the
+            // v0.1 feeds stay usable when stale); the artifact feed is stricter
+            // (§3.7.6 rule 5), so the fallback bytes are aged here.
+            warnings.formUnion(Self.artifactFeedFreshnessWarnings(generatedAt: selection.value.generatedAt, now: now()))
+        }
         do {
             // The compiled-in bytes carry their release-manifest-bound signer;
             // when they are what was selected, enforce the three-way identity.

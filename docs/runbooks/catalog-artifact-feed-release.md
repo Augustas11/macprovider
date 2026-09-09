@@ -83,14 +83,25 @@ manifest-bound signer, and on the live path the two authenticated signers it
 holds (the manifest binding of served bytes is enforced by `verify`, the
 acceptance signer, the live release gate, and the coordinator loader). For a
 rate-card-bound release both are `nil` and the CLI behaves exactly as v0.1.
-Every `autotune recommend` / `models` transcript loads the artifact feed for
-the selected candidate release beside the three v0.1 feeds
-(`loadRecommendationInputs`), and its warnings ride in the same warning sets.
-BYOM discovery's catalog matcher additionally resolves a served reference
-through the compiled-in, release-bound artifact set (HuggingFace repo ids, GGUF
-library tags) — identity only, never admission — and only through a `verified`
-artifact whose `allowed_runtime_sources` include the adapter that reported the
-reference (§3.7.4); `declared` and `blocked` artifacts never match. The closed
+Freshness (§3.7.6 rules 3–4) is applied to whichever artifact bytes were
+selected, the compiled-in fallback included, so an offline binary gets no
+usable feed once its baked feed is 14 days old. The transcripts that make the
+live selection are `autotune --recommend`, `--recommend-prefetch`, `--consume`,
+`models adopt-recommendation`, and `models catalog-economics`: each loads the
+artifact feed for the selected candidate release beside the three v0.1 feeds
+(`loadRecommendationInputs`); the first four carry its warnings in the same
+warning sets, and `catalog-economics` — whose SPEC-044 projection codes are a
+closed v0.1 enum — reports them on stderr and runs discovery with a matcher
+built from that qualified selection. `models discover` is offline by design
+and uses the compiled-in matcher, whose artifact set is the same qualified
+selection the loader would make for those bytes without transport (bound with
+the three-way signer identity and fresh at run time). BYOM discovery's catalog
+matcher resolves a served reference through that artifact set (HuggingFace
+repo ids, GGUF library tags) — identity only, never admission — and only
+through a `verified` artifact whose `allowed_runtime_sources` include the
+adapter that reported the reference (§3.7.4), of a `listed` or `recommendable`
+row (§3.2: `candidate` and `blocked` rows are never BYOM-matchable);
+`declared` and `blocked` artifacts never match. The closed
 schema, identity matrix, uniqueness, and
 binding rules are pinned across the generator, the coordinator, and the CLI by
 the shared corpus `scripts/tests/fixtures/artifact_feed_conformance.json`.

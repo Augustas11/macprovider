@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -157,10 +158,19 @@ func (f AutotuneFeeds) catalogArtifactsEnabled() bool {
 // validateCatalogArtifactsFeed is the document-only half of the check: schema
 // closure, envelope, and the §3.7.4 identity matrix. Binding to the candidate
 // catalog needs both feeds and runs in bindCatalogArtifactsFeed.
+// artifactFeedTimestampGrammar is the artifact feed's generated_at grammar,
+// identical in the generator, the coordinator, and the CLI: seconds precision,
+// Z or an explicit ±HH:MM offset, no fractional seconds (time.RFC3339 alone
+// would also admit fractions and a comma separator that the generator rejects).
+var artifactFeedTimestampGrammar = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:Z|[+-]\d{2}:\d{2})$`)
+
 func validateCatalogArtifactsFeed(raw []byte, _ string) (feedRelease, error) {
 	var feed catalogArtifactsFeed
 	if err := decodeStrictJSON(raw, &feed); err != nil {
 		return feedRelease{}, err
+	}
+	if !artifactFeedTimestampGrammar.MatchString(feed.GeneratedAt) {
+		return feedRelease{}, fmt.Errorf("generated_at must be RFC3339 at seconds precision with an explicit timezone")
 	}
 	release, err := validateFeedEnvelope(feed.Version, feed.PolicyVersion, feed.GeneratedAt, feed.Source, catalogArtifactsSource, len(feed.Models))
 	if err != nil {

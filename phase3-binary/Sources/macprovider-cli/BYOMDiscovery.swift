@@ -2160,21 +2160,28 @@ struct BYOMDiscoveryRunner {
     private let environment: BYOMDiscoveryEnvironment
     private let fileManager: FileManager
     private let httpClient: any BYOMDiscoveryHTTPClient
+    private let catalogMatcher: BYOMCatalogMatcher?
 
+    /// `catalogMatcher` lets a transcript that has already made the qualified
+    /// artifact-feed selection (`loadRecommendationInputs`) hand it to
+    /// discovery; `models discover` is offline and uses the compiled-in,
+    /// freshness-qualified matcher.
     init(
         environment: BYOMDiscoveryEnvironment,
         fileManager: FileManager = .default,
-        httpClient: any BYOMDiscoveryHTTPClient = BYOMURLSessionHTTPClient()
+        httpClient: any BYOMDiscoveryHTTPClient = BYOMURLSessionHTTPClient(),
+        catalogMatcher: BYOMCatalogMatcher? = nil
     ) {
         self.environment = environment
         self.fileManager = fileManager
         self.httpClient = httpClient
+        self.catalogMatcher = catalogMatcher
     }
 
     func discover() async -> BYOMDiscoveryWire {
         let namespace = BYOMDiscoveryNamespaceStore(fileManager: fileManager)
             .readNamespace(at: environment.namespaceURL)
-        let catalog = BYOMCatalogMatcher()
+        let catalog = catalogMatcher ?? BYOMCatalogMatcher()
         var adapters: [BYOMDiscoveryWire.Adapter] = []
         var candidates: [BYOMDiscoveryWire.Candidate] = []
         var warnings = Set(namespace.warnings.map(\.rawValue))
@@ -3082,21 +3089,39 @@ struct BYOMCatalogMatcher: Sendable {
     /// exactly as v0.1 did (§3.7.6 rule 6).
     private let artifactReferences: [ArtifactFeed.ServedReference]
 
-    init() {
+    /// The offline matcher: the compiled-in candidate catalog and the
+    /// freshness-qualified compiled-in artifact set (`bakedUsableArtifactFeed`),
+    /// which is nil under exactly the conditions in which the live loader would
+    /// yield no usable feed for the same bytes (§3.7.6 rule 5).
+    init(now: Date = Date()) {
         self.init(
             candidateBytes: Data(AutotuneStaticInputs.bakedCandidateCatalogJSON.utf8),
-            artifactFeed: AutotuneStaticInputs.bakedBoundArtifactFeed()
+            artifactFeed: AutotuneStaticInputs.bakedUsableArtifactFeed(now: now)
         )
     }
 
+    /// `artifactFeed` is the caller's QUALIFIED selection — `loadArtifactFeed`'s
+    /// `value` for a transcript that fetched, or nil when no artifact-derived
+    /// capability may be exercised.
     init(candidateBytes: Data, artifactFeed: ArtifactFeed?) {
+        // SPEC-023 §3.2 ladder: only `listed` and `recommendable` rows are BYOM
+        // catalog-matchable; a `candidate` row is operator staging and a
+        // `blocked` row is diagnostic display only — neither mints a catalog
+        // identity, whatever the artifact feed says about them.
+        var matchable = Set<String>()
         if let catalog = try? AutotuneStaticInputs.decodeSignedStaticCandidateCatalog(candidateBytes) {
-            rows = catalog.rows.map { (key: $0.key, modelID: $0.value.modelID) }
+            rows = catalog.rows.compactMap { entry in
+                guard Self.matchableStatuses.contains(entry.value.runtimeStatus) else { return nil }
+                matchable.insert(entry.key)
+                return (key: entry.key, modelID: entry.value.modelID)
+            }
         } else {
             rows = []
         }
-        artifactReferences = artifactFeed?.servedReferences() ?? []
+        artifactReferences = (artifactFeed?.servedReferences() ?? []).filter { matchable.contains($0.catalogKey) }
     }
+
+    static let matchableStatuses: Set<String> = ["listed", "recommendable"]
 
     /// `runtimeSource` is the adapter reporting the reference (`mlx_cache`,
     /// `ollama_loopback`, ...): an artifact reference matches only when that

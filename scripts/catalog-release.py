@@ -82,6 +82,11 @@ TIER2_SIG_PATTERN = re.compile(r"^[A-Za-z0-9_-]{86}$")
 MODEL_KEY = re.compile(r"^[a-z0-9][a-z0-9._/-]{0,127}$")
 MODEL_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$")
 RFC3339 = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$")
+# The artifact feed's `generated_at` grammar, identical in the generator, the
+# coordinator, and the CLI: the form `generate` stamps — seconds precision,
+# `Z` or an explicit `±HH:MM` offset, no fractional seconds — so no consumer
+# can accept a stamp another rejects (SPEC-023 §3.7.3).
+ARTIFACT_FEED_TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:Z|[+-]\d{2}:\d{2})$")
 INT64_MIN = -(2**63)
 INT64_MAX = 2**63 - 1
 OPENSSL_PROBE_TIMEOUT_SECONDS = 5
@@ -1465,6 +1470,8 @@ def validate_artifact_feed(
     if value["source"] != ARTIFACT_FEED_SOURCE_VALUE:
         fail(f"{label}: source must be {ARTIFACT_FEED_SOURCE_VALUE}")
     parse_time(value["generated_at"], label)
+    if not ARTIFACT_FEED_TIMESTAMP.fullmatch(value["generated_at"]):
+        fail(f"{label}: generated_at must be RFC3339 at seconds precision with an explicit timezone")
     for field in ("version", "release_id"):
         if value[field] != candidate_obj["version"]:
             fail(f"{label}: {field} must equal the candidate catalog version for this release")

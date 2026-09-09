@@ -363,6 +363,140 @@ final class AutotuneArtifactFeedTests: XCTestCase {
         XCTAssertEqual(matcher.catalogKey(for: "mlx-community/Test-Model-4bit", runtimeSource: "mlx_cache"), "test-model")
     }
 
+    func testFallbackBakedFeedIsAgedLikeSelectedBytes() async throws {
+        // §3.7.6 rules 3–5 apply to whichever artifact bytes were SELECTED, the
+        // compiled-in fallback included: an offline binary 14+ days after its
+        // baked feed's stamp gets no usable feed.
+        let fixture = try boundFixture()
+        let candidate = AutotuneStaticSelection(value: fixture.catalog, selectedBytes: fixture.candidateBytes, warnings: [], usedFallback: false, signerKeyID: AutotuneStaticInputs.bakedCatalogSignerKeyID)
+        let expectations: [(now: String, warnings: Set<AutotuneRecommendWarning>)] = [
+            ("2026-07-23T23:00:00Z", [.catalogArtifactFeedFallbackUsed]),
+            ("2026-07-24T00:00:00Z", [.catalogArtifactFeedFallbackUsed, .catalogArtifactFeedStale]),
+            ("2026-08-09T00:00:01Z", [.catalogArtifactFeedFallbackUsed, .catalogArtifactFeedUpdateRequired]),
+            ("2026-07-09T00:00:00Z", [.catalogArtifactFeedFallbackUsed, .catalogArtifactFeedUpdateRequired]),
+        ]
+        for expectation in expectations {
+            let inputs = AutotuneStaticInputs(
+                fetch: { _ in throw URLError(.cannotConnectToHost) },
+                now: { Self.date(expectation.now) }
+            )
+            let selection = await inputs.loadArtifactFeed(
+                candidate: candidate, bakedArtifactFeed: fixture.feedBytes,
+                bakedArtifactFeedSignerKeyID: AutotuneStaticInputs.bakedCatalogSignerKeyID
+            )
+            XCTAssertEqual(selection.warnings, expectation.warnings, expectation.now)
+            XCTAssertTrue(selection.usedFallback, expectation.now)
+            XCTAssertEqual(selection.selectedBytes, fixture.feedBytes, expectation.now)
+            XCTAssertEqual(selection.value == nil, expectation.warnings.count > 1, expectation.now)
+            XCTAssertFalse(AutotuneRecommendEngine.paidTrustBlocks(selection.warnings), expectation.now)
+        }
+    }
+
+    func testOfflineQualifiedSelectionMatchesTheLoaderVerdict() throws {
+        // The compiled-in matcher's feed is the same qualified selection the
+        // loader would make for those bytes offline: bound AND fresh.
+        let fixture = try boundFixture()
+        let signer = AutotuneStaticInputs.bakedCatalogSignerKeyID
+        func usable(now: String, signer bakedSigner: String? = signer, candidateSigner: String? = signer) -> ArtifactFeed? {
+            AutotuneStaticInputs.usableArtifactFeed(
+                bakedBytes: fixture.feedBytes, bakedSignerKeyID: bakedSigner,
+                candidateBytes: fixture.candidateBytes, candidateSignerKeyID: candidateSigner, now: Self.date(now)
+            )
+        }
+        XCTAssertNotNil(usable(now: "2026-07-11T00:00:00Z"))
+        XCTAssertNil(usable(now: "2026-07-24T00:00:00Z"), "stale")
+        XCTAssertNil(usable(now: "2026-08-09T00:00:01Z"), "expired")
+        XCTAssertNil(usable(now: "2026-07-09T00:00:00Z"), "future")
+        XCTAssertNil(usable(now: "2026-07-11T00:00:00Z", signer: nil), "no manifest signer")
+        XCTAssertNil(usable(now: "2026-07-11T00:00:00Z", signer: "streamvc-autotune-static-v5"), "other signer")
+        XCTAssertNil(AutotuneStaticInputs.usableArtifactFeed(
+            bakedBytes: nil, bakedSignerKeyID: signer, candidateBytes: fixture.candidateBytes,
+            candidateSignerKeyID: signer, now: Self.date("2026-07-11T00:00:00Z")
+        ))
+        let stale = BYOMCatalogMatcher(candidateBytes: fixture.candidateBytes, artifactFeed: usable(now: "2026-07-24T00:00:00Z"))
+        XCTAssertEqual(stale.catalogKey(for: "mlx-community/Test-Model-4bit", runtimeSource: "mlx_cache"), "test-model", "candidate-row identity is rule 6")
+    }
+
+    private func feedWithArtifactOnlyReference() throws -> (candidateBytes: Data, feed: ArtifactFeed) {
+        let corpus = try Self.loadCorpus()
+        let candidateBytes = try Self.canonical(corpus.candidate)
+        var feed = corpus.feed
+        feed["candidate_catalog_sha256"] = Self.sha256Hex(candidateBytes)
+        let second = corpus.cases.first { ($0["name"] as! String) == "second verified mlx artifact under another repo id" }!
+        feed = try Self.applying(second["ops"] as! [[String: Any]], to: feed)
+        return (candidateBytes, try AutotuneStaticInputs.decodeArtifactFeed(try Self.canonical(feed)))
+    }
+
+    func testDiscoveryEmitsNoArtifactDerivedMatchFromAnUnusableSelection() throws {
+        // An MLX snapshot known ONLY through the artifact feed (its repo id is
+        // not a candidate row's model id) is catalog_matched with a usable
+        // selection and unmatched with none; the row-known snapshot is matched
+        // either way (rule 6).
+        let fixture = try feedWithArtifactOnlyReference()
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("byom-artifact-only-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        for modelID in ["mlx-community/Test-Model-8bit", "mlx-community/Test-Model-4bit"] {
+            let directory = root.appendingPathComponent("models--" + modelID.replacingOccurrences(of: "/", with: "--"))
+                .appendingPathComponent("snapshots").appendingPathComponent(String(repeating: "a", count: 40))
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            try Data("{}".utf8).write(to: directory.appendingPathComponent("config.json"))
+            try Data(repeating: 0, count: 16).write(to: directory.appendingPathComponent("model.safetensors"))
+        }
+        let namespace = Data(repeating: 0x37, count: 32)
+        func keys(_ matcher: BYOMCatalogMatcher) -> [String: String?] {
+            let result = BYOMMLXCacheDiscovery(cacheRoot: root, namespace: namespace, catalogMatcher: matcher).discover()
+            return Dictionary(uniqueKeysWithValues: result.candidates.map { ($0.servedModelRef, $0.catalogModelKey) })
+        }
+        let usable = keys(BYOMCatalogMatcher(candidateBytes: fixture.candidateBytes, artifactFeed: fixture.feed))
+        XCTAssertEqual(usable["mlx-community/Test-Model-8bit"], "test-model")
+        XCTAssertEqual(usable["mlx-community/Test-Model-4bit"], "test-model")
+        let unusable = keys(BYOMCatalogMatcher(candidateBytes: fixture.candidateBytes, artifactFeed: nil))
+        XCTAssertEqual(unusable["mlx-community/Test-Model-8bit"], .some(nil))
+        XCTAssertEqual(unusable["mlx-community/Test-Model-4bit"], "test-model")
+    }
+
+    func testCatalogMatcherNeverMatchesCandidateOrBlockedRows() throws {
+        // SPEC-023 §3.2 ladder: a `candidate` row is never BYOM-matchable and a
+        // `blocked` row is diagnostic only — by row identity or by artifact.
+        let corpus = try Self.loadCorpus()
+        let fixture = try feedWithArtifactOnlyReference()
+        for status in ["candidate", "blocked"] {
+            var candidate = corpus.candidate
+            var rows = candidate["rows"] as! [String: Any]
+            var row = rows["test-model"] as! [String: Any]
+            row["runtime_status"] = status
+            rows["test-model"] = row
+            candidate["rows"] = rows
+            let candidateBytes = try Self.canonical(candidate)
+            XCTAssertNoThrow(try AutotuneStaticInputs.decodeSignedStaticCandidateCatalog(candidateBytes), status)
+            let matcher = BYOMCatalogMatcher(candidateBytes: candidateBytes, artifactFeed: fixture.feed)
+            XCTAssertNil(matcher.catalogKey(for: "mlx-community/Test-Model-4bit", runtimeSource: "mlx_cache"), status)
+            XCTAssertNil(matcher.catalogKey(for: "test-model", runtimeSource: "mlx_cache"), status)
+            XCTAssertNil(matcher.catalogKey(for: "mlx-community/Test-Model-8bit", runtimeSource: "mlx_cache"), status)
+        }
+        for status in ["listed", "recommendable"] {
+            var candidate = corpus.candidate
+            var rows = candidate["rows"] as! [String: Any]
+            var row = rows["test-model"] as! [String: Any]
+            row["runtime_status"] = status
+            rows["test-model"] = row
+            candidate["rows"] = rows
+            let matcher = BYOMCatalogMatcher(candidateBytes: try Self.canonical(candidate), artifactFeed: fixture.feed)
+            XCTAssertEqual(matcher.catalogKey(for: "mlx-community/Test-Model-8bit", runtimeSource: "mlx_cache"), "test-model", status)
+        }
+    }
+
+    func testGeneratedAtGrammarIsSecondsPrecisionWithExplicitZone() throws {
+        for (raw, ok) in [
+            ("2026-07-10T00:00:00Z", true), ("2026-07-10T02:00:00+02:00", true),
+            ("2026-07-10T00:00:00.000Z", false), ("2026-07-10T00:00:00,000Z", false),
+            ("2026-07-10T00:00:00", false), ("2026-07-10 00:00:00Z", false),
+        ] {
+            XCTAssertEqual(raw.range(of: ArtifactFeed.timestampGrammar, options: .regularExpression) != nil, ok, raw)
+        }
+    }
+
     func testGeneratedAtIsCarriedAsTheExactReleaseStamp() throws {
         let fixture = try boundFixture()
         let feed = try AutotuneStaticInputs.decodeArtifactFeed(fixture.feedBytes)
@@ -376,6 +510,6 @@ final class AutotuneArtifactFeedTests: XCTestCase {
         XCTAssertNil(AutotuneStaticInputs.bakedArtifactFeedBase64)
         XCTAssertNil(AutotuneStaticInputs.bakedArtifactFeedBytes)
         XCTAssertNil(AutotuneStaticInputs.bakedArtifactFeedSignerKeyID)
-        XCTAssertNil(AutotuneStaticInputs.bakedBoundArtifactFeed())
+        XCTAssertNil(AutotuneStaticInputs.bakedUsableArtifactFeed())
     }
 }
