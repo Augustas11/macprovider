@@ -3075,22 +3075,40 @@ struct BYOMCandidateIdentity: Sendable {
 
 struct BYOMCatalogMatcher: Sendable {
     private let rows: [(key: String, modelID: String)]
+    /// SPEC-023 §3.7 artifact set (BYOM v0.2 slice 2c): every served reference
+    /// an artifact of the compiled-in, release-bound artifact feed answers to
+    /// (HuggingFace repo ids, GGUF library tags). Identity only, never
+    /// admission; empty for a rate-card-bound release, which keeps matching
+    /// exactly as v0.1 did (§3.7.6 rule 6).
+    private let artifactReferences: [(reference: String, catalogKey: String)]
 
     init() {
-        let baked = Data(AutotuneStaticInputs.bakedCandidateCatalogJSON.utf8)
-        if let catalog = try? AutotuneStaticInputs.decodeSignedStaticCandidateCatalog(baked) {
+        self.init(
+            candidateBytes: Data(AutotuneStaticInputs.bakedCandidateCatalogJSON.utf8),
+            artifactFeed: AutotuneStaticInputs.bakedBoundArtifactFeed()
+        )
+    }
+
+    init(candidateBytes: Data, artifactFeed: ArtifactFeed?) {
+        if let catalog = try? AutotuneStaticInputs.decodeSignedStaticCandidateCatalog(candidateBytes) {
             rows = catalog.rows.map { (key: $0.key, modelID: $0.value.modelID) }
         } else {
             rows = []
         }
+        artifactReferences = artifactFeed?.servedReferences() ?? []
     }
 
     func catalogKey(for servedModelRef: String) -> String? {
         let normalized = BYOMCandidateIdentity.normalizedServedModelRef(servedModelRef)
-        return rows.first { row in
+        if let row = rows.first(where: { row in
             BYOMCandidateIdentity.normalizedServedModelRef(row.key) == normalized
                 || BYOMCandidateIdentity.normalizedServedModelRef(row.modelID) == normalized
-        }?.key
+        }) {
+            return row.key
+        }
+        return artifactReferences.first { entry in
+            BYOMCandidateIdentity.normalizedServedModelRef(entry.reference) == normalized
+        }?.catalogKey
     }
 }
 

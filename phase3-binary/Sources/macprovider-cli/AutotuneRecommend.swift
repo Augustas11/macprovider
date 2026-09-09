@@ -41,6 +41,13 @@ enum AutotuneRecommendWarning: String, CaseIterable {
     case rateCardIntegrityFailure = "rate_card_integrity_failure"
     case rateCardUpdateRequired = "rate_card_update_required"
     case rateCardStale = "rate_card_stale"
+    /// SPEC-023 §3.7.6: artifact-feed classes fail closed for artifact-derived
+    /// capabilities ONLY and never block paid recommendation or coordinator
+    /// join (rule 6); they are deliberately absent from every blocking set.
+    case catalogArtifactFeedFallbackUsed = "catalog_artifact_feed_fallback_used"
+    case catalogArtifactFeedIntegrityFailure = "catalog_artifact_feed_integrity_failure"
+    case catalogArtifactFeedUpdateRequired = "catalog_artifact_feed_update_required"
+    case catalogArtifactFeedStale = "catalog_artifact_feed_stale"
     case noEligibleModel = "no_eligible_model"
     /// v1.7.6 Track A1: at least one recommended candidate had no
     /// specific rate-card row and is being priced against the coord's
@@ -1637,7 +1644,7 @@ struct AutotuneStaticInputs {
         ) { try Self.decodeRateCard($0) }
     }
 
-    private func loadSignedStatic<T>(
+    func loadSignedStatic<T>(
         name: String,
         bakedBytes: Data,
         fallbackWarning: AutotuneRecommendWarning,
