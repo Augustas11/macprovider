@@ -822,6 +822,8 @@ func (s *Server) Handler() http.Handler {
 	r.Get("/v1/demand-rank.sig", s.handleDemandRankSig)
 	r.Get("/v1/autotune-candidates", s.handleAutotuneCandidates)
 	r.Get("/v1/autotune-candidates.sig", s.handleAutotuneCandidatesSig)
+	r.Get("/v1/catalog-artifacts", s.handleCatalogArtifacts)
+	r.Get("/v1/catalog-artifacts.sig", s.handleCatalogArtifactsSig)
 	r.Get("/v1/autotune-release", s.handleAutotuneRelease)
 	r.Get("/v1/public/trust-pools/{pool_id}/pool_policy.json", s.handlePublicTrustPoolPolicy)
 	r.Get("/v1/public/trust-pools/{pool_id}/policy", s.handlePublicTrustPoolPolicy)

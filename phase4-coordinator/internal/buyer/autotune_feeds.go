@@ -33,16 +33,19 @@ const (
 )
 
 var (
-	lowerHex40Pattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
-	lowerHex64Pattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
-	modelKeyPattern   = regexp.MustCompile(`^[a-z0-9][a-z0-9._/-]{0,127}$`)
-	modelIDPattern    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$`)
+	lowerHex40Pattern       = regexp.MustCompile(`^[0-9a-f]{40}$`)
+	lowerHex64Pattern       = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	modelKeyPattern         = regexp.MustCompile(`^[a-z0-9][a-z0-9._/-]{0,127}$`)
+	modelIDPattern          = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$`)
+	artifactIDPattern       = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,63}$`)
+	artifactFullDatePattern = regexp.MustCompile(`^[0-9]{4}-[0-9]{2}-[0-9]{2}$`)
 )
 
 // AutotuneFeeds holds the literal signed bytes for SPEC-023 recommendation
 // inputs. Served on the buyer mux at /v1/rate-card(+ .sig),
-// /v1/demand-rank(+ .sig), and /v1/autotune-candidates(+ .sig),
-// replacing nginx /static/* hosting.
+// /v1/demand-rank(+ .sig), /v1/autotune-candidates(+ .sig), and — once a
+// release is artifact-bound — /v1/catalog-artifacts(+ .sig), replacing nginx
+// /static/* hosting.
 type AutotuneFeeds struct {
 	RateCardJSON                   []byte
 	RateCardSig                    []byte
@@ -53,6 +56,11 @@ type AutotuneFeeds struct {
 	AutotuneCandidatesJSON         []byte
 	AutotuneCandidatesSig          []byte
 	AutotuneCandidatesVerification AutotuneFeedVerification
+	// CatalogArtifacts* are empty for a rate-card-bound (four-feed) release;
+	// the routes then answer 404 (SPEC-023 §3.7.6 rule 6).
+	CatalogArtifactsJSON         []byte
+	CatalogArtifactsSig          []byte
+	CatalogArtifactsVerification AutotuneFeedVerification
 }
 
 // AutotuneFeedVerification records the trust decision for the exact bytes
@@ -107,6 +115,12 @@ func LoadAutotuneFeeds(cfg config.AutotuneFeedsConfig) (AutotuneFeeds, error) {
 	if err != nil {
 		return AutotuneFeeds{}, err
 	}
+	artifacts, err := loadAutotuneFeedPair(
+		cfg.CatalogArtifactsPath, cfg.CatalogArtifactsSigPath, "catalog_artifacts", keyring, validateCatalogArtifactsFeed,
+	)
+	if err != nil {
+		return AutotuneFeeds{}, err
+	}
 	enabledCount := 0
 	for _, feed := range []loadedAutotuneFeed{rateCard, demand, candidates} {
 		if feed.enabled() {
@@ -115,6 +129,9 @@ func LoadAutotuneFeeds(cfg config.AutotuneFeedsConfig) (AutotuneFeeds, error) {
 	}
 	if enabledCount > 0 && enabledCount != 3 {
 		return AutotuneFeeds{}, fmt.Errorf("autotune feed set incomplete: rate_card, demand_rank, and autotune_candidates must all be configured together")
+	}
+	if artifacts.enabled() && enabledCount != 3 {
+		return AutotuneFeeds{}, fmt.Errorf("autotune feed set incomplete: catalog_artifacts requires the rate_card, demand_rank, and autotune_candidates feeds of the same release")
 	}
 	if enabledCount == 3 {
 		if demand.verification.Version != candidates.verification.Version {
@@ -153,6 +170,11 @@ func LoadAutotuneFeeds(cfg config.AutotuneFeedsConfig) (AutotuneFeeds, error) {
 			)
 		}
 	}
+	if artifacts.enabled() {
+		if err := bindCatalogArtifactsFeed(artifacts, candidates); err != nil {
+			return AutotuneFeeds{}, err
+		}
+	}
 	return AutotuneFeeds{
 		RateCardJSON:                   rateCard.jsonBytes,
 		RateCardSig:                    rateCard.sigBytes,
@@ -163,6 +185,9 @@ func LoadAutotuneFeeds(cfg config.AutotuneFeedsConfig) (AutotuneFeeds, error) {
 		AutotuneCandidatesJSON:         candidates.jsonBytes,
 		AutotuneCandidatesSig:          candidates.sigBytes,
 		AutotuneCandidatesVerification: candidates.verification,
+		CatalogArtifactsJSON:           artifacts.jsonBytes,
+		CatalogArtifactsSig:            artifacts.sigBytes,
+		CatalogArtifactsVerification:   artifacts.verification,
 	}, nil
 }
 
@@ -1016,6 +1041,15 @@ func (s *Server) handleAutotuneRelease(w http.ResponseWriter, r *http.Request) {
 			"sha256":        feeds.RateCardVerification.SHA256,
 			"signer_key_id": feeds.RateCardVerification.KeyID,
 			"verified_at":   feeds.RateCardVerification.VerifiedAt.Format(time.RFC3339Nano),
+		}
+	}
+	// Present only for an artifact-bound release: a four-feed release keeps the
+	// exact status shape v0.1 clients already read (SPEC-023 §3.7.6 rule 6).
+	if feeds.catalogArtifactsEnabled() {
+		feedStatus["catalog_artifacts"] = map[string]any{
+			"sha256":        feeds.CatalogArtifactsVerification.SHA256,
+			"signer_key_id": feeds.CatalogArtifactsVerification.KeyID,
+			"verified_at":   feeds.CatalogArtifactsVerification.VerifiedAt.Format(time.RFC3339Nano),
 		}
 	}
 	w.Header().Set("Content-Type", "application/json")
