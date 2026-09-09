@@ -475,9 +475,16 @@ expect_reject artifact-pair-unbound "${directory_verify[@]}"
 printf '%s\n' "${release_names[@]}" | LC_ALL=C sort > "$accepted/release-assets.txt"
 
 cp "$accepted/release.json" "$work/release.json.unbound"
-printf '%s\n' '{"feeds":{"autotune-candidates.json":{},"demand-rank.json":{},"rate-card.json":{},"tier2-catalog.json":{},"autotune-artifacts.json":{}}}' > "$accepted/release.json"
 printf 'fixture:%s\n' autotune-artifacts.json > "$accepted/autotune-artifacts.json"
 printf 'fixture:%s\n' autotune-artifacts.json.sig > "$accepted/autotune-artifacts.json.sig"
+python3 - "$accepted" <<'PY'
+import hashlib, json, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+feed = (root / "autotune-artifacts.json").read_bytes()
+feeds = {name: {} for name in ("autotune-candidates.json", "demand-rank.json", "rate-card.json", "tier2-catalog.json")}
+feeds["autotune-artifacts.json"] = {"sha256": hashlib.sha256(feed).hexdigest(), "bytes": len(feed)}
+(root / "release.json").write_text(json.dumps({"feeds": feeds}) + "\n", encoding="utf-8")
+PY
 expect_reject artifact-pair-missing-from-inventory "${directory_verify[@]}"
 printf '%s\n' "${release_names[@]}" autotune-artifacts.json autotune-artifacts.json.sig | LC_ALL=C sort > "$accepted/release-assets.txt"
 expect_reject artifact-pair-not-in-pearl "${directory_verify[@]}"
@@ -493,5 +500,8 @@ path.write_text(json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n",
 PY
 sign_pearl
 "${directory_verify[@]}"
+printf 'tampered\n' >> "$accepted/autotune-artifacts.json"
+expect_reject artifact-feed-differs-from-binding "${directory_verify[@]}"
+grep -q 'differs from its release.json binding' "$work/artifact-feed-differs-from-binding.out"
 
 printf '[test-acceptance-promotion] ok: exact accepted-byte promotion fails closed\n'

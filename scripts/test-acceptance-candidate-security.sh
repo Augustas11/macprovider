@@ -143,7 +143,7 @@ if "--private-key \"$release_private_key\"" not in signer or "--public-key \"$re
 for value in (
     "CATALOG_RELEASE_REQUIRE_SEALED_GO_VERIFIER=1",
     'python3 "$root/scripts/catalog-release.py" verify-directory',
-    '--directory "$cli_work/catalog-release"',
+    '--directory "$catalog_verify_dir"',
 ):
     if value not in signer:
         raise SystemExit(f"protected signer does not reverify Tier-2 catalog release: {value}")
@@ -405,16 +405,18 @@ unsigned_arguments=(
 # artifact feed and its sidecar as unsigned inputs, exactly, and a
 # rate-card-bound payload must not be.
 mkdir -p "$work/bound"
-python3 - "$work/bound/phase3-binary-m4-${tag}.tar.gz" <<'PY'
-import io, json, pathlib, sys, tarfile
-feeds = ("autotune-candidates.json", "demand-rank.json", "rate-card.json", "tier2-catalog.json", "autotune-artifacts.json")
-manifest = (json.dumps({"feeds": {name: {} for name in feeds}}) + "\n").encode()
+printf 'artifact-feed\n' > "$work/assets/autotune-artifacts.json"
+printf 'artifact-feed-sig\n' > "$work/assets/autotune-artifacts.json.sig"
+python3 - "$work/bound/phase3-binary-m4-${tag}.tar.gz" "$work/assets/autotune-artifacts.json" <<'PY'
+import hashlib, io, json, pathlib, sys, tarfile
+feed = pathlib.Path(sys.argv[2]).read_bytes()
+feeds = {name: {} for name in ("autotune-candidates.json", "demand-rank.json", "rate-card.json", "tier2-catalog.json")}
+feeds["autotune-artifacts.json"] = {"sha256": hashlib.sha256(feed).hexdigest(), "bytes": len(feed)}
+manifest = (json.dumps({"feeds": feeds}) + "\n").encode()
 with tarfile.open(sys.argv[1], "w:gz") as archive:
     info = tarfile.TarInfo("./catalog-release/release.json"); info.size = len(manifest)
     archive.addfile(info, io.BytesIO(manifest))
 PY
-printf 'artifact-feed\n' > "$work/assets/autotune-artifacts.json"
-printf 'artifact-feed-sig\n' > "$work/assets/autotune-artifacts.json.sig"
 bound_unsigned_arguments=(
   --asset "phase3-binary-m4-${tag}.tar.gz=$work/bound/phase3-binary-m4-${tag}.tar.gz"
   --asset "Malibu.app.tar.gz=$work/assets/Malibu.app.tar.gz"
@@ -453,6 +455,16 @@ if python3 "$metadata" verify-unsigned --repository Augustas11/macprovider --tag
   exit 1
 fi
 grep -q 'differ from the exact build boundary' "$work/unbound-extra.out"
+# The artifact feed bytes must be the ones the archived release.json binds.
+printf 'tampered\n' >> "$work/assets/autotune-artifacts.json"
+if python3 "$metadata" verify-unsigned --repository Augustas11/macprovider --tag "$tag" --candidate-ref "$candidate_ref" \
+  --candidate-commit "$candidate_commit" --control-commit "$control_commit" \
+  --provider-admission-policy strict_post_migration --input "$work/bound-unsigned.json" \
+  "${bound_unsigned_arguments[@]}" >"$work/bound-tampered.out" 2>&1; then
+  echo "unsigned manifest accepted artifact feed bytes that differ from the archived release.json binding" >&2
+  exit 1
+fi
+grep -q 'does not match its release.json binding' "$work/bound-tampered.out"
 
 python3 "$metadata" build-unsigned \
   --repository Augustas11/macprovider \

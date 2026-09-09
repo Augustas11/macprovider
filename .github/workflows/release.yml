@@ -391,6 +391,29 @@ jobs:
             unsigned-release-inputs/coordinator-cli-linux-amd64
             unsigned-release-inputs/gateway-linux-amd64
           )
+          # SPEC-023 §3.7.8 Stage A: re-derive the artifact-feed binding from
+          # the provider archive itself so this reconstruction matches the
+          # capture; a bound archive must be accompanied by both files.
+          if [ "$(python3 - "unsigned-release-inputs/phase3-binary-m4-${tag}.tar.gz" <<'PY'
+          import json, pathlib, sys, tarfile
+          bound = "unbound"
+          try:
+              with tarfile.open(sys.argv[1], "r:gz") as archive:
+                  for member in archive.getmembers():
+                      parts = tuple(p for p in pathlib.PurePosixPath(member.name).parts if p not in ("", "."))
+                      if parts == ("catalog-release", "release.json") and member.isfile():
+                          feeds = json.loads(archive.extractfile(member).read(1 << 20)).get("feeds", {})
+                          bound = "bound" if "autotune-artifacts.json" in feeds else "unbound"
+                          break
+          except (OSError, tarfile.TarError, ValueError, AttributeError):
+              bound = "unbound"
+          print(bound)
+          PY
+          )" = bound ]; then
+            test -f "unsigned-release-inputs/autotune-artifacts.json"
+            test -f "unsigned-release-inputs/autotune-artifacts.json.sig"
+            unsigned_assets+=("unsigned-release-inputs/autotune-artifacts.json" "unsigned-release-inputs/autotune-artifacts.json.sig")
+          fi
           python3 scripts/build-release-provenance.py \
             "$tag" "$commit" \
             "$GITHUB_REPOSITORY" "$prerelease" \
@@ -455,6 +478,29 @@ jobs:
             "$unsigned_dir/coordinator-cli-linux-amd64"
             "$unsigned_dir/gateway-linux-amd64"
           )
+          # SPEC-023 §3.7.8 Stage A: re-derive the artifact-feed binding from
+          # the provider archive itself so this reconstruction matches the
+          # capture; a bound archive must be accompanied by both files.
+          if [ "$(python3 - "$unsigned_dir/phase3-binary-m4-${tag}.tar.gz" <<'PY'
+          import json, pathlib, sys, tarfile
+          bound = "unbound"
+          try:
+              with tarfile.open(sys.argv[1], "r:gz") as archive:
+                  for member in archive.getmembers():
+                      parts = tuple(p for p in pathlib.PurePosixPath(member.name).parts if p not in ("", "."))
+                      if parts == ("catalog-release", "release.json") and member.isfile():
+                          feeds = json.loads(archive.extractfile(member).read(1 << 20)).get("feeds", {})
+                          bound = "bound" if "autotune-artifacts.json" in feeds else "unbound"
+                          break
+          except (OSError, tarfile.TarError, ValueError, AttributeError):
+              bound = "unbound"
+          print(bound)
+          PY
+          )" = bound ]; then
+            test -f "$unsigned_dir/autotune-artifacts.json"
+            test -f "$unsigned_dir/autotune-artifacts.json.sig"
+            unsigned_assets+=("$unsigned_dir/autotune-artifacts.json" "$unsigned_dir/autotune-artifacts.json.sig")
+          fi
           python3 scripts/build-release-provenance.py \
             "$tag" "${{ needs.build.outputs.commit }}" \
             "$GITHUB_REPOSITORY" "${{ needs.build.outputs.prerelease }}" \
@@ -522,6 +568,29 @@ jobs:
             "$unsigned_dir/coordinator-cli-linux-amd64"
             "$unsigned_dir/gateway-linux-amd64"
           )
+          # SPEC-023 §3.7.8 Stage A: re-derive the artifact-feed binding from
+          # the provider archive itself so this reconstruction matches the
+          # capture; a bound archive must be accompanied by both files.
+          if [ "$(python3 - "$unsigned_dir/phase3-binary-m4-${tag}.tar.gz" <<'PY'
+          import json, pathlib, sys, tarfile
+          bound = "unbound"
+          try:
+              with tarfile.open(sys.argv[1], "r:gz") as archive:
+                  for member in archive.getmembers():
+                      parts = tuple(p for p in pathlib.PurePosixPath(member.name).parts if p not in ("", "."))
+                      if parts == ("catalog-release", "release.json") and member.isfile():
+                          feeds = json.loads(archive.extractfile(member).read(1 << 20)).get("feeds", {})
+                          bound = "bound" if "autotune-artifacts.json" in feeds else "unbound"
+                          break
+          except (OSError, tarfile.TarError, ValueError, AttributeError):
+              bound = "unbound"
+          print(bound)
+          PY
+          )" = bound ]; then
+            test -f "$unsigned_dir/autotune-artifacts.json"
+            test -f "$unsigned_dir/autotune-artifacts.json.sig"
+            unsigned_assets+=("$unsigned_dir/autotune-artifacts.json" "$unsigned_dir/autotune-artifacts.json.sig")
+          fi
           python3 scripts/build-release-provenance.py \
             "$tag" "${{ needs.build.outputs.commit }}" \
             "$GITHUB_REPOSITORY" "${{ needs.build.outputs.prerelease }}" \
@@ -1456,6 +1525,14 @@ jobs:
             rate-card.json.sig
           )
           if [ "$catalog_artifact_bound" = bound ]; then
+            # The published bytes must be the ones release.json binds.
+            python3 - "$catalog_manifest_src" "$catalog_artifacts_src" <<'PY'
+          import hashlib, json, pathlib, sys
+          record = json.loads(pathlib.Path(sys.argv[1]).read_text())["feeds"]["autotune-artifacts.json"]
+          data = pathlib.Path(sys.argv[2]).read_bytes()
+          if record["sha256"] != hashlib.sha256(data).hexdigest() or record["bytes"] != len(data):
+              raise SystemExit("autotune-artifacts.json does not match its release.json binding")
+          PY
             cp "$catalog_artifacts_src" autotune-artifacts.json
             cp "$catalog_artifacts_sig_src" autotune-artifacts.json.sig
             catalog_assets+=(autotune-artifacts.json autotune-artifacts.json.sig)

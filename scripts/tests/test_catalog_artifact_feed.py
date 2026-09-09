@@ -2291,6 +2291,21 @@ class HermeticReleaseTest(unittest.TestCase):
                 catalog_release.verify()
             self.assertIn(f"generated drift: {catalog_release.ARTIFACT_FEED_PATH}", str(drift.exception))
 
+    def test_verify_directory_needs_the_pair_beside_a_five_feed_manifest(self):
+        """The acceptance signer's invariant: the provider payload stays at nine
+        catalog names, so verifying an artifact-bound RELEASE needs a separate
+        directory holding the nine payload files plus the verified pair."""
+        with self.harness() as harness:
+            self.activate(harness)
+            staged = harness.stage(harness.root / "staged")
+            nine = harness.root / "nine"
+            shutil.copytree(staged, nine)
+            (nine / "autotune-artifacts.json").unlink()
+            (nine / "autotune-artifacts.json.sig").unlink()
+            with self.assertRaises(catalog_release.CatalogError):
+                catalog_release.verify_directory(nine)
+            catalog_release.verify_directory(staged)
+
     def test_five_feed_release_passes_the_compatibility_manifest_catalog_component(self):
         """AC-CAT-15 FUNCTIONALLY, not as a relation between two constants.
 

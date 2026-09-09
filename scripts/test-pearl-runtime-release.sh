@@ -147,7 +147,6 @@ make_release_dir() {
   if [[ "$lane" == pearl_runtime_catalog_artifacts ]]; then
     printf '%s\n' autotune-artifacts > "$directory/autotune-artifacts.json"
     printf '%s\n' autotune-artifacts-sig > "$directory/autotune-artifacts.json.sig"
-    printf '%s\n' '{"feeds":{"autotune-candidates.json":{},"demand-rank.json":{},"rate-card.json":{},"tier2-catalog.json":{},"autotune-artifacts.json":{}}}' > "$directory/release.json"
   fi
   python3 - "$directory" "$tag" "$commit" "$lane" <<'PY'
 import hashlib
@@ -171,6 +170,10 @@ catalog = None
 artifact_bound = lane == "pearl_runtime_catalog_artifacts"
 if artifact_bound:
     lane = "pearl_runtime_catalog"
+    feed = (directory / "autotune-artifacts.json").read_bytes()
+    feeds = {name: {} for name in ("autotune-candidates.json", "demand-rank.json", "rate-card.json", "tier2-catalog.json")}
+    feeds["autotune-artifacts.json"] = {"sha256": hashlib.sha256(feed).hexdigest(), "bytes": len(feed)}
+    (directory / "release.json").write_text(json.dumps({"feeds": feeds}) + "\n", encoding="utf-8")
 if lane == "pearl_runtime_catalog":
     catalog = {
         "release_id": "test-release",
@@ -416,6 +419,25 @@ fi
 grep -q 'pearl-release.json catalog file set disagrees with release.json feeds on the artifact feed' \
   "$work/artifact-pearl-overbound.out"
 
+make_release_dir "$work/release-artifact-tampered" v1.8.66 "$second" pearl_runtime_catalog_artifacts
+printf '\n' >> "$work/release-artifact-tampered/autotune-artifacts.json"
+python3 - "$work/release-artifact-tampered" <<'PY'
+import hashlib, json, pathlib, sys
+directory = pathlib.Path(sys.argv[1])
+metadata_path = directory / "pearl-release.json"
+metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+metadata["catalog"]["files"]["autotune-artifacts.json"] = hashlib.sha256((directory / "autotune-artifacts.json").read_bytes()).hexdigest()
+metadata_path.write_text(json.dumps(metadata, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+rows = [f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}\n" for path in sorted(directory.iterdir()) if path.name != "checksums.txt"]
+(directory / "checksums.txt").write_text("".join(rows), encoding="utf-8")
+PY
+if bash "$guard" --tag v1.8.66 --expected-commit "$second" \
+  --remote "$work/remote.git" --release-dir "$work/release-artifact-tampered" \
+  >"$work/artifact-tampered.out" 2>&1; then
+  fail "accepted artifact feed bytes that differ from the release.json binding"
+fi
+grep -q 'autotune-artifacts.json does not match its release.json binding' "$work/artifact-tampered.out"
+
 # GitHub mode: the pair is downloaded (and required) exactly when release.json binds it.
 make_release_dir "$work/release-github-artifact-bound" v1.8.66 "$second" pearl_runtime_catalog_artifacts
 FAKE_GH_RELEASE_DIR="$work/release-github-artifact-bound" PATH="$fake_gh_dir:$PATH" \
@@ -432,6 +454,16 @@ if FAKE_GH_RELEASE_DIR="$work/release-github-artifact-bound-missing" PATH="$fake
 fi
 grep -q 'missing catalog/feed asset(s) for catalog-bound Pearl runtime release: autotune-artifacts.json.sig' \
   "$work/github-artifact-bound-missing.out"
+
+make_release_dir "$work/release-github-artifact-stray" v1.8.66 "$second"
+printf '%s\n' stray > "$work/release-github-artifact-stray/autotune-artifacts.json"
+if FAKE_GH_RELEASE_DIR="$work/release-github-artifact-stray" PATH="$fake_gh_dir:$PATH" \
+  bash "$guard" --tag v1.8.66 --expected-commit "$second" \
+    --remote "$work/remote.git" >"$work/github-artifact-stray.out" 2>&1; then
+  fail "accepted a GitHub release publishing an artifact-feed asset release.json does not bind"
+fi
+grep -q 'release publishes artifact-feed asset(s) release.json does not bind: autotune-artifacts.json' \
+  "$work/github-artifact-stray.out"
 
 make_release_dir "$work/release-github-runtime-only" v1.8.66 "$second" pearl_runtime
 rm "$work/release-github-runtime-only"/release.json \

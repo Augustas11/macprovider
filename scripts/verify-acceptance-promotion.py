@@ -90,8 +90,9 @@ def verify_run(args: argparse.Namespace) -> None:
         fail("workflow artifact identity is absent, expired, or ambiguous")
 
 
-def release_binds_artifact_feed(release_path: pathlib.Path) -> bool:
-    """Whether the accepted catalog release.json binds the artifact feed.
+def artifact_feed_record(release_path: pathlib.Path) -> dict | None:
+    """The accepted catalog release.json's artifact-feed record, or None when
+    the release is rate-card-bound.
 
     A manifest that is not a JSON object with a `feeds` object counts as
     rate-card-bound here (its own contract is enforced by the catalog release
@@ -100,9 +101,16 @@ def release_binds_artifact_feed(release_path: pathlib.Path) -> bool:
     try:
         release = json.loads(release_path.read_bytes())
     except (OSError, ValueError):
-        return False
+        return None
     feeds = release.get("feeds") if isinstance(release, dict) else None
-    return isinstance(feeds, dict) and "autotune-artifacts.json" in feeds
+    if not isinstance(feeds, dict) or "autotune-artifacts.json" not in feeds:
+        return None
+    record = feeds["autotune-artifacts.json"]
+    return record if isinstance(record, dict) else {}
+
+
+def release_binds_artifact_feed(release_path: pathlib.Path) -> bool:
+    return artifact_feed_record(release_path) is not None
 
 
 def read_asset_names(path: pathlib.Path) -> list[str]:
@@ -138,7 +146,8 @@ def verify_directory(args: argparse.Namespace) -> None:
     # release.json binds autotune-artifacts.json) publishes the feed and its
     # sidecar as two more release assets, bound in the Pearl catalog map.
     artifact_names = {"autotune-artifacts.json", "autotune-artifacts.json.sig"}
-    artifact_bound = release_binds_artifact_feed(root / "release.json")
+    artifact_record = artifact_feed_record(root / "release.json")
+    artifact_bound = artifact_record is not None
     required_release_names = {
         f"macprovider-cli-{args.tag}-darwin-arm64.tar.gz",
         f"Malibu-{args.tag}.dmg",
@@ -172,6 +181,11 @@ def verify_directory(args: argparse.Namespace) -> None:
     expected = set(release_names) | CONTROL_NAMES
     if set(names) != expected:
         fail("candidate inventory has extra or missing files")
+    if artifact_bound:
+        # The accepted artifact feed bytes must be the ones release.json binds.
+        data = (root / "autotune-artifacts.json").read_bytes()
+        if artifact_record.get("sha256") != hashlib.sha256(data).hexdigest() or artifact_record.get("bytes") != len(data):
+            fail("accepted autotune-artifacts.json differs from its release.json binding")
     for path in entries:
         regular(path, f"candidate asset {path.name}")
     checksums_digest = sha256(root / "checksums.txt")

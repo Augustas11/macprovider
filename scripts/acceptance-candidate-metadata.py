@@ -191,9 +191,10 @@ def release_binds_artifact_feed(release: object) -> bool:
     return isinstance(feeds, dict) and CATALOG_ARTIFACT_FEED in feeds
 
 
-def archived_release_binds_artifact_feed(archive_path: pathlib.Path) -> bool:
-    """Whether the provider payload archive's `catalog-release/release.json`
-    binds the artifact feed (SPEC-023 §3.7.8).
+def archived_artifact_feed_record(archive_path: pathlib.Path) -> dict | None:
+    """The `feeds["autotune-artifacts.json"]` record bound by the provider
+    payload archive's `catalog-release/release.json`, or None when the release
+    is rate-card-bound (SPEC-023 §3.7.8).
 
     Decides which unsigned inputs the build boundary must carry. An input that
     is not a gzip tar, or whose manifest is not a JSON object with a `feeds`
@@ -209,14 +210,33 @@ def archived_release_binds_artifact_feed(archive_path: pathlib.Path) -> bool:
                 if parts != ("catalog-release", "release.json") or not member.isfile():
                     continue
                 if member.size > MAX_JSON_BYTES:
-                    return False
+                    return None
                 handle = archive.extractfile(member)
                 if handle is None:
-                    return False
-                return release_binds_artifact_feed(json.loads(handle.read(MAX_JSON_BYTES)))
+                    return None
+                release = json.loads(handle.read(MAX_JSON_BYTES))
+                if not release_binds_artifact_feed(release):
+                    return None
+                record = release["feeds"][CATALOG_ARTIFACT_FEED]
+                return record if isinstance(record, dict) else {}
     except (OSError, tarfile.TarError, ValueError):
-        return False
-    return False
+        return None
+    return None
+
+
+def archived_release_binds_artifact_feed(archive_path: pathlib.Path) -> bool:
+    return archived_artifact_feed_record(archive_path) is not None
+
+
+def require_artifact_feed_binding(record: object, path: pathlib.Path, label: str) -> None:
+    """The artifact feed bytes must be the ones release.json binds (digest and
+    length); the sidecar's signature and signer equality are authenticated by
+    `catalog-release.py verify-directory` on the release path."""
+    if not isinstance(record, dict):
+        fail(f"{label}: release.json artifact feed record is invalid")
+    data = read_regular(path, label)
+    if record.get("sha256") != hashlib.sha256(data).hexdigest() or record.get("bytes") != len(data):
+        fail(f"{label}: does not match its release.json binding")
 
 
 def sha256(path: pathlib.Path, label: str) -> str:
@@ -280,10 +300,13 @@ def validate_unsigned(value: dict, assets: dict[str, pathlib.Path]) -> None:
     # provider payload (its catalog-release/release.json binds the feed) must
     # be accompanied by the artifact feed and its sidecar as unsigned inputs,
     # and a rate-card-bound one must not be.
-    if archive_name in assets and archived_release_binds_artifact_feed(assets[archive_name]):
+    artifact_record = archived_artifact_feed_record(assets[archive_name]) if archive_name in assets else None
+    if artifact_record is not None:
         expected_names = expected_names | set(CATALOG_ARTIFACT_NAMES)
     if set(assets) != expected_names:
         fail("unsigned manifest: supplied assets differ from the exact build boundary")
+    if artifact_record is not None:
+        require_artifact_feed_binding(artifact_record, assets[CATALOG_ARTIFACT_FEED], f"unsigned asset {CATALOG_ARTIFACT_FEED}")
     rows = value["assets"]
     if not isinstance(rows, dict) or set(rows) != expected_names:
         fail("unsigned manifest: recorded assets differ from the exact build boundary")
@@ -403,6 +426,8 @@ def build_pearl(args: argparse.Namespace) -> dict:
         catalog = args.catalog_directory
         release = strict_json(catalog / "release.json", "catalog release", catalog_release=True)
         catalog_names = CATALOG_NAMES + (CATALOG_ARTIFACT_NAMES if release_binds_artifact_feed(release) else ())
+        if release_binds_artifact_feed(release):
+            require_artifact_feed_binding(release["feeds"][CATALOG_ARTIFACT_FEED], catalog / CATALOG_ARTIFACT_FEED, f"catalog {CATALOG_ARTIFACT_FEED}")
         files = {name: sha256(catalog / name, f"catalog {name}") for name in catalog_names}
         release_id = release.get("release_id")
         policy_version = release.get("policy_version")

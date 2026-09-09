@@ -184,9 +184,24 @@ app="$app_work/Malibu.app"
 [[ -d "$app/Contents/MacOS" && -d "$app/Contents/Resources" ]] || die "Malibu.app structure is invalid"
 
 python3 "$metadata" validate-provider-payload --directory "$cli_work"
+# SPEC-023 §3.7.8 Stage A: the provider payload stays at exactly nine catalog
+# names, but the catalog RELEASE is five-feed once artifact-bound, and
+# verify-directory reconstructs the manifest from the files it sees. Verify a
+# separate catalog directory holding the nine payload files plus the verified
+# unsigned pair, so the pair is authenticated (digest, sidecar signature,
+# signer equality with the candidate feed) before anything is signed.
+catalog_verify_dir="$signing_tmp/catalog-verify"
+mkdir "$catalog_verify_dir"
+for catalog_name in release.json trusted-keys.json tier2-catalog.json autotune-candidates.json autotune-candidates.json.sig demand-rank.json demand-rank.json.sig rate-card.json rate-card.json.sig; do
+  install -m 0644 "$cli_work/catalog-release/$catalog_name" "$catalog_verify_dir/$catalog_name"
+done
+if [[ "$catalog_artifact_bound" == bound ]]; then
+  install -m 0644 "$artifacts_unsigned" "$catalog_verify_dir/autotune-artifacts.json"
+  install -m 0644 "$artifacts_sig_unsigned" "$catalog_verify_dir/autotune-artifacts.json.sig"
+fi
 CATALOG_RELEASE_REQUIRE_SEALED_GO_VERIFIER=1 \
   python3 "$root/scripts/catalog-release.py" verify-directory \
-    --directory "$cli_work/catalog-release"
+    --directory "$catalog_verify_dir"
 python3 "$compatibility" validate \
   --input "$cli_work/compatibility-set.json" \
   --payload-directory "$cli_work" \
