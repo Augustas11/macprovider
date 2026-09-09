@@ -82,7 +82,7 @@ this slice deliberately ships none of them:
 | scheduled renewal | `.github/workflows/renew-autotune-static-feed-signed.yml` | supply `AUTOTUNE_PREVIOUS_RELEASE_DIR` (the previous signed release directory); after activation `generate` requires it and the monthly freshness renewal otherwise fails closed — silently until the 30-day client horizon |
 
 **Deferred requirements** (recorded by the ledger, not enforced by this slice;
-`status` lists them): the §16.8 intake-decision manifest schema and
+`status` lists the first): the §16.8 intake-decision manifest schema and
 tier-change completeness (AC-CAT-21) are owned by the listed-tier intake
 slice (SPEC-023-R006) — `intake_decision_sha256` records the digest of
 whatever `intake-decision.json` holds. Separately, `autotune-artifacts-source.json`

@@ -1328,6 +1328,34 @@ class ReleaseDirectoryTest(unittest.TestCase):
             self.assertIn("must equal the candidate-catalog signer", str(caught.exception))
 
 
+class PendingSurfaceListTest(unittest.TestCase):
+    """`status`'s pending-surface list is the operator's guard against an
+    irreversible activation cut, so it must track the tree: every entry names a
+    surface that is still ABSENT. The moment a slice lands one, this fails and
+    the entry has to go."""
+
+    PROBES = {
+        "CLI release payload": ("phase3-binary/dist/package.sh", "autotune-artifacts.json"),
+        "GitHub release assets": (".github/workflows/release.yml", "autotune-artifacts.json"),
+        "live release gate": ("scripts/verify-live-coordinator-release-gate.py", "catalog-artifacts"),
+        "coordinator serving": ("phase4-coordinator/internal/buyer/server.go", "/v1/catalog-artifacts"),
+        "scheduled renewal": (".github/workflows/renew-autotune-static-feed-signed.yml", "AUTOTUNE_PREVIOUS_RELEASE_DIR"),
+    }
+
+    def test_every_pending_surface_is_still_absent_from_the_tree(self):
+        for surface, _detail in catalog_release.PENDING_DISTRIBUTION_SURFACES:
+            with self.subTest(surface):
+                self.assertIn(surface, self.PROBES, f"pending surface {surface!r} has no absence probe")
+                relative, marker = self.PROBES[surface]
+                text = (ROOT / relative).read_text()
+                self.assertNotIn(marker, text, f"{surface}: {relative} already carries {marker!r}; drop it from the pending list")
+
+    def test_deferred_requirements_name_their_owner(self):
+        for requirement, detail in catalog_release.DEFERRED_REQUIREMENTS:
+            with self.subTest(requirement):
+                self.assertIn("SPEC-023-R", detail)
+
+
 class RateGlobalsTest(unittest.TestCase):
     """SPEC-023 §3.3.1 rules 3+9 / AC-CAT-14: the release-global share and
     multiplier, exactly as coordinator billing derives them."""
@@ -1849,6 +1877,69 @@ class HermeticReleaseTest(unittest.TestCase):
                 catalog_release.generate(harness.KEY_ID, activate_artifact_feed=True)
             self.assertIn("rule 8", str(caught.exception))
             self.assertIn("byte-identical to the preceding release", str(caught.exception))
+
+    def test_verify_re_derives_the_rule_eight_gate_for_the_activation_release(self):
+        """Call-site pin: `verify` — the gate CI runs on committed bytes — must
+        invoke the rule-8 check for the activation release and must NOT invoke
+        it for a four-feed release."""
+        calls: list[str] = []
+        original = catalog_release.require_rate_card_unchanged_at_activation
+
+        def sentinel(rate_card_obj, history):
+            calls.append(rate_card_obj["version"])
+            raise catalog_release.CatalogError("rule 8 sentinel")
+
+        with self.harness() as harness:
+            harness.bump("published-2026-09-15-pre-activation-v1", "2026-09-15T00:00:00Z")
+            harness.cut()  # four-feed release: the gate must not be consulted
+            catalog_release.require_rate_card_unchanged_at_activation = sentinel
+            try:
+                catalog_release.verify()
+                self.assertEqual(calls, [])
+            finally:
+                catalog_release.require_rate_card_unchanged_at_activation = original
+            self.activate(harness)
+            catalog_release.require_rate_card_unchanged_at_activation = sentinel
+            try:
+                with self.assertRaises(catalog_release.CatalogError) as caught:
+                    catalog_release.verify()
+                self.assertIn("rule 8 sentinel", str(caught.exception))
+                self.assertEqual(len(calls), 1)
+            finally:
+                catalog_release.require_rate_card_unchanged_at_activation = original
+            catalog_release.verify()
+
+    def test_rewards_parser_tab_rejection_is_scoped_to_the_rewards_block(self):
+        """The rule-9 parser's tab rule: a tab above the block is the YAML
+        loader's concern; a tab inside the block fails closed; a tab-bearing
+        top-level key AFTER the block ends the scan instead of failing it."""
+        with self.harness() as harness:
+            yaml_path = harness.root / "coordinator.yaml"
+            original = yaml_path.read_text()
+            above = original.replace("rewards:\n", "tabbed_before:\t\"x\"\nrewards:\n", 1)
+            self.assertNotEqual(above, original)
+            catalog_release.parse_coordinator_rewards(above)
+            after = original.rstrip("\n") + "\ntabbed_after:\t\"x\"\n"
+            catalog_release.parse_coordinator_rewards(after)
+            inside = original.replace("  provider_share: 0.90", "\tprovider_share: 0.90", 1)
+            self.assertNotEqual(inside, original)
+            with self.assertRaises(catalog_release.CatalogError) as caught:
+                catalog_release.parse_coordinator_rewards(inside)
+            self.assertIn("tabs are not permitted in the rewards block", str(caught.exception))
+
+    def test_emit_from_source_is_wired_through_the_cli(self):
+        with self.harness() as harness:
+            import sys
+
+            output = harness.root / "cli-rows.yaml"
+            argv = sys.argv
+            sys.argv = ["catalog-release.py", "emit-coordinator-rate-card", "--from-source", "--output", str(output)]
+            try:
+                with contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(catalog_release.main(), 0)
+            finally:
+                sys.argv = argv
+            self.assertIn("  rate_card:\n", output.read_text())
 
     def test_generate_and_verify_each_enforce_coordinator_parity(self):
         """The rule-9 gate's CALL SITES, not only its body: removing either call

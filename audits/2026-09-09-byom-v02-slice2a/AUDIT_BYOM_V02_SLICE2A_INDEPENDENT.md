@@ -42,3 +42,20 @@ resolved in the commit that adds this record unless marked deferred.
 - `bash scripts/test-catalog-release.sh` — PASS
 - `bash scripts/test-renew-autotune-static-feed-signed.sh` — ok
 - `git diff --check` — clean
+
+## Confirmation pass (code + architecture lanes on `b7a401fe`; security not re-run)
+
+| Lane | Verdict |
+|---|---|
+| code | **0 CRITICAL / 0 HIGH / 0 MEDIUM** / 1 LOW / 3 INFO — all three call sites now mutation-pinned |
+| architecture | **0 CRITICAL / 0 HIGH / 0 MEDIUM** / 2 LOW / 2 INFO — rule-8 placement at activation judged faithful |
+
+Resolved in the follow-up commit: rule 8 is re-derived by `verify` for the
+activation release (call-site test with a sentinel, and a four-feed release
+must not consult it); the gate fails closed on a preceding release with no
+recorded rate card instead of returning; the pending-surface list is pinned by
+`PendingSurfaceListTest` (each entry's surface must still be absent from the
+tree); the rewards-parser tab scoping has above/inside/after cases; the
+`--from-source` CLI wiring is exercised through `main()`; `status` separates
+its sections; the runbook parenthetical now claims only what `status` prints.
+181 tests OK.

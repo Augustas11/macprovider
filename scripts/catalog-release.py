@@ -3261,11 +3261,18 @@ def require_rate_card_unchanged_at_activation(rate_card_obj: dict, history: dict
     """
     latest = latest_release(history)
     if latest is None:
+        # No preceding recorded release: rule 8 is vacuous (there is no rows
+        # map to be identical to). Reachable only on a bootstrapped ledger.
         return
     previous_id, record = latest
     previous = (record.get("feeds") or {}).get(RATE_CARD_FEED_NAME, {}).get("version")
     if previous is None:
-        return
+        # A money-path gate must not fail open on an unknown prior: a legacy
+        # two- or three-feed row cannot prove byte identity either way.
+        fail(
+            f"SPEC-023 §3.3.1 rule 8: the preceding release {previous_id!r} records no rate-card "
+            "feed, so the activation release's rate card cannot be proven byte-identical to it"
+        )
     if previous != rate_card_obj["version"]:
         fail(
             "SPEC-023 §3.3.1 rule 8: the activation release must publish rate-card rows "
@@ -3529,6 +3536,13 @@ def verify(previous_release_dir: pathlib.Path | None = None) -> None:
         fail(f"generated drift: {MANIFEST_PATH}")
     ledger = validate_release_ledger(LEDGER_PATH.read_bytes())
     require_ledger_evolution(base_release_ledger(), ledger)
+    # Rule 8 is re-derived here, not only at `generate`: `verify` is the gate
+    # CI runs on the committed bytes, so an activation release cut by a stale
+    # generator is still caught while it is head. The release is the ACTIVATION
+    # release exactly when it publishes the feed and no earlier row is bound.
+    verify_history = release_history(ledger, candidate_obj["version"])
+    if artifact_obj is not None and not any(artifact_bound_row(row) for row in verify_history.values()):
+        require_rate_card_unchanged_at_activation(rate_card_obj, verify_history)
     release_id, record = release_record(
         expected_manifest,
         artifact_bindings(artifact_obj) if artifact_obj is not None else None,
@@ -3781,6 +3795,7 @@ def cmd_status() -> None:
     print("Deferred requirements (recorded, not enforced by this slice):")
     for requirement, detail in DEFERRED_REQUIREMENTS:
         print(f"  [ ] {requirement}: {detail}")
+    print("")
     print("Distribution surfaces still pending (BYOM v0.2 slices 2b/2c — NOT in this slice):")
     for surface, detail in PENDING_DISTRIBUTION_SURFACES:
         print(f"  [ ] {surface}: {detail}")
