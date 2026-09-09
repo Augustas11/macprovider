@@ -652,6 +652,112 @@
         }
       ],
       "spec": "\u00a73.7.3"
+    },
+    {
+      "expect": "reject",
+      "name": "generated_at spelled as a different RFC3339 form of the same instant",
+      "ops": [
+        {
+          "op": "set",
+          "path": [
+            "generated_at"
+          ],
+          "value": "2026-07-10T00:00:00+00:00"
+        }
+      ],
+      "spec": "\u00a73.5 rule 11 / \u00a73.7.4 \u2014 string equality, not instant equality"
+    },
+    {
+      "expect": "reject",
+      "name": "size_bytes beyond int64",
+      "ops": [
+        {
+          "op": "set",
+          "path": [
+            "models",
+            "test-model",
+            "artifacts",
+            "mlx-4bit",
+            "size_bytes"
+          ],
+          "value": 9223372036854775808
+        }
+      ],
+      "spec": "\u00a73.7.3 \u2014 int64 domain in every consumer"
+    },
+    {
+      "expect": "reject",
+      "name": "size_bytes as a float",
+      "ops": [
+        {
+          "op": "set",
+          "path": [
+            "models",
+            "test-model",
+            "artifacts",
+            "mlx-4bit",
+            "size_bytes"
+          ],
+          "value": 123456.5
+        }
+      ],
+      "spec": "\u00a73.7.3"
+    },
+    {
+      "expect": "reject",
+      "name": "min_ram_gb as a boolean",
+      "ops": [
+        {
+          "op": "set",
+          "path": [
+            "models",
+            "test-model",
+            "artifacts",
+            "mlx-4bit",
+            "min_ram_gb"
+          ],
+          "value": true
+        }
+      ],
+      "spec": "\u00a73.7.3"
+    },
+    {
+      "expect": "reject",
+      "name": "model key with a double slash",
+      "ops": [
+        {
+          "op": "set",
+          "path": [
+            "models",
+            "bad//key"
+          ],
+          "value": {
+            "artifacts": {
+              "mlx-4bit": {
+                "allowed_runtime_sources": [
+                  "mlx_cache"
+                ],
+                "hash": "7777777777777777777777777777777777777777777777777777777777777777",
+                "hash_algorithm": "macprovider.snapshot-manifest.v1",
+                "min_ram_gb": 4,
+                "quantization": "4bit",
+                "runtime_format": "mlx_safetensors",
+                "size_bytes": 123456,
+                "source_ref": {
+                  "kind": "huggingface_revision",
+                  "repo_id": "mlx-community/Test-Model-4bit",
+                  "revision": "1111111111111111111111111111111111111111"
+                },
+                "verification_status": "verified",
+                "verified_at": "2026-09-01"
+              }
+            },
+            "primary_artifact_id": "mlx-4bit",
+            "rate_class": "class-8b"
+          }
+        }
+      ],
+      "spec": "\u00a73.7.3 model key grammar"
     }
   ],
   "description": "Shared SPEC-023 \u00a73.7 artifact-feed conformance corpus (BYOM v0.2 slice 2c). One candidate catalog, one valid feed, and mutation cases applied by the Python generator tests, the Go coordinator tests, and the Swift CLI tests, so the three consumers cannot drift on the closed schema, the identity matrix, release binding, or primary consistency. Mutation ops: {op: set, path: [...], value} and {op: delete, path: [...]}. The feed's candidate_catalog_sha256 is computed by each consumer from the canonical candidate bytes it signs or bakes before ops are applied; a case that sets it wins.",

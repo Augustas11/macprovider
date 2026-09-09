@@ -887,6 +887,7 @@ struct AutotuneCommand: AsyncParsableCommand {
         warnings.formUnion(demand.warnings)
         warnings.formUnion(catalog.warnings)
         warnings.formUnion(rateCard.warnings)
+        warnings.formUnion(inputs.artifactFeed.warnings)
 
         if AutotuneRecommendEngine.paidTrustBlocks(warnings) {
             throw ValidationError(AutotuneRecommendEngine.paidTrustBlockMessage(warnings))
@@ -1246,6 +1247,7 @@ struct AutotuneCommand: AsyncParsableCommand {
             warnings.formUnion(demand.warnings)
             warnings.formUnion(catalog.warnings)
             warnings.formUnion(rateCard.warnings)
+            warnings.formUnion(inputs.artifactFeed.warnings)
             if AutotuneRecommendEngine.paidTrustBlocks(warnings) {
                 try emitEvent("failed", reason: "benchmark_failed", stagingDiscarded: true)
                 throw ValidationError(AutotuneRecommendEngine.paidTrustBlockMessage(warnings))
@@ -1414,7 +1416,8 @@ struct AutotuneCommand: AsyncParsableCommand {
         let warnings = Self.recommendationPrefetchTrustWarnings(
             demand: inputs.demand,
             catalog: catalog,
-            rateCard: inputs.rateCard
+            rateCard: inputs.rateCard,
+            artifactFeed: inputs.artifactFeed
         )
 
         if AutotuneRecommendEngine.paidTrustBlocks(warnings) {
@@ -1467,9 +1470,10 @@ struct AutotuneCommand: AsyncParsableCommand {
     static func recommendationPrefetchTrustWarnings(
         demand: AutotuneStaticSelection<DemandRank>,
         catalog: AutotuneStaticSelection<CandidateCatalog>,
-        rateCard: AutotuneStaticSelection<RateCardProjection>
+        rateCard: AutotuneStaticSelection<RateCardProjection>,
+        artifactFeed: AutotuneStaticSelection<ArtifactFeed?>
     ) -> Set<AutotuneRecommendWarning> {
-        demand.warnings.union(catalog.warnings).union(rateCard.warnings)
+        demand.warnings.union(catalog.warnings).union(rateCard.warnings).union(artifactFeed.warnings)
     }
 
     static func recommendationCoreForConfig(

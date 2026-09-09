@@ -326,6 +326,9 @@ func bindCatalogArtifactsFeed(artifacts, candidates loadedAutotuneFeed) error {
 		return fmt.Errorf("autotune feed release mismatch: catalog_artifacts policy_version %q != autotune_candidates policy_version %q",
 			artifacts.verification.PolicyVersion, candidates.verification.PolicyVersion)
 	}
+	// §3.5 rule 11 pairs the feeds by the generated_at STRING the release stamped
+	// (the generator compares strings); an equal instant spelled differently is
+	// a different release stamp in every consumer.
 	if !artifacts.verification.GeneratedAt.Equal(candidates.verification.GeneratedAt) {
 		return fmt.Errorf("autotune feed release mismatch: catalog_artifacts generated_at %q != autotune_candidates generated_at %q",
 			artifacts.verification.GeneratedAt.Format(time.RFC3339), candidates.verification.GeneratedAt.Format(time.RFC3339))
@@ -347,6 +350,10 @@ func bindCatalogArtifactsFeed(artifacts, candidates loadedAutotuneFeed) error {
 	var catalog candidateCatalogFeed
 	if err := decodeStrictJSON(candidates.jsonBytes, &catalog); err != nil {
 		return fmt.Errorf("autotune.autotune_candidates schema: %w", err)
+	}
+	if feed.GeneratedAt != catalog.GeneratedAt {
+		return fmt.Errorf("autotune feed release mismatch: catalog_artifacts generated_at %q is not the candidate catalog's exact stamp %q",
+			feed.GeneratedAt, catalog.GeneratedAt)
 	}
 	return requirePrimaryArtifactConsistency(feed.Models, catalog.Rows)
 }

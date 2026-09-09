@@ -3080,7 +3080,7 @@ struct BYOMCatalogMatcher: Sendable {
     /// (HuggingFace repo ids, GGUF library tags). Identity only, never
     /// admission; empty for a rate-card-bound release, which keeps matching
     /// exactly as v0.1 did (§3.7.6 rule 6).
-    private let artifactReferences: [(reference: String, catalogKey: String)]
+    private let artifactReferences: [ArtifactFeed.ServedReference]
 
     init() {
         self.init(
@@ -3098,7 +3098,10 @@ struct BYOMCatalogMatcher: Sendable {
         artifactReferences = artifactFeed?.servedReferences() ?? []
     }
 
-    func catalogKey(for servedModelRef: String) -> String? {
+    /// `runtimeSource` is the adapter reporting the reference (`mlx_cache`,
+    /// `ollama_loopback`, ...): an artifact reference matches only when that
+    /// adapter is one the VERIFIED artifact allows (SPEC-023 §3.7.4).
+    func catalogKey(for servedModelRef: String, runtimeSource: String) -> String? {
         let normalized = BYOMCandidateIdentity.normalizedServedModelRef(servedModelRef)
         if let row = rows.first(where: { row in
             BYOMCandidateIdentity.normalizedServedModelRef(row.key) == normalized
@@ -3106,9 +3109,7 @@ struct BYOMCatalogMatcher: Sendable {
         }) {
             return row.key
         }
-        return artifactReferences.first { entry in
-            BYOMCandidateIdentity.normalizedServedModelRef(entry.reference) == normalized
-        }?.catalogKey
+        return artifactReferences.first { $0.matches(normalized, runtimeSource: runtimeSource) }?.catalogKey
     }
 }
 
@@ -3350,7 +3351,7 @@ struct BYOMMLXCacheDiscovery {
             runtimeSource: "mlx_cache",
             servedModelRef: servedModelRef
         )
-        let catalogKey = catalogMatcher.catalogKey(for: servedModelRef)
+        let catalogKey = catalogMatcher.catalogKey(for: servedModelRef, runtimeSource: "mlx_cache")
         var warnings = Set((namespaceWarnings + idWarnings + localWarnings + [.capabilityUnevaluated, .evaluationRequired]).map(\.rawValue))
         if catalogKey != nil {
             warnings.insert(BYOMDiscoveryWarning.catalogMatchUnverified.rawValue)
@@ -3505,7 +3506,7 @@ struct BYOMOllamaDiscovery: Sendable {
             runtimeSource: "ollama_loopback",
             servedModelRef: servedModelRef
         )
-        let catalogKey = catalogMatcher.catalogKey(for: model.name)
+        let catalogKey = catalogMatcher.catalogKey(for: model.name, runtimeSource: "ollama_loopback")
         var warnings = Set((namespaceWarnings + idWarnings + model.warningCodes + [.capabilityUnevaluated, .evaluationRequired]).map(\.rawValue))
         if catalogKey != nil {
             warnings.insert(BYOMDiscoveryWarning.catalogMatchUnverified.rawValue)

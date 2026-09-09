@@ -21,5 +21,6 @@ extension AutotuneStaticInputs {
 
     static let bakedCatalogSignerKeyID: String? = "streamvc-autotune-static-v4"
 
-    static let bakedArtifactFeedJSON: String? = nil
+    static let bakedArtifactFeedBase64: String? = nil
+    static let bakedArtifactFeedSignerKeyID: String? = nil
 }

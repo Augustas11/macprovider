@@ -52,6 +52,10 @@ struct ArtifactFeed: Equatable, Sendable {
 
     var version: String
     var generatedAt: Date
+    /// The exact `generated_at` string the release stamped; §3.5 rule 11 pairs
+    /// feeds by this STRING (the generator compares strings), so an equal
+    /// instant spelled differently is a different release stamp here too.
+    var generatedAtRaw: String
     var policyVersion: String
     var source: String
     var releaseID: String
@@ -213,8 +217,8 @@ extension ArtifactFeed {
             models[key] = Model(rateClass: rateClass, primaryArtifactID: primaryID, artifacts: artifacts)
         }
         return ArtifactFeed(
-            version: version, generatedAt: generatedAt, policyVersion: policyVersion, source: source,
-            releaseID: releaseID, candidateCatalogSHA256: digest, models: models
+            version: version, generatedAt: generatedAt, generatedAtRaw: rawGeneratedAt, policyVersion: policyVersion,
+            source: source, releaseID: releaseID, candidateCatalogSHA256: digest, models: models
         )
     }
 
@@ -240,12 +244,17 @@ extension ArtifactFeed {
         guard matches(hex64Pattern, hash) else {
             throw ArtifactFeedError.integrity("\(label): hash must be lowercase 64-hex")
         }
-        guard let rawSize = object["size_bytes"] as? NSNumber, !(rawSize is Bool),
+        // size_bytes: an integer in the int64 domain of every consumer. JSON
+        // numbers reach us as NSNumber; a float, a bool, or a value NSNumber can
+        // only represent by saturating (its decimal text no longer round-trips
+        // through int64) is rejected.
+        guard let rawSize = object["size_bytes"] as? NSNumber,
               CFGetTypeID(rawSize) != CFBooleanGetTypeID(),
               CFNumberIsFloatType(rawSize) == false,
-              rawSize.int64Value > 0
+              rawSize.int64Value > 0,
+              rawSize.stringValue == String(rawSize.int64Value)
         else {
-            throw ArtifactFeedError.integrity("\(label): size_bytes must be a measured integer > 0")
+            throw ArtifactFeedError.integrity("\(label): size_bytes must be a measured integer > 0 within int64")
         }
         guard let rawRAM = object["min_ram_gb"] as? NSNumber, CFGetTypeID(rawRAM) != CFBooleanGetTypeID(),
               rawRAM.doubleValue.isFinite, rawRAM.doubleValue > 0
@@ -321,6 +330,11 @@ extension ArtifactFeed {
         )
     }
 
+    static func rawGeneratedAt(in data: Data) -> String? {
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        return object["generated_at"] as? String
+    }
+
     private static func realDate(_ value: String) -> Bool {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
@@ -336,20 +350,35 @@ extension ArtifactFeed {
     /// fails), the release stamp and the served candidate bytes must match, and
     /// every listed/recommendable row must have a verified primary artifact
     /// identical in identity to the row.
+    /// - Parameters:
+    ///   - manifestSignerKeyID: the `release.json`-bound signer of the artifact
+    ///     feed when the caller knows it (the compiled-in snapshot bakes it from
+    ///     the release that produced it). When known it must equal both
+    ///     authenticated signers, so the baked path is a genuine three-way
+    ///     identity check, not `baked == baked`. For a live fetch the CLI has no
+    ///     authenticated copy of that release's manifest; the release host
+    ///     (`verify`, the acceptance signer, the live release gate) and the
+    ///     coordinator (`LoadAutotuneFeeds`) enforce the manifest binding
+    ///     before those bytes are ever served, and the CLI enforces equality of
+    ///     the two authenticated signers it does have.
     func bind(
         to catalog: CandidateCatalog,
         candidateBytes: Data,
         candidateSignerKeyID: String?,
-        artifactSignerKeyID: String?
+        artifactSignerKeyID: String?,
+        manifestSignerKeyID: String? = nil
     ) throws {
         guard let candidateSignerKeyID, let artifactSignerKeyID, candidateSignerKeyID == artifactSignerKeyID else {
             throw ArtifactFeedError.integrity("artifact feed signer \(artifactSignerKeyID ?? "nil") is not the candidate catalog signer \(candidateSignerKeyID ?? "nil")")
         }
+        if let manifestSignerKeyID, manifestSignerKeyID != artifactSignerKeyID {
+            throw ArtifactFeedError.integrity("artifact feed signer \(artifactSignerKeyID) is not the release-manifest-bound signer \(manifestSignerKeyID)")
+        }
         guard version == catalog.version else {
             throw ArtifactFeedError.releaseMismatch("artifact feed version \(version) != candidate catalog version \(catalog.version)")
         }
-        guard generatedAt == catalog.generatedAt else {
-            throw ArtifactFeedError.releaseMismatch("artifact feed generated_at differs from the candidate catalog")
+        guard generatedAt == catalog.generatedAt, generatedAtRaw == Self.rawGeneratedAt(in: candidateBytes) else {
+            throw ArtifactFeedError.releaseMismatch("artifact feed generated_at differs from the candidate catalog's exact stamp")
         }
         guard policyVersion == catalog.policyVersion else {
             throw ArtifactFeedError.releaseMismatch("artifact feed policy_version differs from the candidate catalog")
@@ -390,16 +419,37 @@ extension ArtifactFeed {
         }
     }
 
-    /// Every served-model reference an artifact of this feed answers to, mapped
-    /// to its catalog model key: HuggingFace repo ids for MLX snapshots and
-    /// library tags for GGUF artifacts. Identity only — never admission.
-    func servedReferences() -> [(reference: String, catalogKey: String)] {
-        var out: [(String, String)] = []
+    /// One served-model reference an artifact of this feed answers to
+    /// (HuggingFace repo id for MLX snapshots, library tag for GGUF), with the
+    /// constraints §3.7.4 puts on matching: only a `verified` artifact may
+    /// satisfy a catalog match, a `blocked` one never may, and the runtime
+    /// source that reports the reference must be one the artifact allows.
+    struct ServedReference: Equatable, Sendable {
+        var reference: String
+        var catalogKey: String
+        var verificationStatus: String
+        var allowedRuntimeSources: [String]
+
+        func matches(_ normalizedReference: String, runtimeSource: String) -> Bool {
+            verificationStatus == "verified"
+                && allowedRuntimeSources.contains(runtimeSource)
+                && BYOMCandidateIdentity.normalizedServedModelRef(reference) == normalizedReference
+        }
+    }
+
+    /// Every served reference of this feed. Identity only — never admission.
+    func servedReferences() -> [ServedReference] {
+        var out: [ServedReference] = []
         for key in models.keys.sorted() {
             for artifactID in models[key]!.artifacts.keys.sorted() {
-                let ref = models[key]!.artifacts[artifactID]!.sourceRef
-                if let repoID = ref.repoID { out.append((repoID, key)) }
-                if let tag = ref.libraryTag { out.append((tag, key)) }
+                let artifact = models[key]!.artifacts[artifactID]!
+                for reference in [artifact.sourceRef.repoID, artifact.sourceRef.libraryTag].compactMap({ $0 }) {
+                    out.append(ServedReference(
+                        reference: reference, catalogKey: key,
+                        verificationStatus: artifact.verificationStatus,
+                        allowedRuntimeSources: artifact.allowedRuntimeSources
+                    ))
+                }
             }
         }
         return out
@@ -411,11 +461,19 @@ extension AutotuneStaticInputs {
         try ArtifactFeed.decode(data)
     }
 
-    /// The artifact feed the compiled-in snapshot carries, already bound to the
-    /// compiled-in candidate catalog, or nil for a rate-card-bound release.
+    /// The exact signed bytes of the compiled-in artifact feed (base64 in the
+    /// generated source so no string escape can alter them), or nil for a
+    /// rate-card-bound release.
+    static var bakedArtifactFeedBytes: Data? {
+        bakedArtifactFeedBase64.flatMap { Data(base64Encoded: $0) }
+    }
+
+    /// The artifact feed the compiled-in snapshot carries, bound to the
+    /// compiled-in candidate catalog with the three-way signer identity
+    /// (manifest-bound artifact signer, candidate signer, artifact signer), or
+    /// nil for a rate-card-bound release.
     static func bakedBoundArtifactFeed() -> ArtifactFeed? {
-        guard let text = bakedArtifactFeedJSON else { return nil }
-        let bytes = Data(text.utf8)
+        guard let bytes = bakedArtifactFeedBytes else { return nil }
         let candidateBytes = Data(bakedCandidateCatalogJSON.utf8)
         guard let feed = try? decodeArtifactFeed(bytes),
               let catalog = try? decodeSignedStaticCandidateCatalog(candidateBytes),
@@ -423,7 +481,8 @@ extension AutotuneStaticInputs {
                   to: catalog,
                   candidateBytes: candidateBytes,
                   candidateSignerKeyID: bakedCatalogSignerKeyID,
-                  artifactSignerKeyID: bakedCatalogSignerKeyID
+                  artifactSignerKeyID: bakedArtifactFeedSignerKeyID,
+                  manifestSignerKeyID: bakedArtifactFeedSignerKeyID
               )) != nil
         else {
             return nil
@@ -437,7 +496,8 @@ extension AutotuneStaticInputs {
     /// the release carries no artifact feed at all (rule 6, no warnings).
     func loadArtifactFeed(
         candidate: AutotuneStaticSelection<CandidateCatalog>,
-        bakedArtifactFeed: Data? = AutotuneStaticInputs.bakedArtifactFeedJSON.map { Data($0.utf8) }
+        bakedArtifactFeed: Data? = AutotuneStaticInputs.bakedArtifactFeedBytes,
+        bakedArtifactFeedSignerKeyID: String? = AutotuneStaticInputs.bakedArtifactFeedSignerKeyID
     ) async -> AutotuneStaticSelection<ArtifactFeed?> {
         guard let bakedBytes = bakedArtifactFeed else {
             return AutotuneStaticSelection(value: nil, selectedBytes: Data(), warnings: [], usedFallback: false, signerKeyID: nil)
@@ -452,11 +512,14 @@ extension AutotuneStaticInputs {
         ) { try Self.decodeArtifactFeed($0) }
         var warnings = selection.warnings
         do {
+            // The compiled-in bytes carry their release-manifest-bound signer;
+            // when they are what was selected, enforce the three-way identity.
             try selection.value.bind(
                 to: candidate.value,
                 candidateBytes: candidate.selectedBytes,
                 candidateSignerKeyID: candidate.signerKeyID,
-                artifactSignerKeyID: selection.signerKeyID
+                artifactSignerKeyID: selection.usedFallback ? bakedArtifactFeedSignerKeyID : selection.signerKeyID,
+                manifestSignerKeyID: selection.usedFallback ? bakedArtifactFeedSignerKeyID : nil
             )
         } catch ArtifactFeedError.integrity {
             warnings.insert(.catalogArtifactFeedIntegrityFailure)
@@ -471,7 +534,7 @@ extension AutotuneStaticInputs {
             selectedBytes: selection.selectedBytes,
             warnings: warnings,
             usedFallback: selection.usedFallback,
-            signerKeyID: selection.signerKeyID
+            signerKeyID: selection.usedFallback ? bakedArtifactFeedSignerKeyID : selection.signerKeyID
         )
     }
 }

@@ -1647,6 +1647,7 @@ extension ModelsAdoptRecommendationCommand {
         let warnings = inputs.demand.warnings
             .union(inputs.candidate.warnings)
             .union(inputs.rateCard.warnings)
+            .union(inputs.artifactFeed.warnings)
         guard !AutotuneRecommendEngine.paidTrustBlocks(warnings),
               recommendation.demandRankVersion == inputs.demand.value.version,
               recommendation.candidateCatalogVersion == inputs.candidate.value.version,

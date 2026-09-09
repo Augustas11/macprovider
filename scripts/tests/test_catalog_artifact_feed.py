@@ -55,6 +55,7 @@ from __future__ import annotations
 import base64
 import contextlib
 import copy
+import re
 import importlib.util
 import io
 import json
@@ -1400,10 +1401,20 @@ class ArtifactFeedConformanceCorpusTest(unittest.TestCase):
         demand = (CATALOG / "demand-rank.json").read_bytes()
         rate_card = RATE_CARD_BYTES
         unbound = catalog_release.generated_swift(candidate, demand, rate_card)
-        self.assertIn("static let bakedArtifactFeedJSON: String? = nil", unbound)
-        bound = catalog_release.generated_swift(candidate, demand, rate_card, artifacts=b'{"models":{}}')
-        self.assertIn('static let bakedArtifactFeedJSON: String? = """', bound)
-        self.assertIn('{"models":{}}', bound)
+        self.assertIn("static let bakedArtifactFeedBase64: String? = nil", unbound)
+        self.assertIn("static let bakedArtifactFeedSignerKeyID: String? = nil", unbound)
+        # Bytes that no Swift string literal could carry verbatim (a triple
+        # quote, a backslash escape, a control character) reach the binary
+        # exactly, because the bake is base64 of the signed bytes.
+        hostile = b'{"models":{"k":"\\"\\"\\" \\\\u0000 \\t"}}'
+        bound = catalog_release.generated_swift(candidate, demand, rate_card, artifacts=hostile)
+        match = re.search(r'static let bakedArtifactFeedBase64: String\? = "([A-Za-z0-9+/=]+)"', bound)
+        self.assertIsNotNone(match)
+        self.assertEqual(base64.b64decode(match.group(1)), hostile)
+        self.assertNotIn('"""', bound.split("bakedArtifactFeedBase64")[1])
+        # Without a sidecar on disk the generator bakes no signer (the committed
+        # snapshot); with one, the sidecar's key_id is baked.
+        self.assertIn("static let bakedArtifactFeedSignerKeyID: String? = nil", bound)
 
 
 class RateGlobalsTest(unittest.TestCase):

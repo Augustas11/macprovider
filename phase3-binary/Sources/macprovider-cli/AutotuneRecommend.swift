@@ -1619,7 +1619,8 @@ struct AutotuneStaticInputs {
     func loadRecommendationInputs() async -> (
         demand: AutotuneStaticSelection<DemandRank>,
         candidate: AutotuneStaticSelection<CandidateCatalog>,
-        rateCard: AutotuneStaticSelection<RateCardProjection>
+        rateCard: AutotuneStaticSelection<RateCardProjection>,
+        artifactFeed: AutotuneStaticSelection<ArtifactFeed?>
     ) {
         var release = await loadCatalogRelease()
         var rateCard = await loadRateCard()
@@ -1630,7 +1631,11 @@ struct AutotuneStaticInputs {
             release.demand.warnings.insert(.demandRankIntegrityFailure)
             release.candidate.warnings.insert(.candidateCatalogIntegrityFailure)
         }
-        return (release.demand, release.candidate, rateCard)
+        // SPEC-023 §3.7: the artifact feed is loaded for the SAME release as the
+        // selected candidate catalog and bound to it; its warnings ride beside
+        // the others but never block (§3.7.6 rule 6).
+        let artifactFeed = await loadArtifactFeed(candidate: release.candidate)
+        return (release.demand, release.candidate, rateCard, artifactFeed)
     }
 
     func loadRateCard() async -> AutotuneStaticSelection<RateCardProjection> {
@@ -1694,15 +1699,9 @@ struct AutotuneStaticInputs {
                 signerKeyID: Self.bakedCatalogSignerKeyID
             )
         }
-        guard policyVersion(in: jsonBytes) == policyVersion(in: bakedBytes) else {
-            return AutotuneStaticSelection(
-                value: bakedValue,
-                selectedBytes: bakedBytes,
-                warnings: [fallbackWarning, updateWarning],
-                usedFallback: true,
-                signerKeyID: Self.bakedCatalogSignerKeyID
-            )
-        }
+        // §3.5 order: signature, then SCHEMA (an invalid document is an integrity
+        // failure), then policy / freshness (update-required). Checking policy on
+        // loosely extracted text first would misclassify a schema-invalid feed.
         guard let value = try? decode(jsonBytes),
               let fetchedGeneratedAt = generatedAt(in: jsonBytes)
         else {
@@ -1710,6 +1709,15 @@ struct AutotuneStaticInputs {
                 value: bakedValue,
                 selectedBytes: bakedBytes,
                 warnings: [fallbackWarning, integrityWarning],
+                usedFallback: true,
+                signerKeyID: Self.bakedCatalogSignerKeyID
+            )
+        }
+        guard policyVersion(in: jsonBytes) == policyVersion(in: bakedBytes) else {
+            return AutotuneStaticSelection(
+                value: bakedValue,
+                selectedBytes: bakedBytes,
+                warnings: [fallbackWarning, updateWarning],
                 usedFallback: true,
                 signerKeyID: Self.bakedCatalogSignerKeyID
             )
