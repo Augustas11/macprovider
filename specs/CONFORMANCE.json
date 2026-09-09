@@ -4364,7 +4364,7 @@
     {
       "requirement_id": "SPEC-006-R003",
       "spec_id": "SPEC-006",
-      "state": "pending",
+      "state": "conformant",
       "implementation": [
         "phase5-gateway/internal/storage/sqlite/store.go:ReserveQuota",
         "phase5-gateway/internal/storage/sqlite/store.go:SettleReservation",
@@ -4379,13 +4379,21 @@
       "journeys": [
         "JOURNEY-BUYER-PAID-PATH"
       ],
-      "evidence": [],
-      "gap": {
-        "verdict": "UNKNOWN",
-        "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/1433",
-        "rationale": "The security fixes change mapped quota settlement selectors beyond the historical 5ed5d719 candidate. Historical artifacts remain available in Git/audits but are removed from the active ledger; full requirement conformance requires refreshed matching candidate and signed paid-path journey evidence. Local regression results do not renew the historical attestation."
-      }
+      "evidence": [
+        {
+          "artifact": "commit:2ae8fa3b2b2c94187e86514a31af9a0370fbf564",
+          "source": null,
+          "captured_at": "2026-09-09",
+          "expires_at": "2026-10-09"
+        },
+        {
+          "artifact": "sha256:2c99f2d2bb82c263ad7052290018fd1455296e768f5bad38bcf0220637cdc4ef",
+          "source": "journeys/evidence/buyer-paid-path-20260909T035540Z.spec-006-r003-spec-022-r005-spec-022-r006.journey-result.signed.json",
+          "captured_at": "2026-09-09",
+          "expires_at": "2026-10-09"
+        }
+      ],
+      "gap": null
     },
     {
       "requirement_id": "SPEC-006-R004",
@@ -4751,7 +4759,7 @@
     {
       "requirement_id": "SPEC-022-R005",
       "spec_id": "SPEC-022",
-      "state": "pending",
+      "state": "conformant",
       "implementation": [
         "phase5-gateway/internal/router/chat_proxy.go:forwardStreamingChat",
         "phase4-coordinator/internal/billing/settlement_receipts.go:IngestSettlementReceipt"
@@ -4763,18 +4771,26 @@
       "journeys": [
         "JOURNEY-BUYER-PAID-PATH"
       ],
-      "evidence": [],
-      "gap": {
-        "verdict": "UNKNOWN",
-        "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/1433",
-        "rationale": "The security fixes change the mapped streaming finality selector beyond the historical 5ed5d719 candidate, including missing-trailer holds and request-bound observe recovery. Historical artifacts remain available in Git/audits but are removed from the active ledger; full requirement conformance requires refreshed matching candidate and signed paid-path journey evidence. Local regression results do not renew the historical attestation."
-      }
+      "evidence": [
+        {
+          "artifact": "commit:2ae8fa3b2b2c94187e86514a31af9a0370fbf564",
+          "source": null,
+          "captured_at": "2026-09-09",
+          "expires_at": "2026-10-09"
+        },
+        {
+          "artifact": "sha256:2c99f2d2bb82c263ad7052290018fd1455296e768f5bad38bcf0220637cdc4ef",
+          "source": "journeys/evidence/buyer-paid-path-20260909T035540Z.spec-006-r003-spec-022-r005-spec-022-r006.journey-result.signed.json",
+          "captured_at": "2026-09-09",
+          "expires_at": "2026-10-09"
+        }
+      ],
+      "gap": null
     },
     {
       "requirement_id": "SPEC-022-R006",
       "spec_id": "SPEC-022",
-      "state": "pending",
+      "state": "conformant",
       "implementation": [
         "phase4-coordinator/internal/billing/settlement_receipt_retrieval.go:LookupBuyerReceipt",
         "phase4-coordinator/internal/buyer/server.go:handleInternalSettlementReceipts",
@@ -4788,13 +4804,21 @@
       "journeys": [
         "JOURNEY-BUYER-PAID-PATH"
       ],
-      "evidence": [],
-      "gap": {
-        "verdict": "UNKNOWN",
-        "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/1433",
-        "rationale": "The wallet-session receipt authorization fix changes the mapped gateway receipt selector beyond the historical f6c61a78 candidate. Historical artifacts remain available in Git/audits but are removed from the active ledger; full requirement conformance requires a refreshed matching candidate and signed paid-path journey evidence. Local regression results do not renew the historical attestation."
-      }
+      "evidence": [
+        {
+          "artifact": "commit:2ae8fa3b2b2c94187e86514a31af9a0370fbf564",
+          "source": null,
+          "captured_at": "2026-09-09",
+          "expires_at": "2026-10-09"
+        },
+        {
+          "artifact": "sha256:2c99f2d2bb82c263ad7052290018fd1455296e768f5bad38bcf0220637cdc4ef",
+          "source": "journeys/evidence/buyer-paid-path-20260909T035540Z.spec-006-r003-spec-022-r005-spec-022-r006.journey-result.signed.json",
+          "captured_at": "2026-09-09",
+          "expires_at": "2026-10-09"
+        }
+      ],
+      "gap": null
     },
     {
       "requirement_id": "SPEC-022-R007",
@@ -4832,7 +4856,7 @@
     {
       "requirement_id": "SPEC-022-R008",
       "spec_id": "SPEC-022",
-      "state": "pending",
+      "state": "conformant",
       "implementation": [
         "phase5-gateway/internal/storage/sqlite/store.go:ReserveQuota",
         "phase5-gateway/internal/storage/sqlite/store.go:SettleReservation",
@@ -4846,13 +4870,21 @@
       "journeys": [
         "JOURNEY-BUYER-ENFORCE"
       ],
-      "evidence": [],
-      "gap": {
-        "verdict": "UNKNOWN",
-        "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/1433",
-        "rationale": "The security fixes change mapped reservation settlement selectors beyond the historical caa6ae4a candidate, including generation-bound reconciliation. Historical artifacts remain available in Git/audits but are removed from the active ledger; full requirement conformance requires refreshed matching candidate and signed enforce journey evidence. Local regression results do not renew the historical attestation."
-      }
+      "evidence": [
+        {
+          "artifact": "commit:2ae8fa3b2b2c94187e86514a31af9a0370fbf564",
+          "source": null,
+          "captured_at": "2026-09-09",
+          "expires_at": "2026-10-09"
+        },
+        {
+          "artifact": "sha256:f13b66fd0fb83013c9089b63d0dea1bb25762fe263e0d5ed23607b17c9069006",
+          "source": "journeys/evidence/buyer-enforce-20260909T035802Z.spec-022-r008.journey-result.signed.json",
+          "captured_at": "2026-09-09",
+          "expires_at": "2026-10-09"
+        }
+      ],
+      "gap": null
     },
     {
       "requirement_id": "SPEC-022-R009",
@@ -6930,7 +6962,7 @@
     {
       "requirement_id": "SPEC-045-R003",
       "spec_id": "SPEC-045",
-      "state": "pending",
+      "state": "conformant",
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:struct ConsumeLocalTokenVerifier",
         "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:struct ConsumeCredentialLoader",
@@ -6955,18 +6987,26 @@
       "journeys": [
         "JOURNEY-LOCAL-CONSUMER-ENDPOINT"
       ],
-      "evidence": [],
-      "gap": {
-        "verdict": "UNKNOWN",
-        "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/1433",
-        "rationale": "The pinned upstream transport has changed beyond the historical dc63ecec candidate, and that signed journey does not prove the required negative TLS, repeated-DNS, connected-peer, proxy, redirect, or zero-credential-byte boundary matrix. Historical artifacts remain available in Git/audits but are removed from the active ledger; refreshed matching implementation evidence and separately authorized signed journey evidence remain required."
-      }
+      "evidence": [
+        {
+          "artifact": "commit:d51b79b07876da9ab0590f9721936530aa614bde",
+          "source": null,
+          "captured_at": "2026-09-09",
+          "expires_at": "2026-10-09"
+        },
+        {
+          "artifact": "sha256:33f88709398091dccf609bc8606b8edba17ec759668dedf0f8fbeee6c1af9bc5",
+          "source": "journeys/evidence/local-consumer-endpoint-20260909T062325Z.spec-045-r003-spec-045-r004-spec-045-r008.journey-result.signed.json",
+          "captured_at": "2026-09-09",
+          "expires_at": "2026-10-09"
+        }
+      ],
+      "gap": null
     },
     {
       "requirement_id": "SPEC-045-R004",
       "spec_id": "SPEC-045",
-      "state": "pending",
+      "state": "conformant",
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:struct ConsumeBudgetConfig",
         "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:struct ConsumePricedExposureEstimate",
@@ -6987,13 +7027,21 @@
       "journeys": [
         "JOURNEY-LOCAL-CONSUMER-ENDPOINT"
       ],
-      "evidence": [],
-      "gap": {
-        "verdict": "UNKNOWN",
-        "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/1433",
-        "rationale": "Trusted pricing metadata now repeats global-address validation and pins each body and sidecar connection, changing the mapped pricing loader beyond the historical dc63ecec candidate. Historical artifacts remain available in Git/audits but are removed from the active ledger; local rebinding regression tests do not replace refreshed matching commit and signed journey evidence."
-      }
+      "evidence": [
+        {
+          "artifact": "commit:d51b79b07876da9ab0590f9721936530aa614bde",
+          "source": null,
+          "captured_at": "2026-09-09",
+          "expires_at": "2026-10-09"
+        },
+        {
+          "artifact": "sha256:33f88709398091dccf609bc8606b8edba17ec759668dedf0f8fbeee6c1af9bc5",
+          "source": "journeys/evidence/local-consumer-endpoint-20260909T062325Z.spec-045-r003-spec-045-r004-spec-045-r008.journey-result.signed.json",
+          "captured_at": "2026-09-09",
+          "expires_at": "2026-10-09"
+        }
+      ],
+      "gap": null
     },
     {
       "requirement_id": "SPEC-045-R005",
@@ -7108,7 +7156,7 @@
     {
       "requirement_id": "SPEC-045-R008",
       "spec_id": "SPEC-045",
-      "state": "pending",
+      "state": "conformant",
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:final class ConsumeLocalHandler",
         "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:final class ConsumePinnedUpstreamClient",
@@ -7135,13 +7183,21 @@
       "journeys": [
         "JOURNEY-LOCAL-CONSUMER-ENDPOINT"
       ],
-      "evidence": [],
-      "gap": {
-        "verdict": "UNKNOWN",
-        "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/1433",
-        "rationale": "The mapped pinned transports and local handler changed after the historical dc63ecec candidate. Local tests now cover pricing rebinding denial and credential-free metadata requests, plus ambiguous-send exposure retention and ledger reopen; however, the required production-transport negative TLS, connected-peer, proxy, redirect, and zero-credential-byte matrix remains incomplete, and the unchanged signed journey does not attest the current implementation. Historical artifacts remain available in Git/audits but are removed from the active ledger; refreshed matching implementation evidence and separately authorized signed journey evidence remain required."
-      }
+      "evidence": [
+        {
+          "artifact": "commit:d51b79b07876da9ab0590f9721936530aa614bde",
+          "source": null,
+          "captured_at": "2026-09-09",
+          "expires_at": "2026-10-09"
+        },
+        {
+          "artifact": "sha256:33f88709398091dccf609bc8606b8edba17ec759668dedf0f8fbeee6c1af9bc5",
+          "source": "journeys/evidence/local-consumer-endpoint-20260909T062325Z.spec-045-r003-spec-045-r004-spec-045-r008.journey-result.signed.json",
+          "captured_at": "2026-09-09",
+          "expires_at": "2026-10-09"
+        }
+      ],
+      "gap": null
     },
     {
       "requirement_id": "SPEC-046-R001",

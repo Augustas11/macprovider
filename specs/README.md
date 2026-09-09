@@ -14,7 +14,7 @@ it can no longer drift. Do not hand-edit the table; edit each spec's
 | SPEC-003 | Open Onboarding: Distribution, Lifecycle & Onboarding UX | 0.11.2 | normative | pending | pending: 2 | [SPEC-003-open-onboarding.md](SPEC-003-open-onboarding.md) |
 | SPEC-004 | Smart Router | 0.3.4 | normative | pending | pending corpus migration | [SPEC-004-smart-router.md](SPEC-004-smart-router.md) |
 | SPEC-005 | Billing, Settlement, and Provider Rewards | 0.6.4 | normative | complete | conformant: 3, pending: 6 | [SPEC-005-billing.md](SPEC-005-billing.md) |
-| SPEC-006 | Buyer API Gateway: Mac Provider's first public buyer surface | 0.9.21 | normative | complete | conformant: 2, pending: 7 | [SPEC-006-buyer-api.md](SPEC-006-buyer-api.md) |
+| SPEC-006 | Buyer API Gateway: Mac Provider's first public buyer surface | 0.9.21 | normative | complete | conformant: 3, pending: 6 | [SPEC-006-buyer-api.md](SPEC-006-buyer-api.md) |
 | SPEC-007 | Internal Operator Protocol Explorer | 0.5.1 | normative | pending | pending corpus migration | [SPEC-007-explorer.md](SPEC-007-explorer.md) |
 | SPEC-008 | Tier-2 Trust Layer | 0.6.1 | normative | pending | pending: 1 | [SPEC-008-tier2.md](SPEC-008-tier2.md) |
 | SPEC-009 | MacProvider Console v2 | 0.1 | normative | pending | pending corpus migration | [SPEC-009-console-v2.md](SPEC-009-console-v2.md) |
@@ -30,7 +30,7 @@ it can no longer drift. Do not hand-edit the table; edit each spec's
 | SPEC-019 | Structured output (`response_format: json_schema`) | 0.2.5 | normative | pending | pending corpus migration | [SPEC-019-structured-output.md](SPEC-019-structured-output.md) |
 | SPEC-020 | Provider autoupdate | v0.1.19 | normative | pending | pending: 5 | [SPEC-020-provider-autoupdate.md](SPEC-020-provider-autoupdate.md) |
 | SPEC-021 | MALIBU rewards emission ledger | 0.4.0 | draft | complete | pending: 10 | [SPEC-021-malibu-emission-ledger.md](SPEC-021-malibu-emission-ledger.md) |
-| SPEC-022 | Verified model settlement | v0.1.7 | draft | complete | conformant: 8, pending: 3 | [SPEC-022-verified-model-settlement.md](SPEC-022-verified-model-settlement.md) |
+| SPEC-022 | Verified model settlement | v0.1.7 | draft | complete | conformant: 11 | [SPEC-022-verified-model-settlement.md](SPEC-022-verified-model-settlement.md) |
 | SPEC-023 | Installer-Integrated Autotune Recommend | v0.10.1 | normative | pending | conformant: 2, pending: 4 | [SPEC-023-installer-autotune-recommend.md](SPEC-023-installer-autotune-recommend.md) |
 | SPEC-024 | Prefix-cache billing and provider-local cache isolation | 0.2.1 | normative | pending | pending corpus migration | [SPEC-024-prefix-cache-billing.md](SPEC-024-prefix-cache-billing.md) |
 | SPEC-025 | Native Mac App (signed `.dmg` + menu bar wrapper) | v0.29 | draft | pending | pending corpus migration | [SPEC-025-native-mac-app.md](SPEC-025-native-mac-app.md) |
@@ -53,7 +53,7 @@ it can no longer drift. Do not hand-edit the table; edit each spec's
 | SPEC-042 | Pool Control Plane and Trusted-Pool Manifest | 0.0.30 | draft | complete | pending: 12 | [SPEC-042-pool-control-plane.md](SPEC-042-pool-control-plane.md) |
 | SPEC-043 | Trusted Pool Creator Onboarding MVP | 0.1.0 | normative | complete | pending: 12 | [SPEC-043-trusted-pool-creator-onboarding.md](SPEC-043-trusted-pool-creator-onboarding.md) |
 | SPEC-044 | Malibu Model Catalog Economics | 0.1.1 | draft | complete | pending: 12 | [SPEC-044-malibu-model-catalog-economics.md](SPEC-044-malibu-model-catalog-economics.md) |
-| SPEC-045 | Local Consumer Endpoint Mode | 0.1.0 | draft | complete | conformant: 1, pending: 7 | [SPEC-045-local-consumer-endpoint-mode.md](SPEC-045-local-consumer-endpoint-mode.md) |
+| SPEC-045 | Local Consumer Endpoint Mode | 0.1.0 | draft | complete | conformant: 4, pending: 4 | [SPEC-045-local-consumer-endpoint-mode.md](SPEC-045-local-consumer-endpoint-mode.md) |
 | SPEC-046 | Provider BYOM Discovery | 0.1.2 | draft | complete | pending: 8 | [SPEC-046-provider-byom-discovery.md](SPEC-046-provider-byom-discovery.md) |
 | SPEC-047 | Network Model Admission | 0.1.3 | draft | complete | pending: 8 | [SPEC-047-network-model-admission.md](SPEC-047-network-model-admission.md) |
 <!-- AUTOGEN:spec-index END -->

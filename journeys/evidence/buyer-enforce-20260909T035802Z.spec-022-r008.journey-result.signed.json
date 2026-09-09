@@ -1,0 +1,123 @@
+{
+  "schema_version": "macprovider.journey-result-envelope.v1",
+  "signatures": [
+    {
+      "algorithm": "ecdsa-p256-sha256",
+      "key_id": "macprovider-acceptance-p256-v1",
+      "signature": "MEUCIAD1gGA9Wahd0du5xTsqapAEHz7peLJQYX7l9FtesbeZAiEA9dWQGFQ5tJBOcw4ZXiCpA1PTFWgaUVcGTWbFS6KOqqY=",
+      "signed_sha256": "08030cb58bed008b3793628ab4a27802aebd825a25460b823364ea93fa21f020",
+      "verified_at": "2026-09-09T07:57:04Z",
+      "verifier": ".github/workflows/promote-signed-buyer-enforce-journey.yml:34326385748:1"
+    }
+  ],
+  "signed": {
+    "schema_version": "macprovider.journey-result.v1",
+    "journey_id": "JOURNEY-BUYER-ENFORCE",
+    "requirement_ids": [
+      "SPEC-022-R008"
+    ],
+    "repository": {
+      "name": "Augustas11/macprovider",
+      "commit": "2ae8fa3b2b2c94187e86514a31af9a0370fbf564"
+    },
+    "captured_at": "2026-09-09T03:58:02Z",
+    "expires_at": "2026-10-09",
+    "operator": {
+      "identity_fingerprint": "36f99b7bd0ed27f09c26023e50341e9044b5786b9bdba2bc55a02986716ff7a6",
+      "role": "acceptance-operator"
+    },
+    "environment": {
+      "candidate": "commit:2ae8fa3b2b2c94187e86514a31af9a0370fbf564",
+      "class": "isolated-candidate-enforce",
+      "hardware_profile": "local-macos-redacted"
+    },
+    "artifacts": [
+      {
+        "id": "redacted-buyer-enforce",
+        "sha256": "58b82b67b79e4f901ff694891955439d251a61514f02ea5affeca3668e7cd12c",
+        "source": "journeys/evidence/buyer-enforce-20260909T035802Z.redacted.json"
+      }
+    ],
+    "result": {
+      "status": "pass",
+      "summary": "isolated candidate enforce journey passed without payout-ready mutation or Pearl flip"
+    },
+    "steps": [
+      {
+        "id": "step-01-capture-config",
+        "status": "pass",
+        "assertion": "isolated candidate captured in enforce mode with an API-key subject and no settlement runner",
+        "artifacts": [
+          "redacted-buyer-enforce"
+        ]
+      },
+      {
+        "id": "step-02-verified-debit",
+        "status": "pass",
+        "assertion": "reservation-first debit settled only after a verified settlement-capable receipt",
+        "artifacts": [
+          "redacted-buyer-enforce"
+        ]
+      },
+      {
+        "id": "step-03-payout-exclusion",
+        "status": "pass",
+        "assertion": "job_enabled stayed false and verified enforce traffic created no payout-ready rows",
+        "artifacts": [
+          "redacted-buyer-enforce"
+        ]
+      },
+      {
+        "id": "step-04-missing-receipt-quarantine",
+        "status": "pass",
+        "assertion": "deadline quarantine released the buyer reservation and kept payout exclusion",
+        "artifacts": [
+          "redacted-buyer-enforce"
+        ]
+      },
+      {
+        "id": "step-05-policy-pinning",
+        "status": "pass",
+        "assertion": "observe rollback did not rewrite already-enforced ledger or verdict rows",
+        "artifacts": [
+          "redacted-buyer-enforce"
+        ]
+      },
+      {
+        "id": "step-06-audit",
+        "status": "pass",
+        "assertion": "per-attempt settlement audit is structured and omits raw prompts, outputs, and secrets",
+        "artifacts": [
+          "redacted-buyer-enforce"
+        ]
+      },
+      {
+        "id": "step-07-restore-config",
+        "status": "pass",
+        "assertion": "settlement job stayed disabled and production Pearl was not touched",
+        "artifacts": [
+          "redacted-buyer-enforce"
+        ]
+      }
+    ],
+    "redaction": {
+      "local_account_names_redacted": true,
+      "operator_identity_redacted": true,
+      "secrets_redacted": true
+    },
+    "run_id": "buyer-enforce-20260909T035802Z",
+    "execution_mode": "isolated-candidate-enforce",
+    "observations": {
+      "enforce_activated": true,
+      "isolated_environment": true,
+      "job_enabled": false,
+      "payout_ready_mutated": false,
+      "production_pearl": false,
+      "production_side_effects": false,
+      "raw_prompt_output_redacted": true,
+      "settlement_mode_end": "observe",
+      "settlement_mode_start": "enforce",
+      "start_job_enabled": false
+    }
+  }
+}

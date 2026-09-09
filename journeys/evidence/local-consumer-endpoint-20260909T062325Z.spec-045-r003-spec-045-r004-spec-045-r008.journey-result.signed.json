@@ -1,0 +1,150 @@
+{
+  "schema_version": "macprovider.journey-result-envelope.v1",
+  "signatures": [
+    {
+      "algorithm": "ecdsa-p256-sha256",
+      "key_id": "macprovider-acceptance-p256-v1",
+      "signature": "MEQCIH5BG0VBKZCBmST0EDGZ7EQux209vxCHmuy4GETVZzSMAiBxZiNjkLHNKBuTlFXP2HnGRVdcZWKIWSiCWaIkSrhQeQ==",
+      "signed_sha256": "340c387c29027f10d6b77bc107d3887b81149008332b33cb4f28ac024f93b46d",
+      "verified_at": "2026-09-09T10:30:36Z",
+      "verifier": ".github/workflows/promote-signed-local-consumer-endpoint-journey.yml:34339824889:1"
+    }
+  ],
+  "signed": {
+    "schema_version": "macprovider.journey-result.v1",
+    "journey_id": "JOURNEY-LOCAL-CONSUMER-ENDPOINT",
+    "requirement_ids": [
+      "SPEC-045-R003",
+      "SPEC-045-R004",
+      "SPEC-045-R008"
+    ],
+    "repository": {
+      "name": "Augustas11/macprovider",
+      "commit": "d51b79b07876da9ab0590f9721936530aa614bde"
+    },
+    "evidence_repository": {
+      "name": "Augustas11/macprovider",
+      "commit": "2865907b6f7a99cbba914bba56897168d51fbdfb"
+    },
+    "captured_at": "2026-09-09T06:23:25Z",
+    "expires_at": "2026-10-09",
+    "operator": {
+      "role": "release-operator",
+      "identity_fingerprint": "2e5a2503810a6b75d51919075dd43175eafdc4ea5dacf20c604a8668d5d79b60"
+    },
+    "environment": {
+      "class": "staging-or-production-local-consumer-endpoint",
+      "hardware_profile": "local-macos-redacted",
+      "candidate": "commit:d51b79b07876da9ab0590f9721936530aa614bde"
+    },
+    "artifacts": [
+      {
+        "id": "redacted-local-consumer-endpoint",
+        "sha256": "052904e8210099ac1885f2207fbf6e9f098b4ccb529e393f2a9a086ea7ddbe6d",
+        "source": "journeys/evidence/local-consumer-endpoint-20260909T062325Z.redacted.json"
+      }
+    ],
+    "result": {
+      "status": "pass"
+    },
+    "steps": [
+      {
+        "id": "step-01-capture-local-endpoint",
+        "status": "pass",
+        "artifacts": [
+          "redacted-local-consumer-endpoint"
+        ]
+      },
+      {
+        "id": "step-02-openai-sdk-local-client",
+        "status": "pass",
+        "artifacts": [
+          "redacted-local-consumer-endpoint"
+        ]
+      },
+      {
+        "id": "step-03-permitted-chat-completion",
+        "status": "pass",
+        "artifacts": [
+          "redacted-local-consumer-endpoint"
+        ]
+      },
+      {
+        "id": "step-04-over-budget-denial",
+        "status": "pass",
+        "artifacts": [
+          "redacted-local-consumer-endpoint"
+        ]
+      },
+      {
+        "id": "step-05-restart-held-reservation",
+        "status": "pass",
+        "artifacts": [
+          "redacted-local-consumer-endpoint"
+        ]
+      },
+      {
+        "id": "step-06-recovery-release-held-reservation",
+        "status": "pass",
+        "artifacts": [
+          "redacted-local-consumer-endpoint"
+        ]
+      },
+      {
+        "id": "step-07-redaction-status-logs",
+        "status": "pass",
+        "artifacts": [
+          "redacted-local-consumer-endpoint"
+        ]
+      },
+      {
+        "id": "step-08-restore-local-state",
+        "status": "pass",
+        "artifacts": [
+          "redacted-local-consumer-endpoint"
+        ]
+      }
+    ],
+    "redaction": {
+      "local_account_names_redacted": true,
+      "operator_identity_redacted": true,
+      "secrets_redacted": true
+    },
+    "run_id": "local-consumer-endpoint-20260909T062325Z",
+    "execution_mode": "staging-or-production-local-consumer-endpoint",
+    "observations": {
+      "bearer_tokens_redacted": true,
+      "generated_local_token_used_as_api_key": true,
+      "held_reservation_survived_restart": true,
+      "local_base_url_configured": true,
+      "openai_sdk_used": true,
+      "over_budget_denial_observed": true,
+      "permitted_chat_completion_observed": true,
+      "raw_prompt_output_redacted": true,
+      "recovery_release_observed": true,
+      "redacted_artifacts_reviewed": true,
+      "staging_or_production_gateway": true,
+      "fake_gateway_used": false,
+      "local_token_logged": false,
+      "raw_completion_logged": false,
+      "raw_prompt_logged": false,
+      "upstream_credential_logged": false
+    },
+    "candidate_identity": {
+      "buyer_credential_fingerprint": "c7b9bf95d1388c019fe79d12fcfaa7a999adf833d467d5036b7c1baad9872733",
+      "cli_binary_sha256": "30d3fe336f7b28ae2e579d2c1cda4d40f4f673e28d2c90377782fd11f7a4bcd5",
+      "cli_version": "1.8.123",
+      "gateway_kind": "production",
+      "ledger_sha256": "1fbdc3d576a7879e23729c9f48595e4e79dc25b53471edcb44b319cda6fa94e0",
+      "local_endpoint_base_url_sha256": "8921de37965c88df775c2f70e5577039a73f77cfd25c71521faac57be039d14a",
+      "local_token_fingerprint": "bde0a8a31071b15357eab5150a351509e0ea81b950859d4304f57d8935a0de48",
+      "log_capture_sha256": "832ff028542b599b76625f5c62c127ef42cc5a953f81eadb63cc53789ae9876a",
+      "model_id": "mlx-community/Qwen3-8B-4bit",
+      "rate_card_sha256": "ae6c2f68fb09f8828e3c415a890e6c30e0a97566ecf311e26110af286c8b674b",
+      "sdk_name": "openai-python",
+      "sdk_version": "2.44.0",
+      "status_capture_sha256": "42015f3e6d5d6d890b05ef22315c5b89e7e94ae74aa75b5ce57b20f16ce30a72",
+      "upstream_gateway_origin_sha256": "05ec143545d842afe0609f2659c59812840dcfeba47e869dea17ff2121686dbe"
+    }
+  }
+}
