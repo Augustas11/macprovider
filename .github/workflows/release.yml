@@ -298,6 +298,23 @@ jobs:
             unsigned-release-inputs/coordinator-cli-linux-amd64
             unsigned-release-inputs/gateway-linux-amd64
           )
+          # SPEC-023 §3.7.8 Stage A: an artifact-bound catalog release carries
+          # the artifact feed and its sidecar as two more unsigned inputs (they
+          # become release assets, never payload members or index roles).
+          catalog_artifact_bound="$(python3 - "phase3-binary/catalog/autotune/release.json" <<'PY'
+          import json, pathlib, sys
+          feeds = json.loads(pathlib.Path(sys.argv[1]).read_text())["feeds"]
+          print("bound" if "autotune-artifacts.json" in feeds else "unbound")
+          PY
+          )"
+          if [ "$catalog_artifact_bound" = bound ]; then
+            cp phase3-binary/dist/static/autotune-artifacts.json \
+              phase3-binary/dist/static/autotune-artifacts.json.sig unsigned-release-inputs/
+            unsigned_assets+=(
+              unsigned-release-inputs/autotune-artifacts.json
+              unsigned-release-inputs/autotune-artifacts.json.sig
+            )
+          fi
           python3 scripts/build-release-provenance.py \
             "$tag" "${{ steps.release_source.outputs.commit }}" \
             "$GITHUB_REPOSITORY" "${{ steps.release_source.outputs.prerelease }}" \
@@ -1391,6 +1408,18 @@ jobs:
           catalog_demand_sig_src="phase3-binary/dist/static/demand-rank.json.sig"
           catalog_rate_card_src="phase3-binary/dist/static/rate-card.json"
           catalog_rate_card_sig_src="phase3-binary/dist/static/rate-card.json.sig"
+          catalog_artifacts_src="phase3-binary/dist/static/autotune-artifacts.json"
+          catalog_artifacts_sig_src="phase3-binary/dist/static/autotune-artifacts.json.sig"
+          # SPEC-023 §3.7.8 Stage A: release.json decides whether the artifact
+          # feed and its sidecar are release assets; they are never payload
+          # members or compatibility-artifact-index roles (exact sets the
+          # deployed updater enforces).
+          catalog_artifact_bound="$(python3 - "$catalog_manifest_src" <<'PY'
+          import json, pathlib, sys
+          feeds = json.loads(pathlib.Path(sys.argv[1]).read_text())["feeds"]
+          print("bound" if "autotune-artifacts.json" in feeds else "unbound")
+          PY
+          )"
           test -f "$src"
           test -f "$coordinator_asset"
           test -f "$coordinator_cli_asset"
@@ -1426,6 +1455,11 @@ jobs:
             rate-card.json
             rate-card.json.sig
           )
+          if [ "$catalog_artifact_bound" = bound ]; then
+            cp "$catalog_artifacts_src" autotune-artifacts.json
+            cp "$catalog_artifacts_sig_src" autotune-artifacts.json.sig
+            catalog_assets+=(autotune-artifacts.json autotune-artifacts.json.sig)
+          fi
           release_assets+=("${catalog_assets[@]}")
           compatibility_manifest_src="phase3-binary/dist/compatibility-set.json"
           test -f "$compatibility_manifest_src"
@@ -1492,6 +1526,8 @@ jobs:
               "rate-card.json",
               "rate-card.json.sig",
           )
+          if "autotune-artifacts.json" in catalog_manifest["feeds"]:
+              catalog_names += ("autotune-artifacts.json", "autotune-artifacts.json.sig")
           catalog_files = {
               name: hashlib.sha256(open(name, "rb").read()).hexdigest()
               for name in catalog_names

@@ -52,6 +52,15 @@ CATALOG_NAMES = (
     "rate-card.json",
     "rate-card.json.sig",
 )
+# SPEC-023 §3.7.8 Stage A (BYOM v0.2 slice 2b-ii): an artifact-bound release
+# publishes the artifact feed and its sidecar as two more RELEASE ASSETS, bound
+# in release.json and pearl-release.json. They are NEVER provider-payload
+# members (the deployed updater and installer enforce the exact nine names
+# above) and never compatibility-artifact-index roles (the deployed updater
+# enforces the exact seventeen); the CLI's fallback is a snapshot compiled into
+# the binary (§3.7.2). Producers carry them as extra unsigned inputs.
+CATALOG_ARTIFACT_FEED = "autotune-artifacts.json"
+CATALOG_ARTIFACT_NAMES = (CATALOG_ARTIFACT_FEED, CATALOG_ARTIFACT_FEED + ".sig")
 LOCAL_COMPATIBILITY_NAMES = {
     "install.sh",
     "provider-launch-agent.plist.template",
@@ -177,6 +186,39 @@ def require_branch_ref(value: object, label: str) -> str:
     return ref
 
 
+def release_binds_artifact_feed(release: object) -> bool:
+    feeds = release.get("feeds") if isinstance(release, dict) else None
+    return isinstance(feeds, dict) and CATALOG_ARTIFACT_FEED in feeds
+
+
+def archived_release_binds_artifact_feed(archive_path: pathlib.Path) -> bool:
+    """Whether the provider payload archive's `catalog-release/release.json`
+    binds the artifact feed (SPEC-023 §3.7.8).
+
+    Decides which unsigned inputs the build boundary must carry. An input that
+    is not a gzip tar, or whose manifest is not a JSON object with a `feeds`
+    object, is treated as rate-card-bound HERE — the archive's own contract is
+    enforced by `validate-archive` and the manifest's by
+    `compatibility-set-manifest.py` — while the exact expected set still
+    rejects an unbound artifact pair.
+    """
+    try:
+        with tarfile.open(archive_path, "r:gz") as archive:
+            for member in archive.getmembers():
+                parts = tuple(part for part in pathlib.PurePosixPath(member.name).parts if part not in ("", "."))
+                if parts != ("catalog-release", "release.json") or not member.isfile():
+                    continue
+                if member.size > MAX_JSON_BYTES:
+                    return False
+                handle = archive.extractfile(member)
+                if handle is None:
+                    return False
+                return release_binds_artifact_feed(json.loads(handle.read(MAX_JSON_BYTES)))
+    except (OSError, tarfile.TarError, ValueError):
+        return False
+    return False
+
+
 def sha256(path: pathlib.Path, label: str) -> str:
     read_regular(path, label)
     digest = hashlib.sha256()
@@ -232,7 +274,14 @@ def validate_unsigned(value: dict, assets: dict[str, pathlib.Path]) -> None:
     require_string(value["control_commit"], HEX40, "unsigned control commit")
     if value["provider_admission_policy"] not in {"bridge_required", "strict_post_migration"}:
         fail("unsigned manifest: unsupported provider admission policy")
-    expected_names = REQUIRED_UNSIGNED_NAMES | {f"phase3-binary-m4-{value['tag']}.tar.gz"}
+    archive_name = f"phase3-binary-m4-{value['tag']}.tar.gz"
+    expected_names = REQUIRED_UNSIGNED_NAMES | {archive_name}
+    # The build boundary is exact in both directions: an artifact-bound
+    # provider payload (its catalog-release/release.json binds the feed) must
+    # be accompanied by the artifact feed and its sidecar as unsigned inputs,
+    # and a rate-card-bound one must not be.
+    if archive_name in assets and archived_release_binds_artifact_feed(assets[archive_name]):
+        expected_names = expected_names | set(CATALOG_ARTIFACT_NAMES)
     if set(assets) != expected_names:
         fail("unsigned manifest: supplied assets differ from the exact build boundary")
     rows = value["assets"]
@@ -352,8 +401,9 @@ def build_pearl(args: argparse.Namespace) -> dict:
     release_lane = "pearl_runtime"
     if args.catalog_directory is not None:
         catalog = args.catalog_directory
-        files = {name: sha256(catalog / name, f"catalog {name}") for name in CATALOG_NAMES}
         release = strict_json(catalog / "release.json", "catalog release", catalog_release=True)
+        catalog_names = CATALOG_NAMES + (CATALOG_ARTIFACT_NAMES if release_binds_artifact_feed(release) else ())
+        files = {name: sha256(catalog / name, f"catalog {name}") for name in catalog_names}
         release_id = release.get("release_id")
         policy_version = release.get("policy_version")
         if not isinstance(release_id, str) or not release_id or not isinstance(policy_version, str) or not policy_version:
@@ -486,6 +536,8 @@ def command_validate_provider_payload(args: argparse.Namespace) -> None:
             fail(f"provider payload: required directory is absent or unsafe: {name}")
     catalog_entries = {path.name for path in (root / "catalog-release").iterdir()}
     if catalog_entries != set(CATALOG_NAMES):
+        if set(CATALOG_ARTIFACT_NAMES) & catalog_entries:
+            fail("provider payload: autotune-artifacts.json is not a provider-payload member at Stage A (SPEC-023 §3.7.8); it is a release asset")
         fail("provider payload: catalog-release members differ from the exact compatibility set")
     for name in CATALOG_NAMES:
         read_regular(root / "catalog-release" / name, f"provider catalog {name}")

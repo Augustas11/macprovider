@@ -90,6 +90,21 @@ def verify_run(args: argparse.Namespace) -> None:
         fail("workflow artifact identity is absent, expired, or ambiguous")
 
 
+def release_binds_artifact_feed(release_path: pathlib.Path) -> bool:
+    """Whether the accepted catalog release.json binds the artifact feed.
+
+    A manifest that is not a JSON object with a `feeds` object counts as
+    rate-card-bound here (its own contract is enforced by the catalog release
+    tooling); the exact inventory below still rejects an unbound pair.
+    """
+    try:
+        release = json.loads(release_path.read_bytes())
+    except (OSError, ValueError):
+        return False
+    feeds = release.get("feeds") if isinstance(release, dict) else None
+    return isinstance(feeds, dict) and "autotune-artifacts.json" in feeds
+
+
 def read_asset_names(path: pathlib.Path) -> list[str]:
     regular(path, "release asset selector")
     try:
@@ -119,6 +134,11 @@ def verify_directory(args: argparse.Namespace) -> None:
     if len(names) != len(set(names)) or any(not SAFE_NAME.fullmatch(name) for name in names):
         fail("candidate directory has duplicate or unsafe basenames")
     release_names = read_asset_names(root / "release-assets.txt")
+    # SPEC-023 §3.7.8 Stage A: an artifact-bound catalog release (the accepted
+    # release.json binds autotune-artifacts.json) publishes the feed and its
+    # sidecar as two more release assets, bound in the Pearl catalog map.
+    artifact_names = {"autotune-artifacts.json", "autotune-artifacts.json.sig"}
+    artifact_bound = release_binds_artifact_feed(root / "release.json")
     required_release_names = {
         f"macprovider-cli-{args.tag}-darwin-arm64.tar.gz",
         f"Malibu-{args.tag}.dmg",
@@ -143,7 +163,11 @@ def verify_directory(args: argparse.Namespace) -> None:
         "macprovider-release-discovery.json.sig",
         "release-provenance.json",
     }
+    if artifact_bound:
+        required_release_names |= artifact_names
     if set(release_names) != required_release_names:
+        if artifact_names & set(release_names) and not artifact_bound:
+            fail("release asset selector carries the artifact feed the accepted release.json does not bind")
         fail("release asset selector differs from the production compatibility inventory")
     expected = set(release_names) | CONTROL_NAMES
     if set(names) != expected:
@@ -255,6 +279,8 @@ def verify_directory(args: argparse.Namespace) -> None:
         "rate-card.json",
         "rate-card.json.sig",
     }
+    if artifact_bound:
+        catalog_names |= artifact_names
     catalog = pearl.get("catalog")
     if (
         not isinstance(catalog, dict)

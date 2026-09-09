@@ -264,6 +264,32 @@ jobs:
             "$RUNNER_TEMP/coordinator-cli-linux-amd64" \
             "$RUNNER_TEMP/gateway-linux-amd64" \
             "$destination/"
+          unsigned_asset_arguments=(
+            --asset "phase3-binary-m4-${TAG}.tar.gz=$destination/phase3-binary-m4-${TAG}.tar.gz"
+            --asset "Malibu.app.tar.gz=$destination/Malibu.app.tar.gz"
+            --asset "release-toolchain.json=$destination/release-toolchain.json"
+            --asset "coordinator-linux-amd64=$destination/coordinator-linux-amd64"
+            --asset "coordinator-cli-linux-amd64=$destination/coordinator-cli-linux-amd64"
+            --asset "gateway-linux-amd64=$destination/gateway-linux-amd64"
+          )
+          # SPEC-023 §3.7.8 Stage A: an artifact-bound catalog release (the
+          # candidate's release.json binds autotune-artifacts.json) carries the
+          # artifact feed and its sidecar as two more unsigned inputs; the
+          # signer publishes them as release assets, never as payload members.
+          catalog_artifact_bound="$(python3 - candidate/phase3-binary/catalog/autotune/release.json <<'PY'
+          import json, pathlib, sys
+          feeds = json.loads(pathlib.Path(sys.argv[1]).read_text())["feeds"]
+          print("bound" if "autotune-artifacts.json" in feeds else "unbound")
+          PY
+          )"
+          if [ "$catalog_artifact_bound" = bound ]; then
+            cp candidate/phase3-binary/dist/static/autotune-artifacts.json \
+              candidate/phase3-binary/dist/static/autotune-artifacts.json.sig "$destination/"
+            unsigned_asset_arguments+=(
+              --asset "autotune-artifacts.json=$destination/autotune-artifacts.json"
+              --asset "autotune-artifacts.json.sig=$destination/autotune-artifacts.json.sig"
+            )
+          fi
           python3 control/scripts/acceptance-candidate-metadata.py build-unsigned \
             --repository "$GITHUB_REPOSITORY" \
             --tag "$TAG" \
@@ -271,12 +297,7 @@ jobs:
             --candidate-commit "$CANDIDATE_COMMIT" \
             --control-commit "$CONTROL_COMMIT" \
             --provider-admission-policy "$PROVIDER_ADMISSION_POLICY" \
-            --asset "phase3-binary-m4-${TAG}.tar.gz=$destination/phase3-binary-m4-${TAG}.tar.gz" \
-            --asset "Malibu.app.tar.gz=$destination/Malibu.app.tar.gz" \
-            --asset "release-toolchain.json=$destination/release-toolchain.json" \
-            --asset "coordinator-linux-amd64=$destination/coordinator-linux-amd64" \
-            --asset "coordinator-cli-linux-amd64=$destination/coordinator-cli-linux-amd64" \
-            --asset "gateway-linux-amd64=$destination/gateway-linux-amd64" \
+            "${unsigned_asset_arguments[@]}" \
             --output "$destination/unsigned-acceptance-manifest.json"
 
       - name: Upload unsigned candidate build data
