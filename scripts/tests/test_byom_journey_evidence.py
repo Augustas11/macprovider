@@ -212,6 +212,64 @@ class BYOMJourneyCaptureTests(unittest.TestCase):
 
         self.assert_capture_fails("discovery", mutator, fragment)
 
+    def complete_discovery_document(self) -> dict:
+        """A COMPLETE closed discovery document, taken from the golden fixture.
+
+        `_digest_document` validates every capture against the full closed key
+        set, so a test that wants a capture ACCEPTED has to start from a
+        complete document; a hand-written partial one is exactly what the
+        contract now refuses.
+        """
+        return json.loads(
+            (FIXTURES / "discovery" / "captures" / "discover-mlx-cache.json").read_text(
+                encoding="utf-8"
+            )
+        )
+
+    def guidance_document(self, **guidance) -> dict:
+        document = self.complete_discovery_document()
+        document["candidates"][0]["provider_guidance"].update(guidance)
+        return document
+
+    # SPEC-046-R003 requires the two localization keys in every
+    # `provider_guidance` object, so captured documents are archived whole and
+    # the scanner validates those two paths against a closed grammar instead of
+    # the shape-based hostname rule.
+    def test_accepts_localization_keys_inside_provider_guidance(self) -> None:
+        manifest, manifest_path = self.mutate(
+            "discovery", lambda _manifest, root: self.write_capture(root, self.guidance_document())
+        )
+        self.capture("discovery", manifest, manifest_path)
+
+    def test_rejects_a_hostname_at_a_localization_key_path(self) -> None:
+        for field in ("state_label_key", "state_meaning_key"):
+            with self.subTest(field=field):
+                self.assert_captured_document_rejected(
+                    self.guidance_document(**{field: "coordinator.malibu.tech"}),
+                    "must be a closed byom localization key",
+                )
+
+    def test_rejects_a_localization_key_shape_outside_the_two_exempt_fields(self) -> None:
+        # Another field of the same guidance object.
+        self.assert_captured_document_rejected(
+            self.guidance_document(next_action="byom.local.local_only"),
+            "contains a hostname",
+        )
+        # And a field outside provider_guidance entirely.
+        document = self.guidance_document()
+        document["candidates"][0]["display_name"] = "byom.local.local_only"
+        self.assert_captured_document_rejected(document, "contains a hostname")
+
+    def test_rejects_a_hostname_hidden_behind_json_escapes_in_a_captured_document(self) -> None:
+        def mutator(_manifest, root):
+            (root / "captures" / "discover-mlx-cache.json").write_text(
+                '{"schema": "provider_byom_discovery.v1", '
+                '"note": "coordinator\\u002emalibu\\u002etech"}',
+                encoding="utf-8",
+            )
+
+        self.assert_capture_fails("discovery", mutator, "contains a hostname")
+
     def test_rejects_captured_document_whose_schema_differs_from_the_manifest(self) -> None:
         self.assert_captured_document_rejected(
             {"schema": "model_admission_status.v1", "candidates": []},
@@ -231,6 +289,207 @@ class BYOMJourneyCaptureTests(unittest.TestCase):
             )
 
         self.assert_capture_fails("discovery", mutator, "must be a JSON object document")
+
+    # R3 MEDIUM: closed-schema validation lives at the capture boundary, so a
+    # document that is redaction-clean but INCOMPLETE (or carries a field the
+    # spec does not define) cannot be digested into evidence -- whoever produced
+    # it. These go through the real capture path, not the driver's copy.
+    #
+    # Scoped to the DISCOVERY journey in this slice (epic #1453 slice 1b), which
+    # is why every case below mutates a discovery capture: the admission
+    # contract keeps redaction plus top-level `schema` equality until its own
+    # journey can be captured (slice 7). See
+    # `JourneyContract.typed_capture_validation`.
+    def test_rejects_captured_document_missing_an_envelope_field(self) -> None:
+        document = self.complete_discovery_document()
+        del document["projection_sequence"]
+        self.assert_captured_document_rejected(
+            document, "is missing required fields: projection_sequence"
+        )
+
+    def test_rejects_captured_document_with_an_unknown_envelope_field(self) -> None:
+        document = self.complete_discovery_document()
+        document["settlement_capable"] = True
+        self.assert_captured_document_rejected(
+            document, "carries unknown fields: settlement_capable"
+        )
+
+    def test_rejects_captured_document_missing_a_nested_candidate_field(self) -> None:
+        document = self.complete_discovery_document()
+        del document["candidates"][0]["admission_state_source"]
+        self.assert_captured_document_rejected(
+            document, "candidates[0] is missing required fields: admission_state_source"
+        )
+
+    def test_rejects_captured_document_missing_a_nested_capability_field(self) -> None:
+        document = self.complete_discovery_document()
+        del document["candidates"][0]["capabilities"]["usage_reporting"]
+        self.assert_captured_document_rejected(
+            document, "capabilities is missing required fields: usage_reporting"
+        )
+
+    def test_rejects_captured_document_with_an_unknown_nested_capability_field(self) -> None:
+        document = self.complete_discovery_document()
+        document["candidates"][0]["capabilities"]["verified_throughput"] = True
+        self.assert_captured_document_rejected(
+            document, "capabilities carries unknown fields: verified_throughput"
+        )
+
+    def test_rejects_captured_document_missing_a_nested_guidance_field(self) -> None:
+        document = self.complete_discovery_document()
+        del document["candidates"][0]["provider_guidance"]["earning_path_class"]
+        self.assert_captured_document_rejected(
+            document, "provider_guidance is missing required fields: earning_path_class"
+        )
+
+    def test_rejects_captured_document_with_an_unknown_nested_guidance_field(self) -> None:
+        document = self.complete_discovery_document()
+        document["candidates"][0]["provider_guidance"]["settlement_hint"] = "yes"
+        self.assert_captured_document_rejected(
+            document, "provider_guidance carries unknown fields: settlement_hint"
+        )
+
+    def test_rejects_captured_document_missing_a_nested_adapter_field(self) -> None:
+        document = self.complete_discovery_document()
+        del document["adapters"][0]["warning_codes"]
+        self.assert_captured_document_rejected(
+            document, "adapters[0] is missing required fields: warning_codes"
+        )
+
+    # R4 MEDIUM: exact key sets proved a captured document was COMPLETE but said
+    # nothing about its values, so `identity_state: declared_local`, capability
+    # results as strings, and `next_action: serve_traffic` all validated. These
+    # go through the real capture path, like the key-set cases above.
+    def test_rejects_captured_document_with_an_out_of_enum_identity_state(self) -> None:
+        document = self.complete_discovery_document()
+        document["candidates"][0]["identity_state"] = "declared_local"
+        self.assert_captured_document_rejected(
+            document, "identity_state is not a permitted value: 'declared_local'"
+        )
+
+    def test_rejects_captured_document_with_an_out_of_enum_locality(self) -> None:
+        document = self.complete_discovery_document()
+        document["candidates"][0]["locality"] = "local_weights"
+        self.assert_captured_document_rejected(
+            document, "locality is not a permitted value: 'local_weights'"
+        )
+
+    def test_rejects_captured_document_with_an_out_of_enum_evaluation_state(self) -> None:
+        document = self.complete_discovery_document()
+        document["candidates"][0]["evaluation_state"] = "evaluated"
+        self.assert_captured_document_rejected(
+            document, "evaluation_state is not a permitted value: 'evaluated'"
+        )
+
+    def test_rejects_captured_document_with_an_out_of_enum_next_action(self) -> None:
+        document = self.complete_discovery_document()
+        document["candidates"][0]["provider_guidance"]["next_action"] = "serve_traffic"
+        self.assert_captured_document_rejected(
+            document, "next_action is not a permitted value: 'serve_traffic'"
+        )
+
+    def test_rejects_captured_document_with_an_out_of_enum_warning_code(self) -> None:
+        document = self.complete_discovery_document()
+        document["candidates"][0]["warning_codes"] = ["adapter_response_malformed"]
+        self.assert_captured_document_rejected(
+            document, "warning_codes[0] is not a permitted value: 'adapter_response_malformed'"
+        )
+
+    def test_rejects_captured_document_with_an_out_of_enum_adapter_status(self) -> None:
+        document = self.complete_discovery_document()
+        document["adapters"][0]["status"] = "failed"
+        self.assert_captured_document_rejected(
+            document, "adapters[0].status is not a permitted value: 'failed'"
+        )
+
+    def test_rejects_captured_document_with_a_wrong_typed_capability(self) -> None:
+        # SPEC-046-R004: unknown is null, so a string standing in for a nullable
+        # boolean is a capability claim the CLI never made.
+        document = self.complete_discovery_document()
+        document["candidates"][0]["capabilities"]["chat_completions"] = "yes"
+        self.assert_captured_document_rejected(
+            document, "capabilities.chat_completions must be a JSON boolean"
+        )
+
+    def test_rejects_captured_document_with_a_wrong_typed_projection_sequence(self) -> None:
+        document = self.complete_discovery_document()
+        document["projection_sequence"] = "1"
+        self.assert_captured_document_rejected(
+            document, "projection_sequence must be a JSON integer"
+        )
+
+    def test_rejects_captured_document_with_a_null_in_a_non_nullable_field(self) -> None:
+        document = self.complete_discovery_document()
+        document["candidates"][0]["display_name"] = None
+        self.assert_captured_document_rejected(
+            document, "display_name must be a non-empty JSON string"
+        )
+
+    def test_rejects_captured_document_with_a_null_admission_state(self) -> None:
+        document = self.complete_discovery_document()
+        document["candidates"][0]["admission_state"] = None
+        self.assert_captured_document_rejected(
+            document, "admission_state must be a JSON string"
+        )
+
+    def test_rejects_captured_document_promoting_a_network_state_locally(self) -> None:
+        # The SPEC-046-R003 cross-field rule: with `local_default` the CLI may
+        # only report its own ladder, never a coordinator admission state.
+        document = self.complete_discovery_document()
+        document["candidates"][0]["admission_state"] = "settlement_capable"
+        document["candidates"][0]["admission_state_source"] = "local_default"
+        self.assert_captured_document_rejected(
+            document,
+            "admission_state 'settlement_capable' is not a permitted state for "
+            "admission_state_source 'local_default'",
+        )
+
+    def test_rejects_captured_evaluation_with_string_capability_results(self) -> None:
+        def mutator(_manifest, root):
+            path = root / "captures" / "evaluate-candidate.json"
+            document = json.loads(path.read_text(encoding="utf-8"))
+            document["capability_results"]["chat_completions"] = "passed"
+            path.write_text(json.dumps(document), encoding="utf-8")
+
+        self.assert_capture_fails("discovery", mutator, "must be a JSON object")
+
+    def test_rejects_captured_evaluation_with_a_renamed_diagnostic_hash(self) -> None:
+        def mutator(_manifest, root):
+            path = root / "captures" / "evaluate-candidate.json"
+            document = json.loads(path.read_text(encoding="utf-8"))
+            hashes = document["diagnostic_hashes"]
+            hashes["completion_sha256"] = hashes.pop("response_body_sha256")
+            path.write_text(json.dumps(document), encoding="utf-8")
+
+        self.assert_capture_fails(
+            "discovery", mutator, "diagnostic_hashes is missing required fields: response_body_sha256"
+        )
+
+    def test_rejects_captured_evaluation_missing_a_mutation_summary_field(self) -> None:
+        def mutator(_manifest, root):
+            document = json.loads(
+                (root / "captures" / "evaluate-candidate.json").read_text(encoding="utf-8")
+            )
+            del document["mutation_summary"]["downloads_started"]
+            (root / "captures" / "evaluate-candidate.json").write_text(
+                json.dumps(document), encoding="utf-8"
+            )
+
+        self.assert_capture_fails(
+            "discovery", mutator, "mutation_summary is missing required fields: downloads_started"
+        )
+
+    def test_rejects_a_captured_document_whose_schema_is_not_enumerated(self) -> None:
+        def mutator(manifest, root):
+            (root / "captures" / "discover-mlx-cache.json").write_text(
+                json.dumps({"schema": "models_browse.v1", "models": []}), encoding="utf-8"
+            )
+            for step in manifest["steps"]:
+                for document in step.get("documents", []):
+                    if document["path"] == "captures/discover-mlx-cache.json":
+                        document["schema"] = "models_browse.v1"
+
+        self.assert_capture_fails("discovery", mutator, "has an unvalidated schema")
 
     def test_rejects_captured_document_with_an_absolute_path(self) -> None:
         def mutator(manifest, root):
@@ -371,6 +630,33 @@ class BYOMJourneyCaptureTests(unittest.TestCase):
                     "credential-like value",
                 )
 
+    # R4 MEDIUM: each journey has exactly one harness that can produce its run
+    # manifest. "Any existing repository-relative source file" let a discovery
+    # manifest be signed under the admission harness's provenance.
+    def test_rejects_manifest_naming_another_journeys_harness(self) -> None:
+        def mutator(manifest, _root):
+            manifest["harness"]["name"] = "test/e2e/byom/run-cli-onboarding-e2e.py"
+
+        self.assert_capture_fails(
+            "discovery", mutator, "harness.name must equal 'test/e2e/byom/run-discovery-journey.py'"
+        )
+
+    def test_rejects_admission_manifest_naming_the_discovery_driver(self) -> None:
+        def mutator(manifest, _root):
+            manifest["harness"]["name"] = "test/e2e/byom/run-discovery-journey.py"
+
+        self.assert_capture_fails(
+            "admission", mutator, "harness.name must equal 'test/e2e/byom/run-cli-onboarding-e2e.py'"
+        )
+
+    def test_rejects_manifest_naming_an_unrelated_repository_file(self) -> None:
+        def mutator(manifest, _root):
+            manifest["harness"]["name"] = "scripts/byom_journey_evidence.py"
+
+        self.assert_capture_fails(
+            "discovery", mutator, "harness.name must equal 'test/e2e/byom/run-discovery-journey.py'"
+        )
+
     def test_legitimate_dns_shaped_values_still_capture(self) -> None:
         # The tightened rule must not reject the DNS-shaped value shapes the
         # contract legitimately emits, so prove them through a real capture.
@@ -384,7 +670,10 @@ class BYOMJourneyCaptureTests(unittest.TestCase):
         manifest, manifest_path = self.mutate("discovery", mutator)
         evidence = self.capture("discovery", manifest, manifest_path)
         self.assertIn("SnapshotManifestV1", evidence["steps"][0]["assertion"])
-        self.assertEqual("test/e2e/byom/run-cli-onboarding-e2e.py", evidence["harness"]["name"])
+        # The discovery journey's evidence carries the discovery driver's own
+        # identity, not "whichever repository file the manifest happened to
+        # name" -- see test_rejects_manifest_naming_another_journeys_harness.
+        self.assertEqual("test/e2e/byom/run-discovery-journey.py", evidence["harness"]["name"])
 
     def test_rejects_secret_bearing_observation_key(self) -> None:
         def mutator(manifest, _root):

@@ -432,6 +432,14 @@ jobs:
         # check. Reuses the SwiftPM build warmed by the swift test step above.
         run: make test-byom-e2e
 
+      - name: Run BYOM discovery-journey driver and evidence pipeline (hermetic)
+        # #1453 slice 1: the ten-step JOURNEY-PROVIDER-BYOM-DISCOVERY driver plus
+        # capture -> build -> preflight. Gated here so a drift between the driver's
+        # manifest and the governance step/requirement/observation tables (or the
+        # fail-closed redaction scan) fails a required check instead of surfacing
+        # during an operator signing session. Reuses the SwiftPM build above.
+        run: make test-byom-discovery-journey
+
       - name: Install reviewed XcodeGen artifact
         shell: bash
         run: |

@@ -5,7 +5,7 @@
   "environment_class": "hermetic-loopback",
   "cli_version": "0.0.0-fixture",
   "harness": {
-    "name": "test/e2e/byom/run-cli-onboarding-e2e.py",
+    "name": "test/e2e/byom/run-discovery-journey.py",
     "status": "pass"
   },
   "steps": [

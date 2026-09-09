@@ -1,10 +1,68 @@
 {
+  "adapters": [
+    {
+      "origin_class": null,
+      "runtime_source": "mlx_cache",
+      "status": "ok",
+      "warning_codes": []
+    },
+    {
+      "origin_class": "loopback_http",
+      "runtime_source": "openai_compatible_loopback",
+      "status": "malformed",
+      "warning_codes": [
+        "adapter_malformed_response"
+      ]
+    }
+  ],
   "candidates": [
     {
       "admission_state": "offerable",
       "admission_state_source": "local_default",
-      "candidate_id": "byom_fixture_candidate"
+      "candidate_id": "byom_4xgiy2qjoayzyeepb7np7xdel37m2avdmu6hwfhe2jlwzu2b77kq",
+      "capabilities": {
+        "chat_completions": null,
+        "family": null,
+        "json_mode": null,
+        "max_context_tokens": 4096,
+        "quantization": "q4",
+        "runtime_version": null,
+        "streaming": null,
+        "structured_output_passthrough": null,
+        "tool_call_passthrough": null,
+        "usage_reporting": null
+      },
+      "catalog_model_key": null,
+      "context_window_tokens": 4096,
+      "display_name": "mlx-community/Tiny-1B-4bit",
+      "estimated_gb": 1,
+      "evaluation_state": "not_evaluated",
+      "fit_state": "fits",
+      "identity_state": "runtime_reported",
+      "locality": "local_artifact",
+      "provider_guidance": {
+        "earning_path_class": "local_inventory_only",
+        "next_action": "evaluate",
+        "state_label_key": "byom.local.offerable",
+        "state_meaning_key": "byom.local.offerable_not_earning",
+        "transition_reason_code": null
+      },
+      "readiness_state": "ready",
+      "runtime_source": "mlx_cache",
+      "served_model_ref": "mlx-community/Tiny-1B-4bit",
+      "warning_codes": [
+        "capability_unevaluated",
+        "evaluation_required"
+      ]
     }
   ],
-  "schema": "provider_byom_discovery.v1"
+  "cli_version": "1.8.123",
+  "generated_at": "2026-09-09T03:46:10.841Z",
+  "projection_sequence": 1,
+  "schema": "provider_byom_discovery.v1",
+  "warnings": [
+    "adapter_malformed_response",
+    "capability_unevaluated",
+    "evaluation_required"
+  ]
 }

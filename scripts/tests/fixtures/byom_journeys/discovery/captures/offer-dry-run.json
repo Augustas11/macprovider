@@ -1,6 +1,23 @@
 {
-  "likely_admission_state": "offerable",
+  "candidate_id": "byom_c6bidtyyoqnlutdfwflcoaq22bbnw6udi343rl64c4wooqumoshq",
+  "catalog_model_key": null,
+  "cli_version": "1.8.123",
+  "generated_at": "2026-09-09T03:46:11.067Z",
+  "likely_admission_state": "local_only",
   "likely_admission_state_source": "local_default",
+  "provider_guidance": {
+    "earning_path_class": "local_inventory_only",
+    "next_action": "fix_local_blocker",
+    "state_label_key": "byom.offer_dry_run.blocked",
+    "state_meaning_key": "byom.offer_dry_run.not_submitted_not_earning",
+    "transition_reason_code": "no_trusted_catalog_match"
+  },
+  "reason_code": "no_trusted_catalog_match",
   "schema": "model_admission_offer_dry_run.v1",
-  "would_submit": true
+  "served_model_ref": "openai_compatible:opaque-mini-1b",
+  "warnings": [
+    "capability_unevaluated",
+    "evaluation_required"
+  ],
+  "would_submit": false
 }
