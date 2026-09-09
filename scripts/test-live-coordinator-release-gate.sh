@@ -31,6 +31,7 @@ make_fixture() {
 import hashlib
 import json
 import base64
+import os
 import pathlib
 import subprocess
 import sys
@@ -117,6 +118,29 @@ for feed_name, sig_name in (
         "key_id": signer,
         "signature": base64.b64encode(signature).decode("ascii"),
     })
+# FIXTURE_ARTIFACT_FEED: "" (default) = four-feed release, nothing served;
+# "bound" = artifact-bound release, feed served and bound in metadata;
+# "served-unbound" = feed served by the coordinator but NOT bound by the release.
+artifact_mode = os.environ.get("FIXTURE_ARTIFACT_FEED", "")
+if artifact_mode:
+    candidate_body = (live / "v1_autotune-candidates").read_bytes()
+    write_endpoint("v1_catalog-artifacts", {
+        "version": "fixture-release",
+        "generated_at": generated_at,
+        "policy_version": policy_version,
+        "source": "operator_curated_autotune_artifact_catalog",
+        "release_id": "fixture-release",
+        "candidate_catalog_sha256": hashlib.sha256(candidate_body).hexdigest(),
+        "models": {},
+    })
+    signature = subprocess.check_output(
+        ["openssl", "pkeyutl", "-sign", "-inkey", str(key_path), "-rawin", "-in", str(live / "v1_catalog-artifacts")],
+    )
+    write_endpoint("v1_catalog-artifacts.sig", {
+        "alg": "ed25519",
+        "key_id": signer,
+        "signature": base64.b64encode(signature).decode("ascii"),
+    })
 healthz = {"status": "ok", "version": live_version}
 if recommended_version != "__absent__":
     healthz["recommended_binary_version"] = recommended_version
@@ -142,6 +166,9 @@ endpoint_to_asset = {
     "rate-card.json": "v1_rate-card",
     "rate-card.json.sig": "v1_rate-card.sig",
 }
+if artifact_mode == "bound":
+    endpoint_to_asset["autotune-artifacts.json"] = "v1_catalog-artifacts"
+    endpoint_to_asset["autotune-artifacts.json.sig"] = "v1_catalog-artifacts.sig"
 files = {
     asset: hashlib.sha256((live / endpoint).read_bytes()).hexdigest()
     for asset, endpoint in endpoint_to_asset.items()
@@ -194,6 +221,135 @@ run_guard_phase() {
 
 make_fixture "$work/ok"
 run_guard "$work/ok" | grep -q 'ok: https://coordinator.fixture.invalid serves v1.8.68 feed set'
+run_guard "$work/ok" | grep -q 'artifact_feed=absent'
+
+# SPEC-023 §3.7 artifact feed (BYOM v0.2 slice 2b): served feed set must equal
+# the release's feed set, and a bound feed is signer-equal and release-bound.
+FIXTURE_ARTIFACT_FEED=bound make_fixture "$work/artifact-bound"
+run_guard "$work/artifact-bound" | grep -q 'artifact_feed=bound'
+
+FIXTURE_ARTIFACT_FEED=served-unbound make_fixture "$work/artifact-served-unbound"
+if run_guard "$work/artifact-served-unbound" >"$work/artifact-served-unbound.out" 2>&1; then
+  fail "accepted a coordinator serving /v1/catalog-artifacts for a release that binds no artifact feed"
+fi
+grep -q 'serves /v1/catalog-artifacts but the release binds no artifact feed' "$work/artifact-served-unbound.out"
+
+FIXTURE_ARTIFACT_FEED=bound make_fixture "$work/artifact-bound-missing"
+rm "$work/artifact-bound-missing/live/v1_catalog-artifacts"
+if run_guard "$work/artifact-bound-missing" >"$work/artifact-bound-missing.out" 2>&1; then
+  fail "accepted a release that binds the artifact feed the coordinator does not serve"
+fi
+grep -q 'fixture coordinator response is missing for /v1/catalog-artifacts' "$work/artifact-bound-missing.out"
+
+FIXTURE_ARTIFACT_FEED=bound make_fixture "$work/artifact-sig-unbound"
+python3 - "$work/artifact-sig-unbound" <<'PY'
+import json
+import pathlib
+import sys
+
+directory = pathlib.Path(sys.argv[1])
+metadata_path = directory / "pearl-release.json"
+metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+del metadata["catalog"]["files"]["autotune-artifacts.json.sig"]
+metadata_path.write_text(json.dumps(metadata, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+PY
+if run_guard "$work/artifact-sig-unbound" >"$work/artifact-sig-unbound.out" 2>&1; then
+  fail "accepted release metadata binding the artifact feed without its sidecar"
+fi
+grep -q 'binds the artifact feed without its signature sidecar' "$work/artifact-sig-unbound.out"
+
+# Re-sign + re-bind helper: mutate the served artifact feed, sign it with the
+# fixture key so signature verification still passes, and re-bind the digests
+# so ONLY the release-binding rule under test fails.
+rebind_artifact_feed() {
+  local directory="$1"
+  local mutation="$2"
+  python3 - "$directory" "$mutation" <<'PY'
+import base64
+import hashlib
+import json
+import pathlib
+import subprocess
+import sys
+
+directory = pathlib.Path(sys.argv[1])
+mutation = sys.argv[2]
+live = directory / "live"
+feed_path = live / "v1_catalog-artifacts"
+sig_path = live / "v1_catalog-artifacts.sig"
+feed = json.loads(feed_path.read_text(encoding="utf-8"))
+if mutation == "candidate-digest":
+    feed["candidate_catalog_sha256"] = "0" * 64
+elif mutation == "generated-at":
+    feed["generated_at"] = "2026-07-30T11:00:00Z"
+elif mutation == "release-id":
+    feed["release_id"] = "fixture-release-2"
+else:
+    raise SystemExit(f"unknown mutation {mutation}")
+feed_path.write_text(json.dumps(feed, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+signature = subprocess.check_output(
+    ["openssl", "pkeyutl", "-sign", "-inkey", str(directory / "autotune-test-ed25519.pem"), "-rawin", "-in", str(feed_path)],
+)
+sidecar = json.loads(sig_path.read_text(encoding="utf-8"))
+sidecar["signature"] = base64.b64encode(signature).decode("ascii")
+sig_path.write_text(json.dumps(sidecar, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+metadata_path = directory / "pearl-release.json"
+metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+metadata["catalog"]["files"]["autotune-artifacts.json"] = hashlib.sha256(feed_path.read_bytes()).hexdigest()
+metadata["catalog"]["files"]["autotune-artifacts.json.sig"] = hashlib.sha256(sig_path.read_bytes()).hexdigest()
+metadata_path.write_text(json.dumps(metadata, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+PY
+}
+
+FIXTURE_ARTIFACT_FEED=bound make_fixture "$work/artifact-candidate-drift"
+rebind_artifact_feed "$work/artifact-candidate-drift" candidate-digest
+if run_guard "$work/artifact-candidate-drift" >"$work/artifact-candidate-drift.out" 2>&1; then
+  fail "accepted an artifact feed bound to different candidate-catalog bytes"
+fi
+grep -q 'candidate_catalog_sha256 .* does not match the served autotune-candidates.json bytes' "$work/artifact-candidate-drift.out"
+
+FIXTURE_ARTIFACT_FEED=bound make_fixture "$work/artifact-generated-at-drift"
+rebind_artifact_feed "$work/artifact-generated-at-drift" generated-at
+if run_guard "$work/artifact-generated-at-drift" >"$work/artifact-generated-at-drift.out" 2>&1; then
+  fail "accepted an artifact feed from a different release stamp"
+fi
+grep -q 'autotune-artifacts.json generated_at .* does not match autotune-candidates.json generated_at' "$work/artifact-generated-at-drift.out"
+
+FIXTURE_ARTIFACT_FEED=bound make_fixture "$work/artifact-release-id-drift"
+rebind_artifact_feed "$work/artifact-release-id-drift" release-id
+if run_guard "$work/artifact-release-id-drift" >"$work/artifact-release-id-drift.out" 2>&1; then
+  fail "accepted an artifact feed whose release_id differs from its version"
+fi
+grep -q 'release_id .* does not equal its version' "$work/artifact-release-id-drift.out"
+
+# Signer identity equality: a VALID signature by a second concurrently trusted
+# key id must still fail — unknown-key rejection cannot see this case.
+FIXTURE_ARTIFACT_FEED=bound make_fixture "$work/artifact-signer-drift"
+python3 - "$work/artifact-signer-drift" <<'PY'
+import hashlib
+import json
+import pathlib
+import sys
+
+directory = pathlib.Path(sys.argv[1])
+trusted = directory / "trusted-keys.json"
+value = json.loads(trusted.read_text(encoding="utf-8"))
+value["keys"]["streamvc-autotune-static-v5"] = dict(value["keys"]["streamvc-autotune-static-v4"])
+trusted.write_text(json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+sig_path = directory / "live" / "v1_catalog-artifacts.sig"
+sidecar = json.loads(sig_path.read_text(encoding="utf-8"))
+sidecar["key_id"] = "streamvc-autotune-static-v5"
+sig_path.write_text(json.dumps(sidecar, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+metadata_path = directory / "pearl-release.json"
+metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+metadata["catalog"]["files"]["trusted-keys.json"] = hashlib.sha256(trusted.read_bytes()).hexdigest()
+metadata["catalog"]["files"]["autotune-artifacts.json.sig"] = hashlib.sha256(sig_path.read_bytes()).hexdigest()
+metadata_path.write_text(json.dumps(metadata, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+PY
+if run_guard "$work/artifact-signer-drift" >"$work/artifact-signer-drift.out" 2>&1; then
+  fail "accepted an artifact feed signed by a different trusted key than the candidate catalog"
+fi
+grep -q "is not the autotune-candidates.json signer 'streamvc-autotune-static-v4' (SPEC-023 §3.7.2 signer identity equality)" "$work/artifact-signer-drift.out"
 
 make_fixture "$work/git-describe-healthz" v1.8.68 v1.8.69-2-gabcdef0
 run_guard "$work/git-describe-healthz" | grep -q 'healthz_version=v1.8.69-2-gabcdef0'
