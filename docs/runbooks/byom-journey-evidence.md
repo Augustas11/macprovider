@@ -34,7 +34,9 @@ to the journey, or capture fails.
 
 `environment.class` records how the run was executed:
 
-- `hermetic-loopback` — the harness at `test/e2e/byom/run-cli-onboarding-e2e.py`
+- `hermetic-loopback` — a loopback harness: the discovery-journey driver at
+  `test/e2e/byom/run-discovery-journey.py` (`make test-byom-discovery-journey`)
+  or the onboarding harness at `test/e2e/byom/run-cli-onboarding-e2e.py`
   (`make test-byom-e2e`).
 - `physical-provider` — a real Mac run per
   `test/e2e/byom/CANDIDATE-E2E-RUNBOOK.md`.
@@ -82,23 +84,143 @@ result to them.
 
 ## Step 1 — run the journey and collect CLI documents
 
-Hermetic:
+### Discovery journey, hermetic: one command
+
+```bash
+test/e2e/byom/run-discovery-journey.py --evidence --out ~/byom-run
+```
+
+`--evidence` is not optional here. It is what makes the run capturable at all:
+only an `--evidence` run writes `run-manifest.json`. A run without it writes
+`run-summary.json` — the same content under a name step 3 does not consume — so
+a local debugging run cannot be promoted no matter what the operator does next.
+That is deliberate: without `--evidence` the driver accepts a
+`MACPROVIDER_CLI_BINARY` override and never checks the source tree, so the run
+proves nothing about any commit.
+
+The driver runs all ten `JOURNEY-PROVIDER-BYOM-DISCOVERY` steps against
+loopback stubs and an on-disk MLX-cache fixture, writes every captured CLI
+document to `~/byom-run/captures/`, and writes `~/byom-run/run-manifest.json`
+itself — so **steps 1 and 2 are already done** and you can go straight to step 3.
+`--out` must be a new or empty directory: reusing one is refused rather than
+cleaned, so a failing rerun can never leave an earlier run's passing manifest
+sitting there as if it were current. The manifest is published atomically and
+only after every step and observation check has passed.
+
+Every observation in that manifest is set from the driver's own assertions. The
+two negative observations are read off harness-owned ledgers rather than
+declared: a recording coordinator sink is configured as the CLI's coordinator
+for the whole run and must finish with zero requests and zero accepted
+connections (`provider_credit_created`), and the harness starts no buyer gateway
+at all while the only chat request anywhere in the run is the evaluation's
+single local probe (`buyer_traffic_sent`). A failed assertion aborts the run, so
+a manifest exists only for a run where all ten steps passed.
+`make test-byom-discovery-journey` runs the driver and then step 3 and step 4
+against its output, which is how CI proves the driver and the governance tables
+have not drifted apart.
+
+Step 10 reaches the ladder's local-default `not_offered` row by running `models
+admission status <offerable candidate> --json` with no coordinator configured at
+all — a harness-owned config with a provider id and no `coordinator_url`, and
+`MACPROVIDER_COORDINATOR_URL` removed from that one command's environment — so
+the CLI answers from local inventory, the document carries
+`admission_state_source: local_default` with the `coordinator_state_unavailable`
+warning, and the coordinator sink ledger stays empty.
+
+Captured CLI documents are stored **whole**. Nothing is stripped before hashing,
+so the digest binds the CLI's complete closed envelope, including the
+SPEC-046-R003 `provider_guidance` localization keys. Those two fields —
+`state_label_key` and `state_meaning_key` — are dotted label paths
+(`byom.local.offerable`) and therefore DNS-shaped by coincidence, so the shared
+scanner validates them against a closed `byom.<segment>.<segment>…` grammar at
+exactly those two paths inside a `provider_guidance` object, while still
+applying every credential, URL, path, IP, and localhost check to the value.
+Anything else at those paths fails closed, and the same string in any other
+field is still just a hostname. The driver runs that same scan — the capture
+tool's own functions, imported not reimplemented — over every command's real
+stdout and stderr, and over every document before writing it, so it cannot emit
+a manifest that step 3 would reject. The localization-key exemption applies only
+to stdout that is about to receive the structured document scan: plain-text
+output such as `--version` gets the full plaintext scan, hostname rule included.
+
+Every captured document is also validated against its **complete** closed
+schema, and that validation lives in the shared capture contract
+(`scripts/byom_journey_evidence.py`), invoked from the document-digest step. It
+therefore covers every discovery capture that reaches evidence — the hermetic
+driver's and a hand-authored physical discovery run's alike — not only the
+documents this driver produced. The field sets are the SPEC-046-R003 discovery
+envelope and candidate fields, the exact SPEC-046-R004 capability object, the
+SPEC-046-R005 evaluation envelope and mutation summary, and the SPEC-047-R002
+dry-run and status envelopes; `adapters[]` rows and `model_catalog_economics.v1`
+rows, which the specs describe without enumerating field names, are frozen at
+the shape the CLI emits. A missing field, an unknown field, and an unenumerated
+schema all fail closed. Redaction-clean is not the same as complete, and the
+signed evidence binds a digest of these documents.
+
+**Scope of typed validation (epic #1453 slice 1b).** Typed closed-enum
+validation currently applies to the **discovery** journey's documents only,
+because the hermetic driver above is what produces real CLI captures to type the
+validators against. The **admission** journey
+(`JOURNEY-NETWORK-MODEL-ADMISSION`) keeps the earlier capture boundary — the
+full redaction scans plus the check that a document's own top-level `schema`
+equals the schema its manifest claims — since that journey cannot be captured
+end to end before catalog binding exists. Typed validation of admission captures
+lands with the admission-journey slice (epic #1453 slice 7). Both journeys keep
+the harness-name binding: a run manifest may only name its own journey's
+harness.
+
+`--evidence` binds the run to the commit the evidence names:
+
+- the `MACPROVIDER_CLI_BINARY` override is refused;
+- `phase3-binary/Package.resolved` is reconciled with `HEAD` first, and only
+  ever in one direction. If the working-tree lockfile already matches `HEAD`,
+  nothing happens. If it differs **in an ephemeral CI checkout** (`GITHUB_ACTIONS`
+  or `CI` set, and nothing staged for the file), `HEAD`'s bytes are restored with
+  a logged notice: that drift is the earlier `swift test` step resolving the
+  graph under the runner's default toolchain, and `HEAD`'s lockfile is separately
+  proven consistent by the `phase3-binary (locked SwiftPM resolve)` job.
+  Anywhere else — a developer machine, or a CI run with the lockfile staged — a
+  differing lockfile is uncommitted work, so the run **refuses** rather than
+  discarding it; commit the file or restore it yourself and re-run. The CI
+  wrapper does no lockfile surgery of its own;
+- the tree must then be clean — **tracked and untracked** — across
+  `phase3-binary/Sources`, `phase3-binary/Tests`, `phase3-binary/Package.swift`,
+  `phase3-binary/Package.resolved`, `scripts/`, and `test/e2e/byom/`. Untracked
+  counts: SwiftPM builds every `.swift` file under the executable's source
+  directory;
+- the CLI is built from that source with locked resolution
+  (`--only-use-versions-from-resolved-file`, the same lock the locked-resolve CI
+  job applies through xcodebuild), so the build cannot rewrite the lockfile;
+- the cleanliness check runs **again after the build**, and the CI wrapper
+  records `source_sha` only once that post-build check has passed.
+
+Local exploratory runs may omit `--evidence` and keep the override; they produce
+no manifest.
+
+### Everything else: hand-authored
+
+For the admission journey, and for a physical-provider discovery run
+(`test/e2e/byom/CANDIDATE-E2E-RUNBOOK.md`), collect the documents and write the
+manifest by hand as described below.
 
 ```bash
 make test-byom-e2e
 ```
 
-Physical provider Mac: follow `test/e2e/byom/CANDIDATE-E2E-RUNBOOK.md`.
-
 Save each `--json` document the run produced (discovery, evaluation, offer
 dry-run, admission status, withdrawal, catalog economics) into one local
-directory, e.g. `~/byom-run/captures/`. For the admission journey, also read the
-money-path row counts directly from the coordinator's own tables (ledger,
-settlement, payout, request log) — not from a quiet API.
+directory, e.g. `~/byom-run/captures/`. Redact each document first: a captured
+value that carries an endpoint, a local path, a hostname, an IP literal or a
+credential makes step 3 refuse the whole run. For the admission journey, also
+read the money-path row counts directly from the coordinator's own tables
+(ledger, settlement, payout, request log) — not from a quiet API.
 
 ## Step 2 — write the run manifest
 
-Create `~/byom-run/run-manifest.json` using schema
+Skip this step for a hermetic discovery run: the driver already wrote the
+manifest.
+
+Otherwise create `~/byom-run/run-manifest.json` using schema
 `macprovider.byom-journey-run.v1`. Copy the shape from the committed golden
 fixtures:
 
@@ -226,8 +348,10 @@ conformance change, and let `spec-index / check` run.
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_byom_journey_evidence
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_discovery_journey_driver
 python3 scripts/check_spec_governance.py
 make test-byom-e2e
+make test-byom-discovery-journey
 ```
 
 The unit suite also runs inside `make test-dist`.
