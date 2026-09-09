@@ -67,6 +67,62 @@ final class BYOMEvaluationTests: XCTestCase {
         XCTAssertEqual(runtime.requestPaths, ["/api/tags", "/v1/chat/completions"])
     }
 
+    // SPEC-046-R005/R006: an opaque `openai_compatible_loopback` candidate runs
+    // through the same bounded chat-completions harness as the Ollama adapter.
+    // The probe proves liveness only: the candidate stays local inventory, the
+    // mutation summary stays all-false, and no prompt/completion text or origin
+    // reaches stdout or stderr.
+    func testEvaluateOpaqueOpenAICompatibleCandidateStaysNonEarning() async throws {
+        let root = try temporaryBYOMEvaluationDirectory("byom-eval-opaque")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let namespace = root.appendingPathComponent("ns")
+        let cache = root.appendingPathComponent("hf", isDirectory: true)
+        let runtime = try BYOMEvaluationLoopbackRuntime(
+            tagsBody: #"{"models":[]}"#,
+            modelsBody: #"{"object":"list","data":[{"id":"opaque-mini-1b","object":"model"}]}"#,
+            chatStatusCode: 200,
+            chatBody: """
+            {"id":"chatcmpl-local","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12}}
+            """
+        )
+
+        let command = try ModelsEvaluateCommand.parse([
+            "openai_compatible:opaque-mini-1b",
+            "--json",
+            "--local-discovery-namespace-path", namespace.path,
+            "--mlx-cache-dir", cache.path,
+            "--skip-ollama",
+            "--openai-compatible-origin", runtime.origin,
+        ])
+        let capture = await captureBYOMEvaluationOutput {
+            try await command.run()
+        }
+
+        XCTAssertNil(capture.error)
+        let object = try jsonObject(capture.stdout)
+        XCTAssertEqual(object["runtime_source"] as? String, "openai_compatible_loopback")
+        XCTAssertEqual(object["served_model_ref"] as? String, "openai_compatible:opaque-mini-1b")
+        XCTAssertEqual(object["adapter_identity"] as? String, "openai_compatible_loopback")
+        XCTAssertEqual(object["health_result"] as? String, "passed")
+        XCTAssertEqual(object["completion_tokens"] as? Int, 2)
+        XCTAssertTrue(object["catalog_model_key"] is NSNull)
+        // Liveness is not offerability: an opaque endpoint never satisfies the
+        // offer preconditions, however healthy the probe was.
+        XCTAssertEqual(object["offer_preconditions_appear_satisfied"] as? Bool, false)
+        let mutations = try XCTUnwrap(object["mutation_summary"] as? [String: Any])
+        for field in ["production_config_mutated", "coordinator_state_mutated", "production_model_switched", "runtime_started", "downloads_started"] {
+            XCTAssertEqual(mutations[field] as? Bool, false, "\(field) must stay false")
+        }
+        let guidance = try XCTUnwrap(object["provider_guidance"] as? [String: Any])
+        XCTAssertEqual(guidance["earning_path_class"] as? String, "local_inventory_only")
+
+        let emitted = capture.stdout + capture.stderr
+        XCTAssertFalse(emitted.contains("MacProvider BYOM local evaluation health probe"))
+        XCTAssertFalse(emitted.contains("\"content\":\"ok\""))
+        XCTAssertFalse(emitted.contains(runtime.origin))
+        XCTAssertEqual(runtime.requestPaths, ["/v1/models", "/v1/chat/completions"])
+    }
+
     func testEvaluateMLXCandidateBlocksWithoutCacheMutation() async throws {
         let root = try temporaryBYOMEvaluationDirectory("byom-eval-mlx")
         let cache = root.appendingPathComponent("hf", isDirectory: true)
@@ -645,6 +701,7 @@ private final class BYOMEvaluationLoopbackRuntime {
     let origin: String
     private let socketFD: Int32
     private let tagsBody: Data
+    private let modelsBody: Data?
     private let chatStatusCode: Int
     private let chatHeaders: [(String, String)]
     private let chatBody: Data
@@ -657,11 +714,13 @@ private final class BYOMEvaluationLoopbackRuntime {
 
     init(
         tagsBody: String,
+        modelsBody: String? = nil,
         chatStatusCode: Int,
         chatHeaders: [(String, String)] = [],
         chatBody: String
     ) throws {
         self.tagsBody = Data(tagsBody.utf8)
+        self.modelsBody = modelsBody.map { Data($0.utf8) }
         self.chatStatusCode = chatStatusCode
         self.chatHeaders = chatHeaders
         self.chatBody = Data(chatBody.utf8)
@@ -724,6 +783,8 @@ private final class BYOMEvaluationLoopbackRuntime {
         record(path)
         if path == "/api/tags" {
             write(statusCode: 200, headers: [], body: tagsBody, to: client)
+        } else if path == "/v1/models", let modelsBody {
+            write(statusCode: 200, headers: [], body: modelsBody, to: client)
         } else {
             write(statusCode: chatStatusCode, headers: chatHeaders, body: chatBody, to: client)
         }
