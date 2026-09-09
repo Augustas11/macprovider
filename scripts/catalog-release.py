@@ -3182,15 +3182,19 @@ def artifact_feed_activation_state(
     return "pre_activation"
 
 
-# Distribution surfaces slices 2b/2c own. Stage A is not servable until each is
+# Distribution surfaces later slices own. Stage A is not servable until each is
 # done, so `status` names them explicitly rather than letting a green generator
-# read as "ready to publish".
+# read as "ready to publish". Coordinator serving (/v1/catalog-artifacts route,
+# nginx allow-through) and the live release gate landed with slice 2b.
 PENDING_DISTRIBUTION_SURFACES = (
     ("CLI release payload", "phase3-binary/dist/package.sh (~196): copy autotune-artifacts.json + .sig"),
     ("GitHub release assets", ".github/workflows/release.yml (~1385, ~1418): publish both artifact files"),
-    ("live release gate", "scripts/verify-live-coordinator-release-gate.py (~17): add the signed feed"),
-    ("coordinator serving", "phase4-coordinator/internal/buyer/server.go: /v1/catalog-artifacts + .sig routes; internal/buyer/autotune_feeds.go: load + validate the pair with the base feeds (signer equality, release binding); internal/config/config.go + dist/coordinator.yaml: catalog_artifacts_path/_sig_path; dist/nginx-coordinator.malibu.tech.conf: exact allow-through blocks before the /v1/ catch-all"),
     ("scheduled renewal", ".github/workflows/renew-autotune-static-feed-signed.yml: supply AUTOTUNE_PREVIOUS_RELEASE_DIR (the previous signed release directory) or the monthly freshness renewal fails closed at generate after activation"),
+)
+# Operator step at the activation deploy (not a code surface): the coordinator
+# answers 404 on /v1/catalog-artifacts until its config names the feed pair.
+ACTIVATION_DEPLOY_STEPS = (
+    ("coordinator config", "set autotune.catalog_artifacts_path + autotune.catalog_artifacts_sig_path in the deploy that installs the activation release (phase4-coordinator/dist/coordinator.yaml); the route answers 404 until then"),
 )
 # Requirements this slice records but does not enforce; each is owned by a
 # later slice and named here so `status` never reads as complete.
@@ -3796,7 +3800,10 @@ def cmd_status() -> None:
     for requirement, detail in DEFERRED_REQUIREMENTS:
         print(f"  [ ] {requirement}: {detail}")
     print("")
-    print("Distribution surfaces still pending (BYOM v0.2 slices 2b/2c — NOT in this slice):")
+    print("Activation-deploy operator steps:")
+    for surface, detail in ACTIVATION_DEPLOY_STEPS:
+        print(f"  [ ] {surface}: {detail}")
+    print("Distribution surfaces still pending (BYOM v0.2 slices 2b-ii/2c — NOT in this slice):")
     for surface, detail in PENDING_DISTRIBUTION_SURFACES:
         print(f"  [ ] {surface}: {detail}")
     print("")

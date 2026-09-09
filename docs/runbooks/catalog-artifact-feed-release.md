@@ -20,11 +20,46 @@ artifact set to a candidate row would fail-close every deployed provider (§3.7.
 | `phase3-binary/catalog/autotune/intake-decision.json` | no | §16.8 manifest; its digest becomes the ledger row's `intake_decision_sha256`. REQUIRED whenever the release adds a `listed` row or promotes a row to `recommendable`: absence then fails the release closed rather than silently recording `null`. |
 | previous signed release DIRECTORY | — | `--previous-release-dir`, a REQUIRED input once an EARLIER release has been recorded with the artifact-bound feed set. Its `release.json`, feed digests, and detached signatures are verified against the trusted keyring, and its published artifact bindings must equal that release's ledger row exactly. |
 
-`autotune-artifacts.json` and its `.sig` are the published outputs. This slice
-**generates, signs, binds, and records** them; it does not serve them. Their
-eventual serving routes are `/v1/catalog-artifacts` and
-`/v1/catalog-artifacts.sig`, which slices 2b/2c land (see "What the 2b/2c slices
-must land before activation").
+`autotune-artifacts.json` and its `.sig` are the published outputs. Slice 2a
+**generates, signs, binds, and records** them. Slice 2b **serves** them: the
+coordinator buyer mux answers `/v1/catalog-artifacts` and
+`/v1/catalog-artifacts.sig` once `autotune.catalog_artifacts_path` /
+`autotune.catalog_artifacts_sig_path` are configured, nginx allows both routes
+through exactly as the rate-card routes, and the live release gate verifies
+that the served feed set equals the release's (see "Serving the feed" and
+"What later slices must land before activation").
+
+## Serving the feed (slice 2b)
+
+The coordinator loads the artifact pair with the three base feeds at boot and
+on SIGHUP reload (`buyer.LoadAutotuneFeeds`) and refuses to serve bytes it
+cannot bind to the candidate catalog it serves beside them: signer `key_id`
+equality with `autotune-candidates.json.sig` (§3.7.2 — a valid signature by a
+second concurrently trusted key fails), `version` / `generated_at` /
+`policy_version` equality, `candidate_catalog_sha256` equal to the served
+candidate bytes (§3.7.4), the closed §3.7.4 identity matrix, and §3.7.5
+primary-artifact consistency. Any mismatch fails startup, and on reload keeps
+the prior served set. `/v1/autotune-release` reports a `catalog_artifacts`
+entry only for an artifact-bound release, so a four-feed release keeps the
+exact status shape v0.1 clients read.
+
+**Configuring the pair is an activation-deploy step, not a default.** The
+checked-in `phase4-coordinator/dist/coordinator.yaml` deliberately does not
+name the two paths: a configured path whose file is absent fails startup
+closed, and every release before activation is a four-feed release without the
+file. Add the two keys (see the commented example in `coordinator.yaml.example`)
+in the same deploy that installs the first artifact-bound release directory;
+until then both routes answer 404 and `catalog-release.py status` lists the
+step. Removing the two keys and reloading is the disablement path
+(`docs/runbooks/byom-disablement-rollback.md`, row 11).
+
+`scripts/verify-live-coordinator-release-gate.py` reads whether the release
+binds `autotune-artifacts.json` (+ `.sig`) from `pearl-release.json`
+`catalog.files`. Bound: the live feed must match the bound digest, verify under
+the release keyring, be signed by the SAME `key_id` as the served candidate
+catalog, and carry the served candidate bytes' digest and release stamp.
+Unbound: `/v1/catalog-artifacts` and `.sig` must NOT be served. The gate's
+summary line ends with `artifact_feed=bound|absent`.
 
 ## Activation state
 
@@ -68,18 +103,17 @@ python3 scripts/catalog-release.py status
 `--activate-artifact-feed` refuses while any generator-side prerequisite it
 lists is unmet.
 
-### What the 2b/2c slices must land before activation
+### What later slices must land before activation
 
-`status` prints these as pending. Stage A is not servable until each is done, and
-this slice deliberately ships none of them:
+`status` prints these as pending. Stage A is not servable until each is done:
 
-| Surface | File | Change |
-|---|---|---|
-| CLI release payload | `phase3-binary/dist/package.sh` (~196) | copy `autotune-artifacts.json` and `autotune-artifacts.json.sig` alongside the candidate/demand/rate-card feeds |
-| GitHub release assets | `.github/workflows/release.yml` (~1385, ~1418) | publish both artifact files with the other static feeds |
-| live release gate | `scripts/verify-live-coordinator-release-gate.py` (~17) | add the signed feed to the served-feed set the gate checks |
-| coordinator serving | `phase4-coordinator/internal/buyer/server.go`, `internal/buyer/autotune_feeds.go`, `internal/config/config.go`, `dist/coordinator.yaml`, `dist/nginx-coordinator.malibu.tech.conf` | the buyer mux has no generic disk handler: add `/v1/catalog-artifacts` + `.sig` routes, load and validate the pair with the base feeds (signer equality, release binding), add `catalog_artifacts_path` / `catalog_artifacts_sig_path` config keys and deploy paths, and the exact nginx allow-through blocks before the generic `location /v1/ { return 404; }`, proxying to `http://127.0.0.1:8443` with no `Authorization` requirement, exactly as the rate-card routes do |
-| scheduled renewal | `.github/workflows/renew-autotune-static-feed-signed.yml` | supply `AUTOTUNE_PREVIOUS_RELEASE_DIR` (the previous signed release directory); after activation `generate` requires it and the monthly freshness renewal otherwise fails closed — silently until the 30-day client horizon |
+| Surface | File | Change | Status |
+|---|---|---|---|
+| CLI release payload | `phase3-binary/dist/package.sh` (~196) | copy `autotune-artifacts.json` and `autotune-artifacts.json.sig` alongside the candidate/demand/rate-card feeds | pending (slice 2b-ii) |
+| GitHub release assets | `.github/workflows/release.yml` (~1385, ~1418) | publish both artifact files with the other static feeds; bind them in `pearl-release.json` `catalog.files` | pending (slice 2b-ii) |
+| live release gate | `scripts/verify-live-coordinator-release-gate.py` | served feed set must equal the release's; bound feed signer-equal and release-bound | **landed (slice 2b)** |
+| coordinator serving | `phase4-coordinator/internal/buyer`, `phase4-coordinator/dist/nginx-coordinator.malibu.tech.conf` | `/v1/catalog-artifacts` (+ `.sig`) on the buyer mux, release-bound at load; exact nginx allow-through blocks before `location /v1/ { return 404; }` | **landed (slice 2b)** |
+| scheduled renewal | `.github/workflows/renew-autotune-static-feed-signed.yml` | supply `AUTOTUNE_PREVIOUS_RELEASE_DIR` (the previous signed release directory); after activation `generate` requires it and the monthly freshness renewal otherwise fails closed — silently until the 30-day client horizon | pending (slice 2b-ii) |
 
 **Deferred requirements** (recorded by the ledger, not enforced by this slice;
 `status` lists the first): the §16.8 intake-decision manifest schema and
