@@ -162,6 +162,11 @@ func (f AutotuneFeeds) catalogArtifactsEnabled() bool {
 // identical in the generator, the coordinator, and the CLI: seconds precision,
 // Z or an explicit ±HH:MM offset, no fractional seconds (time.RFC3339 alone
 // would also admit fractions and a comma separator that the generator rejects).
+// artifactMinRAMGBMax bounds an artifact's min_ram_gb (1 PiB) identically in
+// the generator, the coordinator, and the CLI, so the generator's global int64
+// parsing limit and float decoding here agree on every verdict.
+const artifactMinRAMGBMax = 1_048_576
+
 var artifactFeedTimestampGrammar = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:Z|[+-]\d{2}:\d{2})$`)
 
 func validateCatalogArtifactsFeed(raw []byte, _ string) (feedRelease, error) {
@@ -256,8 +261,8 @@ func validateCatalogArtifactEntry(label string, entry catalogArtifactEntry) erro
 	if entry.SizeBytes == nil || *entry.SizeBytes <= 0 {
 		return fmt.Errorf("%s: size_bytes must be a measured integer > 0", label)
 	}
-	if entry.MinRAMGB == nil || math.IsNaN(*entry.MinRAMGB) || math.IsInf(*entry.MinRAMGB, 0) || *entry.MinRAMGB <= 0 {
-		return fmt.Errorf("%s: min_ram_gb must be a number > 0", label)
+	if entry.MinRAMGB == nil || math.IsNaN(*entry.MinRAMGB) || math.IsInf(*entry.MinRAMGB, 0) || *entry.MinRAMGB <= 0 || *entry.MinRAMGB > artifactMinRAMGBMax {
+		return fmt.Errorf("%s: min_ram_gb must be a number in (0, %d]", label, artifactMinRAMGBMax)
 	}
 	if len(entry.AllowedRuntimeSources) == 0 {
 		return fmt.Errorf("%s: allowed_runtime_sources must be a non-empty array", label)

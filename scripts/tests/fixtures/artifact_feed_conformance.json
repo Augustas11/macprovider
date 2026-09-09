@@ -877,6 +877,106 @@
         }
       ],
       "spec": "\u00a73.7.4 \u2014 several artifacts per model, distinct hashes"
+    },
+    {
+      "expect": "reject",
+      "name": "min_ram_gb above the shared bound",
+      "ops": [
+        {
+          "op": "set",
+          "path": [
+            "models",
+            "test-model",
+            "artifacts",
+            "mlx-4bit",
+            "min_ram_gb"
+          ],
+          "value": 1048577
+        }
+      ],
+      "spec": "\u00a73.7.3 \u2014 one numeric domain (0, 1048576] in every consumer"
+    },
+    {
+      "expect": "reject",
+      "name": "min_ram_gb beyond int64 on a secondary artifact",
+      "ops": [
+        {
+          "op": "set",
+          "path": [
+            "models",
+            "test-model",
+            "artifacts",
+            "mlx-8bit"
+          ],
+          "value": {
+            "allowed_runtime_sources": [
+              "mlx_cache"
+            ],
+            "hash": "5555555555555555555555555555555555555555555555555555555555555555",
+            "hash_algorithm": "macprovider.snapshot-manifest.v1",
+            "min_ram_gb": 9223372036854775808,
+            "quantization": "8bit",
+            "runtime_format": "mlx_safetensors",
+            "size_bytes": 234567,
+            "source_ref": {
+              "kind": "huggingface_revision",
+              "repo_id": "mlx-community/Test-Model-8bit",
+              "revision": "3333333333333333333333333333333333333333"
+            },
+            "verification_status": "verified",
+            "verified_at": "2026-09-01"
+          }
+        }
+      ],
+      "spec": "\u00a73.7.3 \u2014 one numeric domain in every consumer (primary consistency does not mask a secondary)"
+    },
+    {
+      "expect": "accept",
+      "name": "min_ram_gb at the shared bound on a secondary artifact",
+      "ops": [
+        {
+          "op": "set",
+          "path": [
+            "models",
+            "test-model",
+            "artifacts",
+            "mlx-8bit"
+          ],
+          "value": {
+            "allowed_runtime_sources": [
+              "mlx_cache"
+            ],
+            "hash": "5555555555555555555555555555555555555555555555555555555555555555",
+            "hash_algorithm": "macprovider.snapshot-manifest.v1",
+            "min_ram_gb": 1048576,
+            "quantization": "8bit",
+            "runtime_format": "mlx_safetensors",
+            "size_bytes": 234567,
+            "source_ref": {
+              "kind": "huggingface_revision",
+              "repo_id": "mlx-community/Test-Model-8bit",
+              "revision": "3333333333333333333333333333333333333333"
+            },
+            "verification_status": "verified",
+            "verified_at": "2026-09-01"
+          }
+        }
+      ],
+      "spec": "\u00a73.7.3"
+    },
+    {
+      "expect": "reject",
+      "name": "policy_version with surrounding whitespace",
+      "ops": [
+        {
+          "op": "set",
+          "path": [
+            "policy_version"
+          ],
+          "value": "autotune-policy-v1 "
+        }
+      ],
+      "spec": "\u00a73.7.3 \u2014 trimmed release strings"
     }
   ],
   "description": "Shared SPEC-023 \u00a73.7 artifact-feed conformance corpus (BYOM v0.2 slice 2c). One candidate catalog, one valid feed, and mutation cases applied by the Python generator tests, the Go coordinator tests, and the Swift CLI tests, so the three consumers cannot drift on the closed schema, the identity matrix, release binding, or primary consistency. Mutation ops: {op: set, path: [...], value} and {op: delete, path: [...]}. The feed's candidate_catalog_sha256 is computed by each consumer from the canonical candidate bytes it signs or bakes before ops are applied; a case that sets it wins.",

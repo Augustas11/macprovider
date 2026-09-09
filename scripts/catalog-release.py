@@ -87,6 +87,10 @@ RFC3339 = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d
 # `Z` or an explicit `±HH:MM` offset, no fractional seconds — so no consumer
 # can accept a stamp another rejects (SPEC-023 §3.7.3).
 ARTIFACT_FEED_TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:Z|[+-]\d{2}:\d{2})$")
+# One numeric domain for an artifact's `min_ram_gb` in every consumer: a
+# positive number no larger than this bound (1 PiB), so the generator's global
+# int64 parsing limit and the consumers' float decoding agree on every verdict.
+ARTIFACT_MIN_RAM_GB_MAX = 1_048_576
 INT64_MIN = -(2**63)
 INT64_MAX = 2**63 - 1
 OPENSSL_PROBE_TIMEOUT_SECONDS = 5
@@ -1262,8 +1266,8 @@ def validate_artifact_entry(entry: object, label: str, *, allow_unmeasured_size:
             fail(f"{label}: size_bytes must be measured before the release is generated")
     elif not isinstance(size, int) or isinstance(size, bool) or size <= 0:
         fail(f"{label}: size_bytes must be an integer > 0")
-    if not finite_number(entry["min_ram_gb"]) or entry["min_ram_gb"] <= 0:
-        fail(f"{label}: min_ram_gb must be a number > 0")
+    if not finite_number(entry["min_ram_gb"]) or not 0 < entry["min_ram_gb"] <= ARTIFACT_MIN_RAM_GB_MAX:
+        fail(f"{label}: min_ram_gb must be a number in (0, {ARTIFACT_MIN_RAM_GB_MAX}]")
     runtime_sources = entry["allowed_runtime_sources"]
     if (
         not isinstance(runtime_sources, list)
@@ -1472,6 +1476,9 @@ def validate_artifact_feed(
     parse_time(value["generated_at"], label)
     if not ARTIFACT_FEED_TIMESTAMP.fullmatch(value["generated_at"]):
         fail(f"{label}: generated_at must be RFC3339 at seconds precision with an explicit timezone")
+    for field in ("version", "release_id", "policy_version"):
+        if not isinstance(value[field], str) or not value[field] or value[field] != value[field].strip():
+            fail(f"{label}: {field} must be a non-empty trimmed string")
     for field in ("version", "release_id"):
         if value[field] != candidate_obj["version"]:
             fail(f"{label}: {field} must equal the candidate catalog version for this release")

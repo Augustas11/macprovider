@@ -487,6 +487,65 @@ final class AutotuneArtifactFeedTests: XCTestCase {
         }
     }
 
+    func testAmbiguousServedReferenceMintsNoCatalogIdentity() throws {
+        // Two listed/recommendable rows whose verified MLX artifacts share a
+        // normalized repo id at different revisions (distinct hashes, so every
+        // validator accepts the feed): the reference answers to two model keys
+        // and discovery must not pick one by sort order.
+        let corpus = try Self.loadCorpus()
+        var candidate = corpus.candidate
+        var rows = candidate["rows"] as! [String: Any]
+        var other = rows["test-model"] as! [String: Any]
+        other["model_id"] = "mlx-community/Other-Model-4bit"
+        other["model_revision"] = String(repeating: "9", count: 40)
+        other["model_sha256"] = String(repeating: "8", count: 64)
+        rows["other-model"] = other
+        candidate["rows"] = rows
+        let candidateBytes = try Self.canonical(candidate)
+
+        let fixture = try feedWithArtifactOnlyReference()
+        var feed = corpus.feed
+        feed["candidate_catalog_sha256"] = Self.sha256Hex(candidateBytes)
+        let second = corpus.cases.first { ($0["name"] as! String) == "second verified mlx artifact under another repo id" }!
+        feed = try Self.applying(second["ops"] as! [[String: Any]], to: feed)
+        var otherPrimary = (second["ops"] as! [[String: Any]])[0]["value"] as! [String: Any]
+        otherPrimary["quantization"] = "4bit"
+        otherPrimary["hash"] = String(repeating: "8", count: 64)
+        otherPrimary["source_ref"] = ["kind": "huggingface_revision", "repo_id": "mlx-community/Other-Model-4bit", "revision": String(repeating: "9", count: 40)]
+        var otherSecondary = otherPrimary
+        otherSecondary["hash"] = String(repeating: "6", count: 64)
+        otherSecondary["source_ref"] = ["kind": "huggingface_revision", "repo_id": "mlx-community/Test-Model-8bit", "revision": String(repeating: "4", count: 40)]
+        feed = try Self.applying([
+            ["op": "set", "path": ["models", "other-model"], "value": [
+                "rate_class": "class-8b", "primary_artifact_id": "mlx-4bit",
+                "artifacts": ["mlx-4bit": otherPrimary, "mlx-8bit": otherSecondary],
+            ]],
+        ], to: feed)
+        let decoded = try AutotuneStaticInputs.decodeArtifactFeed(try Self.canonical(feed))
+        XCTAssertEqual(decoded.models.count, 2)
+        let matcher = BYOMCatalogMatcher(candidateBytes: candidateBytes, artifactFeed: decoded)
+        XCTAssertNil(matcher.catalogKey(for: "mlx-community/Test-Model-8bit", runtimeSource: "mlx_cache"), "ambiguous")
+        XCTAssertEqual(matcher.catalogKey(for: "mlx-community/Other-Model-4bit", runtimeSource: "mlx_cache"), "other-model")
+        XCTAssertEqual(matcher.catalogKey(for: "mlx-community/Test-Model-4bit", runtimeSource: "mlx_cache"), "test-model")
+        // Unambiguous in a feed where only one model carries the reference.
+        let single = BYOMCatalogMatcher(candidateBytes: fixture.candidateBytes, artifactFeed: fixture.feed)
+        XCTAssertEqual(single.catalogKey(for: "mlx-community/Test-Model-8bit", runtimeSource: "mlx_cache"), "test-model")
+    }
+
+    func testDuplicateObjectKeyInRawBytesIsRejectedBeforeDeserialization() throws {
+        // The corpus works on object models and cannot carry a duplicate key;
+        // the lexical rule is pinned on raw bytes here.
+        let fixture = try boundFixture()
+        let text = String(decoding: fixture.feedBytes, as: UTF8.self)
+        let needle = "\"policy_version\":\"autotune-policy-v1\""
+        XCTAssertTrue(text.contains(needle))
+        let duplicated = Data(text.replacingOccurrences(of: needle, with: needle + "," + needle).utf8)
+        XCTAssertNotNil(try? JSONSerialization.jsonObject(with: duplicated), "Foundation itself tolerates the duplicate")
+        XCTAssertThrowsError(try AutotuneStaticInputs.decodeArtifactFeed(duplicated))
+        let nested = Data(text.replacingOccurrences(of: "\"quantization\":\"4bit\"", with: "\"quantization\":\"4bit\",\"quantization\":\"4bit\"").utf8)
+        XCTAssertThrowsError(try AutotuneStaticInputs.decodeArtifactFeed(nested))
+    }
+
     func testGeneratedAtGrammarIsSecondsPrecisionWithExplicitZone() throws {
         for (raw, ok) in [
             ("2026-07-10T00:00:00Z", true), ("2026-07-10T02:00:00+02:00", true),

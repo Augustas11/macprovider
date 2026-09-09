@@ -261,10 +261,12 @@ extension ArtifactFeed {
         else {
             throw ArtifactFeedError.integrity("\(label): size_bytes must be a measured integer > 0 within int64")
         }
+        // One numeric domain in every consumer (the generator's int64 parsing
+        // limit and float decoding here must agree on every verdict).
         guard let rawRAM = object["min_ram_gb"] as? NSNumber, CFGetTypeID(rawRAM) != CFBooleanGetTypeID(),
-              rawRAM.doubleValue.isFinite, rawRAM.doubleValue > 0
+              rawRAM.doubleValue.isFinite, rawRAM.doubleValue > 0, rawRAM.doubleValue <= Self.minRAMGBMax
         else {
-            throw ArtifactFeedError.integrity("\(label): min_ram_gb must be a number > 0")
+            throw ArtifactFeedError.integrity("\(label): min_ram_gb must be a number in (0, \(Self.minRAMGBMax)]")
         }
         guard let sources = object["allowed_runtime_sources"] as? [String], !sources.isEmpty else {
             throw ArtifactFeedError.integrity("\(label): allowed_runtime_sources must be a non-empty array of strings")
@@ -335,6 +337,7 @@ extension ArtifactFeed {
         )
     }
 
+    static let minRAMGBMax: Double = 1_048_576
     static let timestampGrammar = #"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:Z|[+-]\d{2}:\d{2})$"#
 
     static func rawGeneratedAt(in data: Data) -> String? {

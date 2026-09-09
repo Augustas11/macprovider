@@ -3134,7 +3134,13 @@ struct BYOMCatalogMatcher: Sendable {
         }) {
             return row.key
         }
-        return artifactReferences.first { $0.matches(normalized, runtimeSource: runtimeSource) }?.catalogKey
+        // A served reference is a lossy projection of content-addressed
+        // identity (repo id without revision, library tag without digest): when
+        // it answers to artifacts of more than one model key the match is
+        // ambiguous and no catalog identity is minted (SPEC-023 §3.7.4 resolves
+        // identity by hash; SPEC-046: discovery never creates catalog authority).
+        let keys = Set(artifactReferences.filter { $0.matches(normalized, runtimeSource: runtimeSource) }.map(\.catalogKey))
+        return keys.count == 1 ? keys.first : nil
     }
 }
 
