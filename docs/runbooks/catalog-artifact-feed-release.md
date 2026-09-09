@@ -61,6 +61,28 @@ catalog, and carry the served candidate bytes' digest and release stamp.
 Unbound: `/v1/catalog-artifacts` and `.sig` must NOT be served. The gate's
 summary line ends with `artifact_feed=bound|absent`.
 
+## CLI consumption (slice 2c)
+
+The provider CLI fetches `/v1/catalog-artifacts` and its sidecar through the
+same §3.5 procedure as the other feeds (`AutotuneStaticInputs.loadArtifactFeed`,
+`phase3-binary/Sources/macprovider-cli/AutotuneArtifactFeed.swift`), then
+BINDS the feed to the candidate catalog selected for the same release: signer
+`key_id` equality with the candidate feed (a valid signature by a second
+concurrently trusted key fails), `version` / `generated_at` / `policy_version`
+equality, `candidate_catalog_sha256` equal to the selected candidate bytes,
+and §3.7.5 primary-artifact consistency. Its four warning classes
+(`catalog_artifact_feed_fallback_used` / `_integrity_failure` /
+`_update_required` / `_stale`) fail closed for artifact-derived capabilities
+only — the loader yields no usable feed under any of the last three — and are
+never paid-trust or network-submission blockers (§3.7.6 rule 6). The
+compiled-in fallback is `bakedArtifactFeedJSON`; for a rate-card-bound release
+it is `nil` and the CLI behaves exactly as v0.1. BYOM discovery's catalog
+matcher additionally resolves a served reference through the compiled-in,
+release-bound artifact set (HuggingFace repo ids, GGUF library tags) — identity
+only, never admission. The closed schema, identity matrix, uniqueness, and
+binding rules are pinned across the generator, the coordinator, and the CLI by
+the shared corpus `scripts/tests/fixtures/artifact_feed_conformance.json`.
+
 ## Activation state
 
 The artifact feed is **never** activated implicitly. Committing
@@ -112,7 +134,7 @@ artifact-bound cut, and would list any future surface here as pending:
 
 | Surface | File | Change | Status |
 |---|---|---|---|
-| CLI release payload | `phase3-binary/dist/package.sh`, `scripts/acceptance-candidate-metadata.py`, `scripts/compatibility-set-manifest.py` | NOT a payload member at Stage A: the deployed updater and installer enforce the exact nine-name `catalog-release/` set, so the feed never rides in the provider tarball and the payload validators reject it there; the CLI's fallback is the snapshot compiled into the binary (§3.7.2), which slice 2c bakes | **resolved (slice 2b-ii)** |
+| CLI release payload | `phase3-binary/dist/package.sh`, `scripts/acceptance-candidate-metadata.py`, `scripts/compatibility-set-manifest.py` | NOT a payload member at Stage A: the deployed updater and installer enforce the exact nine-name `catalog-release/` set, so the feed never rides in the provider tarball and the payload validators reject it there; the CLI's fallback is the snapshot compiled into the binary (§3.7.2), baked by `catalog-release.py generate` as `bakedArtifactFeedJSON` (nil for a rate-card-bound release) | **resolved (slice 2b-ii); baked (slice 2c)** |
 | GitHub release assets | `.github/workflows/release.yml`, `.github/workflows/acceptance-candidate.yml`, `scripts/sign-acceptance-candidate.sh`, `scripts/acceptance-candidate-metadata.py`, `scripts/verify-acceptance-promotion.py`, `scripts/verify-pearl-runtime-release.sh` | when `release.json` binds the feed, both files are carried as unsigned inputs into the acceptance signer, published as release assets, listed in `checksums.txt` / `release-assets.txt` / provenance, bound in `pearl-release.json` `catalog.files`, required by the promotion inventory, and downloaded + verified by the Pearl runtime release check; never `compatibility-artifact-index` roles (the deployed updater enforces the exact seventeen) | **landed (slice 2b-ii)** |
 | live release gate | `scripts/verify-live-coordinator-release-gate.py` | served feed set must equal the release's; bound feed signer-equal and release-bound | **landed (slice 2b)** |
 | coordinator serving | `phase4-coordinator/internal/buyer`, `phase4-coordinator/dist/nginx-coordinator.malibu.tech.conf` | `/v1/catalog-artifacts` (+ `.sig`) on the buyer mux, release-bound at load; exact nginx allow-through blocks before `location /v1/ { return 404; }` | **landed (slice 2b)** |
