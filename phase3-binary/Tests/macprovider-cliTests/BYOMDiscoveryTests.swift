@@ -1058,9 +1058,52 @@ final class BYOMDiscoveryTests: XCTestCase {
         }
     }
 
+    // #1246: both adapter parsers read the SAME shared inventory record bound,
+    // so neither can drift. This mirrors
+    // `testOllamaRedactionDoesNotInspectPastExistingRecordBound` exactly: a
+    // record that would be withheld sits beyond the cap and is therefore never
+    // inspected, so no `model_reference_redacted` warning is raised for it.
+    func testOpenAICompatibleRedactionDoesNotInspectPastSharedRecordBound() async throws {
+        let bound = BYOMDiscoveryHTTPBounds.maxInventoryRecords
+        for withheldFirst in [false, true] {
+            let root = try temporaryDirectory("byom-openai-bound")
+            defer { try? FileManager.default.removeItem(at: root) }
+            let namespace = try seededNamespace(in: root)
+
+            let first = withheldFirst ? "/Users/private/model" : "opaque-mini-1b"
+            let last = withheldFirst ? "opaque-mini-1b" : "/Users/private/model"
+            let records = Array(repeating: ["id": first, "object": "model"], count: bound)
+                + [["id": last, "object": "model"]]
+            let body = try JSONSerialization.data(withJSONObject: ["object": "list", "data": records])
+
+            let document = await BYOMDiscoveryRunner(
+                environment: BYOMDiscoveryEnvironment(
+                    namespaceURL: namespace,
+                    mlxCacheRoot: root.appendingPathComponent("hf", isDirectory: true),
+                    ollamaOrigin: nil,
+                    openAICompatibleOrigin: "http://127.0.0.1:39311"
+                ),
+                httpClient: StubBYOMHTTPClient(response: BYOMHTTPResponse(
+                    statusCode: 200,
+                    headers: [("content-type", "application/json")],
+                    body: body
+                ))
+            ).discover()
+
+            let adapter = try XCTUnwrap(document.adapters.first { $0.runtimeSource == "openai_compatible_loopback" })
+            let candidates = document.candidates.filter { $0.runtimeSource == "openai_compatible_loopback" }
+            XCTAssertEqual(adapter.status, "ok")
+            XCTAssertEqual(candidates.count, withheldFirst ? 0 : bound)
+            XCTAssertEqual(adapter.warningCodes, withheldFirst ? ["model_reference_redacted"] : [])
+            XCTAssertFalse(try ModelSwitchingWireCodec.encode(document).contains("private"))
+        }
+    }
+
     // SPEC-046-R002: this adapter has no well-known default. Without an
-    // operator-supplied origin nothing is dispatched, and the projection says
-    // "not attempted" rather than claiming a failed probe.
+    // operator-supplied origin nothing is dispatched and the adapter
+    // contributes no row at all, matching the Ollama adapter's skip behaviour.
+    // An absent row already means "not attempted", so the no-flag projection is
+    // unchanged for existing consumers and no new status value reaches the wire.
     func testOpenAICompatibleAdapterIsNotAttemptedWithoutOperatorOrigin() async throws {
         let root = try temporaryDirectory("byom-openai-absent")
         defer { try? FileManager.default.removeItem(at: root) }
@@ -1081,11 +1124,17 @@ final class BYOMDiscoveryTests: XCTestCase {
         ).discover()
 
         XCTAssertEqual(client.requestLog, [])
-        let adapter = try XCTUnwrap(document.adapters.first { $0.runtimeSource == "openai_compatible_loopback" })
-        XCTAssertEqual(adapter.status, "not_configured")
-        XCTAssertNil(adapter.originClass)
-        XCTAssertEqual(adapter.warningCodes, [])
+        XCTAssertNil(document.adapters.first { $0.runtimeSource == "openai_compatible_loopback" })
         XCTAssertTrue(document.candidates.allSatisfy { $0.runtimeSource != "openai_compatible_loopback" })
+        // Same shape the Ollama adapter already had when it is not attempted.
+        XCTAssertNil(document.adapters.first { $0.runtimeSource == "ollama_loopback" })
+        // Every emitted adapter status stays inside the existing vocabulary.
+        for adapter in document.adapters {
+            XCTAssertTrue(
+                ["ok", "unavailable", "timeout", "malformed", "truncated", "rejected"].contains(adapter.status),
+                "unexpected adapter status \(adapter.status)"
+            )
+        }
     }
 
     // SPEC-046-R002/R007: a non-loopback origin is rejected by the shared

@@ -117,6 +117,22 @@ REPO_SOURCE_FILE_NAME_RE = re.compile(
     r"\.(?:go|json|jsonl|md|mjs|py|sh|swift|toml|ts|txt|yaml|yml)$"
 )
 REPO_SOURCE_FILE_FIELDS = frozenset({"$.harness.name"})
+# SPEC-046-R003 requires every `provider_guidance` object to carry
+# `state_label_key` and `state_meaning_key`. Those two values are dotted
+# localization label paths (`byom.local.offerable`) and are therefore DNS-shaped
+# by coincidence, exactly like the repository source-file names above. Captured
+# CLI documents are archived whole -- deleting the fields would leave the digest
+# proving nothing about them -- so they get the same treatment: a closed grammar
+# checked at exactly those two field names inside a `provider_guidance` object,
+# at any depth, with every other rule (credential, URL, absolute/home path,
+# IPv4, IPv6, localhost) still applied to the value. Anything that is not a
+# whole localization key fails closed, and a localization-key-shaped string in
+# any other field is still just a hostname. The exemption is scoped to captured
+# CLI documents: the emitted-evidence scan (`assert_redacted`) has no exemption
+# at all, and evidence never carries a `provider_guidance` object.
+GUIDANCE_OBJECT_KEY = "provider_guidance"
+GUIDANCE_LOCALIZATION_KEY_FIELDS = frozenset({"state_label_key", "state_meaning_key"})
+LOCALIZATION_KEY_RE = re.compile(r"^byom\.[a-z0-9_]+(?:\.[a-z0-9_]+)+$")
 FORBIDDEN_VALUE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("a url", re.compile(r"(?i)[a-z][a-z0-9+.-]*://")),
     ("an absolute path", re.compile(r"(?:^|[\s\"'=,;(\[])(?:/[A-Za-z0-9._~-]+){2,}")),
@@ -340,25 +356,39 @@ def reject_hostname_like_text(text: str, location: str) -> None:
         fail(f"{location} contains a hostname; evidence must stay redacted")
 
 
+def reject_unredacted_text_except_hostname(text: str, location: str) -> None:
+    """Every redaction rule except the shape-based DNS hostname rule."""
+    reject_secret_like_text(text, location)
+    for label, pattern in FORBIDDEN_VALUE_PATTERNS:
+        if pattern.search(text):
+            fail(f"{location} contains {label}; evidence must stay redacted")
+
+
 def reject_unredacted_repo_source_file(value: str, location: str) -> None:
     """Scoped rule for the repository source file-name fields.
 
     Runs every scan except the hostname rule, then requires the whole value to be
     a repository-relative source file name with a known extension.
     """
-    reject_secret_like_text(value, location)
-    for label, pattern in FORBIDDEN_VALUE_PATTERNS:
-        if pattern.search(value):
-            fail(f"{location} contains {label}; evidence must stay redacted")
+    reject_unredacted_text_except_hostname(value, location)
     if ".." in Path(value).parts or not REPO_SOURCE_FILE_NAME_RE.fullmatch(value):
         fail(f"{location} must be a repository-relative source file name")
 
 
+def reject_unredacted_localization_key(value: str, location: str) -> None:
+    """Scoped rule for `provider_guidance.state_label_key` / `state_meaning_key`.
+
+    Runs every scan except the hostname rule, then requires the WHOLE value to
+    match the closed localization-key grammar. A value that is a hostname, a
+    partial key, or anything else fails closed.
+    """
+    reject_unredacted_text_except_hostname(value, location)
+    if not LOCALIZATION_KEY_RE.fullmatch(value):
+        fail(f"{location} must be a closed byom localization key")
+
+
 def reject_unredacted_text(text: str, location: str) -> None:
-    reject_secret_like_text(text, location)
-    for label, pattern in FORBIDDEN_VALUE_PATTERNS:
-        if pattern.search(text):
-            fail(f"{location} contains {label}; evidence must stay redacted")
+    reject_unredacted_text_except_hostname(text, location)
     reject_hostname_like_text(text, location)
 
 
@@ -381,6 +411,40 @@ def _walk_redaction(value: Any, location: str) -> None:
             reject_unredacted_repo_source_file(value, location)
         else:
             reject_unredacted_text(value, location)
+
+
+def assert_captured_document_redacted(value: Any, location: str = "$") -> None:
+    """Fail-closed scan for a whole captured CLI document.
+
+    Identical to `assert_redacted` except that inside a `provider_guidance`
+    object -- at any depth, so candidate rows and top-level evaluation, dry-run,
+    status, and withdraw documents are all covered -- the two SPEC-046-R003
+    localization-key fields are validated against the closed localization-key
+    grammar instead of the shape-based hostname rule. Every other key and every
+    other string value, including any other field of the same guidance object,
+    keeps the full rule set.
+    """
+    reject_forbidden_keys(value, location)
+    _walk_captured_document(value, location, in_guidance=False)
+
+
+def _walk_captured_document(value: Any, location: str, *, in_guidance: bool) -> None:
+    if isinstance(value, dict):
+        for key, item in value.items():
+            reject_unredacted_text(key, f"{location} key {key!r}")
+            if in_guidance and key in GUIDANCE_LOCALIZATION_KEY_FIELDS and isinstance(item, str):
+                reject_unredacted_localization_key(item, f"{location}.{key}")
+                continue
+            _walk_captured_document(
+                item,
+                f"{location}.{key}",
+                in_guidance=(key == GUIDANCE_OBJECT_KEY and isinstance(item, dict)),
+            )
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            _walk_captured_document(item, f"{location}[{index}]", in_guidance=False)
+    elif isinstance(value, str):
+        reject_unredacted_text(value, location)
 
 
 def repository_relative(root: Path, value: str, label: str) -> str:
@@ -534,13 +598,20 @@ def _digest_document(manifest_dir: Path, entry: Any, step_id: str, index: int) -
     # journey-result binds to, so the redaction claim has to hold for the bytes we
     # digest: a captured document that still carries a URL, an absolute or
     # home-relative path, a hostname, an IP literal, a localhost reference, or a
-    # credential must not be archived at all. There is deliberately no allowlist
-    # for raw-document fields -- a CLI document that legitimately needs an
-    # endpoint or a path in it is a document the operator redacts before capture.
-    reject_unredacted_text(decoded, f"{location}.path")
-    # JSON string escapes (\u002f, \u002e, ...) can hide a URL, path, or hostname
-    # from the serialized-text scan, so the decoded values are scanned as well.
-    _walk_redaction(parsed, f"{location}.document")
+    # credential must not be archived at all. A CLI document that legitimately
+    # needs an endpoint or a path in it is a document the operator redacts before
+    # capture; the one exemption is the field-scoped localization-key rule.
+    #
+    # The DECODED structural walk is the authority here. It is the only scan that
+    # can tell a `provider_guidance` localization key from a hostname, it covers
+    # every key and every string value field by field, and JSON string escapes
+    # (\u002f, \u002e, ...) that would hide a URL, path, or hostname from a
+    # serialized-text scan are already decoded by the time it runs.
+    assert_captured_document_redacted(parsed, f"{location}.document")
+    # The raw-text scan over the archived bytes runs every rule EXCEPT the
+    # hostname rule -- the structural walk owns that one -- so material sitting
+    # outside any decoded string still fails closed.
+    reject_unredacted_text_except_hostname(decoded, f"{location}.path")
     return {
         "id": document_id,
         "schema": schema,

@@ -41,7 +41,11 @@ SOURCE_SHA="$(git rev-parse HEAD)"
 # This gate is not an operator run, so it uses a fixed, non-identifying label.
 OPERATOR_FINGERPRINT="$(printf 'ci-hermetic-discovery-journey' | shasum -a 256 | cut -d' ' -f1)"
 
-test/e2e/byom/run-discovery-journey.py --out "$OUT_DIR"
+# `--evidence` binds the run to SOURCE_SHA: the driver refuses a
+# MACPROVIDER_CLI_BINARY override, requires a clean tracked tree for the CLI
+# source, the scripts, and the harness, and builds the CLI from that source, so
+# the evidence cannot name a commit it did not execute.
+test/e2e/byom/run-discovery-journey.py --evidence --out "$OUT_DIR"
 
 python3 scripts/capture-byom-journey-evidence.py \
   --journey discovery \

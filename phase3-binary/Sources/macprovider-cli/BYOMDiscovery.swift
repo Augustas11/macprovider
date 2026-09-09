@@ -2067,9 +2067,11 @@ struct BYOMDiscoveryRunner {
         }
 
         // SPEC-046-R002: no well-known default, so the adapter is attempted only
-        // when the operator supplies an origin. The unconfigured row is reported
-        // rather than omitted so the projection distinguishes "never attempted"
-        // from an adapter that was attempted and failed.
+        // when the operator supplies an origin. An adapter that was never
+        // attempted contributes no row at all, exactly as the Ollama adapter
+        // does when it is skipped. An absent row already means "not attempted",
+        // so inventing a status value for it would put an undefined string on
+        // the wire and change the no-flag projection for existing consumers.
         let openAIOrigin = environment.openAICompatibleOrigin?.trimmingCharacters(in: .whitespacesAndNewlines)
         if let openAIOrigin, !openAIOrigin.isEmpty {
             let openAICompatible = await BYOMOpenAICompatibleDiscovery(
@@ -2084,8 +2086,6 @@ struct BYOMDiscoveryRunner {
             for candidate in openAICompatible.candidates {
                 warnings.formUnion(candidate.warningCodes)
             }
-        } else {
-            adapters.append(BYOMOpenAICompatibleDiscovery.unconfiguredAdapter)
         }
 
         candidates.sort {
@@ -3416,15 +3416,6 @@ struct BYOMOpenAICompatibleDiscovery: Sendable {
     static let runtimeSource = "openai_compatible_loopback"
     static let servedModelRefPrefix = "openai_compatible:"
 
-    /// Reported when the operator supplied no origin. Not `unavailable`: the
-    /// adapter was never attempted, so claiming a failed probe would be a lie.
-    static let unconfiguredAdapter = BYOMDiscoveryWire.Adapter(
-        runtimeSource: runtimeSource,
-        status: "not_configured",
-        originClass: nil,
-        warningCodes: []
-    )
-
     private let origin: String
     private let namespace: Data?
     private let namespaceWarnings: [BYOMDiscoveryWarning]
@@ -3601,11 +3592,20 @@ enum BYOMLoopbackOriginValidator {
 enum BYOMDiscoveryHTTPBounds {
     static let maxHeaderBytes = 64 * 1024
     static let maxBodyBytes = 256 * 1024
+    /// Records an adapter will read from one runtime inventory response. One
+    /// bound shared by every adapter parser (#1246: the adapters reimplement no
+    /// parser-bound logic), so the cap cannot drift apart per runtime source.
+    static let maxInventoryRecords = 100
 
     static func headerBytes(_ headers: [(String, String)]) -> Int {
         headers.reduce(0) { total, header in
             total + header.0.utf8.count + header.1.utf8.count
         }
+    }
+
+    /// The records an adapter parser is allowed to look at, in wire order.
+    static func boundedInventoryRecords(_ records: [JSONValue]) -> ArraySlice<JSONValue> {
+        records.prefix(maxInventoryRecords)
     }
 }
 
@@ -3630,7 +3630,7 @@ enum BYOMDiscoveryJSON {
         }
         var models: [OllamaModel] = []
         var withheldReference = false
-        for value in rawModels.prefix(100) {
+        for value in BYOMDiscoveryHTTPBounds.boundedInventoryRecords(rawModels) {
             guard case .object(let object) = value,
                   case .string(let name)? = object["name"] else {
                 throw BYOMDiscoveryAdapterError.malformed
@@ -3680,7 +3680,7 @@ enum BYOMDiscoveryJSON {
         }
         var modelIDs: [String] = []
         var withheldReference = false
-        for value in rawModels.prefix(100) {
+        for value in BYOMDiscoveryHTTPBounds.boundedInventoryRecords(rawModels) {
             guard case .object(let object) = value,
                   case .string(let id)? = object["id"] else {
                 throw BYOMDiscoveryAdapterError.malformed

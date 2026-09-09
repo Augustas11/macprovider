@@ -94,23 +94,42 @@ The driver runs all ten `JOURNEY-PROVIDER-BYOM-DISCOVERY` steps against
 loopback stubs and an on-disk MLX-cache fixture, writes every captured CLI
 document to `~/byom-run/captures/`, and writes `~/byom-run/run-manifest.json`
 itself — so **steps 1 and 2 are already done** and you can go straight to step 3.
-Every observation in that manifest is set from the driver's own assertions, and
-a failed assertion aborts the run, so a manifest exists only for a run where all
-ten steps passed. `make test-byom-discovery-journey` runs the driver and then
-step 3 and step 4 against its output, which is how CI proves the driver and the
-governance tables have not drifted apart.
+`--out` must be a new or empty directory: reusing one is refused rather than
+cleaned, so a failing rerun can never leave an earlier run's passing manifest
+sitting there as if it were current. The manifest is published atomically and
+only after every step and observation check has passed.
 
-Two things the driver does to keep captures redaction-clean, because the
-evidence scanner is shape-based and has no allowlist for captured-document
-fields:
+Every observation in that manifest is set from the driver's own assertions. The
+two negative observations are read off harness-owned ledgers rather than
+declared: a recording coordinator sink is configured as the CLI's coordinator
+for the whole run and must finish with zero requests and zero accepted
+connections (`provider_credit_created`), and the harness starts no buyer gateway
+at all while the only chat request anywhere in the run is the evaluation's
+single local probe (`buyer_traffic_sent`). A failed assertion aborts the run, so
+a manifest exists only for a run where all ten steps passed.
+`make test-byom-discovery-journey` runs the driver and then step 3 and step 4
+against its output, which is how CI proves the driver and the governance tables
+have not drifted apart.
 
-- it drops `provider_guidance.state_label_key` / `state_meaning_key`, which are
-  dotted localization label paths (`byom.local.offerable`) that the scanner
-  cannot distinguish from a DNS hostname. Every decision-bearing guidance field
-  (`next_action`, `transition_reason_code`, `earning_path_class`) is retained,
-  and no manifest assertion depends on the dropped keys;
-- it re-runs the capture tool's own redaction scan over each document before
-  writing it, so the driver cannot emit a manifest that step 3 would reject.
+Captured CLI documents are stored **whole**. Nothing is stripped before hashing,
+so the digest binds the CLI's complete closed envelope, including the
+SPEC-046-R003 `provider_guidance` localization keys. Those two fields —
+`state_label_key` and `state_meaning_key` — are dotted label paths
+(`byom.local.offerable`) and therefore DNS-shaped by coincidence, so the shared
+scanner validates them against a closed `byom.<segment>.<segment>…` grammar at
+exactly those two paths inside a `provider_guidance` object, while still
+applying every credential, URL, path, IP, and localhost check to the value.
+Anything else at those paths fails closed, and the same string in any other
+field is still just a hostname. The driver runs that same scan — the capture
+tool's own functions, imported not reimplemented — over every command's real
+stdout and stderr and over every document before writing it, so it cannot emit a
+manifest that step 3 would reject.
+
+The CI gate runs the driver with `--evidence`, which binds the run to the commit
+the evidence names: the `MACPROVIDER_CLI_BINARY` override is refused, the
+tracked trees under `phase3-binary/`, `scripts/`, and `test/e2e/byom/` must be
+clean, and the CLI is built from that source. Local exploratory runs may omit
+`--evidence` and keep the override.
 
 ### Everything else: hand-authored
 

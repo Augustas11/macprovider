@@ -7,8 +7,16 @@ document it produced, and emits the `macprovider.byom-journey-run.v1` run
 manifest that `scripts/capture-byom-journey-evidence.py` consumes.
 
 Every observation in the manifest is set from this driver's own assertions, not
-declared. A failed assertion aborts the run, so a manifest only ever exists for
-a run where all ten steps passed.
+declared: the two negative observations are read off harness-owned ledgers (a
+recording coordinator sink configured as the CLI's coordinator, and the adapter
+stubs' own request logs). A failed assertion aborts the run, and the manifest is
+published atomically only after every step and observation check has passed, so
+a manifest only ever exists for a run where all ten steps passed.
+
+Captured CLI documents are archived whole. Nothing is stripped before hashing,
+so the digest the signed evidence binds to covers the CLI's complete closed
+envelope; the evidence contract's fail-closed scanner is imported and run over
+every one of them, and over every command's real stdout and stderr.
 
 Nothing here signs or promotes anything, and nothing is written into the
 repository: the captures and the manifest go to `--out`, which the operator
@@ -88,26 +96,11 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3] / "scripts"))
 import byom_journey_evidence as evidence_contract  # noqa: E402
 
 
-# `provider_guidance.state_label_key` / `state_meaning_key` are dotted
-# localization label paths (`byom.local.offerable`). The evidence scanner is
-# shape-based and fail-closed, with deliberately no allowlist for
-# captured-document fields, so it cannot tell those apart from a DNS hostname.
-# They carry no verdict: every decision-bearing guidance field
-# (`next_action`, `transition_reason_code`, `earning_path_class`) is retained,
-# and no assertion in this manifest depends on the dropped keys.
-GUIDANCE_LOCALIZATION_KEYS = ("state_label_key", "state_meaning_key")
-
-
-def redact_for_capture(value):
-    if isinstance(value, dict):
-        return {
-            key: redact_for_capture(item)
-            for key, item in value.items()
-            if key not in GUIDANCE_LOCALIZATION_KEYS
-        }
-    if isinstance(value, list):
-        return [redact_for_capture(item) for item in value]
-    return value
+# Tracked paths whose contents decide what an evidence run actually executed.
+# In `--evidence` mode all three must be clean before `source_sha` may be
+# recorded against the run (F5): the harness, the CLI source, and the evidence
+# contract are the run.
+EVIDENCE_SOURCE_PATHS = ("phase3-binary", "scripts", "test/e2e/byom")
 
 
 def assert_true(condition, message):
@@ -119,7 +112,41 @@ def repo_root():
     return pathlib.Path(__file__).resolve().parents[3]
 
 
-def build_cli(root, explicit_binary):
+def require_clean_evidence_source(root):
+    """Refuse to record `source_sha` for a tree that is not what ran (F5).
+
+    Untracked files are ignored on purpose: they cannot change the behaviour of
+    a tracked, committed harness or CLI. A modified tracked file can, so it
+    fails closed.
+    """
+    completed = subprocess.run(
+        ["git", "status", "--porcelain", "--untracked-files=no", "--"]
+        + list(EVIDENCE_SOURCE_PATHS),
+        cwd=str(root),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    dirty = sorted(line[3:] for line in completed.stdout.splitlines() if line.strip())
+    assert_true(
+        not dirty,
+        "evidence mode needs a clean tracked tree for the executed source; modified: "
+        + ", ".join(dirty),
+    )
+
+
+def build_cli(root, explicit_binary, evidence_mode):
+    # An evidence run is attributed to a commit, so it must execute that commit:
+    # an arbitrary prebuilt binary would let the manifest claim a source it never
+    # ran. Local non-evidence runs keep the override for iteration speed.
+    if evidence_mode:
+        assert_true(
+            not explicit_binary,
+            "MACPROVIDER_CLI_BINARY is refused in --evidence mode: evidence must "
+            "execute the binary built from the recorded source",
+        )
+        require_clean_evidence_source(root)
+        explicit_binary = None
     if explicit_binary:
         path = pathlib.Path(explicit_binary).expanduser().resolve()
         assert_true(path.exists(), "MACPROVIDER_CLI_BINARY does not exist: " + str(path))
@@ -134,10 +161,24 @@ def build_cli(root, explicit_binary):
     return path
 
 
+class ConnectionRecordingHTTPServer(ThreadingHTTPServer):
+    """Counts accepted connections, not just parsed requests.
+
+    A request that never becomes valid HTTP -- a TLS handshake against a plain
+    socket, a half-open probe -- still contacted the port, and for the
+    coordinator sink that is exactly what must never happen.
+    """
+
+    def verify_request(self, request, client_address):
+        self.state["connections"] += 1
+        return True
+
+
 class LocalHTTPServer:
-    def __init__(self, handler_class, state):
+    def __init__(self, handler_class, state, server_class=ThreadingHTTPServer):
+        state.setdefault("connections", 0)
         self.state = state
-        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler_class)
+        self.httpd = server_class(("127.0.0.1", 0), handler_class)
         self.httpd.state = state
         self.started = False
         self.ready = threading.Event()
@@ -241,6 +282,33 @@ class MalformedOpenAIHandler(JSONHandler):
         self.send_json(None, raw='{"object":"list","data":"not-an-array"}')
 
 
+class CoordinatorSinkHandler(BaseHTTPRequestHandler):
+    """Records every request it receives and serves nothing.
+
+    This is the harness-owned ledger behind the two negative observations
+    (F4). It is configured as the CLI's coordinator for the whole run, so
+    `buyer_traffic_sent` and `provider_credit_created` are read off an empty
+    ledger rather than declared: discovery, evaluation, and the offer dry run
+    are local-only commands and must never reach a coordinator. It answers 503
+    so that a leaked request is recorded and then fails, never satisfied by a
+    fabricated document.
+    """
+
+    def log_message(self, *_args):
+        pass
+
+    def _record(self):
+        self.server.state["requests"].append("%s %s" % (self.command, self.path))
+        self.send_error(503)
+
+    do_GET = _record
+    do_HEAD = _record
+    do_POST = _record
+    do_PUT = _record
+    do_PATCH = _record
+    do_DELETE = _record
+
+
 def create_mlx_cache_fixture(cache_root):
     """HuggingFace cache layout the MLX adapter recognizes: a `models--<org>--<name>`
     repo directory holding `snapshots/<rev>/` with a config and a weights file."""
@@ -276,6 +344,7 @@ class Runner:
         self.transcript = []
 
     def run(self, args):
+        label = " ".join(args[:3])
         completed = subprocess.run(
             [str(self.cli)] + args,
             cwd=str(self.cwd),
@@ -287,12 +356,30 @@ class Runner:
         self.transcript.append(completed.stderr)
         if completed.returncode != 0:
             raise HarnessFailure(
-                "CLI failed (%d): %s" % (completed.returncode, " ".join(args[:3]))
+                "CLI failed (%d): %s" % (completed.returncode, label)
             )
         try:
-            return json.loads(completed.stdout)
+            document = json.loads(completed.stdout)
         except json.JSONDecodeError as exc:
-            raise HarnessFailure("invalid JSON stdout for %s: %s" % (" ".join(args[:3]), exc))
+            raise HarnessFailure("invalid JSON stdout for %s: %s" % (label, exc))
+        # Step 08's real scan (F2), run here so it covers every command's actual
+        # output rather than only the documents that end up captured, and so an
+        # unexpected forbidden-shaped value fails the run even though it is not
+        # in the run-specific `forbidden` list. The scanner functions are the
+        # evidence contract's own, imported rather than reimplemented.
+        try:
+            evidence_contract.assert_captured_document_redacted(
+                document, "cli stdout for " + label
+            )
+            evidence_contract.reject_unredacted_text_except_hostname(
+                completed.stdout, "cli stdout for " + label
+            )
+            evidence_contract.reject_unredacted_text(
+                completed.stderr, "cli stderr for " + label
+            )
+        except evidence_contract.BYOMEvidenceError as exc:
+            raise HarnessFailure("CLI output for %s is not redaction-clean: %s" % (label, exc))
+        return document
 
 
 def candidate_by_runtime_source(document, runtime_source):
@@ -326,17 +413,23 @@ class ManifestBuilder:
         self.observations = {name: None for name in TRUE_OBSERVATIONS + FALSE_OBSERVATIONS}
 
     def capture(self, name, document):
-        """Write one captured CLI document, redacted and re-scanned fail-closed.
+        """Write one captured CLI document WHOLE, re-scanned fail-closed.
 
-        The scan is the capture tool's own, imported rather than reimplemented,
-        so this driver can never emit a manifest whose documents capture would
-        reject.
+        Nothing is stripped: the digest the signed evidence binds to has to
+        cover the CLI's complete closed envelope, including the SPEC-046-R003
+        `provider_guidance` localization keys. The scan is the capture tool's
+        own, imported rather than reimplemented, so this driver can never emit a
+        manifest whose documents capture would reject -- same field-scoped rule,
+        same fail-closed outcome.
         """
-        redacted = redact_for_capture(document)
-        payload = json.dumps(redacted, indent=2, sort_keys=True) + "\n"
+        payload = json.dumps(document, indent=2, sort_keys=True) + "\n"
         try:
-            evidence_contract.reject_unredacted_text(payload, "captured document " + name)
-            evidence_contract.assert_redacted(redacted, "captured document " + name)
+            evidence_contract.assert_captured_document_redacted(
+                document, "captured document " + name
+            )
+            evidence_contract.reject_unredacted_text_except_hostname(
+                payload, "captured document " + name
+            )
         except evidence_contract.BYOMEvidenceError as exc:
             raise HarnessFailure("captured document %s is not redaction-clean: %s" % (name, exc))
         path = self.captures / (name + ".json")
@@ -386,9 +479,33 @@ class ManifestBuilder:
             "steps": self.steps,
             "observations": {name: self.observations[name] for name in sorted(self.observations)},
         }
+        # Published atomically and only here, after every step and observation
+        # check has passed: a consumer must never be able to read a half-written
+        # manifest, and a failed run must leave none at all (F7).
         path = self.out_dir / "run-manifest.json"
-        path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+        temporary = self.out_dir / ".run-manifest.json.tmp"
+        temporary.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+        os.replace(str(temporary), str(path))
         return path
+
+
+def prepare_out_dir(out_dir):
+    """`--out` must be new or empty, and is created user-private (F7).
+
+    Reusing a directory that already holds a manifest is refused rather than
+    cleaned: a failed rerun into last week's passing output would otherwise
+    leave that stale pass manifest sitting there, consumable, while the run that
+    actually just happened failed. Operator data is never deleted here.
+    """
+    if out_dir.exists():
+        assert_true(out_dir.is_dir(), "--out must be a directory: " + str(out_dir))
+        assert_true(
+            not any(out_dir.iterdir()),
+            "--out must be a new or empty directory; refusing to reuse one that may "
+            "hold a stale run manifest",
+        )
+    out_dir.mkdir(parents=True, mode=0o700, exist_ok=True)
+    return out_dir
 
 
 def redaction_review(transcript, capture_dir, forbidden):
@@ -410,6 +527,13 @@ def main():
     parser = argparse.ArgumentParser(description="Run the hermetic BYOM discovery journey.")
     parser.add_argument("--out", required=True, help="Directory for captures/ and run-manifest.json.")
     parser.add_argument("--keep-temp", action="store_true", help="Keep the temporary harness directory.")
+    parser.add_argument(
+        "--evidence",
+        action="store_true",
+        help="Evidence mode: refuse MACPROVIDER_CLI_BINARY, require a clean tracked "
+             "source tree, and build the CLI from it, so the run is bound to the "
+             "commit the evidence will name.",
+    )
     args = parser.parse_args()
 
     root = repo_root()
@@ -418,11 +542,28 @@ def main():
     ollama = LocalHTTPServer(OllamaHandler, {"paths": []})
     openai = LocalHTTPServer(OpenAICompatibleHandler, {"paths": [], "chat_bodies": []})
     broken = LocalHTTPServer(MalformedOpenAIHandler, {"paths": []})
+    # Configured as the CLI's coordinator for the whole run and expected to stay
+    # untouched; its ledger is what the two negative observations are read from.
+    coordinator = LocalHTTPServer(
+        CoordinatorSinkHandler, {"requests": []}, server_class=ConnectionRecordingHTTPServer
+    )
+    # No buyer gateway is started at any point in this journey. The harness owns
+    # the complete list of servers it runs, so this is a checkable fact rather
+    # than an assumption, and step 06 re-checks that the only chat request in the
+    # run is the evaluation's single local probe.
+    started_servers = {
+        "ollama_adapter_stub": ollama,
+        "openai_compatible_adapter_stub": openai,
+        "malformed_adapter_stub": broken,
+        "coordinator_sink": coordinator,
+    }
     try:
-        cli = build_cli(root, os.environ.get("MACPROVIDER_CLI_BINARY"))
+        prepare_out_dir(out_dir)
+        cli = build_cli(root, os.environ.get("MACPROVIDER_CLI_BINARY"), args.evidence)
         ollama.start()
         openai.start()
         broken.start()
+        coordinator.start()
 
         home = temp_root / "home"
         home.mkdir(mode=0o700)
@@ -441,6 +582,11 @@ def main():
             # The MLX fixture would report does_not_fit on a small CI runner and
             # block the ladder this journey exercises; the fit logic still runs.
             "MACPROVIDER_BYOM_E2E_DETECTED_RAM_GB": "64",
+            # A coordinator IS configured for every command in this run, and it
+            # is the recording sink. `buyer_traffic_sent` and
+            # `provider_credit_created` are then read off its ledger: a command
+            # that tried to reach a coordinator would land here and be recorded.
+            "MACPROVIDER_COORDINATOR_URL": coordinator.origin,
         })
         for stale in ("MACPROVIDER_CONFIG", "HF_HOME", "HF_HUB_CACHE"):
             env.pop(stale, None)
@@ -657,8 +803,6 @@ def main():
             [manifest.document("evaluate-candidate", "provider_byom_evaluation.v1", "evaluate-candidate")],
         )
         manifest.observe("candidate_evaluated", True)
-        manifest.observe("buyer_traffic_sent", False)
-        manifest.observe("provider_credit_created", False)
 
         # Step 07 - no production mutation. The mutation summary is the CLI's own
         # claim; the fixture digests are the independent check on it.
@@ -833,12 +977,13 @@ def main():
         # Step 08 - redaction review over every command's output and every capture.
         probe_prompt = json.loads(openai.state["chat_bodies"][0])["messages"][0]["content"]
         forbidden = [
-            ollama.origin, openai.origin, broken.origin,
+            ollama.origin, openai.origin, broken.origin, coordinator.origin,
             # host:port rather than a bare port: a bare 5-digit number would
             # collide with digests and byte counts and make this scan flaky.
             "127.0.0.1:%d" % ollama.port,
             "127.0.0.1:%d" % openai.port,
             "127.0.0.1:%d" % broken.port,
+            "127.0.0.1:%d" % coordinator.port,
             str(temp_root), str(home), str(namespace), str(hf_cache),
             probe_prompt, COMPLETION_MARKER,
         ]
@@ -857,6 +1002,48 @@ def main():
         manifest.observe("raw_prompt_logged", False)
         manifest.observe("raw_completion_logged", False)
 
+        # The two negative observations, read off harness-owned ledgers at the
+        # end of the run rather than declared (F4).
+        #
+        # No buyer gateway exists in this journey. The harness owns the complete
+        # list of servers it started, so that is a checked fact, and the only
+        # chat request anywhere in the run is the evaluation's single local probe
+        # to the adapter stub.
+        assert_true(
+            not any("buyer" in name or "gateway" in name for name in started_servers),
+            "the harness started a buyer gateway; buyer traffic is out of scope here",
+        )
+        chat_requests = {
+            name: [path for path in server.state.get("paths", []) if "completions" in path]
+            for name, server in started_servers.items()
+        }
+        assert_true(
+            chat_requests["openai_compatible_adapter_stub"] == ["/v1/chat/completions"],
+            "the evaluation probe was not the only chat request to the adapter stub",
+        )
+        assert_true(
+            not any(paths for name, paths in chat_requests.items()
+                    if name != "openai_compatible_adapter_stub"),
+            "a chat request reached a stub other than the evaluated endpoint",
+        )
+        manifest.observe("buyer_traffic_sent", False)
+
+        # Provider credit is coordinator-side state. Every command in this run
+        # had the sink configured as its coordinator, and every one of them is a
+        # local-only command, so the sink must have been contacted zero times --
+        # not one request, not even one accepted connection.
+        assert_true(
+            coordinator.state["requests"] == [],
+            "a request reached the coordinator sink: %s"
+            % ", ".join(coordinator.state["requests"][:3]),
+        )
+        assert_true(
+            coordinator.state["connections"] == 0,
+            "a connection reached the coordinator sink; local-only commands must not "
+            "contact a coordinator",
+        )
+        manifest.observe("provider_credit_created", False)
+
         manifest.steps.sort(key=lambda step: step["id"])
         manifest_path = manifest.write()
         print("BYOM discovery journey passed")
@@ -869,7 +1056,7 @@ def main():
             print("temp_root=%s" % temp_root, file=sys.stderr)
         return 1
     finally:
-        for server in (ollama, openai, broken):
+        for server in (ollama, openai, broken, coordinator):
             try:
                 server.stop()
             except Exception:

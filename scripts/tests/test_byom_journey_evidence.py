@@ -212,6 +212,59 @@ class BYOMJourneyCaptureTests(unittest.TestCase):
 
         self.assert_capture_fails("discovery", mutator, fragment)
 
+    def guidance_document(self, **guidance) -> dict:
+        payload = {
+            "state_label_key": "byom.local.local_only",
+            "state_meaning_key": "byom.local.local_only_not_earning",
+            "next_action": "evaluate",
+            "transition_reason_code": "capability_unevaluated",
+            "earning_path_class": "local_inventory_only",
+        }
+        payload.update(guidance)
+        return {
+            "schema": "provider_byom_discovery.v1",
+            "candidates": [{"candidate_id": "byom_" + "a" * 52, "provider_guidance": payload}],
+        }
+
+    # SPEC-046-R003 requires the two localization keys in every
+    # `provider_guidance` object, so captured documents are archived whole and
+    # the scanner validates those two paths against a closed grammar instead of
+    # the shape-based hostname rule.
+    def test_accepts_localization_keys_inside_provider_guidance(self) -> None:
+        manifest, manifest_path = self.mutate(
+            "discovery", lambda _manifest, root: self.write_capture(root, self.guidance_document())
+        )
+        self.capture("discovery", manifest, manifest_path)
+
+    def test_rejects_a_hostname_at_a_localization_key_path(self) -> None:
+        for field in ("state_label_key", "state_meaning_key"):
+            with self.subTest(field=field):
+                self.assert_captured_document_rejected(
+                    self.guidance_document(**{field: "coordinator.malibu.tech"}),
+                    "must be a closed byom localization key",
+                )
+
+    def test_rejects_a_localization_key_shape_outside_the_two_exempt_fields(self) -> None:
+        # Another field of the same guidance object.
+        self.assert_captured_document_rejected(
+            self.guidance_document(next_action="byom.local.local_only"),
+            "contains a hostname",
+        )
+        # And a field outside provider_guidance entirely.
+        document = self.guidance_document()
+        document["candidates"][0]["display_name"] = "byom.local.local_only"
+        self.assert_captured_document_rejected(document, "contains a hostname")
+
+    def test_rejects_a_hostname_hidden_behind_json_escapes_in_a_captured_document(self) -> None:
+        def mutator(_manifest, root):
+            (root / "captures" / "discover-mlx-cache.json").write_text(
+                '{"schema": "provider_byom_discovery.v1", '
+                '"note": "coordinator\\u002emalibu\\u002etech"}',
+                encoding="utf-8",
+            )
+
+        self.assert_capture_fails("discovery", mutator, "contains a hostname")
+
     def test_rejects_captured_document_whose_schema_differs_from_the_manifest(self) -> None:
         self.assert_captured_document_rejected(
             {"schema": "model_admission_status.v1", "candidates": []},

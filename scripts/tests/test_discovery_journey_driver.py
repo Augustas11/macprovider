@@ -233,18 +233,50 @@ class ManifestEmitterTests(unittest.TestCase):
         with self.assertRaises(driver.HarnessFailure):
             self.builder.write()
 
-    def test_capture_drops_dotted_localization_keys(self) -> None:
+    def test_capture_keeps_the_whole_document_including_localization_keys(self) -> None:
+        """Captures are archived whole (audit R1 F1).
+
+        The digest the signed evidence binds to must cover the CLI's complete
+        SPEC-046-R003 envelope, so nothing is stripped before hashing.
+        """
         path = self.builder.capture("discovery", DISCOVERY_DOCUMENT)
         stored = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(stored, DISCOVERY_DOCUMENT)
         guidance = stored["candidates"][0]["provider_guidance"]
-        self.assertNotIn("state_label_key", guidance)
-        self.assertNotIn("state_meaning_key", guidance)
-        # Every decision-bearing guidance field survives the redaction.
+        self.assertEqual(guidance["state_label_key"], "byom.local.local_only")
+        self.assertEqual(guidance["state_meaning_key"], "byom.local.opaque_endpoint_not_earning")
         self.assertEqual(guidance["next_action"], "evaluate")
         self.assertEqual(guidance["transition_reason_code"], "capability_unevaluated")
         self.assertEqual(guidance["earning_path_class"], "local_inventory_only")
-        # The input document is not mutated in place.
-        self.assertIn("state_label_key", DISCOVERY_DOCUMENT["candidates"][0]["provider_guidance"])
+
+    def test_capture_refuses_a_hostname_at_a_localization_key_path(self) -> None:
+        """The exemption is a closed grammar, not a hole: a real hostname at
+        exactly those paths still fails closed."""
+        for field in ("state_label_key", "state_meaning_key"):
+            document = json.loads(json.dumps(DISCOVERY_DOCUMENT))
+            document["candidates"][0]["provider_guidance"][field] = "coordinator.malibu.tech"
+            with self.subTest(field=field):
+                with self.assertRaises(driver.HarnessFailure):
+                    self.builder.capture("leaky-guidance", document)
+                self.assertFalse((self.temp / "captures" / "leaky-guidance.json").exists())
+
+    def test_capture_refuses_a_localization_key_shape_in_any_other_field(self) -> None:
+        """The exemption is field-scoped: the same string elsewhere is a
+        hostname, in another guidance field or outside guidance entirely."""
+        for path in (
+            ("candidates", 0, "provider_guidance", "next_action"),
+            ("candidates", 0, "display_name"),
+            ("note",),
+        ):
+            document = json.loads(json.dumps(DISCOVERY_DOCUMENT))
+            target = document
+            for key in path[:-1]:
+                target = target[key]
+            target[path[-1]] = "byom.local.local_only"
+            with self.subTest(path=path):
+                with self.assertRaises(driver.HarnessFailure):
+                    self.builder.capture("leaky-shape", document)
+                self.assertFalse((self.temp / "captures" / "leaky-shape.json").exists())
 
     def test_capture_refuses_a_document_carrying_unredacted_material(self) -> None:
         for leak in (
@@ -271,6 +303,151 @@ class ManifestEmitterTests(unittest.TestCase):
         self.assertTrue(driver.redaction_review(["clean output"], captures, ["http://127.0.0.1:1"]))
         with self.assertRaises(driver.HarnessFailure):
             driver.redaction_review(["saw http://127.0.0.1:1 once"], captures, ["http://127.0.0.1:1"])
+
+    def test_captured_document_digest_survives_the_capture_contract(self) -> None:
+        """The whole-document capture is what capture-time validation digests,
+        so the same document must pass the contract's own document scan."""
+        path = self.builder.capture("discovery", DISCOVERY_DOCUMENT)
+        digested = evidence._digest_document(
+            self.temp,
+            {"id": "doc", "schema": "provider_byom_discovery.v1", "path": "captures/discovery.json"},
+            "step-01-discover-mlx-cache",
+            0,
+        )
+        self.assertEqual(digested["bytes"], len(path.read_bytes()))
+        self.assertEqual(digested["schema"], "provider_byom_discovery.v1")
+
+
+class CapturedDocumentScanTests(unittest.TestCase):
+    """The scanner rule the driver and capture both run over captured documents."""
+
+    def test_escaped_hostname_in_a_captured_document_still_fails(self) -> None:
+        """A JSON escape must not hide a hostname from the decoded walk."""
+        temp = Path(tempfile.mkdtemp(prefix="byom-capture-scan-"))
+        self.addCleanup(shutil.rmtree, temp, True)
+        captures = temp / "captures"
+        captures.mkdir()
+        escaped = (
+            '{"schema": "provider_byom_discovery.v1", '
+            '"note": "coordinator\\u002emalibu\\u002etech"}\n'
+        )
+        (captures / "escaped.json").write_text(escaped, encoding="utf-8")
+        with self.assertRaises(evidence.BYOMEvidenceError):
+            evidence._digest_document(
+                temp,
+                {"id": "doc", "schema": "provider_byom_discovery.v1", "path": "captures/escaped.json"},
+                "step-01-discover-mlx-cache",
+                0,
+            )
+
+    def test_localization_key_rule_is_a_closed_grammar(self) -> None:
+        for value in (
+            "byom.local.offerable",
+            "byom.offer_dry_run.not_submitted_not_earning",
+        ):
+            with self.subTest(accepted=value):
+                evidence.reject_unredacted_localization_key(value, "$.provider_guidance.state_label_key")
+        for value in (
+            "coordinator.malibu.tech",
+            "byom.local",
+            "BYOM.Local.Offerable",
+            "byom.local.offerable.",
+            "notbyom.local.offerable",
+            "byom.local.offerable http://127.0.0.1:1",
+        ):
+            with self.subTest(rejected=value):
+                with self.assertRaises(evidence.BYOMEvidenceError):
+                    evidence.reject_unredacted_localization_key(
+                        value, "$.provider_guidance.state_label_key"
+                    )
+
+    def test_emitted_evidence_scan_keeps_no_exemption(self) -> None:
+        """`assert_redacted` is unchanged: evidence never carries guidance."""
+        with self.assertRaises(evidence.BYOMEvidenceError):
+            evidence.assert_redacted({"provider_guidance": {"state_label_key": "byom.local.offerable"}})
+
+
+class OutputDirectoryTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp = Path(tempfile.mkdtemp(prefix="byom-discovery-out-"))
+        self.addCleanup(shutil.rmtree, self.temp, True)
+
+    def test_new_directory_is_created_user_private(self) -> None:
+        out = self.temp / "fresh"
+        driver.prepare_out_dir(out)
+        self.assertTrue(out.is_dir())
+        self.assertEqual(out.stat().st_mode & 0o777, 0o700)
+
+    def test_existing_empty_directory_is_accepted(self) -> None:
+        out = self.temp / "empty"
+        out.mkdir()
+        driver.prepare_out_dir(out)
+
+    def test_a_failed_rerun_cannot_reuse_a_stale_manifest_directory(self) -> None:
+        """Regression for the stale-manifest finding: a directory that already
+        holds a previous run's manifest is refused outright, so a failing rerun
+        can never leave that pass manifest sitting there as if it were current."""
+        out = self.temp / "used"
+        out.mkdir()
+        (out / "run-manifest.json").write_text("{}", encoding="utf-8")
+        with self.assertRaises(driver.HarnessFailure):
+            driver.prepare_out_dir(out)
+        # The operator's data is refused, never deleted.
+        self.assertTrue((out / "run-manifest.json").is_file())
+
+    def test_a_failed_run_publishes_no_manifest(self) -> None:
+        out = self.temp / "failing"
+        driver.prepare_out_dir(out)
+        builder = driver.ManifestBuilder(out, "byom-discovery-unit", "1.2.3")
+        with self.assertRaises(driver.HarnessFailure):
+            builder.write()
+        self.assertFalse((out / "run-manifest.json").exists())
+        self.assertFalse((out / ".run-manifest.json.tmp").exists())
+
+
+class EvidenceModeBindingTests(unittest.TestCase):
+    """Evidence runs must execute the source they name (audit R1 F5)."""
+
+    def test_evidence_mode_refuses_a_binary_override(self) -> None:
+        with self.assertRaises(driver.HarnessFailure) as caught:
+            driver.build_cli(REPO_ROOT, "/usr/bin/true", True)
+        self.assertIn("MACPROVIDER_CLI_BINARY", str(caught.exception))
+
+    def test_non_evidence_mode_keeps_the_local_override(self) -> None:
+        self.assertEqual(driver.build_cli(REPO_ROOT, "/usr/bin/true", False), Path("/usr/bin/true"))
+
+    def test_evidence_source_paths_cover_the_executed_surface(self) -> None:
+        self.assertEqual(
+            sorted(driver.EVIDENCE_SOURCE_PATHS),
+            ["phase3-binary", "scripts", "test/e2e/byom"],
+        )
+
+    def test_evidence_mode_refuses_a_dirty_tracked_source_tree(self) -> None:
+        """Exercised against a scratch repository so a concurrent run of this
+        suite can never touch the checkout under test."""
+        root = Path(tempfile.mkdtemp(prefix="byom-dirty-tree-"))
+        self.addCleanup(shutil.rmtree, root, True)
+        git = ["git", "-c", "user.email=t@example.invalid", "-c", "user.name=t"]
+        subprocess.run(["git", "init", "-q", str(root)], check=True)
+        tracked = root / "scripts" / "byom_journey_evidence.py"
+        tracked.parent.mkdir(parents=True)
+        tracked.write_text("original\n", encoding="utf-8")
+        subprocess.run(git + ["add", "."], cwd=root, check=True)
+        subprocess.run(git + ["commit", "-qm", "seed"], cwd=root, check=True)
+
+        driver.require_clean_evidence_source(root)
+        # Untracked files cannot change what a committed harness executes.
+        (root / "scripts" / "scratch.txt").write_text("note\n", encoding="utf-8")
+        driver.require_clean_evidence_source(root)
+        # A modified tracked file can, so it fails closed.
+        tracked.write_text("modified\n", encoding="utf-8")
+        with self.assertRaises(driver.HarnessFailure) as caught:
+            driver.require_clean_evidence_source(root)
+        self.assertIn("scripts/byom_journey_evidence.py", str(caught.exception))
+
+    def test_the_ci_wrapper_runs_the_driver_in_evidence_mode(self) -> None:
+        wrapper = (REPO_ROOT / "scripts" / "test-byom-discovery-journey.sh").read_text(encoding="utf-8")
+        self.assertIn("run-discovery-journey.py --evidence --out", wrapper)
 
 
 if __name__ == "__main__":
