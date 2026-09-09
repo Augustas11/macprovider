@@ -6,8 +6,12 @@ import XCTest
 @testable import macprovider_cli
 
 final class ConsumeTrustedMetadataTransportMatrixTests: XCTestCase {
+    private let buyerCredential = "matrix-upstream-buyer-credential"
+    private let localCredentialMarker = "matrix-local-client-authorization"
+
     func testTrustedMetadataTransportMatrixUsesRealTLSAndFailsClosed() async throws {
         let workspace = try TemporaryTransportWorkspace()
+        defer { workspace.remove() }
         let trustedCA = try TransportCertificateAuthority(name: "trusted", workspace: workspace)
         let untrustedCA = try TransportCertificateAuthority(name: "untrusted", workspace: workspace)
         var records: [[String: String]] = []
@@ -15,13 +19,36 @@ final class ConsumeTrustedMetadataTransportMatrixTests: XCTestCase {
         let validLeaf = try trustedCA.leaf(commonName: "api.example.test", dnsNames: ["api.example.test"])
         let validServer = try await LocalTLSTestServer(identity: validLeaf.identity, response: .ok(Data(#"{"ok":true}"#.utf8))).start()
         defer { validServer.stop() }
-        let validBody = try await fetchFromPinnedLoopback(port: validServer.port, trustAnchors: [trustedCA.certificate])
+        let validBody = try await fetchMetadataFromPinnedLoopback(port: validServer.port, trustAnchors: [trustedCA.certificate])
         XCTAssertEqual(validBody, Data(#"{"ok":true}"#.utf8))
+        let validChatResponse = try await fetchChatFromPinnedLoopback(
+            port: validServer.port,
+            trustAnchors: [trustedCA.certificate]
+        )
+        XCTAssertEqual(validChatResponse.statusCode, 200)
+
+        let streamingServer = try await LocalTLSTestServer(
+            identity: validLeaf.identity,
+            response: .streaming(Data("data: {\"id\":\"matrix\"}\n\ndata: [DONE]\n\n".utf8))
+        ).start()
+        defer { streamingServer.stop() }
+        let streamingResponse = try await fetchStreamingChatFromPinnedLoopback(
+            port: streamingServer.port,
+            trustAnchors: [trustedCA.certificate]
+        )
+        XCTAssertEqual(streamingResponse.statusCode, 200)
+        XCTAssertNotNil(streamingResponse.sseValidation)
+
         let validRequests = await validServer.requests()
-        XCTAssertEqual(validRequests.count, 1)
-        let validRequest = try XCTUnwrap(validRequests.first)
-        XCTAssertTrue(validRequest.hasPrefix("GET /v1/rate-card HTTP/1.1\r\n"))
-        XCTAssertTrue(validRequest.contains("Host: api.example.test:\(validServer.port)\r\n"))
+        XCTAssertEqual(validRequests.count, 2)
+        let validMetadataRequest = try XCTUnwrap(validRequests.first)
+        let validChatRequest = try XCTUnwrap(validRequests.last)
+        XCTAssertTrue(validMetadataRequest.hasPrefix("GET /v1/rate-card HTTP/1.1\r\n"))
+        XCTAssertTrue(validMetadataRequest.contains("Host: api.example.test:\(validServer.port)\r\n"))
+        assertChatRequest(validChatRequest, port: validServer.port, streaming: false)
+        let streamingRequests = await streamingServer.requests()
+        XCTAssertEqual(streamingRequests.count, 1)
+        assertChatRequest(try XCTUnwrap(streamingRequests.first), port: streamingServer.port, streaming: true)
         records.append(pass("valid_pinned_peer_with_sni"))
 
         let untrustedLeaf = try untrustedCA.leaf(commonName: "api.example.test", dnsNames: ["api.example.test"])
@@ -79,7 +106,7 @@ final class ConsumeTrustedMetadataTransportMatrixTests: XCTestCase {
             },
             fetch: { url, endpoint in
                 await loaderRecorder.recordFetchEndpoint(endpoint)
-                return try await self.fetchFromPinnedLoopback(
+                return try await self.fetchMetadataFromPinnedLoopback(
                     url: url,
                     endpoint: endpoint,
                     trustAnchors: [trustedCA.certificate],
@@ -119,7 +146,7 @@ final class ConsumeTrustedMetadataTransportMatrixTests: XCTestCase {
         defer { restoreProxyEnv() }
         let proxyIsolatedServer = try await LocalTLSTestServer(identity: validLeaf.identity, response: .ok(Data("{}".utf8))).start()
         defer { proxyIsolatedServer.stop() }
-        _ = try await fetchFromPinnedLoopback(port: proxyIsolatedServer.port, trustAnchors: [trustedCA.certificate])
+        _ = try await fetchChatFromPinnedLoopback(port: proxyIsolatedServer.port, trustAnchors: [trustedCA.certificate])
         try await Task.sleep(nanoseconds: 100_000_000)
         let proxyConnections = await proxyProbe.connectionCount()
         XCTAssertEqual(proxyConnections, 0)
@@ -127,25 +154,29 @@ final class ConsumeTrustedMetadataTransportMatrixTests: XCTestCase {
 
         let redirectServer = try await LocalTLSTestServer(
             identity: validLeaf.identity,
-            response: .redirect("https://redirect-target.example.invalid/v1/rate-card")
+            response: .redirect("https://redirect-target.example.invalid/v1/chat/completions")
         ).start()
         defer { redirectServer.stop() }
-        do {
-            _ = try await fetchFromPinnedLoopback(port: redirectServer.port, trustAnchors: [trustedCA.certificate])
-            XCTFail("trusted metadata fetch followed or accepted a redirect")
-        } catch let error as ConsumeTrustedPricingError {
-            XCTAssertEqual(error.reason, .fetchFailed)
-        }
+        let redirectResponse = try await fetchChatFromPinnedLoopback(
+            port: redirectServer.port,
+            trustAnchors: [trustedCA.certificate]
+        )
+        XCTAssertEqual(redirectResponse.statusCode, 307)
         try await Task.sleep(nanoseconds: 100_000_000)
         let redirectRequests = await redirectServer.requests()
         XCTAssertEqual(redirectRequests.count, 1)
+        assertChatRequest(try XCTUnwrap(redirectRequests.first), port: redirectServer.port, streaming: false)
         records.append(pass("redirect_not_followed"))
 
         let proxyIsolatedRequests = await proxyIsolatedServer.requests()
-        for request in validRequests + proxyIsolatedRequests + redirectRequests {
+        XCTAssertEqual(proxyIsolatedRequests.count, 1)
+        assertChatRequest(try XCTUnwrap(proxyIsolatedRequests.first), port: proxyIsolatedServer.port, streaming: false)
+        for request in [validMetadataRequest] + loaderRequests {
             XCTAssertFalse(request.localizedCaseInsensitiveContains("Authorization:"))
             XCTAssertFalse(request.localizedCaseInsensitiveContains("Cookie:"))
             XCTAssertFalse(request.localizedCaseInsensitiveContains("Proxy-Authorization:"))
+            XCTAssertFalse(request.contains(buyerCredential))
+            XCTAssertFalse(request.contains(localCredentialMarker))
         }
         records.append(pass("zero_credential_bytes"))
 
@@ -156,7 +187,7 @@ final class ConsumeTrustedMetadataTransportMatrixTests: XCTestCase {
         defer { slowServer.stop() }
         let started = DispatchTime.now().uptimeNanoseconds
         do {
-            _ = try await fetchFromPinnedLoopback(
+            _ = try await fetchMetadataFromPinnedLoopback(
                 port: slowServer.port,
                 trustAnchors: [trustedCA.certificate],
                 timeouts: ConsumeUpstreamTimeouts(
@@ -178,12 +209,12 @@ final class ConsumeTrustedMetadataTransportMatrixTests: XCTestCase {
         try writeOptionalReport(records: records)
     }
 
-    private func fetchFromPinnedLoopback(
+    private func fetchMetadataFromPinnedLoopback(
         port: Int,
         trustAnchors: [SecCertificate],
         timeouts: ConsumeUpstreamTimeouts = .default
     ) async throws -> Data {
-        try await fetchFromPinnedLoopback(
+        try await fetchMetadataFromPinnedLoopback(
             url: URL(string: "https://api.example.test:\(port)/v1/rate-card")!,
             endpoint: "127.0.0.1",
             trustAnchors: trustAnchors,
@@ -191,7 +222,7 @@ final class ConsumeTrustedMetadataTransportMatrixTests: XCTestCase {
         )
     }
 
-    private func fetchFromPinnedLoopback(
+    private func fetchMetadataFromPinnedLoopback(
         url: URL,
         endpoint: String,
         trustAnchors: [SecCertificate],
@@ -211,6 +242,70 @@ final class ConsumeTrustedMetadataTransportMatrixTests: XCTestCase {
         )
     }
 
+    private func fetchChatFromPinnedLoopback(
+        port: Int,
+        trustAnchors: [SecCertificate],
+        timeouts: ConsumeUpstreamTimeouts = .default
+    ) async throws -> ConsumeUpstreamResponse {
+        try await ConsumePinnedUpstreamClient.fetchTestChatCompletions(
+            upstreamRequest: chatRequest(port: port, streaming: false),
+            maxBodyBytes: ConsumeLocalLimits.bodyBytes,
+            timeouts: timeouts,
+            endpointValidator: { $0 == "127.0.0.1" },
+            parametersFactory: { serverName in
+                ConsumePinnedUpstreamClient.trustedMetadataTLSParametersForTesting(
+                    serverName: serverName,
+                    trustAnchors: trustAnchors,
+                    allowLoopback: true
+                )
+            }
+        )
+    }
+
+    private func fetchStreamingChatFromPinnedLoopback(
+        port: Int,
+        trustAnchors: [SecCertificate],
+        timeouts: ConsumeUpstreamTimeouts = .default
+    ) async throws -> ConsumeUpstreamStreamingResult {
+        try await ConsumePinnedUpstreamClient.fetchTestStreamingChatCompletions(
+            upstreamRequest: chatRequest(port: port, streaming: true),
+            maxBodyBytes: ConsumeLocalLimits.bodyBytes,
+            timeouts: timeouts,
+            callbacks: ConsumeUpstreamStreamingCallbacks(
+                receiveHead: { _, _ in },
+                receiveEventBlock: { _ in }
+            ),
+            endpointValidator: { $0 == "127.0.0.1" },
+            parametersFactory: { serverName in
+                ConsumePinnedUpstreamClient.trustedMetadataTLSParametersForTesting(
+                    serverName: serverName,
+                    trustAnchors: trustAnchors,
+                    allowLoopback: true
+                )
+            }
+        )
+    }
+
+    private func chatRequest(port: Int, streaming: Bool) -> ConsumeUpstreamRequest {
+        ConsumeUpstreamRequest(
+            origin: "https://api.example.test:\(port)",
+            endpoint: "127.0.0.1",
+            bearerToken: buyerCredential,
+            body: Data("{\"model\":\"matrix\",\"messages\":[{\"role\":\"user\",\"content\":\"transport matrix\"}],\"stream\":\(streaming)}".utf8),
+            streaming: streaming
+        )
+    }
+
+    private func assertChatRequest(_ request: String, port: Int, streaming: Bool) {
+        XCTAssertTrue(request.hasPrefix("POST /v1/chat/completions HTTP/1.1\r\n"))
+        XCTAssertTrue(request.contains("Host: api.example.test:\(port)\r\n"))
+        XCTAssertTrue(request.contains("Authorization: Bearer \(buyerCredential)\r\n"))
+        XCTAssertTrue(request.contains("Accept: \(streaming ? "text/event-stream" : "application/json")\r\n"))
+        XCTAssertFalse(request.contains(localCredentialMarker))
+        XCTAssertFalse(request.localizedCaseInsensitiveContains("Cookie:"))
+        XCTAssertFalse(request.localizedCaseInsensitiveContains("Proxy-Authorization:"))
+    }
+
     private func assertTLSFailure(
         leaf: TransportLeafIdentity,
         trustAnchors: [SecCertificate],
@@ -220,7 +315,7 @@ final class ConsumeTrustedMetadataTransportMatrixTests: XCTestCase {
         let server = try await LocalTLSTestServer(identity: leaf.identity, response: .ok(Data("{}".utf8))).start()
         defer { server.stop() }
         do {
-            _ = try await fetchFromPinnedLoopback(
+            _ = try await fetchChatFromPinnedLoopback(
                 port: server.port,
                 trustAnchors: trustAnchors,
                 timeouts: ConsumeUpstreamTimeouts(
@@ -229,9 +324,9 @@ final class ConsumeTrustedMetadataTransportMatrixTests: XCTestCase {
                     readNanoseconds: 1_000_000_000
                 )
             )
-            XCTFail("\(scenarioID) unexpectedly completed trusted metadata TLS")
-        } catch let error as ConsumeTrustedPricingError {
-            XCTAssertEqual(error.reason, .fetchFailed)
+            XCTFail("\(scenarioID) unexpectedly completed credential-bearing chat TLS")
+        } catch {
+            XCTAssertTrue(error is ConsumeUpstreamForwardError)
         }
         try await Task.sleep(nanoseconds: 100_000_000)
         let requests = await server.requests()
@@ -251,30 +346,57 @@ final class ConsumeTrustedMetadataTransportMatrixTests: XCTestCase {
               !path.isEmpty else {
             return
         }
-        let report: [String: Any] = [
-            "schema_version": "macprovider.trusted-metadata-transport-matrix.v1",
-            "repository": [
-                "name": "Augustas11/macprovider",
-                "commit": sourceCommit() ?? NSNull(),
-            ] as [String: Any],
-            "transport": [
-                "production_path": true,
-                "real_sockets": true,
-                "connection_api": "NWConnection",
-                "source_files": [
-                    "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift",
-                    "phase3-binary/Tests/macprovider-cliTests/ConsumeTrustedMetadataTransportMatrixTests.swift",
-                ],
-            ],
-            "scenarios": records,
-            "redaction": [
-                "payload_bytes_omitted": true,
-                "sensitive_material_omitted": true,
-                "transcript_material_omitted": true,
-            ],
-        ]
-        let data = try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
+        guard let commit = sourceCommit() else {
+            throw NSError(domain: "TransportMatrixReport", code: 1)
+        }
+        let scenarioJSON = try records.map { record -> String in
+            guard let id = record["id"], record["status"] == "pass" else {
+                throw NSError(domain: "TransportMatrixReport", code: 2)
+            }
+            return """
+                {
+                  "id": \(try jsonString(id)),
+                  "status": "pass"
+                }
+            """
+        }.joined(separator: ",\n")
+        let payload = """
+        {
+          "schema_version": "macprovider.trusted-metadata-transport-matrix.v1",
+          "repository": {
+            "name": "Augustas11/macprovider",
+            "commit": \(try jsonString(commit))
+          },
+          "transport": {
+            "production_path": true,
+            "real_sockets": true,
+            "connection_api": "NWConnection",
+            "source_files": [
+              "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift",
+              "phase3-binary/Sources/macprovider-cli/ConsumeTrustedPricing.swift",
+              "phase3-binary/Tests/macprovider-cliTests/ConsumeTrustedMetadataTransportMatrixTests.swift"
+            ]
+          },
+          "scenarios": [
+        \(scenarioJSON)
+          ],
+          "redaction": {
+            "payload_bytes_omitted": true,
+            "sensitive_material_omitted": true,
+            "transcript_material_omitted": true
+          }
+        }
+        """ + "\n"
+        let data = Data(payload.utf8)
         try data.write(to: URL(fileURLWithPath: path), options: [.atomic])
+    }
+
+    private func jsonString(_ value: String) throws -> String {
+        let data = try JSONSerialization.data(withJSONObject: value, options: [.fragmentsAllowed])
+        guard let string = String(data: data, encoding: .utf8) else {
+            throw NSError(domain: "TransportMatrixReport", code: 3)
+        }
+        return string
     }
 
     private func sourceCommit() -> String? {
@@ -326,6 +448,10 @@ private struct TemporaryTransportWorkspace {
 
     func path(_ components: String...) -> String {
         components.reduce(url) { $0.appendingPathComponent($1) }.path
+    }
+
+    func remove() {
+        try? FileManager.default.removeItem(at: url)
     }
 }
 
@@ -616,6 +742,7 @@ private enum OpenSSL {
 private final class LocalTLSTestServer: @unchecked Sendable {
     enum Response {
         case ok(Data)
+        case streaming(Data)
         case pathMapped([String: Data])
         case redirect(String)
         case slowDrip(body: Data, intervalNanoseconds: UInt64)
@@ -707,6 +834,8 @@ private final class LocalTLSTestServer: @unchecked Sendable {
         switch response {
         case .ok(let body):
             sendAll(responseBytes(status: "200 OK", headers: ["Content-Type": "application/json"], body: body), on: connection)
+        case .streaming(let body):
+            sendAll(responseBytes(status: "200 OK", headers: ["Content-Type": "text/event-stream"], body: body), on: connection)
         case .pathMapped(let bodies):
             let requestPath = Self.requestPath(from: request) ?? "/"
             let body = bodies[requestPath] ?? Data(#"{"missing":true}"#.utf8)

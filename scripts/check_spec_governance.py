@@ -266,6 +266,11 @@ LOCAL_CONSUMER_ENDPOINT_TRANSPORT_MATRIX_SCENARIO_IDS = (
     "zero_credential_bytes",
     "slow_drip_absolute_timeout",
 )
+LOCAL_CONSUMER_ENDPOINT_TRANSPORT_MATRIX_SOURCE_FILES = (
+    "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift",
+    "phase3-binary/Sources/macprovider-cli/ConsumeTrustedPricing.swift",
+    "phase3-binary/Tests/macprovider-cliTests/ConsumeTrustedMetadataTransportMatrixTests.swift",
+)
 LOCAL_CONSUMER_ENDPOINT_SAFE_METADATA_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@/+~-]{0,127}$")
 LOCAL_CONSUMER_ENDPOINT_SAFE_LOCAL_METADATA_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 LOCAL_CONSUMER_ENDPOINT_OPERATOR_ROLES = {"release-operator"}
@@ -2427,15 +2432,11 @@ def _validate_local_consumer_transport_matrix_report(value: Any, source_sha: str
             result.error(f"{location}.transport.real_sockets", "must be true")
         if transport.get("connection_api") != "NWConnection":
             result.error(f"{location}.transport.connection_api", "must equal 'NWConnection'")
-        source_files = transport.get("source_files")
-        if (
-            not isinstance(source_files, list)
-            or not source_files
-            or any(not isinstance(item, str) or not item.startswith("phase3-binary/") for item in source_files)
-        ):
-            result.error(f"{location}.transport.source_files", "must list repository Swift source paths")
-        elif not any(item.endswith(("ConsumeCommand.swift", "ConsumeTrustedPricing.swift")) for item in source_files):
-            result.error(f"{location}.transport.source_files", "must identify the trusted metadata production path")
+        if transport.get("source_files") != list(LOCAL_CONSUMER_ENDPOINT_TRANSPORT_MATRIX_SOURCE_FILES):
+            result.error(
+                f"{location}.transport.source_files",
+                f"must equal {list(LOCAL_CONSUMER_ENDPOINT_TRANSPORT_MATRIX_SOURCE_FILES)}",
+            )
     scenarios = value.get("scenarios")
     if not isinstance(scenarios, list):
         result.error(f"{location}.scenarios", "must be an array")

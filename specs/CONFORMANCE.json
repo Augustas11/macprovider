@@ -6938,6 +6938,8 @@
         "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:private static func httpRequestBytes",
         "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:static func resolveGlobalEndpoint",
         "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:static func fetchTrustedMetadata",
+        "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:private static func fetch(",
+        "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:private static func fetchStreaming",
         "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:private static func trustedMetadataRequestBytes"
       ],
       "tests": [
@@ -6947,7 +6949,8 @@
         "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testCredentialFileRejectsExtendedACLAndRevalidatesDeletion",
         "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase4PinnedUpstreamGeneratedHeadersAreClosedAndSanitized",
         "phase3-binary/Tests/macprovider-cliTests/ConsumeTrustedPricingTests.swift:testPinnedMetadataRequestIsCredentialFreeAndHeadersRemainBounded",
-        "phase3-binary/Tests/macprovider-cliTests/ConsumeTrustedPricingTests.swift:testPinnedMetadataTransportRejectsNonGlobalEndpointBeforeConnecting"
+        "phase3-binary/Tests/macprovider-cliTests/ConsumeTrustedPricingTests.swift:testPinnedMetadataTransportRejectsNonGlobalEndpointBeforeConnecting",
+        "phase3-binary/Tests/macprovider-cliTests/ConsumeTrustedMetadataTransportMatrixTests.swift:testTrustedMetadataTransportMatrixUsesRealTLSAndFailsClosed"
       ],
       "journeys": [
         "JOURNEY-LOCAL-CONSUMER-ENDPOINT"
@@ -6978,7 +6981,8 @@
         "phase3-binary/Tests/macprovider-cliTests/ConsumeTrustedPricingTests.swift:testPinnedMetadataTransportRejectsNonGlobalEndpointBeforeConnecting",
         "phase3-binary/Tests/macprovider-cliTests/ConsumeTrustedPricingTests.swift:testPinnedMetadataReadDeadlineIsAbsoluteUnderSlowDripProgress",
         "phase3-binary/Tests/macprovider-cliTests/ConsumeTrustedPricingTests.swift:testPricingFetchRejectsPrivateResolutionBeforeRateCardRequest",
-        "phase3-binary/Tests/macprovider-cliTests/ConsumeTrustedPricingTests.swift:testPricingFetchRepeatsResolutionAndRejectsPrivateSidecarRebinding"
+        "phase3-binary/Tests/macprovider-cliTests/ConsumeTrustedPricingTests.swift:testPricingFetchRepeatsResolutionAndRejectsPrivateSidecarRebinding",
+        "phase3-binary/Tests/macprovider-cliTests/ConsumeTrustedMetadataTransportMatrixTests.swift:testTrustedMetadataTransportMatrixUsesRealTLSAndFailsClosed"
       ],
       "journeys": [
         "JOURNEY-LOCAL-CONSUMER-ENDPOINT"
@@ -7124,7 +7128,8 @@
         "scripts/test-signed-local-consumer-endpoint-journey-workflow.sh:required_workflow = [",
         "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase3DSendFailuresAreAmbiguous",
         "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase3DAmbiguousSendFailureHoldsReservationAcrossRestart",
-        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase3GAmbiguousSendFailureAccountsEstimateAcrossRestart"
+        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase3GAmbiguousSendFailureAccountsEstimateAcrossRestart",
+        "phase3-binary/Tests/macprovider-cliTests/ConsumeTrustedMetadataTransportMatrixTests.swift:testTrustedMetadataTransportMatrixUsesRealTLSAndFailsClosed"
       ],
       "journeys": [
         "JOURNEY-LOCAL-CONSUMER-ENDPOINT"

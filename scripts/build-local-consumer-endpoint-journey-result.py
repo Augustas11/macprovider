@@ -55,6 +55,11 @@ TRANSPORT_MATRIX_SCENARIO_IDS = (
     "zero_credential_bytes",
     "slow_drip_absolute_timeout",
 )
+TRANSPORT_MATRIX_SOURCE_FILES = (
+    "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift",
+    "phase3-binary/Sources/macprovider-cli/ConsumeTrustedPricing.swift",
+    "phase3-binary/Tests/macprovider-cliTests/ConsumeTrustedMetadataTransportMatrixTests.swift",
+)
 REQUIREMENT_RE = re.compile(r"^SPEC-[0-9]{3}-R[0-9]{3}$")
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 DATETIME_Z_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
@@ -452,15 +457,11 @@ def require_transport_matrix_report(value: Any, *, source_sha: str) -> None:
         die("support_artifacts.trusted_metadata_transport_matrix.report.transport.real_sockets must be true")
     if transport.get("connection_api") != "NWConnection":
         die("support_artifacts.trusted_metadata_transport_matrix.report.transport.connection_api must equal 'NWConnection'")
-    source_files = transport.get("source_files")
-    if (
-        not isinstance(source_files, list)
-        or not source_files
-        or any(not isinstance(item, str) or not item.startswith("phase3-binary/") for item in source_files)
-    ):
-        die("support_artifacts.trusted_metadata_transport_matrix.report.transport.source_files must list repository Swift source paths")
-    if not any(item.endswith(("ConsumeCommand.swift", "ConsumeTrustedPricing.swift")) for item in source_files):
-        die("support_artifacts.trusted_metadata_transport_matrix.report.transport.source_files must identify the trusted metadata production path")
+    if transport.get("source_files") != list(TRANSPORT_MATRIX_SOURCE_FILES):
+        die(
+            "support_artifacts.trusted_metadata_transport_matrix.report.transport.source_files "
+            f"must equal {list(TRANSPORT_MATRIX_SOURCE_FILES)}"
+        )
     scenarios = matrix.get("scenarios")
     if not isinstance(scenarios, list):
         die("support_artifacts.trusted_metadata_transport_matrix.report.scenarios must be an array")

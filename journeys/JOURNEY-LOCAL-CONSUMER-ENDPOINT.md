@@ -135,6 +135,10 @@ journey-result envelope only after:
   `specs/CONFORMANCE.json`;
 - selector preflight confirms each requirement's mapped implementation/test
   fragments still match `--source-sha`;
+- for SPEC-045-R003, SPEC-045-R004, or SPEC-045-R008, an unprivileged macOS
+  verification job checks out the exact source SHA, runs the named real-socket
+  XCTest, and byte-compares its canonical report with the reviewed embedded
+  report before the protected signing job can start;
 - the workflow is manually dispatched from current `origin/main`;
 - redaction, no-secret, real-gateway, and required-observation checks pass.
 
@@ -158,8 +162,14 @@ macprovider.trusted-metadata-transport-matrix.v1
 The report MUST bind `repository.name = Augustas11/macprovider`,
 `repository.commit = <source-sha>`, `transport.production_path = true`,
 `transport.real_sockets = true`, `transport.connection_api = NWConnection`,
-and `transport.source_files` identifying the trusted metadata production path
-under `phase3-binary/`.
+and `transport.source_files` equal to the production loader, production
+connection path, and real-socket matrix test files:
+
+```text
+phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift
+phase3-binary/Sources/macprovider-cli/ConsumeTrustedPricing.swift
+phase3-binary/Tests/macprovider-cliTests/ConsumeTrustedMetadataTransportMatrixTests.swift
+```
 
 It MUST contain exactly these passing scenarios and no others:
 
@@ -174,6 +184,11 @@ It MUST contain exactly these passing scenarios and no others:
 - `redirect_not_followed`
 - `zero_credential_bytes`
 - `slow_drip_absolute_timeout`
+
+The TLS, connected-peer, environment-proxy, and redirect cases MUST drive the
+credential-bearing non-streaming and streaming chat connection paths with only
+loopback endpoint and test trust-anchor seams. Failed TLS peers MUST receive no
+HTTP request bytes. Metadata requests MUST contain zero buyer-credential bytes.
 
 The report MUST omit payload bytes, sensitive material, and transcript material.
 It records only reviewed matrix facts, source paths, hashes, byte counts, and

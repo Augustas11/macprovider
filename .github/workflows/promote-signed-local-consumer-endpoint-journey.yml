@@ -29,9 +29,138 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  verify_transport_matrix:
+    name: Re-run and bind the trusted transport matrix
+    runs-on: macos-15
+    timeout-minutes: 25
+    steps:
+      - name: Checkout reviewed main controls for transport verification
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate transport verification request
+        id: matrix_request
+        shell: bash
+        env:
+          SOURCE_SHA_INPUT: ${{ github.event.inputs.source_sha }}
+          REDACTED_EVIDENCE_INPUT: ${{ github.event.inputs.redacted_evidence_path }}
+          REQUIREMENT_IDS_INPUT: ${{ github.event.inputs.requirement_ids }}
+          PROMOTION_CONFIRMED_INPUT: ${{ github.event.inputs.promotion_confirmed || 'false' }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]] || { echo "::error::manual dispatch required" >&2; exit 1; }
+          [[ "$GITHUB_REF" == refs/heads/main ]] || { echo "::error::workflow must run from main" >&2; exit 1; }
+          [[ "$SOURCE_SHA_INPUT" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::invalid source SHA" >&2; exit 1; }
+          [[ "$PROMOTION_CONFIRMED_INPUT" == true ]] || { echo "::error::promotion confirmation is required" >&2; exit 1; }
+          [[ "$REDACTED_EVIDENCE_INPUT" =~ ^journeys/evidence/local-consumer-endpoint-[A-Za-z0-9_.:-]+\.redacted\.json$ ]] || { echo "::error::invalid redacted evidence path" >&2; exit 1; }
+          [[ -f "$REDACTED_EVIDENCE_INPUT" && ! -L "$REDACTED_EVIDENCE_INPUT" ]] || { echo "::error::redacted evidence is absent or unsafe" >&2; exit 1; }
+          [[ "$REQUIREMENT_IDS_INPUT" =~ ^SPEC-045-R00[1-8](,SPEC-045-R00[1-8])*$ ]] || { echo "::error::invalid SPEC-045 requirement IDs" >&2; exit 1; }
+          git fetch --quiet origin refs/heads/main:refs/remotes/origin/main
+          [[ "$(git rev-parse refs/remotes/origin/main)" == "$GITHUB_SHA" ]] || { echo "::error::workflow commit is no longer origin/main" >&2; exit 1; }
+          git cat-file -e "${SOURCE_SHA_INPUT}^{commit}" || { echo "::error::source SHA is not reachable" >&2; exit 1; }
+          git merge-base --is-ancestor "$SOURCE_SHA_INPUT" "$GITHUB_SHA" || { echo "::error::source SHA must be an ancestor of the reviewed evidence commit" >&2; exit 1; }
+          matrix_required=false
+          case ",${REQUIREMENT_IDS_INPUT}," in
+            *,SPEC-045-R003,*|*,SPEC-045-R004,*|*,SPEC-045-R008,*) matrix_required=true ;;
+          esac
+          printf 'matrix_required=%s\n' "$matrix_required" >> "$GITHUB_OUTPUT"
+
+      - name: Select reviewed Swift toolchain
+        if: ${{ steps.matrix_request.outputs.matrix_required == 'true' }}
+        run: sudo xcode-select -s /Applications/Xcode_16.4.app/Contents/Developer
+
+      - name: Execute exact-source trusted transport matrix
+        if: ${{ steps.matrix_request.outputs.matrix_required == 'true' }}
+        shell: bash
+        env:
+          SOURCE_SHA_INPUT: ${{ github.event.inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          source_tree="$RUNNER_TEMP/local-consumer-transport-source"
+          report_dir="$RUNNER_TEMP/verified-local-consumer-transport-matrix"
+          report="$report_dir/trusted-metadata-transport-matrix.json"
+          mkdir -p "$report_dir"
+          git worktree add --detach "$source_tree" "$SOURCE_SHA_INPUT"
+          before_status="$(git -C "$source_tree" status --porcelain --untracked-files=no)"
+          [[ -z "$before_status" ]] || { echo "::error::source worktree is not clean before verification" >&2; exit 1; }
+          (
+            cd "$source_tree/phase3-binary"
+            MACPROVIDER_TRUSTED_METADATA_TRANSPORT_MATRIX_REPORT="$report" \
+              swift test --filter ConsumeTrustedMetadataTransportMatrixTests/testTrustedMetadataTransportMatrixUsesRealTLSAndFailsClosed
+          )
+          after_status="$(git -C "$source_tree" status --porcelain --untracked-files=no)"
+          [[ -z "$after_status" ]] || { echo "::error::transport verification changed tracked source bytes" >&2; exit 1; }
+
+      - name: Bind executed transport report to reviewed evidence
+        shell: bash
+        env:
+          MATRIX_REQUIRED: ${{ steps.matrix_request.outputs.matrix_required }}
+          SOURCE_SHA_INPUT: ${{ github.event.inputs.source_sha }}
+          REDACTED_EVIDENCE_INPUT: ${{ github.event.inputs.redacted_evidence_path }}
+          REQUIREMENT_IDS_INPUT: ${{ github.event.inputs.requirement_ids }}
+        run: |
+          set -euo pipefail
+          report_dir="$RUNNER_TEMP/verified-local-consumer-transport-matrix"
+          report="$report_dir/trusted-metadata-transport-matrix.json"
+          manifest="$report_dir/verification.json"
+          mkdir -p "$report_dir"
+          python3 - "$MATRIX_REQUIRED" "$SOURCE_SHA_INPUT" "$GITHUB_SHA" "$REDACTED_EVIDENCE_INPUT" "$REQUIREMENT_IDS_INPUT" "$report" "$manifest" <<'PY'
+          import hashlib
+          import json
+          import os
+          import pathlib
+          import sys
+
+          matrix_required, source_sha, evidence_sha, evidence_path, requirement_ids, report_path, manifest_path = sys.argv[1:]
+          required = matrix_required == "true"
+          report = pathlib.Path(report_path)
+          evidence = json.loads(pathlib.Path(evidence_path).read_text(encoding="utf-8"))
+          report_sha256 = None
+          if required:
+              if evidence.get("schema_version") != "macprovider.local-consumer-endpoint-evidence.v2":
+                  raise SystemExit("transport requirements require v2 redacted evidence")
+              embedded = (
+                  evidence.get("support_artifacts", {})
+                  .get("trusted_metadata_transport_matrix", {})
+                  .get("report")
+              )
+              if not isinstance(embedded, dict):
+                  raise SystemExit("redacted evidence does not embed the trusted transport report")
+              generated = report.read_bytes()
+              expected = (json.dumps(embedded, indent=2, sort_keys=False) + "\n").encode("utf-8")
+              if generated != expected:
+                  raise SystemExit("executed transport report bytes do not match reviewed redacted evidence")
+              report_sha256 = hashlib.sha256(generated).hexdigest()
+          manifest = {
+              "schema_version": "macprovider.trusted-metadata-transport-verification.v1",
+              "status": "passed" if required else "not_required",
+              "source_sha": source_sha,
+              "evidence_sha": evidence_sha,
+              "requirement_ids": [item for item in requirement_ids.split(",") if item],
+              "test_selector": "ConsumeTrustedMetadataTransportMatrixTests/testTrustedMetadataTransportMatrixUsesRealTLSAndFailsClosed",
+              "report_sha256": report_sha256,
+              "workflow_run_id": os.environ["GITHUB_RUN_ID"],
+              "workflow_run_attempt": os.environ["GITHUB_RUN_ATTEMPT"],
+          }
+          pathlib.Path(manifest_path).write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+          PY
+
+      - name: Upload verified transport matrix
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: verified-local-consumer-transport-matrix-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/verified-local-consumer-transport-matrix/
+          if-no-files-found: error
+          include-hidden-files: false
+          retention-days: 1
+
   promote:
     name: Build, sign, validate, and export local-consumer endpoint promotion
     runs-on: ubuntu-latest
+    needs: verify_transport_matrix
     environment: production-release
     steps:
       - name: Checkout reviewed main controls
@@ -76,6 +205,53 @@ jobs:
           printf 'requirement_slug=%s\n' "$requirement_slug" >> "$GITHUB_OUTPUT"
           printf 'payload=%s\n' "$payload" >> "$GITHUB_OUTPUT"
           printf 'envelope=%s\n' "$envelope" >> "$GITHUB_OUTPUT"
+
+      - name: Download verified transport matrix
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: verified-local-consumer-transport-matrix-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/verified-local-consumer-transport-matrix/
+
+      - name: Verify transport matrix attestation before signing
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ steps.request.outputs.source_sha }}
+          EVIDENCE_SHA: ${{ steps.request.outputs.evidence_sha }}
+          REDACTED: ${{ steps.request.outputs.redacted }}
+          REQUIREMENT_IDS: ${{ steps.request.outputs.requirement_ids }}
+        run: |
+          set -euo pipefail
+          report_dir="$RUNNER_TEMP/verified-local-consumer-transport-matrix"
+          python3 - "$SOURCE_SHA" "$EVIDENCE_SHA" "$REDACTED" "$REQUIREMENT_IDS" "$report_dir" <<'PY'
+          import hashlib
+          import json
+          import pathlib
+          import sys
+
+          source_sha, evidence_sha, evidence_path, requirement_ids, report_dir = sys.argv[1:]
+          root = pathlib.Path(report_dir)
+          manifest = json.loads((root / "verification.json").read_text(encoding="utf-8"))
+          ids = [item for item in requirement_ids.split(",") if item]
+          required = bool({"SPEC-045-R003", "SPEC-045-R004", "SPEC-045-R008"}.intersection(ids))
+          expected_status = "passed" if required else "not_required"
+          if manifest.get("schema_version") != "macprovider.trusted-metadata-transport-verification.v1":
+              raise SystemExit("unexpected transport verification schema")
+          if manifest.get("status") != expected_status:
+              raise SystemExit("transport verification status does not match selected requirements")
+          if manifest.get("source_sha") != source_sha or manifest.get("evidence_sha") != evidence_sha:
+              raise SystemExit("transport verification source identity mismatch")
+          if manifest.get("requirement_ids") != ids:
+              raise SystemExit("transport verification requirement set mismatch")
+          if required:
+              report = (root / "trusted-metadata-transport-matrix.json").read_bytes()
+              evidence = json.loads(pathlib.Path(evidence_path).read_text(encoding="utf-8"))
+              embedded = evidence["support_artifacts"]["trusted_metadata_transport_matrix"]["report"]
+              expected = (json.dumps(embedded, indent=2, sort_keys=False) + "\n").encode("utf-8")
+              if report != expected:
+                  raise SystemExit("verified transport report differs from reviewed evidence")
+              if hashlib.sha256(report).hexdigest() != manifest.get("report_sha256"):
+                  raise SystemExit("verified transport report hash mismatch")
+          PY
 
       - name: Build unsigned local-consumer endpoint journey-result payload
         shell: bash
@@ -216,6 +392,11 @@ jobs:
               "signed_envelope": envelope,
               "signed_envelope_sha256": hashlib.sha256((root / envelope).read_bytes()).hexdigest(),
               "conformance_sha256": hashlib.sha256((root / "specs/CONFORMANCE.json").read_bytes()).hexdigest(),
+              "transport_verification_sha256": hashlib.sha256(
+                  pathlib.Path(os.environ["RUNNER_TEMP"])
+                  .joinpath("verified-local-consumer-transport-matrix", "verification.json")
+                  .read_bytes()
+              ).hexdigest(),
               "workflow_run_id": os.environ["GITHUB_RUN_ID"],
               "workflow_run_attempt": os.environ["GITHUB_RUN_ATTEMPT"],
           }

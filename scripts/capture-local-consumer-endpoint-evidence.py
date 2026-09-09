@@ -226,6 +226,11 @@ TRANSPORT_MATRIX_SCENARIO_IDS = (
     "zero_credential_bytes",
     "slow_drip_absolute_timeout",
 )
+TRANSPORT_MATRIX_SOURCE_FILES = (
+    "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift",
+    "phase3-binary/Sources/macprovider-cli/ConsumeTrustedPricing.swift",
+    "phase3-binary/Tests/macprovider-cliTests/ConsumeTrustedMetadataTransportMatrixTests.swift",
+)
 TRANSPORT_MATRIX_SUPPORT_ROLE = "trusted-metadata-transport-matrix"
 ALLOWED_GATEWAY_ORIGINS = {
     kind: set(origins)
@@ -342,15 +347,8 @@ def validate_transport_matrix_report(value: Any, *, source_sha: str) -> None:
         die("trusted_metadata_transport_matrix.transport.real_sockets must be true")
     if transport.get("connection_api") != "NWConnection":
         die("trusted_metadata_transport_matrix.transport.connection_api must equal 'NWConnection'")
-    source_files = transport.get("source_files")
-    if (
-        not isinstance(source_files, list)
-        or not source_files
-        or any(not isinstance(item, str) or not item.startswith("phase3-binary/") for item in source_files)
-    ):
-        die("trusted_metadata_transport_matrix.transport.source_files must list repository Swift source paths")
-    if not any(item.endswith(("ConsumeCommand.swift", "ConsumeTrustedPricing.swift")) for item in source_files):
-        die("trusted_metadata_transport_matrix.transport.source_files must identify the trusted metadata production path")
+    if transport.get("source_files") != list(TRANSPORT_MATRIX_SOURCE_FILES):
+        die(f"trusted_metadata_transport_matrix.transport.source_files must equal {list(TRANSPORT_MATRIX_SOURCE_FILES)}")
     scenarios = value.get("scenarios")
     if not isinstance(scenarios, list):
         die("trusted_metadata_transport_matrix.scenarios must be an array")

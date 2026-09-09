@@ -989,6 +989,7 @@ extension ConsumeUpstreamClient {
 final class ConsumePinnedUpstreamClient: ConsumeUpstreamClient, @unchecked Sendable {
     private static let trustedMetadataMaxReadNanoseconds: UInt64 = 10_000_000_000
     private typealias TrustedMetadataParametersFactory = @Sendable (_ serverName: String) -> NWParameters
+    private typealias TestEndpointValidator = @Sendable (_ endpoint: String) -> Bool
 
     private let maxBodyBytes: Int
     private let timeouts: ConsumeUpstreamTimeouts
@@ -1184,6 +1185,7 @@ final class ConsumePinnedUpstreamClient: ConsumeUpstreamClient, @unchecked Senda
         )
     }
 
+    #if DEBUG
     static func fetchTestTrustedMetadata(
         url: URL,
         endpoint: String,
@@ -1198,6 +1200,7 @@ final class ConsumePinnedUpstreamClient: ConsumeUpstreamClient, @unchecked Senda
             parametersFactory: parametersFactory
         )
     }
+    #endif
 
     private static func performTrustedMetadataConnection(
         url: URL,
@@ -1272,7 +1275,9 @@ final class ConsumePinnedUpstreamClient: ConsumeUpstreamClient, @unchecked Senda
     private static func fetch(
         upstreamRequest: ConsumeUpstreamRequest,
         maxBodyBytes: Int,
-        timeouts: ConsumeUpstreamTimeouts
+        timeouts: ConsumeUpstreamTimeouts,
+        endpointValidator: TestEndpointValidator? = nil,
+        parametersFactory: TrustedMetadataParametersFactory? = nil
     ) async throws -> ConsumeUpstreamResponse {
         guard var components = URLComponents(string: upstreamRequest.origin),
               components.scheme == "https",
@@ -1288,14 +1293,16 @@ final class ConsumePinnedUpstreamClient: ConsumeUpstreamClient, @unchecked Senda
               let port = NWEndpoint.Port(rawValue: UInt16(portValue)) else {
             throw ConsumeStartupError(code: "local_upstream_url_rejected")
         }
-        guard ConsumeEndpointConfig.isValidatedGlobalEndpoint(upstreamRequest.endpoint) else {
+        let endpointIsValid = endpointValidator?(upstreamRequest.endpoint)
+            ?? ConsumeEndpointConfig.isValidatedGlobalEndpoint(upstreamRequest.endpoint)
+        guard endpointIsValid else {
             throw ConsumeStartupError(code: "local_upstream_url_rejected")
         }
         components.path = "/v1/chat/completions"
         let connection = NWConnection(
             host: NWEndpoint.Host(upstreamRequest.endpoint),
             port: port,
-            using: tlsParameters(serverName: host)
+            using: parametersFactory?(host) ?? tlsParameters(serverName: host)
         )
         upstreamRequest.cancellation?.setCancel {
             connection.cancel()
@@ -1346,7 +1353,9 @@ final class ConsumePinnedUpstreamClient: ConsumeUpstreamClient, @unchecked Senda
         upstreamRequest: ConsumeUpstreamRequest,
         maxBodyBytes: Int,
         timeouts: ConsumeUpstreamTimeouts,
-        callbacks: ConsumeUpstreamStreamingCallbacks
+        callbacks: ConsumeUpstreamStreamingCallbacks,
+        endpointValidator: TestEndpointValidator? = nil,
+        parametersFactory: TrustedMetadataParametersFactory? = nil
     ) async throws -> ConsumeUpstreamStreamingResult {
         guard var components = URLComponents(string: upstreamRequest.origin),
               components.scheme == "https",
@@ -1362,14 +1371,16 @@ final class ConsumePinnedUpstreamClient: ConsumeUpstreamClient, @unchecked Senda
               let port = NWEndpoint.Port(rawValue: UInt16(portValue)) else {
             throw ConsumeStartupError(code: "local_upstream_url_rejected")
         }
-        guard ConsumeEndpointConfig.isValidatedGlobalEndpoint(upstreamRequest.endpoint) else {
+        let endpointIsValid = endpointValidator?(upstreamRequest.endpoint)
+            ?? ConsumeEndpointConfig.isValidatedGlobalEndpoint(upstreamRequest.endpoint)
+        guard endpointIsValid else {
             throw ConsumeStartupError(code: "local_upstream_url_rejected")
         }
         components.path = "/v1/chat/completions"
         let connection = NWConnection(
             host: NWEndpoint.Host(upstreamRequest.endpoint),
             port: port,
-            using: tlsParameters(serverName: host)
+            using: parametersFactory?(host) ?? tlsParameters(serverName: host)
         )
         upstreamRequest.cancellation?.setCancel {
             connection.cancel()
@@ -1417,6 +1428,7 @@ final class ConsumePinnedUpstreamClient: ConsumeUpstreamClient, @unchecked Senda
         }
     }
 
+    #if DEBUG
     static func trustedMetadataTLSParametersForTesting(
         serverName: String,
         trustAnchors: [SecCertificate],
@@ -1428,6 +1440,41 @@ final class ConsumePinnedUpstreamClient: ConsumeUpstreamClient, @unchecked Senda
             prohibitLoopback: !allowLoopback
         )
     }
+
+    static func fetchTestChatCompletions(
+        upstreamRequest: ConsumeUpstreamRequest,
+        maxBodyBytes: Int,
+        timeouts: ConsumeUpstreamTimeouts,
+        endpointValidator: @escaping @Sendable (_ endpoint: String) -> Bool,
+        parametersFactory: @escaping @Sendable (_ serverName: String) -> NWParameters
+    ) async throws -> ConsumeUpstreamResponse {
+        try await fetch(
+            upstreamRequest: upstreamRequest,
+            maxBodyBytes: maxBodyBytes,
+            timeouts: timeouts,
+            endpointValidator: endpointValidator,
+            parametersFactory: parametersFactory
+        )
+    }
+
+    static func fetchTestStreamingChatCompletions(
+        upstreamRequest: ConsumeUpstreamRequest,
+        maxBodyBytes: Int,
+        timeouts: ConsumeUpstreamTimeouts,
+        callbacks: ConsumeUpstreamStreamingCallbacks,
+        endpointValidator: @escaping @Sendable (_ endpoint: String) -> Bool,
+        parametersFactory: @escaping @Sendable (_ serverName: String) -> NWParameters
+    ) async throws -> ConsumeUpstreamStreamingResult {
+        try await fetchStreaming(
+            upstreamRequest: upstreamRequest,
+            maxBodyBytes: maxBodyBytes,
+            timeouts: timeouts,
+            callbacks: callbacks,
+            endpointValidator: endpointValidator,
+            parametersFactory: parametersFactory
+        )
+    }
+    #endif
 
     private static func tlsParameters(
         serverName: String,

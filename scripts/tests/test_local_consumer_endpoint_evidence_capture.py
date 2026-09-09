@@ -101,6 +101,7 @@ def valid_transport_matrix(commit: str) -> dict[str, object]:
             "source_files": [
                 "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift",
                 "phase3-binary/Sources/macprovider-cli/ConsumeTrustedPricing.swift",
+                "phase3-binary/Tests/macprovider-cliTests/ConsumeTrustedMetadataTransportMatrixTests.swift",
             ],
         },
         "scenarios": [
@@ -354,6 +355,7 @@ class LocalConsumerEndpointEvidenceCaptureTests(unittest.TestCase):
             "false_result": lambda report: report["scenarios"][0].update({"status": "fail"}),
             "commit_mismatch": lambda report: report["repository"].update({"commit": "2" * 40}),
             "fake_transport": lambda report: report["transport"].update({"connection_api": "URLSession"}),
+            "incomplete_source_binding": lambda report: report["transport"]["source_files"].pop(1),
             "secret_bearing_report": lambda report: report.update({"raw_request": "Authorization: Bearer secret-value-1234567890"}),
         }
         for name, mutate in cases.items():
