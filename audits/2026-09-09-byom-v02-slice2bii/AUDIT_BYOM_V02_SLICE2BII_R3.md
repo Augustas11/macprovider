@@ -34,3 +34,13 @@ that adds this record:
   carried as documented coverage boundary.
 
 R4 re-fires the code and security lanes only.
+
+## R4 (closure; code + security lanes on the final diff)
+
+| Lane | Verdict |
+|---|---|
+| code-reviewer | **0 CRITICAL / 0 HIGH / 0 MEDIUM / 0 LOW / 0 INFO** |
+| security-reviewer | **0 CRITICAL / 0 HIGH / 0 MEDIUM / 0 LOW / 0 INFO** |
+
+Every R3 resolution verified; no new findings. Bar met across all three lanes
+(architect at the bar since R3).
