@@ -108,6 +108,20 @@ class BYOMJourneyCaptureTests(unittest.TestCase):
             self.capture(selector, manifest, manifest_path)
         self.assertIn(fragment, str(caught.exception))
 
+    def test_accepts_a_timed_out_evaluation_capture(self) -> None:
+        # A real physical run can time out on the probe; the CLI encodes that as
+        # health_result "timed_out" and capture must not fail closed on it.
+        def mutator(_manifest, root):
+            path = root / "captures" / "evaluate-candidate.json"
+            document = json.loads(path.read_text(encoding="utf-8"))
+            document["health_result"] = "timed_out"
+            document["warnings"] = sorted(set(document["warnings"]) | {"adapter_timeout", "evaluation_failed"})
+            path.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+
+        manifest, manifest_path = self.mutate("discovery", mutator)
+        evidence = self.capture("discovery", manifest, manifest_path)
+        self.assertEqual("macprovider.provider-byom-discovery-evidence.v1", evidence["schema_version"])
+
     def test_discovery_fixture_produces_schema_valid_evidence(self) -> None:
         evidence = self.capture("discovery")
         self.assertEqual("macprovider.provider-byom-discovery-evidence.v1", evidence["schema_version"])

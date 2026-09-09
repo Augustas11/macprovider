@@ -799,7 +799,9 @@ ADAPTER_STATUSES = frozenset({
 # `adapters[].origin_class`: null for a non-HTTP adapter such as `mlx_cache`.
 ORIGIN_CLASSES = frozenset({"loopback_http", "rejected"})
 # `provider_byom_evaluation.v1` scalars, from the evaluation encoder.
-EVALUATION_HEALTH_RESULTS = frozenset({"passed", "failed", "blocked"})
+# BYOMDiscovery.swift emits `timed_out` for CancellationError / URLError.timedOut
+# (the hermetic stubs never time out, so only a physical run reaches it).
+EVALUATION_HEALTH_RESULTS = frozenset({"passed", "failed", "blocked", "timed_out"})
 EVALUATION_ADAPTER_IDENTITIES = frozenset({
     "openai_compatible_loopback", "mlx_cache_local_artifact", "unknown",
 })
