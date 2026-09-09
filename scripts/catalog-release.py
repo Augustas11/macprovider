@@ -623,7 +623,20 @@ def verify_ed25519(public_key: bytes, signature: bytes, message: bytes, label: s
         fail(f"{label}: signature verification failed")
 
 
-def generated_swift(candidate: bytes, demand: bytes, rate_card: bytes, signer_key_id: str | None = None) -> str:
+def generated_swift(
+    candidate: bytes,
+    demand: bytes,
+    rate_card: bytes,
+    signer_key_id: str | None = None,
+    artifacts: bytes | None = None,
+) -> str:
+    """The compiled-in snapshot the CLI falls back to (SPEC-023 §3.5, §3.7.2).
+
+    `artifacts` is the published artifact feed of an artifact-bound release and
+    is baked as `bakedArtifactFeedJSON`; a rate-card-bound release bakes `nil`,
+    which the CLI treats exactly like v0.1 (§3.7.6 rule 6). Baking is how the
+    feed reaches the provider — it is never a payload member (§3.7.8 Stage A).
+    """
     trusted = keyring()
     swift_keys = "\n".join(
         f'        "{key_id}": "{base64.b64encode(raw).decode()}",'
@@ -651,7 +664,14 @@ def generated_swift(candidate: bytes, demand: bytes, rate_card: bytes, signer_ke
         + swift_keys
         + "\n    ]\n"
         + f"\n    static let bakedCatalogSignerKeyID: String? = {swift_signer}\n"
-        "}\n"
+        + (
+            "\n    static let bakedArtifactFeedJSON: String? = \"\"\"\n"
+            + "    " + artifacts.decode("utf-8")
+            + "\n    \"\"\"\n"
+            if artifacts is not None
+            else "\n    static let bakedArtifactFeedJSON: String? = nil\n"
+        )
+        + "}\n"
     )
 
 
@@ -3357,7 +3377,7 @@ def generate(
         )
         bindings = artifact_bindings(artifact_obj)
     binding_bytes = derive_tier2_identity_binding(candidate, candidate_obj)
-    swift_text = generated_swift(candidate, demand, rate_card, signer_key_id)
+    swift_text = generated_swift(candidate, demand, rate_card, signer_key_id, artifacts=artifacts)
     next_ledger = updated_release_ledger(manifest_bytes, bindings, intake_digest)
     rejected_go = generated_rejected_releases_go(validate_release_ledger(next_ledger))
     CATALOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -3526,7 +3546,7 @@ def verify(previous_release_dir: pathlib.Path | None = None) -> None:
     for path, body in expected.items():
         if path.read_bytes() != body:
             fail(f"generated drift: {path}")
-    if SWIFT_GENERATED.read_text() != generated_swift(candidate, demand, rate_card):
+    if SWIFT_GENERATED.read_text() != generated_swift(candidate, demand, rate_card, artifacts=artifacts):
         fail(f"generated drift: {SWIFT_GENERATED}")
     tier2, tier2_obj, tier2_signer_key_id = require_tier2_catalog()
     check_tier2_binding(candidate, tier2)

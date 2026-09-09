@@ -1357,6 +1357,55 @@ class PendingSurfaceListTest(unittest.TestCase):
                 self.assertIn("SPEC-023-R", detail)
 
 
+class ArtifactFeedConformanceCorpusTest(unittest.TestCase):
+    """The shared §3.7 corpus (`scripts/tests/fixtures/artifact_feed_conformance.json`)
+    is read by this generator, the Go coordinator, and the Swift CLI, so the
+    three validators cannot drift on the closed schema, the identity matrix,
+    release binding, or primary consistency."""
+
+    CORPUS = json.loads((ROOT / "scripts" / "tests" / "fixtures" / "artifact_feed_conformance.json").read_text())
+
+    @staticmethod
+    def apply(feed: dict, ops: list[dict]) -> None:
+        for op in ops:
+            *parents, leaf = op["path"]
+            target = feed
+            for key in parents:
+                target = target[key]
+            if op["op"] == "set":
+                target[leaf] = copy.deepcopy(op["value"])
+            elif op["op"] == "delete":
+                del target[leaf]
+            else:
+                raise AssertionError(op)
+
+    def test_every_corpus_case_matches_the_generator_validator(self):
+        candidate_obj = catalog_release.validate_candidate(catalog_release.canonical_sorted_bytes(self.CORPUS["candidate"]))
+        candidate = catalog_release.canonical_bytes(candidate_obj)
+        self.assertGreaterEqual(len(self.CORPUS["cases"]), 25)
+        for case in self.CORPUS["cases"]:
+            with self.subTest(case["name"]):
+                feed = copy.deepcopy(self.CORPUS["feed"])
+                feed["candidate_catalog_sha256"] = catalog_release.sha256(candidate)
+                self.apply(feed, case["ops"])
+                data = catalog_release.canonical_sorted_bytes(feed)
+                if case["expect"] == "accept":
+                    catalog_release.validate_artifact_feed(data, candidate, candidate_obj)
+                else:
+                    with self.assertRaises(catalog_release.CatalogError):
+                        catalog_release.validate_artifact_feed(data, candidate, candidate_obj)
+
+    def test_baked_swift_snapshot_carries_the_artifact_feed_only_when_bound(self):
+        candidate = CANDIDATE_BYTES
+        demand = (CATALOG / "demand-rank.json").read_bytes()
+        rate_card = RATE_CARD_BYTES
+        unbound = catalog_release.generated_swift(candidate, demand, rate_card)
+        self.assertIn("static let bakedArtifactFeedJSON: String? = nil", unbound)
+        bound = catalog_release.generated_swift(candidate, demand, rate_card, artifacts=b'{"models":{}}')
+        self.assertIn('static let bakedArtifactFeedJSON: String? = """', bound)
+        self.assertIn('{"models":{}}', bound)
+
+
 class RateGlobalsTest(unittest.TestCase):
     """SPEC-023 §3.3.1 rules 3+9 / AC-CAT-14: the release-global share and
     multiplier, exactly as coordinator billing derives them."""
