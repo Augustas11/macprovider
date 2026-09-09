@@ -49,7 +49,7 @@ required_workflow = [
     'git cat-file -e "${SOURCE_SHA_INPUT}^{commit}"',
     'git merge-base --is-ancestor "$SOURCE_SHA_INPUT" "$GITHUB_SHA"',
     '[[ "$REQUIREMENT_IDS_INPUT" =~ ^SPEC-045-R00[1-8](,SPEC-045-R00[1-8])*$ ]]',
-    "evidence_sha=%s",
+    "printf 'evidence_sha=%s\\n' \"$GITHUB_SHA\" >> \"$GITHUB_OUTPUT\"",
     "requirement_slug=",
     "tr '[:upper:]' '[:lower:]'",
     "tr ',' '-'",
