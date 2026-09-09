@@ -169,11 +169,31 @@ rc.write_text(json.dumps(obj, separators=(",", ":"), sort_keys=True))
 print(f"re-stamped candidate/demand version={release_id} generated_at={now_iso} (rate-card date only)")
 PY
 
+# SPEC-023 §3.7.8: a freshness renewal NEVER activates the artifact feed. With
+# neither variable set this stays the four-feed renewal it has always been, even
+# once autotune-artifacts-source.json is committed with unmeasured size_bytes.
+# Once a release IS artifact-bound, AUTOTUNE_PREVIOUS_RELEASE_DIR names the
+# previous signed release directory the §3.7.4 rebinding check requires.
+GENERATE_ARGS=(generate --signer-key-id "$KEY_ID")
+case "${AUTOTUNE_ACTIVATE_ARTIFACT_FEED:-0}" in
+  1|true|yes) GENERATE_ARGS+=(--activate-artifact-feed) ;;
+  0|false|no|"") ;;
+  *) fatal "AUTOTUNE_ACTIVATE_ARTIFACT_FEED must be 1/0 (got ${AUTOTUNE_ACTIVATE_ARTIFACT_FEED})" ;;
+esac
+if [ -n "${AUTOTUNE_PREVIOUS_RELEASE_DIR:-}" ]; then
+  [ -d "$AUTOTUNE_PREVIOUS_RELEASE_DIR" ] ||
+    fatal "AUTOTUNE_PREVIOUS_RELEASE_DIR is not a directory: $AUTOTUNE_PREVIOUS_RELEASE_DIR"
+  GENERATE_ARGS+=(--previous-release-dir "$AUTOTUNE_PREVIOUS_RELEASE_DIR")
+fi
+
 log "regenerating canonical feed + manifest + ledger for $RELEASE_ID"
-( cd "$WORKTREE" && python3 scripts/catalog-release.py generate --signer-key-id "$KEY_ID" )
+( cd "$WORKTREE" && python3 scripts/catalog-release.py "${GENERATE_ARGS[@]}" )
 
 log "signing feed bytes with $KEY_ID (in-memory public-key derivation check; no bytes printed)"
-( cd "$WORKTREE" && AUTOTUNE_STATIC_KEY_ID="$KEY_ID" bash scripts/resign-autotune-static.sh )
+( cd "$WORKTREE" && AUTOTUNE_STATIC_KEY_ID="$KEY_ID" \
+  AUTOTUNE_ACTIVATE_ARTIFACT_FEED="${AUTOTUNE_ACTIVATE_ARTIFACT_FEED:-0}" \
+  AUTOTUNE_PREVIOUS_RELEASE_DIR="${AUTOTUNE_PREVIOUS_RELEASE_DIR:-}" \
+  bash scripts/resign-autotune-static.sh )
 
 # ---------------------------------------------------------------------------
 # 2. Assemble the 9-file release directory and gate it with verify-directory.
@@ -190,6 +210,16 @@ done
 for f in autotune-candidates.json.sig demand-rank.json.sig rate-card.json.sig; do
   install -m 0644 "$STATIC_DIR/$f" "$RELEASE_STAGE/$f"
 done
+# Once the release is artifact-bound its release.json binds a FIFTH feed, so the
+# staged directory must carry the artifact feed and its sidecar or the
+# verify-directory gate below fails on a release that is otherwise correct.
+if [ -f "$CAT_DIR/autotune-artifacts.json" ]; then
+  install -m 0644 "$CAT_DIR/autotune-artifacts.json" "$RELEASE_STAGE/autotune-artifacts.json"
+  [ -f "$STATIC_DIR/autotune-artifacts.json.sig" ] ||
+    fatal "artifact-bound release is missing $STATIC_DIR/autotune-artifacts.json.sig"
+  install -m 0644 "$STATIC_DIR/autotune-artifacts.json.sig" "$RELEASE_STAGE/autotune-artifacts.json.sig"
+  log "staged artifact-bound five-feed release directory"
+fi
 # Strip any macOS AppleDouble junk before it can reach the release dir.
 find "$RELEASE_STAGE" -name '._*' -delete 2>/dev/null || true
 

@@ -46,9 +46,32 @@ print(row["public_key_base64"])
 PY
 )" || fatal "key ID $KEY_ID is not authorized by the trusted keyring"
 
+# SPEC-023 §3.7.8: the artifact feed is NEVER activated implicitly. This script
+# runs `generate` twice (once to materialize the bytes it signs, once to rebind
+# release.json to the fresh sidecars), so both invocations must be handed the
+# same artifact-feed inputs or the second would disagree with the first.
+#
+#   AUTOTUNE_ACTIVATE_ARTIFACT_FEED=1     cut the FIRST artifact-bound release
+#   AUTOTUNE_PREVIOUS_RELEASE_DIR=<dir>   previous signed artifact-bound release,
+#                                         required for every cut after activation
+#
+# With neither set on a pre-activation repo this stays exactly the four-feed
+# resign it has always been, even with autotune-artifacts-source.json committed.
+GENERATE_ARGS=(generate --signer-key-id "$KEY_ID")
+case "${AUTOTUNE_ACTIVATE_ARTIFACT_FEED:-0}" in
+  1|true|yes) GENERATE_ARGS+=(--activate-artifact-feed) ;;
+  0|false|no|"") ;;
+  *) fatal "AUTOTUNE_ACTIVATE_ARTIFACT_FEED must be 1/0 (got ${AUTOTUNE_ACTIVATE_ARTIFACT_FEED})" ;;
+esac
+if [ -n "${AUTOTUNE_PREVIOUS_RELEASE_DIR:-}" ]; then
+  [ -d "$AUTOTUNE_PREVIOUS_RELEASE_DIR" ] ||
+    fatal "AUTOTUNE_PREVIOUS_RELEASE_DIR is not a directory: $AUTOTUNE_PREVIOUS_RELEASE_DIR"
+  GENERATE_ARGS+=(--previous-release-dir "$AUTOTUNE_PREVIOUS_RELEASE_DIR")
+fi
+
 # Materialize canonical feed bytes before signing. Supplying the intended
 # signer avoids trusting or parsing stale sidecars while repairing a release.
-python3 "$REPO_ROOT/scripts/catalog-release.py" generate --signer-key-id "$KEY_ID"
+python3 "$REPO_ROOT/scripts/catalog-release.py" "${GENERATE_ARGS[@]}"
 
 private_b64="$(tr -d '[:space:]' < "$KEY_PATH")"
 [ -n "$private_b64" ] || fatal "private key file is empty"
@@ -152,6 +175,9 @@ if [ -f "$artifacts_json" ]; then
   mv "$STATIC_DIR/autotune-artifacts.json.sig.new" "$STATIC_DIR/autotune-artifacts.json.sig"
 fi
 
-python3 "$REPO_ROOT/scripts/catalog-release.py" generate --signer-key-id "$KEY_ID"
+# Regenerating the SAME release_id is idempotent: the state machine excludes this
+# release's own ledger row from the rebinding history, so the post-sign rebind
+# neither demands a previous release nor rejects its own bindings.
+python3 "$REPO_ROOT/scripts/catalog-release.py" "${GENERATE_ARGS[@]}"
 python3 "$REPO_ROOT/scripts/catalog-release.py" verify
 printf '[resign-autotune-static] Signed and verified release with key_id=%s\n' "$KEY_ID"

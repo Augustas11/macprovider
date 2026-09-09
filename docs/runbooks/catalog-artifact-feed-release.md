@@ -17,11 +17,56 @@ artifact set to a candidate row would fail-close every deployed provider (§3.7.
 |---|---|---|
 | `phase3-binary/catalog/autotune/autotune-artifacts-source.json` | no | operator-authored artifact set. `schema_version: macprovider.autotune-artifacts-source.v1`, closed top level `{schema_version, source, models}`. Its `models` block is the published feed's `models` block verbatim. |
 | `phase3-binary/catalog/autotune/rate-card-source.json` | **never** | §3.3.1 rule 3 rate-card authoring source. Closed top level `{schema_version, generated_at, policy_version, usd_per_million_credits, provider_share_bps, global_multiplier_ppm, rows, classes}`. Never served, never baked, never bound in `release.json`, never in the ledger feed set. |
-| `phase3-binary/catalog/autotune/intake-decision.json` | no | optional §16.8 manifest; its digest becomes the ledger row's `intake_decision_sha256`. Absent ⇒ `null`. |
-| previous release's signed `autotune-artifacts.json` | — | `--previous-artifact-feed`, a REQUIRED input once any release has been recorded with the artifact-bound feed set. |
+| `phase3-binary/catalog/autotune/intake-decision.json` | no | §16.8 manifest; its digest becomes the ledger row's `intake_decision_sha256`. REQUIRED whenever the release adds a `listed` row or promotes a row to `recommendable`: absence then fails the release closed rather than silently recording `null`. |
+| previous signed release DIRECTORY | — | `--previous-release-dir`, a REQUIRED input once an EARLIER release has been recorded with the artifact-bound feed set. Its `release.json`, feed digests, and detached signatures are verified against the trusted keyring, and its published artifact bindings must equal that release's ledger row exactly. |
 
 `autotune-artifacts.json` and its `.sig` are the published outputs, served at
 `/v1/catalog-artifacts` and `/v1/catalog-artifacts.sig`.
+
+## Activation state
+
+The artifact feed is **never** activated implicitly. Committing
+`autotune-artifacts-source.json` changes nothing: `generate`,
+`scripts/resign-autotune-static.sh`, and the scheduled freshness renewal keep
+producing the rate-card-bound four-feed release they produce today, and the
+source is schema-validated only (unmeasured `size_bytes` is legal in an
+unactivated source). The state is read from the release ledger and one explicit
+flag:
+
+| State | Condition | Generator behaviour |
+|---|---|---|
+| pre-activation | no earlier artifact-bound ledger row, no published feed, no flag | four-feed release; source schema-validated only |
+| activation | `--activate-artifact-feed` on a NEW `release_id`, or the idempotent re-run of that same release | builds, binds, and records the feed; no previous release required |
+| post-activation | an EARLIER ledger row is artifact-bound | feed is mandatory; `--previous-release-dir` is required |
+
+Regenerating the SAME `release_id` — what `resign-autotune-static.sh` does
+before and after replacing the sidecars — excludes that release's own ledger row
+from the rebinding history, so the sign/re-generate/verify sequence is
+idempotent and needs no previous-release input.
+
+Print the current state and everything still blocking activation:
+
+```bash
+python3 scripts/catalog-release.py status
+```
+
+`--activate-artifact-feed` refuses while any generator-side prerequisite it
+lists is unmet.
+
+### What the 2b/2c slices must land before activation
+
+`status` prints these as pending. Stage A is not servable until each is done, and
+this slice deliberately ships none of them:
+
+| Surface | File | Change |
+|---|---|---|
+| CLI release payload | `phase3-binary/dist/package.sh` (~196) | copy `autotune-artifacts.json` and `autotune-artifacts.json.sig` alongside the candidate/demand/rate-card feeds |
+| GitHub release assets | `.github/workflows/release.yml` (~1385, ~1418) | publish both artifact files with the other static feeds |
+| live release gate | `scripts/verify-live-coordinator-release-gate.py` (~17) | add the signed feed to the served-feed set the gate checks |
+| coordinator serving | `phase4-coordinator/dist/nginx-coordinator.malibu.tech.conf` | exact `location = /v1/catalog-artifacts` and `location = /v1/catalog-artifacts.sig` allow-through blocks before the generic `location /v1/ { return 404; }`, proxying to `http://127.0.0.1:8443` with no `Authorization` requirement, exactly as the rate-card routes do |
+
+`components.catalog.files` stays the exact nine-name set in every one of these
+(Stage A, below).
 
 ## Current state
 
@@ -108,8 +153,11 @@ publish the new bytes under a **new** `artifact_id` and retire the old id by
 publishing it with `verification_status: "blocked"`. Removing the pair and
 reintroducing it later with different bytes fails exactly the same way — removal
 is not an escape hatch. The generator reconstructs prior bindings from the
-release ledger plus `--previous-artifact-feed`, so an auditor holding those two
-inputs can reach the same verdict without trusting the generator.
+release ledger plus the authenticated `--previous-release-dir`, so an auditor
+holding those two inputs can reach the same verdict without trusting the
+generator. `verify` applies the same rule to the ledger's whole history, so a
+hand-assembled release that reuses a `(model_key, artifact_id)` under different
+bytes is rejected even though generation never produced it.
 
 ## Class rate rows
 
@@ -155,19 +203,41 @@ release may not be enriched with an artifact feed. Bump the candidate catalog
 # 1. Author: fill every size_bytes, add artifacts, set rate_class per key.
 $EDITOR phase3-binary/catalog/autotune/autotune-artifacts-source.json
 
-# 2. Generate. Omit --previous-artifact-feed only for the FIRST artifact-bound
-#    release; it is required for every release after that.
+# 2. Confirm nothing is still blocking activation.
+python3 scripts/catalog-release.py status
+
+# 3. Activate. The flag is REQUIRED for the first artifact-bound release and is
+#    refused once one exists; every later release passes --previous-release-dir
+#    instead.
 python3 scripts/catalog-release.py generate \
-  --signer-key-id streamvc-autotune-static-v4
+  --signer-key-id streamvc-autotune-static-v4 \
+  --activate-artifact-feed
 
-# 3. Sign every feed with the SAME static-feed key (signer equality is checked).
-bash scripts/resign-autotune-static.sh
+# 4. Sign every feed with the SAME static-feed key (signer equality is checked).
+#    The signer re-runs `generate` with the same artifact-feed inputs, so pass
+#    them through the environment rather than editing the script.
+AUTOTUNE_ACTIVATE_ARTIFACT_FEED=1 bash scripts/resign-autotune-static.sh
 
-# 4. Verify the whole release, including the artifact feed's signature.
+# 5. Verify the whole release, including the artifact feed's signature.
 python3 scripts/catalog-release.py verify
 bash scripts/test-catalog-release.sh
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest scripts.tests.test_catalog_artifact_feed
 ```
+
+Every release AFTER the activation release names the previous signed release
+directory instead of the flag:
+
+```bash
+python3 scripts/catalog-release.py generate \
+  --signer-key-id streamvc-autotune-static-v4 \
+  --previous-release-dir /path/to/<previous-release-id>-<candidate-sha16>
+AUTOTUNE_PREVIOUS_RELEASE_DIR=/path/to/<previous-release-id>-<candidate-sha16> \
+  bash scripts/resign-autotune-static.sh
+```
+
+`scripts/renew-autotune-static-feed.sh` reads the same two variables and, once a
+release is artifact-bound, stages `autotune-artifacts.json` and its `.sig` into
+the release directory it gates with `verify-directory`.
 
 `generate` writes `autotune-artifacts.json` to both
 `phase3-binary/catalog/autotune/` and `phase3-binary/dist/static/`, binds it in
@@ -177,12 +247,17 @@ release in a `macprovider.autotune-release-ledger.v3` row carrying
 regardless of `verification_status`, ascending by `model_key` then `artifact_id`)
 and `intake_decision_sha256`.
 
-Serving: add exact `location = /v1/catalog-artifacts` and
-`location = /v1/catalog-artifacts.sig` allow-through blocks before the generic
-`location /v1/ { return 404; }` in
-`phase4-coordinator/dist/nginx-coordinator.malibu.tech.conf`, proxying to
-`http://127.0.0.1:8443` with no `Authorization` requirement, exactly as the
-rate-card routes do.
+**Intake decisions.** `intake_decision_sha256` may be `null` only for a release
+that adds no `listed` row and promotes no row to `recommendable`. The generator
+compares this release's candidate `runtime_status` per key against the previous
+release's — from `--previous-release-dir`, or, for the activation release, from
+the ledger's recorded candidate digest, which proves the rows are unchanged when
+the catalog was only re-stamped. If a transition is present and
+`intake-decision.json` is absent, the release fails closed; if prior state cannot
+be established after activation, it fails closed too.
+
+Serving is a 2b/2c surface: see "What the 2b/2c slices must land before
+activation" above.
 
 ## Stage A vs Stage B
 

@@ -17,6 +17,7 @@ import subprocess
 import sys
 import tempfile
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -735,6 +736,22 @@ def validate_rate_card(data: bytes) -> dict:
         share = row["provider_share_bps"]
         if not isinstance(share, int) or isinstance(share, bool) or not 0 <= share <= 10000:
             fail(f"rate-card row {key}: provider_share_bps must be in [0,10000]")
+    # SPEC-023 §3.3.1 rule 3: `provider_share_bps` and `global_multiplier_ppm` are
+    # RELEASE-GLOBAL values materialised onto every published row, "identical
+    # across every row of a release". The published feed carries them only per
+    # row, so the `default` row is their in-band representation and every other
+    # row MUST equal it. This lives in the shared validator, not in expansion, so
+    # `verify`, `verify-directory`, and the parity gate all enforce it on bytes
+    # they did not generate (a signed feed whose non-default row carries a
+    # different share would otherwise verify).
+    globals_row = rows["default"]
+    for key in sorted(rows):
+        for field in ("provider_share_bps", "global_multiplier_ppm"):
+            if rows[key][field] != globals_row[field]:
+                fail(
+                    f"rate-card row {key}: {field}={rows[key][field]} is not the release-global "
+                    f"value {globals_row[field]}; SPEC-023 §3.3.1 rule 3 requires it on every row"
+                )
     expected_version = rate_card_projection_hash(value)
     if value["version"] != expected_version:
         fail(f"rate-card: version must equal projection hash {expected_version}")
@@ -806,26 +823,41 @@ def validate_rate_card_source(data: bytes, label: str = "rate-card-source") -> d
 def expand_rate_card(source_obj: dict, rate_classes: dict[str, str], candidate_obj: dict) -> bytes:
     """Materialise the published §3.3 rate card from the §3.3.1 authoring source.
 
-    `rate_classes` maps a normalized model key to the `rate_class` its artifact-feed
-    entry declares. Precedence is rule 5: an explicit source row is published
-    verbatim and the class expansion for that key is discarded. Because a source
-    row is schema-forced to carry all three credit fields, a partial override is
-    not representable, so the rule-5 ambiguity case cannot be authored. Rule 4's
+    `rate_classes` maps an artifact-feed model key to the `rate_class` its entry
+    declares. Precedence is rule 5: an explicit source row is published verbatim
+    and the class expansion for that key is discarded. Because a source row is
+    schema-forced to carry all three credit fields, a partial override is not
+    representable, so the rule-5 ambiguity case cannot be authored. Rule 4's
     release-global `provider_share_bps` / `global_multiplier_ppm` are materialised
     onto every published row without rounding or unit conversion.
+
+    An explicit row resolves the same way rule 7 (and SPEC-005 §5.5 rate
+    resolution) resolves one: by EXACT key first, then by `NormalizeModelKey`.
+    The catalog carries both spellings — the artifact feed and candidate catalog
+    key `nvidia/nemotron-3-nano-30b-a3b` is priced by the published row
+    `nemotron-3-nano-30b-a3b` — so exact-key-only lookup would treat a
+    fully-priced key as unpriced and demand class rates for it. Resolving through
+    normalization publishes NO new row for the key: the explicit row already
+    prices it, and adding a second spelling would change the published bytes.
+    A declared `rate_class` whose class has no rates is therefore an error only
+    when no explicit row resolves for that key.
     """
     rows: dict[str, dict] = {}
     for key in sorted(source_obj["rows"]):
         rows[key] = dict(source_obj["rows"][key])
     for key in sorted(rate_classes):
-        if key in rows:
+        if key in rows and key != "default":
+            continue
+        normalized = normalize_model_key(key)
+        if normalized in rows and normalized != "default":
             continue
         name = rate_classes[key]
         entry = source_obj["classes"].get(name)
         if entry is None:
             fail(
                 f"rate-card expansion: model key {key!r} declares rate_class {name!r} "
-                "but the rate-card source has no rates for that class"
+                "but the rate-card source has no rates for that class, and no explicit "
+                f"row resolves for it by exact key or NormalizeModelKey ({normalized!r})"
             )
         rows[key] = dict(entry)
     for row in rows.values():
@@ -939,6 +971,27 @@ def parse_coordinator_rewards(text: str) -> tuple[float, float, dict[str, dict]]
         fail("coordinator.yaml: rewards.provider_share and rewards.global_multiplier must be numbers")
 
 
+def scaled_nonnegative_integer(raw: float, scale: int, label: str) -> int:
+    """Port of Go `int64(math.Round(v * scale))` for a non-negative `v`.
+
+    `billing.ParseShareBps` / `billing.ParseMultiplierPPM` round HALF AWAY FROM
+    ZERO; Python's built-in `round` rounds half to EVEN. At a value that scales
+    exactly onto a half unit (`provider_share: 0.00005` → 0.5 bps) the two
+    disagree by one unit, so the release gate would accept a signed
+    `provider_share_bps` the coordinator never derives. Rounding a `Decimal`
+    parsed from the value's decimal text with `ROUND_HALF_UP` reproduces the Go
+    result exactly for the non-negative domain the config admits, without
+    inheriting a second binary-float rounding step.
+    """
+    try:
+        value = Decimal(str(raw))
+    except InvalidOperation:
+        fail(f"{label}: {raw!r} is not a decimal number")
+    if not value.is_finite() or value < 0:
+        fail(f"{label}: expected a finite non-negative decimal, got {raw!r}")
+    return int((value * scale).quantize(Decimal(1), rounding=ROUND_HALF_UP))
+
+
 def check_rate_card_parity(rate_card_obj: dict, coordinator_text: str) -> None:
     """SPEC-023 §3.3.1 rule 9 / AC-CAT-14: generated-feed vs billing-config parity.
 
@@ -968,18 +1021,27 @@ def check_rate_card_parity(rate_card_obj: dict, coordinator_text: str) -> None:
         unknown = sorted(set(coordinator_row) - set(COORDINATOR_RATE_FIELD_MAP.values()))
         if unknown:
             fail(f"rate-card parity: coordinator rewards.rate_card.{key} carries non-credit fields {unknown}")
-    default_row = published["default"]
     # Mirrors billing.ParseShareBps / billing.ParseMultiplierPPM (round-half-away).
-    if int(round(share * 10000)) != default_row["provider_share_bps"]:
-        fail(
-            f"rate-card parity: provider_share_bps={default_row['provider_share_bps']} disagrees "
-            f"with coordinator rewards.provider_share={share}"
-        )
-    if int(round(multiplier * 1000000)) != default_row["global_multiplier_ppm"]:
-        fail(
-            f"rate-card parity: global_multiplier_ppm={default_row['global_multiplier_ppm']} disagrees "
-            f"with coordinator rewards.global_multiplier={multiplier}"
-        )
+    # Checked on EVERY published row, not only `default`: the globals are
+    # release-global (rule 3) and the coordinator holds exactly one of each, so a
+    # non-default row that disagrees is a money-path divergence even though the
+    # projection hash only quotes the default row's copy.
+    expected_share = scaled_nonnegative_integer(share, 10000, "coordinator rewards.provider_share")
+    expected_multiplier = scaled_nonnegative_integer(
+        multiplier, 1000000, "coordinator rewards.global_multiplier"
+    )
+    for key in sorted(published):
+        row = published[key]
+        if row["provider_share_bps"] != expected_share:
+            fail(
+                f"rate-card parity: {key}.provider_share_bps={row['provider_share_bps']} disagrees "
+                f"with coordinator rewards.provider_share={share}"
+            )
+        if row["global_multiplier_ppm"] != expected_multiplier:
+            fail(
+                f"rate-card parity: {key}.global_multiplier_ppm={row['global_multiplier_ppm']} disagrees "
+                f"with coordinator rewards.global_multiplier={multiplier}"
+            )
 
 
 def coordinator_rate_card_yaml(rate_card_obj: dict) -> str:
@@ -1306,50 +1368,193 @@ def artifact_rate_classes(feed_obj: dict) -> dict[str, str]:
     }
 
 
-def recorded_artifact_bindings(ledger: dict[str, dict]) -> dict[tuple[str, str], tuple[str, str]]:
-    """Reconstruct every prior `(model_key, artifact_id) -> (hash_algorithm, hash)`
-    binding from the release ledger, which §3.7.8 makes the durable authority for
-    the §3.7.4 cross-release rebinding check.
+def artifact_binding_history(
+    releases: dict[str, dict],
+    label: str = "release ledger",
+) -> dict[tuple[str, str], tuple[str, str]]:
+    """Reconstruct every `(model_key, artifact_id) -> (hash_algorithm, hash)`
+    binding recorded across `releases`, which §3.7.8 makes the durable authority
+    for the §3.7.4 cross-release rebinding check.
+
+    Two rows recording one pair under two identities is itself a §3.7.4 violation
+    — a retired `artifact_id` stays bound to its bytes forever — so this fails
+    closed rather than letting a later row shadow an earlier one.
     """
     prior: dict[tuple[str, str], tuple[str, str]] = {}
-    for release_id in sorted(ledger["releases"]):
-        record = ledger["releases"][release_id]
+    for release_id in sorted(releases):
+        record = releases[release_id]
+        if not isinstance(record, dict):
+            continue
         for binding in record.get("artifact_bindings") or []:
             pair = (binding["model_key"], binding["artifact_id"])
             identity = (binding["hash_algorithm"], binding["hash"])
             existing = prior.get(pair)
             if existing is not None and existing != identity:
                 fail(
-                    f"release ledger: artifact {pair[0]}/{pair[1]} is recorded with two "
-                    "different bindings across published releases"
+                    f"{label}: artifact {pair[0]}/{pair[1]} is recorded with two "
+                    f"different bindings across published releases "
+                    f"({existing[0]}:{existing[1]} vs {identity[0]}:{identity[1]})"
                 )
             prior[pair] = identity
     return prior
 
 
+def artifact_bound_row(record: object) -> bool:
+    return (
+        isinstance(record, dict)
+        and isinstance(record.get("feeds"), dict)
+        and set(record["feeds"]) == ARTIFACT_BOUND_LEDGER_FEEDS
+    )
+
+
+def release_history(ledger: dict[str, dict], current_release_id: str) -> dict[str, dict]:
+    """Every recorded release EXCEPT the one being generated.
+
+    Regenerating one release_id — the idempotent re-run `resign-autotune-static.sh`
+    performs before and after replacing the sidecars — must not see that
+    release's own freshly written ledger row as prior history, or the second
+    generation would reject its own bindings as a rebinding and no artifact-bound
+    release could ever be signed.
+    """
+    return {
+        release_id: record
+        for release_id, record in ledger["releases"].items()
+        if release_id != current_release_id
+    }
+
+
+def latest_artifact_bound_release(releases: dict[str, dict]) -> tuple[str, dict] | None:
+    """The most recently generated artifact-bound row in `releases`.
+
+    Ordered by `generated_at` then `release_id`; because §3.7.8 forbids reverting
+    to a smaller feed set, this is also "the previous release" whenever any row is
+    artifact-bound.
+    """
+    rows = [
+        (record["generated_at"], release_id, record)
+        for release_id, record in releases.items()
+        if artifact_bound_row(record)
+    ]
+    if not rows:
+        return None
+    _, release_id, record = max(rows, key=lambda row: (row[0], row[1]))
+    return release_id, record
+
+
+def load_previous_release(
+    directory: pathlib.Path,
+    releases: dict[str, dict],
+    keys: dict[str, bytes] | None = None,
+) -> dict:
+    """Authenticate the previous artifact-bound release DIRECTORY (§3.7.4 input).
+
+    The rebinding check's prior-binding authority has to be a named, signed
+    release, not raw JSON bytes an operator points at: unauthenticated previous
+    feed bytes prove nothing about which release they came from, and the ledger
+    row alone does not prove the operator is comparing against the right one.
+
+    This verifies the directory's `release.json`, every static feed's digest and
+    length against it, and every detached Ed25519 signature under the repo's
+    TRUSTED keyring; requires each sidecar's signer to equal the signer
+    `release.json` binds; requires the directory to be the release the ledger
+    records as the latest artifact-bound one, with `release.json` feed bindings
+    equal to that row's (which carries the per-feed versions the ledger validator
+    already checked); and requires its published artifact bindings to equal that
+    row's `artifact_bindings` EXACTLY — no missing pair, no extra pair, no
+    differing identity.
+    """
+    expected = latest_artifact_bound_release(releases)
+    if expected is None:
+        fail(
+            "--previous-release-dir was supplied but the release ledger records no "
+            "earlier artifact-bound release to compare against"
+        )
+    expected_release_id, record = expected
+    manifest_path = directory / "release.json"
+    if not manifest_path.exists():
+        fail(f"--previous-release-dir {directory}: missing release.json")
+    previous_manifest = strict_json(manifest_path.read_bytes(), "previous release.json")
+    if previous_manifest.get("release_id") != expected_release_id:
+        fail(
+            f"--previous-release-dir {directory}: binds release "
+            f"{previous_manifest.get('release_id')!r}, but the ledger's latest artifact-bound "
+            f"release is {expected_release_id!r}"
+        )
+    feeds = previous_manifest.get("feeds")
+    if not isinstance(feeds, dict) or set(feeds) != ARTIFACT_BOUND_LEDGER_FEEDS:
+        fail(
+            f"--previous-release-dir {directory}: release.json must bind the artifact-bound "
+            f"five-feed set {sorted(ARTIFACT_BOUND_LEDGER_FEEDS)}"
+        )
+    if feeds != record["feeds"]:
+        fail(
+            f"--previous-release-dir {directory}: release.json feed bindings do not equal the "
+            f"release-ledger row for {expected_release_id!r}"
+        )
+    keys = keyring() if keys is None else keys
+    bodies: dict[str, bytes] = {}
+    signed_names = ("autotune-candidates.json", "demand-rank.json", RATE_CARD_FEED_NAME, ARTIFACT_FEED_NAME)
+    for name in signed_names:
+        path = directory / name
+        if not path.exists():
+            fail(f"--previous-release-dir {directory}: missing {name}")
+        body = path.read_bytes()
+        binding = feeds[name]
+        if sha256(body) != binding["sha256"] or len(body) != binding["bytes"]:
+            fail(f"--previous-release-dir {directory}: {name} does not match its release.json binding")
+        sidecar_path = directory / f"{name}.sig"
+        if not sidecar_path.exists():
+            fail(f"--previous-release-dir {directory}: missing {name}.sig")
+        key_id, signature = parse_sidecar(sidecar_path.read_bytes(), sidecar_path.name)
+        if key_id != binding["signer_key_id"]:
+            fail(
+                f"--previous-release-dir {directory}: {name}.sig is signed by {key_id!r}, not the "
+                f"{binding['signer_key_id']!r} release.json binds"
+            )
+        public_key = keys.get(key_id)
+        if public_key is None:
+            fail(f"--previous-release-dir {directory}: {name}.sig key_id {key_id!r} is not trusted")
+        verify_ed25519(public_key, signature, body, f"previous {name}.sig")
+        bodies[name] = body
+    previous_candidate_obj = validate_candidate(bodies["autotune-candidates.json"])
+    previous_feed_obj = validate_artifact_feed(
+        bodies[ARTIFACT_FEED_NAME],
+        bodies["autotune-candidates.json"],
+        previous_candidate_obj,
+        label="previous autotune-artifacts",
+    )
+    if artifact_bindings(previous_feed_obj) != record["artifact_bindings"]:
+        fail(
+            f"--previous-release-dir {directory}: the signed artifact feed's bindings do not "
+            f"equal the release-ledger artifact_bindings for {expected_release_id!r}"
+        )
+    return {
+        "release_id": expected_release_id,
+        "feed_obj": previous_feed_obj,
+        "candidate_obj": previous_candidate_obj,
+        "record": record,
+    }
+
+
 def require_no_artifact_rebinding(
     feed_obj: dict,
-    ledger: dict[str, dict],
-    previous_feed: bytes | None,
+    history: dict[str, dict],
+    previous_release: dict | None,
 ) -> None:
     """SPEC-023 §3.7.4 / AC-CAT-19: an `artifact_id` MUST NOT be rebound to
     different bytes, within or across releases.
 
-    The prior-binding authority is the release ledger plus the previous release's
-    signed artifact-feed bytes, so the verdict is reconstructible from named
-    release inputs. For the FIRST artifact-bound release there is no previous
-    feed and no recorded binding: every binding is new and the check passes
-    vacuously. Once any release has been recorded with the artifact-bound feed
-    set, the previous signed feed becomes a REQUIRED generator input.
+    The prior-binding authority is the release ledger's history (every row EXCEPT
+    the release being generated) plus the previous release's authenticated signed
+    artifact feed, so the verdict is reconstructible from named release inputs.
+    For the FIRST artifact-bound release there is no previous release and no
+    recorded binding: every binding is new and the check passes vacuously. Once
+    an EARLIER release has been recorded with the artifact-bound feed set, the
+    previous signed release directory becomes a REQUIRED generator input.
     """
-    prior = recorded_artifact_bindings(ledger)
-    if previous_feed is not None:
-        previous = strict_json(previous_feed, "previous autotune-artifacts")
-        models = previous.get("models")
-        if not isinstance(models, dict) or not models:
-            fail("previous autotune-artifacts: models must be a non-empty object")
-        validate_artifact_models(models, "previous autotune-artifacts", allow_unmeasured_size=False)
-        for binding in artifact_bindings(previous):
+    prior = artifact_binding_history(history)
+    if previous_release is not None:
+        for binding in artifact_bindings(previous_release["feed_obj"]):
             pair = (binding["model_key"], binding["artifact_id"])
             identity = (binding["hash_algorithm"], binding["hash"])
             existing = prior.get(pair)
@@ -1361,9 +1566,9 @@ def require_no_artifact_rebinding(
             prior[pair] = identity
     elif prior:
         fail(
-            "generate: --previous-artifact-feed is required once a release has been "
+            "generate: --previous-release-dir is required once an earlier release has been "
             "recorded with the artifact-bound feed set; the previous release's signed "
-            "autotune-artifacts.json is a named input to the rebinding check"
+            "directory is a named input to the rebinding check"
         )
     for binding in artifact_bindings(feed_obj):
         pair = (binding["model_key"], binding["artifact_id"])
@@ -1621,6 +1826,13 @@ def validate_release_ledger(data: bytes, label: str = "release ledger") -> dict[
             # content identities, not the autotune release train (see manifest()).
             if feed_name not in {TIER2_CATALOG_FEED_NAME, RATE_CARD_FEED_NAME} and feed["version"] != release_id:
                 fail(f"{label}: feed version does not match release ID {release_id!r}")
+    # SPEC-023 §3.7.4 across the WHOLE document, not only within one row: an
+    # `artifact_id` may not be rebound to different bytes in a later release
+    # either. Enforced here, in the shared ledger validator, so `verify` rejects a
+    # hand-assembled and correctly signed release that reuses a
+    # `(model_key, artifact_id)` under a new identity — generation is not the only
+    # path a ledger reaches the release host by.
+    artifact_binding_history(value["releases"], label)
     for release_id, tombstone in value["tombstones"].items():
         if not isinstance(release_id, str) or not release_id or not isinstance(tombstone, dict):
             fail(f"{label}: invalid tombstone entry {release_id!r}")
@@ -2529,13 +2741,251 @@ def intake_decision_digest() -> str | None:
     §16.8 intake-decision manifest, or `null` for a release that adds no `listed`
     row and promotes no row to `recommendable`. The §16.8 manifest schema and the
     tier-change completeness rule (AC-CAT-21) are owned by the listed-tier intake
-    slice; this slice records the digest the ledger row is required to carry."""
+    slice; this slice records the digest the ledger row is required to carry, and
+    `require_intake_decision` below decides when `null` is permitted."""
     if INTAKE_DECISION_PATH.exists():
         return sha256(INTAKE_DECISION_PATH.read_bytes())
     return None
 
 
-def generate(signer_key_id: str | None = None, previous_artifact_feed: pathlib.Path | None = None) -> None:
+# SPEC-023 §3.7.8 speaks of a row being "added as listed" or "promoted to
+# recommendable". The §3.2 candidate-catalog spelling of the pre-admission states
+# is `candidate` / `blocked`; ranking them lets one comparison cover all three
+# named transitions (absent → listed/recommendable, pre-admission → listed/
+# recommendable, listed → recommendable) while a DEMOTION, which needs no intake
+# decision, is not mistaken for one.
+CANDIDATE_ADMISSION_TIER = {"blocked": 0, "candidate": 0, "listed": 1, "recommendable": 2}
+
+
+def candidate_admission_tiers(candidate_obj: dict) -> dict[str, int]:
+    return {
+        key: CANDIDATE_ADMISSION_TIER[row["runtime_status"]]
+        for key, row in candidate_obj["rows"].items()
+    }
+
+
+def latest_release(releases: dict[str, dict]) -> tuple[str, dict] | None:
+    """The most recently generated recorded release, by `generated_at` then id."""
+    if not releases:
+        return None
+    _, release_id, record = max(
+        ((record["generated_at"], release_id, record) for release_id, record in releases.items()),
+        key=lambda row: (row[0], row[1]),
+    )
+    return release_id, record
+
+
+def previous_candidate_admission(
+    candidate_obj: dict,
+    history: dict[str, dict],
+    previous_release: dict | None,
+) -> dict[str, int] | None:
+    """The previous release's per-key admission tiers, or `None` when unknown.
+
+    Two named release inputs can supply it:
+
+    1. `--previous-release-dir`, whose candidate catalog is authenticated against
+       the trusted keyring and the ledger row (`load_previous_release`).
+    2. For the ACTIVATION release, where no previous release directory is
+       required, the ledger's own `autotune-candidates.json` digest for the
+       preceding release. A freshness-style release re-stamps only `version` and
+       `generated_at`, so re-stamping the current catalog with the preceding
+       release's values and canonicalising reproduces its exact bytes when — and
+       only when — nothing else changed. Digest equality is therefore a PROOF
+       that the candidate rows, and so every admission tier, are unchanged.
+
+    Any other state returns `None`: prior admission is unavailable and the caller
+    fails closed rather than assuming no transition occurred.
+    """
+    if previous_release is not None:
+        return candidate_admission_tiers(previous_release["candidate_obj"])
+    latest = latest_release(history)
+    if latest is None:
+        return None
+    release_id, record = latest
+    binding = record["feeds"].get("autotune-candidates.json")
+    if not isinstance(binding, dict):
+        return None
+    restamped = dict(candidate_obj)
+    restamped["version"] = release_id
+    restamped["generated_at"] = record["generated_at"]
+    if sha256(canonical_bytes(restamped)) != binding["sha256"]:
+        return None
+    return candidate_admission_tiers(candidate_obj)
+
+
+def intake_transitions(previous_tiers: dict[str, int], current_tiers: dict[str, int]) -> list[str]:
+    """Keys this release adds as `listed`/`recommendable` or promotes upward."""
+    changed = []
+    for key in sorted(current_tiers):
+        tier = current_tiers[key]
+        if tier < 1:
+            continue
+        previous = previous_tiers.get(key)
+        if previous is None or tier > previous:
+            changed.append(key)
+    return changed
+
+
+def require_intake_decision(
+    candidate_obj: dict,
+    previous_tiers: dict[str, int] | None,
+    digest: str | None,
+    *,
+    activation: bool,
+) -> None:
+    """SPEC-023 §3.7.8: `intake_decision_sha256` is `null` ONLY for a release that
+    adds no `listed` row and promotes no row to `recommendable`.
+
+    Hashing `intake-decision.json` when it happens to exist is not that rule — it
+    lets a signed, settlement-adjacent catalog admit or promote a model with no
+    release-bound record of the decision that admitted it. The comparison needs
+    the previous release's candidate statuses, which the ledger does not carry
+    (it carries their digest), so this is a GENERATION-time gate on named release
+    inputs rather than a document validator.
+    """
+    if previous_tiers is None:
+        if not activation:
+            fail(
+                "release ledger: the previous release's candidate admission state is "
+                "unavailable, so this release cannot prove it adds no listed row and "
+                "promotes no row to recommendable; pass --previous-release-dir"
+            )
+        if digest is None:
+            fail(
+                "release ledger: the activation release's candidate catalog differs from the "
+                f"preceding release's, so intake_decision_sha256 may not be null; commit "
+                f"{INTAKE_DECISION_PATH.name} recording the §16.8 intake decision"
+            )
+        return
+    changed = intake_transitions(previous_tiers, candidate_admission_tiers(candidate_obj))
+    if changed and digest is None:
+        fail(
+            "release ledger: intake_decision_sha256 is null but this release admits or "
+            f"promotes {changed}; SPEC-023 §3.7.8 requires the §16.8 intake-decision digest "
+            f"for every added listed row and every promotion to recommendable"
+        )
+
+
+def artifact_feed_activation_state(
+    candidate_obj: dict,
+    ledger: dict[str, dict],
+    *,
+    activate: bool,
+) -> str:
+    """Decide whether THIS generation builds an artifact feed (§3.7.8 Stage A).
+
+    Activation is a deliberate operator release cut, never a side effect of a
+    file being committed. Committing `autotune-artifacts-source.json` — which is
+    seeded with unmeasured `size_bytes` on purpose — must leave `generate`,
+    `resign-autotune-static.sh`, and the scheduled freshness renewal producing the
+    same four-feed release they produce today.
+
+    The state is read from the release ledger, the published feed, and one
+    explicit flag:
+
+    * `pre_activation` — no earlier artifact-bound row, no artifact-bound row for
+      this release, no published feed, and no `--activate-artifact-feed`. The
+      source is schema-validated (unmeasured sizes allowed) and nothing is built.
+    * `activation` — `--activate-artifact-feed` on a release_id no earlier
+      release row already claims, or the idempotent re-run of that same release
+      after its row exists. No previous release directory is required.
+    * `post_activation` — an EARLIER release row is artifact-bound. The feed is
+      mandatory and `--previous-release-dir` is a required rebinding input.
+    """
+    release_id = candidate_obj["version"]
+    history = release_history(ledger, release_id)
+    history_activated = latest_artifact_bound_release(history) is not None
+    self_row = ledger["releases"].get(release_id)
+    if history_activated:
+        if activate:
+            previous_id, _ = latest_artifact_bound_release(history)
+            fail(
+                f"--activate-artifact-feed applies only to the FIRST artifact-bound release; "
+                f"release {previous_id!r} already activated the feed, so this release is a "
+                "normal artifact-bound cut (pass --previous-release-dir instead)"
+            )
+        return "post_activation"
+    if artifact_bound_row(self_row):
+        return "activation"
+    if activate:
+        if self_row is not None:
+            fail(
+                f"--activate-artifact-feed requires a NEW release_id: {release_id!r} is already "
+                "recorded in the release ledger without the artifact-bound feed set, and an "
+                "already-published release may not be enriched with an artifact feed"
+            )
+        return "activation"
+    if ARTIFACT_FEED_PATH.exists():
+        fail(
+            f"{ARTIFACT_FEED_PATH.name} is published but no release-ledger row binds it. "
+            "Re-run with --activate-artifact-feed to cut the activation release, or remove "
+            "the stale generated feed; generation never activates the feed implicitly"
+        )
+    return "pre_activation"
+
+
+# Distribution surfaces slices 2b/2c own. Stage A is not servable until each is
+# done, so `status` names them explicitly rather than letting a green generator
+# read as "ready to publish".
+PENDING_DISTRIBUTION_SURFACES = (
+    ("CLI release payload", "phase3-binary/dist/package.sh (~196): copy autotune-artifacts.json + .sig"),
+    ("GitHub release assets", ".github/workflows/release.yml (~1385, ~1418): publish both artifact files"),
+    ("live release gate", "scripts/verify-live-coordinator-release-gate.py (~17): add the signed feed"),
+    ("coordinator serving", "phase4-coordinator/dist/nginx-coordinator.malibu.tech.conf: exact /v1/catalog-artifacts and /v1/catalog-artifacts.sig blocks"),
+)
+
+
+def artifact_activation_prerequisites(candidate_obj: dict, ledger: dict[str, dict]) -> list[tuple[bool, str]]:
+    """Generator-side prerequisites for `--activate-artifact-feed`, each with its
+    satisfied/unmet verdict. `status` prints them; activation refuses on any unmet
+    one so the operator sees the whole list instead of one failure at a time."""
+    checks: list[tuple[bool, str]] = []
+    release_id = candidate_obj["version"]
+    if not ARTIFACT_SOURCE_PATH.exists():
+        return [(False, f"{ARTIFACT_SOURCE_PATH.name} is committed")]
+    checks.append((True, f"{ARTIFACT_SOURCE_PATH.name} is committed"))
+    try:
+        source_obj = validate_artifact_source(ARTIFACT_SOURCE_PATH.read_bytes(), candidate_obj)
+    except CatalogError as exc:
+        return checks + [(False, f"{ARTIFACT_SOURCE_PATH.name} validates against the candidate catalog: {exc}")]
+    checks.append((True, f"{ARTIFACT_SOURCE_PATH.name} validates against the candidate catalog"))
+    unmeasured = sorted(
+        f"{model_key}/{artifact_id}"
+        for model_key, model in source_obj["models"].items()
+        for artifact_id, artifact in model["artifacts"].items()
+        if artifact.get("size_bytes") is None
+    )
+    checks.append((
+        not unmeasured,
+        "every artifact size_bytes is measured"
+        + (f" (unmeasured: {', '.join(unmeasured)})" if unmeasured else ""),
+    ))
+    checks.append((RATE_CARD_SOURCE_PATH.exists(), f"{RATE_CARD_SOURCE_PATH.name} is committed"))
+    if RATE_CARD_SOURCE_PATH.exists():
+        try:
+            rate_source = validate_rate_card_source(RATE_CARD_SOURCE_PATH.read_bytes())
+            expand_rate_card(rate_source, artifact_rate_classes({"models": source_obj["models"]}), candidate_obj)
+            checks.append((True, "every declared rate_class resolves to an explicit row or class rates"))
+        except CatalogError as exc:
+            checks.append((False, f"every declared rate_class resolves: {exc}"))
+    self_row = ledger["releases"].get(release_id)
+    checks.append((
+        self_row is None or artifact_bound_row(self_row),
+        f"release_id {release_id!r} is new (an already-published release may not be enriched)",
+    ))
+    checks.append((
+        latest_artifact_bound_release(release_history(ledger, release_id)) is None,
+        "no earlier release has already activated the artifact feed",
+    ))
+    return checks
+
+
+def generate(
+    signer_key_id: str | None = None,
+    previous_release_dir: pathlib.Path | None = None,
+    activate_artifact_feed: bool = False,
+) -> None:
     candidate_path = CATALOG_DIR / "autotune-candidates.json"
     demand_path = CATALOG_DIR / "demand-rank.json"
     rate_card_path = CATALOG_DIR / RATE_CARD_FEED_NAME
@@ -2543,7 +2993,30 @@ def generate(signer_key_id: str | None = None, previous_artifact_feed: pathlib.P
     demand_obj = validate_demand(demand_path.read_bytes())
     candidate = canonical_bytes(candidate_obj)
     demand = canonical_bytes(demand_obj)
-    artifacts, artifact_obj = resolve_artifact_feed(candidate, candidate_obj)
+    ledger_before = validate_release_ledger(LEDGER_PATH.read_bytes()) if LEDGER_PATH.exists() else empty_release_ledger()
+    state = artifact_feed_activation_state(candidate_obj, ledger_before, activate=activate_artifact_feed)
+    if state == "activation":
+        unmet = [detail for satisfied, detail in artifact_activation_prerequisites(candidate_obj, ledger_before) if not satisfied]
+        if unmet:
+            fail(
+                "--activate-artifact-feed refused: the artifact feed is not activatable yet. "
+                "Unmet prerequisites: " + "; ".join(unmet)
+                + ". Run `catalog-release.py status` for the full activation checklist."
+            )
+    if state == "pre_activation":
+        artifacts, artifact_obj = None, None
+        if ARTIFACT_SOURCE_PATH.exists():
+            # Schema-only: the committed source may still carry unmeasured
+            # `size_bytes`, and a pre-activation release must keep producing the
+            # rate-card-bound four-feed set unchanged.
+            validate_artifact_source(ARTIFACT_SOURCE_PATH.read_bytes(), candidate_obj)
+    else:
+        if not ARTIFACT_SOURCE_PATH.exists():
+            fail(
+                f"generate: this release is artifact-bound but {ARTIFACT_SOURCE_PATH.name} is missing; "
+                "the published feed must be reproducible from named release inputs"
+            )
+        artifacts, artifact_obj = resolve_artifact_feed(candidate, candidate_obj)
     rate_classes = artifact_rate_classes(artifact_obj) if artifact_obj is not None else {}
     rate_card = resolve_rate_card(rate_classes, candidate_obj)
     rate_card_obj = validate_rate_card(rate_card)
@@ -2561,17 +3034,23 @@ def generate(signer_key_id: str | None = None, previous_artifact_feed: pathlib.P
         tier2_signer_key_id=tier2_signer_key_id, artifacts=artifacts, artifact_obj=artifact_obj,
     )
     bindings = None
+    intake_digest = intake_decision_digest()
     if artifact_obj is not None:
-        ledger_before = validate_release_ledger(LEDGER_PATH.read_bytes()) if LEDGER_PATH.exists() else empty_release_ledger()
-        require_no_artifact_rebinding(
-            artifact_obj,
-            ledger_before,
-            previous_artifact_feed.read_bytes() if previous_artifact_feed is not None else None,
+        history = release_history(ledger_before, candidate_obj["version"])
+        previous_release = None
+        if previous_release_dir is not None:
+            previous_release = load_previous_release(previous_release_dir, history)
+        require_no_artifact_rebinding(artifact_obj, history, previous_release)
+        require_intake_decision(
+            candidate_obj,
+            previous_candidate_admission(candidate_obj, history, previous_release),
+            intake_digest,
+            activation=state == "activation",
         )
         bindings = artifact_bindings(artifact_obj)
     binding_bytes = derive_tier2_identity_binding(candidate, candidate_obj)
     swift_text = generated_swift(candidate, demand, rate_card, signer_key_id)
-    next_ledger = updated_release_ledger(manifest_bytes, bindings, intake_decision_digest())
+    next_ledger = updated_release_ledger(manifest_bytes, bindings, intake_digest)
     rejected_go = generated_rejected_releases_go(validate_release_ledger(next_ledger))
     CATALOG_DIR.mkdir(parents=True, exist_ok=True)
     STATIC_DIR.mkdir(parents=True, exist_ok=True)
@@ -2798,6 +3277,57 @@ def cmd_emit_coordinator_rate_card(output_path: pathlib.Path | None) -> None:
         print(block, end="")
 
 
+def cmd_status() -> None:
+    """Print the artifact-feed activation state and its outstanding prerequisites.
+
+    Stage A is not shippable from this slice alone: the generator can produce and
+    bind the feed, but nothing packages, publishes, serves, or live-verifies it
+    yet. Printing an explicit "not activatable yet" state — rather than letting a
+    green `verify` imply readiness — is what keeps the operator from cutting a
+    release whose fifth feed no consumer can fetch.
+    """
+    candidate_obj = validate_candidate((CATALOG_DIR / "autotune-candidates.json").read_bytes())
+    ledger = validate_release_ledger(LEDGER_PATH.read_bytes()) if LEDGER_PATH.exists() else empty_release_ledger()
+    release_id = candidate_obj["version"]
+    history = release_history(ledger, release_id)
+    activated = latest_artifact_bound_release(history)
+    published = ARTIFACT_FEED_PATH.exists()
+    if activated is not None:
+        state = "post-activation"
+    elif artifact_bound_row(ledger["releases"].get(release_id)) or published:
+        state = "activation (this release)"
+    else:
+        state = "pre-activation"
+    print(f"catalog release      : {release_id}")
+    print(f"ledger schema        : {ledger['schema_version']}")
+    print(f"artifact-feed state  : {state}")
+    print(f"published feed       : {'yes' if published else 'no'} ({ARTIFACT_FEED_PATH})")
+    if activated is not None:
+        print(f"activated by release : {activated[0]}")
+        print("previous release     : --previous-release-dir is REQUIRED for the next cut")
+    else:
+        print("previous release     : not required (this would be the activation release)")
+    print("")
+    print("Generator-side activation prerequisites (--activate-artifact-feed refuses on any unmet):")
+    prerequisites = artifact_activation_prerequisites(candidate_obj, ledger)
+    for satisfied, detail in prerequisites:
+        print(f"  [{'x' if satisfied else ' '}] {detail}")
+    print("")
+    print("Distribution surfaces still pending (BYOM v0.2 slices 2b/2c — NOT in this slice):")
+    for surface, detail in PENDING_DISTRIBUTION_SURFACES:
+        print(f"  [ ] {surface}: {detail}")
+    print("")
+    if any(not satisfied for satisfied, _ in prerequisites):
+        print("NOT ACTIVATABLE: generator-side prerequisites are unmet.")
+    elif activated is not None:
+        print("ACTIVATED: cut artifact-bound releases with --previous-release-dir.")
+    else:
+        print(
+            "Generator prerequisites are met. Activation additionally requires every "
+            "distribution surface above; see docs/runbooks/catalog-artifact-feed-release.md."
+        )
+
+
 def cmd_check_tier2_binding(candidate_path: pathlib.Path, tier2_path: pathlib.Path) -> None:
     check_tier2_binding(candidate_path.read_bytes(), tier2_path.read_bytes())
     print(f"tier2 binding ok: {tier2_path} agrees with {candidate_path}")
@@ -2867,14 +3397,29 @@ def main() -> int:
     generate_parser = sub.add_parser("generate")
     generate_parser.add_argument("--signer-key-id")
     generate_parser.add_argument(
-        "--previous-artifact-feed",
+        "--previous-release-dir",
         type=pathlib.Path,
         help=(
-            "previous release's signed autotune-artifacts.json; a REQUIRED input once "
-            "any release has been recorded with the artifact-bound feed set (SPEC-023 §3.7.4)"
+            "previous artifact-bound release directory (release.json + feeds + sidecars); "
+            "authenticated against the trusted keyring and the release ledger, and a REQUIRED "
+            "input once an EARLIER release has been recorded with the artifact-bound feed set "
+            "(SPEC-023 §3.7.4)"
+        ),
+    )
+    generate_parser.add_argument(
+        "--activate-artifact-feed",
+        action="store_true",
+        help=(
+            "cut the FIRST artifact-bound release (SPEC-023 §3.7.8 Stage A). Required: "
+            "committing autotune-artifacts-source.json never activates the feed on its own. "
+            "Refused while any generator-side prerequisite is unmet; see `status`."
         ),
     )
     sub.add_parser("verify")
+    sub.add_parser(
+        "status",
+        help="print the artifact-feed activation state and its outstanding prerequisites",
+    )
     coordinator_parser = sub.add_parser(
         "emit-coordinator-rate-card",
         help="print the rewards.rate_card: block the published rate card requires",
@@ -2928,9 +3473,11 @@ def main() -> int:
         if args.command == "bootstrap":
             bootstrap(args.release_id, args.generated_at, args.policy_version)
         elif args.command == "generate":
-            generate(args.signer_key_id, args.previous_artifact_feed)
+            generate(args.signer_key_id, args.previous_release_dir, args.activate_artifact_feed)
         elif args.command == "verify":
             verify()
+        elif args.command == "status":
+            cmd_status()
         elif args.command == "emit-coordinator-rate-card":
             cmd_emit_coordinator_rate_card(args.output)
         elif args.command == "verify-directory":

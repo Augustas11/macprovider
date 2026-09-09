@@ -1,0 +1,31 @@
+{
+  "_comment": "Shared SPEC-005 §5.5 NormalizeModelKey case table. ONE source of truth consumed by scripts/tests/test_catalog_artifact_feed.py (the Python port in scripts/catalog-release.py) and phase4-coordinator/internal/billing/normalize_model_key_cases_test.go (the Go original). Adding a case here binds both implementations; changing either one alone turns a test red instead of shipping a release whose authoring-time rate resolution disagrees with billing.",
+  "schema_version": "macprovider.normalize-model-key-cases.v1",
+  "cases": [
+    {"input": "qwen3-8b", "expected": "qwen3-8b"},
+    {"input": "Qwen3-8B", "expected": "qwen3-8b"},
+    {"input": "  Qwen3-32B-8bit  ", "expected": "qwen3-32b"},
+    {"input": "mlx-community/Qwen3-8B-4bit", "expected": "qwen3-8b"},
+    {"input": "qwen/Qwen3-8B", "expected": "qwen3-8b"},
+    {"input": "unknown-vendor/Qwen3-8B", "expected": "unknown-vendor/qwen3-8b"},
+    {"input": "nvidia/nemotron-3-nano-30b-a3b", "expected": "nemotron-3-nano-30b-a3b"},
+    {"input": "mlx-community/NVIDIA-Nemotron-3-Nano-30B-A3B-4bit", "expected": "nemotron-3-nano-30b-a3b"},
+    {"input": "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B", "expected": "nemotron-3-nano-30b-a3b"},
+    {"input": "google/nvidia-nemotron-3-nano-30b-a3b", "expected": "nvidia-nemotron-3-nano-30b-a3b"},
+    {"input": "mlx-community/gpt-oss-20b-MXFP4-Q8", "expected": "openai/gpt-oss-20b"},
+    {"input": "gpt-oss-20b", "expected": "openai/gpt-oss-20b"},
+    {"input": "openai/gpt-oss-120b", "expected": "openai/gpt-oss-120b"},
+    {"input": "google/gpt-oss-20b", "expected": "gpt-oss-20b"},
+    {"input": "qwen/gpt-oss-20b", "expected": "gpt-oss-20b"},
+    {"input": "mlx-community/Meta-Llama-3.1-8B-Instruct-4bit", "expected": "meta-llama/llama-3.1-8b-instruct"},
+    {"input": "meta-llama/Llama-3.2-3B-Instruct", "expected": "meta-llama/llama-3.2-3b-instruct"},
+    {"input": "meta-llama/Meta-Llama-3.1-8B-Instruct", "expected": "meta-llama/llama-3.1-8b-instruct"},
+    {"input": "google/meta-llama-3.1-8b-instruct", "expected": "meta-llama-3.1-8b-instruct"},
+    {"input": "mlx-community/gemma-4-26b-a4b-it-4bit", "expected": "gemma-4-26b-a4b-it"},
+    {"input": "google/gemma-4-26b-a4b-it", "expected": "gemma-4-26b-a4b-it"},
+    {"input": "mlx-community/Qwen2.5-Coder-32B-Instruct-4bit", "expected": "qwen2.5-coder-32b-instruct"},
+    {"input": "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit", "expected": "qwen3-coder-30b-a3b-instruct"},
+    {"input": "mlx-community/gpt-oss-120b-4bit", "expected": "openai/gpt-oss-120b"},
+    {"input": "", "expected": ""}
+  ]
+}
