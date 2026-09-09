@@ -50,12 +50,23 @@ final class ConsumeTrustedMetadataTransportMatrixTests: XCTestCase {
         XCTAssertEqual(streamingRequests.count, 1)
         assertChatRequest(try XCTUnwrap(streamingRequests.first), port: streamingServer.port, streaming: true)
         records.append(pass("valid_pinned_peer_with_sni"))
+        records.append(pass("streaming_valid_pinned_peer_with_sni"))
+        records.append(pass("connected_peer_in_validated_set"))
+        records.append(pass("streaming_connected_peer_in_validated_set"))
 
         let untrustedLeaf = try untrustedCA.leaf(commonName: "api.example.test", dnsNames: ["api.example.test"])
         try await assertTLSFailure(
             leaf: untrustedLeaf,
             trustAnchors: [trustedCA.certificate],
+            streaming: false,
             scenarioID: "untrusted_root_rejected",
+            records: &records
+        )
+        try await assertTLSFailure(
+            leaf: untrustedLeaf,
+            trustAnchors: [trustedCA.certificate],
+            streaming: true,
+            scenarioID: "streaming_untrusted_root_rejected",
             records: &records
         )
 
@@ -68,7 +79,15 @@ final class ConsumeTrustedMetadataTransportMatrixTests: XCTestCase {
         try await assertTLSFailure(
             leaf: expiredLeaf,
             trustAnchors: [trustedCA.certificate],
+            streaming: false,
             scenarioID: "expired_certificate_rejected",
+            records: &records
+        )
+        try await assertTLSFailure(
+            leaf: expiredLeaf,
+            trustAnchors: [trustedCA.certificate],
+            streaming: true,
+            scenarioID: "streaming_expired_certificate_rejected",
             records: &records
         )
 
@@ -77,7 +96,15 @@ final class ConsumeTrustedMetadataTransportMatrixTests: XCTestCase {
         try await assertTLSFailure(
             leaf: incompleteChainLeaf,
             trustAnchors: [trustedCA.certificate],
+            streaming: false,
             scenarioID: "invalid_chain_rejected",
+            records: &records
+        )
+        try await assertTLSFailure(
+            leaf: incompleteChainLeaf,
+            trustAnchors: [trustedCA.certificate],
+            streaming: true,
+            scenarioID: "streaming_invalid_chain_rejected",
             records: &records
         )
 
@@ -85,7 +112,15 @@ final class ConsumeTrustedMetadataTransportMatrixTests: XCTestCase {
         try await assertTLSFailure(
             leaf: mismatchedLeaf,
             trustAnchors: [trustedCA.certificate],
+            streaming: false,
             scenarioID: "hostname_mismatch_rejected",
+            records: &records
+        )
+        try await assertTLSFailure(
+            leaf: mismatchedLeaf,
+            trustAnchors: [trustedCA.certificate],
+            streaming: true,
+            scenarioID: "streaming_hostname_mismatch_rejected",
             records: &records
         )
 
@@ -137,7 +172,6 @@ final class ConsumeTrustedMetadataTransportMatrixTests: XCTestCase {
         XCTAssertEqual(loaderRequests.count, 2)
         XCTAssertTrue(fetchedEndpoints.allSatisfy { validatedEndpoints.contains($0) })
         records.append(pass("dns_reresolved_per_connection"))
-        records.append(pass("connected_peer_in_validated_set"))
 
         let proxyProbe = try await PlainTCPProbe().start()
         defer { proxyProbe.stop() }
@@ -146,11 +180,21 @@ final class ConsumeTrustedMetadataTransportMatrixTests: XCTestCase {
         defer { restoreProxyEnv() }
         let proxyIsolatedServer = try await LocalTLSTestServer(identity: validLeaf.identity, response: .ok(Data("{}".utf8))).start()
         defer { proxyIsolatedServer.stop() }
+        let streamingProxyIsolatedServer = try await LocalTLSTestServer(
+            identity: validLeaf.identity,
+            response: .streaming(Data("data: {\"id\":\"proxy-matrix\"}\n\ndata: [DONE]\n\n".utf8))
+        ).start()
+        defer { streamingProxyIsolatedServer.stop() }
         _ = try await fetchChatFromPinnedLoopback(port: proxyIsolatedServer.port, trustAnchors: [trustedCA.certificate])
+        _ = try await fetchStreamingChatFromPinnedLoopback(
+            port: streamingProxyIsolatedServer.port,
+            trustAnchors: [trustedCA.certificate]
+        )
         try await Task.sleep(nanoseconds: 100_000_000)
         let proxyConnections = await proxyProbe.connectionCount()
         XCTAssertEqual(proxyConnections, 0)
         records.append(pass("environment_proxy_ignored"))
+        records.append(pass("streaming_environment_proxy_ignored"))
 
         let redirectServer = try await LocalTLSTestServer(
             identity: validLeaf.identity,
@@ -168,9 +212,37 @@ final class ConsumeTrustedMetadataTransportMatrixTests: XCTestCase {
         assertChatRequest(try XCTUnwrap(redirectRequests.first), port: redirectServer.port, streaming: false)
         records.append(pass("redirect_not_followed"))
 
+        let streamingRedirectServer = try await LocalTLSTestServer(
+            identity: validLeaf.identity,
+            response: .redirect("https://redirect-target.example.invalid/v1/chat/completions")
+        ).start()
+        defer { streamingRedirectServer.stop() }
+        let streamingRedirectResponse = try await fetchStreamingChatFromPinnedLoopback(
+            port: streamingRedirectServer.port,
+            trustAnchors: [trustedCA.certificate]
+        )
+        XCTAssertEqual(streamingRedirectResponse.statusCode, 307)
+        XCTAssertNil(streamingRedirectResponse.sseValidation)
+        try await Task.sleep(nanoseconds: 100_000_000)
+        let streamingRedirectRequests = await streamingRedirectServer.requests()
+        XCTAssertEqual(streamingRedirectRequests.count, 1)
+        assertChatRequest(
+            try XCTUnwrap(streamingRedirectRequests.first),
+            port: streamingRedirectServer.port,
+            streaming: true
+        )
+        records.append(pass("streaming_redirect_not_followed"))
+
         let proxyIsolatedRequests = await proxyIsolatedServer.requests()
         XCTAssertEqual(proxyIsolatedRequests.count, 1)
         assertChatRequest(try XCTUnwrap(proxyIsolatedRequests.first), port: proxyIsolatedServer.port, streaming: false)
+        let streamingProxyIsolatedRequests = await streamingProxyIsolatedServer.requests()
+        XCTAssertEqual(streamingProxyIsolatedRequests.count, 1)
+        assertChatRequest(
+            try XCTUnwrap(streamingProxyIsolatedRequests.first),
+            port: streamingProxyIsolatedServer.port,
+            streaming: true
+        )
         for request in [validMetadataRequest] + loaderRequests {
             XCTAssertFalse(request.localizedCaseInsensitiveContains("Authorization:"))
             XCTAssertFalse(request.localizedCaseInsensitiveContains("Cookie:"))
@@ -309,21 +381,31 @@ final class ConsumeTrustedMetadataTransportMatrixTests: XCTestCase {
     private func assertTLSFailure(
         leaf: TransportLeafIdentity,
         trustAnchors: [SecCertificate],
+        streaming: Bool,
         scenarioID: String,
         records: inout [[String: String]]
     ) async throws {
         let server = try await LocalTLSTestServer(identity: leaf.identity, response: .ok(Data("{}".utf8))).start()
         defer { server.stop() }
         do {
-            _ = try await fetchChatFromPinnedLoopback(
-                port: server.port,
-                trustAnchors: trustAnchors,
-                timeouts: ConsumeUpstreamTimeouts(
-                    connectNanoseconds: 1_000_000_000,
-                    sendNanoseconds: 1_000_000_000,
-                    readNanoseconds: 1_000_000_000
-                )
+            let timeouts = ConsumeUpstreamTimeouts(
+                connectNanoseconds: 1_000_000_000,
+                sendNanoseconds: 1_000_000_000,
+                readNanoseconds: 1_000_000_000
             )
+            if streaming {
+                _ = try await fetchStreamingChatFromPinnedLoopback(
+                    port: server.port,
+                    trustAnchors: trustAnchors,
+                    timeouts: timeouts
+                )
+            } else {
+                _ = try await fetchChatFromPinnedLoopback(
+                    port: server.port,
+                    trustAnchors: trustAnchors,
+                    timeouts: timeouts
+                )
+            }
             XCTFail("\(scenarioID) unexpectedly completed credential-bearing chat TLS")
         } catch {
             XCTAssertTrue(error is ConsumeUpstreamForwardError)

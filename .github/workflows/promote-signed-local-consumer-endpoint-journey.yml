@@ -91,6 +91,12 @@ jobs:
             MACPROVIDER_TRUSTED_METADATA_TRANSPORT_MATRIX_REPORT="$report" \
               swift test --filter ConsumeTrustedMetadataTransportMatrixTests/testTrustedMetadataTransportMatrixUsesRealTLSAndFailsClosed
           )
+          git -C "$source_tree" diff --quiet -- . ':(exclude)phase3-binary/Package.resolved' || {
+            echo "::error::transport verification changed tracked files beyond Package.resolved" >&2
+            git -C "$source_tree" status --short --untracked-files=no >&2
+            exit 1
+          }
+          git -C "$source_tree" restore -- phase3-binary/Package.resolved
           after_status="$(git -C "$source_tree" status --porcelain --untracked-files=no)"
           [[ -z "$after_status" ]] || { echo "::error::transport verification changed tracked source bytes" >&2; exit 1; }
 
