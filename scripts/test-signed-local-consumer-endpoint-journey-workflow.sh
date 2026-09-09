@@ -49,7 +49,7 @@ required_workflow = [
     'git cat-file -e "${SOURCE_SHA_INPUT}^{commit}"',
     'git merge-base --is-ancestor "$SOURCE_SHA_INPUT" "$GITHUB_SHA"',
     '[[ "$REQUIREMENT_IDS_INPUT" =~ ^SPEC-045-R00[1-8](,SPEC-045-R00[1-8])*$ ]]',
-    "evidence_sha=%s",
+    "printf 'evidence_sha=%s\\n' \"$GITHUB_SHA\" >> \"$GITHUB_OUTPUT\"",
     "requirement_slug=",
     "tr '[:upper:]' '[:lower:]'",
     "tr ',' '-'",
@@ -145,6 +145,8 @@ if "MACPROVIDER_ACCEPTANCE_SIGNING_KEY_PEM" in preflight_step:
     raise SystemExit("preflight step must not receive the acceptance signing key")
 if "GH_TOKEN" in preflight_step:
     raise SystemExit("preflight step must not receive the release posture token")
+if "EVIDENCE_SHA" not in preflight_step or '--evidence-sha "$EVIDENCE_SHA"' not in preflight_step:
+    raise SystemExit("preflight step must bind evidence-control selectors to the reviewed evidence commit")
 if "MACPROVIDER_ACCEPTANCE_SIGNING_KEY_PEM" not in sign_step:
     raise SystemExit("signing step must be the step that imports the acceptance signing key")
 if "GH_TOKEN" not in posture_step:

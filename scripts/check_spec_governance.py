@@ -216,6 +216,17 @@ TRUSTED_POOL_CREATOR_MVP_EVIDENCE_REQUIREMENT_IDS = {
     f"SPEC-043-R{index:03d}" for index in range(1, 13)
 }
 LOCAL_CONSUMER_ENDPOINT_JOURNEY_ID = "JOURNEY-LOCAL-CONSUMER-ENDPOINT"
+LOCAL_CONSUMER_ENDPOINT_EVIDENCE_CONTROL_IMPLEMENTATION_MAPPINGS = frozenset(
+    {
+        "scripts/build-local-consumer-endpoint-journey-result.py:def build_payload",
+        ".github/workflows/promote-signed-local-consumer-endpoint-journey.yml:"
+        "printf 'evidence_sha=%s\\n' \"$GITHUB_SHA\" >> \"$GITHUB_OUTPUT\"",
+        ".github/workflows/promote-signed-local-consumer-endpoint-journey.yml:"
+        'python3 scripts/preflight-signed-journey-promotion.py --source-sha "$SOURCE_SHA" '
+        '--evidence-sha "$EVIDENCE_SHA" --requirement-ids "$REQUIREMENT_IDS" '
+        "--journey-id JOURNEY-LOCAL-CONSUMER-ENDPOINT",
+    }
+)
 LOCAL_CONSUMER_ENDPOINT_EXECUTION_MODE = "staging-or-production-local-consumer-endpoint"
 LOCAL_CONSUMER_ENDPOINT_ARTIFACT_ID = "redacted-local-consumer-endpoint"
 LOCAL_CONSUMER_ENDPOINT_ALLOWED_GATEWAY_ORIGINS = {
@@ -535,6 +546,7 @@ SIGNED_JOURNEY_RESULT_ALLOWED_KEYS = SIGNED_JOURNEY_RESULT_REQUIRED_KEYS | {
     "eip712",
     "candidate",
     "candidate_identity",
+    "evidence_repository",
     "pool_rejection_timing",
     "signer",
 }
@@ -1258,6 +1270,19 @@ def _reachable_commit(root: Path, commit: str) -> bool:
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     ).returncode == 0
+
+
+def _artifact_bytes_at_commit(root: Path, commit: str, source: str) -> bytes | None:
+    completed = subprocess.run(
+        ["git", "show", f"{commit}:{source}"],
+        cwd=root,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    if completed.returncode != 0:
+        return None
+    return completed.stdout
 
 
 def _looks_like_signed_journey_result(root: Path, source: str) -> bool:
@@ -2647,6 +2672,35 @@ def _validate_local_consumer_endpoint_journey_result(
         )
 
 
+def _validate_local_consumer_evidence_control_mappings(
+    root: Path,
+    signed: dict[str, Any],
+    implementation_mappings: list[str],
+    location: str,
+    result: ValidationResult,
+) -> None:
+    evidence_control_mappings = LOCAL_CONSUMER_ENDPOINT_EVIDENCE_CONTROL_IMPLEMENTATION_MAPPINGS.intersection(
+        implementation_mappings
+    )
+    if not evidence_control_mappings:
+        return
+    evidence_repository = signed.get("evidence_repository")
+    evidence_commit = evidence_repository.get("commit") if isinstance(evidence_repository, dict) else None
+    if not isinstance(evidence_commit, str):
+        result.error(
+            f"{location}.signed.evidence_repository",
+            "is required when the requirement maps reviewed evidence controls",
+        )
+        return
+    for mapping in sorted(evidence_control_mappings):
+        if not _commit_mapping_selector_matches_current(root, evidence_commit, mapping):
+            result.error(
+                location,
+                f"reviewed evidence commit {evidence_commit} does not match current mapped selector "
+                f"fragment {_mapping_selector(mapping)!r} in {_mapping_file(mapping)!r}",
+            )
+
+
 def _local_consumer_compare_source(source_value: Any, signed_value: Any, location: str, result: ValidationResult) -> None:
     if source_value != signed_value:
         result.error(location, "must match local-consumer endpoint signed payload")
@@ -3447,6 +3501,8 @@ def _validate_signed_journey_result(
     openssl_bin: str,
     location: str,
     result: ValidationResult,
+    *,
+    implementation_mappings: list[str] | None = None,
 ) -> bool:
     before = len(result.errors)
     path = _repository_path(root, source, location, result)
@@ -3591,15 +3647,60 @@ def _validate_signed_journey_result(
                 )
 
     repository = signed.get("repository")
+    source_commit: str | None = None
     if _expect_object(repository, f"{location}.signed.repository", result):
         _expect_keys(repository, {"name", "commit"}, {"name", "commit"}, f"{location}.signed.repository", result)
         if repository.get("name") != "Augustas11/macprovider":
             result.error(f"{location}.signed.repository.name", "must equal 'Augustas11/macprovider'")
-        commit = _string(repository.get("commit"), COMMIT_RE, f"{location}.signed.repository.commit", result)
-        if commit and not _reachable_commit(root, commit):
-            result.error(f"{location}.signed.repository.commit", f"commit is not reachable: {commit}")
-        if commit and evidence_commits and commit not in evidence_commits:
+        source_commit = _string(repository.get("commit"), COMMIT_RE, f"{location}.signed.repository.commit", result)
+        if source_commit and not _reachable_commit(root, source_commit):
+            result.error(f"{location}.signed.repository.commit", f"commit is not reachable: {source_commit}")
+        if source_commit and evidence_commits and source_commit not in evidence_commits:
             result.error(f"{location}.signed.repository.commit", "must match this requirement's commit evidence")
+
+    evidence_repository = signed.get("evidence_repository")
+    evidence_commit: str | None = None
+    if evidence_repository is not None and _expect_object(
+        evidence_repository,
+        f"{location}.signed.evidence_repository",
+        result,
+    ):
+        _expect_keys(
+            evidence_repository,
+            {"name", "commit"},
+            {"name", "commit"},
+            f"{location}.signed.evidence_repository",
+            result,
+        )
+        if evidence_repository.get("name") != "Augustas11/macprovider":
+            result.error(
+                f"{location}.signed.evidence_repository.name",
+                "must equal 'Augustas11/macprovider'",
+            )
+        evidence_commit = _string(
+            evidence_repository.get("commit"),
+            COMMIT_RE,
+            f"{location}.signed.evidence_repository.commit",
+            result,
+        )
+        if evidence_commit and not _reachable_commit(root, evidence_commit):
+            result.error(
+                f"{location}.signed.evidence_repository.commit",
+                f"commit is not reachable: {evidence_commit}",
+            )
+        if source_commit and evidence_commit:
+            completed = subprocess.run(
+                ["git", "merge-base", "--is-ancestor", source_commit, evidence_commit],
+                cwd=root,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+            if completed.returncode != 0:
+                result.error(
+                    f"{location}.signed.evidence_repository.commit",
+                    "signed.repository.commit must be an ancestor of the reviewed evidence commit",
+                )
 
     artifact_ids: set[str] = set()
     artifact_records = signed.get("artifacts")
@@ -3621,17 +3722,37 @@ def _validate_signed_journey_result(
         expected_sha = _string(artifact.get("sha256"), SHA256_HEX_RE, f"{loc}.sha256", result)
         artifact_source = _string(artifact.get("source"), None, f"{loc}.source", result)
         if artifact_source:
-            if not _source_under_journey_evidence(root, artifact_source):
+            source_is_allowed = _source_under_journey_evidence(root, artifact_source)
+            if not source_is_allowed:
                 result.error(f"{loc}.source", "must be under journeys/evidence/")
             artifact_path = _repository_path(root, artifact_source, f"{loc}.source", result)
+            reviewed_artifact_bytes: bytes | None = None
+            if evidence_commit and source_is_allowed:
+                reviewed_artifact_bytes = _artifact_bytes_at_commit(root, evidence_commit, artifact_source)
+                if reviewed_artifact_bytes is None:
+                    result.error(
+                        f"{loc}.source",
+                        "does not exist at signed evidence_repository.commit",
+                    )
+                elif expected_sha and hashlib.sha256(reviewed_artifact_bytes).hexdigest() != expected_sha:
+                    result.error(
+                        f"{loc}.sha256",
+                        "does not match artifact bytes at signed evidence_repository.commit",
+                    )
             if artifact_path is not None:
                 try:
-                    actual_sha = hashlib.sha256(artifact_path.read_bytes()).hexdigest()
+                    artifact_bytes = artifact_path.read_bytes()
                 except OSError as exc:
                     result.error(f"{loc}.source", f"cannot read artifact source: {exc}")
                 else:
+                    actual_sha = hashlib.sha256(artifact_bytes).hexdigest()
                     if expected_sha and actual_sha != expected_sha:
                         result.error(f"{loc}.sha256", "does not match artifact source bytes")
+                    if reviewed_artifact_bytes is not None and artifact_bytes != reviewed_artifact_bytes:
+                        result.error(
+                            f"{loc}.source",
+                            "does not match artifact bytes at signed evidence_repository.commit",
+                        )
 
     run_result = signed.get("result")
     if _expect_object(run_result, f"{location}.signed.result", result):
@@ -3736,6 +3857,13 @@ def _validate_signed_journey_result(
             result,
             root=root,
         )
+        _validate_local_consumer_evidence_control_mappings(
+            root,
+            signed,
+            implementation_mappings or [],
+            location,
+            result,
+        )
 
     if journey_id == PROVIDER_BYOM_DISCOVERY_JOURNEY_ID:
         _validate_provider_byom_discovery_journey_result(
@@ -3828,6 +3956,9 @@ def _signed_journey_result_satisfies(
                 openssl_bin,
                 f"{location}.evidence[{index}].source",
                 candidate_result,
+                implementation_mappings=[
+                    item for item in requirement.get("implementation", []) if isinstance(item, str)
+                ],
             ):
                 return True
             candidate_errors.extend(candidate_result.errors)
@@ -5047,6 +5178,16 @@ def _validate_conformance_schema(root: Path, conformance: Any, result: Validatio
         implementation = _string_list(requirement.get("implementation"), f"{loc}.implementation", result)
         tests = _string_list(requirement.get("tests"), f"{loc}.tests", result)
         journeys = _string_list(requirement.get("journeys"), f"{loc}.journeys", result, JOURNEY_RE)
+        if requirement_id == "SPEC-045-R008":
+            missing_evidence_controls = sorted(
+                LOCAL_CONSUMER_ENDPOINT_EVIDENCE_CONTROL_IMPLEMENTATION_MAPPINGS.difference(implementation)
+            )
+            if missing_evidence_controls:
+                result.error(
+                    f"{loc}.implementation",
+                    "must include every reviewed local-consumer evidence-control mapping: "
+                    + ", ".join(repr(mapping) for mapping in missing_evidence_controls),
+                )
         _validate_mapping_paths(root, implementation, f"{loc}.implementation", result)
         _validate_mapping_paths(root, tests, f"{loc}.tests", result)
         for journey_index, journey in enumerate(journeys):
@@ -5082,8 +5223,21 @@ def _validate_conformance_schema(root: Path, conformance: Any, result: Validatio
             ]
             if not commits:
                 result.error(loc, "conformant requirement requires commit evidence for mapped implementation and test files")
+            evidence_control_mappings = (
+                LOCAL_CONSUMER_ENDPOINT_EVIDENCE_CONTROL_IMPLEMENTATION_MAPPINGS
+                if LOCAL_CONSUMER_ENDPOINT_JOURNEY_ID in journeys
+                else frozenset()
+            )
+            for mapping in implementation:
+                if mapping in evidence_control_mappings:
+                    continue
+                for commit in commits:
+                    mapped_file = _mapping_file(mapping)
+                    selector = _mapping_selector(mapping)
+                    if not _commit_mapping_selector_matches_current(root, commit, mapping):
+                        result.error(loc, f"commit evidence {commit} does not match current mapped selector fragment {selector!r} in {mapped_file!r}")
             for commit in commits:
-                for mapping in implementation + tests:
+                for mapping in tests:
                     mapped_file = _mapping_file(mapping)
                     selector = _mapping_selector(mapping)
                     if not _commit_mapping_selector_matches_current(root, commit, mapping):

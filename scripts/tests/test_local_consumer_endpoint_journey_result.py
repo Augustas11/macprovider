@@ -77,6 +77,7 @@ def valid_signed(*, requirement_ids=None, extra_requirement=None, **overrides):
         "journey_id": LOCAL_CONSUMER_ENDPOINT_JOURNEY_ID,
         "execution_mode": LOCAL_CONSUMER_ENDPOINT_EXECUTION_MODE,
         "requirement_ids": ids,
+        "evidence_repository": {"name": "Augustas11/macprovider", "commit": "1" * 40},
         "operator": {"role": "release-operator", "identity_fingerprint": FINGERPRINT},
         "environment": {
             "class": LOCAL_CONSUMER_ENDPOINT_EXECUTION_MODE,
@@ -1116,6 +1117,10 @@ class LocalConsumerEndpointJourneyResultTests(unittest.TestCase):
                 builder.load_mapped_local_consumer_requirements = original_mapped
         self.assertEqual(LOCAL_CONSUMER_ENDPOINT_JOURNEY_ID, result["journey_id"])
         self.assertEqual(["SPEC-045-R001", "SPEC-045-R008"], result["requirement_ids"])
+        self.assertEqual(
+            {"name": "Augustas11/macprovider", "commit": evidence_sha},
+            result["evidence_repository"],
+        )
         self.assertEqual(evidence["candidate_identity"], result["candidate_identity"])
 
     def test_builder_rejects_non_allowlisted_gateway_origin_hash(self) -> None:

@@ -280,13 +280,11 @@ jobs:
         shell: bash
         env:
           SOURCE_SHA: ${{ steps.request.outputs.source_sha }}
+          EVIDENCE_SHA: ${{ steps.request.outputs.evidence_sha }}
           REQUIREMENT_IDS: ${{ steps.request.outputs.requirement_ids }}
         run: |
           set -euo pipefail
-          python3 scripts/preflight-signed-journey-promotion.py \
-            --source-sha "$SOURCE_SHA" \
-            --requirement-ids "$REQUIREMENT_IDS" \
-            --journey-id JOURNEY-LOCAL-CONSUMER-ENDPOINT
+          python3 scripts/preflight-signed-journey-promotion.py --source-sha "$SOURCE_SHA" --evidence-sha "$EVIDENCE_SHA" --requirement-ids "$REQUIREMENT_IDS" --journey-id JOURNEY-LOCAL-CONSUMER-ENDPOINT
 
       - name: Verify protected environment and repository posture
         shell: bash

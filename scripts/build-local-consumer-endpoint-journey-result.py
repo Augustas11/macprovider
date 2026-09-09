@@ -955,6 +955,7 @@ def build_payload(root: Path, source: str, *, source_sha: str, evidence_sha: str
         "journey_id": JOURNEY_ID,
         "requirement_ids": selected_requirements,
         "repository": {"name": REPOSITORY, "commit": source_sha},
+        "evidence_repository": {"name": REPOSITORY, "commit": evidence_sha},
         "captured_at": captured_at,
         "expires_at": expires_at,
         "operator": operator,
