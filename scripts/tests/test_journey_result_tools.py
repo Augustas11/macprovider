@@ -137,6 +137,106 @@ class JourneyResultToolsTests(unittest.TestCase):
 
             self.assertEqual([], validate_repository(root, trusted_journey_result_public_key_sha256=trusted_hash).errors)
 
+    def test_signed_evidence_commit_must_contain_signed_artifact_source(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_repository(root, base_repository())
+            evidence_commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+            private_key = generate_acceptance_key(root)
+
+            artifact_source = "journeys/evidence/reviewed-proof.json"
+            artifact_bytes = b'{"reviewed":true}\n'
+            (root / artifact_source).write_bytes(artifact_bytes)
+            changed_artifact_source = "journeys/evidence/proof.txt"
+            changed_artifact_bytes = b"changed after evidence review\n"
+            (root / changed_artifact_source).write_bytes(changed_artifact_bytes)
+
+            envelope = signed_journey_envelope(
+                evidence_commit,
+                signatures=[],
+                artifacts=["proof", "changed-proof"],
+                artifact_records=[
+                    {
+                        "id": "proof",
+                        "sha256": hashlib.sha256(artifact_bytes).hexdigest(),
+                        "source": artifact_source,
+                    },
+                    {
+                        "id": "changed-proof",
+                        "sha256": hashlib.sha256(changed_artifact_bytes).hexdigest(),
+                        "source": changed_artifact_source,
+                    },
+                ],
+            )
+            envelope["signed"]["evidence_repository"] = {
+                "name": "Augustas11/macprovider",
+                "commit": evidence_commit,
+            }
+            payload_path = root / "journey-payload.json"
+            payload_path.write_text(json.dumps(envelope["signed"], indent=2) + "\n", encoding="utf-8")
+            signed_result_path = root / "journeys" / "evidence" / "signed-result.json"
+            env = os.environ.copy()
+            env["MACPROVIDER_ACCEPTANCE_SIGNING_KEY_PEM"] = private_key
+            openssl = shutil.which("openssl")
+            if openssl is None:
+                raise unittest.SkipTest("openssl is required")
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(SIGNER),
+                    "--root",
+                    str(root),
+                    "--input",
+                    str(payload_path),
+                    "--output",
+                    "journeys/evidence/signed-result.json",
+                    "--verified-at",
+                    "2026-01-01T00:00:01Z",
+                    "--openssl-bin",
+                    openssl,
+                ],
+                env=env,
+                check=True,
+                stdout=subprocess.DEVNULL,
+            )
+
+            conformance_path = root / "specs" / "CONFORMANCE.json"
+            conformance = json.loads(conformance_path.read_text(encoding="utf-8"))
+            requirement = conformance["requirements"][0]
+            requirement["state"] = "conformant"
+            requirement["gap"] = None
+            requirement["journeys"] = ["JOURNEY-BOOT"]
+            digest = hashlib.sha256(signed_result_path.read_bytes()).hexdigest()
+            requirement["evidence"] = [
+                {
+                    "artifact": f"commit:{evidence_commit}",
+                    "source": None,
+                    "captured_at": "2026-01-01",
+                    "expires_at": "2027-01-01",
+                },
+                {
+                    "artifact": f"sha256:{digest}",
+                    "source": "journeys/evidence/signed-result.json",
+                    "captured_at": "2026-01-01",
+                    "expires_at": "2027-01-01",
+                },
+            ]
+            conformance_path.write_text(json.dumps(conformance, indent=2) + "\n", encoding="utf-8")
+            trusted_hash = hashlib.sha256(
+                (root / "security" / "acceptance-candidate-signing-public.pem").read_bytes()
+            ).hexdigest()
+
+            errors = validate_repository(root, trusted_journey_result_public_key_sha256=trusted_hash).errors
+
+            self.assertTrue(
+                any("does not exist at signed evidence_repository.commit" in error for error in errors),
+                errors,
+            )
+            self.assertTrue(
+                any("does not match artifact bytes at signed evidence_repository.commit" in error for error in errors),
+                errors,
+            )
+
     def test_signer_rejects_duplicate_key_input(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

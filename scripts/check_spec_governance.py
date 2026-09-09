@@ -1270,6 +1270,19 @@ def _reachable_commit(root: Path, commit: str) -> bool:
     ).returncode == 0
 
 
+def _artifact_bytes_at_commit(root: Path, commit: str, source: str) -> bytes | None:
+    completed = subprocess.run(
+        ["git", "show", f"{commit}:{source}"],
+        cwd=root,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    if completed.returncode != 0:
+        return None
+    return completed.stdout
+
+
 def _looks_like_signed_journey_result(root: Path, source: str) -> bool:
     path = _repository_path(root, source, source, ValidationResult())
     if path is None:
@@ -3644,6 +3657,7 @@ def _validate_signed_journey_result(
             result.error(f"{location}.signed.repository.commit", "must match this requirement's commit evidence")
 
     evidence_repository = signed.get("evidence_repository")
+    evidence_commit: str | None = None
     if evidence_repository is not None and _expect_object(
         evidence_repository,
         f"{location}.signed.evidence_repository",
@@ -3706,17 +3720,37 @@ def _validate_signed_journey_result(
         expected_sha = _string(artifact.get("sha256"), SHA256_HEX_RE, f"{loc}.sha256", result)
         artifact_source = _string(artifact.get("source"), None, f"{loc}.source", result)
         if artifact_source:
-            if not _source_under_journey_evidence(root, artifact_source):
+            source_is_allowed = _source_under_journey_evidence(root, artifact_source)
+            if not source_is_allowed:
                 result.error(f"{loc}.source", "must be under journeys/evidence/")
             artifact_path = _repository_path(root, artifact_source, f"{loc}.source", result)
+            reviewed_artifact_bytes: bytes | None = None
+            if evidence_commit and source_is_allowed:
+                reviewed_artifact_bytes = _artifact_bytes_at_commit(root, evidence_commit, artifact_source)
+                if reviewed_artifact_bytes is None:
+                    result.error(
+                        f"{loc}.source",
+                        "does not exist at signed evidence_repository.commit",
+                    )
+                elif expected_sha and hashlib.sha256(reviewed_artifact_bytes).hexdigest() != expected_sha:
+                    result.error(
+                        f"{loc}.sha256",
+                        "does not match artifact bytes at signed evidence_repository.commit",
+                    )
             if artifact_path is not None:
                 try:
-                    actual_sha = hashlib.sha256(artifact_path.read_bytes()).hexdigest()
+                    artifact_bytes = artifact_path.read_bytes()
                 except OSError as exc:
                     result.error(f"{loc}.source", f"cannot read artifact source: {exc}")
                 else:
+                    actual_sha = hashlib.sha256(artifact_bytes).hexdigest()
                     if expected_sha and actual_sha != expected_sha:
                         result.error(f"{loc}.sha256", "does not match artifact source bytes")
+                    if reviewed_artifact_bytes is not None and artifact_bytes != reviewed_artifact_bytes:
+                        result.error(
+                            f"{loc}.source",
+                            "does not match artifact bytes at signed evidence_repository.commit",
+                        )
 
     run_result = signed.get("result")
     if _expect_object(run_result, f"{location}.signed.result", result):
