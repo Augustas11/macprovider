@@ -45,6 +45,11 @@ TRANSPORT_MATRIX_SCENARIOS = (
 )
 
 
+def canonical_report_record(report: dict[str, object]) -> dict[str, object]:
+    payload = (json.dumps(report, indent=2) + "\n").encode("utf-8")
+    return {"sha256": hashlib.sha256(payload).hexdigest(), "bytes": len(payload), "report": report}
+
+
 def load_builder():
     path = REPO_ROOT / "scripts" / "build-local-consumer-endpoint-journey-result.py"
     import sys
@@ -168,6 +173,95 @@ def valid_transport_matrix(commit: str) -> dict[str, object]:
     }
 
 
+def valid_ledger_report(commit: str, run_id: str) -> dict[str, object]:
+    return {
+        "schema_version": "macprovider.local-consumer-ledger-redacted.v1",
+        "repository": {"name": "Augustas11/macprovider", "commit": commit},
+        "run_id": run_id,
+        "summary": {
+            "settled_micro_usd": "227",
+            "released_micro_usd": "115",
+            "held_micro_usd": "0",
+            "reserved_micro_usd": "0",
+        },
+        "recovery_transitions": [
+            {"state": "held", "reason": "restart_recovery", "admission_estimate_micro_usd": "115"},
+            {"state": "released", "reason": "operator_release_held", "admission_estimate_micro_usd": "115"},
+        ],
+        "final_state": {"held_reservation_count": 0, "reserved_reservation_count": 0},
+    }
+
+
+def valid_log_report(commit: str, run_id: str) -> dict[str, object]:
+    return {
+        "schema_version": "macprovider.local-consumer-log-redacted.v1",
+        "repository": {"name": "Augustas11/macprovider", "commit": commit},
+        "run_id": run_id,
+        "events": {
+            "endpoint_started": True,
+            "sdk_permitted": True,
+            "budget_denial": True,
+            "upstream_contact_changed_after_permitted": True,
+            "upstream_contact_unchanged_after_denial": True,
+            "crash_with_active_reservation": True,
+            "restart_recovery_observed": True,
+            "recovery_release_observed": True,
+            "graceful_stop": True,
+        },
+        "redaction": {
+            "bearer_tokens_redacted": True,
+            "local_token_logged": False,
+            "raw_completion_logged": False,
+            "raw_prompt_logged": False,
+            "upstream_credential_logged": False,
+        },
+    }
+
+
+def valid_rate_report(commit: str, run_id: str) -> dict[str, object]:
+    return {
+        "schema_version": "macprovider.local-consumer-rate-card-redacted.v1",
+        "repository": {"name": "Augustas11/macprovider", "commit": commit},
+        "run_id": run_id,
+        "pricing_trust_state": "trusted",
+        "gateway_kind": "staging",
+        "model_id": "mlx-community/Llama-3.2-3B-Instruct-4bit",
+        "budget_configured_micro_usd": "100000",
+        "max_admission_micro_usd": "50000",
+        "interrupted_admission_estimate_micro_usd": "115",
+    }
+
+
+def valid_status_report(commit: str, run_id: str) -> dict[str, object]:
+    return {
+        "schema_version": "macprovider.local-consumer-status-redacted.v1",
+        "repository": {"name": "Augustas11/macprovider", "commit": commit},
+        "run_id": run_id,
+        "observations": {
+            "local_base_url_configured": True,
+            "openai_sdk_used": True,
+            "generated_local_token_used_as_api_key": True,
+            "permitted_chat_completion_observed": True,
+            "over_budget_denial_observed": True,
+            "held_reservation_survived_restart": True,
+            "recovery_release_observed": True,
+            "upstream_contact_observed": True,
+        },
+        "restart_state": {
+            "bound_url": "http://127.0.0.1:4545",
+            "pricing_trust_state": "trusted",
+            "budget_held_micro_usd": "115",
+            "budget_used_micro_usd": "227",
+        },
+        "final_state": {
+            "listener_count": 0,
+            "status_exit": 4,
+            "budget_held_micro_usd": "0",
+            "budget_reserved_micro_usd": "0",
+        },
+    }
+
+
 def write_redacted_source(root: Path, signed: dict[str, object], source: str) -> None:
     has_transport_requirements = any(
         requirement_id in {"SPEC-045-R003", "SPEC-045-R004", "SPEC-045-R008"}
@@ -176,6 +270,35 @@ def write_redacted_source(root: Path, signed: dict[str, object], source: str) ->
     support_artifact_ids = ["cli_binary", "ledger_capture", "log_capture", "rate_card_capture", "status_capture"]
     if has_transport_requirements:
         support_artifact_ids.append(TRANSPORT_MATRIX_ARTIFACT_ID)
+    source_sha = signed["repository"]["commit"]
+    run_id = signed["run_id"]
+    support_artifacts = {
+        "cli_binary": {"role": "cli-binary", "sha256": FINGERPRINT, "bytes": 12},
+        "ledger_capture": {"role": "redacted-ledger-capture", "sha256": FINGERPRINT, "bytes": 12},
+        "log_capture": {"role": "redacted-log-capture", "sha256": FINGERPRINT, "bytes": 12},
+        "rate_card_capture": {"role": "redacted-rate-card-capture", "sha256": FINGERPRINT, "bytes": 12},
+        "status_capture": {"role": "redacted-status-capture", "sha256": FINGERPRINT, "bytes": 12},
+    }
+    if has_transport_requirements:
+        for artifact_id, role, report in (
+            ("ledger_capture", "redacted-ledger-capture", valid_ledger_report(source_sha, run_id)),
+            ("log_capture", "redacted-log-capture", valid_log_report(source_sha, run_id)),
+            ("rate_card_capture", "redacted-rate-card-capture", valid_rate_report(source_sha, run_id)),
+            ("status_capture", "redacted-status-capture", valid_status_report(source_sha, run_id)),
+        ):
+            record = canonical_report_record(report)
+            signed["candidate_identity"][{
+                "ledger_capture": "ledger_sha256",
+                "log_capture": "log_capture_sha256",
+                "rate_card_capture": "rate_card_sha256",
+                "status_capture": "status_capture_sha256",
+            }[artifact_id]] = record["sha256"]
+            support_artifacts[artifact_id] = {
+                "role": role,
+                "sha256": record["sha256"],
+                "bytes": record["bytes"],
+                "report": report,
+            }
     evidence = {
         "schema_version": "macprovider.local-consumer-endpoint-evidence.v2" if has_transport_requirements else "macprovider.local-consumer-endpoint-evidence.v1",
         "journey_id": LOCAL_CONSUMER_ENDPOINT_JOURNEY_ID,
@@ -198,13 +321,7 @@ def write_redacted_source(root: Path, signed: dict[str, object], source: str) ->
         "redaction": signed["redaction"],
         "observations": signed["observations"],
         "candidate_identity": signed["candidate_identity"],
-        "support_artifacts": {
-            "cli_binary": {"role": "cli-binary", "sha256": FINGERPRINT, "bytes": 12},
-            "ledger_capture": {"role": "redacted-ledger-capture", "sha256": FINGERPRINT, "bytes": 12},
-            "log_capture": {"role": "redacted-log-capture", "sha256": FINGERPRINT, "bytes": 12},
-            "rate_card_capture": {"role": "redacted-rate-card-capture", "sha256": FINGERPRINT, "bytes": 12},
-            "status_capture": {"role": "redacted-status-capture", "sha256": FINGERPRINT, "bytes": 12},
-        },
+        "support_artifacts": support_artifacts,
         "review": {
             "reviewed_at": "2026-08-24T00:01:00Z",
             "reviewer_role": "release-operator",
@@ -660,6 +777,34 @@ class LocalConsumerEndpointJourneyResultTests(unittest.TestCase):
             )
             self.assertTrue(any("canonical report bytes" in error for error in result.errors))
 
+    def test_governance_rejects_v2_source_without_semantic_support_reports(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            signed = complete_signed_payload()
+            source = "journeys/evidence/local-consumer-endpoint-staging.redacted.json"
+            write_redacted_source(root, signed, source)
+            payload = json.loads((root / source).read_text(encoding="utf-8"))
+            for support_id in ("ledger_capture", "log_capture", "rate_card_capture", "status_capture"):
+                payload["support_artifacts"][support_id].pop("report")
+                payload["support_artifacts"][support_id]["sha256"] = FINGERPRINT
+                payload["support_artifacts"][support_id]["bytes"] = 12
+            raw = (json.dumps(payload, indent=2) + "\n").encode("utf-8")
+            (root / source).write_bytes(raw)
+            signed["artifacts"][0]["sha256"] = hashlib.sha256(raw).hexdigest()
+
+            result = ValidationResult()
+            _validate_local_consumer_endpoint_journey_result(
+                signed,
+                "SPEC-045-R008",
+                [LOCAL_CONSUMER_ENDPOINT_JOURNEY_ID],
+                signed["artifacts"],
+                signed["steps"],
+                "evidence[0]",
+                result,
+                root=root,
+            )
+            self.assertTrue(any("report" in error and "missing required field" in error for error in result.errors))
+
     def test_governance_rejects_malformed_support_artifacts_reviewed_when_source_matches_signed(self) -> None:
         cases = {
             "object": {
@@ -871,6 +1016,17 @@ class LocalConsumerEndpointJourneyResultTests(unittest.TestCase):
         ]
         matrix_report = valid_transport_matrix(source_sha)
         matrix_bytes = (json.dumps(matrix_report, indent=2) + "\n").encode("utf-8")
+        ledger_record = canonical_report_record(valid_ledger_report(source_sha, "local-consumer-endpoint-test-run"))
+        log_record = canonical_report_record(valid_log_report(source_sha, "local-consumer-endpoint-test-run"))
+        rate_record = canonical_report_record(valid_rate_report(source_sha, "local-consumer-endpoint-test-run"))
+        status_record = canonical_report_record(valid_status_report(source_sha, "local-consumer-endpoint-test-run"))
+        candidate_identity = valid_signed()["candidate_identity"]
+        candidate_identity.update({
+            "ledger_sha256": ledger_record["sha256"],
+            "log_capture_sha256": log_record["sha256"],
+            "rate_card_sha256": rate_record["sha256"],
+            "status_capture_sha256": status_record["sha256"],
+        })
         evidence = {
             "schema_version": "macprovider.local-consumer-endpoint-evidence.v2",
             "journey_id": LOCAL_CONSUMER_ENDPOINT_JOURNEY_ID,
@@ -900,13 +1056,13 @@ class LocalConsumerEndpointJourneyResultTests(unittest.TestCase):
                 "local_account_names_redacted": True,
             },
             "observations": valid_signed()["observations"],
-            "candidate_identity": valid_signed()["candidate_identity"],
+            "candidate_identity": candidate_identity,
             "support_artifacts": {
                 "cli_binary": {"role": "cli-binary", "sha256": FINGERPRINT, "bytes": 12},
-                "ledger_capture": {"role": "redacted-ledger-capture", "sha256": FINGERPRINT, "bytes": 12},
-                "log_capture": {"role": "redacted-log-capture", "sha256": FINGERPRINT, "bytes": 12},
-                "rate_card_capture": {"role": "redacted-rate-card-capture", "sha256": FINGERPRINT, "bytes": 12},
-                "status_capture": {"role": "redacted-status-capture", "sha256": FINGERPRINT, "bytes": 12},
+                "ledger_capture": {"role": "redacted-ledger-capture", **ledger_record},
+                "log_capture": {"role": "redacted-log-capture", **log_record},
+                "rate_card_capture": {"role": "redacted-rate-card-capture", **rate_record},
+                "status_capture": {"role": "redacted-status-capture", **status_record},
                 TRANSPORT_MATRIX_ARTIFACT_ID: {
                     "role": "trusted-metadata-transport-matrix",
                     "sha256": hashlib.sha256(matrix_bytes).hexdigest(),
@@ -968,6 +1124,33 @@ class LocalConsumerEndpointJourneyResultTests(unittest.TestCase):
         identity["upstream_gateway_origin_sha256"] = NON_ALLOWLISTED_GATEWAY_ORIGIN_SHA256
         with self.assertRaises(SystemExit):
             builder.require_candidate_identity(identity)
+
+    def test_builder_rejects_semantically_empty_v2_support_artifacts(self) -> None:
+        builder = load_builder()
+        identity = valid_signed()["candidate_identity"]
+        support = {
+            "cli_binary": {"role": "cli-binary", "sha256": FINGERPRINT, "bytes": 12},
+            "ledger_capture": {"role": "redacted-ledger-capture", "sha256": FINGERPRINT, "bytes": 12},
+            "log_capture": {"role": "redacted-log-capture", "sha256": FINGERPRINT, "bytes": 12},
+            "rate_card_capture": {"role": "redacted-rate-card-capture", "sha256": FINGERPRINT, "bytes": 12},
+            "status_capture": {"role": "redacted-status-capture", "sha256": FINGERPRINT, "bytes": 12},
+            TRANSPORT_MATRIX_ARTIFACT_ID: {
+                "role": "trusted-metadata-transport-matrix",
+                "sha256": hashlib.sha256((json.dumps(valid_transport_matrix("1" * 40), indent=2) + "\n").encode("utf-8")).hexdigest(),
+                "bytes": len((json.dumps(valid_transport_matrix("1" * 40), indent=2) + "\n").encode("utf-8")),
+                "report": valid_transport_matrix("1" * 40),
+            },
+        }
+        with self.assertRaises(SystemExit):
+            builder.require_support_artifacts(
+                support,
+                identity,
+                set(support),
+                "1" * 40,
+                "local-consumer-endpoint-test-run",
+                valid_signed()["observations"],
+                require_semantic_reports=True,
+            )
 
     def test_builder_rejects_malformed_mlx_model_ids(self) -> None:
         builder = load_builder()
