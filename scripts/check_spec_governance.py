@@ -5178,6 +5178,16 @@ def _validate_conformance_schema(root: Path, conformance: Any, result: Validatio
         implementation = _string_list(requirement.get("implementation"), f"{loc}.implementation", result)
         tests = _string_list(requirement.get("tests"), f"{loc}.tests", result)
         journeys = _string_list(requirement.get("journeys"), f"{loc}.journeys", result, JOURNEY_RE)
+        if requirement_id == "SPEC-045-R008":
+            missing_evidence_controls = sorted(
+                LOCAL_CONSUMER_ENDPOINT_EVIDENCE_CONTROL_IMPLEMENTATION_MAPPINGS.difference(implementation)
+            )
+            if missing_evidence_controls:
+                result.error(
+                    f"{loc}.implementation",
+                    "must include every reviewed local-consumer evidence-control mapping: "
+                    + ", ".join(repr(mapping) for mapping in missing_evidence_controls),
+                )
         _validate_mapping_paths(root, implementation, f"{loc}.implementation", result)
         _validate_mapping_paths(root, tests, f"{loc}.tests", result)
         for journey_index, journey in enumerate(journeys):

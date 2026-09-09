@@ -17,6 +17,7 @@ from pathlib import Path
 from scripts.check_spec_governance import (
     LOCAL_CONSUMER_ENDPOINT_EVIDENCE_CONTROL_IMPLEMENTATION_MAPPINGS,
     ValidationResult,
+    _validate_conformance_schema,
     _validate_local_consumer_evidence_control_mappings,
     validate_repository,
 )
@@ -74,6 +75,29 @@ def load_promoter_module():
 
 
 class JourneyResultToolsTests(unittest.TestCase):
+    def test_spec045_r008_requires_every_reviewed_evidence_control_mapping(self) -> None:
+        conformance = json.loads((REPO_ROOT / "specs" / "CONFORMANCE.json").read_text(encoding="utf-8"))
+        requirement = next(
+            item
+            for item in conformance["requirements"]
+            if item.get("requirement_id") == "SPEC-045-R008"
+        )
+        requirement["implementation"] = [
+            mapping
+            for mapping in requirement["implementation"]
+            if mapping not in LOCAL_CONSUMER_ENDPOINT_EVIDENCE_CONTROL_IMPLEMENTATION_MAPPINGS
+        ]
+
+        result = ValidationResult()
+        _validate_conformance_schema(REPO_ROOT, conformance, result)
+
+        self.assertTrue(
+            any(
+                "must include every reviewed local-consumer evidence-control mapping" in error
+                for error in result.errors
+            )
+        )
+
     def test_signer_emits_validator_accepted_envelope(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
