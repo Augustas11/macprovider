@@ -95,11 +95,22 @@ The reviewed redacted evidence artifact MUST be committed under:
 journeys/evidence/local-consumer-endpoint-*.redacted.json
 ```
 
-It MUST use:
+For SPEC-045-R001, SPEC-045-R002, SPEC-045-R005, SPEC-045-R006, and
+SPEC-045-R007-only captures it MUST use:
 
 ```json
 {
   "schema_version": "macprovider.local-consumer-endpoint-evidence.v1",
+  "journey_id": "JOURNEY-LOCAL-CONSUMER-ENDPOINT"
+}
+```
+
+For any capture that covers SPEC-045-R003, SPEC-045-R004, or SPEC-045-R008 it
+MUST use:
+
+```json
+{
+  "schema_version": "macprovider.local-consumer-endpoint-evidence.v2",
   "journey_id": "JOURNEY-LOCAL-CONSUMER-ENDPOINT"
 }
 ```
@@ -126,6 +137,47 @@ journey-result envelope only after:
   fragments still match `--source-sha`;
 - the workflow is manually dispatched from current `origin/main`;
 - redaction, no-secret, real-gateway, and required-observation checks pass.
+
+### Trusted Metadata Transport Matrix
+
+SPEC-045-R003, SPEC-045-R004, and SPEC-045-R008 require a v2-only support
+artifact named:
+
+```text
+trusted_metadata_transport_matrix
+```
+
+That support artifact MUST have role `trusted-metadata-transport-matrix`, bind
+the canonical SHA-256 and byte count of an embedded report, and use report
+schema:
+
+```text
+macprovider.trusted-metadata-transport-matrix.v1
+```
+
+The report MUST bind `repository.name = Augustas11/macprovider`,
+`repository.commit = <source-sha>`, `transport.production_path = true`,
+`transport.real_sockets = true`, `transport.connection_api = NWConnection`,
+and `transport.source_files` identifying the trusted metadata production path
+under `phase3-binary/`.
+
+It MUST contain exactly these passing scenarios and no others:
+
+- `valid_pinned_peer_with_sni`
+- `untrusted_root_rejected`
+- `expired_certificate_rejected`
+- `invalid_chain_rejected`
+- `hostname_mismatch_rejected`
+- `dns_reresolved_per_connection`
+- `connected_peer_in_validated_set`
+- `environment_proxy_ignored`
+- `redirect_not_followed`
+- `zero_credential_bytes`
+- `slow_drip_absolute_timeout`
+
+The report MUST omit payload bytes, sensitive material, and transcript material.
+It records only reviewed matrix facts, source paths, hashes, byte counts, and
+pass/fail booleans.
 
 ## Required Observations
 
