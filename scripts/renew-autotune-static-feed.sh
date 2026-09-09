@@ -150,24 +150,18 @@ fi
 CAT_DIR="$WORKTREE/phase3-binary/catalog/autotune"
 STATIC_DIR="$WORKTREE/phase3-binary/dist/static"
 
-# Re-stamp version + generated_at ONLY. Content is otherwise byte-identical:
-# candidate/demand carry a published-<date> version; rate-card's version is a
-# rows-hash and MUST NOT change on a freshness-only renewal.
-python3 - "$CAT_DIR" "$RELEASE_ID" "$NOW_ISO" <<'PY'
-import json, pathlib, sys
-cat_dir, release_id, now_iso = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3]
-for name in ("autotune-candidates.json", "demand-rank.json"):
-    p = cat_dir / name
-    obj = json.loads(p.read_text())
-    obj["version"] = release_id
-    obj["generated_at"] = now_iso
-    p.write_text(json.dumps(obj, separators=(",", ":"), sort_keys=True))
-rc = cat_dir / "rate-card.json"
-obj = json.loads(rc.read_text())
-obj["generated_at"] = now_iso  # version is a rows-hash; leave it
-rc.write_text(json.dumps(obj, separators=(",", ":"), sort_keys=True))
-print(f"re-stamped candidate/demand version={release_id} generated_at={now_iso} (rate-card date only)")
-PY
+# Re-stamp version + generated_at ONLY, at the SOURCE. Content is otherwise
+# byte-identical: candidate/demand carry a published-<date> version; rate-card's
+# version is a rows-hash and MUST NOT change on a freshness-only renewal.
+#
+# `catalog-release.py restamp` owns which files are sources and which are
+# generated. rate-card.json is now MATERIALISED from rate-card-source.json by the
+# `generate` below, so re-dating rate-card.json here would be overwritten by that
+# same generate and the atomic-release check would then abort this renewal on a
+# stale rate-card generated_at. The generator exclusively writes rate-card.json.
+log "re-stamping release source inputs for $RELEASE_ID"
+( cd "$WORKTREE" && python3 scripts/catalog-release.py restamp \
+    --release-id "$RELEASE_ID" --generated-at "$NOW_ISO" )
 
 # SPEC-023 §3.7.8: a freshness renewal NEVER activates the artifact feed. With
 # neither variable set this stays the four-feed renewal it has always been, even

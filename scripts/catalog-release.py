@@ -17,7 +17,6 @@ import subprocess
 import sys
 import tempfile
 from datetime import datetime, timezone
-from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -154,7 +153,13 @@ def exact_keys(value: dict, allowed: set[str], required: set[str], label: str) -
         fail(f"{label}: unknown fields {sorted(unknown)}")
 
 
-def parse_time(raw: object, label: str) -> None:
+def parse_timestamp(raw: object, label: str) -> datetime:
+    """Validate an RFC3339 `generated_at` and return the AWARE `datetime`.
+
+    Anything that ORDERS releases must compare these instants, never the raw
+    strings: the grammar admits any explicit offset and optional fractional
+    seconds, so lexical string order is not chronological order.
+    """
     if not isinstance(raw, str) or not RFC3339.fullmatch(raw):
         fail(f"{label}: generated_at must be RFC3339 with an explicit timezone")
     try:
@@ -163,6 +168,11 @@ def parse_time(raw: object, label: str) -> None:
         fail(f"{label}: generated_at must be RFC3339: {exc}")
     if parsed.utcoffset() is None:
         fail(f"{label}: generated_at must include a timezone")
+    return parsed
+
+
+def parse_time(raw: object, label: str) -> None:
+    parse_timestamp(raw, label)
 
 
 def finite_number(value: object) -> bool:
@@ -972,24 +982,36 @@ def parse_coordinator_rewards(text: str) -> tuple[float, float, dict[str, dict]]
 
 
 def scaled_nonnegative_integer(raw: float, scale: int, label: str) -> int:
-    """Port of Go `int64(math.Round(v * scale))` for a non-negative `v`.
+    """Port of Go `int64(math.Round(v * float64(scale)))` for a non-negative `v`.
 
-    `billing.ParseShareBps` / `billing.ParseMultiplierPPM` round HALF AWAY FROM
-    ZERO; Python's built-in `round` rounds half to EVEN. At a value that scales
-    exactly onto a half unit (`provider_share: 0.00005` → 0.5 bps) the two
-    disagree by one unit, so the release gate would accept a signed
-    `provider_share_bps` the coordinator never derives. Rounding a `Decimal`
-    parsed from the value's decimal text with `ROUND_HALF_UP` reproduces the Go
-    result exactly for the non-negative domain the config admits, without
-    inheriting a second binary-float rounding step.
+    `billing.ParseShareBps` / `billing.ParseMultiplierPPM` multiply the value the
+    coordinator PARSED — a binary64 — by the binary64 scale, then round half away
+    from zero. Reconstructing the value's shortest decimal text and rounding a
+    `Decimal` is a different computation: it answers what the operator WROTE, not
+    what the coordinator computes, and the two disagree whenever the binary64
+    product falls just off a half unit that the decimal text lands exactly on.
+    The release gate would then accept a signed `provider_share_bps` the
+    coordinator never derives, so the parity rule (§3.3.1 rule 9) would be
+    enforcing the wrong integer.
+
+    So: do exactly what Go does. `math.floor(x + 0.5)` is half-away-from-zero for
+    a non-negative binary64 `x` below 2**52 — below that bound every `x + 0.5` is
+    exactly representable, and at or above it every binary64 is already an
+    integer (where `x + 0.5` could round up and diverge from `math.Round`).
+    `scripts/tests/fixtures/rate_global_rounding_cases.json` pins the boundary
+    vectors against BOTH this port and the Go functions themselves.
     """
-    try:
-        value = Decimal(str(raw))
-    except InvalidOperation:
-        fail(f"{label}: {raw!r} is not a decimal number")
-    if not value.is_finite() or value < 0:
-        fail(f"{label}: expected a finite non-negative decimal, got {raw!r}")
-    return int((value * scale).quantize(Decimal(1), rounding=ROUND_HALF_UP))
+    if not isinstance(raw, (int, float)) or isinstance(raw, bool):
+        fail(f"{label}: expected a finite non-negative number, got {raw!r}")
+    value = float(raw)
+    if not math.isfinite(value) or value < 0:
+        fail(f"{label}: expected a finite non-negative number, got {raw!r}")
+    scaled = value * float(scale)
+    if not math.isfinite(scaled):
+        fail(f"{label}: {raw!r} scaled by {scale} is not finite")
+    if scaled >= 2.0 ** 52:
+        return int(scaled)
+    return int(math.floor(scaled + 0.5))
 
 
 def check_rate_card_parity(rate_card_obj: dict, coordinator_text: str) -> None:
@@ -1260,7 +1282,11 @@ def require_primary_artifact_consistency(models: dict, candidate_obj: dict, labe
             fail(f"{label}: recommendable candidate row {model_key!r} must declare a rate_class")
 
 
-def validate_artifact_source(data: bytes, candidate_obj: dict, label: str = "autotune-artifacts-source") -> dict:
+def validate_artifact_source(
+    data: bytes,
+    candidate_obj: dict | None = None,
+    label: str = "autotune-artifacts-source",
+) -> dict:
     """Validate the operator-authored artifact-feed source document.
 
     The source carries the `models` block verbatim; the generator supplies the
@@ -1268,6 +1294,16 @@ def validate_artifact_source(data: bytes, candidate_obj: dict, label: str = "aut
     `policy_version`, `candidate_catalog_sha256`). `size_bytes` MAY be `null` here
     to mean "the operator has not measured this artifact yet"; generation then
     fails closed rather than publishing a fabricated byte count.
+
+    STRUCTURAL checks — schema closure, the identity-tuple matrix, artifact_id
+    grammar, GGUF digest equality, global hash uniqueness — always run: they are
+    properties of the document alone. Consistency with the CANDIDATE CATALOG runs
+    only when `candidate_obj` is supplied, which is activation time and every
+    artifact-bound cut. Pre-activation the source is committed but unpublished and
+    may still carry unmeasured sizes, so an ordinary candidate-catalog change
+    (adding a row, updating an identity) must not block the four-feed release it
+    has always produced; that drift is caught at the release cut that would
+    actually publish the feed. See `docs/runbooks/catalog-artifact-feed-release.md`.
     """
     value = strict_json(data, label)
     top = {"schema_version", "source", "models"}
@@ -1278,7 +1314,8 @@ def validate_artifact_source(data: bytes, candidate_obj: dict, label: str = "aut
         fail(f"{label}: source must be {ARTIFACT_FEED_SOURCE_VALUE}")
     validate_artifact_models(value["models"], label, allow_unmeasured_size=True)
     require_unique_artifact_hashes(value["models"], label)
-    require_primary_artifact_consistency(value["models"], candidate_obj, label)
+    if candidate_obj is not None:
+        require_primary_artifact_consistency(value["models"], candidate_obj, label)
     return value
 
 
@@ -1399,6 +1436,34 @@ def artifact_binding_history(
     return prior
 
 
+def require_artifact_signer_equality(
+    artifact_signer: object,
+    candidate_signer: object,
+    label: str,
+) -> None:
+    """SPEC-023 §3.7.2: one release's artifact feed and candidate catalog MUST be
+    signed by the SAME operator key.
+
+    Keyring membership is not the test. During a rotation bridge more than one key
+    is concurrently trusted, so two feeds can each carry a valid signature, each
+    agree with its own `release.json` binding and its own ledger `signer_key_id`,
+    and still bind an artifact identity authority to a catalog no single operator
+    ever signed together. Every place that establishes artifact-feed authority —
+    generating this release's manifest, validating any artifact-bound ledger row,
+    and authenticating a previous release directory — routes through here so the
+    equality is one rule with one error, not three near-copies.
+    """
+    if not isinstance(artifact_signer, str) or not artifact_signer:
+        fail(f"{label}: the artifact feed must record a signer key ID")
+    if not isinstance(candidate_signer, str) or not candidate_signer:
+        fail(f"{label}: the candidate catalog must record a signer key ID")
+    if artifact_signer != candidate_signer:
+        fail(
+            f"{label}: {ARTIFACT_FEED_NAME} signer {artifact_signer!r} must equal the "
+            f"candidate-catalog signer {candidate_signer!r} for this release"
+        )
+
+
 def artifact_bound_row(record: object) -> bool:
     return (
         isinstance(record, dict)
@@ -1423,21 +1488,34 @@ def release_history(ledger: dict[str, dict], current_release_id: str) -> dict[st
     }
 
 
+def release_order_key(release_id: str, record: dict, label: str = "release ledger") -> tuple[datetime, str]:
+    """Chronological ordering key for one ledger row.
+
+    The INSTANT first, `release_id` only as the deterministic tie-breaker. Raw
+    `generated_at` strings must never be compared: `2026-09-20T00:00:00Z` and
+    `2026-09-19T23:00:00-02:00` are one hour apart in the other direction from
+    their lexical order, and a fractional-second spelling reorders again. Getting
+    this wrong picks the wrong "previous release" — the authority the §3.7.4
+    rebinding check and the §3.7.8 intake-transition comparison both read from.
+    """
+    return parse_timestamp(record["generated_at"], f"{label} release {release_id}"), release_id
+
+
 def latest_artifact_bound_release(releases: dict[str, dict]) -> tuple[str, dict] | None:
     """The most recently generated artifact-bound row in `releases`.
 
-    Ordered by `generated_at` then `release_id`; because §3.7.8 forbids reverting
-    to a smaller feed set, this is also "the previous release" whenever any row is
-    artifact-bound.
+    Ordered chronologically by `generated_at` then `release_id`; because §3.7.8
+    forbids reverting to a smaller feed set, this is also "the previous release"
+    whenever any row is artifact-bound.
     """
     rows = [
-        (record["generated_at"], release_id, record)
+        (release_order_key(release_id, record), release_id, record)
         for release_id, record in releases.items()
         if artifact_bound_row(record)
     ]
     if not rows:
         return None
-    _, release_id, record = max(rows, key=lambda row: (row[0], row[1]))
+    _, release_id, record = max(rows, key=lambda row: row[0])
     return release_id, record
 
 
@@ -1493,6 +1571,7 @@ def load_previous_release(
         )
     keys = keyring() if keys is None else keys
     bodies: dict[str, bytes] = {}
+    authenticated_signers: dict[str, str] = {}
     signed_names = ("autotune-candidates.json", "demand-rank.json", RATE_CARD_FEED_NAME, ARTIFACT_FEED_NAME)
     for name in signed_names:
         path = directory / name
@@ -1516,6 +1595,16 @@ def load_previous_release(
             fail(f"--previous-release-dir {directory}: {name}.sig key_id {key_id!r} is not trusted")
         verify_ed25519(public_key, signature, body, f"previous {name}.sig")
         bodies[name] = body
+        authenticated_signers[name] = key_id
+    # §3.7.2 equality over the AUTHENTICATED signers, not the recorded ones. Every
+    # check above is per-feed: a directory whose artifact feed and candidate
+    # catalog were signed by two different concurrently trusted keys satisfies all
+    # of them and would otherwise become rebinding authority.
+    require_artifact_signer_equality(
+        authenticated_signers[ARTIFACT_FEED_NAME],
+        authenticated_signers["autotune-candidates.json"],
+        f"--previous-release-dir {directory}",
+    )
     previous_candidate_obj = validate_candidate(bodies["autotune-candidates.json"])
     previous_feed_obj = validate_artifact_feed(
         bodies[ARTIFACT_FEED_NAME],
@@ -1611,19 +1700,12 @@ def manifest(
                 signer_ids[name] = parse_sidecar(sidecar_path.read_bytes(), sidecar_path.name)[0]
     if artifacts is not None:
         # SPEC-023 §3.7.2 signer-identity equality is a CHECKED equality, not an
-        # assumption: during a rotation bridge more than one key is concurrently
-        # trusted, so keyring membership alone does not establish that the artifact
-        # feed and the candidate catalog of one release were signed by one operator
-        # key (AC-CAT-1).
+        # assumption (AC-CAT-1).
         artifact_signer = signer_ids.get(ARTIFACT_FEED_NAME)
         candidate_signer = signer_ids.get("autotune-candidates.json")
         if artifact_signer is None or candidate_signer is None:
             fail("manifest: the artifact feed and the candidate catalog must both be signed before binding")
-        if artifact_signer != candidate_signer:
-            fail(
-                f"manifest: autotune-artifacts.json signer {artifact_signer!r} must equal the "
-                f"candidate-catalog signer {candidate_signer!r} for this release"
-            )
+        require_artifact_signer_equality(artifact_signer, candidate_signer, "manifest")
     feeds = {
         "autotune-candidates.json": {
             "sha256": sha256(candidate), "bytes": len(candidate), "version": candidate_obj["version"],
@@ -1826,6 +1908,13 @@ def validate_release_ledger(data: bytes, label: str = "release ledger") -> dict[
             # content identities, not the autotune release train (see manifest()).
             if feed_name not in {TIER2_CATALOG_FEED_NAME, RATE_CARD_FEED_NAME} and feed["version"] != release_id:
                 fail(f"{label}: feed version does not match release ID {release_id!r}")
+        if artifact_bound:
+            # After validate_ledger_feed, so both signer IDs are known-good strings.
+            require_artifact_signer_equality(
+                record["feeds"][ARTIFACT_FEED_NAME]["signer_key_id"],
+                record["feeds"]["autotune-candidates.json"]["signer_key_id"],
+                f"{label} release {release_id}",
+            )
     # SPEC-023 §3.7.4 across the WHOLE document, not only within one row: an
     # `artifact_id` may not be rebound to different bytes in a later release
     # either. Enforced here, in the shared ledger validator, so `verify` rejects a
@@ -1963,6 +2052,28 @@ def require_ledger_evolution(base: dict, current: dict) -> None:
             "release ledger: an artifact-bound ledger may not be downgraded from "
             f"{LEDGER_SCHEMA_V3} to {current.get('schema_version')}"
         )
+    # Monotonicity over the COMPLETE current ledger in chronological order, not
+    # only over rows the base already had: a single delta can introduce BOTH the
+    # first artifact-bound activation row and a later four-feed row, and a
+    # base-only verdict says "not activated yet" for both. Once any row is
+    # artifact-bound, every chronologically later row must be too.
+    ordered = sorted(
+        current["releases"].items(),
+        key=lambda item: release_order_key(item[0], item[1], "release ledger"),
+    )
+    seen_activation: str | None = None
+    for release_id, record in ordered:
+        if artifact_bound_row(record):
+            if seen_activation is None:
+                seen_activation = release_id
+            continue
+        if seen_activation is not None:
+            fail(
+                f"release ledger: release {release_id!r} reverts to "
+                f"{sorted(set(record.get('feeds', {})))} after the artifact-bound activation "
+                f"release {seen_activation!r}; {sorted(ARTIFACT_BOUND_LEDGER_FEEDS)} is "
+                "mandatory from that release forward"
+            )
     activated = any(
         set(record.get("feeds", {})) == ARTIFACT_BOUND_LEDGER_FEEDS
         for record in base["releases"].values()
@@ -2702,12 +2813,13 @@ def published_artifact_feed(
 
     Pre-activation the published feed is absent while the operator-authored source
     may already be committed. That state is valid and leaves v0.1 behaviour
-    untouched, so the source is only schema-checked here; the measured-size and
-    signing requirements bite at `generate`, which is the operator release cut.
+    untouched, so the source is only STRUCTURALLY checked here; the measured-size,
+    candidate-consistency, and signing requirements bite at `generate`, which is
+    the operator release cut.
     """
     if not feed_path.exists():
         if ARTIFACT_SOURCE_PATH.exists():
-            validate_artifact_source(ARTIFACT_SOURCE_PATH.read_bytes(), candidate_obj)
+            validate_artifact_source(ARTIFACT_SOURCE_PATH.read_bytes())
         return None, None
     if not ARTIFACT_SOURCE_PATH.exists():
         fail(
@@ -2765,12 +2877,15 @@ def candidate_admission_tiers(candidate_obj: dict) -> dict[str, int]:
 
 
 def latest_release(releases: dict[str, dict]) -> tuple[str, dict] | None:
-    """The most recently generated recorded release, by `generated_at` then id."""
+    """The most recently generated recorded release, chronologically then by id."""
     if not releases:
         return None
     _, release_id, record = max(
-        ((record["generated_at"], release_id, record) for release_id, record in releases.items()),
-        key=lambda row: (row[0], row[1]),
+        (
+            (release_order_key(release_id, record), release_id, record)
+            for release_id, record in releases.items()
+        ),
+        key=lambda row: row[0],
     )
     return release_id, record
 
@@ -3006,10 +3121,12 @@ def generate(
     if state == "pre_activation":
         artifacts, artifact_obj = None, None
         if ARTIFACT_SOURCE_PATH.exists():
-            # Schema-only: the committed source may still carry unmeasured
-            # `size_bytes`, and a pre-activation release must keep producing the
-            # rate-card-bound four-feed set unchanged.
-            validate_artifact_source(ARTIFACT_SOURCE_PATH.read_bytes(), candidate_obj)
+            # Structural only: the committed source may still carry unmeasured
+            # `size_bytes` and may lag a candidate-catalog change, and a
+            # pre-activation release must keep producing the rate-card-bound
+            # four-feed set unchanged. Candidate consistency is an activation-time
+            # prerequisite (`status`), not a gate on the four-feed train.
+            validate_artifact_source(ARTIFACT_SOURCE_PATH.read_bytes())
     else:
         if not ARTIFACT_SOURCE_PATH.exists():
             fail(
@@ -3089,6 +3206,55 @@ def migrate_swift_source() -> None:
     if count != 1:
         fail("could not migrate baked candidate/demand constants out of AutotuneRecommend.swift")
     SWIFT_SOURCE.write_text(updated)
+
+
+def restamp(release_id: str, generated_at: str) -> None:
+    """Re-date the release's SOURCE OF TRUTH inputs for a freshness-only renewal.
+
+    The signed feed carries a 30-day client freshness horizon
+    (`AutotuneRecommend.loadSignedStatic`), so a scheduled job re-stamps and
+    re-signs the same content every month. Content is otherwise byte-identical:
+    the candidate and demand feeds take the new `version` + `generated_at`, and
+    the rate card takes the date only — its `version` is a rows-projection hash
+    that a freshness renewal MUST NOT change.
+
+    The rate card is re-dated at its SOURCE. Since the §3.3.1 authoring source was
+    adopted, `rate-card.json` is a GENERATED file: `generate` materialises it from
+    `rate-card-source.json` on every run. Re-dating the generated file directly
+    would be silently reverted by the very next `generate`, and the atomic-release
+    check (`validate_release_inputs`) would then abort the renewal on a rate-card
+    `generated_at` that no longer matches the re-stamped candidate catalog. So the
+    source is re-dated when it exists, and only a checkout that predates the
+    source falls back to re-dating the published file.
+    """
+    parse_timestamp(generated_at, "restamp --generated-at")
+    if not release_id or release_id.strip() != release_id:
+        fail("restamp: --release-id must be a non-empty unpadded release ID")
+    for name in ("autotune-candidates.json", "demand-rank.json"):
+        path = CATALOG_DIR / name
+        if not path.exists():
+            fail(f"restamp: {path} is missing")
+        value = strict_json(path.read_bytes(), name)
+        value["version"] = release_id
+        value["generated_at"] = generated_at
+        path.write_bytes(canonical_bytes(value))
+    if RATE_CARD_SOURCE_PATH.exists():
+        source = strict_json(RATE_CARD_SOURCE_PATH.read_bytes(), RATE_CARD_SOURCE_PATH.name)
+        source["generated_at"] = generated_at
+        RATE_CARD_SOURCE_PATH.write_text(json.dumps(source, indent=2, sort_keys=True) + "\n")
+        restamped_rate_card = RATE_CARD_SOURCE_PATH.name
+    else:
+        rate_card_path = CATALOG_DIR / RATE_CARD_FEED_NAME
+        if not rate_card_path.exists():
+            fail(f"restamp: {rate_card_path} is missing")
+        value = strict_json(rate_card_path.read_bytes(), RATE_CARD_FEED_NAME)
+        value["generated_at"] = generated_at
+        rate_card_path.write_bytes(canonical_bytes(value))
+        restamped_rate_card = RATE_CARD_FEED_NAME
+    print(
+        f"catalog-release: re-stamped candidate/demand version={release_id} "
+        f"generated_at={generated_at} ({restamped_rate_card} date only)"
+    )
 
 
 def bootstrap(release_id: str, generated_at: str, policy_version: str) -> None:
@@ -3394,6 +3560,16 @@ def main() -> int:
     bootstrap_parser.add_argument("--release-id", required=True)
     bootstrap_parser.add_argument("--generated-at", required=True)
     bootstrap_parser.add_argument("--policy-version", default="autotune-policy-v1")
+    restamp_parser = sub.add_parser(
+        "restamp",
+        help=(
+            "re-date the release SOURCE inputs for a freshness-only renewal "
+            "(candidate/demand version + generated_at, rate-card source date); "
+            "run `generate` afterwards to materialise the published feeds"
+        ),
+    )
+    restamp_parser.add_argument("--release-id", required=True)
+    restamp_parser.add_argument("--generated-at", required=True)
     generate_parser = sub.add_parser("generate")
     generate_parser.add_argument("--signer-key-id")
     generate_parser.add_argument(
@@ -3472,6 +3648,8 @@ def main() -> int:
     try:
         if args.command == "bootstrap":
             bootstrap(args.release_id, args.generated_at, args.policy_version)
+        elif args.command == "restamp":
+            restamp(args.release_id, args.generated_at)
         elif args.command == "generate":
             generate(args.signer_key_id, args.previous_release_dir, args.activate_artifact_feed)
         elif args.command == "verify":

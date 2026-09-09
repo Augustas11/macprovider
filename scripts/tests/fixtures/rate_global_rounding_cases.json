@@ -1,0 +1,33 @@
+{
+  "_comment": "Shared SPEC-023 §3.3.1 rule 9 rate-global rounding vectors. ONE source of truth consumed by scripts/tests/test_catalog_artifact_feed.py (catalog_release.scaled_nonnegative_integer, the release gate) and phase4-coordinator/internal/billing/rate_global_rounding_cases_test.go (billing.ParseShareBps / billing.ParseMultiplierPPM, what settlement actually computes). Every value is parsed as a binary64 by both readers and scaled by the same binary64 scale, so a case pins the PRODUCT's rounding, not the operator's decimal intent. The cases flagged decimal_divergence are the ones that matter: their shortest decimal text lands exactly on a half unit while the binary64 product does not, so a decimal-semantics port answers one unit higher than the coordinator. Adding a case here binds both sides; changing either implementation alone turns one of them red instead of shipping a signed rate card the coordinator never derives.",
+  "schema_version": "macprovider.rate-global-rounding-cases.v1",
+  "share_scale": 10000,
+  "multiplier_scale": 1000000,
+  "shares": [
+    {"value": 0.0, "expected_bps": 0, "note": "zero"},
+    {"value": 0.9, "expected_bps": 9000, "note": "the committed production share"},
+    {"value": 1.0, "expected_bps": 10000, "note": "whole"},
+    {"value": 0.5, "expected_bps": 5000, "note": "exactly representable"},
+    {"value": 0.0001, "expected_bps": 1, "note": "one unit, no tie"},
+    {"value": 0.00005, "expected_bps": 1, "decimal_divergence": false, "note": "product is at or above the half unit; ties-to-even would give 0"},
+    {"value": 0.00015, "expected_bps": 1, "decimal_divergence": true, "note": "product falls just BELOW 1.5 bps; decimal ROUND_HALF_UP gives 2"},
+    {"value": 0.00025, "expected_bps": 3, "decimal_divergence": false, "note": "product is at or above 2.5 bps; ties-to-even would give 2"},
+    {"value": 0.00145, "expected_bps": 14, "decimal_divergence": true, "note": "product falls just BELOW 14.5 bps; decimal ROUND_HALF_UP gives 15"},
+    {"value": 0.12345, "expected_bps": 1235, "note": "many-digit share above the half unit"},
+    {"value": 0.33335, "expected_bps": 3334, "note": "many-digit share, non-terminating binary"},
+    {"value": 0.90005, "expected_bps": 9001, "note": "production share nudged onto a half unit"},
+    {"value": 0.99995, "expected_bps": 10000, "note": "rounds up to the full share"}
+  ],
+  "multipliers": [
+    {"value": 1.0, "expected_ppm": 1000000, "note": "the committed production multiplier"},
+    {"value": 1.5, "expected_ppm": 1500000, "note": "exactly representable"},
+    {"value": 2.0, "expected_ppm": 2000000, "note": "whole"},
+    {"value": 0.0000005, "expected_ppm": 1, "decimal_divergence": false, "note": "product is at or above 0.5 ppm; ties-to-even would give 0"},
+    {"value": 0.0000025, "expected_ppm": 3, "decimal_divergence": false, "note": "product is at or above 2.5 ppm; ties-to-even would give 2"},
+    {"value": 1.0000025, "expected_ppm": 1000002, "decimal_divergence": true, "note": "product falls just BELOW 1000002.5 ppm; decimal ROUND_HALF_UP gives 1000003"},
+    {"value": 1.0000075, "expected_ppm": 1000007, "decimal_divergence": true, "note": "product falls just BELOW 1000007.5 ppm; decimal ROUND_HALF_UP gives 1000008"},
+    {"value": 1.2345675, "expected_ppm": 1234568, "note": "many-digit multiplier above the half unit"},
+    {"value": 0.9999995, "expected_ppm": 1000000, "note": "rounds up to unity"},
+    {"value": 3.1415925, "expected_ppm": 3141593, "note": "many-digit multiplier, non-terminating binary"}
+  ]
+}

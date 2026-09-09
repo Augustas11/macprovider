@@ -62,6 +62,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from decimal import Decimal, ROUND_HALF_UP
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -86,6 +87,7 @@ RATE_CARD_SOURCE_BYTES = (CATALOG / "rate-card-source.json").read_bytes()
 ARTIFACT_SOURCE_BYTES = (CATALOG / "autotune-artifacts-source.json").read_bytes()
 CANDIDATE_OBJ = catalog_release.validate_candidate(CANDIDATE_BYTES)
 NORMALIZE_CASES_PATH = ROOT / "scripts" / "tests" / "fixtures" / "normalize_model_key_cases.json"
+ROUNDING_CASES_PATH = ROOT / "scripts" / "tests" / "fixtures" / "rate_global_rounding_cases.json"
 
 # A fixture-only measured size; the committed source deliberately carries
 # `size_bytes: null` until an operator measures each snapshot.
@@ -883,6 +885,90 @@ class LedgerV3Test(unittest.TestCase):
             "record": None,
         }
 
+    def test_artifact_bound_row_must_record_one_signer_across_both_feeds(self):
+        """AC-CAT-1 / §3.7.2 in the SHARED ledger validator.
+
+        The row is the durable record of who signed the release, so a document
+        that records two different concurrently trusted signers for the artifact
+        feed and the candidate catalog is rejected wherever a ledger is read —
+        `verify` included — not only where one is generated.
+        """
+        _, bindings = self.feed_bindings()
+        row = self.artifact_row(bindings)
+        row["feeds"]["autotune-artifacts.json"]["signer_key_id"] = "rotation-bridge-v2"
+        with self.assertRaises(catalog_release.CatalogError) as caught:
+            catalog_release.validate_release_ledger(self.ledger({CANDIDATE_OBJ["version"]: row}))
+        self.assertIn("must equal the candidate-catalog signer", str(caught.exception))
+
+    def test_one_delta_may_not_both_activate_and_revert(self):
+        """SPEC-023 §3.7.8 / AC-CAT-19 over the COMPLETE current ledger.
+
+        Reading activation off the BASE ledger alone answers "not activated yet"
+        for every row in a first-activation delta, so a single hand-assembled
+        delta could introduce the activation row AND a chronologically later
+        four-feed row and pass. Monotonicity is a property of the resulting
+        ledger, not of the rows the base happened to already have.
+        """
+        _, bindings = self.feed_bindings()
+        base = catalog_release.validate_release_ledger(
+            self.ledger({"published-2026-09-01-pre-v1": {
+                "generated_at": "2026-09-01T00:00:00Z",
+                "policy_version": CANDIDATE_OBJ["policy_version"],
+                "feeds": {
+                    name: {
+                        "bytes": 10, "sha256": "a" * 64, "signer_key_id": "k",
+                        "version": "published-2026-09-01-pre-v1" if name not in {
+                            catalog_release.TIER2_CATALOG_FEED_NAME,
+                            catalog_release.RATE_CARD_FEED_NAME,
+                        } else "own-identity",
+                    }
+                    for name in catalog_release.RATE_CARD_BOUND_LEDGER_FEEDS
+                },
+            }}, schema=catalog_release.LEDGER_SCHEMA_V2)
+        )
+        activation = self.artifact_row(bindings, feeds={
+            name: {
+                "bytes": 10, "sha256": "a" * 64, "signer_key_id": "k",
+                "version": "published-2026-09-02-activation-v1" if name not in {
+                    catalog_release.TIER2_CATALOG_FEED_NAME, catalog_release.RATE_CARD_FEED_NAME
+                } else "own-identity",
+            }
+            for name in catalog_release.ARTIFACT_BOUND_LEDGER_FEEDS
+        })
+        activation["generated_at"] = "2026-09-02T00:00:00Z"
+        later_four_feed = {
+            "generated_at": "2026-09-03T00:00:00Z",
+            "policy_version": CANDIDATE_OBJ["policy_version"],
+            "feeds": {
+                name: {
+                    "bytes": 10, "sha256": "a" * 64, "signer_key_id": "k",
+                    "version": "published-2026-09-03-revert-v1" if name not in {
+                        catalog_release.TIER2_CATALOG_FEED_NAME, catalog_release.RATE_CARD_FEED_NAME
+                    } else "own-identity",
+                }
+                for name in catalog_release.RATE_CARD_BOUND_LEDGER_FEEDS
+            },
+        }
+        current = catalog_release.validate_release_ledger(self.ledger({
+            **base["releases"],
+            "published-2026-09-02-activation-v1": activation,
+            "published-2026-09-03-revert-v1": later_four_feed,
+        }))
+        with self.assertRaises(catalog_release.CatalogError) as caught:
+            catalog_release.require_ledger_evolution(base, current)
+        self.assertIn("published-2026-09-03-revert-v1", str(caught.exception))
+        self.assertIn("reverts to", str(caught.exception))
+
+        # The same delta WITHOUT the later four-feed row is the ordinary
+        # activation and must still be accepted.
+        catalog_release.require_ledger_evolution(
+            base,
+            catalog_release.validate_release_ledger(self.ledger({
+                **base["releases"],
+                "published-2026-09-02-activation-v1": activation,
+            })),
+        )
+
     def test_cross_release_rebinding_fails_closed(self):
         feed, bindings = self.feed_bindings()
         history = self.history(bindings)
@@ -1176,36 +1262,76 @@ class RateGlobalsTest(unittest.TestCase):
         self.rate_card = catalog_release.validate_rate_card(RATE_CARD_BYTES)
         self.coordinator = COORDINATOR_YAML.read_text()
 
-    def test_scaled_conversion_rounds_half_away_from_zero_like_go(self):
-        """`billing.ParseShareBps` / `ParseMultiplierPPM` use `math.Round`
-        (half away from zero); Python's `round` is half-to-EVEN. The cases marked
-        below are half-unit boundaries where the two disagree; the rest pin the
-        ordinary values so a rewrite cannot regress them."""
-        share_cases = {
-            0.00005: 1,     # ties-to-even would give 0
-            0.00015: 2,     # ties-to-even would give 2 (agrees; pinned anyway)
-            0.00025: 3,     # ties-to-even would give 2
-            0.90005: 9001,
-            0.9: 9000,
-            1.0: 10000,
-            0.0: 0,
-        }
-        for raw, expected in share_cases.items():
-            with self.subTest(share=raw):
+    def test_scaled_conversion_matches_go_binary64_rounding(self):
+        """Pin the release gate's conversion against `billing.ParseShareBps` /
+        `ParseMultiplierPPM` through the SHARED vector table.
+
+        The two implementations must agree on the BINARY64 PRODUCT, not on the
+        operator's decimal intent: Go multiplies the parsed float64 by the float64
+        scale and rounds half away from zero, so a port that reconstructs the
+        value's decimal text and rounds a `Decimal` answers one unit higher
+        wherever the product sits just below a half unit that the text lands on.
+        A Python-authored expectation table cannot detect that — it only pins
+        Python to itself. Both sides read
+        `scripts/tests/fixtures/rate_global_rounding_cases.json`, and the Go half
+        is `phase4-coordinator/internal/billing/rate_global_rounding_cases_test.go`.
+        """
+        table = json.loads(ROUNDING_CASES_PATH.read_text())
+        self.assertEqual(table["schema_version"], "macprovider.rate-global-rounding-cases.v1")
+        self.assertEqual(table["share_scale"], 10000)
+        self.assertEqual(table["multiplier_scale"], 1000000)
+        go_test = (
+            ROOT / "phase4-coordinator" / "internal" / "billing" / "rate_global_rounding_cases_test.go"
+        ).read_text()
+        self.assertIn("rate_global_rounding_cases.json", go_test)
+        divergent = 0
+        for case in table["shares"]:
+            with self.subTest(share=case["value"]):
                 self.assertEqual(
-                    catalog_release.scaled_nonnegative_integer(raw, 10000, "share"), expected
+                    catalog_release.scaled_nonnegative_integer(
+                        case["value"], table["share_scale"], "share"
+                    ),
+                    case["expected_bps"],
                 )
-        multiplier_cases = {
-            0.0000005: 1,
-            0.0000025: 3,
-            1.0: 1000000,
-            1.5: 1500000,
-        }
-        for raw, expected in multiplier_cases.items():
-            with self.subTest(multiplier=raw):
+            divergent += bool(case.get("decimal_divergence"))
+        for case in table["multipliers"]:
+            with self.subTest(multiplier=case["value"]):
                 self.assertEqual(
-                    catalog_release.scaled_nonnegative_integer(raw, 1000000, "multiplier"), expected
+                    catalog_release.scaled_nonnegative_integer(
+                        case["value"], table["multiplier_scale"], "multiplier"
+                    ),
+                    case["expected_ppm"],
                 )
+            divergent += bool(case.get("decimal_divergence"))
+        # The table is only a parity guard while it still carries vectors that a
+        # decimal-semantics port would get wrong.
+        self.assertGreaterEqual(divergent, 2)
+
+    def test_a_decimal_semantics_port_would_fail_the_flagged_vectors(self):
+        """The `decimal_divergence` flag is a claim about the two roundings, so
+        assert it rather than trusting the annotation: for each flagged vector the
+        decimal answer must actually differ from the binary64 one."""
+        table = json.loads(ROUNDING_CASES_PATH.read_text())
+        for scale_key, cases_key, expected_key in (
+            ("share_scale", "shares", "expected_bps"),
+            ("multiplier_scale", "multipliers", "expected_ppm"),
+        ):
+            scale = table[scale_key]
+            for case in table[cases_key]:
+                decimal_answer = int(
+                    (Decimal(repr(case["value"])) * scale).quantize(
+                        Decimal(1), rounding=ROUND_HALF_UP
+                    )
+                )
+                diverges = decimal_answer != case[expected_key]
+                with self.subTest(value=case["value"]):
+                    self.assertEqual(diverges, bool(case.get("decimal_divergence")))
+
+    def test_scaled_conversion_rejects_a_non_finite_or_negative_value(self):
+        for raw in (float("nan"), float("inf"), -0.5, "0.9", True):
+            with self.subTest(raw=raw):
+                with self.assertRaises(catalog_release.CatalogError):
+                    catalog_release.scaled_nonnegative_integer(raw, 10000, "share")
 
     def test_midpoint_share_disagreement_fails_the_parity_gate(self):
         """A signed rate card whose share is the ties-to-even answer for a
@@ -1357,6 +1483,10 @@ class HermeticRelease:
     """
 
     KEY_ID = "test-hermetic-v1"
+    # A SECOND concurrently trusted key, as a rotation bridge has. Its presence is
+    # what makes "the keyring accepted this signature" and "one operator signed
+    # this release" two different statements (SPEC-023 §3.7.2 / AC-CAT-1).
+    ALT_KEY_ID = "test-hermetic-v2"
     SIGNED_FEEDS = ("autotune-candidates.json", "demand-rank.json", "rate-card.json", "autotune-artifacts.json")
     STAGED_FILES = (
         "release.json", "trusted-keys.json", "tier2-catalog.json",
@@ -1369,22 +1499,26 @@ class HermeticRelease:
         self.catalog = root / "catalog"
         self.static = root / "static"
         self.key = root / "signing.pem"
+        self.alt_key = root / "signing-alt.pem"
         shutil.copytree(CATALOG, self.catalog)
         self.static.mkdir()
-        subprocess.run(
-            [openssl, "genpkey", "-algorithm", "ed25519", "-out", str(self.key)],
-            check=True, capture_output=True,
-        )
-        der = subprocess.run(
-            [openssl, "pkey", "-in", str(self.key), "-pubout", "-outform", "DER"],
-            check=True, capture_output=True,
-        ).stdout
-        (self.catalog / "trusted-keys.json").write_text(json.dumps({
-            "schema_version": "macprovider.autotune-keys.v1",
-            "keys": {self.KEY_ID: {
+        keys = {}
+        for key_id, key_path in ((self.KEY_ID, self.key), (self.ALT_KEY_ID, self.alt_key)):
+            subprocess.run(
+                [openssl, "genpkey", "-algorithm", "ed25519", "-out", str(key_path)],
+                check=True, capture_output=True,
+            )
+            der = subprocess.run(
+                [openssl, "pkey", "-in", str(key_path), "-pubout", "-outform", "DER"],
+                check=True, capture_output=True,
+            ).stdout
+            keys[key_id] = {
                 "public_key_base64": base64.b64encode(der[-32:]).decode("ascii"),
                 "status": "active",
-            }},
+            }
+        (self.catalog / "trusted-keys.json").write_text(json.dumps({
+            "schema_version": "macprovider.autotune-keys.v1",
+            "keys": keys,
         }, indent=2, sort_keys=True) + "\n")
         self.baseline = (self.catalog / "release-ledger.json").read_bytes()
         self._saved: dict[str, object] = {}
@@ -1459,16 +1593,27 @@ class HermeticRelease:
         source["generated_at"] = generated_at
         source_path.write_text(json.dumps(source, indent=2, sort_keys=True) + "\n")
 
-    def sign_into(self, directory: pathlib.Path, name: str, body: bytes) -> None:
+    def sign_into(
+        self,
+        directory: pathlib.Path,
+        name: str,
+        body: bytes,
+        key_id: str | None = None,
+    ) -> None:
+        """Sign `body` into `<name>.sig`. `key_id` selects the alternate trusted
+        key, so a test can produce a sidecar that is genuinely valid under the
+        keyring yet signed by a different operator key than its sibling feeds."""
+        key_id = key_id or self.KEY_ID
+        key_path = self.alt_key if key_id == self.ALT_KEY_ID else self.key
         message = directory / f".{name}.signing"
         message.write_bytes(body)
         signature = subprocess.run(
-            [self.openssl, "pkeyutl", "-sign", "-rawin", "-inkey", str(self.key), "-in", str(message)],
+            [self.openssl, "pkeyutl", "-sign", "-rawin", "-inkey", str(key_path), "-in", str(message)],
             check=True, capture_output=True,
         ).stdout
         message.unlink()
         (directory / f"{name}.sig").write_bytes(json.dumps({
-            "key_id": self.KEY_ID,
+            "key_id": key_id,
             "alg": "ed25519",
             "signature": base64.b64encode(signature).decode("ascii"),
         }).encode())
@@ -1651,6 +1796,69 @@ class HermeticReleaseTest(unittest.TestCase):
                 catalog_release.verify()
             self.assertIn("recorded with two different bindings", str(caught.exception))
 
+    def test_verify_rejects_an_activation_delta_carrying_a_later_four_feed_release(self):
+        """AC-CAT-19 through the PUBLIC entry point, for the FIRST activation.
+
+        `origin/main` has no artifact-bound row, so a single delta introducing both
+        the activation row and a chronologically later four-feed row is the one
+        state a base-only activation verdict cannot see.
+        """
+        with self.harness() as harness:
+            release_id = self.activate(harness)
+            ledger_path = harness.catalog / "release-ledger.json"
+            ledger = json.loads(ledger_path.read_text())
+            activation = ledger["releases"][release_id]
+            reverted_id = "published-2026-09-30-revert-v1"
+            reverted = {
+                "generated_at": "2026-09-30T00:00:00Z",
+                "policy_version": activation["policy_version"],
+                "feeds": {
+                    name: dict(
+                        activation["feeds"][name],
+                        version=activation["feeds"][name]["version"]
+                        if name in {
+                            catalog_release.TIER2_CATALOG_FEED_NAME,
+                            catalog_release.RATE_CARD_FEED_NAME,
+                        }
+                        else reverted_id,
+                    )
+                    for name in catalog_release.RATE_CARD_BOUND_LEDGER_FEEDS
+                },
+            }
+            ledger["releases"][reverted_id] = reverted
+            ledger_path.write_bytes(json.dumps(ledger, indent=2, sort_keys=True).encode() + b"\n")
+            with self.assertRaises(catalog_release.CatalogError) as caught:
+                catalog_release.verify()
+            self.assertIn(reverted_id, str(caught.exception))
+            self.assertIn("reverts to", str(caught.exception))
+
+    def test_a_candidate_change_still_cuts_a_pre_activation_four_feed_release(self):
+        """Code L1: pre-activation, the committed artifact source is unpublished
+        and may lag the candidate catalog. A routine identity update must keep
+        producing the four-feed release it has always produced instead of being
+        blocked by drift against a document nothing is serving yet."""
+        with self.harness() as harness:
+            path = harness.catalog / "autotune-candidates.json"
+            candidate = json.loads(path.read_text())
+            candidate["rows"]["qwen3-8b"]["min_ram_gb"] += 1
+            path.write_bytes(catalog_release.canonical_bytes(candidate))
+            harness.bump("published-2026-09-20-drift-v1", "2026-09-20T00:00:00Z")
+            harness.cut()
+            row = harness.ledger()["releases"]["published-2026-09-20-drift-v1"]
+            self.assertEqual(set(row["feeds"]), catalog_release.RATE_CARD_BOUND_LEDGER_FEEDS)
+            # The same drift IS an activation-time prerequisite failure.
+            unmet = [
+                detail
+                for satisfied, detail in catalog_release.artifact_activation_prerequisites(
+                    catalog_release.validate_candidate(path.read_bytes()),
+                    catalog_release.validate_release_ledger(
+                        (harness.catalog / "release-ledger.json").read_bytes()
+                    ),
+                )
+                if not satisfied
+            ]
+            self.assertTrue(any("min_ram_gb" in detail for detail in unmet), unmet)
+
     def set_status(self, harness, key: str, status: str) -> None:
         path = harness.catalog / "autotune-candidates.json"
         candidate = json.loads(path.read_text())
@@ -1686,6 +1894,184 @@ class HermeticReleaseTest(unittest.TestCase):
             harness.cut(previous_release_dir=demoted)
             row = harness.ledger()["releases"]["published-2026-09-22-promote-v1"]
             self.assertEqual(len(row["intake_decision_sha256"]), 64)
+
+
+class ReleaseOrderingTest(unittest.TestCase):
+    """`generated_at` is RFC3339 with any explicit offset, so "the latest release"
+    is a CHRONOLOGICAL question. Lexical string order answers it wrongly, and both
+    helpers feed decisions that must not be wrong: which release the §3.7.4
+    rebinding check authenticates against, and which release's admission tiers the
+    §3.7.8 intake-decision rule compares to."""
+
+    def row(self, release_id: str, generated_at: str, artifact_bound: bool) -> dict:
+        names = (
+            catalog_release.ARTIFACT_BOUND_LEDGER_FEEDS
+            if artifact_bound
+            else catalog_release.RATE_CARD_BOUND_LEDGER_FEEDS
+        )
+        record = {
+            "generated_at": generated_at,
+            "policy_version": CANDIDATE_OBJ["policy_version"],
+            "feeds": {
+                name: {"bytes": 10, "sha256": "a" * 64, "signer_key_id": "k", "version": release_id}
+                for name in names
+            },
+        }
+        if artifact_bound:
+            record["artifact_bindings"] = []
+            record["intake_decision_sha256"] = None
+        return record
+
+    # 2026-09-19T23:00:00-02:00 is 2026-09-20T01:00:00Z: LATER than
+    # 2026-09-20T00:00:00Z, but lexically smaller.
+    EARLIER = ("published-a-v1", "2026-09-20T00:00:00Z")
+    LATER = ("published-b-v1", "2026-09-19T23:00:00-02:00")
+
+    def test_latest_artifact_bound_release_is_chronological_not_lexical(self):
+        releases = {
+            self.EARLIER[0]: self.row(*self.EARLIER, artifact_bound=True),
+            self.LATER[0]: self.row(*self.LATER, artifact_bound=True),
+        }
+        self.assertEqual(
+            catalog_release.latest_artifact_bound_release(releases)[0], self.LATER[0]
+        )
+
+    def test_latest_release_is_chronological_not_lexical(self):
+        releases = {
+            self.EARLIER[0]: self.row(*self.EARLIER, artifact_bound=False),
+            self.LATER[0]: self.row(*self.LATER, artifact_bound=False),
+        }
+        self.assertEqual(catalog_release.latest_release(releases)[0], self.LATER[0])
+
+    def test_fractional_seconds_do_not_reorder_the_same_instant(self):
+        """`...:00Z` and `...:00.000Z` are the same instant spelled two ways;
+        lexically the fractional form sorts LATER. The tie-break must be the
+        release ID, not the spelling."""
+        releases = {
+            "published-zz-v1": self.row("published-zz-v1", "2026-09-20T00:00:00Z", artifact_bound=False),
+            "published-aa-v1": self.row("published-aa-v1", "2026-09-20T00:00:00.000Z", artifact_bound=False),
+        }
+        self.assertEqual(catalog_release.latest_release(releases)[0], "published-zz-v1")
+
+    def test_an_offset_release_id_is_only_the_tie_breaker(self):
+        releases = {
+            "published-zz-v1": self.row("published-zz-v1", "2026-09-20T00:00:00Z", artifact_bound=False),
+            "published-aa-v1": self.row("published-aa-v1", "2026-09-21T00:00:00+02:00", artifact_bound=False),
+        }
+        self.assertEqual(catalog_release.latest_release(releases)[0], "published-aa-v1")
+
+
+class RenewalFlowTest(unittest.TestCase):
+    """The scheduled freshness renewal, driven through the real code path.
+
+    `scripts/renew-autotune-static-feed.sh` runs monthly against a production
+    signing key: the signed feed carries a 30-day client freshness horizon, so a
+    renewal that cannot complete strands every provider that restarts after the
+    horizon. Its restamp is `catalog-release.py restamp`, and these tests run that
+    restamp → generate → sign → generate → verify sequence in both the
+    pre-activation four-feed state and the post-activation five-feed state.
+    """
+
+    NOW = "2026-10-05T09:15:00Z"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.openssl = catalog_release.openssl_executable()
+
+    @contextlib.contextmanager
+    def harness(self):
+        with tempfile.TemporaryDirectory() as raw:
+            with HermeticRelease(pathlib.Path(raw) / "repo", self.openssl) as harness:
+                yield harness
+
+    def assert_atomic_release(self, harness, release_id: str, generated_at: str) -> dict:
+        candidate = json.loads((harness.catalog / "autotune-candidates.json").read_text())
+        demand = json.loads((harness.catalog / "demand-rank.json").read_text())
+        rate_card = json.loads((harness.catalog / "rate-card.json").read_text())
+        source = json.loads((harness.catalog / "rate-card-source.json").read_text())
+        self.assertEqual(candidate["version"], release_id)
+        self.assertEqual(demand["version"], release_id)
+        for name, obj in (
+            ("candidate", candidate), ("demand", demand),
+            ("rate-card", rate_card), ("rate-card-source", source),
+        ):
+            self.assertEqual(obj["generated_at"], generated_at, name)
+        return harness.ledger()["releases"][release_id]
+
+    def test_pre_activation_renewal_restamps_generates_and_verifies(self):
+        release_id = "published-2026-10-05-inband-provenance-v1"
+        with self.harness() as harness:
+            catalog_release.restamp(release_id, self.NOW)
+            harness.cut()
+            row = self.assert_atomic_release(harness, release_id, self.NOW)
+            self.assertEqual(set(row["feeds"]), catalog_release.RATE_CARD_BOUND_LEDGER_FEEDS)
+
+    def test_post_activation_renewal_restamps_generates_and_verifies(self):
+        with self.harness() as harness:
+            harness.measure_sizes()
+            harness.bump("published-2026-09-20-activation-v1", "2026-09-20T00:00:00Z")
+            harness.cut(activate_artifact_feed=True)
+            previous = harness.stage(harness.root / "previous")
+
+            release_id = "published-2026-10-05-inband-provenance-v1"
+            catalog_release.restamp(release_id, self.NOW)
+            harness.cut(previous_release_dir=previous)
+            row = self.assert_atomic_release(harness, release_id, self.NOW)
+            self.assertEqual(set(row["feeds"]), catalog_release.ARTIFACT_BOUND_LEDGER_FEEDS)
+            feed = json.loads((harness.catalog / "autotune-artifacts.json").read_text())
+            self.assertEqual(feed["release_id"], release_id)
+            self.assertEqual(feed["generated_at"], self.NOW)
+
+    def test_restamping_the_generated_rate_card_instead_of_its_source_aborts(self):
+        """The regression this replaced. `rate-card.json` is MATERIALISED from
+        `rate-card-source.json`, so re-dating the generated file is reverted by the
+        very next `generate` and the atomic-release check then aborts the renewal
+        on a rate card whose date no longer matches the candidate catalog."""
+        release_id = "published-2026-10-05-inband-provenance-v1"
+        with self.harness() as harness:
+            for name in ("autotune-candidates.json", "demand-rank.json"):
+                path = harness.catalog / name
+                obj = json.loads(path.read_text())
+                obj["version"] = release_id
+                obj["generated_at"] = self.NOW
+                path.write_bytes(catalog_release.canonical_bytes(obj))
+            rate_card_path = harness.catalog / "rate-card.json"
+            rate_card = json.loads(rate_card_path.read_text())
+            rate_card["generated_at"] = self.NOW
+            rate_card_path.write_bytes(catalog_release.canonical_bytes(rate_card))
+            with self.assertRaises(catalog_release.CatalogError) as caught:
+                catalog_release.generate(harness.KEY_ID)
+            self.assertIn("rate-card generated_at", str(caught.exception))
+
+    def test_restamp_falls_back_to_the_published_rate_card_without_a_source(self):
+        """A checkout that predates the §3.3.1 authoring source has no
+        `rate-card-source.json`; there `rate-card.json` IS the source of truth."""
+        release_id = "published-2026-10-05-inband-provenance-v1"
+        with self.harness() as harness:
+            (harness.catalog / "rate-card-source.json").unlink()
+            catalog_release.restamp(release_id, self.NOW)
+            harness.cut()
+            rate_card = json.loads((harness.catalog / "rate-card.json").read_text())
+            self.assertEqual(rate_card["generated_at"], self.NOW)
+
+    def test_restamp_rejects_a_malformed_timestamp(self):
+        with self.harness() as harness:
+            with self.assertRaises(catalog_release.CatalogError):
+                catalog_release.restamp("published-2026-10-05-v1", "2026-10-05 09:15:00")
+            with self.assertRaises(catalog_release.CatalogError):
+                catalog_release.restamp("published-2026-10-05-v1", "2026-10-05T09:15:00")
+
+    def test_the_renewal_script_delegates_the_restamp_to_the_generator(self):
+        """The shell script must not hand-edit the release inputs: which files are
+        SOURCES and which are GENERATED is the generator's knowledge, and a
+        duplicate in shell is exactly how the two drifted apart."""
+        script = (ROOT / "scripts" / "renew-autotune-static-feed.sh").read_text()
+        self.assertIn("catalog-release.py restamp", script)
+        restamp_block = script.split("catalog-release.py restamp", 1)[1].split("\n\n", 1)[0]
+        self.assertIn("--release-id", restamp_block)
+        self.assertIn("--generated-at", restamp_block)
+        before_generate = script.split("catalog-release.py \"${GENERATE_ARGS[@]}\"", 1)[0]
+        self.assertNotIn('rc = cat_dir / "rate-card.json"', before_generate)
 
 
 class PreviousReleaseDirectoryTest(unittest.TestCase):
@@ -1763,6 +2149,34 @@ class PreviousReleaseDirectoryTest(unittest.TestCase):
             with self.assertRaises(catalog_release.CatalogError) as caught:
                 catalog_release.load_previous_release(previous, releases)
             self.assertIn("the ledger's latest artifact-bound release is", str(caught.exception))
+
+    def test_two_valid_concurrently_trusted_signers_fail_closed(self):
+        """AC-CAT-1 / §3.7.2 across the PREVIOUS release.
+
+        Every other check in `load_previous_release` is per-feed: digest, length,
+        sidecar-vs-binding signer, and Ed25519 verification under the trusted
+        keyring. A previous release whose artifact feed is signed by a second
+        concurrently trusted key — with `release.json` and the ledger row both
+        honestly recording that second key — satisfies all of them, and would
+        otherwise become the rebinding authority for every later release. The
+        equality is over the AUTHENTICATED signers, so re-signing with a real
+        second trusted key is the condition that has to fail, not a doctored
+        sidecar `key_id`.
+        """
+        with self.activated() as (harness, previous, releases):
+            body = (previous / "autotune-artifacts.json").read_bytes()
+            harness.sign_into(previous, "autotune-artifacts.json", body, key_id=harness.ALT_KEY_ID)
+            manifest = json.loads((previous / "release.json").read_text())
+            manifest["feeds"]["autotune-artifacts.json"]["signer_key_id"] = harness.ALT_KEY_ID
+            (previous / "release.json").write_bytes(
+                json.dumps(manifest, indent=2, sort_keys=True).encode() + b"\n"
+            )
+            rotated = copy.deepcopy(releases)
+            release_id = "published-2026-09-20-activation-v1"
+            rotated[release_id]["feeds"]["autotune-artifacts.json"]["signer_key_id"] = harness.ALT_KEY_ID
+            with self.assertRaises(catalog_release.CatalogError) as caught:
+                catalog_release.load_previous_release(previous, rotated)
+            self.assertIn("must equal the candidate-catalog signer", str(caught.exception))
 
     def test_the_wrong_signer_fails_closed(self):
         with self.activated() as (harness, previous, releases):

@@ -35,9 +35,21 @@ flag:
 
 | State | Condition | Generator behaviour |
 |---|---|---|
-| pre-activation | no earlier artifact-bound ledger row, no published feed, no flag | four-feed release; source schema-validated only |
+| pre-activation | no earlier artifact-bound ledger row, no published feed, no flag | four-feed release; source **structurally** validated only |
 | activation | `--activate-artifact-feed` on a NEW `release_id`, or the idempotent re-run of that same release | builds, binds, and records the feed; no previous release required |
 | post-activation | an EARLIER ledger row is artifact-bound | feed is mandatory; `--previous-release-dir` is required |
+
+**Pre-activation validation is structural only, deliberately.** Schema closure,
+the identity-tuple matrix, `artifact_id` grammar, GGUF digest equality, and global
+`(hash_algorithm, hash)` uniqueness are properties of the source document alone
+and always run. Consistency with the CANDIDATE CATALOG — every `listed` /
+`recommendable` row having a `verified`, identity-identical primary artifact, and
+every `recommendable` row declaring a `rate_class` — runs at activation and at
+every artifact-bound cut, NOT on the four-feed train. So an ordinary candidate
+change (adding a row, updating a `model_sha256`, `model_revision`, or
+`min_ram_gb`) does not block a pre-activation four-feed release against a source
+that has not caught up yet; nothing is serving that source. `status` reports the
+drift as an unmet prerequisite, and `--activate-artifact-feed` refuses on it.
 
 Regenerating the SAME `release_id` — what `resign-autotune-static.sh` does
 before and after replacing the sidecars — excludes that release's own ledger row

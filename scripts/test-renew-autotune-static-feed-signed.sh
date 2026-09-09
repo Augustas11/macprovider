@@ -151,9 +151,20 @@ for requirement in (
     "restored .previous-target only",
     "__EMPTY__",
     "current moved under lock",
+    # The restamp goes through the generator, which is the only thing that knows
+    # rate-card.json is MATERIALISED from rate-card-source.json. A hand-rolled
+    # restamp in shell re-dates the generated file, `generate` reverts it from the
+    # stale source, and the atomic-release check aborts the monthly renewal on a
+    # feed that is otherwise correct. The executable regression is RenewalFlowTest
+    # in scripts/tests/test_catalog_artifact_feed.py, run below.
+    "catalog-release.py restamp",
+    "--generated-at",
 ):
     if requirement not in script:
         raise SystemExit(f"renew script omits: {requirement}")
+before_generate = script.split('catalog-release.py "${GENERATE_ARGS[@]}"', 1)[0]
+if 'cat_dir / "rate-card.json"' in before_generate:
+    raise SystemExit("renewal must not re-stamp the GENERATED rate-card.json; the generator writes it")
 rollback = script.split("rollback() {", 1)[1].split("\n}", 1)[0]
 if "flock -n 8" not in rollback or "flock -n 9" not in rollback:
     raise SystemExit("rollback must take Pearl deploy locks before mutating current")
@@ -189,5 +200,17 @@ PY
 
 python3 -m py_compile "$helper"
 bash -n "$script"
+
+# EXECUTABLE renewal-flow regression: restamp -> generate -> sign -> generate ->
+# verify, in both the pre-activation four-feed state and the post-activation
+# five-feed state, against a throwaway catalog and key. Structural greps above
+# cannot tell whether the flow still COMPLETES, and this job runs unattended on a
+# 30-day freshness clock.
+( cd "$root" && PYTHONDONTWRITEBYTECODE=1 python3 -m unittest \
+  scripts.tests.test_catalog_artifact_feed.RenewalFlowTest ) >/dev/null 2>&1 || {
+  printf '[test-renew-autotune-static-feed-signed] ERROR: renewal flow regression failed; re-run:\n' >&2
+  printf '  PYTHONDONTWRITEBYTECODE=1 python3 -m unittest scripts.tests.test_catalog_artifact_feed.RenewalFlowTest\n' >&2
+  exit 1
+}
 
 printf '[test-renew-autotune-static-feed-signed] ok: protected autotune renewal fails closed\n'
