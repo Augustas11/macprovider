@@ -210,7 +210,7 @@ struct AutoUpdater: Sendable {
         }
         do {
             let policy = markerStore.effectivePolicy()
-            if let minimum = policy.minimum, SelfUpdate.compareSemver(target, minimum) == .orderedAscending || policy.revoked.contains(target) {
+            if SelfUpdate.targetRejectedBySignedPolicy(target, policy: policy) {
                 // fail(...) records a cooldown/failure for this target, so per
                 // SPEC-020-R005 this is a recorded forward-progress failure cycle
                 // and MUST increment the counter (not .notAttempted). A revoked or
@@ -490,7 +490,7 @@ struct AutoUpdater: Sendable {
                 return
             }
             let policy = markerStore.effectivePolicy()
-            if let minimum = policy.minimum, SelfUpdate.compareSemver(target, minimum) == .orderedAscending || policy.revoked.contains(target) {
+            if SelfUpdate.targetRejectedBySignedPolicy(target, policy: policy) {
                 await failR005(target: target, phase: .eligibility, failure: .targetRevokedOrBelowMinimum, reason: "target_revoked_or_below_minimum")
                 return
             }

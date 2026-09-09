@@ -482,6 +482,27 @@ final class ProviderCredentialStoreTests: XCTestCase {
         XCTAssertTrue(result.status.migrationPending)
     }
 
+    func testCredentialRepairRejectsExtendedACLBeforeMutation() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("provider-credential-repair-acl-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let config = directory.appendingPathComponent("config.yaml")
+        try "provider_id: provider-a\nprovider_token: recovery-token\n".write(
+            to: config,
+            atomically: true,
+            encoding: .utf8
+        )
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: config.path)
+        try addExtendedACL(to: config)
+        let store = InMemoryProviderCredentialStore()
+
+        XCTAssertThrowsError(
+            try CredentialsRepairCommand.repair(configPath: config.path, store: store)
+        )
+        XCTAssertNil(try store.load(providerID: "provider-a"))
+    }
+
     func testCredentialRepairRefusesConflictAndUnavailableStore() throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("provider-credential-repair-refusal-\(UUID().uuidString)")
@@ -903,6 +924,17 @@ final class ProviderCredentialStoreTests: XCTestCase {
         var entry: acl_entry_t?
         XCTAssertEqual(acl_get_entry(acl, ACL_FIRST_ENTRY.rawValue, &entry), 0, file: file, line: line)
         XCTAssertNil(entry, file: file, line: line)
+    }
+
+    private func addExtendedACL(to url: URL) throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/chmod")
+        process.arguments = ["+a", "\(NSUserName()) allow read", url.path]
+        try process.run()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else {
+            throw XCTSkip("extended ACLs are unavailable on this filesystem")
+        }
     }
 }
 

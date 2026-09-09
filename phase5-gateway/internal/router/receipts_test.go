@@ -112,3 +112,18 @@ func TestBuyerReceiptRetrievalAuthAndRedaction(t *testing.T) {
 	}
 	assertStatus(t, h, http.MethodGet, "/v1/receipts/req-owned", "", demoBody.DemoToken, "1.2.3.4", http.StatusForbidden)
 }
+
+func TestBuyerReceiptRejectsWalletSessionBearer(t *testing.T) {
+	h, store, _, cfg := newWalletSessionHarness(t, walletModelsClient())
+	apiKey := createAccountAndKey(t, store, cfg, "acct_wallet_receipt")
+	client := registerWalletSessionViaAPI(t, h, cfg, apiKey, "acct_wallet_receipt", []string{"model-a"})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/receipts/req-wallet", nil)
+	req.Header.Set("Authorization", "Bearer "+client.Bearer)
+	resp := httptest.NewRecorder()
+	h.ServeHTTP(resp, req)
+	if resp.Code != http.StatusForbidden {
+		t.Fatalf("status=%d want 403 body=%s", resp.Code, resp.Body.String())
+	}
+	assertErrorCode(t, resp.Body.String(), "wallet_session_receipt_forbidden")
+}

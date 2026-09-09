@@ -4799,6 +4799,7 @@ final class ConsumeLocalHandler: ChannelInboundHandler, @unchecked Sendable {
     private var upstreamForwardWasDispatched = false
     private var channelInactiveWhileUpstreamPending = false
     private var responseStarted = false
+    private var streamingTerminalErrorStarted = false
     private var upstreamCancellationHandle: ConsumeUpstreamCancellationHandle?
     private var headerDeadlineTask: Scheduled<Void>?
     private var requestDeadlineTask: Scheduled<Void>?
@@ -5640,6 +5641,14 @@ final class ConsumeLocalHandler: ChannelInboundHandler, @unchecked Sendable {
                         extraHeaders: extraHeaders
                     )
                 } catch {
+                    if self.responseStarted {
+                        self.writeStreamingTerminalError(
+                            context: contextBox.context,
+                            code: "local_upstream_unavailable",
+                            forwardedUpstream: true
+                        )
+                        return
+                    }
                     self.writeLocalError(
                         context: contextBox.context,
                         status: HTTPResponseStatus(statusCode: 502),
@@ -5652,7 +5661,11 @@ final class ConsumeLocalHandler: ChannelInboundHandler, @unchecked Sendable {
                 let failure = Self.classifyUpstreamFailure(error)
                 guard !self.shouldSuppressLateStreamingWrite(streaming: true) else { return }
                 if self.responseStarted {
-                    self.writeStreamingEnd(context: contextBox.context)
+                    self.writeStreamingTerminalError(
+                        context: contextBox.context,
+                        code: "local_upstream_unavailable",
+                        forwardedUpstream: failure.forwardedUpstream
+                    )
                     return
                 }
                 self.writeLocalError(
@@ -5926,7 +5939,11 @@ final class ConsumeLocalHandler: ChannelInboundHandler, @unchecked Sendable {
                         }
                     } catch {
                         guard !self.responseStarted else {
-                            self.writeStreamingEnd(context: contextBox.context)
+                            self.writeStreamingTerminalError(
+                                context: contextBox.context,
+                                code: "local_budget_ledger_unavailable",
+                                forwardedUpstream: true
+                            )
                             return
                         }
                         self.writeLocalError(
@@ -5963,6 +5980,14 @@ final class ConsumeLocalHandler: ChannelInboundHandler, @unchecked Sendable {
                             reason: "settled_to_admission_estimate"
                         )
                     } catch {
+                        if self.responseStarted {
+                            self.writeStreamingTerminalError(
+                                context: contextBox.context,
+                                code: "local_budget_ledger_unavailable",
+                                forwardedUpstream: true
+                            )
+                            return
+                        }
                         self.writeLocalError(
                             context: contextBox.context,
                             status: .serviceUnavailable,
@@ -5981,6 +6006,14 @@ final class ConsumeLocalHandler: ChannelInboundHandler, @unchecked Sendable {
                     )
                     return
                 } catch {
+                    if self.responseStarted {
+                        self.writeStreamingTerminalError(
+                            context: contextBox.context,
+                            code: "local_budget_ledger_unavailable",
+                            forwardedUpstream: true
+                        )
+                        return
+                    }
                     self.writeLocalError(
                         context: contextBox.context,
                         status: .serviceUnavailable,
@@ -6005,6 +6038,14 @@ final class ConsumeLocalHandler: ChannelInboundHandler, @unchecked Sendable {
                         extraHeaders: extraHeaders
                     )
                 } catch {
+                    if self.responseStarted {
+                        self.writeStreamingTerminalError(
+                            context: contextBox.context,
+                            code: "local_budget_ledger_unavailable",
+                            forwardedUpstream: true
+                        )
+                        return
+                    }
                     self.writeLocalError(
                         context: contextBox.context,
                         status: .serviceUnavailable,
@@ -6045,7 +6086,11 @@ final class ConsumeLocalHandler: ChannelInboundHandler, @unchecked Sendable {
                 } catch {
                     guard !self.shouldSuppressLateStreamingWrite(streaming: true) else { return }
                     if self.responseStarted {
-                        self.writeStreamingEnd(context: contextBox.context)
+                        self.writeStreamingTerminalError(
+                            context: contextBox.context,
+                            code: "local_budget_ledger_unavailable",
+                            forwardedUpstream: failure.forwardedUpstream
+                        )
                         return
                     }
                     self.writeLocalError(
@@ -6059,7 +6104,11 @@ final class ConsumeLocalHandler: ChannelInboundHandler, @unchecked Sendable {
                 }
                 guard !self.shouldSuppressLateStreamingWrite(streaming: true) else { return }
                 if self.responseStarted {
-                    self.writeStreamingEnd(context: contextBox.context)
+                    self.writeStreamingTerminalError(
+                        context: contextBox.context,
+                        code: "local_upstream_unavailable",
+                        forwardedUpstream: failure.forwardedUpstream
+                    )
                     return
                 }
                 self.writeLocalError(
@@ -6753,6 +6802,36 @@ final class ConsumeLocalHandler: ChannelInboundHandler, @unchecked Sendable {
         let contextBox = ConsumeNIOContextBox(context)
         contextBox.context.eventLoop.execute { [weak self, contextBox] in
             guard let self else { return }
+            contextBox.context.writeAndFlush(self.wrapOutboundOut(.end(nil)), promise: nil)
+            contextBox.context.close(promise: nil)
+        }
+    }
+
+    private func writeStreamingTerminalError(
+        context: ChannelHandlerContext,
+        code: String,
+        forwardedUpstream: Bool
+    ) {
+        guard responseStarted, !streamingTerminalErrorStarted else { return }
+        streamingTerminalErrorStarted = true
+        runtime.diagnostics.recordLocalError(code: code)
+        let contextBox = ConsumeNIOContextBox(context)
+        let payload: Data
+        do {
+            let envelope = errorEnvelope(code: code, forwardedUpstream: forwardedUpstream)
+            payload = try JSONSerialization.data(withJSONObject: envelope, options: [.withoutEscapingSlashes])
+        } catch {
+            contextBox.context.close(promise: nil)
+            return
+        }
+        contextBox.context.eventLoop.execute { [weak self, contextBox, payload] in
+            guard let self else { return }
+            guard !self.shouldSuppressLateStreamingWrite(streaming: true) else { return }
+            var buffer = contextBox.context.channel.allocator.buffer(capacity: payload.count + 8)
+            buffer.writeString("data: ")
+            buffer.writeBytes(payload)
+            buffer.writeString("\n\n")
+            contextBox.context.write(self.wrapOutboundOut(.body(.byteBuffer(buffer))), promise: nil)
             contextBox.context.writeAndFlush(self.wrapOutboundOut(.end(nil)), promise: nil)
             contextBox.context.close(promise: nil)
         }

@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import Darwin
 import MacProviderCore
@@ -423,6 +424,81 @@ final class SelfUpdateTests: XCTestCase {
         }
     }
 
+    func testPreparedAcceptanceCandidateRejectsPreexistingRevokedProviderBeforeApply() async throws {
+        let acceptance = try makePreparedAcceptanceCandidate(
+            setVersion: "1.8.50",
+            providerCLIVersion: "1.8.49"
+        )
+        defer { acceptance.prepared.cleanup() }
+        let recorder = UpdateActionRecorder()
+        let home = FileManager.default.temporaryDirectory
+            .appendingPathComponent("self-update-acceptance-preexisting-policy-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: home) }
+        let store = AutoUpdateMarkerStore(homeDirectory: home)
+        try store.ensureTrustedRoot()
+        try await store.updateSignedPolicy(minimum: nil, revoked: [acceptance.fixture.providerCLIVersion])
+        let update = SelfUpdate(
+            currentVersion: "1.8.48",
+            releasesAPIURL: nil,
+            markerStore: store,
+            replaceBinary: { _ in recorder.append("replace") },
+            restartLaunchd: { recorder.append("restart") }
+        )
+
+        do {
+            try await update.applyPreparedAcceptanceCandidate(
+                prepared: acceptance.prepared,
+                discoveryHeadLoader: { nil }
+            )
+            XCTFail("acceptance candidate unexpectedly applied a revoked provider CLI")
+        } catch let error as UpdateError {
+            XCTAssertEqual(error.description, UpdateError.targetRevokedOrBelowMinimum.description)
+        }
+
+        XCTAssertEqual(recorder.snapshot(), [])
+    }
+
+    func testPreparedAcceptanceCandidateRejectsDiscoveryPolicyAgainstProviderBeforeApply() async throws {
+        let acceptance = try makePreparedAcceptanceCandidate(
+            setVersion: "1.8.50",
+            providerCLIVersion: "1.8.49"
+        )
+        defer { acceptance.prepared.cleanup() }
+        let recorder = UpdateActionRecorder()
+        let home = FileManager.default.temporaryDirectory
+            .appendingPathComponent("self-update-acceptance-discovery-policy-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: home) }
+        let store = AutoUpdateMarkerStore(homeDirectory: home)
+        try store.ensureTrustedRoot()
+        let update = SelfUpdate(
+            currentVersion: "1.8.48",
+            releasesAPIURL: nil,
+            markerStore: store,
+            replaceBinary: { _ in recorder.append("replace") },
+            restartLaunchd: { recorder.append("restart") }
+        )
+
+        do {
+            try await update.applyPreparedAcceptanceCandidate(
+                prepared: acceptance.prepared,
+                discoveryHeadLoader: {
+                    try await store.updateSignedPolicy(
+                        minimum: "1.8.50",
+                        revoked: []
+                    )
+                    return nil
+                }
+            )
+            XCTFail("acceptance candidate unexpectedly applied a provider CLI below the signed floor")
+        } catch let error as UpdateError {
+            XCTAssertEqual(error.description, UpdateError.targetRevokedOrBelowMinimum.description)
+        }
+
+        XCTAssertEqual(recorder.snapshot(), [])
+    }
+
     func testCopiedOlderSignedPayloadCannotMasqueradeAsNewRelease() {
         XCTAssertThrowsError(
             try SelfUpdate.requireStagedBinaryVersion("1.2.0\n", targetVersion: "1.2.1")
@@ -431,6 +507,45 @@ final class SelfUpdateTests: XCTestCase {
                 String(describing: error),
                 UpdateError.stagedVersionMismatch(expected: "1.2.1", actual: "1.2.0").description
             )
+        }
+    }
+
+    func testSignedPolicyRejectsRevokedTargetWithoutMinimum() {
+        XCTAssertTrue(SelfUpdate.targetRejectedBySignedPolicy(
+            "1.2.1",
+            policy: (minimum: nil, revoked: ["1.2.1"])
+        ))
+        XCTAssertFalse(SelfUpdate.targetRejectedBySignedPolicy(
+            "1.2.2",
+            policy: (minimum: nil, revoked: ["1.2.1"])
+        ))
+    }
+
+    func testRunByTagRejectsRevokedTargetBeforeReleaseFetch() async throws {
+        let home = FileManager.default.temporaryDirectory
+            .appendingPathComponent("self-update-revoked-tag-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: home) }
+        let store = AutoUpdateMarkerStore(homeDirectory: home)
+        try store.ensureTrustedRoot()
+        try await store.updateSignedPolicy(minimum: nil, revoked: ["1.2.1"])
+        let releaseURL = URL(string: "https://api.github.com/repos/Augustas11/macprovider/releases/latest")!
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [MockURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        MockURLProtocol.responses = [:]
+        let update = SelfUpdate(
+            currentVersion: "1.2.0",
+            releasesAPIURL: releaseURL.absoluteString,
+            session: session,
+            markerStore: store
+        )
+
+        do {
+            try await update.runByTag(tag: "v1.2.1")
+            XCTFail("revoked target unexpectedly reached release fetch")
+        } catch let error as UpdateError {
+            XCTAssertEqual(error.description, UpdateError.targetRevokedOrBelowMinimum.description)
         }
     }
 
@@ -634,6 +749,45 @@ final class SelfUpdateTests: XCTestCase {
         ] {
             try Data("\(marker)-\(name)".utf8).write(to: directory.appendingPathComponent(name))
         }
+    }
+
+    private func makePreparedAcceptanceCandidate(
+        setVersion: String,
+        providerCLIVersion: String
+    ) throws -> (prepared: PreparedSelfUpdate, fixture: CompatibilityManifestFixture) {
+        let fixture = try CompatibilityManifestFixture(
+            version: setVersion,
+            providerCLIVersion: providerCLIVersion,
+            malibuAppVersion: setVersion,
+            commit: "0123456789abcdef0123456789abcdef01234567",
+            populateResources: true
+        )
+        let manifest = try CompatibilitySetManifest.loadValidated(
+            from: fixture.root,
+            expectedProviderVersion: nil,
+            publicKeyPEM: fixture.privateKey.publicKey.pemRepresentation
+        )
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("prepared-self-update-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: tempDir,
+            withIntermediateDirectories: false,
+            attributes: [.posixPermissions: 0o700]
+        )
+        let newBinary = tempDir.appendingPathComponent("macprovider-cli")
+        try Data("#!/bin/sh\nexit 0\n".utf8).write(to: newBinary)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: newBinary.path)
+        return (
+            PreparedSelfUpdate(
+                tempDir: tempDir,
+                newBinary: newBinary,
+                stagedMalibuApp: nil,
+                signedPolicy: nil,
+                compatibilityManifest: manifest,
+                artifactIndexSHA256: String(repeating: "a", count: 64)
+            ),
+            fixture
+        )
     }
 
     private static func writeLocalCompatibilityArtifacts(to directory: URL) throws {

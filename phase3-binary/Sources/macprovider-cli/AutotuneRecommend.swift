@@ -3467,11 +3467,18 @@ struct HuggingFaceSnapshotDownloader {
     }
 
     private func validateRelativeHFPath(_ path: String) throws {
+        try ModelArtifactRelativePathPolicy.validate(path, context: "unsafe HuggingFace path")
+    }
+}
+
+enum ModelArtifactRelativePathPolicy {
+    static func validate(_ path: String, context: String = "unsafe path") throws {
         guard !path.isEmpty,
               !path.hasPrefix("/"),
-              !path.split(separator: "/").contains("..")
+              !path.split(separator: "/").contains(".."),
+              !path.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7F })
         else {
-            throw AutotuneRecommendError.invalidArtifact("unsafe HuggingFace path \(path)")
+            throw AutotuneRecommendError.invalidArtifact(context)
         }
     }
 }
@@ -4245,9 +4252,7 @@ enum ModelArtifactVerifier {
                 throw AutotuneRecommendError.invalidArtifact("path escape \(url.lastPathComponent)")
             }
             let rel = String(path.dropFirst(basePath.count + 1))
-            guard !rel.hasPrefix("/"), !rel.split(separator: "/").contains("..") else {
-                throw AutotuneRecommendError.invalidArtifact("unsafe path \(rel)")
-            }
+            try ModelArtifactRelativePathPolicy.validate(rel)
             var statbuf = stat()
             guard lstat(url.path, &statbuf) == 0 else {
                 throw AutotuneRecommendError.invalidArtifact("lstat \(rel)")

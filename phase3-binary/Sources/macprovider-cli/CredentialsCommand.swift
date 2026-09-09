@@ -590,6 +590,9 @@ struct CredentialsRepairCommand: AsyncParsableCommand {
             if result == 1 { throw ProtectedSourceError.extendedACL }
             throw ProtectedSourceError.unavailable
         }
+        guard entry == nil else {
+            throw ProtectedSourceError.extendedACL
+        }
     }
 
     private static func protectedSourceIdentity(_ info: stat) -> ProtectedSourceIdentity {

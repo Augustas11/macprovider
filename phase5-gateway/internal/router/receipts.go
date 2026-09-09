@@ -41,11 +41,13 @@ func (s *Server) handleBuyerReceipt(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusForbidden, "permission_error", "demo_receipt_forbidden", "Demo tokens cannot retrieve receipts")
 			return
 		}
+		if authn.WalletSession != nil {
+			writeError(w, http.StatusForbidden, "permission_error", "wallet_session_receipt_forbidden", "Wallet sessions cannot retrieve receipts")
+			return
+		}
 		switch {
 		case authn.Bearer != nil:
 			accountID = authn.Bearer.AccountID
-		case authn.WalletSession != nil:
-			accountID = authn.WalletSession.Session.AccountID
 		default:
 			writeError(w, http.StatusUnauthorized, "authentication_error", "missing_bearer_token", "Missing bearer token")
 			return

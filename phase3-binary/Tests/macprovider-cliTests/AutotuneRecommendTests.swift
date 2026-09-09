@@ -2490,6 +2490,46 @@ final class AutotuneRecommendTests: XCTestCase {
         XCTAssertThrowsError(try ModelArtifactVerifier.canonicalArtifactHash(directory: hardlinkDir))
     }
 
+    func testModelArtifactHashRejectsControlCharactersInRelativePath() throws {
+        let dir = try tempDir()
+        try Data("model".utf8).write(to: dir.appendingPathComponent("weights\nmetadata.bin"))
+
+        XCTAssertThrowsError(try ModelArtifactVerifier.canonicalArtifactHash(directory: dir)) { error in
+            XCTAssertTrue(String(describing: error).contains("unsafe path"), "\(error)")
+        }
+    }
+
+    func testSnapshotDownloaderRejectsControlCharactersBeforeDownload() async throws {
+        let infoURL = URL(string: "https://huggingface.co/api/models/namespace/model/revision/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa?blobs=true")!
+        let downloader = HuggingFaceSnapshotDownloader(
+            fetch: { request in
+                XCTAssertEqual(request.url, infoURL)
+                return (
+                    Data(#"{"siblings":[{"rfilename":"weights\nmetadata.bin"}]}"#.utf8),
+                    HTTPURLResponse(url: infoURL, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: nil)!
+                )
+            },
+            download: { _ in
+                XCTFail("download must not start for an unsafe snapshot path")
+                return (
+                    URL(fileURLWithPath: "/tmp/unreachable"),
+                    HTTPURLResponse(url: infoURL, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: nil)!
+                )
+            }
+        )
+
+        do {
+            try await downloader.downloadSnapshot(
+                modelID: "namespace/model",
+                revision: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                to: try tempDir().appendingPathComponent("snapshot", isDirectory: true)
+            )
+            XCTFail("unsafe snapshot path unexpectedly downloaded")
+        } catch {
+            XCTAssertTrue(String(describing: error).contains("unsafe HuggingFace path"), "\(error)")
+        }
+    }
+
     func testModelArtifactHashIsDeterministicForSameFiles() throws {
         let first = try tempDir()
         let second = try tempDir()

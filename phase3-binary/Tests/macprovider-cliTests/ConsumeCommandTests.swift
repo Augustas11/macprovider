@@ -198,6 +198,13 @@ private final class ConsumeStreamingPromiseBox: @unchecked Sendable {
         lock.unlock()
         promise?.succeed(result)
     }
+
+    func fail(_ error: Error) {
+        lock.lock()
+        let promise = self.promise
+        lock.unlock()
+        promise?.fail(error)
+    }
 }
 
 private final class ConsumeUpstreamPromiseBox: @unchecked Sendable {
@@ -4595,6 +4602,181 @@ final class ConsumeCommandTests: XCTestCase {
         XCTAssertTrue(try XCTUnwrap(recorder.snapshot().first).streaming)
     }
 
+    func testPhase3IStartedStreamingFailureWithoutLedgerEmitsTerminalSSEError() throws {
+        let token = try ConsumeLocalToken.generate()
+        let trustedRateCard = phase3CTrustedRateCard(
+            promptRatePerMtok: 1_000_000,
+            completionRatePerMtok: 2_000_000,
+            usdPerMillionCredits: 1.0
+        )
+        let budget = ConsumeBudgetConfig(
+            mode: .noBudget,
+            maxRequestMicroUSD: nil,
+            allowUnpriced: false,
+            ledger: nil,
+            ledgerPathClass: nil
+        )
+        let recorder = ConsumeUpstreamRequestRecorder()
+        let promiseBox = ConsumeStreamingPromiseBox()
+        let firstBlock = Data("data: {\"choices\":[]}\n\n".utf8)
+        let upstreamClient = ConsumeStubUpstreamClient(
+            streamingHandler: { request, eventLoop, callbacks in
+                recorder.append(request)
+                do {
+                    try callbacks.receiveHead(200, [("content-type", "text/event-stream")])
+                    try callbacks.receiveEventBlock(firstBlock)
+                } catch {
+                    return eventLoop.makeFailedFuture(error)
+                }
+                let promise = eventLoop.makePromise(of: ConsumeUpstreamStreamingResult.self)
+                promiseBox.store(promise)
+                return promise.futureResult
+            },
+            handler: { _, eventLoop in
+                eventLoop.makeFailedFuture(ConsumeUpstreamForwardError.dispatchedUnavailable)
+            }
+        )
+        let runtime = consumeRuntime(
+            token: token,
+            credentialStatus: .environmentLoaded,
+            credentialCustody: consumeCredentialCustody("buyer-token"),
+            budget: budget,
+            trustedPricing: .available(trustedRateCard),
+            upstreamClient: upstreamClient,
+            now: { ConsumeCommandTests.phase3CTestNow }
+        )
+        let channel = EmbeddedChannel()
+        try channel.pipeline.addHandler(ConsumeLocalHandler(runtime: runtime)).wait()
+        var headers = HTTPHeaders()
+        headers.add(name: "Authorization", value: "Bearer \(token.value)")
+        let head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/v1/chat/completions", headers: headers)
+        let body = Data(#"{"model":"llama-test","messages":[],"max_tokens":10,"stream":true}"#.utf8)
+
+        try channel.writeInbound(HTTPServerRequestPart.head(head))
+        var buffer = channel.allocator.buffer(capacity: body.count)
+        buffer.writeBytes(body)
+        try channel.writeInbound(HTTPServerRequestPart.body(buffer))
+        try channel.writeInbound(HTTPServerRequestPart.end(nil))
+        channel.embeddedEventLoop.run()
+
+        guard case .head(let responseHead)? = try channel.readOutbound(as: HTTPServerResponsePart.self) else {
+            return XCTFail("streaming head was not emitted before upstream failure")
+        }
+        XCTAssertEqual(responseHead.status, .ok)
+        guard case .body(.byteBuffer(var firstBody))? = try channel.readOutbound(as: HTTPServerResponsePart.self) else {
+            return XCTFail("first SSE block was not emitted before upstream failure")
+        }
+        XCTAssertEqual(firstBody.readString(length: firstBody.readableBytes), String(decoding: firstBlock, as: UTF8.self))
+
+        promiseBox.fail(ConsumeUpstreamForwardError.dispatchedUnavailable)
+        channel.embeddedEventLoop.run()
+        guard case .body(.byteBuffer(var errorBody))? = try channel.readOutbound(as: HTTPServerResponsePart.self) else {
+            return XCTFail("terminal SSE error was not emitted after upstream failure")
+        }
+        let errorChunk = try XCTUnwrap(errorBody.readString(length: errorBody.readableBytes))
+        try assertTerminalSSEError(errorChunk, code: "local_upstream_unavailable", forwardedUpstream: true)
+        guard case .end? = try channel.readOutbound(as: HTTPServerResponsePart.self) else {
+            return XCTFail("streaming end was not emitted after terminal SSE error")
+        }
+        XCTAssertEqual(recorder.snapshot().count, 1)
+        XCTAssertTrue(try XCTUnwrap(recorder.snapshot().first).streaming)
+    }
+
+    func testPhase3IStartedStreamingFailureWithLedgerEmitsTerminalSSEErrorAndSettlesEstimate() throws {
+        let token = try ConsumeLocalToken.generate()
+        let home = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let ledgerURL = home.appendingPathComponent("budget.jsonl")
+        let ledger = try ConsumeBudgetLedger.open(ledgerPath: ledgerURL.path, homeDirectory: home, startupDirectory: home)
+        let trustedRateCard = phase3CTrustedRateCard(
+            promptRatePerMtok: 1_000_000,
+            completionRatePerMtok: 2_000_000,
+            usdPerMillionCredits: 1.0
+        )
+        let bodyText = #"{"model":"llama-test","messages":[],"max_tokens":10,"stream":true}"#
+        let expected = try ConsumePricedExposureEstimator.estimate(
+            bodyByteCount: Data(bodyText.utf8).count,
+            request: StrictJSONParser.parse(bodyText),
+            match: XCTUnwrap(trustedRateCard.match(model: "llama-test")),
+            projection: trustedRateCard.projection
+        )
+        let budget = ConsumeBudgetConfig(
+            mode: .budget(ConsumeMicroUSD(rawValue: 100_000_000)),
+            maxRequestMicroUSD: nil,
+            allowUnpriced: false,
+            ledger: ledger,
+            ledgerPathClass: ledger.pathClass
+        )
+        let recorder = ConsumeUpstreamRequestRecorder()
+        let promiseBox = ConsumeStreamingPromiseBox()
+        let firstBlock = Data("data: {\"choices\":[]}\n\n".utf8)
+        let upstreamClient = ConsumeStubUpstreamClient(
+            streamingHandler: { request, eventLoop, callbacks in
+                recorder.append(request)
+                do {
+                    try callbacks.receiveHead(200, [("content-type", "text/event-stream")])
+                    try callbacks.receiveEventBlock(firstBlock)
+                } catch {
+                    return eventLoop.makeFailedFuture(error)
+                }
+                let promise = eventLoop.makePromise(of: ConsumeUpstreamStreamingResult.self)
+                promiseBox.store(promise)
+                return promise.futureResult
+            },
+            handler: { _, eventLoop in
+                eventLoop.makeFailedFuture(ConsumeUpstreamForwardError.dispatchedUnavailable)
+            }
+        )
+        let runtime = consumeRuntime(
+            token: token,
+            credentialStatus: .environmentLoaded,
+            credentialCustody: consumeCredentialCustody("buyer-token"),
+            budget: budget,
+            trustedPricing: .available(trustedRateCard),
+            upstreamClient: upstreamClient,
+            now: { ConsumeCommandTests.phase3CTestNow }
+        )
+        let channel = EmbeddedChannel()
+        try channel.pipeline.addHandler(ConsumeLocalHandler(runtime: runtime)).wait()
+        var headers = HTTPHeaders()
+        headers.add(name: "Authorization", value: "Bearer \(token.value)")
+        let head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/v1/chat/completions", headers: headers)
+
+        try channel.writeInbound(HTTPServerRequestPart.head(head))
+        var buffer = channel.allocator.buffer(capacity: bodyText.utf8.count)
+        buffer.writeString(bodyText)
+        try channel.writeInbound(HTTPServerRequestPart.body(buffer))
+        try channel.writeInbound(HTTPServerRequestPart.end(nil))
+        channel.embeddedEventLoop.run()
+
+        guard case .head(let responseHead)? = try channel.readOutbound(as: HTTPServerResponsePart.self) else {
+            return XCTFail("streaming head was not emitted before upstream failure")
+        }
+        XCTAssertEqual(responseHead.status, .ok)
+        guard case .body(.byteBuffer(var firstBody))? = try channel.readOutbound(as: HTTPServerResponsePart.self) else {
+            return XCTFail("first SSE block was not emitted before upstream failure")
+        }
+        XCTAssertEqual(firstBody.readString(length: firstBody.readableBytes), String(decoding: firstBlock, as: UTF8.self))
+
+        promiseBox.fail(ConsumeUpstreamForwardError.dispatchedUnavailable)
+        channel.embeddedEventLoop.run()
+        guard case .body(.byteBuffer(var errorBody))? = try channel.readOutbound(as: HTTPServerResponsePart.self) else {
+            return XCTFail("terminal SSE error was not emitted after upstream failure")
+        }
+        let errorChunk = try XCTUnwrap(errorBody.readString(length: errorBody.readableBytes))
+        try assertTerminalSSEError(errorChunk, code: "local_upstream_unavailable", forwardedUpstream: true)
+        guard case .end? = try channel.readOutbound(as: HTTPServerResponsePart.self) else {
+            return XCTFail("streaming end was not emitted after terminal SSE error")
+        }
+        XCTAssertEqual(recorder.snapshot().count, 1)
+        XCTAssertTrue(try XCTUnwrap(recorder.snapshot().first).streaming)
+        let summary = try ledger.summary()
+        XCTAssertEqual(summary.reserved.rawValue, 0)
+        XCTAssertEqual(summary.held.rawValue, 0)
+        XCTAssertEqual(summary.settled.rawValue, expected.amount.rawValue)
+        XCTAssertEqual(summary.heldReservationCount, 0)
+    }
+
     func testPhase3IIncrementalSSEFinishEmitsFinalEOFEvent() throws {
         let firstBlock = Data("data: {\"choices\":[]}\n\n".utf8)
         let doneBlock = Data("data: [DONE]\n\n".utf8)
@@ -6083,6 +6265,20 @@ final class ConsumeCommandTests: XCTestCase {
     private func localForwardedFlag(from body: String) throws -> Bool {
         let macprovider = try XCTUnwrap(localError(from: body)["macprovider"] as? [String: Any])
         return try XCTUnwrap(macprovider["forwarded_upstream"] as? Bool)
+    }
+
+    private func assertTerminalSSEError(_ chunk: String, code: String, forwardedUpstream: Bool) throws {
+        XCTAssertTrue(chunk.hasPrefix("data: "))
+        XCTAssertTrue(chunk.hasSuffix("\n\n"))
+        let start = chunk.index(chunk.startIndex, offsetBy: 6)
+        let end = chunk.index(chunk.endIndex, offsetBy: -2)
+        let payload = String(chunk[start..<end])
+        let error = try localError(from: payload)
+        XCTAssertEqual(error["code"] as? String, code)
+        XCTAssertEqual(error["message"] as? String, code)
+        XCTAssertEqual(error["type"] as? String, "macprovider_local_error")
+        let macprovider = try XCTUnwrap(error["macprovider"] as? [String: Any])
+        XCTAssertEqual(macprovider["forwarded_upstream"] as? Bool, forwardedUpstream)
     }
 
     private func gzipData(_ data: Data) throws -> Data {

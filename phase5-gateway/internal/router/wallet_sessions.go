@@ -576,7 +576,7 @@ func (s *Server) admitWalletSessionMetadata(w http.ResponseWriter, r *http.Reque
 		SessionID: sessionAuth.Session.SessionID,
 		AccountID: sessionAuth.Session.AccountID,
 		Replay: storage.WalletSessionReplayMaterial{
-			SessionID: sessionAuth.Session.SessionID, RequestID: requestID(r), Method: r.Method,
+			SessionID: sessionAuth.Session.SessionID, AccountID: sessionAuth.Session.AccountID, RequestID: requestID(r), Method: r.Method,
 			CanonicalRoute: canonicalRoute, SemanticHeadersHash: headersHashBytes, RawBodyHash: bodyHash[:],
 			BodyBytes: 0, MetadataClientIP: s.clientIP(r),
 		},
@@ -612,11 +612,13 @@ func (s *Server) admitWalletSessionInference(r *http.Request, sessionAuth *walle
 		RequestID: requestID(r), Method: r.Method, CanonicalRoute: walletCanonicalRouteForRequest(r),
 		ModelID: model, WindowDate: window, RequestedTokens: reservationTokens, DailyQuota: dailyQuota,
 		Replay: storage.WalletSessionReplayMaterial{
-			SessionID: sessionAuth.Session.SessionID, RequestID: requestID(r), Method: r.Method,
+			SessionID: sessionAuth.Session.SessionID, AccountID: sessionAuth.Session.AccountID, RequestID: requestID(r), Method: r.Method,
 			CanonicalRoute: walletCanonicalRouteForRequest(r), SemanticHeadersHash: headersHashBytes,
 			RawBodyHash: bodyHash[:], BodyBytes: int64(len(rawBody)),
 		},
-		CreatedAt: createdAt.UTC(), ExpiresAt: expiresAt.UTC(),
+		MaxReplayRows:  s.cfg.Auth.WalletSessions.ReplayMaxRowsPerSession,
+		MaxReplayBytes: s.cfg.Auth.WalletSessions.ReplayMaxBytesPerSession,
+		CreatedAt:      createdAt.UTC(), ExpiresAt: expiresAt.UTC(),
 	})
 }
 

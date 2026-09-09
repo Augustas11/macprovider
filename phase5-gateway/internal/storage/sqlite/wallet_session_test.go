@@ -43,6 +43,57 @@ func TestWalletSessionMigrationIdempotent(t *testing.T) {
 	}
 }
 
+func TestWalletSessionReplayAccountMigrationBackfillsExistingRows(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	createWalletSession(t, store, "acct_wallet_replay_migration", "ws_replay_migration", 1000, 100)
+
+	if err := store.AdmitWalletSessionMetadata(ctx, storage.WalletSessionMetadataAdmissionRequest{
+		SessionID: "ws_replay_migration",
+		AccountID: "acct_wallet_replay_migration",
+		Replay: walletReplay(
+			"ws_replay_migration",
+			"req_replay_migration",
+			"GET",
+			"/v1/models",
+			[]byte("empty"),
+			10,
+			"1.2.3.4",
+		),
+		WindowStart:    fixedTime().Add(-time.Minute),
+		RateLimit:      10,
+		MaxReplayRows:  10,
+		MaxReplayBytes: 1000,
+		CreatedAt:      fixedTime(),
+	}); err != nil {
+		t.Fatalf("seed wallet replay: %v", err)
+	}
+	if _, err := store.db.ExecContext(ctx, `DROP INDEX idx_wallet_replays_account_created`); err != nil {
+		t.Fatalf("drop account replay index: %v", err)
+	}
+	if _, err := store.db.ExecContext(ctx, `ALTER TABLE wallet_session_replays DROP COLUMN account_id`); err != nil {
+		t.Fatalf("simulate legacy replay schema: %v", err)
+	}
+
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("migrate legacy replay schema: %v", err)
+	}
+	var accountID string
+	if err := store.db.QueryRowContext(ctx, `
+		SELECT account_id FROM wallet_session_replays WHERE session_id = ? AND request_id = ?`,
+		"ws_replay_migration", "req_replay_migration").Scan(&accountID); err != nil {
+		t.Fatalf("read migrated replay account: %v", err)
+	}
+	if accountID != "acct_wallet_replay_migration" {
+		t.Fatalf("migrated replay account_id=%q want acct_wallet_replay_migration", accountID)
+	}
+	var indexName string
+	if err := store.db.QueryRowContext(ctx, `
+		SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_wallet_replays_account_created'`).Scan(&indexName); err != nil {
+		t.Fatalf("read migrated replay account index: %v", err)
+	}
+}
+
 func TestRelayBlindReplayDuplicateWinsOverCapacity(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t)
@@ -283,6 +334,51 @@ func TestWalletReplayDuplicateAndMismatchDoNotReserveAgain(t *testing.T) {
 	}
 }
 
+func TestWalletInferenceReplayCapacityPreservesReplayPrecedence(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	createWalletSession(t, store, "acct_wallet_inf_cap", "ws_inf_cap", 1000, 500)
+
+	req := walletAdmission("acct_wallet_inf_cap", "ws_inf_cap", "req_inf_cap_0", 20)
+	req.MaxReplayRows = 1
+	if _, err := store.AdmitWalletSessionInference(ctx, req); err != nil {
+		t.Fatalf("seed inference replay: %v", err)
+	}
+	if _, err := store.AdmitWalletSessionInference(ctx, req); !errors.Is(err, storage.ErrWalletSessionReplayDuplicate) {
+		t.Fatalf("duplicate over cap err=%v want ErrWalletSessionReplayDuplicate", err)
+	}
+	mismatch := req
+	mismatch.Replay.RawBodyHash = []byte("different-body")
+	if _, err := store.AdmitWalletSessionInference(ctx, mismatch); !errors.Is(err, storage.ErrWalletSessionReplayMismatch) {
+		t.Fatalf("mismatch over cap err=%v want ErrWalletSessionReplayMismatch", err)
+	}
+	next := walletAdmission("acct_wallet_inf_cap", "ws_inf_cap", "req_inf_cap_1", 20)
+	next.MaxReplayRows = 1
+	if _, err := store.AdmitWalletSessionInference(ctx, next); !errors.Is(err, storage.ErrWalletSessionReplayCapacity) {
+		t.Fatalf("unique over row cap err=%v want ErrWalletSessionReplayCapacity", err)
+	}
+}
+
+func TestWalletInferenceReplayCapacityIncludesRefundedAttempts(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	createWalletSession(t, store, "acct_wallet_refund_cap", "ws_refund_cap", 1000, 500)
+
+	req := walletAdmission("acct_wallet_refund_cap", "ws_refund_cap", "req_refund_cap_0", 20)
+	req.MaxReplayRows = 1
+	if _, err := store.AdmitWalletSessionInference(ctx, req); err != nil {
+		t.Fatalf("seed inference replay: %v", err)
+	}
+	if err := store.RefundWalletSessionReservation(ctx, "acct_wallet_refund_cap", "ws_refund_cap", "req_refund_cap_0", fixedTime()); err != nil {
+		t.Fatalf("refund seeded replay: %v", err)
+	}
+	next := walletAdmission("acct_wallet_refund_cap", "ws_refund_cap", "req_refund_cap_1", 20)
+	next.MaxReplayRows = 1
+	if _, err := store.AdmitWalletSessionInference(ctx, next); !errors.Is(err, storage.ErrWalletSessionReplayCapacity) {
+		t.Fatalf("unique after refunded replay err=%v want ErrWalletSessionReplayCapacity", err)
+	}
+}
+
 func TestWalletMetadataRateLimitAndReplayCeiling(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t)
@@ -354,6 +450,74 @@ func TestWalletMetadataRateLimitAndReplayCeiling(t *testing.T) {
 	})
 	if !errors.Is(err, storage.ErrWalletSessionReplayMismatch) {
 		t.Fatalf("mismatch after capacity/rate err=%v want ErrWalletSessionReplayMismatch", err)
+	}
+}
+
+func TestWalletMetadataRateLimitUsesIndependentSessionAccountAndIPBuckets(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	createWalletSession(t, store, "acct_wallet_meta_scope", "ws_meta_scope_a", 1000, 100)
+	createAdditionalWalletSession(t, store, "acct_wallet_meta_scope", "ws_meta_scope_b", 1000, 100)
+	createWalletSession(t, store, "acct_wallet_meta_ip_a", "ws_meta_ip_a", 1000, 100)
+	createWalletSession(t, store, "acct_wallet_meta_ip_b", "ws_meta_ip_b", 1000, 100)
+	createWalletSession(t, store, "acct_wallet_meta_ip_c", "ws_meta_ip_c", 1000, 100)
+
+	admit := func(accountID, sessionID, requestID, ip string, createdAt time.Time) error {
+		return store.AdmitWalletSessionMetadata(ctx, storage.WalletSessionMetadataAdmissionRequest{
+			SessionID:      sessionID,
+			AccountID:      accountID,
+			Replay:         walletReplay(sessionID, requestID, "GET", "/v1/models", []byte(requestID), 10, ip),
+			WindowStart:    fixedTime().Add(-time.Minute),
+			RateLimit:      2,
+			MaxReplayRows:  100,
+			MaxReplayBytes: 1000,
+			CreatedAt:      createdAt,
+		})
+	}
+
+	if err := admit("acct_wallet_meta_scope", "ws_meta_scope_a", "req_scope_a", "1.2.3.1", fixedTime()); err != nil {
+		t.Fatalf("scope seed a: %v", err)
+	}
+	if err := admit("acct_wallet_meta_scope", "ws_meta_scope_b", "req_scope_b", "1.2.3.2", fixedTime().Add(time.Second)); err != nil {
+		t.Fatalf("scope seed b: %v", err)
+	}
+	if err := admit("acct_wallet_meta_scope", "ws_meta_scope_b", "req_scope_c", "1.2.3.3", fixedTime().Add(2*time.Second)); !errors.Is(err, storage.ErrRateLimit) {
+		t.Fatalf("account bucket err=%v want ErrRateLimit", err)
+	}
+
+	if err := admit("acct_wallet_meta_ip_a", "ws_meta_ip_a", "req_ip_a", "5.6.7.8", fixedTime()); err != nil {
+		t.Fatalf("ip seed a: %v", err)
+	}
+	if err := admit("acct_wallet_meta_ip_b", "ws_meta_ip_b", "req_ip_b", "5.6.7.8", fixedTime().Add(time.Second)); err != nil {
+		t.Fatalf("ip seed b: %v", err)
+	}
+	if err := admit("acct_wallet_meta_ip_c", "ws_meta_ip_c", "req_ip_c", "5.6.7.8", fixedTime().Add(2*time.Second)); !errors.Is(err, storage.ErrRateLimit) {
+		t.Fatalf("ip bucket err=%v want ErrRateLimit", err)
+	}
+}
+
+func TestWalletMetadataRateLimitIgnoresClaimedInferenceRows(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	createWalletSession(t, store, "acct_wallet_meta_claimed", "ws_meta_claimed", 1000, 100)
+
+	claimed := walletAdmission("acct_wallet_meta_claimed", "ws_meta_claimed", "req_claimed", 10)
+	claimed.Replay.MetadataClientIP = "1.2.3.4"
+	if _, err := store.AdmitWalletSessionInference(ctx, claimed); err != nil {
+		t.Fatalf("seed claimed replay: %v", err)
+	}
+	err := store.AdmitWalletSessionMetadata(ctx, storage.WalletSessionMetadataAdmissionRequest{
+		SessionID:      "ws_meta_claimed",
+		AccountID:      "acct_wallet_meta_claimed",
+		Replay:         walletReplay("ws_meta_claimed", "req_meta_after_claimed", "GET", "/v1/models", []byte("empty"), 10, "1.2.3.4"),
+		WindowStart:    fixedTime().Add(-time.Minute),
+		RateLimit:      1,
+		MaxReplayRows:  10,
+		MaxReplayBytes: 1000,
+		CreatedAt:      fixedTime().Add(time.Second),
+	})
+	if err != nil {
+		t.Fatalf("metadata row after claimed inference replay: %v", err)
 	}
 }
 
@@ -800,6 +964,11 @@ func storeWalletChallenge(t *testing.T, store *Store, accountID string, nonce []
 func createWalletSession(t *testing.T, store *Store, accountID, sessionID string, totalCap, perRequestCap int64) {
 	t.Helper()
 	createAccount(t, store, accountID)
+	createAdditionalWalletSession(t, store, accountID, sessionID, totalCap, perRequestCap)
+}
+
+func createAdditionalWalletSession(t *testing.T, store *Store, accountID, sessionID string, totalCap, perRequestCap int64) {
+	t.Helper()
 	nonce := []byte("nonce-" + sessionID)
 	storeWalletChallenge(t, store, accountID, nonce, "wallet-"+sessionID, totalCap, perRequestCap)
 	if _, err := store.RegisterWalletSession(context.Background(), storage.WalletSessionRegistrationRequest{
