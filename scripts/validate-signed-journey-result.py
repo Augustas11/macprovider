@@ -126,6 +126,9 @@ def validate(
             trusted_openssl,
             f"{requirement_id}.signed_journey_result",
             result,
+            implementation_mappings=[
+                item for item in requirement.get("implementation", []) if isinstance(item, str)
+            ],
         ):
             errors.extend(result.errors)
     if errors:

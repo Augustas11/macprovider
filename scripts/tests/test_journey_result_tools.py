@@ -14,7 +14,12 @@ import unittest
 import importlib.util
 from pathlib import Path
 
-from scripts.check_spec_governance import validate_repository
+from scripts.check_spec_governance import (
+    LOCAL_CONSUMER_ENDPOINT_EVIDENCE_CONTROL_IMPLEMENTATION_MAPPINGS,
+    ValidationResult,
+    _validate_local_consumer_evidence_control_mappings,
+    validate_repository,
+)
 from scripts.tests.test_spec_governance import (
     SPEC016_PAYOUT_JOURNEY_ID,
     SPEC016_PAYOUT_RUN_ID,
@@ -781,6 +786,266 @@ class JourneyResultToolsTests(unittest.TestCase):
 
             self.assertEqual(0, completed.returncode, completed.stderr)
             self.assertIn("match current selectors", completed.stdout)
+
+    def test_preflight_separates_journey_source_from_reviewed_evidence_controls(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository = base_repository()
+            repository["files"]["scripts/build-local-consumer-endpoint-journey-result.py"] = (
+                "def build_payload():\n    return True\n"
+            )
+            requirement = repository["conformance"]["requirements"][0]
+            requirement["implementation"].append(
+                "scripts/build-local-consumer-endpoint-journey-result.py:def build_payload"
+            )
+            requirement["journeys"] = ["JOURNEY-LOCAL-CONSUMER-ENDPOINT"]
+            write_repository(root, repository)
+            source_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+            (root / "scripts" / "build-local-consumer-endpoint-journey-result.py").write_text(
+                "def build_payload():\n    return False\n",
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "add", "."], cwd=root, check=True)
+            subprocess.run(["git", "commit", "-qm", "harden evidence control"], cwd=root, check=True)
+            evidence_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(PREFLIGHT),
+                    "--root",
+                    str(root),
+                    "--source-sha",
+                    source_sha,
+                    "--evidence-sha",
+                    evidence_sha,
+                    "--requirement-ids",
+                    "SPEC-001-R001",
+                    "--journey-id",
+                    "JOURNEY-LOCAL-CONSUMER-ENDPOINT",
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(0, completed.returncode, completed.stderr)
+            self.assertIn(f"source selectors at {source_sha}", completed.stdout)
+            self.assertIn(f"evidence controls at {evidence_sha}", completed.stdout)
+
+    def test_preflight_does_not_treat_runtime_selectors_as_evidence_controls(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository = base_repository()
+            repository["files"]["scripts/build-local-consumer-endpoint-journey-result.py"] = (
+                "def build_payload():\n    return True\n"
+            )
+            requirement = repository["conformance"]["requirements"][0]
+            requirement["implementation"].append(
+                "scripts/build-local-consumer-endpoint-journey-result.py:def build_payload"
+            )
+            requirement["journeys"] = ["JOURNEY-LOCAL-CONSUMER-ENDPOINT"]
+            write_repository(root, repository)
+            source_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+            (root / "src" / "example.py").write_text("def example():\n    return False\n", encoding="utf-8")
+            (root / "scripts" / "build-local-consumer-endpoint-journey-result.py").write_text(
+                "def build_payload():\n    return False\n",
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "add", "."], cwd=root, check=True)
+            subprocess.run(["git", "commit", "-qm", "change runtime and evidence control"], cwd=root, check=True)
+            evidence_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(PREFLIGHT),
+                    "--root",
+                    str(root),
+                    "--source-sha",
+                    source_sha,
+                    "--evidence-sha",
+                    evidence_sha,
+                    "--requirement-ids",
+                    "SPEC-001-R001",
+                    "--journey-id",
+                    "JOURNEY-LOCAL-CONSUMER-ENDPOINT",
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertNotEqual(0, completed.returncode)
+            self.assertIn(f"commit evidence {source_sha}", completed.stderr)
+            self.assertIn("mapped selector fragment 'example'", completed.stderr)
+
+    def test_preflight_keeps_registered_mapping_source_bound_when_listed_as_test(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository = base_repository()
+            repository["files"]["scripts/build-local-consumer-endpoint-journey-result.py"] = (
+                "def build_payload():\n    return True\n"
+            )
+            requirement = repository["conformance"]["requirements"][0]
+            requirement["tests"].append(
+                "scripts/build-local-consumer-endpoint-journey-result.py:def build_payload"
+            )
+            requirement["journeys"] = ["JOURNEY-LOCAL-CONSUMER-ENDPOINT"]
+            write_repository(root, repository)
+            source_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+            (root / "scripts" / "build-local-consumer-endpoint-journey-result.py").write_text(
+                "def build_payload():\n    return False\n",
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "add", "."], cwd=root, check=True)
+            subprocess.run(["git", "commit", "-qm", "change misplaced evidence control"], cwd=root, check=True)
+            evidence_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(PREFLIGHT),
+                    "--root",
+                    str(root),
+                    "--source-sha",
+                    source_sha,
+                    "--evidence-sha",
+                    evidence_sha,
+                    "--requirement-ids",
+                    "SPEC-001-R001",
+                    "--journey-id",
+                    "JOURNEY-LOCAL-CONSUMER-ENDPOINT",
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertNotEqual(0, completed.returncode)
+            self.assertIn(f"commit evidence {source_sha}", completed.stderr)
+            self.assertIn("mapped selector fragment 'def build_payload'", completed.stderr)
+
+    def test_preflight_requires_evidence_sha_for_registered_journey_controls(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository = base_repository()
+            repository["files"]["scripts/build-local-consumer-endpoint-journey-result.py"] = (
+                "def build_payload():\n    return True\n"
+            )
+            requirement = repository["conformance"]["requirements"][0]
+            requirement["implementation"].append(
+                "scripts/build-local-consumer-endpoint-journey-result.py:def build_payload"
+            )
+            requirement["journeys"] = ["JOURNEY-LOCAL-CONSUMER-ENDPOINT"]
+            write_repository(root, repository)
+            source_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(PREFLIGHT),
+                    "--root",
+                    str(root),
+                    "--source-sha",
+                    source_sha,
+                    "--requirement-ids",
+                    "SPEC-001-R001",
+                    "--journey-id",
+                    "JOURNEY-LOCAL-CONSUMER-ENDPOINT",
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertNotEqual(0, completed.returncode)
+            self.assertIn("--evidence-sha is required", completed.stderr)
+
+    def test_preflight_rejects_evidence_sha_older_than_source(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_repository(root, base_repository())
+            evidence_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+            (root / "src" / "example.py").write_text("def example():\n    return False\n", encoding="utf-8")
+            subprocess.run(["git", "add", "."], cwd=root, check=True)
+            subprocess.run(["git", "commit", "-qm", "newer source"], cwd=root, check=True)
+            source_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(PREFLIGHT),
+                    "--root",
+                    str(root),
+                    "--source-sha",
+                    source_sha,
+                    "--evidence-sha",
+                    evidence_sha,
+                    "--requirement-ids",
+                    "SPEC-001-R001",
+                    "--journey-id",
+                    "JOURNEY-LOCAL-CONSUMER-ENDPOINT",
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertNotEqual(0, completed.returncode)
+            self.assertIn("--source-sha must be an ancestor of --evidence-sha", completed.stderr)
+
+    def test_signed_evidence_commit_is_required_for_evidence_control_mappings(self) -> None:
+        result = ValidationResult()
+        _validate_local_consumer_evidence_control_mappings(
+            REPO_ROOT,
+            {},
+            list(LOCAL_CONSUMER_ENDPOINT_EVIDENCE_CONTROL_IMPLEMENTATION_MAPPINGS),
+            "SPEC-045-R008",
+            result,
+        )
+        self.assertTrue(any("evidence_repository" in error and "required" in error for error in result.errors))
+
+    def test_signed_evidence_commit_binds_only_registered_control_fragments(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository = base_repository()
+            mapping = "scripts/build-local-consumer-endpoint-journey-result.py:def build_payload"
+            repository["files"]["scripts/build-local-consumer-endpoint-journey-result.py"] = (
+                "def build_payload():\n    return True\n"
+            )
+            write_repository(root, repository)
+            (root / "scripts" / "build-local-consumer-endpoint-journey-result.py").write_text(
+                "def build_payload():\n    return False\n",
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "add", "."], cwd=root, check=True)
+            subprocess.run(["git", "commit", "-qm", "review evidence control"], cwd=root, check=True)
+            evidence_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+
+            result = ValidationResult()
+            _validate_local_consumer_evidence_control_mappings(
+                root,
+                {"evidence_repository": {"name": "Augustas11/macprovider", "commit": evidence_sha}},
+                [mapping],
+                "SPEC-045-R008",
+                result,
+            )
+            self.assertEqual([], result.errors)
+
+            (root / "scripts" / "build-local-consumer-endpoint-journey-result.py").write_text(
+                "def build_payload():\n    return None\n",
+                encoding="utf-8",
+            )
+            result = ValidationResult()
+            _validate_local_consumer_evidence_control_mappings(
+                root,
+                {"evidence_repository": {"name": "Augustas11/macprovider", "commit": evidence_sha}},
+                [mapping],
+                "SPEC-045-R008",
+                result,
+            )
+            self.assertTrue(any("reviewed evidence commit" in error for error in result.errors))
 
 
 if __name__ == "__main__":

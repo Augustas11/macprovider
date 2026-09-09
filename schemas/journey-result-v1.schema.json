@@ -66,6 +66,15 @@
             "commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"}
           }
         },
+        "evidence_repository": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "commit"],
+          "properties": {
+            "name": {"const": "Augustas11/macprovider"},
+            "commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"}
+          }
+        },
         "captured_at": {
           "type": "string",
           "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"

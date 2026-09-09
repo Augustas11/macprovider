@@ -123,6 +123,9 @@ def require_valid_signed_result(
         openssl_bin,
         f"{requirement_id}.signed_journey_result",
         result,
+        implementation_mappings=[
+            item for item in requirement.get("implementation", []) if isinstance(item, str)
+        ],
     ):
         for error in result.errors:
             print(f"error: {error}", file=sys.stderr)

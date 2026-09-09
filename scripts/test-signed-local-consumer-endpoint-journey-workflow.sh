@@ -145,6 +145,8 @@ if "MACPROVIDER_ACCEPTANCE_SIGNING_KEY_PEM" in preflight_step:
     raise SystemExit("preflight step must not receive the acceptance signing key")
 if "GH_TOKEN" in preflight_step:
     raise SystemExit("preflight step must not receive the release posture token")
+if "EVIDENCE_SHA" not in preflight_step or '--evidence-sha "$EVIDENCE_SHA"' not in preflight_step:
+    raise SystemExit("preflight step must bind evidence-control selectors to the reviewed evidence commit")
 if "MACPROVIDER_ACCEPTANCE_SIGNING_KEY_PEM" not in sign_step:
     raise SystemExit("signing step must be the step that imports the acceptance signing key")
 if "GH_TOKEN" not in posture_step:
