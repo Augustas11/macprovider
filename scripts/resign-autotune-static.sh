@@ -6,7 +6,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 STATIC_DIR="$REPO_ROOT/phase3-binary/dist/static"
-TRUSTED_KEYS="$REPO_ROOT/phase3-binary/catalog/autotune/trusted-keys.json"
+CATALOG_DIR="$REPO_ROOT/phase3-binary/catalog/autotune"
+TRUSTED_KEYS="$CATALOG_DIR/trusted-keys.json"
 KEY_ID="${AUTOTUNE_STATIC_KEY_ID:-streamvc-autotune-static-v4}"
 KEY_VERSION="${KEY_ID##*-}"
 DEFAULT_KEY_PATH="$HOME/.config/macprovider/keys/autotune-static-${KEY_VERSION}.private.base64"
@@ -46,9 +47,43 @@ print(row["public_key_base64"])
 PY
 )" || fatal "key ID $KEY_ID is not authorized by the trusted keyring"
 
+# SPEC-023 §3.7.8: the artifact feed is NEVER activated implicitly. This script
+# runs `generate` twice (once to materialize the bytes it signs, once to rebind
+# release.json to the fresh sidecars), so both invocations must be handed the
+# same artifact-feed inputs or the second would disagree with the first.
+#
+#   AUTOTUNE_ACTIVATE_ARTIFACT_FEED=1     cut the FIRST artifact-bound release
+#   AUTOTUNE_PREVIOUS_RELEASE_DIR=<dir>   previous signed artifact-bound release,
+#                                         required for every cut after activation
+#
+# With neither set on a pre-activation repo this stays exactly the four-feed
+# resign it has always been, even with autotune-artifacts-source.json committed.
+GENERATE_ARGS=(generate --signer-key-id "$KEY_ID")
+case "${AUTOTUNE_ACTIVATE_ARTIFACT_FEED:-0}" in
+  1|true|yes) GENERATE_ARGS+=(--activate-artifact-feed) ;;
+  0|false|no|"") ;;
+  *) fatal "AUTOTUNE_ACTIVATE_ARTIFACT_FEED must be 1/0 (got ${AUTOTUNE_ACTIVATE_ARTIFACT_FEED})" ;;
+esac
+if [ -n "${AUTOTUNE_PREVIOUS_RELEASE_DIR:-}" ]; then
+  [ -d "$AUTOTUNE_PREVIOUS_RELEASE_DIR" ] ||
+    fatal "AUTOTUNE_PREVIOUS_RELEASE_DIR is not a directory: $AUTOTUNE_PREVIOUS_RELEASE_DIR"
+  GENERATE_ARGS+=(--previous-release-dir "$AUTOTUNE_PREVIOUS_RELEASE_DIR")
+fi
+
 # Materialize canonical feed bytes before signing. Supplying the intended
 # signer avoids trusting or parsing stale sidecars while repairing a release.
-python3 "$REPO_ROOT/scripts/catalog-release.py" generate --signer-key-id "$KEY_ID"
+python3 "$REPO_ROOT/scripts/catalog-release.py" "${GENERATE_ARGS[@]}"
+
+# Artifact-feed presence must AGREE across the catalog directory, dist/static,
+# release.json, and the release ledger. `generate` writes both copies or neither,
+# so a static body or sidecar that survives a run publishing no feed is a
+# leftover that release.json and the ledger do not account for. Signing it would
+# stage a signed feed alongside the release that nothing binds; refuse instead.
+if [ ! -f "$CATALOG_DIR/autotune-artifacts.json" ]; then
+  if [ -e "$STATIC_DIR/autotune-artifacts.json" ] || [ -e "$STATIC_DIR/autotune-artifacts.json.sig" ]; then
+    fatal "this release publishes no artifact feed, but $STATIC_DIR/autotune-artifacts.json(.sig) exists; remove the stale static file or cut the activation release with AUTOTUNE_ACTIVATE_ARTIFACT_FEED=1"
+  fi
+fi
 
 private_b64="$(tr -d '[:space:]' < "$KEY_PATH")"
 [ -n "$private_b64" ] || fatal "private key file is empty"
@@ -119,9 +154,15 @@ guard let publicRaw = env["PUBLIC_B64"].flatMap({ Data(base64Encoded: $0) }),
 candidate_json="$STATIC_DIR/autotune-candidates.json"
 demand_json="$STATIC_DIR/demand-rank.json"
 rate_card_json="$STATIC_DIR/rate-card.json"
+# SPEC-023 §3.7.2: the artifact feed is signed by the SAME static-feed key as the
+# candidate catalog for the release, and catalog-release.py checks that equality
+# before binding it in release.json. Present only once a release has been
+# generated from autotune-artifacts-source.json.
+artifacts_json="$STATIC_DIR/autotune-artifacts.json"
 candidate_sig="$TMP_DIR/autotune-candidates.json.sig"
 demand_sig="$TMP_DIR/demand-rank.json.sig"
 rate_card_sig="$TMP_DIR/rate-card.json.sig"
+artifacts_sig="$TMP_DIR/autotune-artifacts.json.sig"
 
 sign_one "$candidate_json" "$candidate_sig"
 sign_one "$demand_json" "$demand_sig"
@@ -129,6 +170,10 @@ sign_one "$rate_card_json" "$rate_card_sig"
 verify_one "$candidate_json" "$candidate_sig"
 verify_one "$demand_json" "$demand_sig"
 verify_one "$rate_card_json" "$rate_card_sig"
+if [ -f "$artifacts_json" ]; then
+  sign_one "$artifacts_json" "$artifacts_sig"
+  verify_one "$artifacts_json" "$artifacts_sig"
+fi
 
 # All signatures are verified before any generated sidecar is replaced.
 install -m 0644 "$candidate_sig" "$STATIC_DIR/autotune-candidates.json.sig.new"
@@ -137,7 +182,14 @@ install -m 0644 "$rate_card_sig" "$STATIC_DIR/rate-card.json.sig.new"
 mv "$STATIC_DIR/autotune-candidates.json.sig.new" "$STATIC_DIR/autotune-candidates.json.sig"
 mv "$STATIC_DIR/demand-rank.json.sig.new" "$STATIC_DIR/demand-rank.json.sig"
 mv "$STATIC_DIR/rate-card.json.sig.new" "$STATIC_DIR/rate-card.json.sig"
+if [ -f "$artifacts_json" ]; then
+  install -m 0644 "$artifacts_sig" "$STATIC_DIR/autotune-artifacts.json.sig.new"
+  mv "$STATIC_DIR/autotune-artifacts.json.sig.new" "$STATIC_DIR/autotune-artifacts.json.sig"
+fi
 
-python3 "$REPO_ROOT/scripts/catalog-release.py" generate --signer-key-id "$KEY_ID"
+# Regenerating the SAME release_id is idempotent: the state machine excludes this
+# release's own ledger row from the rebinding history, so the post-sign rebind
+# neither demands a previous release nor rejects its own bindings.
+python3 "$REPO_ROOT/scripts/catalog-release.py" "${GENERATE_ARGS[@]}"
 python3 "$REPO_ROOT/scripts/catalog-release.py" verify
 printf '[resign-autotune-static] Signed and verified release with key_id=%s\n' "$KEY_ID"

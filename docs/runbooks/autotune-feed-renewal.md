@@ -51,13 +51,27 @@ dry-run):
 1. Builds an **ephemeral git worktree**. On Actions, restamps `GITHUB_SHA`
    (the approved workflow commit), not a floating `origin/main`. Locally,
    restamps `origin/main`.
-2. Re-stamps `version` + `generated_at` on candidate/demand and `generated_at`
-   only on rate-card (its `version` is a rows-hash — a freshness renewal must not
-   change it). Content is otherwise byte-identical.
+2. `catalog-release.py restamp --release-id … --generated-at …` re-stamps the
+   release **source** inputs: `version` + `generated_at` on candidate/demand, and
+   `generated_at` only on the rate card (its `version` is a rows-hash — a
+   freshness renewal must not change it). Content is otherwise byte-identical.
+   The rate card is re-dated at `rate-card-source.json`, because `rate-card.json`
+   is MATERIALISED from that source by step 3: re-dating the generated file
+   directly is reverted by the very next `generate`, and the atomic-release check
+   then aborts the renewal on a rate-card `generated_at` that no longer matches
+   the candidate catalog. The generator exclusively writes `rate-card.json`. A
+   checkout with no `rate-card-source.json` falls back to re-dating the published
+   file, which is the source of truth there. The executable regression for the
+   whole restamp → generate → verify sequence, in both the four-feed and
+   five-feed states, is `RenewalFlowTest` in
+   `scripts/tests/test_catalog_artifact_feed.py`, run by
+   `scripts/test-renew-autotune-static-feed-signed.sh`.
 3. `catalog-release.py generate` → canonical bytes + manifest + ledger, then
-   `resign-autotune-static.sh` signs the three feeds (Swift). `verify-directory`
+   `resign-autotune-static.sh` signs the three static feeds — four once the
+   release is artifact-bound (`autotune-artifacts.json`). `verify-directory`
    uses `OPENSSL_BIN` when set (CI sealed bottle).
-4. Assembles the 9-file release dir and gates it with
+4. Assembles the release dir (9 files; 11 once artifact-bound: the artifact
+   feed and its `.sig`) and gates it with
    `catalog-release.py verify-directory`.
 5. **Dry-run stops here.** With `--deploy`:
    - refuses to run if the signing-host clock is skewed >120s vs Pearl;

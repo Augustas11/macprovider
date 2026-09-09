@@ -52,6 +52,13 @@ def parse_semver(value: str) -> tuple[int, int, int]:
     return (major, minor, patch)
 
 
+# SPEC-023 §3.7.8 Stage A: `autotune-artifacts.json` is bound in release.json and
+# recorded in the artifact-bound ledger feed set, but it MUST NOT join this map.
+# The deployed CLI validates an exact nine-name `components.catalog.files` set
+# (CompatibilitySetManifest.swift); adding a tenth name would make every
+# ALREADY-INSTALLED updater reject the payload before the binary that understands
+# it can run. Stage B is gated on a shipped bridge CLI plus a previous-stable
+# release at or after that bridge version.
 CATALOG_FILES = (
     "release.json",
     "trusted-keys.json",
@@ -63,6 +70,11 @@ CATALOG_FILES = (
     "rate-card.json",
     "rate-card.json.sig",
 )
+CATALOG_ARTIFACT_FEED = "autotune-artifacts.json"
+RATE_CARD_BOUND_RELEASE_FEEDS = {
+    "autotune-candidates.json", "demand-rank.json", "rate-card.json", "tier2-catalog.json",
+}
+ARTIFACT_BOUND_RELEASE_FEEDS = RATE_CARD_BOUND_RELEASE_FEEDS | {CATALOG_ARTIFACT_FEED}
 LOCAL_ARTIFACT_FILES = {
     "install_contract": "install.sh",
     "provider_plist_template": "provider-launch-agent.plist.template",
@@ -546,7 +558,20 @@ def catalog_component(catalog_directory: pathlib.Path, catalog_feed_directory: p
     feeds = manifest["feeds"]
     if not isinstance(feeds, dict):
         fail("catalog release.json feeds: must be an object")
-    exact_keys(feeds, {"autotune-candidates.json", "demand-rank.json", "rate-card.json", "tier2-catalog.json"}, "catalog release.json feeds")
+    # SPEC-023 §3.7.8 Stage A widens THIS producer-side check to the five-feed
+    # artifact-bound set. It runs on the release host and in acceptance, never on
+    # an installed provider, so widening it fails-closes no fleet member. The
+    # `components.catalog.files` map above stays the exact nine-name set.
+    if set(feeds) == RATE_CARD_BOUND_RELEASE_FEEDS:
+        pass
+    elif set(feeds) == ARTIFACT_BOUND_RELEASE_FEEDS:
+        artifact_bytes = read_regular(
+            catalog_feed_directory / CATALOG_ARTIFACT_FEED,
+            f"catalog {CATALOG_ARTIFACT_FEED}",
+        )
+        catalog_bytes = {**catalog_bytes, CATALOG_ARTIFACT_FEED: artifact_bytes}
+    else:
+        exact_keys(feeds, RATE_CARD_BOUND_RELEASE_FEEDS, "catalog release.json feeds")
     for name, record in feeds.items():
         if not isinstance(record, dict):
             fail(f"catalog release.json feed {name}: must be an object")
@@ -561,6 +586,9 @@ def catalog_component(catalog_directory: pathlib.Path, catalog_feed_directory: p
             fail(f"catalog release.json feed {name}: digest does not match packaged feed")
         if name not in {"tier2-catalog.json", "rate-card.json"} and record["version"] != manifest["release_id"]:
             fail(f"catalog release.json feed {name}: version does not match release_id")
+    # The artifact feed is release-bound and digest-checked above, but it is NOT
+    # a member of the signed `files` map at Stage A (see CATALOG_FILES).
+    catalog_bytes.pop(CATALOG_ARTIFACT_FEED, None)
     return {
         "activation": "local",
         "files": {name: hashlib.sha256(data).hexdigest() for name, data in sorted(catalog_bytes.items())},

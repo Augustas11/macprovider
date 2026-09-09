@@ -151,9 +151,26 @@ for requirement in (
     "restored .previous-target only",
     "__EMPTY__",
     "current moved under lock",
+    # The restamp goes through the generator, which is the only thing that knows
+    # rate-card.json is MATERIALISED from rate-card-source.json. A hand-rolled
+    # restamp in shell re-dates the generated file, `generate` reverts it from the
+    # stale source, and the atomic-release check aborts the monthly renewal on a
+    # feed that is otherwise correct. The executable regression is RenewalFlowTest
+    # in scripts/tests/test_catalog_artifact_feed.py, run below.
+    "catalog-release.py restamp",
+    "--generated-at",
+    # The freshness-only guard must cover the artifact feed once a release is
+    # artifact-bound: a model-set change confined to autotune-artifacts.json
+    # must not ride the scheduled restamp. The pre-deploy check delegates to the
+    # unit-tested generator rules; the under-lock recheck mirrors them inline.
+    "catalog-release.py continuity-check",
+    'live-current',
 ):
     if requirement not in script:
         raise SystemExit(f"renew script omits: {requirement}")
+before_generate = script.split('catalog-release.py "${GENERATE_ARGS[@]}"', 1)[0]
+if 'cat_dir / "rate-card.json"' in before_generate:
+    raise SystemExit("renewal must not re-stamp the GENERATED rate-card.json; the generator writes it")
 rollback = script.split("rollback() {", 1)[1].split("\n}", 1)[0]
 if "flock -n 8" not in rollback or "flock -n 9" not in rollback:
     raise SystemExit("rollback must take Pearl deploy locks before mutating current")
@@ -175,6 +192,18 @@ if "/etc/macprovider/keys" in script:
 remote = script.split("<<'REMOTE'", 1)[1].split("\nREMOTE", 1)[0]
 if remote.find("mutated=1") > remote.find('printf \'%s\\n\' "$prev" > "$root/.previous-target"'):
     raise SystemExit("mutated=1 must be set before writing .previous-target")
+under_lock = remote.split("Re-check dates-only continuity under the lock", 1)[1].split("\nPY", 1)[0]
+for requirement in (
+    'artifact = "autotune-artifacts.json"',
+    "(presence)",
+    # The inline mirror of RENEWAL_ARTIFACT_RELEASE_FIELDS on Pearl (no
+    # checkout there) must carry the FULL tuple, not a subset.
+    '("version", "release_id", "generated_at", "candidate_catalog_sha256")',
+):
+    if requirement not in under_lock:
+        raise SystemExit(f"under-lock continuity recheck omits the artifact feed rule: {requirement}")
+if remote.find("(presence)") > remote.find('mv "$incoming" "$final"'):
+    raise SystemExit("artifact-feed continuity must be rechecked before the release directory is installed")
 if "rsync" in script and ".private.base64" in script.split("rsync", 1)[1][:800]:
     raise SystemExit("renew script must not rsync the private key to Pearl")
 if 'ln -sfn "$(cat .previous-target)"' in runbook:
@@ -189,5 +218,17 @@ PY
 
 python3 -m py_compile "$helper"
 bash -n "$script"
+
+# EXECUTABLE renewal-flow regression: restamp -> generate -> sign -> generate ->
+# verify, in both the pre-activation four-feed state and the post-activation
+# five-feed state, against a throwaway catalog and key. Structural greps above
+# cannot tell whether the flow still COMPLETES, and this job runs unattended on a
+# 30-day freshness clock.
+( cd "$root" && PYTHONDONTWRITEBYTECODE=1 python3 -m unittest \
+  scripts.tests.test_catalog_artifact_feed.RenewalFlowTest ) >/dev/null 2>&1 || {
+  printf '[test-renew-autotune-static-feed-signed] ERROR: renewal flow regression failed; re-run:\n' >&2
+  printf '  PYTHONDONTWRITEBYTECODE=1 python3 -m unittest scripts.tests.test_catalog_artifact_feed.RenewalFlowTest\n' >&2
+  exit 1
+}
 
 printf '[test-renew-autotune-static-feed-signed] ok: protected autotune renewal fails closed\n'

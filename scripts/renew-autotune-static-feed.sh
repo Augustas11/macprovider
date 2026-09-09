@@ -150,33 +150,49 @@ fi
 CAT_DIR="$WORKTREE/phase3-binary/catalog/autotune"
 STATIC_DIR="$WORKTREE/phase3-binary/dist/static"
 
-# Re-stamp version + generated_at ONLY. Content is otherwise byte-identical:
-# candidate/demand carry a published-<date> version; rate-card's version is a
-# rows-hash and MUST NOT change on a freshness-only renewal.
-python3 - "$CAT_DIR" "$RELEASE_ID" "$NOW_ISO" <<'PY'
-import json, pathlib, sys
-cat_dir, release_id, now_iso = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3]
-for name in ("autotune-candidates.json", "demand-rank.json"):
-    p = cat_dir / name
-    obj = json.loads(p.read_text())
-    obj["version"] = release_id
-    obj["generated_at"] = now_iso
-    p.write_text(json.dumps(obj, separators=(",", ":"), sort_keys=True))
-rc = cat_dir / "rate-card.json"
-obj = json.loads(rc.read_text())
-obj["generated_at"] = now_iso  # version is a rows-hash; leave it
-rc.write_text(json.dumps(obj, separators=(",", ":"), sort_keys=True))
-print(f"re-stamped candidate/demand version={release_id} generated_at={now_iso} (rate-card date only)")
-PY
+# Re-stamp version + generated_at ONLY, at the SOURCE. Content is otherwise
+# byte-identical: candidate/demand carry a published-<date> version; rate-card's
+# version is a rows-hash and MUST NOT change on a freshness-only renewal.
+#
+# `catalog-release.py restamp` owns which files are sources and which are
+# generated. rate-card.json is now MATERIALISED from rate-card-source.json by the
+# `generate` below, so re-dating rate-card.json here would be overwritten by that
+# same generate and the atomic-release check would then abort this renewal on a
+# stale rate-card generated_at. The generator exclusively writes rate-card.json.
+log "re-stamping release source inputs for $RELEASE_ID"
+( cd "$WORKTREE" && python3 scripts/catalog-release.py restamp \
+    --release-id "$RELEASE_ID" --generated-at "$NOW_ISO" )
+
+# SPEC-023 §3.7.8: a freshness renewal NEVER activates the artifact feed. With
+# neither variable set this stays the four-feed renewal it has always been, even
+# once autotune-artifacts-source.json is committed with unmeasured size_bytes.
+# Once a release IS artifact-bound, AUTOTUNE_PREVIOUS_RELEASE_DIR names the
+# previous signed release directory the §3.7.4 rebinding check requires.
+GENERATE_ARGS=(generate --signer-key-id "$KEY_ID")
+case "${AUTOTUNE_ACTIVATE_ARTIFACT_FEED:-0}" in
+  1|true|yes) GENERATE_ARGS+=(--activate-artifact-feed) ;;
+  0|false|no|"") ;;
+  *) fatal "AUTOTUNE_ACTIVATE_ARTIFACT_FEED must be 1/0 (got ${AUTOTUNE_ACTIVATE_ARTIFACT_FEED})" ;;
+esac
+if [ -n "${AUTOTUNE_PREVIOUS_RELEASE_DIR:-}" ]; then
+  [ -d "$AUTOTUNE_PREVIOUS_RELEASE_DIR" ] ||
+    fatal "AUTOTUNE_PREVIOUS_RELEASE_DIR is not a directory: $AUTOTUNE_PREVIOUS_RELEASE_DIR"
+  GENERATE_ARGS+=(--previous-release-dir "$AUTOTUNE_PREVIOUS_RELEASE_DIR")
+fi
 
 log "regenerating canonical feed + manifest + ledger for $RELEASE_ID"
-( cd "$WORKTREE" && python3 scripts/catalog-release.py generate --signer-key-id "$KEY_ID" )
+( cd "$WORKTREE" && python3 scripts/catalog-release.py "${GENERATE_ARGS[@]}" )
 
 log "signing feed bytes with $KEY_ID (in-memory public-key derivation check; no bytes printed)"
-( cd "$WORKTREE" && AUTOTUNE_STATIC_KEY_ID="$KEY_ID" bash scripts/resign-autotune-static.sh )
+( cd "$WORKTREE" && AUTOTUNE_STATIC_KEY_ID="$KEY_ID" \
+  AUTOTUNE_ACTIVATE_ARTIFACT_FEED="${AUTOTUNE_ACTIVATE_ARTIFACT_FEED:-0}" \
+  AUTOTUNE_PREVIOUS_RELEASE_DIR="${AUTOTUNE_PREVIOUS_RELEASE_DIR:-}" \
+  bash scripts/resign-autotune-static.sh )
 
 # ---------------------------------------------------------------------------
-# 2. Assemble the 9-file release directory and gate it with verify-directory.
+# 2. Assemble the release directory (9 files; 11 once the release is
+#    artifact-bound: + autotune-artifacts.json and its .sig) and gate it with
+#    verify-directory.
 # ---------------------------------------------------------------------------
 CANDIDATE_SHA="$(python3 -c 'import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$CAT_DIR/autotune-candidates.json")"
 RELEASE_DIRNAME="${RELEASE_ID}-${CANDIDATE_SHA:0:16}"
@@ -190,6 +206,16 @@ done
 for f in autotune-candidates.json.sig demand-rank.json.sig rate-card.json.sig; do
   install -m 0644 "$STATIC_DIR/$f" "$RELEASE_STAGE/$f"
 done
+# Once the release is artifact-bound its release.json binds a FIFTH feed, so the
+# staged directory must carry the artifact feed and its sidecar or the
+# verify-directory gate below fails on a release that is otherwise correct.
+if [ -f "$CAT_DIR/autotune-artifacts.json" ]; then
+  install -m 0644 "$CAT_DIR/autotune-artifacts.json" "$RELEASE_STAGE/autotune-artifacts.json"
+  [ -f "$STATIC_DIR/autotune-artifacts.json.sig" ] ||
+    fatal "artifact-bound release is missing $STATIC_DIR/autotune-artifacts.json.sig"
+  install -m 0644 "$STATIC_DIR/autotune-artifacts.json.sig" "$RELEASE_STAGE/autotune-artifacts.json.sig"
+  log "staged artifact-bound five-feed release directory"
+fi
 # Strip any macOS AppleDouble junk before it can reach the release dir.
 find "$RELEASE_STAGE" -name '._*' -delete 2>/dev/null || true
 
@@ -276,20 +302,28 @@ fi
 # feed content (version/generated_at stripped) against the live release; abort
 # if models, gates, or rate-card rows differ — a real catalog change must go
 # through a reviewed release, never this freshness cron.
+# The rules live in `catalog-release.py continuity-check` (feed_continuity_drift)
+# so they are unit-tested: candidate/demand/rate-card compared with version +
+# generated_at stripped, and the artifact feed compared by PRESENCE and by
+# content with its release-derived fields stripped. A renewal that would add,
+# drop, or rewrite the artifact feed is a catalog release, not a restamp.
 log "checking content continuity against the live release (freshness-only guard)"
+LIVE_SNAPSHOT="$STAGING/live-current"
+mkdir -p "$LIVE_SNAPSHOT"
 for name in autotune-candidates.json demand-rank.json rate-card.json; do
-  live="$(SSH "cat '$REMOTE_AUTOTUNE_DIR/current/$name'")" || fatal "cannot read live $name"
-  if ! printf '%s' "$live" | python3 -c '
-import json, sys
-def norm(o):
-    o = dict(o); o.pop("version", None); o.pop("generated_at", None); return json.dumps(o, sort_keys=True)
-new = json.load(open(sys.argv[1]))
-live = json.loads(sys.stdin.read())
-sys.exit(0 if norm(new) == norm(live) else 1)
-' "$RELEASE_STAGE/$name"; then
-    fatal "content drift in $name vs live feed — renewal is freshness-only; a content change needs a reviewed catalog release, not this cron"
-  fi
+  SSH "cat '$REMOTE_AUTOTUNE_DIR/current/$name'" > "$LIVE_SNAPSHOT/$name" || fatal "cannot read live $name"
 done
+live_artifact_state="$(SSH "if test -f '$REMOTE_AUTOTUNE_DIR/current/autotune-artifacts.json'; then echo present; else echo absent; fi")" \
+  || fatal "cannot determine whether the live release carries autotune-artifacts.json"
+case "$live_artifact_state" in
+  present)
+    SSH "cat '$REMOTE_AUTOTUNE_DIR/current/autotune-artifacts.json'" > "$LIVE_SNAPSHOT/autotune-artifacts.json" \
+      || fatal "cannot read live autotune-artifacts.json" ;;
+  absent) ;;
+  *) fatal "unexpected live artifact-feed state: $live_artifact_state" ;;
+esac
+( cd "$WORKTREE" && python3 scripts/catalog-release.py continuity-check --incoming "$RELEASE_STAGE" --live "$LIVE_SNAPSHOT" ) \
+  || fatal "content drift vs live feed — renewal is freshness-only; a content change needs a reviewed catalog release, not this cron"
 log "content continuity confirmed (dates-only delta)"
 
 # Rollback restores the EXACT prior state — current AND .previous-target — then
@@ -393,6 +427,20 @@ def norm(path):
 for name in ("autotune-candidates.json", "demand-rank.json", "rate-card.json"):
     if norm(incoming / name) != norm(current / name):
         raise SystemExit(f"content drift under lock in {name}")
+# Mirrors catalog-release.py feed_continuity_drift (Pearl has no checkout): the
+# artifact feed must agree by PRESENCE and, once release-derived fields are
+# stripped, by content. Keep in step with RENEWAL_ARTIFACT_RELEASE_FIELDS.
+artifact = "autotune-artifacts.json"
+if (incoming / artifact).exists() != (current / artifact).exists():
+    raise SystemExit(f"content drift under lock in {artifact} (presence)")
+if (incoming / artifact).exists():
+    def norm_artifact(path):
+        obj = json.loads(path.read_text())
+        for field in ("version", "release_id", "generated_at", "candidate_catalog_sha256"):
+            obj.pop(field, None)
+        return json.dumps(obj, sort_keys=True)
+    if norm_artifact(incoming / artifact) != norm_artifact(current / artifact):
+        raise SystemExit(f"content drift under lock in {artifact}")
 PY
 cd "$root/releases"
 chown -R root:macprovider "$incoming"

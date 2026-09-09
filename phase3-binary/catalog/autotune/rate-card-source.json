@@ -1,0 +1,92 @@
+{
+  "classes": {
+    "class-120b-moe": {
+      "completion_rate_per_mtok": 136000,
+      "prompt_cache_hit_rate_per_mtok": 17000,
+      "prompt_rate_per_mtok": 68000
+    },
+    "class-20b-moe": {
+      "completion_rate_per_mtok": 100000,
+      "prompt_cache_hit_rate_per_mtok": 12500,
+      "prompt_rate_per_mtok": 50000
+    },
+    "class-3b": {
+      "completion_rate_per_mtok": 27000,
+      "prompt_cache_hit_rate_per_mtok": 3375,
+      "prompt_rate_per_mtok": 13500
+    },
+    "class-8b": {
+      "completion_rate_per_mtok": 27000,
+      "prompt_cache_hit_rate_per_mtok": 3375,
+      "prompt_rate_per_mtok": 13500
+    }
+  },
+  "generated_at": "2026-09-02T00:00:00Z",
+  "global_multiplier_ppm": 1000000,
+  "policy_version": "autotune-policy-v1",
+  "provider_share_bps": 9000,
+  "rows": {
+    "default": {
+      "completion_rate_per_mtok": 1000000,
+      "prompt_cache_hit_rate_per_mtok": 125000,
+      "prompt_rate_per_mtok": 500000
+    },
+    "gemma-4-26b-a4b-it": {
+      "completion_rate_per_mtok": 240000,
+      "prompt_cache_hit_rate_per_mtok": 15000,
+      "prompt_rate_per_mtok": 60000
+    },
+    "google-gemma-4-26b-a4b-it": {
+      "completion_rate_per_mtok": 240000,
+      "prompt_cache_hit_rate_per_mtok": 15000,
+      "prompt_rate_per_mtok": 60000
+    },
+    "meta-llama/llama-3.1-8b-instruct": {
+      "completion_rate_per_mtok": 27000,
+      "prompt_cache_hit_rate_per_mtok": 3375,
+      "prompt_rate_per_mtok": 13500
+    },
+    "meta-llama/llama-3.2-3b-instruct": {
+      "completion_rate_per_mtok": 27000,
+      "prompt_cache_hit_rate_per_mtok": 3375,
+      "prompt_rate_per_mtok": 13500
+    },
+    "nemotron-3-nano-30b-a3b": {
+      "completion_rate_per_mtok": 160000,
+      "prompt_cache_hit_rate_per_mtok": 20000,
+      "prompt_rate_per_mtok": 80000
+    },
+    "openai/gpt-oss-120b": {
+      "completion_rate_per_mtok": 136000,
+      "prompt_cache_hit_rate_per_mtok": 17000,
+      "prompt_rate_per_mtok": 68000
+    },
+    "openai/gpt-oss-20b": {
+      "completion_rate_per_mtok": 100000,
+      "prompt_cache_hit_rate_per_mtok": 12500,
+      "prompt_rate_per_mtok": 50000
+    },
+    "qwen2.5-coder-32b-instruct": {
+      "completion_rate_per_mtok": 850000,
+      "prompt_cache_hit_rate_per_mtok": 106250,
+      "prompt_rate_per_mtok": 425000
+    },
+    "qwen3-32b": {
+      "completion_rate_per_mtok": 220000,
+      "prompt_cache_hit_rate_per_mtok": 27500,
+      "prompt_rate_per_mtok": 110000
+    },
+    "qwen3-8b": {
+      "completion_rate_per_mtok": 27000,
+      "prompt_cache_hit_rate_per_mtok": 3375,
+      "prompt_rate_per_mtok": 13500
+    },
+    "qwen3-coder-30b-a3b-instruct": {
+      "completion_rate_per_mtok": 235000,
+      "prompt_cache_hit_rate_per_mtok": 29375,
+      "prompt_rate_per_mtok": 117500
+    }
+  },
+  "schema_version": "macprovider.rate-card-source.v1",
+  "usd_per_million_credits": 1.0
+}
