@@ -23,10 +23,13 @@ from check_spec_governance import (
     LOCAL_CONSUMER_ENDPOINT_EVIDENCE_REQUIREMENT_IDS,
     LOCAL_CONSUMER_ENDPOINT_EXECUTION_MODE,
     LOCAL_CONSUMER_ENDPOINT_JOURNEY_ID,
+    LOCAL_CONSUMER_ENDPOINT_SEMANTIC_SUPPORT_ARTIFACT_IDS,
     LOCAL_CONSUMER_ENDPOINT_STEP_ID_ORDER,
     ValidationResult,
     _load_json,
     _unique_json_object,
+    local_consumer_endpoint_canonical_report_bytes,
+    validate_local_consumer_endpoint_support_report,
 )
 
 
@@ -734,7 +737,16 @@ def require_candidate_identity(value: Any) -> dict[str, Any]:
     return deepcopy(identity)
 
 
-def require_support_artifacts(value: Any, candidate_identity: dict[str, Any], expected_support_artifacts: set[str], source_sha: str) -> dict[str, Any]:
+def require_support_artifacts(
+    value: Any,
+    candidate_identity: dict[str, Any],
+    expected_support_artifacts: set[str],
+    source_sha: str,
+    run_id: str,
+    observations: dict[str, Any],
+    *,
+    require_semantic_reports: bool,
+) -> dict[str, Any]:
     support = require_object(value, "support_artifacts")
     require_exact_keys(support, expected_support_artifacts, expected_support_artifacts, "support_artifacts")
     expected_hashes = {
@@ -748,7 +760,9 @@ def require_support_artifacts(value: Any, candidate_identity: dict[str, Any], ex
     for artifact_id in sorted(expected_support_artifacts):
         artifact = require_object(support.get(artifact_id), f"support_artifacts.{artifact_id}")
         allowed_keys = {"role", "sha256", "bytes"}
-        if artifact_id == TRANSPORT_MATRIX_ARTIFACT_ID:
+        if artifact_id == TRANSPORT_MATRIX_ARTIFACT_ID or (
+            require_semantic_reports and artifact_id in LOCAL_CONSUMER_ENDPOINT_SEMANTIC_SUPPORT_ARTIFACT_IDS
+        ):
             allowed_keys.add("report")
         require_exact_keys(artifact, allowed_keys, allowed_keys, f"support_artifacts.{artifact_id}")
         if artifact.get("role") != SUPPORT_ARTIFACT_ROLES[artifact_id]:
@@ -769,6 +783,25 @@ def require_support_artifacts(value: Any, candidate_identity: dict[str, Any], ex
             if byte_count != expected_report_bytes:
                 die("support_artifacts.trusted_metadata_transport_matrix.bytes must match canonical report bytes")
             normalized[artifact_id]["report"] = deepcopy(artifact["report"])
+        elif require_semantic_reports and artifact_id in LOCAL_CONSUMER_ENDPOINT_SEMANTIC_SUPPORT_ARTIFACT_IDS:
+            report = require_object(artifact.get("report"), f"support_artifacts.{artifact_id}.report")
+            errors = validate_local_consumer_endpoint_support_report(
+                artifact_id,
+                report,
+                source_sha=source_sha,
+                run_id=run_id,
+                candidate_identity=candidate_identity,
+                observations=observations,
+                location=f"support_artifacts.{artifact_id}.report",
+            )
+            if errors:
+                die("; ".join(errors))
+            expected_report_bytes = local_consumer_endpoint_canonical_report_bytes(report)
+            if artifact_sha != hashlib.sha256(expected_report_bytes).hexdigest():
+                die(f"support_artifacts.{artifact_id}.sha256 must match canonical report bytes")
+            if byte_count != len(expected_report_bytes):
+                die(f"support_artifacts.{artifact_id}.bytes must match canonical report bytes")
+            normalized[artifact_id]["report"] = deepcopy(report)
     return normalized
 
 
@@ -904,10 +937,18 @@ def build_payload(root: Path, source: str, *, source_sha: str, evidence_sha: str
     redaction = require_redaction(evidence.get("redaction"))
     observations = require_observations(evidence.get("observations"))
     candidate_identity = require_candidate_identity(evidence.get("candidate_identity"))
-    require_support_artifacts(evidence.get("support_artifacts"), candidate_identity, expected_support_artifacts, source_sha)
+    run_id = require_safe_metadata(evidence.get("run_id"), "run_id", run_id=True)
+    require_support_artifacts(
+        evidence.get("support_artifacts"),
+        candidate_identity,
+        expected_support_artifacts,
+        source_sha,
+        run_id,
+        observations,
+        require_semantic_reports=evidence.get("schema_version") == EVIDENCE_SCHEMA_V2,
+    )
     require_review(evidence.get("review"), expected_support_artifacts)
     artifact_sha = hashlib.sha256(evidence_bytes).hexdigest()
-    run_id = require_safe_metadata(evidence.get("run_id"), "run_id", run_id=True)
 
     return {
         "schema_version": JOURNEY_RESULT_PAYLOAD_SCHEMA,

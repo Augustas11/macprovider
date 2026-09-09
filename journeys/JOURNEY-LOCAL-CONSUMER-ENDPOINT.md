@@ -124,6 +124,29 @@ signing. The review manifest that feeds capture must pin each reviewed support
 artifact by SHA-256 and byte count; capture must fail if the files have changed
 after review.
 
+For v2 captures, the `ledger_capture`, `log_capture`, `rate_card_capture`, and
+`status_capture` entries MUST also embed their canonical redacted JSON reports.
+Those reports use the closed schemas
+`macprovider.local-consumer-ledger-redacted.v1`,
+`macprovider.local-consumer-log-redacted.v1`,
+`macprovider.local-consumer-rate-card-redacted.v1`, and
+`macprovider.local-consumer-status-redacted.v1`. Each report MUST bind the same
+repository source commit and physical `run_id` as the enclosing evidence. The
+capture, signer builder, and governance validator independently validate the
+required permitted-call, local budget denial, held-reservation restart,
+operator release, final zero-held state, trusted-pricing, production-gateway,
+OpenAI SDK, and redaction observations. The recorded SHA-256 and byte count
+MUST match the canonical embedded report bytes. Semantically empty files or
+caller-authored pass booleans without these reports are not promotable.
+
+This remains an operator-attested physical journey, not remote attestation of a
+local Mac. The release operator is the trust root for whether the reviewed
+redacted reports truthfully describe the observed run; protected signing
+records that separate authorization. The machine-enforced boundary prevents
+missing, semantically empty, cross-run, cross-source, mutated, or internally
+inconsistent reports from being promoted. It does not claim to defend against
+an authorized release operator intentionally falsifying a schema-valid review.
+
 The signer workflow converts that artifact into a generic signed
 journey-result envelope only after:
 

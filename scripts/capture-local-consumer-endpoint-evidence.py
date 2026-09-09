@@ -24,6 +24,8 @@ from check_spec_governance import (
     LOCAL_CONSUMER_ENDPOINT_JOURNEY_ID,
     LOCAL_CONSUMER_ENDPOINT_STEP_ID_ORDER,
     _unique_json_object,
+    local_consumer_endpoint_canonical_report_bytes,
+    validate_local_consumer_endpoint_support_report,
 )
 
 
@@ -501,6 +503,44 @@ def canonical_report_bytes(value: dict[str, Any]) -> bytes:
     return (json.dumps(value, indent=2, sort_keys=False) + "\n").encode("utf-8")
 
 
+def load_semantic_support_report(
+    path: Path,
+    label: str,
+    artifact_id: str,
+    *,
+    source_sha: str,
+    run_id: str,
+    candidate_identity: dict[str, Any] | None = None,
+    observations: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], str, int]:
+    resolved = require_regular_file(path, label)
+    payload = resolved.read_bytes()
+    scan_redacted_artifact_payload(payload, label)
+    try:
+        value = json.loads(payload.decode("utf-8"), object_pairs_hook=_unique_json_object)
+    except DuplicateJSONKeyError as exc:
+        die(f"{label} contains duplicate JSON object key {exc.args[0]!r}")
+    except json.JSONDecodeError as exc:
+        die(f"{label} contains malformed JSON: {exc}")
+    if not isinstance(value, dict):
+        die(f"{label} must be a JSON object")
+    errors = validate_local_consumer_endpoint_support_report(
+        artifact_id,
+        value,
+        source_sha=source_sha,
+        run_id=run_id,
+        candidate_identity=candidate_identity,
+        observations=observations,
+        location=label,
+    )
+    if errors:
+        die("; ".join(errors))
+    canonical = local_consumer_endpoint_canonical_report_bytes(value)
+    if payload != canonical:
+        die(f"{label} must use canonical two-space JSON bytes")
+    return value, sha256_bytes(canonical), len(canonical)
+
+
 def sha256_file(path: Path, label: str, *, binary: bool = False) -> tuple[str, int]:
     resolved = require_regular_file(path, label)
     payload = resolved.read_bytes()
@@ -887,11 +927,6 @@ def build_evidence(args: argparse.Namespace) -> dict[str, Any]:
 
     requirement_ids = parse_requirement_ids(args.requirement_ids)
     expected_support_artifacts = required_support_artifact_ids(requirement_ids)
-    cli_binary_sha256, cli_binary_bytes = sha256_file(Path(args.cli_binary), "--cli-binary", binary=True)
-    ledger_sha256, ledger_bytes = sha256_file(Path(args.ledger_capture), "--ledger-capture")
-    log_capture_sha256, log_bytes = sha256_file(Path(args.log_capture), "--log-capture")
-    rate_card_sha256, rate_card_bytes = sha256_file(Path(args.rate_card_capture), "--rate-card-capture")
-    status_capture_sha256, status_bytes = sha256_file(Path(args.status_capture), "--status-capture")
     transport_matrix_required = TRANSPORT_MATRIX_ARTIFACT_ID in expected_support_artifacts
     if transport_matrix_required and not args.trusted_metadata_transport_matrix:
         die("--trusted-metadata-transport-matrix is required for SPEC-045-R003/R004/R008 captures")
@@ -903,6 +938,38 @@ def build_evidence(args: argparse.Namespace) -> dict[str, Any]:
         die("--upstream-gateway-origin-sha256 is not accepted for capture; pass --upstream-gateway-origin")
     local_endpoint_base_url_sha256 = sha256_text(require_local_endpoint_url(args.local_endpoint_base_url or ""))
     upstream_gateway_origin_sha256 = sha256_text(require_gateway_origin(args.upstream_gateway_origin or "", args.gateway_kind))
+    model_id = require_candidate_identity_metadata(args.model_id, "--model-id", field="model_id")
+
+    cli_binary_sha256, cli_binary_bytes = sha256_file(Path(args.cli_binary), "--cli-binary", binary=True)
+    semantic_reports: dict[str, dict[str, Any]] = {}
+    semantic_artifact_bytes: dict[str, tuple[str, int]] = {}
+    if transport_matrix_required:
+        candidate_context = {"gateway_kind": args.gateway_kind, "model_id": model_id}
+        for artifact_id, path_value, label in (
+            ("ledger_capture", args.ledger_capture, "--ledger-capture"),
+            ("log_capture", args.log_capture, "--log-capture"),
+            ("rate_card_capture", args.rate_card_capture, "--rate-card-capture"),
+            ("status_capture", args.status_capture, "--status-capture"),
+        ):
+            report, report_sha256, report_bytes = load_semantic_support_report(
+                Path(path_value),
+                label,
+                artifact_id,
+                source_sha=source_sha,
+                run_id=run_id,
+                candidate_identity=candidate_context,
+            )
+            semantic_reports[artifact_id] = report
+            semantic_artifact_bytes[artifact_id] = (report_sha256, report_bytes)
+        ledger_sha256, ledger_bytes = semantic_artifact_bytes["ledger_capture"]
+        log_capture_sha256, log_bytes = semantic_artifact_bytes["log_capture"]
+        rate_card_sha256, rate_card_bytes = semantic_artifact_bytes["rate_card_capture"]
+        status_capture_sha256, status_bytes = semantic_artifact_bytes["status_capture"]
+    else:
+        ledger_sha256, ledger_bytes = sha256_file(Path(args.ledger_capture), "--ledger-capture")
+        log_capture_sha256, log_bytes = sha256_file(Path(args.log_capture), "--log-capture")
+        rate_card_sha256, rate_card_bytes = sha256_file(Path(args.rate_card_capture), "--rate-card-capture")
+        status_capture_sha256, status_bytes = sha256_file(Path(args.status_capture), "--status-capture")
 
     operator_identity_fingerprint = require_string(
         args.operator_identity_fingerprint,
@@ -926,6 +993,8 @@ def build_evidence(args: argparse.Namespace) -> dict[str, Any]:
         "rate_card_capture": {"role": "redacted-rate-card-capture", "sha256": rate_card_sha256, "bytes": rate_card_bytes},
         "status_capture": {"role": "redacted-status-capture", "sha256": status_capture_sha256, "bytes": status_bytes},
     }
+    for artifact_id, report in semantic_reports.items():
+        support_artifacts[artifact_id]["report"] = report
     if transport_matrix_required:
         matrix_path = require_regular_file(Path(args.trusted_metadata_transport_matrix), "--trusted-metadata-transport-matrix")
         matrix_payload = matrix_path.read_bytes()
@@ -950,6 +1019,18 @@ def build_evidence(args: argparse.Namespace) -> dict[str, Any]:
         support_artifacts=support_artifacts,
         expected_support_artifacts=expected_support_artifacts,
     )
+    for artifact_id, report in semantic_reports.items():
+        errors = validate_local_consumer_endpoint_support_report(
+            artifact_id,
+            report,
+            source_sha=source_sha,
+            run_id=run_id,
+            candidate_identity={"gateway_kind": args.gateway_kind, "model_id": model_id},
+            observations=observations,
+            location=f"support_artifacts.{artifact_id}.report",
+        )
+        if errors:
+            die("; ".join(errors))
     candidate = require_safe_metadata(args.candidate, "--candidate")
     if candidate != f"commit:{source_sha}":
         die("--candidate must equal commit:<source-sha>")
@@ -983,7 +1064,7 @@ def build_evidence(args: argparse.Namespace) -> dict[str, Any]:
             "local_endpoint_base_url_sha256": local_endpoint_base_url_sha256,
             "local_token_fingerprint": local_token_fingerprint,
             "log_capture_sha256": log_capture_sha256,
-            "model_id": require_candidate_identity_metadata(args.model_id, "--model-id", field="model_id"),
+            "model_id": model_id,
             "rate_card_sha256": rate_card_sha256,
             "sdk_name": require_candidate_identity_metadata(args.sdk_name, "--sdk-name", field="sdk_name"),
             "sdk_version": require_candidate_identity_metadata(args.sdk_version, "--sdk-version", field="sdk_version"),

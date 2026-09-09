@@ -25,6 +25,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from pathlib import PurePosixPath
 from typing import Any
+from urllib.parse import urlsplit
 
 
 AUTHORITY_SCHEMA_PATH = "../schemas/spec-authority-v1.schema.json"
@@ -248,6 +249,19 @@ LOCAL_CONSUMER_ENDPOINT_SUPPORT_ARTIFACT_ROLES = {
     "status_capture": "redacted-status-capture",
     LOCAL_CONSUMER_ENDPOINT_TRANSPORT_MATRIX_ARTIFACT_ID: "trusted-metadata-transport-matrix",
 }
+LOCAL_CONSUMER_ENDPOINT_SEMANTIC_SUPPORT_ARTIFACT_IDS = {
+    "ledger_capture",
+    "log_capture",
+    "rate_card_capture",
+    "status_capture",
+}
+LOCAL_CONSUMER_ENDPOINT_SUPPORT_REPORT_SCHEMAS = {
+    "ledger_capture": "macprovider.local-consumer-ledger-redacted.v1",
+    "log_capture": "macprovider.local-consumer-log-redacted.v1",
+    "rate_card_capture": "macprovider.local-consumer-rate-card-redacted.v1",
+    "status_capture": "macprovider.local-consumer-status-redacted.v1",
+}
+LOCAL_CONSUMER_ENDPOINT_SUPPORT_DECIMAL_RE = re.compile(r"^(?:0|[1-9][0-9]*)$")
 LOCAL_CONSUMER_ENDPOINT_TRANSPORT_MATRIX_REQUIREMENT_IDS = {
     "SPEC-045-R003",
     "SPEC-045-R004",
@@ -932,6 +946,268 @@ def _local_consumer_expected_support_artifact_ids(requirement_ids: list[str]) ->
     if any(requirement_id in LOCAL_CONSUMER_ENDPOINT_TRANSPORT_MATRIX_REQUIREMENT_IDS for requirement_id in requirement_ids):
         return set(LOCAL_CONSUMER_ENDPOINT_SUPPORT_ARTIFACT_IDS)
     return set(LOCAL_CONSUMER_ENDPOINT_BASE_SUPPORT_ARTIFACT_IDS)
+
+
+def local_consumer_endpoint_canonical_report_bytes(value: dict[str, Any]) -> bytes:
+    return (json.dumps(value, indent=2, sort_keys=False) + "\n").encode("utf-8")
+
+
+def _local_consumer_support_error(errors: list[str], location: str, message: str) -> None:
+    errors.append(f"{location}: {message}")
+
+
+def _local_consumer_support_expect_keys(
+    value: Any,
+    required: set[str],
+    location: str,
+    errors: list[str],
+) -> bool:
+    if not isinstance(value, dict):
+        _local_consumer_support_error(errors, location, "must be an object")
+        return False
+    missing = required - set(value)
+    extra = set(value) - required
+    if missing:
+        _local_consumer_support_error(errors, location, f"missing keys: {sorted(missing)}")
+    if extra:
+        _local_consumer_support_error(errors, location, f"has unexpected keys: {sorted(extra)}")
+    return not missing and not extra
+
+
+def _local_consumer_support_decimal(value: Any, location: str, errors: list[str], *, positive: bool = False) -> int | None:
+    if not isinstance(value, str) or LOCAL_CONSUMER_ENDPOINT_SUPPORT_DECIMAL_RE.fullmatch(value) is None:
+        _local_consumer_support_error(errors, location, "must be a non-negative micro-USD decimal string")
+        return None
+    parsed = int(value)
+    if positive and parsed <= 0:
+        _local_consumer_support_error(errors, location, "must be greater than zero")
+        return None
+    return parsed
+
+
+def _local_consumer_support_zero_int(value: Any, location: str, errors: list[str]) -> None:
+    if not isinstance(value, int) or isinstance(value, bool) or value != 0:
+        _local_consumer_support_error(errors, location, "must equal integer 0")
+
+
+def _local_consumer_validate_support_common(
+    artifact_id: str,
+    value: Any,
+    source_sha: str,
+    run_id: str,
+    location: str,
+    errors: list[str],
+    specific_keys: set[str],
+) -> bool:
+    required = {"schema_version", "repository", "run_id"} | specific_keys
+    if not _local_consumer_support_expect_keys(value, required, location, errors):
+        return False
+    expected_schema = LOCAL_CONSUMER_ENDPOINT_SUPPORT_REPORT_SCHEMAS[artifact_id]
+    if value.get("schema_version") != expected_schema:
+        _local_consumer_support_error(errors, f"{location}.schema_version", f"must equal {expected_schema!r}")
+    repository = value.get("repository")
+    if _local_consumer_support_expect_keys(repository, {"name", "commit"}, f"{location}.repository", errors):
+        if repository.get("name") != "Augustas11/macprovider":
+            _local_consumer_support_error(errors, f"{location}.repository.name", "must equal 'Augustas11/macprovider'")
+        if repository.get("commit") != source_sha:
+            _local_consumer_support_error(errors, f"{location}.repository.commit", "must match source repository.commit")
+    if value.get("run_id") != run_id:
+        _local_consumer_support_error(errors, f"{location}.run_id", "must match source run_id")
+    return True
+
+
+def validate_local_consumer_endpoint_support_report(
+    artifact_id: str,
+    value: Any,
+    *,
+    source_sha: str,
+    run_id: str,
+    candidate_identity: dict[str, Any] | None = None,
+    observations: dict[str, Any] | None = None,
+    location: str,
+) -> list[str]:
+    errors: list[str] = []
+    if artifact_id == "ledger_capture":
+        if not _local_consumer_validate_support_common(
+            artifact_id,
+            value,
+            source_sha,
+            run_id,
+            location,
+            errors,
+            {"summary", "recovery_transitions", "final_state"},
+        ):
+            return errors
+        summary = value.get("summary")
+        if _local_consumer_support_expect_keys(summary, {"settled_micro_usd", "released_micro_usd", "held_micro_usd", "reserved_micro_usd"}, f"{location}.summary", errors):
+            _local_consumer_support_decimal(summary.get("settled_micro_usd"), f"{location}.summary.settled_micro_usd", errors, positive=True)
+            _local_consumer_support_decimal(summary.get("released_micro_usd"), f"{location}.summary.released_micro_usd", errors, positive=True)
+            held = _local_consumer_support_decimal(summary.get("held_micro_usd"), f"{location}.summary.held_micro_usd", errors)
+            reserved = _local_consumer_support_decimal(summary.get("reserved_micro_usd"), f"{location}.summary.reserved_micro_usd", errors)
+            if held not in (None, 0):
+                _local_consumer_support_error(errors, f"{location}.summary.held_micro_usd", "must equal '0' after release")
+            if reserved not in (None, 0):
+                _local_consumer_support_error(errors, f"{location}.summary.reserved_micro_usd", "must equal '0' after shutdown")
+        transitions = value.get("recovery_transitions")
+        if not isinstance(transitions, list) or len(transitions) != 2:
+            _local_consumer_support_error(errors, f"{location}.recovery_transitions", "must contain held and released recovery transitions")
+        else:
+            expected = [("held", "restart_recovery"), ("released", "operator_release_held")]
+            estimates: list[int] = []
+            for index, (transition, (state, reason)) in enumerate(zip(transitions, expected, strict=True)):
+                loc = f"{location}.recovery_transitions[{index}]"
+                if _local_consumer_support_expect_keys(transition, {"state", "reason", "admission_estimate_micro_usd"}, loc, errors):
+                    if transition.get("state") != state:
+                        _local_consumer_support_error(errors, f"{loc}.state", f"must equal {state!r}")
+                    if transition.get("reason") != reason:
+                        _local_consumer_support_error(errors, f"{loc}.reason", f"must equal {reason!r}")
+                    estimate = _local_consumer_support_decimal(
+                        transition.get("admission_estimate_micro_usd"),
+                        f"{loc}.admission_estimate_micro_usd",
+                        errors,
+                        positive=True,
+                    )
+                    if estimate is not None:
+                        estimates.append(estimate)
+            if len(estimates) == 2 and estimates[0] != estimates[1]:
+                _local_consumer_support_error(errors, f"{location}.recovery_transitions", "held and released estimates must match")
+        final_state = value.get("final_state")
+        if _local_consumer_support_expect_keys(final_state, {"held_reservation_count", "reserved_reservation_count"}, f"{location}.final_state", errors):
+            _local_consumer_support_zero_int(final_state.get("held_reservation_count"), f"{location}.final_state.held_reservation_count", errors)
+            _local_consumer_support_zero_int(final_state.get("reserved_reservation_count"), f"{location}.final_state.reserved_reservation_count", errors)
+    elif artifact_id == "log_capture":
+        if not _local_consumer_validate_support_common(artifact_id, value, source_sha, run_id, location, errors, {"events", "redaction"}):
+            return errors
+        event_fields = {
+            "endpoint_started",
+            "sdk_permitted",
+            "budget_denial",
+            "upstream_contact_changed_after_permitted",
+            "upstream_contact_unchanged_after_denial",
+            "crash_with_active_reservation",
+            "restart_recovery_observed",
+            "recovery_release_observed",
+            "graceful_stop",
+        }
+        events = value.get("events")
+        if _local_consumer_support_expect_keys(events, event_fields, f"{location}.events", errors):
+            for field_name in sorted(event_fields):
+                if events.get(field_name) is not True:
+                    _local_consumer_support_error(errors, f"{location}.events.{field_name}", "must be true")
+        redaction = value.get("redaction")
+        redaction_fields = {
+            "bearer_tokens_redacted": True,
+            "local_token_logged": False,
+            "raw_completion_logged": False,
+            "raw_prompt_logged": False,
+            "upstream_credential_logged": False,
+        }
+        if _local_consumer_support_expect_keys(redaction, set(redaction_fields), f"{location}.redaction", errors):
+            for field_name, expected in redaction_fields.items():
+                if redaction.get(field_name) is not expected:
+                    _local_consumer_support_error(errors, f"{location}.redaction.{field_name}", f"must be {str(expected).lower()}")
+                if observations is not None and observations.get(field_name) is not expected:
+                    _local_consumer_support_error(errors, f"{location}.redaction.{field_name}", "must match source observations")
+    elif artifact_id == "rate_card_capture":
+        if not _local_consumer_validate_support_common(
+            artifact_id,
+            value,
+            source_sha,
+            run_id,
+            location,
+            errors,
+            {"pricing_trust_state", "gateway_kind", "model_id", "budget_configured_micro_usd", "max_admission_micro_usd", "interrupted_admission_estimate_micro_usd"},
+        ):
+            return errors
+        if value.get("pricing_trust_state") != "trusted":
+            _local_consumer_support_error(errors, f"{location}.pricing_trust_state", "must equal 'trusted'")
+        if candidate_identity is not None:
+            if value.get("gateway_kind") != candidate_identity.get("gateway_kind"):
+                _local_consumer_support_error(errors, f"{location}.gateway_kind", "must match candidate_identity.gateway_kind")
+            if value.get("model_id") != candidate_identity.get("model_id"):
+                _local_consumer_support_error(errors, f"{location}.model_id", "must match candidate_identity.model_id")
+        budget = _local_consumer_support_decimal(value.get("budget_configured_micro_usd"), f"{location}.budget_configured_micro_usd", errors, positive=True)
+        maximum = _local_consumer_support_decimal(value.get("max_admission_micro_usd"), f"{location}.max_admission_micro_usd", errors, positive=True)
+        interrupted = _local_consumer_support_decimal(
+            value.get("interrupted_admission_estimate_micro_usd"),
+            f"{location}.interrupted_admission_estimate_micro_usd",
+            errors,
+            positive=True,
+        )
+        if budget is not None and maximum is not None and maximum > budget:
+            _local_consumer_support_error(errors, f"{location}.max_admission_micro_usd", "must not exceed configured budget")
+        if maximum is not None and interrupted is not None and interrupted > maximum:
+            _local_consumer_support_error(errors, f"{location}.interrupted_admission_estimate_micro_usd", "must not exceed max admission")
+    elif artifact_id == "status_capture":
+        if not _local_consumer_validate_support_common(
+            artifact_id,
+            value,
+            source_sha,
+            run_id,
+            location,
+            errors,
+            {"observations", "restart_state", "final_state"},
+        ):
+            return errors
+        status_observation_fields = {
+            "local_base_url_configured",
+            "openai_sdk_used",
+            "generated_local_token_used_as_api_key",
+            "permitted_chat_completion_observed",
+            "over_budget_denial_observed",
+            "held_reservation_survived_restart",
+            "recovery_release_observed",
+            "upstream_contact_observed",
+        }
+        support_observations = value.get("observations")
+        if _local_consumer_support_expect_keys(support_observations, status_observation_fields, f"{location}.observations", errors):
+            for field_name in sorted(status_observation_fields):
+                if support_observations.get(field_name) is not True:
+                    _local_consumer_support_error(errors, f"{location}.observations.{field_name}", "must be true")
+            if observations is not None:
+                for field_name in sorted(status_observation_fields - {"upstream_contact_observed"}):
+                    if observations.get(field_name) is not True:
+                        _local_consumer_support_error(errors, f"{location}.observations.{field_name}", "must match source observations")
+        restart_state = value.get("restart_state")
+        restart_fields = {"bound_url", "pricing_trust_state", "budget_held_micro_usd", "budget_used_micro_usd"}
+        if _local_consumer_support_expect_keys(restart_state, restart_fields, f"{location}.restart_state", errors):
+            bound_url = restart_state.get("bound_url")
+            valid_bound_url = False
+            if isinstance(bound_url, str):
+                try:
+                    parsed_bound_url = urlsplit(bound_url)
+                    valid_bound_url = (
+                        parsed_bound_url.scheme == "http"
+                        and parsed_bound_url.hostname in {"127.0.0.1", "localhost", "::1"}
+                        and parsed_bound_url.port is not None
+                        and parsed_bound_url.port > 0
+                        and parsed_bound_url.username is None
+                        and parsed_bound_url.password is None
+                        and parsed_bound_url.path in {"", "/"}
+                        and not parsed_bound_url.query
+                        and not parsed_bound_url.fragment
+                    )
+                except ValueError:
+                    valid_bound_url = False
+            if not valid_bound_url:
+                _local_consumer_support_error(errors, f"{location}.restart_state.bound_url", "must be an HTTP loopback URL")
+            if restart_state.get("pricing_trust_state") != "trusted":
+                _local_consumer_support_error(errors, f"{location}.restart_state.pricing_trust_state", "must equal 'trusted'")
+            _local_consumer_support_decimal(restart_state.get("budget_held_micro_usd"), f"{location}.restart_state.budget_held_micro_usd", errors, positive=True)
+            _local_consumer_support_decimal(restart_state.get("budget_used_micro_usd"), f"{location}.restart_state.budget_used_micro_usd", errors, positive=True)
+        final_state = value.get("final_state")
+        final_fields = {"listener_count", "status_exit", "budget_held_micro_usd", "budget_reserved_micro_usd"}
+        if _local_consumer_support_expect_keys(final_state, final_fields, f"{location}.final_state", errors):
+            _local_consumer_support_zero_int(final_state.get("listener_count"), f"{location}.final_state.listener_count", errors)
+            if final_state.get("status_exit") != 4:
+                _local_consumer_support_error(errors, f"{location}.final_state.status_exit", "must equal 4 after endpoint shutdown")
+            for field_name in ("budget_held_micro_usd", "budget_reserved_micro_usd"):
+                amount = _local_consumer_support_decimal(final_state.get(field_name), f"{location}.final_state.{field_name}", errors)
+                if amount not in (None, 0):
+                    _local_consumer_support_error(errors, f"{location}.final_state.{field_name}", "must equal '0'")
+    else:
+        _local_consumer_support_error(errors, location, f"unsupported semantic support artifact {artifact_id!r}")
+    return errors
 
 
 def _validate_local_consumer_support_artifacts_reviewed(
@@ -2577,7 +2853,9 @@ def _validate_local_consumer_endpoint_source(
             if not _expect_object(entry, entry_loc, result):
                 continue
             expected_entry_keys = {"role", "sha256", "bytes"}
-            if support_id == LOCAL_CONSUMER_ENDPOINT_TRANSPORT_MATRIX_ARTIFACT_ID:
+            if support_id == LOCAL_CONSUMER_ENDPOINT_TRANSPORT_MATRIX_ARTIFACT_ID or (
+                source_uses_v2 and support_id in LOCAL_CONSUMER_ENDPOINT_SEMANTIC_SUPPORT_ARTIFACT_IDS
+            ):
                 expected_entry_keys.add("report")
             _expect_keys(entry, expected_entry_keys, expected_entry_keys, entry_loc, result)
             if entry.get("role") != LOCAL_CONSUMER_ENDPOINT_SUPPORT_ARTIFACT_ROLES[support_id]:
@@ -2593,6 +2871,24 @@ def _validate_local_consumer_endpoint_source(
                 )
                 if isinstance(entry.get("report"), dict):
                     report_bytes = _local_consumer_canonical_report_bytes(entry["report"])
+                    if entry.get("sha256") != hashlib.sha256(report_bytes).hexdigest():
+                        result.error(f"{entry_loc}.sha256", "must match canonical report bytes")
+                    if entry.get("bytes") != len(report_bytes):
+                        result.error(f"{entry_loc}.bytes", "must match canonical report bytes")
+            elif source_uses_v2 and support_id in LOCAL_CONSUMER_ENDPOINT_SEMANTIC_SUPPORT_ARTIFACT_IDS:
+                report = entry.get("report")
+                for error in validate_local_consumer_endpoint_support_report(
+                    support_id,
+                    report,
+                    source_sha=payload.get("repository", {}).get("commit") if isinstance(payload.get("repository"), dict) else "",
+                    run_id=payload.get("run_id") if isinstance(payload.get("run_id"), str) else "",
+                    candidate_identity=identity if isinstance(identity, dict) else None,
+                    observations=payload.get("observations") if isinstance(payload.get("observations"), dict) else None,
+                    location=f"{entry_loc}.report",
+                ):
+                    result.error(f"{entry_loc}.report", error)
+                if isinstance(report, dict):
+                    report_bytes = local_consumer_endpoint_canonical_report_bytes(report)
                     if entry.get("sha256") != hashlib.sha256(report_bytes).hexdigest():
                         result.error(f"{entry_loc}.sha256", "must match canonical report bytes")
                     if entry.get("bytes") != len(report_bytes):

@@ -19,6 +19,7 @@ from scripts.check_spec_governance import (
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FINGERPRINT = "a" * 64
 OTHER_FINGERPRINT = "b" * 64
+RUN_ID = "local-consumer-endpoint-20260824T000000Z"
 
 
 def load_capture():
@@ -81,13 +82,114 @@ def write_capture_inputs(root: Path) -> dict[str, Path]:
         "status": inputs / "status.redacted.json",
     }
     files["cli"].write_bytes(b"binary-bytes")
-    files["ledger"].write_text('{"state":"settled","redacted":true}\n', encoding="utf-8")
-    files["log"].write_text("local endpoint log redacted\n", encoding="utf-8")
-    files["rate"].write_text('{"rate_card":"redacted","sha_only":true}\n', encoding="utf-8")
-    files["status"].write_text('{"status":"ready","redacted":true}\n', encoding="utf-8")
+    try:
+        commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+    except subprocess.CalledProcessError:
+        commit = "0" * 40
+    refresh_semantic_support_inputs(files, commit, RUN_ID)
     files["matrix"] = inputs / "trusted-metadata-transport-matrix.json"
     files["matrix"].write_text(json.dumps(valid_transport_matrix("0" * 40), indent=2) + "\n", encoding="utf-8")
     return files
+
+
+def write_json(path: Path, value: dict[str, object]) -> None:
+    path.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
+
+
+def valid_ledger_report(commit: str, run_id: str) -> dict[str, object]:
+    return {
+        "schema_version": "macprovider.local-consumer-ledger-redacted.v1",
+        "repository": {"name": "Augustas11/macprovider", "commit": commit},
+        "run_id": run_id,
+        "summary": {
+            "settled_micro_usd": "227",
+            "released_micro_usd": "115",
+            "held_micro_usd": "0",
+            "reserved_micro_usd": "0",
+        },
+        "recovery_transitions": [
+            {"state": "held", "reason": "restart_recovery", "admission_estimate_micro_usd": "115"},
+            {"state": "released", "reason": "operator_release_held", "admission_estimate_micro_usd": "115"},
+        ],
+        "final_state": {"held_reservation_count": 0, "reserved_reservation_count": 0},
+    }
+
+
+def valid_log_report(commit: str, run_id: str) -> dict[str, object]:
+    return {
+        "schema_version": "macprovider.local-consumer-log-redacted.v1",
+        "repository": {"name": "Augustas11/macprovider", "commit": commit},
+        "run_id": run_id,
+        "events": {
+            "endpoint_started": True,
+            "sdk_permitted": True,
+            "budget_denial": True,
+            "upstream_contact_changed_after_permitted": True,
+            "upstream_contact_unchanged_after_denial": True,
+            "crash_with_active_reservation": True,
+            "restart_recovery_observed": True,
+            "recovery_release_observed": True,
+            "graceful_stop": True,
+        },
+        "redaction": {
+            "bearer_tokens_redacted": True,
+            "local_token_logged": False,
+            "raw_completion_logged": False,
+            "raw_prompt_logged": False,
+            "upstream_credential_logged": False,
+        },
+    }
+
+
+def valid_rate_report(commit: str, run_id: str) -> dict[str, object]:
+    return {
+        "schema_version": "macprovider.local-consumer-rate-card-redacted.v1",
+        "repository": {"name": "Augustas11/macprovider", "commit": commit},
+        "run_id": run_id,
+        "pricing_trust_state": "trusted",
+        "gateway_kind": "production",
+        "model_id": "mlx-community/Llama-3.2-3B-Instruct-4bit",
+        "budget_configured_micro_usd": "100000",
+        "max_admission_micro_usd": "50000",
+        "interrupted_admission_estimate_micro_usd": "115",
+    }
+
+
+def valid_status_report(commit: str, run_id: str) -> dict[str, object]:
+    return {
+        "schema_version": "macprovider.local-consumer-status-redacted.v1",
+        "repository": {"name": "Augustas11/macprovider", "commit": commit},
+        "run_id": run_id,
+        "observations": {
+            "local_base_url_configured": True,
+            "openai_sdk_used": True,
+            "generated_local_token_used_as_api_key": True,
+            "permitted_chat_completion_observed": True,
+            "over_budget_denial_observed": True,
+            "held_reservation_survived_restart": True,
+            "recovery_release_observed": True,
+            "upstream_contact_observed": True,
+        },
+        "restart_state": {
+            "bound_url": "http://127.0.0.1:4545",
+            "pricing_trust_state": "trusted",
+            "budget_held_micro_usd": "115",
+            "budget_used_micro_usd": "227",
+        },
+        "final_state": {
+            "listener_count": 0,
+            "status_exit": 4,
+            "budget_held_micro_usd": "0",
+            "budget_reserved_micro_usd": "0",
+        },
+    }
+
+
+def refresh_semantic_support_inputs(files: dict[str, Path], commit: str, run_id: str = RUN_ID) -> None:
+    write_json(files["ledger"], valid_ledger_report(commit, run_id))
+    write_json(files["log"], valid_log_report(commit, run_id))
+    write_json(files["rate"], valid_rate_report(commit, run_id))
+    write_json(files["status"], valid_status_report(commit, run_id))
 
 
 def valid_transport_matrix(commit: str) -> dict[str, object]:
@@ -309,6 +411,14 @@ class LocalConsumerEndpointEvidenceCaptureTests(unittest.TestCase):
                 "macprovider.trusted-metadata-transport-matrix.v1",
                 evidence["support_artifacts"]["trusted_metadata_transport_matrix"]["report"]["schema_version"],
             )
+            self.assertEqual(
+                "macprovider.local-consumer-ledger-redacted.v1",
+                evidence["support_artifacts"]["ledger_capture"]["report"]["schema_version"],
+            )
+            self.assertEqual(
+                RUN_ID,
+                evidence["support_artifacts"]["status_capture"]["report"]["run_id"],
+            )
 
             subprocess.run(["git", "add", output], cwd=root, check=True)
             subprocess.run(["git", "commit", "-q", "-m", "add evidence"], cwd=root, check=True)
@@ -354,6 +464,45 @@ class LocalConsumerEndpointEvidenceCaptureTests(unittest.TestCase):
             evidence = json.loads((root / output).read_text(encoding="utf-8"))
             self.assertEqual("macprovider.local-consumer-endpoint-evidence.v1", evidence["schema_version"])
             self.assertNotIn("trusted_metadata_transport_matrix", evidence["support_artifacts"])
+            self.assertNotIn("report", evidence["support_artifacts"]["ledger_capture"])
+
+    def test_capture_rejects_semantically_empty_v2_support_artifacts(self) -> None:
+        capture = load_capture()
+        cases = {
+            "ledger": ("ledger", '{"state":"settled","redacted":true}\n'),
+            "log": ("log", "local endpoint log redacted\n"),
+            "rate": ("rate", '{"rate_card":"redacted","sha_only":true}\n'),
+            "status": ("status", '{"status":"ready","redacted":true}\n'),
+        }
+        for name, (key, payload) in cases.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory).resolve()
+                commit = git_init(root)
+                files = write_capture_inputs(root)
+                refresh_semantic_support_inputs(files, commit, RUN_ID)
+                files[key].write_text(payload, encoding="utf-8")
+                with self.assertRaises(SystemExit):
+                    capture.main(base_argv(root, commit, files, f"journeys/evidence/local-consumer-endpoint-empty-{name}.redacted.json"))
+
+    def test_capture_rejects_loopback_prefix_with_remote_url_host(self) -> None:
+        capture = load_capture()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            commit = git_init(root)
+            files = write_capture_inputs(root)
+            refresh_semantic_support_inputs(files, commit, RUN_ID)
+            status = json.loads(files["status"].read_text(encoding="utf-8"))
+            status["restart_state"]["bound_url"] = "http://127.0.0.1:80@evil.example"
+            write_json(files["status"], status)
+            with self.assertRaises(SystemExit):
+                capture.main(
+                    base_argv(
+                        root,
+                        commit,
+                        files,
+                        "journeys/evidence/local-consumer-endpoint-remote-host.redacted.json",
+                    )
+                )
 
     def test_capture_rejects_bad_transport_matrix_reports(self) -> None:
         capture = load_capture()
@@ -384,59 +533,43 @@ class LocalConsumerEndpointEvidenceCaptureTests(unittest.TestCase):
             root = Path(directory).resolve()
             commit = git_init(root)
             files = write_capture_inputs(root)
+            del files["matrix"]
             files["log"].write_text("Authorization: Bearer redacted\n", encoding="utf-8")
+            argv = base_argv(root, commit, files, "journeys/evidence/local-consumer-endpoint-redacted-auth.redacted.json")
+            argv[argv.index("--requirement-ids") + 1] = "SPEC-045-R001"
             self.assertEqual(
                 0,
-                capture.main(
-                    base_argv(
-                        root,
-                        commit,
-                        files,
-                        "journeys/evidence/local-consumer-endpoint-redacted-auth.redacted.json",
-                    )
-                ),
+                capture.main(argv),
             )
 
             files = write_capture_inputs(root)
+            del files["matrix"]
             files["log"].write_text("Authorization: Basic redacted\n", encoding="utf-8")
+            argv = base_argv(root, commit, files, "journeys/evidence/local-consumer-endpoint-redacted-basic-auth.redacted.json")
+            argv[argv.index("--requirement-ids") + 1] = "SPEC-045-R001"
             self.assertEqual(
                 0,
-                capture.main(
-                    base_argv(
-                        root,
-                        commit,
-                        files,
-                        "journeys/evidence/local-consumer-endpoint-redacted-basic-auth.redacted.json",
-                    )
-                ),
+                capture.main(argv),
             )
 
             files = write_capture_inputs(root)
+            del files["matrix"]
             files["log"].write_text("payload={'authorization': 'Basic redacted'}\n", encoding="utf-8")
+            argv = base_argv(root, commit, files, "journeys/evidence/local-consumer-endpoint-quoted-redacted-basic-auth.redacted.json")
+            argv[argv.index("--requirement-ids") + 1] = "SPEC-045-R001"
             self.assertEqual(
                 0,
-                capture.main(
-                    base_argv(
-                        root,
-                        commit,
-                        files,
-                        "journeys/evidence/local-consumer-endpoint-quoted-redacted-basic-auth.redacted.json",
-                    )
-                ),
+                capture.main(argv),
             )
 
             files = write_capture_inputs(root)
+            del files["matrix"]
             files["log"].write_text('{"authorization":"redacted"}\n', encoding="utf-8")
+            argv = base_argv(root, commit, files, "journeys/evidence/local-consumer-endpoint-json-redacted-auth.redacted.json")
+            argv[argv.index("--requirement-ids") + 1] = "SPEC-045-R001"
             self.assertEqual(
                 0,
-                capture.main(
-                    base_argv(
-                        root,
-                        commit,
-                        files,
-                        "journeys/evidence/local-consumer-endpoint-json-redacted-auth.redacted.json",
-                    )
-                ),
+                capture.main(argv),
             )
 
     def test_capture_rejects_fake_gateway_kind(self) -> None:
