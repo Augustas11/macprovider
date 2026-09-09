@@ -765,6 +765,7 @@ func (s *Store) ensureWalletSessionReplayDispatchColumns(ctx context.Context) er
 		name string
 		ddl  string
 	}{
+		{"account_id", `ALTER TABLE wallet_session_replays ADD COLUMN account_id TEXT NOT NULL DEFAULT ''`},
 		{"dispatch_armed_at", `ALTER TABLE wallet_session_replays ADD COLUMN dispatch_armed_at TEXT NOT NULL DEFAULT ''`},
 		{"dispatched_at", `ALTER TABLE wallet_session_replays ADD COLUMN dispatched_at TEXT NOT NULL DEFAULT ''`},
 		{"recovery_policy", `ALTER TABLE wallet_session_replays ADD COLUMN recovery_policy TEXT NOT NULL DEFAULT ''`},
@@ -777,6 +778,27 @@ func (s *Store) ensureWalletSessionReplayDispatchColumns(ctx context.Context) er
 		if _, err := s.db.ExecContext(ctx, column.ddl); err != nil {
 			return fmt.Errorf("add wallet_session_replays.%s: %w", column.name, err)
 		}
+	}
+	if _, err := s.db.ExecContext(ctx, `
+		UPDATE wallet_session_replays
+		SET account_id = (
+			SELECT wallet_sessions.account_id
+			FROM wallet_sessions
+			WHERE wallet_sessions.session_id = wallet_session_replays.session_id
+		)
+		WHERE account_id = ''
+			AND EXISTS (
+				SELECT 1
+				FROM wallet_sessions
+				WHERE wallet_sessions.session_id = wallet_session_replays.session_id
+			)`); err != nil {
+		return fmt.Errorf("backfill wallet_session_replays.account_id: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_wallet_replays_account_created ON wallet_session_replays(account_id, created_at)`); err != nil {
+		return fmt.Errorf("create wallet_session_replays.account_id index: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_wallet_replays_metadata_ip_created ON wallet_session_replays(metadata_client_ip, created_at)`); err != nil {
+		return fmt.Errorf("create wallet_session_replays.metadata_client_ip index: %w", err)
 	}
 	return nil
 }
@@ -2060,6 +2082,9 @@ func (s *Store) AdmitWalletSessionInference(ctx context.Context, req storage.Wal
 	if req.Replay.SessionID == "" {
 		req.Replay.SessionID = req.SessionID
 	}
+	if req.Replay.AccountID == "" {
+		req.Replay.AccountID = req.AccountID
+	}
 	if req.Replay.RequestID == "" {
 		req.Replay.RequestID = req.RequestID
 	}
@@ -2084,6 +2109,23 @@ func (s *Store) AdmitWalletSessionInference(ctx context.Context, req storage.Wal
 	}
 	if req.RequestedTokens > session.PerRequestTokenCap {
 		return storage.WalletSessionAdmissionDecision{}, storage.ErrWalletSessionPerRequestCap
+	}
+	if existing, matched, err := walletReplayMaterialMatchTx(ctx, tx, req.Replay); err != nil {
+		return storage.WalletSessionAdmissionDecision{}, err
+	} else if existing {
+		if matched {
+			return storage.WalletSessionAdmissionDecision{}, storage.ErrWalletSessionReplayDuplicate
+		}
+		return storage.WalletSessionAdmissionDecision{}, storage.ErrWalletSessionReplayMismatch
+	}
+	if req.MaxReplayRows > 0 || req.MaxReplayBytes > 0 {
+		rows, bytes, err := walletReplayCapacityTx(ctx, tx, req.SessionID)
+		if err != nil {
+			return storage.WalletSessionAdmissionDecision{}, err
+		}
+		if (req.MaxReplayRows > 0 && rows >= req.MaxReplayRows) || (req.MaxReplayBytes > 0 && bytes+req.Replay.BodyBytes > req.MaxReplayBytes) {
+			return storage.WalletSessionAdmissionDecision{}, storage.ErrWalletSessionReplayCapacity
+		}
 	}
 	if err := insertWalletReplayTx(ctx, tx, req.Replay, "claimed", now); err != nil {
 		return storage.WalletSessionAdmissionDecision{}, err
@@ -2162,6 +2204,9 @@ func (s *Store) AdmitWalletSessionMetadata(ctx context.Context, req storage.Wall
 	if req.Replay.SessionID == "" {
 		req.Replay.SessionID = req.SessionID
 	}
+	if req.Replay.AccountID == "" {
+		req.Replay.AccountID = req.AccountID
+	}
 	if req.Replay.RequestID == "" {
 		return storage.ErrWalletSessionReplayMismatch
 	}
@@ -2186,14 +2231,11 @@ func (s *Store) AdmitWalletSessionMetadata(ctx context.Context, req storage.Wall
 		}
 	}
 	if req.RateLimit > 0 {
-		var count int
-		if err := tx.QueryRowContext(ctx, `
-			SELECT COUNT(*) FROM wallet_session_replays
-			WHERE session_id = ? AND metadata_client_ip = ? AND created_at >= ?`,
-			req.SessionID, req.Replay.MetadataClientIP, encodeTime(req.WindowStart.UTC())).Scan(&count); err != nil {
+		limited, err := walletMetadataReplayRateLimitedTx(ctx, tx, req.AccountID, req.SessionID, req.Replay.MetadataClientIP, req.WindowStart.UTC(), req.RateLimit)
+		if err != nil {
 			return err
 		}
-		if count >= req.RateLimit {
+		if limited {
 			if req.RelayBlindReplay != nil {
 				replay := *req.RelayBlindReplay
 				replay.AccountID, replay.WalletSessionID = req.AccountID, req.SessionID
@@ -3289,15 +3331,43 @@ func insertWalletReplayTx(ctx context.Context, tx *immediateTx, replay storage.W
 	}
 	_, err := tx.ExecContext(ctx, `
 		INSERT INTO wallet_session_replays(
-			session_id, request_id, method, canonical_route, semantic_headers_hash, raw_body_hash,
+			session_id, account_id, request_id, method, canonical_route, semantic_headers_hash, raw_body_hash,
 			body_bytes, metadata_client_ip, state, created_at, updated_at)
-		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		replay.SessionID, replay.RequestID, replay.Method, replay.CanonicalRoute, replay.SemanticHeadersHash,
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		replay.SessionID, replay.AccountID, replay.RequestID, replay.Method, replay.CanonicalRoute, replay.SemanticHeadersHash,
 		replay.RawBodyHash, replay.BodyBytes, replay.MetadataClientIP, state, encodeTime(now.UTC()), encodeTime(now.UTC()))
 	if isUniqueConstraintError(err) {
 		return storage.ErrWalletSessionReplayDuplicate
 	}
 	return err
+}
+
+func walletMetadataReplayRateLimitedTx(ctx context.Context, tx *immediateTx, accountID, sessionID, metadataClientIP string, windowStart time.Time, limit int) (bool, error) {
+	if limit <= 0 {
+		return false, nil
+	}
+	cutoff := encodeTime(windowStart.UTC())
+	checks := []struct {
+		column string
+		value  string
+	}{
+		{column: "session_id", value: sessionID},
+		{column: "account_id", value: accountID},
+		{column: "metadata_client_ip", value: metadataClientIP},
+	}
+	for _, check := range checks {
+		var count int
+		if err := tx.QueryRowContext(ctx, `
+			SELECT COUNT(*) FROM wallet_session_replays
+			WHERE state = 'metadata_only' AND `+check.column+` = ? AND created_at >= ?`,
+			check.value, cutoff).Scan(&count); err != nil {
+			return false, err
+		}
+		if count >= limit {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func walletReplayMaterialMatchTx(ctx context.Context, tx *immediateTx, replay storage.WalletSessionReplayMaterial) (bool, bool, error) {

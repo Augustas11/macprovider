@@ -129,6 +129,7 @@ CREATE INDEX IF NOT EXISTS idx_wallet_sessions_bearer_hash ON wallet_sessions(be
 
 CREATE TABLE IF NOT EXISTS wallet_session_replays (
 	session_id TEXT NOT NULL REFERENCES wallet_sessions(session_id),
+	account_id TEXT NOT NULL DEFAULT '',
 	request_id TEXT NOT NULL,
 	method TEXT NOT NULL,
 	canonical_route TEXT NOT NULL,
@@ -151,6 +152,7 @@ CREATE TABLE IF NOT EXISTS wallet_session_replays (
 );
 
 CREATE INDEX IF NOT EXISTS idx_wallet_replays_session_created ON wallet_session_replays(session_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_wallet_replays_metadata_ip_created ON wallet_session_replays(metadata_client_ip, created_at);
 CREATE INDEX IF NOT EXISTS idx_wallet_replays_state ON wallet_session_replays(state, updated_at);
 
 CREATE TABLE IF NOT EXISTS wallet_session_reservations (

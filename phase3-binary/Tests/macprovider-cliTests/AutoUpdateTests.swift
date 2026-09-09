@@ -3568,6 +3568,34 @@ final class AutoUpdateTests: XCTestCase {
         XCTAssertEqual(outcome, .forwardProgressFailure)
     }
 
+    func testHandleCoordinatorRecommendationRejectsRevokedTargetWhenMinimumIsNil() async throws {
+        let fixture = try TempHome()
+        let store = AutoUpdateMarkerStore(homeDirectory: fixture.url)
+        try store.ensureTrustedRoot()
+        try await store.updateSignedPolicy(minimum: nil, revoked: ["1.7.0"])
+        SessionAutoupdateGate.shared.resetForTest()
+        defer { SessionAutoupdateGate.shared.resetForTest() }
+        let updater = AutoUpdater(
+            config: .defaults(configPath: fixture.url.appendingPathComponent("config.yaml").path),
+            currentVersion: "1.6.0",
+            providerStatus: r005Status(),
+            markerStore: store,
+            trustProvider: { self.r005PinnedTrust() },
+            drain: { _ in true },
+            sendReady: {},
+            restartLaunchd: {},
+            fenceReloadJobs: {},
+            currentBinaryURL: { nil },
+            rollbackObserverAvailable: { true },
+            launchdProviderAvailable: { true },
+            headlessOperatorManagedTopology: { false }
+        )
+
+        let outcome = await updater.handleCoordinatorRecommendation("1.7.0")
+
+        XCTAssertEqual(outcome, .forwardProgressFailure)
+    }
+
     // SPEC-020-R005 round-4 MEDIUM-2 / R-6.8: an R005-triggered signed-recovery
     // invocation that ends on a NON-detection terminal path still carries the R005
     // attribution on the terminal event (the coordinator only sees the last event).

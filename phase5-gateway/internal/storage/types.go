@@ -293,6 +293,7 @@ type WalletSessionRegistrationRequest struct {
 
 type WalletSessionReplayMaterial struct {
 	SessionID           string
+	AccountID           string
 	RequestID           string
 	Method              string
 	CanonicalRoute      string
@@ -329,6 +330,8 @@ type WalletSessionAdmissionRequest struct {
 	RequestedTokens int64
 	DailyQuota      int64
 	Replay          WalletSessionReplayMaterial
+	MaxReplayRows   int
+	MaxReplayBytes  int64
 	CreatedAt       time.Time
 	ExpiresAt       time.Time
 }

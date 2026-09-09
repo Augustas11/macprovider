@@ -179,6 +179,8 @@ struct SelfUpdate {
             return
         }
 
+        try Self.requireTargetAllowedBySignedPolicy(latest, policy: markerStore.effectivePolicy())
+
         if checkOnly {
             print("Update available: v\(installedReleaseVersion) -> v\(latest)")
             return
@@ -207,6 +209,8 @@ struct SelfUpdate {
     }
 
     func runByTag(tag: String) async throws {
+        let target = try Self.validateReleaseTag(tag)
+        try Self.requireTargetAllowedBySignedPolicy(target, policy: markerStore.effectivePolicy())
         let release = try await releaseByTag(tag)
         let prepared = try await prepareValidatedUpdate(from: release)
         defer { prepared.cleanup() }
@@ -248,12 +252,30 @@ struct SelfUpdate {
             expectedRunAttempt: expectedRunAttempt
         )
         defer { prepared.cleanup() }
+        try await applyPreparedAcceptanceCandidate(
+            prepared: prepared,
+            discoveryHeadLoader: {
+                try await acceptanceDiscoveryHeadIfPresent(prepared: prepared)
+            }
+        )
+        print(
+            "Acceptance candidate v\(target) applied with provider CLI "
+                + "v\(prepared.compatibilityManifest.providerCLIVersion). Restart malibu-cli."
+        )
+    }
+
+    func applyPreparedAcceptanceCandidate(
+        prepared: PreparedSelfUpdate,
+        discoveryHeadLoader: () async throws -> SignedReleaseDiscoveryHead?
+    ) async throws {
         try Self.requireAcceptanceProviderVersion(
             current: currentVersion,
             target: prepared.compatibilityManifest.providerCLIVersion
         )
-        let discoveryHead = try await acceptanceDiscoveryHeadIfPresent(
-            prepared: prepared
+        let discoveryHead = try await discoveryHeadLoader()
+        try Self.requireTargetAllowedBySignedPolicy(
+            prepared.compatibilityManifest.providerCLIVersion,
+            policy: markerStore.effectivePolicy()
         )
         try await applyValidatedUpdate(
             newBinary: prepared.newBinary,
@@ -262,10 +284,6 @@ struct SelfUpdate {
             compatibilityManifest: prepared.compatibilityManifest,
             authorityMode: discoveryHead == nil ? nil : "signed_release",
             discoveryHead: discoveryHead
-        )
-        print(
-            "Acceptance candidate v\(target) applied with provider CLI "
-                + "v\(prepared.compatibilityManifest.providerCLIVersion). Restart malibu-cli."
         )
     }
 
@@ -611,6 +629,26 @@ struct SelfUpdate {
               ) != nil
         else {
             throw UpdateError.discoveryHeadInvalid("target_identity_mismatch")
+        }
+    }
+
+    static func targetRejectedBySignedPolicy(
+        _ target: String,
+        policy: (minimum: String?, revoked: Set<String>)
+    ) -> Bool {
+        if let minimum = policy.minimum,
+           Self.compareSemver(target, minimum) == .orderedAscending {
+            return true
+        }
+        return policy.revoked.contains(target)
+    }
+
+    static func requireTargetAllowedBySignedPolicy(
+        _ target: String,
+        policy: (minimum: String?, revoked: Set<String>)
+    ) throws {
+        if targetRejectedBySignedPolicy(target, policy: policy) {
+            throw UpdateError.targetRevokedOrBelowMinimum
         }
     }
 
@@ -2801,6 +2839,7 @@ enum UpdateError: Error, CustomStringConvertible {
     case discoveryHeadReplay
     case discoveryHeadEquivocation
     case discoveryHeadExpired
+    case targetRevokedOrBelowMinimum
     case unsafeAcceptanceDirectory(String)
     case acceptanceCandidateNotNewer(current: String, target: String)
     case acceptanceProviderDowngrade(current: String, target: String)
@@ -2871,6 +2910,8 @@ enum UpdateError: Error, CustomStringConvertible {
             return "Signed release discovery head changed digest at the accepted sequence"
         case .discoveryHeadExpired:
             return "Signed release discovery head is expired or not yet valid"
+        case .targetRevokedOrBelowMinimum:
+            return "Target release is revoked or below the signed minimum"
         case .unsafeAcceptanceDirectory(let reason):
             return "Acceptance-candidate directory is unsafe: \(reason)"
         case let .acceptanceCandidateNotNewer(current, target):

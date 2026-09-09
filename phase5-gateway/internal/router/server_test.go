@@ -6688,7 +6688,7 @@ var gatewayEmittedErrorCodes = []string{
 	"wallet_session_inactive", "wallet_session_issuance_failed",
 	"wallet_session_load_failed", "wallet_session_lookup_failed",
 	"wallet_session_model_not_allowed", "wallet_session_not_found",
-	"wallet_session_query_forbidden",
+	"wallet_session_query_forbidden", "wallet_session_receipt_forbidden",
 	"wallet_session_rate_limited", "wallet_session_replay_capacity_exhausted",
 	"wallet_session_replay_mismatch", "wallet_session_request_cap_exceeded",
 	"wallet_session_request_id_required", "wallet_session_revoked",
