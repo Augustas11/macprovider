@@ -1,20 +1,24 @@
 {
-  "candidate_id": "byom_fixture_candidate",
-  "catalog_model_key": null,
-  "cli_version": "0.0.0-fixture",
-  "generated_at": "2026-09-08T00:00:00Z",
+  "candidate_id": "byom_bcofgbqro5wyftt7pfi6w3wqf5klaewofxk2tgncqofrcli2yljq",
+  "catalog_model_key": "qwen3-8b",
+  "cli_version": "1.8.123",
+  "generated_at": "2026-09-09T03:47:52.362Z",
   "likely_admission_state": "offerable",
   "likely_admission_state_source": "local_default",
   "provider_guidance": {
     "earning_path_class": "not_earning_yet_catalog_or_receipt_path_exists",
     "next_action": "submit_offer",
-    "state_label_key": "byom.local.offerable",
-    "state_meaning_key": "byom.local.offerable_not_earning",
-    "transition_reason_code": "evaluation_passed"
+    "state_label_key": "byom.offer_dry_run.would_submit",
+    "state_meaning_key": "byom.offer_dry_run.catalog_path_missing_trusted_binding",
+    "transition_reason_code": "catalog_binding_unverified"
   },
-  "reason_code": null,
+  "reason_code": "catalog_binding_unverified",
   "schema": "model_admission_offer_dry_run.v1",
-  "served_model_ref": "mlx-community/Tiny-1B-4bit",
-  "warnings": [],
+  "served_model_ref": "ollama:qwen3-8b",
+  "warnings": [
+    "capability_unevaluated",
+    "catalog_match_unverified",
+    "evaluation_required"
+  ],
   "would_submit": true
 }

@@ -236,7 +236,12 @@ struct ModelsAdmissionCommand: AsyncParsableCommand {
 struct ModelsAdmissionStatusCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "status",
-        abstract: "Read coordinator-backed BYOM admission status."
+        // SPEC-046-R003: the command reads coordinator admission state when a
+        // coordinator is configured and reachable, and otherwise reports the
+        // local ladder under admission_state_source local_default rather than
+        // failing. "Coordinator-backed" alone contradicted that fallback.
+        abstract: "Read BYOM admission status: coordinator readback when a coordinator "
+            + "is configured and reachable, otherwise the local default state."
     )
 
     @Argument(help: "Candidate id, served model reference, or display name from models discover --json.")

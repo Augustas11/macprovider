@@ -184,6 +184,7 @@ class JourneyContract:
         evidence_schema: str,
         evidence_prefix: str,
         artifact_id: str,
+        expected_harness_name: str,
         step_id_order: tuple[str, ...],
         step_requirement_ids: dict[str, set[str]],
         promotable_requirement_ids: set[str],
@@ -198,6 +199,11 @@ class JourneyContract:
         self.evidence_schema = evidence_schema
         self.evidence_prefix = evidence_prefix
         self.artifact_id = artifact_id
+        # The one harness whose run manifest may back this journey's evidence.
+        # Without it the contract accepted any existing repository-relative
+        # source file, so a discovery manifest could claim the admission
+        # harness's provenance (R4 MEDIUM).
+        self.expected_harness_name = expected_harness_name
         self.step_id_order = step_id_order
         self.step_requirement_ids = step_requirement_ids
         self.promotable_requirement_ids = promotable_requirement_ids
@@ -220,6 +226,7 @@ DISCOVERY_CONTRACT = JourneyContract(
     evidence_schema=PROVIDER_BYOM_DISCOVERY_EVIDENCE_SCHEMA,
     evidence_prefix=PROVIDER_BYOM_DISCOVERY_EVIDENCE_PREFIX,
     artifact_id=PROVIDER_BYOM_DISCOVERY_ARTIFACT_ID,
+    expected_harness_name="test/e2e/byom/run-discovery-journey.py",
     step_id_order=PROVIDER_BYOM_DISCOVERY_STEP_ID_ORDER,
     step_requirement_ids=PROVIDER_BYOM_DISCOVERY_STEP_REQUIREMENT_IDS,
     promotable_requirement_ids=set(PROVIDER_BYOM_DISCOVERY_PROMOTABLE_REQUIREMENT_IDS),
@@ -234,6 +241,7 @@ ADMISSION_CONTRACT = JourneyContract(
     evidence_schema=NETWORK_MODEL_ADMISSION_EVIDENCE_SCHEMA,
     evidence_prefix=NETWORK_MODEL_ADMISSION_EVIDENCE_PREFIX,
     artifact_id=NETWORK_MODEL_ADMISSION_ARTIFACT_ID,
+    expected_harness_name="test/e2e/byom/run-cli-onboarding-e2e.py",
     step_id_order=NETWORK_MODEL_ADMISSION_STEP_ID_ORDER,
     step_requirement_ids=NETWORK_MODEL_ADMISSION_STEP_REQUIREMENT_IDS,
     promotable_requirement_ids=set(NETWORK_MODEL_ADMISSION_PROMOTABLE_REQUIREMENT_IDS),
@@ -646,6 +654,247 @@ CATALOG_ECONOMICS_ADMISSION_KEYS = frozenset({
     "state", "source", "settlement_capable", "catalog_economics_permitted",
     "coordinator_event_id", "state_observed_at",
 })
+# `model_catalog_economics.v1` nested objects. The spec does not enumerate these
+# either, so -- like the row itself -- they are frozen at the shape
+# `ModelCatalogEconomicsWire.Source` / `.Action` actually encodes. The R4 audit
+# found hand-authored fixtures carrying `prepare: false` and a string `source`
+# where the CLI emits objects; only a shape check catches that.
+CATALOG_ECONOMICS_SOURCE_KEYS = frozenset({
+    "cli_version", "cli_build_commit", "process_launch_id", "process_started_at",
+    "projection_protocol_version", "rate_card_source", "rate_card_digest",
+    "rate_card_signature_digest", "demand_feed_digest", "candidate_feed_digest",
+    "rate_card_max_age_seconds",
+})
+CATALOG_ECONOMICS_ACTION_KEYS = frozenset({
+    "available", "requires_confirmation", "transaction_kind", "transaction_id",
+    "action_timeout_seconds", "estimated_bytes", "unavailable_reason",
+})
+CATALOG_ECONOMICS_ACTION_FIELDS = (
+    "switch", "prepare", "evaluate", "adopt_recommendation", "cleanup_staging",
+)
+
+# --- Closed value enums ----------------------------------------------------
+#
+# Exact key sets prove a document is COMPLETE; they do not prove its values are
+# ones the CLI can emit. The R4 audit showed that gap concretely: fixtures
+# carrying `identity_state: declared_local`, `locality: local_weights`,
+# `evaluation_state: evaluated`, and `next_action: serve_traffic` passed
+# validation and could have backed signed evidence. Every enum below is
+# transcribed from the normative spec text; where a spec deliberately leaves a
+# field's vocabulary to the implementation, the set is frozen from the CLI
+# encoder instead and says so.
+
+# SPEC-046-R002 v0.1 adapter enum, exactly.
+RUNTIME_SOURCES = frozenset({
+    "mlx_cache", "ollama_loopback", "lmstudio_loopback", "llamacpp_loopback",
+    "openai_compatible_loopback",
+})
+# SPEC-046-R003 candidate enums, exactly.
+IDENTITY_STATES = frozenset({
+    "catalog_matched", "artifact_hash_available", "runtime_reported",
+    "opaque_endpoint", "unknown",
+})
+LOCALITIES = frozenset({
+    "local_artifact", "loopback_runtime", "opaque_local_endpoint", "unknown",
+})
+READINESS_STATES = frozenset({
+    "ready", "needs_runtime", "needs_weights", "requires_preparation",
+    "unreachable", "unknown",
+})
+FIT_STATES = frozenset({"fits", "does_not_fit", "unknown"})
+EVALUATION_STATES = frozenset({
+    "not_evaluated", "running", "passed", "failed", "timed_out", "blocked",
+})
+ADMISSION_STATE_SOURCES = frozenset({"local_default", "coordinator"})
+# SPEC-046-R003 `admission_state`, all twelve values.
+ADMISSION_STATES = frozenset({
+    "local_only", "not_offered", "offerable", "offer_submitted", "offer_rejected",
+    "sandbox_probe_only", "network_visible_unpriced", "network_admitted_unsettled",
+    "catalog_priced", "settlement_capable", "withdrawn", "revoked",
+})
+# SPEC-046-R003: under `admission_state_source: local_default` the CLI may only
+# report its own local ladder. A network state carried on a local default would
+# be the CLI promoting a candidate no coordinator ever admitted.
+LOCAL_DEFAULT_ADMISSION_STATES = frozenset({"local_only", "not_offered", "offerable"})
+# SPEC-047-R001 v0.1 coordinator states, exactly. `local_only` and `offerable`
+# are CLI-only inventory states and are deliberately absent.
+COORDINATOR_ADMISSION_STATES = frozenset({
+    "not_offered", "offer_submitted", "offer_rejected", "sandbox_probe_only",
+    "network_visible_unpriced", "network_admitted_unsettled", "catalog_priced",
+    "settlement_capable", "withdrawn", "revoked",
+})
+# SPEC-047-R001 transition table. `allowed_next_states` must be a subset of the
+# row for the state the document reports: a document offering an edge the state
+# machine has no row for is not readback of any legal coordinator state.
+ADMISSION_ALLOWED_NEXT_STATES = {
+    "not_offered": frozenset({"offer_submitted"}),
+    "offer_submitted": frozenset({
+        "offer_rejected", "sandbox_probe_only", "network_visible_unpriced",
+        "network_admitted_unsettled", "catalog_priced", "withdrawn", "revoked",
+    }),
+    "offer_rejected": frozenset({"offer_submitted", "revoked"}),
+    "sandbox_probe_only": frozenset({
+        "network_visible_unpriced", "network_admitted_unsettled", "catalog_priced",
+        "withdrawn", "revoked",
+    }),
+    "network_visible_unpriced": frozenset({
+        "network_admitted_unsettled", "catalog_priced", "withdrawn", "revoked",
+    }),
+    "network_admitted_unsettled": frozenset({
+        "catalog_priced", "settlement_capable", "withdrawn", "revoked",
+    }),
+    "catalog_priced": frozenset({
+        "network_admitted_unsettled", "settlement_capable", "withdrawn", "revoked",
+    }),
+    "settlement_capable": frozenset({
+        "network_admitted_unsettled", "catalog_priced", "withdrawn", "revoked",
+    }),
+    "withdrawn": frozenset({"offer_submitted"}),
+    "revoked": frozenset({"offer_submitted"}),
+}
+# SPEC-046-R003 `provider_guidance` enums, exactly.
+NEXT_ACTIONS = frozenset({
+    "fix_local_blocker", "evaluate", "offer_dry_run", "submit_offer",
+    "revise_and_reoffer", "check_status", "withdraw", "wait_for_coordinator",
+    "maintain_runtime", "none",
+})
+EARNING_PATH_CLASSES = frozenset({
+    "local_inventory_only", "not_earning_yet_catalog_or_receipt_path_exists",
+    "no_earning_path_in_v0_1", "settlement_capable",
+})
+# SPEC-046-R003 warning-code enum plus the four R007 redaction-provenance codes,
+# which that section adds to the same enum. Mirrors `BYOMDiscoveryWarning`.
+WARNING_CODES = frozenset({
+    "candidate_id_unstable", "adapter_unavailable", "adapter_timeout",
+    "adapter_rejected_non_loopback", "adapter_malformed_response",
+    "adapter_response_truncated", "catalog_match_unverified",
+    "capability_unevaluated", "evaluation_required", "evaluation_failed",
+    "requires_preparation", "namespace_permission_invalid",
+    "coordinator_state_unavailable", "capability_family_redacted",
+    "capability_quantization_redacted", "capability_runtime_version_redacted",
+    "model_reference_redacted",
+})
+# SPEC-047-R002 withdrawal `reason_code`, exactly.
+WITHDRAW_REASON_CODES = frozenset({
+    "provider_requested", "wrong_model", "runtime_unavailable",
+    "identity_mismatch", "policy_uncertain", "other_operator_reason",
+})
+
+# The vocabularies below are left to the implementation by their specs, so each
+# set is frozen from the CLI encoder rather than from spec text. A CLI that
+# starts emitting a value outside one of them fails capture, which is the
+# intended outcome: an unreviewed projection change must not silently back
+# signed evidence.
+#
+# `adapters[].status`: BYOMDiscovery.swift emits exactly these six.
+ADAPTER_STATUSES = frozenset({
+    "ok", "unavailable", "timeout", "malformed", "truncated", "rejected",
+})
+# `adapters[].origin_class`: null for a non-HTTP adapter such as `mlx_cache`.
+ORIGIN_CLASSES = frozenset({"loopback_http", "rejected"})
+# `provider_byom_evaluation.v1` scalars, from the evaluation encoder.
+EVALUATION_HEALTH_RESULTS = frozenset({"passed", "failed", "blocked"})
+EVALUATION_ADAPTER_IDENTITIES = frozenset({
+    "openai_compatible_loopback", "mlx_cache_local_artifact", "unknown",
+})
+EVALUATION_USAGE_REPORTING_SOURCES = frozenset({
+    "runtime_reported", "absent", "not_evaluated",
+})
+EVALUATION_FIT_ESTIMATE_SOURCES = frozenset({"discovery_fit_state"})
+# A blocked evaluation reports `runtime_source: "unknown"` for a candidate it
+# never resolved, so the evaluation envelope admits one value discovery does not.
+EVALUATION_RUNTIME_SOURCES = RUNTIME_SOURCES | {"unknown"}
+# SPEC-046-R005 capability test results; the CLI models each as an object, not a
+# bare string. The R4 audit found a fixture using strings here.
+EVALUATION_CAPABILITY_RESULT_KEYS = frozenset({"result", "source", "reason_code"})
+EVALUATION_CAPABILITY_RESULTS = frozenset({"passed", "failed", "not_tested"})
+EVALUATION_CAPABILITY_SOURCES = frozenset({
+    "evaluation", "not_evaluated", "runtime_reported", "absent",
+})
+# SPEC-046-R005 requires transcripts to be content-hashed, never retained; these
+# are the hash fields the evaluation encoder emits. The R4 audit found a fixture
+# using `completion_sha256`, a key the CLI has never emitted.
+EVALUATION_DIAGNOSTIC_HASH_KEYS = frozenset({"prompt_sha256", "response_body_sha256"})
+
+
+def require_bool(value: Any, where: str) -> bool:
+    if not isinstance(value, bool):
+        fail(f"{where} must be a JSON boolean")
+    return value
+
+
+def require_int(value: Any, where: str) -> int:
+    # `isinstance(True, int)` is True in Python; a boolean is not an integer here.
+    if isinstance(value, bool) or not isinstance(value, int):
+        fail(f"{where} must be a JSON integer")
+    return value
+
+
+def require_number(value: Any, where: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        fail(f"{where} must be a JSON number")
+    return value
+
+
+def require_text(value: Any, where: str) -> str:
+    """A non-empty string. A free-text field may still not be null or a number."""
+    if not isinstance(value, str) or not value:
+        fail(f"{where} must be a non-empty JSON string")
+    return value
+
+
+def require_nullable(value: Any, where: str, check) -> Any:
+    """A nullable field is either JSON null or whatever `check` accepts.
+
+    SPEC-046-R004 is explicit that an unknown value is null -- never `false`,
+    never a sentinel string -- so for those fields the nullable wrapper is the
+    whole rule rather than a convenience.
+    """
+    if value is None:
+        return None
+    return check(value, where)
+
+
+def require_enum(value: Any, allowed: frozenset[str], where: str) -> str:
+    if not isinstance(value, str):
+        fail(f"{where} must be a JSON string")
+    if value not in allowed:
+        fail(f"{where} is not a permitted value: {value!r}")
+    return value
+
+
+def require_enum_list(value: Any, allowed: frozenset[str], where: str) -> list[str]:
+    items = require_list(value, where)
+    for index, item in enumerate(items):
+        require_enum(item, allowed, f"{where}[{index}]")
+    return items
+
+
+def _require_admission_pair(
+    document: dict[str, Any], state_field: str, source_field: str, where: str
+) -> tuple[str, str]:
+    """SPEC-046-R003 / SPEC-047-R002 cross-field rule on a state and its source.
+
+    Reading the state without its source is the mistake both specs single out:
+    `not_offered` means local advisory inventory under `local_default` and
+    authoritative coordinator readback under `coordinator`. A document claiming
+    a network state under `local_default` is the CLI promoting a candidate no
+    coordinator admitted, so it must never reach a digest.
+    """
+    source = require_enum(
+        document[source_field], ADMISSION_STATE_SOURCES, f"{where}.{source_field}"
+    )
+    state = require_enum(document[state_field], ADMISSION_STATES, f"{where}.{state_field}")
+    allowed = (
+        LOCAL_DEFAULT_ADMISSION_STATES if source == "local_default"
+        else COORDINATOR_ADMISSION_STATES
+    )
+    if state not in allowed:
+        fail(
+            f"{where}.{state_field} {state!r} is not a permitted state for "
+            f"{source_field} {source!r}"
+        )
+    return state, source
 
 
 def assert_exact_object(value: Any, expected_keys: frozenset[str], where: str) -> dict[str, Any]:
@@ -663,7 +912,280 @@ def assert_exact_object(value: Any, expected_keys: frozenset[str], where: str) -
 
 
 def _validate_guidance(document: dict[str, Any], where: str) -> None:
-    assert_exact_object(document["provider_guidance"], PROVIDER_GUIDANCE_KEYS, where + ".provider_guidance")
+    """SPEC-046-R003 `provider_guidance`, reused verbatim by every SPEC-047-R002
+    envelope. The two `*_key` fields are localization keys, so they are checked
+    as non-empty strings; the rest are closed enums."""
+    location = where + ".provider_guidance"
+    guidance = assert_exact_object(document["provider_guidance"], PROVIDER_GUIDANCE_KEYS, location)
+    require_text(guidance["state_label_key"], location + ".state_label_key")
+    require_text(guidance["state_meaning_key"], location + ".state_meaning_key")
+    require_enum(guidance["next_action"], NEXT_ACTIONS, location + ".next_action")
+    require_nullable(
+        guidance["transition_reason_code"], location + ".transition_reason_code", require_text
+    )
+    require_enum(
+        guidance["earning_path_class"], EARNING_PATH_CLASSES, location + ".earning_path_class"
+    )
+
+
+def _validate_envelope_header(document: dict[str, Any], where: str) -> None:
+    """Fields every CLI envelope carries. `schema` itself is cross-checked
+    against the manifest's claim in `_digest_document`."""
+    require_text(document["schema"], where + ".schema")
+    require_text(document["generated_at"], where + ".generated_at")
+    require_text(document["cli_version"], where + ".cli_version")
+
+
+def _validate_capabilities(candidate: dict[str, Any], where: str) -> None:
+    """SPEC-046-R004: six nullable booleans, one nullable number, three nullable
+    strings. `false` is a claim that the capability is absent, so a `false`
+    standing in for an unknown value is exactly what this rejects."""
+    location = where + ".capabilities"
+    capabilities = assert_exact_object(candidate["capabilities"], CAPABILITY_KEYS, location)
+    for field in (
+        "chat_completions", "streaming", "tool_call_passthrough",
+        "structured_output_passthrough", "json_mode", "usage_reporting",
+    ):
+        require_nullable(capabilities[field], f"{location}.{field}", require_bool)
+    require_nullable(capabilities["max_context_tokens"], location + ".max_context_tokens", require_number)
+    for field in ("quantization", "family", "runtime_version"):
+        require_nullable(capabilities[field], f"{location}.{field}", require_text)
+
+
+def _validate_discovery(parsed: dict[str, Any], location: str) -> None:
+    assert_exact_object(parsed, DISCOVERY_ENVELOPE_KEYS, location)
+    _validate_envelope_header(parsed, location)
+    require_int(parsed["projection_sequence"], location + ".projection_sequence")
+    require_enum_list(parsed["warnings"], WARNING_CODES, location + ".warnings")
+    for index, adapter in enumerate(require_list(parsed["adapters"], location + ".adapters")):
+        where = f"{location} adapters[{index}]"
+        assert_exact_object(adapter, DISCOVERY_ADAPTER_KEYS, where)
+        require_enum(adapter["runtime_source"], RUNTIME_SOURCES, where + ".runtime_source")
+        require_enum(adapter["status"], ADAPTER_STATUSES, where + ".status")
+        require_nullable(
+            adapter["origin_class"], where + ".origin_class",
+            lambda value, at: require_enum(value, ORIGIN_CLASSES, at),
+        )
+        require_enum_list(adapter["warning_codes"], WARNING_CODES, where + ".warning_codes")
+    for index, candidate in enumerate(require_list(parsed["candidates"], location + ".candidates")):
+        where = f"{location} candidates[{index}]"
+        assert_exact_object(candidate, DISCOVERY_CANDIDATE_KEYS, where)
+        require_text(candidate["candidate_id"], where + ".candidate_id")
+        require_enum(candidate["runtime_source"], RUNTIME_SOURCES, where + ".runtime_source")
+        require_text(candidate["display_name"], where + ".display_name")
+        require_text(candidate["served_model_ref"], where + ".served_model_ref")
+        require_nullable(candidate["catalog_model_key"], where + ".catalog_model_key", require_text)
+        require_enum(candidate["identity_state"], IDENTITY_STATES, where + ".identity_state")
+        require_enum(candidate["locality"], LOCALITIES, where + ".locality")
+        require_nullable(candidate["estimated_gb"], where + ".estimated_gb", require_number)
+        require_nullable(
+            candidate["context_window_tokens"], where + ".context_window_tokens", require_int
+        )
+        _validate_capabilities(candidate, where)
+        require_enum(candidate["readiness_state"], READINESS_STATES, where + ".readiness_state")
+        require_enum(candidate["fit_state"], FIT_STATES, where + ".fit_state")
+        require_enum(candidate["evaluation_state"], EVALUATION_STATES, where + ".evaluation_state")
+        _require_admission_pair(candidate, "admission_state", "admission_state_source", where)
+        _validate_guidance(candidate, where)
+        require_enum_list(candidate["warning_codes"], WARNING_CODES, where + ".warning_codes")
+
+
+def _validate_evaluation(parsed: dict[str, Any], location: str) -> None:
+    assert_exact_object(parsed, EVALUATION_ENVELOPE_KEYS, location)
+    _validate_envelope_header(parsed, location)
+    require_text(parsed["candidate_id"], location + ".candidate_id")
+    require_enum(parsed["runtime_source"], EVALUATION_RUNTIME_SOURCES, location + ".runtime_source")
+    require_text(parsed["served_model_ref"], location + ".served_model_ref")
+    require_nullable(parsed["catalog_model_key"], location + ".catalog_model_key", require_text)
+    require_enum(
+        parsed["adapter_identity"], EVALUATION_ADAPTER_IDENTITIES, location + ".adapter_identity"
+    )
+    require_enum(parsed["health_result"], EVALUATION_HEALTH_RESULTS, location + ".health_result")
+    require_nullable(parsed["latency_ms"], location + ".latency_ms", require_int)
+    require_nullable(parsed["tokens_per_second"], location + ".tokens_per_second", require_number)
+    require_nullable(parsed["completion_tokens"], location + ".completion_tokens", require_int)
+    require_int(parsed["output_bytes"], location + ".output_bytes")
+    require_int(parsed["request_count"], location + ".request_count")
+    require_enum(
+        parsed["usage_reporting_source"], EVALUATION_USAGE_REPORTING_SOURCES,
+        location + ".usage_reporting_source",
+    )
+    results = require_object(parsed["capability_results"], location + ".capability_results")
+    for name, result in results.items():
+        where = f"{location}.capability_results[{name!r}]"
+        entry = assert_exact_object(result, EVALUATION_CAPABILITY_RESULT_KEYS, where)
+        require_enum(entry["result"], EVALUATION_CAPABILITY_RESULTS, where + ".result")
+        require_enum(entry["source"], EVALUATION_CAPABILITY_SOURCES, where + ".source")
+        require_nullable(entry["reason_code"], where + ".reason_code", require_text)
+    require_enum(
+        parsed["fit_estimate_source"], EVALUATION_FIT_ESTIMATE_SOURCES,
+        location + ".fit_estimate_source",
+    )
+    mutations = assert_exact_object(
+        parsed["mutation_summary"], EVALUATION_MUTATION_SUMMARY_KEYS,
+        location + ".mutation_summary",
+    )
+    # Every mutation flag is a hard SPEC-046-R006 claim; a missing or non-boolean
+    # value must not read as "no mutation".
+    for field in sorted(EVALUATION_MUTATION_SUMMARY_KEYS):
+        require_bool(mutations[field], f"{location}.mutation_summary.{field}")
+    hashes = assert_exact_object(
+        parsed["diagnostic_hashes"], EVALUATION_DIAGNOSTIC_HASH_KEYS,
+        location + ".diagnostic_hashes",
+    )
+    require_string(
+        hashes["prompt_sha256"], SHA256_RE, location + ".diagnostic_hashes.prompt_sha256"
+    )
+    require_nullable(
+        hashes["response_body_sha256"], location + ".diagnostic_hashes.response_body_sha256",
+        lambda value, at: require_string(value, SHA256_RE, at),
+    )
+    _validate_guidance(parsed, location)
+    require_bool(
+        parsed["offer_preconditions_appear_satisfied"],
+        location + ".offer_preconditions_appear_satisfied",
+    )
+    require_enum_list(parsed["warnings"], WARNING_CODES, location + ".warnings")
+
+
+def _validate_offer_dry_run(parsed: dict[str, Any], location: str) -> None:
+    assert_exact_object(parsed, OFFER_DRY_RUN_ENVELOPE_KEYS, location)
+    _validate_envelope_header(parsed, location)
+    require_text(parsed["candidate_id"], location + ".candidate_id")
+    require_text(parsed["served_model_ref"], location + ".served_model_ref")
+    require_nullable(parsed["catalog_model_key"], location + ".catalog_model_key", require_text)
+    require_bool(parsed["would_submit"], location + ".would_submit")
+    _require_admission_pair(
+        parsed, "likely_admission_state", "likely_admission_state_source", location
+    )
+    _validate_guidance(parsed, location)
+    require_nullable(parsed["reason_code"], location + ".reason_code", require_text)
+    require_enum_list(parsed["warnings"], WARNING_CODES, location + ".warnings")
+
+
+def _validate_admission_status(parsed: dict[str, Any], location: str) -> None:
+    assert_exact_object(parsed, ADMISSION_STATUS_ENVELOPE_KEYS, location)
+    _validate_envelope_header(parsed, location)
+    require_text(parsed["provider_id"], location + ".provider_id")
+    require_text(parsed["candidate_id"], location + ".candidate_id")
+    require_text(parsed["served_model_ref"], location + ".served_model_ref")
+    require_nullable(parsed["catalog_model_key"], location + ".catalog_model_key", require_text)
+    state, source = _require_admission_pair(
+        parsed, "admission_state", "admission_state_source", location
+    )
+    require_nullable(parsed["coordinator_event_id"], location + ".coordinator_event_id", require_text)
+    require_nullable(parsed["state_observed_at"], location + ".state_observed_at", require_text)
+    _validate_guidance(parsed, location)
+    next_states = require_enum_list(
+        parsed["allowed_next_states"], ADMISSION_STATES, location + ".allowed_next_states"
+    )
+    # SPEC-047-R002: empty for a local default that has not entered coordinator
+    # admission, and otherwise only edges SPEC-047-R001 actually allows.
+    if source == "local_default":
+        if next_states:
+            fail(
+                f"{location}.allowed_next_states must be empty for a local_default state"
+            )
+    else:
+        allowed = ADMISSION_ALLOWED_NEXT_STATES[state]
+        for index, next_state in enumerate(next_states):
+            if next_state not in allowed:
+                fail(
+                    f"{location}.allowed_next_states[{index}] {next_state!r} is not an "
+                    f"allowed transition from {state!r}"
+                )
+    require_enum_list(parsed["warnings"], WARNING_CODES, location + ".warnings")
+
+
+def _validate_admission_withdraw(parsed: dict[str, Any], location: str) -> None:
+    assert_exact_object(parsed, ADMISSION_WITHDRAW_ENVELOPE_KEYS, location)
+    _validate_envelope_header(parsed, location)
+    require_text(parsed["provider_id"], location + ".provider_id")
+    require_text(parsed["candidate_id"], location + ".candidate_id")
+    require_text(parsed["served_model_ref"], location + ".served_model_ref")
+    require_nullable(parsed["catalog_model_key"], location + ".catalog_model_key", require_text)
+    require_text(parsed["idempotency_key"], location + ".idempotency_key")
+    require_enum(parsed["reason_code"], WITHDRAW_REASON_CODES, location + ".reason_code")
+    # Both states are coordinator-derived by SPEC-047-R002, so neither may carry
+    # a CLI-only inventory state.
+    require_enum(
+        parsed["previous_admission_state"], COORDINATOR_ADMISSION_STATES,
+        location + ".previous_admission_state",
+    )
+    require_enum(
+        parsed["resulting_admission_state"], COORDINATOR_ADMISSION_STATES,
+        location + ".resulting_admission_state",
+    )
+    require_text(parsed["coordinator_event_id"], location + ".coordinator_event_id")
+    require_text(parsed["accepted_at"], location + ".accepted_at")
+    _validate_guidance(parsed, location)
+    require_enum_list(parsed["warnings"], WARNING_CODES, location + ".warnings")
+
+
+def _validate_catalog_economics(parsed: dict[str, Any], location: str) -> None:
+    assert_exact_object(parsed, CATALOG_ECONOMICS_ENVELOPE_KEYS, location)
+    require_text(parsed["schema"], location + ".schema")
+    require_text(parsed["generated_at"], location + ".generated_at")
+    require_int(parsed["projection_sequence"], location + ".projection_sequence")
+    assert_exact_object(parsed["source"], CATALOG_ECONOMICS_SOURCE_KEYS, location + ".source")
+    require_list(parsed["warnings"], location + ".warnings")
+    for index, row in enumerate(require_list(parsed["rows"], location + ".rows")):
+        where = f"{location} rows[{index}]"
+        assert_exact_object(row, CATALOG_ECONOMICS_ROW_KEYS, where)
+        require_text(row["model_key"], where + ".model_key")
+        require_text(row["served_model_id"], where + ".served_model_id")
+        require_text(row["display_model_id"], where + ".display_model_id")
+        require_nullable(row["action_model_id"], where + ".action_model_id", require_text)
+        require_bool(row["is_current"], where + ".is_current")
+        require_bool(row["weights_present_locally"], where + ".weights_present_locally")
+        require_text(row["runtime_state"], where + ".runtime_state")
+        require_nullable(row["estimated_gb"], where + ".estimated_gb", require_number)
+        require_enum(row["fit"], FIT_STATES, where + ".fit")
+        require_nullable(row["disabled_reason"], where + ".disabled_reason", require_text)
+        require_list(row["warning_codes"], where + ".warning_codes")
+        admission = assert_exact_object(
+            row["admission"], CATALOG_ECONOMICS_ADMISSION_KEYS, where + ".admission"
+        )
+        _require_admission_pair(admission, "state", "source", where + ".admission")
+        require_bool(
+            admission["catalog_economics_permitted"],
+            where + ".admission.catalog_economics_permitted",
+        )
+        require_bool(admission["settlement_capable"], where + ".admission.settlement_capable")
+        require_nullable(
+            admission["coordinator_event_id"], where + ".admission.coordinator_event_id", require_text
+        )
+        require_nullable(
+            admission["state_observed_at"], where + ".admission.state_observed_at", require_text
+        )
+        # Money fields. A string or boolean here would read as a rate.
+        for field in (
+            "prompt_rate_usd_per_million_tokens", "completion_rate_usd_per_million_tokens",
+            "provider_prompt_payout_usd_per_million_tokens",
+            "provider_completion_payout_usd_per_million_tokens", "demand_weight",
+            "supply_deficit_score",
+        ):
+            require_nullable(row[field], f"{where}.{field}", require_number)
+        for field in ("provider_share_bps", "demand_rank", "ready_provider_count"):
+            require_nullable(row[field], f"{where}.{field}", require_int)
+        for field in ("rate_card_version", "rate_card_generated_at", "rate_card_key"):
+            require_nullable(row[field], f"{where}.{field}", require_text)
+        require_text(row["rate_source"], where + ".rate_source")
+        require_text(row["economics_state"], where + ".economics_state")
+        for field in CATALOG_ECONOMICS_ACTION_FIELDS:
+            action = assert_exact_object(
+                row[field], CATALOG_ECONOMICS_ACTION_KEYS, f"{where}.{field}"
+            )
+            require_bool(action["available"], f"{where}.{field}.available")
+            require_bool(action["requires_confirmation"], f"{where}.{field}.requires_confirmation")
+            for nullable_text in ("transaction_kind", "transaction_id", "unavailable_reason"):
+                require_nullable(
+                    action[nullable_text], f"{where}.{field}.{nullable_text}", require_text
+                )
+            for nullable_int in ("action_timeout_seconds", "estimated_bytes"):
+                require_nullable(
+                    action[nullable_int], f"{where}.{field}.{nullable_int}", require_int
+                )
 
 
 def validate_captured_cli_document(schema: Any, parsed: Any, location: str = "$") -> None:
@@ -673,38 +1195,25 @@ def validate_captured_cli_document(schema: Any, parsed: Any, location: str = "$"
     driver-produced or hand-authored -- is complete before its bytes are hashed.
     An unrecognised schema fails closed: a document nobody enumerated cannot be
     known to be complete, so it may not back a signed step.
+
+    "Complete" means the exact key set AND the values: R4 showed that key-set
+    validation alone accepts `identity_state: declared_local`, capability results
+    as strings, and `next_action: serve_traffic` -- none of which the CLI can
+    emit -- so each schema below also checks wire types, nullability, the closed
+    enums its spec defines, and the state/source cross-field rules.
     """
     if schema == "provider_byom_discovery.v1":
-        assert_exact_object(parsed, DISCOVERY_ENVELOPE_KEYS, location)
-        for index, adapter in enumerate(require_list(parsed["adapters"], location + ".adapters")):
-            assert_exact_object(adapter, DISCOVERY_ADAPTER_KEYS, f"{location} adapters[{index}]")
-        for index, candidate in enumerate(require_list(parsed["candidates"], location + ".candidates")):
-            where = f"{location} candidates[{index}]"
-            assert_exact_object(candidate, DISCOVERY_CANDIDATE_KEYS, where)
-            assert_exact_object(candidate["capabilities"], CAPABILITY_KEYS, where + ".capabilities")
-            _validate_guidance(candidate, where)
+        _validate_discovery(parsed, location)
     elif schema == "provider_byom_evaluation.v1":
-        assert_exact_object(parsed, EVALUATION_ENVELOPE_KEYS, location)
-        assert_exact_object(
-            parsed["mutation_summary"], EVALUATION_MUTATION_SUMMARY_KEYS,
-            location + ".mutation_summary",
-        )
-        _validate_guidance(parsed, location)
+        _validate_evaluation(parsed, location)
     elif schema == "model_admission_offer_dry_run.v1":
-        assert_exact_object(parsed, OFFER_DRY_RUN_ENVELOPE_KEYS, location)
-        _validate_guidance(parsed, location)
+        _validate_offer_dry_run(parsed, location)
     elif schema == "model_admission_status.v1":
-        assert_exact_object(parsed, ADMISSION_STATUS_ENVELOPE_KEYS, location)
-        _validate_guidance(parsed, location)
+        _validate_admission_status(parsed, location)
     elif schema == "model_admission_withdraw.v1":
-        assert_exact_object(parsed, ADMISSION_WITHDRAW_ENVELOPE_KEYS, location)
-        _validate_guidance(parsed, location)
+        _validate_admission_withdraw(parsed, location)
     elif schema == "model_catalog_economics.v1":
-        assert_exact_object(parsed, CATALOG_ECONOMICS_ENVELOPE_KEYS, location)
-        for index, row in enumerate(require_list(parsed["rows"], location + ".rows")):
-            where = f"{location} rows[{index}]"
-            assert_exact_object(row, CATALOG_ECONOMICS_ROW_KEYS, where)
-            assert_exact_object(row["admission"], CATALOG_ECONOMICS_ADMISSION_KEYS, where + ".admission")
+        _validate_catalog_economics(parsed, location)
     else:
         fail(f"captured document {location} has an unvalidated schema: {schema!r}")
 
@@ -1010,6 +1519,14 @@ def build_evidence(
     require_exact_keys(harness, {"name", "status"}, {"name", "status"}, "harness")
     harness_name = require_string(harness.get("name"), REPO_RELATIVE_FILE_RE, "harness.name")
     repository_relative(root, harness_name, "harness.name")
+    # Each journey has exactly one harness that can produce its run manifest.
+    # "Some existing repository file" was not provenance: it let a discovery
+    # manifest be signed under the admission harness's identity, and vice versa.
+    if harness_name != contract.expected_harness_name:
+        fail(
+            f"harness.name must equal {contract.expected_harness_name!r} for "
+            f"{contract.journey_id}, not {harness_name!r}"
+        )
     if harness.get("status") != "pass":
         fail("harness.status must equal 'pass'")
 

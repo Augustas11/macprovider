@@ -2,24 +2,26 @@
   "admission_state": "settlement_capable",
   "admission_state_source": "coordinator",
   "allowed_next_states": [
-    "revoked",
-    "withdrawn"
+    "network_admitted_unsettled",
+    "catalog_priced",
+    "withdrawn",
+    "revoked"
   ],
-  "candidate_id": "byom_fixture_candidate",
+  "candidate_id": "byom_bcofgbqro5wyftt7pfi6w3wqf5klaewofxk2tgncqofrcli2yljq",
   "catalog_model_key": "qwen3-8b",
-  "cli_version": "0.0.0-fixture",
-  "coordinator_event_id": "admission_event_fixture",
-  "generated_at": "2026-09-08T00:00:00Z",
+  "cli_version": "test",
+  "coordinator_event_id": "event_test",
+  "generated_at": "2027-01-15T08:00:00Z",
   "provider_guidance": {
     "earning_path_class": "settlement_capable",
-    "next_action": "serve_traffic",
+    "next_action": "maintain_runtime",
     "state_label_key": "byom.admission.settlement_capable",
     "state_meaning_key": "byom.admission.earning",
-    "transition_reason_code": "route_snapshot_verified"
+    "transition_reason_code": null
   },
-  "provider_id": "provider-byom-fixture",
+  "provider_id": "provider-byom-e2e-ca6dc538cbef3c38",
   "schema": "model_admission_status.v1",
-  "served_model_ref": "mlx-community/Tiny-1B-4bit",
-  "state_observed_at": "2026-09-08T00:00:00Z",
+  "served_model_ref": "ollama:qwen3-8b",
+  "state_observed_at": "2027-01-15T08:00:00Z",
   "warnings": []
 }

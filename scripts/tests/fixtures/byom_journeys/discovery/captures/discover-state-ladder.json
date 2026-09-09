@@ -1,19 +1,19 @@
 {
   "adapters": [
     {
-      "origin_class": "local_filesystem",
+      "origin_class": null,
       "runtime_source": "mlx_cache",
       "status": "ok",
       "warning_codes": []
     },
     {
-      "origin_class": "loopback",
+      "origin_class": "loopback_http",
       "runtime_source": "ollama_loopback",
       "status": "ok",
       "warning_codes": []
     },
     {
-      "origin_class": "loopback",
+      "origin_class": "loopback_http",
       "runtime_source": "openai_compatible_loopback",
       "status": "ok",
       "warning_codes": []
@@ -21,9 +21,87 @@
   ],
   "candidates": [
     {
+      "admission_state": "offerable",
+      "admission_state_source": "local_default",
+      "candidate_id": "byom_4xgiy2qjoayzyeepb7np7xdel37m2avdmu6hwfhe2jlwzu2b77kq",
+      "capabilities": {
+        "chat_completions": null,
+        "family": null,
+        "json_mode": null,
+        "max_context_tokens": 4096,
+        "quantization": "q4",
+        "runtime_version": null,
+        "streaming": null,
+        "structured_output_passthrough": null,
+        "tool_call_passthrough": null,
+        "usage_reporting": null
+      },
+      "catalog_model_key": null,
+      "context_window_tokens": 4096,
+      "display_name": "mlx-community/Tiny-1B-4bit",
+      "estimated_gb": 1,
+      "evaluation_state": "not_evaluated",
+      "fit_state": "fits",
+      "identity_state": "runtime_reported",
+      "locality": "local_artifact",
+      "provider_guidance": {
+        "earning_path_class": "local_inventory_only",
+        "next_action": "evaluate",
+        "state_label_key": "byom.local.offerable",
+        "state_meaning_key": "byom.local.offerable_not_earning",
+        "transition_reason_code": null
+      },
+      "readiness_state": "ready",
+      "runtime_source": "mlx_cache",
+      "served_model_ref": "mlx-community/Tiny-1B-4bit",
+      "warning_codes": [
+        "capability_unevaluated",
+        "evaluation_required"
+      ]
+    },
+    {
+      "admission_state": "offerable",
+      "admission_state_source": "local_default",
+      "candidate_id": "byom_ma54n3hvotbe2c7dkqf6or7s3i5kxlyb7xndgst3qk5cxh7kurda",
+      "capabilities": {
+        "chat_completions": true,
+        "family": "llama",
+        "json_mode": null,
+        "max_context_tokens": null,
+        "quantization": "Q4_0",
+        "runtime_version": null,
+        "streaming": null,
+        "structured_output_passthrough": null,
+        "tool_call_passthrough": null,
+        "usage_reporting": null
+      },
+      "catalog_model_key": null,
+      "context_window_tokens": null,
+      "display_name": "tiny-ollama-1b-q4",
+      "estimated_gb": 1,
+      "evaluation_state": "not_evaluated",
+      "fit_state": "fits",
+      "identity_state": "runtime_reported",
+      "locality": "loopback_runtime",
+      "provider_guidance": {
+        "earning_path_class": "local_inventory_only",
+        "next_action": "evaluate",
+        "state_label_key": "byom.local.offerable",
+        "state_meaning_key": "byom.local.offerable_not_earning",
+        "transition_reason_code": null
+      },
+      "readiness_state": "ready",
+      "runtime_source": "ollama_loopback",
+      "served_model_ref": "ollama:tiny-ollama-1b-q4",
+      "warning_codes": [
+        "capability_unevaluated",
+        "evaluation_required"
+      ]
+    },
+    {
       "admission_state": "local_only",
       "admission_state_source": "local_default",
-      "candidate_id": "byom_fixture_candidate",
+      "candidate_id": "byom_c6bidtyyoqnlutdfwflcoaq22bbnw6udi343rl64c4wooqumoshq",
       "capabilities": {
         "chat_completions": null,
         "family": null,
@@ -38,7 +116,7 @@
       },
       "catalog_model_key": null,
       "context_window_tokens": null,
-      "display_name": "opaque endpoint model",
+      "display_name": "opaque-mini-1b",
       "estimated_gb": null,
       "evaluation_state": "not_evaluated",
       "fit_state": "unknown",
@@ -48,94 +126,24 @@
         "earning_path_class": "local_inventory_only",
         "next_action": "evaluate",
         "state_label_key": "byom.local.local_only",
-        "state_meaning_key": "byom.local.local_only_not_earning",
+        "state_meaning_key": "byom.local.opaque_endpoint_not_earning",
         "transition_reason_code": "capability_unevaluated"
       },
       "readiness_state": "ready",
       "runtime_source": "openai_compatible_loopback",
       "served_model_ref": "openai_compatible:opaque-mini-1b",
       "warning_codes": [
-        "capability_unevaluated"
-      ]
-    },
-    {
-      "admission_state": "offerable",
-      "admission_state_source": "local_default",
-      "candidate_id": "byom_fixture_candidate_offerable",
-      "capabilities": {
-        "chat_completions": true,
-        "family": null,
-        "json_mode": null,
-        "max_context_tokens": null,
-        "quantization": null,
-        "runtime_version": null,
-        "streaming": true,
-        "structured_output_passthrough": null,
-        "tool_call_passthrough": null,
-        "usage_reporting": true
-      },
-      "catalog_model_key": null,
-      "context_window_tokens": 4096,
-      "display_name": "tiny mlx 1b 4bit",
-      "estimated_gb": 1.2,
-      "evaluation_state": "evaluated",
-      "fit_state": "fits",
-      "identity_state": "declared_local",
-      "locality": "local_weights",
-      "provider_guidance": {
-        "earning_path_class": "not_earning_yet_catalog_or_receipt_path_exists",
-        "next_action": "submit_offer",
-        "state_label_key": "byom.local.offerable",
-        "state_meaning_key": "byom.local.offerable_not_earning",
-        "transition_reason_code": "evaluation_passed"
-      },
-      "readiness_state": "ready",
-      "runtime_source": "mlx_cache",
-      "served_model_ref": "mlx-community/Tiny-1B-4bit",
-      "warning_codes": []
-    },
-    {
-      "admission_state": "not_offered",
-      "admission_state_source": "local_default",
-      "candidate_id": "byom_fixture_candidate_not_offered",
-      "capabilities": {
-        "chat_completions": true,
-        "family": null,
-        "json_mode": null,
-        "max_context_tokens": null,
-        "quantization": null,
-        "runtime_version": null,
-        "streaming": true,
-        "structured_output_passthrough": null,
-        "tool_call_passthrough": null,
-        "usage_reporting": true
-      },
-      "catalog_model_key": null,
-      "context_window_tokens": 4096,
-      "display_name": "tiny ollama 1b q4",
-      "estimated_gb": 1.2,
-      "evaluation_state": "evaluated",
-      "fit_state": "fits",
-      "identity_state": "declared_local",
-      "locality": "local_weights",
-      "provider_guidance": {
-        "earning_path_class": "no_earning_path_in_v0_1",
-        "next_action": "configure_coordinator",
-        "state_label_key": "byom.local.not_offered",
-        "state_meaning_key": "byom.local.not_offered_not_earning",
-        "transition_reason_code": "coordinator_unconfigured"
-      },
-      "readiness_state": "ready",
-      "runtime_source": "ollama_loopback",
-      "served_model_ref": "ollama:tiny-ollama-1b-q4",
-      "warning_codes": [
-        "coordinator_unconfigured"
+        "capability_unevaluated",
+        "evaluation_required"
       ]
     }
   ],
-  "cli_version": "0.0.0-fixture",
-  "generated_at": "2026-09-08T00:00:00Z",
+  "cli_version": "1.8.123",
+  "generated_at": "2026-09-09T03:46:11.182Z",
   "projection_sequence": 1,
   "schema": "provider_byom_discovery.v1",
-  "warnings": []
+  "warnings": [
+    "capability_unevaluated",
+    "evaluation_required"
+  ]
 }

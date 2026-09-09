@@ -602,7 +602,11 @@ class ManifestBuilder:
     def __init__(self, out_dir, run_id, cli_version, evidence_mode=False):
         self.out_dir = out_dir
         self.captures = out_dir / "captures"
-        self.captures.mkdir(parents=True, exist_ok=True)
+        self.captures.mkdir(parents=True, mode=0o700, exist_ok=True)
+        # POSIX ignores `mode` for a directory that already exists, so say it
+        # outright: captures are operator-local inventory documents and the
+        # directory holding them stays user-private on a shared host (F7).
+        self.captures.chmod(0o700)
         self.run_id = run_id
         self.cli_version = cli_version
         self.evidence_mode = evidence_mode
@@ -635,6 +639,11 @@ class ManifestBuilder:
         validate_captured_document("captured document " + name, document)
         path = self.captures / (name + ".json")
         path.write_text(payload, encoding="utf-8")
+        # Created 0600 rather than umask-dependent: the document is
+        # redaction-clean, but it is still this operator's local model
+        # inventory, and a permissive default would publish it to every account
+        # on the host (F7).
+        path.chmod(0o600)
         return path
 
     def add_step(self, step_id, assertion, documents):
@@ -695,6 +704,7 @@ class ManifestBuilder:
         path = self.out_dir / name
         temporary = self.out_dir / ("." + name + ".tmp")
         temporary.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+        temporary.chmod(0o600)
         os.replace(str(temporary), str(path))
         return path
 
@@ -707,7 +717,8 @@ def prepare_out_dir(out_dir):
     leave that stale pass manifest sitting there, consumable, while the run that
     actually just happened failed. Operator data is never deleted here.
     """
-    if out_dir.exists():
+    existed = out_dir.exists()
+    if existed:
         assert_true(out_dir.is_dir(), "--out must be a directory: " + str(out_dir))
         assert_true(
             not any(out_dir.iterdir()),
@@ -715,21 +726,40 @@ def prepare_out_dir(out_dir):
             "hold a stale run manifest",
         )
     out_dir.mkdir(parents=True, mode=0o700, exist_ok=True)
+    if existed:
+        # POSIX applies `mode` only when mkdir actually creates the directory, so
+        # an operator's pre-existing world-readable `--out` would have stayed
+        # world-readable and published every capture written into it. The
+        # directory is empty, so narrowing it destroys nothing.
+        out_dir.chmod(0o700)
     return out_dir
 
 
 def redaction_review(transcript, capture_dir, forbidden):
     """Step-08: no origin, port, local path, prompt or completion text anywhere in
-    the CLI's stdout, stderr, or the captured JSON documents."""
+    the CLI's stdout, stderr, or the captured JSON documents.
+
+    `forbidden` is a list of `(category, value)` pairs. The failure names the
+    category and the pair's index and NOTHING ELSE: the forbidden set is exactly
+    the origins, absolute paths, probe prompt, and completion marker this step
+    exists to keep out of the operator's terminal, and the top-level handler
+    prints the raised exception to stderr. Echoing even a prefix of the leaked
+    value would make the detector break the invariant it detects (R4 LOW). The
+    category and index are enough to identify which needle matched.
+    """
     haystacks = list(transcript)
     for path in sorted(capture_dir.glob("*.json")):
         haystacks.append(path.read_text(encoding="utf-8"))
-    for needle in forbidden:
+    for index, (category, needle) in enumerate(forbidden):
         if not needle:
             continue
         for haystack in haystacks:
             if needle in haystack:
-                raise HarnessFailure("redaction review found leaked material: %r" % needle[:24])
+                raise HarnessFailure(
+                    "redaction review found leaked material of category %s (forbidden "
+                    "entry %d); the value is withheld from this diagnostic by design"
+                    % (category, index)
+                )
     return True
 
 
@@ -1284,16 +1314,25 @@ def main():
 
         # Step 08 - redaction review over every command's output and every capture.
         probe_prompt = json.loads(openai.state["chat_bodies"][0])["messages"][0]["content"]
+        # `(category, value)` pairs: a match reports only the category and the
+        # entry's index, never the value itself.
         forbidden = [
-            ollama.origin, openai.origin, broken.origin, coordinator.origin,
+            ("adapter_origin", ollama.origin),
+            ("adapter_origin", openai.origin),
+            ("adapter_origin", broken.origin),
+            ("coordinator_origin", coordinator.origin),
             # host:port rather than a bare port: a bare 5-digit number would
             # collide with digests and byte counts and make this scan flaky.
-            "127.0.0.1:%d" % ollama.port,
-            "127.0.0.1:%d" % openai.port,
-            "127.0.0.1:%d" % broken.port,
-            "127.0.0.1:%d" % coordinator.port,
-            str(temp_root), str(home), str(namespace), str(hf_cache),
-            probe_prompt, COMPLETION_MARKER,
+            ("loopback_host_port", "127.0.0.1:%d" % ollama.port),
+            ("loopback_host_port", "127.0.0.1:%d" % openai.port),
+            ("loopback_host_port", "127.0.0.1:%d" % broken.port),
+            ("loopback_host_port", "127.0.0.1:%d" % coordinator.port),
+            ("local_path", str(temp_root)),
+            ("local_path", str(home)),
+            ("local_path", str(namespace)),
+            ("local_path", str(hf_cache)),
+            ("probe_prompt", probe_prompt),
+            ("completion_marker", COMPLETION_MARKER),
         ]
         assert_true(
             redaction_review(runner.transcript, manifest.captures, forbidden),

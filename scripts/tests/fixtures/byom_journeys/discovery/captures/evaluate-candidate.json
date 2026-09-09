@@ -1,25 +1,49 @@
 {
-  "adapter_identity": "mlx_cache",
-  "candidate_id": "byom_fixture_candidate",
+  "adapter_identity": "openai_compatible_loopback",
+  "candidate_id": "byom_c6bidtyyoqnlutdfwflcoaq22bbnw6udi343rl64c4wooqumoshq",
   "capability_results": {
-    "chat_completions": "passed",
-    "json_mode": "not_supported",
-    "streaming": "passed",
-    "structured_output_passthrough": "not_supported",
-    "tool_call_passthrough": "not_supported",
-    "usage_reporting": "passed"
+    "chat_completions": {
+      "reason_code": null,
+      "result": "passed",
+      "source": "evaluation"
+    },
+    "json_mode": {
+      "reason_code": null,
+      "result": "not_tested",
+      "source": "not_evaluated"
+    },
+    "streaming": {
+      "reason_code": null,
+      "result": "not_tested",
+      "source": "not_evaluated"
+    },
+    "structured_output_passthrough": {
+      "reason_code": null,
+      "result": "not_tested",
+      "source": "not_evaluated"
+    },
+    "tool_call_passthrough": {
+      "reason_code": null,
+      "result": "not_tested",
+      "source": "not_evaluated"
+    },
+    "usage_reporting": {
+      "reason_code": null,
+      "result": "passed",
+      "source": "runtime_reported"
+    }
   },
   "catalog_model_key": null,
-  "cli_version": "0.0.0-fixture",
-  "completion_tokens": 4,
+  "cli_version": "1.8.123",
+  "completion_tokens": 2,
   "diagnostic_hashes": {
-    "completion_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-    "prompt_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    "prompt_sha256": "13a60ffccf3f63064f0589c50606be1f0668e4409008d8ef2d23aaa8ef345cf5",
+    "response_body_sha256": "68040dbec65f3af8db4a0df81eda9ef1965f31346c808ebd69cf46322605c11c"
   },
-  "fit_estimate_source": "runtime_reported",
-  "generated_at": "2026-09-08T00:00:00Z",
+  "fit_estimate_source": "discovery_fit_state",
+  "generated_at": "2026-09-09T03:46:10.954Z",
   "health_result": "passed",
-  "latency_ms": 12,
+  "latency_ms": 1,
   "mutation_summary": {
     "coordinator_state_mutated": false,
     "downloads_started": false,
@@ -28,20 +52,20 @@
     "runtime_started": false,
     "temporary_files_created": false
   },
-  "offer_preconditions_appear_satisfied": true,
-  "output_bytes": 128,
+  "offer_preconditions_appear_satisfied": false,
+  "output_bytes": 235,
   "provider_guidance": {
-    "earning_path_class": "not_earning_yet_catalog_or_receipt_path_exists",
-    "next_action": "submit_offer",
-    "state_label_key": "byom.local.offerable",
-    "state_meaning_key": "byom.local.offerable_not_earning",
-    "transition_reason_code": "evaluation_passed"
+    "earning_path_class": "local_inventory_only",
+    "next_action": "offer_dry_run",
+    "state_label_key": "byom.evaluation.passed",
+    "state_meaning_key": "byom.evaluation.passed_not_earning",
+    "transition_reason_code": null
   },
   "request_count": 1,
-  "runtime_source": "mlx_cache",
+  "runtime_source": "openai_compatible_loopback",
   "schema": "provider_byom_evaluation.v1",
-  "served_model_ref": "mlx-community/Tiny-1B-4bit",
-  "tokens_per_second": 41.5,
+  "served_model_ref": "openai_compatible:opaque-mini-1b",
+  "tokens_per_second": 1357.82,
   "usage_reporting_source": "runtime_reported",
   "warnings": []
 }

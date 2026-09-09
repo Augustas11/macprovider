@@ -2,25 +2,29 @@
   "admission_state": "offer_submitted",
   "admission_state_source": "coordinator",
   "allowed_next_states": [
-    "sandbox_probe_only",
     "offer_rejected",
-    "withdrawn"
+    "sandbox_probe_only",
+    "network_visible_unpriced",
+    "network_admitted_unsettled",
+    "catalog_priced",
+    "withdrawn",
+    "revoked"
   ],
-  "candidate_id": "byom_fixture_candidate",
-  "catalog_model_key": null,
-  "cli_version": "0.0.0-fixture",
-  "coordinator_event_id": "admission_event_fixture",
-  "generated_at": "2026-09-08T00:00:00Z",
+  "candidate_id": "byom_bcofgbqro5wyftt7pfi6w3wqf5klaewofxk2tgncqofrcli2yljq",
+  "catalog_model_key": "qwen3-8b",
+  "cli_version": "test",
+  "coordinator_event_id": "event_test",
+  "generated_at": "2027-01-15T08:00:00Z",
   "provider_guidance": {
-    "earning_path_class": "not_earning_yet_catalog_or_receipt_path_exists",
-    "next_action": "await_coordinator_decision",
+    "earning_path_class": "no_earning_path_in_v0_1",
+    "next_action": "wait_for_coordinator",
     "state_label_key": "byom.admission.offer_submitted",
     "state_meaning_key": "byom.admission.not_earning",
-    "transition_reason_code": "offer_accepted"
+    "transition_reason_code": null
   },
-  "provider_id": "provider-byom-fixture",
+  "provider_id": "provider-byom-e2e-ca6dc538cbef3c38",
   "schema": "model_admission_status.v1",
-  "served_model_ref": "mlx-community/Tiny-1B-4bit",
-  "state_observed_at": "2026-09-08T00:00:00Z",
+  "served_model_ref": "ollama:qwen3-8b",
+  "state_observed_at": "2027-01-15T08:00:00Z",
   "warnings": []
 }

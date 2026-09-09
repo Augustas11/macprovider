@@ -59,8 +59,10 @@ PROVIDER_GUIDANCE = {
     "earning_path_class": "local_inventory_only",
 }
 # Complete closed documents: the driver validates every capture against the full
-# SPEC-046-R003/R004/R005 and SPEC-047-R002 field sets, so a partial fixture
-# would not be a valid capture to test with.
+# SPEC-046-R003/R004/R005 and SPEC-047-R002 field sets AND against their wire
+# types and closed enums (R4), so every value below is one the CLI can actually
+# emit -- a plausible-looking invention would not be a valid capture to test
+# with.
 DISCOVERY_DOCUMENT = {
     "schema": "provider_byom_discovery.v1",
     "generated_at": "2026-09-09T00:00:00Z",
@@ -69,7 +71,7 @@ DISCOVERY_DOCUMENT = {
     "adapters": [
         {
             "runtime_source": "openai_compatible_loopback",
-            "origin_class": "loopback",
+            "origin_class": "loopback_http",
             "status": "ok",
             "warning_codes": [],
         }
@@ -113,10 +115,12 @@ EVALUATION_DOCUMENT = {
     "output_bytes": 128,
     "request_count": 1,
     "usage_reporting_source": "runtime_reported",
-    "capability_results": {},
-    "fit_estimate_source": "runtime_reported",
+    "capability_results": {
+        "chat_completions": {"result": "passed", "source": "evaluation", "reason_code": None},
+    },
+    "fit_estimate_source": "discovery_fit_state",
     "mutation_summary": {key: False for key in sorted(evidence.EVALUATION_MUTATION_SUMMARY_KEYS)},
-    "diagnostic_hashes": {},
+    "diagnostic_hashes": {"prompt_sha256": "b" * 64, "response_body_sha256": "c" * 64},
     "provider_guidance": dict(PROVIDER_GUIDANCE),
     "offer_preconditions_appear_satisfied": False,
     "warnings": [],
@@ -360,9 +364,35 @@ class ManifestEmitterTests(unittest.TestCase):
     def test_redaction_review_detects_leaked_material(self) -> None:
         captures = self.temp / "captures"
         captures.mkdir(exist_ok=True)
-        self.assertTrue(driver.redaction_review(["clean output"], captures, ["http://127.0.0.1:1"]))
+        forbidden = [("adapter_origin", "http://127.0.0.1:1")]
+        self.assertTrue(driver.redaction_review(["clean output"], captures, forbidden))
         with self.assertRaises(driver.HarnessFailure):
-            driver.redaction_review(["saw http://127.0.0.1:1 once"], captures, ["http://127.0.0.1:1"])
+            driver.redaction_review(["saw http://127.0.0.1:1 once"], captures, forbidden)
+
+    def test_redaction_review_failure_does_not_re_emit_the_forbidden_value(self) -> None:
+        """R4 LOW: the top-level handler prints this exception to stderr, so a
+        diagnostic quoting the leaked value would break the very invariant the
+        step exists to enforce. The category and index locate it instead."""
+        captures = self.temp / "captures"
+        captures.mkdir(exist_ok=True)
+        secret = "http://127.0.0.1:54321/v1/chat/completions"
+        with self.assertRaises(driver.HarnessFailure) as caught:
+            driver.redaction_review(["leaked " + secret], captures, [("adapter_origin", secret)])
+        message = str(caught.exception)
+        self.assertNotIn(secret, message)
+        # Not even a prefix: the previous diagnostic embedded the first 24 bytes.
+        self.assertNotIn(secret[:24], message)
+        self.assertNotIn("127.0.0.1", message)
+        self.assertIn("adapter_origin", message)
+        self.assertIn("entry 0", message)
+
+    def test_captured_documents_are_written_user_private(self) -> None:
+        """R4 LOW: a capture is redaction-clean but is still this operator's
+        local model inventory, so neither it nor its directory may be left at
+        whatever the umask happened to allow."""
+        path = self.builder.capture("discovery", DISCOVERY_DOCUMENT)
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(path.parent.stat().st_mode & 0o777, 0o700)
 
     def test_captured_document_digest_survives_the_capture_contract(self) -> None:
         """The whole-document capture is what capture-time validation digests,
@@ -477,6 +507,16 @@ class OutputDirectoryTests(unittest.TestCase):
         out = self.temp / "empty"
         out.mkdir()
         driver.prepare_out_dir(out)
+
+    def test_existing_permissive_directory_is_narrowed(self) -> None:
+        """R4 LOW: POSIX applies `mkdir`'s mode only when it creates the
+        directory, so a pre-existing world-readable `--out` stayed
+        world-readable and published every capture written into it."""
+        out = self.temp / "permissive"
+        out.mkdir(mode=0o755)
+        out.chmod(0o755)
+        driver.prepare_out_dir(out)
+        self.assertEqual(out.stat().st_mode & 0o777, 0o700)
 
     def test_a_failed_rerun_cannot_reuse_a_stale_manifest_directory(self) -> None:
         """Regression for the stale-manifest finding: a directory that already
