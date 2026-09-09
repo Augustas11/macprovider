@@ -815,13 +815,27 @@ def validate_rate_card_source(data: bytes, label: str = "rate-card-source") -> d
     multiplier = value["global_multiplier_ppm"]
     if not isinstance(multiplier, int) or isinstance(multiplier, bool) or multiplier < 0:
         fail(f"{label}: global_multiplier_ppm must be an integer >= 0")
+    # `global_multiplier_ppm` is already bounded to the coordinator's int64
+    # domain by `strict_json`, which rejects any wider integer at parse time.
     rows = value["rows"]
     classes = value["classes"]
     if not isinstance(rows, dict) or not isinstance(classes, dict):
         fail(f"{label}: rows and classes must be objects")
     for key, row in rows.items():
-        if key != "default" and not MODEL_KEY.fullmatch(key):
-            fail(f"{label} row {key}: invalid model key")
+        if key != "default":
+            if not MODEL_KEY.fullmatch(key):
+                fail(f"{label} row {key}: invalid model key")
+            # §3.3.1 rule 3: `rows` maps NORMALIZED model keys. Billing resolves
+            # exact spelling before `NormalizeModelKey`, so an un-normalized
+            # explicit row would price one spelling of a model differently from
+            # its equivalents. Requiring every key to be its own normalization
+            # also makes two rows colliding under normalization unrepresentable.
+            normalized = normalize_model_key(key)
+            if normalized != key:
+                fail(
+                    f"{label} row {key}: must be the SPEC-005 normalized model key "
+                    f"({normalized!r}); billing resolves exact spelling first"
+                )
         _credit_row(row, f"{label} row {key}")
     for name, entry in classes.items():
         if name not in RATE_CLASSES:
@@ -851,15 +865,31 @@ def expand_rate_card(source_obj: dict, rate_classes: dict[str, str], candidate_o
     prices it, and adding a second spelling would change the published bytes.
     A declared `rate_class` whose class has no rates is therefore an error only
     when no explicit row resolves for that key.
+
+    A class row is materialised under `NormalizeModelKey(key)`, never under the
+    artifact-feed spelling: rule 4 requires the published and coordinator rows
+    to carry the same normalized key, and billing resolves exact spelling BEFORE
+    normalization, so a class row published under `vendor/model` would make
+    `model` and `vendor/model` — one model — resolve to different rows. Two
+    artifact keys that normalize to one key must declare one class; anything
+    else is an authoring conflict that fails closed rather than letting sort
+    order pick the price.
     """
+    explicit = source_obj["rows"]
     rows: dict[str, dict] = {}
-    for key in sorted(source_obj["rows"]):
-        rows[key] = dict(source_obj["rows"][key])
+    for key in sorted(explicit):
+        rows[key] = dict(explicit[key])
+    class_owner: dict[str, tuple[str, str]] = {}
     for key in sorted(rate_classes):
-        if key in rows and key != "default":
+        # Precedence is decided against the EXPLICIT rows only: a row this loop
+        # materialised for an earlier spelling of the same model is not an
+        # override, it is the collision the owner check below has to see.
+        if key in explicit and key != "default":
             continue
         normalized = normalize_model_key(key)
-        if normalized in rows and normalized != "default":
+        if normalized == "default":
+            fail(f"rate-card expansion: model key {key!r} normalizes to the reserved row 'default'")
+        if normalized in explicit:
             continue
         name = rate_classes[key]
         entry = source_obj["classes"].get(name)
@@ -869,7 +899,17 @@ def expand_rate_card(source_obj: dict, rate_classes: dict[str, str], candidate_o
                 "but the rate-card source has no rates for that class, and no explicit "
                 f"row resolves for it by exact key or NormalizeModelKey ({normalized!r})"
             )
-        rows[key] = dict(entry)
+        owner = class_owner.get(normalized)
+        if owner is not None:
+            if owner[1] != name:
+                fail(
+                    f"rate-card expansion: model keys {owner[0]!r} and {key!r} both normalize to "
+                    f"{normalized!r} but declare rate classes {owner[1]!r} and {name!r}; one "
+                    "normalized key prices one way"
+                )
+            continue
+        class_owner[normalized] = (key, name)
+        rows[normalized] = dict(entry)
     for row in rows.values():
         row["provider_share_bps"] = source_obj["provider_share_bps"]
         row["global_multiplier_ppm"] = source_obj["global_multiplier_ppm"]
@@ -1020,11 +1060,15 @@ def scaled_nonnegative_integer(raw: float, scale: int, label: str) -> int:
     if not math.isfinite(scaled):
         fail(f"{label}: {raw!r} scaled by {scale} is not finite")
     if scaled >= 2.0 ** 52:
-        return int(scaled)
-    truncated = math.floor(scaled)
-    if scaled - truncated >= 0.5:
-        return int(truncated) + 1
-    return int(truncated)
+        rounded = int(scaled)
+    else:
+        truncated = math.floor(scaled)
+        rounded = int(truncated) + 1 if scaled - truncated >= 0.5 else int(truncated)
+    if rounded > INT64_MAX:
+        # Go's float64 -> int64 conversion is implementation-defined out of
+        # range; a "parity" integer wider than int64 is not what billing holds.
+        fail(f"{label}: {raw!r} scaled by {scale} exceeds the coordinator int64 domain")
+    return rounded
 
 
 def check_rate_card_parity(rate_card_obj: dict, coordinator_text: str) -> None:
@@ -2842,7 +2886,30 @@ def published_artifact_feed(
     return resolve_artifact_feed(candidate, candidate_obj)
 
 
-def authoring_rate_classes(candidate: bytes, candidate_obj: dict) -> dict[str, str]:
+def published_feed_rate_classes(feed_path: pathlib.Path) -> dict[str, str] | None:
+    """The `rate_class` map bound by the PUBLISHED artifact feed, read from its
+    committed bytes — not re-derived from the source, which is the only way a
+    source-vs-published comparison can observe a disagreement.
+
+    Only the document's own structure is checked here: release binding
+    (`candidate_catalog_sha256`, `version`, `generated_at`) is `verify`'s job and
+    is legitimately stale between `restamp` and the `generate` that rewrites the
+    feed, which is exactly when `emit-coordinator-rate-card` is run.
+    """
+    if not feed_path.exists():
+        return None
+    label = feed_path.name
+    value = strict_json(feed_path.read_bytes(), label)
+    top = {
+        "version", "generated_at", "policy_version", "source", "release_id",
+        "candidate_catalog_sha256", "models",
+    }
+    exact_keys(value, top, top, label)
+    validate_artifact_models(value["models"], label, allow_unmeasured_size=False)
+    return artifact_rate_classes(value)
+
+
+def authoring_rate_classes() -> dict[str, str]:
     """The §3.3.1 `rate_class` map for AUTHORING-time projections of the rate card.
 
     `rate_class` is authored on `autotune-artifacts-source.json` and only reaches
@@ -2855,19 +2922,24 @@ def authoring_rate_classes(candidate: bytes, candidate_obj: dict) -> dict[str, s
     release; they are the wrong authority for projecting the config a not-yet-cut
     release needs.
 
-    So: published feed when one exists, the authored source when none does, and —
-    because `published_artifact_feed` re-derives the published bytes from the
-    source — an explicit equality when both exist, stated here rather than left
-    implicit in byte reproduction.
+    So: published feed when one exists, the authored source when none does, and
+    an equality between the two when both exist. The published side is read from
+    the committed feed BYTES: re-deriving it from the source would compare the
+    source with itself and could never see the source drift away from what the
+    release actually binds.
     """
-    _, artifact_obj = published_artifact_feed(candidate, candidate_obj, ARTIFACT_FEED_PATH)
+    published = published_feed_rate_classes(ARTIFACT_FEED_PATH)
     if not ARTIFACT_SOURCE_PATH.exists():
-        return artifact_rate_classes(artifact_obj) if artifact_obj is not None else {}
+        if published is not None:
+            fail(
+                f"generated drift: {ARTIFACT_FEED_NAME} is published but {ARTIFACT_SOURCE_PATH.name} is "
+                "missing; the published feed must be reproducible from named release inputs"
+            )
+        return {}
     source_obj = validate_artifact_source(ARTIFACT_SOURCE_PATH.read_bytes())
     authored = artifact_rate_classes({"models": source_obj["models"]})
-    if artifact_obj is None:
+    if published is None:
         return authored
-    published = artifact_rate_classes(artifact_obj)
     if authored != published:
         fail(
             f"rate-card: {ARTIFACT_SOURCE_PATH.name} declares rate classes {authored} but the "
@@ -3534,8 +3606,7 @@ def cmd_emit_coordinator_rate_card(output_path: pathlib.Path | None) -> None:
     cut until parity already holds.
     """
     candidate_obj = validate_candidate((CATALOG_DIR / "autotune-candidates.json").read_bytes())
-    candidate = canonical_bytes(candidate_obj)
-    rate_classes = authoring_rate_classes(candidate, candidate_obj)
+    rate_classes = authoring_rate_classes()
     rate_card_obj = validate_rate_card(resolve_rate_card(rate_classes, candidate_obj))
     block = coordinator_rate_card_yaml(rate_card_obj)
     if output_path is not None:
@@ -3543,6 +3614,57 @@ def cmd_emit_coordinator_rate_card(output_path: pathlib.Path | None) -> None:
         print(f"emit-coordinator-rate-card: wrote {len(rate_card_obj['rows'])} rows to {output_path}")
     else:
         print(block, end="")
+
+
+RENEWAL_CONTINUITY_FEEDS = ("autotune-candidates.json", "demand-rank.json", RATE_CARD_FEED_NAME)
+# The artifact feed carries its release binding in four fields; everything else
+# (`source`, `policy_version`, `models`) is catalog CONTENT a freshness renewal
+# must not change. `candidate_catalog_sha256` follows the restamped candidate
+# bytes, so it is release-derived too.
+RENEWAL_ARTIFACT_RELEASE_FIELDS = ("version", "release_id", "generated_at", "candidate_catalog_sha256")
+
+
+def feed_continuity_drift(incoming: pathlib.Path, live: pathlib.Path) -> list[str]:
+    """Freshness-only guard for `renew-autotune-static-feed.sh` (dates-only delta).
+
+    Returns the names of feeds whose CONTENT differs between the staged release
+    and the live one once release-derived fields are stripped. The artifact feed
+    is compared by presence AND content: a renewal may neither add, drop, nor
+    rewrite it — the first artifact-bound release and every model change are
+    deliberate catalog release cuts (`docs/runbooks/catalog-artifact-feed-release.md`),
+    never the scheduled freshness path. The under-lock recheck on Pearl mirrors
+    these rules inline (it has no checkout); keep the two in step.
+    """
+    drift: list[str] = []
+
+    def stripped(path: pathlib.Path, fields: tuple[str, ...]) -> str:
+        obj = strict_json(path.read_bytes(), str(path))
+        for field in fields:
+            obj.pop(field, None)
+        return json.dumps(obj, sort_keys=True)
+
+    for name in RENEWAL_CONTINUITY_FEEDS:
+        if stripped(incoming / name, ("version", "generated_at")) != stripped(live / name, ("version", "generated_at")):
+            drift.append(name)
+    incoming_feed = incoming / ARTIFACT_FEED_NAME
+    live_feed = live / ARTIFACT_FEED_NAME
+    if incoming_feed.exists() != live_feed.exists():
+        drift.append(ARTIFACT_FEED_NAME)
+    elif incoming_feed.exists() and stripped(incoming_feed, RENEWAL_ARTIFACT_RELEASE_FIELDS) != stripped(
+        live_feed, RENEWAL_ARTIFACT_RELEASE_FIELDS
+    ):
+        drift.append(ARTIFACT_FEED_NAME)
+    return drift
+
+
+def cmd_continuity_check(incoming: pathlib.Path, live: pathlib.Path) -> None:
+    drift = feed_continuity_drift(incoming, live)
+    if drift:
+        fail(
+            "content drift vs live feed in " + ", ".join(drift)
+            + " — renewal is freshness-only; a content change needs a reviewed catalog release"
+        )
+    print("continuity-check: dates-only delta confirmed")
 
 
 def cmd_status() -> None:
@@ -3710,6 +3832,16 @@ def main() -> int:
         "status",
         help="print the artifact-feed activation state and its outstanding prerequisites",
     )
+    continuity_parser = sub.add_parser(
+        "continuity-check",
+        help=(
+            "freshness-renewal guard: fail unless the staged release differs from the live "
+            "release only in release-derived fields (dates, release id, candidate digest); "
+            "the artifact feed must match by presence and content"
+        ),
+    )
+    continuity_parser.add_argument("--incoming", type=pathlib.Path, required=True)
+    continuity_parser.add_argument("--live", type=pathlib.Path, required=True)
     coordinator_parser = sub.add_parser(
         "emit-coordinator-rate-card",
         help="print the rewards.rate_card: block the published rate card requires",
@@ -3779,6 +3911,8 @@ def main() -> int:
             verify(args.previous_release_dir)
         elif args.command == "status":
             cmd_status()
+        elif args.command == "continuity-check":
+            cmd_continuity_check(args.incoming, args.live)
         elif args.command == "emit-coordinator-rate-card":
             cmd_emit_coordinator_rate_card(args.output)
         elif args.command == "verify-directory":

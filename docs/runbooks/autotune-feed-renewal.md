@@ -67,9 +67,11 @@ dry-run):
    `scripts/tests/test_catalog_artifact_feed.py`, run by
    `scripts/test-renew-autotune-static-feed-signed.sh`.
 3. `catalog-release.py generate` → canonical bytes + manifest + ledger, then
-   `resign-autotune-static.sh` signs the three feeds (Swift). `verify-directory`
+   `resign-autotune-static.sh` signs the three static feeds — four once the
+   release is artifact-bound (`autotune-artifacts.json`). `verify-directory`
    uses `OPENSSL_BIN` when set (CI sealed bottle).
-4. Assembles the 9-file release dir and gates it with
+4. Assembles the release dir (9 files; 11 once artifact-bound: the artifact
+   feed and its `.sig`) and gates it with
    `catalog-release.py verify-directory`.
 5. **Dry-run stops here.** With `--deploy`:
    - refuses to run if the signing-host clock is skewed >120s vs Pearl;

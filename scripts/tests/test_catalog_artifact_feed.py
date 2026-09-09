@@ -529,6 +529,67 @@ class RateCardSourceTest(unittest.TestCase):
             )
         self.assertIn("no rates for that class", str(caught.exception))
 
+    def test_source_rows_must_be_normalized_model_keys(self):
+        """§3.3.1 rule 3: `rows` maps NORMALIZED keys. Billing resolves exact
+        spelling before `NormalizeModelKey`, so an explicit row under an
+        un-normalized spelling would price one model two ways."""
+        source = json.loads(RATE_CARD_SOURCE_BYTES)
+        source["rows"]["nvidia/nemotron-3-nano-30b-a3b"] = dict(source["rows"]["nemotron-3-nano-30b-a3b"])
+        with self.assertRaises(catalog_release.CatalogError) as caught:
+            catalog_release.validate_rate_card_source(canonical(source))
+        self.assertIn("normalized model key", str(caught.exception))
+        self.assertIn("'nemotron-3-nano-30b-a3b'", str(caught.exception))
+
+    def test_class_expansion_materialises_under_the_normalized_key(self):
+        """§3.3.1 rule 4: the published and coordinator rows carry the SAME
+        normalized key, so a class-only artifact key whose spelling changes under
+        `NormalizeModelKey` publishes its row under the normalized spelling — the
+        one every equivalent served identifier resolves to — never the raw one."""
+        source = json.loads(RATE_CARD_SOURCE_BYTES)
+        del source["rows"]["nemotron-3-nano-30b-a3b"]
+        source["classes"]["class-30b-moe"] = {
+            "completion_rate_per_mtok": 5, "prompt_cache_hit_rate_per_mtok": 3, "prompt_rate_per_mtok": 4,
+        }
+        source = catalog_release.validate_rate_card_source(canonical(source))
+        expanded = json.loads(catalog_release.expand_rate_card(
+            source, {"nvidia/nemotron-3-nano-30b-a3b": "class-30b-moe"}, CANDIDATE_OBJ
+        ))["rows"]
+        self.assertNotIn("nvidia/nemotron-3-nano-30b-a3b", expanded)
+        self.assertEqual(expanded["nemotron-3-nano-30b-a3b"]["completion_rate_per_mtok"], 5)
+        self.assertEqual(
+            catalog_release.normalize_model_key("nvidia/nemotron-3-nano-30b-a3b"), "nemotron-3-nano-30b-a3b"
+        )
+
+    def test_conflicting_classes_under_one_normalized_key_fail_closed(self):
+        """Two artifact keys that are one model after normalization must declare
+        one class; otherwise sort order would silently pick the price."""
+        source = json.loads(RATE_CARD_SOURCE_BYTES)
+        del source["rows"]["qwen3-8b"]
+        source = catalog_release.validate_rate_card_source(canonical(source))
+        self.assertEqual(catalog_release.normalize_model_key("mlx-community/qwen3-8b-4bit"), "qwen3-8b")
+        with self.assertRaises(catalog_release.CatalogError) as caught:
+            catalog_release.expand_rate_card(
+                source, {"qwen3-8b": "class-8b", "mlx-community/qwen3-8b-4bit": "class-3b"}, CANDIDATE_OBJ
+            )
+        self.assertIn("both normalize to 'qwen3-8b'", str(caught.exception))
+        # The same class under both spellings is one row, published once.
+        expanded = json.loads(catalog_release.expand_rate_card(
+            source, {"qwen3-8b": "class-8b", "mlx-community/qwen3-8b-4bit": "class-8b"}, CANDIDATE_OBJ
+        ))["rows"]
+        self.assertNotIn("mlx-community/qwen3-8b-4bit", expanded)
+        self.assertEqual(expanded["qwen3-8b"], json.loads(RATE_CARD_BYTES)["rows"]["qwen3-8b"])
+
+    def test_global_multiplier_ppm_is_bounded_to_the_coordinator_int64_domain(self):
+        """The coordinator parses `rewards.global_multiplier` into an int64 ppm;
+        a wider source integer is rejected at parse time, before parity."""
+        source = json.loads(RATE_CARD_SOURCE_BYTES)
+        source["global_multiplier_ppm"] = 2 ** 63
+        with self.assertRaises(catalog_release.CatalogError) as caught:
+            catalog_release.validate_rate_card_source(canonical(source))
+        self.assertIn("64-bit", str(caught.exception))
+        source["global_multiplier_ppm"] = 2 ** 63 - 1
+        catalog_release.validate_rate_card_source(canonical(source))
+
     def test_published_schema_is_unchanged(self):
         """AC-CAT-8: no `classes` key, no per-row class field, §3.3 projection hash."""
         source = catalog_release.validate_rate_card_source(RATE_CARD_SOURCE_BYTES)
@@ -1263,6 +1324,17 @@ class RateGlobalsTest(unittest.TestCase):
     def setUp(self):
         self.rate_card = catalog_release.validate_rate_card(RATE_CARD_BYTES)
         self.coordinator = COORDINATOR_YAML.read_text()
+
+    def test_scaled_conversion_rejects_values_outside_the_int64_domain(self):
+        """Go's float64→int64 conversion is implementation-defined out of range,
+        so an unbounded Python integer is not a parity result there."""
+        with self.assertRaises(catalog_release.CatalogError) as caught:
+            catalog_release.scaled_nonnegative_integer(1e16, 1000000, "rewards.global_multiplier")
+        self.assertIn("int64", str(caught.exception))
+        self.assertEqual(
+            catalog_release.scaled_nonnegative_integer(9.0e12, 1000000, "rewards.global_multiplier"),
+            9000000000000000000,
+        )
 
     def test_scaled_conversion_matches_go_binary64_rounding(self):
         """Pin the release gate's conversion against `billing.ParseShareBps` /
@@ -2007,7 +2079,7 @@ class HermeticReleaseTest(unittest.TestCase):
                 (harness.catalog / "autotune-candidates.json").read_bytes()
             )
             candidate = catalog_release.canonical_bytes(candidate_obj)
-            rate_classes = catalog_release.authoring_rate_classes(candidate, candidate_obj)
+            rate_classes = catalog_release.authoring_rate_classes()
             self.assertEqual(rate_classes["qwen3-8b"], "class-8b")
             rate_card = catalog_release.validate_rate_card(
                 catalog_release.resolve_rate_card(rate_classes, candidate_obj)
@@ -2020,6 +2092,32 @@ class HermeticReleaseTest(unittest.TestCase):
                 rate_card,
                 "rewards:\n  global_multiplier: 1.0\n  provider_share: 0.90\n" + block,
             )
+
+    def test_emit_coordinator_rate_card_reads_published_classes_from_the_feed_bytes(self):
+        """Post-activation the source and the PUBLISHED feed must agree on
+        `rate_class`, and the published side has to come from the committed feed
+        bytes: re-deriving it from the source compares the source with itself
+        and can never observe the source drifting from what the release binds.
+        """
+        with self.harness() as harness:
+            harness.measure_sizes()
+            harness.bump("published-2026-09-20-activation-v1", "2026-09-20T00:00:00Z")
+            harness.cut(activate_artifact_feed=True)
+            published = catalog_release.published_feed_rate_classes(harness.catalog / "autotune-artifacts.json")
+            self.assertEqual(published["qwen3-8b"], "class-8b")
+            self.assertEqual(catalog_release.authoring_rate_classes(), published)
+
+            source_path = harness.catalog / "autotune-artifacts-source.json"
+            source = json.loads(source_path.read_text())
+            source["models"]["qwen3-8b"]["rate_class"] = "class-3b"
+            source_path.write_bytes(canonical(source))
+            with self.assertRaises(catalog_release.CatalogError) as caught:
+                catalog_release.cmd_emit_coordinator_rate_card(harness.root / "rewards-block.yaml")
+            self.assertIn("must agree", str(caught.exception))
+            self.assertFalse((harness.root / "rewards-block.yaml").exists())
+            with self.assertRaises(catalog_release.CatalogError) as drift:
+                catalog_release.verify()
+            self.assertIn("generated drift", str(drift.exception))
 
     def test_five_feed_release_passes_the_compatibility_manifest_catalog_component(self):
         """AC-CAT-15 FUNCTIONALLY, not as a relation between two constants.
@@ -2215,6 +2313,56 @@ class RenewalFlowTest(unittest.TestCase):
             feed = json.loads((harness.catalog / "autotune-artifacts.json").read_text())
             self.assertEqual(feed["release_id"], release_id)
             self.assertEqual(feed["generated_at"], self.NOW)
+
+    def test_continuity_check_covers_the_artifact_feed_by_presence_and_content(self):
+        """The freshness-only deploy guard in `renew-autotune-static-feed.sh`. A
+        restamp changes only release-derived fields; a change confined to the
+        artifact feed's `models` — or the feed appearing or disappearing — is a
+        catalog release and must not ride the scheduled renewal."""
+        restamped = "published-2026-10-05-inband-provenance-v1"
+        with self.harness() as harness:
+            harness.measure_sizes()
+            harness.bump("published-2026-09-20-activation-v1", "2026-09-20T00:00:00Z")
+            harness.cut(activate_artifact_feed=True)
+            live = harness.stage(harness.root / "live")
+            incoming = harness.stage(harness.root / "incoming")
+            self.assertEqual(catalog_release.feed_continuity_drift(incoming, live), [])
+
+            def rewrite(name: str, **fields) -> dict:
+                path = incoming / name
+                obj = json.loads(path.read_text())
+                obj.update(fields)
+                path.write_bytes(catalog_release.canonical_bytes(obj))
+                return obj
+
+            rewrite("autotune-candidates.json", version=restamped, generated_at=self.NOW)
+            rewrite("demand-rank.json", version=restamped, generated_at=self.NOW)
+            rewrite("rate-card.json", generated_at=self.NOW)
+            feed = rewrite(
+                "autotune-artifacts.json", version=restamped, release_id=restamped,
+                generated_at=self.NOW, candidate_catalog_sha256="0" * 64,
+            )
+            self.assertEqual(catalog_release.feed_continuity_drift(incoming, live), [])
+            catalog_release.cmd_continuity_check(incoming, live)
+
+            feed["models"]["qwen3-8b"]["rate_class"] = "class-3b"
+            (incoming / "autotune-artifacts.json").write_bytes(catalog_release.canonical_bytes(feed))
+            self.assertEqual(catalog_release.feed_continuity_drift(incoming, live), ["autotune-artifacts.json"])
+            with self.assertRaises(catalog_release.CatalogError) as caught:
+                catalog_release.cmd_continuity_check(incoming, live)
+            self.assertIn("autotune-artifacts.json", str(caught.exception))
+            self.assertIn("freshness-only", str(caught.exception))
+
+            (incoming / "autotune-artifacts.json").unlink()
+            self.assertEqual(catalog_release.feed_continuity_drift(incoming, live), ["autotune-artifacts.json"])
+            (live / "autotune-artifacts.json").unlink()
+            self.assertEqual(catalog_release.feed_continuity_drift(incoming, live), [])
+            (live / "autotune-artifacts.json").write_bytes(catalog_release.canonical_bytes(feed))
+            self.assertEqual(catalog_release.feed_continuity_drift(incoming, live), ["autotune-artifacts.json"])
+
+            (live / "autotune-artifacts.json").unlink()
+            rewrite("autotune-candidates.json", policy_version="autotune-policy-v999")
+            self.assertEqual(catalog_release.feed_continuity_drift(incoming, live), ["autotune-candidates.json"])
 
     def test_restamping_the_generated_rate_card_instead_of_its_source_aborts(self):
         """The regression this replaced. `rate-card.json` is MATERIALISED from

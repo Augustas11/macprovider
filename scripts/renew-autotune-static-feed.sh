@@ -190,7 +190,9 @@ log "signing feed bytes with $KEY_ID (in-memory public-key derivation check; no 
   bash scripts/resign-autotune-static.sh )
 
 # ---------------------------------------------------------------------------
-# 2. Assemble the 9-file release directory and gate it with verify-directory.
+# 2. Assemble the release directory (9 files; 11 once the release is
+#    artifact-bound: + autotune-artifacts.json and its .sig) and gate it with
+#    verify-directory.
 # ---------------------------------------------------------------------------
 CANDIDATE_SHA="$(python3 -c 'import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$CAT_DIR/autotune-candidates.json")"
 RELEASE_DIRNAME="${RELEASE_ID}-${CANDIDATE_SHA:0:16}"
@@ -300,20 +302,28 @@ fi
 # feed content (version/generated_at stripped) against the live release; abort
 # if models, gates, or rate-card rows differ — a real catalog change must go
 # through a reviewed release, never this freshness cron.
+# The rules live in `catalog-release.py continuity-check` (feed_continuity_drift)
+# so they are unit-tested: candidate/demand/rate-card compared with version +
+# generated_at stripped, and the artifact feed compared by PRESENCE and by
+# content with its release-derived fields stripped. A renewal that would add,
+# drop, or rewrite the artifact feed is a catalog release, not a restamp.
 log "checking content continuity against the live release (freshness-only guard)"
+LIVE_SNAPSHOT="$STAGING/live-current"
+mkdir -p "$LIVE_SNAPSHOT"
 for name in autotune-candidates.json demand-rank.json rate-card.json; do
-  live="$(SSH "cat '$REMOTE_AUTOTUNE_DIR/current/$name'")" || fatal "cannot read live $name"
-  if ! printf '%s' "$live" | python3 -c '
-import json, sys
-def norm(o):
-    o = dict(o); o.pop("version", None); o.pop("generated_at", None); return json.dumps(o, sort_keys=True)
-new = json.load(open(sys.argv[1]))
-live = json.loads(sys.stdin.read())
-sys.exit(0 if norm(new) == norm(live) else 1)
-' "$RELEASE_STAGE/$name"; then
-    fatal "content drift in $name vs live feed — renewal is freshness-only; a content change needs a reviewed catalog release, not this cron"
-  fi
+  SSH "cat '$REMOTE_AUTOTUNE_DIR/current/$name'" > "$LIVE_SNAPSHOT/$name" || fatal "cannot read live $name"
 done
+live_artifact_state="$(SSH "if test -f '$REMOTE_AUTOTUNE_DIR/current/autotune-artifacts.json'; then echo present; else echo absent; fi")" \
+  || fatal "cannot determine whether the live release carries autotune-artifacts.json"
+case "$live_artifact_state" in
+  present)
+    SSH "cat '$REMOTE_AUTOTUNE_DIR/current/autotune-artifacts.json'" > "$LIVE_SNAPSHOT/autotune-artifacts.json" \
+      || fatal "cannot read live autotune-artifacts.json" ;;
+  absent) ;;
+  *) fatal "unexpected live artifact-feed state: $live_artifact_state" ;;
+esac
+( cd "$WORKTREE" && python3 scripts/catalog-release.py continuity-check --incoming "$RELEASE_STAGE" --live "$LIVE_SNAPSHOT" ) \
+  || fatal "content drift vs live feed — renewal is freshness-only; a content change needs a reviewed catalog release, not this cron"
 log "content continuity confirmed (dates-only delta)"
 
 # Rollback restores the EXACT prior state — current AND .previous-target — then
@@ -417,6 +427,20 @@ def norm(path):
 for name in ("autotune-candidates.json", "demand-rank.json", "rate-card.json"):
     if norm(incoming / name) != norm(current / name):
         raise SystemExit(f"content drift under lock in {name}")
+# Mirrors catalog-release.py feed_continuity_drift (Pearl has no checkout): the
+# artifact feed must agree by PRESENCE and, once release-derived fields are
+# stripped, by content. Keep in step with RENEWAL_ARTIFACT_RELEASE_FIELDS.
+artifact = "autotune-artifacts.json"
+if (incoming / artifact).exists() != (current / artifact).exists():
+    raise SystemExit(f"content drift under lock in {artifact} (presence)")
+if (incoming / artifact).exists():
+    def norm_artifact(path):
+        obj = json.loads(path.read_text())
+        for field in ("version", "release_id", "generated_at", "candidate_catalog_sha256"):
+            obj.pop(field, None)
+        return json.dumps(obj, sort_keys=True)
+    if norm_artifact(incoming / artifact) != norm_artifact(current / artifact):
+        raise SystemExit(f"content drift under lock in {artifact}")
 PY
 cd "$root/releases"
 chown -R root:macprovider "$incoming"

@@ -159,6 +159,12 @@ for requirement in (
     # in scripts/tests/test_catalog_artifact_feed.py, run below.
     "catalog-release.py restamp",
     "--generated-at",
+    # The freshness-only guard must cover the artifact feed once a release is
+    # artifact-bound: a model-set change confined to autotune-artifacts.json
+    # must not ride the scheduled restamp. The pre-deploy check delegates to the
+    # unit-tested generator rules; the under-lock recheck mirrors them inline.
+    "catalog-release.py continuity-check",
+    'live-current',
 ):
     if requirement not in script:
         raise SystemExit(f"renew script omits: {requirement}")
@@ -186,6 +192,16 @@ if "/etc/macprovider/keys" in script:
 remote = script.split("<<'REMOTE'", 1)[1].split("\nREMOTE", 1)[0]
 if remote.find("mutated=1") > remote.find('printf \'%s\\n\' "$prev" > "$root/.previous-target"'):
     raise SystemExit("mutated=1 must be set before writing .previous-target")
+under_lock = remote.split("Re-check dates-only continuity under the lock", 1)[1].split("\nPY", 1)[0]
+for requirement in (
+    'artifact = "autotune-artifacts.json"',
+    "(presence)",
+    '"candidate_catalog_sha256"',
+):
+    if requirement not in under_lock:
+        raise SystemExit(f"under-lock continuity recheck omits the artifact feed rule: {requirement}")
+if remote.find("(presence)") > remote.find('mv "$incoming" "$final"'):
+    raise SystemExit("artifact-feed continuity must be rechecked before the release directory is installed")
 if "rsync" in script and ".private.base64" in script.split("rsync", 1)[1][:800]:
     raise SystemExit("renew script must not rsync the private key to Pearl")
 if 'ln -sfn "$(cat .previous-target)"' in runbook:
