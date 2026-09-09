@@ -1,6 +1,8 @@
 package buyer
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"math"
 	"net/http"
@@ -70,18 +72,68 @@ type catalogArtifactsFeed struct {
 	Models                 map[string]catalogArtifactModel `json:"models"`
 }
 
+// presentString is an OPTIONAL string field of the closed §3.7.3 schema.
+// Go's decoder maps an absent field and a present JSON null to the same nil
+// pointer, but the generator's exact-key validation treats them differently:
+// absent is allowed, a present null is a wrong-typed field and fails closed.
+// Recording presence keeps the coordinator's closed schema equal to the
+// generator's, so a signed feed the generator would refuse is refused here too.
+type presentString struct {
+	present bool
+	value   string
+}
+
+func (v *presentString) UnmarshalJSON(raw []byte) error {
+	v.present = true
+	if bytes.Equal(raw, []byte("null")) {
+		return fmt.Errorf("optional string field must be a string when present, not null")
+	}
+	var value string
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return err
+	}
+	v.value = value
+	return nil
+}
+
+// requiredNullableString is a REQUIRED field whose value may be null
+// (`verified_at`: null unless the artifact is verified). Absence is a missing
+// required key, which only presence tracking can tell apart from null.
+type requiredNullableString struct {
+	present bool
+	null    bool
+	value   string
+}
+
+func (v *requiredNullableString) UnmarshalJSON(raw []byte) error {
+	v.present = true
+	if bytes.Equal(raw, []byte("null")) {
+		v.null = true
+		return nil
+	}
+	var value string
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return err
+	}
+	v.value = value
+	return nil
+}
+
 type catalogArtifactModel struct {
-	RateClass         *string                         `json:"rate_class,omitempty"`
+	RateClass         presentString                   `json:"rate_class"`
 	PrimaryArtifactID string                          `json:"primary_artifact_id"`
 	Artifacts         map[string]catalogArtifactEntry `json:"artifacts"`
 }
 
+// catalogArtifactSourceRef carries both §3.7.4 variants; the validator closes
+// the key set per `kind` by PRESENCE, so a null-valued field of the other
+// variant is rejected exactly as a non-null one is.
 type catalogArtifactSourceRef struct {
-	Kind       string  `json:"kind"`
-	RepoID     *string `json:"repo_id,omitempty"`
-	Revision   *string `json:"revision,omitempty"`
-	LibraryTag *string `json:"library_tag,omitempty"`
-	Digest     *string `json:"digest,omitempty"`
+	Kind       string        `json:"kind"`
+	RepoID     presentString `json:"repo_id"`
+	Revision   presentString `json:"revision"`
+	LibraryTag presentString `json:"library_tag"`
+	Digest     presentString `json:"digest"`
 }
 
 type catalogArtifactEntry struct {
@@ -94,8 +146,8 @@ type catalogArtifactEntry struct {
 	MinRAMGB              *float64                  `json:"min_ram_gb"`
 	AllowedRuntimeSources []string                  `json:"allowed_runtime_sources"`
 	VerificationStatus    string                    `json:"verification_status"`
-	VerifiedAt            *string                   `json:"verified_at"`
-	Notes                 *string                   `json:"notes,omitempty"`
+	VerifiedAt            requiredNullableString    `json:"verified_at"`
+	Notes                 presentString             `json:"notes"`
 }
 
 func (f AutotuneFeeds) catalogArtifactsEnabled() bool {
@@ -143,9 +195,9 @@ func validateCatalogArtifactModels(models map[string]catalogArtifactModel) error
 		if err := validateModelKey(key); err != nil {
 			return fmt.Errorf("model %q: %w", key, err)
 		}
-		if model.RateClass != nil {
-			if _, ok := artifactRateClasses[*model.RateClass]; !ok {
-				return fmt.Errorf("model %q rate_class %q is not a SPEC-023 §3.3.1 class", key, *model.RateClass)
+		if model.RateClass.present {
+			if _, ok := artifactRateClasses[model.RateClass.value]; !ok {
+				return fmt.Errorf("model %q rate_class %q is not a SPEC-023 §3.3.1 class", key, model.RateClass.value)
 			}
 		}
 		if len(model.Artifacts) == 0 {
@@ -213,17 +265,20 @@ func validateCatalogArtifactEntry(label string, entry catalogArtifactEntry) erro
 	if _, ok := artifactVerificationStatuses[entry.VerificationStatus]; !ok {
 		return fmt.Errorf("%s: invalid verification_status %q", label, entry.VerificationStatus)
 	}
+	if !entry.VerifiedAt.present {
+		return fmt.Errorf("%s: verified_at is required (null unless verification_status is verified)", label)
+	}
 	if entry.VerificationStatus == "verified" {
 		if _, loopback := distinct["openai_compatible_loopback"]; loopback {
 			return fmt.Errorf("%s: a verified artifact may not allow openai_compatible_loopback", label)
 		}
-		if entry.VerifiedAt == nil || !artifactFullDatePattern.MatchString(*entry.VerifiedAt) {
+		if entry.VerifiedAt.null || !artifactFullDatePattern.MatchString(entry.VerifiedAt.value) {
 			return fmt.Errorf("%s: verified_at must be an RFC3339 full-date when verified", label)
 		}
-		if _, err := time.Parse("2006-01-02", *entry.VerifiedAt); err != nil {
+		if _, err := time.Parse("2006-01-02", entry.VerifiedAt.value); err != nil {
 			return fmt.Errorf("%s: verified_at is not a real date", label)
 		}
-	} else if entry.VerifiedAt != nil {
+	} else if !entry.VerifiedAt.null {
 		return fmt.Errorf("%s: verified_at must be null unless verification_status is verified", label)
 	}
 	if entry.SourceRef == nil {
@@ -235,23 +290,23 @@ func validateCatalogArtifactEntry(label string, entry catalogArtifactEntry) erro
 	}
 	switch ref.Kind {
 	case "huggingface_revision":
-		if ref.LibraryTag != nil || ref.Digest != nil {
+		if ref.LibraryTag.present || ref.Digest.present {
 			return fmt.Errorf("%s: source_ref carries fields outside {kind, repo_id, revision}", label)
 		}
-		if ref.RepoID == nil || !modelIDPattern.MatchString(*ref.RepoID) {
+		if !ref.RepoID.present || !modelIDPattern.MatchString(ref.RepoID.value) {
 			return fmt.Errorf("%s: source_ref.repo_id must be a HuggingFace repo id", label)
 		}
-		if ref.Revision == nil || !lowerHex40Pattern.MatchString(*ref.Revision) {
+		if !ref.Revision.present || !lowerHex40Pattern.MatchString(ref.Revision.value) {
 			return fmt.Errorf("%s: source_ref.revision must be an immutable lowercase 40-hex commit", label)
 		}
 	default:
-		if ref.RepoID != nil || ref.Revision != nil {
+		if ref.RepoID.present || ref.Revision.present {
 			return fmt.Errorf("%s: source_ref carries fields outside {kind, library_tag, digest}", label)
 		}
-		if ref.LibraryTag == nil || strings.TrimSpace(*ref.LibraryTag) == "" {
+		if !ref.LibraryTag.present || strings.TrimSpace(ref.LibraryTag.value) == "" {
 			return fmt.Errorf("%s: source_ref.library_tag required", label)
 		}
-		if ref.Digest == nil || *ref.Digest != "sha256:"+entry.Hash {
+		if !ref.Digest.present || ref.Digest.value != "sha256:"+entry.Hash {
 			return fmt.Errorf("%s: gguf source_ref.digest must equal 'sha256:' + hash", label)
 		}
 	}
@@ -322,10 +377,10 @@ func requirePrimaryArtifactConsistency(models map[string]catalogArtifactModel, r
 		if row.ModelSHA256 == nil || primary.Hash != *row.ModelSHA256 {
 			return fmt.Errorf("autotune.catalog_artifacts model %q primary artifact hash does not equal the candidate model_sha256", key)
 		}
-		if primary.SourceRef == nil || primary.SourceRef.RepoID == nil || *primary.SourceRef.RepoID != row.ModelID {
+		if primary.SourceRef == nil || !primary.SourceRef.RepoID.present || primary.SourceRef.RepoID.value != row.ModelID {
 			return fmt.Errorf("autotune.catalog_artifacts model %q primary artifact repo_id does not equal the candidate model_id", key)
 		}
-		if row.ModelRevision == nil || primary.SourceRef.Revision == nil || *primary.SourceRef.Revision != *row.ModelRevision {
+		if row.ModelRevision == nil || !primary.SourceRef.Revision.present || primary.SourceRef.Revision.value != *row.ModelRevision {
 			return fmt.Errorf("autotune.catalog_artifacts model %q primary artifact revision does not equal the candidate model_revision", key)
 		}
 		if row.MinRAMGB == nil || primary.MinRAMGB == nil || *primary.MinRAMGB != float64(*row.MinRAMGB) {
@@ -334,7 +389,7 @@ func requirePrimaryArtifactConsistency(models map[string]catalogArtifactModel, r
 		if row.RuntimeStatus != "candidate" && primary.VerificationStatus != "verified" {
 			return fmt.Errorf("autotune.catalog_artifacts: %s candidate row %q requires a verified primary artifact", row.RuntimeStatus, key)
 		}
-		if row.RuntimeStatus == "recommendable" && model.RateClass == nil {
+		if row.RuntimeStatus == "recommendable" && !model.RateClass.present {
 			return fmt.Errorf("autotune.catalog_artifacts: recommendable candidate row %q must declare a rate_class", key)
 		}
 	}

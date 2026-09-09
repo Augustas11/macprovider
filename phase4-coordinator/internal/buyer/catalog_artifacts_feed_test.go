@@ -20,14 +20,35 @@ import (
 	"github.com/rs/zerolog"
 )
 
-// validCatalogArtifactsFeed is the SPEC-023 §3.7.3 feed whose single model
-// binds the `test-model` row of validCandidateFeed: same model_id, revision,
-// sha256, and min_ram_gb, primary verified, rate_class declared.
-func validCatalogArtifactsFeed(version, generatedAt, policyVersion, candidateSHA256 string) []byte {
+// artifactModelJSON is one §3.7.3 model entry binding the `test-model` row of
+// validCandidateFeed: same model_id, revision, sha256, and min_ram_gb, primary
+// verified, rate_class declared. `extraArtifacts` is spliced into `artifacts`
+// (leading comma included by the caller) so a test can add a secondary.
+func artifactModelJSON(extraArtifacts string) string {
+	return fmt.Sprintf(
+		`{"artifacts":{"mlx-4bit":{"allowed_runtime_sources":["mlx_cache"],"hash":%q,"hash_algorithm":"macprovider.snapshot-manifest.v1","min_ram_gb":4,"quantization":"4bit","runtime_format":"mlx_safetensors","size_bytes":123456,"source_ref":{"kind":"huggingface_revision","repo_id":"mlx-community/Test-Model-4bit","revision":%q},"verification_status":"verified","verified_at":"2026-09-01"}%s},"primary_artifact_id":"mlx-4bit","rate_class":"class-8b"}`,
+		strings.Repeat("2", 64), strings.Repeat("1", 40), extraArtifacts,
+	)
+}
+
+func ggufArtifactJSON(hash, digest string) string {
+	return fmt.Sprintf(
+		`,"gguf-q4":{"allowed_runtime_sources":["ollama_loopback"],"hash":%q,"hash_algorithm":"macprovider.gguf-file.v1","min_ram_gb":4,"quantization":"q4_k_m","runtime_format":"gguf","size_bytes":654321,"source_ref":{"digest":%q,"kind":"ollama_library_tag","library_tag":"test-model:q4_k_m"},"verification_status":"declared","verified_at":null}`,
+		hash, digest,
+	)
+}
+
+func catalogArtifactsFeedWithModels(version, generatedAt, policyVersion, candidateSHA256, models string) []byte {
 	return []byte(fmt.Sprintf(
-		`{"candidate_catalog_sha256":%q,"generated_at":%q,"models":{"test-model":{"artifacts":{"mlx-4bit":{"allowed_runtime_sources":["mlx_cache"],"hash":%q,"hash_algorithm":"macprovider.snapshot-manifest.v1","min_ram_gb":4,"quantization":"4bit","runtime_format":"mlx_safetensors","size_bytes":123456,"source_ref":{"kind":"huggingface_revision","repo_id":"mlx-community/Test-Model-4bit","revision":%q},"verification_status":"verified","verified_at":"2026-09-01"}},"primary_artifact_id":"mlx-4bit","rate_class":"class-8b"}},"policy_version":%q,"release_id":%q,"source":"operator_curated_autotune_artifact_catalog","version":%q}`,
-		candidateSHA256, generatedAt, strings.Repeat("2", 64), strings.Repeat("1", 40), policyVersion, version, version,
+		`{"candidate_catalog_sha256":%q,"generated_at":%q,"models":{%s},"policy_version":%q,"release_id":%q,"source":"operator_curated_autotune_artifact_catalog","version":%q}`,
+		candidateSHA256, generatedAt, models, policyVersion, version, version,
 	))
+}
+
+// validCatalogArtifactsFeed is the SPEC-023 §3.7.3 feed whose single model
+// binds the `test-model` row of validCandidateFeed.
+func validCatalogArtifactsFeed(version, generatedAt, policyVersion, candidateSHA256 string) []byte {
+	return catalogArtifactsFeedWithModels(version, generatedAt, policyVersion, candidateSHA256, `"test-model":`+artifactModelJSON(""))
 }
 
 type artifactBoundFixture struct {
@@ -226,6 +247,64 @@ func TestLoadAutotuneFeedsRejectsUnboundCatalogArtifacts(t *testing.T) {
 			want: "catalog_artifacts generated_at",
 		},
 		{
+			name: "policy_version drift",
+			artifacts: func(candidateSHA string) []byte {
+				return validCatalogArtifactsFeed("test-release", "2026-07-10T00:00:00Z", "other-policy-v2", candidateSHA)
+			},
+			want: `catalog_artifacts policy_version "other-policy-v2" != autotune_candidates policy_version "autotune-policy-v1"`,
+		},
+		{
+			name: "one hash under two model keys",
+			artifacts: func(candidateSHA string) []byte {
+				models := `"a-model":` + artifactModelJSON("") + `,"test-model":` + artifactModelJSON("")
+				return catalogArtifactsFeedWithModels("test-release", "2026-07-10T00:00:00Z", "autotune-policy-v1", candidateSHA, models)
+			},
+			want: "appears under both a-model/mlx-4bit and test-model/mlx-4bit",
+		},
+		{
+			name: "gguf digest does not equal its hash",
+			artifacts: func(candidateSHA string) []byte {
+				models := `"test-model":` + artifactModelJSON(ggufArtifactJSON(strings.Repeat("4", 64), "sha256:"+strings.Repeat("5", 64)))
+				return catalogArtifactsFeedWithModels("test-release", "2026-07-10T00:00:00Z", "autotune-policy-v1", candidateSHA, models)
+			},
+			want: "gguf source_ref.digest must equal 'sha256:' + hash",
+		},
+		{
+			name:      "primary repo_id drift",
+			artifacts: replace(`"repo_id":"mlx-community/Test-Model-4bit"`, `"repo_id":"mlx-community/Other-Model-4bit"`),
+			want:      "primary artifact repo_id does not equal the candidate model_id",
+		},
+		{
+			name:      "verified_at omitted",
+			artifacts: replace(`,"verified_at":"2026-09-01"`, ``),
+			want:      "verified_at is required",
+		},
+		{
+			name:      "verified_at null on a verified artifact",
+			artifacts: replace(`"verified_at":"2026-09-01"`, `"verified_at":null`),
+			want:      "verified_at must be an RFC3339 full-date when verified",
+		},
+		{
+			name:      "notes present as null",
+			artifacts: replace(`"quantization":"4bit"`, `"notes":null,"quantization":"4bit"`),
+			want:      "optional string field must be a string when present, not null",
+		},
+		{
+			name:      "rate_class present as null",
+			artifacts: replace(`"rate_class":"class-8b"`, `"rate_class":null`),
+			want:      "optional string field must be a string when present, not null",
+		},
+		{
+			name:      "cross-variant source_ref field present as null",
+			artifacts: replace(`"revision":"`+strings.Repeat("1", 40)+`"}`, `"revision":"`+strings.Repeat("1", 40)+`","library_tag":null}`),
+			want:      "optional string field must be a string when present, not null",
+		},
+		{
+			name:      "cross-variant source_ref field present",
+			artifacts: replace(`"revision":"`+strings.Repeat("1", 40)+`"}`, `"revision":"`+strings.Repeat("1", 40)+`","digest":"sha256:`+strings.Repeat("2", 64)+`"}`),
+			want:      "source_ref carries fields outside {kind, repo_id, revision}",
+		},
+		{
 			name:      "candidate digest drift",
 			artifacts: func(string) []byte { return boundArtifacts(strings.Repeat("0", 64)) },
 			want:      "candidate_catalog_sha256",
@@ -312,6 +391,23 @@ func TestLoadAutotuneFeedsRejectsUnboundCatalogArtifacts(t *testing.T) {
 				t.Fatalf("LoadAutotuneFeeds error=%v, want %q", err, tc.want)
 			}
 		})
+	}
+}
+
+func TestLoadAutotuneFeedsAcceptsADeclaredGGUFSecondaryArtifact(t *testing.T) {
+	t.Parallel()
+	publicKey, privateKey := testSigningKey(t)
+	hash := strings.Repeat("4", 64)
+	fixture := artifactBoundFeedSet(t, func(candidateSHA string) []byte {
+		models := `"test-model":` + artifactModelJSON(ggufArtifactJSON(hash, "sha256:"+hash))
+		return catalogArtifactsFeedWithModels("test-release", "2026-07-10T00:00:00Z", "autotune-policy-v1", candidateSHA, models)
+	}, privateKey, "test-key", map[string]ed25519.PublicKey{"test-key": publicKey}, privateKey)
+	feeds, err := buyer.LoadAutotuneFeeds(fixture.cfg)
+	if err != nil {
+		t.Fatalf("LoadAutotuneFeeds with a declared gguf secondary: %v", err)
+	}
+	if string(feeds.CatalogArtifactsJSON) != string(fixture.artifactsJSON) {
+		t.Fatalf("served bytes must be the literal feed bytes")
 	}
 }
 

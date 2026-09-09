@@ -284,6 +284,11 @@ elif mutation == "generated-at":
     feed["generated_at"] = "2026-07-30T11:00:00Z"
 elif mutation == "release-id":
     feed["release_id"] = "fixture-release-2"
+elif mutation == "version":
+    feed["version"] = "fixture-release-2"
+    feed["release_id"] = "fixture-release-2"
+elif mutation == "policy-version":
+    feed["policy_version"] = "autotune-policy-v2"
 else:
     raise SystemExit(f"unknown mutation {mutation}")
 feed_path.write_text(json.dumps(feed, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
@@ -321,6 +326,105 @@ if run_guard "$work/artifact-release-id-drift" >"$work/artifact-release-id-drift
   fail "accepted an artifact feed whose release_id differs from its version"
 fi
 grep -q 'release_id .* does not equal its version' "$work/artifact-release-id-drift.out"
+
+FIXTURE_ARTIFACT_FEED=bound make_fixture "$work/artifact-version-drift"
+rebind_artifact_feed "$work/artifact-version-drift" version
+if run_guard "$work/artifact-version-drift" >"$work/artifact-version-drift.out" 2>&1; then
+  fail "accepted an artifact feed from a different release id"
+fi
+grep -q "autotune-artifacts.json version 'fixture-release-2' does not match autotune-candidates.json version 'fixture-release'" "$work/artifact-version-drift.out"
+
+FIXTURE_ARTIFACT_FEED=bound make_fixture "$work/artifact-policy-drift"
+rebind_artifact_feed "$work/artifact-policy-drift" policy-version
+if run_guard "$work/artifact-policy-drift" >"$work/artifact-policy-drift.out" 2>&1; then
+  fail "accepted an artifact feed under a different policy version"
+fi
+grep -q "autotune-artifacts.json policy_version 'autotune-policy-v2' does not match autotune-candidates.json policy_version 'autotune-policy-v1'" "$work/artifact-policy-drift.out"
+
+# Metadata digest binding, body and sidecar independently.
+FIXTURE_ARTIFACT_FEED=bound make_fixture "$work/artifact-body-digest"
+python3 - "$work/artifact-body-digest/pearl-release.json" autotune-artifacts.json <<'PY'
+import json, pathlib, sys
+path = pathlib.Path(sys.argv[1]); metadata = json.loads(path.read_text(encoding="utf-8"))
+metadata["catalog"]["files"][sys.argv[2]] = "0" * 64
+path.write_text(json.dumps(metadata, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+PY
+if run_guard "$work/artifact-body-digest" >"$work/artifact-body-digest.out" 2>&1; then
+  fail "accepted an artifact feed body that differs from release metadata"
+fi
+grep -q 'live coordinator /v1/catalog-artifacts sha256 .* does not match release metadata' "$work/artifact-body-digest.out"
+
+FIXTURE_ARTIFACT_FEED=bound make_fixture "$work/artifact-sidecar-digest"
+python3 - "$work/artifact-sidecar-digest/pearl-release.json" autotune-artifacts.json.sig <<'PY'
+import json, pathlib, sys
+path = pathlib.Path(sys.argv[1]); metadata = json.loads(path.read_text(encoding="utf-8"))
+metadata["catalog"]["files"][sys.argv[2]] = "0" * 64
+path.write_text(json.dumps(metadata, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+PY
+if run_guard "$work/artifact-sidecar-digest" >"$work/artifact-sidecar-digest.out" 2>&1; then
+  fail "accepted an artifact sidecar that differs from release metadata"
+fi
+grep -q 'live coordinator /v1/catalog-artifacts.sig sha256 .* does not match release metadata' "$work/artifact-sidecar-digest.out"
+
+# Presence agreement, each route independently.
+FIXTURE_ARTIFACT_FEED=bound make_fixture "$work/artifact-bound-sig-missing"
+rm "$work/artifact-bound-sig-missing/live/v1_catalog-artifacts.sig"
+if run_guard "$work/artifact-bound-sig-missing" >"$work/artifact-bound-sig-missing.out" 2>&1; then
+  fail "accepted a bound artifact feed whose sidecar route is not served"
+fi
+grep -q 'fixture coordinator response is missing for /v1/catalog-artifacts.sig' "$work/artifact-bound-sig-missing.out"
+
+FIXTURE_ARTIFACT_FEED=served-unbound make_fixture "$work/artifact-sig-served-unbound"
+rm "$work/artifact-sig-served-unbound/live/v1_catalog-artifacts"
+if run_guard "$work/artifact-sig-served-unbound" >"$work/artifact-sig-served-unbound.out" 2>&1; then
+  fail "accepted a coordinator serving only /v1/catalog-artifacts.sig for a release that binds no artifact feed"
+fi
+grep -q 'serves /v1/catalog-artifacts.sig but the release binds no artifact feed' "$work/artifact-sig-served-unbound.out"
+
+# Live-mode absence probe: only HTTP 404 is "absent"; 200 is "served"; any
+# other status or a transport failure is a gate error, never "absent".
+python3 - "$guard" <<'PY'
+import importlib.util
+import types
+import urllib.error
+import sys
+
+spec = importlib.util.spec_from_file_location("live_gate", sys.argv[1])
+live_gate = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(live_gate)
+
+class Response:
+    status = 200
+    def __enter__(self): return self
+    def __exit__(self, *exc): return False
+    def read(self, n): return b"{}"
+
+def opener_for(outcome):
+    class Opener:
+        def open(self, request, timeout):
+            if outcome == "200":
+                return Response()
+            if outcome == "url-error":
+                raise urllib.error.URLError("connection refused")
+            raise urllib.error.HTTPError(request.full_url, int(outcome), "status", {}, None)
+    return Opener()
+
+args = types.SimpleNamespace(coordinator_dir=None, coordinator_url="https://coordinator.fixture.invalid", timeout_s=1, max_bytes=1024)
+for outcome, expect in (("404", False), ("200", True)):
+    live_gate.urllib.request.build_opener = lambda *a, **k: opener_for(outcome)
+    got = live_gate.endpoint_is_served(args, "/v1/catalog-artifacts")
+    if got is not expect:
+        raise SystemExit(f"endpoint_is_served under HTTP {outcome} returned {got}, want {expect}")
+for outcome, needle in (("500", "returned HTTP 500, expected 200 or 404"), ("302", "redirected with HTTP 302"), ("url-error", "could not be fetched")):
+    live_gate.urllib.request.build_opener = lambda *a, **k: opener_for(outcome)
+    try:
+        live_gate.endpoint_is_served(args, "/v1/catalog-artifacts")
+    except live_gate.GateError as exc:
+        if needle not in str(exc):
+            raise SystemExit(f"absence probe under {outcome}: {exc}")
+    else:
+        raise SystemExit(f"absence probe treated {outcome} as a definite answer")
+PY
 
 # Signer identity equality: a VALID signature by a second concurrently trusted
 # key id must still fail — unknown-key rejection cannot see this case.
