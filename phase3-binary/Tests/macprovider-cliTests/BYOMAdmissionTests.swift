@@ -662,8 +662,10 @@ final class BYOMAdmissionTests: XCTestCase {
 
     // #1248 old-client compatibility: a current CLI pointed at a pre-BYOM
     // coordinator (no SPEC-047 admission endpoints -> 404/405, or an unknown
-    // response schema) must fail closed and never fabricate a coordinator
-    // admission state. The provider stays on local_default inventory state.
+    // response schema) must never fabricate a COORDINATOR admission state. The
+    // transport still refuses to produce one; the provider is answered from the
+    // SPEC-046-R003 local ladder instead (local_default `not_offered`), which is
+    // what that ladder means by "coordinator state is unavailable".
     func testAdmissionStatusAgainstPreBYOMCoordinatorFailsClosedWithoutFabricatingState() async throws {
         for status in [404, 405] {
             let session = makeBYOMAdmissionSession { _ in
@@ -678,6 +680,33 @@ final class BYOMAdmissionTests: XCTestCase {
                 XCTAssertTrue(error.description.contains("local_default"))
                 XCTAssertTrue(error.description.contains("wait_for_coordinator"))
             }
+
+            let runtime = try makeLocalLadderRuntime(
+                name: "byom-admission-prebyom-\(status)",
+                client: BYOMModelAdmissionClient(
+                    baseURL: URL(string: "https://coordinator.test")!,
+                    session: makeBYOMAdmissionSession { _ in
+                        BYOMAdmissionMockHTTPResponse(statusCode: status, body: "not found")
+                    }
+                )
+            )
+            let document = try await runtime.status(
+                providerID: "provider-byom-a",
+                target: "mlx-community/Tiny-1B-4bit"
+            )
+            XCTAssertEqual(document.schema, "model_admission_status.v1")
+            XCTAssertEqual(document.admissionStateSource, "local_default")
+            XCTAssertNotEqual(document.admissionStateSource, "coordinator")
+            XCTAssertEqual(document.admissionState, "not_offered")
+            XCTAssertNil(document.coordinatorEventID)
+            XCTAssertNil(document.stateObservedAt)
+            XCTAssertEqual(document.allowedNextStates, [])
+            XCTAssertTrue(document.warnings.contains("coordinator_state_unavailable"))
+            XCTAssertEqual(document.providerGuidance.transitionReasonCode, "coordinator_state_unavailable")
+            // Action-neutral with the `offerable` row it came from: this fixture
+            // candidate is unevaluated, so both rows say evaluate first.
+            XCTAssertEqual(document.providerGuidance.nextAction, "evaluate")
+            XCTAssertEqual(document.providerGuidance.earningPathClass, "local_inventory_only")
         }
 
         // An older coordinator that answers 200 with a schema this release does
@@ -695,6 +724,242 @@ final class BYOMAdmissionTests: XCTestCase {
         } catch let error as BYOMModelAdmissionError {
             XCTAssertEqual(error, .invalidStatusSchema)
         }
+
+        // A coordinator that answered with a decodable-but-wrong document is a
+        // contract fault, not an unavailable coordinator: it must NOT be
+        // relabelled as the local ladder's `not_offered`.
+        let schemaFaultRuntime = try makeLocalLadderRuntime(
+            name: "byom-admission-schema-fault",
+            client: BYOMModelAdmissionClient(
+                baseURL: URL(string: "https://coordinator.test")!,
+                session: makeBYOMAdmissionSession { _ in
+                    BYOMAdmissionMockHTTPResponse(
+                        statusCode: 200,
+                        body: #"{"schema":"models_browse.v1","rows":[]}"#
+                    )
+                }
+            )
+        )
+        do {
+            _ = try await schemaFaultRuntime.status(
+                providerID: "provider-byom-a",
+                target: "mlx-community/Tiny-1B-4bit"
+            )
+            XCTFail("an unknown coordinator schema became a local ladder state")
+        } catch let error as BYOMModelAdmissionError {
+            XCTAssertEqual(error, .invalidStatusSchema)
+        }
+    }
+
+    // SPEC-046-R003 local ladder, trigger (a): no coordinator is configured at
+    // all. The CLI must answer from local inventory and must not open a
+    // connection to anything while doing it.
+    func testAdmissionStatusWithoutConfiguredCoordinatorReportsLocalDefaultNotOffered() async throws {
+        let probes = BYOMAdmissionRequestRecorder()
+        let runtime = try makeLocalLadderRuntime(
+            name: "byom-admission-no-coordinator",
+            client: nil,
+            httpClient: BYOMAdmissionRecordingDiscoveryHTTPClient(recorder: probes)
+        )
+
+        let document = try await runtime.status(
+            providerID: "provider-byom-a",
+            target: "mlx-community/Tiny-1B-4bit"
+        )
+
+        XCTAssertEqual(document.schema, "model_admission_status.v1")
+        XCTAssertEqual(document.admissionStateSource, "local_default")
+        XCTAssertEqual(document.admissionState, "not_offered")
+        XCTAssertEqual(document.providerID, "provider-byom-a")
+        XCTAssertEqual(document.servedModelRef, "mlx-community/Tiny-1B-4bit")
+        XCTAssertNil(document.coordinatorEventID)
+        XCTAssertNil(document.stateObservedAt)
+        XCTAssertEqual(document.allowedNextStates, [])
+        XCTAssertEqual(document.providerGuidance.stateLabelKey, "byom.local.not_offered")
+        XCTAssertEqual(document.providerGuidance.transitionReasonCode, "coordinator_state_unavailable")
+        XCTAssertEqual(document.providerGuidance.earningPathClass, "local_inventory_only")
+        XCTAssertTrue(document.warnings.contains("coordinator_state_unavailable"))
+        XCTAssertEqual(probes.count, 0, "the unconfigured-coordinator path made a request")
+
+        // The ladder's `not_offered` row is action-neutral with the `offerable`
+        // row it came from: the unevaluated fixture candidate is sent to
+        // evaluation first, and a candidate with nothing outstanding is sent to
+        // the offer dry run. Both are the offerable row's own choice.
+        XCTAssertEqual(document.providerGuidance.nextAction, "evaluate")
+        XCTAssertEqual(
+            BYOMDiscoveryGuidance.localNotOfferedGuidance(warnings: []).nextAction,
+            "offer_dry_run"
+        )
+        XCTAssertEqual(
+            BYOMDiscoveryGuidance.localNotOfferedGuidance(warnings: ["evaluation_required"]).nextAction,
+            BYOMDiscoveryGuidance.guidance(
+                forAdmissionState: "offerable",
+                warnings: ["evaluation_required"]
+            ).nextAction
+        )
+    }
+
+    // Trigger (b), transport half: the coordinator is configured but refuses the
+    // connection. Same ladder row, and exactly the one attempted request.
+    func testAdmissionStatusWithUnreachableCoordinatorReportsLocalDefaultNotOffered() async throws {
+        let attempts = BYOMAdmissionRequestRecorder()
+        let session = makeBYOMAdmissionSession { request in
+            _ = attempts.record(request)
+            throw URLError(.cannotConnectToHost)
+        }
+        let runtime = try makeLocalLadderRuntime(
+            name: "byom-admission-unreachable",
+            client: BYOMModelAdmissionClient(
+                baseURL: URL(string: "https://coordinator.test")!,
+                session: session
+            )
+        )
+
+        let document = try await runtime.status(
+            providerID: "provider-byom-a",
+            target: "mlx-community/Tiny-1B-4bit"
+        )
+
+        XCTAssertEqual(document.admissionStateSource, "local_default")
+        XCTAssertEqual(document.admissionState, "not_offered")
+        XCTAssertTrue(document.warnings.contains("coordinator_state_unavailable"))
+        XCTAssertEqual(document.providerGuidance.transitionReasonCode, "coordinator_state_unavailable")
+        XCTAssertEqual(attempts.count, 1, "the unreachable-coordinator path did not make exactly one request")
+    }
+
+    // Auth faults are the provider's to fix and must stay errors: a 401/403 must
+    // never be laundered into "no offer is known for this candidate".
+    func testAdmissionStatusKeepsAuthenticationFailuresAsErrors() async throws {
+        for status in [401, 403] {
+            let runtime = try makeLocalLadderRuntime(
+                name: "byom-admission-auth-\(status)",
+                client: BYOMModelAdmissionClient(
+                    baseURL: URL(string: "https://coordinator.test")!,
+                    session: makeBYOMAdmissionSession { _ in
+                        BYOMAdmissionMockHTTPResponse(statusCode: status, body: "denied")
+                    }
+                )
+            )
+            do {
+                _ = try await runtime.status(
+                    providerID: "provider-byom-a",
+                    target: "mlx-community/Tiny-1B-4bit"
+                )
+                XCTFail("HTTP \(status) became a local ladder state")
+            } catch let error as BYOMModelAdmissionError {
+                XCTAssertEqual(error, .httpStatus(status))
+            }
+        }
+    }
+
+    // #1448 disablement mapping is unchanged: 503 stays an error whose guidance
+    // is wait_for_coordinator, not a relabelled local state.
+    func testAdmissionStatusKeepsUnavailableCoordinatorMappingFor503() async throws {
+        let runtime = try makeLocalLadderRuntime(
+            name: "byom-admission-503",
+            client: BYOMModelAdmissionClient(
+                baseURL: URL(string: "https://coordinator.test")!,
+                session: makeBYOMAdmissionSession { _ in
+                    BYOMAdmissionMockHTTPResponse(
+                        statusCode: 503,
+                        body: #"{"error":{"code":"submissions_disabled"}}"#
+                    )
+                }
+            )
+        )
+        do {
+            _ = try await runtime.status(
+                providerID: "provider-byom-a",
+                target: "mlx-community/Tiny-1B-4bit"
+            )
+            XCTFail("HTTP 503 became a local ladder state")
+        } catch let error as BYOMModelAdmissionError {
+            XCTAssertEqual(error, .httpStatus(503))
+            XCTAssertTrue(error.description.contains("wait_for_coordinator"))
+            XCTAssertTrue(error.description.contains("unchanged"))
+        }
+    }
+
+    // A `local_only` candidate's blocker is local, so coordinator reachability
+    // does not move it: it keeps its own state and its own guidance.
+    func testAdmissionStatusKeepsLocalOnlyCandidateOnItsOwnLadderRow() async throws {
+        let root = try temporaryBYOMAdmissionDirectory("byom-admission-local-only")
+        let cache = root.appendingPathComponent("hf", isDirectory: true)
+        try createBYOMAdmissionMLXSnapshot(cacheRoot: cache, modelID: "mlx-community/Tiny-1B-4bit")
+        // No namespace file: the candidate id is unstable, which is a blocking
+        // local warning, so the ladder holds the candidate at local_only.
+        let runtime = BYOMModelAdmissionRuntime(
+            environment: BYOMDiscoveryEnvironment(
+                namespaceURL: root.appendingPathComponent("absent.namespace"),
+                mlxCacheRoot: cache,
+                ollamaOrigin: nil
+            ),
+            credentialStore: BYOMAdmissionCredentialStore(token: "provider-token-test"),
+            identityStore: BYOMAdmissionIdentityStore(identity: Curve25519.Signing.PrivateKey()),
+            client: nil,
+            httpClient: BYOMAdmissionDiscoveryHTTPClient()
+        )
+
+        let document = try await runtime.status(
+            providerID: "provider-byom-a",
+            target: "mlx-community/Tiny-1B-4bit"
+        )
+
+        XCTAssertEqual(document.admissionStateSource, "local_default")
+        XCTAssertEqual(document.admissionState, "local_only")
+        XCTAssertEqual(document.providerGuidance.stateLabelKey, "byom.local.local_only")
+        XCTAssertEqual(document.providerGuidance.nextAction, "fix_local_blocker")
+        XCTAssertEqual(document.providerGuidance.transitionReasonCode, "candidate_id_unstable")
+        XCTAssertTrue(document.warnings.contains("candidate_id_unstable"))
+        XCTAssertTrue(document.warnings.contains("coordinator_state_unavailable"))
+    }
+
+    // The local-default document is the same closed envelope as a coordinator
+    // one: it must survive the strict decoder, which requires the exact key set
+    // (nullable keys present as null) and rejects any unknown field.
+    func testLocalDefaultAdmissionStatusRoundTripsThroughTheStrictDecoder() async throws {
+        let runtime = try makeLocalLadderRuntime(name: "byom-admission-roundtrip", client: nil)
+        let document = try await runtime.status(
+            providerID: "provider-byom-a",
+            target: "mlx-community/Tiny-1B-4bit"
+        )
+
+        let encoded = try ModelSwitchingWireCodec.encode(document)
+        let object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(encoded.utf8)) as? [String: Any]
+        )
+        XCTAssertTrue(object["coordinator_event_id"] is NSNull)
+        XCTAssertTrue(object["state_observed_at"] is NSNull)
+
+        let decoded = try BYOMAdmissionStatusWire.decodeStrictStatus(
+            from: Data(encoded.utf8),
+            expectedProviderID: "provider-byom-a",
+            expectedCandidateID: document.candidateID
+        )
+        XCTAssertEqual(decoded, document)
+    }
+
+    private func makeLocalLadderRuntime(
+        name: String,
+        client: BYOMModelAdmissionClient?,
+        httpClient: any BYOMDiscoveryHTTPClient = BYOMAdmissionDiscoveryHTTPClient()
+    ) throws -> BYOMModelAdmissionRuntime {
+        let root = try temporaryBYOMAdmissionDirectory(name)
+        let namespace = root.appendingPathComponent("ns")
+        let cache = root.appendingPathComponent("hf", isDirectory: true)
+        try writeBYOMAdmissionNamespace(at: namespace)
+        try createBYOMAdmissionMLXSnapshot(cacheRoot: cache, modelID: "mlx-community/Tiny-1B-4bit")
+        return BYOMModelAdmissionRuntime(
+            environment: BYOMDiscoveryEnvironment(
+                namespaceURL: namespace,
+                mlxCacheRoot: cache,
+                ollamaOrigin: nil
+            ),
+            credentialStore: BYOMAdmissionCredentialStore(token: "provider-token-test"),
+            identityStore: BYOMAdmissionIdentityStore(identity: Curve25519.Signing.PrivateKey()),
+            client: client,
+            httpClient: httpClient
+        )
     }
 
     // #1248 disablement matrix, "Offer submit" row, provider side: the
@@ -847,6 +1112,15 @@ private struct BYOMAdmissionIdentityStore: ProviderIdentityKeyStoring {
     func commitAdmissionIdentityRotation(providerId: String, expectedPublicKey: Data, previousValidUntil: Date?) throws -> Curve25519.Signing.PrivateKey { identity ?? Curve25519.Signing.PrivateKey() }
     func commitAdmissionIdentityRecovery(providerId: String, expectedPublicKey: Data) throws -> Curve25519.Signing.PrivateKey { identity ?? Curve25519.Signing.PrivateKey() }
     func cancelAdmissionIdentityRotation(providerId: String) throws {}
+}
+
+private struct BYOMAdmissionRecordingDiscoveryHTTPClient: BYOMDiscoveryHTTPClient {
+    let recorder: BYOMAdmissionRequestRecorder
+
+    func get(_ url: URL, maxHeaderBytes: Int, maxBodyBytes: Int) async throws -> BYOMHTTPResponse {
+        _ = recorder.record(URLRequest(url: url))
+        return BYOMHTTPResponse(statusCode: 200, headers: [], body: Data(#"{"models":[]}"#.utf8))
+    }
 }
 
 private struct BYOMAdmissionDiscoveryHTTPClient: BYOMDiscoveryHTTPClient {

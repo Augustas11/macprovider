@@ -1000,6 +1000,351 @@ final class BYOMDiscoveryTests: XCTestCase {
         XCTAssertEqual(before, after)
     }
 
+    // MARK: - openai_compatible_loopback adapter (SPEC-046-R002/R003/R004)
+
+    // SPEC-046-R003: an OpenAI-compatible endpoint reports only a model id, so
+    // every candidate it yields is an opaque endpoint — no catalog key, no size,
+    // no capability claim, and local inventory state only.
+    func testOpenAICompatibleAdapterEmitsOpaqueEndpointCandidate() async throws {
+        let root = try temporaryDirectory("byom-openai-opaque")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let namespace = try seededNamespace(in: root)
+
+        let client = RecordingBYOMHTTPClient(response: BYOMHTTPResponse(
+            statusCode: 200,
+            headers: [("content-type", "application/json")],
+            body: Data(#"{"object":"list","data":[{"id":"opaque-mini-1b","object":"model"}]}"#.utf8)
+        ))
+        let document = await BYOMDiscoveryRunner(
+            environment: BYOMDiscoveryEnvironment(
+                namespaceURL: namespace,
+                mlxCacheRoot: root.appendingPathComponent("hf", isDirectory: true),
+                ollamaOrigin: nil,
+                openAICompatibleOrigin: "http://127.0.0.1:39311"
+            ),
+            httpClient: client
+        ).discover()
+
+        XCTAssertEqual(client.requestLog, ["GET http://127.0.0.1:39311/v1/models"])
+        let adapter = try XCTUnwrap(document.adapters.first { $0.runtimeSource == "openai_compatible_loopback" })
+        XCTAssertEqual(adapter.status, "ok")
+        XCTAssertEqual(adapter.originClass, "loopback_http")
+        XCTAssertEqual(adapter.warningCodes, [])
+
+        let candidate = try XCTUnwrap(document.candidates.first { $0.runtimeSource == "openai_compatible_loopback" })
+        XCTAssertTrue(candidate.candidateID.hasPrefix("byom_"))
+        XCTAssertFalse(candidate.candidateID.hasPrefix("byom_unstable_"))
+        XCTAssertEqual(candidate.servedModelRef, "openai_compatible:opaque-mini-1b")
+        XCTAssertEqual(candidate.displayName, "opaque-mini-1b")
+        XCTAssertNil(candidate.catalogModelKey)
+        XCTAssertEqual(candidate.identityState, "opaque_endpoint")
+        XCTAssertEqual(candidate.locality, "opaque_local_endpoint")
+        XCTAssertNil(candidate.estimatedGB)
+        XCTAssertNil(candidate.contextWindowTokens)
+        XCTAssertEqual(candidate.capabilities, .unknown)
+        XCTAssertEqual(candidate.readinessState, "ready")
+        XCTAssertEqual(candidate.fitState, "unknown")
+        XCTAssertEqual(candidate.evaluationState, "not_evaluated")
+        XCTAssertEqual(candidate.admissionState, "local_only")
+        XCTAssertEqual(candidate.admissionStateSource, "local_default")
+        XCTAssertEqual(candidate.providerGuidance.earningPathClass, "local_inventory_only")
+        XCTAssertEqual(candidate.providerGuidance.nextAction, "evaluate")
+        XCTAssertEqual(candidate.warningCodes, ["capability_unevaluated", "evaluation_required"])
+
+        // Every advisory capability stays null, never false (R004).
+        let encoded = try ModelSwitchingWireCodec.encode(document)
+        for field in ["chat_completions", "streaming", "tool_call_passthrough", "quantization", "family", "runtime_version"] {
+            XCTAssertTrue(encoded.contains("\"\(field)\":null"), "\(field) must be null, not false")
+        }
+    }
+
+    // #1246: both adapter parsers read the SAME shared inventory record bound,
+    // so neither can drift. This mirrors
+    // `testOllamaRedactionDoesNotInspectPastExistingRecordBound` exactly: a
+    // record that would be withheld sits beyond the cap and is therefore never
+    // inspected, so no `model_reference_redacted` warning is raised for it.
+    func testOpenAICompatibleRedactionDoesNotInspectPastSharedRecordBound() async throws {
+        let bound = BYOMDiscoveryHTTPBounds.maxInventoryRecords
+        for withheldFirst in [false, true] {
+            let root = try temporaryDirectory("byom-openai-bound")
+            defer { try? FileManager.default.removeItem(at: root) }
+            let namespace = try seededNamespace(in: root)
+
+            let first = withheldFirst ? "/Users/private/model" : "opaque-mini-1b"
+            let last = withheldFirst ? "opaque-mini-1b" : "/Users/private/model"
+            let records = Array(repeating: ["id": first, "object": "model"], count: bound)
+                + [["id": last, "object": "model"]]
+            let body = try JSONSerialization.data(withJSONObject: ["object": "list", "data": records])
+
+            let document = await BYOMDiscoveryRunner(
+                environment: BYOMDiscoveryEnvironment(
+                    namespaceURL: namespace,
+                    mlxCacheRoot: root.appendingPathComponent("hf", isDirectory: true),
+                    ollamaOrigin: nil,
+                    openAICompatibleOrigin: "http://127.0.0.1:39311"
+                ),
+                httpClient: StubBYOMHTTPClient(response: BYOMHTTPResponse(
+                    statusCode: 200,
+                    headers: [("content-type", "application/json")],
+                    body: body
+                ))
+            ).discover()
+
+            let adapter = try XCTUnwrap(document.adapters.first { $0.runtimeSource == "openai_compatible_loopback" })
+            let candidates = document.candidates.filter { $0.runtimeSource == "openai_compatible_loopback" }
+            XCTAssertEqual(adapter.status, "ok")
+            XCTAssertEqual(candidates.count, withheldFirst ? 0 : bound)
+            XCTAssertEqual(adapter.warningCodes, withheldFirst ? ["model_reference_redacted"] : [])
+            XCTAssertFalse(try ModelSwitchingWireCodec.encode(document).contains("private"))
+        }
+    }
+
+    // SPEC-046-R002: this adapter has no well-known default. Without an
+    // operator-supplied origin nothing is dispatched and the adapter
+    // contributes no row at all, matching the Ollama adapter's skip behaviour.
+    // An absent row already means "not attempted", so the no-flag projection is
+    // unchanged for existing consumers and no new status value reaches the wire.
+    func testOpenAICompatibleAdapterIsNotAttemptedWithoutOperatorOrigin() async throws {
+        let root = try temporaryDirectory("byom-openai-absent")
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        // No `--openai-compatible-origin` default is shipped.
+        XCTAssertNil(try ModelsDiscoverCommand.parse(["--json"]).openaiCompatibleOrigin)
+        // The legacy catalog commands stay outside this taxonomy (SPEC-046-R001).
+        XCTAssertThrowsError(try ModelsListCommand.parse(["--json", "--openai-compatible-origin", "http://127.0.0.1:1"]))
+
+        let client = RecordingBYOMHTTPClient()
+        let document = await BYOMDiscoveryRunner(
+            environment: BYOMDiscoveryEnvironment(
+                namespaceURL: root.appendingPathComponent("ns"),
+                mlxCacheRoot: root.appendingPathComponent("hf", isDirectory: true),
+                ollamaOrigin: nil
+            ),
+            httpClient: client
+        ).discover()
+
+        XCTAssertEqual(client.requestLog, [])
+        XCTAssertNil(document.adapters.first { $0.runtimeSource == "openai_compatible_loopback" })
+        XCTAssertTrue(document.candidates.allSatisfy { $0.runtimeSource != "openai_compatible_loopback" })
+        // Same shape the Ollama adapter already had when it is not attempted.
+        XCTAssertNil(document.adapters.first { $0.runtimeSource == "ollama_loopback" })
+        // Every emitted adapter status stays inside the existing vocabulary.
+        for adapter in document.adapters {
+            XCTAssertTrue(
+                ["ok", "unavailable", "timeout", "malformed", "truncated", "rejected"].contains(adapter.status),
+                "unexpected adapter status \(adapter.status)"
+            )
+        }
+    }
+
+    // SPEC-046-R002/R007: a non-loopback origin is rejected by the shared
+    // validator before any request is dispatched, and the rejected endpoint is
+    // never echoed into stdout JSON or stderr diagnostics.
+    func testOpenAICompatibleAdapterRejectsNonLoopbackOriginBeforeDispatch() async throws {
+        let root = try temporaryDirectory("byom-openai-reject")
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        for origin in ["http://0.0.0.0:39311", "http://192.168.1.10:39311", "http://localhost:39311", "https://127.0.0.1:39311"] {
+            let client = RecordingBYOMHTTPClient()
+            let document = await BYOMDiscoveryRunner(
+                environment: BYOMDiscoveryEnvironment(
+                    namespaceURL: root.appendingPathComponent("ns"),
+                    mlxCacheRoot: root.appendingPathComponent("hf", isDirectory: true),
+                    ollamaOrigin: nil,
+                    openAICompatibleOrigin: origin
+                ),
+                httpClient: client
+            ).discover()
+
+            XCTAssertEqual(client.requestLog, [], "dispatched a request for \(origin)")
+            let adapter = try XCTUnwrap(document.adapters.first { $0.runtimeSource == "openai_compatible_loopback" })
+            XCTAssertEqual(adapter.status, "rejected")
+            XCTAssertEqual(adapter.originClass, "rejected")
+            XCTAssertEqual(adapter.warningCodes, ["adapter_rejected_non_loopback"])
+            XCTAssertTrue(document.candidates.isEmpty)
+            let encoded = try ModelSwitchingWireCodec.encode(document)
+            XCTAssertFalse(encoded.contains(origin), "rejection leaked \(origin)")
+        }
+    }
+
+    // SPEC-046-R002: every adapter failure class maps to a closed warning code
+    // and produces no candidate and no partial trust claim.
+    func testOpenAICompatibleAdapterFailureClassesMapToClosedWarningCodes() async throws {
+        let root = try temporaryDirectory("byom-openai-failures")
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let oversized = Data(repeating: 0x20, count: BYOMDiscoveryHTTPBounds.maxBodyBytes + 1)
+        let cases: [(client: StubBYOMHTTPClient, status: String, warning: String)] = [
+            (StubBYOMHTTPClient(response: BYOMHTTPResponse(statusCode: 503, headers: [], body: Data())), "unavailable", "adapter_unavailable"),
+            (StubBYOMHTTPClient(error: URLError(.timedOut)), "timeout", "adapter_timeout"),
+            (StubBYOMHTTPClient(response: BYOMHTTPResponse(
+                statusCode: 200,
+                headers: [("content-type", "application/json")],
+                body: Data(#"{"data":"not-an-array"}"#.utf8)
+            )), "malformed", "adapter_malformed_response"),
+            (StubBYOMHTTPClient(response: BYOMHTTPResponse(statusCode: 200, headers: [], body: oversized)), "truncated", "adapter_response_truncated"),
+        ]
+
+        for testCase in cases {
+            let document = await BYOMDiscoveryRunner(
+                environment: BYOMDiscoveryEnvironment(
+                    namespaceURL: root.appendingPathComponent("ns"),
+                    mlxCacheRoot: root.appendingPathComponent("hf", isDirectory: true),
+                    ollamaOrigin: nil,
+                    openAICompatibleOrigin: "http://127.0.0.1:39311"
+                ),
+                httpClient: testCase.client
+            ).discover()
+
+            let adapter = try XCTUnwrap(document.adapters.first { $0.runtimeSource == "openai_compatible_loopback" })
+            XCTAssertEqual(adapter.status, testCase.status)
+            XCTAssertEqual(adapter.warningCodes, [testCase.warning])
+            XCTAssertTrue(document.candidates.isEmpty, "\(testCase.warning) fabricated a candidate")
+            XCTAssertTrue(document.warnings.contains(testCase.warning))
+        }
+    }
+
+    // SPEC-046-R007: an unsafe model id is withheld entirely — no placeholder
+    // candidate, no synthesized identity — and only the fixed provenance code is
+    // retained. A safe sibling in the same inventory stays visible.
+    func testOpenAICompatibleUnsafeModelIDsAreWithheldWithoutPlaceholder() async throws {
+        let root = try temporaryDirectory("byom-openai-redaction")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let namespace = try seededNamespace(in: root)
+
+        let unsafeIDs = [
+            "coordinator.malibu.tech:443",
+            "hf.co/library/x",
+            "sk-live-abcdefghijklmnopqrstuvwxyz",
+            "http://127.0.0.1:9/models",
+            "127.0.0.1:11434",
+        ]
+        let body = #"{"data":["# + (unsafeIDs + ["safe-mini-1b"])
+            .map { #"{"id":"\#($0)"}"# }
+            .joined(separator: ",") + "]}"
+
+        let document = await BYOMDiscoveryRunner(
+            environment: BYOMDiscoveryEnvironment(
+                namespaceURL: namespace,
+                mlxCacheRoot: root.appendingPathComponent("hf", isDirectory: true),
+                ollamaOrigin: nil,
+                openAICompatibleOrigin: "http://127.0.0.1:39311"
+            ),
+            httpClient: StubBYOMHTTPClient(response: BYOMHTTPResponse(
+                statusCode: 200,
+                headers: [("content-type", "application/json")],
+                body: Data(body.utf8)
+            ))
+        ).discover()
+
+        let adapter = try XCTUnwrap(document.adapters.first { $0.runtimeSource == "openai_compatible_loopback" })
+        XCTAssertEqual(adapter.status, "ok")
+        XCTAssertEqual(adapter.warningCodes, ["model_reference_redacted"])
+        XCTAssertTrue(document.warnings.contains("model_reference_redacted"))
+        let candidates = document.candidates.filter { $0.runtimeSource == "openai_compatible_loopback" }
+        XCTAssertEqual(candidates.map(\.servedModelRef), ["openai_compatible:safe-mini-1b"])
+        let encoded = try ModelSwitchingWireCodec.encode(document)
+        for unsafeID in unsafeIDs {
+            XCTAssertFalse(encoded.contains(unsafeID), "withheld id leaked: \(unsafeID)")
+        }
+    }
+
+    // SPEC-046-R002 "bounded JSON nesting/parser work": the shared strict parser
+    // turns a pathologically nested but under-cap body into the closed
+    // malformed code rather than a stack overflow.
+    func testOpenAICompatibleParserBoundsRejectPathologicalNesting() throws {
+        let depth = 20_000
+        let nested = Data((
+            #"{"data":["# + String(repeating: "[", count: depth)
+                + String(repeating: "]", count: depth) + "]}"
+        ).utf8)
+        XCTAssertLessThan(nested.count, BYOMDiscoveryHTTPBounds.maxBodyBytes)
+        for hostile in [nested, Data(String(repeating: "{", count: 50_000).utf8)] {
+            XCTAssertThrowsError(try BYOMDiscoveryJSON.parseOpenAIModels(hostile)) { error in
+                guard case BYOMDiscoveryAdapterError.malformed = error else {
+                    return XCTFail("expected malformed, got \(error)")
+                }
+            }
+        }
+        // A wrong-typed id is a malformed response, not a privacy redaction.
+        XCTAssertThrowsError(try BYOMDiscoveryJSON.parseOpenAIModels(Data(#"{"data":[{"id":7}]}"#.utf8)))
+    }
+
+    // SPEC-046-R003: the candidate id is the namespace-scoped HMAC over
+    // `runtime_source || 0x00 || normalized served_model_ref`, so it is stable
+    // across runs and never collides with another adapter's id for the same
+    // model name.
+    func testOpenAICompatibleCandidateIDIsStableAndScopedByRuntimeSource() throws {
+        let namespace = Data(repeating: 0x5b, count: 32)
+        let (first, firstWarnings) = BYOMCandidateIdentity.candidateID(
+            namespace: namespace,
+            runtimeSource: "openai_compatible_loopback",
+            servedModelRef: "openai_compatible:opaque-mini-1b"
+        )
+        let (second, _) = BYOMCandidateIdentity.candidateID(
+            namespace: namespace,
+            runtimeSource: "openai_compatible_loopback",
+            servedModelRef: "openai_compatible:Opaque-Mini-1B"
+        )
+        let (ollama, _) = BYOMCandidateIdentity.candidateID(
+            namespace: namespace,
+            runtimeSource: "ollama_loopback",
+            servedModelRef: "openai_compatible:opaque-mini-1b"
+        )
+        XCTAssertEqual(firstWarnings, [])
+        XCTAssertEqual(first, second)
+        XCTAssertNotEqual(first, ollama)
+        XCTAssertNotNil(first.range(of: #"^byom_[a-z2-7]{52}$"#, options: .regularExpression))
+    }
+
+    // SPEC-046-R003 / SPEC-047: an opaque endpoint has no artifact hash and no
+    // catalog key, so the dry-run must not claim a catalog earning path and must
+    // not predict a submittable offer.
+    func testOpenAICompatibleOfferDryRunClaimsNoCatalogPath() async throws {
+        let root = try temporaryDirectory("byom-openai-dryrun")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let namespace = try seededNamespace(in: root)
+
+        let document = await BYOMOfferDryRunRunner(
+            target: "openai_compatible:opaque-mini-1b",
+            environment: BYOMDiscoveryEnvironment(
+                namespaceURL: namespace,
+                mlxCacheRoot: root.appendingPathComponent("hf", isDirectory: true),
+                ollamaOrigin: nil,
+                openAICompatibleOrigin: "http://127.0.0.1:39311"
+            ),
+            httpClient: StubBYOMHTTPClient(response: BYOMHTTPResponse(
+                statusCode: 200,
+                headers: [("content-type", "application/json")],
+                body: Data(#"{"data":[{"id":"opaque-mini-1b"}]}"#.utf8)
+            ))
+        ).dryRun()
+
+        XCTAssertEqual(document.servedModelRef, "openai_compatible:opaque-mini-1b")
+        XCTAssertNil(document.catalogModelKey)
+        XCTAssertFalse(document.wouldSubmit)
+        XCTAssertEqual(document.likelyAdmissionState, "local_only")
+        XCTAssertEqual(document.likelyAdmissionStateSource, "local_default")
+        XCTAssertEqual(document.reasonCode, "no_trusted_catalog_match")
+        XCTAssertEqual(document.providerGuidance.earningPathClass, "local_inventory_only")
+        XCTAssertNotEqual(
+            document.providerGuidance.stateMeaningKey,
+            "byom.offer_dry_run.catalog_path_missing_trusted_binding"
+        )
+    }
+
+    /// 0700 directory holding an 0600 32-byte salt, so discovery reports stable
+    /// `byom_` ids instead of `byom_unstable_` ones.
+    private func seededNamespace(in root: URL) throws -> URL {
+        let directory = root.appendingPathComponent("nsdir", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
+        let namespace = directory.appendingPathComponent("ns")
+        try Data(repeating: 0x5b, count: 32).write(to: namespace)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: namespace.path)
+        return namespace
+    }
+
     private func createMLXSnapshot(
         cacheRoot: URL,
         modelID: String,
