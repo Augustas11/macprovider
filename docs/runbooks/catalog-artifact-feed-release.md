@@ -20,8 +20,11 @@ artifact set to a candidate row would fail-close every deployed provider (§3.7.
 | `phase3-binary/catalog/autotune/intake-decision.json` | no | §16.8 manifest; its digest becomes the ledger row's `intake_decision_sha256`. REQUIRED whenever the release adds a `listed` row or promotes a row to `recommendable`: absence then fails the release closed rather than silently recording `null`. |
 | previous signed release DIRECTORY | — | `--previous-release-dir`, a REQUIRED input once an EARLIER release has been recorded with the artifact-bound feed set. Its `release.json`, feed digests, and detached signatures are verified against the trusted keyring, and its published artifact bindings must equal that release's ledger row exactly. |
 
-`autotune-artifacts.json` and its `.sig` are the published outputs, served at
-`/v1/catalog-artifacts` and `/v1/catalog-artifacts.sig`.
+`autotune-artifacts.json` and its `.sig` are the published outputs. This slice
+**generates, signs, binds, and records** them; it does not serve them. Their
+eventual serving routes are `/v1/catalog-artifacts` and
+`/v1/catalog-artifacts.sig`, which slices 2b/2c land (see "What the 2b/2c slices
+must land before activation").
 
 ## Activation state
 
@@ -245,6 +248,8 @@ python3 scripts/catalog-release.py generate \
   --previous-release-dir /path/to/<previous-release-id>-<candidate-sha16>
 AUTOTUNE_PREVIOUS_RELEASE_DIR=/path/to/<previous-release-id>-<candidate-sha16> \
   bash scripts/resign-autotune-static.sh
+python3 scripts/catalog-release.py verify \
+  --previous-release-dir /path/to/<previous-release-id>-<candidate-sha16>
 ```
 
 `scripts/renew-autotune-static-feed.sh` reads the same two variables and, once a
@@ -268,13 +273,32 @@ the catalog was only re-stamped. If a transition is present and
 `intake-decision.json` is absent, the release fails closed; if prior state cannot
 be established after activation, it fails closed too.
 
+`verify` re-derives that same transition verdict only when it is given the same
+authenticated input: run `verify --previous-release-dir <previous signed release
+directory>` after every post-activation cut. Without the flag, an artifact-bound
+release is verified in every other respect and `verify` prints an explicit
+`NOTICE` that the §3.7.8 transition rule was not re-derived — it never passes the
+rule silently. `verify-directory` has no ledger and no previous release, so a
+hand-assembled staged release is checked for transitions **only** by `verify
+--previous-release-dir` in the repository that holds the ledger.
+
+**Carried item for the first activation release cut.** CI runs
+`python3 scripts/catalog-release.py verify` with no previous-release snapshot, so
+post-activation CI will print the NOTICE rather than enforce the transition rule.
+Wiring a previous-release snapshot into that job belongs with the activation
+release cut, when the first artifact-bound release directory exists to snapshot;
+until then the enforcement point is the operator `generate` run, which fails
+closed. See `audits/2026-09-09-byom-v02-slice2a/AUDIT_BYOM_V02_SLICE2A_R3.md`.
+
 Serving is a 2b/2c surface: see "What the 2b/2c slices must land before
 activation" above.
 
 ## Stage A vs Stage B
 
-**Stage A (now).** The feed is generated, signed, served, bound in `release.json`,
-and recorded in the artifact-bound ledger feed set. It **MUST NOT** be added to
+**Stage A (now).** The feed is generated, signed, bound in `release.json`, and
+recorded in the artifact-bound ledger feed set. It is **not served**: packaging,
+publishing, the live gate, and the coordinator routes are 2b/2c surfaces this
+slice deliberately ships none of. It **MUST NOT** be added to
 the compatibility-set manifest's `components.catalog.files` map, which stays the
 exact nine-name set the deployed updater enforces. Only the producer-side
 `release.json` `feeds` check in `scripts/compatibility-set-manifest.py` is widened

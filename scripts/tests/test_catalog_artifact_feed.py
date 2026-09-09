@@ -56,7 +56,9 @@ import base64
 import contextlib
 import copy
 import importlib.util
+import io
 import json
+import math
 import pathlib
 import shutil
 import subprocess
@@ -1327,6 +1329,39 @@ class RateGlobalsTest(unittest.TestCase):
                 with self.subTest(value=case["value"]):
                     self.assertEqual(diverges, bool(case.get("decimal_divergence")))
 
+    def test_a_floor_half_add_port_would_fail_the_flagged_vectors(self):
+        """`math.Round` is NOT `floor(x + 0.5)`.
+
+        The sum is itself a rounded binary64: for a product immediately below a
+        half unit, `x + 0.5` can round up onto the next integer and carry the
+        value across a boundary it does not actually reach. Go compares the exact
+        fractional part instead, and `scaled_nonnegative_integer` must do the
+        same. Assert the `floor_half_add_divergence` annotation rather than trust
+        it, and require the table to still carry at least one such vector — the
+        guard is only a guard while a wrong port would go red on it.
+        """
+        table = json.loads(ROUNDING_CASES_PATH.read_text())
+        flagged = 0
+        for scale_key, cases_key, expected_key in (
+            ("share_scale", "shares", "expected_bps"),
+            ("multiplier_scale", "multipliers", "expected_ppm"),
+        ):
+            scale = table[scale_key]
+            for case in table[cases_key]:
+                product = float(case["value"]) * float(scale)
+                floor_half_add = int(math.floor(product + 0.5))
+                diverges = floor_half_add != case[expected_key]
+                with self.subTest(value=case["value"]):
+                    self.assertEqual(diverges, bool(case.get("floor_half_add_divergence")))
+                    self.assertEqual(
+                        catalog_release.scaled_nonnegative_integer(
+                            case["value"], scale, "vector"
+                        ),
+                        case[expected_key],
+                    )
+                flagged += bool(case.get("floor_half_add_divergence"))
+        self.assertGreaterEqual(flagged, 1)
+
     def test_scaled_conversion_rejects_a_non_finite_or_negative_value(self):
         for raw in (float("nan"), float("inf"), -0.5, "0.9", True):
             with self.subTest(raw=raw):
@@ -1894,6 +1929,165 @@ class HermeticReleaseTest(unittest.TestCase):
             harness.cut(previous_release_dir=demoted)
             row = harness.ledger()["releases"]["published-2026-09-22-promote-v1"]
             self.assertEqual(len(row["intake_decision_sha256"]), 64)
+
+    def test_verify_re_derives_the_intake_transition_with_the_previous_release(self):
+        """SPEC-023 §3.7.8 through `verify`, not only through `generate`.
+
+        `generate` is the only place the transition rule ran, so a hand-assembled
+        artifact-bound release that promotes a row while recording
+        `intake_decision_sha256: null` — with no `intake-decision.json` for the
+        digest to disagree with — verified clean. The rule needs the previous
+        release's candidate admission state, which the ledger carries only the
+        DIGEST of, so `verify` takes the same authenticated `--previous-release-dir`
+        input `generate` takes, and says so explicitly when it is absent.
+        """
+        with self.harness() as harness:
+            self.activate(harness)
+            previous = harness.stage(harness.root / "previous")
+
+            harness.bump("published-2026-09-21-demote-v1", "2026-09-21T00:00:00Z")
+            self.set_status(harness, "qwen3-8b", "candidate")
+            harness.cut(previous_release_dir=previous)
+            demoted = harness.stage(harness.root / "demoted")
+
+            promoted_id = "published-2026-09-22-promote-v1"
+            harness.bump(promoted_id, "2026-09-22T00:00:00Z")
+            self.set_status(harness, "qwen3-8b", "recommendable")
+            (harness.catalog / "intake-decision.json").write_text('{"decision":"promote qwen3-8b"}\n')
+            harness.cut(previous_release_dir=demoted)
+            catalog_release.verify(previous_release_dir=demoted)
+
+            # Hand-assemble the null: drop the intake decision AND the ledger
+            # digest together, so every OTHER equality `verify` checks still holds.
+            (harness.catalog / "intake-decision.json").unlink()
+            ledger_path = harness.catalog / "release-ledger.json"
+            ledger = json.loads(ledger_path.read_text())
+            ledger["releases"][promoted_id]["intake_decision_sha256"] = None
+            ledger_path.write_bytes(json.dumps(ledger, indent=2, sort_keys=True).encode() + b"\n")
+
+            # Without the previous release the verdict is not reconstructible, so
+            # `verify` must SAY that rather than pass silently.
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                catalog_release.verify()
+            self.assertIn("NOTICE", output.getvalue())
+            self.assertIn("intake_decision_sha256", output.getvalue())
+            self.assertIn("--previous-release-dir", output.getvalue())
+
+            with self.assertRaises(catalog_release.CatalogError) as caught:
+                catalog_release.verify(previous_release_dir=demoted)
+            self.assertIn("intake_decision_sha256 is null", str(caught.exception))
+            self.assertIn("qwen3-8b", str(caught.exception))
+
+    def test_emit_coordinator_rate_card_projects_a_class_only_row_pre_activation(self):
+        """The first activation is otherwise circular.
+
+        `rate_class` is authored on the artifact SOURCE and reaches the published
+        feed only at the activation cut, while the coordinator fallback row the
+        rule-9 parity gate demands has to be in `coordinator.yaml` BEFORE that cut
+        succeeds. Reading the classes through the published feed alone therefore
+        makes a class-only row unemittable exactly when the operator needs it.
+        """
+        with self.harness() as harness:
+            source_path = harness.catalog / "rate-card-source.json"
+            source = json.loads(source_path.read_text())
+            explicit = source["rows"].pop("qwen3-8b")
+            source_path.write_text(json.dumps(source, indent=2, sort_keys=True) + "\n")
+            self.assertNotIn("qwen3-8b", source["rows"])
+            self.assertFalse((harness.catalog / "autotune-artifacts.json").exists())
+
+            output_path = harness.root / "rewards-block.yaml"
+            catalog_release.cmd_emit_coordinator_rate_card(output_path)
+            block = output_path.read_text()
+            self.assertIn("    qwen3-8b:\n", block)
+
+            # The emitted block is the one the parity gate accepts, and the class
+            # rates it carries are the values that priced the key explicitly.
+            candidate_obj = catalog_release.validate_candidate(
+                (harness.catalog / "autotune-candidates.json").read_bytes()
+            )
+            candidate = catalog_release.canonical_bytes(candidate_obj)
+            rate_classes = catalog_release.authoring_rate_classes(candidate, candidate_obj)
+            self.assertEqual(rate_classes["qwen3-8b"], "class-8b")
+            rate_card = catalog_release.validate_rate_card(
+                catalog_release.resolve_rate_card(rate_classes, candidate_obj)
+            )
+            self.assertEqual(
+                {field: rate_card["rows"]["qwen3-8b"][field] for field in explicit},
+                explicit,
+            )
+            catalog_release.check_rate_card_parity(
+                rate_card,
+                "rewards:\n  global_multiplier: 1.0\n  provider_share: 0.90\n" + block,
+            )
+
+    def test_five_feed_release_passes_the_compatibility_manifest_catalog_component(self):
+        """AC-CAT-15 FUNCTIONALLY, not as a relation between two constants.
+
+        A test that only compares `ARTIFACT_BOUND_RELEASE_FEEDS` to
+        `RATE_CARD_BOUND_RELEASE_FEEDS | {feed}` stays green if the five-feed
+        branch stops reading the artifact body or emits the wrong `files` map. So
+        run the real `catalog_component` over a real generated five-feed release.
+        """
+        with self.harness() as harness:
+            release_id = self.activate(harness)
+            directory = harness.stage(harness.root / "component")
+            component = compatibility_set.catalog_component(directory, directory)
+
+            self.assertEqual(component["release_id"], release_id)
+            self.assertEqual(
+                sorted(component["files"]), sorted(compatibility_set.CATALOG_FILES)
+            )
+            self.assertNotIn("autotune-artifacts.json", component["files"])
+            for name, digest in component["files"].items():
+                with self.subTest(name):
+                    self.assertEqual(
+                        digest, catalog_release.sha256((directory / name).read_bytes())
+                    )
+
+            # The artifact feed is not in the `files` map, but it IS validated:
+            # release.json binds five feeds, so the body has to be there and match.
+            feed = (directory / "autotune-artifacts.json").read_bytes()
+            (directory / "autotune-artifacts.json").unlink()
+            with self.assertRaises(compatibility_set.ManifestError) as caught:
+                compatibility_set.catalog_component(directory, directory)
+            self.assertIn("autotune-artifacts.json", str(caught.exception))
+
+            corrupted = feed[:10] + bytes([feed[10] ^ 0x20]) + feed[11:]
+            self.assertEqual(len(corrupted), len(feed))
+            (directory / "autotune-artifacts.json").write_bytes(corrupted)
+            with self.assertRaises(compatibility_set.ManifestError) as caught:
+                compatibility_set.catalog_component(directory, directory)
+            self.assertIn("digest does not match", str(caught.exception))
+
+    def test_a_pre_activation_static_artifact_leftover_fails_verify(self):
+        """Artifact-feed presence must AGREE across the catalog directory,
+        dist/static, `release.json`, and the ledger. A body or sidecar left under
+        dist/static by an abandoned activation attempt is bound by nothing, yet
+        `resign-autotune-static.sh` would sign it and the release would ship a feed
+        no manifest, ledger row, or signer accounts for."""
+        for leftover in ("autotune-artifacts.json", "autotune-artifacts.json.sig"):
+            with self.subTest(leftover=leftover):
+                with self.harness() as harness:
+                    harness.bump("published-2026-09-20-leftover-v1", "2026-09-20T00:00:00Z")
+                    harness.cut()
+                    self.assertFalse((harness.catalog / "autotune-artifacts.json").exists())
+                    (harness.static / leftover).write_bytes(b"{}")
+                    with self.assertRaises(catalog_release.CatalogError) as caught:
+                        catalog_release.verify()
+                    self.assertIn("publishes no artifact feed", str(caught.exception))
+                    self.assertIn(leftover, str(caught.exception))
+
+    def test_the_signer_refuses_a_pre_activation_static_artifact_leftover(self):
+        """`resign-autotune-static.sh` signs whatever artifact body is present
+        under dist/static, so the same presence-agreement rule has to hold there:
+        the shell guard runs after `generate` and before any signing."""
+        script = (ROOT / "scripts" / "resign-autotune-static.sh").read_text()
+        guard = script.split('catalog-release.py" "${GENERATE_ARGS[@]}"', 1)[1].split("sign_one", 1)[0]
+        self.assertIn('if [ ! -f "$CATALOG_DIR/autotune-artifacts.json" ]; then', guard)
+        self.assertIn('-e "$STATIC_DIR/autotune-artifacts.json"', guard)
+        self.assertIn('-e "$STATIC_DIR/autotune-artifacts.json.sig"', guard)
+        self.assertIn("fatal", guard)
 
 
 class ReleaseOrderingTest(unittest.TestCase):

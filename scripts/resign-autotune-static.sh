@@ -6,7 +6,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 STATIC_DIR="$REPO_ROOT/phase3-binary/dist/static"
-TRUSTED_KEYS="$REPO_ROOT/phase3-binary/catalog/autotune/trusted-keys.json"
+CATALOG_DIR="$REPO_ROOT/phase3-binary/catalog/autotune"
+TRUSTED_KEYS="$CATALOG_DIR/trusted-keys.json"
 KEY_ID="${AUTOTUNE_STATIC_KEY_ID:-streamvc-autotune-static-v4}"
 KEY_VERSION="${KEY_ID##*-}"
 DEFAULT_KEY_PATH="$HOME/.config/macprovider/keys/autotune-static-${KEY_VERSION}.private.base64"
@@ -72,6 +73,17 @@ fi
 # Materialize canonical feed bytes before signing. Supplying the intended
 # signer avoids trusting or parsing stale sidecars while repairing a release.
 python3 "$REPO_ROOT/scripts/catalog-release.py" "${GENERATE_ARGS[@]}"
+
+# Artifact-feed presence must AGREE across the catalog directory, dist/static,
+# release.json, and the release ledger. `generate` writes both copies or neither,
+# so a static body or sidecar that survives a run publishing no feed is a
+# leftover that release.json and the ledger do not account for. Signing it would
+# stage a signed feed alongside the release that nothing binds; refuse instead.
+if [ ! -f "$CATALOG_DIR/autotune-artifacts.json" ]; then
+  if [ -e "$STATIC_DIR/autotune-artifacts.json" ] || [ -e "$STATIC_DIR/autotune-artifacts.json.sig" ]; then
+    fatal "this release publishes no artifact feed, but $STATIC_DIR/autotune-artifacts.json(.sig) exists; remove the stale static file or cut the activation release with AUTOTUNE_ACTIVATE_ARTIFACT_FEED=1"
+  fi
+fi
 
 private_b64="$(tr -d '[:space:]' < "$KEY_PATH")"
 [ -n "$private_b64" ] || fatal "private key file is empty"

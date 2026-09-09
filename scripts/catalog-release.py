@@ -994,12 +994,22 @@ def scaled_nonnegative_integer(raw: float, scale: int, label: str) -> int:
     coordinator never derives, so the parity rule (§3.3.1 rule 9) would be
     enforcing the wrong integer.
 
-    So: do exactly what Go does. `math.floor(x + 0.5)` is half-away-from-zero for
-    a non-negative binary64 `x` below 2**52 — below that bound every `x + 0.5` is
-    exactly representable, and at or above it every binary64 is already an
-    integer (where `x + 0.5` could round up and diverge from `math.Round`).
-    `scripts/tests/fixtures/rate_global_rounding_cases.json` pins the boundary
-    vectors against BOTH this port and the Go functions themselves.
+    So: do exactly what Go does. `math.Round` compares the FRACTIONAL PART to one
+    half; it never forms `x + 0.5`, and that distinction is not academic.
+    `math.floor(x + 0.5)` answers one unit HIGH whenever the binary64 SUM rounds
+    up onto the integer boundary `x` itself sits below — the value is then carried
+    across on an addition's rounding error rather than on its own magnitude. The
+    product `0.49999999999999994` (the largest binary64 below one half, which
+    `4.9999999999999996e-05 * 10000` produces exactly) is the case: `floor(x+0.5)`
+    answers 1 bps, `math.Round` answers 0, and the release gate would then accept
+    a signed `provider_share_bps` settlement never derives.
+
+    `x - math.floor(x)` is EXACT for every `0 <= x < 2**52`, so the comparison
+    below is Go's semantics with no intermediate rounding at all; at or above
+    2**52 every binary64 is already an integer.
+    `scripts/tests/fixtures/rate_global_rounding_cases.json` pins the vectors
+    IMMEDIATELY below and above the half-unit products against BOTH this port and
+    the Go functions themselves.
     """
     if not isinstance(raw, (int, float)) or isinstance(raw, bool):
         fail(f"{label}: expected a finite non-negative number, got {raw!r}")
@@ -1011,7 +1021,10 @@ def scaled_nonnegative_integer(raw: float, scale: int, label: str) -> int:
         fail(f"{label}: {raw!r} scaled by {scale} is not finite")
     if scaled >= 2.0 ** 52:
         return int(scaled)
-    return int(math.floor(scaled + 0.5))
+    truncated = math.floor(scaled)
+    if scaled - truncated >= 0.5:
+        return int(truncated) + 1
+    return int(truncated)
 
 
 def check_rate_card_parity(rate_card_obj: dict, coordinator_text: str) -> None:
@@ -2829,6 +2842,41 @@ def published_artifact_feed(
     return resolve_artifact_feed(candidate, candidate_obj)
 
 
+def authoring_rate_classes(candidate: bytes, candidate_obj: dict) -> dict[str, str]:
+    """The §3.3.1 `rate_class` map for AUTHORING-time projections of the rate card.
+
+    `rate_class` is authored on `autotune-artifacts-source.json` and only reaches
+    the published feed at the activation release cut. Reading the classes through
+    the PUBLISHED feed alone therefore deadlocks the first activation: a model key
+    priced solely by class expands to no published row before the feed exists, so
+    `emit-coordinator-rate-card` cannot emit the coordinator fallback row that
+    rule-9 parity requires before `generate --activate-artifact-feed` will publish
+    that same feed. The published bytes are the right authority for VERIFYING a
+    release; they are the wrong authority for projecting the config a not-yet-cut
+    release needs.
+
+    So: published feed when one exists, the authored source when none does, and —
+    because `published_artifact_feed` re-derives the published bytes from the
+    source — an explicit equality when both exist, stated here rather than left
+    implicit in byte reproduction.
+    """
+    _, artifact_obj = published_artifact_feed(candidate, candidate_obj, ARTIFACT_FEED_PATH)
+    if not ARTIFACT_SOURCE_PATH.exists():
+        return artifact_rate_classes(artifact_obj) if artifact_obj is not None else {}
+    source_obj = validate_artifact_source(ARTIFACT_SOURCE_PATH.read_bytes())
+    authored = artifact_rate_classes({"models": source_obj["models"]})
+    if artifact_obj is None:
+        return authored
+    published = artifact_rate_classes(artifact_obj)
+    if authored != published:
+        fail(
+            f"rate-card: {ARTIFACT_SOURCE_PATH.name} declares rate classes {authored} but the "
+            f"published {ARTIFACT_FEED_NAME} binds {published}; the authoring source and the "
+            "published feed must agree before either can price a release"
+        )
+    return published
+
+
 def resolve_rate_card(rate_classes: dict[str, str], candidate_obj: dict) -> bytes:
     """Materialise the published rate card, from `rate-card-source.json` when the
     operator has adopted the §3.3.1 authoring source and from the committed
@@ -3286,7 +3334,7 @@ def bootstrap(release_id: str, generated_at: str, policy_version: str) -> None:
     migrate_swift_source()
 
 
-def verify() -> None:
+def verify(previous_release_dir: pathlib.Path | None = None) -> None:
     candidate_path = CATALOG_DIR / "autotune-candidates.json"
     demand_path = CATALOG_DIR / "demand-rank.json"
     rate_card_path = CATALOG_DIR / RATE_CARD_FEED_NAME
@@ -3313,6 +3361,25 @@ def verify() -> None:
     }
     if artifacts is not None:
         expected[STATIC_DIR / ARTIFACT_FEED_NAME] = artifacts
+    else:
+        # Artifact-feed presence must AGREE across the catalog directory,
+        # dist/static, release.json, and the ledger. The manifest and ledger sides
+        # are equalities below; dist/static is not, because a pre-activation
+        # release simply omits the feed from `expected`. A body or sidecar left
+        # under dist/static would then be signed by `resign-autotune-static.sh`,
+        # published as a release asset, and bound by nothing — a feed the fleet
+        # could fetch that no release, ledger row, or signature set accounts for.
+        orphaned = [
+            path
+            for path in (STATIC_DIR / ARTIFACT_FEED_NAME, STATIC_DIR / f"{ARTIFACT_FEED_NAME}.sig")
+            if path.exists()
+        ]
+        if orphaned:
+            fail(
+                f"{', '.join(str(path) for path in orphaned)} exists but this release publishes no "
+                f"artifact feed ({ARTIFACT_FEED_PATH.name} is absent from the catalog directory and "
+                "no ledger row binds it); remove the stale static file or cut the activation release"
+            )
     for path, body in expected.items():
         if path.read_bytes() != body:
             fail(f"generated drift: {path}")
@@ -3345,6 +3412,35 @@ def verify() -> None:
     if not TIER2_BINDING_PATH.exists():
         fail(f"missing tier2 identity binding: {TIER2_BINDING_PATH}")
     validate_tier2_identity_binding(TIER2_BINDING_PATH.read_bytes(), candidate, candidate_obj)
+    # SPEC-023 §3.7.8: `intake_decision_sha256` may be null ONLY for a release
+    # that adds no `listed` row and promotes no row to `recommendable`. That is a
+    # TRANSITION rule, so deciding it needs the previous release's candidate
+    # admission state — which the ledger does not carry, only the digest of. With
+    # `--previous-release-dir` this re-derives the same verdict `generate` reached
+    # from the same authenticated input. Without it the verdict is not
+    # reconstructible, and `verify` says so instead of passing silently: a
+    # hand-assembled artifact-bound release that admits or promotes a row while
+    # recording `null` is exactly what a silent pass would bless.
+    if artifact_obj is not None:
+        history = release_history(ledger, release_id)
+        if previous_release_dir is not None:
+            previous_release = load_previous_release(previous_release_dir, history)
+            require_intake_decision(
+                candidate_obj,
+                previous_candidate_admission(candidate_obj, history, previous_release),
+                intake_decision_digest(),
+                activation=latest_artifact_bound_release(history) is None,
+            )
+            print(
+                f"verified intake-decision transitions for {release_id} against "
+                f"{previous_release['release_id']}"
+            )
+        else:
+            print(
+                f"verify: NOTICE: release {release_id} is artifact-bound and its "
+                "intake_decision_sha256 transition rule (SPEC-023 §3.7.8) was NOT re-derived; "
+                "pass --previous-release-dir <previous signed release directory> to check it"
+            )
     keys = keyring()
     for path, body in expected.items():
         sidecar_path = pathlib.Path(str(path) + ".sig")
@@ -3429,11 +3525,17 @@ def cmd_emit_coordinator_rate_card(output_path: pathlib.Path | None) -> None:
     the reviewed config and the rule-9 parity gate (`check_rate_card_parity`,
     enforced by `generate` and `verify`) then refuses to cut a release until the
     two sides agree row-for-row.
+
+    The `rate_class` map comes from `authoring_rate_classes`, so a class-only row
+    projects its coordinator fallback BEFORE the activation release publishes the
+    artifact feed. Emitting is a projection of reviewed authoring inputs, not a
+    verification of published bytes: requiring the published feed here would make
+    the first activation circular, since the release that publishes it will not be
+    cut until parity already holds.
     """
     candidate_obj = validate_candidate((CATALOG_DIR / "autotune-candidates.json").read_bytes())
     candidate = canonical_bytes(candidate_obj)
-    _, artifact_obj = published_artifact_feed(candidate, candidate_obj, ARTIFACT_FEED_PATH)
-    rate_classes = artifact_rate_classes(artifact_obj) if artifact_obj is not None else {}
+    rate_classes = authoring_rate_classes(candidate, candidate_obj)
     rate_card_obj = validate_rate_card(resolve_rate_card(rate_classes, candidate_obj))
     block = coordinator_rate_card_yaml(rate_card_obj)
     if output_path is not None:
@@ -3591,7 +3693,19 @@ def main() -> int:
             "Refused while any generator-side prerequisite is unmet; see `status`."
         ),
     )
-    sub.add_parser("verify")
+    verify_parser = sub.add_parser("verify")
+    verify_parser.add_argument(
+        "--previous-release-dir",
+        type=pathlib.Path,
+        help=(
+            "previous artifact-bound release directory, authenticated exactly as `generate` "
+            "authenticates it. Supplying it re-derives the SPEC-023 §3.7.8 intake-decision "
+            "transition rule (whether intake_decision_sha256 may be null) from the previous "
+            "release's candidate admission state. Without it, an artifact-bound release is "
+            "verified in every other respect and `verify` prints a NOTICE that the transition "
+            "rule was not re-derived"
+        ),
+    )
     sub.add_parser(
         "status",
         help="print the artifact-feed activation state and its outstanding prerequisites",
@@ -3601,7 +3715,16 @@ def main() -> int:
         help="print the rewards.rate_card: block the published rate card requires",
     )
     coordinator_parser.add_argument("--output", type=pathlib.Path)
-    directory_parser = sub.add_parser("verify-directory")
+    directory_parser = sub.add_parser(
+        "verify-directory",
+        help=(
+            "verify a staged release directory's feeds, manifest bindings, and signatures. "
+            "It has no release ledger and no previous release, so the SPEC-023 §3.7.8 "
+            "intake-decision TRANSITION rule is NOT checked here: a hand-assembled release is "
+            "checked for transitions only by `verify --previous-release-dir` in the repository "
+            "that holds the ledger"
+        ),
+    )
     directory_parser.add_argument("--directory", required=True, type=pathlib.Path)
     directory_parser.add_argument("--tier2-public-key-file", type=pathlib.Path)
     directory_parser.add_argument("--tier2-coordinator-config", type=pathlib.Path)
@@ -3653,7 +3776,7 @@ def main() -> int:
         elif args.command == "generate":
             generate(args.signer_key_id, args.previous_release_dir, args.activate_artifact_feed)
         elif args.command == "verify":
-            verify()
+            verify(args.previous_release_dir)
         elif args.command == "status":
             cmd_status()
         elif args.command == "emit-coordinator-rate-card":
