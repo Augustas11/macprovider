@@ -278,7 +278,7 @@ struct ModelsAdmissionStatusCommand: AsyncParsableCommand {
             throw ExitCode(2)
         }
         do {
-            let resolved = try loadModelAdmissionConfig(
+            let resolved = try loadModelAdmissionStatusConfig(
                 config: config,
                 coordinatorURL: coordinatorURL,
                 providerID: providerID
@@ -289,7 +289,7 @@ struct ModelsAdmissionStatusCommand: AsyncParsableCommand {
                 ollamaOrigin: skipOllama ? nil : ollamaOrigin,
             openAICompatibleOrigin: skipOpenaiCompatible ? nil : openaiCompatibleOrigin
             )
-            let client = try BYOMModelAdmissionClient(coordinatorURL: resolved.coordinatorURL)
+            let client = try resolved.coordinatorURL.map { try BYOMModelAdmissionClient(coordinatorURL: $0) }
             let runtime = BYOMModelAdmissionRuntime(
                 environment: environment,
                 credentialStore: ProviderCredentialStoreFactory.providerStore(for: resolved.config),
@@ -537,6 +537,37 @@ struct ModelsCatalogEconomicsCommand: AsyncParsableCommand {
         resolved.coordinatorURL = coordinatorURL
         return (resolved, coordinatorURL, providerID)
     }
+}
+
+/// Status is the one admission command that is meaningful without a coordinator:
+/// SPEC-046-R003's local ladder reports `not_offered` under
+/// `admission_state_source: local_default` when coordinator state "is unavailable
+/// or has not been queried". Offer submission and withdrawal mutate coordinator
+/// state and keep requiring a coordinator URL through `loadModelAdmissionConfig`.
+private func loadModelAdmissionStatusConfig(
+    config: String?,
+    coordinatorURL: String?,
+    providerID: String?
+) throws -> (config: AppConfig, coordinatorURL: String?, providerID: String) {
+    var resolved = try ConfigLoader.load(cli: CLIOverrides(
+        coordinatorURL: coordinatorURL,
+        providerID: providerID,
+        configPath: config
+    ))
+    guard let providerID = resolved.providerID?.trimmingCharacters(in: .whitespacesAndNewlines),
+          !providerID.isEmpty else {
+        throw BYOMModelAdmissionError.missingProviderID
+    }
+    let trimmedCoordinatorURL = resolved.coordinatorURL?
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+        .nonEmpty
+    resolved.providerID = providerID
+    resolved.coordinatorURL = trimmedCoordinatorURL
+    return (resolved, trimmedCoordinatorURL, providerID)
+}
+
+private extension String {
+    var nonEmpty: String? { isEmpty ? nil : self }
 }
 
 private func loadModelAdmissionConfig(

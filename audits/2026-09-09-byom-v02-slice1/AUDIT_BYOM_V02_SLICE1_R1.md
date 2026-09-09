@@ -86,7 +86,7 @@ through the full generic scanner. Any failure fails the run and therefore step
 08. The run-specific forbidden-string check is retained as an additional
 assertion at `:979-1000`, now including the coordinator sink's origin and port.
 
-### F3 — Step 10 asserts `not_offered` guidance it never observes — NOT RESOLVED
+### F3 — Step 10 asserts `not_offered` guidance it never observes — resolved
 
 Lanes: code-reviewer, security-reviewer, architect. **Carried as BLOCKING.**
 
@@ -137,10 +137,61 @@ means adding a CLI code path that produces that label with guidance — a
 governed wire-behaviour change under SPEC-046-R003/R008 that belongs in its own
 change with its own SPEC confirmation.
 
-Per the audit-fix scope, work stopped on this item. The step-10 code and
-assertion were **left exactly as they are**: not narrowed, and not made to pass
-against a surface that does not exist. **This finding remains open and the
-0 C / 0 H / 0 M merge bar is NOT met for this slice.**
+**Resolution.** The CLI now produces the ladder row. `models admission status
+<candidate> --json` emits a `model_admission_status.v1` document with
+`admission_state_source: "local_default"`, `admission_state: "not_offered"`,
+`coordinator_event_id` and `state_observed_at` null, `allowed_next_states` empty
+(SPEC-047-R002 for a candidate that has not entered coordinator admission),
+`provider_guidance.transition_reason_code: "coordinator_state_unavailable"`, and
+the same warning code in `warnings`, in exactly two situations: no coordinator is
+configured, or a configured coordinator is unreachable or serves no admission
+route (404/405). 401/403, 503 (which keeps its #1448 `wait_for_coordinator`
+mapping), any other status, and any decodable response all stay errors.
+
+- `phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:23-26` —
+  `BYOMDiscoveryWarning.coordinatorStateUnavailable`, the R003 warning code
+  nothing emitted before.
+- `phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:4181-4200` —
+  `BYOMDiscoveryGuidance.localNotOfferedGuidance(warnings:)`. The reason code is
+  the R003 warning code; the next action is taken from the `offerable` row so the
+  two rows stay action-neutral as the ladder requires (`evaluate` while the
+  candidate is unevaluated, `offer_dry_run` otherwise); the earning path class is
+  the existing local `local_inventory_only`.
+- `phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:1788-1824` —
+  `BYOMModelAdmissionRuntime.status` falls through to the local ladder for an
+  absent route or an unreachable host, and only for those.
+- `phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:1826-1850` —
+  `isAdmissionRouteAbsent` / `isCoordinatorUnreachable`, the closed trigger set.
+- `phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:1852-1893` —
+  `localDefaultStatus`: an `offerable` candidate takes the `not_offered` row, a
+  `local_only` candidate keeps its own state and guidance, an unresolvable target
+  is `candidateNotFound` rather than invented inventory, and the source is never
+  `coordinator`.
+- `phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:694-729` —
+  `BYOMAdmissionStatusWire.encode(to:)` writes the nullable keys explicitly, so
+  the emitted document satisfies the closed SPEC-047-R002 envelope and round-trips
+  through `decodeStrictStatus`.
+- `phase3-binary/Sources/macprovider-cli/ModelsSubcommand.swift:281-300,
+  541-572` — `models admission status` accepts a missing `coordinator_url` and
+  builds no client; offer and withdrawal still require one.
+- `test/e2e/byom/run-discovery-journey.py:922-988` — step 10 reaches the row
+  through `models admission status` with no coordinator configured at all, and
+  asserts the coordinator sink ledger and connection count are unchanged across
+  it. The step-10 assertion now states exactly what is checked: all three states
+  report a closed next action; `local_only` and `not_offered` each report a
+  non-null local transition reason; `offerable` reports the nullable field with
+  no blocker to name (SPEC-046-R003 makes it nullable, and inventing a code for
+  an unblocked candidate was rejected).
+
+Tests: `phase3-binary/Tests/macprovider-cliTests/BYOMAdmissionTests.swift:669-727`
+(pre-BYOM 404/405 — transport still refuses to fabricate a coordinator state, and
+the runtime now answers with the local-default document), `:728-755` (a decodable
+unknown schema stays an error), `:757-802` (no coordinator configured: the
+document, plus zero probe requests), `:804-830` (unreachable coordinator: the
+document, plus exactly one attempted request), `:832-855` (401/403 stay errors),
+`:857-883` (503 keeps the `wait_for_coordinator` mapping), `:885-918`
+(`local_only` candidate keeps its own row), `:920-940` (the document round-trips
+through the strict decoder with its nullable keys present as null).
 
 ### F4 — Two negative observations were literals, not measurements
 
@@ -243,10 +294,8 @@ stays inside the existing vocabulary.
 
 ## Carried items
 
-- **F3 (MEDIUM × 3 lanes) — OPEN, blocking.** No CLI surface produces
-  local-default `not_offered` with `provider_guidance`. Step 10's assertion still
-  overstates what was observed. Closing it requires a CLI change under SPEC-046
-  (see F3 above), tracked separately.
+- **F3 (MEDIUM × 3 lanes) — resolved.** The CLI change described under F3 above
+  landed in this branch; no item is carried.
 - INFO (code-reviewer, architect): the adapter's reuse of the shared origin
   validator, bounded no-proxy/no-redirect transport, and runtime-reference guard
   was confirmed correct by all three lanes; no SSRF or loopback escape was found;
@@ -256,5 +305,6 @@ stays inside the existing vocabulary.
 
 ## Merge bar
 
-0 CRITICAL / 0 HIGH / 0 MEDIUM required. F1, F2, F4, F5, F6, F7, F8 are
-resolved. **F3 is open**, so the bar is not yet met.
+0 CRITICAL / 0 HIGH / 0 MEDIUM required. F1 through F8 are resolved. The fixes
+have not yet been re-audited as a combined diff; re-run the three lanes over the
+full fix before merging.

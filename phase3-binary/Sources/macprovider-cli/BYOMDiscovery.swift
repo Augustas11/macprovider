@@ -20,6 +20,10 @@ enum BYOMDiscoveryWarning: String, Codable, Sendable {
     case evaluationFailed = "evaluation_failed"
     case requiresPreparation = "requires_preparation"
     case namespacePermissionInvalid = "namespace_permission_invalid"
+    /// SPEC-046-R003: no coordinator admission state could be read for the
+    /// candidate, so the CLI reports the local ladder's `not_offered` row under
+    /// `admission_state_source: local_default` instead of a coordinator state.
+    case coordinatorStateUnavailable = "coordinator_state_unavailable"
 }
 
 extension BYOMDiscoveryWarning {
@@ -685,6 +689,41 @@ struct BYOMAdmissionStatusWire: Codable, Equatable, Sendable {
         case providerGuidance = "provider_guidance"
         case allowedNextStates = "allowed_next_states"
         case warnings
+    }
+
+    /// SPEC-047-R002 makes this a closed envelope: `catalog_model_key`,
+    /// `coordinator_event_id`, and `state_observed_at` are nullable KEYS, not
+    /// optional ones, and `decodeStrictStatus` requires the exact key set. The
+    /// synthesized encoder would drop a nil key entirely, so encode the nulls
+    /// explicitly, exactly as `Guidance` and `Candidate` already do.
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(schema, forKey: .schema)
+        try container.encode(generatedAt, forKey: .generatedAt)
+        try container.encode(cliVersion, forKey: .cliVersion)
+        try container.encode(providerID, forKey: .providerID)
+        try container.encode(candidateID, forKey: .candidateID)
+        try container.encode(servedModelRef, forKey: .servedModelRef)
+        try encodeNullableString(catalogModelKey, forKey: .catalogModelKey, into: &container)
+        try container.encode(admissionState, forKey: .admissionState)
+        try container.encode(admissionStateSource, forKey: .admissionStateSource)
+        try encodeNullableString(coordinatorEventID, forKey: .coordinatorEventID, into: &container)
+        try encodeNullableString(stateObservedAt, forKey: .stateObservedAt, into: &container)
+        try container.encode(providerGuidance, forKey: .providerGuidance)
+        try container.encode(allowedNextStates, forKey: .allowedNextStates)
+        try container.encode(warnings, forKey: .warnings)
+    }
+
+    private func encodeNullableString(
+        _ value: String?,
+        forKey key: CodingKeys,
+        into container: inout KeyedEncodingContainer<CodingKeys>
+    ) throws {
+        if let value {
+            try container.encode(value, forKey: key)
+        } else {
+            try container.encodeNil(forKey: key)
+        }
     }
 }
 
@@ -1689,14 +1728,17 @@ struct BYOMModelAdmissionRuntime: Sendable {
     let environment: BYOMDiscoveryEnvironment
     let credentialStore: any ProviderCredentialStoring
     let identityStore: any ProviderIdentityKeyStoring
-    let client: BYOMModelAdmissionClient
+    /// Nil when no coordinator URL is configured. Status then stays entirely on
+    /// the SPEC-046-R003 local ladder and opens no connection at all; offers and
+    /// withdrawals still require a coordinator and fail closed without one.
+    let client: BYOMModelAdmissionClient?
     let httpClient: any BYOMDiscoveryHTTPClient
 
     init(
         environment: BYOMDiscoveryEnvironment,
         credentialStore: any ProviderCredentialStoring = KeychainProviderCredentialStore(),
         identityStore: any ProviderIdentityKeyStoring = KeychainReceiptKeyStore(),
-        client: BYOMModelAdmissionClient,
+        client: BYOMModelAdmissionClient?,
         httpClient: any BYOMDiscoveryHTTPClient = BYOMURLSessionHTTPClient()
     ) {
         self.environment = environment
@@ -1712,6 +1754,9 @@ struct BYOMModelAdmissionRuntime: Sendable {
         evaluationDigestSHA256: String?,
         requestedDisclosureClass: String
     ) async throws -> BYOMAdmissionStatusWire {
+        guard let client else {
+            throw BYOMModelAdmissionError.missingCoordinatorURL
+        }
         // Submitting an offer is a deliberate mutating command: the coordinator
         // records the admission event keyed by candidate_id, so the id must be
         // stable. Provision the local identity salt first (idempotent, local CLI
@@ -1743,14 +1788,113 @@ struct BYOMModelAdmissionRuntime: Sendable {
     func status(providerID: String, target: String) async throws -> BYOMAdmissionStatusWire {
         let candidate = await resolveCandidate(target)
         let candidateID = candidate?.candidateID ?? target.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let client else {
+            // No coordinator is configured, so coordinator state "has not been
+            // queried" in the SPEC-046-R003 sense. Report the local ladder
+            // without opening a connection: this path performs no request at all.
+            return try Self.localDefaultStatus(
+                providerID: providerID,
+                candidateID: candidateID,
+                candidate: candidate
+            )
+        }
         guard let bearer = try credentialStore.load(providerID: providerID) else {
             throw BYOMModelAdmissionError.missingBearer(providerID: providerID)
         }
-        let status = try await client.status(candidateID: candidateID, providerID: providerID, bearerToken: bearer)
-        return status.withLocalCandidateIdentityIfCoordinatorHasNoOffer(candidate)
+        do {
+            let status = try await client.status(candidateID: candidateID, providerID: providerID, bearerToken: bearer)
+            return status.withLocalCandidateIdentityIfCoordinatorHasNoOffer(candidate)
+        } catch let error as BYOMModelAdmissionError where Self.isAdmissionRouteAbsent(error) {
+            // A pre-BYOM coordinator serves no SPEC-047 admission route. That is
+            // "coordinator state is unavailable", not an authentication, policy,
+            // or schema fault, so the local ladder answers instead of an error.
+            return try Self.localDefaultStatus(
+                providerID: providerID,
+                candidateID: candidateID,
+                candidate: candidate
+            )
+        } catch let error as URLError where Self.isCoordinatorUnreachable(error) {
+            return try Self.localDefaultStatus(
+                providerID: providerID,
+                candidateID: candidateID,
+                candidate: candidate
+            )
+        }
+    }
+
+    /// 404/405 only: the coordinator answered, but serves no admission route.
+    /// Every other HTTP status stays an error — 401/403 are provider auth faults
+    /// the operator must fix, 503 keeps its #1448 `wait_for_coordinator` mapping,
+    /// and any other 5xx is an unexplained coordinator fault that must not be
+    /// relabelled as "no offer is known for this candidate".
+    private static func isAdmissionRouteAbsent(_ error: BYOMModelAdmissionError) -> Bool {
+        error == .httpStatus(404) || error == .httpStatus(405)
+    }
+
+    /// The request never reached a coordinator that could answer. A decodable
+    /// response, including an unknown or invalid schema, is deliberately absent:
+    /// that is a coordinator contract fault and stays an error.
+    private static func isCoordinatorUnreachable(_ error: URLError) -> Bool {
+        switch error.code {
+        case .cannotConnectToHost,
+             .cannotFindHost,
+             .dnsLookupFailed,
+             .timedOut,
+             .networkConnectionLost,
+             .notConnectedToInternet:
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// The SPEC-046-R003 local ladder as a `model_admission_status.v1` document.
+    ///
+    /// A locally eligible (`offerable`) candidate takes the ladder's `not_offered`
+    /// row: no active coordinator offer is known, because coordinator state is
+    /// unavailable or has not been queried. A `local_only` candidate keeps its own
+    /// state and guidance — its blocker is local, and coordinator reachability
+    /// does not move it. `allowed_next_states` is empty because the candidate has
+    /// not entered coordinator admission (SPEC-047-R002), and the source is never
+    /// `coordinator`, so no coordinator state is fabricated.
+    private static func localDefaultStatus(
+        providerID: String,
+        candidateID: String,
+        candidate: BYOMDiscoveryWire.Candidate?
+    ) throws -> BYOMAdmissionStatusWire {
+        // With no local candidate there is no local state to report: answering
+        // for an unknown candidate would invent inventory rather than report it.
+        guard let candidate, candidate.candidateID == candidateID else {
+            throw BYOMModelAdmissionError.candidateNotFound
+        }
+        let localWarnings = Set(candidate.warningCodes)
+        let isOfferable = candidate.admissionState == "offerable"
+        return BYOMAdmissionStatusWire(
+            schema: "model_admission_status.v1",
+            generatedAt: ModelSwitchingWireCodec.timestamp(),
+            cliVersion: CoordinatorClient.binaryVersion,
+            providerID: providerID,
+            candidateID: candidate.candidateID,
+            servedModelRef: candidate.servedModelRef,
+            catalogModelKey: candidate.catalogModelKey,
+            admissionState: isOfferable ? "not_offered" : candidate.admissionState,
+            admissionStateSource: "local_default",
+            coordinatorEventID: nil,
+            stateObservedAt: nil,
+            providerGuidance: isOfferable
+                ? BYOMDiscoveryGuidance.localNotOfferedGuidance(warnings: localWarnings)
+                : candidate.providerGuidance,
+            allowedNextStates: [],
+            warnings: localWarnings
+                .union([BYOMDiscoveryWarning.coordinatorStateUnavailable.rawValue])
+                .sorted()
+        )
     }
 
     func withdraw(providerID: String, target: String, reasonCode: String) async throws -> BYOMAdmissionWithdrawWire {
+        guard let client else {
+            throw BYOMModelAdmissionError.missingCoordinatorURL
+        }
         let candidate = await resolveCandidate(target)
         let candidateID = candidate?.candidateID ?? target.trimmingCharacters(in: .whitespacesAndNewlines)
         guard candidate != nil || BYOMWithdrawalBuilder.isStableCandidateID(candidateID) else {
@@ -4033,6 +4177,25 @@ enum BYOMDiscoveryGuidance {
             nextAction: blocked ? "fix_local_blocker" : "evaluate",
             transitionReasonCode: warnings.sorted().first,
             earningPathClass: "local_inventory_only"
+        )
+    }
+
+    /// Guidance for the SPEC-046-R003 local ladder's `not_offered` row under
+    /// `admission_state_source: local_default`, which the ladder defines as
+    /// "coordinator state is unavailable or has not been queried". The candidate
+    /// is locally eligible, so the next action is the ladder's own — status
+    /// readback, offer dry-run, or a refreshed offer — which is exactly the
+    /// `offerable` row's action, including its evaluate-first preference for an
+    /// unevaluated candidate. The label change between `offerable` and
+    /// `not_offered` is action-neutral, so the two rows MUST NOT disagree here.
+    static func localNotOfferedGuidance(warnings: Set<String>) -> BYOMDiscoveryWire.Guidance {
+        let offerable = guidance(forAdmissionState: "offerable", warnings: warnings)
+        return BYOMDiscoveryWire.Guidance(
+            stateLabelKey: "byom.local.not_offered",
+            stateMeaningKey: "byom.local.not_offered_coordinator_state_unavailable",
+            nextAction: offerable.nextAction,
+            transitionReasonCode: BYOMDiscoveryWarning.coordinatorStateUnavailable.rawValue,
+            earningPathClass: offerable.earningPathClass
         )
     }
 

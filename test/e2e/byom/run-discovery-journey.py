@@ -48,6 +48,16 @@ MLX_SNAPSHOT_REVISION = "0123456789abcdef0123456789abcdef01234567"
 OLLAMA_MODEL_NAME = "tiny-ollama-1b-q4"
 OPAQUE_MODEL_ID = "opaque-mini-1b"
 OPAQUE_SERVED_MODEL_REF = "openai_compatible:" + OPAQUE_MODEL_ID
+# Local provider identity for the step-10 status readback. `models admission
+# status` needs a provider id even when it never reaches a coordinator, because
+# `model_admission_status.v1` carries one; it is local config, not a credential.
+LADDER_PROVIDER_ID = "provider-byom-discovery-journey"
+# SPEC-046-R003 `provider_guidance.next_action` enum, closed.
+NEXT_ACTIONS = (
+    "fix_local_blocker", "evaluate", "offer_dry_run", "submit_offer",
+    "revise_and_reoffer", "check_status", "withdraw", "wait_for_coordinator",
+    "maintain_runtime", "none",
+)
 # Distinctive so the step-08 scan can prove no completion text was ever echoed.
 COMPLETION_MARKER = "byomprobecompletionmarker"
 
@@ -343,12 +353,15 @@ class Runner:
         self.cwd = cwd
         self.transcript = []
 
-    def run(self, args):
+    def run(self, args, env=None):
+        """Run one CLI command. `env` overrides the runner's environment for a
+        command that must see a different one -- step 10 runs `models admission
+        status` with no coordinator configured at all."""
         label = " ".join(args[:3])
         completed = subprocess.run(
             [str(self.cli)] + args,
             cwd=str(self.cwd),
-            env=self.env,
+            env=self.env if env is None else env,
             text=True,
             capture_output=True,
         )
@@ -878,11 +891,7 @@ def main():
         for candidate in offerable + local_only:
             guidance = candidate.get("provider_guidance") or {}
             assert_true(
-                guidance.get("next_action") in (
-                    "fix_local_blocker", "evaluate", "offer_dry_run", "submit_offer",
-                    "revise_and_reoffer", "check_status", "withdraw", "wait_for_coordinator",
-                    "maintain_runtime", "none",
-                ),
+                guidance.get("next_action") in NEXT_ACTIONS,
                 "a ladder candidate reported no closed next action",
             )
             assert_true(
@@ -894,7 +903,89 @@ def main():
                 (candidate.get("provider_guidance") or {}).get("transition_reason_code"),
                 "a local_only candidate reported no local transition reason",
             )
+        for candidate in offerable:
+            # SPEC-046-R003 makes `transition_reason_code` nullable and the
+            # `offerable` ladder row has no reason to carry: nothing has moved the
+            # candidate and nothing is blocking it. The field must still be
+            # reported rather than omitted, and it must not carry an invented code.
+            guidance = candidate.get("provider_guidance") or {}
+            assert_true(
+                "transition_reason_code" in guidance,
+                "an offerable candidate omitted the local transition reason field",
+            )
+            assert_true(
+                guidance.get("transition_reason_code") is None,
+                "an offerable candidate reported a transition reason with no blocker",
+            )
         manifest.capture("discover-state-ladder", ladder_document)
+
+        # local-default `not_offered` is the third ladder row: the candidate is
+        # locally eligible, but no coordinator offer state is known because no
+        # coordinator has been queried. Run the status readback with NO
+        # coordinator configured, so the CLI must answer from local inventory and
+        # the coordinator sink ledger stays empty (F4).
+        # A harness-owned config with a provider id and no `coordinator_url`.
+        # `models admission status` is the one journey command that reads the
+        # config file, and config-path expansion resolves `~` from the account
+        # rather than from `HOME`, so an operator's real config would otherwise
+        # supply this run's provider id and coordinator.
+        harness_config = temp_root / "harness-config.yaml"
+        harness_config.write_text("provider_id: %s\n" % LADDER_PROVIDER_ID, encoding="utf-8")
+        harness_config.chmod(0o600)
+        ladder_status_env = dict(env)
+        ladder_status_env.pop("MACPROVIDER_COORDINATOR_URL", None)
+        coordinator_requests_before = len(coordinator.state["requests"])
+        coordinator_connections_before = coordinator.state["connections"]
+        status_document = runner.run(
+            ["models", "admission", "status", MLX_MODEL_ID, "--json", "--skip-ollama",
+             "--config", str(harness_config),
+             "--provider-id", LADDER_PROVIDER_ID] + local_args,
+            env=ladder_status_env,
+        )
+        assert_true(
+            status_document.get("schema") == "model_admission_status.v1",
+            "wrong admission status schema",
+        )
+        assert_true(
+            status_document.get("admission_state_source") == "local_default",
+            "the unqueried-coordinator readback claimed coordinator authority",
+        )
+        assert_true(
+            status_document.get("admission_state") == "not_offered",
+            "the unqueried-coordinator readback did not report not_offered",
+        )
+        assert_true(
+            status_document.get("coordinator_event_id") is None
+            and status_document.get("state_observed_at") is None,
+            "a local-default readback carried coordinator event material",
+        )
+        assert_true(
+            status_document.get("allowed_next_states") == [],
+            "a local-default readback offered coordinator next states",
+        )
+        status_guidance = status_document.get("provider_guidance") or {}
+        assert_true(
+            status_guidance.get("next_action") in NEXT_ACTIONS,
+            "the not_offered row reported no closed next action",
+        )
+        assert_true(
+            status_guidance.get("transition_reason_code") == "coordinator_state_unavailable",
+            "the not_offered row reported no local transition reason",
+        )
+        assert_true(
+            status_guidance.get("earning_path_class") == "local_inventory_only",
+            "the not_offered row claimed an earning path",
+        )
+        assert_true(
+            "coordinator_state_unavailable" in (status_document.get("warnings") or []),
+            "the not_offered row did not disclose why coordinator state is absent",
+        )
+        assert_true(
+            len(coordinator.state["requests"]) == coordinator_requests_before
+            and coordinator.state["connections"] == coordinator_connections_before,
+            "the unconfigured-coordinator readback reached a coordinator",
+        )
+        manifest.capture("admission-status-state-ladder", status_document)
 
         # A missing namespace is the other route into local_only: the candidate id
         # is unstable, so the CLI must refuse to treat the candidate as offerable.
@@ -918,9 +1009,11 @@ def main():
         )
         manifest.capture("discover-state-ladder-unstable", unstable_document)
 
-        # local-default `not_offered` is the coordinator-unqueried label, which the
-        # catalog-economics projection reports for catalog rows with no local
-        # candidate; discovery itself reports only local_only and offerable.
+        # The catalog-economics projection reports the same coordinator-unqueried
+        # label for catalog rows that have no local candidate at all, and gates
+        # settlement and catalog economics closed on it. Discovery itself still
+        # reports only local_only and offerable; the status readback above is the
+        # surface that reports `not_offered` with guidance.
         economics = runner.run(
             ["models", "catalog-economics", "--json", "--skip-coordinator-status", "--skip-ollama"]
             + local_args
@@ -954,11 +1047,17 @@ def main():
         manifest.observe("state_boundary_preserved", True)
         manifest.add_step(
             "step-10-local-state-ladder",
-            "local_only, offerable, and local-default not_offered each reported their next action "
-            "and local transition reason.",
+            "local_only, offerable, and local-default not_offered each reported a closed next "
+            "action; local_only and not_offered each reported a non-null local transition reason, "
+            "and offerable reported the nullable reason field with no blocker to name.",
             [
                 manifest.document(
                     "discover-state-ladder", "provider_byom_discovery.v1", "discover-state-ladder"
+                ),
+                manifest.document(
+                    "admission-status-state-ladder",
+                    "model_admission_status.v1",
+                    "admission-status-state-ladder",
                 ),
                 manifest.document(
                     "discover-state-ladder-unstable",

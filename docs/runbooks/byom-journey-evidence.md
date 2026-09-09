@@ -111,6 +111,14 @@ a manifest exists only for a run where all ten steps passed.
 against its output, which is how CI proves the driver and the governance tables
 have not drifted apart.
 
+Step 10 reaches the ladder's local-default `not_offered` row by running `models
+admission status <offerable candidate> --json` with no coordinator configured at
+all — a harness-owned config with a provider id and no `coordinator_url`, and
+`MACPROVIDER_COORDINATOR_URL` removed from that one command's environment — so
+the CLI answers from local inventory, the document carries
+`admission_state_source: local_default` with the `coordinator_state_unavailable`
+warning, and the coordinator sink ledger stays empty.
+
 Captured CLI documents are stored **whole**. Nothing is stripped before hashing,
 so the digest binds the CLI's complete closed envelope, including the
 SPEC-046-R003 `provider_guidance` localization keys. Those two fields —
