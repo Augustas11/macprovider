@@ -151,6 +151,7 @@ test-dist:
 	bash phase3-binary/dist/test/install_config_path_escape.test.sh
 	bash phase3-binary/dist/test/install_stapler_validate.test.sh
 	bash scripts/test-catalog-release.sh
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_catalog_artifact_feed
 	bash scripts/test-autotune-gate-matrix.sh
 	bash -n phase4-coordinator/dist/deploy-pearl-vps.sh
 	bash -n phase4-coordinator/dist/deploy-malibu-emission-pearl.sh
