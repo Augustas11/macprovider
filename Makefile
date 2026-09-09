@@ -6,7 +6,7 @@
 # targets below to preserve parallel jobs and failure isolation.
 
 .PHONY: test test-coordinator test-coordinator-integration test-gateway test-integration test-dist \
-        test-byom-e2e \
+        test-byom-e2e test-byom-discovery-journey \
         vet vet-coordinator vet-gateway \
         lint-coordinator \
         build-linux check check-exceptions fmt verify-autotune-catalog
@@ -20,6 +20,14 @@ test: test-coordinator test-gateway test-integration test-dist
 # BYOM-affecting provider CLI/app release. See test/e2e/byom/README.md.
 test-byom-e2e:
 	test/e2e/byom/run-cli-onboarding-e2e.py
+
+# Hermetic JOURNEY-PROVIDER-BYOM-DISCOVERY gate (#1453 slice 1). Runs the
+# ten-step discovery-journey driver, then feeds its run manifest through the
+# real evidence pipeline (capture -> build -> preflight): the pipeline is the
+# acceptance test for the driver. Signing stays an operator step and is not run
+# here. See docs/runbooks/byom-journey-evidence.md.
+test-byom-discovery-journey:
+	bash scripts/test-byom-discovery-journey.sh
 
 verify-autotune-catalog:
 	python3 scripts/catalog-release.py verify
@@ -65,6 +73,7 @@ test-dist:
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_upstream_watch
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_byom_contract_lock
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_byom_journey_evidence
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_discovery_journey_driver
 	node --test phase3-binary/app/Tests/MalibuTests/payout-signer-chain.test.mjs
 	bash scripts/test-production-exceptions.sh
 	bash scripts/test-coordinator-advertised-version-test.sh

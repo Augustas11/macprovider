@@ -34,7 +34,9 @@ to the journey, or capture fails.
 
 `environment.class` records how the run was executed:
 
-- `hermetic-loopback` — the harness at `test/e2e/byom/run-cli-onboarding-e2e.py`
+- `hermetic-loopback` — a loopback harness: the discovery-journey driver at
+  `test/e2e/byom/run-discovery-journey.py` (`make test-byom-discovery-journey`)
+  or the onboarding harness at `test/e2e/byom/run-cli-onboarding-e2e.py`
   (`make test-byom-e2e`).
 - `physical-provider` — a real Mac run per
   `test/e2e/byom/CANDIDATE-E2E-RUNBOOK.md`.
@@ -82,23 +84,58 @@ result to them.
 
 ## Step 1 — run the journey and collect CLI documents
 
-Hermetic:
+### Discovery journey, hermetic: one command
+
+```bash
+test/e2e/byom/run-discovery-journey.py --out ~/byom-run
+```
+
+The driver runs all ten `JOURNEY-PROVIDER-BYOM-DISCOVERY` steps against
+loopback stubs and an on-disk MLX-cache fixture, writes every captured CLI
+document to `~/byom-run/captures/`, and writes `~/byom-run/run-manifest.json`
+itself — so **steps 1 and 2 are already done** and you can go straight to step 3.
+Every observation in that manifest is set from the driver's own assertions, and
+a failed assertion aborts the run, so a manifest exists only for a run where all
+ten steps passed. `make test-byom-discovery-journey` runs the driver and then
+step 3 and step 4 against its output, which is how CI proves the driver and the
+governance tables have not drifted apart.
+
+Two things the driver does to keep captures redaction-clean, because the
+evidence scanner is shape-based and has no allowlist for captured-document
+fields:
+
+- it drops `provider_guidance.state_label_key` / `state_meaning_key`, which are
+  dotted localization label paths (`byom.local.offerable`) that the scanner
+  cannot distinguish from a DNS hostname. Every decision-bearing guidance field
+  (`next_action`, `transition_reason_code`, `earning_path_class`) is retained,
+  and no manifest assertion depends on the dropped keys;
+- it re-runs the capture tool's own redaction scan over each document before
+  writing it, so the driver cannot emit a manifest that step 3 would reject.
+
+### Everything else: hand-authored
+
+For the admission journey, and for a physical-provider discovery run
+(`test/e2e/byom/CANDIDATE-E2E-RUNBOOK.md`), collect the documents and write the
+manifest by hand as described below.
 
 ```bash
 make test-byom-e2e
 ```
 
-Physical provider Mac: follow `test/e2e/byom/CANDIDATE-E2E-RUNBOOK.md`.
-
 Save each `--json` document the run produced (discovery, evaluation, offer
 dry-run, admission status, withdrawal, catalog economics) into one local
-directory, e.g. `~/byom-run/captures/`. For the admission journey, also read the
-money-path row counts directly from the coordinator's own tables (ledger,
-settlement, payout, request log) — not from a quiet API.
+directory, e.g. `~/byom-run/captures/`. Redact each document first: a captured
+value that carries an endpoint, a local path, a hostname, an IP literal or a
+credential makes step 3 refuse the whole run. For the admission journey, also
+read the money-path row counts directly from the coordinator's own tables
+(ledger, settlement, payout, request log) — not from a quiet API.
 
 ## Step 2 — write the run manifest
 
-Create `~/byom-run/run-manifest.json` using schema
+Skip this step for a hermetic discovery run: the driver already wrote the
+manifest.
+
+Otherwise create `~/byom-run/run-manifest.json` using schema
 `macprovider.byom-journey-run.v1`. Copy the shape from the committed golden
 fixtures:
 
@@ -226,8 +263,10 @@ conformance change, and let `spec-index / check` run.
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_byom_journey_evidence
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_discovery_journey_driver
 python3 scripts/check_spec_governance.py
 make test-byom-e2e
+make test-byom-discovery-journey
 ```
 
 The unit suite also runs inside `make test-dist`.
