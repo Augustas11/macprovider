@@ -442,6 +442,11 @@ def normalize_model_key(model: str) -> str:
     used only for the §3.3.1 rule-7 authoring-time invariant ("a recommendable
     row MUST resolve to a rate row"), never for billing. The port is pinned by a
     table test so Go/Python drift fails a test rather than a release.
+
+    Equivalence is scoped to `MODEL_KEY`-conforming input, which every caller
+    enforces first: Python `str.strip()` / `str.lower()` and Go
+    `strings.TrimSpace` / `strings.ToLower` differ on a few code points
+    (U+001C–U+001F, U+0130) that the grammar cannot admit.
     """
     key = model.strip().lower()
     namespace = ""
@@ -734,8 +739,18 @@ def validate_rate_card(data: bytes) -> dict:
         "global_multiplier_ppm",
     }
     for key, row in rows.items():
-        if key != "default" and not MODEL_KEY.fullmatch(key):
-            fail(f"rate-card row {key}: invalid model key")
+        if key != "default":
+            if not MODEL_KEY.fullmatch(key):
+                fail(f"rate-card row {key}: invalid model key")
+            # Same invariant as `validate_rate_card_source`, in the SHARED
+            # validator so `verify-directory` and the parity gate enforce it on
+            # bytes they did not generate: billing resolves exact spelling first.
+            normalized = normalize_model_key(key)
+            if normalized != key:
+                fail(
+                    f"rate-card row {key}: must be the SPEC-005 normalized model key "
+                    f"({normalized!r}); billing resolves exact spelling first"
+                )
         if not isinstance(row, dict):
             fail(f"rate-card row {key}: row must be an object")
         exact_keys(row, row_fields, row_fields, f"rate-card row {key}")
@@ -967,6 +982,13 @@ def parse_coordinator_rewards(text: str) -> tuple[float, float, dict[str, dict]]
         if "\t" in raw_line:
             if raw_line.strip().startswith("#") or not raw_line.strip():
                 continue
+            if not in_rewards:
+                # Tabs outside the block are the YAML loader's concern, not
+                # this indentation parser's; do not misreport them as a
+                # rewards-block defect.
+                continue
+            if raw_line[:1] not in (" ", "\t"):
+                break  # a new top-level key ends the rewards block
             fail("coordinator.yaml: tabs are not permitted in the rewards block")
         line = re.sub(r"(?:(?<=\s)|^)#.*$", "", raw_line).rstrip()
         if not line.strip():
@@ -3167,7 +3189,13 @@ PENDING_DISTRIBUTION_SURFACES = (
     ("CLI release payload", "phase3-binary/dist/package.sh (~196): copy autotune-artifacts.json + .sig"),
     ("GitHub release assets", ".github/workflows/release.yml (~1385, ~1418): publish both artifact files"),
     ("live release gate", "scripts/verify-live-coordinator-release-gate.py (~17): add the signed feed"),
-    ("coordinator serving", "phase4-coordinator/dist/nginx-coordinator.malibu.tech.conf: exact /v1/catalog-artifacts and /v1/catalog-artifacts.sig blocks"),
+    ("coordinator serving", "phase4-coordinator/internal/buyer/server.go: /v1/catalog-artifacts + .sig routes; internal/buyer/autotune_feeds.go: load + validate the pair with the base feeds (signer equality, release binding); internal/config/config.go + dist/coordinator.yaml: catalog_artifacts_path/_sig_path; dist/nginx-coordinator.malibu.tech.conf: exact allow-through blocks before the /v1/ catch-all"),
+    ("scheduled renewal", ".github/workflows/renew-autotune-static-feed-signed.yml: supply AUTOTUNE_PREVIOUS_RELEASE_DIR (the previous signed release directory) or the monthly freshness renewal fails closed at generate after activation"),
+)
+# Requirements this slice records but does not enforce; each is owned by a
+# later slice and named here so `status` never reads as complete.
+DEFERRED_REQUIREMENTS = (
+    ("§16.8 intake-decision manifest schema (AC-CAT-21)", "intake_decision_digest() records the digest only; closed-schema validation and tier-change completeness are owned by the listed-tier intake slice (SPEC-023-R006, epic #1453 slice 5)"),
 )
 
 
@@ -3216,6 +3244,37 @@ def artifact_activation_prerequisites(candidate_obj: dict, ledger: dict[str, dic
     return checks
 
 
+def require_rate_card_unchanged_at_activation(rate_card_obj: dict, history: dict[str, dict]) -> None:
+    """SPEC-023 §3.3.1 rule 8 / AC-CAT-10 as a GENERATION gate, not a fact about
+    today's seed data.
+
+    Pre-activation the artifact feed is unpublished, so the class map that
+    reaches `expand_rate_card` is empty and only explicit rows are published.
+    The activation release is therefore the first release at which class
+    expansion can add or change a row — exactly the release rule 8 governs and
+    §3.7.8 makes irreversible. The ledger already records each release's
+    rate-card projection `version` (`rate_card_projection_hash`: rows +
+    release globals + usd_per_million_credits), so equality with the latest
+    recorded release IS the byte-identity check. It is slightly stronger than
+    rule 8 (it covers the globals too), which is what the rule's own last
+    sentence asks for: an intended price change is a separate reviewed release.
+    """
+    latest = latest_release(history)
+    if latest is None:
+        return
+    previous_id, record = latest
+    previous = (record.get("feeds") or {}).get(RATE_CARD_FEED_NAME, {}).get("version")
+    if previous is None:
+        return
+    if previous != rate_card_obj["version"]:
+        fail(
+            "SPEC-023 §3.3.1 rule 8: the activation release must publish rate-card rows "
+            f"byte-identical to the preceding release {previous_id!r} (projection {previous} != "
+            f"{rate_card_obj['version']}); class expansion is not a repricing event — reprice in "
+            "a separate reviewed release, before or after activation"
+        )
+
+
 def generate(
     signer_key_id: str | None = None,
     previous_release_dir: pathlib.Path | None = None,
@@ -3257,6 +3316,8 @@ def generate(
     rate_classes = artifact_rate_classes(artifact_obj) if artifact_obj is not None else {}
     rate_card = resolve_rate_card(rate_classes, candidate_obj)
     rate_card_obj = validate_rate_card(rate_card)
+    if state == "activation":
+        require_rate_card_unchanged_at_activation(rate_card_obj, release_history(ledger_before, candidate_obj["version"]))
     validate_release_inputs(candidate_obj, demand_obj, rate_card_obj)
     check_rate_card_parity(rate_card_obj, COORDINATOR_YAML_PATH.read_text())
     if signer_key_id is not None and signer_key_id not in keyring():
@@ -3588,7 +3649,7 @@ def verify_directory(
     print(f"verified release directory {candidate_obj['version']} candidate={sha256(candidate)} demand={sha256(demand)} rate_card={sha256(rate_card)}")
 
 
-def cmd_emit_coordinator_rate_card(output_path: pathlib.Path | None) -> None:
+def cmd_emit_coordinator_rate_card(output_path: pathlib.Path | None, from_source: bool = False) -> None:
     """Emit the `rewards.rate_card:` block that the release's published rate card
     requires of `phase4-coordinator/dist/coordinator.yaml` (SPEC-023 §3.3.1 rule 4).
 
@@ -3606,7 +3667,21 @@ def cmd_emit_coordinator_rate_card(output_path: pathlib.Path | None) -> None:
     cut until parity already holds.
     """
     candidate_obj = validate_candidate((CATALOG_DIR / "autotune-candidates.json").read_bytes())
-    rate_classes = authoring_rate_classes()
+    if from_source:
+        # Post-activation the source and the published feed legitimately
+        # disagree while a class change is being authored, and the next cut
+        # needs the coordinator rows BEFORE it can publish the feed that would
+        # make them agree. `--from-source` projects the AUTHORED classes and
+        # says so; it never touches published bytes.
+        source_obj = validate_artifact_source(ARTIFACT_SOURCE_PATH.read_bytes())
+        rate_classes = artifact_rate_classes({"models": source_obj["models"]})
+        print(
+            "emit-coordinator-rate-card: NOTICE: projecting rate classes from "
+            f"{ARTIFACT_SOURCE_PATH.name} (authoring input), not from the published feed",
+            file=sys.stderr,
+        )
+    else:
+        rate_classes = authoring_rate_classes()
     rate_card_obj = validate_rate_card(resolve_rate_card(rate_classes, candidate_obj))
     block = coordinator_rate_card_yaml(rate_card_obj)
     if output_path is not None:
@@ -3703,6 +3778,9 @@ def cmd_status() -> None:
     for satisfied, detail in prerequisites:
         print(f"  [{'x' if satisfied else ' '}] {detail}")
     print("")
+    print("Deferred requirements (recorded, not enforced by this slice):")
+    for requirement, detail in DEFERRED_REQUIREMENTS:
+        print(f"  [ ] {requirement}: {detail}")
     print("Distribution surfaces still pending (BYOM v0.2 slices 2b/2c — NOT in this slice):")
     for surface, detail in PENDING_DISTRIBUTION_SURFACES:
         print(f"  [ ] {surface}: {detail}")
@@ -3847,6 +3925,15 @@ def main() -> int:
         help="print the rewards.rate_card: block the published rate card requires",
     )
     coordinator_parser.add_argument("--output", type=pathlib.Path)
+    coordinator_parser.add_argument(
+        "--from-source",
+        action="store_true",
+        help=(
+            "project rate classes from autotune-artifacts-source.json instead of the published "
+            "feed; needed post-activation while a class change is being authored, since the next "
+            "cut requires the coordinator rows before it can publish the feed"
+        ),
+    )
     directory_parser = sub.add_parser(
         "verify-directory",
         help=(
@@ -3914,7 +4001,7 @@ def main() -> int:
         elif args.command == "continuity-check":
             cmd_continuity_check(args.incoming, args.live)
         elif args.command == "emit-coordinator-rate-card":
-            cmd_emit_coordinator_rate_card(args.output)
+            cmd_emit_coordinator_rate_card(args.output, from_source=args.from_source)
         elif args.command == "verify-directory":
             verify_directory(args.directory, args.tier2_public_key_file, args.tier2_coordinator_config)
         elif args.command == "check-tier2-binding":

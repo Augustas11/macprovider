@@ -590,6 +590,17 @@ class RateCardSourceTest(unittest.TestCase):
         source["global_multiplier_ppm"] = 2 ** 63 - 1
         catalog_release.validate_rate_card_source(canonical(source))
 
+    def test_published_rate_card_rejects_an_unnormalized_row_key(self):
+        """The normalized-key invariant lives in the SHARED validator, so
+        `verify-directory` enforces it on bytes it did not generate."""
+        value = json.loads(RATE_CARD_BYTES)
+        value["rows"]["mlx-community/qwen3-8b-4bit"] = dict(value["rows"]["qwen3-8b"])
+        value["version"] = ""
+        value["version"] = catalog_release.rate_card_projection_hash(value)
+        with self.assertRaises(catalog_release.CatalogError) as caught:
+            catalog_release.validate_rate_card(catalog_release.canonical_sorted_bytes(value))
+        self.assertIn("must be the SPEC-005 normalized model key ('qwen3-8b')", str(caught.exception))
+
     def test_published_schema_is_unchanged(self):
         """AC-CAT-8: no `classes` key, no per-row class field, §3.3 projection hash."""
         source = catalog_release.validate_rate_card_source(RATE_CARD_SOURCE_BYTES)
@@ -1608,6 +1619,9 @@ class HermeticRelease:
         self.key = root / "signing.pem"
         self.alt_key = root / "signing-alt.pem"
         shutil.copytree(CATALOG, self.catalog)
+        # The rule-9 parity gate reads the coordinator config; a throwaway copy
+        # lets a test drift it without touching the reviewed money-path file.
+        shutil.copy2(COORDINATOR_YAML, root / "coordinator.yaml")
         self.static.mkdir()
         keys = {}
         for key_id, key_path in ((self.KEY_ID, self.key), (self.ALT_KEY_ID, self.alt_key)):
@@ -1644,6 +1658,7 @@ class HermeticRelease:
         "ARTIFACT_SOURCE_PATH": "catalog/autotune-artifacts-source.json",
         "RATE_CARD_SOURCE_PATH": "catalog/rate-card-source.json",
         "INTAKE_DECISION_PATH": "catalog/intake-decision.json",
+        "COORDINATOR_YAML_PATH": "coordinator.yaml",
         "SWIFT_GENERATED": "AutotuneCatalog.generated.swift",
         "GO_REJECTED_RELEASES_GENERATED": "rejected_release_ids.generated.go",
     }
@@ -1817,6 +1832,71 @@ class HermeticReleaseTest(unittest.TestCase):
         harness.bump(release_id, "2026-09-20T00:00:00Z")
         harness.cut(activate_artifact_feed=True)
         return release_id
+
+    def test_activation_refuses_a_rate_card_that_differs_from_the_preceding_release(self):
+        """§3.3.1 rule 8 as a generation gate: the activation release is the
+        first at which class expansion can change a row, and §3.7.8 makes it
+        irreversible, so its rate card must project to the ledger's latest
+        recorded rate-card version."""
+        with self.harness() as harness:
+            harness.measure_sizes()
+            harness.bump("published-2026-09-20-activation-v1", "2026-09-20T00:00:00Z")
+            source_path = harness.catalog / "rate-card-source.json"
+            source = json.loads(source_path.read_text())
+            source["rows"]["qwen3-8b"]["completion_rate_per_mtok"] += 1
+            source_path.write_text(json.dumps(source, indent=2, sort_keys=True) + "\n")
+            with self.assertRaises(catalog_release.CatalogError) as caught:
+                catalog_release.generate(harness.KEY_ID, activate_artifact_feed=True)
+            self.assertIn("rule 8", str(caught.exception))
+            self.assertIn("byte-identical to the preceding release", str(caught.exception))
+
+    def test_generate_and_verify_each_enforce_coordinator_parity(self):
+        """The rule-9 gate's CALL SITES, not only its body: removing either call
+        must fail a test, because `verify` is the only thing that catches a
+        coordinator.yaml rate edit that never re-cut the catalog."""
+        with self.harness() as harness:
+            release_id = self.activate(harness)
+            self.assertTrue(release_id)
+            yaml_path = harness.root / "coordinator.yaml"
+            original = yaml_path.read_text()
+            self.assertIn("provider_share: 0.90", original)
+            drifted = original.replace("provider_share: 0.90", "provider_share: 0.12345", 1)
+            yaml_path.write_text(drifted)
+            with self.assertRaises(catalog_release.CatalogError) as at_verify:
+                catalog_release.verify()
+            self.assertIn("rate-card parity", str(at_verify.exception))
+            with self.assertRaises(catalog_release.CatalogError) as at_generate:
+                catalog_release.generate(harness.KEY_ID)
+            self.assertIn("rate-card parity", str(at_generate.exception))
+            yaml_path.write_text(original)
+            catalog_release.verify()
+
+    def test_emit_from_source_projects_authored_classes_post_activation(self):
+        """Post-activation the documented emitter path must not deadlock: the
+        next cut needs the coordinator rows before it can publish the feed that
+        would make source and published classes agree again."""
+        with self.harness() as harness:
+            self.activate(harness)
+            artifact_source_path = harness.catalog / "autotune-artifacts-source.json"
+            artifact_source = json.loads(artifact_source_path.read_text())
+            artifact_source["models"]["qwen3-8b"]["rate_class"] = "class-3b"
+            artifact_source_path.write_bytes(canonical(artifact_source))
+            rate_source_path = harness.catalog / "rate-card-source.json"
+            rate_source = json.loads(rate_source_path.read_text())
+            del rate_source["rows"]["qwen3-8b"]
+            class_3b = rate_source["classes"]["class-3b"]
+            rate_source_path.write_text(json.dumps(rate_source, indent=2, sort_keys=True) + "\n")
+
+            with self.assertRaises(catalog_release.CatalogError) as caught:
+                catalog_release.cmd_emit_coordinator_rate_card(harness.root / "rows.yaml")
+            self.assertIn("must agree", str(caught.exception))
+
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                catalog_release.cmd_emit_coordinator_rate_card(harness.root / "rows.yaml", from_source=True)
+            self.assertIn("NOTICE", stderr.getvalue())
+            block = (harness.root / "rows.yaml").read_text()
+            self.assertIn(f"    qwen3-8b:\n      prompt_credits_per_mtok: {class_3b['prompt_rate_per_mtok']}\n", block)
 
     def test_activation_then_idempotent_regeneration_then_verify(self):
         """`cut()` IS the runbook sequence: generate, sign, regenerate, verify.
@@ -2117,7 +2197,7 @@ class HermeticReleaseTest(unittest.TestCase):
             self.assertFalse((harness.root / "rewards-block.yaml").exists())
             with self.assertRaises(catalog_release.CatalogError) as drift:
                 catalog_release.verify()
-            self.assertIn("generated drift", str(drift.exception))
+            self.assertIn(f"generated drift: {catalog_release.ARTIFACT_FEED_PATH}", str(drift.exception))
 
     def test_five_feed_release_passes_the_compatibility_manifest_catalog_component(self):
         """AC-CAT-15 FUNCTIONALLY, not as a relation between two constants.

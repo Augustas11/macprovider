@@ -196,7 +196,9 @@ under_lock = remote.split("Re-check dates-only continuity under the lock", 1)[1]
 for requirement in (
     'artifact = "autotune-artifacts.json"',
     "(presence)",
-    '"candidate_catalog_sha256"',
+    # The inline mirror of RENEWAL_ARTIFACT_RELEASE_FIELDS on Pearl (no
+    # checkout there) must carry the FULL tuple, not a subset.
+    '("version", "release_id", "generated_at", "candidate_catalog_sha256")',
 ):
     if requirement not in under_lock:
         raise SystemExit(f"under-lock continuity recheck omits the artifact feed rule: {requirement}")

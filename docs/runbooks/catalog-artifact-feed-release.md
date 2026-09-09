@@ -78,7 +78,19 @@ this slice deliberately ships none of them:
 | CLI release payload | `phase3-binary/dist/package.sh` (~196) | copy `autotune-artifacts.json` and `autotune-artifacts.json.sig` alongside the candidate/demand/rate-card feeds |
 | GitHub release assets | `.github/workflows/release.yml` (~1385, ~1418) | publish both artifact files with the other static feeds |
 | live release gate | `scripts/verify-live-coordinator-release-gate.py` (~17) | add the signed feed to the served-feed set the gate checks |
-| coordinator serving | `phase4-coordinator/dist/nginx-coordinator.malibu.tech.conf` | exact `location = /v1/catalog-artifacts` and `location = /v1/catalog-artifacts.sig` allow-through blocks before the generic `location /v1/ { return 404; }`, proxying to `http://127.0.0.1:8443` with no `Authorization` requirement, exactly as the rate-card routes do |
+| coordinator serving | `phase4-coordinator/internal/buyer/server.go`, `internal/buyer/autotune_feeds.go`, `internal/config/config.go`, `dist/coordinator.yaml`, `dist/nginx-coordinator.malibu.tech.conf` | the buyer mux has no generic disk handler: add `/v1/catalog-artifacts` + `.sig` routes, load and validate the pair with the base feeds (signer equality, release binding), add `catalog_artifacts_path` / `catalog_artifacts_sig_path` config keys and deploy paths, and the exact nginx allow-through blocks before the generic `location /v1/ { return 404; }`, proxying to `http://127.0.0.1:8443` with no `Authorization` requirement, exactly as the rate-card routes do |
+| scheduled renewal | `.github/workflows/renew-autotune-static-feed-signed.yml` | supply `AUTOTUNE_PREVIOUS_RELEASE_DIR` (the previous signed release directory); after activation `generate` requires it and the monthly freshness renewal otherwise fails closed — silently until the 30-day client horizon |
+
+**Deferred requirements** (recorded by the ledger, not enforced by this slice;
+`status` lists them): the §16.8 intake-decision manifest schema and
+tier-change completeness (AC-CAT-21) are owned by the listed-tier intake
+slice (SPEC-023-R006) — `intake_decision_sha256` records the digest of
+whatever `intake-decision.json` holds. Separately, `autotune-artifacts-source.json`
+is a named, versioned, never-published release input that SPEC-023 §3.7 does
+not yet name the way §3.3.1 rule 3 names `rate-card-source.json`; the next
+SPEC-023 revision adds that rule (closed top level `{schema_version, source,
+models}`, `size_bytes: null` staging allowance, never served/baked/bound/
+ledgered).
 
 `components.catalog.files` stays the exact nine-name set in every one of these
 (Stage A, below).
@@ -200,10 +212,21 @@ To change or add a coordinator fallback row:
 python3 scripts/catalog-release.py emit-coordinator-rate-card
 ```
 
+Post-activation, a class change is authored in `autotune-artifacts-source.json`
+before the feed that publishes it exists, so the source and the published feed
+legitimately disagree and the plain emitter refuses (`must agree`). Run it with
+`--from-source` to project the AUTHORED classes (it prints a NOTICE saying so);
+paste the rows, then cut the release that publishes the feed. The rule-8 gate
+means the ACTIVATION release itself may not change any row: reprice in a
+separate reviewed release before or after it.
+
 Paste the emitted `rewards.rate_card:` rows into
 `phase4-coordinator/dist/coordinator.yaml`, keeping the existing provenance
 comments. The generator emits rather than rewrites because that file carries
-reviewed money-path commentary. The §3.3.1 rule-9 parity gate then refuses to cut
+reviewed money-path commentary. Parity is a statement about the committed
+`dist/coordinator.yaml`: a Pearl overlay (`coordinator.pearl-overlays.yaml`)
+can still override `rewards.*` at runtime, which this gate does not see. The
+§3.3.1 rule-9 parity gate then refuses to cut
 a release until both sides agree row-for-row and the release-global
 `provider_share_bps / 10000` and `global_multiplier_ppm / 1000000` equal
 `rewards.provider_share` and `rewards.global_multiplier`.
