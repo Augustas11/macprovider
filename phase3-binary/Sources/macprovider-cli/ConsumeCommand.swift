@@ -740,6 +740,11 @@ struct ConsumeUpstreamTimeouts: Sendable {
     )
 }
 
+struct ConsumeReadDeadlinePolicy: Equatable, Sendable {
+    let timeoutNanoseconds: UInt64
+    let refreshOnProgress: Bool
+}
+
 private struct ConsumeUpstreamFailureClassification {
     let status: HTTPResponseStatus
     let forwardedUpstream: Bool
@@ -982,6 +987,8 @@ extension ConsumeUpstreamClient {
 }
 
 final class ConsumePinnedUpstreamClient: ConsumeUpstreamClient, @unchecked Sendable {
+    private static let trustedMetadataMaxReadNanoseconds: UInt64 = 10_000_000_000
+
     private let maxBodyBytes: Int
     private let timeouts: ConsumeUpstreamTimeouts
 
@@ -1121,6 +1128,10 @@ final class ConsumePinnedUpstreamClient: ConsumeUpstreamClient, @unchecked Senda
         guard let host = upstreamTarget(origin: origin).host else {
             throw ConsumeStartupError(code: "local_upstream_url_rejected")
         }
+        return try await resolveGlobalEndpoint(host: host, timeoutNanoseconds: timeoutNanoseconds)
+    }
+
+    static func resolveGlobalEndpoint(host: String, timeoutNanoseconds: UInt64) async throws -> String {
         return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<String, Error>) in
             let gate = ContinuationGate<String>()
             let deadline = DeadlineTimer()
@@ -1156,6 +1167,73 @@ final class ConsumePinnedUpstreamClient: ConsumeUpstreamClient, @unchecked Senda
             return (nil, nil)
         }
         return (components.host, components.port ?? 443)
+    }
+
+    static func fetchTrustedMetadata(
+        url: URL,
+        endpoint: String,
+        timeouts: ConsumeUpstreamTimeouts
+    ) async throws -> Data {
+        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              components.scheme == "https",
+              let host = components.host,
+              !host.isEmpty,
+              components.user == nil,
+              components.password == nil,
+              components.query == nil,
+              components.fragment == nil,
+              components.path == "/v1/rate-card" || components.path == "/v1/rate-card.sig"
+        else {
+            throw ConsumeTrustedPricingError(.fetchFailed)
+        }
+        let portValue = components.port ?? 443
+        guard (1...65_535).contains(portValue),
+              let port = NWEndpoint.Port(rawValue: UInt16(portValue)),
+              ConsumeEndpointConfig.isValidatedGlobalEndpoint(endpoint) else {
+            throw ConsumeTrustedPricingError(.fetchFailed)
+        }
+        let connection = NWConnection(
+            host: NWEndpoint.Host(endpoint),
+            port: port,
+            using: tlsParameters(serverName: host)
+        )
+        let queue = DispatchQueue(label: "macprovider.consume.pricing.\(UUID().uuidString)")
+        connection.start(queue: queue)
+        do {
+            try await waitUntilReady(connection, timeoutNanoseconds: timeouts.connectNanoseconds)
+            try await send(
+                trustedMetadataRequestBytes(host: host, port: portValue, path: components.path),
+                on: connection,
+                timeoutNanoseconds: timeouts.sendNanoseconds
+            )
+            let limit = components.path.hasSuffix(".sig")
+                ? ConsumeTrustedPricingLoader.maxSidecarBytes
+                : ConsumeTrustedPricingLoader.maxRateCardBytes
+            let readDeadline = trustedMetadataReadDeadline(for: timeouts)
+            let response = try await readHTTPResponse(
+                from: connection,
+                maxBodyBytes: limit + 1,
+                timeoutNanoseconds: readDeadline.timeoutNanoseconds,
+                refreshDeadlineOnProgress: readDeadline.refreshOnProgress
+            )
+            guard ConsumeTrustedPricingLoader.responseHeadersAreBounded(response.headers),
+                  (200..<300).contains(response.statusCode) else {
+                throw ConsumeTrustedPricingError(.fetchFailed)
+            }
+            guard response.body.count <= limit else {
+                throw ConsumeTrustedPricingError(
+                    components.path.hasSuffix(".sig") ? .oversizedSidecar : .oversizedRateCard
+                )
+            }
+            connection.cancel()
+            return response.body
+        } catch let error as ConsumeTrustedPricingError {
+            connection.cancel()
+            throw error
+        } catch {
+            connection.cancel()
+            throw ConsumeTrustedPricingError(.fetchFailed)
+        }
     }
 
     private static func fetch(
@@ -1378,10 +1456,22 @@ final class ConsumePinnedUpstreamClient: ConsumeUpstreamClient, @unchecked Senda
         httpRequestBytes(host: host, port: port, bearerToken: bearerToken, body: body, streaming: streaming)
     }
 
+    static func trustedMetadataRequestBytesForTesting(host: String, port: Int, path: String) -> Data {
+        trustedMetadataRequestBytes(host: host, port: port, path: path)
+    }
+
+    static func trustedMetadataReadDeadline(for timeouts: ConsumeUpstreamTimeouts) -> ConsumeReadDeadlinePolicy {
+        ConsumeReadDeadlinePolicy(
+            timeoutNanoseconds: min(timeouts.readNanoseconds, trustedMetadataMaxReadNanoseconds),
+            refreshOnProgress: false
+        )
+    }
+
     private static func readHTTPResponse(
         from connection: NWConnection,
         maxBodyBytes: Int,
-        timeoutNanoseconds: UInt64
+        timeoutNanoseconds: UInt64,
+        refreshDeadlineOnProgress: Bool = true
     ) async throws -> ConsumeUpstreamResponse {
         try await withCheckedThrowingContinuation { continuation in
             let state = ReceiveState()
@@ -1404,9 +1494,11 @@ final class ConsumePinnedUpstreamClient: ConsumeUpstreamClient, @unchecked Senda
                     }
                     if let data, !data.isEmpty {
                         state.received.append(data)
-                        deadline.schedule(nanoseconds: timeoutNanoseconds) {
-                            connection.cancel()
-                            finish(.failure(ConsumeUpstreamForwardError.dispatchedUnavailable))
+                        if refreshDeadlineOnProgress {
+                            deadline.schedule(nanoseconds: timeoutNanoseconds) {
+                                connection.cancel()
+                                finish(.failure(ConsumeUpstreamForwardError.dispatchedUnavailable))
+                            }
                         }
                     }
                     if let headerRange = state.received.range(of: headerTerminator) {
@@ -2057,6 +2149,20 @@ final class ConsumePinnedUpstreamClient: ConsumeUpstreamClient, @unchecked Senda
         request.append(Data("Content-Length: \(body.count)\r\n\r\n".utf8))
         request.append(body)
         return request
+    }
+
+    private static func trustedMetadataRequestBytes(host: String, port: Int, path: String) -> Data {
+        let hostHeader = host.contains(":") && !host.hasPrefix("[") ? "[\(host)]" : host
+        let authority = port == 443 ? hostHeader : "\(hostHeader):\(port)"
+        return Data(([
+            "GET \(path) HTTP/1.1",
+            "Host: \(authority)",
+            "Accept: application/json",
+            "Accept-Encoding: identity",
+            "Connection: close",
+            "",
+            "",
+        ].joined(separator: "\r\n")).utf8)
     }
 }
 

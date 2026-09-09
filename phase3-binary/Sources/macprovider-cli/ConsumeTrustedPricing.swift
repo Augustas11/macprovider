@@ -145,21 +145,33 @@ struct ConsumeTrustedPricingLoader: Sendable {
     static let staleAge: TimeInterval = 14 * 24 * 3600
     static let maxAge: TimeInterval = 30 * 24 * 3600
 
-    var fetch: @Sendable (URL) async throws -> Data
+    var resolveEndpoint: @Sendable (String) async throws -> String
+    var fetch: @Sendable (URL, String) async throws -> Data
     var trustedPublicKeys: [String: String]
     var expectedPolicyVersion: String
     var minimumGeneratedAt: Date
     var now: @Sendable () -> Date
 
     init(
-        fetch: @escaping @Sendable (URL) async throws -> Data = { url in
-            try await ConsumeTrustedPricingLoader.defaultFetch(url)
+        resolveEndpoint: @escaping @Sendable (String) async throws -> String = { host in
+            try await ConsumePinnedUpstreamClient.resolveGlobalEndpoint(
+                host: host,
+                timeoutNanoseconds: ConsumeUpstreamTimeouts.default.connectNanoseconds
+            )
+        },
+        fetch: @escaping @Sendable (URL, String) async throws -> Data = { url, endpoint in
+            try await ConsumePinnedUpstreamClient.fetchTrustedMetadata(
+                url: url,
+                endpoint: endpoint,
+                timeouts: .default
+            )
         },
         trustedPublicKeys: [String: String] = AutotuneStaticInputs.defaultTrustedPublicKeys,
         expectedPolicyVersion: String = Self.defaultExpectedPolicyVersion(),
         minimumGeneratedAt: Date = Self.defaultMinimumGeneratedAt(),
         now: @escaping @Sendable () -> Date = { Date() }
     ) {
+        self.resolveEndpoint = resolveEndpoint
         self.fetch = fetch
         self.trustedPublicKeys = trustedPublicKeys
         self.expectedPolicyVersion = expectedPolicyVersion
@@ -174,11 +186,11 @@ struct ConsumeTrustedPricingLoader: Sendable {
             return .unavailable(reason: .fetchFailed)
         }
         do {
-            let body = try await fetch(bodyURL)
+            let body = try await fetchValidated(bodyURL)
             guard body.count <= Self.maxRateCardBytes else {
                 return .unavailable(reason: .oversizedRateCard)
             }
-            let sidecar = try await fetch(sidecarURL)
+            let sidecar = try await fetchValidated(sidecarURL)
             guard sidecar.count <= Self.maxSidecarBytes else {
                 return .unavailable(reason: .oversizedSidecar)
             }
@@ -230,54 +242,15 @@ struct ConsumeTrustedPricingLoader: Sendable {
         )
     }
 
-    private static func defaultFetch(_ url: URL) async throws -> Data {
-        try await fetch(url, session: defaultURLSession())
-    }
-
-    static func defaultURLSession(protocolClasses: [AnyClass]? = nil) -> URLSession {
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.timeoutIntervalForRequest = 5
-        configuration.timeoutIntervalForResource = 10
-        configuration.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
-        configuration.urlCache = nil
-        configuration.httpCookieStorage = nil
-        configuration.httpCookieAcceptPolicy = .never
-        configuration.httpAdditionalHeaders = nil
-        configuration.connectionProxyDictionary = [:]
-        configuration.waitsForConnectivity = false
-        configuration.protocolClasses = protocolClasses
-        return URLSession(configuration: configuration, delegate: NoRedirectURLSessionDelegate(), delegateQueue: nil)
-    }
-
-    static func fetch(_ url: URL, session: URLSession) async throws -> Data {
-        defer { session.invalidateAndCancel() }
-        let limit = url.path.hasSuffix(".sig") ? Self.maxSidecarBytes : Self.maxRateCardBytes
-        var request = URLRequest(url: url)
-        request.httpMethod = "GET"
-        request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
-        request.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
-        let (bytes, response) = try await session.bytes(for: request)
-        guard let http = response as? HTTPURLResponse else {
+    private func fetchValidated(_ url: URL) async throws -> Data {
+        guard let host = url.host, !host.isEmpty else {
             throw ConsumeTrustedPricingError(.fetchFailed)
         }
-        guard Self.responseHeadersAreBounded(http) else {
+        let endpoint = try await resolveEndpoint(host)
+        guard ConsumeEndpointConfig.isValidatedGlobalEndpoint(endpoint) else {
             throw ConsumeTrustedPricingError(.fetchFailed)
         }
-        guard (200 ..< 300).contains(http.statusCode) else {
-            throw ConsumeTrustedPricingError(.fetchFailed)
-        }
-        if response.expectedContentLength > Int64(limit) {
-            throw ConsumeTrustedPricingError(url.path.hasSuffix(".sig") ? .oversizedSidecar : .oversizedRateCard)
-        }
-        var data = Data()
-        data.reserveCapacity(min(limit, max(0, Int(response.expectedContentLength))))
-        for try await byte in bytes {
-            data.append(byte)
-            if data.count > limit {
-                throw ConsumeTrustedPricingError(url.path.hasSuffix(".sig") ? .oversizedSidecar : .oversizedRateCard)
-            }
-        }
-        return data
+        return try await fetch(url, endpoint)
     }
 
     private static func defaultExpectedPolicyVersion() -> String {
@@ -312,14 +285,14 @@ struct ConsumeTrustedPricingLoader: Sendable {
         return SignatureSidecar(keyID: keyID, signature: signature)
     }
 
-    private static func responseHeadersAreBounded(_ response: HTTPURLResponse) -> Bool {
-        guard response.allHeaderFields.count <= maxResponseHeaderCount else {
+    static func responseHeadersAreBounded(_ headers: [(String, String)]) -> Bool {
+        guard headers.count <= maxResponseHeaderCount else {
             return false
         }
         var total = 0
-        for (rawName, rawValue) in response.allHeaderFields {
-            total += String(describing: rawName).utf8.count
-            total += String(describing: rawValue).utf8.count
+        for (name, value) in headers {
+            total += name.utf8.count
+            total += value.utf8.count
             if total > maxResponseHeaderBytes {
                 return false
             }
