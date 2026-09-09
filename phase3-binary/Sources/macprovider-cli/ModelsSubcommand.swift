@@ -43,6 +43,12 @@ struct ModelsDiscoverCommand: AsyncParsableCommand {
     @Flag(help: "Skip the Ollama-compatible loopback adapter.")
     var skipOllama = false
 
+    @Option(help: "Operator-supplied OpenAI-compatible loopback origin to query. Must be http://127.0.0.0/8:<port> or http://[::1]:<port>. There is no default: the adapter is not attempted unless this is set.")
+    var openaiCompatibleOrigin: String?
+
+    @Flag(help: "Skip the OpenAI-compatible loopback adapter.")
+    var skipOpenaiCompatible = false
+
     func run() async throws {
         guard emitJSON else {
             writeStderr("models discover is JSON-only in this release; pass --json")
@@ -51,7 +57,8 @@ struct ModelsDiscoverCommand: AsyncParsableCommand {
         let environment = BYOMDiscoveryEnvironment.production(
             namespacePath: localDiscoveryNamespacePath,
             mlxCacheDir: mlxCacheDir,
-            ollamaOrigin: skipOllama ? nil : ollamaOrigin
+            ollamaOrigin: skipOllama ? nil : ollamaOrigin,
+            openAICompatibleOrigin: skipOpenaiCompatible ? nil : openaiCompatibleOrigin
         )
         let document = await BYOMDiscoveryRunner(environment: environment).discover()
         for warning in document.warnings.sorted() {
@@ -85,6 +92,12 @@ struct ModelsEvaluateCommand: AsyncParsableCommand {
     @Flag(help: "Skip the Ollama-compatible loopback adapter during candidate lookup.")
     var skipOllama = false
 
+    @Option(help: "Operator-supplied OpenAI-compatible loopback origin to query. Must be http://127.0.0.0/8:<port> or http://[::1]:<port>. There is no default: the adapter is not attempted unless this is set.")
+    var openaiCompatibleOrigin: String?
+
+    @Flag(help: "Skip the OpenAI-compatible loopback adapter during candidate lookup.")
+    var skipOpenaiCompatible = false
+
     func run() async throws {
         guard emitJSON else {
             writeStderr("models evaluate is JSON-only in this release; pass --json")
@@ -93,7 +106,8 @@ struct ModelsEvaluateCommand: AsyncParsableCommand {
         let environment = BYOMDiscoveryEnvironment.production(
             namespacePath: localDiscoveryNamespacePath,
             mlxCacheDir: mlxCacheDir,
-            ollamaOrigin: skipOllama ? nil : ollamaOrigin
+            ollamaOrigin: skipOllama ? nil : ollamaOrigin,
+            openAICompatibleOrigin: skipOpenaiCompatible ? nil : openaiCompatibleOrigin
         )
         let document = await BYOMEvaluationRunner(target: candidate, environment: environment).evaluate()
         for warning in document.warnings.sorted() {
@@ -148,6 +162,12 @@ struct ModelsOfferCommand: AsyncParsableCommand {
     @Flag(help: "Skip the Ollama-compatible loopback adapter during candidate lookup.")
     var skipOllama = false
 
+    @Option(help: "Operator-supplied OpenAI-compatible loopback origin to query. Must be http://127.0.0.0/8:<port> or http://[::1]:<port>. There is no default: the adapter is not attempted unless this is set.")
+    var openaiCompatibleOrigin: String?
+
+    @Flag(help: "Skip the OpenAI-compatible loopback adapter during candidate lookup.")
+    var skipOpenaiCompatible = false
+
     func run() async throws {
         guard emitJSON else {
             if dryRun {
@@ -160,7 +180,8 @@ struct ModelsOfferCommand: AsyncParsableCommand {
         let environment = BYOMDiscoveryEnvironment.production(
             namespacePath: localDiscoveryNamespacePath,
             mlxCacheDir: mlxCacheDir,
-            ollamaOrigin: skipOllama ? nil : ollamaOrigin
+            ollamaOrigin: skipOllama ? nil : ollamaOrigin,
+            openAICompatibleOrigin: skipOpenaiCompatible ? nil : openaiCompatibleOrigin
         )
         if dryRun {
             let document = await BYOMOfferDryRunRunner(target: candidate, environment: environment).dryRun()
@@ -245,6 +266,12 @@ struct ModelsAdmissionStatusCommand: AsyncParsableCommand {
     @Flag(help: "Skip the Ollama-compatible loopback adapter during candidate lookup.")
     var skipOllama = false
 
+    @Option(help: "Operator-supplied OpenAI-compatible loopback origin to query. Must be http://127.0.0.0/8:<port> or http://[::1]:<port>. There is no default: the adapter is not attempted unless this is set.")
+    var openaiCompatibleOrigin: String?
+
+    @Flag(help: "Skip the OpenAI-compatible loopback adapter during candidate lookup.")
+    var skipOpenaiCompatible = false
+
     func run() async throws {
         guard emitJSON else {
             writeStderr("models admission status is JSON-only in this release; pass --json")
@@ -259,7 +286,8 @@ struct ModelsAdmissionStatusCommand: AsyncParsableCommand {
             let environment = BYOMDiscoveryEnvironment.production(
                 namespacePath: localDiscoveryNamespacePath,
                 mlxCacheDir: mlxCacheDir,
-                ollamaOrigin: skipOllama ? nil : ollamaOrigin
+                ollamaOrigin: skipOllama ? nil : ollamaOrigin,
+            openAICompatibleOrigin: skipOpenaiCompatible ? nil : openaiCompatibleOrigin
             )
             let client = try BYOMModelAdmissionClient(coordinatorURL: resolved.coordinatorURL)
             let runtime = BYOMModelAdmissionRuntime(
@@ -316,6 +344,12 @@ struct ModelsAdmissionWithdrawCommand: AsyncParsableCommand {
     @Flag(help: "Skip the Ollama-compatible loopback adapter during candidate lookup.")
     var skipOllama = false
 
+    @Option(help: "Operator-supplied OpenAI-compatible loopback origin to query. Must be http://127.0.0.0/8:<port> or http://[::1]:<port>. There is no default: the adapter is not attempted unless this is set.")
+    var openaiCompatibleOrigin: String?
+
+    @Flag(help: "Skip the OpenAI-compatible loopback adapter during candidate lookup.")
+    var skipOpenaiCompatible = false
+
     func run() async throws {
         guard emitJSON else {
             writeStderr("models admission withdraw is JSON-only in this release; pass --json")
@@ -334,7 +368,8 @@ struct ModelsAdmissionWithdrawCommand: AsyncParsableCommand {
             let environment = BYOMDiscoveryEnvironment.production(
                 namespacePath: localDiscoveryNamespacePath,
                 mlxCacheDir: mlxCacheDir,
-                ollamaOrigin: skipOllama ? nil : ollamaOrigin
+                ollamaOrigin: skipOllama ? nil : ollamaOrigin,
+            openAICompatibleOrigin: skipOpenaiCompatible ? nil : openaiCompatibleOrigin
             )
             let client = try BYOMModelAdmissionClient(coordinatorURL: resolved.coordinatorURL)
             let runtime = BYOMModelAdmissionRuntime(
@@ -398,6 +433,12 @@ struct ModelsCatalogEconomicsCommand: AsyncParsableCommand {
     @Flag(help: "Skip the Ollama-compatible loopback adapter during candidate lookup.")
     var skipOllama = false
 
+    @Option(help: "Operator-supplied OpenAI-compatible loopback origin to query. Must be http://127.0.0.0/8:<port> or http://[::1]:<port>. There is no default: the adapter is not attempted unless this is set.")
+    var openaiCompatibleOrigin: String?
+
+    @Flag(help: "Skip the OpenAI-compatible loopback adapter during candidate lookup.")
+    var skipOpenaiCompatible = false
+
     func run() async throws {
         guard emitJSON else {
             writeStderr("models catalog-economics is JSON-only in this release; pass --json")
@@ -414,7 +455,8 @@ struct ModelsCatalogEconomicsCommand: AsyncParsableCommand {
         let environment = BYOMDiscoveryEnvironment.production(
             namespacePath: localDiscoveryNamespacePath,
             mlxCacheDir: mlxCacheDir,
-            ollamaOrigin: skipOllama ? nil : ollamaOrigin
+            ollamaOrigin: skipOllama ? nil : ollamaOrigin,
+            openAICompatibleOrigin: skipOpenaiCompatible ? nil : openaiCompatibleOrigin
         )
         let discovery = await BYOMDiscoveryRunner(environment: environment).discover()
         let inputs = await AutotuneStaticInputs().loadRecommendationInputs()

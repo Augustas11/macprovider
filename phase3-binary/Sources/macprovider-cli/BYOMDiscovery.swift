@@ -1844,18 +1844,38 @@ struct BYOMDiscoveryEnvironment: Sendable {
     let namespaceURL: URL
     let mlxCacheRoot: URL
     let ollamaOrigin: String?
+    /// Operator-supplied OpenAI-compatible loopback origin. SPEC-046-R002 allows
+    /// an adapter endpoint to be either a well-known loopback default for that
+    /// runtime or an operator-supplied loopback origin; a generic
+    /// OpenAI-compatible server has no well-known port, so this adapter has no
+    /// default and stays unattempted until the operator names an origin.
+    let openAICompatibleOrigin: String?
+
+    init(
+        namespaceURL: URL,
+        mlxCacheRoot: URL,
+        ollamaOrigin: String?,
+        openAICompatibleOrigin: String? = nil
+    ) {
+        self.namespaceURL = namespaceURL
+        self.mlxCacheRoot = mlxCacheRoot
+        self.ollamaOrigin = ollamaOrigin
+        self.openAICompatibleOrigin = openAICompatibleOrigin
+    }
 
     static func production(
         namespacePath: String?,
         mlxCacheDir: String?,
         ollamaOrigin: String?,
+        openAICompatibleOrigin: String? = nil,
         environment: [String: String] = ProcessInfo.processInfo.environment,
         homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
     ) -> BYOMDiscoveryEnvironment {
         BYOMDiscoveryEnvironment(
             namespaceURL: namespacePath.map(URL.init(fileURLWithPath:)) ?? defaultNamespaceURL(homeDirectory: homeDirectory),
             mlxCacheRoot: mlxCacheDir.map(URL.init(fileURLWithPath:)) ?? defaultMLXCacheRoot(environment: environment, homeDirectory: homeDirectory),
-            ollamaOrigin: ollamaOrigin
+            ollamaOrigin: ollamaOrigin,
+            openAICompatibleOrigin: openAICompatibleOrigin
         )
     }
 
@@ -2046,6 +2066,28 @@ struct BYOMDiscoveryRunner {
             }
         }
 
+        // SPEC-046-R002: no well-known default, so the adapter is attempted only
+        // when the operator supplies an origin. The unconfigured row is reported
+        // rather than omitted so the projection distinguishes "never attempted"
+        // from an adapter that was attempted and failed.
+        let openAIOrigin = environment.openAICompatibleOrigin?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let openAIOrigin, !openAIOrigin.isEmpty {
+            let openAICompatible = await BYOMOpenAICompatibleDiscovery(
+                origin: openAIOrigin,
+                namespace: namespace.bytes,
+                namespaceWarnings: namespace.warnings,
+                httpClient: httpClient
+            ).discover()
+            adapters.append(openAICompatible.adapter)
+            candidates.append(contentsOf: openAICompatible.candidates)
+            warnings.formUnion(openAICompatible.adapter.warningCodes)
+            for candidate in openAICompatible.candidates {
+                warnings.formUnion(candidate.warningCodes)
+            }
+        } else {
+            adapters.append(BYOMOpenAICompatibleDiscovery.unconfiguredAdapter)
+        }
+
         candidates.sort {
             if $0.runtimeSource == $1.runtimeSource {
                 return $0.servedModelRef < $1.servedModelRef
@@ -2148,9 +2190,7 @@ struct BYOMEvaluationRunner: Sendable {
             )
         }
 
-        guard candidate.runtimeSource == "ollama_loopback",
-              let baseURL = BYOMLoopbackOriginValidator.validatedHTTPOrigin(environment.ollamaOrigin ?? ""),
-              let runtimeModel = ollamaModelName(from: candidate.servedModelRef) else {
+        guard let resolved = resolveLoopbackRuntime(for: candidate) else {
             let warnings = mergedWarnings(candidate, adding: [.requiresPreparation])
             return failureDocument(
                 for: candidate,
@@ -2161,7 +2201,37 @@ struct BYOMEvaluationRunner: Sendable {
             )
         }
 
-        return await evaluateOpenAICompatible(candidate: candidate, runtimeModel: runtimeModel, baseURL: baseURL)
+        return await evaluateOpenAICompatible(
+            candidate: candidate,
+            runtimeModel: resolved.runtimeModel,
+            baseURL: resolved.baseURL
+        )
+    }
+
+    /// Both loopback runtime adapters are probed through the same bounded
+    /// OpenAI chat-completions harness; only the configured origin and the
+    /// `served_model_ref` prefix differ. Local artifact candidates (`mlx_cache`)
+    /// have no local endpoint to probe and stay `requires_preparation`.
+    private func resolveLoopbackRuntime(
+        for candidate: BYOMDiscoveryWire.Candidate
+    ) -> (runtimeModel: String, baseURL: URL)? {
+        let origin: String?
+        let prefix: String
+        switch candidate.runtimeSource {
+        case "ollama_loopback":
+            origin = environment.ollamaOrigin
+            prefix = "ollama:"
+        case BYOMOpenAICompatibleDiscovery.runtimeSource:
+            origin = environment.openAICompatibleOrigin
+            prefix = BYOMOpenAICompatibleDiscovery.servedModelRefPrefix
+        default:
+            return nil
+        }
+        guard let baseURL = BYOMLoopbackOriginValidator.validatedHTTPOrigin(origin ?? ""),
+              let runtimeModel = runtimeModelName(from: candidate.servedModelRef, prefix: prefix) else {
+            return nil
+        }
+        return (runtimeModel, baseURL)
     }
 
     private func evaluateOpenAICompatible(
@@ -2355,9 +2425,9 @@ struct BYOMEvaluationRunner: Sendable {
         }
     }
 
-    private func ollamaModelName(from servedModelRef: String) -> String? {
-        guard servedModelRef.hasPrefix("ollama:") else { return nil }
-        let name = String(servedModelRef.dropFirst("ollama:".count))
+    private func runtimeModelName(from servedModelRef: String, prefix: String) -> String? {
+        guard servedModelRef.hasPrefix(prefix) else { return nil }
+        let name = String(servedModelRef.dropFirst(prefix.count))
         guard BYOMDiscoveryPrivacy.isSafeRuntimeModelReference(name) else { return nil }
         return name
     }
@@ -2435,7 +2505,7 @@ struct BYOMEvaluationRunner: Sendable {
 
     private func adapterIdentity(for candidate: BYOMDiscoveryWire.Candidate) -> String {
         switch candidate.runtimeSource {
-        case "ollama_loopback":
+        case "ollama_loopback", BYOMOpenAICompatibleDiscovery.runtimeSource:
             return "openai_compatible_loopback"
         case "mlx_cache":
             return "mlx_cache_local_artifact"
@@ -3329,6 +3399,160 @@ struct BYOMOllamaDiscovery: Sendable {
     }
 }
 
+/// SPEC-046-R002 `openai_compatible_loopback` adapter.
+///
+/// Deliberately a thin wrapper over the same shared safety layer the Ollama
+/// adapter uses (#1246): `BYOMLoopbackOriginValidator` for URL admission,
+/// `BYOMDiscoveryHTTPBounds` + the injected client for redirect/proxy/byte
+/// bounds, `StrictJSONParser` via `BYOMDiscoveryJSON` for parser limits, and
+/// `BYOMDiscoveryPrivacy` for redaction. It reimplements none of them.
+///
+/// A generic OpenAI-compatible server exposes only `GET /v1/models`, which
+/// carries no artifact hash and no catalog identity, so every candidate it
+/// produces is an opaque endpoint: `identity_state: "opaque_endpoint"`,
+/// `locality: "opaque_local_endpoint"`, null `catalog_model_key`, and local
+/// inventory state only.
+struct BYOMOpenAICompatibleDiscovery: Sendable {
+    static let runtimeSource = "openai_compatible_loopback"
+    static let servedModelRefPrefix = "openai_compatible:"
+
+    /// Reported when the operator supplied no origin. Not `unavailable`: the
+    /// adapter was never attempted, so claiming a failed probe would be a lie.
+    static let unconfiguredAdapter = BYOMDiscoveryWire.Adapter(
+        runtimeSource: runtimeSource,
+        status: "not_configured",
+        originClass: nil,
+        warningCodes: []
+    )
+
+    private let origin: String
+    private let namespace: Data?
+    private let namespaceWarnings: [BYOMDiscoveryWarning]
+    private let httpClient: any BYOMDiscoveryHTTPClient
+
+    init(
+        origin: String,
+        namespace: Data?,
+        namespaceWarnings: [BYOMDiscoveryWarning] = [],
+        httpClient: any BYOMDiscoveryHTTPClient
+    ) {
+        self.origin = origin
+        self.namespace = namespace
+        self.namespaceWarnings = namespaceWarnings
+        self.httpClient = httpClient
+    }
+
+    func discover() async -> (adapter: BYOMDiscoveryWire.Adapter, candidates: [BYOMDiscoveryWire.Candidate]) {
+        guard let baseURL = BYOMLoopbackOriginValidator.validatedHTTPOrigin(origin) else {
+            // The rejected origin is never echoed back: R007 forbids surfacing a
+            // full local endpoint, and the closed warning code is the diagnostic.
+            return (
+                BYOMDiscoveryWire.Adapter(
+                    runtimeSource: Self.runtimeSource,
+                    status: "rejected",
+                    originClass: "rejected",
+                    warningCodes: [BYOMDiscoveryWarning.adapterRejectedNonLoopback.rawValue]
+                ),
+                []
+            )
+        }
+
+        do {
+            let response = try await httpClient.get(
+                baseURL.appendingPathComponent("v1/models"),
+                maxHeaderBytes: BYOMDiscoveryHTTPBounds.maxHeaderBytes,
+                maxBodyBytes: BYOMDiscoveryHTTPBounds.maxBodyBytes
+            )
+            guard response.statusCode == 200 else {
+                return adapterFailure(.adapterUnavailable, status: "unavailable")
+            }
+            guard BYOMDiscoveryHTTPBounds.headerBytes(response.headers) <= BYOMDiscoveryHTTPBounds.maxHeaderBytes else {
+                return adapterFailure(.adapterResponseTruncated, status: "truncated")
+            }
+            guard response.body.count <= BYOMDiscoveryHTTPBounds.maxBodyBytes else {
+                return adapterFailure(.adapterResponseTruncated, status: "truncated")
+            }
+            let inventory = try BYOMDiscoveryJSON.parseOpenAIModels(response.body)
+            return (
+                BYOMDiscoveryWire.Adapter(
+                    runtimeSource: Self.runtimeSource,
+                    status: "ok",
+                    originClass: "loopback_http",
+                    warningCodes: inventory.warningCodes.map(\.rawValue).sorted()
+                ),
+                inventory.modelIDs.map(buildCandidate)
+            )
+        } catch is CancellationError {
+            return adapterFailure(.adapterTimeout, status: "timeout")
+        } catch let error as URLError where error.code == .timedOut {
+            return adapterFailure(.adapterTimeout, status: "timeout")
+        } catch let error as BYOMDiscoveryAdapterError {
+            switch error {
+            case .malformed:
+                return adapterFailure(.adapterMalformedResponse, status: "malformed")
+            case .truncated:
+                return adapterFailure(.adapterResponseTruncated, status: "truncated")
+            case .rejectedNonLoopback:
+                return adapterFailure(.adapterRejectedNonLoopback, status: "rejected")
+            }
+        } catch {
+            return adapterFailure(.adapterUnavailable, status: "unavailable")
+        }
+    }
+
+    private func adapterFailure(
+        _ warning: BYOMDiscoveryWarning,
+        status: String
+    ) -> (adapter: BYOMDiscoveryWire.Adapter, candidates: [BYOMDiscoveryWire.Candidate]) {
+        (
+            BYOMDiscoveryWire.Adapter(
+                runtimeSource: Self.runtimeSource,
+                status: status,
+                originClass: "loopback_http",
+                warningCodes: [warning.rawValue]
+            ),
+            []
+        )
+    }
+
+    private func buildCandidate(_ modelID: String) -> BYOMDiscoveryWire.Candidate {
+        let servedModelRef = Self.servedModelRefPrefix + modelID
+        let (candidateID, idWarnings) = BYOMCandidateIdentity.candidateID(
+            namespace: namespace,
+            runtimeSource: Self.runtimeSource,
+            servedModelRef: servedModelRef
+        )
+        let warnings = Set((namespaceWarnings + idWarnings + [.capabilityUnevaluated, .evaluationRequired]).map(\.rawValue))
+        // SPEC-046-R003 local-state ladder: an opaque endpoint's identity is
+        // insufficient for offering — there is no artifact hash and no catalog
+        // key to bind — so it stays local inventory and never reports
+        // `offerable`. SPEC-047 rejects opaque endpoints for network admission,
+        // so a locally optimistic label here would over-promise.
+        let admission = "local_only"
+        return BYOMDiscoveryWire.Candidate(
+            candidateID: candidateID,
+            runtimeSource: Self.runtimeSource,
+            displayName: BYOMDiscoveryPrivacy.displayName(from: modelID),
+            servedModelRef: servedModelRef,
+            catalogModelKey: nil,
+            identityState: "opaque_endpoint",
+            locality: "opaque_local_endpoint",
+            estimatedGB: nil,
+            contextWindowTokens: nil,
+            // `GET /v1/models` reports no capability, size, or runtime version,
+            // so every advisory field stays null rather than false (R004).
+            capabilities: .unknown,
+            readinessState: "ready",
+            fitState: "unknown",
+            evaluationState: "not_evaluated",
+            admissionState: admission,
+            admissionStateSource: "local_default",
+            providerGuidance: BYOMDiscoveryGuidance.opaqueEndpointGuidance(warnings: warnings),
+            warningCodes: Array(warnings).sorted()
+        )
+    }
+}
+
 enum BYOMLoopbackOriginValidator {
     static func validatedHTTPOrigin(_ raw: String) -> URL? {
         guard var components = URLComponents(string: raw.trimmingCharacters(in: .whitespacesAndNewlines)),
@@ -3436,6 +3660,41 @@ enum BYOMDiscoveryJSON {
             ))
         }
         return OllamaInventory(models: models, warningCodes: withheldReference ? [.modelReferenceRedacted] : [])
+    }
+
+    struct OpenAIModelInventory {
+        let modelIDs: [String]
+        let warningCodes: [BYOMDiscoveryWarning]
+    }
+
+    /// Parse `GET /v1/models` through the same bounded strict parser and
+    /// record-count cap the Ollama adapter uses. An id that is not a safe
+    /// runtime model reference is withheld entirely (R007: no placeholder
+    /// candidate, no synthesized identity) and reported as
+    /// `model_reference_redacted` on the adapter.
+    static func parseOpenAIModels(_ data: Data) throws -> OpenAIModelInventory {
+        guard let text = String(data: data, encoding: .utf8),
+              case .object(let root) = try? StrictJSONParser.parse(text),
+              case .array(let rawModels)? = root["data"] else {
+            throw BYOMDiscoveryAdapterError.malformed
+        }
+        var modelIDs: [String] = []
+        var withheldReference = false
+        for value in rawModels.prefix(100) {
+            guard case .object(let object) = value,
+                  case .string(let id)? = object["id"] else {
+                throw BYOMDiscoveryAdapterError.malformed
+            }
+            guard BYOMDiscoveryPrivacy.isSafeRuntimeModelReference(id) else {
+                withheldReference = true
+                continue
+            }
+            modelIDs.append(id)
+        }
+        return OpenAIModelInventory(
+            modelIDs: modelIDs,
+            warningCodes: withheldReference ? [.modelReferenceRedacted] : []
+        )
     }
 
     static func contextWindowTokens(from data: Data) -> Int? {
@@ -3762,6 +4021,21 @@ enum BYOMDiscoveryPrivacy {
 }
 
 enum BYOMDiscoveryGuidance {
+    /// Guidance for an `opaque_endpoint` candidate. The state is always
+    /// `local_only`, so the ladder's own next actions apply: fix the blocking
+    /// local condition, or — when nothing is blocking — run `models evaluate`,
+    /// which is the only thing an opaque endpoint can usefully do locally.
+    static func opaqueEndpointGuidance(warnings: Set<String>) -> BYOMDiscoveryWire.Guidance {
+        let blocked = !warnings.isDisjoint(with: BYOMDiscoveryWarning.submitBlockingWarningCodes)
+        return BYOMDiscoveryWire.Guidance(
+            stateLabelKey: "byom.local.local_only",
+            stateMeaningKey: "byom.local.opaque_endpoint_not_earning",
+            nextAction: blocked ? "fix_local_blocker" : "evaluate",
+            transitionReasonCode: warnings.sorted().first,
+            earningPathClass: "local_inventory_only"
+        )
+    }
+
     static func guidance(forAdmissionState state: String, warnings: Set<String>) -> BYOMDiscoveryWire.Guidance {
         switch state {
         case "offerable":
