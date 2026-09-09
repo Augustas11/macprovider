@@ -171,6 +171,10 @@ for requirement in (
     "artifact-feed state",
     'AUTOTUNE_PREVIOUS_RELEASE_DIR="$PREVIOUS_RELEASE_DIR"',
     "cannot fetch the live signed release",
+    # Dry-run never contacts Pearl; staging follows release.json only.
+    "dry-run makes no contact with",
+    'staged_artifact_bound="$(python3 - "$CAT_DIR/release.json"',
+    "release.json does not bind autotune-artifacts.json but",
 ):
     if requirement not in script:
         raise SystemExit(f"renew script omits: {requirement}")
@@ -179,6 +183,12 @@ if 'cat_dir / "rate-card.json"' in before_generate:
     raise SystemExit("renewal must not re-stamp the GENERATED rate-card.json; the generator writes it")
 if 'AUTOTUNE_PREVIOUS_RELEASE_DIR="$PREVIOUS_RELEASE_DIR"' not in before_generate:
     raise SystemExit("the previous-release fetch must run before generate")
+fetch_position = script.find("SSH \"tar -C '$REMOTE_AUTOTUNE_DIR/current'")
+guard_position = script.find('case "$REMOTE_AUTOTUNE_DIR" in ""|*[!A-Za-z0-9._/-]*)')
+if min(fetch_position, guard_position) < 0 or guard_position > fetch_position:
+    raise SystemExit("REMOTE_AUTOTUNE_DIR must be allowlisted before the previous-release fetch interpolates it")
+if script.find('[ "$DEPLOY" = 1 ] ||') < 0 or script.find('[ "$DEPLOY" = 1 ] ||') > fetch_position:
+    raise SystemExit("the previous-release fetch must be gated on --deploy so dry-run stays no-contact")
 if 'rm -rf "$PREVIOUS_RELEASE_DIR"' not in script.split("cleanup() {", 1)[1].split("\n}", 1)[0]:
     raise SystemExit("the fetched previous release must be removed on exit")
 rollback = script.split("rollback() {", 1)[1].split("\n}", 1)[0]

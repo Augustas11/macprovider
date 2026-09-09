@@ -3762,11 +3762,12 @@ def cmd_continuity_check(incoming: pathlib.Path, live: pathlib.Path) -> None:
 def cmd_status() -> None:
     """Print the artifact-feed activation state and its outstanding prerequisites.
 
-    Stage A is not shippable from the generator alone: it produces and binds
-    the feed, the coordinator serves it and the live release gate verifies it
-    (slice 2b), but nothing packages or publishes it as a release asset yet
-    (`PENDING_DISTRIBUTION_SURFACES`). Printing an explicit "not activatable
-    yet" state — rather than letting a
+    Every distribution surface has landed (the coordinator serves the feed and
+    the live gate verifies it; the release pipeline publishes, deploys, and
+    renews it), so what gates activation now is the generator-side prerequisite
+    list above and the operator's activation-deploy step; any future surface is
+    added to `PENDING_DISTRIBUTION_SURFACES`. Printing an explicit "not
+    activatable yet" state — rather than letting a
     green `verify` imply readiness — is what keeps the operator from cutting a
     release whose fifth feed no consumer can fetch.
     """
