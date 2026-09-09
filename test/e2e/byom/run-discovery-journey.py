@@ -3,8 +3,12 @@
 
 Runs all ten normative steps of `journeys/JOURNEY-PROVIDER-BYOM-DISCOVERY.md`
 against loopback stubs and an on-disk MLX-cache fixture, saves every CLI JSON
-document it produced, and emits the `macprovider.byom-journey-run.v1` run
-manifest that `scripts/capture-byom-journey-evidence.py` consumes.
+document it produced, and -- in `--evidence` mode only -- emits the
+`macprovider.byom-journey-run.v1` run manifest that
+`scripts/capture-byom-journey-evidence.py` consumes. A run without `--evidence`
+may execute an arbitrary MACPROVIDER_CLI_BINARY against a dirty tree, so it
+writes `run-summary.json` instead: local debugging output that no capture step
+reads, which makes an unbound run non-promotable by construction.
 
 Every observation in the manifest is set from this driver's own assertions, not
 declared: the two negative observations are read off harness-owned ledgers (a
@@ -13,10 +17,12 @@ stubs' own request logs). A failed assertion aborts the run, and the manifest is
 published atomically only after every step and observation check has passed, so
 a manifest only ever exists for a run where all ten steps passed.
 
-Captured CLI documents are archived whole. Nothing is stripped before hashing,
-so the digest the signed evidence binds to covers the CLI's complete closed
-envelope; the evidence contract's fail-closed scanner is imported and run over
-every one of them, and over every command's real stdout and stderr.
+Captured CLI documents are archived whole and validated against their complete
+closed schemas -- a missing or unknown field fails the step. Nothing is stripped
+before hashing, so the digest the signed evidence binds to covers the CLI's
+complete closed envelope; the evidence contract's fail-closed scanner is
+imported and run over every one of them, and over every command's real stdout
+and stderr, `--version` included.
 
 Nothing here signs or promotes anything, and nothing is written into the
 repository: the captures and the manifest go to `--out`, which the operator
@@ -97,6 +103,152 @@ FALSE_OBSERVATIONS = (
     "weights_downloaded",
 )
 
+# --- Closed capture schemas (R2 MEDIUM) ------------------------------------
+#
+# Capture checks that a document is JSON, names the expected schema id, and is
+# redaction-clean. None of that proves the document is COMPLETE: a CLI that
+# stopped emitting `capabilities`, or emitted a mutation summary with one field
+# in it, would still pass. The signed evidence binds a digest of these
+# documents, so an incomplete one is a false conformance claim.
+#
+# Every set below is exact: a missing key and an unknown key both fail closed.
+# The field lists are the normative ones -- SPEC-046-R003 (discovery envelope,
+# candidate, provider_guidance), SPEC-046-R004 (capability object),
+# SPEC-046-R005 (evaluation envelope), SPEC-047-R002 (dry-run and status
+# envelopes) -- except the two the specs describe without enumerating field
+# names, `adapters[]` rows and the `model_catalog_economics.v1` row, which are
+# frozen here at the shape the CLI actually emits so a silent projection change
+# fails this gate.
+
+DISCOVERY_ENVELOPE_KEYS = frozenset({
+    "schema", "generated_at", "cli_version", "projection_sequence",
+    "adapters", "candidates", "warnings",
+})
+DISCOVERY_ADAPTER_KEYS = frozenset({
+    "runtime_source", "origin_class", "status", "warning_codes",
+})
+DISCOVERY_CANDIDATE_KEYS = frozenset({
+    "candidate_id", "runtime_source", "display_name", "served_model_ref",
+    "catalog_model_key", "identity_state", "locality", "estimated_gb",
+    "context_window_tokens", "capabilities", "readiness_state", "fit_state",
+    "evaluation_state", "admission_state", "admission_state_source",
+    "provider_guidance", "warning_codes",
+})
+# SPEC-046-R004, exactly.
+CAPABILITY_KEYS = frozenset({
+    "chat_completions", "streaming", "tool_call_passthrough",
+    "structured_output_passthrough", "json_mode", "usage_reporting",
+    "max_context_tokens", "quantization", "family", "runtime_version",
+})
+# SPEC-046-R003; SPEC-047-R002 requires the dry-run and status envelopes to
+# reuse this same object.
+PROVIDER_GUIDANCE_KEYS = frozenset({
+    "state_label_key", "state_meaning_key", "next_action",
+    "transition_reason_code", "earning_path_class",
+})
+EVALUATION_ENVELOPE_KEYS = frozenset({
+    "schema", "generated_at", "cli_version", "candidate_id", "runtime_source",
+    "served_model_ref", "catalog_model_key", "adapter_identity",
+    "health_result", "latency_ms", "tokens_per_second", "completion_tokens",
+    "output_bytes", "request_count", "usage_reporting_source",
+    "capability_results", "fit_estimate_source", "mutation_summary",
+    "diagnostic_hashes", "provider_guidance",
+    "offer_preconditions_appear_satisfied", "warnings",
+})
+EVALUATION_MUTATION_SUMMARY_KEYS = frozenset({
+    "production_config_mutated", "production_model_switched", "runtime_started",
+    "downloads_started", "temporary_files_created", "coordinator_state_mutated",
+})
+# SPEC-047-R002, exactly.
+OFFER_DRY_RUN_ENVELOPE_KEYS = frozenset({
+    "schema", "generated_at", "cli_version", "candidate_id", "served_model_ref",
+    "catalog_model_key", "would_submit", "likely_admission_state",
+    "likely_admission_state_source", "provider_guidance", "reason_code",
+    "warnings",
+})
+ADMISSION_STATUS_ENVELOPE_KEYS = frozenset({
+    "schema", "generated_at", "cli_version", "provider_id", "candidate_id",
+    "served_model_ref", "catalog_model_key", "admission_state",
+    "admission_state_source", "coordinator_event_id", "state_observed_at",
+    "provider_guidance", "allowed_next_states", "warnings",
+})
+CATALOG_ECONOMICS_ENVELOPE_KEYS = frozenset({
+    "schema", "generated_at", "projection_sequence", "source", "rows", "warnings",
+})
+CATALOG_ECONOMICS_ROW_KEYS = frozenset({
+    "model_key", "display_model_id", "served_model_id", "action_model_id",
+    "is_current", "runtime_state", "economics_state", "admission", "fit",
+    "estimated_gb", "weights_present_locally", "ready_provider_count",
+    "demand_rank", "demand_weight", "supply_deficit_score",
+    "prompt_rate_usd_per_million_tokens", "completion_rate_usd_per_million_tokens",
+    "provider_prompt_payout_usd_per_million_tokens",
+    "provider_completion_payout_usd_per_million_tokens", "provider_share_bps",
+    "rate_source", "rate_card_key", "rate_card_version", "rate_card_generated_at",
+    "adopt_recommendation", "prepare", "evaluate", "switch", "cleanup_staging",
+    "disabled_reason", "warning_codes",
+})
+CATALOG_ECONOMICS_ADMISSION_KEYS = frozenset({
+    "state", "source", "settlement_capable", "catalog_economics_permitted",
+    "coordinator_event_id", "state_observed_at",
+})
+
+
+def assert_exact_object(value, expected_keys, where):
+    """The captured document must carry exactly these fields -- no more, no less."""
+    assert_true(isinstance(value, dict), where + " must be a JSON object")
+    present = set(value)
+    missing = sorted(expected_keys - present)
+    unknown = sorted(present - expected_keys)
+    assert_true(not missing, where + " is missing required fields: " + ", ".join(missing))
+    assert_true(not unknown, where + " carries unknown fields: " + ", ".join(unknown))
+
+
+def validate_captured_document(name, document):
+    """Validate one captured CLI document against its complete closed schema.
+
+    Runs on every capture, so no incomplete or extended document can reach the
+    manifest whose digest the signed evidence binds.
+    """
+    schema = document.get("schema")
+    if schema == "provider_byom_discovery.v1":
+        assert_exact_object(document, DISCOVERY_ENVELOPE_KEYS, name)
+        for index, adapter in enumerate(document["adapters"]):
+            assert_exact_object(adapter, DISCOVERY_ADAPTER_KEYS, "%s adapters[%d]" % (name, index))
+        for index, candidate in enumerate(document["candidates"]):
+            where = "%s candidates[%d]" % (name, index)
+            assert_exact_object(candidate, DISCOVERY_CANDIDATE_KEYS, where)
+            assert_exact_object(candidate["capabilities"], CAPABILITY_KEYS, where + ".capabilities")
+            assert_exact_object(
+                candidate["provider_guidance"], PROVIDER_GUIDANCE_KEYS, where + ".provider_guidance"
+            )
+    elif schema == "provider_byom_evaluation.v1":
+        assert_exact_object(document, EVALUATION_ENVELOPE_KEYS, name)
+        assert_exact_object(
+            document["mutation_summary"], EVALUATION_MUTATION_SUMMARY_KEYS,
+            name + ".mutation_summary",
+        )
+        assert_exact_object(
+            document["provider_guidance"], PROVIDER_GUIDANCE_KEYS, name + ".provider_guidance"
+        )
+    elif schema == "model_admission_offer_dry_run.v1":
+        assert_exact_object(document, OFFER_DRY_RUN_ENVELOPE_KEYS, name)
+        assert_exact_object(
+            document["provider_guidance"], PROVIDER_GUIDANCE_KEYS, name + ".provider_guidance"
+        )
+    elif schema == "model_admission_status.v1":
+        assert_exact_object(document, ADMISSION_STATUS_ENVELOPE_KEYS, name)
+        assert_exact_object(
+            document["provider_guidance"], PROVIDER_GUIDANCE_KEYS, name + ".provider_guidance"
+        )
+    elif schema == "model_catalog_economics.v1":
+        assert_exact_object(document, CATALOG_ECONOMICS_ENVELOPE_KEYS, name)
+        for index, row in enumerate(document["rows"]):
+            where = "%s rows[%d]" % (name, index)
+            assert_exact_object(row, CATALOG_ECONOMICS_ROW_KEYS, where)
+            assert_exact_object(row["admission"], CATALOG_ECONOMICS_ADMISSION_KEYS, where + ".admission")
+    else:
+        raise HarnessFailure("captured document %s has an unvalidated schema: %r" % (name, schema))
+
 
 class HarnessFailure(Exception):
     pass
@@ -106,11 +258,40 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3] / "scripts"))
 import byom_journey_evidence as evidence_contract  # noqa: E402
 
 
-# Tracked paths whose contents decide what an evidence run actually executed.
-# In `--evidence` mode all three must be clean before `source_sha` may be
-# recorded against the run (F5): the harness, the CLI source, and the evidence
-# contract are the run.
-EVIDENCE_SOURCE_PATHS = ("phase3-binary", "scripts", "test/e2e/byom")
+# Paths whose contents decide what an evidence run actually executed. In
+# `--evidence` mode every one of them must be clean -- tracked AND untracked --
+# both before and after the CLI is built, before `source_sha` may be recorded
+# against the run (R1 F5, R2 HIGH). SwiftPM's executable target selects the
+# whole `Sources/macprovider-cli` directory with no closed source list, so an
+# untracked `.swift` file there is a build input; ignoring untracked files would
+# let the manifest name a commit that did not produce the binary.
+EVIDENCE_SOURCE_PATHS = (
+    "phase3-binary/Sources",
+    "phase3-binary/Tests",
+    "phase3-binary/Package.swift",
+    "phase3-binary/Package.resolved",
+    "scripts",
+    "test/e2e/byom",
+)
+
+# The one tracked file an earlier CI step is expected to have rewritten. The
+# `swift test` step that runs before this gate resolves the package graph under
+# the runner's default toolchain, which writes a different (still valid)
+# `Package.resolved` than the committed one. That drift says nothing about what
+# this run executes, and HEAD's lockfile is already proven consistent by the
+# separate `phase3-binary (locked SwiftPM resolve)` CI job, so evidence mode
+# restores the committed bytes rather than refusing to run. Everything else in
+# EVIDENCE_SOURCE_PATHS still fails closed, and the build below is locked to
+# this lockfile so it cannot rewrite it again.
+EVIDENCE_RESTORED_LOCKFILE = "phase3-binary/Package.resolved"
+
+# Same lock the `phase3-binary (locked SwiftPM resolve)` CI job applies through
+# xcodebuild's `-onlyUsePackageVersionsFromResolvedFile`
+# (scripts/verify-swift-package-lock.sh): resolution may only use the versions
+# in Package.resolved and fails if that file is out of date. Without it the
+# build itself can rewrite the lockfile after the pre-build cleanliness check
+# and publish evidence against a tree it has already changed.
+SWIFT_LOCKED_RESOLUTION_FLAG = "--only-use-versions-from-resolved-file"
 
 
 def assert_true(condition, message):
@@ -122,15 +303,37 @@ def repo_root():
     return pathlib.Path(__file__).resolve().parents[3]
 
 
-def require_clean_evidence_source(root):
-    """Refuse to record `source_sha` for a tree that is not what ran (F5).
+def restore_locked_package_resolved(root):
+    """Put the committed `Package.resolved` back before the cleanliness check.
 
-    Untracked files are ignored on purpose: they cannot change the behaviour of
-    a tracked, committed harness or CLI. A modified tracked file can, so it
-    fails closed.
+    See EVIDENCE_RESTORED_LOCKFILE: the CI `swift test` step that runs before
+    this gate rewrites the lockfile, and that rewrite is not evidence about this
+    run. Restoring HEAD's bytes -- and then building locked to them -- is what
+    makes evidence mode order-independent in CI instead of failing on, or
+    silently absorbing, an earlier step's resolution.
+    """
+    lockfile = root / EVIDENCE_RESTORED_LOCKFILE
+    if not lockfile.exists():
+        return
+    subprocess.run(
+        ["git", "checkout", "HEAD", "--", EVIDENCE_RESTORED_LOCKFILE],
+        cwd=str(root),
+        check=True,
+    )
+
+
+def require_clean_evidence_source(root, phase):
+    """Refuse to record `source_sha` for a tree that is not what ran (F5, R2).
+
+    Tracked AND untracked files count: SwiftPM builds every `.swift` file under
+    the executable's source directory, so an untracked one is as much a build
+    input as a modified tracked one. Anything reported fails closed.
+
+    `phase` names when the check ran ("before the build" / "after the build");
+    the post-build call is what catches a build that mutated its own inputs.
     """
     completed = subprocess.run(
-        ["git", "status", "--porcelain", "--untracked-files=no", "--"]
+        ["git", "status", "--porcelain", "--untracked-files=all", "--"]
         + list(EVIDENCE_SOURCE_PATHS),
         cwd=str(root),
         capture_output=True,
@@ -140,8 +343,8 @@ def require_clean_evidence_source(root):
     dirty = sorted(line[3:] for line in completed.stdout.splitlines() if line.strip())
     assert_true(
         not dirty,
-        "evidence mode needs a clean tracked tree for the executed source; modified: "
-        + ", ".join(dirty),
+        "evidence mode needs a clean source tree %s; dirty: %s"
+        % (phase, ", ".join(dirty)),
     )
 
 
@@ -155,19 +358,24 @@ def build_cli(root, explicit_binary, evidence_mode):
             "MACPROVIDER_CLI_BINARY is refused in --evidence mode: evidence must "
             "execute the binary built from the recorded source",
         )
-        require_clean_evidence_source(root)
+        restore_locked_package_resolved(root)
+        require_clean_evidence_source(root, "before the build")
         explicit_binary = None
     if explicit_binary:
         path = pathlib.Path(explicit_binary).expanduser().resolve()
         assert_true(path.exists(), "MACPROVIDER_CLI_BINARY does not exist: " + str(path))
         return path
-    subprocess.run(
-        ["swift", "build", "--product", "macprovider-cli"],
-        cwd=str(root / "phase3-binary"),
-        check=True,
-    )
+    command = ["swift", "build", "--product", "macprovider-cli"]
+    if evidence_mode:
+        command.append(SWIFT_LOCKED_RESOLUTION_FLAG)
+    subprocess.run(command, cwd=str(root / "phase3-binary"), check=True)
     path = root / "phase3-binary" / ".build" / "debug" / "macprovider-cli"
     assert_true(path.exists(), "swift build did not produce " + str(path))
+    if evidence_mode:
+        # The build is an input mutation risk of its own: a resolution or a
+        # generated file landing under the executable's source directory would
+        # make the binary something other than what the pre-build check saw.
+        require_clean_evidence_source(root, "after the build")
     return path
 
 
@@ -353,10 +561,15 @@ class Runner:
         self.cwd = cwd
         self.transcript = []
 
-    def run(self, args, env=None):
-        """Run one CLI command. `env` overrides the runner's environment for a
-        command that must see a different one -- step 10 runs `models admission
-        status` with no coordinator configured at all."""
+    def run_text(self, args, env=None):
+        """Run one CLI command and return its stdout, scanned.
+
+        EVERY command goes through here, including ones whose output is not JSON
+        (`--version`), so the step-08 claim that the scan covers every command's
+        real stdout and stderr is true rather than nearly true. Both streams also
+        enter `transcript`, which the step-08 review re-scans for this run's
+        origins, paths, prompt, and completion marker.
+        """
         label = " ".join(args[:3])
         completed = subprocess.run(
             [str(self.cli)] + args,
@@ -371,24 +584,36 @@ class Runner:
             raise HarnessFailure(
                 "CLI failed (%d): %s" % (completed.returncode, label)
             )
-        try:
-            document = json.loads(completed.stdout)
-        except json.JSONDecodeError as exc:
-            raise HarnessFailure("invalid JSON stdout for %s: %s" % (label, exc))
         # Step 08's real scan (F2), run here so it covers every command's actual
         # output rather than only the documents that end up captured, and so an
         # unexpected forbidden-shaped value fails the run even though it is not
         # in the run-specific `forbidden` list. The scanner functions are the
         # evidence contract's own, imported rather than reimplemented.
         try:
-            evidence_contract.assert_captured_document_redacted(
-                document, "cli stdout for " + label
-            )
             evidence_contract.reject_unredacted_text_except_hostname(
                 completed.stdout, "cli stdout for " + label
             )
             evidence_contract.reject_unredacted_text(
                 completed.stderr, "cli stderr for " + label
+            )
+        except evidence_contract.BYOMEvidenceError as exc:
+            raise HarnessFailure("CLI output for %s is not redaction-clean: %s" % (label, exc))
+        return completed.stdout
+
+    def run(self, args, env=None):
+        """Run one CLI command that emits a JSON document. `env` overrides the
+        runner's environment for a command that must see a different one -- step
+        10 runs `models admission status` with no coordinator configured at
+        all."""
+        label = " ".join(args[:3])
+        stdout = self.run_text(args, env=env)
+        try:
+            document = json.loads(stdout)
+        except json.JSONDecodeError as exc:
+            raise HarnessFailure("invalid JSON stdout for %s: %s" % (label, exc))
+        try:
+            evidence_contract.assert_captured_document_redacted(
+                document, "cli stdout for " + label
             )
         except evidence_contract.BYOMEvidenceError as exc:
             raise HarnessFailure("CLI output for %s is not redaction-clean: %s" % (label, exc))
@@ -416,12 +641,13 @@ class ManifestBuilder:
     paths, hostnames and IP literals: capture's redaction scan runs over them.
     """
 
-    def __init__(self, out_dir, run_id, cli_version):
+    def __init__(self, out_dir, run_id, cli_version, evidence_mode=False):
         self.out_dir = out_dir
         self.captures = out_dir / "captures"
         self.captures.mkdir(parents=True, exist_ok=True)
         self.run_id = run_id
         self.cli_version = cli_version
+        self.evidence_mode = evidence_mode
         self.steps = []
         self.observations = {name: None for name in TRUE_OBSERVATIONS + FALSE_OBSERVATIONS}
 
@@ -430,7 +656,10 @@ class ManifestBuilder:
 
         Nothing is stripped: the digest the signed evidence binds to has to
         cover the CLI's complete closed envelope, including the SPEC-046-R003
-        `provider_guidance` localization keys. The scan is the capture tool's
+        `provider_guidance` localization keys. The document is first validated
+        against that complete closed schema -- a missing or unknown field fails
+        the step, so redaction-clean but incomplete captures cannot support
+        evidence (R2). The scan is the capture tool's
         own, imported rather than reimplemented, so this driver can never emit a
         manifest whose documents capture would reject -- same field-scoped rule,
         same fail-closed outcome.
@@ -445,6 +674,7 @@ class ManifestBuilder:
             )
         except evidence_contract.BYOMEvidenceError as exc:
             raise HarnessFailure("captured document %s is not redaction-clean: %s" % (name, exc))
+        validate_captured_document("captured document " + name, document)
         path = self.captures / (name + ".json")
         path.write_text(payload, encoding="utf-8")
         return path
@@ -495,8 +725,17 @@ class ManifestBuilder:
         # Published atomically and only here, after every step and observation
         # check has passed: a consumer must never be able to read a half-written
         # manifest, and a failed run must leave none at all (F7).
-        path = self.out_dir / "run-manifest.json"
-        temporary = self.out_dir / ".run-manifest.json.tmp"
+        #
+        # Only an `--evidence` run publishes `run-manifest.json`. A local
+        # debugging run -- which may execute an arbitrary MACPROVIDER_CLI_BINARY
+        # against a dirty tree -- writes the same content as `run-summary.json`,
+        # a name the capture tool does not consume. Non-promotable by
+        # construction rather than by operator discipline (R2 HIGH): there is no
+        # sequence of local commands that produces a capturable manifest without
+        # the source binding.
+        name = "run-manifest.json" if self.evidence_mode else "run-summary.json"
+        path = self.out_dir / name
+        temporary = self.out_dir / ("." + name + ".tmp")
         temporary.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
         os.replace(str(temporary), str(path))
         return path
@@ -543,9 +782,10 @@ def main():
     parser.add_argument(
         "--evidence",
         action="store_true",
-        help="Evidence mode: refuse MACPROVIDER_CLI_BINARY, require a clean tracked "
-             "source tree, and build the CLI from it, so the run is bound to the "
-             "commit the evidence will name.",
+        help="Evidence mode: refuse MACPROVIDER_CLI_BINARY, require a clean source "
+             "tree (tracked and untracked) before and after a lock-resolved build of "
+             "the CLI, and publish run-manifest.json. Without it the run writes only "
+             "run-summary.json, which the capture tool does not consume.",
     )
     args = parser.parse_args()
 
@@ -609,11 +849,9 @@ def main():
             "--mlx-cache-dir", str(hf_cache),
         ]
         runner = Runner(cli, env, root)
-        cli_version = subprocess.run(
-            [str(cli), "--version"], capture_output=True, text=True, check=True
-        ).stdout.strip()
+        cli_version = runner.run_text(["--version"]).strip()
         run_id = "byom-discovery-" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        manifest = ManifestBuilder(out_dir, run_id, cli_version)
+        manifest = ManifestBuilder(out_dir, run_id, cli_version, evidence_mode=args.evidence)
 
         cache_digest_before = directory_digest(hf_cache)
         namespace_before = namespace.read_bytes()
@@ -698,7 +936,11 @@ def main():
             opaque_candidate.get("admission_state_source") == "local_default",
             "opaque candidate claimed coordinator authority",
         )
-        capabilities = opaque_candidate.get("capabilities") or {}
+        # The exact SPEC-046-R004 capability object, every value null. An
+        # absent or partial object would otherwise make "no asserted
+        # capability" vacuously true (R2).
+        capabilities = opaque_candidate.get("capabilities")
+        assert_exact_object(capabilities, CAPABILITY_KEYS, "opaque candidate capabilities")
         assert_true(
             all(value is None for value in capabilities.values()),
             "opaque candidate asserted an unevaluated capability",
@@ -819,8 +1061,13 @@ def main():
 
         # Step 07 - no production mutation. The mutation summary is the CLI's own
         # claim; the fixture digests are the independent check on it.
-        mutations = evaluation.get("mutation_summary") or {}
-        assert_true(bool(mutations), "evaluation reported no mutation summary")
+        # The exact SPEC-046-R005 mutation-summary field set, every value
+        # false. Any nonempty subset used to satisfy this; a document that had
+        # dropped a mutation field would have passed (R2).
+        mutations = evaluation.get("mutation_summary")
+        assert_exact_object(
+            mutations, EVALUATION_MUTATION_SUMMARY_KEYS, "evaluation mutation_summary"
+        )
         assert_true(
             all(value is False for value in mutations.values()),
             "evaluation claimed a mutation: %s" % sorted(k for k, v in mutations.items() if v),
@@ -1147,7 +1394,10 @@ def main():
         manifest_path = manifest.write()
         print("BYOM discovery journey passed")
         print("run_id=%s cli_version=%s steps=%d" % (run_id, cli_version, len(manifest.steps)))
-        print("manifest=%s" % manifest_path)
+        if args.evidence:
+            print("manifest=%s" % manifest_path)
+        else:
+            print("summary=%s (not evidence: no run manifest was published)" % manifest_path)
         return 0
     except Exception as exc:
         print("BYOM discovery journey failed: %s" % exc, file=sys.stderr)

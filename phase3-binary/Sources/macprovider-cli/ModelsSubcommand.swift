@@ -287,7 +287,7 @@ struct ModelsAdmissionStatusCommand: AsyncParsableCommand {
                 namespacePath: localDiscoveryNamespacePath,
                 mlxCacheDir: mlxCacheDir,
                 ollamaOrigin: skipOllama ? nil : ollamaOrigin,
-            openAICompatibleOrigin: skipOpenaiCompatible ? nil : openaiCompatibleOrigin
+                openAICompatibleOrigin: skipOpenaiCompatible ? nil : openaiCompatibleOrigin
             )
             let client = try resolved.coordinatorURL.map { try BYOMModelAdmissionClient(coordinatorURL: $0) }
             let runtime = BYOMModelAdmissionRuntime(
@@ -369,7 +369,7 @@ struct ModelsAdmissionWithdrawCommand: AsyncParsableCommand {
                 namespacePath: localDiscoveryNamespacePath,
                 mlxCacheDir: mlxCacheDir,
                 ollamaOrigin: skipOllama ? nil : ollamaOrigin,
-            openAICompatibleOrigin: skipOpenaiCompatible ? nil : openaiCompatibleOrigin
+                openAICompatibleOrigin: skipOpenaiCompatible ? nil : openaiCompatibleOrigin
             )
             let client = try BYOMModelAdmissionClient(coordinatorURL: resolved.coordinatorURL)
             let runtime = BYOMModelAdmissionRuntime(

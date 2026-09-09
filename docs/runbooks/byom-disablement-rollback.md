@@ -39,7 +39,7 @@ explicit not-applicable reason. Test references are `file:testName`.
 | 7 | **Settlement** | Billing `verified_model_settlement_mode` read by `Server.settlementEnforceMode()` (`phase4-coordinator/internal/buyer/server.go`): `observe` or a nil billing store ⇒ no settlement side effects. Positive provider credit and final buyer debit additionally require the settlement-capable gate plus SPEC-022 receipt checks (valid receipt key, matching catalog key), each fail-closed. | `observe` (never `enforce` unless configured) | `phase4-coordinator/internal/billing/account_scope_test.go:TestVerifiedModelSettlementModeDefaultsObserve`; `phase4-coordinator/internal/buyer/route_snapshot_test.go:TestBYOMSettlementCapableRequiresValidReceiptKeyBeforeRouting`, `:TestBYOMSettlementCapableBindsAdmissionEventIntoRouteSnapshot`, `:TestBYOMCatalogKeyMismatchFailsClosed` |
 | 8 | **Economics projection** | Rate/payout fields are null unless `rate_card_source: live_signed` + a fresh signed rate card + a coordinator-bound trusted catalog identity all hold. Revoke or expire the signed rate card, or withhold the coordinator admission status, and rows degrade to `economics_state: blocked` with null money fields. | null/unavailable without trusted inputs | `phase3-binary/Tests/macprovider-cliTests/ModelCatalogEconomicsTests.swift:testLocalOnlyCandidateEncodesExplicitNullMoneyFields` (no coordinator status at all), `:testFallbackAndStaleRateCardsKeepMoneyFieldsNull`, `:testSettlementCapableRequiresCoordinatorSettlementState`, `:testFeedIntegrityWarningsBlockEconomicsEvenWithCoordinatorPricing` |
 | 9 | **Malibu app** | Checked-in capability manifest `phase3-binary/app/Sources/Malibu/Resources/MalibuModelCapabilities.json`. Remove/withhold `model_catalog_economics_v1` (and `model_ready_switch_v1`) and the app falls back to its existing static `models list` management. No provider state touched. | on only if the manifest advertises the caps **and** a fresh provider observation agrees | `phase3-binary/app/Tests/MalibuTests/ModelManagementTests.swift:testRefreshFallsBackToLegacyListWhenCatalogEconomicsCapabilityMissing`, `:testLegacyFallbackCancelsPreviousCatalogProjectionExpiry` |
-| 10 | **`openai_compatible_loopback` adapter** (#1453 slice 1) | Off unless the operator names an origin: `models discover/evaluate/offer/admission ...` take **`--openai-compatible-origin`** with **no default**, so omitting it leaves the adapter unattempted (`adapters[].status: not_configured`, zero requests dispatched). **`--skip-openai-compatible`** suppresses it even when an origin is configured. Both are read-only client-side switches: the adapter persists nothing, holds no credential, and its candidates are `identity_state: opaque_endpoint` / `admission_state: local_only`, which `BYOMOfferSubmissionBuilder.canSubmit` refuses, so no coordinator state exists to lose. | off (no default origin) | `phase3-binary/Tests/macprovider-cliTests/BYOMDiscoveryTests.swift:testOpenAICompatibleAdapterIsNotAttemptedWithoutOperatorOrigin`, `:testOpenAICompatibleAdapterEmitsOpaqueEndpointCandidate`, `:testOpenAICompatibleAdapterRejectsNonLoopbackOriginBeforeDispatch`, `:testOpenAICompatibleOfferDryRunClaimsNoCatalogPath`; `phase3-binary/Tests/macprovider-cliTests/BYOMEvaluationTests.swift:testEvaluateOpaqueOpenAICompatibleCandidateStaysNonEarning` |
+| 10 | **`openai_compatible_loopback` adapter** (#1453 slice 1) | Off unless the operator names an origin: `models discover/evaluate/offer/admission ...` take **`--openai-compatible-origin`** with **no default**, so omitting it leaves the adapter unattempted: **no `openai_compatible_loopback` row appears in `adapters[]` at all** (same as a skipped Ollama adapter — the projection gains no new wire value), and zero requests are dispatched. **`--skip-openai-compatible`** suppresses it even when an origin is configured. Both are read-only client-side switches: the adapter persists nothing, holds no credential, and its candidates are `identity_state: opaque_endpoint` / `admission_state: local_only`, which `BYOMOfferSubmissionBuilder.canSubmit` refuses, so no coordinator state exists to lose. | off (no default origin) | `phase3-binary/Tests/macprovider-cliTests/BYOMDiscoveryTests.swift:testOpenAICompatibleAdapterIsNotAttemptedWithoutOperatorOrigin`, `:testOpenAICompatibleAdapterEmitsOpaqueEndpointCandidate`, `:testOpenAICompatibleAdapterRejectsNonLoopbackOriginBeforeDispatch`, `:testOpenAICompatibleOfferDryRunClaimsNoCatalogPath`; `phase3-binary/Tests/macprovider-cliTests/BYOMEvaluationTests.swift:testEvaluateOpaqueOpenAICompatibleCandidateStaysNonEarning` |
 
 Supporting client-side notes for rows 1-3: the provider CLI BYOM commands
 (`models discover/evaluate/offer/admission ...`) are client-side and harmless
@@ -108,9 +108,24 @@ directions.
 **Current CLI/app against a pre-BYOM coordinator**
 
 - `phase3-binary/Tests/macprovider-cliTests/BYOMAdmissionTests.swift:testAdmissionStatusAgainstPreBYOMCoordinatorFailsClosedWithoutFabricatingState`
-  - 404/405 (no admission endpoints) and an unknown 200 schema both fail closed;
-    the CLI never fabricates a coordinator admission state and the operator is
-    pointed at `local_default` / `wait_for_coordinator`.
+  - **Transport layer.** The admission client itself still reports 404/405 (no
+    admission endpoints) as an error, and an unknown 200 schema as an error. The
+    CLI never fabricates a coordinator admission state at this layer.
+- `phase3-binary/Tests/macprovider-cliTests/BYOMAdmissionTests.swift:testAdmissionStatusWithoutConfiguredCoordinatorReportsLocalDefaultNotOffered`,
+  `:testAdmissionStatusWithUnreachableCoordinatorReportsLocalDefaultNotOffered`
+  - **Command runtime.** Above that transport, `models admission status` maps
+    exactly two conditions — no coordinator configured, and a coordinator whose
+    admission route is absent or unreachable (404/405, connection failure) — to
+    the local ladder row `admission_state: not_offered` with
+    `admission_state_source: local_default` and the
+    `coordinator_state_unavailable` warning
+    (`phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift`, `status(providerID:target:)`).
+    That is "coordinator state has not been queried", not a coordinator claim.
+- `phase3-binary/Tests/macprovider-cliTests/BYOMAdmissionTests.swift:testAdmissionStatusKeepsAuthenticationFailuresAsErrors`,
+  `:testAdmissionStatusKeepsUnavailableCoordinatorMappingFor503`
+  - **Still errors.** An unknown successful schema, and 401/403/503, are not
+    mapped to the local ladder: they stay errors, so a policy or authentication
+    fault can never be read as "no offer exists".
 - `phase3-binary/Tests/macprovider-cliTests/ModelCatalogEconomicsTests.swift:testLocalOnlyCandidateEncodesExplicitNullMoneyFields`
   - with no coordinator admission status available (exactly what a pre-BYOM
     coordinator yields, since `readAdmissionStatuses` drops failed lookups), the

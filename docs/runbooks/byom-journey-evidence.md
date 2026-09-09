@@ -87,8 +87,16 @@ result to them.
 ### Discovery journey, hermetic: one command
 
 ```bash
-test/e2e/byom/run-discovery-journey.py --out ~/byom-run
+test/e2e/byom/run-discovery-journey.py --evidence --out ~/byom-run
 ```
+
+`--evidence` is not optional here. It is what makes the run capturable at all:
+only an `--evidence` run writes `run-manifest.json`. A run without it writes
+`run-summary.json` — the same content under a name step 3 does not consume — so
+a local debugging run cannot be promoted no matter what the operator does next.
+That is deliberate: without `--evidence` the driver accepts a
+`MACPROVIDER_CLI_BINARY` override and never checks the source tree, so the run
+proves nothing about any commit.
 
 The driver runs all ten `JOURNEY-PROVIDER-BYOM-DISCOVERY` steps against
 loopback stubs and an on-disk MLX-cache fixture, writes every captured CLI
@@ -130,14 +138,38 @@ applying every credential, URL, path, IP, and localhost check to the value.
 Anything else at those paths fails closed, and the same string in any other
 field is still just a hostname. The driver runs that same scan — the capture
 tool's own functions, imported not reimplemented — over every command's real
-stdout and stderr and over every document before writing it, so it cannot emit a
-manifest that step 3 would reject.
+stdout and stderr, `--version` included, and over every document before writing
+it, so it cannot emit a manifest that step 3 would reject.
 
-The CI gate runs the driver with `--evidence`, which binds the run to the commit
-the evidence names: the `MACPROVIDER_CLI_BINARY` override is refused, the
-tracked trees under `phase3-binary/`, `scripts/`, and `test/e2e/byom/` must be
-clean, and the CLI is built from that source. Local exploratory runs may omit
-`--evidence` and keep the override.
+Every captured document is also validated against its **complete** closed
+schema before it is written: the SPEC-046-R003 discovery envelope and candidate
+fields, the exact SPEC-046-R004 capability object, the SPEC-046-R005 evaluation
+envelope and mutation summary, and the SPEC-047-R002 dry-run and status
+envelopes. A missing field and an unknown field both fail the step. Redaction-
+clean is not the same as complete, and the signed evidence binds a digest of
+these documents.
+
+`--evidence` binds the run to the commit the evidence names:
+
+- the `MACPROVIDER_CLI_BINARY` override is refused;
+- `phase3-binary/Package.resolved` is restored from `HEAD` first, because the
+  CI `swift test` step that runs before this gate rewrites it under the
+  runner's default toolchain — that drift is step ordering, not a fact about
+  this run, and `HEAD`'s lockfile is separately proven consistent by the
+  `phase3-binary (locked SwiftPM resolve)` job;
+- the tree must then be clean — **tracked and untracked** — across
+  `phase3-binary/Sources`, `phase3-binary/Tests`, `phase3-binary/Package.swift`,
+  `phase3-binary/Package.resolved`, `scripts/`, and `test/e2e/byom/`. Untracked
+  counts: SwiftPM builds every `.swift` file under the executable's source
+  directory;
+- the CLI is built from that source with locked resolution
+  (`--only-use-versions-from-resolved-file`, the same lock the locked-resolve CI
+  job applies through xcodebuild), so the build cannot rewrite the lockfile;
+- the cleanliness check runs **again after the build**, and the CI wrapper
+  records `source_sha` only once that post-build check has passed.
+
+Local exploratory runs may omit `--evidence` and keep the override; they produce
+no manifest.
 
 ### Everything else: hand-authored
 

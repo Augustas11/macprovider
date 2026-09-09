@@ -36,16 +36,32 @@ if [ -e "$EVIDENCE" ]; then
 fi
 
 REQUIREMENT_IDS="SPEC-046-R001,SPEC-046-R002,SPEC-046-R003,SPEC-046-R004,SPEC-046-R005,SPEC-046-R006,SPEC-046-R007,SPEC-046-R008"
-SOURCE_SHA="$(git rev-parse HEAD)"
 # The evidence artifact records an operator identity as a SHA-256 fingerprint.
 # This gate is not an operator run, so it uses a fixed, non-identifying label.
 OPERATOR_FINGERPRINT="$(printf 'ci-hermetic-discovery-journey' | shasum -a 256 | cut -d' ' -f1)"
 
-# `--evidence` binds the run to SOURCE_SHA: the driver refuses a
-# MACPROVIDER_CLI_BINARY override, requires a clean tracked tree for the CLI
-# source, the scripts, and the harness, and builds the CLI from that source, so
-# the evidence cannot name a commit it did not execute.
+# Restore the committed lockfile before the driver's cleanliness check. The CI
+# `swift test` step that runs before this gate resolves the package graph under
+# the runner's default toolchain and rewrites phase3-binary/Package.resolved;
+# that rewrite is an artifact of step ordering, not a fact about this run, and
+# HEAD's lockfile is separately proven consistent by the `phase3-binary (locked
+# SwiftPM resolve)` job. Restoring it here (the driver does the same in
+# --evidence mode) is what makes this gate order-independent instead of red
+# whenever it runs after the Swift tests.
+git checkout HEAD -- phase3-binary/Package.resolved
+
+# `--evidence` binds the run to the commit: the driver refuses a
+# MACPROVIDER_CLI_BINARY override, requires a clean tree -- tracked AND
+# untracked -- across the CLI source, the scripts, and the harness, builds the
+# CLI with locked resolution so the build cannot rewrite the lockfile, and
+# re-checks cleanliness after the build before publishing the manifest. Without
+# --evidence the driver publishes no manifest at all.
 test/e2e/byom/run-discovery-journey.py --evidence --out "$OUT_DIR"
+
+# Recorded only now: the driver's post-build cleanliness check has passed, so
+# this commit is what produced the manifest above. Reading it earlier would
+# name a commit before knowing whether the run stayed bound to it.
+SOURCE_SHA="$(git rev-parse HEAD)"
 
 python3 scripts/capture-byom-journey-evidence.py \
   --journey discovery \

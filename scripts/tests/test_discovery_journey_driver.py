@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 from scripts.check_spec_governance import (
@@ -49,33 +50,89 @@ def head_commit() -> str:
     ).stdout.strip()
 
 
+PROVIDER_GUIDANCE = {
+    "state_label_key": "byom.local.local_only",
+    "state_meaning_key": "byom.local.opaque_endpoint_not_earning",
+    "next_action": "evaluate",
+    "transition_reason_code": "capability_unevaluated",
+    "earning_path_class": "local_inventory_only",
+}
+# Complete closed documents: the driver validates every capture against the full
+# SPEC-046-R003/R004/R005 and SPEC-047-R002 field sets, so a partial fixture
+# would not be a valid capture to test with.
 DISCOVERY_DOCUMENT = {
     "schema": "provider_byom_discovery.v1",
+    "generated_at": "2026-09-09T00:00:00Z",
+    "cli_version": "1.2.3",
+    "projection_sequence": 1,
+    "adapters": [
+        {
+            "runtime_source": "openai_compatible_loopback",
+            "origin_class": "loopback",
+            "status": "ok",
+            "warning_codes": [],
+        }
+    ],
     "candidates": [
         {
             "candidate_id": "byom_" + "a" * 52,
+            "runtime_source": "openai_compatible_loopback",
+            "display_name": "opaque endpoint model",
+            "served_model_ref": "openai_compatible:opaque-mini-1b",
+            "catalog_model_key": None,
+            "identity_state": "opaque_endpoint",
+            "locality": "opaque_local_endpoint",
+            "estimated_gb": None,
+            "context_window_tokens": None,
+            "capabilities": {key: None for key in sorted(driver.CAPABILITY_KEYS)},
+            "readiness_state": "ready",
+            "fit_state": "unknown",
+            "evaluation_state": "not_evaluated",
             "admission_state": "local_only",
             "admission_state_source": "local_default",
-            "provider_guidance": {
-                "state_label_key": "byom.local.local_only",
-                "state_meaning_key": "byom.local.opaque_endpoint_not_earning",
-                "next_action": "evaluate",
-                "transition_reason_code": "capability_unevaluated",
-                "earning_path_class": "local_inventory_only",
-            },
+            "provider_guidance": dict(PROVIDER_GUIDANCE),
+            "warning_codes": ["capability_unevaluated"],
         }
     ],
+    "warnings": [],
 }
 EVALUATION_DOCUMENT = {
     "schema": "provider_byom_evaluation.v1",
+    "generated_at": "2026-09-09T00:00:00Z",
+    "cli_version": "1.2.3",
+    "candidate_id": "byom_" + "a" * 52,
+    "runtime_source": "openai_compatible_loopback",
+    "served_model_ref": "openai_compatible:opaque-mini-1b",
+    "catalog_model_key": None,
+    "adapter_identity": "openai_compatible_loopback",
     "health_result": "passed",
-    "mutation_summary": {"production_config_mutated": False, "coordinator_state_mutated": False},
+    "latency_ms": 12,
+    "tokens_per_second": None,
+    "completion_tokens": 4,
+    "output_bytes": 128,
+    "request_count": 1,
+    "usage_reporting_source": "runtime_reported",
+    "capability_results": {},
+    "fit_estimate_source": "runtime_reported",
+    "mutation_summary": {key: False for key in sorted(driver.EVALUATION_MUTATION_SUMMARY_KEYS)},
+    "diagnostic_hashes": {},
+    "provider_guidance": dict(PROVIDER_GUIDANCE),
+    "offer_preconditions_appear_satisfied": False,
+    "warnings": [],
 }
 DRY_RUN_DOCUMENT = {
     "schema": "model_admission_offer_dry_run.v1",
+    "generated_at": "2026-09-09T00:00:00Z",
+    "cli_version": "1.2.3",
+    "candidate_id": "byom_" + "a" * 52,
+    "served_model_ref": "openai_compatible:opaque-mini-1b",
+    "catalog_model_key": None,
     "would_submit": False,
     "likely_admission_state": "local_only",
     "likely_admission_state_source": "local_default",
+    "provider_guidance": dict(PROVIDER_GUIDANCE),
+    "reason_code": None,
+    "warnings": [],
 }
 
 
@@ -123,7 +180,9 @@ class ManifestEmitterTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = Path(tempfile.mkdtemp(prefix="byom-discovery-driver-"))
         self.addCleanup(shutil.rmtree, self.temp, True)
-        self.builder = driver.ManifestBuilder(self.temp, "byom-discovery-unit", "1.2.3")
+        self.builder = driver.ManifestBuilder(
+            self.temp, "byom-discovery-unit", "1.2.3", evidence_mode=True
+        )
 
     def build_all_steps(self) -> None:
         self.builder.capture("discovery", DISCOVERY_DOCUMENT)
@@ -419,35 +478,260 @@ class EvidenceModeBindingTests(unittest.TestCase):
     def test_evidence_source_paths_cover_the_executed_surface(self) -> None:
         self.assertEqual(
             sorted(driver.EVIDENCE_SOURCE_PATHS),
-            ["phase3-binary", "scripts", "test/e2e/byom"],
+            [
+                "phase3-binary/Package.resolved",
+                "phase3-binary/Package.swift",
+                "phase3-binary/Sources",
+                "phase3-binary/Tests",
+                "scripts",
+                "test/e2e/byom",
+            ],
         )
 
-    def test_evidence_mode_refuses_a_dirty_tracked_source_tree(self) -> None:
-        """Exercised against a scratch repository so a concurrent run of this
-        suite can never touch the checkout under test."""
+    def scratch_repo(self) -> Path:
+        """A throwaway repository shaped like this one, so a concurrent run of
+        this suite can never touch the checkout under test."""
         root = Path(tempfile.mkdtemp(prefix="byom-dirty-tree-"))
         self.addCleanup(shutil.rmtree, root, True)
         git = ["git", "-c", "user.email=t@example.invalid", "-c", "user.name=t"]
         subprocess.run(["git", "init", "-q", str(root)], check=True)
-        tracked = root / "scripts" / "byom_journey_evidence.py"
-        tracked.parent.mkdir(parents=True)
-        tracked.write_text("original\n", encoding="utf-8")
+        for relative, contents in (
+            ("scripts/byom_journey_evidence.py", "original\n"),
+            ("phase3-binary/Sources/macprovider-cli/Main.swift", "// original\n"),
+            ("phase3-binary/Package.resolved", '{"pins": []}\n'),
+        ):
+            path = root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(contents, encoding="utf-8")
         subprocess.run(git + ["add", "."], cwd=root, check=True)
         subprocess.run(git + ["commit", "-qm", "seed"], cwd=root, check=True)
+        return root
 
-        driver.require_clean_evidence_source(root)
-        # Untracked files cannot change what a committed harness executes.
-        (root / "scripts" / "scratch.txt").write_text("note\n", encoding="utf-8")
-        driver.require_clean_evidence_source(root)
-        # A modified tracked file can, so it fails closed.
-        tracked.write_text("modified\n", encoding="utf-8")
+    def test_evidence_mode_refuses_a_dirty_tracked_source_tree(self) -> None:
+        root = self.scratch_repo()
+        driver.require_clean_evidence_source(root, "before the build")
+        (root / "scripts" / "byom_journey_evidence.py").write_text("modified\n", encoding="utf-8")
         with self.assertRaises(driver.HarnessFailure) as caught:
-            driver.require_clean_evidence_source(root)
+            driver.require_clean_evidence_source(root, "before the build")
         self.assertIn("scripts/byom_journey_evidence.py", str(caught.exception))
+
+    def test_evidence_mode_refuses_an_untracked_swift_source_file(self) -> None:
+        """Reverses the R1 test that endorsed untracked files (audit R2).
+
+        SwiftPM's executable target selects the whole `Sources/macprovider-cli`
+        directory with no closed source list, so an untracked `.swift` file
+        there is a build input and the manifest would name a commit that did
+        not produce the binary.
+        """
+        root = self.scratch_repo()
+        driver.require_clean_evidence_source(root, "before the build")
+        untracked = root / "phase3-binary" / "Sources" / "macprovider-cli" / "Injected.swift"
+        untracked.write_text("// not committed\n", encoding="utf-8")
+        with self.assertRaises(driver.HarnessFailure) as caught:
+            driver.require_clean_evidence_source(root, "before the build")
+        self.assertIn("Injected.swift", str(caught.exception))
+
+    def test_lockfile_drift_after_the_build_fails_closed(self) -> None:
+        """The post-build check is the one that catches a build which rewrote
+        its own inputs after the pre-build check passed (audit R2 HIGH)."""
+        root = self.scratch_repo()
+        lockfile = root / driver.EVIDENCE_RESTORED_LOCKFILE
+        lockfile.write_text('{"pins": ["rewritten by the build"]}\n', encoding="utf-8")
+        with self.assertRaises(driver.HarnessFailure) as caught:
+            driver.require_clean_evidence_source(root, "after the build")
+        self.assertIn("after the build", str(caught.exception))
+        self.assertIn("Package.resolved", str(caught.exception))
+
+    def test_the_committed_lockfile_is_restored_before_the_check(self) -> None:
+        """An earlier CI `swift test` step rewrites the lockfile; that drift is
+        step ordering, not a fact about this run, so evidence mode restores the
+        committed bytes instead of refusing to run."""
+        root = self.scratch_repo()
+        lockfile = root / driver.EVIDENCE_RESTORED_LOCKFILE
+        original = lockfile.read_text(encoding="utf-8")
+        lockfile.write_text('{"pins": ["swift test rewrote this"]}\n', encoding="utf-8")
+        driver.restore_locked_package_resolved(root)
+        self.assertEqual(lockfile.read_text(encoding="utf-8"), original)
+        driver.require_clean_evidence_source(root, "before the build")
+
+    def test_evidence_builds_with_locked_resolution(self) -> None:
+        """Locked resolution is what stops the build from rewriting the
+        lockfile after the pre-build check; it is the same lock the
+        `phase3-binary (locked SwiftPM resolve)` CI job applies."""
+        self.assertEqual(
+            driver.SWIFT_LOCKED_RESOLUTION_FLAG, "--only-use-versions-from-resolved-file"
+        )
+        verifier = (REPO_ROOT / "scripts" / "verify-swift-package-lock.sh").read_text(encoding="utf-8")
+        self.assertIn("-onlyUsePackageVersionsFromResolvedFile", verifier)
+
+        commands: list[list[str]] = []
+
+        def record(command, **kwargs):
+            commands.append(list(command))
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+        root = self.scratch_repo()
+        binary = root / "phase3-binary" / ".build" / "debug" / "macprovider-cli"
+        binary.parent.mkdir(parents=True)
+        binary.write_text("#!/bin/sh\n", encoding="utf-8")
+        with unittest.mock.patch.object(driver.subprocess, "run", side_effect=record):
+            driver.build_cli(root, None, True)
+        build = [command for command in commands if command[:2] == ["swift", "build"]]
+        self.assertEqual(len(build), 1)
+        self.assertIn(driver.SWIFT_LOCKED_RESOLUTION_FLAG, build[0])
 
     def test_the_ci_wrapper_runs_the_driver_in_evidence_mode(self) -> None:
         wrapper = (REPO_ROOT / "scripts" / "test-byom-discovery-journey.sh").read_text(encoding="utf-8")
         self.assertIn("run-discovery-journey.py --evidence --out", wrapper)
+        # The lockfile is restored before the driver's cleanliness check, and
+        # the commit is recorded only after the driver's post-build check has
+        # passed -- so the wrapper cannot name a commit whose run drifted.
+        restore = wrapper.index("git checkout HEAD -- phase3-binary/Package.resolved")
+        run = wrapper.index("run-discovery-journey.py --evidence --out")
+        record = wrapper.index('SOURCE_SHA="$(git rev-parse HEAD)"')
+        self.assertLess(restore, run)
+        self.assertLess(run, record)
+
+
+class ManifestPublicationModeTests(unittest.TestCase):
+    """Only an `--evidence` run may publish a capturable manifest (audit R2)."""
+
+    def setUp(self) -> None:
+        self.temp = Path(tempfile.mkdtemp(prefix="byom-discovery-mode-"))
+        self.addCleanup(shutil.rmtree, self.temp, True)
+
+    def populate(self, builder: "driver.ManifestBuilder") -> None:
+        builder.capture("discovery", DISCOVERY_DOCUMENT)
+        for step_id in PROVIDER_BYOM_DISCOVERY_STEP_ID_ORDER:
+            builder.add_step(
+                step_id,
+                "Hermetic loopback step passed with a bounded projection.",
+                [builder.document(step_id.replace("step-", "doc-"), "provider_byom_discovery.v1", "discovery")],
+            )
+        for name in driver.TRUE_OBSERVATIONS:
+            builder.observe(name, True)
+        for name in driver.FALSE_OBSERVATIONS:
+            builder.observe(name, False)
+
+    def test_evidence_mode_publishes_the_run_manifest(self) -> None:
+        builder = driver.ManifestBuilder(self.temp, "byom-discovery-unit", "1.2.3", evidence_mode=True)
+        self.populate(builder)
+        self.assertEqual(builder.write().name, "run-manifest.json")
+
+    def test_a_non_evidence_run_publishes_no_manifest(self) -> None:
+        builder = driver.ManifestBuilder(self.temp, "byom-discovery-unit", "1.2.3")
+        self.populate(builder)
+        path = builder.write()
+        self.assertEqual(path.name, "run-summary.json")
+        self.assertFalse((self.temp / "run-manifest.json").exists())
+        # Same content, a name the capture tool does not consume.
+        self.assertEqual(
+            json.loads(path.read_text(encoding="utf-8"))["journey_id"],
+            PROVIDER_BYOM_DISCOVERY_JOURNEY_ID,
+        )
+
+    def test_the_runbook_evidence_step_passes_evidence(self) -> None:
+        runbook = (REPO_ROOT / "docs" / "runbooks" / "byom-journey-evidence.md").read_text(encoding="utf-8")
+        self.assertIn("run-discovery-journey.py --evidence", runbook)
+
+
+class ClosedCaptureSchemaTests(unittest.TestCase):
+    """Captured documents must match their complete closed schemas (audit R2).
+
+    Redaction-clean is not the same as complete: a document that had dropped a
+    required field would otherwise be digested into signed evidence as if the
+    CLI had emitted it.
+    """
+
+    def setUp(self) -> None:
+        self.temp = Path(tempfile.mkdtemp(prefix="byom-discovery-schema-"))
+        self.addCleanup(shutil.rmtree, self.temp, True)
+        self.builder = driver.ManifestBuilder(
+            self.temp, "byom-discovery-unit", "1.2.3", evidence_mode=True
+        )
+
+    def capture_refused(self, document: dict, fragment: str) -> None:
+        with self.assertRaises(driver.HarnessFailure) as caught:
+            self.builder.capture("candidate-document", document)
+        self.assertIn(fragment, str(caught.exception))
+        self.assertFalse((self.temp / "captures" / "candidate-document.json").exists())
+
+    def test_complete_documents_are_accepted(self) -> None:
+        for name, document in (
+            ("discovery", DISCOVERY_DOCUMENT),
+            ("evaluation", EVALUATION_DOCUMENT),
+            ("dry-run", DRY_RUN_DOCUMENT),
+        ):
+            with self.subTest(name=name):
+                self.assertTrue(self.builder.capture(name, document).is_file())
+
+    def test_a_missing_envelope_field_is_refused(self) -> None:
+        document = json.loads(json.dumps(DISCOVERY_DOCUMENT))
+        del document["projection_sequence"]
+        self.capture_refused(document, "missing required fields: projection_sequence")
+
+    def test_an_unknown_envelope_field_is_refused(self) -> None:
+        document = json.loads(json.dumps(DISCOVERY_DOCUMENT))
+        document["settlement_capable"] = True
+        self.capture_refused(document, "unknown fields: settlement_capable")
+
+    def test_a_missing_candidate_field_is_refused(self) -> None:
+        document = json.loads(json.dumps(DISCOVERY_DOCUMENT))
+        del document["candidates"][0]["admission_state_source"]
+        self.capture_refused(document, "missing required fields: admission_state_source")
+
+    def test_a_missing_capability_field_is_refused(self) -> None:
+        """The step-03 "no asserted capability" check was vacuously true for an
+        absent or partial capability object."""
+        document = json.loads(json.dumps(DISCOVERY_DOCUMENT))
+        del document["candidates"][0]["capabilities"]["usage_reporting"]
+        self.capture_refused(document, "capabilities is missing required fields: usage_reporting")
+
+    def test_an_unknown_capability_field_is_refused(self) -> None:
+        document = json.loads(json.dumps(DISCOVERY_DOCUMENT))
+        document["candidates"][0]["capabilities"]["verified_throughput"] = True
+        self.capture_refused(document, "capabilities carries unknown fields: verified_throughput")
+
+    def test_a_missing_guidance_field_is_refused(self) -> None:
+        document = json.loads(json.dumps(DISCOVERY_DOCUMENT))
+        del document["candidates"][0]["provider_guidance"]["earning_path_class"]
+        self.capture_refused(document, "provider_guidance is missing required fields: earning_path_class")
+
+    def test_a_missing_mutation_summary_field_is_refused(self) -> None:
+        """Step 07 accepted any nonempty subset of false mutation fields."""
+        document = json.loads(json.dumps(EVALUATION_DOCUMENT))
+        del document["mutation_summary"]["downloads_started"]
+        self.capture_refused(document, "mutation_summary is missing required fields: downloads_started")
+
+    def test_an_unknown_mutation_summary_field_is_refused(self) -> None:
+        document = json.loads(json.dumps(EVALUATION_DOCUMENT))
+        document["mutation_summary"]["weights_deleted"] = False
+        self.capture_refused(document, "mutation_summary carries unknown fields: weights_deleted")
+
+    def test_a_missing_dry_run_field_is_refused(self) -> None:
+        document = json.loads(json.dumps(DRY_RUN_DOCUMENT))
+        del document["would_submit"]
+        self.capture_refused(document, "missing required fields: would_submit")
+
+    def test_an_unvalidated_schema_is_refused(self) -> None:
+        self.capture_refused({"schema": "models_browse.v1"}, "unvalidated schema")
+
+    def test_the_capability_field_set_is_the_spec_046_r004_list(self) -> None:
+        self.assertEqual(
+            sorted(driver.CAPABILITY_KEYS),
+            [
+                "chat_completions",
+                "family",
+                "json_mode",
+                "max_context_tokens",
+                "quantization",
+                "runtime_version",
+                "streaming",
+                "structured_output_passthrough",
+                "tool_call_passthrough",
+                "usage_reporting",
+            ],
+        )
 
 
 if __name__ == "__main__":
