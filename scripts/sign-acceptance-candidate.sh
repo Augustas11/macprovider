@@ -79,6 +79,29 @@ coordinator="$unsigned_dir/coordinator-linux-amd64"
 coordinator_cli="$unsigned_dir/coordinator-cli-linux-amd64"
 gateway="$unsigned_dir/gateway-linux-amd64"
 unsigned_manifest="$unsigned_dir/unsigned-acceptance-manifest.json"
+# SPEC-023 §3.7.8 Stage A: an artifact-bound provider payload (its archived
+# catalog-release/release.json binds the feed) is accompanied by the artifact
+# feed and its sidecar as two more unsigned inputs; they become release assets,
+# never payload members or artifact-index roles (both are exact sets the
+# deployed updater enforces).
+catalog_artifact_bound="$(python3 - "$cli_unsigned" <<'PY'
+import json, pathlib, sys, tarfile
+try:
+    with tarfile.open(sys.argv[1], "r:gz") as archive:
+        bound = "unbound"
+        for member in archive.getmembers():
+            parts = tuple(p for p in pathlib.PurePosixPath(member.name).parts if p not in ("", "."))
+            if parts == ("catalog-release", "release.json") and member.isfile():
+                feeds = json.loads(archive.extractfile(member).read(1 << 20)).get("feeds", {})
+                bound = "bound" if "autotune-artifacts.json" in feeds else "unbound"
+                break
+except (OSError, tarfile.TarError, ValueError, AttributeError):
+    bound = "unbound"
+print(bound)
+PY
+)"
+artifacts_unsigned="$unsigned_dir/autotune-artifacts.json"
+artifacts_sig_unsigned="$unsigned_dir/autotune-artifacts.json.sig"
 unsigned_assets=(
   --asset "phase3-binary-m4-${tag}.tar.gz=$cli_unsigned"
   --asset "Malibu.app.tar.gz=$app_unsigned"
@@ -87,6 +110,12 @@ unsigned_assets=(
   --asset "coordinator-cli-linux-amd64=$coordinator_cli"
   --asset "gateway-linux-amd64=$gateway"
 )
+if [[ "$catalog_artifact_bound" == bound ]]; then
+  unsigned_assets+=(
+    --asset "autotune-artifacts.json=$artifacts_unsigned"
+    --asset "autotune-artifacts.json.sig=$artifacts_sig_unsigned"
+  )
+fi
 python3 "$metadata" verify-unsigned \
   --repository "$repository" \
   --tag "$tag" \
@@ -155,9 +184,24 @@ app="$app_work/Malibu.app"
 [[ -d "$app/Contents/MacOS" && -d "$app/Contents/Resources" ]] || die "Malibu.app structure is invalid"
 
 python3 "$metadata" validate-provider-payload --directory "$cli_work"
+# SPEC-023 §3.7.8 Stage A: the provider payload stays at exactly nine catalog
+# names, but the catalog RELEASE is five-feed once artifact-bound, and
+# verify-directory reconstructs the manifest from the files it sees. Verify a
+# separate catalog directory holding the nine payload files plus the verified
+# unsigned pair, so the pair is authenticated (digest, sidecar signature,
+# signer equality with the candidate feed) before anything is signed.
+catalog_verify_dir="$signing_tmp/catalog-verify"
+mkdir "$catalog_verify_dir"
+for catalog_name in release.json trusted-keys.json tier2-catalog.json autotune-candidates.json autotune-candidates.json.sig demand-rank.json demand-rank.json.sig rate-card.json rate-card.json.sig; do
+  install -m 0644 "$cli_work/catalog-release/$catalog_name" "$catalog_verify_dir/$catalog_name"
+done
+if [[ "$catalog_artifact_bound" == bound ]]; then
+  install -m 0644 "$artifacts_unsigned" "$catalog_verify_dir/autotune-artifacts.json"
+  install -m 0644 "$artifacts_sig_unsigned" "$catalog_verify_dir/autotune-artifacts.json.sig"
+fi
 CATALOG_RELEASE_REQUIRE_SEALED_GO_VERIFIER=1 \
   python3 "$root/scripts/catalog-release.py" verify-directory \
-    --directory "$cli_work/catalog-release"
+    --directory "$catalog_verify_dir"
 python3 "$compatibility" validate \
   --input "$cli_work/compatibility-set.json" \
   --payload-directory "$cli_work" \
@@ -330,6 +374,11 @@ install -m 0644 "$cli_work/compatibility-set.json" "$output_dir/compatibility-se
 for catalog_name in release.json trusted-keys.json tier2-catalog.json autotune-candidates.json autotune-candidates.json.sig demand-rank.json demand-rank.json.sig rate-card.json rate-card.json.sig; do
   install -m 0644 "$cli_work/catalog-release/$catalog_name" "$output_dir/$catalog_name"
 done
+if [[ "$catalog_artifact_bound" == bound ]]; then
+  # The pair comes from the verified unsigned inputs, not from the payload.
+  install -m 0644 "$artifacts_unsigned" "$output_dir/autotune-artifacts.json"
+  install -m 0644 "$artifacts_sig_unsigned" "$output_dir/autotune-artifacts.json.sig"
+fi
 
 python3 "$metadata" build-pearl \
   --repository "$repository" \
@@ -421,6 +470,12 @@ release_assets=(
   "$output_dir/macprovider-release-discovery.json"
   "$output_dir/macprovider-release-discovery.json.sig"
 )
+if [[ "$catalog_artifact_bound" == bound ]]; then
+  release_assets+=(
+    "$output_dir/autotune-artifacts.json"
+    "$output_dir/autotune-artifacts.json.sig"
+  )
+fi
 python3 "$root/scripts/build-release-provenance.py" \
   "$tag" "$candidate_commit" "$repository" "$release_prerelease" \
   "$output_dir/release-toolchain.json" \

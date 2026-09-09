@@ -223,8 +223,37 @@ else:
     if not isinstance(catalog, dict):
         fail("pearl-release.json catalog metadata is missing")
     catalog_files = catalog.get("files")
-    if set(catalog_files if isinstance(catalog_files, dict) else ()) != expected_catalog_assets:
+    bound_names = set(catalog_files if isinstance(catalog_files, dict) else ())
+    # SPEC-023 §3.7.8 Stage A: the catalog release.json is the binding
+    # authority. When its feeds bind autotune-artifacts.json, the feed and its
+    # sidecar are two more catalog assets that pearl-release.json MUST bind and
+    # the release MUST carry; otherwise neither may appear. Both sets are exact.
+    artifact_assets = {"autotune-artifacts.json", "autotune-artifacts.json.sig"}
+    artifact_bound = False
+    artifact_record = None
+    try:
+        release_feeds = json.loads((directory / "release.json").read_text(encoding="utf-8")).get("feeds")
+        artifact_bound = isinstance(release_feeds, dict) and "autotune-artifacts.json" in release_feeds
+        artifact_record = release_feeds.get("autotune-artifacts.json") if artifact_bound else None
+    except (OSError, ValueError, AttributeError):
+        artifact_bound = False
+    if artifact_bound:
+        expected_catalog_assets = expected_catalog_assets | artifact_assets
+        if not isinstance(artifact_record, dict):
+            fail("release.json artifact feed record is invalid")
+        feed_path = directory / "autotune-artifacts.json"
+        if feed_path.is_file():
+            data = feed_path.read_bytes()
+            if artifact_record.get("sha256") != hashlib.sha256(data).hexdigest() or artifact_record.get("bytes") != len(data):
+                fail("autotune-artifacts.json does not match its release.json binding")
+    if bound_names != expected_catalog_assets:
+        if bound_names == expected_catalog_assets ^ artifact_assets:
+            fail("pearl-release.json catalog file set disagrees with release.json feeds on the artifact feed")
         fail("pearl-release.json catalog file set is invalid")
+    if not artifact_bound:
+        stray = sorted(asset for asset in artifact_assets if (directory / asset).is_file())
+        if stray:
+            fail("release carries artifact-feed asset(s) release.json does not bind: " + " ".join(stray))
     missing_catalog = sorted(asset for asset in expected_catalog_assets if not (directory / asset).is_file())
     if missing_catalog:
         fail("missing catalog/feed asset(s) for catalog-bound Pearl runtime release: " + " ".join(missing_catalog))
@@ -349,6 +378,61 @@ PY
     --pattern autotune-candidates.json.sig --pattern demand-rank.json \
     --pattern demand-rank.json.sig --pattern rate-card.json \
     --pattern rate-card.json.sig --clobber >/dev/null
+  # SPEC-023 §3.7.8 Stage A: the downloaded release.json decides whether the
+  # artifact feed and its sidecar are release assets too; fetch them so the
+  # local validator can bind them (it fails closed if they are missing).
+  artifact_feed_state="$(python3 - "$work/assets/release.json" <<'PY'
+import json, sys
+try:
+    feeds = json.load(open(sys.argv[1], encoding="utf-8")).get("feeds")
+    print("bound" if isinstance(feeds, dict) and "autotune-artifacts.json" in feeds else "unbound")
+except Exception:
+    print("unbound")
+PY
+)"
+  if [[ "$artifact_feed_state" != bound ]]; then
+    # A rate-card-bound release must not publish the pair at all.
+    PEARL_RELEASE_VIEW="$work/release.json" python3 - <<'PY'
+import json
+import os
+import sys
+
+payload = json.loads(open(os.environ["PEARL_RELEASE_VIEW"], encoding="utf-8").read())
+names = {row.get("name") for row in payload.get("assets") if isinstance(row, dict)}
+stray = sorted(names & {"autotune-artifacts.json", "autotune-artifacts.json.sig"})
+if stray:
+    print(
+        "[verify-pearl-runtime-release] ERROR: release publishes artifact-feed asset(s) release.json does not bind: "
+        + " ".join(stray),
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+PY
+  fi
+  if [[ "$artifact_feed_state" == bound ]]; then
+    PEARL_RELEASE_VIEW="$work/release.json" \
+    PEARL_RELEASE_CATALOG_ASSETS="$(printf '%s\n' autotune-artifacts.json autotune-artifacts.json.sig)" \
+      python3 - <<'PY'
+import json
+import os
+import sys
+
+payload = json.loads(open(os.environ["PEARL_RELEASE_VIEW"], encoding="utf-8").read())
+assets = payload.get("assets")
+names = {row.get("name") for row in assets if isinstance(row, dict)}
+required = {line for line in os.environ["PEARL_RELEASE_CATALOG_ASSETS"].splitlines() if line}
+missing = sorted(required - names)
+if missing:
+    print(
+        "[verify-pearl-runtime-release] ERROR: missing catalog/feed asset(s) for catalog-bound Pearl runtime release: "
+        + " ".join(missing),
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+PY
+    gh release download "$tag" --repo "$repository" --dir "$work/assets" \
+      --pattern autotune-artifacts.json --pattern autotune-artifacts.json.sig --clobber >/dev/null
+  fi
 else
   PEARL_RELEASE_VIEW="$work/release.json" python3 - <<'PY'
 import json

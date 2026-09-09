@@ -103,17 +103,21 @@ python3 scripts/catalog-release.py status
 `--activate-artifact-feed` refuses while any generator-side prerequisite it
 lists is unmet.
 
-### What later slices must land before activation
+### Distribution surfaces (all landed)
 
-`status` prints these as pending. Stage A is not servable until each is done:
+Every surface Stage A needs has landed; this table is the single map of
+where each one lives and what it enforces. `status` reports the generator-side
+prerequisites and the activation-deploy step that still gate the first
+artifact-bound cut, and would list any future surface here as pending:
 
 | Surface | File | Change | Status |
 |---|---|---|---|
-| CLI release payload | `phase3-binary/dist/package.sh` (~196) | copy `autotune-artifacts.json` and `autotune-artifacts.json.sig` alongside the candidate/demand/rate-card feeds | pending (slice 2b-ii) |
-| GitHub release assets | `.github/workflows/release.yml` (~1385, ~1418) | publish both artifact files with the other static feeds; bind them in `pearl-release.json` `catalog.files` | pending (slice 2b-ii) |
+| CLI release payload | `phase3-binary/dist/package.sh`, `scripts/acceptance-candidate-metadata.py`, `scripts/compatibility-set-manifest.py` | NOT a payload member at Stage A: the deployed updater and installer enforce the exact nine-name `catalog-release/` set, so the feed never rides in the provider tarball and the payload validators reject it there; the CLI's fallback is the snapshot compiled into the binary (§3.7.2), which slice 2c bakes | **resolved (slice 2b-ii)** |
+| GitHub release assets | `.github/workflows/release.yml`, `.github/workflows/acceptance-candidate.yml`, `scripts/sign-acceptance-candidate.sh`, `scripts/acceptance-candidate-metadata.py`, `scripts/verify-acceptance-promotion.py`, `scripts/verify-pearl-runtime-release.sh` | when `release.json` binds the feed, both files are carried as unsigned inputs into the acceptance signer, published as release assets, listed in `checksums.txt` / `release-assets.txt` / provenance, bound in `pearl-release.json` `catalog.files`, required by the promotion inventory, and downloaded + verified by the Pearl runtime release check; never `compatibility-artifact-index` roles (the deployed updater enforces the exact seventeen) | **landed (slice 2b-ii)** |
 | live release gate | `scripts/verify-live-coordinator-release-gate.py` | served feed set must equal the release's; bound feed signer-equal and release-bound | **landed (slice 2b)** |
 | coordinator serving | `phase4-coordinator/internal/buyer`, `phase4-coordinator/dist/nginx-coordinator.malibu.tech.conf` | `/v1/catalog-artifacts` (+ `.sig`) on the buyer mux, release-bound at load; exact nginx allow-through blocks before `location /v1/ { return 404; }` | **landed (slice 2b)** |
-| scheduled renewal | `.github/workflows/renew-autotune-static-feed-signed.yml` | supply `AUTOTUNE_PREVIOUS_RELEASE_DIR` (the previous signed release directory); after activation `generate` requires it and the monthly freshness renewal otherwise fails closed — silently until the 30-day client horizon | pending (slice 2b-ii) |
+| scheduled renewal | `scripts/renew-autotune-static-feed.sh` | once `status` reports `post-activation`, the renewal fetches the live coordinator's `current` release directory from Pearl as the previous signed release (or uses `AUTOTUNE_PREVIOUS_RELEASE_DIR` when set) and `generate` authenticates it; the monthly freshness cron therefore cannot fail closed at generate after activation | **landed (slice 2b-ii)** |
+| coordinator deploy | `phase4-coordinator/dist/deploy-pearl-vps.sh` | when `release.json` binds the feed, the pair is uploaded, content-addressed into the immutable release envelope, and staged beside the other feeds (a bound release whose checkout lacks the pair aborts before upload; `verify-directory` on Pearl re-checks the envelope) | **landed (slice 2b-ii)** |
 
 **Deferred requirements** (recorded by the ledger, not enforced by this slice;
 `status` lists the first): the §16.8 intake-decision manifest schema and

@@ -291,6 +291,23 @@ MALIBU_CAPTURE_STEP = r'''        if: ${{ github.event.inputs.promote_run_id == 
             unsigned-release-inputs/coordinator-cli-linux-amd64
             unsigned-release-inputs/gateway-linux-amd64
           )
+          # SPEC-023 §3.7.8 Stage A: an artifact-bound catalog release carries
+          # the artifact feed and its sidecar as two more unsigned inputs (they
+          # become release assets, never payload members or index roles).
+          catalog_artifact_bound="$(python3 - "phase3-binary/catalog/autotune/release.json" <<'PY'
+          import json, pathlib, sys
+          feeds = json.loads(pathlib.Path(sys.argv[1]).read_text())["feeds"]
+          print("bound" if "autotune-artifacts.json" in feeds else "unbound")
+          PY
+          )"
+          if [ "$catalog_artifact_bound" = bound ]; then
+            cp phase3-binary/dist/static/autotune-artifacts.json \
+              phase3-binary/dist/static/autotune-artifacts.json.sig unsigned-release-inputs/
+            unsigned_assets+=(
+              unsigned-release-inputs/autotune-artifacts.json
+              unsigned-release-inputs/autotune-artifacts.json.sig
+            )
+          fi
           python3 scripts/build-release-provenance.py \
             "$tag" "${{ steps.release_source.outputs.commit }}" \
             "$GITHUB_REPOSITORY" "${{ steps.release_source.outputs.prerelease }}" \

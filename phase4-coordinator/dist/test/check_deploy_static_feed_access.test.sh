@@ -492,6 +492,25 @@ grep -q 'canary provider identity mismatch' "$DEPLOY_SH" &&
 grep -q 'O_NOFOLLOW' "$DEPLOY_SH" && grep -q 'dir_fd=' "$DEPLOY_SH" ||
   fail "trusted canary files must be opened no-follow through directory file descriptors"
 
+# SPEC-023 §3.7.8 Stage A (BYOM v0.2 slice 2b-ii): release.json decides whether
+# the artifact feed and its sidecar are members of the immutable envelope; a
+# bound release whose checkout lacks them aborts before upload, and when bound
+# they are content-addressed, digest-recorded, uploaded, and staged beside the
+# other feeds so verify-directory on Pearl sees the exact five-feed envelope.
+grep -q 'AUTOTUNE_ARTIFACT_BOUND="$(python3 - "$AUTOTUNE_RELEASE_MANIFEST"' "$DEPLOY_SH" &&
+  grep -q 'release.json binds autotune-artifacts.json but' "$DEPLOY_SH" ||
+  fail "deploy must read artifact-feed binding from release.json and abort a bound release without the pair"
+grep -q '("autotune-artifacts.json", pathlib.Path(sys.argv\[10\]))' "$DEPLOY_SH" &&
+  grep -q '("autotune-artifacts.json.sig", pathlib.Path(sys.argv\[11\]))' "$DEPLOY_SH" ||
+  fail "deploy must content-address the artifact feed pair into the release envelope when bound"
+grep -q '_append_deploy_input_digest "$STATIC_ARTIFACTS_JSON" "autotune-artifacts.json"' "$DEPLOY_SH" &&
+  grep -q '_append_deploy_input_digest "$STATIC_ARTIFACTS_SIG" "autotune-artifacts.json.sig"' "$DEPLOY_SH" ||
+  fail "deploy must record the artifact feed pair in the deploy input manifest when bound"
+grep -q '$DEPLOY_TMP/autotune-artifacts.json \\$_autotune_stage/autotune-artifacts.json' "$DEPLOY_SH" &&
+  grep -q '$DEPLOY_TMP/autotune-artifacts.json.sig \\$_autotune_stage/autotune-artifacts.json.sig' "$DEPLOY_SH" &&
+  grep -q 'rate-card.json.sig$AUTOTUNE_ARTIFACT_INSTALL_LINES' "$DEPLOY_SH" ||
+  fail "deploy must stage the artifact feed pair into the release envelope beside the other feeds when bound"
+
 grep -q '/v1/demand-rank' "$DEPLOY_SH" ||
   fail "deploy smoke must probe /v1/demand-rank"
 grep -q '/v1/rate-card.sig' "$DEPLOY_SH" ||

@@ -3186,11 +3186,10 @@ def artifact_feed_activation_state(
 # done, so `status` names them explicitly rather than letting a green generator
 # read as "ready to publish". Coordinator serving (/v1/catalog-artifacts route,
 # nginx allow-through) and the live release gate landed with slice 2b.
-PENDING_DISTRIBUTION_SURFACES = (
-    ("CLI release payload", "phase3-binary/dist/package.sh (~196): copy autotune-artifacts.json + .sig"),
-    ("GitHub release assets", ".github/workflows/release.yml (~1385, ~1418): publish both artifact files"),
-    ("scheduled renewal", ".github/workflows/renew-autotune-static-feed-signed.yml: supply AUTOTUNE_PREVIOUS_RELEASE_DIR (the previous signed release directory) or the monthly freshness renewal fails closed at generate after activation"),
-)
+# All distribution surfaces have landed (2b: serving + live gate; 2b-ii:
+# release assets, coordinator deploy, scheduled renewal); the tuple stays so
+# `status` and its test keep the shape for any future surface.
+PENDING_DISTRIBUTION_SURFACES: tuple[tuple[str, str], ...] = ()
 # Operator step at the activation deploy (not a code surface): the coordinator
 # answers 404 on /v1/catalog-artifacts until its config names the feed pair.
 ACTIVATION_DEPLOY_STEPS = (
@@ -3763,11 +3762,12 @@ def cmd_continuity_check(incoming: pathlib.Path, live: pathlib.Path) -> None:
 def cmd_status() -> None:
     """Print the artifact-feed activation state and its outstanding prerequisites.
 
-    Stage A is not shippable from the generator alone: it produces and binds
-    the feed, the coordinator serves it and the live release gate verifies it
-    (slice 2b), but nothing packages or publishes it as a release asset yet
-    (`PENDING_DISTRIBUTION_SURFACES`). Printing an explicit "not activatable
-    yet" state — rather than letting a
+    Every distribution surface has landed (the coordinator serves the feed and
+    the live gate verifies it; the release pipeline publishes, deploys, and
+    renews it), so what gates activation now is the generator-side prerequisite
+    list above and the operator's activation-deploy step; any future surface is
+    added to `PENDING_DISTRIBUTION_SURFACES`. Printing an explicit "not
+    activatable yet" state — rather than letting a
     green `verify` imply readiness — is what keeps the operator from cutting a
     release whose fifth feed no consumer can fetch.
     """
@@ -3805,9 +3805,11 @@ def cmd_status() -> None:
     print("Activation-deploy operator steps:")
     for surface, detail in ACTIVATION_DEPLOY_STEPS:
         print(f"  [ ] {surface}: {detail}")
-    print("Distribution surfaces still pending (BYOM v0.2 slices 2b-ii/2c — NOT in this slice):")
+    print("Distribution surfaces still pending:")
     for surface, detail in PENDING_DISTRIBUTION_SURFACES:
         print(f"  [ ] {surface}: {detail}")
+    if not PENDING_DISTRIBUTION_SURFACES:
+        print("  (none — serving, live gate, release assets, coordinator deploy, and scheduled renewal have landed; activation is gated by the prerequisites above)")
     print("")
     if any(not satisfied for satisfied, _ in prerequisites):
         print("NOT ACTIVATABLE: generator-side prerequisites are unmet.")

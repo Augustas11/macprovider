@@ -55,6 +55,11 @@ dry-run):
    release **source** inputs: `version` + `generated_at` on candidate/demand, and
    `generated_at` only on the rate card (its `version` is a rows-hash — a
    freshness renewal must not change it). Content is otherwise byte-identical.
+   Once the catalog is artifact-bound (`catalog-release.py status` reports
+   `post-activation`), the script first fetches Pearl's live `current` release
+   directory as the previous signed release (or honours
+   `AUTOTUNE_PREVIOUS_RELEASE_DIR`), which `generate` authenticates against the
+   keyring and the ledger before it will cut the next release.
    The rate card is re-dated at `rate-card-source.json`, because `rate-card.json`
    is MATERIALISED from that source by step 3: re-dating the generated file
    directly is reverted by the very next `generate`, and the atomic-release check

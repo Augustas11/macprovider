@@ -1340,6 +1340,7 @@ class PendingSurfaceListTest(unittest.TestCase):
         "live release gate": ("scripts/verify-live-coordinator-release-gate.py", "catalog-artifacts"),
         "coordinator serving": ("phase4-coordinator/internal/buyer/server.go", "/v1/catalog-artifacts"),
         "scheduled renewal": (".github/workflows/renew-autotune-static-feed-signed.yml", "AUTOTUNE_PREVIOUS_RELEASE_DIR"),
+        "coordinator deploy": ("phase4-coordinator/dist/deploy-pearl-vps.sh", "autotune-artifacts.json"),
     }
 
     def test_every_pending_surface_is_still_absent_from_the_tree(self):
@@ -2289,6 +2290,21 @@ class HermeticReleaseTest(unittest.TestCase):
             with self.assertRaises(catalog_release.CatalogError) as drift:
                 catalog_release.verify()
             self.assertIn(f"generated drift: {catalog_release.ARTIFACT_FEED_PATH}", str(drift.exception))
+
+    def test_verify_directory_needs_the_pair_beside_a_five_feed_manifest(self):
+        """The acceptance signer's invariant: the provider payload stays at nine
+        catalog names, so verifying an artifact-bound RELEASE needs a separate
+        directory holding the nine payload files plus the verified pair."""
+        with self.harness() as harness:
+            self.activate(harness)
+            staged = harness.stage(harness.root / "staged")
+            nine = harness.root / "nine"
+            shutil.copytree(staged, nine)
+            (nine / "autotune-artifacts.json").unlink()
+            (nine / "autotune-artifacts.json.sig").unlink()
+            with self.assertRaises(catalog_release.CatalogError):
+                catalog_release.verify_directory(nine)
+            catalog_release.verify_directory(staged)
 
     def test_five_feed_release_passes_the_compatibility_manifest_catalog_component(self):
         """AC-CAT-15 FUNCTIONALLY, not as a relation between two constants.

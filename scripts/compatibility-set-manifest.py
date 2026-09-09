@@ -504,6 +504,15 @@ def validate_payload_artifacts(payload: dict, payload_directory: pathlib.Path) -
         actual = hashlib.sha256(read_regular(payload_directory / "catalog-release" / name, f"payload catalog {name}")).hexdigest()
         if actual != expected:
             fail(f"payload catalog digest mismatch: {name}")
+    # SPEC-023 §3.7.8 Stage A: the artifact feed is release-bound through
+    # release.json and published as a release asset, but it is NOT a
+    # provider-payload member — the deployed updater and installer enforce the
+    # exact nine-name catalog-release set, so shipping it inside the payload
+    # would fail-close the fleet. Its presence here is a producer error.
+    catalog_directory = payload_directory / "catalog-release"
+    present = [name for name in (CATALOG_ARTIFACT_FEED, CATALOG_ARTIFACT_FEED + ".sig") if (catalog_directory / name).exists()]
+    if present:
+        fail(f"payload catalog: {', '.join(present)} is not a provider-payload member at Stage A (SPEC-023 §3.7.8); publish it as a release asset")
 
 
 def parse_signature(value: object) -> bytes:

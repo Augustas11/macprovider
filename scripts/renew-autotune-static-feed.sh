@@ -48,6 +48,9 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 PEARL_SSH="${PEARL_SSH:-pearl}"
 REMOTE_AUTOTUNE_DIR="${REMOTE_AUTOTUNE_DIR:-/opt/macprovider/autotune}"
+# Allowlisted HERE, before any use in a remote shell string (the post-activation
+# previous-release fetch below runs long before the deploy section's guards).
+case "$REMOTE_AUTOTUNE_DIR" in ""|*[!A-Za-z0-9._/-]*) echo "unsafe REMOTE_AUTOTUNE_DIR: $REMOTE_AUTOTUNE_DIR" >&2; exit 1 ;; esac
 COORDINATOR_UNIT="${COORDINATOR_UNIT:-macprovider-coordinator}"
 COORDINATOR_HEALTH_URL="${COORDINATOR_HEALTH_URL:-https://coordinator.malibu.tech/v1/rate-card}"
 KEY_ID="${AUTOTUNE_STATIC_KEY_ID:-streamvc-autotune-static-v4}"
@@ -58,6 +61,7 @@ DEPLOY=0
 [ "${1:-}" = "--deploy" ] && DEPLOY=1
 
 WORKTREE=""
+PREVIOUS_RELEASE_DIR=""
 STAGING=""
 LOCK_HELD=""
 LOCK_HELPER=""
@@ -109,6 +113,7 @@ cleanup() {
     SSH "rm -f '$LOCK_HELPER'" >/dev/null 2>&1 || true
   fi
   [ -n "$STAGING" ] && [ -d "$STAGING" ] && rm -rf "$STAGING"
+  [ -n "$PREVIOUS_RELEASE_DIR" ] && [ -d "$PREVIOUS_RELEASE_DIR" ] && rm -rf "$PREVIOUS_RELEASE_DIR"
   if [ -n "$WORKTREE" ] && [ -d "$WORKTREE" ]; then
     git -C "$REPO_ROOT" worktree remove --force "$WORKTREE" >/dev/null 2>&1 || rm -rf "$WORKTREE"
   fi
@@ -168,6 +173,32 @@ log "re-stamping release source inputs for $RELEASE_ID"
 # once autotune-artifacts-source.json is committed with unmeasured size_bytes.
 # Once a release IS artifact-bound, AUTOTUNE_PREVIOUS_RELEASE_DIR names the
 # previous signed release directory the §3.7.4 rebinding check requires.
+# SPEC-023 §3.7.8: once a release is artifact-bound, every later cut must
+# authenticate the PREVIOUS signed release (cross-release rebinding, intake
+# transitions), and `generate` fails closed without it. The scheduled renewal
+# fetches the live coordinator's current release directory as that input when
+# the operator has not named one, so the monthly freshness cron keeps working
+# after activation instead of stranding providers at the 30-day horizon. The
+# fetched bytes are AUTHENTICATED by `generate` (keyring + ledger binding +
+# signer equality), never trusted by path.
+ARTIFACT_FEED_STATE="$( cd "$WORKTREE" && python3 scripts/catalog-release.py status | sed -n 's/^artifact-feed state *: *//p' )"
+case "$ARTIFACT_FEED_STATE" in
+  post-activation|post_activation)
+    if [ -z "${AUTOTUNE_PREVIOUS_RELEASE_DIR:-}" ]; then
+      # Dry-run keeps its no-contact contract: it never talks to Pearl, so a
+      # post-activation dry-run needs the operator to name the directory.
+      [ "$DEPLOY" = 1 ] ||
+        fatal "post-activation renewal dry-run needs AUTOTUNE_PREVIOUS_RELEASE_DIR (the previous signed release directory); dry-run makes no contact with $PEARL_SSH"
+      PREVIOUS_RELEASE_DIR="$(mktemp -d -t macprovider-feed-previous.XXXXXXXX)"
+      log "post-activation catalog: fetching the live signed release from $PEARL_SSH:$REMOTE_AUTOTUNE_DIR/current as the previous release"
+      SSH "tar -C '$REMOTE_AUTOTUNE_DIR/current' -cf - ." | tar -C "$PREVIOUS_RELEASE_DIR" -xf - ||
+        fatal "cannot fetch the live signed release from $PEARL_SSH; set AUTOTUNE_PREVIOUS_RELEASE_DIR to the previous signed release directory"
+      AUTOTUNE_PREVIOUS_RELEASE_DIR="$PREVIOUS_RELEASE_DIR"
+    fi
+    ;;
+  pre-activation|pre_activation|activation) ;;
+  *) fatal "cannot determine the artifact-feed state from catalog-release.py status (got '${ARTIFACT_FEED_STATE}')" ;;
+esac
 GENERATE_ARGS=(generate --signer-key-id "$KEY_ID")
 case "${AUTOTUNE_ACTIVATE_ARTIFACT_FEED:-0}" in
   1|true|yes) GENERATE_ARGS+=(--activate-artifact-feed) ;;
@@ -206,15 +237,26 @@ done
 for f in autotune-candidates.json.sig demand-rank.json.sig rate-card.json.sig; do
   install -m 0644 "$STATIC_DIR/$f" "$RELEASE_STAGE/$f"
 done
-# Once the release is artifact-bound its release.json binds a FIFTH feed, so the
-# staged directory must carry the artifact feed and its sidecar or the
-# verify-directory gate below fails on a release that is otherwise correct.
-if [ -f "$CAT_DIR/autotune-artifacts.json" ]; then
+# SPEC-023 §3.7.8 Stage A: the freshly generated release.json is the ONLY
+# authority on whether this release is artifact-bound. Bound → the feed and
+# its sidecar are staged (both required); unbound → neither may exist, or the
+# verify-directory gate below would see a stray fifth feed.
+staged_artifact_bound="$(python3 - "$CAT_DIR/release.json" <<'PY'
+import json, pathlib, sys
+feeds = json.loads(pathlib.Path(sys.argv[1]).read_text())["feeds"]
+print("bound" if "autotune-artifacts.json" in feeds else "unbound")
+PY
+)"
+if [ "$staged_artifact_bound" = bound ]; then
+  [ -f "$CAT_DIR/autotune-artifacts.json" ] && [ -f "$STATIC_DIR/autotune-artifacts.json.sig" ] ||
+    fatal "release.json binds autotune-artifacts.json but the generated feed or its sidecar is missing"
   install -m 0644 "$CAT_DIR/autotune-artifacts.json" "$RELEASE_STAGE/autotune-artifacts.json"
-  [ -f "$STATIC_DIR/autotune-artifacts.json.sig" ] ||
-    fatal "artifact-bound release is missing $STATIC_DIR/autotune-artifacts.json.sig"
   install -m 0644 "$STATIC_DIR/autotune-artifacts.json.sig" "$RELEASE_STAGE/autotune-artifacts.json.sig"
   log "staged artifact-bound five-feed release directory"
+else
+  for stray in "$CAT_DIR/autotune-artifacts.json" "$STATIC_DIR/autotune-artifacts.json.sig"; do
+    [ -e "$stray" ] && fatal "release.json does not bind autotune-artifacts.json but $stray exists"
+  done
 fi
 # Strip any macOS AppleDouble junk before it can reach the release dir.
 find "$RELEASE_STAGE" -name '._*' -delete 2>/dev/null || true
