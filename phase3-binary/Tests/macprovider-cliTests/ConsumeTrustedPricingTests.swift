@@ -88,7 +88,9 @@ final class ConsumeTrustedPricingTests: XCTestCase {
     func testLoaderFetchesCanonicalEndpointsAndFailsClosedWithoutFallback() async throws {
         let fixture = try SignedRateCardFixture(generatedAt: "2026-09-02T12:00:00Z")
         let loader = ConsumeTrustedPricingLoader(
-            fetch: { url in
+            resolveEndpoint: { _ in "8.8.8.8" },
+            fetch: { url, endpoint in
+                XCTAssertEqual(endpoint, "8.8.8.8")
                 switch url.path {
                 case "/v1/rate-card":
                     return fixture.body
@@ -107,7 +109,8 @@ final class ConsumeTrustedPricingTests: XCTestCase {
         XCTAssertEqual(loaded, .available(try loader.verify(rateCardBytes: fixture.body, sidecarBytes: fixture.sidecar)))
 
         let failingLoader = ConsumeTrustedPricingLoader(
-            fetch: { _ in throw ConsumeTrustedPricingError(.fetchFailed) },
+            resolveEndpoint: { _ in "8.8.8.8" },
+            fetch: { _, _ in throw ConsumeTrustedPricingError(.fetchFailed) },
             trustedPublicKeys: fixture.trustedPublicKeys,
             expectedPolicyVersion: fixture.policyVersion,
             now: { SignedRateCardFixture.date("2026-08-29T00:00:00Z") }
@@ -116,37 +119,82 @@ final class ConsumeTrustedPricingTests: XCTestCase {
         XCTAssertEqual(failed, .unavailable(reason: .fetchFailed))
     }
 
-    func testDefaultFetchRejectsUnboundedHeadersStatusAndOversizedMetadata() async throws {
-        defer { ConsumeTrustedPricingMockURLProtocol.requestHandler = nil }
-        let url = URL(string: "https://api.example.test/v1/rate-card.sig")!
+    func testPinnedMetadataRequestIsCredentialFreeAndHeadersRemainBounded() throws {
+        let request = String(decoding: ConsumePinnedUpstreamClient.trustedMetadataRequestBytesForTesting(
+            host: "api.example.test",
+            port: 443,
+            path: "/v1/rate-card.sig"
+        ), as: UTF8.self)
+        XCTAssertEqual(request, [
+            "GET /v1/rate-card.sig HTTP/1.1",
+            "Host: api.example.test",
+            "Accept: application/json",
+            "Accept-Encoding: identity",
+            "Connection: close",
+            "",
+            "",
+        ].joined(separator: "\r\n"))
+        XCTAssertFalse(request.localizedCaseInsensitiveContains("Authorization:"))
+        XCTAssertFalse(request.localizedCaseInsensitiveContains("Cookie:"))
+        XCTAssertFalse(request.localizedCaseInsensitiveContains("Proxy-Authorization:"))
 
-        ConsumeTrustedPricingMockURLProtocol.requestHandler = { request in
-            XCTAssertEqual(request.value(forHTTPHeaderField: "Accept-Encoding"), "identity")
-            var headers: [String: String] = [:]
-            for index in 0 ... ConsumeTrustedPricingLoader.maxResponseHeaderCount {
-                headers["X-Test-\(index)"] = "v"
-            }
-            return Self.response(for: request, status: 200, headers: headers, data: Data())
-        }
-        let headerFailure = try await fetchFailure(url)
-        XCTAssertEqual(headerFailure, .fetchFailed)
+        let tooManyHeaders = (0...ConsumeTrustedPricingLoader.maxResponseHeaderCount).map { ("X-Test-\($0)", "v") }
+        XCTAssertFalse(ConsumeTrustedPricingLoader.responseHeadersAreBounded(tooManyHeaders))
+        XCTAssertFalse(ConsumeTrustedPricingLoader.responseHeadersAreBounded([
+            ("X-Test", String(repeating: "x", count: ConsumeTrustedPricingLoader.maxResponseHeaderBytes + 1)),
+        ]))
+    }
 
-        ConsumeTrustedPricingMockURLProtocol.requestHandler = { request in
-            Self.response(
-                for: request,
-                status: 200,
-                headers: ["Content-Length": "\(ConsumeTrustedPricingLoader.maxSidecarBytes + 1)"],
-                data: Data()
+    func testPinnedMetadataTransportRejectsNonGlobalEndpointBeforeConnecting() async throws {
+        do {
+            _ = try await ConsumePinnedUpstreamClient.fetchTrustedMetadata(
+                url: URL(string: "https://api.example.test/v1/rate-card")!,
+                endpoint: "127.0.0.1",
+                timeouts: .default
             )
+            XCTFail("private endpoint unexpectedly reached the transport")
+        } catch let error as ConsumeTrustedPricingError {
+            XCTAssertEqual(error.reason, .fetchFailed)
         }
-        let sizeFailure = try await fetchFailure(url)
-        XCTAssertEqual(sizeFailure, .oversizedSidecar)
+    }
 
-        ConsumeTrustedPricingMockURLProtocol.requestHandler = { request in
-            Self.response(for: request, status: 500, headers: [:], data: Data("nope".utf8))
+    func testPinnedMetadataReadDeadlineIsAbsoluteUnderSlowDripProgress() {
+        let policy = ConsumePinnedUpstreamClient.trustedMetadataReadDeadline(for: .default)
+        XCTAssertEqual(policy.timeoutNanoseconds, 10_000_000_000)
+        XCTAssertFalse(policy.refreshOnProgress)
+
+        var expiryNanoseconds = policy.timeoutNanoseconds
+        let slowDripProgress: [UInt64] = [1_000_000_000, 9_000_000_000, 9_999_999_999]
+        for progressNanoseconds in slowDripProgress where policy.refreshOnProgress {
+            expiryNanoseconds = progressNanoseconds + policy.timeoutNanoseconds
         }
-        let statusFailure = try await fetchFailure(url)
-        XCTAssertEqual(statusFailure, .fetchFailed)
+        XCTAssertEqual(expiryNanoseconds, 10_000_000_000)
+    }
+
+    func testPricingFetchRejectsPrivateResolutionBeforeRateCardRequest() async throws {
+        let fixture = try SignedRateCardFixture(generatedAt: "2026-09-02T12:00:00Z")
+        let recorder = PricingTransportRecorder(endpoints: ["127.0.0.1"], fixture: fixture)
+        let loader = fixture.loader(now: "2026-09-03T00:00:00Z", recorder: recorder)
+
+        let result = await loader.load(from: "https://api.example.test")
+        let resolvedHosts = await recorder.resolvedHosts()
+        let fetchedPaths = await recorder.fetchedPaths()
+        XCTAssertEqual(result, .unavailable(reason: .fetchFailed))
+        XCTAssertEqual(resolvedHosts, ["api.example.test"])
+        XCTAssertEqual(fetchedPaths, [])
+    }
+
+    func testPricingFetchRepeatsResolutionAndRejectsPrivateSidecarRebinding() async throws {
+        let fixture = try SignedRateCardFixture(generatedAt: "2026-09-02T12:00:00Z")
+        let recorder = PricingTransportRecorder(endpoints: ["8.8.8.8", "127.0.0.1"], fixture: fixture)
+        let loader = fixture.loader(now: "2026-09-03T00:00:00Z", recorder: recorder)
+
+        let result = await loader.load(from: "https://api.example.test")
+        let resolvedHosts = await recorder.resolvedHosts()
+        let fetchedPaths = await recorder.fetchedPaths()
+        XCTAssertEqual(result, .unavailable(reason: .fetchFailed))
+        XCTAssertEqual(resolvedHosts, ["api.example.test", "api.example.test"])
+        XCTAssertEqual(fetchedPaths, ["/v1/rate-card@8.8.8.8"])
     }
 
     private func verifyFailure(
@@ -163,53 +211,6 @@ final class ConsumeTrustedPricingTests: XCTestCase {
         }
     }
 
-    private func fetchFailure(_ url: URL) async throws -> ConsumeTrustedPricingUnavailableReason {
-        do {
-            let session = ConsumeTrustedPricingLoader.defaultURLSession(protocolClasses: [ConsumeTrustedPricingMockURLProtocol.self])
-            _ = try await ConsumeTrustedPricingLoader.fetch(url, session: session)
-            XCTFail("fetch unexpectedly succeeded")
-            return .notLoaded
-        } catch let error as ConsumeTrustedPricingError {
-            return error.reason
-        }
-    }
-
-    private static func response(
-        for request: URLRequest,
-        status: Int,
-        headers: [String: String],
-        data: Data
-    ) -> (HTTPURLResponse, Data) {
-        (
-            HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: "HTTP/1.1", headerFields: headers)!,
-            data
-        )
-    }
-}
-
-private final class ConsumeTrustedPricingMockURLProtocol: URLProtocol {
-    static var requestHandler: ((URLRequest) throws -> (HTTPURLResponse, Data))?
-
-    override class func canInit(with request: URLRequest) -> Bool { true }
-
-    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
-
-    override func startLoading() {
-        guard let requestHandler = Self.requestHandler else {
-            client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse))
-            return
-        }
-        do {
-            let (response, data) = try requestHandler(request)
-            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-            client?.urlProtocol(self, didLoad: data)
-            client?.urlProtocolDidFinishLoading(self)
-        } catch {
-            client?.urlProtocol(self, didFailWithError: error)
-        }
-    }
-
-    override func stopLoading() {}
 }
 
 private struct SignedRateCardFixture {
@@ -232,9 +233,22 @@ private struct SignedRateCardFixture {
     func loader(
         now rawNow: String,
         expectedPolicyVersion: String? = nil,
-        minimumGeneratedAt: Date = .distantPast
+        minimumGeneratedAt: Date = .distantPast,
+        recorder: PricingTransportRecorder? = nil
     ) -> ConsumeTrustedPricingLoader {
         ConsumeTrustedPricingLoader(
+            resolveEndpoint: { host in
+                if let recorder {
+                    return await recorder.resolve(host)
+                }
+                return "8.8.8.8"
+            },
+            fetch: { url, endpoint in
+                guard let recorder else {
+                    throw ConsumeTrustedPricingError(.fetchFailed)
+                }
+                return await recorder.fetch(url, endpoint: endpoint)
+            },
             trustedPublicKeys: trustedPublicKeys,
             expectedPolicyVersion: expectedPolicyVersion ?? policyVersion,
             minimumGeneratedAt: minimumGeneratedAt,
@@ -291,4 +305,29 @@ private struct SignedRateCardFixture {
         {"version":"\(projection.projectionHash)","policy_version":"\(policyVersion)","generated_at":"\(generatedAt)","usd_per_million_credits":1.0,"rows":{\(rowsJSON)}}
         """.utf8)
     }
+}
+
+private actor PricingTransportRecorder {
+    private var endpoints: [String]
+    private let fixture: SignedRateCardFixture
+    private var hosts: [String] = []
+    private var paths: [String] = []
+
+    init(endpoints: [String], fixture: SignedRateCardFixture) {
+        self.endpoints = endpoints
+        self.fixture = fixture
+    }
+
+    func resolve(_ host: String) -> String {
+        hosts.append(host)
+        return endpoints.removeFirst()
+    }
+
+    func fetch(_ url: URL, endpoint: String) -> Data {
+        paths.append("\(url.path)@\(endpoint)")
+        return url.path.hasSuffix(".sig") ? fixture.sidecar : fixture.body
+    }
+
+    func resolvedHosts() -> [String] { hosts }
+    func fetchedPaths() -> [String] { paths }
 }

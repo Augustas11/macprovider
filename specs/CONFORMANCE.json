@@ -6995,19 +6995,24 @@
     {
       "requirement_id": "SPEC-045-R003",
       "spec_id": "SPEC-045",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:struct ConsumeLocalTokenVerifier",
         "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:struct ConsumeCredentialLoader",
         "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:static func httpRequestBytesForTesting",
-        "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:private static func httpRequestBytes"
+        "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:private static func httpRequestBytes",
+        "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:static func resolveGlobalEndpoint",
+        "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:static func fetchTrustedMetadata",
+        "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:private static func trustedMetadataRequestBytes"
       ],
       "tests": [
         "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testLocalTokenVerifierAcceptsOnlyOneAcceptedHeader",
         "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testCredentialSourceOrderPrefersExplicitThenEnvFileThenDefaultThenEnvironment",
         "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testCredentialFileRejectsGroupReadableFileAndSymlink",
         "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testCredentialFileRejectsExtendedACLAndRevalidatesDeletion",
-        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase4PinnedUpstreamGeneratedHeadersAreClosedAndSanitized"
+        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase4PinnedUpstreamGeneratedHeadersAreClosedAndSanitized",
+        "phase3-binary/Tests/macprovider-cliTests/ConsumeTrustedPricingTests.swift:testPinnedMetadataRequestIsCredentialFreeAndHeadersRemainBounded",
+        "phase3-binary/Tests/macprovider-cliTests/ConsumeTrustedPricingTests.swift:testPinnedMetadataTransportRejectsNonGlobalEndpointBeforeConnecting"
       ],
       "journeys": [
         "JOURNEY-LOCAL-CONSUMER-ENDPOINT"
@@ -7026,12 +7031,17 @@
           "expires_at": "2027-08-24"
         }
       ],
-      "gap": null
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1433",
+        "rationale": "The pinned upstream transport has changed beyond the historical dc63ecec candidate, and that signed journey does not prove the required negative TLS, repeated-DNS, connected-peer, proxy, redirect, or zero-credential-byte boundary matrix. Existing evidence is retained as historical provenance; refreshed matching implementation evidence and separately authorized signed journey evidence remain required."
+      }
     },
     {
       "requirement_id": "SPEC-045-R004",
       "spec_id": "SPEC-045",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:struct ConsumeBudgetConfig",
         "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:struct ConsumePricedExposureEstimate",
@@ -7042,7 +7052,11 @@
         "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase3BudgetFlagsParseAndRejectInvalidCombinations",
         "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase3CPricedEstimateUsesGrossRatesAndRoundsUp",
         "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase3CPricedEstimateCapRejectsBeforeLedgerAppend",
-        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase3PerRequestCapRejectsBeforeLedgerAppend"
+        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase3PerRequestCapRejectsBeforeLedgerAppend",
+        "phase3-binary/Tests/macprovider-cliTests/ConsumeTrustedPricingTests.swift:testPinnedMetadataTransportRejectsNonGlobalEndpointBeforeConnecting",
+        "phase3-binary/Tests/macprovider-cliTests/ConsumeTrustedPricingTests.swift:testPinnedMetadataReadDeadlineIsAbsoluteUnderSlowDripProgress",
+        "phase3-binary/Tests/macprovider-cliTests/ConsumeTrustedPricingTests.swift:testPricingFetchRejectsPrivateResolutionBeforeRateCardRequest",
+        "phase3-binary/Tests/macprovider-cliTests/ConsumeTrustedPricingTests.swift:testPricingFetchRepeatsResolutionAndRejectsPrivateSidecarRebinding"
       ],
       "journeys": [
         "JOURNEY-LOCAL-CONSUMER-ENDPOINT"
@@ -7061,7 +7075,12 @@
           "expires_at": "2027-08-24"
         }
       ],
-      "gap": null
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1433",
+        "rationale": "Trusted pricing metadata now repeats global-address validation and pins each body and sidecar connection, changing the mapped pricing loader beyond the historical dc63ecec candidate. Local rebinding regression tests do not replace refreshed matching commit and signed journey evidence."
+      }
     },
     {
       "requirement_id": "SPEC-045-R005",
@@ -7201,6 +7220,11 @@
         "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase4FakeGatewayStreamingSDKPayloadEmitsOpenAICompatibleSSE",
         "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase4FakeGatewayRedirectStatusIsPreservedWithoutLocationOrSecondDispatch",
         "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase4PinnedUpstreamGeneratedHeadersAreClosedAndSanitized",
+        "phase3-binary/Tests/macprovider-cliTests/ConsumeTrustedPricingTests.swift:testPinnedMetadataRequestIsCredentialFreeAndHeadersRemainBounded",
+        "phase3-binary/Tests/macprovider-cliTests/ConsumeTrustedPricingTests.swift:testPinnedMetadataTransportRejectsNonGlobalEndpointBeforeConnecting",
+        "phase3-binary/Tests/macprovider-cliTests/ConsumeTrustedPricingTests.swift:testPinnedMetadataReadDeadlineIsAbsoluteUnderSlowDripProgress",
+        "phase3-binary/Tests/macprovider-cliTests/ConsumeTrustedPricingTests.swift:testPricingFetchRejectsPrivateResolutionBeforeRateCardRequest",
+        "phase3-binary/Tests/macprovider-cliTests/ConsumeTrustedPricingTests.swift:testPricingFetchRepeatsResolutionAndRejectsPrivateSidecarRebinding",
         "scripts/test-signed-local-consumer-endpoint-journey-workflow.sh:required_workflow = [",
         "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase3DSendFailuresAreAmbiguous",
         "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase3DAmbiguousSendFailureHoldsReservationAcrossRestart",
@@ -7226,8 +7250,8 @@
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/927",
-        "rationale": "The mapped pinned upstream client and local handler changed for ambiguous-send budget safety after the historical dc63ecec candidate. New local negative tests cover exposure retention, denial, and ledger reopen, but the unchanged signed journey does not attest this implementation; refreshed matching commit and signed journey evidence remain required."
+        "issue": "https://github.com/Augustas11/macprovider/issues/1433",
+        "rationale": "The mapped pinned transports and local handler changed after the historical dc63ecec candidate. Local tests now cover pricing rebinding denial and credential-free metadata requests, plus ambiguous-send exposure retention and ledger reopen; however, the required production-transport negative TLS, connected-peer, proxy, redirect, and zero-credential-byte matrix remains incomplete, and the unchanged signed journey does not attest the current implementation. Existing evidence is historical provenance only; refreshed matching implementation evidence and separately authorized signed journey evidence remain required."
       }
     },
     {
