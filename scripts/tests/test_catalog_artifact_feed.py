@@ -1340,6 +1340,7 @@ class PendingSurfaceListTest(unittest.TestCase):
         "live release gate": ("scripts/verify-live-coordinator-release-gate.py", "catalog-artifacts"),
         "coordinator serving": ("phase4-coordinator/internal/buyer/server.go", "/v1/catalog-artifacts"),
         "scheduled renewal": (".github/workflows/renew-autotune-static-feed-signed.yml", "AUTOTUNE_PREVIOUS_RELEASE_DIR"),
+        "coordinator deploy": ("phase4-coordinator/dist/deploy-pearl-vps.sh", "autotune-artifacts.json"),
     }
 
     def test_every_pending_surface_is_still_absent_from_the_tree(self):

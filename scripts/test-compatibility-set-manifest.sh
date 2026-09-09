@@ -65,6 +65,16 @@ python3 "$tool" validate \
 cp "$manifest" "$payload/compatibility-set.json"
 python3 "$tool" validate --input "$manifest" --payload-directory "$payload"
 
+# SPEC-023 §3.7.8 Stage A: the artifact feed is a release asset, never a
+# provider-payload member (the deployed updater enforces the exact nine names).
+printf 'stray\n' > "$payload/catalog-release/autotune-artifacts.json"
+if python3 "$tool" validate --input "$manifest" --payload-directory "$payload" >"$work/stray-artifact.out" 2>&1; then
+  echo "payload validation accepted the artifact feed as a payload member" >&2
+  exit 1
+fi
+grep -q 'is not a provider-payload member at Stage A' "$work/stray-artifact.out"
+rm "$payload/catalog-release/autotune-artifacts.json"
+
 # client-floor: the generated manifest carries the Malibu CLI identifier, so the
 # oldest client that can accept it is 1.8.95. A declared support floor below that
 # must be rejected — that gap is exactly what the Malibu rebrand orphaned

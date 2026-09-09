@@ -467,4 +467,31 @@ printf '%s\n' "${release_names[@]}" "gateway-linux-amd64" | LC_ALL=C sort > "$ac
 expect_reject duplicate-basename "${directory_verify[@]}"
 printf '%s\n' "${release_names[@]}" | LC_ALL=C sort > "$accepted/release-assets.txt"
 
+# SPEC-023 §3.7.8 Stage A (BYOM v0.2 slice 2b-ii): the artifact feed and its
+# sidecar are release assets exactly when the accepted release.json binds them,
+# and then pearl-release.json binds them in catalog.files too.
+printf '%s\n' "${release_names[@]}" autotune-artifacts.json autotune-artifacts.json.sig | LC_ALL=C sort > "$accepted/release-assets.txt"
+expect_reject artifact-pair-unbound "${directory_verify[@]}"
+printf '%s\n' "${release_names[@]}" | LC_ALL=C sort > "$accepted/release-assets.txt"
+
+cp "$accepted/release.json" "$work/release.json.unbound"
+printf '%s\n' '{"feeds":{"autotune-candidates.json":{},"demand-rank.json":{},"rate-card.json":{},"tier2-catalog.json":{},"autotune-artifacts.json":{}}}' > "$accepted/release.json"
+printf 'fixture:%s\n' autotune-artifacts.json > "$accepted/autotune-artifacts.json"
+printf 'fixture:%s\n' autotune-artifacts.json.sig > "$accepted/autotune-artifacts.json.sig"
+expect_reject artifact-pair-missing-from-inventory "${directory_verify[@]}"
+printf '%s\n' "${release_names[@]}" autotune-artifacts.json autotune-artifacts.json.sig | LC_ALL=C sort > "$accepted/release-assets.txt"
+expect_reject artifact-pair-not-in-pearl "${directory_verify[@]}"
+python3 - "$accepted" <<'PY'
+import hashlib, json, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+digest = lambda name: hashlib.sha256((root / name).read_bytes()).hexdigest()
+path = root / "pearl-release.json"
+value = json.loads(path.read_text())
+for name in ("release.json", "autotune-artifacts.json", "autotune-artifacts.json.sig"):
+    value["catalog"]["files"][name] = digest(name)
+path.write_text(json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+PY
+sign_pearl
+"${directory_verify[@]}"
+
 printf '[test-acceptance-promotion] ok: exact accepted-byte promotion fails closed\n'
