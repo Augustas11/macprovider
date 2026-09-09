@@ -165,12 +165,22 @@ for requirement in (
     # unit-tested generator rules; the under-lock recheck mirrors them inline.
     "catalog-release.py continuity-check",
     'live-current',
+    # Post-activation, generate needs the previous signed release; the cron
+    # fetches the live current release from Pearl and lets generate
+    # authenticate it, so the monthly renewal cannot fail closed at generate.
+    "artifact-feed state",
+    'AUTOTUNE_PREVIOUS_RELEASE_DIR="$PREVIOUS_RELEASE_DIR"',
+    "cannot fetch the live signed release",
 ):
     if requirement not in script:
         raise SystemExit(f"renew script omits: {requirement}")
 before_generate = script.split('catalog-release.py "${GENERATE_ARGS[@]}"', 1)[0]
 if 'cat_dir / "rate-card.json"' in before_generate:
     raise SystemExit("renewal must not re-stamp the GENERATED rate-card.json; the generator writes it")
+if 'AUTOTUNE_PREVIOUS_RELEASE_DIR="$PREVIOUS_RELEASE_DIR"' not in before_generate:
+    raise SystemExit("the previous-release fetch must run before generate")
+if 'rm -rf "$PREVIOUS_RELEASE_DIR"' not in script.split("cleanup() {", 1)[1].split("\n}", 1)[0]:
+    raise SystemExit("the fetched previous release must be removed on exit")
 rollback = script.split("rollback() {", 1)[1].split("\n}", 1)[0]
 if "flock -n 8" not in rollback or "flock -n 9" not in rollback:
     raise SystemExit("rollback must take Pearl deploy locks before mutating current")

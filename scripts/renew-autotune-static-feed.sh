@@ -58,6 +58,7 @@ DEPLOY=0
 [ "${1:-}" = "--deploy" ] && DEPLOY=1
 
 WORKTREE=""
+PREVIOUS_RELEASE_DIR=""
 STAGING=""
 LOCK_HELD=""
 LOCK_HELPER=""
@@ -109,6 +110,7 @@ cleanup() {
     SSH "rm -f '$LOCK_HELPER'" >/dev/null 2>&1 || true
   fi
   [ -n "$STAGING" ] && [ -d "$STAGING" ] && rm -rf "$STAGING"
+  [ -n "$PREVIOUS_RELEASE_DIR" ] && [ -d "$PREVIOUS_RELEASE_DIR" ] && rm -rf "$PREVIOUS_RELEASE_DIR"
   if [ -n "$WORKTREE" ] && [ -d "$WORKTREE" ]; then
     git -C "$REPO_ROOT" worktree remove --force "$WORKTREE" >/dev/null 2>&1 || rm -rf "$WORKTREE"
   fi
@@ -168,6 +170,28 @@ log "re-stamping release source inputs for $RELEASE_ID"
 # once autotune-artifacts-source.json is committed with unmeasured size_bytes.
 # Once a release IS artifact-bound, AUTOTUNE_PREVIOUS_RELEASE_DIR names the
 # previous signed release directory the §3.7.4 rebinding check requires.
+# SPEC-023 §3.7.8: once a release is artifact-bound, every later cut must
+# authenticate the PREVIOUS signed release (cross-release rebinding, intake
+# transitions), and `generate` fails closed without it. The scheduled renewal
+# fetches the live coordinator's current release directory as that input when
+# the operator has not named one, so the monthly freshness cron keeps working
+# after activation instead of stranding providers at the 30-day horizon. The
+# fetched bytes are AUTHENTICATED by `generate` (keyring + ledger binding +
+# signer equality), never trusted by path.
+ARTIFACT_FEED_STATE="$( cd "$WORKTREE" && python3 scripts/catalog-release.py status | sed -n 's/^artifact-feed state *: *//p' )"
+case "$ARTIFACT_FEED_STATE" in
+  post-activation|post_activation)
+    if [ -z "${AUTOTUNE_PREVIOUS_RELEASE_DIR:-}" ]; then
+      PREVIOUS_RELEASE_DIR="$(mktemp -d -t macprovider-feed-previous.XXXXXXXX)"
+      log "post-activation catalog: fetching the live signed release from $PEARL_SSH:$REMOTE_AUTOTUNE_DIR/current as the previous release"
+      SSH "tar -C '$REMOTE_AUTOTUNE_DIR/current' -cf - ." | tar -C "$PREVIOUS_RELEASE_DIR" -xf - ||
+        fatal "cannot fetch the live signed release from $PEARL_SSH; set AUTOTUNE_PREVIOUS_RELEASE_DIR to the previous signed release directory"
+      AUTOTUNE_PREVIOUS_RELEASE_DIR="$PREVIOUS_RELEASE_DIR"
+    fi
+    ;;
+  pre-activation|pre_activation|activation) ;;
+  *) fatal "cannot determine the artifact-feed state from catalog-release.py status (got '${ARTIFACT_FEED_STATE}')" ;;
+esac
 GENERATE_ARGS=(generate --signer-key-id "$KEY_ID")
 case "${AUTOTUNE_ACTIVATE_ARTIFACT_FEED:-0}" in
   1|true|yes) GENERATE_ARGS+=(--activate-artifact-feed) ;;
