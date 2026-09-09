@@ -835,6 +835,19 @@ func valueOrNaN(value *float64) float64 {
 }
 
 func validateFeedEnvelope(version, policyVersion, generatedAt, source, expectedSource string, rowCount int) (feedRelease, error) {
+	release, err := validateFeedHeader(version, policyVersion, generatedAt, source, expectedSource)
+	if err != nil {
+		return feedRelease{}, err
+	}
+	if rowCount == 0 {
+		return feedRelease{}, fmt.Errorf("rows must not be empty")
+	}
+	return release, nil
+}
+
+// validateFeedHeader is the release header part of validateFeedEnvelope,
+// without the v0.1 row-count rule.
+func validateFeedHeader(version, policyVersion, generatedAt, source, expectedSource string) (feedRelease, error) {
 	if strings.TrimSpace(version) == "" || strings.TrimSpace(version) != version {
 		return feedRelease{}, fmt.Errorf("version must be a non-empty trimmed string")
 	}
@@ -847,9 +860,6 @@ func validateFeedEnvelope(version, policyVersion, generatedAt, source, expectedS
 	}
 	if source != expectedSource {
 		return feedRelease{}, fmt.Errorf("source must be %q", expectedSource)
-	}
-	if rowCount == 0 {
-		return feedRelease{}, fmt.Errorf("rows must not be empty")
 	}
 	return feedRelease{version: version, policyVersion: policyVersion, generatedAt: parsedGeneratedAt}, nil
 }

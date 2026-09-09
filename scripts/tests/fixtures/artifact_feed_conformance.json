@@ -1,4 +1,5 @@
 {
+  "_format": "cases[].ops mutate `feed`; optional cases[].candidate_ops mutate `candidate` first (its sha256 is recomputed by every harness)",
   "candidate": {
     "generated_at": "2026-07-10T00:00:00Z",
     "policy_version": "autotune-policy-v1",
@@ -977,6 +978,45 @@
         }
       ],
       "spec": "\u00a73.7.3 \u2014 trimmed release strings"
+    },
+    {
+      "expect": "reject",
+      "name": "empty models with a recommendable row",
+      "ops": [
+        {
+          "op": "set",
+          "path": [
+            "models"
+          ],
+          "value": {}
+        }
+      ],
+      "spec": "\u00a73.7.7 R004 \u2014 every listed/recommendable row has a model entry"
+    },
+    {
+      "candidate_ops": [
+        {
+          "op": "set",
+          "path": [
+            "rows",
+            "test-model",
+            "runtime_status"
+          ],
+          "value": "candidate"
+        }
+      ],
+      "expect": "accept",
+      "name": "empty models with a candidate-only catalog",
+      "ops": [
+        {
+          "op": "set",
+          "path": [
+            "models"
+          ],
+          "value": {}
+        }
+      ],
+      "spec": "\u00a73.7.3 \u2014 models is an object with no non-empty rule; \u00a73.2: a candidate row is out of R004 scope"
     }
   ],
   "description": "Shared SPEC-023 \u00a73.7 artifact-feed conformance corpus (BYOM v0.2 slice 2c). One candidate catalog, one valid feed, and mutation cases applied by the Python generator tests, the Go coordinator tests, and the Swift CLI tests, so the three consumers cannot drift on the closed schema, the identity matrix, release binding, or primary consistency. Mutation ops: {op: set, path: [...], value} and {op: delete, path: [...]}. The feed's candidate_catalog_sha256 is computed by each consumer from the canonical candidate bytes it signs or bakes before ops are applied; a case that sets it wins.",

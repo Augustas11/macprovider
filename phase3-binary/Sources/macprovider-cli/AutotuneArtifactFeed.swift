@@ -176,8 +176,11 @@ extension ArtifactFeed {
         guard matches(hex64Pattern, digest) else {
             throw ArtifactFeedError.integrity("candidate_catalog_sha256 must be lowercase 64-hex")
         }
-        guard let rawModels = object["models"] as? [String: Any], !rawModels.isEmpty else {
-            throw ArtifactFeedError.integrity("models must be a non-empty object")
+        // §3.7.3: `models` is an object with no non-empty rule (only each
+        // model's `artifacts` is non-empty); a release whose catalog has no
+        // listed/recommendable row publishes an empty map.
+        guard let rawModels = object["models"] as? [String: Any] else {
+            throw ArtifactFeedError.integrity("models must be an object")
         }
         var models: [String: Model] = [:]
         var seen: [String: String] = [:]

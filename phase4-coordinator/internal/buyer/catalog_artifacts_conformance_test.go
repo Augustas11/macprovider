@@ -17,25 +17,24 @@ import (
 // The shared SPEC-023 §3.7 conformance corpus is read by the Python generator,
 // this coordinator validator, and the Swift CLI, so the three cannot drift on
 // the closed schema, identity matrix, release binding, or primary consistency.
+type corpusOp struct {
+	Op    string   `json:"op"`
+	Path  []string `json:"path"`
+	Value any      `json:"value"`
+}
+
 type artifactCorpus struct {
 	Candidate map[string]any `json:"candidate"`
 	Feed      map[string]any `json:"feed"`
 	Cases     []struct {
-		Name   string `json:"name"`
-		Expect string `json:"expect"`
-		Ops    []struct {
-			Op    string   `json:"op"`
-			Path  []string `json:"path"`
-			Value any      `json:"value"`
-		} `json:"ops"`
+		Name         string     `json:"name"`
+		Expect       string     `json:"expect"`
+		CandidateOps []corpusOp `json:"candidate_ops"`
+		Ops          []corpusOp `json:"ops"`
 	} `json:"cases"`
 }
 
-func applyCorpusOps(feed map[string]any, ops []struct {
-	Op    string   `json:"op"`
-	Path  []string `json:"path"`
-	Value any      `json:"value"`
-}) {
+func applyCorpusOps(feed map[string]any, ops []corpusOp) {
 	for _, op := range ops {
 		target := feed
 		for _, key := range op.Path[:len(op.Path)-1] {
@@ -79,14 +78,6 @@ func TestCatalogArtifactsSharedConformanceCorpus(t *testing.T) {
 	if len(corpus.Cases) < 25 {
 		t.Fatalf("corpus has %d cases", len(corpus.Cases))
 	}
-	// json.Marshal sorts object keys and emits compact JSON: the same canonical
-	// form the generator signs.
-	candidate, err := json.Marshal(corpus.Candidate)
-	if err != nil {
-		t.Fatal(err)
-	}
-	digest := sha256.Sum256(candidate)
-	candidateSHA := hex.EncodeToString(digest[:])
 	version := corpus.Candidate["version"].(string)
 	generatedAt := corpus.Candidate["generated_at"].(string)
 	policyVersion := corpus.Candidate["policy_version"].(string)
@@ -97,6 +88,16 @@ func TestCatalogArtifactsSharedConformanceCorpus(t *testing.T) {
 			t.Parallel()
 			publicKey, privateKey := testSigningKey(t)
 			dir := t.TempDir()
+			// json.Marshal sorts object keys and emits compact JSON: the same
+			// canonical form the generator signs.
+			candidateSource := deepCopyJSON(t, corpus.Candidate)
+			applyCorpusOps(candidateSource, tc.CandidateOps)
+			candidate, err := json.Marshal(candidateSource)
+			if err != nil {
+				t.Fatal(err)
+			}
+			digest := sha256.Sum256(candidate)
+			candidateSHA := hex.EncodeToString(digest[:])
 			feed := deepCopyJSON(t, corpus.Feed)
 			feed["candidate_catalog_sha256"] = candidateSHA
 			applyCorpusOps(feed, tc.Ops)

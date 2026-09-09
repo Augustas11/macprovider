@@ -1305,8 +1305,11 @@ def validate_artifact_entry(entry: object, label: str, *, allow_unmeasured_size:
 
 def validate_artifact_models(models: object, label: str, *, allow_unmeasured_size: bool) -> None:
     """Validate the shared `models` block of the artifact source and published feed."""
-    if not isinstance(models, dict) or not models:
-        fail(f"{label}: models must be a non-empty object")
+    # SPEC-023 §3.7.3: `models` is an object; only each model's `artifacts` is
+    # non-empty. A release whose catalog has no `listed`/`recommendable` row
+    # publishes an empty map (R004 binds entries to those rows only).
+    if not isinstance(models, dict):
+        fail(f"{label}: models must be an object")
     for model_key, entry in models.items():
         model_label = f"{label} model {model_key}"
         if not isinstance(model_key, str) or not MODEL_KEY.fullmatch(model_key) or "//" in model_key:
@@ -1915,8 +1918,10 @@ def release_record(
 
 def validate_artifact_binding_rows(bindings: object, label: str) -> None:
     """SPEC-023 §3.7.8 / AC-CAT-19: the concrete `artifact_bindings` wire shape."""
-    if not isinstance(bindings, list) or not bindings:
-        fail(f"{label}: artifact_bindings must be a non-empty array")
+    # §3.7.8 completeness: exactly one element per published pair — an empty
+    # feed binds an empty array.
+    if not isinstance(bindings, list):
+        fail(f"{label}: artifact_bindings must be an array")
     fields = {"model_key", "artifact_id", "hash_algorithm", "hash"}
     seen_pairs: set[tuple[str, str]] = set()
     seen_hashes: set[tuple[str, str]] = set()

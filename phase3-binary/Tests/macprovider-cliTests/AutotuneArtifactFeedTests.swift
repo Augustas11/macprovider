@@ -76,10 +76,11 @@ final class AutotuneArtifactFeedTests: XCTestCase {
     func testSharedConformanceCorpus() throws {
         let corpus = try Self.loadCorpus()
         XCTAssertGreaterThanOrEqual(corpus.cases.count, 25)
-        let candidateBytes = try Self.canonical(corpus.candidate)
-        let catalog = try AutotuneStaticInputs.decodeSignedStaticCandidateCatalog(candidateBytes)
         for testCase in corpus.cases {
             let name = testCase["name"] as! String
+            let candidateSource = try Self.applying(testCase["candidate_ops"] as? [[String: Any]] ?? [], to: corpus.candidate)
+            let candidateBytes = try Self.canonical(candidateSource)
+            let catalog = try AutotuneStaticInputs.decodeSignedStaticCandidateCatalog(candidateBytes)
             var feed = corpus.feed
             feed["candidate_catalog_sha256"] = Self.sha256Hex(candidateBytes)
             feed = try Self.applying(testCase["ops"] as! [[String: Any]], to: feed)

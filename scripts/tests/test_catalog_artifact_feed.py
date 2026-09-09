@@ -1381,11 +1381,13 @@ class ArtifactFeedConformanceCorpusTest(unittest.TestCase):
                 raise AssertionError(op)
 
     def test_every_corpus_case_matches_the_generator_validator(self):
-        candidate_obj = catalog_release.validate_candidate(catalog_release.canonical_sorted_bytes(self.CORPUS["candidate"]))
-        candidate = catalog_release.canonical_bytes(candidate_obj)
         self.assertGreaterEqual(len(self.CORPUS["cases"]), 25)
         for case in self.CORPUS["cases"]:
             with self.subTest(case["name"]):
+                candidate_source = copy.deepcopy(self.CORPUS["candidate"])
+                self.apply(candidate_source, case.get("candidate_ops", []))
+                candidate_obj = catalog_release.validate_candidate(catalog_release.canonical_sorted_bytes(candidate_source))
+                candidate = catalog_release.canonical_bytes(candidate_obj)
                 feed = copy.deepcopy(self.CORPUS["feed"])
                 feed["candidate_catalog_sha256"] = catalog_release.sha256(candidate)
                 self.apply(feed, case["ops"])

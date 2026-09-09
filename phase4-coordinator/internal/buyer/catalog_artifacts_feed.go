@@ -177,9 +177,16 @@ func validateCatalogArtifactsFeed(raw []byte, _ string) (feedRelease, error) {
 	if !artifactFeedTimestampGrammar.MatchString(feed.GeneratedAt) {
 		return feedRelease{}, fmt.Errorf("generated_at must be RFC3339 at seconds precision with an explicit timezone")
 	}
-	release, err := validateFeedEnvelope(feed.Version, feed.PolicyVersion, feed.GeneratedAt, feed.Source, catalogArtifactsSource, len(feed.Models))
+	// SPEC-023 §3.7.3: `models` is an object with no non-empty rule (only each
+	// model's `artifacts` is non-empty); a release whose catalog has no
+	// listed/recommendable row publishes an empty map. The shared envelope
+	// check's row-count rule is for the v0.1 feeds, so it is not applied here.
+	release, err := validateFeedHeader(feed.Version, feed.PolicyVersion, feed.GeneratedAt, feed.Source, catalogArtifactsSource)
 	if err != nil {
 		return feedRelease{}, err
+	}
+	if feed.Models == nil {
+		return feedRelease{}, fmt.Errorf("models must be an object")
 	}
 	if feed.ReleaseID != feed.Version {
 		return feedRelease{}, fmt.Errorf("release_id must equal version")
