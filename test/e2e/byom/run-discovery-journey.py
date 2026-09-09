@@ -22,7 +22,8 @@ closed schemas -- a missing or unknown field fails the step. Nothing is stripped
 before hashing, so the digest the signed evidence binds to covers the CLI's
 complete closed envelope; the evidence contract's fail-closed scanner is
 imported and run over every one of them, and over every command's real stdout
-and stderr, `--version` included.
+and stderr. The closed-schema validation itself lives in the shared capture
+contract, so it covers hand-authored runs too, not only this driver's captures.
 
 Nothing here signs or promotes anything, and nothing is written into the
 repository: the captures and the manifest go to `--out`, which the operator
@@ -103,152 +104,6 @@ FALSE_OBSERVATIONS = (
     "weights_downloaded",
 )
 
-# --- Closed capture schemas (R2 MEDIUM) ------------------------------------
-#
-# Capture checks that a document is JSON, names the expected schema id, and is
-# redaction-clean. None of that proves the document is COMPLETE: a CLI that
-# stopped emitting `capabilities`, or emitted a mutation summary with one field
-# in it, would still pass. The signed evidence binds a digest of these
-# documents, so an incomplete one is a false conformance claim.
-#
-# Every set below is exact: a missing key and an unknown key both fail closed.
-# The field lists are the normative ones -- SPEC-046-R003 (discovery envelope,
-# candidate, provider_guidance), SPEC-046-R004 (capability object),
-# SPEC-046-R005 (evaluation envelope), SPEC-047-R002 (dry-run and status
-# envelopes) -- except the two the specs describe without enumerating field
-# names, `adapters[]` rows and the `model_catalog_economics.v1` row, which are
-# frozen here at the shape the CLI actually emits so a silent projection change
-# fails this gate.
-
-DISCOVERY_ENVELOPE_KEYS = frozenset({
-    "schema", "generated_at", "cli_version", "projection_sequence",
-    "adapters", "candidates", "warnings",
-})
-DISCOVERY_ADAPTER_KEYS = frozenset({
-    "runtime_source", "origin_class", "status", "warning_codes",
-})
-DISCOVERY_CANDIDATE_KEYS = frozenset({
-    "candidate_id", "runtime_source", "display_name", "served_model_ref",
-    "catalog_model_key", "identity_state", "locality", "estimated_gb",
-    "context_window_tokens", "capabilities", "readiness_state", "fit_state",
-    "evaluation_state", "admission_state", "admission_state_source",
-    "provider_guidance", "warning_codes",
-})
-# SPEC-046-R004, exactly.
-CAPABILITY_KEYS = frozenset({
-    "chat_completions", "streaming", "tool_call_passthrough",
-    "structured_output_passthrough", "json_mode", "usage_reporting",
-    "max_context_tokens", "quantization", "family", "runtime_version",
-})
-# SPEC-046-R003; SPEC-047-R002 requires the dry-run and status envelopes to
-# reuse this same object.
-PROVIDER_GUIDANCE_KEYS = frozenset({
-    "state_label_key", "state_meaning_key", "next_action",
-    "transition_reason_code", "earning_path_class",
-})
-EVALUATION_ENVELOPE_KEYS = frozenset({
-    "schema", "generated_at", "cli_version", "candidate_id", "runtime_source",
-    "served_model_ref", "catalog_model_key", "adapter_identity",
-    "health_result", "latency_ms", "tokens_per_second", "completion_tokens",
-    "output_bytes", "request_count", "usage_reporting_source",
-    "capability_results", "fit_estimate_source", "mutation_summary",
-    "diagnostic_hashes", "provider_guidance",
-    "offer_preconditions_appear_satisfied", "warnings",
-})
-EVALUATION_MUTATION_SUMMARY_KEYS = frozenset({
-    "production_config_mutated", "production_model_switched", "runtime_started",
-    "downloads_started", "temporary_files_created", "coordinator_state_mutated",
-})
-# SPEC-047-R002, exactly.
-OFFER_DRY_RUN_ENVELOPE_KEYS = frozenset({
-    "schema", "generated_at", "cli_version", "candidate_id", "served_model_ref",
-    "catalog_model_key", "would_submit", "likely_admission_state",
-    "likely_admission_state_source", "provider_guidance", "reason_code",
-    "warnings",
-})
-ADMISSION_STATUS_ENVELOPE_KEYS = frozenset({
-    "schema", "generated_at", "cli_version", "provider_id", "candidate_id",
-    "served_model_ref", "catalog_model_key", "admission_state",
-    "admission_state_source", "coordinator_event_id", "state_observed_at",
-    "provider_guidance", "allowed_next_states", "warnings",
-})
-CATALOG_ECONOMICS_ENVELOPE_KEYS = frozenset({
-    "schema", "generated_at", "projection_sequence", "source", "rows", "warnings",
-})
-CATALOG_ECONOMICS_ROW_KEYS = frozenset({
-    "model_key", "display_model_id", "served_model_id", "action_model_id",
-    "is_current", "runtime_state", "economics_state", "admission", "fit",
-    "estimated_gb", "weights_present_locally", "ready_provider_count",
-    "demand_rank", "demand_weight", "supply_deficit_score",
-    "prompt_rate_usd_per_million_tokens", "completion_rate_usd_per_million_tokens",
-    "provider_prompt_payout_usd_per_million_tokens",
-    "provider_completion_payout_usd_per_million_tokens", "provider_share_bps",
-    "rate_source", "rate_card_key", "rate_card_version", "rate_card_generated_at",
-    "adopt_recommendation", "prepare", "evaluate", "switch", "cleanup_staging",
-    "disabled_reason", "warning_codes",
-})
-CATALOG_ECONOMICS_ADMISSION_KEYS = frozenset({
-    "state", "source", "settlement_capable", "catalog_economics_permitted",
-    "coordinator_event_id", "state_observed_at",
-})
-
-
-def assert_exact_object(value, expected_keys, where):
-    """The captured document must carry exactly these fields -- no more, no less."""
-    assert_true(isinstance(value, dict), where + " must be a JSON object")
-    present = set(value)
-    missing = sorted(expected_keys - present)
-    unknown = sorted(present - expected_keys)
-    assert_true(not missing, where + " is missing required fields: " + ", ".join(missing))
-    assert_true(not unknown, where + " carries unknown fields: " + ", ".join(unknown))
-
-
-def validate_captured_document(name, document):
-    """Validate one captured CLI document against its complete closed schema.
-
-    Runs on every capture, so no incomplete or extended document can reach the
-    manifest whose digest the signed evidence binds.
-    """
-    schema = document.get("schema")
-    if schema == "provider_byom_discovery.v1":
-        assert_exact_object(document, DISCOVERY_ENVELOPE_KEYS, name)
-        for index, adapter in enumerate(document["adapters"]):
-            assert_exact_object(adapter, DISCOVERY_ADAPTER_KEYS, "%s adapters[%d]" % (name, index))
-        for index, candidate in enumerate(document["candidates"]):
-            where = "%s candidates[%d]" % (name, index)
-            assert_exact_object(candidate, DISCOVERY_CANDIDATE_KEYS, where)
-            assert_exact_object(candidate["capabilities"], CAPABILITY_KEYS, where + ".capabilities")
-            assert_exact_object(
-                candidate["provider_guidance"], PROVIDER_GUIDANCE_KEYS, where + ".provider_guidance"
-            )
-    elif schema == "provider_byom_evaluation.v1":
-        assert_exact_object(document, EVALUATION_ENVELOPE_KEYS, name)
-        assert_exact_object(
-            document["mutation_summary"], EVALUATION_MUTATION_SUMMARY_KEYS,
-            name + ".mutation_summary",
-        )
-        assert_exact_object(
-            document["provider_guidance"], PROVIDER_GUIDANCE_KEYS, name + ".provider_guidance"
-        )
-    elif schema == "model_admission_offer_dry_run.v1":
-        assert_exact_object(document, OFFER_DRY_RUN_ENVELOPE_KEYS, name)
-        assert_exact_object(
-            document["provider_guidance"], PROVIDER_GUIDANCE_KEYS, name + ".provider_guidance"
-        )
-    elif schema == "model_admission_status.v1":
-        assert_exact_object(document, ADMISSION_STATUS_ENVELOPE_KEYS, name)
-        assert_exact_object(
-            document["provider_guidance"], PROVIDER_GUIDANCE_KEYS, name + ".provider_guidance"
-        )
-    elif schema == "model_catalog_economics.v1":
-        assert_exact_object(document, CATALOG_ECONOMICS_ENVELOPE_KEYS, name)
-        for index, row in enumerate(document["rows"]):
-            where = "%s rows[%d]" % (name, index)
-            assert_exact_object(row, CATALOG_ECONOMICS_ROW_KEYS, where)
-            assert_exact_object(row["admission"], CATALOG_ECONOMICS_ADMISSION_KEYS, where + ".admission")
-    else:
-        raise HarnessFailure("captured document %s has an unvalidated schema: %r" % (name, schema))
-
 
 class HarnessFailure(Exception):
     pass
@@ -256,6 +111,42 @@ class HarnessFailure(Exception):
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3] / "scripts"))
 import byom_journey_evidence as evidence_contract  # noqa: E402
+
+
+# --- Closed capture schemas (R2 MEDIUM, moved to the contract in R3) --------
+#
+# Capture checks that a document is JSON, names the expected schema id, and is
+# redaction-clean. None of that proves the document is COMPLETE: a CLI that
+# stopped emitting `capabilities`, or emitted a mutation summary with one field
+# in it, would still pass. The signed evidence binds a digest of these
+# documents, so an incomplete one is a false conformance claim.
+#
+# The closed key sets and the validator now live in `byom_journey_evidence.py`
+# and run inside `_digest_document`, so they cover every capture that reaches
+# evidence -- this driver's and the hand-authored physical/admission runs' alike
+# (R3 MEDIUM). This driver keeps calling them at capture time so a bad document
+# fails the step that produced it instead of the pipeline three commands later.
+
+
+def assert_exact_object(value, expected_keys, where):
+    """Contract's exact-key check, reported as a step failure.
+
+    Steps 03 and 07 assert over one closed object each (the SPEC-046-R004
+    capability object, the SPEC-046-R005 mutation summary), so they use the same
+    key sets the capture contract enforces rather than a second copy.
+    """
+    try:
+        evidence_contract.assert_exact_object(value, expected_keys, where)
+    except evidence_contract.BYOMEvidenceError as exc:
+        raise HarnessFailure(str(exc))
+
+
+def validate_captured_document(name, document):
+    """Validate one captured CLI document against its complete closed schema."""
+    try:
+        evidence_contract.validate_captured_cli_document(document.get("schema"), document, name)
+    except evidence_contract.BYOMEvidenceError as exc:
+        raise HarnessFailure(str(exc))
 
 
 # Paths whose contents decide what an evidence run actually executed. In
@@ -279,11 +170,22 @@ EVIDENCE_SOURCE_PATHS = (
 # the runner's default toolchain, which writes a different (still valid)
 # `Package.resolved` than the committed one. That drift says nothing about what
 # this run executes, and HEAD's lockfile is already proven consistent by the
-# separate `phase3-binary (locked SwiftPM resolve)` CI job, so evidence mode
-# restores the committed bytes rather than refusing to run. Everything else in
+# separate `phase3-binary (locked SwiftPM resolve)` CI job. Everything else in
 # EVIDENCE_SOURCE_PATHS still fails closed, and the build below is locked to
 # this lockfile so it cannot rewrite it again.
+#
+# Restoring it is NOT unconditional (R3 MEDIUM): outside an ephemeral CI
+# checkout, a differing lockfile is the operator's own uncommitted work, and
+# `git checkout HEAD --` would destroy it with nothing to restore from. The rule
+# is in `restore_locked_package_resolved`.
 EVIDENCE_RESTORED_LOCKFILE = "phase3-binary/Package.resolved"
+
+# An ephemeral CI checkout is the only place a differing lockfile may be thrown
+# away: the checkout is created for the job and discarded with it, so nothing
+# uncommitted there can be work anyone wanted to keep. GitHub Actions sets both;
+# either alone is enough for other CI systems.
+CI_ENVIRONMENT_FLAGS = ("GITHUB_ACTIONS", "CI")
+CI_ENVIRONMENT_TRUE_VALUES = frozenset({"true", "1"})
 
 # Same lock the `phase3-binary (locked SwiftPM resolve)` CI job applies through
 # xcodebuild's `-onlyUsePackageVersionsFromResolvedFile`
@@ -303,18 +205,64 @@ def repo_root():
     return pathlib.Path(__file__).resolve().parents[3]
 
 
-def restore_locked_package_resolved(root):
-    """Put the committed `Package.resolved` back before the cleanliness check.
+def in_ephemeral_ci_checkout(environ=None):
+    """True when this process runs in a throwaway CI checkout."""
+    environ = os.environ if environ is None else environ
+    return any(
+        environ.get(name, "").strip().lower() in CI_ENVIRONMENT_TRUE_VALUES
+        for name in CI_ENVIRONMENT_FLAGS
+    )
 
-    See EVIDENCE_RESTORED_LOCKFILE: the CI `swift test` step that runs before
-    this gate rewrites the lockfile, and that rewrite is not evidence about this
-    run. Restoring HEAD's bytes -- and then building locked to them -- is what
-    makes evidence mode order-independent in CI instead of failing on, or
-    silently absorbing, an earlier step's resolution.
+
+def restore_locked_package_resolved(root, environ=None):
+    """Reconcile `Package.resolved` with HEAD before the cleanliness check.
+
+    Three cases, and only one of them writes:
+
+    * The working-tree lockfile already equals HEAD -- nothing to do.
+    * It differs, this is an ephemeral CI checkout, and nothing is staged for
+      it: the difference is the earlier `swift test` step's resolution under the
+      runner's default toolchain, so HEAD's bytes are restored with a notice.
+      HEAD's lockfile is separately proven by the `phase3-binary (locked SwiftPM
+      resolve)` job, and the build below is locked to it.
+    * Anything else -- a local run, or a CI run with the lockfile staged -- is
+      someone's uncommitted work. `git checkout HEAD --` would destroy it with
+      no copy anywhere, so the run REFUSES and says what to do instead (R3
+      MEDIUM).
     """
     lockfile = root / EVIDENCE_RESTORED_LOCKFILE
     if not lockfile.exists():
         return
+    committed = subprocess.run(
+        ["git", "show", "HEAD:" + EVIDENCE_RESTORED_LOCKFILE],
+        cwd=str(root),
+        capture_output=True,
+        check=True,
+    ).stdout
+    if lockfile.read_bytes() == committed:
+        return
+    staged = subprocess.run(
+        ["git", "diff", "--cached", "--quiet", "--", EVIDENCE_RESTORED_LOCKFILE],
+        cwd=str(root),
+        capture_output=True,
+    ).returncode != 0
+    assert_true(
+        in_ephemeral_ci_checkout(environ) and not staged,
+        "evidence mode will not discard your uncommitted %s. Commit it, or "
+        "restore it with `git checkout HEAD -- %s`, then re-run. (This run is "
+        "not an ephemeral CI checkout%s.)"
+        % (
+            EVIDENCE_RESTORED_LOCKFILE,
+            EVIDENCE_RESTORED_LOCKFILE,
+            " and the lockfile is staged" if staged else "",
+        ),
+    )
+    print(
+        "evidence mode: restoring HEAD's %s in this ephemeral CI checkout; the "
+        "difference is an earlier step's package resolution, and HEAD's "
+        "lockfile is proven by the locked SwiftPM resolve job"
+        % EVIDENCE_RESTORED_LOCKFILE
+    )
     subprocess.run(
         ["git", "checkout", "HEAD", "--", EVIDENCE_RESTORED_LOCKFILE],
         cwd=str(root),
@@ -561,7 +509,7 @@ class Runner:
         self.cwd = cwd
         self.transcript = []
 
-    def run_text(self, args, env=None):
+    def run_text(self, args, env=None, defer_hostname_scan=False):
         """Run one CLI command and return its stdout, scanned.
 
         EVERY command goes through here, including ones whose output is not JSON
@@ -569,6 +517,13 @@ class Runner:
         real stdout and stderr is true rather than nearly true. Both streams also
         enter `transcript`, which the step-08 review re-scans for this run's
         origins, paths, prompt, and completion marker.
+
+        By default stdout gets the FULL plaintext scan, hostname rule included.
+        `defer_hostname_scan` is set only by `run()`, whose stdout is a JSON
+        document carrying the SPEC-046-R003 localization keys -- DNS-shaped by
+        coincidence -- and which immediately runs the structured document scan
+        that decides those keys field by field. Plain-text output such as
+        `--version` has no such follow-up, so it may not skip the rule (R3 LOW).
         """
         label = " ".join(args[:3])
         completed = subprocess.run(
@@ -589,10 +544,13 @@ class Runner:
         # unexpected forbidden-shaped value fails the run even though it is not
         # in the run-specific `forbidden` list. The scanner functions are the
         # evidence contract's own, imported rather than reimplemented.
+        stdout_scan = (
+            evidence_contract.reject_unredacted_text_except_hostname
+            if defer_hostname_scan
+            else evidence_contract.reject_unredacted_text
+        )
         try:
-            evidence_contract.reject_unredacted_text_except_hostname(
-                completed.stdout, "cli stdout for " + label
-            )
+            stdout_scan(completed.stdout, "cli stdout for " + label)
             evidence_contract.reject_unredacted_text(
                 completed.stderr, "cli stderr for " + label
             )
@@ -606,7 +564,7 @@ class Runner:
         10 runs `models admission status` with no coordinator configured at
         all."""
         label = " ".join(args[:3])
-        stdout = self.run_text(args, env=env)
+        stdout = self.run_text(args, env=env, defer_hostname_scan=True)
         try:
             document = json.loads(stdout)
         except json.JSONDecodeError as exc:
@@ -940,7 +898,10 @@ def main():
         # absent or partial object would otherwise make "no asserted
         # capability" vacuously true (R2).
         capabilities = opaque_candidate.get("capabilities")
-        assert_exact_object(capabilities, CAPABILITY_KEYS, "opaque candidate capabilities")
+        assert_exact_object(
+            capabilities, evidence_contract.CAPABILITY_KEYS,
+            "opaque candidate capabilities",
+        )
         assert_true(
             all(value is None for value in capabilities.values()),
             "opaque candidate asserted an unevaluated capability",
@@ -1066,7 +1027,8 @@ def main():
         # dropped a mutation field would have passed (R2).
         mutations = evaluation.get("mutation_summary")
         assert_exact_object(
-            mutations, EVALUATION_MUTATION_SUMMARY_KEYS, "evaluation mutation_summary"
+            mutations, evidence_contract.EVALUATION_MUTATION_SUMMARY_KEYS,
+            "evaluation mutation_summary",
         )
         assert_true(
             all(value is False for value in mutations.values()),

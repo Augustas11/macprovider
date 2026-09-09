@@ -1,8 +1,47 @@
 {
+  "adapter_identity": "mlx_cache",
+  "candidate_id": "byom_fixture_candidate",
+  "capability_results": {
+    "chat_completions": "passed",
+    "json_mode": "not_supported",
+    "streaming": "passed",
+    "structured_output_passthrough": "not_supported",
+    "tool_call_passthrough": "not_supported",
+    "usage_reporting": "passed"
+  },
+  "catalog_model_key": null,
+  "cli_version": "0.0.0-fixture",
+  "completion_tokens": 4,
+  "diagnostic_hashes": {
+    "completion_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "prompt_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  "fit_estimate_source": "runtime_reported",
+  "generated_at": "2026-09-08T00:00:00Z",
   "health_result": "passed",
+  "latency_ms": 12,
   "mutation_summary": {
     "coordinator_state_mutated": false,
-    "production_config_mutated": false
+    "downloads_started": false,
+    "production_config_mutated": false,
+    "production_model_switched": false,
+    "runtime_started": false,
+    "temporary_files_created": false
   },
-  "schema": "provider_byom_evaluation.v1"
+  "offer_preconditions_appear_satisfied": true,
+  "output_bytes": 128,
+  "provider_guidance": {
+    "earning_path_class": "not_earning_yet_catalog_or_receipt_path_exists",
+    "next_action": "submit_offer",
+    "state_label_key": "byom.local.offerable",
+    "state_meaning_key": "byom.local.offerable_not_earning",
+    "transition_reason_code": "evaluation_passed"
+  },
+  "request_count": 1,
+  "runtime_source": "mlx_cache",
+  "schema": "provider_byom_evaluation.v1",
+  "served_model_ref": "mlx-community/Tiny-1B-4bit",
+  "tokens_per_second": 41.5,
+  "usage_reporting_source": "runtime_reported",
+  "warnings": []
 }

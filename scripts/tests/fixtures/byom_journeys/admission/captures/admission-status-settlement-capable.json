@@ -1,9 +1,25 @@
 {
   "admission_state": "settlement_capable",
   "admission_state_source": "coordinator",
-  "catalog_model_key": null,
+  "allowed_next_states": [
+    "revoked",
+    "withdrawn"
+  ],
+  "candidate_id": "byom_fixture_candidate",
+  "catalog_model_key": "qwen3-8b",
+  "cli_version": "0.0.0-fixture",
+  "coordinator_event_id": "admission_event_fixture",
+  "generated_at": "2026-09-08T00:00:00Z",
   "provider_guidance": {
-    "earning_path_class": "settlement_capable"
+    "earning_path_class": "settlement_capable",
+    "next_action": "serve_traffic",
+    "state_label_key": "byom.admission.settlement_capable",
+    "state_meaning_key": "byom.admission.earning",
+    "transition_reason_code": "route_snapshot_verified"
   },
-  "schema": "model_admission_status.v1"
+  "provider_id": "provider-byom-fixture",
+  "schema": "model_admission_status.v1",
+  "served_model_ref": "mlx-community/Tiny-1B-4bit",
+  "state_observed_at": "2026-09-08T00:00:00Z",
+  "warnings": []
 }

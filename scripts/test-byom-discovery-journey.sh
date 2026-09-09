@@ -18,37 +18,46 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
-EVIDENCE="journeys/evidence/provider-byom-discovery-ci-${STAMP}.redacted.json"
-OUT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/byom-discovery-journey-XXXXXX")"
-UNSIGNED="${OUT_DIR}/journey-result.unsigned.json"
-INDEX="${OUT_DIR}/git-index"
+# Every artifact this gate writes lives under a directory `mktemp -d` created
+# for this invocation, so two runs -- even in the same second -- can never name
+# the same path, and cleanup can never delete another run's artifact. A
+# timestamped filename plus a "refuse to overwrite" check could not promise
+# either: the trap that ran on the refusal deleted the file it had just refused
+# to touch (R3 MEDIUM). The evidence directory has to stay inside
+# `journeys/evidence/` and keep the journey's prefix, because the capture
+# contract only accepts `journeys/evidence/provider-byom-discovery-*.redacted.json`
+# and the builder verifies the bytes against a commit that contains them.
+EVIDENCE_DIR=""
+OUT_DIR=""
 
 cleanup() {
-  rm -f "$EVIDENCE"
-  rm -rf "$OUT_DIR"
+  # Only ever remove what this invocation created. Both variables are set from
+  # a successful `mktemp -d`, so an empty one means the directory is not ours.
+  [ -n "$EVIDENCE_DIR" ] && rm -rf "$EVIDENCE_DIR"
+  [ -n "$OUT_DIR" ] && rm -rf "$OUT_DIR"
+  return 0
 }
 trap cleanup EXIT
 
-if [ -e "$EVIDENCE" ]; then
-  echo "test-byom-discovery-journey: refusing to overwrite $EVIDENCE" >&2
-  exit 1
-fi
+EVIDENCE_DIR="$(mktemp -d "journeys/evidence/provider-byom-discovery-ci-XXXXXX")"
+OUT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/byom-discovery-journey-XXXXXX")"
+EVIDENCE="${EVIDENCE_DIR}/run.redacted.json"
+UNSIGNED="${OUT_DIR}/journey-result.unsigned.json"
+INDEX="${OUT_DIR}/git-index"
 
 REQUIREMENT_IDS="SPEC-046-R001,SPEC-046-R002,SPEC-046-R003,SPEC-046-R004,SPEC-046-R005,SPEC-046-R006,SPEC-046-R007,SPEC-046-R008"
 # The evidence artifact records an operator identity as a SHA-256 fingerprint.
 # This gate is not an operator run, so it uses a fixed, non-identifying label.
 OPERATOR_FINGERPRINT="$(printf 'ci-hermetic-discovery-journey' | shasum -a 256 | cut -d' ' -f1)"
 
-# Restore the committed lockfile before the driver's cleanliness check. The CI
-# `swift test` step that runs before this gate resolves the package graph under
-# the runner's default toolchain and rewrites phase3-binary/Package.resolved;
-# that rewrite is an artifact of step ordering, not a fact about this run, and
-# HEAD's lockfile is separately proven consistent by the `phase3-binary (locked
-# SwiftPM resolve)` job. Restoring it here (the driver does the same in
-# --evidence mode) is what makes this gate order-independent instead of red
-# whenever it runs after the Swift tests.
-git checkout HEAD -- phase3-binary/Package.resolved
+# The lockfile rule is the driver's, and only the driver's: unconditionally
+# restoring phase3-binary/Package.resolved from HEAD here destroyed local
+# uncommitted lockfile work with no way to get it back (R3 MEDIUM). In
+# `--evidence` mode the driver restores HEAD's lockfile only in an ephemeral CI
+# checkout, where the drift is the earlier `swift test` step's resolution and
+# HEAD's lockfile is separately proven by the `phase3-binary (locked SwiftPM
+# resolve)` job; on a developer machine it refuses to run instead, and says to
+# commit or restore the file.
 
 # `--evidence` binds the run to the commit: the driver refuses a
 # MACPROVIDER_CLI_BINARY override, requires a clean tree -- tracked AND

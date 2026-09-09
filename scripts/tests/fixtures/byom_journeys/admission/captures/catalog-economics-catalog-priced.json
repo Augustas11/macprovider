@@ -1,13 +1,49 @@
 {
+  "generated_at": "2026-09-08T00:00:00Z",
+  "projection_sequence": 1,
   "rows": [
     {
+      "action_model_id": "qwen3-8b",
       "admission": {
         "catalog_economics_permitted": true,
-        "settlement_capable": false
+        "coordinator_event_id": "admission_event_fixture",
+        "settlement_capable": false,
+        "source": "coordinator",
+        "state": "settlement_capable",
+        "state_observed_at": "2026-09-08T00:00:00Z"
       },
+      "adopt_recommendation": "consider",
+      "cleanup_staging": false,
+      "completion_rate_usd_per_million_tokens": 0.6,
+      "demand_rank": 2,
+      "demand_weight": 0.25,
+      "disabled_reason": null,
+      "display_model_id": "qwen3-8b",
       "economics_state": "permitted",
-      "rate_source": "live_signed"
+      "estimated_gb": 5.6,
+      "evaluate": true,
+      "fit": "fits",
+      "is_current": false,
+      "model_key": "qwen3-8b",
+      "prepare": true,
+      "prompt_rate_usd_per_million_tokens": 0.2,
+      "provider_completion_payout_usd_per_million_tokens": 0.42,
+      "provider_prompt_payout_usd_per_million_tokens": 0.14,
+      "provider_share_bps": 7000,
+      "rate_card_generated_at": "2026-09-01T00:00:00Z",
+      "rate_card_key": "malibu-rate-card-v1",
+      "rate_card_version": "2026-09-01",
+      "rate_source": "live_signed",
+      "ready_provider_count": 3,
+      "runtime_state": "ready",
+      "served_model_id": "qwen3-8b",
+      "supply_deficit_score": 0.1,
+      "switch": false,
+      "warning_codes": [],
+      "weights_present_locally": true
     }
   ],
-  "schema": "model_catalog_economics.v1"
+  "schema": "model_catalog_economics.v1",
+  "source": "live_signed",
+  "warnings": []
 }

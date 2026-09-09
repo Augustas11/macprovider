@@ -547,6 +547,168 @@ def load_mapped_pending_requirements(root: Path, contract: JourneyContract) -> s
     return mapped
 
 
+# --- Closed CLI-document schemas -------------------------------------------
+#
+# A captured CLI document is the thing the signed evidence digests, so the
+# digest is only a conformance claim if the document is COMPLETE. Redaction
+# alone is not enough: a discovery envelope that stopped emitting `capabilities`,
+# or an evaluation whose `mutation_summary` carried one field, is redaction-clean
+# and still a false claim. These key sets are therefore enforced here, at the
+# capture trust boundary (`_digest_document`), not in whichever harness produced
+# the document -- hand-authored physical and admission runs go through the same
+# gate as the hermetic discovery driver.
+#
+# Every set is exact: a missing key and an unknown key both fail closed. The
+# field lists are the normative ones -- SPEC-046-R003 (discovery envelope,
+# candidate, provider_guidance), SPEC-046-R004 (capability object), SPEC-046-R005
+# (evaluation envelope), SPEC-047-R002 (dry-run, status, and withdraw envelopes)
+# -- except the two the specs describe without enumerating field names,
+# `adapters[]` rows and the `model_catalog_economics.v1` row, which are frozen
+# here at the shape the CLI actually emits so a silent projection change fails
+# closed rather than passing unnoticed.
+
+DISCOVERY_ENVELOPE_KEYS = frozenset({
+    "schema", "generated_at", "cli_version", "projection_sequence",
+    "adapters", "candidates", "warnings",
+})
+DISCOVERY_ADAPTER_KEYS = frozenset({
+    "runtime_source", "origin_class", "status", "warning_codes",
+})
+DISCOVERY_CANDIDATE_KEYS = frozenset({
+    "candidate_id", "runtime_source", "display_name", "served_model_ref",
+    "catalog_model_key", "identity_state", "locality", "estimated_gb",
+    "context_window_tokens", "capabilities", "readiness_state", "fit_state",
+    "evaluation_state", "admission_state", "admission_state_source",
+    "provider_guidance", "warning_codes",
+})
+# SPEC-046-R004, exactly.
+CAPABILITY_KEYS = frozenset({
+    "chat_completions", "streaming", "tool_call_passthrough",
+    "structured_output_passthrough", "json_mode", "usage_reporting",
+    "max_context_tokens", "quantization", "family", "runtime_version",
+})
+# SPEC-046-R003; SPEC-047-R002 requires the dry-run, status, and withdraw
+# envelopes to reuse this same object.
+PROVIDER_GUIDANCE_KEYS = frozenset({
+    "state_label_key", "state_meaning_key", "next_action",
+    "transition_reason_code", "earning_path_class",
+})
+EVALUATION_ENVELOPE_KEYS = frozenset({
+    "schema", "generated_at", "cli_version", "candidate_id", "runtime_source",
+    "served_model_ref", "catalog_model_key", "adapter_identity",
+    "health_result", "latency_ms", "tokens_per_second", "completion_tokens",
+    "output_bytes", "request_count", "usage_reporting_source",
+    "capability_results", "fit_estimate_source", "mutation_summary",
+    "diagnostic_hashes", "provider_guidance",
+    "offer_preconditions_appear_satisfied", "warnings",
+})
+EVALUATION_MUTATION_SUMMARY_KEYS = frozenset({
+    "production_config_mutated", "production_model_switched", "runtime_started",
+    "downloads_started", "temporary_files_created", "coordinator_state_mutated",
+})
+# SPEC-047-R002, exactly.
+OFFER_DRY_RUN_ENVELOPE_KEYS = frozenset({
+    "schema", "generated_at", "cli_version", "candidate_id", "served_model_ref",
+    "catalog_model_key", "would_submit", "likely_admission_state",
+    "likely_admission_state_source", "provider_guidance", "reason_code",
+    "warnings",
+})
+ADMISSION_STATUS_ENVELOPE_KEYS = frozenset({
+    "schema", "generated_at", "cli_version", "provider_id", "candidate_id",
+    "served_model_ref", "catalog_model_key", "admission_state",
+    "admission_state_source", "coordinator_event_id", "state_observed_at",
+    "provider_guidance", "allowed_next_states", "warnings",
+})
+# SPEC-047-R002 withdrawal response; mirrors the CLI's own strict decoder
+# (`BYOMAdmissionWithdrawWire.topLevelKeys`).
+ADMISSION_WITHDRAW_ENVELOPE_KEYS = frozenset({
+    "schema", "generated_at", "cli_version", "provider_id", "candidate_id",
+    "served_model_ref", "catalog_model_key", "idempotency_key", "reason_code",
+    "previous_admission_state", "coordinator_event_id", "accepted_at",
+    "resulting_admission_state", "provider_guidance", "warnings",
+})
+CATALOG_ECONOMICS_ENVELOPE_KEYS = frozenset({
+    "schema", "generated_at", "projection_sequence", "source", "rows", "warnings",
+})
+CATALOG_ECONOMICS_ROW_KEYS = frozenset({
+    "model_key", "display_model_id", "served_model_id", "action_model_id",
+    "is_current", "runtime_state", "economics_state", "admission", "fit",
+    "estimated_gb", "weights_present_locally", "ready_provider_count",
+    "demand_rank", "demand_weight", "supply_deficit_score",
+    "prompt_rate_usd_per_million_tokens", "completion_rate_usd_per_million_tokens",
+    "provider_prompt_payout_usd_per_million_tokens",
+    "provider_completion_payout_usd_per_million_tokens", "provider_share_bps",
+    "rate_source", "rate_card_key", "rate_card_version", "rate_card_generated_at",
+    "adopt_recommendation", "prepare", "evaluate", "switch", "cleanup_staging",
+    "disabled_reason", "warning_codes",
+})
+CATALOG_ECONOMICS_ADMISSION_KEYS = frozenset({
+    "state", "source", "settlement_capable", "catalog_economics_permitted",
+    "coordinator_event_id", "state_observed_at",
+})
+
+
+def assert_exact_object(value: Any, expected_keys: frozenset[str], where: str) -> dict[str, Any]:
+    """The captured document must carry exactly these fields -- no more, no less."""
+    if not isinstance(value, dict):
+        fail(f"{where} must be a JSON object")
+    present = set(value)
+    missing = sorted(expected_keys - present)
+    if missing:
+        fail(f"{where} is missing required fields: " + ", ".join(missing))
+    unknown = sorted(present - expected_keys)
+    if unknown:
+        fail(f"{where} carries unknown fields: " + ", ".join(unknown))
+    return value
+
+
+def _validate_guidance(document: dict[str, Any], where: str) -> None:
+    assert_exact_object(document["provider_guidance"], PROVIDER_GUIDANCE_KEYS, where + ".provider_guidance")
+
+
+def validate_captured_cli_document(schema: Any, parsed: Any, location: str = "$") -> None:
+    """Validate one captured CLI document against its complete closed schema.
+
+    Invoked from `_digest_document`, so EVERY document that reaches evidence --
+    driver-produced or hand-authored -- is complete before its bytes are hashed.
+    An unrecognised schema fails closed: a document nobody enumerated cannot be
+    known to be complete, so it may not back a signed step.
+    """
+    if schema == "provider_byom_discovery.v1":
+        assert_exact_object(parsed, DISCOVERY_ENVELOPE_KEYS, location)
+        for index, adapter in enumerate(require_list(parsed["adapters"], location + ".adapters")):
+            assert_exact_object(adapter, DISCOVERY_ADAPTER_KEYS, f"{location} adapters[{index}]")
+        for index, candidate in enumerate(require_list(parsed["candidates"], location + ".candidates")):
+            where = f"{location} candidates[{index}]"
+            assert_exact_object(candidate, DISCOVERY_CANDIDATE_KEYS, where)
+            assert_exact_object(candidate["capabilities"], CAPABILITY_KEYS, where + ".capabilities")
+            _validate_guidance(candidate, where)
+    elif schema == "provider_byom_evaluation.v1":
+        assert_exact_object(parsed, EVALUATION_ENVELOPE_KEYS, location)
+        assert_exact_object(
+            parsed["mutation_summary"], EVALUATION_MUTATION_SUMMARY_KEYS,
+            location + ".mutation_summary",
+        )
+        _validate_guidance(parsed, location)
+    elif schema == "model_admission_offer_dry_run.v1":
+        assert_exact_object(parsed, OFFER_DRY_RUN_ENVELOPE_KEYS, location)
+        _validate_guidance(parsed, location)
+    elif schema == "model_admission_status.v1":
+        assert_exact_object(parsed, ADMISSION_STATUS_ENVELOPE_KEYS, location)
+        _validate_guidance(parsed, location)
+    elif schema == "model_admission_withdraw.v1":
+        assert_exact_object(parsed, ADMISSION_WITHDRAW_ENVELOPE_KEYS, location)
+        _validate_guidance(parsed, location)
+    elif schema == "model_catalog_economics.v1":
+        assert_exact_object(parsed, CATALOG_ECONOMICS_ENVELOPE_KEYS, location)
+        for index, row in enumerate(require_list(parsed["rows"], location + ".rows")):
+            where = f"{location} rows[{index}]"
+            assert_exact_object(row, CATALOG_ECONOMICS_ROW_KEYS, where)
+            assert_exact_object(row["admission"], CATALOG_ECONOMICS_ADMISSION_KEYS, where + ".admission")
+    else:
+        fail(f"captured document {location} has an unvalidated schema: {schema!r}")
+
+
 def _digest_document(manifest_dir: Path, entry: Any, step_id: str, index: int) -> dict[str, Any]:
     location = f"{step_id}.documents[{index}]"
     document = require_object(entry, location)
@@ -612,6 +774,12 @@ def _digest_document(manifest_dir: Path, entry: Any, step_id: str, index: int) -
     # hostname rule -- the structural walk owns that one -- so material sitting
     # outside any decoded string still fails closed.
     reject_unredacted_text_except_hostname(decoded, f"{location}.path")
+    # Completeness is the other half of the trust claim. A redaction-clean but
+    # schema-incomplete document would let a signed step assert conformance the
+    # bytes under the digest do not carry, so the closed key sets are checked
+    # here -- the one boundary every capture crosses -- rather than in whichever
+    # harness produced the document.
+    validate_captured_cli_document(schema, parsed, f"{location}.document")
     return {
         "id": document_id,
         "schema": schema,

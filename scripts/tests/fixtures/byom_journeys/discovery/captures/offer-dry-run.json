@@ -1,6 +1,20 @@
 {
+  "candidate_id": "byom_fixture_candidate",
+  "catalog_model_key": null,
+  "cli_version": "0.0.0-fixture",
+  "generated_at": "2026-09-08T00:00:00Z",
   "likely_admission_state": "offerable",
   "likely_admission_state_source": "local_default",
+  "provider_guidance": {
+    "earning_path_class": "not_earning_yet_catalog_or_receipt_path_exists",
+    "next_action": "submit_offer",
+    "state_label_key": "byom.local.offerable",
+    "state_meaning_key": "byom.local.offerable_not_earning",
+    "transition_reason_code": "evaluation_passed"
+  },
+  "reason_code": null,
   "schema": "model_admission_offer_dry_run.v1",
+  "served_model_ref": "mlx-community/Tiny-1B-4bit",
+  "warnings": [],
   "would_submit": true
 }

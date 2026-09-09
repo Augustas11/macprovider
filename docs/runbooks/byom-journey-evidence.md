@@ -138,25 +138,39 @@ applying every credential, URL, path, IP, and localhost check to the value.
 Anything else at those paths fails closed, and the same string in any other
 field is still just a hostname. The driver runs that same scan — the capture
 tool's own functions, imported not reimplemented — over every command's real
-stdout and stderr, `--version` included, and over every document before writing
-it, so it cannot emit a manifest that step 3 would reject.
+stdout and stderr, and over every document before writing it, so it cannot emit
+a manifest that step 3 would reject. The localization-key exemption applies only
+to stdout that is about to receive the structured document scan: plain-text
+output such as `--version` gets the full plaintext scan, hostname rule included.
 
 Every captured document is also validated against its **complete** closed
-schema before it is written: the SPEC-046-R003 discovery envelope and candidate
-fields, the exact SPEC-046-R004 capability object, the SPEC-046-R005 evaluation
-envelope and mutation summary, and the SPEC-047-R002 dry-run and status
-envelopes. A missing field and an unknown field both fail the step. Redaction-
-clean is not the same as complete, and the signed evidence binds a digest of
-these documents.
+schema, and that validation lives in the shared capture contract
+(`scripts/byom_journey_evidence.py`), invoked from the document-digest step. It
+therefore covers every capture that reaches evidence — the hermetic driver's and
+a hand-authored physical or admission run's alike — not only the documents this
+driver produced. The field sets are the SPEC-046-R003 discovery envelope and
+candidate fields, the exact SPEC-046-R004 capability object, the SPEC-046-R005
+evaluation envelope and mutation summary, and the SPEC-047-R002 dry-run, status,
+and withdraw envelopes; `adapters[]` rows and `model_catalog_economics.v1` rows,
+which the specs describe without enumerating field names, are frozen at the
+shape the CLI emits. A missing field, an unknown field, and an unenumerated
+schema all fail closed. Redaction-clean is not the same as complete, and the
+signed evidence binds a digest of these documents.
 
 `--evidence` binds the run to the commit the evidence names:
 
 - the `MACPROVIDER_CLI_BINARY` override is refused;
-- `phase3-binary/Package.resolved` is restored from `HEAD` first, because the
-  CI `swift test` step that runs before this gate rewrites it under the
-  runner's default toolchain — that drift is step ordering, not a fact about
-  this run, and `HEAD`'s lockfile is separately proven consistent by the
-  `phase3-binary (locked SwiftPM resolve)` job;
+- `phase3-binary/Package.resolved` is reconciled with `HEAD` first, and only
+  ever in one direction. If the working-tree lockfile already matches `HEAD`,
+  nothing happens. If it differs **in an ephemeral CI checkout** (`GITHUB_ACTIONS`
+  or `CI` set, and nothing staged for the file), `HEAD`'s bytes are restored with
+  a logged notice: that drift is the earlier `swift test` step resolving the
+  graph under the runner's default toolchain, and `HEAD`'s lockfile is separately
+  proven consistent by the `phase3-binary (locked SwiftPM resolve)` job.
+  Anywhere else — a developer machine, or a CI run with the lockfile staged — a
+  differing lockfile is uncommitted work, so the run **refuses** rather than
+  discarding it; commit the file or restore it yourself and re-run. The CI
+  wrapper does no lockfile surgery of its own;
 - the tree must then be clean — **tracked and untracked** — across
   `phase3-binary/Sources`, `phase3-binary/Tests`, `phase3-binary/Package.swift`,
   `phase3-binary/Package.resolved`, `scripts/`, and `test/e2e/byom/`. Untracked

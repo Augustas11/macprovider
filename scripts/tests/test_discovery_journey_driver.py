@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -84,7 +85,7 @@ DISCOVERY_DOCUMENT = {
             "locality": "opaque_local_endpoint",
             "estimated_gb": None,
             "context_window_tokens": None,
-            "capabilities": {key: None for key in sorted(driver.CAPABILITY_KEYS)},
+            "capabilities": {key: None for key in sorted(evidence.CAPABILITY_KEYS)},
             "readiness_state": "ready",
             "fit_state": "unknown",
             "evaluation_state": "not_evaluated",
@@ -114,7 +115,7 @@ EVALUATION_DOCUMENT = {
     "usage_reporting_source": "runtime_reported",
     "capability_results": {},
     "fit_estimate_source": "runtime_reported",
-    "mutation_summary": {key: False for key in sorted(driver.EVALUATION_MUTATION_SUMMARY_KEYS)},
+    "mutation_summary": {key: False for key in sorted(evidence.EVALUATION_MUTATION_SUMMARY_KEYS)},
     "diagnostic_hashes": {},
     "provider_guidance": dict(PROVIDER_GUIDANCE),
     "offer_preconditions_appear_satisfied": False,
@@ -377,6 +378,41 @@ class ManifestEmitterTests(unittest.TestCase):
         self.assertEqual(digested["schema"], "provider_byom_discovery.v1")
 
 
+class RunnerStdoutScanTests(unittest.TestCase):
+    """`run_text` owns the full plaintext scan; only `run()` defers the hostname
+    rule, and only because its very next act is the structured document scan
+    that decides the SPEC-046-R003 localization keys field by field (R3 LOW)."""
+
+    def setUp(self) -> None:
+        self.temp = Path(tempfile.mkdtemp(prefix="byom-runner-scan-"))
+        self.addCleanup(shutil.rmtree, self.temp, True)
+
+    def runner_for(self, stdout: str) -> "object":
+        fake = self.temp / "fake-cli"
+        fake.write_text("#!/bin/sh\ncat <<'EOF'\n%s\nEOF\n" % stdout, encoding="utf-8")
+        fake.chmod(0o755)
+        return driver.Runner(fake, dict(os.environ), self.temp)
+
+    def test_a_clean_version_string_passes(self) -> None:
+        self.assertEqual(self.runner_for("1.8.122").run_text(["--version"]).strip(), "1.8.122")
+
+    def test_a_dns_shaped_version_string_is_refused(self) -> None:
+        """`--version` has no follow-up structured scan, so it may not use the
+        hostname exemption the JSON path relies on."""
+        runner = self.runner_for("1.8.122 (coordinator.malibu.tech)")
+        with self.assertRaises(driver.HarnessFailure) as caught:
+            runner.run_text(["--version"])
+        self.assertIn("contains a hostname", str(caught.exception))
+
+    def test_the_json_path_still_accepts_localization_keys(self) -> None:
+        document = {
+            "schema": "provider_byom_discovery.v1",
+            "candidates": [{"provider_guidance": {"state_label_key": "byom.local.offerable"}}],
+        }
+        runner = self.runner_for(json.dumps(document))
+        self.assertEqual(runner.run(["models", "discover", "--json"]), document)
+
+
 class CapturedDocumentScanTests(unittest.TestCase):
     """The scanner rule the driver and capture both run over captured documents."""
 
@@ -542,17 +578,62 @@ class EvidenceModeBindingTests(unittest.TestCase):
         self.assertIn("after the build", str(caught.exception))
         self.assertIn("Package.resolved", str(caught.exception))
 
-    def test_the_committed_lockfile_is_restored_before_the_check(self) -> None:
-        """An earlier CI `swift test` step rewrites the lockfile; that drift is
-        step ordering, not a fact about this run, so evidence mode restores the
-        committed bytes instead of refusing to run."""
+    def test_a_clean_lockfile_passes_untouched(self) -> None:
+        """The common case writes nothing at all."""
         root = self.scratch_repo()
         lockfile = root / driver.EVIDENCE_RESTORED_LOCKFILE
-        original = lockfile.read_text(encoding="utf-8")
-        lockfile.write_text('{"pins": ["swift test rewrote this"]}\n', encoding="utf-8")
-        driver.restore_locked_package_resolved(root)
-        self.assertEqual(lockfile.read_text(encoding="utf-8"), original)
+        before = lockfile.read_bytes()
+        driver.restore_locked_package_resolved(root, environ={})
+        self.assertEqual(lockfile.read_bytes(), before)
         driver.require_clean_evidence_source(root, "before the build")
+
+    def test_the_committed_lockfile_is_restored_in_an_ephemeral_ci_checkout(self) -> None:
+        """An earlier CI `swift test` step rewrites the lockfile; that drift is
+        step ordering, not a fact about this run, and the checkout is thrown
+        away with the job, so evidence mode restores the committed bytes."""
+        for environ in ({"GITHUB_ACTIONS": "true"}, {"CI": "true"}):
+            with self.subTest(environ=environ):
+                root = self.scratch_repo()
+                lockfile = root / driver.EVIDENCE_RESTORED_LOCKFILE
+                original = lockfile.read_text(encoding="utf-8")
+                lockfile.write_text('{"pins": ["swift test rewrote this"]}\n', encoding="utf-8")
+                driver.restore_locked_package_resolved(root, environ=environ)
+                self.assertEqual(lockfile.read_text(encoding="utf-8"), original)
+                driver.require_clean_evidence_source(root, "before the build")
+
+    def test_a_dirty_lockfile_on_a_local_run_is_refused_and_left_alone(self) -> None:
+        """R3 MEDIUM: outside an ephemeral CI checkout the difference is the
+        operator's own uncommitted work, and `git checkout HEAD --` would
+        destroy it with no copy anywhere. Refuse, and do not touch the bytes."""
+        root = self.scratch_repo()
+        lockfile = root / driver.EVIDENCE_RESTORED_LOCKFILE
+        local_work = '{"pins": ["local work nobody committed"]}\n'
+        lockfile.write_text(local_work, encoding="utf-8")
+        with self.assertRaises(driver.HarnessFailure) as caught:
+            driver.restore_locked_package_resolved(root, environ={})
+        self.assertIn("will not discard your uncommitted", str(caught.exception))
+        self.assertEqual(lockfile.read_text(encoding="utf-8"), local_work)
+
+    def test_a_staged_lockfile_change_is_refused_even_in_ci(self) -> None:
+        """A staged lockfile is deliberate work, not an earlier step's
+        resolution, wherever the run happens."""
+        root = self.scratch_repo()
+        lockfile = root / driver.EVIDENCE_RESTORED_LOCKFILE
+        staged = '{"pins": ["staged on purpose"]}\n'
+        lockfile.write_text(staged, encoding="utf-8")
+        subprocess.run(
+            ["git", "add", "--", driver.EVIDENCE_RESTORED_LOCKFILE], cwd=root, check=True
+        )
+        with self.assertRaises(driver.HarnessFailure) as caught:
+            driver.restore_locked_package_resolved(root, environ={"GITHUB_ACTIONS": "true"})
+        self.assertIn("the lockfile is staged", str(caught.exception))
+        self.assertEqual(lockfile.read_text(encoding="utf-8"), staged)
+
+    def test_the_ci_flag_must_actually_say_true(self) -> None:
+        self.assertTrue(driver.in_ephemeral_ci_checkout({"CI": "true"}))
+        self.assertTrue(driver.in_ephemeral_ci_checkout({"GITHUB_ACTIONS": "1"}))
+        self.assertFalse(driver.in_ephemeral_ci_checkout({"CI": "false"}))
+        self.assertFalse(driver.in_ephemeral_ci_checkout({}))
 
     def test_evidence_builds_with_locked_resolution(self) -> None:
         """Locked resolution is what stops the build from rewriting the
@@ -565,9 +646,15 @@ class EvidenceModeBindingTests(unittest.TestCase):
         self.assertIn("-onlyUsePackageVersionsFromResolvedFile", verifier)
 
         commands: list[list[str]] = []
+        real_run = driver.subprocess.run
 
         def record(command, **kwargs):
             commands.append(list(command))
+            # Only the build is stubbed. `git` still runs for real, so the
+            # lockfile reconciliation sees the scratch repository's actual state
+            # instead of an empty mocked stdout.
+            if list(command)[:1] == ["git"]:
+                return real_run(command, **kwargs)
             return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
         root = self.scratch_repo()
@@ -583,14 +670,99 @@ class EvidenceModeBindingTests(unittest.TestCase):
     def test_the_ci_wrapper_runs_the_driver_in_evidence_mode(self) -> None:
         wrapper = (REPO_ROOT / "scripts" / "test-byom-discovery-journey.sh").read_text(encoding="utf-8")
         self.assertIn("run-discovery-journey.py --evidence --out", wrapper)
-        # The lockfile is restored before the driver's cleanliness check, and
-        # the commit is recorded only after the driver's post-build check has
+        # The commit is recorded only after the driver's post-build check has
         # passed -- so the wrapper cannot name a commit whose run drifted.
-        restore = wrapper.index("git checkout HEAD -- phase3-binary/Package.resolved")
         run = wrapper.index("run-discovery-journey.py --evidence --out")
         record = wrapper.index('SOURCE_SHA="$(git rev-parse HEAD)"')
-        self.assertLess(restore, run)
         self.assertLess(run, record)
+
+    def test_the_ci_wrapper_does_no_lockfile_surgery_of_its_own(self) -> None:
+        """R3 MEDIUM: the wrapper's unconditional restore destroyed local
+        uncommitted lockfile work. The rule lives in the driver, which refuses
+        outside an ephemeral CI checkout instead of overwriting."""
+        wrapper = (REPO_ROOT / "scripts" / "test-byom-discovery-journey.sh").read_text(encoding="utf-8")
+        self.assertNotIn("git checkout HEAD -- phase3-binary/Package.resolved", wrapper)
+
+    def test_the_ci_wrapper_only_removes_directories_it_created(self) -> None:
+        """R3 MEDIUM: the EXIT trap used to delete the pre-existing evidence
+        file it had just refused to overwrite. Both cleanup targets now come
+        from this invocation's own `mktemp -d`."""
+        wrapper = (REPO_ROOT / "scripts" / "test-byom-discovery-journey.sh").read_text(encoding="utf-8")
+        self.assertNotIn("refusing to overwrite", wrapper)
+        self.assertIn('EVIDENCE_DIR="$(mktemp -d "journeys/evidence/', wrapper)
+        self.assertIn('[ -n "$EVIDENCE_DIR" ] && rm -rf "$EVIDENCE_DIR"', wrapper)
+        # The trap is armed with both variables empty, so an early failure
+        # cannot make it remove anything.
+        empty = wrapper.index('EVIDENCE_DIR=""')
+        trap = wrapper.index("trap cleanup EXIT")
+        created = wrapper.index('EVIDENCE_DIR="$(mktemp -d')
+        self.assertLess(empty, trap)
+        self.assertLess(trap, created)
+
+
+class WrapperEvidenceArtifactTests(unittest.TestCase):
+    """The CI wrapper must only ever delete artifacts it created (R3 MEDIUM).
+
+    These run the wrapper's REAL artifact prologue -- everything from `set -e`
+    down to the last path assignment, taken verbatim out of the shipped script
+    -- inside a scratch tree, with a trailer standing in for the pipeline.
+    """
+
+    def setUp(self) -> None:
+        self.scratch = Path(tempfile.mkdtemp(prefix="byom-wrapper-artifacts-"))
+        self.addCleanup(shutil.rmtree, self.scratch, True)
+        self.evidence_dir = self.scratch / "journeys" / "evidence"
+        self.evidence_dir.mkdir(parents=True)
+        # A pre-existing artifact from some other run, in the directory this
+        # gate writes into.
+        self.collision = self.evidence_dir / "provider-byom-discovery-ci-collision.redacted.json"
+        self.collision_bytes = b'{"schema_version": "someone-elses-run"}\n'
+        self.collision.write_bytes(self.collision_bytes)
+
+    def run_prologue(self, trailer: str) -> subprocess.CompletedProcess:
+        wrapper = (REPO_ROOT / "scripts" / "test-byom-discovery-journey.sh").read_text(encoding="utf-8")
+        head, marker, _ = wrapper.partition("REQUIREMENT_IDS=")
+        self.assertTrue(marker, "wrapper prologue marker moved")
+        script = self.scratch / "scripts" / "test-byom-discovery-journey.sh"
+        script.parent.mkdir(parents=True, exist_ok=True)
+        script.write_text(head + trailer, encoding="utf-8")
+        return subprocess.run(["bash", str(script)], capture_output=True, text=True)
+
+    def test_a_failed_run_leaves_another_runs_artifact_byte_identical(self) -> None:
+        completed = self.run_prologue(
+            'echo "$EVIDENCE_DIR"\n'
+            'printf \'{"schema_version": "this run"}\\n\' > "$EVIDENCE"\n'
+            "exit 1\n"
+        )
+        self.assertEqual(completed.returncode, 1)
+        self.assertEqual(self.collision.read_bytes(), self.collision_bytes)
+        # `mktemp -d` runs on a repository-relative template, so the wrapper
+        # reports a path relative to the tree root it `cd`-ed into.
+        created = completed.stdout.strip()
+        self.assertTrue(
+            created.startswith("journeys/evidence/provider-byom-discovery-ci-"), created
+        )
+        self.assertFalse(
+            (self.scratch / created).exists(),
+            "the run's own evidence directory survived cleanup",
+        )
+
+    def test_an_early_failure_deletes_nothing(self) -> None:
+        """The trap is armed before the directories exist, so a failure between
+        `trap` and `mktemp` must not remove anyone's artifact."""
+        completed = self.run_prologue("exit 1\n")
+        self.assertEqual(completed.returncode, 1)
+        self.assertEqual(self.collision.read_bytes(), self.collision_bytes)
+        self.assertEqual(
+            sorted(path.name for path in self.evidence_dir.iterdir()), [self.collision.name]
+        )
+
+    def test_two_same_second_runs_cannot_collide(self) -> None:
+        directories = {
+            self.run_prologue('echo "$EVIDENCE_DIR"\nexit 1\n').stdout.strip()
+            for _ in range(4)
+        }
+        self.assertEqual(len(directories), 4)
 
 
 class ManifestPublicationModeTests(unittest.TestCase):
@@ -718,7 +890,7 @@ class ClosedCaptureSchemaTests(unittest.TestCase):
 
     def test_the_capability_field_set_is_the_spec_046_r004_list(self) -> None:
         self.assertEqual(
-            sorted(driver.CAPABILITY_KEYS),
+            sorted(evidence.CAPABILITY_KEYS),
             [
                 "chat_completions",
                 "family",

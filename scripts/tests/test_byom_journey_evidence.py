@@ -212,19 +212,24 @@ class BYOMJourneyCaptureTests(unittest.TestCase):
 
         self.assert_capture_fails("discovery", mutator, fragment)
 
+    def complete_discovery_document(self) -> dict:
+        """A COMPLETE closed discovery document, taken from the golden fixture.
+
+        `_digest_document` validates every capture against the full closed key
+        set, so a test that wants a capture ACCEPTED has to start from a
+        complete document; a hand-written partial one is exactly what the
+        contract now refuses.
+        """
+        return json.loads(
+            (FIXTURES / "discovery" / "captures" / "discover-mlx-cache.json").read_text(
+                encoding="utf-8"
+            )
+        )
+
     def guidance_document(self, **guidance) -> dict:
-        payload = {
-            "state_label_key": "byom.local.local_only",
-            "state_meaning_key": "byom.local.local_only_not_earning",
-            "next_action": "evaluate",
-            "transition_reason_code": "capability_unevaluated",
-            "earning_path_class": "local_inventory_only",
-        }
-        payload.update(guidance)
-        return {
-            "schema": "provider_byom_discovery.v1",
-            "candidates": [{"candidate_id": "byom_" + "a" * 52, "provider_guidance": payload}],
-        }
+        document = self.complete_discovery_document()
+        document["candidates"][0]["provider_guidance"].update(guidance)
+        return document
 
     # SPEC-046-R003 requires the two localization keys in every
     # `provider_guidance` object, so captured documents are archived whole and
@@ -284,6 +289,117 @@ class BYOMJourneyCaptureTests(unittest.TestCase):
             )
 
         self.assert_capture_fails("discovery", mutator, "must be a JSON object document")
+
+    # R3 MEDIUM: closed-schema validation lives at the capture boundary, so a
+    # document that is redaction-clean but INCOMPLETE (or carries a field the
+    # spec does not define) cannot be digested into evidence -- whoever produced
+    # it. These go through the real capture path, not the driver's copy.
+    def test_rejects_captured_document_missing_an_envelope_field(self) -> None:
+        document = self.complete_discovery_document()
+        del document["projection_sequence"]
+        self.assert_captured_document_rejected(
+            document, "is missing required fields: projection_sequence"
+        )
+
+    def test_rejects_captured_document_with_an_unknown_envelope_field(self) -> None:
+        document = self.complete_discovery_document()
+        document["settlement_capable"] = True
+        self.assert_captured_document_rejected(
+            document, "carries unknown fields: settlement_capable"
+        )
+
+    def test_rejects_captured_document_missing_a_nested_candidate_field(self) -> None:
+        document = self.complete_discovery_document()
+        del document["candidates"][0]["admission_state_source"]
+        self.assert_captured_document_rejected(
+            document, "candidates[0] is missing required fields: admission_state_source"
+        )
+
+    def test_rejects_captured_document_missing_a_nested_capability_field(self) -> None:
+        document = self.complete_discovery_document()
+        del document["candidates"][0]["capabilities"]["usage_reporting"]
+        self.assert_captured_document_rejected(
+            document, "capabilities is missing required fields: usage_reporting"
+        )
+
+    def test_rejects_captured_document_with_an_unknown_nested_capability_field(self) -> None:
+        document = self.complete_discovery_document()
+        document["candidates"][0]["capabilities"]["verified_throughput"] = True
+        self.assert_captured_document_rejected(
+            document, "capabilities carries unknown fields: verified_throughput"
+        )
+
+    def test_rejects_captured_document_missing_a_nested_guidance_field(self) -> None:
+        document = self.complete_discovery_document()
+        del document["candidates"][0]["provider_guidance"]["earning_path_class"]
+        self.assert_captured_document_rejected(
+            document, "provider_guidance is missing required fields: earning_path_class"
+        )
+
+    def test_rejects_captured_document_with_an_unknown_nested_guidance_field(self) -> None:
+        document = self.complete_discovery_document()
+        document["candidates"][0]["provider_guidance"]["settlement_hint"] = "yes"
+        self.assert_captured_document_rejected(
+            document, "provider_guidance carries unknown fields: settlement_hint"
+        )
+
+    def test_rejects_captured_document_missing_a_nested_adapter_field(self) -> None:
+        document = self.complete_discovery_document()
+        del document["adapters"][0]["warning_codes"]
+        self.assert_captured_document_rejected(
+            document, "adapters[0] is missing required fields: warning_codes"
+        )
+
+    def test_rejects_captured_evaluation_missing_a_mutation_summary_field(self) -> None:
+        def mutator(_manifest, root):
+            document = json.loads(
+                (root / "captures" / "evaluate-candidate.json").read_text(encoding="utf-8")
+            )
+            del document["mutation_summary"]["downloads_started"]
+            (root / "captures" / "evaluate-candidate.json").write_text(
+                json.dumps(document), encoding="utf-8"
+            )
+
+        self.assert_capture_fails(
+            "discovery", mutator, "mutation_summary is missing required fields: downloads_started"
+        )
+
+    def test_rejects_captured_withdrawal_missing_an_envelope_field(self) -> None:
+        def mutator(_manifest, root):
+            document = json.loads(
+                (root / "captures" / "admission-withdraw.json").read_text(encoding="utf-8")
+            )
+            del document["previous_admission_state"]
+            (root / "captures" / "admission-withdraw.json").write_text(
+                json.dumps(document), encoding="utf-8"
+            )
+
+        self.assert_capture_fails(
+            "admission", mutator, "is missing required fields: previous_admission_state"
+        )
+
+    def test_rejects_captured_economics_row_with_an_unknown_field(self) -> None:
+        def mutator(_manifest, root):
+            path = root / "captures" / "catalog-economics-catalog-priced.json"
+            document = json.loads(path.read_text(encoding="utf-8"))
+            document["rows"][0]["settlement_bonus_bps"] = 100
+            path.write_text(json.dumps(document), encoding="utf-8")
+
+        self.assert_capture_fails(
+            "admission", mutator, "rows[0] carries unknown fields: settlement_bonus_bps"
+        )
+
+    def test_rejects_a_captured_document_whose_schema_is_not_enumerated(self) -> None:
+        def mutator(manifest, root):
+            (root / "captures" / "discover-mlx-cache.json").write_text(
+                json.dumps({"schema": "models_browse.v1", "models": []}), encoding="utf-8"
+            )
+            for step in manifest["steps"]:
+                for document in step.get("documents", []):
+                    if document["path"] == "captures/discover-mlx-cache.json":
+                        document["schema"] = "models_browse.v1"
+
+        self.assert_capture_fails("discovery", mutator, "has an unvalidated schema")
 
     def test_rejects_captured_document_with_an_absolute_path(self) -> None:
         def mutator(manifest, root):
