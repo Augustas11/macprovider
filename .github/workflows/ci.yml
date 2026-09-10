@@ -390,7 +390,8 @@ jobs:
   swift-tests:
     name: phase3-binary (swift test)
     runs-on: macos-15
-    timeout-minutes: 25
+    # Cold Swift/app builds plus journey and recovery checks exceed 25 minutes.
+    timeout-minutes: 45
     needs: changes
     # Swift/xcodebuild only runs when Swift sources, build scripts, the
     # Makefile, or this workflow change. ci-required treats a skip here as a

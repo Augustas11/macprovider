@@ -158,6 +158,9 @@ func (s *Server) reconcileSettlementReservation(ctx context.Context, reservation
 		}
 		return "", err
 	}
+	if reservation.RelayBlind != nil {
+		return s.reconcileRelayBlindReservation(ctx, reservation)
+	}
 	candidate, candidateErr := s.store.LookupSettlementFallbackCandidate(ctx, reservation)
 	if errors.Is(candidateErr, storage.ErrNotFound) {
 		// Reconciliation without the coordinator-owned current-attempt binding
@@ -304,6 +307,7 @@ func (s *Server) settleObserveFallbackCandidate(ctx context.Context, candidate s
 		return fmt.Errorf("observe fallback reservation creation time and current internal request ID are required")
 	}
 	settlement := storage.ReservationSettlement{
+		RelayBlind:                   candidate.RelayBlind,
 		ExpectedReservationCreatedAt: candidate.ReservationCreatedAt,
 		AccountID:                    candidate.AccountID, RequestID: candidate.RequestID,
 		PromptTokens: candidate.PromptTokens, CompletionTokens: candidate.CompletionTokens,
@@ -312,6 +316,7 @@ func (s *Server) settleObserveFallbackCandidate(ctx context.Context, candidate s
 	}
 	if candidate.WalletSessionID != "" {
 		return s.store.FinalizeWalletSessionReservation(ctx, storage.WalletSessionReservationSettlement{
+			RelayBlind:                   candidate.RelayBlind,
 			ExpectedReservationCreatedAt: candidate.ReservationCreatedAt,
 			AccountID:                    candidate.AccountID, SessionID: candidate.WalletSessionID, RequestID: candidate.RequestID,
 			PromptTokens: settlement.PromptTokens, CompletionTokens: settlement.CompletionTokens,

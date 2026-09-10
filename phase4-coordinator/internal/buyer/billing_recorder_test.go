@@ -11,6 +11,26 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/requestlog"
 )
 
+func TestBoundedTokenPointerClampsUntrustedRelayBlindUsage(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		value int64
+		limit int64
+		want  int64
+	}{
+		{name: "negative", value: -1, limit: 32, want: 0},
+		{name: "within", value: 17, limit: 32, want: 17},
+		{name: "malicious_overreport", value: 1<<62 - 1, limit: 32, want: 32},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got := boundedTokenPointer(&test.value, test.limit)
+			if got == nil || *got != test.want {
+				t.Fatalf("bounded value=%v want=%d", got, test.want)
+			}
+		})
+	}
+}
+
 // TestRecordSettlementAttemptOutputNormalDoneBillableEqualsObserved locks in the
 // SPEC-015 receipts invariant: for a normal_done attempt the settlement evidence
 // tuple MUST carry billable_input_tokens == observed_input_tokens, even when the

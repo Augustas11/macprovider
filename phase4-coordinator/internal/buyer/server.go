@@ -295,6 +295,7 @@ type Server struct {
 	// assert per-request claim/row ordering, which is not otherwise
 	// reachable because the arbiter is owned by a request-scoped recorder.
 	terminalObserver func(*requestTerminal)
+	relayBlind       *relayBlindService
 }
 
 type receiptKeysBucket struct {
@@ -310,6 +311,7 @@ type PreflightResult struct {
 type PreflightFunc func(provider pool.Provider, requestID string, estimatedTokens int, timeout time.Duration) (PreflightResult, bool, error)
 type RelayFunc func(ctx context.Context, provider pool.Provider, requestID string, body []byte, stream bool) (*providerws.RelayStream, error)
 type SettlementRelayFunc func(ctx context.Context, provider pool.Provider, requestID string, body []byte, stream bool, settlement *providerws.SettlementReceiptMetadata) (*providerws.RelayStream, error)
+type RelayBlindRelayFunc func(ctx context.Context, provider pool.Provider, requestID string, body []byte, stream bool, relayContext providerws.RelayBlindDispatchContext) (*providerws.RelayStream, error)
 
 type Option func(*Server)
 
@@ -833,6 +835,10 @@ func (s *Server) Handler() http.Handler {
 	r.With(s.gatewayContextMiddleware).Get("/v1/trust-pools/{pool_id}/policy", s.handleTrustPoolPolicy)
 	r.With(s.gatewayContextMiddleware).Get("/v1/trust-pools/{pool_id}/pool_status.json", s.handleTrustPoolStatus)
 	r.With(s.gatewayContextMiddleware).Get("/v1/trust-pools/{pool_id}/status", s.handleTrustPoolStatus)
+	r.With(s.gatewayContextMiddleware).Post("/v1/relay-blind/route-reservations", s.handleRelayBlindReservation)
+	r.With(s.gatewayContextMiddleware).Post("/v1/relay-blind/consume", s.handleRelayBlindConsume)
+	r.With(s.gatewayContextMiddleware).Post("/v1/relay-blind/status", s.handleRelayBlindStatus)
+	r.With(s.gatewayServiceMiddleware).Get("/v1/relay-blind/capabilities", s.handleRelayBlindCapabilities)
 	r.Get("/v1/pool/check", s.handlePoolCheck)
 	r.Get("/v1/receipt-keys/{provider_id}", s.handleReceiptKeys)
 	// SPEC-015 §M.4 — SPEC-002 v1.6 candidate annotations.
@@ -868,6 +874,23 @@ func (s *Server) gatewayContextMiddleware(next http.Handler) http.Handler {
 		}
 		ctx := context.WithValue(r.Context(), authenticatedAccountContextKey{}, account)
 		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+// gatewayServiceMiddleware authenticates gateway-owned aggregate reads that
+// do not carry an end-user account. It deliberately does not synthesize an
+// account context: callers of these routes may only observe global metadata.
+func (s *Server) gatewayServiceMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !s.requireGatewayContext {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if !s.internalBearerAuthorizedRemote(r.Header, r.RemoteAddr) {
+			writeError(w, http.StatusUnauthorized, "unauthorized", "Gateway authentication is required")
+			return
+		}
+		next.ServeHTTP(w, r)
 	})
 }
 
@@ -2245,6 +2268,10 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// recorder so mark() reads the live billing state at write time; outermost
 	// so it covers every downstream write path.
 	w = &noPriorDispatchResponseWriter{ResponseWriter: w, rec: rec}
+	if strings.TrimSpace(r.Header.Get(relayBlindExecutionAuthorizationHeader)) != "" {
+		s.handleRelayBlindChat(w, r, rec, originalRequestID)
+		return
+	}
 	if !contentEncodingSupported(r.Header.Values("Content-Encoding")) {
 		msg := "v0.1.0 accepts `Content-Encoding: identity` or no `Content-Encoding` header; compressed request bodies are deferred to v0.2 per §10."
 		rec.logBuyerFailure(http.StatusUnsupportedMediaType, msg)
@@ -2262,6 +2289,11 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if int64(len(body)) > maxBodyBytes {
 		rec.logBuyerFailure(http.StatusRequestEntityTooLarge, "Request body too large")
 		writeError(w, http.StatusRequestEntityTooLarge, "request_body_too_large", "Request body too large")
+		return
+	}
+	if relayBlindEnvelopeNamespace(body) {
+		rec.logBuyerFailure(http.StatusBadRequest, "Relay-blind execution authorization is required")
+		writeRelayBlindError(w, "relay_blind_downgrade_rejected", "Relay-blind execution authorization is required")
 		return
 	}
 	req, status, code, msg := validateChatRequest(body)

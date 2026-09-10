@@ -110,6 +110,7 @@ func (s *Store) Ping(ctx context.Context) error {
 //	v10 — SPEC-040 wallet-native buyer session tables.
 //	v11 — SPEC-041 relay-blind replay ledger.
 //	v12 — OAuth issuance intent and reservation-bound observe recovery candidates.
+//	v13 — SPEC-041 relay-blind accounting metadata and independent clear caps.
 //
 // At Open time the store reads the current applied version; if it
 // exceeds this constant the binary is older than the DB and refuses
@@ -120,7 +121,7 @@ func (s *Store) Ping(ctx context.Context) error {
 // Operators rolling back the gateway binary on a DB at a higher
 // version must restore /var/lib/macprovider/gateway.db from the
 // pre-deploy snapshot (deploy-pearl-vps.sh step 5b writes one).
-const maxKnownSchemaVersion = 12
+const maxKnownSchemaVersion = 13
 
 func (s *Store) Migrate(ctx context.Context) error {
 	if err := s.checkSchemaVersionGate(ctx); err != nil {
@@ -194,6 +195,9 @@ func (s *Store) Migrate(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, settlementFallbackCandidatesDDL); err != nil {
 		return err
 	}
+	if err := s.ensureRelayBlindAccountingColumns(ctx); err != nil {
+		return err
+	}
 	// Stamp the schema version. We always insert v1 (preserves
 	// historical behavior for any tooling that checked exactly that
 	// row) AND the post-#196 marker v2. INSERT OR IGNORE keeps it
@@ -240,6 +244,56 @@ func (s *Store) Migrate(ctx context.Context) error {
 	}
 	if _, err := s.db.ExecContext(ctx, "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(12, ?)", now); err != nil {
 		return err
+	}
+	if _, err := s.db.ExecContext(ctx, "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(13, ?)", now); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *Store) ensureRelayBlindAccountingColumns(ctx context.Context) error {
+	columns := []struct {
+		name string
+		ddl  string
+	}{
+		{"requested_privacy_mode", "TEXT NOT NULL DEFAULT ''"},
+		{"effective_privacy_outcome", "TEXT NOT NULL DEFAULT ''"},
+		{"relay_blind_envelope_digest", "TEXT NOT NULL DEFAULT ''"},
+		{"relay_blind_key_record_digest", "TEXT NOT NULL DEFAULT ''"},
+		{"relay_blind_kid", "TEXT NOT NULL DEFAULT ''"},
+		{"relay_blind_provider_binding_digest", "TEXT NOT NULL DEFAULT ''"},
+		{"input_token_upper_bound", "INTEGER NOT NULL DEFAULT 0 CHECK (input_token_upper_bound >= 0)"},
+		{"max_output_tokens", "INTEGER NOT NULL DEFAULT 0 CHECK (max_output_tokens >= 0)"},
+	}
+	for _, table := range []string{"quota_reservations", "usage_events", "settlement_fallback_candidates"} {
+		rows, err := s.db.QueryContext(ctx, "PRAGMA table_info("+table+")")
+		if err != nil {
+			return err
+		}
+		existing := map[string]bool{}
+		for rows.Next() {
+			var cid int
+			var name, typ string
+			var notNull int
+			var defaultValue sql.NullString
+			var pk int
+			if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
+				rows.Close()
+				return err
+			}
+			existing[name] = true
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		for _, column := range columns {
+			if existing[column.name] {
+				continue
+			}
+			if _, err := s.db.ExecContext(ctx, "ALTER TABLE "+table+" ADD COLUMN "+column.name+" "+column.ddl); err != nil {
+				return fmt.Errorf("add %s.%s: %w", table, column.name, err)
+			}
+		}
 	}
 	return nil
 }
@@ -1323,6 +1377,9 @@ func (s *Store) CountDemoSessionEventsSince(ctx context.Context, clientIP string
 }
 
 func (s *Store) ReserveQuota(ctx context.Context, req storage.ReservationRequest) (storage.QuotaDecision, error) {
+	if err := validateRelayBlind(req.RelayBlind); err != nil {
+		return storage.QuotaDecision{}, err
+	}
 	tx, err := s.beginImmediate(ctx)
 	if err != nil {
 		return storage.QuotaDecision{}, err
@@ -1361,10 +1418,13 @@ func (s *Store) ReserveQuota(ctx context.Context, req storage.ReservationRequest
 	if req.ExpiresAt.IsZero() {
 		req.ExpiresAt = req.CreatedAt.Add(24 * time.Hour)
 	}
+	args := []any{req.AccountID, req.RequestID, req.WindowDate, req.RequestedTokens, encodeTime(req.ExpiresAt), encodeTime(req.CreatedAt)}
+	args = append(args, relayBlindArgs(req.RelayBlind)...)
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO quota_reservations(account_id, request_id, window_date, reserved_tokens, status, expires_at, created_at)
-		VALUES(?, ?, ?, ?, 'active', ?, ?)`,
-		req.AccountID, req.RequestID, req.WindowDate, req.RequestedTokens, encodeTime(req.ExpiresAt), encodeTime(req.CreatedAt))
+		INSERT INTO quota_reservations(account_id, request_id, window_date, reserved_tokens, status, expires_at, created_at,
+			requested_privacy_mode, effective_privacy_outcome, relay_blind_envelope_digest, relay_blind_key_record_digest,
+			relay_blind_kid, relay_blind_provider_binding_digest, input_token_upper_bound, max_output_tokens)
+		VALUES(?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, args...)
 	if err != nil {
 		if isUniqueConstraintError(err) {
 			return storage.QuotaDecision{}, storage.ErrReservationExists
@@ -1395,9 +1455,12 @@ func (s *Store) SettleReservation(ctx context.Context, settlement storage.Reserv
 	var windowDate string
 	var status string
 	var createdAt string
+	var requested, effective, envelope, keyRecord, kid, providerBinding string
+	var inputCap, outputCap int64
 	if err := tx.QueryRowContext(ctx, `
-		SELECT window_date, status, created_at FROM quota_reservations
-		WHERE account_id = ? AND request_id = ?`, settlement.AccountID, settlement.RequestID).Scan(&windowDate, &status, &createdAt); err != nil {
+		SELECT window_date, status, created_at, `+relayBlindSelectColumns+` FROM quota_reservations
+		WHERE account_id = ? AND request_id = ?`, settlement.AccountID, settlement.RequestID).Scan(
+		&windowDate, &status, &createdAt, &requested, &effective, &envelope, &keyRecord, &kid, &providerBinding, &inputCap, &outputCap); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return storage.ErrReservationNotFound
 		}
@@ -1412,22 +1475,31 @@ func (s *Store) SettleReservation(ctx context.Context, settlement storage.Reserv
 	if settlement.SettledAt.IsZero() {
 		settlement.SettledAt = time.Now().UTC()
 	}
+	resolved, err := resolveRelayBlind(relayBlindFromValues(requested, effective, envelope, keyRecord, kid, providerBinding, inputCap, outputCap), settlement.RelayBlind)
+	if err != nil {
+		return err
+	}
+	settlement.RelayBlind = resolved
 	if err := normalizeSettlementTokens(&settlement); err != nil {
 		return err
 	}
+	metadataArgs := relayBlindArgs(resolved)
 	_, err = tx.ExecContext(ctx, `
 		UPDATE quota_reservations
-		SET status = 'settled', settled_tokens = ?, settled_at = ?
+		SET status = 'settled', settled_tokens = ?, settled_at = ?, effective_privacy_outcome = ?, settlement_hold = CASE WHEN requested_privacy_mode = 'relay_blind_required' THEN 0 ELSE settlement_hold END
 		WHERE account_id = ? AND request_id = ?`,
-		settlement.TotalTokens, encodeTime(settlement.SettledAt), settlement.AccountID, settlement.RequestID)
+		settlement.TotalTokens, encodeTime(settlement.SettledAt), metadataArgs[1], settlement.AccountID, settlement.RequestID)
 	if err != nil {
 		return err
 	}
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO usage_events(request_id, account_id, window_date, prompt_tokens, completion_tokens, total_tokens, token_source, outcome, created_at)
-		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		INSERT INTO usage_events(request_id, account_id, window_date, prompt_tokens, completion_tokens, total_tokens, token_source, outcome, created_at,
+			requested_privacy_mode, effective_privacy_outcome, relay_blind_envelope_digest, relay_blind_key_record_digest,
+			relay_blind_kid, relay_blind_provider_binding_digest, input_token_upper_bound, max_output_tokens)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		settlement.RequestID, settlement.AccountID, windowDate, settlement.PromptTokens, settlement.CompletionTokens,
-		settlement.TotalTokens, settlement.TokenSource, settlement.Outcome, encodeTime(settlement.SettledAt))
+		settlement.TotalTokens, settlement.TokenSource, settlement.Outcome, encodeTime(settlement.SettledAt),
+		metadataArgs[0], metadataArgs[1], metadataArgs[2], metadataArgs[3], metadataArgs[4], metadataArgs[5], metadataArgs[6], metadataArgs[7])
 	if err != nil {
 		return err
 	}
@@ -1443,9 +1515,12 @@ func (s *Store) SettleDemoReservation(ctx context.Context, settlement storage.Re
 	var windowDate string
 	var status string
 	var createdAt string
+	var requested, effective, envelope, keyRecord, kid, providerBinding string
+	var inputCap, outputCap int64
 	if err := tx.QueryRowContext(ctx, `
-		SELECT window_date, status, created_at FROM quota_reservations
-		WHERE account_id = ? AND request_id = ?`, settlement.AccountID, settlement.RequestID).Scan(&windowDate, &status, &createdAt); err != nil {
+		SELECT window_date, status, created_at, `+relayBlindSelectColumns+` FROM quota_reservations
+		WHERE account_id = ? AND request_id = ?`, settlement.AccountID, settlement.RequestID).Scan(
+		&windowDate, &status, &createdAt, &requested, &effective, &envelope, &keyRecord, &kid, &providerBinding, &inputCap, &outputCap); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return storage.ErrReservationNotFound
 		}
@@ -1466,22 +1541,31 @@ func (s *Store) SettleDemoReservation(ctx context.Context, settlement storage.Re
 	if settlement.SettledAt.IsZero() {
 		settlement.SettledAt = time.Now().UTC()
 	}
+	resolved, err := resolveRelayBlind(relayBlindFromValues(requested, effective, envelope, keyRecord, kid, providerBinding, inputCap, outputCap), settlement.RelayBlind)
+	if err != nil {
+		return err
+	}
+	settlement.RelayBlind = resolved
 	if err := normalizeSettlementTokens(&settlement); err != nil {
 		return err
 	}
+	metadataArgs := relayBlindArgs(resolved)
 	_, err = tx.ExecContext(ctx, `
 		UPDATE quota_reservations
-		SET status = 'settled', settled_tokens = ?, settled_at = ?
+		SET status = 'settled', settled_tokens = ?, settled_at = ?, effective_privacy_outcome = ?, settlement_hold = CASE WHEN requested_privacy_mode = 'relay_blind_required' THEN 0 ELSE settlement_hold END
 		WHERE account_id = ? AND request_id = ?`,
-		settlement.TotalTokens, encodeTime(settlement.SettledAt), settlement.AccountID, settlement.RequestID)
+		settlement.TotalTokens, encodeTime(settlement.SettledAt), metadataArgs[1], settlement.AccountID, settlement.RequestID)
 	if err != nil {
 		return err
 	}
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO usage_events(request_id, account_id, demo_identity, window_date, prompt_tokens, completion_tokens, total_tokens, token_source, outcome, created_at)
-		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		INSERT INTO usage_events(request_id, account_id, demo_identity, window_date, prompt_tokens, completion_tokens, total_tokens, token_source, outcome, created_at,
+			requested_privacy_mode, effective_privacy_outcome, relay_blind_envelope_digest, relay_blind_key_record_digest,
+			relay_blind_kid, relay_blind_provider_binding_digest, input_token_upper_bound, max_output_tokens)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		settlement.RequestID, settlement.AccountID, demo.ClientIP, windowDate, settlement.PromptTokens, settlement.CompletionTokens,
-		settlement.TotalTokens, settlement.TokenSource, settlement.Outcome, encodeTime(settlement.SettledAt))
+		settlement.TotalTokens, settlement.TokenSource, settlement.Outcome, encodeTime(settlement.SettledAt),
+		metadataArgs[0], metadataArgs[1], metadataArgs[2], metadataArgs[3], metadataArgs[4], metadataArgs[5], metadataArgs[6], metadataArgs[7])
 	if err != nil {
 		return err
 	}
@@ -1491,7 +1575,7 @@ func (s *Store) SettleDemoReservation(ctx context.Context, settlement storage.Re
 	if demo.WindowDate == "" {
 		demo.WindowDate = windowDate
 	}
-	if demo.TotalTokens == 0 {
+	if demo.TotalTokens == 0 || settlement.RelayBlind != nil {
 		demo.TotalTokens = settlement.TotalTokens
 	}
 	_, err = tx.ExecContext(ctx, `
@@ -1513,7 +1597,7 @@ func (s *Store) RefundReservation(ctx context.Context, accountID, requestID stri
 	when := time.Unix(refundedAt, 0).UTC()
 	res, err := tx.ExecContext(ctx, `
 		UPDATE quota_reservations
-		SET status = 'refunded', settled_tokens = 0, settled_at = ?
+		SET status = 'refunded', settled_tokens = 0, settled_at = ?, settlement_hold = CASE WHEN requested_privacy_mode = 'relay_blind_required' THEN 0 ELSE settlement_hold END
 		WHERE account_id = ? AND request_id = ? AND status = 'active'`,
 		encodeTime(when), accountID, requestID)
 	if err != nil {
@@ -1659,7 +1743,10 @@ func (s *Store) ListSettlementHeldReservations(ctx context.Context, limit int) (
 	}
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT qr.account_id, qr.request_id, COALESCE(wrm.session_id, ''), qr.window_date,
-			qr.reserved_tokens, qr.expires_at, qr.created_at
+			qr.reserved_tokens, qr.expires_at, qr.created_at,
+			qr.requested_privacy_mode, qr.effective_privacy_outcome, qr.relay_blind_envelope_digest,
+			qr.relay_blind_key_record_digest, qr.relay_blind_kid, qr.relay_blind_provider_binding_digest,
+			qr.input_token_upper_bound, qr.max_output_tokens
 		FROM quota_reservations qr
 		LEFT JOIN wallet_session_request_map wrm
 			ON wrm.account_id = qr.account_id AND wrm.request_id = qr.request_id
@@ -1676,14 +1763,18 @@ func (s *Store) ListSettlementHeldReservations(ctx context.Context, limit int) (
 	for rows.Next() {
 		var reservation storage.ActiveReservation
 		var expiresAt, createdAt string
+		var requested, effective, envelope, keyRecord, kid, providerBinding string
+		var inputCap, outputCap int64
 		if err := rows.Scan(
 			&reservation.AccountID, &reservation.RequestID, &reservation.WalletSessionID,
 			&reservation.WindowDate, &reservation.ReservedTokens, &expiresAt, &createdAt,
+			&requested, &effective, &envelope, &keyRecord, &kid, &providerBinding, &inputCap, &outputCap,
 		); err != nil {
 			return nil, err
 		}
 		reservation.ExpiresAt = decodeTime(expiresAt)
 		reservation.CreatedAt = decodeTime(createdAt)
+		reservation.RelayBlind = relayBlindFromValues(requested, effective, envelope, keyRecord, kid, providerBinding, inputCap, outputCap)
 		out = append(out, reservation)
 	}
 	return out, rows.Err()
@@ -2067,6 +2158,9 @@ func (s *Store) RevokeWalletSession(ctx context.Context, accountID, sessionID, a
 }
 
 func (s *Store) AdmitWalletSessionInference(ctx context.Context, req storage.WalletSessionAdmissionRequest) (storage.WalletSessionAdmissionDecision, error) {
+	if err := validateRelayBlind(req.RelayBlind); err != nil {
+		return storage.WalletSessionAdmissionDecision{}, err
+	}
 	tx, err := s.beginImmediate(ctx)
 	if err != nil {
 		return storage.WalletSessionAdmissionDecision{}, err
@@ -2154,10 +2248,13 @@ func (s *Store) AdmitWalletSessionInference(ctx context.Context, req storage.Wal
 	if req.RequestedTokens > accountRemaining {
 		return decision, storage.ErrQuotaExceeded
 	}
+	args := []any{req.AccountID, req.RequestID, req.WindowDate, req.RequestedTokens, encodeTime(req.ExpiresAt.UTC()), encodeTime(now)}
+	args = append(args, relayBlindArgs(req.RelayBlind)...)
 	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO quota_reservations(account_id, request_id, window_date, reserved_tokens, status, expires_at, created_at)
-		VALUES(?, ?, ?, ?, 'active', ?, ?)`,
-		req.AccountID, req.RequestID, req.WindowDate, req.RequestedTokens, encodeTime(req.ExpiresAt.UTC()), encodeTime(now)); err != nil {
+		INSERT INTO quota_reservations(account_id, request_id, window_date, reserved_tokens, status, expires_at, created_at,
+			requested_privacy_mode, effective_privacy_outcome, relay_blind_envelope_digest, relay_blind_key_record_digest,
+			relay_blind_kid, relay_blind_provider_binding_digest, input_token_upper_bound, max_output_tokens)
+		VALUES(?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, args...); err != nil {
 		if isUniqueConstraintError(err) {
 			return storage.WalletSessionAdmissionDecision{}, storage.ErrReservationExists
 		}
@@ -2411,15 +2508,15 @@ func (s *Store) ArmWalletSessionDispatch(ctx context.Context, arm storage.Wallet
 	if _, _, err := activeWalletSessionTx(ctx, tx, arm.AccountID, arm.SessionID, arm.ArmedAt.UTC()); err != nil {
 		return err
 	}
-	var replayState, replayRoute, reservationStatus, quotaStatus string
+	var replayState, replayRoute, reservationStatus, quotaStatus, requestedPrivacyMode string
 	var reservedTokens int64
 	if err := tx.QueryRowContext(ctx, `
-		SELECT r.state, r.canonical_route, sr.status, qr.status, sr.reserved_tokens
+		SELECT r.state, r.canonical_route, sr.status, qr.status, sr.reserved_tokens, qr.requested_privacy_mode
 		FROM wallet_session_replays r
 		JOIN wallet_session_reservations sr ON sr.session_id = r.session_id AND sr.request_id = r.request_id
 		JOIN quota_reservations qr ON qr.account_id = sr.account_id AND qr.request_id = sr.request_id
 		WHERE r.session_id = ? AND r.request_id = ? AND sr.account_id = ?`,
-		arm.SessionID, arm.RequestID, arm.AccountID).Scan(&replayState, &replayRoute, &reservationStatus, &quotaStatus, &reservedTokens); err != nil {
+		arm.SessionID, arm.RequestID, arm.AccountID).Scan(&replayState, &replayRoute, &reservationStatus, &quotaStatus, &reservedTokens, &requestedPrivacyMode); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return storage.ErrWalletSessionDispatchFence
 		}
@@ -2448,6 +2545,23 @@ func (s *Store) ArmWalletSessionDispatch(ctx context.Context, arm storage.Wallet
 	}
 	if rows == 0 {
 		return storage.ErrWalletSessionDispatchFence
+	}
+	if requestedPrivacyMode == "relay_blind_required" {
+		res, err := tx.ExecContext(ctx, `
+			UPDATE quota_reservations
+			SET settlement_hold = 1
+			WHERE account_id = ? AND request_id = ? AND status = 'active' AND requested_privacy_mode = ?`,
+			arm.AccountID, arm.RequestID, requestedPrivacyMode)
+		if err != nil {
+			return err
+		}
+		rows, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if rows == 0 {
+			return storage.ErrWalletSessionDispatchFence
+		}
 	}
 	return tx.Commit()
 }
@@ -2552,18 +2666,21 @@ func (s *Store) FinalizeWalletSessionReservation(ctx context.Context, settlement
 	accountSettlement := storage.ReservationSettlement{
 		AccountID: settlement.AccountID, RequestID: settlement.RequestID, PromptTokens: settlement.PromptTokens,
 		CompletionTokens: settlement.CompletionTokens, TotalTokens: settlement.TotalTokens, MaxTotalTokens: settlement.MaxTotalTokens,
-		TokenSource: settlement.TokenSource, Outcome: settlement.Outcome, SettledAt: settlement.SettledAt,
-	}
-	if err := normalizeSettlementTokens(&accountSettlement); err != nil {
-		return err
+		TokenSource: settlement.TokenSource, Outcome: settlement.Outcome, SettledAt: settlement.SettledAt, RelayBlind: settlement.RelayBlind,
 	}
 	var windowDate, quotaStatus, sessionStatus, reservationCreatedAt string
+	var requested, effective, envelope, keyRecord, kid, providerBinding string
+	var inputCap, outputCap int64
 	if err := tx.QueryRowContext(ctx, `
-		SELECT qr.window_date, qr.status, sr.status, qr.created_at
+		SELECT qr.window_date, qr.status, sr.status, qr.created_at,
+			qr.requested_privacy_mode, qr.effective_privacy_outcome, qr.relay_blind_envelope_digest,
+			qr.relay_blind_key_record_digest, qr.relay_blind_kid, qr.relay_blind_provider_binding_digest,
+			qr.input_token_upper_bound, qr.max_output_tokens
 		FROM quota_reservations qr
 		JOIN wallet_session_reservations sr ON sr.account_id = qr.account_id AND sr.request_id = qr.request_id
 		WHERE qr.account_id = ? AND qr.request_id = ? AND sr.session_id = ?`,
-		settlement.AccountID, settlement.RequestID, settlement.SessionID).Scan(&windowDate, &quotaStatus, &sessionStatus, &reservationCreatedAt); err != nil {
+		settlement.AccountID, settlement.RequestID, settlement.SessionID).Scan(&windowDate, &quotaStatus, &sessionStatus, &reservationCreatedAt,
+		&requested, &effective, &envelope, &keyRecord, &kid, &providerBinding, &inputCap, &outputCap); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return storage.ErrReservationNotFound
 		}
@@ -2575,12 +2692,21 @@ func (s *Store) FinalizeWalletSessionReservation(ctx context.Context, settlement
 	if quotaStatus != "active" || (sessionStatus != "active" && sessionStatus != "held") {
 		return fmt.Errorf("%w: wallet reservation %s is %s/%s", storage.ErrReservationTerminal, settlement.RequestID, quotaStatus, sessionStatus)
 	}
+	resolved, err := resolveRelayBlind(relayBlindFromValues(requested, effective, envelope, keyRecord, kid, providerBinding, inputCap, outputCap), settlement.RelayBlind)
+	if err != nil {
+		return err
+	}
+	accountSettlement.RelayBlind = resolved
+	if err := normalizeSettlementTokens(&accountSettlement); err != nil {
+		return err
+	}
+	metadataArgs := relayBlindArgs(resolved)
 	when := encodeTime(settlement.SettledAt.UTC())
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE quota_reservations
-		SET status = 'settled', settled_tokens = ?, settled_at = ?
+		SET status = 'settled', settled_tokens = ?, settled_at = ?, effective_privacy_outcome = ?, settlement_hold = CASE WHEN requested_privacy_mode = 'relay_blind_required' THEN 0 ELSE settlement_hold END
 		WHERE account_id = ? AND request_id = ? AND status = 'active'`,
-		accountSettlement.TotalTokens, when, settlement.AccountID, settlement.RequestID); err != nil {
+		accountSettlement.TotalTokens, when, metadataArgs[1], settlement.AccountID, settlement.RequestID); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `
@@ -2591,10 +2717,13 @@ func (s *Store) FinalizeWalletSessionReservation(ctx context.Context, settlement
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO usage_events(request_id, account_id, window_date, prompt_tokens, completion_tokens, total_tokens, token_source, outcome, created_at)
-		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		INSERT INTO usage_events(request_id, account_id, window_date, prompt_tokens, completion_tokens, total_tokens, token_source, outcome, created_at,
+			requested_privacy_mode, effective_privacy_outcome, relay_blind_envelope_digest, relay_blind_key_record_digest,
+			relay_blind_kid, relay_blind_provider_binding_digest, input_token_upper_bound, max_output_tokens)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		settlement.RequestID, settlement.AccountID, windowDate, accountSettlement.PromptTokens, accountSettlement.CompletionTokens,
-		accountSettlement.TotalTokens, accountSettlement.TokenSource, accountSettlement.Outcome, when); err != nil {
+		accountSettlement.TotalTokens, accountSettlement.TokenSource, accountSettlement.Outcome, when,
+		metadataArgs[0], metadataArgs[1], metadataArgs[2], metadataArgs[3], metadataArgs[4], metadataArgs[5], metadataArgs[6], metadataArgs[7]); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `
@@ -2725,8 +2854,8 @@ func (s *Store) EnsureUsageEvent(ctx context.Context, event storage.UsageEvent) 
 	// against the row's normalized prompt+completion sum and
 	// falsely return ErrUsageEventConflict, triggering a wrong
 	// refund. Caught by ISS-196 R2 codex CODE MEDIUM.
-	if event.TotalTokens == 0 {
-		event.TotalTokens = event.PromptTokens + event.CompletionTokens
+	if err := normalizeUsageEvent(&event); err != nil {
+		return err
 	}
 	result, err := s.insertUsageEventExec(ctx, event, true)
 	if err != nil {
@@ -2758,13 +2887,22 @@ func (s *Store) EnsureUsageEvent(ctx context.Context, event storage.UsageEvent) 
 		TotalTokens      int64
 		TokenSource      string
 		Outcome          string
+		Requested        string
+		Effective        string
+		Envelope         string
+		KeyRecord        string
+		KID              string
+		ProviderBinding  string
+		InputCap         int64
+		OutputCap        int64
 	}
 	if err := s.db.QueryRowContext(ctx, `
-		SELECT account_id, demo_identity, window_date, prompt_tokens, completion_tokens, total_tokens, token_source, outcome
+		SELECT account_id, demo_identity, window_date, prompt_tokens, completion_tokens, total_tokens, token_source, outcome, `+relayBlindSelectColumns+`
 		FROM usage_events WHERE account_id = ? AND request_id = ?`, event.AccountID, event.RequestID).Scan(
 		&existing.AccountID, &existing.DemoIdentity, &existing.WindowDate,
 		&existing.PromptTokens, &existing.CompletionTokens, &existing.TotalTokens,
-		&existing.TokenSource, &existing.Outcome,
+		&existing.TokenSource, &existing.Outcome, &existing.Requested, &existing.Effective,
+		&existing.Envelope, &existing.KeyRecord, &existing.KID, &existing.ProviderBinding, &existing.InputCap, &existing.OutputCap,
 	); err != nil {
 		return err
 	}
@@ -2775,7 +2913,9 @@ func (s *Store) EnsureUsageEvent(ctx context.Context, event storage.UsageEvent) 
 		existing.CompletionTokens != event.CompletionTokens ||
 		existing.TotalTokens != event.TotalTokens ||
 		existing.TokenSource != event.TokenSource ||
-		existing.Outcome != event.Outcome {
+		existing.Outcome != event.Outcome ||
+		!relayBlindMetadataEqual(relayBlindFromValues(existing.Requested, existing.Effective, existing.Envelope, existing.KeyRecord,
+			existing.KID, existing.ProviderBinding, existing.InputCap, existing.OutputCap), event.RelayBlind) {
 		return storage.ErrUsageEventConflict
 	}
 	return nil
@@ -2803,29 +2943,45 @@ func (s *Store) insertUsageEventExec(ctx context.Context, event storage.UsageEve
 	if event.CreatedAt.IsZero() {
 		event.CreatedAt = time.Now().UTC()
 	}
-	if event.PromptTokens < 0 || event.CompletionTokens < 0 || event.TotalTokens < 0 {
-		return nil, fmt.Errorf("usage tokens must be non-negative")
+	if err := normalizeUsageEvent(&event); err != nil {
+		return nil, err
 	}
-	if event.PromptTokens > math.MaxInt64-event.CompletionTokens {
-		return nil, fmt.Errorf("usage token total overflows int64")
-	}
-	sum := event.PromptTokens + event.CompletionTokens
-	if event.TotalTokens == 0 {
-		event.TotalTokens = sum
-	} else if event.TotalTokens != sum {
-		return nil, fmt.Errorf("usage total_tokens does not match prompt_tokens plus completion_tokens")
-	}
+	metadataArgs := relayBlindArgs(event.RelayBlind)
 	stmt := `
-		INSERT INTO usage_events(request_id, account_id, demo_identity, window_date, prompt_tokens, completion_tokens, total_tokens, token_source, outcome, created_at)
-		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+		INSERT INTO usage_events(request_id, account_id, demo_identity, window_date, prompt_tokens, completion_tokens, total_tokens, token_source, outcome, created_at,
+			requested_privacy_mode, effective_privacy_outcome, relay_blind_envelope_digest, relay_blind_key_record_digest,
+			relay_blind_kid, relay_blind_provider_binding_digest, input_token_upper_bound, max_output_tokens)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 	if idempotent {
 		stmt = `
-		INSERT OR IGNORE INTO usage_events(request_id, account_id, demo_identity, window_date, prompt_tokens, completion_tokens, total_tokens, token_source, outcome, created_at)
-		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+		INSERT OR IGNORE INTO usage_events(request_id, account_id, demo_identity, window_date, prompt_tokens, completion_tokens, total_tokens, token_source, outcome, created_at,
+			requested_privacy_mode, effective_privacy_outcome, relay_blind_envelope_digest, relay_blind_key_record_digest,
+			relay_blind_kid, relay_blind_provider_binding_digest, input_token_upper_bound, max_output_tokens)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 	}
 	return s.db.ExecContext(ctx, stmt,
 		event.RequestID, event.AccountID, event.DemoIdentity, event.WindowDate, event.PromptTokens, event.CompletionTokens,
-		event.TotalTokens, event.TokenSource, event.Outcome, encodeTime(event.CreatedAt))
+		event.TotalTokens, event.TokenSource, event.Outcome, encodeTime(event.CreatedAt),
+		metadataArgs[0], metadataArgs[1], metadataArgs[2], metadataArgs[3], metadataArgs[4], metadataArgs[5], metadataArgs[6], metadataArgs[7])
+}
+
+func normalizeUsageEvent(event *storage.UsageEvent) error {
+	if event.PromptTokens < 0 || event.CompletionTokens < 0 || event.TotalTokens < 0 {
+		return fmt.Errorf("usage tokens must be non-negative")
+	}
+	if event.PromptTokens > math.MaxInt64-event.CompletionTokens {
+		return fmt.Errorf("usage token total overflows int64")
+	}
+	sum := event.PromptTokens + event.CompletionTokens
+	if event.TotalTokens != 0 && event.TotalTokens != sum {
+		return fmt.Errorf("usage total_tokens does not match prompt_tokens plus completion_tokens")
+	}
+	if err := validateRelayBlind(event.RelayBlind); err != nil {
+		return err
+	}
+	event.PromptTokens, event.CompletionTokens = clampRelayBlindTokens(event.PromptTokens, event.CompletionTokens, event.RelayBlind)
+	event.TotalTokens = event.PromptTokens + event.CompletionTokens
+	return nil
 }
 
 func normalizeSettlementTokens(settlement *storage.ReservationSettlement) error {
@@ -2836,11 +2992,14 @@ func normalizeSettlementTokens(settlement *storage.ReservationSettlement) error 
 		return fmt.Errorf("settlement token total overflows int64")
 	}
 	sum := settlement.PromptTokens + settlement.CompletionTokens
-	if settlement.TotalTokens == 0 {
-		settlement.TotalTokens = sum
-	} else if settlement.TotalTokens != sum {
+	if settlement.TotalTokens != 0 && settlement.TotalTokens != sum {
 		return fmt.Errorf("settlement total_tokens does not match prompt_tokens plus completion_tokens")
 	}
+	if err := validateRelayBlind(settlement.RelayBlind); err != nil {
+		return err
+	}
+	settlement.PromptTokens, settlement.CompletionTokens = clampRelayBlindTokens(settlement.PromptTokens, settlement.CompletionTokens, settlement.RelayBlind)
+	settlement.TotalTokens = settlement.PromptTokens + settlement.CompletionTokens
 	if settlement.MaxTotalTokens > 0 && settlement.TotalTokens > settlement.MaxTotalTokens {
 		return fmt.Errorf("settlement total_tokens exceeds request maximum")
 	}

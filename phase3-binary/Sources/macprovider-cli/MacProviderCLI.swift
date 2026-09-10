@@ -40,7 +40,7 @@ struct MacProviderCLI: AsyncParsableCommand {
         commandName: "malibu-cli",
         abstract: "OpenAI-compatible Malibu (Mac Provider) inference CLI.",
         version: CoordinatorClient.binaryVersion,
-        subcommands: [ServeCommand.self, SelfTestCommand.self, StatusCommand.self, ClaimCommand.self, UpdateCommand.self, UninstallCommand.self, ModelsCommand.self, AutotuneCommand.self, BootstrapAuthCommand.self, RotateKeyCommand.self, CredentialsCommand.self, LifecycleStateCommand.self, RecoverUpdateCommand.self, LifecycleLeaseCommand.self, Spec028CanaryCommand.self, Spec028BenchmarkCommand.self, LegacySpec028CanaryCommand.self, LegacySpec028BenchmarkCommand.self, DecodeBenchCommand.self, EnrollCommand.self, ReleasePayloadPreflightCommand.self, KVCacheCommand.self, DoctorCommand.self, PayoutAddressCommand.self, ConsumeCommand.self],
+        subcommands: [ServeCommand.self, SelfTestCommand.self, StatusCommand.self, ClaimCommand.self, UpdateCommand.self, UninstallCommand.self, ModelsCommand.self, AutotuneCommand.self, BootstrapAuthCommand.self, RotateKeyCommand.self, CredentialsCommand.self, LifecycleStateCommand.self, RecoverUpdateCommand.self, LifecycleLeaseCommand.self, Spec028CanaryCommand.self, Spec028BenchmarkCommand.self, LegacySpec028CanaryCommand.self, LegacySpec028BenchmarkCommand.self, DecodeBenchCommand.self, EnrollCommand.self, ReleasePayloadPreflightCommand.self, KVCacheCommand.self, DoctorCommand.self, PayoutAddressCommand.self, ConsumeCommand.self, RelayBlindKeyCommand.self, RelayBlindFixtureCommand.self],
         defaultSubcommand: ServeCommand.self
     )
 }
@@ -325,6 +325,12 @@ struct ServeCommand: AsyncParsableCommand {
 
     @Flag(name: .customLong("enable-receipts"), inversion: .prefixedNo, help: "Opt into signed non-streaming request receipts. Default off for staged rollout.")
     var enableReceipts: Bool?
+
+    @Flag(name: .customLong("relay-blind-enabled"), inversion: .prefixedNo, help: "Opt into the default-off relay-blind request encryption pilot.")
+    var relayBlindEnabled: Bool?
+
+    @Option(name: .customLong("relay-blind-state-directory"), help: "Absolute operator-owned 0700 directory outside the repository for relay-blind keys and execution journal.")
+    var relayBlindStateDirectory: String?
 
     @Option(help: "Drain timeout in seconds for an in-flight model switch. Default 30. Only meaningful when --enable-warm-swap is set.")
     var swapDrainTimeoutSeconds: Int?
@@ -1422,6 +1428,8 @@ struct ServeCommand: AsyncParsableCommand {
                 publishesSupportedModels: publishSupportedModels,
                 enableWarmSwap: enableWarmSwap,
                 enableReceipts: enableReceipts,
+                relayBlindEnabled: relayBlindEnabled,
+                relayBlindStateDirectory: relayBlindStateDirectory,
                 swapDrainTimeoutSeconds: swapDrainTimeoutSeconds,
                 ctlSocketPath: ctlSocketPath,
                 switchStatePath: switchStatePath,
@@ -3312,6 +3320,7 @@ private func printResolvedConfiguration(_ config: AppConfig) {
     print("  continuous_batching: \(config.continuousBatching.rawValue)")
     print("  continuous_batch_queue_limit: \(config.continuousBatchQueueLimit.map(String.init) ?? "<unset, 2 * max_batch>")")
     print("  enable_receipts: \(config.enableReceipts)")
+    print("  relay_blind_enabled: \(config.relayBlindEnabled)")
     print("  idle_prewarm.enabled: \(config.idlePrewarmEnabled)")
     print("  idle_prewarm.idle_threshold_seconds: \(config.idlePrewarmIdleThresholdSeconds)")
     print("  idle_prewarm.tick_seconds: \(config.idlePrewarmTickSeconds)")

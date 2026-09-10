@@ -1,7 +1,9 @@
 # SPEC-015 — Verifiable inference receipts
 
-**Version:** 0.4.6 (2026-08-18, close SPEC-015 requirement-ID migration; LOCKED settlement-capable receipt profile for SPEC-022 otherwise unchanged)
+**Version:** 0.4.7 (2026-09-10, SPEC-041 relay-blind exclusion clarification; LOCKED v0.4 tuple unchanged)
 **Depends on:** SPEC-001 v1.6, SPEC-002 v1.4 (v1.5 candidate `GET /v1/receipt-keys/<provider_id>` buyer-safe pubkey resolver; v1.6 candidate `/poolz` catalog fields + `/catalog/<catalog_id>` + `/catalog/pubkey` per §M.4), SPEC-005 v0.3 (settlement/accounting semantics; v0.4+ chargeability successor expected for terminal-state rows), SPEC-006 v0.9, SPEC-008 v0.3 (hard — §5.3-5.6 model-hash semantics; §5.5 hash_status enum), SPEC-010 v1.5, SPEC-011 v0.5 (hard — §3.3.1 heartbeat `model_hash`; §3.2 warm-swap state machine; §3.3.0 opt-in gating), SPEC-013 v0.3, SPEC-022 v0.1.4 (hard — settlement-capable receipt profile consumer)
+
+**Change log v0.4.7 (SPEC-041 composition):** The locked v0.4 receipt tuple is unchanged. A relay-blind pilot request MUST NOT attach v0.4 positive-settlement metadata, fabricate plaintext prompt/output snapshots or hashes from ciphertext/envelope digests, or reuse a receipt key as the relay-blind signing identity. Provider validation/terminal evidence defined by SPEC-041 is execution evidence, not a SPEC-015 receipt.
 
 **Change log v0.4.6 (2026-08-18, issue #1023 — close requirement-ID migration):**
 - Accepts `SPEC-015-R001`..`SPEC-015-R005` as the exhaustive evidencable

@@ -1,7 +1,9 @@
 # SPEC-006 - Buyer API Gateway: Mac Provider's first public buyer surface
 
-**Version:** 0.9.21 (2026-08-18, close SPEC-006 requirement-ID migration)
+**Version:** 0.9.22 (2026-09-10, SPEC-041 buyer contract composition)
 **Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.5.4, SPEC-003 v0.7, SPEC-004 v0.3.2
+
+**Change log v0.9.22 (SPEC-041 composition):** Reserves the authenticated public relay-blind reservation route and SPEC-041 typed errors/metadata. Success and errors carry requested/effective privacy outcome, exact request-only scope, settlement labels, and retry action in the specified headers/JSON/SSE locations. Public relay-blind responses MUST NOT emit `X-Provider-Id` or equivalent stable provider identity. Buyer-supplied internal wallet-session/execution-auth headers are stripped and trusted values overwritten after authentication. Plaintext APIs remain unchanged while the draft feature is off.
 
 **Change log v0.9.21 (2026-08-18, issue #1023 — close requirement-ID migration):**
 - Accepts `SPEC-006-R001`..`SPEC-006-R009` as the exhaustive evidencable

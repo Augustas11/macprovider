@@ -1,11 +1,15 @@
 # SPEC-022 - Verified model settlement
 
-Version: v0.1.7
+Version: v0.1.8
 Status: Draft, lock-ready after round-4 closure
 Date drafted: 2026-06-30
 Depends on: SPEC-001, SPEC-002, SPEC-005, SPEC-006, SPEC-008, SPEC-010, SPEC-011, SPEC-015, SPEC-016
 
 ## Change log
+
+### v0.1.8
+
+SPEC-041 composition: relay-blind pilot reservation/admission MUST fail before quota when effective settlement mode is `enforce`; no per-request exemption or global weakening is allowed. Under `off`/`observe`, ordinary SPEC-005 settlement, provider earnings, payment, and payout readiness proceed normally, but relay-blind rows remain explicitly excluded from positive receipt claims, mirrored/verified status, SPEC-022 verified-work rewards, and positive verified-work aggregates. No v0.4 receipt tuple or settlement-finality change.
 
 ### v0.1.7
 

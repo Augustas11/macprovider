@@ -198,6 +198,7 @@ func (s *Server) redriveSettlementEffect(ctx context.Context, rec journal.Record
 	}
 
 	settlement := storage.ReservationSettlement{
+		RelayBlind:       rec.RelayBlind,
 		AccountID:        rec.AccountID,
 		RequestID:        rec.RequestID,
 		PromptTokens:     rec.PromptTokens,
@@ -218,6 +219,7 @@ func (s *Server) redriveSettlementEffect(ctx context.Context, rec journal.Record
 		})
 	} else if rec.WalletSessionID != "" {
 		settleErr = s.store.FinalizeWalletSessionReservation(ctx, storage.WalletSessionReservationSettlement{
+			RelayBlind:       rec.RelayBlind,
 			SessionID:        rec.WalletSessionID,
 			AccountID:        rec.AccountID,
 			RequestID:        rec.RequestID,
@@ -249,6 +251,7 @@ func (s *Server) redriveSettlementEffect(ctx context.Context, rec journal.Record
 	// too, leaving the effect unsealed for the next tick.
 
 	ev := storage.UsageEvent{
+		RelayBlind:       rec.RelayBlind,
 		RequestID:        rec.RequestID,
 		AccountID:        rec.AccountID,
 		DemoIdentity:     rec.DemoIdentity,

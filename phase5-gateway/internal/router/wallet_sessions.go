@@ -608,7 +608,8 @@ func (s *Server) admitWalletSessionInference(r *http.Request, sessionAuth *walle
 		return storage.WalletSessionAdmissionDecision{}, err
 	}
 	return s.store.AdmitWalletSessionInference(r.Context(), storage.WalletSessionAdmissionRequest{
-		SessionID: sessionAuth.Session.SessionID, AccountID: sessionAuth.Session.AccountID,
+		RelayBlind: relayBlindMetadataFor(r),
+		SessionID:  sessionAuth.Session.SessionID, AccountID: sessionAuth.Session.AccountID,
 		RequestID: requestID(r), Method: r.Method, CanonicalRoute: walletCanonicalRouteForRequest(r),
 		ModelID: model, WindowDate: window, RequestedTokens: reservationTokens, DailyQuota: dailyQuota,
 		Replay: storage.WalletSessionReplayMaterial{

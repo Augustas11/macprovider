@@ -86,10 +86,11 @@ import (
 // these via os/exec. Treating them as opaque is what makes this a
 // REAL cross-service test rather than within-process.
 var (
-	coordinatorBin    string
-	coordinatorCLIBin string
-	gatewayBin        string
-	binBuildErr       error
+	coordinatorBin      string
+	coordinatorCLIBin   string
+	gatewayBin          string
+	relayBlindClientBin string
+	binBuildErr         error
 )
 
 const (
@@ -119,6 +120,7 @@ func TestMain(m *testing.M) {
 	coordinatorBin = filepath.Join(tmpRoot, "coordinator")
 	coordinatorCLIBin = filepath.Join(tmpRoot, "coordinator-cli")
 	gatewayBin = filepath.Join(tmpRoot, "gateway")
+	relayBlindClientBin = filepath.Join(tmpRoot, "relay-blind-client")
 
 	binBuildErr = buildBinary(filepath.Join(repoRoot, "phase4-coordinator"), "./cmd/coordinator", coordinatorBin)
 	if binBuildErr == nil {
@@ -126,6 +128,9 @@ func TestMain(m *testing.M) {
 	}
 	if binBuildErr == nil {
 		binBuildErr = buildBinary(filepath.Join(repoRoot, "phase5-gateway"), "./cmd/gateway", gatewayBin)
+	}
+	if binBuildErr == nil {
+		binBuildErr = buildBinary(filepath.Join(repoRoot, "phase5-gateway"), "./cmd/relay-blind-client", relayBlindClientBin)
 	}
 
 	os.Exit(m.Run())
@@ -218,10 +223,13 @@ type scenario struct {
 	}
 	fakeProvs              []*fakeProvider
 	coordLogBuf            *logBuffer // populated when captureCoordLogs=true
+	gatewayLogBuf          *logBuffer // populated when captureGatewayLogs=true
 	cancelAll              context.CancelFunc
 	rootCtx                context.Context
 	coordCancel            context.CancelFunc
 	coordCmd               *exec.Cmd
+	gatewayCancel          context.CancelFunc
+	gatewayCmd             *exec.Cmd
 	fakeProv               *fakeProvider
 	procWG                 sync.WaitGroup
 	modelHash              string
@@ -265,10 +273,19 @@ type scenarioOpts struct {
 	// sticky test cannot prove the sticky-header contract holds — it
 	// passes trivially. Defaults to 1.
 	providerCount int
+	// providerID pins a caller-selected ID for external provider harnesses.
+	providerID string
+	// externalWebSocketProvider issues auth and configures a pinned WS-only
+	// provider, but leaves connection ownership to the caller.
+	externalWebSocketProvider bool
 	// captureCoordLogs, when true, retains coordinator stdout for the
 	// scenario to inspect. Used by log-class assertion scenarios that
 	// pin `internal_bearer_accepted key=<service_token|operator_key>`.
 	captureCoordLogs bool
+	// captureGatewayLogs retains gateway stdout/stderr for privacy leak
+	// assertions. It is opt-in because the normal test logger already receives
+	// child-process output and retaining every scenario would waste memory.
+	captureGatewayLogs bool
 	// receiptEnabledProvider, when true, makes the fake provider emit a
 	// SPEC-015-shaped non-streaming receipt header so the gateway and
 	// coordinator boundary can be tested without mocking either service.
@@ -289,6 +306,13 @@ type scenarioOpts struct {
 	// pendingDeadlineSeconds overrides settlement.pending_deadline_seconds.
 	// Zero keeps the coordinator default (300).
 	pendingDeadlineSeconds int
+	// The two relay-blind switches are intentionally independent so the
+	// integration suite can exercise mixed-version/default-off failures.
+	gatewayRelayBlindEnabled     bool
+	coordinatorRelayBlindEnabled bool
+	// Optional coordinator trust pins. If omitted for an enabled scenario,
+	// the harness creates public-only keys for its configured providers.
+	relayBlindIdentityPublicKeys map[string]string
 }
 
 type settlementCatalogFixture struct {
@@ -331,6 +355,9 @@ func newScenario(t *testing.T, opts scenarioOpts) *scenario {
 		providerID:    "prov-" + randHex(t, 4),
 		rootCtx:       ctx,
 		cancelAll:     cancel,
+	}
+	if opts.providerID != "" {
+		s.providerID = opts.providerID
 	}
 	t.Cleanup(s.shutdown)
 
@@ -385,10 +412,9 @@ func newScenario(t *testing.T, opts scenarioOpts) *scenario {
 	}
 	providerCfgs := make([]map[string]any, len(providerSlots))
 	for i, slot := range providerSlots {
-		providerCfgs[i] = map[string]any{
-			"provider_id":  slot.ID,
-			"endpoint_url": slot.URL,
-			"display_name": fmt.Sprintf("fake-integration-%d", i),
+		providerCfgs[i] = map[string]any{"provider_id": slot.ID, "display_name": fmt.Sprintf("fake-integration-%d", i)}
+		if !opts.externalWebSocketProvider {
+			providerCfgs[i]["endpoint_url"] = slot.URL
 		}
 	}
 	var settlementCatalog settlementCatalogFixture
@@ -402,13 +428,24 @@ func newScenario(t *testing.T, opts scenarioOpts) *scenario {
 		s.settlementCatalogID = settlementCatalog.catalogID
 		s.settlementCatalogKeyID = settlementCatalog.catalogKeyID
 	}
-	s.writeCoordinatorYAML(buyerPort, provPort, opts.stickyEnabled, coordServiceTok, providerCfgs, settlementCatalog, opts.settlementEnforceMode, opts.pendingDeadlineSeconds)
+	relayBlindIdentityPublicKeys := opts.relayBlindIdentityPublicKeys
+	if opts.coordinatorRelayBlindEnabled && len(relayBlindIdentityPublicKeys) == 0 {
+		relayBlindIdentityPublicKeys = make(map[string]string, len(providerSlots))
+		for _, slot := range providerSlots {
+			pub, _, err := ed25519.GenerateKey(rand.Reader)
+			if err != nil {
+				t.Fatalf("generate relay-blind identity fixture: %v", err)
+			}
+			relayBlindIdentityPublicKeys[slot.ID] = base64.RawURLEncoding.EncodeToString(pub)
+		}
+	}
+	s.writeCoordinatorYAML(buyerPort, provPort, opts.stickyEnabled, coordServiceTok, providerCfgs, settlementCatalog, opts.settlementEnforceMode, opts.pendingDeadlineSeconds, opts.coordinatorRelayBlindEnabled, relayBlindIdentityPublicKeys)
 
 	gwServiceTok := s.serviceToken
 	if opts.gatewayServiceToken != nil {
 		gwServiceTok = *opts.gatewayServiceToken
 	}
-	s.writeGatewayYAML(gwPort, opts.stickyEnabled, gwServiceTok, opts.settlementReconcileIntervalSeconds)
+	s.writeGatewayYAML(gwPort, opts.stickyEnabled, gwServiceTok, opts.settlementReconcileIntervalSeconds, opts.gatewayRelayBlindEnabled)
 
 	if opts.seedAccount {
 		s.apiKey = s.seedGatewayAccountAndKey()
@@ -440,7 +477,7 @@ func newScenario(t *testing.T, opts scenarioOpts) *scenario {
 	s.waitForHealth(s.coordBuyerURL + "/healthz")
 	s.waitForHealth(s.coordProvURL + "/healthz")
 
-	if !opts.skipProvider {
+	if !opts.skipProvider && !opts.externalWebSocketProvider {
 		for i, slot := range providerSlots {
 			fp := newFakeProvider(t, slot.ID, slot.Port, s.coordProvURL, providerTokens[i])
 			if opts.receiptEnabledProvider {
@@ -459,6 +496,9 @@ func newScenario(t *testing.T, opts scenarioOpts) *scenario {
 		}
 	}
 
+	if opts.captureGatewayLogs {
+		s.gatewayLogBuf = newLogBuffer()
+	}
 	s.startGateway(ctx)
 	s.waitForHealth(s.gatewayBaseURL + "/healthz")
 
@@ -488,7 +528,7 @@ func randHex(t *testing.T, n int) string {
 // the audit fixture: we want a clean room for testing the GATEWAY ↔
 // COORDINATOR boundary, not the provider auth gate which has its own
 // dedicated tests in phase4-coordinator/internal/ws).
-func (s *scenario) writeCoordinatorYAML(buyerPort, provPort int, stickyEnabled bool, gatewayServiceToken string, providers []map[string]any, settlementCatalog settlementCatalogFixture, settlementEnforceMode bool, pendingDeadlineSeconds int) {
+func (s *scenario) writeCoordinatorYAML(buyerPort, provPort int, stickyEnabled bool, gatewayServiceToken string, providers []map[string]any, settlementCatalog settlementCatalogFixture, settlementEnforceMode bool, pendingDeadlineSeconds int, relayBlindEnabled bool, relayBlindIdentityPublicKeys map[string]string) {
 	s.t.Helper()
 	tier2Cfg := map[string]any{
 		"observe_enabled":                    false,
@@ -558,6 +598,17 @@ func (s *scenario) writeCoordinatorYAML(buyerPort, provPort int, stickyEnabled b
 			"max_frame_bytes":                 4 << 20,
 			"max_unauthenticated_conn":        64,
 			"max_unauthenticated_conn_per_ip": 16,
+		},
+		"relay_blind": map[string]any{
+			"enabled":                      relayBlindEnabled,
+			"sqlite_path":                  filepath.Join(s.tempDir, "relay-blind.db"),
+			"identity_public_keys":         relayBlindIdentityPublicKeys,
+			"reservation_ttl_seconds":      30,
+			"replay_retention_seconds":     300,
+			"max_clock_skew_seconds":       60,
+			"max_active_reservations":      10000,
+			"max_key_records_per_provider": 8,
+			"metadata_requests_per_minute": 120,
 		},
 		"admission": map[string]any{
 			"pinned_only":                         false,
@@ -815,7 +866,7 @@ type settlementCatalogFile struct {
 	Version   int                        `json:"version"`
 }
 
-func (s *scenario) writeGatewayYAML(gwPort int, stickyEnabled bool, serviceToken string, settlementReconcileIntervalSeconds int) {
+func (s *scenario) writeGatewayYAML(gwPort int, stickyEnabled bool, serviceToken string, settlementReconcileIntervalSeconds int, relayBlindEnabled bool) {
 	s.t.Helper()
 	cfg := map[string]any{
 		"listen": map[string]any{
@@ -896,6 +947,19 @@ func (s *scenario) writeGatewayYAML(gwPort int, stickyEnabled bool, serviceToken
 			"sticky_enabled": stickyEnabled,
 			"sticky_ttl_s":   1800,
 		},
+		"features": map[string]any{
+			"relay_blind_requests": map[string]any{
+				"enabled":                       relayBlindEnabled,
+				"replay_retention_seconds":      600,
+				"timestamp_max_skew_seconds":    60,
+				"route_reservation_ttl_seconds": 30,
+				"max_encrypted_request_bytes":   1048576,
+				"metadata_requests_per_minute":  120,
+				"replay_max_rows_per_account":   10000,
+				"replay_max_bytes_per_account":  4194304,
+				"algorithms":                    []string{"x25519-hkdf-sha256-a256gcm-v1"},
+			},
+		},
 		"explorer": map[string]any{
 			"enabled": false,
 		},
@@ -936,7 +1000,7 @@ func (s *scenario) seedGatewayAccountAndKey() string {
 	cmd := exec.CommandContext(ctx, gatewayBin, "-config", s.gatewayYAML)
 	var seedLogs bytes.Buffer
 	cmd.Stderr = &seedLogs
-	cmd.Stdout = io.Discard
+	cmd.Stdout = &seedLogs
 	if err := cmd.Start(); err != nil {
 		s.t.Fatalf("seed gateway start: %v", err)
 	}
@@ -1101,17 +1165,79 @@ func (s *scenario) rewriteSettlementMode(mode string) {
 
 func (s *scenario) startGateway(ctx context.Context) {
 	s.t.Helper()
-	cmd := exec.CommandContext(ctx, gatewayBin, "-config", s.gatewayYAML)
+	if s.gatewayCancel != nil {
+		s.gatewayCancel()
+	}
+	gatewayCtx, cancel := context.WithCancel(ctx)
+	s.gatewayCancel = cancel
+	cmd := exec.CommandContext(gatewayCtx, gatewayBin, "-config", s.gatewayYAML)
 	cmd.Env = os.Environ()
 	s.streamLogs(cmd, "gateway")
 	if err := cmd.Start(); err != nil {
 		s.t.Fatalf("start gateway: %v", err)
 	}
+	s.gatewayCmd = cmd
 	s.procWG.Add(1)
 	go func() {
 		defer s.procWG.Done()
 		_ = cmd.Wait()
 	}()
+}
+
+func (s *scenario) stopGateway() {
+	s.t.Helper()
+	if s.gatewayCancel != nil {
+		s.gatewayCancel()
+	}
+	if s.gatewayCmd != nil && s.gatewayCmd.Process != nil {
+		_ = s.gatewayCmd.Process.Kill()
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		resp, err := http.Get(s.gatewayBaseURL + "/healthz")
+		if err != nil {
+			s.gatewayCmd = nil
+			return
+		}
+		resp.Body.Close()
+		time.Sleep(50 * time.Millisecond)
+	}
+	s.t.Fatal("gateway healthz still reachable after stop")
+}
+
+func (s *scenario) restartGateway() {
+	s.t.Helper()
+	s.stopGateway()
+	time.Sleep(200 * time.Millisecond)
+	s.startGateway(s.rootCtx)
+	s.waitForHealth(s.gatewayBaseURL + "/healthz")
+}
+
+func (s *scenario) rewriteGatewayRelayBlindEnabled(enabled bool) {
+	s.t.Helper()
+	raw, err := os.ReadFile(s.gatewayYAML)
+	if err != nil {
+		s.t.Fatalf("read gateway yaml: %v", err)
+	}
+	var cfg map[string]any
+	if err := yaml.Unmarshal(raw, &cfg); err != nil {
+		s.t.Fatalf("parse gateway yaml: %v", err)
+	}
+	features, _ := cfg["features"].(map[string]any)
+	relayBlind, _ := features["relay_blind_requests"].(map[string]any)
+	if relayBlind == nil {
+		s.t.Fatal("gateway yaml missing relay-blind feature config")
+	}
+	relayBlind["enabled"] = enabled
+	features["relay_blind_requests"] = relayBlind
+	cfg["features"] = features
+	out, err := yaml.Marshal(cfg)
+	if err != nil {
+		s.t.Fatalf("marshal gateway yaml: %v", err)
+	}
+	if err := os.WriteFile(s.gatewayYAML, out, 0o600); err != nil {
+		s.t.Fatalf("write gateway yaml: %v", err)
+	}
 }
 
 func (s *scenario) streamLogs(cmd *exec.Cmd, tag string) {
@@ -1125,11 +1251,14 @@ func (s *scenario) streamLogs(cmd *exec.Cmd, tag string) {
 		s.t.Fatalf("stderr pipe: %v", err)
 	}
 	var captureOut *logBuffer
-	if tag == "coord" {
+	switch tag {
+	case "coord":
 		captureOut = s.coordLogBuf // nil when captureCoordLogs=false
+	case "gateway":
+		captureOut = s.gatewayLogBuf // nil when captureGatewayLogs=false
 	}
 	go pumpLogs(s.t, tag+".out", stdout, captureOut)
-	go pumpLogs(s.t, tag+".err", stderr, nil)
+	go pumpLogs(s.t, tag+".err", stderr, captureOut)
 }
 
 func pumpLogs(t *testing.T, tag string, r io.ReadCloser, capture *logBuffer) {
@@ -1249,8 +1378,14 @@ func (s *scenario) waitForProviderReady(providerID string) {
 // chatRequest sends a chat completion to the gateway with the given
 // Bearer + extra headers. Returns status, headers, body.
 func (s *scenario) chatRequest(headers map[string]string, body string) (int, http.Header, []byte) {
+	return s.jsonRequest(http.MethodPost, "/v1/chat/completions", headers, body)
+}
+
+// jsonRequest sends an authenticated JSON request through the real gateway.
+// Relay-blind tests use it for both metadata reservation and opaque dispatch.
+func (s *scenario) jsonRequest(method, path string, headers map[string]string, body string) (int, http.Header, []byte) {
 	s.t.Helper()
-	req, err := http.NewRequest(http.MethodPost, s.gatewayBaseURL+"/v1/chat/completions", strings.NewReader(body))
+	req, err := http.NewRequest(method, s.gatewayBaseURL+path, strings.NewReader(body))
 	if err != nil {
 		s.t.Fatalf("new request: %v", err)
 	}
@@ -1261,7 +1396,7 @@ func (s *scenario) chatRequest(headers map[string]string, body string) (int, htt
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		s.t.Fatalf("chat: %v", err)
+		s.t.Fatalf("%s %s: %v", method, path, err)
 	}
 	defer resp.Body.Close()
 	respBody, _ := io.ReadAll(resp.Body)

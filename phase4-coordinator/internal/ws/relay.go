@@ -30,6 +30,7 @@ var (
 	ErrRelayAEADFailed           = errors.New("tier2 aead decrypt failed")
 	ErrRelayBufferExceeded       = errors.New("relay_buffer_exceeded")
 	ErrRelaySettlementIDMismatch = errors.New("settlement request ID mismatch")
+	ErrRelayBlindEvidence        = errors.New("relay-blind validation evidence mismatch")
 	errTier2C2PCounterExhausted  = errors.New("tier2 c2p frame counter exhausted")
 )
 
@@ -44,11 +45,12 @@ var relayEndFrameAADMismatchTotal atomic.Uint64
 var relayBufferExceededTotal atomic.Uint64
 
 type RelayStream struct {
-	RequestID string
-	Chunks    <-chan InferenceResponseChunk
-	Done      <-chan InferenceResponseEnd
-	Errors    <-chan error
-	cancel    func(string)
+	RequestID   string
+	Chunks      <-chan InferenceResponseChunk
+	Done        <-chan InferenceResponseEnd
+	Errors      <-chan error
+	Validations <-chan RelayBlindValidation
+	cancel      func(string)
 }
 
 func (r *RelayStream) Cancel(reason string) {
@@ -73,13 +75,18 @@ func ConversationKeyFromContext(ctx context.Context) string {
 }
 
 type relayActive struct {
-	requestID     string
-	stream        bool
-	bufferMu      sync.Mutex
-	bufferedBytes int64
-	chunks        chan InferenceResponseChunk
-	done          chan InferenceResponseEnd
-	errs          chan error
+	requestID           string
+	stream              bool
+	bufferMu            sync.Mutex
+	bufferedBytes       int64
+	chunks              chan InferenceResponseChunk
+	done                chan InferenceResponseEnd
+	errs                chan error
+	validations         chan RelayBlindValidation
+	relayBlind          *RelayBlindDispatchContext
+	validationSeen      bool
+	validationState     string
+	validationErrorCode string
 }
 
 func (a *relayActive) delivered(ctx context.Context) (<-chan InferenceResponseChunk, <-chan InferenceResponseEnd) {
@@ -219,9 +226,11 @@ type encryptedInferenceRequest struct {
 }
 
 type encryptedInferencePlaintext struct {
-	Type            string `json:"type"`
-	Body            string `json:"body"`
-	ConversationKey string `json:"conversation_key,omitempty"`
+	Type              string                     `json:"type"`
+	Body              string                     `json:"body"`
+	ConversationKey   string                     `json:"conversation_key,omitempty"`
+	BodyEncoding      string                     `json:"body_encoding,omitempty"`
+	RelayBlindContext *RelayBlindDispatchContext `json:"relay_blind_context,omitempty"`
 }
 
 type encryptedInferenceResponseChunk struct {
@@ -424,11 +433,12 @@ func (ps *providerSession) addActive(requestID string, maxConcurrency int, strea
 		return nil, ErrRelayBackpressure
 	}
 	active := &relayActive{
-		requestID: requestID,
-		stream:    stream,
-		chunks:    make(chan InferenceResponseChunk, 256),
-		done:      make(chan InferenceResponseEnd, 1),
-		errs:      make(chan error, 1),
+		requestID:   requestID,
+		stream:      stream,
+		chunks:      make(chan InferenceResponseChunk, 256),
+		done:        make(chan InferenceResponseEnd, 1),
+		errs:        make(chan error, 1),
+		validations: make(chan RelayBlindValidation, 2),
 	}
 	ps.active[requestID] = active
 	return active, nil
@@ -577,17 +587,23 @@ func (ps *providerSession) hasTier2Session() bool {
 }
 
 func (ps *providerSession) sealInferenceRequest(provider pool.Provider, requestID string, body []byte, stream bool, settlement *SettlementReceiptMetadata, conversationKey string) ([]byte, error) {
+	return ps.sealInferenceRequestWithRelayBlind(provider, requestID, body, stream, settlement, conversationKey, nil)
+}
+
+func (ps *providerSession) sealInferenceRequestWithRelayBlind(provider pool.Provider, requestID string, body []byte, stream bool, settlement *SettlementReceiptMetadata, conversationKey string, relayBlind *RelayBlindDispatchContext) ([]byte, error) {
 	ps.tier2Mu.Lock()
 	session := ps.tier2
 	if session == nil {
 		ps.tier2Mu.Unlock()
 		msg := InferenceRequest{
-			Type:            "inference_request",
-			RequestID:       requestID,
-			Stream:          stream,
-			Body:            string(body),
-			Settlement:      settlement,
-			ConversationKey: conversationKey,
+			Type:              "inference_request",
+			RequestID:         requestID,
+			Stream:            stream,
+			Body:              string(body),
+			Settlement:        settlement,
+			ConversationKey:   conversationKey,
+			BodyEncoding:      relayBlindBodyEncoding(relayBlind),
+			RelayBlindContext: relayBlind,
 		}
 		return json.Marshal(msg)
 	}
@@ -606,9 +622,11 @@ func (ps *providerSession) sealInferenceRequest(provider pool.Provider, requestI
 		Seq:        seq,
 	}
 	plaintext, err := json.Marshal(encryptedInferencePlaintext{
-		Type:            "inference_request_plaintext",
-		Body:            string(body),
-		ConversationKey: strings.TrimSpace(conversationKey),
+		Type:              "inference_request_plaintext",
+		Body:              string(body),
+		ConversationKey:   strings.TrimSpace(conversationKey),
+		BodyEncoding:      relayBlindBodyEncoding(relayBlind),
+		RelayBlindContext: relayBlind,
 	})
 	if err != nil {
 		return nil, err
@@ -626,6 +644,13 @@ func (ps *providerSession) sealInferenceRequest(provider pool.Provider, requestI
 		Enc:        envelope.Enc,
 		Settlement: settlement,
 	})
+}
+
+func relayBlindBodyEncoding(context *RelayBlindDispatchContext) string {
+	if context == nil {
+		return ""
+	}
+	return "relay-blind-request-v1"
 }
 
 func (ps *providerSession) openInferenceChunk(providerID, assignedID string, active *relayActive, aad tier2.AEADFrameAAD, envelope tier2.AEADEnvelope) (InferenceResponseChunk, error) {
@@ -758,6 +783,38 @@ func (ps *providerSession) openInferenceEnd(providerID, assignedID string, activ
 		return InferenceResponseEnd{}, err
 	}
 	return end, nil
+}
+
+func (ps *providerSession) openInferenceValidation(providerID, assignedID string, active *relayActive, aad tier2.AEADFrameAAD, envelope tier2.AEADEnvelope) (InferenceResponseValidation, error) {
+	ps.tier2Mu.Lock()
+	defer ps.tier2Mu.Unlock()
+	if ps.tier2 == nil {
+		return InferenceResponseValidation{}, errors.New("encrypted validation for provider without tier2 session")
+	}
+	seq := aad.Seq
+	expectedAAD := tier2.AEADFrameAAD{Type: "inference_response_validation", Direction: "p2c", RequestID: active.requestID, Stream: active.stream, ProviderID: providerID, AssignedID: assignedID, Seq: seq}
+	if seq == ^uint64(0) || ps.tier2P2CSequenceOutsideWindow(seq) || ps.tier2P2CSequenceSeen(seq) {
+		return InferenceResponseValidation{}, errors.New("tier2 validation frame sequence invalid")
+	}
+	plaintext, err := tier2.OpenPillarBFrame(ps.tier2.P2CKey, ps.tier2.P2CNonceBase, ps.tier2.KeyID, seq, expectedAAD, envelope)
+	if err != nil {
+		return InferenceResponseValidation{}, err
+	}
+	ps.markTier2P2CSequenceSeen(seq)
+	var validation InferenceResponseValidation
+	if err := json.Unmarshal(plaintext, &validation); err != nil {
+		return InferenceResponseValidation{}, err
+	}
+	return validation, nil
+}
+
+func relayBlindValidationMatches(expected *RelayBlindDispatchContext, validation RelayBlindValidation, state string) bool {
+	return expected != nil && validation.State == state && validation.InputTokens >= 0 && validation.InputTokens <= expected.InputTokenUpperBound &&
+		validation.ExecutionAuthDigest == expected.ExecutionAuthDigest && validation.EnvelopeDigest == expected.EnvelopeDigest &&
+		validation.KID == expected.KID && validation.ProviderBindingDigest == expected.ProviderBindingDigest &&
+		validation.BuyerBindingDigest == expected.BuyerBindingDigest && validation.AssignedSession == expected.AssignedSession &&
+		validation.RequestID == expected.RequestID && validation.InputTokenUpperBound == expected.InputTokenUpperBound &&
+		validation.MaxOutputTokens == expected.MaxOutputTokens
 }
 
 func (ps *providerSession) consumeRetiredEncryptedFrame(providerID, assignedID string, retired retiredRelayRequest, expectedType, expectedRequestID string, aad tier2.AEADFrameAAD, envelope tier2.AEADEnvelope) error {
@@ -1276,14 +1333,21 @@ func (s *Server) closeProviderForTier2SessionFailure(session *providerSession, p
 }
 
 func (s *Server) DispatchInference(ctx context.Context, provider pool.Provider, requestID string, body []byte, stream bool) (*RelayStream, error) {
-	return s.dispatchInference(ctx, provider, requestID, body, stream, nil)
+	return s.dispatchInference(ctx, provider, requestID, body, stream, nil, nil)
 }
 
 func (s *Server) DispatchInferenceWithSettlement(ctx context.Context, provider pool.Provider, requestID string, body []byte, stream bool, settlement *SettlementReceiptMetadata) (*RelayStream, error) {
-	return s.dispatchInference(ctx, provider, requestID, body, stream, settlement)
+	return s.dispatchInference(ctx, provider, requestID, body, stream, settlement, nil)
 }
 
-func (s *Server) dispatchInference(ctx context.Context, provider pool.Provider, requestID string, body []byte, stream bool, settlementMetadata *SettlementReceiptMetadata) (*RelayStream, error) {
+func (s *Server) DispatchRelayBlindInference(ctx context.Context, provider pool.Provider, requestID string, body []byte, stream bool, relayContext RelayBlindDispatchContext) (*RelayStream, error) {
+	if requestID == "" || relayContext.RequestID != requestID || relayContext.AssignedSession != provider.AssignedID {
+		return nil, ErrRelayBlindEvidence
+	}
+	return s.dispatchInference(ctx, provider, requestID, body, stream, nil, &relayContext)
+}
+
+func (s *Server) dispatchInference(ctx context.Context, provider pool.Provider, requestID string, body []byte, stream bool, settlementMetadata *SettlementReceiptMetadata, relayContext *RelayBlindDispatchContext) (*RelayStream, error) {
 	// Settlement receipts bind request_id to the durable route snapshot.
 	// Preserve that canonical ID on the wire; adding the legacy relay prefix
 	// would make the outer request and signed settlement metadata disagree,
@@ -1292,7 +1356,7 @@ func (s *Server) dispatchInference(ctx context.Context, provider pool.Provider, 
 		if requestID == "" || settlementMetadata.RequestID != requestID {
 			return nil, ErrRelaySettlementIDMismatch
 		}
-	} else if !strings.HasPrefix(requestID, "req-") {
+	} else if relayContext == nil && !strings.HasPrefix(requestID, "req-") {
 		requestID = "req-" + requestID
 	}
 	session, ok := s.sessionFor(provider.ProviderID, provider.AssignedID)
@@ -1312,8 +1376,9 @@ func (s *Server) dispatchInference(ctx context.Context, provider pool.Provider, 
 	if err != nil {
 		return nil, err
 	}
+	active.relayBlind = relayContext
 	s.extendProviderReadDeadlineForActive(provider)
-	payload, err := session.sealInferenceRequest(provider, requestID, body, stream, settlementMetadata, ConversationKeyFromContext(ctx))
+	payload, err := session.sealInferenceRequestWithRelayBlind(provider, requestID, body, stream, settlementMetadata, ConversationKeyFromContext(ctx), relayContext)
 	if err != nil {
 		if errors.Is(err, errTier2C2PCounterExhausted) {
 			s.closeProviderForTier2SessionFailure(session, provider.ProviderID, provider.AssignedID, requestID, "counter_exhausted", ErrRelayAEADFailed)
@@ -1352,11 +1417,12 @@ func (s *Server) dispatchInference(ctx context.Context, provider pool.Provider, 
 	}()
 	chunks, done := active.delivered(ctx)
 	return &RelayStream{
-		RequestID: requestID,
-		Chunks:    chunks,
-		Done:      done,
-		Errors:    active.errs,
-		cancel:    cancel,
+		RequestID:   requestID,
+		Chunks:      chunks,
+		Done:        done,
+		Errors:      active.errs,
+		Validations: active.validations,
+		cancel:      cancel,
 	}, nil
 }
 
@@ -1468,6 +1534,74 @@ func (s *Server) relayChunkWouldExceed(active *relayActive, n int) bool {
 	return !active.reserveBufferedBytes(s.cfg.RelayMaxRequestBufferBytes(), n)
 }
 
+func (s *Server) handleInferenceValidation(providerID, assignedID string, payload []byte) {
+	session, ok := s.sessionFor(providerID, assignedID)
+	if !ok {
+		return
+	}
+	var envelope encryptedInferenceResponseEnd
+	if err := json.Unmarshal(payload, &envelope); err != nil || containsControlChar(envelope.RequestID) {
+		return
+	}
+	requestID := envelope.RequestID
+	var frame InferenceResponseValidation
+	if envelope.Encrypted {
+		aad, _, err := tier2.DecodeAEADAAD(envelope.Enc.AAD)
+		if err != nil || aad.Type != "inference_response_validation" || aad.Direction != "p2c" {
+			s.closeProviderForTier2AEADFailure(session, providerID, assignedID, requestID, "invalid relay-blind validation AAD")
+			return
+		}
+		requestID = aad.RequestID
+		active, exists := session.activeFor(requestID)
+		if !exists {
+			s.closeProviderForTier2AEADFailure(session, providerID, assignedID, requestID, "unknown relay-blind validation request_id")
+			return
+		}
+		frame, err = session.openInferenceValidation(providerID, assignedID, active, aad, tier2.AEADEnvelope{Encrypted: true, Enc: envelope.Enc})
+		if err != nil {
+			s.closeProviderForTier2AEADFailure(session, providerID, assignedID, requestID, err.Error())
+			return
+		}
+		frame.RequestID = requestID
+	} else {
+		if session.hasTier2Session() || json.Unmarshal(payload, &frame) != nil {
+			if session.hasTier2Session() {
+				s.closeProviderForTier2AEADFailure(session, providerID, assignedID, requestID, "tier2 encrypted validation required")
+			}
+			return
+		}
+		requestID = frame.RequestID
+	}
+	active, ok := session.activeFor(requestID)
+	validEvidence := ok && frame.Type == "inference_response_validation" && frame.RequestID == requestID
+	if validEvidence {
+		validation := frame.RelayBlindValidation
+		validEvidence = (relayBlindValidationMatches(active.relayBlind, validation, "validated") && validation.ErrorCode == "") ||
+			(relayBlindValidationMatches(active.relayBlind, validation, "rejected") && validation.InputTokens == 0 && relayBlindRejectionCode(validation.ErrorCode))
+	}
+	if !validEvidence {
+		if active, found := session.removeActive(requestID); found {
+			active.errs <- ErrRelayBlindEvidence
+			close(active.chunks)
+		}
+		return
+	}
+	active.bufferMu.Lock()
+	duplicate := active.validationSeen
+	active.validationSeen = true
+	active.validationState = frame.RelayBlindValidation.State
+	active.validationErrorCode = frame.RelayBlindValidation.ErrorCode
+	active.bufferMu.Unlock()
+	if duplicate {
+		if active, found := session.removeActive(requestID); found {
+			active.errs <- ErrRelayBlindEvidence
+			close(active.chunks)
+		}
+		return
+	}
+	active.validations <- frame.RelayBlindValidation
+}
+
 func (s *Server) handleInferenceEnd(providerID, assignedID string, payload []byte) {
 	session, ok := s.sessionFor(providerID, assignedID)
 	if !ok {
@@ -1545,6 +1679,22 @@ func (s *Server) handleInferenceEnd(providerID, assignedID string, payload []byt
 		s.log.Warn().Str("provider_id", providerID).Msg("invalid inference_response_end request_id (control chars)")
 		return
 	}
+	if pending, exists := session.activeFor(end.RequestID); exists && pending.relayBlind != nil {
+		pending.bufferMu.Lock()
+		validationState, validationErrorCode := pending.validationState, pending.validationErrorCode
+		pending.bufferMu.Unlock()
+		expectedState := "terminal"
+		if validationState == "rejected" {
+			expectedState = "rejected"
+		}
+		if end.RelayBlindValidation == nil || !relayBlindValidationMatches(pending.relayBlind, *end.RelayBlindValidation, expectedState) || end.RelayBlindValidation.ErrorCode != validationErrorCode {
+			if active, found := session.removeActive(end.RequestID); found {
+				active.errs <- ErrRelayBlindEvidence
+				close(active.chunks)
+			}
+			return
+		}
+	}
 	active, ok := session.removeActive(end.RequestID)
 	if !ok {
 		s.log.Warn().Str("provider_id", providerID).Str("request_id", end.RequestID).Msg("unknown inference_response_end request_id")
@@ -1553,6 +1703,15 @@ func (s *Server) handleInferenceEnd(providerID, assignedID string, payload []byt
 	active.done <- end
 	close(active.chunks)
 	s.closeProviderForTier2RekeyIfDrained(session, providerID, assignedID, end.RequestID)
+}
+
+func relayBlindRejectionCode(code string) bool {
+	switch code {
+	case "relay_blind_ciphertext_invalid", "relay_blind_decrypt_failed":
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *Server) handleNAK(providerID, assignedID string, payload []byte) {

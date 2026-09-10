@@ -52,22 +52,26 @@ type Result struct {
 }
 
 type RequestCredit struct {
-	SQLiteID                  int64
-	RequestID                 string
-	AttemptN                  int
-	ProviderID                string
-	TSUTC                     time.Time
-	CreatedAtUTC              time.Time
-	UpdatedAtUTC              sql.NullTime
-	PromptTokens              sql.NullInt64
-	CompletionTokens          sql.NullInt64
-	EstimatedCompletionTokens sql.NullInt64
-	UsageSource               string
-	ProviderCredits           int64
-	FaultFlag                 string
-	Quarantined               bool
-	SettlementPolicyMode      string
-	Spec022Verified           bool
+	SQLiteID                     int64
+	RequestID                    string
+	AttemptN                     int
+	ProviderID                   string
+	TSUTC                        time.Time
+	CreatedAtUTC                 time.Time
+	UpdatedAtUTC                 sql.NullTime
+	PromptTokens                 sql.NullInt64
+	CompletionTokens             sql.NullInt64
+	EstimatedCompletionTokens    sql.NullInt64
+	UsageSource                  string
+	ProviderCredits              int64
+	FaultFlag                    string
+	Quarantined                  bool
+	SettlementPolicyMode         string
+	Spec022Verified              bool
+	RequestedPrivacyMode         string
+	EffectivePrivacyOutcome      string
+	PositiveVerificationExcluded bool
+	RewardsExcluded              bool
 }
 
 type ProviderIdentity struct {
@@ -296,8 +300,12 @@ func FetchRequestCreditsThrough(ctx context.Context, db *sql.DB, startID, endID 
 }
 
 type requestCreditSourceCapabilities struct {
-	HasSettlementPolicyMode bool
-	HasSpec022PayableView   bool
+	HasSettlementPolicyMode         bool
+	HasSpec022PayableView           bool
+	HasRequestedPrivacyMode         bool
+	HasEffectivePrivacyOutcome      bool
+	HasPositiveVerificationExcluded bool
+	HasRewardsExcluded              bool
 }
 
 func detectRequestCreditSourceCapabilities(ctx context.Context, db *sql.DB) (requestCreditSourceCapabilities, error) {
@@ -309,9 +317,29 @@ func detectRequestCreditSourceCapabilities(ctx context.Context, db *sql.DB) (req
 	if err != nil {
 		return requestCreditSourceCapabilities{}, err
 	}
+	hasRequestedPrivacyMode, err := sqliteColumnExists(ctx, db, "ledger_request_credits", "requested_privacy_mode")
+	if err != nil {
+		return requestCreditSourceCapabilities{}, err
+	}
+	hasEffectivePrivacyOutcome, err := sqliteColumnExists(ctx, db, "ledger_request_credits", "effective_privacy_outcome")
+	if err != nil {
+		return requestCreditSourceCapabilities{}, err
+	}
+	hasPositiveVerificationExcluded, err := sqliteColumnExists(ctx, db, "ledger_request_credits", "positive_verification_excluded")
+	if err != nil {
+		return requestCreditSourceCapabilities{}, err
+	}
+	hasRewardsExcluded, err := sqliteColumnExists(ctx, db, "ledger_request_credits", "rewards_excluded")
+	if err != nil {
+		return requestCreditSourceCapabilities{}, err
+	}
 	return requestCreditSourceCapabilities{
-		HasSettlementPolicyMode: hasPolicy,
-		HasSpec022PayableView:   hasPayable,
+		HasSettlementPolicyMode:         hasPolicy,
+		HasSpec022PayableView:           hasPayable,
+		HasRequestedPrivacyMode:         hasRequestedPrivacyMode,
+		HasEffectivePrivacyOutcome:      hasEffectivePrivacyOutcome,
+		HasPositiveVerificationExcluded: hasPositiveVerificationExcluded,
+		HasRewardsExcluded:              hasRewardsExcluded,
 	}, nil
 }
 
@@ -328,6 +356,22 @@ func requestCreditsQuery(caps requestCreditSourceCapabilities, bounded bool) str
            THEN 1 ELSE 0
        END`, policyExpr)
 	}
+	requestedPrivacyExpr := "'none'"
+	if caps.HasRequestedPrivacyMode {
+		requestedPrivacyExpr = "COALESCE(lrc.requested_privacy_mode, 'none')"
+	}
+	effectivePrivacyExpr := "'plaintext'"
+	if caps.HasEffectivePrivacyOutcome {
+		effectivePrivacyExpr = "COALESCE(lrc.effective_privacy_outcome, 'plaintext')"
+	}
+	positiveExcludedExpr := "0"
+	if caps.HasPositiveVerificationExcluded {
+		positiveExcludedExpr = "COALESCE(lrc.positive_verification_excluded, 0)"
+	}
+	rewardsExcludedExpr := "0"
+	if caps.HasRewardsExcluded {
+		rewardsExcludedExpr = "COALESCE(lrc.rewards_excluded, 0)"
+	}
 	where := "WHERE lrc.id > ?"
 	if bounded {
 		where += "\n   AND lrc.id <= ?"
@@ -337,11 +381,13 @@ SELECT lrc.id, lrc.request_id, lrc.attempt_n, lrc.provider_id, lrc.ts_utc, lrc.c
        lrc.prompt_tokens, lrc.completion_tokens, lrc.estimated_completion_tokens, lrc.usage_source,
        lrc.provider_credits, lrc.fault_flag, lrc.quarantined,
        %s AS settlement_policy_mode,
-       %s AS spec022_verified
+       %s AS spec022_verified,
+       %s AS requested_privacy_mode, %s AS effective_privacy_outcome,
+       %s AS positive_verification_excluded, %s AS rewards_excluded
   FROM ledger_request_credits lrc
  %s
  ORDER BY lrc.id
- LIMIT ?`, policyExpr, verifiedExpr, where)
+ LIMIT ?`, policyExpr, verifiedExpr, requestedPrivacyExpr, effectivePrivacyExpr, positiveExcludedExpr, rewardsExcludedExpr, where)
 }
 
 func sqliteColumnExists(ctx context.Context, db *sql.DB, table, column string) (bool, error) {
@@ -389,13 +435,14 @@ func scanRequestCredits(ctx context.Context, db *sql.DB, q string, args ...any) 
 		var row RequestCredit
 		var ts, created sql.NullString
 		var updated sql.NullString
-		var quarantined, spec022Verified int
+		var quarantined, spec022Verified, positiveExcluded, rewardsExcluded int
 		if err := cur.Scan(
 			&row.SQLiteID, &row.RequestID, &row.AttemptN, &row.ProviderID,
 			&ts, &created, &updated,
 			&row.PromptTokens, &row.CompletionTokens, &row.EstimatedCompletionTokens,
 			&row.UsageSource, &row.ProviderCredits, &row.FaultFlag, &quarantined,
 			&row.SettlementPolicyMode, &spec022Verified,
+			&row.RequestedPrivacyMode, &row.EffectivePrivacyOutcome, &positiveExcluded, &rewardsExcluded,
 		); err != nil {
 			return nil, fmt.Errorf("scan ledger_request_credits: %w", err)
 		}
@@ -413,6 +460,8 @@ func scanRequestCredits(ctx context.Context, db *sql.DB, q string, args ...any) 
 		}
 		row.Quarantined = quarantined != 0
 		row.Spec022Verified = spec022Verified != 0
+		row.PositiveVerificationExcluded = positiveExcluded != 0
+		row.RewardsExcluded = rewardsExcluded != 0
 		out = append(out, row)
 	}
 	if err := cur.Err(); err != nil {
@@ -537,11 +586,13 @@ func upsertRequestCredit(ctx context.Context, tx *sql.Tx, row RequestCredit) err
 	if _, err := tx.ExecContext(ctx, `SELECT stats_billing_mirror_upsert_request_credit(
     $1, $2, $3, $4, $5, $6, $7,
     $8, $9, $10, $11,
-    $12, $13, $14, $15, $16
+    $12, $13, $14, $15, $16,
+    $17, $18, $19, $20
 )`,
 		row.SQLiteID, row.RequestID, row.AttemptN, row.ProviderID, row.TSUTC, row.CreatedAtUTC, nullTimeArg(row.UpdatedAtUTC),
 		nullInt64Arg(row.PromptTokens), nullInt64Arg(row.CompletionTokens), nullInt64Arg(row.EstimatedCompletionTokens),
-		row.UsageSource, row.ProviderCredits, row.FaultFlag, row.Quarantined, row.SettlementPolicyMode, row.Spec022Verified); err != nil {
+		row.UsageSource, row.ProviderCredits, row.FaultFlag, row.Quarantined, row.SettlementPolicyMode, row.Spec022Verified,
+		row.RequestedPrivacyMode, row.EffectivePrivacyOutcome, row.PositiveVerificationExcluded, row.RewardsExcluded); err != nil {
 		return fmt.Errorf("upsert request credit %q/%d/%q: %w", row.RequestID, row.AttemptN, row.ProviderID, err)
 	}
 	return nil
@@ -661,7 +712,11 @@ var schemaStatements = []string{
     fault_flag TEXT NOT NULL DEFAULT 'none' CHECK (fault_flag IN ('none','breaker_qualifying','null_usage_error')),
     quarantined BOOLEAN NOT NULL DEFAULT FALSE,
     settlement_policy_mode TEXT NOT NULL DEFAULT 'legacy' CHECK (settlement_policy_mode IN ('legacy','observe','enforce')),
-    spec022_verified BOOLEAN NOT NULL DEFAULT FALSE
+    spec022_verified BOOLEAN NOT NULL DEFAULT FALSE,
+    requested_privacy_mode TEXT NOT NULL DEFAULT 'none',
+    effective_privacy_outcome TEXT NOT NULL DEFAULT 'plaintext',
+    positive_verification_excluded BOOLEAN NOT NULL DEFAULT FALSE,
+    rewards_excluded BOOLEAN NOT NULL DEFAULT FALSE
 )`,
 	`ALTER TABLE ledger_request_credits ADD COLUMN IF NOT EXISTS sqlite_lrc_id BIGINT`,
 	`ALTER TABLE ledger_request_credits ADD COLUMN IF NOT EXISTS request_id TEXT`,
@@ -679,8 +734,16 @@ var schemaStatements = []string{
 	`ALTER TABLE ledger_request_credits ADD COLUMN IF NOT EXISTS quarantined BOOLEAN DEFAULT FALSE`,
 	`ALTER TABLE ledger_request_credits ADD COLUMN IF NOT EXISTS settlement_policy_mode TEXT DEFAULT 'legacy'`,
 	`ALTER TABLE ledger_request_credits ADD COLUMN IF NOT EXISTS spec022_verified BOOLEAN DEFAULT FALSE`,
+	`ALTER TABLE ledger_request_credits ADD COLUMN IF NOT EXISTS requested_privacy_mode TEXT DEFAULT 'none'`,
+	`ALTER TABLE ledger_request_credits ADD COLUMN IF NOT EXISTS effective_privacy_outcome TEXT DEFAULT 'plaintext'`,
+	`ALTER TABLE ledger_request_credits ADD COLUMN IF NOT EXISTS positive_verification_excluded BOOLEAN DEFAULT FALSE`,
+	`ALTER TABLE ledger_request_credits ADD COLUMN IF NOT EXISTS rewards_excluded BOOLEAN DEFAULT FALSE`,
 	`UPDATE ledger_request_credits SET settlement_policy_mode = 'legacy' WHERE settlement_policy_mode IS NULL`,
 	`UPDATE ledger_request_credits SET spec022_verified = FALSE WHERE spec022_verified IS NULL`,
+	`UPDATE ledger_request_credits SET requested_privacy_mode = 'none' WHERE requested_privacy_mode IS NULL`,
+	`UPDATE ledger_request_credits SET effective_privacy_outcome = 'plaintext' WHERE effective_privacy_outcome IS NULL`,
+	`UPDATE ledger_request_credits SET positive_verification_excluded = FALSE WHERE positive_verification_excluded IS NULL`,
+	`UPDATE ledger_request_credits SET rewards_excluded = FALSE WHERE rewards_excluded IS NULL`,
 	`DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'lrc_mirror_attempt_nonnegative') THEN
@@ -818,7 +881,11 @@ $$`,
     p_fault_flag TEXT,
     p_quarantined BOOLEAN,
     p_settlement_policy_mode TEXT,
-    p_spec022_verified BOOLEAN
+    p_spec022_verified BOOLEAN,
+    p_requested_privacy_mode TEXT,
+    p_effective_privacy_outcome TEXT,
+    p_positive_verification_excluded BOOLEAN,
+    p_rewards_excluded BOOLEAN
 )
 RETURNS void
 LANGUAGE plpgsql
@@ -851,11 +918,14 @@ BEGIN
     INSERT INTO ledger_request_credits (
         sqlite_lrc_id, request_id, attempt_n, provider_id, ts_utc, created_at_utc, updated_at_utc,
         prompt_tokens, completion_tokens, estimated_completion_tokens, usage_source,
-        provider_credits, fault_flag, quarantined, settlement_policy_mode, spec022_verified
+        provider_credits, fault_flag, quarantined, settlement_policy_mode, spec022_verified,
+        requested_privacy_mode, effective_privacy_outcome, positive_verification_excluded, rewards_excluded
     ) VALUES (
         p_sqlite_lrc_id, p_request_id, p_attempt_n, p_provider_id, p_ts_utc, p_created_at_utc, p_updated_at_utc,
         p_prompt_tokens, p_completion_tokens, p_estimated_completion_tokens, p_usage_source,
-        p_provider_credits, p_fault_flag, COALESCE(p_quarantined, FALSE), v_settlement_policy_mode, v_spec022_verified
+        p_provider_credits, p_fault_flag, COALESCE(p_quarantined, FALSE), v_settlement_policy_mode, v_spec022_verified,
+        COALESCE(NULLIF(p_requested_privacy_mode, ''), 'none'), COALESCE(NULLIF(p_effective_privacy_outcome, ''), 'plaintext'),
+        COALESCE(p_positive_verification_excluded, FALSE), COALESCE(p_rewards_excluded, FALSE)
     )
     ON CONFLICT (request_id, attempt_n, provider_id) DO UPDATE SET
         sqlite_lrc_id = EXCLUDED.sqlite_lrc_id,
@@ -870,7 +940,11 @@ BEGIN
         fault_flag = EXCLUDED.fault_flag,
         quarantined = EXCLUDED.quarantined,
         settlement_policy_mode = EXCLUDED.settlement_policy_mode,
-        spec022_verified = EXCLUDED.spec022_verified;
+        spec022_verified = EXCLUDED.spec022_verified,
+        requested_privacy_mode = EXCLUDED.requested_privacy_mode,
+        effective_privacy_outcome = EXCLUDED.effective_privacy_outcome,
+        positive_verification_excluded = EXCLUDED.positive_verification_excluded,
+        rewards_excluded = EXCLUDED.rewards_excluded;
 
     IF v_spec022_verified AND NOT COALESCE(v_was_spec022_verified, FALSE) THEN
         INSERT INTO ledger_request_credit_spec022_verified_audit (
@@ -906,7 +980,7 @@ BEGIN
     ) THEN
         REVOKE ALL ON FUNCTION stats_billing_mirror_upsert_request_credit(BIGINT, TEXT, INTEGER, TEXT, TIMESTAMPTZ, TIMESTAMPTZ, TIMESTAMPTZ, BIGINT, BIGINT, BIGINT, TEXT, BIGINT, TEXT, BOOLEAN) FROM PUBLIC;
     END IF;
-    REVOKE ALL ON FUNCTION stats_billing_mirror_upsert_request_credit(BIGINT, TEXT, INTEGER, TEXT, TIMESTAMPTZ, TIMESTAMPTZ, TIMESTAMPTZ, BIGINT, BIGINT, BIGINT, TEXT, BIGINT, TEXT, BOOLEAN, TEXT, BOOLEAN) FROM PUBLIC;
+    REVOKE ALL ON FUNCTION stats_billing_mirror_upsert_request_credit(BIGINT, TEXT, INTEGER, TEXT, TIMESTAMPTZ, TIMESTAMPTZ, TIMESTAMPTZ, BIGINT, BIGINT, BIGINT, TEXT, BIGINT, TEXT, BOOLEAN, TEXT, BOOLEAN, TEXT, TEXT, BOOLEAN, BOOLEAN) FROM PUBLIC;
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'stats_billing_mirror_writer') THEN
         REVOKE ALL ON ledger_request_credits FROM stats_billing_mirror_writer;
         REVOKE ALL ON provider_tokens FROM stats_billing_mirror_writer;
@@ -915,7 +989,7 @@ BEGIN
         GRANT EXECUTE ON FUNCTION stats_billing_mirror_load_state(TEXT) TO stats_billing_mirror_writer;
         GRANT EXECUTE ON FUNCTION stats_billing_mirror_save_state(TEXT, BIGINT, BIGINT) TO stats_billing_mirror_writer;
         GRANT EXECUTE ON FUNCTION stats_billing_mirror_ensure_provider(TEXT, TEXT, TEXT, TIMESTAMPTZ, TIMESTAMPTZ) TO stats_billing_mirror_writer;
-        GRANT EXECUTE ON FUNCTION stats_billing_mirror_upsert_request_credit(BIGINT, TEXT, INTEGER, TEXT, TIMESTAMPTZ, TIMESTAMPTZ, TIMESTAMPTZ, BIGINT, BIGINT, BIGINT, TEXT, BIGINT, TEXT, BOOLEAN, TEXT, BOOLEAN) TO stats_billing_mirror_writer;
+        GRANT EXECUTE ON FUNCTION stats_billing_mirror_upsert_request_credit(BIGINT, TEXT, INTEGER, TEXT, TIMESTAMPTZ, TIMESTAMPTZ, TIMESTAMPTZ, BIGINT, BIGINT, BIGINT, TEXT, BIGINT, TEXT, BOOLEAN, TEXT, BOOLEAN, TEXT, TEXT, BOOLEAN, BOOLEAN) TO stats_billing_mirror_writer;
     END IF;
 END $$`,
 }

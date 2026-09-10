@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 
 	"github.com/augstar/macprovider-gateway/internal/storage"
@@ -52,6 +53,7 @@ func (s *Store) SaveSettlementFallbackCandidate(ctx context.Context, candidate s
 	}
 	usage := storage.ReservationSettlement{
 		PromptTokens: candidate.PromptTokens, CompletionTokens: candidate.CompletionTokens, MaxTotalTokens: candidate.MaxTotalTokens,
+		RelayBlind: candidate.RelayBlind,
 	}
 	if err := normalizeSettlementTokens(&usage); err != nil {
 		return err
@@ -62,13 +64,15 @@ func (s *Store) SaveSettlementFallbackCandidate(ctx context.Context, candidate s
 	}
 	defer tx.Rollback()
 	var window, createdAt, status, sessionID string
+	var requested, effective, envelope, keyRecord, kid, providerBinding string
+	var inputCap, outputCap int64
 	var reservedTokens int64
 	if err := tx.QueryRowContext(ctx, `
-		SELECT qr.window_date, qr.created_at, qr.status, qr.reserved_tokens, COALESCE(wrm.session_id, '')
+		SELECT qr.window_date, qr.created_at, qr.status, qr.reserved_tokens, COALESCE(wrm.session_id, ''), `+relayBlindSelectColumns+`
 		FROM quota_reservations qr LEFT JOIN wallet_session_request_map wrm
 		ON wrm.account_id = qr.account_id AND wrm.request_id = qr.request_id
 		WHERE qr.account_id = ? AND qr.request_id = ?`, candidate.AccountID, candidate.RequestID).
-		Scan(&window, &createdAt, &status, &reservedTokens, &sessionID); err != nil {
+		Scan(&window, &createdAt, &status, &reservedTokens, &sessionID, &requested, &effective, &envelope, &keyRecord, &kid, &providerBinding, &inputCap, &outputCap); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return storage.ErrReservationNotFound
 		}
@@ -80,6 +84,16 @@ func (s *Store) SaveSettlementFallbackCandidate(ctx context.Context, candidate s
 	if status != "active" {
 		return storage.ErrReservationTerminal
 	}
+	resolved, err := resolveRelayBlind(relayBlindFromValues(requested, effective, envelope, keyRecord, kid, providerBinding, inputCap, outputCap), candidate.RelayBlind)
+	if err != nil {
+		return err
+	}
+	candidate.RelayBlind = resolved
+	usage.RelayBlind = resolved
+	if err := normalizeSettlementTokens(&usage); err != nil {
+		return err
+	}
+	candidate.PromptTokens, candidate.CompletionTokens = usage.PromptTokens, usage.CompletionTokens
 	if candidate.MaxTotalTokens > reservedTokens {
 		return fmt.Errorf("settlement fallback exceeds reservation")
 	}
@@ -88,18 +102,22 @@ func (s *Store) SaveSettlementFallbackCandidate(ctx context.Context, candidate s
 	})
 	if err == nil {
 		existing.ReservationCreatedAt = candidate.ReservationCreatedAt
-		if existing != candidate {
+		if !reflect.DeepEqual(existing, candidate) {
 			return fmt.Errorf("settlement fallback candidate mismatch")
 		}
 	} else if errors.Is(err, storage.ErrNotFound) {
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO settlement_fallback_candidates(account_id, request_id, required_internal_request_id, reservation_created_at,
 				wallet_session_id, demo_identity, demo_token_hash, window_date, prompt_tokens, completion_tokens,
-				max_total_tokens, token_source, outcome)
-			VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				max_total_tokens, token_source, outcome, requested_privacy_mode, effective_privacy_outcome,
+				relay_blind_envelope_digest, relay_blind_key_record_digest, relay_blind_kid,
+				relay_blind_provider_binding_digest, input_token_upper_bound, max_output_tokens)
+			VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			candidate.AccountID, candidate.RequestID, candidate.RequiredInternalRequestID, createdAt, candidate.WalletSessionID, candidate.DemoIdentity,
 			candidate.DemoTokenHash, candidate.WindowDate, candidate.PromptTokens, candidate.CompletionTokens,
-			candidate.MaxTotalTokens, candidate.TokenSource, candidate.Outcome); err != nil {
+			candidate.MaxTotalTokens, candidate.TokenSource, candidate.Outcome,
+			relayBlindArgs(candidate.RelayBlind)[0], relayBlindArgs(candidate.RelayBlind)[1], relayBlindArgs(candidate.RelayBlind)[2], relayBlindArgs(candidate.RelayBlind)[3],
+			relayBlindArgs(candidate.RelayBlind)[4], relayBlindArgs(candidate.RelayBlind)[5], relayBlindArgs(candidate.RelayBlind)[6], relayBlindArgs(candidate.RelayBlind)[7]); err != nil {
 			return err
 		}
 	} else {
@@ -122,17 +140,23 @@ func lookupSettlementFallbackCandidate(ctx context.Context, q interface {
 }, reservation storage.ActiveReservation) (storage.SettlementFallbackCandidate, error) {
 	var candidate storage.SettlementFallbackCandidate
 	var createdAt string
+	var requested, effective, envelope, keyRecord, kid, providerBinding string
+	var inputCap, outputCap int64
 	err := q.QueryRowContext(ctx, `
 		SELECT c.account_id, c.request_id, c.required_internal_request_id, c.reservation_created_at, c.wallet_session_id,
 			c.demo_identity, c.demo_token_hash, c.window_date, c.prompt_tokens, c.completion_tokens,
-			c.max_total_tokens, c.token_source, c.outcome
+			c.max_total_tokens, c.token_source, c.outcome,
+			c.requested_privacy_mode, c.effective_privacy_outcome, c.relay_blind_envelope_digest,
+			c.relay_blind_key_record_digest, c.relay_blind_kid, c.relay_blind_provider_binding_digest,
+			c.input_token_upper_bound, c.max_output_tokens
 		FROM settlement_fallback_candidates c JOIN quota_reservations qr
 		ON qr.account_id = c.account_id AND qr.request_id = c.request_id AND qr.created_at = c.reservation_created_at
 		WHERE c.account_id = ? AND c.request_id = ? AND c.reservation_created_at = ? AND qr.status = 'active'`,
 		reservation.AccountID, reservation.RequestID, encodeTime(reservation.CreatedAt.UTC())).Scan(
 		&candidate.AccountID, &candidate.RequestID, &candidate.RequiredInternalRequestID, &createdAt, &candidate.WalletSessionID,
 		&candidate.DemoIdentity, &candidate.DemoTokenHash, &candidate.WindowDate, &candidate.PromptTokens,
-		&candidate.CompletionTokens, &candidate.MaxTotalTokens, &candidate.TokenSource, &candidate.Outcome)
+		&candidate.CompletionTokens, &candidate.MaxTotalTokens, &candidate.TokenSource, &candidate.Outcome,
+		&requested, &effective, &envelope, &keyRecord, &kid, &providerBinding, &inputCap, &outputCap)
 	if errors.Is(err, sql.ErrNoRows) {
 		return storage.SettlementFallbackCandidate{}, storage.ErrNotFound
 	}
@@ -140,5 +164,6 @@ func lookupSettlementFallbackCandidate(ctx context.Context, q interface {
 		return storage.SettlementFallbackCandidate{}, err
 	}
 	candidate.ReservationCreatedAt = decodeTime(createdAt)
+	candidate.RelayBlind = relayBlindFromValues(requested, effective, envelope, keyRecord, kid, providerBinding, inputCap, outputCap)
 	return candidate, nil
 }

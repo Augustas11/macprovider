@@ -1490,7 +1490,11 @@ func setGatewayRetryAfter(w http.ResponseWriter, status int, code string, retrya
 func writeError(w http.ResponseWriter, status int, typ, code, message string) {
 	retryable := gatewayRetryable(code)
 	setGatewayRetryAfter(w, status, code, retryable)
-	writeJSON(w, status, map[string]any{"error": map[string]any{"message": message, "type": typ, "param": nil, "code": code, "retryable": retryable}})
+	payload := map[string]any{"message": message, "type": typ, "param": nil, "code": code, "retryable": retryable}
+	if metadata := relayBlindOutcomeMetadata(w.Header(), code); metadata != nil {
+		payload["macprovider"] = metadata
+	}
+	writeJSON(w, status, map[string]any{"error": payload})
 }
 
 func writeSpec019PreflightError(w http.ResponseWriter, status int, code, message, param string) {

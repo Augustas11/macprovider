@@ -83,6 +83,8 @@ public struct AppConfig: Equatable, Sendable {
     public var publishesSupportedModels: Bool
     public var enableWarmSwap: Bool
     public var enableReceipts: Bool
+    public var relayBlindEnabled: Bool
+    public var relayBlindStateDirectory: String?
     public var swapDrainTimeoutSeconds: Int
     public var ctlSocketPath: String?
     public var switchStatePath: String?
@@ -176,6 +178,8 @@ public struct AppConfig: Equatable, Sendable {
             publishesSupportedModels: false,
             enableWarmSwap: false,
             enableReceipts: false,
+            relayBlindEnabled: false,
+            relayBlindStateDirectory: nil,
             swapDrainTimeoutSeconds: 30,
             ctlSocketPath: nil,
             switchStatePath: nil,
@@ -217,6 +221,8 @@ public struct CLIOverrides: Equatable, Sendable {
     public var publishesSupportedModels: Bool?
     public var enableWarmSwap: Bool?
     public var enableReceipts: Bool?
+    public var relayBlindEnabled: Bool?
+    public var relayBlindStateDirectory: String?
     public var swapDrainTimeoutSeconds: Int?
     public var ctlSocketPath: String?
     public var switchStatePath: String?
@@ -263,6 +269,8 @@ public struct CLIOverrides: Equatable, Sendable {
         publishesSupportedModels: Bool? = nil,
         enableWarmSwap: Bool? = nil,
         enableReceipts: Bool? = nil,
+        relayBlindEnabled: Bool? = nil,
+        relayBlindStateDirectory: String? = nil,
         swapDrainTimeoutSeconds: Int? = nil,
         ctlSocketPath: String? = nil,
         switchStatePath: String? = nil,
@@ -303,6 +311,8 @@ public struct CLIOverrides: Equatable, Sendable {
         self.publishesSupportedModels = publishesSupportedModels
         self.enableWarmSwap = enableWarmSwap
         self.enableReceipts = enableReceipts
+        self.relayBlindEnabled = relayBlindEnabled
+        self.relayBlindStateDirectory = relayBlindStateDirectory
         self.swapDrainTimeoutSeconds = swapDrainTimeoutSeconds
         self.ctlSocketPath = ctlSocketPath
         self.switchStatePath = switchStatePath
@@ -480,6 +490,8 @@ public enum ConfigLoader {
         try assign(&config.publishesSupportedModels, from: dict, key: "publishes_supported_models", expected: "boolean")
         try assign(&config.enableWarmSwap, from: dict, key: "enable_warm_swap", expected: "boolean")
         try assign(&config.enableReceipts, from: dict, key: "enable_receipts", expected: "boolean")
+        try assign(&config.relayBlindEnabled, from: dict, key: "relay_blind_enabled", expected: "boolean")
+        try assign(&config.relayBlindStateDirectory, from: dict, key: "relay_blind_state_directory", expected: "absolute string")
         try assign(&config.swapDrainTimeoutSeconds, from: dict, key: "swap_drain_timeout_s", expected: "integer")
         try assign(&config.ctlSocketPath, from: dict, key: "ctl_socket_path", expected: "string")
         try assign(&config.switchStatePath, from: dict, key: "switch_state_path", expected: "string")
@@ -557,6 +569,8 @@ public enum ConfigLoader {
         try assign(&config.publishesSupportedModels, from: environment, env: "MACPROVIDER_PUBLISHES_SUPPORTED_MODELS", expected: "boolean")
         try assign(&config.enableWarmSwap, from: environment, env: "MACPROVIDER_ENABLE_WARM_SWAP", expected: "boolean")
         try assign(&config.enableReceipts, from: environment, env: "MACPROVIDER_ENABLE_RECEIPTS", expected: "boolean")
+        try assign(&config.relayBlindEnabled, from: environment, env: "MACPROVIDER_RELAY_BLIND_ENABLED", expected: "boolean")
+        try assign(&config.relayBlindStateDirectory, from: environment, env: "MACPROVIDER_RELAY_BLIND_STATE_DIRECTORY", expected: "absolute string")
         try assign(&config.swapDrainTimeoutSeconds, from: environment, env: "MACPROVIDER_SWAP_DRAIN_TIMEOUT_S", expected: "integer")
         try assign(&config.ctlSocketPath, from: environment, env: "MACPROVIDER_CTL_SOCKET_PATH", expected: "string")
         try assign(&config.switchStatePath, from: environment, env: "MACPROVIDER_SWITCH_STATE_PATH", expected: "string")
@@ -673,6 +687,12 @@ public enum ConfigLoader {
         }
         if let enableReceipts = cli.enableReceipts {
             config.enableReceipts = enableReceipts
+        }
+        if let relayBlindEnabled = cli.relayBlindEnabled {
+            config.relayBlindEnabled = relayBlindEnabled
+        }
+        if let relayBlindStateDirectory = cli.relayBlindStateDirectory {
+            config.relayBlindStateDirectory = relayBlindStateDirectory
         }
         if let swapDrainTimeoutSeconds = cli.swapDrainTimeoutSeconds {
             config.swapDrainTimeoutSeconds = swapDrainTimeoutSeconds

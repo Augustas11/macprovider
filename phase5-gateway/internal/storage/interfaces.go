@@ -88,7 +88,8 @@ type UsageStore interface {
 	//   - Returns nil when an existing row at the same account_id and
 	//     request_id matches the incoming event in EVERY billing-relevant
 	//     field (demo_identity, window_date, prompt_tokens,
-	//     completion_tokens, total_tokens, token_source, outcome).
+	//     completion_tokens, total_tokens, token_source, outcome, and the
+	//     optional relay-blind privacy metadata/caps).
 	//   - Returns ErrUsageEventConflict when an existing row at the same
 	//     account_id and request_id DIFFERS from the incoming event in any
 	//     of those fields.
