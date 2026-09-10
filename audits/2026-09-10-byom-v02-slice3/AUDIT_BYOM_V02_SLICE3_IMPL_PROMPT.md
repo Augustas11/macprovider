@@ -30,3 +30,6 @@ CRITICAL / HIGH / MEDIUM / LOW / INFO; merge bar 0 C / 0 H / 0 M.
 - architect: SPEC-010/023/047/046 fidelity, single identity authority across ws/buyer/billing, what slice 4 (coordinator decision path) needs from these shapes.
 
 End with `VERDICT: <N> CRITICAL / <N> HIGH / <N> MEDIUM / <N> LOW / <N> INFO`. Cite file:line. Do not invent issues to fill a lane.
+
+## ROUND 2 EXTRA
+Round 1 findings (code 0/2H/4M/1L, security 0/0/3M, architect 0/2H/2M) were fixed in commits `4fb50fb6` and `4f0f56e0`; record `audits/2026-09-10-byom-v02-slice3/AUDIT_BYOM_V02_SLICE3_IMPL_R1.md`. Re-review the FULL working-tree diff (`git diff origin/main`, `main.go` uncommitted and in scope), not only the delta. R1 fix shapes to re-challenge: every artifact-derived session (primary member included) now carries six-value evidence; `artifactidentity.Provenance.Fresh` 14-day gate at route time and at `byomSettlementPrereqsReady`; `ws.SetAutotuneCatalog` drops the index and the SIGHUP path re-installs it via `buyer.WithAutotuneFeedsObserver` → `ws.SetArtifactIdentityIndex` (main.go boot wiring; `reloadCoordinatorConfig` untouched); GGUF expected identity requires complete artifact evidence in the admission predicate; CLI `models offer` re-validates file identity (nanosecond mtime) before submit. Do not re-report a Round 1 item unless its fix is wrong or incomplete.
