@@ -1422,9 +1422,9 @@ enum AgentSnapshotPresenter {
         }
         if verdict.usdcActivity == .earning {
             return result(
-                status: "Earning",
+                status: "USDC earning",
                 code: "earning",
-                reason: "Paid work or rewards have settled in the current window.",
+                reason: "USDC activity is reported in the current window. This does not establish MALIBU earning or withdrawal eligibility.",
                 action: "No local action needed."
             )
         }

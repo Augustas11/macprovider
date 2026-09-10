@@ -433,6 +433,8 @@ final class DashboardViewTests: XCTestCase {
         partial.updateRewardInputs(malibuProjectionFresh: false)
         partial.earningsUsdcToday = 0.04
         let partialHealth = AgentSnapshotPresenter.miningHealth(partial)
+        XCTAssertEqual(partialHealth.status, "USDC earning")
+        XCTAssertEqual(partialHealth.reason, "USDC activity is reported in the current window. This does not establish MALIBU earning or withdrawal eligibility.")
         XCTAssertEqual(partialHealth.reasonCode, "earning")
         XCTAssertEqual(partialHealth.rewardSummary, "$0.04 USDC today · MALIBU unavailable")
         XCTAssertEqual(partialHealth.trustSummary, "MALIBU trust status unavailable")
