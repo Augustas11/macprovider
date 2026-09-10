@@ -23,6 +23,8 @@ Commands were executed in the isolated task worktree. Interrupted runs are not c
 | Gateway `go test ./... -count=1`, `go vet ./...`, `GOOS=linux GOARCH=amd64 go build ./...` | Pass |
 | Gateway race tests across crypto, client, router, SQLite, settlement journal | Pass |
 | `make lint-coordinator` with pinned golangci-lint v2.12.2 | Pass, zero issues |
+| `make vet` (coordinator, gateway, integration) | Pass |
+| `python3 scripts/check_spec_governance.py --base-ref origin/main` | Pass |
 | `make test-integration` | Pass, all integration packages |
 | Integration `go test -run '^TestRelayBlind' -race -count=1 -timeout 5m` | Pass |
 | `bash scripts/test-relay-blind-parity.sh` | Pass |
@@ -44,8 +46,8 @@ Production activation, independently trusted deployment journey signatures, a co
 
 ## Review and remaining low-severity limits
 
-The five independent native review lanes are code, security, architecture, adversarial verification, and product design. GPT-6 Astra was available and used for adversarial plan and final verification; no substitution was made. Material findings were repaired and affected checks rerun. Review snapshots and detailed findings are retained in ignored local `.omx/reviews/` artifacts; the final PR records disposition.
+The five independent native review lanes are code, security, architecture, adversarial verification, and product design. GPT-6 Astra was available and used for adversarial plan and final verification; no substitution was made. All five lanes report zero Critical, High, and Medium findings. Material findings were repaired and affected checks rerun. Review snapshots and detailed findings are retained in ignored local `.omx/reviews/` artifacts; the final PR records disposition.
 
 Two availability limitations are carried explicitly: expired active-state references can temporarily delay same-kid renewal until reservation cleanup fences them; the provider's cumulative revocation file has a 16 KiB read ceiling and no expiry pruning, so extensive repeated revocation can require operator maintenance before new startup. Both fail closed and do not authorize replay, stale-key use, or duplicate settlement. Do not delete revocations still inside signed expiry plus replay retention.
 
-Historical signed journey evidence for existing plaintext/verified-settlement requirements remains historical. Updating their implementation commit pointers only identifies current mapped selector bytes; it does not redate or replace those signatures, establish new deployment evidence, or promote SPEC-041.
+Historical signed journey evidence for existing plaintext/verified-settlement requirements remains historical. SPEC-006-R002/R003 and SPEC-022-R005/R008 return to pending because this change modifies their mapped selector bytes and historical signatures cannot attest the new implementation. Local regressions pass; fresh independently trusted journey evidence is required to restore conformant status. No signature is replaced or redated, and SPEC-041 is not promoted.
