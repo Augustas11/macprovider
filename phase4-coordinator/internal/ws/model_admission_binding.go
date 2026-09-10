@@ -16,6 +16,10 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/tier2"
 )
 
+// artifactidentityBinding aliases the feed binding a settlement decision
+// records the six values from.
+type artifactidentityBinding = artifactidentity.Binding
+
 // SPEC-047 v0.1.5 catalog binding in production: the per-provider decision
 // critical section and binding generation (R001), offer-time catalog
 // matching (R001 "Match"), the coordinator-derived session-to-candidate
@@ -279,8 +283,12 @@ func sessionDriftReason(provider pool.Provider, candidate ModelAdmissionEvent) (
 	return "", false
 }
 
+// sessionReceiptKeyPresent: the session presents its SPEC-022 receipt key —
+// active, or staged as pending by the SPEC-015 publication grace (a fresh
+// hello stages the key and the registry commits it later; routing gates the
+// commit separately, R006(d) asks only whether the key is presented).
 func sessionReceiptKeyPresent(provider pool.Provider) bool {
-	return len(provider.ReceiptPubkey) == ed25519.PublicKeySize
+	return len(provider.ReceiptPubkey) == ed25519.PublicKeySize || len(provider.PendingReceiptPubkey) == ed25519.PublicKeySize
 }
 
 // sessionBoundMember is the recorded admissible member the session's PINNED

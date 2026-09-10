@@ -219,6 +219,7 @@ type Server struct {
 	settlementRelay          SettlementRelayFunc
 	admission                *providerws.AdmissionManager
 	modelAdmissionStore      providerws.ModelAdmissionStore
+	modelAdmissionRouteGuard ModelAdmissionRouteGuard
 	requestTimeout           time.Duration
 	failoverEnabled          bool
 	failoverTimeout          time.Duration
@@ -651,6 +652,14 @@ func WithAdmission(admission *providerws.AdmissionManager, provisionalWeight flo
 func WithModelAdmissionStore(store providerws.ModelAdmissionStore) Option {
 	return func(s *Server) {
 		s.modelAdmissionStore = store
+	}
+}
+
+// WithModelAdmissionRouteGuard wires the coordinator's SPEC-047-R001
+// route-time compare-and-insert for BYOM-bound routes.
+func WithModelAdmissionRouteGuard(guard ModelAdmissionRouteGuard) Option {
+	return func(s *Server) {
+		s.modelAdmissionRouteGuard = guard
 	}
 }
 

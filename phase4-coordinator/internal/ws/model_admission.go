@@ -75,15 +75,24 @@ type ModelAdmissionStore interface {
 	// idempotency resolution — a replay answers the original event whatever
 	// the head); errModelAdmissionStaleHead otherwise.
 	AppendModelAdmissionDecisionCAS(context.Context, ModelAdmissionEvent, string) (ModelAdmissionEvent, bool, error)
+	// AppendModelAdmissionApproval is AppendModelAdmissionDecisionCAS that,
+	// in the same atomic step, marks the approved pending record consumed by
+	// this approval (every other open record for the candidate is
+	// invalidated, as on any append).
+	AppendModelAdmissionApproval(context.Context, ModelAdmissionEvent, string, PendingModelAdmissionApproval) (ModelAdmissionEvent, bool, error)
 	// LatestModelAdmissionStatusesForProvider is the latest event of every
 	// candidate of one provider (the operator listing), ordered by candidate id.
 	LatestModelAdmissionStatusesForProvider(context.Context, string) ([]ModelAdmissionEvent, error)
 	// LatestModelAdmissionStatusesInStates is the latest event of every
 	// candidate of every provider whose state is one of states (reload sweeps).
 	LatestModelAdmissionStatusesInStates(context.Context, []string) ([]ModelAdmissionEvent, error)
+	// ModelAdmissionEventByRequestID is the operator idempotency lookup: the
+	// event a (provider_id, request_id) pair originally produced.
+	ModelAdmissionEventByRequestID(context.Context, string, string) (ModelAdmissionEvent, bool, error)
 	// Dual-control pending decisions.
 	CreatePendingModelAdmissionDecision(context.Context, PendingModelAdmissionDecision) (PendingModelAdmissionDecision, bool, error)
 	PendingModelAdmissionDecision(context.Context, string) (PendingModelAdmissionDecision, bool, error)
+	PendingModelAdmissionDecisionByRequest(context.Context, string, string, string) (PendingModelAdmissionDecision, bool, error)
 	ConsumePendingModelAdmissionDecision(context.Context, string, string, string, string, string) (PendingModelAdmissionDecision, bool, error)
 	InvalidatePendingModelAdmissionDecisions(context.Context, string, string) error
 }
@@ -183,6 +192,16 @@ func decodeModelAdmissionCatalogMembers(raw string) []ModelAdmissionCatalogMembe
 	return members
 }
 
+// PendingModelAdmissionApproval identifies the approval that consumes a
+// pending decision: the record, the approval's replay key and body digest,
+// and the approving actor.
+type PendingModelAdmissionApproval struct {
+	PendingID  string
+	RequestKey string
+	Digest     string
+	Actor      string
+}
+
 // PendingModelAdmissionDecision is a dual-control `settlement_capable`
 // request awaiting approval by a distinct operator actor (SPEC-047-R001
 // v0.1.5): it appends nothing until approved, is consumed by exactly one
@@ -239,12 +258,16 @@ func (s *memoryModelAdmissionStore) AppendModelAdmissionWithdrawal(_ context.Con
 }
 
 func (s *memoryModelAdmissionStore) AppendModelAdmissionDecision(_ context.Context, event ModelAdmissionEvent) (ModelAdmissionEvent, error) {
-	stored, _, err := s.appendCoordinatorModelAdmissionEvent(event, "")
+	stored, _, err := s.appendCoordinatorModelAdmissionEvent(event, "", nil)
 	return stored, err
 }
 
 func (s *memoryModelAdmissionStore) AppendModelAdmissionDecisionCAS(_ context.Context, event ModelAdmissionEvent, expectedHead string) (ModelAdmissionEvent, bool, error) {
-	return s.appendCoordinatorModelAdmissionEvent(event, expectedHead)
+	return s.appendCoordinatorModelAdmissionEvent(event, expectedHead, nil)
+}
+
+func (s *memoryModelAdmissionStore) AppendModelAdmissionApproval(_ context.Context, event ModelAdmissionEvent, expectedHead string, approval PendingModelAdmissionApproval) (ModelAdmissionEvent, bool, error) {
+	return s.appendCoordinatorModelAdmissionEvent(event, expectedHead, &approval)
 }
 
 func (s *memoryModelAdmissionStore) appendProviderModelAdmissionEvent(event ModelAdmissionEvent, nextState string) (ModelAdmissionEvent, bool, error) {
@@ -344,7 +367,7 @@ func (s *memoryModelAdmissionStore) resolveModelAdmissionReplay(event ModelAdmis
 	return ModelAdmissionEvent{}, false, false
 }
 
-func (s *memoryModelAdmissionStore) appendCoordinatorModelAdmissionEvent(event ModelAdmissionEvent, expectedHead string) (ModelAdmissionEvent, bool, error) {
+func (s *memoryModelAdmissionStore) appendCoordinatorModelAdmissionEvent(event ModelAdmissionEvent, expectedHead string, approval *PendingModelAdmissionApproval) (ModelAdmissionEvent, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := event.CreatedAt
@@ -391,7 +414,17 @@ func (s *memoryModelAdmissionStore) appendCoordinatorModelAdmissionEvent(event M
 	s.requestIDs[event.ProviderID+"|"+event.RequestID] = event
 	s.nonces[event.ProviderID+"|"+event.Nonce] = event
 	s.invalidatePendingLocked(event.ProviderID, event.CandidateID)
+	if approval != nil {
+		s.consumePendingLocked(*approval, event)
+	}
 	return event, false, nil
+}
+
+func (s *memoryModelAdmissionStore) ModelAdmissionEventByRequestID(_ context.Context, providerID, requestID string) (ModelAdmissionEvent, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	event, ok := s.requestIDs[providerID+"|"+requestID]
+	return event, ok, nil
 }
 
 func (s *memoryModelAdmissionStore) LatestModelAdmissionStatusesForProvider(_ context.Context, providerID string) ([]ModelAdmissionEvent, error) {
@@ -602,7 +635,19 @@ func (s *SQLiteModelAdmissionStore) AppendModelAdmissionWithdrawal(ctx context.C
 }
 
 func (s *SQLiteModelAdmissionStore) AppendModelAdmissionDecisionCAS(ctx context.Context, event ModelAdmissionEvent, expectedHead string) (ModelAdmissionEvent, bool, error) {
-	return s.appendCoordinatorModelAdmissionEventCAS(ctx, event, expectedHead)
+	return s.appendCoordinatorModelAdmissionEventCAS(ctx, event, expectedHead, nil)
+}
+
+func (s *SQLiteModelAdmissionStore) AppendModelAdmissionApproval(ctx context.Context, event ModelAdmissionEvent, expectedHead string, approval PendingModelAdmissionApproval) (ModelAdmissionEvent, bool, error) {
+	return s.appendCoordinatorModelAdmissionEventCAS(ctx, event, expectedHead, &approval)
+}
+
+func (s *SQLiteModelAdmissionStore) ModelAdmissionEventByRequestID(ctx context.Context, providerID, requestID string) (ModelAdmissionEvent, bool, error) {
+	return scanModelAdmissionEvent(ctx, s.db, modelAdmissionEventSelect(`
+  FROM model_admission_events
+ WHERE provider_id = ? AND request_id = ?
+ ORDER BY id DESC
+ LIMIT 1`), providerID, requestID)
 }
 
 func (s *SQLiteModelAdmissionStore) LatestModelAdmissionStatusesForProvider(ctx context.Context, providerID string) ([]ModelAdmissionEvent, error) {
@@ -832,10 +877,10 @@ func scanSQLiteModelAdmissionReplay(ctx context.Context, conn *sql.Conn, event M
 }
 
 func (s *SQLiteModelAdmissionStore) appendCoordinatorModelAdmissionEvent(ctx context.Context, event ModelAdmissionEvent) (ModelAdmissionEvent, bool, error) {
-	return s.appendCoordinatorModelAdmissionEventCAS(ctx, event, "")
+	return s.appendCoordinatorModelAdmissionEventCAS(ctx, event, "", nil)
 }
 
-func (s *SQLiteModelAdmissionStore) appendCoordinatorModelAdmissionEventCAS(ctx context.Context, event ModelAdmissionEvent, expectedHead string) (ModelAdmissionEvent, bool, error) {
+func (s *SQLiteModelAdmissionStore) appendCoordinatorModelAdmissionEventCAS(ctx context.Context, event ModelAdmissionEvent, expectedHead string, approval *PendingModelAdmissionApproval) (ModelAdmissionEvent, bool, error) {
 	now := event.CreatedAt
 	if now.IsZero() {
 		now = time.Now().UTC()
@@ -951,7 +996,13 @@ INSERT INTO model_admission_events(
 			return err
 		}
 		stored = event
-		return invalidateSQLitePendingModelAdmissionDecisions(txCtx, conn, event.ProviderID, event.CandidateID)
+		if err := invalidateSQLitePendingModelAdmissionDecisions(txCtx, conn, event.ProviderID, event.CandidateID); err != nil {
+			return err
+		}
+		if approval != nil {
+			return consumeSQLitePendingModelAdmissionDecision(txCtx, conn, *approval, event)
+		}
+		return nil
 	})
 	return stored, replay, err
 }

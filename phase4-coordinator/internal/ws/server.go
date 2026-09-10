@@ -255,6 +255,9 @@ type Server struct {
 	// modelAdmissionSections are the SPEC-047-R001 v0.1.5 per-provider
 	// decision critical sections and binding generations.
 	modelAdmissionSections providerSections
+	// modelAdmissionOperatorLimiter rate-limits operator decision requests
+	// per credential and source address, never drawing on a provider window.
+	modelAdmissionOperatorLimiter operatorRateLimiter
 }
 
 // liveMDAUpgrader is the minimal interface satisfied by mdm.LiveMDAService.
@@ -1685,6 +1688,9 @@ func (s *Server) Handler() http.Handler {
 		mux.HandleFunc("/admin/admission-canary/clear-admitted-tuple", s.handleAdmissionCanaryClearAdmittedTuple)
 		mux.HandleFunc("/admin/admission-canary/proof-of-weights", s.handleAdmissionCanaryProofOfWeights)
 	}
+	mux.HandleFunc("/admin/model-admission/decisions", s.handleAdminModelAdmissionDecisions)
+	mux.HandleFunc("/admin/model-admission/decisions/", s.handleAdminModelAdmissionApprove)
+	mux.HandleFunc("/admin/model-admission/offers", s.handleAdminModelAdmissionOffers)
 	mux.HandleFunc("/v1/provider/model-admission/offers", s.handleProviderModelAdmissionOffer)
 	mux.HandleFunc("/v1/provider/model-admission/withdrawals", s.handleProviderModelAdmissionWithdrawal)
 	mux.HandleFunc("/v1/provider/model-admission/status", s.handleProviderModelAdmissionStatus)

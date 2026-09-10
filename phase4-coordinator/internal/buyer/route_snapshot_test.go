@@ -1018,7 +1018,7 @@ func TestBYOMSettlementCapableBindsAdmissionEventIntoRouteSnapshot(t *testing.T)
 	provider := byomAdmissionProvider(t, registry.Snapshot()[0])
 	store := providerws.NewMemoryModelAdmissionStore()
 	event := seedBYOMAdmissionState(t, store, provider, "settlement_capable")
-	routeProvider := clearBYOMAdmissionFields(provider)
+	routeProvider := bindBYOMSession(clearBYOMAdmissionFields(provider), event)
 	registry.Register(&routeProvider, nil)
 	server := buyer.NewServer(
 		registry,
@@ -1230,7 +1230,7 @@ func TestBYOMReadmissionRotatesRouteSnapshotAdmissionEvent(t *testing.T) {
 	provider := byomAdmissionProvider(t, registry.Snapshot()[0])
 	store := providerws.NewMemoryModelAdmissionStore()
 	first := seedBYOMAdmissionState(t, store, provider, "settlement_capable")
-	routeProvider := clearBYOMAdmissionFields(provider)
+	routeProvider := bindBYOMSession(clearBYOMAdmissionFields(provider), first)
 	registry.Register(&routeProvider, nil)
 	server := buyer.NewServer(
 		registry,
@@ -1263,7 +1263,7 @@ func TestBYOMReadmissionRotatesRouteSnapshotAdmissionEvent(t *testing.T) {
 	if second.CoordinatorEventID == first.CoordinatorEventID {
 		t.Fatal("readmission reused coordinator event id")
 	}
-	routeProvider = clearBYOMAdmissionFields(provider)
+	routeProvider = bindBYOMSession(clearBYOMAdmissionFields(provider), second)
 	registry.Register(&routeProvider, nil)
 	slotsFree := 1
 	registry.ApplyStateUpdate(provider.ProviderID, provider.AssignedID, pool.StateUpdate{State: pool.StateReady, SlotsFree: &slotsFree, At: time.Now().UTC()})
@@ -1812,6 +1812,20 @@ func byomAdmissionProvider(t *testing.T, provider pool.Provider) pool.Provider {
 	provider.ModelAdmissionCatalogModelKey = "model-a"
 	provider.ModelAdmissionDiscoveryDigestSHA256 = strings.Repeat("b", 64)
 	provider.ModelAdmissionEvaluationDigestSHA256 = strings.Repeat("c", 64)
+	return provider
+}
+
+// bindBYOMSession installs the coordinator-derived session-to-candidate
+// binding (SPEC-047-R003 v0.1.5) a live session carries for the candidate's
+// latest event: default routing and settlement require it.
+func bindBYOMSession(provider pool.Provider, event providerws.ModelAdmissionEvent) pool.Provider {
+	provider.ModelAdmissionCandidateID = event.CandidateID
+	provider.ModelAdmissionCoordinatorEventID = event.CoordinatorEventID
+	provider.ModelAdmissionServedModelRef = event.ServedModelRef
+	provider.ModelAdmissionCatalogModelKey = event.CatalogModelKey
+	provider.ModelAdmissionDiscoveryDigestSHA256 = event.DiscoveryDigestSHA256
+	provider.ModelAdmissionEvaluationDigestSHA256 = event.EvaluationDigestSHA256
+	provider.ModelAdmissionCatalogRowStatus = "recommendable"
 	return provider
 }
 

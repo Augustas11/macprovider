@@ -78,6 +78,15 @@ func seedBYOMArtifactSettlementState(t *testing.T, store providerws.ModelAdmissi
 	settlement.Nonce = "nonce-artifact-" + state
 	settlement.PayloadDigestSHA256 = strings.Repeat("1", 64)
 	settlement.CreatedAt = time.Unix(1800000020, 0).UTC()
+	// SPEC-047-R003 v0.1.5: a settlement_capable decision binds the session's
+	// feed member as the settlement identity with its six values.
+	settlement.BoundMemberSource = "artifact_feed"
+	settlement.ArtifactID = binding.Member.ArtifactID
+	settlement.ArtifactHash = binding.Member.Hash
+	settlement.ArtifactHashAlgorithm = binding.Member.HashAlgorithm
+	settlement.ArtifactFeedSHA256 = binding.Provenance.FeedSHA256
+	settlement.ArtifactFeedSignerKeyID = binding.Provenance.SignerKeyID
+	settlement.ArtifactCandidateCatalogSHA256 = binding.Provenance.CandidateCatalogSHA256
 	stored, err = store.AppendModelAdmissionDecision(context.Background(), settlement)
 	if err != nil {
 		t.Fatalf("AppendModelAdmissionDecision(%s): %v", state, err)
@@ -130,7 +139,7 @@ func TestBYOMArtifactMemberSettlesWithSixValueEvidence(t *testing.T) {
 	store := providerws.NewMemoryModelAdmissionStore()
 	event := seedBYOMArtifactSettlementState(t, store, provider, binding, "settlement_capable")
 
-	routeProvider := clearBYOMAdmissionFields(provider)
+	routeProvider := bindBYOMSession(clearBYOMAdmissionFields(provider), event)
 	routeProvider.ModelHash = binding.Member.Hash
 	routeProvider.ModelHashAlgorithm = binding.Member.HashAlgorithm
 	routeProvider.ExpectedModelHash = buyerTestHash // the admitted ROW stays session authority (R004)
@@ -196,8 +205,8 @@ func TestBYOMGGUFPairWithoutArtifactBindingNeverSettles(t *testing.T) {
 			provider := byomAdmissionProvider(t, registry.Snapshot()[0])
 			binding := ggufArtifactBinding()
 			store := providerws.NewMemoryModelAdmissionStore()
-			seedBYOMArtifactSettlementState(t, store, provider, binding, "settlement_capable")
-			routeProvider := clearBYOMAdmissionFields(provider)
+			event := seedBYOMArtifactSettlementState(t, store, provider, binding, "settlement_capable")
+			routeProvider := bindBYOMSession(clearBYOMAdmissionFields(provider), event)
 			routeProvider.ModelHash = binding.Member.Hash
 			routeProvider.ModelHashAlgorithm = binding.Member.HashAlgorithm
 			routeProvider.ExpectedModelHash = buyerTestHash
@@ -242,8 +251,8 @@ func TestBYOMArtifactMemberRouteTimeGatesFailClosed(t *testing.T) {
 			provider := byomAdmissionProvider(t, registry.Snapshot()[0])
 			binding := ggufArtifactBinding()
 			store := providerws.NewMemoryModelAdmissionStore()
-			seedBYOMArtifactSettlementState(t, store, provider, binding, "settlement_capable")
-			routeProvider := clearBYOMAdmissionFields(provider)
+			event := seedBYOMArtifactSettlementState(t, store, provider, binding, "settlement_capable")
+			routeProvider := bindBYOMSession(clearBYOMAdmissionFields(provider), event)
 			routeProvider.ModelHash = binding.Member.Hash
 			routeProvider.ModelHashAlgorithm = binding.Member.HashAlgorithm
 			routeProvider.ExpectedModelHash = buyerTestHash

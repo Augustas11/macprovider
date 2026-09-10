@@ -176,6 +176,43 @@ func TestModelAdmissionDecisionStoreCASAndPending(t *testing.T) {
 			if _, _, err := store.ConsumePendingModelAdmissionDecision(ctx, "pend-expired", "k", "d", "operator:bob", "e"); !errors.Is(err, providerws.ErrModelAdmissionPendingExpired) {
 				t.Fatalf("expired pending must be pending_expired, got %v", err)
 			}
+			// An approval append consumes its own record atomically while
+			// invalidating every other open record for the candidate.
+			approvalPending := pending
+			approvalPending.ID = "pend-approve"
+			approvalPending.RequestID = "operator_decision_" + offer.CandidateID + "_key-5"
+			if _, _, err := store.CreatePendingModelAdmissionDecision(ctx, approvalPending); err != nil {
+				t.Fatal(err)
+			}
+			sibling := pending
+			sibling.ID = "pend-sibling"
+			sibling.RequestID = "operator_decision_" + offer.CandidateID + "_key-6"
+			if _, _, err := store.CreatePendingModelAdmissionDecision(ctx, sibling); err != nil {
+				t.Fatal(err)
+			}
+			settle := priced
+			settle.State = "settlement_capable"
+			settle.Actor = "operator:bob"
+			settle.ReasonCode = "operator_settlement"
+			settle.RequestID = "operator_approval_pend-approve_a1"
+			settle.Nonce = "operator_approval_nonce_1"
+			settle.PayloadDigestSHA256 = stringsOf("c", 64)
+			settle.CreatedAt = time.Unix(1800000045, 0).UTC()
+			settled, replayed, err := store.AppendModelAdmissionApproval(ctx, settle, priced.CoordinatorEventID, providerws.PendingModelAdmissionApproval{PendingID: "pend-approve", RequestKey: settle.RequestID, Digest: stringsOf("c", 64), Actor: "operator:bob"})
+			if err != nil || replayed || settled.State != "settlement_capable" {
+				t.Fatalf("approval append replayed=%v err=%v state=%s", replayed, err, settled.State)
+			}
+			consumedRecord, ok, err := store.PendingModelAdmissionDecision(ctx, "pend-approve")
+			if err != nil || !ok || consumedRecord.Invalidated || consumedRecord.ConsumedAt.IsZero() || consumedRecord.ConsumedBy != "operator:bob" || consumedRecord.ConsumedEventID != settled.CoordinatorEventID || consumedRecord.ApprovalRequestKey != settle.RequestID {
+				t.Fatalf("approved record must be consumed, not invalidated: %+v err=%v", consumedRecord, err)
+			}
+			if _, _, err := store.ConsumePendingModelAdmissionDecision(ctx, "pend-approve", "other-key", stringsOf("c", 64), "operator:carol", "x"); !errors.Is(err, providerws.ErrModelAdmissionPendingConsumed) {
+				t.Fatalf("distinct-key approval of the consumed record must be pending_consumed, got %v", err)
+			}
+			if siblingRecord, _, _ := store.PendingModelAdmissionDecision(ctx, "pend-sibling"); !siblingRecord.Invalidated {
+				t.Fatal("sibling record must be invalidated by the append")
+			}
+			priced = settled
 			// Any append for the candidate invalidates open pending records.
 			open := pending
 			open.ID = "pend-open"
