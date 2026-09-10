@@ -313,10 +313,27 @@ func cliIdentity(t *testing.T, now time.Time) (relayblind.KeyRecord, relayblind.
 
 func writePin(t *testing.T, pin relayblind.IdentityPin) string {
 	t.Helper()
-	dir, err := filepath.EvalSymlinks(t.TempDir())
+	home, err := os.UserHomeDir()
 	if err != nil {
 		t.Fatal(err)
 	}
+	home = filepath.Clean(home)
+	realHome, err := filepath.EvalSymlinks(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if realHome != home {
+		t.Fatalf("test home contains a symlink: %q", home)
+	}
+	dir, err := os.MkdirTemp(home, ".macprovider-pin-test-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(dir); err != nil {
+			t.Errorf("remove pin test directory: %v", err)
+		}
+	})
 	if err := os.Chmod(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}

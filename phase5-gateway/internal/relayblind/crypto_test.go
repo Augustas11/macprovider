@@ -322,14 +322,7 @@ func TestReadIdentityPinRejectsSymlinksAndPermissions(t *testing.T) {
 	now := time.Now().UTC()
 	_, pin, _ := testRecord(t, now)
 	raw, _ := json.Marshal(pin)
-	dir := t.TempDir()
-	dir, err := filepath.EvalSymlinks(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
+	dir := securePinTestDir(t)
 	path := filepath.Join(dir, "pin.json")
 	if err := os.WriteFile(path, raw, 0o600); err != nil {
 		t.Fatal(err)
@@ -384,6 +377,35 @@ func TestReadIdentityPinRejectsSymlinksAndPermissions(t *testing.T) {
 	if _, err := ReadIdentityPin(large); err == nil {
 		t.Fatal("oversize pin accepted")
 	}
+}
+
+func securePinTestDir(t *testing.T) string {
+	t.Helper()
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	home = filepath.Clean(home)
+	realHome, err := filepath.EvalSymlinks(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if realHome != home {
+		t.Fatalf("test home contains a symlink: %q", home)
+	}
+	dir, err := os.MkdirTemp(home, ".macprovider-pin-test-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(dir); err != nil {
+			t.Errorf("remove pin test directory: %v", err)
+		}
+	})
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return dir
 }
 
 func testRecord(t *testing.T, now time.Time) (KeyRecord, IdentityPin, *ecdh.PrivateKey) {

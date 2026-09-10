@@ -41,7 +41,7 @@ The real Swift process-crash test kills the provider after its first chunk, rest
 
 ## Evidence boundaries
 
-The signed local journey artifact is `ephemeral_test_only`, signed with an ephemeral P-256 test key that is deleted after capture. It binds the test log and source snapshot, verifies required test names actually passed, and cannot promote SPEC conformance. The verified artifact and public test key are checked in under [local test evidence](evidence/privacy-pool-v01-local/README.md), bound to clean commit `956498f3fee52988d37d777e7f2fe0c2a8381676`; only evidence/documentation changes follow it. No production identity signature or hardware journey is fabricated.
+The signed local journey artifact is `ephemeral_test_only`, signed with an ephemeral P-256 test key that is deleted after capture. It binds the test log and source snapshot, verifies required test names actually passed, and cannot promote SPEC conformance. The verified artifact and public test key are checked in under [local test evidence](evidence/privacy-pool-v01-local/README.md), bound to clean commit `956498f3fee52988d37d777e7f2fe0c2a8381676`; subsequent changes are documentation/evidence and test-fixture portability only; production runtime bytes are unchanged. No production identity signature or hardware journey is fabricated.
 
 A separate cached Llama-3.2-3B-Instruct-4bit self-test passed on local Apple M5/arm64 using the real MLX Metal runtime (four-token bound, about 1.61 tokens/second). It used no model download or external service and emitted no prompt/generated text in reported evidence. This proves local model runtime operation only. The complete buyer/gateway/coordinator/Swift encrypted journey uses a deterministic backend, not that model.
 
@@ -54,3 +54,11 @@ The five independent native review lanes are code, security, architecture, adver
 Two availability limitations are carried explicitly: expired active-state references can temporarily delay same-kid renewal until reservation cleanup fences them; the provider's cumulative revocation file has a 16 KiB read ceiling and no expiry pruning, so extensive repeated revocation can require operator maintenance before new startup. Both fail closed and do not authorize replay, stale-key use, or duplicate settlement. Do not delete revocations still inside signed expiry plus replay retention.
 
 Historical signed journey evidence for existing plaintext/verified-settlement requirements remains historical. SPEC-006-R002/R003 and SPEC-022-R005/R008 return to pending because this change modifies their mapped selector bytes and historical signatures cannot attest the new implementation. Local regressions pass; fresh independently trusted journey evidence is required to restore conformant status. No signature is replaced or redated, and SPEC-041 is not promoted.
+
+## Linux CI fixture follow-up
+
+Initial Linux CI rejected positive pin fixtures under world-writable `/tmp`, as the production verifier correctly requires safe ancestry. Three test files now create private, cleaned-up fixtures under a non-symlinked home directory. Production pin validation is unchanged. All five independent review lanes cleared this delta with zero Critical/High/Medium findings.
+
+Verification passed in `golang:1.26.6-bookworm` on Linux/arm64 as unprivileged UID/GID 1000, with `/tmp` mode 1777 and the source mounted read-only: both relayblind packages ran `go test ./internal/relayblind -run '^TestReadIdentityPinRejectsSymlinksAndPermissions$' -race -count=1`; the client ran `go test ./cmd/relay-blind-client -run 'TestRunAPIKeyAndWalletSession|TestRunDoesNotRetryEncryptedRequest|TestRunRejectsRelaySubstitutedRecordBeforeEncryptedSend' -race -count=1`. Full affected packages also passed locally under the race detector. This is targeted Linux container evidence, distinct from the broader integration target's lack of Docker coverage.
+
+The unchanged trusted-pool timing test also passed twice locally after its initial hosted-runner timing failure; no threshold or assertion was weakened. Merge remains gated on the new CI run.
