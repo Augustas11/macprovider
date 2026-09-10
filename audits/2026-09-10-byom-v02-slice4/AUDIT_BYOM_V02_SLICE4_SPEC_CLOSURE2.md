@@ -7,7 +7,7 @@
 | code-reviewer | 0 C / 1 H / 1 M |
 | architect | 0 C / 1 H / 2 M / 1 L / 1 I |
 
-Resolved in the commit that adds this record:
+Resolved in `05de8e96` (the record itself landed one commit earlier, `cb370b53`, from a chain whose patch step had aborted on an over-broad guard — that commit carries audit files only):
 - **HIGH (both): residual "candidate's section" wording** in R003, R006, §4 and the change log contradicted R001's per-provider section — every reference now names the provider's decision critical section (verified by a grep guard in the patch; R001's pre-existing "per-provider/per-candidate state machine" phrase describes the state machine, not the section).
 - **MEDIUM (architect): approval idempotency** — approvals replay in their own (`pending_decision_id`, `idempotency_key`) namespace: an identical-key retry answers the committed response (`replayed: true`); a distinct-key approval of a consumed record is `pending_consumed`.
 - **MEDIUM (architect): dual control unavailable** — fewer than two configured operator actors refuse the initial `settlement_capable` request synchronously with `dual_control_unavailable` (no pending record); code added to the closed set.
