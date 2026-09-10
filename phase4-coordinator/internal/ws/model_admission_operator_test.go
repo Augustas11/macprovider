@@ -374,6 +374,17 @@ func TestModelAdmissionOperatorDualControlSecretsAndReservedKeys(t *testing.T) {
 	if code, resp := c.do(http.MethodPost, decisions, "bob-secret", decisionRequest("p1", offer.CandidateID, "settlement_capable", "operator_settle", pricedHead, "k2-shared-bob")); code != http.StatusConflict || errorCode(resp) != "dual_control_unavailable" {
 		t.Fatalf("entry equal to the shared key must not count toward dual control: %d %v", code, resp)
 	}
+	// A named entry equal to an ACTIVE provider token lends that provider
+	// no attribution either: refused, and not counted toward dual control.
+	s.tokens = readOnlyProviderTokens{"provider-token-9": "p9"}
+	s.cfg.Auth.OperatorKeys = map[string]string{"alice": "provider-token-9", "bob": "bob-secret"}
+	if code, resp := c.do(http.MethodPost, decisions, "provider-token-9", decisionRequest("p1", offer.CandidateID, "settlement_capable", "operator_settle", pricedHead, "k2-provider")); code != http.StatusUnauthorized || errorCode(resp) != "invalid_operator_token" {
+		t.Fatalf("provider token reused by a named entry: %d %v", code, resp)
+	}
+	if code, resp := c.do(http.MethodPost, decisions, "bob-secret", decisionRequest("p1", offer.CandidateID, "settlement_capable", "operator_settle", pricedHead, "k2-provider-bob")); code != http.StatusConflict || errorCode(resp) != "dual_control_unavailable" {
+		t.Fatalf("entry equal to a provider token must not count toward dual control: %d %v", code, resp)
+	}
+	s.tokens = nil
 	s.cfg.Auth.OperatorKey = "shared-secret"
 	// Distinct secrets: pending; then an expired record is pending_expired.
 	s.cfg.Auth.OperatorKeys = map[string]string{"alice": "alice-secret", "bob": "bob-secret"}
@@ -428,4 +439,19 @@ func TestModelAdmissionOperatorDualControlSecretsAndReservedKeys(t *testing.T) {
 	if stamped.ModelAdmissionCandidateID != offer.CandidateID || stamped.ModelAdmissionBindingGeneration != s.ModelAdmissionBindingGeneration("p1") || stamped.ModelAdmissionBindingGeneration == before.ModelAdmissionBindingGeneration {
 		t.Fatalf("unchanged binding must be re-stamped with the advanced section generation: %+v vs %d", stamped.ModelAdmissionBindingGeneration, s.ModelAdmissionBindingGeneration("p1"))
 	}
+}
+
+// readOnlyProviderTokens is a token authority for tests: token → provider id.
+type readOnlyProviderTokens map[string]string
+
+func (r readOnlyProviderTokens) ValidateToken(_ context.Context, token string) (string, bool, error) {
+	id, ok := r[token]
+	return id, ok, nil
+}
+func (r readOnlyProviderTokens) MarkTokenUsed(context.Context, string) error { return nil }
+func (r readOnlyProviderTokens) ValidateAndMarkTokenUsed(ctx context.Context, token string) (string, bool, error) {
+	return r.ValidateToken(ctx, token)
+}
+func (r readOnlyProviderTokens) ValidateTokenReadOnly(ctx context.Context, token string) (string, bool, error) {
+	return r.ValidateToken(ctx, token)
 }

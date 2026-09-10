@@ -49,3 +49,6 @@ Closure pass 2 (code 0/0/1M) fixed; record `AUDIT_BYOM_V02_SLICE4_IMPL_CLOSURE2.
 
 ## CLOSURE PASS 4 (code-reviewer only; security and architect at bar)
 Closure pass 3 (code 0/1H) fixed; record `AUDIT_BYOM_V02_SLICE4_IMPL_CLOSURE3.md`. Re-review the FULL `git diff origin/main` (uncommitted `main.go` included). Shape to re-challenge: `sharedOperatorKeyBearer` refusal ahead of the named match and the shared-secret exclusion in `operatorDualControlAvailable`, against every other credential class the coordinator accepts on `/admin` (gateway service token, provider tokens). Do not re-report an item from any record unless its fix is wrong or incomplete.
+
+## CLOSURE PASS 5 (code-reviewer only; security and architect at bar)
+Closure pass 4 (code 0/1H) fixed; record `AUDIT_BYOM_V02_SLICE4_IMPL_CLOSURE4.md`. Re-review the FULL `git diff origin/main` (uncommitted `main.go` included). Shape to re-challenge: `activeProviderTokenSecret` (read-only provider-token classification ahead of the named match and in `operatorDualControlAvailable`), together with the shared-key refusal and the ambiguity refusal — is any credential class the coordinator accepts still able to obtain an operator attribution on these three endpoints? Do not re-report an item from any record unless its fix is wrong or incomplete.

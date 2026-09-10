@@ -185,6 +185,24 @@ func (s *Server) sharedOperatorKeyBearer(r *http.Request) bool {
 	return shared != "" && auth.OperatorOnlyBearerMatches(r.Header, shared)
 }
 
+// activeProviderTokenSecret reports whether a secret is an ACTIVE provider
+// token (read-only validation, no last-used stamp): a provider credential
+// is never an operator credential, whatever an operator_keys entry says.
+func (s *Server) activeProviderTokenSecret(ctx context.Context, secret string) bool {
+	secret = strings.TrimSpace(secret)
+	if secret == "" || s.tokens == nil {
+		return false
+	}
+	readOnly, ok := s.tokens.(computeIntegrityReadOnlyTokenValidator)
+	if !ok {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	_, valid, err := readOnly.ValidateTokenReadOnly(ctx, secret)
+	return err == nil && valid
+}
+
 func (s *Server) allowModelAdmissionOperatorAttempt(actor string, r *http.Request) bool {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
@@ -201,7 +219,7 @@ func (s *Server) authorizedModelAdmissionOperator(w http.ResponseWriter, r *http
 	// a bearer equal to it is refused BEFORE any named match, so a named
 	// entry that (mis)configures the same secret cannot lend the shared key
 	// an attribution.
-	if s.sharedOperatorKeyBearer(r) {
+	if s.sharedOperatorKeyBearer(r) || s.activeProviderTokenSecret(r.Context(), bearerToken(r.Header.Get("Authorization"))) {
 		writeJSON(w, http.StatusUnauthorized, modelAdmissionError("invalid_operator_token", "unauthorized"))
 		return "", false
 	}
@@ -240,9 +258,10 @@ func (s *Server) operatorDualControlAvailable() bool {
 			continue
 		}
 		secret = strings.TrimSpace(secret)
-		// An entry whose secret is the shared operator_key can never
-		// authenticate here (the shared bearer is refused first).
-		if secret == "" || secretCount[secret] != 1 || (shared != "" && secret == shared) {
+		// An entry whose secret is the shared operator_key or an active
+		// provider token can never authenticate here (both are refused
+		// before the named match).
+		if secret == "" || secretCount[secret] != 1 || (shared != "" && secret == shared) || s.activeProviderTokenSecret(context.Background(), secret) {
 			continue
 		}
 		if _, dup := actors[actor]; dup {
