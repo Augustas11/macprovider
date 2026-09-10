@@ -168,6 +168,14 @@ func main() {
 			os.Exit(1)
 		}
 	}
+	// SPEC-010 v1.7 R007: the expected-identity set is derived from the SAME
+	// loaded feeds as the admitted catalog, so it is release-bound by
+	// construction; nil for a rate-card-bound release.
+	artifactIdentityIndex, err := buyer.BuildArtifactIdentityIndex(autotuneFeeds)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "artifact identity index: %v\n", err)
+		os.Exit(1)
+	}
 	providerhttp.Init(cfg.ProviderHTTP.TimeoutS)
 
 	logger := zerolog.New(os.Stdout).With().Timestamp().Logger()
@@ -546,6 +554,7 @@ func main() {
 	wsOpts = append(wsOpts, providerws.WithReferralPolicy(referralPolicy))
 	wsOpts = append(wsOpts, providerws.WithAdmissionStore(admissionStore))
 	wsOpts = append(wsOpts, providerws.WithModelAdmissionStore(byomOfferStore))
+	wsOpts = append(wsOpts, providerws.WithArtifactIdentityIndex(artifactIdentityIndex))
 	wsOpts = append(wsOpts, providerws.WithModelAdmissionSubmissionsDisabled(byomSubmissionsDisabled))
 	wsOpts = append(wsOpts, providerws.WithConnectionEventStore(connectionEventStore))
 	wsOpts = append(wsOpts, providerws.WithConnectionEventMetrics(metricsHandle))
@@ -940,6 +949,22 @@ func main() {
 		buyer.WithBillingSnapshotID(snapshotID),
 		buyer.WithRateCardUSDPerMillionCredits(cfg.Stats.Rollup.UsdPerMillionCredits),
 		buyer.WithAutotuneFeeds(autotuneFeeds),
+		// SPEC-010 v1.7 R007 across the SIGHUP lifecycle: every publish of the
+		// served feed bytes rebuilds the expected-identity set from those SAME
+		// bytes and installs it beside the admission catalog. The catalog swap
+		// that precedes the publish drops the previous index, so between the
+		// two steps a new-release session is primary-only (fail closed), never
+		// verified against another release's members; a rebuild failure leaves
+		// no index installed.
+		buyer.WithAutotuneFeedsObserver(func(feeds buyer.AutotuneFeeds) {
+			index, err := buyer.BuildArtifactIdentityIndex(feeds)
+			if err != nil {
+				logger.Error().Err(err).Str("event", "autotune_feed_sighup_reload").Msg("artifact identity index rebuild rejected; artifact-derived identity disabled until the next successful reload")
+				wsServer.SetArtifactIdentityIndex(nil)
+				return
+			}
+			wsServer.SetArtifactIdentityIndex(index)
+		}),
 		buyer.WithModelAdmissionStore(byomOfferStore),
 		buyer.WithStreamingMetricsMaxSamples(cfg.Stats.StreamingMetrics.MaxSamples),
 		buyer.WithPreflight(func(provider pool.Provider, requestID string, estimatedTokens int, timeout time.Duration) (buyer.PreflightResult, bool, error) {
