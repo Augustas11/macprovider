@@ -326,7 +326,7 @@ struct ServeCommand: AsyncParsableCommand {
     @Flag(name: .customLong("enable-receipts"), inversion: .prefixedNo, help: "Opt into signed non-streaming request receipts. Default off for staged rollout.")
     var enableReceipts: Bool?
 
-    @Flag(name: .customLong("relay-blind-enabled"), inversion: .prefixedNo, help: "Opt into the default-off SPEC-041 relay-blind provider pilot.")
+    @Flag(name: .customLong("relay-blind-enabled"), inversion: .prefixedNo, help: "Opt into the default-off relay-blind request encryption pilot.")
     var relayBlindEnabled: Bool?
 
     @Option(name: .customLong("relay-blind-state-directory"), help: "Absolute operator-owned 0700 directory outside the repository for relay-blind keys and execution journal.")
