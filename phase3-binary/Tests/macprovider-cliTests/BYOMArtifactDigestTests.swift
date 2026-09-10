@@ -86,8 +86,11 @@ final class BYOMArtifactDigestTests: XCTestCase {
         let store = try makeStore()
         let digest = try store.resolver.computeDigest(forOllamaModel: "test-model:q4_k_m")
         XCTAssertEqual(store.resolver.knownDigest(forOllamaModel: "test-model:q4_k_m"), digest)
-        // Same path, different bytes: the identity (size/mtime/inode) differs.
-        try (store.blobBytes + Data([0x01])).write(to: store.blobURL)
+        // Same path, SAME size, different bytes: only the modification time
+        // (at filesystem precision) distinguishes the identity.
+        var sameSize = store.blobBytes
+        sameSize[sameSize.count - 1] ^= 0xff
+        try sameSize.write(to: store.blobURL)
         XCTAssertNil(store.resolver.knownDigest(forOllamaModel: "test-model:q4_k_m"), "a changed file is a different identity")
         let recomputed = try store.resolver.computeDigest(forOllamaModel: "test-model:q4_k_m")
         XCTAssertNotEqual(recomputed, digest)
@@ -181,9 +184,22 @@ final class BYOMArtifactDigestTests: XCTestCase {
         ).discover().candidates.first
         let candidate = try XCTUnwrap(candidateValue)
         XCTAssertNil(store.resolver.knownDigest(forOllamaModel: "test-model:q4_k_m"), "nothing hashed before the offer")
-        let hashes = try BYOMModelAdmissionRuntime.artifactHashes(for: candidate, environment: environment)
-        XCTAssertEqual(hashes, [ModelArtifactIdentity.ggufFileV1: Self.sha256Hex(store.blobBytes)])
+        let evidence = try XCTUnwrap(BYOMModelAdmissionRuntime.artifactEvidence(for: candidate, environment: environment))
+        XCTAssertEqual(evidence.hashes, [ModelArtifactIdentity.ggufFileV1: Self.sha256Hex(store.blobBytes)])
+        XCTAssertEqual(evidence.locatorDigest, "sha256:" + store.manifestDigest)
         XCTAssertNotNil(store.resolver.knownDigest(forOllamaModel: "test-model:q4_k_m"), "the offer's computation is recorded")
+        // The binding survives to the report only while the name still
+        // resolves, through the manifest, to the same unchanged file.
+        XCTAssertNoThrow(try store.resolver.validateCurrent(evidence, forOllamaModel: "test-model:q4_k_m"))
+        let otherBlob = Data("GGUF".utf8) + Data(repeating: 0x11, count: 4096)
+        let otherHex = Self.sha256Hex(otherBlob)
+        try otherBlob.write(to: store.root.appendingPathComponent("blobs/sha256-\(otherHex)"))
+        let manifestURL = store.root.appendingPathComponent("manifests/registry.ollama.ai/library/test-model/q4_k_m")
+        let retargeted = try String(contentsOf: manifestURL, encoding: .utf8).replacingOccurrences(of: store.manifestDigest, with: otherHex)
+        try Data(retargeted.utf8).write(to: manifestURL)
+        XCTAssertThrowsError(try store.resolver.validateCurrent(evidence, forOllamaModel: "test-model:q4_k_m"), "manifest retargeted to another blob") { error in
+            XCTAssertEqual(error as? BYOMArtifactDigestError, .fileIdentityChanged)
+        }
         // Unresolvable blob: no artifact evidence, the offer proceeds as v0.1.
         let missingTags = Data(#"{"models":[{"name":"absent:latest"}]}"#.utf8)
         let absentValue = await BYOMOllamaDiscovery(
@@ -191,7 +207,19 @@ final class BYOMArtifactDigestTests: XCTestCase {
             httpClient: ArtifactStubHTTPClient(response: BYOMHTTPResponse(statusCode: 200, headers: [], body: missingTags))
         ).discover().candidates.first
         let absent = try XCTUnwrap(absentValue)
-        XCTAssertEqual(try BYOMModelAdmissionRuntime.artifactHashes(for: absent, environment: environment), [:])
+        XCTAssertNil(try BYOMModelAdmissionRuntime.artifactEvidence(for: absent, environment: environment), "never artifact-backed: identity-less offer as v0.1")
+        // The same unresolvable blob on a candidate discovery reported as
+        // artifact-backed fails the offer closed.
+        let backed = BYOMDiscoveryWire.Candidate(
+            candidateID: absent.candidateID, runtimeSource: absent.runtimeSource, displayName: absent.displayName, servedModelRef: absent.servedModelRef,
+            catalogModelKey: nil, identityState: "artifact_hash_available", locality: absent.locality, estimatedGB: nil, contextWindowTokens: nil,
+            capabilities: absent.capabilities, readinessState: absent.readinessState, fitState: absent.fitState,
+            evaluationState: absent.evaluationState, admissionState: absent.admissionState, admissionStateSource: absent.admissionStateSource,
+            providerGuidance: absent.providerGuidance, warningCodes: absent.warningCodes
+        )
+        XCTAssertThrowsError(try BYOMModelAdmissionRuntime.artifactEvidence(for: backed, environment: environment)) { error in
+            XCTAssertEqual(error as? BYOMModelAdmissionError, .artifactIdentityChanged)
+        }
         // A non-Ollama candidate carries no GGUF evidence.
         let mlx = BYOMDiscoveryWire.Candidate(
             candidateID: candidate.candidateID, runtimeSource: "mlx_cache", displayName: candidate.displayName, servedModelRef: "mlx-community/x",
@@ -200,7 +228,7 @@ final class BYOMArtifactDigestTests: XCTestCase {
             evaluationState: candidate.evaluationState, admissionState: candidate.admissionState, admissionStateSource: candidate.admissionStateSource,
             providerGuidance: candidate.providerGuidance, warningCodes: candidate.warningCodes
         )
-        XCTAssertEqual(try BYOMModelAdmissionRuntime.artifactHashes(for: mlx, environment: environment), [:])
+        XCTAssertNil(try BYOMModelAdmissionRuntime.artifactEvidence(for: mlx, environment: environment))
     }
 }
 

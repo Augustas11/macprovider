@@ -60,5 +60,6 @@ func BuildArtifactIdentityIndex(feeds AutotuneFeeds) (*artifactidentity.Index, e
 		SignerKeyID:            feeds.CatalogArtifactsVerification.KeyID,
 		ReleaseID:              feed.ReleaseID,
 		CandidateCatalogSHA256: feed.CandidateCatalogSHA256,
+		FeedGeneratedAt:        feeds.CatalogArtifactsVerification.GeneratedAt,
 	}, members)
 }

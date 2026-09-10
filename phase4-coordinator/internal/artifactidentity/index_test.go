@@ -3,6 +3,7 @@ package artifactidentity
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/modelidentity"
 )
@@ -10,7 +11,7 @@ import (
 func hex(c byte) string { return strings.Repeat(string(c), 64) }
 
 func provenance() Provenance {
-	return Provenance{FeedSHA256: hex('a'), SignerKeyID: "k1", ReleaseID: "r1", CandidateCatalogSHA256: hex('b')}
+	return Provenance{FeedSHA256: hex('a'), SignerKeyID: "k1", ReleaseID: "r1", CandidateCatalogSHA256: hex('b'), FeedGeneratedAt: time.Date(2026, 7, 10, 0, 0, 0, 0, time.UTC)}
 }
 
 func TestIndexResolvesExactPairOnly(t *testing.T) {
@@ -53,5 +54,30 @@ func TestIndexRejectsDuplicatePairAndUnnamedAlgorithm(t *testing.T) {
 	}
 	if _, err := New(Provenance{}, nil); err == nil {
 		t.Fatal("provenance is required")
+	}
+}
+
+func TestProvenanceFreshnessFollowsSpec023Rules4And5(t *testing.T) {
+	t.Parallel()
+	p := provenance()
+	stamp := p.FeedGeneratedAt
+	if !p.Fresh(stamp.Add(13 * 24 * time.Hour)) {
+		t.Fatal("13 days old is fresh")
+	}
+	if p.Fresh(stamp.Add(14 * 24 * time.Hour)) {
+		t.Fatal("14 days old is stale: no artifact-derived capability")
+	}
+	if p.Fresh(stamp.Add(-time.Hour)) {
+		t.Fatal("a future stamp is not fresh")
+	}
+	if !p.Fresh(stamp.Add(5 * time.Minute)) {
+		t.Fatal("skew inside the 10-minute allowance is fresh")
+	}
+	if (Provenance{}).Fresh(stamp) {
+		t.Fatal("no stamp, no freshness")
+	}
+	var nilIndex *Index
+	if nilIndex.Fresh(stamp) {
+		t.Fatal("nil index is never fresh")
 	}
 }

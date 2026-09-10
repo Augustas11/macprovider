@@ -29,6 +29,8 @@ func ggufArtifactBinding() *artifactidentity.Binding {
 		Provenance: artifactidentity.Provenance{
 			FeedSHA256: strings.Repeat("a", 64), SignerKeyID: "streamvc-autotune-static-v4",
 			ReleaseID: "test-release", CandidateCatalogSHA256: strings.Repeat("b", 64),
+			// The buyer server verifies freshness against the real clock.
+			FeedGeneratedAt: time.Now().UTC().Add(-24 * time.Hour),
 		},
 	}
 }
@@ -175,10 +177,13 @@ func TestBYOMGGUFPairWithoutArtifactBindingNeverSettles(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { writeProviderOK(w) }))
 	defer upstream.Close()
 
+	staleBinding := ggufArtifactBinding()
+	staleBinding.Provenance.FeedGeneratedAt = time.Now().UTC().Add(-15 * 24 * time.Hour)
 	for name, arrange := range map[string]func(*pool.Provider){
 		"no binding at all":                func(p *pool.Provider) { p.ArtifactIdentity = nil },
 		"binding but heartbeat unverified": func(p *pool.Provider) { p.HashStatus = pool.HashStatusMismatch },
 		"binding hash differs from report": func(p *pool.Provider) { p.ModelHash = strings.Repeat("d", 64) },
+		"binding from a stale feed (14d+)": func(p *pool.Provider) { p.ArtifactIdentity = staleBinding },
 	} {
 		t.Run(name, func(t *testing.T) {
 			registry := pool.NewRegistry(nil)
@@ -201,5 +206,46 @@ func TestBYOMGGUFPairWithoutArtifactBindingNeverSettles(t *testing.T) {
 				t.Fatalf("ledger credits=%d want 0 (status=%d body=%s)", got, rr.Code, rr.Body.String())
 			}
 		})
+	}
+}
+
+// SPEC-010-R007(d): a secondary snapshot-manifest member is feed-derived too.
+// Without a BYOM admission binding there is no source for the six values, so
+// the recorder fails closed rather than writing a member hash with no
+// provenance (which would be indistinguishable from the row-bound primary).
+func TestSecondaryMLXMemberWithoutAdmissionEvidenceNeverSettles(t *testing.T) {
+	tier2.ResetForTest()
+	t.Cleanup(tier2.ResetForTest)
+	raw, pubkey := routeSnapshotCatalogFixture(t, "byom-secondary-mlx-catalog", time.Now().UTC().Add(time.Hour))
+	if err := tier2.Configure(config.Tier2Config{ObserveEnabled: true, CatalogPath: writeRouteSnapshotCatalog(t, raw), CatalogPublicKey: pubkey, RequireHashVerified: true}, zerolog.Nop()); err != nil {
+		t.Fatalf("tier2.Configure: %v", err)
+	}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { writeProviderOK(w) }))
+	defer upstream.Close()
+	registry := pool.NewRegistry(nil)
+	registerSettlementProvider(registry, "p1", "session-1", upstream.URL, 30, bytes.Repeat([]byte{0x79}, 32))
+	provider := registry.Snapshot()[0]
+	secondary := ggufArtifactBinding()
+	secondary.Member = artifactidentity.Member{
+		ModelKey: "model-a", ArtifactID: "mlx-8bit", HashAlgorithm: modelidentity.SnapshotManifestV1,
+		Hash: strings.Repeat("e", 64), RuntimeStatus: "recommendable",
+	}
+	provider.ModelHash = secondary.Member.Hash
+	provider.ModelHashAlgorithm = modelidentity.SnapshotManifestV1
+	provider.ExpectedModelHash = buyerTestHash
+	provider.HashStatus = pool.HashStatusVerified
+	provider.ArtifactIdentity = secondary
+	registry.Register(&provider, nil)
+	// No admission store at all: the legacy (non-BYOM) routing path.
+	server, dbPath := artifactSettlementServer(t, provider, registry, nil)
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`), nil)
+	if rr.Code == http.StatusOK {
+		t.Fatalf("secondary member without evidence must not route/settle: status=%d", rr.Code)
+	}
+	if rows := queryRouteSnapshotBYOMBindings(t, dbPath); len(rows) != 0 {
+		t.Fatalf("no route snapshot may be written without the six values: %#v", rows)
+	}
+	if got := ledgerCreditCount(t, dbPath); got != 0 {
+		t.Fatalf("ledger credits=%d want 0", got)
 	}
 }

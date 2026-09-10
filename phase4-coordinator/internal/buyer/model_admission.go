@@ -142,7 +142,9 @@ func (s *Server) byomSettlementPrereqsReady(p pool.Provider, material tier2.Rout
 			reportedHash == binding.Member.Hash &&
 			modelidentity.CanonicalAlgorithm(binding.Member.HashAlgorithm) &&
 			p.HashStatus == pool.HashStatusVerified &&
-			strings.EqualFold(material.CatalogModelKey, binding.Member.ModelKey)
+			strings.EqualFold(material.CatalogModelKey, binding.Member.ModelKey) &&
+			// SPEC-023 §3.7.6 rules 4–5 at route time, not only at the last heartbeat.
+			binding.Provenance.Fresh(s.now())
 	}
 	return p.ModelHashAlgorithm == modelidentity.SnapshotManifestV1 &&
 		isLowerHex64(expectedHash) &&

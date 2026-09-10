@@ -559,11 +559,28 @@ func (s *Server) autotuneCatalogSnapshot() (*autotune.Catalog, map[string]*autot
 // SIGHUP feed reload calls this only after the new feed is parsed and validated;
 // on any validation failure the caller keeps the prior catalog (fail-closed).
 func (s *Server) SetAutotuneCatalog(catalog *autotune.Catalog, compatible ...*autotune.Catalog) {
+	// A catalog swap without its artifact index drops the index: an index
+	// bound to another release's digest must never outlive that release.
+	s.SetAutotuneCatalogWithArtifactIndex(catalog, nil, compatible...)
+}
+
+// SetAutotuneCatalogWithArtifactIndex swaps the admission catalog AND the
+// SPEC-010 v1.7 R007 expected-identity set derived from the same loaded
+// feeds under one lock, so no session can be verified against a catalog and
+// an index of different releases (SIGHUP reload path).
+func (s *Server) SetAutotuneCatalogWithArtifactIndex(catalog *autotune.Catalog, index *artifactidentity.Index, compatible ...*autotune.Catalog) {
 	next := buildCompatibleCatalogSet(catalog, compatible)
 	s.autotuneCatalogMu.Lock()
 	s.autotuneCatalog = catalog
 	s.autotuneCompatibleCatalogs = next
+	s.artifactIdentityIndex = index
 	s.autotuneCatalogMu.Unlock()
+}
+
+func (s *Server) currentArtifactIdentityIndex() *artifactidentity.Index {
+	s.autotuneCatalogMu.RLock()
+	defer s.autotuneCatalogMu.RUnlock()
+	return s.artifactIdentityIndex
 }
 
 // CurrentAutotuneCatalog exposes the live active catalog to the coordinator's
@@ -1450,8 +1467,10 @@ func (s *Server) verifyModelIdentity(req pool.ModelIdentityRequest) pool.ModelId
 // the index, the index bound to the provider's admitted candidate catalog,
 // and the resolved member's model key equal to the session's admitted key.
 func (s *Server) resolveArtifactIdentity(req pool.ModelIdentityRequest, algorithm, reported string) (artifactidentity.Binding, bool) {
-	index := s.artifactIdentityIndex
-	if index == nil || !index.BoundTo(req.CandidateCatalogSHA256) {
+	index := s.currentArtifactIdentityIndex()
+	// SPEC-023 §3.7.6 rules 4–5: a stale or future-stamped feed authorizes no
+	// artifact-derived capability; the primary-row path is unaffected.
+	if index == nil || !index.BoundTo(req.CandidateCatalogSHA256) || !index.Fresh(s.now()) {
 		return artifactidentity.Binding{}, false
 	}
 	binding, ok := index.Resolve(algorithm, reported)

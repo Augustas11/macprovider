@@ -37,8 +37,10 @@ func TestArtifactFeedIdentityVerifiesExactMemberForTheAdmittedRelease(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
+	now := time.Date(2026, 9, 10, 12, 0, 0, 0, time.UTC)
 	index, err := artifactidentity.New(artifactidentity.Provenance{
 		FeedSHA256: strings.Repeat("a", 64), SignerKeyID: "k1", ReleaseID: "test", CandidateCatalogSHA256: catalog.SHA256,
+		FeedGeneratedAt: now.Add(-24 * time.Hour),
 	}, []artifactidentity.Member{
 		{ModelKey: "small", ArtifactID: "mlx-4bit", HashAlgorithm: modelidentity.SnapshotManifestV1, Hash: rowHash, IsPrimary: true, RuntimeStatus: "recommendable"},
 		{ModelKey: "small", ArtifactID: "gguf-q4", HashAlgorithm: modelidentity.GGUFFileV1, Hash: ggufHash, RuntimeStatus: "recommendable"},
@@ -48,8 +50,8 @@ func TestArtifactFeedIdentityVerifiesExactMemberForTheAdmittedRelease(t *testing
 	}
 	cfg := config.Default()
 	cfg.Tier2.ObserveEnabled = true
-	now := time.Date(2026, 9, 10, 12, 0, 0, 0, time.UTC)
-	server := &Server{cfg: cfg, tier2: cfg.Tier2, autotuneCatalog: catalog, artifactIdentityIndex: index, now: func() time.Time { return now }}
+	clock := now
+	server := &Server{cfg: cfg, tier2: cfg.Tier2, autotuneCatalog: catalog, artifactIdentityIndex: index, now: func() time.Time { return clock }}
 
 	base := pool.ModelIdentityRequest{ModelID: "model-a", ExpectedHash: rowHash, CandidateCatalogSHA256: catalog.SHA256, CatalogModelKey: "small"}
 
@@ -100,6 +102,26 @@ func TestArtifactFeedIdentityVerifiesExactMemberForTheAdmittedRelease(t *testing
 	if v := server.verifyModelIdentity(noKey); v.Status != pool.HashStatusMismatch {
 		t.Fatalf("model id is not the catalog key: %+v", v)
 	}
+	// SPEC-023 §3.7.6 rules 4–5: 14 days after the feed's stamp the artifact
+	// leg goes dark while the primary-row path is untouched.
+	clock = now.Add(14 * 24 * time.Hour)
+	if v := server.verifyModelIdentity(gguf); v.Status != pool.HashStatusMismatch || v.Artifact != nil {
+		t.Fatalf("stale feed must not authorize an artifact identity: %+v", v)
+	}
+	if v := server.verifyModelIdentity(primary); v.Status != pool.HashStatusVerified || v.Artifact != nil {
+		t.Fatalf("primary row path survives a stale feed: %+v", v)
+	}
+	clock = now
+	// A catalog swap carries its own index (or none): the boot index never
+	// outlives its release.
+	server.SetAutotuneCatalog(catalog)
+	if v := server.verifyModelIdentity(gguf); v.Status != pool.HashStatusMismatch || v.Artifact != nil {
+		t.Fatalf("swap without an index must drop artifact authority: %+v", v)
+	}
+	server.SetAutotuneCatalogWithArtifactIndex(catalog, index)
+	if v := server.verifyModelIdentity(gguf); v.Status != pool.HashStatusVerified || v.Artifact == nil {
+		t.Fatalf("swap with its index restores artifact authority: %+v", v)
+	}
 	// No index (rate-card-bound release): v1.6 verdicts exactly.
 	server.artifactIdentityIndex = nil
 	if v := server.verifyModelIdentity(gguf); v.Status != pool.HashStatusMismatch || v.Artifact != nil {
@@ -110,5 +132,50 @@ func TestArtifactFeedIdentityVerifiesExactMemberForTheAdmittedRelease(t *testing
 	bad.ReportedAlgorithm = "sha256"
 	if v := server.verifyModelIdentity(bad); v.Status != pool.HashStatusInvalid {
 		t.Fatalf("unnamed algorithm: %+v", v)
+	}
+}
+
+// SPEC-010-R007(d): a GGUF expected identity can only be an artifact-feed
+// member, so a binding predicate with none of the six values fails closed —
+// the eligibility contract agrees with the billing snapshot contract.
+func TestGGUFAdmissionPredicateRequiresCompleteArtifactEvidence(t *testing.T) {
+	hash := strings.Repeat("c", 64)
+	event := ModelAdmissionEvent{
+		ProviderID: "p1", CandidateID: "byom_" + strings.Repeat("a", 52), ServedModelRef: "ollama:test", CatalogModelKey: "small",
+		CatalogID: "catalog", CatalogBodyDigest: strings.Repeat("4", 64), CatalogSignatureKeyID: "k", CatalogSignaturePubkeyFingerprint: "ed25519-sha256:" + strings.Repeat("5", 64),
+		ExpectedCatalogModelHash: hash, ExpectedCatalogModelHashAlgorithm: modelidentity.GGUFFileV1,
+		DiscoveryDigestSHA256: strings.Repeat("b", 64), EvaluationDigestSHA256: strings.Repeat("d", 64),
+		CoordinatorEventID: strings.Repeat("e", 64), State: "settlement_capable",
+	}
+	base := ModelAdmissionSettlementPredicate{
+		ProviderID: event.ProviderID, CandidateID: event.CandidateID, ServedModelRef: event.ServedModelRef, CatalogModelKey: event.CatalogModelKey,
+		DiscoveryDigestSHA256: event.DiscoveryDigestSHA256, EvaluationDigestSHA256: event.EvaluationDigestSHA256,
+		CatalogID: event.CatalogID, CatalogBodyDigest: event.CatalogBodyDigest, CatalogSignatureKeyID: event.CatalogSignatureKeyID,
+		CatalogSignaturePubkeyFingerprint: event.CatalogSignaturePubkeyFingerprint,
+		ExpectedCatalogModelHash:          hash, ExpectedCatalogModelHashAlgorithm: modelidentity.GGUFFileV1,
+	}
+	if _, ok := ModelAdmissionSettlementBindingForRouteSnapshot(event, base); ok {
+		t.Fatal("gguf identity with no artifact evidence must not bind")
+	}
+	complete := base
+	complete.ArtifactFeedSHA256 = strings.Repeat("a", 64)
+	complete.ArtifactID = "gguf-q4"
+	complete.ArtifactHash = hash
+	complete.ArtifactHashAlgorithm = modelidentity.GGUFFileV1
+	complete.ArtifactFeedSignerKeyID = "k"
+	complete.ArtifactCandidateCatalogSHA256 = strings.Repeat("b", 64)
+	binding, ok := ModelAdmissionSettlementBindingForRouteSnapshot(event, complete)
+	if !ok || !binding.ArtifactDerived() || binding.ArtifactID != "gguf-q4" {
+		t.Fatalf("complete evidence must bind: %+v %v", binding, ok)
+	}
+	partial := complete
+	partial.ArtifactFeedSignerKeyID = ""
+	if _, ok := ModelAdmissionSettlementBindingForRouteSnapshot(event, partial); ok {
+		t.Fatal("partial evidence must not bind")
+	}
+	mismatched := complete
+	mismatched.ArtifactHash = strings.Repeat("d", 64)
+	if _, ok := ModelAdmissionSettlementBindingForRouteSnapshot(event, mismatched); ok {
+		t.Fatal("evidence naming another hash must not bind")
 	}
 }

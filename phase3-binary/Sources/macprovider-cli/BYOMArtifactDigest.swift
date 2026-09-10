@@ -55,27 +55,49 @@ struct BYOMArtifactFileIdentity: Codable, Equatable, Sendable {
     let path: String
     let sizeBytes: Int
     let inode: UInt64
-    let modifiedUnixMS: Int64
+    let device: UInt64
+    /// Modification time at the filesystem's own precision (seconds and
+    /// nanoseconds from `stat`), so two same-size in-place rewrites are not
+    /// one identity.
+    let modifiedSeconds: Int64
+    let modifiedNanoseconds: Int64
 
     enum CodingKeys: String, CodingKey {
         case path
         case sizeBytes = "size_bytes"
         case inode
-        case modifiedUnixMS = "modified_unix_ms"
+        case device
+        case modifiedSeconds = "modified_seconds"
+        case modifiedNanoseconds = "modified_nanoseconds"
     }
 
-    static func current(of url: URL, fileManager: FileManager = .default) -> BYOMArtifactFileIdentity? {
+    static func current(of url: URL) -> BYOMArtifactFileIdentity? {
         let resolved = url.resolvingSymlinksInPath().standardizedFileURL
-        guard let attributes = try? fileManager.attributesOfItem(atPath: resolved.path),
-              attributes[.type] as? FileAttributeType == .typeRegular,
-              let size = (attributes[.size] as? NSNumber)?.intValue,
-              let inode = (attributes[.systemFileNumber] as? NSNumber)?.uint64Value,
-              let modified = attributes[.modificationDate] as? Date
-        else {
+        var status = stat()
+        guard stat(resolved.path, &status) == 0, (status.st_mode & S_IFMT) == S_IFREG, status.st_size >= 0 else {
             return nil
         }
-        return BYOMArtifactFileIdentity(path: resolved.path, sizeBytes: size, inode: inode, modifiedUnixMS: Int64(modified.timeIntervalSince1970 * 1000))
+        return BYOMArtifactFileIdentity(
+            path: resolved.path,
+            sizeBytes: Int(status.st_size),
+            inode: UInt64(status.st_ino),
+            device: UInt64(status.st_dev),
+            modifiedSeconds: Int64(status.st_mtimespec.tv_sec),
+            modifiedNanoseconds: Int64(status.st_mtimespec.tv_nsec)
+        )
     }
+}
+
+/// A digest bound to the exact file it was computed over. An offer holds one
+/// of these until the moment it submits, re-validating the binding then.
+struct BYOMArtifactEvidence: Equatable, Sendable {
+    let algorithm: String
+    let digest: String
+    let file: BYOMArtifactFileIdentity
+    /// The manifest layer digest that LOCATED the blob (never reported).
+    let locatorDigest: String
+
+    var hashes: [String: String] { [algorithm: digest] }
 }
 
 /// Locates the GGUF blob an Ollama model name is served from, in the local
@@ -276,18 +298,36 @@ struct BYOMArtifactDigestResolver: Sendable {
     }
 
     /// Binding-time: recompute over the complete bytes, fail closed if the
-    /// file's identity changed while hashing, record the result.
-    func computeDigest(forOllamaModel name: String) throws -> String {
+    /// file's identity changed while hashing, record the result, and return
+    /// the digest BOUND to the file so the caller can re-validate right
+    /// before it reports (SPEC-010-R007(a)).
+    func computeEvidence(forOllamaModel name: String) throws -> BYOMArtifactEvidence {
         guard let blob = store.resolveModelBlob(name: name),
               let before = BYOMArtifactFileIdentity.current(of: blob.blobURL)
         else {
             throw BYOMArtifactDigestError.unresolvedBlob
         }
         let digest = try GGUFArtifactDigest.compute(fileURL: blob.blobURL)
-        guard BYOMArtifactFileIdentity.current(of: blob.blobURL) == before else {
+        let evidence = BYOMArtifactEvidence(algorithm: ModelArtifactIdentity.ggufFileV1, digest: digest, file: before, locatorDigest: blob.locatorDigest)
+        try validateCurrent(evidence, forOllamaModel: name)
+        cache.store(before, algorithm: evidence.algorithm, digest: digest)
+        return evidence
+    }
+
+    func computeDigest(forOllamaModel name: String) throws -> String {
+        try computeEvidence(forOllamaModel: name).digest
+    }
+
+    /// The name must STILL resolve — through the manifest — to the very file
+    /// the digest was computed over, with an unchanged identity: a manifest
+    /// retargeted to another blob, or a blob rewritten in place, fails closed.
+    func validateCurrent(_ evidence: BYOMArtifactEvidence, forOllamaModel name: String) throws {
+        guard let blob = store.resolveModelBlob(name: name),
+              blob.locatorDigest == evidence.locatorDigest,
+              let now = BYOMArtifactFileIdentity.current(of: blob.blobURL),
+              now == evidence.file
+        else {
             throw BYOMArtifactDigestError.fileIdentityChanged
         }
-        cache.store(before, algorithm: ModelArtifactIdentity.ggufFileV1, digest: digest)
-        return digest
     }
 }

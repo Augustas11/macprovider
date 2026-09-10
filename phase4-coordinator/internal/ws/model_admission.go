@@ -1210,8 +1210,10 @@ func ModelAdmissionSettlementBindingForRouteSnapshot(event ModelAdmissionEvent, 
 		return ModelAdmissionSettlementBinding{}, false
 	}
 	// SPEC-010-R007(d) / SPEC-047-R003: a feed-derived binding carries all six
-	// artifact values or none of them; a partial record fails closed here.
-	if predicate.ArtifactDerived() && !predicate.artifactEvidenceComplete() {
+	// artifact values; a partial record fails closed, and a GGUF expected
+	// identity (never a row identity) with no evidence at all fails closed too.
+	if (predicate.ArtifactDerived() || predicate.ExpectedCatalogModelHashAlgorithm == modelidentity.GGUFFileV1) &&
+		!predicate.artifactEvidenceComplete() {
 		return ModelAdmissionSettlementBinding{}, false
 	}
 	if !validModelAdmissionSHA256Hex(event.CoordinatorEventID) ||

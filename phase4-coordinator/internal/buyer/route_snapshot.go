@@ -100,6 +100,14 @@ func (b *billingRecorder) recordRouteSnapshot(providerBody []byte, provider pool
 	if err != nil {
 		return nil, err
 	}
+	// SPEC-010-R007(d): a session whose identity resolved through the feed —
+	// a GGUF member OR a secondary snapshot member — settles only with the
+	// six values, which come from the BYOM admission binding; without an
+	// artifact-derived binding the snapshot would carry a member hash with no
+	// provenance, indistinguishable from the row-bound primary path.
+	if provider.ArtifactIdentity != nil && !byomBinding.ArtifactDerived() {
+		return nil, fmt.Errorf("artifact identity requires admission and feed evidence")
+	}
 	promptHash, err := coordinatorPromptHash(providerBody)
 	if err != nil {
 		return nil, err

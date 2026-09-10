@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/buyer"
 	"github.com/augstar/macprovider-coordinator/internal/modelidentity"
@@ -51,6 +52,12 @@ func TestBuildArtifactIdentityIndexFromBoundFeeds(t *testing.T) {
 	}
 	if !index.BoundTo(feeds.AutotuneCandidatesVerification.SHA256) || index.BoundTo(strings.Repeat("f", 64)) {
 		t.Fatal("index must be bound to the served candidate catalog only")
+	}
+	if prov.FeedGeneratedAt.IsZero() || !prov.FeedGeneratedAt.Equal(feeds.CatalogArtifactsVerification.GeneratedAt) {
+		t.Fatalf("index must carry the feed's release stamp for freshness: %v", prov.FeedGeneratedAt)
+	}
+	if !index.Fresh(prov.FeedGeneratedAt.Add(24*time.Hour)) || index.Fresh(prov.FeedGeneratedAt.Add(15*24*time.Hour)) {
+		t.Fatal("freshness follows SPEC-023 §3.7.6 rules 4–5")
 	}
 }
 

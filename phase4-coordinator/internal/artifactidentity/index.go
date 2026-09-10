@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/modelidentity"
 )
@@ -35,6 +36,23 @@ type Provenance struct {
 	// CandidateCatalogSHA256 is the exact candidate-catalog body digest the
 	// feed is release-bound to (SPEC-023 §3.7.4).
 	CandidateCatalogSHA256 string
+	// FeedGeneratedAt is the feed's release stamp: SPEC-023 §3.7.6 rules 4–5
+	// make a feed 14 days past it (or ahead of the clock) unusable for every
+	// artifact-derived capability while the primary-row path continues.
+	FeedGeneratedAt time.Time
+}
+
+const (
+	artifactFeedStaleAfter = 14 * 24 * time.Hour
+	artifactFeedClockSkew  = 10 * time.Minute
+)
+
+// Fresh reports whether artifact-derived capability may be exercised at `now`.
+func (p Provenance) Fresh(now time.Time) bool {
+	if p.FeedGeneratedAt.IsZero() || p.FeedGeneratedAt.After(now.Add(artifactFeedClockSkew)) {
+		return false
+	}
+	return now.Sub(p.FeedGeneratedAt) < artifactFeedStaleAfter
 }
 
 // Binding is a verified provider identity resolved through the index: the
@@ -69,6 +87,9 @@ func New(provenance Provenance, members []Member) (*Index, error) {
 	if strings.TrimSpace(provenance.SignerKeyID) == "" || strings.TrimSpace(provenance.ReleaseID) == "" {
 		return nil, fmt.Errorf("artifact identity index: provenance signer and release id are required")
 	}
+	if provenance.FeedGeneratedAt.IsZero() {
+		return nil, fmt.Errorf("artifact identity index: provenance feed generated_at is required")
+	}
 	index := &Index{provenance: provenance, members: make(map[string]Member, len(members))}
 	for _, member := range members {
 		if !modelidentity.CanonicalAlgorithm(member.HashAlgorithm) {
@@ -95,6 +116,12 @@ func (i *Index) Provenance() Provenance {
 		return Provenance{}
 	}
 	return i.provenance
+}
+
+// Fresh reports whether the feed behind this index may authorize artifact-
+// derived capability at `now` (SPEC-023 §3.7.6 rules 4–5).
+func (i *Index) Fresh(now time.Time) bool {
+	return i != nil && i.provenance.Fresh(now)
 }
 
 // BoundTo reports whether the index is release-bound to the candidate

@@ -1779,32 +1779,46 @@ struct BYOMModelAdmissionRuntime: Sendable {
         guard let identity = try identityStore.loadAdmissionIdentity(providerId: providerID) else {
             throw BYOMModelAdmissionError.missingAdmissionIdentity(providerID: providerID)
         }
+        let evidence = try Self.artifactEvidence(for: candidate, environment: environment)
         let package = try BYOMOfferSubmissionBuilder.makePackage(
             providerID: providerID,
             candidate: candidate,
             admissionIdentity: identity,
             evaluationDigestSHA256: evaluationDigestSHA256,
             requestedDisclosureClass: requestedDisclosureClass,
-            artifactHashes: try Self.artifactHashes(for: candidate, environment: environment)
+            artifactHashes: evidence?.hashes ?? [:]
         )
+        // SPEC-010-R007(a): the binding must survive through the report. The
+        // name is re-resolved and the file identity re-checked immediately
+        // before the signed package leaves the machine.
+        if let evidence {
+            do {
+                try environment.artifactDigests.validateCurrent(evidence, forOllamaModel: candidate.servedModelRef)
+            } catch {
+                throw BYOMModelAdmissionError.artifactIdentityChanged
+            }
+        }
         return try await client.submitOffer(package, bearerToken: bearer)
     }
 
     /// SPEC-010 v1.7 R007(a): an offer is a report that binds identity, so the
     /// GGUF digest of an Ollama-served candidate is RECOMPUTED over the blob's
     /// complete bytes here — never read from the cache and never adopted from
-    /// the runtime. An unresolvable blob yields no artifact evidence (the
-    /// offer proceeds identity-less, as v0.1 did); a file that changes while
-    /// hashing fails the offer closed.
-    static func artifactHashes(for candidate: BYOMDiscoveryWire.Candidate, environment: BYOMDiscoveryEnvironment) throws -> [String: String] {
-        guard candidate.runtimeSource == "ollama_loopback" else { return [:] }
+    /// the runtime — and returned bound to the file for a final re-check at
+    /// submission. A candidate that discovery reported as artifact-backed
+    /// (`catalog_matched` / `artifact_hash_available`) MUST hash: a blob that
+    /// no longer resolves, is not GGUF, or changes fails the offer closed. A
+    /// candidate that never had artifact evidence proceeds identity-less, as
+    /// v0.1 did.
+    static func artifactEvidence(for candidate: BYOMDiscoveryWire.Candidate, environment: BYOMDiscoveryEnvironment) throws -> BYOMArtifactEvidence? {
+        guard candidate.runtimeSource == "ollama_loopback" else { return nil }
+        let artifactBacked = candidate.identityState == "catalog_matched" || candidate.identityState == "artifact_hash_available"
         do {
-            let digest = try environment.artifactDigests.computeDigest(forOllamaModel: candidate.servedModelRef)
-            return [ModelArtifactIdentity.ggufFileV1: digest]
-        } catch BYOMArtifactDigestError.unresolvedBlob {
-            return [:]
-        } catch BYOMArtifactDigestError.notGGUF {
-            return [:]
+            return try environment.artifactDigests.computeEvidence(forOllamaModel: candidate.servedModelRef)
+        } catch BYOMArtifactDigestError.unresolvedBlob where !artifactBacked {
+            return nil
+        } catch BYOMArtifactDigestError.notGGUF where !artifactBacked {
+            return nil
         } catch {
             throw BYOMModelAdmissionError.artifactIdentityChanged
         }
