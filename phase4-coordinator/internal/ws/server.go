@@ -3708,7 +3708,7 @@ func (s *Server) registerProviderSession(conn net.Conn, entry *pool.Provider) (*
 		prior, hadPrior := s.pool.Resolve(entry.ProviderID, "")
 		session, refusal = s.registerProviderSessionLocked(conn, entry)
 		if session != nil {
-			s.bindModelAdmissionSessionAtHelloLocked(entry.ProviderID, prior, hadPrior, section)
+			s.helloSessionBindingLocked(entry.ProviderID, prior, hadPrior, section)
 		}
 	})
 	return session, refusal
@@ -5634,7 +5634,7 @@ func (s *Server) handleHeartbeat(conn net.Conn, providerID, assignedID string, p
 			At:                        s.now(),
 		})
 		if heartbeatResult.OK {
-			s.evaluateModelAdmissionSessionOnHeartbeatLocked(*heartbeatResult.Provider, priorBinding, hadPriorBinding, section)
+			s.heartbeatSessionEvaluationLocked(*heartbeatResult.Provider, priorBinding, hadPriorBinding, section)
 		}
 	})
 	entry, gap, ok := heartbeatResult.Provider, heartbeatResult.Gap, heartbeatResult.OK

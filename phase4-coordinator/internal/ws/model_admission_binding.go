@@ -386,14 +386,14 @@ func (s *Server) evaluateSessionDriftLocked(ctx context.Context, provider pool.P
 // derived one, and only then publishes the binding.
 func (s *Server) bindModelAdmissionSessionAtHello(providerID string, prior pool.Provider, hadPrior bool) {
 	s.withProviderSection(providerID, func(section *providerSection) {
-		s.bindModelAdmissionSessionAtHelloLocked(providerID, prior, hadPrior, section)
+		s.helloSessionBindingLocked(providerID, prior, hadPrior, section)
 	})
 }
 
-// bindModelAdmissionSessionAtHelloLocked is bindModelAdmissionSessionAtHello
+// helloSessionBindingLocked is bindModelAdmissionSessionAtHello
 // for a caller already holding the provider's section (the registration
 // path, which replaces the session under the same hold).
-func (s *Server) bindModelAdmissionSessionAtHelloLocked(providerID string, prior pool.Provider, hadPrior bool, section *providerSection) {
+func (s *Server) helloSessionBindingLocked(providerID string, prior pool.Provider, hadPrior bool, section *providerSection) {
 	if s.modelAdmissions == nil || s.pool == nil {
 		return
 	}
@@ -421,14 +421,14 @@ func (s *Server) bindModelAdmissionSessionAtHelloLocked(providerID string, prior
 // identity or receipt-key change revokes it, and the binding is refreshed.
 func (s *Server) evaluateModelAdmissionSessionOnHeartbeat(provider pool.Provider, priorBinding pool.ModelAdmissionBinding, hadBinding bool) {
 	s.withProviderSection(provider.ProviderID, func(section *providerSection) {
-		s.evaluateModelAdmissionSessionOnHeartbeatLocked(provider, priorBinding, hadBinding, section)
+		s.heartbeatSessionEvaluationLocked(provider, priorBinding, hadBinding, section)
 	})
 }
 
-// evaluateModelAdmissionSessionOnHeartbeatLocked is the heartbeat (a)/(d)
+// heartbeatSessionEvaluationLocked is the heartbeat (a)/(d)
 // evaluation for a caller holding the section (the heartbeat handler, which
 // applies the registry update under the same hold).
-func (s *Server) evaluateModelAdmissionSessionOnHeartbeatLocked(provider pool.Provider, priorBinding pool.ModelAdmissionBinding, hadBinding bool, section *providerSection) {
+func (s *Server) heartbeatSessionEvaluationLocked(provider pool.Provider, priorBinding pool.ModelAdmissionBinding, hadBinding bool, section *providerSection) {
 	if s.modelAdmissions == nil || s.pool == nil || !hadBinding {
 		return
 	}
