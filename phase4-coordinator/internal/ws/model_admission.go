@@ -70,12 +70,12 @@ type ModelAdmissionStore interface {
 	LatestModelAdmissionRouteStatus(context.Context, string, string, string) (ModelAdmissionEvent, bool, error)
 	SettlementCapableModelAdmissionStatusesForServedModel(context.Context, string, string) ([]ModelAdmissionEvent, error)
 	// SPEC-047-R001 v0.1.5 operator decision path.
-	// AppendModelAdmissionDecisionCAS appends a coordinator/operator decision
+	// CASAppendModelAdmissionDecision appends a coordinator/operator decision
 	// only when the candidate's head still equals expectedHead (after
 	// idempotency resolution — a replay answers the original event whatever
 	// the head); errModelAdmissionStaleHead otherwise.
-	AppendModelAdmissionDecisionCAS(context.Context, ModelAdmissionEvent, string) (ModelAdmissionEvent, bool, error)
-	// AppendModelAdmissionApproval is AppendModelAdmissionDecisionCAS that,
+	CASAppendModelAdmissionDecision(context.Context, ModelAdmissionEvent, string) (ModelAdmissionEvent, bool, error)
+	// AppendModelAdmissionApproval is CASAppendModelAdmissionDecision that,
 	// in the same atomic step, marks the approved pending record consumed by
 	// this approval (every other open record for the candidate is
 	// invalidated, as on any append).
@@ -262,7 +262,7 @@ func (s *memoryModelAdmissionStore) AppendModelAdmissionDecision(_ context.Conte
 	return stored, err
 }
 
-func (s *memoryModelAdmissionStore) AppendModelAdmissionDecisionCAS(_ context.Context, event ModelAdmissionEvent, expectedHead string) (ModelAdmissionEvent, bool, error) {
+func (s *memoryModelAdmissionStore) CASAppendModelAdmissionDecision(_ context.Context, event ModelAdmissionEvent, expectedHead string) (ModelAdmissionEvent, bool, error) {
 	return s.appendCoordinatorModelAdmissionEvent(event, expectedHead, nil)
 }
 
@@ -634,7 +634,7 @@ func (s *SQLiteModelAdmissionStore) AppendModelAdmissionWithdrawal(ctx context.C
 	return s.appendProviderModelAdmissionEvent(ctx, event, modelAdmissionWithdrawn)
 }
 
-func (s *SQLiteModelAdmissionStore) AppendModelAdmissionDecisionCAS(ctx context.Context, event ModelAdmissionEvent, expectedHead string) (ModelAdmissionEvent, bool, error) {
+func (s *SQLiteModelAdmissionStore) CASAppendModelAdmissionDecision(ctx context.Context, event ModelAdmissionEvent, expectedHead string) (ModelAdmissionEvent, bool, error) {
 	return s.appendCoordinatorModelAdmissionEventCAS(ctx, event, expectedHead, nil)
 }
 

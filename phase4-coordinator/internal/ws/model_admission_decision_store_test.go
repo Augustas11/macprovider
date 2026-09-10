@@ -89,10 +89,10 @@ func TestModelAdmissionDecisionStoreCASAndPending(t *testing.T) {
 			decision.EvaluatedReleaseGeneration = 7
 			decision = withTrustedCatalogDecisionFields(decision)
 
-			if _, _, err := store.AppendModelAdmissionDecisionCAS(ctx, decision, stringsOf("0", 64)); !errors.Is(err, providerws.ErrModelAdmissionStaleHead) {
+			if _, _, err := store.CASAppendModelAdmissionDecision(ctx, decision, stringsOf("0", 64)); !errors.Is(err, providerws.ErrModelAdmissionStaleHead) {
 				t.Fatalf("stale head expected, got %v", err)
 			}
-			priced, replayed, err := store.AppendModelAdmissionDecisionCAS(ctx, decision, submitted.CoordinatorEventID)
+			priced, replayed, err := store.CASAppendModelAdmissionDecision(ctx, decision, submitted.CoordinatorEventID)
 			if err != nil || replayed {
 				t.Fatalf("catalog_priced CAS replayed=%v err=%v", replayed, err)
 			}
@@ -101,14 +101,14 @@ func TestModelAdmissionDecisionStoreCASAndPending(t *testing.T) {
 			}
 			// Idempotent replay: same request id + payload digest answers the
 			// committed event even though the head has moved on.
-			again, replayed, err := store.AppendModelAdmissionDecisionCAS(ctx, decision, submitted.CoordinatorEventID)
+			again, replayed, err := store.CASAppendModelAdmissionDecision(ctx, decision, submitted.CoordinatorEventID)
 			if err != nil || !replayed || again.CoordinatorEventID != priced.CoordinatorEventID {
 				t.Fatalf("replay expected: replayed=%v err=%v", replayed, err)
 			}
 			// Same key, different body: conflict, before any head compare.
 			conflict := decision
 			conflict.PayloadDigestSHA256 = stringsOf("f", 64)
-			if _, _, err := store.AppendModelAdmissionDecisionCAS(ctx, conflict, priced.CoordinatorEventID); err == nil || errors.Is(err, providerws.ErrModelAdmissionStaleHead) {
+			if _, _, err := store.CASAppendModelAdmissionDecision(ctx, conflict, priced.CoordinatorEventID); err == nil || errors.Is(err, providerws.ErrModelAdmissionStaleHead) {
 				t.Fatalf("idempotency conflict expected, got %v", err)
 			}
 

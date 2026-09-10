@@ -206,7 +206,7 @@ func (f *bindingFixture) decide(t *testing.T, current ModelAdmissionEvent, nextS
 	decision.ExpectedCatalogModelHash = bindingRowHash
 	decision.ExpectedCatalogModelHashAlgorithm = modelidentity.SnapshotManifestV1
 	stored, _, err := f.server.appendModelAdmissionEventInSection(context.Background(), current.ProviderID, func(ctx context.Context) (ModelAdmissionEvent, bool, error) {
-		return f.server.modelAdmissions.AppendModelAdmissionDecisionCAS(ctx, decision, current.CoordinatorEventID)
+		return f.server.modelAdmissions.CASAppendModelAdmissionDecision(ctx, decision, current.CoordinatorEventID)
 	})
 	if err != nil {
 		t.Fatalf("decide %s: %v", nextState, err)

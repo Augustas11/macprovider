@@ -7527,14 +7527,27 @@
         "phase4-coordinator/internal/ws/model_admission.go:func (s *memoryModelAdmissionStore) AppendModelAdmissionOffer",
         "phase4-coordinator/internal/ws/model_admission.go:func (s *memoryModelAdmissionStore) AppendModelAdmissionDecision",
         "phase4-coordinator/internal/ws/model_admission.go:modelAdmissionAllowedNextState",
-        "phase4-coordinator/internal/ws/model_admission.go:ModelAdmissionRevocationForRuntimeDrift"
+        "phase4-coordinator/internal/ws/model_admission.go:ModelAdmissionRevocationForRuntimeDrift",
+        "phase4-coordinator/internal/ws/model_admission_operator.go:func (s *Server) handleAdminModelAdmissionDecisions",
+        "phase4-coordinator/internal/ws/model_admission_operator.go:func (s *Server) applyModelAdmissionDecisionLocked",
+        "phase4-coordinator/internal/ws/model_admission_operator.go:func (s *Server) applyModelAdmissionApprovalLocked",
+        "phase4-coordinator/internal/ws/model_admission_operator.go:func (s *Server) handleAdminModelAdmissionOffers",
+        "phase4-coordinator/internal/ws/model_admission_operator.go:func (s *Server) CompareAndInsertModelAdmissionRouteSnapshot",
+        "phase4-coordinator/internal/ws/model_admission_binding.go:func (s *Server) withProviderSection",
+        "phase4-coordinator/internal/ws/model_admission_binding.go:func matchOfferArtifactHashes",
+        "phase4-coordinator/internal/ws/model_admission.go:func (s *SQLiteModelAdmissionStore) CASAppendModelAdmissionDecision",
+        "phase4-coordinator/internal/ws/release_snapshot.go:type releaseSnapshotState struct"
       ],
       "tests": [
         "phase4-coordinator/internal/ws/model_admission_test.go:TestModelAdmissionDecisionStateMachineAndRoutingGate",
         "phase4-coordinator/internal/ws/model_admission_test.go:TestModelAdmissionStoreRequiresFreshEvidenceForReEntry",
         "phase4-coordinator/internal/ws/model_admission_test.go:TestSQLiteModelAdmissionStorePersistsAppendOnlyStatus",
         "phase4-coordinator/internal/ws/model_admission_test.go:TestModelAdmissionRouteStatusUsesAppendOrderAcrossStores",
-        "phase4-coordinator/internal/ws/server_test.go:TestHeartbeatModelDriftRevokesSettlementCapableModelAdmission"
+        "phase4-coordinator/internal/ws/server_test.go:TestHeartbeatModelDriftRevokesSettlementCapableModelAdmission",
+        "phase4-coordinator/internal/ws/model_admission_operator_test.go:TestModelAdmissionOperatorDecisionPath",
+        "phase4-coordinator/internal/ws/model_admission_decision_store_test.go:TestModelAdmissionDecisionStoreCASAndPending",
+        "phase4-coordinator/internal/ws/model_admission_binding_test.go:TestModelAdmissionOfferTimeMatchOrdering",
+        "phase4-coordinator/internal/ws/artifact_identity_test.go:TestReleaseStagingPublishesCatalogAndIdentitySetsAsOneGeneration"
       ],
       "journeys": [
         "JOURNEY-NETWORK-MODEL-ADMISSION"
@@ -7543,8 +7556,8 @@
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/1240",
-        "rationale": "Coordinator state-machine storage, transition ordering, re-entry freshness, and drift revocation helpers are locally tested, but the full policy/probe workflow and signed admission journey remain incomplete."
+        "issue": "https://github.com/Augustas11/macprovider/issues/1453",
+        "rationale": "v0.1.5 operator decision path (per-actor credential, closed precedence, dual control, offer listing), offer-time catalog match, per-provider sections, atomic release snapshot, and route-time compare-and-insert are in production code with local tests; the signed JOURNEY-NETWORK-MODEL-ADMISSION result covering a settlement-capable case remains uncaptured."
       }
     },
     {
@@ -7585,7 +7598,15 @@
         "phase4-coordinator/internal/ws/model_admission.go:ModelAdmissionDefaultPaidRoutingEligible",
         "phase4-coordinator/internal/ws/model_admission.go:ModelAdmissionSettlementBindingForRouteSnapshot",
         "phase4-coordinator/internal/routing/filter.go:EligibleCandidates",
-        "phase4-coordinator/internal/buyer/route_snapshot.go:func (b *billingRecorder) recordRouteSnapshot"
+        "phase4-coordinator/internal/buyer/route_snapshot.go:func (b *billingRecorder) recordRouteSnapshot",
+        "phase4-coordinator/internal/ws/model_admission_operator.go:func (s *Server) bindDecisionToCatalogLocked",
+        "phase4-coordinator/internal/ws/model_admission_operator.go:func (s *Server) settlementSessionMemberLocked",
+        "phase4-coordinator/internal/ws/model_admission_binding.go:func (s *Server) evaluateCatalogPreconditionsLocked",
+        "phase4-coordinator/internal/ws/model_admission_binding.go:func (s *Server) refreshModelAdmissionBindingLocked",
+        "phase4-coordinator/internal/ws/model_admission_binding.go:func sessionBoundMember",
+        "phase4-coordinator/internal/pool/provider.go:func (r *Registry) SetModelAdmissionBinding",
+        "phase4-coordinator/internal/buyer/model_admission.go:func (s *Server) byomRouteSnapshotBinding",
+        "phase4-coordinator/internal/buyer/model_admission.go:func (s *Server) insertBYOMRouteSnapshot"
       ],
       "tests": [
         "phase4-coordinator/internal/buyer/route_snapshot_test.go:TestBYOMNonSettlementStatesAreHiddenFromDefaultPaidModelsAndRouting",
@@ -7593,7 +7614,11 @@
         "phase4-coordinator/internal/buyer/route_snapshot_test.go:TestBYOMSettlementCapableBindsAdmissionEventIntoRouteSnapshot",
         "phase4-coordinator/internal/buyer/route_snapshot_test.go:TestBYOMSettlementCapableRequiresValidReceiptKeyBeforeRouting",
         "phase4-coordinator/internal/buyer/route_snapshot_test.go:TestBYOMCatalogKeyMismatchFailsClosed",
-        "phase5-gateway/internal/router/server_test.go:TestBYOMNonSettlementCoordinatorUnavailableDoesNotChargeOrClaimVerified"
+        "phase5-gateway/internal/router/server_test.go:TestBYOMNonSettlementCoordinatorUnavailableDoesNotChargeOrClaimVerified",
+        "phase4-coordinator/internal/ws/model_admission_binding_test.go:TestModelAdmissionSessionBindingLifecycleAndDrift",
+        "phase4-coordinator/internal/ws/model_admission_operator_test.go:TestModelAdmissionOperatorDecisionPath",
+        "phase4-coordinator/internal/buyer/artifact_settlement_test.go:TestBYOMArtifactMemberSettlesWithSixValueEvidence",
+        "phase4-coordinator/internal/buyer/artifact_settlement_test.go:TestBYOMArtifactMemberRouteTimeGatesFailClosed"
       ],
       "journeys": [
         "JOURNEY-NETWORK-MODEL-ADMISSION"
@@ -7661,7 +7686,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1240",
-        "rationale": "Default buyer invisibility for non-settlement BYOM states is locally covered; explicit experimental publication and full lifecycle evidence are not implemented."
+        "rationale": "v0.1.5 content-anchored preconditions, the coordinator-derived session binding, settlement bound to the session's pinned member, and the route-time compare-and-insert are in production code with local tests; explicit experimental publication and the signed lifecycle evidence are not implemented."
       }
     },
     {
@@ -7673,9 +7698,16 @@
         "phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:struct BYOMModelAdmissionRuntime",
         "phase4-coordinator/internal/ws/model_admission.go:func (s *memoryModelAdmissionStore) AppendModelAdmissionWithdrawal",
         "phase4-coordinator/internal/ws/model_admission.go:ModelAdmissionRevocationForRuntimeDrift",
-        "phase4-coordinator/internal/ws/server.go:handleHeartbeat"
+        "phase4-coordinator/internal/ws/server.go:handleHeartbeat",
+        "phase4-coordinator/internal/ws/model_admission_binding.go:func sessionDriftReason",
+        "phase4-coordinator/internal/ws/model_admission_binding.go:func (s *Server) bindModelAdmissionSessionAtHello",
+        "phase4-coordinator/internal/ws/model_admission_binding.go:func (s *Server) evaluateModelAdmissionSessionOnHeartbeat",
+        "phase4-coordinator/internal/ws/model_admission_binding.go:func (s *Server) afterReleasePublished",
+        "phase4-coordinator/internal/ws/model_admission_binding.go:func (s *Server) sweepProviderRelease"
       ],
       "tests": [
+        "phase4-coordinator/internal/ws/model_admission_binding_test.go:TestModelAdmissionSessionBindingLifecycleAndDrift",
+        "phase4-coordinator/internal/ws/model_admission_binding_test.go:TestModelAdmissionReleaseSweepRevokesOnContentChangeOnly",
         "phase3-binary/Tests/macprovider-cliTests/BYOMAdmissionTests.swift:testWithdrawalPackageBindsAdmissionIdentityAndNullableCatalogKey",
         "phase3-binary/Tests/macprovider-cliTests/BYOMAdmissionTests.swift:testAdmissionRuntimeWithdrawPostsPackageAndPreservesNonEarningStatus",
         "phase3-binary/Tests/macprovider-cliTests/BYOMAdmissionTests.swift:testAdmissionRuntimeWithdrawFallsBackToCoordinatorStatusWhenRuntimeUnavailable",
@@ -7691,7 +7723,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1240",
-        "rationale": "Signed withdrawal and heartbeat drift revocation slices are covered locally, but broader policy/probe/staleness workflows and signed journey evidence remain incomplete."
+        "rationale": "v0.1.5 content-only drift is live in production: hello/heartbeat identity and receipt-key drift under the provider section, artifact-feed and catalog reload sweeps after every atomic publication, a release re-stamp appends nothing; signed journey evidence of a revoked drift case remains uncaptured."
       }
     },
     {
@@ -7738,6 +7770,11 @@
       ],
       "tests": [
         "phase4-coordinator/internal/ws/model_admission_test.go:TestModelAdmissionDecisionStateMachineAndRoutingGate",
+        "phase4-coordinator/internal/ws/model_admission_operator_test.go:TestModelAdmissionOperatorDecisionPath",
+        "phase4-coordinator/internal/ws/model_admission_decision_store_test.go:TestModelAdmissionDecisionStoreCASAndPending",
+        "phase4-coordinator/internal/ws/model_admission_binding_test.go:TestModelAdmissionOfferTimeMatchOrdering",
+        "phase4-coordinator/internal/ws/model_admission_binding_test.go:TestModelAdmissionSessionBindingLifecycleAndDrift",
+        "phase4-coordinator/internal/ws/model_admission_binding_test.go:TestModelAdmissionReleaseSweepRevokesOnContentChangeOnly",
         "phase4-coordinator/internal/buyer/route_snapshot_test.go:TestBYOMNonSettlementStatesAreHiddenFromDefaultPaidModelsAndRouting",
         "phase4-coordinator/internal/routing/filter_test.go:TestEligibleCandidates_BYOMNonSettlementExcluded",
         "phase5-gateway/internal/router/server_test.go:TestBYOMNonSettlementUnavailableIsPermanent",

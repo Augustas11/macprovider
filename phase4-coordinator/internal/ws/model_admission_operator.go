@@ -385,7 +385,7 @@ func (s *Server) applyModelAdmissionDecisionLocked(ctx context.Context, actor st
 		}
 		// (5) release-generation re-compare (one read-lock hold spans (4)
 		// and this append, so the generation cannot have moved) + append.
-		stored, replayed, appendErr = s.modelAdmissions.AppendModelAdmissionDecisionCAS(ctx, decision, head.CoordinatorEventID)
+		stored, replayed, appendErr = s.modelAdmissions.CASAppendModelAdmissionDecision(ctx, decision, head.CoordinatorEventID)
 	})
 	if appendErr != nil {
 		return modelAdmissionDecisionOutcome{}, mapDecisionStoreError(appendErr)

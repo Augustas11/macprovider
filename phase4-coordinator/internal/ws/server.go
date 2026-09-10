@@ -1578,14 +1578,14 @@ func (s *Server) verifyProviderModelIdentity(modelID, expectedHash, reportedHash
 
 func (s *Server) verifyModelIdentity(req pool.ModelIdentityRequest) pool.ModelIdentityVerdict {
 	var verdict pool.ModelIdentityVerdict
-	s.withReleaseRead(func() { verdict = s.verifyModelIdentityLocked(req) })
+	s.withReleaseRead(func() { verdict = s.resolveModelIdentityVerdict(req) })
 	return verdict
 }
 
-// verifyModelIdentityLocked is verifyModelIdentity for callers that already
+// resolveModelIdentityVerdict is verifyModelIdentity for callers that already
 // hold the release read lock (decision evaluation); it MUST NOT be called
 // without it.
-func (s *Server) verifyModelIdentityLocked(req pool.ModelIdentityRequest) pool.ModelIdentityVerdict {
+func (s *Server) resolveModelIdentityVerdict(req pool.ModelIdentityRequest) pool.ModelIdentityVerdict {
 	cfg := s.tier2Config()
 	algorithm := strings.TrimSpace(req.ReportedAlgorithm)
 	reported := strings.TrimSpace(req.ReportedHash)
