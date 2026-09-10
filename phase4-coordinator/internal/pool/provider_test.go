@@ -18,12 +18,13 @@ func TestAirLlamaHeartbeatKeepsCatalogArtifactAndWeightsIdentitiesSeparate(t *te
 	const artifactHash = "3975387f249977e5e8bfb7ed0d352f8258ac3d630f961ce1dd952f428ee7216a"
 	const weightsHash = "0baf13715db1eeb56e6d0806b0d764aa1c44497aaaaf8d2ba90c21128d9fe2fe"
 	var verifiedHash string
-	registry := NewRegistry(nil, WithModelIdentityVerifier(func(_, expected, reported, algorithm string) HashStatus {
+	registry := NewRegistry(nil, WithModelIdentityVerifier(func(req ModelIdentityRequest) ModelIdentityVerdict {
+		expected, reported, algorithm := req.ExpectedHash, req.ReportedHash, req.ReportedAlgorithm
 		if expected != artifactHash || algorithm != modelidentity.SnapshotManifestV1 {
-			return HashStatusInvalid
+			return ModelIdentityVerdict{Status: HashStatusInvalid}
 		}
 		verifiedHash = reported
-		return HashStatusVerified
+		return ModelIdentityVerdict{Status: HashStatusVerified}
 	}))
 	start := time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC)
 	registerHeartbeatProvider(t, registry, "old-model", "", HashStatusUncatalogued, start)
@@ -59,12 +60,13 @@ func TestAirLlamaHeartbeatKeepsCatalogArtifactAndWeightsIdentitiesSeparate(t *te
 func TestHeartbeatModelChangeClearsPriorExpectedCatalogHash(t *testing.T) {
 	const hashA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	var seenExpected string
-	registry := NewRegistry(nil, WithModelIdentityVerifier(func(_, expected, _, _ string) HashStatus {
+	registry := NewRegistry(nil, WithModelIdentityVerifier(func(req ModelIdentityRequest) ModelIdentityVerdict {
+		expected := req.ExpectedHash
 		seenExpected = expected
 		if expected == "" {
-			return HashStatusUncatalogued
+			return ModelIdentityVerdict{Status: HashStatusUncatalogued}
 		}
-		return HashStatusVerified
+		return ModelIdentityVerdict{Status: HashStatusVerified}
 	}))
 	start := time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC)
 	registerHeartbeatProvider(t, registry, "model-a", hashA, HashStatusVerified, start)
@@ -2792,15 +2794,15 @@ func TestRegisterMigratesMDAProofAcrossReconnect(t *testing.T) {
 	chain := [][]byte{[]byte("leaf-der"), []byte("root-der")}
 
 	_, ok, refusal := registry.RegisterAtDetailed(&Provider{
-		ProviderID:   "p-mda",
-		AssignedID:   "s1",
-		ModelID:      "model-a",
-		State:        StateReady,
-		SlotsFree:    1,
-		SlotsTotal:   1,
-		SEPublicKey:  seKey,
-		AuthState:    AuthBearerValidated,
-		MaxConcurrency: 1,
+		ProviderID:       "p-mda",
+		AssignedID:       "s1",
+		ModelID:          "model-a",
+		State:            StateReady,
+		SlotsFree:        1,
+		SlotsTotal:       1,
+		SEPublicKey:      seKey,
+		AuthState:        AuthBearerValidated,
+		MaxConcurrency:   1,
 		MaxContextTokens: 8000,
 	}, nil, now)
 	if !ok || refusal != RegisterRefusalNone {
@@ -2811,17 +2813,17 @@ func TestRegisterMigratesMDAProofAcrossReconnect(t *testing.T) {
 	}
 
 	_, ok, refusal = registry.RegisterAtDetailed(&Provider{
-		ProviderID:   "p-mda",
-		AssignedID:   "s2",
-		ModelID:      "model-a",
-		State:        StateReady,
-		SlotsFree:    1,
-		SlotsTotal:   1,
-		SEPublicKey:  append([]byte(nil), seKey...),
-		AuthState:    AuthBearerValidated,
-		MaxConcurrency: 1,
+		ProviderID:       "p-mda",
+		AssignedID:       "s2",
+		ModelID:          "model-a",
+		State:            StateReady,
+		SlotsFree:        1,
+		SlotsTotal:       1,
+		SEPublicKey:      append([]byte(nil), seKey...),
+		AuthState:        AuthBearerValidated,
+		MaxConcurrency:   1,
 		MaxContextTokens: 8000,
-		AttestationTier: AttestationTierSelfSigned,
+		AttestationTier:  AttestationTierSelfSigned,
 	}, nil, now.Add(time.Minute))
 	if !ok || refusal != RegisterRefusalNone {
 		t.Fatalf("register s2: ok=%v refusal=%q", ok, refusal)

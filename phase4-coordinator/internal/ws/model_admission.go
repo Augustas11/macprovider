@@ -904,7 +904,7 @@ func modelAdmissionEventHasTrustedCatalogAuthority(event ModelAdmissionEvent) bo
 		strings.TrimSpace(event.CatalogSignatureKeyID) != "" &&
 		validModelAdmissionReceiptKeyFingerprint(event.CatalogSignaturePubkeyFingerprint) &&
 		validModelAdmissionSHA256Hex(event.ExpectedCatalogModelHash) &&
-		event.ExpectedCatalogModelHashAlgorithm == modelidentity.SnapshotManifestV1
+		modelidentity.CanonicalAlgorithm(event.ExpectedCatalogModelHashAlgorithm)
 }
 
 func sameModelAdmissionTuple(previous, next ModelAdmissionEvent) bool {
@@ -1109,6 +1109,14 @@ type ModelAdmissionPaidRoutingPredicate struct {
 	CatalogSignaturePubkeyFingerprint string
 	ExpectedCatalogModelHash          string
 	ExpectedCatalogModelHashAlgorithm string
+	// SPEC-010 v1.7 R007(d) six values for a feed-derived binding (mirrors
+	// ModelAdmissionSettlementPredicate so the two convert field-for-field).
+	ArtifactFeedSHA256             string
+	ArtifactID                     string
+	ArtifactHash                   string
+	ArtifactHashAlgorithm          string
+	ArtifactFeedSignerKeyID        string
+	ArtifactCandidateCatalogSHA256 string
 }
 
 func ModelAdmissionDefaultPaidRoutingEligible(event ModelAdmissionEvent, predicate ModelAdmissionPaidRoutingPredicate) bool {
@@ -1129,6 +1137,33 @@ type ModelAdmissionSettlementPredicate struct {
 	CatalogSignaturePubkeyFingerprint string
 	ExpectedCatalogModelHash          string
 	ExpectedCatalogModelHashAlgorithm string
+	// SPEC-010 v1.7 R007(d) six values for a feed-derived binding.
+	ArtifactFeedSHA256             string
+	ArtifactID                     string
+	ArtifactHash                   string
+	ArtifactHashAlgorithm          string
+	ArtifactFeedSignerKeyID        string
+	ArtifactCandidateCatalogSHA256 string
+}
+
+// ArtifactDerived reports whether the predicate references an artifact-feed
+// member (any of the six values present).
+func (p ModelAdmissionSettlementPredicate) ArtifactDerived() bool {
+	return p.ArtifactID != "" || p.ArtifactFeedSHA256 != "" || p.ArtifactHash != "" ||
+		p.ArtifactHashAlgorithm != "" || p.ArtifactFeedSignerKeyID != "" || p.ArtifactCandidateCatalogSHA256 != ""
+}
+
+// artifactEvidenceComplete is the all-six-or-none rule, with the member's
+// pair equal to the expected pair and the digests well-formed.
+func (p ModelAdmissionSettlementPredicate) artifactEvidenceComplete() bool {
+	return validModelAdmissionSHA256Hex(p.ArtifactFeedSHA256) &&
+		strings.TrimSpace(p.ArtifactID) != "" &&
+		validModelAdmissionSHA256Hex(p.ArtifactHash) &&
+		modelidentity.CanonicalAlgorithm(p.ArtifactHashAlgorithm) &&
+		strings.TrimSpace(p.ArtifactFeedSignerKeyID) != "" &&
+		validModelAdmissionSHA256Hex(p.ArtifactCandidateCatalogSHA256) &&
+		p.ArtifactHash == p.ExpectedCatalogModelHash &&
+		p.ArtifactHashAlgorithm == p.ExpectedCatalogModelHashAlgorithm
 }
 
 type ModelAdmissionSettlementBinding struct {
@@ -1138,7 +1173,20 @@ type ModelAdmissionSettlementBinding struct {
 	CatalogModelKey        string
 	DiscoveryDigestSHA256  string
 	EvaluationDigestSHA256 string
+	// SPEC-010 v1.7 R007(d) / SPEC-047-R003 six values, set only for a
+	// feed-derived binding (the feed's primary entry included; a primary
+	// identity bound directly through the signed candidate row carries none).
+	ArtifactFeedSHA256             string
+	ArtifactID                     string
+	ArtifactHash                   string
+	ArtifactHashAlgorithm          string
+	ArtifactFeedSignerKeyID        string
+	ArtifactCandidateCatalogSHA256 string
 }
+
+// ArtifactDerived reports whether the binding references an artifact-feed
+// member and therefore must carry all six values.
+func (b ModelAdmissionSettlementBinding) ArtifactDerived() bool { return b.ArtifactID != "" }
 
 func ModelAdmissionSettlementBindingForRouteSnapshot(event ModelAdmissionEvent, predicate ModelAdmissionSettlementPredicate) (ModelAdmissionSettlementBinding, bool) {
 	if !ModelAdmissionSettlementStateCandidate(event) {
@@ -1158,7 +1206,12 @@ func ModelAdmissionSettlementBindingForRouteSnapshot(event ModelAdmissionEvent, 
 		event.ExpectedCatalogModelHashAlgorithm != predicate.ExpectedCatalogModelHashAlgorithm {
 		return ModelAdmissionSettlementBinding{}, false
 	}
-	if predicate.ExpectedCatalogModelHashAlgorithm != modelidentity.SnapshotManifestV1 {
+	if !modelidentity.CanonicalAlgorithm(predicate.ExpectedCatalogModelHashAlgorithm) {
+		return ModelAdmissionSettlementBinding{}, false
+	}
+	// SPEC-010-R007(d) / SPEC-047-R003: a feed-derived binding carries all six
+	// artifact values or none of them; a partial record fails closed here.
+	if predicate.ArtifactDerived() && !predicate.artifactEvidenceComplete() {
 		return ModelAdmissionSettlementBinding{}, false
 	}
 	if !validModelAdmissionSHA256Hex(event.CoordinatorEventID) ||
@@ -1174,12 +1227,18 @@ func ModelAdmissionSettlementBindingForRouteSnapshot(event ModelAdmissionEvent, 
 		return ModelAdmissionSettlementBinding{}, false
 	}
 	return ModelAdmissionSettlementBinding{
-		CandidateID:            event.CandidateID,
-		CoordinatorEventID:     event.CoordinatorEventID,
-		ServedModelRef:         event.ServedModelRef,
-		CatalogModelKey:        event.CatalogModelKey,
-		DiscoveryDigestSHA256:  event.DiscoveryDigestSHA256,
-		EvaluationDigestSHA256: event.EvaluationDigestSHA256,
+		CandidateID:                    event.CandidateID,
+		CoordinatorEventID:             event.CoordinatorEventID,
+		ServedModelRef:                 event.ServedModelRef,
+		CatalogModelKey:                event.CatalogModelKey,
+		DiscoveryDigestSHA256:          event.DiscoveryDigestSHA256,
+		EvaluationDigestSHA256:         event.EvaluationDigestSHA256,
+		ArtifactFeedSHA256:             predicate.ArtifactFeedSHA256,
+		ArtifactID:                     predicate.ArtifactID,
+		ArtifactHash:                   predicate.ArtifactHash,
+		ArtifactHashAlgorithm:          predicate.ArtifactHashAlgorithm,
+		ArtifactFeedSignerKeyID:        predicate.ArtifactFeedSignerKeyID,
+		ArtifactCandidateCatalogSHA256: predicate.ArtifactCandidateCatalogSHA256,
 	}, true
 }
 

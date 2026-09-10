@@ -105,7 +105,8 @@ func (s *Server) byomRouteSnapshotBinding(ctx context.Context, p pool.Provider, 
 	if !s.byomSettlementPrereqsReady(p, material) {
 		return providerws.ModelAdmissionSettlementBinding{}, true, false
 	}
-	binding, ok := providerws.ModelAdmissionSettlementBindingForRouteSnapshot(event, providerws.ModelAdmissionSettlementPredicate{
+	expectedAlgorithm, expectedHash := byomExpectedIdentity(p, material)
+	predicate := providerws.ModelAdmissionSettlementPredicate{
 		ProviderID:                        p.ProviderID,
 		CandidateID:                       event.CandidateID,
 		ServedModelRef:                    event.ServedModelRef,
@@ -116,9 +117,11 @@ func (s *Server) byomRouteSnapshotBinding(ctx context.Context, p pool.Provider, 
 		CatalogBodyDigest:                 material.CatalogBodyDigest,
 		CatalogSignatureKeyID:             material.CatalogSignatureKeyID,
 		CatalogSignaturePubkeyFingerprint: material.CatalogSignaturePubkeyFingerprint,
-		ExpectedCatalogModelHash:          material.ExpectedModelHash,
-		ExpectedCatalogModelHashAlgorithm: material.ExpectedModelHashAlgorithm,
-	})
+		ExpectedCatalogModelHash:          expectedHash,
+		ExpectedCatalogModelHashAlgorithm: expectedAlgorithm,
+	}
+	byomArtifactPredicate(p, &predicate)
+	binding, ok := providerws.ModelAdmissionSettlementBindingForRouteSnapshot(event, predicate)
 	return binding, true, ok
 }
 
@@ -128,13 +131,49 @@ func (s *Server) byomSettlementPrereqsReady(p pool.Provider, material tier2.Rout
 	}
 	reportedHash := strings.TrimSpace(p.ModelHash)
 	expectedHash := strings.TrimSpace(p.ExpectedModelHash)
-	return validProviderReceiptPubkey(p) &&
-		p.ModelHashAlgorithm == modelidentity.SnapshotManifestV1 &&
-		isLowerHex64(reportedHash) &&
+	if !validProviderReceiptPubkey(p) || !isLowerHex64(reportedHash) {
+		return false
+	}
+	// SPEC-010 v1.7 R007: a pair that resolved through the release-bound
+	// artifact feed is the expected identity — the member's exact pair, for
+	// the key the session is admitted for, verified by the heartbeat path.
+	if binding := p.ArtifactIdentity; binding != nil {
+		return p.ModelHashAlgorithm == binding.Member.HashAlgorithm &&
+			reportedHash == binding.Member.Hash &&
+			modelidentity.CanonicalAlgorithm(binding.Member.HashAlgorithm) &&
+			p.HashStatus == pool.HashStatusVerified &&
+			strings.EqualFold(material.CatalogModelKey, binding.Member.ModelKey)
+	}
+	return p.ModelHashAlgorithm == modelidentity.SnapshotManifestV1 &&
 		isLowerHex64(expectedHash) &&
 		reportedHash == expectedHash &&
 		material.HashStatus == pool.HashStatusVerified &&
 		material.ExpectedModelHash == expectedHash
+}
+
+// byomExpectedIdentity is the (algorithm, hash) the route snapshot and the
+// admission predicate bind for this provider: the artifact member when the
+// session resolved through the feed, the tier-2 row otherwise.
+func byomExpectedIdentity(p pool.Provider, material tier2.RouteSnapshotMaterial) (algorithm, hash string) {
+	if binding := p.ArtifactIdentity; binding != nil {
+		return binding.Member.HashAlgorithm, binding.Member.Hash
+	}
+	return material.ExpectedModelHashAlgorithm, material.ExpectedModelHash
+}
+
+// byomArtifactPredicate fills the SPEC-047-R003 six values for a
+// feed-derived binding (every member, the primary included).
+func byomArtifactPredicate(p pool.Provider, predicate *providerws.ModelAdmissionSettlementPredicate) {
+	binding := p.ArtifactIdentity
+	if binding == nil {
+		return
+	}
+	predicate.ArtifactFeedSHA256 = binding.Provenance.FeedSHA256
+	predicate.ArtifactID = binding.Member.ArtifactID
+	predicate.ArtifactHash = binding.Member.Hash
+	predicate.ArtifactHashAlgorithm = binding.Member.HashAlgorithm
+	predicate.ArtifactFeedSignerKeyID = binding.Provenance.SignerKeyID
+	predicate.ArtifactCandidateCatalogSHA256 = binding.Provenance.CandidateCatalogSHA256
 }
 
 func validProviderReceiptPubkey(p pool.Provider) bool {
@@ -163,4 +202,12 @@ func applyBYOMRouteSnapshotBinding(snapshot *billing.RouteSnapshot, binding prov
 	snapshot.ModelAdmissionCatalogModelKey = binding.CatalogModelKey
 	snapshot.ModelAdmissionDiscoveryDigestSHA256 = binding.DiscoveryDigestSHA256
 	snapshot.ModelAdmissionEvaluationDigestSHA256 = binding.EvaluationDigestSHA256
+	// SPEC-010 v1.7 R007(d) / SPEC-047-R003: a feed-derived binding's six
+	// values ride in the IMMUTABLE route-time record.
+	snapshot.ArtifactFeedSHA256 = binding.ArtifactFeedSHA256
+	snapshot.ArtifactID = binding.ArtifactID
+	snapshot.ArtifactHash = binding.ArtifactHash
+	snapshot.ArtifactHashAlgorithm = binding.ArtifactHashAlgorithm
+	snapshot.ArtifactFeedSignerKeyID = binding.ArtifactFeedSignerKeyID
+	snapshot.ArtifactCandidateCatalogSHA256 = binding.ArtifactCandidateCatalogSHA256
 }

@@ -1219,7 +1219,7 @@ func parseModelIdentityMetadata(
 	if modelAlgorithmPresent && modelHash == "" {
 		return "model_hash_algorithm", fmt.Errorf("model_hash_algorithm requires model_hash")
 	}
-	if modelAlgorithmPresent && *modelHashAlgorithm != modelidentity.SnapshotManifestV1 {
+	if modelAlgorithmPresent && !modelidentity.CanonicalAlgorithm(*modelHashAlgorithm) {
 		return "model_hash_algorithm", fmt.Errorf("unsupported model_hash_algorithm")
 	}
 	if modelAlgorithmPresent && !modelidentity.ValidSHA256(modelHash) {
@@ -1325,7 +1325,7 @@ func ParseHeartbeat(payload []byte) (Heartbeat, HeartbeatPresence, string, error
 	if presence.ModelHashAlgorithm && !presence.ModelHash {
 		return Heartbeat{}, presence, "model_hash_algorithm", fmt.Errorf("model_hash_algorithm requires model_hash")
 	}
-	if presence.ModelHashAlgorithm && hb.ModelHashAlgorithm != modelidentity.SnapshotManifestV1 {
+	if presence.ModelHashAlgorithm && !modelidentity.CanonicalAlgorithm(hb.ModelHashAlgorithm) {
 		return Heartbeat{}, presence, "model_hash_algorithm", fmt.Errorf("unsupported model_hash_algorithm")
 	}
 	if presence.ModelHashAlgorithm && !modelidentity.ValidSHA256(hb.ModelHash) {
@@ -1445,7 +1445,7 @@ func ParseHeartbeat(payload []byte) (Heartbeat, HeartbeatPresence, string, error
 				containsControlChar(telemetry.BinaryVersion) || containsControlChar(telemetry.CompatibilitySetID) {
 				return Heartbeat{}, presence, "safety_telemetry", fmt.Errorf("invalid version 2 safety telemetry identity")
 			}
-			if telemetry.ModelHashAlgorithm != modelidentity.SnapshotManifestV1 {
+			if !modelidentity.CanonicalAlgorithm(telemetry.ModelHashAlgorithm) {
 				return Heartbeat{}, presence, "safety_telemetry.model_hash_algorithm", fmt.Errorf("unsupported safety telemetry model_hash_algorithm")
 			}
 			if !modelidentity.ValidSHA256(telemetry.ModelHash) {

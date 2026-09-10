@@ -6,6 +6,7 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"fmt"
+	"github.com/augstar/macprovider-coordinator/internal/artifactidentity"
 	"log/slog"
 	"math"
 	"net"
@@ -154,7 +155,13 @@ type Provider struct {
 	WeightsHashAlgorithm  string     `json:"weights_manifest_algorithm,omitempty"`
 	ExpectedModelHash     string     `json:"-"`
 	HashStatus            HashStatus `json:"hash_status,omitempty"`
-	EncryptedLeg          bool       `json:"encrypted_leg,omitempty"`
+	// ArtifactIdentity is set only when the provider's named pair resolved
+	// through the release-bound SPEC-023 §3.7 artifact feed (SPEC-010 v1.7
+	// R007); it carries the matched member and the feed provenance the route
+	// snapshot binds. Nil on the primary-row path and whenever the pair is
+	// unverified. Session state, never wire-exported.
+	ArtifactIdentity *artifactidentity.Binding `json:"-"`
+	EncryptedLeg     bool                      `json:"encrypted_leg,omitempty"`
 	// TrustedPoolV1 is the provider-side half of SPEC-042-R010 positive
 	// pool-capability negotiation. Pool-selected traffic may route only to a
 	// member whose current session advertised this capability; global traffic
@@ -1252,17 +1259,28 @@ func (r *Registry) SetEarnedTrustTier(providerID string, tier Tier) (Provider, b
 }
 
 func (r *Registry) UpdateHashStatuses(statusFor func(Provider) HashStatus) int {
+	return r.UpdateModelIdentities(func(p Provider) ModelIdentityVerdict {
+		return ModelIdentityVerdict{Status: statusFor(p), Artifact: p.ArtifactIdentity}
+	})
+}
+
+// UpdateModelIdentities re-evaluates every session's SPEC-010 verdict —
+// hash status AND the v1.7 artifact-feed binding — under one lock, so a
+// catalog swap that changes the expected identity set cannot leave a stale
+// binding beside a fresh status.
+func (r *Registry) UpdateModelIdentities(verdictFor func(Provider) ModelIdentityVerdict) int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	updated := 0
 	for _, p := range r.providers {
 		cp := *p
 		cp.conn = nil
-		next := statusFor(cp)
-		if p.HashStatus != next {
+		next := verdictFor(cp)
+		if p.HashStatus != next.Status {
 			updated++
 		}
-		p.HashStatus = next
+		p.HashStatus = next.Status
+		p.ArtifactIdentity = next.Artifact
 	}
 	return updated
 }
@@ -2170,7 +2188,29 @@ type HeartbeatHashVerifier func(modelID, reportedHash string) HashStatus
 // ModelIdentityVerifier is the algorithm-aware production verifier. The
 // legacy two-argument verifier remains available only to preserve focused
 // package tests and old embedders while the wire migration is bounded.
-type ModelIdentityVerifier func(modelID, expectedHash, reportedHash, reportedAlgorithm string) HashStatus
+// ModelIdentityRequest is everything a SPEC-010 identity verdict needs about
+// one provider report: the named pair, the row identity admission selected
+// (R001/R004), and — for the v1.7 R007 artifact-feed path — the candidate
+// catalog the provider was admitted against and the catalog key its session
+// is admitted for.
+type ModelIdentityRequest struct {
+	ModelID                string
+	ExpectedHash           string
+	ReportedHash           string
+	ReportedAlgorithm      string
+	CandidateCatalogSHA256 string
+	CatalogModelKey        string
+}
+
+// ModelIdentityVerdict is the verifier's answer: the SPEC-008 hash status and,
+// when the pair resolved through the release-bound artifact feed, the R007
+// binding the route snapshot must carry (nil on the primary-row path).
+type ModelIdentityVerdict struct {
+	Status   HashStatus
+	Artifact *artifactidentity.Binding
+}
+
+type ModelIdentityVerifier func(req ModelIdentityRequest) ModelIdentityVerdict
 
 // SwapEvent carries the per-swap data needed for the operator_model_swap audit
 // event per SPEC-002 v1.3.5 §7.10. Phase 2C only populates and emits this
@@ -2315,13 +2355,23 @@ func (r *Registry) applyHeartbeatLocked(providerID, assignedID string, hb Heartb
 		p.WeightsManifestSHA256 = ""
 		p.WeightsHashAlgorithm = ""
 		p.HashStatus = HashStatusUncatalogued
+		p.ArtifactIdentity = nil
 	} else {
 		p.ModelHash = hb.ModelHash
 		p.ModelHashAlgorithm = hb.ModelHashAlgorithm
 		p.WeightsManifestSHA256 = hb.WeightsManifestSHA256
 		p.WeightsHashAlgorithm = hb.WeightsHashAlgorithm
 		if r.modelIdentityVerifier != nil {
-			p.HashStatus = r.modelIdentityVerifier(hb.ModelID, hb.ExpectedModelHash, hb.ModelHash, hb.ModelHashAlgorithm)
+			verdict := r.modelIdentityVerifier(ModelIdentityRequest{
+				ModelID:                hb.ModelID,
+				ExpectedHash:           hb.ExpectedModelHash,
+				ReportedHash:           hb.ModelHash,
+				ReportedAlgorithm:      hb.ModelHashAlgorithm,
+				CandidateCatalogSHA256: p.CandidateCatalogSHA256,
+				CatalogModelKey:        p.ModelAdmissionCatalogModelKey,
+			})
+			p.HashStatus = verdict.Status
+			p.ArtifactIdentity = verdict.Artifact
 		} else if r.hashVerifier != nil {
 			p.HashStatus = r.hashVerifier(hb.ModelID, hb.ModelHash)
 		} else {

@@ -56,7 +56,14 @@ func (b *billingRecorder) recordRouteSnapshot(providerBody []byte, provider pool
 	if err != nil {
 		return skipOrEnforceError("invalid provider receipt key")
 	}
-	if provider.ModelHashAlgorithm != modelidentity.SnapshotManifestV1 ||
+	// SPEC-010 v1.7 R007: the expected identity is the artifact member the
+	// session resolved through the release-bound feed, else the admitted row.
+	expectedAlgorithm := modelidentity.SnapshotManifestV1
+	if binding := provider.ArtifactIdentity; binding != nil {
+		expectedAlgorithm, expectedHash = binding.Member.HashAlgorithm, binding.Member.Hash
+	}
+	if !modelidentity.CanonicalAlgorithm(provider.ModelHashAlgorithm) ||
+		provider.ModelHashAlgorithm != expectedAlgorithm ||
 		!isLowerHex64(reportedHash) ||
 		!isLowerHex64(expectedHash) {
 		return skipOrEnforceError("invalid canonical provider model identity")
@@ -64,14 +71,27 @@ func (b *billingRecorder) recordRouteSnapshot(providerBody []byte, provider pool
 	if reportedHash != expectedHash {
 		return skipOrEnforceError("provider model identity does not match signed admission row")
 	}
-	material, ok := tier2.SnapshotMaterial(provider.ModelID, reportedHash)
+	// Tier-2 material is keyed by the ROW digest; an artifact member looks it
+	// up by the row the session was admitted against.
+	materialHash := reportedHash
+	if provider.ArtifactIdentity != nil {
+		materialHash = strings.TrimSpace(provider.ExpectedModelHash)
+	}
+	material, ok := tier2.SnapshotMaterial(provider.ModelID, materialHash)
 	if !ok {
 		if byomAdmissionCandidate(provider) {
 			return nil, fmt.Errorf("BYOM model admission requires trusted catalog material")
 		}
 		return skipOrEnforceError("missing catalog material")
 	}
-	if material.HashStatus != pool.HashStatusVerified || material.ExpectedModelHash != expectedHash {
+	// The tier-2 row must agree with the ROW the session was admitted for
+	// (SPEC-010-R004); an artifact member is verified against the feed by the
+	// heartbeat path, so its own hash is compared elsewhere, never here.
+	admittedRowHash := expectedHash
+	if provider.ArtifactIdentity != nil {
+		admittedRowHash = materialHash
+	}
+	if material.HashStatus != pool.HashStatusVerified || material.ExpectedModelHash != admittedRowHash {
 		return nil, fmt.Errorf("tier2 catalog does not match signed admission row")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), requestLogWriteTimeout)
@@ -114,15 +134,15 @@ func (b *billingRecorder) recordRouteSnapshot(providerBody []byte, provider pool
 		ProviderReceiptKeySource:           "auth_session",
 		ModelID:                            provider.ModelID,
 		ProviderReportedModelHash:          reportedHash,
-		ProviderReportedModelHashAlgorithm: modelidentity.SnapshotManifestV1,
+		ProviderReportedModelHashAlgorithm: expectedAlgorithm,
 		ExpectedCatalogModelHash:           expectedHash,
-		ExpectedCatalogModelHashAlgorithm:  modelidentity.SnapshotManifestV1,
+		ExpectedCatalogModelHashAlgorithm:  expectedAlgorithm,
 		CatalogID:                          material.CatalogID,
 		CatalogBodyDigest:                  material.CatalogBodyDigest,
 		CatalogSignatureKeyID:              material.CatalogSignatureKeyID,
 		CatalogSignaturePubkeyFingerprint:  material.CatalogSignaturePubkeyFingerprint,
 		CatalogExpiresAtUnixMS:             material.CatalogExpiresAt.UnixMilli(),
-		Spec008HashStatus:                  string(material.HashStatus),
+		Spec008HashStatus:                  string(routeSnapshotHashStatus(provider, material)),
 		RouteSnapshotPolicyVersion:         billing.RouteSnapshotPolicyVersion,
 		RouteSnapshotMode:                  routeMode,
 		RouteDecisionTSUnixMS:              b.state.routingDone.UnixMilli(),
@@ -596,4 +616,16 @@ func jcsOrNull(value any) any {
 func normalizeLineEndings(value string) string {
 	value = strings.ReplaceAll(value, "\r\n", "\n")
 	return strings.ReplaceAll(value, "\r", "\n")
+}
+
+// routeSnapshotHashStatus is the SPEC-008 status the snapshot records: the
+// tier-2 row comparison on the primary path; on the SPEC-010 v1.7 artifact
+// path the session's verdict, which the heartbeat verifier reached by exact
+// member equality against the release-bound feed (tier-2 material holds only
+// the row digest and cannot judge a secondary member).
+func routeSnapshotHashStatus(provider pool.Provider, material tier2.RouteSnapshotMaterial) pool.HashStatus {
+	if provider.ArtifactIdentity != nil {
+		return provider.HashStatus
+	}
+	return material.HashStatus
 }

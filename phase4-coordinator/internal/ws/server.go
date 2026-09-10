@@ -31,6 +31,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 
+	"github.com/augstar/macprovider-coordinator/internal/artifactidentity"
 	"github.com/augstar/macprovider-coordinator/internal/auth"
 	"github.com/augstar/macprovider-coordinator/internal/autotune"
 	"github.com/augstar/macprovider-coordinator/internal/onboarding"
@@ -157,9 +158,13 @@ type Server struct {
 	// hello admission reads them concurrently. Construction-time Options write
 	// the fields before Serve() starts any goroutine (happens-before), so they
 	// stay lock-free; every runtime read goes through a getter under RLock.
-	autotuneCatalogMu              sync.RWMutex
-	autotuneCatalog                *autotune.Catalog
-	autotuneCompatibleCatalogs     map[string]*autotune.Catalog
+	autotuneCatalogMu          sync.RWMutex
+	autotuneCatalog            *autotune.Catalog
+	autotuneCompatibleCatalogs map[string]*autotune.Catalog
+	// artifactIdentityIndex is the SPEC-010 v1.7 R007 expected-identity set
+	// derived from the artifact feed release-bound to the current candidate
+	// catalog; nil for a rate-card-bound release (v1.6 primary-only path).
+	artifactIdentityIndex          *artifactidentity.Index
 	autotuneCatalogEnforced        bool
 	autotuneCatalogBridgeDeadline  time.Time
 	autotuneCatalogBridgeMu        sync.Mutex
@@ -614,6 +619,16 @@ func (s *Server) resolveProviderCatalog(provider pool.Provider) (resolved, curre
 // deadline-bounded fleet bridge for metadata-free providers. Config validation
 // requires a future deadline no more than 24 hours away whenever enforced is
 // false.
+// WithArtifactIdentityIndex installs the SPEC-010 v1.7 R007 expected-identity
+// set. It MUST be built from the same loaded feeds as the current autotune
+// catalog: the index is bound to that catalog's digest and resolves nothing
+// for a provider admitted against any other release.
+func WithArtifactIdentityIndex(index *artifactidentity.Index) Option {
+	return func(s *Server) {
+		s.artifactIdentityIndex = index
+	}
+}
+
 func WithAutotuneCatalogEnforcement(enforced bool, bridgeDeadline time.Time) Option {
 	return func(s *Server) {
 		s.autotuneCatalogEnforced = enforced
@@ -952,8 +967,8 @@ func NewServer(cfg config.Config, registry *pool.Registry, logger zerolog.Logger
 		// caller that overrides the catalog via WithCatalog (and the
 		// SIGHUP swap of tier2.Default()) is honored on every heartbeat
 		// rather than frozen at NewServer time.
-		pool.WithModelIdentityVerifier(func(modelID, expectedHash, reportedHash, reportedAlgorithm string) pool.HashStatus {
-			return s.verifyProviderModelIdentity(modelID, expectedHash, reportedHash, reportedAlgorithm)
+		pool.WithModelIdentityVerifier(func(req pool.ModelIdentityRequest) pool.ModelIdentityVerdict {
+			return s.verifyProviderModelIdentity(req)
 		})(registry)
 	}
 	if s.currentAutotuneCatalog() != nil && !s.autotuneCatalogEnforced && !s.autotuneCatalogBridgeDeadline.IsZero() && registry != nil {
@@ -1331,6 +1346,19 @@ func (s *Server) expireLegacyModelHashAdmissions(deadline time.Time) {
 		Msg("model hash legacy bridge deadline reached")
 }
 
+// providerIdentityRequest is the SPEC-010 verdict input for a live session
+// record (heartbeat refresh, drift sweeps, routing predicates).
+func providerIdentityRequest(p pool.Provider) pool.ModelIdentityRequest {
+	return pool.ModelIdentityRequest{
+		ModelID:                p.ModelID,
+		ExpectedHash:           p.ExpectedModelHash,
+		ReportedHash:           p.ModelHash,
+		ReportedAlgorithm:      p.ModelHashAlgorithm,
+		CandidateCatalogSHA256: p.CandidateCatalogSHA256,
+		CatalogModelKey:        p.ModelAdmissionCatalogModelKey,
+	}
+}
+
 func (s *Server) RefreshTier2HashStatuses() int {
 	cfg := s.tier2Config()
 	if !tier2.ModelHashActive(cfg) {
@@ -1338,13 +1366,14 @@ func (s *Server) RefreshTier2HashStatuses() int {
 			return ""
 		})
 	}
-	return s.pool.UpdateHashStatuses(func(provider pool.Provider) pool.HashStatus {
-		next := s.verifyProviderModelIdentity(provider.ModelID, provider.ExpectedModelHash, provider.ModelHash, provider.ModelHashAlgorithm)
+	return s.pool.UpdateModelIdentities(func(provider pool.Provider) pool.ModelIdentityVerdict {
+		verdict := s.verifyProviderModelIdentity(providerIdentityRequest(provider))
+		next := verdict.Status
 		s.observeHashStatusTransition(provider.HashStatus, next, provider.ProviderID, provider.AssignedID, provider.ModelID, provider.ModelHash)
 		if cfg.RequireHashVerified && (next == pool.HashStatusUncatalogued || next == pool.HashStatusCatalogUnavailable) {
 			tier2.LogHashRequiredProviderExcluded(s.log, provider.ProviderID, provider.AssignedID, provider.ModelID, provider.ModelHash, next)
 		}
-		return next
+		return verdict
 	})
 }
 
@@ -1364,31 +1393,66 @@ func (s *Server) tier2Config() config.Tier2Config {
 	return s.tier2
 }
 
-func (s *Server) verifyProviderModelIdentity(modelID, expectedHash, reportedHash, reportedAlgorithm string) pool.HashStatus {
+// verifyProviderModelIdentity is the SPEC-010 identity verdict for one
+// provider report. The primary-row path (R001/R004) is unchanged from v1.6:
+// a snapshot-manifest pair equal to the admitted row's digest is verified.
+// The v1.7 R007 path applies only when the pair is not the row's own: the
+// named pair must equal, exactly, one `verified` member of the artifact feed
+// release-bound to the candidate catalog THIS provider was admitted against,
+// and that member's model key must be the key the session is admitted for.
+// Everything else is unverified — never "approximately matched".
+func (s *Server) verifyProviderModelIdentity(req pool.ModelIdentityRequest) pool.ModelIdentityVerdict {
 	cfg := s.tier2Config()
-	algorithm := strings.TrimSpace(reportedAlgorithm)
-	if algorithm != "" && (algorithm != modelidentity.SnapshotManifestV1 || !modelidentity.ValidSHA256(reportedHash)) {
-		return pool.HashStatusInvalid
+	algorithm := strings.TrimSpace(req.ReportedAlgorithm)
+	reported := strings.TrimSpace(req.ReportedHash)
+	if algorithm != "" && (!modelidentity.CanonicalAlgorithm(algorithm) || !modelidentity.ValidSHA256(reported)) {
+		return pool.ModelIdentityVerdict{Status: pool.HashStatusInvalid}
 	}
 	if !tier2.ModelHashActive(cfg) {
-		return pool.HashStatusUncatalogued
+		return pool.ModelIdentityVerdict{Status: pool.HashStatusUncatalogued}
 	}
 	if algorithm == "" {
 		if modelidentity.LegacyMissingAlgorithmAllowed(cfg.ModelHashLegacyUntil, s.now()) {
-			return pool.HashStatusUncatalogued
+			return pool.ModelIdentityVerdict{Status: pool.HashStatusUncatalogued}
 		}
-		return pool.HashStatusInvalid
+		return pool.ModelIdentityVerdict{Status: pool.HashStatusInvalid}
 	}
-	if expected := strings.TrimSpace(expectedHash); expected != "" {
-		if strings.EqualFold(expected, strings.TrimSpace(reportedHash)) {
-			return pool.HashStatusVerified
-		}
-		return pool.HashStatusMismatch
+	expected := strings.TrimSpace(req.ExpectedHash)
+	if expected != "" && algorithm == modelidentity.SnapshotManifestV1 && strings.EqualFold(expected, reported) {
+		return pool.ModelIdentityVerdict{Status: pool.HashStatusVerified}
+	}
+	if binding, ok := s.resolveArtifactIdentity(req, algorithm, reported); ok {
+		return pool.ModelIdentityVerdict{Status: pool.HashStatusVerified, Artifact: &binding}
+	}
+	if expected != "" {
+		return pool.ModelIdentityVerdict{Status: pool.HashStatusMismatch}
 	}
 	if s.currentAutotuneCatalog() == nil {
-		return pool.HashStatusCatalogUnavailable
+		return pool.ModelIdentityVerdict{Status: pool.HashStatusCatalogUnavailable}
 	}
-	return pool.HashStatusUncatalogued
+	return pool.ModelIdentityVerdict{Status: pool.HashStatusUncatalogued}
+}
+
+// resolveArtifactIdentity is SPEC-010-R007(b)(c): exact pair equality against
+// the index, the index bound to the provider's admitted candidate catalog,
+// and the resolved member's model key equal to the session's admitted key.
+func (s *Server) resolveArtifactIdentity(req pool.ModelIdentityRequest, algorithm, reported string) (artifactidentity.Binding, bool) {
+	index := s.artifactIdentityIndex
+	if index == nil || !index.BoundTo(req.CandidateCatalogSHA256) {
+		return artifactidentity.Binding{}, false
+	}
+	binding, ok := index.Resolve(algorithm, reported)
+	if !ok {
+		return artifactidentity.Binding{}, false
+	}
+	admittedKey := strings.ToLower(strings.TrimSpace(req.CatalogModelKey))
+	if admittedKey == "" {
+		admittedKey = strings.ToLower(strings.TrimSpace(req.ModelID))
+	}
+	if binding.Member.ModelKey != admittedKey {
+		return artifactidentity.Binding{}, false
+	}
+	return binding, true
 }
 
 func (s *Server) Handler() http.Handler {
@@ -2778,9 +2842,18 @@ func (s *Server) prepareProviderAdmissionWithQuotaCheck(conn net.Conn, auth prov
 	now := s.now()
 	expectedModelHash := s.expectedAdmissionModelHashWithCatalog(hello, catalogAdmissionMode, admissionCurrent, admissionCompatible)
 	hashStatus := pool.HashStatus("")
+	var artifactIdentity *artifactidentity.Binding
 	tier2Cfg := s.tier2Config()
 	if tier2.ModelHashActive(tier2Cfg) {
-		hashStatus = s.verifyProviderModelIdentity(hello.ModelID, expectedModelHash, hello.ModelHash, hello.ModelHashAlgorithm)
+		verdict := s.verifyProviderModelIdentity(pool.ModelIdentityRequest{
+			ModelID:                hello.ModelID,
+			ExpectedHash:           expectedModelHash,
+			ReportedHash:           hello.ModelHash,
+			ReportedAlgorithm:      hello.ModelHashAlgorithm,
+			CandidateCatalogSHA256: hello.CandidateCatalogSHA256,
+		})
+		hashStatus = verdict.Status
+		artifactIdentity = verdict.Artifact
 		if hashStatus == pool.HashStatusInvalid {
 			s.close(conn, CloseInvalidHello, "invalid_model_hash_identity")
 			return nil, false
@@ -2938,6 +3011,7 @@ func (s *Server) prepareProviderAdmissionWithQuotaCheck(conn net.Conn, auth prov
 		WeightsHashAlgorithm:   hello.WeightsHashAlgorithm,
 		ExpectedModelHash:      expectedModelHash,
 		HashStatus:             hashStatus,
+		ArtifactIdentity:       artifactIdentity,
 		CatalogAdmissionMode:   catalogAdmissionMode,
 		CatalogReleaseID:       hello.CatalogReleaseID,
 		CatalogPolicyVersion:   hello.CatalogPolicyVersion,
@@ -4365,7 +4439,7 @@ func (s *Server) tier2WarmupExcluded(provider pool.Provider) bool {
 	if tier2.ModelHashActive(cfg) {
 		status := provider.HashStatus
 		if status == "" {
-			status = s.verifyProviderModelIdentity(provider.ModelID, provider.ExpectedModelHash, provider.ModelHash, provider.ModelHashAlgorithm)
+			status = s.verifyProviderModelIdentity(providerIdentityRequest(provider)).Status
 		}
 		if tier2.IsHashPredicateFailure(status, cfg.RequireHashVerified) {
 			return true
@@ -5226,7 +5300,17 @@ func (s *Server) handleHeartbeat(conn net.Conn, providerID, assignedID string, p
 	}
 	expectedModelHash := s.expectedProviderModelHash(providerID, assignedID, hb.ModelID)
 	if tier2.ModelHashActive(s.tier2Config()) {
-		status := s.verifyProviderModelIdentity(hb.ModelID, expectedModelHash, hb.ModelHash, hb.ModelHashAlgorithm)
+		request := pool.ModelIdentityRequest{
+			ModelID:           hb.ModelID,
+			ExpectedHash:      expectedModelHash,
+			ReportedHash:      hb.ModelHash,
+			ReportedAlgorithm: hb.ModelHashAlgorithm,
+		}
+		if current, ok := s.pool.Resolve(providerID, assignedID); ok {
+			request.CandidateCatalogSHA256 = current.CandidateCatalogSHA256
+			request.CatalogModelKey = current.ModelAdmissionCatalogModelKey
+		}
+		status := s.verifyProviderModelIdentity(request).Status
 		if status == pool.HashStatusInvalid {
 			s.fenceInvalidModelIdentity(conn, providerID, assignedID)
 			return
@@ -6186,7 +6270,7 @@ func (s *Server) handlePoolz(w http.ResponseWriter, r *http.Request) {
 		}
 	} else {
 		for i := range providers {
-			providers[i].HashStatus = s.verifyProviderModelIdentity(providers[i].ModelID, providers[i].ExpectedModelHash, providers[i].ModelHash, providers[i].ModelHashAlgorithm)
+			providers[i].HashStatus = s.verifyProviderModelIdentity(providerIdentityRequest(providers[i])).Status
 		}
 	}
 	modelSet := map[string]struct{}{}
@@ -6315,7 +6399,7 @@ func (s *Server) providerTier2PolicyEligible(p pool.Provider, cfg config.Tier2Co
 	if !tier2.ConfigActive(cfg) {
 		return true
 	}
-	if tier2.ModelHashActive(cfg) && tier2.IsHashPredicateFailure(s.verifyProviderModelIdentity(p.ModelID, p.ExpectedModelHash, p.ModelHash, p.ModelHashAlgorithm), cfg.RequireHashVerified) {
+	if tier2.ModelHashActive(cfg) && tier2.IsHashPredicateFailure(s.verifyProviderModelIdentity(providerIdentityRequest(p)).Status, cfg.RequireHashVerified) {
 		return false
 	}
 	if cfg.RequireEncryptedLeg && !p.EncryptedLeg {
