@@ -652,15 +652,20 @@ func (s *Server) PublishArtifactIdentitySets(sets map[string]*artifactidentity.I
 // write-lock hold: the served feeds are part of the release snapshot.
 func (s *Server) PublishArtifactIdentitySetsWith(sets map[string]*artifactidentity.Index, feedIntegrityFailed bool, commit func()) uint64 {
 	s.artifactIdentitySets.mu.Lock()
-	if commit != nil {
-		commit()
-	}
 	// The staged catalog is consumed, the integrity outcome recorded, and the
 	// catalog / identity sets / Tier-2 material / generation swapped under
-	// ONE write-lock hold: no reader observes any part ahead of the others.
+	// ONE write-lock hold: no release reader observes any part ahead of the
+	// others. The served feed bytes are committed LAST inside the same hold:
+	// a lock-free feed reader can at worst see the previous bytes against the
+	// new internal release (a provider admitted from them is a retained
+	// compatible-previous release), never new bytes the coordinator does not
+	// yet recognise.
 	catalog, compatible, staged := s.artifactIdentitySets.takeStagedCatalog()
 	s.artifactIdentitySets.feedIntegrityFailed = feedIntegrityFailed
 	generation := s.publishReleaseLocked(catalog, compatible, sets, staged)
+	if commit != nil {
+		commit()
+	}
 	s.artifactIdentitySets.mu.Unlock()
 	s.afterReleasePublished()
 	return generation
@@ -1534,14 +1539,23 @@ func admittedCandidateCatalogSHA256(catalogAdmissionMode, candidateCatalogSHA256
 }
 
 func (s *Server) RefreshTier2HashStatuses() int {
-	cfg := s.tier2Config()
 	// A reload whose catalog half never arrived (or a Tier-2-only reload)
-	// still publishes what it staged, as one act, before sessions are
-	// re-verified against it — whatever the Tier-2 hash policy says.
+	// still publishes what it staged, as one act — whatever the Tier-2 hash
+	// policy says; publication re-verifies every session and sweeps.
 	if s.artifactIdentitySets.hasStaged() {
 		s.publishStagedKeepingSets()
 		s.afterReleasePublished()
 	}
+	return s.refreshSessionIdentities()
+}
+
+// refreshSessionIdentities re-verifies every live session's model identity
+// against the published release (SPEC-047-R006(a) "refresh"): the registry
+// stores the pinned verdict and advances the session identity epoch of every
+// session whose identity facts changed. Lock order: registry → release
+// read; no provider section is held.
+func (s *Server) refreshSessionIdentities() int {
+	cfg := s.tier2Config()
 	if !tier2.ModelHashActive(cfg) {
 		return s.pool.UpdateHashStatuses(func(pool.Provider) pool.HashStatus {
 			return ""

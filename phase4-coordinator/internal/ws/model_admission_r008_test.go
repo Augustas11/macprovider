@@ -327,3 +327,67 @@ func TestModelAdmissionStaleFeedAndRuntimeSourceAtDecisionTime(t *testing.T) {
 		}
 	})
 }
+
+// R008 / R006(a) "refresh": publication re-verifies every session BEFORE
+// the sweep — a feed-member session whose own release's identity set is no
+// longer retained loses hash_verified, its epoch advances (an in-flight
+// route attempt fails closed) and the bound decided candidate is revoked
+// with runtime_identity_drift.
+func TestModelAdmissionPublicationRefreshesSessionsBeforeSweep(t *testing.T) {
+	f := newBindingFixture(t)
+	s := f.server
+	f.registerGGUFSession(t, "p1", "s1")
+	feedOffer := f.offer(t, "p1", "g", "ollama_loopback", map[string]string{modelidentity.GGUFFileV1: f.gguf})
+	priced := f.decide(t, feedOffer, "catalog_priced")
+	before, _ := s.pool.Resolve("p1", "")
+	if before.HashStatus != pool.HashStatusVerified || before.ModelAdmissionCandidateID != priced.CandidateID {
+		t.Fatalf("fixture: %+v", before)
+	}
+	expect := ModelAdmissionRouteExpectation{ProviderID: "p1", CandidateID: priced.CandidateID, CoordinatorEventID: priced.CoordinatorEventID, BindingGeneration: before.ModelAdmissionBindingGeneration, SessionEpoch: before.ModelAdmissionSessionEpoch}
+	// Re-stamp that keeps the content but drops release-1's identity set
+	// (release-1 catalog is still retained as compatible-previous).
+	restamped := bindingCatalog(t, "release-2", "recommendable", bindingRowHash)
+	f.publish(restamped, map[string]*artifactidentity.Index{
+		restamped.SHA256: bindingIndex(t, restamped, strings.Repeat("e", 64), f.now, bindingMembers(f.gguf, "")),
+	}, f.catalog)
+	after, _ := s.pool.Resolve("p1", "")
+	if after.HashStatus == pool.HashStatusVerified || after.ModelAdmissionSessionEpoch == before.ModelAdmissionSessionEpoch {
+		t.Fatalf("refresh must re-verify the session and advance its epoch: %+v", after)
+	}
+	if latest := f.latest(t, "p1", priced.CandidateID); latest.State != modelAdmissionRevoked || latest.ReasonCode != "runtime_identity_drift" {
+		t.Fatalf("sweep after refresh must revoke the no-longer-verified session's candidate: %+v", latest)
+	}
+	inserted := 0
+	if err := s.CompareAndInsertModelAdmissionRouteSnapshot(context.Background(), expect, func() error { inserted++; return nil }); !errors.Is(err, ErrModelAdmissionRouteStale) || inserted != 0 {
+		t.Fatalf("in-flight attempt must fail closed: err=%v inserted=%d", err, inserted)
+	}
+}
+
+// A heartbeat that changes only the served model id (same reported pair)
+// advances the session epoch; the served feed bytes are committed after the
+// internal release inside the same publication hold.
+func TestModelAdmissionEpochOnModelIDChangeAndFeedCommitOrder(t *testing.T) {
+	f := newBindingFixture(t)
+	s := f.server
+	f.registerSession(t, "p1", "s1", "model-a", true)
+	before, _ := s.pool.Resolve("p1", "")
+	result := s.pool.ApplyHeartbeatDetailed("p1", "s1", pool.HeartbeatUpdate{Status: pool.StateReady, ModelID: "model-b", ModelHash: bindingRowHash, ModelHashPresent: true,
+		ModelHashAlgorithm: modelidentity.SnapshotManifestV1, ModelHashAlgorithmPresent: true, ExpectedModelHash: bindingRowHash,
+		MaxContextTokens: 8192, MaxConcurrency: 1, SlotsFree: 1, SlotsTotal: 1, At: f.now.Add(time.Minute)})
+	if !result.OK || !result.ModelIDChanged || result.Provider.ModelAdmissionSessionEpoch == before.ModelAdmissionSessionEpoch {
+		t.Fatalf("model-id-only change must advance the epoch: %+v", result.Provider)
+	}
+	next := bindingCatalog(t, "release-commit", "recommendable", bindingRowHash)
+	s.SetAutotuneCatalog(next)
+	generationBefore := s.ReleaseGeneration()
+	committed := false
+	s.PublishArtifactIdentitySetsWith(nil, false, func() {
+		committed = true
+		if s.artifactIdentitySets.gen != generationBefore+1 || s.autotuneCatalog != next {
+			t.Fatal("feed bytes must be committed after the internal release inside the hold")
+		}
+	})
+	if !committed {
+		t.Fatal("commit must run")
+	}
+}

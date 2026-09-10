@@ -1308,6 +1308,7 @@ func (r *Registry) UpdateModelIdentities(verdictFor func(Provider) ModelIdentity
 	for _, p := range r.providers {
 		cp := *p
 		cp.conn = nil
+		prior := sessionIdentityFingerprint(p)
 		next := pinArtifactSession(p.IdentityPin, verdictFor(cp))
 		p.IdentityPin = pinIdentity(p.IdentityPin, next)
 		if p.HashStatus != next.Status {
@@ -1315,6 +1316,12 @@ func (r *Registry) UpdateModelIdentities(verdictFor func(Provider) ModelIdentity
 		}
 		p.HashStatus = next.Status
 		p.ArtifactIdentity = next.Artifact
+		// A refresh that changes the session's identity facts is a session
+		// identity change like any other: in-flight route attempts that
+		// captured the old identity fail closed at compare-and-insert.
+		if sessionIdentityFingerprint(p) != prior {
+			r.bumpSessionEpochLocked(p)
+		}
 	}
 	return updated
 }
@@ -2576,12 +2583,12 @@ func (r *Registry) applyHeartbeatLocked(providerID, assignedID string, hb Heartb
 		p.WeightsManifestSHA256 = hb.WeightsManifestSHA256
 		p.WeightsHashAlgorithm = hb.WeightsHashAlgorithm
 	}
-	if sessionIdentityFingerprint(p) != priorIdentity {
-		r.bumpSessionEpochLocked(p)
-	}
 	p.ExpectedModelHash = hb.ExpectedModelHash
 
 	p.ModelID = hb.ModelID
+	if sessionIdentityFingerprint(p) != priorIdentity {
+		r.bumpSessionEpochLocked(p)
+	}
 	p.ModelParamsB = hb.ModelParamsB
 	p.RAMGB = hb.RAMGB
 	p.MaxContextTokens = hb.MaxContextTokens

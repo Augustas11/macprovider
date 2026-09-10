@@ -741,6 +741,14 @@ func (s *Server) evaluateCatalogPreconditionsLocked(candidate ModelAdmissionEven
 // drifted candidates revoked with the matching code, survivors' bindings
 // stamped with the new generation. Never called under the release write lock.
 func (s *Server) afterReleasePublished() {
+	// Publish → re-verify every session against the new release → evaluate
+	// drift and re-stamp survivors: one ordered sequence owned here. The
+	// refresh advances the session epoch of every session whose identity
+	// changed, so a route attempt captured before it fails closed at
+	// compare-and-insert even before the sweep appends the revocation.
+	if s.pool != nil {
+		s.refreshSessionIdentities()
+	}
 	if s.modelAdmissions == nil {
 		return
 	}
@@ -800,8 +808,9 @@ func (s *Server) sweepProviderRelease(ctx context.Context, providerID string, ca
 			}
 		}
 		// R006(a) "refresh": the session's identity was re-verified against
-		// the new release (RefreshTier2HashStatuses); the bound decided
-		// candidate is evaluated against it here, under the section.
+		// the new release by afterReleasePublished before this sweep; the
+		// bound decided candidate is evaluated against it here, under the
+		// section.
 		if provider, ok := s.pool.Resolve(providerID, ""); ok && provider.ModelAdmissionCandidateID != "" {
 			s.evaluateSessionDriftLocked(ctx, provider, []string{provider.ModelAdmissionCandidateID}, section)
 		}
