@@ -1,12 +1,12 @@
 package autotune
 
 import (
-	"sort"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"math"
+	"sort"
 	"strings"
 
 	"github.com/augstar/macprovider-coordinator/internal/billing"
@@ -348,17 +348,17 @@ func (c *Catalog) HighestClaimedTier(modelID string) (key string, row Row, ok bo
 	if len(keys) == 0 {
 		return "", Row{}, false
 	}
-		bestKey := keys[0]
-		bestRow := c.rowsByKey[bestKey]
-		for _, candidateKey := range keys[1:] {
-			candidate := c.rowsByKey[candidateKey]
-			if candidate.MinRAMGB > bestRow.MinRAMGB ||
-				(candidate.MinRAMGB == bestRow.MinRAMGB && candidateKey < bestKey) {
-				bestKey = candidateKey
-				bestRow = candidate
-			}
+	bestKey := keys[0]
+	bestRow := c.rowsByKey[bestKey]
+	for _, candidateKey := range keys[1:] {
+		candidate := c.rowsByKey[candidateKey]
+		if candidate.MinRAMGB > bestRow.MinRAMGB ||
+			(candidate.MinRAMGB == bestRow.MinRAMGB && candidateKey < bestKey) {
+			bestKey = candidateKey
+			bestRow = candidate
 		}
-		return bestKey, bestRow, true
+	}
+	return bestKey, bestRow, true
 }
 
 func normalizeModelID(modelID string) string {

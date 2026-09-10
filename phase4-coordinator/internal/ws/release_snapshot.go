@@ -24,6 +24,9 @@ type releaseSnapshotState struct {
 
 	staging bool
 	stageMu sync.Mutex
+	// onReadLocked, when set (tests only), runs right after a reader took
+	// mu — the point at which a publisher may queue behind it.
+	onReadLocked func()
 	// staged parts of the next release, set by the reload before publication
 	stagedCatalog    *autotune.Catalog
 	stagedCompatible []*autotune.Catalog
@@ -87,6 +90,10 @@ func (r *releaseSnapshotState) generation() uint64 {
 	defer r.mu.RUnlock()
 	return r.gen
 }
+
+// generationLocked is generation() for a caller that already holds mu (a
+// nested read lock deadlocks against a queued publisher).
+func (r *releaseSnapshotState) generationLocked() uint64 { return r.gen }
 
 // setFor and currentSets read the published sets; callers that need a
 // consistent snapshot across several reads hold mu themselves

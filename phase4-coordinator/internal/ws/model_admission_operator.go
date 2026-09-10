@@ -14,6 +14,7 @@ import (
 
 	"github.com/augstar/macprovider-coordinator/internal/autotune"
 	"github.com/augstar/macprovider-coordinator/internal/jcs"
+	"github.com/augstar/macprovider-coordinator/internal/modelidentity"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
 	"github.com/augstar/macprovider-coordinator/internal/tier2"
 )
@@ -232,11 +233,16 @@ func (s *Server) modelAdmissionDecisionResponse(o modelAdmissionDecisionOutcome)
 		"bound_member":             nil,
 	}
 	if o.pending != nil {
-		// Pending values (R001): the unchanged state twice, the request's
-		// reason, the evaluated head, the record's creation time, the
-		// requesting actor.
-		resp["previous_admission_state"] = o.event.State
-		resp["admission_state"] = o.event.State
+		// Pending values (R001), answered from the RECORD so a replay returns
+		// what the request originally produced whatever the head did since:
+		// the unchanged state twice, the request's reason, the evaluated
+		// head, the record's creation time, the requesting actor.
+		resp["provider_id"] = o.pending.ProviderID
+		resp["candidate_id"] = o.pending.CandidateID
+		resp["served_model_ref"] = o.pending.ServedModelRef
+		resp["catalog_model_key"] = nullString(o.pending.CatalogModelKey)
+		resp["previous_admission_state"] = o.pending.AdmissionState
+		resp["admission_state"] = o.pending.AdmissionState
 		resp["reason_code"] = o.pending.ReasonCode
 		resp["coordinator_event_id"] = o.pending.EvaluatedHead
 		resp["accepted_at"] = o.pending.CreatedAt.UTC().Format(time.RFC3339Nano)
@@ -260,7 +266,7 @@ func (s *Server) modelAdmissionDecisionResponse(o modelAdmissionDecisionOutcome)
 func (s *Server) handleAdminModelAdmissionDecisions(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", http.MethodPost)
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		writeJSON(w, http.StatusMethodNotAllowed, modelAdmissionError("invalid_request", "method not allowed"))
 		return
 	}
 	actor, ok := s.authorizedModelAdmissionOperator(w, r)
@@ -298,102 +304,27 @@ func (s *Server) handleAdminModelAdmissionDecisions(w http.ResponseWriter, r *ht
 func (s *Server) applyModelAdmissionDecisionLocked(ctx context.Context, actor string, body modelAdmissionDecisionRequest, section *providerSection) (modelAdmissionDecisionOutcome, error) {
 	digest := body.digest()
 	requestID := body.requestID()
-	// (1) idempotency: an identical request answers what it originally
-	// produced — the appended event or the pending record — whatever the head.
-	if prior, found, err := s.modelAdmissions.ModelAdmissionEventByRequestID(ctx, body.ProviderID, requestID); err != nil {
-		return modelAdmissionDecisionOutcome{}, err
-	} else if found {
-		if prior.PayloadDigestSHA256 != digest || prior.CandidateID != body.CandidateID {
-			return modelAdmissionDecisionOutcome{}, decisionFail(http.StatusConflict, "idempotency_conflict")
-		}
-		return modelAdmissionDecisionOutcome{event: prior, replayed: true}, nil
+	// Lock order: section → registry → release. The live session is read
+	// before the release read lock, which then spans the whole evaluation
+	// (1)–(5) as ONE reader of ONE release snapshot.
+	var provider pool.Provider
+	hasSession := false
+	if s.pool != nil {
+		provider, hasSession = s.pool.Resolve(body.ProviderID, "")
 	}
-	if pending, found, err := s.modelAdmissions.PendingModelAdmissionDecisionByRequest(ctx, body.ProviderID, body.CandidateID, requestID); err != nil {
-		return modelAdmissionDecisionOutcome{}, err
-	} else if found {
-		if pending.RequestDigest != digest {
-			return modelAdmissionDecisionOutcome{}, decisionFail(http.StatusConflict, "idempotency_conflict")
-		}
-		head, _, err := s.modelAdmissions.LatestModelAdmissionStatus(ctx, body.ProviderID, body.CandidateID)
-		if err != nil {
-			return modelAdmissionDecisionOutcome{}, err
-		}
-		return modelAdmissionDecisionOutcome{event: head, pending: &pending, replayed: true}, nil
-	}
-	head, found, err := s.modelAdmissions.LatestModelAdmissionStatus(ctx, body.ProviderID, body.CandidateID)
-	if err != nil {
-		return modelAdmissionDecisionOutcome{}, err
-	}
-	if !found {
-		return modelAdmissionDecisionOutcome{}, decisionFail(http.StatusNotFound, "no_offer")
-	}
-	// (2) head compare.
-	if head.CoordinatorEventID != body.ExpectedCoordinatorEventID {
-		return modelAdmissionDecisionOutcome{}, decisionFail(http.StatusConflict, "stale_head")
-	}
-	// (3) edge validation.
-	if !modelAdmissionCoordinatorTransitionAllowed(head.State, body.NextState) {
-		return modelAdmissionDecisionOutcome{}, decisionFail(http.StatusConflict, "invalid_transition")
-	}
-	decision := operatorDecisionFromHead(head, body.NextState, actor, body.ReasonCode, requestID, "operator_nonce_"+digest[:32], digest, s.now())
-
 	var (
-		stored    ModelAdmissionEvent
-		replayed  bool
-		appendErr error
-		pending   *PendingModelAdmissionDecision
+		outcome  modelAdmissionDecisionOutcome
+		evalErr  error
+		appended bool
 	)
 	s.withReleaseRead(func() {
-		generation := s.artifactIdentitySets.generation()
-		// (4) R003 preconditions, in their stated order, for the two
-		// catalog-bound edges only.
-		if modelAdmissionTransitionRequiresCatalogAuthority(body.NextState) {
-			if appendErr = s.bindDecisionToCatalogLocked(&decision, head, body.NextState == "settlement_capable"); appendErr != nil {
-				return
-			}
-		}
-		decision.EvaluatedReleaseGeneration = generation
-		if body.NextState == "settlement_capable" {
-			// Dual control: the request appends nothing.
-			if s.distinctOperatorActors() < 2 {
-				appendErr = decisionFail(http.StatusConflict, "dual_control_unavailable")
-				return
-			}
-			record := PendingModelAdmissionDecision{
-				ID:            strings.ReplaceAll(s.newUUID(), "-", ""),
-				ProviderID:    body.ProviderID,
-				CandidateID:   body.CandidateID,
-				NextState:     body.NextState,
-				ReasonCode:    body.ReasonCode,
-				RequestDigest: digest,
-				RequestID:     requestID,
-				EvaluatedHead: head.CoordinatorEventID,
-				RequestedBy:   actor,
-				CreatedAt:     s.now().UTC(),
-			}
-			if !modelAdmissionPendingIDPattern.MatchString(record.ID) {
-				appendErr = errors.New("generated pending_decision_id is invalid")
-				return
-			}
-			created, replay, err := s.modelAdmissions.CreatePendingModelAdmissionDecision(ctx, record)
-			if err != nil {
-				appendErr = err
-				return
-			}
-			pending, replayed = &created, replay
-			return
-		}
-		// (5) release-generation re-compare (one read-lock hold spans (4)
-		// and this append, so the generation cannot have moved) + append.
-		stored, replayed, appendErr = s.modelAdmissions.CASAppendModelAdmissionDecision(ctx, decision, head.CoordinatorEventID)
+		outcome, appended, evalErr = s.evaluateModelAdmissionDecisionLocked(ctx, actor, body, digest, requestID, provider, hasSession)
 	})
-	if appendErr != nil {
-		return modelAdmissionDecisionOutcome{}, mapDecisionStoreError(appendErr)
+	if evalErr != nil {
+		return modelAdmissionDecisionOutcome{}, mapDecisionStoreError(evalErr)
 	}
-	if pending != nil {
-		return modelAdmissionDecisionOutcome{event: head, pending: pending, replayed: replayed}, nil
-	}
-	if !replayed {
+	if appended {
+		stored := outcome.event
 		s.afterModelAdmissionAppendLocked(ctx, body.ProviderID, section)
 		s.log.Info().
 			Str("admin_action", "model_admission_decision").
@@ -406,7 +337,92 @@ func (s *Server) applyModelAdmissionDecisionLocked(ctx context.Context, actor st
 			Str("coordinator_event_id", stored.CoordinatorEventID).
 			Msg("model admission operator decision appended")
 	}
-	return modelAdmissionDecisionOutcome{event: stored, replayed: replayed}, nil
+	return outcome, nil
+}
+
+// evaluateModelAdmissionDecisionLocked is precedence (1)–(5) under the
+// section and the release read lock; appended reports a new event (the
+// caller refreshes the binding after the read lock is released).
+func (s *Server) evaluateModelAdmissionDecisionLocked(ctx context.Context, actor string, body modelAdmissionDecisionRequest, digest, requestID string, provider pool.Provider, hasSession bool) (modelAdmissionDecisionOutcome, bool, error) {
+	// (1) idempotency: an identical request answers what it originally
+	// produced — the appended event or the pending record — whatever the head.
+	if prior, found, err := s.modelAdmissions.ModelAdmissionEventByRequestID(ctx, body.ProviderID, requestID); err != nil {
+		return modelAdmissionDecisionOutcome{}, false, err
+	} else if found {
+		if prior.PayloadDigestSHA256 != digest || prior.CandidateID != body.CandidateID {
+			return modelAdmissionDecisionOutcome{}, false, decisionFail(http.StatusConflict, "idempotency_conflict")
+		}
+		return modelAdmissionDecisionOutcome{event: prior, replayed: true}, false, nil
+	}
+	if pending, found, err := s.modelAdmissions.PendingModelAdmissionDecisionByRequest(ctx, body.ProviderID, body.CandidateID, requestID); err != nil {
+		return modelAdmissionDecisionOutcome{}, false, err
+	} else if found {
+		if pending.RequestDigest != digest {
+			return modelAdmissionDecisionOutcome{}, false, decisionFail(http.StatusConflict, "idempotency_conflict")
+		}
+		return modelAdmissionDecisionOutcome{pending: &pending, replayed: true}, false, nil
+	}
+	head, found, err := s.modelAdmissions.LatestModelAdmissionStatus(ctx, body.ProviderID, body.CandidateID)
+	if err != nil {
+		return modelAdmissionDecisionOutcome{}, false, err
+	}
+	if !found {
+		return modelAdmissionDecisionOutcome{}, false, decisionFail(http.StatusNotFound, "no_offer")
+	}
+	// (2) head compare.
+	if head.CoordinatorEventID != body.ExpectedCoordinatorEventID {
+		return modelAdmissionDecisionOutcome{}, false, decisionFail(http.StatusConflict, "stale_head")
+	}
+	// (3) edge validation.
+	if !modelAdmissionCoordinatorTransitionAllowed(head.State, body.NextState) {
+		return modelAdmissionDecisionOutcome{}, false, decisionFail(http.StatusConflict, "invalid_transition")
+	}
+	decision := operatorDecisionFromHead(head, body.NextState, actor, body.ReasonCode, requestID, "operator_nonce_"+digest[:32], digest, s.now())
+	generation := s.artifactIdentitySets.generationLocked()
+	// (4) R003 preconditions, in their stated order, for the two
+	// catalog-bound edges only.
+	if modelAdmissionTransitionRequiresCatalogAuthority(body.NextState) {
+		if err := s.bindDecisionToCatalogLocked(&decision, head, body.NextState == "settlement_capable", provider, hasSession); err != nil {
+			return modelAdmissionDecisionOutcome{}, false, err
+		}
+	}
+	decision.EvaluatedReleaseGeneration = generation
+	if body.NextState == "settlement_capable" {
+		// Dual control: the request appends nothing.
+		if s.distinctOperatorActors() < 2 {
+			return modelAdmissionDecisionOutcome{}, false, decisionFail(http.StatusConflict, "dual_control_unavailable")
+		}
+		record := PendingModelAdmissionDecision{
+			ID:              strings.ReplaceAll(s.newUUID(), "-", ""),
+			ProviderID:      body.ProviderID,
+			CandidateID:     body.CandidateID,
+			NextState:       body.NextState,
+			ReasonCode:      body.ReasonCode,
+			RequestDigest:   digest,
+			RequestID:       requestID,
+			EvaluatedHead:   head.CoordinatorEventID,
+			RequestedBy:     actor,
+			CreatedAt:       s.now().UTC(),
+			AdmissionState:  head.State,
+			ServedModelRef:  head.ServedModelRef,
+			CatalogModelKey: head.CatalogModelKey,
+		}
+		if !modelAdmissionPendingIDPattern.MatchString(record.ID) {
+			return modelAdmissionDecisionOutcome{}, false, errors.New("generated pending_decision_id is invalid")
+		}
+		created, replay, err := s.modelAdmissions.CreatePendingModelAdmissionDecision(ctx, record)
+		if err != nil {
+			return modelAdmissionDecisionOutcome{}, false, err
+		}
+		return modelAdmissionDecisionOutcome{pending: &created, replayed: replay}, false, nil
+	}
+	// (5) release-generation re-compare (one read-lock hold spans (1)–(5),
+	// so the generation cannot have moved) + append.
+	stored, replayed, err := s.modelAdmissions.CASAppendModelAdmissionDecision(ctx, decision, head.CoordinatorEventID)
+	if err != nil {
+		return modelAdmissionDecisionOutcome{}, false, err
+	}
+	return modelAdmissionDecisionOutcome{event: stored, replayed: replayed}, !replayed, nil
 }
 
 // operatorDecisionFromHead is the operator-origin event before catalog
@@ -460,7 +476,7 @@ func mapDecisionStoreError(err error) error {
 // the Tier-2 row material (composite proof of the row binding and pricing
 // key), the resolved key and the refreshed member set; for
 // settlement_capable the session's pinned member as the settlement identity.
-func (s *Server) bindDecisionToCatalogLocked(decision *ModelAdmissionEvent, head ModelAdmissionEvent, settlement bool) error {
+func (s *Server) bindDecisionToCatalogLocked(decision *ModelAdmissionEvent, head ModelAdmissionEvent, settlement bool, provider pool.Provider, hasSession bool) error {
 	current, compatible := s.autotuneCatalogSnapshot()
 	eval := s.evaluateCatalogPreconditionsLocked(head, current)
 	if eval.decisionCode != "" {
@@ -483,7 +499,10 @@ func (s *Server) bindDecisionToCatalogLocked(decision *ModelAdmissionEvent, head
 		return nil
 	}
 	// (iv) the provider's single live session, bound to this candidate.
-	member, binding, ok := s.settlementSessionMemberLocked(head, current, compatible)
+	if !hasSession {
+		return decisionFail(http.StatusConflict, "no_verified_session")
+	}
+	member, binding, ok := s.settlementSessionMemberLocked(head, provider, current, compatible)
 	if !ok {
 		return decisionFail(http.StatusConflict, "no_verified_session")
 	}
@@ -501,32 +520,31 @@ func (s *Server) bindDecisionToCatalogLocked(decision *ModelAdmissionEvent, head
 	return nil
 }
 
-// settlementSessionMemberLocked is R003(iv): the live session is bound to the
+// settlementSessionMemberLocked is R003(iv): the live session (read from
+// the registry BEFORE the release read lock — lock order) is bound to the
 // candidate at its current head, admitted on the current release or a
-// retained compatible-previous release carrying the same row tuple, pinned
-// hash_verified for a recorded admissible member resolved in the session's
-// OWN release's identity set, with its receipt key present.
-func (s *Server) settlementSessionMemberLocked(head ModelAdmissionEvent, current *autotune.Catalog, compatible map[string]*autotune.Catalog) (ModelAdmissionCatalogMember, artifactidentityBinding, bool) {
+// retained compatible-previous release carrying the same row tuple
+// (resolved by the session's EXACT release id, never by its stored
+// admission mode, which goes stale after a re-stamp), pinned hash_verified
+// for a recorded admissible member resolved in the session's OWN release's
+// fresh identity set, with its receipt key present. Until the
+// SPEC-010-R007(e) runtime path reports another source, a session presents
+// only `mlx_cache` and only an `mlx_safetensors` member can bind: the
+// offer's signed `runtime_source` is a provider assertion, never a
+// live-session fact.
+func (s *Server) settlementSessionMemberLocked(head ModelAdmissionEvent, provider pool.Provider, current *autotune.Catalog, compatible map[string]*autotune.Catalog) (ModelAdmissionCatalogMember, artifactidentityBinding, bool) {
 	none := ModelAdmissionCatalogMember{}
-	if s.pool == nil {
-		return none, artifactidentityBinding{}, false
-	}
-	provider, ok := s.pool.Resolve(head.ProviderID, "")
-	if !ok || provider.ModelAdmissionCandidateID != head.CandidateID || provider.ModelAdmissionCoordinatorEventID != head.CoordinatorEventID {
+	if provider.ModelAdmissionCandidateID != head.CandidateID || provider.ModelAdmissionCoordinatorEventID != head.CoordinatorEventID {
 		return none, artifactidentityBinding{}, false
 	}
 	if !sessionReceiptKeyPresent(provider) {
 		return none, artifactidentityBinding{}, false
 	}
-	// The session's own release must carry the same row tuple.
-	var sessionCatalog *autotune.Catalog
-	switch provider.CatalogAdmissionMode {
-	case "current":
-		sessionCatalog = current
-	case "previous":
-		sessionCatalog = compatible[provider.CatalogReleaseID]
+	if head.RuntimeSource != modelAdmissionRuntimeSourceMLXCache {
+		return none, artifactidentityBinding{}, false
 	}
-	if sessionCatalog == nil {
+	sessionCatalog, _, _, ok := resolveProviderCatalogIn(provider, current, compatible)
+	if !ok || sessionCatalog == nil {
 		return none, artifactidentityBinding{}, false
 	}
 	row, ok := sessionCatalog.Row(head.CatalogModelKey)
@@ -534,17 +552,13 @@ func (s *Server) settlementSessionMemberLocked(head ModelAdmissionEvent, current
 		return none, artifactidentityBinding{}, false
 	}
 	member, ok := sessionBoundMember(provider, head)
-	if !ok {
+	if !ok || member.HashAlgorithm != modelidentity.SnapshotManifestV1 {
 		return none, artifactidentityBinding{}, false
 	}
-	// The serving path a session presents is its runtime source.
 	if member.Source == modelAdmissionMemberSourceCandidateRow {
-		if head.RuntimeSource != modelAdmissionRuntimeSourceMLXCache {
-			return none, artifactidentityBinding{}, false
-		}
 		return member, artifactidentityBinding{}, true
 	}
-	set := s.artifactIdentitySetFor(provider.CandidateCatalogSHA256)
+	set := s.usableIdentitySetLocked(sessionCatalog)
 	resolved, ok := set.Resolve(member.HashAlgorithm, member.Hash)
 	if !ok || resolved.Member.ModelKey != head.CatalogModelKey || resolved.Member.ArtifactID != member.ArtifactID || !resolved.Member.AllowsRuntimeSource(head.RuntimeSource) {
 		return none, artifactidentityBinding{}, false
@@ -557,7 +571,7 @@ func (s *Server) settlementSessionMemberLocked(head ModelAdmissionEvent, current
 func (s *Server) handleAdminModelAdmissionApprove(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", http.MethodPost)
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		writeJSON(w, http.StatusMethodNotAllowed, modelAdmissionError("invalid_request", "method not allowed"))
 		return
 	}
 	actor, ok := s.authorizedModelAdmissionOperator(w, r)
@@ -599,95 +613,112 @@ func (s *Server) handleAdminModelAdmissionApprove(w http.ResponseWriter, r *http
 	writeJSON(w, http.StatusOK, s.modelAdmissionDecisionResponse(outcome))
 }
 
-// applyModelAdmissionApprovalLocked is the approval precedence (a)–(g).
+// applyModelAdmissionApprovalLocked is the approval precedence (a)–(g),
+// evaluated as one release reader after the live session was read.
 func (s *Server) applyModelAdmissionApprovalLocked(ctx context.Context, actor string, body modelAdmissionApproveRequest, section *providerSection) (modelAdmissionDecisionOutcome, error) {
 	digest := body.digest()
 	requestID := body.requestID()
+	var provider pool.Provider
+	hasSession := false
+	if s.pool != nil {
+		provider, hasSession = s.pool.Resolve(body.ProviderID, "")
+	}
+	var (
+		outcome  modelAdmissionDecisionOutcome
+		pending  PendingModelAdmissionDecision
+		evalErr  error
+		appended bool
+	)
+	s.withReleaseRead(func() {
+		outcome, pending, appended, evalErr = s.evaluateModelAdmissionApprovalLocked(ctx, actor, body, digest, requestID, provider, hasSession)
+	})
+	if evalErr != nil {
+		return modelAdmissionDecisionOutcome{}, mapDecisionStoreError(evalErr)
+	}
+	if appended {
+		s.afterModelAdmissionAppendLocked(ctx, body.ProviderID, section)
+		s.log.Info().
+			Str("admin_action", "model_admission_decision_approved").
+			Str("actor", actor).
+			Str("requested_by", pending.RequestedBy).
+			Str("provider_id", body.ProviderID).
+			Str("candidate_id", body.CandidateID).
+			Str("pending_decision_id", pending.ID).
+			Str("coordinator_event_id", outcome.event.CoordinatorEventID).
+			Msg("model admission settlement_capable approved")
+	}
+	return outcome, nil
+}
+
+func (s *Server) evaluateModelAdmissionApprovalLocked(ctx context.Context, actor string, body modelAdmissionApproveRequest, digest, requestID string, provider pool.Provider, hasSession bool) (modelAdmissionDecisionOutcome, PendingModelAdmissionDecision, bool, error) {
+	none := PendingModelAdmissionDecision{}
 	// (b) approval idempotency, before any pending or head check.
 	if prior, found, err := s.modelAdmissions.ModelAdmissionEventByRequestID(ctx, body.ProviderID, requestID); err != nil {
-		return modelAdmissionDecisionOutcome{}, err
+		return modelAdmissionDecisionOutcome{}, none, false, err
 	} else if found {
 		if prior.PayloadDigestSHA256 != digest {
-			return modelAdmissionDecisionOutcome{}, decisionFail(http.StatusConflict, "idempotency_conflict")
+			return modelAdmissionDecisionOutcome{}, none, false, decisionFail(http.StatusConflict, "idempotency_conflict")
 		}
-		return modelAdmissionDecisionOutcome{event: prior, replayed: true}, nil
+		return modelAdmissionDecisionOutcome{event: prior, replayed: true}, none, false, nil
 	}
 	pending, found, err := s.modelAdmissions.PendingModelAdmissionDecision(ctx, body.PendingDecisionID)
 	if err != nil {
-		return modelAdmissionDecisionOutcome{}, err
+		return modelAdmissionDecisionOutcome{}, none, false, err
 	}
 	if found && pending.ApprovalRequestKey == requestID && pending.ApprovalDigest != digest {
-		return modelAdmissionDecisionOutcome{}, decisionFail(http.StatusConflict, "idempotency_conflict")
+		return modelAdmissionDecisionOutcome{}, none, false, decisionFail(http.StatusConflict, "idempotency_conflict")
 	}
 	// (a) the bound fields must equal the stored record.
 	if found && (pending.ProviderID != body.ProviderID || pending.CandidateID != body.CandidateID || pending.EvaluatedHead != body.ExpectedCoordinatorEventID) {
-		return modelAdmissionDecisionOutcome{}, decisionFail(http.StatusBadRequest, "invalid_request")
+		return modelAdmissionDecisionOutcome{}, none, false, decisionFail(http.StatusBadRequest, "invalid_request")
 	}
 	// (c) pending status.
 	switch {
 	case !found || pending.Invalidated:
-		return modelAdmissionDecisionOutcome{}, decisionFail(http.StatusConflict, "no_pending_decision")
+		return modelAdmissionDecisionOutcome{}, none, false, decisionFail(http.StatusConflict, "no_pending_decision")
 	case !pending.ConsumedAt.IsZero():
-		return modelAdmissionDecisionOutcome{}, decisionFail(http.StatusConflict, "pending_consumed")
+		return modelAdmissionDecisionOutcome{}, none, false, decisionFail(http.StatusConflict, "pending_consumed")
 	case s.now().UTC().After(pending.ExpiresAt):
-		return modelAdmissionDecisionOutcome{}, decisionFail(http.StatusConflict, "pending_expired")
+		return modelAdmissionDecisionOutcome{}, none, false, decisionFail(http.StatusConflict, "pending_expired")
 	}
 	// (d) a distinct actor.
 	if pending.RequestedBy == actor {
-		return modelAdmissionDecisionOutcome{}, decisionFail(http.StatusConflict, "dual_control_required")
+		return modelAdmissionDecisionOutcome{}, none, false, decisionFail(http.StatusConflict, "dual_control_required")
 	}
 	head, found, err := s.modelAdmissions.LatestModelAdmissionStatus(ctx, body.ProviderID, body.CandidateID)
 	if err != nil {
-		return modelAdmissionDecisionOutcome{}, err
+		return modelAdmissionDecisionOutcome{}, none, false, err
 	}
 	if !found {
-		return modelAdmissionDecisionOutcome{}, decisionFail(http.StatusNotFound, "no_offer")
+		return modelAdmissionDecisionOutcome{}, none, false, decisionFail(http.StatusNotFound, "no_offer")
 	}
 	// (e) the head must still be the evaluated head, else the record dies.
 	if head.CoordinatorEventID != pending.EvaluatedHead {
-		_ = s.modelAdmissions.InvalidatePendingModelAdmissionDecisions(ctx, body.ProviderID, body.CandidateID)
-		return modelAdmissionDecisionOutcome{}, decisionFail(http.StatusConflict, "stale_head")
+		if err := s.modelAdmissions.InvalidatePendingModelAdmissionDecisions(ctx, body.ProviderID, body.CandidateID); err != nil {
+			return modelAdmissionDecisionOutcome{}, none, false, err
+		}
+		return modelAdmissionDecisionOutcome{}, none, false, decisionFail(http.StatusConflict, "stale_head")
 	}
 	if !modelAdmissionCoordinatorTransitionAllowed(head.State, pending.NextState) {
-		return modelAdmissionDecisionOutcome{}, decisionFail(http.StatusConflict, "invalid_transition")
+		return modelAdmissionDecisionOutcome{}, none, false, decisionFail(http.StatusConflict, "invalid_transition")
 	}
 	decision := operatorDecisionFromHead(head, pending.NextState, actor, pending.ReasonCode, requestID, "operator_approval_nonce_"+digest[:32], digest, s.now())
-	var (
-		stored    ModelAdmissionEvent
-		replayed  bool
-		appendErr error
-	)
-	s.withReleaseRead(func() {
-		generation := s.artifactIdentitySets.generation()
-		// (f) the R003 preconditions re-evaluated in full.
-		if appendErr = s.bindDecisionToCatalogLocked(&decision, head, true); appendErr != nil {
-			return
-		}
-		decision.EvaluatedReleaseGeneration = generation
-		// (g) release-generation re-compare and append; the same atomic step
-		// marks the record consumed by this approval (an identical-key retry
-		// replays, a distinct-key one is `pending_consumed`).
-		stored, replayed, appendErr = s.modelAdmissions.AppendModelAdmissionApproval(ctx, decision, head.CoordinatorEventID, PendingModelAdmissionApproval{
-			PendingID: pending.ID, RequestKey: requestID, Digest: digest, Actor: actor,
-		})
+	generation := s.artifactIdentitySets.generationLocked()
+	// (f) the R003 preconditions re-evaluated in full.
+	if err := s.bindDecisionToCatalogLocked(&decision, head, true, provider, hasSession); err != nil {
+		return modelAdmissionDecisionOutcome{}, none, false, err
+	}
+	decision.EvaluatedReleaseGeneration = generation
+	// (g) release-generation re-compare and append; the same atomic step
+	// marks the record consumed by this approval (an identical-key retry
+	// replays, a distinct-key one is `pending_consumed`).
+	stored, replayed, err := s.modelAdmissions.AppendModelAdmissionApproval(ctx, decision, head.CoordinatorEventID, PendingModelAdmissionApproval{
+		PendingID: pending.ID, RequestKey: requestID, Digest: digest, Actor: actor,
 	})
-	if appendErr != nil {
-		return modelAdmissionDecisionOutcome{}, mapDecisionStoreError(appendErr)
+	if err != nil {
+		return modelAdmissionDecisionOutcome{}, none, false, err
 	}
-	if replayed {
-		return modelAdmissionDecisionOutcome{event: stored, replayed: true}, nil
-	}
-	s.afterModelAdmissionAppendLocked(ctx, body.ProviderID, section)
-	s.log.Info().
-		Str("admin_action", "model_admission_decision_approved").
-		Str("actor", actor).
-		Str("requested_by", pending.RequestedBy).
-		Str("provider_id", body.ProviderID).
-		Str("candidate_id", body.CandidateID).
-		Str("pending_decision_id", pending.ID).
-		Str("coordinator_event_id", stored.CoordinatorEventID).
-		Msg("model admission settlement_capable approved")
-	return modelAdmissionDecisionOutcome{event: stored}, nil
+	return modelAdmissionDecisionOutcome{event: stored, replayed: replayed}, pending, !replayed, nil
 }
 
 // ---- GET /admin/model-admission/offers?provider_id=
@@ -695,7 +726,7 @@ func (s *Server) applyModelAdmissionApprovalLocked(ctx context.Context, actor st
 func (s *Server) handleAdminModelAdmissionOffers(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.Header().Set("Allow", http.MethodGet)
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		writeJSON(w, http.StatusMethodNotAllowed, modelAdmissionError("invalid_request", "method not allowed"))
 		return
 	}
 	if _, ok := s.authorizedModelAdmissionOperator(w, r); !ok {
@@ -824,32 +855,63 @@ type ModelAdmissionRouteExpectation struct {
 // ErrModelAdmissionRouteStale is the compare-and-insert's fail-closed answer.
 var ErrModelAdmissionRouteStale = errors.New("BYOM model admission route snapshot expectation no longer holds")
 
-// CompareAndInsertModelAdmissionRouteSnapshot re-reads, under the release
-// read lock and immediately before insert, the candidate's head, the
-// session binding, the provider's binding generation and the binding's
-// validated release generation; any difference fails the attempt closed.
-// Takes no provider section (R001).
+// CompareAndInsertModelAdmissionRouteSnapshot re-reads, immediately before
+// insert, the candidate's head, the session binding, the provider's binding
+// generation and the binding's validated release generation (the binding
+// from the registry BEFORE the release read lock — lock order — the rest
+// under it), runs the insert under the same read hold, and re-reads all of
+// them again after the insert: an append that slipped between the compare
+// and the insert (appends are serialized by the provider section, which the
+// route path never takes) fails the attempt closed — the immutable snapshot
+// stands, nothing is dispatched or settled under it.
 func (s *Server) CompareAndInsertModelAdmissionRouteSnapshot(ctx context.Context, expect ModelAdmissionRouteExpectation, insert func() error) error {
 	if s.modelAdmissions == nil || s.pool == nil {
 		return ErrModelAdmissionRouteStale
 	}
+	check := func(provider pool.Provider, generation uint64) error {
+		head, found, err := s.modelAdmissions.LatestModelAdmissionStatus(ctx, expect.ProviderID, expect.CandidateID)
+		if err != nil || !found || head.CoordinatorEventID != expect.CoordinatorEventID || head.State != "settlement_capable" {
+			return ErrModelAdmissionRouteStale
+		}
+		if provider.ModelAdmissionCandidateID != expect.CandidateID || provider.ModelAdmissionCoordinatorEventID != expect.CoordinatorEventID ||
+			provider.ModelAdmissionValidatedReleaseGeneration != generation ||
+			s.modelAdmissionSections.get(expect.ProviderID).generation.Load() != expect.BindingGeneration {
+			return ErrModelAdmissionRouteStale
+		}
+		return nil
+	}
+	provider, ok := s.pool.Resolve(expect.ProviderID, "")
+	if !ok {
+		return ErrModelAdmissionRouteStale
+	}
 	var err error
 	s.withReleaseRead(func() {
-		head, found, lookupErr := s.modelAdmissions.LatestModelAdmissionStatus(ctx, expect.ProviderID, expect.CandidateID)
-		if lookupErr != nil || !found || head.CoordinatorEventID != expect.CoordinatorEventID || head.State != "settlement_capable" {
-			err = ErrModelAdmissionRouteStale
+		generation := s.artifactIdentitySets.generationLocked()
+		if err = check(provider, generation); err != nil {
 			return
 		}
-		provider, ok := s.pool.Resolve(expect.ProviderID, "")
-		if !ok || provider.ModelAdmissionCandidateID != expect.CandidateID || provider.ModelAdmissionCoordinatorEventID != expect.CoordinatorEventID ||
-			provider.ModelAdmissionValidatedReleaseGeneration != s.artifactIdentitySets.generation() ||
+		if err = insert(); err != nil {
+			return
+		}
+		// Post-insert re-read of the durable authority (the head) and the
+		// generations under the same release hold.
+		head, found, lookupErr := s.modelAdmissions.LatestModelAdmissionStatus(ctx, expect.ProviderID, expect.CandidateID)
+		if lookupErr != nil || !found || head.CoordinatorEventID != expect.CoordinatorEventID ||
 			s.modelAdmissionSections.get(expect.ProviderID).generation.Load() != expect.BindingGeneration {
 			err = ErrModelAdmissionRouteStale
-			return
 		}
-		err = insert()
 	})
-	return err
+	if err != nil {
+		return err
+	}
+	// The binding itself, re-read after the release hold (registry lock is
+	// never taken under the release lock).
+	after, ok := s.pool.Resolve(expect.ProviderID, "")
+	if !ok || after.ModelAdmissionCandidateID != expect.CandidateID || after.ModelAdmissionCoordinatorEventID != expect.CoordinatorEventID ||
+		after.ModelAdmissionBindingGeneration != provider.ModelAdmissionBindingGeneration {
+		return ErrModelAdmissionRouteStale
+	}
+	return nil
 }
 
 // Tier2RouteSnapshotMaterial is the row material on the catalog reference

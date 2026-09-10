@@ -156,7 +156,7 @@ func (s *memoryModelAdmissionStore) InvalidatePendingModelAdmissionDecisions(_ c
 // ---- SQLite store
 
 func ensureSQLitePendingModelAdmissionTable(db *sql.DB) error {
-	_, err := db.ExecContext(context.Background(), `
+	if _, err := db.ExecContext(context.Background(), `
 CREATE TABLE IF NOT EXISTS model_admission_pending_decisions (
     id TEXT PRIMARY KEY,
     provider_id TEXT NOT NULL,
@@ -175,9 +175,41 @@ CREATE TABLE IF NOT EXISTS model_admission_pending_decisions (
     invalidated INTEGER NOT NULL DEFAULT 0,
     approval_request_key TEXT NOT NULL DEFAULT '',
     approval_digest TEXT NOT NULL DEFAULT '',
+    admission_state TEXT NOT NULL DEFAULT '',
+    served_model_ref TEXT NOT NULL DEFAULT '',
+    catalog_model_key TEXT NOT NULL DEFAULT '',
     UNIQUE(provider_id, candidate_id, request_id)
-)`)
-	return err
+)`); err != nil {
+		return err
+	}
+	rows, err := db.QueryContext(context.Background(), `PRAGMA table_info(model_admission_pending_decisions)`)
+	if err != nil {
+		return err
+	}
+	existing := map[string]struct{}{}
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull, pk int
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		existing[name] = struct{}{}
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, column := range []string{"admission_state", "served_model_ref", "catalog_model_key"} {
+		if _, ok := existing[column]; ok {
+			continue
+		}
+		if _, err := db.ExecContext(context.Background(), `ALTER TABLE model_admission_pending_decisions ADD COLUMN `+column+` TEXT NOT NULL DEFAULT ''`); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func invalidateSQLitePendingModelAdmissionDecisions(ctx context.Context, conn *sql.Conn, providerID, candidateID string) error {
@@ -192,7 +224,8 @@ func consumeSQLitePendingModelAdmissionDecision(ctx context.Context, conn *sql.C
 }
 
 const sqlitePendingSelect = `SELECT id, provider_id, candidate_id, next_state, reason_code, request_digest, request_id, evaluated_head, requested_by,
-       created_at_utc, expires_at_utc, consumed_at_utc, consumed_by, consumed_event_id, invalidated, approval_request_key, approval_digest
+       created_at_utc, expires_at_utc, consumed_at_utc, consumed_by, consumed_event_id, invalidated, approval_request_key, approval_digest,
+       admission_state, served_model_ref, catalog_model_key
   FROM model_admission_pending_decisions`
 
 type sqlitePendingScanner interface{ Scan(dest ...any) error }
@@ -202,7 +235,8 @@ func scanSQLitePending(row sqlitePendingScanner) (PendingModelAdmissionDecision,
 	var created, expires, consumed string
 	var invalidated int
 	if err := row.Scan(&p.ID, &p.ProviderID, &p.CandidateID, &p.NextState, &p.ReasonCode, &p.RequestDigest, &p.RequestID, &p.EvaluatedHead, &p.RequestedBy,
-		&created, &expires, &consumed, &p.ConsumedBy, &p.ConsumedEventID, &invalidated, &p.ApprovalRequestKey, &p.ApprovalDigest); err != nil {
+		&created, &expires, &consumed, &p.ConsumedBy, &p.ConsumedEventID, &invalidated, &p.ApprovalRequestKey, &p.ApprovalDigest,
+		&p.AdmissionState, &p.ServedModelRef, &p.CatalogModelKey); err != nil {
 		return PendingModelAdmissionDecision{}, err
 	}
 	p.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
@@ -236,9 +270,9 @@ func (s *SQLiteModelAdmissionStore) CreatePendingModelAdmissionDecision(ctx cont
 		if err != sql.ErrNoRows {
 			return err
 		}
-		if _, err := conn.ExecContext(txCtx, `INSERT INTO model_admission_pending_decisions(id, provider_id, candidate_id, next_state, reason_code, request_digest, request_id, evaluated_head, requested_by, created_at_utc, expires_at_utc)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, p.ID, p.ProviderID, p.CandidateID, p.NextState, p.ReasonCode, p.RequestDigest, p.RequestID, p.EvaluatedHead, p.RequestedBy,
-			p.CreatedAt.UTC().Format(time.RFC3339Nano), p.ExpiresAt.UTC().Format(time.RFC3339Nano)); err != nil {
+		if _, err := conn.ExecContext(txCtx, `INSERT INTO model_admission_pending_decisions(id, provider_id, candidate_id, next_state, reason_code, request_digest, request_id, evaluated_head, requested_by, created_at_utc, expires_at_utc, admission_state, served_model_ref, catalog_model_key)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, p.ID, p.ProviderID, p.CandidateID, p.NextState, p.ReasonCode, p.RequestDigest, p.RequestID, p.EvaluatedHead, p.RequestedBy,
+			p.CreatedAt.UTC().Format(time.RFC3339Nano), p.ExpiresAt.UTC().Format(time.RFC3339Nano), p.AdmissionState, p.ServedModelRef, p.CatalogModelKey); err != nil {
 			return err
 		}
 		stored = p

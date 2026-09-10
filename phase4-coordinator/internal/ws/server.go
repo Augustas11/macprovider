@@ -584,6 +584,12 @@ func (s *Server) SetAutotuneCatalog(catalog *autotune.Catalog, compatible ...*au
 func (s *Server) publishRelease(catalog *autotune.Catalog, compatible []*autotune.Catalog, sets map[string]*artifactidentity.Index, catalogGiven bool) uint64 {
 	s.artifactIdentitySets.mu.Lock()
 	defer s.artifactIdentitySets.mu.Unlock()
+	return s.publishReleaseLocked(catalog, compatible, sets, catalogGiven)
+}
+
+// publishReleaseLocked is publishRelease for a caller holding the release
+// write lock.
+func (s *Server) publishReleaseLocked(catalog *autotune.Catalog, compatible []*autotune.Catalog, sets map[string]*artifactidentity.Index, catalogGiven bool) uint64 {
 	if catalogGiven {
 		next := buildCompatibleCatalogSet(catalog, compatible)
 		s.autotuneCatalogMu.Lock()
@@ -638,11 +644,14 @@ func (s *Server) SetArtifactIdentitySets(sets map[string]*artifactidentity.Index
 // then `catalog_artifact_feed_integrity_failure` rather than
 // `no_artifact_match`). After publication the SPEC-047-R006 sweeps run.
 func (s *Server) PublishArtifactIdentitySets(sets map[string]*artifactidentity.Index, feedIntegrityFailed bool) uint64 {
-	catalog, compatible, staged := s.artifactIdentitySets.takeStagedCatalog()
 	s.artifactIdentitySets.mu.Lock()
+	// The staged catalog is consumed, the integrity outcome recorded, and the
+	// catalog / identity sets / Tier-2 material / generation swapped under
+	// ONE write-lock hold: no reader observes any part ahead of the others.
+	catalog, compatible, staged := s.artifactIdentitySets.takeStagedCatalog()
 	s.artifactIdentitySets.feedIntegrityFailed = feedIntegrityFailed
+	generation := s.publishReleaseLocked(catalog, compatible, sets, staged)
 	s.artifactIdentitySets.mu.Unlock()
-	generation := s.publishRelease(catalog, compatible, sets, staged)
 	s.afterReleasePublished()
 	return generation
 }
@@ -657,6 +666,13 @@ func (s *Server) ReleaseGeneration() uint64 { return s.artifactIdentitySets.gene
 // generation). Never nest: a nested read lock deadlocks against a waiting
 // publisher. Lock order: provider section → registry → release read lock.
 func (s *Server) withReleaseRead(fn func()) {
+	if hook := s.artifactIdentitySets.onReadLocked; hook != nil {
+		s.artifactIdentitySets.mu.RLock()
+		hook()
+		defer s.artifactIdentitySets.mu.RUnlock()
+		fn()
+		return
+	}
 	s.artifactIdentitySets.mu.RLock()
 	defer s.artifactIdentitySets.mu.RUnlock()
 	fn()
@@ -688,10 +704,18 @@ func (s *Server) CurrentAutotuneCatalog() *autotune.Catalog {
 // checks exactly as before. isCurrent reports whether the resolved catalog is the
 // active one, for callers that cross-check a previous release against the active.
 func (s *Server) resolveProviderCatalog(provider pool.Provider) (resolved, current *autotune.Catalog, isCurrent, ok bool) {
+	cur, compatible := s.autotuneCatalogSnapshot()
+	return resolveProviderCatalogIn(provider, cur, compatible)
+}
+
+// resolveProviderCatalogIn is resolveProviderCatalog against one already
+// captured (current, compatible) pair — a caller under the release read lock
+// resolves the session's EXACT release (by release id, never by the stored
+// admission mode, which goes stale after a re-stamp).
+func resolveProviderCatalogIn(provider pool.Provider, cur *autotune.Catalog, compatible map[string]*autotune.Catalog) (resolved, current *autotune.Catalog, isCurrent, ok bool) {
 	if provider.CatalogAdmissionMode != "current" && provider.CatalogAdmissionMode != "previous" {
 		return nil, nil, false, false
 	}
-	cur, compatible := s.autotuneCatalogSnapshot()
 	if provider.CatalogReleaseID != "" {
 		// Resolve by the exact release the session presented. This is the case
 		// production catalogAdmission always produces, and it is what keeps a

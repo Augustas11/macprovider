@@ -208,15 +208,21 @@ type PendingModelAdmissionApproval struct {
 // approval, expires unused, and is invalidated by any event appended for the
 // candidate.
 type PendingModelAdmissionDecision struct {
-	ID                 string
-	ProviderID         string
-	CandidateID        string
-	NextState          string
-	ReasonCode         string
-	RequestDigest      string
-	RequestID          string
-	EvaluatedHead      string
-	RequestedBy        string
+	ID            string
+	ProviderID    string
+	CandidateID   string
+	NextState     string
+	ReasonCode    string
+	RequestDigest string
+	RequestID     string
+	EvaluatedHead string
+	RequestedBy   string
+	// The pending response is answered from the RECORD on replay, whatever
+	// the head did since: the state at evaluation, the candidate's served
+	// reference and resolved key.
+	AdmissionState     string
+	ServedModelRef     string
+	CatalogModelKey    string
 	CreatedAt          time.Time
 	ExpiresAt          time.Time
 	ConsumedAt         time.Time

@@ -1028,6 +1028,7 @@ func TestBYOMSettlementCapableBindsAdmissionEventIntoRouteSnapshot(t *testing.T)
 		buyer.WithBilling(billingStore, cfg),
 		buyer.WithBillingSnapshotID(snapshotID),
 		buyer.WithModelAdmissionStore(store),
+		buyer.WithModelAdmissionRouteGuard(testRouteGuard{registry: registry, store: store}),
 	)
 
 	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`), nil)
@@ -1240,6 +1241,7 @@ func TestBYOMReadmissionRotatesRouteSnapshotAdmissionEvent(t *testing.T) {
 		buyer.WithBilling(billingStore, cfg),
 		buyer.WithBillingSnapshotID(snapshotID),
 		buyer.WithModelAdmissionStore(store),
+		buyer.WithModelAdmissionRouteGuard(testRouteGuard{registry: registry, store: store}),
 	)
 
 	firstRR := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`), nil)
@@ -1813,6 +1815,27 @@ func byomAdmissionProvider(t *testing.T, provider pool.Provider) pool.Provider {
 	provider.ModelAdmissionDiscoveryDigestSHA256 = strings.Repeat("b", 64)
 	provider.ModelAdmissionEvaluationDigestSHA256 = strings.Repeat("c", 64)
 	return provider
+}
+
+// testRouteGuard stands in for the coordinator's SPEC-047-R001 route-time
+// compare-and-insert in buyer unit tests: the head and the registry binding
+// are re-read immediately before the insert (the production guard adds the
+// release read lock and the binding/release generations).
+type testRouteGuard struct {
+	registry *pool.Registry
+	store    providerws.ModelAdmissionStore
+}
+
+func (g testRouteGuard) CompareAndInsertModelAdmissionRouteSnapshot(ctx context.Context, expect providerws.ModelAdmissionRouteExpectation, insert func() error) error {
+	head, found, err := g.store.LatestModelAdmissionStatus(ctx, expect.ProviderID, expect.CandidateID)
+	if err != nil || !found || head.CoordinatorEventID != expect.CoordinatorEventID || head.State != "settlement_capable" {
+		return providerws.ErrModelAdmissionRouteStale
+	}
+	provider, ok := g.registry.Resolve(expect.ProviderID, "")
+	if !ok || provider.ModelAdmissionCandidateID != expect.CandidateID || provider.ModelAdmissionCoordinatorEventID != expect.CoordinatorEventID {
+		return providerws.ErrModelAdmissionRouteStale
+	}
+	return insert()
 }
 
 // bindBYOMSession installs the coordinator-derived session-to-candidate

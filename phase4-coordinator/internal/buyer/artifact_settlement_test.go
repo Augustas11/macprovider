@@ -116,6 +116,7 @@ func artifactSettlementServer(t *testing.T, provider pool.Provider, registry *po
 		buyer.WithBilling(billingStore, cfg),
 		buyer.WithBillingSnapshotID(snapshotID),
 		buyer.WithModelAdmissionStore(store),
+		buyer.WithModelAdmissionRouteGuard(testRouteGuard{registry: registry, store: store}),
 	), dbPath
 }
 

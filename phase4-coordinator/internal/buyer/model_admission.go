@@ -233,33 +233,23 @@ func (s *Server) requireBYOMRouteSnapshotBinding(ctx context.Context, p pool.Pro
 }
 
 // insertBYOMRouteSnapshot performs the SPEC-047-R001 compare-and-insert for
-// a BYOM-bound route: through the coordinator's guard when wired (release
-// read lock, binding generation), else the buyer's own re-read of the head
-// and the registry binding immediately before the insert.
+// a BYOM-bound route through the coordinator's guard (release read lock,
+// head, binding, binding generation, validated release generation). A
+// server composed with an admission store but no guard fails every
+// BYOM-bound route closed: there is no weaker path.
 func (s *Server) insertBYOMRouteSnapshot(ctx context.Context, p pool.Provider, binding providerws.ModelAdmissionSettlementBinding, insert func() error) error {
 	if binding.CandidateID == "" {
 		return insert()
 	}
-	expect := providerws.ModelAdmissionRouteExpectation{
+	if s.modelAdmissionRouteGuard == nil {
+		return providerws.ErrModelAdmissionRouteStale
+	}
+	return s.modelAdmissionRouteGuard.CompareAndInsertModelAdmissionRouteSnapshot(ctx, providerws.ModelAdmissionRouteExpectation{
 		ProviderID:         p.ProviderID,
 		CandidateID:        binding.CandidateID,
 		CoordinatorEventID: binding.CoordinatorEventID,
 		BindingGeneration:  p.ModelAdmissionBindingGeneration,
-	}
-	if s.modelAdmissionRouteGuard != nil {
-		return s.modelAdmissionRouteGuard.CompareAndInsertModelAdmissionRouteSnapshot(ctx, expect, insert)
-	}
-	head, found, err := s.modelAdmissionStore.LatestModelAdmissionStatus(ctx, expect.ProviderID, expect.CandidateID)
-	if err != nil || !found || head.CoordinatorEventID != expect.CoordinatorEventID || head.State != "settlement_capable" {
-		return providerws.ErrModelAdmissionRouteStale
-	}
-	if s.pool != nil {
-		current, ok := s.pool.Resolve(expect.ProviderID, "")
-		if !ok || current.ModelAdmissionCandidateID != expect.CandidateID || current.ModelAdmissionCoordinatorEventID != expect.CoordinatorEventID {
-			return providerws.ErrModelAdmissionRouteStale
-		}
-	}
-	return insert()
+	}, insert)
 }
 
 func applyBYOMRouteSnapshotBinding(snapshot *billing.RouteSnapshot, binding providerws.ModelAdmissionSettlementBinding) {

@@ -248,7 +248,7 @@ func (s *Server) modelAdmissionBindingFor(candidate ModelAdmissionEvent) pool.Mo
 			binding.CatalogRowStatus = row.RuntimeStatus
 		}
 		if eval := s.evaluateCatalogPreconditionsLocked(candidate, current); eval.decisionCode == "" {
-			binding.ValidatedReleaseGeneration = s.artifactIdentitySets.generation()
+			binding.ValidatedReleaseGeneration = s.artifactIdentitySets.generationLocked()
 		}
 	})
 	return binding
@@ -475,13 +475,24 @@ func (s *Server) matchModelAdmissionOffer(runtimeSource, assertedKey string, art
 	var match modelAdmissionCatalogMatch
 	s.withReleaseRead(func() {
 		current, _ := s.autotuneCatalogSnapshot()
-		var set *artifactidentity.Index
-		if current != nil {
-			set = s.artifactIdentitySetFor(current.SHA256)
-		}
-		match = matchOfferArtifactHashes(current, set, s.artifactIdentitySets.integrityFailed(), runtimeSource, assertedKey, artifactHashes)
+		match = matchOfferArtifactHashes(current, s.usableIdentitySetLocked(current), s.artifactIdentitySets.integrityFailed(), runtimeSource, assertedKey, artifactHashes)
 	})
 	return match
+}
+
+// usableIdentitySetLocked is the release's identity set when it is usable
+// for artifact-derived authority: present and fresh (SPEC-023 §3.7.6 rules
+// 4–5); a missing or stale set resolves nothing on the feed path. Caller
+// holds the release read lock.
+func (s *Server) usableIdentitySetLocked(catalog *autotune.Catalog) *artifactidentity.Index {
+	if catalog == nil {
+		return nil
+	}
+	set := s.artifactIdentitySetFor(catalog.SHA256)
+	if set == nil || !set.Fresh(s.now()) {
+		return nil
+	}
+	return set
 }
 
 func unmatched(reason string) modelAdmissionCatalogMatch {
@@ -658,7 +669,7 @@ func (s *Server) evaluateCatalogPreconditionsLocked(candidate ModelAdmissionEven
 	if !ok || autotune.NormalizeModelID(row.ModelID) != autotune.NormalizeModelID(candidate.CatalogRowModelID) || strings.TrimSpace(row.ModelSHA256) != candidate.CatalogRowModelSHA256 {
 		return catalogPreconditionResult{decisionCode: "catalog_match_stale", driftReason: modelAdmissionDriftRowChanged}
 	}
-	set := s.artifactIdentitySetFor(current.SHA256)
+	set := s.usableIdentitySetLocked(current)
 	members := make([]ModelAdmissionCatalogMember, 0, len(candidate.CatalogMembers))
 	for _, member := range candidate.CatalogMembers {
 		switch member.Source {
