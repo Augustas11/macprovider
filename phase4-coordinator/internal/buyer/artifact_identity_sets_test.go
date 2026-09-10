@@ -39,6 +39,10 @@ func versionedArtifactBoundFeedSet(t *testing.T, version string, artifacts func(
 	}
 }
 
+func verifiedGGUF(hash string) string {
+	return strings.Replace(ggufArtifactJSON(hash, "sha256:"+hash), `"verification_status":"declared","verified_at":null`, `"verification_status":"verified","verified_at":"2026-09-01"`, 1)
+}
+
 // SPEC-010-R004 v1.8: one identity set per retained release. A retained
 // previous release directory that carries its artifact feed contributes its
 // own set keyed by its candidate-catalog digest; one without contributes none.
@@ -48,10 +52,10 @@ func TestArtifactIdentitySetsPerRetainedRelease(t *testing.T) {
 	keyring := map[string]ed25519.PublicKey{"test-key": publicKey}
 	hashA, hashB := strings.Repeat("4", 64), strings.Repeat("5", 64)
 	currentCfg := versionedArtifactBoundFeedSet(t, "release-b", func(sha string) []byte {
-		return catalogArtifactsFeedWithModels("release-b", "2026-07-10T00:00:00Z", "autotune-policy-v1", sha, `"test-model":`+artifactModelJSON(ggufArtifactJSON(hashB, "sha256:"+hashB)))
+		return catalogArtifactsFeedWithModels("release-b", "2026-07-10T00:00:00Z", "autotune-policy-v1", sha, `"test-model":`+artifactModelJSON(verifiedGGUF(hashB)))
 	}, privateKey, keyring)
 	previousCfg := versionedArtifactBoundFeedSet(t, "release-a", func(sha string) []byte {
-		return catalogArtifactsFeedWithModels("release-a", "2026-07-03T00:00:00Z", "autotune-policy-v1", sha, `"test-model":`+artifactModelJSON(ggufArtifactJSON(hashA, "sha256:"+hashA)))
+		return catalogArtifactsFeedWithModels("release-a", "2026-07-10T00:00:00Z", "autotune-policy-v1", sha, `"test-model":`+artifactModelJSON(verifiedGGUF(hashA)))
 	}, privateKey, keyring)
 	currentFeeds, err := buyer.LoadAutotuneFeeds(currentCfg)
 	if err != nil {
@@ -98,7 +102,7 @@ func TestLoadPreviousAutotuneFeedsFollowsPreviousTarget(t *testing.T) {
 	keyring := map[string]ed25519.PublicKey{"test-key": publicKey}
 	hashA := strings.Repeat("6", 64)
 	previous := artifactBoundFeedSet(t, func(sha string) []byte {
-		return catalogArtifactsFeedWithModels("test-release", "2026-07-03T00:00:00Z", "autotune-policy-v1", sha, `"test-model":`+artifactModelJSON(ggufArtifactJSON(hashA, "sha256:"+hashA)))
+		return catalogArtifactsFeedWithModels("test-release", "2026-07-10T00:00:00Z", "autotune-policy-v1", sha, `"test-model":`+artifactModelJSON(verifiedGGUF(hashA)))
 	}, privateKey, "test-key", keyring, privateKey)
 	root := t.TempDir()
 	releaseDir := filepath.Join(root, "releases", "release-prev")
