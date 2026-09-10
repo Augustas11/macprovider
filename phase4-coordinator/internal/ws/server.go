@@ -1408,7 +1408,9 @@ func (s *Server) RefreshTier2HashStatuses() int {
 			Msg("artifact feed is stale; artifact-derived identity is disabled until the feed is re-issued and reloaded (primary-row identity unaffected)")
 	}
 	return s.pool.UpdateModelIdentities(func(provider pool.Provider) pool.ModelIdentityVerdict {
-		verdict := s.verifyModelIdentity(providerIdentityRequest(provider))
+		// The registry applies the session pin again when it stores the
+		// verdict; applying it here too keeps the transition log honest.
+		verdict := provider.PinnedVerdict(s.verifyModelIdentity(providerIdentityRequest(provider)))
 		next := verdict.Status
 		s.observeHashStatusTransition(provider.HashStatus, next, provider.ProviderID, provider.AssignedID, provider.ModelID, provider.ModelHash)
 		if cfg.RequireHashVerified && (next == pool.HashStatusUncatalogued || next == pool.HashStatusCatalogUnavailable) {
