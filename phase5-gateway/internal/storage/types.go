@@ -104,6 +104,20 @@ type DemoUsageEvent struct {
 	CreatedAt     time.Time
 }
 
+// RelayBlindMetadata is the durable, request-scoped privacy context attached
+// to the existing reservation and usage ledgers. A nil value means the
+// ordinary plaintext path.
+type RelayBlindMetadata struct {
+	RequestedPrivacyMode    string
+	EffectivePrivacyOutcome string
+	EnvelopeDigest          string
+	KeyRecordDigest         string
+	KID                     string
+	ProviderBindingDigest   string
+	InputTokenUpperBound    int64
+	MaxOutputTokens         int64
+}
+
 type UsageEvent struct {
 	RequestID        string
 	AccountID        string
@@ -115,6 +129,7 @@ type UsageEvent struct {
 	TokenSource      string
 	Outcome          string
 	CreatedAt        time.Time
+	RelayBlind       *RelayBlindMetadata
 }
 
 type ReservationRequest struct {
@@ -125,6 +140,7 @@ type ReservationRequest struct {
 	DailyQuota      int64
 	ExpiresAt       time.Time
 	CreatedAt       time.Time
+	RelayBlind      *RelayBlindMetadata
 }
 
 type ActiveReservation struct {
@@ -135,6 +151,7 @@ type ActiveReservation struct {
 	ReservedTokens  int64
 	ExpiresAt       time.Time
 	CreatedAt       time.Time
+	RelayBlind      *RelayBlindMetadata
 }
 
 // SettlementFallbackCandidate preserves local usage while request-scoped
@@ -153,6 +170,7 @@ type SettlementFallbackCandidate struct {
 	MaxTotalTokens            int64
 	TokenSource               string
 	Outcome                   string
+	RelayBlind                *RelayBlindMetadata
 }
 
 type QuotaDecision struct {
@@ -175,6 +193,7 @@ type ReservationSettlement struct {
 	TokenSource                  string
 	Outcome                      string
 	SettledAt                    time.Time
+	RelayBlind                   *RelayBlindMetadata
 }
 
 type ConcurrencyRequest struct {
@@ -334,6 +353,7 @@ type WalletSessionAdmissionRequest struct {
 	MaxReplayBytes  int64
 	CreatedAt       time.Time
 	ExpiresAt       time.Time
+	RelayBlind      *RelayBlindMetadata
 }
 
 type WalletSessionAdmissionDecision struct {
@@ -382,6 +402,7 @@ type WalletSessionReservationSettlement struct {
 	TokenSource                  string
 	Outcome                      string
 	SettledAt                    time.Time
+	RelayBlind                   *RelayBlindMetadata
 }
 
 type FeedbackEvent struct {

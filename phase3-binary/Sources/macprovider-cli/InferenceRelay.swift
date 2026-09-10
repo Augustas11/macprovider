@@ -33,6 +33,7 @@ actor InferenceRelay {
     private let receiptBuilder: ReceiptBuilder?
     private let receiptProviderID: String?
     private let demoteAutoupdateTrust: TrustDemotion?
+    private let relayBlindRuntime: RelayBlindProviderRuntime?
     // T3-01: number of content-token deltas to accumulate per WS frame.
     // 1 = one frame per token (default, current behaviour).
     nonisolated let streamInterval: Int
@@ -50,6 +51,7 @@ actor InferenceRelay {
         receiptBuilder: ReceiptBuilder? = nil,
         receiptProviderID: String? = nil,
         streamInterval: Int = 1,
+        relayBlindRuntime: RelayBlindProviderRuntime? = nil,
         demoteAutoupdateTrust: TrustDemotion? = nil,
         sendFrame: @escaping SendFrame
     ) {
@@ -64,6 +66,7 @@ actor InferenceRelay {
         self.receiptBuilder = receiptBuilder
         self.receiptProviderID = receiptProviderID
         self.streamInterval = max(1, streamInterval)
+        self.relayBlindRuntime = relayBlindRuntime
         self.demoteAutoupdateTrust = demoteAutoupdateTrust
         self.sendFrame = sendFrame
     }
@@ -77,6 +80,8 @@ actor InferenceRelay {
         }
         let body: String
         let decryptedConversationKey: String?
+        let bodyEncoding: String?
+        let relayBlindContextObject: [String: Any]?
         if let tier2Session {
             guard message["encrypted"] as? Bool == true else {
                 try await sendNAK(inReplyTo: requestID, code: "tier2_encrypted_frame_required", message: "Tier-2 session requires encrypted inference_request frames")
@@ -86,6 +91,8 @@ actor InferenceRelay {
                 let payload = try tier2Session.openRequestPayload(message: message, requestID: requestID, stream: stream)
                 body = payload.body
                 decryptedConversationKey = payload.conversationKey
+                bodyEncoding = payload.bodyEncoding
+                relayBlindContextObject = payload.relayBlindContext
             } catch {
                 await demoteAutoupdateTrust?("encrypted_leg_invalidated")
                 try await sendNAK(inReplyTo: requestID, code: "tier2_aead_decrypt_failed", message: "Encrypted inference_request failed authentication")
@@ -94,17 +101,75 @@ actor InferenceRelay {
         } else if let cleartextBody = message["body"] as? String {
             body = cleartextBody
             decryptedConversationKey = nil
+            bodyEncoding = message["body_encoding"] as? String
+            relayBlindContextObject = message["relay_blind_context"] as? [String: Any]
         } else {
             try await sendNAK(inReplyTo: "inference_request", code: "invalid_message", message: "inference_request requires request_id, stream, and body")
             return
         }
 
+        let relayBlindOpened: RelayBlindProviderRuntime.OpenedRequest?
+        if bodyEncoding == RelayBlindEnvelope.version {
+            guard let relayBlindRuntime else {
+                try await sendRelayBlindFailure(requestID: requestID, stream: stream, code: RelayBlindProviderError.disabled.code)
+                return
+            }
+            guard message["settlement"] == nil, let relayBlindContextObject else {
+                try await sendRelayBlindFailure(requestID: requestID, stream: stream, code: RelayBlindProviderError.invalidEnvelope.code)
+                return
+            }
+            do {
+                relayBlindOpened = try relayBlindRuntime.open(
+                    envelopeBody: body,
+                    outerRequestID: requestID,
+                    outerStream: stream,
+                    contextObject: relayBlindContextObject,
+                    expectedAssignedSession: tier2Session?.assignedID
+                )
+            } catch let rejection as RelayBlindProviderRejection {
+                try await sendRelayBlindRejection(
+                    rejection.evidence,
+                    requestID: requestID,
+                    stream: stream,
+                    error: rejection.error
+                )
+                return
+            } catch let error as RelayBlindProviderError {
+                try await sendRelayBlindFailure(requestID: requestID, stream: stream, code: error.code)
+                return
+            } catch {
+                try await sendRelayBlindFailure(requestID: requestID, stream: stream, code: RelayBlindProviderError.decryptFailed.code)
+                return
+            }
+        } else if let bodyEncoding, bodyEncoding.hasPrefix("relay-blind-request-") {
+            try await sendRelayBlindFailure(requestID: requestID, stream: stream, code: RelayBlindProviderError.invalidEnvelope.code)
+            return
+        } else {
+            guard relayBlindContextObject == nil else {
+                try await sendRelayBlindFailure(requestID: requestID, stream: stream, code: RelayBlindProviderError.invalidEnvelope.code)
+                return
+            }
+            relayBlindOpened = nil
+        }
+
         guard active[requestID] == nil else {
+            if let relayBlindOpened {
+                try await terminateClaimedRelay(
+                    relayBlindOpened, requestID: requestID, stream: stream, error: .providerUnsupported
+                )
+                return
+            }
             try await sendNAK(inReplyTo: "inference_request", code: "duplicate_request_id", message: "Duplicate active request_id: \(requestID)")
             return
         }
 
         guard active.count < maxActiveRequests else {
+            if let relayBlindOpened {
+                try await terminateClaimedRelay(
+                    relayBlindOpened, requestID: requestID, stream: stream, error: .providerUnsupported
+                )
+                return
+            }
             try await Self.sendEndFrame([
                 "type": "inference_response_end",
                 "request_id": requestID,
@@ -116,7 +181,9 @@ actor InferenceRelay {
         }
 
         let settlementMetadata: SettlementReceiptMetadata?
-        if let settlementWire = message["settlement"] as? [String: Any] {
+        if relayBlindOpened != nil {
+            settlementMetadata = nil
+        } else if let settlementWire = message["settlement"] as? [String: Any] {
             guard let parsed = SettlementReceiptMetadata(wire: settlementWire) else {
                 try await sendNAK(inReplyTo: requestID, code: "invalid_settlement_metadata", message: "inference_request settlement metadata is malformed")
                 return
@@ -138,7 +205,16 @@ actor InferenceRelay {
                 .trimmingCharacters(in: .whitespacesAndNewlines)
         }
 
-        guard body.utf8.count <= maxBodyBytes else {
+        let effectiveBodyLimit = relayBlindOpened == nil
+            ? maxBodyBytes
+            : max(maxBodyBytes, RelayBlindEnvelope.maxSerializedBytes)
+        guard body.utf8.count <= effectiveBodyLimit else {
+            if let relayBlindOpened {
+                try await terminateClaimedRelay(
+                    relayBlindOpened, requestID: requestID, stream: stream, error: .ciphertextInvalid
+                )
+                return
+            }
             try await Self.sendEndFrame([
                 "type": "inference_response_end",
                 "request_id": requestID,
@@ -150,6 +226,12 @@ actor InferenceRelay {
         }
 
         guard let startedAt = await providerStatus.beginRequestIfAccepting(requestID: requestID) else {
+            if let relayBlindOpened {
+                try await terminateClaimedRelay(
+                    relayBlindOpened, requestID: requestID, stream: stream, error: .providerUnsupported
+                )
+                return
+            }
             try await Self.sendEndFrame([
                 "type": "inference_response_end",
                 "request_id": requestID,
@@ -163,7 +245,7 @@ actor InferenceRelay {
         let state = RelayRequestState()
         let receiptBuilder = receiptBuilder
         let receiptProviderID = receiptProviderID
-        let task = Task { [weak self, modelRuntime, providerStatus, loadedModelID, catalogModelIDAlias, warmSwapEnabled, sendFrame, tier2Session, state, settlementMetadata, streamInterval] in
+        let task = Task { [weak self, modelRuntime, providerStatus, loadedModelID, catalogModelIDAlias, warmSwapEnabled, sendFrame, tier2Session, state, settlementMetadata, streamInterval, relayBlindRuntime] in
             await Self.process(
                 requestID: requestID,
                 body: body,
@@ -181,6 +263,8 @@ actor InferenceRelay {
                 conversationKey: conversationKey?.isEmpty == false ? conversationKey : nil,
                 startedAt: startedAt,
                 streamInterval: streamInterval,
+                relayBlindOpened: relayBlindOpened,
+                relayBlindRuntime: relayBlindRuntime,
                 sendFrame: sendFrame
             )
             await self?.removeActive(requestID)
@@ -256,6 +340,54 @@ actor InferenceRelay {
         ])
     }
 
+    private func sendRelayBlindFailure(requestID: String, stream: Bool, code: String) async throws {
+        try await Self.sendEndFrame([
+            "type": "inference_response_end",
+            "request_id": requestID,
+            "status": code,
+            "chunks_sent": 0,
+            "error": code,
+        ], requestID: requestID, stream: stream, tier2Session: tier2Session, sendFrame: sendFrame)
+    }
+
+    private func terminateClaimedRelay(
+        _ opened: RelayBlindProviderRuntime.OpenedRequest,
+        requestID: String,
+        stream: Bool,
+        error: RelayBlindProviderError
+    ) async throws {
+        try? relayBlindRuntime?.journal.markTerminal(opened.claim)
+        try await sendRelayBlindRejection(
+            .rejected(context: opened.context, error: error),
+            requestID: requestID,
+            stream: stream,
+            error: error
+        )
+    }
+
+    private func sendRelayBlindRejection(
+        _ evidence: RelayBlindValidationEvidence,
+        requestID: String,
+        stream: Bool,
+        error: RelayBlindProviderError
+    ) async throws {
+        try await Self.sendValidationFrame(
+            evidence,
+            requestID: requestID,
+            stream: stream,
+            tier2Session: tier2Session,
+            sendFrame: sendFrame
+        )
+        try await Self.sendEndFrame([
+            "type": "inference_response_end",
+            "request_id": requestID,
+            "status": error.code,
+            "chunks_sent": 0,
+            "error": error.code,
+            "relay_blind_validation": evidence.wireObject,
+        ], requestID: requestID, stream: stream, tier2Session: tier2Session, sendFrame: sendFrame)
+    }
+
     private static func process(
         requestID: String,
         body: String,
@@ -273,11 +405,15 @@ actor InferenceRelay {
         conversationKey: String?,
         startedAt: Date,
         streamInterval: Int = 1,
+        relayBlindOpened: RelayBlindProviderRuntime.OpenedRequest?,
+        relayBlindRuntime: RelayBlindProviderRuntime?,
         sendFrame: @escaping SendFrame
     ) async {
         var completionResult: CompletionResult?
         var failed = false
         var telemetryModelID = loadedModelID ?? ""
+        var relayBlindEvidence: RelayBlindValidationEvidence?
+        var relayBlindPrepared: RelayBlindPreparedRequest?
 
         do {
             let requestData = Data(body.utf8)
@@ -285,23 +421,71 @@ actor InferenceRelay {
             // Tier-2 traffic is ever persisted by the disk tier (only the
             // direct-HTTP operator path is), independent of key shape.
             let ingestProvenance: KVIngestProvenance = tier2Session != nil ? .tier2 : .relay
-            let request = try ChatCompletionRequest.parse(data: requestData)
-                .withConversationKey(conversationKey)
-                .withIngestProvenance(ingestProvenance)
+            let request: ChatCompletionRequest
+            if let relayBlindOpened {
+                request = relayBlindOpened.request
+            } else {
+                request = try ChatCompletionRequest.parse(data: requestData)
+                    .withConversationKey(conversationKey)
+                    .withIngestProvenance(ingestProvenance)
+            }
             telemetryModelID = request.model
-            let validationModelID = warmSwapEnabled
-                ? await modelRuntime.currentSnapshot().modelID
-                : loadedModelID
-            // Accept the coordinator-advertised catalog id as an alias only while
-            // the configured model is the one currently served — the exact predicate
-            // coordinatorWireModelID uses to decide whether to advertise it
-            // (servedModelID == loadedModelID). This holds even when warm-swap is
-            // enabled but the configured model is still loaded; after a swap to a
-            // different model the alias no longer applies.
-            let relayAliases = (validationModelID != nil && validationModelID == loadedModelID)
-                ? modelIDAliasList(catalogModelIDAlias)
-                : []
-            try request.validateModelMatches(validationModelID, aliases: relayAliases)
+            if let opened = relayBlindOpened, let relayBlindRuntime {
+                let prepared: RelayBlindPreparedRequest
+                do {
+                    prepared = try await modelRuntime.relayBlindPrepare(request)
+                } catch {
+                    throw RelayBlindProviderError.providerUnsupported
+                }
+                relayBlindPrepared = prepared
+                let preparedModelID = prepared.handle.snapshot.modelID
+                let relayAliases = (preparedModelID != nil && preparedModelID == loadedModelID)
+                    ? modelIDAliasList(catalogModelIDAlias)
+                    : []
+                do {
+                    try request.validateModelMatches(preparedModelID, aliases: relayAliases)
+                } catch {
+                    throw RelayBlindProviderError.ciphertextInvalid
+                }
+                let providerWireModelID = relayAliases.first ?? preparedModelID
+                guard opened.envelope.providerModel == providerWireModelID,
+                      request.maxTokens == Int(exactly: opened.envelope.maxOutputTokens) else {
+                    throw RelayBlindProviderError.ciphertextInvalid
+                }
+                let inputTokens = prepared.inputTokens
+                guard inputTokens >= 0, UInt64(inputTokens) <= opened.envelope.inputTokenUpperBound else {
+                    let rejection = RelayBlindValidationEvidence.rejected(
+                        context: opened.context, error: .ciphertextInvalid
+                    )
+                    relayBlindEvidence = rejection
+                    try await sendValidationFrame(
+                        rejection,
+                        requestID: requestID,
+                        stream: stream,
+                        tier2Session: tier2Session,
+                        sendFrame: sendFrame
+                    )
+                    throw RelayBlindProviderError.ciphertextInvalid
+                }
+                try relayBlindRuntime.journal.markValidated(opened.claim, inputTokens: inputTokens)
+                let evidence = RelayBlindValidationEvidence(context: opened.context, inputTokens: inputTokens, state: "validated")
+                relayBlindEvidence = evidence
+                try await sendValidationFrame(
+                    evidence,
+                    requestID: requestID,
+                    stream: stream,
+                    tier2Session: tier2Session,
+                    sendFrame: sendFrame
+                )
+            } else {
+                let validationModelID = warmSwapEnabled
+                    ? await modelRuntime.currentSnapshot().modelID
+                    : loadedModelID
+                let relayAliases = (validationModelID != nil && validationModelID == loadedModelID)
+                    ? modelIDAliasList(catalogModelIDAlias)
+                    : []
+                try request.validateModelMatches(validationModelID, aliases: relayAliases)
+            }
         if stream {
             let trace = EgressPerfTrace()
             completionResult = try await EgressPerfTraceKey.$current.withValue(trace) {
@@ -312,10 +496,14 @@ actor InferenceRelay {
                     modelRuntime: modelRuntime,
                     warmSwapEnabled: warmSwapEnabled,
                     tier2Session: tier2Session,
-                    receiptBuilder: receiptBuilder,
+                    receiptBuilder: relayBlindOpened == nil ? receiptBuilder : nil,
                     receiptProviderID: receiptProviderID,
                     settlementMetadata: settlementMetadata,
                     streamInterval: streamInterval,
+                    relayBlindEvidence: relayBlindEvidence,
+                    relayBlindRuntime: relayBlindRuntime,
+                    relayBlindClaim: relayBlindOpened?.claim,
+                    preparedHandle: relayBlindPrepared?.handle,
                     sendFrame: sendFrame
                 )
             }
@@ -327,11 +515,15 @@ actor InferenceRelay {
                     state: state,
                     modelRuntime: modelRuntime,
                     tier2Session: tier2Session,
-                    receiptBuilder: receiptBuilder,
+                    receiptBuilder: relayBlindOpened == nil ? receiptBuilder : nil,
                     receiptProviderID: receiptProviderID,
                     settlementMetadata: settlementMetadata,
                     startedAt: startedAt,
                     warmSwapEnabled: warmSwapEnabled,
+                    relayBlindEvidence: relayBlindEvidence,
+                    relayBlindRuntime: relayBlindRuntime,
+                    relayBlindClaim: relayBlindOpened?.claim,
+                    preparedHandle: relayBlindPrepared?.handle,
                     sendFrame: sendFrame
                 )
             }
@@ -345,13 +537,54 @@ actor InferenceRelay {
                     "chunks_sent": state.chunksSent,
                     "usage": state.usage ?? zeroUsage(),
                 ]
+                if let evidence = relayBlindEvidence { endFrame["relay_blind_validation"] = evidence.terminalWireObject() }
+                if let opened = relayBlindOpened, let relayBlindRuntime {
+                    try? relayBlindRuntime.journal.markTerminal(opened.claim, inputTokens: relayBlindEvidence?.inputTokens)
+                }
                 addSettlementTerminalMetadata(&endFrame, settlementMetadata: settlementMetadata)
+                try? await sendEndFrame(endFrame, requestID: requestID, stream: stream, tier2Session: tier2Session, sendFrame: sendFrame)
+            }
+        } catch let error as RelayBlindProviderError {
+            failed = true
+            if relayBlindEvidence == nil, let opened = relayBlindOpened {
+                let rejection = RelayBlindValidationEvidence.rejected(context: opened.context, error: error)
+                relayBlindEvidence = rejection
+                try? await sendValidationFrame(
+                    rejection,
+                    requestID: requestID,
+                    stream: stream,
+                    tier2Session: tier2Session,
+                    sendFrame: sendFrame
+                )
+            }
+            if let opened = relayBlindOpened, let relayBlindRuntime {
+                try? relayBlindRuntime.journal.markTerminal(opened.claim)
+            }
+            if state.markTerminalSent() {
+                var endFrame: [String: Any] = [
+                    "type": "inference_response_end",
+                    "request_id": requestID,
+                    "status": error.code,
+                    "chunks_sent": state.chunksSent,
+                    "error": error.code,
+                ]
+                if let evidence = relayBlindEvidence { endFrame["relay_blind_validation"] = evidence.terminalWireObject() }
                 try? await sendEndFrame(endFrame, requestID: requestID, stream: stream, tier2Session: tier2Session, sendFrame: sendFrame)
             }
         } catch let error as APIError {
             failed = true
             if state.markTerminalSent() {
-                var endFrame = errorEndFrame(requestID: requestID, error: error, chunksSent: state.chunksSent)
+                var endFrame = relayBlindOpened == nil
+                    ? errorEndFrame(requestID: requestID, error: error, chunksSent: state.chunksSent)
+                    : [
+                        "type": "inference_response_end",
+                        "request_id": requestID,
+                        "status": RelayBlindProviderError.committedFailed.code,
+                        "chunks_sent": state.chunksSent,
+                        "error": RelayBlindProviderError.committedFailed.code,
+                    ]
+                if let evidence = relayBlindEvidence { endFrame["relay_blind_validation"] = evidence.terminalWireObject() }
+                if let opened = relayBlindOpened, let relayBlindRuntime { try? relayBlindRuntime.journal.markTerminal(opened.claim, inputTokens: relayBlindEvidence?.inputTokens) }
                 addSettlementTerminalMetadata(&endFrame, settlementMetadata: settlementMetadata)
                 try? await sendEndFrame(endFrame, requestID: requestID, stream: stream, tier2Session: tier2Session, sendFrame: sendFrame)
             }
@@ -363,11 +596,17 @@ actor InferenceRelay {
                     "request_id": requestID,
                     "status": "error_internal",
                     "chunks_sent": state.chunksSent,
-                    "error": String(describing: error),
+                    "error": relayBlindOpened == nil ? String(describing: error) : RelayBlindProviderError.committedFailed.code,
                 ]
+                if relayBlindOpened != nil { endFrame["status"] = RelayBlindProviderError.committedFailed.code }
+                if let evidence = relayBlindEvidence { endFrame["relay_blind_validation"] = evidence.terminalWireObject() }
+                if let opened = relayBlindOpened, let relayBlindRuntime { try? relayBlindRuntime.journal.markTerminal(opened.claim, inputTokens: relayBlindEvidence?.inputTokens) }
                 addSettlementTerminalMetadata(&endFrame, settlementMetadata: settlementMetadata)
                 try? await sendEndFrame(endFrame, requestID: requestID, stream: stream, tier2Session: tier2Session, sendFrame: sendFrame)
             }
+        }
+        if let relayBlindPrepared {
+            await modelRuntime.unregisterInFlight(relayBlindPrepared.handle.registrationID)
         }
         await providerStatus.finishRequest(
             startedAt: startedAt,
@@ -375,7 +614,7 @@ actor InferenceRelay {
             failed: failed,
             requestID: requestID
         )
-        if !failed, !state.isCancelled, let completionResult {
+        if relayBlindOpened == nil, !failed, !state.isCancelled, let completionResult {
             KVCacheTelemetry.emitRequestCompleted(
                 providerID: receiptProviderID,
                 requestID: requestID,
@@ -397,13 +636,26 @@ actor InferenceRelay {
         settlementMetadata: SettlementReceiptMetadata?,
         startedAt: Date,
         warmSwapEnabled: Bool,
+        relayBlindEvidence: RelayBlindValidationEvidence?,
+        relayBlindRuntime: RelayBlindProviderRuntime?,
+        relayBlindClaim: RelayBlindExecutionJournal.Claim?,
+        preparedHandle: RequestHandle?,
         sendFrame: @escaping SendFrame
     ) async throws -> CompletionResult {
         // SPEC-015 §M.2.2 atomic-read invariant — bind the receipt
         // to the snapshot the runtime ACTUALLY used to drive
         // generation, not to a separately-sampled `currentSnapshot()`
         // which can drift across an actor interleaving / warm-swap.
-        let (completion, servedSnapshot) = try await modelRuntime.completeWithServedSnapshot(request, shouldCancel: { state.isCancelled })
+        let (completion, servedSnapshot): (CompletionResult, RuntimeSnapshot)
+        if let preparedHandle {
+            (completion, servedSnapshot) = try await modelRuntime.completeWithServedSnapshot(
+                request, with: preparedHandle, shouldCancel: { state.isCancelled }
+            )
+        } else {
+            (completion, servedSnapshot) = try await modelRuntime.completeWithServedSnapshot(
+                request, shouldCancel: { state.isCancelled }
+            )
+        }
         let modelHashSource = RouterHandler.resolveModelHashSource(
             warmSwapEnabled: warmSwapEnabled,
             snapshot: servedSnapshot,
@@ -442,6 +694,9 @@ actor InferenceRelay {
                     endFrame["receipt_pending_deadline_seconds"] = settlementMetadata.pendingDeadlineSeconds
                     endFrame["late_receipt_settlement"] = "not_settled"
                 }
+                try attachRelayBlindTerminal(
+                    &endFrame, evidence: relayBlindEvidence, runtime: relayBlindRuntime, claim: relayBlindClaim
+                )
                 try await sendEndFrame(endFrame, requestID: requestID, stream: false, tier2Session: tier2Session, sendFrame: sendFrame)
             }
             return completion
@@ -482,6 +737,9 @@ actor InferenceRelay {
                 endFrame["receipt_pending_deadline_seconds"] = settlementMetadata.pendingDeadlineSeconds
                 endFrame["late_receipt_settlement"] = "not_settled"
             }
+            try attachRelayBlindTerminal(
+                &endFrame, evidence: relayBlindEvidence, runtime: relayBlindRuntime, claim: relayBlindClaim
+            )
             try await sendEndFrame(endFrame, requestID: requestID, stream: false, tier2Session: tier2Session, sendFrame: sendFrame)
         }
         return completion
@@ -581,6 +839,17 @@ actor InferenceRelay {
         frame["late_receipt_settlement"] = "not_settled"
     }
 
+    private static func attachRelayBlindTerminal(
+        _ frame: inout [String: Any],
+        evidence: RelayBlindValidationEvidence?,
+        runtime: RelayBlindProviderRuntime?,
+        claim: RelayBlindExecutionJournal.Claim?
+    ) throws {
+        guard let evidence, let runtime, let claim else { return }
+        try runtime.journal.markTerminal(claim, inputTokens: evidence.inputTokens)
+        frame["relay_blind_validation"] = evidence.terminalWireObject()
+    }
+
     private static func processStreaming(
         requestID: String,
         request: ChatCompletionRequest,
@@ -592,6 +861,10 @@ actor InferenceRelay {
         receiptProviderID: String?,
         settlementMetadata: SettlementReceiptMetadata?,
         streamInterval: Int = 1,
+        relayBlindEvidence: RelayBlindValidationEvidence?,
+        relayBlindRuntime: RelayBlindProviderRuntime?,
+        relayBlindClaim: RelayBlindExecutionJournal.Claim?,
+        preparedHandle: RequestHandle?,
         sendFrame: @escaping SendFrame
     ) async throws -> CompletionResult {
         let created = Int(Date().timeIntervalSince1970)
@@ -612,9 +885,19 @@ actor InferenceRelay {
         }
 
         do {
-            let handle = try await modelRuntime.acquireRequestHandle(request)
+            let handle: RequestHandle
+            let ownsHandle: Bool
+            if let preparedHandle {
+                handle = preparedHandle
+                ownsHandle = false
+            } else {
+                handle = try await modelRuntime.acquireRequestHandle(request)
+                ownsHandle = true
+            }
             defer {
-                Task { await modelRuntime.unregisterInFlight(handle.registrationID) }
+                if ownsHandle {
+                    Task { await modelRuntime.unregisterInFlight(handle.registrationID) }
+                }
             }
             try await modelRuntime.pagedKVPreflight(request, with: handle)
             _ = buffer.enqueue(sseEvent(chatCompletionChunk(
@@ -722,6 +1005,9 @@ actor InferenceRelay {
                         endFrame["receipt_pending_deadline_seconds"] = settlementMetadata.pendingDeadlineSeconds
                         endFrame["late_receipt_settlement"] = "not_settled"
                     }
+                    try attachRelayBlindTerminal(
+                        &endFrame, evidence: relayBlindEvidence, runtime: relayBlindRuntime, claim: relayBlindClaim
+                    )
                     try await sendEndFrame(endFrame, requestID: requestID, stream: true, tier2Session: tier2Session, sendFrame: sendFrame)
                 }
                 return completion
@@ -795,6 +1081,9 @@ actor InferenceRelay {
                     endFrame["receipt_pending_deadline_seconds"] = settlementMetadata.pendingDeadlineSeconds
                     endFrame["late_receipt_settlement"] = "not_settled"
                 }
+                try attachRelayBlindTerminal(
+                    &endFrame, evidence: relayBlindEvidence, runtime: relayBlindRuntime, claim: relayBlindClaim
+                )
                 try await sendEndFrame(endFrame, requestID: requestID, stream: true, tier2Session: tier2Session, sendFrame: sendFrame)
             }
             return completion
@@ -811,6 +1100,9 @@ actor InferenceRelay {
                         "chunks_sent": chunksSent,
                         "usage": state.usage ?? zeroUsage(),
                     ]
+                    try? attachRelayBlindTerminal(
+                        &endFrame, evidence: relayBlindEvidence, runtime: relayBlindRuntime, claim: relayBlindClaim
+                    )
                     addSettlementTerminalMetadata(&endFrame, settlementMetadata: settlementMetadata)
                     try? await sendEndFrame(endFrame, requestID: requestID, stream: true, tier2Session: tier2Session, sendFrame: sendFrame)
                 }
@@ -875,6 +1167,27 @@ actor InferenceRelay {
             "seq": seq,
             "data": data,
         ])
+    }
+
+    private static func sendValidationFrame(
+        _ evidence: RelayBlindValidationEvidence,
+        requestID: String,
+        stream: Bool,
+        tier2Session: Tier2ProviderSession?,
+        sendFrame: @escaping SendFrame
+    ) async throws {
+        let frame: [String: Any] = [
+            "type": "inference_response_validation",
+            "request_id": requestID,
+            "relay_blind_validation": evidence.wireObject,
+        ]
+        if let tier2Session {
+            try await sendFrame(tier2Session.sealResponseValidation(
+                requestID: requestID, stream: stream, payload: frame
+            ))
+        } else {
+            try await sendFrame(frame)
+        }
     }
 
     private static func sendEndFrame(

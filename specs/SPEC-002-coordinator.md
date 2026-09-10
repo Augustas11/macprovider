@@ -1,7 +1,9 @@
 # SPEC-002 — Phase 4 Coordinator: Mac Provider Request Router
 
-**Version:** 1.6.0 (2026-09-03, warm-up capability gate becomes fail-open observe-only)
+**Version:** 1.6.1 (2026-09-10, SPEC-041 reservation and opaque-dispatch composition)
 **Depends on:** SPEC-001 v1.4 (Phase 3 binary wire protocol, locked; v1.4 adds installer custom-model selection + `models browse` + fit guard on top of the v1.3 absorbed in §7.8/§7.9); SPEC-003 FR-C9.4 composed contract — base AuthState enum (`bearer_validated`, `self_minted`, `bearerless_duplicate`) introduced in v0.8.3; `mint_failed` reserved value added in v0.8.4.
+
+**Change log v1.6.1 (2026-09-10, SPEC-041 composition):** The coordinator is authoritative for durable relay-blind key/revocation and `reserved -> consumed_predispatch -> dispatched -> terminal` state. It accepts reservation/consume only from authenticated gateway context, atomically burns single-use material before quota/dispatch, arms one exact live-session WS dispatch, rejects HTTP/failover/plaintext conversion, persists bounded relay facts in `request_log`, and never retries unknown postdispatch work. This is a default-off interface reservation; SPEC-041 remains draft and pending.
 
 **Change log v1.6.0 (2026-09-03, warm-up capability gate becomes fail-open observe-only):**
 - Reverses the **FR-P8a** admission posture after the #1346 candidate E2E

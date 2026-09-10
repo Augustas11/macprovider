@@ -1,7 +1,9 @@
 # SPEC-005 - Billing, Settlement, and Provider Rewards
 
-**Version:** 0.6.4 (2026-08-18, close SPEC-005 requirement-ID migration)
+**Version:** 0.6.5 (2026-09-10, SPEC-041 relay-blind accounting composition)
 **Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.5.6, SPEC-003 v0.7, SPEC-004 v0.3.2, SPEC-006 v0.9.8, SPEC-024 v0.2.1 (prefix-cache cache-isolation; its billing sections are superseded by this spec)
+
+**Change log v0.6.5 (SPEC-041 composition):** Relay-blind work uses the existing quota, journal, request-log, refund, finality, delivered-output, ordinary provider-earnings, payment, and payout-readiness formulas. Billable input is the lesser of reported input and its clear cap; unknown input is zero, never a ciphertext estimate. Output remains bounded by clear output cap and delivered-output rules. Durable relay context must recover to at most one settlement. The draft pilot is excluded only from positive SPEC-022 receipt/verified-work reward claims and may run only under SPEC-022 off/observe; enforce rejects before quota. No arithmetic or ledger owner changes.
 
 **Change log v0.6.4 (2026-08-18, issue #1023 — close requirement-ID migration):**
 - Accepts `SPEC-005-R001`..`SPEC-005-R009` as the exhaustive evidencable

@@ -70,6 +70,7 @@ type Config struct {
 	Limits                       LimitsConfig                 `yaml:"limits"`
 	WS                           WSConfig                     `yaml:"ws"`
 	Relay                        RelayConfig                  `yaml:"relay"`
+	RelayBlind                   RelayBlindConfig             `yaml:"relay_blind"`
 	Admission                    AdmissionConfig              `yaml:"admission"`
 	Tier2                        Tier2Config                  `yaml:"tier2"`
 	CoordinatorAdvertisedVersion CoordinatorAdvertisedVersion `yaml:"coordinator_advertised_version"`
@@ -808,6 +809,21 @@ type RelayConfig struct {
 	MaxRequestBufferBytes int64 `yaml:"max_request_buffer_bytes"`
 }
 
+// RelayBlindConfig controls the default-off SPEC-041 pilot. IdentityPublicKeys
+// is an operator-authored provider_id -> canonical unpadded base64url Ed25519
+// public-key map; advertised encryption records are never trusted without it.
+type RelayBlindConfig struct {
+	Enabled                    bool              `yaml:"enabled"`
+	SQLitePath                 string            `yaml:"sqlite_path"`
+	IdentityPublicKeys         map[string]string `yaml:"identity_public_keys"`
+	ReservationTTLSeconds      int               `yaml:"reservation_ttl_seconds"`
+	ReplayRetentionSeconds     int               `yaml:"replay_retention_seconds"`
+	MaxClockSkewSeconds        int               `yaml:"max_clock_skew_seconds"`
+	MaxActiveReservations      int               `yaml:"max_active_reservations"`
+	MaxKeyRecordsPerProvider   int               `yaml:"max_key_records_per_provider"`
+	MetadataRequestsPerMinute  int               `yaml:"metadata_requests_per_minute"`
+}
+
 type AdmissionConfig struct {
 	PinnedOnly                      bool    `yaml:"pinned_only"`
 	ProvisionalAdmissionRatePerHour int     `yaml:"provisional_admission_rate_per_hour"`
@@ -1337,6 +1353,16 @@ func Default() Config {
 		},
 		Relay: RelayConfig{
 			MaxRequestBufferBytes: 16 * 1024 * 1024,
+		},
+		RelayBlind: RelayBlindConfig{
+			Enabled:                   false,
+			IdentityPublicKeys:        map[string]string{},
+			ReservationTTLSeconds:     30,
+			ReplayRetentionSeconds:    300,
+			MaxClockSkewSeconds:       60,
+			MaxActiveReservations:     10000,
+			MaxKeyRecordsPerProvider:  8,
+			MetadataRequestsPerMinute: 60,
 		},
 		Admission: AdmissionConfig{
 			PinnedOnly:                      false,
@@ -2276,6 +2302,41 @@ func (c Config) Validate() error {
 	}
 	if c.Relay.MaxRequestBufferBytes > 128<<20 {
 		return fmt.Errorf("relay.max_request_buffer_bytes must be <= 134217728")
+	}
+	if c.RelayBlind.Enabled {
+		if !c.Coordinator.RequireGatewayContext {
+			return fmt.Errorf("relay_blind.enabled requires coordinator.require_gateway_context=true")
+		}
+		if strings.TrimSpace(c.RelayBlind.SQLitePath) == "" {
+			return fmt.Errorf("relay_blind.sqlite_path must be set when enabled")
+		}
+		if c.Settlement.VerifiedModelSettlementMode == "enforce" {
+			return fmt.Errorf("relay_blind.enabled requires settlement.verified_model_settlement_mode=observe")
+		}
+		if len(c.RelayBlind.IdentityPublicKeys) == 0 {
+			return fmt.Errorf("relay_blind.identity_public_keys must contain at least one provider pin when enabled")
+		}
+		for providerID, encoded := range c.RelayBlind.IdentityPublicKeys {
+			if err := ValidateProviderID(providerID); err != nil {
+				return fmt.Errorf("relay_blind.identity_public_keys: %w", err)
+			}
+			decoded, err := base64.RawURLEncoding.Strict().DecodeString(encoded)
+			if err != nil || base64.RawURLEncoding.EncodeToString(decoded) != encoded || len(decoded) != ed25519.PublicKeySize {
+				return fmt.Errorf("relay_blind.identity_public_keys.%s must be canonical unpadded base64url Ed25519 public key", providerID)
+			}
+		}
+	}
+	if c.RelayBlind.ReservationTTLSeconds < 1 || c.RelayBlind.ReservationTTLSeconds > 30 {
+		return fmt.Errorf("relay_blind.reservation_ttl_seconds must be in [1,30]")
+	}
+	if c.RelayBlind.ReplayRetentionSeconds < 30 || c.RelayBlind.ReplayRetentionSeconds > 86400 {
+		return fmt.Errorf("relay_blind.replay_retention_seconds must be in [30,86400]")
+	}
+	if c.RelayBlind.MaxClockSkewSeconds < 0 || c.RelayBlind.MaxClockSkewSeconds > 60 {
+		return fmt.Errorf("relay_blind.max_clock_skew_seconds must be in [0,60]")
+	}
+	if c.RelayBlind.MaxActiveReservations < 1 || c.RelayBlind.MaxKeyRecordsPerProvider < 1 || c.RelayBlind.MetadataRequestsPerMinute < 1 {
+		return fmt.Errorf("relay_blind admission limits must be > 0")
 	}
 	if c.Routing.PreflightTimeoutS <= 0 || c.Routing.RequestTimeoutS <= 0 || c.Routing.FailoverTimeoutS <= 0 {
 		return fmt.Errorf("routing timeouts must be > 0")

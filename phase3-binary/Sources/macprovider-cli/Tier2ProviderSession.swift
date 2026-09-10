@@ -16,9 +16,11 @@ struct Tier2AuthAttempt: @unchecked Sendable {
 final class Tier2ProviderSession: @unchecked Sendable {
     static let aeadSuite = "A256GCM"
 
-    struct RequestPayload: Sendable {
+    struct RequestPayload: @unchecked Sendable {
         let body: String
         let conversationKey: String?
+        let bodyEncoding: String?
+        let relayBlindContext: [String: Any]?
     }
 
     struct LosslessnessProbePayload {
@@ -212,7 +214,9 @@ final class Tier2ProviderSession: @unchecked Sendable {
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return RequestPayload(
             body: envelopeBody,
-            conversationKey: conversationKey?.isEmpty == false ? conversationKey : nil
+            conversationKey: conversationKey?.isEmpty == false ? conversationKey : nil,
+            bodyEncoding: envelope["body_encoding"] as? String,
+            relayBlindContext: envelope["relay_blind_context"] as? [String: Any]
         )
     }
 
@@ -356,7 +360,47 @@ final class Tier2ProviderSession: @unchecked Sendable {
         ]
     }
 
-    static func sealRequestForTest(session: Tier2ProviderSession, requestID: String, stream: Bool, plaintext: String, conversationKey: String? = nil, seq: UInt64 = 0) throws -> [String: Any] {
+    func sealResponseValidation(requestID: String, stream: Bool, payload: [String: Any]) throws -> [String: Any] {
+        let plaintext = try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
+        lock.lock()
+        defer { lock.unlock() }
+        let seq = p2cCounter
+        let aad = Tier2FrameAAD(
+            type: "inference_response_validation",
+            direction: "p2c",
+            requestID: requestID,
+            stream: stream,
+            providerID: providerID,
+            assignedID: assignedID,
+            seq: seq
+        )
+        let enc = try Self.sealEnvelope(
+            plaintext,
+            key: p2cKey,
+            nonceBase: p2cNonceBase,
+            keyID: keyID,
+            aad: aad,
+            seq: seq
+        )
+        p2cCounter += 1
+        return [
+            "type": "inference_response_validation",
+            "request_id": requestID,
+            "encrypted": true,
+            "enc": enc,
+        ]
+    }
+
+    static func sealRequestForTest(
+        session: Tier2ProviderSession,
+        requestID: String,
+        stream: Bool,
+        plaintext: String,
+        conversationKey: String? = nil,
+        bodyEncoding: String? = nil,
+        relayBlindContext: [String: Any]? = nil,
+        seq: UInt64 = 0
+    ) throws -> [String: Any] {
         let aad = Tier2FrameAAD(
             type: "inference_request",
             direction: "c2p",
@@ -373,6 +417,8 @@ final class Tier2ProviderSession: @unchecked Sendable {
         if let conversationKey = conversationKey?.trimmingCharacters(in: .whitespacesAndNewlines), !conversationKey.isEmpty {
             plaintextEnvelope["conversation_key"] = conversationKey
         }
+        if let bodyEncoding { plaintextEnvelope["body_encoding"] = bodyEncoding }
+        if let relayBlindContext { plaintextEnvelope["relay_blind_context"] = relayBlindContext }
         let plaintextData = try JSONSerialization.data(withJSONObject: plaintextEnvelope, options: [.sortedKeys])
         let enc = try sealEnvelope(
             plaintextData,
@@ -489,6 +535,41 @@ final class Tier2ProviderSession: @unchecked Sendable {
             throw Tier2ProviderError.invalidPlaintext
         }
         return dict
+    }
+
+    static func openResponseValidationForTest(
+        session: Tier2ProviderSession,
+        frame: [String: Any],
+        requestID: String,
+        stream: Bool,
+        seq: UInt64 = 0
+    ) throws -> [String: Any] {
+        guard frame["type"] as? String == "inference_response_validation",
+              frame["encrypted"] as? Bool == true,
+              let enc = frame["enc"] as? [String: Any] else {
+            throw Tier2ProviderError.invalidEnvelope
+        }
+        let aad = Tier2FrameAAD(
+            type: "inference_response_validation",
+            direction: "p2c",
+            requestID: requestID,
+            stream: stream,
+            providerID: session.providerID,
+            assignedID: session.assignedID,
+            seq: seq
+        )
+        let plaintext = try openEnvelope(
+            enc,
+            key: session.p2cKey,
+            nonceBase: session.p2cNonceBase,
+            keyID: session.keyID,
+            expectedAAD: aad,
+            expectedSeq: seq
+        )
+        guard let object = try JSONSerialization.jsonObject(with: plaintext) as? [String: Any] else {
+            throw Tier2ProviderError.invalidPlaintext
+        }
+        return object
     }
 
     static func coordinatorSessionForRekeyTest(

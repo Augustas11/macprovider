@@ -67,6 +67,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/augstar/macprovider-gateway/internal/storage"
 )
 
 // RecordVersion is stamped into every record. Readers refuse versions they
@@ -144,16 +146,17 @@ type Record struct {
 	WrittenAtUnixMS int64  `json:"written_at_unix_ms"`
 
 	// Effect payload (kind == KindEffect).
-	WindowDate       string `json:"window_date,omitempty"`
-	PromptTokens     int64  `json:"prompt_tokens,omitempty"`
-	CompletionTokens int64  `json:"completion_tokens,omitempty"`
-	TotalTokens      int64  `json:"total_tokens,omitempty"`
-	MaxTotalTokens   int64  `json:"max_total_tokens,omitempty"`
-	TokenSource      string `json:"token_source,omitempty"`
-	Outcome          string `json:"outcome,omitempty"`
-	DemoIdentity     string `json:"demo_identity,omitempty"`
-	DemoTokenHash    string `json:"demo_token_hash,omitempty"`
-	WalletSessionID  string `json:"wallet_session_id,omitempty"`
+	WindowDate       string                      `json:"window_date,omitempty"`
+	PromptTokens     int64                       `json:"prompt_tokens,omitempty"`
+	CompletionTokens int64                       `json:"completion_tokens,omitempty"`
+	TotalTokens      int64                       `json:"total_tokens,omitempty"`
+	MaxTotalTokens   int64                       `json:"max_total_tokens,omitempty"`
+	TokenSource      string                      `json:"token_source,omitempty"`
+	Outcome          string                      `json:"outcome,omitempty"`
+	DemoIdentity     string                      `json:"demo_identity,omitempty"`
+	DemoTokenHash    string                      `json:"demo_token_hash,omitempty"`
+	WalletSessionID  string                      `json:"wallet_session_id,omitempty"`
+	RelayBlind       *storage.RelayBlindMetadata `json:"relay_blind,omitempty"`
 
 	// Seal payload (kind == KindSeal): SealSettled or SealUsageEvent.
 	Result string `json:"result,omitempty"`

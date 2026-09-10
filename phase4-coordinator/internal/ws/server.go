@@ -23,6 +23,7 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/pool"
 	"github.com/augstar/macprovider-coordinator/internal/providerevents"
 	"github.com/augstar/macprovider-coordinator/internal/providerhttp"
+	"github.com/augstar/macprovider-coordinator/internal/relayblind"
 	"github.com/augstar/macprovider-coordinator/internal/tier2"
 	"github.com/augstar/macprovider-coordinator/internal/versionfloor"
 	gobwas "github.com/gobwas/ws"
@@ -122,6 +123,7 @@ type Server struct {
 	losslessnessTelemetry         []LosslessnessTelemetryEvent
 	canarySanctions               CanarySanctionStore
 	tokens                        TokenValidator
+	relayBlindKeys                RelayBlindKeySink
 	// SPEC-003 v0.8 FR-C9.1 — separate issuer field so validator and
 	// issuer roles can be wired independently. Production wires the same
 	// concrete *auth.Store to both (see main.go), but tests can override
@@ -484,6 +486,14 @@ type idlePrewarmRecord struct {
 }
 
 type Option func(*Server)
+
+type RelayBlindKeySink interface {
+	AcceptProviderKeys(context.Context, string, string, []relayblind.KeyRecord, time.Time) error
+}
+
+func WithRelayBlindKeySink(sink RelayBlindKeySink) Option {
+	return func(s *Server) { s.relayBlindKeys = sink }
+}
 
 // WithCatalog injects a specific tier2.Catalog instance for this server.
 // Default (nil/unset) is tier2.Default(), the package singleton, so production
@@ -1940,6 +1950,7 @@ func (s *Server) handleV1Conn(conn net.Conn, connectionAuth providerAuth, payloa
 		return "", ""
 	}
 	registered = true
+	s.acceptRelayBlindKeyRecords(entry.ProviderID, entry.AssignedID, hello.RelayBlindKeyRecords)
 	if reservedAdmission && entry.Tier == pool.TierProvisional {
 		s.admission.ReleasePendingProvisional()
 	}
@@ -2533,6 +2544,7 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
 		return "", ""
 	}
 	registered = true
+	s.acceptRelayBlindKeyRecords(entry.ProviderID, entry.AssignedID, initial.RelayBlindKeyRecords)
 	// Phase 3 observe-mode: trigger live MDA upgrade asynchronously after
 	// SE attestation auth. Never blocks auth. Serial comes from the SE
 	// attestation blob when present (MicroMDM device lookup).
@@ -3803,6 +3815,8 @@ func (s *Server) handleMessage(conn net.Conn, providerID, assignedID string, pay
 		s.handleAEADRekeyCommitted(providerID, assignedID, payload)
 	case "inference_response_chunk":
 		s.handleInferenceChunk(providerID, assignedID, payload)
+	case "inference_response_validation":
+		s.handleInferenceValidation(providerID, assignedID, payload)
 	case "inference_response_end":
 		s.handleInferenceEnd(providerID, assignedID, payload)
 	case "nak":
@@ -5196,6 +5210,7 @@ func (s *Server) handleHeartbeat(conn net.Conn, providerID, assignedID string, p
 		s.log.Warn().Str("state", hb.Status).Str("provider_id", providerID).Msg("invalid heartbeat state")
 		return
 	}
+	s.acceptRelayBlindKeyRecords(providerID, assignedID, hb.RelayBlindKeyRecords)
 	// #1354 / SPEC-002 v1.6.0: the warm-up probe is observe-only and fail-open,
 	// so a heartbeat `ready` is no longer clamped to `degraded` while a probe is
 	// in flight — that clamp was part of the blocking gate that deadlocked
@@ -5326,6 +5341,15 @@ func (s *Server) handleHeartbeat(conn net.Conn, providerID, assignedID string, p
 		// telemetry_drift.quarantine_missing_benchmark are set, in which case
 		// the verdict is Unknown and routing is untouched.
 		s.applyBenchmarkQuarantine(providerID, assignedID, entry.ModelID, verdict, telemetryGeneration)
+	}
+}
+
+func (s *Server) acceptRelayBlindKeyRecords(providerID, assignedID string, records []relayblind.KeyRecord) {
+	if s.relayBlindKeys == nil || records == nil {
+		return
+	}
+	if err := s.relayBlindKeys.AcceptProviderKeys(context.Background(), providerID, assignedID, records, s.now()); err != nil {
+		s.log.Warn().Err(err).Str("provider_id", providerID).Str("assigned_id", assignedID).Msg("relay-blind key advertisement rejected")
 	}
 }
 

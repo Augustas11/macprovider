@@ -9,7 +9,7 @@
     {
       "spec_id": "SPEC-001",
       "title": "Phase 3 Binary: Mac Provider Inference CLI",
-      "version": "1.9.7",
+      "version": "1.9.8",
       "path": "specs/SPEC-001-phase3-binary.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -35,7 +35,7 @@
     {
       "spec_id": "SPEC-002",
       "title": "Phase 4 Coordinator: Mac Provider Request Router",
-      "version": "1.6.0",
+      "version": "1.6.1",
       "path": "specs/SPEC-002-coordinator.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -62,7 +62,7 @@
     {
       "spec_id": "SPEC-003",
       "title": "Open Onboarding: Distribution, Lifecycle & Onboarding UX",
-      "version": "0.11.2",
+      "version": "0.11.3",
       "path": "specs/SPEC-003-open-onboarding.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -119,7 +119,7 @@
     {
       "spec_id": "SPEC-005",
       "title": "Billing, Settlement, and Provider Rewards",
-      "version": "0.6.4",
+      "version": "0.6.5",
       "path": "specs/SPEC-005-billing.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -151,7 +151,7 @@
     {
       "spec_id": "SPEC-006",
       "title": "Buyer API Gateway: Mac Provider's first public buyer surface",
-      "version": "0.9.21",
+      "version": "0.9.22",
       "path": "specs/SPEC-006-buyer-api.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -205,7 +205,7 @@
     {
       "spec_id": "SPEC-008",
       "title": "Tier-2 Trust Layer",
-      "version": "0.6.1",
+      "version": "0.6.2",
       "path": "specs/SPEC-008-tier2.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -394,7 +394,7 @@
     {
       "spec_id": "SPEC-015",
       "title": "Verifiable inference receipts",
-      "version": "0.4.6",
+      "version": "0.4.7",
       "path": "specs/SPEC-015-receipts.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -624,7 +624,7 @@
     {
       "spec_id": "SPEC-022",
       "title": "Verified model settlement",
-      "version": "v0.1.7",
+      "version": "v0.1.8",
       "path": "specs/SPEC-022-verified-model-settlement.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1152,7 +1152,7 @@
     {
       "spec_id": "SPEC-040",
       "title": "Wallet-Native Buyer Sessions",
-      "version": "0.1.8",
+      "version": "0.1.9",
       "path": "specs/SPEC-040-wallet-native-buyer-sessions.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1189,7 +1189,7 @@
     {
       "spec_id": "SPEC-041",
       "title": "Relay-Blind Request Encryption",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "path": "specs/SPEC-041-relay-blind-request-encryption.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1218,7 +1218,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/928",
-        "rationale": "Relay-blind buyer privacy is a new authority domain. The first implementation must land default-off with local tests and no conformance promotion until signed journey-result evidence exists."
+        "rationale": "The complete default-off global-pool pilot contract is reconciled in SPEC-041 v0.2.0. Existing gateway admission-only implementation remains partial; provider identity/key lifecycle, buyer pins, reservations/consume, opaque dispatch, provider execution journal, ordinary settlement integration, truthful success disclosure, recovery, signed journeys, and five-lane audit remain pending. No conformance or production promotion is made by this amendment."
       }
     },
     {
@@ -4331,7 +4331,7 @@
     {
       "requirement_id": "SPEC-006-R002",
       "spec_id": "SPEC-006",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
         "phase5-gateway/internal/router/server.go:gatewayRetryable",
         "phase5-gateway/internal/router/server.go:writeError"
@@ -4359,12 +4359,17 @@
           "expires_at": "2026-09-16"
         }
       ],
-      "gap": null
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/928",
+        "rationale": "Relay-blind integration changes mapped implementation selectors. Local regression checks pass, but historical signed deployment journeys bind earlier selector bytes; fresh independently trusted journey evidence is required before restoring conformant status. Historical evidence is retained without redating or replacement."
+      }
     },
     {
       "requirement_id": "SPEC-006-R003",
       "spec_id": "SPEC-006",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
         "phase5-gateway/internal/storage/sqlite/store.go:ReserveQuota",
         "phase5-gateway/internal/storage/sqlite/store.go:SettleReservation",
@@ -4393,7 +4398,12 @@
           "expires_at": "2026-10-09"
         }
       ],
-      "gap": null
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/928",
+        "rationale": "Relay-blind integration changes mapped implementation selectors. Local regression checks pass, but historical signed deployment journeys bind earlier selector bytes; fresh independently trusted journey evidence is required before restoring conformant status. Historical evidence is retained without redating or replacement."
+      }
     },
     {
       "requirement_id": "SPEC-006-R004",
@@ -4759,7 +4769,7 @@
     {
       "requirement_id": "SPEC-022-R005",
       "spec_id": "SPEC-022",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
         "phase5-gateway/internal/router/chat_proxy.go:forwardStreamingChat",
         "phase4-coordinator/internal/billing/settlement_receipts.go:IngestSettlementReceipt"
@@ -4785,7 +4795,12 @@
           "expires_at": "2026-10-09"
         }
       ],
-      "gap": null
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/928",
+        "rationale": "Relay-blind integration changes mapped implementation selectors. Local regression checks pass, but historical signed deployment journeys bind earlier selector bytes; fresh independently trusted journey evidence is required before restoring conformant status. Historical evidence is retained without redating or replacement."
+      }
     },
     {
       "requirement_id": "SPEC-022-R006",
@@ -4856,7 +4871,7 @@
     {
       "requirement_id": "SPEC-022-R008",
       "spec_id": "SPEC-022",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
         "phase5-gateway/internal/storage/sqlite/store.go:ReserveQuota",
         "phase5-gateway/internal/storage/sqlite/store.go:SettleReservation",
@@ -4884,7 +4899,12 @@
           "expires_at": "2026-10-09"
         }
       ],
-      "gap": null
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/928",
+        "rationale": "Relay-blind integration changes mapped implementation selectors. Local regression checks pass, but historical signed deployment journeys bind earlier selector bytes; fresh independently trusted journey evidence is required before restoring conformant status. Historical evidence is retained without redating or replacement."
+      }
     },
     {
       "requirement_id": "SPEC-022-R009",
@@ -5181,13 +5201,15 @@
       "implementation": [
         "phase5-gateway/internal/config/config.go:RelayBlindRequestsConfig",
         "phase5-gateway/internal/router/disclosure.go:makeTier1Disclosure",
-        "phase5-gateway/internal/router/relay_blind.go:rejectRelayBlindEnvelopeIfRequired"
+        "phase5-gateway/internal/router/relay_blind.go:rejectRelayBlindEnvelopeIfRequired",
+        "phase5-gateway/internal/router/relay_blind_success.go:applyRelayBlindModelsDisclosure"
       ],
       "tests": [
         "phase5-gateway/internal/config/config_test.go:TestRelayBlindRequestsDefaultOffDoesNotRequireBounds",
         "phase5-gateway/internal/router/relay_blind_test.go:TestRelayBlindModelsDisclosureDefaultOffOmitted",
         "phase5-gateway/internal/router/relay_blind_test.go:TestRelayBlindModelsDisclosureEnabledUnavailable",
-        "phase5-gateway/internal/router/relay_blind_test.go:TestRelayBlindProbePreservesDefaultOffPlaintextCompatibility"
+        "phase5-gateway/internal/router/relay_blind_test.go:TestRelayBlindProbePreservesDefaultOffPlaintextCompatibility",
+        "phase5-gateway/internal/router/relay_blind_success_test.go:TestRelayBlindModelCapabilitiesAreFreshAndModelScoped"
       ],
       "journeys": [],
       "evidence": [],
@@ -5195,22 +5217,28 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/928",
-        "rationale": "Gateway default-off config, plaintext compatibility, and buyer-safe /v1/models disclosure have local implementation/tests in this gateway slice; signed journey evidence and provider/coordinator key evidence remain pending."
+        "rationale": "Local five-stage pilot implementation and mapped regression tests are present; see audits/privacy-pool-v01-implementation.md. Independently trusted deployment journey evidence and readiness reconciliation remain pending. Ephemeral local test signatures do not promote conformance; production remains disabled."
       }
     },
     {
       "requirement_id": "SPEC-041-R002",
       "spec_id": "SPEC-041",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase4-coordinator/internal/relayblind/authority.go:AcceptProviderKeys",
+        "phase3-binary/Sources/macprovider-cli/RelayBlindProvider.swift:open"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/relayblind/store_test.go:TestAuthenticatedEmptyAdvertisementRevokesOutstandingReservation",
+        "phase5-gateway/internal/relayblind/crypto_test.go:TestKeyRecordRenewalAndSubstitution"
+      ],
       "journeys": [],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/928",
-        "rationale": "Provider relay-blind key advertisement, revocation, and lifecycle remain future provider/coordinator work; this gateway slice intentionally exposes required_unavailable until signed key evidence exists."
+        "rationale": "Local five-stage pilot implementation and mapped regression tests are present; see audits/privacy-pool-v01-implementation.md. Independently trusted deployment journey evidence and readiness reconciliation remain pending. Ephemeral local test signatures do not promote conformance; production remains disabled."
       }
     },
     {
@@ -5221,13 +5249,18 @@
         "phase5-gateway/internal/router/relay_blind.go:validateRelayBlindRequestEnvelope",
         "phase5-gateway/internal/router/relay_blind.go:relayBlindEnvelopeMetadataValid",
         "phase5-gateway/internal/router/relay_blind.go:recordRelayBlindReplay",
-        "phase5-gateway/internal/storage/sqlite/store.go:RecordRelayBlindReplay"
+        "phase5-gateway/internal/storage/sqlite/store.go:RecordRelayBlindReplay",
+        "phase5-gateway/internal/relayblind/crypto.go:Encrypt",
+        "phase5-gateway/cmd/relay-blind-client/main.go:run"
       ],
       "tests": [
         "phase5-gateway/internal/router/relay_blind_test.go:TestRelayBlindRequiredChatFailsClosedBeforeDispatchOrQuota",
         "phase5-gateway/internal/router/relay_blind_test.go:TestRelayBlindRequiredChatReplayReturnsRelayBlindReplay",
         "phase5-gateway/internal/router/relay_blind_test.go:TestRelayBlindChatEnvelopeRejectsAPIAndDemoTokenCapViolations",
-        "phase5-gateway/internal/router/relay_blind_test.go:TestRelayBlindMalformedSentinelFieldsFailClosedBeforeDispatchOrQuota"
+        "phase5-gateway/internal/router/relay_blind_test.go:TestRelayBlindMalformedSentinelFieldsFailClosedBeforeDispatchOrQuota",
+        "phase5-gateway/internal/relayblind/crypto_test.go:TestGoldenVector",
+        "phase5-gateway/internal/relayblind/crypto_test.go:TestClosedJSONAndCanonicalEncoding",
+        "phase3-binary/Tests/macprovider-cliTests/RelayBlindProviderTests.swift:testSharedGoldenVectorMatchesGoAndDecrypts"
       ],
       "journeys": [],
       "evidence": [],
@@ -5235,7 +5268,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/928",
-        "rationale": "Gateway envelope shape, clear metadata bounds, freshness, and replay admission have local tests; buyer encryption libraries, provider key evidence, and signed end-to-end vectors remain pending."
+        "rationale": "Local five-stage pilot implementation and mapped regression tests are present; see audits/privacy-pool-v01-implementation.md. Independently trusted deployment journey evidence and readiness reconciliation remain pending. Ephemeral local test signatures do not promote conformance; production remains disabled."
       }
     },
     {
@@ -5247,7 +5280,10 @@
         "phase5-gateway/internal/router/relay_blind.go:rejectRelayBlindEnvelopeIfRequired",
         "phase5-gateway/internal/router/relay_blind.go:handleRelayBlindRouteReservations",
         "phase5-gateway/internal/router/relay_blind.go:handleRelayBlindEndpointDisabled",
-        "phase5-gateway/internal/storage/sqlite/store.go:RecordRelayBlindReplay"
+        "phase5-gateway/internal/storage/sqlite/store.go:RecordRelayBlindReplay",
+        "phase4-coordinator/internal/buyer/relay_blind.go:handleRelayBlindReservation",
+        "phase4-coordinator/internal/relayblind/store.go:Consume",
+        "phase5-gateway/internal/router/relay_blind_success.go:dispatchRelayBlindChat"
       ],
       "tests": [
         "phase5-gateway/internal/router/relay_blind_test.go:TestRelayBlindRouteReservationFailsClosedNoStoreNoQuota",
@@ -5255,7 +5291,9 @@
         "phase5-gateway/internal/router/relay_blind_test.go:TestRelayBlindRequiredChatDoesNotConsumeAccountRateLimit",
         "phase5-gateway/internal/router/relay_blind_test.go:TestRelayBlindRequiredChatMetadataLimiterDoesNotConsumePlaintextBucket",
         "phase5-gateway/internal/router/relay_blind_test.go:TestRelayBlindUnsupportedFamiliesRemainMountedWhenPlaintextFeatureDisabled",
-        "phase5-gateway/internal/router/relay_blind_test.go:TestRelayBlindDisabledFamilyPrechecksModelAndCapsBeforeReplayAudit"
+        "phase5-gateway/internal/router/relay_blind_test.go:TestRelayBlindDisabledFamilyPrechecksModelAndCapsBeforeReplayAudit",
+        "phase4-coordinator/internal/relayblind/store_test.go:TestStoreConsumeRaceAndRevocation",
+        "phase5-gateway/internal/router/relay_blind_wallet_success_test.go:TestRelayBlindWalletSignedReservationEnvelopeAndSettlement"
       ],
       "journeys": [],
       "evidence": [],
@@ -5263,22 +5301,29 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/928",
-        "rationale": "Gateway fail-closed route reservation, inference admission, disabled-family handling, wallet metadata admission, and local replay/rate guards are implemented/tested; coordinator provider-key admission and signed journey evidence remain pending."
+        "rationale": "Local five-stage pilot implementation and mapped regression tests are present; see audits/privacy-pool-v01-implementation.md. Independently trusted deployment journey evidence and readiness reconciliation remain pending. Ephemeral local test signatures do not promote conformance; production remains disabled."
       }
     },
     {
       "requirement_id": "SPEC-041-R005",
       "spec_id": "SPEC-041",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase4-coordinator/internal/buyer/relay_blind.go:handleRelayBlindChat",
+        "phase4-coordinator/internal/ws/relay.go:DispatchRelayBlindInference",
+        "phase3-binary/Sources/macprovider-cli/InferenceRelay.swift:handleInferenceRequest"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/buyer/relay_blind_test.go:TestRelayBlindHTTPFlowPersistsValidationBeforeSuccess",
+        "phase3-binary/Tests/macprovider-cliTests/RelayBlindProviderTests.swift:testSharedGoldenVectorMatchesGoAndDecrypts"
+      ],
       "journeys": [],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/928",
-        "rationale": "Provider decryption and decrypted-body validation remain future provider work; this gateway slice only validates clear envelope metadata and fails closed before dispatch."
+        "rationale": "Local five-stage pilot implementation and mapped regression tests are present; see audits/privacy-pool-v01-implementation.md. Independently trusted deployment journey evidence and readiness reconciliation remain pending. Ephemeral local test signatures do not promote conformance; production remains disabled."
       }
     },
     {
@@ -5288,12 +5333,17 @@
       "implementation": [
         "phase5-gateway/internal/router/disclosure.go:makeTier1Disclosure",
         "phase5-gateway/internal/router/chat_proxy.go:handleChatCompletions",
-        "phase5-gateway/internal/router/relay_blind.go:rejectRelayBlindEnvelopeIfRequired"
+        "phase5-gateway/internal/router/relay_blind.go:rejectRelayBlindEnvelopeIfRequired",
+        "phase5-gateway/internal/storage/sqlite/relay_blind.go:clampRelayBlindTokens",
+        "phase4-coordinator/internal/buyer/billing_recorder.go:recordRow",
+        "phase5-gateway/internal/router/relay_blind_success.go:reconcileRelayBlindReservation"
       ],
       "tests": [
         "phase5-gateway/internal/router/relay_blind_test.go:TestRelayBlindModelsDisclosureEnabledUnavailable",
         "phase5-gateway/internal/router/relay_blind_test.go:TestRelayBlindRequiredChatFailsClosedBeforeDispatchOrQuota",
-        "phase5-gateway/internal/router/relay_blind_test.go:TestRelayBlindRequiredChatDoesNotConsumeAccountRateLimit"
+        "phase5-gateway/internal/router/relay_blind_test.go:TestRelayBlindRequiredChatDoesNotConsumeAccountRateLimit",
+        "phase5-gateway/internal/router/relay_blind_recovery_edges_test.go:TestRelayBlindRecoveryStatusEdges",
+        "phase5-gateway/internal/router/relay_blind_success_test.go:TestRelayBlindSuccessfulChatUsesExistingSettlementAndNeverRetries"
       ],
       "journeys": [],
       "evidence": [],
@@ -5301,7 +5351,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/928",
-        "rationale": "Admission-only gateway slice preserves no-quota/no-dispatch behavior and exposes settlement disclosure metadata; successful encrypted inference, receipt digest support, and signed settlement journey evidence remain pending."
+        "rationale": "Local five-stage pilot implementation and mapped regression tests are present; see audits/privacy-pool-v01-implementation.md. Independently trusted deployment journey evidence and readiness reconciliation remain pending. Ephemeral local test signatures do not promote conformance; production remains disabled."
       }
     },
     {
@@ -5312,14 +5362,17 @@
         "phase5-gateway/internal/router/server.go:gatewayRetryableByCode",
         "phase5-gateway/internal/router/server.go:gatewayPermanentCodes",
         "phase5-gateway/internal/router/relay_blind.go:recordRelayBlindAudit",
-        "phase5-gateway/internal/router/relay_blind.go:recordRelayBlindRequiredAudit"
+        "phase5-gateway/internal/router/relay_blind.go:recordRelayBlindRequiredAudit",
+        "phase5-gateway/internal/router/relay_blind_success.go:relayBlindOutcomeMetadata"
       ],
       "tests": [
         "phase5-gateway/internal/router/server_test.go:TestGatewayErrorCodeCompleteness",
         "phase5-gateway/internal/router/relay_blind_test.go:TestRelayBlindEnvelopeRejectsDowngradeAndUnsupportedFamilies",
         "phase5-gateway/internal/router/relay_blind_test.go:TestRelayBlindEnabledFamiliesPreferDisabledOverUnsupported",
         "phase5-gateway/internal/router/relay_blind_test.go:TestRelayBlindRequiredChatWalletAuditIncludesSafeCorrelation",
-        "phase5-gateway/internal/router/relay_blind_test.go:TestRelayBlindDowngradeAuditFailureFailsClosed"
+        "phase5-gateway/internal/router/relay_blind_test.go:TestRelayBlindDowngradeAuditFailureFailsClosed",
+        "phase5-gateway/internal/router/relay_blind_recovery_edges_test.go:TestRelayBlindConsumeFailureNeverDispatchesAndReplayNeedsFreshEnvelope",
+        "phase4-coordinator/internal/buyer/relay_blind_test.go:TestRelayBlindAuthenticatedPregenerationRejection"
       ],
       "journeys": [],
       "evidence": [],
@@ -5327,7 +5380,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/928",
-        "rationale": "Gateway error classification, downgrade rejection, disabled-vs-unsupported precedence, and redacted audit payloads are implemented/tested locally; provider-side error emissions and signed journey evidence remain pending."
+        "rationale": "Local five-stage pilot implementation and mapped regression tests are present; see audits/privacy-pool-v01-implementation.md. Independently trusted deployment journey evidence and readiness reconciliation remain pending. Ephemeral local test signatures do not promote conformance; production remains disabled."
       }
     },
     {
@@ -5337,13 +5390,17 @@
       "implementation": [
         "phase5-gateway/internal/config/config.go:validateRelayBlindRequestsConfig",
         "phase5-gateway/internal/router/server.go:New",
-        "phase5-gateway/internal/storage/sqlite/migrate.go:relayBlindReplayDDL"
+        "phase5-gateway/internal/storage/sqlite/migrate.go:relayBlindReplayDDL",
+        "scripts/test-relay-blind-parity.sh:for name in"
       ],
       "tests": [
         "phase5-gateway/internal/config/config_test.go:TestRelayBlindRequestsValidation",
         "phase5-gateway/internal/router/relay_blind_test.go:TestRelayBlindUnsupportedFamiliesRemainMountedWhenPlaintextFeatureDisabled",
         "phase5-gateway/internal/router/relay_blind_test.go:TestRelayBlindRequiredChatMetadataLimiterDoesNotConsumePlaintextBucket",
-        "phase5-gateway/internal/router/relay_blind_test.go:TestRelayBlindRequiredChatReplayCapacityLimitsMetadataWrites"
+        "phase5-gateway/internal/router/relay_blind_test.go:TestRelayBlindRequiredChatReplayCapacityLimitsMetadataWrites",
+        "test/integration/relay_blind_integration_test.go:TestRelayBlindSwiftProviderNonstreamEndToEnd",
+        "test/integration/relay_blind_integration_test.go:TestRelayBlindSwiftProviderStreamEndToEnd",
+        "test/integration/relay_blind_integration_test.go:TestRelayBlindSwiftProviderReconnectRecovery"
       ],
       "journeys": [],
       "evidence": [],
@@ -5351,7 +5408,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/928",
-        "rationale": "Gateway config validation, disabled compatibility, relay-blind metadata limiter, and replay storage DDL are implemented/tested locally; production enablement and signed journey-result evidence remain pending."
+        "rationale": "Local five-stage pilot implementation and mapped regression tests are present; see audits/privacy-pool-v01-implementation.md. Independently trusted deployment journey evidence and readiness reconciliation remain pending. Ephemeral local test signatures do not promote conformance; production remains disabled."
       }
     },
     {

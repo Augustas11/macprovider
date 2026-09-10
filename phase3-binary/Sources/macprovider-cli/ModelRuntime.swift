@@ -17,12 +17,22 @@ protocol ModelRuntimeServing: Actor {
     /// turn — distinct from a caller-side `currentSnapshot()` sample,
     /// which can drift across an actor interleaving / warm-swap.
     func completeWithServedSnapshot(_ request: ChatCompletionRequest, shouldCancel: @escaping @Sendable () -> Bool) async throws -> (CompletionResult, RuntimeSnapshot)
+    func completeWithServedSnapshot(_ request: ChatCompletionRequest, with handle: RequestHandle, shouldCancel: @escaping @Sendable () -> Bool) async throws -> (CompletionResult, RuntimeSnapshot)
     func stream(_ request: ChatCompletionRequest, with handle: RequestHandle, shouldCancel: @escaping @Sendable () -> Bool, onChunk: @escaping @Sendable (StreamChunk) -> Void) async throws -> CompletionResult
     func preflight(_ request: ChatCompletionRequest, with handle: RequestHandle) async throws
     func pagedKVPreflight(_ request: ChatCompletionRequest, with handle: RequestHandle) async throws
+    /// Tokenize through the active model processor without entering generation.
+    /// SPEC-041 uses this exact count to enforce the buyer-declared input bound
+    /// before emitting validation evidence or starting inference.
+    func relayBlindPrepare(_ request: ChatCompletionRequest) async throws -> RelayBlindPreparedRequest
     func acquireRequestHandle(_ request: ChatCompletionRequest) throws -> RequestHandle
     func unregisterInFlight(_ id: Int)
     func currentSnapshot() async -> RuntimeSnapshot
+}
+
+struct RelayBlindPreparedRequest: @unchecked Sendable {
+    let handle: RequestHandle
+    let inputTokens: Int
 }
 
 enum StreamChunk: Sendable {
@@ -171,6 +181,10 @@ private enum StructuredStreamingIdleRaceResult<T: Sendable>: Sendable {
 }
 
 extension ModelRuntimeServing {
+    func relayBlindPrepare(_ request: ChatCompletionRequest) async throws -> RelayBlindPreparedRequest {
+        throw RelayBlindProviderError.providerUnsupported
+    }
+
     func pagedKVPreflight(_ request: ChatCompletionRequest, with handle: RequestHandle) async throws {
         try await preflight(request, with: handle)
     }
@@ -197,6 +211,14 @@ extension ModelRuntimeServing {
         let result = try await complete(request, shouldCancel: shouldCancel)
         let snapshot = await currentSnapshot()
         return (result, snapshot)
+    }
+
+    func completeWithServedSnapshot(
+        _ request: ChatCompletionRequest,
+        with handle: RequestHandle,
+        shouldCancel: @escaping @Sendable () -> Bool
+    ) async throws -> (CompletionResult, RuntimeSnapshot) {
+        try await completeWithServedSnapshot(request, shouldCancel: shouldCancel)
     }
 }
 
@@ -2244,6 +2266,34 @@ actor ModelRuntime: ModelRuntimeServing {
                 try handle.drainCancelled.check()
                 try Self.validatePromptTokenCount(lmInput.text.tokens.size, maxContextTokens: maxContextTokens)
             }
+        }
+    }
+
+    func relayBlindPrepare(_ request: ChatCompletionRequest) async throws -> RelayBlindPreparedRequest {
+        let handle = try acquireRequestHandle(request)
+        do {
+            try applyContinuousBatchingPolicy(request: request, snapshot: handle.snapshot)
+            try Self.enforcePagedKVPreflight(pagedKVAttachDecision)
+            try handle.drainCancelled.check()
+            guard let container = handle.snapshot.container else {
+                throw APIError(status: 503, message: "Model not loaded", type: "server_error", code: "model_not_loaded")
+            }
+            let maxContextTokens = maxContextTokens
+            let inputTokens = try await inferenceGate.withPermit {
+                try handle.drainCancelled.check()
+                return try await container.perform { context in
+                    try handle.drainCancelled.check()
+                    let input = try Self.userInput(for: request)
+                    let prepared = try await context.processor.prepare(input: input)
+                    let count = prepared.text.tokens.size
+                    try Self.validatePromptTokenCount(count, maxContextTokens: maxContextTokens)
+                    return count
+                }
+            }
+            return RelayBlindPreparedRequest(handle: handle, inputTokens: inputTokens)
+        } catch {
+            unregisterInFlight(handle.registrationID)
+            throw error
         }
     }
 

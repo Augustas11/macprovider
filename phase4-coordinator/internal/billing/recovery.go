@@ -102,7 +102,8 @@ UPDATE ledger_request_credits
 SELECT rl.id, rl.ts_utc, rl.request_id, rl.account_id, rl.model, rl.provider_assigned_id,
        rl.prompt_tokens, rl.cached_prompt_tokens, rl.completion_tokens, rl.estimated_completion_tokens,
        rl.status, rl.stream, rl.error_code, rl.cache_quarantine_reason,
-       rl.retried,
+       rl.retried, rl.requested_privacy_mode, rl.effective_privacy_outcome,
+       rl.positive_verification_excluded, rl.rewards_excluded,
        -- SPEC-002 v1.5.2 / SPEC-005 v0.3.3 (issue #168): prefer
        -- persisted rl.attempt_n when non-NULL; fall back to the
        -- v0.3.1 id-ASC derivation for legacy NULL rows during the
@@ -132,8 +133,9 @@ SELECT rl.id, rl.ts_utc, rl.request_id, rl.account_id, rl.model, rl.provider_ass
 		var tsText, requestID, model, assignedID string
 		var accountID, errorCode, cacheQuarantineReason sql.NullString
 		var prompt, cached, completion, estimated sql.NullInt64
-		var status, stream, retried, attemptN int
-		if err := rows.Scan(&rlID, &tsText, &requestID, &accountID, &model, &assignedID, &prompt, &cached, &completion, &estimated, &status, &stream, &errorCode, &cacheQuarantineReason, &retried, &attemptN); err != nil {
+		var privacyMode, privacyOutcome string
+		var status, stream, retried, positiveVerificationExcluded, rewardsExcluded, attemptN int
+		if err := rows.Scan(&rlID, &tsText, &requestID, &accountID, &model, &assignedID, &prompt, &cached, &completion, &estimated, &status, &stream, &errorCode, &cacheQuarantineReason, &retried, &privacyMode, &privacyOutcome, &positiveVerificationExcluded, &rewardsExcluded, &attemptN); err != nil {
 			return err
 		}
 		scanned++
@@ -324,6 +326,10 @@ SELECT rl.id, rl.ts_utc, rl.request_id, rl.account_id, rl.model, rl.provider_ass
 			SettlementAccountScopeHash:   settlementHash,
 			SettlementPolicyMode:         settlementMode,
 			SettlementPolicyVersion:      settlementVersion,
+			RequestedPrivacyMode:         privacyMode,
+			EffectivePrivacyOutcome:      privacyOutcome,
+			PositiveVerificationExcluded: positiveVerificationExcluded == 1,
+			RewardsExcluded:              rewardsExcluded == 1,
 		}
 		result := ComputeCreditsWithCache(pp, cachedP, cp, ep, usageFor(errorCode.String, ep), FaultNone, input.RateEntry, multiplier, share)
 		// SPEC-005 v0.3.3 / SPEC-002 v1.5.2 (issue #168): the v0.3.1

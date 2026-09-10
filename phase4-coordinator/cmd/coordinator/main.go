@@ -36,6 +36,7 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/providerevents"
 	"github.com/augstar/macprovider-coordinator/internal/providerhttp"
 	"github.com/augstar/macprovider-coordinator/internal/referralapi"
+	"github.com/augstar/macprovider-coordinator/internal/relayblind"
 	"github.com/augstar/macprovider-coordinator/internal/requestlog"
 	"github.com/augstar/macprovider-coordinator/internal/rewards"
 	"github.com/augstar/macprovider-coordinator/internal/sqliteutil"
@@ -885,6 +886,26 @@ func main() {
 			Int("refresh_hours", cfg.Tier2.MDM.MDARefreshIntervalHours).
 			Msg("Phase 3 live MDA service wired (observe mode)")
 	}
+	var relayBlindStore *relayblind.Store
+	if strings.TrimSpace(cfg.RelayBlind.SQLitePath) != "" {
+		relayBlindStore, err = relayblind.OpenStore(cfg.RelayBlind.SQLitePath)
+		if err != nil {
+			logger.Fatal().Err(err).Msg("relay-blind durable store open failed")
+		}
+		defer relayBlindStore.Close()
+		if recovered, err := relayBlindStore.RecoverUncertain(context.Background(), time.Now().UTC()); err != nil {
+			logger.Fatal().Err(err).Msg("relay-blind recovery failed")
+		} else if recovered > 0 {
+			logger.Warn().Int64("recovered_requests", recovered).Msg("relay-blind uncertain executions burned during recovery")
+		}
+		if cfg.RelayBlind.Enabled {
+			relayBlindAuthority, err := relayblind.NewAuthority(relayBlindStore, cfg.RelayBlind.IdentityPublicKeys, cfg.RelayBlind.MaxKeyRecordsPerProvider, time.Duration(cfg.RelayBlind.ReplayRetentionSeconds)*time.Second)
+			if err != nil {
+				logger.Fatal().Err(err).Msg("relay-blind operator pins invalid")
+			}
+			wsOpts = append(wsOpts, providerws.WithRelayBlindKeySink(relayBlindAuthority))
+		}
+	}
 	wsServer := providerws.NewServer(cfg, registry, logger, wsOpts...)
 	if rewardsRunner != nil {
 		rewardsRunner.SetConnectivity(rewards.NewPoolHeartbeatBridge(wsServer.PoolSnapshot))
@@ -910,6 +931,7 @@ func main() {
 		buyer.WithRequireGatewayContext(cfg.Coordinator.RequireGatewayContext),
 		buyer.WithRelay(wsServer.DispatchInference, time.Duration(cfg.Routing.RequestTimeoutS)*time.Second),
 		buyer.WithSettlementRelay(wsServer.DispatchInferenceWithSettlement),
+		buyer.WithRelayBlind(cfg.RelayBlind, relayBlindStore, wsServer.DispatchRelayBlindInference),
 		buyer.WithAdmission(wsServer.Admission(), cfg.Admission.ProvisionalTierWeight),
 		buyer.WithRequestLog(reqLogStore),
 		buyer.WithBilling(billingStore, cfg.Rewards),

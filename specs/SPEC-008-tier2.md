@@ -1,8 +1,10 @@
 # SPEC-008 — Tier-2 Trust Layer
 
-**Version:** 0.6.1 (2026-08-18, Apple DevicePropertiesAttestation query key)
+**Version:** 0.6.2 (2026-09-10, SPEC-041 protected opaque-context composition)
 **Depends on:** SPEC-001 v1.8, SPEC-002 v1.3.3, SPEC-004 v0.3.2,
                SPEC-006 v0.9.8
+
+**Change log v0.6.2 (SPEC-041 composition):** SPEC-008 remains coordinator-to-provider-only and does not imply relay blindness. When its wrapping carries SPEC-041 work, `body_encoding`, execution-auth digest, assigned session, provider validation evidence, and terminal evidence are authenticated inside the protected payload. SPEC-041 identities/keys remain distinct from SPEC-008 ECDH material. No Tier-2 tier or production claim changes.
 
 **Change log v0.6.1 (2026-08-18, Apple DeviceInformation attestation query key):**
 - **§7.9.2 / §7.9.3:** live MDA DeviceInformation MUST query

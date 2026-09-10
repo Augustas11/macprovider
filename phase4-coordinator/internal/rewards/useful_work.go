@@ -55,6 +55,7 @@ func (r *Runner) listUnrewardedUsefulWork(ctx context.Context, limit int) ([]use
         SELECT lrc.request_id, lrc.attempt_n, lrc.provider_id, lrc.provider_credits
           FROM ledger_request_credits lrc
          WHERE COALESCE(lrc.spec022_verified, FALSE) = TRUE
+		   AND COALESCE((to_jsonb(lrc)->>'rewards_excluded')::BOOLEAN, FALSE) = FALSE
            AND lrc.provider_credits > 0
            AND NOT EXISTS (
                 SELECT 1

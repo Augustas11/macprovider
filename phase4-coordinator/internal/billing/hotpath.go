@@ -38,6 +38,10 @@ type HotPathInput struct {
 	SettlementPolicyMode         string
 	SettlementPolicyVersion      string
 	RoutingDecisionLog           func(CacheBillingRoutingDecision)
+	RequestedPrivacyMode         string
+	EffectivePrivacyOutcome      string
+	PositiveVerificationExcluded bool
+	RewardsExcluded              bool
 }
 
 type CacheBillingRoutingDecision struct {
@@ -377,8 +381,9 @@ INSERT INTO ledger_request_credits (
     global_multiplier_ppm, gross_credits, provider_share_bps, provider_credits,
     fault_flag, settlement_account_scope_hash, settlement_policy_mode,
     settlement_policy_version, recovery_source, created_at_utc, quarantined,
-    quarantine_reason
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    quarantine_reason, requested_privacy_mode, effective_privacy_outcome,
+    positive_verification_excluded, rewards_excluded
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		in.RequestID,
 		in.AttemptN,
 		in.ProviderID,
@@ -408,11 +413,31 @@ INSERT INTO ledger_request_credits (
 		now,
 		boolInt(quarantined),
 		nullString(quarantineReason),
+		privacyModeOrNone(in.RequestedPrivacyMode),
+		privacyOutcomeOrPlaintext(in.EffectivePrivacyOutcome),
+		boolInt(in.PositiveVerificationExcluded),
+		boolInt(in.RewardsExcluded),
 	)
 	if err != nil {
 		return 0, err
 	}
 	return res.LastInsertId()
+}
+
+func privacyModeOrNone(value string) string {
+	if value == "relay_blind_required" {
+		return value
+	}
+	return "none"
+}
+
+func privacyOutcomeOrPlaintext(value string) string {
+	switch value {
+	case "provider_leg_encrypted", "relay_blind_satisfied", "relay_blind_unavailable":
+		return value
+	default:
+		return "plaintext"
+	}
 }
 
 func settlementPolicyModeOrLegacy(mode string) string {
