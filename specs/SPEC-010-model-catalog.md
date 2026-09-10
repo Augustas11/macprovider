@@ -29,12 +29,16 @@ SPEC-023 owns candidate-catalog `bench_gate` provenance, including
 `bench_gate.gate_seed` metadata. SPEC-010 does not treat oMLX evidence as provider admission or promotion authority; verified provider autotune and existing model identity/hash checks remain binding.
 
 **Change log v1.8 (issue #1453 slice 4 — R004 composite-proof clarification):**
-- R004: states that a binding to a non-primary artifact-feed member is a
-  composite proof — retained row material proves the row binding and the
-  pricing key; the member's hash is proven only by the R007(d) six values —
-  and forbids reading either half as the other. No behavior change to the
-  slice-3 implementation, which already records the composite; bounded
-  `model-catalog-identity` clarification.
+- R004: retained Tier-2 material's expected hash is the exact admitted
+  row's `model_sha256` and proves the row binding and the pricing key only;
+  a binding to a non-primary artifact-feed member is a composite proof whose
+  member hash is proven only by the R007(d) six values, and neither half may
+  be read as the other (no behavior change to the slice-3 implementation,
+  which records the composite). The coordinator retains the artifact identity
+  set of each compatible-previous release it retains, so a session keeps
+  artifact-derived identity across a scheduled catalog re-stamp by resolving
+  in its own release's set (slice-4 implementation). Bounded
+  `model-catalog-identity` amendment.
 
 **Change log v1.7 (issue #1453 slice 3 — multi-artifact identity, resolves SPEC-023 §13 Q14):**
 - Names `macprovider.gguf-file.v1` as a canonical wire pair under
@@ -1044,19 +1048,23 @@ algorithm.
   row. From v1.7 the expected identity MAY instead be a `verified` member of
   that same exact release's artifact feed for that model row (R007), selected
   from the feed release-bound to that release and never from an independently
-  loaded feed; a release whose artifact feed the coordinator has not loaded —
-  today every compatible-previous release, since only the current release's
-  feed is loaded — authorizes no artifact-derived identity, and such a
-  session keeps the primary-row path only. That expected value remains session authority for later
+  loaded feed. The coordinator MUST retain, for every compatible-previous
+  release it retains, that release's own artifact identity set (built from
+  the retained release's artifact feed; v1.8), and a session resolves
+  artifact-derived identity only in the set of its own admitted release; a
+  release whose artifact feed the coordinator does not hold authorizes no
+  artifact-derived identity, and such a session keeps the primary-row path
+  only. That expected value remains session authority for later
   heartbeats. Coordinator/Tier-2 logic MUST compare only the named provider
   artifact identity with that same expected row or artifact-feed member; an
   independently selected catalog row, a second catalog fallback, or a feed of
   another release cannot authorize it. If existing Tier-2 signed
-  material is retained as proof, its expected hash MUST equal the expected
-  identity actually admitted — the row's `model_sha256` on the primary path,
-  or the matched member's `hash` under R007; retained proof of the primary row
-  is never proof of a different member's hash. (v1.8 clarification.) A binding
-  to a non-primary member is a COMPOSITE proof: the retained row material
+  material is retained as proof, its expected hash MUST equal the row's
+  `model_sha256` of the exact admitted row, and it proves the ROW binding and
+  the pricing key only; on the primary path that value is also the admitted
+  expected identity, and under R007 the admitted expected identity is the
+  matched member's `hash`, which the R007(d) six values alone prove (v1.8).
+  A binding to a non-primary member is a COMPOSITE proof: the retained row material
   (catalog identity, body digest, signer, and the row's `model_sha256` — the
   primary member) proves the row binding and the pricing key, while the
   member's hash is proven only by the R007(d) six values recorded for that
