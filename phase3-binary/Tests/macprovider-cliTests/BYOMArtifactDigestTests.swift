@@ -248,6 +248,30 @@ final class BYOMArtifactDigestTests: XCTestCase {
         // The binding survives to the report only while the name still
         // resolves, through the manifest, to the same unchanged file.
         XCTAssertNoThrow(try store.resolver.validateCurrent(evidence, forOllamaModel: "test-model:q4_k_m"))
+        // A `catalog_matched` the CLI reached through its OWN computed digest
+        // is artifact-backed. The residual tamper the file identity cannot see
+        // — same path, inode, size AND modification time (restored with
+        // utimensat), non-GGUF bytes — fails the offer closed instead of
+        // degrading to an identity-less offer.
+        let digestMatched = BYOMDiscoveryWire.Candidate(
+            candidateID: candidate.candidateID, runtimeSource: candidate.runtimeSource, displayName: candidate.displayName, servedModelRef: candidate.servedModelRef,
+            catalogModelKey: "test-model", identityState: "catalog_matched", locality: candidate.locality, estimatedGB: nil, contextWindowTokens: nil,
+            capabilities: candidate.capabilities, readinessState: candidate.readinessState, fitState: candidate.fitState,
+            evaluationState: candidate.evaluationState, admissionState: candidate.admissionState, admissionStateSource: candidate.admissionStateSource,
+            providerGuidance: candidate.providerGuidance, warningCodes: candidate.warningCodes
+        )
+        let blobPath = store.blobURL.resolvingSymlinksInPath().standardizedFileURL.path
+        var original = stat()
+        XCTAssertEqual(stat(blobPath, &original), 0)
+        try (Data("XXXX".utf8) + Data(repeating: 0xab, count: 4096)).write(to: store.blobURL)
+        var times = [original.st_atimespec, original.st_mtimespec]
+        XCTAssertEqual(utimensat(AT_FDCWD, blobPath, &times, 0), 0)
+        XCTAssertEqual(store.resolver.knownDigest(forOllamaModel: "test-model:q4_k_m"), evidence.digest, "identity unchanged: the CLI still holds a digest for this file")
+        XCTAssertThrowsError(try BYOMModelAdmissionRuntime.artifactEvidence(for: digestMatched, environment: environment), "digest-backed candidate with tampered bytes fails closed") { error in
+            XCTAssertEqual(error as? BYOMModelAdmissionError, .artifactIdentityChanged)
+        }
+        try store.blobBytes.write(to: store.blobURL)
+        _ = try store.resolver.computeDigest(forOllamaModel: "test-model:q4_k_m")
         let otherBlob = Data("GGUF".utf8) + Data(repeating: 0x11, count: 4096)
         let otherHex = Self.sha256Hex(otherBlob)
         try otherBlob.write(to: store.root.appendingPathComponent("blobs/sha256-\(otherHex)"))
@@ -283,6 +307,18 @@ final class BYOMArtifactDigestTests: XCTestCase {
         XCTAssertThrowsError(try BYOMModelAdmissionRuntime.artifactEvidence(for: backed, environment: environment)) { error in
             XCTAssertEqual(error as? BYOMModelAdmissionError, .artifactIdentityChanged)
         }
+        // A `catalog_matched` reached through the NAME leg alone (library tag,
+        // `catalog_match_unverified`) with no resolvable GGUF is advisory: the
+        // offer proceeds identity-less as v0.1 did (the BYOM CLI onboarding
+        // E2E harness serves /api/tags with no Ollama store at all).
+        let nameMatched = BYOMDiscoveryWire.Candidate(
+            candidateID: absent.candidateID, runtimeSource: absent.runtimeSource, displayName: absent.displayName, servedModelRef: absent.servedModelRef,
+            catalogModelKey: "test-model", identityState: "catalog_matched", locality: absent.locality, estimatedGB: nil, contextWindowTokens: nil,
+            capabilities: absent.capabilities, readinessState: absent.readinessState, fitState: absent.fitState,
+            evaluationState: absent.evaluationState, admissionState: absent.admissionState, admissionStateSource: absent.admissionStateSource,
+            providerGuidance: absent.providerGuidance, warningCodes: absent.warningCodes + [BYOMDiscoveryWarning.catalogMatchUnverified.rawValue]
+        )
+        XCTAssertNil(try BYOMModelAdmissionRuntime.artifactEvidence(for: nameMatched, environment: environment), "name-leg catalog match without a GGUF is advisory: identity-less offer")
         // A non-Ollama candidate carries no GGUF evidence.
         let mlx = BYOMDiscoveryWire.Candidate(
             candidateID: candidate.candidateID, runtimeSource: "mlx_cache", displayName: candidate.displayName, servedModelRef: "mlx-community/x",

@@ -1808,11 +1808,14 @@ struct BYOMModelAdmissionRuntime: Sendable {
     /// GGUF digest of an Ollama-served candidate is RECOMPUTED over the blob's
     /// complete bytes here — never read from the cache and never adopted from
     /// the runtime — and returned bound to the file for a final re-check at
-    /// submission. A candidate that discovery reported as artifact-backed
-    /// (`catalog_matched` / `artifact_hash_available`) MUST hash: a blob that
-    /// no longer resolves, is not GGUF, or changes fails the offer closed. A
-    /// candidate that never had artifact evidence proceeds identity-less, as
-    /// v0.1 did.
+    /// submission. A candidate is ARTIFACT-BACKED when the CLI itself holds
+    /// a computed digest for the exact current file (`artifact_hash_available`,
+    /// or `catalog_matched` through the digest leg); such a candidate MUST
+    /// hash, and a blob that no longer resolves, is not GGUF, or changes
+    /// fails the offer closed. A `catalog_matched` reached through the NAME
+    /// leg alone (an Ollama library tag; discovery flags it
+    /// `catalog_match_unverified`) is advisory, not artifact evidence — with
+    /// no resolvable GGUF it proceeds identity-less, exactly as v0.1 did.
     /// The explicit time budget for the offer's binding hash. Generous — a
     /// legitimate large GGUF on a local volume must still offer — but bounded,
     /// so a stalled or network-backed store cannot hang the command.
@@ -1820,7 +1823,8 @@ struct BYOMModelAdmissionRuntime: Sendable {
 
     static func artifactEvidence(for candidate: BYOMDiscoveryWire.Candidate, environment: BYOMDiscoveryEnvironment, deadline: Date? = nil) throws -> BYOMArtifactEvidence? {
         guard candidate.runtimeSource == "ollama_loopback" else { return nil }
-        let artifactBacked = candidate.identityState == "catalog_matched" || candidate.identityState == "artifact_hash_available"
+        let artifactBacked = candidate.identityState == "artifact_hash_available" ||
+            environment.artifactDigests.knownDigest(forOllamaModel: candidate.servedModelRef) != nil
         do {
             return try environment.artifactDigests.computeEvidence(forOllamaModel: candidate.servedModelRef, deadline: deadline)
         } catch BYOMArtifactDigestError.unresolvedBlob where !artifactBacked {
