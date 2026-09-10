@@ -577,6 +577,15 @@ func (s *Server) SetAutotuneCatalogWithArtifactIndex(catalog *autotune.Catalog, 
 	s.autotuneCatalogMu.Unlock()
 }
 
+// SetArtifactIdentityIndex installs (or, with nil, removes) the expected-
+// identity set at runtime; the SIGHUP feed publish observer calls it with the
+// index rebuilt from the exact feeds just published.
+func (s *Server) SetArtifactIdentityIndex(index *artifactidentity.Index) {
+	s.autotuneCatalogMu.Lock()
+	s.artifactIdentityIndex = index
+	s.autotuneCatalogMu.Unlock()
+}
+
 func (s *Server) currentArtifactIdentityIndex() *artifactidentity.Index {
 	s.autotuneCatalogMu.RLock()
 	defer s.autotuneCatalogMu.RUnlock()

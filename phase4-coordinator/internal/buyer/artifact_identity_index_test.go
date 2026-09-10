@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rs/zerolog"
+
 	"github.com/augstar/macprovider-coordinator/internal/buyer"
 	"github.com/augstar/macprovider-coordinator/internal/modelidentity"
 )
@@ -87,5 +89,38 @@ func TestBuildArtifactIdentityIndexSkipsDeclaredArtifactsAndFourFeedReleases(t *
 	index, err = buyer.BuildArtifactIdentityIndex(fourFeed)
 	if err != nil || index != nil {
 		t.Fatalf("four-feed release must yield no index: %v %v", index, err)
+	}
+}
+
+// The SIGHUP lifecycle rebuilds the index from the EXACT feeds published:
+// the buyer server's feed observer receives them after the publish.
+func TestAutotuneFeedsObserverReceivesEachRuntimePublish(t *testing.T) {
+	t.Parallel()
+	publicKey, privateKey := testSigningKey(t)
+	hash := strings.Repeat("4", 64)
+	fixture := artifactBoundFeedSet(t, func(candidateSHA string) []byte {
+		return catalogArtifactsFeedWithModels("test-release", "2026-07-10T00:00:00Z", "autotune-policy-v1", candidateSHA, `"test-model":`+artifactModelJSON(ggufArtifactJSON(hash, "sha256:"+hash)))
+	}, privateKey, "test-key", map[string]ed25519.PublicKey{"test-key": publicKey}, privateKey)
+	feeds, err := buyer.LoadAutotuneFeeds(fixture.cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var observed []string
+	server := buyer.NewServer(nil, zerolog.Nop(), time.Unix(1716768000, 0), buyer.WithAutotuneFeedsObserver(func(published buyer.AutotuneFeeds) {
+		index, err := buyer.BuildArtifactIdentityIndex(published)
+		if err != nil {
+			t.Fatal(err)
+		}
+		observed = append(observed, index.Provenance().FeedSHA256)
+	}))
+	server.SetAutotuneFeeds(feeds)
+	if len(observed) != 1 || observed[0] != feeds.CatalogArtifactsVerification.SHA256 {
+		t.Fatalf("observer must see the published feeds: %v", observed)
+	}
+	fourFeed := feeds
+	fourFeed.CatalogArtifactsJSON, fourFeed.CatalogArtifactsSig = nil, nil
+	server.SetAutotuneFeeds(fourFeed)
+	if len(observed) != 2 || observed[1] != "" {
+		t.Fatalf("a rate-card-bound publish yields no index: %v", observed)
 	}
 }

@@ -122,6 +122,17 @@ func TestArtifactFeedIdentityVerifiesExactMemberForTheAdmittedRelease(t *testing
 	if v := server.verifyModelIdentity(gguf); v.Status != pool.HashStatusVerified || v.Artifact == nil {
 		t.Fatalf("swap with its index restores artifact authority: %+v", v)
 	}
+	// The SIGHUP lifecycle: catalog swap (index dropped), then the feed publish
+	// observer installs the index rebuilt from the published feeds.
+	server.SetAutotuneCatalog(catalog)
+	server.SetArtifactIdentityIndex(index)
+	if v := server.verifyModelIdentity(gguf); v.Status != pool.HashStatusVerified || v.Artifact == nil {
+		t.Fatalf("published index restores artifact authority: %+v", v)
+	}
+	server.SetArtifactIdentityIndex(nil)
+	if v := server.verifyModelIdentity(gguf); v.Status != pool.HashStatusMismatch || v.Artifact != nil {
+		t.Fatalf("a failed rebuild leaves no artifact authority: %+v", v)
+	}
 	// No index (rate-card-bound release): v1.6 verdicts exactly.
 	server.artifactIdentityIndex = nil
 	if v := server.verifyModelIdentity(gguf); v.Status != pool.HashStatusMismatch || v.Artifact != nil {
