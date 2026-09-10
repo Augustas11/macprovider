@@ -144,9 +144,15 @@ On the CLI (R007(a)) the GGUF digest is computed over the COMPLETE bytes of
 the blob the local Ollama store serves — `$OLLAMA_MODELS` or
 `~/.ollama/models`, manifest → model layer → `blobs/sha256-<hex>`; the
 manifest's layer digest only LOCATES the blob and is never reported.
-`models evaluate` and `models offer` are the deliberate commands that hash
-(the offer always recomputes, and fails closed if the file's identity —
-path, size, inode, mtime — changes while hashing); the digest is recorded for
+`models evaluate` and `models offer` are the deliberate commands that hash.
+The blob is opened once and the identity (path, size, inode, mtime at
+filesystem precision) is taken from that open descriptor before and after
+hashing, then the name is re-resolved and must still name that same file, so
+a rewrite or a substituted path fails closed. The evaluation-time hash has
+an explicit budget (`BYOMEvaluationLimits.artifactHashSeconds`, 60 s; SPEC-046-R005): on expiry
+nothing is recorded and the candidate simply stays without artifact
+identity. The offer always recomputes and re-validates the binding right
+before the signed package leaves the machine. The digest is recorded for
 that exact file identity in `~/.config/macprovider/byom/artifact-digests.json`
 (0600), so `models discover` (read-only) reports
 `identity_state: artifact_hash_available` and matches a `verified` GGUF

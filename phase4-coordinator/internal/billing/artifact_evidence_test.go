@@ -2,6 +2,7 @@ package billing
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -129,5 +130,71 @@ func TestRouteSnapshotArtifactEvidenceIsAllSixOrNoneAndNamesTheExpectedPair(t *t
 	split.ProviderReportedModelHashAlgorithm = modelidentity.GGUFFileV1
 	if err := split.Validate(); err == nil {
 		t.Fatal("reported/expected algorithm split must fail")
+	}
+}
+
+// SPEC-010 v1.7 R007(d): the settlement recompute path rejects a recorded
+// artifact binding whose stored evidence was changed or removed after the
+// route-time record — on the stored record alone, with no feed, manifest, or
+// keyring consulted — behind the storage-level immutability trigger.
+func TestSettlementRejectsChangedOrMissingRecordedArtifactEvidence(t *testing.T) {
+	for name, mutate := range map[string]func(map[string]any){
+		"signer changed":      func(m map[string]any) { m["artifact_feed_signer_key_id"] = "other-key" },
+		"release changed":     func(m map[string]any) { m["artifact_candidate_catalog_sha256"] = strings.Repeat("e", 64) },
+		"feed digest changed": func(m map[string]any) { m["artifact_feed_sha256"] = strings.Repeat("f", 64) },
+		"artifact id changed": func(m map[string]any) { m["artifact_id"] = "gguf-q8" },
+		"evidence removed": func(m map[string]any) {
+			for _, key := range []string{"artifact_feed_sha256", "artifact_id", "artifact_hash", "artifact_hash_algorithm", "artifact_feed_signer_key_id", "artifact_candidate_catalog_sha256"} {
+				delete(m, key)
+			}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, store := newRequestAndBillingStores(t)
+			snap := artifactRouteSnapshot()
+			if _, err := store.InsertRouteSnapshot(context.Background(), snap); err != nil {
+				t.Fatal(err)
+			}
+			ctx := context.Background()
+			var stored string
+			if err := store.db.QueryRowContext(ctx, `SELECT route_snapshot_json FROM settlement_route_snapshots WHERE request_id = ?`, snap.RequestID).Scan(&stored); err != nil {
+				t.Fatal(err)
+			}
+			var m map[string]any
+			if err := json.Unmarshal([]byte(stored), &m); err != nil {
+				t.Fatal(err)
+			}
+			mutate(m)
+			changed, err := json.Marshal(m)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// First layer: the route-time record is immutable at the storage
+			// level.
+			if _, err := store.db.ExecContext(ctx, `UPDATE settlement_route_snapshots SET route_snapshot_json = ? WHERE request_id = ?`, string(changed), snap.RequestID); err == nil || !strings.Contains(err.Error(), "immutable") {
+				t.Fatalf("%s: the immutability trigger must refuse the update, got %v", name, err)
+			}
+			// Second layer: with the trigger gone (storage tampered with
+			// directly), the settlement recompute rejects the record.
+			if _, err := store.db.ExecContext(ctx, `DROP TRIGGER trg_srs_immutable`); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.db.ExecContext(ctx, `UPDATE settlement_route_snapshots SET route_snapshot_json = ? WHERE request_id = ?`, string(changed), snap.RequestID); err != nil {
+				t.Fatal(err)
+			}
+			conn, err := store.db.Conn(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer conn.Close()
+			_, _, err = loadSettlementRouteSnapshotConn(ctx, conn, SettlementReceiptIdentity{
+				AccountScope: snap.AccountScope, RequestID: snap.RequestID, AttemptN: snap.AttemptN, ProviderID: snap.ProviderID,
+			})
+			// Changed evidence trips the digest recompute; removed evidence
+			// trips the GGUF-requires-evidence validation first. Both reject.
+			if err == nil || !(strings.Contains(err.Error(), "digest mismatch") || strings.Contains(err.Error(), "artifact evidence")) {
+				t.Fatalf("%s: settlement must reject the record, got %v", name, err)
+			}
+		})
 	}
 }

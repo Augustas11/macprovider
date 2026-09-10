@@ -13,12 +13,26 @@ enum GGUFArtifactDigest {
 
     /// Streams the file and returns the digest. Fails closed when the file is
     /// not a regular readable file or does not start with the GGUF magic.
-    static func compute(fileURL: URL) throws -> String {
+    /// `deadline` bounds the work: once it passes (checked between chunks,
+    /// as is task cancellation) the incomplete digest is discarded and
+    /// `hashingBudgetExceeded` is thrown.
+    static func compute(fileURL: URL, deadline: Date? = nil) throws -> String {
         let handle = try FileHandle(forReadingFrom: fileURL)
         defer { try? handle.close() }
+        return try compute(handle: handle, deadline: deadline)
+    }
+
+    /// Hashes through an ALREADY OPEN descriptor so the caller can bind the
+    /// digest to the identity of the very file it read (`fstat` before and
+    /// after), not merely to a pathname that could resolve differently
+    /// between opening and checking.
+    static func compute(handle: FileHandle, deadline: Date? = nil) throws -> String {
         var hasher = SHA256()
         var first = true
         while true {
+            if Task.isCancelled || (deadline.map { Date() >= $0 } ?? false) {
+                throw BYOMArtifactDigestError.hashingBudgetExceeded
+            }
             let chunk = try handle.read(upToCount: chunkBytes) ?? Data()
             if chunk.isEmpty { break }
             if first {
@@ -38,12 +52,14 @@ enum BYOMArtifactDigestError: Error, Equatable, CustomStringConvertible {
     case notGGUF
     case unresolvedBlob
     case fileIdentityChanged
+    case hashingBudgetExceeded
 
     var description: String {
         switch self {
         case .notGGUF: return "artifact is not a GGUF file"
         case .unresolvedBlob: return "served model blob could not be resolved in the local Ollama store"
         case .fileIdentityChanged: return "artifact file changed between hashing and reporting; identity not reported (SPEC-010-R007(a))"
+        case .hashingBudgetExceeded: return "artifact hashing exceeded its time budget; no digest recorded"
         }
     }
 }
@@ -71,14 +87,26 @@ struct BYOMArtifactFileIdentity: Codable, Equatable, Sendable {
         case modifiedNanoseconds = "modified_nanoseconds"
     }
 
+    /// The identity the PATH currently resolves to.
     static func current(of url: URL) -> BYOMArtifactFileIdentity? {
         let resolved = url.resolvingSymlinksInPath().standardizedFileURL
         var status = stat()
-        guard stat(resolved.path, &status) == 0, (status.st_mode & S_IFMT) == S_IFREG, status.st_size >= 0 else {
-            return nil
-        }
+        guard stat(resolved.path, &status) == 0 else { return nil }
+        return from(status: status, path: resolved.path)
+    }
+
+    /// The identity of the file an OPEN descriptor refers to (`fstat`): the
+    /// file actually being read, whatever the pathname resolves to now.
+    static func of(descriptor: Int32, path: String) -> BYOMArtifactFileIdentity? {
+        var status = stat()
+        guard fstat(descriptor, &status) == 0 else { return nil }
+        return from(status: status, path: path)
+    }
+
+    private static func from(status: stat, path: String) -> BYOMArtifactFileIdentity? {
+        guard (status.st_mode & S_IFMT) == S_IFREG, status.st_size >= 0 else { return nil }
         return BYOMArtifactFileIdentity(
-            path: resolved.path,
+            path: path,
             sizeBytes: Int(status.st_size),
             inode: UInt64(status.st_ino),
             device: UInt64(status.st_dev),
@@ -301,21 +329,37 @@ struct BYOMArtifactDigestResolver: Sendable {
     /// file's identity changed while hashing, record the result, and return
     /// the digest BOUND to the file so the caller can re-validate right
     /// before it reports (SPEC-010-R007(a)).
-    func computeEvidence(forOllamaModel name: String) throws -> BYOMArtifactEvidence {
-        guard let blob = store.resolveModelBlob(name: name),
-              let before = BYOMArtifactFileIdentity.current(of: blob.blobURL)
-        else {
+    ///
+    /// The blob is opened ONCE; the identity is taken from that descriptor
+    /// (`fstat`) before and after hashing, so the digest is bound to the file
+    /// that was actually read. The pathname is then re-resolved and must name
+    /// that same file: a path that pointed elsewhere while it was opened, or
+    /// a blob rewritten while it was read, fails closed. `deadline` bounds
+    /// the hashing; on expiry nothing is recorded.
+    func computeEvidence(forOllamaModel name: String, deadline: Date? = nil) throws -> BYOMArtifactEvidence {
+        guard let blob = store.resolveModelBlob(name: name) else {
             throw BYOMArtifactDigestError.unresolvedBlob
         }
-        let digest = try GGUFArtifactDigest.compute(fileURL: blob.blobURL)
+        let path = blob.blobURL.resolvingSymlinksInPath().standardizedFileURL.path
+        guard let handle = FileHandle(forReadingAtPath: path) else {
+            throw BYOMArtifactDigestError.unresolvedBlob
+        }
+        defer { try? handle.close() }
+        guard let before = BYOMArtifactFileIdentity.of(descriptor: handle.fileDescriptor, path: path) else {
+            throw BYOMArtifactDigestError.unresolvedBlob
+        }
+        let digest = try GGUFArtifactDigest.compute(handle: handle, deadline: deadline)
+        guard BYOMArtifactFileIdentity.of(descriptor: handle.fileDescriptor, path: path) == before else {
+            throw BYOMArtifactDigestError.fileIdentityChanged
+        }
         let evidence = BYOMArtifactEvidence(algorithm: ModelArtifactIdentity.ggufFileV1, digest: digest, file: before, locatorDigest: blob.locatorDigest)
         try validateCurrent(evidence, forOllamaModel: name)
         cache.store(before, algorithm: evidence.algorithm, digest: digest)
         return evidence
     }
 
-    func computeDigest(forOllamaModel name: String) throws -> String {
-        try computeEvidence(forOllamaModel: name).digest
+    func computeDigest(forOllamaModel name: String, deadline: Date? = nil) throws -> String {
+        try computeEvidence(forOllamaModel: name, deadline: deadline).digest
     }
 
     /// The name must STILL resolve — through the manifest — to the very file

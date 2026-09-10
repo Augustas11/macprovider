@@ -100,6 +100,58 @@ final class BYOMArtifactDigestTests: XCTestCase {
         XCTAssertEqual((attributes[.posixPermissions] as? NSNumber)?.intValue, 0o600)
     }
 
+    /// SPEC-046-R005: hashing at evaluation time has an explicit budget. An
+    /// expired deadline discards the incomplete digest and records nothing.
+    func testHashingIsBoundedByItsDeadlineAndRecordsNothingOnExpiry() throws {
+        let store = try makeStore(blob: Data("GGUF".utf8) + Data(repeating: 0x5a, count: 3 * (1 << 20)))
+        XCTAssertThrowsError(try store.resolver.computeDigest(forOllamaModel: "test-model:q4_k_m", deadline: Date.distantPast)) { error in
+            XCTAssertEqual(error as? BYOMArtifactDigestError, .hashingBudgetExceeded)
+        }
+        XCTAssertNil(store.resolver.knownDigest(forOllamaModel: "test-model:q4_k_m"), "nothing recorded for an unfinished hash")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: store.cacheURL.path))
+        // A live deadline hashes the complete bytes.
+        XCTAssertEqual(try store.resolver.computeDigest(forOllamaModel: "test-model:q4_k_m", deadline: Date().addingTimeInterval(60)), Self.sha256Hex(store.blobBytes))
+        XCTAssertGreaterThan(BYOMEvaluationLimits.standard.artifactHashSeconds, 0)
+    }
+
+    /// SPEC-010-R007(a): the digest binds to the file that was READ. The
+    /// identity comes from the open descriptor, so a pathname that resolved
+    /// to another file while it was opened, or a blob rewritten through
+    /// another descriptor while it was read, is a different identity.
+    func testDigestIdentityIsTakenFromTheOpenedDescriptorNotThePathname() throws {
+        let store = try makeStore()
+        let path = store.blobURL.resolvingSymlinksInPath().standardizedFileURL.path
+        let handle = try XCTUnwrap(FileHandle(forReadingAtPath: path))
+        defer { try? handle.close() }
+        let opened = try XCTUnwrap(BYOMArtifactFileIdentity.of(descriptor: handle.fileDescriptor, path: path))
+        XCTAssertEqual(opened, BYOMArtifactFileIdentity.current(of: store.blobURL), "same file: descriptor and path agree")
+        // In-place rewrite through another descriptor while ours stays open:
+        // the descriptor identity moves with the file (size and mtime).
+        var rewritten = store.blobBytes
+        rewritten.append(contentsOf: [0x01, 0x02])
+        try rewritten.write(to: store.blobURL)
+        let afterRewrite = try XCTUnwrap(BYOMArtifactFileIdentity.of(descriptor: handle.fileDescriptor, path: path))
+        XCTAssertNotEqual(afterRewrite, opened, "a rewrite during hashing is visible on the descriptor")
+        XCTAssertEqual(afterRewrite.inode, opened.inode)
+        XCTAssertEqual(afterRewrite.sizeBytes, opened.sizeBytes + 2)
+        // The path substituted by another file (unlink + recreate): the
+        // descriptor still names the file that was read, the path does not.
+        try FileManager.default.removeItem(at: store.blobURL)
+        try store.blobBytes.write(to: store.blobURL)
+        let substituted = try XCTUnwrap(BYOMArtifactFileIdentity.current(of: store.blobURL))
+        let stillOpen = try XCTUnwrap(BYOMArtifactFileIdentity.of(descriptor: handle.fileDescriptor, path: path))
+        XCTAssertEqual(stillOpen.inode, opened.inode)
+        XCTAssertNotEqual(substituted.inode, stillOpen.inode, "the evidence's identity is the read file's; validation against the path fails closed")
+        XCTAssertThrowsError(try store.resolver.validateCurrent(
+            BYOMArtifactEvidence(algorithm: ModelArtifactIdentity.ggufFileV1, digest: Self.sha256Hex(store.blobBytes), file: stillOpen, locatorDigest: "sha256:" + store.manifestDigest),
+            forOllamaModel: "test-model:q4_k_m"
+        )) { error in
+            XCTAssertEqual(error as? BYOMArtifactDigestError, .fileIdentityChanged)
+        }
+        // Not a regular file: no identity.
+        XCTAssertNil(BYOMArtifactFileIdentity.current(of: store.root))
+    }
+
     private func qualifiedFeed(ggufHash: String, candidateBytes: inout Data) throws -> QualifiedArtifactFeed {
         let object = try JSONSerialization.jsonObject(with: Data(contentsOf: Self.corpusURL)) as! [String: Any]
         candidateBytes = try JSONSerialization.data(withJSONObject: object["candidate"]!, options: [.sortedKeys, .withoutEscapingSlashes])

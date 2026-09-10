@@ -2304,6 +2304,11 @@ struct BYOMDiscoveryRunner {
 
 struct BYOMEvaluationLimits: Sendable {
     let timeoutSeconds: Double
+    /// SPEC-046-R005 explicit time limit for the GGUF artifact hashing phase
+    /// of `models evaluate` (SPEC-010-R007(a)); the probe timeout above
+    /// starts afterwards. On expiry no digest is recorded and the evaluation
+    /// proceeds without artifact identity.
+    let artifactHashSeconds: Double
     let maxRequestBytes: Int
     let maxHeaderBytes: Int
     let maxBodyBytes: Int
@@ -2313,6 +2318,7 @@ struct BYOMEvaluationLimits: Sendable {
 
     static let standard = BYOMEvaluationLimits(
         timeoutSeconds: 3.0,
+        artifactHashSeconds: 60.0,
         maxRequestBytes: 16 * 1024,
         maxHeaderBytes: BYOMDiscoveryHTTPBounds.maxHeaderBytes,
         maxBodyBytes: 256 * 1024,
@@ -2402,9 +2408,14 @@ struct BYOMEvaluationRunner: Sendable {
         // it is where the GGUF digest of an Ollama-served candidate is computed
         // over the blob's complete bytes and recorded for the exact file
         // identity; discovery then reports `artifact_hash_available` / matches
-        // by digest without hashing. Failure here is not an evaluation failure.
+        // by digest without hashing. Failure here — including exceeding the
+        // explicit hashing budget — is not an evaluation failure: the candidate
+        // simply stays without artifact identity.
         if candidate.runtimeSource == "ollama_loopback" {
-            _ = try? environment.artifactDigests.computeDigest(forOllamaModel: candidate.servedModelRef)
+            _ = try? environment.artifactDigests.computeDigest(
+                forOllamaModel: candidate.servedModelRef,
+                deadline: Date().addingTimeInterval(limits.artifactHashSeconds)
+            )
         }
 
         return await evaluateOpenAICompatible(
