@@ -168,12 +168,15 @@ func main() {
 			os.Exit(1)
 		}
 	}
-	// SPEC-010 v1.7 R007: the expected-identity set is derived from the SAME
-	// loaded feeds as the admitted catalog, so it is release-bound by
-	// construction; nil for a rate-card-bound release.
-	artifactIdentityIndex, err := buyer.BuildArtifactIdentityIndex(autotuneFeeds)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "artifact identity index: %v\n", err)
+	// SPEC-010 v1.7 R007 / v1.8 R004: one identity set per retained release,
+	// each derived from that release's OWN loaded feeds (release-bound by
+	// construction; a rate-card-bound release contributes none). A retained
+	// previous release whose feed fails to load is skipped with a log line —
+	// it never blocks the current release.
+	previousAutotuneFeeds, previousErr := buyer.LoadPreviousAutotuneFeeds(cfg.AutotuneFeeds)
+	artifactIdentitySets, setErrs := buyer.BuildArtifactIdentitySets(autotuneFeeds, previousAutotuneFeeds)
+	if artifactIdentitySets == nil {
+		fmt.Fprintf(os.Stderr, "artifact identity sets: %v\n", setErrs)
 		os.Exit(1)
 	}
 	providerhttp.Init(cfg.ProviderHTTP.TimeoutS)
@@ -554,7 +557,13 @@ func main() {
 	wsOpts = append(wsOpts, providerws.WithReferralPolicy(referralPolicy))
 	wsOpts = append(wsOpts, providerws.WithAdmissionStore(admissionStore))
 	wsOpts = append(wsOpts, providerws.WithModelAdmissionStore(byomOfferStore))
-	wsOpts = append(wsOpts, providerws.WithArtifactIdentityIndex(artifactIdentityIndex))
+	wsOpts = append(wsOpts, providerws.WithArtifactIdentitySets(artifactIdentitySets), providerws.WithReleaseStaging())
+	if previousErr != nil {
+		logger.Warn().Err(previousErr).Str("event", "artifact_identity_sets_previous_release").Msg("retained previous release feeds not loaded; its sessions keep the primary-row path only")
+	}
+	for _, err := range setErrs {
+		logger.Warn().Err(err).Str("event", "artifact_identity_sets_previous_release").Msg("retained previous release identity set rejected; its sessions keep the primary-row path only")
+	}
 	wsOpts = append(wsOpts, providerws.WithModelAdmissionSubmissionsDisabled(byomSubmissionsDisabled))
 	wsOpts = append(wsOpts, providerws.WithConnectionEventStore(connectionEventStore))
 	wsOpts = append(wsOpts, providerws.WithConnectionEventMetrics(metricsHandle))
@@ -918,6 +927,9 @@ func main() {
 		}
 	}
 	wsServer := providerws.NewServer(cfg, registry, logger, wsOpts...)
+	// SPEC-047-R001 v0.1.5: the SIGHUP reload's Tier-2 material is staged and
+	// promoted with the release publication instead of swapped on its own.
+	tier2.SetReleasePublisher(wsServer)
 	if rewardsRunner != nil {
 		rewardsRunner.SetConnectivity(rewards.NewPoolHeartbeatBridge(wsServer.PoolSnapshot))
 		rewardsRunner.SetTrustTierObserver(rewards.TrustTierObserverFunc(func(providerID, tier string) {
@@ -949,23 +961,42 @@ func main() {
 		buyer.WithBillingSnapshotID(snapshotID),
 		buyer.WithRateCardUSDPerMillionCredits(cfg.Stats.Rollup.UsdPerMillionCredits),
 		buyer.WithAutotuneFeeds(autotuneFeeds),
-		// SPEC-010 v1.7 R007 across the SIGHUP lifecycle: every publish of the
-		// served feed bytes rebuilds the expected-identity set from those SAME
-		// bytes and installs it beside the admission catalog. The catalog swap
-		// that precedes the publish drops the previous index, so between the
-		// two steps a new-release session is primary-only (fail closed), never
-		// verified against another release's members; a rebuild failure leaves
-		// no index installed.
-		buyer.WithAutotuneFeedsObserver(func(feeds buyer.AutotuneFeeds) {
-			index, err := buyer.BuildArtifactIdentityIndex(feeds)
-			if err != nil {
-				logger.Error().Err(err).Str("event", "autotune_feed_sighup_reload").Msg("artifact identity index rebuild rejected; artifact-derived identity disabled until the next successful reload")
-				wsServer.SetArtifactIdentityIndex(nil)
-				return
+		// SPEC-047-R001 v0.1.5 / SPEC-010-R004 v1.8 across the SIGHUP
+		// lifecycle: the reload stages the Tier-2 material and the admission
+		// catalog; this observer, fed the exact bytes just published, rebuilds
+		// one identity set per retained release and publishes EVERYTHING as one
+		// release generation. A rebuild failure publishes with no
+		// artifact-derived identity (fail closed) rather than leaving the
+		// staged catalog unpublished.
+		buyer.WithAutotuneFeedsObserver(func(feeds buyer.AutotuneFeeds, commit func()) {
+			// The retained previous releases come from the configuration the
+			// RELOAD loaded these feeds from (feeds.SourceConfig), never from
+			// the boot-time cfg this closure captured: a SIGHUP that moves
+			// the feed root, the previous target, or the keyring publishes
+			// one coherent release.
+			feedsCfg := cfg.AutotuneFeeds
+			if feeds.SourceConfig != nil {
+				feedsCfg = *feeds.SourceConfig
 			}
-			wsServer.SetArtifactIdentityIndex(index)
+			previous, previousErr := buyer.LoadPreviousAutotuneFeeds(feedsCfg)
+			if previousErr != nil {
+				logger.Warn().Err(previousErr).Str("event", "autotune_feed_sighup_reload").Msg("retained previous release feeds not loaded; its sessions keep the primary-row path only")
+			}
+			sets, errs := buyer.BuildArtifactIdentitySets(feeds, previous)
+			for _, err := range errs {
+				logger.Warn().Err(err).Str("event", "autotune_feed_sighup_reload").Msg("retained previous release identity set rejected")
+			}
+			if sets == nil {
+				logger.Error().Str("event", "autotune_feed_sighup_reload").Msg("artifact identity set rebuild rejected; artifact-derived identity disabled until the next successful reload")
+			}
+			generation := wsServer.PublishArtifactIdentitySetsWith(sets, sets == nil, commit)
+			logger.Info().Uint64("release_generation", generation).Int("identity_sets", len(sets)).Str("event", "autotune_feed_sighup_reload").Msg("release published")
 		}),
 		buyer.WithModelAdmissionStore(byomOfferStore),
+		// SPEC-047-R001 v0.1.5: BYOM route snapshots are created by the
+		// coordinator's compare-and-insert — pre/post release-generation,
+		// head, binding and session-epoch checks around the insert.
+		buyer.WithModelAdmissionRouteGuard(wsServer),
 		buyer.WithStreamingMetricsMaxSamples(cfg.Stats.StreamingMetrics.MaxSamples),
 		buyer.WithPreflight(func(provider pool.Provider, requestID string, estimatedTokens int, timeout time.Duration) (buyer.PreflightResult, bool, error) {
 			ack, ok, err := wsServer.Preflight(provider, requestID, estimatedTokens, timeout)
@@ -1438,35 +1469,18 @@ func main() {
 // verified through the same loader as the active feed and is never discovered
 // from an unbounded directory scan.
 func loadPreviousAutotuneCatalog(cfg config.AutotuneFeedsConfig) ([]*autotune.Catalog, error) {
-	if cfg.AutotuneCandidatesPath == "" {
-		return nil, nil
+	// One resolver for the deployer's `.previous-target` marker: the release
+	// retained as compatible-previous here is the release whose identity
+	// set buyer.LoadPreviousAutotuneFeeds retains (SPEC-010-R004 v1.8).
+	dir, err := buyer.PreviousAutotuneReleaseTarget(cfg)
+	if err != nil || dir == "" {
+		return nil, err
 	}
-	root := filepath.Dir(filepath.Dir(cfg.AutotuneCandidatesPath))
-	targetBytes, err := os.ReadFile(filepath.Join(root, ".previous-target"))
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("read previous-target: %w", err)
-	}
-	target := strings.TrimSpace(string(targetBytes))
-	if target == "" {
-		return nil, nil
-	}
-	releaseID := strings.TrimPrefix(target, "releases/")
-	if releaseID == target || releaseID == "" || strings.Contains(releaseID, "/") {
-		return nil, fmt.Errorf("invalid previous-target %q", target)
-	}
-	for _, r := range releaseID {
-		if !(r >= 'A' && r <= 'Z') && !(r >= 'a' && r <= 'z') && !(r >= '0' && r <= '9') && !strings.ContainsRune("._-", r) {
-			return nil, fmt.Errorf("invalid previous-target %q", target)
-		}
-	}
-	// Compatibility is optional. Never let a stale tombstoned bridge prevent a
-	// verified current catalog from starting. The deploy rollback restores the
-	// previous binary, config, and catalog as one unit if current activation fails.
-	if autotune.IsPermanentlyRejectedReleaseID(releaseID) {
-		return nil, nil
+	root := filepath.Dir(dir)
+	target := filepath.Base(dir)
+	if filepath.Base(root) == "releases" {
+		root = filepath.Dir(root)
+		target = filepath.Join("releases", filepath.Base(dir))
 	}
 	previousCfg := cfg
 	previousCfg.DemandRankPath = ""
