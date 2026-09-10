@@ -164,7 +164,7 @@ type Server struct {
 	// artifactIdentityIndex is the SPEC-010 v1.7 R007 expected-identity set
 	// derived from the artifact feed release-bound to the current candidate
 	// catalog; nil for a rate-card-bound release (v1.6 primary-only path).
-	artifactIdentityIndex          *artifactidentity.Index
+	artifactIdentitySets           releaseSnapshotState
 	autotuneCatalogEnforced        bool
 	autotuneCatalogBridgeDeadline  time.Time
 	autotuneCatalogBridgeMu        sync.Mutex
@@ -252,6 +252,12 @@ type Server struct {
 	// liveMDA is the Phase 3 observe-mode MDA upgrade service (may be nil when
 	// MDM client is disabled or live_mda_enabled=false).
 	liveMDA liveMDAUpgrader
+	// modelAdmissionSections are the SPEC-047-R001 v0.1.5 per-provider
+	// decision critical sections and binding generations.
+	modelAdmissionSections providerSections
+	// modelAdmissionOperatorLimiter rate-limits operator decision requests
+	// per credential and source address, never drawing on a provider window.
+	modelAdmissionOperatorLimiter operatorRateLimiter
 }
 
 // liveMDAUpgrader is the minimal interface satisfied by mdm.LiveMDAService.
@@ -559,31 +565,138 @@ func (s *Server) autotuneCatalogSnapshot() (*autotune.Catalog, map[string]*autot
 // SIGHUP feed reload calls this only after the new feed is parsed and validated;
 // on any validation failure the caller keeps the prior catalog (fail-closed).
 func (s *Server) SetAutotuneCatalog(catalog *autotune.Catalog, compatible ...*autotune.Catalog) {
-	next := buildCompatibleCatalogSet(catalog, compatible)
-	s.autotuneCatalogMu.Lock()
-	s.autotuneCatalog = catalog
-	s.autotuneCompatibleCatalogs = next
-	// SPEC-010-R007(b): an index is bound to exactly one release; the one
-	// built for the previous catalog never outlives it. The feed publish that
-	// follows a reload installs the replacement (SetArtifactIdentityIndex),
-	// so between the two steps every session is primary-only (fail closed).
-	s.artifactIdentityIndex = nil
-	s.autotuneCatalogMu.Unlock()
+	if s.artifactIdentitySets.stagingEnabled() {
+		// SPEC-047-R001 v0.1.5: the reload stages every part of the release
+		// and publishes them as ONE act (SetArtifactIdentitySets, or the
+		// end-of-reload RefreshTier2HashStatuses when no feed publish
+		// follows), so no reader observes a catalog without its identity
+		// sets and Tier-2 material.
+		s.artifactIdentitySets.stageCatalog(catalog, compatible)
+		return
+	}
+	s.publishRelease(catalog, compatible, nil, true)
+	s.afterReleasePublished()
+}
+
+// publishRelease installs catalog + compatible set (when catalogGiven), the
+// identity sets, and any staged Tier-2 material under the release write lock
+// and bumps the release generation once.
+func (s *Server) publishRelease(catalog *autotune.Catalog, compatible []*autotune.Catalog, sets map[string]*artifactidentity.Index, catalogGiven bool) uint64 {
+	s.artifactIdentitySets.mu.Lock()
+	defer s.artifactIdentitySets.mu.Unlock()
+	return s.publishReleaseLocked(catalog, compatible, sets, catalogGiven)
+}
+
+// publishReleaseLocked is publishRelease for a caller holding the release
+// write lock.
+func (s *Server) publishReleaseLocked(catalog *autotune.Catalog, compatible []*autotune.Catalog, sets map[string]*artifactidentity.Index, catalogGiven bool) uint64 {
+	if catalogGiven {
+		next := buildCompatibleCatalogSet(catalog, compatible)
+		s.autotuneCatalogMu.Lock()
+		s.autotuneCatalog = catalog
+		s.autotuneCompatibleCatalogs = next
+		s.autotuneCatalogMu.Unlock()
+	}
+	return s.artifactIdentitySets.publishLocked(sets, false)
+}
+
+// publishStagedKeepingSets publishes whatever a reload staged (catalog half,
+// Tier-2 material) while keeping the current identity sets — the path for a
+// reload whose feed publish never arrived.
+func (s *Server) publishStagedKeepingSets() uint64 {
+	s.artifactIdentitySets.mu.Lock()
+	defer s.artifactIdentitySets.mu.Unlock()
+	catalog, compatible, staged := s.artifactIdentitySets.takeStagedCatalog()
+	if staged {
+		next := buildCompatibleCatalogSet(catalog, compatible)
+		s.autotuneCatalogMu.Lock()
+		s.autotuneCatalog = catalog
+		s.autotuneCompatibleCatalogs = next
+		s.autotuneCatalogMu.Unlock()
+	}
+	return s.artifactIdentitySets.publishLocked(nil, true)
 }
 
 // SetArtifactIdentityIndex installs (or, with nil, removes) the expected-
 // identity set at runtime; the SIGHUP feed publish observer calls it with the
 // index rebuilt from the exact feeds just published.
 func (s *Server) SetArtifactIdentityIndex(index *artifactidentity.Index) {
-	s.autotuneCatalogMu.Lock()
-	s.artifactIdentityIndex = index
-	s.autotuneCatalogMu.Unlock()
+	var sets map[string]*artifactidentity.Index
+	if index != nil {
+		sets = map[string]*artifactidentity.Index{index.Provenance().CandidateCatalogSHA256: index}
+	}
+	s.SetArtifactIdentitySets(sets)
 }
 
-func (s *Server) currentArtifactIdentityIndex() *artifactidentity.Index {
-	s.autotuneCatalogMu.RLock()
-	defer s.autotuneCatalogMu.RUnlock()
-	return s.artifactIdentityIndex
+// SetArtifactIdentitySets publishes the release: the identity set of every
+// retained release keyed by its candidate-catalog body digest (SPEC-010-R004
+// v1.8), together with a staged admission catalog and staged Tier-2 material
+// when the reload staged them — ONE atomic publication under the release
+// write lock, one generation bump (SPEC-047-R001 v0.1.5). Called by the
+// buyer feed-publish observer with the sets rebuilt from the exact feeds
+// just published; nil publishes with no artifact-derived identity.
+func (s *Server) SetArtifactIdentitySets(sets map[string]*artifactidentity.Index) uint64 {
+	return s.PublishArtifactIdentitySets(sets, false)
+}
+
+// PublishArtifactIdentitySets is SetArtifactIdentitySets with the current
+// release's feed-integrity outcome recorded (an offered feed-path pair is
+// then `catalog_artifact_feed_integrity_failure` rather than
+// `no_artifact_match`). After publication the SPEC-047-R006 sweeps run.
+func (s *Server) PublishArtifactIdentitySets(sets map[string]*artifactidentity.Index, feedIntegrityFailed bool) uint64 {
+	return s.PublishArtifactIdentitySetsWith(sets, feedIntegrityFailed, nil)
+}
+
+// PublishArtifactIdentitySetsWith is PublishArtifactIdentitySets that also
+// runs `commit` (the buyer's served-feed-bytes swap) inside the same
+// write-lock hold: the served feeds are part of the release snapshot.
+func (s *Server) PublishArtifactIdentitySetsWith(sets map[string]*artifactidentity.Index, feedIntegrityFailed bool, commit func()) uint64 {
+	s.artifactIdentitySets.mu.Lock()
+	// The staged catalog is consumed, the integrity outcome recorded, and the
+	// catalog / identity sets / Tier-2 material / generation swapped under
+	// ONE write-lock hold: no release reader observes any part ahead of the
+	// others. The served feed bytes are committed LAST inside the same hold:
+	// a lock-free feed reader can at worst see the previous bytes against the
+	// new internal release (a provider admitted from them is a retained
+	// compatible-previous release), never new bytes the coordinator does not
+	// yet recognise.
+	catalog, compatible, staged := s.artifactIdentitySets.takeStagedCatalog()
+	s.artifactIdentitySets.feedIntegrityFailed = feedIntegrityFailed
+	generation := s.publishReleaseLocked(catalog, compatible, sets, staged)
+	if commit != nil {
+		commit()
+	}
+	s.artifactIdentitySets.mu.Unlock()
+	s.afterReleasePublished()
+	return generation
+}
+
+// ReleaseGeneration is the monotonic generation of the published release
+// snapshot; decisions record the generation they evaluated under and route
+// time requires a binding validated under the current one.
+func (s *Server) ReleaseGeneration() uint64 { return s.artifactIdentitySets.generation() }
+
+// withReleaseRead runs fn under the release read lock so it observes one
+// consistent release snapshot (catalog, identity sets, Tier-2 material,
+// generation). Never nest: a nested read lock deadlocks against a waiting
+// publisher. Lock order: provider section → registry → release read lock.
+func (s *Server) withReleaseRead(fn func()) {
+	if hook := s.artifactIdentitySets.onReadLocked; hook != nil {
+		s.artifactIdentitySets.mu.RLock()
+		hook()
+		defer s.artifactIdentitySets.mu.RUnlock()
+		fn()
+		return
+	}
+	s.artifactIdentitySets.mu.RLock()
+	defer s.artifactIdentitySets.mu.RUnlock()
+	fn()
+}
+
+// artifactIdentitySetFor is the identity set bound to the given release
+// (candidate-catalog body digest), or nil when the coordinator holds none.
+func (s *Server) artifactIdentitySetFor(release string) *artifactidentity.Index {
+	return s.artifactIdentitySets.setFor(release)
 }
 
 // CurrentAutotuneCatalog exposes the live active catalog to the coordinator's
@@ -606,10 +719,18 @@ func (s *Server) CurrentAutotuneCatalog() *autotune.Catalog {
 // checks exactly as before. isCurrent reports whether the resolved catalog is the
 // active one, for callers that cross-check a previous release against the active.
 func (s *Server) resolveProviderCatalog(provider pool.Provider) (resolved, current *autotune.Catalog, isCurrent, ok bool) {
+	cur, compatible := s.autotuneCatalogSnapshot()
+	return resolveProviderCatalogIn(provider, cur, compatible)
+}
+
+// resolveProviderCatalogIn is resolveProviderCatalog against one already
+// captured (current, compatible) pair — a caller under the release read lock
+// resolves the session's EXACT release (by release id, never by the stored
+// admission mode, which goes stale after a re-stamp).
+func resolveProviderCatalogIn(provider pool.Provider, cur *autotune.Catalog, compatible map[string]*autotune.Catalog) (resolved, current *autotune.Catalog, isCurrent, ok bool) {
 	if provider.CatalogAdmissionMode != "current" && provider.CatalogAdmissionMode != "previous" {
 		return nil, nil, false, false
 	}
-	cur, compatible := s.autotuneCatalogSnapshot()
 	if provider.CatalogReleaseID != "" {
 		// Resolve by the exact release the session presented. This is the case
 		// production catalogAdmission always produces, and it is what keeps a
@@ -645,8 +766,33 @@ func (s *Server) resolveProviderCatalog(provider pool.Provider) (resolved, curre
 // for a provider admitted against any other release.
 func WithArtifactIdentityIndex(index *artifactidentity.Index) Option {
 	return func(s *Server) {
-		s.artifactIdentityIndex = index
+		if index != nil {
+			s.artifactIdentitySets.sets = map[string]*artifactidentity.Index{index.Provenance().CandidateCatalogSHA256: index}
+		}
 	}
+}
+
+// WithArtifactIdentitySets installs the boot-time identity sets (one per
+// retained release); construction runs before any goroutine, so lock-free.
+func WithArtifactIdentitySets(sets map[string]*artifactidentity.Index) Option {
+	return func(s *Server) {
+		s.artifactIdentitySets.sets = sets
+	}
+}
+
+// WithReleaseStaging makes SetAutotuneCatalog stage (rather than publish) so
+// the SIGHUP reload's catalog, feeds, identity sets, and Tier-2 material
+// become visible as one release publication (SPEC-047-R001 v0.1.5).
+func WithReleaseStaging() Option {
+	return func(s *Server) {
+		s.artifactIdentitySets.staging = true
+	}
+}
+
+// StageTier2 implements tier2.ReleasePublisher: the reload's validated
+// Tier-2 catalog is promoted with the next release publication.
+func (s *Server) StageTier2(next *tier2.Catalog) {
+	s.artifactIdentitySets.stageTier2(next)
 }
 
 func WithAutotuneCatalogEnforcement(enforced bool, bridgeDeadline time.Time) Option {
@@ -966,8 +1112,11 @@ func NewServer(cfg config.Config, registry *pool.Registry, logger zerolog.Logger
 		autotuneCatalogEnforced:       cfg.AutotuneFeeds.EnforceProviderAdmission,
 		autotuneCatalogBridgeDeadline: providerAdmissionBridgeDeadline,
 		modelAdmissions:               NewMemoryModelAdmissionStore(),
-		modelAdmissionAttempts:        map[string][]time.Time{},
-		version:                       "dev",
+		// The published release generation is never the zero value: a
+		// binding stamped 0 was never validated under any release.
+		artifactIdentitySets:   releaseSnapshotState{gen: 1},
+		modelAdmissionAttempts: map[string][]time.Time{},
+		version:                "dev",
 	}
 	s.authAttempts = newAuthAttemptStore(1024)
 	s.bootstrapLimiter = newBootstrapMintLimiter(cfg.Auth)
@@ -1393,20 +1542,41 @@ func admittedCandidateCatalogSHA256(catalogAdmissionMode, candidateCatalogSHA256
 }
 
 func (s *Server) RefreshTier2HashStatuses() int {
+	// A reload whose catalog half never arrived (or a Tier-2-only reload)
+	// still publishes what it staged, as one act — whatever the Tier-2 hash
+	// policy says; publication re-verifies every session and sweeps.
+	if s.artifactIdentitySets.hasStaged() {
+		s.publishStagedKeepingSets()
+		s.afterReleasePublished()
+	}
+	return s.refreshSessionIdentities()
+}
+
+// refreshSessionIdentities re-verifies every live session's model identity
+// against the published release (SPEC-047-R006(a) "refresh"): the registry
+// stores the pinned verdict and advances the session identity epoch of every
+// session whose identity facts changed. Lock order: registry → release
+// read; no provider section is held.
+func (s *Server) refreshSessionIdentities() int {
 	cfg := s.tier2Config()
 	if !tier2.ModelHashActive(cfg) {
 		return s.pool.UpdateHashStatuses(func(pool.Provider) pool.HashStatus {
 			return ""
 		})
 	}
-	if index := s.currentArtifactIdentityIndex(); index != nil && !index.Fresh(s.now()) {
-		// SPEC-023 §3.7.6 rules 4–5 in effect: distinguishable from provider
-		// drift, which the per-session transition log below cannot tell apart.
-		s.log.Warn().
-			Str("event", "artifact_identity_index_stale").
-			Time("feed_generated_at", index.Provenance().FeedGeneratedAt).
-			Msg("artifact feed is stale; artifact-derived identity is disabled until the feed is re-issued and reloaded (primary-row identity unaffected)")
-	}
+	s.withReleaseRead(func() {
+		for release, index := range s.artifactIdentitySets.currentSets() {
+			if index != nil && !index.Fresh(s.now()) {
+				// SPEC-023 §3.7.6 rules 4–5 in effect: distinguishable from provider
+				// drift, which the per-session transition log below cannot tell apart.
+				s.log.Warn().
+					Str("event", "artifact_identity_index_stale").
+					Str("release_candidate_catalog_sha256", release).
+					Time("feed_generated_at", index.Provenance().FeedGeneratedAt).
+					Msg("artifact feed is stale; artifact-derived identity is disabled for that release until the feed is re-issued and reloaded (primary-row identity unaffected)")
+			}
+		}
+	})
 	return s.pool.UpdateModelIdentities(func(provider pool.Provider) pool.ModelIdentityVerdict {
 		// The registry applies the session pin again when it stores the
 		// verdict; applying it here too keeps the transition log honest.
@@ -1458,6 +1628,15 @@ func (s *Server) verifyProviderModelIdentity(modelID, expectedHash, reportedHash
 }
 
 func (s *Server) verifyModelIdentity(req pool.ModelIdentityRequest) pool.ModelIdentityVerdict {
+	var verdict pool.ModelIdentityVerdict
+	s.withReleaseRead(func() { verdict = s.resolveModelIdentityVerdict(req) })
+	return verdict
+}
+
+// resolveModelIdentityVerdict is the verdict computation for a caller that
+// already holds the release read lock (verifyModelIdentity is its only
+// caller today); it MUST NOT be called without the lock.
+func (s *Server) resolveModelIdentityVerdict(req pool.ModelIdentityRequest) pool.ModelIdentityVerdict {
 	cfg := s.tier2Config()
 	algorithm := strings.TrimSpace(req.ReportedAlgorithm)
 	reported := strings.TrimSpace(req.ReportedHash)
@@ -1493,14 +1672,20 @@ func (s *Server) verifyModelIdentity(req pool.ModelIdentityRequest) pool.ModelId
 // the index, the index bound to the provider's admitted candidate catalog,
 // and the resolved member's model key equal to the session's admitted key.
 func (s *Server) resolveArtifactIdentity(req pool.ModelIdentityRequest, algorithm, reported string) (artifactidentity.Binding, bool) {
-	index := s.currentArtifactIdentityIndex()
-	// SPEC-023 §3.7.6 rules 4–5: a stale or future-stamped feed authorizes no
-	// artifact-derived capability; the primary-row path is unaffected.
 	// Only a validated catalog envelope ("current" / compatible "previous")
 	// binds a release; a bridge or legacy session presented none, on every
-	// leg (hello, heartbeat, refresh) since the gate lives here.
+	// leg (hello, heartbeat, refresh) since the gate lives here. The session
+	// resolves in the identity set of its OWN admitted release (SPEC-010-R004
+	// v1.8): a retained compatible-previous release keeps its set, so a
+	// scheduled re-stamp changes nothing for live sessions.
 	release := admittedCandidateCatalogSHA256(req.CatalogAdmissionMode, req.CandidateCatalogSHA256)
-	if index == nil || release == "" || !index.BoundTo(release) || !index.Fresh(s.now()) {
+	if release == "" {
+		return artifactidentity.Binding{}, false
+	}
+	index := s.artifactIdentitySetFor(release)
+	// SPEC-023 §3.7.6 rules 4–5: a stale or future-stamped feed authorizes no
+	// artifact-derived capability; the primary-row path is unaffected.
+	if index == nil || !index.BoundTo(release) || !index.Fresh(s.now()) {
 		return artifactidentity.Binding{}, false
 	}
 	binding, ok := index.Resolve(algorithm, reported)
@@ -1554,6 +1739,9 @@ func (s *Server) Handler() http.Handler {
 		mux.HandleFunc("/admin/admission-canary/clear-admitted-tuple", s.handleAdmissionCanaryClearAdmittedTuple)
 		mux.HandleFunc("/admin/admission-canary/proof-of-weights", s.handleAdmissionCanaryProofOfWeights)
 	}
+	mux.HandleFunc("/admin/model-admission/decisions", s.handleAdminModelAdmissionDecisions)
+	mux.HandleFunc("/admin/model-admission/decisions/", s.handleAdminModelAdmissionApprove)
+	mux.HandleFunc("/admin/model-admission/offers", s.handleAdminModelAdmissionOffers)
 	mux.HandleFunc("/v1/provider/model-admission/offers", s.handleProviderModelAdmissionOffer)
 	mux.HandleFunc("/v1/provider/model-admission/withdrawals", s.handleProviderModelAdmissionWithdrawal)
 	mux.HandleFunc("/v1/provider/model-admission/status", s.handleProviderModelAdmissionStatus)
@@ -3524,6 +3712,26 @@ func (s *Server) belowModelVersionFloor(p pool.Provider, gate string) bool {
 // TOCTOU is covered by the bounded revalidation sweep, which evicts (never
 // refuses) a session whose trust lapsed after it was committed.
 func (s *Server) registerProviderSession(conn net.Conn, entry *pool.Provider) (*providerSession, pool.RegisterRefusal) {
+	var (
+		session *providerSession
+		refusal pool.RegisterRefusal
+	)
+	// SPEC-047-R001/R006: the session replacement, the (a)/(d) evaluation
+	// against the candidate the replaced session's binding named, and the
+	// new binding are one linearization point under the provider's section
+	// (section → registry): no decision observes the new session before it
+	// was evaluated.
+	s.withProviderSection(entry.ProviderID, func(section *providerSection) {
+		prior, hadPrior := s.pool.Resolve(entry.ProviderID, "")
+		session, refusal = s.registerProviderSessionLocked(conn, entry)
+		if session != nil {
+			s.helloSessionBindingLocked(entry.ProviderID, prior, hadPrior, section)
+		}
+	})
+	return session, refusal
+}
+
+func (s *Server) registerProviderSessionLocked(conn net.Conn, entry *pool.Provider) (*providerSession, pool.RegisterRefusal) {
 	s.autotuneCatalogBridgeMu.Lock()
 	defer s.autotuneCatalogBridgeMu.Unlock()
 	if entry.CatalogAdmissionMode == "legacy_bridge" && !s.autotuneCatalogBridgeActive() {
@@ -4400,7 +4608,7 @@ func (s *Server) runModelAdmissionSyntheticProbe(ctx context.Context, current Mo
 		if !ok {
 			return ModelAdmissionEvent{}, errors.New("invalid model admission sandbox probe transition")
 		}
-		stored, err := s.modelAdmissions.AppendModelAdmissionDecision(ctx, decision)
+		stored, err := s.appendModelAdmissionDecisionInSection(ctx, decision)
 		if err != nil {
 			return ModelAdmissionEvent{}, err
 		}
@@ -4467,7 +4675,7 @@ func (s *Server) appendModelAdmissionSyntheticProbeResult(ctx context.Context, c
 	if !ok {
 		return ModelAdmissionEvent{}, errors.New("invalid model admission synthetic probe result")
 	}
-	return s.modelAdmissions.AppendModelAdmissionDecision(ctx, decision)
+	return s.appendModelAdmissionDecisionInSection(ctx, decision)
 }
 
 func (s *Server) runWSWarmupGateAttempt(ctx context.Context, provider pool.Provider, attempt int, body []byte) bool {
@@ -5403,31 +5611,48 @@ func (s *Server) handleHeartbeat(conn net.Conn, providerID, assignedID string, p
 			Int("effective_slots_total", capacity.SlotsTotal).
 			Msg("provider capacity claim exceeds the operator ceiling; clamped")
 	}
-	heartbeatResult := s.pool.ApplyHeartbeatDetailed(providerID, assignedID, pool.HeartbeatUpdate{
-		Status:                    state,
-		ModelID:                   hb.ModelID,
-		ModelParamsB:              hb.ModelParamsB,
-		RAMGB:                     hb.RAMGB,
-		MaxContextTokens:          hb.MaxContextTokens,
-		MaxConcurrency:            capacity.MaxConcurrency,
-		SlotsFree:                 capacity.SlotsFree,
-		SlotsTotal:                capacity.SlotsTotal,
-		ThroughputTPSEstimate:     hb.ThroughputTPSEstimate,
-		RequestsServedSinceLast:   hb.RequestsServedSinceLast,
-		ThroughputTPSSinceLast:    hb.ThroughputTPSSinceLast,
-		ModelHash:                 hb.ModelHash,
-		ModelHashPresent:          presence.ModelHash,
-		ModelHashAlgorithm:        hb.ModelHashAlgorithm,
-		ModelHashAlgorithmPresent: presence.ModelHashAlgorithm,
-		WeightsManifestSHA256:     hb.WeightsManifestSHA256,
-		WeightsHashAlgorithm:      hb.WeightsHashAlgorithm,
-		ExpectedModelHash:         expectedModelHash,
-		Loading:                   hb.Loading,
-		LoadingPresent:            presence.Loading,
-		LastAutoupdateEvent:       hb.LastAutoupdateEvent,
-		HardwareCapacity:          poolHardwareCapacity(hb.HardwareSummary),
-		SafetyTelemetry:           hb.SafetyTelemetry,
-		At:                        s.now(),
+	// SPEC-047-R006(a)/(d): the registry mutation and the drift evaluation of
+	// the bound candidate are one linearization point under the provider's
+	// section (section → registry), so no decision or binding refresh
+	// observes the changed identity before it was evaluated.
+	var heartbeatResult pool.HeartbeatResult
+	s.withProviderSection(providerID, func(section *providerSection) {
+		var (
+			priorBinding    pool.ModelAdmissionBinding
+			hadPriorBinding bool
+		)
+		if before, ok := s.pool.Resolve(providerID, assignedID); ok {
+			priorBinding, hadPriorBinding = before.ModelAdmissionBinding()
+		}
+		heartbeatResult = s.pool.ApplyHeartbeatDetailed(providerID, assignedID, pool.HeartbeatUpdate{
+			Status:                    state,
+			ModelID:                   hb.ModelID,
+			ModelParamsB:              hb.ModelParamsB,
+			RAMGB:                     hb.RAMGB,
+			MaxContextTokens:          hb.MaxContextTokens,
+			MaxConcurrency:            capacity.MaxConcurrency,
+			SlotsFree:                 capacity.SlotsFree,
+			SlotsTotal:                capacity.SlotsTotal,
+			ThroughputTPSEstimate:     hb.ThroughputTPSEstimate,
+			RequestsServedSinceLast:   hb.RequestsServedSinceLast,
+			ThroughputTPSSinceLast:    hb.ThroughputTPSSinceLast,
+			ModelHash:                 hb.ModelHash,
+			ModelHashPresent:          presence.ModelHash,
+			ModelHashAlgorithm:        hb.ModelHashAlgorithm,
+			ModelHashAlgorithmPresent: presence.ModelHashAlgorithm,
+			WeightsManifestSHA256:     hb.WeightsManifestSHA256,
+			WeightsHashAlgorithm:      hb.WeightsHashAlgorithm,
+			ExpectedModelHash:         expectedModelHash,
+			Loading:                   hb.Loading,
+			LoadingPresent:            presence.Loading,
+			LastAutoupdateEvent:       hb.LastAutoupdateEvent,
+			HardwareCapacity:          poolHardwareCapacity(hb.HardwareSummary),
+			SafetyTelemetry:           hb.SafetyTelemetry,
+			At:                        s.now(),
+		})
+		if heartbeatResult.OK {
+			s.heartbeatSessionEvaluationLocked(*heartbeatResult.Provider, priorBinding, hadPriorBinding, section)
+		}
 	})
 	entry, gap, ok := heartbeatResult.Provider, heartbeatResult.Gap, heartbeatResult.OK
 	if !ok {
@@ -5543,7 +5768,7 @@ func (s *Server) revokeSettlementAdmissionForHeartbeatModelDrift(provider pool.P
 		if !drifted {
 			continue
 		}
-		if _, err := s.modelAdmissions.AppendModelAdmissionDecision(ctx, revocation); err != nil {
+		if _, err := s.appendModelAdmissionDecisionInSection(ctx, revocation); err != nil {
 			s.log.Warn().
 				Err(err).
 				Str("provider_id", provider.ProviderID).
@@ -5968,6 +6193,7 @@ func (s *Server) markDegradedForWarmup(providerID, assignedID string) {
 }
 
 func (s *Server) handleDisconnect(providerID, assignedID string) {
+	s.clearModelAdmissionBindingOnDisconnect(providerID, assignedID)
 	s.clearWarmupGate(providerID, assignedID)
 	s.clearRewardsTrustLookupFailure(providerID, assignedID)
 	s.resetSupervisorDwellOnDisconnect(providerID)

@@ -1018,7 +1018,7 @@ func TestBYOMSettlementCapableBindsAdmissionEventIntoRouteSnapshot(t *testing.T)
 	provider := byomAdmissionProvider(t, registry.Snapshot()[0])
 	store := providerws.NewMemoryModelAdmissionStore()
 	event := seedBYOMAdmissionState(t, store, provider, "settlement_capable")
-	routeProvider := clearBYOMAdmissionFields(provider)
+	routeProvider := bindBYOMSession(clearBYOMAdmissionFields(provider), event)
 	registry.Register(&routeProvider, nil)
 	server := buyer.NewServer(
 		registry,
@@ -1028,6 +1028,7 @@ func TestBYOMSettlementCapableBindsAdmissionEventIntoRouteSnapshot(t *testing.T)
 		buyer.WithBilling(billingStore, cfg),
 		buyer.WithBillingSnapshotID(snapshotID),
 		buyer.WithModelAdmissionStore(store),
+		buyer.WithModelAdmissionRouteGuard(testRouteGuard{registry: registry, store: store}),
 	)
 
 	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`), nil)
@@ -1230,7 +1231,7 @@ func TestBYOMReadmissionRotatesRouteSnapshotAdmissionEvent(t *testing.T) {
 	provider := byomAdmissionProvider(t, registry.Snapshot()[0])
 	store := providerws.NewMemoryModelAdmissionStore()
 	first := seedBYOMAdmissionState(t, store, provider, "settlement_capable")
-	routeProvider := clearBYOMAdmissionFields(provider)
+	routeProvider := bindBYOMSession(clearBYOMAdmissionFields(provider), first)
 	registry.Register(&routeProvider, nil)
 	server := buyer.NewServer(
 		registry,
@@ -1240,6 +1241,7 @@ func TestBYOMReadmissionRotatesRouteSnapshotAdmissionEvent(t *testing.T) {
 		buyer.WithBilling(billingStore, cfg),
 		buyer.WithBillingSnapshotID(snapshotID),
 		buyer.WithModelAdmissionStore(store),
+		buyer.WithModelAdmissionRouteGuard(testRouteGuard{registry: registry, store: store}),
 	)
 
 	firstRR := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`), nil)
@@ -1263,7 +1265,7 @@ func TestBYOMReadmissionRotatesRouteSnapshotAdmissionEvent(t *testing.T) {
 	if second.CoordinatorEventID == first.CoordinatorEventID {
 		t.Fatal("readmission reused coordinator event id")
 	}
-	routeProvider = clearBYOMAdmissionFields(provider)
+	routeProvider = bindBYOMSession(clearBYOMAdmissionFields(provider), second)
 	registry.Register(&routeProvider, nil)
 	slotsFree := 1
 	registry.ApplyStateUpdate(provider.ProviderID, provider.AssignedID, pool.StateUpdate{State: pool.StateReady, SlotsFree: &slotsFree, At: time.Now().UTC()})
@@ -1815,6 +1817,41 @@ func byomAdmissionProvider(t *testing.T, provider pool.Provider) pool.Provider {
 	return provider
 }
 
+// testRouteGuard stands in for the coordinator's SPEC-047-R001 route-time
+// compare-and-insert in buyer unit tests: the head and the registry binding
+// are re-read immediately before the insert (the production guard adds the
+// release read lock and the binding/release generations).
+type testRouteGuard struct {
+	registry *pool.Registry
+	store    providerws.ModelAdmissionStore
+}
+
+func (g testRouteGuard) CompareAndInsertModelAdmissionRouteSnapshot(ctx context.Context, expect providerws.ModelAdmissionRouteExpectation, insert func() error) error {
+	head, found, err := g.store.LatestModelAdmissionStatus(ctx, expect.ProviderID, expect.CandidateID)
+	if err != nil || !found || head.CoordinatorEventID != expect.CoordinatorEventID || head.State != "settlement_capable" {
+		return providerws.ErrModelAdmissionRouteStale
+	}
+	provider, ok := g.registry.Resolve(expect.ProviderID, "")
+	if !ok || provider.ModelAdmissionCandidateID != expect.CandidateID || provider.ModelAdmissionCoordinatorEventID != expect.CoordinatorEventID {
+		return providerws.ErrModelAdmissionRouteStale
+	}
+	return insert()
+}
+
+// bindBYOMSession installs the coordinator-derived session-to-candidate
+// binding (SPEC-047-R003 v0.1.5) a live session carries for the candidate's
+// latest event: default routing and settlement require it.
+func bindBYOMSession(provider pool.Provider, event providerws.ModelAdmissionEvent) pool.Provider {
+	provider.ModelAdmissionCandidateID = event.CandidateID
+	provider.ModelAdmissionCoordinatorEventID = event.CoordinatorEventID
+	provider.ModelAdmissionServedModelRef = event.ServedModelRef
+	provider.ModelAdmissionCatalogModelKey = event.CatalogModelKey
+	provider.ModelAdmissionDiscoveryDigestSHA256 = event.DiscoveryDigestSHA256
+	provider.ModelAdmissionEvaluationDigestSHA256 = event.EvaluationDigestSHA256
+	provider.ModelAdmissionCatalogRowStatus = "recommendable"
+	return provider
+}
+
 func clearBYOMAdmissionFields(provider pool.Provider) pool.Provider {
 	provider.ModelAdmissionCandidateID = ""
 	provider.ModelAdmissionServedModelRef = ""
@@ -1906,6 +1943,7 @@ func seedBYOMAdmissionStateWithSuffix(t *testing.T, store providerws.ModelAdmiss
 		PayloadDigestSHA256:      strings.Repeat("d", 64),
 		SignatureDigestSHA256:    strings.Repeat("e", 64),
 		CreatedAt:                time.Unix(1800000000, 0).UTC(),
+		RuntimeSource:            "mlx_cache",
 	}
 	stored, _, err := store.AppendModelAdmissionOffer(context.Background(), offer)
 	if err != nil {
@@ -1935,6 +1973,9 @@ func seedBYOMAdmissionStateWithSuffix(t *testing.T, store providerws.ModelAdmiss
 	settlement.PayloadDigestSHA256 = strings.Repeat("1", 64)
 	settlement.CreatedAt = time.Unix(1800000020, 0).UTC()
 	settlement = withBYOMTrustedCatalogDecisionFields(t, settlement, provider)
+	// SPEC-047-R003 v0.1.5: a settlement decision binds the session's member
+	// (the row's own pair for a primary-row session).
+	settlement.BoundMemberSource = "candidate_row"
 	stored, err = store.AppendModelAdmissionDecision(context.Background(), settlement)
 	if err != nil {
 		t.Fatalf("AppendModelAdmissionDecision(%s): %v", state, err)

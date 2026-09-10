@@ -144,7 +144,48 @@ var (
 	defaultCatalog atomic.Pointer[Catalog]
 
 	nowUTC = func() time.Time { return time.Now().UTC() }
+
+	// releasePublisher, when set, receives every validated reload instead of
+	// an immediate singleton swap, so the Tier-2 material becomes visible in
+	// the SAME atomic release publication as the admission catalog, the
+	// artifact feeds, and the identity sets (SPEC-047-R001 v0.1.5). The
+	// staged pointer is remembered so PublishStaged can promote exactly the
+	// catalog ConfigureDefaultStrict validated and nothing else.
+	releasePublisher atomic.Pointer[releasePublisherBox]
+	stagedCatalog    atomic.Pointer[Catalog]
 )
+
+// ReleasePublisher is implemented by the coordinator's release-snapshot
+// owner (the provider WebSocket server): StageTier2 receives a validated
+// catalog and the publisher later promotes it with PublishStaged.
+type ReleasePublisher interface {
+	StageTier2(next *Catalog)
+}
+
+type releasePublisherBox struct{ p ReleasePublisher }
+
+// SetReleasePublisher registers the release-snapshot owner; nil restores the
+// immediate-swap behaviour (tests, standalone tools).
+func SetReleasePublisher(p ReleasePublisher) {
+	if p == nil {
+		releasePublisher.Store(nil)
+		return
+	}
+	releasePublisher.Store(&releasePublisherBox{p: p})
+}
+
+// PublishStaged promotes a catalog previously staged by ConfigureDefaultStrict
+// to the package singleton. Any other pointer is refused: this is not a
+// generic swap (M3-8d audit MEDIUM), only the second half of a validated
+// reload whose first half was staged.
+func PublishStaged(c *Catalog) bool {
+	if c == nil || stagedCatalog.Load() != c {
+		return false
+	}
+	stagedCatalog.Store(nil)
+	setDefault(c)
+	return true
+}
 
 func init() {
 	defaultCatalog.Store(NewCatalog())
@@ -218,6 +259,11 @@ func ConfigureDefaultStrict(cfg config.Tier2Config, logger zerolog.Logger, guard
 		if err := guard(next); err != nil {
 			return nil, err
 		}
+	}
+	if box := releasePublisher.Load(); box != nil && box.p != nil {
+		stagedCatalog.Store(next)
+		box.p.StageTier2(next)
+		return next, nil
 	}
 	setDefault(next)
 	return next, nil

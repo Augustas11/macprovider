@@ -707,24 +707,42 @@ func validOperatorActor(actor string) bool {
 }
 
 func (s *Server) authorizedProviderAuthPolicyOperator(r *http.Request) (string, bool) {
+	// Every entry is compared: a bearer that matches more than one actor
+	// carries no attribution (a duplicated secret would otherwise resolve to
+	// a map-order-random identity and defeat dual control), so it is
+	// refused outright.
+	matched := ""
+	matches := 0
 	for actorID, operatorKey := range s.cfg.Auth.OperatorKeys {
 		if !auth.OperatorOnlyBearerMatches(r.Header, operatorKey) {
 			continue
 		}
-		actor := normalizedOperatorActor(actorID)
-		if !validOperatorActor(actor) {
-			return "", false
-		}
-		s.log.Info().
-			Str("event", "internal_bearer_accepted").
-			Str("key", "operator_keys").
-			Str("actor", actor).
-			Str("path", r.URL.Path).
-			Str("remote_addr", r.RemoteAddr).
-			Msg("internal bearer accepted")
-		return actor, true
+		matches++
+		matched = actorID
 	}
-	return "", false
+	if matches != 1 {
+		if matches > 1 {
+			s.log.Warn().
+				Str("event", "internal_bearer_ambiguous").
+				Str("key", "operator_keys").
+				Str("path", r.URL.Path).
+				Str("remote_addr", r.RemoteAddr).
+				Msg("operator bearer matches more than one actor; refused")
+		}
+		return "", false
+	}
+	actor := normalizedOperatorActor(matched)
+	if !validOperatorActor(actor) {
+		return "", false
+	}
+	s.log.Info().
+		Str("event", "internal_bearer_accepted").
+		Str("key", "operator_keys").
+		Str("actor", actor).
+		Str("path", r.URL.Path).
+		Str("remote_addr", r.RemoteAddr).
+		Msg("internal bearer accepted")
+	return actor, true
 }
 
 func normalizedOperatorActor(actorID string) string {

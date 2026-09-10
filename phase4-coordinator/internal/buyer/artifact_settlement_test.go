@@ -24,7 +24,7 @@ func ggufArtifactBinding() *artifactidentity.Binding {
 	return &artifactidentity.Binding{
 		Member: artifactidentity.Member{
 			ModelKey: "model-a-key", ModelID: "model-a", ArtifactID: "gguf-q4", HashAlgorithm: modelidentity.GGUFFileV1,
-			Hash: strings.Repeat("c", 64), RuntimeStatus: "recommendable",
+			Hash: strings.Repeat("c", 64), RuntimeStatus: "recommendable", AllowedRuntimeSources: "llamacpp_loopback,ollama_loopback",
 		},
 		Provenance: artifactidentity.Provenance{
 			FeedSHA256: strings.Repeat("a", 64), SignerKeyID: "streamvc-autotune-static-v4",
@@ -55,6 +55,7 @@ func seedBYOMArtifactSettlementState(t *testing.T, store providerws.ModelAdmissi
 	}
 	decision := offer
 	decision.State = "catalog_priced"
+	decision.RuntimeSource = "ollama_loopback"
 	decision.RequestID = "decision-catalog-priced-artifact"
 	decision.Nonce = "nonce-catalog-priced-artifact"
 	decision.PayloadDigestSHA256 = strings.Repeat("f", 64)
@@ -78,6 +79,15 @@ func seedBYOMArtifactSettlementState(t *testing.T, store providerws.ModelAdmissi
 	settlement.Nonce = "nonce-artifact-" + state
 	settlement.PayloadDigestSHA256 = strings.Repeat("1", 64)
 	settlement.CreatedAt = time.Unix(1800000020, 0).UTC()
+	// SPEC-047-R003 v0.1.5: a settlement_capable decision binds the session's
+	// feed member as the settlement identity with its six values.
+	settlement.BoundMemberSource = "artifact_feed"
+	settlement.ArtifactID = binding.Member.ArtifactID
+	settlement.ArtifactHash = binding.Member.Hash
+	settlement.ArtifactHashAlgorithm = binding.Member.HashAlgorithm
+	settlement.ArtifactFeedSHA256 = binding.Provenance.FeedSHA256
+	settlement.ArtifactFeedSignerKeyID = binding.Provenance.SignerKeyID
+	settlement.ArtifactCandidateCatalogSHA256 = binding.Provenance.CandidateCatalogSHA256
 	stored, err = store.AppendModelAdmissionDecision(context.Background(), settlement)
 	if err != nil {
 		t.Fatalf("AppendModelAdmissionDecision(%s): %v", state, err)
@@ -107,6 +117,7 @@ func artifactSettlementServer(t *testing.T, provider pool.Provider, registry *po
 		buyer.WithBilling(billingStore, cfg),
 		buyer.WithBillingSnapshotID(snapshotID),
 		buyer.WithModelAdmissionStore(store),
+		buyer.WithModelAdmissionRouteGuard(testRouteGuard{registry: registry, store: store}),
 	), dbPath
 }
 
@@ -130,7 +141,7 @@ func TestBYOMArtifactMemberSettlesWithSixValueEvidence(t *testing.T) {
 	store := providerws.NewMemoryModelAdmissionStore()
 	event := seedBYOMArtifactSettlementState(t, store, provider, binding, "settlement_capable")
 
-	routeProvider := clearBYOMAdmissionFields(provider)
+	routeProvider := bindBYOMSession(clearBYOMAdmissionFields(provider), event)
 	routeProvider.ModelHash = binding.Member.Hash
 	routeProvider.ModelHashAlgorithm = binding.Member.HashAlgorithm
 	routeProvider.ExpectedModelHash = buyerTestHash // the admitted ROW stays session authority (R004)
@@ -196,8 +207,8 @@ func TestBYOMGGUFPairWithoutArtifactBindingNeverSettles(t *testing.T) {
 			provider := byomAdmissionProvider(t, registry.Snapshot()[0])
 			binding := ggufArtifactBinding()
 			store := providerws.NewMemoryModelAdmissionStore()
-			seedBYOMArtifactSettlementState(t, store, provider, binding, "settlement_capable")
-			routeProvider := clearBYOMAdmissionFields(provider)
+			event := seedBYOMArtifactSettlementState(t, store, provider, binding, "settlement_capable")
+			routeProvider := bindBYOMSession(clearBYOMAdmissionFields(provider), event)
 			routeProvider.ModelHash = binding.Member.Hash
 			routeProvider.ModelHashAlgorithm = binding.Member.HashAlgorithm
 			routeProvider.ExpectedModelHash = buyerTestHash
@@ -242,8 +253,8 @@ func TestBYOMArtifactMemberRouteTimeGatesFailClosed(t *testing.T) {
 			provider := byomAdmissionProvider(t, registry.Snapshot()[0])
 			binding := ggufArtifactBinding()
 			store := providerws.NewMemoryModelAdmissionStore()
-			seedBYOMArtifactSettlementState(t, store, provider, binding, "settlement_capable")
-			routeProvider := clearBYOMAdmissionFields(provider)
+			event := seedBYOMArtifactSettlementState(t, store, provider, binding, "settlement_capable")
+			routeProvider := bindBYOMSession(clearBYOMAdmissionFields(provider), event)
 			routeProvider.ModelHash = binding.Member.Hash
 			routeProvider.ModelHashAlgorithm = binding.Member.HashAlgorithm
 			routeProvider.ExpectedModelHash = buyerTestHash

@@ -168,8 +168,12 @@ func (b *billingRecorder) recordRouteSnapshot(providerBody []byte, provider pool
 	snapshot.ComputeIntegrityCaptureRequired = computeIntegrityRequired
 	snapshot.ComputeIntegritySamplingCovered = computeIntegrityCovered
 	snapshot.ComputeIntegrityHardwareDigest = computeIntegrityHardwareDigest
-	digest, err := store.InsertRouteSnapshot(ctx, snapshot)
-	if err != nil {
+	var digest string
+	if err := b.server.insertBYOMRouteSnapshot(ctx, provider, byomBinding, func() error {
+		inserted, err := store.InsertRouteSnapshot(ctx, snapshot)
+		digest = inserted
+		return err
+	}); err != nil {
 		return nil, err
 	}
 	b.settlementAttemptN = attemptN

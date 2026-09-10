@@ -111,12 +111,21 @@ func TestAutotuneFeedsObserverReceivesEachRuntimePublish(t *testing.T) {
 		t.Fatal(err)
 	}
 	var observed []string
-	server := buyer.NewServer(nil, zerolog.Nop(), time.Unix(1716768000, 0), buyer.WithAutotuneFeedsObserver(func(published buyer.AutotuneFeeds) {
+	var server *buyer.Server
+	server = buyer.NewServer(nil, zerolog.Nop(), time.Unix(1716768000, 0), buyer.WithAutotuneFeedsObserver(func(published buyer.AutotuneFeeds, commit func()) {
 		index, err := buyer.BuildArtifactIdentityIndex(published)
 		if err != nil {
 			t.Fatal(err)
 		}
 		observed = append(observed, index.Provenance().FeedSHA256)
+		// The served bytes change only when the publisher commits them.
+		if before := server.AutotuneFeedsForTest(); string(before.CatalogArtifactsJSON) == string(published.CatalogArtifactsJSON) && len(published.CatalogArtifactsJSON) > 0 && len(observed) == 1 {
+			t.Fatal("feed bytes must not be served before the publisher commits them")
+		}
+		commit()
+		if after := server.AutotuneFeedsForTest(); string(after.CatalogArtifactsJSON) != string(published.CatalogArtifactsJSON) {
+			t.Fatal("commit must install the published bytes")
+		}
 	}))
 	server.SetAutotuneFeeds(feeds)
 	if len(observed) != 1 || observed[0] != feeds.CatalogArtifactsVerification.SHA256 {

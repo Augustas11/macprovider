@@ -12,66 +12,57 @@ import (
 	providerws "github.com/augstar/macprovider-coordinator/internal/ws"
 )
 
+// ModelAdmissionRouteGuard is the SPEC-047-R001 v0.1.5 route-time
+// compare-and-insert: under the coordinator's release read lock it re-reads
+// the candidate's head, the session binding and the provider's binding
+// generation immediately before the route snapshot insert and fails the
+// attempt closed on any difference. The ws server implements it.
+type ModelAdmissionRouteGuard interface {
+	CompareAndInsertModelAdmissionRouteSnapshot(context.Context, providerws.ModelAdmissionRouteExpectation, func() error) error
+}
+
+// byomAdmissionCandidate reports whether the session carries a
+// coordinator-derived session-to-candidate binding (SPEC-047-R003 v0.1.5).
+// Provider-reported names and keys are never a binding.
 func byomAdmissionCandidate(p pool.Provider) bool {
-	return strings.TrimSpace(p.ModelAdmissionCandidateID) != "" ||
-		strings.TrimSpace(p.ModelAdmissionServedModelRef) != "" ||
-		strings.TrimSpace(p.ModelAdmissionCatalogModelKey) != ""
+	return strings.TrimSpace(p.ModelAdmissionCandidateID) != ""
 }
 
 func (s *Server) byomDefaultPaidRoutingEligible(p pool.Provider) bool {
-	marked := byomAdmissionCandidate(p)
+	bound := byomAdmissionCandidate(p)
 	// SPEC-010-R007(d): a session bound to a feed member routes only with the
 	// admission evidence its route snapshot must carry (which needs a store).
 	if p.ArtifactIdentity != nil && (s == nil || s.modelAdmissionStore == nil) {
 		return false
 	}
 	if s == nil || s.modelAdmissionStore == nil {
-		return !marked
+		return !bound
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), requestLogWriteTimeout)
 	defer cancel()
 	material, ok := tier2.SnapshotMaterial(p.ModelID, byomMaterialHash(p))
 	if !ok {
-		_, found, err := s.modelAdmissionStore.LatestModelAdmissionRouteStatus(
-			ctx,
-			p.ProviderID,
-			"",
-			"",
-		)
-		if err != nil || found {
-			return false
-		}
-		return byomLegacyRoutingEligible(p, marked)
+		return s.byomLegacyRoutingEligible(ctx, p)
 	}
 	_, found, eligible := s.byomRouteSnapshotBinding(ctx, p, material)
 	if found {
 		return eligible
 	}
-	return byomLegacyRoutingEligible(p, marked)
+	return s.byomLegacyRoutingEligible(ctx, p)
 }
 
-// byomLegacyRoutingEligible is the v0.1 default for a session with no
-// admission record: routable unless it marked itself as a BYOM candidate.
-// SPEC-010-R007(d): a session bound to a feed member routes only with the
-// admission evidence its route snapshot must carry, so it is excluded here
-// on every fallback — never dispatched to fail at the snapshot.
-func byomLegacyRoutingEligible(p pool.Provider, marked bool) bool {
-	return !marked && p.ArtifactIdentity == nil
-}
-
-// byomCatalogModelKey is the admission catalog key a route-time lookup and
-// predicate name for a session: the key the session asserted; else, for a
-// session bound to a feed member, the member's row KEY (what a decision that
-// resolved the member records); else tier-2's normalized row model id. The
-// member's ModelID is compared separately against the tier-2 row.
-func byomCatalogModelKey(p pool.Provider, material tier2.RouteSnapshotMaterial) string {
-	if asserted := strings.ToLower(strings.TrimSpace(p.ModelAdmissionCatalogModelKey)); asserted != "" {
-		return asserted
+// byomLegacyRoutingEligible is the non-BYOM session path: a session with no
+// binding routes as an ordinary catalog session only when its provider has
+// no admission record at all — a provider with candidates and no binding is
+// never routed by default (served-model-name or asserted-key lookups are
+// never a fallback, SPEC-047-R003 v0.1.5). SPEC-010-R007(d): a session bound
+// to a feed member is excluded on every fallback.
+func (s *Server) byomLegacyRoutingEligible(ctx context.Context, p pool.Provider) bool {
+	if byomAdmissionCandidate(p) || p.ArtifactIdentity != nil {
+		return false
 	}
-	if binding := p.ArtifactIdentity; binding != nil {
-		return binding.Member.ModelKey
-	}
-	return strings.ToLower(strings.TrimSpace(material.CatalogModelKey))
+	_, found, err := s.modelAdmissionStore.LatestModelAdmissionRouteStatus(ctx, p.ProviderID, "", "")
+	return err == nil && !found
 }
 
 // byomMaterialHash is the tier-2 material lookup digest for a session: the
@@ -85,60 +76,33 @@ func byomMaterialHash(p pool.Provider) string {
 	return strings.TrimSpace(p.ModelHash)
 }
 
+// byomRouteSnapshotBinding resolves the session's BOUND candidate: its
+// latest event must be the binding's head and settlement_capable, the
+// session's verified pair (and artifact id, for a feed member) must equal
+// the decision's bound member by CONTENT, and the route-time snapshot
+// carries the session's CURRENT binding provenance. Returns (binding,
+// found, eligible): found=false only when the session carries no binding.
 func (s *Server) byomRouteSnapshotBinding(ctx context.Context, p pool.Provider, material tier2.RouteSnapshotMaterial) (providerws.ModelAdmissionSettlementBinding, bool, bool) {
-	if s == nil || s.modelAdmissionStore == nil {
+	if s == nil || s.modelAdmissionStore == nil || !byomAdmissionCandidate(p) {
 		return providerws.ModelAdmissionSettlementBinding{}, false, false
 	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	marked := byomAdmissionCandidate(p)
 	candidateID := strings.TrimSpace(p.ModelAdmissionCandidateID)
-	servedModelRef := strings.TrimSpace(p.ModelAdmissionServedModelRef)
-	if servedModelRef == "" {
-		servedModelRef = strings.TrimSpace(p.ModelID)
-	}
-	catalogModelKey := byomCatalogModelKey(p, material)
-
-	var (
-		event providerws.ModelAdmissionEvent
-		found bool
-		err   error
-	)
-	if candidateID != "" {
-		event, found, err = s.modelAdmissionStore.LatestModelAdmissionStatus(ctx, p.ProviderID, candidateID)
-	} else if marked {
-		event, found, err = s.modelAdmissionStore.LatestModelAdmissionRouteStatus(ctx, p.ProviderID, servedModelRef, catalogModelKey)
-	} else {
-		event, found, err = s.modelAdmissionStore.LatestModelAdmissionRouteStatus(ctx, p.ProviderID, servedModelRef, catalogModelKey)
-		if err == nil && !found {
-			event, found, err = s.modelAdmissionStore.LatestModelAdmissionRouteStatus(ctx, p.ProviderID, "", catalogModelKey)
-		}
-		if err == nil && !found {
-			_, providerFound, providerErr := s.modelAdmissionStore.LatestModelAdmissionRouteStatus(ctx, p.ProviderID, "", "")
-			if providerErr != nil || providerFound {
-				return providerws.ModelAdmissionSettlementBinding{}, true, false
-			}
-		}
-	}
+	event, found, err := s.modelAdmissionStore.LatestModelAdmissionStatus(ctx, p.ProviderID, candidateID)
 	if err != nil || !found {
-		if err != nil {
-			return providerws.ModelAdmissionSettlementBinding{}, true, false
-		}
-		return providerws.ModelAdmissionSettlementBinding{}, false, false
+		return providerws.ModelAdmissionSettlementBinding{}, true, false
 	}
-	if marked {
-		if candidateID != "" && event.CandidateID != candidateID {
-			return providerws.ModelAdmissionSettlementBinding{}, true, false
-		}
-		if explicitServed := strings.TrimSpace(p.ModelAdmissionServedModelRef); explicitServed != "" && event.ServedModelRef != explicitServed {
-			return providerws.ModelAdmissionSettlementBinding{}, true, false
-		}
-		if explicitCatalogKey := strings.ToLower(strings.TrimSpace(p.ModelAdmissionCatalogModelKey)); explicitCatalogKey != "" && event.CatalogModelKey != explicitCatalogKey {
-			return providerws.ModelAdmissionSettlementBinding{}, true, false
-		}
+	// Route-time event-id equality: the binding must name the candidate's
+	// latest event (a revocation refreshes the binding to the terminal event).
+	if event.CoordinatorEventID == "" || event.CoordinatorEventID != strings.TrimSpace(p.ModelAdmissionCoordinatorEventID) {
+		return providerws.ModelAdmissionSettlementBinding{}, true, false
 	}
 	if !s.byomSettlementPrereqsReady(p, material) {
+		return providerws.ModelAdmissionSettlementBinding{}, true, false
+	}
+	if !byomBoundMemberMatchesSession(p, event) {
 		return providerws.ModelAdmissionSettlementBinding{}, true, false
 	}
 	expectedAlgorithm, expectedHash := byomExpectedIdentity(p, material)
@@ -146,7 +110,7 @@ func (s *Server) byomRouteSnapshotBinding(ctx context.Context, p pool.Provider, 
 		ProviderID:                        p.ProviderID,
 		CandidateID:                       event.CandidateID,
 		ServedModelRef:                    event.ServedModelRef,
-		CatalogModelKey:                   byomCatalogModelKey(p, material),
+		CatalogModelKey:                   strings.ToLower(strings.TrimSpace(p.ModelAdmissionCatalogModelKey)),
 		DiscoveryDigestSHA256:             event.DiscoveryDigestSHA256,
 		EvaluationDigestSHA256:            event.EvaluationDigestSHA256,
 		CatalogID:                         material.CatalogID,
@@ -161,6 +125,31 @@ func (s *Server) byomRouteSnapshotBinding(ctx context.Context, p pool.Provider, 
 	return binding, true, ok
 }
 
+// byomBoundMemberMatchesSession compares the decision's bound member to the
+// session's verified identity by CONTENT: a feed member needs the session's
+// feed binding for the same artifact id; a candidate_row member (or a
+// pre-v0.1.5 record, which bound the row) needs the primary-row session.
+func byomBoundMemberMatchesSession(p pool.Provider, event providerws.ModelAdmissionEvent) bool {
+	switch event.BoundMemberSource {
+	case "artifact_feed":
+		// SPEC-047-R003(ii) defence in depth: the member must still allow
+		// the recorded runtime source (the sweep revokes on reload; the
+		// route re-checks before any snapshot).
+		return p.ArtifactIdentity != nil &&
+			p.ArtifactIdentity.Member.ArtifactID == event.ArtifactID &&
+			p.ArtifactIdentity.Member.HashAlgorithm == event.ExpectedCatalogModelHashAlgorithm &&
+			p.ArtifactIdentity.Member.Hash == event.ExpectedCatalogModelHash &&
+			p.ArtifactIdentity.Member.AllowsRuntimeSource(event.RuntimeSource)
+	case "candidate_row":
+		return p.ArtifactIdentity == nil && event.ExpectedCatalogModelHashAlgorithm == modelidentity.SnapshotManifestV1 &&
+			event.RuntimeSource == "mlx_cache"
+	default:
+		// A record with no bound member source predates v0.1.5: it never
+		// bound a session's member, so it never settles.
+		return false
+	}
+}
+
 func (s *Server) byomSettlementPrereqsReady(p pool.Provider, material tier2.RouteSnapshotMaterial) bool {
 	if s == nil || !s.settlementEnforceMode() {
 		return false
@@ -170,20 +159,26 @@ func (s *Server) byomSettlementPrereqsReady(p pool.Provider, material tier2.Rout
 	if !validProviderReceiptPubkey(p) || !isLowerHex64(reportedHash) {
 		return false
 	}
+	// SPEC-047-R003 v0.1.5 (ii) defence in depth: the coordinator stamps the
+	// bound row's status on the session; a row that is no longer
+	// recommendable stops here even before the linearized revocation lands.
+	if strings.TrimSpace(p.ModelAdmissionCatalogRowStatus) != "recommendable" {
+		return false
+	}
 	// SPEC-010 v1.7 R007: a pair that resolved through the release-bound
 	// artifact feed is the expected identity — the member's exact pair, for
 	// the key the session is admitted for, verified by the heartbeat path.
 	if binding := p.ArtifactIdentity; binding != nil {
-		assertedKey := strings.ToLower(strings.TrimSpace(p.ModelAdmissionCatalogModelKey))
+		boundKey := strings.ToLower(strings.TrimSpace(p.ModelAdmissionCatalogModelKey))
 		return p.ModelHashAlgorithm == binding.Member.HashAlgorithm &&
 			reportedHash == binding.Member.Hash &&
 			modelidentity.CanonicalAlgorithm(binding.Member.HashAlgorithm) &&
 			p.HashStatus == pool.HashStatusVerified &&
 			// The member belongs to the row this session serves (tier-2
-			// material is keyed by the row's model id) and agrees with any
-			// key the session asserted (SPEC-010-R007(c)).
+			// material is keyed by the row's model id) and to the key the
+			// session is bound for (SPEC-010-R007(c)).
 			material.CatalogModelKey == binding.Member.ModelID &&
-			(assertedKey == "" || assertedKey == binding.Member.ModelKey) &&
+			(boundKey == "" || boundKey == binding.Member.ModelKey) &&
 			// SPEC-023 §3.7.4 / AC-CAT-7(iii): a `listed` row stops at
 			// network_visible_unpriced whatever its admission state says.
 			binding.Member.RuntimeStatus == "recommendable" &&
@@ -208,7 +203,8 @@ func byomExpectedIdentity(p pool.Provider, material tier2.RouteSnapshotMaterial)
 }
 
 // byomArtifactPredicate fills the SPEC-047-R003 six values for a
-// feed-derived binding (every member, the primary included).
+// feed-derived binding (every member, the primary included) from the
+// session's CURRENT binding provenance.
 func byomArtifactPredicate(p pool.Provider, predicate *providerws.ModelAdmissionSettlementPredicate) {
 	binding := p.ArtifactIdentity
 	if binding == nil {
@@ -236,6 +232,27 @@ func (s *Server) requireBYOMRouteSnapshotBinding(ctx context.Context, p pool.Pro
 		return providerws.ModelAdmissionSettlementBinding{}, fmt.Errorf("BYOM model admission is not settlement capable")
 	}
 	return binding, nil
+}
+
+// insertBYOMRouteSnapshot performs the SPEC-047-R001 compare-and-insert for
+// a BYOM-bound route through the coordinator's guard (release read lock,
+// head, binding, binding generation, validated release generation). A
+// server composed with an admission store but no guard fails every
+// BYOM-bound route closed: there is no weaker path.
+func (s *Server) insertBYOMRouteSnapshot(ctx context.Context, p pool.Provider, binding providerws.ModelAdmissionSettlementBinding, insert func() error) error {
+	if binding.CandidateID == "" {
+		return insert()
+	}
+	if s.modelAdmissionRouteGuard == nil {
+		return providerws.ErrModelAdmissionRouteStale
+	}
+	return s.modelAdmissionRouteGuard.CompareAndInsertModelAdmissionRouteSnapshot(ctx, providerws.ModelAdmissionRouteExpectation{
+		ProviderID:         p.ProviderID,
+		CandidateID:        binding.CandidateID,
+		CoordinatorEventID: binding.CoordinatorEventID,
+		BindingGeneration:  p.ModelAdmissionBindingGeneration,
+		SessionEpoch:       p.ModelAdmissionSessionEpoch,
+	}, insert)
 }
 
 func applyBYOMRouteSnapshotBinding(snapshot *billing.RouteSnapshot, binding providerws.ModelAdmissionSettlementBinding) {

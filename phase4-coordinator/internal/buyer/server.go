@@ -219,6 +219,7 @@ type Server struct {
 	settlementRelay          SettlementRelayFunc
 	admission                *providerws.AdmissionManager
 	modelAdmissionStore      providerws.ModelAdmissionStore
+	modelAdmissionRouteGuard ModelAdmissionRouteGuard
 	requestTimeout           time.Duration
 	failoverEnabled          bool
 	failoverTimeout          time.Duration
@@ -288,7 +289,7 @@ type Server struct {
 	autotuneFeeds     AutotuneFeeds
 	// autotuneFeedsObserver is notified after every runtime feed publish
 	// (SPEC-010 v1.7 R007 index rebuild on SIGHUP).
-	autotuneFeedsObserver func(AutotuneFeeds)
+	autotuneFeedsObserver func(AutotuneFeeds, func())
 	now                   func() time.Time
 	version               string
 	// terminalObserver is the #766 arbiter observation seam. Nil in
@@ -651,6 +652,14 @@ func WithAdmission(admission *providerws.AdmissionManager, provisionalWeight flo
 func WithModelAdmissionStore(store providerws.ModelAdmissionStore) Option {
 	return func(s *Server) {
 		s.modelAdmissionStore = store
+	}
+}
+
+// WithModelAdmissionRouteGuard wires the coordinator's SPEC-047-R001
+// route-time compare-and-insert for BYOM-bound routes.
+func WithModelAdmissionRouteGuard(guard ModelAdmissionRouteGuard) Option {
+	return func(s *Server) {
+		s.modelAdmissionRouteGuard = guard
 	}
 }
 

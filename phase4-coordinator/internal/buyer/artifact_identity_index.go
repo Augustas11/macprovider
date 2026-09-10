@@ -14,6 +14,45 @@ import (
 // provenance (exact feed digest, authenticated signer, release id, and the
 // candidate-catalog digest it is bound to). A rate-card-bound (four-feed)
 // release yields nil: every consumer then keeps the v1.6 primary-only path.
+// ArtifactIdentitySets is the identity set of every retained release, keyed by
+// the release's candidate-catalog body digest (SPEC-010-R004 v1.8): a session
+// resolves artifact-derived identity only in the set of its OWN admitted
+// release, so a scheduled catalog re-stamp — which retains the previous
+// release as compatible — changes nothing for live sessions.
+type ArtifactIdentitySets map[string]*artifactidentity.Index
+
+// BuildArtifactIdentitySets builds the current release's set and one set per
+// retained previous release that carries an artifact feed; a release without
+// one contributes no set (primary-row path only). A current-release build
+// error is fatal; a previous release's is logged by the caller and skipped,
+// so a bad retained feed never blocks the current release.
+func BuildArtifactIdentitySets(current AutotuneFeeds, previous []AutotuneFeeds) (ArtifactIdentitySets, []error) {
+	sets := ArtifactIdentitySets{}
+	var errs []error
+	index, err := BuildArtifactIdentityIndex(current)
+	if err != nil {
+		return nil, []error{err}
+	}
+	if index != nil {
+		sets[index.Provenance().CandidateCatalogSHA256] = index
+	}
+	for _, feeds := range previous {
+		prev, err := BuildArtifactIdentityIndex(feeds)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		if prev == nil {
+			continue
+		}
+		sha := prev.Provenance().CandidateCatalogSHA256
+		if _, dup := sets[sha]; !dup {
+			sets[sha] = prev
+		}
+	}
+	return sets, errs
+}
+
 func BuildArtifactIdentityIndex(feeds AutotuneFeeds) (*artifactidentity.Index, error) {
 	if !feeds.catalogArtifactsEnabled() {
 		return nil, nil
@@ -54,6 +93,8 @@ func BuildArtifactIdentityIndex(feeds AutotuneFeeds) (*artifactidentity.Index, e
 				Hash:          entry.Hash,
 				IsPrimary:     artifactID == model.PrimaryArtifactID,
 				RuntimeStatus: row.RuntimeStatus,
+				// SPEC-047-R001 v0.1.5 offer-time admissibility and R003(ii).
+				AllowedRuntimeSources: artifactidentity.JoinRuntimeSources(entry.AllowedRuntimeSources),
 			})
 		}
 	}

@@ -12,11 +12,13 @@ import (
 	"math"
 	"net/http"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
 	"unicode/utf8"
 
+	"github.com/augstar/macprovider-coordinator/internal/autotune"
 	"github.com/augstar/macprovider-coordinator/internal/config"
 )
 
@@ -61,6 +63,12 @@ type AutotuneFeeds struct {
 	CatalogArtifactsJSON         []byte
 	CatalogArtifactsSig          []byte
 	CatalogArtifactsVerification AutotuneFeedVerification
+	// SourceConfig is the exact feed configuration these feeds were loaded
+	// from (paths, previous-release target, keyring), so a publication that
+	// needs the retained previous releases resolves them from the SAME
+	// configuration a SIGHUP reload validated — never from boot-time config.
+	// Nil for feeds not produced by LoadAutotuneFeeds.
+	SourceConfig *config.AutotuneFeedsConfig
 }
 
 // AutotuneFeedVerification records the trust decision for the exact bytes
@@ -188,7 +196,85 @@ func LoadAutotuneFeeds(cfg config.AutotuneFeedsConfig) (AutotuneFeeds, error) {
 		CatalogArtifactsJSON:           artifacts.jsonBytes,
 		CatalogArtifactsSig:            artifacts.sigBytes,
 		CatalogArtifactsVerification:   artifacts.verification,
+		SourceConfig:                   &cfg,
 	}, nil
+}
+
+// PreviousAutotuneReleaseTarget resolves the deployer-recorded compatible
+// previous release (`<root>/.previous-target` = "releases/<id>") to that
+// release's directory; "" when none is recorded or it is permanently
+// rejected. Mirrors the coordinator's compatible-catalog resolution.
+func PreviousAutotuneReleaseTarget(cfg config.AutotuneFeedsConfig) (dir string, err error) {
+	if cfg.AutotuneCandidatesPath == "" {
+		return "", nil
+	}
+	root := filepath.Dir(filepath.Dir(cfg.AutotuneCandidatesPath))
+	targetBytes, err := os.ReadFile(filepath.Join(root, ".previous-target"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		return "", fmt.Errorf("read previous-target: %w", err)
+	}
+	target := strings.TrimSpace(string(targetBytes))
+	if target == "" {
+		return "", nil
+	}
+	releaseID := strings.TrimPrefix(target, "releases/")
+	if releaseID == target || releaseID == "" || strings.Contains(releaseID, "/") {
+		return "", fmt.Errorf("invalid previous-target %q", target)
+	}
+	for _, r := range releaseID {
+		if !(r >= 'A' && r <= 'Z') && !(r >= 'a' && r <= 'z') && !(r >= '0' && r <= '9') && !strings.ContainsRune("._-", r) {
+			return "", fmt.Errorf("invalid previous-target %q", target)
+		}
+	}
+	if autotune.IsPermanentlyRejectedReleaseID(releaseID) {
+		return "", nil
+	}
+	return filepath.Join(root, target), nil
+}
+
+// LoadPreviousAutotuneFeeds loads the retained compatible previous release's
+// candidate feed and, when that release directory carries its artifact feed
+// (an artifact-bound release keeps `autotune-artifacts.json` + `.sig`), the
+// artifact feed bound to it — the input of that release's identity set
+// (SPEC-010-R004 v1.8). A retained release without an artifact feed loads
+// with an empty artifact half (primary-row path only).
+func LoadPreviousAutotuneFeeds(cfg config.AutotuneFeedsConfig) ([]AutotuneFeeds, error) {
+	dir, err := PreviousAutotuneReleaseTarget(cfg)
+	if err != nil || dir == "" {
+		return nil, err
+	}
+	previousCfg := cfg
+	previousCfg.DemandRankPath, previousCfg.DemandRankSigPath = "", ""
+	previousCfg.AutotuneCandidatesPath = filepath.Join(dir, "autotune-candidates.json")
+	previousCfg.AutotuneCandidatesSigPath = previousCfg.AutotuneCandidatesPath + ".sig"
+	feeds, err := LoadPreviousAutotuneCandidateFeed(previousCfg)
+	if err != nil {
+		return nil, fmt.Errorf("verify %s: %w", dir, err)
+	}
+	artifactsPath := filepath.Join(dir, "autotune-artifacts.json")
+	if _, statErr := os.Stat(artifactsPath); statErr == nil {
+		keyring, err := cfg.DecodePublicKeyring()
+		if err != nil {
+			return nil, err
+		}
+		candidates := loadedAutotuneFeed{jsonBytes: feeds.AutotuneCandidatesJSON, sigBytes: feeds.AutotuneCandidatesSig, verification: feeds.AutotuneCandidatesVerification}
+		artifacts, err := loadAutotuneFeedPair(artifactsPath, artifactsPath+".sig", "catalog_artifacts", keyring, validateCatalogArtifactsFeed)
+		if err != nil {
+			return nil, fmt.Errorf("verify %s artifact feed: %w", dir, err)
+		}
+		if artifacts.enabled() {
+			if err := bindCatalogArtifactsFeed(artifacts, candidates); err != nil {
+				return nil, fmt.Errorf("bind %s artifact feed: %w", dir, err)
+			}
+			feeds.CatalogArtifactsJSON = artifacts.jsonBytes
+			feeds.CatalogArtifactsSig = artifacts.sigBytes
+			feeds.CatalogArtifactsVerification = artifacts.verification
+		}
+	}
+	return []AutotuneFeeds{feeds}, nil
 }
 
 // LoadPreviousAutotuneCandidateFeed verifies the deployer-recorded previous
@@ -993,27 +1079,41 @@ func WithAutotuneFeeds(feeds AutotuneFeeds) Option {
 // (fail-closed), so /v1/rate-card etc. never serve unverified bytes.
 func (s *Server) SetAutotuneFeeds(feeds AutotuneFeeds) {
 	s.autotuneFeedsMu.Lock()
-	s.autotuneFeeds = feeds
 	observer := s.autotuneFeedsObserver
 	s.autotuneFeedsMu.Unlock()
-	// Observers (the SPEC-010 v1.7 R007 index rebuild) run after the publish
-	// and outside the lock, so a slow observer never blocks feed serving.
-	if observer != nil {
-		observer(feeds)
+	commit := func() {
+		s.autotuneFeedsMu.Lock()
+		s.autotuneFeeds = feeds
+		s.autotuneFeedsMu.Unlock()
 	}
+	if observer == nil {
+		commit()
+		return
+	}
+	// SPEC-047-R001 v0.1.5: the served feed bytes are part of the release
+	// snapshot. The observer builds the identity sets from the exact bytes
+	// and runs `commit` under the coordinator's release write lock, so no
+	// reader observes the new feed bytes ahead of the rest of the release.
+	// An observer that never calls commit leaves the previous feeds live
+	// (fail closed on the new release, not fail open).
+	observer(feeds, commit)
 }
 
-// WithAutotuneFeedsObserver registers a callback invoked after every runtime
-// feed publish (SetAutotuneFeeds) with the exact published feeds. Boot-time
-// feeds installed through WithAutotuneFeeds are not observed: callers derive
-// boot state from the same loaded feeds directly.
-func WithAutotuneFeedsObserver(fn func(AutotuneFeeds)) Option {
+// WithAutotuneFeedsObserver registers the publisher of every runtime feed
+// reload (SetAutotuneFeeds): it receives the exact feeds and a `commit`
+// that installs them as the served bytes, to be run inside the release
+// publication. Boot-time feeds installed through WithAutotuneFeeds are not
+// observed: callers derive boot state from the same loaded feeds directly.
+func WithAutotuneFeedsObserver(fn func(AutotuneFeeds, func())) Option {
 	return func(s *Server) {
 		s.autotuneFeedsMu.Lock()
 		defer s.autotuneFeedsMu.Unlock()
 		s.autotuneFeedsObserver = fn
 	}
 }
+
+// AutotuneFeedsForTest exposes the served feeds (tests only).
+func (s *Server) AutotuneFeedsForTest() AutotuneFeeds { return s.autotuneFeedsSnapshot() }
 
 func (s *Server) autotuneFeedsSnapshot() AutotuneFeeds {
 	s.autotuneFeedsMu.RLock()
