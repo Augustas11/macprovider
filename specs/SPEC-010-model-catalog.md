@@ -1,7 +1,8 @@
 # SPEC-010 — Provider Model Catalog
 
-**Version:** 1.6
-**Status:** v1.6 canonical model-identity amendment proposed by issue #609
+**Version:** 1.7
+**Status:** v1.7 multi-artifact identity amendment (BYOM v0.2 epic #1453,
+slice 3, 2026-09-10) over the v1.6 canonical model-identity amendment proposed by issue #609
 (2026-07-18). The supported-model catalog contract remains **LOCKED** at
 v1.5 (2026-06-06, Decision-log Entry 54 —
 codex round-6 returned 0 CRITICAL / 0 MAJOR / 0 MINOR). Implemented on
@@ -25,6 +26,27 @@ SPEC-004 v0.3.1, SPEC-008 v0.3, SPEC-006 v0.8.1.
 SPEC-023 owns candidate-catalog `bench_gate` provenance, including
 `bench_gate.provenance.source == "omlx_seeded"` and required
 `bench_gate.gate_seed` metadata. SPEC-010 does not treat oMLX evidence as provider admission or promotion authority; verified provider autotune and existing model identity/hash checks remain binding.
+
+**Change log v1.7 (issue #1453 slice 3 — multi-artifact identity, resolves SPEC-023 §13 Q14):**
+- Names `macprovider.gguf-file.v1` as a canonical wire pair under
+  SPEC-010-R002: the lowercase SHA-256 of the complete GGUF file bytes,
+  computed by the CLI over the bytes it holds — never a digest a runtime
+  reports about itself.
+- Adds **SPEC-010-R007 — Artifact-feed identity**: a model key's identity is
+  the set of `verified` artifacts the release-bound SPEC-023 §3.7 artifact
+  feed publishes for it, of which the candidate row's `model_sha256` is the
+  primary member. The provider's named pair must equal one member exactly,
+  the match resolves by the globally unique `(hash_algorithm, hash)` pair to
+  one `(model_key, artifact_id)`, and a non-primary member binds route
+  snapshots and settlement only with the SPEC-047-R003 six-value evidence.
+- Amends R004 (expected identity may be an artifact-feed member of the same
+  exact release) and R006 (warm swap verifies against that member's
+  identity). Lifts the primary-only settlement restriction SPEC-023
+  v0.10.0–v0.10.2 and SPEC-047 v0.1.3 imposed by reference to this SPEC;
+  those specs now cite R007 instead of restating it. Pricing stays
+  model-key scoped (SPEC-023 §3.3); no SPEC-005 formula changes.
+- Bounded `model-catalog-identity` amendment; does not reopen R001–R003 or
+  R005 semantics or unrelated lifecycle behavior.
 
 **Change log v1.6 (issue #609 canonical model identity):**
 - Names the canonical signed-snapshot identity
@@ -989,7 +1011,8 @@ algorithm.
 - **SPEC-010-R002 — Typed wire contract.** Provider hello, v2 auth initial,
   heartbeat, local status, safety telemetry, and Tier-2 attestation projections
   MUST keep `model_hash` paired with `model_hash_algorithm`. A modern canonical
-  pair uses only `macprovider.snapshot-manifest.v1` and a 64-character
+  pair uses `macprovider.snapshot-manifest.v1` or, from v1.7,
+  `macprovider.gguf-file.v1` (R007), each with a 64-character
   lowercase SHA-256 digest. An explicit unknown algorithm, malformed pair, or
   algorithm without a hash MUST be rejected; the coordinator MUST NOT guess
   semantics from a hash value.
@@ -1004,14 +1027,19 @@ algorithm.
 - **SPEC-010-R004 — Exact admitted-row authority and settlement binding.**
   Admission MUST select the expected `model_sha256` from the provider's exact
   signed current or explicitly compatible-previous catalog release and model
-  row. That expected value remains session authority for later heartbeats.
-  Coordinator/Tier-2 logic MUST compare only the named provider artifact
-  identity with that same expected row; an independently selected catalog row
-  or second catalog fallback cannot authorize it. If existing Tier-2 signed
+  row. From v1.7 the expected identity MAY instead be a `verified` member of
+  that same exact release's artifact feed for that model row (R007), selected
+  from the feed release-bound to that release and never from an independently
+  loaded feed. That expected value remains session authority for later
+  heartbeats. Coordinator/Tier-2 logic MUST compare only the named provider
+  artifact identity with that same expected row or artifact-feed member; an
+  independently selected catalog row, a second catalog fallback, or a feed of
+  another release cannot authorize it. If existing Tier-2 signed
   material is retained as proof, its expected hash MUST equal the admitted
-  autotune row. Buyer route snapshots MUST bind both algorithm and digest; the
-  existing receipt v0.4 transitively binds them through the signed route
-  snapshot digest without adding receipt keys.
+  autotune row. Buyer route snapshots MUST bind both algorithm and digest — and, when the
+  expected identity is a non-primary artifact-feed member, the R007(d)
+  evidence; the existing receipt v0.4 transitively binds them through the
+  signed route snapshot digest without adding receipt keys.
 
 - **SPEC-010-R005 — Bounded missing-algorithm migration.** A provider that
   omits `model_hash_algorithm` MAY remain connected only before an explicit
@@ -1025,10 +1053,61 @@ algorithm.
 
 - **SPEC-010-R006 — Warm-swap identity.** Before publishing a warm-swapped
   model, the CLI MUST verify the complete target snapshot against the exact
-  signed target row and atomically replace the model ID, digest, and algorithm.
+  signed target row (or, for a non-primary artifact, against its R007
+  expected identity in the release-bound artifact feed) and atomically
+  replace the model ID, digest, and algorithm.
   A swap with no bound signed target row, a mismatched digest, or a snapshot
   that fails SPEC-023 §3.2 validation MUST fail closed without publishing the
   new model under the prior model's identity.
+
+- **SPEC-010-R007 — Artifact-feed identity (v1.7 amendment).** A catalog
+  model key's identity is the SET of `verified` artifacts the release-bound
+  SPEC-023 §3.7 artifact feed publishes for it, of which the candidate row's
+  `(macprovider.snapshot-manifest.v1, model_sha256)` is the primary member;
+  the primary member exists whether or not a release carries an artifact
+  feed, so a release without one is unchanged from v1.6.
+  (a) **GGUF wire pair.** `macprovider.gguf-file.v1` is a canonical wire pair
+  (R002). Its digest is the lowercase hex SHA-256 of the complete GGUF file
+  bytes. The CLI MUST compute it over the bytes it holds locally and serves;
+  a digest a runtime reports about itself — an Ollama manifest layer digest,
+  a registry or library tag, a runtime-reported model name — MAY locate the
+  file but MUST NEVER be reported as the digest, and the CLI MUST recompute
+  before every report that binds identity (hello, warm swap, offer).
+  (b) **Expected identity.** For a provider whose admitted catalog release
+  carries an artifact feed (release-bound to that exact release per SPEC-023
+  §3.7.4, signer identity equal per §3.7.2, loaded through the SPEC-023 §3.5
+  procedure), the coordinator's expected identity for a model key is the set
+  of `(hash_algorithm, hash)` pairs of that key's `verified` artifacts in
+  that feed. The provider's named pair MUST equal one member exactly —
+  algorithm and digest both, compared as exact strings — and the matched
+  member's `artifact_id` becomes session authority alongside the row
+  (R004). A `declared` or `blocked` artifact, an artifact of a `candidate` or
+  `blocked` row, a feed that is missing, stale, integrity-failed, or not
+  release-bound to the admitted release, a pair whose algorithm is not named
+  by R002, and any pair not in the set fail closed: the provider's hash is
+  then unverified, never "approximately matched", and the v1.6 primary-only
+  comparison applies unchanged.
+  (c) **Resolution.** The match resolves by the globally unique
+  `(hash_algorithm, hash)` pair (SPEC-023 §3.7.4) to exactly one
+  `(model_key, artifact_id)`; a provider-asserted model key that disagrees
+  with the resolved key fails closed rather than selecting a price. Pricing
+  remains model-key scoped (SPEC-023 §3.3, §3.3.1); every SPEC-023 tier gate
+  (`recommendable` for paid defaults) and every SPEC-047 admission gate is
+  unchanged by this requirement.
+  (d) **Route snapshots and settlement.** When the expected identity is a
+  non-primary member, the SPEC-022 route-time snapshot MUST carry the
+  SPEC-047-R003 six values — `artifact_feed_sha256`, `artifact_id`, the
+  artifact `hash`, its `hash_algorithm`, `artifact_feed_signer_key_id`, and
+  the exact candidate-catalog body digest the feed is release-bound to — and
+  settlement MUST re-verify them against the snapshot and fail closed on
+  missing, changed, cross-release, or wrong-signer evidence, without
+  consulting any current feed, manifest, or keyring to repair it.
+  (e) **Scope of the lift.** The primary-only settlement restriction that
+  SPEC-023 v0.10.0–v0.10.2 and SPEC-047 v0.1.3 imposed by reference to this
+  SPEC is lifted for members satisfying (a)–(d); those specs cite this
+  requirement rather than restating it. Serving a non-MLX artifact requires a
+  SPEC-046-conformant loopback runtime path; this requirement defines the
+  identity that path reports, not the path.
 
 ---
 
