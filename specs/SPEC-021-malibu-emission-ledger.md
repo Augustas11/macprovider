@@ -521,7 +521,10 @@ issuance, balances, holds, USDC settlement, and payment execution. The reward
 owner MAY emit it only when the Postgres settlement mirror contains at least one
 row for the provider in the preceding **30 minutes** whose
 `spec022_verified = TRUE`, `settlement_policy_mode = 'enforce'`,
-`quarantined = FALSE`, and `provider_credits > 0`. The observation timestamp is
+`quarantined = FALSE`, and `provider_credits > 0`. Rows marked
+`rewards_excluded = TRUE` MUST NOT qualify, matching the useful-work accrual
+exclusion and SPEC-022/SPEC-041 relay-blind reward boundary. A legacy mirror
+without this column retains the pre-exclusion behavior. The observation timestamp is
 the latest qualifying `ledger_request_credits.ts_utc`; it is not a wallet update
 time, audit-event time, receipt lifetime count, local request count, online
 duration, or USDC amount.

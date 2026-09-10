@@ -2,7 +2,6 @@ package rewards
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"testing"
 	"time"
@@ -56,59 +55,6 @@ func TestRecentWorkEligibilityFactsPreserveMirrorUncertainty(t *testing.T) {
 	}
 	if reasons, unavailable := recentWorkEligibilityFacts(nil, errors.New("mirror unavailable")); !unavailable || reasons != nil {
 		t.Fatalf("mirror failure = reasons %v unavailable %v", reasons, unavailable)
-	}
-}
-
-func TestQueryRecentVerifiedWorkUsesOnlyFreshVerifiedEnforceMirrorRows(t *testing.T) {
-	ctx := context.Background()
-	db, err := sql.Open("sqlite", ":memory:")
-	if err != nil {
-		t.Fatalf("open sqlite: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	if _, err := db.ExecContext(ctx, `
-CREATE TABLE ledger_request_credits (
-    provider_id TEXT NOT NULL,
-    ts_utc TIMESTAMP NOT NULL,
-    spec022_verified BOOLEAN NOT NULL,
-    settlement_policy_mode TEXT NOT NULL,
-    quarantined BOOLEAN NOT NULL,
-    provider_credits INTEGER NOT NULL
-)`); err != nil {
-		t.Fatalf("create mirror: %v", err)
-	}
-	now := time.Date(2026, time.September, 10, 12, 0, 0, 0, time.UTC)
-	rows := []struct {
-		provider    string
-		at          time.Time
-		verified    bool
-		mode        string
-		quarantined bool
-		credits     int
-	}{
-		{"provider-a", now.Add(-RecentVerifiedWorkWindow - time.Second), true, "enforce", false, 1},
-		{"provider-a", now.Add(-time.Minute), false, "enforce", false, 1},
-		{"provider-a", now.Add(-time.Minute), true, "observe", false, 1},
-		{"provider-a", now.Add(-time.Minute), true, "enforce", true, 1},
-		{"provider-a", now.Add(-time.Minute), true, "enforce", false, 0},
-		{"provider-a", now.Add(-2 * time.Minute), true, "enforce", false, 7},
-		{"provider-a", now.Add(time.Minute), true, "enforce", false, 7},
-	}
-	for _, row := range rows {
-		if _, err := db.ExecContext(ctx, `INSERT INTO ledger_request_credits VALUES (?, ?, ?, ?, ?, ?)`, row.provider, row.at, row.verified, row.mode, row.quarantined, row.credits); err != nil {
-			t.Fatalf("insert mirror row: %v", err)
-		}
-	}
-	got, err := queryRecentVerifiedWork(ctx, db, "provider-a", now)
-	if err != nil {
-		t.Fatalf("query recent work: %v", err)
-	}
-	if got == nil || !got.Equal(now.Add(-2*time.Minute)) {
-		t.Fatalf("recent verified work = %v, want %v", got, now.Add(-2*time.Minute))
-	}
-	missing, err := queryRecentVerifiedWork(ctx, db, "provider-b", now)
-	if err != nil || missing != nil {
-		t.Fatalf("missing provider = %v, %v; want nil, nil", missing, err)
 	}
 }
 

@@ -99,3 +99,91 @@ func TestRewardEndpointsShareAuthoritativeProjection(t *testing.T) {
 		}
 	}
 }
+func TestQueryRecentVerifiedWorkUsesOnlyFreshVerifiedEnforceMirrorRows(t *testing.T) {
+	ctx := context.Background()
+	_, db := startPostgres(t)
+	if _, err := db.ExecContext(ctx, `
+CREATE TABLE ledger_request_credits (
+    provider_id TEXT NOT NULL,
+    ts_utc TIMESTAMP NOT NULL,
+    spec022_verified BOOLEAN NOT NULL,
+    settlement_policy_mode TEXT NOT NULL,
+    quarantined BOOLEAN NOT NULL,
+    provider_credits INTEGER NOT NULL
+)`); err != nil {
+		t.Fatalf("create mirror: %v", err)
+	}
+	now := time.Date(2026, time.September, 10, 12, 0, 0, 0, time.UTC)
+	rows := []struct {
+		provider    string
+		at          time.Time
+		verified    bool
+		mode        string
+		quarantined bool
+		credits     int
+	}{
+		{"provider-a", now.Add(-rewards.RecentVerifiedWorkWindow - time.Second), true, "enforce", false, 1},
+		{"provider-a", now.Add(-time.Minute), false, "enforce", false, 1},
+		{"provider-a", now.Add(-time.Minute), true, "observe", false, 1},
+		{"provider-a", now.Add(-time.Minute), true, "enforce", true, 1},
+		{"provider-a", now.Add(-time.Minute), true, "enforce", false, 0},
+		{"provider-a", now.Add(-2 * time.Minute), true, "enforce", false, 7},
+		{"provider-a", now.Add(time.Minute), true, "enforce", false, 7},
+	}
+	for _, row := range rows {
+		if _, err := db.ExecContext(ctx, `INSERT INTO ledger_request_credits VALUES ($1, $2, $3, $4, $5, $6)`, row.provider, row.at, row.verified, row.mode, row.quarantined, row.credits); err != nil {
+			t.Fatalf("insert mirror row: %v", err)
+		}
+	}
+	config := rewards.Config{SQLitePayoutDBPath: filepath.Join(t.TempDir(), "unavailable-payout.sqlite")}
+	recent := func(provider string) *time.Time {
+		t.Helper()
+		projection, err := rewards.BuildProviderRewardProjection(ctx, provider, rewards.ProviderRewardProjectionDeps{
+			RewardsDB: db, Config: config, Now: func() time.Time { return now },
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if projection.RecentWorkAt == nil {
+			for _, reason := range projection.Eligibility.Reasons {
+				if reason == rewards.ReasonEarningVerifiedWork {
+					t.Fatal("absent observation claimed earning")
+				}
+			}
+		}
+		return projection.RecentWorkAt
+	}
+	got := recent("provider-a")
+	if got == nil || !got.Equal(now.Add(-2*time.Minute)) {
+		t.Fatalf("recent verified work = %v, want %v", got, now.Add(-2*time.Minute))
+	}
+	missing := recent("provider-b")
+	if missing != nil {
+		t.Fatalf("missing provider = %v; want nil", missing)
+	}
+
+	// A missing column above models an older mirror. With the new column,
+	// excluded rows must neither replace an older valid observation nor create one.
+	if _, err := db.ExecContext(ctx, "ALTER TABLE ledger_request_credits ADD COLUMN rewards_excluded BOOLEAN"); err != nil {
+		t.Fatal(err)
+	}
+	for _, provider := range []string{"provider-a", "provider-excluded"} {
+		if _, err := db.ExecContext(ctx, `INSERT INTO ledger_request_credits VALUES ($1, $2, TRUE, 'enforce', FALSE, 7, TRUE)`, provider, now.Add(-time.Minute)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := recent("provider-a"); got == nil || !got.Equal(now.Add(-2*time.Minute)) {
+		t.Fatalf("excluded row replaced valid observation: %v", got)
+	}
+	if got := recent("provider-excluded"); got != nil {
+		t.Fatalf("excluded-only provider has positive work observation: %v", got)
+	}
+	for _, flag := range []any{false, nil} {
+		if _, err := db.ExecContext(ctx, "UPDATE ledger_request_credits SET rewards_excluded = $1 WHERE provider_id = 'provider-excluded'", flag); err != nil {
+			t.Fatal(err)
+		}
+		if got := recent("provider-excluded"); got == nil || !got.Equal(now.Add(-time.Minute)) {
+			t.Fatalf("nonexcluded legacy flag %v lost valid work: %v", flag, got)
+		}
+	}
+}

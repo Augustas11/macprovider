@@ -28,7 +28,8 @@ the complete covered model/runtime/profile key and freshness before using a
 result. One passing key must not become provider-wide trust.
 
 SPEC-021 §4.2.1 defines recent verified-work observation from the verified
-settlement mirror over 30 minutes. Missing observations remain uncertain because
+settlement mirror over 30 minutes, excluding rows marked as reward-excluded
+(including relay-blind work). Missing observations remain uncertain because
 the v0.2 mirror has no authoritative fresh watermark. Recent work is not a
 receipt-lifetime counter, wallet-update timestamp, reward issuance, or completed
 payment.

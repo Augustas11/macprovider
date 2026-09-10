@@ -163,9 +163,10 @@ func queryRecentVerifiedWork(ctx context.Context, db *sql.DB, providerID string,
 	var observed any
 	err := db.QueryRowContext(ctx, `
         SELECT MAX(ts_utc)
-          FROM ledger_request_credits
+          FROM ledger_request_credits lrc
          WHERE provider_id = $1
            AND spec022_verified = TRUE
+           AND COALESCE((to_jsonb(lrc)->>'rewards_excluded')::BOOLEAN, FALSE) = FALSE
            AND settlement_policy_mode = 'enforce'
            AND quarantined = FALSE
            AND provider_credits > 0
