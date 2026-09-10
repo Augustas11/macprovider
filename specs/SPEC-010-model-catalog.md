@@ -1,8 +1,9 @@
 # SPEC-010 — Provider Model Catalog
 
-**Version:** 1.7
-**Status:** v1.7 multi-artifact identity amendment (BYOM v0.2 epic #1453,
-slice 3, 2026-09-10) over the v1.6 canonical model-identity amendment proposed by issue #609
+**Version:** 1.8
+**Status:** v1.8 R004 composite-proof clarification (BYOM v0.2 epic #1453,
+slice 4, 2026-09-10) over the v1.7 multi-artifact identity amendment (slice 3,
+2026-09-10) over the v1.6 canonical model-identity amendment proposed by issue #609
 (2026-07-18). The supported-model catalog contract remains **LOCKED** at
 v1.5 (2026-06-06, Decision-log Entry 54 —
 codex round-6 returned 0 CRITICAL / 0 MAJOR / 0 MINOR). Implemented on
@@ -26,6 +27,14 @@ SPEC-004 v0.3.1, SPEC-008 v0.3, SPEC-006 v0.8.1.
 SPEC-023 owns candidate-catalog `bench_gate` provenance, including
 `bench_gate.provenance.source == "omlx_seeded"` and required
 `bench_gate.gate_seed` metadata. SPEC-010 does not treat oMLX evidence as provider admission or promotion authority; verified provider autotune and existing model identity/hash checks remain binding.
+
+**Change log v1.8 (issue #1453 slice 4 — R004 composite-proof clarification):**
+- R004: states that a binding to a non-primary artifact-feed member is a
+  composite proof — retained row material proves the row binding and the
+  pricing key; the member's hash is proven only by the R007(d) six values —
+  and forbids reading either half as the other. No behavior change to the
+  slice-3 implementation, which already records the composite; bounded
+  `model-catalog-identity` clarification.
 
 **Change log v1.7 (issue #1453 slice 3 — multi-artifact identity, resolves SPEC-023 §13 Q14):**
 - Names `macprovider.gguf-file.v1` as a canonical wire pair under
@@ -1046,7 +1055,13 @@ algorithm.
   material is retained as proof, its expected hash MUST equal the expected
   identity actually admitted — the row's `model_sha256` on the primary path,
   or the matched member's `hash` under R007; retained proof of the primary row
-  is never proof of a different member's hash. Buyer route snapshots MUST bind both algorithm and digest — and, when the
+  is never proof of a different member's hash. (v1.8 clarification.) A binding
+  to a non-primary member is a COMPOSITE proof: the retained row material
+  (catalog identity, body digest, signer, and the row's `model_sha256` — the
+  primary member) proves the row binding and the pricing key, while the
+  member's hash is proven only by the R007(d) six values recorded for that
+  member; a consumer MUST NOT read the row material's digest as the member's
+  expected hash, nor the member's hash as proof of the row. Buyer route snapshots MUST bind both algorithm and digest — and, when the
   binding references an artifact-feed member, the R007(d)
   evidence; the existing receipt v0.4 transitively binds them through the
   signed route snapshot digest without adding receipt keys.
