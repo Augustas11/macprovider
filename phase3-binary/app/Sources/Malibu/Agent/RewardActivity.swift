@@ -237,7 +237,7 @@ enum RewardActivityPresentation {
         switch raw {
         case "per_wallet_daily_cap": return "wallet daily limit"
         case "per_provider_daily_cap": return "provider daily limit"
-        case "provisional_trust_tier": return "trust review"
+        case "trust_tier_provisional", "provisional_trust_tier": return "trust review"
         default: return "review pending"
         }
     }

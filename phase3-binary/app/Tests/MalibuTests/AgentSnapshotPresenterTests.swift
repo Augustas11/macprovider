@@ -2064,7 +2064,7 @@ final class AgentSnapshotPresenterTests: XCTestCase {
                 "Ready for customer work · network is quiet",
                 "Ready · work is queued on this Mac",
                 "Ready · work ran; paid credits appear when a job settles",
-                "Eligible · network is quiet",
+                "Ready for customer work · network is quiet",
                 AgentSnapshotPresenter.credentialLine(snapshot),
                 AgentSnapshotPresenter.cliUpdateStatusLine(snapshot),
             ].compactMap { $0 }

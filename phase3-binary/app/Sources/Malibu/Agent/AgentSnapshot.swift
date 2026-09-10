@@ -1336,8 +1336,8 @@ enum AgentSnapshotPresenter {
             return result(
                 status: "No payout wallet yet",
                 code: verdict.reasonCode.rawValue,
-                reason: "You're set up to earn — you just need somewhere to be paid.",
-                action: "Add a payout wallet to receive earnings."
+                reason: "A bound payout wallet is required for MALIBU reward eligibility.",
+                action: "Add a payout wallet to complete reward setup."
             )
         }
         switch verdict.malibuWithdrawal {
@@ -1440,7 +1440,7 @@ enum AgentSnapshotPresenter {
             return result(
                 status: "Eligible, idle",
                 code: "idle_no_work",
-                reason: "This Mac is eligible, but the network is quiet right now.",
+                reason: "This Mac is ready for customer work, but the network is quiet right now.",
                 action: "Keep Malibu online."
             )
         }
@@ -1507,7 +1507,7 @@ enum AgentSnapshotPresenter {
         case .trustedAuthoritative:
             return "Trust: Trusted"
         case .trustedStaleNeutral:
-            return "MALIBU trust telemetry not published yet"
+            return "MALIBU trust status unavailable"
         case .provisional:
             if verdict.reasonCode == .heldDemotionCooldown {
                 return "Trust: Provisional · Trust review in progress"
@@ -1517,7 +1517,7 @@ enum AgentSnapshotPresenter {
             }
             return "Trust: Provisional"
         case .unknown:
-            return "MALIBU trust telemetry not published yet"
+            return "MALIBU trust status unavailable"
         }
     }
 
@@ -1532,7 +1532,7 @@ enum AgentSnapshotPresenter {
 
     private static func liveNextAction(_ verdict: RewardVerdict) -> String? {
         if verdict.reasonCode == .walletMissing || !verdict.walletBound {
-            return "Add a payout wallet to receive earnings."
+            return "Add a payout wallet to complete reward setup."
         }
         if verdict.trustDisplay == .provisional {
             return trustCriteriaAction(verdict) ?? "Trust status refreshes automatically; held rewards remain visible."
@@ -1734,21 +1734,21 @@ enum AgentSnapshotPresenter {
             nextAction = rewardReasonNextAction(verdict.reasonCode)
         case .unknown:
             meaning = verdict.usdcActivity == .earning
-                ? "USDC earning is active. MALIBU reward telemetry is not published yet."
-                : "MALIBU reward telemetry is not published yet."
+                ? "USDC earning is active. MALIBU reward status is temporarily unavailable."
+                : "MALIBU reward status is temporarily unavailable."
             nextAction = rewardReasonNextAction(verdict.reasonCode)
         case .none where verdict.reasonCode == .walletMissing || !verdict.walletBound:
-            meaning = "You're set up to earn — you just need somewhere to be paid."
-            nextAction = "Add a payout wallet to receive earnings."
+            meaning = "A bound payout wallet is required for MALIBU reward eligibility."
+            nextAction = "Add a payout wallet to complete reward setup."
         case .none:
             switch verdict.usdcActivity {
             case .earning:
                 meaning = verdict.trustDisplay == .trustedStaleNeutral
-                    ? "USDC earning is active. MALIBU trust telemetry is not published yet."
+                    ? "USDC earning is active. MALIBU trust status is unavailable."
                     : "Paid work or rewards have settled in the current window."
                 nextAction = liveNextAction(verdict)
             case .idle:
-                meaning = "This Mac is eligible, but the network is quiet right now."
+                meaning = "This Mac is ready for customer work, but the network is quiet right now."
                 nextAction = liveNextAction(verdict) ?? "Keep Malibu online."
             case .unavailable:
                 meaning = "Fresh earnings or MALIBU reward telemetry is not available yet."
@@ -2229,7 +2229,7 @@ enum AgentSnapshotPresenter {
             if (s.requestsServedToday ?? 0) > 0, idleEarningsAreZero(s) {
                 return "Work ran today · paid credits show when a job settles"
             }
-            return "Eligible · network is quiet"
+            return "Ready for customer work · network is quiet"
         }
         return nil
     }
@@ -2731,7 +2731,7 @@ enum AgentSnapshotPresenter {
             }
             return "Provisional"
         case .unknown:
-            return "MALIBU trust telemetry not published yet"
+            return "MALIBU trust status unavailable"
         }
     }
 
@@ -3392,7 +3392,7 @@ enum AgentSnapshotPresenter {
         case .trustTierProvisional:
             return "Trust verification is incomplete"
         case .rewardProjectionUnavailable:
-            return "MALIBU reward telemetry is not published yet"
+            return "MALIBU reward status is temporarily unavailable"
         case .rewardProjectionWarmingUp:
             return "earnings appear after your first paid job"
         case .earning:

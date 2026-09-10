@@ -2,6 +2,28 @@ import XCTest
 @testable import Malibu
 
 final class RewardVerdictContractTests: XCTestCase {
+    func testMissingWalletCopySeparatesCustomerReadinessFromMalibuEligibility() {
+        var snapshot = trustedServing()
+        snapshot.walletBound = false
+        snapshot.updateRewardInputs(malibuRewardEligibility: MalibuRewardEligibility(
+            earningState: "ineligible", withdrawalState: "ineligible",
+            primaryReason: "missing_wallet_binding", reasons: ["missing_wallet_binding"]))
+        XCTAssertEqual(AgentSnapshotPresenter.rewardVerdict(snapshot).malibuEarning, .ineligible)
+        XCTAssertEqual(AgentSnapshotPresenter.eligibilityLine(snapshot), "Ready for customer work · network is quiet")
+        let health = AgentSnapshotPresenter.miningHealth(snapshot)
+        XCTAssertEqual(health.reason, "A bound payout wallet is required for MALIBU reward eligibility.")
+        XCTAssertEqual(AgentSnapshotPresenter.consolidatedStatus(snapshot).nextAction,
+                       "Add a payout wallet to complete reward setup.")
+    }
+
+    func testUnknownMalibuCopyDoesNotClaimTelemetryWasNeverPublished() {
+        var snapshot = trustedServing()
+        snapshot.updateRewardInputs(providerEarningsFresh: true, malibuProjectionFresh: false)
+        let status = AgentSnapshotPresenter.consolidatedStatus(snapshot)
+        XCTAssertTrue(status.meaning.contains("MALIBU reward status is temporarily unavailable"))
+        XCTAssertFalse(status.meaning.contains("not published yet"))
+    }
+
     func testEarningVerifiedWorkDoesNotHideEligibleExistingBalance() {
         var snapshot = trustedServing()
         snapshot.updateRewardInputs(

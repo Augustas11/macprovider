@@ -152,16 +152,26 @@ final class ControlFrameCodecTests: XCTestCase {
         )
     }
 
-    func testRewardActivityPresentationUsesAuthoritativeSourceAndHoldReasons() {
-        let usefulWork = RewardActivityEvent(
-            id: "mra_2",
-            occurredAt: Self.rewardOccurredAt,
-            eventType: "malibu_accrual_inserted",
-            amountMALIBU: 1.25,
-            withdrawalHoldReason: "provisional_trust_tier",
-            sourceReason: "malibu_verified_useful_work_v0_2",
-            summary: "Useful work reward held."
-        )
+    func testRewardActivityPresentationUsesAuthoritativeSourceAndHoldReasons() throws {
+        let wire = Data("""
+        {
+          "type": "reward_audit_response",
+          "events": [{
+            "id": "mra_2",
+            "occurred_at": "2026-08-09T10:11:12.125Z",
+            "event_type": "malibu_accrual_inserted",
+            "amount_malibu": "1.25",
+            "withdrawal_hold_reason": "trust_tier_provisional",
+            "source_reason": "malibu_verified_useful_work_v0_2",
+            "summary": "Useful work reward held."
+          }],
+          "next_before_id": null
+        }
+        """.utf8)
+        guard case let .rewardAuditResponse(page) = try ControlCodec.decode(wire),
+              let usefulWork = page.events.first else {
+            return XCTFail("expected reward audit response")
+        }
         XCTAssertEqual(
             RewardActivityPresentation.detailLines(for: usefulWork),
             ["1.25 MALIBU", "Source: verified useful work", "Hold: trust review"]
@@ -421,7 +431,7 @@ final class ControlFrameCodecTests: XCTestCase {
         )
         XCTAssertFalse(AgentSnapshotPresenter.earningsLine(agent.snapshot).contains("[locked]"))
         XCTAssertFalse(AgentSnapshotPresenter.earningsLine(agent.snapshot).contains("Trusted"))
-        XCTAssertEqual(AgentSnapshotPresenter.trustLine(agent.snapshot), "MALIBU trust telemetry not published yet")
+        XCTAssertEqual(AgentSnapshotPresenter.trustLine(agent.snapshot), "MALIBU trust status unavailable")
         XCTAssertNil(AgentSnapshotPresenter.backlogLine(agent.snapshot))
     }
 
