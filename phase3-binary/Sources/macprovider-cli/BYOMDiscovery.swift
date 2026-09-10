@@ -3080,6 +3080,7 @@ struct BYOMCatalogMatcher: Sendable {
     /// empty for a rate-card-bound release, which keeps matching exactly as
     /// v0.1 did (§3.7.6 rule 6).
     private let artifactIdentities: [ArtifactFeed.ArtifactIdentity]
+    private let qualifiedFeed: QualifiedArtifactFeed?
 
     /// The offline matcher every discovery entry point uses: the compiled-in
     /// candidate catalog and the freshness-qualified compiled-in artifact set
@@ -3115,6 +3116,7 @@ struct BYOMCatalogMatcher: Sendable {
         }
         artifactIdentities = (artifactFeed?.artifactIdentities() ?? []).filter { matchable.contains($0.catalogKey) }
         artifactCoveredKeys = Set(artifactIdentities.map(\.catalogKey))
+        qualifiedFeed = artifactFeed
     }
 
     /// Catalog keys the qualified artifact feed carries an artifact for: their
@@ -3154,6 +3156,25 @@ struct BYOMCatalogMatcher: Sendable {
         }.map(\.catalogKey))
         let keys = nameOnlyKeys.union(artifactKeys)
         return keys.count == 1 ? keys.first : nil
+    }
+
+    /// The single artifact identity a served reference resolves to through the
+    /// artifact leg, with its provenance — what a later trusted binding
+    /// (SPEC-047-R003; slices 3–4) records — or nil when no artifact, or more
+    /// than one model key, answers. A name-level row match yields nothing here.
+    func matchedArtifact(
+        for servedModelRef: String,
+        runtimeSource: String,
+        revisions: Set<String> = [],
+        digest: String? = nil
+    ) -> (identity: ArtifactFeed.ArtifactIdentity, feedSHA256: String, signerKeyID: String, releaseID: String)? {
+        guard let feed = qualifiedFeed else { return nil }
+        let normalized = BYOMCandidateIdentity.normalizedServedModelRef(servedModelRef)
+        let matches = artifactIdentities.filter {
+            $0.matches(normalized, runtimeSource: runtimeSource, revisions: revisions, digest: digest)
+        }
+        guard Set(matches.map(\.catalogKey)).count == 1, let identity = matches.first else { return nil }
+        return (identity, feed.feedSHA256, feed.signerKeyID, feed.releaseID)
     }
 }
 
@@ -3235,9 +3256,8 @@ struct BYOMMLXCacheDiscovery {
             collected.append(url)
             if collected.count >= cap { break }
         }
-        // Enumeration order is unspecified; a deterministic order keeps every
-        // bounded scan below stable between runs on the same host.
-        collected.sort { $0.lastPathComponent < $1.lastPathComponent }
+        // Sorted for a stable content scan; the cap bounds membership, so a
+        // caller for whom every entry matters must not go through this list.
         return collected.sorted(by: { $0.lastPathComponent < $1.lastPathComponent })
     }
 
@@ -3333,16 +3353,10 @@ struct BYOMMLXCacheDiscovery {
         var inspected = 0
         // HF cache snapshot directories are named by the commit revision: the
         // immutable half of a SPEC-023 `huggingface_revision` source reference.
-        // Identity-load-bearing, so collected over EVERY entry (a name test, no
-        // I/O); only the content inspection below is bounded.
-        var revisions = Set<String>()
-        for snapshot in snapshotDirs
-        where (try? snapshot.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true {
-            let name = snapshot.lastPathComponent
-            if name.count == 40, name.allSatisfy({ $0.isHexDigit && ($0.isNumber || $0.isLowercase) }) {
-                revisions.insert(name)
-            }
-        }
+        // Identity-load-bearing, so collected over EVERY entry name with no cap
+        // (a string test per entry, no per-entry I/O); only the content
+        // inspection below goes through the bounded, sorted list.
+        let revisions = snapshotRevisionNames(at: snapshots)
         for snapshot in snapshotDirs.prefix(20) {
             guard (try? snapshot.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true else { continue }
             if let config = boundedFileContents(
@@ -3380,6 +3394,15 @@ struct BYOMMLXCacheDiscovery {
             }
         }
         return (sawConfig && weightBytes > 0, weightBytes, context, revisions)
+    }
+
+    /// Every entry name under `snapshots/` that has the shape of a HuggingFace
+    /// commit revision (40 lowercase hex). Names only, uncapped.
+    private func snapshotRevisionNames(at snapshots: URL) -> Set<String> {
+        guard let names = try? fileManager.contentsOfDirectory(atPath: snapshots.path) else { return [] }
+        return Set(names.filter { name in
+            name.count == 40 && name.allSatisfy { $0.isHexDigit && ($0.isNumber || $0.isLowercase) }
+        })
     }
 
     private static func isModelWeightFile(_ name: String) -> Bool {

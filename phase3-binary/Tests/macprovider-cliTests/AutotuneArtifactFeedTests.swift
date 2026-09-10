@@ -472,12 +472,12 @@ final class AutotuneArtifactFeedTests: XCTestCase {
             try Data("{}".utf8).write(to: directory.appendingPathComponent("config.json"))
             try Data(repeating: 0, count: 16).write(to: directory.appendingPathComponent("model.safetensors"))
         }
-        // Revisions are identity-load-bearing: 25 older snapshot directories that
-        // sort before the artifact's revision must not push it out of the
-        // bounded content scan.
-        for index in 0..<25 {
+        // Revisions are identity-load-bearing: 300 older snapshot directories
+        // (beyond the 256-entry content-scan cap) that sort before the
+        // artifact's revision must not hide it.
+        for index in 0..<300 {
             let stale = root.appendingPathComponent("models--mlx-community--Test-Model-8bit/snapshots")
-                .appendingPathComponent(String(repeating: "0", count: 38) + String(format: "%02x", index))
+                .appendingPathComponent(String(repeating: "0", count: 37) + String(format: "%03x", index))
             try FileManager.default.createDirectory(at: stale, withIntermediateDirectories: true)
         }
         let namespace = Data(repeating: 0x37, count: 32)
@@ -604,6 +604,17 @@ final class AutotuneArtifactFeedTests: XCTestCase {
         // Unambiguous in a feed where only one model carries the reference.
         let single = BYOMCatalogMatcher(candidateBytes: fixture.candidateBytes, artifactFeed: fixture.feed)
         XCTAssertEqual(single.catalogKey(for: "mlx-community/Test-Model-8bit", runtimeSource: "mlx_cache", revisions: [Self.secondRevision]), "test-model")
+        // The artifact leg also yields the identity with its provenance; the
+        // ambiguous case and a name-level row match yield nothing.
+        let matched = try XCTUnwrap(single.matchedArtifact(for: "mlx-community/Test-Model-8bit", runtimeSource: "mlx_cache", revisions: [Self.secondRevision]))
+        XCTAssertEqual(matched.identity.artifactID, "mlx-8bit")
+        XCTAssertEqual(matched.identity.hash, String(repeating: "5", count: 64))
+        XCTAssertFalse(matched.identity.isPrimary)
+        XCTAssertEqual(matched.feedSHA256, fixture.feed.feedSHA256)
+        XCTAssertEqual(matched.signerKeyID, Self.signer)
+        XCTAssertEqual(matched.releaseID, "test-release")
+        XCTAssertNil(matcher.matchedArtifact(for: "mlx-community/Test-Model-8bit", runtimeSource: "mlx_cache", revisions: both))
+        XCTAssertNil(BYOMCatalogMatcher(candidateBytes: fixture.candidateBytes, artifactFeed: nil).matchedArtifact(for: "mlx-community/Test-Model-4bit", runtimeSource: "mlx_cache"))
     }
 
     func testAmbiguousCandidateRowIdentityMintsNoCatalogIdentity() throws {

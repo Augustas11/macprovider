@@ -162,3 +162,32 @@ partially, see the first item). Resolved in the commit that adds this section:
   directory name, not a locally computed hash — the coordinator resolves by
   verified hash; (INFO, architect) three validators reject duplicate adapters
   and whitespace-only `quantization`, which §3.7.3 does not name.
+
+## Final verification (two fresh cold-context lanes, at `6099576d`; security at the bar since the closure pass)
+
+| Lane | Verdict (open or new only) |
+|---|---|
+| code-reviewer | **0 CRITICAL / 0 HIGH / 0 MEDIUM** / 1 LOW / 3 INFO |
+| architect | 0 CRITICAL / 0 HIGH / 1 MEDIUM / 2 LOW / 1 INFO |
+
+Every closure bullet verified closed by both lanes. Resolved in the commit
+that adds this section:
+
+- **MEDIUM (architect):** AC-CAT-1 was the third restatement of the unscoped
+  `release.json` signer rule; it now carries the §3.7.2 scoping (v0.10.2,
+  change log names it).
+- **LOW (code, architect):** snapshot revisions were collected from the
+  256-capped enumerator list, so membership was still enumeration-order
+  dependent above the cap; revisions now come from an uncapped names-only
+  read of `snapshots/` (no per-entry I/O), the content scan alone stays
+  bounded and sorted; the dead duplicate sort line is removed; the discovery
+  test places 300 older snapshot directories ahead of the artifact's.
+- **LOW (architect):** runbook no longer lists `models adopt-recommendation`
+  among the transcripts that make the live selection.
+- **INFO (architect):** `BYOMCatalogMatcher.matchedArtifact(...)` returns the
+  matched `ArtifactIdentity` with the feed digest, signer, and release id, so
+  slice 4's binding path is an added call, not a return-type change.
+- **Carried, in the PR body:** (INFO, code) the corpus pins verdicts, not the
+  §3.7.6 class; (INFO, code) the catalog-match set is non-monotonic in
+  artifact-feed trust — a name-level row match reappears once the usable feed
+  ages out (rule 5's own fallback, advisory, `catalog_match_unverified`).

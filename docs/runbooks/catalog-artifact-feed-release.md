@@ -89,13 +89,13 @@ Freshness (§3.7.6 rules 3–4) is applied to whichever artifact bytes were
 selected, the compiled-in fallback included, so an offline binary gets no
 usable feed once its baked feed is 14 days old. The transcripts that make the
 live selection are `autotune --recommend`, `--recommend-prefetch`, `--consume`,
-`models adopt-recommendation`, and `models catalog-economics`: each loads the
-artifact feed for the selected candidate release beside the three v0.1 feeds
-(`loadRecommendationInputs`); the first four carry its warnings in the same
-warning sets, and `catalog-economics` — whose SPEC-044 projection codes are a
-closed v0.1 enum — reports them on stderr. Callers that consume only the three
-v0.1 feeds (recommendation freshness, the `serve` preflight) skip the artifact
-fetch. A compiled-in snapshot the CLI cannot decode is
+and `models catalog-economics`: each loads the artifact feed for the selected
+candidate release beside the three v0.1 feeds (`loadRecommendationInputs`);
+the first three carry its warnings in the same warning sets, and
+`catalog-economics` — whose SPEC-044 projection codes are a closed v0.1 enum —
+reports them on stderr. Callers that consume only the three v0.1 feeds
+(recommendation freshness, the `serve` preflight, `models
+adopt-recommendation`) skip the artifact fetch. A compiled-in snapshot the CLI cannot decode is
 `catalog_artifact_feed_integrity_failure` with no usable feed, never a crash.
 BYOM identity is resolved against the compiled-in release in every command
 (`discover`, `evaluate`, `offer`, `catalog-economics`) through the one offline
