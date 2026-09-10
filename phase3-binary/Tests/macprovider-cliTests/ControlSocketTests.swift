@@ -14,6 +14,59 @@ final class ControlSocketTests: XCTestCase {
         try assertRoundTrip(.statusRequest)
     }
 
+    func testEncodeDecodeRewardAuditFrames() throws {
+        let page = try JSONDecoder().decode(
+            ProviderWalletAuditPageSummary.self,
+            from: Data("""
+            {
+              "events": [{
+                "id":"mra_2",
+                "occurred_at":"2026-09-10T01:02:03Z",
+                "event_type":"malibu_accrual_inserted",
+                "amount_malibu":"1.25000000",
+                "withdrawal_hold_reason":"per_wallet_daily_cap",
+                "source_reason":"malibu_verified_useful_work_v0_2",
+                "summary":"Verified useful work reward recorded."
+              }],
+              "next_before_id":"mra_1"
+            }
+            """.utf8)
+        )
+
+        try assertRoundTrip(.rewardAuditRequest(beforeID: nil))
+        try assertRoundTrip(.rewardAuditRequest(beforeID: "mra_2"))
+        try assertRoundTrip(.rewardAuditResponse(page))
+        try assertRoundTrip(.rewardAuditError(code: .authenticationRequired, retryAfterSeconds: nil))
+        try assertRoundTrip(.rewardAuditError(code: .rateLimited, retryAfterSeconds: 15))
+    }
+
+    func testDecodeRewardAuditRequestRejectsMalformedCursor() {
+        XCTAssertThrowsError(
+            try ControlSocketCodec.decode(Data(#"{"type":"reward_audit_request","before_id":"mra_01"}"#.utf8))
+        )
+    }
+
+    func testDecodeRewardAuditResponseIgnoresUnknownFields() throws {
+        let frame = try ControlSocketCodec.decode(Data("""
+        {
+          "type":"reward_audit_response",
+          "events":[{
+            "id":"mra_1",
+            "occurred_at":"2026-09-10T01:02:03Z",
+            "event_type":"malibu_accrual_inserted",
+            "source_reason":"malibu_bootstrap_tick",
+            "summary":"Bootstrap reward recorded.",
+            "future_event_field":true
+          }],
+          "future_page_field":"ignored"
+        }
+        """.utf8))
+        guard case let .rewardAuditResponse(page) = frame else {
+            return XCTFail("expected reward audit response")
+        }
+        XCTAssertEqual(page.events.map(\.id), ["mra_1"])
+    }
+
     func testEncodeDecodeRotateReceiptKeyRequest() throws {
         try assertRoundTrip(.rotateReceiptKeyRequest(providerID: "provider-a"))
     }

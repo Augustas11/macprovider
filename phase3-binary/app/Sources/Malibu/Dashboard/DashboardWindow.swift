@@ -105,6 +105,7 @@ private struct DashboardView: View {
     let onResetProvider: () -> Void
     @State private var showAddWalletSheet = false
     @State private var showModelSheet = false
+    @State private var rewardActivityExpanded = false
     @ObservedObject private var modelStore = ModelManagementStore.shared
 
     @State private var advancedDiagnosticsExpanded = true
@@ -313,6 +314,10 @@ private struct DashboardView: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
+                    RewardActivityPanel(
+                        agent: agent,
+                        isExpanded: $rewardActivityExpanded
+                    )
                 }
 
                 statsPanel {
@@ -468,6 +473,17 @@ private struct DashboardView: View {
                 peer: MalibuModelPeerEvidence(snapshot: agent.snapshot)
             )
             await modelStore.startBackgroundCheckIfEligible(thermalState: agent.snapshot.thermalState)
+            if agent.rewardAuditSupported,
+               agent.rewardActivityEvents.isEmpty,
+               !agent.rewardActivityLoading {
+                await agent.loadRewardActivity()
+            }
+        }
+        .onChange(of: agent.rewardAuditSupported) { supported in
+            guard supported,
+                  agent.rewardActivityEvents.isEmpty,
+                  !agent.rewardActivityLoading else { return }
+            Task { await agent.loadRewardActivity() }
         }
     }
 
@@ -486,8 +502,15 @@ private struct DashboardView: View {
                     .accessibilityIdentifier("malibu.dashboard.mining-status")
             }
             VStack(alignment: .leading, spacing: 8) {
+                MetricRow(title: "Serving readiness", value: AgentSnapshotPresenter.servingReadinessLine(agent.snapshot))
+                MetricRow(title: "MALIBU earning", value: AgentSnapshotPresenter.malibuEarningLine(rewardVerdict))
                 MetricRow(title: DashboardCopy.miningReasonTitle, value: mining.reason)
                 MetricRow(title: DashboardCopy.miningRewardsTitle, value: mining.rewardSummary)
+                MetricRow(
+                    title: "MALIBU withdrawal",
+                    value: AgentSnapshotPresenter.malibuAvailabilityLine(agent.snapshot, verdict: rewardVerdict)
+                        ?? "Status unavailable"
+                )
                 MetricRow(title: DashboardCopy.miningEligibilityTitle, value: mining.trustSummary)
                 MetricRow(title: DashboardCopy.nextActionTitle, value: mining.nextAction)
             }
@@ -656,6 +679,96 @@ private struct DashboardView: View {
 enum PayoutRegistrationPresentation {
     static func isCancellable(inProgress: Bool, canCancel: Bool) -> Bool {
         !inProgress || canCancel
+    }
+}
+
+private struct RewardActivityPanel: View {
+    @ObservedObject var agent: MalibuAgent
+    @Binding var isExpanded: Bool
+
+    var body: some View {
+        DisclosureGroup("Reward activity", isExpanded: $isExpanded) {
+            VStack(alignment: .leading, spacing: 8) {
+                if agent.rewardActivityLoading && agent.rewardActivityEvents.isEmpty {
+                    ProgressView("Loading reward activity…")
+                        .controlSize(.small)
+                }
+
+                if !agent.rewardActivityEvents.isEmpty {
+                    ForEach(agent.rewardActivityEvents) { event in
+                        VStack(alignment: .leading, spacing: 3) {
+                            HStack(alignment: .firstTextBaseline) {
+                                Text(RewardActivityPresentation.title(for: event))
+                                    .font(.caption.weight(.semibold))
+                                Spacer()
+                                Text(RewardActivityPresentation.timeText(for: event))
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Text(event.summary)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                            ForEach(RewardActivityPresentation.detailLines(for: event), id: \.self) { line in
+                                Text(line)
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        .accessibilityElement(children: .combine)
+                    }
+                } else if !agent.rewardActivityLoading, !agent.rewardAuditSupported {
+                    Text("Reward activity is available after the provider software updates.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                } else if !agent.rewardActivityLoading, agent.rewardActivityError == nil {
+                    Text("No reward activity has been reported yet.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+
+                if let error = agent.rewardActivityError {
+                    Text(error)
+                        .font(.caption2)
+                        .foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Button("Retry reward activity") {
+                        Task { await agent.loadRewardActivity() }
+                    }
+                    .disabled(agent.rewardActivityLoading || !agent.rewardAuditSupported)
+                    .accessibilityIdentifier("malibu.dashboard.reward-activity.retry")
+                    .accessibilityHint("Retries the read-only reward activity request.")
+                }
+
+                HStack(spacing: 8) {
+                    Button(agent.rewardActivityEvents.isEmpty ? "Refresh reward activity" : "Refresh") {
+                        Task { await agent.loadRewardActivity() }
+                    }
+                    .disabled(agent.rewardActivityLoading || !agent.rewardAuditSupported)
+                    .accessibilityIdentifier("malibu.dashboard.reward-activity.refresh")
+                    .accessibilityHint("Refreshes read-only reward activity without changing balances or payout settings.")
+
+                    if agent.rewardActivityNextBeforeID != nil {
+                        Button("Load older activity") {
+                            Task { await agent.loadRewardActivity(loadOlder: true) }
+                        }
+                        .disabled(agent.rewardActivityLoading || !agent.rewardAuditSupported)
+                        .accessibilityIdentifier("malibu.dashboard.reward-activity.load-older")
+                        .accessibilityHint("Loads an older page of read-only reward activity.")
+                    }
+                    if agent.rewardActivityLoading, !agent.rewardActivityEvents.isEmpty {
+                        ProgressView()
+                            .controlSize(.small)
+                            .accessibilityLabel("Loading reward activity")
+                    }
+                }
+                .font(.caption)
+            }
+            .padding(.top, 4)
+        }
+        .font(.caption)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Reward activity")
     }
 }
 

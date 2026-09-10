@@ -23,6 +23,16 @@ final class MalibuAgent: ObservableObject {
     @Published private(set) var snapshot: AgentSnapshot = .empty
     @Published private(set) var logLines: [String] = []
     @Published private(set) var providerStartFailure: String?
+    @Published private(set) var rewardActivityEvents: [RewardActivityEvent] = []
+    @Published private(set) var rewardActivityNextBeforeID: String?
+    @Published private(set) var rewardActivityLoading = false
+    @Published private(set) var rewardActivityError: String?
+    @Published private(set) var rewardAuditSupported = false
+    private var rewardActivityPendingBeforeID: String?
+    private var rewardActivityRequestID: UUID?
+    private var rewardActivityControl: ControlSocketClient?
+    private var rewardActivityProviderID: String?
+    private var controlSocketPath: String?
 
     private var child: CLIChildProcess?
     private var control: ControlSocketClient?
@@ -663,12 +673,15 @@ final class MalibuAgent: ObservableObject {
         monitorsLaunchdProvider = false
         lastRequestsRateSample = nil
         await control?.close()
+        await rewardActivityControl?.close()
         metricsPoller?.cancel(); metricsPoller = nil
         eventStreamTask?.cancel(); eventStreamTask = nil
         stopProviderLogTail()
         logLines = []
         child = nil
         control = nil
+        controlSocketPath = nil
+        clearRewardActivity(closeConnection: false)
         snapshot = .empty
         snapshot.thermalState = thermalMonitor.state
     }
@@ -729,17 +742,21 @@ final class MalibuAgent: ObservableObject {
         reconnectTask?.cancel()
         reconnectTask = nil
         let oldControl = control
+        let oldRewardActivityControl = rewardActivityControl
         metricsPoller?.cancel()
         metricsPoller = nil
         eventStreamTask?.cancel()
         eventStreamTask = nil
         control = nil
+        controlSocketPath = nil
+        clearRewardActivity(closeConnection: false)
         if child != nil {
             child?.markStopping()
             try? await oldControl?.send(.shutdownRequest(graceSeconds: 5))
             await child?.stop(gracePeriod: 5)
         }
         await oldControl?.close()
+        await oldRewardActivityControl?.close()
         child = nil
         invalidateProviderProjectionFreshness()
     }
@@ -750,6 +767,12 @@ final class MalibuAgent: ObservableObject {
         let healthReady = applyHealthCounters(await healthTask)
         let launchdPID = monitorsLaunchdProvider ? InstalledProviderMonitor.launchdServicePID() : nil
         let expectedProviderID = ProviderConfig.readProviderID()
+        if let rewardActivityProviderID, rewardActivityProviderID != expectedProviderID {
+            // Configuration identity changed even if the live process has not
+            // yet passed identity matching. Never show the prior provider's
+            // coordinator history during that transition.
+            clearRewardActivity()
+        }
         let identityMatched = status.map { fetched in
             guard let expectedProviderID else { return false }
             return InstalledProviderMonitor.serviceIdentityMatches(
@@ -763,7 +786,7 @@ final class MalibuAgent: ObservableObject {
         let identityMismatch = status != nil && !identityMatched
         if let status, let expectedProviderID, identityMatched {
             localStatusMissStartedAt = nil
-            snapshot.localProviderID = expectedProviderID
+            applyLocalProviderIdentity(expectedProviderID)
             snapshot.localStatusContractVersion = status.contractVersion
             snapshot.localStatusMinimumReaderVersion = status.minimumReaderVersion
             snapshot.localStatusContractCompatible = status.contractCompatible
@@ -937,7 +960,7 @@ final class MalibuAgent: ObservableObject {
     }
 
     private func applyCredentialSnapshot(_ credential: ProviderCredentialHandoffRunner.CredentialSnapshot) {
-        snapshot.localProviderID = credential.providerID
+        applyLocalProviderIdentity(credential.providerID)
         snapshot.credentialSource = credential.source
         snapshot.credentialState = credential.condition
         snapshot.credentialRestartSafe = credential.restartSafe
@@ -1166,6 +1189,9 @@ final class MalibuAgent: ObservableObject {
         if let control {
             await control.close()
             self.control = nil
+            controlSocketPath = nil
+            rewardAuditSupported = false
+            clearRewardActivity()
         }
 
         let client = ControlSocketClient(socketPath: socketPath)
@@ -1191,6 +1217,7 @@ final class MalibuAgent: ObservableObject {
         }
         guard !isShuttingDown else { await client.close(); return }
         self.control = client
+        controlSocketPath = socketPath
         reconnect.reset()
         snapshot.state = .starting
 
@@ -1239,6 +1266,7 @@ final class MalibuAgent: ObservableObject {
             return
         }
         control = client
+        controlSocketPath = ProviderPaths.current.controlSocket.path
         eventStreamTask?.cancel()
         eventStreamTask = Task { [weak self] in
             for await frame in client.stream {
@@ -1316,6 +1344,69 @@ final class MalibuAgent: ObservableObject {
             }
         } catch {
             // Soft-fail on dashboard load; keep any locally remembered address.
+        }
+    }
+
+    /// Requests one authenticated coordinator audit page through the provider's
+    /// same-user control socket. Reward history is intentionally independent
+    /// from the reward projection: an unavailable page never changes balances,
+    /// holds, earning state, or withdrawal eligibility.
+    func loadRewardActivity(loadOlder: Bool = false) async {
+        guard !rewardActivityLoading else { return }
+        guard rewardAuditSupported else {
+            rewardActivityError = "Reward activity is available after the provider software updates."
+            return
+        }
+        guard control != nil, let controlSocketPath else {
+            rewardActivityError = "Reward activity is unavailable while Malibu reconnects to the provider."
+            return
+        }
+        guard let providerID = snapshot.localProviderID,
+              !providerID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            rewardActivityError = "Reward activity is unavailable until provider identity is verified."
+            return
+        }
+        if let rewardActivityProviderID, rewardActivityProviderID != providerID {
+            clearRewardActivity()
+        }
+        let beforeID = loadOlder ? rewardActivityNextBeforeID : nil
+        guard !loadOlder || beforeID != nil else { return }
+        let requestID = UUID()
+        let historyControl = ControlSocketClient(socketPath: controlSocketPath)
+        rewardActivityLoading = true
+        rewardActivityError = nil
+        rewardActivityPendingBeforeID = beforeID
+        rewardActivityRequestID = requestID
+        rewardActivityProviderID = providerID
+        rewardActivityControl = historyControl
+        do {
+            try await historyControl.connect(timeout: 2)
+            try await historyControl.send(.rewardAuditRequest(beforeID: beforeID))
+            let response = try await historyControl.receiveOne(timeout: 15)
+            await historyControl.close()
+            guard rewardActivityRequestID == requestID,
+                  rewardActivityProviderID == providerID,
+                  snapshot.localProviderID == providerID else { return }
+            rewardActivityControl = nil
+            switch response {
+            case .rewardAuditResponse, .rewardAuditError:
+                consume(response)
+            default:
+                rewardActivityLoading = false
+                rewardActivityPendingBeforeID = nil
+                rewardActivityRequestID = nil
+                rewardActivityError = "Reward activity could not be verified. Try again."
+            }
+        } catch {
+            await historyControl.close()
+            guard rewardActivityRequestID == requestID,
+                  rewardActivityProviderID == providerID,
+                  snapshot.localProviderID == providerID else { return }
+            rewardActivityControl = nil
+            rewardActivityRequestID = nil
+            rewardActivityLoading = false
+            rewardActivityPendingBeforeID = nil
+            rewardActivityError = "Reward activity is temporarily unavailable. Try again."
         }
     }
 
@@ -1415,6 +1506,31 @@ final class MalibuAgent: ObservableObject {
         snapshot.referralStatus = nil
         if snapshot.hasTrustedReferralBoundary() {
             snapshot.referralLastError = "Invite status is unavailable while Malibu reconnects to the provider."
+        }
+        rewardAuditSupported = false
+        controlSocketPath = nil
+        clearRewardActivity()
+    }
+
+    func applyLocalProviderIdentity(_ providerID: String?) {
+        if let rewardActivityProviderID, rewardActivityProviderID != providerID {
+            clearRewardActivity()
+        }
+        snapshot.localProviderID = providerID
+    }
+
+    private func clearRewardActivity(closeConnection: Bool = true) {
+        rewardActivityEvents = []
+        rewardActivityNextBeforeID = nil
+        rewardActivityLoading = false
+        rewardActivityError = nil
+        rewardActivityPendingBeforeID = nil
+        rewardActivityRequestID = nil
+        rewardActivityProviderID = nil
+        let historyControl = rewardActivityControl
+        rewardActivityControl = nil
+        if closeConnection, let historyControl {
+            Task { await historyControl.close() }
         }
     }
 
@@ -1529,6 +1645,8 @@ final class MalibuAgent: ObservableObject {
             if looksLikeStub {
                 if snapshot.hasObservedProviderEarnings {
                     snapshot.demoteRewardInputsAfterLegacyStub()
+                    rewardAuditSupported = false
+                    clearRewardActivity()
                     persistDashboardObservation()
                     return
                 }
@@ -1555,6 +1673,11 @@ final class MalibuAgent: ObservableObject {
                 providerProjectionEligible: providerProjectionEligible,
                 providerEarnings: providerEarnings
             )
+            let supportsRewardAudit = providerEarnings?.rewardAuditSupported ?? false
+            rewardAuditSupported = supportsRewardAudit
+            if !supportsRewardAudit {
+                clearRewardActivity()
+            }
             if let providerEarnings {
                 snapshot.applyProviderEarnings(
                     providerEarnings,
@@ -1562,6 +1685,32 @@ final class MalibuAgent: ObservableObject {
                 )
             }
             persistDashboardObservation()
+        case let .rewardAuditResponse(page):
+            if rewardActivityProviderID == nil {
+                rewardActivityProviderID = snapshot.localProviderID
+            }
+            guard let rewardActivityProviderID,
+                  rewardActivityProviderID == snapshot.localProviderID else {
+                clearRewardActivity()
+                return
+            }
+            rewardActivityEvents = page.mergedEvents(
+                with: rewardActivityEvents,
+                loadingOlderPage: rewardActivityPendingBeforeID != nil
+            )
+            rewardActivityNextBeforeID = page.nextBeforeID
+            rewardActivityLoading = false
+            rewardActivityPendingBeforeID = nil
+            rewardActivityRequestID = nil
+            rewardActivityError = nil
+        case let .rewardAuditError(code, retryAfterSeconds):
+            rewardActivityLoading = false
+            rewardActivityPendingBeforeID = nil
+            rewardActivityRequestID = nil
+            rewardActivityError = RewardActivityPresentation.errorText(
+                code,
+                retryAfterSeconds: retryAfterSeconds
+            )
         case let .pauseAck(accepted, reason):
             if accepted {
                 snapshot.state = .paused

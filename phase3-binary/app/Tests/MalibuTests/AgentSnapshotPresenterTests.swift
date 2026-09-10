@@ -1693,19 +1693,19 @@ final class AgentSnapshotPresenterTests: XCTestCase {
             )
         )
 
-        XCTAssertEqual(AgentSnapshotPresenter.eligibilityLine(snapshot), "MALIBU withdrawals are available")
+        XCTAssertEqual(AgentSnapshotPresenter.eligibilityLine(snapshot), "Earlier MALIBU rewards remain held")
         XCTAssertEqual(
             AgentSnapshotPresenter.malibuAvailabilityLine(snapshot),
-            "MALIBU: 2.00 available · 0.00 held"
+            "MALIBU: not withdrawable · 0.00 held"
         )
         XCTAssertEqual(
             AgentSnapshotPresenter.malibuFullLine(snapshot),
-            "2.00 MALIBU · 2.00 all-time"
+            "2.00 MALIBU today (locked) · 2.00 all-time · locked until eligible"
         )
-        XCTAssertNil(AgentSnapshotPresenter.malibuHoldLine(snapshot))
+        XCTAssertNotNil(AgentSnapshotPresenter.malibuHoldLine(snapshot))
     }
 
-    func testTrustedSnapshotIgnoresLeftoverProvisionalHoldCopy() {
+    func testTrustedSnapshotRetainsAuthoritativeHistoricalHoldCopy() {
         var snapshot = AgentSnapshot.empty
         snapshot.state = .serving
         snapshot.networkState = "buyer_serving"
@@ -1729,15 +1729,15 @@ final class AgentSnapshotPresenterTests: XCTestCase {
 
         let health = AgentSnapshotPresenter.miningHealth(snapshot)
         XCTAssertNotEqual(health.reasonCode, "trust_tier_provisional")
-        XCTAssertNotEqual(health.reasonCode, "rewards_held")
+        XCTAssertEqual(health.reasonCode, "rewards_held")
         XCTAssertFalse(health.status.contains("Locked"))
-        XCTAssertFalse(health.status.contains("Rewards held"))
-        XCTAssertNil(AgentSnapshotPresenter.malibuHoldLine(snapshot))
+        XCTAssertTrue(health.status.contains("Rewards held"))
+        XCTAssertNotNil(AgentSnapshotPresenter.malibuHoldLine(snapshot))
         XCTAssertNotEqual(
             AgentSnapshotPresenter.eligibilityLine(snapshot),
             "MALIBU is locked until Trusted"
         )
-        XCTAssertFalse(AgentSnapshotPresenter.malibuFullLine(snapshot).contains("locked"))
+        XCTAssertTrue(AgentSnapshotPresenter.malibuFullLine(snapshot).contains("locked"))
         XCTAssertFalse(AgentSnapshotPresenter.malibuFullLine(snapshot).contains("Locked"))
         XCTAssertFalse(
             (AgentSnapshotPresenter.malibuHoldLine(snapshot) ?? "")
@@ -1762,10 +1762,10 @@ final class AgentSnapshotPresenterTests: XCTestCase {
             )
         )
 
-        XCTAssertNil(AgentSnapshotPresenter.eligibilityLine(snapshot))
+        XCTAssertEqual(AgentSnapshotPresenter.eligibilityLine(snapshot), "Earlier MALIBU rewards remain held")
         XCTAssertEqual(
             AgentSnapshotPresenter.malibuFullLine(snapshot),
-            "2.00 MALIBU · 2.00 all-time"
+            "2.00 MALIBU today (locked) · 2.00 all-time · locked until eligible"
         )
     }
 

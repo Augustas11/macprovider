@@ -514,6 +514,28 @@ The same provider cap, wallet cap, provisional hold, demotion hold, and trusted
 withdrawable rules from §3 apply. Non-verified, missing-receipt, quarantined, or
 legacy/observe-only rows are excluded from v0.2 MALIBU useful-work accrual.
 
+### 4.2.1 Recent verified-work observation for provider presentation
+
+`earning_verified_work` is a presentation observation, separate from MALIBU
+issuance, balances, holds, USDC settlement, and payment execution. The reward
+owner MAY emit it only when the Postgres settlement mirror contains at least one
+row for the provider in the preceding **30 minutes** whose
+`spec022_verified = TRUE`, `settlement_policy_mode = 'enforce'`,
+`quarantined = FALSE`, and `provider_credits > 0`. The observation timestamp is
+the latest qualifying `ledger_request_credits.ts_utc`; it is not a wallet update
+time, audit-event time, receipt lifetime count, local request count, online
+duration, or USDC amount.
+
+The current v0.2 mirror has no provider-independent high-water mark. Therefore
+the absence of a qualifying row is ambiguous: it can mean idle, a newly active
+provider, or settlement/mirror propagation lag. Until an authoritative fresh
+mirror watermark exists, the coordinator MUST emit `telemetry_unavailable` and
+an unavailable earning state rather than infer `eligible_idle_no_work`. A
+future owner that supplies a fresh watermark may render
+`eligible_idle_no_work`, but MUST NOT represent it as proof that no request is
+in flight. A current inability to observe earning work MUST NOT change ledger
+totals, a held balance, or a valid MALIBU `withdrawal_state`.
+
 ### 4.3 Wallet-bind mirror
 
 Periodic poll of SQLite `provider_payout_addresses` (same DB as `ledger_payout_ready` per SPEC-016 §3.1) into `provider_payout_addresses_proj`.
@@ -680,12 +702,22 @@ Fields:
 | `primary_reason` | enum | The single highest-priority reason clients should render first. |
 | `reasons` | array | Closed ordered set of reason codes. Unknown codes under a known schema version MUST be rendered as generic unavailable/review-needed copy and logged for client upgrade. |
 
+Accrual and wallet read responses MAY include
+`reward_projection_generated_at` and `reward_projection_stale_after` as RFC3339
+timestamps for the coherent coordinator reward bundle. The timestamps describe
+the bundle, not reward accrual time, wallet update time, USDC freshness, a
+payment execution promise, or a client authorization to infer eligibility.
+`reward_projection_stale_after` is normally 60 seconds after generation and
+MUST be no later than the expiration of any recent-work or hardware-evidence
+fact used to make the bundle. It is not a replacement for the relevant source
+TTL.
+
 Reason vocabulary:
 
 | Reason | Owner | Meaning |
 |--------|-------|---------|
-| `earning_verified_work` | coordinator reward/read model | Recent verified work was observed by the reward owner and can be presented as active earning. |
-| `eligible_idle_no_work` | coordinator reward/read model | No blocking reward reason is known, but no current earning work is observed. |
+| `earning_verified_work` | coordinator reward/read model | Recent verified work was observed by the reward owner under §4.2.1 and can be presented as active earning. |
+| `eligible_idle_no_work` | coordinator reward/read model | An authoritative fresh mirror watermark found no current earning work. It does not prove that a request is not in flight. |
 | `held_provisional_trust_tier` | MALIBU ledger/trust | Accrual is visible but held because the provider is not Trusted. Maps from `withdrawal_hold_reason = trust_tier_provisional`. |
 | `held_provider_daily_cap` | provider emission state | The provider has reached its UTC-day MALIBU cap. Maps from `provider_emission_state.provider_day_malibu >= daily_cap_malibu` for the current UTC day. |
 | `held_wallet_daily_cap` | MALIBU ledger | Accrual is held or capped by the bound-wallet daily MALIBU cap. Maps from `withdrawal_hold_reason = per_wallet_daily_cap`. |

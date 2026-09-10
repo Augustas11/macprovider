@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/auth"
+	"github.com/augstar/macprovider-coordinator/internal/autotune"
 )
 
 type tokenValidator interface {
@@ -23,6 +24,8 @@ type AccrualHandlerDeps struct {
 	RequireProviderTokens bool
 	Config                Config
 	Connectivity          ProviderConnectivity
+	HardwareEvidence      autotune.EvidenceStore
+	HardwareEvidenceTTL   time.Duration
 }
 
 // NewAccrualHandler serves GET /v1/provider/malibu-accrual.
@@ -56,58 +59,43 @@ func NewAccrualHandler(deps AccrualHandlerDeps) http.Handler {
 			return
 		}
 
-		bal, err := QueryAccrualBalance(r.Context(), deps.DB, providerID, deps.Config)
+		projection, err := BuildProviderRewardProjection(r.Context(), providerID, ProviderRewardProjectionDeps{
+			RewardsDB:           deps.DB,
+			PayoutDB:            deps.PayoutDB,
+			Config:              deps.Config,
+			Connectivity:        deps.Connectivity,
+			HardwareEvidence:    deps.HardwareEvidence,
+			HardwareEvidenceTTL: deps.HardwareEvidenceTTL,
+		})
 		if err != nil {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusInternalServerError)
 			_, _ = w.Write([]byte(`{"error":"internal_error"}` + "\n"))
 			return
 		}
-		trust, err := QueryTrustCriteriaStatus(r.Context(), deps.DB, providerID, deps.Config, deps.Connectivity)
-		if err != nil {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusInternalServerError)
-			_, _ = w.Write([]byte(`{"error":"internal_error"}` + "\n"))
-			return
-		}
-		rewardProjection, err := queryRewardWalletProjection(r.Context(), deps.DB, providerID)
-		if err != nil {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusInternalServerError)
-			_, _ = w.Write([]byte(`{"error":"internal_error"}` + "\n"))
-			return
-		}
-		payoutWallet, err := queryPayoutWalletStatus(r.Context(), deps.PayoutDB, providerID, deps.Config.PayoutHotWalletAddress)
-		if err != nil {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusInternalServerError)
-			_, _ = w.Write([]byte(`{"error":"internal_error"}` + "\n"))
-			return
-		}
-		currentWalletAllowed, walletMismatch := currentWalletBinding(payoutWallet, rewardProjection)
-		trust = trustCriteriaWithWalletBinding(trust, currentWalletAllowed && !walletMismatch)
-		eligibility := RewardEligibilityFromBalanceAndTrust(bal, trust)
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Cache-Control", "no-store")
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
-			"provider_id":             providerID,
-			"accrued_malibu":          bal.AccruedMALIBU,
-			"withdrawable_malibu":     bal.WithdrawableMALIBU,
-			"held_malibu":             bal.HeldMALIBU,
-			"trust_tier":              bal.TrustTier,
-			"daily_cap_malibu":        bal.ProviderDailyCap,
-			"provider_daily_capped":   bal.ProviderDailyCapped,
-			"wallet_daily_cap_malibu": bal.WalletDailyCap,
-			"withdrawal_hold_reasons": bal.HoldReasons,
-			"trust_criteria_met":      trust.CriteriaMet,
-			"trust_criteria_required": trust.CriteriaRequired,
-			"economic_criteria":       trust.EconomicSatisfied,
-			"additional_criteria":     trust.AdditionalSatisfied,
-			"verified_receipt_count":  trust.VerifiedReceiptCount,
-			"wallet_bound":            trust.WalletBound,
-			"wallet_mismatch":         walletMismatch,
-			"app_attested":            trust.AppAttested,
-			"reward_eligibility":      eligibility,
+			"provider_id":                    providerID,
+			"accrued_malibu":                 projection.Balance.AccruedMALIBU,
+			"withdrawable_malibu":            projection.Balance.WithdrawableMALIBU,
+			"held_malibu":                    projection.Balance.HeldMALIBU,
+			"trust_tier":                     projection.Balance.TrustTier,
+			"daily_cap_malibu":               projection.Balance.ProviderDailyCap,
+			"provider_daily_capped":          projection.Balance.ProviderDailyCapped,
+			"wallet_daily_cap_malibu":        projection.Balance.WalletDailyCap,
+			"withdrawal_hold_reasons":        projection.Balance.HoldReasons,
+			"trust_criteria_met":             projection.Trust.CriteriaMet,
+			"trust_criteria_required":        projection.Trust.CriteriaRequired,
+			"economic_criteria":              projection.Trust.EconomicSatisfied,
+			"additional_criteria":            projection.Trust.AdditionalSatisfied,
+			"verified_receipt_count":         projection.Trust.VerifiedReceiptCount,
+			"wallet_bound":                   projection.WalletBound,
+			"wallet_mismatch":                projection.WalletMismatch,
+			"app_attested":                   projection.Trust.AppAttested,
+			"reward_projection_generated_at": projection.GeneratedAt.Format(time.RFC3339),
+			"reward_projection_stale_after":  projection.StaleAfter.Format(time.RFC3339),
+			"reward_eligibility":             projection.Eligibility,
 		})
 	})
 }

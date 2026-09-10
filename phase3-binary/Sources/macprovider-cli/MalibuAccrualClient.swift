@@ -1,5 +1,66 @@
 import Foundation
 
+/// Coordinator timestamp bounds for one coherently-built reward projection.
+/// Older coordinators omit both fields; a partial or malformed pair is rejected.
+struct RewardProjectionFreshness: Equatable, Sendable {
+    /// The coordinator's projection contract bounds coherent snapshots to 60s.
+    private static let maximumValidityWindow: TimeInterval = 60
+    /// Allow only minor coordinator/provider clock skew; future projections
+    /// beyond this cannot be treated as observations from the current poll.
+    private static let maximumFutureClockSkew: TimeInterval = 5
+
+    let generatedAt: Date?
+    let staleAfter: Date?
+
+    static let legacy = RewardProjectionFreshness(generatedAt: nil, staleAfter: nil)
+
+    static func decode<K: CodingKey>(
+        _ c: KeyedDecodingContainer<K>,
+        generatedAtKey: K,
+        staleAfterKey: K
+    ) throws -> RewardProjectionFreshness {
+        let hasGeneratedAt = c.contains(generatedAtKey)
+        let hasStaleAfter = c.contains(staleAfterKey)
+        guard hasGeneratedAt == hasStaleAfter else {
+            throw DecodingError.dataCorruptedError(
+                forKey: hasGeneratedAt ? staleAfterKey : generatedAtKey,
+                in: c,
+                debugDescription: "Reward projection freshness bounds must be supplied together"
+            )
+        }
+        guard hasGeneratedAt else { return .legacy }
+
+        let generatedText = try c.decode(String.self, forKey: generatedAtKey)
+        let staleText = try c.decode(String.self, forKey: staleAfterKey)
+        guard let generatedAt = parseRFC3339(generatedText),
+              let staleAfter = parseRFC3339(staleText),
+              staleAfter >= generatedAt,
+              staleAfter.timeIntervalSince(generatedAt) <= maximumValidityWindow else {
+            throw DecodingError.dataCorruptedError(
+                forKey: staleAfterKey,
+                in: c,
+                debugDescription: "Invalid reward projection freshness bounds"
+            )
+        }
+        return RewardProjectionFreshness(generatedAt: generatedAt, staleAfter: staleAfter)
+    }
+
+    func isFresh(at date: Date) -> Bool {
+        guard let generatedAt, let staleAfter else { return true }
+        return generatedAt <= date.addingTimeInterval(Self.maximumFutureClockSkew)
+            && date <= staleAfter
+    }
+
+    private static func parseRFC3339(_ value: String) -> Date? {
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = fractional.date(from: value) { return date }
+        let wholeSeconds = ISO8601DateFormatter()
+        wholeSeconds.formatOptions = [.withInternetDateTime]
+        return wholeSeconds.date(from: value)
+    }
+}
+
 /// Coordinator-owned MALIBU reward eligibility reason model.
 public struct MalibuRewardEligibility: Codable, Equatable, Sendable {
     public static let schemaV1 = "malibu_reward_eligibility.v1"
@@ -102,6 +163,9 @@ public struct MalibuRewardEligibility: Codable, Equatable, Sendable {
         "held_provider_daily_cap",
         "held_wallet_daily_cap",
         "held_demotion_cooldown",
+        "held_epoch_disposition",
+        "excluded_epoch_disposition",
+        "burned_or_retired_epoch_disposition",
         "withdrawable_balance_available",
         "withdrawable_no_balance",
         "missing_wallet_binding",
@@ -135,6 +199,7 @@ struct MalibuAccrualSummary: Decodable, Equatable, Sendable {
     let walletDailyCapMALIBU: Double?
     let withdrawalHoldReasons: [String]
     let rewardEligibility: MalibuRewardEligibility?
+    let projectionFreshness: RewardProjectionFreshness
 
     enum CodingKeys: String, CodingKey {
         case accruedMALIBU = "accrued_malibu"
@@ -150,6 +215,8 @@ struct MalibuAccrualSummary: Decodable, Equatable, Sendable {
         case walletDailyCapMALIBU = "wallet_daily_cap_malibu"
         case withdrawalHoldReasons = "withdrawal_hold_reasons"
         case rewardEligibility = "reward_eligibility"
+        case projectionGeneratedAt = "reward_projection_generated_at"
+        case projectionStaleAfter = "reward_projection_stale_after"
     }
 
     init(from decoder: Decoder) throws {
@@ -157,6 +224,18 @@ struct MalibuAccrualSummary: Decodable, Equatable, Sendable {
         accruedMALIBU = try Self.decodeRequiredDecimal(c, key: .accruedMALIBU)
         withdrawableMALIBU = try Self.decodeRequiredDecimal(c, key: .withdrawableMALIBU)
         heldMALIBU = try Self.decodeRequiredDecimal(c, key: .heldMALIBU)
+        guard accruedMALIBU >= 0,
+              withdrawableMALIBU >= 0,
+              heldMALIBU >= 0,
+              withdrawableMALIBU <= accruedMALIBU,
+              heldMALIBU <= accruedMALIBU,
+              withdrawableMALIBU + heldMALIBU <= accruedMALIBU + 0.000_000_001 else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .accruedMALIBU,
+                in: c,
+                debugDescription: "Incoherent MALIBU reward amounts"
+            )
+        }
         let rawTrustTier = try c.decode(String.self, forKey: .trustTier).lowercased()
         guard rawTrustTier == "provisional" || rawTrustTier == "trusted" else {
             throw DecodingError.dataCorruptedError(
@@ -173,12 +252,29 @@ struct MalibuAccrualSummary: Decodable, Equatable, Sendable {
         walletBound = try c.decodeIfPresent(Bool.self, forKey: .walletBound)
         dailyCapMALIBU = try Self.decodeOptionalDecimal(c, key: .dailyCapMALIBU)
         walletDailyCapMALIBU = try Self.decodeOptionalDecimal(c, key: .walletDailyCapMALIBU)
+        guard dailyCapMALIBU.map({ $0 >= 0 }) ?? true,
+              walletDailyCapMALIBU.map({ $0 >= 0 }) ?? true else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .dailyCapMALIBU,
+                in: c,
+                debugDescription: "MALIBU caps cannot be negative"
+            )
+        }
         withdrawalHoldReasons = try c.decodeIfPresent([String].self, forKey: .withdrawalHoldReasons) ?? []
         if let decodedRewardEligibility = try c.decodeIfPresent(MalibuRewardEligibility.self, forKey: .rewardEligibility) {
             rewardEligibility = decodedRewardEligibility
         } else {
             rewardEligibility = MalibuRewardEligibility.unavailableForMissingObject()
         }
+        projectionFreshness = try RewardProjectionFreshness.decode(
+            c,
+            generatedAtKey: .projectionGeneratedAt,
+            staleAfterKey: .projectionStaleAfter
+        )
+    }
+
+    func isFresh(at date: Date) -> Bool {
+        projectionFreshness.isFresh(at: date)
     }
 
     private static func decodeRequiredDecimal(

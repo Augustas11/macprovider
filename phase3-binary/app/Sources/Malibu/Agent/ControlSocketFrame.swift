@@ -39,6 +39,9 @@ enum ControlFrame: Sendable, Equatable {
         outputTokensAllTime: Int64?,
         uptimeSec: Int?
     )
+    case rewardAuditRequest(beforeID: String?)
+    case rewardAuditResponse(RewardActivityPage)
+    case rewardAuditError(code: RewardAuditControlErrorCode, retryAfterSeconds: Int?)
 
     case pauseRequest
     case pauseAck(accepted: Bool, reason: String?)
@@ -80,7 +83,7 @@ enum ReferralControlErrorCode: String, Sendable, Equatable {
 
 enum ControlCodec {
     static func encode(_ frame: ControlFrame) throws -> Data {
-        let object = payload(for: frame)
+        let object = try payload(for: frame)
         return try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
     }
 
@@ -94,7 +97,7 @@ enum ControlCodec {
 
     enum DecodeError: Error { case malformed, unknownType(String) }
 
-    private static func payload(for frame: ControlFrame) -> [String: Any] {
+    private static func payload(for frame: ControlFrame) throws -> [String: Any] {
         switch frame {
         case .statusRequest:
             return ["type": "status_request"]
@@ -153,6 +156,22 @@ enum ControlCodec {
             if let inputTokensAllTime { obj["input_tokens_all_time"] = inputTokensAllTime }
             if let outputTokensAllTime { obj["output_tokens_all_time"] = outputTokensAllTime }
             if let uptime { obj["uptime_sec"] = uptime }
+            return obj
+        case let .rewardAuditRequest(beforeID):
+            var obj: [String: Any] = ["type": "reward_audit_request"]
+            if let beforeID { obj["before_id"] = beforeID }
+            return obj
+        case let .rewardAuditResponse(page):
+            var obj: [String: Any] = ["type": "reward_audit_response"]
+            let encoded = try JSONEncoder().encode(page)
+            guard let nested = try JSONSerialization.jsonObject(with: encoded) as? [String: Any] else {
+                throw DecodeError.malformed
+            }
+            for (key, value) in nested { obj[key] = value }
+            return obj
+        case let .rewardAuditError(code, retryAfterSeconds):
+            var obj: [String: Any] = ["type": "reward_audit_error", "code": code.rawValue]
+            if let retryAfterSeconds { obj["retry_after_seconds"] = retryAfterSeconds }
             return obj
         case .pauseRequest: return ["type": "pause_request"]
         case let .pauseAck(accepted, reason):
@@ -237,6 +256,29 @@ enum ControlCodec {
                 outputTokensAllTime: int64Value(dict["output_tokens_all_time"]),
                 uptimeSec: intValue(dict["uptime_sec"])
             )
+        case "reward_audit_request":
+            return .rewardAuditRequest(beforeID: dict["before_id"] as? String)
+        case "reward_audit_response":
+            var page = dict
+            page.removeValue(forKey: "type")
+            do {
+                let data = try JSONSerialization.data(withJSONObject: page)
+                return .rewardAuditResponse(try JSONDecoder().decode(RewardActivityPage.self, from: data))
+            } catch {
+                // History is optional telemetry. A malformed page must not
+                // tear down the control connection or alter reward eligibility.
+                return .rewardAuditError(code: .invalidResponse, retryAfterSeconds: nil)
+            }
+        case "reward_audit_error":
+            guard let raw = dict["code"] as? String,
+                  let code = RewardAuditControlErrorCode(rawValue: raw) else {
+                return .rewardAuditError(code: .invalidResponse, retryAfterSeconds: nil)
+            }
+            let retryAfter = intValue(dict["retry_after_seconds"])
+            guard retryAfter.map({ (0...86_400).contains($0) }) ?? true else {
+                return .rewardAuditError(code: .invalidResponse, retryAfterSeconds: nil)
+            }
+            return .rewardAuditError(code: code, retryAfterSeconds: retryAfter)
         case "pause_ack":
             return .pauseAck(
                 accepted: dict["accepted"] as? Bool ?? false,

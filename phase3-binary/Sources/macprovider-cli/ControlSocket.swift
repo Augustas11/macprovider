@@ -68,6 +68,9 @@ public enum ControlSocketFrame: Equatable, Sendable {
     // SPEC-025 §5.2 — additive frames used by Malibu.app's read-only control client.
     case metricsRequest
     case metricsResponse(ControlMetricsSnapshot)
+    case rewardAuditRequest(beforeID: String?)
+    case rewardAuditResponse(ProviderWalletAuditPageSummary)
+    case rewardAuditError(code: RewardAuditControlErrorCode, retryAfterSeconds: Int?)
     case pauseRequest
     case pauseAck(accepted: Bool, reason: String?)
     case resumeRequest
@@ -97,6 +100,13 @@ public enum ControlSocketFrame: Equatable, Sendable {
     case kvCachePurgeResponse(status: String, entriesRemoved: Int, bytesFreed: Int, detail: String?)
     case kvCacheStatusRequest
     case kvCacheStatusResponse(payloadJSON: String)
+}
+
+public enum RewardAuditControlErrorCode: String, Sendable, Equatable {
+    case authenticationRequired = "authentication_required"
+    case rateLimited = "rate_limited"
+    case temporarilyUnavailable = "temporarily_unavailable"
+    case invalidResponse = "invalid_response"
 }
 
 public enum ControlSocketCodec {
@@ -269,6 +279,22 @@ public enum ControlSocketCodec {
             if let inputTokensAllTime = metrics.inputTokensAllTime { frame["input_tokens_all_time"] = inputTokensAllTime }
             if let outputTokensAllTime = metrics.outputTokensAllTime { frame["output_tokens_all_time"] = outputTokensAllTime }
             if let queueDepth = metrics.queueDepth { frame["queue_depth"] = queueDepth }
+            object = frame
+        case let .rewardAuditRequest(beforeID):
+            var frame: [String: Any] = ["type": "reward_audit_request"]
+            if let beforeID { frame["before_id"] = beforeID }
+            object = frame
+        case let .rewardAuditResponse(page):
+            object = try Self.object(
+                encoding: page,
+                adding: ["type": "reward_audit_response"]
+            )
+        case let .rewardAuditError(code, retryAfterSeconds):
+            var frame: [String: Any] = [
+                "type": "reward_audit_error",
+                "code": code.rawValue,
+            ]
+            if let retryAfterSeconds { frame["retry_after_seconds"] = retryAfterSeconds }
             object = frame
         case .pauseRequest:
             object = ["type": "pause_request"]
@@ -536,6 +562,39 @@ public enum ControlSocketCodec {
                 outputTokensAllTime: optionalInt64Field("output_tokens_all_time", in: object),
                 queueDepth: optionalIntField("queue_depth", in: object)
             ))
+        case "reward_audit_request":
+            if let raw = object["before_id"], !(raw is NSNull), !(raw is String) {
+                throw ControlSocketError.invalidEnumValue(field: "before_id", value: "non_string")
+            }
+            let beforeID = object["before_id"] as? String
+            if let beforeID {
+                guard beforeID.hasPrefix("mra_"),
+                      let id = Int64(beforeID.dropFirst(4)),
+                      id > 0,
+                      beforeID == "mra_\(id)" else {
+                    throw ControlSocketError.invalidEnumValue(field: "before_id", value: beforeID)
+                }
+            }
+            return .rewardAuditRequest(beforeID: beforeID)
+        case "reward_audit_response":
+            return .rewardAuditResponse(try decode(
+                ProviderWalletAuditPageSummary.self,
+                from: object,
+                removing: "type"
+            ))
+        case "reward_audit_error":
+            let codeRaw = try stringField("code", in: object)
+            guard let code = RewardAuditControlErrorCode(rawValue: codeRaw) else {
+                throw ControlSocketError.invalidEnumValue(field: "code", value: codeRaw)
+            }
+            let retryAfter = optionalIntField("retry_after_seconds", in: object)
+            if let retryAfter, !(0...86_400).contains(retryAfter) {
+                throw ControlSocketError.invalidEnumValue(
+                    field: "retry_after_seconds",
+                    value: String(retryAfter)
+                )
+            }
+            return .rewardAuditError(code: code, retryAfterSeconds: retryAfter)
         case "pause_request":
             return .pauseRequest
         case "pause_ack":
@@ -1115,6 +1174,7 @@ actor ControlSocketServer {
 	private let referralCoordinatorService: ReferralCoordinatorService?
 	private let malibuAccrualClient: MalibuAccrualClient?
 	private let providerWalletStatusClient: ProviderWalletStatusClient?
+	private let providerRewardAuditClient: ProviderRewardAuditClient?
 	private let providerToken: String?
     private let pauseProvider: (@Sendable () async -> ProviderControlCommandResult)?
     private let resumeProvider: (@Sendable () async -> ProviderControlCommandResult)?
@@ -1142,6 +1202,7 @@ actor ControlSocketServer {
 		referralCoordinatorService: ReferralCoordinatorService? = nil,
 		malibuAccrualClient: MalibuAccrualClient? = nil,
 		providerWalletStatusClient: ProviderWalletStatusClient? = nil,
+		providerRewardAuditClient: ProviderRewardAuditClient? = nil,
 		providerToken: String? = nil,
         pauseProvider: (@Sendable () async -> ProviderControlCommandResult)? = nil,
         resumeProvider: (@Sendable () async -> ProviderControlCommandResult)? = nil,
@@ -1159,6 +1220,7 @@ actor ControlSocketServer {
 		self.referralCoordinatorService = referralCoordinatorService
 		self.malibuAccrualClient = malibuAccrualClient
 		self.providerWalletStatusClient = providerWalletStatusClient
+		self.providerRewardAuditClient = providerRewardAuditClient
 		self.providerToken = providerToken
         self.pauseProvider = pauseProvider
         self.resumeProvider = resumeProvider
@@ -1227,6 +1289,7 @@ actor ControlSocketServer {
         let referralCoordinatorService = referralCoordinatorService
         let malibuAccrualClient = malibuAccrualClient
         let providerWalletStatusClient = providerWalletStatusClient
+		let providerRewardAuditClient = providerRewardAuditClient
         let providerToken = providerToken
         let pauseProvider = pauseProvider
         let resumeProvider = resumeProvider
@@ -1244,6 +1307,7 @@ actor ControlSocketServer {
                 referralCoordinatorService: referralCoordinatorService,
                 malibuAccrualClient: malibuAccrualClient,
                 providerWalletStatusClient: providerWalletStatusClient,
+				providerRewardAuditClient: providerRewardAuditClient,
                 providerToken: providerToken,
                 pauseProvider: pauseProvider,
                 resumeProvider: resumeProvider,
@@ -1306,6 +1370,7 @@ actor ControlSocketServer {
 		referralCoordinatorService: ReferralCoordinatorService?,
 		malibuAccrualClient: MalibuAccrualClient?,
 		providerWalletStatusClient: ProviderWalletStatusClient?,
+		providerRewardAuditClient: ProviderRewardAuditClient?,
 		providerToken: String?,
         pauseProvider: (@Sendable () async -> ProviderControlCommandResult)?,
         resumeProvider: (@Sendable () async -> ProviderControlCommandResult)?,
@@ -1343,6 +1408,7 @@ actor ControlSocketServer {
                     referralCoordinatorService: referralCoordinatorService,
                     malibuAccrualClient: malibuAccrualClient,
                     providerWalletStatusClient: providerWalletStatusClient,
+					providerRewardAuditClient: providerRewardAuditClient,
                     providerToken: providerToken,
                     pauseProvider: pauseProvider,
                     resumeProvider: resumeProvider,
@@ -1367,6 +1433,7 @@ actor ControlSocketServer {
 		referralCoordinatorService: ReferralCoordinatorService? = nil,
 		malibuAccrualClient: MalibuAccrualClient? = nil,
 		providerWalletStatusClient: ProviderWalletStatusClient? = nil,
+		providerRewardAuditClient: ProviderRewardAuditClient? = nil,
 		providerToken: String? = nil,
         pauseProvider: (@Sendable () async -> ProviderControlCommandResult)? = nil,
         resumeProvider: (@Sendable () async -> ProviderControlCommandResult)? = nil,
@@ -1459,14 +1526,25 @@ actor ControlSocketServer {
                     await connection.close()
                     return
                 case .metricsRequest:
-                    let snapshot = await ControlMetricsBuilder.build(
+                    var snapshot = await ControlMetricsBuilder.build(
 						providerStatus: providerStatus,
 						providerEarningsClient: providerEarningsClient,
 						malibuAccrualClient: malibuAccrualClient,
 						providerWalletStatusClient: providerWalletStatusClient,
 						providerToken: providerToken
 					)
+                    if providerRewardAuditClient != nil,
+                       providerToken?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
+                        snapshot.providerEarnings = snapshot.providerEarnings?.markingRewardAuditSupported()
+                    }
                     try? await connection.send(.metricsResponse(snapshot))
+                case let .rewardAuditRequest(beforeID):
+                    await handleRewardAuditRequest(
+                        beforeID: beforeID,
+                        client: providerRewardAuditClient,
+                        providerToken: providerToken,
+                        connection: connection
+                    )
                 case .pauseRequest:
                     let result = await pauseProvider?()
                         ?? .rejected("lifecycle_control_unavailable")
@@ -1555,6 +1633,39 @@ actor ControlSocketServer {
             }
         }
         await connection.close()
+    }
+
+    private nonisolated static func handleRewardAuditRequest(
+        beforeID: String?,
+        client: ProviderRewardAuditClient?,
+        providerToken: String?,
+        connection: ControlSocketConnection
+    ) async {
+        guard let client,
+              let token = providerToken?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !token.isEmpty else {
+            try? await connection.send(.rewardAuditError(code: .temporarilyUnavailable, retryAfterSeconds: nil))
+            return
+        }
+        do {
+            let page = try await client.fetch(bearerToken: token, beforeID: beforeID, limit: 10)
+            try? await connection.send(.rewardAuditResponse(page))
+        } catch let error as ProviderRewardAuditClientError {
+            switch error {
+            case let .httpStatus(status, _) where status == 401 || status == 403:
+                try? await connection.send(.rewardAuditError(code: .authenticationRequired, retryAfterSeconds: nil))
+            case let .httpStatus(status, retryAfterSeconds) where status == 429:
+                try? await connection.send(.rewardAuditError(code: .rateLimited, retryAfterSeconds: retryAfterSeconds))
+            case .invalidPageRequest, .invalidResponse:
+                try? await connection.send(.rewardAuditError(code: .invalidResponse, retryAfterSeconds: nil))
+            case .invalidCoordinatorURL, .unavailable, .httpStatus:
+                try? await connection.send(.rewardAuditError(code: .temporarilyUnavailable, retryAfterSeconds: nil))
+            }
+        } catch {
+            // A malformed coordinator response is history-only telemetry. Do
+            // not carry it into the eligibility projection or expose internals.
+            try? await connection.send(.rewardAuditError(code: .invalidResponse, retryAfterSeconds: nil))
+        }
     }
 
     /// SPEC-037 stage 5 (FR-KVP8) — execute a kv-cache purge in the lock-holding

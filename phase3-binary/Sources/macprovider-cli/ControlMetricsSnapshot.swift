@@ -84,7 +84,8 @@ enum ControlMetricsBuilder {
 		providerEarningsClient: ProviderEarningsClient?,
 		malibuAccrualClient: MalibuAccrualClient?,
 		providerWalletStatusClient: ProviderWalletStatusClient? = nil,
-		providerToken: String?
+		providerToken: String?,
+		now: Date = Date()
 	) async -> ControlMetricsSnapshot {
         guard let providerStatus else {
             return ControlMetricsSnapshot()
@@ -97,37 +98,36 @@ enum ControlMetricsBuilder {
         // heartbeat's window to the post-poll sliver. Read without resetting.
         let snapshot = await providerStatus.snapshot(resetWindow: false)
         var earnings: ProviderEarningsSummary?
-        var accrual: MalibuAccrualSummary?
-        var walletStatus: ProviderWalletStatusSummary?
-        var walletStatusSchemaFailed = false
+        var rewardProjectionAttempted = false
+        var selectedRewardProjection = false
         if let token = providerToken?.trimmingCharacters(in: .whitespacesAndNewlines),
            !token.isEmpty {
             if let providerEarningsClient {
                 earnings = try? await providerEarningsClient.fetch(bearerToken: token)
             }
             if let malibuAccrualClient {
-                accrual = try? await malibuAccrualClient.fetch(bearerToken: token)
+                rewardProjectionAttempted = true
+                if let accrual = try? await malibuAccrualClient.fetch(bearerToken: token),
+                   accrual.isFresh(at: now) {
+                    earnings = earnings?.merging(accrual: accrual) ?? .from(accrual: accrual)
+                    selectedRewardProjection = true
+                }
             }
-            if let providerWalletStatusClient {
-                do {
-                    walletStatus = try await providerWalletStatusClient.fetch(bearerToken: token)
-                } catch ProviderWalletStatusClientError.httpStatus {
-                } catch ProviderWalletStatusClientError.unavailable {
-                } catch ProviderWalletStatusClientError.invalidCoordinatorURL {
-                } catch {
-                    walletStatusSchemaFailed = true
+            // The wallet endpoint is a whole-bundle fallback. Never overwrite
+            // any field from a coherent accrual response with a separately
+            // constructed wallet response from the same poll.
+            if !selectedRewardProjection, let providerWalletStatusClient {
+                rewardProjectionAttempted = true
+                if let walletStatus = try? await providerWalletStatusClient.fetch(bearerToken: token),
+                   walletStatus.isFresh(at: now) {
+                    earnings = earnings?.merging(walletStatus: walletStatus)
+                        ?? ProviderEarningsSummary.unavailableWalletStatus().merging(walletStatus: walletStatus)
+                    selectedRewardProjection = true
                 }
             }
         }
-        if let accrual {
-            earnings = earnings?.merging(accrual: accrual) ?? .from(accrual: accrual)
-        }
-        if let walletStatus {
-            earnings = earnings?.merging(walletStatus: walletStatus) ?? ProviderEarningsSummary.unavailableWalletStatus().merging(walletStatus: walletStatus)
-        } else if walletStatusSchemaFailed {
-            if earnings?.malibuProjectionFresh != true {
-                earnings = earnings?.markingWalletStatusUnavailable() ?? .unavailableWalletStatus()
-            }
+        if rewardProjectionAttempted && !selectedRewardProjection {
+            earnings = earnings?.markingWalletStatusUnavailable() ?? .unavailableWalletStatus()
         }
         return .from(
             provider: snapshot,

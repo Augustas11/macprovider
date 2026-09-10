@@ -27,6 +27,8 @@ func TestLatestVerifiedRequiresCurrentVerifiedHardwareTuple(t *testing.T) {
 		profileMemory   int
 		profileVerified bool
 		trustExpired    bool
+		trustPresent    bool
+		nowOffset       time.Duration
 		wantOK          bool
 	}{
 		{
@@ -34,6 +36,8 @@ func TestLatestVerifiedRequiresCurrentVerifiedHardwareTuple(t *testing.T) {
 			profileChip:     "apple m4 max",
 			profileMemory:   64,
 			profileVerified: true,
+			trustPresent:    true,
+			nowOffset:       time.Hour,
 			wantOK:          true,
 		},
 		{
@@ -41,18 +45,24 @@ func TestLatestVerifiedRequiresCurrentVerifiedHardwareTuple(t *testing.T) {
 			profileChip:     "apple m3 max",
 			profileMemory:   64,
 			profileVerified: true,
+			trustPresent:    true,
+			nowOffset:       time.Hour,
 		},
 		{
 			name:            "changed memory rejects old verified job",
 			profileChip:     "apple m4 max",
 			profileMemory:   32,
 			profileVerified: true,
+			trustPresent:    true,
+			nowOffset:       time.Hour,
 		},
 		{
 			name:            "unverified current tuple rejects old verified job",
 			profileChip:     "apple m4 max",
 			profileMemory:   64,
 			profileVerified: false,
+			trustPresent:    true,
+			nowOffset:       time.Hour,
 		},
 		{
 			// FIX 4 (round-6): verified bit is TRUE and the profile tuple matches,
@@ -61,7 +71,35 @@ func TestLatestVerifiedRequiresCurrentVerifiedHardwareTuple(t *testing.T) {
 			profileChip:     "apple m4 max",
 			profileMemory:   64,
 			profileVerified: true,
+			trustPresent:    true,
 			trustExpired:    true,
+			nowOffset:       time.Hour,
+		},
+		{
+			// Trust revocation removes the live authority row. A still-verified
+			// denormalized profile must not authorize evidence after that removal.
+			name:            "revoked trust root rejects verified profile",
+			profileChip:     "apple m4 max",
+			profileMemory:   64,
+			profileVerified: true,
+			nowOffset:       time.Hour,
+		},
+		{
+			name:            "evidence at ttl boundary remains current",
+			profileChip:     "apple m4 max",
+			profileMemory:   64,
+			profileVerified: true,
+			trustPresent:    true,
+			nowOffset:       24 * time.Hour,
+			wantOK:          true,
+		},
+		{
+			name:            "evidence past ttl boundary expires",
+			profileChip:     "apple m4 max",
+			profileMemory:   64,
+			profileVerified: true,
+			trustPresent:    true,
+			nowOffset:       24*time.Hour + time.Nanosecond,
 		},
 	}
 
@@ -89,16 +127,18 @@ INSERT INTO hardware_verification_jobs (
 			if tc.trustExpired {
 				expiresAt = generatedAt.Add(-time.Hour)
 			}
-			if _, err := db.Exec(`
+			if tc.trustPresent {
+				if _, err := db.Exec(`
 INSERT INTO hardware_verification_trust (
     provider_id, hardware_identity_hash, chip_normalized, unified_memory_gb, expires_at
 ) VALUES (?, ?, ?, ?, ?)`,
-				"mp-provider", jobHash, "apple m4 max", 64, expiresAt); err != nil {
-				t.Fatalf("insert trust root: %v", err)
+					"mp-provider", jobHash, "apple m4 max", 64, expiresAt); err != nil {
+					t.Fatalf("insert trust root: %v", err)
+				}
 			}
 
 			store := NewPGEvidenceStore(db)
-			store.now = func() time.Time { return generatedAt.Add(time.Hour) }
+			store.now = func() time.Time { return generatedAt.Add(tc.nowOffset) }
 			evidence, ok, err := store.LatestVerified(context.Background(), "mp-provider", 24*time.Hour)
 			if err != nil {
 				t.Fatalf("LatestVerified: %v", err)

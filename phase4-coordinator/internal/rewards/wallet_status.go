@@ -4,11 +4,12 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/augstar/macprovider-coordinator/internal/autotune"
 )
 
 const ProviderWalletStatusSchemaV1 = "provider_wallet_status.v1"
@@ -21,20 +22,24 @@ type WalletHandlerDeps struct {
 	Config                Config
 	Connectivity          ProviderConnectivity
 	Limiter               *RewardAuditLimiter
+	HardwareEvidence      autotune.EvidenceStore
+	HardwareEvidenceTTL   time.Duration
 }
 
 type ProviderWalletStatus struct {
-	SchemaVersion        string                           `json:"schema_version"`
-	ProviderID           string                           `json:"provider_id"`
-	WalletBound          bool                             `json:"wallet_bound"`
-	WalletMismatch       bool                             `json:"wallet_mismatch"`
-	HoldOrMismatchReason string                           `json:"hold_or_mismatch_reason,omitempty"`
-	PayoutWallet         *ProviderPayoutWalletStatus      `json:"payout_wallet"`
-	RewardWallet         ProviderRewardWalletStatus       `json:"reward_wallet"`
-	RewardAmounts        ProviderWalletRewardAmounts      `json:"reward_amounts"`
-	EligibilityInputs    ProviderWalletEligibilityInput   `json:"eligibility_inputs"`
-	RewardEligibility    MalibuRewardEligibilityReadModel `json:"reward_eligibility"`
-	Audit                RewardAuditPage                  `json:"audit"`
+	SchemaVersion               string                           `json:"schema_version"`
+	ProviderID                  string                           `json:"provider_id"`
+	WalletBound                 bool                             `json:"wallet_bound"`
+	WalletMismatch              bool                             `json:"wallet_mismatch"`
+	HoldOrMismatchReason        string                           `json:"hold_or_mismatch_reason,omitempty"`
+	PayoutWallet                *ProviderPayoutWalletStatus      `json:"payout_wallet"`
+	RewardWallet                ProviderRewardWalletStatus       `json:"reward_wallet"`
+	RewardAmounts               ProviderWalletRewardAmounts      `json:"reward_amounts"`
+	EligibilityInputs           ProviderWalletEligibilityInput   `json:"eligibility_inputs"`
+	RewardEligibility           MalibuRewardEligibilityReadModel `json:"reward_eligibility"`
+	RewardProjectionGeneratedAt string                           `json:"reward_projection_generated_at"`
+	RewardProjectionStaleAfter  string                           `json:"reward_projection_stale_after"`
+	Audit                       RewardAuditPage                  `json:"audit"`
 }
 
 type ProviderPayoutWalletStatus struct {
@@ -134,7 +139,14 @@ func NewWalletStatusHandler(deps WalletHandlerDeps) http.Handler {
 			writeWalletJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "unavailable"})
 			return
 		}
-		status, err := QueryProviderWalletStatus(r.Context(), deps.RewardsDB, deps.PayoutDB, providerID, deps.Config, deps.Connectivity)
+		status, err := QueryProviderWalletStatusWithDeps(r.Context(), providerID, ProviderRewardProjectionDeps{
+			RewardsDB:           deps.RewardsDB,
+			PayoutDB:            deps.PayoutDB,
+			Config:              deps.Config,
+			Connectivity:        deps.Connectivity,
+			HardwareEvidence:    deps.HardwareEvidence,
+			HardwareEvidenceTTL: deps.HardwareEvidenceTTL,
+		})
 		if err != nil {
 			writeWalletJSON(w, http.StatusInternalServerError, map[string]any{"error": "internal_error"})
 			return
@@ -144,82 +156,75 @@ func NewWalletStatusHandler(deps WalletHandlerDeps) http.Handler {
 }
 
 func QueryProviderWalletStatus(ctx context.Context, rewardsDB, payoutDB *sql.DB, providerID string, cfg Config, connectivity ProviderConnectivity) (ProviderWalletStatus, error) {
-	if rewardsDB == nil {
-		return ProviderWalletStatus{}, errors.New("rewards db is required")
-	}
-	cfg = cfg.DefaultsApplied()
-	bal, err := QueryAccrualBalance(ctx, rewardsDB, providerID, cfg)
+	return QueryProviderWalletStatusWithDeps(ctx, providerID, ProviderRewardProjectionDeps{
+		RewardsDB:    rewardsDB,
+		PayoutDB:     payoutDB,
+		Config:       cfg,
+		Connectivity: connectivity,
+	})
+}
+
+// QueryProviderWalletStatusWithDeps builds wallet-specific detail around the
+// same coordinator reward projection used by the accrual endpoint.
+func QueryProviderWalletStatusWithDeps(ctx context.Context, providerID string, deps ProviderRewardProjectionDeps) (ProviderWalletStatus, error) {
+	projection, err := BuildProviderRewardProjection(ctx, providerID, deps)
 	if err != nil {
 		return ProviderWalletStatus{}, err
 	}
-	trust, err := QueryTrustCriteriaStatus(ctx, rewardsDB, providerID, cfg, connectivity)
+	walletDay, walletCapped, err := queryWalletDayUsage(ctx, deps.RewardsDB, projection.RewardWallet.Address, projection.Balance.WalletDailyCap)
 	if err != nil {
 		return ProviderWalletStatus{}, err
 	}
-	rewardProjection, err := queryRewardWalletProjection(ctx, rewardsDB, providerID)
+	auditPage, err := QueryRewardAuditEvents(ctx, deps.RewardsDB, RewardAuditQuery{ProviderID: providerID, Limit: 10})
 	if err != nil {
 		return ProviderWalletStatus{}, err
 	}
-	payoutWallet, err := queryPayoutWalletStatus(ctx, payoutDB, providerID, cfg.PayoutHotWalletAddress)
-	if err != nil {
-		return ProviderWalletStatus{}, err
-	}
-	walletDay, walletCapped, err := queryWalletDayUsage(ctx, rewardsDB, rewardProjection.Address, cfg.WalletDailyCapMALIBU)
-	if err != nil {
-		return ProviderWalletStatus{}, err
-	}
-	auditPage, err := QueryRewardAuditEvents(ctx, rewardsDB, RewardAuditQuery{ProviderID: providerID, Limit: 10})
-	if err != nil {
-		return ProviderWalletStatus{}, err
-	}
-	currentWalletAllowed, mismatch := currentWalletBinding(payoutWallet, rewardProjection)
-	walletBound := currentWalletAllowed && !mismatch
-	trust = trustCriteriaWithWalletBinding(trust, walletBound)
-	eligibility := RewardEligibilityFromBalanceAndTrust(bal, trust)
-	reason := holdOrMismatchReason(mismatch, eligibility, bal.HoldReasons)
+	reason := holdOrMismatchReason(projection.WalletMismatch, projection.Eligibility, projection.Balance.HoldReasons)
 	return ProviderWalletStatus{
 		SchemaVersion:        ProviderWalletStatusSchemaV1,
 		ProviderID:           providerID,
-		WalletBound:          walletBound,
-		WalletMismatch:       mismatch,
+		WalletBound:          projection.WalletBound,
+		WalletMismatch:       projection.WalletMismatch,
 		HoldOrMismatchReason: reason,
-		PayoutWallet:         payoutWallet,
+		PayoutWallet:         projection.PayoutWallet,
 		RewardWallet: ProviderRewardWalletStatus{
-			Address:            rewardProjection.Address,
-			VerificationSource: rewardWalletVerificationSource(rewardProjection.Address),
-			LastUpdateUTC:      formatOptionalTime(rewardProjection.UpdatedAt),
-			CapReplayPending:   rewardProjection.CapReplayPending,
+			Address:            projection.RewardWallet.Address,
+			VerificationSource: rewardWalletVerificationSource(projection.RewardWallet.Address),
+			LastUpdateUTC:      formatOptionalTime(projection.RewardWallet.UpdatedAt),
+			CapReplayPending:   projection.RewardWallet.CapReplayPending,
 		},
 		RewardAmounts: ProviderWalletRewardAmounts{
-			AccruedMALIBU:      bal.AccruedMALIBU,
-			WithdrawableMALIBU: bal.WithdrawableMALIBU,
-			HeldMALIBU:         bal.HeldMALIBU,
-			ProviderDailyCap:   bal.ProviderDailyCap,
-			ProviderDayMALIBU:  rewardProjection.ProviderDayMALIBU,
-			ProviderCapped:     bal.ProviderDailyCapped,
-			WalletDailyCap:     bal.WalletDailyCap,
+			AccruedMALIBU:      projection.Balance.AccruedMALIBU,
+			WithdrawableMALIBU: projection.Balance.WithdrawableMALIBU,
+			HeldMALIBU:         projection.Balance.HeldMALIBU,
+			ProviderDailyCap:   projection.Balance.ProviderDailyCap,
+			ProviderDayMALIBU:  projection.RewardWallet.ProviderDayMALIBU,
+			ProviderCapped:     projection.Balance.ProviderDailyCapped,
+			WalletDailyCap:     projection.Balance.WalletDailyCap,
 			WalletDayMALIBU:    walletDay,
 			WalletCapped:       walletCapped,
 		},
 		EligibilityInputs: ProviderWalletEligibilityInput{
-			TrustTier:             trust.TrustTier,
-			DemotionCooldownUntil: trust.DemotionCooldownUntil,
-			Quarantined:           eligibility.EarningState == EarningStateIneligible || eligibility.WithdrawalState == WithdrawalStateIneligible,
-			ReceiptQuality:        receiptQuality(trust.VerifiedReceiptCount),
-			VerifiedReceiptCount:  trust.VerifiedReceiptCount,
+			TrustTier:             projection.Trust.TrustTier,
+			DemotionCooldownUntil: projection.Trust.DemotionCooldownUntil,
+			Quarantined:           projection.Eligibility.EarningState == EarningStateIneligible || projection.Eligibility.WithdrawalState == WithdrawalStateIneligible,
+			ReceiptQuality:        receiptQuality(projection.Trust.VerifiedReceiptCount),
+			VerifiedReceiptCount:  projection.Trust.VerifiedReceiptCount,
 			RequiredReceiptCount:  minVerifiedReceipts,
 			ComputeIntegrityState: ComputeIntegrityStateUnknown,
-			AttestationTier:       attestationTier(trust.AppAttested),
-			AppAttested:           trust.AppAttested,
-			CriteriaMet:           trust.CriteriaMet,
-			CriteriaRequired:      trust.CriteriaRequired,
-			EconomicCriteria:      trust.EconomicSatisfied,
-			AdditionalCriteria:    trust.AdditionalSatisfied,
-			WalletBalanceOK:       trust.WalletBalanceOK,
-			UptimeOK:              trust.UptimeOK,
+			AttestationTier:       attestationTier(projection.Trust.AppAttested),
+			AppAttested:           projection.Trust.AppAttested,
+			CriteriaMet:           projection.Trust.CriteriaMet,
+			CriteriaRequired:      projection.Trust.CriteriaRequired,
+			EconomicCriteria:      projection.Trust.EconomicSatisfied,
+			AdditionalCriteria:    projection.Trust.AdditionalSatisfied,
+			WalletBalanceOK:       projection.Trust.WalletBalanceOK,
+			UptimeOK:              projection.Trust.UptimeOK,
 		},
-		RewardEligibility: eligibility,
-		Audit:             auditPage,
+		RewardEligibility:           projection.Eligibility,
+		RewardProjectionGeneratedAt: projection.GeneratedAt.Format(time.RFC3339),
+		RewardProjectionStaleAfter:  projection.StaleAfter.Format(time.RFC3339),
+		Audit:                       auditPage,
 	}, nil
 }
 
