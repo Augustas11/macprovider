@@ -164,6 +164,20 @@ func (f *bindingFixture) registerSession(t *testing.T, providerID, assignedID, m
 	}
 }
 
+// registerGGUFSession registers a session pinned to the feed's GGUF member
+// (hash-verified through the feed), the session a loopback candidate needs.
+func (f *bindingFixture) registerGGUFSession(t *testing.T, providerID, assignedID string) {
+	t.Helper()
+	entry := &pool.Provider{ProviderID: providerID, AssignedID: assignedID, ModelID: "model-a", State: pool.StateReady,
+		ModelHash: f.gguf, ModelHashAlgorithm: modelidentity.GGUFFileV1, ExpectedModelHash: bindingRowHash, HashStatus: pool.HashStatusVerified,
+		ArtifactIdentity:       &artifactidentity.Binding{Member: artifactidentity.Member{ModelKey: "small", ModelID: "model-a", ArtifactID: "gguf-q4", HashAlgorithm: modelidentity.GGUFFileV1, Hash: f.gguf, RuntimeStatus: "recommendable", AllowedRuntimeSources: "llamacpp_loopback,ollama_loopback"}},
+		CandidateCatalogSHA256: f.catalog.SHA256, CatalogAdmissionMode: "current", CatalogReleaseID: f.catalog.Version,
+		ReceiptPubkey: bytes.Repeat([]byte{9}, ed25519.PublicKeySize), SlotsFree: 1, SlotsTotal: 1, MaxConcurrency: 1, LastHeartbeatAt: f.now, LastActivityAt: f.now}
+	if _, ok, refusal := f.server.pool.RegisterAtDetailed(entry, nil, f.now); !ok {
+		t.Fatalf("register gguf session refused: %v", refusal)
+	}
+}
+
 func (f *bindingFixture) offer(t *testing.T, providerID, suffix, runtimeSource string, hashes map[string]string) ModelAdmissionEvent {
 	t.Helper()
 	candidateID := "byom_" + strings.Repeat(suffix, 52)
@@ -422,7 +436,7 @@ func TestModelAdmissionReleaseSweepRevokesOnContentChangeOnly(t *testing.T) {
 	f.registerSession(t, "p1", "s1", "model-a", true)
 	rowOnly := f.offer(t, "p1", "a", "mlx_cache", map[string]string{modelidentity.SnapshotManifestV1: bindingRowHash})
 	rowOnly = f.decide(t, rowOnly, "catalog_priced")
-	f.registerSession(t, "p2", "s2", "model-a", true)
+	f.registerGGUFSession(t, "p2", "s2")
 	feed := f.offer(t, "p2", "b", "ollama_loopback", map[string]string{modelidentity.GGUFFileV1: f.gguf})
 	if len(feed.CatalogMembers) != 1 || feed.CatalogMembers[0].Source != "artifact_feed" {
 		t.Fatalf("feed offer: %+v", feed.CatalogMembers)

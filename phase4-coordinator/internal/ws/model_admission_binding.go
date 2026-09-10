@@ -385,27 +385,34 @@ func (s *Server) evaluateSessionDriftLocked(ctx context.Context, provider pool.P
 // (a)/(d) against the candidate the prior binding named or the newly
 // derived one, and only then publishes the binding.
 func (s *Server) bindModelAdmissionSessionAtHello(providerID string, prior pool.Provider, hadPrior bool) {
+	s.withProviderSection(providerID, func(section *providerSection) {
+		s.bindModelAdmissionSessionAtHelloLocked(providerID, prior, hadPrior, section)
+	})
+}
+
+// bindModelAdmissionSessionAtHelloLocked is bindModelAdmissionSessionAtHello
+// for a caller already holding the provider's section (the registration
+// path, which replaces the session under the same hold).
+func (s *Server) bindModelAdmissionSessionAtHelloLocked(providerID string, prior pool.Provider, hadPrior bool, section *providerSection) {
 	if s.modelAdmissions == nil || s.pool == nil {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), modelAdmissionRuntimeRevocationTimeout)
 	defer cancel()
-	s.withProviderSection(providerID, func(section *providerSection) {
-		provider, ok := s.pool.Resolve(providerID, "")
-		if !ok {
-			return
+	provider, ok := s.pool.Resolve(providerID, "")
+	if !ok {
+		return
+	}
+	var candidateIDs []string
+	if hadPrior && prior.ModelAdmissionCandidateID != "" {
+		candidateIDs = append(candidateIDs, prior.ModelAdmissionCandidateID)
+	} else if events, err := s.modelAdmissions.LatestModelAdmissionStatusesForProvider(ctx, providerID); err == nil {
+		if candidates := bindableCandidates(events, provider.ModelID); len(candidates) == 1 {
+			candidateIDs = append(candidateIDs, candidates[0].CandidateID)
 		}
-		var candidateIDs []string
-		if hadPrior && prior.ModelAdmissionCandidateID != "" {
-			candidateIDs = append(candidateIDs, prior.ModelAdmissionCandidateID)
-		} else if events, err := s.modelAdmissions.LatestModelAdmissionStatusesForProvider(ctx, providerID); err == nil {
-			if candidates := bindableCandidates(events, provider.ModelID); len(candidates) == 1 {
-				candidateIDs = append(candidateIDs, candidates[0].CandidateID)
-			}
-		}
-		s.evaluateSessionDriftLocked(ctx, provider, candidateIDs, section)
-		s.refreshModelAdmissionBindingLocked(ctx, providerID, section)
-	})
+	}
+	s.evaluateSessionDriftLocked(ctx, provider, candidateIDs, section)
+	s.refreshModelAdmissionBindingLocked(ctx, providerID, section)
 }
 
 // evaluateModelAdmissionSessionOnHeartbeat applies (a)/(d) to the bound
@@ -413,19 +420,26 @@ func (s *Server) bindModelAdmissionSessionAtHello(providerID string, prior pool.
 // candidate and clears the binding (the registry already cleared it), an
 // identity or receipt-key change revokes it, and the binding is refreshed.
 func (s *Server) evaluateModelAdmissionSessionOnHeartbeat(provider pool.Provider, priorBinding pool.ModelAdmissionBinding, hadBinding bool) {
+	s.withProviderSection(provider.ProviderID, func(section *providerSection) {
+		s.evaluateModelAdmissionSessionOnHeartbeatLocked(provider, priorBinding, hadBinding, section)
+	})
+}
+
+// evaluateModelAdmissionSessionOnHeartbeatLocked is the heartbeat (a)/(d)
+// evaluation for a caller holding the section (the heartbeat handler, which
+// applies the registry update under the same hold).
+func (s *Server) evaluateModelAdmissionSessionOnHeartbeatLocked(provider pool.Provider, priorBinding pool.ModelAdmissionBinding, hadBinding bool, section *providerSection) {
 	if s.modelAdmissions == nil || s.pool == nil || !hadBinding {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), modelAdmissionRuntimeRevocationTimeout)
 	defer cancel()
-	s.withProviderSection(provider.ProviderID, func(section *providerSection) {
-		current, ok := s.pool.Resolve(provider.ProviderID, provider.AssignedID)
-		if !ok {
-			return
-		}
-		s.evaluateSessionDriftLocked(ctx, current, []string{priorBinding.CandidateID}, section)
-		s.refreshModelAdmissionBindingLocked(ctx, provider.ProviderID, section)
-	})
+	current, ok := s.pool.Resolve(provider.ProviderID, provider.AssignedID)
+	if !ok {
+		return
+	}
+	s.evaluateSessionDriftLocked(ctx, current, []string{priorBinding.CandidateID}, section)
+	s.refreshModelAdmissionBindingLocked(ctx, provider.ProviderID, section)
 }
 
 // clearModelAdmissionBindingOnDisconnect clears the binding when the session
@@ -671,6 +685,8 @@ func (s *Server) evaluateCatalogPreconditionsLocked(candidate ModelAdmissionEven
 	}
 	set := s.usableIdentitySetLocked(current)
 	members := make([]ModelAdmissionCatalogMember, 0, len(candidate.CatalogMembers))
+	sourceAllowed := true
+	// (i) every recorded member still resolves by content.
 	for _, member := range candidate.CatalogMembers {
 		switch member.Source {
 		case modelAdmissionMemberSourceCandidateRow:
@@ -678,7 +694,7 @@ func (s *Server) evaluateCatalogPreconditionsLocked(candidate ModelAdmissionEven
 				return catalogPreconditionResult{decisionCode: "catalog_match_stale", driftReason: modelAdmissionDriftRowChanged}
 			}
 			if candidate.RuntimeSource != modelAdmissionRuntimeSourceMLXCache {
-				return catalogPreconditionResult{decisionCode: "runtime_source_not_allowed", driftReason: modelAdmissionDriftRuntimeSourceDisallow}
+				sourceAllowed = false
 			}
 			members = append(members, member)
 		case modelAdmissionMemberSourceArtifactFeed:
@@ -687,7 +703,7 @@ func (s *Server) evaluateCatalogPreconditionsLocked(candidate ModelAdmissionEven
 				return catalogPreconditionResult{decisionCode: "catalog_match_stale", driftReason: modelAdmissionDriftArtifactFeedChanged}
 			}
 			if !binding.Member.AllowsRuntimeSource(candidate.RuntimeSource) {
-				return catalogPreconditionResult{decisionCode: "runtime_source_not_allowed", driftReason: modelAdmissionDriftRuntimeSourceDisallow}
+				sourceAllowed = false
 			}
 			refreshed := member
 			refreshed.ArtifactFeedSHA256 = binding.Provenance.FeedSHA256
@@ -701,8 +717,12 @@ func (s *Server) evaluateCatalogPreconditionsLocked(candidate ModelAdmissionEven
 	if len(members) == 0 {
 		return catalogPreconditionResult{decisionCode: "catalog_match_stale", driftReason: modelAdmissionDriftRowChanged}
 	}
+	// (ii) the row is recommendable, then every member allows the source.
 	if row.RuntimeStatus != "recommendable" {
 		return catalogPreconditionResult{decisionCode: "catalog_row_not_recommendable", driftReason: modelAdmissionDriftRowIneligible, members: members}
+	}
+	if !sourceAllowed {
+		return catalogPreconditionResult{decisionCode: "runtime_source_not_allowed", driftReason: modelAdmissionDriftRuntimeSourceDisallow, members: members}
 	}
 	material, ok := s.catalogRef().RouteSnapshotMaterial(row.ModelID, strings.TrimSpace(row.ModelSHA256))
 	if !ok || material.HashStatus != pool.HashStatusVerified || material.ExpectedModelHash != candidate.CatalogRowModelSHA256 ||
@@ -778,6 +798,12 @@ func (s *Server) sweepProviderRelease(ctx context.Context, providerID string, ca
 			case boundDrift:
 				s.appendDriftRevocationLocked(ctx, candidate, modelAdmissionDriftRowChanged, "release_sweep_tier2_material", section)
 			}
+		}
+		// R006(a) "refresh": the session's identity was re-verified against
+		// the new release (RefreshTier2HashStatuses); the bound decided
+		// candidate is evaluated against it here, under the section.
+		if provider, ok := s.pool.Resolve(providerID, ""); ok && provider.ModelAdmissionCandidateID != "" {
+			s.evaluateSessionDriftLocked(ctx, provider, []string{provider.ModelAdmissionCandidateID}, section)
 		}
 		// Survivors: refresh the binding (row status + validated generation).
 		s.refreshModelAdmissionBindingLocked(ctx, providerID, section)

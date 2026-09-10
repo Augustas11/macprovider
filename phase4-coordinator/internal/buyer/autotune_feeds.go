@@ -1072,27 +1072,41 @@ func WithAutotuneFeeds(feeds AutotuneFeeds) Option {
 // (fail-closed), so /v1/rate-card etc. never serve unverified bytes.
 func (s *Server) SetAutotuneFeeds(feeds AutotuneFeeds) {
 	s.autotuneFeedsMu.Lock()
-	s.autotuneFeeds = feeds
 	observer := s.autotuneFeedsObserver
 	s.autotuneFeedsMu.Unlock()
-	// Observers (the SPEC-010 v1.7 R007 index rebuild) run after the publish
-	// and outside the lock, so a slow observer never blocks feed serving.
-	if observer != nil {
-		observer(feeds)
+	commit := func() {
+		s.autotuneFeedsMu.Lock()
+		s.autotuneFeeds = feeds
+		s.autotuneFeedsMu.Unlock()
 	}
+	if observer == nil {
+		commit()
+		return
+	}
+	// SPEC-047-R001 v0.1.5: the served feed bytes are part of the release
+	// snapshot. The observer builds the identity sets from the exact bytes
+	// and runs `commit` under the coordinator's release write lock, so no
+	// reader observes the new feed bytes ahead of the rest of the release.
+	// An observer that never calls commit leaves the previous feeds live
+	// (fail closed on the new release, not fail open).
+	observer(feeds, commit)
 }
 
-// WithAutotuneFeedsObserver registers a callback invoked after every runtime
-// feed publish (SetAutotuneFeeds) with the exact published feeds. Boot-time
-// feeds installed through WithAutotuneFeeds are not observed: callers derive
-// boot state from the same loaded feeds directly.
-func WithAutotuneFeedsObserver(fn func(AutotuneFeeds)) Option {
+// WithAutotuneFeedsObserver registers the publisher of every runtime feed
+// reload (SetAutotuneFeeds): it receives the exact feeds and a `commit`
+// that installs them as the served bytes, to be run inside the release
+// publication. Boot-time feeds installed through WithAutotuneFeeds are not
+// observed: callers derive boot state from the same loaded feeds directly.
+func WithAutotuneFeedsObserver(fn func(AutotuneFeeds, func())) Option {
 	return func(s *Server) {
 		s.autotuneFeedsMu.Lock()
 		defer s.autotuneFeedsMu.Unlock()
 		s.autotuneFeedsObserver = fn
 	}
 }
+
+// AutotuneFeedsForTest exposes the served feeds (tests only).
+func (s *Server) AutotuneFeedsForTest() AutotuneFeeds { return s.autotuneFeedsSnapshot() }
 
 func (s *Server) autotuneFeedsSnapshot() AutotuneFeeds {
 	s.autotuneFeedsMu.RLock()

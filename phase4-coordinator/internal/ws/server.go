@@ -644,7 +644,17 @@ func (s *Server) SetArtifactIdentitySets(sets map[string]*artifactidentity.Index
 // then `catalog_artifact_feed_integrity_failure` rather than
 // `no_artifact_match`). After publication the SPEC-047-R006 sweeps run.
 func (s *Server) PublishArtifactIdentitySets(sets map[string]*artifactidentity.Index, feedIntegrityFailed bool) uint64 {
+	return s.PublishArtifactIdentitySetsWith(sets, feedIntegrityFailed, nil)
+}
+
+// PublishArtifactIdentitySetsWith is PublishArtifactIdentitySets that also
+// runs `commit` (the buyer's served-feed-bytes swap) inside the same
+// write-lock hold: the served feeds are part of the release snapshot.
+func (s *Server) PublishArtifactIdentitySetsWith(sets map[string]*artifactidentity.Index, feedIntegrityFailed bool, commit func()) uint64 {
 	s.artifactIdentitySets.mu.Lock()
+	if commit != nil {
+		commit()
+	}
 	// The staged catalog is consumed, the integrity outcome recorded, and the
 	// catalog / identity sets / Tier-2 material / generation swapped under
 	// ONE write-lock hold: no reader observes any part ahead of the others.
@@ -3685,13 +3695,22 @@ func (s *Server) belowModelVersionFloor(p pool.Provider, gate string) bool {
 // TOCTOU is covered by the bounded revalidation sweep, which evicts (never
 // refuses) a session whose trust lapsed after it was committed.
 func (s *Server) registerProviderSession(conn net.Conn, entry *pool.Provider) (*providerSession, pool.RegisterRefusal) {
-	// SPEC-047-R006(a)/(d): the binding the replaced session carried names
-	// the candidate a replacement hello is evaluated against.
-	prior, hadPrior := s.pool.Resolve(entry.ProviderID, "")
-	session, refusal := s.registerProviderSessionLocked(conn, entry)
-	if session != nil {
-		s.bindModelAdmissionSessionAtHello(entry.ProviderID, prior, hadPrior)
-	}
+	var (
+		session *providerSession
+		refusal pool.RegisterRefusal
+	)
+	// SPEC-047-R001/R006: the session replacement, the (a)/(d) evaluation
+	// against the candidate the replaced session's binding named, and the
+	// new binding are one linearization point under the provider's section
+	// (section → registry): no decision observes the new session before it
+	// was evaluated.
+	s.withProviderSection(entry.ProviderID, func(section *providerSection) {
+		prior, hadPrior := s.pool.Resolve(entry.ProviderID, "")
+		session, refusal = s.registerProviderSessionLocked(conn, entry)
+		if session != nil {
+			s.bindModelAdmissionSessionAtHelloLocked(entry.ProviderID, prior, hadPrior, section)
+		}
+	})
 	return session, refusal
 }
 
@@ -5575,47 +5594,54 @@ func (s *Server) handleHeartbeat(conn net.Conn, providerID, assignedID string, p
 			Int("effective_slots_total", capacity.SlotsTotal).
 			Msg("provider capacity claim exceeds the operator ceiling; clamped")
 	}
-	var (
-		priorBinding    pool.ModelAdmissionBinding
-		hadPriorBinding bool
-	)
-	if before, ok := s.pool.Resolve(providerID, assignedID); ok {
-		priorBinding, hadPriorBinding = before.ModelAdmissionBinding()
-	}
-	heartbeatResult := s.pool.ApplyHeartbeatDetailed(providerID, assignedID, pool.HeartbeatUpdate{
-		Status:                    state,
-		ModelID:                   hb.ModelID,
-		ModelParamsB:              hb.ModelParamsB,
-		RAMGB:                     hb.RAMGB,
-		MaxContextTokens:          hb.MaxContextTokens,
-		MaxConcurrency:            capacity.MaxConcurrency,
-		SlotsFree:                 capacity.SlotsFree,
-		SlotsTotal:                capacity.SlotsTotal,
-		ThroughputTPSEstimate:     hb.ThroughputTPSEstimate,
-		RequestsServedSinceLast:   hb.RequestsServedSinceLast,
-		ThroughputTPSSinceLast:    hb.ThroughputTPSSinceLast,
-		ModelHash:                 hb.ModelHash,
-		ModelHashPresent:          presence.ModelHash,
-		ModelHashAlgorithm:        hb.ModelHashAlgorithm,
-		ModelHashAlgorithmPresent: presence.ModelHashAlgorithm,
-		WeightsManifestSHA256:     hb.WeightsManifestSHA256,
-		WeightsHashAlgorithm:      hb.WeightsHashAlgorithm,
-		ExpectedModelHash:         expectedModelHash,
-		Loading:                   hb.Loading,
-		LoadingPresent:            presence.Loading,
-		LastAutoupdateEvent:       hb.LastAutoupdateEvent,
-		HardwareCapacity:          poolHardwareCapacity(hb.HardwareSummary),
-		SafetyTelemetry:           hb.SafetyTelemetry,
-		At:                        s.now(),
+	// SPEC-047-R006(a)/(d): the registry mutation and the drift evaluation of
+	// the bound candidate are one linearization point under the provider's
+	// section (section → registry), so no decision or binding refresh
+	// observes the changed identity before it was evaluated.
+	var heartbeatResult pool.HeartbeatResult
+	s.withProviderSection(providerID, func(section *providerSection) {
+		var (
+			priorBinding    pool.ModelAdmissionBinding
+			hadPriorBinding bool
+		)
+		if before, ok := s.pool.Resolve(providerID, assignedID); ok {
+			priorBinding, hadPriorBinding = before.ModelAdmissionBinding()
+		}
+		heartbeatResult = s.pool.ApplyHeartbeatDetailed(providerID, assignedID, pool.HeartbeatUpdate{
+			Status:                    state,
+			ModelID:                   hb.ModelID,
+			ModelParamsB:              hb.ModelParamsB,
+			RAMGB:                     hb.RAMGB,
+			MaxContextTokens:          hb.MaxContextTokens,
+			MaxConcurrency:            capacity.MaxConcurrency,
+			SlotsFree:                 capacity.SlotsFree,
+			SlotsTotal:                capacity.SlotsTotal,
+			ThroughputTPSEstimate:     hb.ThroughputTPSEstimate,
+			RequestsServedSinceLast:   hb.RequestsServedSinceLast,
+			ThroughputTPSSinceLast:    hb.ThroughputTPSSinceLast,
+			ModelHash:                 hb.ModelHash,
+			ModelHashPresent:          presence.ModelHash,
+			ModelHashAlgorithm:        hb.ModelHashAlgorithm,
+			ModelHashAlgorithmPresent: presence.ModelHashAlgorithm,
+			WeightsManifestSHA256:     hb.WeightsManifestSHA256,
+			WeightsHashAlgorithm:      hb.WeightsHashAlgorithm,
+			ExpectedModelHash:         expectedModelHash,
+			Loading:                   hb.Loading,
+			LoadingPresent:            presence.Loading,
+			LastAutoupdateEvent:       hb.LastAutoupdateEvent,
+			HardwareCapacity:          poolHardwareCapacity(hb.HardwareSummary),
+			SafetyTelemetry:           hb.SafetyTelemetry,
+			At:                        s.now(),
+		})
+		if heartbeatResult.OK {
+			s.evaluateModelAdmissionSessionOnHeartbeatLocked(*heartbeatResult.Provider, priorBinding, hadPriorBinding, section)
+		}
 	})
 	entry, gap, ok := heartbeatResult.Provider, heartbeatResult.Gap, heartbeatResult.OK
 	if !ok {
 		s.log.Warn().Str("provider_id", providerID).Msg("heartbeat for unknown provider")
 		return
 	}
-	// SPEC-047-R006(a)/(d): the bound candidate is evaluated against the
-	// session's post-heartbeat identity and receipt key under the section.
-	s.evaluateModelAdmissionSessionOnHeartbeat(*entry, priorBinding, hadPriorBinding)
 	if heartbeatResult.ModelIDChanged {
 		s.observeAdmissionCeilingDrift(*entry, heartbeatResult.PriorModelID)
 		s.revokeSettlementAdmissionForHeartbeatModelDrift(*entry, heartbeatResult.PriorModelID)

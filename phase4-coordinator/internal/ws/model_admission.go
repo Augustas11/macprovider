@@ -181,15 +181,17 @@ func encodeModelAdmissionCatalogMembers(members []ModelAdmissionCatalogMember) s
 	return string(raw)
 }
 
-func decodeModelAdmissionCatalogMembers(raw string) []ModelAdmissionCatalogMember {
+// decodeModelAdmissionCatalogMembers distinguishes an empty member set
+// (legacy row, unmatched offer) from a corrupt column, which is a scan error.
+func decodeModelAdmissionCatalogMembers(raw string) ([]ModelAdmissionCatalogMember, error) {
 	if strings.TrimSpace(raw) == "" {
-		return nil
+		return nil, nil
 	}
 	var members []ModelAdmissionCatalogMember
 	if err := json.Unmarshal([]byte(raw), &members); err != nil {
-		return nil
+		return nil, fmt.Errorf("model admission catalog_members_json: %w", err)
 	}
-	return members
+	return members, nil
 }
 
 // PendingModelAdmissionApproval identifies the approval that consumes a
@@ -1180,7 +1182,11 @@ func scanModelAdmissionEventRow(row modelAdmissionScanner) (ModelAdmissionEvent,
 	if err != nil {
 		return ModelAdmissionEvent{}, err
 	}
-	event.CatalogMembers = decodeModelAdmissionCatalogMembers(membersJSON)
+	members, err := decodeModelAdmissionCatalogMembers(membersJSON)
+	if err != nil {
+		return ModelAdmissionEvent{}, err
+	}
+	event.CatalogMembers = members
 	event.EvaluatedReleaseGeneration = uint64(evaluatedGeneration)
 	parsed, err := time.Parse(time.RFC3339Nano, createdAt)
 	if err != nil {

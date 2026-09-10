@@ -289,7 +289,7 @@ type Server struct {
 	autotuneFeeds     AutotuneFeeds
 	// autotuneFeedsObserver is notified after every runtime feed publish
 	// (SPEC-010 v1.7 R007 index rebuild on SIGHUP).
-	autotuneFeedsObserver func(AutotuneFeeds)
+	autotuneFeedsObserver func(AutotuneFeeds, func())
 	now                   func() time.Time
 	version               string
 	// terminalObserver is the #766 arbiter observation seam. Nil in

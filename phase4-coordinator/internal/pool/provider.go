@@ -202,6 +202,14 @@ type Provider struct {
 	ModelAdmissionCatalogRowStatus           string `json:"-"`
 	ModelAdmissionValidatedReleaseGeneration uint64 `json:"-"`
 	ModelAdmissionBindingGeneration          uint64 `json:"-"`
+	// ModelAdmissionSessionEpoch is a per-provider monotonic counter the
+	// registry advances on every session replacement and on every change of
+	// the session's identity facts (model id, reported pair, verdict, pin,
+	// artifact binding, receipt key): a route attempt captures it at
+	// evaluation and the coordinator's compare-and-insert requires it
+	// unchanged, so identity drift that the drift path has not yet appended
+	// still fails the attempt closed.
+	ModelAdmissionSessionEpoch uint64 `json:"-"`
 	// SPEC-015 v0.1.3 / SPEC-001 v1.6 — raw ed25519 public key bytes
 	// populated from auth_request.provider_receipt_public_key when present.
 	ReceiptPubkey []byte `json:"-"`
@@ -643,6 +651,9 @@ type Registry struct {
 	// on RemoveIfSession / RemoveIfSessionState, with a per-provider cap
 	// to bound a single provider's contribution.
 	seenModelsByProvider map[string]map[string]struct{}
+	// sessionEpochs is the per-provider session identity epoch (see
+	// Provider.ModelAdmissionSessionEpoch); it survives session replacement.
+	sessionEpochs map[string]uint64
 	// seenModelsLifetime is the SPEC-002 v1.4.1 § 7.2 pool-lifetime
 	// model history: any model id ever advertised during this coordinator
 	// process lifetime, retained even after the advertising provider
@@ -765,6 +776,7 @@ func NewRegistry(providers []config.ProviderConfig, opts ...RegistryOption) *Reg
 		sessions:                  map[string]*Provider{},
 		endpoints:                 endpoints,
 		seenModelsByProvider:      map[string]map[string]struct{}{},
+		sessionEpochs:             map[string]uint64{},
 		seenModelsLifetime:        map[string]struct{}{},
 		lifetimeContribByProvider: map[string]int{},
 		breakerFaults:             map[string][]time.Time{},
@@ -994,6 +1006,7 @@ func (r *Registry) RegisterAtDetailed(p *Provider, conn net.Conn, now time.Time)
 	// session's authority from its first heartbeat on, not from the first
 	// heartbeat that happens to verify.
 	p.IdentityPin = pinIdentity(nil, ModelIdentityVerdict{Status: p.HashStatus, Artifact: p.ArtifactIdentity})
+	r.bumpSessionEpochLocked(p)
 	r.providers[p.ProviderID] = p
 	r.sessions[p.AssignedID] = p
 	// SPEC-010 v1.5 R-3.3.4: seed the seen-model index with the union of
@@ -1331,6 +1344,30 @@ func (p Provider) ModelAdmissionBinding() (ModelAdmissionBinding, bool) {
 		CatalogRowStatus:           p.ModelAdmissionCatalogRowStatus,
 		ValidatedReleaseGeneration: p.ModelAdmissionValidatedReleaseGeneration,
 	}, true
+}
+
+// sessionIdentityFingerprint is the tuple whose change advances the session
+// identity epoch.
+func sessionIdentityFingerprint(p *Provider) string {
+	parts := []string{p.ModelID, p.ModelHash, p.ModelHashAlgorithm, string(p.HashStatus), string(p.ReceiptPubkey), string(p.PendingReceiptPubkey)}
+	if p.ArtifactIdentity != nil {
+		m := p.ArtifactIdentity.Member
+		parts = append(parts, "artifact", m.ModelKey, m.ArtifactID, m.HashAlgorithm, m.Hash)
+	}
+	if p.IdentityPin != nil {
+		parts = append(parts, "pin", fmt.Sprint(p.IdentityPin.Primary), p.IdentityPin.Member.ArtifactID, p.IdentityPin.Member.Hash)
+	}
+	return strings.Join(parts, "\x00")
+}
+
+// bumpSessionEpochLocked advances the provider's session identity epoch and
+// stamps it on p (caller holds r.mu).
+func (r *Registry) bumpSessionEpochLocked(p *Provider) {
+	if r.sessionEpochs == nil {
+		r.sessionEpochs = map[string]uint64{}
+	}
+	r.sessionEpochs[p.ProviderID]++
+	p.ModelAdmissionSessionEpoch = r.sessionEpochs[p.ProviderID]
 }
 
 func clearModelAdmissionBinding(p *Provider) {
@@ -2485,6 +2522,7 @@ func (r *Registry) applyHeartbeatLocked(providerID, assignedID string, hb Heartb
 	prev := p.LastHeartbeatAt
 	priorModelID := p.ModelID
 	priorModelHash := p.ModelHash
+	priorIdentity := sessionIdentityFingerprint(p)
 	priorLoadingState := p.LastLoadingState
 	priorLoadingStartedAt := p.LoadingStartedAt
 	p.LastHeartbeatAt = hb.At
@@ -2537,6 +2575,9 @@ func (r *Registry) applyHeartbeatLocked(providerID, assignedID string, hb Heartb
 	if hb.WeightsManifestSHA256 != "" {
 		p.WeightsManifestSHA256 = hb.WeightsManifestSHA256
 		p.WeightsHashAlgorithm = hb.WeightsHashAlgorithm
+	}
+	if sessionIdentityFingerprint(p) != priorIdentity {
+		r.bumpSessionEpochLocked(p)
 	}
 	p.ExpectedModelHash = hb.ExpectedModelHash
 
@@ -2772,7 +2813,11 @@ func (r *Registry) ApplyStateUpdate(providerID, assignedID string, update StateU
 	if at.IsZero() {
 		at = time.Now().UTC()
 	}
+	priorReceipt := string(p.ReceiptPubkey) + "\x00" + string(p.PendingReceiptPubkey)
 	rotationEvent := r.commitPendingReceiptPubkeyLocked(p, at)
+	if string(p.ReceiptPubkey)+"\x00"+string(p.PendingReceiptPubkey) != priorReceipt {
+		r.bumpSessionEpochLocked(p)
+	}
 	cp := *p
 	emitter := r.receiptRotationEmitter
 	r.mu.Unlock()

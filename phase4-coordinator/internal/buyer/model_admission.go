@@ -249,6 +249,7 @@ func (s *Server) insertBYOMRouteSnapshot(ctx context.Context, p pool.Provider, b
 		CandidateID:        binding.CandidateID,
 		CoordinatorEventID: binding.CoordinatorEventID,
 		BindingGeneration:  p.ModelAdmissionBindingGeneration,
+		SessionEpoch:       p.ModelAdmissionSessionEpoch,
 	}, insert)
 }
 

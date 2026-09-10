@@ -652,6 +652,15 @@ func (s *Server) applyModelAdmissionApprovalLocked(ctx context.Context, actor st
 
 func (s *Server) evaluateModelAdmissionApprovalLocked(ctx context.Context, actor string, body modelAdmissionApproveRequest, digest, requestID string, provider pool.Provider, hasSession bool) (modelAdmissionDecisionOutcome, PendingModelAdmissionDecision, bool, error) {
 	none := PendingModelAdmissionDecision{}
+	pending, found, err := s.modelAdmissions.PendingModelAdmissionDecision(ctx, body.PendingDecisionID)
+	if err != nil {
+		return modelAdmissionDecisionOutcome{}, none, false, err
+	}
+	// (a) the bound fields must equal the stored record — before (b): every
+	// divergence of the closed approval body is a bound-field disagreement.
+	if found && (pending.ProviderID != body.ProviderID || pending.CandidateID != body.CandidateID || pending.EvaluatedHead != body.ExpectedCoordinatorEventID) {
+		return modelAdmissionDecisionOutcome{}, none, false, decisionFail(http.StatusBadRequest, "invalid_request")
+	}
 	// (b) approval idempotency, before any pending or head check.
 	if prior, found, err := s.modelAdmissions.ModelAdmissionEventByRequestID(ctx, body.ProviderID, requestID); err != nil {
 		return modelAdmissionDecisionOutcome{}, none, false, err
@@ -661,16 +670,8 @@ func (s *Server) evaluateModelAdmissionApprovalLocked(ctx context.Context, actor
 		}
 		return modelAdmissionDecisionOutcome{event: prior, replayed: true}, none, false, nil
 	}
-	pending, found, err := s.modelAdmissions.PendingModelAdmissionDecision(ctx, body.PendingDecisionID)
-	if err != nil {
-		return modelAdmissionDecisionOutcome{}, none, false, err
-	}
 	if found && pending.ApprovalRequestKey == requestID && pending.ApprovalDigest != digest {
 		return modelAdmissionDecisionOutcome{}, none, false, decisionFail(http.StatusConflict, "idempotency_conflict")
-	}
-	// (a) the bound fields must equal the stored record.
-	if found && (pending.ProviderID != body.ProviderID || pending.CandidateID != body.CandidateID || pending.EvaluatedHead != body.ExpectedCoordinatorEventID) {
-		return modelAdmissionDecisionOutcome{}, none, false, decisionFail(http.StatusBadRequest, "invalid_request")
 	}
 	// (c) pending status.
 	switch {
@@ -850,6 +851,10 @@ type ModelAdmissionRouteExpectation struct {
 	CandidateID        string
 	CoordinatorEventID string
 	BindingGeneration  uint64
+	// SessionEpoch is the session identity epoch the attempt evaluated
+	// (pool.Provider.ModelAdmissionSessionEpoch): identity drift the drift
+	// path has not yet appended still fails the attempt closed.
+	SessionEpoch uint64
 }
 
 // ErrModelAdmissionRouteStale is the compare-and-insert's fail-closed answer.
@@ -875,6 +880,7 @@ func (s *Server) CompareAndInsertModelAdmissionRouteSnapshot(ctx context.Context
 		}
 		if provider.ModelAdmissionCandidateID != expect.CandidateID || provider.ModelAdmissionCoordinatorEventID != expect.CoordinatorEventID ||
 			provider.ModelAdmissionValidatedReleaseGeneration != generation ||
+			provider.ModelAdmissionSessionEpoch != expect.SessionEpoch ||
 			s.modelAdmissionSections.get(expect.ProviderID).generation.Load() != expect.BindingGeneration {
 			return ErrModelAdmissionRouteStale
 		}
@@ -908,7 +914,7 @@ func (s *Server) CompareAndInsertModelAdmissionRouteSnapshot(ctx context.Context
 	// never taken under the release lock).
 	after, ok := s.pool.Resolve(expect.ProviderID, "")
 	if !ok || after.ModelAdmissionCandidateID != expect.CandidateID || after.ModelAdmissionCoordinatorEventID != expect.CoordinatorEventID ||
-		after.ModelAdmissionBindingGeneration != provider.ModelAdmissionBindingGeneration {
+		after.ModelAdmissionBindingGeneration != provider.ModelAdmissionBindingGeneration || after.ModelAdmissionSessionEpoch != expect.SessionEpoch {
 		return ErrModelAdmissionRouteStale
 	}
 	return nil

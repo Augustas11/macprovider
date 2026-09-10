@@ -227,7 +227,9 @@ func TestModelAdmissionOperatorDecisionPath(t *testing.T) {
 	if code, resp := c.do(http.MethodPost, approvePath, "bob-secret", approveRequest("p1", offer.CandidateID, pendingID, pricedHead, "a2")); code != http.StatusConflict || errorCode(resp) != "pending_consumed" {
 		t.Fatalf("distinct-key double approval: %d %v", code, resp)
 	}
-	if code, resp := c.do(http.MethodPost, approvePath, "bob-secret", approveRequest("p1", offer.CandidateID, pendingID, other, "a1")); code != http.StatusConflict || errorCode(resp) != "idempotency_conflict" {
+	// A divergent body under the reused key changes a bound field: (a)
+	// answers invalid_request before (b).
+	if code, resp := c.do(http.MethodPost, approvePath, "bob-secret", approveRequest("p1", offer.CandidateID, pendingID, other, "a1")); code != http.StatusBadRequest || errorCode(resp) != "invalid_request" {
 		t.Fatalf("divergent approval body: %d %v", code, resp)
 	}
 	// A pending record dies when the head moves: request, then a revocation

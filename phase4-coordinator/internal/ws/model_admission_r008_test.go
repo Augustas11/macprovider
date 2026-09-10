@@ -124,7 +124,7 @@ func TestModelAdmissionRouteCompareAndInsertFailsClosedOnConcurrentAppend(t *tes
 	priced := f.decide(t, offer, "catalog_priced")
 	settled := f.decide(t, priced, "settlement_capable")
 	p, _ := s.pool.Resolve("p1", "")
-	expect := ModelAdmissionRouteExpectation{ProviderID: "p1", CandidateID: settled.CandidateID, CoordinatorEventID: settled.CoordinatorEventID, BindingGeneration: p.ModelAdmissionBindingGeneration}
+	expect := ModelAdmissionRouteExpectation{ProviderID: "p1", CandidateID: settled.CandidateID, CoordinatorEventID: settled.CoordinatorEventID, BindingGeneration: p.ModelAdmissionBindingGeneration, SessionEpoch: p.ModelAdmissionSessionEpoch}
 	inserted := 0
 	if err := s.CompareAndInsertModelAdmissionRouteSnapshot(context.Background(), expect, func() error { inserted++; return nil }); err != nil {
 		t.Fatalf("clean compare-and-insert: %v", err)
@@ -147,18 +147,80 @@ func TestModelAdmissionRouteCompareAndInsertFailsClosedOnConcurrentAppend(t *tes
 	offer2 := f.offer(t, "p2", "b", "mlx_cache", map[string]string{modelidentity.SnapshotManifestV1: bindingRowHash})
 	settled2 := f.decide(t, f.decide(t, offer2, "catalog_priced"), "settlement_capable")
 	p2, _ := s.pool.Resolve("p2", "")
-	stale := ModelAdmissionRouteExpectation{ProviderID: "p2", CandidateID: settled2.CandidateID, CoordinatorEventID: settled2.CoordinatorEventID, BindingGeneration: p2.ModelAdmissionBindingGeneration - 1}
+	stale := ModelAdmissionRouteExpectation{ProviderID: "p2", CandidateID: settled2.CandidateID, CoordinatorEventID: settled2.CoordinatorEventID, BindingGeneration: p2.ModelAdmissionBindingGeneration - 1, SessionEpoch: p2.ModelAdmissionSessionEpoch}
 	inserted = 0
 	if err := s.CompareAndInsertModelAdmissionRouteSnapshot(context.Background(), stale, func() error { inserted++; return nil }); !errors.Is(err, ErrModelAdmissionRouteStale) || inserted != 0 {
 		t.Fatalf("stale binding generation must fail before insert: err=%v inserted=%d", err, inserted)
 	}
 	// A second candidate for the same row appended while the first is
 	// routable: the binding generation moves, the in-flight attempt fails.
-	current := ModelAdmissionRouteExpectation{ProviderID: "p2", CandidateID: settled2.CandidateID, CoordinatorEventID: settled2.CoordinatorEventID, BindingGeneration: p2.ModelAdmissionBindingGeneration}
+	current := ModelAdmissionRouteExpectation{ProviderID: "p2", CandidateID: settled2.CandidateID, CoordinatorEventID: settled2.CoordinatorEventID, BindingGeneration: p2.ModelAdmissionBindingGeneration, SessionEpoch: p2.ModelAdmissionSessionEpoch}
 	f.offer(t, "p2", "c", "mlx_cache", map[string]string{modelidentity.SnapshotManifestV1: bindingRowHash})
 	if err := s.CompareAndInsertModelAdmissionRouteSnapshot(context.Background(), current, func() error { inserted++; return nil }); !errors.Is(err, ErrModelAdmissionRouteStale) || inserted != 0 {
 		t.Fatalf("offer for candidate B must fail the in-flight attempt for A: err=%v", err)
 	}
+}
+
+// R008: same-model identity drift observed by the registry between a route
+// attempt's evaluation and its compare-and-insert — before the drift path
+// appended anything — fails the attempt closed through the session epoch.
+func TestModelAdmissionRouteCompareAndInsertFailsClosedOnSessionIdentityDrift(t *testing.T) {
+	f := newBindingFixture(t)
+	s := f.server
+	f.registerSession(t, "p1", "s1", "model-a", true)
+	offer := f.offer(t, "p1", "a", "mlx_cache", map[string]string{modelidentity.SnapshotManifestV1: bindingRowHash})
+	settled := f.decide(t, f.decide(t, offer, "catalog_priced"), "settlement_capable")
+	p, _ := s.pool.Resolve("p1", "")
+	expect := ModelAdmissionRouteExpectation{ProviderID: "p1", CandidateID: settled.CandidateID, CoordinatorEventID: settled.CoordinatorEventID, BindingGeneration: p.ModelAdmissionBindingGeneration, SessionEpoch: p.ModelAdmissionSessionEpoch}
+	// The registry applies a same-model heartbeat with another hash (no
+	// binding mutation, no append yet).
+	result := s.pool.ApplyHeartbeatDetailed("p1", "s1", pool.HeartbeatUpdate{Status: pool.StateReady, ModelID: "model-a", ModelHash: strings.Repeat("f", 64), ModelHashPresent: true,
+		ModelHashAlgorithm: modelidentity.SnapshotManifestV1, ModelHashAlgorithmPresent: true, ExpectedModelHash: bindingRowHash,
+		MaxContextTokens: 8192, MaxConcurrency: 1, SlotsFree: 1, SlotsTotal: 1, At: f.now.Add(time.Minute)})
+	if !result.OK || result.Provider.ModelAdmissionSessionEpoch == p.ModelAdmissionSessionEpoch || result.Provider.ModelAdmissionCandidateID != settled.CandidateID {
+		t.Fatalf("identity change must advance the epoch and leave the binding: %+v", result.Provider)
+	}
+	inserted := 0
+	if err := s.CompareAndInsertModelAdmissionRouteSnapshot(context.Background(), expect, func() error { inserted++; return nil }); !errors.Is(err, ErrModelAdmissionRouteStale) || inserted != 0 {
+		t.Fatalf("drifted identity must fail before insert: err=%v inserted=%d", err, inserted)
+	}
+	// A heartbeat that changes nothing keeps the epoch.
+	before := result.Provider.ModelAdmissionSessionEpoch
+	again := s.pool.ApplyHeartbeatDetailed("p1", "s1", pool.HeartbeatUpdate{Status: pool.StateReady, ModelID: "model-a", ModelHash: strings.Repeat("f", 64), ModelHashPresent: true,
+		ModelHashAlgorithm: modelidentity.SnapshotManifestV1, ModelHashAlgorithmPresent: true, ExpectedModelHash: bindingRowHash,
+		MaxContextTokens: 8192, MaxConcurrency: 1, SlotsFree: 1, SlotsTotal: 1, At: f.now.Add(2 * time.Minute)})
+	if again.Provider.ModelAdmissionSessionEpoch != before {
+		t.Fatal("an unchanged identity must not advance the epoch")
+	}
+}
+
+// R003(ii): row recommendability is evaluated before member runtime-source
+// policy — a listed row whose member also lost the source answers
+// catalog_row_not_recommendable (sweep: catalog_row_ineligible).
+func TestModelAdmissionPreconditionOrderRowBeforeRuntimeSource(t *testing.T) {
+	f := newBindingFixture(t)
+	s := f.server
+	f.registerGGUFSession(t, "p1", "s1")
+	feedOffer := f.offer(t, "p1", "g", "ollama_loopback", map[string]string{modelidentity.GGUFFileV1: f.gguf})
+	priced := f.decide(t, feedOffer, "catalog_priced")
+	// New release: row listed AND the gguf member no longer allows ollama_loopback.
+	listed := bindingCatalog(t, "release-listed", "listed", bindingRowHash)
+	members := bindingMembers(f.gguf, "")
+	members[1].AllowedRuntimeSources = "llamacpp_loopback"
+	s.withReleaseRead(func() {
+		set := bindingIndex(t, listed, strings.Repeat("e", 64), f.now, members)
+		saved := s.artifactIdentitySets.sets
+		s.artifactIdentitySets.sets = map[string]*artifactidentity.Index{listed.SHA256: set}
+		defer func() { s.artifactIdentitySets.sets = saved }()
+		if eval := s.evaluateCatalogPreconditionsLocked(priced, listed); eval.decisionCode != "catalog_row_not_recommendable" || eval.driftReason != "catalog_row_ineligible" {
+			t.Fatalf("row eligibility must precede runtime-source policy: %+v", eval)
+		}
+		recommendable := bindingCatalog(t, "release-rec", "recommendable", bindingRowHash)
+		s.artifactIdentitySets.sets = map[string]*artifactidentity.Index{recommendable.SHA256: bindingIndex(t, recommendable, strings.Repeat("e", 64), f.now, members)}
+		if eval := s.evaluateCatalogPreconditionsLocked(priced, recommendable); eval.decisionCode != "runtime_source_not_allowed" || eval.driftReason != "catalog_runtime_source_disallowed" {
+			t.Fatalf("runtime-source policy after row eligibility: %+v", eval)
+		}
+	})
 }
 
 // R008 / SPEC-010-R004 v1.8: a session on a retained compatible-previous

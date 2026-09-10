@@ -239,10 +239,17 @@ func scanSQLitePending(row sqlitePendingScanner) (PendingModelAdmissionDecision,
 		&p.AdmissionState, &p.ServedModelRef, &p.CatalogModelKey); err != nil {
 		return PendingModelAdmissionDecision{}, err
 	}
-	p.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
-	p.ExpiresAt, _ = time.Parse(time.RFC3339Nano, expires)
+	var err error
+	if p.CreatedAt, err = time.Parse(time.RFC3339Nano, created); err != nil {
+		return PendingModelAdmissionDecision{}, fmt.Errorf("model admission pending decision %s: created_at_utc: %w", p.ID, err)
+	}
+	if p.ExpiresAt, err = time.Parse(time.RFC3339Nano, expires); err != nil {
+		return PendingModelAdmissionDecision{}, fmt.Errorf("model admission pending decision %s: expires_at_utc: %w", p.ID, err)
+	}
 	if consumed != "" {
-		p.ConsumedAt, _ = time.Parse(time.RFC3339Nano, consumed)
+		if p.ConsumedAt, err = time.Parse(time.RFC3339Nano, consumed); err != nil {
+			return PendingModelAdmissionDecision{}, fmt.Errorf("model admission pending decision %s: consumed_at_utc: %w", p.ID, err)
+		}
 	}
 	p.Invalidated = invalidated == 1
 	return p, nil
