@@ -12,11 +12,13 @@ import (
 	"math"
 	"net/http"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
 	"unicode/utf8"
 
+	"github.com/augstar/macprovider-coordinator/internal/autotune"
 	"github.com/augstar/macprovider-coordinator/internal/config"
 )
 
@@ -189,6 +191,83 @@ func LoadAutotuneFeeds(cfg config.AutotuneFeedsConfig) (AutotuneFeeds, error) {
 		CatalogArtifactsSig:            artifacts.sigBytes,
 		CatalogArtifactsVerification:   artifacts.verification,
 	}, nil
+}
+
+// PreviousAutotuneReleaseTarget resolves the deployer-recorded compatible
+// previous release (`<root>/.previous-target` = "releases/<id>") to that
+// release's directory; "" when none is recorded or it is permanently
+// rejected. Mirrors the coordinator's compatible-catalog resolution.
+func PreviousAutotuneReleaseTarget(cfg config.AutotuneFeedsConfig) (dir string, err error) {
+	if cfg.AutotuneCandidatesPath == "" {
+		return "", nil
+	}
+	root := filepath.Dir(filepath.Dir(cfg.AutotuneCandidatesPath))
+	targetBytes, err := os.ReadFile(filepath.Join(root, ".previous-target"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		return "", fmt.Errorf("read previous-target: %w", err)
+	}
+	target := strings.TrimSpace(string(targetBytes))
+	if target == "" {
+		return "", nil
+	}
+	releaseID := strings.TrimPrefix(target, "releases/")
+	if releaseID == target || releaseID == "" || strings.Contains(releaseID, "/") {
+		return "", fmt.Errorf("invalid previous-target %q", target)
+	}
+	for _, r := range releaseID {
+		if !(r >= 'A' && r <= 'Z') && !(r >= 'a' && r <= 'z') && !(r >= '0' && r <= '9') && !strings.ContainsRune("._-", r) {
+			return "", fmt.Errorf("invalid previous-target %q", target)
+		}
+	}
+	if autotune.IsPermanentlyRejectedReleaseID(releaseID) {
+		return "", nil
+	}
+	return filepath.Join(root, target), nil
+}
+
+// LoadPreviousAutotuneFeeds loads the retained compatible previous release's
+// candidate feed and, when that release directory carries its artifact feed
+// (an artifact-bound release keeps `autotune-artifacts.json` + `.sig`), the
+// artifact feed bound to it — the input of that release's identity set
+// (SPEC-010-R004 v1.8). A retained release without an artifact feed loads
+// with an empty artifact half (primary-row path only).
+func LoadPreviousAutotuneFeeds(cfg config.AutotuneFeedsConfig) ([]AutotuneFeeds, error) {
+	dir, err := PreviousAutotuneReleaseTarget(cfg)
+	if err != nil || dir == "" {
+		return nil, err
+	}
+	previousCfg := cfg
+	previousCfg.DemandRankPath, previousCfg.DemandRankSigPath = "", ""
+	previousCfg.AutotuneCandidatesPath = filepath.Join(dir, "autotune-candidates.json")
+	previousCfg.AutotuneCandidatesSigPath = previousCfg.AutotuneCandidatesPath + ".sig"
+	feeds, err := LoadPreviousAutotuneCandidateFeed(previousCfg)
+	if err != nil {
+		return nil, fmt.Errorf("verify %s: %w", dir, err)
+	}
+	artifactsPath := filepath.Join(dir, "autotune-artifacts.json")
+	if _, statErr := os.Stat(artifactsPath); statErr == nil {
+		keyring, err := cfg.DecodePublicKeyring()
+		if err != nil {
+			return nil, err
+		}
+		candidates := loadedAutotuneFeed{jsonBytes: feeds.AutotuneCandidatesJSON, sigBytes: feeds.AutotuneCandidatesSig, verification: feeds.AutotuneCandidatesVerification}
+		artifacts, err := loadAutotuneFeedPair(artifactsPath, artifactsPath+".sig", "catalog_artifacts", keyring, validateCatalogArtifactsFeed)
+		if err != nil {
+			return nil, fmt.Errorf("verify %s artifact feed: %w", dir, err)
+		}
+		if artifacts.enabled() {
+			if err := bindCatalogArtifactsFeed(artifacts, candidates); err != nil {
+				return nil, fmt.Errorf("bind %s artifact feed: %w", dir, err)
+			}
+			feeds.CatalogArtifactsJSON = artifacts.jsonBytes
+			feeds.CatalogArtifactsSig = artifacts.sigBytes
+			feeds.CatalogArtifactsVerification = artifacts.verification
+		}
+	}
+	return []AutotuneFeeds{feeds}, nil
 }
 
 // LoadPreviousAutotuneCandidateFeed verifies the deployer-recorded previous

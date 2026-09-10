@@ -51,7 +51,8 @@ func TestArtifactFeedIdentityVerifiesExactMemberForTheAdmittedRelease(t *testing
 	cfg := config.Default()
 	cfg.Tier2.ObserveEnabled = true
 	clock := now
-	server := &Server{cfg: cfg, tier2: cfg.Tier2, autotuneCatalog: catalog, artifactIdentityIndex: index, now: func() time.Time { return clock }}
+	server := &Server{cfg: cfg, tier2: cfg.Tier2, autotuneCatalog: catalog, now: func() time.Time { return clock }}
+	server.artifactIdentitySets.sets = map[string]*artifactidentity.Index{catalog.SHA256: index}
 
 	base := pool.ModelIdentityRequest{ModelID: "model-a", ExpectedHash: rowHash, CandidateCatalogSHA256: catalog.SHA256, CatalogAdmissionMode: "current", CatalogModelKey: "small"}
 
@@ -224,7 +225,7 @@ func TestArtifactFeedIdentityVerifiesExactMemberForTheAdmittedRelease(t *testing
 		t.Fatalf("a failed rebuild leaves no artifact authority: %+v", v)
 	}
 	// No index (rate-card-bound release): v1.6 verdicts exactly.
-	server.artifactIdentityIndex = nil
+	server.SetArtifactIdentitySets(nil)
 	if v := server.verifyModelIdentity(gguf); v.Status != pool.HashStatusMismatch || v.Artifact != nil {
 		t.Fatalf("no feed: %+v", v)
 	}
@@ -337,4 +338,91 @@ func (s *Server) SetArtifactIdentityIndexForTest(catalog *autotune.Catalog, now 
 	}
 	s.SetArtifactIdentityIndex(index)
 	return nil
+}
+
+// SPEC-047-R001 v0.1.5 / SPEC-010-R004 v1.8: with release staging on, the
+// reload's catalog swap is invisible until the feed publish installs the
+// identity sets, and both land as ONE generation; a session admitted on a
+// retained previous release resolves in that release's own set.
+func TestReleaseStagingPublishesCatalogAndIdentitySetsAsOneGeneration(t *testing.T) {
+	const rowHash = "3975387f249977e5e8bfb7ed0d352f8258ac3d630f961ce1dd952f428ee7216a"
+	ggufOld, ggufNew := strings.Repeat("c", 64), strings.Repeat("d", 64)
+	catalogJSON := func(version string) string {
+		return `{"version":"` + version + `","policy_version":"test-v1","generated_at":"2026-07-18T00:00:00Z","source":"operator_curated_autotune_candidate_catalog","rows":{"small":{"model_id":"model-a","model_revision":"revision-a","model_sha256":"` + rowHash + `","min_ram_gb":4,"min_bandwidth_tier":"C","bench_gate":{"min_sustained_tps":1,"max_4k_ttft_ms":1000},"runtime_status":"recommendable"}}}`
+	}
+	oldCatalog, err := autotune.ParseCatalog([]byte(catalogJSON("old")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	newCatalog, err := autotune.ParseCatalog([]byte(catalogJSON("new")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 9, 10, 12, 0, 0, 0, time.UTC)
+	setFor := func(catalog *autotune.Catalog, gguf string) *artifactidentity.Index {
+		index, err := artifactidentity.New(artifactidentity.Provenance{
+			FeedSHA256: strings.Repeat("a", 64), SignerKeyID: "k1", ReleaseID: catalog.Version, CandidateCatalogSHA256: catalog.SHA256, FeedGeneratedAt: now.Add(-24 * time.Hour),
+		}, []artifactidentity.Member{{ModelKey: "small", ModelID: "model-a", ArtifactID: "gguf-q4", HashAlgorithm: modelidentity.GGUFFileV1, Hash: gguf, RuntimeStatus: "recommendable"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return index
+	}
+	cfg := config.Default()
+	cfg.Tier2.ObserveEnabled = true
+	server := &Server{cfg: cfg, tier2: cfg.Tier2, autotuneCatalog: oldCatalog, now: func() time.Time { return now }}
+	WithReleaseStaging()(server)
+	WithArtifactIdentitySets(map[string]*artifactidentity.Index{oldCatalog.SHA256: setFor(oldCatalog, ggufOld)})(server)
+	req := func(catalog *autotune.Catalog, gguf string) pool.ModelIdentityRequest {
+		return pool.ModelIdentityRequest{ModelID: "model-a", ExpectedHash: rowHash, ReportedHash: gguf, ReportedAlgorithm: modelidentity.GGUFFileV1,
+			CandidateCatalogSHA256: catalog.SHA256, CatalogAdmissionMode: "current"}
+	}
+	if v := server.verifyModelIdentity(req(oldCatalog, ggufOld)); v.Status != pool.HashStatusVerified {
+		t.Fatalf("old release member verifies before the reload: %+v", v)
+	}
+	// The reload stages the new catalog: nothing changes yet.
+	server.SetAutotuneCatalog(newCatalog, oldCatalog)
+	if server.currentAutotuneCatalog() != oldCatalog {
+		t.Fatal("a staged catalog must not be visible before publication")
+	}
+	if got := server.ReleaseGeneration(); got != 0 {
+		t.Fatalf("no generation before publication, got %d", got)
+	}
+	// The feed publish installs both releases' sets and publishes everything as one generation.
+	gen := server.SetArtifactIdentitySets(map[string]*artifactidentity.Index{newCatalog.SHA256: setFor(newCatalog, ggufNew), oldCatalog.SHA256: setFor(oldCatalog, ggufOld)})
+	if gen != 1 || server.ReleaseGeneration() != 1 || server.currentAutotuneCatalog() != newCatalog {
+		t.Fatalf("publication: gen=%d catalog=%v", gen, server.currentAutotuneCatalog().Version)
+	}
+	// A session on the retained previous release resolves in ITS set (re-stamp is a no-op for it);
+	// a session on the new release resolves in the new set; neither crosses over.
+	if v := server.verifyModelIdentity(req(oldCatalog, ggufOld)); v.Status != pool.HashStatusVerified || v.Artifact == nil {
+		t.Fatalf("previous-release session keeps artifact identity: %+v", v)
+	}
+	if v := server.verifyModelIdentity(req(newCatalog, ggufNew)); v.Status != pool.HashStatusVerified || v.Artifact == nil {
+		t.Fatalf("new-release session resolves in the new set: %+v", v)
+	}
+	if v := server.verifyModelIdentity(req(oldCatalog, ggufNew)); v.Status != pool.HashStatusMismatch {
+		t.Fatalf("a session never resolves another release's member: %+v", v)
+	}
+	// A reload whose feed publish never arrives still publishes the staged
+	// catalog at the end-of-reload refresh, keeping the current sets.
+	server.SetAutotuneCatalog(oldCatalog)
+	server.pool = pool.NewRegistry(nil)
+	server.RefreshTier2HashStatuses()
+	if server.currentAutotuneCatalog() != oldCatalog || server.ReleaseGeneration() != 2 {
+		t.Fatalf("staged catalog must publish at refresh: catalog=%s gen=%d", server.currentAutotuneCatalog().Version, server.ReleaseGeneration())
+	}
+	if v := server.verifyModelIdentity(req(oldCatalog, ggufOld)); v.Status != pool.HashStatusVerified {
+		t.Fatalf("sets survive a catalog-only publication: %+v", v)
+	}
+	// Without staging (tests, tools) SetAutotuneCatalog publishes immediately and drops the sets.
+	plain := &Server{cfg: cfg, tier2: cfg.Tier2, autotuneCatalog: oldCatalog, now: func() time.Time { return now }}
+	WithArtifactIdentitySets(map[string]*artifactidentity.Index{oldCatalog.SHA256: setFor(oldCatalog, ggufOld)})(plain)
+	plain.SetAutotuneCatalog(newCatalog)
+	if plain.currentAutotuneCatalog() != newCatalog || plain.ReleaseGeneration() != 1 {
+		t.Fatal("immediate publication without staging")
+	}
+	if v := plain.verifyModelIdentity(req(oldCatalog, ggufOld)); v.Status != pool.HashStatusMismatch {
+		t.Fatalf("a catalog swap without its sets drops artifact authority: %+v", v)
+	}
 }

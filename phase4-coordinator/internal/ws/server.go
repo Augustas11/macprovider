@@ -164,7 +164,7 @@ type Server struct {
 	// artifactIdentityIndex is the SPEC-010 v1.7 R007 expected-identity set
 	// derived from the artifact feed release-bound to the current candidate
 	// catalog; nil for a rate-card-bound release (v1.6 primary-only path).
-	artifactIdentityIndex          *artifactidentity.Index
+	artifactIdentitySets           releaseSnapshotState
 	autotuneCatalogEnforced        bool
 	autotuneCatalogBridgeDeadline  time.Time
 	autotuneCatalogBridgeMu        sync.Mutex
@@ -559,31 +559,93 @@ func (s *Server) autotuneCatalogSnapshot() (*autotune.Catalog, map[string]*autot
 // SIGHUP feed reload calls this only after the new feed is parsed and validated;
 // on any validation failure the caller keeps the prior catalog (fail-closed).
 func (s *Server) SetAutotuneCatalog(catalog *autotune.Catalog, compatible ...*autotune.Catalog) {
-	next := buildCompatibleCatalogSet(catalog, compatible)
-	s.autotuneCatalogMu.Lock()
-	s.autotuneCatalog = catalog
-	s.autotuneCompatibleCatalogs = next
-	// SPEC-010-R007(b): an index is bound to exactly one release; the one
-	// built for the previous catalog never outlives it. The feed publish that
-	// follows a reload installs the replacement (SetArtifactIdentityIndex),
-	// so between the two steps every session is primary-only (fail closed).
-	s.artifactIdentityIndex = nil
-	s.autotuneCatalogMu.Unlock()
+	if s.artifactIdentitySets.stagingEnabled() {
+		// SPEC-047-R001 v0.1.5: the reload stages every part of the release
+		// and publishes them as ONE act (SetArtifactIdentitySets, or the
+		// end-of-reload RefreshTier2HashStatuses when no feed publish
+		// follows), so no reader observes a catalog without its identity
+		// sets and Tier-2 material.
+		s.artifactIdentitySets.stageCatalog(catalog, compatible)
+		return
+	}
+	s.publishRelease(catalog, compatible, nil, true)
+}
+
+// publishRelease installs catalog + compatible set (when catalogGiven), the
+// identity sets, and any staged Tier-2 material under the release write lock
+// and bumps the release generation once.
+func (s *Server) publishRelease(catalog *autotune.Catalog, compatible []*autotune.Catalog, sets map[string]*artifactidentity.Index, catalogGiven bool) uint64 {
+	s.artifactIdentitySets.mu.Lock()
+	defer s.artifactIdentitySets.mu.Unlock()
+	if catalogGiven {
+		next := buildCompatibleCatalogSet(catalog, compatible)
+		s.autotuneCatalogMu.Lock()
+		s.autotuneCatalog = catalog
+		s.autotuneCompatibleCatalogs = next
+		s.autotuneCatalogMu.Unlock()
+	}
+	return s.artifactIdentitySets.publishLocked(sets, false)
+}
+
+// publishStagedKeepingSets publishes whatever a reload staged (catalog half,
+// Tier-2 material) while keeping the current identity sets — the path for a
+// reload whose feed publish never arrived.
+func (s *Server) publishStagedKeepingSets() uint64 {
+	s.artifactIdentitySets.mu.Lock()
+	defer s.artifactIdentitySets.mu.Unlock()
+	catalog, compatible, staged := s.artifactIdentitySets.takeStagedCatalog()
+	if staged {
+		next := buildCompatibleCatalogSet(catalog, compatible)
+		s.autotuneCatalogMu.Lock()
+		s.autotuneCatalog = catalog
+		s.autotuneCompatibleCatalogs = next
+		s.autotuneCatalogMu.Unlock()
+	}
+	return s.artifactIdentitySets.publishLocked(nil, true)
 }
 
 // SetArtifactIdentityIndex installs (or, with nil, removes) the expected-
 // identity set at runtime; the SIGHUP feed publish observer calls it with the
 // index rebuilt from the exact feeds just published.
 func (s *Server) SetArtifactIdentityIndex(index *artifactidentity.Index) {
-	s.autotuneCatalogMu.Lock()
-	s.artifactIdentityIndex = index
-	s.autotuneCatalogMu.Unlock()
+	var sets map[string]*artifactidentity.Index
+	if index != nil {
+		sets = map[string]*artifactidentity.Index{index.Provenance().CandidateCatalogSHA256: index}
+	}
+	s.SetArtifactIdentitySets(sets)
 }
 
-func (s *Server) currentArtifactIdentityIndex() *artifactidentity.Index {
-	s.autotuneCatalogMu.RLock()
-	defer s.autotuneCatalogMu.RUnlock()
-	return s.artifactIdentityIndex
+// SetArtifactIdentitySets publishes the release: the identity set of every
+// retained release keyed by its candidate-catalog body digest (SPEC-010-R004
+// v1.8), together with a staged admission catalog and staged Tier-2 material
+// when the reload staged them — ONE atomic publication under the release
+// write lock, one generation bump (SPEC-047-R001 v0.1.5). Called by the
+// buyer feed-publish observer with the sets rebuilt from the exact feeds
+// just published; nil publishes with no artifact-derived identity.
+func (s *Server) SetArtifactIdentitySets(sets map[string]*artifactidentity.Index) uint64 {
+	catalog, compatible, staged := s.artifactIdentitySets.takeStagedCatalog()
+	return s.publishRelease(catalog, compatible, sets, staged)
+}
+
+// ReleaseGeneration is the monotonic generation of the published release
+// snapshot; decisions record the generation they evaluated under and route
+// time requires a binding validated under the current one.
+func (s *Server) ReleaseGeneration() uint64 { return s.artifactIdentitySets.generation() }
+
+// withReleaseRead runs fn under the release read lock so it observes one
+// consistent release snapshot (catalog, identity sets, Tier-2 material,
+// generation). Never nest: a nested read lock deadlocks against a waiting
+// publisher. Lock order: provider section → registry → release read lock.
+func (s *Server) withReleaseRead(fn func()) {
+	s.artifactIdentitySets.mu.RLock()
+	defer s.artifactIdentitySets.mu.RUnlock()
+	fn()
+}
+
+// artifactIdentitySetFor is the identity set bound to the given release
+// (candidate-catalog body digest), or nil when the coordinator holds none.
+func (s *Server) artifactIdentitySetFor(release string) *artifactidentity.Index {
+	return s.artifactIdentitySets.setFor(release)
 }
 
 // CurrentAutotuneCatalog exposes the live active catalog to the coordinator's
@@ -645,8 +707,33 @@ func (s *Server) resolveProviderCatalog(provider pool.Provider) (resolved, curre
 // for a provider admitted against any other release.
 func WithArtifactIdentityIndex(index *artifactidentity.Index) Option {
 	return func(s *Server) {
-		s.artifactIdentityIndex = index
+		if index != nil {
+			s.artifactIdentitySets.sets = map[string]*artifactidentity.Index{index.Provenance().CandidateCatalogSHA256: index}
+		}
 	}
+}
+
+// WithArtifactIdentitySets installs the boot-time identity sets (one per
+// retained release); construction runs before any goroutine, so lock-free.
+func WithArtifactIdentitySets(sets map[string]*artifactidentity.Index) Option {
+	return func(s *Server) {
+		s.artifactIdentitySets.sets = sets
+	}
+}
+
+// WithReleaseStaging makes SetAutotuneCatalog stage (rather than publish) so
+// the SIGHUP reload's catalog, feeds, identity sets, and Tier-2 material
+// become visible as one release publication (SPEC-047-R001 v0.1.5).
+func WithReleaseStaging() Option {
+	return func(s *Server) {
+		s.artifactIdentitySets.staging = true
+	}
+}
+
+// StageTier2 implements tier2.ReleasePublisher: the reload's validated
+// Tier-2 catalog is promoted with the next release publication.
+func (s *Server) StageTier2(next *tier2.Catalog) {
+	s.artifactIdentitySets.stageTier2(next)
 }
 
 func WithAutotuneCatalogEnforcement(enforced bool, bridgeDeadline time.Time) Option {
@@ -1399,14 +1486,25 @@ func (s *Server) RefreshTier2HashStatuses() int {
 			return ""
 		})
 	}
-	if index := s.currentArtifactIdentityIndex(); index != nil && !index.Fresh(s.now()) {
-		// SPEC-023 §3.7.6 rules 4–5 in effect: distinguishable from provider
-		// drift, which the per-session transition log below cannot tell apart.
-		s.log.Warn().
-			Str("event", "artifact_identity_index_stale").
-			Time("feed_generated_at", index.Provenance().FeedGeneratedAt).
-			Msg("artifact feed is stale; artifact-derived identity is disabled until the feed is re-issued and reloaded (primary-row identity unaffected)")
+	// A reload whose catalog half never arrived (or a Tier-2-only reload)
+	// still publishes what it staged, as one act, before sessions are
+	// re-verified against it.
+	if s.artifactIdentitySets.hasStaged() {
+		s.publishStagedKeepingSets()
 	}
+	s.withReleaseRead(func() {
+		for release, index := range s.artifactIdentitySets.currentSets() {
+			if index != nil && !index.Fresh(s.now()) {
+				// SPEC-023 §3.7.6 rules 4–5 in effect: distinguishable from provider
+				// drift, which the per-session transition log below cannot tell apart.
+				s.log.Warn().
+					Str("event", "artifact_identity_index_stale").
+					Str("release_candidate_catalog_sha256", release).
+					Time("feed_generated_at", index.Provenance().FeedGeneratedAt).
+					Msg("artifact feed is stale; artifact-derived identity is disabled for that release until the feed is re-issued and reloaded (primary-row identity unaffected)")
+			}
+		}
+	})
 	return s.pool.UpdateModelIdentities(func(provider pool.Provider) pool.ModelIdentityVerdict {
 		// The registry applies the session pin again when it stores the
 		// verdict; applying it here too keeps the transition log honest.
@@ -1458,6 +1556,15 @@ func (s *Server) verifyProviderModelIdentity(modelID, expectedHash, reportedHash
 }
 
 func (s *Server) verifyModelIdentity(req pool.ModelIdentityRequest) pool.ModelIdentityVerdict {
+	var verdict pool.ModelIdentityVerdict
+	s.withReleaseRead(func() { verdict = s.verifyModelIdentityLocked(req) })
+	return verdict
+}
+
+// verifyModelIdentityLocked is verifyModelIdentity for callers that already
+// hold the release read lock (decision evaluation); it MUST NOT be called
+// without it.
+func (s *Server) verifyModelIdentityLocked(req pool.ModelIdentityRequest) pool.ModelIdentityVerdict {
 	cfg := s.tier2Config()
 	algorithm := strings.TrimSpace(req.ReportedAlgorithm)
 	reported := strings.TrimSpace(req.ReportedHash)
@@ -1493,14 +1600,20 @@ func (s *Server) verifyModelIdentity(req pool.ModelIdentityRequest) pool.ModelId
 // the index, the index bound to the provider's admitted candidate catalog,
 // and the resolved member's model key equal to the session's admitted key.
 func (s *Server) resolveArtifactIdentity(req pool.ModelIdentityRequest, algorithm, reported string) (artifactidentity.Binding, bool) {
-	index := s.currentArtifactIdentityIndex()
-	// SPEC-023 §3.7.6 rules 4–5: a stale or future-stamped feed authorizes no
-	// artifact-derived capability; the primary-row path is unaffected.
 	// Only a validated catalog envelope ("current" / compatible "previous")
 	// binds a release; a bridge or legacy session presented none, on every
-	// leg (hello, heartbeat, refresh) since the gate lives here.
+	// leg (hello, heartbeat, refresh) since the gate lives here. The session
+	// resolves in the identity set of its OWN admitted release (SPEC-010-R004
+	// v1.8): a retained compatible-previous release keeps its set, so a
+	// scheduled re-stamp changes nothing for live sessions.
 	release := admittedCandidateCatalogSHA256(req.CatalogAdmissionMode, req.CandidateCatalogSHA256)
-	if index == nil || release == "" || !index.BoundTo(release) || !index.Fresh(s.now()) {
+	if release == "" {
+		return artifactidentity.Binding{}, false
+	}
+	index := s.artifactIdentitySetFor(release)
+	// SPEC-023 §3.7.6 rules 4–5: a stale or future-stamped feed authorizes no
+	// artifact-derived capability; the primary-row path is unaffected.
+	if index == nil || !index.BoundTo(release) || !index.Fresh(s.now()) {
 		return artifactidentity.Binding{}, false
 	}
 	binding, ok := index.Resolve(algorithm, reported)
