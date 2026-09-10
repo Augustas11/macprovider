@@ -363,6 +363,18 @@ func TestModelAdmissionOperatorDualControlSecretsAndReservedKeys(t *testing.T) {
 			t.Fatalf("%s: %d %v", name, code, resp)
 		}
 	}
+	// A named entry reusing the legacy shared operator_key lends it no
+	// attribution: the shared bearer is refused, and that entry does not
+	// count toward dual control.
+	s.cfg.Auth.OperatorKey = "shared-legacy"
+	s.cfg.Auth.OperatorKeys = map[string]string{"alice": "shared-legacy", "bob": "bob-secret"}
+	if code, resp := c.do(http.MethodPost, decisions, "shared-legacy", decisionRequest("p1", offer.CandidateID, "settlement_capable", "operator_settle", pricedHead, "k2-shared")); code != http.StatusUnauthorized || errorCode(resp) != "invalid_operator_token" {
+		t.Fatalf("shared operator_key reused by a named entry: %d %v", code, resp)
+	}
+	if code, resp := c.do(http.MethodPost, decisions, "bob-secret", decisionRequest("p1", offer.CandidateID, "settlement_capable", "operator_settle", pricedHead, "k2-shared-bob")); code != http.StatusConflict || errorCode(resp) != "dual_control_unavailable" {
+		t.Fatalf("entry equal to the shared key must not count toward dual control: %d %v", code, resp)
+	}
+	s.cfg.Auth.OperatorKey = "shared-secret"
 	// Distinct secrets: pending; then an expired record is pending_expired.
 	s.cfg.Auth.OperatorKeys = map[string]string{"alice": "alice-secret", "bob": "bob-secret"}
 	code, pending := c.do(http.MethodPost, decisions, "alice-secret", decisionRequest("p1", offer.CandidateID, "settlement_capable", "operator_settle", pricedHead, "k3"))

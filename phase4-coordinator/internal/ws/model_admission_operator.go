@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/augstar/macprovider-coordinator/internal/auth"
 	"github.com/augstar/macprovider-coordinator/internal/autotune"
 	"github.com/augstar/macprovider-coordinator/internal/jcs"
 	"github.com/augstar/macprovider-coordinator/internal/modelidentity"
@@ -177,6 +178,13 @@ func (l *operatorRateLimiter) allow(key string, now time.Time, limit int) bool {
 	return true
 }
 
+// sharedOperatorKeyBearer reports whether the request presents the shared
+// single-value auth.operator_key.
+func (s *Server) sharedOperatorKeyBearer(r *http.Request) bool {
+	shared := strings.TrimSpace(s.cfg.Auth.OperatorKey)
+	return shared != "" && auth.OperatorOnlyBearerMatches(r.Header, shared)
+}
+
 func (s *Server) allowModelAdmissionOperatorAttempt(actor string, r *http.Request) bool {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
@@ -189,6 +197,14 @@ func (s *Server) allowModelAdmissionOperatorAttempt(actor string, r *http.Reques
 // credential class (never the shared operator_key) and applies the operator
 // rate window; it writes the closed error itself.
 func (s *Server) authorizedModelAdmissionOperator(w http.ResponseWriter, r *http.Request) (string, bool) {
+	// The shared single-value operator_key is never a per-actor credential:
+	// a bearer equal to it is refused BEFORE any named match, so a named
+	// entry that (mis)configures the same secret cannot lend the shared key
+	// an attribution.
+	if s.sharedOperatorKeyBearer(r) {
+		writeJSON(w, http.StatusUnauthorized, modelAdmissionError("invalid_operator_token", "unauthorized"))
+		return "", false
+	}
 	actor, ok := s.authorizedProviderAuthPolicyOperator(r)
 	if !ok || !modelAdmissionOperatorActorPattern.MatchString(actor) {
 		writeJSON(w, http.StatusUnauthorized, modelAdmissionError("invalid_operator_token", "unauthorized"))
@@ -216,6 +232,7 @@ func (s *Server) operatorDualControlAvailable() bool {
 	for _, secret := range s.cfg.Auth.OperatorKeys {
 		secretCount[strings.TrimSpace(secret)]++
 	}
+	shared := strings.TrimSpace(s.cfg.Auth.OperatorKey)
 	actors := map[string]struct{}{}
 	for actorID, secret := range s.cfg.Auth.OperatorKeys {
 		actor := normalizedOperatorActor(actorID)
@@ -223,7 +240,9 @@ func (s *Server) operatorDualControlAvailable() bool {
 			continue
 		}
 		secret = strings.TrimSpace(secret)
-		if secret == "" || secretCount[secret] != 1 {
+		// An entry whose secret is the shared operator_key can never
+		// authenticate here (the shared bearer is refused first).
+		if secret == "" || secretCount[secret] != 1 || (shared != "" && secret == shared) {
 			continue
 		}
 		if _, dup := actors[actor]; dup {

@@ -46,3 +46,6 @@ Closure pass 1 (code 0/1H/1M/1L, security 0/0/0/1L, architect 0/0/0/1L) fixed; r
 
 ## CLOSURE PASS 3 (code-reviewer only; security and architect at bar)
 Closure pass 2 (code 0/0/1M) fixed; record `AUDIT_BYOM_V02_SLICE4_IMPL_CLOSURE2.md`. Re-review the FULL `git diff origin/main` (uncommitted `main.go` included). Shape to re-challenge: `operatorDualControlAvailable` — secret multiplicity over all entries, strict normalized actors with a globally unique non-empty secret, normalized-alias disqualification — against `authorizedProviderAuthPolicyOperator`'s ambiguity refusal. Do not re-report an item from any record unless its fix is wrong or incomplete.
+
+## CLOSURE PASS 4 (code-reviewer only; security and architect at bar)
+Closure pass 3 (code 0/1H) fixed; record `AUDIT_BYOM_V02_SLICE4_IMPL_CLOSURE3.md`. Re-review the FULL `git diff origin/main` (uncommitted `main.go` included). Shape to re-challenge: `sharedOperatorKeyBearer` refusal ahead of the named match and the shared-secret exclusion in `operatorDualControlAvailable`, against every other credential class the coordinator accepts on `/admin` (gateway service token, provider tokens). Do not re-report an item from any record unless its fix is wrong or incomplete.
