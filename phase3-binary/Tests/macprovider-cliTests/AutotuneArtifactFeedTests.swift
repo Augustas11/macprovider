@@ -348,7 +348,11 @@ final class AutotuneArtifactFeedTests: XCTestCase {
         XCTAssertNil(without.catalogKey(for: "test-model:q4_k_m", runtimeSource: "ollama_loopback", digest: digest))
 
         let with = BYOMCatalogMatcher(candidateBytes: candidateBytes, artifactFeed: try XCTUnwrap(qualified(try Self.canonical(feed), candidateBytes: candidateBytes)))
-        XCTAssertEqual(with.catalogKey(for: "mlx-community/Test-Model-4bit", runtimeSource: "mlx_cache"), "test-model")
+        // A key the feed covers is decided by the artifact leg alone: the row's
+        // repo id matches only together with the primary artifact's revision.
+        XCTAssertEqual(with.catalogKey(for: "mlx-community/Test-Model-4bit", runtimeSource: "mlx_cache", revisions: [Self.primaryRevision]), "test-model")
+        XCTAssertNil(with.catalogKey(for: "mlx-community/Test-Model-4bit", runtimeSource: "mlx_cache"), "name alone, key covered by the feed")
+        XCTAssertNil(with.catalogKey(for: "test-model", runtimeSource: "mlx_cache"), "row key alone, key covered by the feed")
         // The corpus gguf secondary is only `declared`: it is identity in the
         // feed but not yet a catalog match (§3.7.4).
         XCTAssertNil(with.catalogKey(for: "TEST-MODEL:Q4_K_M", runtimeSource: "ollama_loopback", digest: digest))
@@ -380,8 +384,8 @@ final class AutotuneArtifactFeedTests: XCTestCase {
         ], to: feed)
         let matcher = BYOMCatalogMatcher(candidateBytes: candidateBytes, artifactFeed: try XCTUnwrap(qualified(try Self.canonical(feed), candidateBytes: candidateBytes)))
         XCTAssertNil(matcher.catalogKey(for: "test-model:q4_k_m", runtimeSource: "ollama_loopback", digest: "sha256:" + String(repeating: "4", count: 64)))
-        // The candidate-row path is unaffected by artifact status.
-        XCTAssertEqual(matcher.catalogKey(for: "mlx-community/Test-Model-4bit", runtimeSource: "mlx_cache"), "test-model")
+        // The primary artifact's own identity is unaffected by a sibling's status.
+        XCTAssertEqual(matcher.catalogKey(for: "mlx-community/Test-Model-4bit", runtimeSource: "mlx_cache", revisions: [Self.primaryRevision]), "test-model")
     }
 
     func testFallbackBakedFeedIsAgedLikeSelectedBytes() async throws {
@@ -439,6 +443,7 @@ final class AutotuneArtifactFeedTests: XCTestCase {
     }
 
     private static let secondRevision = String(repeating: "3", count: 40)
+    private static let primaryRevision = String(repeating: "1", count: 40)
 
     private func feedWithArtifactOnlyReference() throws -> (candidateBytes: Data, feedBytes: Data, feed: QualifiedArtifactFeed) {
         let corpus = try Self.loadCorpus()
@@ -460,12 +465,20 @@ final class AutotuneArtifactFeedTests: XCTestCase {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("byom-artifact-only-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
-        for (modelID, revision) in [("mlx-community/Test-Model-8bit", Self.secondRevision), ("mlx-community/Test-Model-4bit", String(repeating: "1", count: 40))] {
+        for (modelID, revision) in [("mlx-community/Test-Model-8bit", Self.secondRevision), ("mlx-community/Test-Model-4bit", Self.primaryRevision)] {
             let directory = root.appendingPathComponent("models--" + modelID.replacingOccurrences(of: "/", with: "--"))
                 .appendingPathComponent("snapshots").appendingPathComponent(revision)
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             try Data("{}".utf8).write(to: directory.appendingPathComponent("config.json"))
             try Data(repeating: 0, count: 16).write(to: directory.appendingPathComponent("model.safetensors"))
+        }
+        // Revisions are identity-load-bearing: 25 older snapshot directories that
+        // sort before the artifact's revision must not push it out of the
+        // bounded content scan.
+        for index in 0..<25 {
+            let stale = root.appendingPathComponent("models--mlx-community--Test-Model-8bit/snapshots")
+                .appendingPathComponent(String(repeating: "0", count: 38) + String(format: "%02x", index))
+            try FileManager.default.createDirectory(at: stale, withIntermediateDirectories: true)
         }
         let namespace = Data(repeating: 0x37, count: 32)
         func keys(_ matcher: BYOMCatalogMatcher) -> [String: String?] {
@@ -475,9 +488,17 @@ final class AutotuneArtifactFeedTests: XCTestCase {
         let usable = keys(BYOMCatalogMatcher(candidateBytes: fixture.candidateBytes, artifactFeed: fixture.feed))
         XCTAssertEqual(usable["mlx-community/Test-Model-8bit"], "test-model")
         XCTAssertEqual(usable["mlx-community/Test-Model-4bit"], "test-model")
+        // No usable feed: the v0.1 name-level row leg (rule 6).
         let unusable = keys(BYOMCatalogMatcher(candidateBytes: fixture.candidateBytes, artifactFeed: nil))
         XCTAssertEqual(unusable["mlx-community/Test-Model-8bit"], .some(nil))
         XCTAssertEqual(unusable["mlx-community/Test-Model-4bit"], "test-model")
+        // A usable feed covering the key: the row's repo id at a revision the
+        // feed does not know is NOT that catalog identity.
+        let primary = root.appendingPathComponent("models--mlx-community--Test-Model-4bit/snapshots")
+        try FileManager.default.moveItem(at: primary.appendingPathComponent(Self.primaryRevision), to: primary.appendingPathComponent(String(repeating: "d", count: 40)))
+        let primaryRebased = keys(BYOMCatalogMatcher(candidateBytes: fixture.candidateBytes, artifactFeed: fixture.feed))
+        XCTAssertEqual(primaryRebased["mlx-community/Test-Model-4bit"], .some(nil))
+        try FileManager.default.moveItem(at: primary.appendingPathComponent(String(repeating: "d", count: 40)), to: primary.appendingPathComponent(Self.primaryRevision))
         // A snapshot at another revision than the artifact's is a different set
         // of bytes: the repo id alone never matches (SPEC-023 §3.7.4).
         let otherRevision = root.appendingPathComponent("models--mlx-community--Test-Model-8bit/snapshots")
@@ -510,7 +531,7 @@ final class AutotuneArtifactFeedTests: XCTestCase {
             let second = corpus.cases.first { ($0["name"] as! String) == "second verified mlx artifact under another repo id" }!
             rebound = try Self.applying(second["ops"] as! [[String: Any]], to: rebound)
             let matcher = BYOMCatalogMatcher(candidateBytes: candidateBytes, artifactFeed: qualified(try Self.canonical(rebound), candidateBytes: candidateBytes))
-            XCTAssertNil(matcher.catalogKey(for: "mlx-community/Test-Model-4bit", runtimeSource: "mlx_cache"), status)
+            XCTAssertNil(matcher.catalogKey(for: "mlx-community/Test-Model-4bit", runtimeSource: "mlx_cache", revisions: [Self.primaryRevision]), status)
             XCTAssertNil(matcher.catalogKey(for: "test-model", runtimeSource: "mlx_cache"), status)
             XCTAssertNil(matcher.catalogKey(for: "mlx-community/Test-Model-8bit", runtimeSource: "mlx_cache", revisions: [Self.secondRevision]), status)
         }
@@ -577,8 +598,9 @@ final class AutotuneArtifactFeedTests: XCTestCase {
         // One revision observed: the immutable half disambiguates.
         XCTAssertEqual(matcher.catalogKey(for: "mlx-community/Test-Model-8bit", runtimeSource: "mlx_cache", revisions: [Self.secondRevision]), "test-model")
         XCTAssertEqual(matcher.catalogKey(for: "mlx-community/Test-Model-8bit", runtimeSource: "mlx_cache", revisions: [String(repeating: "4", count: 40)]), "other-model")
-        XCTAssertEqual(matcher.catalogKey(for: "mlx-community/Other-Model-4bit", runtimeSource: "mlx_cache"), "other-model")
-        XCTAssertEqual(matcher.catalogKey(for: "mlx-community/Test-Model-4bit", runtimeSource: "mlx_cache"), "test-model")
+        XCTAssertEqual(matcher.catalogKey(for: "mlx-community/Other-Model-4bit", runtimeSource: "mlx_cache", revisions: [String(repeating: "9", count: 40)]), "other-model")
+        XCTAssertEqual(matcher.catalogKey(for: "mlx-community/Test-Model-4bit", runtimeSource: "mlx_cache", revisions: [Self.primaryRevision]), "test-model")
+        XCTAssertNil(matcher.catalogKey(for: "mlx-community/Other-Model-4bit", runtimeSource: "mlx_cache"), "covered key, name alone")
         // Unambiguous in a feed where only one model carries the reference.
         let single = BYOMCatalogMatcher(candidateBytes: fixture.candidateBytes, artifactFeed: fixture.feed)
         XCTAssertEqual(single.catalogKey(for: "mlx-community/Test-Model-8bit", runtimeSource: "mlx_cache", revisions: [Self.secondRevision]), "test-model")
@@ -596,6 +618,21 @@ final class AutotuneArtifactFeedTests: XCTestCase {
         let matcher = BYOMCatalogMatcher(candidateBytes: try Self.canonical(candidate), artifactFeed: nil)
         XCTAssertNil(matcher.catalogKey(for: "mlx-community/Test-Model-4bit", runtimeSource: "mlx_cache"))
         XCTAssertEqual(matcher.catalogKey(for: "test-model-alias", runtimeSource: "mlx_cache"), "test-model-alias")
+    }
+
+    func testArtifactFeedWarningsLeaveTheCandidateWarningStateUntouched() {
+        // §3.7.6 rule 6 at the per-candidate `explanation.warning_state`: the
+        // artifact classes ride in `warnings[]` only.
+        for warning in AutotuneRecommendEngine.artifactFeedWarnings {
+            XCTAssertEqual(
+                AutotuneRecommendEngine.warningState(eligible: true, confidence: "high", localHealthWarnings: [], candidateWarnings: Set([warning]).subtracting(AutotuneRecommendEngine.artifactFeedWarnings)),
+                "ready", warning.rawValue
+            )
+        }
+        XCTAssertEqual(
+            AutotuneRecommendEngine.warningState(eligible: true, confidence: "high", localHealthWarnings: [], candidateWarnings: [.rateCardFallbackUsed]),
+            "advisory"
+        )
     }
 
     func testUndecodableCompiledInSnapshotIsAnIntegrityFailureNotATrap() async throws {

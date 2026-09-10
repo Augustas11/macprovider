@@ -466,7 +466,7 @@ struct ModelsCatalogEconomicsCommand: AsyncParsableCommand {
         // BYOM identity is resolved against the compiled-in release through the
         // one offline qualified selection (`BYOMCatalogMatcher()`), the same
         // authority `discover`, `evaluate`, and `offer` use; the live artifact
-        // selection loaded below governs recommendation and is reported here.
+        // selection loaded below contributes its §3.7.6 warnings, reported here.
         let discovery = await BYOMDiscoveryRunner(environment: environment).discover()
         let inputs = await AutotuneStaticInputs().loadRecommendationInputs()
         let admissions = await readAdmissionStatuses(
@@ -1654,11 +1654,12 @@ extension ModelsAdoptRecommendationCommand {
             return nil
         }
         #endif
-        let inputs = await AutotuneStaticInputs().loadRecommendationInputs()
+        // Adoption is gated on the three v0.1 feeds only (§3.7.6 rule 6: the
+        // artifact classes can never block it), so the artifact fetch is skipped.
+        let inputs = await AutotuneStaticInputs().loadRecommendationInputs(includeArtifactFeed: false)
         let warnings = inputs.demand.warnings
             .union(inputs.candidate.warnings)
             .union(inputs.rateCard.warnings)
-            .union(inputs.artifactFeed.warnings)
         guard !AutotuneRecommendEngine.paidTrustBlocks(warnings),
               recommendation.demandRankVersion == inputs.demand.value.version,
               recommendation.candidateCatalogVersion == inputs.candidate.value.version,

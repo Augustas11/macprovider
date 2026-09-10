@@ -102,15 +102,21 @@ BYOM identity is resolved against the compiled-in release in every command
 qualified selection — the same bound-and-fresh verdict the loader would reach
 for those bytes without transport — so all commands agree on one authority
 (SPEC-046: discovery is offline and never creates catalog authority). The
-matcher resolves a served reference through that artifact set only
-content-addressed: an MLX cache entry matches a `huggingface_revision`
-artifact only when one of its snapshot directories IS the artifact's
-`revision`; a GGUF `library_tag` never matches until the adapter reports the
-layer digest (slice 3) — a repo id or tag alone is a mutable name, not
-identity (§3.7.4; SPEC-047 §R001). Only a `verified` artifact whose
-`allowed_runtime_sources` include the reporting adapter, of a `listed` or
-`recommendable` row (§3.2: `candidate` and `blocked` rows are never
-BYOM-matchable), and only when exactly one model key answers. The closed
+matcher has two legs under that one authority. A catalog key the usable
+artifact feed covers is decided by the ARTIFACT leg alone: an MLX cache entry
+matches a `huggingface_revision` artifact only when one of its snapshot
+directories IS the artifact's `revision` (the immutable half of the source
+reference as the adapter observed it — a directory name, not a locally
+computed hash; the coordinator resolves by verified hash, SPEC-047 §R001);
+a GGUF `library_tag` never matches until the adapter reports the layer digest
+(slice 3). A repo id, row key, or tag alone is a mutable name and mints no
+identity for a covered key. A key the feed does not cover — every key when no
+usable feed exists, which includes any binary more than 14 days past its
+baked feed's stamp between release cuts — keeps the v0.1 name-level row
+match with `catalog_match_unverified` (§3.7.6 rule 6). Only a `verified`
+artifact whose `allowed_runtime_sources` include the reporting adapter, of a
+`listed` or `recommendable` row (§3.2: `candidate` and `blocked` rows are
+never BYOM-matchable), and only when exactly one model key answers. The closed
 schema, identity matrix, uniqueness, and
 binding rules are pinned across the generator, the coordinator, and the CLI by
 the shared corpus `scripts/tests/fixtures/artifact_feed_conformance.json`.

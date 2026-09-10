@@ -2143,11 +2143,13 @@ struct AutotuneRecommendEngine {
                 eligible: eligible,
                 demandAvailable: demandAvailable
             )
+            // SPEC-023 §3.7.6 rule 6: an artifact-feed class rides in
+            // `warnings[]` but leaves the v0.1 per-candidate state untouched.
             let warningState = Self.warningState(
                 eligible: eligible,
                 confidence: confidence,
                 localHealthWarnings: localHealthWarnings,
-                candidateWarnings: candidateWarnings
+                candidateWarnings: candidateWarnings.subtracting(Self.artifactFeedWarnings)
             )
             let summary = Self.explanationSummary(
                 modelKey: modelKey,
@@ -2471,7 +2473,12 @@ struct AutotuneRecommendEngine {
         return "measured"
     }
 
-    private static func warningState(
+    static let artifactFeedWarnings: Set<AutotuneRecommendWarning> = [
+        .catalogArtifactFeedFallbackUsed, .catalogArtifactFeedIntegrityFailure,
+        .catalogArtifactFeedUpdateRequired, .catalogArtifactFeedStale,
+    ]
+
+    static func warningState(
         eligible: Bool,
         confidence: String,
         localHealthWarnings: [String],

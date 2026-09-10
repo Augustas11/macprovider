@@ -167,7 +167,7 @@ extension ArtifactFeed {
         // One timestamp grammar in every consumer (generator, coordinator, CLI):
         // the form the generator stamps — seconds precision, `Z` or an explicit
         // `±HH:MM` offset, no fractional seconds.
-        guard rawGeneratedAt.range(of: Self.timestampGrammar, options: .regularExpression) != nil,
+        guard Self.matches(Self.timestampPattern, rawGeneratedAt),
               let generatedAt = ISO8601DateFormatter.autotuneInternet.date(from: rawGeneratedAt)
         else {
             throw ArtifactFeedError.integrity("generated_at must be RFC3339 at seconds precision with an explicit timezone")
@@ -347,6 +347,7 @@ extension ArtifactFeed {
 
     static let minRAMGBMax: Double = 1_048_576
     static let timestampGrammar = #"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:Z|[+-]\d{2}:\d{2})$"#
+    private static let timestampPattern = try! NSRegularExpression(pattern: timestampGrammar)
 
     static func rawGeneratedAt(in data: Data) -> String? {
         guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
@@ -370,15 +371,17 @@ extension ArtifactFeed {
     /// identical in identity to the row.
     /// - Parameters:
     ///   - manifestSignerKeyID: the `release.json`-bound signer of the artifact
-    ///     feed when the caller knows it (the compiled-in snapshot bakes it from
-    ///     the release that produced it). When known it must equal both
-    ///     authenticated signers, so the baked path is a genuine three-way
-    ///     identity check, not `baked == baked`. For a live fetch the CLI has no
-    ///     authenticated copy of that release's manifest; the release host
-    ///     (`verify`, the acceptance signer, the live release gate) and the
-    ///     coordinator (`LoadAutotuneFeeds`) enforce the manifest binding
-    ///     before those bytes are ever served, and the CLI enforces equality of
-    ///     the two authenticated signers it does have.
+    ///     feed when the caller holds one. The generator enforces the
+    ///     manifest leg before `release.json` is written, so the compiled-in
+    ///     snapshot's baked signer equals the manifest binding by
+    ///     construction; supplying it here re-asserts that equality against
+    ///     the authenticated signers (and is a real check only for a caller
+    ///     with an independently sourced value). For a live fetch the CLI has
+    ///     no authenticated copy of that release's manifest (SPEC-023 §3.7.2
+    ///     as amended in v0.10.2): the release host (`verify`, the acceptance
+    ///     signer, the live release gate) enforces the manifest binding before
+    ///     those bytes are served, and the CLI enforces equality of the two
+    ///     authenticated signers it does have.
     func bind(
         to catalog: CandidateCatalog,
         candidateBytes: Data,
@@ -473,8 +476,9 @@ extension ArtifactFeed {
         }
     }
 
-    /// Every artifact of this feed as an identity.
-    func artifactIdentities() -> [ArtifactIdentity] {
+    /// Every artifact of this feed as an identity. Reachable only through a
+    /// `QualifiedArtifactFeed`, so identities never bypass the qualification.
+    fileprivate func artifactIdentities() -> [ArtifactIdentity] {
         var out: [ArtifactIdentity] = []
         for key in models.keys.sorted() {
             let model = models[key]!
@@ -511,6 +515,12 @@ struct QualifiedArtifactFeed: Sendable {
         self.feedSHA256 = AutotuneStaticInputs.candidateCatalogSHA256(bytes: bytes)
         self.signerKeyID = signerKeyID
         self.releaseID = feed.releaseID
+    }
+
+    /// The artifacts of the qualified feed as identities (the only way to
+    /// obtain them).
+    func artifactIdentities() -> [ArtifactFeed.ArtifactIdentity] {
+        feed.artifactIdentities()
     }
 }
 

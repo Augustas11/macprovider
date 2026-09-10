@@ -3113,8 +3113,13 @@ struct BYOMCatalogMatcher: Sendable {
         } else {
             rows = []
         }
-        artifactIdentities = (artifactFeed?.feed.artifactIdentities() ?? []).filter { matchable.contains($0.catalogKey) }
+        artifactIdentities = (artifactFeed?.artifactIdentities() ?? []).filter { matchable.contains($0.catalogKey) }
+        artifactCoveredKeys = Set(artifactIdentities.map(\.catalogKey))
     }
+
+    /// Catalog keys the qualified artifact feed carries an artifact for: their
+    /// identity is decided by the artifact leg alone.
+    private let artifactCoveredKeys: Set<String>
 
     static let matchableStatuses: Set<String> = ["listed", "recommendable"]
 
@@ -3122,10 +3127,17 @@ struct BYOMCatalogMatcher: Sendable {
     /// `ollama_loopback`, ...); `revisions` are the HuggingFace snapshot
     /// revisions the adapter observed for an MLX cache entry and `digest` the
     /// GGUF layer digest it observed for a loopback runtime (none is reported
-    /// yet). A catalog identity is minted only when exactly ONE model key
-    /// answers: a served reference is a lossy projection of content-addressed
-    /// identity, and an ambiguous one names nobody (SPEC-023 §3.7.4 resolves
-    /// identity by hash; SPEC-046: discovery never creates catalog authority).
+    /// yet).
+    ///
+    /// Two legs, one authority. A catalog key the qualified artifact feed
+    /// covers is decided by the ARTIFACT leg alone: the reference must answer
+    /// to one of that key's artifacts together with the immutable half of its
+    /// source reference as observed (a name alone is not identity — SPEC-023
+    /// §3.7.4, SPEC-047 §R001). A key the feed does not cover — every key
+    /// when no usable feed exists — keeps the v0.1 name-level row match
+    /// (§3.7.6 rule 6: an absent or unusable feed is indistinguishable from
+    /// v0.1). Either way an identity is minted only when exactly ONE model
+    /// key answers (SPEC-046: discovery never creates catalog authority).
     func catalogKey(
         for servedModelRef: String,
         runtimeSource: String,
@@ -3133,16 +3145,14 @@ struct BYOMCatalogMatcher: Sendable {
         digest: String? = nil
     ) -> String? {
         let normalized = BYOMCandidateIdentity.normalizedServedModelRef(servedModelRef)
-        let rowKeys = Set(rows.filter { row in
+        let nameOnlyKeys = Set(rows.filter { row in
             BYOMCandidateIdentity.normalizedServedModelRef(row.key) == normalized
                 || BYOMCandidateIdentity.normalizedServedModelRef(row.modelID) == normalized
-        }.map(\.key))
-        if !rowKeys.isEmpty {
-            return rowKeys.count == 1 ? rowKeys.first : nil
-        }
-        let keys = Set(artifactIdentities.filter {
+        }.map(\.key)).subtracting(artifactCoveredKeys)
+        let artifactKeys = Set(artifactIdentities.filter {
             $0.matches(normalized, runtimeSource: runtimeSource, revisions: revisions, digest: digest)
         }.map(\.catalogKey))
+        let keys = nameOnlyKeys.union(artifactKeys)
         return keys.count == 1 ? keys.first : nil
     }
 }
@@ -3225,6 +3235,9 @@ struct BYOMMLXCacheDiscovery {
             collected.append(url)
             if collected.count >= cap { break }
         }
+        // Enumeration order is unspecified; a deterministic order keeps every
+        // bounded scan below stable between runs on the same host.
+        collected.sort { $0.lastPathComponent < $1.lastPathComponent }
         return collected.sorted(by: { $0.lastPathComponent < $1.lastPathComponent })
     }
 
@@ -3320,13 +3333,18 @@ struct BYOMMLXCacheDiscovery {
         var inspected = 0
         // HF cache snapshot directories are named by the commit revision: the
         // immutable half of a SPEC-023 `huggingface_revision` source reference.
+        // Identity-load-bearing, so collected over EVERY entry (a name test, no
+        // I/O); only the content inspection below is bounded.
         var revisions = Set<String>()
-        for snapshot in snapshotDirs.prefix(20) {
-            guard (try? snapshot.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true else { continue }
+        for snapshot in snapshotDirs
+        where (try? snapshot.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true {
             let name = snapshot.lastPathComponent
             if name.count == 40, name.allSatisfy({ $0.isHexDigit && ($0.isNumber || $0.isLowercase) }) {
                 revisions.insert(name)
             }
+        }
+        for snapshot in snapshotDirs.prefix(20) {
+            guard (try? snapshot.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true else { continue }
             if let config = boundedFileContents(
                 at: snapshot.appendingPathComponent("config.json"),
                 within: cacheRoot,

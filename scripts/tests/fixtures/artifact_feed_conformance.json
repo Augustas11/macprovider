@@ -25,7 +25,7 @@
     "source": "operator_curated_autotune_candidate_catalog",
     "version": "test-release"
   },
-  "case_count": 55,
+  "case_count": 56,
   "cases": [
     {
       "expect": "accept",
@@ -1241,6 +1241,20 @@
             "verification_status": "verified",
             "verified_at": "2026-09-01"
           }
+        }
+      ],
+      "spec": "\u00a73.7.3 \u2014 whole-string anchoring in every consumer"
+    },
+    {
+      "expect": "reject",
+      "name": "generated_at with a trailing newline",
+      "ops": [
+        {
+          "op": "set",
+          "path": [
+            "generated_at"
+          ],
+          "value": "2026-07-10T00:00:00Z\n"
         }
       ],
       "spec": "\u00a73.7.3 \u2014 whole-string anchoring in every consumer"

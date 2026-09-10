@@ -38,9 +38,14 @@ resolved in the commit that adds this record unless marked carried.
   primary flag, full `source_ref`) and the artifact leg matches only together
   with the IMMUTABLE half of the source reference as the adapter observed it:
   the HuggingFace `revision` (the MLX cache adapter now reports its snapshot
-  revisions) or the GGUF layer `digest` (no adapter reports one yet, so no
-  GGUF artifact matches until slice 3). A repo id or tag alone never matches.
-  Tests: revision-required, wrong-revision, digest-required, wrong-digest.
+  revisions — directory names, not a locally computed hash) or the GGUF
+  layer `digest` (no adapter reports one yet, so no GGUF artifact matches
+  until slice 3). For a catalog key the usable feed covers, a repo id, row
+  key, or tag alone mints no identity (closure pass: the name-level row leg
+  no longer pre-empts the artifact leg); a key the feed does not cover keeps
+  the v0.1 name-level row match with `catalog_match_unverified` (rule 6).
+  Tests: revision-required, wrong-revision, digest-required, wrong-digest,
+  covered-key-by-name.
 - **MEDIUM (security) / MEDIUM (code) / HIGH (architect): baked-bytes
   force-unwrap.** The shared loader's `(try? decode(bakedBytes))!` would trap
   every recommend / consume / preflight transcript on a compiled-in artifact
@@ -111,3 +116,49 @@ resolved in the commit that adds this record unless marked carried.
   hash; (INFO, code) only the `mlx_cache` and `ollama_loopback` adapters
   consult the matcher (pre-existing v0.1 shape); (INFO, architect) the three
   harnesses assert the same case count but not a shared schema version.
+
+## Closure verification (three fresh cold-context lanes, at `63e7757d`)
+
+| Lane | Verdict (open or new only) |
+|---|---|
+| code-reviewer | 0 CRITICAL / 0 HIGH / 1 MEDIUM / 1 LOW / 2 INFO |
+| security-reviewer | 0 CRITICAL / 0 HIGH / 0 MEDIUM / 1 LOW / 4 INFO — **at the bar** |
+| architect | 0 CRITICAL / 0 HIGH / 2 MEDIUM / 0 LOW / 3 INFO |
+
+All three lanes verified every finding above as closed (the architect: one
+partially, see the first item). Resolved in the commit that adds this section:
+
+- **MEDIUM (architect):** the name-level row leg pre-empted the artifact leg,
+  so every primary artifact was still matched on its repo id alone. Now a
+  catalog key the usable feed covers is decided by the artifact leg alone
+  (revision / digest required); a key the feed does not cover — every key
+  when no usable feed exists — keeps the v0.1 name-level row match (rule 6).
+  The record and runbook wording above were corrected accordingly.
+- **MEDIUM (code):** MLX snapshot revisions were collected from an unsorted
+  first 20 entries. Revisions are now collected over every entry (a name
+  test, no I/O) and the bounded directory enumerator sorts its result; the
+  discovery test adds 25 older snapshot directories ahead of the artifact's.
+- **MEDIUM (architect):** §3.7.6 class 2 and the §3.7.7 R004 signer sentence
+  restated the unscoped `release.json` rule; both now carry the §3.7.2
+  scoping and cross-reference it (v0.10.2, no further bump; `last-locked`
+  advanced to 2026-09-10).
+- **LOW (security):** an artifact-feed-only warning flipped every candidate's
+  `explanation.warning_state` to `advisory`; the artifact classes are now
+  subtracted before that v0.1 verdict (`artifactFeedWarnings`), pinned by
+  `testArtifactFeedWarningsLeaveTheCandidateWarningStateUntouched`.
+- **LOW (code):** `models adopt-recommendation` skips the artifact fetch
+  (`includeArtifactFeed: false`); its inert union is dropped.
+- **INFO (code, security):** `generated_at` now goes through the hardened
+  whole-string helper; corpus case "generated_at with a trailing newline" (56).
+- **INFO (security):** `ArtifactFeed.artifactIdentities()` is fileprivate;
+  identities are obtainable only from a `QualifiedArtifactFeed`.
+- **INFO (security):** the `manifestSignerKeyID` doc comment now states that
+  the manifest leg is enforced at generation and re-asserted here.
+- **INFO (architect):** the `catalog-economics` comment no longer says the
+  live selection "governs" recommendation.
+- **Carried, in the PR body:** (INFO, code) `ArtifactFeed.Model.primary`
+  force-unwraps an invariant `decode` guarantees but the type does not;
+  (INFO, security) the MLX artifact leg is gated on the observed snapshot
+  directory name, not a locally computed hash — the coordinator resolves by
+  verified hash; (INFO, architect) three validators reject duplicate adapters
+  and whitespace-only `quantization`, which §3.7.3 does not name.
