@@ -56,14 +56,14 @@ func TestArtifactFeedIdentityVerifiesExactMemberForTheAdmittedRelease(t *testing
 	// Primary-row path unchanged: verified with no artifact binding.
 	primary := base
 	primary.ReportedHash, primary.ReportedAlgorithm = rowHash, modelidentity.SnapshotManifestV1
-	if v := server.verifyProviderModelIdentity(primary); v.Status != pool.HashStatusVerified || v.Artifact != nil {
+	if v := server.verifyModelIdentity(primary); v.Status != pool.HashStatusVerified || v.Artifact != nil {
 		t.Fatalf("primary row path: %+v", v)
 	}
 
 	// GGUF member: verified, with the member and the feed provenance bound.
 	gguf := base
 	gguf.ReportedHash, gguf.ReportedAlgorithm = ggufHash, modelidentity.GGUFFileV1
-	v := server.verifyProviderModelIdentity(gguf)
+	v := server.verifyModelIdentity(gguf)
 	if v.Status != pool.HashStatusVerified || v.Artifact == nil || v.Artifact.Member.ArtifactID != "gguf-q4" ||
 		v.Artifact.Provenance.CandidateCatalogSHA256 != catalog.SHA256 || v.Artifact.Provenance.SignerKeyID != "k1" {
 		t.Fatalf("gguf member: %+v", v)
@@ -72,43 +72,43 @@ func TestArtifactFeedIdentityVerifiesExactMemberForTheAdmittedRelease(t *testing
 	// Algorithm is half of the pair.
 	wrongAlg := gguf
 	wrongAlg.ReportedAlgorithm = modelidentity.SnapshotManifestV1
-	if v := server.verifyProviderModelIdentity(wrongAlg); v.Status != pool.HashStatusMismatch || v.Artifact != nil {
+	if v := server.verifyModelIdentity(wrongAlg); v.Status != pool.HashStatusMismatch || v.Artifact != nil {
 		t.Fatalf("gguf hash under the snapshot algorithm must not resolve: %+v", v)
 	}
 	// A pair that is in no set is unverified, never approximately matched.
 	unknown := gguf
 	unknown.ReportedHash = strings.Repeat("d", 64)
-	if v := server.verifyProviderModelIdentity(unknown); v.Status != pool.HashStatusMismatch || v.Artifact != nil {
+	if v := server.verifyModelIdentity(unknown); v.Status != pool.HashStatusMismatch || v.Artifact != nil {
 		t.Fatalf("unknown pair: %+v", v)
 	}
 	// The feed must be release-bound to THIS provider's admitted catalog.
 	otherRelease := gguf
 	otherRelease.CandidateCatalogSHA256 = strings.Repeat("e", 64)
-	if v := server.verifyProviderModelIdentity(otherRelease); v.Status != pool.HashStatusMismatch || v.Artifact != nil {
+	if v := server.verifyModelIdentity(otherRelease); v.Status != pool.HashStatusMismatch || v.Artifact != nil {
 		t.Fatalf("feed of another release must not supply the identity: %+v", v)
 	}
 	// The resolved member's key must be the session's admitted key.
 	otherKey := gguf
 	otherKey.CatalogModelKey = "other-model"
-	if v := server.verifyProviderModelIdentity(otherKey); v.Status != pool.HashStatusMismatch || v.Artifact != nil {
+	if v := server.verifyModelIdentity(otherKey); v.Status != pool.HashStatusMismatch || v.Artifact != nil {
 		t.Fatalf("member of another key must fail closed: %+v", v)
 	}
 	// Without an admitted key the served model id (normalized) is the key;
 	// "model-a" is not the catalog key "small".
 	noKey := gguf
 	noKey.CatalogModelKey = ""
-	if v := server.verifyProviderModelIdentity(noKey); v.Status != pool.HashStatusMismatch {
+	if v := server.verifyModelIdentity(noKey); v.Status != pool.HashStatusMismatch {
 		t.Fatalf("model id is not the catalog key: %+v", v)
 	}
 	// No index (rate-card-bound release): v1.6 verdicts exactly.
 	server.artifactIdentityIndex = nil
-	if v := server.verifyProviderModelIdentity(gguf); v.Status != pool.HashStatusMismatch || v.Artifact != nil {
+	if v := server.verifyModelIdentity(gguf); v.Status != pool.HashStatusMismatch || v.Artifact != nil {
 		t.Fatalf("no feed: %+v", v)
 	}
 	// An unnamed algorithm is invalid regardless of the feed.
 	bad := gguf
 	bad.ReportedAlgorithm = "sha256"
-	if v := server.verifyProviderModelIdentity(bad); v.Status != pool.HashStatusInvalid {
+	if v := server.verifyModelIdentity(bad); v.Status != pool.HashStatusInvalid {
 		t.Fatalf("unnamed algorithm: %+v", v)
 	}
 }

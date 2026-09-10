@@ -667,6 +667,7 @@ type Registry struct {
 	maxProvider             int
 	hashVerifier            HeartbeatHashVerifier
 	modelIdentityVerifier   ModelIdentityVerifier
+	modelIdentityResolver   ModelIdentityResolver
 	swapEmitter             SwapEventEmitter
 	receiptRotationEmitter  ReceiptRotationEventEmitter
 }
@@ -2210,7 +2211,14 @@ type ModelIdentityVerdict struct {
 	Artifact *artifactidentity.Binding
 }
 
-type ModelIdentityVerifier func(req ModelIdentityRequest) ModelIdentityVerdict
+// ModelIdentityVerifier is the v1.6 primary-row verdict callback (kept for
+// legacy wiring and the SPEC-010-R003/R005 conformance mappings).
+type ModelIdentityVerifier func(modelID, expectedHash, reportedHash, reportedAlgorithm string) HashStatus
+
+// ModelIdentityResolver is the v1.7 verdict callback: it receives the whole
+// request (including the admitted catalog digest and key) and may bind an
+// artifact-feed member. When set it takes precedence over ModelIdentityVerifier.
+type ModelIdentityResolver func(req ModelIdentityRequest) ModelIdentityVerdict
 
 // SwapEvent carries the per-swap data needed for the operator_model_swap audit
 // event per SPEC-002 v1.3.5 §7.10. Phase 2C only populates and emits this
@@ -2361,8 +2369,8 @@ func (r *Registry) applyHeartbeatLocked(providerID, assignedID string, hb Heartb
 		p.ModelHashAlgorithm = hb.ModelHashAlgorithm
 		p.WeightsManifestSHA256 = hb.WeightsManifestSHA256
 		p.WeightsHashAlgorithm = hb.WeightsHashAlgorithm
-		if r.modelIdentityVerifier != nil {
-			verdict := r.modelIdentityVerifier(ModelIdentityRequest{
+		if r.modelIdentityResolver != nil {
+			verdict := r.modelIdentityResolver(ModelIdentityRequest{
 				ModelID:                hb.ModelID,
 				ExpectedHash:           hb.ExpectedModelHash,
 				ReportedHash:           hb.ModelHash,
@@ -2372,6 +2380,9 @@ func (r *Registry) applyHeartbeatLocked(providerID, assignedID string, hb Heartb
 			})
 			p.HashStatus = verdict.Status
 			p.ArtifactIdentity = verdict.Artifact
+		} else if r.modelIdentityVerifier != nil {
+			p.HashStatus = r.modelIdentityVerifier(hb.ModelID, hb.ExpectedModelHash, hb.ModelHash, hb.ModelHashAlgorithm)
+			p.ArtifactIdentity = nil
 		} else if r.hashVerifier != nil {
 			p.HashStatus = r.hashVerifier(hb.ModelID, hb.ModelHash)
 		} else {
@@ -2722,6 +2733,12 @@ func WithHeartbeatHashVerifier(fn HeartbeatHashVerifier) RegistryOption {
 
 func WithModelIdentityVerifier(fn ModelIdentityVerifier) RegistryOption {
 	return func(r *Registry) { r.modelIdentityVerifier = fn }
+}
+
+// WithModelIdentityResolver installs the SPEC-010 v1.7 request-based verdict
+// callback; it takes precedence over WithModelIdentityVerifier.
+func WithModelIdentityResolver(fn ModelIdentityResolver) RegistryOption {
+	return func(r *Registry) { r.modelIdentityResolver = fn }
 }
 
 // WithSwapEmitter injects the operator_model_swap callback per SPEC-002

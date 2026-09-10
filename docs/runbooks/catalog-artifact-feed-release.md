@@ -121,6 +121,43 @@ schema, identity matrix, uniqueness, and
 binding rules are pinned across the generator, the coordinator, and the CLI by
 the shared corpus `scripts/tests/fixtures/artifact_feed_conformance.json`.
 
+## GGUF settlement identity (slice 3, SPEC-010 v1.7 R007)
+
+A model key's identity is the SET of `verified` artifacts the release-bound
+feed publishes for it (SPEC-010-R007). On the coordinator the expected-identity
+set is derived at startup from the same loaded feeds as the admitted catalog
+(`buyer.BuildArtifactIdentityIndex` → `artifactidentity.Index`, nil for a
+rate-card-bound release), so it is release-bound by construction: it resolves
+nothing for a provider admitted against another candidate-catalog digest. The
+heartbeat/hello verifier keeps the v1.6 primary-row path unchanged; a pair
+that is not the row's own is verified only by EXACT member equality for the
+session's admitted key, and the session then carries the member and the feed
+provenance. A verified member settles: the BYOM admission predicate, the
+route snapshot, and settlement carry the SPEC-047-R003 six values
+(`artifact_feed_sha256`, `artifact_id`, `artifact_hash`,
+`artifact_hash_algorithm`, `artifact_feed_signer_key_id`,
+`artifact_candidate_catalog_sha256`) — all six or none, bound into the
+snapshot digest, recovered on the settlement recompute path, never looked up
+in a current feed. `macprovider.gguf-file.v1` is a canonical wire pair.
+
+On the CLI (R007(a)) the GGUF digest is computed over the COMPLETE bytes of
+the blob the local Ollama store serves — `$OLLAMA_MODELS` or
+`~/.ollama/models`, manifest → model layer → `blobs/sha256-<hex>`; the
+manifest's layer digest only LOCATES the blob and is never reported.
+`models evaluate` and `models offer` are the deliberate commands that hash
+(the offer always recomputes, and fails closed if the file's identity —
+path, size, inode, mtime — changes while hashing); the digest is recorded for
+that exact file identity in `~/.config/macprovider/byom/artifact-digests.json`
+(0600), so `models discover` (read-only) reports
+`identity_state: artifact_hash_available` and matches a `verified` GGUF
+artifact by the COMPUTED digest without hashing. The offer package carries
+it as `artifact_hashes["macprovider.gguf-file.v1"]`.
+
+What this slice does NOT do: the provider CLI has no GGUF serving runtime, and
+SPEC-046 does not proxy buyer traffic, so a served GGUF model cannot yet
+report the wire pair in hello/heartbeat. R007 defines the identity that
+runtime path will report; the path itself is a later runtime slice.
+
 ## Activation state
 
 The artifact feed is **never** activated implicitly. Committing

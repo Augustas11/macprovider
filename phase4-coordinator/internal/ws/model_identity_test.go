@@ -37,25 +37,25 @@ func TestCanonicalModelIdentityUsesSignedAutotuneRowWithoutTier2Fallback(t *test
 	now := time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC)
 	server := &Server{cfg: cfg, tier2: cfg.Tier2, autotuneCatalog: catalog, now: func() time.Time { return now }}
 
-	if got := server.verifyProviderModelIdentity(pool.ModelIdentityRequest{ModelID: "model-a", ExpectedHash: expected, ReportedHash: expected, ReportedAlgorithm: modelidentity.SnapshotManifestV1}).Status; got != pool.HashStatusVerified {
+	if got := server.verifyProviderModelIdentity("model-a", expected, expected, modelidentity.SnapshotManifestV1); got != pool.HashStatusVerified {
 		t.Fatalf("matching canonical identity = %q", got)
 	}
-	if got := server.verifyProviderModelIdentity(pool.ModelIdentityRequest{ModelID: "model-a", ExpectedHash: expected, ReportedHash: strings.Repeat("a", 64), ReportedAlgorithm: modelidentity.SnapshotManifestV1}).Status; got != pool.HashStatusMismatch {
+	if got := server.verifyProviderModelIdentity("model-a", expected, strings.Repeat("a", 64), modelidentity.SnapshotManifestV1); got != pool.HashStatusMismatch {
 		t.Fatalf("mismatching canonical identity = %q", got)
 	}
-	if got := server.verifyProviderModelIdentity(pool.ModelIdentityRequest{ModelID: "unknown", ExpectedHash: "", ReportedHash: expected, ReportedAlgorithm: modelidentity.SnapshotManifestV1}).Status; got != pool.HashStatusUncatalogued {
+	if got := server.verifyProviderModelIdentity("unknown", "", expected, modelidentity.SnapshotManifestV1); got != pool.HashStatusUncatalogued {
 		t.Fatalf("missing signed row reused fallback hash: %q", got)
 	}
-	if got := server.verifyProviderModelIdentity(pool.ModelIdentityRequest{ModelID: "model-a", ExpectedHash: expected, ReportedHash: expected, ReportedAlgorithm: "sha256"}).Status; got != pool.HashStatusInvalid {
+	if got := server.verifyProviderModelIdentity("model-a", expected, expected, "sha256"); got != pool.HashStatusInvalid {
 		t.Fatalf("unknown explicit algorithm = %q", got)
 	}
 
 	server.tier2.ModelHashLegacyUntil = now.Add(time.Minute).Format(time.RFC3339)
-	if got := server.verifyProviderModelIdentity(pool.ModelIdentityRequest{ModelID: "model-a", ExpectedHash: expected, ReportedHash: expected, ReportedAlgorithm: ""}).Status; got != pool.HashStatusUncatalogued {
+	if got := server.verifyProviderModelIdentity("model-a", expected, expected, ""); got != pool.HashStatusUncatalogued {
 		t.Fatalf("bridged missing algorithm = %q", got)
 	}
 	server.tier2.ModelHashLegacyUntil = now.Format(time.RFC3339)
-	if got := server.verifyProviderModelIdentity(pool.ModelIdentityRequest{ModelID: "model-a", ExpectedHash: expected, ReportedHash: expected, ReportedAlgorithm: ""}).Status; got != pool.HashStatusInvalid {
+	if got := server.verifyProviderModelIdentity("model-a", expected, expected, ""); got != pool.HashStatusInvalid {
 		t.Fatalf("expired missing algorithm = %q", got)
 	}
 }
@@ -139,10 +139,10 @@ func TestCompatiblePreviousAdmissionKeepsExactSelectedRowIdentity(t *testing.T) 
 	if heartbeatExpected := server.expectedProviderModelHash("provider-a", "session-a", "model-a"); heartbeatExpected != previousHash {
 		t.Fatalf("heartbeat previous hash = %q", heartbeatExpected)
 	}
-	if got := server.verifyProviderModelIdentity(pool.ModelIdentityRequest{ModelID: "model-a", ExpectedHash: selected, ReportedHash: previousHash, ReportedAlgorithm: modelidentity.SnapshotManifestV1}).Status; got != pool.HashStatusVerified {
+	if got := server.verifyProviderModelIdentity("model-a", selected, previousHash, modelidentity.SnapshotManifestV1); got != pool.HashStatusVerified {
 		t.Fatalf("previous signed row was compared against current row: %q", got)
 	}
-	if got := server.verifyProviderModelIdentity(pool.ModelIdentityRequest{ModelID: "model-a", ExpectedHash: currentHash, ReportedHash: currentHash, ReportedAlgorithm: modelidentity.SnapshotManifestV1}).Status; got != pool.HashStatusVerified {
+	if got := server.verifyProviderModelIdentity("model-a", currentHash, currentHash, modelidentity.SnapshotManifestV1); got != pool.HashStatusVerified {
 		t.Fatalf("current signed row = %q", got)
 	}
 }

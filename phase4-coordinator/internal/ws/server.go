@@ -967,8 +967,8 @@ func NewServer(cfg config.Config, registry *pool.Registry, logger zerolog.Logger
 		// caller that overrides the catalog via WithCatalog (and the
 		// SIGHUP swap of tier2.Default()) is honored on every heartbeat
 		// rather than frozen at NewServer time.
-		pool.WithModelIdentityVerifier(func(req pool.ModelIdentityRequest) pool.ModelIdentityVerdict {
-			return s.verifyProviderModelIdentity(req)
+		pool.WithModelIdentityResolver(func(req pool.ModelIdentityRequest) pool.ModelIdentityVerdict {
+			return s.verifyModelIdentity(req)
 		})(registry)
 	}
 	if s.currentAutotuneCatalog() != nil && !s.autotuneCatalogEnforced && !s.autotuneCatalogBridgeDeadline.IsZero() && registry != nil {
@@ -1367,7 +1367,7 @@ func (s *Server) RefreshTier2HashStatuses() int {
 		})
 	}
 	return s.pool.UpdateModelIdentities(func(provider pool.Provider) pool.ModelIdentityVerdict {
-		verdict := s.verifyProviderModelIdentity(providerIdentityRequest(provider))
+		verdict := s.verifyModelIdentity(providerIdentityRequest(provider))
 		next := verdict.Status
 		s.observeHashStatusTransition(provider.HashStatus, next, provider.ProviderID, provider.AssignedID, provider.ModelID, provider.ModelHash)
 		if cfg.RequireHashVerified && (next == pool.HashStatusUncatalogued || next == pool.HashStatusCatalogUnavailable) {
@@ -1401,7 +1401,20 @@ func (s *Server) tier2Config() config.Tier2Config {
 // release-bound to the candidate catalog THIS provider was admitted against,
 // and that member's model key must be the key the session is admitted for.
 // Everything else is unverified — never "approximately matched".
-func (s *Server) verifyProviderModelIdentity(req pool.ModelIdentityRequest) pool.ModelIdentityVerdict {
+// verifyProviderModelIdentity is the v1.6 primary-row verdict: a request that
+// carries no admitted catalog digest can never resolve through the artifact
+// feed, so this is exactly the pre-R007 behaviour (kept for the SPEC-010-R005
+// conformance mapping and legacy callers).
+func (s *Server) verifyProviderModelIdentity(modelID, expectedHash, reportedHash, reportedAlgorithm string) pool.HashStatus {
+	return s.verifyModelIdentity(pool.ModelIdentityRequest{
+		ModelID:           modelID,
+		ExpectedHash:      expectedHash,
+		ReportedHash:      reportedHash,
+		ReportedAlgorithm: reportedAlgorithm,
+	}).Status
+}
+
+func (s *Server) verifyModelIdentity(req pool.ModelIdentityRequest) pool.ModelIdentityVerdict {
 	cfg := s.tier2Config()
 	algorithm := strings.TrimSpace(req.ReportedAlgorithm)
 	reported := strings.TrimSpace(req.ReportedHash)
@@ -2845,7 +2858,7 @@ func (s *Server) prepareProviderAdmissionWithQuotaCheck(conn net.Conn, auth prov
 	var artifactIdentity *artifactidentity.Binding
 	tier2Cfg := s.tier2Config()
 	if tier2.ModelHashActive(tier2Cfg) {
-		verdict := s.verifyProviderModelIdentity(pool.ModelIdentityRequest{
+		verdict := s.verifyModelIdentity(pool.ModelIdentityRequest{
 			ModelID:                hello.ModelID,
 			ExpectedHash:           expectedModelHash,
 			ReportedHash:           hello.ModelHash,
@@ -4439,7 +4452,7 @@ func (s *Server) tier2WarmupExcluded(provider pool.Provider) bool {
 	if tier2.ModelHashActive(cfg) {
 		status := provider.HashStatus
 		if status == "" {
-			status = s.verifyProviderModelIdentity(providerIdentityRequest(provider)).Status
+			status = s.verifyModelIdentity(providerIdentityRequest(provider)).Status
 		}
 		if tier2.IsHashPredicateFailure(status, cfg.RequireHashVerified) {
 			return true
@@ -5310,7 +5323,7 @@ func (s *Server) handleHeartbeat(conn net.Conn, providerID, assignedID string, p
 			request.CandidateCatalogSHA256 = current.CandidateCatalogSHA256
 			request.CatalogModelKey = current.ModelAdmissionCatalogModelKey
 		}
-		status := s.verifyProviderModelIdentity(request).Status
+		status := s.verifyModelIdentity(request).Status
 		if status == pool.HashStatusInvalid {
 			s.fenceInvalidModelIdentity(conn, providerID, assignedID)
 			return
@@ -6270,7 +6283,7 @@ func (s *Server) handlePoolz(w http.ResponseWriter, r *http.Request) {
 		}
 	} else {
 		for i := range providers {
-			providers[i].HashStatus = s.verifyProviderModelIdentity(providerIdentityRequest(providers[i])).Status
+			providers[i].HashStatus = s.verifyModelIdentity(providerIdentityRequest(providers[i])).Status
 		}
 	}
 	modelSet := map[string]struct{}{}
@@ -6399,7 +6412,7 @@ func (s *Server) providerTier2PolicyEligible(p pool.Provider, cfg config.Tier2Co
 	if !tier2.ConfigActive(cfg) {
 		return true
 	}
-	if tier2.ModelHashActive(cfg) && tier2.IsHashPredicateFailure(s.verifyProviderModelIdentity(providerIdentityRequest(p)).Status, cfg.RequireHashVerified) {
+	if tier2.ModelHashActive(cfg) && tier2.IsHashPredicateFailure(s.verifyModelIdentity(providerIdentityRequest(p)).Status, cfg.RequireHashVerified) {
 		return false
 	}
 	if cfg.RequireEncryptedLeg && !p.EncryptedLeg {

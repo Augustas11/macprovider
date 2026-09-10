@@ -1,0 +1,32 @@
+# Audit — BYOM v0.2 slice 3 IMPL: SPEC-010 v1.7 R007 artifact-feed identity in the coordinator and the CLI GGUF digest (#1453)
+
+METHOD CONSTRAINT: first-party software-correctness review on the MONEY PATH (model identity, route-time verification, settlement). Do NOT author adversarial payloads. Do NOT modify or commit the worktree; `phase3-binary/Package.resolved` may be rewritten by a local build — ignore that. Review the COMPLETE working-tree diff `git diff origin/main` on branch `feat/byom-v02-slice3-gguf-settlement-identity` (NOT `origin/main...HEAD`: `phase4-coordinator/cmd/coordinator/main.go` is intentionally uncommitted pending an operator commit and MUST be in scope). The diff bundles the SPEC revision (SPEC-010 v1.7, SPEC-023 v0.10.3, SPEC-047 v0.1.4 — already audited to 0 C/H/M, records in `audits/2026-09-10-byom-v02-slice3/AUDIT_BYOM_V02_SLICE3_SPEC_R{1,2,3}.md`) with its implementation. Read the SPEC text first: SPEC-010 §3.7 R001–R007; SPEC-023 §3.2, §3.7.4–§3.7.6, §3.7.7 R004, AC-CAT-7, AC-CAT-17, AC-CAT-20; SPEC-047 §R001 and R003; SPEC-046 R002/R003.
+
+Evaluate by reading source and running the EXISTING tests:
+- `cd phase4-coordinator && go vet ./... && go test ./internal/artifactidentity ./internal/modelidentity ./internal/pool ./internal/ws ./internal/buyer ./internal/billing -count=1`
+- `cd phase3-binary && swift test --filter 'BYOMArtifactDigestTests|BYOMDiscovery|AutotuneArtifactFeedTests|BYOMEvaluation|BYOMModelAdmission'` (local `CoordinatorClientTests` / MLX metallib failures are a known env-only false failure; ignore them)
+- `python3 scripts/check_spec_governance.py`
+
+## What the change does
+1. Coordinator: `modelidentity.GGUFFileV1` + `CanonicalAlgorithm`; wire parsing accepts both canonical pairs. `internal/artifactidentity.Index` = every `verified` artifact of a `listed`/`recommendable` row keyed by the exact `(hash_algorithm, hash)` pair with feed provenance; `buyer.BuildArtifactIdentityIndex` derives it from the loaded feeds (bound to `AutotuneCandidatesVerification.SHA256`); `main.go` wires it into the ws server. `pool.ModelIdentityRequest/Verdict`; `Provider.ArtifactIdentity` session binding; `Registry.UpdateModelIdentities`. ws `verifyProviderModelIdentity`: primary-row path unchanged; otherwise `resolveArtifactIdentity` requires index `BoundTo(provider.CandidateCatalogSHA256)`, exact `Resolve(alg, hash)`, member key == admitted key (`ModelAdmissionCatalogModelKey`, else normalized model id). BYOM admission predicate/binding + `billing.RouteSnapshot` carry the six SPEC-047-R003 values (all-six-or-none; GGUF expected identity requires them; bound into the digest when present; recovered on the settlement recompute path); `byomSettlementPrereqsReady` accepts a verified member; `recordRouteSnapshot` binds the member pair as reported/expected and keeps the tier-2 row agreement on the ADMITTED row.
+2. CLI: `BYOMArtifactDigest.swift` — `GGUFArtifactDigest.compute` (streaming SHA-256, GGUF magic), `BYOMOllamaModelStore` (manifest → model layer → blob, filesystem only, name grammar, containment), `BYOMArtifactFileIdentity` (path/size/inode/mtime), `BYOMArtifactDigestCache` (0600 JSON keyed by file identity), `BYOMArtifactDigestResolver` (`knownDigest` never hashes; `computeDigest` hashes, fails closed on identity change, records). `BYOMDiscoveryEnvironment` gains `ollamaModelsRoot` / `artifactDigestCacheURL`. Ollama adapter passes the COMPUTED digest to the matcher's digest leg; `identity_state` = `catalog_matched` / `artifact_hash_available` / `runtime_reported`. `models evaluate` computes for an Ollama candidate; `models offer` recomputes and fills `artifact_hashes`.
+3. Docs: runbook section; CONFORMANCE R007 implementation/tests rows (state stays pending until journey evidence).
+
+## Invariants to challenge
+- Release binding: can the index ever be consulted for a provider admitted against a previous/compatible release (`CandidateCatalogSHA256` differs)? Can the index and the ws admitted catalog diverge (built from different bytes)?
+- Exactness: any path where a member match is case-insensitive, trimmed, or falls back to a row when the pair is unknown; any path where a GGUF pair verifies WITHOUT the feed (tier-2, legacy bridge, `hashVerifier` fallback, `RefreshTier2HashStatuses`, hello vs heartbeat asymmetry).
+- Key authority: `resolveArtifactIdentity` uses `ModelAdmissionCatalogModelKey` (provider-asserted at offer time, coordinator-recorded) — can a provider steer resolution to a different key's member? (SPEC-010-R007(c): a disagreeing asserted key MUST fail closed.)
+- Six values: every feed-derived binding carries all six (primary member included); `applyBYOMRouteSnapshotBinding` ↔ `RouteSnapshot.Value()` ↔ settlement loader recovery ↔ `Validate` agree; insert-digest == recompute-digest; a row-bound primary snapshot is byte-identical to before.
+- Settlement re-verification: missing / changed / cross-release / wrong-signer each fail; no current feed, manifest, or keyring consulted at settlement.
+- `Spec008HashStatus` on the artifact path is the session verdict (tier-2 holds only the row) — is that honest and covered?
+- Rule 6 / v1.6 byte-identity: with no artifact feed (index nil), every coordinator and CLI path is unchanged; with a feed, primary-row providers are unchanged.
+- CLI: the manifest layer digest is never reported; hashing only in deliberate commands; cache keyed by exact file identity; name grammar/containment cannot escape the store; `identity_state` semantics per SPEC-046-R003; no new discovery warning codes; offer `artifact_hashes` recomputed; a changed file fails the offer closed.
+- Tests: each rule above maps to a test that fails if the check is removed; name Swift/Go rules covered only incidentally.
+
+## Lanes to report (this pass is: {{LANE}})
+CRITICAL / HIGH / MEDIUM / LOW / INFO; merge bar 0 C / 0 H / 0 M.
+- code-reviewer: correctness of verifier/binding/snapshot code and CLI store/digest/cache; test adequacy.
+- security-reviewer: identity substitution, replay, key steering, release/signer confusion, settlement bypass, filesystem containment, secret hygiene.
+- architect: SPEC-010/023/047/046 fidelity, single identity authority across ws/buyer/billing, what slice 4 (coordinator decision path) needs from these shapes.
+
+End with `VERDICT: <N> CRITICAL / <N> HIGH / <N> MEDIUM / <N> LOW / <N> INFO`. Cite file:line. Do not invent issues to fill a lane.

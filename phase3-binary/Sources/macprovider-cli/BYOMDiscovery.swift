@@ -1265,6 +1265,7 @@ enum BYOMModelAdmissionError: Error, Equatable, CustomStringConvertible {
     case invalidCoordinatorURL
     case httpStatus(Int)
     case invalidStatusSchema
+    case artifactIdentityChanged
 
     var description: String {
         switch self {
@@ -1290,6 +1291,8 @@ enum BYOMModelAdmissionError: Error, Equatable, CustomStringConvertible {
             return "coordinator status does not contain a withdrawable BYOM admission tuple"
         case .invalidCoordinatorURL:
             return "invalid coordinator URL; use wss:// or https://"
+        case .artifactIdentityChanged:
+            return "the served model's artifact file changed while its digest was being computed; the offer was not submitted (SPEC-010-R007(a)) — re-run models offer once the local Ollama store is stable"
         case .httpStatus(let status):
             if status == 404 || status == 405 {
                 // A pre-BYOM coordinator has no SPEC-047 admission endpoints.
@@ -1330,6 +1333,7 @@ struct BYOMOfferSubmissionBuilder {
         admissionIdentity: Curve25519.Signing.PrivateKey,
         evaluationDigestSHA256: String?,
         requestedDisclosureClass: String,
+        artifactHashes: [String: String] = [:],
         now: Date = Date(),
         nonce: String = UUID().uuidString.lowercased(),
         idempotencyKey: String = UUID().uuidString.lowercased(),
@@ -1359,7 +1363,7 @@ struct BYOMOfferSubmissionBuilder {
             catalogModelKey: candidate.catalogModelKey ?? "",
             discoveryDigestSHA256: try discoveryDigest(candidate),
             evaluationDigestSHA256: evaluationDigest,
-            artifactHashes: [:],
+            artifactHashes: artifactHashes,
             advisoryCapabilities: BYOMOfferSubmitRequestWire.AdvisoryCapabilities(candidate.capabilities),
             fitEvidenceSource: "local_discovery",
             localReadiness: candidate.readinessState,
@@ -1780,9 +1784,30 @@ struct BYOMModelAdmissionRuntime: Sendable {
             candidate: candidate,
             admissionIdentity: identity,
             evaluationDigestSHA256: evaluationDigestSHA256,
-            requestedDisclosureClass: requestedDisclosureClass
+            requestedDisclosureClass: requestedDisclosureClass,
+            artifactHashes: try Self.artifactHashes(for: candidate, environment: environment)
         )
         return try await client.submitOffer(package, bearerToken: bearer)
+    }
+
+    /// SPEC-010 v1.7 R007(a): an offer is a report that binds identity, so the
+    /// GGUF digest of an Ollama-served candidate is RECOMPUTED over the blob's
+    /// complete bytes here — never read from the cache and never adopted from
+    /// the runtime. An unresolvable blob yields no artifact evidence (the
+    /// offer proceeds identity-less, as v0.1 did); a file that changes while
+    /// hashing fails the offer closed.
+    static func artifactHashes(for candidate: BYOMDiscoveryWire.Candidate, environment: BYOMDiscoveryEnvironment) throws -> [String: String] {
+        guard candidate.runtimeSource == "ollama_loopback" else { return [:] }
+        do {
+            let digest = try environment.artifactDigests.computeDigest(forOllamaModel: candidate.servedModelRef)
+            return [ModelArtifactIdentity.ggufFileV1: digest]
+        } catch BYOMArtifactDigestError.unresolvedBlob {
+            return [:]
+        } catch BYOMArtifactDigestError.notGGUF {
+            return [:]
+        } catch {
+            throw BYOMModelAdmissionError.artifactIdentityChanged
+        }
     }
 
     func status(providerID: String, target: String) async throws -> BYOMAdmissionStatusWire {
@@ -1994,17 +2019,29 @@ struct BYOMDiscoveryEnvironment: Sendable {
     /// OpenAI-compatible server has no well-known port, so this adapter has no
     /// default and stays unattempted until the operator names an origin.
     let openAICompatibleOrigin: String?
+    /// SPEC-010 v1.7 R007(a): the local Ollama store the served GGUF blob is
+    /// resolved from, and the digest cache keyed by exact file identity.
+    let ollamaModelsRoot: URL
+    let artifactDigestCacheURL: URL
 
     init(
         namespaceURL: URL,
         mlxCacheRoot: URL,
         ollamaOrigin: String?,
-        openAICompatibleOrigin: String? = nil
+        openAICompatibleOrigin: String? = nil,
+        ollamaModelsRoot: URL? = nil,
+        artifactDigestCacheURL: URL? = nil
     ) {
         self.namespaceURL = namespaceURL
         self.mlxCacheRoot = mlxCacheRoot
         self.ollamaOrigin = ollamaOrigin
         self.openAICompatibleOrigin = openAICompatibleOrigin
+        self.ollamaModelsRoot = ollamaModelsRoot ?? BYOMOllamaModelStore.defaultRoot()
+        self.artifactDigestCacheURL = artifactDigestCacheURL ?? BYOMArtifactDigestCache.defaultURL()
+    }
+
+    var artifactDigests: BYOMArtifactDigestResolver {
+        BYOMArtifactDigestResolver(store: BYOMOllamaModelStore(root: ollamaModelsRoot), cache: BYOMArtifactDigestCache(url: artifactDigestCacheURL))
     }
 
     static func production(
@@ -2019,7 +2056,9 @@ struct BYOMDiscoveryEnvironment: Sendable {
             namespaceURL: namespacePath.map(URL.init(fileURLWithPath:)) ?? defaultNamespaceURL(homeDirectory: homeDirectory),
             mlxCacheRoot: mlxCacheDir.map(URL.init(fileURLWithPath:)) ?? defaultMLXCacheRoot(environment: environment, homeDirectory: homeDirectory),
             ollamaOrigin: ollamaOrigin,
-            openAICompatibleOrigin: openAICompatibleOrigin
+            openAICompatibleOrigin: openAICompatibleOrigin,
+            ollamaModelsRoot: BYOMOllamaModelStore.defaultRoot(environment: environment, homeDirectory: homeDirectory),
+            artifactDigestCacheURL: BYOMArtifactDigestCache.defaultURL(homeDirectory: homeDirectory)
         )
     }
 
@@ -2200,7 +2239,8 @@ struct BYOMDiscoveryRunner {
                 namespace: namespace.bytes,
                 namespaceWarnings: namespace.warnings,
                 catalogMatcher: catalog,
-                httpClient: httpClient
+                httpClient: httpClient,
+                artifactDigests: environment.artifactDigests
             ).discover()
             adapters.append(ollama.adapter)
             candidates.append(contentsOf: ollama.candidates)
@@ -2343,6 +2383,14 @@ struct BYOMEvaluationRunner: Sendable {
                 warnings: warnings,
                 guidance: evaluationGuidance(health: "blocked", warnings: Set(warnings))
             )
+        }
+        // SPEC-010 v1.7 R007(a): `models evaluate` is a deliberate command, so
+        // it is where the GGUF digest of an Ollama-served candidate is computed
+        // over the blob's complete bytes and recorded for the exact file
+        // identity; discovery then reports `artifact_hash_available` / matches
+        // by digest without hashing. Failure here is not an evaluation failure.
+        if candidate.runtimeSource == "ollama_loopback" {
+            _ = try? environment.artifactDigests.computeDigest(forOllamaModel: candidate.servedModelRef)
         }
 
         return await evaluateOpenAICompatible(
@@ -3497,19 +3545,25 @@ struct BYOMOllamaDiscovery: Sendable {
     private let namespaceWarnings: [BYOMDiscoveryWarning]
     private let catalogMatcher: BYOMCatalogMatcher
     private let httpClient: any BYOMDiscoveryHTTPClient
+    /// SPEC-010 v1.7 R007(a): digests already computed over the served blob's
+    /// exact bytes; discovery never hashes, it only reads what evaluate /
+    /// offer recorded for the same file identity.
+    private let artifactDigests: BYOMArtifactDigestResolver?
 
     init(
         origin: String,
         namespace: Data?,
         namespaceWarnings: [BYOMDiscoveryWarning] = [],
         catalogMatcher: BYOMCatalogMatcher,
-        httpClient: any BYOMDiscoveryHTTPClient
+        httpClient: any BYOMDiscoveryHTTPClient,
+        artifactDigests: BYOMArtifactDigestResolver? = nil
     ) {
         self.origin = origin
         self.namespace = namespace
         self.namespaceWarnings = namespaceWarnings
         self.catalogMatcher = catalogMatcher
         self.httpClient = httpClient
+        self.artifactDigests = artifactDigests
     }
 
     func discover() async -> (adapter: BYOMDiscoveryWire.Adapter, candidates: [BYOMDiscoveryWire.Candidate]) {
@@ -3590,7 +3644,10 @@ struct BYOMOllamaDiscovery: Sendable {
             runtimeSource: "ollama_loopback",
             servedModelRef: servedModelRef
         )
-        let catalogKey = catalogMatcher.catalogKey(for: model.name, runtimeSource: "ollama_loopback")
+        // The GGUF artifact leg matches only together with the layer digest
+        // the CLI computed over the served blob (never the runtime's report).
+        let computedDigest = artifactDigests?.knownDigest(forOllamaModel: model.name)
+        let catalogKey = catalogMatcher.catalogKey(for: model.name, runtimeSource: "ollama_loopback", digest: computedDigest.map { "sha256:" + $0 })
         var warnings = Set((namespaceWarnings + idWarnings + model.warningCodes + [.capabilityUnevaluated, .evaluationRequired]).map(\.rawValue))
         if catalogKey != nil {
             warnings.insert(BYOMDiscoveryWarning.catalogMatchUnverified.rawValue)
@@ -3608,7 +3665,7 @@ struct BYOMOllamaDiscovery: Sendable {
             displayName: BYOMDiscoveryPrivacy.displayName(from: model.name),
             servedModelRef: servedModelRef,
             catalogModelKey: catalogKey,
-            identityState: catalogKey == nil ? "runtime_reported" : "catalog_matched",
+            identityState: catalogKey != nil ? "catalog_matched" : (computedDigest != nil ? "artifact_hash_available" : "runtime_reported"),
             locality: "loopback_runtime",
             estimatedGB: ModelFit.estimateWeightSizeGB(modelID: model.name).map(Double.init),
             contextWindowTokens: nil,
