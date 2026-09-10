@@ -256,11 +256,16 @@ func (s *Server) modelAdmissionBindingFor(candidate ModelAdmissionEvent) pool.Mo
 
 func (s *Server) setModelAdmissionBindingLocked(providerID string, binding *pool.ModelAdmissionBinding, section *providerSection) {
 	// A refresh that derives the binding already in place is not a
-	// mutation: the generation stays, so a route attempt captured before a
-	// no-op heartbeat still compares equal.
+	// mutation: the section generation is not advanced (a route attempt
+	// captured before a no-op heartbeat still compares equal) but the
+	// session is re-stamped with the CURRENT section generation, which an
+	// append for any of the provider's candidates has already advanced —
+	// otherwise the stamp would fall behind the section and every later
+	// route attempt would fail closed until the next real mutation.
 	if current, ok := s.pool.Resolve(providerID, ""); ok {
 		existing, bound := current.ModelAdmissionBinding()
 		if (!bound && binding == nil) || (bound && binding != nil && existing == *binding) {
+			s.pool.SetModelAdmissionBinding(providerID, binding, section.generation.Load())
 			return
 		}
 	}

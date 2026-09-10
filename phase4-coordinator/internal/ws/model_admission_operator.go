@@ -201,12 +201,31 @@ func (s *Server) authorizedModelAdmissionOperator(w http.ResponseWriter, r *http
 	return actor, true
 }
 
-// operatorDualControlAvailable is the predicate `/admin/hardware-trust/approve`
-// uses: at least two per-actor entries with valid actor ids and non-empty,
-// pairwise-DISTINCT secrets. Distinct actor ids sharing one secret are one
-// principal and cannot dual-control anything.
+// operatorDualControlAvailable: dual control needs at least two entries
+// that can actually act on this surface — normalized actor ids matching the
+// SPEC-047 actor grammar, DISTINCT after normalization (`alice` and
+// `operator:alice` are one actor), with non-empty, pairwise-distinct
+// secrets (distinct ids sharing one secret are one principal). Entries that
+// cannot authenticate here do not count.
 func (s *Server) operatorDualControlAvailable() bool {
-	return s.providerAuthPolicyDualControlAvailable()
+	actors := map[string]struct{}{}
+	secrets := map[string]struct{}{}
+	for actorID, secret := range s.cfg.Auth.OperatorKeys {
+		actor := normalizedOperatorActor(actorID)
+		if !modelAdmissionOperatorActorPattern.MatchString(actor) {
+			continue
+		}
+		secret = strings.TrimSpace(secret)
+		if secret == "" {
+			return false
+		}
+		if _, dup := secrets[secret]; dup {
+			return false
+		}
+		secrets[secret] = struct{}{}
+		actors[actor] = struct{}{}
+	}
+	return len(actors) >= 2 && len(secrets) == len(actors)
 }
 
 // ---- decision response

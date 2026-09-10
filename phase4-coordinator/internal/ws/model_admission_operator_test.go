@@ -172,7 +172,7 @@ func TestModelAdmissionOperatorDecisionPath(t *testing.T) {
 	if code, resp := c.do(http.MethodPost, decisions, "alice-secret", decisionRequest("p1", offer.CandidateID, "settlement_capable", "operator_settle", pricedHead, "k4")); code != http.StatusConflict || errorCode(resp) != "dual_control_unavailable" {
 		t.Fatalf("dual control unavailable: %d %v", code, resp)
 	}
-	if _, found, _ := s.modelAdmissions.PendingModelAdmissionDecisionByRequest(t.Context(), "p1", offer.CandidateID, "operator_decision_"+offer.CandidateID+"_k4"); found {
+	if _, found, _ := s.modelAdmissions.PendingModelAdmissionDecisionByRequest(t.Context(), "p1", offer.CandidateID, modelAdmissionDecisionRequest{CandidateID: offer.CandidateID, IdempotencyKey: "k4"}.requestID()); found {
 		t.Fatal("no pending record may exist after dual_control_unavailable")
 	}
 	s.cfg.Auth.OperatorKeys["bob"] = "bob-secret"
@@ -348,6 +348,17 @@ func TestModelAdmissionOperatorDualControlSecretsAndReservedKeys(t *testing.T) {
 	if code, resp := c.do(http.MethodPost, decisions, "carol-secret", decisionRequest("p1", offer.CandidateID, "settlement_capable", "operator_settle", pricedHead, "k2")); code != http.StatusConflict || errorCode(resp) != "dual_control_unavailable" {
 		t.Fatalf("duplicated secrets must not count as dual control: %d %v", code, resp)
 	}
+	// Aliases that normalize to one actor, or an entry the SPEC actor
+	// grammar rejects, do not count toward dual control either.
+	for name, keys := range map[string]map[string]string{
+		"alias":         {"alice": "alice-secret", "operator:alice": "alias-secret"},
+		"invalid actor": {"alice": "alice-secret", "Bob!": "bob-secret"},
+	} {
+		s.cfg.Auth.OperatorKeys = keys
+		if code, resp := c.do(http.MethodPost, decisions, "alice-secret", decisionRequest("p1", offer.CandidateID, "settlement_capable", "operator_settle", pricedHead, "k2-"+strings.ReplaceAll(name, " ", "-"))); code != http.StatusConflict || errorCode(resp) != "dual_control_unavailable" {
+			t.Fatalf("%s: %d %v", name, code, resp)
+		}
+	}
 	// Distinct secrets: pending; then an expired record is pending_expired.
 	s.cfg.Auth.OperatorKeys = map[string]string{"alice": "alice-secret", "bob": "bob-secret"}
 	code, pending := c.do(http.MethodPost, decisions, "alice-secret", decisionRequest("p1", offer.CandidateID, "settlement_capable", "operator_settle", pricedHead, "k3"))
@@ -392,5 +403,13 @@ func TestModelAdmissionOperatorDualControlSecretsAndReservedKeys(t *testing.T) {
 	after, _ := s.pool.Resolve("p1", "")
 	if after.ModelAdmissionBindingGeneration != before.ModelAdmissionBindingGeneration || s.ModelAdmissionBindingGeneration("p1") != before.ModelAdmissionBindingGeneration {
 		t.Fatalf("no-op refresh must not advance the binding generation: %d → %d", before.ModelAdmissionBindingGeneration, after.ModelAdmissionBindingGeneration)
+	}
+	// An append for an UNRELATED candidate advances the section generation;
+	// the unchanged binding is re-stamped with it, so a route resolved after
+	// the append compares equal while one captured before it fails closed.
+	f.offer(t, "p1", "z", "ollama_loopback", map[string]string{})
+	stamped, _ := s.pool.Resolve("p1", "")
+	if stamped.ModelAdmissionCandidateID != offer.CandidateID || stamped.ModelAdmissionBindingGeneration != s.ModelAdmissionBindingGeneration("p1") || stamped.ModelAdmissionBindingGeneration == before.ModelAdmissionBindingGeneration {
+		t.Fatalf("unchanged binding must be re-stamped with the advanced section generation: %+v vs %d", stamped.ModelAdmissionBindingGeneration, s.ModelAdmissionBindingGeneration("p1"))
 	}
 }
