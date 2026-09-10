@@ -185,13 +185,20 @@ func (s *Server) sharedOperatorKeyBearer(r *http.Request) bool {
 	return shared != "" && auth.OperatorOnlyBearerMatches(r.Header, shared)
 }
 
-// activeProviderTokenSecret reports whether a secret is an ACTIVE provider
-// token (read-only validation, no last-used stamp): a provider credential
-// is never an operator credential, whatever an operator_keys entry says.
-func (s *Server) activeProviderTokenSecret(ctx context.Context, secret string) bool {
+// secretIsNotAProviderToken reports whether a secret is POSITIVELY known not
+// to be an active provider token: a provider credential is never an operator
+// credential, whatever an operator_keys entry says. With a token authority
+// configured, classification must succeed (read-only validation, no
+// last-used stamp); an authority without read-only validation, a backend
+// error or a timeout is "unknown" and fails closed. Without a token
+// authority there is no provider credential class to confuse.
+func (s *Server) secretIsNotAProviderToken(ctx context.Context, secret string) bool {
 	secret = strings.TrimSpace(secret)
-	if secret == "" || s.tokens == nil {
+	if secret == "" {
 		return false
+	}
+	if s.tokens == nil {
+		return true
 	}
 	readOnly, ok := s.tokens.(computeIntegrityReadOnlyTokenValidator)
 	if !ok {
@@ -200,7 +207,7 @@ func (s *Server) activeProviderTokenSecret(ctx context.Context, secret string) b
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 	_, valid, err := readOnly.ValidateTokenReadOnly(ctx, secret)
-	return err == nil && valid
+	return err == nil && !valid
 }
 
 func (s *Server) allowModelAdmissionOperatorAttempt(actor string, r *http.Request) bool {
@@ -219,7 +226,7 @@ func (s *Server) authorizedModelAdmissionOperator(w http.ResponseWriter, r *http
 	// a bearer equal to it is refused BEFORE any named match, so a named
 	// entry that (mis)configures the same secret cannot lend the shared key
 	// an attribution.
-	if s.sharedOperatorKeyBearer(r) || s.activeProviderTokenSecret(r.Context(), bearerToken(r.Header.Get("Authorization"))) {
+	if s.sharedOperatorKeyBearer(r) || !s.secretIsNotAProviderToken(r.Context(), bearerToken(r.Header.Get("Authorization"))) {
 		writeJSON(w, http.StatusUnauthorized, modelAdmissionError("invalid_operator_token", "unauthorized"))
 		return "", false
 	}
@@ -258,10 +265,10 @@ func (s *Server) operatorDualControlAvailable() bool {
 			continue
 		}
 		secret = strings.TrimSpace(secret)
-		// An entry whose secret is the shared operator_key or an active
-		// provider token can never authenticate here (both are refused
-		// before the named match).
-		if secret == "" || secretCount[secret] != 1 || (shared != "" && secret == shared) || s.activeProviderTokenSecret(context.Background(), secret) {
+		// An entry whose secret is the shared operator_key, an active
+		// provider token, or one the token authority cannot classify can
+		// never authenticate here (all are refused before the named match).
+		if secret == "" || secretCount[secret] != 1 || (shared != "" && secret == shared) || !s.secretIsNotAProviderToken(context.Background(), secret) {
 			continue
 		}
 		if _, dup := actors[actor]; dup {

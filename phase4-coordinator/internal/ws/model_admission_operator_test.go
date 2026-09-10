@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -384,6 +385,22 @@ func TestModelAdmissionOperatorDualControlSecretsAndReservedKeys(t *testing.T) {
 	if code, resp := c.do(http.MethodPost, decisions, "bob-secret", decisionRequest("p1", offer.CandidateID, "settlement_capable", "operator_settle", pricedHead, "k2-provider-bob")); code != http.StatusConflict || errorCode(resp) != "dual_control_unavailable" {
 		t.Fatalf("entry equal to a provider token must not count toward dual control: %d %v", code, resp)
 	}
+	// Classification that cannot be performed fails closed: a token
+	// authority without read-only validation, or one that errors, refuses
+	// the operator bearer and makes dual control unavailable.
+	for name, authority := range map[string]TokenValidator{
+		"no read-only validation": noReadOnlyProviderTokens{},
+		"backend error":           erroringProviderTokens{},
+	} {
+		s.tokens = authority
+		s.cfg.Auth.OperatorKeys = map[string]string{"alice": "alice-secret", "bob": "bob-secret"}
+		if code, resp := c.do(http.MethodPost, decisions, "alice-secret", decisionRequest("p1", offer.CandidateID, "settlement_capable", "operator_settle", pricedHead, "k2-"+strings.ReplaceAll(name, " ", "-"))); code != http.StatusUnauthorized || errorCode(resp) != "invalid_operator_token" {
+			t.Fatalf("%s: unclassifiable bearer must be refused: %d %v", name, code, resp)
+		}
+		if s.operatorDualControlAvailable() {
+			t.Fatalf("%s: unclassifiable entries must not count toward dual control", name)
+		}
+	}
 	s.tokens = nil
 	s.cfg.Auth.OperatorKey = "shared-secret"
 	// Distinct secrets: pending; then an expired record is pending_expired.
@@ -454,4 +471,22 @@ func (r readOnlyProviderTokens) ValidateAndMarkTokenUsed(ctx context.Context, to
 }
 func (r readOnlyProviderTokens) ValidateTokenReadOnly(ctx context.Context, token string) (string, bool, error) {
 	return r.ValidateToken(ctx, token)
+}
+
+// noReadOnlyProviderTokens is a token authority without read-only validation.
+type noReadOnlyProviderTokens struct{}
+
+func (noReadOnlyProviderTokens) ValidateToken(context.Context, string) (string, bool, error) {
+	return "", false, nil
+}
+func (noReadOnlyProviderTokens) MarkTokenUsed(context.Context, string) error { return nil }
+func (noReadOnlyProviderTokens) ValidateAndMarkTokenUsed(context.Context, string) (string, bool, error) {
+	return "", false, nil
+}
+
+// erroringProviderTokens is a token authority whose backend fails.
+type erroringProviderTokens struct{ noReadOnlyProviderTokens }
+
+func (erroringProviderTokens) ValidateTokenReadOnly(context.Context, string) (string, bool, error) {
+	return "", false, errors.New("token store unavailable")
 }
