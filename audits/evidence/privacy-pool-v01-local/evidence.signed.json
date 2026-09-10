@@ -1,0 +1,46 @@
+{
+  "schema_version": "macprovider.relay-blind-local-test-evidence-envelope.v1",
+  "signature": {
+    "algorithm": "ecdsa-p256-sha256",
+    "key_class": "ephemeral_test_only",
+    "payload_sha256": "e3fb4a5f6ed4cb3264cc13a97e07ea4fb6dea3e6738f8ef3d305756e8cbbbefc",
+    "public_key_sha256": "9ace2d0134965396f5e77c9023747cca1dbcab0bec0e287b7d826b3d008a12f8",
+    "value_base64": "MEQCIGIxM4B50eukD2mXTXWS9DKWjiTktApK4CWLB8M6fiKoAiAeXy8d2yIa4wVgllc9supvyOx3QUvlvQ/O3MmUq2v7hg=="
+  },
+  "signed": {
+    "captured_at": "2026-09-10T01:20:16Z",
+    "classification": "ephemeral_test_only",
+    "covered_journeys": [
+      "real_local_swift_nonstream",
+      "real_local_swift_stream",
+      "buyer_cancel_after_first_encrypted_chunk",
+      "provider_disconnect_before_dispatch",
+      "provider_disconnect_after_first_encrypted_chunk",
+      "provider_process_crash_after_first_encrypted_chunk_and_replay_rejection",
+      "provider_rejects_underdeclared_input_bound",
+      "provider_rejects_tampered_aead",
+      "provider_reconnect_with_persisted_key_and_journal",
+      "gateway_restart_replay_rejection",
+      "default_off_mixed_version_and_unsupported_provider_fail_closed",
+      "relay_log_plaintext_leak_scan"
+    ],
+    "limitations": [
+      "deterministic test model runtime; no production model weights",
+      "loopback gateway and coordinator only",
+      "no physical hardware, notarization, promotion, or production claims"
+    ],
+    "physical_hardware_claimed": false,
+    "production_funds_used": false,
+    "production_services_contacted": false,
+    "promotion_ready": false,
+    "repository": {
+      "commit": "956498f3fee52988d37d777e7f2fe0c2a8381676",
+      "working_tree_content_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "result": "pass",
+    "schema_version": "macprovider.relay-blind-local-test-evidence.v1",
+    "signer_trust": "self_attested_ephemeral_test_key",
+    "test_command": "go test -json -run '^TestRelayBlind' -race -count=1 -timeout 4m",
+    "test_log_sha256": "0a0dcbebcf90b66758fba4e25f0973eab4b9ead64b89be0e951d54a8e0f45594"
+  }
+}

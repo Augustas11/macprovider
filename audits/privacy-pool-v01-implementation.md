@@ -24,21 +24,24 @@ Commands were executed in the isolated task worktree. Interrupted runs are not c
 | Gateway race tests across crypto, client, router, SQLite, settlement journal | Pass |
 | `make lint-coordinator` with pinned golangci-lint v2.12.2 | Pass, zero issues |
 | `make vet` (coordinator, gateway, integration) | Pass |
+| `make test-dist` | Pass, complete distribution/script suite |
 | `python3 scripts/check_spec_governance.py --base-ref origin/main` | Pass |
-| `make test-integration` | Pass, all integration packages |
+| `make test-integration` | Pass, all packages; two opt-in SDK tests skipped (below) |
 | Integration `go test -run '^TestRelayBlind' -race -count=1 -timeout 5m` | Pass |
 | `bash scripts/test-relay-blind-parity.sh` | Pass |
-| Swift `RelayBlindProviderTests` | Pass, 13 tests |
-| Swift InferenceRelay, Tier2, and ModelRuntime adjacent selections | Pass, 83 tests |
+| `swift test --filter RelayBlindProviderTests` | Pass, 13 tests |
+| `swift test --filter 'InferenceRelay\|Tier2ProviderSession\|ModelRuntime'` | Pass, 83 selected tests; two overlap the provider selection, giving 94 unique passing tests combined |
 | `python3 -m unittest scripts.tests.test_relay_blind_local_journey` | Pass, 3 tests |
 | Full Swift suite | Not green: CoordinatorClient selection has 27 failures, independently reproduced on clean origin/main 6006f3135c106e7e13eb50171fcdf59f5cc54231 |
 | Swift suite excluding CoordinatorClientTests | Interrupted during DoctorCommandTests after extended silence; not passing evidence |
+
+The relay-only signed JSON log records 18 passed, zero skipped, and zero failed test actions. The broader integration run skips `TestSpec015SDKCompatAgainstGateway` (`SPEC015_SDK_COMPAT_GATEWAY` unset) and `TestSpec015SDKCompatLiveRunner` (`SPEC015_SDK_COMPAT_LIVE` and live URL unset). Docker is not exercised by this integration target; no Docker result is claimed.
 
 The real Swift process-crash test kills the provider after its first chunk, restarts with the same persisted identity/session, replays the old dispatch, and proves no second output, one unknown-postdispatch journal entry, and exactly one settlement. Six durable provider crash cuts separately cover claim, decrypt, validation, partial output, terminal-send loss, and terminal-update loss. AEAD tampering reaches the Swift provider and produces typed rejection, one burned terminal claim, zero charge, and cleared hold. Tests cover cancellation, pre/post-dispatch disconnect, reconnect, cap underdeclaration/overreporting, replay/restart/concurrency, pin substitution, low-order keys, malformed envelopes, pool rejection, and rollback.
 
 ## Evidence boundaries
 
-The signed local journey artifact is `ephemeral_test_only`, signed with an ephemeral P-256 test key that is deleted after capture. It binds the test log and source snapshot, verifies required test names actually passed, and cannot promote SPEC conformance. The final local artifact location is reported in the PR. No production identity signature or hardware journey is fabricated.
+The signed local journey artifact is `ephemeral_test_only`, signed with an ephemeral P-256 test key that is deleted after capture. It binds the test log and source snapshot, verifies required test names actually passed, and cannot promote SPEC conformance. The verified artifact and public test key are checked in under [local test evidence](evidence/privacy-pool-v01-local/README.md), bound to clean commit `956498f3fee52988d37d777e7f2fe0c2a8381676`; only evidence/documentation changes follow it. No production identity signature or hardware journey is fabricated.
 
 A separate cached Llama-3.2-3B-Instruct-4bit self-test passed on local Apple M5/arm64 using the real MLX Metal runtime (four-token bound, about 1.61 tokens/second). It used no model download or external service and emitted no prompt/generated text in reported evidence. This proves local model runtime operation only. The complete buyer/gateway/coordinator/Swift encrypted journey uses a deterministic backend, not that model.
 
