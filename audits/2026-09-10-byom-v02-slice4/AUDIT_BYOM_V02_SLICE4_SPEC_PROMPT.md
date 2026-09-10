@@ -28,3 +28,6 @@ The anchored loop closed at R4; an independent cold-context round (record `AUDIT
 
 ## CLOSURE PASS 2 (code-reviewer + architect; security at bar)
 Closure pass 1 (code 0/2H/3M/1L, security 0/0/0/0, architect 0/3H/1M) fixed; record `AUDIT_BYOM_V02_SLICE4_SPEC_CLOSURE1.md`. Shapes to re-challenge on the FULL `git diff origin/main -- specs/`: release read-write lock + `evaluated_release_generation` on decisions + `validated_release_generation` stamped by the sweeps and required at route time; per-PROVIDER section with a binding generation; `allowed_runtime_sources` at match/decision/session/reload; the closed dual-control protocol; precedence scoping; actor readback through the listing; R008's synchronous-rejection cases. Do not re-report an item from any record unless its fix is wrong or incomplete.
+
+## CLOSURE PASS 3 (code-reviewer + architect; security at bar)
+Closure pass 2 (code 0/1H/1M, architect 0/1H/2M/1L/1I) fixed; record `AUDIT_BYOM_V02_SLICE4_SPEC_CLOSURE2.md`. Re-challenge on the FULL `git diff origin/main -- specs/`: provider-scoped section wording everywhere; approval replay namespace; `dual_control_unavailable`; inadmissible members not recorded; R006(c) re-evaluating (i)–(iii) with the Tier-2 swap allowed to precede the locked swap. Do not re-report an item from any record unless its fix is wrong or incomplete.
