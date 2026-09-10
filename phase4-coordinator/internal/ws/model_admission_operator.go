@@ -208,24 +208,32 @@ func (s *Server) authorizedModelAdmissionOperator(w http.ResponseWriter, r *http
 // secrets (distinct ids sharing one secret are one principal). Entries that
 // cannot authenticate here do not count.
 func (s *Server) operatorDualControlAvailable() bool {
+	// Secret multiplicity is counted over EVERY entry (authentication
+	// compares the bearer against all of them and refuses an ambiguous
+	// match), so an entry that cannot act here can still make another
+	// actor's credential unusable.
+	secretCount := map[string]int{}
+	for _, secret := range s.cfg.Auth.OperatorKeys {
+		secretCount[strings.TrimSpace(secret)]++
+	}
 	actors := map[string]struct{}{}
-	secrets := map[string]struct{}{}
 	for actorID, secret := range s.cfg.Auth.OperatorKeys {
 		actor := normalizedOperatorActor(actorID)
 		if !modelAdmissionOperatorActorPattern.MatchString(actor) {
 			continue
 		}
 		secret = strings.TrimSpace(secret)
-		if secret == "" {
+		if secret == "" || secretCount[secret] != 1 {
+			continue
+		}
+		if _, dup := actors[actor]; dup {
+			// Two entries authenticate as one actor: neither is a distinct
+			// principal.
 			return false
 		}
-		if _, dup := secrets[secret]; dup {
-			return false
-		}
-		secrets[secret] = struct{}{}
 		actors[actor] = struct{}{}
 	}
-	return len(actors) >= 2 && len(secrets) == len(actors)
+	return len(actors) >= 2
 }
 
 // ---- decision response

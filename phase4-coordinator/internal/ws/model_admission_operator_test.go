@@ -350,12 +350,16 @@ func TestModelAdmissionOperatorDualControlSecretsAndReservedKeys(t *testing.T) {
 	}
 	// Aliases that normalize to one actor, or an entry the SPEC actor
 	// grammar rejects, do not count toward dual control either.
-	for name, keys := range map[string]map[string]string{
-		"alias":         {"alice": "alice-secret", "operator:alice": "alias-secret"},
-		"invalid actor": {"alice": "alice-secret", "Bob!": "bob-secret"},
+	for name, tc := range map[string]struct {
+		keys   map[string]string
+		bearer string
+	}{
+		"alias":                    {map[string]string{"alice": "alice-secret", "operator:alice": "alias-secret"}, "alice-secret"},
+		"invalid actor":            {map[string]string{"alice": "alice-secret", "Bob!": "bob-secret"}, "alice-secret"},
+		"invalid actor shares key": {map[string]string{"alice": "shared", "Bob!": "shared", "carol": "carol-secret"}, "carol-secret"},
 	} {
-		s.cfg.Auth.OperatorKeys = keys
-		if code, resp := c.do(http.MethodPost, decisions, "alice-secret", decisionRequest("p1", offer.CandidateID, "settlement_capable", "operator_settle", pricedHead, "k2-"+strings.ReplaceAll(name, " ", "-"))); code != http.StatusConflict || errorCode(resp) != "dual_control_unavailable" {
+		s.cfg.Auth.OperatorKeys = tc.keys
+		if code, resp := c.do(http.MethodPost, decisions, tc.bearer, decisionRequest("p1", offer.CandidateID, "settlement_capable", "operator_settle", pricedHead, "k2-"+strings.ReplaceAll(name, " ", "-"))); code != http.StatusConflict || errorCode(resp) != "dual_control_unavailable" {
 			t.Fatalf("%s: %d %v", name, code, resp)
 		}
 	}
