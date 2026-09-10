@@ -85,6 +85,50 @@ final class ControlSocketClientTests: XCTestCase {
             await client.close()
         }
     }
+
+    func testOneFrameTimeoutClosesShortLivedConnectionAndRetryUsesFreshConnection() async throws {
+        let stalledFixture = try UnixSocketFixture()
+        defer { stalledFixture.close() }
+        let stalledClient = ControlSocketClient(socketPath: stalledFixture.path)
+        let stalledAccept = Task.detached { try stalledFixture.accept() }
+        try await stalledClient.connect(timeout: 1)
+        let stalledPeer = try await stalledAccept.value
+        defer { Darwin.close(stalledPeer) }
+        try await stalledClient.send(.rewardAuditRequest(beforeID: nil))
+
+        do {
+            _ = try await stalledClient.receiveOne(timeout: 0.05)
+            XCTFail("expected bounded history timeout")
+        } catch let error as ControlSocketClientRequestError {
+            XCTAssertEqual(error, .timedOut)
+        }
+        let stalledClientOpen = await stalledClient.hasOpenFileDescriptorForTesting()
+        XCTAssertFalse(stalledClientOpen)
+
+        let retryFixture = try UnixSocketFixture()
+        defer { retryFixture.close() }
+        let retryClient = ControlSocketClient(socketPath: retryFixture.path)
+        let retryAccept = Task.detached { try retryFixture.accept() }
+        try await retryClient.connect(timeout: 1)
+        let retryPeer = try await retryAccept.value
+        defer { Darwin.close(retryPeer) }
+        var response = try ControlCodec.encode(
+            .rewardAuditError(code: .temporarilyUnavailable, retryAfterSeconds: nil)
+        )
+        response.append(0x0A)
+        try response.withUnsafeBytes { raw in
+            guard Darwin.write(retryPeer, raw.baseAddress, raw.count) == raw.count else {
+                throw POSIXError(.EIO)
+            }
+        }
+
+        let retryResponse = try await retryClient.receiveOne(timeout: 1)
+        XCTAssertEqual(
+            retryResponse,
+            .rewardAuditError(code: .temporarilyUnavailable, retryAfterSeconds: nil)
+        )
+        await retryClient.close()
+    }
 }
 
 private final class UnixSocketFixture: @unchecked Sendable {

@@ -641,16 +641,18 @@ func main() {
 		wsOpts = append(wsOpts, providerws.WithSupervisorEventSink(onboardingStore))
 	}
 	var autotuneEvidenceStore autotune.EvidenceStore
-	if autotuneCatalog != nil && onboardingStore != nil && onboardingStore.DB() != nil {
+	if onboardingStore != nil && onboardingStore.DB() != nil {
 		autotuneEvidenceStore = autotune.NewPGEvidenceStore(onboardingStore.DB())
-		wsOpts = append(wsOpts, providerws.WithAutotuneEvidenceStore(autotuneEvidenceStore))
+		if autotuneCatalog != nil {
+			wsOpts = append(wsOpts, providerws.WithAutotuneEvidenceStore(autotuneEvidenceStore))
+		}
 	}
-	if autotuneEvidenceStore != nil && cfg.ProofOfWeights.AutotuneEvidenceTTLDays > 0 {
+	if autotuneEvidenceStore != nil && autotuneCatalog != nil && cfg.ProofOfWeights.AutotuneEvidenceTTLDays > 0 {
 		logger.Info().
 			Int("autotune_evidence_ttl_days", cfg.ProofOfWeights.AutotuneEvidenceTTLDays).
 			Str("autotune_catalog_version", autotuneCatalog.Version).
 			Msg("proof-of-weights admission cap observation enabled")
-	} else if autotuneEvidenceStore != nil {
+	} else if autotuneEvidenceStore != nil && autotuneCatalog != nil {
 		logger.Info().
 			Int("autotune_evidence_ttl_days", cfg.ProofOfWeights.AutotuneEvidenceTTLDays).
 			Msg("proof-of-weights admission cap observation disabled because evidence TTL is not positive")
@@ -1246,8 +1248,8 @@ func main() {
 		register,
 		hardwareEvidence,
 		enrollHandler,
-		providerWalletHandler(cfg, tokenStore, rewardsDB, payoutReadDB, rewards.NewPoolHeartbeatBridge(wsServer.PoolSnapshot), rewardAuditLimiter),
-		malibuAccrualHandler(cfg, tokenStore, rewardsDB, payoutReadDB, rewards.NewPoolHeartbeatBridge(wsServer.PoolSnapshot)),
+		providerWalletHandler(cfg, tokenStore, rewardsDB, payoutReadDB, rewards.NewPoolHeartbeatBridge(wsServer.PoolSnapshot), rewardAuditLimiter, autotuneEvidenceStore),
+		malibuAccrualHandler(cfg, tokenStore, rewardsDB, payoutReadDB, rewards.NewPoolHeartbeatBridge(wsServer.PoolSnapshot), autotuneEvidenceStore),
 		malibuRewardAuditHandler(cfg, tokenStore, rewardsDB, rewardAuditLimiter),
 	)
 	buyerHandler = withPortalSessionMe(buyerHandler, tokenStore)
@@ -2953,7 +2955,7 @@ func buildEnrollHandler(cfg config.Config, logger zerolog.Logger) *onboarding.En
 	return eh
 }
 
-func malibuAccrualHandler(cfg config.Config, tokenStore *auth.Store, rewardsDB, payoutDB *sql.DB, connectivity rewards.ProviderConnectivity) http.Handler {
+func malibuAccrualHandler(cfg config.Config, tokenStore *auth.Store, rewardsDB, payoutDB *sql.DB, connectivity rewards.ProviderConnectivity, hardwareEvidence autotune.EvidenceStore) http.Handler {
 	if rewardsDB == nil {
 		return nil
 	}
@@ -2964,6 +2966,8 @@ func malibuAccrualHandler(cfg config.Config, tokenStore *auth.Store, rewardsDB, 
 		RequireProviderTokens: cfg.Auth.RequireProviderTokens,
 		Config:                coordinatorRewardsConfig(cfg),
 		Connectivity:          connectivity,
+		HardwareEvidence:      hardwareEvidence,
+		HardwareEvidenceTTL:   time.Duration(cfg.ProofOfWeights.AutotuneEvidenceTTLDays) * 24 * time.Hour,
 	})
 }
 
@@ -2989,7 +2993,7 @@ func malibuRewardAuditAdminHandler(cfg config.Config, rewardsDB *sql.DB) http.Ha
 	})
 }
 
-func providerWalletHandler(cfg config.Config, tokenStore *auth.Store, rewardsDB, payoutDB *sql.DB, connectivity rewards.ProviderConnectivity, limiter *rewards.RewardAuditLimiter) http.Handler {
+func providerWalletHandler(cfg config.Config, tokenStore *auth.Store, rewardsDB, payoutDB *sql.DB, connectivity rewards.ProviderConnectivity, limiter *rewards.RewardAuditLimiter, hardwareEvidence autotune.EvidenceStore) http.Handler {
 	return rewards.NewWalletStatusHandler(rewards.WalletHandlerDeps{
 		RewardsDB:             rewardsDB,
 		PayoutDB:              payoutDB,
@@ -2998,6 +3002,8 @@ func providerWalletHandler(cfg config.Config, tokenStore *auth.Store, rewardsDB,
 		Config:                coordinatorRewardsConfig(cfg),
 		Connectivity:          connectivity,
 		Limiter:               limiter,
+		HardwareEvidence:      hardwareEvidence,
+		HardwareEvidenceTTL:   time.Duration(cfg.ProofOfWeights.AutotuneEvidenceTTLDays) * 24 * time.Hour,
 	})
 }
 

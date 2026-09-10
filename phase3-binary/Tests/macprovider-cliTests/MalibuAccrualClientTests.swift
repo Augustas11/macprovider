@@ -104,6 +104,67 @@ final class MalibuAccrualClientTests: XCTestCase {
         XCTAssertEqual(summary.rewardEligibility?.reasons, ["telemetry_unavailable"])
     }
 
+    func testExistingEpochDispositionReasonsRemainInClosedVocabulary() throws {
+        for reason in [
+            "held_epoch_disposition",
+            "excluded_epoch_disposition",
+            "burned_or_retired_epoch_disposition",
+        ] {
+            let data = Data("""
+            {
+              "accrued_malibu": "8",
+              "withdrawable_malibu": "0",
+              "held_malibu": "8",
+              "trust_tier": "trusted",
+              "reward_eligibility": {
+                "schema_version": "malibu_reward_eligibility.v1",
+                "earning_state": "held",
+                "withdrawal_state": "held",
+                "primary_reason": "\(reason)",
+                "reasons": ["\(reason)"]
+              }
+            }
+            """.utf8)
+            let summary = try JSONDecoder().decode(MalibuAccrualSummary.self, from: data)
+            XCTAssertEqual(summary.rewardEligibility?.primaryReason, reason)
+        }
+    }
+
+    func testProjectionFreshnessAcceptsBoundaryAndExpiresAfterIt() throws {
+        let data = Data("""
+        {
+          "accrued_malibu": "8",
+          "withdrawable_malibu": "8",
+          "held_malibu": "0",
+          "trust_tier": "trusted",
+          "reward_projection_generated_at": "2026-09-10T00:00:00.123Z",
+          "reward_projection_stale_after": "2026-09-10T00:01:00.123Z"
+        }
+        """.utf8)
+        let summary = try JSONDecoder().decode(MalibuAccrualSummary.self, from: data)
+        let boundary = try XCTUnwrap(ISO8601DateFormatter.withFractionalSeconds.date(from: "2026-09-10T00:01:00.123Z"))
+        XCTAssertTrue(summary.isFresh(at: boundary))
+        XCTAssertFalse(summary.isFresh(at: boundary.addingTimeInterval(0.001)))
+    }
+
+    func testPartialProjectionFreshnessFailsClosed() {
+        let data = Data(#"{"accrued_malibu":"8","withdrawable_malibu":"8","held_malibu":"0","trust_tier":"trusted","reward_projection_generated_at":"2026-09-10T00:00:00Z"}"#.utf8)
+        XCTAssertThrowsError(try JSONDecoder().decode(MalibuAccrualSummary.self, from: data))
+    }
+
+    func testProjectionFreshnessRejectsOverlongValidityWindow() {
+        let data = Data(#"{"accrued_malibu":"8","withdrawable_malibu":"8","held_malibu":"0","trust_tier":"trusted","reward_projection_generated_at":"2026-09-10T00:00:00Z","reward_projection_stale_after":"2026-09-10T00:01:01Z"}"#.utf8)
+        XCTAssertThrowsError(try JSONDecoder().decode(MalibuAccrualSummary.self, from: data))
+    }
+
+    func testProjectionFreshnessRejectsGenerationBeyondClockSkew() throws {
+        let data = Data(#"{"accrued_malibu":"8","withdrawable_malibu":"8","held_malibu":"0","trust_tier":"trusted","reward_projection_generated_at":"2026-09-10T00:00:06Z","reward_projection_stale_after":"2026-09-10T00:01:06Z"}"#.utf8)
+        let summary = try JSONDecoder().decode(MalibuAccrualSummary.self, from: data)
+        let now = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-09-10T00:00:00Z"))
+        XCTAssertFalse(summary.isFresh(at: now))
+        XCTAssertTrue(summary.isFresh(at: now.addingTimeInterval(1)))
+    }
+
     func testMissingRewardEligibilityNormalizesUnavailable() throws {
         let json = """
         {
@@ -136,6 +197,16 @@ final class MalibuAccrualClientTests: XCTestCase {
     func testNonFiniteAmountFailsClosed() {
         let json = Data(#"{"accrued_malibu":1.25,"withdrawable_malibu":0,"held_malibu":"NaN","trust_tier":"provisional"}"#.utf8)
         XCTAssertThrowsError(try JSONDecoder().decode(MalibuAccrualSummary.self, from: json))
+    }
+
+    func testNegativeAndIncoherentAmountsFailClosed() {
+        for json in [
+            #"{"accrued_malibu":1.25,"withdrawable_malibu":0,"held_malibu":-1,"trust_tier":"trusted"}"#,
+            #"{"accrued_malibu":1.25,"withdrawable_malibu":1,"held_malibu":1,"trust_tier":"trusted"}"#,
+            #"{"accrued_malibu":1.25,"withdrawable_malibu":0,"held_malibu":1.25,"trust_tier":"trusted","daily_cap_malibu":-1}"#,
+        ] {
+            XCTAssertThrowsError(try JSONDecoder().decode(MalibuAccrualSummary.self, from: Data(json.utf8)))
+        }
     }
 
     func testNonFiniteOptionalCapFailsClosed() throws {
@@ -181,6 +252,14 @@ final class MalibuAccrualClientTests: XCTestCase {
         )
         let summary = try await client.fetch(bearerToken: "test-token")
         XCTAssertEqual(summary.accruedMALIBU, 1.25)
+    }
+}
+
+private extension ISO8601DateFormatter {
+    static var withFractionalSeconds: ISO8601DateFormatter {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
     }
 }
 

@@ -94,6 +94,42 @@ actor ControlSocketClient {
         }
     }
 
+    /// Waits for one frame without holding the actor or leaving its detached
+    /// reader alive after the deadline. Intended for short-lived, single-
+    /// request control connections such as reward history.
+    func receiveOne(timeout: TimeInterval) async throws -> ControlFrame {
+        let responseStream = stream
+        let nanoseconds = UInt64(max(0, timeout) * 1_000_000_000)
+        let outcome = try await withThrowingTaskGroup(of: OneFrameOutcome.self) { group in
+            group.addTask {
+                var iterator = responseStream.makeAsyncIterator()
+                if let frame = await iterator.next() {
+                    return .frame(frame)
+                }
+                return .closed
+            }
+            group.addTask {
+                try await Task.sleep(nanoseconds: nanoseconds)
+                return .timedOut
+            }
+            let first = try await group.next() ?? .closed
+            group.cancelAll()
+            if case .frame = first {
+                // The caller owns the short-lived connection after success.
+            } else {
+                // Wake the detached read before the task-group scope waits for
+                // its cancelled reader child to finish.
+                close()
+            }
+            return first
+        }
+        switch outcome {
+        case let .frame(frame): return frame
+        case .closed: throw ControlSocketClientRequestError.closed
+        case .timedOut: throw ControlSocketClientRequestError.timedOut
+        }
+    }
+
     func close() {
         // Cancel reader FIRST so the detached task exits before we free the fd.
         readerTask?.cancel(); readerTask = nil
@@ -160,4 +196,16 @@ actor ControlSocketClient {
         }
         continuation?.finish()
     }
+}
+
+private enum OneFrameOutcome: Sendable {
+    case frame(ControlFrame)
+    case closed
+    case timedOut
+
+}
+
+enum ControlSocketClientRequestError: Error, Equatable {
+    case closed
+    case timedOut
 }

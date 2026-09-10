@@ -2300,6 +2300,7 @@ struct ServeCommand: AsyncParsableCommand {
 	        }()
 	        let malibuAccrualClient = try? MalibuAccrualClient(coordinatorURL: resolved.coordinatorURL)
 	        let providerWalletStatusClient = try? ProviderWalletStatusClient(coordinatorURL: resolved.coordinatorURL)
+	        let providerRewardAuditClient = try? ProviderRewardAuditClient(coordinatorURL: resolved.coordinatorURL)
 	        controlSocket = ControlSocketServer(
             socketPath: socketURL,
             modelRuntime: modelRuntime,
@@ -2311,6 +2312,7 @@ struct ServeCommand: AsyncParsableCommand {
 	            referralCoordinatorService: referralCoordinatorService,
 	            malibuAccrualClient: malibuAccrualClient,
 	            providerWalletStatusClient: providerWalletStatusClient,
+	            providerRewardAuditClient: providerRewardAuditClient,
 	            providerToken: resolved.providerToken,
             pauseProvider: pauseProvider,
             resumeProvider: resumeProvider,

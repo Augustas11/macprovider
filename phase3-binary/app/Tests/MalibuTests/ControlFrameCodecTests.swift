@@ -19,6 +19,8 @@ final class ControlFrameCodecTests: XCTestCase {
     // round-trip equality after wire truncation to seconds.
     private static let referralObservedAt = Date(timeIntervalSince1970: floor(Date().timeIntervalSince1970) - 1)
 
+    private static let rewardOccurredAt = Date(timeIntervalSince1970: 1_786_334_400.125)
+
     private func referralStatus(
         state: String = ReferralStatusProjection.eligible,
         pending: ReferralPendingChallengeProjection? = nil
@@ -94,6 +96,236 @@ final class ControlFrameCodecTests: XCTestCase {
             uptimeSec: 3600
         )
         XCTAssertEqual(try roundTrip(f), f)
+    }
+
+    func testRewardAuditFramesRoundTripWithRFC3339TimeAndPagination() throws {
+        let event = RewardActivityEvent(
+            id: "mra_42",
+            occurredAt: Self.rewardOccurredAt,
+            eventType: "malibu_accrual_inserted",
+            amountMALIBU: 2.5,
+            withdrawalHoldReason: "per_wallet_daily_cap",
+            sourceReason: "malibu_verified_useful_work_v0_2",
+            summary: "Verified useful work was recorded."
+        )
+        let response = ControlFrame.rewardAuditResponse(
+            RewardActivityPage(events: [event], nextBeforeID: "mra_41")
+        )
+
+        XCTAssertEqual(try roundTrip(.rewardAuditRequest(beforeID: nil)), .rewardAuditRequest(beforeID: nil))
+        XCTAssertEqual(try roundTrip(.rewardAuditRequest(beforeID: "mra_41")), .rewardAuditRequest(beforeID: "mra_41"))
+        XCTAssertEqual(try roundTrip(response), response)
+        XCTAssertEqual(
+            try roundTrip(.rewardAuditError(code: .rateLimited, retryAfterSeconds: 12)),
+            .rewardAuditError(code: .rateLimited, retryAfterSeconds: 12)
+        )
+    }
+
+    func testRewardAuditDecodeIgnoresUnknownFieldsAndRejectsMalformedPageWithoutDisconnecting() throws {
+        let valid = Data("""
+        {
+          "type": "reward_audit_response",
+          "events": [{
+            "id": "mra_9",
+            "occurred_at": "2026-08-09T10:11:12.125Z",
+            "event_type": "malibu_accrual_inserted",
+            "source_reason": "malibu_bootstrap_tick",
+            "summary": "Bootstrap reward recorded.",
+            "future_field": {"ignored": true}
+          }],
+          "next_before_id": null,
+          "future_page_field": "ignored"
+        }
+        """.utf8)
+        guard case let .rewardAuditResponse(page) = try ControlCodec.decode(valid) else {
+            return XCTFail("expected reward audit response")
+        }
+        XCTAssertEqual(page.events.map(\.id), ["mra_9"])
+        XCTAssertNil(page.nextBeforeID)
+
+        let malformed = Data("""
+        {"type":"reward_audit_response","events":[],"next_before_id":"bad"}
+        """.utf8)
+        XCTAssertEqual(
+            try ControlCodec.decode(malformed),
+            .rewardAuditError(code: .invalidResponse, retryAfterSeconds: nil)
+        )
+    }
+
+    func testRewardActivityPresentationUsesAuthoritativeSourceAndHoldReasons() throws {
+        let wire = Data("""
+        {
+          "type": "reward_audit_response",
+          "events": [{
+            "id": "mra_2",
+            "occurred_at": "2026-08-09T10:11:12.125Z",
+            "event_type": "malibu_accrual_inserted",
+            "amount_malibu": "1.25",
+            "withdrawal_hold_reason": "trust_tier_provisional",
+            "source_reason": "malibu_verified_useful_work_v0_2",
+            "summary": "Useful work reward held."
+          }],
+          "next_before_id": null
+        }
+        """.utf8)
+        guard case let .rewardAuditResponse(page) = try ControlCodec.decode(wire),
+              let usefulWork = page.events.first else {
+            return XCTFail("expected reward audit response")
+        }
+        XCTAssertEqual(
+            RewardActivityPresentation.detailLines(for: usefulWork),
+            ["1.25 MALIBU", "Source: verified useful work", "Hold: trust review"]
+        )
+
+        let bootstrap = RewardActivityEvent(
+            id: "mra_1",
+            occurredAt: Self.rewardOccurredAt,
+            eventType: "malibu_accrual_inserted",
+            sourceReason: "malibu_bootstrap_tick",
+            summary: "Bootstrap reward recorded."
+        )
+        XCTAssertEqual(
+            RewardActivityPresentation.detailLines(for: bootstrap),
+            ["Source: bootstrap reward"]
+        )
+    }
+
+    func testRewardActivityPaginationAppendsOlderUniqueEvents() {
+        let newest = RewardActivityEvent(
+            id: "mra_3",
+            occurredAt: Self.rewardOccurredAt,
+            eventType: "malibu_accrual_inserted",
+            amountMALIBU: 3,
+            summary: "Newest event."
+        )
+        let older = RewardActivityEvent(
+            id: "mra_2",
+            occurredAt: Self.rewardOccurredAt.addingTimeInterval(-60),
+            eventType: "malibu_hold_applied",
+            amountMALIBU: 2,
+            summary: "Older hold event."
+        )
+        let page = RewardActivityPage(events: [newest, older], nextBeforeID: "mra_1")
+
+        XCTAssertEqual(
+            page.mergedEvents(with: [newest], loadingOlderPage: true).map(\.id),
+            ["mra_3", "mra_2"]
+        )
+        XCTAssertEqual(
+            page.mergedEvents(with: [older], loadingOlderPage: false).map(\.id),
+            ["mra_3", "mra_2"]
+        )
+    }
+
+    func testProviderEarningsRewardAuditCapabilityIsAdditiveAndDefaultsOff() throws {
+        let legacy = try JSONDecoder().decode(
+            ProviderEarnings.self,
+            from: Data("""
+            {"wallet_bound":true,"trust_tier":"trusted","unpaid_ledger_backlog_usdc":0,"unpaid_ledger_backlog_malibu":0}
+            """.utf8)
+        )
+        XCTAssertFalse(legacy.rewardAuditSupported)
+
+        let capable = try JSONDecoder().decode(
+            ProviderEarnings.self,
+            from: Data("""
+            {"wallet_bound":true,"trust_tier":"trusted","unpaid_ledger_backlog_usdc":0,"unpaid_ledger_backlog_malibu":0,"reward_audit_supported":true,"future_field":"ignored"}
+            """.utf8)
+        )
+        XCTAssertTrue(capable.rewardAuditSupported)
+    }
+
+    @MainActor
+    func testRewardAuditFailureDoesNotChangeRewardProjectionAndMissingCapabilityDemotesSupport() throws {
+        var snapshot = AgentSnapshot.empty
+        snapshot.state = .serving
+        let agent = MalibuAgent(initialSnapshot: snapshot, projectionEligibleForMetrics: true)
+        let earnings = try JSONDecoder().decode(
+            ProviderEarnings.self,
+            from: Data("""
+            {
+              "wallet_bound": true,
+              "trust_tier": "trusted",
+              "unpaid_ledger_backlog_usdc": 1,
+              "unpaid_ledger_backlog_malibu": 2,
+              "malibu_withdrawable": 4,
+              "malibu_held": 1,
+              "reward_audit_supported": true,
+              "earnings_projection_fresh": true,
+              "malibu_projection_fresh": true,
+              "malibu_reward_eligibility": {
+                "schema_version":"malibu_reward_eligibility.v1",
+                "earning_state":"eligible_idle",
+                "withdrawal_state":"withdrawable",
+                "primary_reason":"eligible_idle_no_work",
+                "reasons":["eligible_idle_no_work","withdrawable_balance_available"]
+              }
+            }
+            """.utf8)
+        )
+        agent.consume(.metricsResponse(
+            earningsUsdc: nil, malibuAccrued: nil, providerEarnings: earnings,
+            gpuC: nil, gpuUtilizationPct: nil, latencyP50Ms: nil, latencyP99Ms: nil,
+            queueDepth: nil, requestsServedToday: nil, requestsServedAllTime: nil,
+            requestsPerMinute: nil, inputTokensToday: nil, outputTokensToday: nil,
+            inputTokensAllTime: nil, outputTokensAllTime: nil, uptimeSec: nil
+        ))
+        XCTAssertTrue(agent.rewardAuditSupported)
+        let before = AgentSnapshotPresenter.rewardVerdict(agent.snapshot)
+
+        agent.consume(.rewardAuditError(code: .rateLimited, retryAfterSeconds: 30))
+
+        XCTAssertEqual(agent.rewardActivityError, "Reward activity is busy. Try again in 30 seconds.")
+        XCTAssertEqual(AgentSnapshotPresenter.rewardVerdict(agent.snapshot), before)
+
+        agent.consume(.metricsResponse(
+            earningsUsdc: nil, malibuAccrued: nil, providerEarnings: nil,
+            gpuC: nil, gpuUtilizationPct: nil, latencyP50Ms: nil, latencyP99Ms: nil,
+            queueDepth: nil, requestsServedToday: nil, requestsServedAllTime: nil,
+            requestsPerMinute: nil, inputTokensToday: nil, outputTokensToday: nil,
+            inputTokensAllTime: nil, outputTokensAllTime: nil, uptimeSec: nil
+        ))
+        XCTAssertFalse(agent.rewardAuditSupported)
+    }
+
+    @MainActor
+    func testRewardActivityClearsWhenCapabilityOrProviderContextChanges() throws {
+        let event = RewardActivityEvent(
+            id: "mra_8",
+            occurredAt: Self.rewardOccurredAt,
+            eventType: "malibu_accrual_inserted",
+            sourceReason: "malibu_verified_useful_work_v0_2",
+            summary: "Verified useful work was recorded."
+        )
+        let page = RewardActivityPage(events: [event], nextBeforeID: "mra_7")
+
+        var firstSnapshot = AgentSnapshot.empty
+        firstSnapshot.localProviderID = "provider-a"
+        let capabilityAgent = MalibuAgent(initialSnapshot: firstSnapshot)
+        capabilityAgent.consume(.rewardAuditResponse(page))
+        XCTAssertEqual(capabilityAgent.rewardActivityEvents.map(\.id), ["mra_8"])
+        XCTAssertEqual(capabilityAgent.rewardActivityNextBeforeID, "mra_7")
+
+        capabilityAgent.consume(.metricsResponse(
+            earningsUsdc: nil, malibuAccrued: nil, providerEarnings: nil,
+            gpuC: nil, gpuUtilizationPct: nil, latencyP50Ms: nil, latencyP99Ms: nil,
+            queueDepth: nil, requestsServedToday: nil, requestsServedAllTime: nil,
+            requestsPerMinute: nil, inputTokensToday: nil, outputTokensToday: nil,
+            inputTokensAllTime: nil, outputTokensAllTime: nil, uptimeSec: nil
+        ))
+        XCTAssertTrue(capabilityAgent.rewardActivityEvents.isEmpty)
+        XCTAssertNil(capabilityAgent.rewardActivityNextBeforeID)
+
+        var secondSnapshot = AgentSnapshot.empty
+        secondSnapshot.localProviderID = "provider-a"
+        let identityAgent = MalibuAgent(initialSnapshot: secondSnapshot)
+        identityAgent.consume(.rewardAuditResponse(page))
+        XCTAssertEqual(identityAgent.rewardActivityEvents.map(\.id), ["mra_8"])
+
+        identityAgent.applyLocalProviderIdentity("provider-b")
+        XCTAssertTrue(identityAgent.rewardActivityEvents.isEmpty)
+        XCTAssertNil(identityAgent.rewardActivityNextBeforeID)
+        XCTAssertEqual(identityAgent.snapshot.localProviderID, "provider-b")
     }
 
     func testMetricsResponseOmitsOptionalNils() throws {
@@ -193,10 +425,13 @@ final class ControlFrameCodecTests: XCTestCase {
         XCTAssertNil(AgentSnapshotPresenter.malibuAvailabilityLine(agent.snapshot))
         XCTAssertNil(AgentSnapshotPresenter.malibuHoldLine(agent.snapshot))
         XCTAssertFalse(AgentSnapshotPresenter.usdcFullLine(agent.snapshot).contains("$18.40"))
-        XCTAssertEqual(AgentSnapshotPresenter.malibuFullLine(agent.snapshot), "n/a MALIBU today · n/a all-time")
+        XCTAssertEqual(
+            AgentSnapshotPresenter.malibuFullLine(agent.snapshot),
+            "MALIBU 50.00 accrued · last known · eligibility unavailable"
+        )
         XCTAssertFalse(AgentSnapshotPresenter.earningsLine(agent.snapshot).contains("[locked]"))
         XCTAssertFalse(AgentSnapshotPresenter.earningsLine(agent.snapshot).contains("Trusted"))
-        XCTAssertEqual(AgentSnapshotPresenter.trustLine(agent.snapshot), "MALIBU trust telemetry not published yet")
+        XCTAssertEqual(AgentSnapshotPresenter.trustLine(agent.snapshot), "MALIBU trust status unavailable")
         XCTAssertNil(AgentSnapshotPresenter.backlogLine(agent.snapshot))
     }
 

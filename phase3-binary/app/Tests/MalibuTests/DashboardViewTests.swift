@@ -243,7 +243,7 @@ final class DashboardViewTests: XCTestCase {
         )
 
         snapshot.idlePrewarmSummary = .empty
-        XCTAssertEqual(AgentSnapshotPresenter.eligibilityLine(snapshot), "Eligible · network is quiet")
+        XCTAssertEqual(AgentSnapshotPresenter.eligibilityLine(snapshot), "Ready for customer work · network is quiet")
 
         snapshot.updateRewardInputs(providerEarningsFresh: false)
         XCTAssertNil(AgentSnapshotPresenter.eligibilityLine(snapshot))
@@ -433,9 +433,11 @@ final class DashboardViewTests: XCTestCase {
         partial.updateRewardInputs(malibuProjectionFresh: false)
         partial.earningsUsdcToday = 0.04
         let partialHealth = AgentSnapshotPresenter.miningHealth(partial)
+        XCTAssertEqual(partialHealth.status, "USDC earning")
+        XCTAssertEqual(partialHealth.reason, "USDC activity is reported in the current window. This does not establish MALIBU earning or withdrawal eligibility.")
         XCTAssertEqual(partialHealth.reasonCode, "earning")
         XCTAssertEqual(partialHealth.rewardSummary, "$0.04 USDC today · MALIBU unavailable")
-        XCTAssertEqual(partialHealth.trustSummary, "MALIBU trust telemetry not published yet")
+        XCTAssertEqual(partialHealth.trustSummary, "MALIBU trust status unavailable")
 
         var partialIdle = miningBase()
         partialIdle.updateRewardInputs(malibuProjectionFresh: false)
@@ -443,7 +445,7 @@ final class DashboardViewTests: XCTestCase {
         let partialIdleHealth = AgentSnapshotPresenter.miningHealth(partialIdle)
         XCTAssertEqual(partialIdleHealth.reasonCode, "idle_no_work")
         XCTAssertEqual(partialIdleHealth.status, "Eligible, idle")
-        XCTAssertEqual(partialIdleHealth.trustSummary, "MALIBU trust telemetry not published yet")
+        XCTAssertEqual(partialIdleHealth.trustSummary, "MALIBU trust status unavailable")
 
         var stale = miningBase()
         stale.updateRewardInputs(providerEarningsFresh: false, malibuProjectionFresh: false)

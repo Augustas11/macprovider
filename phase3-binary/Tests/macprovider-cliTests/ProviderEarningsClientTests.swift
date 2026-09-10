@@ -96,6 +96,15 @@ final class ProviderEarningsClientTests: XCTestCase {
         XCTAssertEqual(summary.idlePrewarm, .empty)
         XCTAssertFalse(summary.earningsProjectionFresh)
         XCTAssertFalse(summary.malibuProjectionFresh)
+        XCTAssertFalse(summary.rewardAuditSupported)
+    }
+
+    func testRewardAuditCapabilityOnlyEncodesWhenSupported() throws {
+        let legacy = try providerEarningsSummary(#"{"unpaid_ledger_backlog_usdc":0}"#)
+        XCTAssertNil(try encodedProviderEarningsObject(legacy)["reward_audit_supported"])
+
+        let capable = legacy.markingRewardAuditSupported()
+        XCTAssertEqual(try encodedProviderEarningsObject(capable)["reward_audit_supported"] as? Bool, true)
     }
 
     func testFreshMalibuProjectionWithoutRewardEligibilityNormalizesUnavailable() throws {

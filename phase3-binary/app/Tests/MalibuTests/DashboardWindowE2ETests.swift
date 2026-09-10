@@ -31,14 +31,14 @@ final class DashboardWindowE2ETests: XCTestCase {
         let mining = AgentSnapshotPresenter.miningHealth(agent.snapshot)
         XCTAssertEqual(mining.status, "Eligible, idle")
         XCTAssertEqual(mining.reasonCode, "idle_no_work")
-        XCTAssertEqual(mining.trustSummary, "MALIBU trust telemetry not published yet")
+        XCTAssertEqual(mining.trustSummary, "MALIBU trust status unavailable")
         XCTAssertFalse(mining.status.contains("Reward status unavailable"))
 
         let initialPNG = try Self.writePNG(Self.capture(window), to: artifacts.appendingPathComponent("01-initial.png"))
         let initialText = Self.ocr(initialPNG)
         Self.write(initialText, to: artifacts.appendingPathComponent("01-initial-text.txt"))
         Self.write(Self.viewTree(window), to: artifacts.appendingPathComponent("01-initial-tree.txt"))
-        Self.assertRenderedCopy(initialText, mustContain: ["Eligible, idle", "Change Model", "MALIBU trust telemetry not published yet"])
+        Self.assertRenderedCopy(initialText, mustContain: ["Eligible, idle", "Change Model", "MALIBU trust status unavailable"])
 
         let gear = Self.firstView(in: window) {
             String(describing: type(of: $0)).contains("SwiftUIAppKitButton") && $0.frame.width <= 24

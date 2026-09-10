@@ -197,6 +197,9 @@ struct ProviderEarnings: Codable, Equatable {
     let malibuProjectionFresh: Bool
     /// True only when the CLI fetched the provider earnings endpoint.
     let earningsProjectionFresh: Bool
+    /// Capability advertised by the connected CLI. Its absence preserves
+    /// compatibility with older peers and prevents sending unknown commands.
+    let rewardAuditSupported: Bool
 
     enum CodingKeys: String, CodingKey {
         case walletBound = "wallet_bound"
@@ -223,6 +226,7 @@ struct ProviderEarnings: Codable, Equatable {
         case idlePrewarm = "idle_prewarm"
         case malibuProjectionFresh = "malibu_projection_fresh"
         case earningsProjectionFresh = "earnings_projection_fresh"
+        case rewardAuditSupported = "reward_audit_supported"
     }
 
     init(from decoder: Decoder) throws {
@@ -265,6 +269,7 @@ struct ProviderEarnings: Codable, Equatable {
             malibuRewardEligibility = nil
         }
         earningsProjectionFresh = try c.decodeIfPresent(Bool.self, forKey: .earningsProjectionFresh) ?? false
+        rewardAuditSupported = try c.decodeIfPresent(Bool.self, forKey: .rewardAuditSupported) ?? false
     }
 
     func encode(to encoder: Encoder) throws {
@@ -303,6 +308,9 @@ struct ProviderEarnings: Codable, Equatable {
         }
         try c.encode(malibuProjectionFresh, forKey: .malibuProjectionFresh)
         try c.encode(earningsProjectionFresh, forKey: .earningsProjectionFresh)
+        if rewardAuditSupported {
+            try c.encode(true, forKey: .rewardAuditSupported)
+        }
     }
 
     init(
@@ -330,7 +338,8 @@ struct ProviderEarnings: Codable, Equatable {
         rewardTelemetryUnavailable: Bool = false,
         idlePrewarm: ProviderIdlePrewarmSummary = .empty,
         malibuProjectionFresh: Bool = false,
-        earningsProjectionFresh: Bool = false
+        earningsProjectionFresh: Bool = false,
+        rewardAuditSupported: Bool = false
     ) {
         self.walletBound = walletBound
         self.trustTier = trustTier
@@ -357,6 +366,7 @@ struct ProviderEarnings: Codable, Equatable {
         self.idlePrewarm = idlePrewarm
         self.malibuProjectionFresh = malibuProjectionFresh
         self.earningsProjectionFresh = earningsProjectionFresh
+        self.rewardAuditSupported = rewardAuditSupported
     }
 }
 

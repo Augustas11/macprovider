@@ -15,6 +15,7 @@ struct ProviderWalletStatusSummary: Decodable, Equatable, Sendable {
     let eligibilityInputs: ProviderWalletEligibilityInputsSummary?
     let rewardEligibility: MalibuRewardEligibility?
     let audit: ProviderWalletAuditPageSummary?
+    let projectionFreshness: RewardProjectionFreshness
 
     enum CodingKeys: String, CodingKey {
         case schemaVersion = "schema_version"
@@ -28,6 +29,8 @@ struct ProviderWalletStatusSummary: Decodable, Equatable, Sendable {
         case eligibilityInputs = "eligibility_inputs"
         case rewardEligibility = "reward_eligibility"
         case audit
+        case projectionGeneratedAt = "reward_projection_generated_at"
+        case projectionStaleAfter = "reward_projection_stale_after"
     }
 
     init(from decoder: Decoder) throws {
@@ -47,6 +50,7 @@ struct ProviderWalletStatusSummary: Decodable, Equatable, Sendable {
             eligibilityInputs = nil
             rewardEligibility = MalibuRewardEligibility.unavailableForMissingObject()
             audit = nil
+            projectionFreshness = .legacy
             return
         }
         schemaVersion = rawSchema
@@ -61,6 +65,15 @@ struct ProviderWalletStatusSummary: Decodable, Equatable, Sendable {
         eligibilityInputs = try c.decode(ProviderWalletEligibilityInputsSummary.self, forKey: .eligibilityInputs)
         rewardEligibility = try c.decode(MalibuRewardEligibility.self, forKey: .rewardEligibility)
         audit = try c.decode(ProviderWalletAuditPageSummary.self, forKey: .audit)
+        projectionFreshness = try RewardProjectionFreshness.decode(
+            c,
+            generatedAtKey: .projectionGeneratedAt,
+            staleAfterKey: .projectionStaleAfter
+        )
+    }
+
+    func isFresh(at date: Date) -> Bool {
+        !unavailable && projectionFreshness.isFresh(at: date)
     }
 
     private static func logSchemaDrift(schemaVersion: String, field: String) {
@@ -163,6 +176,22 @@ struct ProviderWalletRewardAmountsSummary: Decodable, Equatable, Sendable {
         walletDailyCapMALIBU = try Self.decodeDecimal(c, key: .walletDailyCapMALIBU)
         walletDayMALIBU = try Self.decodeDecimal(c, key: .walletDayMALIBU)
         walletDailyCapped = try c.decode(Bool.self, forKey: .walletDailyCapped)
+        guard accruedMALIBU >= 0,
+              withdrawableMALIBU >= 0,
+              heldMALIBU >= 0,
+              withdrawableMALIBU <= accruedMALIBU,
+              heldMALIBU <= accruedMALIBU,
+              withdrawableMALIBU + heldMALIBU <= accruedMALIBU + 0.000_000_001,
+              providerDailyCapMALIBU >= 0,
+              providerDayMALIBU >= 0,
+              walletDailyCapMALIBU >= 0,
+              walletDayMALIBU >= 0 else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .accruedMALIBU,
+                in: c,
+                debugDescription: "Incoherent provider wallet reward amounts"
+            )
+        }
     }
 
     private static func decodeDecimal(
@@ -240,7 +269,7 @@ struct ProviderWalletEligibilityInputsSummary: Decodable, Equatable, Sendable {
     }
 }
 
-struct ProviderWalletAuditPageSummary: Decodable, Equatable, Sendable {
+public struct ProviderWalletAuditPageSummary: Codable, Equatable, Sendable {
     let events: [ProviderWalletAuditEventSummary]
     let nextBeforeID: String?
 
@@ -249,14 +278,14 @@ struct ProviderWalletAuditPageSummary: Decodable, Equatable, Sendable {
         case nextBeforeID = "next_before_id"
     }
 
-    init(from decoder: Decoder) throws {
+    public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         events = try c.decode([ProviderWalletAuditEventSummary].self, forKey: .events)
         nextBeforeID = try decodeOptionalNonEmptyString(c, forKey: .nextBeforeID)
     }
 }
 
-struct ProviderWalletAuditEventSummary: Decodable, Equatable, Sendable {
+public struct ProviderWalletAuditEventSummary: Codable, Equatable, Sendable {
     let id: String
     let occurredAt: String
     let eventType: String
@@ -279,7 +308,7 @@ struct ProviderWalletAuditEventSummary: Decodable, Equatable, Sendable {
         case summary
     }
 
-    init(from decoder: Decoder) throws {
+    public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try decodeNonEmptyString(c, forKey: .id)
         occurredAt = try decodeNonEmptyString(c, forKey: .occurredAt)
