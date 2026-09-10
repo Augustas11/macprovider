@@ -993,8 +993,26 @@ func WithAutotuneFeeds(feeds AutotuneFeeds) Option {
 // (fail-closed), so /v1/rate-card etc. never serve unverified bytes.
 func (s *Server) SetAutotuneFeeds(feeds AutotuneFeeds) {
 	s.autotuneFeedsMu.Lock()
-	defer s.autotuneFeedsMu.Unlock()
 	s.autotuneFeeds = feeds
+	observer := s.autotuneFeedsObserver
+	s.autotuneFeedsMu.Unlock()
+	// Observers (the SPEC-010 v1.7 R007 index rebuild) run after the publish
+	// and outside the lock, so a slow observer never blocks feed serving.
+	if observer != nil {
+		observer(feeds)
+	}
+}
+
+// WithAutotuneFeedsObserver registers a callback invoked after every runtime
+// feed publish (SetAutotuneFeeds) with the exact published feeds. Boot-time
+// feeds installed through WithAutotuneFeeds are not observed: callers derive
+// boot state from the same loaded feeds directly.
+func WithAutotuneFeedsObserver(fn func(AutotuneFeeds)) Option {
+	return func(s *Server) {
+		s.autotuneFeedsMu.Lock()
+		defer s.autotuneFeedsMu.Unlock()
+		s.autotuneFeedsObserver = fn
+	}
 }
 
 func (s *Server) autotuneFeedsSnapshot() AutotuneFeeds {

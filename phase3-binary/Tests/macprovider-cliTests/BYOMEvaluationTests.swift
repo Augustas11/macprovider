@@ -217,6 +217,7 @@ final class BYOMEvaluationTests: XCTestCase {
         )
         let limits = BYOMEvaluationLimits(
             timeoutSeconds: 0.02,
+            artifactHashSeconds: 60.0,
             maxRequestBytes: 16 * 1024,
             maxHeaderBytes: BYOMDiscoveryHTTPBounds.maxHeaderBytes,
             maxBodyBytes: 256 * 1024,
@@ -269,6 +270,7 @@ final class BYOMEvaluationTests: XCTestCase {
         )
         let limits = BYOMEvaluationLimits(
             timeoutSeconds: 1.0,
+            artifactHashSeconds: 60.0,
             maxRequestBytes: 16 * 1024,
             maxHeaderBytes: BYOMDiscoveryHTTPBounds.maxHeaderBytes,
             maxBodyBytes: 256 * 1024,

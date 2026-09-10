@@ -258,7 +258,7 @@
     {
       "spec_id": "SPEC-010",
       "title": "Provider Model Catalog",
-      "version": "1.6",
+      "version": "1.7",
       "path": "specs/SPEC-010-model-catalog.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -659,7 +659,7 @@
     {
       "spec_id": "SPEC-023",
       "title": "Installer-Integrated Autotune Recommend",
-      "version": "v0.10.2",
+      "version": "v0.10.3",
       "path": "specs/SPEC-023-installer-autotune-recommend.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -1411,7 +1411,7 @@
     {
       "spec_id": "SPEC-047",
       "title": "Network Model Admission",
-      "version": "0.1.3",
+      "version": "0.1.4",
       "path": "specs/SPEC-047-network-model-admission.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1807,6 +1807,42 @@
         }
       ],
       "gap": null
+    },
+    {
+      "requirement_id": "SPEC-010-R007",
+      "spec_id": "SPEC-010",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/artifactidentity/index.go:Index",
+        "phase4-coordinator/internal/buyer/artifact_identity_index.go:BuildArtifactIdentityIndex",
+        "phase4-coordinator/internal/ws/server.go:func (s *Server) verifyModelIdentity",
+        "phase4-coordinator/internal/ws/server.go:func (s *Server) resolveArtifactIdentity",
+        "phase4-coordinator/internal/buyer/model_admission.go:func (s *Server) byomSettlementPrereqsReady",
+        "phase4-coordinator/internal/billing/route_snapshot.go:func (r RouteSnapshot) validateArtifactEvidence",
+        "phase3-binary/Sources/macprovider-cli/BYOMArtifactDigest.swift:GGUFArtifactDigest",
+        "phase3-binary/Sources/macprovider-cli/BYOMArtifactDigest.swift:BYOMArtifactDigestResolver"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/artifactidentity/index_test.go:TestIndexResolvesExactPairOnly",
+        "phase4-coordinator/internal/buyer/artifact_identity_index_test.go:TestBuildArtifactIdentityIndexFromBoundFeeds",
+        "phase4-coordinator/internal/ws/artifact_identity_test.go:TestArtifactFeedIdentityVerifiesExactMemberForTheAdmittedRelease",
+        "phase4-coordinator/internal/buyer/artifact_settlement_test.go:TestBYOMArtifactMemberSettlesWithSixValueEvidence",
+        "phase4-coordinator/internal/buyer/artifact_settlement_test.go:TestBYOMGGUFPairWithoutArtifactBindingNeverSettles",
+        "phase4-coordinator/internal/billing/artifact_evidence_test.go:TestRouteSnapshotArtifactEvidenceDigestBindingAndRoundTrip",
+        "phase4-coordinator/internal/billing/artifact_evidence_test.go:TestRouteSnapshotArtifactEvidenceIsAllSixOrNoneAndNamesTheExpectedPair",
+        "phase3-binary/Tests/macprovider-cliTests/BYOMArtifactDigestTests.swift:testDigestIsComputedOverTheBytesNeverTheManifestLocator",
+        "phase3-binary/Tests/macprovider-cliTests/BYOMArtifactDigestTests.swift:testOllamaDiscoveryReportsHashAvailabilityAndMatchesByComputedDigestOnly"
+      ],
+      "journeys": [
+        "JOURNEY-NETWORK-MODEL-ADMISSION"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1453",
+        "rationale": "SPEC-010 v1.7 specifies artifact-feed identity: `macprovider.gguf-file.v1` as a canonical wire pair computed by the CLI over the local GGUF bytes, a release-bound `verified` artifact-feed entry as an expected identity resolving by the globally unique (hash_algorithm, hash) pair to one (model_key, artifact_id), and six-value route-time evidence with fail-closed settlement re-verification for a non-primary member. Owner is the BYOM v0.2 epic (issue #1453), slice 3."
+      }
     },
     {
       "requirement_id": "SPEC-018-R001",

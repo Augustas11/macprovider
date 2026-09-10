@@ -286,8 +286,11 @@ type Server struct {
 	rateCardUSDPerM   float64
 	autotuneFeedsMu   sync.RWMutex
 	autotuneFeeds     AutotuneFeeds
-	now               func() time.Time
-	version           string
+	// autotuneFeedsObserver is notified after every runtime feed publish
+	// (SPEC-010 v1.7 R007 index rebuild on SIGHUP).
+	autotuneFeedsObserver func(AutotuneFeeds)
+	now                   func() time.Time
+	version               string
 	// terminalObserver is the #766 arbiter observation seam. Nil in
 	// production — no Option sets it and nothing in the serving path reads
 	// the arbiter's state; the production surface is the warn logs plus the

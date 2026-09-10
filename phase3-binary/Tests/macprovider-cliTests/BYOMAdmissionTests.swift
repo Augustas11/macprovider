@@ -113,6 +113,94 @@ final class BYOMAdmissionTests: XCTestCase {
         XCTAssertEqual(status.allowedNextStates.first, "offer_rejected")
     }
 
+    /// SPEC-010-R007(a) at the production boundary: `models offer` for an
+    /// Ollama-served candidate posts `artifact_hashes` RECOMPUTED over the
+    /// blob's complete bytes (never the manifest's layer digest, which here
+    /// lies), signed into the package; and a candidate discovery reported as
+    /// artifact-backed whose blob cannot be hashed never submits.
+    func testOfferSubmissionPostsRecomputedGGUFArtifactHashesForOllamaCandidates() async throws {
+        let root = try temporaryBYOMAdmissionDirectory("byom-admission-gguf")
+        let namespace = root.appendingPathComponent("ns")
+        let cache = root.appendingPathComponent("hf", isDirectory: true)
+        try writeBYOMAdmissionNamespace(at: namespace)
+        try FileManager.default.createDirectory(at: cache, withIntermediateDirectories: true)
+        let blob = Data("GGUF".utf8) + Data(repeating: 0x6b, count: 8192)
+        let digest = Data(SHA256.hash(data: blob)).map { String(format: "%02x", $0) }.joined()
+        let lyingLocator = String(repeating: "e", count: 64)
+        let ollamaRoot = root.appendingPathComponent("ollama", isDirectory: true)
+        let blobURL = ollamaRoot.appendingPathComponent("blobs/sha256-\(lyingLocator)")
+        try FileManager.default.createDirectory(at: blobURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try blob.write(to: blobURL)
+        let manifestURL = ollamaRoot.appendingPathComponent("manifests/registry.ollama.ai/library/tiny-offer-1b/q4")
+        try FileManager.default.createDirectory(at: manifestURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("""
+        {"schemaVersion":2,"layers":[{"mediaType":"application/vnd.ollama.image.model","digest":"sha256:\(lyingLocator)","size":\(blob.count)}]}
+        """.utf8).write(to: manifestURL)
+        let environment = BYOMDiscoveryEnvironment(
+            namespaceURL: namespace, mlxCacheRoot: cache, ollamaOrigin: "http://127.0.0.1:11434",
+            ollamaModelsRoot: ollamaRoot, artifactDigestCacheURL: root.appendingPathComponent("artifact-digests.json")
+        )
+        let identity = Curve25519.Signing.PrivateKey()
+        let posted = BYOMAdmissionPostedHashes()
+        let session = makeBYOMAdmissionSession { request in
+            let body = try XCTUnwrap(byomAdmissionRequestBody(request))
+            let object = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
+            XCTAssertEqual(object["runtime_source"] as? String, "ollama_loopback")
+            XCTAssertEqual(object["served_model_ref"] as? String, "ollama:tiny-offer-1b:q4")
+            posted.record(object["artifact_hashes"] as? [String: String] ?? [:])
+            let candidateID = try XCTUnwrap(object["candidate_id"] as? String)
+            return BYOMAdmissionMockHTTPResponse(
+                statusCode: 200,
+                body: """
+                {"admission_state":"offer_submitted","admission_state_source":"coordinator","allowed_next_states":["offer_rejected"],"candidate_id":"\(candidateID)","catalog_model_key":null,"cli_version":"test","coordinator_event_id":"event_test","generated_at":"2027-01-15T08:00:00Z","provider_guidance":{"earning_path_class":"no_earning_path_in_v0_1","next_action":"wait_for_coordinator","state_label_key":"byom.admission.offer_submitted","state_meaning_key":"byom.admission.not_earning","transition_reason_code":null},"provider_id":"provider-byom-a","schema":"model_admission_status.v1","served_model_ref":"ollama:tiny-offer-1b:q4","state_observed_at":"2027-01-15T08:00:00Z","warnings":[]}
+                """
+            )
+        }
+        let runtime = BYOMModelAdmissionRuntime(
+            environment: environment,
+            credentialStore: BYOMAdmissionCredentialStore(token: "provider-token-test"),
+            identityStore: BYOMAdmissionIdentityStore(identity: identity),
+            client: BYOMModelAdmissionClient(baseURL: URL(string: "https://coordinator.test")!, session: session),
+            httpClient: BYOMAdmissionOllamaTagsHTTPClient(models: ["tiny-offer-1b:q4"])
+        )
+        let status = try await runtime.submitOffer(
+            providerID: "provider-byom-a",
+            target: "ollama:tiny-offer-1b:q4",
+            evaluationDigestSHA256: String(repeating: "b", count: 64),
+            requestedDisclosureClass: "non_earning_provider_asserted"
+        )
+        XCTAssertEqual(status.admissionState, "offer_submitted")
+        XCTAssertEqual(posted.hashes, [ModelArtifactIdentity.ggufFileV1: digest], "the posted digest is computed over the bytes, not the manifest locator")
+        XCTAssertNotEqual(posted.hashes[ModelArtifactIdentity.ggufFileV1], lyingLocator)
+
+        // The blob is now known. Replacing it with non-GGUF bytes of the SAME
+        // size changes its identity, so the fresh discovery inside the next
+        // offer no longer reports it as artifact-backed and the offer goes out
+        // IDENTITY-LESS (v0.1 shape) — a real submission, but never a GGUF
+        // digest for bytes that are not GGUF. (An offer for a candidate that
+        // discovery still reports as artifact-backed fails closed instead:
+        // BYOMArtifactDigestTests.)
+        XCTAssertEqual(environment.artifactDigests.knownDigest(forOllamaModel: "tiny-offer-1b:q4"), digest)
+        try (Data("XXXX".utf8) + Data(repeating: 0x6b, count: 8192)).write(to: blobURL)
+        posted.record([:])
+        let sameSizeRuntime = BYOMModelAdmissionRuntime(
+            environment: environment,
+            credentialStore: BYOMAdmissionCredentialStore(token: "provider-token-test"),
+            identityStore: BYOMAdmissionIdentityStore(identity: identity),
+            client: BYOMModelAdmissionClient(baseURL: URL(string: "https://coordinator.test")!, session: session),
+            httpClient: BYOMAdmissionOllamaTagsHTTPClient(models: ["tiny-offer-1b:q4"])
+        )
+        let identityless = try await sameSizeRuntime.submitOffer(
+            providerID: "provider-byom-a",
+            target: "ollama:tiny-offer-1b:q4",
+            evaluationDigestSHA256: String(repeating: "b", count: 64),
+            requestedDisclosureClass: "non_earning_provider_asserted"
+        )
+        XCTAssertEqual(identityless.admissionState, "offer_submitted", "the identity-less offer is a real submission")
+        XCTAssertEqual(posted.hashes, [:], "no GGUF digest is ever posted for bytes that are not GGUF")
+        XCTAssertNil(environment.artifactDigests.knownDigest(forOllamaModel: "tiny-offer-1b:q4"), "nothing is recorded for the non-GGUF bytes")
+    }
+
     func testAdmissionStatusClientReadsCandidateStatus() async throws {
         let session = makeBYOMAdmissionSession { request in
             XCTAssertEqual(request.httpMethod, "GET")
@@ -1121,6 +1209,23 @@ private struct BYOMAdmissionRecordingDiscoveryHTTPClient: BYOMDiscoveryHTTPClien
         _ = recorder.record(URLRequest(url: url))
         return BYOMHTTPResponse(statusCode: 200, headers: [], body: Data(#"{"models":[]}"#.utf8))
     }
+}
+
+/// Ollama `/api/tags` stub for the submit path: the runtime lists the named
+/// models; everything else about them comes from the local store.
+private struct BYOMAdmissionOllamaTagsHTTPClient: BYOMDiscoveryHTTPClient {
+    let models: [String]
+    func get(_ url: URL, maxHeaderBytes: Int, maxBodyBytes: Int) async throws -> BYOMHTTPResponse {
+        let listed = models.map { #"{"name":"\#($0)"}"# }.joined(separator: ",")
+        return BYOMHTTPResponse(statusCode: 200, headers: [], body: Data(#"{"models":[\#(listed)]}"#.utf8))
+    }
+}
+
+private final class BYOMAdmissionPostedHashes: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: [String: String] = [:]
+    var hashes: [String: String] { lock.withLock { value } }
+    func record(_ hashes: [String: String]) { lock.withLock { value = hashes } }
 }
 
 private struct BYOMAdmissionDiscoveryHTTPClient: BYOMDiscoveryHTTPClient {

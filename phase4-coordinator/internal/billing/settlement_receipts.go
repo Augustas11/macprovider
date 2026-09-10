@@ -846,6 +846,16 @@ WHERE account_scope = ? AND request_id = ? AND attempt_n = ? AND provider_id = ?
 		// below, or a pool snapshot's recompute-digest would omit pool_id and
 		// mismatch the stored insert-digest.
 		PoolID string `json:"pool_id"`
+		// SPEC-010 v1.7 R007(d) / SPEC-047-R003: the six artifact values are
+		// likewise json-carried and MUST be recovered before the recompute;
+		// a snapshot whose evidence is missing or changed fails Validate()
+		// (below, via Digest) and never settles — no current feed is consulted.
+		ArtifactFeedSHA256             string `json:"artifact_feed_sha256"`
+		ArtifactID                     string `json:"artifact_id"`
+		ArtifactHash                   string `json:"artifact_hash"`
+		ArtifactHashAlgorithm          string `json:"artifact_hash_algorithm"`
+		ArtifactFeedSignerKeyID        string `json:"artifact_feed_signer_key_id"`
+		ArtifactCandidateCatalogSHA256 string `json:"artifact_candidate_catalog_sha256"`
 	}
 	if err := json.Unmarshal([]byte(routeSnapshotJSON), &recovered); err != nil {
 		return RouteSnapshot{}, "", fmt.Errorf("settlement route snapshot identity metadata invalid: %w", err)
@@ -859,6 +869,12 @@ WHERE account_scope = ? AND request_id = ? AND attempt_n = ? AND provider_id = ?
 	r.ModelAdmissionDiscoveryDigestSHA256 = recovered.ModelAdmissionDiscoveryDigestSHA256
 	r.ModelAdmissionEvaluationDigestSHA256 = recovered.ModelAdmissionEvaluationDigestSHA256
 	r.PoolID = recovered.PoolID
+	r.ArtifactFeedSHA256 = recovered.ArtifactFeedSHA256
+	r.ArtifactID = recovered.ArtifactID
+	r.ArtifactHash = recovered.ArtifactHash
+	r.ArtifactHashAlgorithm = recovered.ArtifactHashAlgorithm
+	r.ArtifactFeedSignerKeyID = recovered.ArtifactFeedSignerKeyID
+	r.ArtifactCandidateCatalogSHA256 = recovered.ArtifactCandidateCatalogSHA256
 	r.ComputeIntegrityCaptureRequired = computeIntegrityCaptureRequired == 1
 	r.ComputeIntegritySamplingCovered = computeIntegritySamplingCovered == 1
 	if computeIntegrityHardwareDigest.Valid {

@@ -75,7 +75,17 @@ type RouteSnapshot struct {
 	// keep byte-identical digests. Like the *_model_hash_algorithm fields it
 	// is carried in route_snapshot_json (not a dedicated column) and recovered
 	// on the settlement recompute path so insert-digest == recompute-digest.
-	PoolID                          string `json:"pool_id"`
+	PoolID string `json:"pool_id"`
+	// SPEC-010 v1.7 R007(d) / SPEC-047-R003: the six artifact values of a
+	// feed-derived binding. Carried in route_snapshot_json (no dedicated
+	// columns), bound into the digest only when present, recovered on the
+	// settlement recompute path. All six or none; a partial record is invalid.
+	ArtifactFeedSHA256              string `json:"artifact_feed_sha256"`
+	ArtifactID                      string `json:"artifact_id"`
+	ArtifactHash                    string `json:"artifact_hash"`
+	ArtifactHashAlgorithm           string `json:"artifact_hash_algorithm"`
+	ArtifactFeedSignerKeyID         string `json:"artifact_feed_signer_key_id"`
+	ArtifactCandidateCatalogSHA256  string `json:"artifact_candidate_catalog_sha256"`
 	ComputeIntegrityCaptureRequired bool   `json:"-"`
 	ComputeIntegritySamplingCovered bool   `json:"-"`
 	ComputeIntegrityHardwareDigest  string `json:"-"`
@@ -135,7 +145,22 @@ func (r RouteSnapshot) Value() map[string]any {
 		value["model_admission_discovery_digest_sha256"] = r.ModelAdmissionDiscoveryDigestSHA256
 		value["model_admission_evaluation_digest_sha256"] = r.ModelAdmissionEvaluationDigestSHA256
 	}
+	if r.ArtifactDerived() {
+		value["artifact_feed_sha256"] = r.ArtifactFeedSHA256
+		value["artifact_id"] = r.ArtifactID
+		value["artifact_hash"] = r.ArtifactHash
+		value["artifact_hash_algorithm"] = r.ArtifactHashAlgorithm
+		value["artifact_feed_signer_key_id"] = r.ArtifactFeedSignerKeyID
+		value["artifact_candidate_catalog_sha256"] = r.ArtifactCandidateCatalogSHA256
+	}
 	return value
+}
+
+// ArtifactDerived reports whether the snapshot references an artifact-feed
+// member (any of the six SPEC-047-R003 values present).
+func (r RouteSnapshot) ArtifactDerived() bool {
+	return r.ArtifactFeedSHA256 != "" || r.ArtifactID != "" || r.ArtifactHash != "" ||
+		r.ArtifactHashAlgorithm != "" || r.ArtifactFeedSignerKeyID != "" || r.ArtifactCandidateCatalogSHA256 != ""
 }
 
 func (r RouteSnapshot) Digest() (digest string, canonical []byte, err error) {
@@ -184,9 +209,19 @@ func (r RouteSnapshot) Validate() error {
 		return fmt.Errorf("route snapshot route_snapshot_mode invalid")
 	}
 	if (r.ProviderReportedModelHashAlgorithm != "" || r.ExpectedCatalogModelHashAlgorithm != "") &&
-		(r.ProviderReportedModelHashAlgorithm != modelidentity.SnapshotManifestV1 ||
-			r.ExpectedCatalogModelHashAlgorithm != modelidentity.SnapshotManifestV1) {
+		(!modelidentity.CanonicalAlgorithm(r.ProviderReportedModelHashAlgorithm) ||
+			r.ProviderReportedModelHashAlgorithm != r.ExpectedCatalogModelHashAlgorithm) {
 		return fmt.Errorf("route snapshot model hash algorithm invalid")
+	}
+	// SPEC-010 v1.7 R007(d): a GGUF (non-row) expected identity can only be an
+	// artifact-feed member, so the six values are mandatory; any artifact
+	// value present requires all six, well-formed and equal to the expected
+	// pair. Settlement re-verification is this same check on the recovered
+	// snapshot plus the digest recompute, never a lookup in a current feed.
+	if r.ArtifactDerived() || r.ExpectedCatalogModelHashAlgorithm == modelidentity.GGUFFileV1 {
+		if err := r.validateArtifactEvidence(); err != nil {
+			return err
+		}
 	}
 	for field, value := range map[string]string{
 		"provider_reported_model_hash": r.ProviderReportedModelHash,
@@ -334,4 +369,37 @@ func nullableString(v *string) any {
 		return nil
 	}
 	return *v
+}
+
+func (r RouteSnapshot) validateArtifactEvidence() error {
+	for field, value := range map[string]string{
+		"artifact_feed_sha256":              r.ArtifactFeedSHA256,
+		"artifact_hash":                     r.ArtifactHash,
+		"artifact_candidate_catalog_sha256": r.ArtifactCandidateCatalogSHA256,
+	} {
+		if !isLowerHex64Digest(value) {
+			return fmt.Errorf("route snapshot artifact evidence %s missing or invalid", field)
+		}
+	}
+	if strings.TrimSpace(r.ArtifactID) == "" || strings.TrimSpace(r.ArtifactFeedSignerKeyID) == "" {
+		return fmt.Errorf("route snapshot artifact evidence incomplete")
+	}
+	if !modelidentity.CanonicalAlgorithm(r.ArtifactHashAlgorithm) ||
+		r.ArtifactHashAlgorithm != r.ExpectedCatalogModelHashAlgorithm ||
+		r.ArtifactHash != r.ExpectedCatalogModelHash {
+		return fmt.Errorf("route snapshot artifact evidence does not name the expected identity")
+	}
+	return nil
+}
+
+func isLowerHex64Digest(value string) bool {
+	if len(value) != 64 {
+		return false
+	}
+	for _, ch := range value {
+		if (ch < '0' || ch > '9') && (ch < 'a' || ch > 'f') {
+			return false
+		}
+	}
+	return true
 }

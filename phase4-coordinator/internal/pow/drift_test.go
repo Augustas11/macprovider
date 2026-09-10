@@ -2,6 +2,7 @@ package pow
 
 import (
 	"context"
+	"github.com/augstar/macprovider-coordinator/internal/artifactidentity"
 	"testing"
 	"time"
 
@@ -273,5 +274,45 @@ func TestTelemetryDriftCooldownSuppressesRepeat(t *testing.T) {
 	}
 	if alerts := evaluator.EvaluateHeartbeat(context.Background(), provider); len(alerts) != 0 {
 		t.Fatalf("expected cooldown suppression, got %#v", alerts)
+	}
+}
+
+// SPEC-010 v1.7 R007: a session bound to a feed member is verified, but the
+// hash_artifact drift check compares it against THAT member's digest rather
+// than exempting it as a verified row session would be.
+func TestEvaluateHeartbeatChecksArtifactBoundSessionAgainstItsMember(t *testing.T) {
+	t.Parallel()
+	catalog := mustCatalog(t, `{
+		"version":"test","source":"operator_curated_autotune_candidate_catalog",
+		"rows":{"qwen3-coder-30b-a3b-instruct":{"model_id":"mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit","min_ram_gb":28,"bench_gate":{"min_sustained_tps":20,"max_4k_ttft_ms":3500}}}
+	}`)
+	evidence := autotune.VerifiedEvidence{
+		CandidateCatalogSHA256: catalog.SHA256,
+		Benchmarks: []autotune.VerifiedBenchmark{{
+			ModelKey:       "qwen3-coder-30b-a3b-instruct",
+			SustainedTPS:   20,
+			ArtifactSHA256: "row-artifact-hash",
+		}},
+	}
+	evaluator := NewEvaluator(TelemetryDriftConfig{
+		Enabled:                  true,
+		HashAlertOnArtifactDrift: true,
+		AlertCooldown:            time.Second,
+	}, catalog, stubEvidence{evidence: evidence, ok: true}, 30*24*time.Hour)
+	evaluator.now = func() time.Time { return time.Unix(0, 0) }
+	binding := &artifactidentity.Binding{Member: artifactidentity.Member{ModelKey: "qwen3-coder-30b-a3b-instruct", ModelID: "qwen3-coder-30b-a3b-instruct", ArtifactID: "gguf-q4", HashAlgorithm: "macprovider.gguf-file.v1", Hash: "member-gguf-hash"}}
+	live := func(hash string) pool.Provider {
+		return pool.Provider{
+			ProviderID: "mac", AssignedID: "sess-1", ModelID: "qwen3-coder-30b-a3b-instruct", ThroughputTPSEstimate: 20,
+			HashStatus: pool.HashStatusVerified, ModelHash: hash, ArtifactIdentity: binding,
+		}
+	}
+	if alerts := evaluator.EvaluateHeartbeat(context.Background(), live("member-gguf-hash")); len(alerts) != 0 {
+		t.Fatalf("live hash equal to the bound member must not alert, got %#v", alerts)
+	}
+	evaluator.now = func() time.Time { return time.Unix(10, 0) }
+	alerts := evaluator.EvaluateHeartbeat(context.Background(), live("other-bytes"))
+	if len(alerts) != 1 || alerts[0].Signal != "hash_artifact" || alerts[0].ExpectedArtifactHash != "member-gguf-hash" {
+		t.Fatalf("drift from the bound member must alert against the member digest, got %#v", alerts)
 	}
 }

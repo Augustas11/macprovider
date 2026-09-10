@@ -6,6 +6,7 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"fmt"
+	"github.com/augstar/macprovider-coordinator/internal/artifactidentity"
 	"log/slog"
 	"math"
 	"net"
@@ -154,7 +155,20 @@ type Provider struct {
 	WeightsHashAlgorithm  string     `json:"weights_manifest_algorithm,omitempty"`
 	ExpectedModelHash     string     `json:"-"`
 	HashStatus            HashStatus `json:"hash_status,omitempty"`
-	EncryptedLeg          bool       `json:"encrypted_leg,omitempty"`
+	// ArtifactIdentity is set only when the provider's named pair resolved
+	// through the release-bound SPEC-023 §3.7 artifact feed (SPEC-010 v1.7
+	// R007); it carries the matched member and the feed provenance the route
+	// snapshot binds. Nil on the primary-row path and whenever the pair is
+	// unverified. Session state, never wire-exported.
+	ArtifactIdentity *artifactidentity.Binding `json:"-"`
+	// IdentityPin is SPEC-010-R007(b)(c) session authority: the identity the
+	// session FIRST verified for its model — the row's primary pair, or one
+	// feed member — kept across every later verdict (mismatch, missing hash,
+	// stale feed) and reset only when the model changes (warm swap, R006) or
+	// the session is re-registered. Distinct from ArtifactIdentity, which is
+	// the CURRENT verdict's binding. Session state, never wire-exported.
+	IdentityPin  *IdentityPin `json:"-"`
+	EncryptedLeg bool         `json:"encrypted_leg,omitempty"`
 	// TrustedPoolV1 is the provider-side half of SPEC-042-R010 positive
 	// pool-capability negotiation. Pool-selected traffic may route only to a
 	// member whose current session advertised this capability; global traffic
@@ -660,6 +674,7 @@ type Registry struct {
 	maxProvider             int
 	hashVerifier            HeartbeatHashVerifier
 	modelIdentityVerifier   ModelIdentityVerifier
+	modelIdentityResolver   ModelIdentityResolver
 	swapEmitter             SwapEventEmitter
 	receiptRotationEmitter  ReceiptRotationEventEmitter
 }
@@ -967,6 +982,10 @@ func (r *Registry) RegisterAtDetailed(p *Provider, conn net.Conn, now time.Time)
 			p.InferencePath = InferencePathWSTunneled
 		}
 	}
+	// SPEC-010-R007(b)(c): the identity verified at admission (hello) is the
+	// session's authority from its first heartbeat on, not from the first
+	// heartbeat that happens to verify.
+	p.IdentityPin = pinIdentity(nil, ModelIdentityVerdict{Status: p.HashStatus, Artifact: p.ArtifactIdentity})
 	r.providers[p.ProviderID] = p
 	r.sessions[p.AssignedID] = p
 	// SPEC-010 v1.5 R-3.3.4: seed the seen-model index with the union of
@@ -1252,19 +1271,77 @@ func (r *Registry) SetEarnedTrustTier(providerID string, tier Tier) (Provider, b
 }
 
 func (r *Registry) UpdateHashStatuses(statusFor func(Provider) HashStatus) int {
+	return r.UpdateModelIdentities(func(p Provider) ModelIdentityVerdict {
+		return ModelIdentityVerdict{Status: statusFor(p), Artifact: p.ArtifactIdentity}
+	})
+}
+
+// UpdateModelIdentities re-evaluates every session's SPEC-010 verdict —
+// hash status AND the v1.7 artifact-feed binding — under one lock, so a
+// catalog swap that changes the expected identity set cannot leave a stale
+// binding beside a fresh status.
+func (r *Registry) UpdateModelIdentities(verdictFor func(Provider) ModelIdentityVerdict) int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	updated := 0
 	for _, p := range r.providers {
 		cp := *p
 		cp.conn = nil
-		next := statusFor(cp)
-		if p.HashStatus != next {
+		next := pinArtifactSession(p.IdentityPin, verdictFor(cp))
+		p.IdentityPin = pinIdentity(p.IdentityPin, next)
+		if p.HashStatus != next.Status {
 			updated++
 		}
-		p.HashStatus = next
+		p.HashStatus = next.Status
+		p.ArtifactIdentity = next.Artifact
 	}
 	return updated
+}
+
+// IdentityPin is the identity a session first verified for its model:
+// the row's primary pair (Primary) or exactly one feed member (Member).
+type IdentityPin struct {
+	Primary bool
+	Member  artifactidentity.Member
+}
+
+// pinIdentity records the FIRST verified identity of a session as its pin;
+// an existing pin is never replaced (only a model change clears it).
+func pinIdentity(pin *IdentityPin, verdict ModelIdentityVerdict) *IdentityPin {
+	if pin != nil || verdict.Status != HashStatusVerified {
+		return pin
+	}
+	if verdict.Artifact == nil {
+		return &IdentityPin{Primary: true}
+	}
+	return &IdentityPin{Member: verdict.Artifact.Member}
+}
+
+// PinnedVerdict applies the session's identity pin to a verdict computed
+// outside the registry (operator projections such as /poolz and the policy
+// readiness view), so they show the session's verdict, not an unpinned one.
+func (p Provider) PinnedVerdict(verdict ModelIdentityVerdict) ModelIdentityVerdict {
+	return pinArtifactSession(p.IdentityPin, verdict)
+}
+
+// pinArtifactSession is SPEC-010-R007(b)(c): the verified identity is
+// SESSION authority. Once pinned, a later report for the same model that
+// verifies as a DIFFERENT identity — another member, or the primary pair
+// for a member-pinned session, or a member for a primary-pinned session —
+// is a mismatch, exactly as a changed row digest is. The pin survives every
+// non-verified verdict in between; a model change (warm swap, R006) resets
+// it and starts a new binding.
+func pinArtifactSession(pin *IdentityPin, verdict ModelIdentityVerdict) ModelIdentityVerdict {
+	if pin == nil || verdict.Status != HashStatusVerified {
+		return verdict
+	}
+	switch {
+	case pin.Primary && verdict.Artifact == nil:
+		return verdict
+	case !pin.Primary && verdict.Artifact != nil && verdict.Artifact.Member == pin.Member:
+		return verdict
+	}
+	return ModelIdentityVerdict{Status: HashStatusMismatch}
 }
 
 // ExpireLegacyBridgeAdmissions atomically removes every metadata-free bridge
@@ -2170,7 +2247,40 @@ type HeartbeatHashVerifier func(modelID, reportedHash string) HashStatus
 // ModelIdentityVerifier is the algorithm-aware production verifier. The
 // legacy two-argument verifier remains available only to preserve focused
 // package tests and old embedders while the wire migration is bounded.
+// ModelIdentityRequest is everything a SPEC-010 identity verdict needs about
+// one provider report: the named pair, the row identity admission selected
+// (R001/R004), and — for the v1.7 R007 artifact-feed path — the candidate
+// catalog the provider was admitted against and the catalog key its session
+// is admitted for.
+type ModelIdentityRequest struct {
+	ModelID                string
+	ExpectedHash           string
+	ReportedHash           string
+	ReportedAlgorithm      string
+	CandidateCatalogSHA256 string
+	// CatalogAdmissionMode is how the session's catalog envelope was
+	// admitted ("current", "previous", "update_bridge", "legacy", ...): only
+	// a validated envelope may bind artifact identity to a release.
+	CatalogAdmissionMode string
+	CatalogModelKey      string
+}
+
+// ModelIdentityVerdict is the verifier's answer: the SPEC-008 hash status and,
+// when the pair resolved through the release-bound artifact feed, the R007
+// binding the route snapshot must carry (nil on the primary-row path).
+type ModelIdentityVerdict struct {
+	Status   HashStatus
+	Artifact *artifactidentity.Binding
+}
+
+// ModelIdentityVerifier is the v1.6 primary-row verdict callback (kept for
+// legacy wiring and the SPEC-010-R003/R005 conformance mappings).
 type ModelIdentityVerifier func(modelID, expectedHash, reportedHash, reportedAlgorithm string) HashStatus
+
+// ModelIdentityResolver is the v1.7 verdict callback: it receives the whole
+// request (including the admitted catalog digest and key) and may bind an
+// artifact-feed member. When set it takes precedence over ModelIdentityVerifier.
+type ModelIdentityResolver func(req ModelIdentityRequest) ModelIdentityVerdict
 
 // SwapEvent carries the per-swap data needed for the operator_model_swap audit
 // event per SPEC-002 v1.3.5 §7.10. Phase 2C only populates and emits this
@@ -2309,19 +2419,40 @@ func (r *Registry) applyHeartbeatLocked(providerID, assignedID string, hb Heartb
 	p.LastHeartbeatAt = hb.At
 
 	modelIDChanged := !strings.EqualFold(priorModelID, hb.ModelID)
+	if modelIDChanged {
+		// A model change (warm swap, R006) ends the previous session
+		// authority whether or not this report carries a hash.
+		p.IdentityPin = nil
+	}
 	if !hb.ModelHashPresent {
 		p.ModelHash = ""
 		p.ModelHashAlgorithm = ""
 		p.WeightsManifestSHA256 = ""
 		p.WeightsHashAlgorithm = ""
 		p.HashStatus = HashStatusUncatalogued
+		p.ArtifactIdentity = nil
 	} else {
 		p.ModelHash = hb.ModelHash
 		p.ModelHashAlgorithm = hb.ModelHashAlgorithm
 		p.WeightsManifestSHA256 = hb.WeightsManifestSHA256
 		p.WeightsHashAlgorithm = hb.WeightsHashAlgorithm
-		if r.modelIdentityVerifier != nil {
+		if r.modelIdentityResolver != nil {
+			verdict := r.modelIdentityResolver(ModelIdentityRequest{
+				ModelID:                hb.ModelID,
+				ExpectedHash:           hb.ExpectedModelHash,
+				ReportedHash:           hb.ModelHash,
+				ReportedAlgorithm:      hb.ModelHashAlgorithm,
+				CandidateCatalogSHA256: p.CandidateCatalogSHA256,
+				CatalogAdmissionMode:   p.CatalogAdmissionMode,
+				CatalogModelKey:        p.ModelAdmissionCatalogModelKey,
+			})
+			verdict = pinArtifactSession(p.IdentityPin, verdict)
+			p.IdentityPin = pinIdentity(p.IdentityPin, verdict)
+			p.HashStatus = verdict.Status
+			p.ArtifactIdentity = verdict.Artifact
+		} else if r.modelIdentityVerifier != nil {
 			p.HashStatus = r.modelIdentityVerifier(hb.ModelID, hb.ExpectedModelHash, hb.ModelHash, hb.ModelHashAlgorithm)
+			p.ArtifactIdentity = nil
 		} else if r.hashVerifier != nil {
 			p.HashStatus = r.hashVerifier(hb.ModelID, hb.ModelHash)
 		} else {
@@ -2672,6 +2803,12 @@ func WithHeartbeatHashVerifier(fn HeartbeatHashVerifier) RegistryOption {
 
 func WithModelIdentityVerifier(fn ModelIdentityVerifier) RegistryOption {
 	return func(r *Registry) { r.modelIdentityVerifier = fn }
+}
+
+// WithModelIdentityResolver installs the SPEC-010 v1.7 request-based verdict
+// callback; it takes precedence over WithModelIdentityVerifier.
+func WithModelIdentityResolver(fn ModelIdentityResolver) RegistryOption {
+	return func(r *Registry) { r.modelIdentityResolver = fn }
 }
 
 // WithSwapEmitter injects the operator_model_swap callback per SPEC-002
