@@ -255,6 +255,15 @@ func (s *Server) modelAdmissionBindingFor(candidate ModelAdmissionEvent) pool.Mo
 }
 
 func (s *Server) setModelAdmissionBindingLocked(providerID string, binding *pool.ModelAdmissionBinding, section *providerSection) {
+	// A refresh that derives the binding already in place is not a
+	// mutation: the generation stays, so a route attempt captured before a
+	// no-op heartbeat still compares equal.
+	if current, ok := s.pool.Resolve(providerID, ""); ok {
+		existing, bound := current.ModelAdmissionBinding()
+		if (!bound && binding == nil) || (bound && binding != nil && existing == *binding) {
+			return
+		}
+	}
 	generation := section.generation.Add(1)
 	s.pool.SetModelAdmissionBinding(providerID, binding, generation)
 }
@@ -335,6 +344,11 @@ func (s *Server) appendDriftRevocationLocked(ctx context.Context, candidate Mode
 		return false
 	}
 	revocation := modelAdmissionCoordinatorDecisionFromCurrent(candidate, modelAdmissionRevoked, reason, modelAdmissionDriftRevocationDomain, evidence, s.now())
+	// A revocation binds no member and evaluated under no generation: the
+	// decision-bound values belong to the event it supersedes.
+	revocation.ArtifactFeedSHA256, revocation.ArtifactID, revocation.ArtifactHash, revocation.ArtifactHashAlgorithm = "", "", "", ""
+	revocation.ArtifactFeedSignerKeyID, revocation.ArtifactCandidateCatalogSHA256, revocation.BoundMemberSource = "", "", ""
+	revocation.EvaluatedReleaseGeneration = 0
 	if _, err := s.modelAdmissions.AppendModelAdmissionDecision(ctx, revocation); err != nil {
 		s.log.Warn().Err(err).
 			Str("provider_id", candidate.ProviderID).
@@ -403,10 +417,14 @@ func (s *Server) helloSessionBindingLocked(providerID string, prior pool.Provide
 	if !ok {
 		return
 	}
+	// (a)/(d) run against the candidate the prior binding named AND the
+	// candidate the new session would bind to (a replacement hello that
+	// changes the served model rebinds elsewhere), before either is published.
 	var candidateIDs []string
 	if hadPrior && prior.ModelAdmissionCandidateID != "" {
 		candidateIDs = append(candidateIDs, prior.ModelAdmissionCandidateID)
-	} else if events, err := s.modelAdmissions.LatestModelAdmissionStatusesForProvider(ctx, providerID); err == nil {
+	}
+	if events, err := s.modelAdmissions.LatestModelAdmissionStatusesForProvider(ctx, providerID); err == nil {
 		if candidates := bindableCandidates(events, provider.ModelID); len(candidates) == 1 {
 			candidateIDs = append(candidateIDs, candidates[0].CandidateID)
 		}
@@ -801,8 +819,18 @@ func (s *Server) sweepProviderRelease(ctx context.Context, providerID string, ca
 			case eval.driftReason != "":
 				s.appendDriftRevocationLocked(ctx, candidate, eval.driftReason, "release_sweep", section)
 			case eval.decisionCode != "":
-				// catalog_match_required on a decided candidate: legacy record
-				// with no recorded match; nothing to re-resolve, leave it.
+				// A decided candidate with no recorded match (a record that
+				// predates v0.1.5) cannot be re-resolved under any release:
+				// R006(c) requires re-evaluation, and the honest outcome is a
+				// revocation (`catalog_row_changed`) — such a candidate could
+				// never bind or route anyway; re-entry is a fresh signed offer.
+				s.log.Warn().
+					Str("event", "model_admission_legacy_record_revoked").
+					Str("provider_id", providerID).
+					Str("candidate_id", candidate.CandidateID).
+					Str("admission_state", candidate.State).
+					Msg("decided candidate without a recorded catalog match cannot be re-evaluated; revoked")
+				s.appendDriftRevocationLocked(ctx, candidate, modelAdmissionDriftRowChanged, "release_sweep_legacy_record", section)
 			case boundDrift:
 				s.appendDriftRevocationLocked(ctx, candidate, modelAdmissionDriftRowChanged, "release_sweep_tier2_material", section)
 			}

@@ -1112,8 +1112,11 @@ func NewServer(cfg config.Config, registry *pool.Registry, logger zerolog.Logger
 		autotuneCatalogEnforced:       cfg.AutotuneFeeds.EnforceProviderAdmission,
 		autotuneCatalogBridgeDeadline: providerAdmissionBridgeDeadline,
 		modelAdmissions:               NewMemoryModelAdmissionStore(),
-		modelAdmissionAttempts:        map[string][]time.Time{},
-		version:                       "dev",
+		// The published release generation is never the zero value: a
+		// binding stamped 0 was never validated under any release.
+		artifactIdentitySets:   releaseSnapshotState{gen: 1},
+		modelAdmissionAttempts: map[string][]time.Time{},
+		version:                "dev",
 	}
 	s.authAttempts = newAuthAttemptStore(1024)
 	s.bootstrapLimiter = newBootstrapMintLimiter(cfg.Auth)
@@ -1630,9 +1633,9 @@ func (s *Server) verifyModelIdentity(req pool.ModelIdentityRequest) pool.ModelId
 	return verdict
 }
 
-// resolveModelIdentityVerdict is verifyModelIdentity for callers that already
-// hold the release read lock (decision evaluation); it MUST NOT be called
-// without it.
+// resolveModelIdentityVerdict is the verdict computation for a caller that
+// already holds the release read lock (verifyModelIdentity is its only
+// caller today); it MUST NOT be called without the lock.
 func (s *Server) resolveModelIdentityVerdict(req pool.ModelIdentityRequest) pool.ModelIdentityVerdict {
 	cfg := s.tier2Config()
 	algorithm := strings.TrimSpace(req.ReportedAlgorithm)

@@ -93,7 +93,9 @@ func (r modelAdmissionDecisionRequest) digest() string {
 // requestID is the store replay key of an operator decision: the replay
 // index is thereby keyed by (provider_id, candidate_id, idempotency_key).
 func (r modelAdmissionDecisionRequest) requestID() string {
-	return "operator_decision_" + r.CandidateID + "_" + r.IdempotencyKey
+	// ':' is outside the provider `idempotency_key` grammar, so no
+	// provider-chosen request id can ever occupy an operator's slot.
+	return "operator_decision:" + r.CandidateID + ":" + r.IdempotencyKey
 }
 
 type modelAdmissionApproveRequest struct {
@@ -124,7 +126,7 @@ func (r modelAdmissionApproveRequest) digest() string {
 // requestID keys approvals in their own namespace (pending_decision_id,
 // idempotency_key).
 func (r modelAdmissionApproveRequest) requestID() string {
-	return "operator_approval_" + r.PendingDecisionID + "_" + r.IdempotencyKey
+	return "operator_approval:" + r.PendingDecisionID + ":" + r.IdempotencyKey
 }
 
 // modelAdmissionDecisionError is a closed-code failure of the decision path.
@@ -161,6 +163,11 @@ func (l *operatorRateLimiter) allow(key string, now time.Time, limit int) bool {
 	if l.windows == nil {
 		l.windows = map[string][]time.Time{}
 	}
+	for k, w := range l.windows {
+		if k != key && len(pruneModelAdmissionWindow(w, now)) == 0 {
+			delete(l.windows, k)
+		}
+	}
 	window := pruneModelAdmissionWindow(l.windows[key], now)
 	if len(window) >= limit {
 		l.windows[key] = window
@@ -194,16 +201,12 @@ func (s *Server) authorizedModelAdmissionOperator(w http.ResponseWriter, r *http
 	return actor, true
 }
 
-// distinctOperatorActors counts the configured per-actor operator credentials.
-func (s *Server) distinctOperatorActors() int {
-	actors := map[string]struct{}{}
-	for actorID := range s.cfg.Auth.OperatorKeys {
-		actor := normalizedOperatorActor(actorID)
-		if modelAdmissionOperatorActorPattern.MatchString(actor) {
-			actors[actor] = struct{}{}
-		}
-	}
-	return len(actors)
+// operatorDualControlAvailable is the predicate `/admin/hardware-trust/approve`
+// uses: at least two per-actor entries with valid actor ids and non-empty,
+// pairwise-DISTINCT secrets. Distinct actor ids sharing one secret are one
+// principal and cannot dual-control anything.
+func (s *Server) operatorDualControlAvailable() bool {
+	return s.providerAuthPolicyDualControlAvailable()
 }
 
 // ---- decision response
@@ -266,7 +269,7 @@ func (s *Server) modelAdmissionDecisionResponse(o modelAdmissionDecisionOutcome)
 func (s *Server) handleAdminModelAdmissionDecisions(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", http.MethodPost)
-		writeJSON(w, http.StatusMethodNotAllowed, modelAdmissionError("invalid_request", "method not allowed"))
+		writeJSON(w, http.StatusBadRequest, modelAdmissionError("invalid_request", "method not allowed"))
 		return
 	}
 	actor, ok := s.authorizedModelAdmissionOperator(w, r)
@@ -389,7 +392,7 @@ func (s *Server) evaluateModelAdmissionDecisionLocked(ctx context.Context, actor
 	decision.EvaluatedReleaseGeneration = generation
 	if body.NextState == "settlement_capable" {
 		// Dual control: the request appends nothing.
-		if s.distinctOperatorActors() < 2 {
+		if !s.operatorDualControlAvailable() {
 			return modelAdmissionDecisionOutcome{}, false, decisionFail(http.StatusConflict, "dual_control_unavailable")
 		}
 		record := PendingModelAdmissionDecision{
@@ -571,7 +574,7 @@ func (s *Server) settlementSessionMemberLocked(head ModelAdmissionEvent, provide
 func (s *Server) handleAdminModelAdmissionApprove(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", http.MethodPost)
-		writeJSON(w, http.StatusMethodNotAllowed, modelAdmissionError("invalid_request", "method not allowed"))
+		writeJSON(w, http.StatusBadRequest, modelAdmissionError("invalid_request", "method not allowed"))
 		return
 	}
 	actor, ok := s.authorizedModelAdmissionOperator(w, r)
@@ -727,7 +730,7 @@ func (s *Server) evaluateModelAdmissionApprovalLocked(ctx context.Context, actor
 func (s *Server) handleAdminModelAdmissionOffers(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.Header().Set("Allow", http.MethodGet)
-		writeJSON(w, http.StatusMethodNotAllowed, modelAdmissionError("invalid_request", "method not allowed"))
+		writeJSON(w, http.StatusBadRequest, modelAdmissionError("invalid_request", "method not allowed"))
 		return
 	}
 	if _, ok := s.authorizedModelAdmissionOperator(w, r); !ok {
@@ -860,61 +863,59 @@ type ModelAdmissionRouteExpectation struct {
 // ErrModelAdmissionRouteStale is the compare-and-insert's fail-closed answer.
 var ErrModelAdmissionRouteStale = errors.New("BYOM model admission route snapshot expectation no longer holds")
 
-// CompareAndInsertModelAdmissionRouteSnapshot re-reads, immediately before
-// insert, the candidate's head, the session binding, the provider's binding
-// generation and the binding's validated release generation (the binding
-// from the registry BEFORE the release read lock — lock order — the rest
-// under it), runs the insert under the same read hold, and re-reads all of
-// them again after the insert: an append that slipped between the compare
-// and the insert (appends are serialized by the provider section, which the
-// route path never takes) fails the attempt closed — the immutable snapshot
-// stands, nothing is dispatched or settled under it.
+// CompareAndInsertModelAdmissionRouteSnapshot is the SPEC-047-R001 route-time
+// compare-and-insert. Pre-check (under the release read lock): the
+// candidate's head, the session binding read from the registry BEFORE the
+// hold (lock order), the provider's binding generation, the session
+// identity epoch, and the binding's validated release generation, which
+// must equal the published one (0 means never validated). The insert runs
+// OUTSIDE the release hold (a SQLite write must not block a queued
+// publisher and, through it, every hello/heartbeat reader). Post-check
+// (under a fresh read hold, then the registry): the generation, the head,
+// the binding generation, the binding and the epoch are re-read; any
+// difference fails the attempt closed — the immutable snapshot stands,
+// nothing is dispatched or settled under it. Appends stay serialized by the
+// provider section, which the route path never takes.
 func (s *Server) CompareAndInsertModelAdmissionRouteSnapshot(ctx context.Context, expect ModelAdmissionRouteExpectation, insert func() error) error {
 	if s.modelAdmissions == nil || s.pool == nil {
 		return ErrModelAdmissionRouteStale
-	}
-	check := func(provider pool.Provider, generation uint64) error {
-		head, found, err := s.modelAdmissions.LatestModelAdmissionStatus(ctx, expect.ProviderID, expect.CandidateID)
-		if err != nil || !found || head.CoordinatorEventID != expect.CoordinatorEventID || head.State != "settlement_capable" {
-			return ErrModelAdmissionRouteStale
-		}
-		if provider.ModelAdmissionCandidateID != expect.CandidateID || provider.ModelAdmissionCoordinatorEventID != expect.CoordinatorEventID ||
-			provider.ModelAdmissionValidatedReleaseGeneration != generation ||
-			provider.ModelAdmissionSessionEpoch != expect.SessionEpoch ||
-			s.modelAdmissionSections.get(expect.ProviderID).generation.Load() != expect.BindingGeneration {
-			return ErrModelAdmissionRouteStale
-		}
-		return nil
 	}
 	provider, ok := s.pool.Resolve(expect.ProviderID, "")
 	if !ok {
 		return ErrModelAdmissionRouteStale
 	}
-	var err error
+	if provider.ModelAdmissionCandidateID != expect.CandidateID || provider.ModelAdmissionCoordinatorEventID != expect.CoordinatorEventID ||
+		provider.ModelAdmissionValidatedReleaseGeneration == 0 || provider.ModelAdmissionSessionEpoch != expect.SessionEpoch ||
+		s.modelAdmissionSections.get(expect.ProviderID).generation.Load() != expect.BindingGeneration {
+		return ErrModelAdmissionRouteStale
+	}
+	headOK := func() bool {
+		head, found, err := s.modelAdmissions.LatestModelAdmissionStatus(ctx, expect.ProviderID, expect.CandidateID)
+		return err == nil && found && head.CoordinatorEventID == expect.CoordinatorEventID && head.State == "settlement_capable"
+	}
+	var generation uint64
+	stale := false
 	s.withReleaseRead(func() {
-		generation := s.artifactIdentitySets.generationLocked()
-		if err = check(provider, generation); err != nil {
-			return
-		}
-		if err = insert(); err != nil {
-			return
-		}
-		// Post-insert re-read of the durable authority (the head) and the
-		// generations under the same release hold.
-		head, found, lookupErr := s.modelAdmissions.LatestModelAdmissionStatus(ctx, expect.ProviderID, expect.CandidateID)
-		if lookupErr != nil || !found || head.CoordinatorEventID != expect.CoordinatorEventID ||
-			s.modelAdmissionSections.get(expect.ProviderID).generation.Load() != expect.BindingGeneration {
-			err = ErrModelAdmissionRouteStale
-		}
+		generation = s.artifactIdentitySets.generationLocked()
+		stale = generation == 0 || provider.ModelAdmissionValidatedReleaseGeneration != generation || !headOK()
 	})
-	if err != nil {
+	if stale {
+		return ErrModelAdmissionRouteStale
+	}
+	if err := insert(); err != nil {
 		return err
 	}
-	// The binding itself, re-read after the release hold (registry lock is
-	// never taken under the release lock).
+	s.withReleaseRead(func() {
+		stale = s.artifactIdentitySets.generationLocked() != generation || !headOK() ||
+			s.modelAdmissionSections.get(expect.ProviderID).generation.Load() != expect.BindingGeneration
+	})
+	if stale {
+		return ErrModelAdmissionRouteStale
+	}
 	after, ok := s.pool.Resolve(expect.ProviderID, "")
 	if !ok || after.ModelAdmissionCandidateID != expect.CandidateID || after.ModelAdmissionCoordinatorEventID != expect.CoordinatorEventID ||
-		after.ModelAdmissionBindingGeneration != provider.ModelAdmissionBindingGeneration || after.ModelAdmissionSessionEpoch != expect.SessionEpoch {
+		after.ModelAdmissionBindingGeneration != provider.ModelAdmissionBindingGeneration || after.ModelAdmissionSessionEpoch != expect.SessionEpoch ||
+		after.ModelAdmissionValidatedReleaseGeneration != generation {
 		return ErrModelAdmissionRouteStale
 	}
 	return nil

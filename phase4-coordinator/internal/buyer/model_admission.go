@@ -132,19 +132,21 @@ func (s *Server) byomRouteSnapshotBinding(ctx context.Context, p pool.Provider, 
 func byomBoundMemberMatchesSession(p pool.Provider, event providerws.ModelAdmissionEvent) bool {
 	switch event.BoundMemberSource {
 	case "artifact_feed":
+		// SPEC-047-R003(ii) defence in depth: the member must still allow
+		// the recorded runtime source (the sweep revokes on reload; the
+		// route re-checks before any snapshot).
 		return p.ArtifactIdentity != nil &&
 			p.ArtifactIdentity.Member.ArtifactID == event.ArtifactID &&
 			p.ArtifactIdentity.Member.HashAlgorithm == event.ExpectedCatalogModelHashAlgorithm &&
-			p.ArtifactIdentity.Member.Hash == event.ExpectedCatalogModelHash
+			p.ArtifactIdentity.Member.Hash == event.ExpectedCatalogModelHash &&
+			p.ArtifactIdentity.Member.AllowsRuntimeSource(event.RuntimeSource)
 	case "candidate_row":
-		return p.ArtifactIdentity == nil && event.ExpectedCatalogModelHashAlgorithm == modelidentity.SnapshotManifestV1
+		return p.ArtifactIdentity == nil && event.ExpectedCatalogModelHashAlgorithm == modelidentity.SnapshotManifestV1 &&
+			event.RuntimeSource == "mlx_cache"
 	default:
-		// Legacy record without a bound member source: the expected pair
-		// itself decides, feed provenance only from a feed-bound session.
-		if event.ExpectedCatalogModelHashAlgorithm != modelidentity.SnapshotManifestV1 {
-			return p.ArtifactIdentity != nil
-		}
-		return true
+		// A record with no bound member source predates v0.1.5: it never
+		// bound a session's member, so it never settles.
+		return false
 	}
 }
 

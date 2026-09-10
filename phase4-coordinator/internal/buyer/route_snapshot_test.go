@@ -1943,6 +1943,7 @@ func seedBYOMAdmissionStateWithSuffix(t *testing.T, store providerws.ModelAdmiss
 		PayloadDigestSHA256:      strings.Repeat("d", 64),
 		SignatureDigestSHA256:    strings.Repeat("e", 64),
 		CreatedAt:                time.Unix(1800000000, 0).UTC(),
+		RuntimeSource:            "mlx_cache",
 	}
 	stored, _, err := store.AppendModelAdmissionOffer(context.Background(), offer)
 	if err != nil {
@@ -1972,6 +1973,9 @@ func seedBYOMAdmissionStateWithSuffix(t *testing.T, store providerws.ModelAdmiss
 	settlement.PayloadDigestSHA256 = strings.Repeat("1", 64)
 	settlement.CreatedAt = time.Unix(1800000020, 0).UTC()
 	settlement = withBYOMTrustedCatalogDecisionFields(t, settlement, provider)
+	// SPEC-047-R003 v0.1.5: a settlement decision binds the session's member
+	// (the row's own pair for a primary-row session).
+	settlement.BoundMemberSource = "candidate_row"
 	stored, err = store.AppendModelAdmissionDecision(context.Background(), settlement)
 	if err != nil {
 		t.Fatalf("AppendModelAdmissionDecision(%s): %v", state, err)

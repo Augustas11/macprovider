@@ -94,40 +94,6 @@ func (s *memoryModelAdmissionStore) PendingModelAdmissionDecision(_ context.Cont
 	return p, ok, nil
 }
 
-// ConsumePendingModelAdmissionDecision marks the record consumed by one
-// approval (approvalKey + approvalDigest for approval replay; approvedBy;
-// eventID appended). An identical-key approval replay returns the record
-// with replayed=true; a consumed record with another key is
-// errModelAdmissionPendingConsumed.
-func (s *memoryModelAdmissionStore) ConsumePendingModelAdmissionDecision(_ context.Context, id, approvalKey, approvalDigest, approvedBy, eventID string) (PendingModelAdmissionDecision, bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.ensurePending()
-	p, ok := s.pending[id]
-	if !ok || p.Invalidated {
-		return PendingModelAdmissionDecision{}, false, errModelAdmissionNoPending
-	}
-	if !p.ConsumedAt.IsZero() {
-		if p.ApprovalRequestKey == approvalKey {
-			if p.ApprovalDigest != approvalDigest {
-				return PendingModelAdmissionDecision{}, false, errModelAdmissionReplayConflict
-			}
-			return p, true, nil
-		}
-		return PendingModelAdmissionDecision{}, false, errModelAdmissionPendingConsumed
-	}
-	if time.Now().UTC().After(p.ExpiresAt) {
-		return PendingModelAdmissionDecision{}, false, errModelAdmissionPendingExpired
-	}
-	p.ConsumedAt = time.Now().UTC()
-	p.ConsumedBy = approvedBy
-	p.ConsumedEventID = eventID
-	p.ApprovalRequestKey = approvalKey
-	p.ApprovalDigest = approvalDigest
-	s.pending[id] = p
-	return p, false, nil
-}
-
 // consumePendingLocked marks the approved record consumed by the approval
 // that appended event (caller holds s.mu; the append already invalidated
 // every open record, this one is re-marked consumed instead).
@@ -310,43 +276,6 @@ func (s *SQLiteModelAdmissionStore) PendingModelAdmissionDecision(ctx context.Co
 		return PendingModelAdmissionDecision{}, false, err
 	}
 	return p, true, nil
-}
-
-func (s *SQLiteModelAdmissionStore) ConsumePendingModelAdmissionDecision(ctx context.Context, id, approvalKey, approvalDigest, approvedBy, eventID string) (PendingModelAdmissionDecision, bool, error) {
-	var stored PendingModelAdmissionDecision
-	var replayed bool
-	err := sqliteutil.Transact(ctx, s.db, func(txCtx context.Context, conn *sql.Conn) error {
-		row := conn.QueryRowContext(txCtx, sqlitePendingSelect+` WHERE id = ?`, id)
-		p, err := scanSQLitePending(row)
-		if err == sql.ErrNoRows || (err == nil && p.Invalidated) {
-			return errModelAdmissionNoPending
-		}
-		if err != nil {
-			return err
-		}
-		if !p.ConsumedAt.IsZero() {
-			if p.ApprovalRequestKey == approvalKey {
-				if p.ApprovalDigest != approvalDigest {
-					return errModelAdmissionReplayConflict
-				}
-				stored, replayed = p, true
-				return nil
-			}
-			return errModelAdmissionPendingConsumed
-		}
-		now := time.Now().UTC()
-		if now.After(p.ExpiresAt) {
-			return errModelAdmissionPendingExpired
-		}
-		if _, err := conn.ExecContext(txCtx, `UPDATE model_admission_pending_decisions SET consumed_at_utc = ?, consumed_by = ?, consumed_event_id = ?, approval_request_key = ?, approval_digest = ? WHERE id = ?`,
-			now.Format(time.RFC3339Nano), approvedBy, eventID, approvalKey, approvalDigest, id); err != nil {
-			return err
-		}
-		p.ConsumedAt, p.ConsumedBy, p.ConsumedEventID, p.ApprovalRequestKey, p.ApprovalDigest = now, approvedBy, eventID, approvalKey, approvalDigest
-		stored = p
-		return nil
-	})
-	return stored, replayed, err
 }
 
 func (s *SQLiteModelAdmissionStore) InvalidatePendingModelAdmissionDecisions(ctx context.Context, providerID, candidateID string) error {

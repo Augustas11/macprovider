@@ -24,7 +24,7 @@ func ggufArtifactBinding() *artifactidentity.Binding {
 	return &artifactidentity.Binding{
 		Member: artifactidentity.Member{
 			ModelKey: "model-a-key", ModelID: "model-a", ArtifactID: "gguf-q4", HashAlgorithm: modelidentity.GGUFFileV1,
-			Hash: strings.Repeat("c", 64), RuntimeStatus: "recommendable",
+			Hash: strings.Repeat("c", 64), RuntimeStatus: "recommendable", AllowedRuntimeSources: "llamacpp_loopback,ollama_loopback",
 		},
 		Provenance: artifactidentity.Provenance{
 			FeedSHA256: strings.Repeat("a", 64), SignerKeyID: "streamvc-autotune-static-v4",
@@ -55,6 +55,7 @@ func seedBYOMArtifactSettlementState(t *testing.T, store providerws.ModelAdmissi
 	}
 	decision := offer
 	decision.State = "catalog_priced"
+	decision.RuntimeSource = "ollama_loopback"
 	decision.RequestID = "decision-catalog-priced-artifact"
 	decision.Nonce = "nonce-catalog-priced-artifact"
 	decision.PayloadDigestSHA256 = strings.Repeat("f", 64)

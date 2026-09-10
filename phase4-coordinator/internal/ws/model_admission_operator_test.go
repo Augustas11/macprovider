@@ -2,11 +2,13 @@ package ws
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -315,5 +317,80 @@ func TestModelAdmissionOperatorDecisionPath(t *testing.T) {
 	}
 	if !s.allowModelAdmissionAttempt("p3") {
 		t.Fatal("the provider window must be untouched by operator rate limiting")
+	}
+}
+
+// Independent review: dual control needs two DISTINCT secrets (two actor
+// ids sharing one secret are one principal; an ambiguous bearer is refused),
+// a provider cannot squat coordinator/operator replay keys, an approval of an
+// expired record is pending_expired, and a no-op heartbeat refresh does not
+// advance the binding generation.
+func TestModelAdmissionOperatorDualControlSecretsAndReservedKeys(t *testing.T) {
+	f := newBindingFixture(t)
+	s := f.server
+	s.cfg.Auth.OperatorKeys = map[string]string{"alice": "shared", "bob": "shared"}
+	s.newUUID = uuid.NewString
+	c := operatorClient{t: t, s: s}
+	const decisions = "/admin/model-admission/decisions"
+	f.registerSession(t, "p1", "s1", "model-a", true)
+	offer := f.offer(t, "p1", "a", "mlx_cache", map[string]string{modelidentity.SnapshotManifestV1: bindingRowHash})
+	// The shared bearer matches two entries: no attribution, refused.
+	if code, resp := c.do(http.MethodPost, decisions, "shared", decisionRequest("p1", offer.CandidateID, "catalog_priced", "operator_ok", offer.CoordinatorEventID, "k1")); code != http.StatusUnauthorized || errorCode(resp) != "invalid_operator_token" {
+		t.Fatalf("ambiguous bearer: %d %v", code, resp)
+	}
+	// Two actors, one of them a duplicate secret of the other: not dual control.
+	s.cfg.Auth.OperatorKeys = map[string]string{"alice": "alice-secret", "bob": "alice-secret", "carol": "carol-secret"}
+	code, priced := c.do(http.MethodPost, decisions, "carol-secret", decisionRequest("p1", offer.CandidateID, "catalog_priced", "operator_ok", offer.CoordinatorEventID, "k1"))
+	if code != http.StatusOK {
+		t.Fatalf("priced: %d %v", code, priced)
+	}
+	pricedHead, _ := priced["coordinator_event_id"].(string)
+	if code, resp := c.do(http.MethodPost, decisions, "carol-secret", decisionRequest("p1", offer.CandidateID, "settlement_capable", "operator_settle", pricedHead, "k2")); code != http.StatusConflict || errorCode(resp) != "dual_control_unavailable" {
+		t.Fatalf("duplicated secrets must not count as dual control: %d %v", code, resp)
+	}
+	// Distinct secrets: pending; then an expired record is pending_expired.
+	s.cfg.Auth.OperatorKeys = map[string]string{"alice": "alice-secret", "bob": "bob-secret"}
+	code, pending := c.do(http.MethodPost, decisions, "alice-secret", decisionRequest("p1", offer.CandidateID, "settlement_capable", "operator_settle", pricedHead, "k3"))
+	pendingID, _ := pending["pending_decision_id"].(string)
+	if code != http.StatusOK || pendingID == "" {
+		t.Fatalf("pending: %d %v", code, pending)
+	}
+	later := f.now.Add(25 * time.Hour)
+	s.now = func() time.Time { return later }
+	if code, resp := c.do(http.MethodPost, decisions+"/"+pendingID+"/approve", "bob-secret", approveRequest("p1", offer.CandidateID, pendingID, pricedHead, "a1")); code != http.StatusConflict || errorCode(resp) != "pending_expired" {
+		t.Fatalf("expired pending: %d %v", code, resp)
+	}
+	// A provider-chosen replay key in a reserved namespace is rejected at
+	// offer validation (it could pre-empt a coordinator revocation or an
+	// operator decision in the shared replay index).
+	for _, key := range []string{"coordinator_revoked_abc", "operator_decision_k1", "operator_x"} {
+		maxContext := 2048
+		payload := modelAdmissionOfferSubmitRequest{
+			Schema: "model_admission_offer_submit.v1", SignatureDomain: "macprovider.model_admission.offer.v1",
+			ProviderID: "p1", CandidateID: "byom_" + strings.Repeat("a", 52), RuntimeSource: "mlx_cache",
+			ServedModelRef: "ref", DiscoveryDigestSHA256: strings.Repeat("a", 64), EvaluationDigestSHA256: strings.Repeat("b", 64),
+			ArtifactHashes:       map[string]string{},
+			AdvisoryCapabilities: &modelAdmissionAdvisoryCapabilities{MaxContextTokens: &maxContext},
+			FitEvidenceSource:    "local_discovery", LocalReadiness: "ready", RequestedDisclosureClass: "non_earning_provider_asserted",
+			Timestamp: f.now.Format(time.RFC3339Nano), Nonce: "nonce_1", IdempotencyKey: key,
+			SigningKeyDigest: strings.Repeat("e", 64), SignatureAlgorithm: "ed25519", ProviderSignature: "AA==", CLIVersion: "1.8.123",
+		}
+		if err := validateModelAdmissionPayload(payload); err == nil {
+			t.Fatalf("reserved idempotency key %q must be rejected", key)
+		}
+		payload.IdempotencyKey, payload.Nonce = "request_1", key
+		if err := validateModelAdmissionPayload(payload); err == nil {
+			t.Fatalf("reserved nonce %q must be rejected", key)
+		}
+	}
+	// A heartbeat that changes nothing keeps the binding generation.
+	s.now = func() time.Time { return f.now }
+	before, _ := s.pool.Resolve("p1", "")
+	s.withProviderSection("p1", func(section *providerSection) {
+		s.refreshModelAdmissionBindingLocked(context.Background(), "p1", section)
+	})
+	after, _ := s.pool.Resolve("p1", "")
+	if after.ModelAdmissionBindingGeneration != before.ModelAdmissionBindingGeneration || s.ModelAdmissionBindingGeneration("p1") != before.ModelAdmissionBindingGeneration {
+		t.Fatalf("no-op refresh must not advance the binding generation: %d → %d", before.ModelAdmissionBindingGeneration, after.ModelAdmissionBindingGeneration)
 	}
 }

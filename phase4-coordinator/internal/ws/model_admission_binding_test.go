@@ -137,6 +137,8 @@ func newBindingFixture(t *testing.T) *bindingFixture {
 	server := &Server{cfg: cfg, tier2: cfg.Tier2, autotuneCatalog: catalog, now: func() time.Time { return now }, log: zerolog.Nop(),
 		modelAdmissions: NewMemoryModelAdmissionStore(), catalog: bindingTier2Catalog(t, "tier2-1")}
 	server.artifactIdentitySets.sets = map[string]*artifactidentity.Index{catalog.SHA256: index}
+	// As in NewServer: generation 0 means "never validated".
+	server.artifactIdentitySets.gen = 1
 	// Production wiring: the reload stages the catalog and the feed publish
 	// installs the identity sets, as one generation.
 	server.artifactIdentitySets.staging = true

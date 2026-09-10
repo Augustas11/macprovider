@@ -7700,8 +7700,8 @@
         "phase4-coordinator/internal/ws/model_admission.go:ModelAdmissionRevocationForRuntimeDrift",
         "phase4-coordinator/internal/ws/server.go:handleHeartbeat",
         "phase4-coordinator/internal/ws/model_admission_binding.go:func sessionDriftReason",
-        "phase4-coordinator/internal/ws/model_admission_binding.go:func (s *Server) bindModelAdmissionSessionAtHello",
-        "phase4-coordinator/internal/ws/model_admission_binding.go:func (s *Server) evaluateModelAdmissionSessionOnHeartbeat",
+        "phase4-coordinator/internal/ws/model_admission_binding.go:func (s *Server) helloSessionBindingLocked",
+        "phase4-coordinator/internal/ws/model_admission_binding.go:func (s *Server) heartbeatSessionEvaluationLocked",
         "phase4-coordinator/internal/ws/model_admission_binding.go:func (s *Server) afterReleasePublished",
         "phase4-coordinator/internal/ws/model_admission_binding.go:func (s *Server) sweepProviderRelease"
       ],

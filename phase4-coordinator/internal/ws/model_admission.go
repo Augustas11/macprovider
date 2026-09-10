@@ -93,7 +93,6 @@ type ModelAdmissionStore interface {
 	CreatePendingModelAdmissionDecision(context.Context, PendingModelAdmissionDecision) (PendingModelAdmissionDecision, bool, error)
 	PendingModelAdmissionDecision(context.Context, string) (PendingModelAdmissionDecision, bool, error)
 	PendingModelAdmissionDecisionByRequest(context.Context, string, string, string) (PendingModelAdmissionDecision, bool, error)
-	ConsumePendingModelAdmissionDecision(context.Context, string, string, string, string, string) (PendingModelAdmissionDecision, bool, error)
 	InvalidatePendingModelAdmissionDecisions(context.Context, string, string) error
 }
 
@@ -2291,7 +2290,8 @@ func validateModelAdmissionPayload(payload modelAdmissionOfferSubmitRequest) err
 	if payload.EvaluationDigestSHA256 != "" && !validModelAdmissionSHA256Hex(payload.EvaluationDigestSHA256) {
 		return fmt.Errorf("invalid evaluation digest")
 	}
-	if !validModelAdmissionToken(payload.Nonce) || !validModelAdmissionToken(payload.IdempotencyKey) {
+	if !validModelAdmissionToken(payload.Nonce) || !validModelAdmissionToken(payload.IdempotencyKey) ||
+		reservedModelAdmissionToken(payload.Nonce) || reservedModelAdmissionToken(payload.IdempotencyKey) {
 		return fmt.Errorf("invalid replay key")
 	}
 	if !validModelAdmissionSHA256Hex(payload.SigningKeyDigest) {
@@ -2336,7 +2336,8 @@ func validateModelAdmissionWithdrawalPayload(payload modelAdmissionWithdrawReque
 	if !validModelAdmissionWithdrawReason(payload.ReasonCode) {
 		return fmt.Errorf("invalid reason_code")
 	}
-	if !validModelAdmissionToken(payload.Nonce) || !validModelAdmissionToken(payload.IdempotencyKey) {
+	if !validModelAdmissionToken(payload.Nonce) || !validModelAdmissionToken(payload.IdempotencyKey) ||
+		reservedModelAdmissionToken(payload.Nonce) || reservedModelAdmissionToken(payload.IdempotencyKey) {
 		return fmt.Errorf("invalid replay key")
 	}
 	if !validModelAdmissionSHA256Hex(payload.SigningKeyDigest) {
@@ -2482,6 +2483,14 @@ func pruneModelAdmissionWindow(window []time.Time, now time.Time) []time.Time {
 
 func validModelAdmissionCandidateID(value string) bool {
 	return modelAdmissionCandidatePattern.MatchString(value)
+}
+
+// reservedModelAdmissionToken rejects provider-chosen replay keys that could
+// occupy a coordinator- or operator-origin slot of the shared
+// (provider_id, request_id) replay index: a provider must never be able to
+// pre-empt its own drift revocation or an operator's decision.
+func reservedModelAdmissionToken(value string) bool {
+	return strings.HasPrefix(value, "coordinator_") || strings.HasPrefix(value, "operator_")
 }
 
 func validModelAdmissionToken(value string) bool {

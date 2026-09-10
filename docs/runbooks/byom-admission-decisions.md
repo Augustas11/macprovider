@@ -25,7 +25,17 @@ listing shows.
   candidate can only be priced while its row is `recommendable` and the
   Tier-2 material for the row is present.
 - Requests are bounded and rate-limited per operator credential and source
-  address (independent of any provider window).
+  address (independent of any provider window). A bearer that matches more
+  than one `operator_keys` entry is refused: two entries sharing a secret are
+  one principal and cannot dual-control.
+- The `MODEL_ADMISSION_SUBMISSIONS` kill switch stops new provider offers
+  only; these operator endpoints stay live (no new candidate can appear, but
+  an existing one can still be decided).
+- The artifact feed's 14-day freshness (SPEC-023 §3.7.6) is load-bearing:
+  once it lapses, feed-member sessions stop verifying and the next reload
+  revokes their decided candidates (`runtime_identity_drift` /
+  `catalog_artifact_feed_changed`, re-entry = fresh offer). Renew the feed
+  before it expires (`docs/runbooks/autotune-feed-renewal.md`).
 
 Set once per shell (never print the key; read it from the operator secret
 store):

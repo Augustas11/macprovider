@@ -149,32 +149,11 @@ func TestModelAdmissionDecisionStoreCASAndPending(t *testing.T) {
 			if _, _, err := store.CreatePendingModelAdmissionDecision(ctx, pendingConflict); err == nil {
 				t.Fatal("pending same key different digest must conflict")
 			}
-			consumed, replayed, err := store.ConsumePendingModelAdmissionDecision(ctx, "pend-1", "approval-key-1", stringsOf("8", 64), "operator:bob", stringsOf("9", 64))
-			if err != nil || replayed || consumed.ConsumedBy != "operator:bob" {
-				t.Fatalf("consume replayed=%v err=%v consumed=%+v", replayed, err, consumed)
+			if got, ok, err := store.PendingModelAdmissionDecision(ctx, "pend-1"); err != nil || !ok || got.Invalidated || !got.ConsumedAt.IsZero() || got.RequestedBy != "operator:alice" || got.EvaluatedHead != priced.CoordinatorEventID {
+				t.Fatalf("pending lookup: %+v ok=%v err=%v", got, ok, err)
 			}
-			if _, replayed, err := store.ConsumePendingModelAdmissionDecision(ctx, "pend-1", "approval-key-1", stringsOf("8", 64), "operator:bob", stringsOf("9", 64)); err != nil || !replayed {
-				t.Fatalf("approval replay replayed=%v err=%v", replayed, err)
-			}
-			if _, _, err := store.ConsumePendingModelAdmissionDecision(ctx, "pend-1", "approval-key-1", stringsOf("a", 64), "operator:bob", stringsOf("9", 64)); err == nil {
-				t.Fatal("approval same key different digest must conflict")
-			}
-			if _, _, err := store.ConsumePendingModelAdmissionDecision(ctx, "pend-1", "approval-key-2", stringsOf("8", 64), "operator:carol", stringsOf("9", 64)); !errors.Is(err, providerws.ErrModelAdmissionPendingConsumed) {
-				t.Fatalf("second approval must be pending_consumed, got %v", err)
-			}
-			if _, _, err := store.ConsumePendingModelAdmissionDecision(ctx, "pend-missing", "k", "d", "operator:bob", "e"); !errors.Is(err, providerws.ErrModelAdmissionNoPending) {
-				t.Fatalf("unknown pending must be no_pending, got %v", err)
-			}
-			expired := pending
-			expired.ID = "pend-expired"
-			expired.RequestID = "operator_decision_" + offer.CandidateID + "_key-3"
-			expired.CreatedAt = time.Now().UTC().Add(-48 * time.Hour)
-			expired.ExpiresAt = expired.CreatedAt.Add(24 * time.Hour)
-			if _, _, err := store.CreatePendingModelAdmissionDecision(ctx, expired); err != nil {
-				t.Fatal(err)
-			}
-			if _, _, err := store.ConsumePendingModelAdmissionDecision(ctx, "pend-expired", "k", "d", "operator:bob", "e"); !errors.Is(err, providerws.ErrModelAdmissionPendingExpired) {
-				t.Fatalf("expired pending must be pending_expired, got %v", err)
+			if _, ok, err := store.PendingModelAdmissionDecision(ctx, "pend-missing"); err != nil || ok {
+				t.Fatalf("unknown pending must not be found: ok=%v err=%v", ok, err)
 			}
 			// An approval append consumes its own record atomically while
 			// invalidating every other open record for the candidate.
@@ -206,8 +185,8 @@ func TestModelAdmissionDecisionStoreCASAndPending(t *testing.T) {
 			if err != nil || !ok || consumedRecord.Invalidated || consumedRecord.ConsumedAt.IsZero() || consumedRecord.ConsumedBy != "operator:bob" || consumedRecord.ConsumedEventID != settled.CoordinatorEventID || consumedRecord.ApprovalRequestKey != settle.RequestID {
 				t.Fatalf("approved record must be consumed, not invalidated: %+v err=%v", consumedRecord, err)
 			}
-			if _, _, err := store.ConsumePendingModelAdmissionDecision(ctx, "pend-approve", "other-key", stringsOf("c", 64), "operator:carol", "x"); !errors.Is(err, providerws.ErrModelAdmissionPendingConsumed) {
-				t.Fatalf("distinct-key approval of the consumed record must be pending_consumed, got %v", err)
+			if _, ok, err := store.PendingModelAdmissionDecisionByRequest(ctx, offer.ProviderID, offer.CandidateID, approvalPending.RequestID); err != nil || !ok {
+				t.Fatalf("consumed record must stay addressable by its request: ok=%v err=%v", ok, err)
 			}
 			if siblingRecord, _, _ := store.PendingModelAdmissionDecision(ctx, "pend-sibling"); !siblingRecord.Invalidated {
 				t.Fatal("sibling record must be invalidated by the append")
@@ -230,9 +209,6 @@ func TestModelAdmissionDecisionStoreCASAndPending(t *testing.T) {
 			revoke.CreatedAt = time.Unix(1800000050, 0).UTC()
 			if _, err := store.AppendModelAdmissionDecision(ctx, revoke); err != nil {
 				t.Fatalf("revocation failed: %v", err)
-			}
-			if _, _, err := store.ConsumePendingModelAdmissionDecision(ctx, "pend-open", "k", "d", "operator:bob", "e"); !errors.Is(err, providerws.ErrModelAdmissionNoPending) {
-				t.Fatalf("appended event must invalidate pending, got %v", err)
 			}
 			got, ok, err := store.PendingModelAdmissionDecision(ctx, "pend-open")
 			if err != nil || !ok || !got.Invalidated {
