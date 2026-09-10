@@ -96,6 +96,25 @@ func TestArtifactIdentitySetsPerRetainedRelease(t *testing.T) {
 
 // LoadPreviousAutotuneFeeds follows `.previous-target` to the retained release
 // directory and loads its artifact feed when present.
+// The feeds a reload loads carry the configuration they came from, so the
+// publication resolves retained previous releases from the reload's own
+// configuration rather than the boot-time one.
+func TestLoadAutotuneFeedsRecordsSourceConfig(t *testing.T) {
+	t.Parallel()
+	publicKey, privateKey := testSigningKey(t)
+	keyring := map[string]ed25519.PublicKey{"test-key": publicKey}
+	cfg := versionedArtifactBoundFeedSet(t, "release-src", func(sha string) []byte {
+		return catalogArtifactsFeedWithModels("release-src", "2026-07-10T00:00:00Z", "autotune-policy-v1", sha, `"test-model":`+artifactModelJSON(verifiedGGUF(strings.Repeat("c", 64))))
+	}, privateKey, keyring)
+	feeds, err := buyer.LoadAutotuneFeeds(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if feeds.SourceConfig == nil || feeds.SourceConfig.AutotuneCandidatesPath != cfg.AutotuneCandidatesPath || feeds.SourceConfig.CatalogArtifactsPath != cfg.CatalogArtifactsPath {
+		t.Fatalf("loaded feeds must record their source configuration: %+v", feeds.SourceConfig)
+	}
+}
+
 func TestLoadPreviousAutotuneFeedsFollowsPreviousTarget(t *testing.T) {
 	t.Parallel()
 	publicKey, privateKey := testSigningKey(t)

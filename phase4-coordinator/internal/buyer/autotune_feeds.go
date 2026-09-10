@@ -63,6 +63,12 @@ type AutotuneFeeds struct {
 	CatalogArtifactsJSON         []byte
 	CatalogArtifactsSig          []byte
 	CatalogArtifactsVerification AutotuneFeedVerification
+	// SourceConfig is the exact feed configuration these feeds were loaded
+	// from (paths, previous-release target, keyring), so a publication that
+	// needs the retained previous releases resolves them from the SAME
+	// configuration a SIGHUP reload validated — never from boot-time config.
+	// Nil for feeds not produced by LoadAutotuneFeeds.
+	SourceConfig *config.AutotuneFeedsConfig
 }
 
 // AutotuneFeedVerification records the trust decision for the exact bytes
@@ -190,6 +196,7 @@ func LoadAutotuneFeeds(cfg config.AutotuneFeedsConfig) (AutotuneFeeds, error) {
 		CatalogArtifactsJSON:           artifacts.jsonBytes,
 		CatalogArtifactsSig:            artifacts.sigBytes,
 		CatalogArtifactsVerification:   artifacts.verification,
+		SourceConfig:                   &cfg,
 	}, nil
 }
 
