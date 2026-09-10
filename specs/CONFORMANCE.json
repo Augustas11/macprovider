@@ -1815,7 +1815,7 @@
       "implementation": [
         "phase4-coordinator/internal/artifactidentity/index.go:Index",
         "phase4-coordinator/internal/buyer/artifact_identity_index.go:BuildArtifactIdentityIndex",
-        "phase4-coordinator/internal/ws/server.go:func (s *Server) verifyProviderModelIdentity",
+        "phase4-coordinator/internal/ws/server.go:func (s *Server) verifyModelIdentity",
         "phase4-coordinator/internal/ws/server.go:func (s *Server) resolveArtifactIdentity",
         "phase4-coordinator/internal/buyer/model_admission.go:func (s *Server) byomSettlementPrereqsReady",
         "phase4-coordinator/internal/billing/route_snapshot.go:func (r RouteSnapshot) validateArtifactEvidence",

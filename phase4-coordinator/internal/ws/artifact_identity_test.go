@@ -42,8 +42,8 @@ func TestArtifactFeedIdentityVerifiesExactMemberForTheAdmittedRelease(t *testing
 		FeedSHA256: strings.Repeat("a", 64), SignerKeyID: "k1", ReleaseID: "test", CandidateCatalogSHA256: catalog.SHA256,
 		FeedGeneratedAt: now.Add(-24 * time.Hour),
 	}, []artifactidentity.Member{
-		{ModelKey: "small", ArtifactID: "mlx-4bit", HashAlgorithm: modelidentity.SnapshotManifestV1, Hash: rowHash, IsPrimary: true, RuntimeStatus: "recommendable"},
-		{ModelKey: "small", ArtifactID: "gguf-q4", HashAlgorithm: modelidentity.GGUFFileV1, Hash: ggufHash, RuntimeStatus: "recommendable"},
+		{ModelKey: "small", ModelID: "model-a", ArtifactID: "mlx-4bit", HashAlgorithm: modelidentity.SnapshotManifestV1, Hash: rowHash, IsPrimary: true, RuntimeStatus: "recommendable"},
+		{ModelKey: "small", ModelID: "model-a", ArtifactID: "gguf-q4", HashAlgorithm: modelidentity.GGUFFileV1, Hash: ggufHash, RuntimeStatus: "recommendable"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -89,18 +89,63 @@ func TestArtifactFeedIdentityVerifiesExactMemberForTheAdmittedRelease(t *testing
 	if v := server.verifyModelIdentity(otherRelease); v.Status != pool.HashStatusMismatch || v.Artifact != nil {
 		t.Fatalf("feed of another release must not supply the identity: %+v", v)
 	}
-	// The resolved member's key must be the session's admitted key.
+	// A session-asserted key that disagrees with the resolved key fails closed
+	// (SPEC-010-R007(c)).
 	otherKey := gguf
 	otherKey.CatalogModelKey = "other-model"
 	if v := server.verifyModelIdentity(otherKey); v.Status != pool.HashStatusMismatch || v.Artifact != nil {
-		t.Fatalf("member of another key must fail closed: %+v", v)
+		t.Fatalf("asserted key disagreeing with the member must fail closed: %+v", v)
 	}
-	// Without an admitted key the served model id (normalized) is the key;
-	// "model-a" is not the catalog key "small".
+	// The production session asserts no key (hello carries the row's
+	// model_id, `model_catalog_model_id`): the member is tied to the row by
+	// its model id, so the pair resolves for the model the session serves…
 	noKey := gguf
 	noKey.CatalogModelKey = ""
-	if v := server.verifyModelIdentity(noKey); v.Status != pool.HashStatusMismatch {
-		t.Fatalf("model id is not the catalog key: %+v", v)
+	if v := server.verifyModelIdentity(noKey); v.Status != pool.HashStatusVerified || v.Artifact == nil || v.Artifact.Member.ModelKey != "small" {
+		t.Fatalf("member resolves for the row's model id without an asserted key: %+v", v)
+	}
+	// …and never for a session serving another model id, key or no key.
+	otherModel := noKey
+	otherModel.ModelID = "model-b"
+	if v := server.verifyModelIdentity(otherModel); v.Status != pool.HashStatusMismatch || v.Artifact != nil {
+		t.Fatalf("member of another row must fail closed: %+v", v)
+	}
+	otherModel.CatalogModelKey = "small"
+	if v := server.verifyModelIdentity(otherModel); v.Status != pool.HashStatusMismatch || v.Artifact != nil {
+		t.Fatalf("an asserted key never substitutes for the served model id: %+v", v)
+	}
+	// Only a validated catalog envelope binds a release: a bridge/legacy
+	// session's digest never reaches the index (hello and heartbeat legs).
+	for _, mode := range []string{"update_bridge", "legacy", "legacy_bridge", "not_required", ""} {
+		if got := admittedCandidateCatalogSHA256(mode, catalog.SHA256); got != "" {
+			t.Fatalf("mode %q must not bind a release, got %q", mode, got)
+		}
+	}
+	for _, mode := range []string{"current", "previous"} {
+		if got := admittedCandidateCatalogSHA256(mode, catalog.SHA256); got != catalog.SHA256 {
+			t.Fatalf("mode %q must bind the validated envelope, got %q", mode, got)
+		}
+	}
+	bridge := pool.Provider{ModelID: "model-a", ExpectedModelHash: rowHash, ModelHash: ggufHash, ModelHashAlgorithm: modelidentity.GGUFFileV1,
+		CandidateCatalogSHA256: catalog.SHA256, CatalogAdmissionMode: "update_bridge"}
+	if v := server.verifyModelIdentity(providerIdentityRequest(bridge)); v.Status != pool.HashStatusMismatch || v.Artifact != nil {
+		t.Fatalf("bridge session must not bind artifact identity: %+v", v)
+	}
+	bridge.CatalogAdmissionMode = "current"
+	if v := server.verifyModelIdentity(providerIdentityRequest(bridge)); v.Status != pool.HashStatusVerified || v.Artifact == nil {
+		t.Fatalf("validated envelope binds: %+v", v)
+	}
+	// A compatible-previous release has no loaded artifact feed: such a
+	// session keeps the primary-row path only (SPEC-010-R004 as amended).
+	previous := gguf
+	previous.CandidateCatalogSHA256 = strings.Repeat("9", 64)
+	if v := server.verifyModelIdentity(previous); v.Status != pool.HashStatusMismatch || v.Artifact != nil {
+		t.Fatalf("compatible-previous release without its feed must be primary-only: %+v", v)
+	}
+	previousPrimary := primary
+	previousPrimary.CandidateCatalogSHA256 = strings.Repeat("9", 64)
+	if v := server.verifyModelIdentity(previousPrimary); v.Status != pool.HashStatusVerified || v.Artifact != nil {
+		t.Fatalf("primary row path on a compatible-previous release: %+v", v)
 	}
 	// SPEC-023 §3.7.6 rules 4–5: 14 days after the feed's stamp the artifact
 	// leg goes dark while the primary-row path is untouched.
@@ -118,13 +163,8 @@ func TestArtifactFeedIdentityVerifiesExactMemberForTheAdmittedRelease(t *testing
 	if v := server.verifyModelIdentity(gguf); v.Status != pool.HashStatusMismatch || v.Artifact != nil {
 		t.Fatalf("swap without an index must drop artifact authority: %+v", v)
 	}
-	server.SetAutotuneCatalogWithArtifactIndex(catalog, index)
-	if v := server.verifyModelIdentity(gguf); v.Status != pool.HashStatusVerified || v.Artifact == nil {
-		t.Fatalf("swap with its index restores artifact authority: %+v", v)
-	}
 	// The SIGHUP lifecycle: catalog swap (index dropped), then the feed publish
 	// observer installs the index rebuilt from the published feeds.
-	server.SetAutotuneCatalog(catalog)
 	server.SetArtifactIdentityIndex(index)
 	if v := server.verifyModelIdentity(gguf); v.Status != pool.HashStatusVerified || v.Artifact == nil {
 		t.Fatalf("published index restores artifact authority: %+v", v)
@@ -188,5 +228,49 @@ func TestGGUFAdmissionPredicateRequiresCompleteArtifactEvidence(t *testing.T) {
 	mismatched.ArtifactHash = strings.Repeat("d", 64)
 	if _, ok := ModelAdmissionSettlementBindingForRouteSnapshot(event, mismatched); ok {
 		t.Fatal("evidence naming another hash must not bind")
+	}
+}
+
+// SPEC-047-R002 `artifact_hashes` is keyed by the SPEC-010-R002 algorithm
+// name — the CLI posts `macprovider.gguf-file.v1` (SPEC-010 v1.7 R007(a)) —
+// so the offer validator accepts exactly the canonical names and nothing
+// looser. This is the CLI→coordinator boundary a free-token grammar would
+// have closed on every GGUF offer.
+func TestModelAdmissionOfferArtifactHashesAreKeyedByCanonicalAlgorithm(t *testing.T) {
+	t.Parallel()
+	hex := func(c string) string { return strings.Repeat(c, 64) }
+	for name, tc := range map[string]struct {
+		hashes map[string]string
+		ok     bool
+	}{
+		"gguf":              {map[string]string{modelidentity.GGUFFileV1: hex("c")}, true},
+		"snapshot manifest": {map[string]string{modelidentity.SnapshotManifestV1: hex("d")}, true},
+		"both":              {map[string]string{modelidentity.GGUFFileV1: hex("c"), modelidentity.SnapshotManifestV1: hex("d")}, true},
+		"empty":             {map[string]string{}, true},
+		"free token":        {map[string]string{"gguf": hex("c")}, false},
+		"generic name":      {map[string]string{"sha256": hex("c")}, false},
+		"weights manifest":  {map[string]string{modelidentity.SafetensorsManifestV1: hex("c")}, false},
+		"uppercase digest":  {map[string]string{modelidentity.GGUFFileV1: strings.ToUpper(hex("c"))}, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			maxContext := 2048
+			payload := modelAdmissionOfferSubmitRequest{
+				Schema: "model_admission_offer_submit.v1", SignatureDomain: "macprovider.model_admission.offer.v1",
+				ProviderID: "provider-byom-a", CandidateID: "byom_" + strings.Repeat("a", 52), RuntimeSource: "ollama_loopback",
+				ServedModelRef: "ollama:test-model:q4", DiscoveryDigestSHA256: hex("a"), EvaluationDigestSHA256: hex("b"),
+				ArtifactHashes:       tc.hashes,
+				AdvisoryCapabilities: &modelAdmissionAdvisoryCapabilities{MaxContextTokens: &maxContext},
+				FitEvidenceSource:    "local_discovery", LocalReadiness: "ready", RequestedDisclosureClass: "non_earning_provider_asserted",
+				Timestamp: time.Now().UTC().Format(time.RFC3339Nano), Nonce: "nonce_1", IdempotencyKey: "request_1",
+				SigningKeyDigest: hex("e"), SignatureAlgorithm: "ed25519", ProviderSignature: "AA==", CLIVersion: "1.8.123",
+			}
+			err := validateModelAdmissionPayload(payload)
+			if tc.ok && err != nil {
+				t.Fatalf("%s: canonical artifact_hashes must validate: %v", name, err)
+			}
+			if !tc.ok && err == nil {
+				t.Fatalf("%s: non-canonical artifact_hashes must be rejected", name)
+			}
+		})
 	}
 }

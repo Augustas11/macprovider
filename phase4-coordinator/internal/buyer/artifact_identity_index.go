@@ -2,6 +2,7 @@ package buyer
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/augstar/macprovider-coordinator/internal/artifactidentity"
 )
@@ -47,6 +48,7 @@ func BuildArtifactIdentityIndex(feeds AutotuneFeeds) (*artifactidentity.Index, e
 			}
 			members = append(members, artifactidentity.Member{
 				ModelKey:      key,
+				ModelID:       strings.ToLower(strings.TrimSpace(row.ModelID)),
 				ArtifactID:    artifactID,
 				HashAlgorithm: entry.HashAlgorithm,
 				Hash:          entry.Hash,

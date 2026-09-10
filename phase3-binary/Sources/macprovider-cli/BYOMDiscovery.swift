@@ -1266,6 +1266,7 @@ enum BYOMModelAdmissionError: Error, Equatable, CustomStringConvertible {
     case httpStatus(Int)
     case invalidStatusSchema
     case artifactIdentityChanged
+    case artifactHashingTimedOut
 
     var description: String {
         switch self {
@@ -1293,6 +1294,8 @@ enum BYOMModelAdmissionError: Error, Equatable, CustomStringConvertible {
             return "invalid coordinator URL; use wss:// or https://"
         case .artifactIdentityChanged:
             return "the served model's artifact file changed while its digest was being computed; the offer was not submitted (SPEC-010-R007(a)) — re-run models offer once the local Ollama store is stable"
+        case .artifactHashingTimedOut:
+            return "artifact hashing exceeded its time budget; identity not reported (SPEC-010-R007(a)); retry on a faster volume or with the store local"
         case .httpStatus(let status):
             if status == 404 || status == 405 {
                 // A pre-BYOM coordinator has no SPEC-047 admission endpoints.
@@ -1779,7 +1782,7 @@ struct BYOMModelAdmissionRuntime: Sendable {
         guard let identity = try identityStore.loadAdmissionIdentity(providerId: providerID) else {
             throw BYOMModelAdmissionError.missingAdmissionIdentity(providerID: providerID)
         }
-        let evidence = try Self.artifactEvidence(for: candidate, environment: environment)
+        let evidence = try Self.artifactEvidence(for: candidate, environment: environment, deadline: Date().addingTimeInterval(Self.artifactHashBudgetSeconds))
         let package = try BYOMOfferSubmissionBuilder.makePackage(
             providerID: providerID,
             candidate: candidate,
@@ -1810,15 +1813,22 @@ struct BYOMModelAdmissionRuntime: Sendable {
     /// no longer resolves, is not GGUF, or changes fails the offer closed. A
     /// candidate that never had artifact evidence proceeds identity-less, as
     /// v0.1 did.
-    static func artifactEvidence(for candidate: BYOMDiscoveryWire.Candidate, environment: BYOMDiscoveryEnvironment) throws -> BYOMArtifactEvidence? {
+    /// The explicit time budget for the offer's binding hash. Generous — a
+    /// legitimate large GGUF on a local volume must still offer — but bounded,
+    /// so a stalled or network-backed store cannot hang the command.
+    static let artifactHashBudgetSeconds: Double = 600
+
+    static func artifactEvidence(for candidate: BYOMDiscoveryWire.Candidate, environment: BYOMDiscoveryEnvironment, deadline: Date? = nil) throws -> BYOMArtifactEvidence? {
         guard candidate.runtimeSource == "ollama_loopback" else { return nil }
         let artifactBacked = candidate.identityState == "catalog_matched" || candidate.identityState == "artifact_hash_available"
         do {
-            return try environment.artifactDigests.computeEvidence(forOllamaModel: candidate.servedModelRef)
+            return try environment.artifactDigests.computeEvidence(forOllamaModel: candidate.servedModelRef, deadline: deadline)
         } catch BYOMArtifactDigestError.unresolvedBlob where !artifactBacked {
             return nil
         } catch BYOMArtifactDigestError.notGGUF where !artifactBacked {
             return nil
+        } catch BYOMArtifactDigestError.hashingBudgetExceeded {
+            throw BYOMModelAdmissionError.artifactHashingTimedOut
         } catch {
             throw BYOMModelAdmissionError.artifactIdentityChanged
         }

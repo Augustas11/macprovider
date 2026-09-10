@@ -559,21 +559,15 @@ func (s *Server) autotuneCatalogSnapshot() (*autotune.Catalog, map[string]*autot
 // SIGHUP feed reload calls this only after the new feed is parsed and validated;
 // on any validation failure the caller keeps the prior catalog (fail-closed).
 func (s *Server) SetAutotuneCatalog(catalog *autotune.Catalog, compatible ...*autotune.Catalog) {
-	// A catalog swap without its artifact index drops the index: an index
-	// bound to another release's digest must never outlive that release.
-	s.SetAutotuneCatalogWithArtifactIndex(catalog, nil, compatible...)
-}
-
-// SetAutotuneCatalogWithArtifactIndex swaps the admission catalog AND the
-// SPEC-010 v1.7 R007 expected-identity set derived from the same loaded
-// feeds under one lock, so no session can be verified against a catalog and
-// an index of different releases (SIGHUP reload path).
-func (s *Server) SetAutotuneCatalogWithArtifactIndex(catalog *autotune.Catalog, index *artifactidentity.Index, compatible ...*autotune.Catalog) {
 	next := buildCompatibleCatalogSet(catalog, compatible)
 	s.autotuneCatalogMu.Lock()
 	s.autotuneCatalog = catalog
 	s.autotuneCompatibleCatalogs = next
-	s.artifactIdentityIndex = index
+	// SPEC-010-R007(b): an index is bound to exactly one release; the one
+	// built for the previous catalog never outlives it. The feed publish that
+	// follows a reload installs the replacement (SetArtifactIdentityIndex),
+	// so between the two steps every session is primary-only (fail closed).
+	s.artifactIdentityIndex = nil
 	s.autotuneCatalogMu.Unlock()
 }
 
@@ -1380,9 +1374,20 @@ func providerIdentityRequest(p pool.Provider) pool.ModelIdentityRequest {
 		ExpectedHash:           p.ExpectedModelHash,
 		ReportedHash:           p.ModelHash,
 		ReportedAlgorithm:      p.ModelHashAlgorithm,
-		CandidateCatalogSHA256: p.CandidateCatalogSHA256,
+		CandidateCatalogSHA256: admittedCandidateCatalogSHA256(p.CatalogAdmissionMode, p.CandidateCatalogSHA256),
 		CatalogModelKey:        p.ModelAdmissionCatalogModelKey,
 	}
+}
+
+// admittedCandidateCatalogSHA256 is the release a session may bind artifact
+// identity to: only a catalog envelope the coordinator validated ("current"
+// or a compatible "previous"). A bridge or legacy session presented no
+// validated envelope, so its digest never reaches the index.
+func admittedCandidateCatalogSHA256(catalogAdmissionMode, candidateCatalogSHA256 string) string {
+	if catalogAdmissionMode != "current" && catalogAdmissionMode != "previous" {
+		return ""
+	}
+	return candidateCatalogSHA256
 }
 
 func (s *Server) RefreshTier2HashStatuses() int {
@@ -1391,6 +1396,14 @@ func (s *Server) RefreshTier2HashStatuses() int {
 		return s.pool.UpdateHashStatuses(func(pool.Provider) pool.HashStatus {
 			return ""
 		})
+	}
+	if index := s.currentArtifactIdentityIndex(); index != nil && !index.Fresh(s.now()) {
+		// SPEC-023 §3.7.6 rules 4–5 in effect: distinguishable from provider
+		// drift, which the per-session transition log below cannot tell apart.
+		s.log.Warn().
+			Str("event", "artifact_identity_index_stale").
+			Time("feed_generated_at", index.Provenance().FeedGeneratedAt).
+			Msg("artifact feed is stale; artifact-derived identity is disabled until the feed is re-issued and reloaded (primary-row identity unaffected)")
 	}
 	return s.pool.UpdateModelIdentities(func(provider pool.Provider) pool.ModelIdentityVerdict {
 		verdict := s.verifyModelIdentity(providerIdentityRequest(provider))
@@ -1486,11 +1499,15 @@ func (s *Server) resolveArtifactIdentity(req pool.ModelIdentityRequest, algorith
 	if !ok {
 		return artifactidentity.Binding{}, false
 	}
-	admittedKey := strings.ToLower(strings.TrimSpace(req.CatalogModelKey))
-	if admittedKey == "" {
-		admittedKey = strings.ToLower(strings.TrimSpace(req.ModelID))
+	// The session serves, routes, and prices under the catalog row's
+	// `model_id` (what hello names as model_catalog_model_id); the member must
+	// belong to that row. A row KEY is a different namespace: when the session
+	// asserted one at offer time it must agree with the resolved key
+	// (SPEC-010-R007(c)); an asserted key is never a substitute for the row.
+	if binding.Member.ModelID != strings.ToLower(strings.TrimSpace(req.ModelID)) {
+		return artifactidentity.Binding{}, false
 	}
-	if binding.Member.ModelKey != admittedKey {
+	if asserted := strings.ToLower(strings.TrimSpace(req.CatalogModelKey)); asserted != "" && asserted != binding.Member.ModelKey {
 		return artifactidentity.Binding{}, false
 	}
 	return binding, true
@@ -2891,7 +2908,7 @@ func (s *Server) prepareProviderAdmissionWithQuotaCheck(conn net.Conn, auth prov
 			ExpectedHash:           expectedModelHash,
 			ReportedHash:           hello.ModelHash,
 			ReportedAlgorithm:      hello.ModelHashAlgorithm,
-			CandidateCatalogSHA256: hello.CandidateCatalogSHA256,
+			CandidateCatalogSHA256: admittedCandidateCatalogSHA256(catalogAdmissionMode, hello.CandidateCatalogSHA256),
 		})
 		hashStatus = verdict.Status
 		artifactIdentity = verdict.Artifact

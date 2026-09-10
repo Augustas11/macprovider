@@ -23,7 +23,7 @@ import (
 func ggufArtifactBinding() *artifactidentity.Binding {
 	return &artifactidentity.Binding{
 		Member: artifactidentity.Member{
-			ModelKey: "model-a", ArtifactID: "gguf-q4", HashAlgorithm: modelidentity.GGUFFileV1,
+			ModelKey: "model-a-key", ModelID: "model-a", ArtifactID: "gguf-q4", HashAlgorithm: modelidentity.GGUFFileV1,
 			Hash: strings.Repeat("c", 64), RuntimeStatus: "recommendable",
 		},
 		Provenance: artifactidentity.Provenance{
@@ -209,6 +209,55 @@ func TestBYOMGGUFPairWithoutArtifactBindingNeverSettles(t *testing.T) {
 	}
 }
 
+// SPEC-023 §3.7.4 / AC-CAT-7(iii) and SPEC-010-R007(c) at route time: a
+// `listed` row's member stops at network_visible_unpriced whatever its
+// admission state says, a member of another row (model id) never settles for
+// this session, and an asserted key that disagrees with the member fails
+// closed — each while the same session with a recommendable, row-matching
+// member DOES settle (TestBYOMArtifactMemberSettlesWithSixValueEvidence).
+func TestBYOMArtifactMemberRouteTimeGatesFailClosed(t *testing.T) {
+	for name, mutate := range map[string]func(*pool.Provider){
+		"listed row": func(p *pool.Provider) { p.ArtifactIdentity.Member.RuntimeStatus = "listed" },
+		"other row":  func(p *pool.Provider) { p.ArtifactIdentity.Member.ModelID = "model-b" },
+		"asserted key disagrees": func(p *pool.Provider) {
+			p.ModelAdmissionCatalogModelKey = "some-other-key"
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			tier2.ResetForTest()
+			t.Cleanup(tier2.ResetForTest)
+			raw, pubkey := routeSnapshotCatalogFixture(t, "byom-gate-"+strings.ReplaceAll(name, " ", "-"), time.Now().UTC().Add(time.Hour))
+			if err := tier2.Configure(config.Tier2Config{ObserveEnabled: true, CatalogPath: writeRouteSnapshotCatalog(t, raw), CatalogPublicKey: pubkey, RequireHashVerified: true}, zerolog.Nop()); err != nil {
+				t.Fatalf("tier2.Configure: %v", err)
+			}
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { writeProviderOK(w) }))
+			defer upstream.Close()
+			registry := pool.NewRegistry(nil)
+			registerSettlementProvider(registry, "p1", "session-1", upstream.URL, 30, bytes.Repeat([]byte{0x79}, 32))
+			provider := byomAdmissionProvider(t, registry.Snapshot()[0])
+			binding := ggufArtifactBinding()
+			store := providerws.NewMemoryModelAdmissionStore()
+			seedBYOMArtifactSettlementState(t, store, provider, binding, "settlement_capable")
+			routeProvider := clearBYOMAdmissionFields(provider)
+			routeProvider.ModelHash = binding.Member.Hash
+			routeProvider.ModelHashAlgorithm = binding.Member.HashAlgorithm
+			routeProvider.ExpectedModelHash = buyerTestHash
+			routeProvider.HashStatus = pool.HashStatusVerified
+			routeProvider.ArtifactIdentity = binding
+			mutate(&routeProvider)
+			registry.Register(&routeProvider, nil)
+			server, dbPath := artifactSettlementServer(t, routeProvider, registry, store)
+			rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`), nil)
+			if rr.Code == http.StatusOK {
+				t.Fatalf("%s: must not settle: status=%d body=%s", name, rr.Code, rr.Body.String())
+			}
+			if got := ledgerCreditCount(t, dbPath); got != 0 {
+				t.Fatalf("%s: ledger credits=%d want 0", name, got)
+			}
+		})
+	}
+}
+
 // SPEC-010-R007(d): a secondary snapshot-manifest member is feed-derived too.
 // Without a BYOM admission binding there is no source for the six values, so
 // the recorder fails closed rather than writing a member hash with no
@@ -227,7 +276,7 @@ func TestSecondaryMLXMemberWithoutAdmissionEvidenceNeverSettles(t *testing.T) {
 	provider := registry.Snapshot()[0]
 	secondary := ggufArtifactBinding()
 	secondary.Member = artifactidentity.Member{
-		ModelKey: "model-a", ArtifactID: "mlx-8bit", HashAlgorithm: modelidentity.SnapshotManifestV1,
+		ModelKey: "model-a-key", ModelID: "model-a", ArtifactID: "mlx-8bit", HashAlgorithm: modelidentity.SnapshotManifestV1,
 		Hash: strings.Repeat("e", 64), RuntimeStatus: "recommendable",
 	}
 	provider.ModelHash = secondary.Member.Hash
@@ -239,8 +288,10 @@ func TestSecondaryMLXMemberWithoutAdmissionEvidenceNeverSettles(t *testing.T) {
 	// No admission store at all: the legacy (non-BYOM) routing path.
 	server, dbPath := artifactSettlementServer(t, provider, registry, nil)
 	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`), nil)
-	if rr.Code == http.StatusOK {
-		t.Fatalf("secondary member without evidence must not route/settle: status=%d", rr.Code)
+	// Excluded from routing (no capacity), never dispatched to fail at the
+	// snapshot: the buyer sees the same outcome as for a mismatched session.
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("secondary member without evidence must be excluded from routing: status=%d body=%s", rr.Code, rr.Body.String())
 	}
 	if rows := queryRouteSnapshotBYOMBindings(t, dbPath); len(rows) != 0 {
 		t.Fatalf("no route snapshot may be written without the six values: %#v", rows)

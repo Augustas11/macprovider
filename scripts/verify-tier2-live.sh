@@ -251,7 +251,8 @@ if mode in ("full", "enforce-ready", "enforced", "b6-ready", "encrypted-leg", "a
         invalid_snapshot_providers = []
         for provider in providers:
             if (
-                provider.get("model_hash_algorithm") != "macprovider.snapshot-manifest.v1"
+                provider.get("model_hash_algorithm")
+                not in ("macprovider.snapshot-manifest.v1", "macprovider.gguf-file.v1")
                 or re.fullmatch(r"[0-9a-f]{64}", str(provider.get("model_hash") or "")) is None
                 or provider.get("hash_status") != "hash_verified"
                 or str(provider.get("state") or "") != "ready"

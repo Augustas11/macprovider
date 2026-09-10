@@ -47,6 +47,11 @@ func TestBuildArtifactIdentityIndexFromBoundFeeds(t *testing.T) {
 	if !ok || gguf.Member.IsPrimary || gguf.Member.ArtifactID != "gguf-q4" || gguf.Member.RuntimeStatus != "recommendable" {
 		t.Fatalf("gguf member: %+v %v", gguf, ok)
 	}
+	// The member carries the ROW's model id (normalized), the identity a
+	// session serves under — never only the row key.
+	if gguf.Member.ModelID != "mlx-community/test-model-4bit" || primary.Member.ModelID != gguf.Member.ModelID {
+		t.Fatalf("members must carry the row model id: %+v / %+v", primary.Member, gguf.Member)
+	}
 	prov := index.Provenance()
 	if prov.FeedSHA256 != feeds.CatalogArtifactsVerification.SHA256 || prov.SignerKeyID != "test-key" ||
 		prov.ReleaseID != "test-release" || prov.CandidateCatalogSHA256 != feeds.AutotuneCandidatesVerification.SHA256 {

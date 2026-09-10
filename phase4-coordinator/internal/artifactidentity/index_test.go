@@ -17,8 +17,8 @@ func provenance() Provenance {
 func TestIndexResolvesExactPairOnly(t *testing.T) {
 	t.Parallel()
 	idx, err := New(provenance(), []Member{
-		{ModelKey: "m", ArtifactID: "mlx-4bit", HashAlgorithm: modelidentity.SnapshotManifestV1, Hash: hex('1'), IsPrimary: true, RuntimeStatus: "recommendable"},
-		{ModelKey: "m", ArtifactID: "gguf-q4", HashAlgorithm: modelidentity.GGUFFileV1, Hash: hex('c'), RuntimeStatus: "recommendable"},
+		{ModelKey: "m", ModelID: "org/model-4bit", ArtifactID: "mlx-4bit", HashAlgorithm: modelidentity.SnapshotManifestV1, Hash: hex('1'), IsPrimary: true, RuntimeStatus: "recommendable"},
+		{ModelKey: "m", ModelID: "org/model-4bit", ArtifactID: "gguf-q4", HashAlgorithm: modelidentity.GGUFFileV1, Hash: hex('c'), RuntimeStatus: "recommendable"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -32,8 +32,8 @@ func TestIndexResolvesExactPairOnly(t *testing.T) {
 	if _, ok := idx.Resolve(modelidentity.GGUFFileV1, strings.ToUpper(hex('c'))); ok {
 		t.Fatal("comparison is exact-string")
 	}
-	if !idx.BoundTo(hex('b')) || idx.BoundTo(hex('c')) {
-		t.Fatal("release binding by candidate catalog digest")
+	if !idx.BoundTo(hex('b')) || idx.BoundTo(hex('c')) || idx.BoundTo(strings.ToUpper(hex('b'))) || idx.BoundTo(" "+hex('b')) {
+		t.Fatal("release binding by the exact candidate catalog digest")
 	}
 	var nilIndex *Index
 	if _, ok := nilIndex.Resolve(modelidentity.GGUFFileV1, hex('c')); ok || nilIndex.BoundTo(hex('b')) {
@@ -44,13 +44,21 @@ func TestIndexResolvesExactPairOnly(t *testing.T) {
 func TestIndexRejectsDuplicatePairAndUnnamedAlgorithm(t *testing.T) {
 	t.Parallel()
 	if _, err := New(provenance(), []Member{
-		{ModelKey: "m", ArtifactID: "a", HashAlgorithm: modelidentity.GGUFFileV1, Hash: hex('2')},
-		{ModelKey: "n", ArtifactID: "b", HashAlgorithm: modelidentity.GGUFFileV1, Hash: hex('2')},
+		{ModelKey: "m", ModelID: "x", ArtifactID: "a", HashAlgorithm: modelidentity.GGUFFileV1, Hash: hex('2')},
+		{ModelKey: "n", ModelID: "y", ArtifactID: "b", HashAlgorithm: modelidentity.GGUFFileV1, Hash: hex('2')},
 	}); err == nil {
 		t.Fatal("duplicate pair must fail")
 	}
-	if _, err := New(provenance(), []Member{{ModelKey: "m", ArtifactID: "a", HashAlgorithm: "sha256", Hash: hex('2')}}); err == nil {
+	if _, err := New(provenance(), []Member{{ModelKey: "m", ModelID: "x", ArtifactID: "a", HashAlgorithm: "sha256", Hash: hex('2')}}); err == nil {
 		t.Fatal("unnamed algorithm must fail")
+	}
+	// A member is tied to the row's model id (the identity a session serves
+	// under); a key alone is a different namespace.
+	if _, err := New(provenance(), []Member{{ModelKey: "m", ArtifactID: "a", HashAlgorithm: modelidentity.GGUFFileV1, Hash: hex('2')}}); err == nil {
+		t.Fatal("member without a model id must fail")
+	}
+	if _, err := New(provenance(), []Member{{ModelKey: "m", ModelID: "Org/Model", ArtifactID: "a", HashAlgorithm: modelidentity.GGUFFileV1, Hash: hex('2')}}); err == nil {
+		t.Fatal("model id must be normalized")
 	}
 	if _, err := New(Provenance{}, nil); err == nil {
 		t.Fatal("provenance is required")

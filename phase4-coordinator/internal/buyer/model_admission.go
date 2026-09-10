@@ -20,13 +20,17 @@ func byomAdmissionCandidate(p pool.Provider) bool {
 
 func (s *Server) byomDefaultPaidRoutingEligible(p pool.Provider) bool {
 	marked := byomAdmissionCandidate(p)
+	// SPEC-010-R007(d): a session bound to a feed member routes only with the
+	// admission evidence its route snapshot must carry (which needs a store).
+	if p.ArtifactIdentity != nil && (s == nil || s.modelAdmissionStore == nil) {
+		return false
+	}
 	if s == nil || s.modelAdmissionStore == nil {
 		return !marked
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), requestLogWriteTimeout)
 	defer cancel()
-	reportedHash := strings.TrimSpace(p.ModelHash)
-	material, ok := tier2.SnapshotMaterial(p.ModelID, reportedHash)
+	material, ok := tier2.SnapshotMaterial(p.ModelID, byomMaterialHash(p))
 	if !ok {
 		_, found, err := s.modelAdmissionStore.LatestModelAdmissionRouteStatus(
 			ctx,
@@ -43,7 +47,24 @@ func (s *Server) byomDefaultPaidRoutingEligible(p pool.Provider) bool {
 	if found {
 		return eligible
 	}
+	// SPEC-010-R007(d): a session bound to a feed member routes only with the
+	// admission evidence its route snapshot must carry; without it the
+	// session is excluded here, never dispatched to fail at the snapshot.
+	if p.ArtifactIdentity != nil {
+		return false
+	}
 	return !marked
+}
+
+// byomMaterialHash is the tier-2 material lookup digest for a session: the
+// admitted ROW digest for a session bound to a feed member (tier-2 material
+// is keyed by the row), the reported digest otherwise. Every route-time
+// consumer derives the material the same way.
+func byomMaterialHash(p pool.Provider) string {
+	if p.ArtifactIdentity != nil {
+		return strings.TrimSpace(p.ExpectedModelHash)
+	}
+	return strings.TrimSpace(p.ModelHash)
 }
 
 func (s *Server) byomRouteSnapshotBinding(ctx context.Context, p pool.Provider, material tier2.RouteSnapshotMaterial) (providerws.ModelAdmissionSettlementBinding, bool, bool) {
@@ -138,11 +159,19 @@ func (s *Server) byomSettlementPrereqsReady(p pool.Provider, material tier2.Rout
 	// artifact feed is the expected identity — the member's exact pair, for
 	// the key the session is admitted for, verified by the heartbeat path.
 	if binding := p.ArtifactIdentity; binding != nil {
+		assertedKey := strings.ToLower(strings.TrimSpace(p.ModelAdmissionCatalogModelKey))
 		return p.ModelHashAlgorithm == binding.Member.HashAlgorithm &&
 			reportedHash == binding.Member.Hash &&
 			modelidentity.CanonicalAlgorithm(binding.Member.HashAlgorithm) &&
 			p.HashStatus == pool.HashStatusVerified &&
-			strings.EqualFold(material.CatalogModelKey, binding.Member.ModelKey) &&
+			// The member belongs to the row this session serves (tier-2
+			// material is keyed by the row's model id) and agrees with any
+			// key the session asserted (SPEC-010-R007(c)).
+			material.CatalogModelKey == binding.Member.ModelID &&
+			(assertedKey == "" || assertedKey == binding.Member.ModelKey) &&
+			// SPEC-023 §3.7.4 / AC-CAT-7(iii): a `listed` row stops at
+			// network_visible_unpriced whatever its admission state says.
+			binding.Member.RuntimeStatus == "recommendable" &&
 			// SPEC-023 §3.7.6 rules 4–5 at route time, not only at the last heartbeat.
 			binding.Provenance.Fresh(s.now())
 	}

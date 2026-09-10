@@ -11,21 +11,14 @@ enum GGUFArtifactDigest {
     static let magic = Data("GGUF".utf8)
     private static let chunkBytes = 1 << 20
 
-    /// Streams the file and returns the digest. Fails closed when the file is
-    /// not a regular readable file or does not start with the GGUF magic.
-    /// `deadline` bounds the work: once it passes (checked between chunks,
-    /// as is task cancellation) the incomplete digest is discarded and
-    /// `hashingBudgetExceeded` is thrown.
-    static func compute(fileURL: URL, deadline: Date? = nil) throws -> String {
-        let handle = try FileHandle(forReadingFrom: fileURL)
-        defer { try? handle.close() }
-        return try compute(handle: handle, deadline: deadline)
-    }
-
-    /// Hashes through an ALREADY OPEN descriptor so the caller can bind the
-    /// digest to the identity of the very file it read (`fstat` before and
-    /// after), not merely to a pathname that could resolve differently
-    /// between opening and checking.
+    /// Streams the file through an ALREADY OPEN descriptor and returns the
+    /// digest, so the caller binds the digest to the identity of the very
+    /// file it read (`fstat` before and after) — never to a pathname that
+    /// could resolve differently between opening and checking. There is
+    /// deliberately no pathname entry point. Fails closed when the bytes do
+    /// not start with the GGUF magic. `deadline` bounds the work: once it
+    /// passes (checked between chunks, as is task cancellation) the
+    /// incomplete digest is discarded and `hashingBudgetExceeded` is thrown.
     static func compute(handle: FileHandle, deadline: Date? = nil) throws -> String {
         var hasher = SHA256()
         var first = true
@@ -278,6 +271,13 @@ struct BYOMArtifactDigestCache: Sendable {
             .appendingPathComponent("artifact-digests.json")
     }
 
+    /// A cached digest drives ONLY the read-only discovery view
+    /// (`identity_state`, the advisory `catalog_model_key`). Every report that
+    /// binds identity (`models offer`) recomputes over the bytes and never
+    /// reads this cache, and the coordinator resolves the key from the hash
+    /// against the signed feed (SPEC-047-R003: the asserted key is advisory),
+    /// so a tampered entry can at most mislabel local output — it cannot
+    /// produce a false binding report.
     func lookup(_ identity: BYOMArtifactFileIdentity, algorithm: String) -> String? {
         load().entries.first { $0.file == identity && $0.algorithm == algorithm }?.digest
     }

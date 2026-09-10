@@ -151,13 +151,27 @@ hashing, then the name is re-resolved and must still name that same file, so
 a rewrite or a substituted path fails closed. The evaluation-time hash has
 an explicit budget (`BYOMEvaluationLimits.artifactHashSeconds`, 60 s; SPEC-046-R005): on expiry
 nothing is recorded and the candidate simply stays without artifact
-identity. The offer always recomputes and re-validates the binding right
+identity. The offer always recomputes (under its own explicit budget,
+`BYOMModelAdmissionRuntime.artifactHashBudgetSeconds`, 600 s; expiry fails the
+offer closed with `artifactHashingTimedOut`) and re-validates the binding right
 before the signed package leaves the machine. The digest is recorded for
 that exact file identity in `~/.config/macprovider/byom/artifact-digests.json`
 (0600), so `models discover` (read-only) reports
 `identity_state: artifact_hash_available` and matches a `verified` GGUF
 artifact by the COMPUTED digest without hashing. The offer package carries
 it as `artifact_hashes["macprovider.gguf-file.v1"]`.
+
+On the coordinator, `artifact_hashes` keys are the SPEC-010-R002 algorithm
+names (a closed set; the names carry dots), a member is tied to the candidate
+row whose `model_id` the session serves (hello's `model_catalog_model_id`; the
+row KEY is a different namespace and an asserted key must agree with the
+resolved one), only a validated catalog envelope (`current` / `previous`
+admission) can bind a release, a compatible-previous release has no loaded
+artifact feed and so stays primary-only, a `listed` row's member never settles,
+and the matched member is pinned for the session — a later heartbeat resolving
+to another member (the primary included) is a mismatch. A stale feed logs
+`artifact_identity_index_stale` once per refresh. `scripts/verify-tier2-live.sh`
+accepts both canonical algorithms in its ready-cohort check.
 
 What this slice does NOT do: the provider CLI has no GGUF serving runtime, and
 SPEC-046 does not proxy buyer traffic, so a served GGUF model cannot yet

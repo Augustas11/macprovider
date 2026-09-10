@@ -1111,6 +1111,10 @@ type ModelAdmissionPaidRoutingPredicate struct {
 	ExpectedCatalogModelHashAlgorithm string
 	// SPEC-010 v1.7 R007(d) six values for a feed-derived binding (mirrors
 	// ModelAdmissionSettlementPredicate so the two convert field-for-field).
+	// The runtime-drift revocation path leaves them empty: admission events
+	// carry no artifact evidence (the route snapshot does), and a member
+	// change within a session is a heartbeat MISMATCH (pool.pinArtifactSession,
+	// R007(b) session authority), not a revocation.
 	ArtifactFeedSHA256             string
 	ArtifactID                     string
 	ArtifactHash                   string
@@ -1863,8 +1867,11 @@ func validateModelAdmissionPayload(payload modelAdmissionOfferSubmitRequest) err
 	if len(payload.ArtifactHashes) > 16 {
 		return fmt.Errorf("invalid model admission evidence")
 	}
+	// `artifact_hashes` is keyed by the SPEC-010-R002 algorithm name
+	// (`macprovider.snapshot-manifest.v1`, `macprovider.gguf-file.v1`): a
+	// closed set, not a free token — the names carry dots.
 	for key, value := range payload.ArtifactHashes {
-		if !validModelAdmissionToken(key) || !validModelAdmissionSHA256Hex(value) {
+		if !modelidentity.CanonicalAlgorithm(key) || !validModelAdmissionSHA256Hex(value) {
 			return fmt.Errorf("invalid model admission evidence")
 		}
 	}

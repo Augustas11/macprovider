@@ -72,11 +72,9 @@ func (b *billingRecorder) recordRouteSnapshot(providerBody []byte, provider pool
 		return skipOrEnforceError("provider model identity does not match signed admission row")
 	}
 	// Tier-2 material is keyed by the ROW digest; an artifact member looks it
-	// up by the row the session was admitted against.
-	materialHash := reportedHash
-	if provider.ArtifactIdentity != nil {
-		materialHash = strings.TrimSpace(provider.ExpectedModelHash)
-	}
+	// up by the row the session was admitted against (byomMaterialHash, the
+	// same derivation the routing-eligibility path uses).
+	materialHash := byomMaterialHash(provider)
 	material, ok := tier2.SnapshotMaterial(provider.ModelID, materialHash)
 	if !ok {
 		if byomAdmissionCandidate(provider) {

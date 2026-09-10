@@ -252,6 +252,12 @@ final class BYOMArtifactDigestTests: XCTestCase {
         XCTAssertThrowsError(try store.resolver.validateCurrent(evidence, forOllamaModel: "test-model:q4_k_m"), "manifest retargeted to another blob") { error in
             XCTAssertEqual(error as? BYOMArtifactDigestError, .fileIdentityChanged)
         }
+        // The offer's hash has an explicit budget too: expiry fails the offer
+        // closed with its own reason and records nothing new.
+        XCTAssertThrowsError(try BYOMModelAdmissionRuntime.artifactEvidence(for: candidate, environment: environment, deadline: Date.distantPast)) { error in
+            XCTAssertEqual(error as? BYOMModelAdmissionError, .artifactHashingTimedOut)
+        }
+        XCTAssertGreaterThan(BYOMModelAdmissionRuntime.artifactHashBudgetSeconds, BYOMEvaluationLimits.standard.artifactHashSeconds, "the binding report gets a more generous budget than the probe")
         // Unresolvable blob: no artifact evidence, the offer proceeds as v0.1.
         let missingTags = Data(#"{"models":[{"name":"absent:latest"}]}"#.utf8)
         let absentValue = await BYOMOllamaDiscovery(

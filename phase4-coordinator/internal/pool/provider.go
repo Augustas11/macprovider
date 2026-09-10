@@ -1276,7 +1276,7 @@ func (r *Registry) UpdateModelIdentities(verdictFor func(Provider) ModelIdentity
 	for _, p := range r.providers {
 		cp := *p
 		cp.conn = nil
-		next := verdictFor(cp)
+		next := pinArtifactSession(p.ArtifactIdentity, verdictFor(cp))
 		if p.HashStatus != next.Status {
 			updated++
 		}
@@ -1284,6 +1284,21 @@ func (r *Registry) UpdateModelIdentities(verdictFor func(Provider) ModelIdentity
 		p.ArtifactIdentity = next.Artifact
 	}
 	return updated
+}
+
+// pinArtifactSession is SPEC-010-R007(b): the matched member's artifact_id
+// is SESSION authority. A session that bound a member and later reports a
+// pair resolving to a different member (or to the row's own primary pair)
+// is a mismatch for the same model id, exactly as a changed row digest is;
+// a model change (warm swap, R006) starts a new binding instead.
+func pinArtifactSession(prior *artifactidentity.Binding, verdict ModelIdentityVerdict) ModelIdentityVerdict {
+	if prior == nil || verdict.Status != HashStatusVerified {
+		return verdict
+	}
+	if verdict.Artifact == nil || verdict.Artifact.Member != prior.Member {
+		return ModelIdentityVerdict{Status: HashStatusMismatch}
+	}
+	return verdict
 }
 
 // ExpireLegacyBridgeAdmissions atomically removes every metadata-free bridge
@@ -2378,6 +2393,9 @@ func (r *Registry) applyHeartbeatLocked(providerID, assignedID string, hb Heartb
 				CandidateCatalogSHA256: p.CandidateCatalogSHA256,
 				CatalogModelKey:        p.ModelAdmissionCatalogModelKey,
 			})
+			if !modelIDChanged {
+				verdict = pinArtifactSession(p.ArtifactIdentity, verdict)
+			}
 			p.HashStatus = verdict.Status
 			p.ArtifactIdentity = verdict.Artifact
 		} else if r.modelIdentityVerifier != nil {

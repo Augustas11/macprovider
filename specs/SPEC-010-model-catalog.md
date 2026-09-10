@@ -1004,10 +1004,12 @@ algorithm.
   lowercase SHA-256 `model_sha256` from the exact signed candidate-catalog row,
   whose canonical bytes are defined by SPEC-023 §3.2. For the primary
   identity path the CLI MUST first verify the downloaded snapshot against that
-  row, then report the verified row digest as `model_hash`; for a secondary
-  `mlx_safetensors` artifact (v1.7, R007) the CLI MUST verify the snapshot at
-  the member's `source_ref.revision` against that member's `hash` under the
-  same canonical manifest algorithm and report THAT digest — never the row's.
+  row, then report the verified row digest as `model_hash`. When a runtime
+  path selects a secondary `mlx_safetensors` artifact (v1.7, R007(e) — not
+  part of the v1.7 CLI, which selects and reports the primary row only) it
+  MUST verify the snapshot at the member's `source_ref.revision` against that
+  member's `hash` under the same canonical manifest algorithm and report THAT
+  digest — never the row's.
   No component may infer this algorithm from the presence or shape of a
   hash, or report a weights-only/subset digest under this name.
 
@@ -1033,7 +1035,10 @@ algorithm.
   row. From v1.7 the expected identity MAY instead be a `verified` member of
   that same exact release's artifact feed for that model row (R007), selected
   from the feed release-bound to that release and never from an independently
-  loaded feed. That expected value remains session authority for later
+  loaded feed; a release whose artifact feed the coordinator has not loaded —
+  today every compatible-previous release, since only the current release's
+  feed is loaded — authorizes no artifact-derived identity, and such a
+  session keeps the primary-row path only. That expected value remains session authority for later
   heartbeats. Coordinator/Tier-2 logic MUST compare only the named provider
   artifact identity with that same expected row or artifact-feed member; an
   independently selected catalog row, a second catalog fallback, or a feed of
@@ -1058,9 +1063,10 @@ algorithm.
 
 - **SPEC-010-R006 — Warm-swap identity.** Before publishing a warm-swapped
   model, the CLI MUST verify the complete target snapshot against the exact
-  signed target row (or, for a non-primary artifact, against its R007
-  expected identity in the release-bound artifact feed) and atomically
-  replace the model ID, digest, and algorithm.
+  signed target row (or, when a runtime path selects a non-primary artifact
+  — R007(e), not part of the v1.7 CLI, which swaps to primary rows only —
+  against its R007 expected identity in the release-bound artifact feed) and
+  atomically replace the model ID, digest, and algorithm.
   A swap with no bound signed target row (or R007 member), a mismatched
   digest, or an artifact that fails validation under its selected algorithm —
   SPEC-023 §3.2 canonical snapshot-manifest validation against the row for
@@ -1075,7 +1081,9 @@ algorithm.
   SPEC-023 §3.7 artifact feed publishes for it, of which the candidate row's
   `(macprovider.snapshot-manifest.v1, model_sha256)` is the primary member;
   the primary member exists whether or not a release carries an artifact
-  feed, so a release without one is unchanged from v1.6.
+  feed, so on a release without one every verification outcome and every
+  route-time record is unchanged from v1.6 (the `macprovider.gguf-file.v1`
+  pair is parsed as a canonical pair per R002 and is then simply unverified).
   (a) **GGUF wire pair.** `macprovider.gguf-file.v1` is a canonical wire pair
   (R002). Its digest is the lowercase hex SHA-256 of the complete GGUF file
   bytes. The CLI MUST compute it over the bytes it holds locally and serves;
@@ -1106,8 +1114,14 @@ algorithm.
   is then unverified.
   (c) **Resolution.** The match resolves by the globally unique
   `(hash_algorithm, hash)` pair (SPEC-023 §3.7.4) to exactly one
-  `(model_key, artifact_id)`; a provider-asserted model key that disagrees
-  with the resolved key fails closed rather than selecting a price. Pricing
+  `(model_key, artifact_id)`. The member MUST belong to the candidate row
+  whose `model_id` the session serves, routes, and prices under (the row's
+  key is a separate namespace from its `model_id` and never substitutes for
+  it); a provider-asserted model key that disagrees with the resolved key
+  fails closed rather than selecting a price. The matched member is session
+  authority (b): a later report by the same session for the same `model_id`
+  that resolves to a different member — the primary included — is a
+  mismatch, not a re-binding. Pricing
   remains model-key scoped (SPEC-023 §3.3, §3.3.1); every SPEC-023 tier gate
   (`recommendable` for paid defaults) and every SPEC-047 admission gate is
   unchanged by this requirement.

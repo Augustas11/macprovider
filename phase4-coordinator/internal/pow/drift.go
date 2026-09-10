@@ -276,10 +276,15 @@ func (e *Evaluator) evaluateHash(provider pool.Provider, benchmark autotune.Veri
 	if !e.cfg.HashAlertOnArtifactDrift || !hasBenchmark {
 		return Alert{}, false
 	}
-	if provider.HashStatus == pool.HashStatusVerified {
+	expected := strings.ToLower(strings.TrimSpace(benchmark.ArtifactSHA256))
+	if binding := provider.ArtifactIdentity; binding != nil {
+		// SPEC-010 v1.7 R007: a session bound to a feed member is checked
+		// against THAT member's digest (the benchmark digest is the row's);
+		// a verified primary-row session stays exempt as before.
+		expected = strings.ToLower(strings.TrimSpace(binding.Member.Hash))
+	} else if provider.HashStatus == pool.HashStatusVerified {
 		return Alert{}, false
 	}
-	expected := strings.ToLower(strings.TrimSpace(benchmark.ArtifactSHA256))
 	live := strings.ToLower(strings.TrimSpace(provider.ModelHash))
 	if expected == "" || live == "" || expected == live {
 		return Alert{}, false

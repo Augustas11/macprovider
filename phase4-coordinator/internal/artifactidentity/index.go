@@ -17,7 +17,12 @@ import (
 
 // Member is one artifact of a model key's identity set.
 type Member struct {
-	ModelKey      string
+	ModelKey string
+	// ModelID is the candidate row's `model_id` (normalized lowercase): the
+	// identity a session serves, routes, and prices under. A row KEY is not
+	// a model id, so a session is tied to a member through this field, and
+	// through ModelKey only when it asserted a key (SPEC-010-R007(c)).
+	ModelID       string
 	ArtifactID    string
 	HashAlgorithm string
 	Hash          string
@@ -98,8 +103,11 @@ func New(provenance Provenance, members []Member) (*Index, error) {
 		if !isLowerHex64(member.Hash) {
 			return nil, fmt.Errorf("artifact identity index: %s/%s hash is not lowercase sha256", member.ModelKey, member.ArtifactID)
 		}
-		if member.ModelKey == "" || member.ArtifactID == "" {
-			return nil, fmt.Errorf("artifact identity index: member without model key or artifact id")
+		if member.ModelKey == "" || member.ArtifactID == "" || member.ModelID == "" {
+			return nil, fmt.Errorf("artifact identity index: member without model key, model id, or artifact id")
+		}
+		if member.ModelID != strings.ToLower(strings.TrimSpace(member.ModelID)) {
+			return nil, fmt.Errorf("artifact identity index: %s/%s model id must be normalized", member.ModelKey, member.ArtifactID)
 		}
 		key := memberKey(member.HashAlgorithm, member.Hash)
 		if existing, dup := index.members[key]; dup {
@@ -131,7 +139,9 @@ func (i *Index) BoundTo(candidateCatalogSHA256 string) bool {
 	if i == nil {
 		return false
 	}
-	return strings.EqualFold(strings.TrimSpace(candidateCatalogSHA256), i.provenance.CandidateCatalogSHA256)
+	// Exact string equality: R007(b) binds the release by the exact digest,
+	// as Resolve binds the pair.
+	return candidateCatalogSHA256 == i.provenance.CandidateCatalogSHA256
 }
 
 // Resolve returns the single member the exact (algorithm, hash) pair names.
