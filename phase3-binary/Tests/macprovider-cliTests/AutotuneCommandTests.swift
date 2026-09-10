@@ -273,14 +273,24 @@ final class AutotuneCommandTests: XCTestCase {
             usedFallback: true
         )
 
+        let artifactFeed = AutotuneStaticSelection<QualifiedArtifactFeed?>(
+            value: nil,
+            selectedBytes: Data(),
+            warnings: [.catalogArtifactFeedIntegrityFailure],
+            usedFallback: true
+        )
         let warnings = AutotuneCommand.recommendationPrefetchTrustWarnings(
             demand: demand,
             catalog: catalog,
-            rateCard: rateCard
+            rateCard: rateCard,
+            artifactFeed: artifactFeed
         )
 
         XCTAssertTrue(warnings.contains(.rateCardIntegrityFailure))
+        XCTAssertTrue(warnings.contains(.catalogArtifactFeedIntegrityFailure))
         XCTAssertTrue(AutotuneRecommendEngine.paidTrustBlocks(warnings))
+        // §3.7.6 rule 6: the artifact-feed warning alone never blocks.
+        XCTAssertFalse(AutotuneRecommendEngine.paidTrustBlocks(artifactFeed.warnings))
     }
 
     func testRecommendUsesSpec023FourKProbeContext() throws {

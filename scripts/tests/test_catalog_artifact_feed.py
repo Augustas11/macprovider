@@ -55,6 +55,7 @@ from __future__ import annotations
 import base64
 import contextlib
 import copy
+import re
 import importlib.util
 import io
 import json
@@ -1357,6 +1358,67 @@ class PendingSurfaceListTest(unittest.TestCase):
                 self.assertIn("SPEC-023-R", detail)
 
 
+class ArtifactFeedConformanceCorpusTest(unittest.TestCase):
+    """The shared §3.7 corpus (`scripts/tests/fixtures/artifact_feed_conformance.json`)
+    is read by this generator, the Go coordinator, and the Swift CLI, so the
+    three validators cannot drift on the closed schema, the identity matrix,
+    release binding, or primary consistency."""
+
+    CORPUS = json.loads((ROOT / "scripts" / "tests" / "fixtures" / "artifact_feed_conformance.json").read_text())
+
+    @staticmethod
+    def apply(feed: dict, ops: list[dict]) -> None:
+        for op in ops:
+            *parents, leaf = op["path"]
+            target = feed
+            for key in parents:
+                target = target[key]
+            if op["op"] == "set":
+                target[leaf] = copy.deepcopy(op["value"])
+            elif op["op"] == "delete":
+                del target[leaf]
+            else:
+                raise AssertionError(op)
+
+    def test_every_corpus_case_matches_the_generator_validator(self):
+        self.assertEqual(len(self.CORPUS["cases"]), self.CORPUS["case_count"])
+        for case in self.CORPUS["cases"]:
+            with self.subTest(case["name"]):
+                candidate_source = copy.deepcopy(self.CORPUS["candidate"])
+                self.apply(candidate_source, case.get("candidate_ops", []))
+                candidate_obj = catalog_release.validate_candidate(catalog_release.canonical_sorted_bytes(candidate_source))
+                candidate = catalog_release.canonical_bytes(candidate_obj)
+                feed = copy.deepcopy(self.CORPUS["feed"])
+                feed["candidate_catalog_sha256"] = catalog_release.sha256(candidate)
+                self.apply(feed, case["ops"])
+                data = catalog_release.canonical_sorted_bytes(feed)
+                if case["expect"] == "accept":
+                    catalog_release.validate_artifact_feed(data, candidate, candidate_obj)
+                else:
+                    with self.assertRaises(catalog_release.CatalogError):
+                        catalog_release.validate_artifact_feed(data, candidate, candidate_obj)
+
+    def test_baked_swift_snapshot_carries_the_artifact_feed_only_when_bound(self):
+        candidate = CANDIDATE_BYTES
+        demand = (CATALOG / "demand-rank.json").read_bytes()
+        rate_card = RATE_CARD_BYTES
+        unbound = catalog_release.generated_swift(candidate, demand, rate_card)
+        self.assertIn("static let bakedArtifactFeedBase64: String? = nil", unbound)
+        self.assertIn("static let bakedArtifactFeedSignerKeyID: String? = nil", unbound)
+        # Bytes that no Swift string literal could carry verbatim (a triple
+        # quote, a backslash escape, a control character) reach the binary
+        # exactly, because the bake is base64 of the signed bytes.
+        hostile = b'{"models":{"k":"\\"\\"\\" \\\\u0000 \\t"}}'
+        bound = catalog_release.generated_swift(candidate, demand, rate_card, artifacts=hostile)
+        match = re.search(r'static let bakedArtifactFeedBase64: String\? = "([A-Za-z0-9+/=]+)"', bound)
+        self.assertIsNotNone(match)
+        self.assertEqual(base64.b64decode(match.group(1)), hostile)
+        self.assertNotIn('"""', bound.split("bakedArtifactFeedBase64")[1])
+        # Without a sidecar on disk the generator bakes no signer (the committed
+        # snapshot); with one, the sidecar's key_id is baked.
+        self.assertIn("static let bakedArtifactFeedSignerKeyID: String? = nil", bound)
+
+
 class RateGlobalsTest(unittest.TestCase):
     """SPEC-023 §3.3.1 rules 3+9 / AC-CAT-14: the release-global share and
     multiplier, exactly as coordinator billing derives them."""
@@ -1861,6 +1923,20 @@ class HermeticReleaseTest(unittest.TestCase):
         harness.bump(release_id, "2026-09-20T00:00:00Z")
         harness.cut(activate_artifact_feed=True)
         return release_id
+
+    def test_activation_bakes_the_published_feed_and_its_signer_into_the_cli_snapshot(self):
+        """The compiled-in fallback is the exact signed bytes of the published
+        feed together with the sidecar's key_id (the signer `release.json`
+        binds), produced by the documented generate → sign → regenerate flow."""
+        with self.harness() as harness:
+            self.activate(harness)
+            generated = pathlib.Path(catalog_release.SWIFT_GENERATED).read_text()
+            match = re.search(r'bakedArtifactFeedBase64: String\? = "([A-Za-z0-9+/=]+)"', generated)
+            self.assertIsNotNone(match)
+            published = (harness.static / "autotune-artifacts.json").read_bytes()
+            self.assertEqual(base64.b64decode(match.group(1)), published)
+            self.assertIn(f'bakedArtifactFeedSignerKeyID: String? = "{harness.KEY_ID}"', generated)
+            self.assertNotIn("bakedArtifactFeedSignerKeyID: String? = nil", generated)
 
     def test_activation_refuses_a_rate_card_that_differs_from_the_preceding_release(self):
         """§3.3.1 rule 8 as a generation gate: the activation release is the

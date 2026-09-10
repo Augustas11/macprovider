@@ -1,0 +1,1299 @@
+{
+  "_format": "cases[].ops mutate `feed`; optional cases[].candidate_ops mutate `candidate` first (its sha256 is recomputed by every harness); every harness asserts len(cases) == case_count so no runner can silently skip cases",
+  "candidate": {
+    "generated_at": "2026-07-10T00:00:00Z",
+    "policy_version": "autotune-policy-v1",
+    "rows": {
+      "test-model": {
+        "bench_gate": {
+          "max_4k_ttft_ms": 1000,
+          "min_sustained_tps": 1,
+          "provenance": {
+            "notes": "test fixture",
+            "source": "legacy_unverified"
+          }
+        },
+        "min_bandwidth_tier": "C",
+        "min_ram_gb": 4,
+        "model_id": "mlx-community/Test-Model-4bit",
+        "model_revision": "1111111111111111111111111111111111111111",
+        "model_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+        "notes": "fixture",
+        "runtime_status": "recommendable"
+      }
+    },
+    "source": "operator_curated_autotune_candidate_catalog",
+    "version": "test-release"
+  },
+  "case_count": 56,
+  "cases": [
+    {
+      "expect": "accept",
+      "name": "valid feed",
+      "ops": [],
+      "spec": "\u00a73.7.3"
+    },
+    {
+      "expect": "accept",
+      "name": "declared gguf secondary is accepted",
+      "ops": [
+        {
+          "op": "set",
+          "path": [
+            "models",
+            "test-model",
+            "artifacts",
+            "gguf-q4"
+          ],
+          "value": {
+            "allowed_runtime_sources": [
+              "ollama_loopback"
+            ],
+            "hash": "4444444444444444444444444444444444444444444444444444444444444444",
+            "hash_algorithm": "macprovider.gguf-file.v1",
+            "min_ram_gb": 4,
+            "quantization": "q4_k_m",
+            "runtime_format": "gguf",
+            "size_bytes": 654321,
+            "source_ref": {
+              "digest": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+              "kind": "ollama_library_tag",
+              "library_tag": "test-model:q4_k_m"
+            },
+            "verification_status": "declared",
+            "verified_at": null
+          }
+        }
+      ],
+      "spec": "\u00a73.7.4/\u00a73.7.5"
+    },
+    {
+      "expect": "reject",
+      "name": "unknown top-level field",
+      "ops": [
+        {
+          "op": "set",
+          "path": [
+            "extra"
+          ],
+          "value": true
+        }
+      ],
+      "spec": "\u00a73.7.3 closed schema"
+    },
+    {
+      "expect": "reject",
+      "name": "wrong source",
+      "ops": [
+        {
+          "op": "set",
+          "path": [
+            "source"
+          ],
+          "value": "operator_curated_autotune_candidate_catalog"
+        }
+      ],
+      "spec": "\u00a73.7.3"
+    },
+    {
+      "expect": "reject",
+      "name": "release_id differs from version",
+      "ops": [
+        {
+          "op": "set",
+          "path": [
+            "release_id"
+          ],
+          "value": "test-release-2"
+        }
+      ],
+      "spec": "\u00a73.7.4 release binding"
+    },
+    {
+      "expect": "reject",
+      "name": "candidate digest drift",
+      "ops": [
+        {
+          "op": "set",
+          "path": [
+            "candidate_catalog_sha256"
+          ],
+          "value": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ],
+      "spec": "\u00a73.7.4 release binding"
+    },
+    {
+      "expect": "reject",
+      "name": "version differs from candidate release",
+      "ops": [
+        {
+          "op": "set",
+          "path": [
+            "version"
+          ],
+          "value": "other-release"
+        },
+        {
+          "op": "set",
+          "path": [
+            "release_id"
+          ],
+          "value": "other-release"
+        }
+      ],
+      "spec": "\u00a73.5 rule 11 / \u00a73.7.4"
+    },
+    {
+      "expect": "reject",
+      "name": "generated_at differs from candidate release",
+      "ops": [
+        {
+          "op": "set",
+          "path": [
+            "generated_at"
+          ],
+          "value": "2026-07-11T00:00:00Z"
+        }
+      ],
+      "spec": "\u00a73.5 rule 11 / \u00a73.7.4"
+    },
+    {
+      "expect": "reject",
+      "name": "policy_version differs from candidate release",
+      "ops": [
+        {
+          "op": "set",
+          "path": [
+            "policy_version"
+          ],
+          "value": "other-policy-v2"
+        }
+      ],
+      "spec": "\u00a73.5 rule 11 / \u00a73.7.4"
+    },
+    {
+      "expect": "reject",
+      "name": "gguf hash algorithm on an mlx artifact",
+      "ops": [
+        {
+          "op": "set",
+          "path": [
+            "models",
+            "test-model",
+            "artifacts",
+            "mlx-4bit",
+            "hash_algorithm"
+          ],
+          "value": "macprovider.gguf-file.v1"
+        }
+      ],
+      "spec": "\u00a73.7.4 identity matrix"
+    },
+    {
+      "expect": "reject",
+      "name": "loopback runtime source on an mlx artifact",
+      "ops": [
+        {
+          "op": "set",
+          "path": [
+            "models",
+            "test-model",
+            "artifacts",
+            "mlx-4bit",
+            "allowed_runtime_sources"
+          ],
+          "value": [
+            "mlx_cache",
+            "openai_compatible_loopback"
+          ]
+        }
+      ],
+      "spec": "\u00a73.7.4 identity matrix"
+    },
+    {
+      "expect": "reject",
+      "name": "unmeasured size_bytes",
+      "ops": [
+        {
+          "op": "set",
+          "path": [
+            "models",
+            "test-model",
+            "artifacts",
+            "mlx-4bit",
+            "size_bytes"
+          ],
+          "value": null
+        }
+      ],
+      "spec": "\u00a73.7.3"
+    },
+    {
+      "expect": "reject",
+      "name": "rate_class present as null",
+      "ops": [
+        {
+          "op": "set",
+          "path": [
+            "models",
+            "test-model",
+            "rate_class"
+          ],
+          "value": null
+        }
+      ],
+      "spec": "\u00a73.7.3 closed schema"
+    },
+    {
+      "expect": "reject",
+      "name": "unknown rate_class",
+      "ops": [
+        {
+          "op": "set",
+          "path": [
+            "models",
+            "test-model",
+            "rate_class"
+          ],
+          "value": "class-1t"
+        }
+      ],
+      "spec": "\u00a73.3.1 rule 1"
+    },
+    {
+      "expect": "reject",
+      "name": "recommendable row without rate_class",
+      "ops": [
+        {
+          "op": "delete",
+          "path": [
+            "models",
+            "test-model",
+            "rate_class"
+          ]
+        }
+      ],
+      "spec": "\u00a73.3.1 rule 1 / \u00a73.7.5"
+    },
+    {
+      "expect": "reject",
+      "name": "verified_at omitted",
+      "ops": [
+        {
+          "op": "delete",
+          "path": [
+            "models",
+            "test-model",
+            "artifacts",
+            "mlx-4bit",
+            "verified_at"
+          ]
+        }
+      ],
+      "spec": "\u00a73.7.3 closed schema"
+    },
+    {
+      "expect": "reject",
+      "name": "verified_at null on a verified artifact",
+      "ops": [
+        {
+          "op": "set",
+          "path": [
+            "models",
+            "test-model",
+            "artifacts",
+            "mlx-4bit",
+            "verified_at"
+          ],
+          "value": null
+        }
+      ],
+      "spec": "\u00a73.7.3"
+    },
+    {
+      "expect": "reject",
+      "name": "cross-variant source_ref field",
+      "ops": [
+        {
+          "op": "set",
+          "path": [
+            "models",
+            "test-model",
+            "artifacts",
+            "mlx-4bit",
+            "source_ref",
+            "digest"
+          ],
+          "value": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+        }
+      ],
+      "spec": "\u00a73.7.4 source_ref closure"
+    },
+    {
+      "expect": "reject",
+      "name": "cross-variant source_ref field as null",
+      "ops": [
+        {
+          "op": "set",
+          "path": [
+            "models",
+            "test-model",
+            "artifacts",
+            "mlx-4bit",
+            "source_ref",
+            "library_tag"
+          ],
+          "value": null
+        }
+      ],
+      "spec": "\u00a73.7.4 source_ref closure"
+    },
+    {
+      "expect": "reject",
+      "name": "primary hash differs from candidate model_sha256",
+      "ops": [
+        {
+          "op": "set",
+          "path": [
+            "models",
+            "test-model",
+            "artifacts",
+            "mlx-4bit",
+            "hash"
+          ],
+          "value": "3333333333333333333333333333333333333333333333333333333333333333"
+        }
+      ],
+      "spec": "\u00a73.7.5"
+    },
+    {
+      "expect": "reject",
+      "name": "primary repo_id differs from candidate model_id",
+      "ops": [
+        {
+          "op": "set",
+          "path": [
+            "models",
+            "test-model",
+            "artifacts",
+            "mlx-4bit",
+            "source_ref",
+            "repo_id"
+          ],
+          "value": "mlx-community/Other-Model-4bit"
+        }
+      ],
+      "spec": "\u00a73.7.5"
+    },
+    {
+      "expect": "reject",
+      "name": "primary revision differs from candidate model_revision",
+      "ops": [
+        {
+          "op": "set",
+          "path": [
+            "models",
+            "test-model",
+            "artifacts",
+            "mlx-4bit",
+            "source_ref",
+            "revision"
+          ],
+          "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      ],
+      "spec": "\u00a73.7.5"
+    },
+    {
+      "expect": "reject",
+      "name": "primary min_ram_gb differs from candidate",
+      "ops": [
+        {
+          "op": "set",
+          "path": [
+            "models",
+            "test-model",
+            "artifacts",
+            "mlx-4bit",
+            "min_ram_gb"
+          ],
+          "value": 8
+        }
+      ],
+      "spec": "\u00a73.7.5"
+    },
+    {
+      "expect": "reject",
+      "name": "declared primary on a recommendable row",
+      "ops": [
+        {
+          "op": "set",
+          "path": [
+            "models",
+            "test-model",
+            "artifacts",
+            "mlx-4bit",
+            "verification_status"
+          ],
+          "value": "declared"
+        },
+        {
+          "op": "set",
+          "path": [
+            "models",
+            "test-model",
+            "artifacts",
+            "mlx-4bit",
+            "verified_at"
+          ],
+          "value": null
+        }
+      ],
+      "spec": "\u00a73.7.5"
+    },
+    {
+      "expect": "reject",
+      "name": "primary_artifact_id names no artifact",
+      "ops": [
+        {
+          "op": "set",
+          "path": [
+            "models",
+            "test-model",
+            "primary_artifact_id"
+          ],
+          "value": "gguf-q4"
+        }
+      ],
+      "spec": "\u00a73.7.3"
+    },
+    {
+      "expect": "reject",
+      "name": "model absent from the candidate catalog",
+      "ops": [
+        {
+          "op": "set",
+          "path": [
+            "models",
+            "other-model"
+          ],
+          "value": {
+            "artifacts": {
+              "mlx-4bit": {
+                "allowed_runtime_sources": [
+                  "mlx_cache"
+                ],
+                "hash": "5555555555555555555555555555555555555555555555555555555555555555",
+                "hash_algorithm": "macprovider.snapshot-manifest.v1",
+                "min_ram_gb": 4,
+                "quantization": "4bit",
+                "runtime_format": "mlx_safetensors",
+                "size_bytes": 123456,
+                "source_ref": {
+                  "kind": "huggingface_revision",
+                  "repo_id": "mlx-community/Other-4bit",
+                  "revision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                },
+                "verification_status": "verified",
+                "verified_at": "2026-09-01"
+              }
+            },
+            "primary_artifact_id": "mlx-4bit",
+            "rate_class": "class-8b"
+          }
+        }
+      ],
+      "spec": "\u00a73.7.5"
+    },
+    {
+      "expect": "reject",
+      "name": "one hash under two model keys",
+      "ops": [
+        {
+          "op": "set",
+          "path": [
+            "models",
+            "other-model"
+          ],
+          "value": {
+            "artifacts": {
+              "mlx-4bit": {
+                "allowed_runtime_sources": [
+                  "mlx_cache"
+                ],
+                "hash": "2222222222222222222222222222222222222222222222222222222222222222",
+                "hash_algorithm": "macprovider.snapshot-manifest.v1",
+                "min_ram_gb": 4,
+                "quantization": "4bit",
+                "runtime_format": "mlx_safetensors",
+                "size_bytes": 123456,
+                "source_ref": {
+                  "kind": "huggingface_revision",
+                  "repo_id": "mlx-community/Test-Model-4bit",
+                  "revision": "1111111111111111111111111111111111111111"
+                },
+                "verification_status": "verified",
+                "verified_at": "2026-09-01"
+              }
+            },
+            "primary_artifact_id": "mlx-4bit",
+            "rate_class": "class-8b"
+          }
+        }
+      ],
+      "spec": "\u00a73.7.4 / AC-CAT-18"
+    },
+    {
+      "expect": "reject",
+      "name": "gguf digest differs from its hash",
+      "ops": [
+        {
+          "op": "set",
+          "path": [
+            "models",
+            "test-model",
+            "artifacts",
+            "gguf-q4"
+          ],
+          "value": {
+            "allowed_runtime_sources": [
+              "ollama_loopback"
+            ],
+            "hash": "4444444444444444444444444444444444444444444444444444444444444444",
+            "hash_algorithm": "macprovider.gguf-file.v1",
+            "min_ram_gb": 4,
+            "quantization": "q4_k_m",
+            "runtime_format": "gguf",
+            "size_bytes": 654321,
+            "source_ref": {
+              "digest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+              "kind": "ollama_library_tag",
+              "library_tag": "test-model:q4_k_m"
+            },
+            "verification_status": "declared",
+            "verified_at": null
+          }
+        }
+      ],
+      "spec": "\u00a73.7.4"
+    },
+    {
+      "expect": "reject",
+      "name": "gguf primary",
+      "ops": [
+        {
+          "op": "set",
+          "path": [
+            "models",
+            "test-model",
+            "artifacts",
+            "gguf-q4"
+          ],
+          "value": {
+            "allowed_runtime_sources": [
+              "ollama_loopback"
+            ],
+            "hash": "4444444444444444444444444444444444444444444444444444444444444444",
+            "hash_algorithm": "macprovider.gguf-file.v1",
+            "min_ram_gb": 4,
+            "quantization": "q4_k_m",
+            "runtime_format": "gguf",
+            "size_bytes": 654321,
+            "source_ref": {
+              "digest": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+              "kind": "ollama_library_tag",
+              "library_tag": "test-model:q4_k_m"
+            },
+            "verification_status": "declared",
+            "verified_at": null
+          }
+        },
+        {
+          "op": "set",
+          "path": [
+            "models",
+            "test-model",
+            "primary_artifact_id"
+          ],
+          "value": "gguf-q4"
+        }
+      ],
+      "spec": "\u00a73.7.3 primary must be mlx_safetensors"
+    },
+    {
+      "expect": "reject",
+      "name": "artifact_id grammar",
+      "ops": [
+        {
+          "op": "set",
+          "path": [
+            "models",
+            "test-model",
+            "artifacts",
+            "Bad_ID"
+          ],
+          "value": {
+            "allowed_runtime_sources": [
+              "mlx_cache"
+            ],
+            "hash": "6666666666666666666666666666666666666666666666666666666666666666",
+            "hash_algorithm": "macprovider.snapshot-manifest.v1",
+            "min_ram_gb": 4,
+            "quantization": "4bit",
+            "runtime_format": "mlx_safetensors",
+            "size_bytes": 123456,
+            "source_ref": {
+              "kind": "huggingface_revision",
+              "repo_id": "mlx-community/Test-Model-4bit",
+              "revision": "1111111111111111111111111111111111111111"
+            },
+            "verification_status": "verified",
+            "verified_at": "2026-09-01"
+          }
+        }
+      ],
+      "spec": "\u00a73.7.3"
+    },
+    {
+      "expect": "reject",
+      "name": "generated_at spelled as a different RFC3339 form of the same instant",
+      "ops": [
+        {
+          "op": "set",
+          "path": [
+            "generated_at"
+          ],
+          "value": "2026-07-10T00:00:00+00:00"
+        }
+      ],
+      "spec": "\u00a73.5 rule 11 / \u00a73.7.4 \u2014 string equality, not instant equality"
+    },
+    {
+      "expect": "reject",
+      "name": "size_bytes beyond int64",
+      "ops": [
+        {
+          "op": "set",
+          "path": [
+            "models",
+            "test-model",
+            "artifacts",
+            "mlx-4bit",
+            "size_bytes"
+          ],
+          "value": 9223372036854775808
+        }
+      ],
+      "spec": "\u00a73.7.3 \u2014 int64 domain in every consumer"
+    },
+    {
+      "expect": "reject",
+      "name": "size_bytes as a float",
+      "ops": [
+        {
+          "op": "set",
+          "path": [
+            "models",
+            "test-model",
+            "artifacts",
+            "mlx-4bit",
+            "size_bytes"
+          ],
+          "value": 123456.5
+        }
+      ],
+      "spec": "\u00a73.7.3"
+    },
+    {
+      "expect": "reject",
+      "name": "min_ram_gb as a boolean",
+      "ops": [
+        {
+          "op": "set",
+          "path": [
+            "models",
+            "test-model",
+            "artifacts",
+            "mlx-4bit",
+            "min_ram_gb"
+          ],
+          "value": true
+        }
+      ],
+      "spec": "\u00a73.7.3"
+    },
+    {
+      "expect": "reject",
+      "name": "model key with a double slash",
+      "ops": [
+        {
+          "op": "set",
+          "path": [
+            "models",
+            "bad//key"
+          ],
+          "value": {
+            "artifacts": {
+              "mlx-4bit": {
+                "allowed_runtime_sources": [
+                  "mlx_cache"
+                ],
+                "hash": "7777777777777777777777777777777777777777777777777777777777777777",
+                "hash_algorithm": "macprovider.snapshot-manifest.v1",
+                "min_ram_gb": 4,
+                "quantization": "4bit",
+                "runtime_format": "mlx_safetensors",
+                "size_bytes": 123456,
+                "source_ref": {
+                  "kind": "huggingface_revision",
+                  "repo_id": "mlx-community/Test-Model-4bit",
+                  "revision": "1111111111111111111111111111111111111111"
+                },
+                "verification_status": "verified",
+                "verified_at": "2026-09-01"
+              }
+            },
+            "primary_artifact_id": "mlx-4bit",
+            "rate_class": "class-8b"
+          }
+        }
+      ],
+      "spec": "\u00a73.7.3 model key grammar"
+    },
+    {
+      "expect": "reject",
+      "name": "generated_at with fractional seconds",
+      "ops": [
+        {
+          "op": "set",
+          "path": [
+            "generated_at"
+          ],
+          "value": "2026-07-10T00:00:00.000Z"
+        }
+      ],
+      "spec": "\u00a73.7.3 \u2014 one timestamp grammar in every consumer (seconds precision)"
+    },
+    {
+      "expect": "reject",
+      "name": "generated_at with a comma fraction",
+      "ops": [
+        {
+          "op": "set",
+          "path": [
+            "generated_at"
+          ],
+          "value": "2026-07-10T00:00:00,000Z"
+        }
+      ],
+      "spec": "\u00a73.7.3 \u2014 one timestamp grammar in every consumer"
+    },
+    {
+      "expect": "reject",
+      "name": "verified_at is an impossible calendar date",
+      "ops": [
+        {
+          "op": "set",
+          "path": [
+            "models",
+            "test-model",
+            "artifacts",
+            "mlx-4bit",
+            "verified_at"
+          ],
+          "value": "2026-02-30"
+        }
+      ],
+      "spec": "\u00a73.7.3 \u2014 verified_at is a real RFC3339 full-date"
+    },
+    {
+      "expect": "reject",
+      "name": "version with surrounding whitespace",
+      "ops": [
+        {
+          "op": "set",
+          "path": [
+            "version"
+          ],
+          "value": " test-release"
+        },
+        {
+          "op": "set",
+          "path": [
+            "release_id"
+          ],
+          "value": " test-release"
+        }
+      ],
+      "spec": "\u00a73.7.3 \u2014 trimmed release strings"
+    },
+    {
+      "expect": "accept",
+      "name": "artifact notes present as a string",
+      "ops": [
+        {
+          "op": "set",
+          "path": [
+            "models",
+            "test-model",
+            "artifacts",
+            "mlx-4bit",
+            "notes"
+          ],
+          "value": "curated"
+        }
+      ],
+      "spec": "\u00a73.7.3 \u2014 notes is the one optional artifact field"
+    },
+    {
+      "expect": "accept",
+      "name": "second verified mlx artifact under another repo id",
+      "ops": [
+        {
+          "op": "set",
+          "path": [
+            "models",
+            "test-model",
+            "artifacts",
+            "mlx-8bit"
+          ],
+          "value": {
+            "allowed_runtime_sources": [
+              "mlx_cache"
+            ],
+            "hash": "5555555555555555555555555555555555555555555555555555555555555555",
+            "hash_algorithm": "macprovider.snapshot-manifest.v1",
+            "min_ram_gb": 8,
+            "quantization": "8bit",
+            "runtime_format": "mlx_safetensors",
+            "size_bytes": 234567,
+            "source_ref": {
+              "kind": "huggingface_revision",
+              "repo_id": "mlx-community/Test-Model-8bit",
+              "revision": "3333333333333333333333333333333333333333"
+            },
+            "verification_status": "verified",
+            "verified_at": "2026-09-01"
+          }
+        }
+      ],
+      "spec": "\u00a73.7.4 \u2014 several artifacts per model, distinct hashes"
+    },
+    {
+      "expect": "reject",
+      "name": "min_ram_gb above the shared bound",
+      "ops": [
+        {
+          "op": "set",
+          "path": [
+            "models",
+            "test-model",
+            "artifacts",
+            "mlx-4bit",
+            "min_ram_gb"
+          ],
+          "value": 1048577
+        }
+      ],
+      "spec": "\u00a73.7.3 \u2014 one numeric domain (0, 1048576] in every consumer"
+    },
+    {
+      "expect": "reject",
+      "name": "min_ram_gb beyond int64 on a secondary artifact",
+      "ops": [
+        {
+          "op": "set",
+          "path": [
+            "models",
+            "test-model",
+            "artifacts",
+            "mlx-8bit"
+          ],
+          "value": {
+            "allowed_runtime_sources": [
+              "mlx_cache"
+            ],
+            "hash": "5555555555555555555555555555555555555555555555555555555555555555",
+            "hash_algorithm": "macprovider.snapshot-manifest.v1",
+            "min_ram_gb": 9223372036854775808,
+            "quantization": "8bit",
+            "runtime_format": "mlx_safetensors",
+            "size_bytes": 234567,
+            "source_ref": {
+              "kind": "huggingface_revision",
+              "repo_id": "mlx-community/Test-Model-8bit",
+              "revision": "3333333333333333333333333333333333333333"
+            },
+            "verification_status": "verified",
+            "verified_at": "2026-09-01"
+          }
+        }
+      ],
+      "spec": "\u00a73.7.3 \u2014 one numeric domain in every consumer (primary consistency does not mask a secondary)"
+    },
+    {
+      "expect": "accept",
+      "name": "min_ram_gb at the shared bound on a secondary artifact",
+      "ops": [
+        {
+          "op": "set",
+          "path": [
+            "models",
+            "test-model",
+            "artifacts",
+            "mlx-8bit"
+          ],
+          "value": {
+            "allowed_runtime_sources": [
+              "mlx_cache"
+            ],
+            "hash": "5555555555555555555555555555555555555555555555555555555555555555",
+            "hash_algorithm": "macprovider.snapshot-manifest.v1",
+            "min_ram_gb": 1048576,
+            "quantization": "8bit",
+            "runtime_format": "mlx_safetensors",
+            "size_bytes": 234567,
+            "source_ref": {
+              "kind": "huggingface_revision",
+              "repo_id": "mlx-community/Test-Model-8bit",
+              "revision": "3333333333333333333333333333333333333333"
+            },
+            "verification_status": "verified",
+            "verified_at": "2026-09-01"
+          }
+        }
+      ],
+      "spec": "\u00a73.7.3"
+    },
+    {
+      "expect": "reject",
+      "name": "policy_version with surrounding whitespace",
+      "ops": [
+        {
+          "op": "set",
+          "path": [
+            "policy_version"
+          ],
+          "value": "autotune-policy-v1 "
+        }
+      ],
+      "spec": "\u00a73.7.3 \u2014 trimmed release strings"
+    },
+    {
+      "expect": "reject",
+      "name": "empty models with a recommendable row",
+      "ops": [
+        {
+          "op": "set",
+          "path": [
+            "models"
+          ],
+          "value": {}
+        }
+      ],
+      "spec": "\u00a73.7.7 R004 \u2014 every listed/recommendable row has a model entry"
+    },
+    {
+      "candidate_ops": [
+        {
+          "op": "set",
+          "path": [
+            "rows",
+            "test-model",
+            "runtime_status"
+          ],
+          "value": "candidate"
+        }
+      ],
+      "expect": "accept",
+      "name": "empty models with a candidate-only catalog",
+      "ops": [
+        {
+          "op": "set",
+          "path": [
+            "models"
+          ],
+          "value": {}
+        }
+      ],
+      "spec": "\u00a73.7.3 \u2014 models is an object with no non-empty rule; \u00a73.2: a candidate row is out of R004 scope"
+    },
+    {
+      "expect": "reject",
+      "name": "verified gguf allowing openai_compatible_loopback",
+      "ops": [
+        {
+          "op": "set",
+          "path": [
+            "models",
+            "test-model",
+            "artifacts",
+            "gguf-q4"
+          ],
+          "value": {
+            "allowed_runtime_sources": [
+              "ollama_loopback",
+              "openai_compatible_loopback"
+            ],
+            "hash": "4444444444444444444444444444444444444444444444444444444444444444",
+            "hash_algorithm": "macprovider.gguf-file.v1",
+            "min_ram_gb": 4,
+            "quantization": "q4_k_m",
+            "runtime_format": "gguf",
+            "size_bytes": 654321,
+            "source_ref": {
+              "digest": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+              "kind": "ollama_library_tag",
+              "library_tag": "test-model:q4_k_m"
+            },
+            "verification_status": "verified",
+            "verified_at": "2026-09-01"
+          }
+        }
+      ],
+      "spec": "\u00a73.7.4 / AC-CAT-16 \u2014 a verified artifact never allows the opaque adapter"
+    },
+    {
+      "expect": "reject",
+      "name": "verified_at with a time of day",
+      "ops": [
+        {
+          "op": "set",
+          "path": [
+            "models",
+            "test-model",
+            "artifacts",
+            "mlx-4bit",
+            "verified_at"
+          ],
+          "value": "2026-09-01T00:00:00Z"
+        }
+      ],
+      "spec": "\u00a73.7.3 \u2014 verified_at is a bare full-date"
+    },
+    {
+      "expect": "reject",
+      "name": "verified_at non-null on a declared artifact",
+      "ops": [
+        {
+          "op": "set",
+          "path": [
+            "models",
+            "test-model",
+            "artifacts",
+            "gguf-q4"
+          ],
+          "value": {
+            "allowed_runtime_sources": [
+              "ollama_loopback"
+            ],
+            "hash": "4444444444444444444444444444444444444444444444444444444444444444",
+            "hash_algorithm": "macprovider.gguf-file.v1",
+            "min_ram_gb": 4,
+            "quantization": "q4_k_m",
+            "runtime_format": "gguf",
+            "size_bytes": 654321,
+            "source_ref": {
+              "digest": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+              "kind": "ollama_library_tag",
+              "library_tag": "test-model:q4_k_m"
+            },
+            "verification_status": "declared",
+            "verified_at": "2026-09-01"
+          }
+        }
+      ],
+      "spec": "\u00a73.7.3 \u2014 null exactly when not verified"
+    },
+    {
+      "expect": "reject",
+      "name": "repeated adapter in allowed_runtime_sources",
+      "ops": [
+        {
+          "op": "set",
+          "path": [
+            "models",
+            "test-model",
+            "artifacts",
+            "mlx-4bit",
+            "allowed_runtime_sources"
+          ],
+          "value": [
+            "mlx_cache",
+            "mlx_cache"
+          ]
+        }
+      ],
+      "spec": "\u00a73.7.3"
+    },
+    {
+      "expect": "reject",
+      "name": "empty artifacts map for a model",
+      "ops": [
+        {
+          "op": "set",
+          "path": [
+            "models",
+            "test-model",
+            "artifacts"
+          ],
+          "value": {}
+        }
+      ],
+      "spec": "\u00a73.7.3 \u2014 artifacts is non-empty"
+    },
+    {
+      "expect": "reject",
+      "name": "artifact_id with a trailing newline",
+      "ops": [
+        {
+          "op": "set",
+          "path": [
+            "models",
+            "test-model",
+            "artifacts",
+            "mlx-8bit\n"
+          ],
+          "value": {
+            "allowed_runtime_sources": [
+              "mlx_cache"
+            ],
+            "hash": "5555555555555555555555555555555555555555555555555555555555555555",
+            "hash_algorithm": "macprovider.snapshot-manifest.v1",
+            "min_ram_gb": 8,
+            "quantization": "8bit",
+            "runtime_format": "mlx_safetensors",
+            "size_bytes": 234567,
+            "source_ref": {
+              "kind": "huggingface_revision",
+              "repo_id": "mlx-community/Test-Model-8bit",
+              "revision": "3333333333333333333333333333333333333333"
+            },
+            "verification_status": "verified",
+            "verified_at": "2026-09-01"
+          }
+        }
+      ],
+      "spec": "\u00a73.7.4 grammar \u2014 whole-string anchoring in every consumer"
+    },
+    {
+      "expect": "reject",
+      "name": "hash with a trailing newline",
+      "ops": [
+        {
+          "op": "set",
+          "path": [
+            "models",
+            "test-model",
+            "artifacts",
+            "mlx-8bit"
+          ],
+          "value": {
+            "allowed_runtime_sources": [
+              "mlx_cache"
+            ],
+            "hash": "5555555555555555555555555555555555555555555555555555555555555555\n",
+            "hash_algorithm": "macprovider.snapshot-manifest.v1",
+            "min_ram_gb": 8,
+            "quantization": "8bit",
+            "runtime_format": "mlx_safetensors",
+            "size_bytes": 234567,
+            "source_ref": {
+              "kind": "huggingface_revision",
+              "repo_id": "mlx-community/Test-Model-8bit",
+              "revision": "3333333333333333333333333333333333333333"
+            },
+            "verification_status": "verified",
+            "verified_at": "2026-09-01"
+          }
+        }
+      ],
+      "spec": "\u00a73.7.3 \u2014 whole-string anchoring in every consumer"
+    },
+    {
+      "expect": "reject",
+      "name": "repo_id with a trailing newline",
+      "ops": [
+        {
+          "op": "set",
+          "path": [
+            "models",
+            "test-model",
+            "artifacts",
+            "mlx-8bit"
+          ],
+          "value": {
+            "allowed_runtime_sources": [
+              "mlx_cache"
+            ],
+            "hash": "5555555555555555555555555555555555555555555555555555555555555555",
+            "hash_algorithm": "macprovider.snapshot-manifest.v1",
+            "min_ram_gb": 8,
+            "quantization": "8bit",
+            "runtime_format": "mlx_safetensors",
+            "size_bytes": 234567,
+            "source_ref": {
+              "kind": "huggingface_revision",
+              "repo_id": "mlx-community/Test-Model-8bit\n",
+              "revision": "3333333333333333333333333333333333333333"
+            },
+            "verification_status": "verified",
+            "verified_at": "2026-09-01"
+          }
+        }
+      ],
+      "spec": "\u00a73.7.3 \u2014 whole-string anchoring in every consumer"
+    },
+    {
+      "expect": "reject",
+      "name": "generated_at with a trailing newline",
+      "ops": [
+        {
+          "op": "set",
+          "path": [
+            "generated_at"
+          ],
+          "value": "2026-07-10T00:00:00Z\n"
+        }
+      ],
+      "spec": "\u00a73.7.3 \u2014 whole-string anchoring in every consumer"
+    }
+  ],
+  "description": "Shared SPEC-023 \u00a73.7 artifact-feed conformance corpus (BYOM v0.2 slice 2c). One candidate catalog, one valid feed, and mutation cases applied by the Python generator tests, the Go coordinator tests, and the Swift CLI tests, so the three consumers cannot drift on the closed schema, the identity matrix, release binding, or primary consistency. Mutation ops: {op: set, path: [...], value} and {op: delete, path: [...]}. The feed's candidate_catalog_sha256 is computed by each consumer from the canonical candidate bytes it signs or bakes before ops are applied; a case that sets it wins.",
+  "feed": {
+    "candidate_catalog_sha256": "COMPUTED_AT_TEST_TIME",
+    "generated_at": "2026-07-10T00:00:00Z",
+    "models": {
+      "test-model": {
+        "artifacts": {
+          "mlx-4bit": {
+            "allowed_runtime_sources": [
+              "mlx_cache"
+            ],
+            "hash": "2222222222222222222222222222222222222222222222222222222222222222",
+            "hash_algorithm": "macprovider.snapshot-manifest.v1",
+            "min_ram_gb": 4,
+            "quantization": "4bit",
+            "runtime_format": "mlx_safetensors",
+            "size_bytes": 123456,
+            "source_ref": {
+              "kind": "huggingface_revision",
+              "repo_id": "mlx-community/Test-Model-4bit",
+              "revision": "1111111111111111111111111111111111111111"
+            },
+            "verification_status": "verified",
+            "verified_at": "2026-09-01"
+          }
+        },
+        "primary_artifact_id": "mlx-4bit",
+        "rate_class": "class-8b"
+      }
+    },
+    "policy_version": "autotune-policy-v1",
+    "release_id": "test-release",
+    "source": "operator_curated_autotune_artifact_catalog",
+    "version": "test-release"
+  },
+  "schema_version": "macprovider.artifact-feed-conformance.v1"
+}

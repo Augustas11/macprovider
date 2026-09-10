@@ -481,6 +481,12 @@ struct MalibuRecommendationDocument: Decodable, Equatable, Sendable {
     ]
 
     private static let knownRootWarnings: Set<String> = [
+        // SPEC-023 §3.7.6: artifact-feed classes are never adoption blockers
+        // (rule 6) and are absent from `adoptionBlockingWarnings` by design.
+        "catalog_artifact_feed_fallback_used",
+        "catalog_artifact_feed_integrity_failure",
+        "catalog_artifact_feed_update_required",
+        "catalog_artifact_feed_stale",
         "candidate_catalog_fallback_used",
         "candidate_catalog_integrity_failure",
         "candidate_catalog_update_required",

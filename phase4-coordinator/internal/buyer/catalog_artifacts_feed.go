@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -157,14 +158,35 @@ func (f AutotuneFeeds) catalogArtifactsEnabled() bool {
 // validateCatalogArtifactsFeed is the document-only half of the check: schema
 // closure, envelope, and the §3.7.4 identity matrix. Binding to the candidate
 // catalog needs both feeds and runs in bindCatalogArtifactsFeed.
+// artifactFeedTimestampGrammar is the artifact feed's generated_at grammar,
+// identical in the generator, the coordinator, and the CLI: seconds precision,
+// Z or an explicit ±HH:MM offset, no fractional seconds (time.RFC3339 alone
+// would also admit fractions and a comma separator that the generator rejects).
+// artifactMinRAMGBMax bounds an artifact's min_ram_gb (1 PiB) identically in
+// the generator, the coordinator, and the CLI, so the generator's global int64
+// parsing limit and float decoding here agree on every verdict.
+const artifactMinRAMGBMax = 1_048_576
+
+var artifactFeedTimestampGrammar = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:Z|[+-]\d{2}:\d{2})$`)
+
 func validateCatalogArtifactsFeed(raw []byte, _ string) (feedRelease, error) {
 	var feed catalogArtifactsFeed
 	if err := decodeStrictJSON(raw, &feed); err != nil {
 		return feedRelease{}, err
 	}
-	release, err := validateFeedEnvelope(feed.Version, feed.PolicyVersion, feed.GeneratedAt, feed.Source, catalogArtifactsSource, len(feed.Models))
+	if !artifactFeedTimestampGrammar.MatchString(feed.GeneratedAt) {
+		return feedRelease{}, fmt.Errorf("generated_at must be RFC3339 at seconds precision with an explicit timezone")
+	}
+	// SPEC-023 §3.7.3: `models` is an object with no non-empty rule (only each
+	// model's `artifacts` is non-empty); a release whose catalog has no
+	// listed/recommendable row publishes an empty map. The shared envelope
+	// check's row-count rule is for the v0.1 feeds, so it is not applied here.
+	release, err := validateFeedHeader(feed.Version, feed.PolicyVersion, feed.GeneratedAt, feed.Source, catalogArtifactsSource)
 	if err != nil {
 		return feedRelease{}, err
+	}
+	if feed.Models == nil {
+		return feedRelease{}, fmt.Errorf("models must be an object")
 	}
 	if feed.ReleaseID != feed.Version {
 		return feedRelease{}, fmt.Errorf("release_id must equal version")
@@ -246,8 +268,8 @@ func validateCatalogArtifactEntry(label string, entry catalogArtifactEntry) erro
 	if entry.SizeBytes == nil || *entry.SizeBytes <= 0 {
 		return fmt.Errorf("%s: size_bytes must be a measured integer > 0", label)
 	}
-	if entry.MinRAMGB == nil || math.IsNaN(*entry.MinRAMGB) || math.IsInf(*entry.MinRAMGB, 0) || *entry.MinRAMGB <= 0 {
-		return fmt.Errorf("%s: min_ram_gb must be a number > 0", label)
+	if entry.MinRAMGB == nil || math.IsNaN(*entry.MinRAMGB) || math.IsInf(*entry.MinRAMGB, 0) || *entry.MinRAMGB <= 0 || *entry.MinRAMGB > artifactMinRAMGBMax {
+		return fmt.Errorf("%s: min_ram_gb must be a number in (0, %d]", label, artifactMinRAMGBMax)
 	}
 	if len(entry.AllowedRuntimeSources) == 0 {
 		return fmt.Errorf("%s: allowed_runtime_sources must be a non-empty array", label)
@@ -326,6 +348,9 @@ func bindCatalogArtifactsFeed(artifacts, candidates loadedAutotuneFeed) error {
 		return fmt.Errorf("autotune feed release mismatch: catalog_artifacts policy_version %q != autotune_candidates policy_version %q",
 			artifacts.verification.PolicyVersion, candidates.verification.PolicyVersion)
 	}
+	// §3.5 rule 11 pairs the feeds by the generated_at STRING the release stamped
+	// (the generator compares strings); an equal instant spelled differently is
+	// a different release stamp in every consumer.
 	if !artifacts.verification.GeneratedAt.Equal(candidates.verification.GeneratedAt) {
 		return fmt.Errorf("autotune feed release mismatch: catalog_artifacts generated_at %q != autotune_candidates generated_at %q",
 			artifacts.verification.GeneratedAt.Format(time.RFC3339), candidates.verification.GeneratedAt.Format(time.RFC3339))
@@ -347,6 +372,10 @@ func bindCatalogArtifactsFeed(artifacts, candidates loadedAutotuneFeed) error {
 	var catalog candidateCatalogFeed
 	if err := decodeStrictJSON(candidates.jsonBytes, &catalog); err != nil {
 		return fmt.Errorf("autotune.autotune_candidates schema: %w", err)
+	}
+	if feed.GeneratedAt != catalog.GeneratedAt {
+		return fmt.Errorf("autotune feed release mismatch: catalog_artifacts generated_at %q is not the candidate catalog's exact stamp %q",
+			feed.GeneratedAt, catalog.GeneratedAt)
 	}
 	return requirePrimaryArtifactConsistency(feed.Models, catalog.Rows)
 }

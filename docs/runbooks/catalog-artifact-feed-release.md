@@ -61,6 +61,66 @@ catalog, and carry the served candidate bytes' digest and release stamp.
 Unbound: `/v1/catalog-artifacts` and `.sig` must NOT be served. The gate's
 summary line ends with `artifact_feed=bound|absent`.
 
+## CLI consumption (slice 2c)
+
+The provider CLI fetches `/v1/catalog-artifacts` and its sidecar through the
+same §3.5 procedure as the other feeds (`AutotuneStaticInputs.loadArtifactFeed`,
+`phase3-binary/Sources/macprovider-cli/AutotuneArtifactFeed.swift`), then
+BINDS the feed to the candidate catalog selected for the same release: signer
+`key_id` equality with the candidate feed (a valid signature by a second
+concurrently trusted key fails), `version` / `generated_at` / `policy_version`
+equality, `candidate_catalog_sha256` equal to the selected candidate bytes,
+and §3.7.5 primary-artifact consistency. Its four warning classes
+(`catalog_artifact_feed_fallback_used` / `_integrity_failure` /
+`_update_required` / `_stale`) fail closed for artifact-derived capabilities
+only — the loader yields no usable feed under any of the last three — and are
+never paid-trust or network-submission blockers (§3.7.6 rule 6). The
+compiled-in fallback is `bakedArtifactFeedBase64` (base64 of the exact signed
+bytes) together with `bakedArtifactFeedSignerKeyID`, the release-manifest-bound
+signer read from the artifact sidecar at `generate`; on the compiled-in path the
+CLI enforces the three-way identity candidate signer == artifact signer ==
+manifest-bound signer, and on the live path the two authenticated signers it
+holds (SPEC-023 §3.7.2 as amended in v0.10.2: the `release.json` leg is
+enforced at generation and by the consumers that hold the manifest — `verify`,
+the acceptance signer, the live release gate; the coordinator loader enforces
+cross-feed signer equality). For a
+rate-card-bound release both are `nil` and the CLI behaves exactly as v0.1. A bare `generate` bakes the signer from the sidecar on disk at that moment; the shippable bake is the re-run inside `scripts/resign-autotune-static.sh` after signing, and `verify` fails drift on anything else.
+Freshness (§3.7.6 rules 3–4) is applied to whichever artifact bytes were
+selected, the compiled-in fallback included, so an offline binary gets no
+usable feed once its baked feed is 14 days old. The transcripts that make the
+live selection are `autotune --recommend`, `--recommend-prefetch`, `--consume`,
+and `models catalog-economics`: each loads the artifact feed for the selected
+candidate release beside the three v0.1 feeds (`loadRecommendationInputs`);
+the first three carry its warnings in the same warning sets, and
+`catalog-economics` — whose SPEC-044 projection codes are a closed v0.1 enum —
+reports them on stderr. Callers that consume only the three v0.1 feeds
+(recommendation freshness, the `serve` preflight, `models
+adopt-recommendation`) skip the artifact fetch. A compiled-in snapshot the CLI cannot decode is
+`catalog_artifact_feed_integrity_failure` with no usable feed, never a crash.
+BYOM identity is resolved against the compiled-in release in every command
+(`discover`, `evaluate`, `offer`, `catalog-economics`) through the one offline
+qualified selection — the same bound-and-fresh verdict the loader would reach
+for those bytes without transport — so all commands agree on one authority
+(SPEC-046: discovery is offline and never creates catalog authority). The
+matcher has two legs under that one authority. A catalog key the usable
+artifact feed covers is decided by the ARTIFACT leg alone: an MLX cache entry
+matches a `huggingface_revision` artifact only when one of its snapshot
+directories IS the artifact's `revision` (the immutable half of the source
+reference as the adapter observed it — a directory name, not a locally
+computed hash; the coordinator resolves by verified hash, SPEC-047 §R001);
+a GGUF `library_tag` never matches until the adapter reports the layer digest
+(slice 3). A repo id, row key, or tag alone is a mutable name and mints no
+identity for a covered key. A key the feed does not cover — every key when no
+usable feed exists, which includes any binary more than 14 days past its
+baked feed's stamp between release cuts — keeps the v0.1 name-level row
+match with `catalog_match_unverified` (§3.7.6 rule 6). Only a `verified`
+artifact whose `allowed_runtime_sources` include the reporting adapter, of a
+`listed` or `recommendable` row (§3.2: `candidate` and `blocked` rows are
+never BYOM-matchable), and only when exactly one model key answers. The closed
+schema, identity matrix, uniqueness, and
+binding rules are pinned across the generator, the coordinator, and the CLI by
+the shared corpus `scripts/tests/fixtures/artifact_feed_conformance.json`.
+
 ## Activation state
 
 The artifact feed is **never** activated implicitly. Committing
@@ -112,7 +172,7 @@ artifact-bound cut, and would list any future surface here as pending:
 
 | Surface | File | Change | Status |
 |---|---|---|---|
-| CLI release payload | `phase3-binary/dist/package.sh`, `scripts/acceptance-candidate-metadata.py`, `scripts/compatibility-set-manifest.py` | NOT a payload member at Stage A: the deployed updater and installer enforce the exact nine-name `catalog-release/` set, so the feed never rides in the provider tarball and the payload validators reject it there; the CLI's fallback is the snapshot compiled into the binary (§3.7.2), which slice 2c bakes | **resolved (slice 2b-ii)** |
+| CLI release payload | `phase3-binary/dist/package.sh`, `scripts/acceptance-candidate-metadata.py`, `scripts/compatibility-set-manifest.py` | NOT a payload member at Stage A: the deployed updater and installer enforce the exact nine-name `catalog-release/` set, so the feed never rides in the provider tarball and the payload validators reject it there; the CLI's fallback is the snapshot compiled into the binary (§3.7.2), baked by `catalog-release.py generate` as `bakedArtifactFeedBase64` + `bakedArtifactFeedSignerKeyID` (nil for a rate-card-bound release) | **resolved (slice 2b-ii); baked (slice 2c)** |
 | GitHub release assets | `.github/workflows/release.yml`, `.github/workflows/acceptance-candidate.yml`, `scripts/sign-acceptance-candidate.sh`, `scripts/acceptance-candidate-metadata.py`, `scripts/verify-acceptance-promotion.py`, `scripts/verify-pearl-runtime-release.sh` | when `release.json` binds the feed, both files are carried as unsigned inputs into the acceptance signer, published as release assets, listed in `checksums.txt` / `release-assets.txt` / provenance, bound in `pearl-release.json` `catalog.files`, required by the promotion inventory, and downloaded + verified by the Pearl runtime release check; never `compatibility-artifact-index` roles (the deployed updater enforces the exact seventeen) | **landed (slice 2b-ii)** |
 | live release gate | `scripts/verify-live-coordinator-release-gate.py` | served feed set must equal the release's; bound feed signer-equal and release-bound | **landed (slice 2b)** |
 | coordinator serving | `phase4-coordinator/internal/buyer`, `phase4-coordinator/dist/nginx-coordinator.malibu.tech.conf` | `/v1/catalog-artifacts` (+ `.sig`) on the buyer mux, release-bound at load; exact nginx allow-through blocks before `location /v1/ { return 404; }` | **landed (slice 2b)** |
