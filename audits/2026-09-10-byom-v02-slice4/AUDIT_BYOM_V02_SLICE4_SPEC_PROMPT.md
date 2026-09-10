@@ -34,3 +34,6 @@ Closure pass 2 (code 0/1H/1M, architect 0/1H/2M/1L/1I) fixed; record `AUDIT_BYOM
 
 ## CLOSURE PASS 4 (code-reviewer + architect; security at bar)
 Closure pass 3 (code 0/0/1M/1L, architect 0/2H/1M) fixed; record `AUDIT_BYOM_V02_SLICE4_SPEC_CLOSURE3.md`. Re-challenge on the FULL `git diff origin/main -- specs/`: one atomic release snapshot under the write lock with the read lock across the whole evaluation/match/verification/insert; every append origin under the provider section through append + generation + binding; approval precedence (a)–(g) with body digest and path/body binding; pending-response values. Do not re-report an item from any record unless its fix is wrong or incomplete.
+
+## CLOSURE PASS 5 (architect only; code and security at bar)
+Closure pass 4 (code 0/0/0/0, architect 0/1H) fixed; record `AUDIT_BYOM_V02_SLICE4_SPEC_CLOSURE4.md`. Re-challenge on the FULL `git diff origin/main -- specs/`: the fixed match ordering and the one-runtime-format-per-offer consequence in R001 and R008. Do not re-report an item from any record unless its fix is wrong or incomplete.
