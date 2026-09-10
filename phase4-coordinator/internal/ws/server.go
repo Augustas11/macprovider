@@ -252,6 +252,9 @@ type Server struct {
 	// liveMDA is the Phase 3 observe-mode MDA upgrade service (may be nil when
 	// MDM client is disabled or live_mda_enabled=false).
 	liveMDA liveMDAUpgrader
+	// modelAdmissionSections are the SPEC-047-R001 v0.1.5 per-provider
+	// decision critical sections and binding generations.
+	modelAdmissionSections providerSections
 }
 
 // liveMDAUpgrader is the minimal interface satisfied by mdm.LiveMDAService.
@@ -569,6 +572,7 @@ func (s *Server) SetAutotuneCatalog(catalog *autotune.Catalog, compatible ...*au
 		return
 	}
 	s.publishRelease(catalog, compatible, nil, true)
+	s.afterReleasePublished()
 }
 
 // publishRelease installs catalog + compatible set (when catalogGiven), the
@@ -623,8 +627,21 @@ func (s *Server) SetArtifactIdentityIndex(index *artifactidentity.Index) {
 // buyer feed-publish observer with the sets rebuilt from the exact feeds
 // just published; nil publishes with no artifact-derived identity.
 func (s *Server) SetArtifactIdentitySets(sets map[string]*artifactidentity.Index) uint64 {
+	return s.PublishArtifactIdentitySets(sets, false)
+}
+
+// PublishArtifactIdentitySets is SetArtifactIdentitySets with the current
+// release's feed-integrity outcome recorded (an offered feed-path pair is
+// then `catalog_artifact_feed_integrity_failure` rather than
+// `no_artifact_match`). After publication the SPEC-047-R006 sweeps run.
+func (s *Server) PublishArtifactIdentitySets(sets map[string]*artifactidentity.Index, feedIntegrityFailed bool) uint64 {
 	catalog, compatible, staged := s.artifactIdentitySets.takeStagedCatalog()
-	return s.publishRelease(catalog, compatible, sets, staged)
+	s.artifactIdentitySets.mu.Lock()
+	s.artifactIdentitySets.feedIntegrityFailed = feedIntegrityFailed
+	s.artifactIdentitySets.mu.Unlock()
+	generation := s.publishRelease(catalog, compatible, sets, staged)
+	s.afterReleasePublished()
+	return generation
 }
 
 // ReleaseGeneration is the monotonic generation of the published release
@@ -1481,16 +1498,17 @@ func admittedCandidateCatalogSHA256(catalogAdmissionMode, candidateCatalogSHA256
 
 func (s *Server) RefreshTier2HashStatuses() int {
 	cfg := s.tier2Config()
+	// A reload whose catalog half never arrived (or a Tier-2-only reload)
+	// still publishes what it staged, as one act, before sessions are
+	// re-verified against it — whatever the Tier-2 hash policy says.
+	if s.artifactIdentitySets.hasStaged() {
+		s.publishStagedKeepingSets()
+		s.afterReleasePublished()
+	}
 	if !tier2.ModelHashActive(cfg) {
 		return s.pool.UpdateHashStatuses(func(pool.Provider) pool.HashStatus {
 			return ""
 		})
-	}
-	// A reload whose catalog half never arrived (or a Tier-2-only reload)
-	// still publishes what it staged, as one act, before sessions are
-	// re-verified against it.
-	if s.artifactIdentitySets.hasStaged() {
-		s.publishStagedKeepingSets()
 	}
 	s.withReleaseRead(func() {
 		for release, index := range s.artifactIdentitySets.currentSets() {
@@ -3637,6 +3655,17 @@ func (s *Server) belowModelVersionFloor(p pool.Provider, gate string) bool {
 // TOCTOU is covered by the bounded revalidation sweep, which evicts (never
 // refuses) a session whose trust lapsed after it was committed.
 func (s *Server) registerProviderSession(conn net.Conn, entry *pool.Provider) (*providerSession, pool.RegisterRefusal) {
+	// SPEC-047-R006(a)/(d): the binding the replaced session carried names
+	// the candidate a replacement hello is evaluated against.
+	prior, hadPrior := s.pool.Resolve(entry.ProviderID, "")
+	session, refusal := s.registerProviderSessionLocked(conn, entry)
+	if session != nil {
+		s.bindModelAdmissionSessionAtHello(entry.ProviderID, prior, hadPrior)
+	}
+	return session, refusal
+}
+
+func (s *Server) registerProviderSessionLocked(conn net.Conn, entry *pool.Provider) (*providerSession, pool.RegisterRefusal) {
 	s.autotuneCatalogBridgeMu.Lock()
 	defer s.autotuneCatalogBridgeMu.Unlock()
 	if entry.CatalogAdmissionMode == "legacy_bridge" && !s.autotuneCatalogBridgeActive() {
@@ -4513,7 +4542,7 @@ func (s *Server) runModelAdmissionSyntheticProbe(ctx context.Context, current Mo
 		if !ok {
 			return ModelAdmissionEvent{}, errors.New("invalid model admission sandbox probe transition")
 		}
-		stored, err := s.modelAdmissions.AppendModelAdmissionDecision(ctx, decision)
+		stored, err := s.appendModelAdmissionDecisionInSection(ctx, decision)
 		if err != nil {
 			return ModelAdmissionEvent{}, err
 		}
@@ -4580,7 +4609,7 @@ func (s *Server) appendModelAdmissionSyntheticProbeResult(ctx context.Context, c
 	if !ok {
 		return ModelAdmissionEvent{}, errors.New("invalid model admission synthetic probe result")
 	}
-	return s.modelAdmissions.AppendModelAdmissionDecision(ctx, decision)
+	return s.appendModelAdmissionDecisionInSection(ctx, decision)
 }
 
 func (s *Server) runWSWarmupGateAttempt(ctx context.Context, provider pool.Provider, attempt int, body []byte) bool {
@@ -5516,6 +5545,13 @@ func (s *Server) handleHeartbeat(conn net.Conn, providerID, assignedID string, p
 			Int("effective_slots_total", capacity.SlotsTotal).
 			Msg("provider capacity claim exceeds the operator ceiling; clamped")
 	}
+	var (
+		priorBinding    pool.ModelAdmissionBinding
+		hadPriorBinding bool
+	)
+	if before, ok := s.pool.Resolve(providerID, assignedID); ok {
+		priorBinding, hadPriorBinding = before.ModelAdmissionBinding()
+	}
 	heartbeatResult := s.pool.ApplyHeartbeatDetailed(providerID, assignedID, pool.HeartbeatUpdate{
 		Status:                    state,
 		ModelID:                   hb.ModelID,
@@ -5547,6 +5583,9 @@ func (s *Server) handleHeartbeat(conn net.Conn, providerID, assignedID string, p
 		s.log.Warn().Str("provider_id", providerID).Msg("heartbeat for unknown provider")
 		return
 	}
+	// SPEC-047-R006(a)/(d): the bound candidate is evaluated against the
+	// session's post-heartbeat identity and receipt key under the section.
+	s.evaluateModelAdmissionSessionOnHeartbeat(*entry, priorBinding, hadPriorBinding)
 	if heartbeatResult.ModelIDChanged {
 		s.observeAdmissionCeilingDrift(*entry, heartbeatResult.PriorModelID)
 		s.revokeSettlementAdmissionForHeartbeatModelDrift(*entry, heartbeatResult.PriorModelID)
@@ -5656,7 +5695,7 @@ func (s *Server) revokeSettlementAdmissionForHeartbeatModelDrift(provider pool.P
 		if !drifted {
 			continue
 		}
-		if _, err := s.modelAdmissions.AppendModelAdmissionDecision(ctx, revocation); err != nil {
+		if _, err := s.appendModelAdmissionDecisionInSection(ctx, revocation); err != nil {
 			s.log.Warn().
 				Err(err).
 				Str("provider_id", provider.ProviderID).
@@ -6081,6 +6120,7 @@ func (s *Server) markDegradedForWarmup(providerID, assignedID string) {
 }
 
 func (s *Server) handleDisconnect(providerID, assignedID string) {
+	s.clearModelAdmissionBindingOnDisconnect(providerID, assignedID)
 	s.clearWarmupGate(providerID, assignedID)
 	s.clearRewardsTrustLookupFailure(providerID, assignedID)
 	s.resetSupervisorDwellOnDisconnect(providerID)

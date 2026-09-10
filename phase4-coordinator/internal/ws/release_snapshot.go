@@ -14,9 +14,13 @@ import (
 // the release read-write lock — readers hold it across a whole evaluation,
 // the publisher across the whole swap — and `gen` the published generation.
 type releaseSnapshotState struct {
-	mu   sync.RWMutex
-	sets map[string]*artifactidentity.Index
-	gen  uint64
+	// feedIntegrityFailed records that the current release's artifact feed
+	// was present but rejected (SPEC-023 integrity failure) at the last
+	// publication, so a feed-path offer pair is `catalog_artifact_feed_integrity_failure`.
+	feedIntegrityFailed bool
+	mu                  sync.RWMutex
+	sets                map[string]*artifactidentity.Index
+	gen                 uint64
 
 	staging bool
 	stageMu sync.Mutex
@@ -95,3 +99,7 @@ func (r *releaseSnapshotState) setFor(release string) *artifactidentity.Index {
 func (r *releaseSnapshotState) currentSets() map[string]*artifactidentity.Index {
 	return r.sets
 }
+
+// integrityFailed reports whether the current release's artifact feed failed
+// integrity at the last publication (read under the release read lock).
+func (r *releaseSnapshotState) integrityFailed() bool { return r.feedIntegrityFailed }

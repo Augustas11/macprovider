@@ -1,6 +1,7 @@
 package autotune
 
 import (
+	"sort"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -316,6 +317,24 @@ func (c *Catalog) Row(key string) (Row, bool) {
 	row, ok := c.rowsByKey[key]
 	return row, ok
 }
+
+// Keys returns every row key in sorted order (SPEC-047-R001 v0.1.5 offer-time
+// primary-row matching scans rows by `model_sha256`).
+func (c *Catalog) Keys() []string {
+	if c == nil {
+		return nil
+	}
+	keys := make([]string, 0, len(c.rowsByKey))
+	for key := range c.rowsByKey {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// NormalizeModelID is the catalog's model-id normalization (lowercase,
+// trimmed), exported so session/candidate comparisons use one rule.
+func NormalizeModelID(modelID string) string { return normalizeModelID(modelID) }
 
 func (c *Catalog) HighestClaimedTier(modelID string) (key string, row Row, ok bool) {
 	if c == nil {

@@ -28,6 +28,37 @@ type Member struct {
 	Hash          string
 	IsPrimary     bool
 	RuntimeStatus string
+	// AllowedRuntimeSources is the artifact's SPEC-023 §3.7.4
+	// `allowed_runtime_sources`, sorted and comma-joined so Member stays
+	// comparable (session pins compare members by value).
+	AllowedRuntimeSources string
+}
+
+// JoinRuntimeSources canonicalizes an allowed-runtime-sources list for
+// Member.AllowedRuntimeSources.
+func JoinRuntimeSources(sources []string) string {
+	out := make([]string, 0, len(sources))
+	for _, source := range sources {
+		if source = strings.TrimSpace(source); source != "" {
+			out = append(out, source)
+		}
+	}
+	sort.Strings(out)
+	return strings.Join(out, ",")
+}
+
+// AllowsRuntimeSource reports whether the offer's signed runtime source is
+// one of the artifact's allowed sources.
+func (m Member) AllowsRuntimeSource(source string) bool {
+	if source == "" {
+		return false
+	}
+	for _, allowed := range strings.Split(m.AllowedRuntimeSources, ",") {
+		if allowed == source {
+			return true
+		}
+	}
+	return false
 }
 
 // Provenance is what a later trusted binding records about the feed the

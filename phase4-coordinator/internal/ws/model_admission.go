@@ -1690,7 +1690,14 @@ func (s *Server) handleProviderModelAdmissionOffer(w http.ResponseWriter, r *htt
 		writeJSON(w, status, modelAdmissionError(code, "model admission offer rejected"))
 		return
 	}
-	stored, replay, err := s.modelAdmissions.AppendModelAdmissionOffer(r.Context(), event)
+	// SPEC-047-R001 v0.1.5: the coordinator's offer-time catalog match is the
+	// one authority for the candidate's catalog identity; the append, like
+	// every append origin, holds the provider's section through the binding
+	// refresh.
+	event = s.applyModelAdmissionOfferCatalogMatch(event, body)
+	stored, replay, err := s.appendModelAdmissionEventInSection(r.Context(), providerID, func(ctx context.Context) (ModelAdmissionEvent, bool, error) {
+		return s.modelAdmissions.AppendModelAdmissionOffer(ctx, event)
+	})
 	if err != nil {
 		status := http.StatusInternalServerError
 		code := "model_admission_store_error"
@@ -1746,7 +1753,9 @@ func (s *Server) handleProviderModelAdmissionWithdrawal(w http.ResponseWriter, r
 		writeJSON(w, status, modelAdmissionError(code, "model admission withdrawal rejected"))
 		return
 	}
-	stored, replay, err := s.modelAdmissions.AppendModelAdmissionWithdrawal(r.Context(), event)
+	stored, replay, err := s.appendModelAdmissionEventInSection(r.Context(), providerID, func(ctx context.Context) (ModelAdmissionEvent, bool, error) {
+		return s.modelAdmissions.AppendModelAdmissionWithdrawal(ctx, event)
+	})
 	if err != nil {
 		status := http.StatusInternalServerError
 		code := "model_admission_store_error"

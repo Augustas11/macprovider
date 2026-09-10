@@ -194,6 +194,14 @@ type Provider struct {
 	ModelAdmissionCatalogModelKey        string `json:"model_admission_catalog_model_key,omitempty"`
 	ModelAdmissionDiscoveryDigestSHA256  string `json:"model_admission_discovery_digest_sha256,omitempty"`
 	ModelAdmissionEvaluationDigestSHA256 string `json:"model_admission_evaluation_digest_sha256,omitempty"`
+	// SPEC-047-R003 v0.1.5 coordinator-derived session-to-candidate binding
+	// facts (never provider-asserted, never wire-exported): the bound row's
+	// current `runtime_status`, the release generation the binding was last
+	// validated under (route time requires it to equal the published one),
+	// and the provider's binding generation at the last mutation.
+	ModelAdmissionCatalogRowStatus           string `json:"-"`
+	ModelAdmissionValidatedReleaseGeneration uint64 `json:"-"`
+	ModelAdmissionBindingGeneration          uint64 `json:"-"`
 	// SPEC-015 v0.1.3 / SPEC-001 v1.6 — raw ed25519 public key bytes
 	// populated from auth_request.provider_receipt_public_key when present.
 	ReceiptPubkey []byte `json:"-"`
@@ -1296,6 +1304,69 @@ func (r *Registry) UpdateModelIdentities(verdictFor func(Provider) ModelIdentity
 		p.ArtifactIdentity = next.Artifact
 	}
 	return updated
+}
+
+// ModelAdmissionBinding is the SPEC-047-R003 v0.1.5 coordinator-derived
+// session-to-candidate binding: the candidate, its resolved catalog key, its
+// current head event, and the bound row's status.
+type ModelAdmissionBinding struct {
+	CandidateID                string
+	CoordinatorEventID         string
+	ServedModelRef             string
+	CatalogModelKey            string
+	CatalogRowStatus           string
+	ValidatedReleaseGeneration uint64
+}
+
+// ModelAdmissionBinding returns the session's current binding, if any.
+func (p Provider) ModelAdmissionBinding() (ModelAdmissionBinding, bool) {
+	if strings.TrimSpace(p.ModelAdmissionCandidateID) == "" {
+		return ModelAdmissionBinding{}, false
+	}
+	return ModelAdmissionBinding{
+		CandidateID:                p.ModelAdmissionCandidateID,
+		CoordinatorEventID:         p.ModelAdmissionCoordinatorEventID,
+		ServedModelRef:             p.ModelAdmissionServedModelRef,
+		CatalogModelKey:            p.ModelAdmissionCatalogModelKey,
+		CatalogRowStatus:           p.ModelAdmissionCatalogRowStatus,
+		ValidatedReleaseGeneration: p.ModelAdmissionValidatedReleaseGeneration,
+	}, true
+}
+
+func clearModelAdmissionBinding(p *Provider) {
+	p.ModelAdmissionCandidateID = ""
+	p.ModelAdmissionCoordinatorEventID = ""
+	p.ModelAdmissionServedModelRef = ""
+	p.ModelAdmissionCatalogModelKey = ""
+	p.ModelAdmissionDiscoveryDigestSHA256 = ""
+	p.ModelAdmissionEvaluationDigestSHA256 = ""
+	p.ModelAdmissionCatalogRowStatus = ""
+	p.ModelAdmissionValidatedReleaseGeneration = 0
+}
+
+// SetModelAdmissionBinding installs (or, with a nil binding, clears) the
+// provider's session-to-candidate binding and stamps the provider's binding
+// generation. The caller holds the provider's decision critical section
+// (lock order: section, then registry). Returns false when the provider has
+// no session.
+func (r *Registry) SetModelAdmissionBinding(providerID string, binding *ModelAdmissionBinding, bindingGeneration uint64) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	p := r.providers[providerID]
+	if p == nil {
+		return false
+	}
+	clearModelAdmissionBinding(p)
+	if binding != nil {
+		p.ModelAdmissionCandidateID = binding.CandidateID
+		p.ModelAdmissionCoordinatorEventID = binding.CoordinatorEventID
+		p.ModelAdmissionServedModelRef = binding.ServedModelRef
+		p.ModelAdmissionCatalogModelKey = binding.CatalogModelKey
+		p.ModelAdmissionCatalogRowStatus = binding.CatalogRowStatus
+		p.ModelAdmissionValidatedReleaseGeneration = binding.ValidatedReleaseGeneration
+	}
+	p.ModelAdmissionBindingGeneration = bindingGeneration
+	return true
 }
 
 // IdentityPin is the identity a session first verified for its model:
@@ -2423,6 +2494,10 @@ func (r *Registry) applyHeartbeatLocked(providerID, assignedID string, hb Heartb
 		// A model change (warm swap, R006) ends the previous session
 		// authority whether or not this report carries a hash.
 		p.IdentityPin = nil
+		// SPEC-047-R003 v0.1.5: the session-to-candidate binding is cleared
+		// on model change; the ws drift path revokes the bound candidate
+		// before re-deriving.
+		clearModelAdmissionBinding(p)
 	}
 	if !hb.ModelHashPresent {
 		p.ModelHash = ""

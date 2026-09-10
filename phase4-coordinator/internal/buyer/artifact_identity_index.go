@@ -93,6 +93,8 @@ func BuildArtifactIdentityIndex(feeds AutotuneFeeds) (*artifactidentity.Index, e
 				Hash:          entry.Hash,
 				IsPrimary:     artifactID == model.PrimaryArtifactID,
 				RuntimeStatus: row.RuntimeStatus,
+				// SPEC-047-R001 v0.1.5 offer-time admissibility and R003(ii).
+				AllowedRuntimeSources: artifactidentity.JoinRuntimeSources(entry.AllowedRuntimeSources),
 			})
 		}
 	}
