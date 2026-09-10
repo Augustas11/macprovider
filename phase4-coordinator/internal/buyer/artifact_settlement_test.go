@@ -43,6 +43,11 @@ func seedBYOMArtifactSettlementState(t *testing.T, store providerws.ModelAdmissi
 	rowProvider := provider
 	rowProvider.ModelHash = buyerTestHash
 	rowProvider.ModelHashAlgorithm = modelidentity.SnapshotManifestV1
+	// A decision that resolved the member records the member's row KEY as
+	// the catalog key — a namespace distinct from the row's model id
+	// ("model-a-key" vs "model-a" in these fixtures), which the route-time
+	// lookup and predicate must reproduce.
+	rowProvider.ModelAdmissionCatalogModelKey = binding.Member.ModelKey
 	offer := seedBYOMAdmissionState(t, store, rowProvider, "offer_submitted")
 	material, ok := tier2.SnapshotMaterial(provider.ModelID, buyerTestHash)
 	if !ok {
@@ -255,6 +260,41 @@ func TestBYOMArtifactMemberRouteTimeGatesFailClosed(t *testing.T) {
 				t.Fatalf("%s: ledger credits=%d want 0", name, got)
 			}
 		})
+	}
+}
+
+// SPEC-010-R007(d) on every routing fallback: a member-bound session whose
+// model has no tier-2 material and whose admission store holds nothing is
+// excluded from default routing rather than dispatched to fail at the
+// snapshot.
+func TestArtifactBoundSessionWithoutMaterialIsExcludedFromRouting(t *testing.T) {
+	tier2.ResetForTest()
+	t.Cleanup(tier2.ResetForTest)
+	raw, pubkey := routeSnapshotCatalogFixture(t, "byom-no-material-catalog", time.Now().UTC().Add(time.Hour))
+	if err := tier2.Configure(config.Tier2Config{ObserveEnabled: true, CatalogPath: writeRouteSnapshotCatalog(t, raw), CatalogPublicKey: pubkey, RequireHashVerified: true}, zerolog.Nop()); err != nil {
+		t.Fatalf("tier2.Configure: %v", err)
+	}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { writeProviderOK(w) }))
+	defer upstream.Close()
+	registry := pool.NewRegistry(nil)
+	registerSettlementProvider(registry, "p1", "session-1", upstream.URL, 30, bytes.Repeat([]byte{0x79}, 32))
+	provider := registry.Snapshot()[0]
+	binding := ggufArtifactBinding()
+	binding.Member.ModelID = "model-x"
+	provider.ModelID = "model-x" // not in the tier-2 catalog: no material
+	provider.ModelHash = binding.Member.Hash
+	provider.ModelHashAlgorithm = binding.Member.HashAlgorithm
+	provider.ExpectedModelHash = buyerTestHash
+	provider.HashStatus = pool.HashStatusVerified
+	provider.ArtifactIdentity = binding
+	registry.Register(&provider, nil)
+	server, dbPath := artifactSettlementServer(t, provider, registry, providerws.NewMemoryModelAdmissionStore())
+	rr := postChat(t, server, []byte(`{"model":"model-x","messages":[{"role":"user","content":"hi"}]}`), nil)
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("member-bound session without material must be excluded: status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if got := ledgerCreditCount(t, dbPath); got != 0 {
+		t.Fatalf("ledger credits=%d want 0", got)
 	}
 }
 

@@ -168,8 +168,10 @@ row KEY is a different namespace and an asserted key must agree with the
 resolved one), only a validated catalog envelope (`current` / `previous`
 admission) can bind a release, a compatible-previous release has no loaded
 artifact feed and so stays primary-only, a `listed` row's member never settles,
-and the matched member is pinned for the session — a later heartbeat resolving
-to another member (the primary included) is a mismatch. A stale feed logs
+and the identity a session FIRST verifies (the primary pair or one member) is
+pinned for the session (`pool.Provider.IdentityPin`) — a later heartbeat or
+refresh verifying a different identity is a mismatch, the pin survives
+mismatches and hash-less reports, and only a model change resets it. A stale feed logs
 `artifact_identity_index_stale` once per refresh. `scripts/verify-tier2-live.sh`
 accepts both canonical algorithms in its ready-cohort check.
 

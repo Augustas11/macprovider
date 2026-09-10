@@ -95,9 +95,14 @@ final class BYOMArtifactDigestTests: XCTestCase {
         let recomputed = try store.resolver.computeDigest(forOllamaModel: "test-model:q4_k_m")
         XCTAssertNotEqual(recomputed, digest)
         XCTAssertEqual(store.resolver.knownDigest(forOllamaModel: "test-model:q4_k_m"), recomputed)
-        // The cache file is private.
+        // The cache file is private — including when it replaces an existing
+        // file that was left world-readable.
         let attributes = try FileManager.default.attributesOfItem(atPath: store.cacheURL.path)
         XCTAssertEqual((attributes[.posixPermissions] as? NSNumber)?.intValue, 0o600)
+        try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: store.cacheURL.path)
+        _ = try store.resolver.computeDigest(forOllamaModel: "test-model:q4_k_m")
+        let republished = try FileManager.default.attributesOfItem(atPath: store.cacheURL.path)
+        XCTAssertEqual((republished[.posixPermissions] as? NSNumber)?.intValue, 0o600, "a republished cache is private whatever mode the old file had")
     }
 
     /// SPEC-046-R005: hashing at evaluation time has an explicit budget. An

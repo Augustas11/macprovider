@@ -161,7 +161,14 @@ type Provider struct {
 	// snapshot binds. Nil on the primary-row path and whenever the pair is
 	// unverified. Session state, never wire-exported.
 	ArtifactIdentity *artifactidentity.Binding `json:"-"`
-	EncryptedLeg     bool                      `json:"encrypted_leg,omitempty"`
+	// IdentityPin is SPEC-010-R007(b)(c) session authority: the identity the
+	// session FIRST verified for its model — the row's primary pair, or one
+	// feed member — kept across every later verdict (mismatch, missing hash,
+	// stale feed) and reset only when the model changes (warm swap, R006) or
+	// the session is re-registered. Distinct from ArtifactIdentity, which is
+	// the CURRENT verdict's binding. Session state, never wire-exported.
+	IdentityPin  *IdentityPin `json:"-"`
+	EncryptedLeg bool         `json:"encrypted_leg,omitempty"`
 	// TrustedPoolV1 is the provider-side half of SPEC-042-R010 positive
 	// pool-capability negotiation. Pool-selected traffic may route only to a
 	// member whose current session advertised this capability; global traffic
@@ -1276,7 +1283,8 @@ func (r *Registry) UpdateModelIdentities(verdictFor func(Provider) ModelIdentity
 	for _, p := range r.providers {
 		cp := *p
 		cp.conn = nil
-		next := pinArtifactSession(p.ArtifactIdentity, verdictFor(cp))
+		next := pinArtifactSession(p.IdentityPin, verdictFor(cp))
+		p.IdentityPin = pinIdentity(p.IdentityPin, next)
 		if p.HashStatus != next.Status {
 			updated++
 		}
@@ -1286,19 +1294,43 @@ func (r *Registry) UpdateModelIdentities(verdictFor func(Provider) ModelIdentity
 	return updated
 }
 
-// pinArtifactSession is SPEC-010-R007(b): the matched member's artifact_id
-// is SESSION authority. A session that bound a member and later reports a
-// pair resolving to a different member (or to the row's own primary pair)
-// is a mismatch for the same model id, exactly as a changed row digest is;
-// a model change (warm swap, R006) starts a new binding instead.
-func pinArtifactSession(prior *artifactidentity.Binding, verdict ModelIdentityVerdict) ModelIdentityVerdict {
-	if prior == nil || verdict.Status != HashStatusVerified {
+// IdentityPin is the identity a session first verified for its model:
+// the row's primary pair (Primary) or exactly one feed member (Member).
+type IdentityPin struct {
+	Primary bool
+	Member  artifactidentity.Member
+}
+
+// pinIdentity records the FIRST verified identity of a session as its pin;
+// an existing pin is never replaced (only a model change clears it).
+func pinIdentity(pin *IdentityPin, verdict ModelIdentityVerdict) *IdentityPin {
+	if pin != nil || verdict.Status != HashStatusVerified {
+		return pin
+	}
+	if verdict.Artifact == nil {
+		return &IdentityPin{Primary: true}
+	}
+	return &IdentityPin{Member: verdict.Artifact.Member}
+}
+
+// pinArtifactSession is SPEC-010-R007(b)(c): the verified identity is
+// SESSION authority. Once pinned, a later report for the same model that
+// verifies as a DIFFERENT identity — another member, or the primary pair
+// for a member-pinned session, or a member for a primary-pinned session —
+// is a mismatch, exactly as a changed row digest is. The pin survives every
+// non-verified verdict in between; a model change (warm swap, R006) resets
+// it and starts a new binding.
+func pinArtifactSession(pin *IdentityPin, verdict ModelIdentityVerdict) ModelIdentityVerdict {
+	if pin == nil || verdict.Status != HashStatusVerified {
 		return verdict
 	}
-	if verdict.Artifact == nil || verdict.Artifact.Member != prior.Member {
-		return ModelIdentityVerdict{Status: HashStatusMismatch}
+	switch {
+	case pin.Primary && verdict.Artifact == nil:
+		return verdict
+	case !pin.Primary && verdict.Artifact != nil && verdict.Artifact.Member == pin.Member:
+		return verdict
 	}
-	return verdict
+	return ModelIdentityVerdict{Status: HashStatusMismatch}
 }
 
 // ExpireLegacyBridgeAdmissions atomically removes every metadata-free bridge
@@ -2215,7 +2247,11 @@ type ModelIdentityRequest struct {
 	ReportedHash           string
 	ReportedAlgorithm      string
 	CandidateCatalogSHA256 string
-	CatalogModelKey        string
+	// CatalogAdmissionMode is how the session's catalog envelope was
+	// admitted ("current", "previous", "update_bridge", "legacy", ...): only
+	// a validated envelope may bind artifact identity to a release.
+	CatalogAdmissionMode string
+	CatalogModelKey      string
 }
 
 // ModelIdentityVerdict is the verifier's answer: the SPEC-008 hash status and,
@@ -2391,11 +2427,14 @@ func (r *Registry) applyHeartbeatLocked(providerID, assignedID string, hb Heartb
 				ReportedHash:           hb.ModelHash,
 				ReportedAlgorithm:      hb.ModelHashAlgorithm,
 				CandidateCatalogSHA256: p.CandidateCatalogSHA256,
+				CatalogAdmissionMode:   p.CatalogAdmissionMode,
 				CatalogModelKey:        p.ModelAdmissionCatalogModelKey,
 			})
-			if !modelIDChanged {
-				verdict = pinArtifactSession(p.ArtifactIdentity, verdict)
+			if modelIDChanged {
+				p.IdentityPin = nil
 			}
+			verdict = pinArtifactSession(p.IdentityPin, verdict)
+			p.IdentityPin = pinIdentity(p.IdentityPin, verdict)
 			p.HashStatus = verdict.Status
 			p.ArtifactIdentity = verdict.Artifact
 		} else if r.modelIdentityVerifier != nil {

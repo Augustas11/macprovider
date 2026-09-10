@@ -1374,7 +1374,8 @@ func providerIdentityRequest(p pool.Provider) pool.ModelIdentityRequest {
 		ExpectedHash:           p.ExpectedModelHash,
 		ReportedHash:           p.ModelHash,
 		ReportedAlgorithm:      p.ModelHashAlgorithm,
-		CandidateCatalogSHA256: admittedCandidateCatalogSHA256(p.CatalogAdmissionMode, p.CandidateCatalogSHA256),
+		CandidateCatalogSHA256: p.CandidateCatalogSHA256,
+		CatalogAdmissionMode:   p.CatalogAdmissionMode,
 		CatalogModelKey:        p.ModelAdmissionCatalogModelKey,
 	}
 }
@@ -1382,7 +1383,8 @@ func providerIdentityRequest(p pool.Provider) pool.ModelIdentityRequest {
 // admittedCandidateCatalogSHA256 is the release a session may bind artifact
 // identity to: only a catalog envelope the coordinator validated ("current"
 // or a compatible "previous"). A bridge or legacy session presented no
-// validated envelope, so its digest never reaches the index.
+// validated envelope, so its digest never reaches the index. Applied inside
+// resolveArtifactIdentity, so no caller can forget it.
 func admittedCandidateCatalogSHA256(catalogAdmissionMode, candidateCatalogSHA256 string) string {
 	if catalogAdmissionMode != "current" && catalogAdmissionMode != "previous" {
 		return ""
@@ -1492,7 +1494,11 @@ func (s *Server) resolveArtifactIdentity(req pool.ModelIdentityRequest, algorith
 	index := s.currentArtifactIdentityIndex()
 	// SPEC-023 §3.7.6 rules 4–5: a stale or future-stamped feed authorizes no
 	// artifact-derived capability; the primary-row path is unaffected.
-	if index == nil || !index.BoundTo(req.CandidateCatalogSHA256) || !index.Fresh(s.now()) {
+	// Only a validated catalog envelope ("current" / compatible "previous")
+	// binds a release; a bridge or legacy session presented none, on every
+	// leg (hello, heartbeat, refresh) since the gate lives here.
+	release := admittedCandidateCatalogSHA256(req.CatalogAdmissionMode, req.CandidateCatalogSHA256)
+	if index == nil || release == "" || !index.BoundTo(release) || !index.Fresh(s.now()) {
 		return artifactidentity.Binding{}, false
 	}
 	binding, ok := index.Resolve(algorithm, reported)
@@ -2908,7 +2914,8 @@ func (s *Server) prepareProviderAdmissionWithQuotaCheck(conn net.Conn, auth prov
 			ExpectedHash:           expectedModelHash,
 			ReportedHash:           hello.ModelHash,
 			ReportedAlgorithm:      hello.ModelHashAlgorithm,
-			CandidateCatalogSHA256: admittedCandidateCatalogSHA256(catalogAdmissionMode, hello.CandidateCatalogSHA256),
+			CandidateCatalogSHA256: hello.CandidateCatalogSHA256,
+			CatalogAdmissionMode:   catalogAdmissionMode,
 		})
 		hashStatus = verdict.Status
 		artifactIdentity = verdict.Artifact
@@ -5366,6 +5373,7 @@ func (s *Server) handleHeartbeat(conn net.Conn, providerID, assignedID string, p
 		}
 		if current, ok := s.pool.Resolve(providerID, assignedID); ok {
 			request.CandidateCatalogSHA256 = current.CandidateCatalogSHA256
+			request.CatalogAdmissionMode = current.CatalogAdmissionMode
 			request.CatalogModelKey = current.ModelAdmissionCatalogModelKey
 		}
 		status := s.verifyModelIdentity(request).Status

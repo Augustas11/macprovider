@@ -57,27 +57,59 @@ func TestArtifactSessionMemberIsPinnedAcrossHeartbeats(t *testing.T) {
 	if swapped.HashStatus != HashStatusMismatch || swapped.ArtifactIdentity != nil {
 		t.Fatalf("another member of the same key is a mismatch for the session: %+v", swapped)
 	}
+	// The pin OUTLIVES the mismatch: repeating the other member, a report
+	// with no hash at all, and a refresh all leave the session bound to the
+	// member it first verified; only that member verifies again.
+	if again := beat("model-a", ggufB, modelidentity.GGUFFileV1, start.Add(4*time.Minute)); again.HashStatus != HashStatusMismatch || again.ArtifactIdentity != nil {
+		t.Fatalf("a second report of the other member must still mismatch: %+v", again)
+	}
+	if _, _, ok := registry.ApplyHeartbeat("p1", "current", HeartbeatUpdate{
+		Status: StateReady, ModelID: "model-a", ModelHashPresent: false, ExpectedModelHash: rowHash,
+		MaxContextTokens: 8192, MaxConcurrency: 1, SlotsFree: 1, SlotsTotal: 1, At: start.Add(5 * time.Minute),
+	}); !ok {
+		t.Fatal("hash-less heartbeat not applied")
+	}
+	if after := beat("model-a", ggufB, modelidentity.GGUFFileV1, start.Add(6*time.Minute)); after.HashStatus != HashStatusMismatch || after.ArtifactIdentity != nil {
+		t.Fatalf("a hash-less report must not clear the pin: %+v", after)
+	}
+	if n := registry.UpdateModelIdentities(func(Provider) ModelIdentityVerdict {
+		return ModelIdentityVerdict{Status: HashStatusVerified, Artifact: &artifactidentity.Binding{Member: member("gguf-q8", ggufB)}}
+	}); n != 0 {
+		t.Fatalf("refresh to another member after a mismatch must stay a mismatch, updated=%d", n)
+	}
+	if back := beat("model-a", ggufA, modelidentity.GGUFFileV1, start.Add(7*time.Minute)); back.HashStatus != HashStatusVerified || back.ArtifactIdentity == nil || back.ArtifactIdentity.Member.ArtifactID != "gguf-q4" {
+		t.Fatalf("the pinned member verifies again: %+v", back)
+	}
+	// A session that first verified the row's PRIMARY pair is pinned to it:
+	// a later member report for the same model is a mismatch too.
+	registerHeartbeatProvider(t, registry, "model-a", "", HashStatusUncatalogued, start)
+	if p := beat("model-a", rowHash, modelidentity.SnapshotManifestV1, start.Add(8*time.Minute)); p.HashStatus != HashStatusVerified || p.ArtifactIdentity != nil {
+		t.Fatalf("primary verifies: %+v", p)
+	}
+	if p := beat("model-a", ggufA, modelidentity.GGUFFileV1, start.Add(9*time.Minute)); p.HashStatus != HashStatusMismatch || p.ArtifactIdentity != nil {
+		t.Fatalf("a member after the primary is a different identity for the session: %+v", p)
+	}
 	// Re-register a fresh session bound to gguf-q4, then report the primary pair.
 	registerHeartbeatProvider(t, registry, "model-a", "", HashStatusUncatalogued, start)
-	beat("model-a", ggufA, modelidentity.GGUFFileV1, start.Add(4*time.Minute))
-	toPrimary := beat("model-a", rowHash, modelidentity.SnapshotManifestV1, start.Add(5*time.Minute))
+	beat("model-a", ggufA, modelidentity.GGUFFileV1, start.Add(10*time.Minute))
+	toPrimary := beat("model-a", rowHash, modelidentity.SnapshotManifestV1, start.Add(11*time.Minute))
 	if toPrimary.HashStatus != HashStatusMismatch || toPrimary.ArtifactIdentity != nil {
 		t.Fatalf("the row's own pair is a different member for a session bound elsewhere: %+v", toPrimary)
 	}
 	// A model change (warm swap, R006) starts a new binding instead.
 	registerHeartbeatProvider(t, registry, "model-a", "", HashStatusUncatalogued, start)
-	beat("model-a", ggufA, modelidentity.GGUFFileV1, start.Add(6*time.Minute))
-	changed := beat("model-b", ggufB, modelidentity.GGUFFileV1, start.Add(7*time.Minute))
+	beat("model-a", ggufA, modelidentity.GGUFFileV1, start.Add(12*time.Minute))
+	changed := beat("model-b", ggufB, modelidentity.GGUFFileV1, start.Add(13*time.Minute))
 	if changed.HashStatus != HashStatusVerified || changed.ArtifactIdentity == nil || changed.ArtifactIdentity.Member.ArtifactID != "gguf-q8" {
 		t.Fatalf("model change rebinds: %+v", changed)
 	}
-	// The refresh path pins the same way.
+	// The refresh path pins the same way (session now pinned to gguf-q8).
 	if n := registry.UpdateModelIdentities(func(Provider) ModelIdentityVerdict {
 		return ModelIdentityVerdict{Status: HashStatusVerified, Artifact: &artifactidentity.Binding{Member: member("gguf-q4", ggufA)}}
 	}); n != 1 {
 		t.Fatalf("refresh to another member must flip status, updated=%d", n)
 	}
-	if p := registry.Snapshot()[0]; p.HashStatus != HashStatusMismatch || p.ArtifactIdentity != nil {
-		t.Fatalf("refresh path pin: %+v", p)
+	if p := registry.Snapshot()[0]; p.HashStatus != HashStatusMismatch || p.ArtifactIdentity != nil || p.IdentityPin == nil || p.IdentityPin.Member.ArtifactID != "gguf-q8" {
+		t.Fatalf("refresh path pin: %+v pin=%+v", p, p.IdentityPin)
 	}
 }

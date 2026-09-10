@@ -41,19 +41,37 @@ func (s *Server) byomDefaultPaidRoutingEligible(p pool.Provider) bool {
 		if err != nil || found {
 			return false
 		}
-		return !marked
+		return byomLegacyRoutingEligible(p, marked)
 	}
 	_, found, eligible := s.byomRouteSnapshotBinding(ctx, p, material)
 	if found {
 		return eligible
 	}
-	// SPEC-010-R007(d): a session bound to a feed member routes only with the
-	// admission evidence its route snapshot must carry; without it the
-	// session is excluded here, never dispatched to fail at the snapshot.
-	if p.ArtifactIdentity != nil {
-		return false
+	return byomLegacyRoutingEligible(p, marked)
+}
+
+// byomLegacyRoutingEligible is the v0.1 default for a session with no
+// admission record: routable unless it marked itself as a BYOM candidate.
+// SPEC-010-R007(d): a session bound to a feed member routes only with the
+// admission evidence its route snapshot must carry, so it is excluded here
+// on every fallback — never dispatched to fail at the snapshot.
+func byomLegacyRoutingEligible(p pool.Provider, marked bool) bool {
+	return !marked && p.ArtifactIdentity == nil
+}
+
+// byomCatalogModelKey is the admission catalog key a route-time lookup and
+// predicate name for a session: the key the session asserted; else, for a
+// session bound to a feed member, the member's row KEY (what a decision that
+// resolved the member records); else tier-2's normalized row model id. The
+// member's ModelID is compared separately against the tier-2 row.
+func byomCatalogModelKey(p pool.Provider, material tier2.RouteSnapshotMaterial) string {
+	if asserted := strings.ToLower(strings.TrimSpace(p.ModelAdmissionCatalogModelKey)); asserted != "" {
+		return asserted
 	}
-	return !marked
+	if binding := p.ArtifactIdentity; binding != nil {
+		return binding.Member.ModelKey
+	}
+	return strings.ToLower(strings.TrimSpace(material.CatalogModelKey))
 }
 
 // byomMaterialHash is the tier-2 material lookup digest for a session: the
@@ -80,10 +98,7 @@ func (s *Server) byomRouteSnapshotBinding(ctx context.Context, p pool.Provider, 
 	if servedModelRef == "" {
 		servedModelRef = strings.TrimSpace(p.ModelID)
 	}
-	catalogModelKey := strings.ToLower(strings.TrimSpace(p.ModelAdmissionCatalogModelKey))
-	if catalogModelKey == "" {
-		catalogModelKey = strings.ToLower(strings.TrimSpace(material.CatalogModelKey))
-	}
+	catalogModelKey := byomCatalogModelKey(p, material)
 
 	var (
 		event providerws.ModelAdmissionEvent
@@ -131,7 +146,7 @@ func (s *Server) byomRouteSnapshotBinding(ctx context.Context, p pool.Provider, 
 		ProviderID:                        p.ProviderID,
 		CandidateID:                       event.CandidateID,
 		ServedModelRef:                    event.ServedModelRef,
-		CatalogModelKey:                   material.CatalogModelKey,
+		CatalogModelKey:                   byomCatalogModelKey(p, material),
 		DiscoveryDigestSHA256:             event.DiscoveryDigestSHA256,
 		EvaluationDigestSHA256:            event.EvaluationDigestSHA256,
 		CatalogID:                         material.CatalogID,

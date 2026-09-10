@@ -294,6 +294,9 @@ struct BYOMArtifactDigestCache: Sendable {
         let temporary = url.deletingLastPathComponent().appendingPathComponent(".artifact-digests.\(UUID().uuidString).tmp")
         guard fileManager.createFile(atPath: temporary.path, contents: data, attributes: [.posixPermissions: 0o600]) else { return }
         _ = try? fileManager.replaceItemAt(url, withItemAt: temporary)
+        // replaceItemAt keeps an existing destination's mode; the published
+        // file (absolute paths inside) is private regardless of what was there.
+        try? fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
     }
 
     private func load() -> Document {

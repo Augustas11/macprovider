@@ -53,7 +53,7 @@ func TestArtifactFeedIdentityVerifiesExactMemberForTheAdmittedRelease(t *testing
 	clock := now
 	server := &Server{cfg: cfg, tier2: cfg.Tier2, autotuneCatalog: catalog, artifactIdentityIndex: index, now: func() time.Time { return clock }}
 
-	base := pool.ModelIdentityRequest{ModelID: "model-a", ExpectedHash: rowHash, CandidateCatalogSHA256: catalog.SHA256, CatalogModelKey: "small"}
+	base := pool.ModelIdentityRequest{ModelID: "model-a", ExpectedHash: rowHash, CandidateCatalogSHA256: catalog.SHA256, CatalogAdmissionMode: "current", CatalogModelKey: "small"}
 
 	// Primary-row path unchanged: verified with no artifact binding.
 	primary := base
@@ -134,6 +134,29 @@ func TestArtifactFeedIdentityVerifiesExactMemberForTheAdmittedRelease(t *testing
 	bridge.CatalogAdmissionMode = "current"
 	if v := server.verifyModelIdentity(providerIdentityRequest(bridge)); v.Status != pool.HashStatusVerified || v.Artifact == nil {
 		t.Fatalf("validated envelope binds: %+v", v)
+	}
+	// The gate lives in the resolver, so the REAL registry heartbeat leg —
+	// which builds its own request — cannot skip it: a bridge session
+	// heartbeating the exact member pair stays unbound; a current one binds.
+	// ("previous" is a validated envelope too, but a compatible-previous
+	// release's digest is not the one the loaded feed is bound to.)
+	for _, tc := range []struct {
+		mode string
+		sha  string
+		want pool.HashStatus
+	}{{"update_bridge", catalog.SHA256, pool.HashStatusMismatch}, {"legacy", catalog.SHA256, pool.HashStatusMismatch}, {"current", catalog.SHA256, pool.HashStatusVerified}, {"previous", strings.Repeat("9", 64), pool.HashStatusMismatch}} {
+		registry := pool.NewRegistry(nil, pool.WithModelIdentityResolver(server.verifyModelIdentity))
+		registry.Register(&pool.Provider{ProviderID: "p1", AssignedID: "s1", ModelID: "model-a", State: pool.StateReady,
+			CandidateCatalogSHA256: tc.sha, CatalogAdmissionMode: tc.mode, SlotsFree: 1, SlotsTotal: 1, MaxConcurrency: 1,
+			LastHeartbeatAt: now, LastActivityAt: now}, nil)
+		heartbeat, _, ok := registry.ApplyHeartbeat("p1", "s1", pool.HeartbeatUpdate{
+			Status: pool.StateReady, ModelID: "model-a", ModelHash: ggufHash, ModelHashPresent: true,
+			ModelHashAlgorithm: modelidentity.GGUFFileV1, ModelHashAlgorithmPresent: true, ExpectedModelHash: rowHash,
+			MaxContextTokens: 8192, MaxConcurrency: 1, SlotsFree: 1, SlotsTotal: 1, At: now.Add(time.Minute),
+		})
+		if !ok || heartbeat.HashStatus != tc.want || (tc.want == pool.HashStatusVerified) != (heartbeat.ArtifactIdentity != nil) {
+			t.Fatalf("heartbeat leg, mode %q: ok=%v status=%v artifact=%v", tc.mode, ok, heartbeat.HashStatus, heartbeat.ArtifactIdentity != nil)
+		}
 	}
 	// A compatible-previous release has no loaded artifact feed: such a
 	// session keeps the primary-row path only (SPEC-010-R004 as amended).
