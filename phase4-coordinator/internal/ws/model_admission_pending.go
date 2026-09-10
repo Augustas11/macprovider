@@ -1,0 +1,266 @@
+package ws
+
+import (
+	"context"
+	"database/sql"
+	"fmt"
+	"time"
+
+	"github.com/augstar/macprovider-coordinator/internal/sqliteutil"
+)
+
+// modelAdmissionPendingTTL is the SPEC-047-R001 v0.1.5 pending-decision expiry.
+const modelAdmissionPendingTTL = 24 * time.Hour
+
+var (
+	errModelAdmissionNoPending       = fmt.Errorf("model admission pending decision unknown or invalidated")
+	errModelAdmissionPendingExpired  = fmt.Errorf("model admission pending decision expired")
+	errModelAdmissionPendingConsumed = fmt.Errorf("model admission pending decision consumed")
+)
+
+// Exported for callers and tests outside the package (closed SPEC-047 error
+// codes map onto these sentinels).
+var (
+	ErrModelAdmissionStaleHead       = errModelAdmissionStaleHead
+	ErrModelAdmissionReplayConflict  = errModelAdmissionReplayConflict
+	ErrModelAdmissionNoPending       = errModelAdmissionNoPending
+	ErrModelAdmissionPendingExpired  = errModelAdmissionPendingExpired
+	ErrModelAdmissionPendingConsumed = errModelAdmissionPendingConsumed
+)
+
+// ---- memory store
+
+func (s *memoryModelAdmissionStore) ensurePending() {
+	if s.pending == nil {
+		s.pending = map[string]PendingModelAdmissionDecision{}
+		s.pendingByReq = map[string]string{}
+	}
+}
+
+func (s *memoryModelAdmissionStore) invalidatePendingLocked(providerID, candidateID string) {
+	s.ensurePending()
+	for id, p := range s.pending {
+		if p.ProviderID == providerID && p.CandidateID == candidateID && !p.Invalidated && p.ConsumedAt.IsZero() {
+			p.Invalidated = true
+			s.pending[id] = p
+		}
+	}
+}
+
+// CreatePendingModelAdmissionDecision records a pending decision; a request
+// with the same (provider, candidate, request id) and digest replays the
+// existing record (replayed=true); the same key with another digest is a
+// conflict.
+func (s *memoryModelAdmissionStore) CreatePendingModelAdmissionDecision(_ context.Context, p PendingModelAdmissionDecision) (PendingModelAdmissionDecision, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ensurePending()
+	key := p.ProviderID + "|" + p.CandidateID + "|" + p.RequestID
+	if id, ok := s.pendingByReq[key]; ok {
+		existing := s.pending[id]
+		if existing.RequestDigest != p.RequestDigest {
+			return PendingModelAdmissionDecision{}, false, errModelAdmissionReplayConflict
+		}
+		return existing, true, nil
+	}
+	if p.CreatedAt.IsZero() {
+		p.CreatedAt = time.Now().UTC()
+	}
+	if p.ExpiresAt.IsZero() {
+		p.ExpiresAt = p.CreatedAt.Add(modelAdmissionPendingTTL)
+	}
+	s.pending[p.ID] = p
+	s.pendingByReq[key] = p.ID
+	return p, false, nil
+}
+
+func (s *memoryModelAdmissionStore) PendingModelAdmissionDecision(_ context.Context, id string) (PendingModelAdmissionDecision, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ensurePending()
+	p, ok := s.pending[id]
+	return p, ok, nil
+}
+
+// ConsumePendingModelAdmissionDecision marks the record consumed by one
+// approval (approvalKey + approvalDigest for approval replay; approvedBy;
+// eventID appended). An identical-key approval replay returns the record
+// with replayed=true; a consumed record with another key is
+// errModelAdmissionPendingConsumed.
+func (s *memoryModelAdmissionStore) ConsumePendingModelAdmissionDecision(_ context.Context, id, approvalKey, approvalDigest, approvedBy, eventID string) (PendingModelAdmissionDecision, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ensurePending()
+	p, ok := s.pending[id]
+	if !ok || p.Invalidated {
+		return PendingModelAdmissionDecision{}, false, errModelAdmissionNoPending
+	}
+	if !p.ConsumedAt.IsZero() {
+		if p.ApprovalRequestKey == approvalKey {
+			if p.ApprovalDigest != approvalDigest {
+				return PendingModelAdmissionDecision{}, false, errModelAdmissionReplayConflict
+			}
+			return p, true, nil
+		}
+		return PendingModelAdmissionDecision{}, false, errModelAdmissionPendingConsumed
+	}
+	if time.Now().UTC().After(p.ExpiresAt) {
+		return PendingModelAdmissionDecision{}, false, errModelAdmissionPendingExpired
+	}
+	p.ConsumedAt = time.Now().UTC()
+	p.ConsumedBy = approvedBy
+	p.ConsumedEventID = eventID
+	p.ApprovalRequestKey = approvalKey
+	p.ApprovalDigest = approvalDigest
+	s.pending[id] = p
+	return p, false, nil
+}
+
+func (s *memoryModelAdmissionStore) InvalidatePendingModelAdmissionDecisions(_ context.Context, providerID, candidateID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.invalidatePendingLocked(providerID, candidateID)
+	return nil
+}
+
+// ---- SQLite store
+
+func ensureSQLitePendingModelAdmissionTable(db *sql.DB) error {
+	_, err := db.ExecContext(context.Background(), `
+CREATE TABLE IF NOT EXISTS model_admission_pending_decisions (
+    id TEXT PRIMARY KEY,
+    provider_id TEXT NOT NULL,
+    candidate_id TEXT NOT NULL,
+    next_state TEXT NOT NULL,
+    reason_code TEXT NOT NULL,
+    request_digest TEXT NOT NULL,
+    request_id TEXT NOT NULL,
+    evaluated_head TEXT NOT NULL,
+    requested_by TEXT NOT NULL,
+    created_at_utc TEXT NOT NULL,
+    expires_at_utc TEXT NOT NULL,
+    consumed_at_utc TEXT NOT NULL DEFAULT '',
+    consumed_by TEXT NOT NULL DEFAULT '',
+    consumed_event_id TEXT NOT NULL DEFAULT '',
+    invalidated INTEGER NOT NULL DEFAULT 0,
+    approval_request_key TEXT NOT NULL DEFAULT '',
+    approval_digest TEXT NOT NULL DEFAULT '',
+    UNIQUE(provider_id, candidate_id, request_id)
+)`)
+	return err
+}
+
+func invalidateSQLitePendingModelAdmissionDecisions(ctx context.Context, conn *sql.Conn, providerID, candidateID string) error {
+	_, err := conn.ExecContext(ctx, `UPDATE model_admission_pending_decisions SET invalidated = 1 WHERE provider_id = ? AND candidate_id = ? AND consumed_at_utc = '' AND invalidated = 0`, providerID, candidateID)
+	return err
+}
+
+const sqlitePendingSelect = `SELECT id, provider_id, candidate_id, next_state, reason_code, request_digest, request_id, evaluated_head, requested_by,
+       created_at_utc, expires_at_utc, consumed_at_utc, consumed_by, consumed_event_id, invalidated, approval_request_key, approval_digest
+  FROM model_admission_pending_decisions`
+
+type sqlitePendingScanner interface{ Scan(dest ...any) error }
+
+func scanSQLitePending(row sqlitePendingScanner) (PendingModelAdmissionDecision, error) {
+	var p PendingModelAdmissionDecision
+	var created, expires, consumed string
+	var invalidated int
+	if err := row.Scan(&p.ID, &p.ProviderID, &p.CandidateID, &p.NextState, &p.ReasonCode, &p.RequestDigest, &p.RequestID, &p.EvaluatedHead, &p.RequestedBy,
+		&created, &expires, &consumed, &p.ConsumedBy, &p.ConsumedEventID, &invalidated, &p.ApprovalRequestKey, &p.ApprovalDigest); err != nil {
+		return PendingModelAdmissionDecision{}, err
+	}
+	p.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
+	p.ExpiresAt, _ = time.Parse(time.RFC3339Nano, expires)
+	if consumed != "" {
+		p.ConsumedAt, _ = time.Parse(time.RFC3339Nano, consumed)
+	}
+	p.Invalidated = invalidated == 1
+	return p, nil
+}
+
+func (s *SQLiteModelAdmissionStore) CreatePendingModelAdmissionDecision(ctx context.Context, p PendingModelAdmissionDecision) (PendingModelAdmissionDecision, bool, error) {
+	if p.CreatedAt.IsZero() {
+		p.CreatedAt = time.Now().UTC()
+	}
+	if p.ExpiresAt.IsZero() {
+		p.ExpiresAt = p.CreatedAt.Add(modelAdmissionPendingTTL)
+	}
+	var stored PendingModelAdmissionDecision
+	var replayed bool
+	err := sqliteutil.Transact(ctx, s.db, func(txCtx context.Context, conn *sql.Conn) error {
+		row := conn.QueryRowContext(txCtx, sqlitePendingSelect+` WHERE provider_id = ? AND candidate_id = ? AND request_id = ?`, p.ProviderID, p.CandidateID, p.RequestID)
+		existing, err := scanSQLitePending(row)
+		if err == nil {
+			if existing.RequestDigest != p.RequestDigest {
+				return errModelAdmissionReplayConflict
+			}
+			stored, replayed = existing, true
+			return nil
+		}
+		if err != sql.ErrNoRows {
+			return err
+		}
+		if _, err := conn.ExecContext(txCtx, `INSERT INTO model_admission_pending_decisions(id, provider_id, candidate_id, next_state, reason_code, request_digest, request_id, evaluated_head, requested_by, created_at_utc, expires_at_utc)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, p.ID, p.ProviderID, p.CandidateID, p.NextState, p.ReasonCode, p.RequestDigest, p.RequestID, p.EvaluatedHead, p.RequestedBy,
+			p.CreatedAt.UTC().Format(time.RFC3339Nano), p.ExpiresAt.UTC().Format(time.RFC3339Nano)); err != nil {
+			return err
+		}
+		stored = p
+		return nil
+	})
+	return stored, replayed, err
+}
+
+func (s *SQLiteModelAdmissionStore) PendingModelAdmissionDecision(ctx context.Context, id string) (PendingModelAdmissionDecision, bool, error) {
+	row := s.db.QueryRowContext(ctx, sqlitePendingSelect+` WHERE id = ?`, id)
+	p, err := scanSQLitePending(row)
+	if err == sql.ErrNoRows {
+		return PendingModelAdmissionDecision{}, false, nil
+	}
+	if err != nil {
+		return PendingModelAdmissionDecision{}, false, err
+	}
+	return p, true, nil
+}
+
+func (s *SQLiteModelAdmissionStore) ConsumePendingModelAdmissionDecision(ctx context.Context, id, approvalKey, approvalDigest, approvedBy, eventID string) (PendingModelAdmissionDecision, bool, error) {
+	var stored PendingModelAdmissionDecision
+	var replayed bool
+	err := sqliteutil.Transact(ctx, s.db, func(txCtx context.Context, conn *sql.Conn) error {
+		row := conn.QueryRowContext(txCtx, sqlitePendingSelect+` WHERE id = ?`, id)
+		p, err := scanSQLitePending(row)
+		if err == sql.ErrNoRows || (err == nil && p.Invalidated) {
+			return errModelAdmissionNoPending
+		}
+		if err != nil {
+			return err
+		}
+		if !p.ConsumedAt.IsZero() {
+			if p.ApprovalRequestKey == approvalKey {
+				if p.ApprovalDigest != approvalDigest {
+					return errModelAdmissionReplayConflict
+				}
+				stored, replayed = p, true
+				return nil
+			}
+			return errModelAdmissionPendingConsumed
+		}
+		now := time.Now().UTC()
+		if now.After(p.ExpiresAt) {
+			return errModelAdmissionPendingExpired
+		}
+		if _, err := conn.ExecContext(txCtx, `UPDATE model_admission_pending_decisions SET consumed_at_utc = ?, consumed_by = ?, consumed_event_id = ?, approval_request_key = ?, approval_digest = ? WHERE id = ?`,
+			now.Format(time.RFC3339Nano), approvedBy, eventID, approvalKey, approvalDigest, id); err != nil {
+			return err
+		}
+		p.ConsumedAt, p.ConsumedBy, p.ConsumedEventID, p.ApprovalRequestKey, p.ApprovalDigest = now, approvedBy, eventID, approvalKey, approvalDigest
+		stored = p
+		return nil
+	})
+	return stored, replayed, err
+}
+
+func (s *SQLiteModelAdmissionStore) InvalidatePendingModelAdmissionDecisions(ctx context.Context, providerID, candidateID string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE model_admission_pending_decisions SET invalidated = 1 WHERE provider_id = ? AND candidate_id = ? AND consumed_at_utc = '' AND invalidated = 0`, providerID, candidateID)
+	return err
+}

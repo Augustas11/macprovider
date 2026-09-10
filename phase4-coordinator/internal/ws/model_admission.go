@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -51,6 +52,9 @@ const (
 
 var (
 	errModelAdmissionReplayConflict = errors.New("model admission replay conflict")
+	// errModelAdmissionStaleHead: the operator's expected head is no longer the
+	// candidate's latest event (SPEC-047-R001 v0.1.5 `stale_head`).
+	errModelAdmissionStaleHead      = errors.New("model admission stale head")
 	errModelAdmissionCapExceeded    = errors.New("model admission cap exceeded")
 	errModelAdmissionRateLimited    = errors.New("model admission rate limited")
 	modelAdmissionCandidatePattern  = regexp.MustCompile(`^byom_[a-z2-7]{52}$`)
@@ -65,6 +69,23 @@ type ModelAdmissionStore interface {
 	LatestModelAdmissionStatus(context.Context, string, string) (ModelAdmissionEvent, bool, error)
 	LatestModelAdmissionRouteStatus(context.Context, string, string, string) (ModelAdmissionEvent, bool, error)
 	SettlementCapableModelAdmissionStatusesForServedModel(context.Context, string, string) ([]ModelAdmissionEvent, error)
+	// SPEC-047-R001 v0.1.5 operator decision path.
+	// AppendModelAdmissionDecisionCAS appends a coordinator/operator decision
+	// only when the candidate's head still equals expectedHead (after
+	// idempotency resolution — a replay answers the original event whatever
+	// the head); errModelAdmissionStaleHead otherwise.
+	AppendModelAdmissionDecisionCAS(context.Context, ModelAdmissionEvent, string) (ModelAdmissionEvent, bool, error)
+	// LatestModelAdmissionStatusesForProvider is the latest event of every
+	// candidate of one provider (the operator listing), ordered by candidate id.
+	LatestModelAdmissionStatusesForProvider(context.Context, string) ([]ModelAdmissionEvent, error)
+	// LatestModelAdmissionStatusesInStates is the latest event of every
+	// candidate of every provider whose state is one of states (reload sweeps).
+	LatestModelAdmissionStatusesInStates(context.Context, []string) ([]ModelAdmissionEvent, error)
+	// Dual-control pending decisions.
+	CreatePendingModelAdmissionDecision(context.Context, PendingModelAdmissionDecision) (PendingModelAdmissionDecision, bool, error)
+	PendingModelAdmissionDecision(context.Context, string) (PendingModelAdmissionDecision, bool, error)
+	ConsumePendingModelAdmissionDecision(context.Context, string, string, string, string, string) (PendingModelAdmissionDecision, bool, error)
+	InvalidatePendingModelAdmissionDecisions(context.Context, string, string) error
 }
 
 type ModelAdmissionEvent struct {
@@ -92,6 +113,99 @@ type ModelAdmissionEvent struct {
 	PayloadDigestSHA256               string
 	SignatureDigestSHA256             string
 	CreatedAt                         time.Time
+	// SPEC-047 v0.1.5 recorded catalog match (offer events) and decision
+	// bindings (operator decisions). RuntimeSource is the offer's signed
+	// runtime source; the row tuple and release tuple are read from the
+	// authenticated candidate catalog; members are the admissible tagged
+	// member set; the six Artifact* values bind a feed member at decision
+	// time; EvaluatedReleaseGeneration is the release generation the
+	// decision evaluated under.
+	RuntimeSource                  string
+	CatalogMatchState              string
+	CatalogMatchReason             string
+	CatalogRowModelID              string
+	CatalogRowModelSHA256          string
+	CatalogReleaseID               string
+	CatalogCandidateSHA256         string
+	CatalogSignerKeyID             string
+	CatalogMembers                 []ModelAdmissionCatalogMember
+	ArtifactFeedSHA256             string
+	ArtifactID                     string
+	ArtifactHash                   string
+	ArtifactHashAlgorithm          string
+	ArtifactFeedSignerKeyID        string
+	ArtifactCandidateCatalogSHA256 string
+	BoundMemberSource              string
+	EvaluatedReleaseGeneration     uint64
+}
+
+// ModelAdmissionCatalogMember is one recorded, admissible member of the
+// offer's catalog match (SPEC-047-R001 v0.1.5): `Source` is `candidate_row`
+// (the row's own primary pair; artifact id and provenance null) or
+// `artifact_feed` (artifact id and the provenance of the identity set it
+// resolved in, all non-null).
+type ModelAdmissionCatalogMember struct {
+	Source                         string `json:"source"`
+	HashAlgorithm                  string `json:"hash_algorithm"`
+	Hash                           string `json:"hash"`
+	ArtifactID                     string `json:"artifact_id,omitempty"`
+	ArtifactFeedSHA256             string `json:"artifact_feed_sha256,omitempty"`
+	ArtifactFeedSignerKeyID        string `json:"artifact_feed_signer_key_id,omitempty"`
+	ArtifactCandidateCatalogSHA256 string `json:"artifact_candidate_catalog_sha256,omitempty"`
+}
+
+const (
+	modelAdmissionMemberSourceCandidateRow = "candidate_row"
+	modelAdmissionMemberSourceArtifactFeed = "artifact_feed"
+	modelAdmissionCatalogMatched           = "catalog_matched"
+	modelAdmissionCatalogUnmatched         = "unmatched"
+)
+
+func encodeModelAdmissionCatalogMembers(members []ModelAdmissionCatalogMember) string {
+	if len(members) == 0 {
+		return ""
+	}
+	raw, err := json.Marshal(members)
+	if err != nil {
+		return ""
+	}
+	return string(raw)
+}
+
+func decodeModelAdmissionCatalogMembers(raw string) []ModelAdmissionCatalogMember {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	var members []ModelAdmissionCatalogMember
+	if err := json.Unmarshal([]byte(raw), &members); err != nil {
+		return nil
+	}
+	return members
+}
+
+// PendingModelAdmissionDecision is a dual-control `settlement_capable`
+// request awaiting approval by a distinct operator actor (SPEC-047-R001
+// v0.1.5): it appends nothing until approved, is consumed by exactly one
+// approval, expires unused, and is invalidated by any event appended for the
+// candidate.
+type PendingModelAdmissionDecision struct {
+	ID                 string
+	ProviderID         string
+	CandidateID        string
+	NextState          string
+	ReasonCode         string
+	RequestDigest      string
+	RequestID          string
+	EvaluatedHead      string
+	RequestedBy        string
+	CreatedAt          time.Time
+	ExpiresAt          time.Time
+	ConsumedAt         time.Time
+	ConsumedBy         string
+	ConsumedEventID    string
+	Invalidated        bool
+	ApprovalRequestKey string
+	ApprovalDigest     string
 }
 
 type memoryModelAdmissionStore struct {
@@ -102,6 +216,8 @@ type memoryModelAdmissionStore struct {
 	nonces        map[string]ModelAdmissionEvent
 	candidates    map[string]map[string]struct{}
 	providerEvent map[string][]time.Time
+	pending       map[string]PendingModelAdmissionDecision
+	pendingByReq  map[string]string
 }
 
 func NewMemoryModelAdmissionStore() ModelAdmissionStore {
@@ -123,8 +239,12 @@ func (s *memoryModelAdmissionStore) AppendModelAdmissionWithdrawal(_ context.Con
 }
 
 func (s *memoryModelAdmissionStore) AppendModelAdmissionDecision(_ context.Context, event ModelAdmissionEvent) (ModelAdmissionEvent, error) {
-	stored, _, err := s.appendCoordinatorModelAdmissionEvent(event)
+	stored, _, err := s.appendCoordinatorModelAdmissionEvent(event, "")
 	return stored, err
+}
+
+func (s *memoryModelAdmissionStore) AppendModelAdmissionDecisionCAS(_ context.Context, event ModelAdmissionEvent, expectedHead string) (ModelAdmissionEvent, bool, error) {
+	return s.appendCoordinatorModelAdmissionEvent(event, expectedHead)
 }
 
 func (s *memoryModelAdmissionStore) appendProviderModelAdmissionEvent(event ModelAdmissionEvent, nextState string) (ModelAdmissionEvent, bool, error) {
@@ -175,6 +295,7 @@ func (s *memoryModelAdmissionStore) appendProviderModelAdmissionEvent(event Mode
 	s.latest[event.ProviderID+"|"+event.CandidateID] = event
 	s.requestIDs[event.ProviderID+"|"+event.RequestID] = event
 	s.nonces[event.ProviderID+"|"+event.Nonce] = event
+	s.invalidatePendingLocked(event.ProviderID, event.CandidateID)
 	return event, false, nil
 }
 
@@ -223,7 +344,7 @@ func (s *memoryModelAdmissionStore) resolveModelAdmissionReplay(event ModelAdmis
 	return ModelAdmissionEvent{}, false, false
 }
 
-func (s *memoryModelAdmissionStore) appendCoordinatorModelAdmissionEvent(event ModelAdmissionEvent) (ModelAdmissionEvent, bool, error) {
+func (s *memoryModelAdmissionStore) appendCoordinatorModelAdmissionEvent(event ModelAdmissionEvent, expectedHead string) (ModelAdmissionEvent, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := event.CreatedAt
@@ -248,6 +369,9 @@ func (s *memoryModelAdmissionStore) appendCoordinatorModelAdmissionEvent(event M
 	if !ok || !sameModelAdmissionTuple(previous, event) {
 		return ModelAdmissionEvent{}, false, errModelAdmissionReplayConflict
 	}
+	if expectedHead != "" && previous.CoordinatorEventID != expectedHead {
+		return ModelAdmissionEvent{}, false, errModelAdmissionStaleHead
+	}
 	if !modelAdmissionCoordinatorTransitionAllowed(previous.State, event.State) {
 		return ModelAdmissionEvent{}, false, errModelAdmissionReplayConflict
 	}
@@ -257,12 +381,47 @@ func (s *memoryModelAdmissionStore) appendCoordinatorModelAdmissionEvent(event M
 	if modelAdmissionTransitionReasonRequired(previous.State, event.State) && strings.TrimSpace(event.ReasonCode) == "" {
 		return ModelAdmissionEvent{}, false, errModelAdmissionReplayConflict
 	}
-	event = prepareModelAdmissionTransition(event, previous.State, modelAdmissionActorCoordinator, event.State)
+	actor := modelAdmissionActorCoordinator
+	if strings.HasPrefix(event.Actor, "operator:") {
+		actor = event.Actor
+	}
+	event = prepareModelAdmissionTransition(event, previous.State, actor, event.State)
 	s.events = append(s.events, event)
 	s.latest[event.ProviderID+"|"+event.CandidateID] = event
 	s.requestIDs[event.ProviderID+"|"+event.RequestID] = event
 	s.nonces[event.ProviderID+"|"+event.Nonce] = event
+	s.invalidatePendingLocked(event.ProviderID, event.CandidateID)
 	return event, false, nil
+}
+
+func (s *memoryModelAdmissionStore) LatestModelAdmissionStatusesForProvider(_ context.Context, providerID string) ([]ModelAdmissionEvent, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []ModelAdmissionEvent
+	for key, event := range s.latest {
+		if strings.HasPrefix(key, providerID+"|") {
+			out = append(out, event)
+		}
+	}
+	sortModelAdmissionEventsByCandidate(out)
+	return out, nil
+}
+
+func (s *memoryModelAdmissionStore) LatestModelAdmissionStatusesInStates(_ context.Context, states []string) ([]ModelAdmissionEvent, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	want := map[string]struct{}{}
+	for _, state := range states {
+		want[state] = struct{}{}
+	}
+	var out []ModelAdmissionEvent
+	for _, event := range s.latest {
+		if _, ok := want[event.State]; ok {
+			out = append(out, event)
+		}
+	}
+	sortModelAdmissionEventsByCandidate(out)
+	return out, nil
 }
 
 func (s *memoryModelAdmissionStore) LatestModelAdmissionStatus(_ context.Context, providerID, candidateID string) (ModelAdmissionEvent, bool, error) {
@@ -343,6 +502,9 @@ CREATE TABLE IF NOT EXISTS model_admission_events (
 	if err := ensureSQLiteModelAdmissionColumns(db); err != nil {
 		return nil, err
 	}
+	if err := ensureSQLitePendingModelAdmissionTable(db); err != nil {
+		return nil, err
+	}
 	if _, err := db.ExecContext(context.Background(), `
 CREATE UNIQUE INDEX IF NOT EXISTS model_admission_events_provider_request_id
 ON model_admission_events(provider_id, request_id)`); err != nil {
@@ -402,6 +564,24 @@ func ensureSQLiteModelAdmissionColumns(db *sql.DB) error {
 		{name: "catalog_signature_pubkey_fingerprint", sql: `ALTER TABLE model_admission_events ADD COLUMN catalog_signature_pubkey_fingerprint TEXT NOT NULL DEFAULT ''`},
 		{name: "expected_catalog_model_hash", sql: `ALTER TABLE model_admission_events ADD COLUMN expected_catalog_model_hash TEXT NOT NULL DEFAULT ''`},
 		{name: "expected_catalog_model_hash_algorithm", sql: `ALTER TABLE model_admission_events ADD COLUMN expected_catalog_model_hash_algorithm TEXT NOT NULL DEFAULT ''`},
+		// SPEC-047 v0.1.5 recorded match + decision binding columns.
+		{name: "runtime_source", sql: `ALTER TABLE model_admission_events ADD COLUMN runtime_source TEXT NOT NULL DEFAULT ''`},
+		{name: "catalog_match_state", sql: `ALTER TABLE model_admission_events ADD COLUMN catalog_match_state TEXT NOT NULL DEFAULT ''`},
+		{name: "catalog_match_reason", sql: `ALTER TABLE model_admission_events ADD COLUMN catalog_match_reason TEXT NOT NULL DEFAULT ''`},
+		{name: "catalog_row_model_id", sql: `ALTER TABLE model_admission_events ADD COLUMN catalog_row_model_id TEXT NOT NULL DEFAULT ''`},
+		{name: "catalog_row_model_sha256", sql: `ALTER TABLE model_admission_events ADD COLUMN catalog_row_model_sha256 TEXT NOT NULL DEFAULT ''`},
+		{name: "catalog_release_id", sql: `ALTER TABLE model_admission_events ADD COLUMN catalog_release_id TEXT NOT NULL DEFAULT ''`},
+		{name: "catalog_candidate_sha256", sql: `ALTER TABLE model_admission_events ADD COLUMN catalog_candidate_sha256 TEXT NOT NULL DEFAULT ''`},
+		{name: "catalog_signer_key_id", sql: `ALTER TABLE model_admission_events ADD COLUMN catalog_signer_key_id TEXT NOT NULL DEFAULT ''`},
+		{name: "catalog_members_json", sql: `ALTER TABLE model_admission_events ADD COLUMN catalog_members_json TEXT NOT NULL DEFAULT ''`},
+		{name: "artifact_feed_sha256", sql: `ALTER TABLE model_admission_events ADD COLUMN artifact_feed_sha256 TEXT NOT NULL DEFAULT ''`},
+		{name: "artifact_id", sql: `ALTER TABLE model_admission_events ADD COLUMN artifact_id TEXT NOT NULL DEFAULT ''`},
+		{name: "artifact_hash", sql: `ALTER TABLE model_admission_events ADD COLUMN artifact_hash TEXT NOT NULL DEFAULT ''`},
+		{name: "artifact_hash_algorithm", sql: `ALTER TABLE model_admission_events ADD COLUMN artifact_hash_algorithm TEXT NOT NULL DEFAULT ''`},
+		{name: "artifact_feed_signer_key_id", sql: `ALTER TABLE model_admission_events ADD COLUMN artifact_feed_signer_key_id TEXT NOT NULL DEFAULT ''`},
+		{name: "artifact_candidate_catalog_sha256", sql: `ALTER TABLE model_admission_events ADD COLUMN artifact_candidate_catalog_sha256 TEXT NOT NULL DEFAULT ''`},
+		{name: "bound_member_source", sql: `ALTER TABLE model_admission_events ADD COLUMN bound_member_source TEXT NOT NULL DEFAULT ''`},
+		{name: "evaluated_release_generation", sql: `ALTER TABLE model_admission_events ADD COLUMN evaluated_release_generation INTEGER NOT NULL DEFAULT 0`},
 	} {
 		if columns[column.name] {
 			continue
@@ -419,6 +599,42 @@ func (s *SQLiteModelAdmissionStore) AppendModelAdmissionOffer(ctx context.Contex
 
 func (s *SQLiteModelAdmissionStore) AppendModelAdmissionWithdrawal(ctx context.Context, event ModelAdmissionEvent) (ModelAdmissionEvent, bool, error) {
 	return s.appendProviderModelAdmissionEvent(ctx, event, modelAdmissionWithdrawn)
+}
+
+func (s *SQLiteModelAdmissionStore) AppendModelAdmissionDecisionCAS(ctx context.Context, event ModelAdmissionEvent, expectedHead string) (ModelAdmissionEvent, bool, error) {
+	return s.appendCoordinatorModelAdmissionEventCAS(ctx, event, expectedHead)
+}
+
+func (s *SQLiteModelAdmissionStore) LatestModelAdmissionStatusesForProvider(ctx context.Context, providerID string) ([]ModelAdmissionEvent, error) {
+	return scanModelAdmissionEvents(ctx, s.db, modelAdmissionEventSelect(`
+  FROM model_admission_events e
+  JOIN (
+       SELECT MAX(id) AS latest_id
+         FROM model_admission_events
+        WHERE provider_id = ?
+        GROUP BY provider_id, candidate_id
+  ) latest ON latest.latest_id = e.id
+ ORDER BY e.candidate_id ASC`), providerID)
+}
+
+func (s *SQLiteModelAdmissionStore) LatestModelAdmissionStatusesInStates(ctx context.Context, states []string) ([]ModelAdmissionEvent, error) {
+	if len(states) == 0 {
+		return nil, nil
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(states)), ",")
+	args := make([]any, 0, len(states))
+	for _, state := range states {
+		args = append(args, state)
+	}
+	return scanModelAdmissionEvents(ctx, s.db, modelAdmissionEventSelect(`
+  FROM model_admission_events e
+  JOIN (
+       SELECT MAX(id) AS latest_id
+         FROM model_admission_events
+        GROUP BY provider_id, candidate_id
+  ) latest ON latest.latest_id = e.id
+ WHERE e.state IN (`+placeholders+`)
+ ORDER BY e.provider_id ASC, e.candidate_id ASC`), args...)
 }
 
 func (s *SQLiteModelAdmissionStore) AppendModelAdmissionDecision(ctx context.Context, event ModelAdmissionEvent) (ModelAdmissionEvent, error) {
@@ -500,8 +716,14 @@ INSERT INTO model_admission_events(
     discovery_digest_sha256, evaluation_digest_sha256, requested_disclosure_class,
     previous_state, state, next_state, actor, coordinator_event_id,
     reason_code, request_id, nonce, payload_digest_sha256,
-    signature_digest_sha256, created_at_utc
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    signature_digest_sha256, created_at_utc,
+    runtime_source, catalog_match_state, catalog_match_reason,
+    catalog_row_model_id, catalog_row_model_sha256, catalog_release_id,
+    catalog_candidate_sha256, catalog_signer_key_id, catalog_members_json,
+    artifact_feed_sha256, artifact_id, artifact_hash, artifact_hash_algorithm,
+    artifact_feed_signer_key_id, artifact_candidate_catalog_sha256,
+    bound_member_source, evaluated_release_generation
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			event.ProviderID,
 			event.CandidateID,
 			event.ServedModelRef,
@@ -526,11 +748,28 @@ INSERT INTO model_admission_events(
 			event.PayloadDigestSHA256,
 			event.SignatureDigestSHA256,
 			event.CreatedAt.Format(time.RFC3339Nano),
+			event.RuntimeSource,
+			event.CatalogMatchState,
+			event.CatalogMatchReason,
+			event.CatalogRowModelID,
+			event.CatalogRowModelSHA256,
+			event.CatalogReleaseID,
+			event.CatalogCandidateSHA256,
+			event.CatalogSignerKeyID,
+			encodeModelAdmissionCatalogMembers(event.CatalogMembers),
+			event.ArtifactFeedSHA256,
+			event.ArtifactID,
+			event.ArtifactHash,
+			event.ArtifactHashAlgorithm,
+			event.ArtifactFeedSignerKeyID,
+			event.ArtifactCandidateCatalogSHA256,
+			event.BoundMemberSource,
+			int64(event.EvaluatedReleaseGeneration),
 		); err != nil {
 			return err
 		}
 		stored = event
-		return nil
+		return invalidateSQLitePendingModelAdmissionDecisions(txCtx, conn, event.ProviderID, event.CandidateID)
 	})
 	return stored, replay, err
 }
@@ -593,6 +832,10 @@ func scanSQLiteModelAdmissionReplay(ctx context.Context, conn *sql.Conn, event M
 }
 
 func (s *SQLiteModelAdmissionStore) appendCoordinatorModelAdmissionEvent(ctx context.Context, event ModelAdmissionEvent) (ModelAdmissionEvent, bool, error) {
+	return s.appendCoordinatorModelAdmissionEventCAS(ctx, event, "")
+}
+
+func (s *SQLiteModelAdmissionStore) appendCoordinatorModelAdmissionEventCAS(ctx context.Context, event ModelAdmissionEvent, expectedHead string) (ModelAdmissionEvent, bool, error) {
 	now := event.CreatedAt
 	if now.IsZero() {
 		now = time.Now().UTC()
@@ -629,6 +872,9 @@ func (s *SQLiteModelAdmissionStore) appendCoordinatorModelAdmissionEvent(ctx con
 		if !found || !sameModelAdmissionTuple(previous, event) {
 			return errModelAdmissionReplayConflict
 		}
+		if expectedHead != "" && previous.CoordinatorEventID != expectedHead {
+			return errModelAdmissionStaleHead
+		}
 		if !modelAdmissionCoordinatorTransitionAllowed(previous.State, event.State) {
 			return errModelAdmissionReplayConflict
 		}
@@ -638,7 +884,11 @@ func (s *SQLiteModelAdmissionStore) appendCoordinatorModelAdmissionEvent(ctx con
 		if modelAdmissionTransitionReasonRequired(previous.State, event.State) && strings.TrimSpace(event.ReasonCode) == "" {
 			return errModelAdmissionReplayConflict
 		}
-		event = prepareModelAdmissionTransition(event, previous.State, modelAdmissionActorCoordinator, event.State)
+		actor := modelAdmissionActorCoordinator
+		if strings.HasPrefix(event.Actor, "operator:") {
+			actor = event.Actor
+		}
+		event = prepareModelAdmissionTransition(event, previous.State, actor, event.State)
 		if _, err := conn.ExecContext(txCtx, `
 INSERT INTO model_admission_events(
     provider_id, candidate_id, served_model_ref, catalog_model_key,
@@ -648,8 +898,14 @@ INSERT INTO model_admission_events(
     discovery_digest_sha256, evaluation_digest_sha256, requested_disclosure_class,
     previous_state, state, next_state, actor, coordinator_event_id,
     reason_code, request_id, nonce, payload_digest_sha256,
-    signature_digest_sha256, created_at_utc
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    signature_digest_sha256, created_at_utc,
+    runtime_source, catalog_match_state, catalog_match_reason,
+    catalog_row_model_id, catalog_row_model_sha256, catalog_release_id,
+    catalog_candidate_sha256, catalog_signer_key_id, catalog_members_json,
+    artifact_feed_sha256, artifact_id, artifact_hash, artifact_hash_algorithm,
+    artifact_feed_signer_key_id, artifact_candidate_catalog_sha256,
+    bound_member_source, evaluated_release_generation
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			event.ProviderID,
 			event.CandidateID,
 			event.ServedModelRef,
@@ -674,11 +930,28 @@ INSERT INTO model_admission_events(
 			event.PayloadDigestSHA256,
 			event.SignatureDigestSHA256,
 			event.CreatedAt.Format(time.RFC3339Nano),
+			event.RuntimeSource,
+			event.CatalogMatchState,
+			event.CatalogMatchReason,
+			event.CatalogRowModelID,
+			event.CatalogRowModelSHA256,
+			event.CatalogReleaseID,
+			event.CatalogCandidateSHA256,
+			event.CatalogSignerKeyID,
+			encodeModelAdmissionCatalogMembers(event.CatalogMembers),
+			event.ArtifactFeedSHA256,
+			event.ArtifactID,
+			event.ArtifactHash,
+			event.ArtifactHashAlgorithm,
+			event.ArtifactFeedSignerKeyID,
+			event.ArtifactCandidateCatalogSHA256,
+			event.BoundMemberSource,
+			int64(event.EvaluatedReleaseGeneration),
 		); err != nil {
 			return err
 		}
 		stored = event
-		return nil
+		return invalidateSQLitePendingModelAdmissionDecisions(txCtx, conn, event.ProviderID, event.CandidateID)
 	})
 	return stored, replay, err
 }
@@ -802,7 +1075,8 @@ func scanModelAdmissionEvent(ctx context.Context, q modelAdmissionQueryer, query
 
 func scanModelAdmissionEventRow(row modelAdmissionScanner) (ModelAdmissionEvent, error) {
 	var event ModelAdmissionEvent
-	var createdAt string
+	var createdAt, membersJSON string
+	var evaluatedGeneration int64
 	err := row.Scan(
 		&event.CoordinatorEventID,
 		&event.Actor,
@@ -828,10 +1102,29 @@ func scanModelAdmissionEventRow(row modelAdmissionScanner) (ModelAdmissionEvent,
 		&event.PayloadDigestSHA256,
 		&event.SignatureDigestSHA256,
 		&createdAt,
+		&event.RuntimeSource,
+		&event.CatalogMatchState,
+		&event.CatalogMatchReason,
+		&event.CatalogRowModelID,
+		&event.CatalogRowModelSHA256,
+		&event.CatalogReleaseID,
+		&event.CatalogCandidateSHA256,
+		&event.CatalogSignerKeyID,
+		&membersJSON,
+		&event.ArtifactFeedSHA256,
+		&event.ArtifactID,
+		&event.ArtifactHash,
+		&event.ArtifactHashAlgorithm,
+		&event.ArtifactFeedSignerKeyID,
+		&event.ArtifactCandidateCatalogSHA256,
+		&event.BoundMemberSource,
+		&evaluatedGeneration,
 	)
 	if err != nil {
 		return ModelAdmissionEvent{}, err
 	}
+	event.CatalogMembers = decodeModelAdmissionCatalogMembers(membersJSON)
+	event.EvaluatedReleaseGeneration = uint64(evaluatedGeneration)
 	parsed, err := time.Parse(time.RFC3339Nano, createdAt)
 	if err != nil {
 		return ModelAdmissionEvent{}, err
@@ -846,7 +1139,41 @@ func modelAdmissionEventSelect(tail string) string {
        expected_catalog_model_hash, expected_catalog_model_hash_algorithm,
        discovery_digest_sha256, evaluation_digest_sha256, requested_disclosure_class,
        previous_state, state, next_state, reason_code, request_id, nonce, payload_digest_sha256,
-       signature_digest_sha256, created_at_utc` + tail
+       signature_digest_sha256, created_at_utc,
+       runtime_source, catalog_match_state, catalog_match_reason,
+       catalog_row_model_id, catalog_row_model_sha256, catalog_release_id,
+       catalog_candidate_sha256, catalog_signer_key_id, catalog_members_json,
+       artifact_feed_sha256, artifact_id, artifact_hash, artifact_hash_algorithm,
+       artifact_feed_signer_key_id, artifact_candidate_catalog_sha256,
+       bound_member_source, evaluated_release_generation` + tail
+}
+
+func scanModelAdmissionEvents(ctx context.Context, q interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}, query string, args ...any) ([]ModelAdmissionEvent, error) {
+	rows, err := q.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var events []ModelAdmissionEvent
+	for rows.Next() {
+		event, err := scanModelAdmissionEventRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		events = append(events, event)
+	}
+	return events, rows.Err()
+}
+
+func sortModelAdmissionEventsByCandidate(events []ModelAdmissionEvent) {
+	sort.Slice(events, func(i, j int) bool {
+		if events[i].ProviderID != events[j].ProviderID {
+			return events[i].ProviderID < events[j].ProviderID
+		}
+		return events[i].CandidateID < events[j].CandidateID
+	})
 }
 
 func modelAdmissionProviderTransitionAllowed(previousState, nextState string) bool {
