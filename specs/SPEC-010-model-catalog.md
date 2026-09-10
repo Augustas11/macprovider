@@ -1002,11 +1002,14 @@ algorithm.
 - **SPEC-010-R001 — Canonical signed-snapshot identity.** The algorithm
   identifier is exactly `macprovider.snapshot-manifest.v1`. Its digest is the
   lowercase SHA-256 `model_sha256` from the exact signed candidate-catalog row,
-  whose canonical bytes are defined by SPEC-023 §3.2. The CLI MUST first
-  verify the downloaded snapshot against that row, then report the verified
-  row digest as `model_hash`. No component may infer this algorithm from the
-  presence or shape of a hash, or report a weights-only/subset digest under
-  this name.
+  whose canonical bytes are defined by SPEC-023 §3.2. For the primary
+  identity path the CLI MUST first verify the downloaded snapshot against that
+  row, then report the verified row digest as `model_hash`; for a secondary
+  `mlx_safetensors` artifact (v1.7, R007) the CLI MUST verify the snapshot at
+  the member's `source_ref.revision` against that member's `hash` under the
+  same canonical manifest algorithm and report THAT digest — never the row's.
+  No component may infer this algorithm from the presence or shape of a
+  hash, or report a weights-only/subset digest under this name.
 
 - **SPEC-010-R002 — Typed wire contract.** Provider hello, v2 auth initial,
   heartbeat, local status, safety telemetry, and Tier-2 attestation projections
@@ -1035,9 +1038,11 @@ algorithm.
   artifact identity with that same expected row or artifact-feed member; an
   independently selected catalog row, a second catalog fallback, or a feed of
   another release cannot authorize it. If existing Tier-2 signed
-  material is retained as proof, its expected hash MUST equal the admitted
-  autotune row. Buyer route snapshots MUST bind both algorithm and digest — and, when the
-  expected identity is a non-primary artifact-feed member, the R007(d)
+  material is retained as proof, its expected hash MUST equal the expected
+  identity actually admitted — the row's `model_sha256` on the primary path,
+  or the matched member's `hash` under R007; retained proof of the primary row
+  is never proof of a different member's hash. Buyer route snapshots MUST bind both algorithm and digest — and, when the
+  binding references an artifact-feed member, the R007(d)
   evidence; the existing receipt v0.4 transitively binds them through the
   signed route snapshot digest without adding receipt keys.
 
@@ -1056,9 +1061,14 @@ algorithm.
   signed target row (or, for a non-primary artifact, against its R007
   expected identity in the release-bound artifact feed) and atomically
   replace the model ID, digest, and algorithm.
-  A swap with no bound signed target row, a mismatched digest, or a snapshot
-  that fails SPEC-023 §3.2 validation MUST fail closed without publishing the
-  new model under the prior model's identity.
+  A swap with no bound signed target row (or R007 member), a mismatched
+  digest, or an artifact that fails validation under its selected algorithm —
+  SPEC-023 §3.2 canonical snapshot-manifest validation against the row for
+  the primary, the same manifest validation against the member's revision and
+  `hash` for a secondary snapshot, complete-file hashing per R007(a) for a
+  GGUF file — with the applicable filesystem containment protections, MUST
+  fail closed without publishing the new model under the prior model's
+  identity.
 
 - **SPEC-010-R007 — Artifact-feed identity (v1.7 amendment).** A catalog
   model key's identity is the SET of `verified` artifacts the release-bound
@@ -1072,7 +1082,11 @@ algorithm.
   a digest a runtime reports about itself — an Ollama manifest layer digest,
   a registry or library tag, a runtime-reported model name — MAY locate the
   file but MUST NEVER be reported as the digest, and the CLI MUST recompute
-  before every report that binds identity (hello, warm swap, offer).
+  before every report that binds identity (hello, warm swap, offer) over the
+  file it resolved for the runtime instance it reports on, failing closed if
+  that file's identity (path, size, inode, modification time) changes between
+  hashing and reporting. How a serving runtime is bound to that file is the
+  runtime path's concern (e).
   (b) **Expected identity.** For a provider whose admitted catalog release
   carries an artifact feed (release-bound to that exact release per SPEC-023
   §3.7.4, signer identity equal per §3.7.2, loaded through the SPEC-023 §3.5
@@ -1084,9 +1098,12 @@ algorithm.
   (R004). A `declared` or `blocked` artifact, an artifact of a `candidate` or
   `blocked` row, a feed that is missing, stale, integrity-failed, or not
   release-bound to the admitted release, a pair whose algorithm is not named
-  by R002, and any pair not in the set fail closed: the provider's hash is
-  then unverified, never "approximately matched", and the v1.6 primary-only
-  comparison applies unchanged.
+  by R002, and any pair not in the set fail closed for ARTIFACT-DERIVED
+  verification: no member is matched and the pair is never "approximately
+  matched". The independent primary-row comparison (R001/R004) keeps its own
+  outcome — a valid primary pair verifies through the row even while the feed
+  is stale or unavailable (SPEC-023 §3.7.6 rules 5–6), and a non-primary pair
+  is then unverified.
   (c) **Resolution.** The match resolves by the globally unique
   `(hash_algorithm, hash)` pair (SPEC-023 §3.7.4) to exactly one
   `(model_key, artifact_id)`; a provider-asserted model key that disagrees
@@ -1094,9 +1111,10 @@ algorithm.
   remains model-key scoped (SPEC-023 §3.3, §3.3.1); every SPEC-023 tier gate
   (`recommendable` for paid defaults) and every SPEC-047 admission gate is
   unchanged by this requirement.
-  (d) **Route snapshots and settlement.** When the expected identity is a
-  non-primary member, the SPEC-022 route-time snapshot MUST carry the
-  SPEC-047-R003 six values — `artifact_feed_sha256`, `artifact_id`, the
+  (d) **Route snapshots and settlement.** When the binding references an
+  artifact-feed member — any member, the primary included; only a primary
+  identity bound directly through the signed candidate row is exempt — the
+  SPEC-022 route-time snapshot MUST carry the SPEC-047-R003 six values — `artifact_feed_sha256`, `artifact_id`, the
   artifact `hash`, its `hash_algorithm`, `artifact_feed_signer_key_id`, and
   the exact candidate-catalog body digest the feed is release-bound to — and
   settlement MUST re-verify them against the snapshot and fail closed on
