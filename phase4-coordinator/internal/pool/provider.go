@@ -982,6 +982,10 @@ func (r *Registry) RegisterAtDetailed(p *Provider, conn net.Conn, now time.Time)
 			p.InferencePath = InferencePathWSTunneled
 		}
 	}
+	// SPEC-010-R007(b)(c): the identity verified at admission (hello) is the
+	// session's authority from its first heartbeat on, not from the first
+	// heartbeat that happens to verify.
+	p.IdentityPin = pinIdentity(nil, ModelIdentityVerdict{Status: p.HashStatus, Artifact: p.ArtifactIdentity})
 	r.providers[p.ProviderID] = p
 	r.sessions[p.AssignedID] = p
 	// SPEC-010 v1.5 R-3.3.4: seed the seen-model index with the union of
@@ -1311,6 +1315,13 @@ func pinIdentity(pin *IdentityPin, verdict ModelIdentityVerdict) *IdentityPin {
 		return &IdentityPin{Primary: true}
 	}
 	return &IdentityPin{Member: verdict.Artifact.Member}
+}
+
+// PinnedVerdict applies the session's identity pin to a verdict computed
+// outside the registry (operator projections such as /poolz and the policy
+// readiness view), so they show the session's verdict, not an unpinned one.
+func (p Provider) PinnedVerdict(verdict ModelIdentityVerdict) ModelIdentityVerdict {
+	return pinArtifactSession(p.IdentityPin, verdict)
 }
 
 // pinArtifactSession is SPEC-010-R007(b)(c): the verified identity is
@@ -2408,6 +2419,11 @@ func (r *Registry) applyHeartbeatLocked(providerID, assignedID string, hb Heartb
 	p.LastHeartbeatAt = hb.At
 
 	modelIDChanged := !strings.EqualFold(priorModelID, hb.ModelID)
+	if modelIDChanged {
+		// A model change (warm swap, R006) ends the previous session
+		// authority whether or not this report carries a hash.
+		p.IdentityPin = nil
+	}
 	if !hb.ModelHashPresent {
 		p.ModelHash = ""
 		p.ModelHashAlgorithm = ""
@@ -2430,9 +2446,6 @@ func (r *Registry) applyHeartbeatLocked(providerID, assignedID string, hb Heartb
 				CatalogAdmissionMode:   p.CatalogAdmissionMode,
 				CatalogModelKey:        p.ModelAdmissionCatalogModelKey,
 			})
-			if modelIDChanged {
-				p.IdentityPin = nil
-			}
 			verdict = pinArtifactSession(p.IdentityPin, verdict)
 			p.IdentityPin = pinIdentity(p.IdentityPin, verdict)
 			p.HashStatus = verdict.Status

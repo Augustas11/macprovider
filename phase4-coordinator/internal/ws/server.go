@@ -6336,7 +6336,7 @@ func (s *Server) handlePoolz(w http.ResponseWriter, r *http.Request) {
 		}
 	} else {
 		for i := range providers {
-			providers[i].HashStatus = s.verifyModelIdentity(providerIdentityRequest(providers[i])).Status
+			providers[i].HashStatus = providers[i].PinnedVerdict(s.verifyModelIdentity(providerIdentityRequest(providers[i]))).Status
 		}
 	}
 	modelSet := map[string]struct{}{}
@@ -6465,7 +6465,7 @@ func (s *Server) providerTier2PolicyEligible(p pool.Provider, cfg config.Tier2Co
 	if !tier2.ConfigActive(cfg) {
 		return true
 	}
-	if tier2.ModelHashActive(cfg) && tier2.IsHashPredicateFailure(s.verifyModelIdentity(providerIdentityRequest(p)).Status, cfg.RequireHashVerified) {
+	if tier2.ModelHashActive(cfg) && tier2.IsHashPredicateFailure(p.PinnedVerdict(s.verifyModelIdentity(providerIdentityRequest(p))).Status, cfg.RequireHashVerified) {
 		return false
 	}
 	if cfg.RequireEncryptedLeg && !p.EncryptedLeg {

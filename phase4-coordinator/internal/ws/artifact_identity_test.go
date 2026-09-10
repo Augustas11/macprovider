@@ -158,6 +158,33 @@ func TestArtifactFeedIdentityVerifiesExactMemberForTheAdmittedRelease(t *testing
 			t.Fatalf("heartbeat leg, mode %q: ok=%v status=%v artifact=%v", tc.mode, ok, heartbeat.HashStatus, heartbeat.ArtifactIdentity != nil)
 		}
 	}
+	// Operator projections (/poolz, policy readiness) apply the session pin:
+	// a session pinned to gguf-q4 now reporting gguf-q8 shows the session's
+	// mismatch, never a fresh unpinned "verified".
+	ggufB := strings.Repeat("d", 64)
+	if err := server.SetArtifactIdentityIndexForTest(catalog, now, []artifactidentity.Member{
+		{ModelKey: "small", ModelID: "model-a", ArtifactID: "mlx-4bit", HashAlgorithm: modelidentity.SnapshotManifestV1, Hash: rowHash, IsPrimary: true, RuntimeStatus: "recommendable"},
+		{ModelKey: "small", ModelID: "model-a", ArtifactID: "gguf-q4", HashAlgorithm: modelidentity.GGUFFileV1, Hash: ggufHash, RuntimeStatus: "recommendable"},
+		{ModelKey: "small", ModelID: "model-a", ArtifactID: "gguf-q8", HashAlgorithm: modelidentity.GGUFFileV1, Hash: ggufB, RuntimeStatus: "recommendable"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	pinnedProvider := pool.Provider{ProviderID: "p1", AssignedID: "s1", ModelID: "model-a", State: pool.StateReady, ExpectedModelHash: rowHash,
+		ModelHash: ggufB, ModelHashAlgorithm: modelidentity.GGUFFileV1, CandidateCatalogSHA256: catalog.SHA256, CatalogAdmissionMode: "current",
+		IdentityPin: &pool.IdentityPin{Member: artifactidentity.Member{ModelKey: "small", ModelID: "model-a", ArtifactID: "gguf-q4", HashAlgorithm: modelidentity.GGUFFileV1, Hash: ggufHash, RuntimeStatus: "recommendable"}},
+		SlotsFree:   1, SlotsTotal: 1, MaxConcurrency: 1, LastHeartbeatAt: now, LastActivityAt: now, HashStatus: pool.HashStatusMismatch}
+	if v := server.verifyModelIdentity(providerIdentityRequest(pinnedProvider)); v.Status != pool.HashStatusVerified {
+		t.Fatalf("unpinned verdict of the other member is verified (fixture sanity): %+v", v)
+	}
+	if v := pinnedProvider.PinnedVerdict(server.verifyModelIdentity(providerIdentityRequest(pinnedProvider))); v.Status != pool.HashStatusMismatch {
+		t.Fatalf("projection must apply the pin: %+v", v)
+	}
+	strict := cfg.Tier2
+	strict.RequireHashVerified = true
+	if server.providerTier2PolicyEligible(pinnedProvider, strict) {
+		t.Fatal("policy readiness must apply the session pin")
+	}
+	server.SetArtifactIdentityIndex(index)
 	// A compatible-previous release has no loaded artifact feed: such a
 	// session keeps the primary-row path only (SPEC-010-R004 as amended).
 	previous := gguf
@@ -296,4 +323,18 @@ func TestModelAdmissionOfferArtifactHashesAreKeyedByCanonicalAlgorithm(t *testin
 			}
 		})
 	}
+}
+
+// SetArtifactIdentityIndexForTest installs an index for the given members
+// bound to the catalog's digest and stamped a day before now.
+func (s *Server) SetArtifactIdentityIndexForTest(catalog *autotune.Catalog, now time.Time, members []artifactidentity.Member) error {
+	index, err := artifactidentity.New(artifactidentity.Provenance{
+		FeedSHA256: strings.Repeat("a", 64), SignerKeyID: "k1", ReleaseID: "test", CandidateCatalogSHA256: catalog.SHA256,
+		FeedGeneratedAt: now.Add(-24 * time.Hour),
+	}, members)
+	if err != nil {
+		return err
+	}
+	s.SetArtifactIdentityIndex(index)
+	return nil
 }

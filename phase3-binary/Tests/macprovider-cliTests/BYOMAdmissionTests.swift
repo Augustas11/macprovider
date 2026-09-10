@@ -173,10 +173,13 @@ final class BYOMAdmissionTests: XCTestCase {
         XCTAssertEqual(posted.hashes, [ModelArtifactIdentity.ggufFileV1: digest], "the posted digest is computed over the bytes, not the manifest locator")
         XCTAssertNotEqual(posted.hashes[ModelArtifactIdentity.ggufFileV1], lyingLocator)
 
-        // The blob is now known and discovery reports the candidate as
-        // artifact-backed; replacing it with non-GGUF bytes of the SAME size
-        // makes hashing fail, and an artifact-backed offer fails closed
-        // without posting.
+        // The blob is now known. Replacing it with non-GGUF bytes of the SAME
+        // size changes its identity, so the fresh discovery inside the next
+        // offer no longer reports it as artifact-backed and the offer goes out
+        // IDENTITY-LESS (v0.1 shape) — a real submission, but never a GGUF
+        // digest for bytes that are not GGUF. (An offer for a candidate that
+        // discovery still reports as artifact-backed fails closed instead:
+        // BYOMArtifactDigestTests.)
         XCTAssertEqual(environment.artifactDigests.knownDigest(forOllamaModel: "tiny-offer-1b:q4"), digest)
         try (Data("XXXX".utf8) + Data(repeating: 0x6b, count: 8192)).write(to: blobURL)
         posted.record([:])
@@ -187,20 +190,15 @@ final class BYOMAdmissionTests: XCTestCase {
             client: BYOMModelAdmissionClient(baseURL: URL(string: "https://coordinator.test")!, session: session),
             httpClient: BYOMAdmissionOllamaTagsHTTPClient(models: ["tiny-offer-1b:q4"])
         )
-        do {
-            _ = try await sameSizeRuntime.submitOffer(
-                providerID: "provider-byom-a",
-                target: "ollama:tiny-offer-1b:q4",
-                evaluationDigestSHA256: String(repeating: "b", count: 64),
-                requestedDisclosureClass: "non_earning_provider_asserted"
-            )
-        } catch {
-            // Either the candidate is no longer artifact-backed (identity moved
-            // with the rewrite) and the offer went out identity-less, or it was
-            // still reported as backed and failed closed — never a lying digest.
-            XCTAssertEqual(error as? BYOMModelAdmissionError, .artifactIdentityChanged)
-        }
-        XCTAssertNil(posted.hashes[ModelArtifactIdentity.ggufFileV1], "no GGUF digest is ever posted for bytes that are not GGUF")
+        let identityless = try await sameSizeRuntime.submitOffer(
+            providerID: "provider-byom-a",
+            target: "ollama:tiny-offer-1b:q4",
+            evaluationDigestSHA256: String(repeating: "b", count: 64),
+            requestedDisclosureClass: "non_earning_provider_asserted"
+        )
+        XCTAssertEqual(identityless.admissionState, "offer_submitted", "the identity-less offer is a real submission")
+        XCTAssertEqual(posted.hashes, [:], "no GGUF digest is ever posted for bytes that are not GGUF")
+        XCTAssertNil(environment.artifactDigests.knownDigest(forOllamaModel: "tiny-offer-1b:q4"), "nothing is recorded for the non-GGUF bytes")
     }
 
     func testAdmissionStatusClientReadsCandidateStatus() async throws {

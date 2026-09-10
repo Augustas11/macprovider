@@ -113,3 +113,91 @@ func TestArtifactSessionMemberIsPinnedAcrossHeartbeats(t *testing.T) {
 		t.Fatalf("refresh path pin: %+v pin=%+v", p, p.IdentityPin)
 	}
 }
+
+// The pin is a session-lifecycle property: it is seeded from the identity
+// verified at ADMISSION (hello), so the very first heartbeat is already
+// bound; a hash-less model change ends it; operator projections apply it.
+func TestIdentityPinIsSeededAtRegistrationAndResetByAnyModelChange(t *testing.T) {
+	const rowHash = "3975387f249977e5e8bfb7ed0d352f8258ac3d630f961ce1dd952f428ee7216a"
+	ggufA, ggufB := strings.Repeat("c", 64), strings.Repeat("d", 64)
+	member := func(id, hash string) artifactidentity.Member {
+		return artifactidentity.Member{ModelKey: "small", ModelID: "model-a", ArtifactID: id, HashAlgorithm: modelidentity.GGUFFileV1, Hash: hash, RuntimeStatus: "recommendable"}
+	}
+	resolver := func(req ModelIdentityRequest) ModelIdentityVerdict {
+		switch {
+		case req.ReportedAlgorithm == modelidentity.SnapshotManifestV1 && req.ReportedHash == rowHash:
+			return ModelIdentityVerdict{Status: HashStatusVerified}
+		case req.ReportedHash == ggufA:
+			return ModelIdentityVerdict{Status: HashStatusVerified, Artifact: &artifactidentity.Binding{Member: member("gguf-q4", ggufA)}}
+		case req.ReportedHash == ggufB:
+			return ModelIdentityVerdict{Status: HashStatusVerified, Artifact: &artifactidentity.Binding{Member: member("gguf-q8", ggufB)}}
+		}
+		return ModelIdentityVerdict{Status: HashStatusMismatch}
+	}
+	registry := NewRegistry(nil, WithModelIdentityResolver(resolver))
+	start := time.Date(2026, 9, 10, 12, 0, 0, 0, time.UTC)
+	admit := func(hash string, artifact *artifactidentity.Binding) {
+		t.Helper()
+		registry.Register(&Provider{
+			ProviderID: "p1", AssignedID: "current", ModelID: "model-a", ModelHash: hash, HashStatus: HashStatusVerified, ArtifactIdentity: artifact,
+			State: StateReady, SlotsFree: 1, SlotsTotal: 1, LastHeartbeatAt: start, LastActivityAt: start, MaxConcurrency: 1, MaxContextTokens: 20000, ThroughputTPSEstimate: 20,
+		}, nil)
+	}
+	beat := func(modelID, hash, algorithm string, present bool, at time.Time) Provider {
+		t.Helper()
+		provider, _, ok := registry.ApplyHeartbeat("p1", "current", HeartbeatUpdate{
+			Status: StateReady, ModelID: modelID, ModelHash: hash, ModelHashPresent: present,
+			ModelHashAlgorithm: algorithm, ModelHashAlgorithmPresent: present, ExpectedModelHash: rowHash,
+			MaxContextTokens: 8192, MaxConcurrency: 1, SlotsFree: 1, SlotsTotal: 1, At: at,
+		})
+		if !ok {
+			t.Fatal("heartbeat not applied")
+		}
+		return *provider
+	}
+	// Verified as a MEMBER at hello: the first heartbeat naming another
+	// member — or the primary — is a mismatch.
+	admit(ggufA, &artifactidentity.Binding{Member: member("gguf-q4", ggufA)})
+	if p := registry.Snapshot()[0]; p.IdentityPin == nil || p.IdentityPin.Primary || p.IdentityPin.Member.ArtifactID != "gguf-q4" {
+		t.Fatalf("registration must seed the pin from the admission verdict: %+v", p.IdentityPin)
+	}
+	if p := beat("model-a", ggufB, modelidentity.GGUFFileV1, true, start.Add(time.Minute)); p.HashStatus != HashStatusMismatch || p.ArtifactIdentity != nil {
+		t.Fatalf("first heartbeat with another member: %+v", p)
+	}
+	admit(ggufA, &artifactidentity.Binding{Member: member("gguf-q4", ggufA)})
+	if p := beat("model-a", rowHash, modelidentity.SnapshotManifestV1, true, start.Add(time.Minute)); p.HashStatus != HashStatusMismatch {
+		t.Fatalf("first heartbeat with the primary after a member hello: %+v", p)
+	}
+	// Verified as the PRIMARY at hello: the first heartbeat naming a member
+	// is a mismatch.
+	admit(rowHash, nil)
+	if p := registry.Snapshot()[0]; p.IdentityPin == nil || !p.IdentityPin.Primary {
+		t.Fatalf("registration must pin the primary: %+v", p.IdentityPin)
+	}
+	if p := beat("model-a", ggufA, modelidentity.GGUFFileV1, true, start.Add(time.Minute)); p.HashStatus != HashStatusMismatch || p.ArtifactIdentity != nil {
+		t.Fatalf("first heartbeat with a member after a primary hello: %+v", p)
+	}
+	// An unverified admission seeds no pin.
+	registerHeartbeatProvider(t, registry, "model-a", "", HashStatusUncatalogued, start)
+	if p := registry.Snapshot()[0]; p.IdentityPin != nil {
+		t.Fatalf("unverified admission must not pin: %+v", p.IdentityPin)
+	}
+	// A hash-less model change ends the previous authority: the next typed
+	// report for the NEW model binds fresh instead of mismatching model A's pin.
+	admit(ggufA, &artifactidentity.Binding{Member: member("gguf-q4", ggufA)})
+	if p := beat("model-b", "", "", false, start.Add(time.Minute)); p.IdentityPin != nil || p.HashStatus != HashStatusUncatalogued {
+		t.Fatalf("hash-less model change must reset the pin: %+v pin=%+v", p, p.IdentityPin)
+	}
+	if p := beat("model-b", ggufB, modelidentity.GGUFFileV1, true, start.Add(2*time.Minute)); p.HashStatus != HashStatusVerified || p.ArtifactIdentity == nil || p.ArtifactIdentity.Member.ArtifactID != "gguf-q8" {
+		t.Fatalf("new model binds fresh: %+v", p)
+	}
+	// Operator projections see the session's verdict, not an unpinned one.
+	admit(ggufA, &artifactidentity.Binding{Member: member("gguf-q4", ggufA)})
+	pinned := registry.Snapshot()[0]
+	if v := pinned.PinnedVerdict(resolver(ModelIdentityRequest{ReportedHash: ggufB, ReportedAlgorithm: modelidentity.GGUFFileV1})); v.Status != HashStatusMismatch || v.Artifact != nil {
+		t.Fatalf("projection must apply the pin: %+v", v)
+	}
+	if v := pinned.PinnedVerdict(resolver(ModelIdentityRequest{ReportedHash: ggufA, ReportedAlgorithm: modelidentity.GGUFFileV1})); v.Status != HashStatusVerified {
+		t.Fatalf("projection of the pinned member: %+v", v)
+	}
+}
