@@ -990,7 +990,7 @@ struct ServeCommand: AsyncParsableCommand {
         }
 
         let pairedRecommendationInputs = requireRecommendable
-            ? await staticInputs.loadRecommendationInputs()
+            ? await staticInputs.loadRecommendationInputs(includeArtifactFeed: false)
             : nil
         let expectedPublicModel: String
         if requireRecommendable {

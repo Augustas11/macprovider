@@ -1656,6 +1656,12 @@ final class ModelManagementTests: XCTestCase {
 
     func testRecommendationValidationKeepsAnyRootWarningAdvisoryOnly() throws {
         for warning in [
+            // SPEC-023 §3.7.6 rule 6: the artifact-feed classes decode and never
+            // block, even the ones named `_integrity_failure` / `_update_required`.
+            "catalog_artifact_feed_fallback_used",
+            "catalog_artifact_feed_integrity_failure",
+            "catalog_artifact_feed_update_required",
+            "catalog_artifact_feed_stale",
             "candidate_catalog_fallback_used",
             "candidate_catalog_stale",
             "demand_rank_fallback_used",

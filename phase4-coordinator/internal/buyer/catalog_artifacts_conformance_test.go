@@ -24,6 +24,7 @@ type corpusOp struct {
 }
 
 type artifactCorpus struct {
+	CaseCount int            `json:"case_count"`
 	Candidate map[string]any `json:"candidate"`
 	Feed      map[string]any `json:"feed"`
 	Cases     []struct {
@@ -75,8 +76,8 @@ func TestCatalogArtifactsSharedConformanceCorpus(t *testing.T) {
 	if err := json.Unmarshal(raw, &corpus); err != nil {
 		t.Fatalf("decode corpus: %v", err)
 	}
-	if len(corpus.Cases) < 25 {
-		t.Fatalf("corpus has %d cases", len(corpus.Cases))
+	if len(corpus.Cases) != corpus.CaseCount || corpus.CaseCount < 25 {
+		t.Fatalf("corpus has %d cases, case_count %d", len(corpus.Cases), corpus.CaseCount)
 	}
 	version := corpus.Candidate["version"].(string)
 	generatedAt := corpus.Candidate["generated_at"].(string)

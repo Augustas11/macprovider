@@ -80,9 +80,11 @@ bytes) together with `bakedArtifactFeedSignerKeyID`, the release-manifest-bound
 signer read from the artifact sidecar at `generate`; on the compiled-in path the
 CLI enforces the three-way identity candidate signer == artifact signer ==
 manifest-bound signer, and on the live path the two authenticated signers it
-holds (the manifest binding of served bytes is enforced by `verify`, the
-acceptance signer, the live release gate, and the coordinator loader). For a
-rate-card-bound release both are `nil` and the CLI behaves exactly as v0.1.
+holds (SPEC-023 §3.7.2 as amended in v0.10.2: the `release.json` leg is
+enforced at generation and by the consumers that hold the manifest — `verify`,
+the acceptance signer, the live release gate; the coordinator loader enforces
+cross-feed signer equality). For a
+rate-card-bound release both are `nil` and the CLI behaves exactly as v0.1. A bare `generate` bakes the signer from the sidecar on disk at that moment; the shippable bake is the re-run inside `scripts/resign-autotune-static.sh` after signing, and `verify` fails drift on anything else.
 Freshness (§3.7.6 rules 3–4) is applied to whichever artifact bytes were
 selected, the compiled-in fallback included, so an offline binary gets no
 usable feed once its baked feed is 14 days old. The transcripts that make the
@@ -91,17 +93,24 @@ live selection are `autotune --recommend`, `--recommend-prefetch`, `--consume`,
 artifact feed for the selected candidate release beside the three v0.1 feeds
 (`loadRecommendationInputs`); the first four carry its warnings in the same
 warning sets, and `catalog-economics` — whose SPEC-044 projection codes are a
-closed v0.1 enum — reports them on stderr and runs discovery with a matcher
-built from that qualified selection. `models discover` is offline by design
-and uses the compiled-in matcher, whose artifact set is the same qualified
-selection the loader would make for those bytes without transport (bound with
-the three-way signer identity and fresh at run time). BYOM discovery's catalog
-matcher resolves a served reference through that artifact set (HuggingFace
-repo ids, GGUF library tags) — identity only, never admission — and only
-through a `verified` artifact whose `allowed_runtime_sources` include the
-adapter that reported the reference (§3.7.4), of a `listed` or `recommendable`
-row (§3.2: `candidate` and `blocked` rows are never BYOM-matchable);
-`declared` and `blocked` artifacts never match. The closed
+closed v0.1 enum — reports them on stderr. Callers that consume only the three
+v0.1 feeds (recommendation freshness, the `serve` preflight) skip the artifact
+fetch. A compiled-in snapshot the CLI cannot decode is
+`catalog_artifact_feed_integrity_failure` with no usable feed, never a crash.
+BYOM identity is resolved against the compiled-in release in every command
+(`discover`, `evaluate`, `offer`, `catalog-economics`) through the one offline
+qualified selection — the same bound-and-fresh verdict the loader would reach
+for those bytes without transport — so all commands agree on one authority
+(SPEC-046: discovery is offline and never creates catalog authority). The
+matcher resolves a served reference through that artifact set only
+content-addressed: an MLX cache entry matches a `huggingface_revision`
+artifact only when one of its snapshot directories IS the artifact's
+`revision`; a GGUF `library_tag` never matches until the adapter reports the
+layer digest (slice 3) — a repo id or tag alone is a mutable name, not
+identity (§3.7.4; SPEC-047 §R001). Only a `verified` artifact whose
+`allowed_runtime_sources` include the reporting adapter, of a `listed` or
+`recommendable` row (§3.2: `candidate` and `blocked` rows are never
+BYOM-matchable), and only when exactly one model key answers. The closed
 schema, identity matrix, uniqueness, and
 binding rules are pinned across the generator, the coordinator, and the CLI by
 the shared corpus `scripts/tests/fixtures/artifact_feed_conformance.json`.

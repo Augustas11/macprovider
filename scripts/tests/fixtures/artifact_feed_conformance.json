@@ -1,5 +1,5 @@
 {
-  "_format": "cases[].ops mutate `feed`; optional cases[].candidate_ops mutate `candidate` first (its sha256 is recomputed by every harness)",
+  "_format": "cases[].ops mutate `feed`; optional cases[].candidate_ops mutate `candidate` first (its sha256 is recomputed by every harness); every harness asserts len(cases) == case_count so no runner can silently skip cases",
   "candidate": {
     "generated_at": "2026-07-10T00:00:00Z",
     "policy_version": "autotune-policy-v1",
@@ -25,6 +25,7 @@
     "source": "operator_curated_autotune_candidate_catalog",
     "version": "test-release"
   },
+  "case_count": 55,
   "cases": [
     {
       "expect": "accept",
@@ -1017,6 +1018,232 @@
         }
       ],
       "spec": "\u00a73.7.3 \u2014 models is an object with no non-empty rule; \u00a73.2: a candidate row is out of R004 scope"
+    },
+    {
+      "expect": "reject",
+      "name": "verified gguf allowing openai_compatible_loopback",
+      "ops": [
+        {
+          "op": "set",
+          "path": [
+            "models",
+            "test-model",
+            "artifacts",
+            "gguf-q4"
+          ],
+          "value": {
+            "allowed_runtime_sources": [
+              "ollama_loopback",
+              "openai_compatible_loopback"
+            ],
+            "hash": "4444444444444444444444444444444444444444444444444444444444444444",
+            "hash_algorithm": "macprovider.gguf-file.v1",
+            "min_ram_gb": 4,
+            "quantization": "q4_k_m",
+            "runtime_format": "gguf",
+            "size_bytes": 654321,
+            "source_ref": {
+              "digest": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+              "kind": "ollama_library_tag",
+              "library_tag": "test-model:q4_k_m"
+            },
+            "verification_status": "verified",
+            "verified_at": "2026-09-01"
+          }
+        }
+      ],
+      "spec": "\u00a73.7.4 / AC-CAT-16 \u2014 a verified artifact never allows the opaque adapter"
+    },
+    {
+      "expect": "reject",
+      "name": "verified_at with a time of day",
+      "ops": [
+        {
+          "op": "set",
+          "path": [
+            "models",
+            "test-model",
+            "artifacts",
+            "mlx-4bit",
+            "verified_at"
+          ],
+          "value": "2026-09-01T00:00:00Z"
+        }
+      ],
+      "spec": "\u00a73.7.3 \u2014 verified_at is a bare full-date"
+    },
+    {
+      "expect": "reject",
+      "name": "verified_at non-null on a declared artifact",
+      "ops": [
+        {
+          "op": "set",
+          "path": [
+            "models",
+            "test-model",
+            "artifacts",
+            "gguf-q4"
+          ],
+          "value": {
+            "allowed_runtime_sources": [
+              "ollama_loopback"
+            ],
+            "hash": "4444444444444444444444444444444444444444444444444444444444444444",
+            "hash_algorithm": "macprovider.gguf-file.v1",
+            "min_ram_gb": 4,
+            "quantization": "q4_k_m",
+            "runtime_format": "gguf",
+            "size_bytes": 654321,
+            "source_ref": {
+              "digest": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+              "kind": "ollama_library_tag",
+              "library_tag": "test-model:q4_k_m"
+            },
+            "verification_status": "declared",
+            "verified_at": "2026-09-01"
+          }
+        }
+      ],
+      "spec": "\u00a73.7.3 \u2014 null exactly when not verified"
+    },
+    {
+      "expect": "reject",
+      "name": "repeated adapter in allowed_runtime_sources",
+      "ops": [
+        {
+          "op": "set",
+          "path": [
+            "models",
+            "test-model",
+            "artifacts",
+            "mlx-4bit",
+            "allowed_runtime_sources"
+          ],
+          "value": [
+            "mlx_cache",
+            "mlx_cache"
+          ]
+        }
+      ],
+      "spec": "\u00a73.7.3"
+    },
+    {
+      "expect": "reject",
+      "name": "empty artifacts map for a model",
+      "ops": [
+        {
+          "op": "set",
+          "path": [
+            "models",
+            "test-model",
+            "artifacts"
+          ],
+          "value": {}
+        }
+      ],
+      "spec": "\u00a73.7.3 \u2014 artifacts is non-empty"
+    },
+    {
+      "expect": "reject",
+      "name": "artifact_id with a trailing newline",
+      "ops": [
+        {
+          "op": "set",
+          "path": [
+            "models",
+            "test-model",
+            "artifacts",
+            "mlx-8bit\n"
+          ],
+          "value": {
+            "allowed_runtime_sources": [
+              "mlx_cache"
+            ],
+            "hash": "5555555555555555555555555555555555555555555555555555555555555555",
+            "hash_algorithm": "macprovider.snapshot-manifest.v1",
+            "min_ram_gb": 8,
+            "quantization": "8bit",
+            "runtime_format": "mlx_safetensors",
+            "size_bytes": 234567,
+            "source_ref": {
+              "kind": "huggingface_revision",
+              "repo_id": "mlx-community/Test-Model-8bit",
+              "revision": "3333333333333333333333333333333333333333"
+            },
+            "verification_status": "verified",
+            "verified_at": "2026-09-01"
+          }
+        }
+      ],
+      "spec": "\u00a73.7.4 grammar \u2014 whole-string anchoring in every consumer"
+    },
+    {
+      "expect": "reject",
+      "name": "hash with a trailing newline",
+      "ops": [
+        {
+          "op": "set",
+          "path": [
+            "models",
+            "test-model",
+            "artifacts",
+            "mlx-8bit"
+          ],
+          "value": {
+            "allowed_runtime_sources": [
+              "mlx_cache"
+            ],
+            "hash": "5555555555555555555555555555555555555555555555555555555555555555\n",
+            "hash_algorithm": "macprovider.snapshot-manifest.v1",
+            "min_ram_gb": 8,
+            "quantization": "8bit",
+            "runtime_format": "mlx_safetensors",
+            "size_bytes": 234567,
+            "source_ref": {
+              "kind": "huggingface_revision",
+              "repo_id": "mlx-community/Test-Model-8bit",
+              "revision": "3333333333333333333333333333333333333333"
+            },
+            "verification_status": "verified",
+            "verified_at": "2026-09-01"
+          }
+        }
+      ],
+      "spec": "\u00a73.7.3 \u2014 whole-string anchoring in every consumer"
+    },
+    {
+      "expect": "reject",
+      "name": "repo_id with a trailing newline",
+      "ops": [
+        {
+          "op": "set",
+          "path": [
+            "models",
+            "test-model",
+            "artifacts",
+            "mlx-8bit"
+          ],
+          "value": {
+            "allowed_runtime_sources": [
+              "mlx_cache"
+            ],
+            "hash": "5555555555555555555555555555555555555555555555555555555555555555",
+            "hash_algorithm": "macprovider.snapshot-manifest.v1",
+            "min_ram_gb": 8,
+            "quantization": "8bit",
+            "runtime_format": "mlx_safetensors",
+            "size_bytes": 234567,
+            "source_ref": {
+              "kind": "huggingface_revision",
+              "repo_id": "mlx-community/Test-Model-8bit\n",
+              "revision": "3333333333333333333333333333333333333333"
+            },
+            "verification_status": "verified",
+            "verified_at": "2026-09-01"
+          }
+        }
+      ],
+      "spec": "\u00a73.7.3 \u2014 whole-string anchoring in every consumer"
     }
   ],
   "description": "Shared SPEC-023 \u00a73.7 artifact-feed conformance corpus (BYOM v0.2 slice 2c). One candidate catalog, one valid feed, and mutation cases applied by the Python generator tests, the Go coordinator tests, and the Swift CLI tests, so the three consumers cannot drift on the closed schema, the identity matrix, release binding, or primary consistency. Mutation ops: {op: set, path: [...], value} and {op: delete, path: [...]}. The feed's candidate_catalog_sha256 is computed by each consumer from the canonical candidate bytes it signs or bakes before ops are applied; a case that sets it wins.",

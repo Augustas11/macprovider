@@ -2160,28 +2160,21 @@ struct BYOMDiscoveryRunner {
     private let environment: BYOMDiscoveryEnvironment
     private let fileManager: FileManager
     private let httpClient: any BYOMDiscoveryHTTPClient
-    private let catalogMatcher: BYOMCatalogMatcher?
 
-    /// `catalogMatcher` lets a transcript that has already made the qualified
-    /// artifact-feed selection (`loadRecommendationInputs`) hand it to
-    /// discovery; `models discover` is offline and uses the compiled-in,
-    /// freshness-qualified matcher.
     init(
         environment: BYOMDiscoveryEnvironment,
         fileManager: FileManager = .default,
-        httpClient: any BYOMDiscoveryHTTPClient = BYOMURLSessionHTTPClient(),
-        catalogMatcher: BYOMCatalogMatcher? = nil
+        httpClient: any BYOMDiscoveryHTTPClient = BYOMURLSessionHTTPClient()
     ) {
         self.environment = environment
         self.fileManager = fileManager
         self.httpClient = httpClient
-        self.catalogMatcher = catalogMatcher
     }
 
     func discover() async -> BYOMDiscoveryWire {
         let namespace = BYOMDiscoveryNamespaceStore(fileManager: fileManager)
             .readNamespace(at: environment.namespaceURL)
-        let catalog = catalogMatcher ?? BYOMCatalogMatcher()
+        let catalog = BYOMCatalogMatcher()
         var adapters: [BYOMDiscoveryWire.Adapter] = []
         var candidates: [BYOMDiscoveryWire.Candidate] = []
         var warnings = Set(namespace.warnings.map(\.rawValue))
@@ -3082,17 +3075,20 @@ struct BYOMCandidateIdentity: Sendable {
 
 struct BYOMCatalogMatcher: Sendable {
     private let rows: [(key: String, modelID: String)]
-    /// SPEC-023 §3.7 artifact set (BYOM v0.2 slice 2c): every served reference
-    /// an artifact of the compiled-in, release-bound artifact feed answers to
-    /// (HuggingFace repo ids, GGUF library tags). Identity only, never
-    /// admission; empty for a rate-card-bound release, which keeps matching
-    /// exactly as v0.1 did (§3.7.6 rule 6).
-    private let artifactReferences: [ArtifactFeed.ServedReference]
+    /// SPEC-023 §3.7 artifact set (BYOM v0.2 slice 2c): the identities of the
+    /// qualified artifact feed's artifacts. Identity only, never admission;
+    /// empty for a rate-card-bound release, which keeps matching exactly as
+    /// v0.1 did (§3.7.6 rule 6).
+    private let artifactIdentities: [ArtifactFeed.ArtifactIdentity]
 
-    /// The offline matcher: the compiled-in candidate catalog and the
-    /// freshness-qualified compiled-in artifact set (`bakedUsableArtifactFeed`),
-    /// which is nil under exactly the conditions in which the live loader would
-    /// yield no usable feed for the same bytes (§3.7.6 rule 5).
+    /// The offline matcher every discovery entry point uses: the compiled-in
+    /// candidate catalog and the freshness-qualified compiled-in artifact set
+    /// (`bakedUsableArtifactFeed`), nil under exactly the conditions in which
+    /// the live loader would yield no usable feed for the same bytes (§3.7.6
+    /// rule 5). BYOM identity is resolved against the compiled-in release in
+    /// every command so `discover`, `evaluate`, `offer`, and
+    /// `catalog-economics` agree on one authority (SPEC-046: discovery is
+    /// offline and never creates catalog authority).
     init(now: Date = Date()) {
         self.init(
             candidateBytes: Data(AutotuneStaticInputs.bakedCandidateCatalogJSON.utf8),
@@ -3100,10 +3096,9 @@ struct BYOMCatalogMatcher: Sendable {
         )
     }
 
-    /// `artifactFeed` is the caller's QUALIFIED selection — `loadArtifactFeed`'s
-    /// `value` for a transcript that fetched, or nil when no artifact-derived
-    /// capability may be exercised.
-    init(candidateBytes: Data, artifactFeed: ArtifactFeed?) {
+    /// `artifactFeed` is a QUALIFIED selection (only the two qualifiers can
+    /// make one) or nil when no artifact-derived capability may be exercised.
+    init(candidateBytes: Data, artifactFeed: QualifiedArtifactFeed?) {
         // SPEC-023 §3.2 ladder: only `listed` and `recommendable` rows are BYOM
         // catalog-matchable; a `candidate` row is operator staging and a
         // `blocked` row is diagnostic display only — neither mints a catalog
@@ -3118,28 +3113,36 @@ struct BYOMCatalogMatcher: Sendable {
         } else {
             rows = []
         }
-        artifactReferences = (artifactFeed?.servedReferences() ?? []).filter { matchable.contains($0.catalogKey) }
+        artifactIdentities = (artifactFeed?.feed.artifactIdentities() ?? []).filter { matchable.contains($0.catalogKey) }
     }
 
     static let matchableStatuses: Set<String> = ["listed", "recommendable"]
 
     /// `runtimeSource` is the adapter reporting the reference (`mlx_cache`,
-    /// `ollama_loopback`, ...): an artifact reference matches only when that
-    /// adapter is one the VERIFIED artifact allows (SPEC-023 §3.7.4).
-    func catalogKey(for servedModelRef: String, runtimeSource: String) -> String? {
+    /// `ollama_loopback`, ...); `revisions` are the HuggingFace snapshot
+    /// revisions the adapter observed for an MLX cache entry and `digest` the
+    /// GGUF layer digest it observed for a loopback runtime (none is reported
+    /// yet). A catalog identity is minted only when exactly ONE model key
+    /// answers: a served reference is a lossy projection of content-addressed
+    /// identity, and an ambiguous one names nobody (SPEC-023 §3.7.4 resolves
+    /// identity by hash; SPEC-046: discovery never creates catalog authority).
+    func catalogKey(
+        for servedModelRef: String,
+        runtimeSource: String,
+        revisions: Set<String> = [],
+        digest: String? = nil
+    ) -> String? {
         let normalized = BYOMCandidateIdentity.normalizedServedModelRef(servedModelRef)
-        if let row = rows.first(where: { row in
+        let rowKeys = Set(rows.filter { row in
             BYOMCandidateIdentity.normalizedServedModelRef(row.key) == normalized
                 || BYOMCandidateIdentity.normalizedServedModelRef(row.modelID) == normalized
-        }) {
-            return row.key
+        }.map(\.key))
+        if !rowKeys.isEmpty {
+            return rowKeys.count == 1 ? rowKeys.first : nil
         }
-        // A served reference is a lossy projection of content-addressed
-        // identity (repo id without revision, library tag without digest): when
-        // it answers to artifacts of more than one model key the match is
-        // ambiguous and no catalog identity is minted (SPEC-023 §3.7.4 resolves
-        // identity by hash; SPEC-046: discovery never creates catalog authority).
-        let keys = Set(artifactReferences.filter { $0.matches(normalized, runtimeSource: runtimeSource) }.map(\.catalogKey))
+        let keys = Set(artifactIdentities.filter {
+            $0.matches(normalized, runtimeSource: runtimeSource, revisions: revisions, digest: digest)
+        }.map(\.catalogKey))
         return keys.count == 1 ? keys.first : nil
     }
 }
@@ -3276,6 +3279,7 @@ struct BYOMMLXCacheDiscovery {
             let snapshotSummary = summarizeSnapshots(repoDirectory: entry)
             let candidate = buildCandidate(
                 servedModelRef: modelID,
+                revisions: snapshotSummary.revisions,
                 readinessState: snapshotSummary.ready ? "ready" : "needs_weights",
                 estimatedGB: estimatedGB(modelID: modelID, snapshotBytes: snapshotSummary.weightBytes),
                 contextWindowTokens: snapshotSummary.contextWindowTokens,
@@ -3305,17 +3309,24 @@ struct BYOMMLXCacheDiscovery {
         return modelID
     }
 
-    private func summarizeSnapshots(repoDirectory: URL) -> (ready: Bool, weightBytes: UInt64, contextWindowTokens: Int?) {
+    private func summarizeSnapshots(repoDirectory: URL) -> (ready: Bool, weightBytes: UInt64, contextWindowTokens: Int?, revisions: Set<String>) {
         let snapshots = repoDirectory.appendingPathComponent("snapshots", isDirectory: true)
         guard let snapshotDirs = boundedDirectoryEntries(at: snapshots, cap: 256) else {
-            return (false, 0, nil)
+            return (false, 0, nil, [])
         }
         var sawConfig = false
         var weightBytes: UInt64 = 0
         var context: Int?
         var inspected = 0
+        // HF cache snapshot directories are named by the commit revision: the
+        // immutable half of a SPEC-023 `huggingface_revision` source reference.
+        var revisions = Set<String>()
         for snapshot in snapshotDirs.prefix(20) {
             guard (try? snapshot.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true else { continue }
+            let name = snapshot.lastPathComponent
+            if name.count == 40, name.allSatisfy({ $0.isHexDigit && ($0.isNumber || $0.isLowercase) }) {
+                revisions.insert(name)
+            }
             if let config = boundedFileContents(
                 at: snapshot.appendingPathComponent("config.json"),
                 within: cacheRoot,
@@ -3350,7 +3361,7 @@ struct BYOMMLXCacheDiscovery {
                 weightBytes += UInt64(values.fileSize ?? 0)
             }
         }
-        return (sawConfig && weightBytes > 0, weightBytes, context)
+        return (sawConfig && weightBytes > 0, weightBytes, context, revisions)
     }
 
     private static func isModelWeightFile(_ name: String) -> Bool {
@@ -3372,6 +3383,7 @@ struct BYOMMLXCacheDiscovery {
 
     private func buildCandidate(
         servedModelRef: String,
+        revisions: Set<String>,
         readinessState: String,
         estimatedGB: Double?,
         contextWindowTokens: Int?,
@@ -3382,7 +3394,7 @@ struct BYOMMLXCacheDiscovery {
             runtimeSource: "mlx_cache",
             servedModelRef: servedModelRef
         )
-        let catalogKey = catalogMatcher.catalogKey(for: servedModelRef, runtimeSource: "mlx_cache")
+        let catalogKey = catalogMatcher.catalogKey(for: servedModelRef, runtimeSource: "mlx_cache", revisions: revisions)
         var warnings = Set((namespaceWarnings + idWarnings + localWarnings + [.capabilityUnevaluated, .evaluationRequired]).map(\.rawValue))
         if catalogKey != nil {
             warnings.insert(BYOMDiscoveryWarning.catalogMatchUnverified.rawValue)

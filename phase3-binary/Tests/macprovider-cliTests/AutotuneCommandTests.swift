@@ -273,7 +273,7 @@ final class AutotuneCommandTests: XCTestCase {
             usedFallback: true
         )
 
-        let artifactFeed = AutotuneStaticSelection<ArtifactFeed?>(
+        let artifactFeed = AutotuneStaticSelection<QualifiedArtifactFeed?>(
             value: nil,
             selectedBytes: Data(),
             warnings: [.catalogArtifactFeedIntegrityFailure],

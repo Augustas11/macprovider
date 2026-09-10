@@ -1616,11 +1616,14 @@ struct AutotuneStaticInputs {
         return (demand, candidate)
     }
 
-    func loadRecommendationInputs() async -> (
+    /// `includeArtifactFeed: false` is for callers that consume only the three
+    /// v0.1 feeds (recommendation freshness, the serve preflight): they skip
+    /// the artifact fetch entirely and get the rule-6 "absent feed" selection.
+    func loadRecommendationInputs(includeArtifactFeed: Bool = true) async -> (
         demand: AutotuneStaticSelection<DemandRank>,
         candidate: AutotuneStaticSelection<CandidateCatalog>,
         rateCard: AutotuneStaticSelection<RateCardProjection>,
-        artifactFeed: AutotuneStaticSelection<ArtifactFeed?>
+        artifactFeed: AutotuneStaticSelection<QualifiedArtifactFeed?>
     ) {
         var release = await loadCatalogRelease()
         var rateCard = await loadRateCard()
@@ -1634,7 +1637,9 @@ struct AutotuneStaticInputs {
         // SPEC-023 §3.7: the artifact feed is loaded for the SAME release as the
         // selected candidate catalog and bound to it; its warnings ride beside
         // the others but never block (§3.7.6 rule 6).
-        let artifactFeed = await loadArtifactFeed(candidate: release.candidate)
+        let artifactFeed: AutotuneStaticSelection<QualifiedArtifactFeed?> = includeArtifactFeed
+            ? await loadArtifactFeed(candidate: release.candidate)
+            : AutotuneStaticSelection(value: nil, selectedBytes: Data(), warnings: [], usedFallback: false, signerKeyID: nil)
         return (release.demand, release.candidate, rateCard, artifactFeed)
     }
 
@@ -2975,7 +2980,7 @@ struct RecommendationFreshnessChecker {
 
     func status() async -> Status {
         let stored = try? RecommendationStateStore.read(from: stateURL)
-        let inputs = await staticInputs.loadRecommendationInputs()
+        let inputs = await staticInputs.loadRecommendationInputs(includeArtifactFeed: false)
         let demand = inputs.demand
         let catalog = inputs.candidate
         let rateCard = inputs.rateCard

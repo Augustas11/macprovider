@@ -1381,7 +1381,7 @@ class ArtifactFeedConformanceCorpusTest(unittest.TestCase):
                 raise AssertionError(op)
 
     def test_every_corpus_case_matches_the_generator_validator(self):
-        self.assertGreaterEqual(len(self.CORPUS["cases"]), 25)
+        self.assertEqual(len(self.CORPUS["cases"]), self.CORPUS["case_count"])
         for case in self.CORPUS["cases"]:
             with self.subTest(case["name"]):
                 candidate_source = copy.deepcopy(self.CORPUS["candidate"])
@@ -1923,6 +1923,20 @@ class HermeticReleaseTest(unittest.TestCase):
         harness.bump(release_id, "2026-09-20T00:00:00Z")
         harness.cut(activate_artifact_feed=True)
         return release_id
+
+    def test_activation_bakes_the_published_feed_and_its_signer_into_the_cli_snapshot(self):
+        """The compiled-in fallback is the exact signed bytes of the published
+        feed together with the sidecar's key_id (the signer `release.json`
+        binds), produced by the documented generate → sign → regenerate flow."""
+        with self.harness() as harness:
+            self.activate(harness)
+            generated = pathlib.Path(catalog_release.SWIFT_GENERATED).read_text()
+            match = re.search(r'bakedArtifactFeedBase64: String\? = "([A-Za-z0-9+/=]+)"', generated)
+            self.assertIsNotNone(match)
+            published = (harness.static / "autotune-artifacts.json").read_bytes()
+            self.assertEqual(base64.b64decode(match.group(1)), published)
+            self.assertIn(f'bakedArtifactFeedSignerKeyID: String? = "{harness.KEY_ID}"', generated)
+            self.assertNotIn("bakedArtifactFeedSignerKeyID: String? = nil", generated)
 
     def test_activation_refuses_a_rate_card_that_differs_from_the_preceding_release(self):
         """§3.3.1 rule 8 as a generation gate: the activation release is the

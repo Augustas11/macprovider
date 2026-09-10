@@ -107,8 +107,13 @@ extension ArtifactFeed {
     private static let repoIDPattern = try! NSRegularExpression(pattern: "^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$")
     private static let fullDatePattern = try! NSRegularExpression(pattern: "^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
 
+    /// Whole-string match. ICU's `$` also matches before a final line
+    /// terminator, which Go's RE2 and Python's `fullmatch` do not; requiring the
+    /// match to span the whole value keeps the three validators identical.
     private static func matches(_ pattern: NSRegularExpression, _ value: String) -> Bool {
-        pattern.firstMatch(in: value, range: NSRange(value.startIndex..., in: value)) != nil
+        let whole = NSRange(value.startIndex..., in: value)
+        guard let match = pattern.firstMatch(in: value, range: whole) else { return false }
+        return match.range == whole
     }
 
     private static func exactKeys(_ object: [String: Any], allowed: Set<String>, required: Set<String>, label: String) throws {
@@ -432,40 +437,80 @@ extension ArtifactFeed {
         }
     }
 
-    /// One served-model reference an artifact of this feed answers to
-    /// (HuggingFace repo id for MLX snapshots, library tag for GGUF), with the
-    /// constraints §3.7.4 puts on matching: only a `verified` artifact may
-    /// satisfy a catalog match, a `blocked` one never may, and the runtime
-    /// source that reports the reference must be one the artifact allows.
-    struct ServedReference: Equatable, Sendable {
-        var reference: String
+    /// One artifact of this feed as a content-addressed identity (SPEC-023
+    /// §3.7.4), carrying what a later trusted binding records (SPEC-047-R003)
+    /// together with the constraints §3.7.4 and §3.2 put on matching. Identity
+    /// only — never admission.
+    struct ArtifactIdentity: Equatable, Sendable {
         var catalogKey: String
+        var artifactID: String
+        var isPrimary: Bool
+        var runtimeFormat: String
+        var hashAlgorithm: String
+        var hash: String
         var verificationStatus: String
         var allowedRuntimeSources: [String]
+        var sourceRef: SourceRef
 
-        func matches(_ normalizedReference: String, runtimeSource: String) -> Bool {
-            verificationStatus == "verified"
-                && allowedRuntimeSources.contains(runtimeSource)
-                && BYOMCandidateIdentity.normalizedServedModelRef(reference) == normalizedReference
+        /// A served reference matches only through a `verified` artifact, for an
+        /// adapter the artifact allows, and only together with the IMMUTABLE
+        /// half of the artifact's source reference as the adapter observed it:
+        /// the HuggingFace `revision` of an MLX snapshot, the layer `digest` of a
+        /// GGUF blob. A repo id or library tag on its own is a mutable name and
+        /// never identity (§3.7.4; SPEC-047 §R001: a runtime-reported label is
+        /// not a catalog match). Until an adapter reports the GGUF layer digest
+        /// (slice 3), no GGUF artifact matches at all.
+        func matches(_ normalizedReference: String, runtimeSource: String, revisions: Set<String>, digest: String?) -> Bool {
+            guard verificationStatus == "verified", allowedRuntimeSources.contains(runtimeSource) else { return false }
+            if let repoID = sourceRef.repoID, let revision = sourceRef.revision {
+                return BYOMCandidateIdentity.normalizedServedModelRef(repoID) == normalizedReference
+                    && revisions.contains(revision)
+            }
+            if let tag = sourceRef.libraryTag, let expected = sourceRef.digest, let digest {
+                return BYOMCandidateIdentity.normalizedServedModelRef(tag) == normalizedReference && digest == expected
+            }
+            return false
         }
     }
 
-    /// Every served reference of this feed. Identity only — never admission.
-    func servedReferences() -> [ServedReference] {
-        var out: [ServedReference] = []
+    /// Every artifact of this feed as an identity.
+    func artifactIdentities() -> [ArtifactIdentity] {
+        var out: [ArtifactIdentity] = []
         for key in models.keys.sorted() {
-            for artifactID in models[key]!.artifacts.keys.sorted() {
-                let artifact = models[key]!.artifacts[artifactID]!
-                for reference in [artifact.sourceRef.repoID, artifact.sourceRef.libraryTag].compactMap({ $0 }) {
-                    out.append(ServedReference(
-                        reference: reference, catalogKey: key,
-                        verificationStatus: artifact.verificationStatus,
-                        allowedRuntimeSources: artifact.allowedRuntimeSources
-                    ))
-                }
+            let model = models[key]!
+            for artifactID in model.artifacts.keys.sorted() {
+                let artifact = model.artifacts[artifactID]!
+                out.append(ArtifactIdentity(
+                    catalogKey: key, artifactID: artifactID, isPrimary: artifactID == model.primaryArtifactID,
+                    runtimeFormat: artifact.runtimeFormat, hashAlgorithm: artifact.hashAlgorithm, hash: artifact.hash,
+                    verificationStatus: artifact.verificationStatus, allowedRuntimeSources: artifact.allowedRuntimeSources,
+                    sourceRef: artifact.sourceRef
+                ))
             }
         }
         return out
+    }
+}
+
+/// The ONE artifact selection every artifact consumer takes (SPEC-023 §3.7.6
+/// rule 5): a feed that was authenticated, BOUND to the candidate catalog of the
+/// same release with signer identity equality, and fresh at the time of use.
+/// Only `AutotuneStaticInputs.usableArtifactFeed` (offline consumers) and
+/// `AutotuneStaticInputs.loadArtifactFeed` (fetch-or-fallback) can make one, so
+/// no consumer can reach artifact bytes around the qualification. It carries
+/// the provenance a later trusted binding records (SPEC-047-R003): the digest
+/// of the exact selected bytes, the authenticated signer, and the release.
+struct QualifiedArtifactFeed: Sendable {
+    let feed: ArtifactFeed
+    let feedSHA256: String
+    let signerKeyID: String
+    let releaseID: String
+
+    fileprivate init(feed: ArtifactFeed, bytes: Data, signerKeyID: String) {
+        self.feed = feed
+        self.feedSHA256 = AutotuneStaticInputs.candidateCatalogSHA256(bytes: bytes)
+        self.signerKeyID = signerKeyID
+        self.releaseID = feed.releaseID
     }
 }
 
@@ -496,38 +541,57 @@ extension AutotuneStaticInputs {
         return []
     }
 
+    /// The single binding step both qualifiers share: `feed` (the decoded form
+    /// of `bytes`) bound to the candidate catalog selected for the same run.
+    /// Throws the §3.7.6 class (`integrity` / `releaseMismatch`).
+    private static func qualify(
+        feed: ArtifactFeed,
+        bytes: Data,
+        signerKeyID: String?,
+        manifestSignerKeyID: String?,
+        catalog: CandidateCatalog,
+        candidateBytes: Data,
+        candidateSignerKeyID: String?
+    ) throws -> QualifiedArtifactFeed {
+        try feed.bind(
+            to: catalog,
+            candidateBytes: candidateBytes,
+            candidateSignerKeyID: candidateSignerKeyID,
+            artifactSignerKeyID: signerKeyID,
+            manifestSignerKeyID: manifestSignerKeyID
+        )
+        // `bind` requires a non-nil artifact signer, so this cannot be empty.
+        return QualifiedArtifactFeed(feed: feed, bytes: bytes, signerKeyID: signerKeyID ?? "")
+    }
+
     /// The ONE qualified artifact selection for an offline consumer (BYOM
     /// discovery, which never fetches): the compiled-in bytes bound to the
     /// compiled-in candidate catalog with the three-way signer identity
     /// (manifest-bound artifact signer, candidate signer, artifact signer) AND
-    /// fresh at `now`. Nil for a rate-card-bound release, an unbound snapshot,
-    /// or a stale / expired snapshot — exactly the cases in which
-    /// `loadArtifactFeed` would yield no usable feed for the same bytes.
+    /// fresh at `now`. Nil for a rate-card-bound release, an undecodable or
+    /// unbound snapshot, or a stale / expired snapshot — exactly the cases in
+    /// which `loadArtifactFeed` yields no usable feed for the same bytes.
     static func usableArtifactFeed(
         bakedBytes: Data?,
         bakedSignerKeyID: String?,
         candidateBytes: Data,
         candidateSignerKeyID: String?,
         now: Date
-    ) -> ArtifactFeed? {
+    ) -> QualifiedArtifactFeed? {
         guard let bytes = bakedBytes,
               let feed = try? decodeArtifactFeed(bytes),
               let catalog = try? decodeSignedStaticCandidateCatalog(candidateBytes),
-              (try? feed.bind(
-                  to: catalog,
-                  candidateBytes: candidateBytes,
-                  candidateSignerKeyID: candidateSignerKeyID,
-                  artifactSignerKeyID: bakedSignerKeyID,
-                  manifestSignerKeyID: bakedSignerKeyID
-              )) != nil,
               artifactFeedFreshnessWarnings(generatedAt: feed.generatedAt, now: now).isEmpty
         else {
             return nil
         }
-        return feed
+        return try? qualify(
+            feed: feed, bytes: bytes, signerKeyID: bakedSignerKeyID, manifestSignerKeyID: bakedSignerKeyID,
+            catalog: catalog, candidateBytes: candidateBytes, candidateSignerKeyID: candidateSignerKeyID
+        )
     }
 
-    static func bakedUsableArtifactFeed(now: Date = Date()) -> ArtifactFeed? {
+    static func bakedUsableArtifactFeed(now: Date = Date()) -> QualifiedArtifactFeed? {
         usableArtifactFeed(
             bakedBytes: bakedArtifactFeedBytes,
             bakedSignerKeyID: bakedArtifactFeedSignerKeyID,
@@ -538,16 +602,30 @@ extension AutotuneStaticInputs {
     }
 
     /// Load the §3.7 artifact feed for the release whose candidate catalog was
-    /// just selected. `value` is the bound, usable feed, or nil whenever any
+    /// just selected. `value` is the qualified, usable feed, or nil whenever any
     /// artifact-derived capability must fail closed (§3.7.6 rule 5) — or when
     /// the release carries no artifact feed at all (rule 6, no warnings).
     func loadArtifactFeed(
         candidate: AutotuneStaticSelection<CandidateCatalog>,
         bakedArtifactFeed: Data? = AutotuneStaticInputs.bakedArtifactFeedBytes,
         bakedArtifactFeedSignerKeyID: String? = AutotuneStaticInputs.bakedArtifactFeedSignerKeyID
-    ) async -> AutotuneStaticSelection<ArtifactFeed?> {
+    ) async -> AutotuneStaticSelection<QualifiedArtifactFeed?> {
         guard let bakedBytes = bakedArtifactFeed else {
             return AutotuneStaticSelection(value: nil, selectedBytes: Data(), warnings: [], usedFallback: false, signerKeyID: nil)
+        }
+        // The shared loader force-unwraps its baked decode (for the v0.1 feeds a
+        // fail-hard on a corrupt snapshot is spec-permitted). The artifact feed
+        // must never take the v0.1 path down (rule 6), so an undecodable
+        // snapshot is the class-2 warning with no usable value — and no fetch,
+        // since the fallback the §3.5 procedure would select does not exist.
+        guard (try? Self.decodeArtifactFeed(bakedBytes)) != nil else {
+            return AutotuneStaticSelection(
+                value: nil,
+                selectedBytes: bakedBytes,
+                warnings: [.catalogArtifactFeedIntegrityFailure],
+                usedFallback: true,
+                signerKeyID: bakedArtifactFeedSignerKeyID
+            )
         }
         let selection = await loadSignedStatic(
             name: "catalog-artifacts",
@@ -564,15 +642,21 @@ extension AutotuneStaticInputs {
             // (§3.7.6 rule 5), so the fallback bytes are aged here.
             warnings.formUnion(Self.artifactFeedFreshnessWarnings(generatedAt: selection.value.generatedAt, now: now()))
         }
+        // The compiled-in bytes carry their release-manifest-bound signer; when
+        // they are what was selected, the three-way identity is enforced. A
+        // live fetch holds no authenticated manifest for a newer release, so the
+        // two authenticated signers are enforced (SPEC-023 §3.7.2 as amended).
+        let artifactSignerKeyID = selection.usedFallback ? bakedArtifactFeedSignerKeyID : selection.signerKeyID
+        var qualified: QualifiedArtifactFeed?
         do {
-            // The compiled-in bytes carry their release-manifest-bound signer;
-            // when they are what was selected, enforce the three-way identity.
-            try selection.value.bind(
-                to: candidate.value,
+            qualified = try Self.qualify(
+                feed: selection.value,
+                bytes: selection.selectedBytes,
+                signerKeyID: artifactSignerKeyID,
+                manifestSignerKeyID: selection.usedFallback ? bakedArtifactFeedSignerKeyID : nil,
+                catalog: candidate.value,
                 candidateBytes: candidate.selectedBytes,
-                candidateSignerKeyID: candidate.signerKeyID,
-                artifactSignerKeyID: selection.usedFallback ? bakedArtifactFeedSignerKeyID : selection.signerKeyID,
-                manifestSignerKeyID: selection.usedFallback ? bakedArtifactFeedSignerKeyID : nil
+                candidateSignerKeyID: candidate.signerKeyID
             )
         } catch ArtifactFeedError.integrity {
             warnings.insert(.catalogArtifactFeedIntegrityFailure)
@@ -583,11 +667,11 @@ extension AutotuneStaticInputs {
             .catalogArtifactFeedIntegrityFailure, .catalogArtifactFeedUpdateRequired, .catalogArtifactFeedStale,
         ])
         return AutotuneStaticSelection(
-            value: usable ? selection.value : nil,
+            value: usable ? qualified : nil,
             selectedBytes: selection.selectedBytes,
             warnings: warnings,
             usedFallback: selection.usedFallback,
-            signerKeyID: selection.usedFallback ? bakedArtifactFeedSignerKeyID : selection.signerKeyID
+            signerKeyID: artifactSignerKeyID
         )
     }
 }

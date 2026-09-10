@@ -463,17 +463,12 @@ struct ModelsCatalogEconomicsCommand: AsyncParsableCommand {
             ollamaOrigin: skipOllama ? nil : ollamaOrigin,
             openAICompatibleOrigin: skipOpenaiCompatible ? nil : openaiCompatibleOrigin
         )
-        // The artifact-feed selection is made ONCE, before discovery, and the
-        // matcher discovery runs with is built from that qualified selection:
-        // under integrity / update-required / stale the feed is nil and no
-        // artifact-only reference can become `catalog_matched` (SPEC-023
-        // §3.7.6 rule 5). Candidate-row identity is unaffected (rule 6).
+        // BYOM identity is resolved against the compiled-in release through the
+        // one offline qualified selection (`BYOMCatalogMatcher()`), the same
+        // authority `discover`, `evaluate`, and `offer` use; the live artifact
+        // selection loaded below governs recommendation and is reported here.
+        let discovery = await BYOMDiscoveryRunner(environment: environment).discover()
         let inputs = await AutotuneStaticInputs().loadRecommendationInputs()
-        let catalogMatcher = BYOMCatalogMatcher(
-            candidateBytes: inputs.candidate.selectedBytes,
-            artifactFeed: inputs.artifactFeed.value
-        )
-        let discovery = await BYOMDiscoveryRunner(environment: environment, catalogMatcher: catalogMatcher).discover()
         let admissions = await readAdmissionStatuses(
             discovery: discovery
         )

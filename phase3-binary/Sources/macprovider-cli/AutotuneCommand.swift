@@ -1471,7 +1471,7 @@ struct AutotuneCommand: AsyncParsableCommand {
         demand: AutotuneStaticSelection<DemandRank>,
         catalog: AutotuneStaticSelection<CandidateCatalog>,
         rateCard: AutotuneStaticSelection<RateCardProjection>,
-        artifactFeed: AutotuneStaticSelection<ArtifactFeed?>
+        artifactFeed: AutotuneStaticSelection<QualifiedArtifactFeed?>
     ) -> Set<AutotuneRecommendWarning> {
         demand.warnings.union(catalog.warnings).union(rateCard.warnings).union(artifactFeed.warnings)
     }

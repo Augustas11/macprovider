@@ -20,6 +20,7 @@ final class AutotuneArtifactFeedTests: XCTestCase {
         var candidate: [String: Any]
         var feed: [String: Any]
         var cases: [[String: Any]]
+        var caseCount: Int
     }
 
     private static func loadCorpus() throws -> Corpus {
@@ -27,7 +28,19 @@ final class AutotuneArtifactFeedTests: XCTestCase {
         return Corpus(
             candidate: object["candidate"] as! [String: Any],
             feed: object["feed"] as! [String: Any],
-            cases: object["cases"] as! [[String: Any]]
+            cases: object["cases"] as! [[String: Any]],
+            caseCount: object["case_count"] as! Int
+        )
+    }
+
+    private static let signer = "streamvc-autotune-static-v4"
+
+    /// The only way a test (like production) obtains a matcher's artifact set:
+    /// through the offline qualifier.
+    private func qualified(_ feedBytes: Data, candidateBytes: Data, now: String = "2026-07-11T00:00:00Z") -> QualifiedArtifactFeed? {
+        AutotuneStaticInputs.usableArtifactFeed(
+            bakedBytes: feedBytes, bakedSignerKeyID: Self.signer,
+            candidateBytes: candidateBytes, candidateSignerKeyID: Self.signer, now: Self.date(now)
         )
     }
 
@@ -75,6 +88,7 @@ final class AutotuneArtifactFeedTests: XCTestCase {
 
     func testSharedConformanceCorpus() throws {
         let corpus = try Self.loadCorpus()
+        XCTAssertEqual(corpus.cases.count, corpus.caseCount)
         XCTAssertGreaterThanOrEqual(corpus.cases.count, 25)
         for testCase in corpus.cases {
             let name = testCase["name"] as! String
@@ -146,7 +160,10 @@ final class AutotuneArtifactFeedTests: XCTestCase {
         XCTAssertFalse(selection.usedFallback)
         XCTAssertEqual(selection.signerKeyID, keyID)
         XCTAssertTrue(selection.warnings.isEmpty)
-        XCTAssertEqual(selection.value?.models["test-model"]?.primary.hash, String(repeating: "2", count: 64))
+        XCTAssertEqual(selection.value?.feed.models["test-model"]?.primary.hash, String(repeating: "2", count: 64))
+        XCTAssertEqual(selection.value?.signerKeyID, keyID)
+        XCTAssertEqual(selection.value?.feedSHA256, AutotuneStaticInputs.candidateCatalogSHA256(bytes: fixture.feedBytes))
+        XCTAssertEqual(selection.value?.releaseID, "test-release")
     }
 
     func testLiveFeedSignedByASecondTrustedKeyFailsIntegrity() async throws {
@@ -324,28 +341,31 @@ final class AutotuneArtifactFeedTests: XCTestCase {
         feed["candidate_catalog_sha256"] = Self.sha256Hex(candidateBytes)
         let gguf = corpus.cases.first { ($0["name"] as! String) == "declared gguf secondary is accepted" }!
         feed = try Self.applying(gguf["ops"] as! [[String: Any]], to: feed)
-        let decoded = try AutotuneStaticInputs.decodeArtifactFeed(try Self.canonical(feed))
+        let digest = "sha256:" + String(repeating: "4", count: 64)
 
         let without = BYOMCatalogMatcher(candidateBytes: candidateBytes, artifactFeed: nil)
         XCTAssertEqual(without.catalogKey(for: "mlx-community/Test-Model-4bit", runtimeSource: "mlx_cache"), "test-model")
-        XCTAssertNil(without.catalogKey(for: "test-model:q4_k_m", runtimeSource: "ollama_loopback"))
+        XCTAssertNil(without.catalogKey(for: "test-model:q4_k_m", runtimeSource: "ollama_loopback", digest: digest))
 
-        let with = BYOMCatalogMatcher(candidateBytes: candidateBytes, artifactFeed: decoded)
+        let with = BYOMCatalogMatcher(candidateBytes: candidateBytes, artifactFeed: try XCTUnwrap(qualified(try Self.canonical(feed), candidateBytes: candidateBytes)))
         XCTAssertEqual(with.catalogKey(for: "mlx-community/Test-Model-4bit", runtimeSource: "mlx_cache"), "test-model")
         // The corpus gguf secondary is only `declared`: it is identity in the
         // feed but not yet a catalog match (§3.7.4).
-        XCTAssertNil(with.catalogKey(for: "TEST-MODEL:Q4_K_M", runtimeSource: "ollama_loopback"))
-        XCTAssertNil(with.catalogKey(for: "unrelated:latest", runtimeSource: "ollama_loopback"))
+        XCTAssertNil(with.catalogKey(for: "TEST-MODEL:Q4_K_M", runtimeSource: "ollama_loopback", digest: digest))
+        XCTAssertNil(with.catalogKey(for: "unrelated:latest", runtimeSource: "ollama_loopback", digest: digest))
 
         feed = try Self.applying([
             ["op": "set", "path": ["models", "test-model", "artifacts", "gguf-q4", "verification_status"], "value": "verified"],
             ["op": "set", "path": ["models", "test-model", "artifacts", "gguf-q4", "verified_at"], "value": "2026-09-01"],
         ], to: feed)
-        let verified = BYOMCatalogMatcher(candidateBytes: candidateBytes, artifactFeed: try AutotuneStaticInputs.decodeArtifactFeed(try Self.canonical(feed)))
-        XCTAssertEqual(verified.catalogKey(for: "TEST-MODEL:Q4_K_M", runtimeSource: "ollama_loopback"), "test-model")
+        let verified = BYOMCatalogMatcher(candidateBytes: candidateBytes, artifactFeed: try XCTUnwrap(qualified(try Self.canonical(feed), candidateBytes: candidateBytes)))
+        // Content-addressed: the tag matches only together with the layer digest.
+        XCTAssertEqual(verified.catalogKey(for: "TEST-MODEL:Q4_K_M", runtimeSource: "ollama_loopback", digest: digest), "test-model")
+        XCTAssertNil(verified.catalogKey(for: "TEST-MODEL:Q4_K_M", runtimeSource: "ollama_loopback"), "a library tag alone is a mutable name")
+        XCTAssertNil(verified.catalogKey(for: "TEST-MODEL:Q4_K_M", runtimeSource: "ollama_loopback", digest: "sha256:" + String(repeating: "f", count: 64)))
         // The adapter reporting the reference must be one the artifact allows.
-        XCTAssertNil(verified.catalogKey(for: "TEST-MODEL:Q4_K_M", runtimeSource: "mlx_cache"))
-        XCTAssertNil(verified.catalogKey(for: "TEST-MODEL:Q4_K_M", runtimeSource: "lmstudio_loopback"))
+        XCTAssertNil(verified.catalogKey(for: "TEST-MODEL:Q4_K_M", runtimeSource: "mlx_cache", digest: digest))
+        XCTAssertNil(verified.catalogKey(for: "TEST-MODEL:Q4_K_M", runtimeSource: "lmstudio_loopback", digest: digest))
     }
 
     func testCatalogMatcherNeverMatchesABlockedArtifact() throws {
@@ -358,8 +378,8 @@ final class AutotuneArtifactFeedTests: XCTestCase {
         feed = try Self.applying([
             ["op": "set", "path": ["models", "test-model", "artifacts", "gguf-q4", "verification_status"], "value": "blocked"],
         ], to: feed)
-        let matcher = BYOMCatalogMatcher(candidateBytes: candidateBytes, artifactFeed: try AutotuneStaticInputs.decodeArtifactFeed(try Self.canonical(feed)))
-        XCTAssertNil(matcher.catalogKey(for: "test-model:q4_k_m", runtimeSource: "ollama_loopback"))
+        let matcher = BYOMCatalogMatcher(candidateBytes: candidateBytes, artifactFeed: try XCTUnwrap(qualified(try Self.canonical(feed), candidateBytes: candidateBytes)))
+        XCTAssertNil(matcher.catalogKey(for: "test-model:q4_k_m", runtimeSource: "ollama_loopback", digest: "sha256:" + String(repeating: "4", count: 64)))
         // The candidate-row path is unaffected by artifact status.
         XCTAssertEqual(matcher.catalogKey(for: "mlx-community/Test-Model-4bit", runtimeSource: "mlx_cache"), "test-model")
     }
@@ -398,7 +418,7 @@ final class AutotuneArtifactFeedTests: XCTestCase {
         // loader would make for those bytes offline: bound AND fresh.
         let fixture = try boundFixture()
         let signer = AutotuneStaticInputs.bakedCatalogSignerKeyID
-        func usable(now: String, signer bakedSigner: String? = signer, candidateSigner: String? = signer) -> ArtifactFeed? {
+        func usable(now: String, signer bakedSigner: String? = signer, candidateSigner: String? = signer) -> QualifiedArtifactFeed? {
             AutotuneStaticInputs.usableArtifactFeed(
                 bakedBytes: fixture.feedBytes, bakedSignerKeyID: bakedSigner,
                 candidateBytes: fixture.candidateBytes, candidateSignerKeyID: candidateSigner, now: Self.date(now)
@@ -418,14 +438,17 @@ final class AutotuneArtifactFeedTests: XCTestCase {
         XCTAssertEqual(stale.catalogKey(for: "mlx-community/Test-Model-4bit", runtimeSource: "mlx_cache"), "test-model", "candidate-row identity is rule 6")
     }
 
-    private func feedWithArtifactOnlyReference() throws -> (candidateBytes: Data, feed: ArtifactFeed) {
+    private static let secondRevision = String(repeating: "3", count: 40)
+
+    private func feedWithArtifactOnlyReference() throws -> (candidateBytes: Data, feedBytes: Data, feed: QualifiedArtifactFeed) {
         let corpus = try Self.loadCorpus()
         let candidateBytes = try Self.canonical(corpus.candidate)
         var feed = corpus.feed
         feed["candidate_catalog_sha256"] = Self.sha256Hex(candidateBytes)
         let second = corpus.cases.first { ($0["name"] as! String) == "second verified mlx artifact under another repo id" }!
         feed = try Self.applying(second["ops"] as! [[String: Any]], to: feed)
-        return (candidateBytes, try AutotuneStaticInputs.decodeArtifactFeed(try Self.canonical(feed)))
+        let feedBytes = try Self.canonical(feed)
+        return (candidateBytes, feedBytes, try XCTUnwrap(qualified(feedBytes, candidateBytes: candidateBytes)))
     }
 
     func testDiscoveryEmitsNoArtifactDerivedMatchFromAnUnusableSelection() throws {
@@ -437,9 +460,9 @@ final class AutotuneArtifactFeedTests: XCTestCase {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("byom-artifact-only-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
-        for modelID in ["mlx-community/Test-Model-8bit", "mlx-community/Test-Model-4bit"] {
+        for (modelID, revision) in [("mlx-community/Test-Model-8bit", Self.secondRevision), ("mlx-community/Test-Model-4bit", String(repeating: "1", count: 40))] {
             let directory = root.appendingPathComponent("models--" + modelID.replacingOccurrences(of: "/", with: "--"))
-                .appendingPathComponent("snapshots").appendingPathComponent(String(repeating: "a", count: 40))
+                .appendingPathComponent("snapshots").appendingPathComponent(revision)
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             try Data("{}".utf8).write(to: directory.appendingPathComponent("config.json"))
             try Data(repeating: 0, count: 16).write(to: directory.appendingPathComponent("model.safetensors"))
@@ -455,6 +478,17 @@ final class AutotuneArtifactFeedTests: XCTestCase {
         let unusable = keys(BYOMCatalogMatcher(candidateBytes: fixture.candidateBytes, artifactFeed: nil))
         XCTAssertEqual(unusable["mlx-community/Test-Model-8bit"], .some(nil))
         XCTAssertEqual(unusable["mlx-community/Test-Model-4bit"], "test-model")
+        // A snapshot at another revision than the artifact's is a different set
+        // of bytes: the repo id alone never matches (SPEC-023 §3.7.4).
+        let otherRevision = root.appendingPathComponent("models--mlx-community--Test-Model-8bit/snapshots")
+        try FileManager.default.removeItem(at: otherRevision.appendingPathComponent(Self.secondRevision))
+        let moved = otherRevision.appendingPathComponent(String(repeating: "e", count: 40))
+        try FileManager.default.createDirectory(at: moved, withIntermediateDirectories: true)
+        try Data("{}".utf8).write(to: moved.appendingPathComponent("config.json"))
+        try Data(repeating: 0, count: 16).write(to: moved.appendingPathComponent("model.safetensors"))
+        let rebased = keys(BYOMCatalogMatcher(candidateBytes: fixture.candidateBytes, artifactFeed: fixture.feed))
+        XCTAssertEqual(rebased["mlx-community/Test-Model-8bit"], .some(nil))
+        XCTAssertEqual(rebased["mlx-community/Test-Model-4bit"], "test-model")
     }
 
     func testCatalogMatcherNeverMatchesCandidateOrBlockedRows() throws {
@@ -471,10 +505,14 @@ final class AutotuneArtifactFeedTests: XCTestCase {
             candidate["rows"] = rows
             let candidateBytes = try Self.canonical(candidate)
             XCTAssertNoThrow(try AutotuneStaticInputs.decodeSignedStaticCandidateCatalog(candidateBytes), status)
-            let matcher = BYOMCatalogMatcher(candidateBytes: candidateBytes, artifactFeed: fixture.feed)
+            var rebound = corpus.feed
+            rebound["candidate_catalog_sha256"] = Self.sha256Hex(candidateBytes)
+            let second = corpus.cases.first { ($0["name"] as! String) == "second verified mlx artifact under another repo id" }!
+            rebound = try Self.applying(second["ops"] as! [[String: Any]], to: rebound)
+            let matcher = BYOMCatalogMatcher(candidateBytes: candidateBytes, artifactFeed: qualified(try Self.canonical(rebound), candidateBytes: candidateBytes))
             XCTAssertNil(matcher.catalogKey(for: "mlx-community/Test-Model-4bit", runtimeSource: "mlx_cache"), status)
             XCTAssertNil(matcher.catalogKey(for: "test-model", runtimeSource: "mlx_cache"), status)
-            XCTAssertNil(matcher.catalogKey(for: "mlx-community/Test-Model-8bit", runtimeSource: "mlx_cache"), status)
+            XCTAssertNil(matcher.catalogKey(for: "mlx-community/Test-Model-8bit", runtimeSource: "mlx_cache", revisions: [Self.secondRevision]), status)
         }
         for status in ["listed", "recommendable"] {
             var candidate = corpus.candidate
@@ -483,9 +521,16 @@ final class AutotuneArtifactFeedTests: XCTestCase {
             row["runtime_status"] = status
             rows["test-model"] = row
             candidate["rows"] = rows
-            let matcher = BYOMCatalogMatcher(candidateBytes: try Self.canonical(candidate), artifactFeed: fixture.feed)
-            XCTAssertEqual(matcher.catalogKey(for: "mlx-community/Test-Model-8bit", runtimeSource: "mlx_cache"), "test-model", status)
+            let candidateBytes = try Self.canonical(candidate)
+            var rebound = corpus.feed
+            rebound["candidate_catalog_sha256"] = Self.sha256Hex(candidateBytes)
+            let second = corpus.cases.first { ($0["name"] as! String) == "second verified mlx artifact under another repo id" }!
+            rebound = try Self.applying(second["ops"] as! [[String: Any]], to: rebound)
+            let matcher = BYOMCatalogMatcher(candidateBytes: candidateBytes, artifactFeed: try XCTUnwrap(qualified(try Self.canonical(rebound), candidateBytes: candidateBytes), status))
+            XCTAssertEqual(matcher.catalogKey(for: "mlx-community/Test-Model-8bit", runtimeSource: "mlx_cache", revisions: [Self.secondRevision]), "test-model", status)
+            XCTAssertNil(matcher.catalogKey(for: "mlx-community/Test-Model-8bit", runtimeSource: "mlx_cache"), "revision is required: \(status)")
         }
+        _ = fixture
     }
 
     func testAmbiguousServedReferenceMintsNoCatalogIdentity() throws {
@@ -511,6 +556,7 @@ final class AutotuneArtifactFeedTests: XCTestCase {
         feed = try Self.applying(second["ops"] as! [[String: Any]], to: feed)
         var otherPrimary = (second["ops"] as! [[String: Any]])[0]["value"] as! [String: Any]
         otherPrimary["quantization"] = "4bit"
+        otherPrimary["min_ram_gb"] = 4
         otherPrimary["hash"] = String(repeating: "8", count: 64)
         otherPrimary["source_ref"] = ["kind": "huggingface_revision", "repo_id": "mlx-community/Other-Model-4bit", "revision": String(repeating: "9", count: 40)]
         var otherSecondary = otherPrimary
@@ -522,15 +568,83 @@ final class AutotuneArtifactFeedTests: XCTestCase {
                 "artifacts": ["mlx-4bit": otherPrimary, "mlx-8bit": otherSecondary],
             ]],
         ], to: feed)
-        let decoded = try AutotuneStaticInputs.decodeArtifactFeed(try Self.canonical(feed))
-        XCTAssertEqual(decoded.models.count, 2)
+        let decoded = try XCTUnwrap(qualified(try Self.canonical(feed), candidateBytes: candidateBytes))
+        XCTAssertEqual(decoded.feed.models.count, 2)
         let matcher = BYOMCatalogMatcher(candidateBytes: candidateBytes, artifactFeed: decoded)
-        XCTAssertNil(matcher.catalogKey(for: "mlx-community/Test-Model-8bit", runtimeSource: "mlx_cache"), "ambiguous")
+        // Both revisions observed locally: the reference answers to two keys.
+        let both: Set<String> = [Self.secondRevision, String(repeating: "4", count: 40)]
+        XCTAssertNil(matcher.catalogKey(for: "mlx-community/Test-Model-8bit", runtimeSource: "mlx_cache", revisions: both), "ambiguous")
+        // One revision observed: the immutable half disambiguates.
+        XCTAssertEqual(matcher.catalogKey(for: "mlx-community/Test-Model-8bit", runtimeSource: "mlx_cache", revisions: [Self.secondRevision]), "test-model")
+        XCTAssertEqual(matcher.catalogKey(for: "mlx-community/Test-Model-8bit", runtimeSource: "mlx_cache", revisions: [String(repeating: "4", count: 40)]), "other-model")
         XCTAssertEqual(matcher.catalogKey(for: "mlx-community/Other-Model-4bit", runtimeSource: "mlx_cache"), "other-model")
         XCTAssertEqual(matcher.catalogKey(for: "mlx-community/Test-Model-4bit", runtimeSource: "mlx_cache"), "test-model")
         // Unambiguous in a feed where only one model carries the reference.
         let single = BYOMCatalogMatcher(candidateBytes: fixture.candidateBytes, artifactFeed: fixture.feed)
-        XCTAssertEqual(single.catalogKey(for: "mlx-community/Test-Model-8bit", runtimeSource: "mlx_cache"), "test-model")
+        XCTAssertEqual(single.catalogKey(for: "mlx-community/Test-Model-8bit", runtimeSource: "mlx_cache", revisions: [Self.secondRevision]), "test-model")
+    }
+
+    func testAmbiguousCandidateRowIdentityMintsNoCatalogIdentity() throws {
+        // Two matchable rows sharing a normalized model id (same signed bytes
+        // under two keys): the row leg refuses to pick one by dictionary order,
+        // exactly like the artifact leg.
+        let corpus = try Self.loadCorpus()
+        var candidate = corpus.candidate
+        var rows = candidate["rows"] as! [String: Any]
+        rows["test-model-alias"] = rows["test-model"]
+        candidate["rows"] = rows
+        let matcher = BYOMCatalogMatcher(candidateBytes: try Self.canonical(candidate), artifactFeed: nil)
+        XCTAssertNil(matcher.catalogKey(for: "mlx-community/Test-Model-4bit", runtimeSource: "mlx_cache"))
+        XCTAssertEqual(matcher.catalogKey(for: "test-model-alias", runtimeSource: "mlx_cache"), "test-model-alias")
+    }
+
+    func testUndecodableCompiledInSnapshotIsAnIntegrityFailureNotATrap() async throws {
+        // The shared loader force-unwraps its baked decode; the artifact feed
+        // must never take the v0.1 path down (§3.7.6 rule 6).
+        let fixture = try boundFixture()
+        let candidate = AutotuneStaticSelection(value: fixture.catalog, selectedBytes: fixture.candidateBytes, warnings: [], usedFallback: false, signerKeyID: Self.signer)
+        let inputs = AutotuneStaticInputs(
+            fetch: { _ in XCTFail("no fetch without a decodable fallback"); throw URLError(.badURL) },
+            now: { Self.date("2026-07-11T00:00:00Z") }
+        )
+        for broken in [Data("not json".utf8), Data("{\"models\":{}}".utf8), Data()] {
+            let selection = await inputs.loadArtifactFeed(candidate: candidate, bakedArtifactFeed: broken, bakedArtifactFeedSignerKeyID: Self.signer)
+            XCTAssertNil(selection.value)
+            XCTAssertEqual(selection.warnings, [.catalogArtifactFeedIntegrityFailure])
+            XCTAssertTrue(selection.usedFallback)
+            XCTAssertFalse(AutotuneRecommendEngine.paidTrustBlocks(selection.warnings))
+            XCTAssertFalse(AutotuneRecommendEngine.networkSubmissionBlocks(selection.warnings))
+        }
+        XCTAssertNil(AutotuneStaticInputs.usableArtifactFeed(
+            bakedBytes: Data("not json".utf8), bakedSignerKeyID: Self.signer,
+            candidateBytes: fixture.candidateBytes, candidateSignerKeyID: Self.signer, now: Self.date("2026-07-11T00:00:00Z")
+        ))
+    }
+
+    func testCompiledInArtifactFeedDecodesAndQualifiesWhenPresent() throws {
+        // A no-op until the activation release; from then on the gate that a
+        // bake the generator accepted is one this decoder accepts and binds.
+        guard let bytes = AutotuneStaticInputs.bakedArtifactFeedBytes else { return }
+        XCTAssertNoThrow(try AutotuneStaticInputs.decodeArtifactFeed(bytes))
+        XCTAssertNotNil(AutotuneStaticInputs.bakedArtifactFeedSignerKeyID)
+        let feed = try AutotuneStaticInputs.decodeArtifactFeed(bytes)
+        XCTAssertNotNil(AutotuneStaticInputs.bakedUsableArtifactFeed(now: feed.generatedAt.addingTimeInterval(60)))
+    }
+
+    func testGrammarsRejectATrailingLineTerminator() throws {
+        // ICU's `$` matches before a final line terminator; Go and Python do
+        // not. The decoder requires whole-string matches.
+        let fixture = try boundFixture()
+        let text = String(decoding: fixture.feedBytes, as: UTF8.self)
+        for (needle, replacement) in [
+            ("\"hash\":\"" + String(repeating: "2", count: 64) + "\"", "\"hash\":\"" + String(repeating: "2", count: 64) + "\\n\""),
+            ("\"revision\":\"" + String(repeating: "1", count: 40) + "\"", "\"revision\":\"" + String(repeating: "1", count: 40) + "\\r\""),
+            ("\"mlx-4bit\":{", "\"mlx-4bit\\n\":{"),
+        ] {
+            XCTAssertTrue(text.contains(needle), needle)
+            let mutated = Data(text.replacingOccurrences(of: needle, with: replacement).utf8)
+            XCTAssertThrowsError(try AutotuneStaticInputs.decodeArtifactFeed(mutated), needle)
+        }
     }
 
     func testDuplicateObjectKeyInRawBytesIsRejectedBeforeDeserialization() throws {
