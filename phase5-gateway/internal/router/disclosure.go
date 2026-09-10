@@ -482,7 +482,7 @@ func (s *Server) applyRelayBlindDisclosure(disclosure *tier1Disclosure) {
 func relayBlindDisclosureUnavailable() *relayBlindRequestEncryptionDisclosure {
 	return &relayBlindRequestEncryptionDisclosure{
 		Version: "spec-041-v0.1",
-		Scope:   "request_content_only_provider_can_decrypt_when_available",
+		Scope:   relayBlindScope,
 		EndpointFamilies: map[string]relayBlindEndpointDisclosure{
 			"chat_completions": {RequiredMode: "required_unavailable", PoolComposition: "none"},
 			"responses":        {RequiredMode: "unsupported", PoolComposition: "none"},
@@ -510,6 +510,7 @@ func (s *Server) tier1DisclosureForModels(body map[string]any, ctxs ...context.C
 	if len(ctxs) > 0 && ctxs[0] != nil {
 		ctx = ctxs[0]
 	}
+	s.applyRelayBlindModelsDisclosure(ctx, body, &disclosure)
 	metadata, ok := s.coordinatorRoutingMetadataFresh(ctx)
 	if !ok {
 		if bodyActive {

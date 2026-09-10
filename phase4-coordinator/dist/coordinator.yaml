@@ -82,6 +82,20 @@ relay:
   # websocket relay before dropping the in-flight request.
   max_request_buffer_bytes: 16777216
 
+# SPEC-041 relay-blind pilot. Default off; enabling requires an isolated
+# SQLite path, explicit provider Ed25519 identity pins, gateway context, and
+# settlement observe mode. Never derive pins from provider advertisements.
+relay_blind:
+  enabled: false
+  sqlite_path: ""
+  identity_public_keys: {}
+  reservation_ttl_seconds: 30
+  replay_retention_seconds: 300
+  max_clock_skew_seconds: 60
+  max_active_reservations: 10000
+  max_key_records_per_provider: 8
+  metadata_requests_per_minute: 60
+
 auth:
   # Operator bearer token for /poolz and /admin/*.
   # Resolved from /etc/macprovider/coordinator.env on Pearl; do not inline.

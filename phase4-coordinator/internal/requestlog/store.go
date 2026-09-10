@@ -102,7 +102,17 @@ type Row struct {
 	// (billing hot path / recovery / admin reconcile) reads it back
 	// via SELECT and falls back to the legacy id-ASC derivation when
 	// the persisted value is NULL.
-	AttemptN *int
+	AttemptN                        *int
+	RequestedPrivacyMode            string
+	EffectivePrivacyOutcome         string
+	RelayBlindEnvelopeDigest        string
+	RelayBlindKeyRecordDigest       string
+	RelayBlindKID                   string
+	RelayBlindProviderBindingDigest string
+	RelayBlindInputTokenUpperBound  *int64
+	RelayBlindMaxOutputTokens       *int64
+	PositiveVerificationExcluded    bool
+	RewardsExcluded                 bool
 }
 
 // OpenStoreReadOnly opens the request-log DB without running ALTER
@@ -226,6 +236,16 @@ CREATE TABLE IF NOT EXISTS request_log (
     provider_header      TEXT    NULL,
     retried              INTEGER NOT NULL DEFAULT 0,
     attempt_n            INTEGER NULL
+    ,requested_privacy_mode TEXT NOT NULL DEFAULT 'none'
+    ,effective_privacy_outcome TEXT NOT NULL DEFAULT 'plaintext'
+    ,relay_blind_envelope_digest TEXT NULL
+    ,relay_blind_key_record_digest TEXT NULL
+    ,relay_blind_kid TEXT NULL
+    ,relay_blind_provider_binding_digest TEXT NULL
+    ,relay_blind_input_token_upper_bound INTEGER NULL
+    ,relay_blind_max_output_tokens INTEGER NULL
+    ,positive_verification_excluded INTEGER NOT NULL DEFAULT 0
+    ,rewards_excluded INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_request_log_ts_utc
     ON request_log(ts_utc);
@@ -509,8 +529,18 @@ INSERT INTO request_log (
     pref_header,
     provider_header,
     retried,
-    attempt_n
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    attempt_n,
+    requested_privacy_mode,
+    effective_privacy_outcome,
+    relay_blind_envelope_digest,
+    relay_blind_key_record_digest,
+    relay_blind_kid,
+    relay_blind_provider_binding_digest,
+    relay_blind_input_token_upper_bound,
+    relay_blind_max_output_tokens,
+    positive_verification_excluded,
+    rewards_excluded
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		sqliteTimeText(row.TSUtc),
 		row.RequestID,
 		nullString(row.ExternalRequestID),
@@ -538,6 +568,16 @@ INSERT INTO request_log (
 		nullString(row.ProviderHeader),
 		row.Retried,
 		*attemptN,
+		privacyModeOrDefault(row.RequestedPrivacyMode),
+		privacyOutcomeOrDefault(row.EffectivePrivacyOutcome),
+		nullString(row.RelayBlindEnvelopeDigest),
+		nullString(row.RelayBlindKeyRecordDigest),
+		nullString(row.RelayBlindKID),
+		nullString(row.RelayBlindProviderBindingDigest),
+		nullInt64(row.RelayBlindInputTokenUpperBound),
+		nullInt64(row.RelayBlindMaxOutputTokens),
+		boolInt(row.PositiveVerificationExcluded),
+		boolInt(row.RewardsExcluded),
 	)
 	return err
 }
@@ -596,6 +636,16 @@ func (s *Store) ensureColumns(ctx context.Context) error {
 		// back to id-ASC derivation for NULL rows during the
 		// rollout window.
 		{name: "attempt_n", sql: `ALTER TABLE request_log ADD COLUMN attempt_n INTEGER NULL`},
+		{name: "requested_privacy_mode", sql: `ALTER TABLE request_log ADD COLUMN requested_privacy_mode TEXT NOT NULL DEFAULT 'none'`},
+		{name: "effective_privacy_outcome", sql: `ALTER TABLE request_log ADD COLUMN effective_privacy_outcome TEXT NOT NULL DEFAULT 'plaintext'`},
+		{name: "relay_blind_envelope_digest", sql: `ALTER TABLE request_log ADD COLUMN relay_blind_envelope_digest TEXT NULL`},
+		{name: "relay_blind_key_record_digest", sql: `ALTER TABLE request_log ADD COLUMN relay_blind_key_record_digest TEXT NULL`},
+		{name: "relay_blind_kid", sql: `ALTER TABLE request_log ADD COLUMN relay_blind_kid TEXT NULL`},
+		{name: "relay_blind_provider_binding_digest", sql: `ALTER TABLE request_log ADD COLUMN relay_blind_provider_binding_digest TEXT NULL`},
+		{name: "relay_blind_input_token_upper_bound", sql: `ALTER TABLE request_log ADD COLUMN relay_blind_input_token_upper_bound INTEGER NULL`},
+		{name: "relay_blind_max_output_tokens", sql: `ALTER TABLE request_log ADD COLUMN relay_blind_max_output_tokens INTEGER NULL`},
+		{name: "positive_verification_excluded", sql: `ALTER TABLE request_log ADD COLUMN positive_verification_excluded INTEGER NOT NULL DEFAULT 0`},
+		{name: "rewards_excluded", sql: `ALTER TABLE request_log ADD COLUMN rewards_excluded INTEGER NOT NULL DEFAULT 0`},
 	} {
 		if cols[migration.name] {
 			continue
@@ -1057,4 +1107,20 @@ func boolInt(v bool) int {
 		return 1
 	}
 	return 0
+}
+
+func privacyModeOrDefault(value string) string {
+	if value == "relay_blind_required" {
+		return value
+	}
+	return "none"
+}
+
+func privacyOutcomeOrDefault(value string) string {
+	switch value {
+	case "provider_leg_encrypted", "relay_blind_satisfied", "relay_blind_unavailable":
+		return value
+	default:
+		return "plaintext"
+	}
 }

@@ -16,6 +16,14 @@ const usageEventsTableDDL = `CREATE TABLE IF NOT EXISTS usage_events (
 	total_tokens INTEGER NOT NULL CHECK (total_tokens >= 0),
 	token_source TEXT NOT NULL CHECK (token_source IN ('provider_reported', 'gateway_estimated', 'manual_fixture', 'coordinator_observed')),
 	outcome TEXT NOT NULL,
+	requested_privacy_mode TEXT NOT NULL DEFAULT '',
+	effective_privacy_outcome TEXT NOT NULL DEFAULT '',
+	relay_blind_envelope_digest TEXT NOT NULL DEFAULT '',
+	relay_blind_key_record_digest TEXT NOT NULL DEFAULT '',
+	relay_blind_kid TEXT NOT NULL DEFAULT '',
+	relay_blind_provider_binding_digest TEXT NOT NULL DEFAULT '',
+	input_token_upper_bound INTEGER NOT NULL DEFAULT 0 CHECK (input_token_upper_bound >= 0),
+	max_output_tokens INTEGER NOT NULL DEFAULT 0 CHECK (max_output_tokens >= 0),
 	created_at TEXT NOT NULL,
 	PRIMARY KEY (account_id, request_id)
 )`
@@ -53,6 +61,14 @@ const quotaReservationsTableDDL = `CREATE TABLE IF NOT EXISTS quota_reservations
 	expires_at TEXT NOT NULL,
 	created_at TEXT NOT NULL,
 	settled_at TEXT NOT NULL DEFAULT '',
+	requested_privacy_mode TEXT NOT NULL DEFAULT '',
+	effective_privacy_outcome TEXT NOT NULL DEFAULT '',
+	relay_blind_envelope_digest TEXT NOT NULL DEFAULT '',
+	relay_blind_key_record_digest TEXT NOT NULL DEFAULT '',
+	relay_blind_kid TEXT NOT NULL DEFAULT '',
+	relay_blind_provider_binding_digest TEXT NOT NULL DEFAULT '',
+	input_token_upper_bound INTEGER NOT NULL DEFAULT 0 CHECK (input_token_upper_bound >= 0),
+	max_output_tokens INTEGER NOT NULL DEFAULT 0 CHECK (max_output_tokens >= 0),
 	PRIMARY KEY (account_id, request_id)
 )`
 
@@ -269,6 +285,14 @@ CREATE TABLE IF NOT EXISTS settlement_fallback_candidates (
 	max_total_tokens INTEGER NOT NULL CHECK (max_total_tokens > 0),
 	token_source TEXT NOT NULL CHECK (token_source IN ('provider_reported', 'gateway_estimated')),
 	outcome TEXT NOT NULL,
+	requested_privacy_mode TEXT NOT NULL DEFAULT '',
+	effective_privacy_outcome TEXT NOT NULL DEFAULT '',
+	relay_blind_envelope_digest TEXT NOT NULL DEFAULT '',
+	relay_blind_key_record_digest TEXT NOT NULL DEFAULT '',
+	relay_blind_kid TEXT NOT NULL DEFAULT '',
+	relay_blind_provider_binding_digest TEXT NOT NULL DEFAULT '',
+	input_token_upper_bound INTEGER NOT NULL DEFAULT 0 CHECK (input_token_upper_bound >= 0),
+	max_output_tokens INTEGER NOT NULL DEFAULT 0 CHECK (max_output_tokens >= 0),
 	PRIMARY KEY (account_id, request_id, reservation_created_at),
 	FOREIGN KEY (account_id, request_id) REFERENCES quota_reservations(account_id, request_id) ON DELETE CASCADE
 );

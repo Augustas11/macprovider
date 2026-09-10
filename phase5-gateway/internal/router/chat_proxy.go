@@ -213,12 +213,15 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		subject = usageSubject{AccountID: authn.Bearer.AccountID}
 	}
 	accountID = subject.AccountID
-	body, err := io.ReadAll(io.LimitReader(r.Body, s.cfg.Limits.RequestBodyBytes+1))
+	// The encoded envelope needs base64 expansion and bounded clear metadata.
+	// Plaintext retains its original body limit below.
+	readLimit := max(s.cfg.Limits.RequestBodyBytes, int64(relayBlindCiphertextMaxBytes+(16<<10)))
+	body, err := io.ReadAll(io.LimitReader(r.Body, readLimit+1))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request_error", "invalid_request_body", "Could not read request body")
 		return
 	}
-	if int64(len(body)) > s.cfg.Limits.RequestBodyBytes {
+	if int64(len(body)) > readLimit || (int64(len(body)) > s.cfg.Limits.RequestBodyBytes && !relayBlindDisabledProbeBodyRelayShaped(body)) {
 		writeError(w, http.StatusRequestEntityTooLarge, "invalid_request_error", "request_too_large", "Request body too large")
 		return
 	}
@@ -239,6 +242,10 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.rejectRelayBlindEnvelopeIfRequired(w, r, body, subject.AccountID, authn.WalletSession) {
+		return
+	}
+	if int64(len(body)) > s.cfg.Limits.RequestBodyBytes {
+		writeError(w, http.StatusRequestEntityTooLarge, "invalid_request_error", "request_too_large", "Request body too large")
 		return
 	}
 	if !s.admitChatStart(w, r, subject.AccountID) {
@@ -997,6 +1004,7 @@ func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request,
 		usage = tokenUsage{PromptTokens: promptEstimate, CachedPromptTokens: 0, CompletionTokens: 0, TotalTokens: promptEstimate}
 	} else if usageErr == nil {
 		tokenSource = "provider_reported"
+		usage = relayBlindBoundSettlementUsage(r, usage)
 	}
 	if anthropicDuplicateProviderResponse {
 		settlePrompt, settleCompletion, settleSource := promptEstimate, int64(0), "gateway_estimated"
@@ -1017,6 +1025,7 @@ func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	body = usageBodyWithTokenUsage(body, usage)
+	body = relayBlindUsageMetadataBody(r, body)
 	if adapter := responsesAdapterFromContext(r.Context()); adapter != nil && !adapter.stream {
 		if err := adapter.prepareNonStreamingResponse(body); err != nil {
 			settlePrompt, settleCompletion, settleSource := promptEstimate, int64(0), "gateway_estimated"
@@ -1428,6 +1437,10 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 					s.settleStreamingAfterCommitWithCoordinatorFinality(r, subject, promptEstimate, completion, maxUsageTokens, "gateway_estimated", "stream_malformed", reservationWindow, resp)
 					return false
 				}
+				if relayBlindExecutionFor(r) != nil {
+					data = string(relayBlindUsageMetadataBody(r, []byte(data)))
+					line = []byte("data: " + data + "\n")
+				}
 				if usage, ok, err := usageFromJSON([]byte(data), maxUsageTokens, maxTokens, true); ok {
 					if err != nil {
 						invalidReportedUsage = true
@@ -1435,6 +1448,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 						slog.Warn("invalid provider usage in stream; falling back to gateway estimate", "request_id", requestID(r), "error", err)
 						line = nil
 					} else if !invalidReportedUsage {
+						usage = relayBlindBoundSettlementUsage(r, usage)
 						reported = &usage
 						line = sseDataLineWithCachedPromptTokens(line, usage.CachedPromptTokens)
 					} else {
@@ -1878,6 +1892,7 @@ func (s *Server) recordRefundedCoordinatorAudit(w http.ResponseWriter, r *http.R
 		outcome = "upstream_error"
 	}
 	if err := s.store.EnsureUsageEvent(context.Background(), storage.UsageEvent{
+		RelayBlind:       relayBlindMetadataFor(r),
 		RequestID:        requestID(r),
 		AccountID:        subject.AccountID,
 		DemoIdentity:     subject.DemoIdentity,
@@ -2747,6 +2762,7 @@ func (s *Server) settleAfterCommit(r *http.Request, subject usageSubject, prompt
 	}
 	armed := true
 	if journalErr := s.journal.WriteEffect(journal.Record{
+		RelayBlind:       relayBlindMetadataFor(r),
 		AccountID:        journalKey.AccountID,
 		RequestID:        journalKey.RequestID,
 		Effect:           journalKey.Effect,
@@ -2802,6 +2818,7 @@ func (s *Server) settleAfterCommit(r *http.Request, subject usageSubject, prompt
 		// there for why it is the admission-time window (#187) and why
 		// it must be shared with the journal record (#763).
 		ev := storage.UsageEvent{
+			RelayBlind:       relayBlindMetadataFor(r),
 			RequestID:        requestID(r),
 			AccountID:        subject.AccountID,
 			DemoIdentity:     subject.DemoIdentity,
@@ -2971,7 +2988,8 @@ func (s *Server) deriveConversationKey(accountID, tag string) string {
 
 func (s *Server) settleRequest(r *http.Request, subject usageSubject, prompt, completion, maxTotal int64, source, outcome string) error {
 	settlement := storage.ReservationSettlement{
-		AccountID: subject.AccountID, RequestID: requestID(r), PromptTokens: prompt, CompletionTokens: completion,
+		RelayBlind: relayBlindMetadataFor(r),
+		AccountID:  subject.AccountID, RequestID: requestID(r), PromptTokens: prompt, CompletionTokens: completion,
 		MaxTotalTokens: maxTotal, TokenSource: source, Outcome: outcome, SettledAt: s.now(),
 	}
 	if subject.DemoIdentity != "" {
@@ -2981,7 +2999,8 @@ func (s *Server) settleRequest(r *http.Request, subject usageSubject, prompt, co
 	}
 	if subject.WalletSessionID != "" {
 		return s.store.FinalizeWalletSessionReservation(context.Background(), storage.WalletSessionReservationSettlement{
-			SessionID: subject.WalletSessionID, AccountID: subject.AccountID, RequestID: requestID(r),
+			RelayBlind: relayBlindMetadataFor(r),
+			SessionID:  subject.WalletSessionID, AccountID: subject.AccountID, RequestID: requestID(r),
 			PromptTokens: prompt, CompletionTokens: completion, MaxTotalTokens: maxTotal,
 			TokenSource: source, Outcome: outcome, SettledAt: s.now(),
 		})
@@ -3498,7 +3517,11 @@ func writeSSEError(w http.ResponseWriter, message, errType, code string) {
 	// flushed by the time an SSE frame is emitted (the stream started as
 	// 200), so there's no Retry-After to set here — only writeError's
 	// pre-header-flush 503/504 JSON path can attach that hint.
-	payload, _ := json.Marshal(map[string]any{"error": map[string]any{"message": message, "type": errType, "code": code, "retryable": gatewayRetryable(code)}})
+	errorBody := map[string]any{"message": message, "type": errType, "code": code, "retryable": gatewayRetryable(code)}
+	if metadata := relayBlindOutcomeMetadata(w.Header(), code); metadata != nil {
+		errorBody["macprovider"] = metadata
+	}
+	payload, _ := json.Marshal(map[string]any{"error": errorBody})
 	_, _ = w.Write([]byte("data: "))
 	_, _ = w.Write(payload)
 	_, _ = w.Write([]byte("\n\ndata: [DONE]\n\n"))

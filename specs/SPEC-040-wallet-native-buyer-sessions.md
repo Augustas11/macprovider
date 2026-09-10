@@ -1,6 +1,6 @@
 # SPEC-040 - Wallet-Native Buyer Sessions
 
-**Version:** 0.1.8
+**Version:** 0.1.9
 Status: draft
 Owner: @Augustas11
 Issue: https://github.com/Augustas11/macprovider/issues/930
@@ -10,7 +10,7 @@ Audit history: SPEC audit round 1 found blocking account-binding, replay, settle
 {
   "spec_id": "SPEC-040",
   "title": "Wallet-Native Buyer Sessions",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "path": "specs/SPEC-040-wallet-native-buyer-sessions.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -438,8 +438,17 @@ X-MacProvider-Session-Signature: <base64url ed25519 signature>
 
 The implementation MUST add deterministic test vectors containing the exact JCS signed bytes and SHA-256 digests for the registration proof and the signed inference request above, after replacing placeholder keys/signatures with generated fixture keys.
 
-## 8. Changelog and history
+## 8. SPEC-041 relay-blind pilot composition
 
+For a relay-blind request, the wallet semantic signature MUST bind the exact envelope bytes or canonical digest, route, `relay_blind_required`, provider and buyer bindings, key-record digest, `kid`, canonical model, clear caps, and issued-at time. Existing session ownership, model allowlist, per-request/total caps, expiry, revocation, replay, and dispatch fencing remain mandatory.
+
+The browser cannot assert trusted internal identity. Gateway ingress strips any buyer-supplied `X-MacProvider-Wallet-Session` or execution-authorization header, authenticates the wallet request, and overwrites the internal session value sent to the coordinator. A successful relay-blind inference performs wallet metadata replay admission exactly once within atomic inference admission; the reservation signature path and later inference path MUST NOT double-consume the same replay record. Pool selection remains rejected by SPEC-041/SPEC-042-R009 for this pilot.
+
+This amendment does not promote SPEC-040 or SPEC-041, change wallet settlement ownership, or enable production relay-blind traffic.
+
+## 9. Changelog and history
+
+- 0.1.9 - Bound wallet signatures and trusted internal session context to the SPEC-041 pilot while preserving replay/cap/revocation semantics and preventing double consumption.
 - 0.1.8 - Split active-session cap errors from budget exhaustion and aligned wallet identity conflict remediation with cross-account binding semantics.
 - 0.1.7 - Clarified rollback evidence boundaries: local implementation validates disabled and additive-migration behavior, while released-old-binary rollback rehearsal remains a release acceptance gate.
 - 0.1.6 - Recorded local implementation evidence, pending signed journey promotion, and remaining production/non-deployment gates.

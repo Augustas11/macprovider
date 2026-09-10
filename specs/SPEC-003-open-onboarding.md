@@ -1,6 +1,8 @@
 # SPEC-003 — Open Onboarding: Distribution, Lifecycle & Onboarding UX
 
-**Version:** 0.11.2 (2026-09-07, installer coordinator host override scoping)
+**Version:** 0.11.3 (2026-09-10, SPEC-041 relay-blind identity composition)
+
+**Change log v0.11.3:** A SPEC-041 pilot provider uses a dedicated Ed25519 relay-blind signing identity independently operator-pinned to authenticated provider ID/session. It is distinct from admission, receipt, SPEC-008, and X25519 keys and does not alter onboarding identity or create a public trust-distribution claim. Private custody remains outside repositories; rotation/recovery requires authenticated public-pin distribution and invalidates old reservations.
 
 **Change log v0.11.2:** Clarifies that `MACPROVIDER_COORDINATOR_HOST` is
 watchdog-only and is not an installer coordinator override. The public

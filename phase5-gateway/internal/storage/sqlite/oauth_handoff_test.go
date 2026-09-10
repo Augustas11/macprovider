@@ -225,7 +225,7 @@ func TestOAuthHandoffMigrationInvalidatesLegacyRows(t *testing.T) {
 	if err := store.db.QueryRow(`SELECT COUNT(*) FROM oauth_handoffs`).Scan(&rows); err != nil || rows != 0 {
 		t.Fatalf("legacy rows=%d err=%v", rows, err)
 	}
-	if err := store.db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil || version != 12 {
+	if err := store.db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil || version != maxKnownSchemaVersion {
 		t.Fatalf("schema version=%d err=%v", version, err)
 	}
 	if _, err := store.ConsumeOAuthHandoff(ctx, auth.StateHash("legacy"), oauthHandoffTestKey("rejected"), fixedTime()); !errors.Is(err, storage.ErrNotFound) {

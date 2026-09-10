@@ -111,6 +111,10 @@ CREATE TABLE IF NOT EXISTS ledger_request_credits (
     recovery_source TEXT NOT NULL DEFAULT 'hot_path' CHECK(recovery_source IN ('hot_path','startup_scan','nightly_reconcile')),
     created_at_utc TEXT NOT NULL,
     updated_at_utc TEXT NULL,
+    requested_privacy_mode TEXT NOT NULL DEFAULT 'none',
+    effective_privacy_outcome TEXT NOT NULL DEFAULT 'plaintext',
+    positive_verification_excluded INTEGER NOT NULL DEFAULT 0 CHECK(positive_verification_excluded IN (0,1)),
+    rewards_excluded INTEGER NOT NULL DEFAULT 0 CHECK(rewards_excluded IN (0,1)),
     UNIQUE(request_id, attempt_n, provider_id),
     CHECK(usage_source != 'null_error' OR gross_credits = 0)
 );
@@ -579,6 +583,10 @@ func (s *Store) ensureLedgerRequestCreditSettlementColumns(ctx context.Context) 
 		{"settlement_account_scope_hash", `ALTER TABLE ledger_request_credits ADD COLUMN settlement_account_scope_hash TEXT NULL`},
 		{"settlement_policy_mode", `ALTER TABLE ledger_request_credits ADD COLUMN settlement_policy_mode TEXT NOT NULL DEFAULT 'legacy'`},
 		{"settlement_policy_version", `ALTER TABLE ledger_request_credits ADD COLUMN settlement_policy_version TEXT NULL`},
+		{"requested_privacy_mode", `ALTER TABLE ledger_request_credits ADD COLUMN requested_privacy_mode TEXT NOT NULL DEFAULT 'none'`},
+		{"effective_privacy_outcome", `ALTER TABLE ledger_request_credits ADD COLUMN effective_privacy_outcome TEXT NOT NULL DEFAULT 'plaintext'`},
+		{"positive_verification_excluded", `ALTER TABLE ledger_request_credits ADD COLUMN positive_verification_excluded INTEGER NOT NULL DEFAULT 0 CHECK(positive_verification_excluded IN (0,1))`},
+		{"rewards_excluded", `ALTER TABLE ledger_request_credits ADD COLUMN rewards_excluded INTEGER NOT NULL DEFAULT 0 CHECK(rewards_excluded IN (0,1))`},
 	}
 	for _, col := range add {
 		if cols[col.name] {

@@ -125,6 +125,21 @@ type billingRecorder struct {
 	hasSettlementAttemptN   bool
 	settlementPolicyMode    string
 	settlementPolicyVersion string
+	relayBlind              *relayBlindAuditFields
+}
+
+type relayBlindAuditFields struct {
+	Outcome               string
+	EnvelopeDigest        string
+	KeyRecordDigest       string
+	KID                   string
+	ProviderBindingDigest string
+	InputTokenUpperBound  int64
+	MaxOutputTokens       int64
+}
+
+func (b *billingRecorder) setRelayBlindAudit(reservation relayBlindAuditFields) {
+	b.relayBlind = &reservation
 }
 
 // newBillingRecorder constructs the per-request recorder. Called once
@@ -293,6 +308,11 @@ func (b *billingRecorder) recordRow(
 	if s.reqLog == nil {
 		return nil
 	}
+	if b.relayBlind != nil {
+		promptTok = boundedTokenPointer(promptTok, b.relayBlind.InputTokenUpperBound)
+		completionTok = boundedTokenPointer(completionTok, b.relayBlind.MaxOutputTokens)
+		estimatedCompTokens = boundedTokenPointer(estimatedCompTokens, b.relayBlind.MaxOutputTokens)
+	}
 	attemptN := b.attemptN
 	if providerAssignedID != "" {
 		defer func() {
@@ -335,6 +355,19 @@ func (b *billingRecorder) recordRow(
 		ProviderHeader:        sanitizeRequestLogText(b.req.Header.Get("X-MacProvider-Provider")),
 		Retried:               retried,
 	}
+	if b.relayBlind != nil {
+		inputCap, outputCap := b.relayBlind.InputTokenUpperBound, b.relayBlind.MaxOutputTokens
+		row.RequestedPrivacyMode = "relay_blind_required"
+		row.EffectivePrivacyOutcome = b.relayBlind.Outcome
+		row.RelayBlindEnvelopeDigest = b.relayBlind.EnvelopeDigest
+		row.RelayBlindKeyRecordDigest = b.relayBlind.KeyRecordDigest
+		row.RelayBlindKID = b.relayBlind.KID
+		row.RelayBlindProviderBindingDigest = b.relayBlind.ProviderBindingDigest
+		row.RelayBlindInputTokenUpperBound = &inputCap
+		row.RelayBlindMaxOutputTokens = &outputCap
+		row.PositiveVerificationExcluded = true
+		row.RewardsExcluded = true
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), requestLogWriteTimeout)
 	defer cancel()
 	// FR-CAN23 observed-serving residual: stamp successful buyer relays whenever
@@ -374,32 +407,36 @@ func (b *billingRecorder) recordRow(
 		accountScope := accountScopeForSettlement(b.accountID)
 		settlementMode, settlementVersion := b.settlementPolicyForLedger()
 		billingInput := billing.HotPathInput{
-			RequestID:                  row.RequestID,
-			AttemptN:                   attemptN,
-			ProviderAssignedID:         providerAssignedID,
-			ProviderID:                 stableProviderID,
-			Model:                      row.Model,
-			Status:                     status,
-			Stream:                     row.Stream,
-			TSUtc:                      row.TSUtc,
-			PromptTokens:               promptTok,
-			PromptTokenUpperBound:      b.promptTokenUpperBound,
-			CachedPromptTokens:         cachedPromptTok,
-			CompletionTokens:           completionTok,
-			EstimatedCompTokens:        estimatedCompTokens,
-			ErrorCode:                  errCode,
-			FaultFlag:                  faultFlag,
-			StickyResult:               b.state.stickyResult,
-			StickyMissReason:           b.state.stickyMissReason,
-			ConfigSnapshotID:           billingSnapshotID,
-			RateEntry:                  billing.RateFor(billingCfg.RateCard, row.Model),
-			RateCard:                   billingCfg.RateCard,
-			MultiplierPPM:              billing.ParseMultiplierPPM(billingCfg.GlobalMultiplier),
-			ProviderShareBps:           billing.ParseShareBps(billingCfg.ProviderShare),
-			SettlementAccountScopeHash: billing.SettlementAccountScopeHash(accountScope),
-			SettlementPolicyMode:       settlementMode,
-			SettlementPolicyVersion:    settlementVersion,
-			RoutingDecisionLog:         s.logCacheBillingRoutingDecision,
+			RequestID:                    row.RequestID,
+			AttemptN:                     attemptN,
+			ProviderAssignedID:           providerAssignedID,
+			ProviderID:                   stableProviderID,
+			Model:                        row.Model,
+			Status:                       status,
+			Stream:                       row.Stream,
+			TSUtc:                        row.TSUtc,
+			PromptTokens:                 promptTok,
+			PromptTokenUpperBound:        b.promptTokenUpperBound,
+			CachedPromptTokens:           cachedPromptTok,
+			CompletionTokens:             completionTok,
+			EstimatedCompTokens:          estimatedCompTokens,
+			ErrorCode:                    errCode,
+			FaultFlag:                    faultFlag,
+			StickyResult:                 b.state.stickyResult,
+			StickyMissReason:             b.state.stickyMissReason,
+			ConfigSnapshotID:             billingSnapshotID,
+			RateEntry:                    billing.RateFor(billingCfg.RateCard, row.Model),
+			RateCard:                     billingCfg.RateCard,
+			MultiplierPPM:                billing.ParseMultiplierPPM(billingCfg.GlobalMultiplier),
+			ProviderShareBps:             billing.ParseShareBps(billingCfg.ProviderShare),
+			SettlementAccountScopeHash:   billing.SettlementAccountScopeHash(accountScope),
+			SettlementPolicyMode:         settlementMode,
+			SettlementPolicyVersion:      settlementVersion,
+			RoutingDecisionLog:           s.logCacheBillingRoutingDecision,
+			RequestedPrivacyMode:         row.RequestedPrivacyMode,
+			EffectivePrivacyOutcome:      row.EffectivePrivacyOutcome,
+			PositiveVerificationExcluded: row.PositiveVerificationExcluded,
+			RewardsExcluded:              row.RewardsExcluded,
 		}
 		var err error
 		if b.hasAuthenticatedAccount {
@@ -459,30 +496,48 @@ func (b *billingRecorder) recordRow(
 		accountScope := accountScopeForSettlement(b.accountID)
 		settlementMode, settlementVersion := b.settlementPolicyForLedger()
 		billingInput := billing.HotPathInput{
-			RequestID:                  row.RequestID,
-			AttemptN:                   attemptN,
-			ProviderAssignedID:         providerAssignedID,
-			ProviderID:                 providerID,
-			Model:                      row.Model,
-			Status:                     status,
-			Stream:                     row.Stream,
-			TSUtc:                      row.TSUtc,
-			PromptTokens:               promptTok,
-			PromptTokenUpperBound:      b.promptTokenUpperBound,
-			CachedPromptTokens:         cachedPromptTok,
-			CompletionTokens:           completionTok,
-			EstimatedCompTokens:        estimatedCompTokens,
-			ErrorCode:                  errCode,
-			FaultFlag:                  faultFlag,
-			SettlementAccountScopeHash: billing.SettlementAccountScopeHash(accountScope),
-			SettlementPolicyMode:       settlementMode,
-			SettlementPolicyVersion:    settlementVersion,
+			RequestID:                    row.RequestID,
+			AttemptN:                     attemptN,
+			ProviderAssignedID:           providerAssignedID,
+			ProviderID:                   providerID,
+			Model:                        row.Model,
+			Status:                       status,
+			Stream:                       row.Stream,
+			TSUtc:                        row.TSUtc,
+			PromptTokens:                 promptTok,
+			PromptTokenUpperBound:        b.promptTokenUpperBound,
+			CachedPromptTokens:           cachedPromptTok,
+			CompletionTokens:             completionTok,
+			EstimatedCompTokens:          estimatedCompTokens,
+			ErrorCode:                    errCode,
+			FaultFlag:                    faultFlag,
+			SettlementAccountScopeHash:   billing.SettlementAccountScopeHash(accountScope),
+			SettlementPolicyMode:         settlementMode,
+			SettlementPolicyVersion:      settlementVersion,
+			RequestedPrivacyMode:         row.RequestedPrivacyMode,
+			EffectivePrivacyOutcome:      row.EffectivePrivacyOutcome,
+			PositiveVerificationExcluded: row.PositiveVerificationExcluded,
+			RewardsExcluded:              row.RewardsExcluded,
 		}
 		if err := b.recordSettlementAttemptOutput(ctx, billingStore, billingInput, settlementOutput); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func boundedTokenPointer(value *int64, limit int64) *int64 {
+	if value == nil {
+		return nil
+	}
+	bounded := *value
+	if bounded < 0 {
+		bounded = 0
+	}
+	if bounded > limit {
+		bounded = limit
+	}
+	return &bounded
 }
 
 func (b *billingRecorder) settlementPolicyForLedger() (string, string) {

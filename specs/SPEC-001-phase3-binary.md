@@ -1,6 +1,8 @@
 # SPEC-001 — Phase 3 Binary: Mac Provider Inference CLI
 
-**Version:** 1.9.7 (2026-09-08, last-confirmed buyer-serving on indeterminate `/v1/pool/check`)
+**Version:** 1.9.8 (2026-09-10, SPEC-041 opaque body-encoding reservation)
+
+**Change log v1.9.8 (2026-09-10, SPEC-041 composition):** Reserves optional `body_encoding: relay-blind-request-v1` on `inference_request`. Its body is an opaque SPEC-041 envelope; the provider MUST cross-check marker/namespace and MUST NOT parse it as plaintext chat before authenticated decryption. Under SPEC-008 the marker and authenticated dispatch context are inside protected payloads. Relay-blind mode is WS-only to the exact assigned session with no HTTP fallback or failover. This amendment does not enable the draft feature or alter legacy frames.
 **Revision note (historical, superseded by v1.7):** v1.3.1 added the `provider_token` (yaml, top-level) /
 `MACPROVIDER_PROVIDER_TOKEN` (env) / `--provider-token` (CLI) config key
 and mandates the binary attach `Authorization: Bearer <token>` on the

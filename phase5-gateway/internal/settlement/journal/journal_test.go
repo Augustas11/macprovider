@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/augstar/macprovider-gateway/internal/storage"
 )
 
 func testJournal(t *testing.T, mutate func(*Options)) *Journal {
@@ -21,6 +23,26 @@ func testJournal(t *testing.T, mutate func(*Options)) *Journal {
 	}
 	t.Cleanup(func() { _ = j.Close() })
 	return j
+}
+
+func TestSettlementJournalRelayBlindMetadataRoundTrip(t *testing.T) {
+	j := testJournal(t, nil)
+	rec := effect("req-relay-blind")
+	rec.RelayBlind = &storage.RelayBlindMetadata{
+		RequestedPrivacyMode: "relay_blind_required", EffectivePrivacyOutcome: "relay_blind_satisfied",
+		EnvelopeDigest: "envelope", KeyRecordDigest: "key-record", KID: "kid",
+		ProviderBindingDigest: "provider-binding", InputTokenUpperBound: 8, MaxOutputTokens: 12,
+	}
+	if err := j.WriteEffect(rec); err != nil {
+		t.Fatal(err)
+	}
+	scan, err := j.Scan()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(scan.Unsealed) != 1 || scan.Unsealed[0].RelayBlind == nil || *scan.Unsealed[0].RelayBlind != *rec.RelayBlind {
+		t.Fatalf("round trip record=%+v", scan.Unsealed)
+	}
 }
 
 func effect(requestID string) Record {

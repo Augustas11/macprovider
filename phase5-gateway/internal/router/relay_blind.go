@@ -24,7 +24,7 @@ const relayBlindEnvelopeVersionV1 = "relay-blind-request-v1"
 const (
 	relayBlindIDMaxBytes          = 128
 	relayBlindOpaqueMaxBytes      = 256
-	relayBlindCiphertextMaxBytes  = 1 << 20
+	relayBlindCiphertextMaxBytes  = ((1 << 20) * 4 / 3) + 4
 	relayBlindTagMaxBytes         = 256
 	relayBlindAuditDigestHexBytes = sha256.Size * 2
 )
@@ -46,6 +46,7 @@ type relayBlindRequestEnvelope struct {
 	InputTokenUpperBound    int64  `json:"input_token_upper_bound"`
 	ReservationTokenCap     int64  `json:"reservation_token_cap"`
 	ProviderBinding         string `json:"provider_binding"`
+	BuyerBinding            string `json:"buyer_binding,omitempty"`
 	KeyRecordDigest         string `json:"key_record_digest"`
 	KID                     string `json:"kid"`
 	BuyerEphemeralPublicKey string `json:"buyer_ephemeral_public_key"`
@@ -67,6 +68,7 @@ type relayBlindRouteReservationRequest struct {
 
 func (s *Server) handleRelayBlindRouteReservations(w http.ResponseWriter, r *http.Request) {
 	setNoStoreHeaders(w.Header())
+	relayBlindHeaders(w.Header(), false)
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "invalid_request_error", "method_not_allowed", "Method not allowed")
 		return
@@ -98,7 +100,7 @@ func (s *Server) handleRelayBlindRouteReservations(w http.ResponseWriter, r *htt
 	}
 	req, err := decodeRelayBlindRouteReservation(body)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_request_error", "relay_blind_route_reservation_invalid", err.Error())
+		writeError(w, http.StatusBadRequest, "invalid_request_error", "relay_blind_route_reservation_invalid", "Invalid relay-blind route reservation")
 		return
 	}
 	if s.cfg.Features.RelayBlindRequests.Enabled && req.EncryptedRequestBytes > s.cfg.Features.RelayBlindRequests.MaxEncryptedRequestBytes {
@@ -126,14 +128,13 @@ func (s *Server) handleRelayBlindRouteReservations(w http.ResponseWriter, r *htt
 		writeError(w, http.StatusBadRequest, "invalid_request_error", "relay_blind_route_reservation_invalid", "Invalid relay-blind route reservation")
 		return
 	}
-	// SPEC-041 v0.1 gateway slice has no provider-signed relay-blind key
-	// evidence ingestion. Required mode therefore fails closed before quota
-	// reservation or coordinator dispatch.
+	// Reservation remains default-off; enabled admission requires a fresh
+	// provider/session-bound record from the authenticated coordinator.
 	if !s.cfg.Features.RelayBlindRequests.Enabled {
 		writeError(w, http.StatusServiceUnavailable, "api_error", "relay_blind_disabled", "Relay-blind request encryption is disabled")
 		return
 	}
-	writeError(w, http.StatusServiceUnavailable, "api_error", "relay_blind_required_unavailable", "Relay-blind route reservation is unavailable for this model; no reservation was created")
+	s.reserveRelayBlindRoute(w, r, authn, req)
 }
 
 func decodeRelayBlindRouteReservation(body []byte) (relayBlindRouteReservationRequest, error) {
@@ -160,7 +161,11 @@ func (s *Server) rejectRelayBlindEnvelopeIfRequired(w http.ResponseWriter, r *ht
 	if !ok && !malformed {
 		return false
 	}
-	if walletSession != nil && !s.admitRelayBlindWalletMetadata(w, r, walletSession, body) {
+	relayBlindHeaders(w.Header(), false)
+	// Enabled pilot envelopes carry the required buyer binding; legacy/rejected
+	// envelopes retain the original metadata-only wallet admission.
+	pilotCandidate := s.isRelayBlindPilotCandidate(r, body)
+	if walletSession != nil && !pilotCandidate && !s.admitRelayBlindWalletMetadata(w, r, walletSession, body) {
 		return true
 	}
 	if malformed || probe.Mode == "" {
@@ -182,7 +187,7 @@ func (s *Server) rejectRelayBlindEnvelopeIfRequired(w http.ResponseWriter, r *ht
 	enforceEncryptedSizeLimit := s.cfg.Features.RelayBlindRequests.Enabled
 	env, err := s.validateRelayBlindRequestEnvelope(body, endpointFamily, enforceEncryptedSizeLimit)
 	if err != nil {
-		s.rejectRelayBlindEnvelopePrecheck(w, r, accountID, walletSession, endpointFamily, body, http.StatusBadRequest, "relay_blind_envelope_invalid", err.Error())
+		s.rejectRelayBlindEnvelopePrecheck(w, r, accountID, walletSession, endpointFamily, body, http.StatusBadRequest, "relay_blind_envelope_invalid", "Invalid relay-blind request envelope")
 		return true
 	}
 	if walletSession != nil {
@@ -227,6 +232,10 @@ func (s *Server) rejectRelayBlindEnvelopeIfRequired(w http.ResponseWriter, r *ht
 			return true
 		}
 		writeError(w, http.StatusBadRequest, "invalid_request_error", "relay_blind_endpoint_unsupported", "Relay-blind request encryption v0.1 supports chat_completions only")
+		return true
+	}
+	if env.BuyerBinding != "" {
+		s.dispatchRelayBlindChat(w, r, body, accountID, walletSession)
 		return true
 	}
 	if err := s.recordRelayBlindRequiredAudit(r, accountID, walletSessionID, endpointFamily, env, body, "relay_blind_required_unavailable"); err != nil {
@@ -364,7 +373,7 @@ func (s *Server) handleRelayBlindEndpointDisabledBody(w http.ResponseWriter, r *
 	}
 	env, err := s.validateRelayBlindRequestEnvelope(body, endpointFamily, s.cfg.Features.RelayBlindRequests.Enabled)
 	if err != nil {
-		s.rejectRelayBlindEnvelopePrecheck(w, r, relayBlindAccountID(authn), authn.WalletSession, endpointFamily, body, http.StatusBadRequest, "relay_blind_envelope_invalid", err.Error())
+		s.rejectRelayBlindEnvelopePrecheck(w, r, relayBlindAccountID(authn), authn.WalletSession, endpointFamily, body, http.StatusBadRequest, "relay_blind_envelope_invalid", "Invalid relay-blind request envelope")
 		return
 	}
 	if authn.WalletSession != nil {
@@ -943,7 +952,8 @@ func relayBlindVisibleASCII(value string, maxBytes int) bool {
 }
 
 func relayBlindEnvelopeMetadataValid(env relayBlindRequestEnvelope) bool {
-	return relayBlindVisibleASCII(env.RequestID, relayBlindIDMaxBytes) &&
+	return (env.BuyerBinding == "" || relayBlindVisibleASCII(env.BuyerBinding, relayBlindOpaqueMaxBytes)) &&
+		relayBlindVisibleASCII(env.RequestID, relayBlindIDMaxBytes) &&
 		relayBlindVisibleASCII(env.ProviderBinding, relayBlindOpaqueMaxBytes) &&
 		relayBlindVisibleASCII(env.KeyRecordDigest, relayBlindOpaqueMaxBytes) &&
 		relayBlindVisibleASCII(env.KID, relayBlindIDMaxBytes) &&
@@ -1002,7 +1012,11 @@ func (s *Server) validateRelayBlindRequestEnvelope(body []byte, routeEndpointFam
 	if env.Algorithm != "x25519-hkdf-sha256-a256gcm-v1" {
 		return env, errors.New("Unsupported relay-blind request algorithm")
 	}
-	if enforceEncryptedSizeLimit && int64(len(env.Ciphertext)+len(env.Tag)) > s.cfg.Features.RelayBlindRequests.MaxEncryptedRequestBytes {
+	encryptedBytes := int64(len(env.Ciphertext) + len(env.Tag))
+	if env.BuyerBinding != "" {
+		encryptedBytes = relayBlindDecodedCiphertextBytes(env.Ciphertext)
+	}
+	if enforceEncryptedSizeLimit && encryptedBytes > s.cfg.Features.RelayBlindRequests.MaxEncryptedRequestBytes {
 		return env, errors.New("Relay-blind encrypted request exceeds configured size limit")
 	}
 	return env, nil

@@ -220,6 +220,7 @@ actor CoordinatorClient {
     }
 
     private var inferenceRelay: InferenceRelay?
+    private let relayBlindRuntime: RelayBlindProviderRuntime?
     private var tier2Session: Tier2ProviderSession?
     private var pendingAEADRekey: PendingAEADRekey?
     private var preparingAEADRekeyID: String?
@@ -501,6 +502,29 @@ actor CoordinatorClient {
         // we fall back to a per-instance UUID (dev/test only — production coordinators
         // will reject with close code 4002 unknown_provider_id).
         self.providerID = config.providerID ?? UUID().uuidString
+        if config.relayBlindEnabled {
+            guard let statePath = config.relayBlindStateDirectory,
+                  statePath.hasPrefix("/") else {
+                FileHandle.standardError.write(Data("FATAL relay-blind provider requires an absolute external state directory\n".utf8))
+                return nil
+            }
+            let modelScope = config.supportedModels ?? [config.modelCatalogModelID ?? config.model].compactMap { $0 }
+            do {
+                let root = URL(fileURLWithPath: statePath, isDirectory: true)
+                let keys = try RelayBlindKeyManager(
+                    directory: root,
+                    models: modelScope,
+                    maxEncryptedRequestBytes: UInt64(min(config.maxRequestBodyBytes, 1_048_576))
+                )
+                let journal = try RelayBlindExecutionJournal(directory: root.appendingPathComponent("execution-journal", isDirectory: true))
+                self.relayBlindRuntime = RelayBlindProviderRuntime(keyManager: keys, journal: journal)
+            } catch {
+                FileHandle.standardError.write(Data("FATAL relay-blind provider state failed closed\n".utf8))
+                return nil
+            }
+        } else {
+            self.relayBlindRuntime = nil
+        }
         self.endpointURL = config.endpointURL?.isEmpty == false ? config.endpointURL : nil
         self.wsTunneledMode = self.endpointURL == nil && (config.wsTunneledMode ?? true)
         self.modelRuntime = modelRuntime
@@ -1643,6 +1667,7 @@ actor CoordinatorClient {
             receiptBuilder: receiptBuilder,
             receiptProviderID: providerID,
             streamInterval: streamInterval,
+            relayBlindRuntime: relayBlindRuntime,
             demoteAutoupdateTrust: { [weak self] reason in
                 await self?.markAutoupdateTrustDemoted(reason: reason)
             },
@@ -5179,6 +5204,10 @@ actor CoordinatorClient {
         if let hardwareSummary {
             payload["hardware_summary"] = hardwareSummary
         }
+        if let relayBlindRuntime,
+           let records = try? relayBlindRuntime.advertisedRecords() {
+            payload["relay_blind_key_records"] = records.map(\.wireObject)
+        }
         var specDecodeTelemetryMatchesRuntime = true
         var specDecodeTelemetryRuntimeEligible = true
         if warmSwapEnabled {
@@ -5561,6 +5590,10 @@ actor CoordinatorClient {
             resolvedCatalog = [wireModelID]
         }
         message["supported_models"] = resolvedCatalog
+        if let relayBlindRuntime,
+           let records = try? relayBlindRuntime.advertisedRecords() {
+            message["relay_blind_key_records"] = records.map(\.wireObject)
+        }
         if publishesSupportedModels {
             message["publishes_supported_models"] = true
         }

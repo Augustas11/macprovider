@@ -1,16 +1,16 @@
 # SPEC-041 - Relay-Blind Request Encryption
 
-**Version:** 0.1.0
+**Version:** 0.2.0
 Status: draft
 Owner: @Augustas11
 Issue: https://github.com/Augustas11/macprovider/issues/928
-Audit history: Initial draft for issue #928. This SPEC is not build-ready until the code, security, architecture, adversarial-verifier, and product-design critic lanes report 0 Critical, 0 High, and 0 Medium findings.
+Audit history: v0.2.0 reconciles the default-off pilot contract before full implementation. It does not promote conformance or production deployment.
 
 ```json
 {
   "spec_id": "SPEC-041",
   "title": "Relay-Blind Request Encryption",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "path": "specs/SPEC-041-relay-blind-request-encryption.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -27,238 +27,215 @@ Audit history: Initial draft for issue #928. This SPEC is not build-ready until 
     "verdict": "DECISION_REQUIRED",
     "owner": "@Augustas11",
     "issue": "https://github.com/Augustas11/macprovider/issues/928",
-    "rationale": "Relay-blind buyer privacy is a new authority domain. The first implementation must land default-off with local tests and no conformance promotion until signed journey-result evidence exists."
+    "rationale": "The default-off global-pool pilot has local implementation and test evidence. Promotion still requires independently trusted deployment journey evidence, full readiness reconciliation, and production activation evidence; local ephemeral test signatures do not satisfy those gates. See audits/privacy-pool-v01-implementation.md."
   }
 }
 ```
 
-## 1. Purpose and scope
+## 1. Purpose, scope, and claims
 
-MacProvider currently routes buyer inference through a gateway and coordinator that can observe request content. SPEC-008 Pillar B encrypts only the coordinator-to-provider leg; it explicitly does not hide prompts from the coordinator. SPEC-041 defines a separate relay-blind request mode that lets a buyer require the gateway and coordinator to route, reserve quota, disclose status, and settle usage without seeing prompt or tool content.
+SPEC-041 defines a default-off `chat_completions` pilot in which a buyer encrypts request content for one selected provider before the request reaches the gateway or coordinator. The gateway and coordinator still see buyer authentication, model, caps, routing bindings, request identifiers, ciphertext size, status, settlement metadata, and the provider response. The provider reads the decrypted request. The required buyer-facing scope string is:
 
-In scope for v0.1:
+`request_content_hidden_from_relays; provider_reads_request; responses_visible_to_relays`
 
-- provider-advertised relay-blind encryption keys and capability status;
-- buyer request envelopes that keep only routing and billing metadata in cleartext;
-- gateway admission and typed fail-closed errors when relay-blind mode is required but unavailable;
-- coordinator forwarding of relay-blind encrypted payloads without decrypting prompt content;
-- provider-side decryption immediately before the existing OpenAI-compatible validation/runtime path;
-- receipt, status, model, and diagnostic labels that disclose whether the request was plaintext, provider-leg encrypted only, relay-blind encrypted, or rejected before dispatch;
-- local test vectors for key announcement, envelope validation, downgrade rejection, replay/freshness rejection, and default-off compatibility.
+The pilot MUST NOT be called end-to-end encryption, confidential compute, private from the provider, anonymous routing, unlinkable settlement, or proof that the provider did not retain plaintext. SPEC-008 provider-leg encryption remains a separate `coordinator_to_provider_only` property.
 
-SPEC-041 v0.1 successful relay-blind execution is scoped to `chat_completions` only. `responses` and `messages` MAY advertise `unsupported`, but MUST NOT accept required relay-blind encrypted content until a later SPEC revision defines client-side or provider-side canonical translation for those endpoint families.
+Successful v0.1 pilot execution is limited to the global pool and `chat_completions`. Required relay-blind requests for `responses` or `messages` are unsupported. Any nonempty pool selection, including a pool whose policy requires relay-blind mode, MUST be rejected before reservation, quota, or dispatch under SPEC-042-R009. This SPEC does not activate a production Trusted Pool or Privacy Pool.
 
-Out of scope for v0.1:
+The pilot does not change SPEC-005 arithmetic, the SPEC-015 v0.4 receipt tuple, SPEC-022 finality, or response visibility. It MUST NOT fabricate a plaintext request snapshot or prompt hash from ciphertext or an envelope digest.
 
-- hiding cleartext routing metadata such as canonical model id, request id, stream flag, endpoint family, capped token reservation, and capability requirement;
-- hiding request content from the selected provider process or provider operator;
-- confidential compute, hardware-private prompts, or proof that the selected provider did not log plaintext after decryption;
-- changing SPEC-005 billing arithmetic, SPEC-015 receipt tuple signatures, or SPEC-022 verified-model settlement finality;
-- encrypting provider responses to hide completions from the gateway/coordinator. That is a future bidirectional privacy mode and MUST NOT be implied by v0.1 request encryption.
+## 2. Authority and composition
 
-## 2. Authority and dependencies
+SPEC-041 owns relay-blind provider key records, buyer pins, encryption envelopes, reservations, relay-blind admission, downgrade resistance, provider decryption, privacy outcome disclosure, and relay-blind redaction.
 
-SPEC-041 owns the authority domain `relay-blind-request-encryption`: provider relay-blind key advertisement, buyer request encryption envelope, gateway/coordinator fail-closed admission, downgrade semantics, relay-blind status labels, relay-blind audit redaction, and provider-side request decryption before existing inference validation.
+- SPEC-001 owns provider authentication and inference wire framing. Relay-blind dispatch uses the existing `inference_request` outer message with the explicit body encoding in R005.
+- SPEC-002 owns provider assignment, capacity, request lifecycle, cancellation, and coordinator `request_log`. SPEC-041 adds binding and state constraints without bypassing those owners.
+- SPEC-003 owns provider identity/onboarding. The dedicated pilot signing identity is an additional operator-pinned identity, not an admission credential.
+- SPEC-005 owns ordinary accounting and delivered-output settlement. SPEC-041 supplies bounded clear inputs and an exclusion marker.
+- SPEC-006 owns public routes, errors, headers, JSON, and SSE compatibility.
+- SPEC-008 owns coordinator-to-provider encryption. Its disclosure and keys are distinct from this pilot.
+- SPEC-015 owns receipts. The v0.4 tuple is unchanged and is unavailable as positive evidence for relay-blind work.
+- SPEC-022 owns verified-model settlement. Relay-blind work cannot produce positive verified-model settlement or SPEC-022 verified-work rewards in this pilot; ordinary SPEC-005 provider payment remains in scope.
+- SPEC-040 owns wallet authentication and request signatures. Wallet signatures bind the exact relay-blind transaction.
+- SPEC-042 owns pool selection. Its current R009 requires rejection of every pool-scoped relay-blind request.
 
-SPEC-001 owns the provider wire protocol. SPEC-041 can define relay-blind key and envelope semantics, but any provider WebSocket or HTTP field that carries those records MUST remain compatible with SPEC-001 framing, authentication, and old-provider behavior.
+## 3. Canonical primitives
 
-SPEC-002 owns coordinator admission and routing. SPEC-041 extends coordinator admission with relay-blind key cache and fail-closed routing checks, but MUST NOT bypass SPEC-002 request lifecycle, provider assignment, capacity accounting, cancellation, or request-log ownership.
+All base64url values are RFC 4648 URL-safe encoding without padding. SHA-256 outputs are 32 raw bytes before encoding. Strings and byte strings use an unsigned 32-bit big-endian byte length followed by exact bytes. Unsigned integers use unsigned 64-bit big-endian encoding. Unix times use signed 64-bit big-endian seconds. Booleans use unsigned 64-bit `0` or `1` where an envelope field is specified as `u64`.
 
-SPEC-003 owns provider onboarding identity. SPEC-041 relies on provider identity for buyer-verifiable relay-blind key records; key records MUST be signed by an authenticated provider identity accepted under SPEC-003/SPEC-001, not by the gateway or coordinator alone.
-
-SPEC-005 owns billing arithmetic and settlement formulas. SPEC-041 constrains relay-blind clear-cap settlement inputs, but MUST NOT redefine SPEC-005 delivered-output settlement, over-report handling, payout math, or ledger ownership.
-
-SPEC-006 owns the buyer API error envelope and OpenAI-compatible route shape. SPEC-041 extends the buyer API with relay-blind metadata and error codes but MUST preserve existing plaintext behavior when the feature is disabled or not requested. Public buyer key discovery MUST use opaque provider bindings and MUST NOT expose stable provider IDs unless SPEC-006 is amended to allow that exposure.
-
-SPEC-008 owns Tier-2 trust evidence and provider-leg encryption. SPEC-041 MUST NOT describe SPEC-008 Pillar B as relay-blind or buyer-to-provider end-to-end encryption. A request can be relay-blind without Tier-2 provider-leg encryption, and can use Tier-2 provider-leg encryption without being relay-blind; buyer-facing disclosure MUST distinguish those states.
-
-SPEC-015 owns inference receipts. SPEC-041 v0.1 MAY add buyer/gateway status headers and gateway-side audit fields, but MUST NOT require providers to change the v0.4 receipt tuple. Any later receipt-tuple field addition requires a SPEC-015 version bump.
-
-SPEC-022 owns verified model settlement. Relay-blind requests MUST settle through existing gateway/coordinator usage paths and MUST NOT create a parallel settlement ledger. Because the relay cannot derive the current SPEC-015/SPEC-022 plaintext prompt hash, relay-blind traffic MUST NOT be promoted as positive verified-model-settlement conformant until SPEC-015/SPEC-022 define a relay-blind digest or receipt contract.
-
-SPEC-040 owns wallet-native buyer sessions. A wallet session MAY require relay-blind mode per request, but relay-blind encryption MUST NOT weaken SPEC-040 request signatures, replay checks, expiry, revocation, model allowlist, or spend caps.
-
-## 3. Terms
-
-| Term | Meaning |
-|---|---|
-| Relay | Gateway and coordinator components that route buyer requests before selected-provider execution. |
-| Relay-blind request | A request whose prompt/tool/input content is encrypted for the selected provider before it reaches the gateway/coordinator. |
-| Clear routing metadata | The minimal unencrypted fields needed to authenticate the buyer, choose a model/provider, reserve quota, enforce endpoint policy, and correlate settlement. |
-| Relay-blind key record | Provider-signed X25519 public key record with key id, expiry, algorithm, model/capability scope, provider identity binding, and deterministic digest. |
-| Provider binding | Opaque gateway/coordinator handle that selects a routable provider/key without disclosing a stable provider id to buyers. The binding is authenticated by the provider-signed key record digest and relay admission state. |
-| Request envelope | Closed JSON object submitted by the buyer containing clear metadata plus an encrypted inner OpenAI-compatible request body. |
-| Downgrade | Any path that silently sends plaintext when the buyer required relay-blind mode, or silently routes to a provider/key other than the one authenticated by the envelope. |
+Every set-like array is encoded as an unsigned 32-bit big-endian element count followed by individually u32-length-framed elements, sorted in byte-lexicographic ascending order, with no duplicates. A decoder MUST reject unsorted, duplicated, missing-count, over-count, under-count, or trailing elements; it MUST NOT normalize them.
 
 ## 4. Normative requirements
 
-### SPEC-041-R001 - Default-off posture and disclosure
+### SPEC-041-R001 - Default-off pilot and honest disclosure
 
-Relay-blind request encryption MUST be default-off unless the gateway and coordinator enable explicit relay-blind admission and at least one provider advertises a usable relay-blind key for the requested model.
+Gateway, coordinator, provider runtime, and buyer tooling MUST each default relay-blind support off. A required request succeeds only when every component is enabled, the assigned live provider/session has fresh authenticated key evidence, and all durable stores are available and fresh. Mixed versions or uncertain stores fail before quota.
 
-Existing plaintext API-key, demo, and wallet-session requests MUST behave unchanged when they do not opt in. Existing SPEC-008 provider-leg encryption disclosure MUST remain separate and MUST retain the `coordinator_to_provider_only` scope.
+`/v1/models` and status surfaces MAY expose relay-blind capability only from fresh evidence. Each endpoint family reports `required_mode` as `unsupported`, `available`, or `required_unavailable`, plus the exact scope string above and these settlement labels:
 
-`/v1/models` and buyer-safe diagnostics MUST expose a relay-blind capability object only when relay-blind config or provider evidence is active. The object MUST be endpoint-family scoped. For v0.1, `chat_completions` MAY report relay-blind availability, while `responses` and `messages` MUST report `unsupported` for required relay-blind encrypted content.
+- `verified_model_settlement: unavailable_for_relay_blind_request`
+- `usage_settlement: standard_usage_settlement_and_clear_cap_enforcement_still_apply`
 
-For each endpoint family, the disclosure object MUST separate required-mode capability from pool composition:
+Each endpoint-family object also reports `pool_composition` as `none`, `all_relay_blind_capable`, or `mixed`, and MAY report buyer-safe `capable_provider_count` and `incapable_provider_count` when derived from aggregate routing metadata. Required-mode capability remains separate from composition.
 
-- `required_mode`: `unsupported`, `available`, or `required_unavailable`;
-- `pool_composition`: `none`, `all_relay_blind_capable`, or `mixed`;
-- `capable_provider_count` and `incapable_provider_count` where buyer-safe and already derivable from aggregate routing metadata;
-- `required_unavailable` - request-time requirement could not be satisfied.
+Capability is model-scoped. A signed record that does not include the requested model cannot contribute to availability and MUST NOT be filtered or rewritten after signing. The reference CLI MUST always disclose the request-only limitations with a satisfied result, using safe metadata on stderr and response content on stdout.
 
-Product copy MUST NOT say "end-to-end encrypted," "confidential compute," "private from provider," or "provider cannot read prompts" for SPEC-041 v0.1.
+### SPEC-041-R002 - Dedicated provider identities, keys, and pins
 
-### SPEC-041-R002 - Provider key advertisement and lifecycle
+Each participating provider has a durable Ed25519 relay-blind identity signing key and a rotatable X25519 request-encryption key. The Ed25519 identity MUST be distinct from provider admission credentials, SPEC-015 receipt keys, SPEC-008 ECDH keys, and all X25519 encryption keys. The coordinator accepts its public key only when operator configuration independently pins it to the authenticated provider ID and current assigned session. Provider self-assertion, admission identity reuse, receipt-key reuse, or a relay-supplied record alone is insufficient. The fingerprint is `base64url(SHA256(raw 32-byte Ed25519 public key))`.
 
-A provider that supports relay-blind requests MUST advertise a provider-signed relay-blind key record during authenticated provider registration or heartbeat. The relay MAY distribute the record to buyers, but the relay MUST NOT be the trust anchor for buyer encryption. The signed record MUST contain:
+The immutable key-record framing encodes exactly, in order: `alg` (`x25519-hkdf-sha256-a256gcm-v1`), raw 32-byte X25519 public key, raw 32-byte relay-blind identity fingerprint, canonical model IDs array, `max_encrypted_request_bytes`, endpoint families array, and `signature_algorithm` (`ed25519`). Model scope contains 1..16 unique canonical IDs, each 1..128 printable ASCII bytes; the endpoint list is exactly one `chat_completions` element. `max_encrypted_request_bytes` is 1..1048576. Signed times are nonnegative signed-64 values with `not_before_unix < expires_at_unix`, lifetime at most 24 hours, and accepted future skew at most 60 seconds. `kid = base64url(first16(SHA256(immutable_framing)))`.
 
-- `alg: "x25519-hkdf-sha256-a256gcm-v1"`;
-- `kid`, computed as base64url(SHA256(canonical immutable key record)[0:16]);
-- raw X25519 public key encoded as canonical unpadded base64url;
-- `not_before_unix` and `expires_at_unix`;
-- supported canonical model ids;
-- maximum encrypted request bytes;
-- endpoint families, with v0.1 success limited to `chat_completions`;
-- authenticated provider identity or provider identity key fingerprint;
-- signature algorithm and provider signature over the canonical signed key record, including validity bounds.
+The signed key-record framing is the immutable framing followed exactly by `not_before_unix` and `expires_at_unix`. The provider signature is raw 64-byte Ed25519 over this signed framing. `key_record_digest = base64url(SHA256(signed_framing))`; the signature is not part of that digest. The JSON record carries the same fields, `kid`, `key_record_digest`, and canonical unpadded base64url signature. Relays and buyers MUST independently recompute every derived field and verify signature, time, scope, bounds, and exact framing.
 
-The coordinator MUST reject malformed, unsigned, signature-invalid, expired, future-skewed, duplicate-`kid`, unsupported-algorithm, weak-scope, or overbroad key records. Relay-blind keys MUST be bound to the authenticated provider identity and assigned session. A key from one provider MUST NOT be used for another provider, even when both serve the same model. Buyer-side encryption MUST verify the provider signature over the signed key record, including `not_before_unix` and `expires_at_unix`, and bind the signed key-record digest; a gateway-authorized discovery response by itself is not sufficient proof for relay blindness.
+Registration or heartbeat advertises complete signed records only on an authenticated provider session. The coordinator rejects malformed, invalid, future-skewed, expired, overbroad, substituted, duplicate, revoked, wrong-provider, wrong-session, or unsupported records. Same-`kid` renewal may only extend a validity window monotonically for byte-identical immutable framing and a new valid signature. A changed immutable field with the same `kid` is substitution and MUST be rejected.
 
-The `kid` canonical immutable key record MUST include exactly `alg`, raw public key, provider identity key fingerprint, supported canonical model ids, maximum encrypted request bytes, endpoint families, and the provider signature algorithm. It MUST exclude `not_before_unix`, `expires_at_unix`, heartbeat timestamps, availability counters, and transport metadata. The provider-signed canonical key record MUST include the immutable key record plus `not_before_unix` and `expires_at_unix`; buyers and relays MUST evaluate expiry from the signed record only. Extending a validity window for the same immutable key record therefore keeps the same `kid` but requires a fresh provider signature over the new signed key record, and is allowed only when the new signed record is monotonic, non-overlapping with revoked material, and still inside coordinator freshness bounds. Reusing a `kid` with different immutable key material MUST be rejected as key substitution.
+Revocation is authenticated, durable, and retained through at least the maximum accepted signed expiry plus replay retention. Unknown revocation freshness makes the key unavailable. Every reservation and dispatch rechecks the authenticated live provider session, operator identity pin, signed record, expiry, and revocation.
 
-Canonical key-record encoding is deterministic binary framing, not JSON serialization. The immutable key-record digest input MUST encode fields in this exact order: `alg`, raw X25519 public key bytes, provider identity key fingerprint bytes, supported canonical model ids, maximum encrypted request bytes, endpoint families, and provider signature algorithm. Strings and byte arrays MUST be length-prefixed with unsigned 32-bit big-endian lengths. Unsigned integer fields MUST be unsigned 64-bit big-endian. Supported canonical model ids and endpoint families MUST be sorted lexicographically before encoding and each element MUST be individually length-prefixed. The provider-signed canonical key record MUST use the same framing and append `not_before_unix` and `expires_at_unix` as signed 64-bit big-endian Unix seconds after the immutable record fields. Provider signatures MUST cover that canonical signed key-record byte sequence exactly.
+The buyer MUST receive a public-only pin by an authenticated operator channel outside the gateway/coordinator path and invoke the reference CLI with `--identity-pin /absolute/local/file.json`. Network URL pins, discovery-derived defaults, TOFU, and automatic old/new acceptance are forbidden. The closed pin schema is:
 
-Providers MUST rotate relay-blind keys before expiry. Gateway/coordinator caches MUST fail closed after expiry and MUST NOT route required relay-blind requests to stale keys. Providers MUST be able to revoke a relay-blind key before expiry via an authenticated SPEC-001/SPEC-003-compatible provider message to the coordinator. The coordinator MUST durably mark the `kid` revoked, MUST reject any later required relay-blind request or route reservation that references the revoked `kid`, and MUST preserve revocation state across restarts until at least the original key expiry plus replay retention. Gateway key caches MUST observe revocation no later than their configured key-cache TTL and MUST fail closed while revocation freshness is unknown.
+```json
+{
+  "version": "relay-blind-pilot-pin-v1",
+  "identity_public_key": "<base64url 32-byte Ed25519 public key>",
+  "fingerprint": "<base64url SHA-256 raw public key>",
+  "models": ["<canonical model>"],
+  "endpoint_families": ["chat_completions"],
+  "not_before_unix": 0,
+  "expires_at_unix": 0,
+  "revoked": false
+}
+```
 
-### SPEC-041-R003 - Buyer envelope and cryptographic binding
+`models` is nonempty, canonical, unique, sorted, and subject to the same 1..16 and 1..128-byte limits. `endpoint_families` is exactly `["chat_completions"]`. A reservation returns a complete signed record scoped to exactly the requested canonical model so wallet-model visibility never depends on relay-side filtering of a broader signed record. The CLI rejects missing, malformed, mismatched, out-of-window, revoked, or out-of-scope pins before encryption or network send and prints only the fingerprint and safe status. Rotation or recovery replaces the operator pin and invalidates all old reservations/envelopes. Offline buyers receive revocation/replacement out of band; the pilot makes no global instantaneous-revocation claim.
 
-A relay-blind buyer request MUST use a closed JSON request envelope. The clear envelope MUST include only:
+The CLI reads a pin through a bounded regular-file descriptor, not a pathname-following convenience API: at most 16 KiB; no symlink component; no group/world-writable file or ancestor; owner is the current uid or root; directory descriptors remain open during no-follow `openat` traversal; and the final descriptor is `fstat`-checked before exact bounded read. A sticky temporary test root is a fixture exception, not production acceptance. Production pins SHOULD live under a 0700 `~/.config/macprovider` ancestry with a 0600 or 0644 public pin. Tests cover file and parent symlinks, writable file/parent, wrong owner where privileges permit, pathname replacement after open, valid descriptor reads, and overflow.
 
-- `version: "relay-blind-request-v1"`;
-- `mode: "required"`;
-- endpoint family, which MUST be `chat_completions` for successful v0.1 relay-blind execution;
-- canonical model id;
-- provider executable model id from the route reservation;
-- stream flag;
-- buyer request id;
-- clear maximum output tokens and input-token upper bound;
-- reservation token cap;
-- opaque provider binding returned by a gateway route-reservation response;
-- signed relay-blind key-record digest;
-- selected relay-blind `kid`;
-- buyer ephemeral X25519 public key;
-- request replay nonce;
-- issued-at timestamp;
-- AEAD algorithm and ciphertext fields.
+### SPEC-041-R003 - Closed envelope and cryptographic transcript
 
-The encrypted plaintext MUST be the exact OpenAI-compatible request body the provider will validate, including prompts, tool schemas, response-format schemas, and other request content. The clear envelope MUST NOT contain `messages`, `input`, prompt text, tool schemas, response JSON schemas, attachments, raw conversation tags, API keys, wallet secrets, or provider tokens.
+The closed envelope JSON contains exactly: `version`, `mode`, `endpoint_family`, `model`, `provider_model`, `stream`, `request_id`, `max_output_tokens`, `input_token_upper_bound`, `reservation_token_cap`, `provider_binding`, `buyer_binding`, `key_record_digest`, `kid`, `buyer_ephemeral_public_key`, `request_replay_nonce`, `issued_at_unix`, `algorithm`, `ciphertext`, and `tag`. JSON decoding rejects duplicate/unknown/null fields, non-integer numeric forms, and trailing values; `stream` is a JSON boolean. `version` is `relay-blind-request-v1`; `mode` is `required`; `endpoint_family` is `chat_completions`; `algorithm` is `x25519-hkdf-sha256-a256gcm-v1`. Model, provider model, and request ID are 1..128 printable ASCII bytes; models are canonical IDs. Caps are positive integers no greater than 2^31-1, checked-add without overflow, and `reservation_token_cap == input_token_upper_bound + max_output_tokens`. `issued_at_unix` is nonnegative and inside configured skew. `provider_binding` and `buyer_binding` are random 32-byte values represented as 43-byte canonical base64url text; `buyer_binding` is reservation-local and contains no raw or stable account/session identifier. `kid` and `key_record_digest` are canonical base64url text of exactly 22 and 43 ASCII bytes. The public-key and replay-nonce fields decode to exactly 32 bytes. Ciphertext decodes to 1..1048576 bytes and AES-GCM `tag` to exactly 16 bytes.
 
-The buyer MUST derive an ephemeral X25519 key per request. The request replay nonce is clear routing metadata used only for freshness/replay state. The AEAD nonce is derived, not buyer-supplied cleartext. The transcript MUST frame the clear envelope fields excluding `ciphertext` and `tag`; it MUST include the opaque provider binding, signed key-record digest, `kid`, buyer ephemeral public key, buyer account/session binding, endpoint family, canonical model id, provider executable model id, buyer request id, stream flag, clear maximum output tokens, input-token upper bound, reservation cap, request replay nonce, and issued-at timestamp. For API-key requests, the binding is the opaque account binding returned by route reservation, not the raw API key or stable account id. For wallet-session requests, the binding is the opaque wallet-session binding or session public key returned by route reservation. The binding MUST be present whenever a route-reservation response is used. Keys and nonces MUST be derived as:
+Every base64url decoder rejects padding, whitespace, non-URL alphabet, nonzero trailing bits, and any encoding that does not round-trip byte-for-byte to the canonical unpadded form. Signing public keys, signatures, and fingerprints decode to exactly 32, 64, and 32 bytes. Strings are UTF-8 framed; list sorting is by UTF-8 bytes, with pilot identifiers restricted to ASCII as above.
+
+The canonical AAD framing encodes exactly, in this order: `version`, `mode`, `endpoint_family`, `model`, `provider_model`, `stream` as u64 0/1, `request_id`, `max_output_tokens`, `input_token_upper_bound`, `reservation_token_cap`, `provider_binding`, `buyer_binding`, canonical base64url `key_record_digest` text, canonical base64url `kid` text, raw buyer ephemeral public-key bytes, raw request replay-nonce bytes, `issued_at_unix`, and `algorithm`. Ciphertext and tag are excluded. There are no optional, implicit, map-ordered, JSON-canonicalized, pool, or trailing fields.
+
+The buyer creates a fresh X25519 ephemeral private key and replay nonce for each reservation and rejects an all-zero shared secret. Derivation is exact:
 
 ```text
-shared_secret = X25519(buyer_ephemeral_private, provider_relay_blind_public)
-transcript = SHA256("macprovider/spec041/relay-blind/transcript/v1" || framed clear envelope fields_without_ciphertext_or_tag)
+aad = exact canonical framed clear-envelope bytes above
+transcript = SHA256("macprovider/spec041/relay-blind/transcript/v1" || aad)
+shared_secret = X25519(buyer_ephemeral_private, provider_x25519_public)
 request_key = HKDF-SHA256(shared_secret, transcript, "macprovider/spec041/request/aead/v1", 32)
 aead_nonce = HKDF-SHA256(shared_secret, transcript, "macprovider/spec041/request/aead-nonce/v1", 12)
 ```
 
-The `framed clear envelope fields` in the transcript computation MUST use the same deterministic binary length-prefixed encoding required for AAD. The AEAD AAD MUST authenticate all clear envelope fields except `ciphertext` and `tag`, including the opaque provider binding, signed key-record digest, relay-blind `kid`, buyer ephemeral public key, buyer account/session binding, endpoint family, canonical model id, provider executable model id, request id, stream flag, clear maximum output tokens, input-token upper bound, reservation cap, request replay nonce, and issued-at timestamp. AAD MUST use deterministic binary length-prefixed framing, not Go map order or pretty JSON.
+HKDF uses the 32-byte X25519 shared secret as IKM, the 32-byte transcript digest as salt, and the literal ASCII info strings shown above. AAD is the framed bytes, not the transcript digest. Cross-language golden vectors include negative vectors for every framing, integer, base64url, array, size, and time ambiguity in this section.
 
-For SPEC-040 wallet sessions, the wallet-session semantic signature MUST cover the exact relay-blind request envelope bytes or their canonical digest, the requested relay-blind mode, opaque provider binding, signed key-record digest, `kid`, and issued-at timestamp. A gateway MUST reject wallet-session relay-blind requests when the wallet signature covers a different body, privacy mode, route, model, cap, or provider/key binding.
+AES-256-GCM encrypts the exact UTF-8 bytes of the closed OpenAI-compatible chat request using `aad`. The inner body includes all request content and MUST match the clear endpoint, model, provider model mapping, stream flag, output cap, input cap, reservation cap, tools, structured-output rules, and byte limit when checked at the provider. No prompt, message, tool schema, response schema, attachment, bearer, private key, or raw account/session identifier appears outside ciphertext.
 
-### SPEC-041-R004 - Gateway and coordinator fail-closed admission
+For a SPEC-040 wallet session, the semantic signature covers the exact envelope bytes or their canonical digest plus route, requested privacy mode, `provider_binding`, `buyer_binding`, `key_record_digest`, `kid`, model, caps, and `issued_at_unix`. The gateway-provided trusted internal `X-MacProvider-Wallet-Session` identifies the session to the coordinator; a browser-supplied value is never authority. Gateway ingress strips any buyer-supplied internal wallet-session or execution-authorization header and overwrites trusted internal values after authentication. Wallet success performs metadata replay admission once as part of atomic inference admission; it MUST NOT double-consume replay state while preserving SPEC-040 signature, revocation, model, and cap checks.
 
-Before constructing a relay-blind envelope, the buyer MUST obtain a gateway route-reservation response. SPEC-041 v0.1 has one buyer-facing reservation route: `POST /v1/relay-blind/route-reservations`. The route MUST be mounted even when relay-blind admission is disabled; disabled or unavailable admission MUST return a typed relay-blind error rather than an untyped 404. The route requires the same buyer authentication class as the eventual inference request, including wallet-session authentication when the eventual request uses a wallet session. The request body MUST be closed-schema and contain endpoint family, canonical model id, stream flag, requested maximum output tokens, input-token upper bound, and requested encrypted byte bound; it MUST NOT contain prompt/tool/input content.
+### SPEC-041-R004 - Reservation, consume, and durable coordinator authority
 
-The route-reservation response MUST be closed-schema and contain an opaque provider binding, opaque buyer account or wallet-session binding for transcript/AAD use, signed key-record digest, complete provider-signed key record, `kid`, endpoint family, canonical model id, provider executable model id, maximum encrypted request bytes, clear-cap limits, expiry, cache policy `no-store`, and failover policy. The route reservation MUST be short-lived, single-use, and bound to the authenticated buyer account or wallet session. Gateway key discovery MAY be used only to populate read-only disclosure and MUST NOT mint an opaque provider binding usable for inference. For required mode, cross-provider failover is disabled: if the bound provider/key cannot serve the request, the relay MUST reject and require a fresh route reservation plus fresh buyer envelope rather than replaying ciphertext to another provider.
+Public and coordinator buyer-port `POST /v1/relay-blind/route-reservations` preserve the existing closed request schema exactly: `endpoint_family`, `model`, `stream`, `max_output_tokens`, `input_token_upper_bound`, and `encrypted_request_bytes`. It rejects duplicate, unknown, null, trailing, malformed, noncanonical, overflowed, or out-of-bound fields before state creation. The route is mounted even when disabled so valid requests receive typed `relay_blind_disabled`, never an untyped 404. Every response sets `Cache-Control: no-store` and `Pragma: no-cache`. The public route uses the eventual request's normal API-key or signed wallet-session authentication. Pool selection is not a body field. Any nonempty pool-selection header or other authenticated pool intent is rejected before reservation, quota, or dispatch under SPEC-042-R009. The gateway forwards closed metadata with existing trusted gateway Authorization and trusted account/session context. The coordinator rejects non-gateway callers.
 
-When a buyer marks relay-blind mode `required`, the gateway MUST reject before quota reservation or coordinator dispatch unless:
+The successful closed response contains exactly: `version: relay-blind-reservation-v1`, `provider_binding`, `buyer_binding`, `key_record_digest`, `key_record`, `kid`, `endpoint_family`, `model`, `provider_model`, `stream`, `max_encrypted_request_bytes`, `max_output_tokens`, `input_token_upper_bound`, `reservation_token_cap`, `expires_at_unix`, `cache_policy: no-store`, and `failover_policy: disabled`. It contains no stable provider ID or assigned-session ID. Public success and error metadata MUST NOT expose `X-Provider-Id` or any equivalent stable peer identifier. TTL is at most 30 seconds and no later than signed key expiry.
 
-- relay-blind feature flags are enabled;
-- the buyer credential is valid;
-- the clear envelope is syntactically valid and closed-schema;
-- the model id is canonical and allowed for the buyer/session;
-- a routable provider matching the opaque provider binding has the signed, bound, non-expired key record and `kid`;
-- reservation caps are within account/session limits;
-- request id, request replay nonce, buyer ephemeral public key, timestamp, and envelope digest have not been replayed inside the configured retention window;
-- relay-blind metadata admission and replay storage are inside configured per-account/session rate, row, and byte ceilings.
+Reservation binds immutably to the authenticated account/session, live provider ID and assigned session, signed record digest and `kid`, canonical and provider models, endpoint, stream, all caps, byte bound, and explicit empty pool selection. Key discovery does not reserve capacity or quota. Existing provider capacity is acquired only at dispatch.
 
-The gateway and coordinator MUST NOT decrypt relay-blind ciphertext. They may validate envelope shape, clear metadata syntax and byte bounds, provider signature validity, key availability, provider binding, endpoint family, provider executable model id, clear maximum output tokens, input-token upper bound, reservation cap, metadata admission capacity, and replay state. A required relay-blind request MUST never fall back to plaintext, an unbound key, an expired key, a substituted provider binding, rewritten model id, cross-provider failover target, or a provider not authenticated by the envelope. Public buyer diagnostics MUST identify the opaque binding and key state without exposing stable provider IDs unless SPEC-006 explicitly permits that exposure.
+Before quota or dispatch, the gateway calls internal `POST /v1/relay-blind/consume` with the exact envelope and same trusted account/session context. The closed success response contains exactly `version: relay-blind-consume-v1`, `provider_binding`, `buyer_binding`, `envelope_digest`, `execution_authorization`, `consumed_at_unix`, and `expires_at_unix`. Consumption cannot dispatch. The authorization is opaque outside the coordinator and stored only as a hash in durable state. Buyer-supplied execution authorization is stripped; trusted authorization is carried only on the internal dispatch hop and stripped before any provider runtime/upstream request header set.
 
-SPEC-041 v0.1 does not define opportunistic plaintext fallback. A relay-blind envelope MUST never be converted into plaintext by the gateway or coordinator. Any request body that uses the `relay-blind-request-*` version namespace is relay-shaped even when the exact version is unsupported, and MUST be rejected with a typed relay-blind error before route-specific plaintext parsing. A buyer that wants plaintext fallback must submit a separate plaintext OpenAI-compatible request after receiving a typed relay-blind rejection; that separate request is governed by existing plaintext semantics and MUST NOT be described as relay-blind.
+Recovery uses authenticated internal `POST /v1/relay-blind/status` with exactly `provider_binding_digest` and `envelope_digest`, each canonical base64url SHA-256. The closed response contains `version: relay-blind-status-v1`, `state`, `internal_request_id`, `validated`, nullable `input_tokens`, nullable `completion_tokens`, `effective_privacy_outcome`, and `retry_action: do_not_resubmit`. Input is present exactly when authenticated usage is known; completion is present only for `terminal`. This endpoint never dispatches. It atomically fences expired `reserved` or `consumed_predispatch` rows to `rejected` before reporting them; fresh rows remain held to avoid a concurrent dispatch/refund race. `unknown_postdispatch` is irreversible and settles known input and locally recorded delivered output only. Usage knowledge and satisfied privacy are independent facts.
 
-### SPEC-041-R005 - Provider decryption and validation boundary
+Coordinator SQLite metadata is durable and bounded: key records keyed `(provider_id,kid)`; revocations keyed `(provider_id,kid)` with the R002 retention deadline; and reservations keyed random `provider_binding`, with unique `buyer_binding`, account/session, provider/assigned session, record digest/`kid`, models, stream, caps, byte bound, expiry, state, envelope digest, execution-authorization hash, and created/consumed/dispatched/terminal timestamps.
 
-The selected provider MUST decrypt the relay-blind request immediately before invoking its existing request validation/runtime path. The decrypted body MUST be parsed by the same validation rules as a plaintext OpenAI-compatible chat-completions request. Decryption success MUST NOT bypass max-body, model, stream, tool, structured-output, prefix-cache, or token-limit validation. The decrypted request MUST match the clear endpoint family, canonical model id, provider executable model id, stream flag, maximum output tokens, and reservation/input upper bounds; mismatches MUST fail before inference and billing.
+The atomic state machine is `available -> consumed -> dispatched -> terminal`. Only an exact authenticated envelope may conditionally change `available` to `consumed`; the transition happens before quota or dispatch. Quota failure, disabled/unavailable outcome, expiry, denial, and applicable terminal rejection burn the reservation/envelope and never restore `available`. The coordinator arms dispatch exactly once after revalidation and capacity/quota admission. Duplicate, uncertain, or recovered dispatched work MUST NOT dispatch again. Indexed expiry, row/byte/rate ceilings, and bounded sanitized audits prevent rejection-state amplification. Persistent store error or unknown freshness disables availability.
 
-Provider decryption failure, unsupported envelope version, key mismatch, stale `kid`, malformed AAD, bad ciphertext/tag, or decrypted-body validation failure MUST return a typed provider error without logging plaintext or ciphertext beyond bounded digests. Providers MUST classify envelope-material failures as `relay_blind_ciphertext_invalid` when the failure is attributable to client/envelope material, including AEAD tag authentication failure, `kid` not found or mismatched, unrecognized envelope version, envelope field inconsistency, bad AAD, or decrypted body mismatch with clear caps. Providers MUST classify `relay_blind_decrypt_failed` only when the failure is attributable to a transient provider-internal decryption-service error and the same envelope would be expected to succeed on a fresh provider instance. Provider and coordinator retry/idempotency state MUST be keyed by account/session binding when present, opaque provider binding, `kid`, buyer request id, and envelope digest. SPEC-041 v0.1 route reservations and relay-blind envelopes are single-use: any replay detected before dispatch MUST return `relay_blind_replay` without inference or quota reservation, including byte-identical replays. Replay detection for previously seen envelope material MUST take precedence over retryable relay-blind metadata rate or replay-capacity limit classification; a duplicate MUST NOT be masked as `relay_blind_metadata_rate_limited`. Post-dispatch network retries MUST use existing internal request recovery and MUST NOT re-submit the encrypted envelope as a new inference. Pre-dispatch failures MUST not create billable usage. Post-dispatch failures MUST settle according to existing SPEC-005 rules for delivered output only, but MUST NOT claim SPEC-022 positive verified-model-settlement conformance until SPEC-015/SPEC-022 add relay-blind digest support.
+Gateway replay state remains durable across restart and configuration cycling and is checked before rate/capacity classification. Applicable single-use material is durably recorded before disabled/unavailable rejection, so a later configuration change cannot revive it. Coordinator consumption and dispatch state independently prevent duplicate dispatch. There is no network retry of consume or dispatch; uncertainty fails closed.
 
-The replay-state store MUST be durable across gateway/coordinator restarts and MUST remain effective for at least the configured replay-retention window after each recorded entry's creation time. Disabling and re-enabling relay-blind configuration MUST NOT clear replay-state entries whose retention window has not elapsed.
+The acceptance state names are fixed. Coordinator owns `reserved -> consumed_predispatch -> dispatched -> terminal`, with `rejected` and `unknown_postdispatch` terminal fences. Provider owns `claimed -> validated -> terminal`; a restarted `claimed` or `validated` entry becomes `unknown_postdispatch` and never reexecutes. Gateway owns `quota_held` followed by the existing settled/refunded/pending journal states. Reservation or `consumed_predispatch` alone never permits billing. Cancel, timeout, key/session staleness, or component restart before dispatch burns material, refunds held quota, and returns `new_reservation_and_envelope` when otherwise retryable. After dispatch, cancel, timeout, disconnect, restart uncertainty, or terminal-evidence loss becomes `unknown_postdispatch`, never resubmits, and bills only known usage/delivered output through existing recovery with `do_not_resubmit`. Provider terminal-evidence loss preserves the durable terminal claim while coordinator/gateway reconcile accounting. Tests cover every transition/crash cut and duplicate settlement delivery.
 
-### SPEC-041-R006 - Settlement, receipts, and accounting
+### SPEC-041-R005 - Opaque provider wire, decryption, and execution claim
 
-Relay-blind requests MUST use existing account/session quota reservation, gateway `usage_events`, coordinator `request_log`, settlement journal, and receipt-finality paths. The clear reservation cap is an upper bound only. Until SPEC-015/SPEC-022 define relay-blind receipt support, billable input tokens MUST be the lesser of provider-reported input tokens and the buyer-declared clear input-token upper bound, and billable output tokens MUST remain bounded by the clear maximum output tokens and existing delivered-output rules. Provider-reported usage above those clear caps MUST be rejected or clamped before settlement according to the existing over-report policy, and MUST emit relay-blind audit metadata.
+Relay-blind work uses the SPEC-001 `inference_request` outer message and its existing SPEC-008 wrapping when enabled. It adds `body_encoding: relay-blind-request-v1`, authenticated inside the SPEC-008 payload; a non-SPEC-008 frame carries the same marker. The body is the exact relay-blind envelope JSON, not synthetic chat JSON. Provider and coordinator cross-check marker and namespace. Unknown/mismatched encoding is rejected without plaintext parsing.
 
-Until SPEC-015/SPEC-022 define a relay-blind request digest and receipt/snapshot tuple, relay-blind traffic MUST be excluded only from positive verified-model-settlement claims, not from ordinary usage settlement. For the v0.1 admission-only slice where no successful relay-blind inference is possible, the required buyer-facing settlement metadata surface is `/v1/models` under `tier1_disclosure.relay_blind_request_encryption.settlement`, with `verified_model_settlement: "unavailable_for_relay_blind_request"` and `usage_settlement: "standard_usage_settlement_and_clear_cap_enforcement_still_apply"`. A later implementation that enables successful relay-blind inference MUST emit the same two values on the per-request buyer surface that carries usage or receipt metadata: non-streaming responses MUST use `usage.macprovider.settlement`, streaming responses MUST include it in the final usage/terminal metadata event if such event is enabled, and receipt-finality surfaces MUST carry equivalent fields only after SPEC-015 defines the relay-blind digest tuple. The gateway MUST NOT reuse plaintext prompt-hash evidence to imply relay-blind verified settlement.
+`provider_model` binds the advertised canonical provider wire selector. The provider resolves that selector through its configured catalog alias to the executable model and pins the same runtime handle for tokenization and generation, preventing model replacement between validation and inference. This pilot does not attest an executable artifact or weight hash and makes no SPEC-022 verified-model claim.
 
-The gateway MUST record requested privacy mode separately from effective privacy outcome. Requested mode values are `none` or `relay_blind_required`. Effective outcome values are `plaintext`, `provider_leg_encrypted`, `relay_blind_satisfied`, or `relay_blind_unavailable`. Gateway and coordinator logs MUST contain only request ids, account/session ids, model ids, opaque provider bindings or provider ids where already internal, key ids, envelope/ciphertext SHA-256 digests, status, and reason codes. Raw prompts, tool schemas, decrypted bodies, ciphertext bodies, buyer ephemeral private keys, provider private keys, and API/session bearer secrets MUST NOT be logged.
+Coordinator dispatch is typed opaque, WebSocket-only, and bound to the exact assigned session. It MUST NOT parse ciphertext as chat, rewrite it, use HTTP fallback, fail over, or move it to another provider. Every boundary independently recomputes the envelope digest.
 
-### SPEC-041-R007 - Error contract and downgrade resistance
+The coordinator opaque branch occurs before ordinary chat-body validation. Streaming and WebSocket nonstream callbacks bypass plaintext dispatch-body conversion and plaintext route-snapshot recording. Failover has an explicit pinned/no-retry branch and HTTP transport rejects relay-blind mode. Enforce-mode is rechecked at reservation, consume, and immediately before dispatch. Tests assert zero plaintext-hash snapshots, receipt-settlement metadata, failover-candidate advancement, or next-provider calls for queue-full, NAK, timeout, cancel, and disconnect paths.
 
-SPEC-041 adds these SPEC-006-compatible error codes:
+Before decryption or runtime entry, the provider durably claims execution identity derived from binary-framed `buyer_binding`, `provider_binding`, `kid`, `request_id`, and envelope digest. The journal lives under an operator-configured state directory outside the repository; directory mode is 0700 and files are 0600. Filename is SHA256 of those framed fields. Claim uses exclusive create followed by file fsync and directory fsync. Terminal update uses atomic rename followed by file and directory fsync. Entries contain only digest, state, times, and caps, never request body, ciphertext, or keys. They are retained through replay retention plus active execution.
 
-| Code | HTTP | Retryable | Meaning |
-|---|---:|---|---|
-| `relay_blind_disabled` | 503 | no | Relay-blind request encryption is operator-disabled. |
-| `relay_blind_required_unavailable` | 503 | no | No currently routable provider satisfies the required relay-blind mode for the requested model; the same route reservation/envelope MUST NOT be retried. |
-| `relay_blind_key_expired` | 503 | yes | The selected relay-blind key is expired or outside its validity window. |
-| `relay_blind_envelope_invalid` | 400 | no | The clear envelope is malformed, not closed-schema, exceeds bounds, or is inconsistent with the request route. |
-| `relay_blind_route_reservation_invalid` | 400 | no | The route-reservation metadata is malformed, not closed-schema, exceeds bounds, or is inconsistent before any encrypted envelope exists. |
-| `relay_blind_endpoint_unsupported` | 400 | no | The request is well-formed, but the requested endpoint family does not support relay-blind request encryption in this version. |
-| `relay_blind_replay` | 409 | no | Request id, nonce, or envelope digest was already seen in the replay retention window; resubmission is not permitted regardless of whether the material is byte-identical or different. |
-| `relay_blind_metadata_rate_limited` | 429 | yes | Relay-blind metadata admission or replay-state capacity is temporarily saturated before quota reservation or dispatch. |
-| `relay_blind_downgrade_rejected` | 400 | no | The request attempted fallback, plaintext dispatch, any mode value other than `required`, or provider/key substitution while relay-blind was required. |
-| `relay_blind_decrypt_failed` | 502 | yes | The provider reported an internal relay-blind decrypt service failure before inference commit. |
-| `relay_blind_ciphertext_invalid` | 400 | no | The provider could not authenticate the envelope because AAD, ciphertext, tag, key, or envelope material was client-invalid or inconsistent. |
-| `relay_blind_committed_failed` | 500 | no | The provider reported relay-blind failure after inference commit; settlement follows delivered-output rules and buyers MUST NOT retry automatically. |
-| `relay_blind_provider_unsupported` | 503 | yes | The selected provider does not support relay-blind requests for the model/endpoint. |
+Journal error, capacity exhaustion, or uncertain recovery fails closed. A claimed or uncertain entry after restart always rejects duplicate execution. Crash before claim may be retried only through the same coordinator recovery decision without creating new envelope material; crash after claim, after decrypt, after first token, or during terminal persistence MUST NOT execute again.
 
-Errors MUST use the existing OpenAI-compatible error envelope and retry metadata. For relay-blind 503 codes that are explicitly `retryable: true`, the buyer may attempt a fresh relay-blind transaction after obtaining a new route reservation and constructing a new envelope with a fresh ephemeral key, request id or idempotency material as required by the buyer contract, replay nonce, and ciphertext. `relay_blind_required_unavailable` is intentionally non-retryable for the same request because the v0.1 admission-only slice cannot make progress by replaying a single-use route reservation/envelope; any later attempt MUST start from fresh reservation and envelope material. Buyers MUST NOT replay the same route reservation or encrypted envelope after any relay-blind 503, because the original reservation/envelope is single-use and may subsequently return `relay_blind_replay`. For relay-blind errors, the explicit `retryable` field and this retry action MUST take precedence over generic HTTP-status retry heuristics. Required-mode rejection MUST happen before buyer-visible provider output. Required-mode rejections and downgrade rejections MUST be audited with bounded metadata only.
+After a successful claim, the provider authenticates/decrypts and applies the existing chat validation path. It cross-checks all clear fields, byte bounds, inner schema, model, stream, requested output, actual tokenized input against `input_token_upper_bound`, reservation cap, tools, and structured output before inference. Client/envelope faults use `relay_blind_ciphertext_invalid`; a transient provider-internal decryption subsystem fault uses `relay_blind_decrypt_failed`. Errors and logs contain bounded digests and codes only.
 
-### SPEC-041-R008 - Configuration, compatibility, and evidence gate
+Only the provider may produce `relay_blind_validation`. A `validated` fact is permitted only after decryption, schema checks, and actual token-cap validation but before generation. The object binds `execution_auth_digest`, `envelope_digest`, `kid`, `provider_binding_digest`, `buyer_binding_digest`, `assigned_session`, `request_id`, `state: validated`, `input_tokens`, `input_token_upper_bound`, and `max_output_tokens`. Terminal evidence repeats the same context with terminal state and final usage. The coordinator sends `execution_auth_digest` and `assigned_session` as authenticated opaque dispatch context, inside SPEC-008 protection when active; the provider independently recomputes envelope and binding digests. The coordinator accepts evidence only from the exact live authenticated WebSocket session and only when every field matches its durable dispatch row. Delayed prior-session, misassociated, duplicate-contradictory, or relay-generated evidence cannot mark satisfied or settle provider-reported usage. Under SPEC-008 the evidence is inside the protected response payload; otherwise authenticated WebSocket transport is mandatory. Validated and terminal facts are persisted before success disclosure. Missing or uncertain evidence remains unavailable.
 
-Relay-blind configuration MUST be default-off. Startup validation MUST reject enabled configs with missing replay-retention bounds, impossible timestamp skew, unsupported algorithms, weak key-cache TTLs, or response disclosure settings that would claim relay-blind support when no provider key evidence is active. Disabled relay-blind configuration fields MUST NOT reject startup unless they can affect plaintext behavior. Runtime handling of relay-shaped disabled-mode requests MUST still enforce positive default freshness and replay-retention bounds so disabling and later re-enabling relay-blind admission cannot turn a previously rejected single-use envelope into fresh material.
+Before generation, the provider may instead send bound `state: rejected` evidence with `input_tokens: 0` and `error_code` equal to `relay_blind_ciphertext_invalid` or `relay_blind_decrypt_failed`. It binds the same execution, session, envelope, key, buyer, provider, and cap fields; terminal rejection repeats that context. This evidence proves rejection without inference, never satisfied privacy or billable input, and permits existing quota refund after durable rejection. The provider claim remains burned across restart. Missing or contradictory rejection evidence remains held for reconciliation.
 
-The first implementation MUST be additive and reversible: disabling relay-blind mode must leave plaintext API-key traffic, wallet-session traffic, demo traffic, `/v1/models`, settlement, receipts, and Tier-2 provider-leg encryption unchanged.
+### SPEC-041-R006 - Accounting, receipts, rewards, and disclosure
 
-Rollout MUST be staged so mixed binaries fail safely:
+Relay-blind work uses existing quota, SPEC-005 settlement, gateway `usage_events`/journal, and coordinator `request_log`; there is no parallel ledger. Existing records gain bounded additive facts: `requested_privacy_mode`, `effective_privacy_outcome`, `relay_blind_envelope_digest`, `relay_blind_key_record_digest`, `relay_blind_kid`, `relay_blind_provider_binding_digest`, durable clear caps, and an explicit positive-receipt/reward exclusion. Existing default values mean plaintext. Recovery preserves the same caps/outcome and at most one settlement.
 
-1. Old providers/coordinators/gateways MUST ignore or reject unknown relay-blind fields without changing plaintext behavior.
-2. Coordinator key ingestion MAY land before buyer admission, but required relay-blind buyer traffic MUST still fail closed until gateway, coordinator, and provider support are all enabled.
-3. Gateway `/v1/models` disclosure MAY expose `unsupported`/`available`/`mixed` only from fresh provider-signed key evidence; stale cache or coordinator uncertainty MUST report unsupported or fail closed.
-4. Provider decryption support MUST land before required-mode success is enabled for that provider binding.
-5. Rollback by disabling relay-blind config at any component MUST reject required relay-blind requests before quota reservation and MUST NOT affect plaintext or SPEC-008 provider-leg encrypted traffic.
+The pilot may operate only while the effective SPEC-022 settlement mode is `observe`. `enforce` MUST reject relay-blind reservation/admission before quota with no exemption or global weakening. Relay-blind work is excluded from positive SPEC-015 receipt claims, SPEC-022 mirrored/verified status, SPEC-022 verified-work rewards, and every positive verified-work aggregate. Ordinary SPEC-005 usage settlement, provider earnings, payment, and payout-readiness accounting continue under their existing rules. No SPEC-015 v0.4 receipt metadata is attached.
 
-Promotion out of draft requires:
+Billable input is `min(provider_reported_input_tokens, input_token_upper_bound)`; unknown input defaults to zero and MUST NOT be estimated from ciphertext. Provider actual tokenized input above the declared bound rejects before inference. Output uses existing delivered-output rules and is bounded by `max_output_tokens`. Existing refunds, partial-output accounting, finality, request logs, usage events, and journals remain authoritative.
 
-- local tests for default-off behavior, required-mode unavailable failure, closed-schema envelope rejection, provider-signed key-record rejection, wallet-signature envelope binding, replay rejection, downgrade rejection, stale key rejection, provider decryption failure, settlement exclusion labels, mixed-binary rollback, and disclosure labels;
-- a signed journey result for a successful relay-blind non-streaming request on an isolated provider;
-- a signed journey result for required-mode unavailable fail-closed behavior;
-- five-lane audit to 0 Critical, 0 High, and 0 Medium findings.
+A gateway failure after attempting consumption may return the existing `relay_blind_required_unavailable` code with `retryable: false` and transaction-phase `error.macprovider.retry_action: new_reservation_and_envelope`. This means starting a fresh transaction after resolving the cause, never automatically retrying the failed HTTP request or reusing its envelope. Feature/model unavailability before consumption retains `retry_action: none`. Replay and postdispatch uncertainty always use `do_not_resubmit`, which overrides every predispatch action. The response may also expose `X-MacProvider-Relay-Blind-Retry-Action` for that predispatch phase.
 
-## 5. Product and security gaps
+Requested privacy mode is exactly `none` or `relay_blind_required`. Effective outcome is exactly `plaintext`, `provider_leg_encrypted`, `relay_blind_satisfied`, or `relay_blind_unavailable`. `relay_blind_satisfied` is recorded only after the provider authenticates, decrypts, validates the body, and the coordinator accepts the bound validation evidence. Unknown execution is never satisfied. Buyer surfaces carry requested/effective outcome, the exact scope string, settlement labels, and `retry_action`: `new_reservation_and_envelope` for retryable predispatch failure, `do_not_resubmit` for replay or postdispatch uncertainty/commit, and `none` for success. Non-stream JSON uses `usage.macprovider`; bounded JSON errors use `error.macprovider`; SSE usage, terminal, and error events use `macprovider`. Privacy metadata headers carry the same requested/effective outcome. A disconnected buyer cannot receive a cancellation event, but durable audit and settlement retain the truthful terminal state.
 
-| Requirement/domain | Verdict | Owner | Issue | Evidence needed |
-|---|---|---|---|---|
-| Bidirectional response privacy | OUT_OF_SCOPE_V0_1 | @Augustas11 | https://github.com/Augustas11/macprovider/issues/928 | Future SPEC must define encrypted provider response chunks and buyer-side decryption without breaking streaming, settlement, and output safety. |
-| Confidential compute / private from provider | OUT_OF_SCOPE_V0_1 | @Augustas11 | https://github.com/Augustas11/macprovider/issues/928 | Hardware-backed confidential runtime design and attestation evidence; cannot be inferred from request encryption. |
-| Mainstream browser/client SDK envelope helpers | DEFERRED | @Augustas11 | https://github.com/Augustas11/macprovider/issues/928 | Product design and SDK compatibility review after the wire contract is accepted. |
+### SPEC-041-R007 - Errors, retry, and downgrade resistance
+
+All errors use SPEC-006-compatible envelopes and bounded `macprovider` metadata.
+
+| Code | HTTP | Retryable | Retry action |
+|---|---:|---:|---|
+| `relay_blind_disabled` | 503 | no | `none` |
+| `relay_blind_required_unavailable` | 503 | no | `none` |
+| `relay_blind_key_expired` | 503 | yes | `new_reservation_and_envelope` |
+| `relay_blind_envelope_invalid` | 400 | no | `none` |
+| `relay_blind_route_reservation_invalid` | 400 | no | `none` |
+| `relay_blind_endpoint_unsupported` | 400 | no | `none` |
+| `relay_blind_replay` | 409 | no | `do_not_resubmit` |
+| `relay_blind_metadata_rate_limited` | 429 | yes | `new_reservation_and_envelope` |
+| `relay_blind_downgrade_rejected` | 400 | no | `none` |
+| `relay_blind_decrypt_failed` | 502 | yes | `new_reservation_and_envelope` |
+| `relay_blind_ciphertext_invalid` | 400 | no | `none` |
+| `relay_blind_committed_failed` | 500 | no | `do_not_resubmit` |
+| `relay_blind_provider_unsupported` | 503 | yes | `new_reservation_and_envelope` |
+
+Required mode fails closed before quota when unavailable. No generic 503 helper may replay a reservation, consume call, dispatch call, or ciphertext. A retryable result authorizes only a wholly new reservation, ephemeral key, nonce, request identifier, and envelope. Replay classification takes precedence over rate/capacity classification. Any `relay-blind-request-*` namespace is relay-shaped and can never enter plaintext parsing. Any mode other than `required`, provider/key substitution, HTTP fallback, cross-provider failover, altered model/caps, or plaintext conversion is `relay_blind_downgrade_rejected`.
+
+Both gateway and coordinator MUST implement the same emitted-code inventory, HTTP/retry map, retry action, and completeness guard. Persisted request facts determine recovered terminal classification.
+
+### SPEC-041-R008 - Staging, evidence, and promotion gate
+
+Implementation follows five default-off stages:
+
+1. provider identity/key framing, authenticated advertisement, rotation, revocation, pin workflow, and shared public test vectors;
+2. closed reservation/consume APIs, durable state, gateway replay, wallet/API authentication, and reference buyer encryption;
+3. typed opaque dispatch, provider journal, decryption, validation, and at-most-once execution;
+4. ordinary settlement, positive receipt/reward exclusion, and truthful JSON/header/SSE disclosure;
+5. real buyer -> gateway -> coordinator -> Swift provider nonstream/stream success, cancellation, partial output, loss, timeout, and restart recovery.
+
+No stage may enable buyer success before all preceding stages and their fail-closed checks work. Disabling any component rejects required requests before quota and leaves plaintext, wallet, demo, SPEC-008, receipt, and ordinary pool behavior unchanged.
+
+Configuration MUST retain positive bounds for replay retention, timestamp skew, route-reservation TTL, key-cache freshness, maximum encrypted bytes, metadata admission rate, replay rows, and replay bytes. Enabled configuration rejects nonpositive/impossible bounds, unsupported algorithms, or disclosure that lacks fresh provider evidence. Disabled fields do not break plaintext startup, but disabled relay-shaped requests still use safe freshness/replay defaults so configuration cycling cannot revive old material.
+
+Promotion requires shared Go/Swift vectors; focused state, framing, tamper, low-order X25519, pin, replay, crash-injection, accounting, streaming, and mixed-version tests; broad module build/test/vet gates; successful signed isolated-provider journeys for success and required-unavailable; and independent code, security, architecture, adversarial-verifier, and product-design reviews with zero Critical, High, or Medium findings. Hardware proof and production activation evidence are separate dependencies. Until those exist, this SPEC remains `draft`, `pending-reconciliation`, and `not-deployed`, and CONFORMANCE requirements remain pending.
+
+## 5. Operator custody runbook requirement
+
+The normative operator procedure is [Relay-blind pilot key and pin custody](../docs/runbooks/relay-blind-pilot-key-custody.md). It covers initial creation, provider-ID binding, public pin distribution, planned rotation, emergency revocation, custody loss, local restore, and reservation invalidation. Private Ed25519 and X25519 material, journal output, and helper output MUST stay outside repository roots/worktrees in operator-selected 0700 directories with 0600 files. Documentation and tooling MUST never print private bytes. Recovery verifies identity through the public fingerprint and independently configured provider binding; it does not silently create a new trust root.
 
 ## 6. Evidence
 
-No implementation evidence is attached in v0.1.0. This SPEC remains draft and non-conformant until the audit loop closes and the implementation records local validation evidence.
+Local implementation and verification evidence is recorded in [the pilot audit](../audits/privacy-pool-v01-implementation.md). No promotion evidence is attached. Existing admission-only implementation references remain historical partial work and do not satisfy this full pilot profile.
 
 ## 7. Changelog and history
 
-- 0.1.0 - Initial relay-blind request encryption draft for issue #928. Separates relay-blind buyer privacy from SPEC-008 provider-leg encryption, defines provider key advertisement, closed buyer envelope, fail-closed admission, settlement compatibility, error taxonomy, and evidence gates.
+- 0.2.0 - Reconciled the complete default-off global-pool pilot: dedicated operator-pinned Ed25519 identity and buyer pin; exact key/envelope framing; opaque buyer binding; reservation/consume state; typed opaque provider wire and journal; observe-mode settlement with receipt/reward exclusion; truthful per-request disclosure; and five-stage implementation/recovery gate. Status remains draft, pending-reconciliation, and not-deployed.
+- 0.1.0 - Initial relay-blind request encryption draft and admission-only gateway slice. That slice remains historical partial implementation and is superseded as an implementation plan by the v0.2.0 five-stage build plan.
