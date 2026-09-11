@@ -1220,6 +1220,8 @@ Environment overrides:
   MACPROVIDER_HEADLESS_USER      named non-root account that owns protected
                                  provider data and runs both LaunchDaemons;
                                  defaults to the invoking non-root account
+                                 Full SSH-only Mac mini setup, reboot, upgrade,
+                                 and uninstall: docs/runbooks/headless-mini-productization.md
   MACPROVIDER_NO_LAUNCHD=1       expert/debug only: skip BOTH the provider
                                  launchd service and its companion watchdog
   MACPROVIDER_NO_WATCHDOG=1      expert/debug only: install the provider

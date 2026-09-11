@@ -248,6 +248,84 @@ final class UninstallCommandTests: XCTestCase {
         XCTAssertFalse(called)
     }
 
+    func testStopUninstallServicesUsesSystemDomainForHeadless() throws {
+        var commands: [[String]] = []
+        try UninstallCommand.stopUninstallServices(
+            labels: ["live.malibu.provider", "live.malibu.provider-watchdog"],
+            uid: 501,
+            systemDomain: true,
+            run: { arguments in
+                commands.append(arguments)
+                return arguments.contains("print") ? 113 : 0
+            },
+            sleep: { _ in }
+        )
+        let bootouts = commands.filter { $0.contains("bootout") }
+        let prints = commands.filter { $0.contains("print") }
+        XCTAssertEqual(bootouts.count, 4, "every managed system job is booted out")
+        XCTAssertTrue(bootouts.allSatisfy { $0.contains { $0.hasPrefix("system/live.") } })
+        XCTAssertTrue(prints.allSatisfy { $0.contains { $0.hasPrefix("system/live.") } })
+        XCTAssertFalse(commands.contains { $0.contains("gui/501") })
+    }
+
+    func testStopUninstallServicesRejectsUnexpectedHeadlessLabel() {
+        var called = false
+        XCTAssertThrowsError(
+            try UninstallCommand.stopUninstallServices(
+                labels: ["com.example.unrelated"],
+                uid: 501,
+                systemDomain: true,
+                run: { _ in
+                    called = true
+                    return 113
+                },
+                sleep: { _ in }
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? UninstallCommand.UninstallError,
+                .unexpectedServiceLabel("com.example.unrelated")
+            )
+        }
+        XCTAssertFalse(called)
+    }
+
+    func testStopUninstallServicesFailsClosedWhenSudoBootoutFails() {
+        XCTAssertThrowsError(
+            try UninstallCommand.stopUninstallServices(
+                labels: ["live.malibu.provider"],
+                uid: 501,
+                systemDomain: true,
+                run: { arguments in
+                    arguments.contains("bootout") ? 1 : 113
+                },
+                sleep: { _ in }
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? UninstallCommand.UninstallError,
+                .headlessUninstallPrivilegeRequired
+            )
+        }
+    }
+
+    func testStopUninstallServicesFailsClosedWhenSystemServiceRemainsLoaded() {
+        XCTAssertThrowsError(
+            try UninstallCommand.stopUninstallServices(
+                labels: ["live.malibu.provider"],
+                uid: 501,
+                systemDomain: true,
+                run: { _ in 0 },
+                sleep: { _ in }
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? UninstallCommand.UninstallError,
+                .serviceStillLoaded("live.malibu.provider-watchdog")
+            )
+        }
+    }
+
     func testArtifactPathsMatchCanonicalInstallLayout() {
         let home = URL(fileURLWithPath: "/Users/tester")
         let paths = UninstallCommand.artifactPaths(home: home)
@@ -365,7 +443,7 @@ final class UninstallCommandTests: XCTestCase {
         }
     }
 
-    func testHeadlessManifestUninstallFailsClosed() throws {
+    func testHeadlessManifestUninstallProfileRemainsUnsupportedForLegacyCallers() throws {
         let manifest = UninstallCommand.InstallManifest(
             installPrefix: "/Users/fleet/macprovider",
             launchdLabels: ["live.malibu.provider", "live.malibu.provider-watchdog"],
@@ -384,6 +462,64 @@ final class UninstallCommandTests: XCTestCase {
         XCTAssertThrowsError(try UninstallCommand.validateUninstallProfile(manifest)) { error in
             XCTAssertEqual(error as? UninstallCommand.UninstallError, .unsupportedHeadlessInstallProfile)
         }
+    }
+
+    func testHeadlessManifestUsesSystemDomainAndConsumerDoesNot() {
+        let headless = UninstallCommand.InstallManifest(
+            installPrefix: "/Users/fleet/macprovider",
+            launchdLabels: ["live.malibu.provider"],
+            dataDirs: [],
+            version: nil,
+            binaryPath: nil,
+            symlinkPath: nil,
+            launchdPlists: [],
+            installProfile: "headless_fleet",
+            launchdDomain: "system"
+        )
+        let consumer = UninstallCommand.InstallManifest(
+            installPrefix: "/Users/fleet/macprovider",
+            launchdLabels: ["live.malibu.provider"],
+            dataDirs: [],
+            version: nil,
+            binaryPath: nil,
+            symlinkPath: nil,
+            launchdPlists: [],
+            installProfile: "consumer_user",
+            launchdDomain: "gui/501"
+        )
+        XCTAssertTrue(UninstallCommand.installsInSystemDomain(headless))
+        XCTAssertFalse(UninstallCommand.installsInSystemDomain(consumer))
+    }
+
+    func testHeadlessAllowedRemovalPathsIncludeSystemLaunchDaemonPlists() throws {
+        let home = URL(fileURLWithPath: "/Users/fleet", isDirectory: true)
+        let manifest = UninstallCommand.InstallManifest(
+            installPrefix: "/Users/fleet/macprovider",
+            launchdLabels: ["live.malibu.provider"],
+            dataDirs: [],
+            version: nil,
+            binaryPath: nil,
+            symlinkPath: nil,
+            launchdPlists: [
+                "/Users/fleet/.config/macprovider/launchd/live.malibu.provider.plist",
+                "/Users/fleet/.config/macprovider/launchd/live.malibu.provider-watchdog.plist",
+            ],
+            installProfile: "headless_fleet",
+            launchdDomain: "system"
+        )
+        let allowed = try UninstallCommand.allowedRemovalPaths(home: home, manifest: manifest)
+        XCTAssertTrue(
+            try UninstallCommand.path(
+                "/Library/LaunchDaemons/live.malibu.provider.plist",
+                isAllowedBy: allowed.plists
+            )
+        )
+        XCTAssertTrue(
+            try UninstallCommand.path(
+                "/Library/LaunchDaemons/live.malibu.provider-watchdog.plist",
+                isAllowedBy: allowed.plists
+            )
+        )
     }
 
     func testLoadedConsumerManifestStillFailsClosedWhenSystemArtifactsExist() throws {
