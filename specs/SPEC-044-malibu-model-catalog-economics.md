@@ -1,12 +1,12 @@
 # SPEC-044 - Malibu Model Catalog Economics
 
-**Version:** 0.2.4
+**Version:** 0.2.5
 
 ```json
 {
   "spec_id": "SPEC-044",
   "title": "Malibu Model Catalog Economics",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "path": "specs/SPEC-044-malibu-model-catalog-economics.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -36,7 +36,7 @@
     "verdict": "DECISION_REQUIRED",
     "owner": "@Augustas11",
     "issue": "https://github.com/Augustas11/macprovider/issues/614",
-    "rationale": "The operator-owned v0.2.4 authority resolves the accepted formal Build 1 findings across conditional earning eligibility, exact catalog-only trust isolation, ACL creation, bounded cancellation, one authoritative total ranking, and canonically bound continuous-lock cleanup. Implementation, complete tests, signed release evidence, and the discovery/admission/settlement journeys remain pending."
+    "rationale": "The operator-owned v0.2.5 authority resolves the accepted formal Build 1 findings across conditional earning eligibility, source-aware admission copy, exact catalog-only trust and section isolation, ACL creation, bounded cancellation, one authoritative total ranking, and canonically bound continuous-lock cleanup. Implementation, complete tests, signed release evidence, and the discovery/admission/settlement journeys remain pending."
   }
 }
 ```
@@ -155,6 +155,10 @@ positive admission case, and MUST expose no candidate-dependent action. A
 catalog-only row MUST become candidate-associated on the first snapshot that
 contains a matching validated owner-source candidate; partial group nullability
 is malformed.
+Malibu MUST place this exact catalog-only unavailable sentinel in the `Blocked`
+section. It MUST NOT place it in `Network catalog`, `Current`, `Ready`, or
+`Needs preparation`; the sentinel supplies neither trusted network economics
+nor the independent local evidence required by those sections.
 
 `guidance_binding` is closed and contains exactly `source_schema`,
 `source_sha256`, `source_generated_at`, nullable `source_projection_sequence`,
@@ -746,7 +750,9 @@ attached worker.
 
 For v2, a valid locally motivated preparation row belongs in `Needs
 preparation`; it MUST NOT be placed in `Network catalog` from local custody
-or non-trusted economics. Absence of either exact v2 value permits v1 only when
+or non-trusted economics. The exact all-null catalog-only unavailable sentinel
+from R002 belongs in `Blocked` and MUST NOT appear in `Network catalog`,
+`Current`, `Ready`, or `Needs preparation`. Absence of either exact v2 value permits v1 only when
 the complete v1 pair is exclusively advertised; otherwise Malibu uses the
 legacy fallback without attempting a catalog-economics call or v2 action.
 
@@ -758,6 +764,18 @@ Every localization MUST preserve conditional eligibility and MUST NOT imply
 current income, current serving, current demand, a guaranteed request, or a
 guaranteed settlement. The verdict comes only from the valid owner-source
 guidance binding and does not override R004's rate-versus-income rule.
+
+The exact English source state meaning for `local_only` is **Retained as local
+inventory only; this admission state does not claim the model is prepared,
+installed, ready, reachable, or usable.** Any positive readiness or usability
+copy requires independent validated readiness/runtime evidence for the same row
+and projection. The exact English source meaning for
+`local_default:not_offered` is **Coordinator offer state is unavailable or has
+not been queried.** and MUST NOT assert that no offer has ever existed. The
+exact English source meaning for `coordinator:not_offered` is **Coordinator
+reports no active network offer for this model.** and requires authoritative
+SPEC-047 readback. Every shipped localization and accessibility fixture MUST
+preserve this source distinction.
 
 The exact R002/R003 local, trusted, and published-cleanup English source
 strings and deterministic localized size substitution are part of this
@@ -833,10 +851,18 @@ absence of automatic garbage collection.
 Published-cleanup tests MUST positively compare `row.cleanup_published` with
 the matching `cleanup_targets[i].cleanup` as UTF-8 RFC 8785 JCS bytes and then
 independently compare both action digests and exact logical byte counts with the
-enclosing target. One-fault negatives MUST reject a changed enclosing or action
-digest, enclosing or action size, transaction kind or transaction id, and every
-other changed action field, including an otherwise valid action attached to a
-different target.
+enclosing target. Distinct one-fault fixtures MUST independently change (1) the
+enclosing target `artifact_identity_digest`, (2) the enclosing target
+`estimated_bytes`, (3) `row.cleanup_published.artifact_identity_digest`, (4)
+`cleanup_targets[i].cleanup.artifact_identity_digest`, (5)
+`row.cleanup_published.estimated_bytes`, (6)
+`cleanup_targets[i].cleanup.estimated_bytes`, (7) transaction kind in each
+nested action copy, (8) transaction id in each nested action copy, and (9) every
+other action field in each nested action copy, one field at a time. A separate
+fixture MUST move an otherwise valid action, unchanged, to another target.
+Every fixture MUST be refused before provider confirmation, reservation,
+rename, or deletion, with outside-root, protected-object, and legacy sentinels
+unchanged.
 
 The release test corpus MUST additionally prove all of the following exact
 boundaries:
@@ -863,7 +889,9 @@ boundaries:
   `coordinator_event_id` and `state_observed_at`, false
   `catalog_economics_permitted` and `settlement_capable`, all nullable
   rate-card/rate/share/payout fields null, all demand fields null, every action
-  unavailable, and no earning or readiness claim. Apply one-fault negatives for
+  unavailable, no earning or readiness claim, and exact placement in `Blocked`.
+  Reject placement in `Network catalog`, `Current`, `Ready`, or `Needs
+  preparation` as distinct one-fault section changes. Apply one-fault negatives for
   every other known or unknown economics state, rate source, admission source or
   state, non-null event or observation time, either authorization boolean set
   true, any non-null money/demand field, non-catalog runtime state, non-null
@@ -874,7 +902,9 @@ boundaries:
   model-key/display-name/served-name/cross-candidate admission join, and every
   candidate/local-action row with the group absent;
 - exercise `local_default:not_offered`, `coordinator:not_offered`, and both
-  source-transition directions under every economics class; test primary
+  source-transition directions under every economics class; require the exact
+  R009 source meanings and reject any local-default offer-history assertion;
+  test primary
   artifact status `verified`, `declared`, `blocked`, absent, and each signed-feed
   drift boundary, proving only current `verified` is eligible at projection and
   dispatch and remains eligible at the immediate prepublication recheck. For
@@ -1018,6 +1048,12 @@ The app should preserve the current provider mental model: Malibu observes and a
 
 ## 8. Changelog and history
 
+- 0.2.5 - Resolves the formal v5 authority findings: one exact readiness-safe
+  `local_only` source string; distinct truthful local-default and coordinator
+  `not_offered` meanings; exact `Blocked` placement for the catalog-only
+  unavailable sentinel with four forbidden-section negatives; and distinct
+  enclosing/action/cross-target destructive-cleanup fault proofs. Conformance
+  remains pending.
 - 0.2.4 - Corrects the formal v4 authority findings: R005 remains the sole
   exact row-ranking tuple; catalog-only acceptance locks every exact null/false
   sentinel field; local-only copy is admission-only; published cleanup compares

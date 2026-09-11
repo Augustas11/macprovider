@@ -39,7 +39,8 @@ test reference only — the wire value is authoritative and is what the verdict 
 | admission_state | source | Label | One-line meaning | expected earning_path_class |
 |---|---|---|---|---|
 | `local_only` | local_default | Local only | Retained as local inventory only; this admission state does not claim the model is prepared, installed, ready, reachable, or usable. | local_inventory_only |
-| `not_offered` | local_default | Not offered | Discovered but never offered to the network. | local_inventory_only |
+| `not_offered` | local_default | Not offered | Coordinator offer state is unavailable or has not been queried. | local_inventory_only |
+| `not_offered` | coordinator | Not offered | Coordinator reports no active network offer for this model. | local_inventory_only |
 | `offerable` | local_default | Ready to offer | Passes local checks; you can submit an offer to the network. | local_inventory_only |
 | `offer_submitted` | coordinator | Offer submitted | The coordinator has your offer and is deciding. | not_earning_yet_catalog_or_receipt_path_exists |
 | `offer_rejected` | coordinator | Offer rejected | The coordinator declined this offer; revise and re-offer. | not_earning_yet_catalog_or_receipt_path_exists |
@@ -66,11 +67,18 @@ test reference only — the wire value is authoritative and is what the verdict 
 - `local_only` is an admission disclosure only. Render installed, usable,
   readiness, reachability, or preparation claims solely from independently
   validated readiness/runtime evidence for the same candidate and projection.
+- The table has 12 distinct admission-state values and 13 source/state
+  presentation combinations because `not_offered` has two authoritative source
+  meanings. `local_default:not_offered` MUST NOT assert that an offer never
+  existed; only `coordinator:not_offered` reports current coordinator offer
+  state.
 - `state_label_key` / `state_meaning_key` are localization-safe keys; the strings above
   are the en source values. They MUST NOT carry raw prompts, completions, paths,
   endpoints, or secrets.
 - If a state's real wire `earning_path_class` disagrees with the "expected" column here,
   trust the wire and flag it to @Augustas11 — do not hard-code the mapping in Malibu.
-- Localization and accessibility tests cover every earning verdict in every
-  shipped locale and reject current-income, current-serving, guaranteed-demand,
-  and guaranteed-settlement meanings for `settlement_capable`.
+- Localization and accessibility tests cover every earning verdict and both
+  source-aware `not_offered` meanings in every shipped locale. They reject
+  current-income, current-serving, guaranteed-demand, and guaranteed-settlement
+  meanings for `settlement_capable`, and reject any offer-history assertion for
+  `local_default:not_offered`.

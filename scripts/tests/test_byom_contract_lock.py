@@ -34,24 +34,29 @@ class BYOMContractLockTests(unittest.TestCase):
             " ".join(spec001.split()),
         )
         self.assertIn(
-            "This admission state does not claim that the model is prepared, installed, ready, "
-            "reachable, or usable; those claims require the candidate's independent "
-            "readiness/runtime evidence.",
-            " ".join(spec046.split()),
-        )
-        self.assertIn(
             "| `local_only` | local_default | Local only | Retained as local inventory only; "
             "this admission state does not claim the model is prepared, installed, ready, "
             "reachable, or usable. | local_inventory_only |",
             " ".join(handoff.split()),
         )
+        exact_local_only = (
+            "Retained as local inventory only; this admission state does not claim the model "
+            "is prepared, installed, ready, reachable, or usable."
+        )
+        for owner_text in (spec001, spec046, handoff):
+            with self.subTest(owner="local_only"):
+                self.assertIn(exact_local_only, " ".join(owner_text.split()))
         self.assertNotIn("Installed and usable on this Mac", handoff)
 
         state_table = handoff.split("## State label + meaning copy", 1)[1].split(
             "## Non-earning disclosure lines", 1
         )[0]
         rows = [line for line in state_table.splitlines() if line.startswith("| `")]
-        self.assertEqual(len(rows), 12)
+        self.assertEqual(len(rows), 13)
+        self.assertEqual(
+            len({row.split("|")[1].strip() for row in rows}),
+            12,
+        )
         for blocker in (
             "`needs_weights`",
             "`needs_runtime`",
@@ -63,6 +68,30 @@ class BYOMContractLockTests(unittest.TestCase):
         ):
             with self.subTest(blocker=blocker):
                 self.assertIn(blocker, spec046)
+
+    def test_not_offered_copy_is_exact_and_source_aware(self):
+        spec001 = read_text("specs/SPEC-001-phase3-binary.md")
+        spec044 = read_text("specs/SPEC-044-malibu-model-catalog-economics.md")
+        spec046 = read_text("specs/SPEC-046-provider-byom-discovery.md")
+        spec047 = read_text("specs/SPEC-047-network-model-admission.md")
+        handoff = read_text(
+            "audits/2026-09-11-byom-v02-handoffs/SLICE6_STATE_SURFACE_AND_COPY.md"
+        )
+        local_default = "Coordinator offer state is unavailable or has not been queried."
+        coordinator = "Coordinator reports no active network offer for this model."
+
+        for owner_text in (spec001, spec044, spec046, handoff):
+            with self.subTest(source="local_default"):
+                self.assertIn(local_default, " ".join(owner_text.split()))
+        for owner_text in (spec001, spec044, spec046, spec047, handoff):
+            with self.subTest(source="coordinator"):
+                self.assertIn(coordinator, " ".join(owner_text.split()))
+        self.assertNotIn("Discovered but never offered to the network.", handoff)
+        self.assertIn(
+            "MUST NOT assert that an offer never existed",
+            " ".join(spec046.split()),
+        )
+        self.assertIn("reject any local-default offer-history assertion", spec044)
 
     def test_catalog_only_sentinel_is_exact_and_fault_tested(self):
         spec044 = read_text("specs/SPEC-044-malibu-model-catalog-economics.md")
@@ -88,6 +117,21 @@ class BYOMContractLockTests(unittest.TestCase):
         ):
             with self.subTest(required=required):
                 self.assertIn(required, contract)
+
+        self.assertIn(
+            "exact catalog-only unavailable sentinel in the `Blocked` section",
+            contract,
+        )
+        self.assertIn(
+            "MUST NOT place it in `Network catalog`, `Current`, `Ready`, or `Needs preparation`",
+            contract,
+        )
+        self.assertIn("exact placement in `Blocked`", contract)
+        self.assertIn(
+            "Reject placement in `Network catalog`, `Current`, `Ready`, or `Needs preparation` "
+            "as distinct one-fault section changes",
+            contract,
+        )
 
     def test_r005_is_the_single_complete_ranking_oracle(self):
         spec044 = read_text("specs/SPEC-044-malibu-model-catalog-economics.md")
@@ -129,9 +173,18 @@ class BYOMContractLockTests(unittest.TestCase):
             "`row.cleanup_published.artifact_identity_digest`",
             "`cleanup_targets[i].cleanup.artifact_identity_digest`",
             "`cleanup_targets[i].estimated_bytes`",
-            "One-fault negatives MUST reject a changed enclosing or action",
-            "transaction kind or transaction id",
-            "every other changed action field",
+            "Distinct one-fault fixtures MUST independently change",
+            "the enclosing target `artifact_identity_digest`",
+            "the enclosing target `estimated_bytes`",
+            "`row.cleanup_published.artifact_identity_digest`",
+            "`row.cleanup_published.estimated_bytes`",
+            "`cleanup_targets[i].cleanup.estimated_bytes`",
+            "transaction kind in each nested action copy",
+            "transaction id in each nested action copy",
+            "every other action field in each nested action copy, one field at a time",
+            "otherwise valid action, unchanged, to another target",
+            "before provider confirmation, reservation, rename, or deletion",
+            "outside-root, protected-object, and legacy sentinels unchanged",
         ):
             with self.subTest(required=required):
                 self.assertIn(required, contract)

@@ -1,12 +1,12 @@
 # SPEC-046 - Provider BYOM Discovery
 
-**Version:** 0.1.4
+**Version:** 0.1.5
 
 ```json
 {
   "spec_id": "SPEC-046",
   "title": "Provider BYOM Discovery",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "path": "specs/SPEC-046-provider-byom-discovery.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -96,11 +96,24 @@ For `admission_state_source: "local_default"`, the CLI MUST use this local-state
 
 | Local state | Provider-facing meaning | Provider next action | Local transition rule |
 |---|---|---|---|
-| `local_only` | The candidate is retained only as local inventory because identity, readiness, fit, adapter safety, or operator policy is insufficient for offering. This admission state does not claim that the model is prepared, installed, ready, reachable, or usable; those claims require the candidate's independent readiness/runtime evidence. It is not network-routable or earning-eligible. | Fix the blocking local condition or run `models evaluate <candidate> --json` when evaluation is available. | May become `offerable` only after local checks show safe loopback/locality, stable candidate id, acceptable readiness, and no blocking warning code. |
+| `local_only` | Retained as local inventory only; this admission state does not claim the model is prepared, installed, ready, reachable, or usable. | Fix the blocking local condition or run `models evaluate <candidate> --json` when evaluation is available. | May become `offerable` only after local checks show safe loopback/locality, stable candidate id, acceptable readiness, and no blocking warning code. |
 | `offerable` | The candidate appears locally eligible to preflight an offer, but the coordinator has not accepted any network admission state. It is not network-routable or earning-eligible. | Run `models offer <candidate> --dry-run --json`, preferably after evaluation. | May enter SPEC-047 `offer_submitted` only through a provider-signed offer; if coordinator readback confirms no active offer, the CLI MUST report `admission_state_source: "coordinator"` with `admission_state: "not_offered"` rather than treating that readback as a local default. |
-| `not_offered` | No active coordinator offer is known for this candidate from this provider. With `local_default`, this means coordinator state is unavailable or has not been queried; with `coordinator`, it is authoritative SPEC-047 readback. | Run status readback, offer dry-run, or submit a refreshed offer if local checks still pass. | May become `offerable` when local checks pass without coordinator readback, or may enter SPEC-047 `offer_submitted` only through a provider-signed offer. |
+| `not_offered` | Coordinator offer state is unavailable or has not been queried. | Run status readback, offer dry-run, or submit a refreshed offer if local checks still pass. | May become `offerable` when local checks pass without coordinator readback, or may enter SPEC-047 `offer_submitted` only through a provider-signed offer. |
 
-The same `not_offered` value may appear with either `admission_state_source`; callers MUST read the source field before deciding whether the state is local advisory inventory or coordinator readback.
+The table above defines `local_default:not_offered`. The same `not_offered`
+value may appear with either `admission_state_source`; callers MUST read the
+source field before deciding whether the state is local advisory inventory or
+coordinator readback. The exact English source meaning for
+`local_default:not_offered` is **Coordinator offer state is unavailable or has
+not been queried.** It MUST NOT assert that an offer never existed. The exact
+English source meaning for `coordinator:not_offered` is **Coordinator reports
+no active network offer for this model.** and is valid only for authoritative
+SPEC-047 readback. The exact English source meaning for `local_only` is
+**Retained as local inventory only; this admission state does not claim the
+model is prepared, installed, ready, reachable, or usable.** Network routing
+and earning remain governed independently by `earning_path_class` and
+SPEC-047; readiness and usability remain governed by the same validated
+candidate's independent readiness/runtime evidence.
 
 When coordinator reachability changes, a locally eligible candidate may move between `offerable` and `not_offered` without provider action; this label change is action-neutral unless the source becomes `coordinator` and supplies a SPEC-047 state or reason code.
 
@@ -133,7 +146,7 @@ Redaction provenance is local diagnostic metadata, not an advisory capability va
 
 The R008 automated-test gate for this mapping MUST cover absent/null, safe, withheld, and wrong-type optional labels separately; mixed and all-withheld inventories; stderr/JSON parity without raw content; parser-bound preservation; non-blocking optional warnings with independent blockers retained; and offer projection retaining null capability values. Signed journey evidence remains pending; text-level contract tests do not satisfy that runtime or release-evidence gate. The current adapters do not collect runtime version labels, so `capabilities.runtime_version` remains absent/null without a redaction warning; collecting that field in a future adapter must apply this same provenance mapping.
 
-**SPEC-046-R008 - Release evidence.** Promotion beyond draft MUST include automated tests for adapter allowlisting, loopback rejection, bounded HTTP parsing, malformed adapter responses, candidate schema validation, local-state ladder meaning and next-action projection, advisory capability nullability, catalog-match labeling, read-only discovery, evaluation timeouts and byte caps, no production config mutation, path/token redaction, unevaluated copy restrictions, command-taxonomy separation from legacy `models list`/`models browse`, and SPEC-047 state consumption. Before any provider-visible human discovery/evaluation rendering ships, tests MUST reject forbidden earning-copy meanings with parity to SPEC-044-R004/R009, including claims that a discovered, evaluated, offered, or non-settlement candidate earns, is higher-paying, is buyer-routable by default, is verified, is catalog-priced, or is settlement-capable. For `settlement_capable`, every shipped localization and accessibility fixture MUST preserve **Eligible to earn on qualifying settled requests** as conditional eligibility and reject current-income, current-serving, guaranteed-demand, and guaranteed-settlement meanings. For `local_only`, fixtures MUST cover `needs_weights`, `needs_runtime`, `requires_preparation`, `unreachable`, fit failure, adapter rejection, and policy block; they MUST reject any prepared, installed, ready, reachable, or usable claim unless independent candidate readiness/runtime evidence in the same validated projection proves that exact claim. Production promotion MUST include a signed journey result covering at least one MLX-cache candidate, one loopback runtime candidate, one opaque endpoint candidate, one adapter failure, one evaluated-but-not-network-admitted candidate, and local `local_only`/`offerable`/`not_offered` state-ladder evidence.
+**SPEC-046-R008 - Release evidence.** Promotion beyond draft MUST include automated tests for adapter allowlisting, loopback rejection, bounded HTTP parsing, malformed adapter responses, candidate schema validation, local-state ladder meaning and next-action projection, advisory capability nullability, catalog-match labeling, read-only discovery, evaluation timeouts and byte caps, no production config mutation, path/token redaction, unevaluated copy restrictions, command-taxonomy separation from legacy `models list`/`models browse`, and SPEC-047 state consumption. Before any provider-visible human discovery/evaluation rendering ships, tests MUST reject forbidden earning-copy meanings with parity to SPEC-044-R004/R009, including claims that a discovered, evaluated, offered, or non-settlement candidate earns, is higher-paying, is buyer-routable by default, is verified, is catalog-priced, or is settlement-capable. For `settlement_capable`, every shipped localization and accessibility fixture MUST preserve **Eligible to earn on qualifying settled requests** as conditional eligibility and reject current-income, current-serving, guaranteed-demand, and guaranteed-settlement meanings. For `local_only`, fixtures MUST cover `needs_weights`, `needs_runtime`, `requires_preparation`, `unreachable`, fit failure, adapter rejection, and policy block; they MUST reject any prepared, installed, ready, reachable, or usable claim unless independent candidate readiness/runtime evidence in the same validated projection proves that exact claim. Every shipped localization and accessibility fixture MUST preserve the exact source-aware meanings above for `local_only`, `local_default:not_offered`, and `coordinator:not_offered`, and MUST reject any offer-history assertion for `local_default:not_offered`. Production promotion MUST include a signed journey result covering at least one MLX-cache candidate, one loopback runtime candidate, one opaque endpoint candidate, one adapter failure, one evaluated-but-not-network-admitted candidate, and local `local_only`/`offerable`/`not_offered` state-ladder evidence.
 
 ## 4. Implementation, tests, and journeys
 
@@ -165,6 +178,10 @@ The core invariant is that local discovery is deliberately cheap and broad becau
 
 ## 8. Changelog and history
 
+- v0.1.5 - Freezes the exact `local_only` English source meaning and distinct
+  source-aware meanings for local-default and coordinator-backed `not_offered`.
+  Local-default rendering cannot assert offer history; readiness and usability
+  remain independently evidenced.
 - v0.1.4 - Defines `local_only` solely as an admission-state disclosure and
   requires independent candidate readiness/runtime evidence for prepared,
   installed, ready, reachable, or usable claims. Adds negative copy fixtures

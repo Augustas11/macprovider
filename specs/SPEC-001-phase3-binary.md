@@ -1,6 +1,12 @@
 # SPEC-001 — Phase 3 Binary: Mac Provider Inference CLI
 
-**Version:** 1.9.13 (2026-09-12, Build 1 catalog preparation oracle correction)
+**Version:** 1.9.14 (2026-09-12, Build 1 provider-copy authority correction)
+
+**Change log v1.9.14 (2026-09-12, Build 1 provider-copy authority
+correction):** Freezes the exact admission-only `local_only` English source
+meaning and requires distinct truthful English source meanings for local-default
+and coordinator-backed `not_offered`. A local default cannot assert offer
+history.
 
 **Change log v1.9.13 (2026-09-12, Build 1 catalog preparation oracle
 correction):** Corrects the closed admission-state inventory cardinality to 12.
@@ -3263,6 +3269,16 @@ The `local_only` admission state is not readiness evidence and MUST NOT by itsel
 be rendered as prepared, installed, ready, reachable, or usable. Any such claim
 MUST come from independently validated readiness/runtime fields for that same
 candidate and projection.
+Its exact English source state meaning is **Retained as local inventory only;
+this admission state does not claim the model is prepared, installed, ready,
+reachable, or usable.** The exact English source meanings for source-aware
+`not_offered` are **Coordinator offer state is unavailable or has not been
+queried.** for `local_default:not_offered` and **Coordinator reports no active
+network offer for this model.** for `coordinator:not_offered`. Local-default
+rendering MUST NOT assert that no offer has ever existed. Every shipped
+localization and accessibility fixture MUST preserve those source-aware
+meanings while keeping readiness claims dependent on the independent evidence
+above.
 Provider-facing human output MUST NOT imply earning from a candidate whose
 `earning_path_class` is `no_earning_path_in_v0_1` or `local_inventory_only`,
 consistent with SPEC-047-R004. Malibu and the CLI human surface MUST source the
