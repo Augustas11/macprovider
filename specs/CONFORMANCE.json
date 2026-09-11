@@ -9,7 +9,7 @@
     {
       "spec_id": "SPEC-001",
       "title": "Phase 3 Binary: Mac Provider Inference CLI",
-      "version": "1.9.15",
+      "version": "1.9.16",
       "path": "specs/SPEC-001-phase3-binary.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -1305,7 +1305,7 @@
     {
       "spec_id": "SPEC-044",
       "title": "Malibu Model Catalog Economics",
-      "version": "0.2.6",
+      "version": "0.2.7",
       "path": "specs/SPEC-044-malibu-model-catalog-economics.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1337,7 +1337,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "The operator-owned v0.2.6 authority resolves the accepted formal Build 1 findings across conditional earning eligibility, source-aware admission copy, exact catalog-only trust and section isolation, compatibility fallback presentation, constructive non-live exit-3 failure dispatch, ACL creation, bounded cancellation, one authoritative total ranking, and canonically bound continuous-lock cleanup while preserving prior closures. Implementation, complete tests, signed release evidence, and the discovery/admission/settlement journeys remain pending."
+        "rationale": "The operator-owned v0.2.7 authority resolves the accepted formal Build 1 findings across conditional earning eligibility, source-aware admission copy, exact catalog-only trust and section isolation, compatibility fallback presentation, constructive bounded non-live exit-3 failure dispatch, exhaustive lock ordering, cancel-visible failed-dispatch serialization, ACL creation, bounded cancellation, one authoritative total ranking, and canonically bound continuous-lock cleanup while preserving prior closures. Implementation, complete tests, signed release evidence, and the discovery/admission/settlement journeys remain pending."
       }
     },
     {
@@ -6855,7 +6855,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1257",
-        "rationale": "SPEC-044 v0.2.6 freezes exclusive cross-surface generation advertisement, the exact catalog-only sentinel and Blocked placement, exact SPEC-046/047 source-aware conditional guidance including coordinator no-event binding, app-owned refresh generations, canonically bound cleanup actions, immutable cleanup event keys, authenticated root identity, bounded transport, and deterministic storage accounting. Implementation, complete tests, and signed release evidence remain pending."
+        "rationale": "SPEC-044 v0.2.7 freezes exclusive cross-surface generation advertisement, the exact catalog-only sentinel and Blocked placement, exact SPEC-046/047 source-aware conditional guidance including coordinator no-event binding, app-owned refresh generations, canonically bound cleanup actions, immutable cleanup event keys, authenticated root identity, bounded transport, and deterministic storage accounting. Implementation, complete tests, and signed release evidence remain pending."
       }
     },
     {
@@ -6875,7 +6875,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1257",
-        "rationale": "SPEC-044 v0.2.6 approves locally motivated preparation for the exhaustive non-trusted matrix, including event-backed and authoritative no-event coordinator:not_offered, only with current verified primary artifact authority and verbatim digest-bound conditional guidance. Catalog-only all-null rows have no preparation or trusted-economics positive case. Implementation, exhaustive matrix tests, Malibu rendering, and release evidence remain pending."
+        "rationale": "SPEC-044 v0.2.7 approves locally motivated preparation for the exhaustive non-trusted matrix, including event-backed and authoritative no-event coordinator:not_offered, only with current verified primary artifact authority and verbatim digest-bound conditional guidance. Catalog-only all-null rows have no preparation or trusted-economics positive case. Implementation, exhaustive matrix tests, Malibu rendering, and release evidence remain pending."
       }
     },
     {
@@ -6921,7 +6921,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1257",
-        "rationale": "SPEC-044 v0.2.6 freezes R005 as the sole exact total row-order tuple and rejects duplicate canonical row identities. The existing localized display-name tie-break does not implement that tuple. The named future tests must prove valid local-default and coordinator-backed non-trusted preparation rows remain visible in Needs preparation and that every locale and input order yields the same canonical order; implementation and release evidence remain pending."
+        "rationale": "SPEC-044 v0.2.7 freezes R005 as the sole exact total row-order tuple and rejects duplicate canonical row identities. The existing localized display-name tie-break does not implement that tuple. The named future tests must prove valid local-default and coordinator-backed non-trusted preparation rows remain visible in Needs preparation and that every locale and input order yields the same canonical order; implementation and release evidence remain pending."
       }
     },
     {
@@ -6969,7 +6969,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "SPEC-044 v0.2.6 defines preparation confirmation/copy, worker-only bounded progress, five in-lock cancellation predicates plus the bounded busy outcome, isolated staging, managed-v3 publication, worker/recovery-owned continuous-lock reversible cleanup, and durable tombstoned-phase commit evidence. None of that new authority is yet implemented or evidenced."
+        "rationale": "SPEC-044 v0.2.7 defines preparation confirmation/copy, worker-only bounded progress, five in-lock cancellation predicates plus the bounded busy outcome, the exhaustive operation/failure/cancel/cleanup/adoption lock graph, bounded pre-attachment dispatch_state_busy behavior, cancel-linearized failed-dispatch terminal state, isolated staging, managed-v3 publication, worker/recovery-owned continuous-lock reversible cleanup, and durable tombstoned-phase commit evidence. None of that new authority is yet implemented or evidenced."
       }
     },
     {
@@ -7091,7 +7091,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1257",
-        "rationale": "Slice #1257 adds partial Malibu projection decoding, grouping, old-CLI fallback, projection-failed fallback, forbidden-copy, and action-gating coverage. SPEC-044 v0.2.6 now assigns the complete CSPRNG/restart/freshness/feed-trust, conditional-copy, total-ranking/UX, compatibility/transport, bounded-cancel, recovery/ACL, and signed-journey matrices to concrete acceptance lanes; that evidence remains pending."
+        "rationale": "Slice #1257 adds partial Malibu projection decoding, grouping, old-CLI fallback, projection-failed fallback, forbidden-copy, and action-gating coverage. SPEC-044 v0.2.7 now assigns the complete CSPRNG/restart/freshness/feed-trust, conditional-copy, total-ranking/UX, compatibility/transport, bounded-cancel and dispatch-state contention, exhaustive lock traces and pairwise overlaps, failed-dispatch durability interleavings, recovery/ACL, and signed-journey matrices to concrete acceptance lanes; that evidence remains pending."
       }
     },
     {

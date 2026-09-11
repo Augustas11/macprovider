@@ -1,6 +1,12 @@
 # SPEC-001 — Phase 3 Binary: Mac Provider Inference CLI
 
-**Version:** 1.9.15 (2026-09-12, Build 1 pre-work lifecycle authority correction)
+**Version:** 1.9.16 (2026-09-12, Build 1 lock-graph authority correction)
+
+**Change log v1.9.16 (2026-09-12, Build 1 lock-graph authority
+correction):** Makes the catalog-economics lock graph exhaustive, serializes
+all cancel-visible failed-dispatch state under `failure.lock` then
+`cancel.lock`, and gives pre-attachment failure-state acquisition one bounded
+fail-closed `dispatch_state_busy` result under SPEC-044 v0.2.7.
 
 **Change log v1.9.15 (2026-09-12, Build 1 pre-work lifecycle authority
 correction):** Freezes silent static-card behavior for every unsupported,
@@ -3371,20 +3377,31 @@ mutation, as defined by SPEC-044.
 Only the attached run worker may allocate `event_sequence` or emit transaction
 events. After syntax/framing and immutable projected-action identity validation,
 but before semantic freshness, availability, or conflict checks, a valid run
-creates a fresh attempt and enters SPEC-044 v0.2.6's `failure.lock` lifecycle.
+creates a fresh attempt and enters SPEC-044 v0.2.7's bounded
+`failure.lock`-then-`cancel.lock` lifecycle.
 For exit 3 it MUST durably write the bounded private non-live
 `model_catalog_failed_dispatch.v1` record before emitting exactly one terminal
 `failed` event at sequence 1. That record carries the validated transaction,
 kind, immutable event model key, root locator/identity, tuple and projection
 binding, fresh attempt, and error code; it creates no active attempt, marker,
 network/staging work, model/adoption/runtime mutation, or incumbent displacement.
-Conflict reporting is not a second active worker. Failure-only processing takes
-only `failure.lock`; successful promotion and normal/recovery compaction use
-`operation.lock` then `failure.lock`, never the reverse, with the failed records
-sharing the existing 256-record bounded history. Crash recovery compacts durable
-failure records without fabricating stdout or replaying work. The cancel process
-MUST NOT emit, merge, or synthesize an event and MUST
-NOT kill the worker. No `models transactions` family, public transaction-status
+Conflict reporting is not a second active worker. All failed-dispatch creation,
+compaction, eviction, recovery, and cancel-visible reads use the exhaustive
+SPEC-044 v0.2.7 lock graph. A failure-only path takes `failure.lock` then
+`cancel.lock`; a normal or recovery path takes `operation.lock`, then
+`failure.lock`, then `cancel.lock`. Failure-only failure-then-cancel uses one
+total `CLOCK_MONOTONIC_RAW` deadline. A successful nonblocking
+`operation.lock` acquisition starts one new total deadline for the normal
+operation-then-failure-then-cancel phase. In either phase both subordinate locks
+must be held strictly before 2.000 seconds. Otherwise the process releases every held lock,
+writes exactly `{"error_code":"dispatch_state_busy"}` plus LF to bounded
+stderr, writes no stdout event, exits 5, and makes no durable, model, or network
+mutation. This result occurs before durable worker attachment and is outside
+semantic exit 3. Failed records share the existing 256-record bounded history.
+Crash recovery compacts durable failure records without
+fabricating stdout or replaying work. The cancel process MUST NOT emit, merge,
+or synthesize an event and MUST NOT kill the worker. No `models transactions`
+family, public transaction-status
 schema, public crash or late-cancellation state, authority-refresh frame,
 daemon, background service, or new control-socket frame is part of this
 contract. A v2 Malibu invokes the unchanged read form only after observing the
@@ -3411,7 +3428,7 @@ and uses the static fallback with no mutation call. Production-boundary tests
 MUST launch the built CLI through Malibu's production process adapter and prove
 the complete matrix below, including exact stdout, stderr, exit status, and strict
 decoder behavior. Clients lacking the exact v2 capability/token retain the
-existing fallback and MUST NOT invoke the v2 mutation options. SPEC-044 v0.2.6
+existing fallback and MUST NOT invoke the v2 mutation options. SPEC-044 v0.2.7
 owns the
 projection, event, cancellation-acknowledgement, preparation-copy, action, and
 storage-accounting contracts.

@@ -85,19 +85,66 @@ class BYOMContractLockTests(unittest.TestCase):
             "exactly one terminal event",
             "exits 3",
             "creates no `active.json`, cancellation marker, staging or network work",
-            "failure-only path never acquires `operation.lock`, `cancel.lock`, a cleanup lock",
-            "aggregate 262,144-byte history cap",
+            "A failure-only path takes `failure.lock` then `cancel.lock`",
+            "262,144-byte cap",
             "at most one pending record exists",
-            "A crash before durable record publication",
-            "after the record is durable but before event flush",
+            "A crash before durable pending publication",
+            "after the pending record is durable but before event flush",
             "after event flush but before compaction",
             "during compaction",
-            "release every lock before writing or flushing stdout",
-            "cannot hold `failure.lock` or starve a valid dispatch",
-            "no deadlock, starvation of a valid dispatch, second live attempt, or incumbent displacement",
+            "No lock is held while stdout is written or flushed",
+            "makes no scheduler-fairness or starvation-free claim",
+            "no second live attempt, no cancellation marker for a failed dispatch, and no incumbent displacement",
         ):
             with self.subTest(required=required):
                 self.assertIn(required, spec044)
+
+    def test_catalog_transaction_lock_graph_and_bounded_contention_are_exhaustive(self):
+        spec001 = " ".join(read_text("specs/SPEC-001-phase3-binary.md").split())
+        spec044 = " ".join(
+            read_text("specs/SPEC-044-malibu-model-catalog-economics.md").split()
+        )
+
+        for required in (
+            "The catalog-economics v2 lock graph is exhaustive",
+            "projection writer",
+            "`operation.lock`, then `failure.lock`, then `cancel.lock`",
+            "`failure.lock` then `cancel.lock`",
+            "live non-cleanup worker that already retains `operation.lock` may "
+            "take `cancel.lock` directly only for one bounded periodic exact-marker read",
+            "`operation.lock`, then its one exact-target cleanup lock, then `cancel.lock`",
+            "No path ever holds a cleanup lock and `failure.lock` together",
+            "`operation.lock`, then `RecommendationAdoptionLock`, then the control socket, then the runtime reservation",
+            "No other nested acquisition or release order is permitted",
+            "periodic read-only operation-cancel path",
+            "one `CLOCK_MONOTONIC_RAW` deadline",
+            "strictly less than 2.000 seconds",
+            "Successful nonblocking acquisition changes the process into a pre-active normal worker",
+            "records a new one-total `CLOCK_MONOTONIC_RAW` deadline",
+            '`{"error_code":"dispatch_state_busy"}` followed by LF',
+            "typed pre-attachment process error is outside semantic exit 3",
+            "Malibu maps `dispatch_state_busy` to an actionable retry",
+            "successful new-pending publication/readback is the failed-dispatch terminal publication point",
+            "at the cancel linearization point",
+            "MUST return `terminal` with the record's exact `attempt_id`",
+            "Eviction is part of the replacement history snapshot and never a delete-before-copy operation",
+            "The process then exits 3 and does not reacquire a lock",
+            "The next failure-only writer compacts this complete pending record",
+            "every pairwise overlap",
+            "continuous arrivals",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, spec044)
+
+        for required in (
+            "SPEC-044 v0.2.7",
+            "`failure.lock`-then-`cancel.lock` lifecycle",
+            '`{"error_code":"dispatch_state_busy"}` plus LF',
+            "writes no stdout event",
+            "exits 5",
+        ):
+            with self.subTest(owner="SPEC-001", required=required):
+                self.assertIn(required, spec001)
 
     def test_spec044_current_version_is_cross_spec_locked(self):
         spec001 = read_text("specs/SPEC-001-phase3-binary.md")
@@ -105,25 +152,27 @@ class BYOMContractLockTests(unittest.TestCase):
         readme = read_text("specs/README.md")
         conformance = json.loads(read_text("specs/CONFORMANCE.json"))
 
-        self.assertIn("**Version:** 1.9.15", spec001)
-        self.assertIn("**Version:** 0.2.6", spec044)
-        self.assertIn('"version": "0.2.6"', spec044)
-        self.assertIn("SPEC-044 v0.2.6", spec001)
-        self.assertIn("| SPEC-001 | Phase 3 Binary: Mac Provider Inference CLI | 1.9.15 |", readme)
-        self.assertIn("| SPEC-044 | Malibu Model Catalog Economics | 0.2.6 |", readme)
+        self.assertIn("**Version:** 1.9.16", spec001)
+        self.assertIn("**Version:** 0.2.7", spec044)
+        self.assertIn('"version": "0.2.7"', spec044)
+        self.assertIn("SPEC-044 v0.2.7", spec001)
+        self.assertIn("| SPEC-001 | Phase 3 Binary: Mac Provider Inference CLI | 1.9.16 |", readme)
+        self.assertIn("| SPEC-044 | Malibu Model Catalog Economics | 0.2.7 |", readme)
         current_spec044 = spec044.split("## 8. Changelog and history", 1)[0]
+        self.assertNotIn("v0.2.6", current_spec044)
         self.assertNotIn("v0.2.4", current_spec044)
         self.assertNotIn("v0.2.5", current_spec044)
         spec001_record = next(
             record for record in conformance["specs"] if record["spec_id"] == "SPEC-001"
         )
-        self.assertEqual(spec001_record["version"], "1.9.15")
+        self.assertEqual(spec001_record["version"], "1.9.16")
         spec_record = next(
             record for record in conformance["specs"] if record["spec_id"] == "SPEC-044"
         )
-        self.assertEqual(spec_record["version"], "0.2.6")
+        self.assertEqual(spec_record["version"], "0.2.7")
         for requirement in conformance["requirements"]:
             if requirement["spec_id"] == "SPEC-044":
+                self.assertNotIn("SPEC-044 v0.2.6", json.dumps(requirement))
                 self.assertNotIn("SPEC-044 v0.2.5", json.dumps(requirement))
 
     def test_closed_admission_inventory_and_local_only_copy_are_truthful(self):

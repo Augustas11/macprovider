@@ -1,12 +1,12 @@
 # SPEC-044 - Malibu Model Catalog Economics
 
-**Version:** 0.2.6
+**Version:** 0.2.7
 
 ```json
 {
   "spec_id": "SPEC-044",
   "title": "Malibu Model Catalog Economics",
-  "version": "0.2.6",
+  "version": "0.2.7",
   "path": "specs/SPEC-044-malibu-model-catalog-economics.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -36,7 +36,7 @@
     "verdict": "DECISION_REQUIRED",
     "owner": "@Augustas11",
     "issue": "https://github.com/Augustas11/macprovider/issues/614",
-    "rationale": "The operator-owned v0.2.6 authority resolves the accepted formal Build 1 findings across conditional earning eligibility, source-aware admission copy, exact catalog-only trust and section isolation, compatibility fallback presentation, constructive non-live exit-3 failure dispatch, ACL creation, bounded cancellation, one authoritative total ranking, and canonically bound continuous-lock cleanup. Implementation, complete tests, signed release evidence, and the discovery/admission/settlement journeys remain pending."
+    "rationale": "The operator-owned v0.2.7 authority resolves the accepted formal Build 1 findings across conditional earning eligibility, source-aware admission copy, exact catalog-only trust and section isolation, compatibility fallback presentation, constructive bounded non-live exit-3 failure dispatch, an exhaustive lock graph, cancel-visible failed-dispatch serialization, ACL creation, bounded cancellation, one authoritative total ranking, and canonically bound continuous-lock cleanup. Implementation, complete tests, signed release evidence, and the discovery/admission/settlement journeys remain pending."
   }
 }
 ```
@@ -497,6 +497,70 @@ this precedence: malformed/stale action; operation conflict; authority or root
 identity; filesystem/resource bounds; storage budget/inventory; transfer;
 verification; publication or cleanup; cancellation; timeout; internal error.
 
+The catalog-economics v2 lock graph is exhaustive. A path may hold one lock by
+itself. Whenever it holds more than one lock, the only permitted acquisition
+orders, retention boundaries, and release rules are:
+
+1. A projection writer that creates, replaces, or removes any durable projected-
+   transaction reservation takes `operation.lock`, then `failure.lock`, then
+   `cancel.lock`. It retains all three from final immutable snapshot
+   revalidation through atomic reservation publication, parent full-sync, and
+   readback validation, then releases `cancel.lock`, `failure.lock`, and
+   `operation.lock` in reverse order. Projection construction that has not yet
+   taken these locks is speculative and cannot publish or remove a reservation.
+2. A normal or pre-active worker creating `active.json`, a normal worker
+   committing ordinary terminal/history state, and a startup or recovery worker
+   compacting ordinary or failed-dispatch terminal/history state takes
+   `operation.lock`, then `failure.lock`, then `cancel.lock`. It retains all
+   three across every cancel-visible state change and its durability/readback
+   barriers, then releases them in reverse order. A live worker may retain
+   `operation.lock` while doing bounded work, but it MUST hold both subordinate
+   locks before it creates active state, crosses a non-cleanup commit boundary,
+   or mutates terminal/history state. A final marker check under this sequence
+   retains all three through the applicable non-cleanup publication barrier,
+   then releases them in reverse order.
+3. A failure-only path creating, compacting, or evicting pending
+   or historical `failed_dispatch` state takes `failure.lock` then
+   `cancel.lock`, retains both across the complete atomic state transition and
+   durability/readback barriers, and releases `cancel.lock` then `failure.lock`.
+   A failure-only path takes `failure.lock` then `cancel.lock`; it never takes
+   `operation.lock` or any cleanup, adoption, socket, or runtime authority.
+4. A direct cancel process takes `failure.lock` then `cancel.lock`, retains both
+   across its complete bounded predicate read and optional exact-marker
+   publication/removal, then releases them in reverse order. It never takes
+   `operation.lock`, a cleanup lock, `RecommendationAdoptionLock`, the control
+   socket, or a runtime reservation, and it never mutates history, recovery,
+   cleanup phase, artifact, model, adoption, or runtime state.
+5. A live non-cleanup worker that already retains `operation.lock` may take
+   `cancel.lock` directly only for one bounded periodic exact-marker read. It
+   retains both only through that read, releases `cancel.lock` immediately, and
+   does not read or mutate failed-dispatch pending/history, ordinary terminal/
+   history, projected reservations, active state, or cleanup state, and does
+   not create, remove, or alter any marker.
+   Active creation, final marker check, commit, and terminal/history mutation
+   use item 2 instead.
+6. A published- or staging-cleanup mutation critical section takes
+   `operation.lock`, then its one exact-target cleanup lock, then `cancel.lock`.
+   It retains that sequence through the cleanup durability boundary specified
+   below and releases `cancel.lock` before the cleanup lock. If the same worker
+   must then commit or compact terminal/history state, it first durably
+   readback-validates cleanup state, releases the cleanup lock, retains
+   `operation.lock`, and only then takes `failure.lock` then `cancel.lock` under
+   item 2. No path ever holds a cleanup lock and `failure.lock` together.
+7. An adoption mutation takes `operation.lock`, then
+   `RecommendationAdoptionLock`, then the control socket, then the runtime
+   reservation. It releases the runtime reservation, socket, and adoption lock
+   in reverse order while retaining `operation.lock`. Any later active or
+   terminal/history mutation follows item 2; adoption/socket/runtime resources
+   are never held with `failure.lock`, `cancel.lock`, or a cleanup lock.
+
+No other nested acquisition or release order is permitted. In particular no
+path holding `failure.lock`, `cancel.lock`, a cleanup lock, an adoption lock, a
+control socket, or a runtime reservation may newly acquire `operation.lock`.
+No path holding `cancel.lock` may newly acquire `failure.lock`. All lock files
+use fixed process/file-descriptor resources; waiting never creates a task,
+thread, descriptor, or waiter per retry.
+
 Every syntactically and structurally valid `--run` has a constructive pre-work
 lifecycle. Before semantic freshness, availability, or operation-conflict
 checks, the initiating process MUST first validate the immutable projected
@@ -505,84 +569,130 @@ kind, non-null historical `event_model_key`, saved root locator and identity,
 complete immutable tuple, and projection/action binding digest MUST be present,
 closed, and mutually equal. A syntax, framing, identifier, schema, or immutable
 binding failure remains exit 2 and emits no event. After that validation the
-process creates its fresh `attempt_id`, acquires the private owner-mode `0600`
-`failure.lock`, and becomes the attached failure worker. The lock has no public
-schema and protects only pre-work semantic-check serialization,
-`failed_dispatch` records, and their bounded-history compaction.
+process creates its fresh `attempt_id` and records one `CLOCK_MONOTONIC_RAW`
+deadline immediately before its first attempt to acquire `failure.lock`.
+`failure.lock` and then `cancel.lock` must both be acquired while elapsed time
+is strictly less than 2.000 seconds; retries and spurious wakeups consume the
+same total deadline. Both locks are required to inspect semantic dispatch state,
+but lock ownership alone is not worker attachment. The process becomes the
+attached failure worker only when it selects a semantic exit-3 result and begins
+durable pending-record publication while retaining both locks. If both are not
+held when elapsed time reaches 2.000
+seconds, it releases any lock and every other resource it acquired, writes
+exactly one UTF-8 stderr line `{"error_code":"dispatch_state_busy"}` followed
+by LF, writes no stdout or event, exits 5, and makes zero durable/state/network/
+staging/model/adoption/runtime mutation. This typed pre-attachment process
+error is outside semantic exit 3 because durable worker attachment was never
+established. Malibu maps `dispatch_state_busy` to an actionable retry, keeps the
+projection outcome unresolved, and MUST NOT infer a terminal transaction.
 
-While holding `failure.lock`, the failure worker revalidates semantic action
-freshness and availability and the serialized durable conflict view. Every
-normal worker or recovery path that publishes, promotes, terminally compacts,
-or removes conflict-visible operation state MUST hold `operation.lock` and then
-`failure.lock`; it MUST never take those locks in the reverse order. A failure
-worker whose check finds stale, unavailable, or already-active state records
-that result without leaving `failure.lock`. Otherwise it releases
-`failure.lock` and makes exactly one nonblocking acquisition attempt on
-`operation.lock`; it MUST NOT wait for that lock. Failure to acquire it is
-`operation_conflict`: the process reacquires only `failure.lock`, revalidates
-that it has not become stale or unavailable under the error precedence, and
-records the winning exit-3 result without creating `active.json`. This conflict
-reporter never acquires `operation.lock` and is not a second active attempt.
-Successful acquisition changes the process into a pre-active normal worker. It
-takes `failure.lock` in the allowed operation-then-failure order, repeats the
-semantic and conflict-visible checks, and creates the one live `active.json`
-attempt only if they still pass. A newly stale or unavailable result is written
-under that allowed lock order without creating live state; the locks are
-released before stdout. No durable handoff claim exists between the two locks,
+While holding `failure.lock` then `cancel.lock`, the pre-attachment serializer
+revalidates semantic action freshness and availability and the serialized
+cancel-visible conflict view. A process whose check finds stale, unavailable,
+or already-active state becomes the attached failure worker and records that
+result while retaining both locks. Otherwise
+it releases both locks in reverse order and makes exactly one nonblocking
+acquisition attempt on `operation.lock`; it MUST NOT wait for that lock.
+Failure to acquire it is `operation_conflict`: within the original failure-only
+2.000-second deadline the process reacquires `failure.lock` then `cancel.lock`,
+revalidates that stale or unavailable has not won under the error precedence,
+becomes the attached failure worker, and records the winning exit-3 result. If
+it cannot reacquire both before the
+original deadline, it returns the exact pre-attachment `dispatch_state_busy`
+result above with no event or mutation. The conflict reporter never acquires
+`operation.lock` and is not a second active attempt.
+
+Successful nonblocking acquisition changes the process into a pre-active normal
+worker. While holding `operation.lock`, it records a new one-total
+`CLOCK_MONOTONIC_RAW` deadline and acquires `failure.lock` then `cancel.lock`;
+both must be held strictly before 2.000 seconds. It repeats the semantic and
+cancel-visible conflict checks and creates the one live `active.json` attempt
+only if they still pass. A newly stale or unavailable result is recorded by an
+attached failure worker under all three locks without creating live state. Deadline
+expiry releases every held lock and resource and returns the same exact
+`dispatch_state_busy` stderr/no-event/exit-5 result with zero mutation. No
+durable handoff claim exists between the failure-only and pre-active episodes,
 so a crash in that interval leaves no claim or live attempt to recover.
-The failure-only path never acquires `operation.lock`, `cancel.lock`, a cleanup
-lock, `RecommendationAdoptionLock`, a runtime reservation, or the control
-socket, and never waits for any of them while holding `failure.lock`.
 
 For semantic `stale_transaction`, `action_unavailable`, or
-`operation_conflict`, the attached pre-work process MUST, before writing stdout, atomically
-persist and read back one private record no larger than 16,384 bytes. The closed
-record contains exactly `schema: "model_catalog_failed_dispatch.v1"`,
-`transaction_id`, fresh `attempt_id`, `transaction_kind`, immutable non-null
-`event_model_key`, `root` containing the complete saved root locator/identity
-object, `tuple_sha256`, `projection_binding_sha256`, `event_sequence: 1`,
-`terminal_state: "failed"`, the applicable `error_code`, and
-`live_attempt: false`. Both digests are lowercase 64-hex and bind the exact
-validated tuple and exact bounded projected-action reservation bytes; the root
-object has the path/device/inode/version/digest fields required of every private
-reopening record. The record contains no model path outside that private root
-locator, feed body, URL, provider credential or identifier, prompt, completion,
-raw error, or other unbounded text. It creates no `active.json`, cancellation
-marker, staging or network work, model mutation, runtime/adoption mutation, or
-incumbent displacement. Once the record is durable, the attached process emits
-exactly one terminal event with matching transaction ID/kind,
-`model_key: event_model_key`, `event_sequence: 1`, `state: "failed"`, null
-progress and warning, and the recorded error code. It MUST release every lock
-before writing or flushing stdout, so pipe backpressure or a disconnected app
-cannot hold `failure.lock` or starve a valid dispatch. After the event write
-returns, it reacquires only `failure.lock`, idempotently compacts the record
-into bounded terminal history if another process or recovery has not already
-done so, releases that lock, and exits 3. Failure to make the record durable is
-an internal-processing failure: it emits no unbound event and exits 5.
+`operation_conflict`, the attached pre-work process MUST, before writing stdout,
+atomically persist and read back one private record no larger than 16,384 bytes.
+The closed record contains exactly `schema: "model_catalog_failed_dispatch.v1"`,
+`transaction_id`, fresh `attempt_id`,
+`transaction_kind`, immutable non-null `event_model_key`, `root` containing the
+complete saved root locator/identity object, `tuple_sha256`,
+`projection_binding_sha256`, `event_sequence: 1`, `terminal_state: "failed"`,
+the applicable `error_code`, and `live_attempt: false`. Both digests are
+lowercase 64-hex and bind the exact validated tuple and exact bounded projected-
+action reservation bytes; the root object has the path/device/inode/version/
+digest fields required of every private reopening record. The record contains
+no model path outside that private root locator, feed body, URL, provider
+credential or identifier, prompt, completion, raw error, or other unbounded
+text. It creates no `active.json`, cancellation marker, staging or network work,
+model mutation, runtime/adoption mutation, or incumbent displacement.
 
-Failed-dispatch records are terminal at creation and are never cancellable or
-live. A cancel read may recognize one only as terminal history and MUST NOT
-create a marker. Pending failed-dispatch plus ordinary terminal history share
-one global limit of 256 records and an aggregate 262,144-byte history cap; a
-failed-dispatch record consumes both limits exactly like an ordinary terminal
-record. Under `failure.lock`, a
-new failure compacts any earlier complete failed-dispatch record and applies the
-same deterministic oldest-terminal eviction before it creates one new pending
-record, so at most one pending record exists. A normal or startup recovery
-compactor takes `operation.lock` and then `failure.lock`; a failure worker may
-compact its own record under `failure.lock` alone and never then acquire
-`operation.lock`. A crash before durable record publication leaves only a
-recognized unique temp for bounded cleanup and no terminal claim. A crash after
-the record is durable but before event flush, after event flush but before
-compaction, or during compaction preserves the same immutable terminal record;
-recovery compacts it exactly once into history, never creates live state, never
-emits replacement stdout without an attached invocation, and never replays
-network, staging, cancellation, adoption, or model work. The app treats an
-interrupted stream as interrupted and refreshes; recovery does not fabricate
-delivery. These lock orders and bounds MUST be exercised under concurrent stale,
-unavailable, conflict, successful-dispatch, crash, and compaction schedules to
-prove no deadlock, starvation of a valid dispatch, second live attempt, or
-incumbent displacement.
+All `failed_dispatch` pending/history creation, compaction, recovery, and
+oldest-terminal eviction occurs while holding at least `failure.lock` then
+`cancel.lock`; startup/recovery first holds `operation.lock` as required by
+graph item 2.
+Pending failed-dispatch plus ordinary terminal history share one global limit of
+256 records and an aggregate 262,144-byte cap; a failed-dispatch record consumes
+both limits exactly like an ordinary terminal record, and at most one pending
+record exists. The writer first constructs the complete bounded replacement
+history in a recognized unique temp, including idempotent incorporation of any
+prior pending record and deterministic eviction, fully syncs the temp, atomically
+renames it, fully syncs its parent, and readback-validates it. It then publishes
+the new pending record through its own synced unique temp, atomic rename, parent
+full-sync, and readback validation. Compaction uses the same order: first publish
+and readback-validate a history snapshot containing the pending terminal record,
+then unlink the pending record, full-sync its parent, and read back the coherent
+history. A crash may leave the same record in both places; identity-based
+recovery deduplicates it. It MUST never leave a durable interval in which a
+previously durable terminal record exists in neither place. Eviction is part of
+the replacement history snapshot and never a delete-before-copy operation.
+
+The successful new-pending publication/readback is the failed-dispatch terminal
+publication point. A direct cancel linearizes its predicate while holding the
+same `failure.lock` then `cancel.lock`. Whenever that failed dispatch is durable
+in pending or history at the cancel linearization point, cancel MUST return
+`terminal` with the record's exact `attempt_id`, never `recorded`,
+`already_recorded`, `stale`, or `not_active`, and it MUST never create a marker.
+Injected cancel reads between
+every temp sync, rename, parent barrier, readback, pending unlink, history
+replacement, eviction, and recovery step therefore observe only the state on
+one side of the lock-protected transition.
+
+Once the pending record is durable, the attached process releases
+`cancel.lock` then `failure.lock`, emits exactly one terminal event with matching
+transaction ID/kind, `model_key: event_model_key`, `event_sequence: 1`,
+`state: "failed"`, null progress and warning, and the recorded error code. No
+lock is held while stdout is written or flushed. The process then exits 3 and
+does not reacquire a lock. The next failure-only writer compacts this complete
+pending record before publishing another one; startup/recovery may compact it
+under graph item 2. Failure to make the initial pending record durable emits no
+unbound event and exits 5.
+
+A crash before durable pending publication leaves only a recognized unique temp
+for bounded cleanup and no terminal claim. A crash after the pending record is
+durable but before event flush, after event flush but before compaction, or
+during compaction preserves the same immutable terminal record. Recovery takes
+`operation.lock`, then `failure.lock`, then `cancel.lock`, compacts it exactly
+once into history, never creates live state, never emits replacement stdout
+without an attached invocation, and never replays network, staging,
+cancellation, adoption, or model work. The app treats an interrupted stream as
+interrupted and refreshes; recovery does not fabricate delivery.
+
+The contract makes no scheduler-fairness or starvation-free claim. Under
+continuous arrivals every acquisition episode has fixed waiter, descriptor,
+memory, and two-second monotonic bounds; timeout releases partial ownership and
+preserves the last durable coherent state. Deterministic lock-trace tests MUST
+cover every graph path and every pairwise overlap among projection publication,
+failed-dispatch creation/compaction/eviction/recovery, pre-active creation,
+ordinary terminal/history compaction, direct cancellation, both cleanup paths,
+and adoption. They must prove the permitted order, exact retention/release
+points, absence of reverse acquisition and deadlock, coherent fail-closed
+resource release under sustained arrivals, no second live attempt, no
+cancellation marker for a failed dispatch, and no incumbent displacement.
 
 Machine transport is constant-space. Projection-read stdout is capped at
 4,194,304 bytes and cancel-ack stdout at 4,096 bytes. The attached run adapter
@@ -623,53 +733,56 @@ that the bounded lock-acquisition deadline below expired. It is a syntactically
 valid acknowledgement with exit 0, not an error or a claim about transaction
 state.
 
-After acquiring `cancel.lock`, the cancel process MUST validate bounded active,
-terminal-history, projected-transaction, and marker records and choose the
-first matching predicate in this total precedence:
+The direct cancel process records one `CLOCK_MONOTONIC_RAW` deadline immediately
+before attempting `failure.lock`, then acquires `failure.lock` followed by
+`cancel.lock`. Both locks must be held while elapsed time is strictly less than
+2.000 seconds; retries and spurious wakeups consume the same total deadline. If
+both are not held when elapsed time reaches 2.000 seconds, it releases any held
+lock and every other resource, returns exactly one valid `busy`
+acknowledgement, and exits 0. It MUST NOT read state as though serialized,
+create or remove a marker, mutate history or any cleanup phase, or infer any
+in-lock predicate. Each cancel process uses one waiter and fixed memory/file-
+descriptor resources; it MUST NOT create a task, thread, descriptor, or
+additional waiter per retry or spurious wakeup.
 
-1. `terminal`: the requested transaction has a durable matching attempt whose
-   terminal state was committed, regardless of a leftover exact marker;
+After acquiring `failure.lock` then `cancel.lock`, the cancel process MUST
+validate bounded active, terminal-history, failed-dispatch pending, projected-
+transaction, and marker records and choose the first matching predicate in this
+total precedence:
+
+1. `terminal`: the requested transaction has a durable matching ordinary or
+   failed-dispatch attempt whose terminal state was committed, regardless of a
+   leftover exact marker;
 2. `already_recorded`: the requested transaction is the durable current
    nonterminal attempt and an exact marker for its transaction and attempt is
    already durable;
 3. `recorded`: the requested transaction is the durable current nonterminal
    attempt without its exact marker; the cancel process removes only a
-   validated marker bound to an older attempt, durably creates and
-   readback-validates the current exact marker, and then acknowledges;
+   validated marker bound to an older attempt, durably creates and readback-
+   validates the current exact marker, and then acknowledges;
 4. `stale`: validated bounded state proves that the requested transaction
    existed but is no longer the cancellable current attempt, including a
    different current attempt or a mismatched prior-attempt marker; and
-5. `not_active`: no active, terminal, projected, or bounded-history record
-   recognizes the requested transaction and no marker names it.
+5. `not_active`: no active, terminal, failed-dispatch pending, projected, or
+   bounded-history record recognizes the requested transaction and no marker
+   names it.
 
-`busy` is outside this in-lock precedence. The process can return it only when
-it did not acquire `cancel.lock` before the acquisition deadline, so it MUST NOT
-read state as though serialized, create or remove a marker, mutate any cleanup
-phase, or infer any of predicates 1 through 5.
-
-A malformed record fails the cancel command closed with exit 5 and no
-acknowledgement rather than being classified as `not_active`. Concurrent
-terminal compaction cannot change the result within this decision because the
-worker holds `cancel.lock` across its durable terminal commit, exact-marker
-sweep, and operation-lock release.
-
-The cancel process serializes marker mutation with a bounded cancel lock. It
-starts a monotonic deadline immediately before its first acquisition attempt
-and waits for no more than 2.000 seconds total, including spurious wakeups and
-retries. Acquisition before the deadline enters the in-lock precedence above;
-deadline expiry returns exactly one `busy` acknowledgement and exits 0. Each
-cancel process uses one lock waiter and fixed memory/file-descriptor resources;
-it MUST NOT create a task, thread, descriptor, or additional waiter per retry or
-spurious wakeup. The worker checks the marker at least every 250 ms and in each
-bounded work loop.
+`busy` is outside this in-lock precedence. A malformed record fails the cancel
+command closed with exit 5 and no acknowledgement rather than being classified
+as `not_active`. All writers of cancel-visible active, terminal, failed-
+dispatch, projected-reservation, and marker state hold the compatible lock
+sequence from the exhaustive graph, so no such publication, compaction, or
+eviction can change the predicate while the direct cancel retains both locks.
+The worker checks a durable marker at least every 250 ms and in each bounded
+work loop.
 If cancellation wins before the applicable commit point, the worker emits
 `cancel_requested` once and then terminal `cancelled` after cleanup. After the
-commit point it emits only `succeeded` or `failed`. For terminal compaction the
-worker holds the operation lock, takes the cancel lock, durably commits terminal
-state, removes only the exact matching marker, releases the operation lock
-while retaining the cancel lock, and then releases the cancel lock. A new
-worker takes locks in the same operation-then-cancel order and removes only a
-stale prior-attempt marker before persisting its new attempt. Thus a late marker
+commit point it emits only `succeeded` or `failed`. For ordinary terminal
+compaction the worker retains `operation.lock`, takes
+`failure.lock` then `cancel.lock`, durably commits terminal/history state,
+removes only the exact matching marker, and releases all three in reverse order.
+A new worker takes the same operation-then-failure-then-cancel order and removes
+only a stale prior-attempt marker before persisting its new attempt. Thus a late marker
 cannot cross terminal or new-attempt boundaries. The acknowledgement carries
 no event sequence or terminal-success assertion; Malibu continues the worker
 stream and refreshes the projection for authoritative state.
@@ -699,6 +812,10 @@ and full-sync of `tombstoned`, and readback validation of that phase. Only then
 may it release `cancel.lock`. It subsequently descriptor-validates and removes
 only the recorded tombstone contents and leaf, fully syncs the parent, persists
 and readback-validates `removed`, clears the record, and refreshes inventory.
+After the final cleanup state is durable it releases the cleanup lock while
+retaining `operation.lock`. Only then may it take `failure.lock` followed by
+`cancel.lock` to commit ordinary terminal/history state; it never holds the
+cleanup lock and `failure.lock` together.
 
 Cancellation wins whenever an exact marker is durable before `tombstoned`
 becomes durable. Under `intent`, if no rename occurred, the worker durably
@@ -725,16 +842,23 @@ tombstone present resumes exact deletion; tombstone absent and final absent
 permits durable `removed`; final present fails closed. With `removed`, both
 absent permits record clear and any target present fails closed. Recovery MUST
 NOT report `cancelled` after durable `tombstoned` evidence.
+Before recovery commits or compacts ordinary terminal/history state it must
+durably readback-validate the applicable cleanup state, release the cleanup
+lock while retaining `operation.lock`, and then acquire `failure.lock` followed
+by `cancel.lock`. Recovery never holds a cleanup lock and `failure.lock`
+together.
 
-The cancel process takes only `cancel.lock`. It validates bounded active,
-history, marker, and cleanup phase records solely to select the total
-acknowledgement predicate, and it may durably remove a validated stale marker
-or create/readback-validate the current exact marker as specified above. It
-MUST NOT take an operation or cleanup lock; rename or restore a final or
-tombstone; repeat an object-parent barrier; advance, clear, repair, or otherwise
-mutate a cleanup phase record; delete an artifact; or emit an event. If a worker
-or recovery path holds `cancel.lock`, the bounded cancel call waits only until
-its monotonic deadline. A process that acquires the lock in time observes the
+The direct cancel process takes `failure.lock` then `cancel.lock`. It validates
+bounded active, history, failed-dispatch pending, marker, and cleanup phase
+records solely to select the total acknowledgement predicate, and it may
+durably remove a validated stale marker or create/readback-validate the current
+exact marker as specified above. It MUST NOT mutate terminal/history or recovery
+state; take an operation, cleanup, or adoption lock, control socket, or runtime
+reservation; rename or restore a final or tombstone; repeat an object-parent
+barrier; advance, clear, repair, or otherwise mutate a cleanup phase record;
+delete an artifact; or emit an event. If a worker or recovery path holds either
+required lock, the bounded cancel call waits only until its shared monotonic
+deadline. A process that acquires the lock in time observes the
 resulting phase; one that does not returns `busy` without mutation. After a
 crash leaves `intent` with only the tombstone, a cancel process that obtains the
 lock before recovery and before its deadline records the exact marker and leaves
@@ -750,8 +874,9 @@ discipline inside the attempt's staging parent. Durable, readback-validated
 `tombstoned` is its sole commit evidence. Its worker or recovery owns all phase
 mutation under operation/cleanup-then-cancel lock order and holds `cancel.lock`
 across the final marker check, rename, parent `fsync`/`F_FULLFSYNC`, and durable
-phase commit. Its cancel process takes only `cancel.lock`, records the exact
-marker, and never mutates staging recovery state. A precommit crash with a
+phase commit. Its direct cancel process takes `failure.lock` then `cancel.lock`,
+records the exact marker, and never mutates staging recovery state. A precommit
+crash with a
 marker restores and preserves the staging root plus
 `staging_cleanup_required`; the same state without a marker resumes and commits
 cleanup. After durable `tombstoned`, cleanup or recovery removes only the
@@ -759,6 +884,10 @@ recorded tombstone and terminates `succeeded` or recoverable `cleanup_failed`,
 never `cancelled`. A retry resumes the durable phase for the same identity and
 MUST NOT create a second tombstone, delete published or legacy data, or turn
 incomplete recovery into success.
+Before committing ordinary terminal/history state, the worker or recovery path
+durably readback-validates staging cleanup state, releases the staging cleanup
+lock while retaining `operation.lock`, and then acquires `failure.lock` followed
+by `cancel.lock`; the cleanup and failure locks are never held together.
 
 The supported cancellation-latency profile uses a monotonic start at completion
 of the exact cancellation marker's parent full-sync, worker observation at its
@@ -898,8 +1027,9 @@ marker custody. Malibu MUST continue consuming the attached worker's event
 stream and MUST NOT render cancellation complete until that worker emits
 terminal `cancelled`; `terminal`, `not_active`, and `stale` likewise
 require a fresh projection before Malibu represents current artifact state.
-`busy` proves only that the cancel process did not acquire `cancel.lock` within
-2.000 monotonic seconds. Malibu MUST allow at most one live cancel subprocess
+`busy` proves only that the cancel process did not acquire both `failure.lock`
+and `cancel.lock` within the one total 2.000-second monotonic deadline. Malibu
+MUST allow at most one live cancel subprocess
 per transaction, coalesce or disable repeated cancel triggers while it is live,
 and release every process/pipe resource after acknowledgement and exit. It MUST
 NOT represent the transaction as cancelled and MAY issue a later distinct
@@ -930,8 +1060,11 @@ reconciliation.
   and acknowledgement stdout, incremental JSONL with arbitrary chunks and
   overlong no-newline input, 65,536-byte stderr truncation/drain, sustained
   maximum event rate, fixed 64-event delivery capacity/coalescing/backpressure,
-  `busy` after the two-second monotonic lock deadline with bounded repeated
-  waiters, and exact built-CLI stdout/stderr through Malibu's production adapter.
+  direct-cancel `busy` after the shared failure-then-cancel two-second monotonic
+  deadline with bounded repeated waiters; exact pre-attachment
+  `dispatch_state_busy` stderr/no-event/exit-5 handling for failure-only and
+  operation-owning pre-active acquisition; and exact built-CLI stdout/stderr
+  through Malibu's production adapter.
 - **Filesystem/recovery/security lane:** root locator and digest construction,
   copied/rebound/remounted roots, preparation and both cleanup state machines,
   orphan historical event correlation, bounded storage accounting, and the
@@ -1027,44 +1160,67 @@ boundaries:
   coordinator state and reject any no-event row with a candidate/source/digest,
   timestamp, state, or guidance mismatch;
 - table-test the in-lock cancellation-ack predicate precedence under concurrent
-  active, terminal, projected, history, exact-marker, mismatched-marker, and
-  new-attempt states, including transaction echo and exact attempt nullability;
-  separately prove `busy` is outside that precedence, echoes the transaction,
-  has null attempt ID, exits 0, and performs no marker or phase mutation after
-  exactly 2.000 monotonic seconds. Inject a slow or stuck sync with one waiter,
-  then repeated cancel calls, and prove subprocess/task/file-descriptor counts
-  stay bounded and a later call observes state after worker/recovery release;
-  race cancel, crash, recovery, and retry at rename, after each parent barrier,
+  active, ordinary terminal, failed-dispatch pending/history, projected,
+  exact-marker, mismatched-marker, and new-attempt states, including transaction
+  echo and exact attempt nullability. Direct cancel MUST trace
+  `failure.lock` then `cancel.lock` under one injected `CLOCK_MONOTONIC_RAW`
+  deadline. Exercise acquisition immediately below and exactly at 2.000 seconds
+  for contention on the first lock and on the second after the first is held.
+  At expiry require release of any partial lock, exact `busy` with null attempt,
+  exit 0, no state read, no marker/history/phase mutation, and fixed waiter/task/
+  descriptor/memory counts under sustained arrivals. After timely acquisition,
+  prove the process performs only bounded predicate reads and exact-marker
+  create/removal; it takes no operation, cleanup, adoption, socket, or runtime
+  authority and never performs history compaction or recovery;
+- race cancel, crash, recovery, and retry at rename, after each parent barrier,
   before/during/after durable phase persistence, and before and after every
-  preparation, published-cleanup, and staging-cleanup commit phase.
-  Inject a crash after the parent barrier but before durable `tombstoned`, then
-  prove a marker recorded before recovery restores the final while no marker
-  resumes to durable `tombstoned`; prove the cancel process takes only
-  `cancel.lock` and never mutates a recovery phase, and prove worker/recovery
-  hold the ordered operation/cleanup-then-cancel locks across their final marker
-  check, rename, barriers, and durable phase commit. Prove a live cancel cannot
-  acquire `cancel.lock` anywhere inside that protected interval; the only marker
-  race after rename/barrier and before `tombstoned` is constructible by crashing
-  the lock holder and acquiring the released lock before recovery;
-- table-test the exit-3 pre-work lifecycle after valid immutable action
-  identity. For stale, unavailable, and conflict, require a fresh attempt and
-  one durable closed `model_catalog_failed_dispatch.v1` record with the exact
-  transaction/kind/event-key/root/tuple/projection binding, sequence 1, matching
-  failure code, and `live_attempt: false` before exactly one terminal failed
-  event and exit 3. Prove zero `active.json`, marker, network, staging, model,
-  adoption, runtime, or incumbent mutation. Crash before record publication,
-  after durable record and before event flush, after event flush and before
-  compaction, and during compaction; require bounded unique-temp recovery,
-  idempotent history compaction without fabricated stdout, and no replay of
-  work. Saturate and evict across the shared 256-record history limit. Race
-  stale, unavailable, conflict, successful nonblocking dispatch handoffs, normal terminal
-  compaction, and startup recovery: `failure.lock` alone protects failure-only
-  state, successful promotion and normal/recovery compaction use
-  operation-then-failure order, failure-only workers acquire none of the other
-  locks, every lock is released before terminal stdout, and blocked or
-  disconnected output cannot retain `failure.lock`; the suite proves no reverse
-  acquisition, deadlock, valid-dispatch starvation, second live attempt,
-  cancellation marker, or incumbent displacement;
+  preparation, published-cleanup, and staging-cleanup commit phase. Inject a
+  crash after the parent barrier but before durable `tombstoned`, then prove a
+  marker recorded before recovery restores the final while no marker resumes to
+  durable `tombstoned`. Prove worker/recovery hold
+  operation-then-cleanup-then-cancel across final marker check, rename, barriers,
+  and durable phase commit; after durable cleanup state they release cleanup
+  before acquiring operation-then-failure-then-cancel for terminal/history
+  compaction. Prove cleanup and failure locks never overlap. A live cancel cannot
+  acquire `cancel.lock` inside the protected interval; the only marker race after
+  rename/barrier and before `tombstoned` follows a crash that released the locks;
+- table-test the exit-3 pre-work lifecycle after valid immutable action identity.
+  For stale, unavailable, and conflict, require a fresh attempt and one durable
+  closed `model_catalog_failed_dispatch.v1` record with the exact transaction/
+  kind/event-key/root/tuple/projection binding, sequence 1, matching failure code,
+  and `live_attempt: false` before exactly one terminal failed event and exit 3.
+  A failure-only path traces `failure.lock` then `cancel.lock` under one total
+  two-second deadline. A pre-active path holding `operation.lock` has one new
+  total two-second deadline to acquire `failure.lock` then `cancel.lock`. At
+  either deadline, require all locks/resources released, exact single stderr
+  line `{"error_code":"dispatch_state_busy"}` plus LF, empty stdout, exit 5,
+  no event, actionable Malibu retry without terminal inference, and zero durable,
+  state, network, staging, model, adoption, runtime, or incumbent mutation;
+- inject reads between every failed-dispatch unique-temp sync, atomic rename,
+  parent full-sync, readback, replacement-history publication, deterministic
+  eviction, pending publication/unlink, and recovery step. Prove writers hold
+  `failure.lock` then `cancel.lock` for the entire transition, history is
+  published before pending unlink, crash duplicates deduplicate by identity, and
+  no durable terminal exists in neither place. Whenever the failed dispatch is
+  durable in pending or history at the cancel linearization point, direct cancel
+  must return only `terminal` with the exact attempt and create no marker. Cover crash before
+  record publication, after durable record and before event flush, after event
+  flush and before later compaction, and during compaction; require bounded temp
+  recovery, idempotent history compaction, no fabricated stdout, and no work
+  replay. Saturate and evict across the shared 256-record/262,144-byte cap;
+- run deterministic lock-trace tests for projection-reservation writers,
+  failure-only creation/compaction/eviction, pre-active/live active creation,
+  ordinary terminal/history compaction, startup and failed-dispatch recovery,
+  direct cancellation, published cleanup, staging cleanup, and adoption. Exercise
+  every pairwise overlap and assert the exhaustive permitted orders exactly:
+  operation-failure-cancel, failure-cancel, the periodic read-only
+  operation-cancel path, operation-cleanup-cancel, and operation-adoption-
+  socket-runtime. Assert exact reverse releases and the
+  cleanup-to-terminal release/reacquire boundary, no other nested order, no
+  cleanup/failure overlap, no lock held across stdout, no reverse acquisition or
+  deadlock, bounded fail-closed resources under continuous arrivals, no second
+  live attempt, no cancellation marker for failed dispatch, and no incumbent
+  displacement. Do not claim or infer scheduler fairness or starvation freedom;
 - inject volume capacities immediately below, at, and above the default
   1-TiB/70-percent crossover and non-divisible capacities; test checked
   overflow; YAML-only, environment-only, and both-source precedence; reject
@@ -1145,13 +1301,13 @@ The first journey id is `JOURNEY-MALIBU-MODEL-ECONOMICS`. The journey should cov
 
 | Requirement/domain | Verdict | Owner | Issue | Evidence needed |
 |---|---|---|---|---|
-| `SPEC-044-R001..R012` | `DECISION_REQUIRED` | `@Augustas11` | `#614` | Implement the approved v0.2.6 projection, transaction, failed-dispatch, cancellation, preparation-copy, cleanup, and accounting authority; then decide promotion only after automated tests and signed release evidence. |
+| `SPEC-044-R001..R012` | `DECISION_REQUIRED` | `@Augustas11` | `#614` | Implement the approved v0.2.7 projection, transaction, failed-dispatch, cancellation, preparation-copy, cleanup, and accounting authority; then decide promotion only after automated tests and signed release evidence. |
 | `malibu-model-economics-ux` | `DECISION_REQUIRED` | `@Augustas11` | `#614` | Implement the operator-approved CLI-owned projection and Malibu rendering without app-side feed verification; production enablement remains an operator decision. |
 | `SPEC-046/SPEC-047 integration` | `DECISION_REQUIRED` | `@Augustas11` | `#1240` | Approval that SPEC-044 is narrowed to network economics and does not own provider-local BYOM discovery or network admission. |
 
 ## 6. Evidence
 
-Current implementation evidence predates the v0.2.6 Build 1 authority and is
+Current implementation evidence predates the v0.2.7 Build 1 authority and is
 partial and non-conformant:
 
 - `phase3-binary/app/Sources/Malibu/ModelManagement/ModelManagement.swift` already capability-gates model management and classifies current, ready, preparation-required, and blocked rows, but its row schema does not carry rate-card economics.
@@ -1181,6 +1337,15 @@ The app should preserve the current provider mental model: Malibu observes and a
 
 ## 8. Changelog and history
 
+- 0.2.7 - Resolves the formal v7 authority findings: one exhaustive lock graph
+  governs projection publication, failure-only processing, normal and recovery
+  state, direct cancellation, cleanup, and adoption; all cancel-visible failed-
+  dispatch state uses failure-then-cancel serialization; direct cancel and pre-
+  attachment run paths have one total two-second monotonic deadline and exact
+  fail-closed outcomes; terminal pending/history movement is copy-before-delete
+  with a precise cancel linearization point; and release tests cover every lock
+  trace, pairwise overlap, durability interleaving, and sustained-arrival bound.
+  Conformance remains pending.
 - 0.2.6 - Resolves the formal v6 authority findings: every malformed or stale
   catalog-economics advertisement uses the silent no-call static card while
   failures after a valid exclusive pair use the exact unavailable warning and
