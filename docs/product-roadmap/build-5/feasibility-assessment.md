@@ -2,7 +2,7 @@
 
 Date: 2026-09-11
 
-Assessment revision: `build5-assessment-r3`
+Assessment revision: `build5-assessment-r4`
 
 Repository base: `1d2c930bad81704dd0acc0322226725d8b64aceb`
 
@@ -173,6 +173,20 @@ Current gather-feeds-SDPA restores contiguous K/V before stock attention, so
 its transient gather term must be measured. It cannot support a peak-memory-
 reduction claim.
 
+The calibration algorithm is executable and frozen: five exact-shape dry runs
+use five clean worker starts. Each start first records ten unloaded host minutes,
+then loads the adopted read-only artifact, performs five fixed warm-ups, holds
+nominal/fair thermal state for 60 seconds, and captures exactly 600 paired
+loaded-idle samples at 100 ms. Per-start loaded idle is the sample maximum;
+the manifest uses the maximum across starts. Each target delta subtracts its
+own start's loaded-idle maximum from the maximum of sampled physical footprint
+and the process lifetime physical-footprint high-water; the campaign uses the
+maximum of all five deltas and analytical KV pool bytes. No failed calibration
+run is replaced. A platform without the lifetime high-water counter adds the
+separate frozen polling-gap allowance defined in the test specification and
+remains development-only. The unloaded window diagnoses ambient host state; it
+never substitutes for the post-load baseline in the envelope.
+
 | Model/config assumption | fp16 KV/token | 8K row | 32K row | 64K row | 128K row |
 |---|---:|---:|---:|---:|---:|
 | Llama 3.2 3B: 28 layers, 8 KV heads, head dim 128 | 112 KiB | 0.875 GiB | 3.5 GiB | 7 GiB | 14 GiB |
@@ -216,7 +230,14 @@ Work that can proceed now:
   resident-model leases. Its modes are idle, serial-running, batch-running,
   draining, and failed. Unsupported serial work waits for batch quiescence;
   batch work waits for all serial leases; cancellation releases only after the
-  executor exits; failure and warm swap drain before a new generation;
+  executor exits; failure and warm swap drain before a new generation. The
+  contract fixes 120-second forward and 900-second granted-request execution
+  deadlines, atomic opposite-mode admission closure with 250 ms acknowledgement,
+  250 ms queued cancellation,
+  5-second active cancellation acknowledgement, 1-second post-
+  quiescence handoff, 30-second quiescent drain, 10-second process fencing, and
+  906-second healthy grant and 920-second terminal disposition for a queued
+  mode waiter;
 - preserve the serial path and strict/canary behavior;
 - bind accepted and queued work to the model/tokenizer/weights generation;
 - prove per-request output, stop, usage, receipt, cancellation, and block
@@ -248,8 +269,14 @@ fresh SwiftPM parity pass required manually placing a metallib in the test
 bundle. Its source also selects the first snapshot directory and creates a
 descriptor with zero model/metallib hashes. The R3 evidence inventory binds
 the observed bytes, but the result remains exploratory. A qualifying harness
-must require the exact snapshot revision, verify its canonical file manifest,
-derive non-dummy descriptor hashes, and reject ambiguity before load.
+must require the exact snapshot revision and use only an adopted read-only APFS
+image containing the entire model snapshot, signed runtime package, and frozen
+campaign directory. Its closed loader manifest recursively binds every model, shard/index,
+config, tokenizer/template, resource, metallib, executable, dependency/runtime
+selection, and non-platform dynamic-library byte. It rejects symlinks,
+unreferenced shards, custom/remote code, undeclared selectors, and any pre/post
+identity or content mutation, derives non-dummy descriptor hashes, and rejects
+ambiguity before load.
 
 ### Stage C — integration and release candidate
 
@@ -286,6 +313,14 @@ MSB-05 uses 100 paired runs and a fixed-seed 50,000-resample paired percentile
 bootstrap. Smaller samples report descriptive unavailable tails and cannot
 promote a tuple.
 
+The versioned disturbance matrix fixes all prompt bins, output ceilings,
+arrival cadence, concurrency cap, request/cell timeouts, request count, clean-
+start count, and injection boundary. It includes `REF-TTFT-512-R1`,
+`SLOW-CONSUMER-500-R1`, `CANCEL-2000-R1`, the three `WARM-SWAP-*-R1` cells,
+three whole-batch decode-step failures, and three request-local extension
+failures. MSB-01 additionally requires aggregate-TG coefficient of variation
+at most 10%; an unstable baseline cannot promote MSB-02/03.
+
 ### Stage E — separately authorized canary
 
 Only after Stages A-D, audits, and applicable SPEC gates may a later task
@@ -307,8 +342,11 @@ Serial fallback is mediated by the same execution arbiter as batching. It is
 not an independent escape hatch: the resident generation is always in serial
 or batch execution mode, never both. Scheduler failure moves it to draining;
 only invisible request-local work may reacquire a serial lease after full
-quiescence. Warm swap similarly requires all leases, accepted work, blocks,
-and delivery tasks to resolve before the generation changes.
+quiescence. A deadline overrun fails the generation and requires supervised
+worker exit or fencing; no in-process lease or resident model is reused. Warm
+swap similarly requires old-worker exit and all leases, accepted work, blocks,
+queues, and delivery tasks to resolve before the generation changes. A timed-
+out swap leaves the new generation unpublished.
 
 Cancellation must be tested while queued, during prefill, during decode, and
 after the delivery side disconnects. No token may be emitted after cancellation

@@ -2,7 +2,7 @@
 
 Date: 2026-09-11
 
-Evidence revision: `build5-evidence-r3`
+Evidence revision: `build5-evidence-r4`
 
 Repository source base: `1d2c930bad81704dd0acc0322226725d8b64aceb`
 
@@ -105,13 +105,29 @@ SwiftPM workspace-state/checkouts above bind what actually ran; this is another
 reason the run cannot substitute for the protected locked-resolution release
 path.
 
-A qualifying future harness must accept a declared snapshot revision, resolve
-that exact directory, reject absent or additional candidates unless explicitly
-selected, verify the canonical file manifest before model load, derive the
-model/metallib descriptor hashes from those verified bytes, reject zero/dummy
-authority, record the executable and dependency-lock hashes, and write the
-same values into its result. No first-directory selection or caller assertion
-may grant tuple authority.
+A qualifying future harness must accept a declared snapshot revision, adopt it
+into a dedicated read-only APFS image, and recursively manifest every regular
+model file rather than a caller-selected subset. The closed loader identity
+includes every weight shard/index reference, config, tokenizer/template,
+repository code file, metallib/resource, executable, dependency lock and
+checkout, runtime selector, and non-platform dynamic library. It rejects
+symlinks, normalized-path collisions, missing or unreferenced shards,
+custom/remote code, undeclared selectors, and network fallback. It verifies
+the complete manifest before load and recaptures image, mount, file identity,
+and content after unload; mutation or replacement is a failed cell. Only those
+verified bytes may form the model/metallib SPEC-039 descriptor. No first-
+directory selection or caller assertion may grant tuple authority.
+
+## Assessment review state
+
+The independent R3 GPT-5.6 Sol review reported 0 Critical, 1 High, 3 Medium,
+and 0 Low findings. It did not dispute the merged-source classification or the
+exploratory 3B result. It rejected R3 as a promotion plan because memory
+calibration, immutable loader-byte closure, several disturbance/reference
+cells, and arbiter liveness deadlines were not fully executable. R4 corrects
+those planning contracts only. No additional inference or implementation test
+was run because this revision changes documentation and does not alter the
+historical source or raw exploratory evidence.
 
 ## Sanitized host and artifact inventory
 

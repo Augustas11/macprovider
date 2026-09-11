@@ -2,7 +2,7 @@
 
 Date: 2026-09-11
 
-Specification revision: `build5-benchmark-r3`
+Specification revision: `build5-benchmark-r4`
 
 Repository source base: `1d2c930bad81704dd0acc0322226725d8b64aceb`
 
@@ -70,8 +70,10 @@ Rules:
    batch starts only after all serial leases exit. A bounded, FCFS mode-change
    queue prevents either class starving the other. Once an opposite-mode
    waiter exists, no new current-mode lease is issued; the waiter starts on the
-   first handoff after current-mode quiescence. Tests bound this in arbiter
-   transitions rather than wall time.
+   first handoff after current-mode quiescence. FCFS order is over a monotonic
+   actor-owned enqueue sequence. Starvation freedom is claimed only for
+   executors that terminate or are fenced by rule 7, and is bounded by the
+   wall-clock deadlines below as well as transition order.
 3. Strict unsupported work rejects before acquiring a lease. Cancellation of
    queued serial or batch work removes it without changing execution mode.
    Cancellation of active work releases the lease only after the executor has
@@ -88,13 +90,46 @@ Rules:
    it is a generation/mode capability whose issuance, cancellation, completion,
    and drain accounting remain actor-owned. Every exit path returns it exactly
    once.
+7. Every model forward has a 120-second deadline and every granted request has
+   a 900-second lease-grant-to-terminal execution deadline. A queued
+   cancellation is acknowledged within 250 ms. An active cancellation is
+   acknowledged at a safe boundary within 5 seconds; after acknowledgement no
+   output is emitted.
+   Crossing a forward, request, or cancellation deadline marks the generation
+   `failed`, revokes logical lease authority, and starts a 10-second process-
+   fence deadline. The supervised worker must exit cleanly or be terminated;
+   the in-process model is never reused. This is fail-closed fencing, not
+   unsafe preemption of an executing Metal command.
+8. Assigning an opposite-mode enqueue sequence atomically closes current-mode
+   admission, and the enqueue/preemption acknowledgement returns within 250 ms;
+   this does not interrupt a physical Metal command. Once the old mode is physically quiescent, the
+   head opposite-mode waiter is granted or terminally rejected within 1 second.
+   From enqueue, any mode
+   waiter is granted, cancelled, or terminally rejected within 920 seconds
+   (900-second execution deadline + 5-second cancellation boundary + 10-second
+   process fence + 5 seconds scheduling margin). Once granted, that request's
+   own 900-second execution deadline begins. If the generation remains healthy,
+   an uncancelled head opposite-mode waiter must be granted within 906 seconds
+   of enqueue; terminal rejection satisfies the 920-second bound only when the
+   generation fails or the request becomes invalid. A drain with no active model
+   call completes within 30 seconds. Warm-swap publication requires old-worker
+   exit plus zero leases/rows/blocks/delivery tasks; a timeout leaves the new
+   generation unpublished.
 
 Required structural and deterministic tests prove no overlap with instrumented
 serial and batch forwards, including unsupported mixed ingress, cancellation,
 pre-output recovery, scheduler failure, warm swap, drain timeout, and executor
 that ignores cancellation temporarily. A real-runtime mixed-ingress cell logs
 `serial_forward_active * batch_forward_active == 0` at every 100 ms sample and
-fails on any violation.
+fails on any violation. Separate watchdog fixtures exceed the 120-second
+forward, 900-second request execution, 250 ms queued-cancel and admission-
+preemption, 5-second active-cancel,
+1-second quiescent handoff, 30-second quiescent-drain, and 920-second total-wait
+bounds using a virtual monotonic clock. They prove terminal reason codes, no
+lease reuse, no late output, no publication of a replacement generation, and
+worker exit/fence invocation. A real-runtime test exercises the same failure
+path with shortened preregistered test-only deadlines; it cannot qualify the
+production values.
 
 ## Correctness gates
 
@@ -112,7 +147,7 @@ Every applicable gate is mandatory for the exact tuple.
 | C8 recovery | Whole-batch failure drains deterministically. Only an invisible, idempotent, snapshot-bound request may retry serial; visible output can never be stitched. |
 | C9 compatibility | Flag-off API, streaming, receipt, billing, SPEC-024, SPEC-028, SPEC-037, warm-swap, and generation behavior stays byte/semantics compatible. |
 | C10 release identity | Protected-toolchain final packages satisfy the full dual-artifact release gate below. |
-| C11 arbiter | The same resident generation never has a serial forward and shared forward active concurrently; queued mode changes are bounded and starvation-free. |
+| C11 arbiter | The same resident generation never has a serial forward and shared forward active concurrently; terminating or fenced work obeys the 120 s forward, 900 s granted-request execution, 250 ms admission-preemption/queued-cancel, 5 s active-cancel, 1 s handoff, 30 s quiescent-drain, 10 s process-fence, and 920 s mode-wait bounds. |
 | C12 MoE | For live MoE and deterministic MoE fixtures, candidate and serial paths produce identical greedy token IDs and terminal/accounting results for each row. No after-the-fact output tolerance is permitted. |
 
 Raw-logit comparisons are optional diagnostics. They do not replace C1 or C12.
@@ -133,23 +168,63 @@ logit bias/sticky reuse/quantized KV/speculative decode/model family/cache class
 and mixed HTTP/relay admission. Unsupported work must reason-code to the serial
 arbiter in permissive/canary mode or reject before output in strict mode.
 
-## Deterministic artifact selection
+## Deterministic artifact selection and immutable loader closure
 
-The harness input names an exact repository and snapshot revision. It resolves
-only `<cache>/<repo>/snapshots/<declared-revision>`, checks that the resolved
-path remains under the cache root, rejects symlink escape and missing required
-files, hashes every declared relative file by content, and recomputes a
-canonical manifest. Each lexicographically sorted record is encoded as
-`relative_path NUL decimal_byte_count NUL lowercase_sha256 LF`; its SHA-256 is
-the artifact-manifest identity. The observed manifest
-must equal the preregistered digest before load. Ambiguous directory scanning,
-"first snapshot" selection, all-zero hashes, and caller-provided descriptor
-hashes without byte verification fail before inference.
+The harness input names an exact repository and snapshot revision. Before a
+campaign is frozen, an adoption tool creates a dedicated APFS disk image with
+`/model`, `/runtime`, and `/campaign` trees. It recursively copies the entire
+exact model snapshot, extracted signed runtime package, and frozen campaign
+directory with no caller path allowlist, then closes and fsyncs every file and
+directory and mounts the image
+read-only. The executable is launched from `/runtime`; model, tokenizer,
+template, metallib, resources, harness inputs, and result schema are opened only
+from this mounted image. The harness opens
+the mount root with `O_DIRECTORY|O_NOFOLLOW`, verifies `MNT_RDONLY`, and resolves
+only the canonical `<mount>/model` path. It rejects symlinks, hard links with
+link count other than one, sockets/devices/FIFOs, path escape, case-fold or
+Unicode-normalization collisions, and any mount/device change.
 
-The harness likewise hashes the executable, dependency lock, packaged
-metallib, tokenizer/template, prompt corpus, workload generator, and result
-schema. It places the verified artifact and metallib hashes into the SPEC-039
-descriptor, reads them back from the active runtime, and rejects any mismatch.
+The loader-byte manifest is exhaustive, not declaration-selected. Using
+descriptor-relative POSIX paths normalized to Unicode NFC, it recursively
+enumerates every regular file under the model snapshot, tokenizer/template
+resources, executable resource bundle, and metallib bundle in bytewise UTF-8
+lexicographic order. It also includes the CLI/test executable, exact
+`Package.resolved`, resolved SwiftPM checkout revisions, the harness and result
+schema, canonical runtime-selection inputs (arguments, environment allowlist,
+feature flags, model-family/quantization selector), and every non-platform
+Mach-O image found by recursively resolving `otool -L` from the executable.
+Apple sealed platform images are represented by OS build, dyld shared-cache
+UUID, and image UUID. Undeclared environment keys affecting loader/runtime
+selection fail the cell.
+
+Every model regular file is included, including all weight shards, index JSON,
+config/generation config, tokenizer data/config, special-token maps, chat
+templates, and any repository code file. Every transitive shard path named by
+an index must canonicalize under `model`, exist exactly once, and appear in the
+manifest; an unreferenced weight shard, missing reference, duplicate normalized
+path, or remote/custom-code selection fails closed. Qualification forbids
+network loading and `trust_remote_code`; if a later runtime executes repository
+code, that capability needs a new reviewed cell and the code bytes remain in
+the manifest.
+
+Each record is encoded as
+`domain NUL relative_path NUL decimal_byte_count NUL lowercase_sha256 LF`.
+The manifest records, for each regular file, device, inode, byte count,
+nanosecond mtime and ctime, and content SHA-256; those identity fields are
+evidence but the canonical content digest uses the record above. The observed
+manifest must equal the preregistered digest before any model load. The disk-
+image file is held by an open descriptor and exclusive advisory lock for the
+cell; image identity and SHA-256, mount device/read-only flags, every file
+identity, and the complete content manifest are recaptured after unload. Any
+mutation, replacement, added/deleted file, identity change, or post-run digest
+mismatch is a valid failed cell. No result is emitted as qualifying until this
+recapture passes. Ambiguous directory scanning, "first snapshot" selection,
+all-zero hashes, and caller-provided descriptor hashes without byte
+verification fail before inference.
+
+The harness places the verified closed-manifest and metallib hashes into the
+SPEC-039 descriptor, reads them back from the active runtime, and rejects any
+mismatch.
 Every deterministic result also records the serial and candidate generated-
 token arrays or their canonical SHA-256 plus the count; an equality assertion
 without retained output identity is insufficient qualification evidence.
@@ -180,7 +255,7 @@ four-row MSB-02/03 serving workload because current Entry 110 permits two rows
 on that class. Those cells are blocked until a normative SPEC-038 change
 defines a non-serving benchmark mode that cannot advertise capacity or serve
 buyers, or until they run on a four-row Ultra >=128 GiB with a same-host,
-same-artifact MSB-01 baseline. This R3 uses the latter qualification design.
+same-artifact MSB-01 baseline. This R4 uses the latter qualification design.
 Cross-host baselines are forbidden. Smaller or more quantized models never
 qualify a larger target.
 
@@ -188,7 +263,7 @@ qualify a larger target.
 
 | ID | Executor arms and workload | Threshold and qualification constraint |
 |---|---|---|
-| MSB-01 | Current macprovider single-stream serial `TokenIterator`; exact catalog Qwen3-32B-4bit or governed replacement; pp1024/tg256, greedy, cold conversation cache | Same host/artifact baseline for MSB-02/03; >=20 valid runs is the historical floor, while R3 statistics below require 100 for promotion tails |
+| MSB-01 | Current macprovider single-stream serial `TokenIterator`; exact catalog Qwen3-32B-4bit or governed replacement; pp1024/tg256, greedy, cold conversation cache | Same host/artifact baseline for MSB-02/03; >=20 valid runs is the historical floor, while R4 statistics below require 100 for promotion tails |
 | MSB-02 | Candidate shared-forward executor; four simultaneous identical tokenized prompts, distinct conversation IDs; pp1024/tg256 each | >1.5x MSB-01 aggregate TG; only QUAL-U128-D4 or later legal four-row authority |
 | MSB-03 | Candidate shared-forward executor; four unrelated 512/1024/1536/2048 prompts; tg256 each | >1.2x MSB-01 and short-request TTFT gate; only legal four-row authority |
 | MSB-04 | Same live MoE artifact: serial one-row baseline versus candidate two-row shared forward; two distinct pp1024/tg256 requests | >1.3x MoE serial aggregate, each row >=45% of serial TG, exact greedy tokens and accounting |
@@ -214,7 +289,7 @@ campaign manifest records the resulting integer and randomized schedule.
 - MSB-01 through MSB-04 promotion campaigns require 100 valid randomized
   repetitions per arm across at least five clean process starts, at least 20
   repetitions per start. Report per-repetition aggregate TG and per-request
-  latency. The historical >=20 floor is necessary but insufficient for R3
+  latency. The historical >=20 floor is necessary but insufficient for R4
   p95 promotion.
 - MSB-05 requires 100 valid paired repetitions across at least five clean
   starts. Pair by start and randomized arm order. Compute the estimator as the
@@ -238,29 +313,75 @@ campaign manifest records the resulting integer and randomized schedule.
 
 - Identical/ragged MSB starts use a barrier: all requests are admitted within
   10 ms, measured from the first to last admission timestamp.
-- `MIX-INGRESS-15M` lasts 15 minutes after warm-up. It emits one request every
-  250 ms using a fixed alternating HTTP/relay sequence. Exactly every tenth
+- `MIX-INGRESS-15M-R1` runs from one clean start for exactly 15 minutes after
+  warm-up. It emits exactly 3,600 requests, one every 250 ms, using a fixed
+  alternating HTTP/relay sequence. Exactly every tenth
   request is unsupported; unsupported types rotate tools, structured output,
   logprobs, logit bias, and sticky reuse. Supported prompt bins rotate 128,
   512, 1024, and 2048 tokens; output limits rotate 32, 64, 128, and 256.
-- `SLOW-CONSUMER-500` runs 500 streaming requests. Every fifth request delays
-  each read by 100 ms; others drain immediately. The client buffer is fixed at
-  the declared transport default. Any buffer/default change creates a new cell.
-- `CANCEL-2000` runs 2,000 requests. Requests indexed modulo ten cancel at:
+- `REF-TTFT-512-R1` is the same-host, same-artifact native serial reference for
+  MSB-03. It runs 100 independent greedy requests across five clean starts,
+  20 per start, with the canonical 512-token prompt fixture, output limit 256,
+  cold conversation/prefix state, concurrency one, and the next request
+  admitted only after the prior request reaches terminal. Its p95 TTFT is the
+  only denominator for the MSB-03 short-request gate.
+- `SLOW-CONSUMER-500-R1` runs exactly 500 streaming requests from one clean
+  start, admitted every 100 ms with concurrency bounded by Entry 110. Prompt
+  bins rotate 128/512/1024/2048 tokens and output limits rotate 32/64/128/256;
+  the committed fixture digest fixes the exact token arrays. Requests with
+  index modulo five equal to zero delay every client read by 100 ms; all others
+  drain immediately. Each client buffer is exactly 64 KiB and the server
+  delivery queue is the frozen campaign value. The cell timeout is 2 hours and
+  each granted-request execution timeout is 900 seconds. Any buffer, queue,
+  arrival, or fixture change creates a new cell.
+- `CANCEL-2000-R1` runs exactly 2,000 requests from five clean starts, 400 per
+  start, admitted every 100 ms with the same four prompt/output rotations and
+  Entry 110 cap as `SLOW-CONSUMER-500-R1`. Requests indexed modulo ten cancel at:
   queued (0), 25% prefill (1), first decode boundary (2), 25% output (3), 75%
   output (4), and delivery backpressure (5); indices 6-9 complete. This yields
   1,200 cancellation observations, enough for the declared p99 gate. The
   harness seed fixes prompt/arrival assignment and records actual boundary
-  timestamps.
-- Warm swap is injected after 25%, 50%, and 75% of the declared active work in
-  separate cells. Whole-batch forward failure is injected at decode steps 1,
-  8, and 32. Request-local extension failure targets one row at the same steps.
+  timestamps. The cell timeout is 6 hours, each granted-request execution
+  timeout is 900 seconds,
+  queued acknowledgement must be <=250 ms, active acknowledgement must be
+  <=5 seconds, and no post-acknowledgement token or receipt input is allowed.
+- `WARM-SWAP-25-R1`, `WARM-SWAP-50-R1`, and `WARM-SWAP-75-R1` each run 400
+  mixed-ingress requests from one clean start, admitted every 100 ms, using the
+  same frozen prompt/output rotation. After request 100, 200, or 300 has been
+  admitted respectively, the harness requests a swap at that request's first
+  decode boundary. The target reloads from the same adopted read-only bytes
+  under a distinct generation identifier and therefore has an identical closed
+  loader manifest. Each cell has a 2-hour
+  timeout, the 30-second quiescent-drain bound, and requires zero old-generation
+  lease, row, block, queue, or delivery ownership before publication.
+- `BATCH-FAIL-D1-R1`, `BATCH-FAIL-D8-R1`, and `BATCH-FAIL-D32-R1` run 100
+  repetitions each across five clean starts. Every repetition barrier-admits
+  the legal Entry 110 row count with distinct canonical pp1024/tg256 requests
+  and injects one whole-batch forward failure immediately before decode step
+  1, 8, or 32. `ROW-EXT-FAIL-D1-R1`, `ROW-EXT-FAIL-D8-R1`, and
+  `ROW-EXT-FAIL-D32-R1` use the same workload but inject allocation-extension
+  failure into the lowest request ID only. For target decode step `d`, its
+  canonical prompt length is chosen so its unused final-block slots equal
+  `(d - 1) mod block_size_tokens`; earlier extensions succeed, and the fault is
+  armed only for the extension requested immediately before token `d`. Each
+  granted-request execution timeout is 900 seconds;
+  each 100-repetition cell timeout is 6 hours. Every injected failure is a
+  valid observed outcome and must satisfy C2-C8 and C11.
+
+All MSB/REF repetitions have a 900-second execution timeout and a 12-hour cell
+timeout. Every disturbance request has the same 900-second execution timeout
+unless its cancellation deadline terminates it earlier.
+`MIX-INGRESS-15M-R1` has a 30-minute cell timeout. A timeout is a retained valid
+failure after admission; the harness may not extend a timeout once the campaign
+digest is frozen.
 
 ### Warm-up and exclusions
 
-Before measured work, connect AC power, record 10 minutes idle baseline, load the exact artifact,
-run five unmeasured pp1024/tg256 requests, and wait until thermal state is
-nominal/fair for 60 consecutive seconds. MSB measurements then alternate arms
+Before each clean process start, connect AC power, stop the benchmark worker,
+reset its private runtime/cache directory, and record the unloaded host for 10
+minutes. Then launch a new worker, mount and verify the exact immutable artifact,
+load it once, reset MLX peak counters, run five unmeasured pp1024/tg256 requests,
+and wait until thermal state is nominal/fair for 60 consecutive seconds. MSB measurements then alternate arms
 according to a preregistered seeded permutation. The five warm-ups are always
 excluded and retained in logs.
 
@@ -286,6 +407,8 @@ artifact_file_bytes and artifact_manifest_sha256
 verified_resident_weight_bytes
 loaded_idle_phys_footprint_bytes
 loaded_idle_mlx_active_cache_bytes
+calibration_clean_starts
+loaded_idle_sample_count_per_start
 calibrated_target_peak_delta_bytes
 calibrated_mlx_peak_delta_bytes
 calibrated_activation_high_water_bytes
@@ -295,11 +418,13 @@ block_size_tokens
 rows[{prompt_tokens, output_limit_tokens, holdback_tokens,
       reserved_blocks, reserved_kv_bytes}]
 queue_delivery_allowance_bytes
+polling_gap_allowance_bytes
 measurement_allowance_bytes
 planned_process_envelope_bytes
 hard_process_limit_bytes
 mlx_memory_limit_bytes and mlx_cache_limit_bytes
-sample_period_ms, pre_window_s, post_drain_window_s
+sample_period_ms, unloaded_host_window_s, loaded_idle_window_s,
+post_drain_window_s
 ```
 
 `os_reserve_bytes` is fixed as
@@ -315,6 +440,7 @@ kv_pool_bytes = sum(row_reserved_kv_bytes)
 component_subtotal = loaded_idle_phys_footprint_bytes
                    + calibrated_target_peak_delta_bytes
                    + queue_delivery_allowance_bytes
+                   + polling_gap_allowance_bytes
 measurement_allowance_bytes = ceil(component_subtotal * 10 / 100)
 planned_process_envelope_bytes = component_subtotal + measurement_allowance_bytes
 hard_process_limit_bytes = min(floor(installed_ram_bytes * 85 / 100),
@@ -326,24 +452,58 @@ baseline, and caches; those terms are not added again.
 `verified_resident_weight_bytes` is the checked sum of loaded parameter element
 counts times their runtime dtype byte widths and is cross-bound to the verified
 artifact manifest; it is a diagnostic already contained in loaded idle.
-`calibrated_target_peak_delta` is
-`max(peak_phys_footprint - loaded_idle_phys_footprint, kv_pool_bytes)` over non-promoting dry
-runs of the exact target row/context shape, so it already contains resident KV,
-activation, executor, and transient gather effects; those components are
-recorded separately but are not summed into the envelope again. Calibration
-uses a preliminary manifest capped at 75% of RAM, stops admission at 80%, and
-follows the same pressure/thermal/swap rules; it never promotes a tuple. The
-maximum target delta, MLX peak delta, gather instrumentation high-water, and
-activation instrumentation high-water and allocator KV high-water are frozen
-in the promotion manifest. Queue allowance
-comes from the maximum retained payload/event sizes times the bounded queue.
-The 10% measurement allowance appears exactly once. A promotion cell may start only when
-`planned_process_envelope <= hard_process_limit`. Runtime passes only when
-sampled physical footprint never exceeds either value.
+Calibration is exactly five non-promoting exact-shape dry runs, one in each of
+five clean process starts. A clean start uses the warm-up sequence above and a
+new worker PID; no model, tokenizer, Metal, or MLX cache survives from the
+prior start. After warm-up and 60 seconds of nominal/fair thermal state, sample
+loaded idle at monotonic offsets 0.0, 0.1, ... 59.9 seconds with at most 25 ms
+absolute scheduling error. A start is valid only with all 600 paired physical-
+footprint and MLX active+cache samples; a missing or late sample invalidates the
+calibration campaign.
+`loaded_idle_phys_footprint_i` and `loaded_idle_mlx_active_cache_i` are the
+maxima of those 600 samples.
+Campaign values are `max_i` across all five starts.
 
-The authoritative process total is `proc_pid_rusage(RUSAGE_INFO_V4)`
-`ri_phys_footprint`, sampled every 100 ms from 60 seconds before admission
-through a 120-second post-drain window. `MLX.Memory.activeMemory`,
+Immediately after each loaded-idle window, run exactly one dry repetition of
+the target cell without restarting or resetting caches. Record process peak as
+the maximum of every 100 ms `ri_phys_footprint` sample and
+`ri_lifetime_max_phys_footprint` read immediately after the target and after
+drain. The per-start target delta is saturating
+`max(0, process_peak_i - loaded_idle_phys_footprint_i)`;
+`calibrated_target_peak_delta` is
+`max(kv_pool_bytes, max_i(target_delta_i))`. For start `i`, MLX peak is the
+maximum of sampled `activeMemory + cacheMemory` and reset-per-start
+`peakMemory`; its saturating delta subtracts `loaded_idle_mlx_active_cache_i`.
+`calibrated_mlx_peak_delta` is the maximum of those five deltas. Activation, gather, and
+allocator high-waters are maxima across the five runs and remain non-added
+diagnostics because target delta contains them.
+
+All five calibration outcomes, including OOM, timeout, pressure, thermal,
+pageout, swap, or recovery failure, are retained. Any failed dry run blocks a
+promotion campaign; it is not replaced. Calibration uses a preliminary
+manifest whose planned envelope is at most
+`min(floor(installed_ram_bytes * 75 / 100), hard_process_limit_bytes)`. It stops
+admission when sampled physical footprint reaches 80% of installed RAM and follows the same
+pressure/thermal/swap rules. It never promotes a tuple. The unloaded ten-minute
+host window detects ambient instability and validates exclusions; it is not
+substituted for the loaded-idle baseline used by the formula.
+
+On qualifying macOS, `ri_lifetime_max_phys_footprint` is mandatory, so
+`polling_gap_allowance_bytes` is zero. If that trustworthy lifetime high-water
+counter is unavailable, the non-promoting development envelope sets
+`polling_gap_allowance_bytes = max(1 GiB, ceil(sampled_target_peak_delta * 10 / 100))`;
+such a result remains development-only until a new independently reviewed
+revision justifies promotion on that platform. Queue allowance comes from the
+maximum retained payload/event sizes times the bounded queue. The separate 10%
+measurement allowance appears exactly once. A promotion cell may start only when
+`planned_process_envelope <= hard_process_limit`. Runtime passes only when
+the authoritative process peak never exceeds either value.
+
+The authoritative process total is the maximum of
+`proc_pid_rusage(RUSAGE_INFO_V4).ri_phys_footprint` sampled every 100 ms and
+the post-window `ri_lifetime_max_phys_footprint`. Sampling starts with the
+60-second loaded-idle window and ends after the 120-second post-drain window.
+`MLX.Memory.activeMemory`,
 `cacheMemory`, and reset-per-cell `peakMemory` are sampled at the same cadence
 and checked against the manifest MLX limit; they are diagnostic subsets and
 are never added to physical footprint. Allocator reserved/live/high-water
@@ -373,6 +533,10 @@ run on an actively serving Mac.
 
 All correctness gates pass before performance is considered. Then:
 
+- MSB-01 must have 100 valid repetitions and a sample coefficient of variation
+  `sample_standard_deviation(aggregate_TG) / mean(aggregate_TG) <= 0.10`.
+  Otherwise its denominator is unstable and MSB-02/03 cannot promote. Report
+  mean, sample standard deviation, CV, median, and the frozen bootstrap interval.
 - MSB-02 median aggregate TG >1.5x the same-host MSB-01 median; per-stream p95
   TPOT <=3x the corresponding single-stream baseline.
 - MSB-03 median aggregate TG >1.2x MSB-01; 512-token-request p95 TTFT <=2x its
@@ -386,7 +550,13 @@ All correctness gates pass before performance is considered. Then:
   >=0.80x oMLX aggregate TG and >=1.3x native single-stream TG; it grants no
   serving or trust authority.
 - MIX, slow-consumer, cancellation, arbiter, memory, receipt, and leak gates
-  have zero correctness failures. Unsupported routing is 100% as expected.
+  have zero correctness failures. Queued cancellation acknowledgement is at
+  most 250 ms; opposite-mode admission preemption is at most 250 ms; active
+  acknowledgement is at most 5 seconds for every request, with p99 also
+  reported. Quiescent handoff is at most 1 second, quiescent drain
+  at most 30 seconds, forward at most 120 seconds, request at most 900 seconds,
+  process fencing at most 10 seconds, and total mode-wait terminal disposition
+  at most 920 seconds. Unsupported routing is 100% as expected.
 
 A failed performance threshold leaves the tuple disabled. No result is
 extrapolated across chip, RAM, OS, artifact, quantization, runtime, metallib,
