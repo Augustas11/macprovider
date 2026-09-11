@@ -274,6 +274,106 @@ struct BYOMOllamaModelStore: BYOMGGUFArtifactLocator, Sendable {
     }
 }
 
+/// Locates the GGUF file an LM Studio model id is served from, in the local
+/// LM Studio models directory (default `~/.lmstudio/models`, layout
+/// `<publisher>/<repo>/<file>.gguf`). Filesystem only, from the NAME the
+/// runtime reports — the same principle as `BYOMOllamaModelStore`: the runtime
+/// never names the file that gets hashed.
+///
+/// Matching rule (v1, to be confirmed against a live LM Studio in the #1478
+/// hardware pass and adjusted in `matches(id:publisher:repo:fileStem:)` alone):
+/// the id equals, case-insensitively, one of `<publisher>/<repo>`, `<repo>`,
+/// `<repo>` minus a trailing `-gguf`, or the file stem. Exactly ONE `.gguf`
+/// file may answer; zero or several means no identity (fail closed, as an
+/// Ollama manifest with two model layers does). MLX-format LM Studio models
+/// have no `.gguf` and therefore never resolve here.
+struct BYOMLMStudioModelStore: BYOMGGUFArtifactLocator, Sendable {
+    let runtimeSource = "lmstudio_loopback"
+    static let servedModelRefPrefix = "lmstudio:"
+    let root: URL
+    private let fileManager: FileManager
+    /// Bounds the directory walk so a pathological models tree cannot turn a
+    /// read-only discovery into a filesystem scan.
+    private static let maxEntriesVisited = 8192
+    private static let idPart = try! NSRegularExpression(pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}(/[A-Za-z0-9][A-Za-z0-9._-]{0,127})?$")
+
+    init(root: URL, fileManager: FileManager = .default) {
+        self.root = root
+        self.fileManager = fileManager
+    }
+
+    static func defaultRoot(
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
+    ) -> URL {
+        // LM Studio has no runtime-defined env var (unlike OLLAMA_MODELS); the
+        // CLI-scoped override keeps the operator, not the runtime, in charge
+        // of which tree may be hashed.
+        if let models = environment["MACPROVIDER_LMSTUDIO_MODELS_ROOT"], !models.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return URL(fileURLWithPath: models)
+        }
+        return homeDirectory.appendingPathComponent(".lmstudio/models", isDirectory: true)
+    }
+
+    static func modelID(from servedModelRef: String) -> String? {
+        var id = servedModelRef.trimmingCharacters(in: .whitespacesAndNewlines)
+        if id.hasPrefix(servedModelRefPrefix) { id = String(id.dropFirst(servedModelRefPrefix.count)) }
+        let range = NSRange(id.startIndex..., in: id)
+        guard let match = idPart.firstMatch(in: id, range: range), match.range == range else { return nil }
+        return id
+    }
+
+    static func matches(id: String, publisher: String, repo: String, fileStem: String) -> Bool {
+        let wanted = id.lowercased()
+        let repoLower = repo.lowercased()
+        var repoTrimmed = repoLower
+        if repoTrimmed.hasSuffix("-gguf") { repoTrimmed.removeLast(5) }
+        return wanted == "\(publisher.lowercased())/\(repoLower)"
+            || wanted == repoLower
+            || wanted == repoTrimmed
+            || wanted == fileStem.lowercased()
+    }
+
+    func resolveArtifact(servedModelRef: String) -> BYOMResolvedArtifact? {
+        guard let id = Self.modelID(from: servedModelRef) else { return nil }
+        let rootResolved = root.resolvingSymlinksInPath().standardizedFileURL
+        guard let publishers = try? fileManager.contentsOfDirectory(at: rootResolved, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) else {
+            return nil
+        }
+        var visited = 0
+        var hits: [(url: URL, relative: String)] = []
+        for publisherURL in publishers {
+            guard (try? publisherURL.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true else { continue }
+            let publisher = publisherURL.lastPathComponent
+            guard let repos = try? fileManager.contentsOfDirectory(at: publisherURL, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) else { continue }
+            for repoURL in repos {
+                visited += 1
+                if visited > Self.maxEntriesVisited { return nil }
+                guard (try? repoURL.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true else { continue }
+                let repo = repoURL.lastPathComponent
+                guard let files = try? fileManager.contentsOfDirectory(at: repoURL, includingPropertiesForKeys: [.isRegularFileKey], options: [.skipsHiddenFiles]) else { continue }
+                for fileURL in files {
+                    visited += 1
+                    if visited > Self.maxEntriesVisited { return nil }
+                    guard fileURL.pathExtension.lowercased() == "gguf" else { continue }
+                    let stem = fileURL.deletingPathExtension().lastPathComponent
+                    guard Self.matches(id: id, publisher: publisher, repo: repo, fileStem: stem) else { continue }
+                    let resolved = fileURL.resolvingSymlinksInPath().standardizedFileURL
+                    guard BYOMArtifactPathPolicy.isContained(resolved, in: rootResolved),
+                          (try? resolved.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile == true
+                    else { continue }
+                    hits.append((resolved, "\(publisher)/\(repo)/\(fileURL.lastPathComponent)"))
+                }
+            }
+        }
+        // One file answers or none does: several matching GGUFs (e.g. every
+        // quantization of a repo when the id names the repo) is ambiguous and
+        // must not pick silently.
+        guard hits.count == 1, let hit = hits.first else { return nil }
+        return BYOMResolvedArtifact(fileURL: hit.url, locator: hit.relative)
+    }
+}
+
 /// Digests already computed over local artifact bytes, keyed by the exact
 /// file identity, so discovery (read-only, cheap) can report
 /// `artifact_hash_available` / match by digest without re-hashing gigabytes.

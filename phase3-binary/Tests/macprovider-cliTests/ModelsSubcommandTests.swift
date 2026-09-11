@@ -117,6 +117,7 @@ final class ModelsSubcommandTests: XCTestCase {
         let command = try ModelsCatalogEconomicsCommand.parse([
             "--skip-coordinator-status",
             "--skip-ollama",
+            "--skip-lmstudio",
         ])
 
         let capture = await captureOutput { try await command.run() }
