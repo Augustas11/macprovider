@@ -491,8 +491,12 @@ the LATEST complete window in the response, and the window a decision
 relies on is identified by its `window_id` and bounds in the manifest.
 Windows are never summed, merged, or carried across a close, and the
 operator never chooses among them. **Only complete windows are served
-or persisted** (§5.2b.5): the open window and every incomplete window
-stay in aggregator memory as local diagnostics, so the endpoint never
+or persisted** (§5.2b.5). A window that closes incomplete is DESTROYED
+the moment its local close record — `window_id`, `close_reason`, and
+close time, a constant-size record — is written: its summary, principal
+tables, tokens, and `window_key` are zeroed and released, so repeated
+parameter or eligibility churn never accumulates state. Only the single
+open window exists in memory as a diagnostic, and the endpoint never
 exposes a changing count that a reader could difference between polls.
 
 ### 3.3 Pseudonym
@@ -599,8 +603,8 @@ explorer. Both reach Postgres but via distinct DB roles; see §7.2.
   authenticated request's model string resolves to no admitted catalog
   key (§5.2b.2). It holds no database handle. The `intake` rollup
   component (§7.2.2) reads its snapshot on the overview cadence and
-  upserts the singleton `stats_intake_current` row; the handler reads
-  only that row.
+  upserts the singleton `stats_intake_current` row every 15 minutes;
+  the handler reads only that row.
 - nginx server-block for `stats.malibu.tech` reverse-proxying to the
   same coordinator backend on `/v1/stats/*`, with a dedicated rate-limit
   zone (§5.6).
@@ -1080,12 +1084,22 @@ an operator lists it, and the empty default list refuses every key. No
 query parameters are defined; a request carrying any query parameter
 returns `400` `bad_request`. `HEAD` and `OPTIONS` follow §4.3 and §5.7.
 
-**Response headers.** `Cache-Control: private, max-age=30` (no
+**Response headers.** `Cache-Control: private, max-age=900` (no
 `s-maxage`: the response is private to the key and MUST NOT be stored by
 a shared cache — this endpoint, like §5.2a, is exempt from §1.5 C5);
 `Vary: Accept-Encoding, Origin, Authorization`; `ETag` per §5.4
-partner-projection rules. `generated_at` older than the §9.5 budget
-returns the standard `stats_stale` 503 envelope (§5.8).
+partner-projection rules. **CORS** follows the §5.4.3 per-key Origin
+decision for GET and HEAD exactly as the partner projection of §5.2 does:
+never a wildcard `Access-Control-Allow-Origin`; a key with a non-empty
+`allowed_origins` answers only a listed Origin with that Origin echoed,
+and a disallowed Origin is refused before the body is read. `stale_after`
+= `generated_at` + 15 minutes; `generated_at` older than the §9.5 budget
+(45 minutes) returns the standard `stats_stale` 503 envelope (§5.8).
+**Encoding.** The SPEC-023 generator reads this endpoint with
+`Accept-Encoding: identity`, rejects any non-identity `Content-Encoding`,
+and hashes and retains the unmodified body octets before parsing (SPEC-023
+§16.8 rule 9), so "the exact response bytes" is one unambiguous byte
+string.
 
 **Response (200 OK).** `macprovider.stats-intake.v1` is a **closed
 schema at every level and is exempt from the §8.2 additive-change
@@ -1101,7 +1115,7 @@ abbreviation): one complete window with one emitted bucket.
 {
   "schema_version": "macprovider.stats-intake.v1",
   "generated_at": "2026-09-11T00:00:00Z",
-  "stale_after": "2026-09-11T00:00:30Z",
+  "stale_after": "2026-09-11T00:15:00Z",
   "unmatched_models": {
     "contract": "SPEC-023-16.2a",
     "windows": [
@@ -1114,8 +1128,9 @@ abbreviation): one complete window with one emitted bucket.
           "key_buckets": 64,
           "principals_per_bucket": 64,
           "distinct_key_cap": 10000,
-          "principal_cap_requests": 25,
           "buyer_request_floor": 250,
+          "principal_cap_pct": 10,
+          "principal_cap_requests": 25,
           "k_anonymity_min": 3,
           "window_max_days": 30
         },
@@ -1169,7 +1184,11 @@ window is complete, so `window_end` and `close_reason` are non-null and
 §3.2a exists for the aggregator's local diagnostics; only its
 `epoch_elapsed` member reaches the wire); every count is a non-negative
 integer; `window_id` and `eligibility_policy_id` are 32 lowercase hex
-characters; `model_key` matches `[a-z0-9._/-]{1,128}` and is unique
+characters, each 128 bits from a cryptographically secure random source
+drawn at window open (respectively at policy change), so ids are unique
+over the retention horizon without coordination; a rollup merge that
+finds one `window_id` carrying two different byte representations MUST
+fail closed (the tick writes nothing) rather than pick one; `model_key` matches `[a-z0-9._/-]{1,128}` and is unique
 within a window; `buckets` is ordered by `lower_bound` descending, ties
 by `model_key` ascending (UTF-8 bytes); `classes` is exactly the eleven
 floors of §5.2b.6 in that order.
@@ -1182,14 +1201,17 @@ for its life: `key_buckets` = `INTAKE_UNKNOWN_KEY_BUCKETS`,
 `principals_per_bucket` = `INTAKE_UNKNOWN_PRINCIPALS_PER_BUCKET`,
 `distinct_key_cap` = `INTAKE_UNKNOWN_KEY_DISTINCT_CAP`,
 `buyer_request_floor` = `INTAKE_BUYER_REQUEST_FLOOR`,
+`principal_cap_pct` = `INTAKE_UNKNOWN_KEY_PRINCIPAL_CAP_PCT` (the raw
+policy value, so the manifest threshold is comparable),
 `principal_cap_requests` =
-`floor(INTAKE_BUYER_REQUEST_FLOOR × INTAKE_UNKNOWN_KEY_PRINCIPAL_CAP_PCT / 100)`,
-`k_anonymity_min` = the effective k-anonymity floor, and
-`window_max_days` = 30. Every parameter is a positive integer. A change
-to any of them closes the open window (§3.2a) so no window ever mixes
-two parameter sets, and the SPEC-023 generator validates a decision's
-`thresholds` against the parameters of the window it relies on, failing
-closed on any disagreement. `k_anonymity_min` is `3`: SPEC-023 v0.10.4
+`floor(buyer_request_floor × principal_cap_pct / 100)` (derived; MUST
+reproduce from the two raw values), `k_anonymity_min` = the effective
+k-anonymity floor, and `window_max_days` = 30. Every parameter is a
+positive integer. A change to any of them closes the open window (§3.2a)
+so no window ever mixes two parameter sets, and the SPEC-023 generator
+validates a decision's `thresholds` against the parameters of the window
+it relies on — raw value to raw value — failing closed on any
+disagreement. `k_anonymity_min` is `3`: SPEC-023 v0.10.4
 §16.4 fixes `INTAKE_K_ANONYMITY_MIN` at 3 for that revision — it is not
 release-tunable, because this endpoint suppresses against it and omits
 the cardinality a consumer would need to re-suppress — so a different
@@ -1295,12 +1317,15 @@ emitted at all (§5.2b.5).
 
 Per-request work is bounded by the summary capacity and the per-bucket
 principal bound — one normalization, one grammar check, one HMAC, one
-bounded scan — and TOTAL aggregator memory never exceeds: for the open
-window, `key_buckets` entries plus `key_buckets × principals_per_bucket`
-principal counters plus the two `other_suppressed` counters; plus, for
-retained complete windows, at most `8 × key_buckets` emitted bucket
-records with no principal tables (a closed window keeps only its wire
-form). Both bounds are independent of distinct-key and
+bounded scan — and the aggregator's TRAFFIC-DEPENDENT state never
+exceeds: for the open window, `key_buckets` entries plus `key_buckets ×
+principals_per_bucket` principal counters plus the two `other_suppressed`
+counters; plus, for retained complete windows, at most `8 × key_buckets`
+emitted bucket records with no principal tables (a closed window keeps
+only its wire form). Everything else the aggregator holds — window
+metadata, parameters, the policy id, `eligible_request_total`, the last
+close record, container bookkeeping — is constant per window and
+independent of traffic. Both bounds are independent of distinct-key and
 distinct-principal volume. The aggregator is safe for concurrent use
 from every buyer-handler goroutine and serializes state mutation so two
 conforming runs over one request order emit one summary.
@@ -1312,9 +1337,9 @@ after the full 30 days), in descending `window_start`, at most **8**
 entries, and only windows whose `window_end` is within the trailing 90
 days. The open window and every incomplete window are never served and
 never persisted: they exist only in the aggregator's memory and its
-local diagnostic dump. A reader therefore sees each window exactly once,
-immutable, and cannot difference successive polls to recover individual
-increments. `eligible_request_total` is the number of S1 survivors the
+local diagnostic dump. A reader therefore sees each retained window repeatedly but always as the
+same immutable record, and cannot difference successive polls to recover
+individual increments. `eligible_request_total` is the number of S1 survivors the
 window saw (named buckets plus every `other_suppressed` contribution).
 
 Each `buckets` element is exactly `model_key`, `lower_bound`, `count`,
@@ -1326,10 +1351,15 @@ parameters.buyer_request_floor`, and only that `lower_bound` may satisfy
 `INTAKE_BUYER_REQUEST_FLOOR`; `count` is an upper-bound diagnostic.
 
 The rollup persists the complete windows the aggregator holds and
-merges them with the row's existing complete windows by `window_id`
-(identical ids carry identical bytes; the aggregator's copy is
-authoritative), applying the 8-window and 90-day bounds. A restart
-therefore loses no complete window that was already persisted. No
+merges them with the row's existing complete windows by `window_id`:
+an id present on both sides MUST carry identical bytes, and a tick that
+finds otherwise fails closed and writes nothing; the 8-window and 90-day
+bounds apply. A restart therefore loses no complete window that was
+already persisted. The `intake` component runs on a **15-minute
+cadence** (§9.2) — a privacy cadence: `fleet_ram` in particular is
+re-materialized no more often than that, so between materializations
+every reader sees the identical histogram and a single provider's
+profile change cannot be observed as a ±1 step between two polls. No
 per-request row, no principal token, no raw requested string, and no
 open or incomplete window is persisted anywhere; the aggregator's
 diagnostic dump — the serialized form a test or operator may take of its
@@ -1394,10 +1424,15 @@ Every integer MUST be positive; `principal_cap_pct` is in `[1, 100]`
 and `buyer_request_floor × principal_cap_pct / 100` MUST be at least 1;
 `reader_partner_key_ids` are positive integers; `k_anonymity_min` is
 not configurable (§5.2b.1). Invalid configuration fails coordinator
-startup. When `stats.enabled` or `stats.intake.enabled` is false the
-aggregator and endpoint are absent and the endpoint path returns `404`
-`bad_request` like any unknown endpoint; SPEC-023 records that as
-`source_unavailable`. A change to `excluded_accounts` closes the open
+startup. When `stats.enabled` is false nothing here exists. When
+`stats.intake.enabled` is false the AGGREGATOR and the ENDPOINT are
+absent — the endpoint path returns `404` `bad_request` like any unknown
+endpoint and SPEC-023 records `source_unavailable` — but the `intake`
+ROLLUP component still runs on its cadence and still writes
+`stats_intake_current` with an empty `windows` array and the fleet
+histogram, so `/v1/stats/health` keeps its exact nine components and the
+component reports `ok`; nothing reads the row while the endpoint is
+disabled. A change to `excluded_accounts` closes the open
 window (§3.2a `eligibility_changed`) and rotates `eligibility_policy_id`;
 a change to `reader_partner_key_ids` changes authorization only.
 
@@ -1411,9 +1446,12 @@ against the canonical example, and the SPEC-023 generator rejects any
 deviation, an added field included.
 AC-INTAKE-2 (auth): no bearer → 401; an unlisted or provider-bound
 bearer → 403; a listed bearer → 200 with `Cache-Control: private,
-max-age=30`; any query parameter → 400; the public rate tier is never
+max-age=900` and never a wildcard `Access-Control-Allow-Origin`
+(allowed-, denied-, and absent-Origin cases against a key with an
+allowlist); any query parameter → 400; the public rate tier is never
 consulted; the empty default list refuses every key; `stats.intake.enabled:
-false` → 404 before any auth.
+false` → 404 before any auth while `/v1/stats/health` still reports nine
+components with `intake` `ok`.
 AC-INTAKE-3 (§16.2(a) order and emission): the SPEC-023 AC-CAT-13
 assertions hold against this aggregator — an ineligible request (no
 authenticated account, a bare account header, a `demo:` account, an
@@ -1434,19 +1472,25 @@ AC-INTAKE-4 (windows): a parameter change, an excluded-set change, a
 stop, and a 30-day elapse each close the window with the matching local
 `close_reason`; only the 30-day elapse yields a served window; the open
 window and an incomplete window never appear in the response or in
-`stats_intake_current`; each served window carries the parameters and
+`stats_intake_current`; each served window carries the parameters (raw
+`principal_cap_pct` reproducing `principal_cap_requests`) and
 `eligibility_policy_id` it opened with, unchanged by later
 configuration; `eligibility_policy_id` rotates on a set change and is
-not a function of the account ids; the rollup merge keeps a persisted
-complete window the aggregator no longer holds; at most 8 windows are
+not a function of the account ids; a thousand alternating parameter and
+eligibility changes leave exactly one window in memory and a
+constant-size last-close record; the rollup merge keeps a persisted
+complete window the aggregator no longer holds and fails closed on one
+`window_id` with two byte representations; at most 8 windows are
 emitted and none older than 90 days.
 AC-INTAKE-5 (fleet): the histogram places each fixture provider in
 exactly one class, suppresses a class of one or two AND the smallest
 remaining class, ignores a leaderboard row whose profile was not
-reported in the window, and the SPEC-023 evaluation over a fixture
-histogram reproduces the expected `fleet_fit_fraction_ppm` for an
-artifact `min_ram_gb`, including the boundary `min_ram_gb = 12` against
-the 16 GB class.
+reported in the window, is re-materialized no more often than every 15
+minutes (a profile update between two ticks does not change the served
+histogram), and the SPEC-023 evaluation over a fixture histogram
+reproduces the expected `fleet_fit_fraction_ppm` for an artifact
+`min_ram_gb`, including the boundary `min_ram_gb = 12` against the 16 GB
+class.
 
 ### 5.3 `GET /v1/stats/health`
 
@@ -1900,7 +1944,7 @@ budgets verbatim; the prose below is informative.
   the §9.5 budget for that window.
 - `/v1/stats/intake` (v0.2.1) MUST serve a 503 when
   `stats_intake_current.generated_at` is older than the §9.5 budget
-  (`120s`) or the row is absent.
+  (`45 min`) or the row is absent.
 - A 503 from this surface MUST include `Retry-After: 30` and a JSON
   body per §5.9 with `code: "stats_stale"`.
 
@@ -2756,7 +2800,7 @@ yet. A future SPEC bump of the rewards source does NOT require a
 | `stats_leaderboard_7d` | every 5 min | per-provider sums over last 7d (windowed) |
 | `stats_leaderboard_30d` | every 30 min | per-provider sums over last 30d (windowed) |
 | `stats_leaderboard_all` | every 6 hours | per-provider sums since rollup-start (windowed; `window=all` is the cumulative-since-rollup-start window) |
-| `stats_intake_current` (v0.2.1) | every 30s (the overview cadence) | `unmatched_models`: the aggregator's complete windows merged with the row's persisted complete windows by `window_id` (§5.2b.5); `fleet_ram`: `provider_hardware_profiles` (verified, `last_reported_at` in the trailing 30 days), bucketed by memory class with complementary suppression (§5.2b.6). No OLTP billing/session table is read. |
+| `stats_intake_current` (v0.2.1) | every 15 minutes (privacy cadence, §5.2b.5) | `unmatched_models`: the aggregator's complete windows merged with the row's persisted complete windows by `window_id` (§5.2b.5); `fleet_ram`: `provider_hardware_profiles` (verified, `last_reported_at` in the trailing 30 days), bucketed by memory class with complementary suppression (§5.2b.6). No OLTP billing/session table is read. |
 
 These are the v0.1 floors. The operator MAY tighten them in production
 without a SPEC change; loosening them requires a SPEC bump.
@@ -2893,7 +2937,7 @@ false-positive on legitimate arithmetic noise; a looser one (e.g.
 |---|---|---|
 | `/v1/stats/overview` | 30s | 120s |
 | `/v1/stats/{routability,models,providers}` | 30s | 120s |
-| `/v1/stats/intake` (v0.2.1) | 30s | 120s |
+| `/v1/stats/intake` (v0.2.1) | 15 min | 45 min |
 | `/v1/stats/leaderboard?window=24h` | 60s | 300s |
 | `/v1/stats/leaderboard?window=7d` | 5 min | 30 min |
 | `/v1/stats/leaderboard?window=30d` | 30 min | 4 hours |
