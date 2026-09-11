@@ -103,6 +103,7 @@ class FakeRig:
         self.allow_self_approval = allow_self_approval
         self.allow_illegal_transition = allow_illegal_transition
         self.request_log = 0
+        self.reject_next_offer = False
 
     def _event(self, ref: str) -> str:
         self.events[ref] = self.events.get(ref, 0) + 1
@@ -130,6 +131,14 @@ class FakeRig:
         return "settlement_capable" if self.state.get(ref) == "settlement_capable" else "not_earning_yet_catalog_or_receipt_path_exists"
 
     def _status_doc(self, ref: str) -> dict:
+        if ref == OPAQUE:
+            return {
+                "schema": "model_admission_status.v1", "generated_at": NOW, "cli_version": CLI_VERSION,
+                "provider_id": "mp-" + "a" * 32, "candidate_id": self._candidate_id(ref), "served_model_ref": ref,
+                "catalog_model_key": None, "admission_state": "local_only", "admission_state_source": "local_default",
+                "coordinator_event_id": None, "state_observed_at": None,
+                "provider_guidance": guidance("local_only", "local_inventory_only"), "allowed_next_states": [], "warnings": [],
+            }
         state = self.state.get(ref, "not_offered")
         g = guidance(state, self._earning(ref))
         g["transition_reason_code"] = self.reason.get(ref)
@@ -144,6 +153,21 @@ class FakeRig:
             "warnings": [],
         }
 
+    def cli_raw(self, args: list[str]) -> tuple[int, str, str]:
+        cmd = args[:3]
+        if cmd[:2] == ["models", "offer"] and "--dry-run" not in args:
+            ref = args[2]
+            if ref == OPAQUE:
+                self.calls.append("REFUSED opaque offer")
+                return 2, "", "BYOM candidate is not offerable; resolve the blocking local readiness, fit, or adapter warning first"
+            if self.state.get(ref, "not_offered") not in ("not_offered", "withdrawn", "revoked", "offer_rejected"):
+                self.calls.append("REFUSED duplicate live offer")
+                return 2, "", "coordinator model admission request failed with HTTP 409"
+        try:
+            return 0, json.dumps(self.cli(args)), ""
+        except AssertionError as exc:
+            return 2, "", str(exc)
+
     def cli(self, args: list[str]) -> dict:
         self.calls.append(" ".join(args[:4]))
         cmd = args[:3]
@@ -156,19 +180,17 @@ class FakeRig:
                     "reason_code": "no_trusted_catalog_match", "warnings": []}
         if cmd[:2] == ["models", "offer"]:
             ref = args[2]
-            if ref == OPAQUE:
-                event = self._set(ref, "offer_rejected", "opaque_endpoint")
-                return {"schema": "model_admission_offer_submit.v1", "admission_state": "offer_rejected", "admission_state_source": "coordinator", "coordinator_event_id": event, "provider_signature_verified": True}
+            assert ref != OPAQUE, "fake: opaque offers are refused by the CLI before the coordinator"
             current = self.state.get(ref, "not_offered")
-            # Identical package while the offer is live: idempotency answers
-            # from the record before any state check, exactly as the
-            # coordinator's replay protection does.
-            if current not in ("not_offered", "withdrawn", "revoked", "offer_rejected"):
-                return {"schema": "model_admission_offer_submit.v1", "admission_state": current, "admission_state_source": "coordinator", "coordinator_event_id": self._event_id(ref), "replayed": True, "provider_signature_verified": True}
+            assert current in ("not_offered", "withdrawn", "revoked", "offer_rejected"), "fake: duplicate live offer must go through cli_raw"
+            if self.reject_next_offer:
+                self.reject_next_offer = False
+                event = self._set(ref, "offer_rejected", "intake_rejected")
+                return {"schema": "model_admission_offer_submit.v1", "admission_state": "offer_rejected", "admission_state_source": "coordinator", "coordinator_event_id": event}
             assert "offer_submitted" in ADMISSION_ALLOWED_NEXT_STATES.get(current, frozenset({"offer_submitted"})), f"fake: illegal offer from {current}"
             event = self._set(ref, "offer_submitted")
             self._set(ref, "sandbox_probe_only", "synthetic_probe_required")
-            return {"schema": "model_admission_offer_submit.v1", "admission_state": "offer_submitted", "admission_state_source": "coordinator", "coordinator_event_id": event, "provider_signature_verified": True}
+            return {"schema": "model_admission_offer_submit.v1", "admission_state": "offer_submitted", "admission_state_source": "coordinator", "coordinator_event_id": event}
         if cmd == ["models", "admission", "status"]:
             return self._status_doc(args[3])
         if cmd == ["models", "admission", "withdraw"]:
@@ -232,6 +254,10 @@ class FakeRig:
         reason = "operator_revoke" if self.drift_is_operator_origin else "catalog_artifact_feed_changed"
         self._set(SETTLEABLE, "revoked", reason)
 
+    def induce_rejection(self):
+        self.calls.append("ARMED rejection")
+        self.reject_next_offer = True
+
 
 class AdmissionJourneyRunnerTests(unittest.TestCase):
     def setUp(self):
@@ -244,7 +270,7 @@ class AdmissionJourneyRunnerTests(unittest.TestCase):
             cli_binary=Path("/usr/bin/true"), provider_config=Path(self.tmp.name) / "config.yaml",
             coordinator_admin_origin="http://127.0.0.1:18444", operator_actor_a="rig_a", operator_actor_b="rig_b",
             operator_secret_a_env="T_OP_A", operator_secret_b_env="T_OP_B", postgres_dsn_env="T_DSN",
-            settleable_ref=SETTLEABLE, opaque_ref=OPAQUE, gguf_ref=GGUF, drift_hook=None,
+            settleable_ref=SETTLEABLE, opaque_ref=OPAQUE, gguf_ref=GGUF, drift_hook=None, rejection_hook=None,
         )
         self.config.provider_config.write_text("coordinator_url: ws://127.0.0.1:18444\n")
 
@@ -333,6 +359,18 @@ class AdmissionJourneyRunnerTests(unittest.TestCase):
         same = self.config.__class__(**{**self.config.__dict__, "operator_actor_b": "rig_a"})
         with self.assertRaises(aj.JourneyFailure):
             same.validate()
+
+    def test_physical_rig_fails_closed_without_the_drift_and_rejection_hooks(self):
+        # The two inductions the coordinator cannot perform on its own are
+        # operator-supplied hooks; their absence must name the gap, never set
+        # an observation without measurement.
+        rig = aj.PhysicalRig(self.config)
+        with self.assertRaises(aj.JourneyFailure) as drift:
+            rig.induce_drift()
+        self.assertIn("--drift-hook", str(drift.exception))
+        with self.assertRaises(aj.JourneyFailure) as rejection:
+            rig.induce_rejection()
+        self.assertIn("no coordinator path produces offer_rejected", str(rejection.exception))
 
     def test_out_dir_must_be_empty(self):
         self.out.mkdir(parents=True)
