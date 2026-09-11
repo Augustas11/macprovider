@@ -1,11 +1,9 @@
 # BUILD: SPEC-039 Phase-2 — runtime bridge + FR-PKV10 contiguous-KVCache extraction (issue #887)
 
-> **2026-09-11 — Increment 1 session prompt moved.** Execute
-> [#1474](https://github.com/Augustas11/macprovider/issues/1474) from
-> `audits/_prompts/BUILD_SPEC_039_PHASE2_INCREMENT1_ATTACH_IMPL_PROMPT.md`.
-> This file still describes the bundled Increment 1+2 handoff; do not follow
-> it as a session prompt. Increment 2 stays on **#887**. Closed drafts #889 /
-> #894 must not be revived.
+> **2026-09-11 — do not follow this bundled handoff.**
+> Increment 1 landed in #1475. Execute Increment 2 / [#887](https://github.com/Augustas11/macprovider/issues/887) from
+> `audits/_prompts/BUILD_SPEC_039_PHASE2_INCREMENT2_FR_PKV10_IMPL_PROMPT.md`.
+> Closed drafts #889 / #894 must not be revived.
 
 Author: operator (a11) + Claude session 2026-08-04
 Status: SUPERSEDED as the Increment 1 session prompt. Tracked originally in **issue #887**. SPEC-039 engine (#814)
