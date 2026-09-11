@@ -814,7 +814,7 @@ func TestSchemaShapeSanity(t *testing.T) {
 		t.Fatalf("count components_health: %v", err)
 	}
 	if n != 9 {
-		t.Errorf("stats_components_health row count = %d, want 8", n)
+		t.Errorf("stats_components_health row count = %d, want 9 (v0.2.1 adds intake)", n)
 	}
 
 	// Rewards-populated bootstrap has 4 rows, all false.
@@ -893,14 +893,14 @@ func TestMigrationsIdempotent(t *testing.T) {
 		t.Fatalf("second Apply: %v", err)
 	}
 
-	// stats_components_health still has 8 rows (the ON CONFLICT
-	// DO NOTHING in 002 protects it).
+	// stats_components_health still has 9 rows (the ON CONFLICT
+	// DO NOTHING in 002 protects it; v0.2.1 migration 028 adds intake).
 	var n int
 	if err := adminDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM stats_components_health`).Scan(&n); err != nil {
 		t.Fatalf("count components_health: %v", err)
 	}
-	if n != 8 {
-		t.Errorf("after re-apply, components_health row count = %d, want 8", n)
+	if n != 9 {
+		t.Errorf("after re-apply, components_health row count = %d, want 9 (v0.2.1 adds intake)", n)
 	}
 }
 
