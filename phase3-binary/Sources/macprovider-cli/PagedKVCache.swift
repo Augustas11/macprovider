@@ -274,6 +274,53 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
         return copied
     }
 
+    func physicalLayerBlocks(
+        layerIndex: Int,
+        table: PagedKVBlockTable
+    ) throws -> PagedKVRuntimePhysicalLayerBlocks {
+        guard offset == table.logicalTokenCount,
+              table.blockSizeTokens == descriptor.blockSizeTokens,
+              keyBlocks.count == valueBlocks.count,
+              keyBlocks.count == table.physicalBlocks.count
+        else {
+            throw PagedKVContiguousCacheBridgeError.blockTableMismatch
+        }
+        guard let firstKey = keyBlocks.first,
+              let firstValue = valueBlocks.first,
+              firstKey.shape == firstValue.shape,
+              firstKey.ndim >= 3,
+              firstKey.dtype == firstValue.dtype,
+              try Self.pagedDType(for: firstKey.dtype) == .fp16
+        else {
+            throw PagedKVContiguousCacheBridgeError.invalidLayerState
+        }
+        let sequenceAxis = firstKey.shape.count - 2
+        var fullKeyShape = firstKey.shape
+        var fullValueShape = firstValue.shape
+        fullKeyShape[sequenceAxis] = table.logicalTokenCount
+        fullValueShape[sequenceAxis] = table.logicalTokenCount
+        let bytesPerToken = try Self.bytesPerToken(shape: fullKeyShape, dtype: .fp16)
+        return PagedKVRuntimePhysicalLayerBlocks(
+            layerIndex: layerIndex,
+            keyShape: fullKeyShape,
+            valueShape: fullValueShape,
+            dtype: .fp16,
+            keyBlocks: try Self.physicalBlocks(
+                keyBlocks,
+                table: table,
+                fullShape: fullKeyShape,
+                dtype: .fp16
+            ),
+            valueBlocks: try Self.physicalBlocks(
+                valueBlocks,
+                table: table,
+                fullShape: fullValueShape,
+                dtype: .fp16
+            ),
+            bytesPerToken: bytesPerToken
+        )
+    }
+
     func makeMask(
         n: Int,
         windowSize: Int?,
@@ -320,5 +367,112 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
             start = end
         }
         return blocks
+    }
+
+    private static func physicalBlocks(
+        _ arrays: [MLXArray],
+        table: PagedKVBlockTable,
+        fullShape: [Int],
+        dtype: PagedKVDType
+    ) throws -> [Int: Data] {
+        let sequenceAxis = fullShape.count - 2
+        let outerElements = try product(fullShape.prefix(sequenceAxis))
+        let innerBytes = try innerBytesPerToken(shape: fullShape, dtype: dtype)
+        let blockOuterStride = try checkedMultiply(table.blockSizeTokens, innerBytes)
+        let fullBlockBytes = try checkedMultiply(outerElements, blockOuterStride)
+        var mappedBlocks: [Int: Data] = [:]
+        mappedBlocks.reserveCapacity(table.physicalBlocks.count)
+        for (blockIndex, array) in arrays.enumerated() {
+            let validTokens = blockIndex == table.physicalBlocks.count - 1
+                ? table.tailValidTokenCount
+                : table.blockSizeTokens
+            var expectedShape = fullShape
+            expectedShape[sequenceAxis] = validTokens
+            guard array.shape == expectedShape,
+                  try pagedDType(for: array.dtype) == dtype
+            else {
+                throw PagedKVContiguousCacheBridgeError.blockTableMismatch
+            }
+            let blockData = array.asData(access: .copy)
+            guard blockData.shape == expectedShape,
+                  try pagedDType(for: blockData.dType) == dtype
+            else {
+                throw PagedKVContiguousCacheBridgeError.unsupportedDType
+            }
+            let validBlockBytes = try checkedMultiply(
+                try checkedMultiply(outerElements, validTokens),
+                innerBytes
+            )
+            guard blockData.data.count == validBlockBytes else {
+                throw PagedKVContiguousCacheBridgeError.blockTableMismatch
+            }
+            var padded = Data(repeating: 0, count: fullBlockBytes)
+            let sourceOuterStride = try checkedMultiply(validTokens, innerBytes)
+            for outer in 0..<outerElements {
+                let sourceStart = outer * sourceOuterStride
+                let destinationStart = outer * blockOuterStride
+                padded.replaceSubrange(
+                    destinationStart ..< destinationStart + sourceOuterStride,
+                    with: blockData.data[sourceStart ..< sourceStart + sourceOuterStride]
+                )
+            }
+            let physicalID = table.physicalBlocks[blockIndex]
+            guard mappedBlocks[physicalID] == nil else {
+                throw PagedKVContiguousCacheBridgeError.blockTableMismatch
+            }
+            mappedBlocks[physicalID] = padded
+        }
+        guard mappedBlocks.count == table.physicalBlocks.count else {
+            throw PagedKVContiguousCacheBridgeError.blockTableMismatch
+        }
+        return mappedBlocks
+    }
+
+    private static func pagedDType(for dtype: DType) throws -> PagedKVDType {
+        switch dtype {
+        case .float16:
+            return .fp16
+        default:
+            throw PagedKVContiguousCacheBridgeError.unsupportedDType
+        }
+    }
+
+    private static func innerBytesPerToken(shape: [Int], dtype: PagedKVDType) throws -> Int {
+        guard shape.count >= 3 else { throw PagedKVContiguousCacheBridgeError.blockTableMismatch }
+        let sequenceAxis = shape.count - 2
+        var elements = 1
+        for dim in shape.suffix(from: sequenceAxis + 1) {
+            guard dim > 0 else { throw PagedKVContiguousCacheBridgeError.blockTableMismatch }
+            let (next, overflow) = elements.multipliedReportingOverflow(by: dim)
+            guard !overflow else { throw PagedKVContiguousCacheBridgeError.blockTableMismatch }
+            elements = next
+        }
+        return try checkedMultiply(elements, dtype.byteWidth)
+    }
+
+    private static func bytesPerToken(shape: [Int], dtype: PagedKVDType) throws -> Int {
+        guard shape.count >= 3 else { throw PagedKVContiguousCacheBridgeError.blockTableMismatch }
+        let sequenceAxis = shape.count - 2
+        return try checkedMultiply(
+            try product(shape.prefix(sequenceAxis)),
+            try innerBytesPerToken(shape: shape, dtype: dtype)
+        )
+    }
+
+    private static func product<S: Sequence>(_ values: S) throws -> Int where S.Element == Int {
+        var result = 1
+        for value in values {
+            guard value > 0 else { throw PagedKVContiguousCacheBridgeError.blockTableMismatch }
+            let (next, overflow) = result.multipliedReportingOverflow(by: value)
+            guard !overflow else { throw PagedKVContiguousCacheBridgeError.blockTableMismatch }
+            result = next
+        }
+        return result
+    }
+
+    private static func checkedMultiply(_ lhs: Int, _ rhs: Int) throws -> Int {
+        let (value, overflow) = lhs.multipliedReportingOverflow(by: rhs)
+        guard !overflow else { throw PagedKVContiguousCacheBridgeError.blockTableMismatch }
+        return value
     }
 }

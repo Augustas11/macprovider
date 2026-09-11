@@ -259,8 +259,18 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
             processor: StandInUserInputProcessor(),
             tokenizer: RuntimeBridgeFakeTokenizer()
         ))
-        let backend = PagedKVSharedForwardBackend(container: container, descriptor: descriptor, layerCount: 1)
-        let allocator = try PagedKVBlockAllocator(blockSizeTokens: descriptor.blockSizeTokens, maxPhysicalBlocks: 16)
+        let contiguousCacheBridge = PagedKVRuntimeContiguousCacheBridge()
+        let backend = PagedKVSharedForwardBackend(
+            container: container,
+            descriptor: descriptor,
+            layerCount: 1,
+            contiguousCacheBridge: contiguousCacheBridge
+        )
+        let allocator = try PagedKVBlockAllocator(
+            blockSizeTokens: descriptor.blockSizeTokens,
+            maxPhysicalBlocks: 16,
+            contiguousCacheBridge: contiguousCacheBridge
+        )
         let handle = try await allocator.allocate(conversationKey: "cancel-row", maxTokens: 8)
         _ = try await allocator.extend(handle, by: 1)
         let binding = try await allocator.binding(for: handle)
@@ -292,6 +302,42 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         await cancel.value
         XCTAssertTrue(cancellation.returned())
         XCTAssertEqual(backend.retainedRowCountForTest(), 0)
+        await XCTAssertThrowsErrorAsync {
+            _ = try await allocator.materializeContiguousByteCache(handle)
+        }
+    }
+
+    func testSharedForwardBackendFinishPreservesRetainedPagedHandoffRecord() async throws {
+        let descriptor = Self.bridgeDescriptor(blockSizeTokens: 4, maxPhysicalBlocks: 4)
+        let bridge = RuntimeBridgeRecordingCacheBridge()
+        let backend = PagedKVSharedForwardBackend(
+            container: ModelContainer(context: ModelContext(
+                configuration: ModelConfiguration(id: descriptor.modelID),
+                model: RuntimeBridgeFakeModel(nextTokenByInput: [:]),
+                processor: StandInUserInputProcessor(),
+                tokenizer: RuntimeBridgeFakeTokenizer()
+            )),
+            descriptor: descriptor,
+            layerCount: 1,
+            contiguousCacheBridge: bridge
+        )
+        let allocator = try PagedKVBlockAllocator(
+            blockSizeTokens: descriptor.blockSizeTokens,
+            maxPhysicalBlocks: descriptor.maxPhysicalBlocks
+        )
+        let handle = try await allocator.allocate(conversationKey: "conv:a", maxTokens: 8, initialTokens: 4)
+        let binding = try await allocator.binding(for: handle)
+        let paged = PagedKVCache(descriptor: descriptor, binding: binding, initialOffset: 4)
+        try backend.installRowStateForTest(caches: [paged], requestID: "retained-row", binding: binding)
+        XCTAssertEqual(backend.retainedRowCountForTest(), 1)
+        XCTAssertTrue(bridge.hasRecord(for: handle))
+
+        let retained = try await allocator.retain(handle)
+        backend.finish(requestID: "retained-row")
+        XCTAssertEqual(backend.retainedRowCountForTest(), 0)
+        XCTAssertTrue(bridge.hasRecord(for: handle))
+        XCTAssertEqual(bridge.discardedHandles(), [])
+        _ = try await allocator.reattach(retained, conversationKey: "conv:a")
     }
 
     func testAttachedModelRuntimeServesFreshGreedyRequestsThroughScheduler() async throws {
@@ -415,6 +461,196 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         XCTAssertTrue(chunks.chunks().isEmpty)
     }
 
+    func testContiguousCacheBridgeRestoresLiveKVCacheByteExactAndRoundTrips() async throws {
+        guard PagedKVMetallibGate.defaultMetallibExists() else {
+            throw XCTSkip("MLX default metallib is unavailable in this test host")
+        }
+
+        let descriptor = Self.bridgeDescriptor(blockSizeTokens: 2, maxPhysicalBlocks: 6)
+        let bridge = PagedKVRuntimeContiguousCacheBridge()
+        let allocator = try PagedKVBlockAllocator(
+            blockSizeTokens: descriptor.blockSizeTokens,
+            maxPhysicalBlocks: descriptor.maxPhysicalBlocks,
+            physicalBlockOrder: [4, 1, 3, 0, 2, 5],
+            contiguousCacheBridge: bridge
+        )
+        let handle = try await allocator.allocate(conversationKey: "conv:a", maxTokens: 6, initialTokens: 5)
+        let binding = try await allocator.binding(for: handle)
+        XCTAssertEqual(binding.currentTable.physicalBlocks, [4, 1, 3])
+
+        let keyBytes = Self.fp16Bytes([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
+        let valueBytes = Self.fp16Bytes([101, 102, 103, 104, 105, 106, 107, 108, 109, 110])
+        let paged = PagedKVCache(descriptor: descriptor, binding: binding)
+        paged.state = [
+            MLXArray(keyBytes, [1, 2, 5, 1], dtype: .float16),
+            MLXArray(valueBytes, [1, 2, 5, 1], dtype: .float16),
+        ]
+        try bridge.record(caches: [paged], binding: binding)
+
+        let permutedTable = PagedKVBlockTable(
+            handleID: binding.currentTable.handleID,
+            blockSizeTokens: binding.currentTable.blockSizeTokens,
+            logicalTokenCount: binding.currentTable.logicalTokenCount,
+            physicalBlocks: Array(binding.currentTable.physicalBlocks.reversed()),
+            tailValidTokenCount: binding.currentTable.tailValidTokenCount,
+            poolEpoch: binding.currentTable.poolEpoch
+        )
+        XCTAssertThrowsError(try bridge.materializeContiguousByteCache(handle: handle, table: permutedTable))
+
+        paged.state = [
+            MLXArray(Self.fp16Bytes([201, 202, 203, 204, 205, 206, 207, 208, 209, 210]), [1, 2, 5, 1], dtype: .float16),
+            MLXArray(Self.fp16Bytes([301, 302, 303, 304, 305, 306, 307, 308, 309, 310]), [1, 2, 5, 1], dtype: .float16),
+        ]
+        XCTAssertNotEqual(paged.state[0].asData(access: .copy).data, keyBytes)
+
+        let materialized = try await allocator.materializeContiguousByteCache(handle)
+        XCTAssertEqual(materialized.layers[0].keyBytes, keyBytes)
+        XCTAssertEqual(materialized.layers[0].valueBytes, valueBytes)
+
+        let handoff = try bridge.materializeContiguousKVCache(handle: handle, table: binding.currentTable)
+        XCTAssertEqual(handoff.caches.count, 1)
+        XCTAssertEqual(handoff.caches[0].offset, 5)
+        XCTAssertEqual(handoff.caches[0].state[0].asData(access: .copy).data, keyBytes)
+        XCTAssertEqual(handoff.caches[0].state[1].asData(access: .copy).data, valueBytes)
+
+        let nextKeyBytes = Self.fp16Bytes([11, 12])
+        let nextValueBytes = Self.fp16Bytes([111, 112])
+        let updated = handoff.caches[0].update(
+            keys: MLXArray(nextKeyBytes, [1, 2, 1, 1], dtype: .float16),
+            values: MLXArray(nextValueBytes, [1, 2, 1, 1], dtype: .float16)
+        )
+        eval(updated.0, updated.1)
+        XCTAssertEqual(handoff.caches[0].offset, 6)
+        XCTAssertEqual(
+            handoff.caches[0].state[0].asData(access: .copy).data,
+            Self.fp16Bytes([1, 2, 3, 4, 5, 11, 6, 7, 8, 9, 10, 12])
+        )
+        XCTAssertEqual(
+            handoff.caches[0].state[1].asData(access: .copy).data,
+            Self.fp16Bytes([101, 102, 103, 104, 105, 111, 106, 107, 108, 109, 110, 112])
+        )
+    }
+
+    func testContiguousCacheBridgePreservesMidBlockTrimAcrossExtractAndRetainReattach() async throws {
+        guard PagedKVMetallibGate.defaultMetallibExists() else {
+            throw XCTSkip("MLX default metallib is unavailable in this test host")
+        }
+
+        let descriptor = Self.bridgeDescriptor(blockSizeTokens: 4, maxPhysicalBlocks: 6)
+        let bridge = PagedKVRuntimeContiguousCacheBridge()
+        let allocator = try PagedKVBlockAllocator(
+            blockSizeTokens: descriptor.blockSizeTokens,
+            maxPhysicalBlocks: descriptor.maxPhysicalBlocks,
+            physicalBlockOrder: [2, 5, 1, 0, 4, 3],
+            contiguousCacheBridge: bridge
+        )
+        let handle = try await allocator.allocate(
+            conversationKey: "conv:a",
+            initialCapacityTokens: 8,
+            maxLogicalTokens: 8,
+            initialTokens: 7
+        )
+        let binding = try await allocator.binding(for: handle)
+        XCTAssertEqual(binding.currentTable.tailValidTokenCount, 3)
+
+        let keyBytes = Self.fp16Bytes([1, 2, 3, 4, 5, 6, 7])
+        let valueBytes = Self.fp16Bytes([101, 102, 103, 104, 105, 106, 107])
+        let paged = PagedKVCache(descriptor: descriptor, binding: binding)
+        paged.state = [
+            MLXArray(keyBytes, [1, 1, 7, 1], dtype: .float16),
+            MLXArray(valueBytes, [1, 1, 7, 1], dtype: .float16),
+        ]
+        try bridge.record(caches: [paged], binding: binding)
+
+        var extracted = try bridge.materializeContiguousKVCache(handle: handle, table: binding.currentTable)
+        try extracted.trim(toLogicalTokens: 5)
+        XCTAssertEqual(extracted.caches[0].offset, 5)
+        XCTAssertEqual(extracted.logicalTokenCount, 5)
+        XCTAssertEqual(extracted.tailValidTokenCount, 1)
+        XCTAssertEqual(extracted.caches[0].state[0].asData(access: .copy).data, Self.fp16Bytes([1, 2, 3, 4, 5]))
+
+        let retained = try await allocator.retain(handle)
+        await XCTAssertThrowsErrorAsync {
+            _ = try await allocator.reattach(retained, conversationKey: "conv:b", trimToLogicalTokens: 5)
+        }
+        let reattached = try await allocator.reattach(
+            retained,
+            conversationKey: "conv:a",
+            trimToLogicalTokens: 5
+        )
+        let reattachedTable = try await allocator.table(for: reattached)
+        XCTAssertEqual(reattachedTable.logicalTokenCount, 5)
+        XCTAssertEqual(reattachedTable.tailValidTokenCount, 1)
+        XCTAssertThrowsError(try bridge.materializeContiguousKVCache(handle: handle, table: binding.currentTable))
+
+        let pagedHandoff = try bridge.reattachPagedKVCache(handle: reattached, table: reattachedTable)
+        XCTAssertEqual(pagedHandoff.logicalTokenCount, 5)
+        XCTAssertEqual(pagedHandoff.tailValidTokenCount, 1)
+        XCTAssertEqual(pagedHandoff.caches.count, 1)
+        XCTAssertTrue(pagedHandoff.caches[0] === paged)
+        XCTAssertEqual(pagedHandoff.caches[0].offset, 5)
+        XCTAssertEqual(pagedHandoff.caches[0].state[0].asData(access: .copy).data, Self.fp16Bytes([1, 2, 3, 4, 5]))
+
+        let materializedAfterReattach = try await allocator.materializeContiguousByteCache(reattached)
+        XCTAssertEqual(materializedAfterReattach.layers[0].keyShape, [1, 1, 5, 1])
+        XCTAssertEqual(materializedAfterReattach.layers[0].keyBytes, Self.fp16Bytes([1, 2, 3, 4, 5]))
+        XCTAssertEqual(materializedAfterReattach.layers[0].valueBytes, Self.fp16Bytes([101, 102, 103, 104, 105]))
+
+        _ = try await allocator.extend(reattached, by: 1)
+        let continued = pagedHandoff.caches[0].update(
+            keys: MLXArray(Self.fp16Bytes([6]), [1, 1, 1, 1], dtype: .float16),
+            values: MLXArray(Self.fp16Bytes([106]), [1, 1, 1, 1], dtype: .float16)
+        )
+        eval(continued.0, continued.1)
+        try bridge.record(caches: pagedHandoff.caches, binding: try await allocator.binding(for: reattached))
+        XCTAssertEqual(paged.offset, 6)
+        XCTAssertEqual(pagedHandoff.caches[0].state[0].asData(access: .copy).data, Self.fp16Bytes([1, 2, 3, 4, 5, 6]))
+        let materializedAfterContinuation = try await allocator.materializeContiguousByteCache(reattached)
+        XCTAssertEqual(materializedAfterContinuation.layers[0].keyBytes, Self.fp16Bytes([1, 2, 3, 4, 5, 6]))
+        XCTAssertEqual(materializedAfterContinuation.layers[0].valueBytes, Self.fp16Bytes([101, 102, 103, 104, 105, 106]))
+
+        let zeroRetained = try await allocator.retain(reattached)
+        let zeroReattached = try await allocator.reattach(
+            zeroRetained,
+            conversationKey: "conv:a",
+            trimToLogicalTokens: 0
+        )
+        let zeroTable = try await allocator.table(for: zeroReattached)
+        XCTAssertEqual(zeroTable.logicalTokenCount, 0)
+        XCTAssertEqual(zeroTable.tailValidTokenCount, 0)
+        await XCTAssertThrowsErrorAsync {
+            _ = try await allocator.materializeContiguousByteCache(zeroReattached)
+        }
+    }
+
+    func testContiguousCacheBridgeRejectsCrossHandleCacheRecord() async throws {
+        guard PagedKVMetallibGate.defaultMetallibExists() else {
+            throw XCTSkip("MLX default metallib is unavailable in this test host")
+        }
+
+        let descriptor = Self.bridgeDescriptor(blockSizeTokens: 2, maxPhysicalBlocks: 6)
+        let bridge = PagedKVRuntimeContiguousCacheBridge()
+        let allocator = try PagedKVBlockAllocator(
+            blockSizeTokens: descriptor.blockSizeTokens,
+            maxPhysicalBlocks: descriptor.maxPhysicalBlocks,
+            contiguousCacheBridge: bridge
+        )
+        let first = try await allocator.allocate(conversationKey: "conv:a", maxTokens: 4, initialTokens: 2)
+        let second = try await allocator.allocate(conversationKey: "conv:b", maxTokens: 4, initialTokens: 2)
+        let firstBinding = try await allocator.binding(for: first)
+        let secondBinding = try await allocator.binding(for: second)
+        let paged = PagedKVCache(descriptor: descriptor, binding: firstBinding)
+        paged.state = [
+            MLXArray(Self.fp16Bytes([1, 2]), [1, 1, 2, 1], dtype: .float16),
+            MLXArray(Self.fp16Bytes([101, 102]), [1, 1, 2, 1], dtype: .float16),
+        ]
+
+        XCTAssertThrowsError(try bridge.record(caches: [paged], binding: secondBinding))
+        await XCTAssertThrowsErrorAsync {
+            _ = try await allocator.materializeContiguousByteCache(second)
+        }
+    }
+
     func testStickyRequestsRemainRejectedBeforeFRPKV10CacheBridge() async throws {
         let backend = RuntimeBridgeScriptedBackend(scripts: [:])
         let scheduler = try Self.makeScheduler(maxActiveRows: 2, backend: backend)
@@ -486,10 +722,10 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         )
     }
 
-    private static func bridgeDescriptor() -> PagedKVDescriptor {
+    private static func bridgeDescriptor(blockSizeTokens: Int = 4, maxPhysicalBlocks: Int = 16) -> PagedKVDescriptor {
         PagedKVDescriptor(
-            blockSizeTokens: 4,
-            maxPhysicalBlocks: 16,
+            blockSizeTokens: blockSizeTokens,
+            maxPhysicalBlocks: maxPhysicalBlocks,
             modelID: "mlx-community/Qwen-Test",
             modelSHA256: String(repeating: "a", count: 64),
             tokenizerSHA256: nil,
@@ -501,6 +737,18 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
             kernelIdentifier: "macprovider_paged_kv_gather_v1",
             parityLabel: "sdpa-parity-v1"
         )
+    }
+
+    private static func fp16Bytes(_ values: [UInt16]) -> Data {
+        var data = Data()
+        data.reserveCapacity(values.count * 2)
+        for value in values {
+            var littleEndian = value.littleEndian
+            withUnsafeBytes(of: &littleEndian) { bytes in
+                data.append(contentsOf: bytes)
+            }
+        }
+        return data
     }
 
     private static func decodeInput(
@@ -833,6 +1081,41 @@ private actor RuntimeBridgeScriptedBackend: ContinuousBatchSchedulerBackend {
 
     func decodeBatches() -> [[String]] {
         batches
+    }
+}
+
+private final class RuntimeBridgeRecordingCacheBridge: PagedKVRuntimeCacheBridge, @unchecked Sendable {
+    private let lock = NSLock()
+    private var recorded: Set<UUID> = []
+    private var discarded: [UUID] = []
+
+    func record(caches: [PagedKVCache], binding: PagedKVStorageBinding) throws {
+        lock.lock()
+        recorded.insert(binding.handle.handleID)
+        lock.unlock()
+    }
+
+    func discard(handle: PagedKVBlockTableHandle) {
+        discardContiguousCache(handle: handle)
+    }
+
+    func discardContiguousCache(handle: PagedKVBlockTableHandle) {
+        lock.lock()
+        recorded.remove(handle.handleID)
+        discarded.append(handle.handleID)
+        lock.unlock()
+    }
+
+    func hasRecord(for handle: PagedKVBlockTableHandle) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return recorded.contains(handle.handleID)
+    }
+
+    func discardedHandles() -> [UUID] {
+        lock.lock()
+        defer { lock.unlock() }
+        return discarded
     }
 }
 
