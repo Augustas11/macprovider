@@ -204,6 +204,55 @@ final class BYOMLoopbackAdapterTests: XCTestCase {
         XCTAssertEqual(BYOMLlamaCppModelStore.stem(fromRuntimeModelID: "my-alias"), "my-alias")
     }
 
+    func testLlamaCppPinnedFileResolvesOnlyThatFileAndOverridesTheRoot() throws {
+        let root = try temporaryDirectory("byom-llamacpp-pinned")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let allowed = root.appendingPathComponent("allowed", isDirectory: true)
+        let pinned = root.appendingPathComponent("elsewhere/tiny-q4.gguf")
+        let decoy = allowed.appendingPathComponent("tiny-q4.gguf")
+        try write(ggufBytes, to: pinned)
+        try write(ggufBytes + Data([0x01]), to: decoy)
+
+        // (c): the pinned file wins even though the root also holds a matching stem.
+        let both = BYOMLlamaCppModelStore(root: allowed, pinnedFile: pinned)
+        let hit = try XCTUnwrap(both.resolveArtifact(servedModelRef: "llamacpp:tiny-q4"))
+        XCTAssertEqual(hit.fileURL.resolvingSymlinksInPath().path, pinned.resolvingSymlinksInPath().path)
+        XCTAssertEqual(hit.locator, pinned.resolvingSymlinksInPath().standardizedFileURL.path)
+
+        // The runtime serving a DIFFERENT stem than the operator pinned gets no identity, not a wrong one.
+        XCTAssertNil(both.resolveArtifact(servedModelRef: "llamacpp:other-model"))
+        // A pinned path that is not a regular GGUF resolves nothing.
+        XCTAssertNil(BYOMLlamaCppModelStore(root: nil, pinnedFile: root.appendingPathComponent("missing.gguf")).resolveArtifact(servedModelRef: "llamacpp:missing"))
+        // No root is needed in (c).
+        XCTAssertNotNil(BYOMLlamaCppModelStore(root: nil, pinnedFile: pinned).resolveArtifact(servedModelRef: "llamacpp:tiny-q4"))
+    }
+
+    func testLlamaCppPinnedFileDrivesArtifactHashAvailableThroughDiscovery() async throws {
+        let root = try temporaryDirectory("byom-llamacpp-pinned-e2e")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let pinned = root.appendingPathComponent("models/tiny-q4.gguf")
+        try write(ggufBytes, to: pinned)
+        let env = BYOMDiscoveryEnvironment(
+            namespaceURL: root.appendingPathComponent("ns"),
+            mlxCacheRoot: root.appendingPathComponent("hf", isDirectory: true),
+            ollamaOrigin: nil,
+            llamacppOrigin: "http://127.0.0.1:8080",
+            ollamaModelsRoot: root.appendingPathComponent("ollama", isDirectory: true),
+            lmstudioModelsRoot: root.appendingPathComponent("lms", isDirectory: true),
+            llamacppModelRoot: nil,
+            llamacppModelPath: pinned,
+            artifactDigestCacheURL: root.appendingPathComponent("digests.json")
+        )
+        _ = try env.artifactDigests.computeEvidence(runtimeSource: "llamacpp_loopback", servedModelRef: "llamacpp:tiny-q4")
+        let document = await BYOMDiscoveryRunner(environment: env, httpClient: RoutingBYOMHTTPClient(routes: [
+            "/props": json(#"{"default_generation_settings":{"n_ctx":4096}}"#),
+            "/v1/models": json(#"{"data":[{"id":"/somewhere/else/tiny-q4.gguf"}]}"#),
+        ])).discover()
+        let candidate = try XCTUnwrap(document.candidates.first { $0.runtimeSource == "llamacpp_loopback" })
+        XCTAssertEqual(candidate.identityState, "artifact_hash_available")
+        XCTAssertFalse(try ModelSwitchingWireCodec.encode(document).contains("/somewhere/else"))
+    }
+
     // MARK: - Failure classes map to closed warning codes
 
     func testMalformedInventoryEmitsWarningNotCandidate() async throws {
