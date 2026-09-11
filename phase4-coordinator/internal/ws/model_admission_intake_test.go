@@ -247,7 +247,7 @@ func TestModelAdmissionIntakeOfferPairsWindowIsInclusiveAtSecondGranularity(t *t
 		if _, _, err := store.AppendModelAdmissionWithdrawal(context.Background(), dWithdraw); err != nil {
 			t.Fatalf("append withdrawal: %v", err)
 		}
-		pairs, err := store.ModelAdmissionIntakeOfferPairs(context.Background(), start, now)
+		pairs, err := store.ModelAdmissionIntakeOfferPairs(context.Background(), start, now, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -256,6 +256,11 @@ func TestModelAdmissionIntakeOfferPairsWindowIsInclusiveAtSecondGranularity(t *t
 			got[p]++
 		}
 		want := map[ModelAdmissionIntakePair]int{{"a", "k1"}: 1, {"b", "k1"}: 1, {"d", "k9"}: 1, {"i", "k2"}: 1}
+		// The ceiling is enforced at the store: a limit of 2 yields 2 pairs,
+		// never the full set.
+		if limited, err := store.ModelAdmissionIntakeOfferPairs(context.Background(), start, now, 2); err != nil || len(limited) != 2 {
+			t.Fatalf("%T limit 2: pairs=%d err=%v, want 2", store, len(limited), err)
+		}
 		if len(got) != len(want) {
 			t.Fatalf("%T pairs = %v, want %v", store, got, want)
 		}

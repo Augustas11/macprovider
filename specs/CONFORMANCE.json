@@ -1628,7 +1628,7 @@
         "phase4-coordinator/internal/intake/aggregator.go:func (a *Aggregator) Snapshot",
         "phase4-coordinator/internal/intake/aggregator.go:func ValidateWindow",
         "phase4-coordinator/internal/buyer/intake_hook.go:func (s *Server) observeUnmatchedModel",
-        "phase4-coordinator/internal/buyer/intake_hook.go:func (s *Server) intakeAdmittedCatalogKey",
+        "phase4-coordinator/internal/buyer/intake_hook.go:func (s *Server) intakeUnmatchedCatalogKey",
         "phase4-coordinator/internal/config/config.go:func (c StatsIntakeConfig) EligibilityPolicyID",
         "phase4-coordinator/internal/stats/rollup/intake.go:func runIntakeTick",
         "phase4-coordinator/internal/stats/rollup/intake.go:func BuildFleetRAM",

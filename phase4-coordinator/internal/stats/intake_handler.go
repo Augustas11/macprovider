@@ -1,7 +1,6 @@
 package stats
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -115,17 +114,13 @@ func (h *Handler) handleIntake(w http.ResponseWriter, r *http.Request, ar authRe
 	writeJSON(w, r, http.StatusOK, resp, row.GeneratedAt, "private, max-age=900", varyForPartner(), noCORS)
 }
 
-// intakeFleetRAMClassFloors mirrors SPEC-017 §5.2b.6 for the read-side check.
-var intakeFleetRAMClassFloors = []int{8, 16, 24, 32, 48, 64, 96, 128, 192, 256, 512}
-
 // validateIntakeRow applies SPEC-017 §5.2b to the persisted row bytes:
 // every window passes intake.ValidateWindow (complete, 30 days, ids,
-// parameters, floor, order), at most MaxEmittedWindows of them, and the
-// histogram carries the eleven floors in order with k fixed and
-// provider_total reconciling to the emitted counts plus suppressed.
+// parameters, floor, order), at most MaxEmittedWindows of them, no
+// duplicate id, and the histogram passes intake.ValidateFleetRAMJSON.
 func validateIntakeRow(unmatchedJSON, fleetJSON []byte) error {
 	var um intake.UnmatchedModels
-	if err := decodeClosed(unmatchedJSON, &um); err != nil {
+	if err := intake.DecodeClosed(unmatchedJSON, &um); err != nil {
 		return err
 	}
 	if um.Contract != intake.Contract || len(um.Windows) > intake.MaxEmittedWindows {
@@ -141,59 +136,7 @@ func validateIntakeRow(unmatchedJSON, fleetJSON []byte) error {
 		}
 		seen[w.WindowID] = struct{}{}
 	}
-	var fleet struct {
-		WindowStart        string `json:"window_start"`
-		WindowEnd          string `json:"window_end"`
-		KAnonymityMin      int    `json:"k_anonymity_min"`
-		ProviderTotal      int    `json:"provider_total"`
-		ProviderSuppressed int    `json:"provider_suppressed"`
-		Classes            []struct {
-			RAMGBFloor    int  `json:"ram_gb_floor"`
-			ProviderCount *int `json:"provider_count"`
-			Suppressed    bool `json:"suppressed"`
-		} `json:"classes"`
-	}
-	if err := decodeClosed(fleetJSON, &fleet); err != nil {
-		return err
-	}
-	start, err1 := time.Parse(time.RFC3339, fleet.WindowStart)
-	end, err2 := time.Parse(time.RFC3339, fleet.WindowEnd)
-	if err1 != nil || err2 != nil || end.Sub(start) != intake.WindowMaxDays*24*time.Hour {
-		return errors.New("intake: fleet_ram window")
-	}
-	if fleet.KAnonymityMin != intake.KAnonymityMin || fleet.ProviderTotal < 0 || fleet.ProviderSuppressed < 0 || len(fleet.Classes) != len(intakeFleetRAMClassFloors) {
-		return errors.New("intake: fleet_ram shape")
-	}
-	emitted := 0
-	for i, c := range fleet.Classes {
-		if c.RAMGBFloor != intakeFleetRAMClassFloors[i] || c.Suppressed != (c.ProviderCount == nil) {
-			return errors.New("intake: fleet_ram class")
-		}
-		if c.ProviderCount != nil {
-			if *c.ProviderCount < intake.KAnonymityMin {
-				return errors.New("intake: fleet_ram sub-k class emitted")
-			}
-			emitted += *c.ProviderCount
-		}
-	}
-	if emitted+fleet.ProviderSuppressed != fleet.ProviderTotal {
-		return errors.New("intake: fleet_ram does not reconcile")
-	}
-	return nil
-}
-
-// decodeClosed decodes exactly one JSON document into v, refusing any key
-// the closed shape does not declare and any trailing content.
-func decodeClosed(raw []byte, v any) error {
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(v); err != nil {
-		return err
-	}
-	if dec.More() {
-		return errors.New("intake: trailing content")
-	}
-	return nil
+	return intake.ValidateFleetRAMJSON(fleetJSON)
 }
 
 func intakeStaleFor503(now, generatedAt time.Time) bool {

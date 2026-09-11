@@ -90,7 +90,9 @@ type ModelAdmissionStore interface {
 	// intake_model_key) pairs of offer_submitted events whose
 	// coordinator-assigned append time lies in [since, until] (SPEC-047 R009);
 	// bounded by providers × keys, never by event volume.
-	ModelAdmissionIntakeOfferPairs(context.Context, time.Time, time.Time) ([]ModelAdmissionIntakePair, error)
+	// The store returns at most `limit` pairs: the R009 ceiling is
+	// enforced at the store boundary, never after an unbounded read.
+	ModelAdmissionIntakeOfferPairs(ctx context.Context, since, until time.Time, limit int) ([]ModelAdmissionIntakePair, error)
 	// ModelAdmissionEventByRequestID is the operator idempotency lookup: the
 	// event a (provider_id, request_id) pair originally produced.
 	ModelAdmissionEventByRequestID(context.Context, string, string) (ModelAdmissionEvent, bool, error)
@@ -473,7 +475,7 @@ func (s *memoryModelAdmissionStore) LatestModelAdmissionStatusesInStates(_ conte
 	return out, nil
 }
 
-func (s *memoryModelAdmissionStore) ModelAdmissionIntakeOfferPairs(_ context.Context, since, until time.Time) ([]ModelAdmissionIntakePair, error) {
+func (s *memoryModelAdmissionStore) ModelAdmissionIntakeOfferPairs(_ context.Context, since, until time.Time, limit int) ([]ModelAdmissionIntakePair, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	seen := map[ModelAdmissionIntakePair]struct{}{}
@@ -492,6 +494,9 @@ func (s *memoryModelAdmissionStore) ModelAdmissionIntakeOfferPairs(_ context.Con
 		}
 		seen[pair] = struct{}{}
 		out = append(out, pair)
+		if limit > 0 && len(out) >= limit {
+			break
+		}
 	}
 	return out, nil
 }
@@ -727,7 +732,10 @@ func (s *SQLiteModelAdmissionStore) LatestModelAdmissionStatusesInStates(ctx con
  ORDER BY e.provider_id ASC, e.candidate_id ASC`), args...)
 }
 
-func (s *SQLiteModelAdmissionStore) ModelAdmissionIntakeOfferPairs(ctx context.Context, since, until time.Time) ([]ModelAdmissionIntakePair, error) {
+func (s *SQLiteModelAdmissionStore) ModelAdmissionIntakeOfferPairs(ctx context.Context, since, until time.Time, limit int) ([]ModelAdmissionIntakePair, error) {
+	if limit <= 0 {
+		limit = modelAdmissionIntakePairCeiling + 1
+	}
 	// created_at_utc is RFC3339Nano text; every value shares the fixed
 	// 19-character "YYYY-MM-DDTHH:MM:SS" prefix, so bounds expressed as that
 	// prefix compare lexically at second granularity ([since, until]
@@ -739,7 +747,8 @@ SELECT DISTINCT provider_id, intake_model_key
   FROM model_admission_events
  WHERE state = ? AND intake_model_key <> ''
    AND created_at_utc >= ? AND created_at_utc < ?
- ORDER BY provider_id ASC, intake_model_key ASC`, modelAdmissionOfferSubmitted, lower, upper)
+ ORDER BY provider_id ASC, intake_model_key ASC
+ LIMIT ?`, modelAdmissionOfferSubmitted, lower, upper, limit)
 	if err != nil {
 		return nil, err
 	}

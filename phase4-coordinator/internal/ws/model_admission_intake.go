@@ -200,7 +200,7 @@ func (s *Server) buildModelAdmissionIntakeSnapshot(ctx context.Context) error {
 	defer cancel()
 	generatedAt := s.now().UTC().Truncate(time.Second)
 	windowStart := generatedAt.Add(-modelAdmissionIntakeWindow)
-	pairs, err := s.modelAdmissions.ModelAdmissionIntakeOfferPairs(ctx, windowStart, generatedAt)
+	pairs, err := s.modelAdmissions.ModelAdmissionIntakeOfferPairs(ctx, windowStart, generatedAt, modelAdmissionIntakePairCeiling+1)
 	if err != nil {
 		return fmt.Errorf("offer pairs: %w", err)
 	}

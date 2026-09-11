@@ -115,21 +115,22 @@ func fleetRAMPeriodIndex(t time.Time) int64 {
 	return t.UTC().Unix() / int64(fleetRAMPeriod/time.Second)
 }
 
-// fleetRAMCurrent reports whether a persisted histogram was materialized
-// in the same period as now and is well-formed; if so its bytes are kept
-// verbatim for the rest of the period. An unparseable or foreign-period
-// histogram is recomputed.
+// fleetRAMCurrent reports whether a persisted histogram passes the closed
+// contract (intake.ValidateFleetRAMJSON) AND was materialized in the same
+// period as now; if so its bytes are kept verbatim for the rest of the
+// period. A malformed, foreign-period, or future histogram is recomputed.
 func fleetRAMCurrent(raw []byte, now time.Time) bool {
-	var f FleetRAM
+	if err := intake.ValidateFleetRAMJSON(raw); err != nil {
+		return false
+	}
+	var f struct {
+		WindowEnd string `json:"window_end"`
+	}
 	if err := json.Unmarshal(raw, &f); err != nil {
 		return false
 	}
-	end, err := time.Parse(time.RFC3339, f.WindowEnd)
-	if err != nil || end.After(now) || f.KAnonymityMin != intake.KAnonymityMin {
-		return false
-	}
-	start, err := time.Parse(time.RFC3339, f.WindowStart)
-	if err != nil || end.Sub(start) != fleetRAMPeriod {
+	end, err := intake.ParseUTC(f.WindowEnd)
+	if err != nil || end.After(now) {
 		return false
 	}
 	return fleetRAMPeriodIndex(end) == fleetRAMPeriodIndex(now)
@@ -182,7 +183,7 @@ func MergeIntakeWindows(current []intake.Window, persisted []intake.Window, now 
 	cutoff := now.Add(-intake.EmissionRetention)
 	windows := make([]intake.Window, 0, len(byID))
 	for _, w := range byID {
-		end, _ := time.Parse(time.RFC3339, *w.WindowEnd) // validated above
+		end, _ := intake.ParseUTC(*w.WindowEnd) // validated above
 		if end.Before(cutoff) {
 			continue
 		}

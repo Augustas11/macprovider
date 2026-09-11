@@ -40,9 +40,9 @@ func intakeHandlerFixture(t *testing.T, generatedAt time.Time, now time.Time) *H
 // fixtureUnmatchedJSON is one complete window in the closed §5.2b shape.
 const fixtureUnmatchedJSON = `{"contract":"SPEC-023-16.2a","windows":[{"window_id":"3f1c0a9b7d2e4c6f8a1b3d5e7f9a0c2d","window_start":"2026-08-01T00:00:00Z","window_end":"2026-08-31T00:00:00Z","parameters":{"key_buckets":64,"principals_per_bucket":64,"distinct_key_cap":10000,"buyer_request_floor":250,"principal_cap_pct":10,"principal_cap_requests":25,"k_anonymity_min":3,"window_max_days":30},"eligibility_policy_id":"9a2e6c1d4b8f0a3e5c7d9b1f3a5c7e90","buckets":[{"model_key":"qwen3-14b","lower_bound":311,"count":311,"error":0}],"suppressed_bucket_count":7,"other_suppressed":{"request_count":57,"request_count_saturated":false,"distinct_key_count":41,"distinct_key_count_saturated":false}}]}`
 
-// fixtureFleetJSON is the §5.2b canonical histogram: 32 GB emitted, the
-// rest suppressed, 11 = 5 + 6.
-const fixtureFleetJSON = `{"window_start":"2026-08-12T00:00:00Z","window_end":"2026-09-11T00:00:00Z","k_anonymity_min":3,"provider_total":11,"provider_suppressed":6,"classes":[{"ram_gb_floor":8,"provider_count":null,"suppressed":true},{"ram_gb_floor":16,"provider_count":null,"suppressed":true},{"ram_gb_floor":24,"provider_count":null,"suppressed":true},{"ram_gb_floor":32,"provider_count":5,"suppressed":false},{"ram_gb_floor":48,"provider_count":null,"suppressed":true},{"ram_gb_floor":64,"provider_count":null,"suppressed":true},{"ram_gb_floor":96,"provider_count":null,"suppressed":true},{"ram_gb_floor":128,"provider_count":null,"suppressed":true},{"ram_gb_floor":192,"provider_count":null,"suppressed":true},{"ram_gb_floor":256,"provider_count":null,"suppressed":true},{"ram_gb_floor":512,"provider_count":null,"suppressed":true}]}`
+// fixtureFleetJSON is the §5.2b canonical histogram: 16 GB and 32 GB
+// emitted, 64 GB suppressed complementarily, 15 = 4 + 5 + 6.
+const fixtureFleetJSON = `{"window_start":"2026-08-12T00:00:00Z","window_end":"2026-09-11T00:00:00Z","k_anonymity_min":3,"provider_total":15,"provider_suppressed":6,"classes":[{"ram_gb_floor":8,"provider_count":null,"suppressed":true},{"ram_gb_floor":16,"provider_count":4,"suppressed":false},{"ram_gb_floor":24,"provider_count":null,"suppressed":true},{"ram_gb_floor":32,"provider_count":5,"suppressed":false},{"ram_gb_floor":48,"provider_count":null,"suppressed":true},{"ram_gb_floor":64,"provider_count":null,"suppressed":true},{"ram_gb_floor":96,"provider_count":null,"suppressed":true},{"ram_gb_floor":128,"provider_count":null,"suppressed":true},{"ram_gb_floor":192,"provider_count":null,"suppressed":true},{"ram_gb_floor":256,"provider_count":null,"suppressed":true},{"ram_gb_floor":512,"provider_count":null,"suppressed":true}]}`
 
 func partnerAuth(id int64, providerBound bool) authResult {
 	key := &store.PartnerKey{ID: id}
@@ -223,6 +223,19 @@ func TestIntakeEndpointRoutedThroughMuxRequiresPartnerKey(t *testing.T) {
 	m.Handler().ServeHTTP(rr, req)
 	if rr.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("POST: status=%d, want 405", rr.Code)
+	}
+	// Key-less refusals are metered by the auth-failure bucket (300/min
+	// per IP per endpoint), never left unmetered: the 301st is a 429.
+	metered := &Mux{h: h, authFailLimit: newLimiterWithBounds(1000, time.Minute), publicLimit: newLimiterWithBounds(1000, time.Minute), partnerLimit: newLimiterWithBounds(10, time.Minute), preflightLimit: newLimiterWithBounds(10, time.Minute), preflightRPM: 10}
+	metered.WithIntake(true, []int64{7})
+	last := 0
+	for i := 0; i < 301; i++ {
+		rr := httptest.NewRecorder()
+		metered.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/v1/stats/intake", nil))
+		last = rr.Code
+	}
+	if last != http.StatusTooManyRequests {
+		t.Fatalf("301st key-less intake request: status=%d, want 429 from the auth-failure bucket", last)
 	}
 	// An ENABLED intake endpoint never answers a CORS preflight: OPTIONS
 	// is 405 with Allow: GET, HEAD and no Access-Control-* header.

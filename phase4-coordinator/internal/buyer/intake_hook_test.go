@@ -44,6 +44,7 @@ func TestIntakeHookObservesOnlyAuthenticatedUnmatchedRequests(t *testing.T) {
 		buyer.WithGatewayServiceToken("gateway-secret"),
 		buyer.WithRequireGatewayContext(true),
 		buyer.WithIntakeObserver(obs),
+		buyer.WithAutotuneFeeds(buyer.AutotuneFeeds{CandidateRowStatuses: map[string]string{"qwen3-8b": "listed"}}),
 	)
 	body := `{"model":"Qwen3-Coder-Next","messages":[{"role":"user","content":"hi"}]}`
 	post := func(bearer, account string) *httptest.ResponseRecorder {
@@ -149,7 +150,18 @@ func TestIntakeHookAppliesExclusionAndAdmittedCatalogPredicate(t *testing.T) {
 		}
 	}
 
-	panicky := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0), buyer.WithGatewayServiceToken("gateway-secret"), buyer.WithRequireGatewayContext(true), buyer.WithIntakeObserver(panickingIntakeObserver{}))
+	// No admitted catalog loaded: nothing can be unmatched, nothing is observed.
+	noCatalog := &recordingIntakeObserver{}
+	bare := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0), buyer.WithGatewayServiceToken("gateway-secret"), buyer.WithRequireGatewayContext(true), buyer.WithIntakeObserver(noCatalog))
+	req0 := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"anything","messages":[{"role":"user","content":"hi"}]}`))
+	req0.Header.Set("Authorization", "Bearer gateway-secret")
+	req0.Header.Set("X-MacProvider-Account", "acct_buyer_1")
+	bare.Handler().ServeHTTP(httptest.NewRecorder(), req0)
+	if len(noCatalog.snapshot()) != 0 {
+		t.Fatalf("without an admitted catalog the hook must contribute nothing: %v", noCatalog.snapshot())
+	}
+
+	panicky := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0), buyer.WithGatewayServiceToken("gateway-secret"), buyer.WithRequireGatewayContext(true), buyer.WithIntakeObserver(panickingIntakeObserver{}), buyer.WithAutotuneFeeds(buyer.AutotuneFeeds{CandidateRowStatuses: map[string]string{"qwen3-8b": "listed"}}))
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"x","messages":[{"role":"user","content":"hi"}]}`))
 	req.Header.Set("Authorization", "Bearer gateway-secret")
 	req.Header.Set("X-MacProvider-Account", "acct_buyer_1")

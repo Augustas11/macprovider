@@ -178,7 +178,10 @@ func (m *Mux) dispatch(w http.ResponseWriter, r *http.Request) {
 		// AFTER allow returns true.
 		authHeaderPresent := authPresentFromContext(r.Context())
 		reservedKey := ""
-		if authHeaderPresent {
+		// SPEC-017 §5.2b: intake has no anonymous tier, so a key-less
+		// intake request debits the auth-failure bucket exactly like a
+		// bad key — the private surface is never an unmetered 401 path.
+		if authHeaderPresent || endpoint == "intake" {
 			reservedKey = "authfail|" + ip + "|" + endpoint
 			if !m.authFailLimit.allow(reservedKey, now, 300) {
 				retry := 60
@@ -215,25 +218,24 @@ func (m *Mux) dispatch(w http.ResponseWriter, r *http.Request) {
 			writeError(w, r, http.StatusUnauthorized, codeUnauthorized, "unauthorized", now, nil)
 			return
 		}
-		// Auth succeeded — release the auth-failure slot before
-		// any subsequent error path can keep the reservation
-		// against a valid partner key.
-		if authHeaderPresent {
-			m.authFailLimit.refund(reservedKey, now)
-		}
 		// SPEC-017 §5.2b.7: intake has no public projection. A request
-		// without a partner key is refused here, before the public rate
-		// tier (which is never consulted for this endpoint) and with the
-		// same 401 shape as every other intake refusal.
-		// Every intake refusal — no key, unlisted key, provider-bound key —
-		// is one 401 shape in one timing class, padded exactly like the
-		// no-row / revoked / rejected-origin paths above, so no refusal
-		// confirms that a key exists (§5.4.3 rule 4).
+		// without a partner key, with an unlisted key, or with a
+		// provider-bound key is refused here — before the public rate
+		// tier (never consulted for this endpoint), with one 401 shape,
+		// padded like the no-row / revoked / rejected-origin paths above
+		// so no refusal confirms that a key exists (§5.4.3 rule 4), and
+		// KEEPING the auth-failure slot: every intake 401 debits it.
 		if endpoint == "intake" && (ar.projection != "partner" || !m.h.intakeReaderAllowed(ar)) {
 			padAuthFailureLatency(authStarted)
 			w.Header().Set("Vary", varyForPublic())
 			writeError(w, r, http.StatusUnauthorized, codeUnauthorized, "unauthorized", now, nil)
 			return
+		}
+		// Auth succeeded — release the auth-failure slot before
+		// any subsequent error path can keep the reservation
+		// against a valid partner key.
+		if reservedKey != "" {
+			m.authFailLimit.refund(reservedKey, now)
 		}
 		// Round-3 CODE H2: tag the request context with the
 		// projection so writeError picks the partner Cache-

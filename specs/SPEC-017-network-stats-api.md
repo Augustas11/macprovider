@@ -626,8 +626,11 @@ explorer. Both reach Postgres but via distinct DB roles; see §7.2.
 | `GET /v1/stats/intake` (v0.2.1) | Required `Bearer <partner_key>` whose `partner_keys.id` is listed in `stats.intake.reader_partner_key_ids` (§5.2b.7) and which is not provider-bound | no; private only (exempt from C5) | yes, the whole response (complete windows only) |
 
 `HEAD` MUST be supported on every `GET`. `OPTIONS` MUST return CORS
-preflight per §5.7. Any other verb MUST return `405 Method Not Allowed`
-with `Allow: GET, HEAD, OPTIONS`.
+preflight per §5.7 — except on `/v1/stats/intake` (v0.2.1), which takes
+no part in CORS: there `OPTIONS` is `405` with `Allow: GET, HEAD` and no
+`Access-Control-*` header when the endpoint is enabled, and `404` when it
+is disabled (§5.2b). Any other verb MUST return `405 Method Not Allowed`
+with `Allow: GET, HEAD, OPTIONS` (`Allow: GET, HEAD` on `/v1/stats/intake`).
 
 ---
 
@@ -1121,6 +1124,11 @@ and hashes and retains the unmodified body octets before parsing (SPEC-023
 §16.8 rule 9), so "the exact response bytes" is one unambiguous byte
 string.
 
+(In the example fleet: 8 GB holds one provider and 128 GB one — both
+sub-k — 64 GB holds three and, as the smallest emitted class, is
+suppressed complementarily, one provider is below the lowest floor, and
+16 GB and 32 GB are emitted: 4 + 5 + 6 = 15.)
+
 **Response (200 OK).** `macprovider.stats-intake.v1` is a **closed
 schema at every level and is exempt from the §8.2 additive-change
 rules**: an implementation MUST emit exactly these keys, a consumer (the
@@ -1171,11 +1179,11 @@ abbreviation): one complete window with one emitted bucket.
     "window_start": "2026-08-12T00:00:00Z",
     "window_end": "2026-09-11T00:00:00Z",
     "k_anonymity_min": 3,
-    "provider_total": 11,
+    "provider_total": 15,
     "provider_suppressed": 6,
     "classes": [
       { "ram_gb_floor": 8,   "provider_count": null, "suppressed": true },
-      { "ram_gb_floor": 16,  "provider_count": null, "suppressed": true },
+      { "ram_gb_floor": 16,  "provider_count": 4,    "suppressed": false },
       { "ram_gb_floor": 24,  "provider_count": null, "suppressed": true },
       { "ram_gb_floor": 32,  "provider_count": 5,    "suppressed": false },
       { "ram_gb_floor": 48,  "provider_count": null, "suppressed": true },
@@ -1278,7 +1286,10 @@ model resolution and BEFORE any routing outcome is known:
    `candidate` or `watch` row, or for a key the catalog does not carry,
    is unmatched and reaches the aggregator whether or not some provider
    happens to serve it (a BYOM or non-catalog served model is still
-   evidence that buyers ask for a key the catalog lacks).
+   evidence that buyers ask for a key the catalog lacks). Without an
+   admitted catalog to decide against — the candidate feed not loaded —
+   nothing is unmatched: the hook fails closed and contributes nothing,
+   never "everything".
 
 The **eligibility policy** of a window is the excluded-account set in
 force when it opened. Its `eligibility_policy_id` is derived at the
@@ -1298,7 +1309,12 @@ row of a request that no provider serves carries a BLANK model and a
 constant failure message: the buyer-supplied model string of an
 unserved request is never persisted by the buyer surface, in any
 column, sanitized or not — the aggregator is its only consumer, and the
-aggregator retains neither the string nor the account. The intake hook
+aggregator retains neither the string nor the account. A request that IS
+served is different in kind: its model column records the identity of a
+model the pool advertised and served — a value from the pool's own
+vocabulary, required as SPEC-005 settlement evidence — never a string the
+pool did not recognize, so an unmatched-but-served request persists the
+served model identity and nothing else of the buyer's input. The intake hook
 MUST NOT fail or alter the buyer request: a panic inside the aggregator
 is recovered at the boundary and logged without the request's content.
 
@@ -1496,8 +1512,11 @@ needs at least ten independent principals, so the cap never exceeds a
 tenth of the floor) and `buyer_request_floor × principal_cap_pct / 100`
 MUST be at least 1; `reader_partner_key_ids` are positive integers;
 `excluded_accounts` entries are non-empty and unique; `policy_salt` is
-REQUIRED when intake is enabled — at least 16 characters, not a
-placeholder, `env:NAME` indirection supported, never logged or emitted —
+REQUIRED when intake is enabled — at least 128 bits of secret material
+from a cryptographically secure random source (the 16-character minimum
+the coordinator enforces is a floor, not sufficiency; a dictionary word
+or a reused credential defeats the HMAC's purpose), not a placeholder,
+`env:NAME` indirection supported, never logged or emitted —
 and it is also the default switch: with no explicit `enabled`, intake is
 enabled exactly when a salt is configured, so an existing deployment
 that sets neither keeps running with intake disabled rather than failing
@@ -1543,7 +1562,8 @@ either) while `/v1/stats/health` still reports nine components with
 AC-INTAKE-3 (§16.2(a) order and emission): the SPEC-023 AC-CAT-13
 assertions hold against this aggregator — an ineligible request (no
 authenticated account, a bare account header, a `demo:` account, an
-excluded account) contributes to nothing; an out-of-grammar key and a
+excluded account, any request while no admitted catalog is loaded)
+contributes to nothing; an out-of-grammar key and a
 capped or overflow-principal contribution reach `other_suppressed`
 only; determinism over one request order; memory bounded under a
 million distinct keys and under a million distinct principals against
@@ -1583,7 +1603,10 @@ outside the window (future-dated included), a provider with no trust
 root, and a provider whose only root expired before `window_end`, is
 materialized once per 30-day period (a histogram persisted in the
 current period is re-persisted byte-identical; one from a previous
-period, from the future, or malformed is recomputed), and the SPEC-023
+period, from the future, or failing the closed contract — a wrong floor,
+a sub-k count emitted, counts that do not reconcile, a non-canonical
+timestamp — is recomputed, and a window whose timestamps are not in the
+one `YYYY-MM-DDTHH:MM:SSZ` form is rejected on read-back), and the SPEC-023
 evaluation over a fixture histogram reproduces the expected
 `fleet_fit_fraction_ppm` for an artifact `min_ram_gb`, including the
 boundary `min_ram_gb = 12` against the 16 GB class.
@@ -1866,9 +1889,13 @@ just a tighter accountability surface.
 
 **v0.2.1 — `GET /v1/stats/intake`.** The endpoint has no public
 anon tier: a request without `Authorization` is refused at the auth
-dispatcher before any public bucket is consulted, a request with a
-failing `Authorization` runs the auth-failure tier, and a successful
-partner key runs the partner tier (600 req/min per key per endpoint).
+dispatcher before any public bucket is consulted, and — like a request
+with a failing `Authorization` — it debits the auth-failure tier (300
+per minute per IP per endpoint) before the refusal is written, so the
+private surface is never an unmetered 401 path; every intake 401
+(absent, invalid, revoked, unlisted, provider-bound) keeps its
+auth-failure slot, and only a successful, listed partner key runs the
+partner tier (600 req/min per key per endpoint).
 
 **v0.1.8 reconciliation with AC-8.** Earlier drafts (v0.1.6 / v0.1.7)
 named "burst 120" / "burst 1200" in this table. That was mechanically
@@ -2003,7 +2030,9 @@ Authorization` advertises that the GET will). The handler therefore
 CANNOT evaluate per-key allowlists at preflight time, and MUST NOT
 try. Preflight uses a permissive, key-agnostic rule:
 
-- `OPTIONS /v1/stats/*` returns 204 with empty body.
+- `OPTIONS /v1/stats/*` returns 204 with empty body — except
+  `/v1/stats/intake`, which answers no preflight (§4.3, §5.2b: 405 with
+  `Allow: GET, HEAD` and no `Access-Control-*` header, or 404 when disabled).
 - `Access-Control-Allow-Methods: GET, HEAD, OPTIONS`.
 - `Access-Control-Allow-Headers: Authorization, Content-Type`.
 - `Access-Control-Max-Age: 60` (v0.1.6 had `3600`; lowered in v0.1.7
@@ -2085,7 +2114,7 @@ Code vocabulary (closed set for v0.1):
 |---|---|---|
 | `bad_request` | 400 or 404 | 400: malformed `window`/`sort`/`limit`; 404 with the same code: an unknown endpoint path, which includes a disabled `/v1/stats/intake` (§5.2b.7) |
 | `unauthorized` | 401 or 403 | invalid or revoked `Authorization`; valid bearer not authorized for the requested provider returns 403 (§5.2a); `/v1/stats/intake` answers 401 for every refusal and never 403 (§5.2b) |
-| `method_not_allowed` | 405 | request verb not in `Allow: GET, HEAD, OPTIONS` (§4.3); response MUST also carry `Allow: GET, HEAD, OPTIONS` |
+| `method_not_allowed` | 405 | request verb not in `Allow: GET, HEAD, OPTIONS` (§4.3); response MUST also carry `Allow: GET, HEAD, OPTIONS` — on `/v1/stats/intake` the allowed set and the header are `GET, HEAD` and `OPTIONS` itself is 405 (§5.2b) |
 | `rate_limited` | 429 | per-IP or per-key bucket exhausted |
 | `stats_stale` | 503 | rollup older than §5.8 budget |
 | `internal` | 500 | unhandled; MUST NOT leak stack/SQL |
@@ -3207,7 +3236,9 @@ runbook step.
 - **AC-21.** `POST /v1/stats/overview` (or any verb other than GET,
   HEAD, OPTIONS against any `/v1/stats/*` path) returns 405 with
   `Allow: GET, HEAD, OPTIONS` and the §5.9 envelope
-  `{"error":{"code":"method_not_allowed", ...}}`.
+  `{"error":{"code":"method_not_allowed", ...}}`; on `/v1/stats/intake`
+  (v0.2.1) OPTIONS is itself 405 and the header is `Allow: GET, HEAD`
+  (§5.2b, AC-INTAKE-2).
 - **AC-22 (v0.1.8).** Auth-failure rate limit per §5.6: from a single
   client IP, issue 301 requests in 60s to
   `/v1/stats/leaderboard` each carrying `Authorization: Bearer

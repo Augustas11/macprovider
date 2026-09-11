@@ -42,17 +42,19 @@ func WithIntakeExcludedAccounts(accounts []string) Option {
 // never intake-eligible (SPEC-017 §5.2b.2 item 2).
 const demoAccountPrefix = "demo:"
 
-// intakeAdmittedCatalogKey reports whether the requested model string
-// normalizes onto a listed or recommendable catalog row of the current
+// intakeUnmatchedCatalogKey reports whether the requested model string
+// normalizes onto NO listed or recommendable catalog row of the current
 // admitted release — independent of provider advertisement, rate-class
-// resolution, or routing outcome (SPEC-017 §5.2b.2).
-func (s *Server) intakeAdmittedCatalogKey(rawModel string) bool {
+// resolution, or routing outcome (SPEC-017 §5.2b.2 item 5). Without an
+// admitted catalog to decide against (feed not loaded) nothing is
+// unmatched: the hook fails closed and contributes nothing.
+func (s *Server) intakeUnmatchedCatalogKey(rawModel string) bool {
 	statuses := s.autotuneFeedsSnapshot().CandidateRowStatuses
 	if len(statuses) == 0 {
 		return false
 	}
 	status, ok := statuses[billing.NormalizeModelKey(rawModel)]
-	return ok && (status == "listed" || status == "recommendable")
+	return !ok || (status != "listed" && status != "recommendable")
 }
 
 // observeUnmatchedModel applies SPEC-017 §5.2b.2 items 1–4 for one request
@@ -70,12 +72,14 @@ func (s *Server) observeUnmatchedModel(rawModel, accountID string, authenticated
 	if _, excluded := s.intakeExcluded[accountID]; excluded {
 		return
 	}
-	if s.intakeAdmittedCatalogKey(rawModel) {
+	if !s.intakeUnmatchedCatalogKey(rawModel) {
 		return
 	}
 	defer func() {
-		if r := recover(); r != nil {
-			s.log.Warn().Interface("panic", r).Msg("intake aggregator panicked; request unaffected")
+		// The panic value is never logged: it could carry the request's
+		// model string or account.
+		if recover() != nil {
+			s.log.Warn().Msg("intake aggregator panicked; request unaffected")
 		}
 	}()
 	s.intakeObserver.Observe(rawModel, accountID)

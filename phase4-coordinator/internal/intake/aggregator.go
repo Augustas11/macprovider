@@ -13,6 +13,7 @@
 package intake
 
 import (
+	"bytes"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -177,14 +178,98 @@ type Window struct {
 	OtherSuppressed       OtherSuppressed `json:"other_suppressed"`
 }
 
+// ParseUTC accepts exactly the SPEC-017 §5.2b timestamp form —
+// YYYY-MM-DDTHH:MM:SSZ, no offset, no fraction — so one instant has one
+// byte string and window equality is byte equality.
+func ParseUTC(s string) (time.Time, error) {
+	if len(s) != len("2006-01-02T15:04:05Z") || s[len(s)-1] != 'Z' {
+		return time.Time{}, fmt.Errorf("intake: timestamp %q is not YYYY-MM-DDTHH:MM:SSZ", s)
+	}
+	t, err := time.Parse("2006-01-02T15:04:05Z", s)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("intake: timestamp %q: %w", s, err)
+	}
+	return t.UTC(), nil
+}
+
 // Complete reports whether the window is a served, exactly-30-day epoch.
 func (w Window) Complete() bool {
 	if w.WindowEnd == nil {
 		return false
 	}
-	start, err1 := time.Parse(time.RFC3339, w.WindowStart)
-	end, err2 := time.Parse(time.RFC3339, *w.WindowEnd)
+	start, err1 := ParseUTC(w.WindowStart)
+	end, err2 := ParseUTC(*w.WindowEnd)
 	return err1 == nil && err2 == nil && end.Sub(start) == WindowMaxDays*24*time.Hour
+}
+
+// FleetRAMClassFloors is the fixed closed class list of SPEC-017 §5.2b.6.
+var FleetRAMClassFloors = []int{8, 16, 24, 32, 48, 64, 96, 128, 192, 256, 512}
+
+// ValidateFleetRAMJSON checks a persisted or served `fleet_ram` object
+// against the closed contract: exactly the six keys, the one timestamp
+// form with an exact 30-day window, k fixed, the eleven floors in order,
+// provider_count null exactly when suppressed and never below k, and
+// provider_total reconciling to the emitted counts plus provider_suppressed.
+func ValidateFleetRAMJSON(raw []byte) error {
+	var fleet struct {
+		WindowStart        string `json:"window_start"`
+		WindowEnd          string `json:"window_end"`
+		KAnonymityMin      int    `json:"k_anonymity_min"`
+		ProviderTotal      int    `json:"provider_total"`
+		ProviderSuppressed int    `json:"provider_suppressed"`
+		Classes            []struct {
+			RAMGBFloor    int  `json:"ram_gb_floor"`
+			ProviderCount *int `json:"provider_count"`
+			Suppressed    bool `json:"suppressed"`
+		} `json:"classes"`
+	}
+	if err := DecodeClosed(raw, &fleet); err != nil {
+		return err
+	}
+	start, err := ParseUTC(fleet.WindowStart)
+	if err != nil {
+		return err
+	}
+	end, err := ParseUTC(fleet.WindowEnd)
+	if err != nil {
+		return err
+	}
+	if end.Sub(start) != WindowMaxDays*24*time.Hour {
+		return errors.New("intake: fleet_ram window is not exactly 30 days")
+	}
+	if fleet.KAnonymityMin != KAnonymityMin || fleet.ProviderTotal < 0 || fleet.ProviderSuppressed < 0 || len(fleet.Classes) != len(FleetRAMClassFloors) {
+		return errors.New("intake: fleet_ram shape")
+	}
+	emitted := 0
+	for i, c := range fleet.Classes {
+		if c.RAMGBFloor != FleetRAMClassFloors[i] || c.Suppressed != (c.ProviderCount == nil) {
+			return errors.New("intake: fleet_ram class")
+		}
+		if c.ProviderCount != nil {
+			if *c.ProviderCount < KAnonymityMin {
+				return errors.New("intake: fleet_ram emits a sub-k class")
+			}
+			emitted += *c.ProviderCount
+		}
+	}
+	if emitted+fleet.ProviderSuppressed != fleet.ProviderTotal {
+		return errors.New("intake: fleet_ram does not reconcile")
+	}
+	return nil
+}
+
+// DecodeClosed decodes exactly one JSON document into v, refusing any key
+// the closed shape does not declare and any trailing content.
+func DecodeClosed(raw []byte, v any) error {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(v); err != nil {
+		return err
+	}
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
+		return errors.New("intake: trailing content after the JSON document")
+	}
+	return nil
 }
 
 // ValidateWindow checks a served or persisted window against the closed
@@ -511,7 +596,7 @@ func (a *Aggregator) Snapshot() UnmatchedModels {
 		if !w.Complete() {
 			continue
 		}
-		if end, err := time.Parse(time.RFC3339, *w.WindowEnd); err == nil && end.Before(cutoff) {
+		if end, err := ParseUTC(*w.WindowEnd); err == nil && end.Before(cutoff) {
 			continue
 		}
 		out.Windows = append(out.Windows, cloneWindow(w))

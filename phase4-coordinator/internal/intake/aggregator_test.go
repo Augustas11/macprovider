@@ -565,3 +565,41 @@ func TestRandomFailureIsReported(t *testing.T) {
 		t.Fatalf("expected window key generation failure")
 	}
 }
+
+func TestParseUTCAcceptsOnlyTheCanonicalForm(t *testing.T) {
+	if _, err := ParseUTC("2026-08-01T00:00:00Z"); err != nil {
+		t.Fatal(err)
+	}
+	for _, bad := range []string{"2026-08-01T00:00:00+00:00", "2026-08-01T00:00:00.000Z", "2026-08-01 00:00:00Z", "2026-08-01T00:00:00", "2026-13-01T00:00:00Z"} {
+		if _, err := ParseUTC(bad); err == nil {
+			t.Fatalf("%q must be rejected", bad)
+		}
+	}
+	w := Window{WindowID: strings.Repeat("a", 32), WindowStart: "2026-08-01T00:00:00+00:00"}
+	end := "2026-08-31T00:00:00+00:00"
+	w.WindowEnd = &end
+	if w.Complete() {
+		t.Fatalf("a window with offset timestamps is not a served window")
+	}
+}
+
+func TestValidateFleetRAMJSON(t *testing.T) {
+	good := `{"window_start":"2026-08-12T00:00:00Z","window_end":"2026-09-11T00:00:00Z","k_anonymity_min":3,"provider_total":15,"provider_suppressed":6,"classes":[{"ram_gb_floor":8,"provider_count":null,"suppressed":true},{"ram_gb_floor":16,"provider_count":4,"suppressed":false},{"ram_gb_floor":24,"provider_count":null,"suppressed":true},{"ram_gb_floor":32,"provider_count":5,"suppressed":false},{"ram_gb_floor":48,"provider_count":null,"suppressed":true},{"ram_gb_floor":64,"provider_count":null,"suppressed":true},{"ram_gb_floor":96,"provider_count":null,"suppressed":true},{"ram_gb_floor":128,"provider_count":null,"suppressed":true},{"ram_gb_floor":192,"provider_count":null,"suppressed":true},{"ram_gb_floor":256,"provider_count":null,"suppressed":true},{"ram_gb_floor":512,"provider_count":null,"suppressed":true}]}`
+	if err := ValidateFleetRAMJSON([]byte(good)); err != nil {
+		t.Fatal(err)
+	}
+	for name, bad := range map[string]string{
+		"unknown key":      strings.Replace(good, `"k_anonymity_min":3`, `"k_anonymity_min":3,"extra":1`, 1),
+		"wrong floor":      strings.Replace(good, `"ram_gb_floor":24`, `"ram_gb_floor":20`, 1),
+		"sub-k emitted":    strings.Replace(good, `"provider_count":4`, `"provider_count":2`, 1),
+		"not reconciled":   strings.Replace(good, `"provider_suppressed":6`, `"provider_suppressed":7`, 1),
+		"offset timestamp": strings.Replace(good, `"window_end":"2026-09-11T00:00:00Z"`, `"window_end":"2026-09-11T00:00:00+00:00"`, 1),
+		"31-day window":    strings.Replace(good, `"window_start":"2026-08-12T00:00:00Z"`, `"window_start":"2026-08-11T00:00:00Z"`, 1),
+		"trailing":         good + `{}`,
+		"null with count":  strings.Replace(good, `"provider_count":null,"suppressed":true},{"ram_gb_floor":16`, `"provider_count":3,"suppressed":true},{"ram_gb_floor":16`, 1),
+	} {
+		if err := ValidateFleetRAMJSON([]byte(bad)); err == nil {
+			t.Fatalf("%s: must be rejected", name)
+		}
+	}
+}
