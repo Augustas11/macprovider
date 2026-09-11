@@ -509,6 +509,8 @@ final class BYOMDiscoveryTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
         let listener = try SilentLoopbackListener()
         let command = try ModelsDiscoverCommand.parse([
+            "--skip-lmstudio",
+            "--skip-llamacpp",
             "--json",
             "--local-discovery-namespace-path", root.appendingPathComponent("ns").path,
             "--mlx-cache-dir", root.appendingPathComponent("hf", isDirectory: true).path,
@@ -817,6 +819,8 @@ final class BYOMDiscoveryTests: XCTestCase {
         let runtime = try OneShotHTTPServer(body: body)
         let origin = "http://127.0.0.1:\(try XCTUnwrap(runtime.url.port))"
         let command = try ModelsDiscoverCommand.parse([
+            "--skip-lmstudio",
+            "--skip-llamacpp",
             "--json", "--local-discovery-namespace-path", root.appendingPathComponent("ns").path,
             "--mlx-cache-dir", root.appendingPathComponent("hf").path,
             "--ollama-origin", origin,

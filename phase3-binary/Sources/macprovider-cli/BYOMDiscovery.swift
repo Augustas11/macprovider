@@ -4496,6 +4496,13 @@ enum BYOMDiscoveryJSON {
                   case .string(let id)? = object["id"] else {
                 throw BYOMDiscoveryAdapterError.malformed
             }
+            // LM Studio also lists embedding models (`type: "embedding"`); they
+            // cannot serve chat completions and are not BYOM candidates. Only a
+            // present, non-"llm" type is skipped so the type-less /v1/models
+            // shape still parses.
+            if case .string(let type)? = object["type"], type != "llm" {
+                continue
+            }
             var warnings: [BYOMDiscoveryWarning] = []
             let compatibility = try optionalLabel("compatibility_type", in: object, redactionWarning: .capabilityFamilyRedacted, warnings: &warnings)
             let arch = try optionalLabel("arch", in: object, redactionWarning: .capabilityFamilyRedacted, warnings: &warnings)
