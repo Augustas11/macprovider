@@ -1750,3 +1750,78 @@ func TestValidateDisabledWithoutHotWalletSkipsCoolingOff(t *testing.T) {
 		t.Fatalf("fully disabled payout should not enforce cooling-off: %v", err)
 	}
 }
+
+// SPEC-017 v0.2.1 §5.2b.7: the intake knobs are bounded, the per-principal
+// cap never exceeds a tenth of the floor, and an enabled intake requires a
+// policy salt; the derived eligibility_policy_id is a 32-hex value that
+// depends on the salt and the canonical (trimmed, sorted, de-duplicated)
+// excluded-account set only.
+func TestStatsIntakeConfigValidateAndPolicyID(t *testing.T) {
+	base := StatsIntakeConfig{PolicySalt: "0123456789abcdef-operator-salt", ExcludedAccounts: []string{" b ", "a"}}
+	if err := base.Validate(); err != nil {
+		t.Fatalf("defaults must validate: %v", err)
+	}
+	for name, mutate := range map[string]func(*StatsIntakeConfig){
+		"cap pct above 10":   func(c *StatsIntakeConfig) { c.PrincipalCapPct = 11 },
+		"key buckets over":   func(c *StatsIntakeConfig) { c.KeyBuckets = 4097 },
+		"principals over":    func(c *StatsIntakeConfig) { c.PrincipalsPerBucket = 4097 },
+		"distinct cap over":  func(c *StatsIntakeConfig) { c.DistinctKeyCap = 10_000_001 },
+		"floor over":         func(c *StatsIntakeConfig) { c.BuyerRequestFloor = 1_000_000_001 },
+		"cap below one":      func(c *StatsIntakeConfig) { c.BuyerRequestFloor = 5; c.PrincipalCapPct = 1 },
+		"missing salt":       func(c *StatsIntakeConfig) { on := true; c.Enabled = &on; c.PolicySalt = "" },
+		"short salt":         func(c *StatsIntakeConfig) { c.PolicySalt = "short" },
+		"weak salt":          func(c *StatsIntakeConfig) { c.PolicySalt = "placeholder" },
+		"duplicate excluded": func(c *StatsIntakeConfig) { c.ExcludedAccounts = []string{"a", " a"} },
+		"blank excluded":     func(c *StatsIntakeConfig) { c.ExcludedAccounts = []string{"a", " "} },
+		"bad reader id":      func(c *StatsIntakeConfig) { c.ReaderPartnerKeyIDs = []int64{0} },
+	} {
+		c := base
+		mutate(&c)
+		if err := c.Validate(); err == nil {
+			t.Fatalf("%s: expected a validation error", name)
+		}
+	}
+	disabled := StatsIntakeConfig{Enabled: new(bool)}
+	if err := disabled.Validate(); err != nil || disabled.IsEnabled() {
+		t.Fatalf("a disabled intake needs no salt: %v", err)
+	}
+	// No explicit flag: enabled exactly when a salt is configured; an
+	// explicit true without a salt fails startup.
+	if (StatsIntakeConfig{}).IsEnabled() {
+		t.Fatalf("intake must default to disabled without a policy salt")
+	}
+	if err := (StatsIntakeConfig{}).Validate(); err != nil {
+		t.Fatalf("no salt and no explicit flag is a valid (disabled) configuration: %v", err)
+	}
+	if !base.IsEnabled() {
+		t.Fatalf("intake must default to enabled when a policy salt is configured")
+	}
+	on := true
+	if err := (StatsIntakeConfig{Enabled: &on}).Validate(); err == nil {
+		t.Fatalf("explicit enabled without a salt must fail startup")
+	}
+	if got := base.ExcludedAccountSet(); len(got) != 2 || got[0] != "a" || got[1] != "b" {
+		t.Fatalf("canonical set = %v", got)
+	}
+	id := base.EligibilityPolicyID()
+	if len(id) != 32 || strings.Trim(id, "0123456789abcdef") != "" {
+		t.Fatalf("policy id = %q, want 32 hex", id)
+	}
+	same := StatsIntakeConfig{PolicySalt: base.PolicySalt, ExcludedAccounts: []string{"a", "b", "b "}}
+	if same.EligibilityPolicyID() != id {
+		t.Fatalf("policy id must depend on the canonical set only")
+	}
+	other := base
+	other.ExcludedAccounts = []string{"a"}
+	if other.EligibilityPolicyID() == id {
+		t.Fatalf("a different set must derive a different id")
+	}
+	rotated := base
+	rotated.PolicySalt = "another-operator-salt-0123456789"
+	if rotated.EligibilityPolicyID() == id {
+		t.Fatalf("a different salt must derive a different id")
+	}
+	if strings.Contains(id, "a\x00b") || strings.Contains(id, base.PolicySalt) {
+		t.Fatalf("the id leaks its inputs")
+	}
+}

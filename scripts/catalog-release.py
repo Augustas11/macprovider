@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import datetime as _dt
 import hashlib
 import json
 import math
@@ -3334,10 +3335,736 @@ def require_rate_card_unchanged_at_activation(rate_card_obj: dict, history: dict
         )
 
 
+# ---------------------------------------------------------------------------
+# SPEC-023 §16.8 intake-decision manifest (BYOM v0.2 slice 5, v0.10.4)
+# ---------------------------------------------------------------------------
+
+INTAKE_DECISION_SCHEMA = "macprovider.intake-decision.v1"
+STATS_INTAKE_SCHEMA = "macprovider.stats-intake.v1"
+MODEL_ADMISSION_INTAKE_SCHEMA = "model_admission_intake_offer_counts.v1"
+INTAKE_K_ANONYMITY_MIN = 3  # SPEC-023 v0.10.4 §16.4: fixed, not release-tunable
+INTAKE_CADENCE_DAYS = 31  # SPEC-023 §16.8 rule 3: one cadence period
+INTAKE_SAFETY_MARGIN_GB = 4  # §16.2(c) / §5 headroom rule
+INTAKE_FLEET_FIT_PPM_BUCKET = 50_000  # §16.2(c) [v0.10.4]: recorded fraction is floored to a 5% grid
+INTAKE_WINDOW_DAYS = 30  # SPEC-017 §3.2a: a served window is exactly one 30-day epoch
+INTAKE_MAX_EMITTED_WINDOWS = 3  # SPEC-017 §5.2b.5
+INTAKE_MAX_PRINCIPAL_CAP_PCT = 10  # §16.4 [v0.10.4]: the cap never exceeds a tenth of the floor
+INTAKE_RFC3339_UTC_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
+INTAKE_THRESHOLD_INT_KEYS = (
+    "INTAKE_DEMAND_RANK_MAX",
+    "INTAKE_OFFER_FLOOR",
+    "INTAKE_BUYER_REQUEST_FLOOR",
+    "INTAKE_UNKNOWN_KEY_BUCKETS",
+    "INTAKE_UNKNOWN_PRINCIPALS_PER_BUCKET",
+    "INTAKE_UNKNOWN_KEY_DISTINCT_CAP",
+    "INTAKE_UNKNOWN_KEY_PRINCIPAL_CAP_PCT",
+    "INTAKE_K_ANONYMITY_MIN",
+    "INTAKE_FLEET_FIT_MIN_PCT",
+    "INTAKE_COLDSTART_SLOTS",
+    "INTAKE_MIN_LISTED_DAYS",
+)
+INTAKE_THRESHOLD_KEYS = frozenset(INTAKE_THRESHOLD_INT_KEYS) | {"tier_target"}
+INTAKE_DECISION_KEYS = frozenset({
+    "model_key", "action", "observation_window_start", "observation_window_end", "as_of",
+    "signals", "admission_clause", "fit_clause", "coldstart_slot_used", "listed_since",
+    "promotion", "operator_decision", "operator_role",
+})
+INTAKE_SIGNAL_KEYS = frozenset({
+    "openrouter_demand_rank", "demand_rank_absent_reason", "demand_rank_source_sha256",
+    "distinct_provider_offer_count", "distinct_provider_offer_suppressed",
+    "distinct_provider_offer_absent_reason", "distinct_provider_offer_source_sha256",
+    "distinct_provider_offer_window_start", "distinct_provider_offer_window_end",
+    "unmatched_model_request_count", "unmatched_model_request_suppressed",
+    "unmatched_model_request_absent_reason", "unmatched_model_request_source_sha256",
+    "unmatched_model_request_window_id", "unmatched_model_request_window_start",
+    "unmatched_model_request_window_end",
+    "fleet_fit_fraction_ppm", "fleet_fit_absent_reason", "fleet_fit_source_sha256",
+    "fleet_fit_window_start", "fleet_fit_window_end",
+})
+INTAKE_PROMOTION_KEYS = frozenset({
+    "listed_days_elapsed", "rate_class", "rate_row_resolved", "rate_card_source_sha256",
+    "demand_rank_recommendable", "demand_rank_source_sha256", "bench_provenance_source",
+    "operator_admission_reference",
+})
+INTAKE_ADMISSION_CLAUSES = ("demand_rank", "provider_offer", "buyer_request", "coldstart_slot")
+INTAKE_FIT_CLAUSES = ("fleet_fit", "tier_target")
+INTAKE_ABSENT_REASONS = {
+    "demand_rank_absent_reason": ("unranked",),
+    "distinct_provider_offer_absent_reason": ("suppressed", "no_observations", "source_unavailable"),
+    "unmatched_model_request_absent_reason": ("spec017_amendment_not_landed", "suppressed", "no_observations", "incomplete_window", "source_unavailable"),
+    "fleet_fit_absent_reason": ("no_observations", "source_unavailable"),
+}
+INTAKE_NO_SOURCE_REASONS = {"spec017_amendment_not_landed", "source_unavailable"}
+INTAKE_MODEL_KEY_RE = re.compile(r"^[a-z0-9._/-]{1,128}$")
+INTAKE_TIER_TARGET_RE = re.compile(r"^<= ([1-9][0-9]{0,3}) GB$")
+INTAKE_WINDOW_ID_RE = re.compile(r"^[0-9a-f]{32}$")
+FLEET_RAM_CLASS_FLOORS = (8, 16, 24, 32, 48, 64, 96, 128, 192, 256, 512)
+STATS_INTAKE_WINDOW_KEYS = frozenset({
+    "window_id", "window_start", "window_end", "parameters", "eligibility_policy_id",
+    "buckets", "suppressed_bucket_count", "other_suppressed",
+})
+STATS_INTAKE_METHODOLOGY_KEYS = frozenset({"version", "unmatched_models", "fleet_ram", "redaction"})
+STATS_INTAKE_PARAMETER_KEYS = frozenset({
+    "key_buckets", "principals_per_bucket", "distinct_key_cap", "buyer_request_floor",
+    "principal_cap_pct", "principal_cap_requests", "k_anonymity_min", "window_max_days",
+})
+STATS_INTAKE_BUCKET_KEYS = frozenset({"model_key", "lower_bound", "count", "error"})
+STATS_INTAKE_OTHER_KEYS = frozenset({"request_count", "request_count_saturated", "distinct_key_count", "distinct_key_count_saturated"})
+STATS_INTAKE_FLEET_KEYS = frozenset({"window_start", "window_end", "k_anonymity_min", "provider_total", "provider_suppressed", "classes"})
+STATS_INTAKE_CLASS_KEYS = frozenset({"ram_gb_floor", "provider_count", "suppressed"})
+STATS_INTAKE_TOP_KEYS = frozenset({"schema_version", "generated_at", "stale_after", "unmatched_models", "fleet_ram", "methodology"})
+MODEL_ADMISSION_INTAKE_KEYS = frozenset({"schema", "nonce", "generated_at", "window_start", "window_end", "k_anonymity_min", "rows"})
+MODEL_ADMISSION_INTAKE_ROW_KEYS = frozenset({"catalog_model_key", "distinct_provider_offer_count", "suppressed"})
+INTAKE_THRESHOLD_TO_PARAMETER = {
+    "INTAKE_UNKNOWN_KEY_BUCKETS": "key_buckets",
+    "INTAKE_UNKNOWN_PRINCIPALS_PER_BUCKET": "principals_per_bucket",
+    "INTAKE_UNKNOWN_KEY_DISTINCT_CAP": "distinct_key_cap",
+    "INTAKE_BUYER_REQUEST_FLOOR": "buyer_request_floor",
+    "INTAKE_UNKNOWN_KEY_PRINCIPAL_CAP_PCT": "principal_cap_pct",
+    "INTAKE_K_ANONYMITY_MIN": "k_anonymity_min",
+}
+
+
+def default_intake_audit_dir() -> pathlib.Path:
+    """SPEC-023 §16.8 rule 9: the operator's private intake audit store."""
+    configured = os.environ.get("MACPROVIDER_INTAKE_AUDIT_DIR", "").strip()
+    if configured:
+        return pathlib.Path(configured).expanduser()
+    return pathlib.Path.home() / ".config" / "macprovider" / "intake-audit"
+
+
+def _intake_closed(obj: object, keys: frozenset, label: str) -> dict:
+    if not isinstance(obj, dict):
+        fail(f"{label}: must be an object")
+    unknown = sorted(set(obj) - keys)
+    missing = sorted(keys - set(obj))
+    if unknown:
+        fail(f"{label}: unknown key(s) {unknown}")
+    if missing:
+        fail(f"{label}: missing key(s) {missing}")
+    return obj
+
+
+def _intake_rfc3339(value: object, label: str, nullable: bool = False) -> _dt.datetime | None:
+    """Exactly the SPEC-017 §5.2b / SPEC-023 §16.8 timestamp form: RFC3339
+    UTC with second precision and the literal `Z` — one byte string per
+    instant, so window equality is byte equality."""
+    if value is None:
+        if nullable:
+            return None
+        fail(f"{label}: must be an RFC3339 UTC timestamp")
+    if not isinstance(value, str) or not INTAKE_RFC3339_UTC_RE.fullmatch(value):
+        fail(f"{label}: must be an RFC3339 UTC timestamp with second precision (YYYY-MM-DDTHH:MM:SSZ)")
+    try:
+        parsed = _dt.datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ")
+    except ValueError:
+        fail(f"{label}: must be a valid RFC3339 UTC timestamp")
+    return parsed.replace(tzinfo=_dt.timezone.utc)
+
+
+def _intake_int(value: object, label: str, minimum: int = 0, nullable: bool = False) -> int | None:
+    if value is None and nullable:
+        return None
+    if not isinstance(value, int) or isinstance(value, bool) or value < minimum:
+        fail(f"{label}: must be an integer >= {minimum}")
+    return value
+
+
+def _intake_bool(value: object, label: str) -> bool:
+    if not isinstance(value, bool):
+        fail(f"{label}: must be a boolean")
+    return value
+
+
+def _intake_digest(value: object, label: str, nullable: bool = True) -> str | None:
+    if value is None and nullable:
+        return None
+    if not isinstance(value, str) or not HEX64.fullmatch(value):
+        fail(f"{label}: must be a lowercase 64-hex digest")
+    return value
+
+
+def validate_intake_thresholds(thresholds: object) -> dict:
+    """§16.8 rule 5: every §16.4 knob, no more, no less; the fixed k floor."""
+    t = _intake_closed(thresholds, INTAKE_THRESHOLD_KEYS, "intake-decision.thresholds")
+    for key in INTAKE_THRESHOLD_INT_KEYS:
+        _intake_int(t[key], f"intake-decision.thresholds.{key}", minimum=0)
+    if t["INTAKE_K_ANONYMITY_MIN"] != INTAKE_K_ANONYMITY_MIN:
+        fail(f"intake-decision.thresholds.INTAKE_K_ANONYMITY_MIN must be {INTAKE_K_ANONYMITY_MIN} (fixed in SPEC-023 v0.10.4 §16.4)")
+    if t["INTAKE_OFFER_FLOOR"] < t["INTAKE_K_ANONYMITY_MIN"]:
+        fail("intake-decision.thresholds: INTAKE_OFFER_FLOOR must be >= INTAKE_K_ANONYMITY_MIN (SPEC-023 §16.2(b))")
+    if not 1 <= t["INTAKE_UNKNOWN_KEY_PRINCIPAL_CAP_PCT"] <= INTAKE_MAX_PRINCIPAL_CAP_PCT:
+        fail(f"intake-decision.thresholds.INTAKE_UNKNOWN_KEY_PRINCIPAL_CAP_PCT must be in [1, {INTAKE_MAX_PRINCIPAL_CAP_PCT}]")
+    if not 0 <= t["INTAKE_FLEET_FIT_MIN_PCT"] <= 100:
+        fail("intake-decision.thresholds.INTAKE_FLEET_FIT_MIN_PCT must be in [0, 100]")
+    if not isinstance(t["tier_target"], str) or not INTAKE_TIER_TARGET_RE.fullmatch(t["tier_target"]):
+        fail("intake-decision.thresholds.tier_target must match '<= <N> GB'")
+    return t
+
+
+def intake_tier_target_gb(tier_target: str) -> int:
+    return int(INTAKE_TIER_TARGET_RE.fullmatch(tier_target).group(1))
+
+
+def intake_verified_min_ram(artifact_obj: dict | None, key: str) -> list[int]:
+    """`min_ram_gb` of every verified artifact of the key (§16.1 P1 input)."""
+    if artifact_obj is None:
+        return []
+    model = (artifact_obj.get("models") or {}).get(key) or {}
+    out = []
+    for artifact in (model.get("artifacts") or {}).values():
+        if isinstance(artifact, dict) and artifact.get("verification_status") == "verified" and isinstance(artifact.get("min_ram_gb"), int):
+            out.append(artifact["min_ram_gb"])
+    return out
+
+
+def fleet_fit_fraction_ppm(fleet_ram: dict, min_ram_gb: int) -> int | None:
+    """SPEC-023 §16.2(c) over the SPEC-017 §5.2b.6 histogram: unsuppressed
+    classes whose floor − 4 ≥ min_ram_gb, over provider_total; conservative
+    by class floor, then floored to the 50 000 ppm grid so the public
+    manifest never reproduces the exact fleet ratio. None when the fleet is
+    empty."""
+    total = fleet_ram["provider_total"]
+    if total == 0:
+        return None
+    fit = 0
+    for cls in fleet_ram["classes"]:
+        if cls["suppressed"] or cls["provider_count"] is None:
+            continue
+        if cls["ram_gb_floor"] - INTAKE_SAFETY_MARGIN_GB >= min_ram_gb:
+            fit += cls["provider_count"]
+    exact = fit * 1_000_000 // total
+    return exact // INTAKE_FLEET_FIT_PPM_BUCKET * INTAKE_FLEET_FIT_PPM_BUCKET
+
+
+def spec017_intake_amendment_landed() -> bool:
+    """SPEC-023 §16.7: the buyer-demand signal exists from SPEC-017 v0.2.1.
+    The gate is keyed on the CONFORMANCE index — the version of record —
+    never on a manifest's own claim."""
+    try:
+        index = json.loads((ROOT / "specs" / "CONFORMANCE.json").read_text())
+    except (OSError, ValueError):
+        return False
+    for spec in index.get("specs", []):
+        if spec.get("spec_id") == "SPEC-017":
+            version = str(spec.get("version", "")).lstrip("v")
+            parts = tuple(int(x) for x in version.split(".") if x.isdigit())
+            return parts >= (0, 2, 1)
+    return False
+
+
+def validate_stats_intake_source(data: bytes) -> dict:
+    """Closed-schema parse of a `macprovider.stats-intake.v1` response
+    (SPEC-017 v0.2.1 §5.2b): unknown, missing, or wrong-typed keys fail."""
+    obj = strict_json(data, "stats-intake.json")
+    top = _intake_closed(obj, STATS_INTAKE_TOP_KEYS, "stats-intake.json")
+    if top["schema_version"] != STATS_INTAKE_SCHEMA:
+        fail(f"stats-intake.json: schema_version must be {STATS_INTAKE_SCHEMA}")
+    _intake_rfc3339(top["generated_at"], "stats-intake.json.generated_at")
+    _intake_rfc3339(top["stale_after"], "stats-intake.json.stale_after")
+    um = _intake_closed(top["unmatched_models"], frozenset({"contract", "windows"}), "stats-intake.json.unmatched_models")
+    if um["contract"] != "SPEC-023-16.2a":
+        fail("stats-intake.json.unmatched_models.contract must be SPEC-023-16.2a")
+    if not isinstance(um["windows"], list):
+        fail("stats-intake.json.unmatched_models.windows must be an array")
+    if len(um["windows"]) > INTAKE_MAX_EMITTED_WINDOWS:
+        fail(f"stats-intake.json.unmatched_models.windows carries more than {INTAKE_MAX_EMITTED_WINDOWS} windows")
+    seen_ids = set()
+    for index, window in enumerate(um["windows"]):
+        label = f"stats-intake.json.unmatched_models.windows[{index}]"
+        w = _intake_closed(window, STATS_INTAKE_WINDOW_KEYS, label)
+        if not isinstance(w["window_id"], str) or not INTAKE_WINDOW_ID_RE.fullmatch(w["window_id"]) or w["window_id"] in seen_ids:
+            fail(f"{label}.window_id must be unique 32-hex")
+        seen_ids.add(w["window_id"])
+        start = _intake_rfc3339(w["window_start"], f"{label}.window_start")
+        end = _intake_rfc3339(w["window_end"], f"{label}.window_end")
+        if end - start != _dt.timedelta(days=INTAKE_WINDOW_DAYS):
+            fail(f"{label}: a served window is exactly {INTAKE_WINDOW_DAYS} days (only complete epochs are served)")
+        params = _intake_closed(w["parameters"], STATS_INTAKE_PARAMETER_KEYS, f"{label}.parameters")
+        for key in STATS_INTAKE_PARAMETER_KEYS:
+            _intake_int(params[key], f"{label}.parameters.{key}", minimum=1)
+        if params["k_anonymity_min"] != INTAKE_K_ANONYMITY_MIN or params["window_max_days"] != INTAKE_WINDOW_DAYS:
+            fail(f"{label}.parameters: k_anonymity_min must be {INTAKE_K_ANONYMITY_MIN} and window_max_days {INTAKE_WINDOW_DAYS}")
+        if not 1 <= params["principal_cap_pct"] <= INTAKE_MAX_PRINCIPAL_CAP_PCT or params["principal_cap_requests"] != params["buyer_request_floor"] * params["principal_cap_pct"] // 100:
+            fail(f"{label}.parameters.principal_cap_requests must equal floor(buyer_request_floor × principal_cap_pct / 100) with principal_cap_pct in [1, {INTAKE_MAX_PRINCIPAL_CAP_PCT}]")
+        if not isinstance(w["eligibility_policy_id"], str) or not INTAKE_WINDOW_ID_RE.fullmatch(w["eligibility_policy_id"]):
+            fail(f"{label}.eligibility_policy_id must be 32-hex")
+        _intake_int(w["suppressed_bucket_count"], f"{label}.suppressed_bucket_count")
+        if len(w["buckets"] if isinstance(w["buckets"], list) else []) + w["suppressed_bucket_count"] > params["key_buckets"]:
+            fail(f"{label}: buckets plus suppressed_bucket_count exceed key_buckets")
+        if not isinstance(w["buckets"], list):
+            fail(f"{label}.buckets must be an array")
+        keys = set()
+        for bindex, bucket in enumerate(w["buckets"]):
+            blabel = f"{label}.buckets[{bindex}]"
+            bk = _intake_closed(bucket, STATS_INTAKE_BUCKET_KEYS, blabel)
+            if not isinstance(bk["model_key"], str) or not INTAKE_MODEL_KEY_RE.fullmatch(bk["model_key"]) or bk["model_key"] in keys:
+                fail(f"{blabel}.model_key must be a unique normalized key")
+            keys.add(bk["model_key"])
+            lower = _intake_int(bk["lower_bound"], f"{blabel}.lower_bound")
+            count = _intake_int(bk["count"], f"{blabel}.count")
+            error = _intake_int(bk["error"], f"{blabel}.error")
+            if lower != count - error or lower < params["buyer_request_floor"]:
+                fail(f"{blabel}: lower_bound must equal count - error and clear buyer_request_floor")
+            if bindex > 0:
+                prev = w["buckets"][bindex - 1]
+                if prev["lower_bound"] < lower or (prev["lower_bound"] == lower and prev["model_key"].encode() > bk["model_key"].encode()):
+                    fail(f"{label}.buckets must be ordered by lower_bound descending, then model_key ascending")
+        other = _intake_closed(w["other_suppressed"], STATS_INTAKE_OTHER_KEYS, f"{label}.other_suppressed")
+        _intake_int(other["request_count"], f"{label}.other_suppressed.request_count")
+        _intake_int(other["distinct_key_count"], f"{label}.other_suppressed.distinct_key_count")
+        _intake_bool(other["request_count_saturated"], f"{label}.other_suppressed.request_count_saturated")
+        _intake_bool(other["distinct_key_count_saturated"], f"{label}.other_suppressed.distinct_key_count_saturated")
+    fleet = _intake_closed(top["fleet_ram"], STATS_INTAKE_FLEET_KEYS, "stats-intake.json.fleet_ram")
+    fleet_start = _intake_rfc3339(fleet["window_start"], "stats-intake.json.fleet_ram.window_start")
+    fleet_end = _intake_rfc3339(fleet["window_end"], "stats-intake.json.fleet_ram.window_end")
+    if fleet_end - fleet_start != _dt.timedelta(days=INTAKE_WINDOW_DAYS):
+        fail(f"stats-intake.json.fleet_ram: the window is exactly {INTAKE_WINDOW_DAYS} days")
+    if fleet["k_anonymity_min"] != INTAKE_K_ANONYMITY_MIN:
+        fail(f"stats-intake.json.fleet_ram.k_anonymity_min must be {INTAKE_K_ANONYMITY_MIN}")
+    _intake_int(fleet["provider_total"], "stats-intake.json.fleet_ram.provider_total")
+    _intake_int(fleet["provider_suppressed"], "stats-intake.json.fleet_ram.provider_suppressed")
+    if not isinstance(fleet["classes"], list) or [c.get("ram_gb_floor") if isinstance(c, dict) else None for c in fleet["classes"]] != list(FLEET_RAM_CLASS_FLOORS):
+        fail("stats-intake.json.fleet_ram.classes must be exactly the eleven class floors in order")
+    for cindex, cls in enumerate(fleet["classes"]):
+        clabel = f"stats-intake.json.fleet_ram.classes[{cindex}]"
+        c = _intake_closed(cls, STATS_INTAKE_CLASS_KEYS, clabel)
+        _intake_bool(c["suppressed"], f"{clabel}.suppressed")
+        count = _intake_int(c["provider_count"], f"{clabel}.provider_count", nullable=True)
+        if c["suppressed"] != (count is None):
+            fail(f"{clabel}: provider_count is null exactly when suppressed")
+        if count is not None and count < INTAKE_K_ANONYMITY_MIN:
+            fail(f"{clabel}: an unsuppressed class must hold at least k providers")
+    emitted = sum(c["provider_count"] for c in fleet["classes"] if c["provider_count"] is not None)
+    if emitted + fleet["provider_suppressed"] != fleet["provider_total"]:
+        fail("stats-intake.json.fleet_ram: provider_total must equal the emitted counts plus provider_suppressed")
+    methodology = _intake_closed(top["methodology"], STATS_INTAKE_METHODOLOGY_KEYS, "stats-intake.json.methodology")
+    for key in STATS_INTAKE_METHODOLOGY_KEYS:
+        if not isinstance(methodology[key], str) or not methodology[key]:
+            fail(f"stats-intake.json.methodology.{key} must be a non-empty string")
+    return top
+
+
+def validate_model_admission_intake_source(data: bytes) -> dict:
+    """Closed-schema parse of `model_admission_intake_offer_counts.v1`
+    (SPEC-047 v0.1.6)."""
+    obj = strict_json(data, "model-admission-intake.json")
+    top = _intake_closed(obj, MODEL_ADMISSION_INTAKE_KEYS, "model-admission-intake.json")
+    if top["schema"] != MODEL_ADMISSION_INTAKE_SCHEMA:
+        fail(f"model-admission-intake.json: schema must be {MODEL_ADMISSION_INTAKE_SCHEMA}")
+    if not isinstance(top["nonce"], str) or not INTAKE_WINDOW_ID_RE.fullmatch(top["nonce"]):
+        fail("model-admission-intake.json.nonce must be 32-hex (one build, one byte string)")
+    generated = _intake_rfc3339(top["generated_at"], "model-admission-intake.json.generated_at")
+    start = _intake_rfc3339(top["window_start"], "model-admission-intake.json.window_start")
+    end = _intake_rfc3339(top["window_end"], "model-admission-intake.json.window_end")
+    if end != generated or start != generated - _dt.timedelta(days=30):
+        fail("model-admission-intake.json: window_end must equal generated_at and window_start generated_at - 30 days")
+    if top["k_anonymity_min"] != INTAKE_K_ANONYMITY_MIN:
+        fail(f"model-admission-intake.json.k_anonymity_min must be {INTAKE_K_ANONYMITY_MIN}")
+    if not isinstance(top["rows"], list):
+        fail("model-admission-intake.json.rows must be an array")
+    previous = None
+    for index, row in enumerate(top["rows"]):
+        label = f"model-admission-intake.json.rows[{index}]"
+        r = _intake_closed(row, MODEL_ADMISSION_INTAKE_ROW_KEYS, label)
+        key = r["catalog_model_key"]
+        if not isinstance(key, str) or not INTAKE_MODEL_KEY_RE.fullmatch(key):
+            fail(f"{label}.catalog_model_key must be a normalized key")
+        if previous is not None and key.encode() <= previous.encode():
+            fail("model-admission-intake.json.rows must ascend by catalog_model_key with no repeats")
+        previous = key
+        count = _intake_int(r["distinct_provider_offer_count"], f"{label}.distinct_provider_offer_count", nullable=True)
+        _intake_bool(r["suppressed"], f"{label}.suppressed")
+        if r["suppressed"] != (count is None):
+            fail(f"{label}: distinct_provider_offer_count is null exactly when suppressed")
+        if count is not None and count < INTAKE_K_ANONYMITY_MIN:
+            fail(f"{label}: an unsuppressed count must be at least k")
+    return top
+
+
+def select_intake_window(stats_intake: dict, as_of: _dt.datetime) -> dict | None:
+    """SPEC-023 §16.2(a) [v0.10.4]: the complete window with the latest
+    window_start whose window_end is within one cadence period before as_of."""
+    cutoff = as_of - _dt.timedelta(days=INTAKE_CADENCE_DAYS)
+    best = None
+    for window in stats_intake["unmatched_models"]["windows"]:
+        end = _intake_rfc3339(window["window_end"], "window_end")
+        if end < cutoff or end > as_of:
+            continue
+        if best is None or window["window_start"] > best["window_start"]:
+            best = window
+    return best
+
+
+class IntakeSources:
+    """The operator's retained coordinator responses for one release
+    (SPEC-023 §16.8 rule 9), loaded lazily and validated once."""
+
+    def __init__(self, audit_dir: pathlib.Path | None, release_id: str):
+        self.dir = None if audit_dir is None else audit_dir / release_id
+        self._stats = None
+        self._stats_bytes = None
+        self._offers = None
+        self._offers_bytes = None
+
+    def _read(self, name: str) -> bytes:
+        if self.dir is None:
+            fail(f"intake-decision: a coordinator source was cited but no intake audit store was given; pass --intake-audit-dir (SPEC-023 §16.8 rule 9)")
+        path = self.dir / name
+        if not path.is_file():
+            fail(f"intake-decision: retained source {path} is missing from the intake audit store")
+        if os.name == "posix" and path.stat().st_mode & 0o077:
+            fail(f"intake-decision: retained source {path} must be mode 0600 (SPEC-023 §16.8 rule 9: the store is operator-private)")
+        return path.read_bytes()
+
+    def stats(self) -> tuple[dict, str]:
+        if self._stats is None:
+            self._stats_bytes = self._read("stats-intake.json")
+            self._stats = validate_stats_intake_source(self._stats_bytes)
+        return self._stats, sha256(self._stats_bytes)
+
+    def offers(self) -> tuple[dict, str]:
+        if self._offers is None:
+            self._offers_bytes = self._read("model-admission-intake.json")
+            self._offers = validate_model_admission_intake_source(self._offers_bytes)
+        return self._offers, sha256(self._offers_bytes)
+
+    def uncited(self, cited: set[str]) -> list[str]:
+        if self.dir is None or not self.dir.is_dir():
+            return []
+        return sorted(p.name for p in self.dir.iterdir() if p.is_file() and p.name not in cited)
+
+
+def _intake_absent_pair(signals: dict, value_key: str, reason_key: str, label: str) -> None:
+    value, reason = signals[value_key], signals[reason_key]
+    if (value is None) != (reason is not None):
+        fail(f"{label}: {reason_key} must be non-null exactly when {value_key} is null")
+    if reason is not None and reason not in INTAKE_ABSENT_REASONS[reason_key]:
+        fail(f"{label}.{reason_key}: unknown reason {reason!r}")
+
+
+def validate_intake_admit_entry(entry: dict, thresholds: dict, candidate_obj: dict, artifact_obj: dict | None,
+                                demand_obj: dict, demand_digest: str, sources: IntakeSources, cited: set[str], label: str) -> None:
+    key = entry["model_key"]
+    as_of = _intake_rfc3339(entry["as_of"], f"{label}.as_of")
+    if entry["listed_since"] is not None:
+        fail(f"{label}.listed_since must be null for admit_listed")
+    if entry["promotion"] is not None:
+        fail(f"{label}.promotion must be null for admit_listed")
+    if entry["operator_decision"] != "admitted":
+        fail(f"{label}.operator_decision must be 'admitted' for admit_listed")
+    signals = _intake_closed(entry["signals"], INTAKE_SIGNAL_KEYS, f"{label}.signals")
+    if entry["admission_clause"] not in INTAKE_ADMISSION_CLAUSES:
+        fail(f"{label}.admission_clause must be one of {INTAKE_ADMISSION_CLAUSES}")
+    if entry["fit_clause"] not in INTAKE_FIT_CLAUSES:
+        fail(f"{label}.fit_clause must be one of {INTAKE_FIT_CLAUSES}")
+    if _intake_bool(entry["coldstart_slot_used"], f"{label}.coldstart_slot_used") != (entry["admission_clause"] == "coldstart_slot"):
+        fail(f"{label}: coldstart_slot_used is true exactly when admission_clause is coldstart_slot")
+    # §16.1 P1: a verified artifact with min_ram_gb.
+    verified_ram = intake_verified_min_ram(artifact_obj, key)
+    if not verified_ram:
+        fail(f"{label}: {key!r} has no verified artifact in the artifact feed (SPEC-023 §16.1 P1)")
+    # Absent-reason pairs (rule 2).
+    for value_key, reason_key in (
+        ("openrouter_demand_rank", "demand_rank_absent_reason"),
+        ("distinct_provider_offer_count", "distinct_provider_offer_absent_reason"),
+        ("unmatched_model_request_count", "unmatched_model_request_absent_reason"),
+        ("fleet_fit_fraction_ppm", "fleet_fit_absent_reason"),
+    ):
+        _intake_absent_pair(signals, value_key, reason_key, label)
+    # Demand rank: always read from the release-bound signed feed.
+    rank = _intake_int(signals["openrouter_demand_rank"], f"{label}.signals.openrouter_demand_rank", minimum=1, nullable=True)
+    if _intake_digest(signals["demand_rank_source_sha256"], f"{label}.signals.demand_rank_source_sha256", nullable=False) != demand_digest:
+        fail(f"{label}.signals.demand_rank_source_sha256 must equal the digest of the release-bound demand-rank.json")
+    row_rank = (demand_obj["rows"].get(key) or {}).get("rank")
+    if rank != row_rank:
+        fail(f"{label}.signals.openrouter_demand_rank must equal demand-rank.json rows[{key!r}].rank ({row_rank!r})")
+    # Provider offers (SPEC-047 v0.1.6).
+    offer_count = _intake_int(signals["distinct_provider_offer_count"], f"{label}.signals.distinct_provider_offer_count", nullable=True)
+    offer_suppressed = _intake_bool(signals["distinct_provider_offer_suppressed"], f"{label}.signals.distinct_provider_offer_suppressed")
+    if offer_suppressed:
+        fail(f"{label}: distinct_provider_offer_suppressed is always false in the public manifest (SPEC-023 §16.8 rule 4 [v0.10.4])")
+    offer_digest = _intake_digest(signals["distinct_provider_offer_source_sha256"], f"{label}.signals.distinct_provider_offer_source_sha256")
+    offer_reason = signals["distinct_provider_offer_absent_reason"]
+    offer_start = _intake_rfc3339(signals["distinct_provider_offer_window_start"], f"{label}.signals.distinct_provider_offer_window_start", nullable=True)
+    offer_end = _intake_rfc3339(signals["distinct_provider_offer_window_end"], f"{label}.signals.distinct_provider_offer_window_end", nullable=True)
+    if (offer_digest is None) != (offer_reason in INTAKE_NO_SOURCE_REASONS):
+        fail(f"{label}: distinct_provider_offer_source_sha256 is null exactly when the source was unavailable")
+    if (offer_start is None) != (offer_digest is None) or (offer_end is None) != (offer_digest is None):
+        fail(f"{label}: distinct_provider_offer_window_* are null exactly when the source digest is null")
+    if offer_digest is not None:
+        offers, digest = sources.offers()
+        cited.add("model-admission-intake.json")
+        if digest != offer_digest:
+            fail(f"{label}.signals.distinct_provider_offer_source_sha256 does not equal the retained model-admission-intake.json digest")
+        row = next((r for r in offers["rows"] if r["catalog_model_key"] == key), None)
+        # SPEC-023 §16.8 rule 4 [v0.10.4]: the public manifest never
+        # distinguishes a suppressed row from an absent one.
+        expected_count = None if row is None else row["distinct_provider_offer_count"]
+        if offer_count != expected_count:
+            fail(f"{label}: distinct_provider_offer_count does not match the retained source ({expected_count!r})")
+        if expected_count is None and offer_reason != "no_observations":
+            fail(f"{label}: an absent or suppressed source row records no_observations")
+        if signals["distinct_provider_offer_window_start"] != offers["window_start"] or signals["distinct_provider_offer_window_end"] != offers["window_end"]:
+            fail(f"{label}: distinct_provider_offer_window_* must equal the retained source window")
+    elif offer_count is not None:
+        fail(f"{label}: an unavailable offer source cannot carry a value")
+    # Buyer demand + fleet fit (SPEC-017 v0.2.1).
+    unmatched_count = _intake_int(signals["unmatched_model_request_count"], f"{label}.signals.unmatched_model_request_count", nullable=True)
+    unmatched_suppressed = _intake_bool(signals["unmatched_model_request_suppressed"], f"{label}.signals.unmatched_model_request_suppressed")
+    unmatched_digest = _intake_digest(signals["unmatched_model_request_source_sha256"], f"{label}.signals.unmatched_model_request_source_sha256")
+    unmatched_reason = signals["unmatched_model_request_absent_reason"]
+    fleet_ppm = _intake_int(signals["fleet_fit_fraction_ppm"], f"{label}.signals.fleet_fit_fraction_ppm", nullable=True)
+    fleet_digest = _intake_digest(signals["fleet_fit_source_sha256"], f"{label}.signals.fleet_fit_source_sha256")
+    fleet_reason = signals["fleet_fit_absent_reason"]
+    if unmatched_suppressed:
+        fail(f"{label}: unmatched_model_request_suppressed is always false against a macprovider.stats-intake.v1 source")
+    if unmatched_reason == "spec017_amendment_not_landed" and spec017_intake_amendment_landed():
+        fail(f"{label}: spec017_amendment_not_landed is not a valid reason once CONFORMANCE.json records SPEC-017 >= 0.2.1 (SPEC-023 §16.7); use source_unavailable")
+    if (unmatched_digest is None) != (unmatched_reason in INTAKE_NO_SOURCE_REASONS):
+        fail(f"{label}: unmatched_model_request_source_sha256 is null exactly when the source was unavailable or not landed")
+    if (fleet_digest is None) != (fleet_reason == "source_unavailable"):
+        fail(f"{label}: fleet_fit_source_sha256 is null exactly when the source was unavailable")
+    if unmatched_digest is not None and fleet_digest is not None and unmatched_digest != fleet_digest:
+        fail(f"{label}: unmatched_model_request_source_sha256 and fleet_fit_source_sha256 name one response and must be equal")
+    window_id = signals["unmatched_model_request_window_id"]
+    window_start = _intake_rfc3339(signals["unmatched_model_request_window_start"], f"{label}.signals.unmatched_model_request_window_start", nullable=True)
+    window_end = _intake_rfc3339(signals["unmatched_model_request_window_end"], f"{label}.signals.unmatched_model_request_window_end", nullable=True)
+    triple_present = window_id is not None
+    if (window_start is None) != (not triple_present) or (window_end is None) != (not triple_present):
+        fail(f"{label}: unmatched_model_request_window_id/start/end are null together")
+    if triple_present and (not isinstance(window_id, str) or not INTAKE_WINDOW_ID_RE.fullmatch(window_id)):
+        fail(f"{label}.signals.unmatched_model_request_window_id must be 32-hex")
+    if unmatched_count is not None and not triple_present:
+        fail(f"{label}: a non-null unmatched_model_request_count needs its window triple")
+    if unmatched_digest is not None or fleet_digest is not None:
+        stats, digest = sources.stats()
+        cited.add("stats-intake.json")
+        if unmatched_digest is not None and unmatched_digest != digest:
+            fail(f"{label}.signals.unmatched_model_request_source_sha256 does not equal the retained stats-intake.json digest")
+        if fleet_digest is not None and fleet_digest != digest:
+            fail(f"{label}.signals.fleet_fit_source_sha256 does not equal the retained stats-intake.json digest")
+        if unmatched_digest is not None:
+            selected = select_intake_window(stats, as_of)
+            if selected is None:
+                if unmatched_reason != "incomplete_window" or triple_present:
+                    fail(f"{label}: no complete window qualifies within {INTAKE_CADENCE_DAYS} days of as_of; record incomplete_window with a null window triple")
+            else:
+                if not triple_present or window_id != selected["window_id"] or signals["unmatched_model_request_window_start"] != selected["window_start"] or signals["unmatched_model_request_window_end"] != selected["window_end"]:
+                    fail(f"{label}: the unmatched window triple must name the selected window {selected['window_id']}")
+                for threshold_key, parameter_key in INTAKE_THRESHOLD_TO_PARAMETER.items():
+                    if thresholds[threshold_key] != selected["parameters"][parameter_key]:
+                        fail(f"{label}: thresholds.{threshold_key} ({thresholds[threshold_key]}) differs from the selected window's parameters.{parameter_key} ({selected['parameters'][parameter_key]})")
+                bucket = next((b for b in selected["buckets"] if b["model_key"] == key), None)
+                expected = None if bucket is None else bucket["lower_bound"]
+                if unmatched_count != expected:
+                    fail(f"{label}: unmatched_model_request_count must equal the selected window's lower_bound for {key!r} ({expected!r})")
+                if bucket is None and unmatched_reason != "no_observations":
+                    fail(f"{label}: a key with no bucket in the selected window records no_observations")
+        if fleet_digest is not None:
+            fleet = stats["fleet_ram"]
+            expected_ppm = max((fleet_fit_fraction_ppm(fleet, ram) for ram in verified_ram), key=lambda v: -1 if v is None else v)
+            if fleet_ppm != expected_ppm:
+                fail(f"{label}: fleet_fit_fraction_ppm must equal the value evaluated from the retained fleet_ram ({expected_ppm!r})")
+            if expected_ppm is None and fleet_reason != "no_observations":
+                fail(f"{label}: an empty fleet records no_observations")
+            if signals["fleet_fit_window_start"] != fleet["window_start"] or signals["fleet_fit_window_end"] != fleet["window_end"]:
+                fail(f"{label}: fleet_fit_window_* must equal the retained fleet_ram window")
+    else:
+        if unmatched_count is not None or fleet_ppm is not None or triple_present:
+            fail(f"{label}: an unavailable stats-intake source cannot carry values or a window")
+    fleet_start = _intake_rfc3339(signals["fleet_fit_window_start"], f"{label}.signals.fleet_fit_window_start", nullable=True)
+    fleet_end = _intake_rfc3339(signals["fleet_fit_window_end"], f"{label}.signals.fleet_fit_window_end", nullable=True)
+    if (fleet_start is None) != (fleet_digest is None) or (fleet_end is None) != (fleet_digest is None):
+        fail(f"{label}: fleet_fit_window_* are null exactly when the source digest is null")
+    # Rule 3: staleness per signal and the envelope.
+    windows = [w for w in (offer_end, window_end, fleet_end) if w is not None]
+    starts = [w for w in (offer_start, window_start, fleet_start) if w is not None]
+    cutoff = as_of - _dt.timedelta(days=INTAKE_CADENCE_DAYS)
+    for end in windows:
+        if end < cutoff:
+            fail(f"{label}: a signal window ends more than {INTAKE_CADENCE_DAYS} days before as_of (stale evidence)")
+    env_start = _intake_rfc3339(entry["observation_window_start"], f"{label}.observation_window_start", nullable=True)
+    env_end = _intake_rfc3339(entry["observation_window_end"], f"{label}.observation_window_end", nullable=True)
+    if windows:
+        if env_start != min(starts) or env_end != max(windows):
+            fail(f"{label}: observation_window_* must be the envelope of the non-null signal windows")
+    elif env_start is not None or env_end is not None:
+        fail(f"{label}: observation_window_* must be null when no windowed signal participates")
+    # Rule 4 and §16.3: the selected clause must be satisfied by an unsuppressed value.
+    clause = entry["admission_clause"]
+    if clause == "demand_rank":
+        if rank is None or rank > thresholds["INTAKE_DEMAND_RANK_MAX"]:
+            fail(f"{label}: demand_rank clause is not satisfied (rank {rank!r} vs INTAKE_DEMAND_RANK_MAX)")
+    elif clause == "provider_offer":
+        if offer_count is None or offer_count < thresholds["INTAKE_OFFER_FLOOR"]:
+            fail(f"{label}: provider_offer clause is not satisfied")
+    elif clause == "buyer_request":
+        if unmatched_count is None or unmatched_count < thresholds["INTAKE_BUYER_REQUEST_FLOOR"]:
+            fail(f"{label}: buyer_request clause is not satisfied")
+    fit = entry["fit_clause"]
+    if fit == "fleet_fit":
+        if fleet_ppm is None or fleet_ppm < thresholds["INTAKE_FLEET_FIT_MIN_PCT"] * 10_000:
+            fail(f"{label}: fleet_fit clause is not satisfied")
+    else:
+        target = intake_tier_target_gb(thresholds["tier_target"])
+        if min(verified_ram) + INTAKE_SAFETY_MARGIN_GB > target:
+            fail(f"{label}: tier_target clause is not satisfied (best verified artifact needs {min(verified_ram) + INTAKE_SAFETY_MARGIN_GB} GB > {target} GB)")
+
+
+def validate_intake_promote_entry(entry: dict, thresholds: dict, candidate_obj: dict, artifact_obj: dict | None, demand_obj: dict, demand_digest: str, label: str) -> None:
+    key = entry["model_key"]
+    as_of = _intake_rfc3339(entry["as_of"], f"{label}.as_of")
+    for field in ("signals", "admission_clause", "fit_clause"):
+        if entry[field] is not None:
+            fail(f"{label}.{field} must be null for promote_recommendable")
+    if _intake_bool(entry["coldstart_slot_used"], f"{label}.coldstart_slot_used"):
+        fail(f"{label}.coldstart_slot_used must be false for promote_recommendable")
+    if entry["operator_decision"] != "promoted":
+        fail(f"{label}.operator_decision must be 'promoted' for promote_recommendable")
+    if entry["observation_window_start"] is not None or entry["observation_window_end"] is not None:
+        fail(f"{label}.observation_window_* must be null for promote_recommendable")
+    listed_since = _intake_rfc3339(entry["listed_since"], f"{label}.listed_since")
+    promotion = _intake_closed(entry["promotion"], INTAKE_PROMOTION_KEYS, f"{label}.promotion")
+    elapsed = _intake_int(promotion["listed_days_elapsed"], f"{label}.promotion.listed_days_elapsed")
+    if elapsed < thresholds["INTAKE_MIN_LISTED_DAYS"]:
+        fail(f"{label}.promotion.listed_days_elapsed must be >= INTAKE_MIN_LISTED_DAYS")
+    if (as_of - listed_since).days < elapsed:
+        fail(f"{label}.promotion.listed_days_elapsed exceeds as_of - listed_since")
+    if promotion["rate_class"] not in RATE_CLASSES:
+        fail(f"{label}.promotion.rate_class must be a §3.3.1 rate class")
+    # §3.7 / v0.10.1 rule 2: the key's rate_class lives on its artifact-feed
+    # model entry, never on the candidate row.
+    feed_rate_class = (((artifact_obj or {}).get("models") or {}).get(key) or {}).get("rate_class")
+    if promotion["rate_class"] != feed_rate_class:
+        fail(f"{label}.promotion.rate_class must equal the artifact feed's rate_class for {key!r} ({feed_rate_class!r})")
+    if promotion["rate_row_resolved"] is not True:
+        fail(f"{label}.promotion.rate_row_resolved must be true")
+    rate_source_digest = _intake_digest(promotion["rate_card_source_sha256"], f"{label}.promotion.rate_card_source_sha256", nullable=False)
+    if RATE_CARD_SOURCE_PATH.exists() and rate_source_digest != sha256(RATE_CARD_SOURCE_PATH.read_bytes()):
+        fail(f"{label}.promotion.rate_card_source_sha256 must equal the digest of rate-card-source.json")
+    if promotion["demand_rank_recommendable"] is not True:
+        fail(f"{label}.promotion.demand_rank_recommendable must be true")
+    if (demand_obj["rows"].get(key) or {}).get("recommendable") is not True:
+        fail(f"{label}: demand-rank.json rows[{key!r}].recommendable is not true")
+    if _intake_digest(promotion["demand_rank_source_sha256"], f"{label}.promotion.demand_rank_source_sha256", nullable=False) != demand_digest:
+        fail(f"{label}.promotion.demand_rank_source_sha256 must equal the digest of the release-bound demand-rank.json")
+    row = candidate_obj["rows"].get(key) or {}
+    provenance = ((row.get("bench_gate") or {}).get("provenance") or {}).get("source")
+    if promotion["bench_provenance_source"] != provenance or provenance == "omlx_seeded":
+        fail(f"{label}.promotion.bench_provenance_source must equal the row's provenance and not be omlx_seeded")
+    reference = promotion["operator_admission_reference"]
+    if not isinstance(reference, str) or not reference.strip() or len(reference) > 256:
+        fail(f"{label}.promotion.operator_admission_reference must be a non-empty string")
+
+
+def validate_intake_decision(
+    data: bytes,
+    *,
+    release_id: str,
+    candidate_obj: dict,
+    artifact_obj: dict | None,
+    demand_obj: dict,
+    demand_bytes: bytes,
+    previous_tiers: dict[str, int] | None,
+    audit_dir: pathlib.Path | None,
+) -> dict:
+    """SPEC-023 §16.8 / AC-CAT-21: the closed manifest, one entry per tier
+    change, every signal re-derived from the retained sources, and the
+    §16.3 rule re-evaluated for every entry. Fails closed on any
+    disagreement."""
+    obj = strict_json(data, "intake-decision.json")
+    top = _intake_closed(obj, frozenset({"schema_version", "release_id", "generated_at", "thresholds", "decisions"}), "intake-decision")
+    if top["schema_version"] != INTAKE_DECISION_SCHEMA:
+        fail(f"intake-decision.schema_version must be {INTAKE_DECISION_SCHEMA}")
+    if top["release_id"] != release_id:
+        fail(f"intake-decision.release_id must equal the release id {release_id!r}")
+    _intake_rfc3339(top["generated_at"], "intake-decision.generated_at")
+    thresholds = validate_intake_thresholds(top["thresholds"])
+    if not isinstance(top["decisions"], list):
+        fail("intake-decision.decisions must be an array")
+    current_tiers = candidate_admission_tiers(candidate_obj)
+    expected_actions: dict[str, str] = {}
+    if previous_tiers is not None:
+        for key in intake_transitions(previous_tiers, current_tiers):
+            previous = previous_tiers.get(key, 0)
+            tier = current_tiers[key]
+            if tier == 2 and previous != 1:
+                fail(f"intake-decision: {key!r} reaches recommendable without a listed observation period (SPEC-023 §16.3)")
+            expected_actions[key] = "promote_recommendable" if tier == 2 else "admit_listed"
+    demand_digest = sha256(demand_bytes)
+    sources = IntakeSources(audit_dir, release_id)
+    cited: set[str] = set()
+    seen: set[str] = set()
+    coldstart = 0
+    for index, entry in enumerate(top["decisions"]):
+        label = f"intake-decision.decisions[{index}]"
+        e = _intake_closed(entry, INTAKE_DECISION_KEYS, label)
+        key = e["model_key"]
+        if not isinstance(key, str) or not INTAKE_MODEL_KEY_RE.fullmatch(key) or key in seen:
+            fail(f"{label}.model_key must be a unique normalized key")
+        seen.add(key)
+        if key not in candidate_obj["rows"]:
+            fail(f"{label}: {key!r} is not a candidate-catalog row")
+        if e["action"] not in ("admit_listed", "promote_recommendable"):
+            fail(f"{label}.action must be admit_listed or promote_recommendable")
+        if previous_tiers is not None:
+            if key not in expected_actions:
+                fail(f"{label}: {key!r} is not admitted or promoted by this release (SPEC-023 §16.8 rule 1)")
+            if expected_actions[key] != e["action"]:
+                fail(f"{label}.action must be {expected_actions[key]} for {key!r}")
+        elif current_tiers[key] < (2 if e["action"] == "promote_recommendable" else 1):
+            fail(f"{label}: {key!r} is not at the tier its action implies")
+        if not isinstance(e["operator_role"], str) or not e["operator_role"].strip():
+            fail(f"{label}.operator_role must be a non-empty string")
+        if e["action"] == "admit_listed":
+            validate_intake_admit_entry(e, thresholds, candidate_obj, artifact_obj, demand_obj, demand_digest, sources, cited, label)
+            if e["coldstart_slot_used"]:
+                coldstart += 1
+        else:
+            validate_intake_promote_entry(e, thresholds, candidate_obj, artifact_obj, demand_obj, demand_digest, label)
+    if previous_tiers is not None:
+        missing = sorted(set(expected_actions) - seen)
+        if missing:
+            fail(f"intake-decision: no entry for admitted/promoted key(s) {missing} (SPEC-023 §16.8 rule 1)")
+    if coldstart > thresholds["INTAKE_COLDSTART_SLOTS"]:
+        fail(f"intake-decision: {coldstart} coldstart_slot entries exceed INTAKE_COLDSTART_SLOTS")
+    uncited = sources.uncited(cited)
+    if uncited:
+        fail(f"intake-decision: retained source file(s) not cited by the manifest: {uncited}")
+    return top
+
+
+def check_intake_decision_manifest(
+    candidate_obj: dict,
+    artifact_obj: dict | None,
+    demand_obj: dict,
+    demand_bytes: bytes,
+    previous_tiers: dict[str, int] | None,
+    audit_dir: pathlib.Path | None,
+) -> None:
+    """Generate/verify hook: when the manifest is committed, validate it
+    against the release inputs; a release whose manifest is absent is
+    governed by require_intake_decision alone."""
+    if not INTAKE_DECISION_PATH.exists():
+        return
+    validate_intake_decision(
+        INTAKE_DECISION_PATH.read_bytes(),
+        release_id=candidate_obj["version"],
+        candidate_obj=candidate_obj,
+        artifact_obj=artifact_obj,
+        demand_obj=demand_obj,
+        demand_bytes=demand_bytes,
+        previous_tiers=previous_tiers,
+        audit_dir=audit_dir,
+    )
+
+
 def generate(
     signer_key_id: str | None = None,
     previous_release_dir: pathlib.Path | None = None,
     activate_artifact_feed: bool = False,
+    intake_audit_dir: pathlib.Path | None = None,
 ) -> None:
     candidate_path = CATALOG_DIR / "autotune-candidates.json"
     demand_path = CATALOG_DIR / "demand-rank.json"
@@ -3398,11 +4125,16 @@ def generate(
         if previous_release_dir is not None:
             previous_release = load_previous_release(previous_release_dir, history)
         require_no_artifact_rebinding(artifact_obj, history, previous_release)
+        previous_tiers = previous_candidate_admission(candidate_obj, history, previous_release)
         require_intake_decision(
             candidate_obj,
-            previous_candidate_admission(candidate_obj, history, previous_release),
+            previous_tiers,
             intake_digest,
             activation=state == "activation",
+        )
+        check_intake_decision_manifest(
+            candidate_obj, artifact_obj, demand_obj, demand_path.read_bytes(), previous_tiers,
+            intake_audit_dir if intake_audit_dir is not None else default_intake_audit_dir(),
         )
         bindings = artifact_bindings(artifact_obj)
     binding_bytes = derive_tier2_identity_binding(candidate, candidate_obj)
@@ -3526,7 +4258,7 @@ def bootstrap(release_id: str, generated_at: str, policy_version: str) -> None:
     migrate_swift_source()
 
 
-def verify(previous_release_dir: pathlib.Path | None = None) -> None:
+def verify(previous_release_dir: pathlib.Path | None = None, intake_audit_dir: pathlib.Path | None = None) -> None:
     candidate_path = CATALOG_DIR / "autotune-candidates.json"
     demand_path = CATALOG_DIR / "demand-rank.json"
     rate_card_path = CATALOG_DIR / RATE_CARD_FEED_NAME
@@ -3624,17 +4356,29 @@ def verify(previous_release_dir: pathlib.Path | None = None) -> None:
         history = release_history(ledger, release_id)
         if previous_release_dir is not None:
             previous_release = load_previous_release(previous_release_dir, history)
+            previous_tiers = previous_candidate_admission(candidate_obj, history, previous_release)
             require_intake_decision(
                 candidate_obj,
-                previous_candidate_admission(candidate_obj, history, previous_release),
+                previous_tiers,
                 intake_decision_digest(),
                 activation=latest_artifact_bound_release(history) is None,
+            )
+            check_intake_decision_manifest(
+                candidate_obj, artifact_obj, demand_obj, demand, previous_tiers,
+                intake_audit_dir if intake_audit_dir is not None else default_intake_audit_dir(),
             )
             print(
                 f"verified intake-decision transitions for {release_id} against "
                 f"{previous_release['release_id']}"
             )
         else:
+            # Without the previous release the TRANSITION rule cannot be
+            # re-derived, but the committed manifest itself is still checked
+            # against this release's inputs and retained sources.
+            check_intake_decision_manifest(
+                candidate_obj, artifact_obj, demand_obj, demand, None,
+                intake_audit_dir if intake_audit_dir is not None else default_intake_audit_dir(),
+            )
             print(
                 f"verify: NOTICE: release {release_id} is artifact-bound and its "
                 "intake_decision_sha256 transition rule (SPEC-023 §3.7.8) was NOT re-derived; "
@@ -3950,6 +4694,15 @@ def main() -> int:
     generate_parser = sub.add_parser("generate")
     generate_parser.add_argument("--signer-key-id")
     generate_parser.add_argument(
+        "--intake-audit-dir",
+        type=pathlib.Path,
+        help=(
+            "operator's private intake audit store holding <release_id>/stats-intake.json and "
+            "model-admission-intake.json (SPEC-023 §16.8 rule 9); defaults to "
+            "$MACPROVIDER_INTAKE_AUDIT_DIR or ~/.config/macprovider/intake-audit"
+        ),
+    )
+    generate_parser.add_argument(
         "--previous-release-dir",
         type=pathlib.Path,
         help=(
@@ -3969,6 +4722,7 @@ def main() -> int:
         ),
     )
     verify_parser = sub.add_parser("verify")
+    verify_parser.add_argument("--intake-audit-dir", type=pathlib.Path, help="see generate --intake-audit-dir")
     verify_parser.add_argument(
         "--previous-release-dir",
         type=pathlib.Path,
@@ -4068,9 +4822,9 @@ def main() -> int:
         elif args.command == "restamp":
             restamp(args.release_id, args.generated_at)
         elif args.command == "generate":
-            generate(args.signer_key_id, args.previous_release_dir, args.activate_artifact_feed)
+            generate(args.signer_key_id, args.previous_release_dir, args.activate_artifact_feed, args.intake_audit_dir)
         elif args.command == "verify":
-            verify(args.previous_release_dir)
+            verify(args.previous_release_dir, args.intake_audit_dir)
         elif args.command == "status":
             cmd_status()
         elif args.command == "continuity-check":

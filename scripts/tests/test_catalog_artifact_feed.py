@@ -1580,6 +1580,50 @@ class RateGlobalsTest(unittest.TestCase):
         self.assertIn("qwen3-8b.provider_share_bps", str(caught.exception))
 
 
+def promotion_manifest_bytes(harness, key: str, release_id: str, as_of: str) -> bytes:
+    """A valid SPEC-023 §16.8 promote_recommendable manifest for the hermetic
+    harness: digests over the harness's own demand-rank and rate-card-source
+    bytes, provenance from its candidate row, no coordinator source."""
+    candidate = json.loads((harness.catalog / "autotune-candidates.json").read_bytes())
+    row = candidate["rows"][key]
+    manifest = {
+        "schema_version": "macprovider.intake-decision.v1",
+        "release_id": release_id,
+        "generated_at": as_of,
+        "thresholds": {
+            "INTAKE_DEMAND_RANK_MAX": 100, "INTAKE_OFFER_FLOOR": 3, "INTAKE_BUYER_REQUEST_FLOOR": 250,
+            "INTAKE_UNKNOWN_KEY_BUCKETS": 64, "INTAKE_UNKNOWN_PRINCIPALS_PER_BUCKET": 64,
+            "INTAKE_UNKNOWN_KEY_DISTINCT_CAP": 10000, "INTAKE_UNKNOWN_KEY_PRINCIPAL_CAP_PCT": 10,
+            "INTAKE_K_ANONYMITY_MIN": 3, "INTAKE_FLEET_FIT_MIN_PCT": 25, "INTAKE_COLDSTART_SLOTS": 1,
+            "INTAKE_MIN_LISTED_DAYS": 30, "tier_target": "<= 16 GB",
+        },
+        "decisions": [{
+            "model_key": key,
+            "action": "promote_recommendable",
+            "observation_window_start": None,
+            "observation_window_end": None,
+            "as_of": as_of,
+            "signals": None,
+            "admission_clause": None,
+            "fit_clause": None,
+            "coldstart_slot_used": False,
+            "listed_since": "2026-08-01T00:00:00Z",
+            "promotion": {
+                "listed_days_elapsed": 45,
+                "rate_class": "class-8b",
+                "rate_row_resolved": True,
+                "rate_card_source_sha256": catalog_release.sha256((harness.catalog / "rate-card-source.json").read_bytes()),
+                "demand_rank_recommendable": True,
+                "demand_rank_source_sha256": catalog_release.sha256((harness.catalog / "demand-rank.json").read_bytes()),
+                "bench_provenance_source": row["bench_gate"]["provenance"]["source"],
+                "operator_admission_reference": "release-notes#" + key,
+            },
+            "operator_decision": "promoted",
+            "operator_role": "catalog-operator",
+        }],
+    }
+    return json.dumps(manifest, indent=2, sort_keys=True).encode() + b"\n"
+
 class IntakeDecisionTest(unittest.TestCase):
     """SPEC-023 §3.7.8: `intake_decision_sha256` is `null` ONLY for a release that
     adds no `listed` row and promotes no row to `recommendable`."""
@@ -2228,9 +2272,9 @@ class HermeticReleaseTest(unittest.TestCase):
             self.activate(harness)
             previous = harness.stage(harness.root / "previous")
 
-            # Release N+1 DEMOTES a row: no intake decision is required for that.
+            # Release N+1 DEMOTES a row to listed: no intake decision is required.
             harness.bump("published-2026-09-21-demote-v1", "2026-09-21T00:00:00Z")
-            self.set_status(harness, "qwen3-8b", "candidate")
+            self.set_status(harness, "qwen3-8b", "listed")
             harness.cut(previous_release_dir=previous)
             self.assertIsNone(
                 harness.ledger()["releases"]["published-2026-09-21-demote-v1"]["intake_decision_sha256"]
@@ -2245,7 +2289,15 @@ class HermeticReleaseTest(unittest.TestCase):
             self.assertIn("intake_decision_sha256 is null", str(caught.exception))
             self.assertIn("qwen3-8b", str(caught.exception))
 
+            # A stub manifest is no longer enough: the §16.8 manifest is
+            # validated and re-derived (v0.10.4).
             (harness.catalog / "intake-decision.json").write_text('{"decision":"promote qwen3-8b"}\n')
+            with self.assertRaises(catalog_release.CatalogError) as caught:
+                catalog_release.generate(harness.KEY_ID, previous_release_dir=demoted)
+            self.assertIn("intake-decision: unknown key(s)", str(caught.exception))
+            (harness.catalog / "intake-decision.json").write_bytes(
+                promotion_manifest_bytes(harness, "qwen3-8b", "published-2026-09-22-promote-v1", "2026-09-22T00:00:00Z")
+            )
             harness.cut(previous_release_dir=demoted)
             row = harness.ledger()["releases"]["published-2026-09-22-promote-v1"]
             self.assertEqual(len(row["intake_decision_sha256"]), 64)
@@ -2266,14 +2318,16 @@ class HermeticReleaseTest(unittest.TestCase):
             previous = harness.stage(harness.root / "previous")
 
             harness.bump("published-2026-09-21-demote-v1", "2026-09-21T00:00:00Z")
-            self.set_status(harness, "qwen3-8b", "candidate")
+            self.set_status(harness, "qwen3-8b", "listed")
             harness.cut(previous_release_dir=previous)
             demoted = harness.stage(harness.root / "demoted")
 
             promoted_id = "published-2026-09-22-promote-v1"
             harness.bump(promoted_id, "2026-09-22T00:00:00Z")
             self.set_status(harness, "qwen3-8b", "recommendable")
-            (harness.catalog / "intake-decision.json").write_text('{"decision":"promote qwen3-8b"}\n')
+            (harness.catalog / "intake-decision.json").write_bytes(
+                promotion_manifest_bytes(harness, "qwen3-8b", promoted_id, "2026-09-22T00:00:00Z")
+            )
             harness.cut(previous_release_dir=demoted)
             catalog_release.verify(previous_release_dir=demoted)
 
@@ -2806,3 +2860,504 @@ class PreviousReleaseDirectoryTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class IntakeDecisionManifestTest(unittest.TestCase):
+    """SPEC-023 §16.8 / AC-CAT-21 (v0.10.4): the closed intake-decision
+    manifest, re-derived from the privately retained sources."""
+
+    AS_OF = "2026-10-01T00:00:00Z"
+    KEY = "qwen3-8b"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.audit_dir = pathlib.Path(self.tmp.name) / "intake-audit"
+        self.release_dir = self.audit_dir / CANDIDATE_OBJ["version"]
+        self.release_dir.mkdir(parents=True)
+        self.demand_obj = catalog_release.validate_demand(DEMAND_BYTES)
+        self.artifact_obj = feed_from(artifact_source())
+        self.thresholds = {
+            "INTAKE_DEMAND_RANK_MAX": 100,
+            "INTAKE_OFFER_FLOOR": 3,
+            "INTAKE_BUYER_REQUEST_FLOOR": 250,
+            "INTAKE_UNKNOWN_KEY_BUCKETS": 64,
+            "INTAKE_UNKNOWN_PRINCIPALS_PER_BUCKET": 64,
+            "INTAKE_UNKNOWN_KEY_DISTINCT_CAP": 10000,
+            "INTAKE_UNKNOWN_KEY_PRINCIPAL_CAP_PCT": 10,
+            "INTAKE_K_ANONYMITY_MIN": 3,
+            "INTAKE_FLEET_FIT_MIN_PCT": 25,
+            "INTAKE_COLDSTART_SLOTS": 1,
+            "INTAKE_MIN_LISTED_DAYS": 30,
+            "tier_target": "<= 16 GB",
+        }
+        self.stats_bytes = self.write("stats-intake.json", self.stats_source())
+        self.offers_bytes = self.write("model-admission-intake.json", self.offers_source())
+
+    def write(self, name: str, obj: dict, mode: int = 0o600) -> bytes:
+        data = json.dumps(obj, sort_keys=True).encode()
+        path = self.release_dir / name
+        path.write_bytes(data)
+        path.chmod(mode)
+        return data
+
+    def stats_source(self, buckets: list | None = None, window_end: str = "2026-09-30T00:00:00Z") -> dict:
+        window = {
+            "window_id": "3f1c0a9b7d2e4c6f8a1b3d5e7f9a0c2d",
+            "window_start": "2026-08-31T00:00:00Z",
+            "window_end": window_end,
+            "parameters": {
+                "key_buckets": 64, "principals_per_bucket": 64, "distinct_key_cap": 10000,
+                "buyer_request_floor": 250, "principal_cap_pct": 10, "principal_cap_requests": 25,
+                "k_anonymity_min": 3, "window_max_days": 30,
+            },
+            "eligibility_policy_id": "9a2e6c1d4b8f0a3e5c7d9b1f3a5c7e90",
+            "buckets": [{"model_key": self.KEY, "lower_bound": 300, "count": 300, "error": 0}] if buckets is None else buckets,
+            "suppressed_bucket_count": 7,
+            "other_suppressed": {"request_count": 57, "request_count_saturated": False, "distinct_key_count": 41, "distinct_key_count_saturated": False},
+        }
+        classes = []
+        counts = {16: 4, 32: 5}
+        for floor in (8, 16, 24, 32, 48, 64, 96, 128, 192, 256, 512):
+            if floor in counts:
+                classes.append({"ram_gb_floor": floor, "provider_count": counts[floor], "suppressed": False})
+            else:
+                classes.append({"ram_gb_floor": floor, "provider_count": None, "suppressed": True})
+        return {
+            "schema_version": "macprovider.stats-intake.v1",
+            "generated_at": "2026-09-30T12:00:00Z",
+            "stale_after": "2026-09-30T12:15:00Z",
+            "unmatched_models": {"contract": "SPEC-023-16.2a", "windows": [window]},
+            "fleet_ram": {
+                "window_start": "2026-08-31T12:00:00Z", "window_end": "2026-09-30T12:00:00Z",
+                "k_anonymity_min": 3, "provider_total": 12, "provider_suppressed": 3, "classes": classes,
+            },
+            "methodology": {
+                "version": "SPEC-017-v0.2.1",
+                "unmatched_models": "SPEC-023 §16.2(a) Space-Saving summary over complete 30-day epochs only",
+                "fleet_ram": "verified, trusted hardware profiles bucketed by unified memory class floor",
+                "redaction": "aggregated counts only",
+            },
+        }
+
+    def offers_source(self, rows: list | None = None) -> dict:
+        return {
+            "schema": "model_admission_intake_offer_counts.v1",
+            "nonce": "5e8d1c2b3a4f60718293a4b5c6d7e8f9",
+            "generated_at": "2026-09-30T12:00:00Z",
+            "window_start": "2026-08-31T12:00:00Z",
+            "window_end": "2026-09-30T12:00:00Z",
+            "k_anonymity_min": 3,
+            "rows": [{"catalog_model_key": self.KEY, "distinct_provider_offer_count": 4, "suppressed": False}] if rows is None else rows,
+        }
+
+    def admit_entry(self) -> dict:
+        rank = self.demand_obj["rows"][self.KEY]["rank"]
+        return {
+            "model_key": self.KEY,
+            "action": "admit_listed",
+            "observation_window_start": "2026-08-31T00:00:00Z",
+            "observation_window_end": "2026-09-30T12:00:00Z",
+            "as_of": self.AS_OF,
+            "signals": {
+                "openrouter_demand_rank": rank,
+                "demand_rank_absent_reason": None if rank is not None else "unranked",
+                "demand_rank_source_sha256": catalog_release.sha256(DEMAND_BYTES),
+                "distinct_provider_offer_count": 4,
+                "distinct_provider_offer_suppressed": False,
+                "distinct_provider_offer_absent_reason": None,
+                "distinct_provider_offer_source_sha256": catalog_release.sha256(self.offers_bytes),
+                "distinct_provider_offer_window_start": "2026-08-31T12:00:00Z",
+                "distinct_provider_offer_window_end": "2026-09-30T12:00:00Z",
+                "unmatched_model_request_count": 300,
+                "unmatched_model_request_suppressed": False,
+                "unmatched_model_request_absent_reason": None,
+                "unmatched_model_request_source_sha256": catalog_release.sha256(self.stats_bytes),
+                "unmatched_model_request_window_id": "3f1c0a9b7d2e4c6f8a1b3d5e7f9a0c2d",
+                "unmatched_model_request_window_start": "2026-08-31T00:00:00Z",
+                "unmatched_model_request_window_end": "2026-09-30T00:00:00Z",
+                "fleet_fit_fraction_ppm": 750000,
+                "fleet_fit_absent_reason": None,
+                "fleet_fit_source_sha256": catalog_release.sha256(self.stats_bytes),
+                "fleet_fit_window_start": "2026-08-31T12:00:00Z",
+                "fleet_fit_window_end": "2026-09-30T12:00:00Z",
+            },
+            "admission_clause": "provider_offer",
+            "fit_clause": "fleet_fit",
+            "coldstart_slot_used": False,
+            "listed_since": None,
+            "promotion": None,
+            "operator_decision": "admitted",
+            "operator_role": "catalog-operator",
+        }
+
+    def promote_entry(self) -> dict:
+        row = CANDIDATE_OBJ["rows"][self.KEY]
+        return {
+            "model_key": self.KEY,
+            "action": "promote_recommendable",
+            "observation_window_start": None,
+            "observation_window_end": None,
+            "as_of": self.AS_OF,
+            "signals": None,
+            "admission_clause": None,
+            "fit_clause": None,
+            "coldstart_slot_used": False,
+            "listed_since": "2026-08-15T00:00:00Z",
+            "promotion": {
+                "listed_days_elapsed": 45,
+                "rate_class": "class-8b",
+                "rate_row_resolved": True,
+                "rate_card_source_sha256": catalog_release.sha256(RATE_CARD_SOURCE_BYTES),
+                "demand_rank_recommendable": True,
+                "demand_rank_source_sha256": catalog_release.sha256(DEMAND_BYTES),
+                "bench_provenance_source": row["bench_gate"]["provenance"]["source"],
+                "operator_admission_reference": "release-notes#qwen3-8b",
+            },
+            "operator_decision": "promoted",
+            "operator_role": "catalog-operator",
+        }
+
+    def manifest(self, decisions: list) -> dict:
+        return {
+            "schema_version": "macprovider.intake-decision.v1",
+            "release_id": CANDIDATE_OBJ["version"],
+            "generated_at": self.AS_OF,
+            "thresholds": dict(self.thresholds),
+            "decisions": decisions,
+        }
+
+    def validate(self, manifest: dict, previous_tiers=None, audit_dir="default") -> dict:
+        return catalog_release.validate_intake_decision(
+            json.dumps(manifest).encode(),
+            release_id=CANDIDATE_OBJ["version"],
+            candidate_obj=CANDIDATE_OBJ,
+            artifact_obj=self.artifact_obj,
+            demand_obj=self.demand_obj,
+            demand_bytes=DEMAND_BYTES,
+            previous_tiers=previous_tiers,
+            audit_dir=self.audit_dir if audit_dir == "default" else audit_dir,
+        )
+
+    def rejects(self, manifest: dict, fragment: str, **kwargs) -> None:
+        with self.assertRaises(catalog_release.CatalogError) as caught:
+            self.validate(manifest, **kwargs)
+        self.assertIn(fragment, str(caught.exception))
+
+    def clear_sources(self) -> None:
+        """A promotion-only release retains no coordinator source; a retained
+        file the manifest does not cite fails closed (rule 9)."""
+        for name in ("stats-intake.json", "model-admission-intake.json"):
+            path = self.release_dir / name
+            if path.exists():
+                path.unlink()
+
+    def test_a_reconstructible_admission_and_promotion_are_accepted(self):
+        self.validate(self.manifest([self.admit_entry()]))
+        self.rejects(self.manifest([self.promote_entry()]), "not cited by the manifest")
+        self.clear_sources()
+        self.validate(self.manifest([self.promote_entry()]))
+
+    def test_closed_schema_at_every_level(self):
+        m = self.manifest([self.admit_entry()])
+        m["extra"] = 1
+        self.rejects(m, "unknown key(s) ['extra']")
+        m = self.manifest([self.admit_entry()])
+        m["thresholds"]["INTAKE_NEW_KNOB"] = 1
+        self.rejects(m, "thresholds: unknown key(s)")
+        m = self.manifest([self.admit_entry()])
+        del m["thresholds"]["tier_target"]
+        self.rejects(m, "missing key(s) ['tier_target']")
+        m = self.manifest([self.admit_entry()])
+        m["decisions"][0]["signals"]["novel"] = 1
+        self.rejects(m, "signals: unknown key(s) ['novel']")
+        m = self.manifest([self.admit_entry()])
+        m["decisions"][0]["signals"]["fleet_fit_fraction_ppm"] = "750000"
+        self.rejects(m, "fleet_fit_fraction_ppm: must be an integer")
+
+    def test_fixed_k_floor_and_window_parameters(self):
+        m = self.manifest([self.admit_entry()])
+        m["thresholds"]["INTAKE_K_ANONYMITY_MIN"] = 5
+        self.rejects(m, "INTAKE_K_ANONYMITY_MIN must be 3")
+        m = self.manifest([self.admit_entry()])
+        m["thresholds"]["INTAKE_UNKNOWN_KEY_BUCKETS"] = 32
+        self.rejects(m, "differs from the selected window's parameters.key_buckets")
+        m = self.manifest([self.admit_entry()])
+        m["thresholds"]["INTAKE_UNKNOWN_KEY_PRINCIPAL_CAP_PCT"] = 5
+        self.rejects(m, "parameters.principal_cap_pct")
+
+    def test_source_digests_and_the_audit_store(self):
+        m = self.manifest([self.admit_entry()])
+        m["decisions"][0]["signals"]["distinct_provider_offer_source_sha256"] = "d" * 64
+        self.rejects(m, "does not equal the retained model-admission-intake.json digest")
+        m = self.manifest([self.admit_entry()])
+        m["decisions"][0]["signals"]["unmatched_model_request_source_sha256"] = "d" * 64
+        self.rejects(m, "name one response and must be equal")
+        m["decisions"][0]["signals"]["fleet_fit_source_sha256"] = "d" * 64
+        self.rejects(m, "does not equal the retained stats-intake.json digest")
+        self.rejects(self.manifest([self.admit_entry()]), "no intake audit store was given", audit_dir=None)
+        (self.release_dir / "stray.json").write_bytes(b"{}")
+        self.rejects(self.manifest([self.admit_entry()]), "not cited by the manifest: ['stray.json']")
+        (self.release_dir / "stray.json").unlink()
+        (self.release_dir / "stats-intake.json").unlink()
+        self.rejects(self.manifest([self.admit_entry()]), "is missing from the intake audit store")
+
+    def test_values_are_re_derived_from_the_retained_sources(self):
+        m = self.manifest([self.admit_entry()])
+        m["decisions"][0]["signals"]["distinct_provider_offer_count"] = 5
+        self.rejects(m, "distinct_provider_offer_count does not match the retained source (4)")
+        m = self.manifest([self.admit_entry()])
+        m["decisions"][0]["signals"]["unmatched_model_request_count"] = 301
+        self.rejects(m, "must equal the selected window's lower_bound")
+        m = self.manifest([self.admit_entry()])
+        m["decisions"][0]["signals"]["fleet_fit_fraction_ppm"] = 700000
+        self.rejects(m, "fleet_fit_fraction_ppm must equal the value evaluated from the retained fleet_ram (750000)")
+        m = self.manifest([self.admit_entry()])
+        m["decisions"][0]["signals"]["unmatched_model_request_window_id"] = "0" * 32
+        self.rejects(m, "must name the selected window")
+        m = self.manifest([self.admit_entry()])
+        m["decisions"][0]["signals"]["openrouter_demand_rank"] = 1
+        m["decisions"][0]["signals"]["demand_rank_absent_reason"] = None
+        self.rejects(m, "must equal demand-rank.json rows")
+
+    def test_suppression_is_never_key_attributable_in_the_public_manifest(self):
+        self.offers_bytes = self.write("model-admission-intake.json", self.offers_source(
+            [{"catalog_model_key": self.KEY, "distinct_provider_offer_count": None, "suppressed": True}]))
+        entry = self.admit_entry()
+        entry["signals"]["distinct_provider_offer_source_sha256"] = catalog_release.sha256(self.offers_bytes)
+        entry["signals"]["distinct_provider_offer_count"] = None
+        entry["signals"]["distinct_provider_offer_suppressed"] = True
+        entry["signals"]["distinct_provider_offer_absent_reason"] = "suppressed"
+        entry["admission_clause"] = "buyer_request"
+        self.rejects(self.manifest([entry]), "distinct_provider_offer_suppressed is always false")
+        entry["signals"]["distinct_provider_offer_suppressed"] = False
+        entry["signals"]["distinct_provider_offer_absent_reason"] = "no_observations"
+        self.validate(self.manifest([entry]))
+        entry["admission_clause"] = "provider_offer"
+        self.rejects(self.manifest([entry]), "provider_offer clause is not satisfied")
+        entry["admission_clause"] = "buyer_request"
+        entry["signals"]["unmatched_model_request_suppressed"] = True
+        self.rejects(self.manifest([entry]), "unmatched_model_request_suppressed is always false")
+
+    def test_absent_signals_carry_a_reason_and_only_then(self):
+        entry = self.admit_entry()
+        entry["signals"]["fleet_fit_fraction_ppm"] = None
+        self.rejects(self.manifest([entry]), "fleet_fit_absent_reason must be non-null exactly when fleet_fit_fraction_ppm is null")
+        entry = self.admit_entry()
+        entry["signals"]["fleet_fit_absent_reason"] = "no_observations"
+        self.rejects(self.manifest([entry]), "fleet_fit_absent_reason must be non-null exactly when")
+
+    def test_unavailable_sources_need_no_retained_file(self):
+        rank = self.demand_obj["rows"][self.KEY]["rank"]
+        self.assertIsNotNone(rank)
+        self.assertLessEqual(rank, 100)
+        entry = self.admit_entry()
+        s = entry["signals"]
+        for prefix in ("distinct_provider_offer", "unmatched_model_request", "fleet_fit"):
+            s[prefix + "_source_sha256"] = None
+            s[prefix + "_window_start"] = None
+            s[prefix + "_window_end"] = None
+        s["distinct_provider_offer_count"] = None
+        s["distinct_provider_offer_absent_reason"] = "source_unavailable"
+        s["unmatched_model_request_count"] = None
+        s["unmatched_model_request_absent_reason"] = "source_unavailable"
+        s["unmatched_model_request_window_id"] = None
+        s["fleet_fit_fraction_ppm"] = None
+        s["fleet_fit_absent_reason"] = "source_unavailable"
+        entry["admission_clause"] = "demand_rank"
+        entry["fit_clause"] = "tier_target"
+        entry["observation_window_start"] = None
+        entry["observation_window_end"] = None
+        for name in ("stats-intake.json", "model-admission-intake.json"):
+            (self.release_dir / name).unlink()
+        self.validate(self.manifest([entry]))
+        entry["observation_window_start"] = "2026-08-31T00:00:00Z"
+        self.rejects(self.manifest([entry]), "observation_window_* must be null when no windowed signal participates")
+
+    def test_incomplete_window_and_staleness(self):
+        # as_of far past every window: no complete window qualifies for the
+        # buyer signal, so the entry must record incomplete_window.
+        entry = self.admit_entry()
+        entry["as_of"] = "2026-12-01T00:00:00Z"
+        self.rejects(self.manifest([entry]), "no complete window qualifies within 31 days of as_of")
+        # A stale offer window (source read long before as_of) is refused.
+        self.offers_bytes = self.write("model-admission-intake.json", {**self.offers_source(), "generated_at": "2026-08-01T00:00:00Z", "window_start": "2026-07-02T00:00:00Z", "window_end": "2026-08-01T00:00:00Z"})
+        entry = self.admit_entry()
+        entry["signals"]["distinct_provider_offer_source_sha256"] = catalog_release.sha256(self.offers_bytes)
+        entry["signals"]["distinct_provider_offer_window_start"] = "2026-07-02T00:00:00Z"
+        entry["signals"]["distinct_provider_offer_window_end"] = "2026-08-01T00:00:00Z"
+        entry["observation_window_start"] = "2026-07-02T00:00:00Z"
+        self.rejects(self.manifest([entry]), "ends more than 31 days before as_of")
+        self.offers_bytes = self.write("model-admission-intake.json", self.offers_source())
+        # A source whose only window is not complete is rejected at parse.
+        self.stats_bytes = self.write("stats-intake.json", self.stats_source(window_end="2026-09-05T00:00:00Z"))
+        entry = self.admit_entry()
+        entry["signals"]["unmatched_model_request_source_sha256"] = catalog_release.sha256(self.stats_bytes)
+        entry["signals"]["fleet_fit_source_sha256"] = catalog_release.sha256(self.stats_bytes)
+        self.rejects(self.manifest([entry]), "a served window is exactly 30 days")
+        # No bucket for the key in the selected window → no_observations.
+        self.stats_bytes = self.write("stats-intake.json", self.stats_source(buckets=[]))
+        entry = self.admit_entry()
+        entry["signals"]["unmatched_model_request_source_sha256"] = catalog_release.sha256(self.stats_bytes)
+        entry["signals"]["fleet_fit_source_sha256"] = catalog_release.sha256(self.stats_bytes)
+        self.rejects(self.manifest([entry]), "must equal the selected window's lower_bound for 'qwen3-8b' (None)")
+        entry["signals"]["unmatched_model_request_count"] = None
+        entry["signals"]["unmatched_model_request_absent_reason"] = "no_observations"
+        self.validate(self.manifest([entry]))
+
+    def test_envelope_clauses_and_coldstart(self):
+        entry = self.admit_entry()
+        entry["observation_window_end"] = "2026-09-30T00:00:00Z"
+        self.rejects(self.manifest([entry]), "must be the envelope of the non-null signal windows")
+        entry = self.admit_entry()
+        entry["fit_clause"] = "tier_target"
+        self.thresholds["tier_target"] = "<= 8 GB"
+        self.rejects(self.manifest([entry]), "tier_target clause is not satisfied")
+        self.thresholds["tier_target"] = "<= 16 GB"
+        entry = self.admit_entry()
+        entry["admission_clause"] = "coldstart_slot"
+        entry["coldstart_slot_used"] = True
+        self.thresholds["INTAKE_COLDSTART_SLOTS"] = 0
+        self.rejects(self.manifest([entry]), "exceed INTAKE_COLDSTART_SLOTS")
+
+    def test_promotion_rules(self):
+        self.clear_sources()
+        entry = self.promote_entry()
+        entry["admission_clause"] = "demand_rank"
+        self.rejects(self.manifest([entry]), "admission_clause must be null for promote_recommendable")
+        entry = self.promote_entry()
+        entry["promotion"] = None
+        self.rejects(self.manifest([entry]), "promotion: must be an object")
+        entry = self.promote_entry()
+        entry["promotion"]["listed_days_elapsed"] = 10
+        self.rejects(self.manifest([entry]), "listed_days_elapsed must be >= INTAKE_MIN_LISTED_DAYS")
+        entry = self.promote_entry()
+        entry["promotion"]["bench_provenance_source"] = "omlx_seeded"
+        self.rejects(self.manifest([entry]), "bench_provenance_source must equal the row's provenance and not be omlx_seeded")
+        entry = self.promote_entry()
+        entry["observation_window_start"] = "2026-08-31T00:00:00Z"
+        self.rejects(self.manifest([entry]), "observation_window_* must be null for promote_recommendable")
+
+    def test_one_entry_per_transition(self):
+        previous = catalog_release.candidate_admission_tiers(CANDIDATE_OBJ)
+        previous[self.KEY] = 1  # listed before → promoted now
+        self.clear_sources()
+        self.validate(self.manifest([self.promote_entry()]), previous_tiers=previous)
+        self.rejects(self.manifest([]), "no entry for admitted/promoted key(s) ['qwen3-8b']", previous_tiers=previous)
+        self.rejects(self.manifest([self.admit_entry()]), "action must be promote_recommendable", previous_tiers=previous)
+        previous[self.KEY] = 0  # absent → recommendable directly is refused
+        self.rejects(self.manifest([self.promote_entry()]), "reaches recommendable without a listed observation period", previous_tiers=previous)
+        other = catalog_release.candidate_admission_tiers(CANDIDATE_OBJ)
+        self.rejects(self.manifest([self.admit_entry()]), "is not admitted or promoted by this release", previous_tiers=other)
+
+    def test_source_hardening_rules(self):
+        # More than three windows is not a SPEC-017 response.
+        src = self.stats_source()
+        extra = [dict(src["unmatched_models"]["windows"][0], window_id=f"{i:032x}", window_start=f"2026-0{i}-01T00:00:00Z", window_end=f"2026-0{i}-31T00:00:00Z") for i in (5, 6, 7)]
+        src["unmatched_models"]["windows"] += extra
+        self.stats_bytes = self.write("stats-intake.json", src)
+        entry = self.admit_entry()
+        entry["signals"]["unmatched_model_request_source_sha256"] = catalog_release.sha256(self.stats_bytes)
+        entry["signals"]["fleet_fit_source_sha256"] = catalog_release.sha256(self.stats_bytes)
+        self.rejects(self.manifest([entry]), "more than 3 windows")
+        # A non-UTC or sub-second timestamp form is not one byte string per instant.
+        for bad in ("2026-09-30T12:00:00+00:00", "2026-09-30T12:00:00.000Z", "2026-09-30 12:00:00Z"):
+            src = self.stats_source()
+            src["generated_at"] = bad
+            self.stats_bytes = self.write("stats-intake.json", src)
+            entry = self.admit_entry()
+            entry["signals"]["unmatched_model_request_source_sha256"] = catalog_release.sha256(self.stats_bytes)
+            entry["signals"]["fleet_fit_source_sha256"] = catalog_release.sha256(self.stats_bytes)
+            self.rejects(self.manifest([entry]), "RFC3339 UTC timestamp with second precision")
+        # The per-principal cap never exceeds a tenth of the floor.
+        src = self.stats_source()
+        src["unmatched_models"]["windows"][0]["parameters"]["principal_cap_pct"] = 11
+        src["unmatched_models"]["windows"][0]["parameters"]["principal_cap_requests"] = 27
+        self.stats_bytes = self.write("stats-intake.json", src)
+        entry = self.admit_entry()
+        entry["signals"]["unmatched_model_request_source_sha256"] = catalog_release.sha256(self.stats_bytes)
+        entry["signals"]["fleet_fit_source_sha256"] = catalog_release.sha256(self.stats_bytes)
+        self.rejects(self.manifest([entry]), "principal_cap_pct in [1, 10]")
+        m = self.manifest([self.admit_entry()])
+        m["thresholds"]["INTAKE_UNKNOWN_KEY_PRINCIPAL_CAP_PCT"] = 11
+        self.rejects(m, "INTAKE_UNKNOWN_KEY_PRINCIPAL_CAP_PCT must be in [1, 10]")
+        # The methodology object is closed.
+        src = self.stats_source()
+        src["methodology"]["extra"] = "x"
+        self.stats_bytes = self.write("stats-intake.json", src)
+        entry = self.admit_entry()
+        entry["signals"]["unmatched_model_request_source_sha256"] = catalog_release.sha256(self.stats_bytes)
+        entry["signals"]["fleet_fit_source_sha256"] = catalog_release.sha256(self.stats_bytes)
+        self.rejects(self.manifest([entry]), "methodology: unknown key(s)")
+        # The fleet histogram's counts must reconcile with provider_total.
+        src = self.stats_source()
+        src["fleet_ram"]["provider_suppressed"] = 2
+        self.stats_bytes = self.write("stats-intake.json", src)
+        entry = self.admit_entry()
+        entry["signals"]["unmatched_model_request_source_sha256"] = catalog_release.sha256(self.stats_bytes)
+        entry["signals"]["fleet_fit_source_sha256"] = catalog_release.sha256(self.stats_bytes)
+        self.rejects(self.manifest([entry]), "provider_total must equal the emitted counts plus provider_suppressed")
+        # The amendment has landed (CONFORMANCE SPEC-017 >= 0.2.1): the
+        # not-landed reason is no longer a valid absence.
+        self.assertTrue(catalog_release.spec017_intake_amendment_landed())
+        entry = self.admit_entry()
+        s = entry["signals"]
+        s["unmatched_model_request_count"] = None
+        s["unmatched_model_request_absent_reason"] = "spec017_amendment_not_landed"
+        s["unmatched_model_request_source_sha256"] = None
+        s["unmatched_model_request_window_id"] = None
+        s["unmatched_model_request_window_start"] = None
+        s["unmatched_model_request_window_end"] = None
+        self.rejects(self.manifest([entry]), "spec017_amendment_not_landed is not a valid reason")
+        # A retained source readable by others is not an operator-private store.
+        self.stats_bytes = self.write("stats-intake.json", self.stats_source(), mode=0o644)
+        self.rejects(self.manifest([self.admit_entry()]), "must be mode 0600")
+        self.stats_bytes = self.write("stats-intake.json", self.stats_source())
+
+    def test_duplicate_keys_in_retained_sources_and_manifest_are_rejected(self):
+        # Exact retained bytes are parsed strictly: a duplicate object key is
+        # not last-value-wins, it is a rejected source.
+        raw = json.dumps(self.stats_source(), sort_keys=True)
+        dup = raw.replace('"schema_version": "macprovider.stats-intake.v1"', '"schema_version": "x", "schema_version": "macprovider.stats-intake.v1"', 1).encode()
+        path = self.release_dir / "stats-intake.json"
+        path.write_bytes(dup)
+        path.chmod(0o600)
+        self.stats_bytes = dup
+        entry = self.admit_entry()
+        entry["signals"]["unmatched_model_request_source_sha256"] = catalog_release.sha256(dup)
+        entry["signals"]["fleet_fit_source_sha256"] = catalog_release.sha256(dup)
+        self.rejects(self.manifest([entry]), "duplicate object key 'schema_version'")
+        self.stats_bytes = self.write("stats-intake.json", self.stats_source())
+        with self.assertRaises(catalog_release.CatalogError) as ctx:
+            catalog_release.validate_intake_decision(
+                b'{"schema_version": "a", "schema_version": "b"}', release_id="r", candidate_obj={"rows": {}},
+                artifact_obj=None, demand_obj={"rows": {}}, demand_bytes=b"", previous_tiers=None, audit_dir=None)
+        self.assertIn("duplicate object key", str(ctx.exception))
+
+    def test_bucket_ordering_is_part_of_the_wire_contract(self):
+        src = self.stats_source(buckets=[
+            {"model_key": "b-key", "lower_bound": 300, "count": 300, "error": 0},
+            {"model_key": "a-key", "lower_bound": 300, "count": 300, "error": 0},
+        ])
+        self.stats_bytes = self.write("stats-intake.json", src)
+        entry = self.admit_entry()
+        entry["signals"]["unmatched_model_request_source_sha256"] = catalog_release.sha256(self.stats_bytes)
+        entry["signals"]["fleet_fit_source_sha256"] = catalog_release.sha256(self.stats_bytes)
+        entry["signals"]["unmatched_model_request_count"] = None
+        entry["signals"]["unmatched_model_request_absent_reason"] = "no_observations"
+        self.rejects(self.manifest([entry]), "ordered by lower_bound descending")
+        self.stats_bytes = self.write("stats-intake.json", self.stats_source())
+
+    def test_fleet_fit_ppm_is_floored_to_the_grid(self):
+        # 9 of 12 fit exactly (750 000); 7 of 12 (583 333) floors to 550 000.
+        src = self.stats_source()
+        fleet = src["fleet_ram"]
+        self.assertEqual(catalog_release.fleet_fit_fraction_ppm(fleet, 12), 750000)
+        classes = {c["ram_gb_floor"]: c for c in fleet["classes"]}
+        classes[16]["provider_count"] = 3
+        classes[32]["provider_count"] = 4
+        fleet["provider_total"] = 12
+        fleet["provider_suppressed"] = 5
+        self.assertEqual(catalog_release.fleet_fit_fraction_ppm(fleet, 12), 550000)
+        self.assertEqual(catalog_release.fleet_fit_fraction_ppm(fleet, 28), 300000)
+        self.assertIsNone(catalog_release.fleet_fit_fraction_ppm({**fleet, "provider_total": 0}, 12))

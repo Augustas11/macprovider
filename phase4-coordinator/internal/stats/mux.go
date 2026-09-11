@@ -94,6 +94,19 @@ func NewMuxWithMetricsAndRateLimit(reader *store.Store, cors CORSConfig, backfil
 	}
 }
 
+// WithIntake enables GET /v1/stats/intake for the listed partner key ids
+// (SPEC-017 v0.2.1 §5.2b.7). An empty list refuses every key.
+func (m *Mux) WithIntake(enabled bool, readerKeyIDs []int64) *Mux {
+	m.h.IntakeEnabled = enabled
+	m.h.IntakeReaderKeyIDs = make(map[int64]struct{}, len(readerKeyIDs))
+	for _, id := range readerKeyIDs {
+		if id > 0 {
+			m.h.IntakeReaderKeyIDs[id] = struct{}{}
+		}
+	}
+	return m
+}
+
 func (m *Mux) Handler() http.Handler {
 	inner := http.HandlerFunc(m.dispatch)
 	with := http.Handler(inner)
@@ -105,6 +118,23 @@ func (m *Mux) Handler() http.Handler {
 
 func (m *Mux) dispatch(w http.ResponseWriter, r *http.Request) {
 	now := time.Now().UTC()
+
+	// SPEC-017 §5.2b.7: a disabled intake endpoint does not exist for any
+	// method — OPTIONS included — so the check precedes the preflight
+	// branch and no CORS decision is ever made for it.
+	if !m.h.IntakeEnabled && trimEndpointFromPath(r.URL.Path) == "intake" {
+		writeError(w, r, http.StatusNotFound, codeBadRequest, "unknown endpoint", now, nil)
+		return
+	}
+
+	// SPEC-017 §5.2b: the intake surface never takes part in CORS — an
+	// OPTIONS request is not a preflight it can answer, so it is refused
+	// as an unsupported method with no Access-Control-* header at all.
+	if r.Method == http.MethodOptions && trimEndpointFromPath(r.URL.Path) == "intake" {
+		w.Header().Set("Allow", "GET, HEAD")
+		writeError(w, r, http.StatusMethodNotAllowed, codeMethodNotAllowed, "method not allowed", now, nil)
+		return
+	}
 
 	if r.Method == http.MethodOptions {
 		ip := clientIP(r, m.trustedCIDRs)
@@ -130,7 +160,11 @@ func (m *Mux) dispatch(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet, http.MethodHead:
 	default:
-		w.Header().Set("Allow", "GET, HEAD, OPTIONS")
+		if endpoint == "intake" {
+			w.Header().Set("Allow", "GET, HEAD")
+		} else {
+			w.Header().Set("Allow", "GET, HEAD, OPTIONS")
+		}
 		writeError(w, r, http.StatusMethodNotAllowed, codeMethodNotAllowed, "method not allowed", now, nil)
 		return
 	}
@@ -141,14 +175,17 @@ func (m *Mux) dispatch(w http.ResponseWriter, r *http.Request) {
 	// auth-failure tier + §5.4.3 dispatcher. Public endpoints are
 	// §4.3 `Auth: None`; Authorization is ignored.
 	var ar authResult
-	if endpoint == "leaderboard" || endpoint == "provider" {
+	if endpoint == "leaderboard" || endpoint == "provider" || endpoint == "intake" {
 		authStarted := time.Now()
 		// Layer 4 — auth-failure tier (Authorization-present
 		// only). Round-3 CODE H1: only schedule the refund
 		// AFTER allow returns true.
 		authHeaderPresent := authPresentFromContext(r.Context())
 		reservedKey := ""
-		if authHeaderPresent {
+		// SPEC-017 §5.2b: intake has no anonymous tier, so a key-less
+		// intake request debits the auth-failure bucket exactly like a
+		// bad key — the private surface is never an unmetered 401 path.
+		if authHeaderPresent || endpoint == "intake" {
 			reservedKey = "authfail|" + ip + "|" + endpoint
 			if !m.authFailLimit.allow(reservedKey, now, 300) {
 				retry := 60
@@ -172,7 +209,9 @@ func (m *Mux) dispatch(w http.ResponseWriter, r *http.Request) {
 		var err error
 		ar, err = dispatchAuth(r.Context(), m.h.Store, r)
 		if err != nil {
-			if authHeaderPresent {
+			// Refund whatever slot was reserved (keyless intake reserves
+			// one too), mirroring the reservation and success-path guards.
+			if reservedKey != "" {
 				m.authFailLimit.refund(reservedKey, now)
 			}
 			writeError(w, r, http.StatusInternalServerError, codeInternal, "auth dispatch failed", now, nil)
@@ -185,10 +224,23 @@ func (m *Mux) dispatch(w http.ResponseWriter, r *http.Request) {
 			writeError(w, r, http.StatusUnauthorized, codeUnauthorized, "unauthorized", now, nil)
 			return
 		}
+		// SPEC-017 §5.2b.7: intake has no public projection. A request
+		// without a partner key, with an unlisted key, or with a
+		// provider-bound key is refused here — before the public rate
+		// tier (never consulted for this endpoint), with one 401 shape,
+		// padded like the no-row / revoked / rejected-origin paths above
+		// so no refusal confirms that a key exists (§5.4.3 rule 4), and
+		// KEEPING the auth-failure slot: every intake 401 debits it.
+		if endpoint == "intake" && (ar.projection != "partner" || !m.h.intakeReaderAllowed(ar)) {
+			padAuthFailureLatency(authStarted)
+			w.Header().Set("Vary", varyForPublic())
+			writeError(w, r, http.StatusUnauthorized, codeUnauthorized, "unauthorized", now, nil)
+			return
+		}
 		// Auth succeeded — release the auth-failure slot before
 		// any subsequent error path can keep the reservation
 		// against a valid partner key.
-		if authHeaderPresent {
+		if reservedKey != "" {
 			m.authFailLimit.refund(reservedKey, now)
 		}
 		// Round-3 CODE H2: tag the request context with the
@@ -314,6 +366,8 @@ func (m *Mux) dispatch(w http.ResponseWriter, r *http.Request) {
 		m.h.handleModels(rec, r, ar)
 	case "providers":
 		m.h.handleProviders(rec, r, ar)
+	case "intake":
+		m.h.handleIntake(rec, r, ar)
 	}
 }
 

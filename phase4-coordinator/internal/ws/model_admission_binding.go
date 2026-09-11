@@ -508,13 +508,65 @@ type rawResolvedMember struct {
 // order: (1) raw resolution, (2) key spanning, key disagreement, (3) the
 // runtime-source admissibility filter, (4) match when one admissible member
 // remains. Runs under the release read lock.
-func (s *Server) matchModelAdmissionOffer(runtimeSource, assertedKey string, artifactHashes map[string]string) modelAdmissionCatalogMatch {
+// intakeModelKeyForOffer is the SPEC-047 R009 intake resolution: the ONE
+// catalog key whose row `model_sha256` (any runtime_status) or whose verified
+// artifact in the release-bound identity set equals an offered pair. Two keys
+// or an ambiguous row resolve nothing. It is recorded interest for SPEC-023
+// §16.2(b) only — never an admission input.
+func intakeModelKeyForOffer(current *autotune.Catalog, set *artifactidentity.Index, artifactHashes map[string]string) string {
+	if current == nil || len(artifactHashes) == 0 {
+		return ""
+	}
+	algorithms := make([]string, 0, len(artifactHashes))
+	for algorithm := range artifactHashes {
+		algorithms = append(algorithms, algorithm)
+	}
+	sort.Strings(algorithms)
+	resolved := ""
+	for _, algorithm := range algorithms {
+		hash := strings.ToLower(strings.TrimSpace(artifactHashes[algorithm]))
+		candidate := ""
+		if algorithm == modelidentity.SnapshotManifestV1 {
+			for _, key := range current.Keys() {
+				row, _ := current.Row(key)
+				if strings.TrimSpace(row.ModelSHA256) == hash {
+					if candidate != "" {
+						return ""
+					}
+					candidate = key
+				}
+			}
+		}
+		if candidate == "" && set != nil {
+			if binding, ok := set.Resolve(algorithm, hash); ok {
+				candidate = binding.Member.ModelKey
+			}
+		}
+		if candidate == "" {
+			continue
+		}
+		if resolved != "" && resolved != candidate {
+			return ""
+		}
+		resolved = candidate
+	}
+	return resolved
+}
+
+// matchModelAdmissionOffer resolves the v0.1.5 catalog match AND the
+// SPEC-047 R009 intake_model_key under ONE release read, from one catalog
+// snapshot and one usable identity set, so an offer event can never carry
+// a match state from release N and intake evidence from release N+1.
+func (s *Server) matchModelAdmissionOffer(runtimeSource, assertedKey string, artifactHashes map[string]string) (modelAdmissionCatalogMatch, string) {
 	var match modelAdmissionCatalogMatch
+	intakeKey := ""
 	s.withReleaseRead(func() {
 		current, _ := s.autotuneCatalogSnapshot()
-		match = matchOfferArtifactHashes(current, s.usableIdentitySetLocked(current), s.artifactIdentitySets.integrityFailed(), runtimeSource, assertedKey, artifactHashes)
+		set := s.usableIdentitySetLocked(current)
+		match = matchOfferArtifactHashes(current, set, s.artifactIdentitySets.integrityFailed(), runtimeSource, assertedKey, artifactHashes)
+		intakeKey = intakeModelKeyForOffer(current, set, artifactHashes)
 	})
-	return match
+	return match, intakeKey
 }
 
 // usableIdentitySetLocked is the release's identity set when it is usable
@@ -659,8 +711,9 @@ func matchOfferArtifactHashes(current *autotune.Catalog, set *artifactidentity.I
 // echoed as identity, R002 v0.1.5), the row tuple, the release provenance
 // and the admissible member set.
 func (s *Server) applyModelAdmissionOfferCatalogMatch(event ModelAdmissionEvent, body modelAdmissionOfferSubmitRequest) ModelAdmissionEvent {
-	match := s.matchModelAdmissionOffer(body.RuntimeSource, body.CatalogModelKey, body.ArtifactHashes)
+	match, intakeKey := s.matchModelAdmissionOffer(body.RuntimeSource, body.CatalogModelKey, body.ArtifactHashes)
 	event.RuntimeSource = body.RuntimeSource
+	event.IntakeModelKey = intakeKey
 	event.CatalogMatchState = match.State
 	event.CatalogMatchReason = match.Reason
 	event.CatalogModelKey = match.CatalogModelKey

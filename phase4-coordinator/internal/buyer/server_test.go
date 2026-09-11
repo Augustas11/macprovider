@@ -2723,21 +2723,26 @@ func TestRequestLogModelFieldSanitized(t *testing.T) {
 	if rr.Code == http.StatusOK {
 		t.Fatalf("expected 4xx for C1-bearing model; got status=%d body=%s", rr.Code, rr.Body.String())
 	}
-	// The unknown-model buyer-failure path writes a 4xx request_log
-	// row via logBuyerFailure. That row's model column MUST contain
-	// the SANITIZED value (C1 stripped, "modelabc") - proving the
-	// sanitizer is on the persistence path even for buyer-failure
-	// rows, not just success rows.
+	// The unknown-model buyer-failure path writes a 4xx request_log row
+	// via logBuyerFailure. SPEC-017 v0.2.1 §5.2b.2: the buyer-supplied
+	// string of an unserved model is never persisted — the row carries a
+	// blank model and a constant message, so neither the raw nor the
+	// sanitized string reaches the durable store.
 	rows := queryAllRequestLogRows(t, dbPath)
 	if len(rows) != 1 {
 		t.Fatalf("rows=%d, want 1 buyer-failure row: %#v", len(rows), rows)
 	}
 	row := rows[0]
-	if strings.ContainsRune(row.Model, 0x9b) {
-		t.Fatalf("request_log.model contains C1 codepoint U+009B: %q", row.Model)
+	if row.Model != "" {
+		t.Fatalf("request_log.model = %q, want blank for an unserved model", row.Model)
 	}
-	if row.Model != "modelabc" {
-		t.Fatalf("request_log.model = %q, want %q (C1 stripped)", row.Model, "modelabc")
+	if row.Error.String != "No provider has advertised the requested model" {
+		t.Fatalf("request_log.error = %q, want the constant unserved-model message", row.Error.String)
+	}
+	for _, col := range []string{row.Error.String, row.ErrorCode.String} {
+		if strings.Contains(col, "modelabc") || strings.ContainsRune(col, 0x9b) {
+			t.Fatalf("request_log carries the buyer string: %q", col)
+		}
 	}
 }
 
@@ -7007,6 +7012,7 @@ type requestLogTestRow struct {
 	Status             int
 	ErrorCode          sql.NullString
 	Retried            int
+	Error              sql.NullString
 }
 
 type requestLogQueueWaitRow struct {
@@ -7119,7 +7125,7 @@ func queryRequestLogRows(t *testing.T, dbPath, requestID string) []requestLogTes
 	defer db.Close()
 	rows, err := db.Query(`
 SELECT id, request_id, external_request_id, model, provider_assigned_id,
-       prompt_tokens, completion_tokens, ttft_ms, decode_ms, status, error_code, retried
+       prompt_tokens, completion_tokens, ttft_ms, decode_ms, status, error_code, retried, error
 FROM request_log
 WHERE request_id = ?
 ORDER BY id ASC`, requestID)
@@ -7143,6 +7149,7 @@ ORDER BY id ASC`, requestID)
 			&row.Status,
 			&row.ErrorCode,
 			&row.Retried,
+			&row.Error,
 		); err != nil {
 			t.Fatalf("scan request log: %v", err)
 		}
@@ -7163,7 +7170,7 @@ func queryAllRequestLogRows(t *testing.T, dbPath string) []requestLogTestRow {
 	defer db.Close()
 	rows, err := db.Query(`
 SELECT id, request_id, external_request_id, model, provider_assigned_id,
-       prompt_tokens, completion_tokens, ttft_ms, decode_ms, status, error_code, retried
+       prompt_tokens, completion_tokens, ttft_ms, decode_ms, status, error_code, retried, error
 FROM request_log
 ORDER BY id ASC`)
 	if err != nil {
@@ -7186,6 +7193,7 @@ ORDER BY id ASC`)
 			&row.Status,
 			&row.ErrorCode,
 			&row.Retried,
+			&row.Error,
 		); err != nil {
 			t.Fatalf("scan request log: %v", err)
 		}

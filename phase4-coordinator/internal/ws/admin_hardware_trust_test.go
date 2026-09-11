@@ -863,3 +863,9 @@ func (f *fakeHardwareTrustAdminStore) ListWaitingTrustJobs(ctx context.Context, 
 	f.listLimit = limit
 	return f.waiting, f.listErr
 }
+
+// ProviderHardwareTrustState satisfies the SPEC-047 R009 trust read; the
+// hardware-trust admin tests operate no trust roots.
+func (f *fakeHardwareTrustAdminStore) ProviderHardwareTrustState(context.Context, string, time.Time) (bool, bool, error) {
+	return false, false, nil
+}

@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/augstar/macprovider-coordinator/internal/intake"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
 	statshardware "github.com/augstar/macprovider-coordinator/internal/stats/hardware"
 	statsrollup "github.com/augstar/macprovider-coordinator/internal/stats/rollup"
@@ -42,12 +43,34 @@ type HardwareSource interface {
 	LookupProviderHardware(providerID string) (statshardware.Capacity, bool)
 }
 
+// IntakeSource is the SPEC-023 §16.2(a) aggregator seam: memory-only,
+// returns the current `unmatched_models` wire object.
+type IntakeSource interface {
+	Snapshot() intake.UnmatchedModels
+}
+
 // Provider satisfies statsrollup.SnapshotProvider by computing the
 // live overview snapshot from the current pool state on each tick.
 type Provider struct {
 	src      Source
 	hardware HardwareSource
+	intake   IntakeSource
 	now      func() time.Time
+}
+
+// WithIntake attaches the SPEC-017 v0.2.1 intake aggregator; nil leaves
+// the intake read model without unmatched-model windows.
+func (p *Provider) WithIntake(src IntakeSource) *Provider {
+	p.intake = src
+	return p
+}
+
+// IntakeSnapshot implements statsrollup.IntakeSnapshotProvider.
+func (p *Provider) IntakeSnapshot() intake.UnmatchedModels {
+	if p.intake == nil {
+		return intake.UnmatchedModels{Contract: intake.Contract, Windows: []intake.Window{}}
+	}
+	return p.intake.Snapshot()
 }
 
 // New returns a Provider that reads from src. Panics if src is nil.

@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/augstar/macprovider-coordinator/internal/billing"
 	"io"
 	"math"
 	"net/http"
@@ -49,13 +50,16 @@ var (
 // release is artifact-bound — /v1/catalog-artifacts(+ .sig), replacing nginx
 // /static/* hosting.
 type AutotuneFeeds struct {
-	RateCardJSON                   []byte
-	RateCardSig                    []byte
-	RateCardVerification           AutotuneFeedVerification
-	DemandRankJSON                 []byte
-	DemandRankSig                  []byte
-	DemandRankVerification         AutotuneFeedVerification
-	AutotuneCandidatesJSON         []byte
+	RateCardJSON           []byte
+	RateCardSig            []byte
+	RateCardVerification   AutotuneFeedVerification
+	DemandRankJSON         []byte
+	DemandRankSig          []byte
+	DemandRankVerification AutotuneFeedVerification
+	AutotuneCandidatesJSON []byte
+	// CandidateRowStatuses maps each candidate-catalog key, normalized by
+	// billing.NormalizeModelKey, to its runtime_status (SPEC-017 §5.2b.2).
+	CandidateRowStatuses           map[string]string
 	AutotuneCandidatesSig          []byte
 	AutotuneCandidatesVerification AutotuneFeedVerification
 	// CatalogArtifacts* are empty for a rate-card-bound (four-feed) release;
@@ -191,6 +195,7 @@ func LoadAutotuneFeeds(cfg config.AutotuneFeedsConfig) (AutotuneFeeds, error) {
 		DemandRankSig:                  demand.sigBytes,
 		DemandRankVerification:         demand.verification,
 		AutotuneCandidatesJSON:         candidates.jsonBytes,
+		CandidateRowStatuses:           candidateRowStatuses(candidates.jsonBytes),
 		AutotuneCandidatesSig:          candidates.sigBytes,
 		AutotuneCandidatesVerification: candidates.verification,
 		CatalogArtifactsJSON:           artifacts.jsonBytes,
@@ -298,6 +303,7 @@ func LoadPreviousAutotuneCandidateFeed(cfg config.AutotuneFeedsConfig) (Autotune
 	}
 	return AutotuneFeeds{
 		AutotuneCandidatesJSON:         candidates.jsonBytes,
+		CandidateRowStatuses:           candidateRowStatuses(candidates.jsonBytes),
 		AutotuneCandidatesSig:          candidates.sigBytes,
 		AutotuneCandidatesVerification: candidates.verification,
 	}, nil
@@ -1206,4 +1212,19 @@ func (s *Server) serveAutotuneFeedBytes(w http.ResponseWriter, r *http.Request, 
 	if _, err := w.Write(body); err != nil {
 		s.log.Warn().Err(err).Msg("write autotune feed response failed")
 	}
+}
+
+// candidateRowStatuses extracts runtime_status per normalized catalog key
+// from a validated candidate catalog; a decode failure yields an empty map
+// (the feed was already validated, so this is defensive).
+func candidateRowStatuses(raw []byte) map[string]string {
+	var feed candidateCatalogFeed
+	if err := json.Unmarshal(raw, &feed); err != nil {
+		return map[string]string{}
+	}
+	out := make(map[string]string, len(feed.Rows))
+	for key, row := range feed.Rows {
+		out[billing.NormalizeModelKey(key)] = row.RuntimeStatus
+	}
+	return out
 }

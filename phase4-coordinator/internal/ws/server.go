@@ -185,31 +185,32 @@ type Server struct {
 	capacityOverClaimMetrics       CapacityOverClaimMetrics
 	connectionEvents               ConnectionEventStore
 	modelAdmissions                ModelAdmissionStore
-	modelAdmissionSubmitDisabled   bool
-	modelAdmissionAttemptMu        sync.Mutex
-	modelAdmissionAttempts         map[string][]time.Time
-	connectionEventMetrics         ConnectionEventMetrics
-	closeEventMeta                 sync.Map // net.Conn -> closeEventMeta
-	connectionEventQueue           chan connectionEventJob
-	connectionEventQueueMu         sync.Mutex
-	connectionEventWorkerOnce      sync.Once
-	connectionEventStopOnce        sync.Once
-	connectionEventDone            chan struct{}
-	connectionEventsStopped        atomic.Bool
-	computeIntegrityStatus         ComputeIntegrityStatusSource
-	admissionCeilingEventMu        sync.Mutex
-	admissionCeilingEvents         map[string]admissionCeilingEventRateState
-	providerConnWG                 sync.WaitGroup
-	anonymousEventMu               sync.Mutex
-	anonymousEventWindow           time.Time
-	anonymousEventCount            int
-	lastKnownFlushMu               sync.Mutex
-	lastKnownFlush                 map[string]time.Time
-	diagnosticLastKnownFlushMu     sync.Mutex
-	diagnosticLastKnownFlush       map[string]time.Time
-	bootstrapLimiter               *bootstrapMintLimiter
-	idlePrewarmLimits              sync.Map
-	idlePrewarmQueue               chan idlePrewarmRecord
+	modelAdmissionIntakeState
+	modelAdmissionSubmitDisabled bool
+	modelAdmissionAttemptMu      sync.Mutex
+	modelAdmissionAttempts       map[string][]time.Time
+	connectionEventMetrics       ConnectionEventMetrics
+	closeEventMeta               sync.Map // net.Conn -> closeEventMeta
+	connectionEventQueue         chan connectionEventJob
+	connectionEventQueueMu       sync.Mutex
+	connectionEventWorkerOnce    sync.Once
+	connectionEventStopOnce      sync.Once
+	connectionEventDone          chan struct{}
+	connectionEventsStopped      atomic.Bool
+	computeIntegrityStatus       ComputeIntegrityStatusSource
+	admissionCeilingEventMu      sync.Mutex
+	admissionCeilingEvents       map[string]admissionCeilingEventRateState
+	providerConnWG               sync.WaitGroup
+	anonymousEventMu             sync.Mutex
+	anonymousEventWindow         time.Time
+	anonymousEventCount          int
+	lastKnownFlushMu             sync.Mutex
+	lastKnownFlush               map[string]time.Time
+	diagnosticLastKnownFlushMu   sync.Mutex
+	diagnosticLastKnownFlush     map[string]time.Time
+	bootstrapLimiter             *bootstrapMintLimiter
+	idlePrewarmLimits            sync.Map
+	idlePrewarmQueue             chan idlePrewarmRecord
 
 	// Epic #1235 Child B: heartbeat-driven durable telemetry refresh.
 	// hardwareProfileRefresher/autoupdateOutcomes are nil-checked optional
@@ -374,6 +375,10 @@ type HardwareTrustAdminStore interface {
 	RequestHardwareTrustApproval(ctx context.Context, pendingID string, jobID int64, requestedBy string, expiresAt *time.Time, reason, incidentID string) (providerID, hardwareIdentityHash, chipNormalized string, unifiedMemoryGB int, err error)
 	ApproveHardwareTrustApproval(ctx context.Context, pendingID, approvedBy string) (providerID, hardwareIdentityHash, chipNormalized string, unifiedMemoryGB int, expiresAt *time.Time, reason, incidentID, source string, effectiveExpiresAt *time.Time, err error)
 	RevokeHardwareTrustApproval(ctx context.Context, providerID, hardwareIdentityHash, revokedBy, reason string) (chipNormalized string, unifiedMemoryGB int, nowUntrusted bool, err error)
+	// ProviderHardwareTrustState reports, as of `at`, whether the provider
+	// holds any hardware-trust root and whether one is active (SPEC-047 R009:
+	// trust sanction = held and none active; intake eligibility = active).
+	ProviderHardwareTrustState(ctx context.Context, providerID string, at time.Time) (held bool, active bool, err error)
 	ListWaitingTrustJobs(ctx context.Context, afterID int64, limit int) ([]onboarding.WaitingTrustJob, error)
 }
 
@@ -1127,6 +1132,11 @@ func NewServer(cfg config.Config, registry *pool.Registry, logger zerolog.Logger
 	if tier2.ModelHashActive(s.tier2) || strings.TrimSpace(s.tier2.ModelHashLegacyUntil) != "" {
 		s.scheduleModelHashLegacyDeadline(s.tier2.ModelHashLegacyUntil)
 	}
+	if s.modelAdmissions != nil {
+		// SPEC-047 v0.1.6: materialize the intake aggregate at startup and on
+		// a fixed cadence; GET never scans.
+		go s.runModelAdmissionIntakeLoop()
+	}
 	if s.idlePrewarm != nil {
 		s.idlePrewarmQueue = make(chan idlePrewarmRecord, idlePrewarmEventQueueSize)
 		go s.runIdlePrewarmRecorder()
@@ -1742,6 +1752,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/admin/model-admission/decisions", s.handleAdminModelAdmissionDecisions)
 	mux.HandleFunc("/admin/model-admission/decisions/", s.handleAdminModelAdmissionApprove)
 	mux.HandleFunc("/admin/model-admission/offers", s.handleAdminModelAdmissionOffers)
+	mux.HandleFunc("/admin/model-admission/intake", s.handleAdminModelAdmissionIntake)
 	mux.HandleFunc("/v1/provider/model-admission/offers", s.handleProviderModelAdmissionOffer)
 	mux.HandleFunc("/v1/provider/model-admission/withdrawals", s.handleProviderModelAdmissionWithdrawal)
 	mux.HandleFunc("/v1/provider/model-admission/status", s.handleProviderModelAdmissionStatus)

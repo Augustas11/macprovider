@@ -91,6 +91,9 @@ func (r *Runner) Start(ctx context.Context) {
 	r.spawnTick(ctx, "routability", r.cfg.OverviewInterval, componentRoutability, func(c context.Context) error {
 		return runRoutabilityTick(c, r.db, r.snap)
 	})
+	r.spawnTick(ctx, "intake", r.cfg.IntakeInterval, componentIntake, func(c context.Context) error {
+		return runIntakeTick(c, r.db, r.snap, time.Now().UTC())
+	})
 	r.spawnTick(ctx, "timeseries_rpm", r.cfg.TimeseriesRpmInterval, componentTimeseriesRpm, func(c context.Context) error {
 		return runTimeseriesRpmTick(c, r.db, r.cfg)
 	})

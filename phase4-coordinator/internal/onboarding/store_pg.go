@@ -1662,3 +1662,23 @@ func isSerializationFailure(err error) bool {
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "could not serialize") || strings.Contains(msg, "serialization")
 }
+
+// ProviderHardwareTrustState implements the SPEC-047 R009 trust read as of
+// `at`: held = the provider has at least one hardware_verification_trust
+// root; active = at least one root is unexpired at `at` (revocation sets
+// expires_at into the past, so revoked and expired roots are both inactive).
+func (s *PGStore) ProviderHardwareTrustState(ctx context.Context, providerID string, at time.Time) (bool, bool, error) {
+	if s == nil || s.db == nil {
+		return false, false, errors.New("onboarding postgres store is nil")
+	}
+	var held, active bool
+	err := s.db.QueryRowContext(ctx, `
+SELECT EXISTS (SELECT 1 FROM hardware_verification_trust WHERE provider_id = $1),
+       EXISTS (SELECT 1 FROM hardware_verification_trust
+                WHERE provider_id = $1
+                  AND (expires_at IS NULL OR expires_at > $2))`, providerID, at.UTC()).Scan(&held, &active)
+	if err != nil {
+		return false, false, fmt.Errorf("hardware trust state lookup: %w", err)
+	}
+	return held, active, nil
+}
