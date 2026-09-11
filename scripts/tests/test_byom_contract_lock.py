@@ -11,6 +11,121 @@ def read_text(path: str) -> str:
 
 
 class BYOMContractLockTests(unittest.TestCase):
+    def test_catalog_economics_compatibility_ui_is_exact(self):
+        spec001 = " ".join(read_text("specs/SPEC-001-phase3-binary.md").split())
+        spec044 = " ".join(
+            read_text("specs/SPEC-044-malibu-model-catalog-economics.md").split()
+        )
+
+        common = (
+            "supported pair",
+            "partial",
+            "mixed-generation",
+            "unknown",
+            "stale",
+            "manifest",
+            "local status",
+            "static current-model card",
+            "no error indicator",
+            "no retry",
+            "model catalog unavailable",
+            "`projection_unavailable`",
+            "retry",
+            "no action or economics",
+        )
+        for owner_text in (spec001, spec044):
+            for required in common:
+                with self.subTest(required=required):
+                    self.assertIn(required, owner_text)
+
+        for required in (
+            "capability without its token",
+            "token without its capability",
+            "both complete generations",
+            "no read, run, cancel, action, or economics",
+            "valid exclusive complete pair",
+            "fails, times out, or returns malformed output",
+        ):
+            with self.subTest(spec="SPEC-001", required=required):
+                self.assertIn(required, spec001)
+        for required in (
+            "capability-only, token-only",
+            "dual-generation",
+            "make no catalog-economics read, run, or cancel call",
+            "valid exclusive complete pair",
+            "fails, times out, or returns a malformed envelope",
+            "exposing no catalog action or economics",
+        ):
+            with self.subTest(spec="SPEC-044", required=required):
+                self.assertIn(required, spec044)
+
+    def test_exit3_failed_dispatch_lifecycle_is_constructive_and_non_live(self):
+        spec001 = " ".join(read_text("specs/SPEC-001-phase3-binary.md").split())
+        spec044 = " ".join(
+            read_text("specs/SPEC-044-malibu-model-catalog-economics.md").split()
+        )
+
+        for owner_text in (spec001, spec044):
+            for required in (
+                "immutable projected-action identity validation",
+                "`model_catalog_failed_dispatch.v1`",
+                "`failure.lock`",
+                "256-record",
+            ):
+                with self.subTest(required=required):
+                    self.assertIn(required, owner_text)
+
+        for required in (
+            "`transaction_id`, fresh `attempt_id`, `transaction_kind`, immutable non-null `event_model_key`",
+            "`root` containing the complete saved root locator/identity object",
+            "`tuple_sha256`, `projection_binding_sha256`, `event_sequence: 1`",
+            "`terminal_state: \"failed\"`",
+            "`live_attempt: false`",
+            "`stale_transaction`, `action_unavailable`, or `operation_conflict`",
+            "exactly one terminal event",
+            "exits 3",
+            "creates no `active.json`, cancellation marker, staging or network work",
+            "failure-only path never acquires `operation.lock`, `cancel.lock`, a cleanup lock",
+            "aggregate 262,144-byte history cap",
+            "at most one pending record exists",
+            "A crash before durable record publication",
+            "after the record is durable but before event flush",
+            "after event flush but before compaction",
+            "during compaction",
+            "release every lock before writing or flushing stdout",
+            "cannot hold `failure.lock` or starve a valid dispatch",
+            "no deadlock, starvation of a valid dispatch, second live attempt, or incumbent displacement",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, spec044)
+
+    def test_spec044_current_version_is_cross_spec_locked(self):
+        spec001 = read_text("specs/SPEC-001-phase3-binary.md")
+        spec044 = read_text("specs/SPEC-044-malibu-model-catalog-economics.md")
+        readme = read_text("specs/README.md")
+        conformance = json.loads(read_text("specs/CONFORMANCE.json"))
+
+        self.assertIn("**Version:** 1.9.15", spec001)
+        self.assertIn("**Version:** 0.2.6", spec044)
+        self.assertIn('"version": "0.2.6"', spec044)
+        self.assertIn("SPEC-044 v0.2.6", spec001)
+        self.assertIn("| SPEC-001 | Phase 3 Binary: Mac Provider Inference CLI | 1.9.15 |", readme)
+        self.assertIn("| SPEC-044 | Malibu Model Catalog Economics | 0.2.6 |", readme)
+        current_spec044 = spec044.split("## 8. Changelog and history", 1)[0]
+        self.assertNotIn("v0.2.4", current_spec044)
+        self.assertNotIn("v0.2.5", current_spec044)
+        spec001_record = next(
+            record for record in conformance["specs"] if record["spec_id"] == "SPEC-001"
+        )
+        self.assertEqual(spec001_record["version"], "1.9.15")
+        spec_record = next(
+            record for record in conformance["specs"] if record["spec_id"] == "SPEC-044"
+        )
+        self.assertEqual(spec_record["version"], "0.2.6")
+        for requirement in conformance["requirements"]:
+            if requirement["spec_id"] == "SPEC-044":
+                self.assertNotIn("SPEC-044 v0.2.5", json.dumps(requirement))
+
     def test_closed_admission_inventory_and_local_only_copy_are_truthful(self):
         spec001 = read_text("specs/SPEC-001-phase3-binary.md")
         spec046 = read_text("specs/SPEC-046-provider-byom-discovery.md")
@@ -182,6 +297,10 @@ class BYOMContractLockTests(unittest.TestCase):
             "transaction kind in each nested action copy",
             "transaction id in each nested action copy",
             "every other action field in each nested action copy, one field at a time",
+            "change both nested action copies to the same new `artifact_identity_digest`",
+            "to the same new `estimated_bytes`",
+            "leaving the enclosing target unchanged",
+            "preserve action-to-action JCS equality",
             "otherwise valid action, unchanged, to another target",
             "before provider confirmation, reservation, rename, or deletion",
             "outside-root, protected-object, and legacy sentinels unchanged",

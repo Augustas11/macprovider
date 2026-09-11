@@ -1,6 +1,14 @@
 # SPEC-001 — Phase 3 Binary: Mac Provider Inference CLI
 
-**Version:** 1.9.14 (2026-09-12, Build 1 provider-copy authority correction)
+**Version:** 1.9.15 (2026-09-12, Build 1 pre-work lifecycle authority correction)
+
+**Change log v1.9.15 (2026-09-12, Build 1 pre-work lifecycle authority
+correction):** Freezes silent static-card behavior for every unsupported,
+partial, mixed, stale, unknown, or disagreeing catalog-economics advertisement;
+reserves the unavailable warning and retry only for failure after a valid
+exclusive complete pair; and makes exit-3 stale, unavailable, and conflict
+results constructive through a bounded non-live `failed_dispatch` record and
+terminal event under SPEC-044 v0.2.6.
 
 **Change log v1.9.14 (2026-09-12, Build 1 provider-copy authority
 correction):** Freezes the exact admission-only `local_only` English source
@@ -3346,8 +3354,10 @@ bounded diagnostics are stderr.
 Exit status is closed for these forms: `0` means a valid read, a terminal
 `succeeded` run event, or a syntactically valid cancellation acknowledgement;
 `2` means invalid grammar, unsupported capability/schema, or malformed input
-rejected before work; `3` means the referenced action is stale, unavailable,
-or conflicts before the worker starts; `4` means signed authority, root,
+rejected before work; `3` means the referenced action is semantically stale,
+unavailable, or conflicts after immutable action-identity validation and after
+the initiating run process has become the attached non-live failure worker;
+`4` means signed authority, root,
 network, transfer, or resource admission failed; `5` means verification,
 publication, cleanup, recovery, or internal processing failed after worker
 start; `124` means the worker emitted terminal `timed_out`; and `130` means it
@@ -3359,7 +3369,21 @@ transaction ID, carries a null attempt ID, and makes no marker or phase
 mutation, as defined by SPEC-044.
 
 Only the attached run worker may allocate `event_sequence` or emit transaction
-events. The cancel process MUST NOT emit, merge, or synthesize an event and MUST
+events. After syntax/framing and immutable projected-action identity validation,
+but before semantic freshness, availability, or conflict checks, a valid run
+creates a fresh attempt and enters SPEC-044 v0.2.6's `failure.lock` lifecycle.
+For exit 3 it MUST durably write the bounded private non-live
+`model_catalog_failed_dispatch.v1` record before emitting exactly one terminal
+`failed` event at sequence 1. That record carries the validated transaction,
+kind, immutable event model key, root locator/identity, tuple and projection
+binding, fresh attempt, and error code; it creates no active attempt, marker,
+network/staging work, model/adoption/runtime mutation, or incumbent displacement.
+Conflict reporting is not a second active worker. Failure-only processing takes
+only `failure.lock`; successful promotion and normal/recovery compaction use
+`operation.lock` then `failure.lock`, never the reverse, with the failed records
+sharing the existing 256-record bounded history. Crash recovery compacts durable
+failure records without fabricating stdout or replaying work. The cancel process
+MUST NOT emit, merge, or synthesize an event and MUST
 NOT kill the worker. No `models transactions` family, public transaction-status
 schema, public crash or late-cancellation state, authority-refresh frame,
 daemon, background service, or new control-socket frame is part of this
@@ -3368,10 +3392,17 @@ complete v2 pair in both the command-schema manifest and fresh local status;
 otherwise it invokes v1 only after observing the complete v1 pair in both
 surfaces, and otherwise uses the legacy static fallback without a
 catalog-economics call. The two surfaces MUST advertise byte-identical complete
-pairs. A capability without its token, a token without its capability, either
-partial generation combined with any value from the other generation, both
-complete generations, any other mixed-generation set, or disagreement between
-manifest and local status is malformed and MUST NOT trigger a read or mutation.
+pairs. No supported pair, a capability without its token, a token without its
+capability, any partial generation, either partial generation combined with any
+value from the other generation, both complete generations, any other mixed-
+generation or unknown set, stale local-status capability evidence, or
+disagreement between manifest and local status is malformed. Every such case
+MUST show only the static current-model card with no error indicator, no retry,
+and no read, run, cancel, action, or economics. Only a projection request
+launched after one valid exclusive complete pair that then fails, times out, or
+returns malformed output shows exact English source warning **model catalog
+unavailable**, warning code `projection_unavailable`, and retry, with no action
+or economics.
 Therefore an old v1 Malibu paired with a new v2-only CLI makes no
 catalog-economics call and uses its static fallback, while a new Malibu paired
 with an old v1-only CLI requests and strictly decodes v1 without attempting v2
@@ -3380,17 +3411,21 @@ and uses the static fallback with no mutation call. Production-boundary tests
 MUST launch the built CLI through Malibu's production process adapter and prove
 the complete matrix below, including exact stdout, stderr, exit status, and strict
 decoder behavior. Clients lacking the exact v2 capability/token retain the
-existing fallback and MUST NOT invoke the v2 mutation options. SPEC-044 v0.2.4
+existing fallback and MUST NOT invoke the v2 mutation options. SPEC-044 v0.2.6
 owns the
 projection, event, cancellation-acknowledgement, preparation-copy, action, and
 storage-accounting contracts.
 
 The production-boundary compatibility matrix MUST include, for each v1 and v2,
 the complete exclusive pair, capability-only, and token-only cases; it MUST also
-include both complete pairs together, every mixed-generation partial set, and
+include both complete pairs together, every mixed-generation partial set,
+unknown capability/token values, stale local-status capabilities, and
 manifest/local-status disagreement in both directions. Only the two exclusive
-complete-pair cases may launch a catalog-economics read. All negatives MUST
-prove zero catalog-economics process launches and zero mutation calls.
+complete-pair cases may launch a catalog-economics read. All advertisement
+negatives MUST prove the static card, no error indicator, no retry, zero
+catalog-economics process launches, and zero mutation calls. Projection
+failure, timeout, and malformed response after each valid pair MUST separately
+prove the unavailable warning/retry state and no action or economics.
 
 The production process adapter MUST bound every machine-output path. A read
 projection stdout object is capped at 4,194,304 bytes and a cancellation
