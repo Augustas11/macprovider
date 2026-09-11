@@ -2061,6 +2061,8 @@ struct BYOMDiscoveryEnvironment: Sendable {
     let lmstudioModelsRoot: URL
     /// #1478: operator-declared root llama.cpp GGUFs may be hashed from; nil ⇒ never.
     let llamacppModelRoot: URL?
+    /// #1478 option (c): the one llama.cpp file the operator pins; overrides the root.
+    let llamacppModelPath: URL?
     let artifactDigestCacheURL: URL
 
     init(
@@ -2073,6 +2075,7 @@ struct BYOMDiscoveryEnvironment: Sendable {
         ollamaModelsRoot: URL? = nil,
         lmstudioModelsRoot: URL? = nil,
         llamacppModelRoot: URL? = nil,
+        llamacppModelPath: URL? = nil,
         artifactDigestCacheURL: URL? = nil
     ) {
         self.namespaceURL = namespaceURL
@@ -2084,6 +2087,7 @@ struct BYOMDiscoveryEnvironment: Sendable {
         self.ollamaModelsRoot = ollamaModelsRoot ?? BYOMOllamaModelStore.defaultRoot()
         self.lmstudioModelsRoot = lmstudioModelsRoot ?? BYOMLMStudioModelStore.defaultRoot()
         self.llamacppModelRoot = llamacppModelRoot
+        self.llamacppModelPath = llamacppModelPath
         self.artifactDigestCacheURL = artifactDigestCacheURL ?? BYOMArtifactDigestCache.defaultURL()
     }
 
@@ -2100,7 +2104,7 @@ struct BYOMDiscoveryEnvironment: Sendable {
             locators: [
                 BYOMOllamaModelStore(root: ollamaModelsRoot),
                 BYOMLMStudioModelStore(root: lmstudioModelsRoot),
-                BYOMLlamaCppModelStore(root: llamacppModelRoot),
+                BYOMLlamaCppModelStore(root: llamacppModelRoot, pinnedFile: llamacppModelPath),
             ],
             cache: BYOMArtifactDigestCache(url: artifactDigestCacheURL)
         )
@@ -2114,6 +2118,7 @@ struct BYOMDiscoveryEnvironment: Sendable {
         lmstudioOrigin: String? = nil,
         llamacppOrigin: String? = nil,
         llamacppModelRoot: String? = nil,
+        llamacppModelPath: String? = nil,
         environment: [String: String] = ProcessInfo.processInfo.environment,
         homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
     ) -> BYOMDiscoveryEnvironment {
@@ -2127,6 +2132,7 @@ struct BYOMDiscoveryEnvironment: Sendable {
             ollamaModelsRoot: BYOMOllamaModelStore.defaultRoot(environment: environment, homeDirectory: homeDirectory),
             lmstudioModelsRoot: BYOMLMStudioModelStore.defaultRoot(environment: environment, homeDirectory: homeDirectory),
             llamacppModelRoot: llamacppModelRoot.map(URL.init(fileURLWithPath:)) ?? BYOMLlamaCppModelStore.defaultRoot(environment: environment),
+            llamacppModelPath: llamacppModelPath.map(URL.init(fileURLWithPath:)) ?? BYOMLlamaCppModelStore.defaultPinnedFile(environment: environment),
             artifactDigestCacheURL: BYOMArtifactDigestCache.defaultURL(homeDirectory: homeDirectory)
         )
     }

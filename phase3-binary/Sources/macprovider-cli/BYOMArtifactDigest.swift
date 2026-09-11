@@ -393,20 +393,33 @@ struct BYOMLMStudioModelStore: BYOMGGUFArtifactLocator, Sendable {
 struct BYOMLlamaCppModelStore: BYOMGGUFArtifactLocator, Sendable {
     let runtimeSource = "llamacpp_loopback"
     static let servedModelRefPrefix = "llamacpp:"
-    /// nil ⇒ the operator declared no root ⇒ nothing is ever hashed.
+    /// Option (a): a directory the stem may be resolved under. nil ⇒ off.
     let root: URL?
+    /// Option (c): the ONE file the operator names. When set it takes
+    /// precedence over `root`: the served stem must equal this file's stem
+    /// and nothing else is ever considered. Strictest; the operator, not the
+    /// runtime and not a directory walk, names the artifact.
+    let pinnedFile: URL?
     private let fileManager: FileManager
     private static let maxEntriesVisited = 8192
     private static let stemPart = try! NSRegularExpression(pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$")
 
-    init(root: URL?, fileManager: FileManager = .default) {
+    init(root: URL?, pinnedFile: URL? = nil, fileManager: FileManager = .default) {
         self.root = root
+        self.pinnedFile = pinnedFile
         self.fileManager = fileManager
     }
 
     static func defaultRoot(environment: [String: String] = ProcessInfo.processInfo.environment) -> URL? {
         if let models = environment["MACPROVIDER_LLAMACPP_MODEL_ROOT"], !models.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return URL(fileURLWithPath: models)
+        }
+        return nil
+    }
+
+    static func defaultPinnedFile(environment: [String: String] = ProcessInfo.processInfo.environment) -> URL? {
+        if let path = environment["MACPROVIDER_LLAMACPP_MODEL_PATH"], !path.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return URL(fileURLWithPath: path)
         }
         return nil
     }
@@ -432,8 +445,20 @@ struct BYOMLlamaCppModelStore: BYOMGGUFArtifactLocator, Sendable {
     }
 
     func resolveArtifact(servedModelRef: String) -> BYOMResolvedArtifact? {
-        guard let root, let stem = Self.stem(from: servedModelRef) else { return nil }
+        guard let stem = Self.stem(from: servedModelRef) else { return nil }
         let wanted = stem.lowercased()
+        if let pinnedFile {
+            // (c): exactly the named file, and only if the runtime's served
+            // stem agrees with it — a server loading a different file than
+            // the operator pinned gets no identity rather than a wrong one.
+            let resolved = pinnedFile.resolvingSymlinksInPath().standardizedFileURL
+            guard resolved.pathExtension.lowercased() == "gguf",
+                  resolved.deletingPathExtension().lastPathComponent.lowercased() == wanted,
+                  (try? resolved.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile == true
+            else { return nil }
+            return BYOMResolvedArtifact(fileURL: resolved, locator: resolved.path)
+        }
+        guard let root else { return nil }
         let rootResolved = root.resolvingSymlinksInPath().standardizedFileURL
         var visited = 0
         var hits: [(url: URL, relative: String)] = []
