@@ -553,22 +553,20 @@ func intakeModelKeyForOffer(current *autotune.Catalog, set *artifactidentity.Ind
 	return resolved
 }
 
-func (s *Server) intakeModelKeyForOfferHashes(artifactHashes map[string]string) string {
-	key := ""
-	s.withReleaseRead(func() {
-		current, _ := s.autotuneCatalogSnapshot()
-		key = intakeModelKeyForOffer(current, s.usableIdentitySetLocked(current), artifactHashes)
-	})
-	return key
-}
-
-func (s *Server) matchModelAdmissionOffer(runtimeSource, assertedKey string, artifactHashes map[string]string) modelAdmissionCatalogMatch {
+// matchModelAdmissionOffer resolves the v0.1.5 catalog match AND the
+// SPEC-047 R009 intake_model_key under ONE release read, from one catalog
+// snapshot and one usable identity set, so an offer event can never carry
+// a match state from release N and intake evidence from release N+1.
+func (s *Server) matchModelAdmissionOffer(runtimeSource, assertedKey string, artifactHashes map[string]string) (modelAdmissionCatalogMatch, string) {
 	var match modelAdmissionCatalogMatch
+	intakeKey := ""
 	s.withReleaseRead(func() {
 		current, _ := s.autotuneCatalogSnapshot()
-		match = matchOfferArtifactHashes(current, s.usableIdentitySetLocked(current), s.artifactIdentitySets.integrityFailed(), runtimeSource, assertedKey, artifactHashes)
+		set := s.usableIdentitySetLocked(current)
+		match = matchOfferArtifactHashes(current, set, s.artifactIdentitySets.integrityFailed(), runtimeSource, assertedKey, artifactHashes)
+		intakeKey = intakeModelKeyForOffer(current, set, artifactHashes)
 	})
-	return match
+	return match, intakeKey
 }
 
 // usableIdentitySetLocked is the release's identity set when it is usable
@@ -713,9 +711,9 @@ func matchOfferArtifactHashes(current *autotune.Catalog, set *artifactidentity.I
 // echoed as identity, R002 v0.1.5), the row tuple, the release provenance
 // and the admissible member set.
 func (s *Server) applyModelAdmissionOfferCatalogMatch(event ModelAdmissionEvent, body modelAdmissionOfferSubmitRequest) ModelAdmissionEvent {
-	match := s.matchModelAdmissionOffer(body.RuntimeSource, body.CatalogModelKey, body.ArtifactHashes)
+	match, intakeKey := s.matchModelAdmissionOffer(body.RuntimeSource, body.CatalogModelKey, body.ArtifactHashes)
 	event.RuntimeSource = body.RuntimeSource
-	event.IntakeModelKey = s.intakeModelKeyForOfferHashes(body.ArtifactHashes)
+	event.IntakeModelKey = intakeKey
 	event.CatalogMatchState = match.State
 	event.CatalogMatchReason = match.Reason
 	event.CatalogModelKey = match.CatalogModelKey

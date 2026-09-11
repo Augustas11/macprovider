@@ -369,7 +369,7 @@ func TestRawPrincipalIsTransientAndDumpIsOnlyTheOpenWindow(t *testing.T) {
 	if err := json.Unmarshal(dump, &um); err != nil {
 		t.Fatal(err)
 	}
-	if len(um.Windows) != 1 || um.Windows[0].WindowEnd != nil || um.Windows[0].EligibilityPolicyID != policyA || um.Windows[0].ExcludedAccountCount != 2 {
+	if len(um.Windows) != 1 || um.Windows[0].WindowEnd != nil || um.Windows[0].EligibilityPolicyID != policyA {
 		t.Fatalf("dump must hold exactly the open window with its policy: %+v", um.Windows)
 	}
 	var wireKeys map[string]json.RawMessage
@@ -494,7 +494,7 @@ func TestEligibilityPolicyChangeClosesWindow(t *testing.T) {
 		t.Fatalf("eligibility_changed close not recorded: %+v", lc)
 	}
 	next := openWindow(t, a)
-	if next.EligibilityPolicyID != policyB || next.ExcludedAccountCount != 1 {
+	if next.EligibilityPolicyID != policyB {
 		t.Fatalf("new window must carry the new policy: %+v", next)
 	}
 	if err := a.SetPolicy("nope", 0); err == nil {
@@ -544,7 +544,7 @@ func TestValidateWindowRejectsMalformedPersistedWindows(t *testing.T) {
 		"cap mismatch":        func(w *Window) { w.Parameters.PrincipalCapRequests = 26 },
 		"too many buckets":    func(w *Window) { w.SuppressedBucketCount = 64 },
 		"bad policy id":       func(w *Window) { w.EligibilityPolicyID = "x" },
-		"negative counter":    func(w *Window) { w.ExcludedAccountCount = -1 },
+		"negative counter":    func(w *Window) { w.SuppressedBucketCount = -1 },
 		"other beyond cap":    func(w *Window) { w.OtherSuppressed.DistinctKeyCount = 10001 },
 		"duplicate bucket":    func(w *Window) { w.Buckets = append(w.Buckets, w.Buckets[0]) },
 		"unordered buckets":   func(w *Window) { w.Buckets = append(w.Buckets, Bucket{ModelKey: "zzz", LowerBound: 300, Count: 300}) },

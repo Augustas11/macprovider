@@ -3556,10 +3556,7 @@ def spec017_intake_amendment_landed() -> bool:
 def validate_stats_intake_source(data: bytes) -> dict:
     """Closed-schema parse of a `macprovider.stats-intake.v1` response
     (SPEC-017 v0.2.1 §5.2b): unknown, missing, or wrong-typed keys fail."""
-    try:
-        obj = json.loads(data)
-    except ValueError as exc:
-        fail(f"stats-intake.json: invalid JSON ({exc})")
+    obj = strict_json(data, "stats-intake.json")
     top = _intake_closed(obj, STATS_INTAKE_TOP_KEYS, "stats-intake.json")
     if top["schema_version"] != STATS_INTAKE_SCHEMA:
         fail(f"stats-intake.json: schema_version must be {STATS_INTAKE_SCHEMA}")
@@ -3647,10 +3644,7 @@ def validate_stats_intake_source(data: bytes) -> dict:
 def validate_model_admission_intake_source(data: bytes) -> dict:
     """Closed-schema parse of `model_admission_intake_offer_counts.v1`
     (SPEC-047 v0.1.6)."""
-    try:
-        obj = json.loads(data)
-    except ValueError as exc:
-        fail(f"model-admission-intake.json: invalid JSON ({exc})")
+    obj = strict_json(data, "model-admission-intake.json")
     top = _intake_closed(obj, MODEL_ADMISSION_INTAKE_KEYS, "model-admission-intake.json")
     if top["schema"] != MODEL_ADMISSION_INTAKE_SCHEMA:
         fail(f"model-admission-intake.json: schema must be {MODEL_ADMISSION_INTAKE_SCHEMA}")
@@ -3975,10 +3969,7 @@ def validate_intake_decision(
     change, every signal re-derived from the retained sources, and the
     §16.3 rule re-evaluated for every entry. Fails closed on any
     disagreement."""
-    try:
-        obj = json.loads(data)
-    except ValueError as exc:
-        fail(f"intake-decision.json: invalid JSON ({exc})")
+    obj = strict_json(data, "intake-decision.json")
     top = _intake_closed(obj, frozenset({"schema_version", "release_id", "generated_at", "thresholds", "decisions"}), "intake-decision")
     if top["schema_version"] != INTAKE_DECISION_SCHEMA:
         fail(f"intake-decision.schema_version must be {INTAKE_DECISION_SCHEMA}")

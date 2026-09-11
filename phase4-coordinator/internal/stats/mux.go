@@ -127,6 +127,15 @@ func (m *Mux) dispatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// SPEC-017 §5.2b: the intake surface never takes part in CORS — an
+	// OPTIONS request is not a preflight it can answer, so it is refused
+	// as an unsupported method with no Access-Control-* header at all.
+	if r.Method == http.MethodOptions && trimEndpointFromPath(r.URL.Path) == "intake" {
+		w.Header().Set("Allow", "GET, HEAD")
+		writeError(w, r, http.StatusMethodNotAllowed, codeMethodNotAllowed, "method not allowed", now, nil)
+		return
+	}
+
 	if r.Method == http.MethodOptions {
 		ip := clientIP(r, m.trustedCIDRs)
 		endpoint := trimEndpointFromPath(r.URL.Path)
@@ -216,7 +225,12 @@ func (m *Mux) dispatch(w http.ResponseWriter, r *http.Request) {
 		// without a partner key is refused here, before the public rate
 		// tier (which is never consulted for this endpoint) and with the
 		// same 401 shape as every other intake refusal.
-		if endpoint == "intake" && ar.projection != "partner" {
+		// Every intake refusal — no key, unlisted key, provider-bound key —
+		// is one 401 shape in one timing class, padded exactly like the
+		// no-row / revoked / rejected-origin paths above, so no refusal
+		// confirms that a key exists (§5.4.3 rule 4).
+		if endpoint == "intake" && (ar.projection != "partner" || !m.h.intakeReaderAllowed(ar)) {
+			padAuthFailureLatency(authStarted)
 			w.Header().Set("Vary", varyForPublic())
 			writeError(w, r, http.StatusUnauthorized, codeUnauthorized, "unauthorized", now, nil)
 			return

@@ -1089,9 +1089,17 @@ which this endpoint never consults. A partner key issued for §5.2
 therefore never reads this endpoint until an operator lists it, and the
 empty default list refuses every key. No query parameters are defined;
 a request carrying any query parameter returns `400` `bad_request`.
-`HEAD` follows §4.3. `OPTIONS` follows §5.7 only while the endpoint is
-enabled; a disabled endpoint (§5.2b.7) is unknown for every method,
-`OPTIONS` included, and answers `404` before any CORS decision.
+All three refusals are padded to the §5.4.3 rule-4 auth-failure latency
+floor, so an unlisted or provider-bound key is indistinguishable from a
+non-existent one by timing as well as by shape. A persisted row is served
+only after a read-side check of this contract (every window valid, at
+most 3, the histogram's eleven floors with counts reconciling); a row
+that fails it answers the `stats_stale` 503 and nothing of its content.
+`HEAD` follows §4.3. `OPTIONS` is NOT a preflight this surface can
+answer: an enabled endpoint refuses it with `405` `method_not_allowed`,
+`Allow: GET, HEAD`, and no `Access-Control-*` header; a disabled endpoint
+(§5.2b.7) is unknown for every method, `OPTIONS` included, and answers
+`404` before any CORS decision.
 
 **Response headers.** `Cache-Control: private, max-age=900` (no
 `s-maxage`: the response is private to the key and MUST NOT be stored by
@@ -1279,8 +1287,8 @@ characters of `HMAC-SHA-256(stats.intake.policy_salt, "macprovider.intake.eligib
 over the canonical set (trimmed, de-duplicated, sorted by UTF-8 bytes),
 keyed by the operator secret `stats.intake.policy_salt` (§5.2b.7) so a
 reader cannot dictionary-test account ids against the published id; the
-aggregator receives ONLY the id and the set's cardinality
-(`excluded_account_count`) and never an account identifier, and two
+aggregator receives ONLY the id and the set's cardinality (used to detect
+a policy change; never emitted) and never an account identifier, and two
 coordinators sharing a salt and a set publish the same id. A change to
 the set closes the window (`eligibility_changed`, §3.2a) so one window
 never mixes two policies; rotating the salt alone also rotates the id.
@@ -1514,16 +1522,21 @@ AC-INTAKE-1 (closed shape): the response, the `unmatched_models`
 object, each window, its `parameters`, each bucket, `other_suppressed`,
 `fleet_ram`, and each class carry exactly the keys above with the
 stated types and orderings; a golden-frame test asserts the field set
-against the canonical example, and the SPEC-023 generator rejects any
-deviation, an added field included.
+against the canonical example at every nested level, the handler refuses
+(503) a persisted row carrying a sub-floor bucket, a stray window key, an
+open window, or a histogram that does not reconcile, and the SPEC-023
+generator rejects any deviation, an added field included.
 AC-INTAKE-2 (auth): the path is routable through the stats mux (a
 key-less GET answers 401, never 404); no bearer → 401 before the public
-rate tier (three key-less requests against a public tier of one are all
+rate tier and padded to the auth-failure latency floor like an unlisted
+or provider-bound key (three key-less requests against a public tier of one are all
 401, none 429); an unlisted or provider-bound bearer → 401 with the same
 shape; a listed bearer → 200 with `Cache-Control: private, max-age=900`
 and NO `Access-Control-Allow-Origin` or `Access-Control-Allow-Credentials`
 header at all, Origin present or not; any query parameter → 400; POST →
-405; the empty default list refuses every key; `stats.intake.enabled:
+405; OPTIONS on an enabled endpoint → 405 with `Allow: GET, HEAD` and no
+`Access-Control-*` header even with an Origin; the empty default list
+refuses every key; `stats.intake.enabled:
 false` → 404 before any auth for GET and for OPTIONS (no CORS header on
 either) while `/v1/stats/health` still reports nine components with
 `intake` `ok`.

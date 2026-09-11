@@ -172,7 +172,6 @@ type Window struct {
 	WindowEnd             *string         `json:"window_end"`
 	Parameters            Parameters      `json:"parameters"`
 	EligibilityPolicyID   string          `json:"eligibility_policy_id"`
-	ExcludedAccountCount  int             `json:"excluded_account_count"`
 	Buckets               []Bucket        `json:"buckets"`
 	SuppressedBucketCount int             `json:"suppressed_bucket_count"`
 	OtherSuppressed       OtherSuppressed `json:"other_suppressed"`
@@ -208,7 +207,7 @@ func ValidateWindow(w Window) error {
 	if w.Parameters.PrincipalCapRequests != p.PrincipalCapRequests() || w.Parameters.KAnonymityMin != KAnonymityMin || w.Parameters.WindowMaxDays != WindowMaxDays {
 		return errors.New("intake: window parameters are inconsistent")
 	}
-	if w.ExcludedAccountCount < 0 || w.SuppressedBucketCount < 0 {
+	if w.SuppressedBucketCount < 0 {
 		return errors.New("intake: negative counter")
 	}
 	if len(w.Buckets)+w.SuppressedBucketCount > w.Parameters.KeyBuckets {
@@ -617,13 +616,12 @@ func (p Params) wire() Parameters {
 
 func (w *window) wire(end *time.Time, reason string) Window {
 	out := Window{
-		WindowID:             w.id,
-		WindowStart:          w.start.UTC().Format(time.RFC3339),
-		Parameters:           w.params.wire(),
-		EligibilityPolicyID:  w.policyID,
-		ExcludedAccountCount: w.policyCount,
-		Buckets:              []Bucket{},
-		OtherSuppressed:      w.other,
+		WindowID:            w.id,
+		WindowStart:         w.start.UTC().Format(time.RFC3339),
+		Parameters:          w.params.wire(),
+		EligibilityPolicyID: w.policyID,
+		Buckets:             []Bucket{},
+		OtherSuppressed:     w.other,
 	}
 	if end != nil {
 		s := end.UTC().Format(time.RFC3339)

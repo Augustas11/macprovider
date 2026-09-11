@@ -2736,8 +2736,13 @@ func TestRequestLogModelFieldSanitized(t *testing.T) {
 	if row.Model != "" {
 		t.Fatalf("request_log.model = %q, want blank for an unserved model", row.Model)
 	}
-	if strings.Contains(row.ErrorCode.String, "modelabc") || strings.ContainsRune(row.ErrorCode.String, 0x9b) {
-		t.Fatalf("request_log.error_code carries the buyer string: %q", row.ErrorCode.String)
+	if row.Error.String != "No provider has advertised the requested model" {
+		t.Fatalf("request_log.error = %q, want the constant unserved-model message", row.Error.String)
+	}
+	for _, col := range []string{row.Error.String, row.ErrorCode.String} {
+		if strings.Contains(col, "modelabc") || strings.ContainsRune(col, 0x9b) {
+			t.Fatalf("request_log carries the buyer string: %q", col)
+		}
 	}
 }
 
@@ -7007,6 +7012,7 @@ type requestLogTestRow struct {
 	Status             int
 	ErrorCode          sql.NullString
 	Retried            int
+	Error              sql.NullString
 }
 
 type requestLogQueueWaitRow struct {
@@ -7119,7 +7125,7 @@ func queryRequestLogRows(t *testing.T, dbPath, requestID string) []requestLogTes
 	defer db.Close()
 	rows, err := db.Query(`
 SELECT id, request_id, external_request_id, model, provider_assigned_id,
-       prompt_tokens, completion_tokens, ttft_ms, decode_ms, status, error_code, retried
+       prompt_tokens, completion_tokens, ttft_ms, decode_ms, status, error_code, retried, error
 FROM request_log
 WHERE request_id = ?
 ORDER BY id ASC`, requestID)
@@ -7143,6 +7149,7 @@ ORDER BY id ASC`, requestID)
 			&row.Status,
 			&row.ErrorCode,
 			&row.Retried,
+			&row.Error,
 		); err != nil {
 			t.Fatalf("scan request log: %v", err)
 		}
@@ -7163,7 +7170,7 @@ func queryAllRequestLogRows(t *testing.T, dbPath string) []requestLogTestRow {
 	defer db.Close()
 	rows, err := db.Query(`
 SELECT id, request_id, external_request_id, model, provider_assigned_id,
-       prompt_tokens, completion_tokens, ttft_ms, decode_ms, status, error_code, retried
+       prompt_tokens, completion_tokens, ttft_ms, decode_ms, status, error_code, retried, error
 FROM request_log
 ORDER BY id ASC`)
 	if err != nil {
@@ -7186,6 +7193,7 @@ ORDER BY id ASC`)
 			&row.Status,
 			&row.ErrorCode,
 			&row.Retried,
+			&row.Error,
 		); err != nil {
 			t.Fatalf("scan request log: %v", err)
 		}

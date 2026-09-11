@@ -3314,6 +3314,26 @@ class IntakeDecisionManifestTest(unittest.TestCase):
         self.rejects(self.manifest([self.admit_entry()]), "must be mode 0600")
         self.stats_bytes = self.write("stats-intake.json", self.stats_source())
 
+    def test_duplicate_keys_in_retained_sources_and_manifest_are_rejected(self):
+        # Exact retained bytes are parsed strictly: a duplicate object key is
+        # not last-value-wins, it is a rejected source.
+        raw = json.dumps(self.stats_source(), sort_keys=True)
+        dup = raw.replace('"schema_version": "macprovider.stats-intake.v1"', '"schema_version": "x", "schema_version": "macprovider.stats-intake.v1"', 1).encode()
+        path = self.release_dir / "stats-intake.json"
+        path.write_bytes(dup)
+        path.chmod(0o600)
+        self.stats_bytes = dup
+        entry = self.admit_entry()
+        entry["signals"]["unmatched_model_request_source_sha256"] = catalog_release.sha256(dup)
+        entry["signals"]["fleet_fit_source_sha256"] = catalog_release.sha256(dup)
+        self.rejects(self.manifest([entry]), "duplicate object key 'schema_version'")
+        self.stats_bytes = self.write("stats-intake.json", self.stats_source())
+        with self.assertRaises(catalog_release.CatalogError) as ctx:
+            catalog_release.validate_intake_decision(
+                b'{"schema_version": "a", "schema_version": "b"}', release_id="r", candidate_obj={"rows": {}},
+                artifact_obj=None, demand_obj={"rows": {}}, demand_bytes=b"", previous_tiers=None, audit_dir=None)
+        self.assertIn("duplicate object key", str(ctx.exception))
+
     def test_fleet_fit_ppm_is_floored_to_the_grid(self):
         # 9 of 12 fit exactly (750 000); 7 of 12 (583 333) floors to 550 000.
         src = self.stats_source()

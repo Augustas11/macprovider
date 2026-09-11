@@ -221,7 +221,7 @@ func TestMergeIntakeWindowsValidatesAndFailsClosedOnConflict(t *testing.T) {
 	}
 	// One id, two byte representations: conflict on both sides and within one side.
 	stale := completeWindow(idA, "2026-08-01T00:00:00Z")
-	stale.ExcludedAccountCount = 9
+	stale.SuppressedBucketCount = 9
 	if _, err := MergeIntakeWindows([]intake.Window{stale}, persisted, now); !errors.Is(err, ErrIntakeWindowConflict) {
 		t.Fatalf("cross-set conflict must fail closed, got %v", err)
 	}
