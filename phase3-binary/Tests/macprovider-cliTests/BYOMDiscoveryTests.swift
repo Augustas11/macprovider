@@ -73,6 +73,7 @@ final class BYOMDiscoveryTests: XCTestCase {
             "--mlx-cache-dir", cache.path,
             "--skip-ollama",
             "--skip-lmstudio",
+            "--skip-llamacpp",
         ])
         let capture = await captureBYOMOutput {
             try await command.run()
@@ -225,6 +226,7 @@ final class BYOMDiscoveryTests: XCTestCase {
             "--mlx-cache-dir", root.appendingPathComponent("missing-cache", isDirectory: true).path,
             "--skip-ollama",
             "--skip-lmstudio",
+            "--skip-llamacpp",
         ])
         let capture = await captureBYOMOutput {
             try await command.run()

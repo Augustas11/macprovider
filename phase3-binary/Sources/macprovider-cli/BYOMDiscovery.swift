@@ -2052,11 +2052,15 @@ struct BYOMDiscoveryEnvironment: Sendable {
     /// #1478: LM Studio loopback origin. Has a well-known default like Ollama
     /// (nil only when the operator skips the adapter).
     let lmstudioOrigin: String?
+    /// #1478: llama.cpp `llama-server` loopback origin (well-known default).
+    let llamacppOrigin: String?
     /// SPEC-010 v1.7 R007(a): the local Ollama store the served GGUF blob is
     /// resolved from, and the digest cache keyed by exact file identity.
     let ollamaModelsRoot: URL
     /// #1478: the LM Studio models tree the served GGUF is resolved from.
     let lmstudioModelsRoot: URL
+    /// #1478: operator-declared root llama.cpp GGUFs may be hashed from; nil ⇒ never.
+    let llamacppModelRoot: URL?
     let artifactDigestCacheURL: URL
 
     init(
@@ -2065,8 +2069,10 @@ struct BYOMDiscoveryEnvironment: Sendable {
         ollamaOrigin: String?,
         openAICompatibleOrigin: String? = nil,
         lmstudioOrigin: String? = nil,
+        llamacppOrigin: String? = nil,
         ollamaModelsRoot: URL? = nil,
         lmstudioModelsRoot: URL? = nil,
+        llamacppModelRoot: URL? = nil,
         artifactDigestCacheURL: URL? = nil
     ) {
         self.namespaceURL = namespaceURL
@@ -2074,8 +2080,10 @@ struct BYOMDiscoveryEnvironment: Sendable {
         self.ollamaOrigin = ollamaOrigin
         self.openAICompatibleOrigin = openAICompatibleOrigin
         self.lmstudioOrigin = lmstudioOrigin
+        self.llamacppOrigin = llamacppOrigin
         self.ollamaModelsRoot = ollamaModelsRoot ?? BYOMOllamaModelStore.defaultRoot()
         self.lmstudioModelsRoot = lmstudioModelsRoot ?? BYOMLMStudioModelStore.defaultRoot()
+        self.llamacppModelRoot = llamacppModelRoot
         self.artifactDigestCacheURL = artifactDigestCacheURL ?? BYOMArtifactDigestCache.defaultURL()
     }
 
@@ -2084,6 +2092,7 @@ struct BYOMDiscoveryEnvironment: Sendable {
     static let artifactHashingRuntimes: Set<String> = [
         "ollama_loopback",
         BYOMLMStudioDiscovery.runtimeSource,
+        BYOMLlamaCppDiscovery.runtimeSource,
     ]
 
     var artifactDigests: BYOMArtifactDigestResolver {
@@ -2091,6 +2100,7 @@ struct BYOMDiscoveryEnvironment: Sendable {
             locators: [
                 BYOMOllamaModelStore(root: ollamaModelsRoot),
                 BYOMLMStudioModelStore(root: lmstudioModelsRoot),
+                BYOMLlamaCppModelStore(root: llamacppModelRoot),
             ],
             cache: BYOMArtifactDigestCache(url: artifactDigestCacheURL)
         )
@@ -2102,6 +2112,8 @@ struct BYOMDiscoveryEnvironment: Sendable {
         ollamaOrigin: String?,
         openAICompatibleOrigin: String? = nil,
         lmstudioOrigin: String? = nil,
+        llamacppOrigin: String? = nil,
+        llamacppModelRoot: String? = nil,
         environment: [String: String] = ProcessInfo.processInfo.environment,
         homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
     ) -> BYOMDiscoveryEnvironment {
@@ -2111,8 +2123,10 @@ struct BYOMDiscoveryEnvironment: Sendable {
             ollamaOrigin: ollamaOrigin,
             openAICompatibleOrigin: openAICompatibleOrigin,
             lmstudioOrigin: lmstudioOrigin,
+            llamacppOrigin: llamacppOrigin,
             ollamaModelsRoot: BYOMOllamaModelStore.defaultRoot(environment: environment, homeDirectory: homeDirectory),
             lmstudioModelsRoot: BYOMLMStudioModelStore.defaultRoot(environment: environment, homeDirectory: homeDirectory),
+            llamacppModelRoot: llamacppModelRoot.map(URL.init(fileURLWithPath:)) ?? BYOMLlamaCppModelStore.defaultRoot(environment: environment),
             artifactDigestCacheURL: BYOMArtifactDigestCache.defaultURL(homeDirectory: homeDirectory)
         )
     }
@@ -2325,6 +2339,24 @@ struct BYOMDiscoveryRunner {
             }
         }
 
+        if let llamacppOrigin = environment.llamacppOrigin,
+           !llamacppOrigin.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let llamacpp = await BYOMLlamaCppDiscovery(
+                origin: llamacppOrigin,
+                namespace: namespace.bytes,
+                namespaceWarnings: namespace.warnings,
+                catalogMatcher: catalog,
+                httpClient: httpClient,
+                artifactDigests: environment.artifactDigests
+            ).discover()
+            adapters.append(llamacpp.adapter)
+            candidates.append(contentsOf: llamacpp.candidates)
+            warnings.formUnion(llamacpp.adapter.warningCodes)
+            for candidate in llamacpp.candidates {
+                warnings.formUnion(candidate.warningCodes)
+            }
+        }
+
         // SPEC-046-R002: no well-known default, so the adapter is attempted only
         // when the operator supplies an origin. An adapter that was never
         // attempted contributes no row at all, exactly as the Ollama adapter
@@ -2503,6 +2535,9 @@ struct BYOMEvaluationRunner: Sendable {
         case BYOMLMStudioDiscovery.runtimeSource:
             origin = environment.lmstudioOrigin
             prefix = BYOMLMStudioDiscovery.servedModelRefPrefix
+        case BYOMLlamaCppDiscovery.runtimeSource:
+            origin = environment.llamacppOrigin
+            prefix = BYOMLlamaCppDiscovery.servedModelRefPrefix
         case BYOMOpenAICompatibleDiscovery.runtimeSource:
             origin = environment.openAICompatibleOrigin
             prefix = BYOMOpenAICompatibleDiscovery.servedModelRefPrefix
@@ -3973,6 +4008,197 @@ struct BYOMLMStudioDiscovery: Sendable {
     }
 }
 
+/// SPEC-046-R002 `llamacpp_loopback` adapter (#1478).
+///
+/// Same thin shape as `BYOMOllamaDiscovery` over the #1246 harness. Inventory
+/// is llama-server's `GET /v1/models`; a second bounded `GET /props` supplies
+/// the context window best-effort. The artifact leg is the CLI's own
+/// `macprovider.gguf-file.v1` digest over the file `BYOMLlamaCppModelStore`
+/// resolves from the model's file STEM under the operator-declared root —
+/// never from the path the runtime reports. `identity_state` is
+/// `catalog_matched` / `artifact_hash_available` / `runtime_reported`, never
+/// `opaque_endpoint`.
+struct BYOMLlamaCppDiscovery: Sendable {
+    static let runtimeSource = "llamacpp_loopback"
+    static let servedModelRefPrefix = BYOMLlamaCppModelStore.servedModelRefPrefix
+    static let defaultOrigin = "http://127.0.0.1:8080"
+
+    private let origin: String
+    private let namespace: Data?
+    private let namespaceWarnings: [BYOMDiscoveryWarning]
+    private let catalogMatcher: BYOMCatalogMatcher
+    private let httpClient: any BYOMDiscoveryHTTPClient
+    private let artifactDigests: BYOMArtifactDigestResolver?
+
+    init(
+        origin: String,
+        namespace: Data?,
+        namespaceWarnings: [BYOMDiscoveryWarning] = [],
+        catalogMatcher: BYOMCatalogMatcher,
+        httpClient: any BYOMDiscoveryHTTPClient,
+        artifactDigests: BYOMArtifactDigestResolver? = nil
+    ) {
+        self.origin = origin
+        self.namespace = namespace
+        self.namespaceWarnings = namespaceWarnings
+        self.catalogMatcher = catalogMatcher
+        self.httpClient = httpClient
+        self.artifactDigests = artifactDigests
+    }
+
+    func discover() async -> (adapter: BYOMDiscoveryWire.Adapter, candidates: [BYOMDiscoveryWire.Candidate]) {
+        guard let baseURL = BYOMLoopbackOriginValidator.validatedHTTPOrigin(origin) else {
+            return (
+                BYOMDiscoveryWire.Adapter(
+                    runtimeSource: Self.runtimeSource,
+                    status: "rejected",
+                    originClass: "rejected",
+                    warningCodes: [BYOMDiscoveryWarning.adapterRejectedNonLoopback.rawValue]
+                ),
+                []
+            )
+        }
+        do {
+            // Fingerprint first. llama-server's default port (8080) is also
+            // macprovider's own `serve` port, and both answer GET /v1/models —
+            // so on a provider Mac an unfingerprinted adapter would list the
+            // provider's own served model as a llama.cpp candidate. Only
+            // llama-server exposes /props with default_generation_settings;
+            // anything else on the origin is "not llama.cpp", not an inventory.
+            let props = try await httpClient.get(
+                baseURL.appendingPathComponent("props"),
+                maxHeaderBytes: BYOMDiscoveryHTTPBounds.maxHeaderBytes,
+                maxBodyBytes: BYOMDiscoveryHTTPBounds.maxBodyBytes
+            )
+            guard props.statusCode == 200,
+                  props.body.count <= BYOMDiscoveryHTTPBounds.maxBodyBytes,
+                  BYOMDiscoveryJSON.isLlamaCppProps(props.body)
+            else {
+                return adapterFailure(.adapterUnavailable, status: "unavailable")
+            }
+            let contextWindow = BYOMDiscoveryJSON.llamaCppContextWindow(from: props.body)
+
+            let response = try await httpClient.get(
+                baseURL.appendingPathComponent("v1/models"),
+                maxHeaderBytes: BYOMDiscoveryHTTPBounds.maxHeaderBytes,
+                maxBodyBytes: BYOMDiscoveryHTTPBounds.maxBodyBytes
+            )
+            guard response.statusCode == 200 else {
+                return adapterFailure(.adapterUnavailable, status: "unavailable")
+            }
+            guard BYOMDiscoveryHTTPBounds.headerBytes(response.headers) <= BYOMDiscoveryHTTPBounds.maxHeaderBytes else {
+                return adapterFailure(.adapterResponseTruncated, status: "truncated")
+            }
+            guard response.body.count <= BYOMDiscoveryHTTPBounds.maxBodyBytes else {
+                return adapterFailure(.adapterResponseTruncated, status: "truncated")
+            }
+            let inventory = try BYOMDiscoveryJSON.parseLlamaCppModels(response.body)
+            return (
+                BYOMDiscoveryWire.Adapter(
+                    runtimeSource: Self.runtimeSource,
+                    status: "ok",
+                    originClass: "loopback_http",
+                    warningCodes: inventory.warningCodes.map(\.rawValue).sorted()
+                ),
+                inventory.modelStems.map { buildCandidate(stem: $0, contextWindow: contextWindow) }
+            )
+        } catch is CancellationError {
+            return adapterFailure(.adapterTimeout, status: "timeout")
+        } catch let error as URLError where error.code == .timedOut {
+            return adapterFailure(.adapterTimeout, status: "timeout")
+        } catch let error as BYOMDiscoveryAdapterError {
+            switch error {
+            case .malformed:
+                return adapterFailure(.adapterMalformedResponse, status: "malformed")
+            case .truncated:
+                return adapterFailure(.adapterResponseTruncated, status: "truncated")
+            case .rejectedNonLoopback:
+                return adapterFailure(.adapterRejectedNonLoopback, status: "rejected")
+            }
+        } catch {
+            return adapterFailure(.adapterUnavailable, status: "unavailable")
+        }
+    }
+
+    private func adapterFailure(
+        _ warning: BYOMDiscoveryWarning,
+        status: String
+    ) -> (adapter: BYOMDiscoveryWire.Adapter, candidates: [BYOMDiscoveryWire.Candidate]) {
+        (
+            BYOMDiscoveryWire.Adapter(
+                runtimeSource: Self.runtimeSource,
+                status: status,
+                originClass: "loopback_http",
+                warningCodes: [warning.rawValue]
+            ),
+            []
+        )
+    }
+
+    private func buildCandidate(stem: String, contextWindow: Int?) -> BYOMDiscoveryWire.Candidate {
+        let servedModelRef = Self.servedModelRefPrefix + stem
+        let (candidateID, idWarnings) = BYOMCandidateIdentity.candidateID(
+            namespace: namespace,
+            runtimeSource: Self.runtimeSource,
+            servedModelRef: servedModelRef
+        )
+        let computedDigest = artifactDigests?.knownDigest(runtimeSource: Self.runtimeSource, servedModelRef: servedModelRef)
+        let catalogKey = catalogMatcher.catalogKey(for: stem, runtimeSource: Self.runtimeSource, digest: computedDigest.map { "sha256:" + $0 })
+        var warnings = Set((namespaceWarnings + idWarnings + [.capabilityUnevaluated, .evaluationRequired]).map(\.rawValue))
+        if catalogKey != nil {
+            warnings.insert(BYOMDiscoveryWarning.catalogMatchUnverified.rawValue)
+        }
+        let fit = fitState(modelID: stem)
+        let admission = localAdmissionState(
+            stableID: idWarnings.isEmpty,
+            readinessState: "ready",
+            fitState: fit,
+            blockingWarnings: warnings
+        )
+        return BYOMDiscoveryWire.Candidate(
+            candidateID: candidateID,
+            runtimeSource: Self.runtimeSource,
+            displayName: BYOMDiscoveryPrivacy.displayName(from: stem),
+            servedModelRef: servedModelRef,
+            catalogModelKey: catalogKey,
+            identityState: catalogKey != nil ? "catalog_matched" : (computedDigest != nil ? "artifact_hash_available" : "runtime_reported"),
+            locality: "loopback_runtime",
+            estimatedGB: ModelFit.estimateWeightSizeGB(modelID: stem).map(Double.init),
+            contextWindowTokens: contextWindow,
+            capabilities: BYOMDiscoveryWire.Capabilities(
+                chatCompletions: true,
+                streaming: nil,
+                toolCallPassthrough: nil,
+                structuredOutputPassthrough: nil,
+                jsonMode: nil,
+                usageReporting: nil,
+                maxContextTokens: contextWindow,
+                quantization: nil,
+                family: nil,
+                runtimeVersion: nil
+            ),
+            readinessState: "ready",
+            fitState: fit,
+            evaluationState: "not_evaluated",
+            admissionState: admission,
+            admissionStateSource: "local_default",
+            providerGuidance: BYOMDiscoveryGuidance.guidance(forAdmissionState: admission, warnings: warnings),
+            warningCodes: Array(warnings).sorted()
+        )
+    }
+
+    private func fitState(modelID: String) -> String {
+        switch ModelFit.evaluate(modelID: modelID, ramGB: BYOMFitEnvironment.detectedRAMGB()) {
+        case .fits, .tight:
+            return "fits"
+        case .wontFit:
+            return "does_not_fit"
+        case .unknown:
+            return "unknown"
+        }
+    }
+}
+
 /// SPEC-046-R002 `openai_compatible_loopback` adapter.
 ///
 /// Deliberately a thin wrapper over the same shared safety layer the Ollama
@@ -4299,6 +4525,69 @@ enum BYOMDiscoveryJSON {
             ))
         }
         return LMStudioInventory(models: models, warningCodes: withheldReference ? [.modelReferenceRedacted] : [])
+    }
+
+    struct LlamaCppInventory {
+        /// Stems already reduced from path-shaped ids and checked safe.
+        let modelStems: [String]
+        let warningCodes: [BYOMDiscoveryWarning]
+    }
+
+    /// Parse llama-server's `GET /v1/models` (`{"data":[{id}]}`). llama-server
+    /// reports the loaded file's PATH as the id unless `--alias` is set; a
+    /// path must never become a served reference (the harness refuses `/`,
+    /// and a path on the wire would leak the operator's filesystem), so each
+    /// id is reduced to its file stem first and the safe-reference check runs
+    /// on the stem. Redaction and bounds are the shared harness's.
+    static func parseLlamaCppModels(_ data: Data) throws -> LlamaCppInventory {
+        guard let text = String(data: data, encoding: .utf8),
+              case .object(let root) = try? StrictJSONParser.parse(text),
+              case .array(let rawModels)? = root["data"] else {
+            throw BYOMDiscoveryAdapterError.malformed
+        }
+        var stems: [String] = []
+        var withheldReference = false
+        for value in BYOMDiscoveryHTTPBounds.boundedInventoryRecords(rawModels) {
+            guard case .object(let object) = value,
+                  case .string(let id)? = object["id"] else {
+                throw BYOMDiscoveryAdapterError.malformed
+            }
+            let stem = BYOMLlamaCppModelStore.stem(fromRuntimeModelID: id)
+            guard BYOMDiscoveryPrivacy.isSafeRuntimeModelReference(stem) else {
+                withheldReference = true
+                continue
+            }
+            stems.append(stem)
+        }
+        return LlamaCppInventory(modelStems: stems, warningCodes: withheldReference ? [.modelReferenceRedacted] : [])
+    }
+
+    /// llama-server identifies itself by a `/props` document carrying
+    /// `default_generation_settings` (an object). macprovider's own serve, a
+    /// bare OpenAI-compatible server, or a 404 page do not.
+    static func isLlamaCppProps(_ data: Data) -> Bool {
+        guard let text = String(data: data, encoding: .utf8),
+              case .object(let root) = try? StrictJSONParser.parse(text),
+              case .object? = root["default_generation_settings"] else {
+            return false
+        }
+        return true
+    }
+
+    /// Best-effort context window from llama-server's `GET /props`
+    /// (`default_generation_settings.n_ctx`). Absent or malformed ⇒ nil; this
+    /// never fails the adapter.
+    static func llamaCppContextWindow(from data: Data) -> Int? {
+        guard let text = String(data: data, encoding: .utf8),
+              case .object(let root) = try? StrictJSONParser.parse(text),
+              case .object(let settings)? = root["default_generation_settings"] else {
+            return nil
+        }
+        switch settings["n_ctx"] {
+        case .int(let n)? where n > 0 && n <= 100_000_000: return n
+        case .double(let d)? where d > 0 && d <= 100_000_000 && d == d.rounded(): return Int(d)
+        default: return nil
+        }
     }
 
     struct OpenAIModelInventory {

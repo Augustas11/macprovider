@@ -118,6 +118,7 @@ final class ModelsSubcommandTests: XCTestCase {
             "--skip-coordinator-status",
             "--skip-ollama",
             "--skip-lmstudio",
+            "--skip-llamacpp",
         ])
 
         let capture = await captureOutput { try await command.run() }
