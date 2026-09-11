@@ -471,7 +471,7 @@
     {
       "spec_id": "SPEC-017",
       "title": "Network Stats API",
-      "version": "0.2.0",
+      "version": "0.2.1",
       "path": "specs/SPEC-017-network-stats-api.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -659,7 +659,7 @@
     {
       "spec_id": "SPEC-023",
       "title": "Installer-Integrated Autotune Recommend",
-      "version": "v0.10.3",
+      "version": "v0.10.4",
       "path": "specs/SPEC-023-installer-autotune-recommend.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -1411,7 +1411,7 @@
     {
       "spec_id": "SPEC-047",
       "title": "Network Model Admission",
-      "version": "0.1.5",
+      "version": "0.1.6",
       "path": "specs/SPEC-047-network-model-admission.md",
       "status": "draft",
       "owner": "@Augustas11",
