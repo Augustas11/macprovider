@@ -717,6 +717,14 @@ FIT_STATES = frozenset({"fits", "does_not_fit", "unknown"})
 EVALUATION_STATES = frozenset({
     "not_evaluated", "running", "passed", "failed", "timed_out", "blocked",
 })
+# `model_admission_withdraw.v1` (BYOMAdmissionWithdrawWire), exactly. Typed here
+# for the admission journey's step 8 capture (#1486, slice 7).
+ADMISSION_WITHDRAW_ENVELOPE_KEYS = frozenset({
+    "schema", "generated_at", "cli_version", "provider_id", "candidate_id",
+    "served_model_ref", "catalog_model_key", "idempotency_key", "reason_code",
+    "previous_admission_state", "coordinator_event_id", "accepted_at",
+    "resulting_admission_state", "provider_guidance", "warnings",
+})
 ADMISSION_STATE_SOURCES = frozenset({"local_default", "coordinator"})
 # SPEC-046-R003 `admission_state`, all twelve values.
 ADMISSION_STATES = frozenset({
@@ -1105,6 +1113,33 @@ def _validate_admission_status(parsed: dict[str, Any], location: str) -> None:
     require_enum_list(parsed["warnings"], WARNING_CODES, location + ".warnings")
 
 
+def _validate_admission_withdraw(parsed: dict[str, Any], location: str) -> None:
+    assert_exact_object(parsed, ADMISSION_WITHDRAW_ENVELOPE_KEYS, location)
+    _validate_envelope_header(parsed, location)
+    require_text(parsed["provider_id"], location + ".provider_id")
+    require_text(parsed["candidate_id"], location + ".candidate_id")
+    require_text(parsed["served_model_ref"], location + ".served_model_ref")
+    require_nullable(parsed["catalog_model_key"], location + ".catalog_model_key", require_text)
+    require_text(parsed["idempotency_key"], location + ".idempotency_key")
+    require_text(parsed["reason_code"], location + ".reason_code")
+    previous = require_enum(
+        parsed["previous_admission_state"], COORDINATOR_ADMISSION_STATES, location + ".previous_admission_state"
+    )
+    resulting = require_enum(
+        parsed["resulting_admission_state"], COORDINATOR_ADMISSION_STATES, location + ".resulting_admission_state"
+    )
+    # SPEC-047-R001: a withdrawal is an edge in the matrix, and it always
+    # lands in `withdrawn`; the previous state must have had that edge.
+    if resulting != "withdrawn":
+        fail(f"{location}.resulting_admission_state must be 'withdrawn', got {resulting!r}")
+    if "withdrawn" not in ADMISSION_ALLOWED_NEXT_STATES[previous]:
+        fail(f"{location}: withdrawal from {previous!r} is not an allowed SPEC-047-R001 transition")
+    require_text(parsed["coordinator_event_id"], location + ".coordinator_event_id")
+    require_text(parsed["accepted_at"], location + ".accepted_at")
+    _validate_guidance(parsed, location)
+    require_enum_list(parsed["warnings"], WARNING_CODES, location + ".warnings")
+
+
 def _validate_catalog_economics(parsed: dict[str, Any], location: str) -> None:
     assert_exact_object(parsed, CATALOG_ECONOMICS_ENVELOPE_KEYS, location)
     require_text(parsed["schema"], location + ".schema")
@@ -1197,6 +1232,8 @@ def validate_captured_cli_document(schema: Any, parsed: Any, location: str = "$"
         _validate_offer_dry_run(parsed, location)
     elif schema == "model_admission_status.v1":
         _validate_admission_status(parsed, location)
+    elif schema == "model_admission_withdraw.v1":
+        _validate_admission_withdraw(parsed, location)
     elif schema == "model_catalog_economics.v1":
         _validate_catalog_economics(parsed, location)
     else:
