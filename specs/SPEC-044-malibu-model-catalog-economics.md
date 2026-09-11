@@ -1,12 +1,12 @@
 # SPEC-044 - Malibu Model Catalog Economics
 
-**Version:** 0.2.7
+**Version:** 0.2.8
 
 ```json
 {
   "spec_id": "SPEC-044",
   "title": "Malibu Model Catalog Economics",
-  "version": "0.2.7",
+  "version": "0.2.8",
   "path": "specs/SPEC-044-malibu-model-catalog-economics.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -36,7 +36,7 @@
     "verdict": "DECISION_REQUIRED",
     "owner": "@Augustas11",
     "issue": "https://github.com/Augustas11/macprovider/issues/614",
-    "rationale": "The operator-owned v0.2.7 authority resolves the accepted formal Build 1 findings across conditional earning eligibility, source-aware admission copy, exact catalog-only trust and section isolation, compatibility fallback presentation, constructive bounded non-live exit-3 failure dispatch, an exhaustive lock graph, cancel-visible failed-dispatch serialization, ACL creation, bounded cancellation, one authoritative total ranking, and canonically bound continuous-lock cleanup. Implementation, complete tests, signed release evidence, and the discovery/admission/settlement journeys remain pending."
+    "rationale": "The operator-owned v0.2.8 authority resolves the accepted formal Build 1 findings across conditional earning eligibility, source-aware admission copy, exact catalog-only trust and section isolation, category-aware v1/v2 compatibility grammar, constructive bounded non-live exit-3 failure dispatch, an exhaustive lock graph, cancel-visible failed-dispatch serialization, ACL creation, bounded cancellation, one authoritative total ranking, and canonically bound continuous-lock cleanup. Implementation, complete tests, signed release evidence, and the discovery/admission/settlement journeys remain pending."
   }
 }
 ```
@@ -91,7 +91,13 @@ SPEC-047 owns network model admission. SPEC-044 may present economics only for r
 
 ## 3. Normative requirements
 
-**SPEC-044-R001 - CLI-owned economics projection.** Malibu MUST obtain model economics, network readiness, trust state, and actions from an installed, signed `malibu-cli` projection. The v1 envelope is advertised only by the complete pair `model_catalog_economics_v1` and `models catalog-economics.v1`; the Build 1 preparation/storage envelope is a breaking extension advertised only by the complete pair `model_catalog_economics_v2` and `models catalog-economics.v2`. Advertisement is exclusive and complete in both the command-schema manifest and fresh local status: a CLI serving v2 MUST advertise the exact v2 pair in both surfaces and omit both v1 values, while a CLI serving v1 MUST advertise the exact v1 pair in both surfaces and omit both v2 values. The two surfaces MUST agree byte-for-byte on the selected pair. Malibu MUST select v2 only after observing the exclusive complete v2 pair in both surfaces and select v1 only after observing the exclusive complete v1 pair in both surfaces. With no complete supported pair, or with capability-only, token-only, partial, dual-generation, mixed-generation, unknown, stale, or manifest/local-status-disagreeing capability or command-token advertisement, Malibu MUST show only the existing static current-model card: it MUST show no error indicator, expose no retry affordance, and make no catalog-economics read, run, or cancel call. Only after one valid exclusive complete pair was selected may a projection request be launched. If that request fails, times out, or returns a malformed envelope, Malibu MUST show the static current-model card with exact English source warning **model catalog unavailable**, warning code `projection_unavailable`, and a retry affordance, while exposing no catalog action or economics. Thus an old Malibu paired with a new v2-only CLI makes no catalog-economics call, and a new Malibu paired with an old v1-only CLI requests only v1. A v1-only client MUST retain its existing fallback and MUST NOT invoke v2 run/cancel forms; a v2-serving CLI MUST NOT send a v2 envelope to a client that did not negotiate the exact v2 pair. Malibu MUST NOT fetch coordinator rate feeds, parse static feed files, verify feed signatures, compute billing rates from raw feed bytes, derive action eligibility from app-local heuristics, or present a SPEC-046 discovered candidate as a network economics row unless SPEC-047 admission state permits that presentation. Locally motivated preparation under R002/R003 is permitted only as a non-economics local-readiness action and MUST preserve the candidate's authoritative admission and earning disclosures.
+**SPEC-044-R001 - CLI-owned economics projection.** Malibu MUST obtain model economics, network readiness, trust state, and actions from an installed, signed `malibu-cli` projection. Catalog-economics generation negotiation has separate command-schema-manifest and flat-local-status grammars. For v1, the generation trio is selection capability `model_catalog_economics_v1`, command token `models catalog-economics.v1`, and required same-generation projection-schema companion `model_catalog_economics.v1`; v2 uses `model_catalog_economics_v2`, `models catalog-economics.v2`, and `model_catalog_economics.v2` respectively. The companion is required compatibility evidence and MUST NOT select a generation by itself.
+
+In the manifest, a supported generation MUST have its own tier keyed byte-for-byte by that generation's selection capability. That tier MUST place the generation's selection capability in `local_status_capabilities` and its command token and schema companion in `command_schemas`; none of those three values may occur in another category. The tier MUST retain every other prerequisite required by the applicable manifest version. A new manifest MAY carry separate complete v1 and v2 tiers so one app build remains compatible with either installed CLI generation; those separate declarations are not a dual-generation CLI advertisement. Within one tier, a missing trio member, a wrong tier key, a value from both generations, a generation value in the wrong category, or any unrecognized generation-namespace value is malformed.
+
+Fresh local status is one flat capability set. Among generation-namespace values it MUST contain exactly all three values for one generation and no value for the other generation. The generation-selection namespaces are closed to strings beginning `model_catalog_economics_v`, `models catalog-economics.v`, or `model_catalog_economics.v`; any value beginning one of those prefixes that is not one of the six exact v1/v2 values is unrecognized and malformed. Unrelated existing capability or schema values outside those three namespaces MUST NOT affect catalog-economics generation selection. Malibu selects v1 or v2 only when the flat status trio is exact, a complete correctly categorized manifest tier for that same generation exists, and the status evidence is fresh. Missing trio members, mixed or dual generations in flat status or within a tier, category misplacement, unrecognized generation-namespace values, stale status, a missing matching manifest tier, or any other manifest/status generation disagreement MUST silently show only the existing static current-model card, with no error indicator, no retry affordance, and no catalog-economics read, run, or cancel call.
+
+The checked-in v1 manifest and current v1 flat status are conforming because the manifest places `model_catalog_economics_v1` in `local_status_capabilities`, places `models catalog-economics.v1` and `model_catalog_economics.v1` in `command_schemas`, and status carries that exact trio alongside unrelated values. A new Malibu manifest retaining a complete v1 tier selects v1 with the current old CLI. The current v1-only Malibu manifest paired with a v2-only CLI falls back without a call. A new Malibu manifest with a complete v2 tier selects v2 only with the exact v2 flat-status trio. Only after one valid generation trio is selected may a projection request be launched. If that request fails, times out, or returns a malformed envelope, Malibu MUST show the static current-model card with exact English source warning **model catalog unavailable**, warning code `projection_unavailable`, and a retry affordance, while exposing no catalog action or economics. A v1-only client MUST retain its existing fallback and MUST NOT invoke v2 run/cancel forms; a v2-serving CLI MUST NOT send a v2 envelope to a client that did not negotiate the exact v2 trio. Malibu MUST NOT fetch coordinator rate feeds, parse static feed files, verify feed signatures, compute billing rates from raw feed bytes, derive action eligibility from app-local heuristics, or present a SPEC-046 discovered candidate as a network economics row unless SPEC-047 admission state permits that presentation. Locally motivated preparation under R002/R003 is permitted only as a non-economics local-readiness action and MUST preserve the candidate's authoritative admission and earning disclosures.
 
 **SPEC-044-R002 - Versioned row schema.** The CLI projection MUST emit a closed, versioned JSON envelope with `schema: "model_catalog_economics.v1"`, a wall-clock RFC3339 `generated_at`, a monotonic unsigned integer `projection_sequence`, a `source` object identifying the CLI build and feed provenance, an array of rows, and a projection-level `warnings` array. The v1 `source` object MUST include `cli_version`, `cli_build_commit`, `process_launch_id`, `process_started_at`, `projection_protocol_version`, `rate_card_source`, nullable `rate_card_digest`, nullable `rate_card_signature_digest`, nullable `demand_feed_digest`, nullable `candidate_feed_digest`, and `rate_card_max_age_seconds`; `process_launch_id` MUST be a lowercase hyphen-separated UUID v4 string generated fresh on CLI process start from at least 128 bits of CSPRNG entropy and MUST NOT be derivable from a PID, host serial, MAC address, host UUID, provider id, wallet, username, or any other hardware or identity value. `source.rate_card_source` MUST use the same closed enum as row `rate_source`: `live_signed`, `static_signed`, or `none`. `projection_sequence` MUST increase within a single CLI process for each newly generated projection and MAY reset after CLI restart; callers MUST use it only to order projections that have the same `source.process_launch_id`. When Malibu observes a new `source.process_launch_id`, it MUST treat the projection as a new CLI session, reset its ordering baseline, discard older in-flight projection ordering comparisons, and show a brief reconnecting or refreshing state before rendering the new projection. Each row MUST include model identity (`model_key`, `served_model_id`, `display_model_id`, nullable `action_model_id`), local state (`is_current`, `weights_present_locally`, `runtime_state`, nullable `estimated_gb`, `fit`, nullable `disabled_reason`, `warning_codes`), admission state (`admission`), economics (nullable `rate_card_version`, nullable `rate_card_generated_at`, nullable `rate_card_key`, `rate_source`, nullable `prompt_rate_usd_per_million_tokens`, nullable `completion_rate_usd_per_million_tokens`, nullable `provider_share_bps`, nullable `provider_prompt_payout_usd_per_million_tokens`, nullable `provider_completion_payout_usd_per_million_tokens`, `economics_state`), demand signals (nullable `demand_rank`, nullable `demand_weight`, nullable `ready_provider_count`, nullable `supply_deficit_score`), and actions (`switch`, `prepare`, `evaluate`, `adopt_recommendation`, `cleanup_staging`) as explicit objects with `available`, `requires_confirmation`, nullable `transaction_kind`, nullable `transaction_id`, nullable `action_timeout_seconds`, nullable `estimated_bytes`, and nullable `unavailable_reason`. The row `admission` object MUST include `state`, `source`, nullable `coordinator_event_id`, nullable `state_observed_at`, `catalog_economics_permitted`, and `settlement_capable`; `source` is `local_default` or `coordinator`, `state` MUST use the SPEC-046/SPEC-047 admission-state enum, `source: "local_default"` permits only `local_only`, `not_offered`, or `offerable` and MUST set `catalog_economics_permitted: false` and `settlement_capable: false`, `source: "coordinator"` permits only SPEC-047 coordinator states, `catalog_economics_permitted` MAY be true only when `source: "coordinator"` and `state` is `catalog_priced` or `settlement_capable`, and `settlement_capable` MAY be true only when `source: "coordinator"` and `state` is `settlement_capable`. Rows whose `admission` object is missing, malformed, stale relative to the signed rate-card evidence, or inconsistent with SPEC-047 MUST set `economics_state` to `blocked` or `unavailable`, null all money-facing payout fields, and make money-motivated actions unavailable. Row `warning_codes` MUST be an array of closed warning-code enum values that apply to that specific row; the top-level `warnings` array applies to the projection as a whole. `economics_state: "trusted"` MUST include non-null rate-card identity, provider-share, and prompt/completion catalog and payout fields, and MUST require `admission.catalog_economics_permitted: true`; Malibu MUST NOT render earning-eligible, settlement-ready, or paid-routing copy unless `admission.settlement_capable: true`. Rows with `rate_source: "none"` or `economics_state: "unavailable"` MUST set rate-card identity and all rate/payout numeric fields to null rather than placeholder zero values. Rows with `economics_state: "blocked"` MUST set money-facing rate/payout fields to null unless the CLI can still identify a verified signed rate card while blocking actions for a non-rate reason; Malibu MUST hide economics copy for blocked rows unless `economics_state` is `trusted`. Rows with `economics_state: "fallback"` or `"stale"` MAY include the signed/static/stale rate fields only as disabled warning context and MUST NOT render them as actionable trusted economics. For an available action, `transaction_kind`, `transaction_id`, and `action_timeout_seconds` MUST be non-null; `action_timeout_seconds` MUST be greater than zero and MUST NOT exceed 1800 seconds. For available `switch_model`, `prepare_model`, `switch_model_deferred`, `cleanup_staging`, `adopt_recommendation`, and any `evaluate_model` action with non-null `estimated_bytes` or `action_timeout_seconds` greater than 10 seconds, `requires_confirmation` MUST be true, and Malibu MUST enforce confirmation for those transaction kinds even if a malformed projection sets the flag false. For an unavailable action, `transaction_kind`, `transaction_id`, and `action_timeout_seconds` MUST be null. A row's `rate_source` MUST be equal to `source.rate_card_source` unless the row uses a more conservative value, where `none` is more conservative than `static_signed`, and `static_signed` is more conservative than `live_signed`. Closed v1 enum values are: `runtime_state` = `current`, `ready`, `catalog`, `needs_preparation`, `blocked`; `fit` = `fits`, `does_not_fit`, `unknown`; admission `source` = `local_default`, `coordinator`; admission `state` = `local_only`, `not_offered`, `offerable`, `offer_submitted`, `offer_rejected`, `sandbox_probe_only`, `network_visible_unpriced`, `network_admitted_unsettled`, `catalog_priced`, `settlement_capable`, `withdrawn`, `revoked`; `rate_source` = `live_signed`, `static_signed`, `none`; `economics_state` = `trusted`, `fallback`, `stale`, `blocked`, `unavailable`; warning codes = `feed_fallback`, `feed_stale`, `feed_signature_invalid`, `feed_generation_mismatch`, `rate_multiplier_unknown`, `model_not_local`, `model_not_supported`, `hardware_fit_unknown`, `hardware_does_not_fit`, `admission_state_missing`, `admission_state_not_settlement_capable`, `warm_swap_unavailable`, `action_unavailable`, `old_cli_fallback`, `projection_unavailable`, `projection_timeout`, `staging_cleanup_required`; action `transaction_kind` = `switch_model`, `switch_model_deferred`, `prepare_model`, `evaluate_model`, `adopt_recommendation`, `cleanup_staging`, or null when unavailable. The v1 transaction event stream MUST use a closed JSON-lines envelope with `schema: "model_catalog_transaction_event.v1"`, matching `transaction_id`, matching `transaction_kind`, `model_key`, monotonic per-transaction `event_sequence`, RFC3339 `emitted_at`, `state`, nullable `progress`, nullable `error_code`, and nullable `warning_code`. Closed event `state` values are `queued`, `running`, `cancel_requested`, `cancelled`, `succeeded`, `failed`, and `timed_out`; `progress`, when present, MUST include a localized-safe `stage_label_key` and at least one of `bytes_completed`/nullable `bytes_expected`, `percent_complete`, or `heartbeat`. Cancellation MUST be requested through the same CLI-owned transaction interface, MUST produce either `cancel_requested` followed by `cancelled` or a terminal `succeeded`/`failed` if the commit point has already passed, and MUST never require Malibu to kill the CLI process or delete files directly. Unknown enum values, unknown action transaction kinds, malformed event envelopes, or event transaction mismatches MUST make the affected row or transaction non-actionable and show a generic unsupported warning; they MUST NOT make Malibu reject the whole projection unless the projection envelope schema itself is unsupported.
 
@@ -104,7 +110,7 @@ Build 1 preparation and published-artifact cleanup require capability
 `models catalog-economics.v2`, and projection schema
 `model_catalog_economics.v2`. The v2 envelope preserves every v1 field and
 closed-enum rule except where this subsection explicitly adds a field or enum
-value. The exclusive advertisement and fallback matrix in R001 applies; the
+value. The category-aware trio advertisement and fallback matrix in R001 applies; the
 unchanged read command never selects a generation at request time. A client
 that understands only v1 MUST use its existing fallback when paired with a
 v2-only CLI and MUST NOT receive a v2 envelope. The exact invocation is owned
@@ -967,14 +973,14 @@ v2 digest and keep-set rules and cannot target staging or legacy bytes.
 Progress, cancellation, and terminal events for both come only from the
 attached worker.
 
-**SPEC-044-R008 - UX layout and state model.** Malibu MUST present model rows in stable sections that distinguish `Current`, `Ready`, `Network catalog`, `Needs preparation`, and `Blocked` states. Section headers MUST be localized display copy that follows R004/R009 and MUST NOT be rendered directly from enum names. Each row MUST show at least display name, fit state, approximate size when known, local readiness, provider completion payout rate when trusted, network demand signal label when trusted, and one primary action or disabled reason. Rows whose economics are not `trusted` MUST NOT appear in `Network catalog` based on stale, fallback, blocked, or unavailable rates; they MUST appear in `Needs preparation` when only local preparation blocks a non-money action, otherwise in `Blocked` or an equivalent warning subsection that may still contain explicitly read-only actions such as `Evaluate`. Rows with `fit: unknown` MUST NOT appear in `Network catalog` with an action available unless the confirmation dialog prominently states that hardware fit is unknown and the action is a read-only evaluation or preparation path that the CLI can reverse without changing the current serving model. Malibu MUST select v2, v1, or static fallback by the complete exclusive advertisement matrix in R001. If neither complete supported pair is advertised, including no supported
-catalog-economics capability/token, or if either surface contains any
-capability-only, token-only, partial, dual-generation, mixed-generation,
-unknown, or stale advertisement, or the manifest and fresh local status do not
-agree byte-for-byte, the view MUST degrade to the existing static current-model
+**SPEC-044-R008 - UX layout and state model.** Malibu MUST present model rows in stable sections that distinguish `Current`, `Ready`, `Network catalog`, `Needs preparation`, and `Blocked` states. Section headers MUST be localized display copy that follows R004/R009 and MUST NOT be rendered directly from enum names. Each row MUST show at least display name, fit state, approximate size when known, local readiness, provider completion payout rate when trusted, network demand signal label when trusted, and one primary action or disabled reason. Rows whose economics are not `trusted` MUST NOT appear in `Network catalog` based on stale, fallback, blocked, or unavailable rates; they MUST appear in `Needs preparation` when only local preparation blocks a non-money action, otherwise in `Blocked` or an equivalent warning subsection that may still contain explicitly read-only actions such as `Evaluate`. Rows with `fit: unknown` MUST NOT appear in `Network catalog` with an action available unless the confirmation dialog prominently states that hardware fit is unknown and the action is a read-only evaluation or preparation path that the CLI can reverse without changing the current serving model. Malibu MUST select v2, v1, or static fallback by the category-aware manifest-tier and flat-status trio matrix in R001. If no exact supported status trio has one complete correctly categorized matching manifest tier, including no supported
+catalog-economics trio, or if the generation evidence contains any missing
+member, partial, dual-generation, mixed-generation, category-misplaced,
+unrecognized generation-namespace, or stale advertisement, or the matching
+manifest tier is missing, the view MUST degrade to the existing static current-model
 card with no error indicator, no retry affordance, no action or economics, and
 no catalog-economics read, run, or cancel call. If and only if the CLI advertises
-one valid exclusive complete supported pair in both surfaces but the projection
+one valid complete flat-status trio with a matching manifest tier but the projection
 request then fails, times out, or returns a malformed envelope, Malibu MUST show
 the static current-model card with exact English source warning **model catalog
 unavailable**, warning code `projection_unavailable`, and a retry affordance,
@@ -984,8 +990,8 @@ For v2, a valid locally motivated preparation row belongs in `Needs
 preparation`; it MUST NOT be placed in `Network catalog` from local custody
 or non-trusted economics. The exact all-null catalog-only unavailable sentinel
 from R002 belongs in `Blocked` and MUST NOT appear in `Network catalog`,
-`Current`, `Ready`, or `Needs preparation`. Absence of either exact v2 value permits v1 only when
-the complete v1 pair is exclusively advertised; otherwise Malibu uses the
+`Current`, `Ready`, or `Needs preparation`. Absence of any exact v2 trio member permits v1 only when
+the exact v1 flat-status trio and complete v1 manifest tier are present; otherwise Malibu uses the
 legacy fallback without attempting a catalog-economics call or v2 action.
 
 **SPEC-044-R009 - Trust-preserving copy and localization.** All new Malibu strings for rates, potential, warnings, actions, and disabled reasons MUST be app-localizable, screen-reader accessible, and written as operator guidance rather than marketing. Warning copy MUST clearly distinguish "network catalog rate unavailable" from "model cannot be served" from "model needs preparation". Localization tests MUST cover the forbidden earnings-claim meanings from R004 in every shipped locale, not only the English source strings. Every shipped locale with right-to-left layout support MUST verify that row ordering, numeric rate labels, section grouping, and action buttons remain readable and navigable; if Malibu ships no right-to-left locale for this release, the release evidence MUST state that RTL is out of scope.
@@ -1055,8 +1061,8 @@ reconciliation.
   staging cleanup, and published cleanup gating; confirmation and disabled
   copy; progress/reconciliation; localization; screen readers; and every
   shipped RTL locale.
-- **Built-CLI/production-adapter integration lane:** exact complete-pair
-  compatibility matrix, read/run/cancel grammar and exit status, bounded read
+- **Built-CLI/production-adapter integration lane:** exact category-aware
+  manifest-tier/flat-status trio compatibility matrix, read/run/cancel grammar and exit status, bounded read
   and acknowledgement stdout, incremental JSONL with arbitrary chunks and
   overlong no-newline input, 65,536-byte stderr truncation/drain, sustained
   maximum event rate, fixed 64-event delivery capacity/coalescing/backpressure,
@@ -1076,7 +1082,8 @@ reconciliation.
   ranking, action-gating, cancellation, and reconciliation outcomes captured.
 
 For v2 the R012 evidence also MUST cover exact read/run/cancel grammar and exit
-status, exclusive v1/v2 advertisement, strict v2 decoding, every
+status, one exact flat-status generation trio with a matching manifest tier,
+strict v2 decoding, every
 preparation-matrix branch, exact and localized action copy, event code/state
 closure, worker-only sequencing, all six cancellation-ack outcomes and races,
 storage nullability and bounds, 255/256/idempotent/257 object admission,
@@ -1111,19 +1118,25 @@ boundaries:
 - launch the built CLI and route its exact stdout, stderr, and exit status
   through Malibu's production process adapter and strict decoder for v1 and v2
   reads, every terminal run outcome, all six cancellation acknowledgements,
-  partial/chunked JSONL, malformed-v2 negatives, and the exact complete
-  advertisement matrix: exclusive complete v1, exclusive complete v2, no
-  supported pair, capability-only and token-only for each generation, every
-  partial pair, both complete pairs, every mixed-generation set, unknown
-  capability and token values, stale capability status, and manifest/local-
-  status disagreement in both directions. For every negative prove the static
+  partial/chunked JSONL, malformed-v2 negatives, and byte-exact compatibility
+  fixtures for current manifest/current v1 status, new Malibu/old v1 CLI,
+  current Malibu/new v2-only CLI, and new v2 manifest/status. The negative
+  matrix MUST remove each trio member one at a time; add one opposite-generation
+  member; misplace each manifest member into the other category; exercise both
+  complete generations and every mixed-generation set in flat status or one
+  tier; inject one unrecognized value under each of
+  `model_catalog_economics_v`, `models catalog-economics.v`, and
+  `model_catalog_economics.v`; make status stale; remove the matching manifest
+  tier; and disagree across surfaces in both directions. Unrelated capabilities
+  and schemas outside those namespaces MUST leave valid selection unchanged.
+  For every negative prove the static
   current-model card, no error indicator, no retry, and zero read/run/cancel
-  calls. For each exclusive complete pair separately inject projection failure,
+  calls. For each valid matching trio separately inject projection failure,
   timeout, and malformed output and prove exact **model catalog unavailable**,
   `projection_unavailable`, retry, no action, and no economics. Prove
   old-Malibu/new-v2-CLI static fallback,
-  new-Malibu/old-v1-CLI read-only fallback, exactly one read for each supported
-  exclusive complete pair, and zero catalog-economics calls for every negative;
+  new-Malibu/old-v1-CLI v1 read, exactly one read for each supported
+  matching trio, and zero catalog-economics calls for every negative;
 - reject unknown or mismatched `candidate_id`, guidance-source fields/digest,
   owner-spec guidance fields/enums, admission correlation, coordinator event,
   state timestamp, future source time, and the 300-second freshness boundary;
@@ -1289,7 +1302,7 @@ boundaries:
 The intended implementation is a CLI-first projection, then an app-only presentation layer:
 
 1. Preserve the exact SPEC-001-R003 read/run/cancel forms under `models catalog-economics`; do not add aliases or a transaction-status command.
-2. Advertise only `model_catalog_economics_v2` and `models catalog-economics.v2` in the capability surfaces Malibu already uses for model management, omitting both v1 values.
+2. Make a v2-serving CLI advertise exactly `model_catalog_economics_v2`, `models catalog-economics.v2`, and `model_catalog_economics.v2` in flat local status while omitting all three v1 generation values; retain the complete v1 manifest tier and add a separate v2 tier with the selection capability in `local_status_capabilities` and the command token plus schema companion in `command_schemas`.
 3. Extend Malibu model management decoding with a new envelope while keeping the current `models_list.v1` and browse behavior as fallback paths.
 4. Replace the static switcher modal with a sectioned catalog view that supports current, ready, network-catalog, preparation-required, and blocked rows.
 5. Wire only CLI-owned typed transactions into action buttons; all other rows are informational.
@@ -1301,13 +1314,13 @@ The first journey id is `JOURNEY-MALIBU-MODEL-ECONOMICS`. The journey should cov
 
 | Requirement/domain | Verdict | Owner | Issue | Evidence needed |
 |---|---|---|---|---|
-| `SPEC-044-R001..R012` | `DECISION_REQUIRED` | `@Augustas11` | `#614` | Implement the approved v0.2.7 projection, transaction, failed-dispatch, cancellation, preparation-copy, cleanup, and accounting authority; then decide promotion only after automated tests and signed release evidence. |
+| `SPEC-044-R001..R012` | `DECISION_REQUIRED` | `@Augustas11` | `#614` | Implement the approved v0.2.8 projection, category-aware compatibility negotiation, transaction, failed-dispatch, cancellation, preparation-copy, cleanup, and accounting authority; then decide promotion only after automated tests and signed release evidence. |
 | `malibu-model-economics-ux` | `DECISION_REQUIRED` | `@Augustas11` | `#614` | Implement the operator-approved CLI-owned projection and Malibu rendering without app-side feed verification; production enablement remains an operator decision. |
 | `SPEC-046/SPEC-047 integration` | `DECISION_REQUIRED` | `@Augustas11` | `#1240` | Approval that SPEC-044 is narrowed to network economics and does not own provider-local BYOM discovery or network admission. |
 
 ## 6. Evidence
 
-Current implementation evidence predates the v0.2.7 Build 1 authority and is
+Current implementation evidence predates the v0.2.8 Build 1 authority and is
 partial and non-conformant:
 
 - `phase3-binary/app/Sources/Malibu/ModelManagement/ModelManagement.swift` already capability-gates model management and classifies current, ready, preparation-required, and blocked rows, but its row schema does not carry rate-card economics.
@@ -1329,7 +1342,7 @@ The desired provider copy is comparative and bounded: "Provider share rate", "Fi
 
 The `Network catalog` section is a discovery lane, not a promise that traffic will arrive. A high-rate model may still be disabled because it does not fit, lacks local verified weights, has stale economics, lacks enough demand, fails trust state, or has no safe CLI transaction.
 
-The capability name `model_catalog_economics_v1` and schema discriminator `model_catalog_economics.v1` are intentionally different strings: the capability gates whether Malibu may request the projection, while the schema value identifies the JSON envelope returned by that projection.
+The selection capability `model_catalog_economics_v1` and schema discriminator `model_catalog_economics.v1` are intentionally different strings: the capability selects the generation, while the schema value identifies the JSON envelope and is also a required compatibility companion in the manifest and flat status. The companion never selects a generation alone.
 
 The current Malibu recommendation path may remain as a companion callout, but the catalog view must not require a recommendation run to show signed rates for supported models. Recommendation scores can rank rows only when the feed set is trusted and the CLI marks the signal current.
 
@@ -1337,6 +1350,15 @@ The app should preserve the current provider mental model: Malibu observes and a
 
 ## 8. Changelog and history
 
+- 0.2.8 - Resolves the formal v9 authority finding by freezing distinct
+  manifest-category and flat-status grammars for the shipped three-value v1
+  advertisement and future v2 trio; the projection-schema companion remains
+  required without becoming a generation selector; unknown-value fatality is
+  limited to three exact generation namespaces; separate v1/v2 manifest tiers
+  preserve staged app/CLI upgrade compatibility; and byte-exact fixtures cover
+  each member removal, addition, category misplacement, stale/cross-surface
+  disagreement, unrelated values, and both upgrade orders. Conformance remains
+  pending.
 - 0.2.7 - Resolves the formal v7 authority findings: one exhaustive lock graph
   governs projection publication, failure-only processing, normal and recovery
   state, direct cancellation, cleanup, and adoption; all cancel-visible failed-

@@ -1,4 +1,6 @@
+import copy
 import json
+import re
 from pathlib import Path
 import unittest
 
@@ -11,6 +13,173 @@ def read_text(path: str) -> str:
 
 
 class BYOMContractLockTests(unittest.TestCase):
+    def test_catalog_economics_byte_fixtures_freeze_category_aware_trios(self):
+        fixture_bytes = (
+            ROOT / "scripts/tests/fixtures/catalog_economics_compatibility_v2.json"
+        ).read_bytes()
+        self.assertTrue(fixture_bytes.endswith(b"\n"))
+        fixtures = json.loads(fixture_bytes.decode("utf-8"))
+        self.assertEqual(
+            fixtures["namespace_prefixes"],
+            [
+                "model_catalog_economics_v",
+                "models catalog-economics.v",
+                "model_catalog_economics.v",
+            ],
+        )
+
+        trios = fixtures["trios"]
+        known = {
+            value
+            for trio in trios.values()
+            for value in trio.values()
+        }
+
+        def namespaced(value):
+            return any(value.startswith(prefix) for prefix in fixtures["namespace_prefixes"])
+
+        def selected_generation(manifest, status):
+            if not status["fresh"]:
+                return None
+            status_values = {value for value in status["capabilities"] if namespaced(value)}
+            if not status_values.issubset(known):
+                return None
+            status_generation = None
+            for generation, trio in trios.items():
+                if status_values == set(trio.values()):
+                    status_generation = generation
+                    break
+            if status_generation is None:
+                return None
+
+            complete_manifest_generations = set()
+            for tier_name, tier in manifest["tiers"].items():
+                categorized = {
+                    category: set(values)
+                    for category, values in tier.items()
+                    if isinstance(values, list)
+                }
+                tier_values = {
+                    value
+                    for values in categorized.values()
+                    for value in values
+                    if namespaced(value)
+                }
+                if not tier_values:
+                    continue
+                if not tier_values.issubset(known):
+                    return None
+                generations = {
+                    generation
+                    for generation, trio in trios.items()
+                    if tier_values.intersection(trio.values())
+                }
+                if len(generations) != 1:
+                    return None
+                generation = generations.pop()
+                trio = trios[generation]
+                if tier_name != trio["selection_capability"]:
+                    return None
+                if tier_values != set(trio.values()):
+                    return None
+                if trio["selection_capability"] not in categorized.get(
+                    "local_status_capabilities", set()
+                ):
+                    return None
+                if {
+                    trio["command_token"],
+                    trio["schema_companion"],
+                } - categorized.get("command_schemas", set()):
+                    return None
+                for category, values in categorized.items():
+                    permitted = set()
+                    if category == "local_status_capabilities":
+                        permitted.add(trio["selection_capability"])
+                    elif category == "command_schemas":
+                        permitted.update(
+                            (trio["command_token"], trio["schema_companion"])
+                        )
+                    if {value for value in values if namespaced(value)} != permitted:
+                        return None
+                if generation in complete_manifest_generations:
+                    return None
+                complete_manifest_generations.add(generation)
+            return (
+                status_generation
+                if status_generation in complete_manifest_generations
+                else None
+            )
+
+        cases = {case["name"]: case for case in fixtures["cases"]}
+        for case in fixtures["cases"]:
+            with self.subTest(case=case["name"]):
+                actual = selected_generation(
+                    fixtures["manifests"][case["manifest"]],
+                    fixtures["statuses"][case["status"]],
+                )
+                self.assertEqual(actual, case["expected_generation"])
+
+        for mutation in fixtures["one_fault_mutations"]:
+            case = cases[mutation["base_case"]]
+            manifest = copy.deepcopy(fixtures["manifests"][case["manifest"]])
+            status = copy.deepcopy(fixtures["statuses"][case["status"]])
+            if mutation["operation"] == "stale":
+                status["fresh"] = False
+            elif mutation["surface"] == "status":
+                values = status["capabilities"]
+                if mutation["operation"] == "remove":
+                    values.remove(mutation["value"])
+                else:
+                    values.append(mutation["value"])
+            else:
+                if mutation["operation"] == "rename_tier":
+                    tier = manifest["tiers"].pop(mutation["tier"])
+                    manifest["tiers"][mutation["new_tier"]] = tier
+                    with self.subTest(mutation=mutation["name"]):
+                        self.assertEqual(
+                            selected_generation(manifest, status),
+                            mutation["expected_generation"],
+                        )
+                    continue
+                tier = manifest["tiers"][mutation["tier"]]
+                values = tier[mutation["category"]]
+                if mutation["operation"] in ("remove", "move"):
+                    values.remove(mutation["value"])
+                if mutation["operation"] == "move":
+                    tier[mutation["other_category"]].append(mutation["value"])
+                elif mutation["operation"] == "add":
+                    values.append(mutation["value"])
+            with self.subTest(mutation=mutation["name"]):
+                self.assertEqual(
+                    selected_generation(manifest, status),
+                    mutation["expected_generation"],
+                )
+
+        checked_in_manifest = json.loads(
+            read_text(
+                "phase3-binary/app/Sources/Malibu/Resources/"
+                "MalibuModelCapabilities.json"
+            )
+        )
+        self.assertEqual(
+            checked_in_manifest["tiers"]["model_catalog_economics_v1"],
+            fixtures["manifests"]["current_v1"]["tiers"][
+                "model_catalog_economics_v1"
+            ],
+        )
+        status_source = read_text("phase3-binary/Sources/macprovider-cli/HTTPServer.swift")
+        status_block = re.search(
+            r"static let localStatusCapabilities = \[(.*?)\n    \]",
+            status_source,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(status_block)
+        advertised = set(re.findall(r'"([^"\\]+)"', status_block.group(1)))
+        self.assertEqual(
+            {value for value in advertised if namespaced(value)},
+            set(trios["v1"].values()),
+        )
+
     def test_catalog_economics_compatibility_ui_is_exact(self):
         spec001 = " ".join(read_text("specs/SPEC-001-phase3-binary.md").split())
         spec044 = " ".join(
@@ -18,10 +187,10 @@ class BYOMContractLockTests(unittest.TestCase):
         )
 
         common = (
-            "supported pair",
+            "generation trio",
             "partial",
             "mixed-generation",
-            "unknown",
+            "unrecognized generation-namespace",
             "stale",
             "manifest",
             "local status",
@@ -39,20 +208,20 @@ class BYOMContractLockTests(unittest.TestCase):
                     self.assertIn(required, owner_text)
 
         for required in (
-            "capability without its token",
-            "token without its capability",
-            "both complete generations",
+            "schema companion without both other members",
+            "dual generations in flat status or within one tier",
+            "category misplacement",
             "no read, run, cancel, action, or economics",
-            "valid exclusive complete pair",
+            "valid complete matching generation trio",
             "fails, times out, or returns malformed output",
         ):
             with self.subTest(spec="SPEC-001", required=required):
                 self.assertIn(required, spec001)
         for required in (
-            "capability-only, token-only",
-            "dual-generation",
-            "make no catalog-economics read, run, or cancel call",
-            "valid exclusive complete pair",
+            "Missing trio members",
+            "dual generations in flat status or within a tier",
+            "no catalog-economics read, run, or cancel call",
+            "valid generation trio",
             "fails, times out, or returns a malformed envelope",
             "exposing no catalog action or economics",
         ):
@@ -137,7 +306,7 @@ class BYOMContractLockTests(unittest.TestCase):
                 self.assertIn(required, spec044)
 
         for required in (
-            "SPEC-044 v0.2.7",
+            "SPEC-044 v0.2.8",
             "`failure.lock`-then-`cancel.lock` lifecycle",
             '`{"error_code":"dispatch_state_busy"}` plus LF',
             "writes no stdout event",
@@ -152,26 +321,28 @@ class BYOMContractLockTests(unittest.TestCase):
         readme = read_text("specs/README.md")
         conformance = json.loads(read_text("specs/CONFORMANCE.json"))
 
-        self.assertIn("**Version:** 1.9.16", spec001)
-        self.assertIn("**Version:** 0.2.7", spec044)
-        self.assertIn('"version": "0.2.7"', spec044)
-        self.assertIn("SPEC-044 v0.2.7", spec001)
-        self.assertIn("| SPEC-001 | Phase 3 Binary: Mac Provider Inference CLI | 1.9.16 |", readme)
-        self.assertIn("| SPEC-044 | Malibu Model Catalog Economics | 0.2.7 |", readme)
+        self.assertIn("**Version:** 1.9.17", spec001)
+        self.assertIn("**Version:** 0.2.8", spec044)
+        self.assertIn('"version": "0.2.8"', spec044)
+        self.assertIn("SPEC-044 v0.2.8", spec001)
+        self.assertIn("| SPEC-001 | Phase 3 Binary: Mac Provider Inference CLI | 1.9.17 |", readme)
+        self.assertIn("| SPEC-044 | Malibu Model Catalog Economics | 0.2.8 |", readme)
         current_spec044 = spec044.split("## 8. Changelog and history", 1)[0]
+        self.assertNotIn("v0.2.7", current_spec044)
         self.assertNotIn("v0.2.6", current_spec044)
         self.assertNotIn("v0.2.4", current_spec044)
         self.assertNotIn("v0.2.5", current_spec044)
         spec001_record = next(
             record for record in conformance["specs"] if record["spec_id"] == "SPEC-001"
         )
-        self.assertEqual(spec001_record["version"], "1.9.16")
+        self.assertEqual(spec001_record["version"], "1.9.17")
         spec_record = next(
             record for record in conformance["specs"] if record["spec_id"] == "SPEC-044"
         )
-        self.assertEqual(spec_record["version"], "0.2.7")
+        self.assertEqual(spec_record["version"], "0.2.8")
         for requirement in conformance["requirements"]:
             if requirement["spec_id"] == "SPEC-044":
+                self.assertNotIn("SPEC-044 v0.2.7", json.dumps(requirement))
                 self.assertNotIn("SPEC-044 v0.2.6", json.dumps(requirement))
                 self.assertNotIn("SPEC-044 v0.2.5", json.dumps(requirement))
 

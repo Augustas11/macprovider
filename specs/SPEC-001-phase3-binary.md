@@ -1,6 +1,12 @@
 # SPEC-001 — Phase 3 Binary: Mac Provider Inference CLI
 
-**Version:** 1.9.16 (2026-09-12, Build 1 lock-graph authority correction)
+**Version:** 1.9.17 (2026-09-12, Build 1 catalog compatibility authority correction)
+
+**Change log v1.9.17 (2026-09-12, Build 1 catalog compatibility authority
+correction):** Reconciles the shipped v1 three-value catalog-economics
+advertisement, freezes category-aware manifest declarations separately from
+the flat local-status trio, and scopes fail-closed unknown-value handling to
+the three exact generation-selection namespaces under SPEC-044 v0.2.8.
 
 **Change log v1.9.16 (2026-09-12, Build 1 lock-graph authority
 correction):** Makes the catalog-economics lock graph exhaustive, serializes
@@ -3325,15 +3331,31 @@ New provider-visible model-command PRs MUST include tests proving that:
 
 **SPEC-001-R003 - Catalog-economics transaction invocation.**
 
-The installed CLI owns all catalog-economics reads and mutations. Advertisement
-is exclusive per installed CLI build: a v2-serving CLI MUST advertise
-local-status capability `model_catalog_economics_v2` and command-schema token
-`models catalog-economics.v2` and MUST omit capability
-`model_catalog_economics_v1` and token `models catalog-economics.v1`; a
-v1-serving CLI MUST advertise only the v1 pair and MUST omit the v2 pair. A CLI
-MUST NOT advertise both generations, advertise only one member of a generation
-pair, or select a response generation from caller identity, terminal state,
-environment, or request timing. A CLI advertising the v2 pair MUST accept
+The installed CLI owns all catalog-economics reads and mutations. Each
+generation has three required advertisement values: selection capability
+`model_catalog_economics_v1`, command token `models catalog-economics.v1`, and
+schema companion `model_catalog_economics.v1` for v1; and
+`model_catalog_economics_v2`, `models catalog-economics.v2`, and
+`model_catalog_economics.v2` for v2. The schema companion is required
+compatibility evidence and never selects a generation alone. A manifest tier
+MUST be keyed byte-for-byte by the selection capability and MUST place that
+selection capability in `local_status_capabilities`. It MUST place the command
+token and schema companion in `command_schemas`, with all other tier
+prerequisites preserved. A manifest MAY declare v1 and v2 in
+separate complete tiers. Fresh local status is a flat set and a serving CLI
+MUST advertise exactly one complete three-value generation trio while omitting
+all three values of the other generation.
+
+Generation parsing is limited to exact values in the three namespaces whose
+strings begin `model_catalog_economics_v`, `models catalog-economics.v`, or
+`model_catalog_economics.v`. Any other value beginning one of those prefixes,
+any missing trio member, mixed or dual generations in flat status or within a
+single tier, category misplacement, stale status, or disagreement between the
+status trio and available complete manifest tiers is malformed and permits no
+catalog-economics call. Unrelated existing capability and schema values outside
+those namespaces MUST NOT invalidate negotiation. A CLI MUST NOT select a
+response generation from caller identity, terminal state, environment, or
+request timing. A CLI advertising the exact v2 trio MUST accept
 exactly these public forms:
 
 ```text
@@ -3377,7 +3399,7 @@ mutation, as defined by SPEC-044.
 Only the attached run worker may allocate `event_sequence` or emit transaction
 events. After syntax/framing and immutable projected-action identity validation,
 but before semantic freshness, availability, or conflict checks, a valid run
-creates a fresh attempt and enters SPEC-044 v0.2.7's bounded
+creates a fresh attempt and enters SPEC-044 v0.2.8's bounded
 `failure.lock`-then-`cancel.lock` lifecycle.
 For exit 3 it MUST durably write the bounded private non-live
 `model_catalog_failed_dispatch.v1` record before emitting exactly one terminal
@@ -3387,7 +3409,7 @@ binding, fresh attempt, and error code; it creates no active attempt, marker,
 network/staging work, model/adoption/runtime mutation, or incumbent displacement.
 Conflict reporting is not a second active worker. All failed-dispatch creation,
 compaction, eviction, recovery, and cancel-visible reads use the exhaustive
-SPEC-044 v0.2.7 lock graph. A failure-only path takes `failure.lock` then
+SPEC-044 v0.2.8 lock graph. A failure-only path takes `failure.lock` then
 `cancel.lock`; a normal or recovery path takes `operation.lock`, then
 `failure.lock`, then `cancel.lock`. Failure-only failure-then-cancel uses one
 total `CLOCK_MONOTONIC_RAW` deadline. A successful nonblocking
@@ -3404,44 +3426,59 @@ or synthesize an event and MUST NOT kill the worker. No `models transactions`
 family, public transaction-status
 schema, public crash or late-cancellation state, authority-refresh frame,
 daemon, background service, or new control-socket frame is part of this
-contract. A v2 Malibu invokes the unchanged read form only after observing the
-complete v2 pair in both the command-schema manifest and fresh local status;
-otherwise it invokes v1 only after observing the complete v1 pair in both
-surfaces, and otherwise uses the legacy static fallback without a
-catalog-economics call. The two surfaces MUST advertise byte-identical complete
-pairs. No supported pair, a capability without its token, a token without its
-capability, any partial generation, either partial generation combined with any
-value from the other generation, both complete generations, any other mixed-
-generation or unknown set, stale local-status capability evidence, or
-disagreement between manifest and local status is malformed. Every such case
+contract. A v2-capable Malibu invokes the unchanged read form only after
+observing an exact v2 trio in fresh flat local status and a complete,
+correctly categorized v2 manifest tier. Otherwise it invokes v1 only after the
+equivalent exact v1 status trio and v1 manifest-tier proof, and otherwise uses
+the legacy static fallback without a catalog-economics call. The current v1
+manifest plus current v1 status therefore selects v1; a new Malibu retaining a
+complete v1 tier selects v1 with the old CLI; the current v1-only Malibu plus a
+v2-only CLI falls back; and a new complete v2 manifest tier plus exact v2
+status trio selects v2. No supported trio, a capability, command token, or
+schema companion without both other members, any partial generation, either
+partial generation combined with a value from the other generation, dual
+generations in flat status or within one tier, any other mixed-generation or
+unrecognized generation-namespace set, category misplacement, stale local-
+status evidence, a missing matching manifest tier, or disagreement between
+manifest and local status is malformed. Unrelated values outside the three
+generation namespaces remain valid. Every malformed case
 MUST show only the static current-model card with no error indicator, no retry,
 and no read, run, cancel, action, or economics. Only a projection request
-launched after one valid exclusive complete pair that then fails, times out, or
-returns malformed output shows exact English source warning **model catalog
-unavailable**, warning code `projection_unavailable`, and retry, with no action
-or economics.
+launched after one valid complete matching generation trio that then fails,
+times out, or returns malformed output shows exact English source warning
+**model catalog unavailable**, warning code `projection_unavailable`, and retry,
+with no action or economics.
 Therefore an old v1 Malibu paired with a new v2-only CLI makes no
-catalog-economics call and uses its static fallback, while a new Malibu paired
-with an old v1-only CLI requests and strictly decodes v1 without attempting v2
-actions. Partial, conflicting, or dual-generation advertisement is malformed
+catalog-economics call and uses its static fallback, while a new Malibu
+retaining the complete v1 tier paired with an old v1-only CLI requests and
+strictly decodes v1 without attempting v2 actions. Partial, conflicting,
+category-misplaced, or dual-generation advertisement is malformed
 and uses the static fallback with no mutation call. Production-boundary tests
 MUST launch the built CLI through Malibu's production process adapter and prove
 the complete matrix below, including exact stdout, stderr, exit status, and strict
-decoder behavior. Clients lacking the exact v2 capability/token retain the
-existing fallback and MUST NOT invoke the v2 mutation options. SPEC-044 v0.2.7
+decoder behavior. Clients lacking the exact v2 generation trio and matching
+manifest tier retain the existing fallback and MUST NOT invoke the v2 mutation
+options. SPEC-044 v0.2.8
 owns the
 projection, event, cancellation-acknowledgement, preparation-copy, action, and
 storage-accounting contracts.
 
-The production-boundary compatibility matrix MUST include, for each v1 and v2,
-the complete exclusive pair, capability-only, and token-only cases; it MUST also
-include both complete pairs together, every mixed-generation partial set,
-unknown capability/token values, stale local-status capabilities, and
-manifest/local-status disagreement in both directions. Only the two exclusive
-complete-pair cases may launch a catalog-economics read. All advertisement
+The production-boundary compatibility matrix MUST use byte-exact manifest and
+flat-status fixtures and include, for each v1 and v2, the complete correctly
+categorized trio and one-fault removal of each trio member. It MUST include
+one-fault category misplacement of each manifest member, addition of one
+opposite-generation member, both complete generations in flat status, every
+mixed-generation partial set, one unrecognized value in each of the three
+generation namespaces, stale local-status capabilities, a missing matching
+manifest tier, and manifest/local-status disagreement in both directions. It
+MUST also add unrelated existing capability and schema values and prove they do
+not change a valid selection. The fixtures MUST prove current manifest/current
+v1 status, new Malibu/old v1 CLI, current Malibu/new v2-only CLI, and a new v2
+manifest/status trio. Only a valid matching v1 or v2 trio may launch a catalog-
+economics read. All advertisement
 negatives MUST prove the static card, no error indicator, no retry, zero
 catalog-economics process launches, and zero mutation calls. Projection
-failure, timeout, and malformed response after each valid pair MUST separately
+failure, timeout, and malformed response after each valid trio MUST separately
 prove the unavailable warning/retry state and no action or economics.
 
 The production process adapter MUST bound every machine-output path. A read
