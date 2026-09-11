@@ -408,6 +408,38 @@ final class BYOMLoopbackAdapterTests: XCTestCase {
         XCTAssertNoThrow(try env.artifactDigests.computeEvidence(runtimeSource: "llamacpp_loopback", servedModelRef: "llamacpp:tiny-q4", runtimeArtifactPath: approvedFile.resolvingSymlinksInPath().path))
     }
 
+    // MARK: - Digest cache never persists a model path (audit LOW)
+
+    func testDigestCachePersistsAPathTokenNotThePathAndDiscardsV1Files() throws {
+        let root = try temporaryDirectory("byom-cache-privacy")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let secretDir = root.appendingPathComponent("private-models-xyz", isDirectory: true)
+        let file = secretDir.appendingPathComponent("tiny-q4.gguf")
+        try write(ggufBytes, to: file)
+        let cacheURL = root.appendingPathComponent("digests.json")
+        let store = BYOMLlamaCppModelStore(root: secretDir)
+        let resolver = BYOMArtifactDigestResolver(locators: [store], cache: BYOMArtifactDigestCache(url: cacheURL))
+        let served = file.resolvingSymlinksInPath().standardizedFileURL.path
+        let evidence = try resolver.computeEvidence(runtimeSource: "llamacpp_loopback", servedModelRef: "llamacpp:tiny-q4", runtimeArtifactPath: served)
+
+        let persisted = try String(contentsOf: cacheURL, encoding: .utf8)
+        XCTAssertFalse(persisted.contains("private-models-xyz"), "the cache persisted a model path")
+        XCTAssertFalse(persisted.contains(root.path))
+        XCTAssertTrue(persisted.contains("\"path_sha256\""))
+        XCTAssertTrue(persisted.contains("byom_artifact_digest_cache.v2"))
+        XCTAssertEqual(evidence.file.pathDigest, BYOMArtifactFileIdentity.digest(ofPath: served))
+        // The token still round-trips: discovery reads the digest back for the same file.
+        XCTAssertEqual(resolver.knownDigest(runtimeSource: "llamacpp_loopback", servedModelRef: "llamacpp:tiny-q4", runtimeArtifactPath: served), evidence.digest)
+
+        // A v1 cache (raw paths) is not read: no entry is found, and the next store rewrites it as v2.
+        let v1 = #"{"schema":"byom_artifact_digest_cache.v1","entries":[{"algorithm":"macprovider.gguf-file.v1","digest":"00","computed_at":"2026-01-01T00:00:00Z","file":{"path":"/leaked/tiny-q4.gguf","size_bytes":1,"inode":1,"device":1,"modified_seconds":1,"modified_nanoseconds":1}}]}"#
+        try Data(v1.utf8).write(to: cacheURL)
+        XCTAssertNil(resolver.knownDigest(runtimeSource: "llamacpp_loopback", servedModelRef: "llamacpp:tiny-q4", runtimeArtifactPath: served))
+        _ = try resolver.computeEvidence(runtimeSource: "llamacpp_loopback", servedModelRef: "llamacpp:tiny-q4", runtimeArtifactPath: served)
+        let rewritten = try String(contentsOf: cacheURL, encoding: .utf8)
+        XCTAssertFalse(rewritten.contains("/leaked/")); XCTAssertTrue(rewritten.contains(".v2"))
+    }
+
     // MARK: - Failure classes map to closed warning codes
 
     func testMalformedInventoryEmitsWarningNotCandidate() async throws {

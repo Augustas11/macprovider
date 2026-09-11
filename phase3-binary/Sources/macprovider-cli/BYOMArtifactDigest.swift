@@ -61,7 +61,15 @@ enum BYOMArtifactDigestError: Error, Equatable, CustomStringConvertible {
 /// binds only while the file it resolved for the runtime instance is the same
 /// (path, size, inode, modification time) — SPEC-010-R007(a).
 struct BYOMArtifactFileIdentity: Codable, Equatable, Sendable {
-    let path: String
+    /// The canonical path this identity was taken for. In memory only: it is
+    /// neither persisted nor part of equality, so the digest cache never
+    /// records where an operator keeps model files (PR #1480 audit, LOW).
+    /// nil on identities decoded from the cache.
+    let path: String?
+    /// Lowercase SHA-256 of the canonical path: a non-reversible token that
+    /// still distinguishes two files with identical size/inode/device/mtime
+    /// on different paths. This is what is persisted and compared.
+    let pathDigest: String
     let sizeBytes: Int
     let inode: UInt64
     let device: UInt64
@@ -72,12 +80,46 @@ struct BYOMArtifactFileIdentity: Codable, Equatable, Sendable {
     let modifiedNanoseconds: Int64
 
     enum CodingKeys: String, CodingKey {
-        case path
+        case pathDigest = "path_sha256"
         case sizeBytes = "size_bytes"
         case inode
         case device
         case modifiedSeconds = "modified_seconds"
         case modifiedNanoseconds = "modified_nanoseconds"
+    }
+
+    init(path: String, sizeBytes: Int, inode: UInt64, device: UInt64, modifiedSeconds: Int64, modifiedNanoseconds: Int64) {
+        self.path = path
+        self.pathDigest = Self.digest(ofPath: path)
+        self.sizeBytes = sizeBytes
+        self.inode = inode
+        self.device = device
+        self.modifiedSeconds = modifiedSeconds
+        self.modifiedNanoseconds = modifiedNanoseconds
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        path = nil
+        pathDigest = try c.decode(String.self, forKey: .pathDigest)
+        sizeBytes = try c.decode(Int.self, forKey: .sizeBytes)
+        inode = try c.decode(UInt64.self, forKey: .inode)
+        device = try c.decode(UInt64.self, forKey: .device)
+        modifiedSeconds = try c.decode(Int64.self, forKey: .modifiedSeconds)
+        modifiedNanoseconds = try c.decode(Int64.self, forKey: .modifiedNanoseconds)
+    }
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.pathDigest == rhs.pathDigest
+            && lhs.sizeBytes == rhs.sizeBytes
+            && lhs.inode == rhs.inode
+            && lhs.device == rhs.device
+            && lhs.modifiedSeconds == rhs.modifiedSeconds
+            && lhs.modifiedNanoseconds == rhs.modifiedNanoseconds
+    }
+
+    static func digest(ofPath path: String) -> String {
+        Data(SHA256.hash(data: Data(path.utf8))).map { String(format: "%02x", $0) }.joined()
     }
 
     /// The identity the PATH currently resolves to.
@@ -595,7 +637,7 @@ struct BYOMArtifactDigestCache: Sendable {
         var entries: [Entry]
     }
 
-    static let schema = "byom_artifact_digest_cache.v1"
+    static let schema = "byom_artifact_digest_cache.v2"   // v1 persisted raw paths; discarded on load
 
     init(url: URL, fileManager: FileManager = .default) {
         self.url = url
@@ -622,9 +664,11 @@ struct BYOMArtifactDigestCache: Sendable {
 
     func store(_ identity: BYOMArtifactFileIdentity, algorithm: String, digest: String, now: Date = Date()) {
         var document = load()
-        document.entries.removeAll { $0.file.path == identity.path && $0.algorithm == algorithm }
+        // One entry per (path token, algorithm): a rewritten file replaces its
+        // stale digest rather than accumulating beside it.
+        document.entries.removeAll { $0.file.pathDigest == identity.pathDigest && $0.algorithm == algorithm }
         document.entries.append(Entry(file: identity, algorithm: algorithm, digest: digest, computedAt: ModelSwitchingWireCodec.timestamp(now)))
-        document.entries.sort { ($0.file.path, $0.algorithm) < ($1.file.path, $1.algorithm) }
+        document.entries.sort { ($0.file.pathDigest, $0.algorithm) < ($1.file.pathDigest, $1.algorithm) }
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .prettyPrinted]
         guard let data = try? encoder.encode(document) else { return }
