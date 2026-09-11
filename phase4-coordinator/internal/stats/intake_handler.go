@@ -79,7 +79,7 @@ func (h *Handler) handleIntake(w http.ResponseWriter, r *http.Request, ar authRe
 		writeError(w, r, http.StatusInternalServerError, codeInternal, "intake read failed", now, nil)
 		return
 	}
-	if row == nil || intakeStaleFor503(now, row.GeneratedAt) {
+	if row == nil || intakeStaleFor503(now, row.GeneratedAt) || row.GeneratedAt.After(now) {
 		retry := 30
 		gen := now
 		if row != nil {
@@ -91,7 +91,7 @@ func (h *Handler) handleIntake(w http.ResponseWriter, r *http.Request, ar authRe
 	// Read-side contract check: a persisted row is served only when its
 	// windows and histogram satisfy the closed wire contract, so a fresh
 	// malformed row can no more reach a reader than a stale one.
-	if err := validateIntakeRow(row.UnmatchedModelsJSON, row.FleetRAMJSON); err != nil {
+	if err := validateIntakeRow(row.UnmatchedModelsJSON, row.FleetRAMJSON, now); err != nil {
 		retry := 30
 		writeError(w, r, http.StatusServiceUnavailable, codeStatsStale, "intake is stale", row.GeneratedAt, &retry)
 		return
@@ -115,10 +115,11 @@ func (h *Handler) handleIntake(w http.ResponseWriter, r *http.Request, ar authRe
 }
 
 // validateIntakeRow applies SPEC-017 §5.2b to the persisted row bytes:
-// every window passes intake.ValidateWindow (complete, 30 days, ids,
-// parameters, floor, order), at most MaxEmittedWindows of them, no
-// duplicate id, and the histogram passes intake.ValidateFleetRAMJSON.
-func validateIntakeRow(unmatchedJSON, fleetJSON []byte) error {
+// every window passes intake.ValidateWindowAt (complete, 30 days, ids,
+// parameters, floor, order, closed no later than now), at most
+// MaxEmittedWindows of them, no duplicate id, and the histogram passes
+// intake.ValidateFleetRAMJSONAt (its window_end no later than now).
+func validateIntakeRow(unmatchedJSON, fleetJSON []byte, now time.Time) error {
 	var um intake.UnmatchedModels
 	if err := intake.DecodeClosed(unmatchedJSON, &um); err != nil {
 		return err
@@ -128,7 +129,7 @@ func validateIntakeRow(unmatchedJSON, fleetJSON []byte) error {
 	}
 	seen := map[string]struct{}{}
 	for _, w := range um.Windows {
-		if err := intake.ValidateWindow(w); err != nil {
+		if err := intake.ValidateWindowAt(w, now); err != nil {
 			return err
 		}
 		if _, dup := seen[w.WindowID]; dup {
@@ -136,7 +137,7 @@ func validateIntakeRow(unmatchedJSON, fleetJSON []byte) error {
 		}
 		seen[w.WindowID] = struct{}{}
 	}
-	return intake.ValidateFleetRAMJSON(fleetJSON)
+	return intake.ValidateFleetRAMJSONAt(fleetJSON, now)
 }
 
 func intakeStaleFor503(now, generatedAt time.Time) bool {

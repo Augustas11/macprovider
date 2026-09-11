@@ -160,7 +160,11 @@ func (m *Mux) dispatch(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet, http.MethodHead:
 	default:
-		w.Header().Set("Allow", "GET, HEAD, OPTIONS")
+		if endpoint == "intake" {
+			w.Header().Set("Allow", "GET, HEAD")
+		} else {
+			w.Header().Set("Allow", "GET, HEAD, OPTIONS")
+		}
 		writeError(w, r, http.StatusMethodNotAllowed, codeMethodNotAllowed, "method not allowed", now, nil)
 		return
 	}

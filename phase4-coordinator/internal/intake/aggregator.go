@@ -272,6 +272,34 @@ func DecodeClosed(raw []byte, v any) error {
 	return nil
 }
 
+// ValidateWindowAt is ValidateWindow plus the freshness half the wire
+// contract implies: a served window closed no later than now — a
+// future-dated persisted window is never evidence.
+func ValidateWindowAt(w Window, now time.Time) error {
+	if err := ValidateWindow(w); err != nil {
+		return err
+	}
+	if end, _ := ParseUTC(*w.WindowEnd); end.After(now) {
+		return fmt.Errorf("intake: window %s ends in the future", w.WindowID)
+	}
+	return nil
+}
+
+// ValidateFleetRAMJSONAt is ValidateFleetRAMJSON plus window_end ≤ now.
+func ValidateFleetRAMJSONAt(raw []byte, now time.Time) error {
+	if err := ValidateFleetRAMJSON(raw); err != nil {
+		return err
+	}
+	var f struct {
+		WindowEnd string `json:"window_end"`
+	}
+	_ = json.Unmarshal(raw, &f)
+	if end, _ := ParseUTC(f.WindowEnd); end.After(now) {
+		return errors.New("intake: fleet_ram window ends in the future")
+	}
+	return nil
+}
+
 // ValidateWindow checks a served or persisted window against the closed
 // wire contract (SPEC-017 §5.2b): complete, ids well-formed, parameters
 // valid with k fixed, buckets at most key_buckets, each bucket a normalized

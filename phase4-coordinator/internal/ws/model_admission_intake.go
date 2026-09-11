@@ -117,7 +117,7 @@ func BuildModelAdmissionIntakeRows(ctx context.Context, pairs []ModelAdmissionIn
 //
 //	(1) route        — SPEC-011 provisional admission `rejected`, or a
 //	                   persisted SPEC-032 canary sanction with fail_count > 0;
-//	(2) trust        — at least one hardware-trust root and none active at `at`;
+//	(2) trust        — no hardware-trust root active at `at` (expired, revoked, or never held);
 //	(3) payout       — no per-provider payout sanction exists in v0.1.6;
 //	(4) registration — a revoked SPEC-002 provider token and no active one.
 //
@@ -137,11 +137,11 @@ func (s *Server) providerIntakeSanctioned(ctx context.Context, providerID string
 		}
 	}
 	if s.hardwareTrustAdmin != nil {
-		held, active, err := s.hardwareTrustAdmin.ProviderHardwareTrustState(ctx, providerID, at)
+		_, active, err := s.hardwareTrustAdmin.ProviderHardwareTrustState(ctx, providerID, at)
 		if err != nil {
 			return false, fmt.Errorf("hardware trust: %w", err)
 		}
-		if held && !active {
+		if !active {
 			return true, nil
 		}
 	}
@@ -167,24 +167,16 @@ func (s *Server) providerIntakeSanctioned(ctx context.Context, providerID string
 	return false, nil
 }
 
-// providerIntakeEligible is R009's counting eligibility: not sanctioned,
-// and — when the deployment operates hardware trust — holding an active
-// trust root at `at` (a never-trusted registration is not supply evidence).
+// providerIntakeEligible is R009's counting eligibility: not sanctioned by
+// the predicate above, whose trust category already requires an active
+// root at `at` whenever the deployment operates hardware trust (a
+// never-trusted registration is not supply evidence).
 func (s *Server) providerIntakeEligible(ctx context.Context, providerID string, at time.Time) (bool, error) {
 	sanctioned, err := s.providerIntakeSanctioned(ctx, providerID, at)
-	if err != nil || sanctioned {
+	if err != nil {
 		return false, err
 	}
-	if s.hardwareTrustAdmin != nil {
-		_, active, err := s.hardwareTrustAdmin.ProviderHardwareTrustState(ctx, providerID, at)
-		if err != nil {
-			return false, fmt.Errorf("hardware trust: %w", err)
-		}
-		if !active {
-			return false, nil
-		}
-	}
-	return true, nil
+	return !sanctioned, nil
 }
 
 // buildModelAdmissionIntakeSnapshot materializes the aggregate as one
@@ -255,7 +247,12 @@ func (s *Server) currentModelAdmissionIntake() (*modelAdmissionIntakeSnapshot, b
 	s.modelAdmissionIntakeMu.RLock()
 	snap := s.modelAdmissionIntake
 	s.modelAdmissionIntakeMu.RUnlock()
-	if snap == nil || s.now().UTC().Sub(snap.generatedAt) > modelAdmissionIntakeStaleAfter {
+	// Freshness is two-sided: a snapshot older than two cadences OR dated
+	// in the future (clock step) is unavailable, never served as current.
+	if snap == nil {
+		return nil, false
+	}
+	if age := s.now().UTC().Sub(snap.generatedAt); age > modelAdmissionIntakeStaleAfter || age < 0 {
 		return nil, false
 	}
 	return snap, true

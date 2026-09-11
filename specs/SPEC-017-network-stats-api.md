@@ -1,7 +1,7 @@
 # SPEC-017 — Network Stats API
 
-**Version:** 0.2.1 (2026-09-11, **DRAFT** — BYOM v0.2 slice 5 (#1453): adopts the SPEC-023 §16.2(a) `unmatched_model_request_count` field contract by amendment and adds the partner-keyed catalog-intake read model `GET /v1/stats/intake` (§5.2b). v0.2.0 (2026-08-19, issue #1063) added the public routability read models. v0.1.9 remains the last locked baseline.)
-**Status:** **DRAFT** v0.2.1 — locked, together with the header and change-log lifecycle markers, only when the three-lane SPEC audit for #1453 slice 5 reaches 0 C / 0 H / 0 M; until then v0.1.9 remains the last locked baseline while the v0.2.0 routability read models are implemented and deployed and `CONFORMANCE.json` lists SPEC-017 as normative. v0.2.1 adds one partner-keyed endpoint, one rollup component, one request-path-readable table, and an in-process buyer-request aggregator whose only output is that table. It changes no public projection, no buyer routing behavior, and no operator-only `/poolz` semantics.
+**Version:** 0.2.1 (2026-09-11 — BYOM v0.2 slice 5 (#1453): adopts the SPEC-023 §16.2(a) `unmatched_model_request_count` field contract by amendment and adds the partner-keyed catalog-intake read model `GET /v1/stats/intake` (§5.2b). v0.2.0 (2026-08-19, issue #1063) added the public routability read models. v0.1.9 remains the last locked baseline.)
+**Status:** normative v0.2.1 — LOCKED 2026-09-11 after the #1453 slice 5 SPEC audit reached 0 C / 0 H / 0 M (three codex rounds, an independent cold-context review, three codex closure passes; records in `audits/2026-09-11-byom-v02-slice5/`). `CONFORMANCE.json` records this version, which is what SPEC-023 §16.7 keys the buyer-demand signal on; the v0.2.0 routability read models remain implemented and deployed under it. v0.2.1 adds one partner-keyed endpoint, one rollup component, one request-path-readable table, and an in-process buyer-request aggregator whose only output is that table. It changes no public projection, no buyer routing behavior, and no operator-only `/poolz` semantics.
 **Depends on:** SPEC-023 v0.10.4 (§16.2(a) `unmatched_model_request_count` field contract, items 1–10 and S1–S5, adopted by v0.2.1 §5.2b at THAT version — a later SPEC-023 edit binds this SPEC only through an explicit SPEC-017 amendment; §16.4 `INTAKE_K_ANONYMITY_MIN`), SPEC-002 v1.4 (coordinator binary hosts the new `/v1/stats/*` mount; §4.2 §7.2 isolation seams), SPEC-005 v0.3 (billing settlement defines `work` $ semantics in §5.1 and tokens-out accounting in §11.4), SPEC-006 v0.9 (version-prefix path style and public-surface conventions; SPEC-017 does NOT claim error-envelope compatibility with SPEC-006 — see §5.9), SPEC-014 v0.8 (provider portal consumes own-provider exact earnings via its own surfaces — visibility-toggle UI is a follow-up SPEC-014 v0.9 candidate, not in this SPEC), SPEC-016 v0.1.19 (payout pipeline; v0.1.19 does NOT normatively define a `rewards` split — SPEC-017 defers that source semantic to operator-defined ledger per §9.1a + Q13).
 
 ---
@@ -1095,9 +1095,11 @@ a request carrying any query parameter returns `400` `bad_request`.
 All three refusals are padded to the §5.4.3 rule-4 auth-failure latency
 floor, so an unlisted or provider-bound key is indistinguishable from a
 non-existent one by timing as well as by shape. A persisted row is served
-only after a read-side check of this contract (every window valid, at
-most 3, the histogram's eleven floors with counts reconciling); a row
-that fails it answers the `stats_stale` 503 and nothing of its content.
+only after a read-side check of this contract (every window valid and
+closed no later than now, at most 3, the histogram's eleven floors with
+counts reconciling and its `window_end` no later than now); a row that
+fails it, or whose `generated_at` is in the future, answers the
+`stats_stale` 503 and nothing of its content — freshness is two-sided.
 `HEAD` follows §4.3. `OPTIONS` is NOT a preflight this surface can
 answer: an enabled endpoint refuses it with `405` `method_not_allowed`,
 `Allow: GET, HEAD`, and no `Access-Control-*` header; a disabled endpoint
@@ -1106,7 +1108,7 @@ answer: an enabled endpoint refuses it with `405` `method_not_allowed`,
 
 **Response headers.** `Cache-Control: private, max-age=900` (no
 `s-maxage`: the response is private to the key and MUST NOT be stored by
-a shared cache — this endpoint, like §5.2a, is exempt from §1.5 C5);
+a shared cache — this endpoint is exempt from §1.5 C5);
 `Vary: Accept-Encoding, Origin, Authorization`; `ETag` per §5.4
 partner-projection rules. **CORS: none.** This surface is read by the
 operator's release tooling, never by a browser: a `200` carries NO
@@ -1420,7 +1422,9 @@ suppressed, every bucket a grammar-conforming key with
 representations (on one side or across both), or any other violation
 fails the tick closed: it writes nothing, so a malformed or tampered
 persisted row can never resurrect a suppressed key or a partial window.
-The 3-window and 90-day bounds apply after the merge. A restart
+A window whose `window_end` is after the tick time is likewise a
+violation (a future-dated row is not evidence). The 3-window and 90-day
+bounds apply after the merge. A restart
 therefore loses no complete window that was already persisted. The
 `intake` component runs on a **15-minute cadence** (§9.2), but
 `fleet_ram` is materialized only once per 30-day period (§5.2b.6) and
@@ -1599,7 +1603,8 @@ exactly one class, suppresses a class of one or two AND the smallest
 remaining class (a tie resolved to the highest floor), folds a sub-8 GB
 provider into `provider_suppressed` so `provider_total` equals the
 emitted counts plus `provider_suppressed`, excludes a profile reported
-outside the window (future-dated included), a provider with no trust
+outside the window, including one whose `last_reported_at` is after
+`window_end`, a provider with no trust
 root, and a provider whose only root expired before `window_end`, is
 materialized once per 30-day period (a histogram persisted in the
 current period is re-persisted byte-identical; one from a previous

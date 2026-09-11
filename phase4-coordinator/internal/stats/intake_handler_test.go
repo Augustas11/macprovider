@@ -53,7 +53,7 @@ func partnerAuth(id int64, providerBound bool) authResult {
 }
 
 func TestIntakeHandlerRequiresListedNonProviderBoundPartnerKey(t *testing.T) {
-	now := time.Unix(1_700_000_000, 0).UTC()
+	now := time.Date(2026, 9, 12, 0, 0, 0, 0, time.UTC)
 	h := intakeHandlerFixture(t, now.Add(-10*time.Second), now)
 	get := func(ar authResult, rawQuery string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodGet, "/v1/stats/intake"+rawQuery, nil)
@@ -155,7 +155,7 @@ func TestIntakeHandlerRequiresListedNonProviderBoundPartnerKey(t *testing.T) {
 }
 
 func TestIntakeHandlerDisabledAndStale(t *testing.T) {
-	now := time.Unix(1_700_000_000, 0).UTC()
+	now := time.Date(2026, 9, 12, 0, 0, 0, 0, time.UTC)
 	h := intakeHandlerFixture(t, now.Add(-10*time.Second), now)
 	h.IntakeEnabled = false
 	req := httptest.NewRequest(http.MethodGet, "/v1/stats/intake", nil)
@@ -170,10 +170,17 @@ func TestIntakeHandlerDisabledAndStale(t *testing.T) {
 	if rr.Code != http.StatusServiceUnavailable || !strings.Contains(rr.Body.String(), "stats_stale") {
 		t.Fatalf("stale: status=%d body=%s, want 503 stats_stale", rr.Code, rr.Body.String())
 	}
+	// Freshness is two-sided: a row generated in the future is not fresh.
+	future := intakeHandlerFixture(t, now.Add(10*time.Minute), now)
+	rr = httptest.NewRecorder()
+	future.handleIntake(rr, req, partnerAuth(7, false))
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("future generated_at: status=%d, want 503", rr.Code)
+	}
 }
 
 func TestIntakeEndpointUnknownWhenDisabledAtMux(t *testing.T) {
-	now := time.Unix(1_700_000_000, 0).UTC()
+	now := time.Date(2026, 9, 12, 0, 0, 0, 0, time.UTC)
 	h := intakeHandlerFixture(t, now.Add(-10*time.Second), now)
 	m := &Mux{h: h, authFailLimit: newLimiterWithBounds(10, time.Minute), publicLimit: newLimiterWithBounds(10, time.Minute), partnerLimit: newLimiterWithBounds(10, time.Minute), preflightLimit: newLimiterWithBounds(10, time.Minute), preflightRPM: 10}
 	m.WithIntake(false, nil)
@@ -203,7 +210,7 @@ func TestIntakeEndpointUnknownWhenDisabledAtMux(t *testing.T) {
 // the public rate tier: a 404 here would mean the path never reached the
 // handler at all.
 func TestIntakeEndpointRoutedThroughMuxRequiresPartnerKey(t *testing.T) {
-	now := time.Unix(1_700_000_000, 0).UTC()
+	now := time.Date(2026, 9, 12, 0, 0, 0, 0, time.UTC)
 	h := intakeHandlerFixture(t, now.Add(-10*time.Second), now)
 	m := &Mux{h: h, authFailLimit: newLimiterWithBounds(10, time.Minute), publicLimit: newLimiterWithBounds(1, time.Minute), partnerLimit: newLimiterWithBounds(10, time.Minute), preflightLimit: newLimiterWithBounds(10, time.Minute), preflightRPM: 10}
 	m.WithIntake(true, []int64{7})
@@ -221,8 +228,8 @@ func TestIntakeEndpointRoutedThroughMuxRequiresPartnerKey(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/v1/stats/intake", nil)
 	rr := httptest.NewRecorder()
 	m.Handler().ServeHTTP(rr, req)
-	if rr.Code != http.StatusMethodNotAllowed {
-		t.Fatalf("POST: status=%d, want 405", rr.Code)
+	if rr.Code != http.StatusMethodNotAllowed || rr.Header().Get("Allow") != "GET, HEAD" {
+		t.Fatalf("POST: status=%d allow=%q, want 405 / GET, HEAD", rr.Code, rr.Header().Get("Allow"))
 	}
 	// Key-less refusals are metered by the auth-failure bucket (300/min
 	// per IP per endpoint), never left unmetered: the 301st is a 429.
@@ -257,7 +264,7 @@ func TestIntakeEndpointRoutedThroughMuxRequiresPartnerKey(t *testing.T) {
 // A persisted row that fails the closed contract — a sub-floor bucket, a
 // stray window key, a histogram that does not reconcile — is never served.
 func TestIntakeHandlerRefusesMalformedPersistedRow(t *testing.T) {
-	now := time.Unix(1_700_000_000, 0).UTC()
+	now := time.Date(2026, 9, 12, 0, 0, 0, 0, time.UTC)
 	for name, mutate := range map[string]func(u, f string) (string, string){
 		"sub-floor bucket": func(u, f string) (string, string) {
 			return strings.Replace(u, `"lower_bound":311,"count":311`, `"lower_bound":3,"count":3`, 1), f
@@ -273,6 +280,12 @@ func TestIntakeHandlerRefusesMalformedPersistedRow(t *testing.T) {
 		},
 		"fleet sub-k class": func(u, f string) (string, string) {
 			return u, strings.Replace(f, `"provider_count":5`, `"provider_count":2`, 1)
+		},
+		"future window": func(u, f string) (string, string) {
+			return strings.Replace(strings.Replace(u, `"window_start":"2026-08-01T00:00:00Z"`, `"window_start":"2031-08-01T00:00:00Z"`, 1), `"window_end":"2026-08-31T00:00:00Z"`, `"window_end":"2031-08-31T00:00:00Z"`, 1), f
+		},
+		"future fleet": func(u, f string) (string, string) {
+			return u, strings.Replace(strings.Replace(f, `"window_start":"2026-08-12T00:00:00Z"`, `"window_start":"2031-08-12T00:00:00Z"`, 1), `"window_end":"2026-09-11T00:00:00Z"`, `"window_end":"2031-09-11T00:00:00Z"`, 1)
 		},
 	} {
 		h := intakeHandlerFixture(t, now.Add(-10*time.Second), now)

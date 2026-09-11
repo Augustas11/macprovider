@@ -213,6 +213,11 @@ func TestMergeIntakeWindowsValidatesAndFailsClosedOnConflict(t *testing.T) {
 			t.Fatalf("incomplete persisted window must fail closed, got %v", err)
 		}
 	}
+	// A window that ends after now is not evidence on either side.
+	future := completeWindow(strings.Repeat("9", 32), now.Add(-10*24*time.Hour).Format(time.RFC3339))
+	if _, err := MergeIntakeWindows(nil, []intake.Window{future}, now); !errors.Is(err, ErrIntakeWindowInvalid) {
+		t.Fatalf("future-dated persisted window must fail closed, got %v", err)
+	}
 	// A sub-floor bucket in a persisted window can never resurrect.
 	subFloor := completeWindow(idA, "2026-08-01T00:00:00Z")
 	subFloor.Buckets = []intake.Bucket{{ModelKey: "some-key", LowerBound: 10, Count: 12, Error: 2}}

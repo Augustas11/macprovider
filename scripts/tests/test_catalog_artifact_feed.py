@@ -3334,6 +3334,20 @@ class IntakeDecisionManifestTest(unittest.TestCase):
                 artifact_obj=None, demand_obj={"rows": {}}, demand_bytes=b"", previous_tiers=None, audit_dir=None)
         self.assertIn("duplicate object key", str(ctx.exception))
 
+    def test_bucket_ordering_is_part_of_the_wire_contract(self):
+        src = self.stats_source(buckets=[
+            {"model_key": "b-key", "lower_bound": 300, "count": 300, "error": 0},
+            {"model_key": "a-key", "lower_bound": 300, "count": 300, "error": 0},
+        ])
+        self.stats_bytes = self.write("stats-intake.json", src)
+        entry = self.admit_entry()
+        entry["signals"]["unmatched_model_request_source_sha256"] = catalog_release.sha256(self.stats_bytes)
+        entry["signals"]["fleet_fit_source_sha256"] = catalog_release.sha256(self.stats_bytes)
+        entry["signals"]["unmatched_model_request_count"] = None
+        entry["signals"]["unmatched_model_request_absent_reason"] = "no_observations"
+        self.rejects(self.manifest([entry]), "ordered by lower_bound descending")
+        self.stats_bytes = self.write("stats-intake.json", self.stats_source())
+
     def test_fleet_fit_ppm_is_floored_to_the_grid(self):
         # 9 of 12 fit exactly (750 000); 7 of 12 (583 333) floors to 550 000.
         src = self.stats_source()

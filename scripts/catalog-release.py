@@ -3606,6 +3606,10 @@ def validate_stats_intake_source(data: bytes) -> dict:
             error = _intake_int(bk["error"], f"{blabel}.error")
             if lower != count - error or lower < params["buyer_request_floor"]:
                 fail(f"{blabel}: lower_bound must equal count - error and clear buyer_request_floor")
+            if bindex > 0:
+                prev = w["buckets"][bindex - 1]
+                if prev["lower_bound"] < lower or (prev["lower_bound"] == lower and prev["model_key"].encode() > bk["model_key"].encode()):
+                    fail(f"{label}.buckets must be ordered by lower_bound descending, then model_key ascending")
         other = _intake_closed(w["other_suppressed"], STATS_INTAKE_OTHER_KEYS, f"{label}.other_suppressed")
         _intake_int(other["request_count"], f"{label}.other_suppressed.request_count")
         _intake_int(other["distinct_key_count"], f"{label}.other_suppressed.distinct_key_count")

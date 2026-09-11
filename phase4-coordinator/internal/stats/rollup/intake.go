@@ -147,7 +147,8 @@ var ErrIntakeWindowInvalid = errors.New("intake: window fails the wire contract"
 
 // MergeIntakeWindows merges the aggregator's complete windows into the
 // persisted set by window_id (SPEC-017 §5.2b.5). Every window on either
-// side is validated against the closed wire contract (intake.ValidateWindow)
+// side is validated against the closed wire contract (intake.ValidateWindowAt:
+// shape, and closed no later than now — a future-dated window is rejected)
 // and an invalid one fails the merge; an id appearing twice on one side or
 // on both sides must carry identical bytes (else ErrIntakeWindowConflict).
 // The result is ordered by descending window_start (ties by id), at most
@@ -156,7 +157,7 @@ var ErrIntakeWindowInvalid = errors.New("intake: window fails the wire contract"
 func MergeIntakeWindows(current []intake.Window, persisted []intake.Window, now time.Time) ([]intake.Window, error) {
 	byID := make(map[string]intake.Window, len(current)+len(persisted))
 	add := func(w intake.Window) error {
-		if err := intake.ValidateWindow(w); err != nil {
+		if err := intake.ValidateWindowAt(w, now); err != nil {
 			return fmt.Errorf("%w: %v", ErrIntakeWindowInvalid, err)
 		}
 		if existing, ok := byID[w.WindowID]; ok {
