@@ -1,6 +1,15 @@
 # SPEC-001 — Phase 3 Binary: Mac Provider Inference CLI
 
-**Version:** 1.9.10 (2026-09-11, Build 1 catalog preparation authority correction)
+**Version:** 1.9.11 (2026-09-12, Build 1 catalog preparation authority closure)
+
+**Change log v1.9.11 (2026-09-12, Build 1 catalog preparation authority
+closure):** Makes the catalog-economics compatibility matrix complete: a read
+is permitted only after one exclusive complete capability/token pair, and both
+generations' partial pairs, a dual-generation advertisement, and disagreement
+between the manifest and local status fall back without a catalog-economics
+call. It also bounds production-adapter stdout, stderr, JSONL partial lines,
+and delivery backpressure while keeping attached action workers independent
+from catalog refresh cancellation.
 
 **Change log v1.9.10 (2026-09-11, Build 1 catalog preparation authority
 correction):** Assigns the catalog-economics invocation contract stable
@@ -3316,19 +3325,47 @@ NOT kill the worker. No `models transactions` family, public transaction-status
 schema, public crash or late-cancellation state, authority-refresh frame,
 daemon, background service, or new control-socket frame is part of this
 contract. A v2 Malibu invokes the unchanged read form only after observing the
-complete v2 pair; otherwise it invokes v1 only after observing the complete v1
-pair, and otherwise uses the legacy static fallback without a catalog-economics
-call. Therefore an old v1 Malibu paired with a new v2-only CLI makes no
+complete v2 pair in both the command-schema manifest and fresh local status;
+otherwise it invokes v1 only after observing the complete v1 pair in both
+surfaces, and otherwise uses the legacy static fallback without a
+catalog-economics call. The two surfaces MUST advertise byte-identical complete
+pairs. A capability without its token, a token without its capability, either
+partial generation combined with any value from the other generation, both
+complete generations, any other mixed-generation set, or disagreement between
+manifest and local status is malformed and MUST NOT trigger a read or mutation.
+Therefore an old v1 Malibu paired with a new v2-only CLI makes no
 catalog-economics call and uses its static fallback, while a new Malibu paired
 with an old v1-only CLI requests and strictly decodes v1 without attempting v2
 actions. Partial, conflicting, or dual-generation advertisement is malformed
 and uses the static fallback with no mutation call. Production-boundary tests
 MUST launch the built CLI through Malibu's production process adapter and prove
-these four cases, including exact stdout, stderr, exit status, and strict
+the complete matrix below, including exact stdout, stderr, exit status, and strict
 decoder behavior. Clients lacking the exact v2 capability/token retain the
-existing fallback and MUST NOT invoke the v2 mutation options. SPEC-044 v0.2.1 owns the
+existing fallback and MUST NOT invoke the v2 mutation options. SPEC-044 v0.2.2
+owns the
 projection, event, cancellation-acknowledgement, preparation-copy, action, and
 storage-accounting contracts.
+
+The production-boundary compatibility matrix MUST include, for each v1 and v2,
+the complete exclusive pair, capability-only, and token-only cases; it MUST also
+include both complete pairs together, every mixed-generation partial set, and
+manifest/local-status disagreement in both directions. Only the two exclusive
+complete-pair cases may launch a catalog-economics read. All negatives MUST
+prove zero catalog-economics process launches and zero mutation calls.
+
+The production process adapter MUST bound every machine-output path. A read
+projection stdout object is capped at 4,194,304 bytes and a cancellation
+acknowledgement at 4,096 bytes. Run stdout MUST be decoded incrementally as
+UTF-8 JSONL without retaining whole-worker output; a partial line MUST be
+rejected as soon as it exceeds the SPEC-044 16,384-byte line cap. Stderr
+retention is capped at 65,536 bytes while the pipe continues to drain and
+discard excess bytes. Decoded event delivery MUST use a fixed-capacity queue
+with terminal capacity reserved and the coalescing/rate/backpressure contract
+owned by SPEC-044; it MUST NOT enqueue an unbounded MainActor task per line.
+Catalog refresh reads use app-owned request generations or serialization so an
+older completion cannot replace a newer projection. Cancelling a superseded
+refresh MUST NOT terminate, detach, or stop reading an already attached action
+worker.
 
 ### 6.15. Additive coordinator-wire surface reconciled in v1.7 and extended in v1.8
 
