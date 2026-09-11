@@ -484,7 +484,8 @@
         "SPEC-005",
         "SPEC-006",
         "SPEC-014",
-        "SPEC-016"
+        "SPEC-016",
+        "SPEC-023"
       ],
       "implementation_status": "pending-reconciliation",
       "production_status": "pending-verification",
