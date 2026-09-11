@@ -20,9 +20,11 @@ The first enableable scope is keyless fresh-conversation decode only:
   sticky/cross-turn state;
 - sticky-cache-eligible or cross-turn requests must be serial-routed with
   reason-coded `batching_unsupported` telemetry under `canary`, or rejected
-  fail-closed under strict `on`, until issue #887 lands;
-- no batched cross-turn cache reuse may serve before the SPEC-039
-  contiguous-cache runtime bridge exists;
+  fail-closed under strict `on`, until issue #1477 (SPEC-038 sticky/AC-19
+  consumer) lands **and** this runbook's first enableable scope is widened
+  in a later operator gate;
+- the SPEC-039 contiguous-cache primitive (FR-PKV10) already landed in
+  #887 / #1476; that merge did **not** lift keyed serving or enable canary;
 - no buyer receipt, usage, billing, model identity, settlement, or API schema
   field may change.
 
@@ -63,7 +65,9 @@ Stop and roll back to `continuous_batching: off` if any item below is true:
 - `serve` resolves to a worktree/debug binary or `default.metallib` is missing;
 - the SPEC-039 runtime bridge required for the tested path is unavailable;
 - the requested tuple is absent from the local SPEC-039 capability descriptor;
-- any sticky-cache or cross-turn request enters batching before #887 is closed;
+- any sticky-cache or cross-turn request enters batching before #1477 is
+  closed, or after #1477 lands but before this runbook's first enableable
+  scope is explicitly widened past keyless fresh-conversation decode;
 - any token, stop condition, cancellation, usage field, receipt field, or
   request-log terminal state is attributed to the wrong request;
 - a batch failure and serial retry produce stitched buyer-visible output or a
@@ -85,7 +89,7 @@ only.
 | Hardware tuple | Mac model, chip, RAM, macOS build, power state, thermal state, swap state, and Entry 110 `max_concurrency_override`. |
 | Model tuple | served model id, model SHA-256, tokenizer/template identity when present, cache class, KV dtype, `kv_bits` absence, MoE requirement, metallib SHA-256, kernel identifier, parity label, and pool epoch. |
 | Local descriptor | SPEC-039 descriptor showing the exact tuple is admitted; unsupported tuples must show fail-closed or reason-coded serial routing. |
-| Fresh-conversation scope | Requests used for the batched proof carry no conversation key; separate keyed/sticky/cross-turn requests show canary serial routing or strict rejection with `sticky_cache_bridge_unavailable` or an equivalent #887-gated reason. |
+| Fresh-conversation scope | Requests used for the batched proof carry no conversation key; separate keyed/sticky/cross-turn requests show canary serial routing or strict rejection with `sticky_cache_bridge_unavailable` or an equivalent #1477-gated reason until that consumer lands **and** this runbook widens first enableable scope. |
 | MSB-01..05 | Full harness output for MSB-01 single-stream baseline plus MSB-02, MSB-03, MSB-04, and MSB-05. Aggregate TG is total decoded tokens over common wall-clock, warm-up excluded; per-stream and aggregate TG stay separate. |
 | MoE promotion | A descriptor-admitted MoE tuple still fails closed in strict mode (or reason-coded serial-routes in canary) until the representative AC-23 correctness fixture and live-model MSB-04 evidence have landed in a separately reviewed activation change. |
 | Usage/receipt attribution | Concurrent distinct requests prove correct `prompt_tokens`, `output_tokens`, `cached_prompt_tokens`, stop reason, cancellation state, request id, receipt model hash, and settlement inputs with zero cross-request attribution. |
@@ -188,7 +192,8 @@ Hardware tuple:
 Model tuple:
 Entry 110 slots_total:
 SPEC-039 descriptor hash / tuple admission:
-#887 bridge status:
+#887 FR-PKV10 primitive status (landed #1476; not an enable signal):
+#1477 sticky/AC-19 consumer status:
 Fresh-conversation scope proof:
 MSB-01:
 MSB-02:

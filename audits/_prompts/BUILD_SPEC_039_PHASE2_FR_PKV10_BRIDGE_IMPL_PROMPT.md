@@ -1,8 +1,9 @@
 # BUILD: SPEC-039 Phase-2 — runtime bridge + FR-PKV10 contiguous-KVCache extraction (issue #887)
 
 > **2026-09-11 — do not follow this bundled handoff.**
-> Increment 1 landed in #1475. Execute Increment 2 / [#887](https://github.com/Augustas11/macprovider/issues/887) from
-> `audits/_prompts/BUILD_SPEC_039_PHASE2_INCREMENT2_FR_PKV10_IMPL_PROMPT.md`.
+> Increment 1 landed in #1475. Increment 2 / #887 landed in #1476.
+> Execute Increment 3 / [#1477](https://github.com/Augustas11/macprovider/issues/1477) from
+> `audits/_prompts/BUILD_SPEC_038_INCREMENT3_STICKY_AC19_IMPL_PROMPT.md`.
 > Closed drafts #889 / #894 must not be revived.
 
 Author: operator (a11) + Claude session 2026-08-04
