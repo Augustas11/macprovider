@@ -18,7 +18,7 @@ choose them.
 - The **verdict is read from `earning_path_class` on the wire** — never re-derived
   from runtime model names, provider-proposed prices, or `admission_state` alone
   (§6.14a, SPEC-047-R004).
-- All 13 machine `admission_state` values stay in `--json` unchanged; this table is
+- All 12 machine `admission_state` values stay in `--json` unchanged; this table is
   the HUMAN/Malibu presentation layer only.
 - **Actions** (Switch/Prepare/Evaluate/Adopt/Offer/Withdraw) obey SPEC-044-R006/R007:
   exposed only when the CLI returns a typed transaction for that exact row; a row with
@@ -38,7 +38,7 @@ test reference only — the wire value is authoritative and is what the verdict 
 
 | admission_state | source | Label | One-line meaning | expected earning_path_class |
 |---|---|---|---|---|
-| `local_only` | local_default | Local only | Installed and usable on this Mac; not offered to the network. | local_inventory_only |
+| `local_only` | local_default | Local only | Retained as local inventory only; this admission state does not claim the model is prepared, installed, ready, reachable, or usable. | local_inventory_only |
 | `not_offered` | local_default | Not offered | Discovered but never offered to the network. | local_inventory_only |
 | `offerable` | local_default | Ready to offer | Passes local checks; you can submit an offer to the network. | local_inventory_only |
 | `offer_submitted` | coordinator | Offer submitted | The coordinator has your offer and is deciding. | not_earning_yet_catalog_or_receipt_path_exists |
@@ -63,6 +63,9 @@ test reference only — the wire value is authoritative and is what the verdict 
 - For `settlement_capable`, preserve conditional eligibility: never imply the
   model is prepared, currently serving, receiving demand, currently earning, or
   guaranteed to receive or settle a request.
+- `local_only` is an admission disclosure only. Render installed, usable,
+  readiness, reachability, or preparation claims solely from independently
+  validated readiness/runtime evidence for the same candidate and projection.
 - `state_label_key` / `state_meaning_key` are localization-safe keys; the strings above
   are the en source values. They MUST NOT carry raw prompts, completions, paths,
   endpoints, or secrets.

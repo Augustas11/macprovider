@@ -1,12 +1,12 @@
 # SPEC-044 - Malibu Model Catalog Economics
 
-**Version:** 0.2.3
+**Version:** 0.2.4
 
 ```json
 {
   "spec_id": "SPEC-044",
   "title": "Malibu Model Catalog Economics",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "path": "specs/SPEC-044-malibu-model-catalog-economics.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -36,7 +36,7 @@
     "verdict": "DECISION_REQUIRED",
     "owner": "@Augustas11",
     "issue": "https://github.com/Augustas11/macprovider/issues/614",
-    "rationale": "The operator-owned v0.2.3 authority resolves the accepted formal Build 1 findings across conditional earning eligibility, catalog-only trust, ACL creation, bounded cancellation, total ranking, and continuous-lock cleanup. Implementation, complete tests, signed release evidence, and the discovery/admission/settlement journeys remain pending."
+    "rationale": "The operator-owned v0.2.4 authority resolves the accepted formal Build 1 findings across conditional earning eligibility, exact catalog-only trust isolation, ACL creation, bounded cancellation, one authoritative total ranking, and canonically bound continuous-lock cleanup. Implementation, complete tests, signed release evidence, and the discovery/admission/settlement journeys remain pending."
   }
 }
 ```
@@ -273,10 +273,20 @@ ascending `artifact_identity_digest`. A `reclaimable` entry MUST have one
 available `cleanup_published_artifact` action carrying the same artifact digest
 and `estimated_bytes`; a `protected` entry MUST have an unavailable action and
 exact reason. Missing or stale receipt identity, malformed inventory, or
-overflow makes the array empty and all published cleanup unavailable. A row
-cleanup action, if retained, MUST be a byte-identical projection of its
-corresponding top-level entry; Malibu MUST de-duplicate them by
-`artifact_identity_digest` and keep one reachable action. Absence from the
+overflow makes the array empty and all published cleanup unavailable.
+`row.cleanup_published`, if retained, MUST be byte-for-byte identical to
+`cleanup_targets[i].cleanup` after each of those two closed action objects is
+serialized as UTF-8 RFC 8785 JSON Canonicalization Scheme (JCS) bytes.
+Implementations MUST reject duplicate or unknown action-object member names
+and invalid/noncanonical numeric values before this comparison. Separately,
+`row.cleanup_published.artifact_identity_digest` and
+`cleanup_targets[i].cleanup.artifact_identity_digest` MUST each equal the
+enclosing `cleanup_targets[i].artifact_identity_digest`, and both action
+`estimated_bytes` values MUST each equal the enclosing
+`cleanup_targets[i].estimated_bytes`. Thus the nested action equality cannot
+substitute for the destructive target's digest and size binding. Malibu MUST
+de-duplicate the two action projections by `artifact_identity_digest` and
+keep one reachable action. Absence from the
 current signed catalog MUST NOT make a reclaimable verified identity
 unreachable.
 
@@ -686,7 +696,10 @@ A v2 row with a valid locally motivated `prepare_model` action MUST remain
 visible in `Needs preparation` regardless of its non-trusted economics state;
 its ordering MUST ignore rate, payout, provider share, and demand fields.
 
-The authoritative total row order is the following tuple, compared in order:
+The authoritative total row order is the following tuple, compared in order.
+This R005 tuple is the sole row-ordering authority; no recommendation rank,
+display name/id, localized comparison, or second bucket/ranking tuple may
+precede, replace, extend, or break ties after it:
 
 1. the R008 section rank `Current` = 0, `Ready` = 1, `Network catalog` = 2,
    `Needs preparation` = 3, and `Blocked` = 4, ascending;
@@ -817,6 +830,14 @@ managed-budget/free-space refusal, legacy accounting/protection, digest-bound
 published cleanup, bounded complete cleanup-target reachability, and the
 absence of automatic garbage collection.
 
+Published-cleanup tests MUST positively compare `row.cleanup_published` with
+the matching `cleanup_targets[i].cleanup` as UTF-8 RFC 8785 JCS bytes and then
+independently compare both action digests and exact logical byte counts with the
+enclosing target. One-fault negatives MUST reject a changed enclosing or action
+digest, enclosing or action size, transaction kind or transaction id, and every
+other changed action field, including an otherwise valid action attached to a
+different target.
+
 The release test corpus MUST additionally prove all of the following exact
 boundaries:
 
@@ -835,10 +856,21 @@ boundaries:
   state timestamp, future source time, and the 300-second freshness boundary;
   exercise every matrix branch with verbatim SPEC-046/SPEC-047 guidance and
   prove guidance renders first. Accept all-null candidate/guidance/binding only
-  for a true catalog-only row and prove it remains non-trusted with every
-  money-facing and demand field null and every candidate-dependent action
-  unavailable, even with a valid signed rate row or an unrelated coordinator
-  admission event; reject every partial-null combination, every attempted
+  for a true catalog-only row and require the exact sentinel:
+  `runtime_state: "catalog"`, null `action_model_id`,
+  `economics_state: "unavailable"`, `rate_source: "none"`, admission
+  `source: "local_default"` plus `state: "not_offered"`, null
+  `coordinator_event_id` and `state_observed_at`, false
+  `catalog_economics_permitted` and `settlement_capable`, all nullable
+  rate-card/rate/share/payout fields null, all demand fields null, every action
+  unavailable, and no earning or readiness claim. Apply one-fault negatives for
+  every other known or unknown economics state, rate source, admission source or
+  state, non-null event or observation time, either authorization boolean set
+  true, any non-null money/demand field, non-catalog runtime state, non-null
+  `action_model_id`, any non-null member of the
+  candidate/guidance/binding group, or any available action, including with a
+  valid signed rate row or an unrelated coordinator admission event. Reject
+  every partial-null combination, every attempted
   model-key/display-name/served-name/cross-candidate admission join, and every
   candidate/local-action row with the group absent;
 - exercise `local_default:not_offered`, `coordinator:not_offered`, and both
@@ -950,13 +982,13 @@ The first journey id is `JOURNEY-MALIBU-MODEL-ECONOMICS`. The journey should cov
 
 | Requirement/domain | Verdict | Owner | Issue | Evidence needed |
 |---|---|---|---|---|
-| `SPEC-044-R001..R012` | `DECISION_REQUIRED` | `@Augustas11` | `#614` | Implement the approved v0.2.3 projection, transaction, cancellation, preparation-copy, cleanup, and accounting authority; then decide promotion only after automated tests and signed release evidence. |
+| `SPEC-044-R001..R012` | `DECISION_REQUIRED` | `@Augustas11` | `#614` | Implement the approved v0.2.4 projection, transaction, cancellation, preparation-copy, cleanup, and accounting authority; then decide promotion only after automated tests and signed release evidence. |
 | `malibu-model-economics-ux` | `DECISION_REQUIRED` | `@Augustas11` | `#614` | Implement the operator-approved CLI-owned projection and Malibu rendering without app-side feed verification; production enablement remains an operator decision. |
 | `SPEC-046/SPEC-047 integration` | `DECISION_REQUIRED` | `@Augustas11` | `#1240` | Approval that SPEC-044 is narrowed to network economics and does not own provider-local BYOM discovery or network admission. |
 
 ## 6. Evidence
 
-Current implementation evidence predates the v0.2.3 Build 1 authority and is
+Current implementation evidence predates the v0.2.4 Build 1 authority and is
 partial and non-conformant:
 
 - `phase3-binary/app/Sources/Malibu/ModelManagement/ModelManagement.swift` already capability-gates model management and classifies current, ready, preparation-required, and blocked rows, but its row schema does not carry rate-card economics.
@@ -986,6 +1018,12 @@ The app should preserve the current provider mental model: Malibu observes and a
 
 ## 8. Changelog and history
 
+- 0.2.4 - Corrects the formal v4 authority findings: R005 remains the sole
+  exact row-ranking tuple; catalog-only acceptance locks every exact null/false
+  sentinel field; local-only copy is admission-only; published cleanup compares
+  the row action to the target's nested action under UTF-8 RFC 8785 JCS and
+  separately binds the enclosing digest and size; and the closed admission
+  inventory is consistently 12 values. Conformance remains pending.
 - 0.2.3 - Corrects the formal v3 authority findings: conditional
   settlement-eligibility copy; catalog-only all-null rows remain non-trusted;
   descriptor-first ACL clearing before sensitive writes; a two-second monotonic

@@ -11,6 +11,131 @@ def read_text(path: str) -> str:
 
 
 class BYOMContractLockTests(unittest.TestCase):
+    def test_closed_admission_inventory_and_local_only_copy_are_truthful(self):
+        spec001 = read_text("specs/SPEC-001-phase3-binary.md")
+        spec046 = read_text("specs/SPEC-046-provider-byom-discovery.md")
+        handoff = read_text("audits/2026-09-11-byom-v02-handoffs/SLICE6_STATE_SURFACE_AND_COPY.md")
+
+        exact_enum = (
+            "`local_only`, `not_offered`, `offerable`, `offer_submitted`, "
+            "`offer_rejected`, `sandbox_probe_only`, `network_visible_unpriced`, "
+            "`network_admitted_unsettled`, `catalog_priced`, `settlement_capable`, "
+            "`withdrawn`, and `revoked`"
+        )
+        self.assertIn(exact_enum, spec046)
+        self.assertIn("the 12 machine admission states remain", spec001)
+        self.assertIn("All 12 machine `admission_state` values", handoff)
+        self.assertNotIn("13 machine admission states", spec001)
+        self.assertNotIn("All 13 machine `admission_state` values", handoff)
+
+        self.assertIn(
+            "The `local_only` admission state is not readiness evidence and MUST NOT by itself "
+            "be rendered as prepared, installed, ready, reachable, or usable.",
+            " ".join(spec001.split()),
+        )
+        self.assertIn(
+            "This admission state does not claim that the model is prepared, installed, ready, "
+            "reachable, or usable; those claims require the candidate's independent "
+            "readiness/runtime evidence.",
+            " ".join(spec046.split()),
+        )
+        self.assertIn(
+            "| `local_only` | local_default | Local only | Retained as local inventory only; "
+            "this admission state does not claim the model is prepared, installed, ready, "
+            "reachable, or usable. | local_inventory_only |",
+            " ".join(handoff.split()),
+        )
+        self.assertNotIn("Installed and usable on this Mac", handoff)
+
+        state_table = handoff.split("## State label + meaning copy", 1)[1].split(
+            "## Non-earning disclosure lines", 1
+        )[0]
+        rows = [line for line in state_table.splitlines() if line.startswith("| `")]
+        self.assertEqual(len(rows), 12)
+        for blocker in (
+            "`needs_weights`",
+            "`needs_runtime`",
+            "`requires_preparation`",
+            "`unreachable`",
+            "fit failure",
+            "adapter rejection",
+            "policy block",
+        ):
+            with self.subTest(blocker=blocker):
+                self.assertIn(blocker, spec046)
+
+    def test_catalog_only_sentinel_is_exact_and_fault_tested(self):
+        spec044 = read_text("specs/SPEC-044-malibu-model-catalog-economics.md")
+        contract = " ".join(spec044.split())
+
+        for required in (
+            '`runtime_state: "catalog"`',
+            'null `action_model_id`',
+            '`economics_state` to `unavailable`',
+            '`rate_source` to `none`',
+            '`source: "local_default"`',
+            '`state: "not_offered"`',
+            'null `coordinator_event_id`',
+            'null `state_observed_at`',
+            '`catalog_economics_permitted: false`',
+            '`settlement_capable: false`',
+            'all demand signals to null',
+            'Apply one-fault negatives for',
+            'every other known or unknown economics state, rate source, admission source or',
+            'either authorization boolean set',
+            'any non-null money/demand field',
+            'non-catalog runtime state, non-null `action_model_id`',
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, contract)
+
+    def test_r005_is_the_single_complete_ranking_oracle(self):
+        spec044 = read_text("specs/SPEC-044-malibu-model-catalog-economics.md")
+        self.assertEqual(spec044.count("The authoritative total row order"), 1)
+        ranking = spec044.split("The authoritative total row order", 1)[1].split(
+            "**SPEC-044-R006", 1
+        )[0]
+        ranking = " ".join(ranking.split())
+        ordered = (
+            "the R008 section rank",
+            "`provider_completion_payout_usd_per_million_tokens`, descending",
+            "`demand_rank`, ascending",
+            "`supply_deficit_score`, descending",
+            "`demand_weight`, descending",
+            "`ready_provider_count`, ascending",
+            "the unique canonical row identity, ascending",
+        )
+        positions = [ranking.index(fragment) for fragment in ordered]
+        self.assertEqual(positions, sorted(positions))
+        for required in (
+            "sole row-ordering authority",
+            "unsigned UTF-8 bytes",
+            "tagged wire tuple (`candidate`, `candidate_id`)",
+            "otherwise (`catalog`, `model_key`)",
+            "MUST contain no duplicate canonical row identity",
+            "Display names and locale-aware comparison APIs MUST NOT participate in this order",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, ranking)
+
+    def test_published_cleanup_action_has_canonical_exact_target_binding(self):
+        spec044 = read_text("specs/SPEC-044-malibu-model-catalog-economics.md")
+        contract = " ".join(spec044.split())
+        for required in (
+            "`row.cleanup_published`, if retained, MUST be byte-for-byte identical to",
+            "`cleanup_targets[i].cleanup`",
+            "UTF-8 RFC 8785 JSON Canonicalization Scheme (JCS) bytes",
+            "reject duplicate or unknown action-object member names",
+            "`row.cleanup_published.artifact_identity_digest`",
+            "`cleanup_targets[i].cleanup.artifact_identity_digest`",
+            "`cleanup_targets[i].estimated_bytes`",
+            "One-fault negatives MUST reject a changed enclosing or action",
+            "transaction kind or transaction id",
+            "every other changed action field",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, contract)
+
     def test_legacy_model_command_strings_remain_pinned(self):
         spec001 = read_text("specs/SPEC-001-phase3-binary.md")
         build_spec = read_text("specs/design/BUILD_SPEC_953_MALIBU_MODEL_SWITCHING.md")

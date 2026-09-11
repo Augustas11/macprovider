@@ -1,6 +1,11 @@
 # SPEC-001 — Phase 3 Binary: Mac Provider Inference CLI
 
-**Version:** 1.9.12 (2026-09-12, Build 1 catalog preparation authority correction)
+**Version:** 1.9.13 (2026-09-12, Build 1 catalog preparation oracle correction)
+
+**Change log v1.9.13 (2026-09-12, Build 1 catalog preparation oracle
+correction):** Corrects the closed admission-state inventory cardinality to 12.
+Readiness and usability remain independently evidenced candidate properties;
+the `local_only` admission label does not establish either property.
 
 **Change log v1.9.12 (2026-09-12, Build 1 catalog preparation authority
 correction):** Defines `settlement_capable` provider copy as conditional
@@ -3253,7 +3258,11 @@ the verdict line until admission or dry-run logic exists:
 - `local_inventory_only` -> **"Local only — not offered to the network"**.
 
 The verdict line is a v0.1 slice-1 contract requirement, not a later Malibu
-surface concern; the 13 machine admission states remain in `--json` unchanged.
+surface concern; the 12 machine admission states remain in `--json` unchanged.
+The `local_only` admission state is not readiness evidence and MUST NOT by itself
+be rendered as prepared, installed, ready, reachable, or usable. Any such claim
+MUST come from independently validated readiness/runtime fields for that same
+candidate and projection.
 Provider-facing human output MUST NOT imply earning from a candidate whose
 `earning_path_class` is `no_earning_path_in_v0_1` or `local_inventory_only`,
 consistent with SPEC-047-R004. Malibu and the CLI human surface MUST source the
@@ -3355,7 +3364,7 @@ and uses the static fallback with no mutation call. Production-boundary tests
 MUST launch the built CLI through Malibu's production process adapter and prove
 the complete matrix below, including exact stdout, stderr, exit status, and strict
 decoder behavior. Clients lacking the exact v2 capability/token retain the
-existing fallback and MUST NOT invoke the v2 mutation options. SPEC-044 v0.2.3
+existing fallback and MUST NOT invoke the v2 mutation options. SPEC-044 v0.2.4
 owns the
 projection, event, cancellation-acknowledgement, preparation-copy, action, and
 storage-accounting contracts.
