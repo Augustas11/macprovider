@@ -30,8 +30,8 @@ findings.
 | `current-state-evidence.md` | `build5-evidence-r6` | `141eccae93d374f54ae3fb95338d8202c5cd6504a34da61608e9411709851a51` |
 | `feasibility-assessment.md` | `build5-assessment-r6` | `d25b4cf9e4a4afa8e90e74c5fceabfc980b09536c02714b9a9ee6be866758993` |
 | `test-benchmark-spec.md` | `build5-benchmark-r6` | `3f52dc8802c0883fb06d3839b85bc7cd987473cb9039dc3a1a0fc49d6d22746c` |
-| `reviews/assessment-r5-sol.md` | failed independent R5 gate | `f4e78200c06a6ef54773d2e0b9e05d861dbcaa07eda9118f5d02e08a178ff2b0` |
-| `reviews/assessment-r5-dispositions-r6.md` | R6 corrections | `26153941e241f53de28a88b3dee9c5deb2a50ea3820c91d217a4846ed09c0b66` |
+| `reviews/assessment-r5-sol.md` | failed independent R5 gate | `0b90f8d254790b18f38a9f00c33666e7a3c266127af049609688c605e17574b9` |
+| `reviews/assessment-r5-dispositions-r6.md` | R6 corrections | `a1c7eb9ea79e1f2580ad815376ea632458ebee501775ed4e4bcaa26f2ec14991` |
 | `evidence/real-mlx-3b-exploratory-r3.log` | unchanged exploratory real MLX | `b7bc70a4b7f89b9620b08d1ffa7941a3c49e0fd6b1032f4440dd93dd9089dd95` |
 
 The fresh reviewer must recompute every digest from the committed tree. If a

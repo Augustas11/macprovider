@@ -5,7 +5,7 @@ Date: 2026-09-11
 Source review: `assessment-r4-sol.md`
 
 Source review SHA-256:
-`21399619f980cb5964d6fd2e98472b32fe9f9f6a815d2277985083b8540bef8e`
+`c9a77095519882d6200cb768a34d2e233fade860739f955269bf484fae3add5d`
 
 Correction revision: assessment/evidence/benchmark/checkpoint R5
 

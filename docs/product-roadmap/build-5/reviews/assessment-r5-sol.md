@@ -19,13 +19,17 @@ remote transfer, or economic action.
 | `feasibility-assessment.md` | `3418a419ea2123cd2196078e2c6fc9e2c51be405bfa65ed53e53607656bfbb60` |
 | `test-benchmark-spec.md` | `1d437557b9f05ccd03bab44183bcd08160f1010d5a4fd9d45f4e425bb4b564d5` |
 | `current-state-evidence.md` | `cd070f8cae3f9507b53bfba0faf351ca60c98e1b2976ebe61e9b782d91705c0d` |
-| `assessment-r4-dispositions-r5.md` | `9314bd85f727a77a9a5b4d5855a8ee1674acb2b819011bf74b610137776a1f38` |
-| `assessment-r4-sol.md` | `21399619f980cb5964d6fd2e98472b32fe9f9f6a815d2277985083b8540bef8e` |
+| `assessment-r4-dispositions-r5.md` | `c74237ce9e933e84d3f7e6032e72e2c1c53e16dbfa7d8fef8a7c072e2ba22df9` |
+| `assessment-r4-sol.md` | `c9a77095519882d6200cb768a34d2e233fade860739f955269bf484fae3add5d` |
 | `real-mlx-3b-exploratory-r3.log` | `b7bc70a4b7f89b9620b08d1ffa7941a3c49e0fd6b1032f4440dd93dd9089dd95` |
 
-All six digests matched the committed tree. The branch changes only durable
-Build 5 assessment artifacts relative to its stated source base. The reviewed
-commit was clean before this review artifact was created.
+At the original review, all six then-recorded digests matched the reviewed
+commit. The two predecessor-review rows now record the normalized current bytes
+described in `artifact-normalization-r7.md`; the other four rows remain the
+original frozen inputs. The normalized review chain requires fresh independent
+revalidation. The branch changes only durable Build 5 assessment artifacts
+relative to its stated source base. The reviewed commit was clean before this
+review artifact was created.
 
 ## Independent inspection
 

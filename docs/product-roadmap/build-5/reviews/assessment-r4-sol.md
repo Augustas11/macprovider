@@ -263,4 +263,3 @@ plan gate remains closed until H1-H2 and M1-M3 are corrected without reducing
 the existing correctness, hardware, memory, release, or claim boundaries and a
 fresh independent GPT-5.6 Sol review reports zero Critical, High, and Medium
 findings.
-

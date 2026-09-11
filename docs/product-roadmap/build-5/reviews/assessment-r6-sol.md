@@ -19,16 +19,18 @@ remote transfer, release, or economic action.
 | `feasibility-assessment.md` | `d25b4cf9e4a4afa8e90e74c5fceabfc980b09536c02714b9a9ee6be866758993` |
 | `test-benchmark-spec.md` | `3f52dc8802c0883fb06d3839b85bc7cd987473cb9039dc3a1a0fc49d6d22746c` |
 | `current-state-evidence.md` | `141eccae93d374f54ae3fb95338d8202c5cd6504a34da61608e9411709851a51` |
-| `assessment-r5-sol.md` | `f4e78200c06a6ef54773d2e0b9e05d861dbcaa07eda9118f5d02e08a178ff2b0` |
-| `assessment-r5-dispositions-r6.md` | `26153941e241f53de28a88b3dee9c5deb2a50ea3820c91d217a4846ed09c0b66` |
-| `resume-checkpoint.md` | `fb2c584164dac40f43a2a3ad37f25c644d250db7bbacbc43f9f5d93a78751a79` |
+| `assessment-r5-sol.md` | `0b90f8d254790b18f38a9f00c33666e7a3c266127af049609688c605e17574b9` |
+| `assessment-r5-dispositions-r6.md` | `a1c7eb9ea79e1f2580ad815376ea632458ebee501775ed4e4bcaa26f2ec14991` |
+| `resume-checkpoint.md` | `6553a93894465d31c12449160debaa0d295bfa0b05d3bf3486532189314ced86` |
 | `real-mlx-3b-exploratory-r3.log` | `b7bc70a4b7f89b9620b08d1ffa7941a3c49e0fd6b1032f4440dd93dd9089dd95` |
 
-All seven digests matched the committed tree. The reviewed commit and its source
-base were present, `origin/main` and the merge base both resolved to the stated
-source base, and the worktree was clean before this review artifact was added.
-The branch changes only durable Build 5 assessment artifacts relative to that
-base.
+At the original review, all seven then-recorded digests matched the reviewed
+commit. The frozen-input table now records the normalized current bytes described
+in `artifact-normalization-r7.md`; those bytes require fresh independent
+revalidation. The reviewed commit and its source base were present, `origin/main`
+and the merge base both resolved to the stated source base, and the worktree was
+clean before this review artifact was added. The branch changes only durable
+Build 5 assessment artifacts relative to that base.
 
 ## Independent inspection
 
