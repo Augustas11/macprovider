@@ -1,6 +1,70 @@
 # SPEC-001 — Phase 3 Binary: Mac Provider Inference CLI
 
-**Version:** 1.9.8 (2026-09-10, SPEC-041 opaque body-encoding reservation)
+**Version:** 1.9.17 (2026-09-12, Build 1 catalog compatibility authority correction)
+
+**Change log v1.9.17 (2026-09-12, Build 1 catalog compatibility authority
+correction):** Reconciles the shipped v1 three-value catalog-economics
+advertisement, freezes category-aware manifest declarations separately from
+the flat local-status trio, and scopes fail-closed unknown-value handling to
+the three exact generation-selection namespaces under SPEC-044 v0.2.8.
+
+**Change log v1.9.16 (2026-09-12, Build 1 lock-graph authority
+correction):** Makes the catalog-economics lock graph exhaustive, serializes
+all cancel-visible failed-dispatch state under `failure.lock` then
+`cancel.lock`, and gives pre-attachment failure-state acquisition one bounded
+fail-closed `dispatch_state_busy` result under SPEC-044 v0.2.7.
+
+**Change log v1.9.15 (2026-09-12, Build 1 pre-work lifecycle authority
+correction):** Freezes silent static-card behavior for every unsupported,
+partial, mixed, stale, unknown, or disagreeing catalog-economics advertisement;
+reserves the unavailable warning and retry only for failure after a valid
+exclusive complete pair; and makes exit-3 stale, unavailable, and conflict
+results constructive through a bounded non-live `failed_dispatch` record and
+terminal event under SPEC-044 v0.2.6.
+
+**Change log v1.9.14 (2026-09-12, Build 1 provider-copy authority
+correction):** Freezes the exact admission-only `local_only` English source
+meaning and requires distinct truthful English source meanings for local-default
+and coordinator-backed `not_offered`. A local default cannot assert offer
+history.
+
+**Change log v1.9.13 (2026-09-12, Build 1 catalog preparation oracle
+correction):** Corrects the closed admission-state inventory cardinality to 12.
+Readiness and usability remain independently evidenced candidate properties;
+the `local_only` admission label does not establish either property.
+
+**Change log v1.9.12 (2026-09-12, Build 1 catalog preparation authority
+correction):** Defines `settlement_capable` provider copy as conditional
+eligibility for qualifying settled requests, never current income; adds the
+bounded `busy` cancellation acknowledgement after a two-second monotonic lock
+deadline; and keeps the protected cleanup commit interval continuously locked.
+
+**Change log v1.9.11 (2026-09-12, Build 1 catalog preparation authority
+closure):** Makes the catalog-economics compatibility matrix complete: a read
+is permitted only after one exclusive complete capability/token pair, and both
+generations' partial pairs, a dual-generation advertisement, and disagreement
+between the manifest and local status fall back without a catalog-economics
+call. It also bounds production-adapter stdout, stderr, JSONL partial lines,
+and delivery backpressure while keeping attached action workers independent
+from catalog refresh cancellation.
+
+**Change log v1.9.10 (2026-09-11, Build 1 catalog preparation authority
+correction):** Assigns the catalog-economics invocation contract stable
+requirement ID `SPEC-001-R003`, makes v1/v2 advertisement mutually exclusive
+so the unchanged read command has one deterministic response schema, and
+requires production-boundary old/new CLI/Malibu compatibility evidence.
+
+**Change log v1.9.9 (2026-09-11, Build 1 catalog preparation authority):**
+Reserves the capability-gated `models catalog-economics` transaction grammar
+owned with SPEC-044 v0.2.0. The exact public forms are
+`malibu-cli models catalog-economics --json`,
+`malibu-cli models catalog-economics --run <transaction-id> --json`, and
+`malibu-cli models catalog-economics --cancel <transaction-id> --json`.
+The attached run process alone emits `model_catalog_transaction_event.v1`
+JSON lines; cancellation emits one bounded
+`model_catalog_transaction_cancel_ack.v1` object. This amendment adds no
+transaction-status command/schema, control-socket frame, daemon, or background
+worker and does not claim implementation or conformance.
 
 **Change log v1.9.8 (2026-09-10, SPEC-041 composition):** Reserves optional `body_encoding: relay-blind-request-v1` on `inference_request`. Its body is an opaque SPEC-041 envelope; the provider MUST cross-check marker/namespace and MUST NOT parse it as plaintext chat before authenticated decryption. Under SPEC-008 the marker and authenticated dispatch context are inside protected payloads. Relay-blind mode is WS-only to the exact assigned session with no HTTP fallback or failover. This amendment does not enable the draft feature or alter legacy frames.
 **Revision note (historical, superseded by v1.7):** v1.3.1 added the `provider_token` (yaml, top-level) /
@@ -3212,7 +3276,7 @@ carried through the SPEC-047-R002 offer/status envelopes; `models discover` and
 (for a purely local candidate that is `local_inventory_only`) and MUST NOT defer
 the verdict line until admission or dry-run logic exists:
 
-- `settlement_capable` -> **"Earning now"**.
+- `settlement_capable` -> **"Eligible to earn on qualifying settled requests"**.
 - `not_earning_yet_catalog_or_receipt_path_exists` -> **"Not earning yet — "**
   followed by the single concrete next action from
   `provider_guidance.next_action`.
@@ -3220,12 +3284,31 @@ the verdict line until admission or dry-run logic exists:
 - `local_inventory_only` -> **"Local only — not offered to the network"**.
 
 The verdict line is a v0.1 slice-1 contract requirement, not a later Malibu
-surface concern; the 13 machine admission states remain in `--json` unchanged.
+surface concern; the 12 machine admission states remain in `--json` unchanged.
+The `local_only` admission state is not readiness evidence and MUST NOT by itself
+be rendered as prepared, installed, ready, reachable, or usable. Any such claim
+MUST come from independently validated readiness/runtime fields for that same
+candidate and projection.
+Its exact English source state meaning is **Retained as local inventory only;
+this admission state does not claim the model is prepared, installed, ready,
+reachable, or usable.** The exact English source meanings for source-aware
+`not_offered` are **Coordinator offer state is unavailable or has not been
+queried.** for `local_default:not_offered` and **Coordinator reports no active
+network offer for this model.** for `coordinator:not_offered`. Local-default
+rendering MUST NOT assert that no offer has ever existed. Every shipped
+localization and accessibility fixture MUST preserve those source-aware
+meanings while keeping readiness claims dependent on the independent evidence
+above.
 Provider-facing human output MUST NOT imply earning from a candidate whose
 `earning_path_class` is `no_earning_path_in_v0_1` or `local_inventory_only`,
 consistent with SPEC-047-R004. Malibu and the CLI human surface MUST source the
 verdict from `earning_path_class`; they MUST NOT re-derive an earning claim from
 runtime-reported model names, provider-proposed prices, or admission state alone.
+The `settlement_capable` verdict states only that the provider/candidate pair is
+eligible to participate in positive settlement when a later request satisfies
+every route-time and receipt predicate. It MUST NOT imply that the model is
+prepared, serving, receiving demand, currently generating income, or guaranteed
+to produce a qualifying settled request.
 
 Malibu MUST continue to treat absence of `model_catalog_json_v1`, malformed
 legacy envelopes, missing command-schema manifest tokens, or stale local-status
@@ -3243,6 +3326,174 @@ New provider-visible model-command PRs MUST include tests proving that:
   separate schema values owned by their respective specs.
 - Old Malibu/current-model fallback behavior remains available when capability
   negotiation does not prove the exact required tier.
+
+### 6.14b. Catalog-economics transaction invocation (Build 1 authority)
+
+**SPEC-001-R003 - Catalog-economics transaction invocation.**
+
+The installed CLI owns all catalog-economics reads and mutations. Each
+generation has three required advertisement values: selection capability
+`model_catalog_economics_v1`, command token `models catalog-economics.v1`, and
+schema companion `model_catalog_economics.v1` for v1; and
+`model_catalog_economics_v2`, `models catalog-economics.v2`, and
+`model_catalog_economics.v2` for v2. The schema companion is required
+compatibility evidence and never selects a generation alone. A manifest tier
+MUST be keyed byte-for-byte by the selection capability and MUST place that
+selection capability in `local_status_capabilities`. It MUST place the command
+token and schema companion in `command_schemas`, with all other tier
+prerequisites preserved. A manifest MAY declare v1 and v2 in
+separate complete tiers. Fresh local status is a flat set and a serving CLI
+MUST advertise exactly one complete three-value generation trio while omitting
+all three values of the other generation.
+
+Generation parsing is limited to exact values in the three namespaces whose
+strings begin `model_catalog_economics_v`, `models catalog-economics.v`, or
+`model_catalog_economics.v`. Any other value beginning one of those prefixes,
+any missing trio member, mixed or dual generations in flat status or within a
+single tier, category misplacement, stale status, or disagreement between the
+status trio and available complete manifest tiers is malformed and permits no
+catalog-economics call. Unrelated existing capability and schema values outside
+those namespaces MUST NOT invalidate negotiation. A CLI MUST NOT select a
+response generation from caller identity, terminal state, environment, or
+request timing. A CLI advertising the exact v2 trio MUST accept
+exactly these public forms:
+
+```text
+malibu-cli models catalog-economics --json
+malibu-cli models catalog-economics --run <transaction-id> --json
+malibu-cli models catalog-economics --cancel <transaction-id> --json
+```
+
+`--run` and `--cancel` are mutually exclusive, each occurs at most once, and
+each takes exactly one nonempty transaction ID produced by the current
+projection. `--json` is required in all three forms. Positional modes or IDs,
+aliases, extra positionals, duplicate options, unknown options, and a detached
+or background option MUST fail before state or network access. Option order is
+not semantically significant. These forms are non-interactive even on a TTY:
+they MUST NOT prompt, emit ANSI styling, or alter their machine envelope based
+on terminal detection. Provider confirmation occurs in Malibu before `--run`.
+The read form writes one
+`model_catalog_economics.v2` object. The run form remains attached and writes
+only `model_catalog_transaction_event.v1` JSON lines. The cancel form is a
+short-lived process and writes exactly one
+`model_catalog_transaction_cancel_ack.v1` object. Machine output is stdout;
+bounded diagnostics are stderr.
+
+Exit status is closed for these forms: `0` means a valid read, a terminal
+`succeeded` run event, or a syntactically valid cancellation acknowledgement;
+`2` means invalid grammar, unsupported capability/schema, or malformed input
+rejected before work; `3` means the referenced action is semantically stale,
+unavailable, or conflicts after immutable action-identity validation and after
+the initiating run process has become the attached non-live failure worker;
+`4` means signed authority, root,
+network, transfer, or resource admission failed; `5` means verification,
+publication, cleanup, recovery, or internal processing failed after worker
+start; `124` means the worker emitted terminal `timed_out`; and `130` means it
+emitted terminal `cancelled`. The cancellation acknowledgement's outcome, not
+its exit status, distinguishes `recorded`, `already_recorded`, `terminal`,
+`not_active`, `stale`, and the bounded lock-acquisition outcome `busy`. A
+syntactically valid `busy` acknowledgement exits 0, echoes the validated
+transaction ID, carries a null attempt ID, and makes no marker or phase
+mutation, as defined by SPEC-044.
+
+Only the attached run worker may allocate `event_sequence` or emit transaction
+events. After syntax/framing and immutable projected-action identity validation,
+but before semantic freshness, availability, or conflict checks, a valid run
+creates a fresh attempt and enters SPEC-044 v0.2.8's bounded
+`failure.lock`-then-`cancel.lock` lifecycle.
+For exit 3 it MUST durably write the bounded private non-live
+`model_catalog_failed_dispatch.v1` record before emitting exactly one terminal
+`failed` event at sequence 1. That record carries the validated transaction,
+kind, immutable event model key, root locator/identity, tuple and projection
+binding, fresh attempt, and error code; it creates no active attempt, marker,
+network/staging work, model/adoption/runtime mutation, or incumbent displacement.
+Conflict reporting is not a second active worker. All failed-dispatch creation,
+compaction, eviction, recovery, and cancel-visible reads use the exhaustive
+SPEC-044 v0.2.8 lock graph. A failure-only path takes `failure.lock` then
+`cancel.lock`; a normal or recovery path takes `operation.lock`, then
+`failure.lock`, then `cancel.lock`. Failure-only failure-then-cancel uses one
+total `CLOCK_MONOTONIC_RAW` deadline. A successful nonblocking
+`operation.lock` acquisition starts one new total deadline for the normal
+operation-then-failure-then-cancel phase. In either phase both subordinate locks
+must be held strictly before 2.000 seconds. Otherwise the process releases every held lock,
+writes exactly `{"error_code":"dispatch_state_busy"}` plus LF to bounded
+stderr, writes no stdout event, exits 5, and makes no durable, model, or network
+mutation. This result occurs before durable worker attachment and is outside
+semantic exit 3. Failed records share the existing 256-record bounded history.
+Crash recovery compacts durable failure records without
+fabricating stdout or replaying work. The cancel process MUST NOT emit, merge,
+or synthesize an event and MUST NOT kill the worker. No `models transactions`
+family, public transaction-status
+schema, public crash or late-cancellation state, authority-refresh frame,
+daemon, background service, or new control-socket frame is part of this
+contract. A v2-capable Malibu invokes the unchanged read form only after
+observing an exact v2 trio in fresh flat local status and a complete,
+correctly categorized v2 manifest tier. Otherwise it invokes v1 only after the
+equivalent exact v1 status trio and v1 manifest-tier proof, and otherwise uses
+the legacy static fallback without a catalog-economics call. The current v1
+manifest plus current v1 status therefore selects v1; a new Malibu retaining a
+complete v1 tier selects v1 with the old CLI; the current v1-only Malibu plus a
+v2-only CLI falls back; and a new complete v2 manifest tier plus exact v2
+status trio selects v2. No supported trio, a capability, command token, or
+schema companion without both other members, any partial generation, either
+partial generation combined with a value from the other generation, dual
+generations in flat status or within one tier, any other mixed-generation or
+unrecognized generation-namespace set, category misplacement, stale local-
+status evidence, a missing matching manifest tier, or disagreement between
+manifest and local status is malformed. Unrelated values outside the three
+generation namespaces remain valid. Every malformed case
+MUST show only the static current-model card with no error indicator, no retry,
+and no read, run, cancel, action, or economics. Only a projection request
+launched after one valid complete matching generation trio that then fails,
+times out, or returns malformed output shows exact English source warning
+**model catalog unavailable**, warning code `projection_unavailable`, and retry,
+with no action or economics.
+Therefore an old v1 Malibu paired with a new v2-only CLI makes no
+catalog-economics call and uses its static fallback, while a new Malibu
+retaining the complete v1 tier paired with an old v1-only CLI requests and
+strictly decodes v1 without attempting v2 actions. Partial, conflicting,
+category-misplaced, or dual-generation advertisement is malformed
+and uses the static fallback with no mutation call. Production-boundary tests
+MUST launch the built CLI through Malibu's production process adapter and prove
+the complete matrix below, including exact stdout, stderr, exit status, and strict
+decoder behavior. Clients lacking the exact v2 generation trio and matching
+manifest tier retain the existing fallback and MUST NOT invoke the v2 mutation
+options. SPEC-044 v0.2.8
+owns the
+projection, event, cancellation-acknowledgement, preparation-copy, action, and
+storage-accounting contracts.
+
+The production-boundary compatibility matrix MUST use byte-exact manifest and
+flat-status fixtures and include, for each v1 and v2, the complete correctly
+categorized trio and one-fault removal of each trio member. It MUST include
+one-fault category misplacement of each manifest member, addition of one
+opposite-generation member, both complete generations in flat status, every
+mixed-generation partial set, one unrecognized value in each of the three
+generation namespaces, stale local-status capabilities, a missing matching
+manifest tier, and manifest/local-status disagreement in both directions. It
+MUST also add unrelated existing capability and schema values and prove they do
+not change a valid selection. The fixtures MUST prove current manifest/current
+v1 status, new Malibu/old v1 CLI, current Malibu/new v2-only CLI, and a new v2
+manifest/status trio. Only a valid matching v1 or v2 trio may launch a catalog-
+economics read. All advertisement
+negatives MUST prove the static card, no error indicator, no retry, zero
+catalog-economics process launches, and zero mutation calls. Projection
+failure, timeout, and malformed response after each valid trio MUST separately
+prove the unavailable warning/retry state and no action or economics.
+
+The production process adapter MUST bound every machine-output path. A read
+projection stdout object is capped at 4,194,304 bytes and a cancellation
+acknowledgement at 4,096 bytes. Run stdout MUST be decoded incrementally as
+UTF-8 JSONL without retaining whole-worker output; a partial line MUST be
+rejected as soon as it exceeds the SPEC-044 16,384-byte line cap. Stderr
+retention is capped at 65,536 bytes while the pipe continues to drain and
+discard excess bytes. Decoded event delivery MUST use a fixed-capacity queue
+with terminal capacity reserved and the coalescing/rate/backpressure contract
+owned by SPEC-044; it MUST NOT enqueue an unbounded MainActor task per line.
+Catalog refresh reads use app-owned request generations or serialization so an
+older completion cannot replace a newer projection. Cancelling a superseded
+refresh MUST NOT terminate, detach, or stop reading an already attached action
+worker.
 
 ### 6.15. Additive coordinator-wire surface reconciled in v1.7 and extended in v1.8
 

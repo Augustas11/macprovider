@@ -1,0 +1,474 @@
+{
+  "schema": "catalog_economics_compatibility_fixtures.v1",
+  "namespace_prefixes": [
+    "model_catalog_economics_v",
+    "models catalog-economics.v",
+    "model_catalog_economics.v"
+  ],
+  "trios": {
+    "v1": {
+      "selection_capability": "model_catalog_economics_v1",
+      "command_token": "models catalog-economics.v1",
+      "schema_companion": "model_catalog_economics.v1"
+    },
+    "v2": {
+      "selection_capability": "model_catalog_economics_v2",
+      "command_token": "models catalog-economics.v2",
+      "schema_companion": "model_catalog_economics.v2"
+    }
+  },
+  "manifests": {
+    "current_v1": {
+      "tiers": {
+        "model_catalog_economics_v1": {
+          "first_supporting_binary_version": "1.8.90",
+          "local_status_capabilities": [
+            "model_status_v1",
+            "model_catalog_json_v1",
+            "model_catalog_economics_v1",
+            "service_instance_v1",
+            "status_observation_v1"
+          ],
+          "command_schemas": [
+            "models catalog-economics.v1",
+            "model_catalog_economics.v1"
+          ],
+          "control_frame_schemas": [
+            "status_request",
+            "status_response"
+          ]
+        }
+      }
+    },
+    "new_v1_v2": {
+      "tiers": {
+        "model_catalog_economics_v1": {
+          "first_supporting_binary_version": "1.8.90",
+          "local_status_capabilities": [
+            "model_status_v1",
+            "model_catalog_json_v1",
+            "model_catalog_economics_v1",
+            "service_instance_v1",
+            "status_observation_v1"
+          ],
+          "command_schemas": [
+            "models catalog-economics.v1",
+            "model_catalog_economics.v1"
+          ],
+          "control_frame_schemas": [
+            "status_request",
+            "status_response"
+          ]
+        },
+        "model_catalog_economics_v2": {
+          "first_supporting_binary_version": "1.8.90",
+          "local_status_capabilities": [
+            "model_status_v1",
+            "model_catalog_json_v1",
+            "model_catalog_economics_v2",
+            "service_instance_v1",
+            "status_observation_v1"
+          ],
+          "command_schemas": [
+            "models catalog-economics.v2",
+            "model_catalog_economics.v2"
+          ],
+          "control_frame_schemas": [
+            "status_request",
+            "status_response"
+          ]
+        }
+      }
+    },
+    "v2_only": {
+      "tiers": {
+        "model_catalog_economics_v2": {
+          "first_supporting_binary_version": "1.8.90",
+          "local_status_capabilities": [
+            "model_status_v1",
+            "model_catalog_json_v1",
+            "model_catalog_economics_v2",
+            "service_instance_v1",
+            "status_observation_v1"
+          ],
+          "command_schemas": [
+            "models catalog-economics.v2",
+            "model_catalog_economics.v2"
+          ],
+          "control_frame_schemas": [
+            "status_request",
+            "status_response"
+          ]
+        }
+      }
+    }
+  },
+  "statuses": {
+    "current_v1": {
+      "fresh": true,
+      "capabilities": [
+        "buyer_serving_authority_v1",
+        "model_status_v1",
+        "model_catalog_json_v1",
+        "model_catalog_economics_v1",
+        "model_catalog_economics.v1",
+        "models catalog-economics.v1",
+        "service_instance_v1",
+        "status_observation_v1"
+      ]
+    },
+    "v2": {
+      "fresh": true,
+      "capabilities": [
+        "buyer_serving_authority_v1",
+        "model_status_v1",
+        "model_catalog_json_v1",
+        "model_catalog_economics_v2",
+        "model_catalog_economics.v2",
+        "models catalog-economics.v2",
+        "service_instance_v1",
+        "status_observation_v1"
+      ]
+    }
+  },
+  "cases": [
+    {
+      "name": "current-manifest-current-v1-status",
+      "manifest": "current_v1",
+      "status": "current_v1",
+      "expected_generation": "v1"
+    },
+    {
+      "name": "new-malibu-old-v1-cli",
+      "manifest": "new_v1_v2",
+      "status": "current_v1",
+      "expected_generation": "v1"
+    },
+    {
+      "name": "current-malibu-new-v2-cli",
+      "manifest": "current_v1",
+      "status": "v2",
+      "expected_generation": null
+    },
+    {
+      "name": "new-v2-manifest-status",
+      "manifest": "new_v1_v2",
+      "status": "v2",
+      "expected_generation": "v2"
+    },
+    {
+      "name": "v2-only-manifest-v1-status",
+      "manifest": "v2_only",
+      "status": "current_v1",
+      "expected_generation": null
+    },
+    {
+      "name": "v2-only-manifest-v2-status",
+      "manifest": "v2_only",
+      "status": "v2",
+      "expected_generation": "v2"
+    }
+  ],
+  "one_fault_mutations": [
+    {
+      "name": "v1-remove-selection",
+      "base_case": "current-manifest-current-v1-status",
+      "surface": "status",
+      "operation": "remove",
+      "value": "model_catalog_economics_v1",
+      "expected_generation": null
+    },
+    {
+      "name": "v1-remove-command",
+      "base_case": "current-manifest-current-v1-status",
+      "surface": "status",
+      "operation": "remove",
+      "value": "models catalog-economics.v1",
+      "expected_generation": null
+    },
+    {
+      "name": "v1-remove-companion",
+      "base_case": "current-manifest-current-v1-status",
+      "surface": "status",
+      "operation": "remove",
+      "value": "model_catalog_economics.v1",
+      "expected_generation": null
+    },
+    {
+      "name": "v2-remove-selection",
+      "base_case": "new-v2-manifest-status",
+      "surface": "status",
+      "operation": "remove",
+      "value": "model_catalog_economics_v2",
+      "expected_generation": null
+    },
+    {
+      "name": "v2-remove-command",
+      "base_case": "new-v2-manifest-status",
+      "surface": "status",
+      "operation": "remove",
+      "value": "models catalog-economics.v2",
+      "expected_generation": null
+    },
+    {
+      "name": "v2-remove-companion",
+      "base_case": "new-v2-manifest-status",
+      "surface": "status",
+      "operation": "remove",
+      "value": "model_catalog_economics.v2",
+      "expected_generation": null
+    },
+    {
+      "name": "v1-add-v2-selection",
+      "base_case": "current-manifest-current-v1-status",
+      "surface": "status",
+      "operation": "add",
+      "value": "model_catalog_economics_v2",
+      "expected_generation": null
+    },
+    {
+      "name": "v1-add-v2-command",
+      "base_case": "current-manifest-current-v1-status",
+      "surface": "status",
+      "operation": "add",
+      "value": "models catalog-economics.v2",
+      "expected_generation": null
+    },
+    {
+      "name": "v1-add-v2-companion",
+      "base_case": "current-manifest-current-v1-status",
+      "surface": "status",
+      "operation": "add",
+      "value": "model_catalog_economics.v2",
+      "expected_generation": null
+    },
+    {
+      "name": "v2-add-v1-selection",
+      "base_case": "new-v2-manifest-status",
+      "surface": "status",
+      "operation": "add",
+      "value": "model_catalog_economics_v1",
+      "expected_generation": null
+    },
+    {
+      "name": "v2-add-v1-command",
+      "base_case": "new-v2-manifest-status",
+      "surface": "status",
+      "operation": "add",
+      "value": "models catalog-economics.v1",
+      "expected_generation": null
+    },
+    {
+      "name": "v2-add-v1-companion",
+      "base_case": "new-v2-manifest-status",
+      "surface": "status",
+      "operation": "add",
+      "value": "model_catalog_economics.v1",
+      "expected_generation": null
+    },
+    {
+      "name": "unknown-selection-namespace",
+      "base_case": "current-manifest-current-v1-status",
+      "surface": "status",
+      "operation": "add",
+      "value": "model_catalog_economics_v3",
+      "expected_generation": null
+    },
+    {
+      "name": "unknown-command-namespace",
+      "base_case": "current-manifest-current-v1-status",
+      "surface": "status",
+      "operation": "add",
+      "value": "models catalog-economics.v3",
+      "expected_generation": null
+    },
+    {
+      "name": "unknown-companion-namespace",
+      "base_case": "current-manifest-current-v1-status",
+      "surface": "status",
+      "operation": "add",
+      "value": "model_catalog_economics.v3",
+      "expected_generation": null
+    },
+    {
+      "name": "unrelated-status-capability",
+      "base_case": "current-manifest-current-v1-status",
+      "surface": "status",
+      "operation": "add",
+      "value": "future_unrelated_capability_v99",
+      "expected_generation": "v1"
+    },
+    {
+      "name": "stale-v1-status",
+      "base_case": "current-manifest-current-v1-status",
+      "surface": "status",
+      "operation": "stale",
+      "expected_generation": null
+    },
+    {
+      "name": "v1-manifest-remove-selection",
+      "base_case": "current-manifest-current-v1-status",
+      "surface": "manifest",
+      "tier": "model_catalog_economics_v1",
+      "category": "local_status_capabilities",
+      "operation": "remove",
+      "value": "model_catalog_economics_v1",
+      "expected_generation": null
+    },
+    {
+      "name": "v1-manifest-remove-command",
+      "base_case": "current-manifest-current-v1-status",
+      "surface": "manifest",
+      "tier": "model_catalog_economics_v1",
+      "category": "command_schemas",
+      "operation": "remove",
+      "value": "models catalog-economics.v1",
+      "expected_generation": null
+    },
+    {
+      "name": "v1-manifest-remove-companion",
+      "base_case": "current-manifest-current-v1-status",
+      "surface": "manifest",
+      "tier": "model_catalog_economics_v1",
+      "category": "command_schemas",
+      "operation": "remove",
+      "value": "model_catalog_economics.v1",
+      "expected_generation": null
+    },
+    {
+      "name": "v1-manifest-misplace-selection",
+      "base_case": "current-manifest-current-v1-status",
+      "surface": "manifest",
+      "tier": "model_catalog_economics_v1",
+      "category": "local_status_capabilities",
+      "other_category": "command_schemas",
+      "operation": "move",
+      "value": "model_catalog_economics_v1",
+      "expected_generation": null
+    },
+    {
+      "name": "v1-manifest-misplace-command",
+      "base_case": "current-manifest-current-v1-status",
+      "surface": "manifest",
+      "tier": "model_catalog_economics_v1",
+      "category": "command_schemas",
+      "other_category": "local_status_capabilities",
+      "operation": "move",
+      "value": "models catalog-economics.v1",
+      "expected_generation": null
+    },
+    {
+      "name": "v1-manifest-misplace-companion",
+      "base_case": "current-manifest-current-v1-status",
+      "surface": "manifest",
+      "tier": "model_catalog_economics_v1",
+      "category": "command_schemas",
+      "other_category": "local_status_capabilities",
+      "operation": "move",
+      "value": "model_catalog_economics.v1",
+      "expected_generation": null
+    },
+    {
+      "name": "v2-manifest-remove-selection",
+      "base_case": "new-v2-manifest-status",
+      "surface": "manifest",
+      "tier": "model_catalog_economics_v2",
+      "category": "local_status_capabilities",
+      "operation": "remove",
+      "value": "model_catalog_economics_v2",
+      "expected_generation": null
+    },
+    {
+      "name": "v2-manifest-remove-command",
+      "base_case": "new-v2-manifest-status",
+      "surface": "manifest",
+      "tier": "model_catalog_economics_v2",
+      "category": "command_schemas",
+      "operation": "remove",
+      "value": "models catalog-economics.v2",
+      "expected_generation": null
+    },
+    {
+      "name": "v2-manifest-remove-companion",
+      "base_case": "new-v2-manifest-status",
+      "surface": "manifest",
+      "tier": "model_catalog_economics_v2",
+      "category": "command_schemas",
+      "operation": "remove",
+      "value": "model_catalog_economics.v2",
+      "expected_generation": null
+    },
+    {
+      "name": "v2-manifest-misplace-selection",
+      "base_case": "new-v2-manifest-status",
+      "surface": "manifest",
+      "tier": "model_catalog_economics_v2",
+      "category": "local_status_capabilities",
+      "other_category": "command_schemas",
+      "operation": "move",
+      "value": "model_catalog_economics_v2",
+      "expected_generation": null
+    },
+    {
+      "name": "v2-manifest-misplace-command",
+      "base_case": "new-v2-manifest-status",
+      "surface": "manifest",
+      "tier": "model_catalog_economics_v2",
+      "category": "command_schemas",
+      "other_category": "local_status_capabilities",
+      "operation": "move",
+      "value": "models catalog-economics.v2",
+      "expected_generation": null
+    },
+    {
+      "name": "v2-manifest-misplace-companion",
+      "base_case": "new-v2-manifest-status",
+      "surface": "manifest",
+      "tier": "model_catalog_economics_v2",
+      "category": "command_schemas",
+      "other_category": "local_status_capabilities",
+      "operation": "move",
+      "value": "model_catalog_economics.v2",
+      "expected_generation": null
+    },
+    {
+      "name": "unrelated-manifest-schema",
+      "base_case": "current-manifest-current-v1-status",
+      "surface": "manifest",
+      "tier": "model_catalog_economics_v1",
+      "category": "command_schemas",
+      "operation": "add",
+      "value": "future_unrelated_schema.v99",
+      "expected_generation": "v1"
+    },
+    {
+      "name": "manifest-unknown-selection-namespace",
+      "base_case": "current-manifest-current-v1-status",
+      "surface": "manifest",
+      "tier": "model_catalog_economics_v1",
+      "category": "local_status_capabilities",
+      "operation": "add",
+      "value": "model_catalog_economics_v3",
+      "expected_generation": null
+    },
+    {
+      "name": "manifest-cross-generation-member",
+      "base_case": "current-manifest-current-v1-status",
+      "surface": "manifest",
+      "tier": "model_catalog_economics_v1",
+      "category": "command_schemas",
+      "operation": "add",
+      "value": "model_catalog_economics.v2",
+      "expected_generation": null
+    },
+    {
+      "name": "v1-manifest-wrong-tier-key",
+      "base_case": "current-manifest-current-v1-status",
+      "surface": "manifest",
+      "tier": "model_catalog_economics_v1",
+      "operation": "rename_tier",
+      "new_tier": "model_catalog_economics_legacy",
+      "expected_generation": null
+    }
+  ]
+}

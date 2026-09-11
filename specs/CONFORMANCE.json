@@ -9,7 +9,7 @@
     {
       "spec_id": "SPEC-001",
       "title": "Phase 3 Binary: Mac Provider Inference CLI",
-      "version": "1.9.8",
+      "version": "1.9.17",
       "path": "specs/SPEC-001-phase3-binary.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -1305,7 +1305,7 @@
     {
       "spec_id": "SPEC-044",
       "title": "Malibu Model Catalog Economics",
-      "version": "0.1.1",
+      "version": "0.2.8",
       "path": "specs/SPEC-044-malibu-model-catalog-economics.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1337,7 +1337,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "Malibu currently exposes a model switcher, but the production experience is static around the model chosen during installer autotune. The next release needs a CLI-owned catalog and economics projection before the app can safely show additional catalog models, signed catalog rates, readiness, and preparation/switch actions without making earning guarantees or bypassing provider safety gates."
+        "rationale": "The operator-owned v0.2.8 authority resolves the accepted formal Build 1 findings across conditional earning eligibility, source-aware admission copy, exact catalog-only trust and section isolation, category-aware v1/v2 compatibility grammar, constructive bounded non-live exit-3 failure dispatch, exhaustive lock ordering, cancel-visible failed-dispatch serialization, ACL creation, bounded cancellation, one authoritative total ranking, and canonically bound continuous-lock cleanup while preserving prior closures. Implementation, complete tests, signed release evidence, and the discovery/admission/settlement journeys remain pending."
       }
     },
     {
@@ -1378,7 +1378,7 @@
     {
       "spec_id": "SPEC-046",
       "title": "Provider BYOM Discovery",
-      "version": "0.1.2",
+      "version": "0.1.5",
       "path": "specs/SPEC-046-provider-byom-discovery.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1409,13 +1409,13 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1240",
-        "rationale": "Local CLI discovery/evaluation/offer dry-run code and regression tests now exist and are mapped, but Issue #1240 still needs full workflow completion and signed JOURNEY-PROVIDER-BYOM-DISCOVERY evidence before conformance or production status can be claimed."
+        "rationale": "SPEC-046 v0.1.5 freezes readiness-safe local-only copy plus distinct local-default and coordinator not-offered meanings while requiring separate readiness/runtime evidence for positive claims without changing discovery authority. Local CLI discovery/evaluation/offer dry-run code and regression tests exist and are mapped, but Issue #1240 still needs full workflow completion, updated copy evidence, and signed JOURNEY-PROVIDER-BYOM-DISCOVERY evidence before conformance or production status can be claimed."
       }
     },
     {
       "spec_id": "SPEC-047",
       "title": "Network Model Admission",
-      "version": "0.1.6",
+      "version": "0.1.8",
       "path": "specs/SPEC-047-network-model-admission.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1450,7 +1450,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1240",
-        "rationale": "Local CLI/coordinator/routing/buyer safeguards now exist and are mapped, but Issue #1240 still needs the full admission policy/probe lifecycle and signed JOURNEY-NETWORK-MODEL-ADMISSION evidence before conformance or production status can be claimed."
+        "rationale": "SPEC-047 v0.1.8 clarifies settlement-capable guidance as conditional eligibility, freezes coordinator-backed not-offered copy, and rejects catalog-only reuse of per-candidate admission authority. Local CLI/coordinator/routing/buyer safeguards exist and are mapped, but Issue #1240 still needs the full admission policy/probe lifecycle, updated copy evidence, and signed JOURNEY-NETWORK-MODEL-ADMISSION evidence before conformance or production status can be claimed."
       }
     }
   ],
@@ -1504,6 +1504,21 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
         "rationale": "Last-confirmed buyer_serving on indeterminate /v1/pool/check is implemented under CLI and coordinator unit tests; production Live-hold evidence remains pending until 1.8.123 is on the fleet."
+      }
+    },
+    {
+      "requirement_id": "SPEC-001-R003",
+      "spec_id": "SPEC-001",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "SPEC-001-R003 freezes category-aware manifest declarations and exact flat-status catalog-economics v1/v2 trios, exact read/run/cancel grammar, bounded attached-worker output, exit statuses, refresh/action-worker isolation, and the byte-exact production-boundary matrix. The v2 implementation and built-CLI-through-production-Malibu integration evidence remain pending."
       }
     },
     {
@@ -6840,7 +6855,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1257",
-        "rationale": "Slices #1256 and #1257 define the JSON projection schema, fail-closed action descriptors, and Malibu decoding for explicit nullable fields and malformed action confirmation. Long-evaluation transaction events and release evidence remain pending."
+        "rationale": "SPEC-044 v0.2.8 freezes category-aware manifest declarations and exact flat-status generation trios, the exact catalog-only sentinel and Blocked placement, exact SPEC-046/047 source-aware conditional guidance including coordinator no-event binding, app-owned refresh generations, canonically bound cleanup actions, immutable cleanup event keys, authenticated root identity, bounded transport, and deterministic storage accounting. Implementation, complete tests, and signed release evidence remain pending."
       }
     },
     {
@@ -6860,7 +6875,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1257",
-        "rationale": "Slice #1256 projects signed/fallback/stale/integrity states conservatively from the CLI, but Malibu rendering, transaction disabling, and release evidence remain pending."
+        "rationale": "SPEC-044 v0.2.8 approves locally motivated preparation for the exhaustive non-trusted matrix, including event-backed and authoritative no-event coordinator:not_offered, only with current verified primary artifact authority and verbatim digest-bound conditional guidance. Catalog-only all-null rows have no preparation or trusted-economics positive case. Implementation, exhaustive matrix tests, Malibu rendering, and release evidence remain pending."
       }
     },
     {
@@ -6898,7 +6913,6 @@
       ],
       "tests": [
         "phase3-binary/app/Tests/MalibuTests/ModelManagementTests.swift::testCatalogEconomicsValidationAcceptsTrustedCoordinatorRows",
-        "phase3-binary/app/Tests/MalibuTests/ModelManagementTests.swift::testCatalogEconomicsHidesLocalDefaultBYOMRowsForThisRelease",
         "phase3-binary/app/Tests/MalibuTests/ModelManagementTests.swift::testRefreshUsesCatalogEconomicsProjectionWhenAdvertised"
       ],
       "journeys": [],
@@ -6907,7 +6921,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1257",
-        "rationale": "Slice #1257 adds deterministic grouping, trusted-rate ordering, row-warning copy, and the release decision to hide local-default BYOM rows from Malibu. Full provider-friendly ranking acceptance and release evidence remain pending."
+        "rationale": "SPEC-044 v0.2.8 freezes R005 as the sole exact total row-order tuple and rejects duplicate canonical row identities. The existing localized display-name tie-break does not implement that tuple. The named future tests must prove valid local-default and coordinator-backed non-trusted preparation rows remain visible in Needs preparation and that every locale and input order yields the same canonical order; implementation and release evidence remain pending."
       }
     },
     {
@@ -6955,7 +6969,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "Preparation confirmation, isolated staging, long-evaluation progress, cancellation, and cleanup affordances are not implemented for catalog model preparation."
+        "rationale": "SPEC-044 v0.2.8 defines preparation confirmation/copy, worker-only bounded progress, five in-lock cancellation predicates plus the bounded busy outcome, the exhaustive operation/failure/cancel/cleanup/adoption lock graph, bounded pre-attachment dispatch_state_busy behavior, cancel-linearized failed-dispatch terminal state, isolated staging, managed-v3 publication, worker/recovery-owned continuous-lock reversible cleanup, and durable tombstoned-phase commit evidence. None of that new authority is yet implemented or evidenced."
       }
     },
     {
@@ -7077,7 +7091,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1257",
-        "rationale": "Slice #1257 adds automated Malibu projection decoding, grouping, old-CLI fallback, projection-failed fallback, forbidden-copy, and action-gating coverage. Production promotion still requires signed release journey evidence that old CLIs receive static fallback UI and compatible CLIs render trusted rates without exposing secrets or unsupported actions."
+        "rationale": "Slice #1257 adds partial Malibu projection decoding, grouping, old-CLI fallback, projection-failed fallback, forbidden-copy, and action-gating coverage. SPEC-044 v0.2.8 now assigns the complete CSPRNG/restart/freshness/feed-trust, conditional-copy, total-ranking/UX, compatibility/transport, bounded-cancel and dispatch-state contention, exhaustive lock traces and pairwise overlaps, failed-dispatch durability interleavings, recovery/ACL, and signed-journey matrices to concrete acceptance lanes; that evidence remains pending."
       }
     },
     {
@@ -7512,7 +7526,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1240",
-        "rationale": "Candidate identity, local state/source, and guidance structures have local coverage, but coordinator readback ladder coverage and signed discovery evidence are incomplete."
+        "rationale": "Candidate identity, local state/source, and guidance structures have local coverage. SPEC-046 v0.1.5 additionally freezes source-aware local-only/not-offered copy and requires local-only to remain admission-only unless independent readiness/runtime evidence supports a readiness claim; that copy matrix, coordinator readback ladder coverage, and signed discovery evidence are incomplete."
       }
     },
     {
@@ -7654,7 +7668,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1240",
-        "rationale": "Local unit coverage and the unsigned E2E harness exist, but the complete opaque/ladder/timing/redaction matrix and signed JOURNEY-PROVIDER-BYOM-DISCOVERY result are still missing."
+        "rationale": "Local unit coverage and the unsigned E2E harness exist, but the complete opaque/ladder/timing/redaction and local-only readiness-copy matrix plus the signed JOURNEY-PROVIDER-BYOM-DISCOVERY result are still missing."
       }
     },
     {

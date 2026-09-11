@@ -1,12 +1,12 @@
 # SPEC-046 - Provider BYOM Discovery
 
-**Version:** 0.1.2
+**Version:** 0.1.5
 
 ```json
 {
   "spec_id": "SPEC-046",
   "title": "Provider BYOM Discovery",
-  "version": "0.1.2",
+  "version": "0.1.5",
   "path": "specs/SPEC-046-provider-byom-discovery.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -81,17 +81,39 @@ SPEC-045 is related local endpoint prior art. SPEC-046 must reuse its loopback, 
 
 **SPEC-046-R003 - Candidate identity schema.** Discovery output MUST use a closed JSON envelope with `schema: "provider_byom_discovery.v1"`, `generated_at`, `cli_version`, `projection_sequence`, `adapters`, `candidates`, and `warnings`. Each candidate MUST include `candidate_id`, `runtime_source`, `display_name`, `served_model_ref`, nullable `catalog_model_key`, `identity_state`, `locality`, nullable `estimated_gb`, nullable `context_window_tokens`, `capabilities`, `readiness_state`, `fit_state`, `evaluation_state`, `admission_state`, `admission_state_source`, `provider_guidance`, and `warning_codes`. `candidate_id` MUST be stable for the same runtime source and served model reference on the same host but MUST NOT be derived from provider id, wallet, username, hardware serial, MAC address, stable hardware UUID, absolute private path, bearer token, or endpoint credential. The v0.1 allowed construction is `byom_` plus base32url without padding of `HMAC-SHA256(local_discovery_namespace, runtime_source || 0x00 || normalized_served_model_ref)`, where `local_discovery_namespace` is a CLI-owned random 256-bit secret stored in a user-private config file with user-only permissions and never sent to the coordinator; if that namespace is missing or unreadable, the CLI MUST emit `candidate_id_unstable` and MUST NOT submit offers until a valid namespace exists. `candidate_id` is a provider-local candidate key, not a global model key; the coordinator MUST NOT use it alone to deduplicate model supply across providers. The `provider_guidance` object MUST include `state_label_key`, `state_meaning_key`, `next_action`, nullable `transition_reason_code`, and `earning_path_class`; those fields are localization-safe keys or closed enums for CLI/Malibu presentation and MUST NOT contain raw prompts, completions, paths, endpoints, or secrets. `identity_state` enum values are `catalog_matched`, `artifact_hash_available`, `runtime_reported`, `opaque_endpoint`, and `unknown`. `locality` enum values are `local_artifact`, `loopback_runtime`, `opaque_local_endpoint`, and `unknown`. `readiness_state` enum values are `ready`, `needs_runtime`, `needs_weights`, `requires_preparation`, `unreachable`, and `unknown`. `fit_state` enum values are `fits`, `does_not_fit`, and `unknown`. `evaluation_state` enum values are `not_evaluated`, `running`, `passed`, `failed`, `timed_out`, and `blocked`. `admission_state_source` enum values are `local_default` and `coordinator`; `local_default` states are advisory CLI inventory state, while `coordinator` states are readback from SPEC-047 admission authority. `admission_state` enum values are `local_only`, `not_offered`, `offerable`, `offer_submitted`, `offer_rejected`, `sandbox_probe_only`, `network_visible_unpriced`, `network_admitted_unsettled`, `catalog_priced`, `settlement_capable`, `withdrawn`, and `revoked`; SPEC-046 may only report SPEC-047 network states supplied by the coordinator or local defaults `local_only`, `not_offered`, and `offerable`, and MUST NOT promote a candidate into a network state by itself. `provider_guidance.next_action` enum values are `fix_local_blocker`, `evaluate`, `offer_dry_run`, `submit_offer`, `revise_and_reoffer`, `check_status`, `withdraw`, `wait_for_coordinator`, `maintain_runtime`, and `none`. `provider_guidance.earning_path_class` enum values are `local_inventory_only`, `not_earning_yet_catalog_or_receipt_path_exists`, `no_earning_path_in_v0_1`, and `settlement_capable`. The warning-code enum is `candidate_id_unstable`, `adapter_unavailable`, `adapter_timeout`, `adapter_rejected_non_loopback`, `adapter_malformed_response`, `adapter_response_truncated`, `catalog_match_unverified`, `capability_unevaluated`, `evaluation_required`, `evaluation_failed`, `requires_preparation`, `namespace_permission_invalid`, and `coordinator_state_unavailable`.
 
+`provider_guidance.earning_path_class: "settlement_capable"` is a conditional
+eligibility class owned by SPEC-047. It means only that the provider/candidate
+pair may participate in positive settlement for a later request that satisfies
+every route-time and verified-receipt predicate. It does not mean the candidate
+is prepared, serving, receiving demand, currently earning income, or guaranteed
+to receive or settle a request. Human rendering MUST use the exact SPEC-001
+source verdict **Eligible to earn on qualifying settled requests** and MUST NOT
+substitute current-income wording.
+
 Redaction provenance extends the warning-code enum above with `capability_family_redacted`, `capability_quantization_redacted`, `capability_runtime_version_redacted`, and `model_reference_redacted`. R007 defines their field and warning-array placement. These codes use the existing v1 envelope keys and nullable capability types; they do not add a capability value, admission state, or trust claim.
 
 For `admission_state_source: "local_default"`, the CLI MUST use this local-state ladder:
 
 | Local state | Provider-facing meaning | Provider next action | Local transition rule |
 |---|---|---|---|
-| `local_only` | The candidate is usable only as local inventory because identity, readiness, fit, adapter safety, or operator policy is insufficient for offering. It is not network-routable or earning-eligible. | Fix the blocking local condition or run `models evaluate <candidate> --json` when evaluation is available. | May become `offerable` only after local checks show safe loopback/locality, stable candidate id, acceptable readiness, and no blocking warning code. |
+| `local_only` | Retained as local inventory only; this admission state does not claim the model is prepared, installed, ready, reachable, or usable. | Fix the blocking local condition or run `models evaluate <candidate> --json` when evaluation is available. | May become `offerable` only after local checks show safe loopback/locality, stable candidate id, acceptable readiness, and no blocking warning code. |
 | `offerable` | The candidate appears locally eligible to preflight an offer, but the coordinator has not accepted any network admission state. It is not network-routable or earning-eligible. | Run `models offer <candidate> --dry-run --json`, preferably after evaluation. | May enter SPEC-047 `offer_submitted` only through a provider-signed offer; if coordinator readback confirms no active offer, the CLI MUST report `admission_state_source: "coordinator"` with `admission_state: "not_offered"` rather than treating that readback as a local default. |
-| `not_offered` | No active coordinator offer is known for this candidate from this provider. With `local_default`, this means coordinator state is unavailable or has not been queried; with `coordinator`, it is authoritative SPEC-047 readback. | Run status readback, offer dry-run, or submit a refreshed offer if local checks still pass. | May become `offerable` when local checks pass without coordinator readback, or may enter SPEC-047 `offer_submitted` only through a provider-signed offer. |
+| `not_offered` | Coordinator offer state is unavailable or has not been queried. | Run status readback, offer dry-run, or submit a refreshed offer if local checks still pass. | May become `offerable` when local checks pass without coordinator readback, or may enter SPEC-047 `offer_submitted` only through a provider-signed offer. |
 
-The same `not_offered` value may appear with either `admission_state_source`; callers MUST read the source field before deciding whether the state is local advisory inventory or coordinator readback.
+The table above defines `local_default:not_offered`. The same `not_offered`
+value may appear with either `admission_state_source`; callers MUST read the
+source field before deciding whether the state is local advisory inventory or
+coordinator readback. The exact English source meaning for
+`local_default:not_offered` is **Coordinator offer state is unavailable or has
+not been queried.** It MUST NOT assert that an offer never existed. The exact
+English source meaning for `coordinator:not_offered` is **Coordinator reports
+no active network offer for this model.** and is valid only for authoritative
+SPEC-047 readback. The exact English source meaning for `local_only` is
+**Retained as local inventory only; this admission state does not claim the
+model is prepared, installed, ready, reachable, or usable.** Network routing
+and earning remain governed independently by `earning_path_class` and
+SPEC-047; readiness and usability remain governed by the same validated
+candidate's independent readiness/runtime evidence.
 
 When coordinator reachability changes, a locally eligible candidate may move between `offerable` and `not_offered` without provider action; this label change is action-neutral unless the source becomes `coordinator` and supplies a SPEC-047 state or reason code.
 
@@ -124,7 +146,7 @@ Redaction provenance is local diagnostic metadata, not an advisory capability va
 
 The R008 automated-test gate for this mapping MUST cover absent/null, safe, withheld, and wrong-type optional labels separately; mixed and all-withheld inventories; stderr/JSON parity without raw content; parser-bound preservation; non-blocking optional warnings with independent blockers retained; and offer projection retaining null capability values. Signed journey evidence remains pending; text-level contract tests do not satisfy that runtime or release-evidence gate. The current adapters do not collect runtime version labels, so `capabilities.runtime_version` remains absent/null without a redaction warning; collecting that field in a future adapter must apply this same provenance mapping.
 
-**SPEC-046-R008 - Release evidence.** Promotion beyond draft MUST include automated tests for adapter allowlisting, loopback rejection, bounded HTTP parsing, malformed adapter responses, candidate schema validation, local-state ladder meaning and next-action projection, advisory capability nullability, catalog-match labeling, read-only discovery, evaluation timeouts and byte caps, no production config mutation, path/token redaction, unevaluated copy restrictions, command-taxonomy separation from legacy `models list`/`models browse`, and SPEC-047 state consumption. Before any provider-visible human discovery/evaluation rendering ships, tests MUST reject forbidden earning-copy meanings with parity to SPEC-044-R004/R009, including claims that a discovered, evaluated, offered, or non-settlement candidate earns, is higher-paying, is buyer-routable by default, is verified, is catalog-priced, or is settlement-capable. Production promotion MUST include a signed journey result covering at least one MLX-cache candidate, one loopback runtime candidate, one opaque endpoint candidate, one adapter failure, one evaluated-but-not-network-admitted candidate, and local `local_only`/`offerable`/`not_offered` state-ladder evidence.
+**SPEC-046-R008 - Release evidence.** Promotion beyond draft MUST include automated tests for adapter allowlisting, loopback rejection, bounded HTTP parsing, malformed adapter responses, candidate schema validation, local-state ladder meaning and next-action projection, advisory capability nullability, catalog-match labeling, read-only discovery, evaluation timeouts and byte caps, no production config mutation, path/token redaction, unevaluated copy restrictions, command-taxonomy separation from legacy `models list`/`models browse`, and SPEC-047 state consumption. Before any provider-visible human discovery/evaluation rendering ships, tests MUST reject forbidden earning-copy meanings with parity to SPEC-044-R004/R009, including claims that a discovered, evaluated, offered, or non-settlement candidate earns, is higher-paying, is buyer-routable by default, is verified, is catalog-priced, or is settlement-capable. For `settlement_capable`, every shipped localization and accessibility fixture MUST preserve **Eligible to earn on qualifying settled requests** as conditional eligibility and reject current-income, current-serving, guaranteed-demand, and guaranteed-settlement meanings. For `local_only`, fixtures MUST cover `needs_weights`, `needs_runtime`, `requires_preparation`, `unreachable`, fit failure, adapter rejection, and policy block; they MUST reject any prepared, installed, ready, reachable, or usable claim unless independent candidate readiness/runtime evidence in the same validated projection proves that exact claim. Every shipped localization and accessibility fixture MUST preserve the exact source-aware meanings above for `local_only`, `local_default:not_offered`, and `coordinator:not_offered`, and MUST reject any offer-history assertion for `local_default:not_offered`. Production promotion MUST include a signed journey result covering at least one MLX-cache candidate, one loopback runtime candidate, one opaque endpoint candidate, one adapter failure, one evaluated-but-not-network-admitted candidate, and local `local_only`/`offerable`/`not_offered` state-ladder evidence.
 
 ## 4. Implementation, tests, and journeys
 
@@ -156,6 +178,18 @@ The core invariant is that local discovery is deliberately cheap and broad becau
 
 ## 8. Changelog and history
 
+- v0.1.5 - Freezes the exact `local_only` English source meaning and distinct
+  source-aware meanings for local-default and coordinator-backed `not_offered`.
+  Local-default rendering cannot assert offer history; readiness and usability
+  remain independently evidenced.
+- v0.1.4 - Defines `local_only` solely as an admission-state disclosure and
+  requires independent candidate readiness/runtime evidence for prepared,
+  installed, ready, reachable, or usable claims. Adds negative copy fixtures
+  for every local blocker class without changing admission authority.
+- v0.1.3 - Defines `settlement_capable` guidance as conditional eligibility for
+  qualifying settled requests and requires localization/accessibility tests to
+  reject current-income or guaranteed-request meanings. No discovery state gains
+  money-path authority.
 - v0.1.2 - Define fixed redaction-provenance warning codes and null-preserving
   projection rules under R003/R007, with runtime test obligations under R008.
   Keep optional-label warnings non-blocking and unsafe identities omitted.

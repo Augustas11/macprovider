@@ -1,4 +1,6 @@
+import copy
 import json
+import re
 from pathlib import Path
 import unittest
 
@@ -11,6 +13,521 @@ def read_text(path: str) -> str:
 
 
 class BYOMContractLockTests(unittest.TestCase):
+    def test_catalog_economics_byte_fixtures_freeze_category_aware_trios(self):
+        fixture_bytes = (
+            ROOT / "scripts/tests/fixtures/catalog_economics_compatibility_v2.json"
+        ).read_bytes()
+        self.assertTrue(fixture_bytes.endswith(b"\n"))
+        fixtures = json.loads(fixture_bytes.decode("utf-8"))
+        self.assertEqual(
+            fixtures["namespace_prefixes"],
+            [
+                "model_catalog_economics_v",
+                "models catalog-economics.v",
+                "model_catalog_economics.v",
+            ],
+        )
+
+        trios = fixtures["trios"]
+        known = {
+            value
+            for trio in trios.values()
+            for value in trio.values()
+        }
+
+        def namespaced(value):
+            return any(value.startswith(prefix) for prefix in fixtures["namespace_prefixes"])
+
+        def selected_generation(manifest, status):
+            if not status["fresh"]:
+                return None
+            status_values = {value for value in status["capabilities"] if namespaced(value)}
+            if not status_values.issubset(known):
+                return None
+            status_generation = None
+            for generation, trio in trios.items():
+                if status_values == set(trio.values()):
+                    status_generation = generation
+                    break
+            if status_generation is None:
+                return None
+
+            complete_manifest_generations = set()
+            for tier_name, tier in manifest["tiers"].items():
+                categorized = {
+                    category: set(values)
+                    for category, values in tier.items()
+                    if isinstance(values, list)
+                }
+                tier_values = {
+                    value
+                    for values in categorized.values()
+                    for value in values
+                    if namespaced(value)
+                }
+                if not tier_values:
+                    continue
+                if not tier_values.issubset(known):
+                    return None
+                generations = {
+                    generation
+                    for generation, trio in trios.items()
+                    if tier_values.intersection(trio.values())
+                }
+                if len(generations) != 1:
+                    return None
+                generation = generations.pop()
+                trio = trios[generation]
+                if tier_name != trio["selection_capability"]:
+                    return None
+                if tier_values != set(trio.values()):
+                    return None
+                if trio["selection_capability"] not in categorized.get(
+                    "local_status_capabilities", set()
+                ):
+                    return None
+                if {
+                    trio["command_token"],
+                    trio["schema_companion"],
+                } - categorized.get("command_schemas", set()):
+                    return None
+                for category, values in categorized.items():
+                    permitted = set()
+                    if category == "local_status_capabilities":
+                        permitted.add(trio["selection_capability"])
+                    elif category == "command_schemas":
+                        permitted.update(
+                            (trio["command_token"], trio["schema_companion"])
+                        )
+                    if {value for value in values if namespaced(value)} != permitted:
+                        return None
+                if generation in complete_manifest_generations:
+                    return None
+                complete_manifest_generations.add(generation)
+            return (
+                status_generation
+                if status_generation in complete_manifest_generations
+                else None
+            )
+
+        cases = {case["name"]: case for case in fixtures["cases"]}
+        for case in fixtures["cases"]:
+            with self.subTest(case=case["name"]):
+                actual = selected_generation(
+                    fixtures["manifests"][case["manifest"]],
+                    fixtures["statuses"][case["status"]],
+                )
+                self.assertEqual(actual, case["expected_generation"])
+
+        for mutation in fixtures["one_fault_mutations"]:
+            case = cases[mutation["base_case"]]
+            manifest = copy.deepcopy(fixtures["manifests"][case["manifest"]])
+            status = copy.deepcopy(fixtures["statuses"][case["status"]])
+            if mutation["operation"] == "stale":
+                status["fresh"] = False
+            elif mutation["surface"] == "status":
+                values = status["capabilities"]
+                if mutation["operation"] == "remove":
+                    values.remove(mutation["value"])
+                else:
+                    values.append(mutation["value"])
+            else:
+                if mutation["operation"] == "rename_tier":
+                    tier = manifest["tiers"].pop(mutation["tier"])
+                    manifest["tiers"][mutation["new_tier"]] = tier
+                    with self.subTest(mutation=mutation["name"]):
+                        self.assertEqual(
+                            selected_generation(manifest, status),
+                            mutation["expected_generation"],
+                        )
+                    continue
+                tier = manifest["tiers"][mutation["tier"]]
+                values = tier[mutation["category"]]
+                if mutation["operation"] in ("remove", "move"):
+                    values.remove(mutation["value"])
+                if mutation["operation"] == "move":
+                    tier[mutation["other_category"]].append(mutation["value"])
+                elif mutation["operation"] == "add":
+                    values.append(mutation["value"])
+            with self.subTest(mutation=mutation["name"]):
+                self.assertEqual(
+                    selected_generation(manifest, status),
+                    mutation["expected_generation"],
+                )
+
+        checked_in_manifest = json.loads(
+            read_text(
+                "phase3-binary/app/Sources/Malibu/Resources/"
+                "MalibuModelCapabilities.json"
+            )
+        )
+        self.assertEqual(
+            checked_in_manifest["tiers"]["model_catalog_economics_v1"],
+            fixtures["manifests"]["current_v1"]["tiers"][
+                "model_catalog_economics_v1"
+            ],
+        )
+        status_source = read_text("phase3-binary/Sources/macprovider-cli/HTTPServer.swift")
+        status_block = re.search(
+            r"static let localStatusCapabilities = \[(.*?)\n    \]",
+            status_source,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(status_block)
+        advertised = set(re.findall(r'"([^"\\]+)"', status_block.group(1)))
+        self.assertEqual(
+            {value for value in advertised if namespaced(value)},
+            set(trios["v1"].values()),
+        )
+
+    def test_catalog_economics_compatibility_ui_is_exact(self):
+        spec001 = " ".join(read_text("specs/SPEC-001-phase3-binary.md").split())
+        spec044 = " ".join(
+            read_text("specs/SPEC-044-malibu-model-catalog-economics.md").split()
+        )
+
+        common = (
+            "generation trio",
+            "partial",
+            "mixed-generation",
+            "unrecognized generation-namespace",
+            "stale",
+            "manifest",
+            "local status",
+            "static current-model card",
+            "no error indicator",
+            "no retry",
+            "model catalog unavailable",
+            "`projection_unavailable`",
+            "retry",
+            "no action or economics",
+        )
+        for owner_text in (spec001, spec044):
+            for required in common:
+                with self.subTest(required=required):
+                    self.assertIn(required, owner_text)
+
+        for required in (
+            "schema companion without both other members",
+            "dual generations in flat status or within one tier",
+            "category misplacement",
+            "no read, run, cancel, action, or economics",
+            "valid complete matching generation trio",
+            "fails, times out, or returns malformed output",
+        ):
+            with self.subTest(spec="SPEC-001", required=required):
+                self.assertIn(required, spec001)
+        for required in (
+            "Missing trio members",
+            "dual generations in flat status or within a tier",
+            "no catalog-economics read, run, or cancel call",
+            "valid generation trio",
+            "fails, times out, or returns a malformed envelope",
+            "exposing no catalog action or economics",
+        ):
+            with self.subTest(spec="SPEC-044", required=required):
+                self.assertIn(required, spec044)
+
+    def test_exit3_failed_dispatch_lifecycle_is_constructive_and_non_live(self):
+        spec001 = " ".join(read_text("specs/SPEC-001-phase3-binary.md").split())
+        spec044 = " ".join(
+            read_text("specs/SPEC-044-malibu-model-catalog-economics.md").split()
+        )
+
+        for owner_text in (spec001, spec044):
+            for required in (
+                "immutable projected-action identity validation",
+                "`model_catalog_failed_dispatch.v1`",
+                "`failure.lock`",
+                "256-record",
+            ):
+                with self.subTest(required=required):
+                    self.assertIn(required, owner_text)
+
+        for required in (
+            "`transaction_id`, fresh `attempt_id`, `transaction_kind`, immutable non-null `event_model_key`",
+            "`root` containing the complete saved root locator/identity object",
+            "`tuple_sha256`, `projection_binding_sha256`, `event_sequence: 1`",
+            "`terminal_state: \"failed\"`",
+            "`live_attempt: false`",
+            "`stale_transaction`, `action_unavailable`, or `operation_conflict`",
+            "exactly one terminal event",
+            "exits 3",
+            "creates no `active.json`, cancellation marker, staging or network work",
+            "A failure-only path takes `failure.lock` then `cancel.lock`",
+            "262,144-byte cap",
+            "at most one pending record exists",
+            "A crash before durable pending publication",
+            "after the pending record is durable but before event flush",
+            "after event flush but before compaction",
+            "during compaction",
+            "No lock is held while stdout is written or flushed",
+            "makes no scheduler-fairness or starvation-free claim",
+            "no second live attempt, no cancellation marker for a failed dispatch, and no incumbent displacement",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, spec044)
+
+    def test_catalog_transaction_lock_graph_and_bounded_contention_are_exhaustive(self):
+        spec001 = " ".join(read_text("specs/SPEC-001-phase3-binary.md").split())
+        spec044 = " ".join(
+            read_text("specs/SPEC-044-malibu-model-catalog-economics.md").split()
+        )
+
+        for required in (
+            "The catalog-economics v2 lock graph is exhaustive",
+            "projection writer",
+            "`operation.lock`, then `failure.lock`, then `cancel.lock`",
+            "`failure.lock` then `cancel.lock`",
+            "live non-cleanup worker that already retains `operation.lock` may "
+            "take `cancel.lock` directly only for one bounded periodic exact-marker read",
+            "`operation.lock`, then its one exact-target cleanup lock, then `cancel.lock`",
+            "No path ever holds a cleanup lock and `failure.lock` together",
+            "`operation.lock`, then `RecommendationAdoptionLock`, then the control socket, then the runtime reservation",
+            "No other nested acquisition or release order is permitted",
+            "periodic read-only operation-cancel path",
+            "one `CLOCK_MONOTONIC_RAW` deadline",
+            "strictly less than 2.000 seconds",
+            "Successful nonblocking acquisition changes the process into a pre-active normal worker",
+            "records a new one-total `CLOCK_MONOTONIC_RAW` deadline",
+            '`{"error_code":"dispatch_state_busy"}` followed by LF',
+            "typed pre-attachment process error is outside semantic exit 3",
+            "Malibu maps `dispatch_state_busy` to an actionable retry",
+            "successful new-pending publication/readback is the failed-dispatch terminal publication point",
+            "at the cancel linearization point",
+            "MUST return `terminal` with the record's exact `attempt_id`",
+            "Eviction is part of the replacement history snapshot and never a delete-before-copy operation",
+            "The process then exits 3 and does not reacquire a lock",
+            "The next failure-only writer compacts this complete pending record",
+            "every pairwise overlap",
+            "continuous arrivals",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, spec044)
+
+        for required in (
+            "SPEC-044 v0.2.8",
+            "`failure.lock`-then-`cancel.lock` lifecycle",
+            '`{"error_code":"dispatch_state_busy"}` plus LF',
+            "writes no stdout event",
+            "exits 5",
+        ):
+            with self.subTest(owner="SPEC-001", required=required):
+                self.assertIn(required, spec001)
+
+    def test_spec044_current_version_is_cross_spec_locked(self):
+        spec001 = read_text("specs/SPEC-001-phase3-binary.md")
+        spec044 = read_text("specs/SPEC-044-malibu-model-catalog-economics.md")
+        readme = read_text("specs/README.md")
+        conformance = json.loads(read_text("specs/CONFORMANCE.json"))
+
+        self.assertIn("**Version:** 1.9.17", spec001)
+        self.assertIn("**Version:** 0.2.8", spec044)
+        self.assertIn('"version": "0.2.8"', spec044)
+        self.assertIn("SPEC-044 v0.2.8", spec001)
+        self.assertIn("| SPEC-001 | Phase 3 Binary: Mac Provider Inference CLI | 1.9.17 |", readme)
+        self.assertIn("| SPEC-044 | Malibu Model Catalog Economics | 0.2.8 |", readme)
+        current_spec044 = spec044.split("## 8. Changelog and history", 1)[0]
+        self.assertNotIn("v0.2.7", current_spec044)
+        self.assertNotIn("v0.2.6", current_spec044)
+        self.assertNotIn("v0.2.4", current_spec044)
+        self.assertNotIn("v0.2.5", current_spec044)
+        spec001_record = next(
+            record for record in conformance["specs"] if record["spec_id"] == "SPEC-001"
+        )
+        self.assertEqual(spec001_record["version"], "1.9.17")
+        spec_record = next(
+            record for record in conformance["specs"] if record["spec_id"] == "SPEC-044"
+        )
+        self.assertEqual(spec_record["version"], "0.2.8")
+        for requirement in conformance["requirements"]:
+            if requirement["spec_id"] == "SPEC-044":
+                self.assertNotIn("SPEC-044 v0.2.7", json.dumps(requirement))
+                self.assertNotIn("SPEC-044 v0.2.6", json.dumps(requirement))
+                self.assertNotIn("SPEC-044 v0.2.5", json.dumps(requirement))
+
+    def test_closed_admission_inventory_and_local_only_copy_are_truthful(self):
+        spec001 = read_text("specs/SPEC-001-phase3-binary.md")
+        spec046 = read_text("specs/SPEC-046-provider-byom-discovery.md")
+        handoff = read_text("audits/2026-09-11-byom-v02-handoffs/SLICE6_STATE_SURFACE_AND_COPY.md")
+
+        exact_enum = (
+            "`local_only`, `not_offered`, `offerable`, `offer_submitted`, "
+            "`offer_rejected`, `sandbox_probe_only`, `network_visible_unpriced`, "
+            "`network_admitted_unsettled`, `catalog_priced`, `settlement_capable`, "
+            "`withdrawn`, and `revoked`"
+        )
+        self.assertIn(exact_enum, spec046)
+        self.assertIn("the 12 machine admission states remain", spec001)
+        self.assertIn("All 12 machine `admission_state` values", handoff)
+        self.assertNotIn("13 machine admission states", spec001)
+        self.assertNotIn("All 13 machine `admission_state` values", handoff)
+
+        self.assertIn(
+            "The `local_only` admission state is not readiness evidence and MUST NOT by itself "
+            "be rendered as prepared, installed, ready, reachable, or usable.",
+            " ".join(spec001.split()),
+        )
+        self.assertIn(
+            "| `local_only` | local_default | Local only | Retained as local inventory only; "
+            "this admission state does not claim the model is prepared, installed, ready, "
+            "reachable, or usable. | local_inventory_only |",
+            " ".join(handoff.split()),
+        )
+        exact_local_only = (
+            "Retained as local inventory only; this admission state does not claim the model "
+            "is prepared, installed, ready, reachable, or usable."
+        )
+        for owner_text in (spec001, spec046, handoff):
+            with self.subTest(owner="local_only"):
+                self.assertIn(exact_local_only, " ".join(owner_text.split()))
+        self.assertNotIn("Installed and usable on this Mac", handoff)
+
+        state_table = handoff.split("## State label + meaning copy", 1)[1].split(
+            "## Non-earning disclosure lines", 1
+        )[0]
+        rows = [line for line in state_table.splitlines() if line.startswith("| `")]
+        self.assertEqual(len(rows), 13)
+        self.assertEqual(
+            len({row.split("|")[1].strip() for row in rows}),
+            12,
+        )
+        for blocker in (
+            "`needs_weights`",
+            "`needs_runtime`",
+            "`requires_preparation`",
+            "`unreachable`",
+            "fit failure",
+            "adapter rejection",
+            "policy block",
+        ):
+            with self.subTest(blocker=blocker):
+                self.assertIn(blocker, spec046)
+
+    def test_not_offered_copy_is_exact_and_source_aware(self):
+        spec001 = read_text("specs/SPEC-001-phase3-binary.md")
+        spec044 = read_text("specs/SPEC-044-malibu-model-catalog-economics.md")
+        spec046 = read_text("specs/SPEC-046-provider-byom-discovery.md")
+        spec047 = read_text("specs/SPEC-047-network-model-admission.md")
+        handoff = read_text(
+            "audits/2026-09-11-byom-v02-handoffs/SLICE6_STATE_SURFACE_AND_COPY.md"
+        )
+        local_default = "Coordinator offer state is unavailable or has not been queried."
+        coordinator = "Coordinator reports no active network offer for this model."
+
+        for owner_text in (spec001, spec044, spec046, handoff):
+            with self.subTest(source="local_default"):
+                self.assertIn(local_default, " ".join(owner_text.split()))
+        for owner_text in (spec001, spec044, spec046, spec047, handoff):
+            with self.subTest(source="coordinator"):
+                self.assertIn(coordinator, " ".join(owner_text.split()))
+        self.assertNotIn("Discovered but never offered to the network.", handoff)
+        self.assertIn(
+            "MUST NOT assert that an offer never existed",
+            " ".join(spec046.split()),
+        )
+        self.assertIn("reject any local-default offer-history assertion", spec044)
+
+    def test_catalog_only_sentinel_is_exact_and_fault_tested(self):
+        spec044 = read_text("specs/SPEC-044-malibu-model-catalog-economics.md")
+        contract = " ".join(spec044.split())
+
+        for required in (
+            '`runtime_state: "catalog"`',
+            'null `action_model_id`',
+            '`economics_state` to `unavailable`',
+            '`rate_source` to `none`',
+            '`source: "local_default"`',
+            '`state: "not_offered"`',
+            'null `coordinator_event_id`',
+            'null `state_observed_at`',
+            '`catalog_economics_permitted: false`',
+            '`settlement_capable: false`',
+            'all demand signals to null',
+            'Apply one-fault negatives for',
+            'every other known or unknown economics state, rate source, admission source or',
+            'either authorization boolean set',
+            'any non-null money/demand field',
+            'non-catalog runtime state, non-null `action_model_id`',
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, contract)
+
+        self.assertIn(
+            "exact catalog-only unavailable sentinel in the `Blocked` section",
+            contract,
+        )
+        self.assertIn(
+            "MUST NOT place it in `Network catalog`, `Current`, `Ready`, or `Needs preparation`",
+            contract,
+        )
+        self.assertIn("exact placement in `Blocked`", contract)
+        self.assertIn(
+            "Reject placement in `Network catalog`, `Current`, `Ready`, or `Needs preparation` "
+            "as distinct one-fault section changes",
+            contract,
+        )
+
+    def test_r005_is_the_single_complete_ranking_oracle(self):
+        spec044 = read_text("specs/SPEC-044-malibu-model-catalog-economics.md")
+        self.assertEqual(spec044.count("The authoritative total row order"), 1)
+        ranking = spec044.split("The authoritative total row order", 1)[1].split(
+            "**SPEC-044-R006", 1
+        )[0]
+        ranking = " ".join(ranking.split())
+        ordered = (
+            "the R008 section rank",
+            "`provider_completion_payout_usd_per_million_tokens`, descending",
+            "`demand_rank`, ascending",
+            "`supply_deficit_score`, descending",
+            "`demand_weight`, descending",
+            "`ready_provider_count`, ascending",
+            "the unique canonical row identity, ascending",
+        )
+        positions = [ranking.index(fragment) for fragment in ordered]
+        self.assertEqual(positions, sorted(positions))
+        for required in (
+            "sole row-ordering authority",
+            "unsigned UTF-8 bytes",
+            "tagged wire tuple (`candidate`, `candidate_id`)",
+            "otherwise (`catalog`, `model_key`)",
+            "MUST contain no duplicate canonical row identity",
+            "Display names and locale-aware comparison APIs MUST NOT participate in this order",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, ranking)
+
+    def test_published_cleanup_action_has_canonical_exact_target_binding(self):
+        spec044 = read_text("specs/SPEC-044-malibu-model-catalog-economics.md")
+        contract = " ".join(spec044.split())
+        for required in (
+            "`row.cleanup_published`, if retained, MUST be byte-for-byte identical to",
+            "`cleanup_targets[i].cleanup`",
+            "UTF-8 RFC 8785 JSON Canonicalization Scheme (JCS) bytes",
+            "reject duplicate or unknown action-object member names",
+            "`row.cleanup_published.artifact_identity_digest`",
+            "`cleanup_targets[i].cleanup.artifact_identity_digest`",
+            "`cleanup_targets[i].estimated_bytes`",
+            "Distinct one-fault fixtures MUST independently change",
+            "the enclosing target `artifact_identity_digest`",
+            "the enclosing target `estimated_bytes`",
+            "`row.cleanup_published.artifact_identity_digest`",
+            "`row.cleanup_published.estimated_bytes`",
+            "`cleanup_targets[i].cleanup.estimated_bytes`",
+            "transaction kind in each nested action copy",
+            "transaction id in each nested action copy",
+            "every other action field in each nested action copy, one field at a time",
+            "change both nested action copies to the same new `artifact_identity_digest`",
+            "to the same new `estimated_bytes`",
+            "leaving the enclosing target unchanged",
+            "preserve action-to-action JCS equality",
+            "otherwise valid action, unchanged, to another target",
+            "before provider confirmation, reservation, rename, or deletion",
+            "outside-root, protected-object, and legacy sentinels unchanged",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, contract)
+
     def test_legacy_model_command_strings_remain_pinned(self):
         spec001 = read_text("specs/SPEC-001-phase3-binary.md")
         build_spec = read_text("specs/design/BUILD_SPEC_953_MALIBU_MODEL_SWITCHING.md")
@@ -92,7 +609,7 @@ class BYOMContractLockTests(unittest.TestCase):
         # "Can't earn in this release") fails the lock even though every enum
         # value and verdict string still appears somewhere in the spec.
         expected_mapping = {
-            "settlement_capable": '"Earning now"',
+            "settlement_capable": '"Eligible to earn on qualifying settled requests"',
             "not_earning_yet_catalog_or_receipt_path_exists": '"Not earning yet — "',
             "no_earning_path_in_v0_1": '"Can\'t earn in this release"',
             "local_inventory_only": '"Local only — not offered to the network"',
