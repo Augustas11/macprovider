@@ -2,7 +2,10 @@ package config
 
 import (
 	"crypto/ed25519"
+	"crypto/hmac"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -487,7 +490,10 @@ type StatsConfig struct {
 	// open a pool for it (BUILD §D.6 / SECURITY §B.1).
 	PartnerKeysAdminDSN string `yaml:"partner_keys_admin_dsn"`
 
-	Rollup           StatsRollupConfig           `yaml:"rollup"`
+	Rollup StatsRollupConfig `yaml:"rollup"`
+	// Intake configures the SPEC-017 v0.2.1 §5.2b catalog-intake read
+	// model and its in-process aggregator.
+	Intake           StatsIntakeConfig           `yaml:"intake"`
 	CORS             StatsCORSConfig             `yaml:"cors"`
 	RateLimit        StatsRateLimitConfig        `yaml:"rate_limit"`
 	StreamingMetrics StatsStreamingMetricsConfig `yaml:"streaming_metrics"`
@@ -538,6 +544,154 @@ type StatsPartnerKeysConfig struct {
 	// deployed config is the source of truth for
 	// "is this coordinator production".
 	ProductionSignoffPath string `yaml:"production_signoff_path"`
+}
+
+// StatsIntakeConfig is SPEC-017 v0.2.1 §5.2b.7. Zero values take the
+// SPEC-023 §16.4 defaults at load time; the integers are validated as
+// positive and the per-principal cap must resolve to at least one request.
+type StatsIntakeConfig struct {
+	// Enabled defaults to true exactly when policy_salt is configured and
+	// false otherwise (an operator turns intake on by supplying the
+	// secret it needs); an explicit true without a salt fails startup; an
+	// explicit false removes the aggregator and the endpoint (SPEC-023
+	// records the signal as source_unavailable).
+	Enabled *bool `yaml:"enabled"`
+	// ReaderPartnerKeyIDs lists the partner_keys.id values allowed to read
+	// GET /v1/stats/intake. Empty refuses every key.
+	ReaderPartnerKeyIDs []int64 `yaml:"reader_partner_key_ids"`
+	// ExcludedAccounts flags test, synthetic, and internal buyer accounts
+	// (keep-warm, canary, load generators, acceptance harnesses); their
+	// requests contribute to nothing. A change closes the open window.
+	ExcludedAccounts []string `yaml:"excluded_accounts"`
+	// PolicySalt is the operator secret under which the published
+	// eligibility_policy_id is derived (HMAC-SHA256 over the canonical
+	// excluded-account set). It is required when intake is enabled, is
+	// never emitted, and supports env:NAME indirection. Rotating it changes
+	// the published id without changing the policy — treat it as stable.
+	PolicySalt          string `yaml:"policy_salt"`
+	KeyBuckets          int    `yaml:"key_buckets"`           // INTAKE_UNKNOWN_KEY_BUCKETS
+	PrincipalsPerBucket int    `yaml:"principals_per_bucket"` // INTAKE_UNKNOWN_PRINCIPALS_PER_BUCKET
+	DistinctKeyCap      int    `yaml:"distinct_key_cap"`      // INTAKE_UNKNOWN_KEY_DISTINCT_CAP
+	BuyerRequestFloor   int    `yaml:"buyer_request_floor"`   // INTAKE_BUYER_REQUEST_FLOOR
+	PrincipalCapPct     int    `yaml:"principal_cap_pct"`     // INTAKE_UNKNOWN_KEY_PRINCIPAL_CAP_PCT
+}
+
+// IsEnabled reports the effective enabled flag: the explicit value when
+// set, else true exactly when a policy salt is configured.
+func (c StatsIntakeConfig) IsEnabled() bool {
+	if c.Enabled != nil {
+		return *c.Enabled
+	}
+	return strings.TrimSpace(c.PolicySalt) != ""
+}
+
+// WithDefaults fills zero integers with the SPEC-023 §16.4 defaults.
+func (c StatsIntakeConfig) WithDefaults() StatsIntakeConfig {
+	out := c
+	if out.KeyBuckets == 0 {
+		out.KeyBuckets = 64
+	}
+	if out.PrincipalsPerBucket == 0 {
+		out.PrincipalsPerBucket = 64
+	}
+	if out.DistinctKeyCap == 0 {
+		out.DistinctKeyCap = 10000
+	}
+	if out.BuyerRequestFloor == 0 {
+		out.BuyerRequestFloor = 250
+	}
+	if out.PrincipalCapPct == 0 {
+		out.PrincipalCapPct = 10
+	}
+	return out
+}
+
+// Bounds mirrored from internal/intake (SPEC-023 §16.4): the knobs size
+// fixed in-memory tables, and the per-principal cap may never exceed a
+// tenth of the floor (clearing it needs at least ten independent
+// principals).
+const (
+	intakeMaxKeyBuckets          = 4096
+	intakeMaxPrincipalsPerBucket = 4096
+	intakeMaxDistinctKeyCap      = 10_000_000
+	intakeMaxBuyerRequestFloor   = 1_000_000_000
+	intakeMaxPrincipalCapPct     = 10
+	intakeMinPolicySaltBytes     = 16
+)
+
+// Validate applies SPEC-017 §5.2b.7 after defaults. The salt is checked
+// only when intake is enabled (a disabled intake needs no policy id).
+func (c StatsIntakeConfig) Validate() error {
+	d := c.WithDefaults()
+	switch {
+	case d.KeyBuckets <= 0 || d.KeyBuckets > intakeMaxKeyBuckets:
+		return fmt.Errorf("stats.intake.key_buckets must be in [1, %d]", intakeMaxKeyBuckets)
+	case d.PrincipalsPerBucket <= 0 || d.PrincipalsPerBucket > intakeMaxPrincipalsPerBucket:
+		return fmt.Errorf("stats.intake.principals_per_bucket must be in [1, %d]", intakeMaxPrincipalsPerBucket)
+	case d.DistinctKeyCap <= 0 || d.DistinctKeyCap > intakeMaxDistinctKeyCap:
+		return fmt.Errorf("stats.intake.distinct_key_cap must be in [1, %d]", intakeMaxDistinctKeyCap)
+	case d.BuyerRequestFloor <= 0 || d.BuyerRequestFloor > intakeMaxBuyerRequestFloor:
+		return fmt.Errorf("stats.intake.buyer_request_floor must be in [1, %d]", intakeMaxBuyerRequestFloor)
+	case d.PrincipalCapPct < 1 || d.PrincipalCapPct > intakeMaxPrincipalCapPct:
+		return fmt.Errorf("stats.intake.principal_cap_pct must be in [1, %d]", intakeMaxPrincipalCapPct)
+	case d.BuyerRequestFloor*d.PrincipalCapPct/100 < 1:
+		return fmt.Errorf("stats.intake.buyer_request_floor × principal_cap_pct / 100 must be at least 1")
+	}
+	if salt := strings.TrimSpace(d.PolicySalt); d.IsEnabled() || salt != "" {
+		if _, weak := weakOperatorKeyDenylist[strings.ToLower(salt)]; weak || len(salt) < intakeMinPolicySaltBytes {
+			return fmt.Errorf("stats.intake.policy_salt must be at least %d characters and not a placeholder when intake is enabled (prefer env:NAME)", intakeMinPolicySaltBytes)
+		}
+	}
+	for _, id := range d.ReaderPartnerKeyIDs {
+		if id <= 0 {
+			return fmt.Errorf("stats.intake.reader_partner_key_ids entries must be positive partner_keys.id values")
+		}
+	}
+	seen := make(map[string]struct{}, len(d.ExcludedAccounts))
+	for _, account := range d.ExcludedAccounts {
+		account = strings.TrimSpace(account)
+		if account == "" {
+			return fmt.Errorf("stats.intake.excluded_accounts entries must be non-empty")
+		}
+		if _, dup := seen[account]; dup {
+			return fmt.Errorf("stats.intake.excluded_accounts lists %q twice", account)
+		}
+		seen[account] = struct{}{}
+	}
+	return nil
+}
+
+// ExcludedAccountSet returns the trimmed, sorted, de-duplicated
+// excluded-account list (the canonical form the policy id is derived from).
+func (c StatsIntakeConfig) ExcludedAccountSet() []string {
+	set := make(map[string]struct{}, len(c.ExcludedAccounts))
+	for _, account := range c.ExcludedAccounts {
+		if account = strings.TrimSpace(account); account != "" {
+			set[account] = struct{}{}
+		}
+	}
+	out := make([]string, 0, len(set))
+	for account := range set {
+		out = append(out, account)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// EligibilityPolicyID derives the opaque SPEC-017 §5.2b.2
+// eligibility_policy_id: the first 32 hex characters of HMAC-SHA256 keyed
+// by policy_salt over the canonical excluded-account set (each entry
+// followed by a NUL). The set's members are not recoverable from the id
+// without the salt; two coordinators sharing a salt and a set publish the
+// same id.
+func (c StatsIntakeConfig) EligibilityPolicyID() string {
+	mac := hmac.New(sha256.New, []byte(strings.TrimSpace(c.PolicySalt)))
+	mac.Write([]byte("macprovider.intake.eligibility-policy.v1\x00"))
+	for _, account := range c.ExcludedAccountSet() {
+		mac.Write([]byte(account))
+		mac.Write([]byte{0})
+	}
+	return hex.EncodeToString(mac.Sum(nil))[:32]
 }
 
 type StatsRollupConfig struct {
@@ -813,15 +967,15 @@ type RelayConfig struct {
 // is an operator-authored provider_id -> canonical unpadded base64url Ed25519
 // public-key map; advertised encryption records are never trusted without it.
 type RelayBlindConfig struct {
-	Enabled                    bool              `yaml:"enabled"`
-	SQLitePath                 string            `yaml:"sqlite_path"`
-	IdentityPublicKeys         map[string]string `yaml:"identity_public_keys"`
-	ReservationTTLSeconds      int               `yaml:"reservation_ttl_seconds"`
-	ReplayRetentionSeconds     int               `yaml:"replay_retention_seconds"`
-	MaxClockSkewSeconds        int               `yaml:"max_clock_skew_seconds"`
-	MaxActiveReservations      int               `yaml:"max_active_reservations"`
-	MaxKeyRecordsPerProvider   int               `yaml:"max_key_records_per_provider"`
-	MetadataRequestsPerMinute  int               `yaml:"metadata_requests_per_minute"`
+	Enabled                   bool              `yaml:"enabled"`
+	SQLitePath                string            `yaml:"sqlite_path"`
+	IdentityPublicKeys        map[string]string `yaml:"identity_public_keys"`
+	ReservationTTLSeconds     int               `yaml:"reservation_ttl_seconds"`
+	ReplayRetentionSeconds    int               `yaml:"replay_retention_seconds"`
+	MaxClockSkewSeconds       int               `yaml:"max_clock_skew_seconds"`
+	MaxActiveReservations     int               `yaml:"max_active_reservations"`
+	MaxKeyRecordsPerProvider  int               `yaml:"max_key_records_per_provider"`
+	MetadataRequestsPerMinute int               `yaml:"metadata_requests_per_minute"`
 }
 
 type AdmissionConfig struct {
@@ -1843,6 +1997,11 @@ func (c *Config) resolveEnv() error {
 		return err
 	} else {
 		c.Auth.GatewayServiceToken = v
+	}
+	if v, err := resolveEnvValue("stats.intake.policy_salt", c.Stats.Intake.PolicySalt); err != nil {
+		return err
+	} else {
+		c.Stats.Intake.PolicySalt = v
 	}
 	for name, raw := range c.Auth.OperatorKeys {
 		v, err := resolveEnvValue("auth.operator_keys."+name, raw)
@@ -3604,6 +3763,9 @@ func (c Config) validateStats() error {
 	}
 	if strings.TrimSpace(s.RollupDSN) == "" {
 		return fmt.Errorf("stats.rollup_dsn must be set when stats.enabled is true")
+	}
+	if err := s.Intake.Validate(); err != nil {
+		return err
 	}
 	if s.PartnerKeys.LastUsedAtUpdatesEnabled && strings.TrimSpace(s.PartnerKeys.WriterDSN) == "" {
 		return fmt.Errorf("stats.partner_keys.writer_dsn must be set when stats.partner_keys.last_used_at_updates_enabled is true")

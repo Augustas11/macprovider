@@ -28,6 +28,7 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/catalogbind"
 	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/explorer"
+	"github.com/augstar/macprovider-coordinator/internal/intake"
 	"github.com/augstar/macprovider-coordinator/internal/mdm"
 	"github.com/augstar/macprovider-coordinator/internal/onboarding"
 	"github.com/augstar/macprovider-coordinator/internal/payout"
@@ -397,6 +398,26 @@ func main() {
 	// hardware capacity from an async stats_rollup-side cache. The
 	// snapshot path itself remains memory-only: no DB lookups on buyer,
 	// routing, streaming, heartbeat, or public stats request paths.
+	// SPEC-017 v0.2.1 §5.2b / SPEC-023 §16.2(a): the in-process
+	// unmatched-model aggregator. Memory-only; the stats rollup reads its
+	// snapshot and the buyer chat handler feeds it at model_not_found.
+	var intakeAggregator *intake.Aggregator
+	if statsPools != nil && cfg.Stats.Intake.IsEnabled() {
+		intakeCfg := cfg.Stats.Intake.WithDefaults()
+		agg, err := intake.New(intake.Params{
+			KeyBuckets:          intakeCfg.KeyBuckets,
+			PrincipalsPerBucket: intakeCfg.PrincipalsPerBucket,
+			DistinctKeyCap:      intakeCfg.DistinctKeyCap,
+			BuyerRequestFloor:   intakeCfg.BuyerRequestFloor,
+			PrincipalCapPct:     intakeCfg.PrincipalCapPct,
+		}, billing.NormalizeModelKey, intake.WithPolicy(intakeCfg.EligibilityPolicyID(), len(intakeCfg.ExcludedAccountSet())))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "stats intake: %v\n", err)
+			os.Exit(1)
+		}
+		intakeAggregator = agg
+		defer intakeAggregator.Stop()
+	}
 	var statsRollup *statsrollup.Runner
 	if statsPools != nil {
 		// Round-1 ARCH r1 HIGH 2 fix: BackfillMode must be the
@@ -458,8 +479,12 @@ func main() {
 			logger.Warn().Err(err).Msg("stats hardware cache refresh failed; retaining previous hardware snapshot")
 		})
 
+		snapshotProvider := poolsnapshot.NewWithHardware(registry, hardwareCache)
+		if intakeAggregator != nil {
+			snapshotProvider = snapshotProvider.WithIntake(intakeAggregator)
+		}
 		var err error
-		statsRollup, err = statsrollup.New(statsPools.Rollup, rollupCfg, poolsnapshot.NewWithHardware(registry, hardwareCache), logger.With().Str("subsystem", "stats_rollup").Logger())
+		statsRollup, err = statsrollup.New(statsPools.Rollup, rollupCfg, snapshotProvider, logger.With().Str("subsystem", "stats_rollup").Logger())
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "stats rollup: %v\n", err)
 			os.Exit(1)
@@ -997,6 +1022,10 @@ func main() {
 		// coordinator's compare-and-insert — pre/post release-generation,
 		// head, binding and session-epoch checks around the insert.
 		buyer.WithModelAdmissionRouteGuard(wsServer),
+		buyer.WithIntakeObserver(intakeObserverFor(intakeAggregator)),
+		// The excluded-account set stays at the buyer boundary; the
+		// aggregator receives only the derived policy id and the count.
+		buyer.WithIntakeExcludedAccounts(cfg.Stats.Intake.ExcludedAccountSet()),
 		buyer.WithStreamingMetricsMaxSamples(cfg.Stats.StreamingMetrics.MaxSamples),
 		buyer.WithPreflight(func(provider pool.Provider, requestID string, estimatedTokens int, timeout time.Duration) (buyer.PreflightResult, bool, error) {
 			ack, ok, err := wsServer.Preflight(provider, requestID, estimatedTokens, timeout)
@@ -1224,7 +1253,7 @@ func main() {
 				IdleTTL:      time.Duration(cfg.Stats.RateLimit.IdleTTLSeconds) * time.Second,
 				PreflightRPM: cfg.Stats.RateLimit.PreflightRPM,
 			},
-		).Handler()
+		).WithIntake(cfg.Stats.Intake.IsEnabled(), cfg.Stats.Intake.ReaderPartnerKeyIDs).Handler()
 		providerMux.Handle("/v1/stats/", statsHandler)
 		providerMux.Handle("/metrics", promhttp.HandlerFor(metricsRegistry, promhttp.HandlerOpts{}))
 		logger.Info().Msg("SPEC-017 stats handlers + /metrics mounted on provider port")
@@ -3595,4 +3624,13 @@ func observeRollupLag(ctx context.Context, readerDB *sql.DB, m *statsmetrics.Met
 			statsrollup.ObserveRollupLagOnce(ctx, readerDB, m)
 		}
 	}
+}
+
+// intakeObserverFor keeps a nil aggregator a nil interface so the buyer hook
+// stays disabled when stats or intake are off.
+func intakeObserverFor(a *intake.Aggregator) buyer.IntakeObserver {
+	if a == nil {
+		return nil
+	}
+	return a
 }
