@@ -96,10 +96,17 @@ final class BYOMLoopbackAdapterTests: XCTestCase {
         XCTAssertEqual(hashed.capabilities.quantization, "Q4_K_M")
         XCTAssertEqual(hashed.capabilities.family, "llama")
 
+        XCTAssertEqual(hashed.readinessState, "ready")   // offerability needs a seeded namespace; covered in the state test
+
         let mlx = try XCTUnwrap(document.candidates.first { $0.servedModelRef == "lmstudio:mlx-only-model" })
         XCTAssertEqual(mlx.identityState, "runtime_reported")
         let absent = try XCTUnwrap(document.candidates.first { $0.servedModelRef == "lmstudio:not-on-disk" })
         XCTAssertEqual(absent.identityState, "runtime_reported")
+        // Neither carried state: not proven serviceable, so not offerable.
+        for c in [mlx, absent] {
+            XCTAssertEqual(c.readinessState, "requires_preparation")
+            XCTAssertTrue(c.warningCodes.contains("requires_preparation"))
+        }
 
         // Seen on hardware: LM Studio's default embedding model is listed with
         // type "embedding"; it cannot serve chat and must not be a candidate.
@@ -110,6 +117,54 @@ final class BYOMLoopbackAdapterTests: XCTestCase {
             XCTAssertNotEqual(candidate.identityState, "opaque_endpoint")
             XCTAssertNotEqual(candidate.runtimeSource, "openai_compatible_loopback")
         }
+    }
+
+    /// Audit MEDIUM: a downloaded but unloaded LM Studio model must not be
+    /// `ready`/`offerable`. Only the documented `loaded` state is serviceable;
+    /// `not-loaded`, an unrecognized value, and an absent field all stay
+    /// local-only until evaluate proves a completion.
+    func testLMStudioOnlyALoadedModelIsReadyAndOfferable() async throws {
+        let root = try temporaryDirectory("byom-lms-state")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let namespace = try seededNamespace(in: root)
+        let client = RoutingBYOMHTTPClient(routes: ["/api/v0/models": json(#"""
+        {"data":[
+          {"id":"is-loaded","type":"llm","compatibility_type":"gguf","state":"loaded"},
+          {"id":"is-not-loaded","type":"llm","compatibility_type":"gguf","state":"not-loaded"},
+          {"id":"is-weird","type":"llm","compatibility_type":"gguf","state":"defragmenting"},
+          {"id":"has-no-state","type":"llm","compatibility_type":"gguf"}
+        ]}
+        """#)])
+        let document = await BYOMDiscoveryRunner(environment: environment(root: root, namespace: namespace, lmstudio: "http://127.0.0.1:1234"), httpClient: client).discover()
+        func c(_ id: String) throws -> BYOMDiscoveryWire.Candidate { try XCTUnwrap(document.candidates.first { $0.servedModelRef == "lmstudio:\(id)" }) }
+        XCTAssertEqual(try c("is-loaded").readinessState, "ready")
+        XCTAssertEqual(try c("is-loaded").admissionState, "offerable")
+        for id in ["is-not-loaded", "is-weird", "has-no-state"] {
+            XCTAssertEqual(try c(id).readinessState, "requires_preparation", id)
+            XCTAssertEqual(try c(id).admissionState, "local_only", id)
+        }
+        // A non-string state is malformed, not silently ready.
+        let bad = await BYOMDiscoveryRunner(environment: environment(root: root, lmstudio: "http://127.0.0.1:1234"), httpClient: RoutingBYOMHTTPClient(routes: ["/api/v0/models": json(#"{"data":[{"id":"x","type":"llm","state":true}]}"#)])).discover()
+        XCTAssertEqual(bad.adapters.first { $0.runtimeSource == "lmstudio_loopback" }?.status, "malformed")
+    }
+
+    func testLMStudioFallsBackToV1ModelsOn404AndNothingFromItIsReady() async throws {
+        let root = try temporaryDirectory("byom-lms-fallback")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let client = RoutingBYOMHTTPClient(routes: [
+            "/api/v0/models": BYOMHTTPResponse(statusCode: 404, headers: [], body: Data()),
+            "/v1/models": json(#"{"data":[{"id":"legacy-model"}]}"#),
+        ])
+        let document = await BYOMDiscoveryRunner(environment: environment(root: root, lmstudio: "http://127.0.0.1:1234"), httpClient: client).discover()
+        XCTAssertEqual(client.requestLog, ["GET http://127.0.0.1:1234/api/v0/models", "GET http://127.0.0.1:1234/v1/models"])
+        let adapter = try XCTUnwrap(document.adapters.first { $0.runtimeSource == "lmstudio_loopback" })
+        XCTAssertEqual(adapter.status, "ok")
+        let candidate = try XCTUnwrap(document.candidates.first { $0.servedModelRef == "lmstudio:legacy-model" })
+        XCTAssertEqual(candidate.readinessState, "requires_preparation")
+        XCTAssertEqual(candidate.admissionState, "local_only")
+        // Any other non-200 on the native endpoint is still 'unavailable', not a fallback.
+        let down = await BYOMDiscoveryRunner(environment: environment(root: root, lmstudio: "http://127.0.0.1:1234"), httpClient: RoutingBYOMHTTPClient(routes: ["/api/v0/models": BYOMHTTPResponse(statusCode: 503, headers: [], body: Data())])).discover()
+        XCTAssertEqual(down.adapters.first { $0.runtimeSource == "lmstudio_loopback" }?.status, "unavailable")
     }
 
     func testLMStudioStoreFailsClosedWhenSeveralFilesAnswerTheID() throws {
@@ -386,7 +441,7 @@ final class BYOMLoopbackAdapterTests: XCTestCase {
         let lms = await BYOMOfferDryRunRunner(
             target: "lmstudio:tiny-1b-q4_k_m",
             environment: environment(root: root, namespace: namespace, lmstudio: "http://127.0.0.1:1234"),
-            httpClient: RoutingBYOMHTTPClient(routes: ["/api/v0/models": json(#"{"data":[{"id":"tiny-1b-q4_k_m","compatibility_type":"gguf"}]}"#)])
+            httpClient: RoutingBYOMHTTPClient(routes: ["/api/v0/models": json(#"{"data":[{"id":"tiny-1b-q4_k_m","compatibility_type":"gguf","state":"loaded"}]}"#)])
         ).dryRun()
         XCTAssertEqual(lms.servedModelRef, "lmstudio:tiny-1b-q4_k_m")
         // A hashed GGUF candidate is first-class and MAY be offered (unlike the

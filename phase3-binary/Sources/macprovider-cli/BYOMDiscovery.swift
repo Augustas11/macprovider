@@ -3921,11 +3921,22 @@ struct BYOMLMStudioDiscovery: Sendable {
             )
         }
         do {
-            let response = try await httpClient.get(
+            var response = try await httpClient.get(
                 baseURL.appendingPathComponent("api/v0/models"),
                 maxHeaderBytes: BYOMDiscoveryHTTPBounds.maxHeaderBytes,
                 maxBodyBytes: BYOMDiscoveryHTTPBounds.maxBodyBytes
             )
+            // An LM Studio that does not expose the native inventory (404) is
+            // read through the OpenAI-shaped /v1/models instead. That shape
+            // carries no `state`, so every candidate from it is
+            // `requires_preparation` until evaluate proves it serves.
+            if response.statusCode == 404 {
+                response = try await httpClient.get(
+                    baseURL.appendingPathComponent("v1/models"),
+                    maxHeaderBytes: BYOMDiscoveryHTTPBounds.maxHeaderBytes,
+                    maxBodyBytes: BYOMDiscoveryHTTPBounds.maxBodyBytes
+                )
+            }
             guard response.statusCode == 200 else {
                 return adapterFailure(.adapterUnavailable, status: "unavailable")
             }
@@ -3996,10 +4007,18 @@ struct BYOMLMStudioDiscovery: Sendable {
         if catalogKey != nil {
             warnings.insert(BYOMDiscoveryWarning.catalogMatchUnverified.rawValue)
         }
+        // Only a model LM Studio reports as loaded is ready. A downloaded but
+        // unloaded model is real inventory but not yet serviceable: it stays
+        // local-only (requires_preparation is a blocking warning) until
+        // `models evaluate` drives a load and proves a completion.
+        let readiness = model.loadState.isServiceable ? "ready" : "requires_preparation"
+        if !model.loadState.isServiceable {
+            warnings.insert(BYOMDiscoveryWarning.requiresPreparation.rawValue)
+        }
         let fit = fitState(modelID: model.id)
         let admission = localAdmissionState(
             stableID: idWarnings.isEmpty,
-            readinessState: "ready",
+            readinessState: readiness,
             fitState: fit,
             blockingWarnings: warnings
         )
@@ -4025,7 +4044,7 @@ struct BYOMLMStudioDiscovery: Sendable {
                 family: model.arch,
                 runtimeVersion: nil
             ),
-            readinessState: "ready",
+            readinessState: readiness,
             fitState: fit,
             evaluationState: "not_evaluated",
             admissionState: admission,
@@ -4504,8 +4523,20 @@ enum BYOMDiscoveryJSON {
         return OllamaInventory(models: models, warningCodes: withheldReference ? [.modelReferenceRedacted] : [])
     }
 
+    /// LM Studio's documented load states, closed. Anything not exactly
+    /// `loaded` (including an absent `state`, as on the plain `/v1/models`
+    /// shape) is treated as not serviceable until `models evaluate` proves it.
+    enum LMStudioLoadState: String, Equatable {
+        case loaded = "loaded"
+        case notLoaded = "not-loaded"
+        case unknown
+
+        var isServiceable: Bool { self == .loaded }
+    }
+
     struct LMStudioModel: Equatable {
         let id: String
+        let loadState: LMStudioLoadState
         /// `gguf` / `mlx` as LM Studio reports it (`compatibility_type`), or nil.
         let compatibilityType: String?
         let arch: String?
@@ -4549,6 +4580,12 @@ enum BYOMDiscoveryJSON {
             let compatibility = try optionalLabel("compatibility_type", in: object, redactionWarning: .capabilityFamilyRedacted, warnings: &warnings)
             let arch = try optionalLabel("arch", in: object, redactionWarning: .capabilityFamilyRedacted, warnings: &warnings)
             let quantization = try optionalLabel("quantization", in: object, redactionWarning: .capabilityQuantizationRedacted, warnings: &warnings)
+            let loadState: LMStudioLoadState
+            switch object["state"] {
+            case .string(let raw)?: loadState = LMStudioLoadState(rawValue: raw) ?? .unknown
+            case nil, .null?: loadState = .unknown
+            default: throw BYOMDiscoveryAdapterError.malformed
+            }
             var maxContext: Int?
             switch object["max_context_length"] {
             case .int(let n)? where n >= 0 && n <= 100_000_000:
@@ -4566,6 +4603,7 @@ enum BYOMDiscoveryJSON {
             }
             models.append(LMStudioModel(
                 id: id,
+                loadState: loadState,
                 compatibilityType: compatibility?.lowercased(),
                 arch: arch,
                 quantization: quantization,
