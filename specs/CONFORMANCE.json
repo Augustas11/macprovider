@@ -9,7 +9,7 @@
     {
       "spec_id": "SPEC-001",
       "title": "Phase 3 Binary: Mac Provider Inference CLI",
-      "version": "1.9.11",
+      "version": "1.9.12",
       "path": "specs/SPEC-001-phase3-binary.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -1305,7 +1305,7 @@
     {
       "spec_id": "SPEC-044",
       "title": "Malibu Model Catalog Economics",
-      "version": "0.2.2",
+      "version": "0.2.3",
       "path": "specs/SPEC-044-malibu-model-catalog-economics.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1337,7 +1337,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "The operator-owned v0.2.2 authority closes the formal Build 1 preparation gate across compatibility selection, guidance nullability, no-event coordinator binding, root identity, cancellation linearization, cleanup correlation, bounded transport, refresh ordering, ACL policy, and release evidence. Implementation, complete tests, signed release evidence, and the discovery/admission/settlement journeys remain pending."
+        "rationale": "The operator-owned v0.2.3 authority resolves the accepted formal Build 1 findings across conditional earning eligibility, catalog-only trust, ACL creation, bounded cancellation, total ranking, and continuous-lock cleanup while preserving prior closures. Implementation, complete tests, signed release evidence, and the discovery/admission/settlement journeys remain pending."
       }
     },
     {
@@ -1378,7 +1378,7 @@
     {
       "spec_id": "SPEC-046",
       "title": "Provider BYOM Discovery",
-      "version": "0.1.2",
+      "version": "0.1.3",
       "path": "specs/SPEC-046-provider-byom-discovery.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1409,13 +1409,13 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1240",
-        "rationale": "Local CLI discovery/evaluation/offer dry-run code and regression tests now exist and are mapped, but Issue #1240 still needs full workflow completion and signed JOURNEY-PROVIDER-BYOM-DISCOVERY evidence before conformance or production status can be claimed."
+        "rationale": "SPEC-046 v0.1.3 clarifies settlement-capable guidance as conditional eligibility without changing discovery authority. Local CLI discovery/evaluation/offer dry-run code and regression tests exist and are mapped, but Issue #1240 still needs full workflow completion, updated copy evidence, and signed JOURNEY-PROVIDER-BYOM-DISCOVERY evidence before conformance or production status can be claimed."
       }
     },
     {
       "spec_id": "SPEC-047",
       "title": "Network Model Admission",
-      "version": "0.1.6",
+      "version": "0.1.7",
       "path": "specs/SPEC-047-network-model-admission.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1450,7 +1450,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1240",
-        "rationale": "Local CLI/coordinator/routing/buyer safeguards now exist and are mapped, but Issue #1240 still needs the full admission policy/probe lifecycle and signed JOURNEY-NETWORK-MODEL-ADMISSION evidence before conformance or production status can be claimed."
+        "rationale": "SPEC-047 v0.1.7 clarifies settlement-capable guidance as conditional eligibility and rejects catalog-only reuse of per-candidate admission authority. Local CLI/coordinator/routing/buyer safeguards exist and are mapped, but Issue #1240 still needs the full admission policy/probe lifecycle, updated copy evidence, and signed JOURNEY-NETWORK-MODEL-ADMISSION evidence before conformance or production status can be claimed."
       }
     }
   ],
@@ -6855,7 +6855,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1257",
-        "rationale": "SPEC-044 v0.2.2 freezes exclusive cross-surface generation advertisement, catalog-only guidance nullability, exact SPEC-046/047 guidance including coordinator no-event binding, app-owned refresh generations, immutable cleanup event keys, authenticated root identity, bounded transport, and deterministic storage accounting. Implementation, complete tests, and signed release evidence remain pending."
+        "rationale": "SPEC-044 v0.2.3 freezes exclusive cross-surface generation advertisement, catalog-only non-trusted nullability, exact SPEC-046/047 conditional guidance including coordinator no-event binding, app-owned refresh generations, immutable cleanup event keys, authenticated root identity, bounded transport, and deterministic storage accounting. Implementation, complete tests, and signed release evidence remain pending."
       }
     },
     {
@@ -6875,7 +6875,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1257",
-        "rationale": "SPEC-044 v0.2.2 approves locally motivated preparation for the exhaustive non-trusted matrix, including event-backed and authoritative no-event coordinator:not_offered, only with current verified primary artifact authority and verbatim digest-bound guidance. Implementation, exhaustive matrix tests, Malibu rendering, and release evidence remain pending."
+        "rationale": "SPEC-044 v0.2.3 approves locally motivated preparation for the exhaustive non-trusted matrix, including event-backed and authoritative no-event coordinator:not_offered, only with current verified primary artifact authority and verbatim digest-bound conditional guidance. Catalog-only all-null rows have no preparation or trusted-economics positive case. Implementation, exhaustive matrix tests, Malibu rendering, and release evidence remain pending."
       }
     },
     {
@@ -6969,7 +6969,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "SPEC-044 v0.2.2 defines preparation confirmation/copy, worker-only bounded progress, total cancellation acknowledgement precedence, isolated staging, managed-v3 publication, worker/recovery-owned reversible cleanup, and durable tombstoned-phase commit evidence. None of that new authority is yet implemented or evidenced."
+        "rationale": "SPEC-044 v0.2.3 defines preparation confirmation/copy, worker-only bounded progress, five in-lock cancellation predicates plus the bounded busy outcome, isolated staging, managed-v3 publication, worker/recovery-owned continuous-lock reversible cleanup, and durable tombstoned-phase commit evidence. None of that new authority is yet implemented or evidenced."
       }
     },
     {
@@ -7091,7 +7091,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1257",
-        "rationale": "Slice #1257 adds partial Malibu projection decoding, grouping, old-CLI fallback, projection-failed fallback, forbidden-copy, and action-gating coverage. SPEC-044 v0.2.2 now assigns the complete CSPRNG/restart/freshness/feed-trust, economics/ranking/UX, compatibility/transport, recovery/ACL, and signed-journey matrices to concrete acceptance lanes; that evidence remains pending."
+        "rationale": "Slice #1257 adds partial Malibu projection decoding, grouping, old-CLI fallback, projection-failed fallback, forbidden-copy, and action-gating coverage. SPEC-044 v0.2.3 now assigns the complete CSPRNG/restart/freshness/feed-trust, conditional-copy, total-ranking/UX, compatibility/transport, bounded-cancel, recovery/ACL, and signed-journey matrices to concrete acceptance lanes; that evidence remains pending."
       }
     },
     {

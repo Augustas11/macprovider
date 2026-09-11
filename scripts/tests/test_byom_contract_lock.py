@@ -92,7 +92,7 @@ class BYOMContractLockTests(unittest.TestCase):
         # "Can't earn in this release") fails the lock even though every enum
         # value and verdict string still appears somewhere in the spec.
         expected_mapping = {
-            "settlement_capable": '"Earning now"',
+            "settlement_capable": '"Eligible to earn on qualifying settled requests"',
             "not_earning_yet_catalog_or_receipt_path_exists": '"Not earning yet — "',
             "no_earning_path_in_v0_1": '"Can\'t earn in this release"',
             "local_inventory_only": '"Local only — not offered to the network"',

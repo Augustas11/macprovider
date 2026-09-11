@@ -1,6 +1,12 @@
 # SPEC-001 — Phase 3 Binary: Mac Provider Inference CLI
 
-**Version:** 1.9.11 (2026-09-12, Build 1 catalog preparation authority closure)
+**Version:** 1.9.12 (2026-09-12, Build 1 catalog preparation authority correction)
+
+**Change log v1.9.12 (2026-09-12, Build 1 catalog preparation authority
+correction):** Defines `settlement_capable` provider copy as conditional
+eligibility for qualifying settled requests, never current income; adds the
+bounded `busy` cancellation acknowledgement after a two-second monotonic lock
+deadline; and keeps the protected cleanup commit interval continuously locked.
 
 **Change log v1.9.11 (2026-09-12, Build 1 catalog preparation authority
 closure):** Makes the catalog-economics compatibility matrix complete: a read
@@ -3239,7 +3245,7 @@ carried through the SPEC-047-R002 offer/status envelopes; `models discover` and
 (for a purely local candidate that is `local_inventory_only`) and MUST NOT defer
 the verdict line until admission or dry-run logic exists:
 
-- `settlement_capable` -> **"Earning now"**.
+- `settlement_capable` -> **"Eligible to earn on qualifying settled requests"**.
 - `not_earning_yet_catalog_or_receipt_path_exists` -> **"Not earning yet — "**
   followed by the single concrete next action from
   `provider_guidance.next_action`.
@@ -3253,6 +3259,11 @@ Provider-facing human output MUST NOT imply earning from a candidate whose
 consistent with SPEC-047-R004. Malibu and the CLI human surface MUST source the
 verdict from `earning_path_class`; they MUST NOT re-derive an earning claim from
 runtime-reported model names, provider-proposed prices, or admission state alone.
+The `settlement_capable` verdict states only that the provider/candidate pair is
+eligible to participate in positive settlement when a later request satisfies
+every route-time and receipt predicate. It MUST NOT imply that the model is
+prepared, serving, receiving demand, currently generating income, or guaranteed
+to produce a qualifying settled request.
 
 Malibu MUST continue to treat absence of `model_catalog_json_v1`, malformed
 legacy envelopes, missing command-schema manifest tokens, or stale local-status
@@ -3317,7 +3328,10 @@ publication, cleanup, recovery, or internal processing failed after worker
 start; `124` means the worker emitted terminal `timed_out`; and `130` means it
 emitted terminal `cancelled`. The cancellation acknowledgement's outcome, not
 its exit status, distinguishes `recorded`, `already_recorded`, `terminal`,
-`not_active`, and `stale`.
+`not_active`, `stale`, and the bounded lock-acquisition outcome `busy`. A
+syntactically valid `busy` acknowledgement exits 0, echoes the validated
+transaction ID, carries a null attempt ID, and makes no marker or phase
+mutation, as defined by SPEC-044.
 
 Only the attached run worker may allocate `event_sequence` or emit transaction
 events. The cancel process MUST NOT emit, merge, or synthesize an event and MUST
@@ -3341,7 +3355,7 @@ and uses the static fallback with no mutation call. Production-boundary tests
 MUST launch the built CLI through Malibu's production process adapter and prove
 the complete matrix below, including exact stdout, stderr, exit status, and strict
 decoder behavior. Clients lacking the exact v2 capability/token retain the
-existing fallback and MUST NOT invoke the v2 mutation options. SPEC-044 v0.2.2
+existing fallback and MUST NOT invoke the v2 mutation options. SPEC-044 v0.2.3
 owns the
 projection, event, cancellation-acknowledgement, preparation-copy, action, and
 storage-accounting contracts.

@@ -27,7 +27,7 @@ choose them.
 ## Earning-verdict headers (fixed by SPEC-001 §6.14a — verbatim, do not reword)
 | earning_path_class | verdict line |
 |---|---|
-| `settlement_capable` | **Earning now** |
+| `settlement_capable` | **Eligible to earn on qualifying settled requests** |
 | `not_earning_yet_catalog_or_receipt_path_exists` | **Not earning yet — ** + the one concrete `provider_guidance.next_action` |
 | `no_earning_path_in_v0_1` | **Can't earn in this release** |
 | `local_inventory_only` | **Local only — not offered to the network** |
@@ -47,7 +47,7 @@ test reference only — the wire value is authoritative and is what the verdict 
 | `network_visible_unpriced` | coordinator | Network-visible (unpriced) | Buyers can see it, but it carries no price and does not earn yet. | not_earning_yet_catalog_or_receipt_path_exists |
 | `network_admitted_unsettled` | coordinator | Admitted (not settling) | Admitted to the network but not settlement-capable; no earnings yet. | not_earning_yet_catalog_or_receipt_path_exists |
 | `catalog_priced` | coordinator | Catalog-priced | Carries a catalog price but is not yet settlement-capable; not earning yet. | not_earning_yet_catalog_or_receipt_path_exists |
-| `settlement_capable` | coordinator | Earning | Fully admitted and settlement-capable; serving this model earns. | settlement_capable |
+| `settlement_capable` | coordinator | Eligible to earn | Eligible to earn only on qualifying settled requests; this does not state current income. | settlement_capable |
 | `withdrawn` | coordinator | Withdrawn | You withdrew this offer; re-offer with fresh evidence to earn. | local_inventory_only |
 | `revoked` | coordinator | Revoked | The coordinator revoked admission (identity or policy drift); re-offer with fresh evidence. | not_earning_yet_catalog_or_receipt_path_exists |
 
@@ -60,8 +60,14 @@ test reference only — the wire value is authoritative and is what the verdict 
 
 ## Guardrails (SPEC-047-R004 / SPEC-046-R003)
 - Never imply earning for `no_earning_path_in_v0_1` or `local_inventory_only`.
+- For `settlement_capable`, preserve conditional eligibility: never imply the
+  model is prepared, currently serving, receiving demand, currently earning, or
+  guaranteed to receive or settle a request.
 - `state_label_key` / `state_meaning_key` are localization-safe keys; the strings above
   are the en source values. They MUST NOT carry raw prompts, completions, paths,
   endpoints, or secrets.
 - If a state's real wire `earning_path_class` disagrees with the "expected" column here,
   trust the wire and flag it to @Augustas11 — do not hard-code the mapping in Malibu.
+- Localization and accessibility tests cover every earning verdict in every
+  shipped locale and reject current-income, current-serving, guaranteed-demand,
+  and guaranteed-settlement meanings for `settlement_capable`.
