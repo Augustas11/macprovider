@@ -2,7 +2,7 @@
 
 Date: 2026-09-11
 
-Evidence revision: `build5-evidence-r4`
+Evidence revision: `build5-evidence-r5`
 
 Repository source base: `1d2c930bad81704dd0acc0322226725d8b64aceb`
 
@@ -120,14 +120,19 @@ directory selection or caller assertion may grant tuple authority.
 
 ## Assessment review state
 
-The independent R3 GPT-5.6 Sol review reported 0 Critical, 1 High, 3 Medium,
+The independent R4 GPT-5.6 Sol review reported 0 Critical, 2 High, 3 Medium,
 and 0 Low findings. It did not dispute the merged-source classification or the
-exploratory 3B result. It rejected R3 as a promotion plan because memory
-calibration, immutable loader-byte closure, several disturbance/reference
-cells, and arbiter liveness deadlines were not fully executable. R4 corrects
-those planning contracts only. No additional inference or implementation test
-was run because this revision changes documentation and does not alter the
-historical source or raw exploratory evidence.
+exploratory 3B result. It rejected R4 as a promotion plan because first-run
+memory admission depended on the calibration result it sought to measure;
+accepted backlog and logical fencing did not prove the mode-wait bound; the
+runtime/campaign/dynamic loader closure and backing-object custody were
+incomplete; cancellation and slow-consumer triggers were nondeterministic; and
+request-level resampling ignored start/batch correlation. R5 corrects those
+planning contracts only. No additional inference or implementation test was
+run because this revision changes documentation and does not alter the
+historical source or raw exploratory evidence. R5 remains unapproved until a
+fresh independent GPT-5.6 Sol review reports zero Critical, High, and Medium
+findings against the exact committed digests.
 
 ## Sanitized host and artifact inventory
 

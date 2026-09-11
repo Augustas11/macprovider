@@ -2,7 +2,7 @@
 
 Date: 2026-09-11
 
-Assessment revision: `build5-assessment-r4`
+Assessment revision: `build5-assessment-r5`
 
 Repository base: `1d2c930bad81704dd0acc0322226725d8b64aceb`
 
@@ -173,8 +173,20 @@ Current gather-feeds-SDPA restores contiguous K/V before stock attention, so
 its transient gather term must be measured. It cannot support a peak-memory-
 reduction claim.
 
-The calibration algorithm is executable and frozen: five exact-shape dry runs
-use five clean worker starts. Each start first records ten unloaded host minutes,
+The calibration algorithm is executable and frozen only after an independent
+pre-calibration gate passes. A signed `precalibration-budget-v1` uses the
+measured loaded-idle footprint, analytical full-pool KV, bounded queues, an
+overflow-checked maximum-live allocation ledger for every activation, gather,
+logit, staging, command-buffer, and cache site, a `max(4 GiB, 25%)` runtime
+reserve, and a separate 25% bootstrap allowance. It never consumes the future
+calibrated peak. An opaque or unbounded allocation fails closed. The target
+must fit both 70% of RAM and the final hard limit before target-shaped work.
+Loaded idle is itself admitted by an immutable-weight-metadata pre-load ledger
+with dtype expansion, loader/runtime/tokenizer bounds, fixed reserves, and the
+same process hard-stop; unknown conversion or allocation forbids model load.
+Three fresh-worker ramps at 25%, 50%, and 75% precede five exact-shape dry runs.
+The exact-shape runs use five clean worker starts. Each start first records ten
+unloaded host minutes,
 then loads the adopted read-only artifact, performs five fixed warm-ups, holds
 nominal/fair thermal state for 60 seconds, and captures exactly 600 paired
 loaded-idle samples at 100 ms. Per-start loaded idle is the sample maximum;
@@ -185,7 +197,13 @@ maximum of all five deltas and analytical KV pool bytes. No failed calibration
 run is replaced. A platform without the lifetime high-water counter adds the
 separate frozen polling-gap allowance defined in the test specification and
 remains development-only. The unloaded window diagnoses ambient host state; it
-never substitutes for the post-load baseline in the envelope.
+never substitutes for the post-load baseline in the envelope. Calibration
+executes in a separate MLX worker. A lifecycle supervisor sets and first proves an
+exact-OS `RLIMIT_AS`/Metal allocation hard-stop, applies the MLX cache bound,
+watches physical footprint and memory pressure at 10 ms, kills the worker at
+the frozen stop, and observes exit. If the hard-stop probe does not cover CPU
+and Metal unified-memory allocations, the host cannot run target-shaped
+calibration.
 
 | Model/config assumption | fp16 KV/token | 8K row | 32K row | 64K row | 128K row |
 |---|---:|---:|---:|---:|---:|
@@ -228,16 +246,32 @@ Work that can proceed now:
   capability, with no second HTTP/relay queue;
 - implement one generation-scoped execution arbiter as the sole issuer of
   resident-model leases. Its modes are idle, serial-running, batch-running,
-  draining, and failed. Unsupported serial work waits for batch quiescence;
-  batch work waits for all serial leases; cancellation releases only after the
-  executor exits; failure and warm swap drain before a new generation. The
-  contract fixes 120-second forward and 900-second granted-request execution
-  deadlines, atomic opposite-mode admission closure with 250 ms acknowledgement,
+  draining, and failed. A bounded pre-admission queue is exactly twice Entry
+  110 and independently capped at 1,048,576 queued tokens; acceptance occurs
+  only with a funded lease, so no accepted backlog can
+  add sequential 900-second waits. Opposite-mode selection closes the current
+  epoch, retryably rejects every current-mode pre-admission entry in enqueue
+  order plus new same-mode work before acceptance, resolves any migrated
+  accepted-queued entry under its old snapshot within 250 ms, and drains at
+  most Entry 110 already granted requests under their original queue-inclusive
+  deadline. Cancellation releases only after executor exit; failure and warm
+  swap drain before a new generation. The contract fixes 120-second forward
+  and 900-second enqueue-to-terminal deadlines, atomic opposite-mode admission
+  closure with 250 ms acknowledgement,
   250 ms queued cancellation,
   5-second active cancellation acknowledgement, 1-second post-
-  quiescence handoff, 30-second quiescent drain, 10-second process fencing, and
-  906-second healthy grant and 920-second terminal disposition for a queued
-  mode waiter;
+  quiescence handoff, 30-second quiescent drain, 10-second process fencing,
+  900-second waiter disposition, and 915-second old-accepted-work
+  reconciliation. A waiter is granted within one second after quiescence only
+  while its queue-inclusive deadline remains; otherwise it receives a truthful
+  `mode_wait_timeout`. The selected architecture is a controller-owned admission
+  and
+  durable-disposition process plus a separate MLX inference worker. The worker
+  alone owns model/Metal/scheduler state; replacement or publication requires
+  supervisor-observed `waitpid` exit, not a logical fence callback. A launchd-
+  owned lifecycle supervisor owns the worker PID/process group and fences it
+  even if the controller exits; the relaunched controller reconciles its durable
+  accepted-request log before publishing a generation;
 - preserve the serial path and strict/canary behavior;
 - bind accepted and queued work to the model/tokenizer/weights generation;
 - prove per-request output, stop, usage, receipt, cancellation, and block
@@ -271,8 +305,12 @@ descriptor with zero model/metallib hashes. The R3 evidence inventory binds
 the observed bytes, but the result remains exploratory. A qualifying harness
 must require the exact snapshot revision and use only an adopted read-only APFS
 image containing the entire model snapshot, signed runtime package, and frozen
-campaign directory. Its closed loader manifest recursively binds every model, shard/index,
-config, tokenizer/template, resource, metallib, executable, dependency/runtime
+campaign directory. Its closed loader manifest recursively binds every regular
+file in the model, runtime, and campaign trees. A privilege-separated adoption
+broker is the sole writer, closes all write descriptors, attaches read-only,
+unlinks the inaccessible backing pathname, and proves no writable descriptor
+or attachment remains. Static `otool` closure and actual loaded Mach-O/plugin
+snapshots bind every resource, metallib, executable, dependency/runtime-
 selection, and non-platform dynamic-library byte. It rejects symlinks,
 unreferenced shards, custom/remote code, undeclared selectors, and any pre/post
 identity or content mutation, derives non-dummy descriptor hashes, and rejects
@@ -309,16 +347,24 @@ tolerance.
 The campaign freezes generators, arrival/cancellation/slow-consumer schedules,
 exclusions, and statistics before results. Promotion tails use at least 100
 valid repetitions/requests for p95; p99 is promotable only at 1,000 observations.
-MSB-05 uses 100 paired runs and a fixed-seed 50,000-resample paired percentile
-bootstrap. Smaller samples report descriptive unavailable tails and cannot
-promote a tuple.
+All promotable intervals require at least ten independent clean-start clusters.
+The hierarchical bootstrap selects starts and then complete repetitions while
+preserving every row of a shared batch together. MSB-05 uses 100 paired runs and
+a fixed-seed 50,000-resample hierarchical paired percentile bootstrap.
+Request-level resampling is descriptive only. Smaller samples report
+descriptive unavailable tails and cannot promote a tuple.
 
 The versioned disturbance matrix fixes all prompt bins, output ceilings,
 arrival cadence, concurrency cap, request/cell timeouts, request count, clean-
 start count, and injection boundary. It includes `REF-TTFT-512-R1`,
 `SLOW-CONSUMER-500-R1`, `CANCEL-2000-R1`, the three `WARM-SWAP-*-R1` cells,
 three whole-batch decode-step failures, and three request-local extension
-failures. MSB-01 additionally requires aggregate-TG coefficient of variation
+failures. Slow consumption freezes the socket receive buffer, 256-byte read
+size, first-read offset, 100 ms cadence, 16-frame delivery queue, and producer-
+blocked marker. Cancellation freezes 256-token prefill chunks, exact token
+indices, queue occupancy 16, and the attempted seventeenth frame; a missing
+boundary is a failed cell. MSB-01 additionally requires aggregate-TG
+coefficient of variation
 at most 10%; an unstable baseline cannot promote MSB-02/03.
 
 ### Stage E — separately authorized canary
@@ -340,10 +386,19 @@ specified idempotent recovery path.
 
 Serial fallback is mediated by the same execution arbiter as batching. It is
 not an independent escape hatch: the resident generation is always in serial
-or batch execution mode, never both. Scheduler failure moves it to draining;
+or batch execution mode, never both. The provider controller owns admission,
+durable request dispositions, receipts, and generation publication. A separate
+inference worker exclusively owns MLX, Metal, scheduler, pool, and leases over
+versioned bounded local IPC. A launchd-owned lifecycle supervisor exclusively
+owns the worker PID/process group and performs the exit fence even on controller
+loss. Scheduler failure moves it to draining;
 only invisible request-local work may reacquire a serial lease after full
-quiescence. A deadline overrun fails the generation and requires supervised
-worker exit or fencing; no in-process lease or resident model is reused. Warm
+quiescence. A deadline overrun fails the generation; the controller requests
+exit, the supervisor sends SIGKILL by ten seconds and observes `waitpid`, and
+the controller durably resolves all
+accepted request IDs before replacement. A callback without observed process
+exit grants no fencing authority. No in-process lease or resident model is
+reused. Warm
 swap similarly requires old-worker exit and all leases, accepted work, blocks,
 queues, and delivery tasks to resolve before the generation changes. A timed-
 out swap leaves the new generation unpublished.
