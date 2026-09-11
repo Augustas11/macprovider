@@ -1,6 +1,18 @@
 # SPEC-001 — Phase 3 Binary: Mac Provider Inference CLI
 
-**Version:** 1.9.8 (2026-09-10, SPEC-041 opaque body-encoding reservation)
+**Version:** 1.9.9 (2026-09-11, Build 1 catalog preparation authority)
+
+**Change log v1.9.9 (2026-09-11, Build 1 catalog preparation authority):**
+Reserves the capability-gated `models catalog-economics` transaction grammar
+owned with SPEC-044 v0.2.0. The exact public forms are
+`malibu-cli models catalog-economics --json`,
+`malibu-cli models catalog-economics --run <transaction-id> --json`, and
+`malibu-cli models catalog-economics --cancel <transaction-id> --json`.
+The attached run process alone emits `model_catalog_transaction_event.v1`
+JSON lines; cancellation emits one bounded
+`model_catalog_transaction_cancel_ack.v1` object. This amendment adds no
+transaction-status command/schema, control-socket frame, daemon, or background
+worker and does not claim implementation or conformance.
 
 **Change log v1.9.8 (2026-09-10, SPEC-041 composition):** Reserves optional `body_encoding: relay-blind-request-v1` on `inference_request`. Its body is an opaque SPEC-041 envelope; the provider MUST cross-check marker/namespace and MUST NOT parse it as plaintext chat before authenticated decryption. Under SPEC-008 the marker and authenticated dispatch context are inside protected payloads. Relay-blind mode is WS-only to the exact assigned session with no HTTP fallback or failover. This amendment does not enable the draft feature or alter legacy frames.
 **Revision note (historical, superseded by v1.7):** v1.3.1 added the `provider_token` (yaml, top-level) /
@@ -3243,6 +3255,56 @@ New provider-visible model-command PRs MUST include tests proving that:
   separate schema values owned by their respective specs.
 - Old Malibu/current-model fallback behavior remains available when capability
   negotiation does not prove the exact required tier.
+
+### 6.14b. Catalog-economics transaction invocation (Build 1 authority)
+
+The installed CLI owns all catalog-economics reads and mutations. A CLI that
+advertises local-status capability `model_catalog_economics_v2` and command
+schema token `models catalog-economics.v2` MUST accept exactly these public
+forms:
+
+```text
+malibu-cli models catalog-economics --json
+malibu-cli models catalog-economics --run <transaction-id> --json
+malibu-cli models catalog-economics --cancel <transaction-id> --json
+```
+
+`--run` and `--cancel` are mutually exclusive, each occurs at most once, and
+each takes exactly one nonempty transaction ID produced by the current
+projection. `--json` is required in all three forms. Positional modes or IDs,
+aliases, extra positionals, duplicate options, unknown options, and a detached
+or background option MUST fail before state or network access. Option order is
+not semantically significant. These forms are non-interactive even on a TTY:
+they MUST NOT prompt, emit ANSI styling, or alter their machine envelope based
+on terminal detection. Provider confirmation occurs in Malibu before `--run`.
+The read form writes one
+`model_catalog_economics.v2` object. The run form remains attached and writes
+only `model_catalog_transaction_event.v1` JSON lines. The cancel form is a
+short-lived process and writes exactly one
+`model_catalog_transaction_cancel_ack.v1` object. Machine output is stdout;
+bounded diagnostics are stderr.
+
+Exit status is closed for these forms: `0` means a valid read, a terminal
+`succeeded` run event, or a syntactically valid cancellation acknowledgement;
+`2` means invalid grammar, unsupported capability/schema, or malformed input
+rejected before work; `3` means the referenced action is stale, unavailable,
+or conflicts before the worker starts; `4` means signed authority, root,
+network, transfer, or resource admission failed; `5` means verification,
+publication, cleanup, recovery, or internal processing failed after worker
+start; `124` means the worker emitted terminal `timed_out`; and `130` means it
+emitted terminal `cancelled`. The cancellation acknowledgement's outcome, not
+its exit status, distinguishes `recorded`, `already_recorded`, `terminal`,
+`not_active`, and `stale`.
+
+Only the attached run worker may allocate `event_sequence` or emit transaction
+events. The cancel process MUST NOT emit, merge, or synthesize an event and MUST
+NOT kill the worker. No `models transactions` family, public transaction-status
+schema, public crash or late-cancellation state, authority-refresh frame,
+daemon, background service, or new control-socket frame is part of this
+contract. Clients lacking the exact v2 capability/token retain the existing
+fallback and MUST NOT invoke these mutation options. SPEC-044 v0.2.0 owns the
+projection, event, cancellation-acknowledgement, preparation-copy, action, and
+storage-accounting contracts.
 
 ### 6.15. Additive coordinator-wire surface reconciled in v1.7 and extended in v1.8
 

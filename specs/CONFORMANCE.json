@@ -9,7 +9,7 @@
     {
       "spec_id": "SPEC-001",
       "title": "Phase 3 Binary: Mac Provider Inference CLI",
-      "version": "1.9.8",
+      "version": "1.9.9",
       "path": "specs/SPEC-001-phase3-binary.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -1305,7 +1305,7 @@
     {
       "spec_id": "SPEC-044",
       "title": "Malibu Model Catalog Economics",
-      "version": "0.1.1",
+      "version": "0.2.0",
       "path": "specs/SPEC-044-malibu-model-catalog-economics.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1337,7 +1337,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "Malibu currently exposes a model switcher, but the production experience is static around the model chosen during installer autotune. The next release needs a CLI-owned catalog and economics projection before the app can safely show additional catalog models, signed catalog rates, readiness, and preparation/switch actions without making earning guarantees or bypassing provider safety gates."
+        "rationale": "The operator-owned v0.2.0 authority now defines the Build 1 preparation, cancellation, published-cleanup, and storage-accounting contracts. Implementation, complete tests, signed release evidence, and the discovery/admission/settlement journeys remain pending."
       }
     },
     {
@@ -6840,7 +6840,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1257",
-        "rationale": "Slices #1256 and #1257 define the JSON projection schema, fail-closed action descriptors, and Malibu decoding for explicit nullable fields and malformed action confirmation. Long-evaluation transaction events and release evidence remain pending."
+        "rationale": "SPEC-044 v0.2.0 now freezes the compatible v2 projection, preparation matrix, transaction event codes, cancellation acknowledgement, published cleanup, and storage accounting authority. Implementation, complete tests, and signed release evidence remain pending."
       }
     },
     {
@@ -6860,7 +6860,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1257",
-        "rationale": "Slice #1256 projects signed/fallback/stale/integrity states conservatively from the CLI, but Malibu rendering, transaction disabling, and release evidence remain pending."
+        "rationale": "SPEC-044 v0.2.0 approves locally motivated preparation for the exhaustive non-trusted matrix with exact non-economic copy while retaining trusted-economics gates. Implementation, exhaustive matrix tests, Malibu rendering, and release evidence remain pending."
       }
     },
     {
@@ -6955,7 +6955,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "Preparation confirmation, isolated staging, long-evaluation progress, cancellation, and cleanup affordances are not implemented for catalog model preparation."
+        "rationale": "SPEC-044 v0.2.0 defines preparation confirmation/copy, worker-only progress, bounded cancellation acknowledgement, isolated staging, managed-v3 publication, and separate staging/published cleanup authority. None of that new authority is yet implemented or evidenced."
       }
     },
     {
