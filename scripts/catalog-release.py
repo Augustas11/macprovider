@@ -465,14 +465,14 @@ def normalize_model_key(model: str) -> str:
         namespace = key[:slash]
         if namespace in KNOWN_MODEL_NAMESPACES:
             key = key[slash + 1:]
-    for suffix in ("-mxfp4-q8", "-4bit", "-8bit"):
+    for suffix in ("-free", "-mxfp4-q8", "-4bit", "-8bit"):
         if key.endswith(suffix):
             key = key[: -len(suffix)]
 
     def served_alias(canonical_vendor: str) -> bool:
         return namespace in {"", "mlx-community", canonical_vendor}
 
-    if namespace == "meta-llama" and key.startswith("llama-"):
+    if served_alias("meta-llama") and key.startswith("llama-"):
         return "meta-llama/" + key
     if served_alias("meta-llama") and key.startswith("meta-llama-"):
         return "meta-llama/" + key[len("meta-"):]

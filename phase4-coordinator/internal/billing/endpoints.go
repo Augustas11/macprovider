@@ -265,6 +265,14 @@ func (h *handler) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		h.payoutReadyHandler(w, r)
 		return
 	}
+	if r.URL.Path == wholesaleStatementsPath {
+		h.wholesaleStatements(w, r)
+		return
+	}
+	if strings.HasPrefix(r.URL.Path, wholesaleStatementsPath+"/") {
+		h.wholesaleStatementItem(w, r)
+		return
+	}
 	switch {
 	case r.URL.Path == "/admin/ledger/summary":
 		h.admin(w, r, h.summary)

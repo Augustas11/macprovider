@@ -88,6 +88,28 @@ func (s *Server) effectiveAccountDailyQuota(ctx context.Context) int64 {
 	return limit
 }
 
+const wholesaleAccountDailyQuota int64 = 1 << 62
+
+func (s *Server) isWholesaleAccount(accountID string) bool {
+	accountID = strings.TrimSpace(accountID)
+	if accountID == "" {
+		return false
+	}
+	for _, id := range s.cfg.Auth.WholesaleAccountIDs {
+		if strings.TrimSpace(id) == accountID {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Server) dailyQuotaForAccount(ctx context.Context, accountID string) int64 {
+	if s.isWholesaleAccount(accountID) {
+		return wholesaleAccountDailyQuota
+	}
+	return s.effectiveAccountDailyQuota(ctx)
+}
+
 type authResult struct {
 	Bearer        *storage.KeyValidation
 	WalletSession *walletSessionAuth

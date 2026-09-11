@@ -38,6 +38,9 @@ type Store struct {
 	forceVoidEnabled       atomic.Bool
 	forceCreditEnabled     atomic.Bool
 	forceCreditHoldSeconds atomic.Int64
+	wholesaleMu            sync.RWMutex
+	wholesaleRewards       RewardsConfig
+	usdPerMillionCredits   float64
 }
 
 type SQLiteMetrics interface {
@@ -472,6 +475,9 @@ CREATE INDEX IF NOT EXISTS idx_lqr_request_latest ON ledger_quarantine_resolutio
 		return err
 	}
 	if err := s.rebuildLegacyConfigSnapshots(ctx); err != nil {
+		return err
+	}
+	if err := s.ensureWholesaleStatementTables(ctx); err != nil {
 		return err
 	}
 	return s.validateRequestLog(ctx)
@@ -1279,6 +1285,13 @@ func (s *Store) SetSettlementConfig(cfg SettlementConfig) {
 	s.settlementMu.Lock()
 	defer s.settlementMu.Unlock()
 	s.settlement = cfg
+}
+
+func (s *Store) SetWholesalePricing(rewards RewardsConfig, usdPerMillionCredits float64) {
+	s.wholesaleMu.Lock()
+	defer s.wholesaleMu.Unlock()
+	s.wholesaleRewards = rewards
+	s.usdPerMillionCredits = usdPerMillionCredits
 }
 
 // usdcBaseUnitsPerUSDC is the USDC fixed-point scale (6 decimals): one USDC

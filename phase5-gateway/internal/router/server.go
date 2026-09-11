@@ -229,7 +229,9 @@ func (s *Server) Handler() http.Handler {
 	}
 	mux.HandleFunc("/account", s.handleAccount)
 	mux.HandleFunc("/docs", s.handleDocs)
+	mux.HandleFunc("/privacy", s.handlePrivacy)
 	mux.Handle("/v1/models", s.withCORS(http.MethodGet, http.HandlerFunc(s.handleModels)))
+	mux.Handle("/v1/openrouter/models", s.withCORS(http.MethodGet, http.HandlerFunc(s.handleOpenRouterModels)))
 	mux.HandleFunc("/v1/usage", s.handleUsage)
 	mux.Handle("/v1/chat/completions", s.withCORS(http.MethodPost, http.HandlerFunc(s.handleChatCompletions)))
 	mux.Handle("/v1/receipts/", s.withCORS(http.MethodGet, http.HandlerFunc(s.handleBuyerReceipt)))
@@ -1416,6 +1418,7 @@ var gatewayPermanentCodes = map[string]bool{
 	"coordinator_sticky_error": true, "feedback_limit_check_failed": true,
 	"feedback_store_failed": true, "settlement_reconcile_load_failed": true,
 	"nonce_unavailable": true, "docs_missing": true, "docs_render_failed": true,
+	"privacy_missing": true, "privacy_render_failed": true,
 	"quota_reservation_failed": true, "concurrency_reservation_failed": true,
 	// Gateway-side stream/cap-shape codes (mirrors the coordinator's own
 	// byte/schema cap family, all false): retrying the same request/prompt
@@ -1455,6 +1458,7 @@ var gatewayRetryAfterByCode = map[string]string{
 	"public_api_paused":          "30",
 	"demo_paused":                "30",
 	"capacity_signup_closed":     "30",
+	"no_provider_available":      "1",
 }
 
 // gatewayTransientRetryAfterSeconds is a modest, bounded backoff hint the

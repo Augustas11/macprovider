@@ -83,6 +83,28 @@ func TestDocsRouteRendersMarkdown(t *testing.T) {
 	}
 }
 
+func TestPrivacyRouteRendersHonestRetention(t *testing.T) {
+	h, _, _, _ := newTestHarness(t, fakeOAuth{})
+	resp := assertStatus(t, h, http.MethodGet, "/privacy", "", "", "", http.StatusOK)
+	body := resp.Body.String()
+	lower := strings.ToLower(body)
+	for _, want := range []string{
+		`<h1 id="privacy-and-retention">Privacy and retention</h1>`,
+		"plaintext",
+		"zero-data-retention",
+		"compliance.zdr",
+		"train foundation models",
+		"us-east-1",
+	} {
+		if !strings.Contains(body, want) && !strings.Contains(lower, strings.ToLower(want)) {
+			t.Fatalf("privacy body missing %q: %s", want, body)
+		}
+	}
+	if strings.Contains(lower, "private inference guaranteed") {
+		t.Fatalf("privacy page must not claim private inference: %s", body)
+	}
+}
+
 func TestTier1DisclosureMatchesSpecSection16(t *testing.T) {
 	specPath := filepath.Join("..", "..", "..", "specs", "SPEC-006-buyer-api.md")
 	raw, err := os.ReadFile(specPath)

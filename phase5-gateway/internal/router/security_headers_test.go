@@ -49,7 +49,7 @@ func TestSensitiveIssuanceResponsesAreNoStore(t *testing.T) {
 
 func TestHTMLRoutesSetBrowserSecurityHeaders(t *testing.T) {
 	h, _, _, _ := newTestHarness(t, fakeOAuth{})
-	for _, path := range []string{"/account", "/docs"} {
+	for _, path := range []string{"/account", "/docs", "/privacy"} {
 		resp := assertStatus(t, h, http.MethodGet, path, "", "", "", http.StatusOK)
 		if got := resp.Header().Get("X-Content-Type-Options"); got != "nosniff" {
 			t.Fatalf("%s nosniff=%q", path, got)

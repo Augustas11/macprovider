@@ -314,6 +314,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "billing config snapshot: %v\n", err)
 		os.Exit(1)
 	}
+	billingStore.SetWholesalePricing(cfg.Rewards, cfg.Stats.Rollup.UsdPerMillionCredits)
 	// SPEC-017 v0.1.8 Step 1 — Postgres pools for the Network
 	// Stats API. Fail-closed per BUILD §C.3: any missing required
 	// runtime DSN or any failed startup smoke aborts coordinator

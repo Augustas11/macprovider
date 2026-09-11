@@ -71,11 +71,11 @@ func NormalizeModelKey(model string) string {
 			key = key[slash+1:]
 		}
 	}
-	for _, suffix := range []string{"-mxfp4-q8", "-4bit", "-8bit"} {
+	for _, suffix := range []string{"-free", "-mxfp4-q8", "-4bit", "-8bit"} {
 		key = strings.TrimSuffix(key, suffix)
 	}
 	switch {
-	case namespace == "meta-llama" && strings.HasPrefix(key, "llama-"):
+	case servedAliasNamespace(namespace, "meta-llama") && strings.HasPrefix(key, "llama-"):
 		return "meta-llama/" + key
 	// Magic-prefix collapses are namespace-scoped: only the empty /
 	// mlx-community / canonical-vendor namespaces may rewrite into the
@@ -110,6 +110,13 @@ func ModelsEquivalent(a, b string) bool {
 		return false
 	}
 	return na == nb
+}
+
+// IsWholesaleFreeSKU reports whether the original buyer model string is the
+// D1a / SPEC-006 free alias (trailing -free). Callers MUST pass the
+// unmodified request_log.model, not NormalizeModelKey output.
+func IsWholesaleFreeSKU(model string) bool {
+	return strings.HasSuffix(strings.ToLower(strings.TrimSpace(model)), "-free")
 }
 
 // MatchesNormalizedKey reports whether model aligns with an already-

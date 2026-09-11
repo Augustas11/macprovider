@@ -119,7 +119,7 @@
     {
       "spec_id": "SPEC-005",
       "title": "Billing, Settlement, and Provider Rewards",
-      "version": "0.6.5",
+      "version": "0.6.6",
       "path": "specs/SPEC-005-billing.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -151,7 +151,7 @@
     {
       "spec_id": "SPEC-006",
       "title": "Buyer API Gateway: Mac Provider's first public buyer surface",
-      "version": "0.9.22",
+      "version": "0.9.23",
       "path": "specs/SPEC-006-buyer-api.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -4397,6 +4397,27 @@
       }
     },
     {
+      "requirement_id": "SPEC-005-R010",
+      "spec_id": "SPEC-005",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/billing/wholesale.go:GenerateWholesaleStatement",
+        "phase4-coordinator/internal/billing/wholesale.go:wholesaleStatements"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/billing/wholesale_test.go:TestGenerateWholesaleStatementPaidVersusFreeSKU",
+        "phase4-coordinator/internal/billing/wholesale_test.go:TestWholesaleStatementAdminExport"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1023",
+        "rationale": "D1a wholesale partner monthly USD statement ledger and operator export (\u00a72.1a, \u00a711.7). Mapped to new wholesale statement tests. Not promoted. Signed journey-result still required."
+      }
+    },
+    {
       "requirement_id": "SPEC-006-R001",
       "spec_id": "SPEC-006",
       "state": "conformant",
@@ -4623,6 +4644,29 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1023",
         "rationale": "Demo-token traffic isolation from paid API-key quota (\u00a73.6). Mapped to existing demo tests. Not promoted. ID migration closed by #1023; not promoted. Signed journey-result still required (Entry 234)."
+      }
+    },
+    {
+      "requirement_id": "SPEC-006-R010",
+      "spec_id": "SPEC-006",
+      "state": "pending",
+      "implementation": [
+        "phase5-gateway/internal/router/openrouter_models.go:handleOpenRouterModels",
+        "phase5-gateway/internal/router/chat_proxy.go:passThroughNoProviderCoordinatorError",
+        "phase4-coordinator/internal/billing/formula.go:NormalizeModelKey"
+      ],
+      "tests": [
+        "phase5-gateway/internal/router/openrouter_models_test.go:TestProjectOpenRouterModelsDualLlamaSKU",
+        "phase5-gateway/internal/router/wholesale_partner_test.go:TestWholesaleNoProviderBecomes429",
+        "phase4-coordinator/internal/billing/normalize_model_key_cases_test.go:TestNormalizeModelKeySharedCaseTable"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1023",
+        "rationale": "OpenRouter schema-2.4 models document, wholesale partner chat flags, and dual SKU alias ids (\u00a72.2, \u00a75.3.2, \u00a77.8, \u00a717.9). Mapped to new gateway/coordinator tests. Not promoted. Signed journey-result still required."
       }
     },
     {

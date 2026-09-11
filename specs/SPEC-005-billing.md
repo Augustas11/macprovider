@@ -1,7 +1,13 @@
 # SPEC-005 - Billing, Settlement, and Provider Rewards
 
-**Version:** 0.6.5 (2026-09-10, SPEC-041 relay-blind accounting composition)
+**Version:** 0.6.6 (2026-09-11, D1a wholesale postpaid statement)
 **Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.5.6, SPEC-003 v0.7, SPEC-004 v0.3.2, SPEC-006 v0.9.8, SPEC-024 v0.2.1 (prefix-cache cache-isolation; its billing sections are superseded by this spec)
+
+**Change log v0.6.6 (2026-09-11, D1a wholesale partner postpaid USD statement):**
+- Operator SCOPE reopen of D1 **only** as D1a: public buyers stay donation-only (no Stripe, no checkout, no cards). A named wholesale partner class MAY be billed by an operator-issued monthly postpaid USD statement from metered settled usage on paid SKUs. Free SKUs are $0 to the partner. Provider `ComputeCredits` 90% `provider_share` still accrues for free and paid SKU work.
+- HTTP 402 is forbidden on live wholesale inference. Unpaid statements are an operator kill-switch, not a mid-request 402.
+- Appendix G: `invoice_id` is replaced by `stripe_invoice_id`. Coordinator `wholesale_period_statements` / `wholesale_statement_id` are D1a identifiers. `buyer_invoice` and `phase5-gateway/internal/billing` remain forbidden.
+- Registers `SPEC-005-R010` for the wholesale statement ledger and operator export.
 
 **Change log v0.6.5 (SPEC-041 composition):** Relay-blind work uses the existing quota, journal, request-log, refund, finality, delivered-output, ordinary provider-earnings, payment, and payout-readiness formulas. Billable input is the lesser of reported input and its clear cap; unknown input is zero, never a ciphertext estimate. Output remains bounded by clear output cap and delivered-output rules. Durable relay context must recover to at most one settlement. The draft pilot is excluded only from positive SPEC-022 receipt/verified-work reward claims and may run only under SPEC-022 off/observe; enforce rejects before quota. No arithmetic or ledger owner changes.
 
@@ -28,10 +34,10 @@
 
 ## Preliminary conformance unit IDs
 
-SPEC-005 v0.6.4 registers `SPEC-005-R001`..`SPEC-005-R009` in
+SPEC-005 v0.6.6 registers `SPEC-005-R001`..`SPEC-005-R010` in
 `specs/CONFORMANCE.json`. R001–R003 remain the paid-path formula, hot-path,
 and crash-recovery units. R004–R009 group additional existing obligation
-areas without changing them:
+areas without changing them. R010 is the D1a wholesale statement unit:
 
 - `SPEC-005-R001` — closed-form credit formula, units, rounding, and rate-card
   resolution (§5).
@@ -47,8 +53,10 @@ areas without changing them:
 - `SPEC-005-R008` — settlement account-scope hashing / identity snapshots
   (§4.8).
 - `SPEC-005-R009` — operator quarantine resolutions (§4.10, §10.5).
+- `SPEC-005-R010` — D1a wholesale partner monthly USD statement ledger and
+  operator export (§2.1a, §11.7).
 
-`requirement_id_migration` is `complete`. R004–R009 are not promoted from
+`requirement_id_migration` is `complete`. R004–R010 are not promoted from
 this close. Signed journey-result evidence is still required before any of
 those rows can become conformant.
 
@@ -629,8 +637,19 @@ Any change to D1-D12 requires operator review and a reopened SCOPE stage.
 ### 2.1 D1 - Billing model
 
 **Operator decision:** **D** - donation-only; no tip jar in v1; SPEC-005 ledger tracks provider credits only, not buyer revenue; no Stripe, no checkout, no credit card collection.
-**Normative effect:** Implementations MUST satisfy D1 exactly as written.
-**Reference discipline:** Later sections may cite D1; they MUST NOT weaken it.
+**Normative effect:** Implementations MUST satisfy D1 exactly as written for public buyers.
+**Reference discipline:** Later sections may cite D1; they MUST NOT weaken it. D1a is the only approved exception and applies only to named wholesale partner accounts.
+
+### 2.1a D1a - Wholesale partner postpaid USD statement (SCOPE reopen)
+
+**Operator decision:** Public D1 remains **D**. A named wholesale partner class (OpenRouter join on the live pool) MAY be billed by an operator-issued monthly postpaid USD statement derived from metered settled usage on **paid** SKUs. Free SKUs are $0 to the partner. Provider credits still follow D3/D5 `ComputeCredits` at 90% `provider_share` for both free and paid SKU work; Malibu absorbs free-SKU partner cost the same way it absorbs donation-tier public usage. Still no Stripe, no checkout, no card collection, no auto top-up.
+**Normative effect:**
+- Public buyers MUST remain donation-only under D1.
+- Wholesale statements MUST be generated from coordinator `request_log` settled usage keyed by partner `account_id` + UTC calendar month. Identifiers MUST be `wholesale_statement_id` / `wholesale_period_statements` (not `invoice_id`, not `buyer_invoice`).
+- Paid SKU line items MUST convert rate-card credits to USD using the existing `usd_per_million_credits` peg (1 credit = $0.000001 when the peg is 1.0). Free SKU (`-free` alias) line items MUST be $0.
+- Live wholesale inference MUST NOT return HTTP 402. Unpaid statements are an operator kill-switch (disable the partner account or `kill_switch.all_public_api`), not a mid-request 402.
+- Billing logic MUST stay in `phase4-coordinator/internal/billing`. The Phase 5 gateway MUST NOT grow a billing package.
+**Reference discipline:** Later sections may cite D1a; they MUST NOT extend it to public buyers or introduce Stripe.
 
 ### 2.2 D2 - Settlement cadence
 
@@ -1787,7 +1806,7 @@ AC-H005 explicitly excludes these states; `delta_gross_credits` is computed over
 
 ## 11. Operator and provider endpoints (D11)
 
-This section implements the locked operator-dashboard decision (D11) by defining exactly four JSON visibility endpoints and no charts, HTML dashboards, Slack, email, or digest surface.
+This section implements the locked operator-dashboard decision (D11) by defining the four JSON visibility endpoints plus the D1a wholesale-statement export, and no charts, HTML dashboards, Slack, email, or digest surface.
 All endpoint errors use this envelope:
 
 ```json
@@ -2415,6 +2434,29 @@ a bare INSERT) is the correct shape.
    snapshots acquire `BEGIN IMMEDIATE` so a correction cannot
    interleave with payout-ready materialization.
 
+### 11.7 D1a wholesale period statements
+
+**Method and path:**
+- `GET /admin/ledger/wholesale-statements` — list statements (optional `account_id`, `period=YYYY-MM`).
+- `POST /admin/ledger/wholesale-statements` — generate or refresh the UTC calendar-month statement for `account_id`.
+- `GET /admin/ledger/wholesale-statements/{statement_id}` — JSON body. `?format=csv` returns the same line items as CSV.
+
+**Auth requirement:** operator key. Same `/admin/*` bucket as §11.1.
+
+**Purpose:** operator-issued monthly USD statement for a named wholesale partner. This is not a Stripe invoice, not a buyer-facing checkout, and not a live 402.
+
+**Source of truth:** `request_log` rows for that `account_id` in `[period_start_utc, period_end_utc)` with HTTP `status=200`. The original buyer model string is preserved on `request_log.model` so paid vs `-free` alias split is exact.
+
+**Line items:**
+- Paid SKU: USD from rate-card credits × `usd_per_million_credits` (integer micro-dollars).
+- Free SKU (`-free` suffix on the wire id): `$0` to the partner. Provider `ComputeCredits` for those rows is unchanged (D3/D5).
+
+**Identifiers:** `wholesale_statement_id` (opaque). MUST NOT use `invoice_id` or `buyer_invoice`.
+
+**Idempotency:** generating the same `(account_id, period_start_utc, period_end_utc)` replaces the draft row in place. Issued statements are not silently rewritten; a later POST returns 409 unless `force=true` (operator explicit).
+
+**HTTP 402:** these endpoints never cause live partner inference to return 402.
+
 ## 12. Buyer-balance interaction (D7)
 
 This section implements the locked buyer-balance decision (D7) by leaving buyer balance enforcement to SPEC-006 and crediting providers for legitimate completed work regardless of buyer quota state.
@@ -2617,7 +2659,7 @@ Fixtures may use in-memory SQLite, temporary SQLite, or pure functions.
 
 **Traceability verification:** Parse section  2 and locate D1; then locate at least one later normative reference.
 **Behavior verification:** Run SPEC-005 migrations in an empty SQLite fixture and inspect tables.
-**Expected:** D1 exists in section  2, is enforced outside section  2, and no buyer revenue, Stripe, checkout, donation, tip-jar, or payment-collection table is created by SPEC-005 migrations.
+**Expected:** D1 exists in section  2, is enforced outside section  2, and no Stripe, checkout, donation, tip-jar, or card-collection table is created by SPEC-005 migrations. D1a MAY create `wholesale_period_statements` / `wholesale_statement_line_items` as an operator export of metered partner usage; that is not public buyer revenue collection.
 **Network:** Not required.
 **State reset:** Fresh fixture database or pure-function input.
 
@@ -3898,7 +3940,7 @@ PARTIAL — credit-arm pending v0.5.
 
 - Claim: Billing model encoded.
 - Setup: Parse section  2 and later D1 references; run migrations in an empty SQLite fixture.
-- Oracle: D1 exists in section  2, is enforced outside section  2, and no buyer revenue, Stripe, checkout, donation, tip-jar, or payment-collection table exists.
+- Oracle: D1 exists in section  2, is enforced outside section  2, and no Stripe, checkout, donation, tip-jar, or card-collection table exists. D1a wholesale statement tables are operator export, not Stripe/checkout.
 - Live network: forbidden.
 - Failure handling: failing this fixture blocks claiming SPEC-005 implementation complete.
 
@@ -4312,7 +4354,7 @@ AC-NO-ONCHAIN and related scope checks MUST grep the machine-checkable prohibite
 |---|---|
 | AntFeed USDC payment rail | `antfeed.Client`, `ANTFEED_`, `antfeed_settlement` |
 | On-chain settlement of any kind | `eth_sendRawTransaction`, `solana_client`, `chain_id`, `wallet_private_key` |
-| Stripe, checkout, credit cards, fiat invoices, refunds, or buyer revenue | `stripe.`, `STRIPE_`, `checkout_session`, `invoice_id`, `refund_id`, `buyer_revenue_cents` |
+| Stripe, checkout, credit cards, Stripe invoices, refunds, or buyer revenue | `stripe.`, `STRIPE_`, `checkout_session`, `stripe_invoice_id`, `refund_id`, `buyer_revenue_cents` |
 | Billing logic in the Phase 5 gateway | `phase5-gateway/internal/billing`, `gateway_ledger_write`, `buyer_invoice` |
 | SPEC-001 wire-format changes | `inference_response_billing`, `provider_payout`, `billing_credits` in SPEC-001 protocol messages |
 | Per-provider negotiated splits | `provider_share_overrides`, `negotiated_share_bps`, `provider_contract_terms` |
