@@ -195,7 +195,7 @@ func (r Runner) Run(ctx context.Context, sc *scenario.Scenario, scenarioPath, ou
 			viabilityCandidates = decoded.AllCandidates
 		}
 		v := AggregateViability(viabilityCandidates, hw.Expected)
-		outcome := ClassifyI5(hw.Expected, v.EligibleRowCount, decoded.RecommendedModel)
+		outcome := ClassifyI5WithModel(hw.Expected, v.EligibleRowCount, decoded.RecommendedModel, hw.ExpectedRecommendedModel)
 		line := map[string]any{
 			"label":     hw.Label,
 			"tier":      hw.BandwidthTier,
@@ -298,6 +298,21 @@ func ClassifyI5(expected string, eligibleRowCount int, recommendedModel string) 
 	default:
 		return "fail"
 	}
+}
+
+// ClassifyI5WithModel layers the SPEC-023 §4.1 recommended-model identity
+// check (#1483) on top of ClassifyI5. When expectedRecommendedModel is set, the
+// row fails on ANY mismatch — a different model OR no recommendation at all
+// (e.g. a regression that leaves recommended_model empty and would otherwise be
+// recorded as a zero-eligible row). An exact model expectation is a hard
+// assertion, so it overrides the base outcome rather than only refining a pass.
+// An empty expectation preserves the prior eligible-row-count-only behavior.
+func ClassifyI5WithModel(expected string, eligibleRowCount int, recommendedModel, expectedRecommendedModel string) string {
+	base := ClassifyI5(expected, eligibleRowCount, recommendedModel)
+	if expectedRecommendedModel != "" && recommendedModel != expectedRecommendedModel {
+		return "fail"
+	}
+	return base
 }
 
 func I5Check(row scenario.HardwareMatrixRow, eligibleRowCount int, outcome string) invariants.Check {

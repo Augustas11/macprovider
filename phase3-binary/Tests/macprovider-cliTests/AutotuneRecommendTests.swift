@@ -39,6 +39,150 @@ final class AutotuneRecommendTests: XCTestCase {
         XCTAssertGreaterThan(try XCTUnwrap(result.candidates.first?.rawScore), 0)
     }
 
+    // MARK: SPEC-023 §4.1 RAM-class recommendation rule (#1483)
+
+    private static let threeBKey = "meta-llama/llama-3.2-3b-instruct"
+    private static let eightBKey = "meta-llama/llama-3.1-8b-instruct"
+    private static let qwen8BKey = "qwen3-8b"
+
+    /// Builds a request over the three baked small-dense rows (Llama 3.2 3B,
+    /// Llama 3.1 8B, Qwen3-8B) with per-model benchmarks reproducing the
+    /// #1483 clean `admin` M3 16 GB run (3B ~2× the TPS of the dense 8B rows,
+    /// all at the $0.027/M small-dense parity, no hard-gate trips).
+    private func makeSmallDenseRequest(
+        memoryGB: Int,
+        benchmarkTPS: [String: Double]
+    ) throws -> AutotuneRecommendRequest {
+        var demand = try AutotuneStaticInputs.decodeDemandRank(Data(AutotuneStaticInputs.bakedDemandRankJSON.utf8))
+        var catalog = try AutotuneStaticInputs.decodeCandidateCatalog(Data(AutotuneStaticInputs.bakedCandidateCatalogJSON.utf8))
+        let rateCard = try AutotuneStaticInputs.decodeRateCard(Data(AutotuneStaticInputs.bakedRateCardJSON.utf8))
+        let keep: Set<String> = [Self.threeBKey, Self.eightBKey, Self.qwen8BKey]
+        demand.rows = demand.rows.filter { keep.contains($0.key) }
+        catalog.rows = catalog.rows.filter { keep.contains($0.key) }
+
+        let catalogSHA = AutotuneStaticInputs.candidateCatalogSHA256(bytes: Data(AutotuneStaticInputs.bakedCandidateCatalogJSON.utf8))
+        let generatedAt = Self.date("2026-09-11T00:00:00Z")
+        let hardware = Self.hardware(chip: "Apple M3", memoryGB: memoryGB, bandwidthTier: .c)
+
+        var benchmarks: [String: CandidateBenchmark] = [:]
+        for (key, tps) in benchmarkTPS {
+            guard let candidate = catalog.rows[key] else { continue }
+            benchmarks[key] = CandidateBenchmark(
+                modelKey: key,
+                sustainedTPS: tps,
+                // TTFT well above the advisory catalog gate — advisory only,
+                // must not veto eligibility (§5) or trigger the rule's fallback.
+                ttftMS: 20_000,
+                swapDetected: false,
+                thermalThrottleDetected: false,
+                artifactSHA256: candidate.modelSHA256 ?? String(repeating: "f", count: 64),
+                modelArtifactPath: "/tmp/\(key)",
+                benchmarkID: "bench-1483-\(key)",
+                generatedAt: generatedAt,
+                candidateCatalogSHA256: catalogSHA,
+                binaryVersion: hardware.binaryVersion,
+                modelID: candidate.modelID,
+                hardwareIdentityHash: hardware.hardwareIdentityHash
+            )
+        }
+
+        return AutotuneRecommendRequest(
+            hardware: hardware,
+            demandRank: demand,
+            candidateCatalog: catalog,
+            candidateCatalogSHA256: catalogSHA,
+            rateCard: rateCard,
+            benchmarks: benchmarks,
+            warnings: [],
+            generatedAt: generatedAt,
+            donorMode: false,
+            buyerTTFTCeilingMS: 0
+        )
+    }
+
+    func test16GBPrefersLlama8BOverOnboarding3BWhenEligible() throws {
+        let request = try makeSmallDenseRequest(
+            memoryGB: 16,
+            benchmarkTPS: [Self.threeBKey: 38.5, Self.eightBKey: 17.2, Self.qwen8BKey: 8.45]
+        )
+
+        let result = AutotuneRecommendEngine().recommend(request)
+
+        // Pick is the RAM-class dense 8B row, not the 8 GB onboarding SKU.
+        XCTAssertEqual(result.selectedCandidate?.catalogKey, Self.eightBKey)
+        XCTAssertEqual(result.recommendedModel, result.selectedCandidate?.model)
+        XCTAssertEqual(result.defaultModel, result.selectedCandidate?.model)
+
+        let threeB = try XCTUnwrap(result.allCandidates.first { $0.catalogKey == Self.threeBKey })
+        let eightB = try XCTUnwrap(result.allCandidates.first { $0.catalogKey == Self.eightBKey })
+
+        // 3B is still eligible (payout parity, no hard-gate trip) but demoted.
+        XCTAssertTrue(threeB.eligible)
+        XCTAssertEqual(threeB.explanation.lostReason, "deprioritized_ram_class_onboarding_sku")
+        XCTAssertGreaterThan(threeB.rank, eightB.rank)
+
+        // Proof it is a policy override, not a scoring outcome: 3B out-scores 8B.
+        XCTAssertGreaterThan(threeB.rawScore, eightB.rawScore)
+        // The selected row keeps the stable slug (Malibu validates against it);
+        // the RAM-class policy is surfaced on the demoted 3B row above.
+        XCTAssertEqual(eightB.explanation.lostReason, "selected_best_expected_earning_potential")
+
+        // Qwen3-8B is eligible but not forced ahead of Llama 8B on M3.
+        let qwen = try XCTUnwrap(result.allCandidates.first { $0.catalogKey == Self.qwen8BKey })
+        XCTAssertTrue(qwen.eligible)
+        XCTAssertGreaterThan(qwen.rank, eightB.rank)
+    }
+
+    func test16GBFallsBackTo3BWhenEveryRAMClassRowFailsHardGate() throws {
+        var request = try makeSmallDenseRequest(
+            memoryGB: 16,
+            benchmarkTPS: [Self.threeBKey: 38.5, Self.eightBKey: 17.2, Self.qwen8BKey: 8.45]
+        )
+        // Hard swap veto on BOTH dense rows leaves 3B the only eligible row.
+        for key in [Self.eightBKey, Self.qwen8BKey] {
+            request.benchmarks[key]?.swapDetected = true
+        }
+
+        let result = AutotuneRecommendEngine().recommend(request)
+
+        XCTAssertEqual(result.selectedCandidate?.catalogKey, Self.threeBKey)
+        let threeB = try XCTUnwrap(result.allCandidates.first { $0.catalogKey == Self.threeBKey })
+        XCTAssertTrue(threeB.eligible)
+        // Rule inert (no eligible RAM-class row): 3B keeps the ordinary reason.
+        XCTAssertEqual(threeB.explanation.lostReason, "selected_best_expected_earning_potential")
+    }
+
+    func test16GBAdvisoryTTFTDoesNotSendBackTo3B() throws {
+        // 8B carries an advisory-high TTFT (default buyer ceiling = 0 → no hard
+        // veto); it must stay eligible and remain the pick.
+        let request = try makeSmallDenseRequest(
+            memoryGB: 16,
+            benchmarkTPS: [Self.threeBKey: 38.5, Self.eightBKey: 17.2]
+        )
+
+        let result = AutotuneRecommendEngine().recommend(request)
+
+        XCTAssertEqual(result.selectedCandidate?.catalogKey, Self.eightBKey)
+    }
+
+    func test8GBStillSelects3BOnboardingSKU() throws {
+        // On 8 GB the dense rows fail hardware_fits (12 > 8 − 4) and are
+        // ineligible; 3B stays the SPEC-003 / Entry 116 onboarding default.
+        let request = try makeSmallDenseRequest(
+            memoryGB: 8,
+            benchmarkTPS: [Self.threeBKey: 38.5, Self.eightBKey: 17.2, Self.qwen8BKey: 8.45]
+        )
+
+        let result = AutotuneRecommendEngine().recommend(request)
+
+        XCTAssertEqual(result.selectedCandidate?.catalogKey, Self.threeBKey)
+        let threeB = try XCTUnwrap(result.allCandidates.first { $0.catalogKey == Self.threeBKey })
+        XCTAssertTrue(threeB.eligible)
+        XCTAssertEqual(threeB.explanation.lostReason, "selected_best_expected_earning_potential")
+        let eightB = try XCTUnwrap(result.allCandidates.first { $0.catalogKey == Self.eightBKey })
+        XCTAssertFalse(eightB.eligible)
+    }
+
     func testBakedNemotronInputsArePaidRecommendable() throws {
         let modelKey = "nvidia/nemotron-3-nano-30b-a3b"
         let demand = try AutotuneStaticInputs.decodeDemandRank(Data(AutotuneStaticInputs.bakedDemandRankJSON.utf8))
@@ -350,7 +494,11 @@ final class AutotuneRecommendTests: XCTestCase {
             XCTAssertFalse(explanationPayload.contains(forbiddenField), "\(forbiddenField) leaked into explanation payload")
         }
         XCTAssertFalse(alternatives.isEmpty)
-        XCTAssertEqual(alternatives.first?["lost_reason"] as? String, "lower_expected_earning_potential")
+        // SPEC-023 §4.1 (#1483): on this 16 GB+ Mac the Llama 3.2 3B onboarding
+        // SKU (min_ram_gb=4) is demoted below the eligible RAM-class-matched
+        // Qwen3-Coder-30B row (min_ram_gb=28), so the alternative now carries
+        // the RAM-class reason rather than the plain earning-potential one.
+        XCTAssertEqual(alternatives.first?["lost_reason"] as? String, "deprioritized_ram_class_onboarding_sku")
     }
 
     func testInstalledOnlyRecommendationUsesOnlyExistingVerifiedArtifacts() throws {

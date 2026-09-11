@@ -93,6 +93,37 @@ func TestClassifyI5RecordsMisclassifiedRows(t *testing.T) {
 	}
 }
 
+// SPEC-023 §4.1 (#1483): the recommended-model identity check.
+func TestClassifyI5WithModelEnforcesRecommendedModel(t *testing.T) {
+	const eightB = "meta-llama/llama-3.1-8b-instruct"
+	const threeB = "meta-llama/llama-3.2-3b-instruct"
+	tests := []struct {
+		name          string
+		expected      string
+		eligible      int
+		recommended   string
+		expectedModel string
+		want          string
+	}{
+		{name: "16GB expects 8B and gets 8B passes", expected: "at_least_one_eligible_row", eligible: 3, recommended: eightB, expectedModel: eightB, want: "pass"},
+		{name: "16GB expects 8B but got 3B fails", expected: "at_least_one_eligible_row", eligible: 3, recommended: threeB, expectedModel: eightB, want: "fail"},
+		{name: "8GB expects 3B and gets 3B passes", expected: "at_least_one_eligible_row", eligible: 1, recommended: threeB, expectedModel: threeB, want: "pass"},
+		{name: "empty expectation preserves base pass", expected: "at_least_one_eligible_row", eligible: 2, recommended: threeB, expectedModel: "", want: "pass"},
+		{name: "empty expectation with empty recommendation records", expected: "at_least_one_eligible_row", eligible: 0, recommended: "", expectedModel: "", want: "record"},
+		// A hard model expectation fails even when the base outcome is "record"
+		// (zero eligible rows / no recommendation) — a regression that drops the
+		// recommendation must not be silently recorded as acceptable.
+		{name: "expected model but no recommendation fails not records", expected: "at_least_one_eligible_row", eligible: 0, recommended: "", expectedModel: eightB, want: "fail"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ClassifyI5WithModel(tt.expected, tt.eligible, tt.recommended, tt.expectedModel); got != tt.want {
+				t.Fatalf("ClassifyI5WithModel(%q,%d,%q,%q)=%q, want %q", tt.expected, tt.eligible, tt.recommended, tt.expectedModel, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestSummaryLineFormatsPerTokenRate(t *testing.T) {
 	eligible := SummaryLine(scenario.HardwareMatrixRow{
 		Label:         "m4-64gb",

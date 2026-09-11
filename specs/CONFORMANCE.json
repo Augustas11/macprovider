@@ -660,7 +660,7 @@
     {
       "spec_id": "SPEC-023",
       "title": "Installer-Integrated Autotune Recommend",
-      "version": "v0.10.4",
+      "version": "v0.11.0",
       "path": "specs/SPEC-023-installer-autotune-recommend.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -2351,6 +2351,38 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1453",
         "rationale": "SPEC-023 v0.10.4 sources the three intake signals (SPEC-017 v0.2.1 /v1/stats/intake, SPEC-047 v0.1.6 /admin/model-admission/intake, the signed demand-rank feed) and the generator validates the closed \u00a716.8 intake-decision manifest, re-derives every recorded signal from the operator's privately retained sources, and re-evaluates \u00a716.3 for every entry (BYOM v0.2 slice 5, #1453). Remains pending until the first listed-tier release is cut on the monthly cadence with a committed manifest and the signed JOURNEY-PROVIDER-PREBETA-ADMISSION evidence is promoted."
+      }
+    },
+    {
+      "requirement_id": "SPEC-023-R007",
+      "spec_id": "SPEC-023",
+      "state": "pending",
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/AutotuneRecommend.swift:static func isRAMClassMatched(",
+        "phase3-binary/Sources/macprovider-cli/AutotuneRecommend.swift:static func isRAMClassOnboardingSKU(",
+        "phase3-binary/Sources/macprovider-cli/AutotuneRecommend.swift:func recommend(",
+        "phase3-binary/app/Sources/Malibu/ModelManagement/RecommendationManagement.swift:knownExactExplanationSummaries",
+        "test/network-harness/internal/skuecon/runner.go:func ClassifyI5WithModel",
+        "test/network-harness/internal/scenario/schema.go:ExpectedRecommendedModel"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/AutotuneRecommendTests.swift::test16GBPrefersLlama8BOverOnboarding3BWhenEligible",
+        "phase3-binary/Tests/macprovider-cliTests/AutotuneRecommendTests.swift::test16GBFallsBackTo3BWhenEveryRAMClassRowFailsHardGate",
+        "phase3-binary/Tests/macprovider-cliTests/AutotuneRecommendTests.swift::test16GBAdvisoryTTFTDoesNotSendBackTo3B",
+        "phase3-binary/Tests/macprovider-cliTests/AutotuneRecommendTests.swift::test8GBStillSelects3BOnboardingSKU",
+        "phase3-binary/app/Tests/MalibuTests/ModelManagementTests.swift::testRecommendationValidationAcceptsRAMClassDemotedAlternative",
+        "test/network-harness/internal/skuecon/runner_test.go::TestClassifyI5WithModelEnforcesRecommendedModel",
+        "test/network-harness/internal/scenario/schema_test.go::TestValidateSKUEconExpectedRecommendedModel"
+      ],
+      "journeys": [
+        "JOURNEY-PROVIDER-PREBETA-ADMISSION"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1483",
+        "rationale": "SPEC-023 v0.11.0 \u00a74.1 RAM-class rule is implemented in the CLI recommend engine and covered by unit tests that replay the #1483 clean admin M3 16 GB run (3B ~2\u00d7 the dense-8B TPS at $0.027/M parity): a 16 GB Mac selects Llama 3.1 8B when eligible, falls back to Llama 3.2 3B only when every RAM-class row fails a hard \u00a75 gate, ignores advisory TTFT, and keeps 3B the 8 GB default. Selector-policy only \u2014 no rate-card, catalog, or signed-feed change. Remains pending until a signed JOURNEY-PROVIDER-PREBETA-ADMISSION result from live 16 GB hardware (or the recorded admin JSON replay) is promoted as evidence."
       }
     },
     {
