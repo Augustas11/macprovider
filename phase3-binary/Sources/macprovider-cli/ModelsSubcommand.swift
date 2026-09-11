@@ -55,6 +55,15 @@ struct ModelsDiscoverCommand: AsyncParsableCommand {
     @Flag(help: "Skip the LM Studio loopback adapter..")
     var skipLmstudio = false
 
+    @Option(help: "llama.cpp llama-server loopback origin to query. Must be http://127.0.0.0/8:<port> or http://[::1]:<port>.")
+    var llamacppOrigin: String = BYOMLlamaCppDiscovery.defaultOrigin
+
+    @Flag(help: "Skip the llama.cpp loopback adapter...")
+    var skipLlamacpp = false
+
+    @Option(help: "Directory llama.cpp GGUF files may be resolved and hashed from (one or two levels deep). No default: without it llama.cpp candidates stay runtime_reported. Also MACPROVIDER_LLAMACPP_MODEL_ROOT.")
+    var llamacppModelRoot: String?
+
     func run() async throws {
         guard emitJSON else {
             writeStderr("models discover is JSON-only in this release; pass --json")
@@ -65,7 +74,9 @@ struct ModelsDiscoverCommand: AsyncParsableCommand {
             mlxCacheDir: mlxCacheDir,
             ollamaOrigin: skipOllama ? nil : ollamaOrigin,
             openAICompatibleOrigin: skipOpenaiCompatible ? nil : openaiCompatibleOrigin,
-            lmstudioOrigin: skipLmstudio ? nil : lmstudioOrigin
+            lmstudioOrigin: skipLmstudio ? nil : lmstudioOrigin,
+            llamacppOrigin: skipLlamacpp ? nil : llamacppOrigin,
+            llamacppModelRoot: llamacppModelRoot
         )
         let document = await BYOMDiscoveryRunner(environment: environment).discover()
         for warning in document.warnings.sorted() {
@@ -111,6 +122,15 @@ struct ModelsEvaluateCommand: AsyncParsableCommand {
     @Flag(help: "Skip the LM Studio loopback adapter during candidate lookup..")
     var skipLmstudio = false
 
+    @Option(help: "llama.cpp llama-server loopback origin to query. Must be http://127.0.0.0/8:<port> or http://[::1]:<port>.")
+    var llamacppOrigin: String = BYOMLlamaCppDiscovery.defaultOrigin
+
+    @Flag(help: "Skip the llama.cpp loopback adapter during candidate lookup...")
+    var skipLlamacpp = false
+
+    @Option(help: "Directory llama.cpp GGUF files may be resolved and hashed from (one or two levels deep). No default: without it llama.cpp candidates stay runtime_reported. Also MACPROVIDER_LLAMACPP_MODEL_ROOT.")
+    var llamacppModelRoot: String?
+
     func run() async throws {
         guard emitJSON else {
             writeStderr("models evaluate is JSON-only in this release; pass --json")
@@ -121,7 +141,9 @@ struct ModelsEvaluateCommand: AsyncParsableCommand {
             mlxCacheDir: mlxCacheDir,
             ollamaOrigin: skipOllama ? nil : ollamaOrigin,
             openAICompatibleOrigin: skipOpenaiCompatible ? nil : openaiCompatibleOrigin,
-            lmstudioOrigin: skipLmstudio ? nil : lmstudioOrigin
+            lmstudioOrigin: skipLmstudio ? nil : lmstudioOrigin,
+            llamacppOrigin: skipLlamacpp ? nil : llamacppOrigin,
+            llamacppModelRoot: llamacppModelRoot
         )
         let document = await BYOMEvaluationRunner(target: candidate, environment: environment).evaluate()
         for warning in document.warnings.sorted() {
@@ -188,6 +210,15 @@ struct ModelsOfferCommand: AsyncParsableCommand {
     @Flag(help: "Skip the LM Studio loopback adapter during candidate lookup..")
     var skipLmstudio = false
 
+    @Option(help: "llama.cpp llama-server loopback origin to query. Must be http://127.0.0.0/8:<port> or http://[::1]:<port>.")
+    var llamacppOrigin: String = BYOMLlamaCppDiscovery.defaultOrigin
+
+    @Flag(help: "Skip the llama.cpp loopback adapter during candidate lookup...")
+    var skipLlamacpp = false
+
+    @Option(help: "Directory llama.cpp GGUF files may be resolved and hashed from (one or two levels deep). No default: without it llama.cpp candidates stay runtime_reported. Also MACPROVIDER_LLAMACPP_MODEL_ROOT.")
+    var llamacppModelRoot: String?
+
     func run() async throws {
         guard emitJSON else {
             if dryRun {
@@ -202,7 +233,9 @@ struct ModelsOfferCommand: AsyncParsableCommand {
             mlxCacheDir: mlxCacheDir,
             ollamaOrigin: skipOllama ? nil : ollamaOrigin,
             openAICompatibleOrigin: skipOpenaiCompatible ? nil : openaiCompatibleOrigin,
-            lmstudioOrigin: skipLmstudio ? nil : lmstudioOrigin
+            lmstudioOrigin: skipLmstudio ? nil : lmstudioOrigin,
+            llamacppOrigin: skipLlamacpp ? nil : llamacppOrigin,
+            llamacppModelRoot: llamacppModelRoot
         )
         if dryRun {
             let document = await BYOMOfferDryRunRunner(target: candidate, environment: environment).dryRun()
@@ -304,6 +337,15 @@ struct ModelsAdmissionStatusCommand: AsyncParsableCommand {
     @Flag(help: "Skip the LM Studio loopback adapter during candidate lookup..")
     var skipLmstudio = false
 
+    @Option(help: "llama.cpp llama-server loopback origin to query. Must be http://127.0.0.0/8:<port> or http://[::1]:<port>.")
+    var llamacppOrigin: String = BYOMLlamaCppDiscovery.defaultOrigin
+
+    @Flag(help: "Skip the llama.cpp loopback adapter during candidate lookup...")
+    var skipLlamacpp = false
+
+    @Option(help: "Directory llama.cpp GGUF files may be resolved and hashed from (one or two levels deep). No default: without it llama.cpp candidates stay runtime_reported. Also MACPROVIDER_LLAMACPP_MODEL_ROOT.")
+    var llamacppModelRoot: String?
+
     func run() async throws {
         guard emitJSON else {
             writeStderr("models admission status is JSON-only in this release; pass --json")
@@ -320,7 +362,9 @@ struct ModelsAdmissionStatusCommand: AsyncParsableCommand {
                 mlxCacheDir: mlxCacheDir,
                 ollamaOrigin: skipOllama ? nil : ollamaOrigin,
                 openAICompatibleOrigin: skipOpenaiCompatible ? nil : openaiCompatibleOrigin,
-                lmstudioOrigin: skipLmstudio ? nil : lmstudioOrigin
+                lmstudioOrigin: skipLmstudio ? nil : lmstudioOrigin,
+                llamacppOrigin: skipLlamacpp ? nil : llamacppOrigin,
+                llamacppModelRoot: llamacppModelRoot
             )
             let client = try resolved.coordinatorURL.map { try BYOMModelAdmissionClient(coordinatorURL: $0) }
             let runtime = BYOMModelAdmissionRuntime(
@@ -389,6 +433,15 @@ struct ModelsAdmissionWithdrawCommand: AsyncParsableCommand {
     @Flag(help: "Skip the LM Studio loopback adapter during candidate lookup..")
     var skipLmstudio = false
 
+    @Option(help: "llama.cpp llama-server loopback origin to query. Must be http://127.0.0.0/8:<port> or http://[::1]:<port>.")
+    var llamacppOrigin: String = BYOMLlamaCppDiscovery.defaultOrigin
+
+    @Flag(help: "Skip the llama.cpp loopback adapter during candidate lookup...")
+    var skipLlamacpp = false
+
+    @Option(help: "Directory llama.cpp GGUF files may be resolved and hashed from (one or two levels deep). No default: without it llama.cpp candidates stay runtime_reported. Also MACPROVIDER_LLAMACPP_MODEL_ROOT.")
+    var llamacppModelRoot: String?
+
     func run() async throws {
         guard emitJSON else {
             writeStderr("models admission withdraw is JSON-only in this release; pass --json")
@@ -409,7 +462,9 @@ struct ModelsAdmissionWithdrawCommand: AsyncParsableCommand {
                 mlxCacheDir: mlxCacheDir,
                 ollamaOrigin: skipOllama ? nil : ollamaOrigin,
                 openAICompatibleOrigin: skipOpenaiCompatible ? nil : openaiCompatibleOrigin,
-                lmstudioOrigin: skipLmstudio ? nil : lmstudioOrigin
+                lmstudioOrigin: skipLmstudio ? nil : lmstudioOrigin,
+                llamacppOrigin: skipLlamacpp ? nil : llamacppOrigin,
+                llamacppModelRoot: llamacppModelRoot
             )
             let client = try BYOMModelAdmissionClient(coordinatorURL: resolved.coordinatorURL)
             let runtime = BYOMModelAdmissionRuntime(
@@ -485,6 +540,15 @@ struct ModelsCatalogEconomicsCommand: AsyncParsableCommand {
     @Flag(help: "Skip the LM Studio loopback adapter during candidate lookup..")
     var skipLmstudio = false
 
+    @Option(help: "llama.cpp llama-server loopback origin to query. Must be http://127.0.0.0/8:<port> or http://[::1]:<port>.")
+    var llamacppOrigin: String = BYOMLlamaCppDiscovery.defaultOrigin
+
+    @Flag(help: "Skip the llama.cpp loopback adapter during candidate lookup...")
+    var skipLlamacpp = false
+
+    @Option(help: "Directory llama.cpp GGUF files may be resolved and hashed from (one or two levels deep). No default: without it llama.cpp candidates stay runtime_reported. Also MACPROVIDER_LLAMACPP_MODEL_ROOT.")
+    var llamacppModelRoot: String?
+
     func run() async throws {
         guard emitJSON else {
             writeStderr("models catalog-economics is JSON-only in this release; pass --json")
@@ -503,7 +567,9 @@ struct ModelsCatalogEconomicsCommand: AsyncParsableCommand {
             mlxCacheDir: mlxCacheDir,
             ollamaOrigin: skipOllama ? nil : ollamaOrigin,
             openAICompatibleOrigin: skipOpenaiCompatible ? nil : openaiCompatibleOrigin,
-            lmstudioOrigin: skipLmstudio ? nil : lmstudioOrigin
+            lmstudioOrigin: skipLmstudio ? nil : lmstudioOrigin,
+            llamacppOrigin: skipLlamacpp ? nil : llamacppOrigin,
+            llamacppModelRoot: llamacppModelRoot
         )
         // BYOM identity is resolved against the compiled-in release through the
         // one offline qualified selection (`BYOMCatalogMatcher()`), the same

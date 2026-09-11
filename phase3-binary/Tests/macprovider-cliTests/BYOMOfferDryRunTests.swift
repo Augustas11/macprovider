@@ -25,6 +25,7 @@ final class BYOMOfferDryRunTests: XCTestCase {
             "--json",
             "--skip-ollama",
             "--skip-lmstudio",
+            "--skip-llamacpp",
             "--local-discovery-namespace-path", root.appendingPathComponent("ns").path,
             "--mlx-cache-dir", root.appendingPathComponent("hf", isDirectory: true).path,
         ])

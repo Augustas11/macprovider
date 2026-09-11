@@ -374,6 +374,102 @@ struct BYOMLMStudioModelStore: BYOMGGUFArtifactLocator, Sendable {
     }
 }
 
+/// Locates the GGUF file a llama.cpp `llama-server` model is served from,
+/// under an OPERATOR-declared root (`--llamacpp-model-root` /
+/// `MACPROVIDER_LLAMACPP_MODEL_ROOT`; no default). Filesystem only, from the
+/// NAME.
+///
+/// Why a name and not the path llama-server reports: `llama-server` exposes
+/// the loaded file's path both as the `/v1/models` id (absent `--alias`) and
+/// as `/props.model_path`. Adopting either would let the runtime choose which
+/// file gets recorded as artifact evidence (#1478 `harm:supply`), and the
+/// #1246 harness already refuses any served reference containing `/` so a
+/// filesystem path never reaches `candidate_id`, display names or evidence
+/// JSON. So the adapter reduces the id to its file stem (`foo-q4_k_m` for
+/// `/x/models/foo-q4_k_m.gguf`), and this store resolves that stem to exactly
+/// one `<stem>.gguf` under the root, one or two levels deep, symlink-resolved
+/// and root-contained. No root, an aliased server whose alias names no file,
+/// or several files with that stem ⇒ no identity (`runtime_reported`).
+struct BYOMLlamaCppModelStore: BYOMGGUFArtifactLocator, Sendable {
+    let runtimeSource = "llamacpp_loopback"
+    static let servedModelRefPrefix = "llamacpp:"
+    /// nil ⇒ the operator declared no root ⇒ nothing is ever hashed.
+    let root: URL?
+    private let fileManager: FileManager
+    private static let maxEntriesVisited = 8192
+    private static let stemPart = try! NSRegularExpression(pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$")
+
+    init(root: URL?, fileManager: FileManager = .default) {
+        self.root = root
+        self.fileManager = fileManager
+    }
+
+    static func defaultRoot(environment: [String: String] = ProcessInfo.processInfo.environment) -> URL? {
+        if let models = environment["MACPROVIDER_LLAMACPP_MODEL_ROOT"], !models.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return URL(fileURLWithPath: models)
+        }
+        return nil
+    }
+
+    /// The served reference the adapter emits for a llama-server model id:
+    /// a path-shaped id becomes its file stem, anything else is kept as-is.
+    /// The harness's safe-reference check runs on the result, not here.
+    static func stem(fromRuntimeModelID id: String) -> String {
+        var value = id.trimmingCharacters(in: .whitespacesAndNewlines)
+        if value.contains("/") {
+            value = (value as NSString).lastPathComponent
+        }
+        if value.lowercased().hasSuffix(".gguf") { value.removeLast(5) }
+        return value
+    }
+
+    static func stem(from servedModelRef: String) -> String? {
+        var value = servedModelRef.trimmingCharacters(in: .whitespacesAndNewlines)
+        if value.hasPrefix(servedModelRefPrefix) { value = String(value.dropFirst(servedModelRefPrefix.count)) }
+        let range = NSRange(value.startIndex..., in: value)
+        guard let match = stemPart.firstMatch(in: value, range: range), match.range == range else { return nil }
+        return value
+    }
+
+    func resolveArtifact(servedModelRef: String) -> BYOMResolvedArtifact? {
+        guard let root, let stem = Self.stem(from: servedModelRef) else { return nil }
+        let wanted = stem.lowercased()
+        let rootResolved = root.resolvingSymlinksInPath().standardizedFileURL
+        var visited = 0
+        var hits: [(url: URL, relative: String)] = []
+        func consider(_ fileURL: URL, relative: String) {
+            guard fileURL.pathExtension.lowercased() == "gguf",
+                  fileURL.deletingPathExtension().lastPathComponent.lowercased() == wanted
+            else { return }
+            let resolved = fileURL.resolvingSymlinksInPath().standardizedFileURL
+            guard BYOMArtifactPathPolicy.isContained(resolved, in: rootResolved),
+                  (try? resolved.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile == true
+            else { return }
+            hits.append((resolved, relative))
+        }
+        guard let top = try? fileManager.contentsOfDirectory(at: rootResolved, includingPropertiesForKeys: [.isDirectoryKey, .isRegularFileKey], options: [.skipsHiddenFiles]) else {
+            return nil
+        }
+        for entry in top {
+            visited += 1
+            if visited > Self.maxEntriesVisited { return nil }
+            let values = try? entry.resourceValues(forKeys: [.isDirectoryKey, .isRegularFileKey])
+            if values?.isDirectory == true {
+                guard let inner = try? fileManager.contentsOfDirectory(at: entry, includingPropertiesForKeys: [.isRegularFileKey], options: [.skipsHiddenFiles]) else { continue }
+                for fileURL in inner {
+                    visited += 1
+                    if visited > Self.maxEntriesVisited { return nil }
+                    consider(fileURL, relative: "\(entry.lastPathComponent)/\(fileURL.lastPathComponent)")
+                }
+            } else {
+                consider(entry, relative: entry.lastPathComponent)
+            }
+        }
+        guard hits.count == 1, let hit = hits.first else { return nil }
+        return BYOMResolvedArtifact(fileURL: hit.url, locator: hit.relative)
+    }
+}
+
 /// Digests already computed over local artifact bytes, keyed by the exact
 /// file identity, so discovery (read-only, cheap) can report
 /// `artifact_hash_available` / match by digest without re-hashing gigabytes.
