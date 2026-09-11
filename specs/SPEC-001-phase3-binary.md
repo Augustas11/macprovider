@@ -1,6 +1,12 @@
 # SPEC-001 — Phase 3 Binary: Mac Provider Inference CLI
 
-**Version:** 1.9.9 (2026-09-11, Build 1 catalog preparation authority)
+**Version:** 1.9.10 (2026-09-11, Build 1 catalog preparation authority correction)
+
+**Change log v1.9.10 (2026-09-11, Build 1 catalog preparation authority
+correction):** Assigns the catalog-economics invocation contract stable
+requirement ID `SPEC-001-R003`, makes v1/v2 advertisement mutually exclusive
+so the unchanged read command has one deterministic response schema, and
+requires production-boundary old/new CLI/Malibu compatibility evidence.
 
 **Change log v1.9.9 (2026-09-11, Build 1 catalog preparation authority):**
 Reserves the capability-gated `models catalog-economics` transaction grammar
@@ -3258,10 +3264,18 @@ New provider-visible model-command PRs MUST include tests proving that:
 
 ### 6.14b. Catalog-economics transaction invocation (Build 1 authority)
 
-The installed CLI owns all catalog-economics reads and mutations. A CLI that
-advertises local-status capability `model_catalog_economics_v2` and command
-schema token `models catalog-economics.v2` MUST accept exactly these public
-forms:
+**SPEC-001-R003 - Catalog-economics transaction invocation.**
+
+The installed CLI owns all catalog-economics reads and mutations. Advertisement
+is exclusive per installed CLI build: a v2-serving CLI MUST advertise
+local-status capability `model_catalog_economics_v2` and command-schema token
+`models catalog-economics.v2` and MUST omit capability
+`model_catalog_economics_v1` and token `models catalog-economics.v1`; a
+v1-serving CLI MUST advertise only the v1 pair and MUST omit the v2 pair. A CLI
+MUST NOT advertise both generations, advertise only one member of a generation
+pair, or select a response generation from caller identity, terminal state,
+environment, or request timing. A CLI advertising the v2 pair MUST accept
+exactly these public forms:
 
 ```text
 malibu-cli models catalog-economics --json
@@ -3301,8 +3315,18 @@ events. The cancel process MUST NOT emit, merge, or synthesize an event and MUST
 NOT kill the worker. No `models transactions` family, public transaction-status
 schema, public crash or late-cancellation state, authority-refresh frame,
 daemon, background service, or new control-socket frame is part of this
-contract. Clients lacking the exact v2 capability/token retain the existing
-fallback and MUST NOT invoke these mutation options. SPEC-044 v0.2.0 owns the
+contract. A v2 Malibu invokes the unchanged read form only after observing the
+complete v2 pair; otherwise it invokes v1 only after observing the complete v1
+pair, and otherwise uses the legacy static fallback without a catalog-economics
+call. Therefore an old v1 Malibu paired with a new v2-only CLI makes no
+catalog-economics call and uses its static fallback, while a new Malibu paired
+with an old v1-only CLI requests and strictly decodes v1 without attempting v2
+actions. Partial, conflicting, or dual-generation advertisement is malformed
+and uses the static fallback with no mutation call. Production-boundary tests
+MUST launch the built CLI through Malibu's production process adapter and prove
+these four cases, including exact stdout, stderr, exit status, and strict
+decoder behavior. Clients lacking the exact v2 capability/token retain the
+existing fallback and MUST NOT invoke the v2 mutation options. SPEC-044 v0.2.1 owns the
 projection, event, cancellation-acknowledgement, preparation-copy, action, and
 storage-accounting contracts.
 

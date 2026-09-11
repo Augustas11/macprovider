@@ -666,7 +666,9 @@
     {
       "id": "malibu-model-economics-ux",
       "owner_spec": "SPEC-044",
-      "consumers": [],
+      "consumers": [
+        "SPEC-001"
+      ],
       "status": "declared",
       "requires_signed_journey_result": true,
       "owner": "@Augustas11",

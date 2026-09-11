@@ -1,12 +1,12 @@
 # SPEC-044 - Malibu Model Catalog Economics
 
-**Version:** 0.2.0
+**Version:** 0.2.1
 
 ```json
 {
   "spec_id": "SPEC-044",
   "title": "Malibu Model Catalog Economics",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "path": "specs/SPEC-044-malibu-model-catalog-economics.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -36,7 +36,7 @@
     "verdict": "DECISION_REQUIRED",
     "owner": "@Augustas11",
     "issue": "https://github.com/Augustas11/macprovider/issues/614",
-    "rationale": "The operator-owned v0.2.0 authority now defines the Build 1 preparation, cancellation, published-cleanup, and storage-accounting contracts. Implementation, complete tests, signed release evidence, and the discovery/admission/settlement journeys remain pending."
+    "rationale": "The operator-owned v0.2.1 authority defines the corrected Build 1 preparation, cancellation, published-cleanup, guidance-correlation, and storage-accounting contracts. Implementation, complete tests, signed release evidence, and the discovery/admission/settlement journeys remain pending."
   }
 }
 ```
@@ -91,7 +91,7 @@ SPEC-047 owns network model admission. SPEC-044 may present economics only for r
 
 ## 3. Normative requirements
 
-**SPEC-044-R001 - CLI-owned economics projection.** Malibu MUST obtain model economics, network readiness, trust state, and actions from an installed, signed `malibu-cli` projection. The v1 envelope is advertised by capability `model_catalog_economics_v1`; the Build 1 preparation/storage envelope is a breaking extension advertised only by `model_catalog_economics_v2` together with command-schema token `models catalog-economics.v2`. A v1-only client MUST retain its existing fallback and MUST NOT invoke v2 run/cancel forms; a v2-capable CLI MUST NOT send a v2 envelope to a client that did not negotiate that exact capability and token. Malibu MUST NOT fetch coordinator rate feeds, parse static feed files, verify feed signatures, compute billing rates from raw feed bytes, derive action eligibility from app-local heuristics, or present a SPEC-046 discovered candidate as a network economics row unless SPEC-047 admission state permits that presentation. Locally motivated preparation under R002/R003 is permitted only as a non-economics local-readiness action and MUST preserve the candidate's authoritative admission and earning disclosures.
+**SPEC-044-R001 - CLI-owned economics projection.** Malibu MUST obtain model economics, network readiness, trust state, and actions from an installed, signed `malibu-cli` projection. The v1 envelope is advertised only by the complete pair `model_catalog_economics_v1` and `models catalog-economics.v1`; the Build 1 preparation/storage envelope is a breaking extension advertised only by the complete pair `model_catalog_economics_v2` and `models catalog-economics.v2`. Advertisement is exclusive: a CLI serving v2 MUST omit both v1 values, a CLI serving v1 MUST omit both v2 values, and a CLI MUST NOT advertise both generations or only one value of either pair. Malibu MUST select v2 only for the complete v2 pair, otherwise v1 only for the complete v1 pair, and otherwise the legacy static fallback without invoking `models catalog-economics`; it MUST treat dual or partial advertisement as malformed. Thus an old Malibu paired with a new v2-only CLI makes no catalog-economics call, and a new Malibu paired with an old v1-only CLI requests only v1. A v1-only client MUST retain its existing fallback and MUST NOT invoke v2 run/cancel forms; a v2-serving CLI MUST NOT send a v2 envelope to a client that did not negotiate the exact v2 pair. Malibu MUST NOT fetch coordinator rate feeds, parse static feed files, verify feed signatures, compute billing rates from raw feed bytes, derive action eligibility from app-local heuristics, or present a SPEC-046 discovered candidate as a network economics row unless SPEC-047 admission state permits that presentation. Locally motivated preparation under R002/R003 is permitted only as a non-economics local-readiness action and MUST preserve the candidate's authoritative admission and earning disclosures.
 
 **SPEC-044-R002 - Versioned row schema.** The CLI projection MUST emit a closed, versioned JSON envelope with `schema: "model_catalog_economics.v1"`, a wall-clock RFC3339 `generated_at`, a monotonic unsigned integer `projection_sequence`, a `source` object identifying the CLI build and feed provenance, an array of rows, and a projection-level `warnings` array. The v1 `source` object MUST include `cli_version`, `cli_build_commit`, `process_launch_id`, `process_started_at`, `projection_protocol_version`, `rate_card_source`, nullable `rate_card_digest`, nullable `rate_card_signature_digest`, nullable `demand_feed_digest`, nullable `candidate_feed_digest`, and `rate_card_max_age_seconds`; `process_launch_id` MUST be a lowercase hyphen-separated UUID v4 string generated fresh on CLI process start from at least 128 bits of CSPRNG entropy and MUST NOT be derivable from a PID, host serial, MAC address, host UUID, provider id, wallet, username, or any other hardware or identity value. `source.rate_card_source` MUST use the same closed enum as row `rate_source`: `live_signed`, `static_signed`, or `none`. `projection_sequence` MUST increase within a single CLI process for each newly generated projection and MAY reset after CLI restart; callers MUST use it only to order projections that have the same `source.process_launch_id`. When Malibu observes a new `source.process_launch_id`, it MUST treat the projection as a new CLI session, reset its ordering baseline, discard older in-flight projection ordering comparisons, and show a brief reconnecting or refreshing state before rendering the new projection. Each row MUST include model identity (`model_key`, `served_model_id`, `display_model_id`, nullable `action_model_id`), local state (`is_current`, `weights_present_locally`, `runtime_state`, nullable `estimated_gb`, `fit`, nullable `disabled_reason`, `warning_codes`), admission state (`admission`), economics (nullable `rate_card_version`, nullable `rate_card_generated_at`, nullable `rate_card_key`, `rate_source`, nullable `prompt_rate_usd_per_million_tokens`, nullable `completion_rate_usd_per_million_tokens`, nullable `provider_share_bps`, nullable `provider_prompt_payout_usd_per_million_tokens`, nullable `provider_completion_payout_usd_per_million_tokens`, `economics_state`), demand signals (nullable `demand_rank`, nullable `demand_weight`, nullable `ready_provider_count`, nullable `supply_deficit_score`), and actions (`switch`, `prepare`, `evaluate`, `adopt_recommendation`, `cleanup_staging`) as explicit objects with `available`, `requires_confirmation`, nullable `transaction_kind`, nullable `transaction_id`, nullable `action_timeout_seconds`, nullable `estimated_bytes`, and nullable `unavailable_reason`. The row `admission` object MUST include `state`, `source`, nullable `coordinator_event_id`, nullable `state_observed_at`, `catalog_economics_permitted`, and `settlement_capable`; `source` is `local_default` or `coordinator`, `state` MUST use the SPEC-046/SPEC-047 admission-state enum, `source: "local_default"` permits only `local_only`, `not_offered`, or `offerable` and MUST set `catalog_economics_permitted: false` and `settlement_capable: false`, `source: "coordinator"` permits only SPEC-047 coordinator states, `catalog_economics_permitted` MAY be true only when `source: "coordinator"` and `state` is `catalog_priced` or `settlement_capable`, and `settlement_capable` MAY be true only when `source: "coordinator"` and `state` is `settlement_capable`. Rows whose `admission` object is missing, malformed, stale relative to the signed rate-card evidence, or inconsistent with SPEC-047 MUST set `economics_state` to `blocked` or `unavailable`, null all money-facing payout fields, and make money-motivated actions unavailable. Row `warning_codes` MUST be an array of closed warning-code enum values that apply to that specific row; the top-level `warnings` array applies to the projection as a whole. `economics_state: "trusted"` MUST include non-null rate-card identity, provider-share, and prompt/completion catalog and payout fields, and MUST require `admission.catalog_economics_permitted: true`; Malibu MUST NOT render earning-eligible, settlement-ready, or paid-routing copy unless `admission.settlement_capable: true`. Rows with `rate_source: "none"` or `economics_state: "unavailable"` MUST set rate-card identity and all rate/payout numeric fields to null rather than placeholder zero values. Rows with `economics_state: "blocked"` MUST set money-facing rate/payout fields to null unless the CLI can still identify a verified signed rate card while blocking actions for a non-rate reason; Malibu MUST hide economics copy for blocked rows unless `economics_state` is `trusted`. Rows with `economics_state: "fallback"` or `"stale"` MAY include the signed/static/stale rate fields only as disabled warning context and MUST NOT render them as actionable trusted economics. For an available action, `transaction_kind`, `transaction_id`, and `action_timeout_seconds` MUST be non-null; `action_timeout_seconds` MUST be greater than zero and MUST NOT exceed 1800 seconds. For available `switch_model`, `prepare_model`, `switch_model_deferred`, `cleanup_staging`, `adopt_recommendation`, and any `evaluate_model` action with non-null `estimated_bytes` or `action_timeout_seconds` greater than 10 seconds, `requires_confirmation` MUST be true, and Malibu MUST enforce confirmation for those transaction kinds even if a malformed projection sets the flag false. For an unavailable action, `transaction_kind`, `transaction_id`, and `action_timeout_seconds` MUST be null. A row's `rate_source` MUST be equal to `source.rate_card_source` unless the row uses a more conservative value, where `none` is more conservative than `static_signed`, and `static_signed` is more conservative than `live_signed`. Closed v1 enum values are: `runtime_state` = `current`, `ready`, `catalog`, `needs_preparation`, `blocked`; `fit` = `fits`, `does_not_fit`, `unknown`; admission `source` = `local_default`, `coordinator`; admission `state` = `local_only`, `not_offered`, `offerable`, `offer_submitted`, `offer_rejected`, `sandbox_probe_only`, `network_visible_unpriced`, `network_admitted_unsettled`, `catalog_priced`, `settlement_capable`, `withdrawn`, `revoked`; `rate_source` = `live_signed`, `static_signed`, `none`; `economics_state` = `trusted`, `fallback`, `stale`, `blocked`, `unavailable`; warning codes = `feed_fallback`, `feed_stale`, `feed_signature_invalid`, `feed_generation_mismatch`, `rate_multiplier_unknown`, `model_not_local`, `model_not_supported`, `hardware_fit_unknown`, `hardware_does_not_fit`, `admission_state_missing`, `admission_state_not_settlement_capable`, `warm_swap_unavailable`, `action_unavailable`, `old_cli_fallback`, `projection_unavailable`, `projection_timeout`, `staging_cleanup_required`; action `transaction_kind` = `switch_model`, `switch_model_deferred`, `prepare_model`, `evaluate_model`, `adopt_recommendation`, `cleanup_staging`, or null when unavailable. The v1 transaction event stream MUST use a closed JSON-lines envelope with `schema: "model_catalog_transaction_event.v1"`, matching `transaction_id`, matching `transaction_kind`, `model_key`, monotonic per-transaction `event_sequence`, RFC3339 `emitted_at`, `state`, nullable `progress`, nullable `error_code`, and nullable `warning_code`. Closed event `state` values are `queued`, `running`, `cancel_requested`, `cancelled`, `succeeded`, `failed`, and `timed_out`; `progress`, when present, MUST include a localized-safe `stage_label_key` and at least one of `bytes_completed`/nullable `bytes_expected`, `percent_complete`, or `heartbeat`. Cancellation MUST be requested through the same CLI-owned transaction interface, MUST produce either `cancel_requested` followed by `cancelled` or a terminal `succeeded`/`failed` if the commit point has already passed, and MUST never require Malibu to kill the CLI process or delete files directly. Unknown enum values, unknown action transaction kinds, malformed event envelopes, or event transaction mismatches MUST make the affected row or transaction non-actionable and show a generic unsupported warning; they MUST NOT make Malibu reject the whole projection unless the projection envelope schema itself is unsupported.
 
@@ -104,9 +104,54 @@ Build 1 preparation and published-artifact cleanup require capability
 `models catalog-economics.v2`, and projection schema
 `model_catalog_economics.v2`. The v2 envelope preserves every v1 field and
 closed-enum rule except where this subsection explicitly adds a field or enum
-value. A client that understands only v1 MUST use its existing fallback and
-MUST NOT receive a v2 envelope. The exact invocation is owned by SPEC-001
-§6.14b.
+value. The exclusive advertisement and fallback matrix in R001 applies; the
+unchanged read command never selects a generation at request time. A client
+that understands only v1 MUST use its existing fallback when paired with a
+v2-only CLI and MUST NOT receive a v2 envelope. The exact invocation is owned
+by SPEC-001-R003 (§6.14b).
+
+Every v2 row adds required non-null `candidate_id`, `provider_guidance`, and
+`guidance_binding`. `candidate_id` MUST match `^byom_[a-z2-7]{52}$` and equal
+the candidate ID in the single SPEC-046 or SPEC-047 source envelope used to
+build the row. `provider_guidance` MUST contain exactly the five SPEC-046-R003
+fields `state_label_key`, `state_meaning_key`, `next_action`, nullable
+`transition_reason_code`, and `earning_path_class`, with the owner-spec field
+values and closed enums copied verbatim. It MUST NOT be reconstructed from
+admission state, economics, catalog identity, model names, or local action
+eligibility.
+
+`guidance_binding` is closed and contains exactly `source_schema`,
+`source_sha256`, `source_generated_at`, nullable `source_projection_sequence`,
+nullable `source_coordinator_event_id`, `candidate_id`, `admission_source`, and
+`admission_state`. For `admission_source: "local_default"`, `source_schema` MUST
+be `provider_byom_discovery.v1`, `source_projection_sequence` MUST be the
+non-null sequence from that source, and `source_coordinator_event_id` MUST be
+null. For `admission_source: "coordinator"`, `source_schema` MUST be
+`model_admission_status.v1`, `source_projection_sequence` MUST be null, and
+`source_coordinator_event_id` MUST be the non-null event ID from that source.
+`source_sha256` is lowercase 64-hex SHA-256 over the exact bounded validated
+UTF-8 source bytes, not a Malibu-generated join, and `source_generated_at` is
+copied from the same source. For these v1 owner-source schemas,
+`owner_source_max_age` is exactly 300 seconds; a later owner-spec amendment may
+only narrow that bound for its source schema.
+
+The row candidate ID, admission source/state/event, all five guidance values,
+and every duplicated `guidance_binding` value MUST byte-for-byte equal that
+single bound source. At v2 generation, checked wall-clock age MUST satisfy
+`0 <= projection.generated_at - source_generated_at <= min(300 seconds,
+owner_source_max_age)`; at Malibu rendering the same inequality uses the
+current wall clock in place of `projection.generated_at`. A future source is
+invalid. The
+builder MUST load and validate the guidance source in the same immutable
+projection snapshot as admission and artifact eligibility. Any missing, stale,
+unknown, cross-candidate, cross-source, cross-event, cross-sequence,
+digest-mismatched, or malformed binding invalidates the row: every action MUST
+be unavailable, money fields MUST be null, and Malibu MUST show generic
+unsupported copy. For a valid row Malibu MUST render the SPEC-001 earning
+verdict mapped from the copied `earning_path_class` and the copied state
+disclosure before fit, storage, preparation, demand, or economics detail.
+Strict CLI and Malibu decoders MUST reject unknown binding/guidance fields and
+unknown owner enums.
 
 Each v2 action object adds nullable `artifact_identity_digest` to the v1 action
 shape, and each row adds an explicit `cleanup_published` action. The closed v2 action
@@ -116,17 +161,63 @@ provider confirmation. An available cleanup action MUST carry a non-null
 lowercase 64-hex `artifact_identity_digest` that binds the projection action to
 the exact model/revision/artifact/release/root/receipt tuple; every other action
 MUST set that field to null. Its source label is **Remove prepared model** and
-its confirmation is **Remove this verified prepared model and recover
-{reclaimable_size}? The current model and legacy model files will be kept.**
+its confirmation is **Remove this verified prepared model ({reclaimable_size}
+of managed data)? The current model and legacy model files will be kept.**
 `{reclaimable_size}` uses the same formatting rule as `{estimated_size}` below.
-For an available cleanup action, `estimated_bytes` MUST equal the exact
-reclaimable bytes represented by `{reclaimable_size}`.
+For an available cleanup action, `estimated_bytes` MUST equal the exact logical
+prepared-data bytes represented by `{reclaimable_size}`. The UI MUST NOT
+describe that logical value as bytes that will be recovered, freed, or made
+available on the volume because APFS clones, compression, snapshots, and shared
+allocation can make physical free-space change differ.
+`artifact_identity_digest` is SHA-256 over the domain UTF-8 bytes
+`macprovider.model_catalog.artifact_identity.v1`, followed in order by the exact
+validated UTF-8 bytes of `display_model_id`, `model_revision`, `artifact_id`,
+and `release_id`, then the lowercase ASCII bytes of `root_identity_digest` and
+`receipt_sha256`; the domain and every field are independently prefixed by an
+unsigned 32-bit big-endian byte length. No Unicode normalization or alternate
+serialization is permitted. The managed object leaf is this same lowercase
+64-hex digest, so receipt validation and inventory enumeration recompute it
+without consulting a current catalog row.
+`root_identity_digest` is SHA-256 over the exact ASCII domain
+`macprovider.model_catalog.root_identity.v1` followed by one zero byte and the
+32 raw bytes of a root nonce generated once from a CSPRNG during atomic v3-root
+bootstrap. The nonce and the canonical path, `st_dev`, and `st_ino` of the
+opened root descriptor are stored only in the owner-mode `0600` internal
+`root.identity` record; the nonce, path, device, inode, username, and hardware
+identifiers MUST NOT appear in the projection. Every projection, dispatch,
+publication, cleanup, and recovery MUST reopen the saved canonical path
+component-by-component without following symlinks, validate the descriptor's
+device/inode plus the owner/type/mode/link-count of its descriptor-relative
+`root.identity` record, and recompute the digest from that record before using
+the root. A supplied projection digest or current configuration path is never
+root authority.
 The worker MUST revalidate the current projection transaction, digest, receipt,
 root identity, and keep set under the common operation/cleanup lock before any
 rename. A stale or mismatched binding fails before deletion. It is distinct
 from `cleanup_staging`, which remains
 limited to incomplete staging data and MUST reject published objects. Neither
 action authorizes automatic garbage collection or legacy-object mutation.
+
+The v2 envelope also adds required top-level `cleanup_targets`, an array of at
+most 256 closed objects with exactly `artifact_identity_digest`,
+`display_model_id`, `model_revision`, `artifact_id`, `release_id`, nullable
+current `model_key`, `root_identity_digest`, `receipt_sha256`, exact logical
+`estimated_bytes`, `keep_set_status`, nullable `protected_reason`, and
+`cleanup`. The two SHA-256 digests are lowercase 64-hex;
+`keep_set_status` is `protected` or `reclaimable`; `protected_reason` is
+non-null exactly for `protected`; and `cleanup` uses the v2 action shape. The
+array MUST contain every verified managed-v3 object in the usable inventory
+exactly once, including objects with no current catalog row, ordered by
+ascending `artifact_identity_digest`. A `reclaimable` entry MUST have one
+available `cleanup_published_artifact` action carrying the same artifact digest
+and `estimated_bytes`; a `protected` entry MUST have an unavailable action and
+exact reason. Missing or stale receipt identity, malformed inventory, or
+overflow makes the array empty and all published cleanup unavailable. A row
+cleanup action, if retained, MUST be a byte-identical projection of its
+corresponding top-level entry; Malibu MUST de-duplicate them by
+`artifact_identity_digest` and keep one reachable action. Absence from the
+current signed catalog MUST NOT make a reclaimable verified identity
+unreachable.
 
 The v2 envelope adds one required top-level `storage` object with exact fields:
 
@@ -155,6 +246,27 @@ current model, configured current/draft artifacts, active or prepared adoption
 targets, selected or active preparation targets, live-worker targets, serving
 verification targets, and identities bound to another root.
 
+All byte fields in `storage`, `cleanup_targets.estimated_bytes`, and action
+`estimated_bytes` are descriptor-relative logical byte counts. Starting from
+the already identity-validated root descriptor, the CLI MUST open each path
+component relative to its parent descriptor without following symlinks, walk
+only the exact managed-object or configured-legacy tree, and classify every
+entry with descriptor-relative metadata. It MUST require same-device,
+owner-approved regular files with `st_nlink == 1` and reject symlinks, hard
+links, device nodes, sockets, FIFOs, traversal, mount crossings, and any entry
+or sum outside the existing file-count, depth, relative-path, or integer
+bounds. Each directory contributes zero. Each accepted regular file contributes
+exactly its nonnegative logical data-fork `st_size` once, including artifact
+bytes, receipts, manifests, and other managed metadata files inside the measured
+tree. Directory implementation bytes, extended attributes, resource forks,
+filesystem allocation blocks, snapshots, APFS clone sharing, and compression
+savings are excluded; sparse, cloned, and compressed regular files therefore
+count by full logical `st_size`, subject to the same estimate and aggregate
+caps. Each addition MUST use checked unsigned arithmetic and the complete walk
+MUST be revalidated against the same bound descriptor before its result is
+published or used for dispatch; a race or unstable descriptor identity fails
+the affected managed inventory or configured-legacy accounting closed.
+
 Verified configured legacy current/draft trees outside the v3 namespace are
 always protected. Their same-volume bytes populate
 `configured_legacy_protected_bytes` and charge the managed budget; their
@@ -164,8 +276,10 @@ charge that root's budget. Therefore
 configured_legacy_protected_bytes`, and `available_managed_budget_bytes =
 max(0, global_managed_budget_bytes - managed_budget_charge_bytes)`. An
 unconfigured legacy object is unmanaged and MUST NOT be enumerated, imported,
-receipted, renamed, repaired, or deleted. Filesystem free-space checks still
-observe all allocated bytes. If a configured legacy tree cannot be safely
+receipted, renamed, repaired, or deleted. Filesystem free-space checks use the
+checked product of the bound volume's current available-allocation count and
+allocation-unit size; this physical-availability value is never reported as a
+logical byte field. If a configured legacy tree cannot be safely
 measured, the CLI MUST use `configured_legacy_accounting_state: "unavailable"`,
 set both legacy byte fields, the charge, and available budget to null, disable
 preparation and published cleanup, and preserve incumbent serving.
@@ -176,27 +290,43 @@ budget MUST be non-null and satisfy the equations above. When managed inventory
 is malformed or overfull, all managed-v3 totals, charge, and available budget
 MUST be null regardless of legacy-accounting state.
 
-The default `global_managed_budget_bytes` is the lesser of 1 TiB
-(1099511627776 bytes) and 70 percent of the bound root volume capacity, rounded
-down with checked unsigned arithmetic. An operator may replace the default
-only with the positive integer `model_preparation_budget_bytes` from the normal
-CLI configuration layering: environment
-`MACPROVIDER_MODEL_PREPARATION_BUDGET_BYTES` overrides YAML
-`model_preparation_budget_bytes`. The configured value MUST NOT exceed 1 TiB.
-A new distinct publication that
-would exceed either the byte budget or the 256-object ceiling MUST fail before
-network or staging side effects; an exact already-published identity remains
-idempotently usable. Preparation also requires checked free space of at least
-`2 * estimated_bytes + 1073741824` bytes before transfer. No budget failure
-authorizes deletion.
+The default `global_managed_budget_bytes` is exactly
+`min(1099511627776, floor(volume_capacity_bytes * 70 / 100))`, implemented with
+checked unsigned arithmetic that cannot overflow before division. An operator
+may replace the default only with the positive integer
+`model_preparation_budget_bytes` from the normal CLI configuration layering:
+environment `MACPROVIDER_MODEL_PREPARATION_BUDGET_BYTES` overrides YAML
+`model_preparation_budget_bytes`. Either configured value MUST be in the exact
+range `1...1099511627776`; an invalid higher-precedence value MUST fail closed
+rather than falling through to a lower-precedence value or the default.
+`managed_budget_source` MUST report `configured` only for the selected valid
+configured value and `default` otherwise. A new distinct publication requires
+checked `managed_budget_charge_bytes + estimated_bytes <=
+global_managed_budget_bytes` and a free object-count slot; failure of either
+check MUST occur before network or staging side effects. An exact
+already-published identity remains idempotently usable. Preparation separately
+requires checked physical free space satisfying `available_capacity_bytes >=
+2 * estimated_bytes + 1073741824` before transfer and again before publication,
+measured from the bound root volume as stated above. Failure or overflow refuses
+before the corresponding side effect. No budget failure authorizes deletion.
 
 The exhaustive v2 preparation classification is:
 
+Every preparation branch below requires the bound primary artifact to be
+`mlx_safetensors` with SPEC-023 `verification_status: "verified"` in the
+current signed artifact feed. `declared`, `blocked`, absent, signature-invalid,
+or feed-drifted artifacts MUST make Prepare unavailable at projection and MUST
+be rechecked at dispatch before network or staging access and immediately
+before publication. The bound guidance/admission source and its freshness MUST
+also be revalidated immediately before publication; drift preserves incumbent
+serving and leaves no published object. A signed binding by itself is
+insufficient.
+
 | Admission source/state | Economics state | Preparation authority and presentation |
 |---|---|---|
-| `local_default` with `local_only`, `not_offered`, or `offerable` | `fallback`, `stale`, `blocked`, or `unavailable` | Locally motivated `prepare_model` MAY be available only when the signed primary `mlx_safetensors` artifact binding is current, `fit: fits`, `runtime_state: needs_preparation`, `action_model_id` is non-null, exact `estimated_bytes` is positive and at most 1 TiB, and no non-economic safety/storage block applies. Hide rates, payouts, provider share, and demand motivation; preserve the authoritative earning verdict and admission disclosure. |
+| `local_default` with `local_only`, `not_offered`, or `offerable` | `fallback`, `stale`, `blocked`, or `unavailable` | Locally motivated `prepare_model` MAY be available only when the verified signed primary `mlx_safetensors` artifact binding is current, `fit: fits`, `runtime_state: needs_preparation`, `action_model_id` is non-null, exact `estimated_bytes` is positive and at most 1 TiB, and no non-economic safety/storage block applies. Hide rates, payouts, provider share, and demand motivation; preserve the authoritative earning verdict and admission disclosure. |
 | `local_default` with any state | `trusted` | Invalid projection combination. Hide economics and disable Prepare with generic unsupported/action-unavailable copy. |
-| `coordinator` with `offer_submitted`, `offer_rejected`, `sandbox_probe_only`, `network_visible_unpriced`, `network_admitted_unsettled`, `withdrawn`, or `revoked` | `fallback`, `stale`, `blocked`, or `unavailable` | The same locally motivated eligibility and copy MAY apply. Hide rates, payouts, provider share, and demand motivation; preserve the wire earning verdict and admission disclosure. |
+| `coordinator` with `not_offered`, `offer_submitted`, `offer_rejected`, `sandbox_probe_only`, `network_visible_unpriced`, `network_admitted_unsettled`, `withdrawn`, or `revoked` | `fallback`, `stale`, `blocked`, or `unavailable` | The same locally motivated eligibility and copy MAY apply. Hide rates, payouts, provider share, and demand motivation; preserve the wire earning verdict and admission disclosure. |
 | Those non-priced coordinator states | `trusted` | Invalid because `catalog_economics_permitted` is false. Hide economics and disable Prepare with generic unsupported/action-unavailable copy. |
 | `coordinator` with `catalog_priced` or `settlement_capable`, with `catalog_economics_permitted: true` | `trusted` | Trusted-economics `prepare_model` MAY be available when the same artifact, fit, runtime, target, size, and safety/storage prerequisites pass. Trusted rates may be shown under R004; earning/settlement copy still follows the admission state. |
 | `coordinator` with `catalog_priced` or `settlement_capable` | `fallback`, `stale`, `blocked`, or `unavailable` | Only the locally motivated classification MAY be available under the same prerequisites. Hide or neutralize rates, payouts, provider share, and demand for the action. |
@@ -224,7 +354,15 @@ The existing `model_catalog_transaction_event.v1` schema and seven states are
 retained. Each line is capped at 16384 bytes. Only the attached worker emits
 events and allocates a strictly increasing per-transaction `event_sequence`;
 every event MUST match the invoked `transaction_id`, projected
-`transaction_kind`, and `model_key`. The
+`transaction_kind`, and `model_key`. The `transaction_id` is a canonical
+lowercase hyphenated UUID v4 generated fresh when the CLI builds an available
+projected action from at least 122 bits of CSPRNG entropy. At invocation the
+worker generates a distinct canonical lowercase hyphenated UUID v4 `attempt_id`
+from the same minimum entropy source; it records that ID in bounded durable
+active, history, and marker state but does not add it to the retained v1 event
+envelope. Parsers MUST require the exact 36-byte UUID grammar before either
+identifier can select or name durable state, and MUST treat both identifiers as
+opaque equality keys. The
 cancel process emits none. Exactly one terminal state is allowed. The closed
 event `error_code` values are `action_unavailable`, `stale_transaction`,
 `operation_conflict`, `authority_unavailable`, `artifact_unqualified`,
@@ -246,29 +384,149 @@ this precedence: malformed/stale action; operation conflict; authority or root
 identity; filesystem/resource bounds; storage budget/inventory; transfer;
 verification; publication or cleanup; cancellation; timeout; internal error.
 
-Cancellation uses the exact SPEC-001 §6.14b `--cancel` form and returns one
-JSON object capped at 4096 bytes with exactly `schema`, `transaction_id`,
-nullable `attempt_id`, `outcome`, and `observed_at`. `schema` is
+Cancellation uses the exact SPEC-001-R003 `--cancel` form and returns one JSON
+object capped at 4096 bytes with exactly `schema`, `transaction_id`, nullable
+`attempt_id`, `outcome`, and `observed_at`. `schema` is
 `model_catalog_transaction_cancel_ack.v1`; `observed_at` is RFC3339; and the
 closed outcomes are `recorded`, `already_recorded`, `terminal`, `not_active`,
-and `stale`. `attempt_id` MUST be non-null for `recorded`, `already_recorded`,
-or `terminal`, and MAY be null only for `not_active` or `stale`. `recorded`
-means only that an exact-attempt cancellation marker is durable; it is not a
-worker-observation, cancellation-success, or terminal claim.
+and `stale`. `transaction_id` MUST byte-for-byte echo the validated requested
+ID. `attempt_id` MUST be the matching opaque durable attempt ID for `recorded`,
+`already_recorded`, or `terminal`; it MUST be null for `not_active`; for
+`stale` it is the recognized prior or mismatched attempt ID when one can be
+read safely and otherwise null. `recorded` means only that an exact-attempt
+cancellation marker is durable; it is not a worker-observation,
+cancellation-success, or terminal claim.
+
+While holding `cancel.lock`, the cancel process MUST validate bounded active,
+terminal-history, projected-transaction, and marker records and choose the
+first matching predicate in this total precedence:
+
+1. `terminal`: the requested transaction has a durable matching attempt whose
+   terminal state was committed, regardless of a leftover exact marker;
+2. `already_recorded`: the requested transaction is the durable current
+   nonterminal attempt and an exact marker for its transaction and attempt is
+   already durable;
+3. `recorded`: the requested transaction is the durable current nonterminal
+   attempt without its exact marker; the cancel process removes only a
+   validated marker bound to an older attempt, durably creates and
+   readback-validates the current exact marker, and then acknowledges;
+4. `stale`: validated bounded state proves that the requested transaction
+   existed but is no longer the cancellable current attempt, including a
+   different current attempt or a mismatched prior-attempt marker; and
+5. `not_active`: no active, terminal, projected, or bounded-history record
+   recognizes the requested transaction and no marker names it.
+
+A malformed record fails the cancel command closed with exit 5 and no
+acknowledgement rather than being classified as `not_active`. Concurrent
+terminal compaction cannot change the result within this decision because the
+worker holds `cancel.lock` across its durable terminal commit, exact-marker
+sweep, and operation-lock release.
 
 The cancel process serializes marker mutation with a bounded cancel lock. The
 worker checks the marker at least every 250 ms and in each bounded work loop.
-If cancellation wins before publication, the worker emits `cancel_requested`
-once and then terminal `cancelled` after cleanup. After durable publication it
-emits only `succeeded` or `failed`. For terminal compaction the worker holds the
-operation lock, takes the cancel lock, durably commits terminal state, removes
-only the exact matching marker, releases the operation lock while retaining the
-cancel lock, and then releases the cancel lock. A new worker takes locks in the
-same operation-then-cancel order and removes only a stale prior-attempt marker
-before persisting its new attempt. Thus a late marker cannot cross terminal or
-new-attempt boundaries. The acknowledgement carries no event sequence or
-terminal-success assertion; Malibu continues the worker stream and refreshes
-the projection for authoritative state.
+If cancellation wins before the applicable commit point, the worker emits
+`cancel_requested` once and then terminal `cancelled` after cleanup. After the
+commit point it emits only `succeeded` or `failed`. For terminal compaction the
+worker holds the operation lock, takes the cancel lock, durably commits terminal
+state, removes only the exact matching marker, releases the operation lock
+while retaining the cancel lock, and then releases the cancel lock. A new
+worker takes locks in the same operation-then-cancel order and removes only a
+stale prior-attempt marker before persisting its new attempt. Thus a late marker
+cannot cross terminal or new-attempt boundaries. The acknowledgement carries
+no event sequence or terminal-success assertion; Malibu continues the worker
+stream and refreshes the projection for authoritative state.
+
+For preparation and other non-cleanup transactions, the publication commit
+point is the durable exclusive object rename plus destination-parent full-sync.
+A marker observed before that point wins: the worker emits
+`cancel_requested`, restores or removes only attempt-owned unpublished state,
+then emits terminal `cancelled`. At or after that point cancellation is too
+late and the worker emits only terminal `succeeded` or `failed`.
+
+Published cleanup uses durable phases `intent`, `tombstoned`, and `removed`.
+Under the fixed operation/cleanup locks, the worker first persists and
+full-syncs `intent` with the exact transaction, tuple, receipt, saved root
+identity, final leaf, reserved same-parent tombstone leaf, and expected byte and
+file totals. It recomputes the keep set before rename and clears the intent if
+the target became protected. Its commit point is the exclusive
+final-to-tombstone rename followed by successful `fsync` and `F_FULLFSYNC` of
+the shared `objects` parent. Immediately before rename, the worker takes
+`cancel.lock` while retaining the operation/cleanup locks, performs the final
+exact-marker check, and retains `cancel.lock` through the rename, parent
+barrier, and durable readback-validated `tombstoned` phase update. Only after
+that parent barrier may the worker persist and full-sync `tombstoned`, and it
+MUST do so before releasing `cancel.lock`. It then descriptor-validates and removes
+only the recorded tombstone contents and leaf, fully syncs the parent, persists
+`removed`, clears the record, and refreshes inventory.
+
+Before the published-cleanup commit barrier, cancellation wins. If no rename
+occurred, the worker durably clears `intent`; if rename occurred but the parent
+barrier did not commit, it renames the descriptor-validated tombstone back to
+the exact final leaf, fully syncs the parent, and durably clears `intent`. It
+then emits `cancel_requested` and terminal `cancelled`. At or after the parent
+barrier, cancellation cannot produce `cancelled`: the worker or recovery MUST
+advance through `tombstoned` and `removed`, complete exact deletion and emit
+`succeeded`, or retain recoverable state and fail with `cleanup_failed`.
+
+Published-cleanup recovery never scans or guesses and uses only the recorded
+tuple, saved root, final, and tombstone identity. With `intent`, final present
+and tombstone absent means recheck the keep set and then resume rename or clear
+intent; final absent and tombstone present means consult the exact-attempt
+durable cancellation marker, restoring and fully syncing the final for a
+matching pre-commit marker, or repeating the parent barrier and advancing to
+`tombstoned` for an absent or nonmatching marker. Both present or both absent
+fails closed. With `tombstoned`, tombstone present resumes exact deletion;
+tombstone absent and final absent repeats the parent barrier and advances to
+`removed`; final present fails closed. With `removed`, both absent permits
+record clear and any target present fails closed. Recovery MUST NOT report
+`cancelled` after the durable tombstone barrier.
+
+The cancel process performs cleanup-record recovery while holding
+`cancel.lock`, before creating a new marker. For `intent` with final absent and
+tombstone present, an already-durable exact-attempt marker proves cancellation
+won the worker's final check and requires restoration. If no exact marker is
+already durable, the cancel process repeats the parent `fsync` and
+`F_FULLFSYNC`, durably advances the record to `tombstoned`, and only then may it
+record the new exact marker; that marker is necessarily post-commit and cannot
+authorize restoration. A malformed or unsafe record fails the cancel command
+closed. Because the worker holds `cancel.lock` from its final marker check
+through the durable `tombstoned` update, and the cancel process resolves this
+recovery state before marker creation, every crash leaves recoverable evidence
+of whether cancellation preceded or followed the cleanup commit barrier.
+
+Staging cleanup is separate and uses an attempt-owned recorded target plus the
+same reversible `intent` to same-parent tombstone to `removed` discipline
+inside the attempt's staging parent. Its commit point is the exclusive
+staging-to-tombstone rename followed by successful parent `fsync` and
+`F_FULLFSYNC`. It uses the same final marker check and holds `cancel.lock`
+through the rename, parent barrier, and durable readback-validated
+`tombstoned` update. Its cancel process likewise resolves `intent` plus only a
+tombstone under that lock before creating a new marker, so only an
+already-durable exact marker authorizes pre-commit restoration. Before the
+commit barrier cancellation preserves or restores the staging root, retains
+`staging_cleanup_required`, and terminates `cancelled`; after it, cleanup or
+recovery removes only the recorded tombstone and terminates `succeeded` or
+recoverable `cleanup_failed`, never `cancelled`. A retry resumes the durable
+phase for the same identity and MUST NOT create a second tombstone, delete
+published or legacy data, or turn incomplete recovery into success.
+
+The supported cancellation-latency profile uses a monotonic start at completion
+of the exact cancellation marker's parent full-sync, worker observation at its
+validated marker read, transport cancellation at entry to
+`URLSessionTask.cancel()`, and completion when terminal `cancelled` JSONL is
+flushed. It applies only to a scheduled worker on supported Apple Silicon with
+a local APFS authority/staging volume, in metadata or stalled-transfer phase,
+with no publication or tombstone, at most 8 MiB across at most 16 staging files,
+no injected syscall fault, every required sync completing within 250 ms, and no
+harness-induced scheduler suspension. Under that profile marker observation
+and entry to `URLSessionTask.cancel()` MUST occur within 250 ms plus a declared
+50 ms measurement tolerance, and terminal `cancelled` MUST be flushed within
+2.000 seconds of the start. Outside that profile only the 250 ms watchdog and
+bounded-loop checks, heartbeat, action timeout, and truthful delayed-response
+behavior are normative; the worker MUST never emit terminal state before
+durable cleanup to meet timing. Tests MUST use an injected monotonic clock and
+measure the marker barrier, validated observation, cancellation call, and
+terminal flush separately.
 
 **SPEC-044-R004 - Rate math display contract.** Malibu MUST display network catalog rates as rates, not income. Provider payout rates MUST be displayed in USD per 1,000,000 tokens, matching the schema field unit, with at least two significant figures and labels that distinguish prompt and completion rates when both are shown. When showing provider economics, Malibu MUST label them as provider share of catalog rates and MUST disclose that actual rewards depend on eligible demand, uptime, accepted requests, trust state, routing, token mix, settlement, and any active sanctions or probation. That variability disclosure MUST be persistently visible within the same scrollable container as rate-bearing rows, MUST NOT require hover, expansion, navigation, or a separate tooltip to be discovered, and MUST meet the same localization and screen-reader accessibility requirements as the rate labels themselves. Malibu MUST NOT display or imply a specific dollar amount attributed to a time period, including hourly, daily, weekly, monthly, annual, or "up to" projections. The UI MUST NOT show copy such as "earns", "guaranteed", "daily revenue", "hourly pay", "will pay", "potential earnings", "estimated daily", "up to $X/day", "average payout", "projected return", "higher-paying", or any absolute payout projection unless a later billing-owner spec defines a verified earnings forecast contract.
 
@@ -296,12 +554,13 @@ v2 digest and keep-set rules and cannot target staging or legacy bytes.
 Progress, cancellation, and terminal events for both come only from the
 attached worker.
 
-**SPEC-044-R008 - UX layout and state model.** Malibu MUST present model rows in stable sections that distinguish `Current`, `Ready`, `Network catalog`, `Needs preparation`, and `Blocked` states. Section headers MUST be localized display copy that follows R004/R009 and MUST NOT be rendered directly from enum names. Each row MUST show at least display name, fit state, approximate size when known, local readiness, provider completion payout rate when trusted, network demand signal label when trusted, and one primary action or disabled reason. Rows whose economics are not `trusted` MUST NOT appear in `Network catalog` based on stale, fallback, blocked, or unavailable rates; they MUST appear in `Needs preparation` when only local preparation blocks a non-money action, otherwise in `Blocked` or an equivalent warning subsection that may still contain explicitly read-only actions such as `Evaluate`. Rows with `fit: unknown` MUST NOT appear in `Network catalog` with an action available unless the confirmation dialog prominently states that hardware fit is unknown and the action is a read-only evaluation or preparation path that the CLI can reverse without changing the current serving model. Malibu MUST prefer v2 only when both its exact capability and command token are present; otherwise it MAY consume a negotiated v1 read projection. If neither supported projection capability is advertised, the view MUST degrade to the existing static current-model card with no error indicator. If the CLI advertises a supported capability but the projection request fails, times out, or returns a malformed envelope, Malibu MUST show the static current-model card with a distinct "model catalog unavailable" warning, warning code `projection_unavailable`, and a retry affordance.
+**SPEC-044-R008 - UX layout and state model.** Malibu MUST present model rows in stable sections that distinguish `Current`, `Ready`, `Network catalog`, `Needs preparation`, and `Blocked` states. Section headers MUST be localized display copy that follows R004/R009 and MUST NOT be rendered directly from enum names. Each row MUST show at least display name, fit state, approximate size when known, local readiness, provider completion payout rate when trusted, network demand signal label when trusted, and one primary action or disabled reason. Rows whose economics are not `trusted` MUST NOT appear in `Network catalog` based on stale, fallback, blocked, or unavailable rates; they MUST appear in `Needs preparation` when only local preparation blocks a non-money action, otherwise in `Blocked` or an equivalent warning subsection that may still contain explicitly read-only actions such as `Evaluate`. Rows with `fit: unknown` MUST NOT appear in `Network catalog` with an action available unless the confirmation dialog prominently states that hardware fit is unknown and the action is a read-only evaluation or preparation path that the CLI can reverse without changing the current serving model. Malibu MUST select v2, v1, or static fallback by the complete exclusive advertisement matrix in R001. If neither complete supported pair is advertised, or advertisement is partial or dual-generation, the view MUST degrade to the existing static current-model card with no catalog-economics call and no error indicator. If the CLI advertises one complete supported pair but the projection request fails, times out, or returns a malformed envelope, Malibu MUST show the static current-model card with a distinct "model catalog unavailable" warning, warning code `projection_unavailable`, and a retry affordance.
 
 For v2, a valid locally motivated preparation row belongs in `Needs
 preparation`; it MUST NOT be placed in `Network catalog` from local custody
-or non-trusted economics. Absence of either exact v2 capability or command
-token uses the v1 or legacy fallback without attempting v2 actions.
+or non-trusted economics. Absence of either exact v2 value permits v1 only when
+the complete v1 pair is exclusively advertised; otherwise Malibu uses the
+legacy fallback without attempting a catalog-economics call or v2 action.
 
 **SPEC-044-R009 - Trust-preserving copy and localization.** All new Malibu strings for rates, potential, warnings, actions, and disabled reasons MUST be app-localizable, screen-reader accessible, and written as operator guidance rather than marketing. Warning copy MUST clearly distinguish "network catalog rate unavailable" from "model cannot be served" from "model needs preparation". Localization tests MUST cover the forbidden earnings-claim meanings from R004 in every shipped locale, not only the English source strings. Every shipped locale with right-to-left layout support MUST verify that row ordering, numeric rate labels, section grouping, and action buttons remain readable and navigable; if Malibu ships no right-to-left locale for this release, the release evidence MUST state that RTL is out of scope.
 
@@ -326,20 +585,83 @@ require a fresh projection before Malibu represents current artifact state.
 
 **SPEC-044-R012 - Release evidence.** A Malibu release that enables this experience by default MUST include automated tests for the CLI projection schema, feed trust/fallback/staleness priority states, row warning-code attribution, rate math normalization and display units, browse-row non-actionability, immediate and deferred switch gating, Swift decoding, UI grouping, projection-failed fallback, CLI restart sequencing, disabled-action copy, progress rendering, localization/accessibility coverage including any shipped RTL locale, staging cleanup/reporting, and post-action reconciliation. Production promotion MUST additionally capture signed release evidence, using the repository journey-result signing format governed by `requires_signed_journey_result`, that an old CLI receives the static fallback UI and a compatible CLI renders trusted rates without exposing secrets or unsupported actions.
 
-For v2 the R012 evidence also MUST cover exact read/run/cancel grammar and
-exit status, v1 fallback, strict v2 decoding, every preparation-matrix branch,
-exact and localized action copy, event code/state closure, worker-only
-sequencing, all cancellation-ack outcomes and races, storage nullability and
-bounds, 255/256/idempotent/257 object admission, managed-budget/free-space
-refusal, legacy accounting/protection, digest-bound published cleanup, and the
+For v2 the R012 evidence also MUST cover exact read/run/cancel grammar and exit
+status, exclusive v1/v2 advertisement, strict v2 decoding, every
+preparation-matrix branch, exact and localized action copy, event code/state
+closure, worker-only sequencing, all cancellation-ack outcomes and races,
+storage nullability and bounds, 255/256/idempotent/257 object admission,
+managed-budget/free-space refusal, legacy accounting/protection, digest-bound
+published cleanup, bounded complete cleanup-target reachability, and the
 absence of automatic garbage collection.
+
+The release test corpus MUST additionally prove all of the following exact
+boundaries:
+
+- launch the built CLI and route its exact stdout, stderr, and exit status
+  through Malibu's production process adapter and strict decoder for v1 and v2
+  reads, every terminal run outcome, all five cancellation acknowledgements,
+  partial/chunked JSONL, malformed-v2 negatives, old-Malibu/new-v2-CLI static
+  fallback, and new-Malibu/old-v1-CLI read-only fallback;
+- reject unknown or mismatched `candidate_id`, guidance-source fields/digest,
+  owner-spec guidance fields/enums, admission correlation, coordinator event,
+  state timestamp, future source time, and the 300-second freshness boundary;
+  exercise every matrix branch with verbatim SPEC-046/SPEC-047 guidance and
+  prove guidance renders first;
+- exercise `local_default:not_offered`, `coordinator:not_offered`, and both
+  source-transition directions under every economics class; test primary
+  artifact status `verified`, `declared`, `blocked`, absent, and each signed-feed
+  drift boundary, proving only current `verified` is eligible at projection and
+  dispatch and remains eligible at the immediate prepublication recheck;
+- table-test the total cancellation-ack predicate precedence under concurrent
+  active, terminal, projected, history, exact-marker, mismatched-marker, and
+  new-attempt states, including transaction echo and exact attempt nullability;
+  race cancel, crash, recovery, and retry before/after every preparation,
+  published-cleanup, and staging-cleanup commit phase, including marker creation
+  after the parent barrier but before an attempted `tombstoned` phase write;
+- inject volume capacities immediately below, at, and above the default
+  1-TiB/70-percent crossover and non-divisible capacities; test checked
+  overflow; YAML-only, environment-only, and both-source precedence; reject
+  zero, negative, non-integer, and greater-than-1-TiB overrides; assert
+  `managed_budget_source`; and test physical free space one byte below, exactly
+  at, and one byte above `2 * estimated_bytes + 1073741824`;
+- exercise descriptor-relative logical accounting for regular files,
+  directories, receipts, metadata, hard links, symlinks, sparse files, special
+  files, APFS clones/compression, cross-device configured legacy, every checked
+  sum boundary, and physical-free-space divergence. Prove root nonce entropy,
+  exact digest construction, descriptor revalidation, copied-record rejection,
+  and that projected digests reveal no path/device/inode/identity value. When configured-legacy
+  accounting is unavailable, assert Prepare is unavailable, stale direct
+  dispatch refuses before network/staging, published cleanup is unavailable,
+  affected fields have the required nullability, and incumbent serving is
+  unchanged;
+- prove `cleanup_targets` contains every verified managed object exactly once
+  in digest order at 0, 1, 255, and 256 objects; prove protected targets are
+  disabled, every reclaimable orphan without a current catalog row remains
+  reachable, row/target duplicates are identical and de-duplicated, and
+  malformed/257-entry inventories fail closed; and
+- property-test size formatting at 1 byte, 99,999,999 bytes, every exact
+  100,000,000-byte boundary and boundary plus one through 1 TiB, across locales
+  including non-Latin digits. The displayed preparation size MUST never
+  understate `estimated_bytes`, and cleanup action `estimated_bytes` MUST equal
+  the descriptor-measured logical bytes. Exercise the frozen cancellation
+  profile on supported Apple Silicon and local APFS in metadata and
+  stalled-transfer phases, with its exact file/byte, sync, fault, and scheduler
+  predicates; assert observation and cancel-call entry within 300 ms (the
+  250-ms contract plus exactly 50 ms measurement tolerance) and terminal flush
+  within 2.000 seconds. Exercise flowing transfer, verification, copy,
+  publish-ready, large cleanup, scheduler starvation, injected faults, and slow
+  barriers only under the functional watchdog/loop, heartbeat, action-timeout,
+  delayed-response, and no-premature-terminal requirements. Table-test
+  simultaneous failures across
+  every adjacent event-error precedence class and assert the exact error code,
+  terminal state, exit status, and unchanged side-effect boundary.
 
 ## 4. Implementation, tests, and journeys
 
 The intended implementation is a CLI-first projection, then an app-only presentation layer:
 
-1. Preserve the exact SPEC-001 §6.14b read/run/cancel forms under `models catalog-economics`; do not add aliases or a transaction-status command.
-2. Advertise `model_catalog_economics_v2` and `models catalog-economics.v2` in the same capability surfaces Malibu already uses for model management.
+1. Preserve the exact SPEC-001-R003 read/run/cancel forms under `models catalog-economics`; do not add aliases or a transaction-status command.
+2. Advertise only `model_catalog_economics_v2` and `models catalog-economics.v2` in the capability surfaces Malibu already uses for model management, omitting both v1 values.
 3. Extend Malibu model management decoding with a new envelope while keeping the current `models_list.v1` and browse behavior as fallback paths.
 4. Replace the static switcher modal with a sectioned catalog view that supports current, ready, network-catalog, preparation-required, and blocked rows.
 5. Wire only CLI-owned typed transactions into action buttons; all other rows are informational.
@@ -351,13 +673,13 @@ The first journey id is `JOURNEY-MALIBU-MODEL-ECONOMICS`. The journey should cov
 
 | Requirement/domain | Verdict | Owner | Issue | Evidence needed |
 |---|---|---|---|---|
-| `SPEC-044-R001..R012` | `DECISION_REQUIRED` | `@Augustas11` | `#614` | Implement the approved v0.2.0 projection, transaction, cancellation, preparation-copy, cleanup, and accounting authority; then decide promotion only after automated tests and signed release evidence. |
+| `SPEC-044-R001..R012` | `DECISION_REQUIRED` | `@Augustas11` | `#614` | Implement the approved v0.2.1 projection, transaction, cancellation, preparation-copy, cleanup, and accounting authority; then decide promotion only after automated tests and signed release evidence. |
 | `malibu-model-economics-ux` | `DECISION_REQUIRED` | `@Augustas11` | `#614` | Implement the operator-approved CLI-owned projection and Malibu rendering without app-side feed verification; production enablement remains an operator decision. |
 | `SPEC-046/SPEC-047 integration` | `DECISION_REQUIRED` | `@Augustas11` | `#1240` | Approval that SPEC-044 is narrowed to network economics and does not own provider-local BYOM discovery or network admission. |
 
 ## 6. Evidence
 
-Current implementation evidence predates the v0.2.0 Build 1 authority and is
+Current implementation evidence predates the v0.2.1 Build 1 authority and is
 partial and non-conformant:
 
 - `phase3-binary/app/Sources/Malibu/ModelManagement/ModelManagement.swift` already capability-gates model management and classifies current, ready, preparation-required, and blocked rows, but its row schema does not carry rate-card economics.
@@ -394,3 +716,9 @@ The app should preserve the current provider mental model: Malibu observes and a
   exhaustive local/trusted preparation matrix and copy, worker-only event and
   cancellation acknowledgement contracts, and distinct provider-confirmed
   published-artifact cleanup. Conformance remains pending.
+- 0.2.1 - Corrects the Build 1 authority gate: exclusive v1/v2 advertisement;
+  exact SPEC-046/047 guidance correlation and freshness; coordinator
+  `not_offered`; verified-artifact eligibility; total cancel acknowledgement
+  precedence; cleanup commit/recovery rules; descriptor-relative logical byte
+  accounting and truthful copy; complete bounded cleanup targets; and exact
+  release-test boundaries. Conformance remains pending.
