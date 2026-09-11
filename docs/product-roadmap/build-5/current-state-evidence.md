@@ -2,7 +2,7 @@
 
 Date: 2026-09-11
 
-Evidence revision: `build5-evidence-r5`
+Evidence revision: `build5-evidence-r6`
 
 Repository source base: `1d2c930bad81704dd0acc0322226725d8b64aceb`
 
@@ -120,19 +120,33 @@ directory selection or caller assertion may grant tuple authority.
 
 ## Assessment review state
 
-The independent R4 GPT-5.6 Sol review reported 0 Critical, 2 High, 3 Medium,
-and 0 Low findings. It did not dispute the merged-source classification or the
-exploratory 3B result. It rejected R4 as a promotion plan because first-run
-memory admission depended on the calibration result it sought to measure;
-accepted backlog and logical fencing did not prove the mode-wait bound; the
-runtime/campaign/dynamic loader closure and backing-object custody were
-incomplete; cancellation and slow-consumer triggers were nondeterministic; and
-request-level resampling ignored start/batch correlation. R5 corrects those
-planning contracts only. No additional inference or implementation test was
-run because this revision changes documentation and does not alter the
-historical source or raw exploratory evidence. R5 remains unapproved until a
-fresh independent GPT-5.6 Sol review reports zero Critical, High, and Medium
-findings against the exact committed digests.
+The independent R5 GPT-5.6 Sol review reported 0 Critical, 3 High, 3 Medium,
+and 0 Low findings. It did not dispute the merged-source classification, the
+73-test deterministic result, or the exploratory 3B MLX result. It rejected R5
+because Darwin `RLIMIT_AS` was incorrectly treated as a synchronous CPU/Metal
+hard cap; supervisor loss depended on impossible post-parent `waitpid` proof;
+the preload arithmetic omitted simultaneous source/expanded/temporary
+lifetimes; fixed-rate arrivals did not guarantee accepted boundary samples;
+cluster-aware intervals did not govern most promotion decisions; and the dyld
+closure assumed a pre-runtime callback that the proposed Swift worker did not
+provide.
+
+R6 changes planning contracts only. It explicitly leaves promotable target-shaped
+calibration and capacity promotion blocked on Darwin until an independently
+reviewed synchronous CPU/forced-Metal cap exists, while retaining a-priori
+ledgers and measured asynchronous containment as separate defenses. It defines
+a launchd job/process-group supervisor-loss path with unconditional durable
+boot-scoped orphaning; one maximum-live ledger
+across stored, expanded, temporary, KV, and output allocations; deterministic
+open-loop and closed-loop boundary count oracles; confidence-bound decisions
+for every distributional threshold; and a minimal Apple-only audit launcher
+whose protected pre-runtime ordering must be implemented and proved before
+qualification.
+
+No new inference, runtime, hardware, or implementation test was
+run for this documentation-only revision. R6 remains unapproved until a fresh
+independent GPT-5.6 Sol review of its exact committed digests reports zero
+Critical, High, and Medium findings.
 
 ## Sanitized host and artifact inventory
 

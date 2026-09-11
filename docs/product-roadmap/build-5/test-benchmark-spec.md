@@ -2,7 +2,7 @@
 
 Date: 2026-09-11
 
-Specification revision: `build5-benchmark-r5`
+Specification revision: `build5-benchmark-r6`
 
 Repository source base: `1d2c930bad81704dd0acc0322226725d8b64aceb`
 
@@ -108,24 +108,34 @@ Rules:
    output is emitted.
    Crossing a forward, request, or cancellation deadline marks the generation
    `failed`, revokes logical lease authority, and starts a 10-second process-
-   fence deadline. R5 chooses a separate inference-worker process: the provider
+   fence deadline. R6 chooses a separate inference-worker process: the provider
    controller owns admission, durable request dispositions, receipts, and the
    generation record; the worker exclusively owns the loaded MLX model, Metal
-   context, scheduler, paged pool, and execution leases. A launchd-owned
-   `InferenceWorkerSupervisor`, separate from both, owns the worker PID/process
-   group and is the only lifecycle authority. Versioned bounded local IPC
-   carries request IDs, frozen served-snapshot identity, token frames,
-   cancellation, terminal outcome, and quiescence acknowledgements. On a fence,
-   the controller closes admission and asks the supervisor to terminate; the
-   supervisor sends graceful termination, SIGKILL by ten seconds, and waits for
-   `waitpid` before acknowledging exit. On controller EOF/crash it performs the
-   same fence and writes a generation-failed marker; the relaunched controller
-   reconciles unresolved accepted IDs from its durable request log before any
-   new generation. Only observed worker exit plus complete durable dispositions
-   permits replacement or publication. Supervisor loss, worker EOF, IPC
-   corruption, or an unmatched generation token fails closed. The worker never
-   self-publishes readiness, its sandbox forbids spawning descendants, and the
-   provider never reuses its in-process model
+   context, scheduler, paged pool, and execution leases. A launchd job owns an
+   `InferenceWorkerSupervisor` and its direct worker child in one process group;
+   the frozen profile sets `AbandonProcessGroup=false`, the worker sandbox
+   forbids `fork`, `posix_spawn`, `exec`, and `setsid`, and the supervisor records
+   boot UUID, launchd label, job-instance nonce, process-group ID, PID, process
+   start time, audit token, and generation token before admission. Versioned
+   bounded local IPC carries request IDs, frozen served-snapshot identity, token
+   frames, cancellation, terminal outcome, and quiescence acknowledgements.
+
+   On the normal fence, the controller closes admission and asks the supervisor
+   to terminate; the supervisor sends graceful termination, SIGKILL by ten
+   seconds, obtains child `waitpid` exit, and durably acknowledges the matching
+   generation. On controller EOF/crash the live supervisor performs that same
+   child fence and writes a generation-failed marker. On supervisor EOF/crash,
+   the controller detects EOF within 250 ms, atomically closes admission, marks
+   every unresolved accepted ID `generation_orphaned` within five seconds, and
+   asks launchd to stop the exact job. Parent `waitpid` is not claimed on this
+   path. Launchd job-instance termination and kernel empty-process-group
+   observations are retained, but neither grants same-boot recovery authority.
+   Supervisor loss unconditionally creates a durable orphan fence that forbids
+   worker restart, lease reuse, and generation publication until the boot UUID
+   changes. A relaunched controller reads the fence before contacting launchd
+   and follows the same order. The claim is therefore bounded detection and fail-
+   closed orphaning, not impossible post-parent `waitpid` evidence. Worker escape,
+   late IPC, unmatched identity, or launchd-profile drift retains the orphan
    state. This three-process boundary requires a reviewed normative contract
    and protected-package identity before implementation.
 8. Assigning an opposite-mode enqueue sequence atomically closes current-mode
@@ -154,23 +164,30 @@ Rules:
 
 Required structural and deterministic tests prove no overlap with instrumented
 serial and batch forwards, including unsupported mixed ingress, cancellation,
-pre-output recovery, scheduler failure, warm swap, drain timeout, and executor
-that ignores cancellation temporarily. A real-runtime mixed-ingress cell logs
-`serial_forward_active * batch_forward_active == 0` at every 100 ms sample and
-fails on any violation. Separate watchdog fixtures exceed the 120-second
-forward, 900-second request execution, 250 ms queued-cancel and admission-
-preemption, 5-second active-cancel,
+pre-output recovery, scheduler failure, warm swap, drain timeout, and an
+executor that ignores cancellation temporarily. A real-runtime mixed-ingress
+cell logs `serial_forward_active * batch_forward_active == 0` at every 100 ms
+sample and fails on any violation. Separate watchdog fixtures exceed the 120-
+second forward, 900-second request execution, 250 ms queued-cancel/admission-
+preemption/supervisor-EOF detection, 5-second active-cancel/orphan-disposition,
 1-second quiescent handoff, 30-second quiescent-drain, 900-second waiter
-disposition, and 915-second old-accepted-work reconciliation
-bounds using a virtual monotonic clock. They prove terminal reason codes, no
-lease reuse, no late output, no publication of a replacement generation, and
-actual worker PID exit observed by `waitpid`, complete durable terminal
-dispositions, and no worker or lease reuse. A fence-callback observation alone
-fails. Queue-depth fixtures cover `2 * slots_total` at Entry 110 depths one
-through four, simultaneous old-mode grants, migrated accepted-queued entries,
-and controller restart during fencing. A real-runtime test exercises the same
-failure path with shortened preregistered test-only deadlines, a real child
-process, and observed process exit; it cannot qualify the production values.
+disposition, and 915-second old-accepted-work reconciliation bounds using a
+virtual monotonic clock.
+
+Normal-path real-process fixtures prove matching-generation child `waitpid`
+exit. Supervisor-loss fixtures crash the real parent at each worker lifecycle
+phase and prove exact launchd profile/process-group membership, no descendant or
+session escape, controller EOF detection, durable `generation_orphaned`
+outcomes, exact-job stop attempts, empty-group observation, PID-reuse rejection,
+restart order, and no same-boot reuse/publication. A second fixture withholds
+launchd or group-empty observation and proves the same durable fence survives
+both controller and supervisor restart until a simulated boot-UUID change. A
+real-runtime test exercises both
+paths with shortened preregistered test-only deadlines. A fence callback or a
+new supervisor attempting `waitpid` on the orphan is a failed test. Queue-depth
+fixtures cover `2 * slots_total` at Entry 110 depths one through four,
+simultaneous old-mode grants, migrated accepted-queued entries, and controller
+restart during fencing. These tests cannot qualify production deadline values.
 
 ## Correctness gates
 
@@ -188,7 +205,7 @@ Every applicable gate is mandatory for the exact tuple.
 | C8 recovery | Whole-batch failure drains deterministically. Only an invisible, idempotent, snapshot-bound request may retry serial; visible output can never be stitched. |
 | C9 compatibility | Flag-off API, streaming, receipt, billing, SPEC-024, SPEC-028, SPEC-037, warm-swap, and generation behavior stays byte/semantics compatible. |
 | C10 release identity | Protected-toolchain final packages satisfy the full dual-artifact release gate below. |
-| C11 arbiter | The same resident generation never has a serial forward and shared forward active concurrently; terminating or fenced work obeys the 120 s forward, 900 s queue-inclusive request/waiter disposition, 250 ms admission-preemption/queued-cancel, 5 s active-cancel, 1 s post-quiescence handoff, 30 s quiescent drain, 10 s process fence, and 915 s old-accepted-work reconciliation bounds, with actual worker exit observed before reuse/publication. |
+| C11 arbiter | The same resident generation never has a serial forward and shared forward active concurrently. Normal fencing proves child `waitpid`; supervisor loss proves 250 ms detection and unconditional durable boot-scoped orphaning. No path reuses or publishes while worker exit is unproved. Other 120 s forward, 900 s queue-inclusive request/waiter disposition, 250 ms admission-preemption/queued-cancel, 5 s active-cancel, 1 s post-quiescence handoff, 30 s quiescent drain, 10 s process fence, and 915 s old-work reconciliation bounds remain mandatory. |
 | C12 MoE | For live MoE and deterministic MoE fixtures, candidate and serial paths produce identical greedy token IDs and terminal/accounting results for each row. No after-the-fact output tolerance is permitted. |
 
 Raw-logit comparisons are optional diagnostics. They do not replace C1 or C12.
@@ -209,20 +226,28 @@ logit bias/sticky reuse/quantized KV/speculative decode/model family/cache class
 and mixed HTTP/relay admission. Unsupported work must reason-code to the serial
 arbiter in permissive/canary mode or reject before output in strict mode.
 
-R5-specific fail-closed fixtures are mandatory: a missing static allocation
-site, overlapping-lifetime undercount, dtype expansion, malformed weight
-metadata, opaque plugin allocation, failed CPU/Metal cap probe, ramp hard-stop,
-and sampled-pressure race; queue depth `2 * slots_total` plus the token cap at
-every Entry 110 depth, older pre-admission rejection order, migrated accepted-
-queued disposition, active deadline overrun, controller loss, supervisor loss,
-PID reuse, late worker IPC, and restart reconciliation; added/deleted
-runtime/campaign files, transient `dlopen` then unload, external plugin/rpath,
-unmanifested metallib, source-compiled Metal library, writable backing
-descriptor, second attachment, and broker loss; early/short/coalesced client
-reads, missing queue watermark, prefill chunk coalescing, cancellation before
-or after its exact boundary; and a statistics fixture whose request-level CI
-passes while the hierarchical clean-start/batch-cluster CI fails. Each fixture
-must fail the relevant gate and retain its reason code.
+R6-specific fail-closed fixtures are mandatory: a missing preload or target
+allocation site, wrong overlap edge, source-plus-expanded coexistence,
+decompression/conversion scratch, tied-weight duplication, output staging,
+malformed metadata, opaque plugin allocation, and integer overflow; an
+`RLIMIT_AS` probe that appears to fail causally but cumulative forced-synchronous
+Metal allocations cross it; footprint-watcher overshoot and missing samples;
+queue depth `2 * slots_total` plus the token cap at every Entry 110 depth; older
+pre-admission rejection order, migrated accepted-queued disposition, active
+deadline overrun, controller loss, supervisor loss at every lifecycle phase,
+process-group escape, withheld launchd/group-empty proof, PID reuse, late worker
+IPC, boot-scoped orphan persistence, and restart reconciliation; added/deleted
+runtime/campaign files, a non-platform audit-entrypoint dependency, transient
+early-constructor `dlopen` then unload, missing synchronous event ack, evidence-
+channel backpressure/controller loss, external plugin/rpath, unmanifested
+metallib, source-compiled Metal library, writable backing descriptor, second
+attachment, and broker loss; saturation oracle count/reason mismatches, boundary
+admission before its funded lease/queue precondition, early/short/coalesced
+client reads, missing queue watermark, prefill chunk coalescing, cancellation
+before or after its exact boundary; and statistical fixtures in which point or
+request-level estimates pass while the required paired hierarchical confidence
+bound fails. Each fixture must fail the relevant gate and retain its reason
+code.
 
 ## Deterministic artifact selection and immutable loader closure
 
@@ -254,26 +279,44 @@ undeclared selector or a regular file omitted from any adopted tree fails the
 cell.
 
 Static closure recursively resolves `otool -L` and `LC_RPATH` from every Mach-O
-file in `/runtime`, not only the entry executable. Runtime closure records
-`_dyld_image_count`, canonical path, device/inode/size/mtime/ctime, Mach-O UUID,
-and content hash before model load, after load, after every plugin registration,
-and after unload. It also installs dyld add/remove-image callbacks before any
-runtime initialization; every callback appends a sequence-numbered identity to
-the controller-owned evidence stream, so a transient load/unload cannot evade
-the snapshots. Any dynamically loaded Mach-O, bundle, metallib, or plugin
-must canonicalize under `/runtime` and match a manifest record. Apple sealed
-platform images are the only exception and are represented by OS build, dyld
-shared-cache UUID, image UUID, and canonical platform path. A resolved or
-actually loaded non-platform image outside the read-only mount, a deleted
-loaded image, an unmanifested plugin, or an identity/hash mismatch fails before
-a result is eligible. All Metal library creation is routed through one audited
-wrapper that accepts only a manifest-bound `/runtime` file descriptor, hashes
-the bytes immediately before `MTLDevice.makeLibrary`, and records the result;
-source-string/default-library compilation is forbidden in qualification. The
-inference worker has network access denied and a
-read policy limited to the read-only image, required Apple platform paths, and
-an empty controller-owned output channel; an attempted outside read or network
-fallback is a retained failed cell.
+file in `/runtime`, not only the entry executable. Static closure and ordinary
+post-main image snapshots are necessary but cannot qualify the loader history.
+R6 defines a prerequisite runtime-audit boundary and leaves qualification
+blocked until it is implemented and passes the protected release gate.
+
+The audit entrypoint is a minimal native launcher whose static closure contains
+only Apple sealed platform images. It opens a predeclared bounded evidence
+channel and installs dyld add/remove-image capture before it loads any
+manifest-bound non-platform inference or runtime image. The inference worker,
+Swift/MLX runtime, plugins, and their non-platform dependencies are packaged as
+manifest-bound libraries loaded only through that entrypoint. Static inspection
+rejects a non-platform launcher dependency or initializer. Each add/remove event
+records monotonically increasing sequence, canonical path, device/inode/size/
+mtime/ctime, Mach-O UUID, and content hash; loading cannot proceed past the
+callback until the controller durably persists and acknowledges that sequence.
+The channel has no drop mode: timeout, capacity exhaustion, controller loss,
+sequence gap, or callback reentrancy failure terminates the worker and fails the
+cell. The package freezes launcher bytes, entitlements, environment, sandbox,
+IPC schema, and load API. An early constructor that loads and unloads another
+manifested library before returning is a mandatory proof fixture. If this
+ordering cannot be demonstrated under final signing, hardened runtime, and the
+protected toolchain, C10 and every runtime/capacity qualification remain
+blocked; R6 makes no exhaustive actual-loader claim from later callbacks.
+
+At every captured boundary and after model load, plugin registration, and
+unload, the worker also records `_dyld_image_count` and the same identities.
+Every dynamically loaded Mach-O, bundle, metallib, or plugin must canonicalize
+under `/runtime` and match a manifest record. Apple sealed platform images are
+the only exception and are represented by OS build, dyld shared-cache UUID,
+image UUID, and canonical platform path. A resolved or loaded non-platform
+image outside the read-only mount, a deleted loaded image, an unmanifested
+plugin, or an identity/hash mismatch fails. All Metal library creation is
+routed through one audited wrapper accepting only a manifest-bound `/runtime`
+file descriptor, hashing immediately before `MTLDevice.makeLibrary`; source-
+string/default-library compilation is forbidden. The inference worker has
+network access denied and a read policy limited to the read-only image,
+required Apple platform paths, and an empty controller-owned output channel; an
+attempted outside read or network fallback is retained as a failed cell.
 
 Every model regular file is included, including all weight shards, index JSON,
 config/generation config, tokenizer data/config, special-token maps, chat
@@ -290,7 +333,7 @@ Each record is encoded as
 The manifest records, for each regular file, device, inode, byte count,
 nanosecond mtime and ctime, and content SHA-256; those identity fields are
 evidence but the canonical content digest uses the record above. The observed
-manifest must equal the preregistered digest before any model load. R5 does not
+manifest must equal the preregistered digest before any model load. R6 does not
 treat an advisory lock as immutability. The local-writer threat boundary covers
 every unprivileged process, including another process running as the benchmark
 account; kernel, root compromise, and physical attacks remain out of scope and
@@ -346,7 +389,7 @@ four-row MSB-02/03 serving workload because current Entry 110 permits two rows
 on that class. Those cells are blocked until a normative SPEC-038 change
 defines a non-serving benchmark mode that cannot advertise capacity or serve
 buyers, or until they run on a four-row Ultra >=128 GiB with a same-host,
-same-artifact MSB-01 baseline. This R5 uses the latter qualification design.
+same-artifact MSB-01 baseline. This R6 uses the latter qualification design.
 Cross-host baselines are forbidden. Smaller or more quantized models never
 qualify a larger target.
 
@@ -354,7 +397,7 @@ qualify a larger target.
 
 | ID | Executor arms and workload | Threshold and qualification constraint |
 |---|---|---|
-| MSB-01 | Current macprovider single-stream serial `TokenIterator`; exact catalog Qwen3-32B-4bit or governed replacement; pp1024/tg256, greedy, cold conversation cache | Same host/artifact baseline for MSB-02/03; >=20 valid runs is the historical floor, while R5 statistics below require 100 repetitions and ten clean-start clusters for promotion tails |
+| MSB-01 | Current macprovider single-stream serial `TokenIterator`; exact catalog Qwen3-32B-4bit or governed replacement; pp1024/tg256, greedy, cold conversation cache | Same host/artifact baseline for MSB-02/03; >=20 valid runs is the historical floor, while R6 statistics below require 100 repetitions and ten clean-start clusters for promotion tails |
 | MSB-02 | Candidate shared-forward executor; four simultaneous identical tokenized prompts, distinct conversation IDs; pp1024/tg256 each | >1.5x MSB-01 aggregate TG; only QUAL-U128-D4 or later legal four-row authority |
 | MSB-03 | Candidate shared-forward executor; four unrelated 512/1024/1536/2048 prompts; tg256 each | >1.2x MSB-01 and short-request TTFT gate; only legal four-row authority |
 | MSB-04 | Same live MoE artifact: serial one-row baseline versus candidate two-row shared forward; two distinct pp1024/tg256 requests | >1.3x MoE serial aggregate, each row >=45% of serial TG, exact greedy tokens and accounting |
@@ -377,132 +420,125 @@ campaign manifest records the resulting integer and randomized schedule.
 
 ### Run counts and estimators
 
-- MSB-01 through MSB-04 promotion campaigns require 100 valid randomized
-  repetitions per arm across exactly ten valid clean process starts, ten
-  valid repetitions per start. Report per-repetition aggregate TG and
-  per-request latency. The historical >=20 floor is necessary but insufficient
-  for R5 promotion.
-- MSB-05 requires 100 valid paired repetitions across exactly ten valid clean
-  starts, with ten valid pairs per start. Pair by start and randomized arm
-  order. Compute the estimator as the
-  median of paired `native_aggregate_TG / oMLX_aggregate_TG` ratios. Generate
-  50,000 hierarchical paired bootstrap resamples with PCG64 seed
-  `0x4d53423035523301`, sampling clean starts and then complete paired
-  repetitions within each sampled start; take the percentile 2.5th and 97.5th
-  quantiles. CI width
-  is upper minus lower in ratio units and must be <=0.20. Report the interval,
-  median, resample count, seed, and all pair values.
-- p50 uses the nearest-rank empirical quantile. p95 is promotable only with
-  >=100 request observations and at least ten independent clean-start clusters
-  for that scenario/arm. p99 is promotable only with >=1,000 observations and
-  at least ten independent clean-start clusters; otherwise label it
-  `descriptive_unqualified` with both counts and do not use it in a gate.
-  Cancellation acknowledgement p99 requires 1,000 cancellations across at
-  least ten clean starts.
-- A clean process start is the independent decision unit. A shared-forward
-  repetition is an indivisible within-start cluster: all rows retain their
-  common batch ID, start ID, thermal history, allocator state, and disturbance
-  assignment. Point p50/p95/p99 values use all retained request observations,
-  but row count never increases the reported independent-cluster count.
-  Promotion intervals use exactly 50,000 hierarchical resamples with the
-  campaign PCG64 seed: sample clean-start IDs with replacement; within each
-  selected start sample complete repetition IDs with replacement; retain every
-  row of each selected repetition together; then recompute the full statistic.
-  Serial repetitions are one-row clusters. Paired arm comparisons resample a
-  start and then its complete paired repetition IDs, preserving arm order and
-  pairing. Report the point estimate, hierarchical interval, start count,
-  repetition count, request count, batch sizes, seed, and resampling algorithm
-  version. A request-level bootstrap may be reported only as
-  `descriptive_nondecision` and cannot support go/no-go. Never discard a
-  completed valid repetition because it worsens a result.
+- MSB-01 through MSB-04 promotion campaigns use ten preregistered matched
+  clean-start blocks. Each block contains one baseline start and one candidate
+  start on the same host/artifact tuple; randomized arm order is fixed by the
+  campaign seed. Each arm has ten valid repetitions per block, for 100 per arm.
+  A completed failed repetition is retained and cannot be replaced. Report
+  per-repetition aggregate TG and per-request latency.
+- MSB-05 uses the same 100 valid matched pairs across ten clean-start blocks,
+  with ten valid pairs per block. Its primary estimator is the median of paired
+  `native_aggregate_TG / oMLX_aggregate_TG` ratios.
+- Every distributional decision interval uses exactly 50,000 PCG64 hierarchical
+  bootstrap resamples. Baseline/candidate comparisons sample matched start-block
+  IDs with replacement, then complete paired repetition IDs within each block,
+  retaining every row of both arms and their batch IDs. Single-arm CV, latency,
+  footprint, and recovery statistics sample clean-start IDs, then complete
+  repetitions within each selected start, retaining all rows. Recompute the
+  complete statistic for each resample. Serial repetitions remain one-row
+  clusters. Seeds are derived from the frozen campaign seed and statistic ID;
+  MSB-05 retains `0x4d53423035523301`. Report the point estimate, 2.5th and
+  97.5th percentile endpoints, seed, algorithm version, start/repetition/
+  request counts, batch sizes, and all matched values.
+- p50 uses nearest-rank empirical quantiles. p95 requires at least 100 boundary-
+  reached request observations across all ten matched start blocks; p99
+  requires at least 1,000 boundary-reached observations across ten blocks.
+  Smaller samples are `descriptive_unqualified`. Row count does not increase
+  the independent start-block count. Request-level or unpaired resampling is
+  `descriptive_nondecision` and cannot support go/no-go.
+- Every uplift threshold is passed only when the lower 95% hierarchical bound
+  is strictly greater than the threshold. Every latency-ratio or variability
+  ceiling is passed only when the upper bound is at or below the threshold.
+  Equality follows the threshold's stated strictness. MSB-05 additionally
+  requires interval width <=0.20. There is no generic width exception: a wide
+  interval whose required endpoint does not clear the gate is `inconclusive`
+  and the tuple remains disabled. Point estimates are report-only.
+- A clean start block is invalid only under the preregistered pre-admission
+  host/artifact exclusion rules. Once either arm admits work, every outcome in
+  both arms is retained; no worsening block is discarded.
 
 ### Arrival and disturbance schedules
 
-- Identical/ragged MSB starts use a barrier: all requests are admitted within
-  10 ms, measured from the first to last admission timestamp.
-- `MIX-INGRESS-15M-R1` runs from one clean start for exactly 15 minutes after
-  warm-up. It emits exactly 3,600 requests, one every 250 ms, using a fixed
-  alternating HTTP/relay sequence. Exactly every tenth
-  request is unsupported; unsupported types rotate tools, structured output,
-  logprobs, logit bias, and sticky reuse. Supported prompt bins rotate 128,
-  512, 1024, and 2048 tokens; output limits rotate 32, 64, 128, and 256.
-- `REF-TTFT-512-R1` is the same-host, same-artifact native serial reference for
-  MSB-03. It runs 100 independent greedy requests across ten clean starts,
-  ten per start, with the canonical 512-token prompt fixture, output limit 256,
-  cold conversation/prefix state, concurrency one, and the next request
-  admitted only after the prior request reaches terminal. Its p95 TTFT is the
-  only denominator for the MSB-03 short-request gate.
-- `SLOW-CONSUMER-500-R1` runs exactly 500 streaming requests across ten clean
-  starts, 50 per start, admitted every 100 ms with concurrency bounded by Entry
-  110. Prompt
-  bins rotate 128/512/1024/2048 tokens and output limits rotate 32/64/128/256;
-  the committed fixture digest fixes the exact token arrays. Requests with
-  index modulo five equal to zero use the controlled slow path; all others
-  drain immediately. The slow client requests `SO_RCVBUF=4096`, verifies and
-  requires the `getsockopt(SO_RCVBUF)` value frozen by the campaign preflight
-  before admission, performs no body read for 500 ms after response headers,
-  and then makes one `recv(MSG_WAITALL)` for exactly 256 application bytes every
-  100 ms using a monotonic schedule; only a terminal EOF may return fewer. The server delivery queue capacity is
-  exactly 16 token frames. Instrumentation records the first transition from
-  occupancy 15 to 16 and the producer suspension while attempting frame 17;
-  each slow request must reach both markers or the cell fails. A short read,
-  early read, cadence error over 10 ms, kernel-buffer mismatch, queue-capacity
-  change, or missing suspension marker fails the cell. The cell timeout is 2
-  hours and
-  each queue-inclusive request timeout is 900 seconds. Any buffer, queue,
-  arrival, or fixture change creates a new cell.
-- `CANCEL-2000-R1` runs exactly 2,000 requests from ten clean starts, 200 per
-  start, admitted every 100 ms with the same four prompt/output rotations and
-  Entry 110 cap as `SLOW-CONSUMER-500-R1`. Requests indexed modulo ten cancel at:
-  queued (0), exact prefill token 512 of a canonical 2,048-token prompt (1),
-  first decode boundary (2), exact generated-token indices at 25% (3) and 75%
-  (4), and delivery backpressure (5); indices 6-9 complete. Prefill chunk size
-  is exactly 256 tokens; case 1 records completion of chunk two and injects
-  cancellation before chunk three is scheduled. Case 5 performs no client body
-  reads, uses the same verified socket and 16-frame delivery queue as the slow
-  cell, records occupancy 16 plus the producer blocked on frame 17, and only
-  then injects cancellation. Each case records its required boundary before
-  injection and fails if the boundary is skipped, coalesced, or not reached.
-  This yields
-  1,200 cancellation observations, enough for the declared p99 gate. The
-  harness seed fixes prompt/arrival assignment and records actual boundary
-  timestamps. The cell timeout is 6 hours, each queue-inclusive request
-  timeout is 900 seconds,
-  queued acknowledgement must be <=250 ms, active acknowledgement must be
-  <=5 seconds, and no post-acknowledgement token or receipt input is allowed.
-- `WARM-SWAP-25-R1`, `WARM-SWAP-50-R1`, and `WARM-SWAP-75-R1` each run 400
-  mixed-ingress requests across ten clean starts, 40 per start, admitted every
-  100 ms, using the
-  same frozen prompt/output rotation. Within each clean start, after request
-  10, 20, or 30 has been admitted respectively, the harness requests a swap at
-  that request's first decode boundary. The target reloads from the same
-  adopted read-only bytes
-  under a distinct generation identifier and therefore has an identical closed
-  loader manifest. Each cell has a 2-hour
-  timeout, the 30-second quiescent-drain bound, and requires zero old-generation
-  lease, row, block, queue, or delivery ownership before publication.
-- `BATCH-FAIL-D1-R1`, `BATCH-FAIL-D8-R1`, and `BATCH-FAIL-D32-R1` run 100
-  repetitions each across ten clean starts, ten per start. Every repetition
-  barrier-admits
-  the legal Entry 110 row count with distinct canonical pp1024/tg256 requests
-  and injects one whole-batch forward failure immediately before decode step
-  1, 8, or 32. `ROW-EXT-FAIL-D1-R1`, `ROW-EXT-FAIL-D8-R1`, and
-  `ROW-EXT-FAIL-D32-R1` use the same workload but inject allocation-extension
-  failure into the lowest request ID only. For target decode step `d`, its
-  canonical prompt length is chosen so its unused final-block slots equal
-  `(d - 1) mod block_size_tokens`; earlier extensions succeed, and the fault is
-  armed only for the extension requested immediately before token `d`. Each
-  queue-inclusive request timeout is 900 seconds;
-  each 100-repetition cell timeout is 6 hours. Every injected failure is a
-  valid observed outcome and must satisfy C2-C8 and C11.
+`SATURATION-ORACLE-R1` is the only open-loop count oracle. It uses the
+deterministic executor and virtual monotonic clock, exact Entry 110 depth `D`,
+a queue of `2*D`, one arrival every 100 ms for 60 seconds (600 sent), and an
+exact 1,000 ms service time with completion processed before same-timestamp
+arrival. The reference state machine, committed as campaign input, freezes these exact
+post-drain counts: for `D=1,2,3,4`, accepted/started/terminal are respectively
+62/124/186/248 and `queue_capacity` rejected are 538/476/414/352. The harness
+must match every count and request ID. Accepted plus rejected equals 600, all
+accepted reach terminal, and no other reason code is permitted. A separate real-runtime open-loop characterization
+uses the same cadence but is non-promoting and reports, without predicting,
+sent = accepted + reason-coded rejected and accepted = terminal + unresolved.
+It never supplies boundary sample counts.
 
-All MSB/REF repetitions have a 900-second queue-inclusive timeout and a 12-hour
-cell timeout. Every disturbance request has the same 900-second queue-inclusive
-timeout
-unless its cancellation deadline terminates it earlier.
-`MIX-INGRESS-15M-R1` has a 30-minute cell timeout. A timeout is a retained valid
-failure after admission; the harness may not extend a timeout once the campaign
-digest is frozen.
+All real-runtime boundary campaigns are closed-loop. The controller exposes a
+read-only, generation-bound harness event stream for queue depth, funded lease,
+row state, token boundary, delivery occupancy, and terminal outcome. The
+harness sends the next candidate only after the cell-specific precondition and
+waits for the required marker/terminal before advancing. It keeps at most the
+explicit anchor requests plus one disturbance candidate, so saturation cannot
+silently reduce observations. A precondition or marker timeout is a retained
+cell failure; it is never replaced by an index assumption.
+
+- Identical/ragged MSB starts use a barrier: all requests are admitted within
+  10 ms, measured from first to last admission.
+- `MIX-INGRESS-15M-R1` remains an open-loop compatibility characterization:
+  exactly 3,600 sent, one every 250 ms, alternating HTTP/relay; every tenth is
+  unsupported and rotates tools, structured output, logprobs, logit bias, and
+  sticky reuse. It reports sent, accepted, reason-coded rejected, boundary,
+  terminal, and unresolved counts and cannot supply a fixed performance sample.
+- `REF-TTFT-512-R1` runs 100 independent greedy serial requests across ten
+  clean starts, ten per start. The next request is sent only after prior
+  terminal. It fixes the canonical 512-token prompt, output 256, and cold
+  conversation/prefix state.
+- `SLOW-CONSUMER-1000-R2` produces exactly 1,000 accepted slow-path requests,
+  100 per clean start. The next candidate is admitted only with one funded
+  lease and no other disturbance candidate. It requires exactly 1,000 accepted,
+  occupancy-16, blocked-frame-17, cancellation/terminal, and reconciled
+  outcomes; rejected=0. The client verifies campaign-frozen `SO_RCVBUF=4096`,
+  reads nothing for 500 ms after headers, then performs exactly 256-byte
+  `recv(MSG_WAITALL)` calls every 100 ms. The server queue is 16 frames. A short
+  or early read, >10 ms cadence error, buffer mismatch, changed capacity, or
+  missing marker fails the cell.
+- `CANCEL-6000-R2` has six subcells: queued, exact prefill token 512 before
+  scheduling 256-token chunk three, first decode boundary, exact 25% generated-
+  token index, exact 75% index, and delivery occupancy 16 with producer blocked
+  on frame 17. Each subcell produces exactly 1,000 boundary-reached
+  cancellations, 100 per clean start, for 6,000 total. The five active
+  subcells each require sent=accepted=boundary=acknowledged=terminal=1,000 and
+  rejected=0. The queued subcell requires sent=queued-boundary=acknowledged=
+  preadmission-terminal=1,000, accepted=0, and rejected=0. It first occupies all
+  `D` funded leases with deterministic anchor requests, observes the candidate
+  in pre-admission position one, then cancels it; anchors drain before the next
+  trial. Other subcells wait for a funded lease and exact marker. Delivery uses the verified slow-client
+  settings. Queued acknowledgement is <=250 ms, active <=5 s, and no later
+  token or receipt input is allowed.
+- `WARM-SWAP-25-R2`, `WARM-SWAP-50-R2`, and `WARM-SWAP-75-R2` each produce
+  exactly 100 accepted swap-trigger candidates across ten clean starts. Within
+  each trial, a deterministic finite set of funded requests is admitted, the
+  trigger candidate reaches respectively 25%, 50%, or 75% of its generated-
+  token limit, and only then is swap requested. Each trial records exact
+  accepted, boundary, old-generation terminal, rejected, and new-generation
+  publication counts. Rejected is zero before admission closure; any later
+  probe is exactly one `generation_draining` rejection. Publication requires
+  zero old leases/rows/blocks/queues/delivery tasks and the applicable normal or
+  orphan fence proof.
+- `BATCH-FAIL-D1-R1`, `BATCH-FAIL-D8-R1`, and `BATCH-FAIL-D32-R1` run 100
+  repetitions across ten clean starts. Each barrier-admits legal Entry 110 rows
+  and injects one whole-batch failure before decode step 1, 8, or 32.
+  `ROW-EXT-FAIL-*` uses the same workload but faults the lowest request ID's
+  extension. The canonical prompt makes unused final-block slots equal
+  `(d-1) mod block_size_tokens`; the fault is armed only for the extension
+  immediately before token `d`.
+
+Each boundary candidate retains sent, accepted, rejected with exact reason,
+precondition sequence, boundary sequence, acknowledgement, terminal outcome,
+and clean-start ID. Per-request timeout is 900 seconds. Slow and warm-swap
+cells have 12-hour limits; each cancellation subcell and failure cell has a
+12-hour limit. The campaign digest freezes all counts, schedules, fixtures,
+timeouts, Entry 110 depth, and event-schema version. A timeout is a retained
+failure after admission and is never extended.
 
 ### Warm-up and exclusions
 
@@ -526,7 +562,7 @@ under a new campaign ID; exclusions never count toward required samples.
 
 ## Executable memory budget and pressure protocol
 
-Each cell has a signed/versioned `memory-budget-v1` manifest frozen before its
+Each cell has a signed/versioned `memory-budget-v2` manifest frozen before its
 promotion runs. All values are unsigned byte integers. Required fields are:
 
 ```text
@@ -550,7 +586,7 @@ queue_delivery_allowance_bytes
 polling_gap_allowance_bytes
 measurement_allowance_bytes
 planned_process_envelope_bytes
-hard_process_limit_bytes
+planning_process_limit_bytes
 mlx_memory_limit_bytes and mlx_cache_limit_bytes
 sample_period_ms, unloaded_host_window_s, loaded_idle_window_s,
 post_drain_window_s
@@ -573,7 +609,7 @@ component_subtotal = loaded_idle_phys_footprint_bytes
                    + polling_gap_allowance_bytes
 measurement_allowance_bytes = ceil(component_subtotal * 10 / 100)
 planned_process_envelope_bytes = component_subtotal + measurement_allowance_bytes
-hard_process_limit_bytes = min(floor(installed_ram_bytes * 85 / 100),
+planning_process_limit_bytes = min(floor(installed_ram_bytes * 85 / 100),
                                installed_ram_bytes - os_reserve_bytes)
 ```
 
@@ -608,107 +644,113 @@ maximum of sampled `activeMemory + cacheMemory` and reset-per-start
 allocator high-waters are maxima across the five runs and remain non-added
 diagnostics because target delta contains them.
 
-Before any target-shaped calibration, the campaign freezes a separate signed
-`precalibration-budget-v1`; it never contains or derives from
-`calibrated_target_peak_delta`. Required fields are the immutable tuple and
-manifest digests; installed RAM and OS reserve; maximum measured loaded-idle
-physical footprint and virtual size from exactly five clean load-only starts
-with the same 600-sample window and no target work; analytical full-pool KV
-bytes; bounded queue/delivery bytes; MLX cache limit; `RLIMIT_AS`; watchdog
-sample period and stop threshold; ramp fractions and 256-token rounding rule;
-pre-load model/runtime ledger and its digest; static target-ledger digest; every
-derived bootstrap term; and a generated static allocation ledger. A failed or
-incomplete load-only start forbids
-pre-calibration and is not replaced. The ledger enumerates every maximum-live
-non-KV allocation site in the candidate forward and gather path, with tensor
-dimensions, dtype,
-alignment, multiplicity, lifetime interval, and overflow-checked byte formula.
-It covers activation tensors, contiguous gathered K/V, logits/sampling
-workspace, executor staging, command buffers, and allocator/cache reservations.
-An allocation without a finite manifest-bound formula, an opaque dynamic
-plugin allocation, or an incomplete lifetime-overlap graph makes the target
-`precalibration_unbounded` and forbids the run.
+Before any model load, the campaign freezes `preload-budget-v2`. The adoption
+broker parses immutable container metadata without materializing tensors and
+generates an event-indexed maximum-live ledger. Each row records stable site ID,
+phase start/end events, dimensions, source and destination dtype, alignment,
+multiplicity, residency rule, tied/duplicate policy, overflow-checked formula,
+and bytes. Required incremental rows cover file-backed source mapping residency; compressed source; decompression and conversion
+scratch; dtype-expanded destination tensor; duplicate/tied-weight
+materialization; tokenizer/config/template; loader and Swift/MLX runtime;
+CPU/Metal staging; command buffers; caches; logits/sampling; and output/IPC
+buffers. Edges state coexistence. For each ordered lifecycle event, the
+calculator sums every live row; `preload_max_live_bytes` is the maximum sum,
+not the maximum row or `max(stored, expanded)`. Source mapping and converted
+output coexist from first destination allocation through forced Metal
+synchronization and source-release evidence. An unknown row, edge, release,
+compression ratio, conversion formula, dynamic allocation, or overflow is
+`preload_unbounded` and forbids load.
 
-Loading the target to obtain loaded idle has its own a priori bound. Before any
-model load, the adoption broker parses the immutable weight-container metadata
-without materializing tensors and computes the maximum of stored tensor bytes
-and runtime dtype-expanded tensor bytes, including alignment and duplicate/
-tied-weight policy. It adds a static loader/runtime allocation ledger, bounded
-tokenizer/config bytes, `max(2 GiB, 25%)` unattributed load reserve, and a
-separate 25% allowance. Unknown compression, conversion, custom code, dynamic
-allocation, or malformed/overflowing metadata is `preload_unbounded`. The
-resulting `preload_process_envelope` must be <= the 70% pre-calibration limit;
-the supervisor applies the correspondingly proven `RLIMIT_AS`, 10 ms watchdog,
-pressure stop, and exit fence while producing each load-only start. Thus the
-loaded-idle input is measured only after a separate immutable-byte-derived
-pre-load admission decision.
+Exactly ten minutes of minimal audit-worker physical-footprint samples establish
+`unloaded_worker_peak`; no model, Swift/MLX inference runtime, tokenizer, or
+Metal payload has yet loaded. Every preload ledger row is incremental to that
+frozen baseline, and duplicate site coverage is rejected. The frozen
+arithmetic is:
 
 ```text
-preload_payload_bound = tensor_runtime_bytes + tokenizer_config_bytes
-                      + preload_runtime_static_bound
 preload_runtime_reserve = max(2 * 2^30,
-                              ceil(preload_payload_bound * 25 / 100))
-preload_subtotal = unloaded_worker_phys_footprint
-                 + preload_payload_bound + preload_runtime_reserve
+                              ceil(preload_max_live_bytes * 25 / 100))
+preload_subtotal = unloaded_worker_peak + preload_max_live_bytes
+                 + preload_runtime_reserve
 preload_allowance = ceil(preload_subtotal * 25 / 100)
 preload_process_envelope = preload_subtotal + preload_allowance
+preload_advisory_limit = min(floor(installed_ram_bytes * 50 / 100),
+                             installed_ram_bytes - os_reserve_bytes)
 ```
 
-The independent bootstrap arithmetic is:
+The lower 50% advisory limit is an assessment policy for unqualified Darwin,
+not an OS hard cap. Model load is forbidden unless the envelope fits it. The
+10 ms watcher closes admission and requests termination at 50% physical
+footprint or the first warning/critical pressure event; it records detection,
+signal, exit, lifetime high-water, and overshoot. Crossing is a failed run and
+cannot establish safety. The watcher is asynchronous and is never described as
+preventing a transient crossing.
+
+After five successful load-only starts, the campaign freezes
+`precalibration-budget-v2`. It never contains or derives from
+`calibrated_target_peak_delta`. Required fields are immutable tuple and
+manifest digests; installed RAM/OS reserve; five loaded-idle maxima; analytical
+full-pool KV; queue/delivery bytes; MLX cache limit; preload ledger/digest;
+target maximum-live ledger/digest; runtime reserve; advisory threshold; watcher
+period; ramp fractions; and every derived term. The target ledger uses the same
+site/phase/edge schema and separately charges activation tensors, gathered K/V,
+logits/sampling, executor/Metal staging, command buffers, caches, output/IPC,
+and analytical KV. A single `campaign_max_live_ledger` spans adoption, load,
+warm-up, prefill, decode, delivery, drain, and unload. It therefore contains
+stored/file-backed source residency, compressed bytes, expanded resident
+tensors, conversion/decompression temporary bytes, KV, activations, command
+and staging buffers, caches, and outputs in one event order. After the measured
+loaded-idle baseline becomes authoritative, its manifest-bound resident-set row
+replaces, rather than adds to, the analytical resident-weight/runtime rows for
+serving phases; the replacement edge and covered site IDs are frozen. Thus no
+resident byte is omitted or double counted. `campaign_max_live_bytes` is the
+maximum over every phase and must equal the greater of the preload phase and
+serving phase calculations. `max_live_sum` is evaluated over all ordered
+events. An opaque allocation, uncovered replacement, or incomplete overlap
+graph is `precalibration_unbounded`.
 
 ```text
-bootstrap_non_kv_bound = max_live_sum(static_allocation_ledger)
+bootstrap_non_kv_bound = max_live_sum(target_non_kv_ledger)
 bootstrap_runtime_reserve = max(4 * 2^30,
                                 ceil(bootstrap_non_kv_bound * 25 / 100))
-bootstrap_component_subtotal = loaded_idle_phys_footprint
-                             + kv_pool_bytes
-                             + bootstrap_non_kv_bound
-                             + bootstrap_runtime_reserve
-                             + queue_delivery_allowance_bytes
-bootstrap_measurement_allowance = ceil(bootstrap_component_subtotal * 25 / 100)
-precalibration_process_envelope = bootstrap_component_subtotal
-                                + bootstrap_measurement_allowance
-precalibration_limit = min(floor(installed_ram_bytes * 70 / 100),
-                           hard_process_limit_bytes)
-bootstrap_increment = kv_pool_bytes + bootstrap_non_kv_bound
-                    + bootstrap_runtime_reserve
-                    + queue_delivery_allowance_bytes
-                    + bootstrap_measurement_allowance
-rlimit_as_bytes = min(loaded_idle_virtual_size + bootstrap_increment,
-                      precalibration_limit)
+bootstrap_subtotal = loaded_idle_phys_footprint + kv_pool_bytes
+                   + bootstrap_non_kv_bound + bootstrap_runtime_reserve
+                   + queue_delivery_allowance_bytes
+bootstrap_allowance = ceil(bootstrap_subtotal * 25 / 100)
+precalibration_process_envelope = bootstrap_subtotal + bootstrap_allowance
+precalibration_advisory_limit = min(floor(installed_ram_bytes * 60 / 100),
+                                    installed_ram_bytes - os_reserve_bytes)
 ```
 
-The exact-shape run is forbidden unless
-`precalibration_process_envelope <= precalibration_limit`. The 4 GiB/25%
-runtime reserve and separate 25% bootstrap allowance are conservative bootstrap
-terms only; they do not replace, lower, or enter the later five-start maximum or
-the final `memory-budget-v1` formula.
+Exact-shape work is forbidden unless the envelope fits the advisory limit and
+all preload/load-only/ramp evidence passes. On Darwin, `RLIMIT_AS`/`RLIMIT_RSS`
+is recorded only as diagnostic configuration. It supplies no hard-cap field,
+no admission authority, and no promotion evidence. Optional causal allocator
+characterization requires, on repeated clean workers, an unlimited successful
+control; below-candidate success; one large and cumulative smaller allocations
+crossing the candidate; identical CPU and forced-synchronous Metal operations;
+and API/signal/kernel reason capture. Passing proves only the exact allocator
+path tested. Until a reviewed exact-OS mechanism synchronously constrains all
+CPU and forced-synchronous Metal committed memory used by the runtime,
+representative target-shaped runs are non-promoting and the capacity gate stays
+closed. Ledgers, ramps, pressure monitoring, and worker termination remain
+independent defenses and cannot be weakened.
 
-Calibration runs only in the separate inference-worker process selected by the
-arbiter contract. Before launch, the supervisor sets `RLIMIT_AS` to the smaller
-of the overflow-checked loaded-idle virtual-size-plus-bootstrap allocation bound
-and `precalibration_limit`, sets the frozen MLX cache limit, and proves on the
-exact OS/runtime with two sacrificial workers that CPU-backed MLX and Metal
-unified-memory allocations obey it. Each probe sets headroom to 512 MiB above
-its post-runtime-load virtual size, then attempts one 768 MiB allocation through
-the exact candidate allocation API; the allocation must fail and the sampled
-physical footprint must remain below the frozen 70% stop. A successful
-over-limit allocation, signal, missing sample, or unobserved exit means the cap
-is unproved and target-shaped calibration is forbidden on the host. The
-supervisor samples worker physical footprint every 10 ms, subscribes to memory-
-pressure events, closes admission and sends SIGKILL at 70% of
-installed RAM or the first warning/critical event, and observes exit with
-`waitpid`; the worker cannot terminate or corrupt the controller. These are
-defense-in-depth stops behind the a priori bound, not substitutes for it.
+The watcher closes admission and sends termination at the 60% advisory
+threshold or first warning/critical pressure event. The parent supervisor uses
+normal `waitpid`; supervisor loss uses the launchd/orphan protocol above. Every
+sample, detection latency, SIGTERM/SIGKILL time, exit path, and maximum overshoot
+is retained. A missing sample, late exit, or crossing fails the cell. A watchdog
+pass never converts the advisory boundary into a hard cap.
 
 Before the five exact-shape runs, three non-promoting ramp cells execute at
 25%, 50%, and 75% of each row's target token extent, rounded up to a complete
 256-token prefill chunk, in three fresh workers. Each ramp has its own
-conservatively recomputed pre-calibration envelope and the same hard limit,
+conservatively recomputed pre-calibration envelope and the same advisory limit,
 pressure, thermal, swap, recovery, process-exit, and retained-failure rules. A
 failed or unbounded ramp forbids later stages. All five exact-shape outcomes,
-including OOM, timeout, pressure, thermal, pageout, swap, hard-stop, or recovery
-failure, are retained. Any failed dry run blocks a promotion campaign; it is
+including OOM, timeout, pressure, thermal, pageout, swap, advisory-stop, or
+recovery failure, are retained. Any failed dry run blocks a promotion campaign; it is
 not replaced. The unloaded ten-minute host window detects ambient instability
 and validates exclusions; it is not substituted for the loaded-idle baseline
 used by the final formula.
@@ -720,8 +762,9 @@ counter is unavailable, the non-promoting development envelope sets
 such a result remains development-only until a new independently reviewed
 revision justifies promotion on that platform. Queue allowance comes from the
 maximum retained payload/event sizes times the bounded queue. The separate 10%
-measurement allowance appears exactly once. A promotion cell may start only when
-`planned_process_envelope <= hard_process_limit`. Runtime passes only when
+measurement allowance appears exactly once. A promotion cell may start only when an independently reviewed synchronous
+CPU/Metal cap exists and
+`planned_process_envelope <= planning_process_limit`. Runtime passes only when
 the authoritative process peak never exceeds either value.
 
 The authoritative process total is the maximum of
@@ -756,41 +799,58 @@ run on an actively serving Mac.
 
 ## Performance and go/no-go thresholds
 
-All correctness gates pass before performance is considered. Then:
+All correctness gates pass before performance is considered. Each distributional
+decision uses the cluster-aware hierarchical interval defined above, paired for
+baseline/candidate comparisons and single-arm for standalone statistics. Point
+estimates are report-only.
 
-- MSB-01 must have 100 valid repetitions and a sample coefficient of variation
-  `sample_standard_deviation(aggregate_TG) / mean(aggregate_TG) <= 0.10`.
-  Otherwise its denominator is unstable and MSB-02/03 cannot promote. Report
-  mean, sample standard deviation, CV, median, and the frozen bootstrap interval.
-- MSB-02 median aggregate TG >1.5x the same-host MSB-01 median; per-stream p95
-  TPOT <=3x the corresponding single-stream baseline.
-- MSB-03 median aggregate TG >1.2x MSB-01; 512-token-request p95 TTFT <=2x its
-  same-host single-request baseline.
-- At least one legally authorized multi-row Entry 110 tuple exceeds 1.3x its
-  same-host single-stream aggregate TG within all memory/tail gates.
-- MSB-04 independently exceeds 1.3x its live-MoE serial baseline; each stream
-  sustains >=45% of single-stream TG; exact token/terminal/accounting parity is
-  mandatory.
-- MSB-05 meets the paired CI method above. The optional prototype threshold is
-  >=0.80x oMLX aggregate TG and >=1.3x native single-stream TG; it grants no
+- MSB-01 baseline stability passes only when the upper 95% hierarchical bound
+  for `sample_standard_deviation(aggregate_TG) / mean(aggregate_TG)` is <=0.10.
+  Otherwise MSB-02/03 remain inconclusive.
+- MSB-02 aggregate-TG candidate/baseline ratio passes only when its lower bound
+  is >1.50. Its per-stream p95-TPOT candidate/baseline ratio passes only when
+  its upper bound is <=3.00.
+- MSB-03 aggregate-TG ratio passes only when its lower bound is >1.20. Its
+  canonical 512-token p95-TTFT candidate/`REF-TTFT-512-R1` ratio passes only
+  when its upper bound is <=2.00.
+- The generic multi-row gate requires at least one legally authorized Entry 110
+  tuple whose aggregate-TG ratio lower bound is >1.30 while every memory,
+  correctness, and latency gate passes.
+- MSB-04 live-MoE aggregate-TG ratio lower bound must be >1.30 and each stream's
+  TG/single-stream-TG ratio lower bound must be >=0.45. Exact token, terminal,
+  and accounting parity remains mandatory.
+- MSB-05 requires its native/oMLX ratio lower bound >=0.80, native/single-serial
+  ratio lower bound >=1.30, and paired interval width <=0.20. It grants no
   serving or trust authority.
 - MIX, slow-consumer, cancellation, arbiter, memory, receipt, and leak gates
-  have zero correctness failures. Queued cancellation acknowledgement is at
-  most 250 ms; opposite-mode admission preemption is at most 250 ms; active
-  acknowledgement is at most 5 seconds for every request, with p99 also
-  reported. Quiescent handoff is at most 1 second, quiescent drain
-  at most 30 seconds, forward at most 120 seconds, request at most 900 seconds,
-  process fencing at most 10 seconds, opposite-mode waiter terminal disposition
-  at most 900 seconds, and old accepted-work terminal reconciliation at most
-  915 seconds. A healthy grant is promised only within one second after
-  quiescence and before the waiter's 900-second deadline; a long prior epoch
-  may produce a truthful `mode_wait_timeout` instead.
-  Actual worker exit and durable terminal dispositions precede lease reuse or
-  generation publication. Unsupported routing is 100% as expected.
+  require zero correctness failures and exact schedule/count-oracle agreement.
+  Every individual deadline observation must meet its fixed ceiling: 250 ms
+  queued cancellation/admission preemption/supervisor-loss detection; 5 s
+  active cancellation/orphan request disposition; 1 s quiescent handoff; 30 s
+  quiescent drain; 120 s forward; 900 s request/waiter disposition; 10 s normal
+  process fence or launchd proof attempt; and 915 s old accepted-work
+  reconciliation. A hard per-observation ceiling is not replaced by an
+  interval. Cancellation p99 is reported only with 1,000 boundary-reached observations for
+  each subcell, and its upper hierarchical bound must also be <= the
+  applicable acknowledgement ceiling. Unsupported routing is 100% exact.
 
-A failed performance threshold leaves the tuple disabled. No result is
+All distributional go/no-go quantities, including throughput ratios, latency
+ratios, CV, cancellation-tail latency, per-start peak-footprint ratio, and
+post-drain recovery time, use the matched-start hierarchical interval and its
+required endpoint. Exact protocol invariants--token equality, zero cross-
+request leakage, count-oracle equality, reason codes, fixed deadline maxima,
+and no bound crossing--must hold for every observation and are not statistical
+claims; an interval cannot excuse one violation. The memory gate requires both
+zero observed crossing and the upper 95% bound of the per-start peak/envelope
+ratio <=1.00. The recovery gate requires every observation <=120 seconds and
+the upper 95% bound <=120 seconds.
+
+A bound that crosses or touches a strict threshold is `inconclusive`; a bound
+above a non-strict ceiling fails. Both leave the tuple disabled. No result is
 extrapolated across chip, RAM, OS, artifact, quantization, runtime, metallib,
-context/output shape, or Entry 110 value.
+context/output shape, or Entry 110 value. On Darwin without a proven synchronous
+CPU/Metal memory cap, satisfying these statistical gates still cannot promote a
+capacity claim; the cap blocker is independent.
 
 ## Protected release-candidate gate
 
@@ -801,13 +861,15 @@ C10 requires all of the following in the protected release path:
    unchanged.
 2. The exact candidate commit produces the standalone tarball and Malibu.app
    package. Both carry the same dependency-lock digest and version-matched
-   metallib content hash. The inference worker, lifecycle supervisor, adoption
-   broker, IPC schema, launchd profile, and sandbox policy are mandatory signed
+   metallib content hash. The inference worker, pre-runtime audit launcher, lifecycle supervisor,
+   adoption broker, IPC schema, launchd profile, and sandbox policy are
+   mandatory signed
    runtime resources, not host-installed substitutes.
 3. After final nested signing, outer signing, notarization, stapling, and
    packaging, extract both deliverables and prove SHA-256 byte identity of the
    standalone and Malibu-embedded `macprovider-cli`. Verify metallib hashes and
-   byte-identical worker/supervisor/broker helpers, IPC schema, launchd profile,
+   byte-identical worker/audit-launcher/supervisor/broker helpers, IPC schema,
+   launchd profile,
    sandbox policy, entitlements, and required resource-bundle identities in
    both packages.
 4. Run `codesign --verify --strict --deep`, `stapler validate`, Gatekeeper

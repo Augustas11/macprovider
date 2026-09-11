@@ -2,7 +2,7 @@
 
 Date: 2026-09-11
 
-Assessment revision: `build5-assessment-r5`
+Assessment revision: `build5-assessment-r6`
 
 Repository base: `1d2c930bad81704dd0acc0322226725d8b64aceb`
 
@@ -11,7 +11,8 @@ Repository base: `1d2c930bad81704dd0acc0322226725d8b64aceb`
 Development can safely continue before a 64 GB+ Mac is available, but only on
 the contracts, allocator/scheduler correctness, fail-closed runtime bridge,
 unsupported-feature routing, deterministic accounting, packaging, fixtures,
-and small-model real-inference lanes defined below. The production backend and
+and operator-approved, explicitly non-promoting small-model real-inference
+lanes defined below. The production backend and
 capacity advertisement must remain disabled until its exact
 model/artifact/runtime/OS/hardware tuple passes the representative-hardware
 gate.
@@ -139,7 +140,7 @@ KV_bytes(row, tokens) = KV_bytes_per_token * tokens
 
 Weight quantization does not quantize KV. Current batching rejects `kv_bits`,
 so fp16 is the only valid planning basis. Every future measured cell freezes a
-`memory-budget-v1` manifest before promotion runs. It contains exact installed
+`memory-budget-v2` manifest before promotion runs. It contains exact installed
 RAM and OS reserve; verified artifact bytes; loaded-idle process physical
 footprint; an exact-shape calibrated total peak delta with separate
 activation/gather/KV diagnostics; prompt plus
@@ -154,7 +155,7 @@ M_process_subtotal = M_loaded_idle_physical_footprint
         + M_calibrated_target_peak_delta
         + M_delivery_and_queues
 M_process_envelope = M_process_subtotal + ceil(10% * M_process_subtotal)
-M_hard = min(floor(85% * installed_RAM), installed_RAM - M_OS_reserve)
+M_planning_limit = min(floor(85% * installed_RAM), installed_RAM - M_OS_reserve)
 ```
 
 Loaded idle already includes resident weights, runtime, and MLX caches, so
@@ -162,7 +163,7 @@ those values are never added again. The calibrated target delta is the larger
 of observed exact-shape process growth and analytical KV pool bytes; it already
 contains activation, KV, executor, and transient gather effects, so those
 diagnostics are not summed again. The planned cell
-must satisfy `M_process_envelope <= M_hard`; sampled
+must satisfy `M_process_envelope <= M_planning_limit`; sampled
 `proc_pid_rusage(RUSAGE_INFO_V4).ri_phys_footprint` must remain under both.
 `MLX.Memory.activeMemory/cacheMemory/peakMemory` are sampled as diagnostic
 subsets and are never added to process footprint. Exact algorithms, 100 ms
@@ -174,36 +175,47 @@ its transient gather term must be measured. It cannot support a peak-memory-
 reduction claim.
 
 The calibration algorithm is executable and frozen only after an independent
-pre-calibration gate passes. A signed `precalibration-budget-v1` uses the
+pre-calibration gate passes. A signed `precalibration-budget-v2` uses the
 measured loaded-idle footprint, analytical full-pool KV, bounded queues, an
 overflow-checked maximum-live allocation ledger for every activation, gather,
-logit, staging, command-buffer, and cache site, a `max(4 GiB, 25%)` runtime
-reserve, and a separate 25% bootstrap allowance. It never consumes the future
-calibrated peak. An opaque or unbounded allocation fails closed. The target
-must fit both 70% of RAM and the final hard limit before target-shaped work.
-Loaded idle is itself admitted by an immutable-weight-metadata pre-load ledger
-with dtype expansion, loader/runtime/tokenizer bounds, fixed reserves, and the
-same process hard-stop; unknown conversion or allocation forbids model load.
-Three fresh-worker ramps at 25%, 50%, and 75% precede five exact-shape dry runs.
-The exact-shape runs use five clean worker starts. Each start first records ten
-unloaded host minutes,
-then loads the adopted read-only artifact, performs five fixed warm-ups, holds
-nominal/fair thermal state for 60 seconds, and captures exactly 600 paired
-loaded-idle samples at 100 ms. Per-start loaded idle is the sample maximum;
-the manifest uses the maximum across starts. Each target delta subtracts its
-own start's loaded-idle maximum from the maximum of sampled physical footprint
-and the process lifetime physical-footprint high-water; the campaign uses the
-maximum of all five deltas and analytical KV pool bytes. No failed calibration
-run is replaced. A platform without the lifetime high-water counter adds the
-separate frozen polling-gap allowance defined in the test specification and
-remains development-only. The unloaded window diagnoses ambient host state; it
-never substitutes for the post-load baseline in the envelope. Calibration
-executes in a separate MLX worker. A lifecycle supervisor sets and first proves an
-exact-OS `RLIMIT_AS`/Metal allocation hard-stop, applies the MLX cache bound,
-watches physical footprint and memory pressure at 10 ms, kills the worker at
-the frozen stop, and observes exit. If the hard-stop probe does not cover CPU
-and Metal unified-memory allocations, the host cannot run target-shaped
-calibration.
+logit, staging, command-buffer, output, and cache site, a `max(4 GiB, 25%)`
+runtime reserve, and a separate 25% bootstrap allowance. It never consumes the
+future calibrated peak. An opaque or unbounded allocation fails closed. The
+target must fit both 70% of RAM and the final planning limit before target-shaped
+work. Loaded idle is itself admitted by `preload-budget-v2`, whose generated
+lifetime graph separately charges simultaneously live source mappings,
+decompressed or dtype-expanded tensors, conversion scratch, tokenizer/config,
+loader/runtime, Metal staging and command buffers, caches, output buffers, and
+duplicate/tied-weight materializations. A known conversion uses a manifest-
+bound byte formula and coexistence interval; unknown conversion, lifetime, or
+allocation forbids model load. Three fresh-worker ramps at 25%, 50%, and 75%
+precede five exact-shape dry runs. The exact-shape runs use five clean worker
+starts. Each start first records ten unloaded host minutes, then loads the
+adopted read-only artifact, performs five fixed warm-ups, holds nominal/fair
+thermal state for 60 seconds, and captures exactly 600 paired loaded-idle
+samples at 100 ms. Per-start loaded idle is the sample maximum; the manifest
+uses the maximum across starts. Each target delta subtracts its own start's
+loaded-idle maximum from the maximum of sampled physical footprint and the
+process lifetime physical-footprint high-water; the campaign uses the maximum
+of all five deltas and analytical KV pool bytes. No failed calibration run is
+replaced. A platform without the lifetime high-water counter adds the separate
+frozen polling-gap allowance defined in the test specification and remains
+development-only. The unloaded window diagnoses ambient host state; it never
+substitutes for the post-load baseline in the envelope.
+
+Calibration executes in a separate MLX worker. Darwin `RLIMIT_AS` is not a
+qualified synchronous CPU/Metal memory cap and cannot authorize calibration or
+promotion. The a-priori ledgers are the admission authority. A 10 ms footprint
+and pressure watcher closes admission at the frozen advisory threshold and
+orders worker termination; the harness measures detection, signal, exit, and
+peak overshoot separately and retains every crossing. This is damage
+containment after observation, not a hard memory ceiling. Until an exact-OS
+mechanism is independently shown to synchronously bound every CPU and forced-
+synchronous Metal allocation path, target-shaped work may run only as explicitly
+non-promoting characterization on an operator-approved disposable or
+maintenance host, and every capacity promotion remains gated. This assessment
+authorizes no such run or hardware action, and characterization does not create
+a cap claim.
 
 | Model/config assumption | fp16 KV/token | 8K row | 32K row | 64K row | 128K row |
 |---|---:|---:|---:|---:|---:|
@@ -268,10 +280,18 @@ Work that can proceed now:
   and
   durable-disposition process plus a separate MLX inference worker. The worker
   alone owns model/Metal/scheduler state; replacement or publication requires
-  supervisor-observed `waitpid` exit, not a logical fence callback. A launchd-
-  owned lifecycle supervisor owns the worker PID/process group and fences it
-  even if the controller exits; the relaunched controller reconciles its durable
-  accepted-request log before publishing a generation;
+  supervisor-observed `waitpid` exit on the normal path, not a logical fence
+  callback. The supervisor and its non-escaping worker form one launchd-owned
+  process group with `AbandonProcessGroup=false`. Controller EOF is fenced by
+  the supervisor normally. Supervisor EOF is detected by the controller within
+  250 ms, admission closes, unresolved requests become durable
+  `generation_orphaned`, and launchd is asked to stop the exact boot/session/
+  generation-qualified job. Supervisor loss always leaves the generation
+  persistently orphaned: launchd termination and empty-group observations are
+  retained but grant no same-boot recovery authority. No worker restart, lease
+  reuse, or generation publication is permitted until the boot UUID changes.
+  The relaunched controller reads and enforces the orphan fence before any
+  lifecycle action and reconciles its durable accepted-request log;
 - preserve the serial path and strict/canary behavior;
 - bind accepted and queued work to the model/tokenizer/weights generation;
 - prove per-request output, stop, usage, receipt, cancellation, and block
@@ -309,9 +329,15 @@ campaign directory. Its closed loader manifest recursively binds every regular
 file in the model, runtime, and campaign trees. A privilege-separated adoption
 broker is the sole writer, closes all write descriptors, attaches read-only,
 unlinks the inaccessible backing pathname, and proves no writable descriptor
-or attachment remains. Static `otool` closure and actual loaded Mach-O/plugin
-snapshots bind every resource, metallib, executable, dependency/runtime-
-selection, and non-platform dynamic-library byte. It rejects symlinks,
+or attachment remains. Static `otool` closure and protected runtime audit evidence bind every
+resource, metallib, executable, dependency/runtime-selection, and non-platform
+dynamic-library byte. The proposed audit entrypoint may link only Apple
+platform images, installs capture before loading any manifest-bound inference/
+runtime library, and synchronously persists and acknowledges each add/remove
+event. A protected signed package, early-constructor transient-load fixture,
+and controller-loss/backpressure tests must prove this boundary before any
+runtime or capacity qualification; static closure and post-main snapshots alone
+leave the tuple blocked. It rejects symlinks,
 unreferenced shards, custom/remote code, undeclared selectors, and any pre/post
 identity or content mutation, derives non-dummy descriptor hashes, and rejects
 ambiguity before load.
@@ -354,18 +380,29 @@ a fixed-seed 50,000-resample hierarchical paired percentile bootstrap.
 Request-level resampling is descriptive only. Smaller samples report
 descriptive unavailable tails and cannot promote a tuple.
 
-The versioned disturbance matrix fixes all prompt bins, output ceilings,
-arrival cadence, concurrency cap, request/cell timeouts, request count, clean-
-start count, and injection boundary. It includes `REF-TTFT-512-R1`,
-`SLOW-CONSUMER-500-R1`, `CANCEL-2000-R1`, the three `WARM-SWAP-*-R1` cells,
-three whole-batch decode-step failures, and three request-local extension
-failures. Slow consumption freezes the socket receive buffer, 256-byte read
-size, first-read offset, 100 ms cadence, 16-frame delivery queue, and producer-
-blocked marker. Cancellation freezes 256-token prefill chunks, exact token
-indices, queue occupancy 16, and the attempted seventeenth frame; a missing
-boundary is a failed cell. MSB-01 additionally requires aggregate-TG
-coefficient of variation
-at most 10%; an unstable baseline cannot promote MSB-02/03.
+The versioned disturbance matrix separates a deterministic open-loop saturation
+oracle from closed-loop boundary campaigns. Each boundary campaign admits the
+next candidate only after the harness observes the exact funded-lease/queue
+precondition, and it freezes sent, accepted, rejected, boundary-reached, and
+terminal counts with reason codes. Every cancellation boundary class supplies 1,000 boundary-reached observations
+across ten clean starts. Active classes require 1,000 accepted requests; the
+queued class requires 1,000 pre-admission queue entries and zero accepted
+requests. No request index substitutes for those counts. The matrix includes
+`SATURATION-ORACLE-R1`, `REF-TTFT-512-R1`, `SLOW-CONSUMER-1000-R2`,
+`CANCEL-6000-R2`, the three `WARM-SWAP-*-R2` cells, three whole-batch decode-step
+failures, and three request-local extension failures. Slow consumption freezes
+the socket receive buffer, 256-byte read size, first-read offset, 100 ms cadence,
+16-frame delivery queue, and producer-blocked marker. Cancellation freezes
+256-token prefill chunks, exact token indices, queue occupancy 16, and the
+attempted seventeenth frame; a missing boundary is a failed cell. MSB-01
+additionally requires aggregate-TG coefficient of variation at most 10%; an
+unstable baseline cannot promote MSB-02/03.
+
+Every throughput uplift uses the lower endpoint of the frozen cluster-aware 95%
+interval; every latency or variability ceiling uses the upper endpoint.
+Baseline/candidate arms use preregistered matched clean-start blocks and paired
+hierarchical resampling. A point estimate can be reported but never promotes a
+tuple.
 
 ### Stage E — separately authorized canary
 
@@ -389,14 +426,17 @@ not an independent escape hatch: the resident generation is always in serial
 or batch execution mode, never both. The provider controller owns admission,
 durable request dispositions, receipts, and generation publication. A separate
 inference worker exclusively owns MLX, Metal, scheduler, pool, and leases over
-versioned bounded local IPC. A launchd-owned lifecycle supervisor exclusively
-owns the worker PID/process group and performs the exit fence even on controller
-loss. Scheduler failure moves it to draining;
-only invisible request-local work may reacquire a serial lease after full
-quiescence. A deadline overrun fails the generation; the controller requests
-exit, the supervisor sends SIGKILL by ten seconds and observes `waitpid`, and
-the controller durably resolves all
-accepted request IDs before replacement. A callback without observed process
+versioned bounded local IPC. A launchd-owned lifecycle supervisor exclusively owns the worker on the normal
+path and records child `waitpid` exit. Controller loss is handled by that
+supervisor. On supervisor loss, the controller uses the separate launchd job-
+instance/process-group protocol above; it never claims that a restarted parent
+can `waitpid` an orphan. Supervisor loss leaves a durable orphan fence until the
+boot UUID changes, regardless of later group-empty observation. Scheduler
+failure moves the generation to draining; only invisible request-local work may
+reacquire a serial lease after full quiescence. A deadline overrun fails the
+generation; on the normal parent path, the controller requests exit, the
+supervisor sends SIGKILL by ten seconds and observes `waitpid`, and the
+controller durably resolves all accepted request IDs before replacement. A callback without observed process
 exit grants no fencing authority. No in-process lease or resident model is
 reused. Warm
 swap similarly requires old-worker exit and all leases, accepted work, blocks,
@@ -486,6 +526,12 @@ evidence qualifies a larger production tuple.
 - The current 3B test does not deterministically select its snapshot or bind
   real hashes into its descriptor; its exact-byte R3 manifest remains
   exploratory evidence.
+- No reviewed exact-OS mechanism synchronously bounds every CPU and forced-
+  synchronous Metal committed-memory path. Darwin `RLIMIT_AS` and asynchronous
+  sampling do not qualify; target-shaped results remain non-promoting.
+- No protected, signed pre-runtime audit launcher has proved complete non-
+  platform load/unload capture with the early-constructor and evidence-channel
+  failure fixtures.
 - No clean maintenance window has been established for sustained benchmarks
   on the current actively serving Mac.
 - No protected Xcode 16.4 release-candidate package, final standalone/Malibu
