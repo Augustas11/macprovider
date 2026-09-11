@@ -2149,8 +2149,7 @@ struct BYOMDiscoveryEnvironment: Sendable {
         openAICompatibleOrigin: String? = nil,
         lmstudioOrigin: String? = nil,
         llamacppOrigin: String? = nil,
-        llamacppModelRoot: String? = nil,
-        llamacppModelPath: String? = nil,
+        llamacppSelector: BYOMLlamaCppArtifactSelector = .none,
         environment: [String: String] = ProcessInfo.processInfo.environment,
         homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
     ) -> BYOMDiscoveryEnvironment {
@@ -2163,8 +2162,8 @@ struct BYOMDiscoveryEnvironment: Sendable {
             llamacppOrigin: llamacppOrigin,
             ollamaModelsRoot: BYOMOllamaModelStore.defaultRoot(environment: environment, homeDirectory: homeDirectory),
             lmstudioModelsRoot: BYOMLMStudioModelStore.defaultRoot(environment: environment, homeDirectory: homeDirectory),
-            llamacppModelRoot: llamacppModelRoot.map(URL.init(fileURLWithPath:)) ?? BYOMLlamaCppModelStore.defaultRoot(environment: environment),
-            llamacppModelPath: llamacppModelPath.map(URL.init(fileURLWithPath:)) ?? BYOMLlamaCppModelStore.defaultPinnedFile(environment: environment),
+            llamacppModelRoot: llamacppSelector.root,
+            llamacppModelPath: llamacppSelector.pinnedFile,
             artifactDigestCacheURL: BYOMArtifactDigestCache.defaultURL(homeDirectory: homeDirectory)
         )
     }

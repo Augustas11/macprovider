@@ -305,6 +305,54 @@ final class BYOMLoopbackAdapterTests: XCTestCase {
         XCTAssertFalse(try ModelSwitchingWireCodec.encode(document).contains(pinnedPath), "pinned path leaked to the wire")
     }
 
+    // MARK: - llama.cpp selector precedence (audit MEDIUM)
+
+    func testLlamaCppSelectorIsDecidedOnceFromOneSource() throws {
+        typealias S = BYOMLlamaCppArtifactSelector
+        let env = ["MACPROVIDER_LLAMACPP_MODEL_ROOT": "/env/root", "MACPROVIDER_LLAMACPP_MODEL_PATH": "/env/pin.gguf"]
+
+        // An explicit CLI root ignores BOTH environment selectors: the inherited pin cannot defeat it.
+        let cliRoot = try S.resolve(cliRoot: "/cli/root", cliPath: nil, environment: env)
+        XCTAssertEqual(cliRoot.root?.path, "/cli/root"); XCTAssertNil(cliRoot.pinnedFile)
+        let cliPath = try S.resolve(cliRoot: nil, cliPath: "/cli/pin.gguf", environment: env)
+        XCTAssertNil(cliPath.root); XCTAssertEqual(cliPath.pinnedFile?.path, "/cli/pin.gguf")
+
+        // Two selectors from the same source are an error, not a precedence rule.
+        XCTAssertThrowsError(try S.resolve(cliRoot: "/a", cliPath: "/b.gguf", environment: [:])) {
+            XCTAssertEqual($0 as? S.SelectionError, .conflictingCLISelectors)
+        }
+        XCTAssertThrowsError(try S.resolve(cliRoot: nil, cliPath: nil, environment: env)) {
+            XCTAssertEqual($0 as? S.SelectionError, .conflictingEnvironmentSelectors)
+        }
+
+        // Environment is honoured only when the CLI says nothing; blank strings count as nothing.
+        XCTAssertEqual(try S.resolve(cliRoot: "  ", cliPath: nil, environment: ["MACPROVIDER_LLAMACPP_MODEL_ROOT": "/env/root"]).root?.path, "/env/root")
+        XCTAssertEqual(try S.resolve(cliRoot: nil, cliPath: nil, environment: [:]), .none)
+    }
+
+    func testLlamaCppEnvironmentPinCannotDefeatAnExplicitCLIRootEndToEnd() throws {
+        let root = try temporaryDirectory("byom-llamacpp-precedence")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let approved = root.appendingPathComponent("approved", isDirectory: true)
+        let approvedFile = approved.appendingPathComponent("tiny-q4.gguf")
+        let rogue = root.appendingPathComponent("rogue/tiny-q4.gguf")
+        try write(ggufBytes, to: approvedFile); try write(ggufBytes, to: rogue)
+        let env = BYOMDiscoveryEnvironment.production(
+            namespacePath: root.appendingPathComponent("ns").path,
+            mlxCacheDir: root.appendingPathComponent("hf").path,
+            ollamaOrigin: nil,
+            llamacppOrigin: "http://127.0.0.1:8080",
+            llamacppSelector: try BYOMLlamaCppArtifactSelector.resolve(cliRoot: approved.path, cliPath: nil, environment: ["MACPROVIDER_LLAMACPP_MODEL_PATH": rogue.path]),
+            homeDirectory: root
+        )
+        XCTAssertNil(env.llamacppModelPath, "the inherited pin leaked into the environment despite an explicit CLI root")
+        XCTAssertEqual(env.llamacppModelRoot?.path, approved.path)
+        // The rogue file, served by the runtime, is outside the approved root: no identity.
+        XCTAssertThrowsError(try env.artifactDigests.computeEvidence(runtimeSource: "llamacpp_loopback", servedModelRef: "llamacpp:tiny-q4", runtimeArtifactPath: rogue.resolvingSymlinksInPath().path))
+        // The approved file, served by the runtime, hashes.
+        XCTAssertNoThrow(try env.artifactDigests.computeEvidence(runtimeSource: "llamacpp_loopback", servedModelRef: "llamacpp:tiny-q4", runtimeArtifactPath: approvedFile.resolvingSymlinksInPath().path))
+    }
+
     // MARK: - Failure classes map to closed warning codes
 
     func testMalformedInventoryEmitsWarningNotCandidate() async throws {

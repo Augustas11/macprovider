@@ -79,8 +79,7 @@ struct ModelsDiscoverCommand: AsyncParsableCommand {
             openAICompatibleOrigin: skipOpenaiCompatible ? nil : openaiCompatibleOrigin,
             lmstudioOrigin: skipLmstudio ? nil : lmstudioOrigin,
             llamacppOrigin: skipLlamacpp ? nil : llamacppOrigin,
-            llamacppModelRoot: llamacppModelRoot,
-            llamacppModelPath: llamacppModelPath
+            llamacppSelector: try BYOMLlamaCppArtifactSelector.resolve(cliRoot: llamacppModelRoot, cliPath: llamacppModelPath)
         )
         let document = await BYOMDiscoveryRunner(environment: environment).discover()
         for warning in document.warnings.sorted() {
@@ -150,8 +149,7 @@ struct ModelsEvaluateCommand: AsyncParsableCommand {
             openAICompatibleOrigin: skipOpenaiCompatible ? nil : openaiCompatibleOrigin,
             lmstudioOrigin: skipLmstudio ? nil : lmstudioOrigin,
             llamacppOrigin: skipLlamacpp ? nil : llamacppOrigin,
-            llamacppModelRoot: llamacppModelRoot,
-            llamacppModelPath: llamacppModelPath
+            llamacppSelector: try BYOMLlamaCppArtifactSelector.resolve(cliRoot: llamacppModelRoot, cliPath: llamacppModelPath)
         )
         let document = await BYOMEvaluationRunner(target: candidate, environment: environment).evaluate()
         for warning in document.warnings.sorted() {
@@ -246,8 +244,7 @@ struct ModelsOfferCommand: AsyncParsableCommand {
             openAICompatibleOrigin: skipOpenaiCompatible ? nil : openaiCompatibleOrigin,
             lmstudioOrigin: skipLmstudio ? nil : lmstudioOrigin,
             llamacppOrigin: skipLlamacpp ? nil : llamacppOrigin,
-            llamacppModelRoot: llamacppModelRoot,
-            llamacppModelPath: llamacppModelPath
+            llamacppSelector: try BYOMLlamaCppArtifactSelector.resolve(cliRoot: llamacppModelRoot, cliPath: llamacppModelPath)
         )
         if dryRun {
             let document = await BYOMOfferDryRunRunner(target: candidate, environment: environment).dryRun()
@@ -379,8 +376,7 @@ struct ModelsAdmissionStatusCommand: AsyncParsableCommand {
                 openAICompatibleOrigin: skipOpenaiCompatible ? nil : openaiCompatibleOrigin,
                 lmstudioOrigin: skipLmstudio ? nil : lmstudioOrigin,
                 llamacppOrigin: skipLlamacpp ? nil : llamacppOrigin,
-                llamacppModelRoot: llamacppModelRoot,
-                llamacppModelPath: llamacppModelPath
+                llamacppSelector: try BYOMLlamaCppArtifactSelector.resolve(cliRoot: llamacppModelRoot, cliPath: llamacppModelPath)
             )
             let client = try resolved.coordinatorURL.map { try BYOMModelAdmissionClient(coordinatorURL: $0) }
             let runtime = BYOMModelAdmissionRuntime(
@@ -483,8 +479,7 @@ struct ModelsAdmissionWithdrawCommand: AsyncParsableCommand {
                 openAICompatibleOrigin: skipOpenaiCompatible ? nil : openaiCompatibleOrigin,
                 lmstudioOrigin: skipLmstudio ? nil : lmstudioOrigin,
                 llamacppOrigin: skipLlamacpp ? nil : llamacppOrigin,
-                llamacppModelRoot: llamacppModelRoot,
-                llamacppModelPath: llamacppModelPath
+                llamacppSelector: try BYOMLlamaCppArtifactSelector.resolve(cliRoot: llamacppModelRoot, cliPath: llamacppModelPath)
             )
             let client = try BYOMModelAdmissionClient(coordinatorURL: resolved.coordinatorURL)
             let runtime = BYOMModelAdmissionRuntime(
@@ -592,8 +587,7 @@ struct ModelsCatalogEconomicsCommand: AsyncParsableCommand {
             openAICompatibleOrigin: skipOpenaiCompatible ? nil : openaiCompatibleOrigin,
             lmstudioOrigin: skipLmstudio ? nil : lmstudioOrigin,
             llamacppOrigin: skipLlamacpp ? nil : llamacppOrigin,
-            llamacppModelRoot: llamacppModelRoot,
-            llamacppModelPath: llamacppModelPath
+            llamacppSelector: try BYOMLlamaCppArtifactSelector.resolve(cliRoot: llamacppModelRoot, cliPath: llamacppModelPath)
         )
         // BYOM identity is resolved against the compiled-in release through the
         // one offline qualified selection (`BYOMCatalogMatcher()`), the same

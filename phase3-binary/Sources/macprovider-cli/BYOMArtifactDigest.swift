@@ -388,6 +388,53 @@ struct BYOMLMStudioModelStore: BYOMGGUFArtifactLocator, Sendable {
     }
 }
 
+/// #1478 audit (MEDIUM): which llama.cpp file may be hashed is decided ONCE,
+/// from ONE source. If either CLI selector is given, both environment
+/// selectors are ignored, so an inherited `MACPROVIDER_LLAMACPP_MODEL_PATH`
+/// can never silently defeat an explicit `--llamacpp-model-root`. Two
+/// selectors from the same source are a conflict and an explicit error, not
+/// a precedence rule the operator has to know about.
+struct BYOMLlamaCppArtifactSelector: Equatable, Sendable {
+    let root: URL?
+    let pinnedFile: URL?
+
+    static let none = BYOMLlamaCppArtifactSelector(root: nil, pinnedFile: nil)
+
+    enum SelectionError: Error, Equatable, CustomStringConvertible {
+        case conflictingCLISelectors
+        case conflictingEnvironmentSelectors
+
+        var description: String {
+            switch self {
+            case .conflictingCLISelectors:
+                return "--llamacpp-model-root and --llamacpp-model-path are mutually exclusive; pass exactly one"
+            case .conflictingEnvironmentSelectors:
+                return "MACPROVIDER_LLAMACPP_MODEL_ROOT and MACPROVIDER_LLAMACPP_MODEL_PATH are both set; unset one (or pass a --llamacpp-model-* flag, which ignores both)"
+            }
+        }
+    }
+
+    static func resolve(
+        cliRoot: String?,
+        cliPath: String?,
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) throws -> BYOMLlamaCppArtifactSelector {
+        func clean(_ value: String?) -> String? {
+            guard let value else { return nil }
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+        }
+        let root = clean(cliRoot), path = clean(cliPath)
+        if root != nil || path != nil {
+            if root != nil && path != nil { throw SelectionError.conflictingCLISelectors }
+            return BYOMLlamaCppArtifactSelector(root: root.map(URL.init(fileURLWithPath:)), pinnedFile: path.map(URL.init(fileURLWithPath:)))
+        }
+        let envRoot = clean(environment["MACPROVIDER_LLAMACPP_MODEL_ROOT"]), envPath = clean(environment["MACPROVIDER_LLAMACPP_MODEL_PATH"])
+        if envRoot != nil && envPath != nil { throw SelectionError.conflictingEnvironmentSelectors }
+        return BYOMLlamaCppArtifactSelector(root: envRoot.map(URL.init(fileURLWithPath:)), pinnedFile: envPath.map(URL.init(fileURLWithPath:)))
+    }
+}
+
 /// Locates the GGUF file a llama.cpp `llama-server` model is served from,
 /// under an OPERATOR-declared root (`--llamacpp-model-root` /
 /// `MACPROVIDER_LLAMACPP_MODEL_ROOT`; no default). Filesystem only, from the
@@ -424,19 +471,6 @@ struct BYOMLlamaCppModelStore: BYOMGGUFArtifactLocator, Sendable {
         self.fileManager = fileManager
     }
 
-    static func defaultRoot(environment: [String: String] = ProcessInfo.processInfo.environment) -> URL? {
-        if let models = environment["MACPROVIDER_LLAMACPP_MODEL_ROOT"], !models.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return URL(fileURLWithPath: models)
-        }
-        return nil
-    }
-
-    static func defaultPinnedFile(environment: [String: String] = ProcessInfo.processInfo.environment) -> URL? {
-        if let path = environment["MACPROVIDER_LLAMACPP_MODEL_PATH"], !path.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return URL(fileURLWithPath: path)
-        }
-        return nil
-    }
 
     /// The served reference the adapter emits for a llama-server model id:
     /// a path-shaped id becomes its file stem, anything else is kept as-is.
