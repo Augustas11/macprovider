@@ -472,7 +472,7 @@ def normalize_model_key(model: str) -> str:
     def served_alias(canonical_vendor: str) -> bool:
         return namespace in {"", "mlx-community", canonical_vendor}
 
-    if namespace == "meta-llama" and key.startswith("llama-"):
+    if served_alias("meta-llama") and key.startswith("llama-"):
         return "meta-llama/" + key
     if served_alias("meta-llama") and key.startswith("meta-llama-"):
         return "meta-llama/" + key[len("meta-"):]

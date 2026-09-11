@@ -75,7 +75,7 @@ func NormalizeModelKey(model string) string {
 		key = strings.TrimSuffix(key, suffix)
 	}
 	switch {
-	case namespace == "meta-llama" && strings.HasPrefix(key, "llama-"):
+	case servedAliasNamespace(namespace, "meta-llama") && strings.HasPrefix(key, "llama-"):
 		return "meta-llama/" + key
 	// Magic-prefix collapses are namespace-scoped: only the empty /
 	// mlx-community / canonical-vendor namespaces may rewrite into the

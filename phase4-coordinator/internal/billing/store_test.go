@@ -1426,17 +1426,13 @@ INSERT INTO settlement_receipt_verdicts (
 func TestRecoverLedger_ExistingCreditUsesPersistedRateContract(t *testing.T) {
 	reqStore, store := newRequestAndBillingStores(t)
 	cfg := testRewards()
-	cfg.RateCard["meta-llama/llama-3.2-3b-instruct"] = RateCardEntry{
-		PromptCreditsPerMtok:     13500,
-		CompletionCreditsPerMtok: 27000,
-	}
 	ts := time.Date(2026, 8, 5, 5, 11, 0, 0, time.UTC)
 	snapshotID, err := store.InsertConfigSnapshot(context.Background(), cfg, ts.Add(-time.Minute))
 	if err != nil {
 		t.Fatal(err)
 	}
 	prompt, completion := int64(40), int64(34)
-	model := "mlx-community/Llama-3.2-3B-Instruct-4bit"
+	model := "obscure-unlisted-model"
 	row := requestlog.Row{
 		TSUtc:              ts,
 		RequestID:          "historical-rate-contract",
@@ -1648,7 +1644,7 @@ func TestRecoverLedger_QuarantinesPersistedMultiplierShareDrift(t *testing.T) {
 func TestRecoverLedger_QuarantinesPostCutoffDefaultRateTamper(t *testing.T) {
 	reqStore, store := newRequestAndBillingStores(t)
 	cfg := testRewards()
-	cfg.RateCard["llama-3.2-3b-instruct"] = RateCardEntry{
+	cfg.RateCard["meta-llama/llama-3.2-3b-instruct"] = RateCardEntry{
 		PromptCreditsPerMtok:     13500,
 		CompletionCreditsPerMtok: 27000,
 	}
@@ -1724,7 +1720,7 @@ func TestRecoverLedger_QuarantinesPostCutoffDefaultRateTamper(t *testing.T) {
 func TestRecoverLedger_QuarantinesPreCutoffNormalizedDefaultRateTamper(t *testing.T) {
 	reqStore, store := newRequestAndBillingStores(t)
 	cfg := testRewards()
-	cfg.RateCard["llama-3.2-3b-instruct"] = RateCardEntry{
+	cfg.RateCard["meta-llama/llama-3.2-3b-instruct"] = RateCardEntry{
 		PromptCreditsPerMtok:     13500,
 		CompletionCreditsPerMtok: 27000,
 	}
