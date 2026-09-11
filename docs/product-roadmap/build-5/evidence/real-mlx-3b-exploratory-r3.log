@@ -1,0 +1,18 @@
+[0/1] Planning build
+Test Suite 'Selected tests' started at 2026-09-11 10:17:36.285.
+Test Suite 'phase3-binaryPackageTests.xctest' started at 2026-09-11 10:17:36.286.
+Test Suite 'PagedKVParityTests' started at 2026-09-11 10:17:36.286.
+Test Case '-[macprovider_cliTests.PagedKVParityTests testAC1_DenseLlama_3_2_3B_ParityWithRealGather]' started.
+Test Case '-[macprovider_cliTests.PagedKVParityTests testAC1_DenseLlama_3_2_3B_ParityWithRealGather]' passed (5.944 seconds).
+Test Suite 'PagedKVParityTests' passed at 2026-09-11 10:17:42.230.
+	 Executed 1 test, with 0 failures (0 unexpected) in 5.944 (5.944) seconds
+Test Suite 'phase3-binaryPackageTests.xctest' passed at 2026-09-11 10:17:42.230.
+	 Executed 1 test, with 0 failures (0 unexpected) in 5.944 (5.944) seconds
+Test Suite 'Selected tests' passed at 2026-09-11 10:17:42.230.
+	 Executed 1 test, with 0 failures (0 unexpected) in 5.944 (5.945) seconds
+  [Llama-3.2-3B-Instruct-4bit] loaded; layers=28; promptTokens=15; newCache types=["KVCacheSimple": 28]
+  [AC-1] Llama-3.2-3B-Instruct-4bit: PARITY PASS 40/40 tokens; gatherKernelCalls=2240; maxLogicalBlocks=4; nonIdentityPermutation=true
+◇ Test run started.
+↳ Testing Library Version: 1902
+↳ Target Platform: arm64e-apple-macos14.0
+✔ Test run with 0 tests in 0 suites passed after 0.001 seconds.
