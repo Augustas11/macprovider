@@ -40,6 +40,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
             pagedKVConfig: PagedKVConfig(enabled: true, blockSizeTokens: 32, maxPhysicalBlocks: 64),
             maxBatch: 2,
             continuousBatchingMode: .on,
+            continuousBatchingDurableReplayAuthorityAvailable: true,
             warmSwapEnabled: false,
             pagedKVObservedRuntimeIdentity: observedIdentity,
             pagedKVHardwareSizingProof: proof,
@@ -361,6 +362,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
             pagedKVConfig: PagedKVConfig(enabled: true, blockSizeTokens: 32, maxPhysicalBlocks: 64),
             maxBatch: 2,
             continuousBatchingMode: .on,
+            continuousBatchingDurableReplayAuthorityAvailable: true,
             warmSwapEnabled: false,
             pagedKVObservedRuntimeIdentity: Self.observedIdentity(from: proof),
             pagedKVHardwareSizingProof: proof,
@@ -651,25 +653,24 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         }
     }
 
-    func testStickyRequestsRemainRejectedBeforeFRPKV10CacheBridge() async throws {
-        let backend = RuntimeBridgeScriptedBackend(scripts: [:])
+    func testConversationKeyWithoutRetainedHandoffRunsAsFreshSchedulerRow() async throws {
+        let backend = RuntimeBridgeScriptedBackend(scripts: ["keyed": [7]])
         let scheduler = try Self.makeScheduler(maxActiveRows: 2, backend: backend)
 
-        do {
-            _ = try await scheduler.submit(.init(
-                id: "sticky",
-                conversationKey: "conversation-1",
-                promptTokens: [1],
-                maxOutputTokens: 1,
-                temperature: 0.0,
-                topP: 1.0
-            ))
-            XCTFail("sticky requests must not enter the Increment 1 batch path")
-        } catch ContinuousBatchSchedulerError.unsupported(let reason) {
-            XCTAssertEqual(reason, "keyed_or_sticky_cache_reuse_deferred_until_paged_kv_cache_bridge")
-        }
+        let result = try await scheduler.submit(.init(
+            id: "keyed",
+            conversationKey: "conversation-1",
+            promptTokens: [1],
+            maxOutputTokens: 1,
+            temperature: 0.0,
+            topP: 1.0
+        ))
         let decodeCallCount = await backend.decodeCallCount()
-        XCTAssertEqual(decodeCallCount, 0)
+        XCTAssertEqual(result.terminalStatus, .length)
+        XCTAssertEqual(result.conversationKey, "conversation-1")
+        XCTAssertEqual(result.cachedPromptTokens, 0)
+        XCTAssertEqual(result.outputTokens, [7])
+        XCTAssertEqual(decodeCallCount, 1)
     }
 
     private static func makeScheduler(
@@ -817,6 +818,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
             pagedKVConfig: PagedKVConfig(enabled: true, blockSizeTokens: 32, maxPhysicalBlocks: 64),
             maxBatch: 2,
             continuousBatchingMode: .on,
+            continuousBatchingDurableReplayAuthorityAvailable: true,
             warmSwapEnabled: false,
             pagedKVObservedRuntimeIdentity: Self.observedIdentity(from: proof),
             pagedKVHardwareSizingProof: proof,

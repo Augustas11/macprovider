@@ -575,6 +575,79 @@ final class ServingKnobsConfigTests: XCTestCase {
         XCTAssertNoThrow(try ServeCommand.runContinuousBatchingPreflight(config))
     }
 
+    func testCanarySerialRoutesCachedHitWithoutRetainedPagedHandoff() {
+        XCTAssertTrue(ModelRuntime.canaryShouldSerialRouteCachedHitMissingRetainedHandoff(
+            mode: .canary,
+            cachedPromptTokens: 32,
+            hasRetainedPagedKVHandoff: false
+        ))
+        XCTAssertFalse(ModelRuntime.canaryShouldSerialRouteCachedHitMissingRetainedHandoff(
+            mode: .on,
+            cachedPromptTokens: 32,
+            hasRetainedPagedKVHandoff: false
+        ))
+        XCTAssertFalse(ModelRuntime.canaryShouldSerialRouteCachedHitMissingRetainedHandoff(
+            mode: .canary,
+            cachedPromptTokens: 0,
+            hasRetainedPagedKVHandoff: false
+        ))
+        XCTAssertFalse(ModelRuntime.canaryShouldSerialRouteCachedHitMissingRetainedHandoff(
+            mode: .canary,
+            cachedPromptTokens: 32,
+            hasRetainedPagedKVHandoff: true
+        ))
+
+        let capability = ContinuousBatchingCapability(
+            mode: .canary,
+            maxActiveRows: 2,
+            queueLimit: 4,
+            descriptor: nil,
+            unsupportedReason: .stickyCacheHandoffUnavailable
+        )
+        XCTAssertEqual(
+            ContinuousBatchingPolicy.serialRouteTelemetryLine(capability),
+            "event=batching_unsupported action=serial_routed reason=sticky_cache_handoff_unavailable\n"
+        )
+    }
+
+    func testRuntimePolicyKeepsConversationKeysOutOfCurrentBatchingRollout() {
+        let canaryCapability = ContinuousBatchingPolicy.capability(
+            mode: .canary,
+            maxBatch: 2,
+            queueLimit: nil,
+            kvBits: nil,
+            draftConfigured: false,
+            requestHasConversationKey: true,
+            schedulerBackendAvailable: true,
+            pagedKVDecision: .attached(Self.pagedKVDescriptor()),
+            requestedTuple: Self.continuousBatchingTuple()
+        )
+        XCTAssertEqual(canaryCapability.unsupportedReason, .conversationKeyRolloutUnavailable)
+        XCTAssertTrue(canaryCapability.shouldUseSerialPath)
+        XCTAssertEqual(
+            ContinuousBatchingPolicy.serialRouteTelemetryLine(canaryCapability),
+            "event=batching_unsupported action=serial_routed reason=conversation_key_rollout_unavailable\n"
+        )
+
+        let strictCapability = ContinuousBatchingPolicy.capability(
+            mode: .on,
+            maxBatch: 2,
+            queueLimit: nil,
+            kvBits: nil,
+            draftConfigured: false,
+            requestHasConversationKey: true,
+            schedulerBackendAvailable: true,
+            pagedKVDecision: .attached(Self.pagedKVDescriptor()),
+            requestedTuple: Self.continuousBatchingTuple()
+        )
+        XCTAssertEqual(strictCapability.unsupportedReason, .conversationKeyRolloutUnavailable)
+        XCTAssertThrowsError(try ContinuousBatchingPolicy.validateStrictStartup(strictCapability)) { error in
+            let apiError = error as? APIError
+            XCTAssertEqual(apiError?.status, 400)
+            XCTAssertEqual(apiError?.code, "continuous_batching_conversation_key_rollout_unavailable")
+        }
+    }
+
     func testContinuousBatchingPolicyReportsKvBitsBeforeLocalCapability() {
         let capability = ContinuousBatchingPolicy.capability(
             mode: .on,
@@ -692,19 +765,59 @@ final class ServingKnobsConfigTests: XCTestCase {
         XCTAssertTrue(rejected.shouldUseSerialPath)
     }
 
-    func testStickyCacheEligibleRequestSerialRoutesUntilBridgeExists() {
+    func testStickyCacheEligibleRequestUsesLocalCapabilityGateAfterFRPKV10() {
+        let descriptor = PagedKVDescriptor(
+            blockSizeTokens: 16,
+            maxPhysicalBlocks: 32,
+            modelID: "catalog/model",
+            modelSHA256: String(repeating: "a", count: 64),
+            tokenizerSHA256: String(repeating: "b", count: 64),
+            chatTemplateSHA256: String(repeating: "c", count: 64),
+            supportedModelFamilies: ["qwen"],
+            supportsMoEDispatch: false,
+            hardwareClass: "m4-max-64gb",
+            metallibSHA256: String(repeating: "d", count: 64),
+            kernelIdentifier: "paged-attention-v1",
+            parityLabel: "dense-greedy-parity"
+        )
+        let tuple = ContinuousBatchingRequestedTuple(
+            modelID: descriptor.modelID,
+            modelSHA256: descriptor.modelSHA256,
+            tokenizerSHA256: descriptor.tokenizerSHA256,
+            chatTemplateSHA256: descriptor.chatTemplateSHA256,
+            cacheClass: "KVCacheSimple",
+            kvDType: .fp16,
+            requiresMoE: false,
+            hardwareClass: "m4-max-64gb",
+            metallibSHA256: descriptor.metallibSHA256,
+            kernelIdentifier: descriptor.kernelIdentifier,
+            parityLabel: descriptor.parityLabel,
+            poolEpoch: 1
+        )
+        let supported = ContinuousBatchingPolicy.capability(
+            mode: .canary,
+            maxBatch: 2,
+            queueLimit: nil,
+            kvBits: nil,
+            draftConfigured: false,
+            schedulerBackendAvailable: true,
+            pagedKVDecision: .attached(descriptor),
+            requestedTuple: tuple
+        )
+        XCTAssertNil(supported.unsupportedReason)
+        XCTAssertFalse(supported.shouldUseSerialPath)
+
         let capability = ContinuousBatchingPolicy.capability(
             mode: .canary,
             maxBatch: 2,
             queueLimit: nil,
             kvBits: nil,
             draftConfigured: false,
-            stickyCacheEligible: true,
             schedulerBackendAvailable: false,
             pagedKVDecision: .disabled,
             requestedTuple: nil
         )
-        XCTAssertEqual(capability.unsupportedReason, .stickyCacheBridgeUnavailable)
+        XCTAssertEqual(capability.unsupportedReason, .pagedKVDisabled)
         XCTAssertTrue(capability.shouldUseSerialPath)
     }
 
@@ -715,7 +828,6 @@ final class ServingKnobsConfigTests: XCTestCase {
             queueLimit: nil,
             kvBits: nil,
             draftConfigured: false,
-            stickyCacheEligible: false,
             requestStateRepresentable: false,
             schedulerBackendAvailable: true,
             pagedKVDecision: .disabled,
@@ -735,7 +847,6 @@ final class ServingKnobsConfigTests: XCTestCase {
             queueLimit: nil,
             kvBits: nil,
             draftConfigured: false,
-            stickyCacheEligible: false,
             requestStateRepresentable: false,
             schedulerBackendAvailable: true,
             pagedKVDecision: .disabled,
@@ -836,7 +947,6 @@ final class ServingKnobsConfigTests: XCTestCase {
             queueLimit: nil,
             kvBits: nil,
             draftConfigured: false,
-            stickyCacheEligible: false,
             requestStateRepresentable: true,
             schedulerBackendAvailable: false,
             pagedKVDecision: .disabled,
@@ -913,21 +1023,26 @@ final class ServingKnobsConfigTests: XCTestCase {
         }
     }
 
-    func testStrictOnRejectsStickyRequestWithoutCacheBridge() {
+    func testStrictOnRejectsStickyRequestWhenPagedKVUnavailable() {
         let capability = ContinuousBatchingPolicy.capability(
             mode: .on,
             maxBatch: 2,
             queueLimit: nil,
             kvBits: nil,
             draftConfigured: false,
-            stickyCacheEligible: true,
             schedulerBackendAvailable: false,
             pagedKVDecision: .disabled,
             requestedTuple: nil
         )
-        XCTAssertEqual(capability.unsupportedReason, .stickyCacheBridgeUnavailable)
+        XCTAssertEqual(capability.unsupportedReason, .pagedKVDisabled)
         XCTAssertFalse(capability.shouldUseSerialPath)
-        XCTAssertThrowsError(try ContinuousBatchingPolicy.validateStrictStartup(capability))
+        XCTAssertThrowsError(try ContinuousBatchingPolicy.validateStrictStartup(capability)) { error in
+            guard let apiError = error as? APIError else {
+                return XCTFail("expected APIError, got \(error)")
+            }
+            XCTAssertEqual(apiError.status, 503)
+            XCTAssertEqual(apiError.code, "continuous_batching_local_capability_unavailable")
+        }
         XCTAssertNil(ContinuousBatchingPolicy.serialRouteTelemetryLine(capability))
     }
 
@@ -1032,6 +1147,53 @@ final class ServingKnobsConfigTests: XCTestCase {
         }
     }
 
+    func testRuntimeCanarySerialRoutesConversationKeyBeforeSchedulerAdmission() async throws {
+        let runtime = ModelRuntime(
+            modelID: "fixture-model",
+            maxBatch: 2,
+            continuousBatchingMode: .canary,
+            warmSwapEnabled: false,
+            loader: { _ in throw TestRuntimeError.notExpected },
+            testCompletion: { _, _ in
+                CompletionResult(content: "ok", finishReason: "stop", promptTokens: 1, completionTokens: 1)
+            }
+        )
+        let request = try Self.request(model: "fixture-model", conversationKey: "conv:first-rollout-scope")
+        let handle = try await runtime.acquireRequestHandle(request)
+        do {
+            try await runtime.preflight(request, with: handle)
+            await runtime.unregisterInFlight(handle.registrationID)
+        } catch {
+            await runtime.unregisterInFlight(handle.registrationID)
+            throw error
+        }
+    }
+
+    func testRuntimeStrictRejectsConversationKeyBeforeSchedulerAdmission() async throws {
+        let runtime = ModelRuntime(
+            modelID: "fixture-model",
+            maxBatch: 2,
+            continuousBatchingMode: .on,
+            warmSwapEnabled: false,
+            loader: { _ in throw TestRuntimeError.notExpected },
+            testCompletion: { _, _ in
+                XCTFail("strict keyed continuous batching rejection must happen before inference")
+                return CompletionResult(content: "unexpected", finishReason: "stop", promptTokens: 1, completionTokens: 1)
+            }
+        )
+        let request = try Self.request(model: "fixture-model", conversationKey: "conv:first-rollout-scope")
+        let handle = try await runtime.acquireRequestHandle(request)
+        do {
+            try await runtime.preflight(request, with: handle)
+            await runtime.unregisterInFlight(handle.registrationID)
+            XCTFail("expected keyed continuous batching preflight rejection")
+        } catch let error as APIError {
+            await runtime.unregisterInFlight(handle.registrationID)
+            XCTAssertEqual(error.status, 400)
+            XCTAssertEqual(error.code, "continuous_batching_conversation_key_rollout_unavailable")
+        }
+    }
+
     func testRuntimeReceivesMaxBatch() async throws {
         let runtime = ModelRuntime(
             modelID: "test-model",
@@ -1103,6 +1265,7 @@ final class ServingKnobsConfigTests: XCTestCase {
             pagedKVConfig: PagedKVConfig(enabled: true, blockSizeTokens: 32, maxPhysicalBlocks: 64),
             maxBatch: 2,
             continuousBatchingMode: .on,
+            continuousBatchingDurableReplayAuthorityAvailable: true,
             warmSwapEnabled: false,
             pagedKVObservedRuntimeIdentity: observedIdentity,
             pagedKVHardwareSizingProof: proof,
@@ -1152,6 +1315,55 @@ final class ServingKnobsConfigTests: XCTestCase {
         XCTAssertNotNil(noBackendCapability.unsupportedReason)
     }
 
+    func testRuntimeContinuousBatchingRequiresDurableReplayAuthorityBeforeAttachCapability() async throws {
+        let modelID = "mlx-community/Qwen-Test"
+        let modelSHA = String(repeating: "a", count: 64)
+        let proof = PagedKVHardwareSizingProof(
+            modelID: modelID,
+            modelSHA256: modelSHA,
+            tokenizerSHA256: nil,
+            chatTemplateSHA256: nil,
+            modelFamily: "qwen",
+            hardwareClass: "apple-silicon-test",
+            metallibSHA256: String(repeating: "b", count: 64),
+            kernelIdentifier: "macprovider_paged_kv_gather_v1",
+            blockSizeTokens: 32,
+            maxPhysicalBlocks: 64,
+            maxResidentTokens: 2048,
+            parityLabel: "sdpa-parity-v1"
+        )
+        let observedIdentity = PagedKVObservedRuntimeIdentity(
+            hardwareClass: proof.hardwareClass,
+            metallibSHA256: proof.metallibSHA256,
+            kernelIdentifier: proof.kernelIdentifier,
+            parityLabel: proof.parityLabel,
+            moeDispatchProven: false,
+            poolEpoch: proof.poolEpoch,
+            source: .runtimeMeasurement
+        )
+        let runtime = ModelRuntime(
+            modelID: modelID,
+            modelHash: modelSHA,
+            pagedKVConfig: PagedKVConfig(enabled: true, blockSizeTokens: 32, maxPhysicalBlocks: 64),
+            maxBatch: 2,
+            continuousBatchingMode: .on,
+            warmSwapEnabled: false,
+            pagedKVObservedRuntimeIdentity: observedIdentity,
+            pagedKVHardwareSizingProof: proof,
+            pagedKVRuntimeCacheClass: "KVCacheSimple",
+            pagedKVSchedulerBackendInstalled: true,
+            continuousBatchingBackend: ServingKnobsContinuousBatchingBackend(),
+            loader: { _ in throw TestRuntimeError.notExpected }
+        )
+        let capability = await runtime.continuousBatchingCapabilityForTest()
+        XCTAssertEqual(capability.unsupportedReason, .durableReplayAuthorityUnavailable)
+        XCTAssertThrowsError(try ContinuousBatchingPolicy.validateStrictStartup(capability)) { error in
+            let apiError = error as? APIError
+            XCTAssertEqual(apiError?.status, 503)
+            XCTAssertEqual(apiError?.code, "continuous_batching_durable_replay_authority_unavailable")
+        }
+    }
+
     func testRuntimeDefaultMaxBatchIsOne() async throws {
         let runtime = ModelRuntime(
             modelID: "test-model",
@@ -1191,14 +1403,53 @@ final class ServingKnobsConfigTests: XCTestCase {
         XCTAssertNoThrow(try ModelRuntime.validatePromptTokenCount(4096, maxContextTokens: 4096))
     }
 
-    private static func request(model: String, stream: Bool = false) throws -> ChatCompletionRequest {
+    private static func pagedKVDescriptor() -> PagedKVDescriptor {
+        PagedKVDescriptor(
+            blockSizeTokens: 32,
+            maxPhysicalBlocks: 64,
+            modelID: "mlx-community/Qwen-Test",
+            modelSHA256: String(repeating: "a", count: 64),
+            tokenizerSHA256: nil,
+            chatTemplateSHA256: nil,
+            supportedModelFamilies: ["qwen"],
+            supportsMoEDispatch: false,
+            hardwareClass: "apple-silicon-test",
+            metallibSHA256: String(repeating: "b", count: 64),
+            kernelIdentifier: "macprovider_paged_kv_gather_v1",
+            parityLabel: "sdpa-parity-v1"
+        )
+    }
+
+    private static func continuousBatchingTuple() -> ContinuousBatchingRequestedTuple {
+        ContinuousBatchingRequestedTuple(
+            modelID: "mlx-community/Qwen-Test",
+            modelSHA256: String(repeating: "a", count: 64),
+            tokenizerSHA256: nil,
+            chatTemplateSHA256: nil,
+            cacheClass: "KVCacheSimple",
+            kvDType: .fp16,
+            requiresMoE: false,
+            hardwareClass: "apple-silicon-test",
+            metallibSHA256: String(repeating: "b", count: 64),
+            kernelIdentifier: "macprovider_paged_kv_gather_v1",
+            parityLabel: "sdpa-parity-v1",
+            poolEpoch: 1
+        )
+    }
+
+    private static func request(
+        model: String,
+        stream: Bool = false,
+        conversationKey: String? = nil
+    ) throws -> ChatCompletionRequest {
         let body: [String: Any] = [
             "model": model,
             "messages": [["role": "user", "content": "Say hi"]],
             "max_tokens": 1,
             "stream": stream,
         ]
-        return try ChatCompletionRequest.parse(data: try JSONSerialization.data(withJSONObject: body))
+        let parsed = try ChatCompletionRequest.parse(data: try JSONSerialization.data(withJSONObject: body))
+        return parsed.withConversationKey(conversationKey)
     }
 }
 

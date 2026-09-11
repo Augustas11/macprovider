@@ -921,7 +921,8 @@ public actor PagedKVBlockAllocator {
     public func reattach(
         _ retained: PagedKVRetainedSequence,
         conversationKey: String,
-        trimToLogicalTokens tokens: Int? = nil
+        trimToLogicalTokens tokens: Int? = nil,
+        maxLogicalTokens: Int? = nil
     ) throws -> PagedKVBlockTableHandle {
         guard retained.conversationKey == conversationKey.trimmingCharacters(in: .whitespacesAndNewlines) else {
             throw PagedKVAllocatorError.conversationMismatch
@@ -933,6 +934,12 @@ public actor PagedKVBlockAllocator {
         guard state.logicalTokenCount == retained.logicalTokenCount else {
             throw PagedKVAllocatorError.invalidBlockTable("retained logical length mismatch")
         }
+        let requestedMaxLogicalTokens = maxLogicalTokens.map { max($0, state.maxLogicalTokens) }
+        if let requestedMaxLogicalTokens {
+            guard requestedMaxLogicalTokens >= state.logicalTokenCount else {
+                throw PagedKVAllocatorError.invalidBlockTable("max logical length below retained length")
+            }
+        }
         if let tokens {
             guard tokens >= 0 else { throw PagedKVAllocatorError.invalidBlockTable("negative trim length") }
             guard tokens <= state.logicalTokenCount else {
@@ -940,6 +947,12 @@ public actor PagedKVBlockAllocator {
             }
             var nextState = state
             nextState.logicalTokenCount = tokens
+            if let requestedMaxLogicalTokens {
+                guard requestedMaxLogicalTokens >= tokens else {
+                    throw PagedKVAllocatorError.invalidBlockTable("max logical length below trim length")
+                }
+                nextState.maxLogicalTokens = requestedMaxLogicalTokens
+            }
             let needed = try requiredBlocks(maxTokens: tokens)
             var released: ArraySlice<Int> = []
             if needed < nextState.reservedBlocks.count {
@@ -953,6 +966,9 @@ public actor PagedKVBlockAllocator {
             freeBlocks.append(contentsOf: released.reversed())
             return retained.handle
         }
+        if let requestedMaxLogicalTokens {
+            state.maxLogicalTokens = requestedMaxLogicalTokens
+        }
         state.retained = false
         sequences[retained.handle.id] = state
         return retained.handle
@@ -962,9 +978,16 @@ public actor PagedKVBlockAllocator {
         guard retained.conversationKey == conversationKey.trimmingCharacters(in: .whitespacesAndNewlines) else {
             throw PagedKVAllocatorError.conversationMismatch
         }
+        try discardRetained(retained)
+    }
+
+    public func discardRetained(_ retained: PagedKVRetainedSequence) throws {
         let state = try lookupState(for: retained.handle)
         guard state.retained else {
             throw PagedKVAllocatorError.unknownHandle
+        }
+        guard state.conversationKey == retained.conversationKey else {
+            throw PagedKVAllocatorError.conversationMismatch
         }
         sequences.removeValue(forKey: retained.handle.id)
         freeBlocks.append(contentsOf: state.reservedBlocks.reversed())

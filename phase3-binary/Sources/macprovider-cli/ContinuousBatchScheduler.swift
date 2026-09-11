@@ -1,5 +1,6 @@
 import Foundation
 import CryptoKit
+import MLXLMCommon
 import MacProviderCore
 
 enum ContinuousBatchSchedulerTerminalStatus: String, Sendable, Equatable {
@@ -136,7 +137,7 @@ struct ContinuousBatchSchedulerConfiguration: Sendable, Equatable {
     }
 }
 
-struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Codable {
+struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Encodable {
     let id: String
     let conversationKey: String
     let promptTokens: [Int]
@@ -148,6 +149,7 @@ struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Codable {
     let presencePenalty: Double
     let frequencyPenalty: Double
     let cachedPromptTokens: Int
+    let retainedPagedKVSequence: PagedKVRetainedSequence?
 
     init(
         id: String,
@@ -160,7 +162,8 @@ struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Codable {
         topP: Double = 1.0,
         presencePenalty: Double = 0.0,
         frequencyPenalty: Double = 0.0,
-        cachedPromptTokens: Int = 0
+        cachedPromptTokens: Int = 0,
+        retainedPagedKVSequence: PagedKVRetainedSequence? = nil
     ) {
         self.id = id
         self.conversationKey = conversationKey
@@ -173,6 +176,21 @@ struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Codable {
         self.presencePenalty = presencePenalty
         self.frequencyPenalty = frequencyPenalty
         self.cachedPromptTokens = max(0, cachedPromptTokens)
+        self.retainedPagedKVSequence = retainedPagedKVSequence
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case conversationKey
+        case promptTokens
+        case maxOutputTokens
+        case stopTokenSequences
+        case samplerSeed
+        case temperature
+        case topP
+        case presencePenalty
+        case frequencyPenalty
+        case cachedPromptTokens
     }
 }
 
@@ -185,6 +203,8 @@ enum ContinuousBatchSettlementDisposition: String, Sendable, Equatable {
 struct ContinuousBatchSchedulerResult: Sendable, Equatable {
     let requestID: String
     let conversationKey: String
+    /// Raw generated tokens, including stop tokens withheld from buyers.
+    let generatedTokens: [Int]
     let outputTokens: [Int]
     let promptTokens: Int
     let completionTokens: Int
@@ -194,6 +214,7 @@ struct ContinuousBatchSchedulerResult: Sendable, Equatable {
     let errorCode: String?
     let snapshot: ContinuousBatchSchedulerSnapshot?
     let settlementDisposition: ContinuousBatchSettlementDisposition
+    let retainedCache: ContinuousBatchRetainedCache?
 
     func withSettlementDisposition(
         _ disposition: ContinuousBatchSettlementDisposition
@@ -201,6 +222,7 @@ struct ContinuousBatchSchedulerResult: Sendable, Equatable {
         ContinuousBatchSchedulerResult(
             requestID: requestID,
             conversationKey: conversationKey,
+            generatedTokens: generatedTokens,
             outputTokens: outputTokens,
             promptTokens: promptTokens,
             completionTokens: completionTokens,
@@ -209,7 +231,62 @@ struct ContinuousBatchSchedulerResult: Sendable, Equatable {
             terminalStatus: terminalStatus,
             errorCode: errorCode,
             snapshot: snapshot,
-            settlementDisposition: disposition
+            settlementDisposition: disposition,
+            retainedCache: disposition == .eligibleOwner ? retainedCache : nil
+        )
+    }
+
+    func withRetainedCache(_ cache: ContinuousBatchRetainedCache?) -> ContinuousBatchSchedulerResult {
+        ContinuousBatchSchedulerResult(
+            requestID: requestID,
+            conversationKey: conversationKey,
+            generatedTokens: generatedTokens,
+            outputTokens: outputTokens,
+            promptTokens: promptTokens,
+            completionTokens: completionTokens,
+            emittedTokens: emittedTokens,
+            cachedPromptTokens: cachedPromptTokens,
+            terminalStatus: terminalStatus,
+            errorCode: errorCode,
+            snapshot: snapshot,
+            settlementDisposition: settlementDisposition,
+            retainedCache: cache
+        )
+    }
+
+    static func == (lhs: ContinuousBatchSchedulerResult, rhs: ContinuousBatchSchedulerResult) -> Bool {
+        lhs.requestID == rhs.requestID
+            && lhs.conversationKey == rhs.conversationKey
+            && lhs.generatedTokens == rhs.generatedTokens
+            && lhs.outputTokens == rhs.outputTokens
+            && lhs.promptTokens == rhs.promptTokens
+            && lhs.completionTokens == rhs.completionTokens
+            && lhs.emittedTokens == rhs.emittedTokens
+            && lhs.cachedPromptTokens == rhs.cachedPromptTokens
+            && lhs.terminalStatus == rhs.terminalStatus
+            && lhs.errorCode == rhs.errorCode
+            && lhs.snapshot == rhs.snapshot
+            && lhs.settlementDisposition == rhs.settlementDisposition
+            && lhs.retainedCache?.retainedSequence == rhs.retainedCache?.retainedSequence
+    }
+}
+
+final class ContinuousBatchRetainedCache: @unchecked Sendable {
+    let retainedSequence: PagedKVRetainedSequence
+    let layers: [KVCache]
+    let deliveryID: UUID?
+
+    init(retainedSequence: PagedKVRetainedSequence, layers: [KVCache], deliveryID: UUID? = nil) {
+        self.retainedSequence = retainedSequence
+        self.layers = layers
+        self.deliveryID = deliveryID
+    }
+
+    func withDeliveryID(_ deliveryID: UUID?) -> ContinuousBatchRetainedCache {
+        ContinuousBatchRetainedCache(
+            retainedSequence: retainedSequence,
+            layers: layers,
+            deliveryID: deliveryID
         )
     }
 }
@@ -285,6 +362,15 @@ struct ContinuousBatchDecodeInput: Sendable, Equatable {
     let samplerStep: Int
 }
 
+struct ContinuousBatchTerminalKVCommitInput: Sendable, Equatable {
+    let requestID: String
+    let currentToken: Int
+    let binding: PagedKVStorageBinding
+    let blockTable: PagedKVBlockTable
+    let committedKVTokenCount: Int
+    let targetKVTokenCount: Int
+}
+
 struct ContinuousBatchDecodeOutput: Sendable, Equatable {
     let requestID: String
     let token: Int
@@ -312,6 +398,18 @@ protocol ContinuousBatchSchedulerBackend: Sendable {
     /// writes `currentToken` at `committedKVTokenCount` and returns one sampled
     /// token without advancing any other row's cursor.
     func decode(rows: [ContinuousBatchDecodeInput]) async throws -> [ContinuousBatchDecodeOutcome]
+    /// Install a same-conversation retained paged-KV handoff before the row resumes
+    /// prefill at its serial LCP. Backends that cannot consume FR-PKV10 must fail
+    /// closed instead of accepting positive cached-token credit.
+    func installRetainedPagedKVCache(
+        requestID: String,
+        handoff: PagedKVPagedCacheHandoff,
+        binding: PagedKVStorageBinding
+    ) async throws
+    /// Commit the final buyer-visible token into row-local KV state when a row
+    /// stops immediately after sampling it. Retention happens after this step so
+    /// canonical prompt history and retained paged-KV length agree.
+    func commitTerminalKV(_ input: ContinuousBatchTerminalKVCommitInput) async throws
     /// Row-local cleanup hook for backend state that is not owned by the
     /// scheduler/allocator. Called after the scheduler has reached a terminal
     /// result for the request. Implementations that keep no row-local state can
@@ -321,7 +419,26 @@ protocol ContinuousBatchSchedulerBackend: Sendable {
     func cancelInFlight() async
 }
 
+protocol ContinuousBatchRetainedCacheBridge: Sendable {
+    func reattachPagedKVCache(
+        handle: PagedKVBlockTableHandle,
+        table: PagedKVBlockTable
+    ) throws -> PagedKVPagedCacheHandoff
+}
+
 extension ContinuousBatchSchedulerBackend {
+    func installRetainedPagedKVCache(
+        requestID: String,
+        handoff: PagedKVPagedCacheHandoff,
+        binding: PagedKVStorageBinding
+    ) async throws {
+        throw ContinuousBatchSchedulerError.unsupported("continuous_batching_paged_kv_handoff_unavailable")
+    }
+
+    func commitTerminalKV(_ input: ContinuousBatchTerminalKVCommitInput) async throws {
+        throw ContinuousBatchSchedulerError.unsupported("continuous_batching_terminal_kv_commit_unavailable")
+    }
+
     func finish(requestID: String) {}
 }
 
@@ -609,6 +726,10 @@ actor ContinuousBatchScheduler {
         var pendingOutputTokens: [Int]
         var prefillCursor: Int
         var snapshot: ContinuousBatchSchedulerSnapshot
+
+        var retainedLogicalTokenCount: Int {
+            request.promptTokens.count + generatedTokens.count
+        }
     }
 
     private struct PendingTerminalDelivery {
@@ -629,11 +750,17 @@ actor ContinuousBatchScheduler {
         let waiters: [Waiter]
     }
 
+    private struct DeliveredRetainedOwner {
+        let retained: PagedKVRetainedSequence
+        let conversationKey: String
+    }
+
     private let configuration: ContinuousBatchSchedulerConfiguration
     private let schedulerID = UUID()
     private let allocator: PagedKVBlockAllocator
     private let backend: any ContinuousBatchSchedulerBackend
     private let replayAuthority: any ContinuousBatchSchedulerReplayAuthority
+    private let contiguousCacheBridge: (any ContinuousBatchRetainedCacheBridge)?
     private let tokenDeliveryCapacity: ContinuousBatchTokenDeliveryCapacity
 
     private var waiting: [ContinuousBatchSchedulerRequest] = []
@@ -654,6 +781,7 @@ actor ContinuousBatchScheduler {
     private var stoppingWaiterIDs: Set<UUID> = []
     private var stoppingActiveWaiters: [UUID: StoppingActiveWaiter] = [:]
     private var deferredTerminalCompletions: [String: DeferredTerminalCompletion] = [:]
+    private var deliveredRetainedOwners: [UUID: DeliveredRetainedOwner] = [:]
     private var terminalResultOrder: [String] = []
     private var dedupeTombstones: Set<String> = []
     private var dedupeTombstoneOrder: [String] = []
@@ -672,7 +800,8 @@ actor ContinuousBatchScheduler {
         configuration: ContinuousBatchSchedulerConfiguration,
         allocator: PagedKVBlockAllocator,
         backend: any ContinuousBatchSchedulerBackend,
-        replayAuthority: any ContinuousBatchSchedulerReplayAuthority
+        replayAuthority: any ContinuousBatchSchedulerReplayAuthority,
+        contiguousCacheBridge: (any ContinuousBatchRetainedCacheBridge)? = nil
     ) {
         self.configuration = configuration
         self.tokenDeliveryCapacity = ContinuousBatchTokenDeliveryCapacity(
@@ -681,6 +810,7 @@ actor ContinuousBatchScheduler {
         self.allocator = allocator
         self.backend = backend
         self.replayAuthority = replayAuthority
+        self.contiguousCacheBridge = contiguousCacheBridge
     }
 
     static func localCapabilityReason(
@@ -701,8 +831,14 @@ actor ContinuousBatchScheduler {
         _ request: ContinuousBatchSchedulerRequest,
         tokenSink: @escaping ContinuousBatchSchedulerTokenSink = { _ in }
     ) async throws -> ContinuousBatchSchedulerResult {
-        try Task.checkCancellation()
+        do {
+            try Task.checkCancellation()
+        } catch {
+            await discardUnacceptedRetainedCache(for: request)
+            throw error
+        }
         if cleanupFailedClosed {
+            await discardUnacceptedRetainedCache(for: request)
             throw ContinuousBatchSchedulerError.unsupported("continuous_batching_scheduler_failed_closed")
         }
         if let reason = Self.localCapabilityReason(
@@ -711,12 +847,23 @@ actor ContinuousBatchScheduler {
             moePromotionEvidenceAvailable: configuration.moePromotionEvidenceAvailable
         ) {
             record(.localCapabilityMissing)
+            await discardUnacceptedRetainedCache(for: request)
             throw ContinuousBatchSchedulerError.unsupported(reason)
         }
-        if !request.conversationKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            || request.cachedPromptTokens > 0 {
+        if request.cachedPromptTokens > 0 && request.retainedPagedKVSequence == nil {
             record(.stickyCacheUnsupported)
-            throw ContinuousBatchSchedulerError.unsupported("keyed_or_sticky_cache_reuse_deferred_until_paged_kv_cache_bridge")
+            throw ContinuousBatchSchedulerError.unsupported("continuous_batching_paged_kv_handoff_unavailable")
+        }
+        let trimmedConversationKey = request.conversationKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        if request.cachedPromptTokens > 0 && trimmedConversationKey.isEmpty {
+            record(.stickyCacheUnsupported)
+            await discardUnacceptedRetainedCache(for: request)
+            throw ContinuousBatchSchedulerError.unsupported("continuous_batching_cached_tokens_require_conversation_key")
+        }
+        if request.cachedPromptTokens > 0 && request.cachedPromptTokens >= request.promptTokens.count {
+            record(.stickyCacheUnsupported)
+            await discardUnacceptedRetainedCache(for: request)
+            throw ContinuousBatchSchedulerError.requestFailed("continuous_batching_invalid_cached_prompt_tokens")
         }
         guard !request.id.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               request.id.lengthOfBytes(using: .utf8) <= configuration.maxRequestIDBytes,
@@ -730,14 +877,17 @@ actor ContinuousBatchScheduler {
               }),
               let retainedTokenCost = validatedRetainedTokenCost(for: request),
               retainedTokenCost <= configuration.maxRequestTokens else {
+            await discardUnacceptedRetainedCache(for: request)
             throw ContinuousBatchSchedulerError.requestFailed("continuous_batching_invalid_request")
         }
         guard queueHasCapacity(addingTokenCost: retainedTokenCost) else {
             record(.backpressureRejected)
+            await discardUnacceptedRetainedCache(for: request)
             throw ContinuousBatchSchedulerError.backpressure
         }
         guard nextAdmissionSequence < UInt64.max else {
             cleanupFailedClosed = true
+            await discardUnacceptedRetainedCache(for: request)
             throw ContinuousBatchSchedulerError.unsupported("continuous_batching_admission_sequence_exhausted")
         }
         let admissionSequence = nextAdmissionSequence
@@ -751,12 +901,14 @@ actor ContinuousBatchScheduler {
         guard bindingsAreValid else {
             record(.localCapabilityMissing)
             finishAdmissionTurn(admissionSequence)
+            await discardUnacceptedRetainedCache(for: request)
             throw ContinuousBatchSchedulerError.unsupported("continuous_batching_local_binding_mismatch")
         }
         do {
             try Task.checkCancellation()
         } catch {
             finishAdmissionTurn(admissionSequence)
+            await discardUnacceptedRetainedCache(for: request)
             throw error
         }
         let waiterID = UUID()
@@ -804,7 +956,7 @@ actor ContinuousBatchScheduler {
         record(.drained)
         while !waiting.isEmpty {
             let request = waiting.removeFirst()
-            finishQueued(
+            await finishQueued(
                 request,
                 status: .rejected,
                 errorCode: "continuous_batching_draining"
@@ -920,6 +1072,7 @@ actor ContinuousBatchScheduler {
     ) {
         guard let requestFingerprint = RequestFingerprint(request) else {
             delivery.finish()
+            scheduleDiscardUnacceptedRetainedCache(for: request)
             continuation.resume(throwing: ContinuousBatchSchedulerError.requestFailed(
                 "continuous_batching_request_fingerprint_failed"
             ))
@@ -927,16 +1080,19 @@ actor ContinuousBatchScheduler {
         }
         if Task.isCancelled {
             delivery.finish()
+            scheduleDiscardUnacceptedRetainedCache(for: request)
             continuation.resume(throwing: CancellationError())
             return
         }
         if let known = knownRequests[request.id], known != requestFingerprint {
             delivery.finish()
+            scheduleDiscardUnacceptedRetainedCache(for: request)
             continuation.resume(throwing: ContinuousBatchSchedulerError.duplicateRequestMismatch)
             return
         }
         if let terminal = terminalResults[request.id] {
             delivery.finish()
+            scheduleDiscardUnacceptedRetainedCache(for: request)
             continuation.resume(returning: terminal.withSettlementDisposition(.nonSettlingReplay))
             return
         }
@@ -944,9 +1100,11 @@ actor ContinuousBatchScheduler {
             guard pending.waiters.count < configuration.duplicateWaiterLimit else {
                 record(.backpressureRejected)
                 delivery.finish()
+                scheduleDiscardUnacceptedRetainedCache(for: request)
                 continuation.resume(throwing: ContinuousBatchSchedulerError.backpressure)
                 return
             }
+            scheduleDiscardUnacceptedRetainedCache(for: request)
             let waiter = Waiter(
                 id: waiterID,
                 continuation: continuation,
@@ -984,11 +1142,13 @@ actor ContinuousBatchScheduler {
         }
         if dedupeTombstones.contains(request.id) {
             delivery.finish()
+            scheduleDiscardUnacceptedRetainedCache(for: request)
             continuation.resume(throwing: ContinuousBatchSchedulerError.idempotencyWindowExpired)
             return
         }
         if draining {
             delivery.finish()
+            scheduleDiscardUnacceptedRetainedCache(for: request)
             continuation.resume(throwing: ContinuousBatchSchedulerError.drained)
             return
         }
@@ -998,9 +1158,11 @@ actor ContinuousBatchScheduler {
                     < configuration.duplicateWaiterLimit else {
                 record(.backpressureRejected)
                 delivery.finish()
+                scheduleDiscardUnacceptedRetainedCache(for: request)
                 continuation.resume(throwing: ContinuousBatchSchedulerError.backpressure)
                 return
             }
+            scheduleDiscardUnacceptedRetainedCache(for: request)
             requestWaiters[request.id, default: []].append(Waiter(
                 id: waiterID,
                 continuation: continuation,
@@ -1033,6 +1195,7 @@ actor ContinuousBatchScheduler {
               queueHasCapacity(addingTokenCost: retainedTokenCost) else {
             record(.backpressureRejected)
             delivery.finish()
+            scheduleDiscardUnacceptedRetainedCache(for: request)
             continuation.resume(throwing: ContinuousBatchSchedulerError.backpressure)
             return
         }
@@ -1045,15 +1208,18 @@ actor ContinuousBatchScheduler {
                 break
             case .duplicateSameRequest:
                 delivery.finish()
+                scheduleDiscardUnacceptedRetainedCache(for: request)
                 continuation.resume(throwing: ContinuousBatchSchedulerError.idempotencyWindowExpired)
                 return
             case .duplicateMismatchedRequest:
                 delivery.finish()
+                scheduleDiscardUnacceptedRetainedCache(for: request)
                 continuation.resume(throwing: ContinuousBatchSchedulerError.duplicateRequestMismatch)
                 return
             }
         } catch {
             delivery.finish()
+            scheduleDiscardUnacceptedRetainedCache(for: request)
             continuation.resume(throwing: ContinuousBatchSchedulerError.idempotencyAuthorityUnavailable)
             return
         }
@@ -1068,8 +1234,13 @@ actor ContinuousBatchScheduler {
         ensurePump()
     }
 
-    private func cancelWaiter(requestID: String, waiterID: UUID) {
+    private func cancelWaiter(requestID: String, waiterID: UUID) async {
         guard stoppingWaiterIDs.insert(waiterID).inserted else { return }
+        if let delivered = deliveredRetainedOwners.removeValue(forKey: waiterID) {
+            stoppingWaiterIDs.remove(waiterID)
+            await discardRetainedCache(delivered.retained, conversationKey: delivered.conversationKey)
+            return
+        }
         if let waiter = pendingTerminalDeliveries[requestID]?.waiters.first(where: { $0.id == waiterID }) {
             waiter.delivery.stop(afterStopping: {
                 Task { await self.finishStoppedWaiter(requestID: requestID, waiterID: waiterID) }
@@ -1097,7 +1268,7 @@ actor ContinuousBatchScheduler {
         })
     }
 
-    private func finishStoppedWaiter(requestID: String, waiterID: UUID) {
+    private func finishStoppedWaiter(requestID: String, waiterID: UUID) async {
         guard stoppingWaiterIDs.remove(waiterID) != nil else { return }
         if var pending = pendingTerminalDeliveries[requestID],
            pending.remainingWaiterIDs.contains(waiterID),
@@ -1111,6 +1282,7 @@ actor ContinuousBatchScheduler {
                 let failedResult = ContinuousBatchSchedulerResult(
                     requestID: pending.result.requestID,
                     conversationKey: pending.result.conversationKey,
+                    generatedTokens: [],
                     outputTokens: [],
                     promptTokens: pending.result.promptTokens,
                     completionTokens: 0,
@@ -1119,12 +1291,19 @@ actor ContinuousBatchScheduler {
                     terminalStatus: .requestFailed,
                     errorCode: "continuous_batching_stream_delivery_cancelled",
                     snapshot: pending.result.snapshot,
-                    settlementDisposition: .notEligible
+                    settlementDisposition: .notEligible,
+                    retainedCache: nil
                 )
                 finalizeTerminalResult(requestID: requestID, result: failedResult, waiters: pending.waiters)
+                if let retainedCache = pending.result.retainedCache {
+                    await discardRetainedCache(
+                        retainedCache.retainedSequence,
+                        conversationKey: pending.result.conversationKey
+                    )
+                }
             } else if pending.remainingWaiterIDs.isEmpty {
                 pendingTerminalDeliveries.removeValue(forKey: requestID)
-                finalizePendingTerminal(requestID: requestID, pending: pending)
+                await finalizePendingTerminal(requestID: requestID, pending: pending)
             } else {
                 pendingTerminalDeliveries[requestID] = pending
             }
@@ -1237,7 +1416,7 @@ actor ContinuousBatchScheduler {
         var remaining: [ContinuousBatchSchedulerRequest] = []
         for request in waiting {
             if cancelledIDs.contains(request.id) {
-                finishQueued(request, status: .cancelled, errorCode: "request_cancelled")
+                await finishQueued(request, status: .cancelled, errorCode: "request_cancelled")
                 cancelledIDs.remove(request.id)
             } else {
                 remaining.append(request)
@@ -1510,10 +1689,17 @@ actor ContinuousBatchScheduler {
 
         if let terminalStatus {
             activeDecode.removeValue(forKey: row.request.id)
-            let released = await release(row.handle)
-            finish(row, status: released ? terminalStatus : .requestFailed, errorCode: released
-                ? nil
-                : "continuous_batching_cleanup_failed")
+            if let retainedCache = await retainTerminalCache(
+                for: row,
+                targetLogicalTokens: row.retainedLogicalTokenCount
+            ) {
+                finish(row, status: terminalStatus, errorCode: nil, retainedCache: retainedCache)
+            } else {
+                let released = await release(row.handle)
+                finish(row, status: released ? terminalStatus : .requestFailed, errorCode: released
+                    ? nil
+                    : "continuous_batching_cleanup_failed")
+            }
         }
     }
 
@@ -1575,23 +1761,54 @@ actor ContinuousBatchScheduler {
             let request = waiting.removeFirst()
             madeProgress = true
             if cancelledIDs.remove(request.id) != nil {
-                finishQueued(request, status: .cancelled, errorCode: "request_cancelled")
+                await finishQueued(request, status: .cancelled, errorCode: "request_cancelled")
                 continue
             }
 
             admittingRequests[request.id] = request
+            var admissionHandle: PagedKVBlockTableHandle?
             do {
                 let reservation = try initialReservation(for: request)
-                let handle = try await allocator.allocate(
-                    conversationKey: "continuous-batching:\(request.id)",
-                    initialCapacityTokens: reservation.initialCapacityTokens,
-                    maxLogicalTokens: reservation.maxLogicalTokens,
-                    initialTokens: 0
-                )
+                let handle: PagedKVBlockTableHandle
+                let prefillCursor: Int
+                if let retained = request.retainedPagedKVSequence {
+                    guard let contiguousCacheBridge else {
+                        throw ContinuousBatchSchedulerError.unsupported(
+                            "continuous_batching_paged_kv_handoff_unavailable"
+                        )
+                    }
+                    handle = try await allocator.reattach(
+                        retained,
+                        conversationKey: request.conversationKey,
+                        trimToLogicalTokens: request.cachedPromptTokens,
+                        maxLogicalTokens: reservation.maxLogicalTokens
+                    )
+                    admissionHandle = handle
+                    let binding = try await allocator.binding(for: handle)
+                    let handoff = try contiguousCacheBridge.reattachPagedKVCache(
+                        handle: handle,
+                        table: binding.currentTable
+                    )
+                    try await backend.installRetainedPagedKVCache(
+                        requestID: request.id,
+                        handoff: handoff,
+                        binding: binding
+                    )
+                    prefillCursor = request.cachedPromptTokens
+                } else {
+                    handle = try await allocator.allocate(
+                        conversationKey: schedulerConversationKey(for: request),
+                        initialCapacityTokens: reservation.initialCapacityTokens,
+                        maxLogicalTokens: reservation.maxLogicalTokens,
+                        initialTokens: 0
+                    )
+                    admissionHandle = handle
+                    prefillCursor = 0
+                }
                 admittingRequests.removeValue(forKey: request.id)
                 if draining {
                     let released = await release(handle)
-                    finishQueued(
+                    await finishQueued(
                         request,
                         status: released ? .rejected : .requestFailed,
                         errorCode: released ? "continuous_batching_draining" : "continuous_batching_cleanup_failed"
@@ -1600,7 +1817,7 @@ actor ContinuousBatchScheduler {
                     continue
                 } else if cancelledIDs.remove(request.id) != nil {
                     let released = await release(handle)
-                    finishQueued(
+                    await finishQueued(
                         request,
                         status: released ? .cancelled : .requestFailed,
                         errorCode: released ? "request_cancelled" : "continuous_batching_cleanup_failed"
@@ -1617,17 +1834,17 @@ actor ContinuousBatchScheduler {
                     generatedTokens: [],
                     outputTokens: [],
                     pendingOutputTokens: [],
-                    prefillCursor: 0,
+                    prefillCursor: prefillCursor,
                     snapshot: configuration.snapshot
                 )
                 promptOrder.append(request.id)
             } catch PagedKVAllocatorError.capacityExceeded {
                 admittingRequests.removeValue(forKey: request.id)
                 if draining {
-                    finishQueued(request, status: .rejected, errorCode: "continuous_batching_draining")
+                    await finishQueued(request, status: .rejected, errorCode: "continuous_batching_draining")
                 } else if activeDecode.isEmpty && activePrompt.isEmpty && admittingRequests.isEmpty {
                     record(.poolCapacityRejected)
-                    finishQueued(
+                    await finishQueued(
                         request,
                         status: .rejected,
                         errorCode: "continuous_batching_pool_capacity_exhausted"
@@ -1636,9 +1853,24 @@ actor ContinuousBatchScheduler {
                     waiting.insert(request, at: 0)
                     return madeProgress
                 }
+            } catch PagedKVAllocatorError.conversationMismatch {
+                admittingRequests.removeValue(forKey: request.id)
+                if let admissionHandle {
+                    let released = await release(admissionHandle)
+                    if !released { return madeProgress }
+                } else if let retained = request.retainedPagedKVSequence {
+                    await discardRetainedCache(retained)
+                }
+                await finishQueued(request, status: .requestFailed, errorCode: "continuous_batching_admission_failed")
             } catch {
                 admittingRequests.removeValue(forKey: request.id)
-                finishQueued(request, status: .requestFailed, errorCode: "continuous_batching_admission_failed")
+                if let admissionHandle {
+                    let released = await release(admissionHandle)
+                    if !released { return madeProgress }
+                } else {
+                    await discardUnacceptedRetainedCache(for: request)
+                }
+                await finishQueued(request, status: .requestFailed, errorCode: "continuous_batching_admission_failed")
             }
         }
         return madeProgress
@@ -1757,10 +1989,17 @@ actor ContinuousBatchScheduler {
     private func transitionPrefilledRow(_ row: Row) async {
         _ = removePromptRow(row.request.id)
         if row.request.maxOutputTokens == 0 {
-            let released = await release(row.handle)
-            finish(row, status: released ? .length : .requestFailed, errorCode: released
-                ? nil
-                : "continuous_batching_cleanup_failed")
+            if let retainedCache = await retainTerminalCache(
+                for: row,
+                targetLogicalTokens: row.retainedLogicalTokenCount
+            ) {
+                finish(row, status: .length, errorCode: nil, retainedCache: retainedCache)
+            } else {
+                let released = await release(row.handle)
+                finish(row, status: released ? .length : .requestFailed, errorCode: released
+                    ? nil
+                    : "continuous_batching_cleanup_failed")
+            }
         } else {
             activeDecode[row.request.id] = row
             record(.joinedDecode)
@@ -1769,7 +2008,7 @@ actor ContinuousBatchScheduler {
 
     private func failRemainingAfterCleanupFailure() async {
         while !waiting.isEmpty {
-            finishQueued(
+            await finishQueued(
                 waiting.removeFirst(),
                 status: .requestFailed,
                 errorCode: "continuous_batching_scheduler_failed_closed"
@@ -1800,10 +2039,12 @@ actor ContinuousBatchScheduler {
         _ request: ContinuousBatchSchedulerRequest,
         status: ContinuousBatchSchedulerTerminalStatus,
         errorCode: String?
-    ) {
+    ) async {
+        await discardUnacceptedRetainedCache(for: request)
         let result = ContinuousBatchSchedulerResult(
             requestID: request.id,
             conversationKey: request.conversationKey,
+            generatedTokens: [],
             outputTokens: [],
             promptTokens: 0,
             completionTokens: 0,
@@ -1812,9 +2053,20 @@ actor ContinuousBatchScheduler {
             terminalStatus: status,
             errorCode: errorCode,
             snapshot: nil,
-            settlementDisposition: .notEligible
+            settlementDisposition: .notEligible,
+            retainedCache: nil
         )
         complete(requestID: request.id, result: result)
+    }
+
+    private func discardUnacceptedRetainedCache(for request: ContinuousBatchSchedulerRequest) async {
+        guard let retained = request.retainedPagedKVSequence else { return }
+        await discardRetainedCache(retained)
+    }
+
+    private func scheduleDiscardUnacceptedRetainedCache(for request: ContinuousBatchSchedulerRequest) {
+        guard let retained = request.retainedPagedKVSequence else { return }
+        Task { await self.discardRetainedCache(retained) }
     }
 
     private func finish(
@@ -1828,6 +2080,7 @@ actor ContinuousBatchScheduler {
         let result = ContinuousBatchSchedulerResult(
             requestID: row.request.id,
             conversationKey: row.request.conversationKey,
+            generatedTokens: isSuccessful ? row.generatedTokens : [],
             outputTokens: outputTokens,
             promptTokens: row.request.promptTokens.count,
             completionTokens: isSuccessful ? row.generatedTokens.count : 0,
@@ -1836,7 +2089,35 @@ actor ContinuousBatchScheduler {
             terminalStatus: status,
             errorCode: errorCode,
             snapshot: row.snapshot,
-            settlementDisposition: isSuccessful ? .eligibleOwner : .notEligible
+            settlementDisposition: isSuccessful ? .eligibleOwner : .notEligible,
+            retainedCache: nil
+        )
+        complete(requestID: row.request.id, result: result)
+    }
+
+    private func finish(
+        _ row: Row,
+        status: ContinuousBatchSchedulerTerminalStatus,
+        errorCode: String?,
+        retainedCache: ContinuousBatchRetainedCache?
+    ) {
+        record(status == .cancelled ? .cancelled : .stopped)
+        let isSuccessful = status == .stop || status == .length
+        let outputTokens = isSuccessful ? row.outputTokens : []
+        let result = ContinuousBatchSchedulerResult(
+            requestID: row.request.id,
+            conversationKey: row.request.conversationKey,
+            generatedTokens: isSuccessful ? row.generatedTokens : [],
+            outputTokens: outputTokens,
+            promptTokens: row.request.promptTokens.count,
+            completionTokens: isSuccessful ? row.generatedTokens.count : 0,
+            emittedTokens: row.outputTokens.count,
+            cachedPromptTokens: row.request.cachedPromptTokens,
+            terminalStatus: status,
+            errorCode: errorCode,
+            snapshot: row.snapshot,
+            settlementDisposition: isSuccessful ? .eligibleOwner : .notEligible,
+            retainedCache: isSuccessful ? retainedCache : nil
         )
         complete(requestID: row.request.id, result: result)
     }
@@ -1862,6 +2143,14 @@ actor ContinuousBatchScheduler {
     ) {
         guard !waiters.isEmpty else {
             finalizeTerminalResult(requestID: requestID, result: result, waiters: [])
+            if let retainedCache = result.retainedCache {
+                Task {
+                    await self.discardRetainedCache(
+                        retainedCache.retainedSequence,
+                        conversationKey: result.conversationKey
+                    )
+                }
+            }
             return
         }
         pendingTerminalDeliveries[requestID] = PendingTerminalDelivery(
@@ -1882,7 +2171,7 @@ actor ContinuousBatchScheduler {
         }
     }
 
-    private func finishTerminalDelivery(requestID: String, waiterID: UUID, delivered: Bool) {
+    private func finishTerminalDelivery(requestID: String, waiterID: UUID, delivered: Bool) async {
         guard !stoppingWaiterIDs.contains(waiterID) else { return }
         guard var pending = pendingTerminalDeliveries[requestID],
               pending.remainingWaiterIDs.remove(waiterID) != nil else { return }
@@ -1892,10 +2181,10 @@ actor ContinuousBatchScheduler {
             return
         }
         pendingTerminalDeliveries.removeValue(forKey: requestID)
-        finalizePendingTerminal(requestID: requestID, pending: pending)
+        await finalizePendingTerminal(requestID: requestID, pending: pending)
     }
 
-    private func finalizePendingTerminal(requestID: String, pending: PendingTerminalDelivery) {
+    private func finalizePendingTerminal(requestID: String, pending: PendingTerminalDelivery) async {
         let result: ContinuousBatchSchedulerResult
         if pending.deliveryOutcomes.values.contains(true) {
             result = pending.result
@@ -1903,6 +2192,7 @@ actor ContinuousBatchScheduler {
             result = ContinuousBatchSchedulerResult(
                 requestID: pending.result.requestID,
                 conversationKey: pending.result.conversationKey,
+                generatedTokens: [],
                 outputTokens: [],
                 promptTokens: pending.result.promptTokens,
                 completionTokens: 0,
@@ -1911,7 +2201,8 @@ actor ContinuousBatchScheduler {
                 terminalStatus: .requestFailed,
                 errorCode: "continuous_batching_stream_delivery_timed_out",
                 snapshot: pending.result.snapshot,
-                settlementDisposition: .notEligible
+                settlementDisposition: .notEligible,
+                retainedCache: nil
             )
         }
         finalizeTerminalResult(
@@ -1920,6 +2211,13 @@ actor ContinuousBatchScheduler {
             waiters: pending.waiters,
             deliveryOutcomes: pending.deliveryOutcomes
         )
+        if !pending.deliveryOutcomes.values.contains(true),
+           let retainedCache = pending.result.retainedCache {
+            await discardRetainedCache(
+                retainedCache.retainedSequence,
+                conversationKey: pending.result.conversationKey
+            )
+        }
     }
 
     private func finalizeTerminalResult(
@@ -1941,6 +2239,7 @@ actor ContinuousBatchScheduler {
                 waiter.continuation.resume(returning: ContinuousBatchSchedulerResult(
                     requestID: result.requestID,
                     conversationKey: result.conversationKey,
+                    generatedTokens: [],
                     outputTokens: [],
                     promptTokens: result.promptTokens,
                     completionTokens: 0,
@@ -1949,14 +2248,22 @@ actor ContinuousBatchScheduler {
                     terminalStatus: .requestFailed,
                     errorCode: "continuous_batching_stream_delivery_timed_out",
                     snapshot: result.snapshot,
-                    settlementDisposition: .notEligible
+                    settlementDisposition: .notEligible,
+                    retainedCache: nil
                 ))
             } else {
-                waiter.continuation.resume(returning: result.withSettlementDisposition(
-                    waiter.id == settlementOwnerID ? .eligibleOwner : (
-                        result.settlementDisposition == .eligibleOwner ? .nonSettlingReplay : .notEligible
+                let disposition: ContinuousBatchSettlementDisposition = waiter.id == settlementOwnerID
+                    ? .eligibleOwner
+                    : (result.settlementDisposition == .eligibleOwner ? .nonSettlingReplay : .notEligible)
+                var waiterResult = result.withSettlementDisposition(disposition)
+                if disposition == .eligibleOwner, let retainedCache = waiterResult.retainedCache {
+                    deliveredRetainedOwners[waiter.id] = DeliveredRetainedOwner(
+                        retained: retainedCache.retainedSequence,
+                        conversationKey: result.conversationKey
                     )
-                ))
+                    waiterResult = waiterResult.withRetainedCache(retainedCache.withDeliveryID(waiter.id))
+                }
+                waiter.continuation.resume(returning: waiterResult)
             }
         }
         while terminalResultOrder.count > configuration.terminalResultLimit {
@@ -2006,6 +2313,100 @@ actor ContinuousBatchScheduler {
 
     private var occupiedSlots: Int {
         admittingRequests.count + activePrompt.count + activeDecode.count
+    }
+
+    private func schedulerConversationKey(for request: ContinuousBatchSchedulerRequest) -> String {
+        let trimmed = request.conversationKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? "continuous-batching:\(request.id)" : trimmed
+    }
+
+    private func retainTerminalCache(for row: Row, targetLogicalTokens: Int) async -> ContinuousBatchRetainedCache? {
+        let trimmedKey = row.request.conversationKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedKey.isEmpty, let contiguousCacheBridge else { return nil }
+        var retainedSequence: PagedKVRetainedSequence?
+        do {
+            let binding = try await allocator.binding(for: row.handle)
+            if targetLogicalTokens > binding.currentTable.logicalTokenCount {
+                _ = try await allocator.extend(
+                    row.handle,
+                    by: targetLogicalTokens - binding.currentTable.logicalTokenCount
+                )
+                let targetBinding = try await allocator.binding(for: row.handle)
+                guard let terminalToken = row.generatedTokens.last else {
+                    throw ContinuousBatchSchedulerError.requestFailed("continuous_batching_terminal_kv_commit_missing_token")
+                }
+                try await backend.commitTerminalKV(ContinuousBatchTerminalKVCommitInput(
+                    requestID: row.request.id,
+                    currentToken: terminalToken,
+                    binding: targetBinding,
+                    blockTable: targetBinding.currentTable,
+                    committedKVTokenCount: binding.currentTable.logicalTokenCount,
+                    targetKVTokenCount: targetLogicalTokens
+                ))
+            } else if targetLogicalTokens < binding.currentTable.logicalTokenCount {
+                _ = try await allocator.trim(row.handle, toLogicalTokens: targetLogicalTokens)
+            }
+            let retained = try await allocator.retain(row.handle)
+            retainedSequence = retained
+            let retainedBinding = try await allocator.binding(for: retained.handle)
+            let handoff = try contiguousCacheBridge.reattachPagedKVCache(
+                handle: retained.handle,
+                table: retainedBinding.currentTable
+            )
+            return ContinuousBatchRetainedCache(
+                retainedSequence: retained,
+                layers: handoff.caches
+            )
+        } catch {
+            if let retainedSequence {
+                do {
+                    _ = try await allocator.reattach(retainedSequence, conversationKey: trimmedKey)
+                } catch {
+                    cleanupFailedClosed = true
+                    record(.cleanupFailed)
+                }
+            }
+            return nil
+        }
+    }
+
+    func discardRetainedCache(_ retained: PagedKVRetainedSequence, conversationKey: String) async {
+        do {
+            try await allocator.discardRetained(retained, conversationKey: conversationKey)
+        } catch PagedKVAllocatorError.unknownHandle {
+            return
+        } catch {
+            cleanupFailedClosed = true
+            record(.cleanupFailed)
+        }
+    }
+
+    func discardRetainedCache(_ retained: PagedKVRetainedSequence) async {
+        do {
+            try await allocator.discardRetained(retained)
+        } catch PagedKVAllocatorError.unknownHandle {
+            return
+        } catch {
+            cleanupFailedClosed = true
+            record(.cleanupFailed)
+        }
+    }
+
+    func acknowledgeRetainedCacheDelivery(_ retainedCache: ContinuousBatchRetainedCache) {
+        guard let deliveryID = retainedCache.deliveryID else { return }
+        deliveredRetainedOwners.removeValue(forKey: deliveryID)
+    }
+
+    func cancelRetainedCacheDelivery(
+        _ retainedCache: ContinuousBatchRetainedCache,
+        conversationKey: String
+    ) async {
+        guard let deliveryID = retainedCache.deliveryID else {
+            await discardRetainedCache(retainedCache.retainedSequence, conversationKey: conversationKey)
+            return
+        }
+        guard let delivered = deliveredRetainedOwners.removeValue(forKey: deliveryID) else { return }
+        await discardRetainedCache(delivered.retained, conversationKey: delivered.conversationKey)
     }
 
     private func admissionPrecedes(_ lhs: String, _ rhs: String) -> Bool {
