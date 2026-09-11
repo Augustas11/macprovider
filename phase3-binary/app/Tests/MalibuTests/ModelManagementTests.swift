@@ -1145,6 +1145,25 @@ final class ModelManagementTests: XCTestCase {
         XCTAssertEqual(document.alternativeExplanations.first?.lostReason, "lower_expected_earning_potential")
     }
 
+    func testRecommendationValidationAcceptsRAMClassDemotedAlternative() throws {
+        // SPEC-023 §4.1 (#1483): the demoted 8 GB onboarding SKU on a 16 GB+ Mac
+        // carries a new lost_reason and summary; the bundled Malibu validator
+        // must accept them (selected row keeps the stable slug).
+        let json = recommendationJSON()
+            .replacingOccurrences(
+                of: "lower_expected_earning_potential",
+                with: "deprioritized_ram_class_onboarding_sku"
+            )
+            .replacingOccurrences(
+                of: "Eligible, but another model has stronger estimated earning potential on this Mac.",
+                with: "Eligible, but reserved as the 8 GB onboarding model; this Mac has memory for a RAM-class model."
+            )
+        let document = try JSONDecoder().decode(MalibuRecommendationDocument.self, from: Data(json.utf8))
+
+        XCTAssertNoThrow(try document.validated(now: ModelTestTimestamp.date))
+        XCTAssertEqual(document.alternativeExplanations.first?.lostReason, "deprioritized_ram_class_onboarding_sku")
+    }
+
     func testRecommendationValidationRejectsMismatchedSelectedExplanation() throws {
         let json = recommendationJSON()
             .replacingOccurrences(

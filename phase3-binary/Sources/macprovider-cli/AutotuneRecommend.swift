@@ -2011,6 +2011,34 @@ struct AutotuneRecommendResult: Equatable {
 struct AutotuneRecommendEngine {
     static let safetyMarginGB = 4
     static let maxBenchmarkAge: TimeInterval = 7 * 24 * 3600
+    // SPEC-023 §4.1 RAM-class recommendation rule (#1483). On a Mac at or above
+    // `ramClassRuleMinMemoryGB`, the raw-score pick must not hand back an 8 GB
+    // onboarding SKU when a RAM-class-matched dense row is still eligible: the
+    // score is `payout × tps × demand × supply-deficit`, both the 3 GB and 8 GB
+    // rows pay the same $0.027/M small-dense parity (Entry 116 / P2-02), so the
+    // ~2× faster 3 GB row would otherwise win on throughput alone. A row that
+    // fails a HARD eligibility gate (swap, thermal, buyer-TTFT ceiling) is not
+    // eligible and thus never a RAM-class-matched row, so the carve-out — fall
+    // back to the onboarding SKU only when every RAM-class row failed a hard
+    // gate — falls out of the `eligible` filter. Advisory TPS/TTFT drift never
+    // vetoes eligibility and therefore never sends a 16 GB Mac back to 3 GB.
+    static let ramClassRuleMinMemoryGB = 16
+    // A RAM-class-matched row consumes essentially the whole 16 GB class: its
+    // `min_ram_gb` sits at the fit ceiling (`16 - safetyMargin = 12`). Llama 3.1
+    // 8B and Qwen3-8B are 12; the Llama 3.2 3B onboarding SKU is 4.
+    static let ramClassMatchedFloorGB = 16 - safetyMarginGB
+    // The 8 GB onboarding SKU floor: `8 - safetyMargin = 4`. Keeps Llama 3.2 3B
+    // the 8 GB default (Entry 116 / SPEC-003) while excluding it as the 16 GB
+    // paid default when a RAM-class row is eligible.
+    static let ramClassOnboardingCeilingGB = 8 - safetyMarginGB
+
+    static func isRAMClassMatched(minRAMGB: Int) -> Bool {
+        minRAMGB >= ramClassMatchedFloorGB
+    }
+
+    static func isRAMClassOnboardingSKU(minRAMGB: Int) -> Bool {
+        minRAMGB <= ramClassOnboardingCeilingGB
+    }
     /// Integrity / update-required warnings that fail closed before paid
     /// recommend / prefetch. Baked-catalog transport fallback stays out of this
     /// set so SPEC-023 local diagnostics remain available offline (#582).
@@ -2074,7 +2102,7 @@ struct AutotuneRecommendEngine {
             warnings.insert(.hardwareTierUnknown)
         }
 
-        let scored = request.candidateCatalog.rows.keys.sorted().compactMap { modelKey -> AutotuneCandidateScore? in
+        let scoredUnsorted = request.candidateCatalog.rows.keys.sorted().compactMap { modelKey -> AutotuneCandidateScore? in
             guard let candidate = request.candidateCatalog.rows[modelKey] else {
                 return nil
             }
@@ -2203,8 +2231,30 @@ struct AutotuneRecommendEngine {
                 )
             )
         }
-        .sorted { a, b in
-            if a.eligible != b.eligible { return a.eligible && !b.eligible }
+        // SPEC-023 §4.1 RAM-class rule (#1483). Look up a scored row's catalog
+        // `min_ram_gb`; unknown rows are treated as neither matched nor an
+        // onboarding SKU so the rule only ever demotes a positively-identified
+        // small SKU.
+        func minRAMGB(of score: AutotuneCandidateScore) -> Int? {
+            request.candidateCatalog.rows[score.catalogKey]?.minRAMGB
+        }
+        // The rule is active only when this Mac is in the 16 GB+ class AND at
+        // least one RAM-class-matched row is eligible (i.e. not every such row
+        // failed a hard gate).
+        let ramClassRuleActive = request.hardware.memoryGB >= Self.ramClassRuleMinMemoryGB
+            && scoredUnsorted.contains { score in
+                score.eligible && (minRAMGB(of: score).map(Self.isRAMClassMatched) ?? false)
+            }
+        // An eligible onboarding SKU is demoted below every RAM-class-matched
+        // eligible row while the rule is active.
+        func ramClassDemoted(_ score: AutotuneCandidateScore) -> Bool {
+            ramClassRuleActive
+                && score.eligible
+                && (minRAMGB(of: score).map(Self.isRAMClassOnboardingSKU) ?? false)
+        }
+        // The earning-potential tiebreakers shared by the sort and, below, the
+        // §6 transcript. Kept identical so the two never diverge.
+        func rawScoreOrdering(_ a: AutotuneCandidateScore, _ b: AutotuneCandidateScore) -> Bool {
             if a.rawScore != b.rawScore { return a.rawScore > b.rawScore }
             if a.tokensPerSecond != b.tokensPerSecond { return a.tokensPerSecond > b.tokensPerSecond }
             let demandA = max(request.demandRank.rows[a.catalogKey]?.demandWeight ?? 0, request.demandRank.coldStartFloor)
@@ -2212,17 +2262,39 @@ struct AutotuneRecommendEngine {
             if demandA != demandB { return demandA > demandB }
             return a.model < b.model
         }
+
+        let scored = scoredUnsorted
+        .sorted { a, b in
+            if a.eligible != b.eligible { return a.eligible && !b.eligible }
+            // RAM-class-matched rows outrank the demoted onboarding SKU
+            // regardless of raw score; this is the only place the score order
+            // is overridden, and it is a stable per-row key so the sort stays
+            // transitive.
+            let demoteA = ramClassDemoted(a)
+            let demoteB = ramClassDemoted(b)
+            if demoteA != demoteB { return !demoteA }
+            return rawScoreOrdering(a, b)
+        }
         .enumerated()
         .map { offset, value in
             var next = value
             next.rank = offset + 1
             if next.eligible {
-                next.explanation.lostReason = offset == 0
-                    ? "selected_best_expected_earning_potential"
-                    : "lower_expected_earning_potential"
-                next.explanation.summary = offset == 0
-                    ? "Selected for the best estimated earning potential on this Mac."
-                    : "Eligible, but another model has stronger estimated earning potential on this Mac."
+                // The selected row keeps the stable
+                // `selected_best_expected_earning_potential` slug (the Malibu
+                // app validates the pick against it); §4.1 surfaces the policy
+                // on the DEMOTED onboarding SKU instead, whose reason is the one
+                // that would otherwise be inaccurate.
+                if ramClassDemoted(next) {
+                    next.explanation.lostReason = "deprioritized_ram_class_onboarding_sku"
+                    next.explanation.summary = "Eligible, but reserved as the 8 GB onboarding model; this Mac has memory for a RAM-class model."
+                } else if offset == 0 {
+                    next.explanation.lostReason = "selected_best_expected_earning_potential"
+                    next.explanation.summary = "Selected for the best estimated earning potential on this Mac."
+                } else {
+                    next.explanation.lostReason = "lower_expected_earning_potential"
+                    next.explanation.summary = "Eligible, but another model has stronger estimated earning potential on this Mac."
+                }
             }
             return next
         }

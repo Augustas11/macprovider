@@ -733,6 +733,8 @@ struct MalibuRecommendationDocument: Decodable, Equatable, Sendable {
     private static let knownExactExplanationSummaries: Set<String> = [
         "Selected for the best estimated earning potential on this Mac.",
         "Eligible, but another model has stronger estimated earning potential on this Mac.",
+        // SPEC-023 §4.1 (#1483): the demoted 8 GB onboarding SKU on a 16 GB+ Mac.
+        "Eligible, but reserved as the 8 GB onboarding model; this Mac has memory for a RAM-class model.",
         "Selected from signed catalog estimates and current hardware fit; no local throughput benchmark was run.",
         "Eligible installed alternative from signed catalog estimates; no local throughput benchmark was run.",
         "No paid recommendation is available for this Mac right now.",

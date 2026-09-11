@@ -281,6 +281,36 @@ func TestValidateSKUEconPinsCoordinatorURL(t *testing.T) {
 	}
 }
 
+// SPEC-023 §4.1 (#1483): the optional expected_recommended_model expectation.
+func TestValidateSKUEconExpectedRecommendedModel(t *testing.T) {
+	tpl := Scenario{
+		Name: "sku",
+		Mode: "sku-econ",
+		Target: Target{
+			CoordinatorURL: "https://coordinator.malibu.tech",
+			CLIBin:         "/path/to/cli",
+		},
+		HardwareMatrix: []HardwareMatrixRow{
+			{Label: "m4-16gb", Chip: "Apple M4", MemoryGB: 16, BandwidthTier: "C", Expected: "at_least_one_eligible_row", ExpectedRecommendedModel: "meta-llama/llama-3.1-8b-instruct"},
+		},
+		BenchmarkSynthesis: BenchmarkSynthesis{
+			Mode:                  "warm_cache_synthetic",
+			TPSMultiplierOfGate:   1.10,
+			TTFTFractionOfCeiling: 0.85,
+		},
+	}
+
+	if err := tpl.Validate(); err != nil {
+		t.Fatalf("eligible row with expected_recommended_model should validate: %v", err)
+	}
+
+	donor := tpl
+	donor.HardwareMatrix[0].Expected = "donor_only_by_ram"
+	if err := donor.Validate(); err == nil || !strings.Contains(err.Error(), "expected_recommended_model requires expected=at_least_one_eligible_row") {
+		t.Fatalf("donor row with expected_recommended_model err=%v, want rejection", err)
+	}
+}
+
 func TestProbeModeReadsResolvedModeWithoutEnvExpansion(t *testing.T) {
 	// A tampered scenario should never be able to interpolate parent-shell
 	// secrets during the mode probe. SEC-M-1 (r3 security audit).

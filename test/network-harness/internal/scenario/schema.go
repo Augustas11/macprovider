@@ -230,6 +230,10 @@ type HardwareMatrixRow struct {
 	MemoryGB      int    `yaml:"memoryGB"`
 	BandwidthTier string `yaml:"bandwidthTier"`
 	Expected      string `yaml:"expected"`
+	// ExpectedRecommendedModel, when non-empty, asserts the exact
+	// recommended_model the engine returns for this row (SPEC-023 §4.1 /
+	// #1483). Empty keeps the eligible-row-count-only check.
+	ExpectedRecommendedModel string `yaml:"expected_recommended_model"`
 }
 
 type BenchmarkSynthesis struct {
@@ -755,6 +759,15 @@ func (s *Scenario) validateSKUEcon() error {
 			return fmt.Errorf("hardware_matrix[%d].expected uses deprecated sku-econ vocabulary %q; use at_least_one_eligible_row or donor_only_by_ram (rate-card v4 pivot)", i, row.Expected)
 		default:
 			return fmt.Errorf("hardware_matrix[%d].expected must be at_least_one_eligible_row or donor_only_by_ram", i)
+		}
+		// SPEC-023 §4.1 (#1483): an optional recommended-model identity
+		// expectation. When set, the row asserts which model the engine
+		// actually recommends (e.g. Llama 3.1 8B on a 16 GB Mac, Llama 3.2 3B
+		// on 8 GB), not merely that some row was eligible. A recommended model
+		// only exists on a paid-eligible row, so this is incompatible with a
+		// donor_only_by_ram row.
+		if row.ExpectedRecommendedModel != "" && row.Expected != "at_least_one_eligible_row" {
+			return fmt.Errorf("hardware_matrix[%d].expected_recommended_model requires expected=at_least_one_eligible_row", i)
 		}
 	}
 	if s.BenchmarkSynthesis.Mode != "warm_cache_synthetic" {
