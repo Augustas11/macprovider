@@ -121,12 +121,52 @@ struct BYOMArtifactEvidence: Equatable, Sendable {
     var hashes: [String: String] { [algorithm: digest] }
 }
 
+/// SPEC-046-R002 / SPEC-010 v1.7 R007(a): a runtime-specific step that maps a
+/// served model reference to the GGUF file on disk. Everything downstream —
+/// opening the descriptor, binding the identity, streaming the digest, the
+/// cache — is runtime-neutral and lives in `BYOMArtifactDigestResolver`.
+///
+/// Invariant every conformer keeps: the resolved file is a regular file
+/// contained in a root the OPERATOR declared (never one the runtime named),
+/// resolved through symlinks before the containment check, and identified by
+/// a `locator` that is stable for the runtime instance so the resolver can
+/// prove the reference still names the very file it hashed. Locators are never
+/// reported as digests.
+protocol BYOMGGUFArtifactLocator: Sendable {
+    /// The SPEC-046-R002 adapter this locator serves (`ollama_loopback`, ...).
+    var runtimeSource: String { get }
+    /// `servedModelRef` is the candidate's `served_model_ref`, prefix and all.
+    func resolveArtifact(servedModelRef: String) -> BYOMResolvedArtifact?
+}
+
+struct BYOMResolvedArtifact: Equatable, Sendable {
+    /// Canonical (symlinks resolved) URL of the regular file to hash.
+    let fileURL: URL
+    /// Stable re-check token: the Ollama manifest layer digest, an LM Studio
+    /// path relative to its models root, a llama.cpp canonical path. Compared
+    /// verbatim by `validateCurrent`; never surfaced as a digest.
+    let locator: String
+}
+
+/// Shared containment check: `url`, after resolving symlinks, must be `root`
+/// or strictly beneath it. Used by every locator so a symlink or `..` cannot
+/// escape the operator-declared root.
+enum BYOMArtifactPathPolicy {
+    static func isContained(_ url: URL, in root: URL) -> Bool {
+        let target = url.resolvingSymlinksInPath().standardizedFileURL.path
+        let base = root.resolvingSymlinksInPath().standardizedFileURL.path
+        if target == base { return true }
+        return target.hasPrefix(base.hasSuffix("/") ? base : base + "/")
+    }
+}
+
 /// Locates the GGUF blob an Ollama model name is served from, in the local
 /// Ollama store (`$OLLAMA_MODELS`, default `~/.ollama/models`): the manifest at
 /// `manifests/registry.ollama.ai/<namespace>/<repo>/<tag>` names the model
 /// layer, whose digest LOCATES `blobs/sha256-<hex>`. Filesystem only — no
 /// network, no dereferencing anything the runtime reports beyond the name.
-struct BYOMOllamaModelStore: Sendable {
+struct BYOMOllamaModelStore: BYOMGGUFArtifactLocator, Sendable {
+    let runtimeSource = "ollama_loopback"
     let root: URL
     private let fileManager: FileManager
     private static let manifestMaxBytes = 256 * 1024
@@ -213,11 +253,13 @@ struct BYOMOllamaModelStore: Sendable {
         return components
     }
 
+    func resolveArtifact(servedModelRef: String) -> BYOMResolvedArtifact? {
+        guard let blob = resolveModelBlob(name: servedModelRef) else { return nil }
+        return BYOMResolvedArtifact(fileURL: blob.blobURL, locator: blob.locatorDigest)
+    }
+
     private func pathIsContained(_ url: URL, in root: URL) -> Bool {
-        let target = url.resolvingSymlinksInPath().standardizedFileURL.path
-        let base = root.resolvingSymlinksInPath().standardizedFileURL.path
-        if target == base { return true }
-        return target.hasPrefix(base.hasSuffix("/") ? base : base + "/")
+        BYOMArtifactPathPolicy.isContained(url, in: root)
     }
 
     private func boundedFileContents(at url: URL, maxBytes: Int) -> Data? {
@@ -314,14 +356,39 @@ struct BYOMArtifactDigestCache: Sendable {
 /// `macprovider.gguf-file.v1` digest: resolve the blob, hash the complete
 /// bytes, and bind the result to the exact file identity.
 struct BYOMArtifactDigestResolver: Sendable {
-    let store: BYOMOllamaModelStore
+    /// Locators keyed by `runtime_source`. A runtime with no locator has no
+    /// artifact leg: `knownDigest` is nil and `computeEvidence` throws
+    /// `unresolvedBlob`, exactly as an unresolvable Ollama name does.
+    private let locators: [String: any BYOMGGUFArtifactLocator]
     let cache: BYOMArtifactDigestCache
+
+    /// The Ollama store, kept addressable for callers that predate the
+    /// locator protocol.
+    var store: BYOMOllamaModelStore {
+        locators["ollama_loopback"] as! BYOMOllamaModelStore
+    }
+
+    init(locators: [any BYOMGGUFArtifactLocator], cache: BYOMArtifactDigestCache) {
+        var table: [String: any BYOMGGUFArtifactLocator] = [:]
+        for locator in locators {
+            precondition(table[locator.runtimeSource] == nil, "duplicate locator for \(locator.runtimeSource)")
+            table[locator.runtimeSource] = locator
+        }
+        self.locators = table
+        self.cache = cache
+    }
+
+    init(store: BYOMOllamaModelStore, cache: BYOMArtifactDigestCache) {
+        self.init(locators: [store], cache: cache)
+    }
+
+    // MARK: Runtime-neutral entry points
 
     /// Discovery-time: a digest previously computed over the SAME file (path,
     /// size, inode, mtime), or nil. Never hashes.
-    func knownDigest(forOllamaModel name: String) -> String? {
-        guard let blob = store.resolveModelBlob(name: name),
-              let identity = BYOMArtifactFileIdentity.current(of: blob.blobURL)
+    func knownDigest(runtimeSource: String, servedModelRef: String) -> String? {
+        guard let artifact = locators[runtimeSource]?.resolveArtifact(servedModelRef: servedModelRef),
+              let identity = BYOMArtifactFileIdentity.current(of: artifact.fileURL)
         else {
             return nil
         }
@@ -333,17 +400,17 @@ struct BYOMArtifactDigestResolver: Sendable {
     /// the digest BOUND to the file so the caller can re-validate right
     /// before it reports (SPEC-010-R007(a)).
     ///
-    /// The blob is opened ONCE; the identity is taken from that descriptor
+    /// The file is opened ONCE; the identity is taken from that descriptor
     /// (`fstat`) before and after hashing, so the digest is bound to the file
     /// that was actually read. The pathname is then re-resolved and must name
     /// that same file: a path that pointed elsewhere while it was opened, or
-    /// a blob rewritten while it was read, fails closed. `deadline` bounds
+    /// a file rewritten while it was read, fails closed. `deadline` bounds
     /// the hashing; on expiry nothing is recorded.
-    func computeEvidence(forOllamaModel name: String, deadline: Date? = nil) throws -> BYOMArtifactEvidence {
-        guard let blob = store.resolveModelBlob(name: name) else {
+    func computeEvidence(runtimeSource: String, servedModelRef: String, deadline: Date? = nil) throws -> BYOMArtifactEvidence {
+        guard let artifact = locators[runtimeSource]?.resolveArtifact(servedModelRef: servedModelRef) else {
             throw BYOMArtifactDigestError.unresolvedBlob
         }
-        let path = blob.blobURL.resolvingSymlinksInPath().standardizedFileURL.path
+        let path = artifact.fileURL.resolvingSymlinksInPath().standardizedFileURL.path
         guard let handle = FileHandle(forReadingAtPath: path) else {
             throw BYOMArtifactDigestError.unresolvedBlob
         }
@@ -355,26 +422,45 @@ struct BYOMArtifactDigestResolver: Sendable {
         guard BYOMArtifactFileIdentity.of(descriptor: handle.fileDescriptor, path: path) == before else {
             throw BYOMArtifactDigestError.fileIdentityChanged
         }
-        let evidence = BYOMArtifactEvidence(algorithm: ModelArtifactIdentity.ggufFileV1, digest: digest, file: before, locatorDigest: blob.locatorDigest)
-        try validateCurrent(evidence, forOllamaModel: name)
+        let evidence = BYOMArtifactEvidence(algorithm: ModelArtifactIdentity.ggufFileV1, digest: digest, file: before, locatorDigest: artifact.locator)
+        try validateCurrent(evidence, runtimeSource: runtimeSource, servedModelRef: servedModelRef)
         cache.store(before, algorithm: evidence.algorithm, digest: digest)
         return evidence
     }
 
-    func computeDigest(forOllamaModel name: String, deadline: Date? = nil) throws -> String {
-        try computeEvidence(forOllamaModel: name, deadline: deadline).digest
+    func computeDigest(runtimeSource: String, servedModelRef: String, deadline: Date? = nil) throws -> String {
+        try computeEvidence(runtimeSource: runtimeSource, servedModelRef: servedModelRef, deadline: deadline).digest
     }
 
-    /// The name must STILL resolve — through the manifest — to the very file
-    /// the digest was computed over, with an unchanged identity: a manifest
-    /// retargeted to another blob, or a blob rewritten in place, fails closed.
-    func validateCurrent(_ evidence: BYOMArtifactEvidence, forOllamaModel name: String) throws {
-        guard let blob = store.resolveModelBlob(name: name),
-              blob.locatorDigest == evidence.locatorDigest,
-              let now = BYOMArtifactFileIdentity.current(of: blob.blobURL),
+    /// The reference must STILL resolve — through the runtime's locator — to
+    /// the very file the digest was computed over, with an unchanged identity:
+    /// a reference retargeted to another file, or a file rewritten in place,
+    /// fails closed.
+    func validateCurrent(_ evidence: BYOMArtifactEvidence, runtimeSource: String, servedModelRef: String) throws {
+        guard let artifact = locators[runtimeSource]?.resolveArtifact(servedModelRef: servedModelRef),
+              artifact.locator == evidence.locatorDigest,
+              let now = BYOMArtifactFileIdentity.current(of: artifact.fileURL),
               now == evidence.file
         else {
             throw BYOMArtifactDigestError.fileIdentityChanged
         }
+    }
+
+    // MARK: Ollama-named shims (pre-#1478 call sites and tests)
+
+    func knownDigest(forOllamaModel name: String) -> String? {
+        knownDigest(runtimeSource: "ollama_loopback", servedModelRef: name)
+    }
+
+    func computeEvidence(forOllamaModel name: String, deadline: Date? = nil) throws -> BYOMArtifactEvidence {
+        try computeEvidence(runtimeSource: "ollama_loopback", servedModelRef: name, deadline: deadline)
+    }
+
+    func computeDigest(forOllamaModel name: String, deadline: Date? = nil) throws -> String {
+        try computeDigest(runtimeSource: "ollama_loopback", servedModelRef: name, deadline: deadline)
+    }
+
+    func validateCurrent(_ evidence: BYOMArtifactEvidence, forOllamaModel name: String) throws {
+        try validateCurrent(evidence, runtimeSource: "ollama_loopback", servedModelRef: name)
     }
 }
