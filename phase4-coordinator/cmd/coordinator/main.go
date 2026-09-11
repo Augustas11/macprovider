@@ -314,6 +314,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "billing config snapshot: %v\n", err)
 		os.Exit(1)
 	}
+	billingStore.SetWholesalePricing(cfg.Rewards, cfg.Stats.Rollup.UsdPerMillionCredits)
 	// SPEC-017 v0.1.8 Step 1 — Postgres pools for the Network
 	// Stats API. Fail-closed per BUILD §C.3: any missing required
 	// runtime DSN or any failed startup smoke aborts coordinator
@@ -3284,6 +3285,7 @@ func reloadCoordinatorConfig(configPath, configOverlay string, startupTier2 conf
 		}
 		buyerServer.SetBillingConfig(cfg.Rewards, snapshotID, cfg.Stats.Rollup.UsdPerMillionCredits)
 		billingStores[0].SetSettlementConfig(cfg.Settlement)
+		billingStores[0].SetWholesalePricing(cfg.Rewards, cfg.Stats.Rollup.UsdPerMillionCredits)
 		logger.Info().
 			Bool("billing.quarantine_resolution_force_void_enabled", cfg.Billing.QuarantineResolutionForceVoidEnabled).
 			Bool("billing.quarantine_resolution_force_credit_enabled", cfg.Billing.QuarantineResolutionForceCreditEnabled).

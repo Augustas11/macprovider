@@ -31,6 +31,8 @@ func TestBillingMigration(t *testing.T) {
 		"ledger_provider_identity_snapshots",
 		"settlement_route_snapshots",
 		"settlement_attempt_outputs",
+		"wholesale_period_statements",
+		"wholesale_statement_line_items",
 	} {
 		rows, err := db.Query(`PRAGMA table_info(` + table + `)`)
 		if err != nil {

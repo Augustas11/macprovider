@@ -12,7 +12,7 @@ import (
 	"github.com/yuin/goldmark/parser"
 )
 
-//go:embed templates/account.html templates/docs.md
+//go:embed templates/account.html templates/docs.md templates/privacy.md
 var pageFS embed.FS
 
 var accountTemplate = template.Must(template.ParseFS(pageFS, "templates/account.html"))
@@ -121,6 +121,30 @@ func (s *Server) handleDocs(w http.ResponseWriter, r *http.Request) {
 	setBrowserSecurityHeaders(w.Header(), "")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Mac Provider docs</title><style>body{margin:0;background:#0d1117;color:#c9d1d9;font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}main{max-width:920px;margin:0 auto;padding:40px 20px 64px}a{color:#58a6ff}pre{overflow:auto;background:#161b22;border:1px solid #30363d;border-radius:8px;padding:16px}code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}h1,h2{color:#f0f6fc;line-height:1.2}h1{font-size:34px}h2{margin-top:36px;border-top:1px solid #30363d;padding-top:24px}table{border-collapse:collapse;width:100%}td,th{border:1px solid #30363d;padding:8px;text-align:left}.note{border-left:3px solid #58a6ff;padding:8px 14px;background:#161b22}</style></head><body><main>`))
+	_, _ = body.WriteTo(w)
+	_, _ = w.Write([]byte(`</main></body></html>`))
+}
+
+func (s *Server) handlePrivacy(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "invalid_request_error", "method_not_allowed", "Method not allowed")
+		return
+	}
+	source, err := pageFS.ReadFile("templates/privacy.md")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "server_error", "privacy_missing", "Privacy page unavailable")
+		return
+	}
+	var body bytes.Buffer
+	if err := docsMarkdown.Convert(source, &body); err != nil {
+		writeError(w, http.StatusInternalServerError, "server_error", "privacy_render_failed", "Privacy page unavailable")
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "public, max-age=300")
+	setBrowserSecurityHeaders(w.Header(), "")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Mac Provider privacy</title><style>body{margin:0;background:#0d1117;color:#c9d1d9;font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}main{max-width:920px;margin:0 auto;padding:40px 20px 64px}a{color:#58a6ff}pre{overflow:auto;background:#161b22;border:1px solid #30363d;border-radius:8px;padding:16px}code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}h1,h2{color:#f0f6fc;line-height:1.2}h1{font-size:34px}h2{margin-top:36px;border-top:1px solid #30363d;padding-top:24px}</style></head><body><main>`))
 	_, _ = body.WriteTo(w)
 	_, _ = w.Write([]byte(`</main></body></html>`))
 }

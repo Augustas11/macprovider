@@ -1,7 +1,15 @@
 # SPEC-006 - Buyer API Gateway: Mac Provider's first public buyer surface
 
-**Version:** 0.9.22 (2026-09-10, SPEC-041 buyer contract composition)
+**Version:** 0.9.23 (2026-09-11, OpenRouter wholesale partner surface)
 **Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.5.4, SPEC-003 v0.7, SPEC-004 v0.3.2
+
+**Change log v0.9.23 (2026-09-11, OpenRouter join on the live pool):**
+- Additive unauthenticated `GET /v1/openrouter/models` schema-2.4 document. Public `GET /v1/models` is unchanged (OpenAI list + integrity/`tier1_disclosure`). OpenRouter ingest MUST NOT be served the sanitized public list.
+- Dual Llama 3B SKUs: paid pool id `mlx-community/Llama-3.2-3B-Instruct-4bit` and free alias `mlx-community/Llama-3.2-3B-Instruct-4bit-free` that routes to the same pool after `NormalizeModelKey` strips `-free`. Qwen3-8B stays off this document until more than one warm node.
+- Named wholesale `mp_` accounts (`auth.wholesale_account_ids`): no 100k/day cap; coordinator `503 no_provider_available` becomes gateway `429`; skip SPEC-006 §7.8 750ms slot queue; always emit a final stream `usage` chunk; gateway-only SSE comment keepalives. SPEC-001 FR-5 keepalives stay on the provider binary.
+- Chat remains `POST /v1/chat/completions` on `api.malibu.tech`. No second host and no `/partner/openrouter` remap.
+- Public `GET /privacy` retention page (`compliance.zdr` is false; prompts are plaintext on provider Macs).
+- Registers `SPEC-006-R010`. Wholesale USD statements remain SPEC-005 D1a.
 
 **Change log v0.9.22 (SPEC-041 composition):** Reserves the authenticated public relay-blind reservation route and SPEC-041 typed errors/metadata. Success and errors carry requested/effective privacy outcome, exact request-only scope, settlement labels, and retry action in the specified headers/JSON/SSE locations. Public relay-blind responses MUST NOT emit `X-Provider-Id` or equivalent stable provider identity. Buyer-supplied internal wallet-session/execution-auth headers are stripped and trusted values overwritten after authentication. Plaintext APIs remain unchanged while the draft feature is off.
 
@@ -207,7 +215,7 @@
 
 ## Preliminary conformance unit IDs
 
-SPEC-006 v0.9.21 registers `SPEC-006-R001`..`SPEC-006-R009` in
+SPEC-006 v0.9.23 registers `SPEC-006-R001`..`SPEC-006-R010` in
 `specs/CONFORMANCE.json`. R001–R003 remain the paid-path chat, error, and
 quota units. R004–R009 group additional existing obligation areas without
 changing them:
@@ -225,8 +233,10 @@ changing them:
 - `SPEC-006-R008` — unauthenticated public rate-card and stats overview
   (§2.2, §4.2).
 - `SPEC-006-R009` — demo-token traffic isolation from paid quota (§3.6).
+- `SPEC-006-R010` — OpenRouter schema-2.4 models document, wholesale
+  partner chat flags, dual SKU alias ids (§2.2, §5.3.2, §7.8, §17.9).
 
-`requirement_id_migration` is `complete`. R004–R009 are not promoted from
+`requirement_id_migration` is `complete`. R004–R010 are not promoted from
 this close. Signed journey-result evidence is still required before any of
 those rows can become conformant.
 
@@ -293,10 +303,8 @@ SPEC-006 covers:
 SPEC-006 v1 explicitly does not specify:
 
 - Stripe.
-- Billing.
-- Metered payment.
-- Paid plans.
-- Invoicing.
+- Public-buyer metered payment, paid plans, or card checkout.
+- Public-buyer invoicing (wholesale partner USD statements are SPEC-005 D1a, operator-issued, not a SPEC-006 Stripe rail).
 - Refunds.
 - Provider payout.
 - Revenue share.
@@ -530,6 +538,7 @@ This section is read-only design input and MUST NOT be treated as a place to pro
 - Internal coordinator URL: `https://coordinator.malibu.tech` stays in service for M4/M1 legacy direct-tunnel buyer paths and operator endpoints (`/admin/*`, `/poolz`, `/healthz`).
 - Endpoints exposed at `api.malibu.tech`:
   - `GET /v1/models`
+  - `GET /v1/openrouter/models` (unauthenticated schema-2.4 partner ingest document; not a replacement for `/v1/models`)
   - `POST /v1/chat/completions` (including SSE streaming via `stream: true`)
   - `POST /v1/messages` only when `features.anthropic_messages_enabled` is true
   - `GET /v1/usage`
@@ -541,6 +550,7 @@ This section is read-only design input and MUST NOT be treated as a place to pro
   - `POST /v1/feedback`
   - OAuth callbacks at `/auth/github/callback` (and `/auth/email/callback` if email magic link is implemented)
   - Signup/key-management UI at `/account` (or operator-chosen path consistent with the Vercel demo's structure)
+  - Public privacy and retention page at `/privacy`
 - Endpoints NOT exposed at `api.malibu.tech` (kept internal):
   - `/admin/*`, `/poolz`, `/healthz`, `/ws/provider` -- all remain on coordinator port.
   - `GET /v1/stats/leaderboard` and other SPEC-017 partner / exact-$ projections.
@@ -555,6 +565,7 @@ This section is read-only design input and MUST NOT be treated as a place to pro
 ### 2.4 Quotas
 
 - **Default daily quota: 100,000 total tokens per account per day.** Adjustable in `gateway.yaml` without code change.
+- **Wholesale partner accounts** listed in `auth.wholesale_account_ids` MUST NOT be bound by that 100,000/day cap. Reservations and settlement still run so usage is metered for SPEC-005 D1a. Public accounts are unchanged.
 - **Unauthenticated demo quota: 1,000 total tokens per IP per day.** Demo traffic is allowed via specific endpoints (chat playground through front door) and a tiny `X-Demo-Token` header sourced from the Vercel demo's session cookie.
 - **Per-account concurrency cap: 2 concurrent requests** at v1. Adjustable.
 - **Per-IP signup issuance: 3 accounts per IP per day** (Sybil defense).
@@ -810,6 +821,7 @@ The gateway MUST be restartable independently of the coordinator.
 `https://api.malibu.tech` MUST expose only:
 
 - `GET /v1/models`
+- `GET /v1/openrouter/models`
 - `POST /v1/chat/completions`
 - `POST /v1/messages` only when `features.anthropic_messages_enabled` is true
 - `GET /v1/usage`
@@ -822,6 +834,7 @@ The gateway MUST be restartable independently of the coordinator.
 - `/auth/github/callback`
 - `/auth/email/callback` if email magic link ships
 - `/account` or equivalent account UI path
+- `/privacy`
 
 `https://api.malibu.tech` MUST NOT expose:
 
@@ -1399,6 +1412,56 @@ buyer-facing disclosure (this field, `/v1/models tier1_disclosure`, and
 `disclosure.go`) to cover (i)–(ii) is a tracked completeness follow-up; it is
 recorded here as a known gap, not silently omitted.
 
+### 5.3.2 `GET /v1/openrouter/models`
+
+`GET /v1/openrouter/models` is the OpenRouter ingest document. It is **additive**. Public `GET /v1/models` MUST remain the sanitized OpenAI list with `tier1_disclosure` / `compute_integrity`.
+
+Authentication: unauthenticated. Subject to `kill_switch.all_public_api` like other public APIs. `/v1/status` stays carved out; this path is not.
+
+Response status:
+
+- `200` when the gateway can project from live pool state plus the coordinator rate card.
+- `502` / `503` when coordinator pool or rate-card inputs are unavailable. The document MUST NOT invent `is_ready: true`.
+
+Document shape (schema 2.4):
+
+```json
+{
+  "schema_version": "2.4",
+  "data": [
+    {
+      "id": "mlx-community/Llama-3.2-3B-Instruct-4bit",
+      "name": "Llama 3.2 3B Instruct (4-bit)",
+      "architecture": {
+        "input_modalities": ["text"],
+        "output_modalities": ["text"],
+        "modality": "text->text"
+      },
+      "context_length": 131072,
+      "quantization": "int4",
+      "hugging_face_id": "mlx-community/Llama-3.2-3B-Instruct-4bit",
+      "is_ready": true,
+      "is_free": false,
+      "cost_usd": {
+        "prompt": "0.0000000135",
+        "completion": "0.000000027"
+      },
+      "compliance": { "zdr": false }
+    }
+  ]
+}
+```
+
+Normative rules:
+
+- Dual Llama 3B rows when that pool id is present: paid id equals the pool `ModelID`; free id is that string plus `-free` with `is_free: true` and `$0` cost. OpenRouter's catalog `:free` suffix is **their** display form, not the wire id.
+- `is_ready` MUST be true only when that pool id currently has at least one ready slot (`slots_free > 0`).
+- `cost_usd` MUST be decimal per-token strings from the live rate card (`credits_per_mtok × usd_per_million_credits / 1e12`). Free rows MUST be `"0"`.
+- `compliance.zdr` MUST be `false`. Prompts are plaintext on provider Macs. MUST NOT invent a datacenter region such as `us-east-1`.
+- Qwen3-8B and other pool ids MUST stay off this document until the id has more than one warm ready provider.
+- The document MUST NOT include `compute_integrity`, `tier1_disclosure`, provider ids, hostnames, or IPs.
+- Gateway sanitizer for `/v1/models` MUST NOT run on this path.
+
 ### 5.4 `POST /v1/chat/completions`
 
 `POST /v1/chat/completions` is the primary OpenAI-compatible inference endpoint.
@@ -1436,6 +1499,12 @@ Supported request fields:
 `n` is accepted for OpenAI SDK compatibility and MUST be 1 in v1. Values greater than 1 MUST be rejected with HTTP 400, `type: "invalid_request_error"`, and `code: "n_must_be_1"`.
 
 `stream_options` MUST be accepted and forwarded to the provider. When `stream_options.include_usage = true`, the final SSE chunk MUST include a `usage` field so OpenAI SDK streaming token accounting works. `stream_options.include_usage = false` MUST be tolerated and MAY be ignored if the provider always emits usage.
+
+Wholesale partner accounts MUST always receive a final stream `usage` chunk even when `stream_options.include_usage` is omitted. If the provider stream omitted usage, the gateway MUST inject a gateway-estimated usage chunk before `[DONE]`. Public accounts are unchanged.
+
+Wholesale partner streams MUST also receive gateway-only SSE comment keepalives (`: keepalive`) on an idle interval. SPEC-001 FR-5 provider-binary keepalives are unchanged.
+
+The free SKU wire id `mlx-community/Llama-3.2-3B-Instruct-4bit-free` MUST route to the same pool as `mlx-community/Llama-3.2-3B-Instruct-4bit`. Coordinator `NormalizeModelKey` MUST strip a trailing `-free` before other quantization suffixes. `request_log.model` MUST retain the original buyer string so SPEC-005 D1a can split $0 vs paid.
 
 `user` is accepted as opaque diagnostics, stored in usage events, and MUST NOT be exposed in buyer-visible responses.
 
@@ -1986,6 +2055,17 @@ The implementation MAY serve it from the gateway or front door, but the contract
 
 If the front door owns rendering, the gateway MUST provide API endpoints sufficient for these functions.
 
+### 5.10 `GET /privacy`
+
+Unauthenticated HTML page. MUST state honestly:
+
+- Prompts and completions are processed as plaintext on volunteer Apple Silicon Macs.
+- There is no zero-data-retention (ZDR) guarantee. `compliance.zdr` on the OpenRouter document is `false`.
+- MacProvider does not train foundation models on buyer prompts.
+- Request metadata needed for routing, quota, settlement, and D1a wholesale statements is retained per coordinator `request_log` lifetime.
+
+MUST NOT claim private inference, hardware attestation, or a US datacenter region.
+
 ---
 
 ## 6. Identity and auth
@@ -2328,6 +2408,8 @@ For non-pinned requests, the coordinator MAY hold a request in a bounded pre-dis
 If no slot becomes available before the bounded queue deadline, or if the candidate provider leaves `ready` state, return 503.
 
 Pinned provider or session requests MUST NOT enter this queue. If the pinned target has no immediately available slot, return 503.
+
+Wholesale partner accounts (`auth.wholesale_account_ids`) MUST NOT enter this queue. If no slot is immediately free, the coordinator MUST return `503 no_provider_available` without waiting; the gateway MUST translate that outcome to `429` with `retryable: true` and a `Retry-After` hint. OpenRouter scores HTTP 503 against uptime; 429 is capacity-shed.
 
 If the account concurrency cap is reached, return 429.
 
@@ -3312,6 +3394,15 @@ The code MUST distinguish:
 
 - `demo_paused`
 - `beta_paused`
+
+### 17.9 Wholesale partner shed
+
+For accounts in `auth.wholesale_account_ids` only:
+
+- Coordinator `503 no_provider_available` MUST be rewritten at the gateway to `429` with `code: no_provider_available`, `retryable: true`, and `Retry-After`.
+- Other coordinator 5xx codes are unchanged.
+- HTTP 402 MUST NOT be returned on this chat path.
+- The gateway MUST set `X-MacProvider-Internal-Wholesale: 1` on the service-token hop and MUST strip any client-supplied copy.
 
 ---
 

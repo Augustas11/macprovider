@@ -78,6 +78,7 @@ type AuthConfig struct {
 	OAuth                 OAuthConfig          `yaml:"oauth"`
 	Demo                  DemoConfig           `yaml:"demo"`
 	WalletSessions        WalletSessionsConfig `yaml:"wallet_sessions"`
+	WholesaleAccountIDs   []string             `yaml:"wholesale_account_ids"`
 }
 
 type WalletSessionsConfig struct {
@@ -628,6 +629,9 @@ func (c Config) Validate() error {
 	if c.Auth.Demo.SigningSecret == "" {
 		return fmt.Errorf("auth.demo.signing_secret must be set")
 	}
+	if err := validateWholesaleAccountIDs(c.Auth.WholesaleAccountIDs); err != nil {
+		return err
+	}
 	if err := validateWalletSessionsConfig(c); err != nil {
 		return err
 	}
@@ -843,6 +847,24 @@ func (c Config) Validate() error {
 		if _, ok := corsOrigins[origin]; !ok {
 			return fmt.Errorf("auth.oauth.return_to_allowlist[%d] origin %q missing matching cors.allowed_origins entry", i, origin)
 		}
+	}
+	return nil
+}
+
+func validateWholesaleAccountIDs(ids []string) error {
+	seen := map[string]struct{}{}
+	for i, raw := range ids {
+		id := strings.TrimSpace(raw)
+		if id == "" {
+			return fmt.Errorf("auth.wholesale_account_ids[%d] must be non-empty", i)
+		}
+		if strings.HasPrefix(id, "demo:") {
+			return fmt.Errorf("auth.wholesale_account_ids[%d] must not be a demo identity", i)
+		}
+		if _, ok := seen[id]; ok {
+			return fmt.Errorf("auth.wholesale_account_ids duplicates %q", id)
+		}
+		seen[id] = struct{}{}
 	}
 	return nil
 }

@@ -51,6 +51,10 @@ auth:
       user_url: https://api.github.com/user
   demo:
     signing_secret: env:MACPROVIDER_DEMO_SIGNING_SECRET
+  # Named wholesale partner accounts (OpenRouter). Empty by default.
+  # These mp_ accounts skip the 100k/day cap, skip the 750ms slot queue,
+  # get 429-not-503 shed, always-on stream usage, and gateway SSE keepalives.
+  wholesale_account_ids: []
 
 quotas:
   account_daily_tokens: 100000

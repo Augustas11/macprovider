@@ -465,7 +465,7 @@ def normalize_model_key(model: str) -> str:
         namespace = key[:slash]
         if namespace in KNOWN_MODEL_NAMESPACES:
             key = key[slash + 1:]
-    for suffix in ("-mxfp4-q8", "-4bit", "-8bit"):
+    for suffix in ("-free", "-mxfp4-q8", "-4bit", "-8bit"):
         if key.endswith(suffix):
             key = key[: -len(suffix)]
 

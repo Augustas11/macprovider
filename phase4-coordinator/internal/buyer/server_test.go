@@ -8021,6 +8021,39 @@ func TestSlotQueueDoesNotApplyToHardPinnedProvider(t *testing.T) {
 	assertOpenAIErrorEnvelope(t, rr, "no_provider_available", "service_unavailable")
 }
 
+func TestSlotQueueDoesNotApplyToWholesalePartner(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("upstream should not receive wholesale busy request")
+	}))
+	defer upstream.Close()
+
+	registry := pool.NewRegistry([]config.ProviderConfig{{ProviderID: "busy", EndpointURL: upstream.URL}})
+	registerWithEndpoint(registry, "busy", "s1", "model-a", pool.StateReady, 20000, 1, upstream.URL, 10)
+	zero := 0
+	registry.ApplyStateUpdate("busy", "s1", pool.StateUpdate{State: pool.StateReady, SlotsFree: &zero, At: time.Now().UTC()})
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithSlotQueueConfig(4, 100*time.Millisecond, time.Millisecond),
+		buyer.WithGatewayServiceToken("gateway-secret"),
+	)
+
+	start := time.Now()
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`), http.Header{
+		"Authorization":                    []string{"Bearer gateway-secret"},
+		"X-MacProvider-Account":            []string{"acct_openrouter"},
+		"X-MacProvider-Internal-Wholesale": []string{"1"},
+	})
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("wholesale busy request status = %d, want 503 body=%s", rr.Code, rr.Body.String())
+	}
+	if elapsed := time.Since(start); elapsed > 50*time.Millisecond {
+		t.Fatalf("wholesale busy request waited %v; partner traffic should not enter slot queue", elapsed)
+	}
+	assertOpenAIErrorEnvelope(t, rr, "no_provider_available", "service_unavailable")
+}
+
 func TestSlotQueueExitsWhenQueuedProviderStartsDraining(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Fatal("upstream should not receive queued draining request")

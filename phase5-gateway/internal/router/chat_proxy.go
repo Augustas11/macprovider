@@ -59,6 +59,7 @@ const (
 	settlementPolicyVersionHeader      = "X-MacProvider-Settlement-Policy-Version"
 	settlementPendingUntilHeader       = "X-MacProvider-Settlement-Pending-Deadline-Unix-Ms"
 	coordinatorInternalRequestIDHeader = "X-MacProvider-Internal-Request-ID"
+	wholesaleInternalHeader            = "X-MacProvider-Internal-Wholesale"
 	// settlementNoPriorDispatchHeader mirrors the coordinator constant of the
 	// same name (separate Go module, intentionally duplicated). The coordinator
 	// sets it on a route_snapshot_failed ONLY when it is the genuine first
@@ -213,6 +214,9 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		subject = usageSubject{AccountID: authn.Bearer.AccountID}
 	}
 	accountID = subject.AccountID
+	if s.isWholesaleAccount(subject.AccountID) {
+		dailyQuota = s.dailyQuotaForAccount(r.Context(), subject.AccountID)
+	}
 	// The encoded envelope needs base64 expansion and bounded clear metadata.
 	// Plaintext retains its original body limit below.
 	readLimit := max(s.cfg.Limits.RequestBodyBytes, int64(relayBlindCiphertextMaxBytes+(16<<10)))
@@ -646,6 +650,9 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		if subject.AccountID != "" {
 			upReq.Header.Set("Authorization", "Bearer "+s.cfg.Coordinator.UpstreamCoordinatorBearer())
 			upReq.Header.Set("X-MacProvider-Account", subject.AccountID)
+			if s.isWholesaleAccount(subject.AccountID) {
+				upReq.Header.Set(wholesaleInternalHeader, "1")
+			}
 			// SPEC-042-R002 emit: the pool authority header is set ONLY for an
 			// authenticated account context (the coordinator honors it only
 			// under the service-token bearer + account, both set just above)
@@ -1152,6 +1159,14 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 	w.Header().Set("X-Accel-Buffering", "no")
 	w.WriteHeader(http.StatusOK)
 	flusher, _ := w.(http.Flusher)
+	wholesale := s.isWholesaleAccount(subject.AccountID)
+	if wholesale {
+		wrap := &wholesaleStreamWriter{w: w, flusher: flusher}
+		w = wrap
+		flusher = wrap
+		stopKeepalives := startWholesaleKeepalives(r.Context().Done(), wrap)
+		defer stopKeepalives()
+	}
 	// #760: the coordinator has committed streaming headers, which post-#92
 	// means it accepted the request and is relaying provider output. The
 	// admission budget is done; from here the first content-bearing delta is
@@ -1183,6 +1198,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 	var serializedEmitted int64
 	var reported *tokenUsage
 	invalidReportedUsage := false
+	forwardedUsage := false
 	terminalStructuredErrorCode := ""
 	refundTerminalStructuredError := func() {
 		s.refundWalletAwareReservation(subject, requestID(r))
@@ -1334,6 +1350,27 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 		text := strings.TrimRight(string(line), "\r\n")
 		if data, ok := sseDataValue(text); ok {
 			if data == "[DONE]" {
+				if wholesale {
+					if wrap, ok := w.(*wholesaleStreamWriter); ok {
+						wrap.stopKeepalives()
+					}
+				}
+				if wholesale && !forwardedUsage && terminalStructuredErrorCode == "" {
+					promptTok, completionTok := promptEstimate, gatewayContentEstimatedCompletion()
+					if reported != nil {
+						promptTok, completionTok = reported.PromptTokens, reported.CompletionTokens
+					}
+					if _, err := w.Write(wholesaleUsageSSEChunk(promptTok, completionTok)); err != nil {
+						slog.Warn("streaming buyer write failed", "request_id", requestID(r), "error", err)
+						poisonDedupeCapture(w)
+						settleCancelled()
+						return false
+					}
+					if flusher != nil {
+						flusher.Flush()
+					}
+					forwardedUsage = true
+				}
 				if terminalStructuredErrorCode != "" {
 					if _, err := w.Write(line); err != nil {
 						slog.Warn("streaming buyer write failed", "request_id", requestID(r), "error", err)
@@ -1451,6 +1488,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 						usage = relayBlindBoundSettlementUsage(r, usage)
 						reported = &usage
 						line = sseDataLineWithCachedPromptTokens(line, usage.CachedPromptTokens)
+						forwardedUsage = true
 					} else {
 						line = nil
 					}
@@ -1851,6 +1889,10 @@ func (s *Server) passThroughNoProviderCoordinatorError(w http.ResponseWriter, r 
 			"error", err,
 		)
 		writeError(w, http.StatusInternalServerError, "server_error", "settlement_failed", "Could not settle usage")
+		return
+	}
+	if s.isWholesaleAccount(subject.AccountID) && isCoordNoProviderAvailable503(resp.StatusCode, body) {
+		writeError(w, http.StatusTooManyRequests, "rate_limit_exceeded", "no_provider_available", "No provider available")
 		return
 	}
 	if len(bytes.TrimSpace(body)) == 0 && resp.StatusCode == http.StatusServiceUnavailable {
