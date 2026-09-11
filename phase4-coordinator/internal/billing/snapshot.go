@@ -202,6 +202,13 @@ VALUES (?, 'billing_config_flag_changed', NULL, ?)`, ts, string(creditFlagPayloa
 		s.forceCreditEnabled.Store(forceCreditEnabled)
 	}
 	s.forceCreditHoldSeconds.Store(forceCreditHoldSeconds)
+	// Keep wholesale statement rate-card pricing in lockstep with the
+	// committed snapshot. usd_per_million_credits is stats config and
+	// stays on the last SetWholesalePricing (startup); do not touch
+	// reloadCoordinatorConfig (SPEC-032-R003 evidence fragment).
+	s.wholesaleMu.Lock()
+	s.wholesaleRewards = cfg
+	s.wholesaleMu.Unlock()
 	return snapshotID, nil
 }
 

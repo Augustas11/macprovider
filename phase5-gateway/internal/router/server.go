@@ -1418,6 +1418,7 @@ var gatewayPermanentCodes = map[string]bool{
 	"coordinator_sticky_error": true, "feedback_limit_check_failed": true,
 	"feedback_store_failed": true, "settlement_reconcile_load_failed": true,
 	"nonce_unavailable": true, "docs_missing": true, "docs_render_failed": true,
+	"privacy_missing": true, "privacy_render_failed": true,
 	"quota_reservation_failed": true, "concurrency_reservation_failed": true,
 	// Gateway-side stream/cap-shape codes (mirrors the coordinator's own
 	// byte/schema cap family, all false): retrying the same request/prompt

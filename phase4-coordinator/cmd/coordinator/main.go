@@ -3285,7 +3285,6 @@ func reloadCoordinatorConfig(configPath, configOverlay string, startupTier2 conf
 		}
 		buyerServer.SetBillingConfig(cfg.Rewards, snapshotID, cfg.Stats.Rollup.UsdPerMillionCredits)
 		billingStores[0].SetSettlementConfig(cfg.Settlement)
-		billingStores[0].SetWholesalePricing(cfg.Rewards, cfg.Stats.Rollup.UsdPerMillionCredits)
 		logger.Info().
 			Bool("billing.quarantine_resolution_force_void_enabled", cfg.Billing.QuarantineResolutionForceVoidEnabled).
 			Bool("billing.quarantine_resolution_force_credit_enabled", cfg.Billing.QuarantineResolutionForceCreditEnabled).

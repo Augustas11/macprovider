@@ -4402,7 +4402,7 @@
       "state": "pending",
       "implementation": [
         "phase4-coordinator/internal/billing/wholesale.go:GenerateWholesaleStatement",
-        "phase4-coordinator/internal/billing/endpoints.go:wholesaleStatements"
+        "phase4-coordinator/internal/billing/wholesale.go:wholesaleStatements"
       ],
       "tests": [
         "phase4-coordinator/internal/billing/wholesale_test.go:TestGenerateWholesaleStatementPaidVersusFreeSKU",
