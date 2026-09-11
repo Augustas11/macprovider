@@ -1,6 +1,9 @@
 package rollup
 
-import "time"
+import (
+	"github.com/augstar/macprovider-coordinator/internal/intake"
+	"time"
+)
 
 // SnapshotProvider exposes the live point-in-time fields the
 // §5.1 `/v1/stats/overview` endpoint surfaces alongside the
@@ -25,6 +28,15 @@ type SnapshotProvider interface {
 // overview snapshot keep working.
 type RoutabilitySnapshotProvider interface {
 	RoutabilitySnapshot() RoutabilitySnapshot
+}
+
+// IntakeSnapshotProvider is the optional v0.2.1 extension for the
+// SPEC-017 §5.2b catalog-intake read model: the in-process SPEC-023
+// §16.2(a) aggregator's current wire object. Runner checks for it at
+// tick time; a provider that does not implement it yields an intake row
+// with no unmatched-model windows (the fleet histogram is still written).
+type IntakeSnapshotProvider interface {
+	IntakeSnapshot() intake.UnmatchedModels
 }
 
 // OverviewSnapshot is the live point-in-time tuple of

@@ -47,6 +47,9 @@ type Config struct {
 	// OverviewInterval — SPEC §9.2 cadence floor 30s. Operator
 	// MAY tighten.
 	OverviewInterval time.Duration
+	// IntakeInterval is the SPEC-017 v0.2.1 §5.2b.5 privacy cadence for the
+	// intake read model (default 15 minutes; never below it).
+	IntakeInterval time.Duration
 	// TimeseriesRpmInterval — SPEC §9.2 30s rolling.
 	TimeseriesRpmInterval time.Duration
 	// TimeseriesTpmInterval — SPEC §9.2 30s rolling.
@@ -92,6 +95,9 @@ func (c Config) DefaultsApplied() Config {
 	}
 	if c.OverviewInterval == 0 {
 		c.OverviewInterval = 30 * time.Second
+	}
+	if c.IntakeInterval < 15*time.Minute {
+		c.IntakeInterval = 15 * time.Minute
 	}
 	if c.TimeseriesRpmInterval == 0 {
 		c.TimeseriesRpmInterval = 30 * time.Second

@@ -220,11 +220,14 @@ type Server struct {
 	admission                *providerws.AdmissionManager
 	modelAdmissionStore      providerws.ModelAdmissionStore
 	modelAdmissionRouteGuard ModelAdmissionRouteGuard
-	requestTimeout           time.Duration
-	failoverEnabled          bool
-	failoverTimeout          time.Duration
-	tiebreakRandomize        bool
-	tiebreakEpsilon          float64
+	// intakeObserver receives unmatched-model requests (SPEC-017 v0.2.1
+	// §5.2b.2); nil disables the hook.
+	intakeObserver    IntakeObserver
+	requestTimeout    time.Duration
+	failoverEnabled   bool
+	failoverTimeout   time.Duration
+	tiebreakRandomize bool
+	tiebreakEpsilon   float64
 	// routingMu guards modelClasses, which is hot-swapped on SIGHUP
 	// when routing.model_classes shape changes (issue #266 T1).
 	// Pre-SIGHUP readers (handleModels iteration at modelEntry build;
@@ -2412,6 +2415,10 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// settlement trailers and follows any idempotency-assigned internal ID.
 	w.Header().Set("X-MacProvider-Internal-Request-ID", requestID)
 	if !s.pool.ModelKnown(req.Model) && s.resolveModelClass(req.Model) == nil {
+		// SPEC-017 v0.2.1 §5.2b.2 step S1: the request is authenticated
+		// and reached model resolution; hand the raw string and the
+		// account id to the intake aggregator, which retains neither.
+		s.observeUnmatchedModel(req.Model, accountID, hasAuthenticatedAccount)
 		rec.logBuyerFailure(http.StatusNotFound, "No provider has advertised model "+req.Model)
 		writeError(w, http.StatusNotFound, "model_not_found", "No provider has advertised model "+req.Model)
 		return

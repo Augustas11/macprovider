@@ -863,3 +863,9 @@ func (f *fakeHardwareTrustAdminStore) ListWaitingTrustJobs(ctx context.Context, 
 	f.listLimit = limit
 	return f.waiting, f.listErr
 }
+
+// ProviderHardwareTrustSanctioned satisfies the SPEC-047 v0.1.6 trust-sanction
+// read; the hardware-trust admin tests never sanction a provider.
+func (f *fakeHardwareTrustAdminStore) ProviderHardwareTrustSanctioned(context.Context, string) (bool, error) {
+	return false, nil
+}

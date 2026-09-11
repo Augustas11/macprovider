@@ -25,7 +25,7 @@ it can no longer drift. Do not hand-edit the table; edit each spec's
 | SPEC-014 | Provider Portal (seller-facing web surface) | 0.10 | draft | pending | pending: 2 | [SPEC-014-provider-portal.md](SPEC-014-provider-portal.md) |
 | SPEC-015 | Verifiable inference receipts | 0.4.7 | normative | complete | conformant: 1, pending: 4 | [SPEC-015-receipts.md](SPEC-015-receipts.md) |
 | SPEC-016 | Provider payout pipeline (USDC on Base) | 0.1.26 | draft | pending | pending: 11 | [SPEC-016-payout-pipeline.md](SPEC-016-payout-pipeline.md) |
-| SPEC-017 | Network Stats API | 0.2.1 | normative | pending | pending: 1 | [SPEC-017-network-stats-api.md](SPEC-017-network-stats-api.md) |
+| SPEC-017 | Network Stats API | 0.2.1 | normative | pending | pending: 2 | [SPEC-017-network-stats-api.md](SPEC-017-network-stats-api.md) |
 | SPEC-018 | Agentic tool calling (provider-side response synthesis) | 0.2.7 | normative | pending | conformant: 1, pending: 1 | [SPEC-018-agentic-tool-calling.md](SPEC-018-agentic-tool-calling.md) |
 | SPEC-019 | Structured output (`response_format: json_schema`) | 0.2.5 | normative | pending | pending corpus migration | [SPEC-019-structured-output.md](SPEC-019-structured-output.md) |
 | SPEC-020 | Provider autoupdate | v0.1.19 | normative | pending | pending: 5 | [SPEC-020-provider-autoupdate.md](SPEC-020-provider-autoupdate.md) |

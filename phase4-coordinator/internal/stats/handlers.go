@@ -24,6 +24,12 @@ type Handler struct {
 	Now          func() time.Time
 	Logger       zerolog.Logger
 
+	// IntakeEnabled and IntakeReaderKeyIDs gate GET /v1/stats/intake
+	// (SPEC-017 v0.2.1 §5.2b.7): when disabled the endpoint is unknown;
+	// otherwise only listed, non-provider-bound partner keys may read it.
+	IntakeEnabled      bool
+	IntakeReaderKeyIDs map[int64]struct{}
+
 	idlePrewarmRead func(context.Context, string) (store.ProviderIdlePrewarmSummary, error)
 }
 
@@ -930,6 +936,7 @@ var healthComponentKeys = []string{
 	"leaderboard_30d",
 	"leaderboard_all",
 	"routability",
+	"intake",
 }
 
 func (h *Handler) handleHealth(w http.ResponseWriter, r *http.Request, ar authResult) {

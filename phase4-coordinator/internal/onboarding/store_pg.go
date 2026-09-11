@@ -1662,3 +1662,24 @@ func isSerializationFailure(err error) bool {
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "could not serialize") || strings.Contains(msg, "serialization")
 }
+
+// ProviderHardwareTrustSanctioned implements the SPEC-047 v0.1.6 trust
+// sanction read: true when the provider holds at least one
+// hardware_verification_trust root and none is active (expires_at null or in
+// the future). A provider that never held a root is not sanctioned.
+func (s *PGStore) ProviderHardwareTrustSanctioned(ctx context.Context, providerID string) (bool, error) {
+	if s == nil || s.db == nil {
+		return false, errors.New("onboarding postgres store is nil")
+	}
+	var sanctioned bool
+	err := s.db.QueryRowContext(ctx, `
+SELECT EXISTS (SELECT 1 FROM hardware_verification_trust WHERE provider_id = $1)
+   AND NOT EXISTS (
+        SELECT 1 FROM hardware_verification_trust
+         WHERE provider_id = $1
+           AND (expires_at IS NULL OR expires_at > clock_timestamp()))`, providerID).Scan(&sanctioned)
+	if err != nil {
+		return false, fmt.Errorf("hardware trust sanction lookup: %w", err)
+	}
+	return sanctioned, nil
+}

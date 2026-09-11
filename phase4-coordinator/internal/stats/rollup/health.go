@@ -21,6 +21,7 @@ const (
 	componentLeaderboard30d component = "leaderboard_30d"
 	componentLeaderboardAll component = "leaderboard_all"
 	componentRoutability    component = "routability"
+	componentIntake         component = "intake"
 )
 
 // healthOK marks the component as having a fresh successful

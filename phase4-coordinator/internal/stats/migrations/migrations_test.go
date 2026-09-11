@@ -48,6 +48,7 @@ func TestEmbeddedMigrationsLoad(t *testing.T) {
 		{25, "routability_current"},
 		{26, "provider_autoupdate_events"},
 		{27, "provider_supervisor_events"},
+		{28, "stats_intake_current"},
 	}
 	if len(all) != len(want) {
 		t.Fatalf("got %d migrations, want %d", len(all), len(want))

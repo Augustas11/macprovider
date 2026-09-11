@@ -42,6 +42,9 @@ func thresholdsForComponent(c string) healthThresholds {
 		return healthThresholds{targetSec: 30, budgetSec: 120}
 	case "timeseries_rpm", "timeseries_tpm":
 		return healthThresholds{targetSec: 30, budgetSec: 120}
+	case "intake":
+		// SPEC-017 v0.2.1 §9.5: 15-minute privacy cadence, 45-minute budget.
+		return healthThresholds{targetSec: 900, budgetSec: 2700}
 	case "leaderboard_24h":
 		return healthThresholds{targetSec: 60, budgetSec: 300}
 	case "leaderboard_7d":

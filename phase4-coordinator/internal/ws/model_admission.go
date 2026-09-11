@@ -86,6 +86,10 @@ type ModelAdmissionStore interface {
 	// LatestModelAdmissionStatusesInStates is the latest event of every
 	// candidate of every provider whose state is one of states (reload sweeps).
 	LatestModelAdmissionStatusesInStates(context.Context, []string) ([]ModelAdmissionEvent, error)
+	// ModelAdmissionOfferEventsSince lists every offer_submitted event whose
+	// coordinator-assigned CreatedAt is at or after since (SPEC-047 v0.1.6
+	// intake aggregate; ascending append order).
+	ModelAdmissionOfferEventsSince(context.Context, time.Time) ([]ModelAdmissionEvent, error)
 	// ModelAdmissionEventByRequestID is the operator idempotency lookup: the
 	// event a (provider_id, request_id) pair originally produced.
 	ModelAdmissionEventByRequestID(context.Context, string, string) (ModelAdmissionEvent, bool, error)
@@ -464,6 +468,18 @@ func (s *memoryModelAdmissionStore) LatestModelAdmissionStatusesInStates(_ conte
 	return out, nil
 }
 
+func (s *memoryModelAdmissionStore) ModelAdmissionOfferEventsSince(_ context.Context, since time.Time) ([]ModelAdmissionEvent, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []ModelAdmissionEvent
+	for _, event := range s.events {
+		if event.State == modelAdmissionOfferSubmitted && !event.CreatedAt.Before(since) {
+			out = append(out, event)
+		}
+	}
+	return out, nil
+}
+
 func (s *memoryModelAdmissionStore) LatestModelAdmissionStatus(_ context.Context, providerID, candidateID string) (ModelAdmissionEvent, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -563,6 +579,11 @@ ON model_admission_events(provider_id, served_model_ref, LOWER(catalog_model_key
 	if _, err := db.ExecContext(context.Background(), `
 CREATE INDEX IF NOT EXISTS model_admission_events_provider_catalog
 ON model_admission_events(provider_id, LOWER(catalog_model_key), id DESC)`); err != nil {
+		return nil, err
+	}
+	if _, err := db.ExecContext(context.Background(), `
+CREATE INDEX IF NOT EXISTS model_admission_events_state_created
+    ON model_admission_events(state, created_at_utc)`); err != nil {
 		return nil, err
 	}
 	if _, err := db.ExecContext(context.Background(), `
@@ -687,6 +708,26 @@ func (s *SQLiteModelAdmissionStore) LatestModelAdmissionStatusesInStates(ctx con
   ) latest ON latest.latest_id = e.id
  WHERE e.state IN (`+placeholders+`)
  ORDER BY e.provider_id ASC, e.candidate_id ASC`), args...)
+}
+
+func (s *SQLiteModelAdmissionStore) ModelAdmissionOfferEventsSince(ctx context.Context, since time.Time) ([]ModelAdmissionEvent, error) {
+	// State is filtered in SQL (indexed); the window bound is applied on the
+	// parsed coordinator-assigned CreatedAt so the comparison never depends
+	// on the textual timestamp encoding.
+	events, err := scanModelAdmissionEvents(ctx, s.db, modelAdmissionEventSelect(`
+  FROM model_admission_events e
+ WHERE e.state = ?
+ ORDER BY e.id ASC`), modelAdmissionOfferSubmitted)
+	if err != nil {
+		return nil, err
+	}
+	out := events[:0]
+	for _, event := range events {
+		if !event.CreatedAt.Before(since) {
+			out = append(out, event)
+		}
+	}
+	return out, nil
 }
 
 func (s *SQLiteModelAdmissionStore) AppendModelAdmissionDecision(ctx context.Context, event ModelAdmissionEvent) (ModelAdmissionEvent, error) {
@@ -2022,19 +2063,19 @@ func (s *Server) verifyModelAdmissionWithdrawal(ctx context.Context, authenticat
 	}, nil
 }
 
+// providerModelAdmissionSanctioned is the offer-path view of the SPEC-047
+// v0.1.6 closed `provider_intake_sanctioned` predicate (see
+// providerIntakeSanctioned): a sanctioned provider may not submit or
+// withdraw an offer, and an unreadable sanction source fails closed.
 func (s *Server) providerModelAdmissionSanctioned(providerID string) bool {
-	if s.admission != nil && s.admission.Rejected(providerID) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	sanctioned, err := s.providerIntakeSanctioned(ctx, providerID)
+	if err != nil {
+		s.log.Warn().Err(err).Str("provider_id", providerID).Msg("sanction source unreadable; refusing model admission mutation")
 		return true
 	}
-	if s.pool == nil {
-		return false
-	}
-	for _, sanction := range s.pool.CanarySanctions() {
-		if sanction.ProviderID == providerID && sanction.FailCount > 0 {
-			return true
-		}
-	}
-	return false
+	return sanctioned
 }
 
 func (s *Server) allowModelAdmissionAttempt(providerID string) bool {

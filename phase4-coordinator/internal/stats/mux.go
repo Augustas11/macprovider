@@ -94,6 +94,19 @@ func NewMuxWithMetricsAndRateLimit(reader *store.Store, cors CORSConfig, backfil
 	}
 }
 
+// WithIntake enables GET /v1/stats/intake for the listed partner key ids
+// (SPEC-017 v0.2.1 §5.2b.7). An empty list refuses every key.
+func (m *Mux) WithIntake(enabled bool, readerKeyIDs []int64) *Mux {
+	m.h.IntakeEnabled = enabled
+	m.h.IntakeReaderKeyIDs = make(map[int64]struct{}, len(readerKeyIDs))
+	for _, id := range readerKeyIDs {
+		if id > 0 {
+			m.h.IntakeReaderKeyIDs[id] = struct{}{}
+		}
+	}
+	return m
+}
+
 func (m *Mux) Handler() http.Handler {
 	inner := http.HandlerFunc(m.dispatch)
 	with := http.Handler(inner)
@@ -122,7 +135,7 @@ func (m *Mux) dispatch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	endpoint := trimEndpointFromPath(r.URL.Path)
-	if endpoint == "" {
+	if endpoint == "" || (endpoint == "intake" && !m.h.IntakeEnabled) {
 		writeError(w, r, http.StatusNotFound, codeBadRequest, "unknown endpoint", now, nil)
 		return
 	}
@@ -141,7 +154,7 @@ func (m *Mux) dispatch(w http.ResponseWriter, r *http.Request) {
 	// auth-failure tier + §5.4.3 dispatcher. Public endpoints are
 	// §4.3 `Auth: None`; Authorization is ignored.
 	var ar authResult
-	if endpoint == "leaderboard" || endpoint == "provider" {
+	if endpoint == "leaderboard" || endpoint == "provider" || endpoint == "intake" {
 		authStarted := time.Now()
 		// Layer 4 — auth-failure tier (Authorization-present
 		// only). Round-3 CODE H1: only schedule the refund
@@ -314,6 +327,8 @@ func (m *Mux) dispatch(w http.ResponseWriter, r *http.Request) {
 		m.h.handleModels(rec, r, ar)
 	case "providers":
 		m.h.handleProviders(rec, r, ar)
+	case "intake":
+		m.h.handleIntake(rec, r, ar)
 	}
 }
 
