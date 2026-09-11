@@ -880,6 +880,83 @@ final class PagedKVEngineTests: XCTestCase {
         }
     }
 
+    func testRetainReattachCanTrimToMidBlockLCPWithoutWholeBlockRounding() async throws {
+        let allocator = try PagedKVBlockAllocator(
+            blockSizeTokens: 4,
+            maxPhysicalBlocks: 4,
+            physicalBlockOrder: [2, 0, 3, 1]
+        )
+        let handle = try await allocator.allocate(
+            conversationKey: "conv:a",
+            initialCapacityTokens: 12,
+            maxLogicalTokens: 12,
+            initialTokens: 7
+        )
+        let retained = try await allocator.retain(handle)
+
+        await XCTAssertThrowsErrorAsync {
+            _ = try await allocator.reattach(retained, conversationKey: "conv:b", trimToLogicalTokens: 5)
+        }
+
+        let reattached = try await allocator.reattach(
+            retained,
+            conversationKey: "conv:a",
+            trimToLogicalTokens: 5
+        )
+        XCTAssertEqual(reattached, handle)
+        let table = try await allocator.table(for: reattached)
+        XCTAssertEqual(table.logicalTokenCount, 5)
+        XCTAssertEqual(table.physicalBlocks, [2, 0])
+        XCTAssertEqual(table.tailValidTokenCount, 1)
+    }
+
+    func testBridgeTrimFailureLeavesAllocatorAndRetainedStateUnchanged() async throws {
+        let bridge = ThrowingTrimContiguousCacheBridge()
+        let allocator = try PagedKVBlockAllocator(
+            blockSizeTokens: 4,
+            maxPhysicalBlocks: 4,
+            physicalBlockOrder: [2, 0, 3, 1],
+            contiguousCacheBridge: bridge
+        )
+        let handle = try await allocator.allocate(
+            conversationKey: "conv:a",
+            initialCapacityTokens: 8,
+            maxLogicalTokens: 8,
+            initialTokens: 7
+        )
+        var freeBlockCount = await allocator.freeBlockCount()
+        XCTAssertEqual(freeBlockCount, 2)
+
+        await XCTAssertThrowsErrorAsync {
+            _ = try await allocator.trim(handle, toLogicalTokens: 3)
+        }
+        var table = try await allocator.table(for: handle)
+        XCTAssertEqual(table.logicalTokenCount, 7)
+        XCTAssertEqual(table.physicalBlocks, [2, 0])
+        freeBlockCount = await allocator.freeBlockCount()
+        XCTAssertEqual(freeBlockCount, 2)
+
+        let retained = try await allocator.retain(handle)
+        await XCTAssertThrowsErrorAsync {
+            _ = try await allocator.reattach(retained, conversationKey: "conv:a", trimToLogicalTokens: 3)
+        }
+        table = try await allocator.table(for: handle)
+        XCTAssertEqual(table.logicalTokenCount, 7)
+        XCTAssertEqual(table.physicalBlocks, [2, 0])
+        freeBlockCount = await allocator.freeBlockCount()
+        XCTAssertEqual(freeBlockCount, 2)
+        await XCTAssertThrowsErrorAsync {
+            try await allocator.release(handle)
+        }
+
+        bridge.shouldThrow = false
+        let reattached = try await allocator.reattach(retained, conversationKey: "conv:a")
+        XCTAssertEqual(reattached, handle)
+        table = try await allocator.table(for: handle)
+        XCTAssertEqual(table.logicalTokenCount, 7)
+        XCTAssertEqual(table.physicalBlocks, [2, 0])
+    }
+
     func testExtendAndTrimRejectDuringInFlightDecodeStep() async throws {
         let allocator = try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 3)
         let handle = try await allocator.allocate(conversationKey: "conv:a", maxTokens: 12, initialTokens: 4)
@@ -1059,6 +1136,26 @@ private struct EmptyContiguousCacheBridge: PagedKVContiguousCacheBridge {
                 ),
             ]
         )
+    }
+}
+
+private final class ThrowingTrimContiguousCacheBridge: PagedKVContiguousCacheBridge, @unchecked Sendable {
+    var shouldThrow = true
+
+    func materializeContiguousByteCache(
+        handle: PagedKVBlockTableHandle,
+        table: PagedKVBlockTable
+    ) throws -> PagedKVMaterializedByteCache {
+        PagedKVMaterializedByteCache(handle: handle, blockTable: table, layers: [])
+    }
+
+    func trimRecordedContiguousCache(
+        handle: PagedKVBlockTableHandle,
+        table: PagedKVBlockTable
+    ) throws {
+        if shouldThrow {
+            throw PagedKVAllocatorError.invalidBlockTable("injected trim failure")
+        }
     }
 }
 

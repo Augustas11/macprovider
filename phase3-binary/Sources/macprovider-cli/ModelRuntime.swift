@@ -2079,7 +2079,8 @@ actor ModelRuntime: ModelRuntimeServing {
         modelID: String?,
         modelSHA256: String?,
         weightsGeneration: Int,
-        prefillStepSize: Int
+        prefillStepSize: Int,
+        contiguousCacheBridge: PagedKVRuntimeContiguousCacheBridge? = nil
     ) -> ContinuousBatchScheduler? {
         guard case .attached(let descriptor) = decision,
               let tuple,
@@ -2092,7 +2093,8 @@ actor ModelRuntime: ModelRuntimeServing {
         }
         guard let allocator = try? PagedKVBlockAllocator(
             blockSizeTokens: descriptor.blockSizeTokens,
-            maxPhysicalBlocks: descriptor.maxPhysicalBlocks
+            maxPhysicalBlocks: descriptor.maxPhysicalBlocks,
+            contiguousCacheBridge: contiguousCacheBridge
         ) else {
             return nil
         }
@@ -2155,13 +2157,15 @@ actor ModelRuntime: ModelRuntimeServing {
         else {
             return nil
         }
+        let contiguousCacheBridge = PagedKVRuntimeContiguousCacheBridge()
         return makeContinuousBatchScheduler(
             decision: decision,
             tuple: tuple,
             backend: PagedKVSharedForwardBackend(
                 container: container,
                 descriptor: descriptor,
-                layerCount: layerCount
+                layerCount: layerCount,
+                contiguousCacheBridge: contiguousCacheBridge
             ),
             maxBatch: maxBatch,
             queueLimit: queueLimit,
@@ -2169,7 +2173,8 @@ actor ModelRuntime: ModelRuntimeServing {
             modelID: modelID,
             modelSHA256: modelSHA256,
             weightsGeneration: weightsGeneration,
-            prefillStepSize: prefillStepSize
+            prefillStepSize: prefillStepSize,
+            contiguousCacheBridge: contiguousCacheBridge
         )
     }
 

@@ -565,12 +565,9 @@ public struct PagedKVMaterializedByteLayer: Equatable, Sendable {
     }
 }
 
-/// Neutral BYTE extraction only (FR-PKV10 scope honesty): this type carries logical-order
-/// K/V bytes reassembled from physical blocks. It is NOT the standalone contiguous
-/// `KVCache` handoff that SPEC-024 (cold-tier residency) and SPEC-038 (continuous batching)
-/// consume — reconstructing a live, injectable contiguous `KVCache` from these bytes is
-/// deferred to the runtime bridge. FR-PKV10 is therefore NOT yet complete as a full
-/// extraction contract; only the neutral byte-materialization primitive exists here.
+/// Runtime-independent K/V bytes reassembled from physical blocks in logical token order.
+/// The CLI runtime bridge turns this validated byte surface into the live contiguous
+/// `KVCache` handoff consumed by SPEC-024/SPEC-038.
 public struct PagedKVMaterializedByteCache: Equatable, Sendable {
     public let handle: PagedKVBlockTableHandle
     public let blockTable: PagedKVBlockTable
@@ -587,14 +584,24 @@ public struct PagedKVMaterializedByteCache: Equatable, Sendable {
     }
 }
 
-/// Neutral byte-extraction bridge only: yields `PagedKVMaterializedByteCache` bytes. The
-/// standalone contiguous `KVCache` handoff SPEC-024/SPEC-038 consume (FR-PKV10 as a full
-/// extraction contract) is deferred to the runtime bridge and is not provided here.
+/// Runtime bridge surface for logical-order byte extraction from paged physical blocks.
+/// The engine keeps MLX types out of Core; callers that need an injectable contiguous
+/// `KVCache` restore these bytes through the CLI/runtime bridge.
 public protocol PagedKVContiguousCacheBridge: Sendable {
     func materializeContiguousByteCache(
         handle: PagedKVBlockTableHandle,
         table: PagedKVBlockTable
     ) throws -> PagedKVMaterializedByteCache
+
+    func trimRecordedContiguousCache(handle: PagedKVBlockTableHandle, table: PagedKVBlockTable) throws
+
+    func discardContiguousCache(handle: PagedKVBlockTableHandle)
+}
+
+public extension PagedKVContiguousCacheBridge {
+    func trimRecordedContiguousCache(handle: PagedKVBlockTableHandle, table: PagedKVBlockTable) throws {}
+
+    func discardContiguousCache(handle: PagedKVBlockTableHandle) {}
 }
 
 public actor PagedKVBlockAllocator {
@@ -670,6 +677,37 @@ public actor PagedKVBlockAllocator {
             throw PagedKVAllocatorError.invalidBlockTable("logical length overflow")
         }
         return adjusted / blockSizeTokens
+    }
+
+    private func validateTable(
+        handle: PagedKVBlockTableHandle,
+        state: SequenceState
+    ) throws -> PagedKVBlockTable {
+        let logicalBlocks = try requiredBlocks(maxTokens: state.logicalTokenCount)
+        guard logicalBlocks <= state.reservedBlocks.count else {
+            throw PagedKVAllocatorError.invalidBlockTable("missing physical block")
+        }
+        let liveBlocks = Array(state.reservedBlocks.prefix(logicalBlocks))
+        guard Set(liveBlocks).count == liveBlocks.count else {
+            throw PagedKVAllocatorError.invalidBlockTable("duplicate writable block")
+        }
+        guard liveBlocks.allSatisfy({ (0..<maxPhysicalBlocks).contains($0) }) else {
+            throw PagedKVAllocatorError.invalidBlockTable("out-of-range block")
+        }
+        let tail = state.logicalTokenCount == 0
+            ? 0
+            : ((state.logicalTokenCount - 1) % blockSizeTokens) + 1
+        guard state.logicalTokenCount == 0 || (1...blockSizeTokens).contains(tail) else {
+            throw PagedKVAllocatorError.invalidBlockTable("invalid tail token count")
+        }
+        return PagedKVBlockTable(
+            handleID: handle.id,
+            blockSizeTokens: blockSizeTokens,
+            logicalTokenCount: state.logicalTokenCount,
+            physicalBlocks: liveBlocks,
+            tailValidTokenCount: tail,
+            poolEpoch: poolEpoch
+        )
     }
 
     public func canAdmitBatch1(maxTokens: Int) -> Bool {
@@ -772,7 +810,7 @@ public actor PagedKVBlockAllocator {
 
     public func trim(_ handle: PagedKVBlockTableHandle, toLogicalTokens tokens: Int) throws -> PagedKVBlockTable {
         guard tokens >= 0 else { throw PagedKVAllocatorError.invalidBlockTable("negative trim length") }
-        var state = try lookupState(for: handle)
+        let state = try lookupState(for: handle)
         guard !state.retained else {
             throw PagedKVAllocatorError.retainedHandleStillLive
         }
@@ -782,15 +820,19 @@ public actor PagedKVBlockAllocator {
         guard tokens <= state.logicalTokenCount else {
             throw PagedKVAllocatorError.invalidBlockTable("trim length exceeds logical length")
         }
-        state.logicalTokenCount = tokens
+        var nextState = state
+        nextState.logicalTokenCount = tokens
         let needed = try requiredBlocks(maxTokens: tokens)
-        if needed < state.reservedBlocks.count {
-            let released = state.reservedBlocks[needed...]
-            state.reservedBlocks.removeSubrange(needed...)
-            freeBlocks.append(contentsOf: released.reversed())
+        var released: ArraySlice<Int> = []
+        if needed < nextState.reservedBlocks.count {
+            released = nextState.reservedBlocks[needed...]
+            nextState.reservedBlocks.removeSubrange(needed...)
         }
-        sequences[handle.id] = state
-        return try validate(handle)
+        let table = try validateTable(handle: handle, state: nextState)
+        try contiguousCacheBridge?.trimRecordedContiguousCache(handle: handle, table: table)
+        sequences[handle.id] = nextState
+        freeBlocks.append(contentsOf: released.reversed())
+        return table
     }
 
     public func table(for handle: PagedKVBlockTableHandle) throws -> PagedKVBlockTable {
@@ -856,31 +898,7 @@ public actor PagedKVBlockAllocator {
     @discardableResult
     public func validate(_ handle: PagedKVBlockTableHandle) throws -> PagedKVBlockTable {
         let state = try lookupState(for: handle)
-        let logicalBlocks = try requiredBlocks(maxTokens: state.logicalTokenCount)
-        guard logicalBlocks <= state.reservedBlocks.count else {
-            throw PagedKVAllocatorError.invalidBlockTable("missing physical block")
-        }
-        let liveBlocks = Array(state.reservedBlocks.prefix(logicalBlocks))
-        guard Set(liveBlocks).count == liveBlocks.count else {
-            throw PagedKVAllocatorError.invalidBlockTable("duplicate writable block")
-        }
-        guard liveBlocks.allSatisfy({ (0..<maxPhysicalBlocks).contains($0) }) else {
-            throw PagedKVAllocatorError.invalidBlockTable("out-of-range block")
-        }
-        let tail = state.logicalTokenCount == 0
-            ? 0
-            : ((state.logicalTokenCount - 1) % blockSizeTokens) + 1
-        guard state.logicalTokenCount == 0 || (1...blockSizeTokens).contains(tail) else {
-            throw PagedKVAllocatorError.invalidBlockTable("invalid tail token count")
-        }
-        return PagedKVBlockTable(
-            handleID: handle.id,
-            blockSizeTokens: blockSizeTokens,
-            logicalTokenCount: state.logicalTokenCount,
-            physicalBlocks: liveBlocks,
-            tailValidTokenCount: tail,
-            poolEpoch: poolEpoch
-        )
+        return try validateTable(handle: handle, state: state)
     }
 
     public func retain(_ handle: PagedKVBlockTableHandle) throws -> PagedKVRetainedSequence {
@@ -900,13 +918,40 @@ public actor PagedKVBlockAllocator {
         )
     }
 
-    public func reattach(_ retained: PagedKVRetainedSequence, conversationKey: String) throws -> PagedKVBlockTableHandle {
+    public func reattach(
+        _ retained: PagedKVRetainedSequence,
+        conversationKey: String,
+        trimToLogicalTokens tokens: Int? = nil
+    ) throws -> PagedKVBlockTableHandle {
         guard retained.conversationKey == conversationKey.trimmingCharacters(in: .whitespacesAndNewlines) else {
             throw PagedKVAllocatorError.conversationMismatch
         }
         var state = try lookupState(for: retained.handle)
         guard state.retained else {
             throw PagedKVAllocatorError.unknownHandle
+        }
+        guard state.logicalTokenCount == retained.logicalTokenCount else {
+            throw PagedKVAllocatorError.invalidBlockTable("retained logical length mismatch")
+        }
+        if let tokens {
+            guard tokens >= 0 else { throw PagedKVAllocatorError.invalidBlockTable("negative trim length") }
+            guard tokens <= state.logicalTokenCount else {
+                throw PagedKVAllocatorError.invalidBlockTable("trim length exceeds logical length")
+            }
+            var nextState = state
+            nextState.logicalTokenCount = tokens
+            let needed = try requiredBlocks(maxTokens: tokens)
+            var released: ArraySlice<Int> = []
+            if needed < nextState.reservedBlocks.count {
+                released = nextState.reservedBlocks[needed...]
+                nextState.reservedBlocks.removeSubrange(needed...)
+            }
+            let table = try validateTable(handle: retained.handle, state: nextState)
+            try contiguousCacheBridge?.trimRecordedContiguousCache(handle: retained.handle, table: table)
+            nextState.retained = false
+            sequences[retained.handle.id] = nextState
+            freeBlocks.append(contentsOf: released.reversed())
+            return retained.handle
         }
         state.retained = false
         sequences[retained.handle.id] = state
@@ -923,6 +968,7 @@ public actor PagedKVBlockAllocator {
         }
         sequences.removeValue(forKey: retained.handle.id)
         freeBlocks.append(contentsOf: state.reservedBlocks.reversed())
+        contiguousCacheBridge?.discardContiguousCache(handle: retained.handle)
     }
 
     public func release(_ handle: PagedKVBlockTableHandle) throws {
@@ -935,6 +981,7 @@ public actor PagedKVBlockAllocator {
         }
         sequences.removeValue(forKey: handle.id)
         freeBlocks.append(contentsOf: state.reservedBlocks.reversed())
+        contiguousCacheBridge?.discardContiguousCache(handle: handle)
     }
 
     public func freeBlockCount() -> Int { freeBlocks.count }
