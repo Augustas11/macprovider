@@ -14,7 +14,7 @@ entries below are one-liners per version pointing at the corresponding
 audit file. Per [[feedback-spec-audit-file-convention]], audit narrative
 does NOT live in this SPEC body.
 
-**v0.2.1 (2026-09-11, draft — BYOM v0.2 slice 5, catalog-intake read model):**
+**v0.2.1 (2026-09-11, locked — BYOM v0.2 slice 5, catalog-intake read model):**
 Adopts, verbatim and by reference, the SPEC-023 **v0.10.4** §16.2(a)
 `unmatched_model_request_count` field contract (items 1–10 and the
 S1–S5 processing order, at that version) as a SPEC-017 obligation, so that signal may
@@ -1304,7 +1304,12 @@ aggregator receives ONLY the id and the set's cardinality (used to detect
 a policy change; never emitted) and never an account identifier, and two
 coordinators sharing a salt and a set publish the same id. A change to
 the set closes the window (`eligibility_changed`, §3.2a) so one window
-never mixes two policies; rotating the salt alone also rotates the id.
+never mixes two policies. `stats.intake.policy_salt` is resolved once at
+coordinator load (§5.2b.7) and is immutable for the life of the process,
+so it cannot rotate mid-window; changing it takes effect only on a
+restart, which closes the open window (`aggregator_stopped`, §3.2a) and
+opens a fresh one — a rotated salt therefore rotates the id exactly at a
+window boundary, never within a served window.
 "Unmatched" means unmatched at model resolution against the admitted
 catalog, and only that. **Redaction on the money path.** The request-log
 row of a request that no provider serves carries a BLANK model and a
@@ -2092,7 +2097,10 @@ narrower envelope by design.
 `304 Not Modified` is exempt from the JSON envelope: it MUST be
 returned with an empty body and the headers required by RFC 7232
 (`ETag`, `Cache-Control`, `Vary`) PLUS the projection-aware CORS
-headers from §5.7 (`Access-Control-Allow-Origin`,
+headers from §5.7 — EXCEPT on `/v1/stats/intake` (v0.2.1), which
+emits no CORS header on any response, 304 included (§5.2b): its 304
+carries the RFC 7232 cache headers only. Everywhere else:
+(`Access-Control-Allow-Origin`,
 `Access-Control-Allow-Credentials` on partner projection,
 `Access-Control-Max-Age` on preflight). v0.1.8 erratum
 (2026-06-26): the Fetch spec requires `Access-Control-Allow-Origin`
