@@ -376,8 +376,21 @@ def catalog_row(document, candidate_id):
 
 
 def main():
+    # This file is the harness the admission-journey evidence contract names
+    # (`ADMISSION_CONTRACT.expected_harness_name`). Its hermetic stub mode
+    # below is what `make test-byom-e2e` runs. `--journey-evidence` is the
+    # physical-provider mode for JOURNEY-NETWORK-MODEL-ADMISSION (#1486, BYOM
+    # v0.2 slice 7): it drives a REAL coordinator and provider through the
+    # twelve steps and emits run-manifest.json. Everything after the flag is
+    # that runner's own argv.
+    if len(sys.argv) > 1 and sys.argv[1] == "--journey-evidence":
+        sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+        import admission_journey
+        raise SystemExit(admission_journey.main(sys.argv[2:]))
+
     parser = argparse.ArgumentParser(description="Run the BYOM CLI onboarding E2E harness.")
     parser.add_argument("--keep-temp", action="store_true", help="Keep the temporary harness directory.")
+    parser.add_argument("--journey-evidence", action="store_true", help="Physical-provider admission journey mode; see admission_journey.py --help.")
     args = parser.parse_args()
 
     root = repo_root()
