@@ -12,17 +12,13 @@ serve real traffic with continuous batching for that tuple.
 
 ## Scope
 
-The first enableable scope is keyless fresh-conversation decode only:
+The first enableable scope remains keyless until a later operator gate:
 
 - keyless requests may enter the batch after the runtime bridge gate opens;
-- under `canary`, any request carrying a conversation key is conservatively
-  serial-routed until the runtime can prove that it has no reusable
-  sticky/cross-turn state;
-- sticky-cache-eligible or cross-turn requests must be serial-routed with
-  reason-coded `batching_unsupported` telemetry under `canary`, or rejected
-  fail-closed under strict `on`, until issue #1477 (SPEC-038 sticky/AC-19
-  consumer) lands **and** this runbook's first enableable scope is widened
-  in a later operator gate;
+- keyed requests and sticky/cross-turn cached-token credit are landed by #1477
+  as runtime-inert code paths, not as permission to canary buyer traffic;
+- positive sticky/cross-turn cached-token credit remains invalid without a
+  same-conversation FR-PKV10 retained paged-KV handoff;
 - the SPEC-039 contiguous-cache primitive (FR-PKV10) already landed in
   #887 / #1476; that merge did **not** lift keyed serving or enable canary;
 - no buyer receipt, usage, billing, model identity, settlement, or API schema
@@ -65,9 +61,10 @@ Stop and roll back to `continuous_batching: off` if any item below is true:
 - `serve` resolves to a worktree/debug binary or `default.metallib` is missing;
 - the SPEC-039 runtime bridge required for the tested path is unavailable;
 - the requested tuple is absent from the local SPEC-039 capability descriptor;
-- any sticky-cache or cross-turn request enters batching before #1477 is
-  closed, or after #1477 lands but before this runbook's first enableable
-  scope is explicitly widened past keyless fresh-conversation decode;
+- any conversation-keyed request enters the batch during the first keyless
+  enablement scope, even when it reports zero cached-token credit;
+- any sticky-cache or cross-turn request reports positive cached-token credit
+  without a same-conversation FR-PKV10 retained paged-KV handoff;
 - any token, stop condition, cancellation, usage field, receipt field, or
   request-log terminal state is attributed to the wrong request;
 - a batch failure and serial retry produce stitched buyer-visible output or a
@@ -89,7 +86,8 @@ only.
 | Hardware tuple | Mac model, chip, RAM, macOS build, power state, thermal state, swap state, and Entry 110 `max_concurrency_override`. |
 | Model tuple | served model id, model SHA-256, tokenizer/template identity when present, cache class, KV dtype, `kv_bits` absence, MoE requirement, metallib SHA-256, kernel identifier, parity label, and pool epoch. |
 | Local descriptor | SPEC-039 descriptor showing the exact tuple is admitted; unsupported tuples must show fail-closed or reason-coded serial routing. |
-| Fresh-conversation scope | Requests used for the batched proof carry no conversation key; separate keyed/sticky/cross-turn requests show canary serial routing or strict rejection with `sticky_cache_bridge_unavailable` or an equivalent #1477-gated reason until that consumer lands **and** this runbook widens first enableable scope. |
+| Sticky/cross-turn scope | #1477 code is present but not enablement: first-scope buyer traffic stays keyless, and positive cached-token credit requires a same-conversation FR-PKV10 retained paged-KV handoff before any later keyed operator gate may admit it. |
+| Durable replay authority | Stable relay request identity is mapped into scheduler replay keys, settlement disposition is propagated through usage/receipt code, and duplicate inference or duplicate settlement is rejected after local terminal-result retention rolls. The in-process `ContinuousBatchRuntimeReplayAuthority` stub is not activation evidence. |
 | MSB-01..05 | Full harness output for MSB-01 single-stream baseline plus MSB-02, MSB-03, MSB-04, and MSB-05. Aggregate TG is total decoded tokens over common wall-clock, warm-up excluded; per-stream and aggregate TG stay separate. |
 | MoE promotion | A descriptor-admitted MoE tuple still fails closed in strict mode (or reason-coded serial-routes in canary) until the representative AC-23 correctness fixture and live-model MSB-04 evidence have landed in a separately reviewed activation change. |
 | Usage/receipt attribution | Concurrent distinct requests prove correct `prompt_tokens`, `output_tokens`, `cached_prompt_tokens`, stop reason, cancellation state, request id, receipt model hash, and settlement inputs with zero cross-request attribution. |
@@ -126,20 +124,14 @@ authorization headers.
 
 ## Canary Enable
 
-No `canary` or `on` buyer traffic is currently enableable. The merged
-SPEC-039 foundation deliberately reports `engineBridgeAvailable: false`, and
-the scheduler backend therefore remains unavailable. Before collecting the
-proofs in this runbook, a separately reviewed SPEC-039 runtime-bridge change
-must install safe `PagedKVCache` injection, kernel bounds validation, request
-leasing, handle release/retain, stop-token holdback, bounded token delivery
-outside scheduler isolation, a hard delivery deadline and scheduler-wide
-delivery-task cap that fail closed without settlement, backend cancellation
-acknowledgement, and a durable request-log replay authority that atomically
-claims a non-secret request fingerprint for the settlement replay horizon. The
-runtime must then
-derive both the requested tuple and
-`schedulerBackendAvailable: true` from that installed state. Until then,
-strict `on` is rejected before provider readiness and `canary` serial-routes.
+No `canary` or `on` buyer traffic is currently enableable from implementation
+presence alone. #1477 may install retained paged-KV bridge code, but operators
+still need a packaged release-candidate tuple whose local descriptor admits the
+requested path, whose runtime derives `schedulerBackendAvailable: true` from
+that installed state, and whose durable replay authority is wired to stable
+relay request identity plus usage/receipt settlement disposition. Until those
+proofs exist for the exact keyless tuple, strict `on` is rejected before
+provider readiness and `canary` serial-routes.
 
 After that prerequisite lands, use `canary` only when every required proof
 above is present for the exact tuple. Leave `continuous_batch_queue_limit`

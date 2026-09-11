@@ -94,7 +94,7 @@ struct PagedKVPagedCacheHandoff {
     let tailValidTokenCount: Int
     let caches: [PagedKVCache]
 
-    fileprivate init(handle: PagedKVBlockTableHandle, blockTable: PagedKVBlockTable, caches: [PagedKVCache]) {
+    init(handle: PagedKVBlockTableHandle, blockTable: PagedKVBlockTable, caches: [PagedKVCache]) {
         self.handle = handle
         self.blockTable = blockTable
         self.logicalTokenCount = blockTable.logicalTokenCount
@@ -418,6 +418,8 @@ final class PagedKVRuntimeContiguousCacheBridge: PagedKVContiguousCacheBridge, P
     }
 }
 
+extension PagedKVRuntimeContiguousCacheBridge: ContinuousBatchRetainedCacheBridge {}
+
 /// SPEC-039 / SPEC-038 Increment 1 runtime bridge.
 ///
 /// This backend is intentionally installable only after the attach gate has a
@@ -542,6 +544,37 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
 
     func finish(requestID: String) {
         removeRowState(for: requestID, discardRecordedCache: false)
+    }
+
+    func installRetainedPagedKVCache(
+        requestID: String,
+        handoff: PagedKVPagedCacheHandoff,
+        binding: PagedKVStorageBinding
+    ) async throws {
+        let state = RowState(caches: handoff.caches, state: nil)
+        try setRowState(state, for: requestID, binding: binding)
+    }
+
+    func commitTerminalKV(_ input: ContinuousBatchTerminalKVCommitInput) async throws {
+        guard beginOperation() else {
+            throw ContinuousBatchSchedulerError.unsupported("continuous_batching_backend_cancelled")
+        }
+        defer { endOperation() }
+        try await container.perform(nonSendable: input) { context, input in
+            var state = self.rowState(
+                for: input.requestID,
+                binding: input.binding,
+                initialOffset: input.committedKVTokenCount
+            )
+            let tokenInput = MLXArray([Int32(input.currentToken)]).reshaped([1, 1])
+            let text = LMInput.Text(tokens: tokenInput)
+            let output = withPreparedCache(state.caches, lengths: text.sequenceLengths) {
+                context.model(text, cache: state.caches, state: state.state)
+            }
+            eval(output.logits)
+            state.state = output.state
+            try self.setRowState(state, for: input.requestID, binding: input.binding)
+        }
     }
 
     func cancelInFlight() async {

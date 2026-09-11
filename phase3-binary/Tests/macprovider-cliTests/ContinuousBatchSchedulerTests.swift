@@ -1,4 +1,5 @@
 import Foundation
+import MLX
 @testable import MacProviderCore
 @testable import macprovider_cli
 import XCTest
@@ -55,21 +56,21 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         XCTAssertEqual(decodeCalls, 0)
     }
 
-    func testHeadUpdateStickyCacheRequestNeverEntersBatch() async throws {
+    func testCachedPromptTokensRequireRetainedPagedKVHandoff() async throws {
         let backend = ScriptedBackend(scripts: [:])
         let scheduler = try await makeScheduler(maxActiveRows: 2, backend: backend)
 
         do {
             _ = try await scheduler.submit(.init(
                 id: "sticky",
-                conversationKey: "",
-                promptTokens: [1],
+                conversationKey: "conversation-1",
+                promptTokens: [1, 2],
                 maxOutputTokens: 1,
                 cachedPromptTokens: 1
             ))
-            XCTFail("expected the deferred contiguous-cache bridge gate")
+            XCTFail("expected retained FR-PKV10 handoff evidence")
         } catch ContinuousBatchSchedulerError.unsupported(let reason) {
-            XCTAssertEqual(reason, "keyed_or_sticky_cache_reuse_deferred_until_paged_kv_cache_bridge")
+            XCTAssertEqual(reason, "continuous_batching_paged_kv_handoff_unavailable")
         }
 
         let prefillCalls = await backend.prefillCallCount()
@@ -80,26 +81,779 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         XCTAssertTrue(metrics.diagnostics.contains(.stickyCacheUnsupported))
     }
 
-    func testConversationKeyNeverEntersBatchBeforePagedKVCacheBridge() async throws {
-        let backend = ScriptedBackend(scripts: [:])
+    func testConversationKeyWithoutReusableStateBatchesAsFreshRequest() async throws {
+        let backend = ScriptedBackend(scripts: ["keyed": [7]])
         let scheduler = try await makeScheduler(maxActiveRows: 2, backend: backend)
 
-        do {
-            _ = try await scheduler.submit(.init(
-                id: "keyed",
-                conversationKey: "conversation-1",
-                promptTokens: [1],
-                maxOutputTokens: 1
-            ))
-            XCTFail("expected the deferred keyed-cache bridge gate")
-        } catch ContinuousBatchSchedulerError.unsupported(let reason) {
-            XCTAssertEqual(reason, "keyed_or_sticky_cache_reuse_deferred_until_paged_kv_cache_bridge")
-        }
+        let result = try await scheduler.submit(.init(
+            id: "keyed",
+            conversationKey: "conversation-1",
+            promptTokens: [1, 2],
+            maxOutputTokens: 1,
+            temperature: 0.0,
+            topP: 1.0
+        ))
 
         let prefillCalls = await backend.prefillCallCount()
         let decodeCalls = await backend.decodeCallCount()
-        XCTAssertEqual(prefillCalls, 0)
-        XCTAssertEqual(decodeCalls, 0)
+        XCTAssertEqual(result.terminalStatus, .length)
+        XCTAssertEqual(result.conversationKey, "conversation-1")
+        XCTAssertEqual(result.cachedPromptTokens, 0)
+        XCTAssertEqual(result.outputTokens, [7])
+        XCTAssertEqual(prefillCalls, 1)
+        XCTAssertEqual(decodeCalls, 1)
+    }
+
+    func testTerminalRetainFailureReleasesFreshHandleWithoutFailClosing() async throws {
+        let bridge = PagedKVRuntimeContiguousCacheBridge()
+        let allocator = try PagedKVBlockAllocator(
+            blockSizeTokens: 4,
+            maxPhysicalBlocks: 16,
+            contiguousCacheBridge: bridge
+        )
+        let backend = ScriptedBackend(scripts: ["keyed": [7], "unkeyed": [8]])
+        let scheduler = try await makeScheduler(
+            maxActiveRows: 1,
+            backend: backend,
+            allocator: allocator,
+            contiguousCacheBridge: bridge
+        )
+
+        let keyedResult = try await scheduler.submit(.init(
+            id: "keyed",
+            conversationKey: "conversation-1",
+            promptTokens: [1, 2],
+            maxOutputTokens: 1,
+            temperature: 0.0,
+            topP: 1.0
+        ))
+
+        XCTAssertEqual(keyedResult.terminalStatus, .length)
+        XCTAssertNil(keyedResult.retainedCache)
+        let freeBlockCount = await allocator.freeBlockCount()
+        XCTAssertEqual(freeBlockCount, 16)
+
+        let nextResult = try await scheduler.submit(.init(
+            id: "unkeyed",
+            conversationKey: "",
+            promptTokens: [3],
+            maxOutputTokens: 1,
+            temperature: 0.0,
+            topP: 1.0
+        ))
+        XCTAssertEqual(nextResult.terminalStatus, .length)
+        XCTAssertEqual(nextResult.outputTokens, [8])
+    }
+
+    func testRetainedPagedKVHandoffResumesPrefillAtStickyLCP() async throws {
+        let fixture = try await makeRetainedSchedulerFixture(cachedTokens: 34, promptCount: 40)
+
+        let result = try await fixture.scheduler.submit(.init(
+            id: "sticky-hit",
+            conversationKey: "conversation-1",
+            promptTokens: Array(0..<40),
+            maxOutputTokens: 1,
+            temperature: 0.0,
+            topP: 1.0,
+            cachedPromptTokens: 34,
+            retainedPagedKVSequence: fixture.retained
+        ))
+
+        XCTAssertEqual(result.terminalStatus, .length)
+        XCTAssertEqual(result.cachedPromptTokens, 34)
+        XCTAssertNotNil(result.retainedCache)
+        let retainedInstalls = await fixture.backend.retainedInstalls()
+        let prefillCommitted = await fixture.backend.prefillCommittedCounts()
+        let prefillTargets = await fixture.backend.prefillTargetCounts()
+        let decodeCommitted = await fixture.backend.decodeCommittedCounts()
+        XCTAssertEqual(retainedInstalls, ["sticky-hit": 34])
+        XCTAssertEqual(prefillCommitted.first, ["sticky-hit": 34])
+        XCTAssertEqual(prefillTargets.first, ["sticky-hit": 36])
+        XCTAssertEqual(decodeCommitted.last, ["sticky-hit": 39])
+        XCTAssertEqual(result.retainedCache?.retainedSequence.logicalTokenCount, 41)
+        let terminalCommitTargets = await fixture.backend.terminalCommitTargets()
+        XCTAssertEqual(terminalCommitTargets, ["sticky-hit": 41])
+        if let retainedCache = result.retainedCache {
+            await fixture.scheduler.cancelRetainedCacheDelivery(
+                retainedCache,
+                conversationKey: result.conversationKey
+            )
+        }
+    }
+
+    func testRetainedReattachExpandsMaxLogicalTokensForContinuation() async throws {
+        let allocator = try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 16)
+        let handle = try await allocator.allocate(
+            conversationKey: "conversation-1",
+            initialCapacityTokens: 34,
+            maxLogicalTokens: 34,
+            initialTokens: 34
+        )
+        let retained = try await allocator.retain(handle)
+
+        let reattached = try await allocator.reattach(
+            retained,
+            conversationKey: "conversation-1",
+            trimToLogicalTokens: 34,
+            maxLogicalTokens: 48
+        )
+        _ = try await allocator.extend(reattached, by: 7)
+        let binding = try await allocator.binding(for: reattached)
+
+        XCTAssertEqual(binding.currentTable.logicalTokenCount, 41)
+        XCTAssertEqual(binding.maxLogicalTokens, 48)
+        try await allocator.release(reattached)
+    }
+
+    func testCrossConversationRetainedHandoffFailureDiscardsOwner() async throws {
+        let bridge = PagedKVRuntimeContiguousCacheBridge()
+        let allocator = try PagedKVBlockAllocator(
+            blockSizeTokens: 4,
+            maxPhysicalBlocks: 16,
+            contiguousCacheBridge: bridge
+        )
+        let handle = try await allocator.allocate(
+            conversationKey: "conversation-a",
+            initialCapacityTokens: 8,
+            maxLogicalTokens: 8,
+            initialTokens: 6
+        )
+        let retained = try await allocator.retain(handle)
+        let backend = ScriptedBackend(scripts: [:])
+        let scheduler = try await makeScheduler(
+            maxActiveRows: 1,
+            backend: backend,
+            allocator: allocator,
+            contiguousCacheBridge: bridge
+        )
+
+        let result = try await scheduler.submit(.init(
+            id: "cross-key",
+            conversationKey: "conversation-b",
+            promptTokens: Array(0..<8),
+            maxOutputTokens: 1,
+            temperature: 0.0,
+            topP: 1.0,
+            cachedPromptTokens: 6,
+            retainedPagedKVSequence: retained
+        ))
+
+        XCTAssertEqual(result.terminalStatus, .requestFailed)
+        XCTAssertEqual(result.errorCode, "continuous_batching_admission_failed")
+        do {
+            _ = try await allocator.reattach(retained, conversationKey: "conversation-a")
+            XCTFail("retained sequence should have been discarded after cross-key admission failure")
+        } catch PagedKVAllocatorError.unknownHandle {
+        } catch {
+            XCTFail("unexpected retained sequence error: \(error)")
+        }
+        let freeBlockCount = await allocator.freeBlockCount()
+        XCTAssertEqual(freeBlockCount, 16)
+    }
+
+    func testInvalidCachedRangeDiscardsSuppliedRetainedOwner() async throws {
+        let allocator = try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 16)
+        let retained = try await makeRetainedSequence(allocator: allocator)
+        let backend = ScriptedBackend(scripts: [:])
+        let scheduler = try await makeScheduler(
+            maxActiveRows: 1,
+            backend: backend,
+            allocator: allocator
+        )
+
+        do {
+            _ = try await scheduler.submit(.init(
+                id: "invalid-cached-range",
+                conversationKey: "conversation-1",
+                promptTokens: Array(0..<5),
+                maxOutputTokens: 1,
+                cachedPromptTokens: 6,
+                retainedPagedKVSequence: retained
+            ))
+            XCTFail("expected invalid cached-token range rejection")
+        } catch ContinuousBatchSchedulerError.requestFailed(let reason) {
+            XCTAssertEqual(reason, "continuous_batching_invalid_cached_prompt_tokens")
+        }
+
+        try await assertRetainedDiscarded(retained, allocator: allocator, expectedFreeBlockCount: 16)
+    }
+
+    func testFullPromptCachedRangeDiscardsSuppliedRetainedOwner() async throws {
+        let allocator = try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 16)
+        let retained = try await makeRetainedSequence(
+            allocator: allocator,
+            initialCapacityTokens: 8,
+            maxLogicalTokens: 8,
+            initialTokens: 5
+        )
+        let backend = ScriptedBackend(scripts: [:])
+        let scheduler = try await makeScheduler(
+            maxActiveRows: 1,
+            backend: backend,
+            allocator: allocator
+        )
+
+        do {
+            _ = try await scheduler.submit(.init(
+                id: "full-prompt-cached-range",
+                conversationKey: "conversation-1",
+                promptTokens: Array(0..<5),
+                maxOutputTokens: 1,
+                cachedPromptTokens: 5,
+                retainedPagedKVSequence: retained
+            ))
+            XCTFail("expected full-prompt cached-token range rejection")
+        } catch ContinuousBatchSchedulerError.requestFailed(let reason) {
+            XCTAssertEqual(reason, "continuous_batching_invalid_cached_prompt_tokens")
+        }
+
+        try await assertRetainedDiscarded(retained, allocator: allocator, expectedFreeBlockCount: 16)
+    }
+
+    func testTwoRetainedConversationKeysShareDecodeBatchWithoutCrossAttribution() async throws {
+        let decodeGate = AsyncGate()
+        let bridge = HeadlessRetainedCacheBridge()
+        let allocator = try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 16)
+        let retainedA = try await makeRetainedSequence(
+            allocator: allocator,
+            conversationKey: "conversation-a",
+            initialCapacityTokens: 8,
+            maxLogicalTokens: 8,
+            initialTokens: 3
+        )
+        let retainedB = try await makeRetainedSequence(
+            allocator: allocator,
+            conversationKey: "conversation-b",
+            initialCapacityTokens: 8,
+            maxLogicalTokens: 8,
+            initialTokens: 3
+        )
+        let backend = ScriptedBackend(
+            scripts: ["sticky-a": [10, 11], "sticky-b": [20]],
+            decodeGate: decodeGate
+        )
+        let scheduler = try await makeScheduler(
+            maxActiveRows: 2,
+            maxPromptChunkTokens: 4,
+            backend: backend,
+            allocator: allocator,
+            contiguousCacheBridge: bridge
+        )
+
+        let first = Task {
+            try await scheduler.submit(.init(
+                id: "sticky-a",
+                conversationKey: "conversation-a",
+                promptTokens: Array(0..<5),
+                maxOutputTokens: 2,
+                samplerSeed: 101,
+                temperature: 0.0,
+                topP: 1.0,
+                cachedPromptTokens: 3,
+                retainedPagedKVSequence: retainedA
+            ))
+        }
+        try await eventually { await backend.decodeCallCount() == 1 }
+        let second = Task {
+            try await scheduler.submit(.init(
+                id: "sticky-b",
+                conversationKey: "conversation-b",
+                promptTokens: Array(10..<15),
+                maxOutputTokens: 1,
+                samplerSeed: 202,
+                temperature: 0.0,
+                topP: 1.0,
+                cachedPromptTokens: 3,
+                retainedPagedKVSequence: retainedB
+            ))
+        }
+        try await eventually { await scheduler.metrics().waitingCount == 1 }
+        await decodeGate.open()
+
+        let firstResult = try await first.value
+        let secondResult = try await second.value
+
+        XCTAssertEqual(firstResult.conversationKey, "conversation-a")
+        XCTAssertEqual(secondResult.conversationKey, "conversation-b")
+        XCTAssertEqual(firstResult.cachedPromptTokens, 3)
+        XCTAssertEqual(secondResult.cachedPromptTokens, 3)
+        XCTAssertEqual(firstResult.outputTokens, [10, 11])
+        XCTAssertEqual(secondResult.outputTokens, [20])
+        XCTAssertEqual(firstResult.settlementDisposition, .eligibleOwner)
+        XCTAssertEqual(secondResult.settlementDisposition, .eligibleOwner)
+
+        let retainedInstalls = await backend.retainedInstalls()
+        XCTAssertEqual(retainedInstalls, ["sticky-a": 3, "sticky-b": 3])
+        let decodeBatches = await backend.decodeBatches()
+        guard let sharedBatchIndex = decodeBatches.firstIndex(of: ["sticky-a", "sticky-b"]) else {
+            return XCTFail("expected retained sticky rows to share one decode batch; saw \(decodeBatches)")
+        }
+        let currentTokens = await backend.currentTokensByDecodeBatch()
+        let committedCounts = await backend.decodeCommittedCounts()
+        let targetCounts = await backend.decodeTargetCounts()
+        XCTAssertEqual(currentTokens[sharedBatchIndex], ["sticky-a": 10, "sticky-b": 14])
+        XCTAssertEqual(committedCounts[sharedBatchIndex], ["sticky-a": 5, "sticky-b": 4])
+        XCTAssertEqual(targetCounts[sharedBatchIndex], ["sticky-a": 6, "sticky-b": 5])
+        let samplerSeeds = await backend.observedSamplerSeeds()
+        let terminalCommitTargets = await backend.terminalCommitTargets()
+        XCTAssertEqual(samplerSeeds, ["sticky-a": [101, 101], "sticky-b": [202]])
+        XCTAssertEqual(terminalCommitTargets, ["sticky-a": 7, "sticky-b": 6])
+
+        if let retainedCache = firstResult.retainedCache {
+            await scheduler.cancelRetainedCacheDelivery(
+                retainedCache,
+                conversationKey: firstResult.conversationKey
+            )
+        }
+        if let retainedCache = secondResult.retainedCache {
+            await scheduler.cancelRetainedCacheDelivery(
+                retainedCache,
+                conversationKey: secondResult.conversationKey
+            )
+        }
+    }
+
+    func testDeliveredRetainedCacheCanBeReclaimedAfterCallerCancellationRace() async throws {
+        let bridge = HeadlessRetainedCacheBridge()
+        let allocator = try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 16)
+        let originalRetained = try await makeRetainedSequence(
+            allocator: allocator,
+            conversationKey: "conversation-1",
+            initialCapacityTokens: 8,
+            maxLogicalTokens: 8,
+            initialTokens: 6
+        )
+        let backend = ScriptedBackend(scripts: ["sticky-cancel-race": [777]])
+        let scheduler = try await makeScheduler(
+            maxActiveRows: 1,
+            maxPromptChunkTokens: 4,
+            backend: backend,
+            allocator: allocator,
+            contiguousCacheBridge: bridge
+        )
+        let freeBeforeSubmit = await allocator.freeBlockCount()
+
+        let result = try await scheduler.submit(.init(
+            id: "sticky-cancel-race",
+            conversationKey: "conversation-1",
+            promptTokens: Array(0..<8),
+            maxOutputTokens: 1,
+            cachedPromptTokens: 6,
+            retainedPagedKVSequence: originalRetained
+        ))
+
+        XCTAssertEqual(result.terminalStatus, .length)
+        XCTAssertEqual(result.settlementDisposition, .eligibleOwner)
+        guard let retainedCache = result.retainedCache else {
+            return XCTFail("expected terminal retained cache delivery")
+        }
+        XCTAssertNotNil(retainedCache.deliveryID)
+        let freeAfterSubmit = await allocator.freeBlockCount()
+        XCTAssertLessThan(freeAfterSubmit, freeBeforeSubmit)
+
+        await scheduler.cancelRetainedCacheDelivery(retainedCache, conversationKey: result.conversationKey)
+        try await eventually {
+            await allocator.freeBlockCount() == 16
+        }
+        do {
+            _ = try await allocator.reattach(
+                retainedCache.retainedSequence,
+                conversationKey: result.conversationKey
+            )
+            XCTFail("cancelled delivered retained cache should be reclaimed")
+        } catch PagedKVAllocatorError.unknownHandle {
+        } catch {
+            throw error
+        }
+    }
+
+    func testMissingContiguousBridgeAdmissionFailureDiscardsSuppliedRetainedOwner() async throws {
+        let allocator = try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 16)
+        let retained = try await makeRetainedSequence(allocator: allocator)
+        let backend = ScriptedBackend(scripts: [:])
+        let scheduler = try await makeScheduler(
+            maxActiveRows: 1,
+            backend: backend,
+            allocator: allocator
+        )
+
+        let result = try await scheduler.submit(.init(
+            id: "missing-bridge",
+            conversationKey: "conversation-1",
+            promptTokens: Array(0..<8),
+            maxOutputTokens: 1,
+            cachedPromptTokens: 6,
+            retainedPagedKVSequence: retained
+        ))
+
+        XCTAssertEqual(result.terminalStatus, .requestFailed)
+        XCTAssertEqual(result.errorCode, "continuous_batching_admission_failed")
+        try await assertRetainedDiscarded(retained, allocator: allocator, expectedFreeBlockCount: 16)
+    }
+
+    func testTerminalReplayDiscardsSuppliedRetainedOwner() async throws {
+        let allocator = try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 16)
+        let backend = ScriptedBackend(scripts: ["owner": [7]])
+        let scheduler = try await makeScheduler(
+            maxActiveRows: 1,
+            backend: backend,
+            allocator: allocator
+        )
+        let original = try await scheduler.submit(.init(
+            id: "owner",
+            conversationKey: "conversation-1",
+            promptTokens: [1],
+            maxOutputTokens: 1
+        ))
+        XCTAssertEqual(original.terminalStatus, .length)
+
+        let retained = try await makeRetainedSequence(allocator: allocator)
+        let replay = try await scheduler.submit(.init(
+            id: "owner",
+            conversationKey: "conversation-1",
+            promptTokens: [1],
+            maxOutputTokens: 1,
+            retainedPagedKVSequence: retained
+        ))
+
+        XCTAssertEqual(replay.settlementDisposition, .nonSettlingReplay)
+        XCTAssertNil(replay.retainedCache)
+        try await assertRetainedDiscarded(retained, allocator: allocator, expectedFreeBlockCount: 16)
+    }
+
+    func testPositiveCachedTerminalReplayDiscardsSuppliedRetainedOwner() async throws {
+        let allocator = try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 16)
+        let bridge = HeadlessRetainedCacheBridge()
+        let originalRetained = try await makeRetainedSequence(
+            allocator: allocator,
+            initialCapacityTokens: 8,
+            maxLogicalTokens: 8,
+            initialTokens: 6
+        )
+        let backend = ScriptedBackend(scripts: ["owner-positive": [7]])
+        let scheduler = try await makeScheduler(
+            maxActiveRows: 1,
+            backend: backend,
+            allocator: allocator,
+            contiguousCacheBridge: bridge
+        )
+        let original = try await scheduler.submit(.init(
+            id: "owner-positive",
+            conversationKey: "conversation-1",
+            promptTokens: Array(0..<8),
+            maxOutputTokens: 1,
+            cachedPromptTokens: 6,
+            retainedPagedKVSequence: originalRetained
+        ))
+        XCTAssertEqual(original.terminalStatus, .length)
+        XCTAssertEqual(original.cachedPromptTokens, 6)
+        XCTAssertEqual(original.retainedCache?.retainedSequence.logicalTokenCount, 9)
+
+        let retained = try await makeRetainedSequence(allocator: allocator)
+        let replay = try await scheduler.submit(.init(
+            id: "owner-positive",
+            conversationKey: "conversation-1",
+            promptTokens: Array(0..<8),
+            maxOutputTokens: 1,
+            cachedPromptTokens: 6,
+            retainedPagedKVSequence: retained
+        ))
+
+        XCTAssertEqual(replay.settlementDisposition, .nonSettlingReplay)
+        XCTAssertEqual(replay.cachedPromptTokens, 6)
+        XCTAssertNil(replay.retainedCache)
+        try await assertRetainedDiscarded(retained, allocator: allocator, expectedFreeBlockCount: 13)
+        if let retainedCache = original.retainedCache {
+            await scheduler.cancelRetainedCacheDelivery(
+                retainedCache,
+                conversationKey: original.conversationKey
+            )
+        }
+    }
+
+    func testQueuedCancellationDiscardsSuppliedRetainedOwner() async throws {
+        let gate = AsyncGate()
+        let allocator = try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 16)
+        let backend = ScriptedBackend(scripts: ["active": [7]], prefillGate: gate)
+        let scheduler = try await makeScheduler(
+            maxActiveRows: 1,
+            queueLimit: 1,
+            backend: backend,
+            allocator: allocator
+        )
+
+        let active = Task {
+            try await scheduler.submit(.init(
+                id: "active",
+                conversationKey: "",
+                promptTokens: [1, 2],
+                maxOutputTokens: 1
+            ))
+        }
+        try await eventually { await backend.prefillCallCount() == 1 }
+
+        let retained = try await makeRetainedSequence(allocator: allocator)
+        let queued = Task {
+            try await scheduler.submit(.init(
+                id: "queued-retained",
+                conversationKey: "conversation-1",
+                promptTokens: Array(0..<8),
+                maxOutputTokens: 1,
+                cachedPromptTokens: 6,
+                retainedPagedKVSequence: retained
+            ))
+        }
+        try await eventually { await scheduler.metrics().waitingCount == 1 }
+        await scheduler.cancel(requestID: "queued-retained")
+        await gate.open()
+
+        let queuedResult = try await queued.value
+        XCTAssertEqual(queuedResult.terminalStatus, .cancelled)
+        _ = try await active.value
+        try await assertRetainedDiscarded(retained, allocator: allocator, expectedFreeBlockCount: 16)
+    }
+
+    func testTimedOutTerminalDeliveryDiscardsRetainedPagedKVOwner() async throws {
+        let sinkGate = AsyncGate()
+        let fixture = try await makeRetainedSchedulerFixture(
+            cachedTokens: 34,
+            promptCount: 40,
+            tokenDeliveryTimeoutNanoseconds: 20_000_000
+        )
+
+        let timedOut = Task {
+            try await fixture.scheduler.submit(.init(
+                id: "sticky-hit",
+                conversationKey: "conversation-1",
+                promptTokens: Array(0..<40),
+                maxOutputTokens: 1,
+                temperature: 0.0,
+                topP: 1.0,
+                cachedPromptTokens: 34,
+                retainedPagedKVSequence: fixture.retained
+            ), tokenSink: { _ in
+                await sinkGate.wait()
+            })
+        }
+
+        let result = try await timedOut.value
+        XCTAssertEqual(result.terminalStatus, .requestFailed)
+        XCTAssertEqual(result.errorCode, "continuous_batching_stream_delivery_timed_out")
+        XCTAssertNil(result.retainedCache)
+        try await eventually { await fixture.allocator.freeBlockCount() == 32 }
+        await sinkGate.open()
+    }
+
+    func testConversationCacheRetainedPagedKVHitLeavesTrimToSchedulerHandoff() async throws {
+        let fixture = try await makeRetainedSchedulerFixture(
+            cachedTokens: 34,
+            promptCount: 40,
+            retainedTokenCount: 40
+        )
+        let conversationCache = ConversationCache(
+            config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900)
+        )
+        let seedTokens = Array(0..<40).map(Int32.init)
+        let seed = await conversationCache.begin(
+            conversationKey: "conversation-1",
+            incomingTokens: seedTokens,
+            modelID: Self.modelID,
+            kvBits: nil
+        )
+        await conversationCache.commit(
+            seed!,
+            cache: ConversationCacheLayers(
+                [fixture.pagedCache],
+                retainedPagedKVSequence: fixture.retained,
+                discardRetainedPagedKVSequence: { retained, key in
+                    await fixture.scheduler.discardRetainedCache(retained, conversationKey: key)
+                }
+            ),
+            fullTokens: seedTokens
+        )
+
+        let incomingTokens = Array(0..<34).map(Int32.init) + Array(100..<106).map(Int32.init)
+        let lease = await conversationCache.begin(
+            conversationKey: "conversation-1",
+            incomingTokens: incomingTokens,
+            modelID: Self.modelID,
+            kvBits: nil,
+            allowRetainedPagedKVHandoff: true
+        )
+
+        XCTAssertEqual(lease?.cachedPromptTokens, 34)
+        XCTAssertEqual(lease?.trimBy, 6)
+        XCTAssertEqual(fixture.pagedCache.offset, 40)
+
+        let result = try await fixture.scheduler.submit(.init(
+            id: "sticky-hit",
+            conversationKey: "conversation-1",
+            promptTokens: Array(0..<34) + Array(100..<106),
+            maxOutputTokens: 1,
+            temperature: 0.0,
+            topP: 1.0,
+            cachedPromptTokens: lease?.cachedPromptTokens ?? 0,
+            retainedPagedKVSequence: lease?.reusableCache?.retainedPagedKVSequence
+        ))
+
+        XCTAssertEqual(result.terminalStatus, .length)
+        XCTAssertEqual(result.cachedPromptTokens, 34)
+        XCTAssertNotNil(result.retainedCache)
+        let retainedInstalls = await fixture.backend.retainedInstalls()
+        let prefillCommitted = await fixture.backend.prefillCommittedCounts()
+        let prefillTargets = await fixture.backend.prefillTargetCounts()
+        XCTAssertEqual(retainedInstalls, ["sticky-hit": 34])
+        XCTAssertEqual(prefillCommitted.first, ["sticky-hit": 34])
+        XCTAssertEqual(prefillTargets.first, ["sticky-hit": 36])
+
+        if let lease, let retainedCache = result.retainedCache {
+            await conversationCache.commit(
+                lease,
+                cache: ConversationCacheLayers(
+                    retainedCache.layers,
+                    retainedPagedKVSequence: retainedCache.retainedSequence,
+                    discardRetainedPagedKVSequence: { retained, key in
+                        await fixture.scheduler.discardRetainedCache(retained, conversationKey: key)
+                    }
+                ),
+                fullTokens: incomingTokens + result.outputTokens.map(Int32.init)
+            )
+            await fixture.scheduler.acknowledgeRetainedCacheDelivery(retainedCache)
+            _ = await conversationCache.purgeHot(conversationKey: "conversation-1")
+        } else if let lease {
+            await conversationCache.abort(lease)
+        }
+    }
+
+    func testRetainedStickyStopSequenceCommitsCanonicalGeneratedTokens() async throws {
+        let bridge = HeadlessRetainedCacheBridge()
+        let allocator = try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 16)
+        let retained = try await makeRetainedSequence(
+            allocator: allocator,
+            conversationKey: "conversation-1",
+            initialCapacityTokens: 40,
+            maxLogicalTokens: 48,
+            initialTokens: 34
+        )
+        let backend = ScriptedBackend(scripts: ["sticky-hit": [5, 7, 8]])
+        let scheduler = try await makeScheduler(
+            maxActiveRows: 1,
+            backend: backend,
+            allocator: allocator,
+            contiguousCacheBridge: bridge
+        )
+
+        let incomingTokens = Array<Int32>(0..<40)
+        let result = try await scheduler.submit(.init(
+            id: "sticky-hit",
+            conversationKey: "conversation-1",
+            promptTokens: incomingTokens.map(Int.init),
+            maxOutputTokens: 3,
+            stopTokenSequences: [[7, 8]],
+            temperature: 0.0,
+            topP: 1.0,
+            cachedPromptTokens: 34,
+            retainedPagedKVSequence: retained
+        ))
+
+        XCTAssertEqual(result.terminalStatus, .stop)
+        XCTAssertEqual(result.generatedTokens, [5, 7, 8])
+        XCTAssertEqual(result.outputTokens, [5])
+        XCTAssertEqual(result.completionTokens, 3)
+        XCTAssertEqual(result.retainedCache?.retainedSequence.logicalTokenCount, 43)
+        let terminalCommitTargets = await backend.terminalCommitTargets()
+        XCTAssertEqual(terminalCommitTargets, ["sticky-hit": 43])
+
+        let conversationCache = ConversationCache(
+            config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900)
+        )
+        if let retainedCache = result.retainedCache {
+            let lease = await conversationCache.begin(
+                conversationKey: "conversation-1",
+                incomingTokens: incomingTokens,
+                modelID: "model-a",
+                kvBits: nil,
+                allowRetainedPagedKVHandoff: true
+            )
+            XCTAssertNotNil(lease)
+            await conversationCache.commit(
+                lease!,
+                cache: ConversationCacheLayers(
+                    retainedCache.layers,
+                    retainedPagedKVSequence: retainedCache.retainedSequence,
+                    discardRetainedPagedKVSequence: { retained, key in
+                        await scheduler.discardRetainedCache(retained, conversationKey: key)
+                    }
+                ),
+                fullTokens: incomingTokens + result.generatedTokens.map(Int32.init)
+            )
+            await scheduler.acknowledgeRetainedCacheDelivery(retainedCache)
+            let next = await conversationCache.begin(
+                conversationKey: "conversation-1",
+                incomingTokens: incomingTokens + result.generatedTokens.map(Int32.init) + [42],
+                modelID: "model-a",
+                kvBits: nil,
+                allowRetainedPagedKVHandoff: true
+            )
+            XCTAssertEqual(next?.cachedPromptTokens, 43)
+            await conversationCache.abort(next!)
+            _ = await conversationCache.purgeHot(conversationKey: "conversation-1")
+        } else {
+            XCTFail("expected retained sticky cache")
+        }
+    }
+
+    func testCachedPromptTokensCannotExceedPromptLengthEvenWithRetainedHandoff() async throws {
+        let fixture = try await makeRetainedSchedulerFixture(cachedTokens: 6, promptCount: 6)
+
+        do {
+            _ = try await fixture.scheduler.submit(.init(
+                id: "invalid-cached-range",
+                conversationKey: "conversation-1",
+                promptTokens: Array(0..<5),
+                maxOutputTokens: 1,
+                cachedPromptTokens: 6,
+                retainedPagedKVSequence: fixture.retained
+            ))
+            XCTFail("expected invalid cached-token range rejection")
+        } catch ContinuousBatchSchedulerError.requestFailed(let reason) {
+            XCTAssertEqual(reason, "continuous_batching_invalid_cached_prompt_tokens")
+        }
+        let retainedInstalls = await fixture.backend.retainedInstalls()
+        XCTAssertEqual(retainedInstalls, [:])
+    }
+
+    func testNonSettlingReplayResultDropsRetainedCacheOwnership() async throws {
+        let allocator = try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 4)
+        let handle = try await allocator.allocate(
+            conversationKey: "conversation-1",
+            initialCapacityTokens: 1,
+            maxLogicalTokens: 4,
+            initialTokens: 1
+        )
+        let retained = try await allocator.retain(handle)
+        let retainedCache = ContinuousBatchRetainedCache(retainedSequence: retained, layers: [])
+        let result = ContinuousBatchSchedulerResult(
+            requestID: "sticky-owner",
+            conversationKey: "conversation-1",
+            generatedTokens: [7],
+            outputTokens: [7],
+            promptTokens: 2,
+            completionTokens: 1,
+            emittedTokens: 1,
+            cachedPromptTokens: 1,
+            terminalStatus: .length,
+            errorCode: nil,
+            snapshot: nil,
+            settlementDisposition: .eligibleOwner,
+            retainedCache: retainedCache
+        )
+
+        let replay = result.withSettlementDisposition(.nonSettlingReplay)
+
+        XCTAssertEqual(replay.settlementDisposition, .nonSettlingReplay)
+        XCTAssertNil(replay.retainedCache)
+        try await allocator.discardRetained(retained, conversationKey: "conversation-1")
     }
 
     func testAC24AdmissionPoolCapacityRejectsWithoutRunningInference() async throws {
@@ -1936,9 +2690,12 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         queueLimit: Int? = nil,
         decodeHeadroomTokens: Int = 2,
         maxPromptChunkTokens: Int = 2,
-        backend: ScriptedBackend
+        tokenDeliveryTimeoutNanoseconds: UInt64 = 5_000_000_000,
+        backend: ScriptedBackend,
+        allocator: PagedKVBlockAllocator? = nil,
+        contiguousCacheBridge: (any ContinuousBatchRetainedCacheBridge)? = nil
     ) async throws -> ContinuousBatchScheduler {
-        let allocator = try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 16)
+        let allocator = try allocator ?? PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 16)
         let config = ContinuousBatchSchedulerConfiguration(
             descriptor: descriptor,
             tuple: tuple,
@@ -1948,6 +2705,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
             decodeHeadroomTokens: decodeHeadroomTokens,
             maxPrefillRowsPerIteration: 1,
             maxPromptChunkTokens: maxPromptChunkTokens,
+            tokenDeliveryTimeoutNanoseconds: tokenDeliveryTimeoutNanoseconds,
             snapshot: ContinuousBatchSchedulerSnapshot(
                 modelID: Self.modelID,
                 modelSHA256: Self.modelSHA,
@@ -1958,8 +2716,114 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
             configuration: config,
             allocator: allocator,
             backend: backend,
-            replayAuthority: TestReplayAuthority()
+            replayAuthority: TestReplayAuthority(),
+            contiguousCacheBridge: contiguousCacheBridge
         )
+    }
+
+    private func makeRetainedSequence(
+        allocator: PagedKVBlockAllocator,
+        conversationKey: String = "conversation-1",
+        initialCapacityTokens: Int = 8,
+        maxLogicalTokens: Int = 8,
+        initialTokens: Int = 6
+    ) async throws -> PagedKVRetainedSequence {
+        let handle = try await allocator.allocate(
+            conversationKey: conversationKey,
+            initialCapacityTokens: initialCapacityTokens,
+            maxLogicalTokens: maxLogicalTokens,
+            initialTokens: initialTokens
+        )
+        return try await allocator.retain(handle)
+    }
+
+    private func assertRetainedDiscarded(
+        _ retained: PagedKVRetainedSequence,
+        allocator: PagedKVBlockAllocator,
+        expectedFreeBlockCount: Int,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async throws {
+        try await eventually(file: file, line: line) {
+            await allocator.freeBlockCount() == expectedFreeBlockCount
+        }
+        do {
+            _ = try await allocator.reattach(retained, conversationKey: retained.conversationKey)
+            XCTFail("retained sequence should have been discarded", file: file, line: line)
+        } catch PagedKVAllocatorError.unknownHandle {
+        } catch {
+            XCTFail("unexpected retained sequence error: \(error)", file: file, line: line)
+        }
+    }
+
+    private func makeRetainedSchedulerFixture(
+        cachedTokens: Int,
+        promptCount: Int,
+        retainedTokenCount: Int? = nil,
+        scripts: [String: [Int]] = ["sticky-hit": [777]],
+        tokenDeliveryTimeoutNanoseconds: UInt64 = 5_000_000_000
+    ) async throws -> (
+        scheduler: ContinuousBatchScheduler,
+        backend: ScriptedBackend,
+        retained: PagedKVRetainedSequence,
+        pagedCache: PagedKVCache,
+        allocator: PagedKVBlockAllocator
+    ) {
+        guard PagedKVMetallibGate.defaultMetallibExists() else {
+            throw XCTSkip("MLX default metallib is unavailable in this test host")
+        }
+        let descriptor = Self.descriptor(blockSizeTokens: 4, maxPhysicalBlocks: 32)
+        let retainedTokenCount = retainedTokenCount ?? cachedTokens
+        let bridge = PagedKVRuntimeContiguousCacheBridge()
+        let allocator = try PagedKVBlockAllocator(
+            blockSizeTokens: descriptor.blockSizeTokens,
+            maxPhysicalBlocks: descriptor.maxPhysicalBlocks,
+            physicalBlockOrder: [2, 5, 1, 0, 4, 3, 6, 7],
+            contiguousCacheBridge: bridge
+        )
+        let handle = try await allocator.allocate(
+            conversationKey: "conversation-1",
+            initialCapacityTokens: max(promptCount, retainedTokenCount),
+            maxLogicalTokens: max(promptCount, retainedTokenCount) + 8,
+            initialTokens: retainedTokenCount
+        )
+        let binding = try await allocator.binding(for: handle)
+        let keyBytes = Self.fp16Bytes((1...UInt16(retainedTokenCount)).map { $0 })
+        let valueBytes = Self.fp16Bytes((1...UInt16(retainedTokenCount)).map { $0 + 100 })
+        let paged = PagedKVCache(descriptor: descriptor, binding: binding)
+        paged.state = [
+            MLXArray(keyBytes, [1, 1, retainedTokenCount, 1], dtype: .float16),
+            MLXArray(valueBytes, [1, 1, retainedTokenCount, 1], dtype: .float16),
+        ]
+        try bridge.record(caches: [paged], binding: binding)
+        let retained = try await allocator.retain(handle)
+        let backend = ScriptedBackend(
+            scripts: scripts,
+            terminalCommitBridge: bridge,
+            terminalCommitCaches: [paged]
+        )
+        let scheduler = try await makeScheduler(
+            descriptor: descriptor,
+            tuple: Self.tuple(),
+            maxActiveRows: 1,
+            tokenDeliveryTimeoutNanoseconds: tokenDeliveryTimeoutNanoseconds,
+            backend: backend,
+            allocator: allocator,
+            contiguousCacheBridge: bridge
+        )
+        return (scheduler, backend, retained, paged, allocator)
+    }
+
+    private static func fp16Bytes(_ values: [UInt16]) -> Data {
+        var data = Data()
+        data.reserveCapacity(values.count * 2)
+        for value in values {
+            var littleEndian = value.littleEndian
+            withUnsafeBytes(of: &littleEndian) { bytes in
+                data.append(contentsOf: bytes)
+            }
+        }
+        return data
     }
 }
 
@@ -2053,12 +2917,23 @@ private actor SecondDecodeGateBackend: ContinuousBatchSchedulerBackend {
     func decodeCallCount() -> Int { decodeCalls }
 }
 
+private struct HeadlessRetainedCacheBridge: ContinuousBatchRetainedCacheBridge {
+    func reattachPagedKVCache(
+        handle: PagedKVBlockTableHandle,
+        table: PagedKVBlockTable
+    ) throws -> PagedKVPagedCacheHandoff {
+        PagedKVPagedCacheHandoff(handle: handle, blockTable: table, caches: [])
+    }
+}
+
 private actor ScriptedBackend: ContinuousBatchSchedulerBackend {
     private let scripts: [String: [Int]]
     private let prefillGate: AsyncGate?
     private let decodeGate: AsyncGate?
     private let failDecodeCall: Int?
     private let rowFailures: Set<String>
+    private let terminalCommitBridge: PagedKVRuntimeContiguousCacheBridge?
+    private let terminalCommitCaches: [PagedKVCache]
     private var prefillRowsLog: [[String]] = []
     private var decodeRowsLog: [[String]] = []
     private var currentTokenLog: [[String: Int]] = []
@@ -2069,6 +2944,8 @@ private actor ScriptedBackend: ContinuousBatchSchedulerBackend {
     private var blockTableLengthLog: [[String: Int]] = []
     private var samplerSeedLog: [String: [Int]] = [:]
     private var samplerStepLog: [String: [Int]] = [:]
+    private var retainedInstallLog: [String: Int] = [:]
+    private var terminalCommitLog: [String: Int] = [:]
     private var promptChunks: [[Int]] = []
     private var eventLog: [String] = []
     private var decodeCalls = 0
@@ -2078,13 +2955,17 @@ private actor ScriptedBackend: ContinuousBatchSchedulerBackend {
         prefillGate: AsyncGate? = nil,
         decodeGate: AsyncGate? = nil,
         failDecodeCall: Int? = nil,
-        rowFailures: Set<String> = []
+        rowFailures: Set<String> = [],
+        terminalCommitBridge: PagedKVRuntimeContiguousCacheBridge? = nil,
+        terminalCommitCaches: [PagedKVCache] = []
     ) {
         self.scripts = scripts
         self.prefillGate = prefillGate
         self.decodeGate = decodeGate
         self.failDecodeCall = failDecodeCall
         self.rowFailures = rowFailures
+        self.terminalCommitBridge = terminalCommitBridge
+        self.terminalCommitCaches = terminalCommitCaches
     }
 
     func prefill(rows: [ContinuousBatchPrefillInput]) async throws -> [ContinuousBatchPrefillOutput] {
@@ -2101,6 +2982,16 @@ private actor ScriptedBackend: ContinuousBatchSchedulerBackend {
             await prefillGate.wait()
         }
         return rows.map { ContinuousBatchPrefillOutput(requestID: $0.requestID) }
+    }
+
+    func installRetainedPagedKVCache(
+        requestID: String,
+        handoff: PagedKVPagedCacheHandoff,
+        binding: PagedKVStorageBinding
+    ) async throws {
+        XCTAssertEqual(handoff.handle, binding.handle)
+        XCTAssertEqual(handoff.blockTable, binding.currentTable)
+        retainedInstallLog[requestID] = handoff.logicalTokenCount
     }
 
     func decode(rows: [ContinuousBatchDecodeInput]) async throws -> [ContinuousBatchDecodeOutcome] {
@@ -2137,6 +3028,25 @@ private actor ScriptedBackend: ContinuousBatchSchedulerBackend {
         }
     }
 
+    func commitTerminalKV(_ input: ContinuousBatchTerminalKVCommitInput) async throws {
+        terminalCommitLog[input.requestID] = input.targetKVTokenCount
+        guard let terminalCommitBridge else { return }
+        for (layerIndex, cache) in terminalCommitCaches.enumerated() {
+            let tokenCount = input.targetKVTokenCount
+            let keyBytes = Self.fp16Bytes((0..<tokenCount).map {
+                UInt16(truncatingIfNeeded: $0 + 1 + layerIndex * 1_000)
+            })
+            let valueBytes = Self.fp16Bytes((0..<tokenCount).map {
+                UInt16(truncatingIfNeeded: $0 + 101 + layerIndex * 1_000)
+            })
+            cache.state = [
+                MLXArray(keyBytes, [1, 1, tokenCount, 1], dtype: .float16),
+                MLXArray(valueBytes, [1, 1, tokenCount, 1], dtype: .float16),
+            ]
+        }
+        try terminalCommitBridge.record(caches: terminalCommitCaches, binding: input.binding)
+    }
+
     func cancelInFlight() async {
         await prefillGate?.open()
         await decodeGate?.open()
@@ -2156,6 +3066,18 @@ private actor ScriptedBackend: ContinuousBatchSchedulerBackend {
     func blockTableLengthsByDecodeBatch() -> [[String: Int]] { blockTableLengthLog }
     func maxObservedPrefillChunkSize() -> Int? { promptChunks.map(\.count).max() }
     func events() -> [String] { eventLog }
+    func retainedInstalls() -> [String: Int] { retainedInstallLog }
+    func terminalCommitTargets() -> [String: Int] { terminalCommitLog }
+
+    private static func fp16Bytes(_ values: [UInt16]) -> Data {
+        var data = Data()
+        data.reserveCapacity(values.count * 2)
+        for value in values {
+            var littleEndian = value.littleEndian
+            withUnsafeBytes(of: &littleEndian) { data.append(contentsOf: $0) }
+        }
+        return data
+    }
 }
 
 private struct BackendFailure: Error {}

@@ -11,7 +11,9 @@ enum ContinuousBatchingUnsupportedReason: String, Sendable, Equatable {
     case tupleNotAdvertised = "requested_tuple_not_advertised"
     case kvBitsUnsupported = "kv_bits_unsupported"
     case draftSpecDecodeMutualExclusion = "draft_spec_decode_mutual_exclusion"
-    case stickyCacheBridgeUnavailable = "sticky_cache_bridge_unavailable"
+    case stickyCacheHandoffUnavailable = "sticky_cache_handoff_unavailable"
+    case conversationKeyRolloutUnavailable = "conversation_key_rollout_unavailable"
+    case durableReplayAuthorityUnavailable = "durable_replay_authority_unavailable"
     case moePromotionEvidenceUnavailable = "moe_promotion_evidence_unavailable"
     case requestStateUnrepresented = "request_local_state_unrepresented"
 
@@ -21,8 +23,12 @@ enum ContinuousBatchingUnsupportedReason: String, Sendable, Equatable {
             return "continuous_batching_unsupported_kv_bits"
         case .draftSpecDecodeMutualExclusion:
             return "draft_model_capacity_shortfall"
-        case .stickyCacheBridgeUnavailable:
-            return "continuous_batching_sticky_cache_unavailable"
+        case .stickyCacheHandoffUnavailable:
+            return "continuous_batching_paged_kv_handoff_unavailable"
+        case .conversationKeyRolloutUnavailable:
+            return "continuous_batching_conversation_key_rollout_unavailable"
+        case .durableReplayAuthorityUnavailable:
+            return "continuous_batching_durable_replay_authority_unavailable"
         case .moePromotionEvidenceUnavailable:
             return "continuous_batching_moe_promotion_evidence_unavailable"
         case .requestStateUnrepresented:
@@ -36,11 +42,15 @@ enum ContinuousBatchingUnsupportedReason: String, Sendable, Equatable {
     var status: Int {
         switch self {
         case .kvBitsUnsupported, .draftSpecDecodeMutualExclusion,
-             .stickyCacheBridgeUnavailable, .moePromotionEvidenceUnavailable,
+             .stickyCacheHandoffUnavailable,
+             .conversationKeyRolloutUnavailable,
+             .moePromotionEvidenceUnavailable,
              .requestStateUnrepresented,
              .tupleNotAdvertised:
             return 400
-        case .localCapabilityUnavailable, .pagedKVDisabled, .pagedKVCapabilityUnavailable:
+        case .localCapabilityUnavailable, .pagedKVDisabled,
+             .pagedKVCapabilityUnavailable,
+             .durableReplayAuthorityUnavailable:
             return 503
         }
     }
@@ -136,7 +146,6 @@ enum ContinuousBatchingPolicy {
             queueLimit: configuredQueueLimit,
             kvBits: kvBits,
             draftConfigured: draftConfigured,
-            stickyCacheEligible: false,
             descriptor: nil,
             tuple: nil,
             checkLocalCapability: false,
@@ -150,9 +159,10 @@ enum ContinuousBatchingPolicy {
         queueLimit configuredQueueLimit: Int?,
         kvBits: Int?,
         draftConfigured: Bool,
-        stickyCacheEligible: Bool = false,
+        requestHasConversationKey: Bool = false,
         requestStateRepresentable: Bool = true,
         schedulerBackendAvailable: Bool,
+        durableReplayAuthorityAvailable: Bool = true,
         pagedKVDecision: PagedKVAttachDecision,
         requestedTuple: ContinuousBatchingRequestedTuple?
     ) -> ContinuousBatchingCapability {
@@ -162,11 +172,12 @@ enum ContinuousBatchingPolicy {
             queueLimit: configuredQueueLimit,
             kvBits: kvBits,
             draftConfigured: draftConfigured,
-            stickyCacheEligible: stickyCacheEligible,
+            requestHasConversationKey: requestHasConversationKey,
             requestStateRepresentable: requestStateRepresentable,
             descriptor: pagedKVDecision.descriptor,
             tuple: requestedTuple,
             schedulerBackendAvailable: schedulerBackendAvailable,
+            durableReplayAuthorityAvailable: durableReplayAuthorityAvailable,
             checkLocalCapability: true,
             pagedKVDecision: pagedKVDecision
         )
@@ -178,11 +189,12 @@ enum ContinuousBatchingPolicy {
         queueLimit configuredQueueLimit: Int?,
         kvBits: Int?,
         draftConfigured: Bool,
-        stickyCacheEligible: Bool,
+        requestHasConversationKey: Bool = false,
         requestStateRepresentable: Bool = true,
         descriptor: PagedKVDescriptor?,
         tuple: ContinuousBatchingRequestedTuple?,
         schedulerBackendAvailable: Bool = false,
+        durableReplayAuthorityAvailable: Bool = true,
         checkLocalCapability: Bool,
         pagedKVDecision: PagedKVAttachDecision
     ) -> ContinuousBatchingCapability {
@@ -191,23 +203,21 @@ enum ContinuousBatchingPolicy {
         let reason: ContinuousBatchingUnsupportedReason?
         if mode == .off {
             reason = nil
+        } else if requestHasConversationKey {
+            reason = .conversationKeyRolloutUnavailable
         } else if !requestStateRepresentable {
             // The shared-forward backend contract carries only scalar sampling
             // parameters. A request needing row-local generation state the
             // contract does not represent (structured-output/grammar-constrained
             // decoding, tool-forced decoding, custom logit processors) must never
             // enter a batch: serial-route in canary, fail closed in strict. This
-            // gate holds even once the deferred SPEC-039 bridge lands, so a future
-            // backend cannot silently ignore or cross-contaminate that state.
+            // gate holds for the SPEC-039 bridge so a future backend cannot
+            // silently ignore or cross-contaminate that state.
             reason = .requestStateUnrepresented
         } else if draftConfigured {
             reason = .draftSpecDecodeMutualExclusion
         } else if kvBits != nil {
             reason = .kvBitsUnsupported
-        } else if stickyCacheEligible {
-            // FR-PKV10's live contiguous-cache bridge is tracked separately;
-            // fresh conversations remain eligible for the first cut.
-            reason = .stickyCacheBridgeUnavailable
         } else if !checkLocalCapability {
             reason = schedulerBackendAvailable ? nil : .localCapabilityUnavailable
         } else {
@@ -231,6 +241,8 @@ enum ContinuousBatchingPolicy {
                     reason = .moePromotionEvidenceUnavailable
                 } else if !schedulerBackendAvailable {
                     reason = .localCapabilityUnavailable
+                } else if !durableReplayAuthorityAvailable {
+                    reason = .durableReplayAuthorityUnavailable
                 } else {
                     reason = nil
                 }
@@ -274,8 +286,12 @@ enum ContinuousBatchingPolicy {
             return "continuous batching does not support the requested kv_bits tuple"
         case .draftSpecDecodeMutualExclusion:
             return "continuous batching is mutually exclusive with speculative decoding in this release"
-        case .stickyCacheBridgeUnavailable:
-            return "continuous batching requires the local contiguous-cache bridge for sticky-cache requests"
+        case .stickyCacheHandoffUnavailable:
+            return "continuous batching requires a same-conversation FR-PKV10 retained paged-KV handoff before cached-token credit can enter the scheduler"
+        case .conversationKeyRolloutUnavailable:
+            return "continuous batching conversation-keyed traffic is not in the current operator rollout scope"
+        case .durableReplayAuthorityUnavailable:
+            return "continuous batching requires durable replay authority before scheduler activation"
         case .moePromotionEvidenceUnavailable:
             return "continuous batching requires the representative MoE correctness fixture and live MSB-04 promotion evidence"
         case .requestStateUnrepresented:

@@ -1,12 +1,26 @@
 import CryptoKit
 import Foundation
 import MLXLMCommon
+import MacProviderCore
 
 final class ConversationCacheLayers: @unchecked Sendable {
     let layers: [KVCache]
+    let retainedPagedKVSequence: PagedKVRetainedSequence?
+    private let discardRetainedPagedKVSequence: (@Sendable (PagedKVRetainedSequence, String) async -> Void)?
 
-    init(_ layers: [KVCache]) {
+    init(
+        _ layers: [KVCache],
+        retainedPagedKVSequence: PagedKVRetainedSequence? = nil,
+        discardRetainedPagedKVSequence: (@Sendable (PagedKVRetainedSequence, String) async -> Void)? = nil
+    ) {
         self.layers = layers
+        self.retainedPagedKVSequence = retainedPagedKVSequence
+        self.discardRetainedPagedKVSequence = discardRetainedPagedKVSequence
+    }
+
+    func discardRetainedPagedKV(conversationKey: String) async {
+        guard let retainedPagedKVSequence, let discardRetainedPagedKVSequence else { return }
+        await discardRetainedPagedKVSequence(retainedPagedKVSequence, conversationKey)
     }
 }
 
@@ -33,6 +47,7 @@ final class ConversationCacheLease: @unchecked Sendable {
     /// True when this hit reuses cold-tier-promoted layers (FR-KVP9). Advisory,
     /// used only for telemetry attribution.
     let promotedFromCold: Bool
+    let reusableCanonicalPromptTokens: [Int32]?
 
     init(
         key: String,
@@ -47,7 +62,8 @@ final class ConversationCacheLease: @unchecked Sendable {
         sampledPurgeGeneration: Int = 0,
         localPurgeStamp: Int = 0,
         globalPurgeStamp: Int = 0,
-        promotedFromCold: Bool = false
+        promotedFromCold: Bool = false,
+        reusableCanonicalPromptTokens: [Int32]? = nil
     ) {
         self.key = key
         self.keyHash = keyHash
@@ -62,6 +78,7 @@ final class ConversationCacheLease: @unchecked Sendable {
         self.localPurgeStamp = localPurgeStamp
         self.globalPurgeStamp = globalPurgeStamp
         self.promotedFromCold = promotedFromCold
+        self.reusableCanonicalPromptTokens = reusableCanonicalPromptTokens
     }
 }
 
@@ -129,7 +146,8 @@ actor ConversationCache {
         modelID: String,
         kvBits: Int?,
         now: Date = Date(),
-        cold: ConversationColdContext? = nil
+        cold: ConversationColdContext? = nil,
+        allowRetainedPagedKVHandoff: Bool = false
     ) async -> ConversationCacheLease? {
         guard let key = conversationKey?.trimmingCharacters(in: .whitespacesAndNewlines), !key.isEmpty else {
             return nil
@@ -138,7 +156,7 @@ actor ConversationCache {
         busyKeys.insert(key)
 
         let keyHash = Self.keyHash(key)
-        sweepExpired(now: now)
+        await sweepExpired(now: now)
 
         // SPEC-037 FR-KVP8 — sample the purge stamps at lease acquisition. The
         // store high-watermark is stamped into any disk write; the local counters
@@ -152,13 +170,15 @@ actor ConversationCache {
         }
         func stampedLease(
             reusableCache: ConversationCacheLayers?, cachedPromptTokens: Int, lcp: Int, trimBy: Int,
-            promotedFromCold: Bool = false
+            promotedFromCold: Bool = false,
+            reusableCanonicalPromptTokens: [Int32]? = nil
         ) -> ConversationCacheLease {
             ConversationCacheLease(
                 key: key, keyHash: keyHash, incomingTokens: incomingTokens, modelID: modelID, kvBits: kvBits,
                 reusableCache: reusableCache, cachedPromptTokens: cachedPromptTokens, lcp: lcp, trimBy: trimBy,
                 sampledPurgeGeneration: sampledPurgeGeneration, localPurgeStamp: localPurgeStamp,
-                globalPurgeStamp: globalPurgeStamp, promotedFromCold: promotedFromCold)
+                globalPurgeStamp: globalPurgeStamp, promotedFromCold: promotedFromCold,
+                reusableCanonicalPromptTokens: reusableCanonicalPromptTokens)
         }
 
         // Acquire a candidate entry from the hot tier, or — for a gated key that
@@ -210,6 +230,7 @@ actor ConversationCache {
             if let promotionCandidate {
                 await coldTier?.finishPromotion(promotionCandidate, accepted: false, rejectionReason: reason)
             }
+            await entry.kvCache.discardRetainedPagedKV(conversationKey: key)
             return stampedLease(reusableCache: nil, cachedPromptTokens: 0, lcp: 0, trimBy: 0)
         }
 
@@ -231,13 +252,20 @@ actor ConversationCache {
             log("event=conv_cache action=miss key_hash=\(keyHash) reason=nothing_new lcp=\(lcp) prompt_tokens=\(incomingTokens.count)")
             return await predicateMiss("nothing_new")
         }
-        guard entry.kvCache.layers.allSatisfy(\.isTrimmable) else {
-            log("event=conv_cache action=miss key_hash=\(keyHash) reason=cache_not_trimmable")
-            return await predicateMiss("cache_not_trimmable")
-        }
 
+        let retainedPagedKV = entry.kvCache.retainedPagedKVSequence != nil
+        if retainedPagedKV && !allowRetainedPagedKVHandoff {
+            log("event=conv_cache action=miss key_hash=\(keyHash) reason=retained_paged_kv_requires_handoff")
+            return await predicateMiss("retained_paged_kv_requires_handoff")
+        }
         let trimBy = entry.canonicalPromptTokens.count - lcp
-        if trimBy > 0 {
+        if !retainedPagedKV {
+            guard entry.kvCache.layers.allSatisfy(\.isTrimmable) else {
+                log("event=conv_cache action=miss key_hash=\(keyHash) reason=cache_not_trimmable")
+                return await predicateMiss("cache_not_trimmable")
+            }
+        }
+        if trimBy > 0 && !retainedPagedKV {
             for layer in entry.kvCache.layers {
                 let trimmed = layer.trim(trimBy)
                 if trimmed != trimBy {
@@ -257,20 +285,30 @@ actor ConversationCache {
             cachedPromptTokens: min(lcp, incomingTokens.count),
             lcp: lcp,
             trimBy: trimBy,
-            promotedFromCold: promotionCandidate != nil)
+            promotedFromCold: promotionCandidate != nil,
+            reusableCanonicalPromptTokens: Array(entry.canonicalPromptTokens.prefix(lcp)))
     }
 
     func commit(_ lease: ConversationCacheLease, cache: ConversationCacheLayers, fullTokens: [Int32], now: Date = Date(), cold: ConversationColdContext? = nil) async {
         // SPEC-037 FR-KVP8 — a `commit()` whose stamps predate a purge that landed
         // during the request reinserts nothing (neither RAM nor disk).
-        let fencedLocal = (localPurgeGen[lease.key] ?? 0) > lease.localPurgeStamp
-        let fencedGlobal = globalPurgeGen > lease.globalPurgeStamp
-        guard !fencedLocal, !fencedGlobal else {
+        guard !isFenced(lease) else {
             log("event=conv_cache action=commit_fenced key_hash=\(lease.keyHash)")
+            await cache.discardRetainedPagedKV(conversationKey: lease.key)
             releaseTurn(lease.key)
             return
         }
 
+        if let old = entries.removeValue(forKey: lease.key),
+           old.kvCache.retainedPagedKVSequence?.handle != cache.retainedPagedKVSequence?.handle {
+            await old.kvCache.discardRetainedPagedKV(conversationKey: lease.key)
+        }
+        guard !isFenced(lease) else {
+            log("event=conv_cache action=commit_fenced key_hash=\(lease.keyHash)")
+            await cache.discardRetainedPagedKV(conversationKey: lease.key)
+            releaseTurn(lease.key)
+            return
+        }
         entries[lease.key] = Entry(
             canonicalPromptTokens: fullTokens,
             kvCache: cache,
@@ -280,7 +318,16 @@ actor ConversationCache {
             lastUsedAt: now,
             tokenCount: fullTokens.count
         )
-        enforceLimits()
+        await enforceLimits()
+        guard !isFenced(lease) else {
+            log("event=conv_cache action=commit_fenced key_hash=\(lease.keyHash)")
+            if let current = entries[lease.key], current.kvCache === cache {
+                entries.removeValue(forKey: lease.key)
+                await current.kvCache.discardRetainedPagedKV(conversationKey: lease.key)
+            }
+            releaseTurn(lease.key)
+            return
+        }
 
         // SPEC-037 FR-KVP3 — snapshot-at-commit while the lease is still held: the
         // synchronous deep copy is the only hot-path cost; the disk write is
@@ -314,7 +361,9 @@ actor ConversationCache {
         let key = conversationKey.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !key.isEmpty else { return false }
         localPurgeGen[key, default: 0] += 1
-        let hadHot = entries.removeValue(forKey: key) != nil
+        let removed = entries.removeValue(forKey: key)
+        await removed?.kvCache.discardRetainedPagedKV(conversationKey: key)
+        let hadHot = removed != nil
         let hadPending = await coldTier?.cancelPendingPersist(conversationKey: key) ?? false
         return hadHot || hadPending
     }
@@ -325,7 +374,11 @@ actor ConversationCache {
     /// (CRITICAL-2).
     func purgeAllHot() async {
         globalPurgeGen += 1
+        let removed = entries
         entries.removeAll()
+        for (key, entry) in removed {
+            await entry.kvCache.discardRetainedPagedKV(conversationKey: key)
+        }
         await coldTier?.cancelPendingPersists()
     }
 
@@ -334,8 +387,39 @@ actor ConversationCache {
         await coldTier?.drainPendingPersists(timeoutSeconds: timeoutSeconds)
     }
 
-    func abort(_ lease: ConversationCacheLease) {
+    func abort(_ lease: ConversationCacheLease) async {
+        await lease.reusableCache?.discardRetainedPagedKV(conversationKey: lease.key)
         releaseTurn(lease.key)
+    }
+
+    func abortForSerialFallback(_ lease: ConversationCacheLease, now: Date = Date()) async {
+        defer { releaseTurn(lease.key) }
+        guard let reusableCache = lease.reusableCache,
+              reusableCache.retainedPagedKVSequence == nil,
+              lease.cachedPromptTokens > 0,
+              let reusableCanonicalPromptTokens = lease.reusableCanonicalPromptTokens
+        else {
+            await lease.reusableCache?.discardRetainedPagedKV(conversationKey: lease.key)
+            return
+        }
+        guard !isFenced(lease) else {
+            log("event=conv_cache action=serial_fallback_fenced key_hash=\(lease.keyHash)")
+            return
+        }
+        entries[lease.key] = Entry(
+            canonicalPromptTokens: reusableCanonicalPromptTokens,
+            kvCache: reusableCache,
+            modelID: lease.modelID,
+            kvBits: lease.kvBits,
+            storedAt: now,
+            lastUsedAt: now,
+            tokenCount: reusableCanonicalPromptTokens.count
+        )
+        await enforceLimits()
+        if isFenced(lease), let current = entries[lease.key], current.kvCache === reusableCache {
+            entries.removeValue(forKey: lease.key)
+            log("event=conv_cache action=serial_fallback_fenced key_hash=\(lease.keyHash)")
+        }
     }
 
     func snapshotStats() -> (entries: Int, tokens: Int) {
@@ -370,25 +454,35 @@ actor ConversationCache {
         next.resume()
     }
 
-    private func sweepExpired(now: Date) {
-        for (key, entry) in entries where now.timeIntervalSince(entry.storedAt) > config.ttlSeconds {
+    private func sweepExpired(now: Date) async {
+        let expired = entries.compactMap { key, entry -> (String, Entry)? in
+            now.timeIntervalSince(entry.storedAt) > config.ttlSeconds ? (key, entry) : nil
+        }
+        for (key, entry) in expired {
+            guard let current = entries[key], current.kvCache === entry.kvCache else { continue }
             entries.removeValue(forKey: key)
+            await entry.kvCache.discardRetainedPagedKV(conversationKey: key)
             log("event=conv_cache action=evict key_hash=\(Self.keyHash(key)) reason=ttl_\(Int(config.ttlSeconds / 60))min")
         }
     }
 
-    private func enforceLimits() {
+    private func enforceLimits() async {
         while entries.count > config.maxConversations || currentStats().tokens > config.maxTokens {
             guard let victim = entries.min(by: { lhs, rhs in lhs.value.lastUsedAt < rhs.value.lastUsedAt })?.key else {
                 return
             }
-            entries.removeValue(forKey: victim)
+            let evicted = entries.removeValue(forKey: victim)
+            await evicted?.kvCache.discardRetainedPagedKV(conversationKey: victim)
             log("event=conv_cache action=evict key_hash=\(Self.keyHash(victim)) reason=lru")
         }
     }
 
     private func currentStats() -> (entries: Int, tokens: Int) {
         (entries.count, entries.values.reduce(0) { $0 + $1.tokenCount })
+    }
+
+    private func isFenced(_ lease: ConversationCacheLease) -> Bool {
+        (localPurgeGen[lease.key] ?? 0) > lease.localPurgeStamp || globalPurgeGen > lease.globalPurgeStamp
     }
 
     private static func keyHash(_ key: String) -> String {
