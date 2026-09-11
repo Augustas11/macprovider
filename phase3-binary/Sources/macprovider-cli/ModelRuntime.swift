@@ -351,6 +351,12 @@ struct PagedKVRuntimeModelCapabilities: Equatable, Sendable {
     let requiresMoEDispatch: Bool
 }
 
+private struct ContinuousBatchRuntimeReplayAuthority: ContinuousBatchSchedulerReplayAuthority {
+    func claim(_ key: ContinuousBatchSchedulerReplayKey) throws -> ContinuousBatchSchedulerReplayClaim {
+        .claimed
+    }
+}
+
 public struct RequestHandle: @unchecked Sendable {
     public let snapshot: RuntimeSnapshot
     public let registrationID: Int
@@ -743,6 +749,13 @@ actor ModelRuntime: ModelRuntimeServing {
     private let prefillStepSize: Int
     private let pagedKVConfig: PagedKVConfig
     private var pagedKVAttachDecision: PagedKVAttachDecision
+    private var pagedKVRuntimeCacheClass: String
+    private var pagedKVObservedRuntimeIdentity: PagedKVObservedRuntimeIdentity?
+    private var pagedKVHardwareSizingProof: PagedKVHardwareSizingProof?
+    private var pagedKVSchedulerBackendInstalled: Bool
+    private var currentPagedKVModelCapabilities: PagedKVRuntimeModelCapabilities
+    private var continuousBatchScheduler: ContinuousBatchScheduler?
+    private let testContinuousBatchingBackend: (any ContinuousBatchSchedulerBackend)?
     private let conversationCache: ConversationCache
     /// SPEC-037 stage 5 — set once the serve process activates the encrypted disk
     /// cold tier (FR-KVP7). Gates all per-request cold-tier context construction;
@@ -870,11 +883,12 @@ actor ModelRuntime: ModelRuntimeServing {
         chatTemplateSHA256: String?,
         kvBitsOverride: Int?,
         runtimeCacheClass: String,
-        modelCapabilities: PagedKVRuntimeModelCapabilities? = nil
+        modelCapabilities: PagedKVRuntimeModelCapabilities? = nil,
+        observedRuntimeIdentity: PagedKVObservedRuntimeIdentity? = nil,
+        hardwareSizingProof: PagedKVHardwareSizingProof? = nil,
+        schedulerBackendInstalled: Bool = false
     ) -> PagedKVAttachDecision {
-        let cacheClassForDecision = runtimeCacheClass == Self.pagedKVUnavailableCacheClass
-            ? PagedKVAttachGate.allowedCacheClasses[0]
-            : runtimeCacheClass
+        let capabilities = modelCapabilities ?? Self.pagedKVModelCapabilities(modelID: modelID, configJSONData: nil)
         return pagedKVAttachDecision(
             config: config,
             modelID: modelID,
@@ -882,9 +896,66 @@ actor ModelRuntime: ModelRuntimeServing {
             tokenizerSHA256: tokenizerSHA256,
             chatTemplateSHA256: chatTemplateSHA256,
             kvBitsOverride: kvBitsOverride,
-            runtimeCacheClass: cacheClassForDecision,
-            gates: .runtimeClosed(identityAvailable: modelHash?.isEmpty == false),
-            modelCapabilities: modelCapabilities
+            runtimeCacheClass: runtimeCacheClass,
+            gates: Self.pagedKVRuntimeBridgeGates(
+                config: config,
+                modelID: modelID,
+                modelHash: modelHash,
+                tokenizerSHA256: tokenizerSHA256,
+                chatTemplateSHA256: chatTemplateSHA256,
+                modelCapabilities: capabilities,
+                observedRuntimeIdentity: observedRuntimeIdentity,
+                hardwareSizingProof: hardwareSizingProof,
+                schedulerBackendInstalled: schedulerBackendInstalled
+            ),
+            modelCapabilities: capabilities
+        )
+    }
+
+    private nonisolated static func pagedKVRuntimeBridgeGates(
+        config: PagedKVConfig,
+        modelID: String?,
+        modelHash: String?,
+        tokenizerSHA256: String?,
+        chatTemplateSHA256: String?,
+        modelCapabilities: PagedKVRuntimeModelCapabilities,
+        observedRuntimeIdentity: PagedKVObservedRuntimeIdentity?,
+        hardwareSizingProof: PagedKVHardwareSizingProof?,
+        schedulerBackendInstalled: Bool
+    ) -> PagedKVGates {
+        guard modelHash?.isEmpty == false,
+              let observedRuntimeIdentity,
+              let hardwareSizingProof,
+              observedRuntimeIdentity.isCompleteRuntimeMeasurement
+        else {
+            return .runtimeClosed(identityAvailable: modelHash?.isEmpty == false)
+        }
+        let preflightIdentityMatches = hardwareSizingProof.covers(
+            config: config,
+            modelID: modelID ?? "",
+            modelSHA256: modelHash ?? "",
+            tokenizerSHA256: tokenizerSHA256,
+            chatTemplateSHA256: chatTemplateSHA256,
+            modelFamily: modelCapabilities.modelFamily,
+            observedHardwareClass: observedRuntimeIdentity.hardwareClass,
+            observedMetallibSHA256: observedRuntimeIdentity.metallibSHA256,
+            observedKernelIdentifier: observedRuntimeIdentity.kernelIdentifier,
+            observedParityLabel: observedRuntimeIdentity.parityLabel,
+            poolEpoch: observedRuntimeIdentity.poolEpoch
+        )
+        return PagedKVGates(
+            identityAvailable: true,
+            observedHardwareClass: observedRuntimeIdentity.hardwareClass,
+            metallibAvailable: preflightIdentityMatches,
+            kernelRegistered: preflightIdentityMatches,
+            parityEstablished: preflightIdentityMatches,
+            hardwareSizingProof: hardwareSizingProof,
+            observedMetallibSHA256: observedRuntimeIdentity.metallibSHA256,
+            observedKernelIdentifier: observedRuntimeIdentity.kernelIdentifier,
+            observedParityLabel: observedRuntimeIdentity.parityLabel,
+            moeDispatchProven: observedRuntimeIdentity.moeDispatchProven,
+            engineBridgeAvailable: schedulerBackendInstalled && preflightIdentityMatches,
+            observedRuntimeIdentity: observedRuntimeIdentity
         )
     }
 
@@ -897,20 +968,16 @@ actor ModelRuntime: ModelRuntimeServing {
         prefillStepSize: Int
     ) async -> String {
         guard let container else { return Self.pagedKVUnavailableCacheClass }
-        do {
-            return try await container.perform { context in
-                let parameters = Self.makeServeGenerateParameters(
-                    maxTokens: 1,
-                    maxContextTokens: maxContextTokens,
-                    kvBitsOverride: kvBitsOverride,
-                    prefillStepSize: prefillStepSize,
-                    temperature: 0.0,
-                    topP: 1.0
-                )
-                return Self.pagedKVRuntimeCacheClass(model: context.model, baseParameters: parameters)
-            }
-        } catch {
-            return Self.pagedKVUnavailableCacheClass
+        return await container.perform { context in
+            let parameters = Self.makeServeGenerateParameters(
+                maxTokens: 1,
+                maxContextTokens: maxContextTokens,
+                kvBitsOverride: kvBitsOverride,
+                prefillStepSize: prefillStepSize,
+                temperature: 0.0,
+                topP: 1.0
+            )
+            return Self.pagedKVRuntimeCacheClass(model: context.model, baseParameters: parameters)
         }
     }
 
@@ -993,19 +1060,6 @@ actor ModelRuntime: ModelRuntimeServing {
     }
 
     nonisolated static func enforcePagedKVPreflight(_ decision: PagedKVAttachDecision) throws {
-        if case .attached = decision {
-            // This IMPL installs the default-off contract and attach gate only. Serving
-            // still requires a runtime owner that reserves a request lease, injects
-            // PagedKVCache, and releases/retains the handle around TokenIterator.
-            throw APIError(
-                status: 503,
-                message: "Inference engine unavailable",
-                type: "server_error",
-                code: "internal_error",
-                inferenceRan: false,
-                settlementRan: false
-            )
-        }
         if case .rejected = decision {
             throw APIError(
                 status: 503,
@@ -1084,6 +1138,13 @@ actor ModelRuntime: ModelRuntimeServing {
         self.kvBitsOverride = kvBitsOverride
         self.prefillStepSize = max(1, prefillStepSize)
         self.pagedKVConfig = pagedKVConfig
+        self.pagedKVRuntimeCacheClass = Self.pagedKVUnavailableCacheClass
+        self.pagedKVObservedRuntimeIdentity = nil
+        self.pagedKVHardwareSizingProof = nil
+        self.pagedKVSchedulerBackendInstalled = false
+        self.currentPagedKVModelCapabilities = Self.pagedKVModelCapabilities(modelID: modelID, configJSONData: nil)
+        self.continuousBatchScheduler = nil
+        self.testContinuousBatchingBackend = nil
         self.pagedKVAttachDecision = Self.pagedKVRuntimeCapabilityDecision(
             config: pagedKVConfig,
             modelID: modelID,
@@ -1166,6 +1227,8 @@ actor ModelRuntime: ModelRuntimeServing {
             )
             : Self.pagedKVUnavailableCacheClass
         let modelCapabilities = Self.pagedKVModelCapabilities(modelID: modelID, directory: directory)
+        self.pagedKVRuntimeCacheClass = runtimeCacheClass
+        self.currentPagedKVModelCapabilities = modelCapabilities
         self.pagedKVAttachDecision = Self.pagedKVRuntimeCapabilityDecision(
             config: self.pagedKVConfig,
             modelID: modelID,
@@ -1174,7 +1237,24 @@ actor ModelRuntime: ModelRuntimeServing {
             chatTemplateSHA256: tokenizerHashes.template,
             kvBitsOverride: self.kvBitsOverride,
             runtimeCacheClass: runtimeCacheClass,
-            modelCapabilities: modelCapabilities
+            modelCapabilities: modelCapabilities,
+            observedRuntimeIdentity: self.pagedKVObservedRuntimeIdentity,
+            hardwareSizingProof: self.pagedKVHardwareSizingProof,
+            schedulerBackendInstalled: self.pagedKVSchedulerBackendInstalled
+        )
+        self.continuousBatchScheduler = await Self.makeContinuousBatchScheduler(
+            decision: self.pagedKVAttachDecision,
+            tuple: self.continuousBatchingRequestedTuple(),
+            container: container,
+            backendOverride: self.testContinuousBatchingBackend,
+            maxBatch: self.maxBatch,
+            queueLimit: self.continuousBatchQueueLimit,
+            maxContextTokens: self.maxContextTokens,
+            modelID: modelID,
+            modelSHA256: self.currentModelHash,
+            weightsGeneration: self.currentSpecDecodeGeneration,
+            kvBitsOverride: self.kvBitsOverride,
+            prefillStepSize: self.prefillStepSize
         )
         Self.logPagedKVAttachDecision(self.pagedKVAttachDecision)
 
@@ -1232,6 +1312,13 @@ actor ModelRuntime: ModelRuntimeServing {
         catalogModelIDAlias: String? = nil,
         targetAuthorities: [String: ModelRuntimeTargetAuthority] = [:],
         authorizedSwitchModelIDs: [String] = [],
+        pagedKVObservedRuntimeIdentity: PagedKVObservedRuntimeIdentity? = nil,
+        pagedKVHardwareSizingProof: PagedKVHardwareSizingProof? = nil,
+        pagedKVRuntimeCacheClass: String = ModelRuntime.pagedKVUnavailableCacheClass,
+        pagedKVSchedulerBackendInstalled: Bool = false,
+        pagedKVModelCapabilities: PagedKVRuntimeModelCapabilities? = nil,
+        container: ModelContainer? = nil,
+        continuousBatchingBackend: (any ContinuousBatchSchedulerBackend)? = nil,
         loader: @escaping @Sendable (String) async throws -> (ModelContainer, String, String?),
         testLoader: (@Sendable (String) async throws -> (String, String?))? = nil,
         testCompletion: (@Sendable (RuntimeSnapshot, ChatCompletionRequest) async throws -> CompletionResult)? = nil,
@@ -1243,7 +1330,7 @@ actor ModelRuntime: ModelRuntimeServing {
         self.configuredModelLoadPath = nil
         self.catalogModelIDAlias = catalogModelIDAlias
         self.currentModelID = modelID
-        self.currentContainer = nil
+        self.currentContainer = container
         self.currentDraftModelID = normalizedDraftModelID
         self.currentDraftTargetModelID = normalizedDraftModelID == nil ? nil : modelID
         self.currentDraftContainer = nil
@@ -1265,6 +1352,15 @@ actor ModelRuntime: ModelRuntimeServing {
         self.kvBitsOverride = kvBitsOverride
         self.prefillStepSize = max(1, prefillStepSize)
         self.pagedKVConfig = pagedKVConfig
+        self.pagedKVRuntimeCacheClass = pagedKVRuntimeCacheClass
+        self.pagedKVObservedRuntimeIdentity = pagedKVObservedRuntimeIdentity
+        self.pagedKVHardwareSizingProof = pagedKVHardwareSizingProof
+        self.pagedKVSchedulerBackendInstalled = pagedKVSchedulerBackendInstalled
+        self.testContinuousBatchingBackend = continuousBatchingBackend
+        let boundedMaxBatch = min(max(1, maxBatch), ProviderCapacity.maxConcurrencyOverrideLimit)
+        let resolvedPagedKVModelCapabilities = pagedKVModelCapabilities
+            ?? Self.pagedKVModelCapabilities(modelID: modelID, configJSONData: nil)
+        self.currentPagedKVModelCapabilities = resolvedPagedKVModelCapabilities
         self.pagedKVAttachDecision = Self.pagedKVRuntimeCapabilityDecision(
             config: pagedKVConfig,
             modelID: modelID,
@@ -1272,10 +1368,25 @@ actor ModelRuntime: ModelRuntimeServing {
             tokenizerSHA256: nil,
             chatTemplateSHA256: nil,
             kvBitsOverride: kvBitsOverride,
-            runtimeCacheClass: Self.pagedKVUnavailableCacheClass
+            runtimeCacheClass: pagedKVRuntimeCacheClass,
+            modelCapabilities: resolvedPagedKVModelCapabilities,
+            observedRuntimeIdentity: pagedKVObservedRuntimeIdentity,
+            hardwareSizingProof: pagedKVHardwareSizingProof,
+            schedulerBackendInstalled: pagedKVSchedulerBackendInstalled
         )
+        let requestedTuple = Self.continuousBatchingRequestedTuple(
+            decision: self.pagedKVAttachDecision,
+            modelID: modelID,
+            modelSHA256: modelHash,
+            tokenizerSHA256: nil,
+            chatTemplateSHA256: nil,
+            kvBitsOverride: kvBitsOverride,
+            runtimeCacheClass: pagedKVRuntimeCacheClass,
+            modelCapabilities: resolvedPagedKVModelCapabilities,
+            observedRuntimeIdentity: pagedKVObservedRuntimeIdentity
+        )
+        self.continuousBatchScheduler = nil
         self.conversationCache = ConversationCache()
-        let boundedMaxBatch = min(max(1, maxBatch), ProviderCapacity.maxConcurrencyOverrideLimit)
         self.maxBatch = boundedMaxBatch
         self.inferenceGate = AsyncSemaphore(value: boundedMaxBatch)
         self.blockingInferenceExecutor = BlockingInferenceExecutor(label: "live.malibu.provider.inference")
@@ -1289,6 +1400,18 @@ actor ModelRuntime: ModelRuntimeServing {
         self.testCompletion = testCompletion
         self.testSpeculativeCompletion = testSpeculativeCompletion
         self.testSpeculativeStream = testSpeculativeStream
+        self.continuousBatchScheduler = Self.makeContinuousBatchScheduler(
+            decision: self.pagedKVAttachDecision,
+            tuple: requestedTuple,
+            backend: continuousBatchingBackend,
+            maxBatch: boundedMaxBatch,
+            queueLimit: continuousBatchQueueLimit,
+            maxContextTokens: self.maxContextTokens,
+            modelID: modelID,
+            modelSHA256: modelHash,
+            weightsGeneration: self.currentSpecDecodeGeneration,
+            prefillStepSize: self.prefillStepSize
+        )
     }
 
     func setProviderStatus(_ providerStatus: ProviderStatus) {
@@ -1864,10 +1987,24 @@ actor ModelRuntime: ModelRuntimeServing {
         stickyCacheEligible: Bool,
         requestStateRepresentable: Bool = true
     ) -> ContinuousBatchingCapability {
-        // The independently observed runtime tuple and scheduler backend are
-        // installed by the deferred SPEC-039 engine bridge. Do not manufacture
-        // a self-fulfilling tuple from the advertised descriptor.
-        let requestedTuple: ContinuousBatchingRequestedTuple? = nil
+        let requestedTuple = continuousBatchingRequestedTuple()
+        let schedulerBackendAvailable = requestedTuple.map {
+            continuousBatchScheduler != nil
+                && pagedKVAttachDecision.descriptor?.admits(
+                    modelID: $0.modelID,
+                    modelSHA256: $0.modelSHA256,
+                    tokenizerSHA256: $0.tokenizerSHA256,
+                    chatTemplateSHA256: $0.chatTemplateSHA256,
+                    cacheClass: $0.cacheClass,
+                    kvDType: $0.kvDType,
+                    requiresMoE: $0.requiresMoE,
+                    hardwareClass: $0.hardwareClass,
+                    metallibSHA256: $0.metallibSHA256,
+                    kernelIdentifier: $0.kernelIdentifier,
+                    parityLabel: $0.parityLabel,
+                    poolEpoch: $0.poolEpoch
+                ) == true
+        } ?? false
         return ContinuousBatchingPolicy.capability(
             mode: continuousBatchingMode,
             maxBatch: maxBatch,
@@ -1876,9 +2013,200 @@ actor ModelRuntime: ModelRuntimeServing {
             draftConfigured: draftConfigured,
             stickyCacheEligible: stickyCacheEligible,
             requestStateRepresentable: requestStateRepresentable,
-            schedulerBackendAvailable: false,
+            schedulerBackendAvailable: schedulerBackendAvailable,
             pagedKVDecision: pagedKVAttachDecision,
             requestedTuple: requestedTuple
+        )
+    }
+
+    private func continuousBatchingRequestedTuple() -> ContinuousBatchingRequestedTuple? {
+        Self.continuousBatchingRequestedTuple(
+            decision: pagedKVAttachDecision,
+            modelID: currentModelID,
+            modelSHA256: currentModelHash,
+            tokenizerSHA256: currentTokenizerConfigSHA256,
+            chatTemplateSHA256: currentChatTemplateSHA256,
+            kvBitsOverride: kvBitsOverride,
+            runtimeCacheClass: pagedKVRuntimeCacheClass,
+            modelCapabilities: currentPagedKVModelCapabilities,
+            observedRuntimeIdentity: pagedKVObservedRuntimeIdentity
+        )
+    }
+
+    private nonisolated static func continuousBatchingRequestedTuple(
+        decision: PagedKVAttachDecision,
+        modelID: String?,
+        modelSHA256: String?,
+        tokenizerSHA256: String?,
+        chatTemplateSHA256: String?,
+        kvBitsOverride: Int?,
+        runtimeCacheClass: String,
+        modelCapabilities: PagedKVRuntimeModelCapabilities,
+        observedRuntimeIdentity: PagedKVObservedRuntimeIdentity?
+    ) -> ContinuousBatchingRequestedTuple? {
+        guard kvBitsOverride == nil,
+              case .attached = decision,
+              let observedRuntimeIdentity,
+              observedRuntimeIdentity.isCompleteRuntimeMeasurement,
+              modelSHA256?.isEmpty == false,
+              runtimeCacheClass != Self.pagedKVUnavailableCacheClass
+        else {
+            return nil
+        }
+        return ContinuousBatchingRequestedTuple(
+            modelID: modelID ?? "",
+            modelSHA256: modelSHA256 ?? "",
+            tokenizerSHA256: tokenizerSHA256,
+            chatTemplateSHA256: chatTemplateSHA256,
+            cacheClass: runtimeCacheClass,
+            kvDType: .fp16,
+            requiresMoE: modelCapabilities.requiresMoEDispatch,
+            hardwareClass: observedRuntimeIdentity.hardwareClass,
+            metallibSHA256: observedRuntimeIdentity.metallibSHA256,
+            kernelIdentifier: observedRuntimeIdentity.kernelIdentifier,
+            parityLabel: observedRuntimeIdentity.parityLabel,
+            poolEpoch: observedRuntimeIdentity.poolEpoch
+        )
+    }
+
+    private nonisolated static func makeContinuousBatchScheduler(
+        decision: PagedKVAttachDecision,
+        tuple: ContinuousBatchingRequestedTuple?,
+        backend: (any ContinuousBatchSchedulerBackend)?,
+        maxBatch: Int,
+        queueLimit: Int?,
+        maxContextTokens: Int,
+        modelID: String?,
+        modelSHA256: String?,
+        weightsGeneration: Int,
+        prefillStepSize: Int
+    ) -> ContinuousBatchScheduler? {
+        guard case .attached(let descriptor) = decision,
+              let tuple,
+              let backend,
+              let modelID,
+              let modelSHA256,
+              tuple.isAdmitted(by: descriptor)
+        else {
+            return nil
+        }
+        guard let allocator = try? PagedKVBlockAllocator(
+            blockSizeTokens: descriptor.blockSizeTokens,
+            maxPhysicalBlocks: descriptor.maxPhysicalBlocks
+        ) else {
+            return nil
+        }
+        return ContinuousBatchScheduler(
+            configuration: ContinuousBatchSchedulerConfiguration(
+                descriptor: descriptor,
+                tuple: tuple,
+                maxActiveRows: maxBatch,
+                queueLimit: queueLimit,
+                decodeHeadroomTokens: 1,
+                maxPromptChunkTokens: max(1, prefillStepSize),
+                snapshot: ContinuousBatchSchedulerSnapshot(
+                    modelID: modelID,
+                    modelSHA256: modelSHA256,
+                    weightsGeneration: weightsGeneration
+                )
+            ),
+            allocator: allocator,
+            backend: backend,
+            replayAuthority: ContinuousBatchRuntimeReplayAuthority()
+        )
+    }
+
+    private static func makeContinuousBatchScheduler(
+        decision: PagedKVAttachDecision,
+        tuple: ContinuousBatchingRequestedTuple?,
+        container: ModelContainer?,
+        backendOverride: (any ContinuousBatchSchedulerBackend)?,
+        maxBatch: Int,
+        queueLimit: Int?,
+        maxContextTokens: Int,
+        modelID: String?,
+        modelSHA256: String?,
+        weightsGeneration: Int,
+        kvBitsOverride: Int?,
+        prefillStepSize: Int
+    ) async -> ContinuousBatchScheduler? {
+        if let backendOverride {
+            return makeContinuousBatchScheduler(
+                decision: decision,
+                tuple: tuple,
+                backend: backendOverride,
+                maxBatch: maxBatch,
+                queueLimit: queueLimit,
+                maxContextTokens: maxContextTokens,
+                modelID: modelID,
+                modelSHA256: modelSHA256,
+                weightsGeneration: weightsGeneration,
+                prefillStepSize: prefillStepSize
+            )
+        }
+        guard case .attached(let descriptor) = decision,
+              let container,
+              let layerCount = await pagedKVLayerCount(
+                  container: container,
+                  maxContextTokens: maxContextTokens,
+                  kvBitsOverride: kvBitsOverride,
+                  prefillStepSize: prefillStepSize
+              )
+        else {
+            return nil
+        }
+        return makeContinuousBatchScheduler(
+            decision: decision,
+            tuple: tuple,
+            backend: PagedKVSharedForwardBackend(
+                container: container,
+                descriptor: descriptor,
+                layerCount: layerCount
+            ),
+            maxBatch: maxBatch,
+            queueLimit: queueLimit,
+            maxContextTokens: maxContextTokens,
+            modelID: modelID,
+            modelSHA256: modelSHA256,
+            weightsGeneration: weightsGeneration,
+            prefillStepSize: prefillStepSize
+        )
+    }
+
+    private static func pagedKVLayerCount(
+        container: ModelContainer,
+        maxContextTokens: Int,
+        kvBitsOverride: Int?,
+        prefillStepSize: Int
+    ) async -> Int? {
+        await container.perform { context in
+            let parameters = Self.makeServeGenerateParameters(
+                maxTokens: 1,
+                maxContextTokens: maxContextTokens,
+                kvBitsOverride: kvBitsOverride,
+                prefillStepSize: prefillStepSize,
+                temperature: 0,
+                topP: 1
+            )
+            let layerCount = context.model.newCache(parameters: Self.cacheParameters(parameters, forceSimpleKV: true)).count
+            return layerCount > 0 ? layerCount : nil
+        }
+    }
+
+    private func rebuildContinuousBatchScheduler(container: ModelContainer?) async {
+        continuousBatchScheduler = await Self.makeContinuousBatchScheduler(
+            decision: pagedKVAttachDecision,
+            tuple: continuousBatchingRequestedTuple(),
+            container: container,
+            backendOverride: testContinuousBatchingBackend,
+            maxBatch: maxBatch,
+            queueLimit: continuousBatchQueueLimit,
+            maxContextTokens: maxContextTokens,
+            modelID: currentModelID,
+            modelSHA256: currentModelHash,
+            weightsGeneration: currentSpecDecodeGeneration,
+            kvBitsOverride: kvBitsOverride,
+            prefillStepSize: prefillStepSize
         )
     }
 
@@ -1904,6 +2232,16 @@ actor ModelRuntime: ModelRuntimeServing {
         if isActiveJSONValue(request.promptSource.logitBias) { return false }
         if isRequestedLogprobs(request.promptSource.logprobs) { return false }
         if isActiveJSONValue(request.promptSource.topLogprobs) { return false }
+        // Increment 1 proves exact greedy shared-forward parity only. Keep
+        // non-greedy or penalty-shaped requests on the existing serial path
+        // until a later sampler-isolated batching increment carries them.
+        guard request.temperature == 0.0,
+              request.topP == 1.0,
+              request.presencePenalty == 0.0,
+              request.frequencyPenalty == 0.0
+        else {
+            return false
+        }
         return true
     }
 
@@ -1932,7 +2270,7 @@ actor ModelRuntime: ModelRuntimeServing {
         request: ChatCompletionRequest,
         snapshot: RuntimeSnapshot,
         emitTelemetry: Bool = true
-    ) throws {
+    ) throws -> ContinuousBatchingCapability {
         let capability = continuousBatchingCapability(
             draftConfigured: snapshot.hasTargetCompatibleDraft || currentDraftModelID != nil,
             // v0.2 admits keyless fresh requests only. A conversation key is
@@ -1948,6 +2286,7 @@ actor ModelRuntime: ModelRuntimeServing {
             ContinuousBatchingPolicy.logSerialRouteIfNeeded(capability)
         }
         try ContinuousBatchingPolicy.validateStrictStartup(capability)
+        return capability
     }
 
     func maxContextTokensForTest() -> Int {
@@ -2067,6 +2406,8 @@ actor ModelRuntime: ModelRuntimeServing {
                 prefillStepSize: prefillStepSize
             )
             : Self.pagedKVUnavailableCacheClass
+        pagedKVRuntimeCacheClass = runtimeCacheClass
+        currentPagedKVModelCapabilities = modelCapabilities
         pagedKVAttachDecision = Self.pagedKVRuntimeCapabilityDecision(
             config: pagedKVConfig,
             modelID: modelID,
@@ -2075,8 +2416,12 @@ actor ModelRuntime: ModelRuntimeServing {
             chatTemplateSHA256: chatTemplateSHA256,
             kvBitsOverride: kvBitsOverride,
             runtimeCacheClass: runtimeCacheClass,
-            modelCapabilities: modelCapabilities
+            modelCapabilities: modelCapabilities,
+            observedRuntimeIdentity: pagedKVObservedRuntimeIdentity,
+            hardwareSizingProof: pagedKVHardwareSizingProof,
+            schedulerBackendInstalled: pagedKVSchedulerBackendInstalled
         )
+        await rebuildContinuousBatchScheduler(container: container)
         Self.logPagedKVAttachDecision(pagedKVAttachDecision)
         currentDraftModelID = draftModelID
         currentDraftTargetModelID = draftModelID == nil ? nil : modelID
@@ -2246,7 +2591,7 @@ actor ModelRuntime: ModelRuntimeServing {
         // preflight is observable (active_inference true) rather than reading idle.
         ModelLivenessTracker.shared.beginInference()
         defer { ModelLivenessTracker.shared.endInference() }
-        try applyContinuousBatchingPolicy(request: request, snapshot: handle.snapshot)
+        _ = try applyContinuousBatchingPolicy(request: request, snapshot: handle.snapshot)
         try Self.enforcePagedKVPreflight(pagedKVAttachDecision)
         try handle.drainCancelled.check()
         guard let container = handle.snapshot.container else {
@@ -2272,7 +2617,7 @@ actor ModelRuntime: ModelRuntimeServing {
     func relayBlindPrepare(_ request: ChatCompletionRequest) async throws -> RelayBlindPreparedRequest {
         let handle = try acquireRequestHandle(request)
         do {
-            try applyContinuousBatchingPolicy(request: request, snapshot: handle.snapshot)
+            _ = try applyContinuousBatchingPolicy(request: request, snapshot: handle.snapshot)
             try Self.enforcePagedKVPreflight(pagedKVAttachDecision)
             try handle.drainCancelled.check()
             guard let container = handle.snapshot.container else {
@@ -2298,9 +2643,334 @@ actor ModelRuntime: ModelRuntimeServing {
     }
 
     func pagedKVPreflight(_ request: ChatCompletionRequest, with handle: RequestHandle) async throws {
-        try applyContinuousBatchingPolicy(request: request, snapshot: handle.snapshot)
+        _ = try applyContinuousBatchingPolicy(request: request, snapshot: handle.snapshot)
         try Self.enforcePagedKVPreflight(pagedKVAttachDecision)
         try handle.drainCancelled.check()
+    }
+
+    private struct ContinuousBatchPreparedRequest: Sendable {
+        let promptTokens: [Int]
+        let stopTokenSequences: [[Int]]
+    }
+
+    private final class AttachedPagedKVStreamState: @unchecked Sendable {
+        private let lock = NSLock()
+        private var tokenIDs: [Int] = []
+        private var emittedText = ""
+        private var recordedError: APIError?
+
+        func appendTokens(_ tokens: [Int]) -> [Int] {
+            lock.lock()
+            defer { lock.unlock() }
+            tokenIDs.append(contentsOf: tokens)
+            return tokenIDs
+        }
+
+        func delta(to candidateText: String) -> String {
+            lock.lock()
+            defer { lock.unlock() }
+            guard candidateText.hasPrefix(emittedText) else { return "" }
+            let delta = String(candidateText.dropFirst(emittedText.count))
+            if !delta.isEmpty {
+                emittedText = candidateText
+            }
+            return delta
+        }
+
+        func record(_ error: APIError) {
+            lock.lock()
+            if recordedError == nil {
+                recordedError = error
+            }
+            lock.unlock()
+        }
+
+        func error() -> APIError? {
+            lock.lock()
+            defer { lock.unlock() }
+            return recordedError
+        }
+    }
+
+    private func attachedContinuousBatchCompletion(
+        request: ChatCompletionRequest,
+        snapshot: RuntimeSnapshot,
+        capability: ContinuousBatchingCapability,
+        completionStartedAt: Date,
+        shouldCancel: @escaping @Sendable () -> Bool,
+        drainCancelled: DrainCancelToken
+    ) async throws -> CompletionResult? {
+        guard capability.isRequested,
+              capability.unsupportedReason == nil,
+              !capability.shouldUseSerialPath,
+              case .attached = pagedKVAttachDecision
+        else {
+            return nil
+        }
+        guard let scheduler = continuousBatchScheduler else {
+            throw Self.attachedPagedKVUnavailableError(code: "continuous_batching_scheduler_unavailable")
+        }
+        guard let container = snapshot.container else {
+            throw APIError(status: 503, message: "Model not loaded", type: "server_error", code: "model_not_loaded")
+        }
+
+        let maxContextTokens = maxContextTokens
+        let stopTokenFilter = stopTokenFilter
+        let prepared = try await container.perform { context -> ContinuousBatchPreparedRequest in
+            try drainCancelled.check()
+            try Task.checkCancellation()
+            let input = try Self.userInput(for: request)
+            let lmInput = try await context.processor.prepare(input: input)
+            let promptTokens = lmInput.text.tokens.asArray(Int32.self).map(Int.init)
+            try Self.validatePromptTokenCount(promptTokens.count, maxContextTokens: maxContextTokens)
+            let stopTokenSequences = request.stop.map {
+                context.tokenizer.encode(text: $0, addSpecialTokens: false)
+            }.filter { !$0.isEmpty }
+            return ContinuousBatchPreparedRequest(
+                promptTokens: promptTokens,
+                stopTokenSequences: stopTokenSequences
+            )
+        }
+
+        try drainCancelled.check()
+        try Task.checkCancellation()
+        if shouldCancel() { throw CancellationError() }
+        let maxOutputTokens = request.maxTokens ?? max(1, maxContextTokens - prepared.promptTokens.count)
+        let result = try await Self.withDrainAndClientCancellation(drainCancelled, shouldCancel: shouldCancel) {
+            try await scheduler.submit(ContinuousBatchSchedulerRequest(
+                id: UUID().uuidString,
+                conversationKey: "",
+                promptTokens: prepared.promptTokens,
+                maxOutputTokens: maxOutputTokens,
+                stopTokenSequences: prepared.stopTokenSequences,
+                temperature: request.temperature,
+                topP: request.topP,
+                presencePenalty: request.presencePenalty,
+                frequencyPenalty: request.frequencyPenalty,
+                cachedPromptTokens: 0
+            ))
+        }
+        try drainCancelled.check()
+        try Task.checkCancellation()
+        if shouldCancel() { throw CancellationError() }
+        guard result.terminalStatus == .stop || result.terminalStatus == .length else {
+            throw Self.attachedPagedKVUnavailableError(code: result.errorCode ?? "continuous_batching_request_failed")
+        }
+        let completionEndedAt = Date()
+        return try await container.perform { context in
+            let decoded = context.tokenizer.decode(tokenIds: result.outputTokens)
+            guard decoded.utf8.count <= ToolCallParser.SPEC018_ARGUMENTS_PER_RESPONSE_BYTE_CAP else {
+                throw APIError(
+                    status: 502,
+                    message: "Model response exceeded 2097152 bytes",
+                    type: "upstream_provider_error",
+                    code: "response_byte_cap_exceeded",
+                    inferenceRan: true,
+                    settlementRan: true
+                )
+            }
+            let filtered = Self.applyOutputFilters(
+                decoded,
+                stopTokenFilter: stopTokenFilter,
+                requestStops: request.stop
+            )
+            let parserFinishReason = result.terminalStatus == .length && !filtered.hitStop
+                ? "length"
+                : (filtered.hitStop ? "request_stop" : "stop")
+            let parsed = try Self.parseGeneratedOutput(
+                filteredText: filtered.text,
+                generatedTokenIDs: result.outputTokens,
+                decode: { context.tokenizer.decode(tokenIds: $0) },
+                request: request,
+                mode: .complete(finishReason: parserFinishReason),
+                defaultCompletionTokens: result.completionTokens,
+                stopTokenFilter: stopTokenFilter,
+                requestStops: request.stop,
+                globalHitStop: filtered.hitStop
+            )
+            let finishReason: String
+            if !parsed.toolCalls.isEmpty {
+                finishReason = "tool_calls"
+            } else if result.terminalStatus == .length, !filtered.hitStop, !parsed.hitStop {
+                finishReason = "length"
+            } else {
+                finishReason = "stop"
+            }
+            return try Self.validateStructuredCompletion(CompletionResult(
+                content: parsed.content,
+                finishReason: finishReason,
+                promptTokens: prepared.promptTokens.count,
+                cachedPromptTokens: result.cachedPromptTokens,
+                completionTokens: parsed.completionTokens,
+                generatedCompletionTokens: parsed.generatedCompletionTokens,
+                ttftMilliseconds: nil,
+                generationMilliseconds: Int64(completionEndedAt.timeIntervalSince(completionStartedAt) * 1000),
+                toolCalls: parsed.toolCalls.isEmpty ? nil : parsed.toolCalls,
+                modelHashObserved: Self.validObservedModelHash(snapshot.modelHash)
+            ), request: request)
+        }
+    }
+
+    private func attachedContinuousBatchStreamingCompletion(
+        request: ChatCompletionRequest,
+        snapshot: RuntimeSnapshot,
+        capability: ContinuousBatchingCapability,
+        completionStartedAt: Date,
+        shouldCancel: @escaping @Sendable () -> Bool,
+        drainCancelled: DrainCancelToken,
+        structuredAccumulator: StructuredStreamingContentAccumulator,
+        idleState: StructuredStreamingIdleState,
+        onChunk: @escaping @Sendable (StreamChunk) -> Void
+    ) async throws -> CompletionResult? {
+        guard capability.isRequested,
+              capability.unsupportedReason == nil,
+              !capability.shouldUseSerialPath,
+              case .attached = pagedKVAttachDecision
+        else {
+            return nil
+        }
+        guard let scheduler = continuousBatchScheduler else {
+            throw Self.attachedPagedKVUnavailableError(code: "continuous_batching_scheduler_unavailable")
+        }
+        guard let container = snapshot.container else {
+            throw APIError(status: 503, message: "Model not loaded", type: "server_error", code: "model_not_loaded")
+        }
+
+        let maxContextTokens = maxContextTokens
+        let stopTokenFilter = stopTokenFilter
+        let requestStops = request.stop
+        let prepared = try await container.perform { context -> ContinuousBatchPreparedRequest in
+            try drainCancelled.check()
+            try Task.checkCancellation()
+            let input = try Self.userInput(for: request)
+            let lmInput = try await context.processor.prepare(input: input)
+            let promptTokens = lmInput.text.tokens.asArray(Int32.self).map(Int.init)
+            try Self.validatePromptTokenCount(promptTokens.count, maxContextTokens: maxContextTokens)
+            let stopTokenSequences = requestStops.map {
+                context.tokenizer.encode(text: $0, addSpecialTokens: false)
+            }.filter { !$0.isEmpty }
+            return ContinuousBatchPreparedRequest(
+                promptTokens: promptTokens,
+                stopTokenSequences: stopTokenSequences
+            )
+        }
+
+        try drainCancelled.check()
+        try Task.checkCancellation()
+        if shouldCancel() { throw CancellationError() }
+        let streamState = AttachedPagedKVStreamState()
+        let maxOutputTokens = request.maxTokens ?? max(1, maxContextTokens - prepared.promptTokens.count)
+        let result = try await Self.withDrainAndClientCancellation(drainCancelled, shouldCancel: shouldCancel) {
+            try await scheduler.submit(ContinuousBatchSchedulerRequest(
+                id: UUID().uuidString,
+                conversationKey: "",
+                promptTokens: prepared.promptTokens,
+                maxOutputTokens: maxOutputTokens,
+                stopTokenSequences: prepared.stopTokenSequences,
+                temperature: request.temperature,
+                topP: request.topP,
+                presencePenalty: request.presencePenalty,
+                frequencyPenalty: request.frequencyPenalty,
+                cachedPromptTokens: 0
+            ), tokenSink: { event in
+                let eventTokens = event.replayTokens ?? [event.token]
+                guard !eventTokens.isEmpty else { return }
+                let allTokens = streamState.appendTokens(eventTokens)
+                let candidate = await container.perform(nonSendable: allTokens) { context, allTokens in
+                    Self.streamingSafePrefix(
+                        context.tokenizer.decode(tokenIds: allTokens),
+                        stopTokenFilter: stopTokenFilter,
+                        requestStops: requestStops
+                    )
+                }
+                let delta = streamState.delta(to: candidate.text)
+                guard !delta.isEmpty else { return }
+                if let error = structuredAccumulator.append(delta) {
+                    streamState.record(error)
+                    return
+                }
+                idleState.noteContent()
+                onChunk(.content(delta))
+            })
+        }
+        if let error = streamState.error() {
+            throw error
+        }
+        try drainCancelled.check()
+        try Task.checkCancellation()
+        if shouldCancel() { throw CancellationError() }
+        guard result.terminalStatus == .stop || result.terminalStatus == .length else {
+            throw Self.attachedPagedKVUnavailableError(code: result.errorCode ?? "continuous_batching_request_failed")
+        }
+        let completionEndedAt = Date()
+        let completion = try await container.perform { context in
+            let decoded = context.tokenizer.decode(tokenIds: result.outputTokens)
+            guard decoded.utf8.count <= ToolCallParser.SPEC018_ARGUMENTS_PER_RESPONSE_BYTE_CAP else {
+                throw APIError(
+                    status: 502,
+                    message: "Model response exceeded 2097152 bytes",
+                    type: "upstream_provider_error",
+                    code: "response_byte_cap_exceeded",
+                    inferenceRan: true,
+                    settlementRan: true
+                )
+            }
+            let filtered = Self.applyOutputFilters(
+                decoded,
+                stopTokenFilter: stopTokenFilter,
+                requestStops: requestStops
+            )
+            let parserFinishReason = result.terminalStatus == .length && !filtered.hitStop
+                ? "length"
+                : (filtered.hitStop ? "request_stop" : "stop")
+            let parsed = try Self.parseGeneratedOutput(
+                filteredText: filtered.text,
+                generatedTokenIDs: result.outputTokens,
+                decode: { context.tokenizer.decode(tokenIds: $0) },
+                request: request,
+                mode: .complete(finishReason: parserFinishReason),
+                defaultCompletionTokens: result.completionTokens,
+                stopTokenFilter: stopTokenFilter,
+                requestStops: requestStops,
+                globalHitStop: filtered.hitStop
+            )
+            let finishReason: String
+            if !parsed.toolCalls.isEmpty {
+                finishReason = "tool_calls"
+            } else if result.terminalStatus == .length, !filtered.hitStop, !parsed.hitStop {
+                finishReason = "length"
+            } else {
+                finishReason = "stop"
+            }
+            return try Self.validateStructuredCompletion(CompletionResult(
+                content: parsed.content,
+                finishReason: finishReason,
+                promptTokens: prepared.promptTokens.count,
+                cachedPromptTokens: result.cachedPromptTokens,
+                completionTokens: parsed.completionTokens,
+                generatedCompletionTokens: parsed.generatedCompletionTokens,
+                ttftMilliseconds: nil,
+                generationMilliseconds: Int64(completionEndedAt.timeIntervalSince(completionStartedAt) * 1000),
+                toolCalls: parsed.toolCalls.isEmpty ? nil : parsed.toolCalls,
+                modelHashObserved: Self.validObservedModelHash(snapshot.modelHash)
+            ), request: request)
+        }
+        return try Self.validateStructuredStreamingCompletion(
+            completion,
+            request: request,
+            buyerVisibleContent: structuredAccumulator.content
+        )
+    }
+
+    private nonisolated static func attachedPagedKVUnavailableError(code: String) -> APIError {
+        APIError(
+            status: 503,
+            message: "Inference engine unavailable",
+            type: "server_error",
+            code: code,
+            inferenceRan: false,
+            settlementRan: false
+        )
     }
 
     func complete(
@@ -2455,9 +3125,23 @@ actor ModelRuntime: ModelRuntimeServing {
         // preflight (HTTP + relay), so it OWNS the single serial-route telemetry
         // emission for this request. (Streaming preflights first and suppresses
         // here to stay exactly-once.)
-        try applyContinuousBatchingPolicy(request: request, snapshot: snapshot, emitTelemetry: true)
+        let continuousBatchingCapability = try applyContinuousBatchingPolicy(
+            request: request,
+            snapshot: snapshot,
+            emitTelemetry: true
+        )
         try Self.enforcePagedKVPreflight(pagedKVAttachDecision)
         try drainCancelled.check()
+        if let completion = try await attachedContinuousBatchCompletion(
+            request: request,
+            snapshot: snapshot,
+            capability: continuousBatchingCapability,
+            completionStartedAt: completionStartedAt,
+            shouldCancel: shouldCancel,
+            drainCancelled: drainCancelled
+        ) {
+            return (completion, snapshot)
+        }
         if speculativeCacheWrapValidated,
            let testSpeculativeCompletion,
            Self.speculativeRoute(
@@ -2888,10 +3572,27 @@ actor ModelRuntime: ModelRuntimeServing {
         defer { ModelLivenessTracker.shared.endInference() }
         let snapshot = handle.snapshot
         let drainCancelled = handle.drainCancelled
-        try applyContinuousBatchingPolicy(request: request, snapshot: snapshot, emitTelemetry: false)
+        let continuousBatchingCapability = try applyContinuousBatchingPolicy(
+            request: request,
+            snapshot: snapshot,
+            emitTelemetry: false
+        )
         try Self.enforcePagedKVPreflight(pagedKVAttachDecision)
         let structuredAccumulator = StructuredStreamingContentAccumulator(enabled: Self.requiresStructuredValidation(request.responseFormat))
         let idleState = StructuredStreamingIdleState(enabled: Self.requiresStructuredValidation(request.responseFormat))
+        if let completion = try await attachedContinuousBatchStreamingCompletion(
+            request: request,
+            snapshot: snapshot,
+            capability: continuousBatchingCapability,
+            completionStartedAt: Date(),
+            shouldCancel: shouldCancel,
+            drainCancelled: drainCancelled,
+            structuredAccumulator: structuredAccumulator,
+            idleState: idleState,
+            onChunk: onChunk
+        ) {
+            return completion
+        }
         if speculativeCacheWrapValidated,
            let testSpeculativeStream,
            Self.speculativeRoute(
@@ -3862,6 +4563,35 @@ actor ModelRuntime: ModelRuntimeServing {
                     try await Task.sleep(nanoseconds: 10_000_000)
                 }
                 throw DrainCancelledError()
+            }
+            guard let result = try await group.next() else {
+                throw DrainCancelledError()
+            }
+            group.cancelAll()
+            return result
+        }
+    }
+
+    private nonisolated static func withDrainAndClientCancellation<T: Sendable>(
+        _ token: DrainCancelToken,
+        shouldCancel: @escaping @Sendable () -> Bool,
+        operation: @escaping @Sendable () async throws -> T
+    ) async throws -> T {
+        try await withThrowingTaskGroup(of: T.self) { group in
+            group.addTask {
+                try await operation()
+            }
+            group.addTask {
+                while !token.isFired {
+                    try await Task.sleep(nanoseconds: 10_000_000)
+                }
+                throw DrainCancelledError()
+            }
+            group.addTask {
+                while !shouldCancel() {
+                    try await Task.sleep(nanoseconds: 10_000_000)
+                }
+                throw CancellationError()
             }
             guard let result = try await group.next() else {
                 throw DrainCancelledError()

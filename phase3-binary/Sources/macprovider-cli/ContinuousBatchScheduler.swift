@@ -274,6 +274,7 @@ struct ContinuousBatchDecodeInput: Sendable, Equatable {
     let topP: Double
     let presencePenalty: Double
     let frequencyPenalty: Double
+    let binding: PagedKVStorageBinding
     let blockTable: PagedKVBlockTable
     let committedKVTokenCount: Int
     let targetKVTokenCount: Int
@@ -311,8 +312,17 @@ protocol ContinuousBatchSchedulerBackend: Sendable {
     /// writes `currentToken` at `committedKVTokenCount` and returns one sampled
     /// token without advancing any other row's cursor.
     func decode(rows: [ContinuousBatchDecodeInput]) async throws -> [ContinuousBatchDecodeOutcome]
+    /// Row-local cleanup hook for backend state that is not owned by the
+    /// scheduler/allocator. Called after the scheduler has reached a terminal
+    /// result for the request. Implementations that keep no row-local state can
+    /// rely on the default no-op.
+    func finish(requestID: String)
     /// Returns only after in-flight calls have stopped accessing row bindings.
     func cancelInFlight() async
+}
+
+extension ContinuousBatchSchedulerBackend {
+    func finish(requestID: String) {}
 }
 
 enum ContinuousBatchSchedulerReplayClaim: Sendable, Equatable {
@@ -1281,6 +1291,7 @@ actor ContinuousBatchScheduler {
             do {
                 try await allocator.beginDecodeStep(row.handle)
                 beganDecode = true
+                let binding = try await allocator.binding(for: row.handle)
                 prepared.append((row, ContinuousBatchDecodeInput(
                     requestID: row.request.id,
                     currentToken: row.currentToken,
@@ -1291,7 +1302,8 @@ actor ContinuousBatchScheduler {
                     topP: row.request.topP,
                     presencePenalty: row.request.presencePenalty,
                     frequencyPenalty: row.request.frequencyPenalty,
-                    blockTable: try await allocator.table(for: row.handle),
+                    binding: binding,
+                    blockTable: binding.currentTable,
                     committedKVTokenCount: committedKVTokenCount,
                     targetKVTokenCount: targetKVTokenCount,
                     samplerStep: row.generatedTokens.count
@@ -1916,6 +1928,7 @@ actor ContinuousBatchScheduler {
         waiters: [Waiter],
         deliveryOutcomes: [UUID: Bool]? = nil
     ) {
+        backend.finish(requestID: requestID)
         terminalResultOrder.append(requestID)
         terminalResults[requestID] = result.withSettlementDisposition(
             result.settlementDisposition == .eligibleOwner ? .nonSettlingReplay : .notEligible

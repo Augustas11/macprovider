@@ -35,6 +35,53 @@ final class PagedKVEngineTests: XCTestCase {
         )
     }
 
+    private func observedIdentity(
+        proof: PagedKVHardwareSizingProof,
+        hardwareClass: String? = nil,
+        metallibSHA256: String? = nil,
+        kernelIdentifier: String? = nil,
+        parityLabel: String? = nil,
+        moeDispatchProven: Bool = true,
+        poolEpoch: Int? = nil,
+        source: PagedKVObservedRuntimeIdentitySource = .runtimeMeasurement
+    ) -> PagedKVObservedRuntimeIdentity {
+        PagedKVObservedRuntimeIdentity(
+            hardwareClass: hardwareClass ?? proof.hardwareClass,
+            metallibSHA256: metallibSHA256 ?? proof.metallibSHA256,
+            kernelIdentifier: kernelIdentifier ?? proof.kernelIdentifier,
+            parityLabel: parityLabel ?? proof.parityLabel,
+            moeDispatchProven: moeDispatchProven,
+            poolEpoch: poolEpoch ?? proof.poolEpoch,
+            source: source
+        )
+    }
+
+    private func attachableGates(
+        proof: PagedKVHardwareSizingProof,
+        observedIdentity: PagedKVObservedRuntimeIdentity? = nil,
+        moeDispatchProven: Bool = true,
+        engineBridgeAvailable: Bool = true
+    ) -> PagedKVGates {
+        let identity = observedIdentity ?? self.observedIdentity(
+            proof: proof,
+            moeDispatchProven: moeDispatchProven
+        )
+        return PagedKVGates(
+            identityAvailable: true,
+            observedHardwareClass: identity.hardwareClass,
+            metallibAvailable: true,
+            kernelRegistered: true,
+            parityEstablished: true,
+            hardwareSizingProof: proof,
+            observedMetallibSHA256: identity.metallibSHA256,
+            observedKernelIdentifier: identity.kernelIdentifier,
+            observedParityLabel: identity.parityLabel,
+            moeDispatchProven: moeDispatchProven,
+            engineBridgeAvailable: engineBridgeAvailable,
+            observedRuntimeIdentity: identity
+        )
+    }
+
     private func decide(
         config: PagedKVConfig,
         runtimeCacheClass: String,
@@ -183,18 +230,7 @@ final class PagedKVEngineTests: XCTestCase {
             kvBits: nil,
             modelFamily: "qwen",
             requiresMoEDispatch: true,
-            gates: PagedKVGates(
-                identityAvailable: true,
-                observedHardwareClass: "apple-silicon-test",
-                metallibAvailable: true,
-                kernelRegistered: true,
-                parityEstablished: true,
-                hardwareSizingProof: proof,
-                observedMetallibSHA256: proof.metallibSHA256,
-                observedKernelIdentifier: proof.kernelIdentifier,
-                observedParityLabel: proof.parityLabel,
-                moeDispatchProven: true
-            )
+            gates: attachableGates(proof: proof, engineBridgeAvailable: false)
         )
         XCTAssertEqual(decision, .fallback(.kernel))
     }
@@ -208,19 +244,7 @@ final class PagedKVEngineTests: XCTestCase {
             kvBits: nil,
             modelFamily: "qwen",
             requiresMoEDispatch: true,
-            gates: PagedKVGates(
-                identityAvailable: true,
-                observedHardwareClass: "apple-silicon-test",
-                metallibAvailable: true,
-                kernelRegistered: true,
-                parityEstablished: true,
-                hardwareSizingProof: proof,
-                observedMetallibSHA256: proof.metallibSHA256,
-                observedKernelIdentifier: proof.kernelIdentifier,
-                observedParityLabel: proof.parityLabel,
-                moeDispatchProven: true,
-                engineBridgeAvailable: true
-            )
+            gates: attachableGates(proof: proof)
         )
         let descriptor = try XCTUnwrap(decision.descriptor)
         XCTAssertTrue(descriptor.admits(
@@ -272,6 +296,75 @@ final class PagedKVEngineTests: XCTestCase {
         XCTAssertEqual(descriptor.hardwareClass, "apple-silicon-test")
         XCTAssertEqual(descriptor.metallibSHA256, String(repeating: "d", count: 64))
         XCTAssertEqual(descriptor.kernelIdentifier, "paged_attention_v1")
+        XCTAssertFalse(PagedKVDescriptor(
+            blockSizeTokens: 32,
+            maxPhysicalBlocks: 64,
+            modelID: proofModelID,
+            modelSHA256: proofModelSHA256,
+            tokenizerSHA256: proofTokenizerSHA256,
+            chatTemplateSHA256: proofChatTemplateSHA256,
+            supportedModelFamilies: ["qwen"],
+            supportsMoEDispatch: true,
+            hardwareClass: nil,
+            metallibSHA256: String(repeating: "d", count: 64),
+            kernelIdentifier: "paged_attention_v1",
+            parityLabel: "sdpa-parity-v1"
+        ).admits(
+            modelID: proofModelID,
+            modelSHA256: proofModelSHA256,
+            tokenizerSHA256: proofTokenizerSHA256,
+            chatTemplateSHA256: proofChatTemplateSHA256,
+            cacheClass: "KVCacheSimple",
+            kvDType: .fp16,
+            requiresMoE: true,
+            hardwareClass: "apple-silicon-test",
+            metallibSHA256: String(repeating: "d", count: 64),
+            kernelIdentifier: "paged_attention_v1",
+            parityLabel: "sdpa-parity-v1",
+            poolEpoch: 1
+        ))
+        XCTAssertFalse(descriptor.admits(
+            modelID: proofModelID,
+            modelSHA256: proofModelSHA256,
+            tokenizerSHA256: proofTokenizerSHA256,
+            chatTemplateSHA256: proofChatTemplateSHA256,
+            cacheClass: "KVCacheSimple",
+            kvDType: .fp16,
+            requiresMoE: false,
+            hardwareClass: "",
+            metallibSHA256: String(repeating: "d", count: 64),
+            kernelIdentifier: "paged_attention_v1",
+            parityLabel: "sdpa-parity-v1",
+            poolEpoch: 1
+        ))
+        XCTAssertFalse(descriptor.admits(
+            modelID: proofModelID,
+            modelSHA256: proofModelSHA256,
+            tokenizerSHA256: proofTokenizerSHA256,
+            chatTemplateSHA256: proofChatTemplateSHA256,
+            cacheClass: "KVCacheSimple",
+            kvDType: .fp16,
+            requiresMoE: false,
+            hardwareClass: "apple-silicon-test",
+            metallibSHA256: "",
+            kernelIdentifier: "paged_attention_v1",
+            parityLabel: "sdpa-parity-v1",
+            poolEpoch: 1
+        ))
+        XCTAssertFalse(descriptor.admits(
+            modelID: proofModelID,
+            modelSHA256: proofModelSHA256,
+            tokenizerSHA256: proofTokenizerSHA256,
+            chatTemplateSHA256: proofChatTemplateSHA256,
+            cacheClass: "KVCacheSimple",
+            kvDType: .fp16,
+            requiresMoE: false,
+            hardwareClass: "apple-silicon-test",
+            metallibSHA256: String(repeating: "d", count: 64),
+            kernelIdentifier: "paged_attention_v1",
+            parityLabel: "sdpa-parity-v1",
+            poolEpoch: 0
+        ))
         XCTAssertFalse(descriptor.admits(
             modelID: "mlx-community/Other-Qwen",
             modelSHA256: proofModelSHA256,
@@ -325,20 +418,89 @@ final class PagedKVEngineTests: XCTestCase {
             kvBits: nil,
             modelFamily: "qwen",
             requiresMoEDispatch: true,
-            gates: PagedKVGates(
-                identityAvailable: true,
-                observedHardwareClass: "apple-silicon-test",
-                metallibAvailable: true,
-                kernelRegistered: true,
-                parityEstablished: true,
-                hardwareSizingProof: proof,
-                observedMetallibSHA256: proof.metallibSHA256,
-                observedKernelIdentifier: proof.kernelIdentifier,
-                observedParityLabel: proof.parityLabel,
-                moeDispatchProven: false
-            )
+            gates: attachableGates(proof: proof, moeDispatchProven: false)
         )
         XCTAssertEqual(unprovenMoE, .fallback(.kernel))
+    }
+
+    func testAttachGateRequiresMeasuredObservedIdentity() {
+        let config = PagedKVConfig(enabled: true, blockSizeTokens: 32, maxPhysicalBlocks: 64)
+        let proof = sizingProof(modelFamily: "qwen", blockSizeTokens: 32, maxPhysicalBlocks: 64)
+
+        let legacyFieldsOnly = PagedKVGates(
+            identityAvailable: true,
+            observedHardwareClass: proof.hardwareClass,
+            metallibAvailable: true,
+            kernelRegistered: true,
+            parityEstablished: true,
+            hardwareSizingProof: proof,
+            observedMetallibSHA256: proof.metallibSHA256,
+            observedKernelIdentifier: proof.kernelIdentifier,
+            observedParityLabel: proof.parityLabel,
+            moeDispatchProven: true,
+            engineBridgeAvailable: true
+        )
+        XCTAssertEqual(
+            decide(
+                config: config,
+                runtimeCacheClass: "KVCacheSimple",
+                kvBits: nil,
+                modelFamily: "qwen",
+                requiresMoEDispatch: false,
+                gates: legacyFieldsOnly
+            ),
+            .fallback(.allocator)
+        )
+
+        let advertisedAsObserved = observedIdentity(
+            proof: proof,
+            source: .advertisedDescriptor
+        )
+        XCTAssertEqual(
+            decide(
+                config: config,
+                runtimeCacheClass: "KVCacheSimple",
+                kvBits: nil,
+                modelFamily: "qwen",
+                requiresMoEDispatch: false,
+                gates: attachableGates(proof: proof, observedIdentity: advertisedAsObserved)
+            ),
+            .fallback(.allocator)
+        )
+
+        let partialRuntimeIdentity = observedIdentity(
+            proof: proof,
+            hardwareClass: "",
+            source: .runtimeMeasurement
+        )
+        XCTAssertEqual(
+            decide(
+                config: config,
+                runtimeCacheClass: "KVCacheSimple",
+                kvBits: nil,
+                modelFamily: "qwen",
+                requiresMoEDispatch: false,
+                gates: attachableGates(proof: proof, observedIdentity: partialRuntimeIdentity)
+            ),
+            .fallback(.allocator)
+        )
+
+        let mismatchedRuntimeIdentity = observedIdentity(
+            proof: proof,
+            kernelIdentifier: "different-kernel",
+            source: .runtimeMeasurement
+        )
+        XCTAssertEqual(
+            decide(
+                config: config,
+                runtimeCacheClass: "KVCacheSimple",
+                kvBits: nil,
+                modelFamily: "qwen",
+                requiresMoEDispatch: false,
+                gates: attachableGates(proof: proof, observedIdentity: mismatchedRuntimeIdentity)
+            ),
+            .fallback(.allocator)
+        )
     }
 
     func testAttachGateRequiresKnownFamilyAndHardwareSizingProof() {

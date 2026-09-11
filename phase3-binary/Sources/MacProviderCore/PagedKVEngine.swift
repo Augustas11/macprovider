@@ -75,14 +75,29 @@ public struct PagedKVDescriptor: Equatable, Sendable, Codable {
         parityLabel: String,
         poolEpoch: Int
     ) -> Bool {
-        self.modelID == modelID
+        guard let descriptorHardwareClass = self.hardwareClass,
+              !descriptorHardwareClass.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !hardwareClass.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !self.metallibSHA256.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !metallibSHA256.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !self.kernelIdentifier.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !kernelIdentifier.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !self.parityLabel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !parityLabel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              self.poolEpoch > 0,
+              poolEpoch > 0
+        else {
+            return false
+        }
+
+        return self.modelID == modelID
             && self.modelSHA256 == modelSHA256
             && self.tokenizerSHA256 == tokenizerSHA256
             && self.chatTemplateSHA256 == chatTemplateSHA256
             && allowedCacheClasses.contains(cacheClass)
             && self.kvDType == kvDType
             && (!requiresMoE || supportsMoEDispatch)
-            && self.hardwareClass == hardwareClass
+            && descriptorHardwareClass == hardwareClass
             && self.metallibSHA256 == metallibSHA256
             && self.kernelIdentifier == kernelIdentifier
             && self.parityLabel == parityLabel
@@ -155,7 +170,21 @@ public struct PagedKVHardwareSizingProof: Equatable, Sendable, Codable {
         observedParityLabel: String,
         poolEpoch: Int
     ) -> Bool {
-        self.modelID == modelID
+        guard !hardwareClass.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !observedHardwareClass.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !metallibSHA256.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !observedMetallibSHA256.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !kernelIdentifier.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !observedKernelIdentifier.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !parityLabel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !observedParityLabel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              self.poolEpoch > 0,
+              poolEpoch > 0
+        else {
+            return false
+        }
+
+        return self.modelID == modelID
             && self.modelSHA256 == modelSHA256
             && self.tokenizerSHA256 == tokenizerSHA256
             && self.chatTemplateSHA256 == chatTemplateSHA256
@@ -164,14 +193,53 @@ public struct PagedKVHardwareSizingProof: Equatable, Sendable, Codable {
             && self.metallibSHA256 == observedMetallibSHA256
             && self.kernelIdentifier == observedKernelIdentifier
             && self.parityLabel == observedParityLabel
-            && !hardwareClass.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && !metallibSHA256.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && !kernelIdentifier.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && !parityLabel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && blockSizeTokens == config.blockSizeTokens
             && maxPhysicalBlocks >= config.maxPhysicalBlocks
             && maxResidentTokens >= config.maxResidentTokens
             && self.poolEpoch == poolEpoch
+    }
+}
+
+public enum PagedKVObservedRuntimeIdentitySource: String, Equatable, Sendable, Codable {
+    case runtimeMeasurement
+    case advertisedDescriptor
+    case selfAsserted
+}
+
+public struct PagedKVObservedRuntimeIdentity: Equatable, Sendable, Codable {
+    public let hardwareClass: String
+    public let metallibSHA256: String
+    public let kernelIdentifier: String
+    public let parityLabel: String
+    public let moeDispatchProven: Bool
+    public let poolEpoch: Int
+    public let source: PagedKVObservedRuntimeIdentitySource
+
+    public init(
+        hardwareClass: String,
+        metallibSHA256: String,
+        kernelIdentifier: String,
+        parityLabel: String,
+        moeDispatchProven: Bool,
+        poolEpoch: Int,
+        source: PagedKVObservedRuntimeIdentitySource
+    ) {
+        self.hardwareClass = hardwareClass
+        self.metallibSHA256 = metallibSHA256
+        self.kernelIdentifier = kernelIdentifier
+        self.parityLabel = parityLabel
+        self.moeDispatchProven = moeDispatchProven
+        self.poolEpoch = poolEpoch
+        self.source = source
+    }
+
+    public var isCompleteRuntimeMeasurement: Bool {
+        source == .runtimeMeasurement
+            && !hardwareClass.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !metallibSHA256.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !kernelIdentifier.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !parityLabel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && poolEpoch > 0
     }
 }
 
@@ -187,6 +255,7 @@ public struct PagedKVGates: Equatable, Sendable {
     public let observedParityLabel: String?
     public let moeDispatchProven: Bool
     public let engineBridgeAvailable: Bool
+    public let observedRuntimeIdentity: PagedKVObservedRuntimeIdentity?
 
     public init(
         identityAvailable: Bool,
@@ -199,7 +268,8 @@ public struct PagedKVGates: Equatable, Sendable {
         observedKernelIdentifier: String? = nil,
         observedParityLabel: String? = nil,
         moeDispatchProven: Bool = false,
-        engineBridgeAvailable: Bool = false
+        engineBridgeAvailable: Bool = false,
+        observedRuntimeIdentity: PagedKVObservedRuntimeIdentity? = nil
     ) {
         self.identityAvailable = identityAvailable
         self.observedHardwareClass = observedHardwareClass
@@ -212,6 +282,7 @@ public struct PagedKVGates: Equatable, Sendable {
         self.observedParityLabel = observedParityLabel
         self.moeDispatchProven = moeDispatchProven
         self.engineBridgeAvailable = engineBridgeAvailable
+        self.observedRuntimeIdentity = observedRuntimeIdentity
     }
 
     public static let closed = PagedKVGates(
@@ -225,7 +296,8 @@ public struct PagedKVGates: Equatable, Sendable {
         observedKernelIdentifier: nil,
         observedParityLabel: nil,
         moeDispatchProven: false,
-        engineBridgeAvailable: false
+        engineBridgeAvailable: false,
+        observedRuntimeIdentity: nil
     )
 
     public static func runtimeClosed(identityAvailable: Bool, observedHardwareClass: String? = nil) -> PagedKVGates {
@@ -240,7 +312,8 @@ public struct PagedKVGates: Equatable, Sendable {
             observedKernelIdentifier: nil,
             observedParityLabel: nil,
             moeDispatchProven: false,
-            engineBridgeAvailable: false
+            engineBridgeAvailable: false,
+            observedRuntimeIdentity: nil
         )
     }
 }
@@ -303,10 +376,13 @@ public enum PagedKVAttachGate {
         guard gates.kernelRegistered else { return fail(.kernel) }
         guard gates.parityEstablished else { return fail(.parity) }
         guard let sizingProof = gates.hardwareSizingProof,
-              let observedHardwareClass = gates.observedHardwareClass,
-              let observedMetallibSHA256 = gates.observedMetallibSHA256,
-              let observedKernelIdentifier = gates.observedKernelIdentifier,
-              let observedParityLabel = gates.observedParityLabel,
+              let observedIdentity = gates.observedRuntimeIdentity,
+              observedIdentity.isCompleteRuntimeMeasurement,
+              gates.observedHardwareClass == observedIdentity.hardwareClass,
+              gates.observedMetallibSHA256 == observedIdentity.metallibSHA256,
+              gates.observedKernelIdentifier == observedIdentity.kernelIdentifier,
+              gates.observedParityLabel == observedIdentity.parityLabel,
+              gates.moeDispatchProven == observedIdentity.moeDispatchProven,
               sizingProof.covers(
                   config: config,
                   modelID: modelID,
@@ -314,16 +390,16 @@ public enum PagedKVAttachGate {
                   tokenizerSHA256: tokenizerSHA256,
                   chatTemplateSHA256: chatTemplateSHA256,
                   modelFamily: modelFamily,
-                  observedHardwareClass: observedHardwareClass,
-                  observedMetallibSHA256: observedMetallibSHA256,
-                  observedKernelIdentifier: observedKernelIdentifier,
-                  observedParityLabel: observedParityLabel,
-                  poolEpoch: 1
+                  observedHardwareClass: observedIdentity.hardwareClass,
+                  observedMetallibSHA256: observedIdentity.metallibSHA256,
+                  observedKernelIdentifier: observedIdentity.kernelIdentifier,
+                  observedParityLabel: observedIdentity.parityLabel,
+                  poolEpoch: observedIdentity.poolEpoch
               )
         else {
             return fail(.allocator)
         }
-        guard !requiresMoEDispatch || gates.moeDispatchProven else { return fail(.kernel) }
+        guard !requiresMoEDispatch || observedIdentity.moeDispatchProven else { return fail(.kernel) }
         guard gates.engineBridgeAvailable else { return fail(.kernel) }
 
         return .attached(PagedKVDescriptor(
@@ -336,12 +412,12 @@ public enum PagedKVAttachGate {
             supportedModelFamilies: [modelFamily],
             allowedCacheClasses: allowedCacheClasses,
             kvDType: .fp16,
-            supportsMoEDispatch: gates.moeDispatchProven,
-            hardwareClass: sizingProof.hardwareClass,
-            metallibSHA256: sizingProof.metallibSHA256,
-            kernelIdentifier: sizingProof.kernelIdentifier,
-            parityLabel: sizingProof.parityLabel,
-            poolEpoch: sizingProof.poolEpoch
+            supportsMoEDispatch: observedIdentity.moeDispatchProven,
+            hardwareClass: observedIdentity.hardwareClass,
+            metallibSHA256: observedIdentity.metallibSHA256,
+            kernelIdentifier: observedIdentity.kernelIdentifier,
+            parityLabel: observedIdentity.parityLabel,
+            poolEpoch: observedIdentity.poolEpoch
         ))
     }
 }

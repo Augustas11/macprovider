@@ -52,11 +52,11 @@ struct PagedKVGatherKernel {
 
 /// Compile-time `KVCache` seam for the future installed paged runtime bridge.
 ///
-/// `ModelRuntime` deliberately never injects this class in the current merge:
-/// `engineBridgeAvailable` is false in runtime gates and `.attached` preflight
-/// fails closed. The class remains type-checked against `mlx-swift-lm` so the
-/// follow-up bridge can wire request-level reservation, real gather execution,
-/// and parity tests without changing public buyer behavior.
+/// Production `ModelRuntime` deliberately leaves the measured-observation path
+/// nil in this increment, so buyer traffic stays fail-closed. Attached test and
+/// future measured-runtime paths may instantiate this cache through the local
+/// bridge; the class remains type-checked against `mlx-swift-lm` so real gather
+/// execution and parity tests can evolve without changing public buyer behavior.
 final class PagedKVCache: KVCache, CustomDebugStringConvertible {
     let descriptor: PagedKVDescriptor
     let binding: PagedKVStorageBinding
@@ -90,12 +90,13 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
     init(
         descriptor: PagedKVDescriptor,
         binding: PagedKVStorageBinding,
-        gatherKernel: PagedKVGatherKernel = PagedKVGatherKernel()
+        gatherKernel: PagedKVGatherKernel = PagedKVGatherKernel(),
+        initialOffset: Int? = nil
     ) {
         self.descriptor = descriptor
         self.binding = binding
         self.gatherKernel = gatherKernel
-        self.offset = binding.currentTable.logicalTokenCount
+        self.offset = initialOffset ?? binding.currentTable.logicalTokenCount
     }
 
     var maxSize: Int? { maxResidentTokens }
@@ -264,6 +265,10 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
     }
 
     func copy() -> any KVCache {
+        concreteCopy()
+    }
+
+    func concreteCopy() -> PagedKVCache {
         let copied = PagedKVCache(descriptor: descriptor, binding: binding, gatherKernel: gatherKernel)
         copied.state = state
         return copied

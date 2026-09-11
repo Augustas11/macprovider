@@ -895,6 +895,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
                 cachedPromptTokens: 0
             ))
         }
+        try await eventually { await scheduler.metrics().waitingCount == 1 }
         await decodeGate.open()
 
         let r1 = try await first.value
@@ -1845,6 +1846,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
                 maxOutputTokens: 1
             ))
         }
+        try await eventually { await scheduler.metrics().waitingCount == 1 }
         await decodeGate.open()
 
         try await eventually {
