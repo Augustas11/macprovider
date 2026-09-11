@@ -1580,6 +1580,50 @@ class RateGlobalsTest(unittest.TestCase):
         self.assertIn("qwen3-8b.provider_share_bps", str(caught.exception))
 
 
+def promotion_manifest_bytes(harness, key: str, release_id: str, as_of: str) -> bytes:
+    """A valid SPEC-023 §16.8 promote_recommendable manifest for the hermetic
+    harness: digests over the harness's own demand-rank and rate-card-source
+    bytes, provenance from its candidate row, no coordinator source."""
+    candidate = json.loads((harness.catalog / "autotune-candidates.json").read_bytes())
+    row = candidate["rows"][key]
+    manifest = {
+        "schema_version": "macprovider.intake-decision.v1",
+        "release_id": release_id,
+        "generated_at": as_of,
+        "thresholds": {
+            "INTAKE_DEMAND_RANK_MAX": 100, "INTAKE_OFFER_FLOOR": 3, "INTAKE_BUYER_REQUEST_FLOOR": 250,
+            "INTAKE_UNKNOWN_KEY_BUCKETS": 64, "INTAKE_UNKNOWN_PRINCIPALS_PER_BUCKET": 64,
+            "INTAKE_UNKNOWN_KEY_DISTINCT_CAP": 10000, "INTAKE_UNKNOWN_KEY_PRINCIPAL_CAP_PCT": 10,
+            "INTAKE_K_ANONYMITY_MIN": 3, "INTAKE_FLEET_FIT_MIN_PCT": 25, "INTAKE_COLDSTART_SLOTS": 1,
+            "INTAKE_MIN_LISTED_DAYS": 30, "tier_target": "<= 16 GB",
+        },
+        "decisions": [{
+            "model_key": key,
+            "action": "promote_recommendable",
+            "observation_window_start": None,
+            "observation_window_end": None,
+            "as_of": as_of,
+            "signals": None,
+            "admission_clause": None,
+            "fit_clause": None,
+            "coldstart_slot_used": False,
+            "listed_since": "2026-08-01T00:00:00Z",
+            "promotion": {
+                "listed_days_elapsed": 45,
+                "rate_class": "class-8b",
+                "rate_row_resolved": True,
+                "rate_card_source_sha256": catalog_release.sha256((harness.catalog / "rate-card-source.json").read_bytes()),
+                "demand_rank_recommendable": True,
+                "demand_rank_source_sha256": catalog_release.sha256((harness.catalog / "demand-rank.json").read_bytes()),
+                "bench_provenance_source": row["bench_gate"]["provenance"]["source"],
+                "operator_admission_reference": "release-notes#" + key,
+            },
+            "operator_decision": "promoted",
+            "operator_role": "catalog-operator",
+        }],
+    }
+    return json.dumps(manifest, indent=2, sort_keys=True).encode() + b"\n"
+
 class IntakeDecisionTest(unittest.TestCase):
     """SPEC-023 §3.7.8: `intake_decision_sha256` is `null` ONLY for a release that
     adds no `listed` row and promotes no row to `recommendable`."""
@@ -2228,9 +2272,9 @@ class HermeticReleaseTest(unittest.TestCase):
             self.activate(harness)
             previous = harness.stage(harness.root / "previous")
 
-            # Release N+1 DEMOTES a row: no intake decision is required for that.
+            # Release N+1 DEMOTES a row to listed: no intake decision is required.
             harness.bump("published-2026-09-21-demote-v1", "2026-09-21T00:00:00Z")
-            self.set_status(harness, "qwen3-8b", "candidate")
+            self.set_status(harness, "qwen3-8b", "listed")
             harness.cut(previous_release_dir=previous)
             self.assertIsNone(
                 harness.ledger()["releases"]["published-2026-09-21-demote-v1"]["intake_decision_sha256"]
@@ -2245,7 +2289,15 @@ class HermeticReleaseTest(unittest.TestCase):
             self.assertIn("intake_decision_sha256 is null", str(caught.exception))
             self.assertIn("qwen3-8b", str(caught.exception))
 
+            # A stub manifest is no longer enough: the §16.8 manifest is
+            # validated and re-derived (v0.10.4).
             (harness.catalog / "intake-decision.json").write_text('{"decision":"promote qwen3-8b"}\n')
+            with self.assertRaises(catalog_release.CatalogError) as caught:
+                catalog_release.generate(harness.KEY_ID, previous_release_dir=demoted)
+            self.assertIn("intake-decision: unknown key(s)", str(caught.exception))
+            (harness.catalog / "intake-decision.json").write_bytes(
+                promotion_manifest_bytes(harness, "qwen3-8b", "published-2026-09-22-promote-v1", "2026-09-22T00:00:00Z")
+            )
             harness.cut(previous_release_dir=demoted)
             row = harness.ledger()["releases"]["published-2026-09-22-promote-v1"]
             self.assertEqual(len(row["intake_decision_sha256"]), 64)
@@ -2266,14 +2318,16 @@ class HermeticReleaseTest(unittest.TestCase):
             previous = harness.stage(harness.root / "previous")
 
             harness.bump("published-2026-09-21-demote-v1", "2026-09-21T00:00:00Z")
-            self.set_status(harness, "qwen3-8b", "candidate")
+            self.set_status(harness, "qwen3-8b", "listed")
             harness.cut(previous_release_dir=previous)
             demoted = harness.stage(harness.root / "demoted")
 
             promoted_id = "published-2026-09-22-promote-v1"
             harness.bump(promoted_id, "2026-09-22T00:00:00Z")
             self.set_status(harness, "qwen3-8b", "recommendable")
-            (harness.catalog / "intake-decision.json").write_text('{"decision":"promote qwen3-8b"}\n')
+            (harness.catalog / "intake-decision.json").write_bytes(
+                promotion_manifest_bytes(harness, "qwen3-8b", promoted_id, "2026-09-22T00:00:00Z")
+            )
             harness.cut(previous_release_dir=demoted)
             catalog_release.verify(previous_release_dir=demoted)
 
