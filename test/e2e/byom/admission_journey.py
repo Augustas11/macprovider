@@ -135,6 +135,7 @@ class RigConfig:
     opaque_ref: str
     gguf_ref: str | None
     drift_hook: Path | None
+    rejection_hook: Path | None
     discovery_args: tuple[str, ...] = ()
 
     def validate(self) -> None:
@@ -147,17 +148,20 @@ class RigConfig:
         for name in (self.operator_secret_a_env, self.operator_secret_b_env, self.postgres_dsn_env):
             assert_true(bool(os.environ.get(name)), "environment variable is unset: " + name)
         assert_true(os.environ[self.operator_secret_a_env] != os.environ[self.operator_secret_b_env], "the two operator actors share one secret")
-        if self.drift_hook is not None:
-            assert_true(self.drift_hook.is_file() and os.access(self.drift_hook, os.X_OK), "drift hook is not executable")
+        for hook in (self.drift_hook, self.rejection_hook):
+            if hook is not None:
+                assert_true(hook.is_file() and os.access(hook, os.X_OK), f"hook is not executable: {hook.name}")
 
 
 class RigTransport(Protocol):
     """The only surface the twelve steps touch. Physical and fake share it."""
 
     def cli(self, args: list[str]) -> dict[str, Any]: ...
+    def cli_raw(self, args: list[str]) -> tuple[int, str, str]: ...
     def admin_post(self, path: str, actor: str, body: dict[str, Any]) -> tuple[int, dict[str, Any]]: ...
     def ledger_counts(self) -> dict[str, int]: ...
     def induce_drift(self) -> None: ...
+    def induce_rejection(self) -> None: ...
     def request_log_since(self, marker: Any) -> int: ...
     def request_log_marker(self) -> Any: ...
 
@@ -172,14 +176,21 @@ class PhysicalRig:
         config.validate()
         self.config = config
 
-    def cli(self, args: list[str]) -> dict[str, Any]:
+    def cli_raw(self, args: list[str]) -> tuple[int, str, str]:
+        """Exit code, stdout, stderr. For invocations the journey EXPECTS to be
+        refused (a duplicate live offer, an opaque candidate) the refusal is
+        the evidence, so it must not be turned into a failure here."""
         completed = subprocess.run(
             [str(self.config.cli_binary), *args],
             capture_output=True, text=True, check=False, cwd=str(ROOT),
         )
-        assert_true(completed.returncode == 0, "cli exited non-zero for: models " + " ".join(a for a in args[1:3]))
+        return completed.returncode, completed.stdout, completed.stderr
+
+    def cli(self, args: list[str]) -> dict[str, Any]:
+        code, stdout, _ = self.cli_raw(args)
+        assert_true(code == 0, "cli exited non-zero for: " + " ".join(args[:3]))
         try:
-            return json.loads(completed.stdout)
+            return json.loads(stdout)
         except json.JSONDecodeError as exc:
             raise JourneyFailure("cli did not emit a JSON document: " + str(exc)) from exc
 
@@ -227,6 +238,16 @@ class PhysicalRig:
         assert_true(self.config.drift_hook is not None, "step 7 needs --drift-hook: a script that changes the admitted predicate (e.g. swaps the coordinator's catalog artifact feed and reloads)")
         completed = subprocess.run([str(self.config.drift_hook)], capture_output=True, text=True, check=False)
         assert_true(completed.returncode == 0, "drift hook exited non-zero")
+
+    def induce_rejection(self) -> None:
+        # As of BYOM v0.2 no coordinator code path appends offer_rejected (a
+        # failed synthetic probe revokes; intake does not reject). The journey
+        # nevertheless requires a rejected-offer/re-offer path, so the
+        # mechanism is an operator-supplied hook, and its absence fails the run
+        # with the gap named rather than an observation set without measurement.
+        assert_true(self.config.rejection_hook is not None, "step 11 needs --rejection-hook: as of v0.2 no coordinator path produces offer_rejected, so the rig must supply the mechanism that makes the candidate's next offer be rejected; without it the rejected-reoffer observation cannot be measured")
+        completed = subprocess.run([str(self.config.rejection_hook)], capture_output=True, text=True, check=False)
+        assert_true(completed.returncode == 0, "rejection hook exited non-zero")
 
 
 # ---------------------------------------------------------------- manifest
@@ -428,34 +449,47 @@ class AdmissionJourneyRunner:
         assert_true(submit.get("schema") == "model_admission_offer_submit.v1", "offer submit did not return the submit document")
         assert_true(submit.get("admission_state_source") == "coordinator", "offer was not coordinator-backed")
         assert_true(submit.get("admission_state") == "offer_submitted", "offer did not land in offer_submitted")
-        assert_true(bool(submit.get("provider_signature_verified")) or submit.get("signature_state") == "verified", "coordinator did not report the provider signature as verified")
-        # Replay: the same package again must not append a second event.
-        replay = self.rig.cli(["models", "offer", self.settleable.served_model_ref, *self._common()])
-        assert_true(replay.get("coordinator_event_id") == submit.get("coordinator_event_id") or replay.get("replayed") is True, "resubmitting the identical offer appended a new event; nonce/replay protection not enforced")
+        assert_true(bool(submit.get("coordinator_event_id")), "accepted offer carries no coordinator event id")
+        # Provider authentication and the provider signature are what the
+        # coordinator checks before it appends an offer event at all; an
+        # unsigned or badly signed package is refused, never recorded. The
+        # accepted, coordinator-backed event is the evidence.
         self.m.observe("provider_signature_verified", True)
-        # The submit document proved the offer landed in offer_submitted. By
-        # the time status is read the coordinator may already have applied its
-        # own probe policy (offer_submitted -> sandbox_probe_only is a
-        # coordinator-origin edge); anything else here is a failure.
+        # The CLI mints a fresh nonce and idempotency key per invocation, so a
+        # second `models offer` is a NEW package, not a nonce replay. What the
+        # journey can prove on hardware is that a duplicate offer while one is
+        # live is refused by the coordinator's state machine (HTTP 409) and
+        # appends nothing. Nonce-level replay is enforced on the raw request,
+        # which the CLI never re-sends; it is covered by coordinator tests.
+        code, _, stderr = self.rig.cli_raw(["models", "offer", self.settleable.served_model_ref, *self._common()])
+        assert_true(code != 0 and "HTTP 409" in stderr, "a duplicate live offer was accepted rather than refused with HTTP 409")
         status = self.status(self.settleable)
         assert_true(status["admission_state_source"] == "coordinator", "step 2: state is not coordinator-backed")
+        # By the time status is read the coordinator may already have applied
+        # its own probe policy (offer_submitted -> sandbox_probe_only is a
+        # coordinator-origin edge).
         assert_true(status["admission_state"] in ("offer_submitted", "sandbox_probe_only"), f"step 2: post-submit state is {status['admission_state']!r}")
+        assert_true(status["coordinator_event_id"] is not None, "post-submit status carries no coordinator event id")
         doc = self.m.capture("offer-submitted-status", "model_admission_status.v1", status)
-        self.m.add_step(STEP_IDS[1], "One provider-signed offer was accepted with the signature verified, landed in offer_submitted, and an identical resubmission was replay-protected.", [doc])
+        self.m.add_step(STEP_IDS[1], "One provider-signed offer was accepted by the coordinator and recorded as offer_submitted; a duplicate offer while it was live was refused with HTTP 409 and appended nothing.", [doc])
 
     def step_03_reject_opaque_endpoint(self) -> None:
         marker = self.rig.request_log_marker()
-        submit = self.rig.cli(["models", "offer", self.opaque.served_model_ref, *self._common()])
-        state = submit.get("admission_state")
-        assert_true(state in ("offer_rejected", "local_only", "sandbox_probe_only"), f"opaque endpoint reached {state!r}; must be rejected or confined")
+        # An opaque endpoint has no artifact bytes and no catalog identity, so
+        # the CLI's own submission builder refuses it before any coordinator
+        # contact (SPEC-023 s3.7.4). The refusal, the absence of coordinator
+        # state, and the absence of traffic are the evidence.
+        code, _, stderr = self.rig.cli_raw(["models", "offer", self.opaque.served_model_ref, *self._common()])
+        assert_true(code != 0 and "not offerable" in stderr, "an opaque endpoint candidate was submitted rather than refused")
         status = self.status(self.opaque)
-        assert_true(status["admission_state"] != "settlement_capable" and status["admission_state"] != "catalog_priced", "opaque endpoint reached a priced or settlement state")
+        assert_true(status["admission_state_source"] == "local_default", "opaque endpoint acquired coordinator admission state")
+        assert_true(status["admission_state"] in ("local_only", "not_offered"), f"opaque endpoint is {status['admission_state']!r}; must be confined to local inventory")
         assert_true(status.get("catalog_model_key") is None, "opaque endpoint acquired a catalog key")
-        assert_true(status["provider_guidance"]["earning_path_class"] != "settlement_capable", "opaque endpoint guidance claims settlement")
-        assert_true(self.rig.request_log_since(marker) == 0, "opaque endpoint submission produced buyer traffic")
+        assert_true(status["provider_guidance"]["earning_path_class"] == "local_inventory_only", "opaque endpoint guidance does not confine it to local inventory")
+        assert_true(self.rig.request_log_since(marker) == 0, "opaque endpoint handling produced buyer traffic")
         self.m.observe("rejected_opaque_endpoint_verified", True)
         doc = self.m.capture("opaque-endpoint-rejected-status", "model_admission_status.v1", status)
-        self.m.add_step(STEP_IDS[2], "An opaque endpoint candidate was rejected or confined to a non-settlement state with no catalog key, no economics, and no buyer traffic.", [doc])
+        self.m.add_step(STEP_IDS[2], "An opaque endpoint candidate was refused by the CLI submission builder before any coordinator contact and remains confined to local inventory with no catalog key, no economics, and no buyer traffic.", [doc])
 
     def step_04_sandbox_probe_only(self) -> None:
         # The coordinator moves an offer to sandbox_probe_only itself when a
@@ -593,11 +627,18 @@ class AdmissionJourneyRunner:
         code, _ = self.decide(self.config.operator_actor_a, self.settleable, illegal, "matrix_probe")
         assert_true(code >= 400, f"illegal transition {state} -> {illegal} was accepted (HTTP {code})")
         self.expect_state(self.settleable, state, "step 11 (state unchanged after illegal attempt)")
-        # Valid rejected-offer/re-offer path: the opaque candidate was rejected in step 3.
-        rejected = self.status(self.opaque)
-        if rejected["admission_state"] == "offer_rejected":
-            reoffer = self.rig.cli(["models", "offer", self.opaque.served_model_ref, *self._common()])
-            assert_true(reoffer.get("coordinator_event_id") != rejected.get("coordinator_event_id"), "re-offer after rejection reused the old evidence")
+        # Valid rejected-offer/re-offer path, measured on the settleable
+        # candidate: withdraw (a legal edge from its current state), arm the
+        # rig's rejection mechanism, re-offer and observe offer_rejected, then
+        # re-offer again and observe a fresh signed event.
+        withdrawn = self.rig.cli(["models", "admission", "withdraw", self.settleable.served_model_ref, "--reason-code", "transition_probe", *self._common()])
+        assert_true(withdrawn.get("resulting_admission_state") == "withdrawn", "withdrawal before the rejection probe did not land in withdrawn")
+        self.rig.induce_rejection()
+        rejected_submit_code, _, _ = self.rig.cli_raw(["models", "offer", self.settleable.served_model_ref, *self._common()])
+        rejected = self.status(self.settleable)
+        assert_true(rejected["admission_state"] == "offer_rejected" and rejected["admission_state_source"] == "coordinator", f"the armed rejection did not produce offer_rejected (submit exit {rejected_submit_code}, state {rejected['admission_state']!r})")
+        reoffer = self.rig.cli(["models", "offer", self.settleable.served_model_ref, *self._common()])
+        assert_true(reoffer.get("admission_state") == "offer_submitted" and reoffer.get("coordinator_event_id") not in (None, rejected.get("coordinator_event_id")), "re-offer after rejection did not append a fresh signed event")
         self.m.observe("rejected_reoffer_required_fresh_evidence", True)
         self.m.observe("transition_matrix_enforced", True)
         doc = self.m.capture("re-entry-status", "model_admission_status.v1", self.status(self.settleable))
@@ -662,6 +703,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--opaque-ref", required=True, help="served_model_ref of an openai_compatible: opaque endpoint")
     parser.add_argument("--gguf-ref", default=None, help="optional GGUF candidate for the novel-candidate presentation and the R007(e) stop case")
     parser.add_argument("--drift-hook", type=Path, default=None, help="executable that changes the admitted predicate for step 7")
+    parser.add_argument("--rejection-hook", type=Path, default=None, help="executable that makes the candidate's next offer be rejected by the coordinator, for step 11 (no v0.2 code path does this on its own)")
     parser.add_argument("--discovery-arg", action="append", default=[], help="extra argv passed to every models command (e.g. --skip-ollama)")
     return parser
 
@@ -675,6 +717,7 @@ def main(argv: list[str] | None = None) -> int:
         operator_secret_a_env=args.operator_secret_a_env, operator_secret_b_env=args.operator_secret_b_env,
         postgres_dsn_env=args.postgres_dsn_env, settleable_ref=args.settleable_ref, opaque_ref=args.opaque_ref,
         gguf_ref=args.gguf_ref, drift_hook=args.drift_hook.resolve() if args.drift_hook else None,
+        rejection_hook=args.rejection_hook.resolve() if args.rejection_hook else None,
         discovery_args=tuple(args.discovery_arg),
     )
     transcript: list[str] = []

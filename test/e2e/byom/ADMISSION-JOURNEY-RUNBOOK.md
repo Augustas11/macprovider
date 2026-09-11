@@ -57,7 +57,7 @@ test/e2e/byom/run-cli-onboarding-e2e.py --journey-evidence \
   --settleable-ref mlx-community/Llama-3.2-3B-Instruct-4bit \
   --opaque-ref openai_compatible:<model id> \
   --gguf-ref ollama:<model> \
-  --drift-hook ./drift-hook.sh \
+  --drift-hook ./drift-hook.sh --rejection-hook ./rejection-hook.sh \
   --discovery-arg --skip-lmstudio --discovery-arg --skip-llamacpp
 ```
 
@@ -79,6 +79,18 @@ re-checks at hello/heartbeat/refresh. Two inductions that need no re-signing:
 Changing the served catalog artifact feed also drifts
 (`catalog_artifact_feed_changed`) but requires re-signing the feed with the
 trusted key, which a rig cannot do.
+
+## The rejection hook (step 11)
+
+Step 11 requires one valid rejected-offer/re-offer path. As of BYOM v0.2 no
+coordinator code path appends `offer_rejected`: a failed synthetic probe
+revokes (`synthetic_probe_failed`), and the intake surface does not reject.
+The runner therefore withdraws the settleable candidate, calls
+`--rejection-hook` once, re-offers, and requires the coordinator to answer
+`offer_rejected`; then re-offers again and requires a fresh signed event.
+Without a hook the run fails closed at step 11 with the gap named. This is
+tracked on #1486; a coordinator-side rejection mechanism (or a journey
+contract change) is needed before the observation can be measured.
 
 ## After the run
 
