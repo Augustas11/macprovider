@@ -72,6 +72,7 @@ final class BYOMDiscoveryTests: XCTestCase {
             "--local-discovery-namespace-path", namespace.path,
             "--mlx-cache-dir", cache.path,
             "--skip-ollama",
+            "--skip-lmstudio",
         ])
         let capture = await captureBYOMOutput {
             try await command.run()
@@ -223,6 +224,7 @@ final class BYOMDiscoveryTests: XCTestCase {
             "--local-discovery-namespace-path", root.appendingPathComponent("ns").path,
             "--mlx-cache-dir", root.appendingPathComponent("missing-cache", isDirectory: true).path,
             "--skip-ollama",
+            "--skip-lmstudio",
         ])
         let capture = await captureBYOMOutput {
             try await command.run()

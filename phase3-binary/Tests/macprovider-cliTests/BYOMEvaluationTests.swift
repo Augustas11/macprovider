@@ -92,6 +92,7 @@ final class BYOMEvaluationTests: XCTestCase {
             "--local-discovery-namespace-path", namespace.path,
             "--mlx-cache-dir", cache.path,
             "--skip-ollama",
+            "--skip-lmstudio",
             "--openai-compatible-origin", runtime.origin,
         ])
         let capture = await captureBYOMEvaluationOutput {
