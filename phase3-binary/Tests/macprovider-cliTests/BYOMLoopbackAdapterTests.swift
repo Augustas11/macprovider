@@ -81,7 +81,8 @@ final class BYOMLoopbackAdapterTests: XCTestCase {
             {"data":[
               {"id":"tiny-1b-q4_k_m","type":"llm","publisher":"lmstudio-community","arch":"llama","compatibility_type":"gguf","quantization":"Q4_K_M","state":"loaded","max_context_length":4096},
               {"id":"mlx-only-model","type":"llm","compatibility_type":"mlx"},
-              {"id":"not-on-disk","type":"llm","compatibility_type":"gguf"}
+              {"id":"not-on-disk","type":"llm","compatibility_type":"gguf"},
+              {"id":"text-embedding-nomic-embed-text-v1.5","type":"embedding","compatibility_type":"gguf"}
             ]}
             """#),
         ])
@@ -99,6 +100,11 @@ final class BYOMLoopbackAdapterTests: XCTestCase {
         XCTAssertEqual(mlx.identityState, "runtime_reported")
         let absent = try XCTUnwrap(document.candidates.first { $0.servedModelRef == "lmstudio:not-on-disk" })
         XCTAssertEqual(absent.identityState, "runtime_reported")
+
+        // Seen on hardware: LM Studio's default embedding model is listed with
+        // type "embedding"; it cannot serve chat and must not be a candidate.
+        XCTAssertNil(document.candidates.first { $0.servedModelRef == "lmstudio:text-embedding-nomic-embed-text-v1.5" })
+        XCTAssertEqual(document.candidates.filter { $0.runtimeSource == "lmstudio_loopback" }.count, 3)
 
         for candidate in document.candidates where candidate.runtimeSource == "lmstudio_loopback" {
             XCTAssertNotEqual(candidate.identityState, "opaque_endpoint")

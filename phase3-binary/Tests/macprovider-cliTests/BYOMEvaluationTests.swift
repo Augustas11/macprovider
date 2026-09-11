@@ -31,6 +31,8 @@ final class BYOMEvaluationTests: XCTestCase {
         )
 
         let command = try ModelsEvaluateCommand.parse([
+            "--skip-lmstudio",
+            "--skip-llamacpp",
             "ollama:Tiny-Ollama-1B-Q4",
             "--json",
             "--local-discovery-namespace-path", namespace.path,
@@ -157,6 +159,8 @@ final class BYOMEvaluationTests: XCTestCase {
             chatBody: #"{"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"completion_tokens":2}}"#
         )
         let command = try ModelsEvaluateCommand.parse([
+            "--skip-lmstudio",
+            "--skip-llamacpp",
             "ollama:Tiny-Ollama-1B-Q4", "--json",
             "--local-discovery-namespace-path", root.appendingPathComponent("ns").path,
             "--mlx-cache-dir", root.appendingPathComponent("hf").path,
