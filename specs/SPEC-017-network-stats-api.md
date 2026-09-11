@@ -1198,9 +1198,11 @@ entries; the `methodology` object is closed — exactly `version`,
 `unmatched_models`, `fleet_ram`, and `redaction`, each a non-empty
 string, with the values shown above for this version; every count is a
 non-negative integer; `window_id` and `eligibility_policy_id` are 32 lowercase hex
-characters, each 128 bits from a cryptographically secure random source
-drawn at window open (respectively at policy change), so ids are unique
-over the retention horizon without coordination; a rollup merge that
+characters — `window_id` is 128 bits from a cryptographically secure
+random source drawn at window open, so ids are unique over the retention
+horizon without coordination, and `eligibility_policy_id` is the salted
+HMAC of §5.2b.2 (deterministic for one salt and one excluded-account set,
+never random); a rollup merge that
 finds one `window_id` carrying two different byte representations MUST
 fail closed (the tick writes nothing) rather than pick one; `model_key` matches `[a-z0-9._/-]{1,128}` and is unique
 within a window; `buckets` is ordered by `lower_bound` descending, ties
@@ -1549,7 +1551,8 @@ window and an incomplete window never appear in the response or in
 `principal_cap_pct` reproducing `principal_cap_requests`) and
 `eligibility_policy_id` it opened with, unchanged by later
 configuration; `eligibility_policy_id` rotates on a set change and is
-not a function of the account ids; a thousand alternating parameter and
+not dictionary-testable against account ids without `stats.intake.policy_salt`
+and rotates when the salt rotates; a thousand alternating parameter and
 eligibility changes leave exactly one window in memory and a
 constant-size last-close record; the rollup merge keeps a persisted
 complete window the aggregator no longer holds and fails closed on one
@@ -2067,7 +2070,7 @@ Code vocabulary (closed set for v0.1):
 
 | `code` | HTTP | When |
 |---|---|---|
-| `bad_request` | 400 | malformed `window`/`sort`/`limit` |
+| `bad_request` | 400 or 404 | 400: malformed `window`/`sort`/`limit`; 404 with the same code: an unknown endpoint path, which includes a disabled `/v1/stats/intake` (§5.2b.7) |
 | `unauthorized` | 401 or 403 | invalid or revoked `Authorization`; valid bearer not authorized for the requested provider returns 403 (§5.2a); `/v1/stats/intake` answers 401 for every refusal and never 403 (§5.2b) |
 | `method_not_allowed` | 405 | request verb not in `Allow: GET, HEAD, OPTIONS` (§4.3); response MUST also carry `Allow: GET, HEAD, OPTIONS` |
 | `rate_limited` | 429 | per-IP or per-key bucket exhausted |
