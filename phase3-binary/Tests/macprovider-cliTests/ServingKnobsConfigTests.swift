@@ -384,7 +384,7 @@ final class ServingKnobsConfigTests: XCTestCase {
         XCTAssertFalse(dense.requiresMoEDispatch)
     }
 
-    func testPagedKVAttachedDecisionFailsClosedUntilRuntimeBridgeOwnsRequestReservation() throws {
+    func testPagedKVAttachedDecisionPassesPreflightWhenRuntimeBridgeOwnsRequestReservation() throws {
         let proof = PagedKVHardwareSizingProof(
             modelID: "mlx-community/Qwen-Test",
             modelSHA256: String(repeating: "a", count: 64),
@@ -398,6 +398,15 @@ final class ServingKnobsConfigTests: XCTestCase {
             maxPhysicalBlocks: 64,
             maxResidentTokens: 2048,
             parityLabel: "sdpa-parity-v1"
+        )
+        let observedIdentity = PagedKVObservedRuntimeIdentity(
+            hardwareClass: proof.hardwareClass,
+            metallibSHA256: proof.metallibSHA256,
+            kernelIdentifier: proof.kernelIdentifier,
+            parityLabel: proof.parityLabel,
+            moeDispatchProven: false,
+            poolEpoch: proof.poolEpoch,
+            source: .runtimeMeasurement
         )
         let decision = PagedKVAttachGate.decide(
             config: PagedKVConfig(enabled: true, blockSizeTokens: 32, maxPhysicalBlocks: 64),
@@ -419,14 +428,12 @@ final class ServingKnobsConfigTests: XCTestCase {
                 observedMetallibSHA256: proof.metallibSHA256,
                 observedKernelIdentifier: proof.kernelIdentifier,
                 observedParityLabel: proof.parityLabel,
-                engineBridgeAvailable: true
+                engineBridgeAvailable: true,
+                observedRuntimeIdentity: observedIdentity
             )
         )
         XCTAssertNotNil(decision.descriptor)
-        XCTAssertThrowsError(try ModelRuntime.enforcePagedKVPreflight(decision)) { error in
-            XCTAssertEqual((error as? APIError)?.status, 503)
-            XCTAssertEqual((error as? APIError)?.code, "internal_error")
-        }
+        XCTAssertNoThrow(try ModelRuntime.enforcePagedKVPreflight(decision))
     }
 
     func testMaxContextPreflightRejectsZero() throws {
@@ -753,11 +760,33 @@ final class ServingKnobsConfigTests: XCTestCase {
     }
 
     func testRequestStateRepresentableGateOnParsedRequests() throws {
-        // Plain request → representable.
-        XCTAssertTrue(ModelRuntime.requestStateRepresentable(try parsedRequest([:])))
+        // Defaults are not enough for Increment 1 attach: the shared-forward proof
+        // only covers explicitly greedy rows.
+        XCTAssertFalse(ModelRuntime.requestStateRepresentable(try parsedRequest([:])))
+
+        let greedy: [String: Any] = ["temperature": 0, "top_p": 1.0]
+
+        // Explicit greedy request → representable.
+        XCTAssertTrue(ModelRuntime.requestStateRepresentable(try parsedRequest(greedy)))
+
+        // Non-greedy sampling / penalties → not representable by this increment.
+        XCTAssertFalse(ModelRuntime.requestStateRepresentable(try parsedRequest([
+            "temperature": 0.2, "top_p": 1.0
+        ])))
+        XCTAssertFalse(ModelRuntime.requestStateRepresentable(try parsedRequest([
+            "temperature": 0, "top_p": 0.9
+        ])))
+        XCTAssertFalse(ModelRuntime.requestStateRepresentable(try parsedRequest([
+            "temperature": 0, "top_p": 1.0, "presence_penalty": 0.1
+        ])))
+        XCTAssertFalse(ModelRuntime.requestStateRepresentable(try parsedRequest([
+            "temperature": 0, "top_p": 1.0, "frequency_penalty": 0.1
+        ])))
 
         // Structured output (json_schema) → not representable.
         XCTAssertFalse(ModelRuntime.requestStateRepresentable(try parsedRequest([
+            "temperature": 0,
+            "top_p": 1.0,
             "response_format": ["type": "json_schema",
                                 "json_schema": ["name": "s",
                                                 "schema": ["type": "object",
@@ -766,27 +795,35 @@ final class ServingKnobsConfigTests: XCTestCase {
 
         // Tools present WITHOUT tool_choice → not representable (the HIGH the gate missed).
         XCTAssertFalse(ModelRuntime.requestStateRepresentable(try parsedRequest([
+            "temperature": 0,
+            "top_p": 1.0,
             "tools": [["type": "function",
                        "function": ["name": "f", "parameters": ["type": "object"]]]]
         ])))
 
         // Explicit JSON null tool_choice, no tools → representable (must NOT false-positive).
-        XCTAssertTrue(ModelRuntime.requestStateRepresentable(try parsedRequest([
-            "tool_choice": NSNull()
-        ])))
+        var explicitNullToolChoice = greedy
+        explicitNullToolChoice["tool_choice"] = NSNull()
+        XCTAssertTrue(ModelRuntime.requestStateRepresentable(try parsedRequest(explicitNullToolChoice)))
 
         // logit_bias → not representable; logprobs:false → representable.
         XCTAssertFalse(ModelRuntime.requestStateRepresentable(try parsedRequest([
+            "temperature": 0,
+            "top_p": 1.0,
             "logit_bias": ["123": -100]
         ])))
-        XCTAssertTrue(ModelRuntime.requestStateRepresentable(try parsedRequest([
-            "logprobs": false
-        ])))
+        var logprobsFalse = greedy
+        logprobsFalse["logprobs"] = false
+        XCTAssertTrue(ModelRuntime.requestStateRepresentable(try parsedRequest(logprobsFalse)))
         XCTAssertFalse(ModelRuntime.requestStateRepresentable(try parsedRequest([
+            "temperature": 0,
+            "top_p": 1.0,
             "logprobs": true
         ])))
         // top_logprobs (response metadata) is rejected too so the gate is provably complete.
         XCTAssertFalse(ModelRuntime.requestStateRepresentable(try parsedRequest([
+            "temperature": 0,
+            "top_p": 1.0,
             "logprobs": true, "top_logprobs": 5
         ])))
     }
@@ -942,7 +979,7 @@ final class ServingKnobsConfigTests: XCTestCase {
             loader: { _ in throw TestRuntimeError.notExpected }
         )
         let decision = await runtime.pagedKVDecisionForTest()
-        XCTAssertEqual(decision, .fallback(.metallib))
+        XCTAssertEqual(decision, .fallback(.cacheClass))
     }
 
     func testRuntimeStrictPagedKVRejectsBeforeCompletionRuns() async throws {
@@ -1033,6 +1070,88 @@ final class ServingKnobsConfigTests: XCTestCase {
          XCTAssertEqual(observed.unsupportedReason, .pagedKVDisabled)
      }
 
+    func testRuntimeContinuousBatchingCapabilityAttachesOnlyWithMeasuredIdentityAndBackend() async throws {
+        let modelID = "mlx-community/Qwen-Test"
+        let modelSHA = String(repeating: "a", count: 64)
+        let proof = PagedKVHardwareSizingProof(
+            modelID: modelID,
+            modelSHA256: modelSHA,
+            tokenizerSHA256: nil,
+            chatTemplateSHA256: nil,
+            modelFamily: "qwen",
+            hardwareClass: "apple-silicon-test",
+            metallibSHA256: String(repeating: "b", count: 64),
+            kernelIdentifier: "macprovider_paged_kv_gather_v1",
+            blockSizeTokens: 32,
+            maxPhysicalBlocks: 64,
+            maxResidentTokens: 2048,
+            parityLabel: "sdpa-parity-v1"
+        )
+        let observedIdentity = PagedKVObservedRuntimeIdentity(
+            hardwareClass: proof.hardwareClass,
+            metallibSHA256: proof.metallibSHA256,
+            kernelIdentifier: proof.kernelIdentifier,
+            parityLabel: proof.parityLabel,
+            moeDispatchProven: false,
+            poolEpoch: proof.poolEpoch,
+            source: .runtimeMeasurement
+        )
+
+        let attached = ModelRuntime(
+            modelID: modelID,
+            modelHash: modelSHA,
+            pagedKVConfig: PagedKVConfig(enabled: true, blockSizeTokens: 32, maxPhysicalBlocks: 64),
+            maxBatch: 2,
+            continuousBatchingMode: .on,
+            warmSwapEnabled: false,
+            pagedKVObservedRuntimeIdentity: observedIdentity,
+            pagedKVHardwareSizingProof: proof,
+            pagedKVRuntimeCacheClass: "KVCacheSimple",
+            pagedKVSchedulerBackendInstalled: true,
+            continuousBatchingBackend: ServingKnobsContinuousBatchingBackend(),
+            loader: { _ in throw TestRuntimeError.notExpected }
+        )
+        let attachedDecision = await attached.pagedKVDecisionForTest()
+        let attachedCapability = await attached.continuousBatchingCapabilityForTest()
+        XCTAssertNotNil(attachedDecision.descriptor)
+        XCTAssertNil(attachedCapability.unsupportedReason)
+
+        let nilObservation = ModelRuntime(
+            modelID: modelID,
+            modelHash: modelSHA,
+            pagedKVConfig: PagedKVConfig(enabled: true, blockSizeTokens: 32, maxPhysicalBlocks: 64),
+            maxBatch: 2,
+            continuousBatchingMode: .on,
+            warmSwapEnabled: false,
+            pagedKVHardwareSizingProof: proof,
+            pagedKVRuntimeCacheClass: "KVCacheSimple",
+            pagedKVSchedulerBackendInstalled: true,
+            loader: { _ in throw TestRuntimeError.notExpected }
+        )
+        let nilObservationDecision = await nilObservation.pagedKVDecisionForTest()
+        let nilObservationCapability = await nilObservation.continuousBatchingCapabilityForTest()
+        XCTAssertNil(nilObservationDecision.descriptor)
+        XCTAssertNotNil(nilObservationCapability.unsupportedReason)
+
+        let noBackend = ModelRuntime(
+            modelID: modelID,
+            modelHash: modelSHA,
+            pagedKVConfig: PagedKVConfig(enabled: true, blockSizeTokens: 32, maxPhysicalBlocks: 64),
+            maxBatch: 2,
+            continuousBatchingMode: .on,
+            warmSwapEnabled: false,
+            pagedKVObservedRuntimeIdentity: observedIdentity,
+            pagedKVHardwareSizingProof: proof,
+            pagedKVRuntimeCacheClass: "KVCacheSimple",
+            pagedKVSchedulerBackendInstalled: false,
+            loader: { _ in throw TestRuntimeError.notExpected }
+        )
+        let noBackendDecision = await noBackend.pagedKVDecisionForTest()
+        let noBackendCapability = await noBackend.continuousBatchingCapabilityForTest()
+        XCTAssertNil(noBackendDecision.descriptor)
+        XCTAssertNotNil(noBackendCapability.unsupportedReason)
+    }
+
     func testRuntimeDefaultMaxBatchIsOne() async throws {
         let runtime = ModelRuntime(
             modelID: "test-model",
@@ -1085,4 +1204,18 @@ final class ServingKnobsConfigTests: XCTestCase {
 
 private enum TestRuntimeError: Error {
     case notExpected
+}
+
+private actor ServingKnobsContinuousBatchingBackend: ContinuousBatchSchedulerBackend {
+    func prefill(rows: [ContinuousBatchPrefillInput]) async throws -> [ContinuousBatchPrefillOutput] {
+        rows.map { ContinuousBatchPrefillOutput(requestID: $0.requestID) }
+    }
+
+    func decode(rows: [ContinuousBatchDecodeInput]) async throws -> [ContinuousBatchDecodeOutcome] {
+        rows.map {
+            .output(ContinuousBatchDecodeOutput(requestID: $0.requestID, token: $0.currentToken))
+        }
+    }
+
+    func cancelInFlight() async {}
 }

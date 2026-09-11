@@ -806,6 +806,15 @@ final class KVConversationColdTierTests: XCTestCase {
             maxResidentTokens: 8,
             parityLabel: "sdpa-parity-v1"
         )
+        let observedIdentity = PagedKVObservedRuntimeIdentity(
+            hardwareClass: proof.hardwareClass,
+            metallibSHA256: proof.metallibSHA256,
+            kernelIdentifier: proof.kernelIdentifier,
+            parityLabel: proof.parityLabel,
+            moeDispatchProven: false,
+            poolEpoch: proof.poolEpoch,
+            source: .runtimeMeasurement
+        )
         let decision = PagedKVAttachGate.decide(
             config: PagedKVConfig(enabled: true, blockSizeTokens: 2, maxPhysicalBlocks: 4),
             runtimeCacheClass: "KVCacheSimple",
@@ -826,7 +835,8 @@ final class KVConversationColdTierTests: XCTestCase {
                 observedMetallibSHA256: proof.metallibSHA256,
                 observedKernelIdentifier: proof.kernelIdentifier,
                 observedParityLabel: proof.parityLabel,
-                engineBridgeAvailable: true
+                engineBridgeAvailable: true,
+                observedRuntimeIdentity: observedIdentity
             )
         )
         let descriptor = try XCTUnwrap(decision.descriptor)
