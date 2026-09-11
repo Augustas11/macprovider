@@ -152,41 +152,88 @@ final class BYOMLoopbackAdapterTests: XCTestCase {
         }
     }
 
-    func testLlamaCppPathIDBecomesAStemAndResolvesOnlyUnderTheOperatorRoot() async throws {
-        let root = try temporaryDirectory("byom-llamacpp-stem")
+    /// PR #1480 audit (HIGH): the served path is PROOF. A same-stem file under
+    /// the operator root must NOT be hashed on behalf of a different file the
+    /// runtime is actually serving. And a filesystem path must never reach
+    /// the wire in any of these outcomes.
+    func testLlamaCppSameStemFileUnderRootIsNotHashedForAFileServedElsewhere() async throws {
+        let root = try temporaryDirectory("byom-llamacpp-samestem")
         defer { try? FileManager.default.removeItem(at: root) }
-        let secretDir = "/Users/someone/private-models"
-        let routes = [
-            "/props": json(#"{"default_generation_settings":{"n_ctx":8192},"total_slots":1,"model_path":"\#(secretDir)/tiny-q4.gguf"}"#),
-            "/v1/models": json(#"{"data":[{"id":"\#(secretDir)/tiny-q4.gguf"}]}"#),
-        ]
-
-        // No operator root: the runtime's path is not adopted; runtime_reported.
-        var document = await BYOMDiscoveryRunner(
-            environment: environment(root: root, llamacpp: "http://127.0.0.1:8080", llamacppModelRoot: nil),
-            httpClient: RoutingBYOMHTTPClient(routes: routes)
-        ).discover()
-        var candidate = try XCTUnwrap(document.candidates.first { $0.runtimeSource == "llamacpp_loopback" })
-        XCTAssertEqual(candidate.servedModelRef, "llamacpp:tiny-q4")
-        XCTAssertEqual(candidate.identityState, "runtime_reported")
-        XCTAssertEqual(candidate.contextWindowTokens, 8192)
-        var encoded = try ModelSwitchingWireCodec.encode(document)
-        XCTAssertFalse(encoded.contains(secretDir), "runtime path leaked to the wire")
-        XCTAssertFalse(encoded.contains("/Users/"), "a filesystem path leaked to the wire")
-
-        // Operator root containing the file: the stem resolves there, the CLI
-        // hashes it, and discovery reports the digest as available.
         let operatorRoot = root.appendingPathComponent("allowed", isDirectory: true)
-        try write(ggufBytes, to: operatorRoot.appendingPathComponent("tiny-q4.gguf"))
+        let decoy = operatorRoot.appendingPathComponent("tiny-q4.gguf")
+        try write(ggufBytes, to: decoy)
+        let servedElsewhere = "/Users/someone/private-models/tiny-q4.gguf"
+        let routes = [
+            "/props": json(#"{"default_generation_settings":{"n_ctx":8192},"total_slots":1,"model_path":"\#(servedElsewhere)"}"#),
+            "/v1/models": json(#"{"data":[{"id":"\#(servedElsewhere)"}]}"#),
+        ]
         let env = environment(root: root, llamacpp: "http://127.0.0.1:8080", llamacppModelRoot: operatorRoot)
-        let evidence = try env.artifactDigests.computeEvidence(runtimeSource: "llamacpp_loopback", servedModelRef: "llamacpp:tiny-q4")
+
+        // Even a digest already cached for the decoy must not be read back.
+        _ = try? env.artifactDigests.computeEvidence(runtimeSource: "llamacpp_loopback", servedModelRef: "llamacpp:tiny-q4", runtimeArtifactPath: decoy.path)
+        let document = await BYOMDiscoveryRunner(environment: env, httpClient: RoutingBYOMHTTPClient(routes: routes)).discover()
+        let candidate = try XCTUnwrap(document.candidates.first { $0.runtimeSource == "llamacpp_loopback" })
+        XCTAssertEqual(candidate.servedModelRef, "llamacpp:tiny-q4")
+        XCTAssertEqual(candidate.identityState, "runtime_reported", "a same-stem decoy under the root was hashed for a file served elsewhere")
+        XCTAssertEqual(candidate.contextWindowTokens, 8192)
+        let encoded = try ModelSwitchingWireCodec.encode(document)
+        XCTAssertFalse(encoded.contains(servedElsewhere)); XCTAssertFalse(encoded.contains("/Users/"))
+        XCTAssertFalse(encoded.contains(operatorRoot.path))
+
+        // Evaluate/offer-time binding refuses the same way.
+        XCTAssertThrowsError(try env.artifactDigests.computeEvidence(runtimeSource: "llamacpp_loopback", servedModelRef: "llamacpp:tiny-q4", runtimeArtifactPath: servedElsewhere)) {
+            XCTAssertEqual($0 as? BYOMArtifactDigestError, .unresolvedBlob)
+        }
+    }
+
+    func testLlamaCppIsHashedOnlyWhenTheServedPathIsTheRootResolvedFile() async throws {
+        let root = try temporaryDirectory("byom-llamacpp-bound")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let operatorRoot = root.appendingPathComponent("allowed", isDirectory: true)
+        let served = operatorRoot.appendingPathComponent("tiny-q4.gguf")
+        try write(ggufBytes, to: served)
+        let servedPath = served.resolvingSymlinksInPath().standardizedFileURL.path
+        let routes = [
+            "/props": json(#"{"default_generation_settings":{"n_ctx":4096},"total_slots":1,"model_path":"\#(servedPath)"}"#),
+            "/v1/models": json(#"{"data":[{"id":"\#(servedPath)"}]}"#),
+        ]
+        let env = environment(root: root, llamacpp: "http://127.0.0.1:8080", llamacppModelRoot: operatorRoot)
+        let evidence = try env.artifactDigests.computeEvidence(runtimeSource: "llamacpp_loopback", servedModelRef: "llamacpp:tiny-q4", runtimeArtifactPath: servedPath)
         XCTAssertEqual(evidence.locatorDigest, "tiny-q4.gguf")
-        document = await BYOMDiscoveryRunner(environment: env, httpClient: RoutingBYOMHTTPClient(routes: routes)).discover()
-        candidate = try XCTUnwrap(document.candidates.first { $0.runtimeSource == "llamacpp_loopback" })
+
+        let document = await BYOMDiscoveryRunner(environment: env, httpClient: RoutingBYOMHTTPClient(routes: routes)).discover()
+        let candidate = try XCTUnwrap(document.candidates.first { $0.runtimeSource == "llamacpp_loopback" })
         XCTAssertEqual(candidate.identityState, "artifact_hash_available")
         XCTAssertNotEqual(candidate.identityState, "opaque_endpoint")
-        encoded = try ModelSwitchingWireCodec.encode(document)
-        XCTAssertFalse(encoded.contains(secretDir))
+        let encoded = try ModelSwitchingWireCodec.encode(document)
+        XCTAssertFalse(encoded.contains(servedPath), "served path leaked to the wire")
+
+        // The binding is re-checked against what the runtime serves NOW: a
+        // different served path fails closed even though the file is unchanged.
+        XCTAssertThrowsError(try env.artifactDigests.validateCurrent(evidence, runtimeSource: "llamacpp_loopback", servedModelRef: "llamacpp:tiny-q4", runtimeArtifactPath: "/somewhere/else/tiny-q4.gguf")) {
+            XCTAssertEqual($0 as? BYOMArtifactDigestError, .fileIdentityChanged)
+        }
+        XCTAssertNoThrow(try env.artifactDigests.validateCurrent(evidence, runtimeSource: "llamacpp_loopback", servedModelRef: "llamacpp:tiny-q4", runtimeArtifactPath: servedPath))
+    }
+
+    func testLlamaCppWithoutAServedPathOrWithAStemMismatchHasNoArtifactLeg() async throws {
+        let root = try temporaryDirectory("byom-llamacpp-noproof")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let operatorRoot = root.appendingPathComponent("allowed", isDirectory: true)
+        let file = operatorRoot.appendingPathComponent("tiny-q4.gguf")
+        try write(ggufBytes, to: file)
+        let env = environment(root: root, llamacpp: "http://127.0.0.1:8080", llamacppModelRoot: operatorRoot)
+        let store = BYOMLlamaCppModelStore(root: operatorRoot)
+        // No served path, a relative one, or one whose stem disagrees with the served id: no proof, no identity.
+        XCTAssertNil(store.resolveArtifact(servedModelRef: "llamacpp:tiny-q4", runtimeArtifactPath: nil))
+        XCTAssertNil(store.resolveArtifact(servedModelRef: "llamacpp:tiny-q4", runtimeArtifactPath: "models/tiny-q4.gguf"))
+        XCTAssertNil(store.resolveArtifact(servedModelRef: "llamacpp:tiny-q4", runtimeArtifactPath: operatorRoot.appendingPathComponent("other.gguf").path))
+        // A /props without model_path (older llama-server) still fingerprints, but yields runtime_reported.
+        let document = await BYOMDiscoveryRunner(environment: env, httpClient: RoutingBYOMHTTPClient(routes: [
+            "/props": json(#"{"default_generation_settings":{"n_ctx":2048}}"#),
+            "/v1/models": json(#"{"data":[{"id":"tiny-q4"}]}"#),
+        ])).discover()
+        XCTAssertEqual(document.candidates.first { $0.runtimeSource == "llamacpp_loopback" }?.identityState, "runtime_reported")
     }
 
     func testLlamaCppStoreRejectsSymlinkEscapeAndNilRoot() throws {
@@ -198,8 +245,9 @@ final class BYOMLoopbackAdapterTests: XCTestCase {
         try FileManager.default.createDirectory(at: allowed, withIntermediateDirectories: true)
         try FileManager.default.createSymbolicLink(at: allowed.appendingPathComponent("real.gguf"), withDestinationURL: outside)
 
-        XCTAssertNil(BYOMLlamaCppModelStore(root: allowed).resolveArtifact(servedModelRef: "llamacpp:real"), "symlink escaped the operator root")
-        XCTAssertNil(BYOMLlamaCppModelStore(root: nil).resolveArtifact(servedModelRef: "llamacpp:real"), "nil root resolved a file")
+        let servedLink = allowed.appendingPathComponent("real.gguf").path
+        XCTAssertNil(BYOMLlamaCppModelStore(root: allowed).resolveArtifact(servedModelRef: "llamacpp:real", runtimeArtifactPath: servedLink), "symlink escaped the operator root")
+        XCTAssertNil(BYOMLlamaCppModelStore(root: nil).resolveArtifact(servedModelRef: "llamacpp:real", runtimeArtifactPath: outside.path), "nil root resolved a file")
         XCTAssertEqual(BYOMLlamaCppModelStore.stem(fromRuntimeModelID: "/x/y/Model-Q4_K_M.GGUF"), "Model-Q4_K_M")
         XCTAssertEqual(BYOMLlamaCppModelStore.stem(fromRuntimeModelID: "my-alias"), "my-alias")
     }
@@ -213,18 +261,21 @@ final class BYOMLoopbackAdapterTests: XCTestCase {
         try write(ggufBytes, to: pinned)
         try write(ggufBytes + Data([0x01]), to: decoy)
 
-        // (c): the pinned file wins even though the root also holds a matching stem.
+        let pinnedPath = pinned.resolvingSymlinksInPath().standardizedFileURL.path
+        let decoyPath = decoy.resolvingSymlinksInPath().standardizedFileURL.path
+        // (c): the pinned file resolves only when the runtime serves exactly it.
         let both = BYOMLlamaCppModelStore(root: allowed, pinnedFile: pinned)
-        let hit = try XCTUnwrap(both.resolveArtifact(servedModelRef: "llamacpp:tiny-q4"))
-        XCTAssertEqual(hit.fileURL.resolvingSymlinksInPath().path, pinned.resolvingSymlinksInPath().path)
-        XCTAssertEqual(hit.locator, pinned.resolvingSymlinksInPath().standardizedFileURL.path)
-
+        let hit = try XCTUnwrap(both.resolveArtifact(servedModelRef: "llamacpp:tiny-q4", runtimeArtifactPath: pinnedPath))
+        XCTAssertEqual(hit.fileURL.path, pinnedPath)
+        XCTAssertEqual(hit.locator, pinnedPath)
+        // Same stem, different served file (the root's decoy): the pin does not apply, and the root is not consulted. No identity.
+        XCTAssertNil(both.resolveArtifact(servedModelRef: "llamacpp:tiny-q4", runtimeArtifactPath: decoyPath), "pinned mode hashed a same-stem file the operator did not pin")
         // The runtime serving a DIFFERENT stem than the operator pinned gets no identity, not a wrong one.
-        XCTAssertNil(both.resolveArtifact(servedModelRef: "llamacpp:other-model"))
+        XCTAssertNil(both.resolveArtifact(servedModelRef: "llamacpp:other-model", runtimeArtifactPath: pinnedPath))
         // A pinned path that is not a regular GGUF resolves nothing.
-        XCTAssertNil(BYOMLlamaCppModelStore(root: nil, pinnedFile: root.appendingPathComponent("missing.gguf")).resolveArtifact(servedModelRef: "llamacpp:missing"))
+        XCTAssertNil(BYOMLlamaCppModelStore(root: nil, pinnedFile: root.appendingPathComponent("missing.gguf")).resolveArtifact(servedModelRef: "llamacpp:missing", runtimeArtifactPath: root.appendingPathComponent("missing.gguf").path))
         // No root is needed in (c).
-        XCTAssertNotNil(BYOMLlamaCppModelStore(root: nil, pinnedFile: pinned).resolveArtifact(servedModelRef: "llamacpp:tiny-q4"))
+        XCTAssertNotNil(BYOMLlamaCppModelStore(root: nil, pinnedFile: pinned).resolveArtifact(servedModelRef: "llamacpp:tiny-q4", runtimeArtifactPath: pinnedPath))
     }
 
     func testLlamaCppPinnedFileDrivesArtifactHashAvailableThroughDiscovery() async throws {
@@ -243,14 +294,15 @@ final class BYOMLoopbackAdapterTests: XCTestCase {
             llamacppModelPath: pinned,
             artifactDigestCacheURL: root.appendingPathComponent("digests.json")
         )
-        _ = try env.artifactDigests.computeEvidence(runtimeSource: "llamacpp_loopback", servedModelRef: "llamacpp:tiny-q4")
+        let pinnedPath = pinned.resolvingSymlinksInPath().standardizedFileURL.path
+        _ = try env.artifactDigests.computeEvidence(runtimeSource: "llamacpp_loopback", servedModelRef: "llamacpp:tiny-q4", runtimeArtifactPath: pinnedPath)
         let document = await BYOMDiscoveryRunner(environment: env, httpClient: RoutingBYOMHTTPClient(routes: [
-            "/props": json(#"{"default_generation_settings":{"n_ctx":4096}}"#),
-            "/v1/models": json(#"{"data":[{"id":"/somewhere/else/tiny-q4.gguf"}]}"#),
+            "/props": json(#"{"default_generation_settings":{"n_ctx":4096},"model_path":"\#(pinnedPath)"}"#),
+            "/v1/models": json(#"{"data":[{"id":"\#(pinnedPath)"}]}"#),
         ])).discover()
         let candidate = try XCTUnwrap(document.candidates.first { $0.runtimeSource == "llamacpp_loopback" })
         XCTAssertEqual(candidate.identityState, "artifact_hash_available")
-        XCTAssertFalse(try ModelSwitchingWireCodec.encode(document).contains("/somewhere/else"))
+        XCTAssertFalse(try ModelSwitchingWireCodec.encode(document).contains(pinnedPath), "pinned path leaked to the wire")
     }
 
     // MARK: - Failure classes map to closed warning codes

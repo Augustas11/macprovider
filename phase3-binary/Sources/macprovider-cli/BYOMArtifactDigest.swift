@@ -136,7 +136,18 @@ protocol BYOMGGUFArtifactLocator: Sendable {
     /// The SPEC-046-R002 adapter this locator serves (`ollama_loopback`, ...).
     var runtimeSource: String { get }
     /// `servedModelRef` is the candidate's `served_model_ref`, prefix and all.
-    func resolveArtifact(servedModelRef: String) -> BYOMResolvedArtifact?
+    /// `runtimeArtifactPath` is the path the runtime itself reports it is
+    /// serving (llama-server `/props.model_path`), or nil when the runtime
+    /// reports none. It is PROOF, never a locator: a conformer may require it
+    /// to agree with what the operator-declared store resolves before it
+    /// returns anything, and it must never be persisted or emitted.
+    func resolveArtifact(servedModelRef: String, runtimeArtifactPath: String?) -> BYOMResolvedArtifact?
+}
+
+extension BYOMGGUFArtifactLocator {
+    func resolveArtifact(servedModelRef: String) -> BYOMResolvedArtifact? {
+        resolveArtifact(servedModelRef: servedModelRef, runtimeArtifactPath: nil)
+    }
 }
 
 struct BYOMResolvedArtifact: Equatable, Sendable {
@@ -253,7 +264,8 @@ struct BYOMOllamaModelStore: BYOMGGUFArtifactLocator, Sendable {
         return components
     }
 
-    func resolveArtifact(servedModelRef: String) -> BYOMResolvedArtifact? {
+    /// Ollama binds through its own manifest; the runtime path plays no part.
+    func resolveArtifact(servedModelRef: String, runtimeArtifactPath: String?) -> BYOMResolvedArtifact? {
         guard let blob = resolveModelBlob(name: servedModelRef) else { return nil }
         return BYOMResolvedArtifact(fileURL: blob.blobURL, locator: blob.locatorDigest)
     }
@@ -334,7 +346,9 @@ struct BYOMLMStudioModelStore: BYOMGGUFArtifactLocator, Sendable {
             || wanted == fileStem.lowercased()
     }
 
-    func resolveArtifact(servedModelRef: String) -> BYOMResolvedArtifact? {
+    /// LM Studio binds through its models directory from the id; the runtime
+    /// reports no artifact path and none is needed.
+    func resolveArtifact(servedModelRef: String, runtimeArtifactPath: String?) -> BYOMResolvedArtifact? {
         guard let id = Self.modelID(from: servedModelRef) else { return nil }
         let rootResolved = root.resolvingSymlinksInPath().standardizedFileURL
         guard let publishers = try? fileManager.contentsOfDirectory(at: rootResolved, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) else {
@@ -444,54 +458,81 @@ struct BYOMLlamaCppModelStore: BYOMGGUFArtifactLocator, Sendable {
         return value
     }
 
-    func resolveArtifact(servedModelRef: String) -> BYOMResolvedArtifact? {
-        guard let stem = Self.stem(from: servedModelRef) else { return nil }
+    /// The runtime path is REQUIRED here. The stem alone locates a file the
+    /// operator allows; the served path proves it is the file the runtime is
+    /// actually serving. Without that proof, a server serving one file while
+    /// a same-stem file sits under the operator root would have the wrong
+    /// file hashed on its behalf (PR #1480 audit, HIGH). So:
+    ///   - no runtime path, a relative path, or a path whose stem differs
+    ///     from the served stem: no identity;
+    ///   - pinned mode: the canonical runtime path must EQUAL the pinned file;
+    ///   - root mode: the canonical runtime path must be contained in the
+    ///     root AND equal the single file the stem resolves to there.
+    /// Symlinks are resolved on both sides before comparison, and the
+    /// runtime path is never stored or emitted.
+    func resolveArtifact(servedModelRef: String, runtimeArtifactPath: String?) -> BYOMResolvedArtifact? {
+        guard let stem = Self.stem(from: servedModelRef),
+              let served = Self.canonicalServedPath(runtimeArtifactPath, expectedStem: stem)
+        else { return nil }
         let wanted = stem.lowercased()
+
         if let pinnedFile {
-            // (c): exactly the named file, and only if the runtime's served
-            // stem agrees with it — a server loading a different file than
-            // the operator pinned gets no identity rather than a wrong one.
             let resolved = pinnedFile.resolvingSymlinksInPath().standardizedFileURL
             guard resolved.pathExtension.lowercased() == "gguf",
                   resolved.deletingPathExtension().lastPathComponent.lowercased() == wanted,
-                  (try? resolved.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile == true
+                  (try? resolved.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile == true,
+                  served.path == resolved.path
             else { return nil }
             return BYOMResolvedArtifact(fileURL: resolved, locator: resolved.path)
         }
+
         guard let root else { return nil }
         let rootResolved = root.resolvingSymlinksInPath().standardizedFileURL
+        guard BYOMArtifactPathPolicy.isContained(served, in: rootResolved) else { return nil }
+        guard let hit = uniqueStemHit(wanted, under: rootResolved), hit.url.path == served.path else { return nil }
+        return BYOMResolvedArtifact(fileURL: hit.url, locator: hit.relative)
+    }
+
+    /// Canonicalizes a runtime-reported path and checks the two things the
+    /// runtime's own report must satisfy before it can serve as proof: it is
+    /// absolute, and its file stem is the served stem.
+    static func canonicalServedPath(_ raw: String?, expectedStem: String) -> URL? {
+        guard let raw, raw.hasPrefix("/") else { return nil }
+        let url = URL(fileURLWithPath: raw).resolvingSymlinksInPath().standardizedFileURL
+        guard url.pathExtension.lowercased() == "gguf",
+              url.deletingPathExtension().lastPathComponent.lowercased() == expectedStem.lowercased()
+        else { return nil }
+        return url
+    }
+
+    /// The single `<stem>.gguf` under `root`, one or two levels deep, or nil
+    /// when zero or several answer. Streams the directory rather than
+    /// materializing it, and counts every entry seen against the budget.
+    private func uniqueStemHit(_ wanted: String, under rootResolved: URL) -> (url: URL, relative: String)? {
+        guard let enumerator = fileManager.enumerator(
+            at: rootResolved,
+            includingPropertiesForKeys: [.isDirectoryKey, .isRegularFileKey],
+            options: [.skipsHiddenFiles, .skipsPackageDescendants]
+        ) else { return nil }
         var visited = 0
         var hits: [(url: URL, relative: String)] = []
-        func consider(_ fileURL: URL, relative: String) {
-            guard fileURL.pathExtension.lowercased() == "gguf",
-                  fileURL.deletingPathExtension().lastPathComponent.lowercased() == wanted
-            else { return }
-            let resolved = fileURL.resolvingSymlinksInPath().standardizedFileURL
-            guard BYOMArtifactPathPolicy.isContained(resolved, in: rootResolved),
-                  (try? resolved.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile == true
-            else { return }
-            hits.append((resolved, relative))
-        }
-        guard let top = try? fileManager.contentsOfDirectory(at: rootResolved, includingPropertiesForKeys: [.isDirectoryKey, .isRegularFileKey], options: [.skipsHiddenFiles]) else {
-            return nil
-        }
-        for entry in top {
+        while let entry = enumerator.nextObject() as? URL {
             visited += 1
             if visited > Self.maxEntriesVisited { return nil }
-            let values = try? entry.resourceValues(forKeys: [.isDirectoryKey, .isRegularFileKey])
-            if values?.isDirectory == true {
-                guard let inner = try? fileManager.contentsOfDirectory(at: entry, includingPropertiesForKeys: [.isRegularFileKey], options: [.skipsHiddenFiles]) else { continue }
-                for fileURL in inner {
-                    visited += 1
-                    if visited > Self.maxEntriesVisited { return nil }
-                    consider(fileURL, relative: "\(entry.lastPathComponent)/\(fileURL.lastPathComponent)")
-                }
-            } else {
-                consider(entry, relative: entry.lastPathComponent)
-            }
+            // Two levels: root/<file> or root/<dir>/<file>.
+            if enumerator.level >= 2 { enumerator.skipDescendants() }
+            guard entry.pathExtension.lowercased() == "gguf",
+                  entry.deletingPathExtension().lastPathComponent.lowercased() == wanted
+            else { continue }
+            let resolved = entry.resolvingSymlinksInPath().standardizedFileURL
+            guard BYOMArtifactPathPolicy.isContained(resolved, in: rootResolved),
+                  (try? resolved.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile == true
+            else { continue }
+            let relative = String(resolved.path.dropFirst(rootResolved.path.count)).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            hits.append((resolved, relative))
         }
-        guard hits.count == 1, let hit = hits.first else { return nil }
-        return BYOMResolvedArtifact(fileURL: hit.url, locator: hit.relative)
+        guard hits.count == 1 else { return nil }
+        return hits[0]
     }
 }
 
@@ -583,12 +624,6 @@ struct BYOMArtifactDigestResolver: Sendable {
     private let locators: [String: any BYOMGGUFArtifactLocator]
     let cache: BYOMArtifactDigestCache
 
-    /// The Ollama store, kept addressable for callers that predate the
-    /// locator protocol.
-    var store: BYOMOllamaModelStore {
-        locators["ollama_loopback"] as! BYOMOllamaModelStore
-    }
-
     init(locators: [any BYOMGGUFArtifactLocator], cache: BYOMArtifactDigestCache) {
         var table: [String: any BYOMGGUFArtifactLocator] = [:]
         for locator in locators {
@@ -607,8 +642,8 @@ struct BYOMArtifactDigestResolver: Sendable {
 
     /// Discovery-time: a digest previously computed over the SAME file (path,
     /// size, inode, mtime), or nil. Never hashes.
-    func knownDigest(runtimeSource: String, servedModelRef: String) -> String? {
-        guard let artifact = locators[runtimeSource]?.resolveArtifact(servedModelRef: servedModelRef),
+    func knownDigest(runtimeSource: String, servedModelRef: String, runtimeArtifactPath: String? = nil) -> String? {
+        guard let artifact = locators[runtimeSource]?.resolveArtifact(servedModelRef: servedModelRef, runtimeArtifactPath: runtimeArtifactPath),
               let identity = BYOMArtifactFileIdentity.current(of: artifact.fileURL)
         else {
             return nil
@@ -627,8 +662,8 @@ struct BYOMArtifactDigestResolver: Sendable {
     /// that same file: a path that pointed elsewhere while it was opened, or
     /// a file rewritten while it was read, fails closed. `deadline` bounds
     /// the hashing; on expiry nothing is recorded.
-    func computeEvidence(runtimeSource: String, servedModelRef: String, deadline: Date? = nil) throws -> BYOMArtifactEvidence {
-        guard let artifact = locators[runtimeSource]?.resolveArtifact(servedModelRef: servedModelRef) else {
+    func computeEvidence(runtimeSource: String, servedModelRef: String, runtimeArtifactPath: String? = nil, deadline: Date? = nil) throws -> BYOMArtifactEvidence {
+        guard let artifact = locators[runtimeSource]?.resolveArtifact(servedModelRef: servedModelRef, runtimeArtifactPath: runtimeArtifactPath) else {
             throw BYOMArtifactDigestError.unresolvedBlob
         }
         let path = artifact.fileURL.resolvingSymlinksInPath().standardizedFileURL.path
@@ -644,21 +679,21 @@ struct BYOMArtifactDigestResolver: Sendable {
             throw BYOMArtifactDigestError.fileIdentityChanged
         }
         let evidence = BYOMArtifactEvidence(algorithm: ModelArtifactIdentity.ggufFileV1, digest: digest, file: before, locatorDigest: artifact.locator)
-        try validateCurrent(evidence, runtimeSource: runtimeSource, servedModelRef: servedModelRef)
+        try validateCurrent(evidence, runtimeSource: runtimeSource, servedModelRef: servedModelRef, runtimeArtifactPath: runtimeArtifactPath)
         cache.store(before, algorithm: evidence.algorithm, digest: digest)
         return evidence
     }
 
-    func computeDigest(runtimeSource: String, servedModelRef: String, deadline: Date? = nil) throws -> String {
-        try computeEvidence(runtimeSource: runtimeSource, servedModelRef: servedModelRef, deadline: deadline).digest
+    func computeDigest(runtimeSource: String, servedModelRef: String, runtimeArtifactPath: String? = nil, deadline: Date? = nil) throws -> String {
+        try computeEvidence(runtimeSource: runtimeSource, servedModelRef: servedModelRef, runtimeArtifactPath: runtimeArtifactPath, deadline: deadline).digest
     }
 
     /// The reference must STILL resolve — through the runtime's locator — to
     /// the very file the digest was computed over, with an unchanged identity:
     /// a reference retargeted to another file, or a file rewritten in place,
     /// fails closed.
-    func validateCurrent(_ evidence: BYOMArtifactEvidence, runtimeSource: String, servedModelRef: String) throws {
-        guard let artifact = locators[runtimeSource]?.resolveArtifact(servedModelRef: servedModelRef),
+    func validateCurrent(_ evidence: BYOMArtifactEvidence, runtimeSource: String, servedModelRef: String, runtimeArtifactPath: String? = nil) throws {
+        guard let artifact = locators[runtimeSource]?.resolveArtifact(servedModelRef: servedModelRef, runtimeArtifactPath: runtimeArtifactPath),
               artifact.locator == evidence.locatorDigest,
               let now = BYOMArtifactFileIdentity.current(of: artifact.fileURL),
               now == evidence.file

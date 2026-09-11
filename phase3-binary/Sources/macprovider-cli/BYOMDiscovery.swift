@@ -1782,7 +1782,7 @@ struct BYOMModelAdmissionRuntime: Sendable {
         guard let identity = try identityStore.loadAdmissionIdentity(providerId: providerID) else {
             throw BYOMModelAdmissionError.missingAdmissionIdentity(providerID: providerID)
         }
-        let evidence = try Self.artifactEvidence(for: candidate, environment: environment, deadline: Date().addingTimeInterval(Self.artifactHashBudgetSeconds))
+        let evidence = try await Self.artifactEvidence(for: candidate, environment: environment, httpClient: httpClient, deadline: Date().addingTimeInterval(Self.artifactHashBudgetSeconds))
         let package = try BYOMOfferSubmissionBuilder.makePackage(
             providerID: providerID,
             candidate: candidate,
@@ -1795,8 +1795,11 @@ struct BYOMModelAdmissionRuntime: Sendable {
         // name is re-resolved and the file identity re-checked immediately
         // before the signed package leaves the machine.
         if let evidence {
+            // Re-probe: the runtime must still be serving the very file the
+            // digest was bound to when the package leaves.
+            let servedPathNow = await environment.runtimeArtifactPath(for: candidate, httpClient: httpClient)
             do {
-                try environment.artifactDigests.validateCurrent(evidence, runtimeSource: candidate.runtimeSource, servedModelRef: candidate.servedModelRef)
+                try environment.artifactDigests.validateCurrent(evidence, runtimeSource: candidate.runtimeSource, servedModelRef: candidate.servedModelRef, runtimeArtifactPath: servedPathNow)
             } catch {
                 throw BYOMModelAdmissionError.artifactIdentityChanged
             }
@@ -1821,14 +1824,22 @@ struct BYOMModelAdmissionRuntime: Sendable {
     /// so a stalled or network-backed store cannot hang the command.
     static let artifactHashBudgetSeconds: Double = 600
 
-    static func artifactEvidence(for candidate: BYOMDiscoveryWire.Candidate, environment: BYOMDiscoveryEnvironment, deadline: Date? = nil) throws -> BYOMArtifactEvidence? {
+    static func artifactEvidence(
+        for candidate: BYOMDiscoveryWire.Candidate,
+        environment: BYOMDiscoveryEnvironment,
+        httpClient: any BYOMDiscoveryHTTPClient,
+        deadline: Date? = nil
+    ) async throws -> BYOMArtifactEvidence? {
         // #1478: every runtime with a CLI-side GGUF locator, not just Ollama.
         guard BYOMDiscoveryEnvironment.artifactHashingRuntimes.contains(candidate.runtimeSource) else { return nil }
         let runtime = candidate.runtimeSource
+        // Fresh proof at hashing time: the file the runtime says it is serving
+        // right now must be the one the operator-declared store resolves.
+        let servedPath = await environment.runtimeArtifactPath(for: candidate, httpClient: httpClient)
         let artifactBacked = candidate.identityState == "artifact_hash_available" ||
-            environment.artifactDigests.knownDigest(runtimeSource: runtime, servedModelRef: candidate.servedModelRef) != nil
+            environment.artifactDigests.knownDigest(runtimeSource: runtime, servedModelRef: candidate.servedModelRef, runtimeArtifactPath: servedPath) != nil
         do {
-            return try environment.artifactDigests.computeEvidence(runtimeSource: runtime, servedModelRef: candidate.servedModelRef, deadline: deadline)
+            return try environment.artifactDigests.computeEvidence(runtimeSource: runtime, servedModelRef: candidate.servedModelRef, runtimeArtifactPath: servedPath, deadline: deadline)
         } catch BYOMArtifactDigestError.unresolvedBlob where !artifactBacked {
             return nil
         } catch BYOMArtifactDigestError.notGGUF where !artifactBacked {
@@ -2089,6 +2100,27 @@ struct BYOMDiscoveryEnvironment: Sendable {
         self.llamacppModelRoot = llamacppModelRoot
         self.llamacppModelPath = llamacppModelPath
         self.artifactDigestCacheURL = artifactDigestCacheURL ?? BYOMArtifactDigestCache.defaultURL()
+    }
+
+    /// The runtime-reported artifact path that binds a candidate's artifact
+    /// leg, fetched fresh at the moment it is needed: discovery, evaluate,
+    /// offer, and the re-validation right before a signed package leaves the
+    /// machine. Only llama.cpp reports one; every other runtime gets nil and
+    /// its locator ignores the parameter. A probe failure is nil, which the
+    /// llama.cpp locator turns into "no artifact leg", never into an error.
+    func runtimeArtifactPath(for candidate: BYOMDiscoveryWire.Candidate, httpClient: any BYOMDiscoveryHTTPClient) async -> String? {
+        guard candidate.runtimeSource == BYOMLlamaCppDiscovery.runtimeSource,
+              let origin = llamacppOrigin,
+              let baseURL = BYOMLoopbackOriginValidator.validatedHTTPOrigin(origin)
+        else { return nil }
+        guard let props = try? await httpClient.get(
+            baseURL.appendingPathComponent("props"),
+            maxHeaderBytes: BYOMDiscoveryHTTPBounds.maxHeaderBytes,
+            maxBodyBytes: BYOMDiscoveryHTTPBounds.maxBodyBytes
+        ), props.statusCode == 200, props.body.count <= BYOMDiscoveryHTTPBounds.maxBodyBytes,
+              BYOMDiscoveryJSON.isLlamaCppProps(props.body)
+        else { return nil }
+        return BYOMDiscoveryJSON.llamaCppServedArtifactPath(from: props.body)
     }
 
     /// The runtimes whose candidates carry a CLI-computed GGUF artifact leg.
@@ -2511,9 +2543,11 @@ struct BYOMEvaluationRunner: Sendable {
         // explicit hashing budget — is not an evaluation failure: the candidate
         // simply stays without artifact identity.
         if BYOMDiscoveryEnvironment.artifactHashingRuntimes.contains(candidate.runtimeSource) {
+            let servedPath = await environment.runtimeArtifactPath(for: candidate, httpClient: httpClient)
             _ = try? environment.artifactDigests.computeDigest(
                 runtimeSource: candidate.runtimeSource,
                 servedModelRef: candidate.servedModelRef,
+                runtimeArtifactPath: servedPath,
                 deadline: Date().addingTimeInterval(limits.artifactHashSeconds)
             )
         }
@@ -4083,6 +4117,7 @@ struct BYOMLlamaCppDiscovery: Sendable {
                 return adapterFailure(.adapterUnavailable, status: "unavailable")
             }
             let contextWindow = BYOMDiscoveryJSON.llamaCppContextWindow(from: props.body)
+            let servedPath = BYOMDiscoveryJSON.llamaCppServedArtifactPath(from: props.body)
 
             let response = try await httpClient.get(
                 baseURL.appendingPathComponent("v1/models"),
@@ -4106,7 +4141,7 @@ struct BYOMLlamaCppDiscovery: Sendable {
                     originClass: "loopback_http",
                     warningCodes: inventory.warningCodes.map(\.rawValue).sorted()
                 ),
-                inventory.modelStems.map { buildCandidate(stem: $0, contextWindow: contextWindow) }
+                inventory.modelStems.map { buildCandidate(stem: $0, contextWindow: contextWindow, servedPath: servedPath) }
             )
         } catch is CancellationError {
             return adapterFailure(.adapterTimeout, status: "timeout")
@@ -4141,14 +4176,16 @@ struct BYOMLlamaCppDiscovery: Sendable {
         )
     }
 
-    private func buildCandidate(stem: String, contextWindow: Int?) -> BYOMDiscoveryWire.Candidate {
+    private func buildCandidate(stem: String, contextWindow: Int?, servedPath: String?) -> BYOMDiscoveryWire.Candidate {
         let servedModelRef = Self.servedModelRefPrefix + stem
         let (candidateID, idWarnings) = BYOMCandidateIdentity.candidateID(
             namespace: namespace,
             runtimeSource: Self.runtimeSource,
             servedModelRef: servedModelRef
         )
-        let computedDigest = artifactDigests?.knownDigest(runtimeSource: Self.runtimeSource, servedModelRef: servedModelRef)
+        // The digest is read back only when the runtime's served path proves
+        // the operator-resolved file is the one being served.
+        let computedDigest = artifactDigests?.knownDigest(runtimeSource: Self.runtimeSource, servedModelRef: servedModelRef, runtimeArtifactPath: servedPath)
         let catalogKey = catalogMatcher.catalogKey(for: stem, runtimeSource: Self.runtimeSource, digest: computedDigest.map { "sha256:" + $0 })
         var warnings = Set((namespaceWarnings + idWarnings + [.capabilityUnevaluated, .evaluationRequired]).map(\.rawValue))
         if catalogKey != nil {
@@ -4585,6 +4622,18 @@ enum BYOMDiscoveryJSON {
             return false
         }
         return true
+    }
+
+    /// The path llama-server reports it is serving (`/props.model_path`). Used
+    /// only as binding PROOF inside the CLI (BYOMLlamaCppModelStore); never
+    /// stored, never emitted. Absent or non-string ⇒ nil ⇒ no artifact leg.
+    static func llamaCppServedArtifactPath(from data: Data) -> String? {
+        guard let text = String(data: data, encoding: .utf8),
+              case .object(let root) = try? StrictJSONParser.parse(text),
+              case .string(let path)? = root["model_path"],
+              !path.isEmpty, path.utf8.count <= 4096
+        else { return nil }
+        return path
     }
 
     /// Best-effort context window from llama-server's `GET /props`
