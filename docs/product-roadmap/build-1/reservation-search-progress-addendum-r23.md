@@ -345,7 +345,7 @@ Row ordinals 0...75 are imported-proof 3/4/4/4/3/12. Ordinals 76...109 and
 | registry transition | Appendix C template | progress count |
 |---|---|---:|
 | prepared-adoption-record | staging-register-progress-full | 7 |
-| activation-record | custody-progress-full | 10 |
+| activation-record | custody-verified-pending-progress-full | 10 |
 | checkpoint-record with no incumbent | initial-activation-progress-full | 8 |
 | checkpoint-record with incumbent | replacement-progress-full | 11 |
 

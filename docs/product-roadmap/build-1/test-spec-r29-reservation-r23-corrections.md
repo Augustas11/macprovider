@@ -88,7 +88,7 @@ terminating/quarantine/free transition 2. Named special progress replaces
 generic progress. Force zero and two affected rows for every CAS and roll back.
 
 The registry expander must name exactly `staging-register-progress-full` 7,
-`custody-progress-full` 10, `initial-activation-progress-full` 8, and
+`custody-verified-pending-progress-full` 10, `initial-activation-progress-full` 8, and
 `replacement-progress-full` 11. Old six/nine/seven/nine names or counts must
 make author generation fail before runtime.
 
@@ -248,7 +248,7 @@ These are plan-shape checks only, run on Darwin 25.5.0 arm64 with Python
 - Exact failed-review SHA reproduced as
   `b5f316a49005bbc77b573544c40786ee3ecfc561a1414a2dd395d02f5324bed9`.
   R23 SHA before this R29-only record was
-  `10b332d4766da61caed9cf0e8a982e53e900ebda40596f60d17bcd8c86c26f0b`.
+  `eb49d8ab8493edfc53527fb9ae2729e56983eeb76cb043d4b0ec959675c344b2`.
 - Extracted Appendix A was 43,652 bytes, SHA
   `70b34abd8229e8a90bd45e0de6c283d33bf1af96a096193d9301e37dba7bf81f`,
   created 23 tables, reported `integrity_check=ok`, empty FK check, and
