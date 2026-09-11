@@ -15,7 +15,7 @@ Exact R2 gate inputs:
 
 - `prd-implementation-plan-v2.md` SHA-256: `040df8c74d1123353e57dc75772248b36966ca1c7d2f443a2deb7b22ca1485d8`
 - `test-spec-v2.md` SHA-256: `519cecb3987de893c1da916ca0438c984b118053bd3f692554c035b2125d61a5`
-- Source failed review SHA-256: `4c2900708c8ce7ce6a1f999ac7b3b5c6054798f1aa12b7cb92eb19d5ab2eae44`
+- Source failed review SHA-256: `4e1005f8dcfec564f3b464117161d43f3326cd00e6ff005161d5379df45a85f7`
 
 ## Revision 2 decisions
 

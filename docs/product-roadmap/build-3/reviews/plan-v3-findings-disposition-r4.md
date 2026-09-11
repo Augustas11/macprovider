@@ -2,7 +2,7 @@
 
 Status: corrections authored; independent review pending
 Source review: `reviews/plan-v3-sol.md`
-Source review SHA-256: `4c3d5a70345413bc90ae09907fe78806370cd44440d9c147d7e4a8637088db41`
+Source review SHA-256: `8ec645c1c6fd0c1695c5811e8171409c65a9dea744b2888abc2b7c03f1113732`
 Corrected artifacts: `prd-implementation-plan-v4.md`, `test-spec-v4.md`
 
 No finding was downgraded, waived, or converted into a weaker acceptance claim. New hardware, custody, witness, and operator prerequisites are named blockers until freshly proven.

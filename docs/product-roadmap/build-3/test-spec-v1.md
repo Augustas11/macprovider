@@ -1,8 +1,8 @@
 # Product Build 3 — Test Specification
 
-Test-spec revision: `build3-test-v1`  
-Plan pairing: `build3-plan-v1`  
-Repository/base: `Augustas11/macprovider@1d2c930bad81704dd0acc0322226725d8b64aceb`  
+Test-spec revision: `build3-test-v1`
+Plan pairing: `build3-plan-v1`
+Repository/base: `Augustas11/macprovider@1d2c930bad81704dd0acc0322226725d8b64aceb`
 Status: awaiting independent adversarial approval
 
 ## Evidence classes

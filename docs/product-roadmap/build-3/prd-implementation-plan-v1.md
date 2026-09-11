@@ -1,8 +1,8 @@
 # Product Build 3 — PRD and Implementation Plan
 
-Plan revision: `build3-plan-v1`  
-Plan status: awaiting independent adversarial approval  
-Repository/base: `Augustas11/macprovider@1d2c930bad81704dd0acc0322226725d8b64aceb`  
+Plan revision: `build3-plan-v1`
+Plan status: awaiting independent adversarial approval
+Repository/base: `Augustas11/macprovider@1d2c930bad81704dd0acc0322226725d8b64aceb`
 Scope: production compute observations and first-job visibility for one explicit covered key, with no economic activation or enforcement
 
 ## Product result

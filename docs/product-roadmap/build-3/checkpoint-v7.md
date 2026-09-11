@@ -38,7 +38,7 @@ Current qualification blockers remain: no approved acquisition-authority or coll
 
 - `prd-implementation-plan-v7.md` SHA-256: `514d024ad2b6d44ae09d9fce1f5d211627512689e77c4f82924aeb0baf103752`
 - `test-spec-v7.md` SHA-256: `6a6c877ffcc05764a7b6e4c601be539e99cc6e8549e93eedd21a91d2288bcd5a`
-- `reviews/plan-v6-findings-disposition-r7.md` SHA-256: `53bc41e940f8655ac7e9e8672dd58482423927b9f5548254ac9042f63939dc2f`
-- source failed review SHA-256: `786bd6a7eba541edf4e905f62de28514c25b84d0890bbbcf040b593bcc05a431`
+- `reviews/plan-v6-findings-disposition-r7.md` SHA-256: `79fdcce8a2dfc75b2e1d0954fae5048600cc35750e6289053a08220dbcde3fc1`
+- source failed review SHA-256: `7ee110e92ae8b83baaa1e292b400b1f71d32c9d4a1ac21140eedde3cf062cf17`
 
 The independent reviewer must recompute these values from the committed tree.

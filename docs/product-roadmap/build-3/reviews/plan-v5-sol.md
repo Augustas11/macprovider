@@ -8,8 +8,8 @@ Plan: `docs/product-roadmap/build-3/prd-implementation-plan-v5.md`
 Plan SHA-256: `8f3e442f027a5908d7af913b900179e399a1cc7dd8134c14142c22d197246111`
 Test specification: `docs/product-roadmap/build-3/test-spec-v5.md`
 Test-spec SHA-256: `7da0c9b87a71bd3a9698ba9454365ae04a15cc56def090057db479c4f0adf3f8`
-Disposition record SHA-256: `01baf9de82730ebbd3323afa3f66ab002a61dbfa02281ba1c35227c19d542f30`
-Source failed review SHA-256: `cdb57d26b3a2325e1c3cfca4c5553c606a3951cf4cb66f0385976987573e35e4`
+Disposition record SHA-256: `7704d6621d6e49315aa1f0fac25a8b6f8ef3fd42cfeaa39cb46a1312cca55b88`
+Source failed review SHA-256: `11baf4d72c197d0947286a8ae03ccd82a25641799b135ca1300a726cb49ab6ee`
 
 ## Verdict
 

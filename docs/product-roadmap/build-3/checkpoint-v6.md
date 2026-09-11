@@ -34,7 +34,7 @@ Exact revision-6 gate inputs before commit:
 
 - `prd-implementation-plan-v6.md` SHA-256: `91b3d488c06de68d90b697a8374aa3acfa1711f6883a3a9de12c10cd6c6e5830`
 - `test-spec-v6.md` SHA-256: `fc5658d42c5b94d7649733df11c4f847a4769be32c92aab8631cca77d2178d85`
-- `reviews/plan-v5-findings-disposition-r6.md` SHA-256: `7b8d33570b5dc7a76241c7465456ef55e76549affac76e6738a6766a579b8ac7`
-- source failed review SHA-256: `31ba0be5c46302e44bf814ffa1db6fa18441f7244b4532458e2f9a46745f4341`
+- `reviews/plan-v5-findings-disposition-r6.md` SHA-256: `50769913b2615f0991c86aa086b67038f4ced224fc39fd357d579df2e18b578f`
+- source failed review SHA-256: `cf82a0598ba44d855ab19bbb41824568cfcd86c1f8886b84975f42babbbb0076`
 
 The independent reviewer must recompute these values from the committed tree.

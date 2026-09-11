@@ -1,14 +1,14 @@
 # Product Build 3 — Independent Adversarial Plan Review
 
-Review status: **FAIL — revision required before implementation**  
-Reviewer: native Codex subagent, `gpt-5.6-sol`, high reasoning  
-Repository/base: `Augustas11/macprovider@1d2c930bad81704dd0acc0322226725d8b64aceb`  
-Reviewed plan commit: `3e83ade8f84fcc0ff7e79588336fcefba77fb0f9`  
-Plan: `docs/product-roadmap/build-3/prd-implementation-plan-v1.md`  
-Plan SHA-256: `725f56e55ba0164e8e6f2c5e96997d2cd1965c715385f106cae015f7804c38ce`  
-Test specification: `docs/product-roadmap/build-3/test-spec-v1.md`  
-Test-spec SHA-256: `5579d0bb1c4be9871961d41d140b43d246b9233f9472f306de2ed19ef9aacdf4`  
-Inspection context verified: `inspection-status-v1.md` SHA-256 `c045f5f3b6a015e7c5f6385518776b6b8cfdcf358c7e05f9db262a6bf07ac0e4`; `independent-inspection-v1.md` SHA-256 `1e7e8d41dbac6b3e42f558ab9de1afff406035f9c2c43b59f157720cc0820e77`.
+Review status: **FAIL — revision required before implementation**
+Reviewer: native Codex subagent, `gpt-5.6-sol`, high reasoning
+Repository/base: `Augustas11/macprovider@1d2c930bad81704dd0acc0322226725d8b64aceb`
+Reviewed plan commit: `3e83ade8f84fcc0ff7e79588336fcefba77fb0f9`
+Plan: `docs/product-roadmap/build-3/prd-implementation-plan-v1.md`
+Plan SHA-256: `8e02cea579d672c9ee9055e359267c6c4ee59521d7772468f7a403cbfc7866d4`
+Test specification: `docs/product-roadmap/build-3/test-spec-v1.md`
+Test-spec SHA-256: `186e030e400c0335a786f430ee8db0a0334284534e1a7734429caf8b01a5ba2b`
+Inspection context verified: `inspection-status-v1.md` SHA-256 `36c65687062eec4bb4584af483318fdb162fa360c5669488959129f24ed70fa1`; `independent-inspection-v1.md` SHA-256 `fca2de09d7c2f3f93008df714ca81b56ae25ebd0f507b25980bba16758928dae`.
 
 ## Verdict
 

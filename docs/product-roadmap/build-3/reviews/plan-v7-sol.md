@@ -2,14 +2,14 @@
 
 Review status: **PASS — zero Critical, High, or Medium findings**
 
-Reviewer: native Codex subagent, `gpt-5.6-sol`, high reasoning  
-Review type: independent plan, architecture, trust-boundary, economics, UX, failure-recovery, and acceptance-test gate  
-Repository/base: `Augustas11/macprovider@1d2c930bad81704dd0acc0322226725d8b64aceb`  
-Reviewed commit: `132247867fc27ba37ed5844dbe4b2831a2559887`  
-Plan: `prd-implementation-plan-v7.md`, SHA-256 `514d024ad2b6d44ae09d9fce1f5d211627512689e77c4f82924aeb0baf103752`  
-Test specification: `test-spec-v7.md`, SHA-256 `6a6c877ffcc05764a7b6e4c601be539e99cc6e8549e93eedd21a91d2288bcd5a`  
-Finding dispositions: `plan-v6-findings-disposition-r7.md`, SHA-256 `53bc41e940f8655ac7e9e8672dd58482423927b9f5548254ac9042f63939dc2f`  
-Source failed review: `plan-v6-sol.md`, SHA-256 `786bd6a7eba541edf4e905f62de28514c25b84d0890bbbcf040b593bcc05a431`
+Reviewer: native Codex subagent, `gpt-5.6-sol`, high reasoning
+Review type: independent plan, architecture, trust-boundary, economics, UX, failure-recovery, and acceptance-test gate
+Repository/base: `Augustas11/macprovider@1d2c930bad81704dd0acc0322226725d8b64aceb`
+Reviewed commit: `132247867fc27ba37ed5844dbe4b2831a2559887`
+Plan: `prd-implementation-plan-v7.md`, SHA-256 `514d024ad2b6d44ae09d9fce1f5d211627512689e77c4f82924aeb0baf103752`
+Test specification: `test-spec-v7.md`, SHA-256 `6a6c877ffcc05764a7b6e4c601be539e99cc6e8549e93eedd21a91d2288bcd5a`
+Finding dispositions: `plan-v6-findings-disposition-r7.md`, SHA-256 `79fdcce8a2dfc75b2e1d0954fae5048600cc35750e6289053a08220dbcde3fc1`
+Source failed review: `plan-v6-sol.md`, SHA-256 `7ee110e92ae8b83baaa1e292b400b1f71d32c9d4a1ac21140eedde3cf062cf17`
 
 ## Verdict
 

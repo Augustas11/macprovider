@@ -3,7 +3,7 @@
 Status: corrections authored; independent review pending
 Source review: `reviews/plan-v5-sol.md`
 Source review commit: `0dfbb8cf`
-Source review SHA-256: `31ba0be5c46302e44bf814ffa1db6fa18441f7244b4532458e2f9a46745f4341`
+Source review SHA-256: `cf82a0598ba44d855ab19bbb41824568cfcd86c1f8886b84975f42babbbb0076`
 Corrected artifacts: `prd-implementation-plan-v6.md`, `test-spec-v6.md`
 
 No finding was downgraded, waived or converted into a weaker acceptance claim. Revision 6 adds authority boundaries and executable tests while preserving the prohibition on governed numeric acquisition before Gate A0, product implementation before Gate B, positive qualification before Gate C, and production observation before separate rollout authorization. It does not implement a collector, lineage tooling, product runtime, payout changes, reward changes or serving lease; collect numeric evidence; enable enforcement/economics/payment; deploy; change secrets; or inspect `d-inference`.

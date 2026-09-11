@@ -1,8 +1,8 @@
 # Product Build 3 — Planning Checkpoint
 
-Checkpoint: `build3-checkpoint-v1`  
-Repository/base: `Augustas11/macprovider@1d2c930bad81704dd0acc0322226725d8b64aceb`  
-Branch/worktree: `codex/product-build-3` at `/Users/augstar/.codex/worktrees/macprovider/product-build-3`  
+Checkpoint: `build3-checkpoint-v1`
+Repository/base: `Augustas11/macprovider@1d2c930bad81704dd0acc0322226725d8b64aceb`
+Branch/worktree: `codex/product-build-3` at `/Users/augstar/.codex/worktrees/macprovider/product-build-3`
 Date: 2026-09-11
 
 ## Completed
@@ -53,4 +53,3 @@ Independent-inspector runs are recorded in `independent-inspection-v1.md`.
 - Two independently controlled, approved reference sources and a representative calibration campaign do not exist.
 - Physical Apple Silicon, actual MLX, Xcode app, real-browser, multi-service, and operator qualification evidence is absent.
 - Production deployment, enforcement, reward activation, and payment activation are not authorized.
-

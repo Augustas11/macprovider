@@ -3,7 +3,7 @@
 Status: corrections authored; independent review pending
 Source review: `reviews/plan-v4-sol.md`
 Source review commit: `615d6fa676a702cad775c80675f1aa842f38239f`
-Source review SHA-256: `cdb57d26b3a2325e1c3cfca4c5553c606a3951cf4cb66f0385976987573e35e4`
+Source review SHA-256: `11baf4d72c197d0947286a8ae03ccd82a25641799b135ca1300a726cb49ab6ee`
 Corrected artifacts: `prd-implementation-plan-v5.md`, `test-spec-v5.md`
 
 No finding was downgraded, waived, or converted into a weaker acceptance claim. Revision 5 adds two bounded executable pre-product slices, but neither is authorized by this document alone: each has a preceding design gate, a following complete-diff gate, exact path ownership, and production exclusion. Governed numeric evidence, product implementation, enforcement, economics, deployment, and positive qualification remain blocked by their named gates.

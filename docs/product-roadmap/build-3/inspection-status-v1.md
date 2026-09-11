@@ -1,9 +1,9 @@
 # Product Build 3 — Current Implementation Inspection
 
-Status: planning evidence only  
-Inspection revision: `build3-inspection-v1`  
-Repository: `Augustas11/macprovider`  
-Inspected base: `1d2c930bad81704dd0acc0322226725d8b64aceb` (`origin/main`, 2026-09-11)  
+Status: planning evidence only
+Inspection revision: `build3-inspection-v1`
+Repository: `Augustas11/macprovider`
+Inspected base: `1d2c930bad81704dd0acc0322226725d8b64aceb` (`origin/main`, 2026-09-11)
 Historical roadmap: `/private/tmp/macprovider-roadmap/.omx/plans/product-roadmap-422fc2f1.md` at `422fc2f13fc62c1ff8987522f822d9ef856e4a96`
 
 The roadmap file was available. It is historical evidence only. This inspection used the freshly fetched base above and fresh tests listed below.
