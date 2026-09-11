@@ -375,10 +375,10 @@ type HardwareTrustAdminStore interface {
 	RequestHardwareTrustApproval(ctx context.Context, pendingID string, jobID int64, requestedBy string, expiresAt *time.Time, reason, incidentID string) (providerID, hardwareIdentityHash, chipNormalized string, unifiedMemoryGB int, err error)
 	ApproveHardwareTrustApproval(ctx context.Context, pendingID, approvedBy string) (providerID, hardwareIdentityHash, chipNormalized string, unifiedMemoryGB int, expiresAt *time.Time, reason, incidentID, source string, effectiveExpiresAt *time.Time, err error)
 	RevokeHardwareTrustApproval(ctx context.Context, providerID, hardwareIdentityHash, revokedBy, reason string) (chipNormalized string, unifiedMemoryGB int, nowUntrusted bool, err error)
-	// ProviderHardwareTrustSanctioned reports the SPEC-047 v0.1.6 trust
-	// sanction: the provider holds at least one hardware-trust root and none
-	// is active.
-	ProviderHardwareTrustSanctioned(ctx context.Context, providerID string) (bool, error)
+	// ProviderHardwareTrustState reports, as of `at`, whether the provider
+	// holds any hardware-trust root and whether one is active (SPEC-047 R009:
+	// trust sanction = held and none active; intake eligibility = active).
+	ProviderHardwareTrustState(ctx context.Context, providerID string, at time.Time) (held bool, active bool, err error)
 	ListWaitingTrustJobs(ctx context.Context, afterID int64, limit int) ([]onboarding.WaitingTrustJob, error)
 }
 

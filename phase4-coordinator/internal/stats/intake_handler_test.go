@@ -59,16 +59,18 @@ func TestIntakeHandlerRequiresListedNonProviderBoundPartnerKey(t *testing.T) {
 	if rr := get(authResult{projection: "public"}, ""); rr.Code != http.StatusUnauthorized {
 		t.Fatalf("public projection: status=%d, want 401", rr.Code)
 	}
-	if rr := get(partnerAuth(9, false), ""); rr.Code != http.StatusForbidden {
-		t.Fatalf("unlisted key: status=%d, want 403", rr.Code)
+	if rr := get(partnerAuth(9, false), ""); rr.Code != http.StatusUnauthorized {
+		t.Fatalf("unlisted key: status=%d, want 401", rr.Code)
 	}
-	if rr := get(partnerAuth(7, true), ""); rr.Code != http.StatusForbidden {
-		t.Fatalf("provider-bound key: status=%d, want 403", rr.Code)
+	if rr := get(partnerAuth(7, true), ""); rr.Code != http.StatusUnauthorized {
+		t.Fatalf("provider-bound key: status=%d, want 401", rr.Code)
 	}
 	if rr := get(partnerAuth(7, false), "?window=30d"); rr.Code != http.StatusBadRequest {
 		t.Fatalf("query parameter: status=%d, want 400", rr.Code)
 	}
-	rr := get(partnerAuth(7, false), "")
+	withOrigin := partnerAuth(7, false)
+	withOrigin.originPresent, withOrigin.originValue = true, "https://console.example"
+	rr := get(withOrigin, "")
 	if rr.Code != http.StatusOK {
 		t.Fatalf("listed key: status=%d body=%s, want 200", rr.Code, rr.Body.String())
 	}
@@ -78,8 +80,11 @@ func TestIntakeHandlerRequiresListedNonProviderBoundPartnerKey(t *testing.T) {
 	if vary := rr.Header().Get("Vary"); !strings.Contains(vary, "Authorization") {
 		t.Fatalf("Vary = %q, want Authorization", vary)
 	}
-	if acao := rr.Header().Get("Access-Control-Allow-Origin"); acao == "*" {
-		t.Fatalf("intake must never emit a wildcard Access-Control-Allow-Origin")
+	if _, present := rr.Header()["Access-Control-Allow-Origin"]; present {
+		t.Fatalf("intake must emit no Access-Control-Allow-Origin at all: %q", rr.Header().Get("Access-Control-Allow-Origin"))
+	}
+	if _, present := rr.Header()["Access-Control-Allow-Credentials"]; present {
+		t.Fatalf("intake must emit no Access-Control-Allow-Credentials")
 	}
 	var body map[string]json.RawMessage
 	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
@@ -98,8 +103,8 @@ func TestIntakeHandlerRequiresListedNonProviderBoundPartnerKey(t *testing.T) {
 	}
 	// Empty reader list refuses every key.
 	h.IntakeReaderKeyIDs = map[int64]struct{}{}
-	if rr := get(partnerAuth(7, false), ""); rr.Code != http.StatusForbidden {
-		t.Fatalf("empty allowlist: status=%d, want 403", rr.Code)
+	if rr := get(partnerAuth(7, false), ""); rr.Code != http.StatusUnauthorized {
+		t.Fatalf("empty allowlist: status=%d, want 401", rr.Code)
 	}
 }
 
@@ -131,5 +136,46 @@ func TestIntakeEndpointUnknownWhenDisabledAtMux(t *testing.T) {
 	m.Handler().ServeHTTP(rr, req)
 	if rr.Code != http.StatusNotFound {
 		t.Fatalf("disabled at mux: status=%d body=%s, want 404 before auth", rr.Code, rr.Body.String())
+	}
+	// OPTIONS on the disabled path is equally unknown: no preflight
+	// decision, no CORS header.
+	opt := httptest.NewRequest(http.MethodOptions, "/v1/stats/intake", nil)
+	opt.Header.Set("Origin", "https://console.example")
+	opt.Header.Set("Access-Control-Request-Method", "GET")
+	rr = httptest.NewRecorder()
+	m.Handler().ServeHTTP(rr, opt)
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("disabled OPTIONS: status=%d, want 404", rr.Code)
+	}
+	if _, present := rr.Header()["Access-Control-Allow-Origin"]; present {
+		t.Fatalf("disabled OPTIONS must not emit CORS headers")
+	}
+}
+
+// The intake path is routable through the mux (endpoint recognition,
+// auth dispatch, handler) and refuses a key-less request with 401 before
+// the public rate tier: a 404 here would mean the path never reached the
+// handler at all.
+func TestIntakeEndpointRoutedThroughMuxRequiresPartnerKey(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	h := intakeHandlerFixture(t, now.Add(-10*time.Second), now)
+	m := &Mux{h: h, authFailLimit: newLimiterWithBounds(10, time.Minute), publicLimit: newLimiterWithBounds(1, time.Minute), partnerLimit: newLimiterWithBounds(10, time.Minute), preflightLimit: newLimiterWithBounds(10, time.Minute), preflightRPM: 10}
+	m.WithIntake(true, []int64{7})
+	for i := 0; i < 3; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/v1/stats/intake", nil)
+		rr := httptest.NewRecorder()
+		m.Handler().ServeHTTP(rr, req)
+		if rr.Code != http.StatusUnauthorized || !strings.Contains(rr.Body.String(), "unauthorized") {
+			t.Fatalf("key-less GET #%d: status=%d body=%s, want 401 unauthorized (never 404, never a public-tier 429)", i, rr.Code, rr.Body.String())
+		}
+		if _, present := rr.Header()["Access-Control-Allow-Origin"]; present {
+			t.Fatalf("intake refusal must not emit CORS headers")
+		}
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/stats/intake", nil)
+	rr := httptest.NewRecorder()
+	m.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("POST: status=%d, want 405", rr.Code)
 	}
 }

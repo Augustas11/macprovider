@@ -119,6 +119,14 @@ func (m *Mux) Handler() http.Handler {
 func (m *Mux) dispatch(w http.ResponseWriter, r *http.Request) {
 	now := time.Now().UTC()
 
+	// SPEC-017 §5.2b.7: a disabled intake endpoint does not exist for any
+	// method — OPTIONS included — so the check precedes the preflight
+	// branch and no CORS decision is ever made for it.
+	if !m.h.IntakeEnabled && trimEndpointFromPath(r.URL.Path) == "intake" {
+		writeError(w, r, http.StatusNotFound, codeBadRequest, "unknown endpoint", now, nil)
+		return
+	}
+
 	if r.Method == http.MethodOptions {
 		ip := clientIP(r, m.trustedCIDRs)
 		endpoint := trimEndpointFromPath(r.URL.Path)
@@ -135,7 +143,7 @@ func (m *Mux) dispatch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	endpoint := trimEndpointFromPath(r.URL.Path)
-	if endpoint == "" || (endpoint == "intake" && !m.h.IntakeEnabled) {
+	if endpoint == "" {
 		writeError(w, r, http.StatusNotFound, codeBadRequest, "unknown endpoint", now, nil)
 		return
 	}
@@ -203,6 +211,15 @@ func (m *Mux) dispatch(w http.ResponseWriter, r *http.Request) {
 		// against a valid partner key.
 		if authHeaderPresent {
 			m.authFailLimit.refund(reservedKey, now)
+		}
+		// SPEC-017 §5.2b.7: intake has no public projection. A request
+		// without a partner key is refused here, before the public rate
+		// tier (which is never consulted for this endpoint) and with the
+		// same 401 shape as every other intake refusal.
+		if endpoint == "intake" && ar.projection != "partner" {
+			w.Header().Set("Vary", varyForPublic())
+			writeError(w, r, http.StatusUnauthorized, codeUnauthorized, "unauthorized", now, nil)
+			return
 		}
 		// Round-3 CODE H2: tag the request context with the
 		// projection so writeError picks the partner Cache-

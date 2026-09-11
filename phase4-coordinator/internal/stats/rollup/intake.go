@@ -17,6 +17,12 @@ import (
 // §5.2b.6, in emission order.
 var fleetRAMClassFloors = []int{8, 16, 24, 32, 48, 64, 96, 128, 192, 256, 512}
 
+// fleetRAMPeriod is the SPEC-017 §5.2b.6 materialization period: the
+// histogram is computed at most once per period and held byte-identical
+// until the next period boundary, so successive polls never differ by one
+// provider's arrival or departure.
+const fleetRAMPeriod = 30 * 24 * time.Hour
+
 // FleetRAMClass is one `fleet_ram.classes` element.
 type FleetRAMClass struct {
 	RAMGBFloor    int  `json:"ram_gb_floor"`
@@ -37,12 +43,15 @@ type FleetRAM struct {
 // BuildFleetRAM buckets active providers' verified unified memory by class
 // floor and applies complementary suppression (SPEC-017 §5.2b.6): a class
 // below k is suppressed, and when any class is suppressed the smallest
-// unsuppressed class (ties: lowest floor) is suppressed too, so the
-// residual never isolates one small class. memoryGB holds one value per
-// active provider; a provider below the lowest floor counts in
-// provider_total only.
+// unsuppressed class is suppressed too (ties: the HIGHEST floor, the more
+// identifying end of the fleet), so the residual never isolates one small
+// class. A provider below the lowest floor belongs to no class and is
+// folded into provider_suppressed, so provider_total always equals the
+// emitted counts plus provider_suppressed. memoryGB holds one value per
+// active provider.
 func BuildFleetRAM(memoryGB []int, windowStart, windowEnd time.Time, k int) FleetRAM {
 	counts := make([]int, len(fleetRAMClassFloors))
+	subFloor := 0
 	for _, gb := range memoryGB {
 		class := -1
 		for i, floor := range fleetRAMClassFloors {
@@ -52,6 +61,8 @@ func BuildFleetRAM(memoryGB []int, windowStart, windowEnd time.Time, k int) Flee
 		}
 		if class >= 0 {
 			counts[class]++
+		} else {
+			subFloor++
 		}
 	}
 	suppressed := make([]bool, len(fleetRAMClassFloors))
@@ -63,13 +74,14 @@ func BuildFleetRAM(memoryGB []int, windowStart, windowEnd time.Time, k int) Flee
 		}
 	}
 	if anySuppressed {
-		// Complementary suppression: also hide the smallest emitted class.
+		// Complementary suppression: also hide the smallest emitted class;
+		// on a tie prefer the highest floor.
 		smallest := -1
 		for i, n := range counts {
 			if suppressed[i] {
 				continue
 			}
-			if smallest < 0 || n < counts[smallest] {
+			if smallest < 0 || n <= counts[smallest] {
 				smallest = i
 			}
 		}
@@ -78,11 +90,12 @@ func BuildFleetRAM(memoryGB []int, windowStart, windowEnd time.Time, k int) Flee
 		}
 	}
 	out := FleetRAM{
-		WindowStart:   windowStart.UTC().Format(time.RFC3339),
-		WindowEnd:     windowEnd.UTC().Format(time.RFC3339),
-		KAnonymityMin: k,
-		ProviderTotal: len(memoryGB),
-		Classes:       make([]FleetRAMClass, 0, len(fleetRAMClassFloors)),
+		WindowStart:        windowStart.UTC().Format(time.RFC3339),
+		WindowEnd:          windowEnd.UTC().Format(time.RFC3339),
+		KAnonymityMin:      k,
+		ProviderTotal:      len(memoryGB),
+		ProviderSuppressed: subFloor,
+		Classes:            make([]FleetRAMClass, 0, len(fleetRAMClassFloors)),
 	}
 	for i, floor := range fleetRAMClassFloors {
 		if suppressed[i] {
@@ -96,40 +109,81 @@ func BuildFleetRAM(memoryGB []int, windowStart, windowEnd time.Time, k int) Flee
 	return out
 }
 
+// fleetRAMPeriodIndex identifies the materialization period a time falls
+// in: fixed 30-day periods counted from the Unix epoch, in UTC.
+func fleetRAMPeriodIndex(t time.Time) int64 {
+	return t.UTC().Unix() / int64(fleetRAMPeriod/time.Second)
+}
+
+// fleetRAMCurrent reports whether a persisted histogram was materialized
+// in the same period as now and is well-formed; if so its bytes are kept
+// verbatim for the rest of the period. An unparseable or foreign-period
+// histogram is recomputed.
+func fleetRAMCurrent(raw []byte, now time.Time) bool {
+	var f FleetRAM
+	if err := json.Unmarshal(raw, &f); err != nil {
+		return false
+	}
+	end, err := time.Parse(time.RFC3339, f.WindowEnd)
+	if err != nil || end.After(now) || f.KAnonymityMin != intake.KAnonymityMin {
+		return false
+	}
+	start, err := time.Parse(time.RFC3339, f.WindowStart)
+	if err != nil || end.Sub(start) != fleetRAMPeriod {
+		return false
+	}
+	return fleetRAMPeriodIndex(end) == fleetRAMPeriodIndex(now)
+}
+
 // ErrIntakeWindowConflict reports one window_id carrying two byte
 // representations; the tick fails closed (SPEC-017 §5.2b.5).
 var ErrIntakeWindowConflict = errors.New("intake: one window_id carries two different windows")
 
+// ErrIntakeWindowInvalid reports a persisted or aggregator window that
+// fails the closed wire contract; the tick fails closed rather than serve
+// or re-persist it (SPEC-017 §5.2b.5).
+var ErrIntakeWindowInvalid = errors.New("intake: window fails the wire contract")
+
 // MergeIntakeWindows merges the aggregator's complete windows into the
-// persisted set by window_id (SPEC-017 §5.2b.5): an id on both sides must
-// carry identical bytes (else ErrIntakeWindowConflict); only complete
-// windows are kept; the result is ordered by descending window_start (ties
-// by id), at most intake.MaxEmittedWindows, none whose end is older than
+// persisted set by window_id (SPEC-017 §5.2b.5). Every window on either
+// side is validated against the closed wire contract (intake.ValidateWindow)
+// and an invalid one fails the merge; an id appearing twice on one side or
+// on both sides must carry identical bytes (else ErrIntakeWindowConflict).
+// The result is ordered by descending window_start (ties by id), at most
+// intake.MaxEmittedWindows, none whose end is older than
 // intake.EmissionRetention before now.
 func MergeIntakeWindows(current []intake.Window, persisted []intake.Window, now time.Time) ([]intake.Window, error) {
 	byID := make(map[string]intake.Window, len(current)+len(persisted))
-	for _, w := range persisted {
-		if w.Complete() {
-			byID[w.WindowID] = w
-		}
-	}
-	for _, w := range current {
-		if !w.Complete() {
-			continue
+	add := func(w intake.Window) error {
+		if err := intake.ValidateWindow(w); err != nil {
+			return fmt.Errorf("%w: %v", ErrIntakeWindowInvalid, err)
 		}
 		if existing, ok := byID[w.WindowID]; ok {
 			a, _ := json.Marshal(existing)
 			b, _ := json.Marshal(w)
 			if !bytes.Equal(a, b) {
-				return nil, fmt.Errorf("%w: %s", ErrIntakeWindowConflict, w.WindowID)
+				return fmt.Errorf("%w: %s", ErrIntakeWindowConflict, w.WindowID)
 			}
+			return nil
 		}
 		byID[w.WindowID] = w
+		return nil
+	}
+	for _, w := range persisted {
+		if err := add(w); err != nil {
+			return nil, err
+		}
+	}
+	for _, w := range current {
+		if err := add(w); err != nil {
+			return nil, err
+		}
 	}
 	cutoff := now.Add(-intake.EmissionRetention)
-	var windows []intake.Window
+	windows := make([]intake.Window, 0, len(byID))
 	for _, w := range byID {
-		if end, err := time.Parse(time.RFC3339, *w.WindowEnd); err != nil || end.Before(cutoff) {
+		end, _ := time.Parse(time.RFC3339, *w.WindowEnd) // validated above
+		if end.Before(cutoff) {
 			continue
 		}
 		windows = append(windows, w)
@@ -166,11 +220,14 @@ func runIntakeTick(ctx context.Context, db *sql.DB, snap SnapshotProvider, now t
 	}()
 
 	// Merge with the persisted complete windows so a restart never loses
-	// one that was already recorded (SPEC-017 §5.2b.5).
+	// one that was already recorded (SPEC-017 §5.2b.5); reuse the
+	// persisted fleet histogram while its materialization period lasts
+	// (§5.2b.6).
 	var persisted intake.UnmatchedModels
+	var persistedFleet []byte
 	{
 		var raw []byte
-		err := tx.QueryRowContext(ctx, `SELECT unmatched_models FROM stats_intake_current WHERE singleton = TRUE`).Scan(&raw)
+		err := tx.QueryRowContext(ctx, `SELECT unmatched_models, fleet_ram FROM stats_intake_current WHERE singleton = TRUE`).Scan(&raw, &persistedFleet)
 		switch {
 		case err == sql.ErrNoRows:
 		case err != nil:
@@ -185,25 +242,26 @@ func runIntakeTick(ctx context.Context, db *sql.DB, snap SnapshotProvider, now t
 	if err != nil {
 		return err
 	}
+	current.Contract = intake.Contract
 	current.Windows = merged
-	if current.Windows == nil {
-		current.Windows = []intake.Window{}
-	}
 
-	windowStart := now.Add(-30 * 24 * time.Hour)
-	memoryGB, err := activeProviderMemory(ctx, tx, windowStart)
-	if err != nil {
-		return err
+	fleetJSON := persistedFleet
+	if !fleetRAMCurrent(persistedFleet, now) {
+		windowStart := now.Add(-fleetRAMPeriod)
+		memoryGB, err := activeProviderMemory(ctx, tx, windowStart, now)
+		if err != nil {
+			return err
+		}
+		fleet := BuildFleetRAM(memoryGB, windowStart, now, intake.KAnonymityMin)
+		fleetJSON, err = json.Marshal(fleet)
+		if err != nil {
+			return fmt.Errorf("intake fleet marshal: %w", err)
+		}
 	}
-	fleet := BuildFleetRAM(memoryGB, windowStart, now, intake.KAnonymityMin)
 
 	unmatchedJSON, err := json.Marshal(current)
 	if err != nil {
 		return fmt.Errorf("intake unmatched marshal: %w", err)
-	}
-	fleetJSON, err := json.Marshal(fleet)
-	if err != nil {
-		return fmt.Errorf("intake fleet marshal: %w", err)
 	}
 	const upsert = `
         INSERT INTO stats_intake_current (singleton, generated_at, unmatched_models, fleet_ram)
@@ -227,22 +285,31 @@ func runIntakeTick(ctx context.Context, db *sql.DB, snap SnapshotProvider, now t
 }
 
 // activeProviderMemory lists the verified unified memory of every provider
-// active in the trailing window (SPEC-017 §5.2b.6): a verified hardware
-// profile whose last_reported_at falls inside the window. Only memory
-// values are read.
-func activeProviderMemory(ctx context.Context, tx *sql.Tx, windowStart time.Time) ([]int, error) {
+// active in the window (SPEC-017 §5.2b.6): a verified hardware profile
+// whose last_reported_at lies in [windowStart, windowEnd] AND whose
+// provider holds a hardware trust root active at windowEnd — a provider
+// that was never trusted, or whose trust has expired, is not fleet. Only
+// memory values are read; no identity column leaves the query.
+func activeProviderMemory(ctx context.Context, tx *sql.Tx, windowStart, windowEnd time.Time) ([]int, error) {
 	rows, err := tx.QueryContext(ctx, `
         SELECT ph.unified_memory_gb
           FROM provider_hardware_profiles ph
          WHERE ph.provider_id <> ''
            AND ph.verified = TRUE
            AND ph.last_reported_at >= $1
-    `, windowStart)
+           AND ph.last_reported_at <= $2
+           AND EXISTS (
+                 SELECT 1
+                   FROM hardware_verification_trust t
+                  WHERE t.provider_id = ph.provider_id
+                    AND (t.expires_at IS NULL OR t.expires_at > $2)
+               )
+    `, windowStart, windowEnd)
 	if err != nil {
 		return nil, fmt.Errorf("intake fleet query: %w", err)
 	}
 	defer rows.Close()
-	var out []int
+	out := []int{}
 	for rows.Next() {
 		var gb int
 		if err := rows.Scan(&gb); err != nil {

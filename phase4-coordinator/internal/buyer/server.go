@@ -223,6 +223,7 @@ type Server struct {
 	// intakeObserver receives unmatched-model requests (SPEC-017 v0.2.1
 	// §5.2b.2); nil disables the hook.
 	intakeObserver    IntakeObserver
+	intakeExcluded    map[string]struct{}
 	requestTimeout    time.Duration
 	failoverEnabled   bool
 	failoverTimeout   time.Duration
@@ -2414,13 +2415,17 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// Coordinator-owned initial metadata binds recovery independently of
 	// settlement trailers and follows any idempotency-assigned internal ID.
 	w.Header().Set("X-MacProvider-Internal-Request-ID", requestID)
+	// SPEC-017 v0.2.1 §5.2b.2: every authenticated request that reached
+	// model resolution and whose key is not an admitted catalog row feeds
+	// the intake aggregator — whether or not a provider serves it. The
+	// aggregator retains neither the string nor the account.
+	s.observeUnmatchedModel(req.Model, accountID, hasAuthenticatedAccount)
 	if !s.pool.ModelKnown(req.Model) && s.resolveModelClass(req.Model) == nil {
-		// SPEC-017 v0.2.1 §5.2b.2 step S1: the request is authenticated
-		// and reached model resolution; hand the raw string and the
-		// account id to the intake aggregator, which retains neither.
-		s.observeUnmatchedModel(req.Model, accountID, hasAuthenticatedAccount)
-		rec.logBuyerFailure(http.StatusNotFound, "No provider has advertised model "+req.Model)
-		writeError(w, http.StatusNotFound, "model_not_found", "No provider has advertised model "+req.Model)
+		// The buyer-supplied string of an unserved model is never persisted:
+		// the request-log row carries a blank model and a constant message.
+		rec.setModel("")
+		rec.logBuyerFailure(http.StatusNotFound, "No provider has advertised the requested model")
+		writeError(w, http.StatusNotFound, "model_not_found", "No provider has advertised the requested model")
 		return
 	}
 	// logAttempt's retried argument is supplied by the caller — M2-1c

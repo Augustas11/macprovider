@@ -37,3 +37,9 @@ GRANT SELECT ON stats_intake_current TO stats_reader;
 GRANT SELECT, INSERT, UPDATE, DELETE ON stats_intake_current TO stats_rollup;
 REVOKE ALL ON stats_intake_current FROM provider_portal;
 REVOKE ALL ON stats_intake_current FROM rewards_writer;
+
+-- SPEC-017 v0.2.1 §5.2b.6 / §7.2.2: the fleet histogram counts only
+-- providers holding a hardware trust root active at the window end, so the
+-- rollup role reads exactly the two columns that decide it — never the
+-- hardware identity hash, chip, memory, or grantor recorded on the row.
+GRANT SELECT (provider_id, expires_at) ON hardware_verification_trust TO stats_rollup;

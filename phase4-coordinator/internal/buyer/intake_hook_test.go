@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/augstar/macprovider-coordinator/internal/billing"
 	"github.com/augstar/macprovider-coordinator/internal/buyer"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
 	"github.com/rs/zerolog"
@@ -91,5 +92,70 @@ func TestIntakeHookIsInertWithoutObserver(t *testing.T) {
 	server.Handler().ServeHTTP(rr, req)
 	if rr.Code != http.StatusNotFound {
 		t.Fatalf("status=%d, want 404", rr.Code)
+	}
+}
+
+type panickingIntakeObserver struct{}
+
+func (panickingIntakeObserver) Observe(string, string) { panic("aggregator bug") }
+
+// SPEC-017 v0.2.1 §5.2b.2 items 1–4 at the buyer boundary: an
+// operator-excluded account is never observed; a key that normalizes onto a
+// listed or recommendable catalog row is never observed even when no
+// provider serves it; an admission-rejected (listed-but-not-recommendable
+// status such as "watch") row IS observed; and a panicking aggregator
+// neither fails nor alters the buyer request.
+func TestIntakeHookAppliesExclusionAndAdmittedCatalogPredicate(t *testing.T) {
+	registry := pool.NewRegistry(nil)
+	obs := &recordingIntakeObserver{}
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithGatewayServiceToken("gateway-secret"),
+		buyer.WithRequireGatewayContext(true),
+		buyer.WithIntakeObserver(obs),
+		buyer.WithIntakeExcludedAccounts([]string{" acct_keepwarm ", ""}),
+		buyer.WithAutotuneFeeds(buyer.AutotuneFeeds{CandidateRowStatuses: map[string]string{
+			billing.NormalizeModelKey("qwen/qwen3-coder-30b"): "listed",
+			billing.NormalizeModelKey("meta/llama-3-8b"):      "recommendable",
+			billing.NormalizeModelKey("acme/watched-1b"):      "watch",
+		}}),
+	)
+	post := func(account, model string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"`+model+`","messages":[{"role":"user","content":"hi"}]}`))
+		req.Header.Set("Authorization", "Bearer gateway-secret")
+		req.Header.Set("X-MacProvider-Account", account)
+		rr := httptest.NewRecorder()
+		server.Handler().ServeHTTP(rr, req)
+		return rr
+	}
+	post("acct_keepwarm", "Some-Unknown")             // excluded account: not observed
+	post("acct_buyer_1", "Qwen/Qwen3-Coder-30B")      // listed row (case-normalized): not observed
+	post("acct_buyer_1", "meta/llama-3-8b")           // recommendable row: not observed
+	post("acct_buyer_1", "acme/watched-1b")           // listed-but-not-admitted: observed
+	rr := post("acct_buyer_1", "Some-Unknown\u009bX") // unknown: observed with the raw string
+	if rr.Code != http.StatusNotFound || strings.Contains(rr.Body.String(), "Some-Unknown") {
+		t.Fatalf("unserved model response must not echo the buyer string: %d %s", rr.Code, rr.Body.String())
+	}
+	calls := obs.snapshot()
+	want := [][2]string{{"acme/watched-1b", "acct_buyer_1"}, {"Some-Unknown\u009bX", "acct_buyer_1"}}
+	if len(calls) != len(want) {
+		t.Fatalf("observer calls = %v, want %v", calls, want)
+	}
+	for i := range want {
+		if calls[i] != want[i] {
+			t.Fatalf("observer calls = %v, want %v", calls, want)
+		}
+	}
+
+	panicky := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0), buyer.WithGatewayServiceToken("gateway-secret"), buyer.WithRequireGatewayContext(true), buyer.WithIntakeObserver(panickingIntakeObserver{}))
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"x","messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set("Authorization", "Bearer gateway-secret")
+	req.Header.Set("X-MacProvider-Account", "acct_buyer_1")
+	rr = httptest.NewRecorder()
+	panicky.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusNotFound || !strings.Contains(rr.Body.String(), "model_not_found") {
+		t.Fatalf("a panicking aggregator must not alter the buyer response: %d %s", rr.Code, rr.Body.String())
 	}
 }

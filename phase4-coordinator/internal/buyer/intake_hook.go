@@ -1,12 +1,18 @@
 package buyer
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/augstar/macprovider-coordinator/internal/billing"
+)
 
 // IntakeObserver receives buyer requests whose model string resolved to no
 // admitted catalog key (SPEC-017 v0.2.1 §5.2b.2 step S1). The coordinator's
-// SPEC-023 §16.2(a) aggregator implements it; the buyer surface only
-// decides eligibility and hands over the raw requested string and the
-// authenticated account id, retaining neither.
+// SPEC-023 §16.2(a) aggregator implements it; the buyer surface alone
+// decides eligibility — authenticated account, not a demo subject, not an
+// operator-excluded account, normalized key matching no listed or
+// recommendable catalog row — and hands over the raw requested string and
+// the authenticated account id, retaining neither.
 type IntakeObserver interface {
 	Observe(rawModel, accountID string)
 }
@@ -18,17 +24,41 @@ func WithIntakeObserver(observer IntakeObserver) Option {
 	}
 }
 
+// WithIntakeExcludedAccounts flags the operator's test, synthetic, and
+// internal buyer accounts (SPEC-017 §5.2b.2 item 4). The set lives at this
+// boundary only; the aggregator never receives an account identifier.
+func WithIntakeExcludedAccounts(accounts []string) Option {
+	return func(s *Server) {
+		s.intakeExcluded = make(map[string]struct{}, len(accounts))
+		for _, id := range accounts {
+			if id = strings.TrimSpace(id); id != "" {
+				s.intakeExcluded[id] = struct{}{}
+			}
+		}
+	}
+}
+
 // demoAccountPrefix marks SPEC-006 demo subjects ("demo:<ip>"); they are
 // never intake-eligible (SPEC-017 §5.2b.2 item 2).
 const demoAccountPrefix = "demo:"
 
-// observeUnmatchedModel applies SPEC-017 §5.2b.2 items 1–3 at the
-// model_not_found rejection: only a request carrying an authenticated
-// account (direct buyer-key authentication or a gateway-service-bearer
-// authenticated account assertion — both land in the request context as
-// the authenticated account) that is not a demo subject reaches the
-// aggregator. Item 4 (the operator's excluded-account set) is applied by
-// the aggregator itself.
+// intakeAdmittedCatalogKey reports whether the requested model string
+// normalizes onto a listed or recommendable catalog row of the current
+// admitted release — independent of provider advertisement, rate-class
+// resolution, or routing outcome (SPEC-017 §5.2b.2).
+func (s *Server) intakeAdmittedCatalogKey(rawModel string) bool {
+	statuses := s.autotuneFeedsSnapshot().CandidateRowStatuses
+	if len(statuses) == 0 {
+		return false
+	}
+	status, ok := statuses[billing.NormalizeModelKey(rawModel)]
+	return ok && (status == "listed" || status == "recommendable")
+}
+
+// observeUnmatchedModel applies SPEC-017 §5.2b.2 items 1–4 for one request
+// that reached model resolution. A panic inside the aggregator is recovered
+// here: intake is stats-owned code on the money path and MUST NOT fail or
+// alter the buyer request (SPEC-017 §4.2).
 func (s *Server) observeUnmatchedModel(rawModel, accountID string, authenticated bool) {
 	if s.intakeObserver == nil || !authenticated {
 		return
@@ -37,5 +67,16 @@ func (s *Server) observeUnmatchedModel(rawModel, accountID string, authenticated
 	if accountID == "" || strings.HasPrefix(accountID, demoAccountPrefix) {
 		return
 	}
+	if _, excluded := s.intakeExcluded[accountID]; excluded {
+		return
+	}
+	if s.intakeAdmittedCatalogKey(rawModel) {
+		return
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			s.log.Warn().Interface("panic", r).Msg("intake aggregator panicked; request unaffected")
+		}
+	}()
 	s.intakeObserver.Observe(rawModel, accountID)
 }

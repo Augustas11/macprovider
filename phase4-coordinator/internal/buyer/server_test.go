@@ -2723,21 +2723,21 @@ func TestRequestLogModelFieldSanitized(t *testing.T) {
 	if rr.Code == http.StatusOK {
 		t.Fatalf("expected 4xx for C1-bearing model; got status=%d body=%s", rr.Code, rr.Body.String())
 	}
-	// The unknown-model buyer-failure path writes a 4xx request_log
-	// row via logBuyerFailure. That row's model column MUST contain
-	// the SANITIZED value (C1 stripped, "modelabc") - proving the
-	// sanitizer is on the persistence path even for buyer-failure
-	// rows, not just success rows.
+	// The unknown-model buyer-failure path writes a 4xx request_log row
+	// via logBuyerFailure. SPEC-017 v0.2.1 §5.2b.2: the buyer-supplied
+	// string of an unserved model is never persisted — the row carries a
+	// blank model and a constant message, so neither the raw nor the
+	// sanitized string reaches the durable store.
 	rows := queryAllRequestLogRows(t, dbPath)
 	if len(rows) != 1 {
 		t.Fatalf("rows=%d, want 1 buyer-failure row: %#v", len(rows), rows)
 	}
 	row := rows[0]
-	if strings.ContainsRune(row.Model, 0x9b) {
-		t.Fatalf("request_log.model contains C1 codepoint U+009B: %q", row.Model)
+	if row.Model != "" {
+		t.Fatalf("request_log.model = %q, want blank for an unserved model", row.Model)
 	}
-	if row.Model != "modelabc" {
-		t.Fatalf("request_log.model = %q, want %q (C1 stripped)", row.Model, "modelabc")
+	if strings.Contains(row.ErrorCode.String, "modelabc") || strings.ContainsRune(row.ErrorCode.String, 0x9b) {
+		t.Fatalf("request_log.error_code carries the buyer string: %q", row.ErrorCode.String)
 	}
 }
 

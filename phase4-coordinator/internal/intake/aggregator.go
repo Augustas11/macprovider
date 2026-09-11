@@ -22,7 +22,6 @@ import (
 	"fmt"
 	"io"
 	"sort"
-	"strings"
 	"sync"
 	"time"
 )
@@ -37,8 +36,9 @@ const (
 	KAnonymityMin = 3
 	// WindowMaxDays bounds an aggregator epoch (SPEC-017 §3.2a).
 	WindowMaxDays = 30
-	// MaxEmittedWindows bounds the `windows` array (SPEC-017 §5.2b.5).
-	MaxEmittedWindows = 8
+	// MaxEmittedWindows bounds the `windows` array (SPEC-017 §5.2b.5): at
+	// most three complete 30-day windows fit the 90-day retention.
+	MaxEmittedWindows = 3
 	// EmissionRetention bounds how old a closed window may be and still be
 	// emitted (SPEC-017 §5.2b.5).
 	EmissionRetention = 90 * 24 * time.Hour
@@ -57,6 +57,13 @@ const (
 	CloseReasonEligibilityChanged = "eligibility_changed"
 
 	eligibilityPolicyIDBytes = 16
+
+	// Configuration maxima (SPEC-017 §5.2b.7): operationally safe ceilings
+	// so K × P and the cap arithmetic stay bounded.
+	MaxKeyBuckets          = 4096
+	MaxPrincipalsPerBucket = 4096
+	MaxDistinctKeyCap      = 10_000_000
+	MaxBuyerRequestFloor   = 1_000_000_000
 )
 
 // Params are the operator-configurable SPEC-023 §16.4 knobs the aggregator
@@ -98,10 +105,20 @@ func (p Params) Validate() error {
 		return errors.New("intake: distinct_key_cap must be positive")
 	case p.BuyerRequestFloor <= 0:
 		return errors.New("intake: buyer_request_floor must be positive")
-	case p.PrincipalCapPct < 1 || p.PrincipalCapPct > 100:
-		return errors.New("intake: principal_cap_pct must be in [1, 100]")
+	case p.PrincipalCapPct < 1 || p.PrincipalCapPct > 10:
+		// SPEC-023 §16.4: clearing the floor needs at least ten independent
+		// principals, so the cap may never exceed a tenth of the floor.
+		return errors.New("intake: principal_cap_pct must be in [1, 10]")
 	case p.PrincipalCapRequests() < 1:
 		return errors.New("intake: buyer_request_floor × principal_cap_pct / 100 must be at least 1")
+	case p.KeyBuckets > MaxKeyBuckets:
+		return fmt.Errorf("intake: key_buckets must be at most %d", MaxKeyBuckets)
+	case p.PrincipalsPerBucket > MaxPrincipalsPerBucket:
+		return fmt.Errorf("intake: principals_per_bucket must be at most %d", MaxPrincipalsPerBucket)
+	case p.DistinctKeyCap > MaxDistinctKeyCap:
+		return fmt.Errorf("intake: distinct_key_cap must be at most %d", MaxDistinctKeyCap)
+	case p.BuyerRequestFloor > MaxBuyerRequestFloor:
+		return fmt.Errorf("intake: buyer_request_floor must be at most %d", MaxBuyerRequestFloor)
 	}
 	return nil
 }
@@ -145,27 +162,94 @@ type OtherSuppressed struct {
 	DistinctKeyCountSaturated bool   `json:"distinct_key_count_saturated"`
 }
 
-// Window is one COMPLETE aggregator epoch on the wire (SPEC-017 §5.2b.5).
-// Only windows closed by epoch_elapsed are ever served or persisted; the
-// open window and incomplete windows exist only in the local diagnostic
-// form (Aggregator.DiagnosticDump), whose close fields are then null.
+// Window is one COMPLETE aggregator epoch on the wire (SPEC-017 §5.2b.5):
+// exactly WindowMaxDays long, closed by epoch_elapsed. Only complete windows
+// are ever served or persisted; the open window exists only in the local
+// diagnostic form (Aggregator.DiagnosticDump), where window_end is null.
 type Window struct {
 	WindowID              string          `json:"window_id"`
 	WindowStart           string          `json:"window_start"`
 	WindowEnd             *string         `json:"window_end"`
-	CloseReason           *string         `json:"close_reason"`
 	Parameters            Parameters      `json:"parameters"`
 	EligibilityPolicyID   string          `json:"eligibility_policy_id"`
-	EligibleRequestTotal  uint64          `json:"eligible_request_total"`
+	ExcludedAccountCount  int             `json:"excluded_account_count"`
 	Buckets               []Bucket        `json:"buckets"`
 	SuppressedBucketCount int             `json:"suppressed_bucket_count"`
 	OtherSuppressed       OtherSuppressed `json:"other_suppressed"`
 }
 
-// Complete reports whether the window was closed by epoch_elapsed — the
-// only kind the endpoint serves.
+// Complete reports whether the window is a served, exactly-30-day epoch.
 func (w Window) Complete() bool {
-	return w.CloseReason != nil && *w.CloseReason == CloseReasonEpochElapsed
+	if w.WindowEnd == nil {
+		return false
+	}
+	start, err1 := time.Parse(time.RFC3339, w.WindowStart)
+	end, err2 := time.Parse(time.RFC3339, *w.WindowEnd)
+	return err1 == nil && err2 == nil && end.Sub(start) == WindowMaxDays*24*time.Hour
+}
+
+// ValidateWindow checks a served or persisted window against the closed
+// wire contract (SPEC-017 §5.2b): complete, ids well-formed, parameters
+// valid with k fixed, buckets at most key_buckets, each bucket a normalized
+// key with lower_bound == count − error ≥ buyer_request_floor, ordered by
+// lower_bound descending then key. A malformed window is never merged or
+// served.
+func ValidateWindow(w Window) error {
+	if !hexID(w.WindowID) || !hexID(w.EligibilityPolicyID) {
+		return errors.New("intake: window_id and eligibility_policy_id must be 32-hex")
+	}
+	if !w.Complete() {
+		return fmt.Errorf("intake: window %s is not a complete %d-day epoch", w.WindowID, WindowMaxDays)
+	}
+	p := Params{KeyBuckets: w.Parameters.KeyBuckets, PrincipalsPerBucket: w.Parameters.PrincipalsPerBucket, DistinctKeyCap: w.Parameters.DistinctKeyCap, BuyerRequestFloor: w.Parameters.BuyerRequestFloor, PrincipalCapPct: w.Parameters.PrincipalCapPct}
+	if err := p.Validate(); err != nil {
+		return err
+	}
+	if w.Parameters.PrincipalCapRequests != p.PrincipalCapRequests() || w.Parameters.KAnonymityMin != KAnonymityMin || w.Parameters.WindowMaxDays != WindowMaxDays {
+		return errors.New("intake: window parameters are inconsistent")
+	}
+	if w.ExcludedAccountCount < 0 || w.SuppressedBucketCount < 0 {
+		return errors.New("intake: negative counter")
+	}
+	if len(w.Buckets)+w.SuppressedBucketCount > w.Parameters.KeyBuckets {
+		return errors.New("intake: more buckets than key_buckets")
+	}
+	seen := map[string]struct{}{}
+	for i, b := range w.Buckets {
+		if !keyEligible(b.ModelKey) {
+			return fmt.Errorf("intake: bucket key %q is not a normalized key", b.ModelKey)
+		}
+		if _, dup := seen[b.ModelKey]; dup {
+			return fmt.Errorf("intake: duplicate bucket key %q", b.ModelKey)
+		}
+		seen[b.ModelKey] = struct{}{}
+		if b.Error > b.Count || b.LowerBound != b.Count-b.Error || b.LowerBound < uint64(w.Parameters.BuyerRequestFloor) {
+			return fmt.Errorf("intake: bucket %q violates lower_bound == count - error >= buyer_request_floor", b.ModelKey)
+		}
+		if i > 0 {
+			prev := w.Buckets[i-1]
+			if prev.LowerBound < b.LowerBound || (prev.LowerBound == b.LowerBound && prev.ModelKey > b.ModelKey) {
+				return errors.New("intake: buckets are not ordered by lower_bound desc, key asc")
+			}
+		}
+	}
+	if w.OtherSuppressed.DistinctKeyCount > uint64(w.Parameters.DistinctKeyCap) || w.OtherSuppressed.RequestCount > requestCountSaturation {
+		return errors.New("intake: other_suppressed exceeds its saturation")
+	}
+	return nil
+}
+
+func hexID(s string) bool {
+	if len(s) != 32 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // UnmatchedModels is the `unmatched_models` object of
@@ -191,23 +275,23 @@ type window struct {
 	other       OtherSuppressed
 	eligible    uint64
 	params      Params
-	eligibility string // eligibility_policy_id in force for this window
+	policyID    string // eligibility_policy_id in force for this window
+	policyCount int    // excluded_account_count in force for this window
 }
 
 // Aggregator is safe for concurrent use.
 type Aggregator struct {
-	mu        sync.Mutex
-	params    Params
-	normalize func(string) string
-	excluded  map[string]struct{}
-	policyKey string // canonical excluded set, compared to detect a change
-	policyID  string // opaque random eligibility_policy_id for the current set
-	now       func() time.Time
-	random    io.Reader
-	open      *window
-	closed    []Window // COMPLETE windows only, newest first, at most MaxEmittedWindows
-	lastClose CloseRecord
-	stopped   bool
+	mu          sync.Mutex
+	params      Params
+	normalize   func(string) string
+	policyID    string // eligibility_policy_id supplied by the caller (SPEC-017 §5.2b.2)
+	policyCount int    // excluded_account_count supplied by the caller
+	now         func() time.Time
+	random      io.Reader
+	open        *window
+	closed      []Window // COMPLETE windows only, newest first, at most MaxEmittedWindows
+	lastClose   CloseRecord
+	stopped     bool
 }
 
 // CloseRecord is the constant-size local record of the most recent close
@@ -239,39 +323,14 @@ func WithRandom(r io.Reader) Option {
 	return func(a *Aggregator) { a.random = r }
 }
 
-// WithExcludedAccounts flags the operator-configured test, synthetic, and
-// internal buyer accounts (SPEC-017 §5.2b.2 item 3).
-func WithExcludedAccounts(accounts []string) Option {
+// WithPolicy records the eligibility policy in force (SPEC-017 §5.2b.2):
+// the caller — the buyer boundary, which alone holds the excluded-account
+// set — derives the opaque policy id and passes only that id and the set's
+// cardinality. The aggregator never sees an account identifier.
+func WithPolicy(policyID string, excludedAccountCount int) Option {
 	return func(a *Aggregator) {
-		a.excluded, a.policyKey = excludedSet(accounts)
+		a.policyID, a.policyCount = policyID, excludedAccountCount
 	}
-}
-
-// excludedSet canonicalizes an excluded-account list. The canonical key is
-// private (never emitted); it only detects whether a reload changed the
-// set. The emitted eligibility_policy_id is random (SPEC-017 §5.2b.2).
-func excludedSet(accounts []string) (map[string]struct{}, string) {
-	set := make(map[string]struct{}, len(accounts))
-	for _, id := range accounts {
-		if id != "" {
-			set[id] = struct{}{}
-		}
-	}
-	ids := make([]string, 0, len(set))
-	for id := range set {
-		ids = append(ids, id)
-	}
-	sort.Strings(ids)
-	return set, strings.Join(ids, "\x00")
-}
-
-func (a *Aggregator) rotatePolicyIDLocked() error {
-	var id [eligibilityPolicyIDBytes]byte
-	if _, err := io.ReadFull(a.random, id[:]); err != nil {
-		return fmt.Errorf("intake: eligibility policy id: %w", err)
-	}
-	a.policyID = hex.EncodeToString(id[:])
-	return nil
 }
 
 // New returns an Aggregator with an open window. normalize is the
@@ -289,39 +348,37 @@ func New(params Params, normalize func(string) string, opts ...Option) (*Aggrega
 		now:       func() time.Time { return time.Now().UTC() },
 		random:    rand.Reader,
 	}
-	a.excluded, a.policyKey = excludedSet(nil)
 	for _, opt := range opts {
 		opt(a)
 	}
+	if !hexID(a.policyID) {
+		return nil, errors.New("intake: eligibility policy id is required (32-hex)")
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if err := a.rotatePolicyIDLocked(); err != nil {
-		return nil, err
-	}
 	if err := a.openLocked(a.now()); err != nil {
 		return nil, err
 	}
 	return a, nil
 }
 
-// SetExcludedAccounts replaces the excluded-account set. A change to the
-// set closes the open window with `eligibility_changed` so one window never
-// mixes two eligibility policies (SPEC-017 §3.2a, §5.2b.2).
-func (a *Aggregator) SetExcludedAccounts(accounts []string) error {
+// SetPolicy replaces the eligibility policy in force. A different policy id
+// closes the open window with `eligibility_changed` so one window never
+// mixes two policies (SPEC-017 §3.2a, §5.2b.2).
+func (a *Aggregator) SetPolicy(policyID string, excludedAccountCount int) error {
+	if !hexID(policyID) {
+		return errors.New("intake: eligibility policy id must be 32-hex")
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	set, key := excludedSet(accounts)
-	if key == a.policyKey {
+	if policyID == a.policyID && excludedAccountCount == a.policyCount {
 		return nil
 	}
 	now := a.now()
 	if a.open != nil {
 		a.closeLocked(now, CloseReasonEligibilityChanged)
 	}
-	a.excluded, a.policyKey = set, key
-	if err := a.rotatePolicyIDLocked(); err != nil {
-		return err
-	}
+	a.policyID, a.policyCount = policyID, excludedAccountCount
 	if a.stopped {
 		return nil
 	}
@@ -362,11 +419,15 @@ func (a *Aggregator) Stop() {
 }
 
 // Observe records one buyer request that passed the caller's S1
-// authentication and model-resolution checks. rawModel is the buyer's
-// requested model string; accountID the authenticated buyer account id.
-// accountID is read once, for the principal token derivation, and is not
-// retained (SPEC-023 §16.2(a) item 10).
+// authentication, model-resolution, and eligibility-policy checks. rawModel
+// is the buyer's requested model string; accountID the authenticated buyer
+// account id. The id is used exactly once, to derive the principal token
+// BEFORE any intake state is touched, and is not retained (SPEC-023
+// §16.2(a) item 10, step S4).
 func (a *Aggregator) Observe(rawModel, accountID string) {
+	if accountID == "" {
+		return
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.stopped {
@@ -376,27 +437,25 @@ func (a *Aggregator) Observe(rawModel, accountID string) {
 	if err := a.ensureWindowLocked(now); err != nil || a.open == nil {
 		return
 	}
-	// S1 — an excluded (test/synthetic/internal) or unauthenticated
-	// principal contributes to nothing at all.
-	if accountID == "" {
-		return
-	}
-	if _, excluded := a.excluded[accountID]; excluded {
-		return
-	}
 	w := a.open
 	// S2 — normalize before any lookup; the raw string is never a key.
 	key := a.normalize(rawModel)
+	eligibleKey := keyEligible(key)
+	// S4 (derivation only) — the token is derived first so no mutation below
+	// runs while the raw identifier is still needed; the id is then dropped.
+	var token [principalTokenBytes]byte
+	if eligibleKey {
+		token = principalToken(&w.key, accountID)
+	}
+	accountID = ""
 	w.eligible++
 	// S3 — closed grammar and byte limit.
-	if !keyEligible(key) {
+	if !eligibleKey {
 		w.other.addRequests(1)
 		w.other.addDistinct(1, w.params.DistinctKeyCap)
 		return
 	}
-	// S4 — derive the opaque window-scoped principal token; the raw
-	// account id is not used past this line.
-	token := principalToken(&w.key, accountID)
+	// S4 (cap and bound) against the bucket this key would target.
 	cap := uint32(w.params.PrincipalCapRequests())
 	e := w.index[key]
 	if e != nil {
@@ -480,15 +539,24 @@ func (a *Aggregator) ensureWindowLocked(now time.Time) error {
 	if a.open == nil {
 		return a.openLocked(now)
 	}
-	if !now.Before(a.open.start.Add(WindowMaxDays * 24 * time.Hour)) {
-		a.closeLocked(now, CloseReasonEpochElapsed)
-		return a.openLocked(now)
+	// An epoch closes at exactly start + 30 days, whatever time the closing
+	// call arrives; the next epoch opens at that deadline, so a late tick
+	// yields exact windows and, if more than one deadline passed, empty
+	// complete windows for the intervening epochs.
+	for {
+		deadline := a.open.start.Add(WindowMaxDays * 24 * time.Hour)
+		if now.Before(deadline) {
+			return nil
+		}
+		a.closeLocked(deadline, CloseReasonEpochElapsed)
+		if err := a.openLocked(deadline); err != nil {
+			return err
+		}
 	}
-	return nil
 }
 
 func (a *Aggregator) openLocked(now time.Time) error {
-	w := &window{start: now.UTC(), index: map[string]*entry{}, params: a.params, eligibility: a.policyID}
+	w := &window{start: now.UTC(), index: map[string]*entry{}, params: a.params, policyID: a.policyID, policyCount: a.policyCount}
 	if _, err := io.ReadFull(a.random, w.key[:]); err != nil {
 		return fmt.Errorf("intake: window key: %w", err)
 	}
@@ -552,17 +620,16 @@ func (w *window) wire(end *time.Time, reason string) Window {
 		WindowID:             w.id,
 		WindowStart:          w.start.UTC().Format(time.RFC3339),
 		Parameters:           w.params.wire(),
-		EligibilityPolicyID:  w.eligibility,
-		EligibleRequestTotal: w.eligible,
+		EligibilityPolicyID:  w.policyID,
+		ExcludedAccountCount: w.policyCount,
 		Buckets:              []Bucket{},
 		OtherSuppressed:      w.other,
 	}
 	if end != nil {
 		s := end.UTC().Format(time.RFC3339)
-		r := reason
 		out.WindowEnd = &s
-		out.CloseReason = &r
 	}
+	_ = reason
 	floor := uint64(w.params.BuyerRequestFloor)
 	for _, e := range w.entries {
 		// SPEC-017 §5.2b.4: a bucket is emitted only when at least
@@ -594,10 +661,6 @@ func cloneWindow(w Window) Window {
 	if w.WindowEnd != nil {
 		s := *w.WindowEnd
 		out.WindowEnd = &s
-	}
-	if w.CloseReason != nil {
-		s := *w.CloseReason
-		out.CloseReason = &s
 	}
 	return out
 }

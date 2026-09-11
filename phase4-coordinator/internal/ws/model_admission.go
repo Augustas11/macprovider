@@ -86,10 +86,11 @@ type ModelAdmissionStore interface {
 	// LatestModelAdmissionStatusesInStates is the latest event of every
 	// candidate of every provider whose state is one of states (reload sweeps).
 	LatestModelAdmissionStatusesInStates(context.Context, []string) ([]ModelAdmissionEvent, error)
-	// ModelAdmissionOfferEventsSince lists every offer_submitted event whose
-	// coordinator-assigned CreatedAt is at or after since (SPEC-047 v0.1.6
-	// intake aggregate; ascending append order).
-	ModelAdmissionOfferEventsSince(context.Context, time.Time) ([]ModelAdmissionEvent, error)
+	// ModelAdmissionIntakeOfferPairs lists the DISTINCT (provider_id,
+	// intake_model_key) pairs of offer_submitted events whose
+	// coordinator-assigned append time lies in [since, until] (SPEC-047 R009);
+	// bounded by providers × keys, never by event volume.
+	ModelAdmissionIntakeOfferPairs(context.Context, time.Time, time.Time) ([]ModelAdmissionIntakePair, error)
 	// ModelAdmissionEventByRequestID is the operator idempotency lookup: the
 	// event a (provider_id, request_id) pair originally produced.
 	ModelAdmissionEventByRequestID(context.Context, string, string) (ModelAdmissionEvent, bool, error)
@@ -132,8 +133,12 @@ type ModelAdmissionEvent struct {
 	// member set; the six Artifact* values bind a feed member at decision
 	// time; EvaluatedReleaseGeneration is the release generation the
 	// decision evaluated under.
-	RuntimeSource                  string
-	CatalogMatchState              string
+	RuntimeSource     string
+	CatalogMatchState string
+	// IntakeModelKey is the SPEC-047 v0.1.6 R009 intake resolution of the
+	// offer's artifact_hashes against ANY catalog row or verified artifact,
+	// whatever the row's tier; never an admission input.
+	IntakeModelKey                 string
 	CatalogMatchReason             string
 	CatalogRowModelID              string
 	CatalogRowModelSHA256          string
@@ -468,14 +473,25 @@ func (s *memoryModelAdmissionStore) LatestModelAdmissionStatusesInStates(_ conte
 	return out, nil
 }
 
-func (s *memoryModelAdmissionStore) ModelAdmissionOfferEventsSince(_ context.Context, since time.Time) ([]ModelAdmissionEvent, error) {
+func (s *memoryModelAdmissionStore) ModelAdmissionIntakeOfferPairs(_ context.Context, since, until time.Time) ([]ModelAdmissionIntakePair, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	var out []ModelAdmissionEvent
+	seen := map[ModelAdmissionIntakePair]struct{}{}
+	var out []ModelAdmissionIntakePair
 	for _, event := range s.events {
-		if event.State == modelAdmissionOfferSubmitted && !event.CreatedAt.Before(since) {
-			out = append(out, event)
+		if event.State != modelAdmissionOfferSubmitted || event.IntakeModelKey == "" {
+			continue
 		}
+		at := event.CreatedAt.UTC().Truncate(time.Second)
+		if at.Before(since.UTC().Truncate(time.Second)) || at.After(until.UTC().Truncate(time.Second)) {
+			continue
+		}
+		pair := ModelAdmissionIntakePair{ProviderID: event.ProviderID, IntakeModelKey: event.IntakeModelKey}
+		if _, dup := seen[pair]; dup {
+			continue
+		}
+		seen[pair] = struct{}{}
+		out = append(out, pair)
 	}
 	return out, nil
 }
@@ -628,6 +644,7 @@ func ensureSQLiteModelAdmissionColumns(db *sql.DB) error {
 		// SPEC-047 v0.1.5 recorded match + decision binding columns.
 		{name: "runtime_source", sql: `ALTER TABLE model_admission_events ADD COLUMN runtime_source TEXT NOT NULL DEFAULT ''`},
 		{name: "catalog_match_state", sql: `ALTER TABLE model_admission_events ADD COLUMN catalog_match_state TEXT NOT NULL DEFAULT ''`},
+		{name: "intake_model_key", sql: `ALTER TABLE model_admission_events ADD COLUMN intake_model_key TEXT NOT NULL DEFAULT ''`},
 		{name: "catalog_match_reason", sql: `ALTER TABLE model_admission_events ADD COLUMN catalog_match_reason TEXT NOT NULL DEFAULT ''`},
 		{name: "catalog_row_model_id", sql: `ALTER TABLE model_admission_events ADD COLUMN catalog_row_model_id TEXT NOT NULL DEFAULT ''`},
 		{name: "catalog_row_model_sha256", sql: `ALTER TABLE model_admission_events ADD COLUMN catalog_row_model_sha256 TEXT NOT NULL DEFAULT ''`},
@@ -710,24 +727,32 @@ func (s *SQLiteModelAdmissionStore) LatestModelAdmissionStatusesInStates(ctx con
  ORDER BY e.provider_id ASC, e.candidate_id ASC`), args...)
 }
 
-func (s *SQLiteModelAdmissionStore) ModelAdmissionOfferEventsSince(ctx context.Context, since time.Time) ([]ModelAdmissionEvent, error) {
-	// State is filtered in SQL (indexed); the window bound is applied on the
-	// parsed coordinator-assigned CreatedAt so the comparison never depends
-	// on the textual timestamp encoding.
-	events, err := scanModelAdmissionEvents(ctx, s.db, modelAdmissionEventSelect(`
-  FROM model_admission_events e
- WHERE e.state = ?
- ORDER BY e.id ASC`), modelAdmissionOfferSubmitted)
+func (s *SQLiteModelAdmissionStore) ModelAdmissionIntakeOfferPairs(ctx context.Context, since, until time.Time) ([]ModelAdmissionIntakePair, error) {
+	// created_at_utc is RFC3339Nano text; every value shares the fixed
+	// 19-character "YYYY-MM-DDTHH:MM:SS" prefix, so bounds expressed as that
+	// prefix compare lexically at second granularity ([since, until]
+	// inclusive) and the (state, created_at_utc) index serves the range.
+	lower := since.UTC().Format("2006-01-02T15:04:05")
+	upper := until.UTC().Add(time.Second).Format("2006-01-02T15:04:05")
+	rows, err := s.db.QueryContext(ctx, `
+SELECT DISTINCT provider_id, intake_model_key
+  FROM model_admission_events
+ WHERE state = ? AND intake_model_key <> ''
+   AND created_at_utc >= ? AND created_at_utc < ?
+ ORDER BY provider_id ASC, intake_model_key ASC`, modelAdmissionOfferSubmitted, lower, upper)
 	if err != nil {
 		return nil, err
 	}
-	out := events[:0]
-	for _, event := range events {
-		if !event.CreatedAt.Before(since) {
-			out = append(out, event)
+	defer rows.Close()
+	var out []ModelAdmissionIntakePair
+	for rows.Next() {
+		var pair ModelAdmissionIntakePair
+		if err := rows.Scan(&pair.ProviderID, &pair.IntakeModelKey); err != nil {
+			return nil, err
 		}
+		out = append(out, pair)
 	}
-	return out, nil
+	return out, rows.Err()
 }
 
 func (s *SQLiteModelAdmissionStore) AppendModelAdmissionDecision(ctx context.Context, event ModelAdmissionEvent) (ModelAdmissionEvent, error) {
@@ -815,8 +840,8 @@ INSERT INTO model_admission_events(
     catalog_candidate_sha256, catalog_signer_key_id, catalog_members_json,
     artifact_feed_sha256, artifact_id, artifact_hash, artifact_hash_algorithm,
     artifact_feed_signer_key_id, artifact_candidate_catalog_sha256,
-    bound_member_source, evaluated_release_generation
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    bound_member_source, evaluated_release_generation, intake_model_key
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			event.ProviderID,
 			event.CandidateID,
 			event.ServedModelRef,
@@ -858,6 +883,7 @@ INSERT INTO model_admission_events(
 			event.ArtifactCandidateCatalogSHA256,
 			event.BoundMemberSource,
 			int64(event.EvaluatedReleaseGeneration),
+			event.IntakeModelKey,
 		); err != nil {
 			return err
 		}
@@ -997,8 +1023,8 @@ INSERT INTO model_admission_events(
     catalog_candidate_sha256, catalog_signer_key_id, catalog_members_json,
     artifact_feed_sha256, artifact_id, artifact_hash, artifact_hash_algorithm,
     artifact_feed_signer_key_id, artifact_candidate_catalog_sha256,
-    bound_member_source, evaluated_release_generation
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    bound_member_source, evaluated_release_generation, intake_model_key
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			event.ProviderID,
 			event.CandidateID,
 			event.ServedModelRef,
@@ -1040,6 +1066,7 @@ INSERT INTO model_admission_events(
 			event.ArtifactCandidateCatalogSHA256,
 			event.BoundMemberSource,
 			int64(event.EvaluatedReleaseGeneration),
+			event.IntakeModelKey,
 		); err != nil {
 			return err
 		}
@@ -1218,6 +1245,7 @@ func scanModelAdmissionEventRow(row modelAdmissionScanner) (ModelAdmissionEvent,
 		&event.ArtifactCandidateCatalogSHA256,
 		&event.BoundMemberSource,
 		&evaluatedGeneration,
+		&event.IntakeModelKey,
 	)
 	if err != nil {
 		return ModelAdmissionEvent{}, err
@@ -1248,7 +1276,7 @@ func modelAdmissionEventSelect(tail string) string {
        catalog_candidate_sha256, catalog_signer_key_id, catalog_members_json,
        artifact_feed_sha256, artifact_id, artifact_hash, artifact_hash_algorithm,
        artifact_feed_signer_key_id, artifact_candidate_catalog_sha256,
-       bound_member_source, evaluated_release_generation` + tail
+       bound_member_source, evaluated_release_generation, intake_model_key` + tail
 }
 
 func scanModelAdmissionEvents(ctx context.Context, q interface {
@@ -2003,9 +2031,8 @@ func (s *Server) verifyModelAdmissionOffer(ctx context.Context, authenticatedPro
 }
 
 func (s *Server) verifyModelAdmissionWithdrawal(ctx context.Context, authenticatedProviderID string, body modelAdmissionWithdrawRequest) (ModelAdmissionEvent, error) {
-	if s.providerModelAdmissionSanctioned(authenticatedProviderID) {
-		return ModelAdmissionEvent{}, errModelAdmissionUnauthorized
-	}
+	// SPEC-047-R006: withdrawal is never sanction-gated; a sanctioned
+	// provider may still leave the admission state it is in.
 	if body.Schema != modelAdmissionWithdrawRequestSchema {
 		return ModelAdmissionEvent{}, fmt.Errorf("invalid schema")
 	}
@@ -2063,19 +2090,24 @@ func (s *Server) verifyModelAdmissionWithdrawal(ctx context.Context, authenticat
 	}, nil
 }
 
-// providerModelAdmissionSanctioned is the offer-path view of the SPEC-047
-// v0.1.6 closed `provider_intake_sanctioned` predicate (see
-// providerIntakeSanctioned): a sanctioned provider may not submit or
-// withdraw an offer, and an unreadable sanction source fails closed.
+// providerModelAdmissionSanctioned is the OFFER-SUBMISSION gate of
+// SPEC-047-R007 (v0.1.5 scope, unchanged by R009): a provider under a
+// provisional-admission rejection or a persisted canary sanction may not
+// submit a new offer. Withdrawal is never gated (SPEC-047-R006). The intake
+// aggregate applies the wider four-category predicate (providerIntakeSanctioned).
 func (s *Server) providerModelAdmissionSanctioned(providerID string) bool {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	sanctioned, err := s.providerIntakeSanctioned(ctx, providerID)
-	if err != nil {
-		s.log.Warn().Err(err).Str("provider_id", providerID).Msg("sanction source unreadable; refusing model admission mutation")
+	if s.admission != nil && s.admission.Rejected(providerID) {
 		return true
 	}
-	return sanctioned
+	if s.pool == nil {
+		return false
+	}
+	for _, sanction := range s.pool.CanarySanctions() {
+		if sanction.ProviderID == providerID && sanction.FailCount > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) allowModelAdmissionAttempt(providerID string) bool {

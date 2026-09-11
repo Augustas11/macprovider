@@ -28,10 +28,15 @@ type clock struct{ t time.Time }
 
 func (c *clock) now() time.Time { return c.t }
 
+const (
+	policyA = "9a2e6c1d4b8f0a3e5c7d9b1f3a5c7e90"
+	policyB = "1111111111111111111111111111aaaa"
+)
+
 func newTestAggregator(t *testing.T, params Params, opts ...Option) (*Aggregator, *clock) {
 	t.Helper()
 	c := &clock{t: time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)}
-	opts = append([]Option{WithClock(c.now), WithRandom(&fixedRandom{seed: 1})}, opts...)
+	opts = append([]Option{WithClock(c.now), WithRandom(&fixedRandom{seed: 1}), WithPolicy(policyA, 2)}, opts...)
 	a, err := New(params, lowerNormalize, opts...)
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -51,18 +56,30 @@ func openWindow(t *testing.T, a *Aggregator) Window {
 	if err := json.Unmarshal(dump, &um); err != nil {
 		t.Fatal(err)
 	}
-	if len(um.Windows) != 1 || um.Windows[0].CloseReason != nil {
+	if len(um.Windows) != 1 || um.Windows[0].WindowEnd != nil {
 		t.Fatalf("no open window in dump: %+v", um)
 	}
 	return um.Windows[0]
+}
+
+// otherSuppressed reads the open window's internal counters (the wire form
+// carries no eligible_request_total).
+func openState(t *testing.T, a *Aggregator) (eligible uint64, other OtherSuppressed, entries int) {
+	t.Helper()
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.open == nil {
+		t.Fatalf("no open window")
+	}
+	return a.open.eligible, a.open.other, len(a.open.entries)
 }
 
 // lowFloor makes the floor rule inert so the S-order tests can inspect
 // per-key bounds; the floor rule has its own test.
 func lowFloor() Params {
 	p := DefaultParams()
-	p.BuyerRequestFloor = 10
-	p.PrincipalCapPct = 100 // cap 10 per principal
+	p.BuyerRequestFloor = 100
+	p.PrincipalCapPct = 10 // cap 10 per principal
 	return p
 }
 
@@ -81,22 +98,33 @@ func TestParamsValidate(t *testing.T) {
 	}
 	bad := DefaultParams()
 	bad.BuyerRequestFloor = 5
-	bad.PrincipalCapPct = 10
 	if err := bad.Validate(); err == nil {
 		t.Fatalf("expected floor×pct/100 < 1 to be rejected")
+	}
+	bad = DefaultParams()
+	bad.PrincipalCapPct = 20
+	if err := bad.Validate(); err == nil {
+		t.Fatalf("a cap above a tenth of the floor must be rejected")
+	}
+	bad = DefaultParams()
+	bad.KeyBuckets = MaxKeyBuckets + 1
+	if err := bad.Validate(); err == nil {
+		t.Fatalf("key_buckets above the maximum must be rejected")
 	}
 	if got := DefaultParams().PrincipalCapRequests(); got != 25 {
 		t.Fatalf("PrincipalCapRequests = %d, want 25", got)
 	}
+	if _, err := New(DefaultParams(), lowerNormalize, WithPolicy("short", 0)); err == nil {
+		t.Fatalf("a malformed policy id must be rejected")
+	}
 }
 
-func TestS1IneligibleContributesToNothing(t *testing.T) {
-	a, _ := newTestAggregator(t, DefaultParams(), WithExcludedAccounts([]string{"keepwarm"}))
+func TestS1EmptyPrincipalContributesToNothing(t *testing.T) {
+	a, _ := newTestAggregator(t, DefaultParams())
 	a.Observe("qwen3-14b", "")
-	a.Observe("qwen3-14b", "keepwarm")
-	w := openWindow(t, a)
-	if w.EligibleRequestTotal != 0 || len(w.Buckets) != 0 || w.OtherSuppressed.RequestCount != 0 {
-		t.Fatalf("ineligible requests contributed: %+v", w)
+	eligible, other, entries := openState(t, a)
+	if eligible != 0 || entries != 0 || other.RequestCount != 0 {
+		t.Fatalf("an unauthenticated request contributed: eligible=%d entries=%d other=%+v", eligible, entries, other)
 	}
 }
 
@@ -106,50 +134,52 @@ func TestS3GrammarGoesToOtherSuppressedOnly(t *testing.T) {
 	a.Observe(strings.Repeat("a", 129), "acct-1") // over 128 bytes
 	a.Observe("ünicode", "acct-1")                // non-ASCII
 	a.Observe(strings.Repeat("a", 128), "acct-1") // exactly 128: eligible
+	eligible, other, entries := openState(t, a)
+	if eligible != 4 {
+		t.Fatalf("eligible = %d, want 4", eligible)
+	}
+	if other.RequestCount != 3 || other.DistinctKeyCount != 3 {
+		t.Fatalf("other_suppressed = %+v, want 3/3", other)
+	}
+	if entries != 1 {
+		t.Fatalf("entries = %d, want the one eligible key", entries)
+	}
+	// The eligible key was requested by one principal below the floor:
+	// retained but omitted from the wire (SPEC-017 §5.2b.4).
 	w := openWindow(t, a)
-	if w.EligibleRequestTotal != 4 {
-		t.Fatalf("eligible_request_total = %d, want 4", w.EligibleRequestTotal)
-	}
-	if w.OtherSuppressed.RequestCount != 3 || w.OtherSuppressed.DistinctKeyCount != 3 {
-		t.Fatalf("other_suppressed = %+v, want 3/3", w.OtherSuppressed)
-	}
-	// The eligible key was requested by one principal only: retained but
-	// omitted from the wire (SPEC-017 §5.2b.4).
 	if len(w.Buckets) != 0 || w.SuppressedBucketCount != 1 {
 		t.Fatalf("buckets = %+v suppressed=%d, want 0 emitted / 1 suppressed", w.Buckets, w.SuppressedBucketCount)
 	}
-	for i := 0; i < 3; i++ {
-		for j := 0; j < 4; j++ {
+	// Ten principals at the cap clear the floor of 100 → emitted.
+	for i := 0; i < 10; i++ {
+		for j := 0; j < 10; j++ {
 			a.Observe(strings.Repeat("a", 128), fmt.Sprintf("acct-%d", i+2))
 		}
 	}
 	w = openWindow(t, a)
-	if len(w.Buckets) != 1 || w.Buckets[0].ModelKey != strings.Repeat("a", 128) || w.SuppressedBucketCount != 0 || w.Buckets[0].LowerBound != 13 {
-		t.Fatalf("three principals clearing the floor should emit the bucket: %+v suppressed=%d", w.Buckets, w.SuppressedBucketCount)
+	if len(w.Buckets) != 1 || w.Buckets[0].ModelKey != strings.Repeat("a", 128) || w.SuppressedBucketCount != 0 || w.Buckets[0].LowerBound != 101 {
+		t.Fatalf("ten principals clearing the floor should emit the bucket: %+v suppressed=%d", w.Buckets, w.SuppressedBucketCount)
 	}
 }
 
-func TestS4PrincipalCapAndSuppression(t *testing.T) {
+func TestS4PrincipalCapAndFloorGatedEmission(t *testing.T) {
 	p := DefaultParams() // cap 25, floor 250
 	a, _ := newTestAggregator(t, p)
 	for i := 0; i < 40; i++ {
 		a.Observe("qwen3-14b", "single-buyer")
 	}
 	w := openWindow(t, a)
-	// One principal, 40 requests: capped at 25 internally, and ABSENT from
-	// the wire (k-anonymity counts distinct principals; the floor is unmet).
 	if _, ok := bucketFor(w, "qwen3-14b"); ok || w.SuppressedBucketCount != 1 {
 		t.Fatalf("single-principal bucket must be omitted: %+v suppressed=%d", w.Buckets, w.SuppressedBucketCount)
 	}
-	if w.OtherSuppressed.RequestCount != 15 {
-		t.Fatalf("over-cap traffic not discarded into other_suppressed: %+v", w.OtherSuppressed)
+	if _, other, _ := openState(t, a); other.RequestCount != 15 {
+		t.Fatalf("over-cap traffic not discarded into other_suppressed: %+v", other)
 	}
 	dump, _ := a.DiagnosticDump()
 	if bytes.Contains(dump, []byte("qwen3-14b")) {
 		t.Fatalf("a key requested by one principal must not appear in emitted bytes: %s", dump)
 	}
-	// Three principals but a lower bound of 27: still below the floor,
-	// still absent.
+	// Three principals but a lower bound of 27: still below the floor.
 	a.Observe("qwen3-14b", "buyer-b")
 	a.Observe("qwen3-14b", "buyer-c")
 	w = openWindow(t, a)
@@ -167,7 +197,7 @@ func TestS4PrincipalCapAndSuppression(t *testing.T) {
 	if !ok || !b.ClearsFloor(250) || b.LowerBound != 250 || b.Count != 250 || b.Error != 0 {
 		t.Fatalf("ten independent principals at the cap should clear 250: %+v", b)
 	}
-	// Nine principals at the cap (225) plus one more principal's 24: 249 < 250, absent.
+	// 249 does not clear 250.
 	a3, _ := newTestAggregator(t, p)
 	for i := 0; i < 9; i++ {
 		for j := 0; j < 25; j++ {
@@ -184,67 +214,64 @@ func TestS4PrincipalCapAndSuppression(t *testing.T) {
 
 func TestS4PrincipalOverflowGoesToOtherSuppressed(t *testing.T) {
 	p := lowFloor()
-	p.PrincipalsPerBucket = 3
+	p.PrincipalsPerBucket = 10
 	a, _ := newTestAggregator(t, p)
-	for i := 0; i < 4; i++ {
-		a.Observe("k", "p1")
-		a.Observe("k", "p2")
-		a.Observe("k", "p3")
+	for i := 0; i < 10; i++ {
+		for j := 0; j < 10; j++ {
+			a.Observe("k", fmt.Sprintf("p%d", i))
+		}
 	}
-	a.Observe("k", "p4") // overflow principal
+	a.Observe("k", "p-overflow")
 	w := openWindow(t, a)
 	b, ok := bucketFor(w, "k")
-	if !ok || b.LowerBound != 12 {
-		t.Fatalf("bucket = %+v, want lower_bound 12 (p4 excluded)", b)
+	if !ok || b.LowerBound != 100 {
+		t.Fatalf("bucket = %+v, want lower_bound 100 (overflow principal excluded)", b)
 	}
-	if w.OtherSuppressed.RequestCount != 1 {
-		t.Fatalf("overflow principal not routed to other_suppressed: %+v", w.OtherSuppressed)
+	if _, other, _ := openState(t, a); other.RequestCount != 1 {
+		t.Fatalf("overflow principal not routed to other_suppressed: %+v", other)
 	}
 }
 
 func TestS5EvictionIsDeterministicAndTransfersOnce(t *testing.T) {
 	p := lowFloor()
 	p.KeyBuckets = 2
-	run := func() (UnmatchedModels, Window) {
+	run := func() (UnmatchedModels, OtherSuppressed, int) {
 		a, _ := newTestAggregator(t, p)
-		for i := 0; i < 5; i++ {
-			a.Observe("alpha", fmt.Sprintf("a%d", i))
-			a.Observe("alpha", fmt.Sprintf("a%d", i))
+		for i := 0; i < 10; i++ {
+			for j := 0; j < 10; j++ {
+				a.Observe("alpha", fmt.Sprintf("a%d", i))
+			}
 		}
 		for i := 0; i < 3; i++ {
 			a.Observe("beta", fmt.Sprintf("b%d", i))
 		}
-		// Summary full: gamma evicts beta (smallest count 3) -> count 4, error 3.
+		// Summary full: gamma evicts beta (count 3) -> count 4, error 3.
 		a.Observe("gamma", "g0")
-		// delta evicts gamma (count 4 < alpha 10) -> count 5, error 4; only
+		// delta evicts gamma (count 4 < alpha 100) -> count 5, error 4; only
 		// gamma's non-inherited contribution (4-3 = 1) transfers.
 		a.Observe("delta", "d0")
 		dump, _ := a.DiagnosticDump()
 		var um UnmatchedModels
 		_ = json.Unmarshal(dump, &um)
-		return um, openWindow(t, a)
+		_, other, entries := openState(t, a)
+		return um, other, entries
 	}
-	s1, w := run()
-	s2, _ := run()
+	s1, other, entries := run()
+	s2, _, _ := run()
 	j1, _ := json.Marshal(s1)
 	j2, _ := json.Marshal(s2)
 	if !bytes.Equal(j1, j2) {
 		t.Fatalf("two runs over one request order differ:\n%s\n%s", j1, j2)
 	}
-	if _, ok := bucketFor(w, "delta"); ok {
-		t.Fatalf("delta (one principal, lower bound 1) must not be emitted")
-	}
-	if len(w.Buckets) != 1 || w.Buckets[0].ModelKey != "alpha" || w.Buckets[0].LowerBound != 10 || w.SuppressedBucketCount != 1 {
+	w := s1.Windows[0]
+	if len(w.Buckets) != 1 || w.Buckets[0].ModelKey != "alpha" || w.Buckets[0].LowerBound != 100 || w.SuppressedBucketCount != 1 {
 		t.Fatalf("emitted = %+v suppressed=%d, want alpha only", w.Buckets, w.SuppressedBucketCount)
 	}
-	if w.OtherSuppressed.RequestCount != 3+1 {
-		t.Fatalf("eviction transfer = %d, want beta 3 + gamma non-inherited 1", w.OtherSuppressed.RequestCount)
+	if other.RequestCount != 3+1 {
+		t.Fatalf("eviction transfer = %d, want beta 3 + gamma non-inherited 1", other.RequestCount)
 	}
-	if w.OtherSuppressed.DistinctKeyCount != 2 {
-		t.Fatalf("distinct_key_count = %d, want 2 evictions", w.OtherSuppressed.DistinctKeyCount)
-	}
-	if len(w.Buckets)+w.SuppressedBucketCount != 2 {
-		t.Fatalf("summary exceeded capacity: %+v + %d", w.Buckets, w.SuppressedBucketCount)
+	if other.DistinctKeyCount != 2 || entries != 2 {
+		t.Fatalf("distinct_key_count = %d entries = %d, want 2/2", other.DistinctKeyCount, entries)
 	}
 }
 
@@ -280,18 +307,25 @@ func TestMemoryBoundedUnderDistinctKeyFanout(t *testing.T) {
 	if principals > p.KeyBuckets*p.PrincipalsPerBucket {
 		t.Fatalf("principal counters %d exceed %d", principals, p.KeyBuckets*p.PrincipalsPerBucket)
 	}
-	w := openWindow(t, a)
-	if !w.OtherSuppressed.DistinctKeyCountSaturated || w.OtherSuppressed.DistinctKeyCount != uint64(p.DistinctKeyCap) {
-		t.Fatalf("distinct_key_count should saturate at the cap with its own flag: %+v", w.OtherSuppressed)
+	_, other, _ := openState(t, a)
+	if !other.DistinctKeyCountSaturated || other.DistinctKeyCount != uint64(p.DistinctKeyCap) {
+		t.Fatalf("distinct_key_count should saturate at the cap with its own flag: %+v", other)
 	}
-	if w.OtherSuppressed.RequestCountSaturated {
-		t.Fatalf("request_count must not be flagged saturated: %+v", w.OtherSuppressed)
+	if other.RequestCountSaturated {
+		t.Fatalf("request_count must not be flagged saturated: %+v", other)
 	}
 }
 
 func TestMemoryBoundedUnderDistinctPrincipalFanout(t *testing.T) {
-	p := lowFloor()
+	p := lowFloor() // floor 100, cap 10
 	a, _ := newTestAggregator(t, p)
+	// The first 64 principals fill the bucket's table at the cap.
+	for i := 0; i < p.PrincipalsPerBucket; i++ {
+		for j := 0; j < 10; j++ {
+			a.Observe("one-key", fmt.Sprintf("tracked-%d", i))
+		}
+	}
+	// A flood of distinct principals overflows the table: none is tracked.
 	for i := 0; i < 200_000; i++ {
 		a.Observe("one-key", fmt.Sprintf("acct-%d", i))
 	}
@@ -301,13 +335,12 @@ func TestMemoryBoundedUnderDistinctPrincipalFanout(t *testing.T) {
 	if tracked != p.PrincipalsPerBucket {
 		t.Fatalf("tracked principals = %d, want %d", tracked, p.PrincipalsPerBucket)
 	}
-	w := openWindow(t, a)
-	b, _ := bucketFor(w, "one-key")
-	if b.LowerBound != uint64(p.PrincipalsPerBucket) {
-		t.Fatalf("overflow principals must not count: lower_bound %d", b.LowerBound)
+	b, ok := bucketFor(openWindow(t, a), "one-key")
+	if !ok || b.LowerBound != uint64(p.PrincipalsPerBucket*10) {
+		t.Fatalf("overflow principals must not count: %+v", b)
 	}
-	if w.OtherSuppressed.RequestCount != 200_000-uint64(p.PrincipalsPerBucket) {
-		t.Fatalf("overflow traffic not in other_suppressed: %+v", w.OtherSuppressed)
+	if _, other, _ := openState(t, a); other.RequestCount != 200_000 {
+		t.Fatalf("overflow traffic not in other_suppressed: %+v", other)
 	}
 }
 
@@ -315,6 +348,7 @@ func TestRawPrincipalIsTransientAndDumpIsOnlyTheOpenWindow(t *testing.T) {
 	a, _ := newTestAggregator(t, DefaultParams())
 	const raw = "buyer-account-SECRET-7f3a"
 	a.Observe("qwen3-14b", raw)
+	a.Observe("bad key!", raw)
 	dump, err := a.DiagnosticDump()
 	if err != nil {
 		t.Fatal(err)
@@ -335,8 +369,18 @@ func TestRawPrincipalIsTransientAndDumpIsOnlyTheOpenWindow(t *testing.T) {
 	if err := json.Unmarshal(dump, &um); err != nil {
 		t.Fatal(err)
 	}
-	if len(um.Windows) != 1 || um.Windows[0].CloseReason != nil || um.Windows[0].WindowEnd != nil {
-		t.Fatalf("dump must hold exactly the open window: %+v", um.Windows)
+	if len(um.Windows) != 1 || um.Windows[0].WindowEnd != nil || um.Windows[0].EligibilityPolicyID != policyA || um.Windows[0].ExcludedAccountCount != 2 {
+		t.Fatalf("dump must hold exactly the open window with its policy: %+v", um.Windows)
+	}
+	var wireKeys map[string]json.RawMessage
+	_ = json.Unmarshal(obj["windows"], &[]map[string]json.RawMessage{})
+	var windows []map[string]json.RawMessage
+	_ = json.Unmarshal(obj["windows"], &windows)
+	wireKeys = windows[0]
+	for _, forbidden := range []string{"close_reason", "eligible_request_total", "closed", "complete"} {
+		if _, present := wireKeys[forbidden]; present {
+			t.Fatalf("wire window must not carry %q", forbidden)
+		}
 	}
 	if len(a.Snapshot().Windows) != 0 {
 		t.Fatalf("the served snapshot must never carry the open window")
@@ -344,7 +388,7 @@ func TestRawPrincipalIsTransientAndDumpIsOnlyTheOpenWindow(t *testing.T) {
 	// No aggregator state holds the raw id either.
 	a.mu.Lock()
 	var state bytes.Buffer
-	fmt.Fprintf(&state, "%v %v", a.open.index, a.open.entries)
+	fmt.Fprintf(&state, "%v %v %v %d", a.open.index, a.open.entries, a.policyID, a.policyCount)
 	for _, e := range a.open.entries {
 		fmt.Fprintf(&state, "%v", e.principals)
 	}
@@ -354,48 +398,48 @@ func TestRawPrincipalIsTransientAndDumpIsOnlyTheOpenWindow(t *testing.T) {
 	}
 }
 
-func TestWindowsCloseOnStopParamsAndEpoch(t *testing.T) {
+func TestWindowsCloseExactlyAtTheDeadlineAndOnlyCompleteOnesAreServed(t *testing.T) {
 	a, c := newTestAggregator(t, DefaultParams())
 	a.Observe("k1", "p")
 	first := openWindow(t, a)
-	if first.Parameters.KAnonymityMin != KAnonymityMin || first.Parameters.KeyBuckets != 64 {
+	if first.Parameters.KAnonymityMin != KAnonymityMin || first.Parameters.KeyBuckets != 64 || first.Parameters.PrincipalCapPct != 10 || first.Parameters.PrincipalCapRequests != 25 {
 		t.Fatalf("window parameters = %+v", first.Parameters)
 	}
-	// Parameter change closes with parameters_changed: incomplete, never served.
+	// Parameter change closes with parameters_changed: incomplete, never
+	// served, destroyed.
 	p := DefaultParams()
 	p.KeyBuckets = 32
 	if err := a.SetParams(p); err != nil {
 		t.Fatal(err)
 	}
 	if got := a.Snapshot(); len(got.Windows) != 0 {
-		t.Fatalf("an incomplete (parameters_changed) window must not be served: %+v", got.Windows)
+		t.Fatalf("an incomplete window must not be served: %+v", got.Windows)
+	}
+	if lc := a.LastClose(); lc.Reason != CloseReasonParametersChanged || lc.WindowID != first.WindowID {
+		t.Fatalf("last close record = %+v", lc)
 	}
 	second := openWindow(t, a)
 	if second.WindowID == first.WindowID || second.Parameters.KeyBuckets != 32 {
 		t.Fatalf("new window not opened with new parameters: %+v", second)
 	}
-	a.mu.Lock()
-	retained := len(a.closed)
-	a.mu.Unlock()
-	if retained != 0 {
-		t.Fatalf("an incomplete window must be destroyed, not retained: %d", retained)
-	}
-	if lc := a.LastClose(); lc.Reason != CloseReasonParametersChanged || lc.WindowID != first.WindowID {
-		t.Fatalf("last close record = %+v", lc)
-	}
-	if first.Parameters.PrincipalCapPct != 10 || first.Parameters.PrincipalCapRequests != 25 {
-		t.Fatalf("parameters must carry the raw cap pct and the derived cap: %+v", first.Parameters)
-	}
-	// Epoch elapse closes with epoch_elapsed: complete, served with the
-	// parameters it opened with.
-	c.t = c.t.Add(WindowMaxDays*24*time.Hour + time.Second)
+	// A tick arriving 5 days late closes the epoch at exactly start + 30d and
+	// opens the next one at that deadline.
+	start, _ := time.Parse(time.RFC3339, second.WindowStart)
+	c.t = start.Add(35 * 24 * time.Hour)
 	a.Observe("k2", "p")
 	snap := a.Snapshot()
-	if len(snap.Windows) != 1 || snap.Windows[0].WindowID != second.WindowID || !snap.Windows[0].Complete() || snap.Windows[0].Parameters.KeyBuckets != 32 {
+	if len(snap.Windows) != 1 || snap.Windows[0].WindowID != second.WindowID || !snap.Windows[0].Complete() {
 		t.Fatalf("epoch_elapsed window not served as complete: %+v", snap.Windows)
 	}
-	if openWindow(t, a).EligibleRequestTotal != 1 {
-		t.Fatalf("new window must start empty")
+	if got := *snap.Windows[0].WindowEnd; got != start.Add(30*24*time.Hour).Format(time.RFC3339) {
+		t.Fatalf("window_end = %s, want the exact deadline", got)
+	}
+	third := openWindow(t, a)
+	if third.WindowStart != start.Add(30*24*time.Hour).Format(time.RFC3339) {
+		t.Fatalf("next window must open at the deadline: %s", third.WindowStart)
+	}
+	if err := ValidateWindow(snap.Windows[0]); err != nil {
+		t.Fatalf("served window must validate: %v", err)
 	}
 	// Stop closes with aggregator_stopped (incomplete); later observations are no-ops.
 	a.mu.Lock()
@@ -411,7 +455,7 @@ func TestWindowsCloseOnStopParamsAndEpoch(t *testing.T) {
 	}
 }
 
-func TestEmissionBoundedToEightWindowsAndNinetyDays(t *testing.T) {
+func TestEmissionBoundedToThreeWindowsAndNinetyDays(t *testing.T) {
 	a, c := newTestAggregator(t, DefaultParams())
 	for i := 0; i < 12; i++ {
 		a.Observe("k", "p")
@@ -419,8 +463,8 @@ func TestEmissionBoundedToEightWindowsAndNinetyDays(t *testing.T) {
 		_ = a.Snapshot() // triggers the epoch close
 	}
 	snap := a.Snapshot()
-	if len(snap.Windows) > MaxEmittedWindows {
-		t.Fatalf("emitted %d windows, max %d", len(snap.Windows), MaxEmittedWindows)
+	if len(snap.Windows) != MaxEmittedWindows {
+		t.Fatalf("emitted %d windows, want %d", len(snap.Windows), MaxEmittedWindows)
 	}
 	cutoff := c.t.Add(-EmissionRetention)
 	for _, w := range snap.Windows {
@@ -432,57 +476,29 @@ func TestEmissionBoundedToEightWindowsAndNinetyDays(t *testing.T) {
 			t.Fatalf("window older than 90 days emitted: %+v", w)
 		}
 	}
-	// Windows ending at now, -30d, -60d, and exactly -90d (the cutoff is
-	// inclusive) are served; older ones are not.
-	if len(snap.Windows) != 4 {
-		t.Fatalf("expected the 4 complete windows within 90 days, got %d", len(snap.Windows))
-	}
 }
 
-func TestRandomFailureIsReported(t *testing.T) {
-	_, err := New(DefaultParams(), lowerNormalize, WithRandom(io.LimitReader(bytes.NewReader(nil), 0)))
-	if err == nil {
-		t.Fatalf("expected window key generation failure")
-	}
-}
-
-func TestEligibilityChangeClosesWindowAndRotatesPolicyID(t *testing.T) {
-	a, _ := newTestAggregator(t, DefaultParams(), WithExcludedAccounts([]string{"keepwarm", "canary"}))
+func TestEligibilityPolicyChangeClosesWindow(t *testing.T) {
+	a, _ := newTestAggregator(t, DefaultParams())
 	first := openWindow(t, a)
-	if len(first.EligibilityPolicyID) != 32 {
-		t.Fatalf("eligibility_policy_id = %q", first.EligibilityPolicyID)
-	}
-	// Same set in a different order / with duplicates: no close, same id.
-	if err := a.SetExcludedAccounts([]string{"canary", "keepwarm", "canary"}); err != nil {
+	if err := a.SetPolicy(policyA, 2); err != nil {
 		t.Fatal(err)
 	}
-	if w := openWindow(t, a); w.WindowID != first.WindowID || w.EligibilityPolicyID != first.EligibilityPolicyID {
-		t.Fatalf("unchanged policy must not close the window or rotate the id")
+	if w := openWindow(t, a); w.WindowID != first.WindowID {
+		t.Fatalf("an unchanged policy must not close the window")
 	}
-	// Different set: close with eligibility_changed and a new random id.
-	if err := a.SetExcludedAccounts([]string{"keepwarm"}); err != nil {
+	if err := a.SetPolicy(policyB, 1); err != nil {
 		t.Fatal(err)
 	}
 	if lc := a.LastClose(); lc.Reason != CloseReasonEligibilityChanged || lc.WindowID != first.WindowID {
 		t.Fatalf("eligibility_changed close not recorded: %+v", lc)
 	}
-	if got := a.Snapshot(); len(got.Windows) != 0 {
-		t.Fatalf("an incomplete window must not be served: %+v", got.Windows)
-	}
 	next := openWindow(t, a)
-	if next.EligibilityPolicyID == first.EligibilityPolicyID {
-		t.Fatalf("policy id must rotate on a set change")
+	if next.EligibilityPolicyID != policyB || next.ExcludedAccountCount != 1 {
+		t.Fatalf("new window must carry the new policy: %+v", next)
 	}
-	// The id is random, not a function of the account ids: a fresh
-	// aggregator with the identical set gets a different id.
-	other, _ := newTestAggregator(t, DefaultParams(), WithExcludedAccounts([]string{"keepwarm"}), WithRandom(&fixedRandom{seed: 99}))
-	if openWindow(t, other).EligibilityPolicyID == next.EligibilityPolicyID {
-		t.Fatalf("policy id must not be derived from the account ids")
-	}
-	// canary is eligible again under the new policy.
-	a.Observe("k", "canary")
-	if openWindow(t, a).EligibleRequestTotal != 1 {
-		t.Fatalf("re-included account must contribute under the new window")
+	if err := a.SetPolicy("nope", 0); err == nil {
+		t.Fatalf("a malformed policy id must be rejected")
 	}
 }
 
@@ -494,7 +510,7 @@ func TestConfigurationChurnLeavesOneWindowInMemory(t *testing.T) {
 		if err := a.SetParams(p); err != nil {
 			t.Fatal(err)
 		}
-		if err := a.SetExcludedAccounts([]string{fmt.Sprintf("acct-%d", i)}); err != nil {
+		if err := a.SetPolicy(fmt.Sprintf("%032x", i), i); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -503,5 +519,49 @@ func TestConfigurationChurnLeavesOneWindowInMemory(t *testing.T) {
 	a.mu.Unlock()
 	if retained != 0 || !open {
 		t.Fatalf("churn must leave exactly one open window and no retained incomplete windows: retained=%d open=%v", retained, open)
+	}
+}
+
+func TestValidateWindowRejectsMalformedPersistedWindows(t *testing.T) {
+	a, c := newTestAggregator(t, DefaultParams())
+	for i := 0; i < 10; i++ {
+		for j := 0; j < 25; j++ {
+			a.Observe("qwen3-14b", fmt.Sprintf("b%d", i))
+		}
+	}
+	c.t = c.t.Add(WindowMaxDays * 24 * time.Hour)
+	good := a.Snapshot().Windows[0]
+	if err := ValidateWindow(good); err != nil {
+		t.Fatalf("good window rejected: %v", err)
+	}
+	cases := map[string]func(w *Window){
+		"sub-floor bucket":    func(w *Window) { w.Buckets[0].LowerBound, w.Buckets[0].Count = 10, 10 },
+		"bound arithmetic":    func(w *Window) { w.Buckets[0].Error = 1 },
+		"bad key":             func(w *Window) { w.Buckets[0].ModelKey = "Not A Key" },
+		"open window":         func(w *Window) { w.WindowEnd = nil },
+		"short epoch":         func(w *Window) { e := c.t.Add(-time.Hour).Format(time.RFC3339); w.WindowEnd = &e },
+		"wrong k":             func(w *Window) { w.Parameters.KAnonymityMin = 5 },
+		"cap mismatch":        func(w *Window) { w.Parameters.PrincipalCapRequests = 26 },
+		"too many buckets":    func(w *Window) { w.SuppressedBucketCount = 64 },
+		"bad policy id":       func(w *Window) { w.EligibilityPolicyID = "x" },
+		"negative counter":    func(w *Window) { w.ExcludedAccountCount = -1 },
+		"other beyond cap":    func(w *Window) { w.OtherSuppressed.DistinctKeyCount = 10001 },
+		"duplicate bucket":    func(w *Window) { w.Buckets = append(w.Buckets, w.Buckets[0]) },
+		"unordered buckets":   func(w *Window) { w.Buckets = append(w.Buckets, Bucket{ModelKey: "zzz", LowerBound: 300, Count: 300}) },
+		"out of bounds param": func(w *Window) { w.Parameters.KeyBuckets = 0 },
+	}
+	for name, mutate := range cases {
+		w := cloneWindow(good)
+		mutate(&w)
+		if err := ValidateWindow(w); err == nil {
+			t.Fatalf("%s: malformed window accepted", name)
+		}
+	}
+}
+
+func TestRandomFailureIsReported(t *testing.T) {
+	_, err := New(DefaultParams(), lowerNormalize, WithPolicy(policyA, 0), WithRandom(io.LimitReader(bytes.NewReader(nil), 0)))
+	if err == nil {
+		t.Fatalf("expected window key generation failure")
 	}
 }

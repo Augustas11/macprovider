@@ -18,7 +18,8 @@ this runbook feeds into.
   answers an operator credential). Both are on the coordinator's public
   and admin ports respectively; the stats mount is behind nginx on
   `stats.malibu.tech`.
-- `stats.intake.enabled: true`, `stats.intake.reader_partner_key_ids` lists
+- `stats.intake.policy_salt` is set (an operator secret, `env:NAME`; intake is
+  enabled exactly when it is configured), `stats.intake.reader_partner_key_ids` lists
   the partner key you will read with (it is refused otherwise), and
   `stats.intake.excluded_accounts` lists EVERY keep-warm, canary,
   synthetic-load, and acceptance-harness buyer account. A missing exclusion
@@ -55,14 +56,21 @@ curl -sS -H "Authorization: Bearer $OPERATOR_ACTOR_KEY" -H "Accept-Encoding: ide
   http://127.0.0.1:8443/admin/model-admission/intake -o "$DIR/model-admission-intake.json"
 
 sha256sum "$DIR"/*.json     # these digests go into intake-decision.json
-chmod 0444 "$DIR"/*.json    # append-only store: never edit or replace a retained file
+chmod 0600 "$DIR"/*.json    # operator-private; the generator refuses a file readable by others
 ```
 
 The `Accept-Encoding: identity` header is mandatory: the digest and the
 retained file are the unmodified body octets, and a compressed response
-would hash differently from what the generator re-parses. Retained files
-are kept at least 24 months after the release's ledger row (SPEC-023
-§16.8 rule 9); deleting one breaks reconstructibility for that release.
+would hash differently from what the generator re-parses. The store is
+append-only — never edit or replace a retained file — and every file is
+mode `0600` under a `0700` directory (SPEC-023 §16.8 rule 9). **Retention
+lifecycle:** keep each release's files for at least 24 months after its
+ledger row and for as long as a later release still lists the key it
+admitted, and delete them no later than 36 months after the last release
+that lists that key — the store holds private coordinator data and is not
+kept indefinitely. Include the store in the operator's encrypted backup;
+a lost file breaks reconstructibility for that release and MUST be
+recorded in the next release's notes.
 
 A `503 stats_stale` or `503 intake_unavailable` means the source is not
 usable this month: record that signal as `null` with
@@ -90,23 +98,32 @@ For each key you consider admitting to `listed`:
      `no_observations` (the manifest never says "one or two providers").
    - `buyer_request`: in `stats-intake.json`, take the window with the
      LATEST `window_start` whose `window_end` is within 31 days of your
-     `as_of` (every served window is complete). The key's bucket
+     `as_of` (every served window is a complete 30-day epoch; at most
+     three are served). The key's bucket
      `lower_bound >= INTAKE_BUYER_REQUEST_FLOOR` (250). No qualifying window
      → `incomplete_window`; no bucket for the key → `no_observations`.
+     `spec017_amendment_not_landed` is no longer a valid reason: the
+     amendment is recorded in `CONFORMANCE.json` (SPEC-017 ≥ 0.2.1) and the
+     generator refuses it — an unreadable endpoint is `source_unavailable`.
    - `coldstart_slot`: at most `INTAKE_COLDSTART_SLOTS` (1) per release,
      only when `tier_target` is under-covered, and only with a fit term.
 3. **Fit** — at least one:
    - `fleet_fit`: from `fleet_ram.classes`, sum `provider_count` over
      unsuppressed classes with `ram_gb_floor - 4 >= artifact.min_ram_gb`,
      divide by `provider_total`, take the max over the key's verified
-     artifacts, record as `fleet_fit_fraction_ppm = floor(fraction × 1e6)`;
-     needs `>= INTAKE_FLEET_FIT_MIN_PCT` (25%) → `>= 250000` ppm.
+     artifacts, record as `fleet_fit_fraction_ppm = floor(fraction × 1e6)`
+     floored to the 50 000 ppm grid (5% steps: 583 333 → 550 000, so the
+     public manifest never reproduces the exact fleet ratio); needs
+     `>= INTAKE_FLEET_FIT_MIN_PCT` (25%) → `>= 250000` ppm. The histogram is
+     frozen for a 30-day period (SPEC-017 §5.2b.6), so two reads inside one
+     period return identical `fleet_ram` bytes.
    - `tier_target`: the key's best-fitting verified artifact satisfies
      `min_ram_gb + 4 <= <tier GB>`.
 
 For a promotion (`listed` → `recommendable`): `listed_since` at least
-`INTAKE_MIN_LISTED_DAYS` (30) before `as_of`; a `rate_class` that resolves to
-a published rate row; `recommendable: true` in `demand-rank.json`;
+`INTAKE_MIN_LISTED_DAYS` (30) before `as_of`; the key's `rate_class` exactly
+as declared on its artifact-feed model entry, resolving to a published
+rate row; `recommendable: true` in `demand-rank.json`;
 bench provenance other than `omlx_seeded`; and your explicit admission
 reference (release-notes anchor or ticket id, no identity).
 

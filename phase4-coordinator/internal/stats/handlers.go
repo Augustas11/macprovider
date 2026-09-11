@@ -1082,7 +1082,7 @@ func trimEndpointFromPath(p string) string {
 	}
 	rest := p[len(prefix):]
 	switch rest {
-	case "overview", "leaderboard", "health", "routability", "models", "providers":
+	case "overview", "leaderboard", "health", "routability", "models", "providers", "intake":
 		return rest
 	}
 	if providerIDFromPath(p) != "" {

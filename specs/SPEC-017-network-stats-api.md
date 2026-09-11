@@ -353,7 +353,10 @@ subset that excludes billing/session OLTP).
 
 C5. **Edge-cacheable.** Every `GET` MUST return `Cache-Control` that lets
 nginx/Cloudflare serve a non-trivial cached body without contacting the
-origin on every request.
+origin on every request. **[amended v0.2.1]** Exempt: an endpoint this
+SPEC marks private to a partner key — `GET /v1/stats/intake` (§5.2b) —
+returns `Cache-Control: private, max-age=900` with no `s-maxage`, and a
+shared cache MUST NOT store it; the exemption is stated at the endpoint.
 
 C6. **No state mutation.** v0.1 has no `POST`/`PUT`/`DELETE`. All
 visibility-toggle writes live on the SPEC-014 portal surface and reach
@@ -481,8 +484,8 @@ to any §5.2b.1 parameter (`"parameters_changed"`), or (d) a change to
 the §5.2b.2 excluded-account set (`"eligibility_changed"`). A window is
 never resumed: after a close the next window starts empty with a fresh
 `window_key`, empty principal tables, and an empty summary. Only a
-window closed by `epoch_elapsed` is **complete** (`complete: true`);
-every other closed window and the open window are incomplete. Because
+window closed by `epoch_elapsed` is **complete**; every other closed
+window and the open window are incomplete. Because
 `INTAKE_BUYER_REQUEST_FLOOR` is an absolute count and not a rate, a
 short window is NOT weaker evidence — a burst inside a short epoch would
 clear the same floor — so an incomplete window MUST NOT satisfy any
@@ -964,7 +967,7 @@ then filter an all-provider exact leaderboard client-side. The server
 performs the provider binding and returns only the requested provider's
 row.
 
-### 5.2a `GET /v1/stats/routability`
+### 5.2c `GET /v1/stats/routability`
 
 **Request.** No query parameters, no auth.
 
@@ -1076,23 +1079,32 @@ the operator's private intake audit store (SPEC-023 §16.8 rule 9).
 key MUST be an **intake reader**: its `partner_keys.id` is listed in the
 operator configuration `stats.intake.reader_partner_key_ids` (§5.2b.7)
 and its `partner_keys.provider_id` is null. There is NO public
-projection and NO implicit grant: a missing, invalid, or revoked bearer
-returns `401` `unauthorized` (§5.9, §5.4.3); a valid bearer that is
-provider-bound, or whose id is not listed, returns `403` `unauthorized`.
-A partner key issued for §5.2 therefore never reads this endpoint until
-an operator lists it, and the empty default list refuses every key. No
-query parameters are defined; a request carrying any query parameter
-returns `400` `bad_request`. `HEAD` and `OPTIONS` follow §4.3 and §5.7.
+projection and NO implicit grant: a missing, invalid, or revoked bearer,
+a valid bearer that is provider-bound, and a valid bearer whose id is not
+listed ALL return `401` `unauthorized` with one response shape and one
+timing class (§5.4.3 row semantics: the endpoint never confirms that a
+key exists by answering it differently) — there is no `403` on this
+surface. A key-less request is refused before the public rate tier,
+which this endpoint never consults. A partner key issued for §5.2
+therefore never reads this endpoint until an operator lists it, and the
+empty default list refuses every key. No query parameters are defined;
+a request carrying any query parameter returns `400` `bad_request`.
+`HEAD` follows §4.3. `OPTIONS` follows §5.7 only while the endpoint is
+enabled; a disabled endpoint (§5.2b.7) is unknown for every method,
+`OPTIONS` included, and answers `404` before any CORS decision.
 
 **Response headers.** `Cache-Control: private, max-age=900` (no
 `s-maxage`: the response is private to the key and MUST NOT be stored by
 a shared cache — this endpoint, like §5.2a, is exempt from §1.5 C5);
 `Vary: Accept-Encoding, Origin, Authorization`; `ETag` per §5.4
-partner-projection rules. **CORS** follows the §5.4.3 per-key Origin
-decision for GET and HEAD exactly as the partner projection of §5.2 does:
-never a wildcard `Access-Control-Allow-Origin`; a key with a non-empty
-`allowed_origins` answers only a listed Origin with that Origin echoed,
-and a disallowed Origin is refused before the body is read. `stale_after`
+partner-projection rules. **CORS: none.** This surface is read by the
+operator's release tooling, never by a browser: a `200` carries NO
+`Access-Control-Allow-Origin` and NO `Access-Control-Allow-Credentials`
+whatever the request's Origin, and a refusal carries none either. The
+§5.4.3 Origin decision still applies to authentication (a key with a
+non-empty `allowed_origins` is refused with `401` on a missing or
+unlisted Origin, before the body is read); it never produces a CORS
+header here. `stale_after`
 = `generated_at` + 15 minutes; `generated_at` older than the §9.5 budget
 (45 minutes) returns the standard `stats_stale` 503 envelope (§5.8).
 **Encoding.** The SPEC-023 generator reads this endpoint with
@@ -1123,7 +1135,6 @@ abbreviation): one complete window with one emitted bucket.
         "window_id": "3f1c0a9b7d2e4c6f8a1b3d5e7f9a0c2d",
         "window_start": "2026-08-01T00:00:00Z",
         "window_end": "2026-08-31T00:00:00Z",
-        "close_reason": "epoch_elapsed",
         "parameters": {
           "key_buckets": 64,
           "principals_per_bucket": 64,
@@ -1135,7 +1146,6 @@ abbreviation): one complete window with one emitted bucket.
           "window_max_days": 30
         },
         "eligibility_policy_id": "9a2e6c1d4b8f0a3e5c7d9b1f3a5c7e90",
-        "eligible_request_total": 1284,
         "buckets": [
           { "model_key": "qwen3-14b", "lower_bound": 311, "count": 311, "error": 0 }
         ],
@@ -1154,10 +1164,10 @@ abbreviation): one complete window with one emitted bucket.
     "window_end": "2026-09-11T00:00:00Z",
     "k_anonymity_min": 3,
     "provider_total": 11,
-    "provider_suppressed": 2,
+    "provider_suppressed": 6,
     "classes": [
       { "ram_gb_floor": 8,   "provider_count": null, "suppressed": true },
-      { "ram_gb_floor": 16,  "provider_count": 4,    "suppressed": false },
+      { "ram_gb_floor": 16,  "provider_count": null, "suppressed": true },
       { "ram_gb_floor": 24,  "provider_count": null, "suppressed": true },
       { "ram_gb_floor": 32,  "provider_count": 5,    "suppressed": false },
       { "ram_gb_floor": 48,  "provider_count": null, "suppressed": true },
@@ -1172,18 +1182,22 @@ abbreviation): one complete window with one emitted bucket.
   "methodology": {
     "version": "SPEC-017-v0.2.1",
     "unmatched_models": "SPEC-023 §16.2(a) Space-Saving summary over complete 30-day epochs only; a bucket is emitted only when at least k_anonymity_min distinct principals contributed and its lower bound clears buyer_request_floor; lower_bound = count - error is the only value that may satisfy a floor",
-    "fleet_ram": "verified hardware profiles reported in the trailing 30 days, bucketed by unified memory class floor; classes below k_anonymity_min are suppressed with complementary suppression and count as zero fit",
+    "fleet_ram": "providers with a verified hardware profile reported in the 30-day window and an active hardware trust root, bucketed by unified memory class floor; classes below k_anonymity_min are suppressed with complementary suppression and count as zero fit; materialized once per 30-day period",
     "redaction": "aggregated counts only; no buyer account, API key, IP, raw requested model string, principal token, provider id, pseudonym, or hardware identity material; no open or incomplete window"
   }
 }
 ```
 
-Types: every timestamp is RFC3339 UTC with second precision; every
-window is complete, so `window_end` and `close_reason` are non-null and
-`close_reason` is always the literal `epoch_elapsed` (the closed enum of
-§3.2a exists for the aggregator's local diagnostics; only its
-`epoch_elapsed` member reaches the wire); every count is a non-negative
-integer; `window_id` and `eligibility_policy_id` are 32 lowercase hex
+Types: every timestamp is RFC3339 UTC with second precision in the one
+form `YYYY-MM-DDTHH:MM:SSZ` (no offset, no fraction — one byte string per
+instant, so a consumer compares windows by byte equality); every window
+is complete, so `window_end` is non-null and exactly 30 × 86 400 seconds
+after `window_start` (the §3.2a close reasons exist for the aggregator's
+local diagnostics and never reach the wire); `windows` holds at most 3
+entries; the `methodology` object is closed — exactly `version`,
+`unmatched_models`, `fleet_ram`, and `redaction`, each a non-empty
+string, with the values shown above for this version; every count is a
+non-negative integer; `window_id` and `eligibility_policy_id` are 32 lowercase hex
 characters, each 128 bits from a cryptographically secure random source
 drawn at window open (respectively at policy change), so ids are unique
 over the retention horizon without coordination; a rollup merge that
@@ -1222,9 +1236,8 @@ SPEC-047. It is applied as a DISTINCT-PRINCIPAL count (§5.2b.4).
 
 A buyer request contributes to the aggregator — to a named bucket OR to
 `other_suppressed` — only when ALL of the following hold at the
-coordinator's buyer chat handler, evaluated at the point where the
-request's model string resolves to no admitted catalog key (the
-`model_not_found` rejection):
+coordinator's buyer chat handler, evaluated once the request has reached
+model resolution and BEFORE any routing outcome is known:
 
 1. the request carries an **authenticated buyer account**, which is
    exactly one of: (i) a buyer key the coordinator itself authenticated,
@@ -1244,19 +1257,40 @@ request's model string resolves to no admitted catalog key (the
    test, synthetic, and internal traffic is flagged: the operator MUST
    list every keep-warm, canary, synthetic-load, and acceptance-harness
    buyer account there. A request from a listed account contributes to
-   nothing — not to a named bucket and not to `other_suppressed`.
+   nothing — not to a named bucket and not to `other_suppressed`;
+5. the requested model string, normalized by SPEC-005 §5.5
+   `NormalizeModelKey`, is NOT the key of a `listed` or `recommendable`
+   row of the CURRENT admitted release's candidate catalog. This is the
+   whole definition of "unmatched": it is a property of the catalog, not
+   of the pool. A request for an admitted key that no provider currently
+   serves is matched (it is capacity, not demand for a new key) and never
+   reaches the aggregator, whatever its routing outcome; a request for a
+   `candidate` or `watch` row, or for a key the catalog does not carry,
+   is unmatched and reaches the aggregator whether or not some provider
+   happens to serve it (a BYOM or non-catalog served model is still
+   evidence that buyers ask for a key the catalog lacks).
 
 The **eligibility policy** of a window is the excluded-account set in
-force when it opened. Its `eligibility_policy_id` is an opaque 16-byte
-random identifier the aggregator generates at process start and again
-whenever the set changes — never a digest of the identifiers, which a
-reader could dictionary-test — so two windows carry the same id exactly
-when the same in-process policy revision produced both. A change to the
-set closes the window (`eligibility_changed`, §3.2a) so one window never
-mixes two policies. A request that was routed — any request whose model
-string resolved to an admitted key — never reaches the aggregator,
-whatever its outcome. "Unmatched" means unmatched at model resolution,
-and only that.
+force when it opened. Its `eligibility_policy_id` is derived at the
+buyer boundary — the only place the set exists — as the first 32 hex
+characters of `HMAC-SHA-256(stats.intake.policy_salt, "macprovider.intake.eligibility-policy.v1" || NUL || account_1 || NUL || … || account_n || NUL)`
+over the canonical set (trimmed, de-duplicated, sorted by UTF-8 bytes),
+keyed by the operator secret `stats.intake.policy_salt` (§5.2b.7) so a
+reader cannot dictionary-test account ids against the published id; the
+aggregator receives ONLY the id and the set's cardinality
+(`excluded_account_count`) and never an account identifier, and two
+coordinators sharing a salt and a set publish the same id. A change to
+the set closes the window (`eligibility_changed`, §3.2a) so one window
+never mixes two policies; rotating the salt alone also rotates the id.
+"Unmatched" means unmatched at model resolution against the admitted
+catalog, and only that. **Redaction on the money path.** The request-log
+row of a request that no provider serves carries a BLANK model and a
+constant failure message: the buyer-supplied model string of an
+unserved request is never persisted by the buyer surface, in any
+column, sanitized or not — the aggregator is its only consumer, and the
+aggregator retains neither the string nor the account. The intake hook
+MUST NOT fail or alter the buyer request: a panic inside the aggregator
+is recovered at the boundary and logged without the request's content.
 
 #### 5.2b.3 Principal (SPEC-023 §16.2(a) items 7, 8, 10, step S4)
 
@@ -1320,12 +1354,11 @@ principal bound — one normalization, one grammar check, one HMAC, one
 bounded scan — and the aggregator's TRAFFIC-DEPENDENT state never
 exceeds: for the open window, `key_buckets` entries plus `key_buckets ×
 principals_per_bucket` principal counters plus the two `other_suppressed`
-counters; plus, for retained complete windows, at most `8 × key_buckets`
+counters; plus, for retained complete windows, at most `3 × key_buckets`
 emitted bucket records with no principal tables (a closed window keeps
 only its wire form). Everything else the aggregator holds — window
-metadata, parameters, the policy id, `eligible_request_total`, the last
-close record, container bookkeeping — is constant per window and
-independent of traffic. Both bounds are independent of distinct-key and
+metadata, parameters, the policy id, the last close record, container
+bookkeeping — is constant per window and independent of traffic. Both bounds are independent of distinct-key and
 distinct-principal volume. The aggregator is safe for concurrent use
 from every buyer-handler goroutine and serializes state mutation so two
 conforming runs over one request order emit one summary.
@@ -1333,14 +1366,14 @@ conforming runs over one request order emit one summary.
 #### 5.2b.5 Emission
 
 `windows` lists COMPLETE windows only (§3.2a: closed by `epoch_elapsed`
-after the full 30 days), in descending `window_start`, at most **8**
+after the full 30 days), in descending `window_start`, at most **3**
 entries, and only windows whose `window_end` is within the trailing 90
 days. The open window and every incomplete window are never served and
 never persisted: they exist only in the aggregator's memory and its
 local diagnostic dump. A reader therefore sees each retained window repeatedly but always as the
 same immutable record, and cannot difference successive polls to recover
-individual increments. `eligible_request_total` is the number of S1 survivors the
-window saw (named buckets plus every `other_suppressed` contribution).
+individual increments. The window carries no request total: the
+S1-survivor count of a window is internal and never emitted.
 
 Each `buckets` element is exactly `model_key`, `lower_bound`, `count`,
 `error` — four keys, all integers except the key. **A suppressed bucket
@@ -1351,15 +1384,24 @@ parameters.buyer_request_floor`, and only that `lower_bound` may satisfy
 `INTAKE_BUYER_REQUEST_FLOOR`; `count` is an upper-bound diagnostic.
 
 The rollup persists the complete windows the aggregator holds and
-merges them with the row's existing complete windows by `window_id`:
-an id present on both sides MUST carry identical bytes, and a tick that
-finds otherwise fails closed and writes nothing; the 8-window and 90-day
-bounds apply. A restart therefore loses no complete window that was
-already persisted. The `intake` component runs on a **15-minute
-cadence** (§9.2) — a privacy cadence: `fleet_ram` in particular is
-re-materialized no more often than that, so between materializations
-every reader sees the identical histogram and a single provider's
-profile change cannot be observed as a ±1 step between two polls. No
+merges them with the row's existing complete windows by `window_id`.
+Every window on either side is validated against this contract before
+it is merged — complete and exactly 30 days, 32-hex ids, valid
+parameters with `k_anonymity_min` 3, at most `key_buckets` buckets plus
+suppressed, every bucket a grammar-conforming key with
+`lower_bound == count − error ≥ buyer_request_floor`, ordered as stated
+— and a window that fails it, an id present twice with two byte
+representations (on one side or across both), or any other violation
+fails the tick closed: it writes nothing, so a malformed or tampered
+persisted row can never resurrect a suppressed key or a partial window.
+The 3-window and 90-day bounds apply after the merge. A restart
+therefore loses no complete window that was already persisted. The
+`intake` component runs on a **15-minute cadence** (§9.2), but
+`fleet_ram` is materialized only once per 30-day period (§5.2b.6) and
+re-persisted byte-identical on every tick of that period, so every
+reader sees the identical histogram for the whole period and a single
+provider's arrival, departure, or profile change is never observable as
+a ±1 step between two polls. No
 per-request row, no principal token, no raw requested string, and no
 open or incomplete window is persisted anywhere; the aggregator's
 diagnostic dump — the serialized form a test or operator may take of its
@@ -1378,41 +1420,57 @@ review.
 
 #### 5.2b.6 Fleet RAM histogram (SPEC-023 §16.2(c) input)
 
-`fleet_ram` counts providers **active in the trailing 30 days** —
-`window_end` = `generated_at`, `window_start` = 30 days earlier — where
-active means exactly: a `provider_hardware_profiles` row with
-`verified = TRUE` whose `last_reported_at` falls inside the window. (A
-leaderboard row proves served work, not the freshness of the memory
-figure, so it is NOT an activity criterion.) Each active provider is
-placed in exactly one class by its verified `unified_memory_gb`:
-`classes` is the fixed closed list of floors
-`8, 16, 24, 32, 48, 64, 96, 128, 192, 256, 512` in that order, and a
-provider with `unified_memory_gb` in `[floor, next_floor)` belongs to
-that class (`512` is unbounded above; a provider below `8` is counted in
-`provider_total` only). `k_anonymity_min` is the same fixed `3`.
-`provider_total` is the number of active providers. **Suppression is
-complementary:** a class whose count is below `k_anonymity_min` is
-suppressed (`provider_count: null`, `suppressed: true`), and when at
-least one class is suppressed the smallest unsuppressed class (ties: the
-lowest floor) is suppressed too, so the residual `provider_total −
-Σ emitted counts` never isolates a single small class; `provider_suppressed`
-is the number of providers in suppressed classes. SPEC-023 evaluates
-`fleet_fit_fraction(artifact)` from this object as
+`fleet_ram` counts providers **active in one 30-day window**, and the
+histogram is **materialized once per 30-day period**: at the first
+`intake` tick at or after a period boundary (fixed 30-day periods
+counted from the Unix epoch, in UTC) the rollup computes the histogram
+with `window_end` = that tick's `generated_at` and `window_start` = 30
+days earlier, and every later tick of the same period re-persists that
+object byte-identical; the next period computes a new one. A histogram
+whose `window_end` falls in the current period is therefore never
+recomputed, and a coordinator that was down at the boundary computes it
+at its first tick after. Active means exactly: a `provider_hardware_profiles`
+row with `verified = TRUE` whose `last_reported_at` lies inside
+`[window_start, window_end]` — a future-dated report is not activity —
+AND whose provider holds a hardware trust root (`hardware_verification_trust`)
+active at `window_end` (`expires_at` null or later than `window_end`).
+A provider that was never trusted, or whose every root has expired or
+been revoked, is not fleet, whatever its profile says. (A leaderboard row
+proves served work, not the freshness of the memory figure, so it is NOT
+an activity criterion.) Each active provider is placed in exactly one
+class by its verified `unified_memory_gb`: `classes` is the fixed closed
+list of floors `8, 16, 24, 32, 48, 64, 96, 128, 192, 256, 512` in that
+order, and a provider with `unified_memory_gb` in `[floor, next_floor)`
+belongs to that class (`512` is unbounded above); a provider below `8`
+belongs to no class and is folded into `provider_suppressed`.
+`k_anonymity_min` is the same fixed `3`. `provider_total` is the number
+of active providers, and `provider_total == Σ emitted provider_count +
+provider_suppressed` always holds. **Suppression is complementary:** a
+class whose count is below `k_anonymity_min` is suppressed
+(`provider_count: null`, `suppressed: true`), and when at least one class
+is suppressed the smallest unsuppressed class is suppressed too — on a
+tie, the class with the HIGHEST floor, the more identifying end of the
+fleet — so the residual `provider_total − Σ emitted counts` never
+isolates a single small class; `provider_suppressed` is the number of
+providers in suppressed classes plus the sub-floor providers. SPEC-023
+evaluates `fleet_fit_fraction(artifact)` from this object as
 `Σ provider_count over unsuppressed classes with (ram_gb_floor − 4) ≥
 artifact.min_ram_gb` divided by `provider_total`: the class FLOOR
 stands in for each member's `ram_gb`, so the evaluation is conservative,
 and a suppressed class contributes zero fit while still counting in the
 denominator. No provider id, pseudonym, chip identity, or exact memory
-value is emitted.
+value is emitted; the rollup's query reads only `unified_memory_gb` and
+the two trust columns that decide activity (§7.2.2).
 
 #### 5.2b.7 Configuration
 
 ```yaml
 stats:
   intake:
-    enabled: true                 # default true when stats.enabled
+    enabled: true                 # default: true when policy_salt is set, false otherwise
     reader_partner_key_ids: []    # partner_keys.id values allowed to read /v1/stats/intake; empty = nobody
     excluded_accounts: []         # buyer account ids: keep-warm, canary, synthetic, harness
+    policy_salt: env:MACPROVIDER_INTAKE_POLICY_SALT   # operator secret keying eligibility_policy_id (§5.2b.2)
     key_buckets: 64               # INTAKE_UNKNOWN_KEY_BUCKETS
     principals_per_bucket: 64     # INTAKE_UNKNOWN_PRINCIPALS_PER_BUCKET
     distinct_key_cap: 10000       # INTAKE_UNKNOWN_KEY_DISTINCT_CAP
@@ -1420,14 +1478,26 @@ stats:
     principal_cap_pct: 10         # INTAKE_UNKNOWN_KEY_PRINCIPAL_CAP_PCT
 ```
 
-Every integer MUST be positive; `principal_cap_pct` is in `[1, 100]`
-and `buyer_request_floor × principal_cap_pct / 100` MUST be at least 1;
-`reader_partner_key_ids` are positive integers; `k_anonymity_min` is
-not configurable (§5.2b.1). Invalid configuration fails coordinator
-startup. When `stats.enabled` is false nothing here exists. When
-`stats.intake.enabled` is false the AGGREGATOR and the ENDPOINT are
-absent — the endpoint path returns `404` `bad_request` like any unknown
-endpoint and SPEC-023 records `source_unavailable` — but the `intake`
+Every integer MUST be positive and bounded: `key_buckets` and
+`principals_per_bucket` at most 4096, `distinct_key_cap` at most
+10 000 000, `buyer_request_floor` at most 1 000 000 000;
+`principal_cap_pct` is in `[1, 10]` (SPEC-023 §16.4: clearing the floor
+needs at least ten independent principals, so the cap never exceeds a
+tenth of the floor) and `buyer_request_floor × principal_cap_pct / 100`
+MUST be at least 1; `reader_partner_key_ids` are positive integers;
+`excluded_accounts` entries are non-empty and unique; `policy_salt` is
+REQUIRED when intake is enabled — at least 16 characters, not a
+placeholder, `env:NAME` indirection supported, never logged or emitted —
+and it is also the default switch: with no explicit `enabled`, intake is
+enabled exactly when a salt is configured, so an existing deployment
+that sets neither keeps running with intake disabled rather than failing
+startup, while an explicit `enabled: true` without a salt fails startup;
+`k_anonymity_min` is not configurable (§5.2b.1). Invalid configuration
+fails coordinator startup. When `stats.enabled` is false nothing here
+exists. When `stats.intake.enabled` is false the AGGREGATOR and the
+ENDPOINT are absent — the endpoint path returns `404` `bad_request` for
+every method, `OPTIONS` included, like any unknown endpoint, and
+SPEC-023 records `source_unavailable` — but the `intake`
 ROLLUP component still runs on its cadence and still writes
 `stats_intake_current` with an empty `windows` array and the fleet
 histogram, so `/v1/stats/health` keeps its exact nine components and the
@@ -1444,14 +1514,17 @@ object, each window, its `parameters`, each bucket, `other_suppressed`,
 stated types and orderings; a golden-frame test asserts the field set
 against the canonical example, and the SPEC-023 generator rejects any
 deviation, an added field included.
-AC-INTAKE-2 (auth): no bearer → 401; an unlisted or provider-bound
-bearer → 403; a listed bearer → 200 with `Cache-Control: private,
-max-age=900` and never a wildcard `Access-Control-Allow-Origin`
-(allowed-, denied-, and absent-Origin cases against a key with an
-allowlist); any query parameter → 400; the public rate tier is never
-consulted; the empty default list refuses every key; `stats.intake.enabled:
-false` → 404 before any auth while `/v1/stats/health` still reports nine
-components with `intake` `ok`.
+AC-INTAKE-2 (auth): the path is routable through the stats mux (a
+key-less GET answers 401, never 404); no bearer → 401 before the public
+rate tier (three key-less requests against a public tier of one are all
+401, none 429); an unlisted or provider-bound bearer → 401 with the same
+shape; a listed bearer → 200 with `Cache-Control: private, max-age=900`
+and NO `Access-Control-Allow-Origin` or `Access-Control-Allow-Credentials`
+header at all, Origin present or not; any query parameter → 400; POST →
+405; the empty default list refuses every key; `stats.intake.enabled:
+false` → 404 before any auth for GET and for OPTIONS (no CORS header on
+either) while `/v1/stats/health` still reports nine components with
+`intake` `ok`.
 AC-INTAKE-3 (§16.2(a) order and emission): the SPEC-023 AC-CAT-13
 assertions hold against this aggregator — an ineligible request (no
 authenticated account, a bare account header, a `demo:` account, an
@@ -1480,17 +1553,24 @@ not a function of the account ids; a thousand alternating parameter and
 eligibility changes leave exactly one window in memory and a
 constant-size last-close record; the rollup merge keeps a persisted
 complete window the aggregator no longer holds and fails closed on one
-`window_id` with two byte representations; at most 8 windows are
-emitted and none older than 90 days.
+`window_id` with two byte representations (across the two sets or
+within one), on an incomplete or non-30-day window on either side, and
+on a persisted bucket below `buyer_request_floor` (a tampered row cannot
+resurrect a suppressed key); at most 3 windows are emitted and none
+older than 90 days.
 AC-INTAKE-5 (fleet): the histogram places each fixture provider in
 exactly one class, suppresses a class of one or two AND the smallest
-remaining class, ignores a leaderboard row whose profile was not
-reported in the window, is re-materialized no more often than every 15
-minutes (a profile update between two ticks does not change the served
-histogram), and the SPEC-023 evaluation over a fixture histogram
-reproduces the expected `fleet_fit_fraction_ppm` for an artifact
-`min_ram_gb`, including the boundary `min_ram_gb = 12` against the 16 GB
-class.
+remaining class (a tie resolved to the highest floor), folds a sub-8 GB
+provider into `provider_suppressed` so `provider_total` equals the
+emitted counts plus `provider_suppressed`, excludes a profile reported
+outside the window (future-dated included), a provider with no trust
+root, and a provider whose only root expired before `window_end`, is
+materialized once per 30-day period (a histogram persisted in the
+current period is re-persisted byte-identical; one from a previous
+period, from the future, or malformed is recomputed), and the SPEC-023
+evaluation over a fixture histogram reproduces the expected
+`fleet_fit_fraction_ppm` for an artifact `min_ram_gb`, including the
+boundary `min_ram_gb = 12` against the 16 GB class.
 
 ### 5.3 `GET /v1/stats/health`
 
@@ -1988,7 +2068,7 @@ Code vocabulary (closed set for v0.1):
 | `code` | HTTP | When |
 |---|---|---|
 | `bad_request` | 400 | malformed `window`/`sort`/`limit` |
-| `unauthorized` | 401 or 403 | invalid or revoked `Authorization`; valid bearer not authorized for the requested provider returns 403 |
+| `unauthorized` | 401 or 403 | invalid or revoked `Authorization`; valid bearer not authorized for the requested provider returns 403 (§5.2a); `/v1/stats/intake` answers 401 for every refusal and never 403 (§5.2b) |
 | `method_not_allowed` | 405 | request verb not in `Allow: GET, HEAD, OPTIONS` (§4.3); response MUST also carry `Allow: GET, HEAD, OPTIONS` |
 | `rate_limited` | 429 | per-IP or per-key bucket exhausted |
 | `stats_stale` | 503 | rollup older than §5.8 budget |
@@ -2306,7 +2386,7 @@ These are the **request-path readable** tables. Notes:
 
 - `stats_components_health` feeds `/v1/stats/health` (§5.3).
 - `stats_routability_current` feeds `/v1/stats/routability`,
-  `/v1/stats/models`, and `/v1/stats/providers` (§5.2a).
+  `/v1/stats/models`, and `/v1/stats/providers` (§5.2c).
 - `stats_intake_current` (v0.2.1) feeds `/v1/stats/intake` (§5.2b). It
   is a singleton row `{generated_at, unmatched_models JSONB, fleet_ram
   JSONB}` written only by the `intake` rollup component; it holds
@@ -2368,6 +2448,11 @@ GRANT SELECT ON
   provider_visibility,
   provider_rewards_ledger
 TO stats_rollup;
+-- v0.2.1 §5.2b.6 fleet histogram: the memory figure of verified
+-- profiles, and the two columns that decide whether a provider's
+-- trust root is active — never the identity hash, chip, or grantor.
+GRANT SELECT ON provider_hardware_profiles TO stats_rollup;
+GRANT SELECT (provider_id, expires_at) ON hardware_verification_trust TO stats_rollup;
 -- BIGSERIAL backing-sequence privileges required for the
 -- stats_late_events INSERT path (§9.3).
 GRANT USAGE, SELECT ON SEQUENCE stats_late_events_id_seq TO stats_rollup;
@@ -2800,7 +2885,7 @@ yet. A future SPEC bump of the rewards source does NOT require a
 | `stats_leaderboard_7d` | every 5 min | per-provider sums over last 7d (windowed) |
 | `stats_leaderboard_30d` | every 30 min | per-provider sums over last 30d (windowed) |
 | `stats_leaderboard_all` | every 6 hours | per-provider sums since rollup-start (windowed; `window=all` is the cumulative-since-rollup-start window) |
-| `stats_intake_current` (v0.2.1) | every 15 minutes (privacy cadence, §5.2b.5) | `unmatched_models`: the aggregator's complete windows merged with the row's persisted complete windows by `window_id` (§5.2b.5); `fleet_ram`: `provider_hardware_profiles` (verified, `last_reported_at` in the trailing 30 days), bucketed by memory class with complementary suppression (§5.2b.6). No OLTP billing/session table is read. |
+| `stats_intake_current` (v0.2.1) | every 15 minutes (privacy cadence, §5.2b.5) | `unmatched_models`: the aggregator's complete windows merged with the row's persisted complete windows by `window_id` (§5.2b.5); `fleet_ram`: materialized once per 30-day period from `provider_hardware_profiles` (verified, `last_reported_at` inside the window) joined to an active `hardware_verification_trust` root, bucketed by memory class with complementary suppression (§5.2b.6), then re-persisted byte-identical for the rest of the period. No OLTP billing/session table is read. |
 
 These are the v0.1 floors. The operator MAY tighten them in production
 without a SPEC change; loosening them requires a SPEC bump.

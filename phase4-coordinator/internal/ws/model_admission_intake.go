@@ -2,6 +2,8 @@ package ws
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,14 +13,15 @@ import (
 	"time"
 )
 
-// SPEC-047 v0.1.6 — GET /admin/model-admission/intake: the SPEC-023
+// SPEC-047 v0.1.6 R009 — GET /admin/model-admission/intake: the SPEC-023
 // §16.2(b) `distinct_provider_offer_count` source. A materialized snapshot,
-// rebuilt on a fixed cadence under a work ceiling, of distinct
-// sanction-excluded providers per catalog key over the trailing 30 days,
-// counted from offer-time catalog_matched offers and suppressed below the
-// fixed SPEC-023-owned k-anonymity floor. Aggregated only: no provider
-// field. GET reads the snapshot; a missing or stale snapshot is
-// `intake_unavailable` (503), never a partial count.
+// rebuilt on a fixed cadence from the DISTINCT (provider, intake_model_key)
+// pairs of the trailing 30 days (bounded by providers × keys, never by event
+// volume), with sanctioned providers excluded and — where the deployment
+// operates hardware trust — only providers holding an active trust root
+// counted; suppressed below the fixed SPEC-023-owned k-anonymity floor.
+// Aggregated only: no provider field. GET reads the snapshot; a missing or
+// stale snapshot is `intake_unavailable` (503), never a partial count.
 
 const (
 	modelAdmissionIntakeSchema        = "model_admission_intake_offer_counts.v1"
@@ -27,10 +30,16 @@ const (
 	modelAdmissionIntakeCadence       = 15 * time.Minute
 	modelAdmissionIntakeStaleAfter    = 2 * modelAdmissionIntakeCadence
 	modelAdmissionIntakeBuildTimeout  = 10 * time.Second
-	modelAdmissionIntakeEventCeiling  = 100_000
+	modelAdmissionIntakePairCeiling   = 100_000
 )
 
-var errModelAdmissionIntakeCeiling = errors.New("model admission intake: offer-event ceiling exceeded")
+var errModelAdmissionIntakeCeiling = errors.New("model admission intake: pair ceiling exceeded")
+
+// ModelAdmissionIntakePair is one DISTINCT (provider, intake key) pair.
+type ModelAdmissionIntakePair struct {
+	ProviderID     string
+	IntakeModelKey string
+}
 
 // ModelAdmissionIntakeRow is one `rows` element.
 type ModelAdmissionIntakeRow struct {
@@ -51,43 +60,39 @@ type modelAdmissionIntakeState struct {
 	modelAdmissionIntake   *modelAdmissionIntakeSnapshot
 }
 
-// BuildModelAdmissionIntakeRows applies the counting and suppression rules
-// to offer events: a provider counts once per key it offered with a
-// catalog_matched key; sanctioned providers are excluded (the predicate is
-// evaluated once per provider at build time and an unreadable sanction
-// source aborts the build); counts below k are reported as null +
-// suppressed. Rows are ordered by key.
-func BuildModelAdmissionIntakeRows(ctx context.Context, events []ModelAdmissionEvent, windowStart, windowEnd time.Time, sanctioned func(context.Context, string) (bool, error), k int) ([]ModelAdmissionIntakeRow, error) {
+// BuildModelAdmissionIntakeRows applies the R009 counting and suppression
+// rules to distinct pairs: a provider counts once per key; `eligible` is
+// evaluated once per provider after the pair scan (an unreadable source
+// aborts the build); counts below k are reported as null + suppressed. Rows
+// are ordered by key.
+func BuildModelAdmissionIntakeRows(ctx context.Context, pairs []ModelAdmissionIntakePair, eligible func(context.Context, string) (bool, error), k int) ([]ModelAdmissionIntakeRow, error) {
 	providersByKey := map[string]map[string]struct{}{}
-	sanctionCache := map[string]bool{}
-	for _, event := range events {
-		if event.State != modelAdmissionOfferSubmitted || event.CatalogModelKey == "" {
+	eligibility := map[string]bool{}
+	for _, pair := range pairs {
+		if pair.IntakeModelKey == "" || pair.ProviderID == "" {
 			continue
 		}
-		at := event.CreatedAt.UTC()
-		if at.Before(windowStart) || at.After(windowEnd) {
-			continue
-		}
-		isSanctioned, seen := sanctionCache[event.ProviderID]
+		ok, seen := eligibility[pair.ProviderID]
 		if !seen {
-			if sanctioned != nil {
+			ok = true
+			if eligible != nil {
 				var err error
-				isSanctioned, err = sanctioned(ctx, event.ProviderID)
+				ok, err = eligible(ctx, pair.ProviderID)
 				if err != nil {
-					return nil, fmt.Errorf("sanction source for provider: %w", err)
+					return nil, fmt.Errorf("provider eligibility: %w", err)
 				}
 			}
-			sanctionCache[event.ProviderID] = isSanctioned
+			eligibility[pair.ProviderID] = ok
 		}
-		if isSanctioned {
+		if !ok {
 			continue
 		}
-		set := providersByKey[event.CatalogModelKey]
+		set := providersByKey[pair.IntakeModelKey]
 		if set == nil {
 			set = map[string]struct{}{}
-			providersByKey[event.CatalogModelKey] = set
+			providersByKey[pair.IntakeModelKey] = set
 		}
-		set[event.ProviderID] = struct{}{}
+		set[pair.ProviderID] = struct{}{}
 	}
 	keys := make([]string, 0, len(providersByKey))
 	for key := range providersByKey {
@@ -107,20 +112,20 @@ func BuildModelAdmissionIntakeRows(ctx context.Context, events []ModelAdmissionE
 	return rows, nil
 }
 
-// providerIntakeSanctioned is the SPEC-047 v0.1.6 closed current-state
-// `provider_intake_sanctioned(provider_id, at)` predicate, shared by the
-// offer path and the intake aggregate:
+// providerIntakeSanctioned is the SPEC-047 R009 closed current-state
+// `provider_intake_sanctioned(provider_id, at)` predicate:
 //
 //	(1) route        — SPEC-011 provisional admission `rejected`, or a
 //	                   persisted SPEC-032 canary sanction with fail_count > 0;
-//	(2) trust        — at least one hardware-trust root and none active;
+//	(2) trust        — at least one hardware-trust root and none active at `at`;
 //	(3) payout       — no per-provider payout sanction exists in v0.1.6;
 //	(4) registration — a revoked SPEC-002 provider token and no active one.
 //
-// A sanction class the deployment does not operate (no trust store, no
+// A sanction class the deployment does not operate (no trust store; no
 // token issuer) contributes no sanction; a wired source that cannot be read
-// returns an error, and callers fail closed on it.
-func (s *Server) providerIntakeSanctioned(ctx context.Context, providerID string) (bool, error) {
+// — including an issuer wired without its custody history — returns an
+// error and the caller fails closed.
+func (s *Server) providerIntakeSanctioned(ctx context.Context, providerID string, at time.Time) (bool, error) {
 	if s.admission != nil && s.admission.Rejected(providerID) {
 		return true, nil
 	}
@@ -132,38 +137,61 @@ func (s *Server) providerIntakeSanctioned(ctx context.Context, providerID string
 		}
 	}
 	if s.hardwareTrustAdmin != nil {
-		sanctioned, err := s.hardwareTrustAdmin.ProviderHardwareTrustSanctioned(ctx, providerID)
+		held, active, err := s.hardwareTrustAdmin.ProviderHardwareTrustState(ctx, providerID, at)
 		if err != nil {
 			return false, fmt.Errorf("hardware trust: %w", err)
 		}
-		if sanctioned {
+		if held && !active {
 			return true, nil
 		}
 	}
 	if s.issuer != nil {
-		if history, ok := s.tokens.(providerTokenCustodyHistoryStore); ok && history != nil {
-			revoked, err := history.HasRevokedTokenForProvider(ctx, providerID)
+		history, ok := s.tokens.(providerTokenCustodyHistoryStore)
+		if !ok || history == nil {
+			return false, errors.New("token issuer wired without custody history")
+		}
+		revoked, err := history.HasRevokedTokenForProvider(ctx, providerID)
+		if err != nil {
+			return false, fmt.Errorf("token custody: %w", err)
+		}
+		if revoked {
+			active, err := s.issuer.HasActiveTokenForProvider(ctx, providerID)
 			if err != nil {
-				return false, fmt.Errorf("token custody: %w", err)
+				return false, fmt.Errorf("token issuer: %w", err)
 			}
-			if revoked {
-				active, err := s.issuer.HasActiveTokenForProvider(ctx, providerID)
-				if err != nil {
-					return false, fmt.Errorf("token issuer: %w", err)
-				}
-				if !active {
-					return true, nil
-				}
+			if !active {
+				return true, nil
 			}
 		}
 	}
 	return false, nil
 }
 
+// providerIntakeEligible is R009's counting eligibility: not sanctioned,
+// and — when the deployment operates hardware trust — holding an active
+// trust root at `at` (a never-trusted registration is not supply evidence).
+func (s *Server) providerIntakeEligible(ctx context.Context, providerID string, at time.Time) (bool, error) {
+	sanctioned, err := s.providerIntakeSanctioned(ctx, providerID, at)
+	if err != nil || sanctioned {
+		return false, err
+	}
+	if s.hardwareTrustAdmin != nil {
+		_, active, err := s.hardwareTrustAdmin.ProviderHardwareTrustState(ctx, providerID, at)
+		if err != nil {
+			return false, fmt.Errorf("hardware trust: %w", err)
+		}
+		if !active {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
 // buildModelAdmissionIntakeSnapshot materializes the aggregate as one
-// bounded job (SPEC-047 v0.1.6): a query timeout, an event ceiling, and
-// every sanction source readable — otherwise no snapshot is produced and
-// the previous one stays in place.
+// bounded job (SPEC-047 R009): the pair scan first, then eligibility once per
+// provider as of the build instant, a query timeout, a pair ceiling, and
+// every wired source readable — otherwise no snapshot is produced and the
+// previous one stays in place. The pointer is swapped once, at the end.
 func (s *Server) buildModelAdmissionIntakeSnapshot(ctx context.Context) error {
 	if s.modelAdmissions == nil {
 		return errors.New("model admission store unavailable")
@@ -172,19 +200,26 @@ func (s *Server) buildModelAdmissionIntakeSnapshot(ctx context.Context) error {
 	defer cancel()
 	generatedAt := s.now().UTC().Truncate(time.Second)
 	windowStart := generatedAt.Add(-modelAdmissionIntakeWindow)
-	events, err := s.modelAdmissions.ModelAdmissionOfferEventsSince(ctx, windowStart)
+	pairs, err := s.modelAdmissions.ModelAdmissionIntakeOfferPairs(ctx, windowStart, generatedAt)
 	if err != nil {
-		return fmt.Errorf("offer events: %w", err)
+		return fmt.Errorf("offer pairs: %w", err)
 	}
-	if len(events) > modelAdmissionIntakeEventCeiling {
+	if len(pairs) > modelAdmissionIntakePairCeiling {
 		return errModelAdmissionIntakeCeiling
 	}
-	rows, err := BuildModelAdmissionIntakeRows(ctx, events, windowStart, generatedAt, s.providerIntakeSanctioned, modelAdmissionIntakeKAnonymityMin)
+	rows, err := BuildModelAdmissionIntakeRows(ctx, pairs, func(c context.Context, providerID string) (bool, error) {
+		return s.providerIntakeEligible(c, providerID, generatedAt)
+	}, modelAdmissionIntakeKAnonymityMin)
 	if err != nil {
 		return err
 	}
+	var nonce [16]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		return fmt.Errorf("nonce: %w", err)
+	}
 	body, err := json.Marshal(map[string]any{
 		"schema":          modelAdmissionIntakeSchema,
+		"nonce":           hex.EncodeToString(nonce[:]),
 		"generated_at":    generatedAt.Format(time.RFC3339),
 		"window_start":    windowStart.Format(time.RFC3339),
 		"window_end":      generatedAt.Format(time.RFC3339),

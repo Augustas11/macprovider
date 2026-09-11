@@ -425,7 +425,10 @@ func TestModelAdmissionOfferRejectsSanctionedProvider(t *testing.T) {
 	}
 }
 
-func TestModelAdmissionWithdrawalRejectsSanctionedProvider(t *testing.T) {
+// SPEC-047-R006: a provider MUST be able to withdraw an offered candidate;
+// a sanction refuses NEW offers (R007) but never traps a provider in an
+// offered state.
+func TestModelAdmissionWithdrawalSucceedsForSanctionedProvider(t *testing.T) {
 	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -449,15 +452,19 @@ func TestModelAdmissionWithdrawalRejectsSanctionedProvider(t *testing.T) {
 		FailCount:  1,
 	}})
 	withdrawal := signedModelAdmissionWithdrawal(t, "provider-byom-a", candidateID, "ollama:qwen3-8b", priv, nil)
-	if status, _ := postModelAdmissionWithdrawal(t, h.HTTP.URL, bearer, withdrawal); status != http.StatusUnauthorized {
-		t.Fatalf("sanctioned withdrawal status=%d, want 401", status)
+	if status, body := postModelAdmissionWithdrawal(t, h.HTTP.URL, bearer, withdrawal); status != http.StatusOK {
+		t.Fatalf("sanctioned withdrawal status=%d body=%s, want 200 (R006: withdrawal is never sanction-gated)", status, body)
+	}
+	reoffer := signedModelAdmissionOffer(t, "provider-byom-a", stableModelAdmissionCandidateID("m2"), "ollama:qwen3-8b", priv, nil)
+	if status, _ := postModelAdmissionOffer(t, h.HTTP.URL, bearer, reoffer); status != http.StatusUnauthorized {
+		t.Fatalf("sanctioned offer status=%d, want 401 (R007 offer gate)", status)
 	}
 	status, body := getModelAdmissionStatus(t, h.HTTP.URL, bearer, candidateID)
 	if status != http.StatusOK {
 		t.Fatalf("sanctioned status readback=%d body=%s", status, body)
 	}
-	if readback := decodeMap(t, body); readback["admission_state"] != "offer_submitted" {
-		t.Fatalf("sanctioned withdrawal mutated admission state: %#v", readback)
+	if readback := decodeMap(t, body); readback["admission_state"] != "withdrawn" {
+		t.Fatalf("sanctioned withdrawal must land the candidate in withdrawn: %#v", readback)
 	}
 
 	_, bearerRejected, privRejected := bindAdmissionIdentityForTest(t, store, "provider-byom-rejected")
@@ -468,8 +475,12 @@ func TestModelAdmissionWithdrawalRejectsSanctionedProvider(t *testing.T) {
 	}
 	h.Provider.Admission().Reject("provider-byom-rejected", "operator rejected provider")
 	withdrawal = signedModelAdmissionWithdrawal(t, "provider-byom-rejected", rejectedCandidateID, "ollama:qwen3-8b", privRejected, nil)
-	if status, _ := postModelAdmissionWithdrawal(t, h.HTTP.URL, bearerRejected, withdrawal); status != http.StatusUnauthorized {
-		t.Fatalf("operator-rejected withdrawal status=%d, want 401", status)
+	if status, body := postModelAdmissionWithdrawal(t, h.HTTP.URL, bearerRejected, withdrawal); status != http.StatusOK {
+		t.Fatalf("operator-rejected withdrawal status=%d body=%s, want 200 (R006)", status, body)
+	}
+	reoffer = signedModelAdmissionOffer(t, "provider-byom-rejected", stableModelAdmissionCandidateID("n2"), "ollama:qwen3-8b", privRejected, nil)
+	if status, _ := postModelAdmissionOffer(t, h.HTTP.URL, bearerRejected, reoffer); status != http.StatusUnauthorized {
+		t.Fatalf("operator-rejected offer status=%d, want 401 (R007 offer gate)", status)
 	}
 }
 

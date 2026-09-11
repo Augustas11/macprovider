@@ -3345,6 +3345,11 @@ MODEL_ADMISSION_INTAKE_SCHEMA = "model_admission_intake_offer_counts.v1"
 INTAKE_K_ANONYMITY_MIN = 3  # SPEC-023 v0.10.4 §16.4: fixed, not release-tunable
 INTAKE_CADENCE_DAYS = 31  # SPEC-023 §16.8 rule 3: one cadence period
 INTAKE_SAFETY_MARGIN_GB = 4  # §16.2(c) / §5 headroom rule
+INTAKE_FLEET_FIT_PPM_BUCKET = 50_000  # §16.2(c) [v0.10.4]: recorded fraction is floored to a 5% grid
+INTAKE_WINDOW_DAYS = 30  # SPEC-017 §3.2a: a served window is exactly one 30-day epoch
+INTAKE_MAX_EMITTED_WINDOWS = 3  # SPEC-017 §5.2b.5
+INTAKE_MAX_PRINCIPAL_CAP_PCT = 10  # §16.4 [v0.10.4]: the cap never exceeds a tenth of the floor
+INTAKE_RFC3339_UTC_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
 INTAKE_THRESHOLD_INT_KEYS = (
     "INTAKE_DEMAND_RANK_MAX",
     "INTAKE_OFFER_FLOOR",
@@ -3395,9 +3400,10 @@ INTAKE_TIER_TARGET_RE = re.compile(r"^<= ([1-9][0-9]{0,3}) GB$")
 INTAKE_WINDOW_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 FLEET_RAM_CLASS_FLOORS = (8, 16, 24, 32, 48, 64, 96, 128, 192, 256, 512)
 STATS_INTAKE_WINDOW_KEYS = frozenset({
-    "window_id", "window_start", "window_end", "close_reason", "parameters", "eligibility_policy_id",
-    "eligible_request_total", "buckets", "suppressed_bucket_count", "other_suppressed",
+    "window_id", "window_start", "window_end", "parameters", "eligibility_policy_id",
+    "buckets", "suppressed_bucket_count", "other_suppressed",
 })
+STATS_INTAKE_METHODOLOGY_KEYS = frozenset({"version", "unmatched_models", "fleet_ram", "redaction"})
 STATS_INTAKE_PARAMETER_KEYS = frozenset({
     "key_buckets", "principals_per_bucket", "distinct_key_cap", "buyer_request_floor",
     "principal_cap_pct", "principal_cap_requests", "k_anonymity_min", "window_max_days",
@@ -3407,7 +3413,7 @@ STATS_INTAKE_OTHER_KEYS = frozenset({"request_count", "request_count_saturated",
 STATS_INTAKE_FLEET_KEYS = frozenset({"window_start", "window_end", "k_anonymity_min", "provider_total", "provider_suppressed", "classes"})
 STATS_INTAKE_CLASS_KEYS = frozenset({"ram_gb_floor", "provider_count", "suppressed"})
 STATS_INTAKE_TOP_KEYS = frozenset({"schema_version", "generated_at", "stale_after", "unmatched_models", "fleet_ram", "methodology"})
-MODEL_ADMISSION_INTAKE_KEYS = frozenset({"schema", "generated_at", "window_start", "window_end", "k_anonymity_min", "rows"})
+MODEL_ADMISSION_INTAKE_KEYS = frozenset({"schema", "nonce", "generated_at", "window_start", "window_end", "k_anonymity_min", "rows"})
 MODEL_ADMISSION_INTAKE_ROW_KEYS = frozenset({"catalog_model_key", "distinct_provider_offer_count", "suppressed"})
 INTAKE_THRESHOLD_TO_PARAMETER = {
     "INTAKE_UNKNOWN_KEY_BUCKETS": "key_buckets",
@@ -3440,19 +3446,20 @@ def _intake_closed(obj: object, keys: frozenset, label: str) -> dict:
 
 
 def _intake_rfc3339(value: object, label: str, nullable: bool = False) -> _dt.datetime | None:
+    """Exactly the SPEC-017 §5.2b / SPEC-023 §16.8 timestamp form: RFC3339
+    UTC with second precision and the literal `Z` — one byte string per
+    instant, so window equality is byte equality."""
     if value is None:
         if nullable:
             return None
-        fail(f"{label}: must be an RFC3339 timestamp")
-    if not isinstance(value, str):
-        fail(f"{label}: must be an RFC3339 timestamp string")
+        fail(f"{label}: must be an RFC3339 UTC timestamp")
+    if not isinstance(value, str) or not INTAKE_RFC3339_UTC_RE.fullmatch(value):
+        fail(f"{label}: must be an RFC3339 UTC timestamp with second precision (YYYY-MM-DDTHH:MM:SSZ)")
     try:
-        parsed = _dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = _dt.datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ")
     except ValueError:
-        fail(f"{label}: must be an RFC3339 timestamp")
-    if parsed.tzinfo is None:
-        fail(f"{label}: RFC3339 timestamp must carry a zone")
-    return parsed.astimezone(_dt.timezone.utc)
+        fail(f"{label}: must be a valid RFC3339 UTC timestamp")
+    return parsed.replace(tzinfo=_dt.timezone.utc)
 
 
 def _intake_int(value: object, label: str, minimum: int = 0, nullable: bool = False) -> int | None:
@@ -3486,8 +3493,8 @@ def validate_intake_thresholds(thresholds: object) -> dict:
         fail(f"intake-decision.thresholds.INTAKE_K_ANONYMITY_MIN must be {INTAKE_K_ANONYMITY_MIN} (fixed in SPEC-023 v0.10.4 §16.4)")
     if t["INTAKE_OFFER_FLOOR"] < t["INTAKE_K_ANONYMITY_MIN"]:
         fail("intake-decision.thresholds: INTAKE_OFFER_FLOOR must be >= INTAKE_K_ANONYMITY_MIN (SPEC-023 §16.2(b))")
-    if not 1 <= t["INTAKE_UNKNOWN_KEY_PRINCIPAL_CAP_PCT"] <= 100:
-        fail("intake-decision.thresholds.INTAKE_UNKNOWN_KEY_PRINCIPAL_CAP_PCT must be in [1, 100]")
+    if not 1 <= t["INTAKE_UNKNOWN_KEY_PRINCIPAL_CAP_PCT"] <= INTAKE_MAX_PRINCIPAL_CAP_PCT:
+        fail(f"intake-decision.thresholds.INTAKE_UNKNOWN_KEY_PRINCIPAL_CAP_PCT must be in [1, {INTAKE_MAX_PRINCIPAL_CAP_PCT}]")
     if not 0 <= t["INTAKE_FLEET_FIT_MIN_PCT"] <= 100:
         fail("intake-decision.thresholds.INTAKE_FLEET_FIT_MIN_PCT must be in [0, 100]")
     if not isinstance(t["tier_target"], str) or not INTAKE_TIER_TARGET_RE.fullmatch(t["tier_target"]):
@@ -3514,7 +3521,9 @@ def intake_verified_min_ram(artifact_obj: dict | None, key: str) -> list[int]:
 def fleet_fit_fraction_ppm(fleet_ram: dict, min_ram_gb: int) -> int | None:
     """SPEC-023 §16.2(c) over the SPEC-017 §5.2b.6 histogram: unsuppressed
     classes whose floor − 4 ≥ min_ram_gb, over provider_total; conservative
-    by class floor. None when the fleet is empty."""
+    by class floor, then floored to the 50 000 ppm grid so the public
+    manifest never reproduces the exact fleet ratio. None when the fleet is
+    empty."""
     total = fleet_ram["provider_total"]
     if total == 0:
         return None
@@ -3524,7 +3533,24 @@ def fleet_fit_fraction_ppm(fleet_ram: dict, min_ram_gb: int) -> int | None:
             continue
         if cls["ram_gb_floor"] - INTAKE_SAFETY_MARGIN_GB >= min_ram_gb:
             fit += cls["provider_count"]
-    return fit * 1_000_000 // total
+    exact = fit * 1_000_000 // total
+    return exact // INTAKE_FLEET_FIT_PPM_BUCKET * INTAKE_FLEET_FIT_PPM_BUCKET
+
+
+def spec017_intake_amendment_landed() -> bool:
+    """SPEC-023 §16.7: the buyer-demand signal exists from SPEC-017 v0.2.1.
+    The gate is keyed on the CONFORMANCE index — the version of record —
+    never on a manifest's own claim."""
+    try:
+        index = json.loads((ROOT / "specs" / "CONFORMANCE.json").read_text())
+    except (OSError, ValueError):
+        return False
+    for spec in index.get("specs", []):
+        if spec.get("spec_id") == "SPEC-017":
+            version = str(spec.get("version", "")).lstrip("v")
+            parts = tuple(int(x) for x in version.split(".") if x.isdigit())
+            return parts >= (0, 2, 1)
+    return False
 
 
 def validate_stats_intake_source(data: bytes) -> dict:
@@ -3544,6 +3570,8 @@ def validate_stats_intake_source(data: bytes) -> dict:
         fail("stats-intake.json.unmatched_models.contract must be SPEC-023-16.2a")
     if not isinstance(um["windows"], list):
         fail("stats-intake.json.unmatched_models.windows must be an array")
+    if len(um["windows"]) > INTAKE_MAX_EMITTED_WINDOWS:
+        fail(f"stats-intake.json.unmatched_models.windows carries more than {INTAKE_MAX_EMITTED_WINDOWS} windows")
     seen_ids = set()
     for index, window in enumerate(um["windows"]):
         label = f"stats-intake.json.unmatched_models.windows[{index}]"
@@ -3553,21 +3581,20 @@ def validate_stats_intake_source(data: bytes) -> dict:
         seen_ids.add(w["window_id"])
         start = _intake_rfc3339(w["window_start"], f"{label}.window_start")
         end = _intake_rfc3339(w["window_end"], f"{label}.window_end")
-        if end <= start:
-            fail(f"{label}: window_end must follow window_start")
-        if w["close_reason"] != "epoch_elapsed":
-            fail(f"{label}.close_reason must be epoch_elapsed (only complete windows are served)")
+        if end - start != _dt.timedelta(days=INTAKE_WINDOW_DAYS):
+            fail(f"{label}: a served window is exactly {INTAKE_WINDOW_DAYS} days (only complete epochs are served)")
         params = _intake_closed(w["parameters"], STATS_INTAKE_PARAMETER_KEYS, f"{label}.parameters")
         for key in STATS_INTAKE_PARAMETER_KEYS:
             _intake_int(params[key], f"{label}.parameters.{key}", minimum=1)
-        if params["k_anonymity_min"] != INTAKE_K_ANONYMITY_MIN:
-            fail(f"{label}.parameters.k_anonymity_min must be {INTAKE_K_ANONYMITY_MIN}")
-        if not 1 <= params["principal_cap_pct"] <= 100 or params["principal_cap_requests"] != params["buyer_request_floor"] * params["principal_cap_pct"] // 100:
-            fail(f"{label}.parameters.principal_cap_requests must equal floor(buyer_request_floor × principal_cap_pct / 100)")
+        if params["k_anonymity_min"] != INTAKE_K_ANONYMITY_MIN or params["window_max_days"] != INTAKE_WINDOW_DAYS:
+            fail(f"{label}.parameters: k_anonymity_min must be {INTAKE_K_ANONYMITY_MIN} and window_max_days {INTAKE_WINDOW_DAYS}")
+        if not 1 <= params["principal_cap_pct"] <= INTAKE_MAX_PRINCIPAL_CAP_PCT or params["principal_cap_requests"] != params["buyer_request_floor"] * params["principal_cap_pct"] // 100:
+            fail(f"{label}.parameters.principal_cap_requests must equal floor(buyer_request_floor × principal_cap_pct / 100) with principal_cap_pct in [1, {INTAKE_MAX_PRINCIPAL_CAP_PCT}]")
         if not isinstance(w["eligibility_policy_id"], str) or not INTAKE_WINDOW_ID_RE.fullmatch(w["eligibility_policy_id"]):
             fail(f"{label}.eligibility_policy_id must be 32-hex")
-        _intake_int(w["eligible_request_total"], f"{label}.eligible_request_total")
         _intake_int(w["suppressed_bucket_count"], f"{label}.suppressed_bucket_count")
+        if len(w["buckets"] if isinstance(w["buckets"], list) else []) + w["suppressed_bucket_count"] > params["key_buckets"]:
+            fail(f"{label}: buckets plus suppressed_bucket_count exceed key_buckets")
         if not isinstance(w["buckets"], list):
             fail(f"{label}.buckets must be an array")
         keys = set()
@@ -3588,8 +3615,10 @@ def validate_stats_intake_source(data: bytes) -> dict:
         _intake_bool(other["request_count_saturated"], f"{label}.other_suppressed.request_count_saturated")
         _intake_bool(other["distinct_key_count_saturated"], f"{label}.other_suppressed.distinct_key_count_saturated")
     fleet = _intake_closed(top["fleet_ram"], STATS_INTAKE_FLEET_KEYS, "stats-intake.json.fleet_ram")
-    _intake_rfc3339(fleet["window_start"], "stats-intake.json.fleet_ram.window_start")
-    _intake_rfc3339(fleet["window_end"], "stats-intake.json.fleet_ram.window_end")
+    fleet_start = _intake_rfc3339(fleet["window_start"], "stats-intake.json.fleet_ram.window_start")
+    fleet_end = _intake_rfc3339(fleet["window_end"], "stats-intake.json.fleet_ram.window_end")
+    if fleet_end - fleet_start != _dt.timedelta(days=INTAKE_WINDOW_DAYS):
+        fail(f"stats-intake.json.fleet_ram: the window is exactly {INTAKE_WINDOW_DAYS} days")
     if fleet["k_anonymity_min"] != INTAKE_K_ANONYMITY_MIN:
         fail(f"stats-intake.json.fleet_ram.k_anonymity_min must be {INTAKE_K_ANONYMITY_MIN}")
     _intake_int(fleet["provider_total"], "stats-intake.json.fleet_ram.provider_total")
@@ -3605,8 +3634,13 @@ def validate_stats_intake_source(data: bytes) -> dict:
             fail(f"{clabel}: provider_count is null exactly when suppressed")
         if count is not None and count < INTAKE_K_ANONYMITY_MIN:
             fail(f"{clabel}: an unsuppressed class must hold at least k providers")
-    if not isinstance(top["methodology"], dict):
-        fail("stats-intake.json.methodology must be an object")
+    emitted = sum(c["provider_count"] for c in fleet["classes"] if c["provider_count"] is not None)
+    if emitted + fleet["provider_suppressed"] != fleet["provider_total"]:
+        fail("stats-intake.json.fleet_ram: provider_total must equal the emitted counts plus provider_suppressed")
+    methodology = _intake_closed(top["methodology"], STATS_INTAKE_METHODOLOGY_KEYS, "stats-intake.json.methodology")
+    for key in STATS_INTAKE_METHODOLOGY_KEYS:
+        if not isinstance(methodology[key], str) or not methodology[key]:
+            fail(f"stats-intake.json.methodology.{key} must be a non-empty string")
     return top
 
 
@@ -3620,6 +3654,8 @@ def validate_model_admission_intake_source(data: bytes) -> dict:
     top = _intake_closed(obj, MODEL_ADMISSION_INTAKE_KEYS, "model-admission-intake.json")
     if top["schema"] != MODEL_ADMISSION_INTAKE_SCHEMA:
         fail(f"model-admission-intake.json: schema must be {MODEL_ADMISSION_INTAKE_SCHEMA}")
+    if not isinstance(top["nonce"], str) or not INTAKE_WINDOW_ID_RE.fullmatch(top["nonce"]):
+        fail("model-admission-intake.json.nonce must be 32-hex (one build, one byte string)")
     generated = _intake_rfc3339(top["generated_at"], "model-admission-intake.json.generated_at")
     start = _intake_rfc3339(top["window_start"], "model-admission-intake.json.window_start")
     end = _intake_rfc3339(top["window_end"], "model-admission-intake.json.window_end")
@@ -3679,6 +3715,8 @@ class IntakeSources:
         path = self.dir / name
         if not path.is_file():
             fail(f"intake-decision: retained source {path} is missing from the intake audit store")
+        if os.name == "posix" and path.stat().st_mode & 0o077:
+            fail(f"intake-decision: retained source {path} must be mode 0600 (SPEC-023 §16.8 rule 9: the store is operator-private)")
         return path.read_bytes()
 
     def stats(self) -> tuple[dict, str]:
@@ -3783,6 +3821,8 @@ def validate_intake_admit_entry(entry: dict, thresholds: dict, candidate_obj: di
     fleet_reason = signals["fleet_fit_absent_reason"]
     if unmatched_suppressed:
         fail(f"{label}: unmatched_model_request_suppressed is always false against a macprovider.stats-intake.v1 source")
+    if unmatched_reason == "spec017_amendment_not_landed" and spec017_intake_amendment_landed():
+        fail(f"{label}: spec017_amendment_not_landed is not a valid reason once CONFORMANCE.json records SPEC-017 >= 0.2.1 (SPEC-023 §16.7); use source_unavailable")
     if (unmatched_digest is None) != (unmatched_reason in INTAKE_NO_SOURCE_REASONS):
         fail(f"{label}: unmatched_model_request_source_sha256 is null exactly when the source was unavailable or not landed")
     if (fleet_digest is None) != (fleet_reason == "source_unavailable"):
@@ -3874,7 +3914,7 @@ def validate_intake_admit_entry(entry: dict, thresholds: dict, candidate_obj: di
             fail(f"{label}: tier_target clause is not satisfied (best verified artifact needs {min(verified_ram) + INTAKE_SAFETY_MARGIN_GB} GB > {target} GB)")
 
 
-def validate_intake_promote_entry(entry: dict, thresholds: dict, candidate_obj: dict, demand_obj: dict, demand_digest: str, label: str) -> None:
+def validate_intake_promote_entry(entry: dict, thresholds: dict, candidate_obj: dict, artifact_obj: dict | None, demand_obj: dict, demand_digest: str, label: str) -> None:
     key = entry["model_key"]
     as_of = _intake_rfc3339(entry["as_of"], f"{label}.as_of")
     for field in ("signals", "admission_clause", "fit_clause"):
@@ -3895,6 +3935,11 @@ def validate_intake_promote_entry(entry: dict, thresholds: dict, candidate_obj: 
         fail(f"{label}.promotion.listed_days_elapsed exceeds as_of - listed_since")
     if promotion["rate_class"] not in RATE_CLASSES:
         fail(f"{label}.promotion.rate_class must be a §3.3.1 rate class")
+    # §3.7 / v0.10.1 rule 2: the key's rate_class lives on its artifact-feed
+    # model entry, never on the candidate row.
+    feed_rate_class = (((artifact_obj or {}).get("models") or {}).get(key) or {}).get("rate_class")
+    if promotion["rate_class"] != feed_rate_class:
+        fail(f"{label}.promotion.rate_class must equal the artifact feed's rate_class for {key!r} ({feed_rate_class!r})")
     if promotion["rate_row_resolved"] is not True:
         fail(f"{label}.promotion.rate_row_resolved must be true")
     rate_source_digest = _intake_digest(promotion["rate_card_source_sha256"], f"{label}.promotion.rate_card_source_sha256", nullable=False)
@@ -3982,7 +4027,7 @@ def validate_intake_decision(
             if e["coldstart_slot_used"]:
                 coldstart += 1
         else:
-            validate_intake_promote_entry(e, thresholds, candidate_obj, demand_obj, demand_digest, label)
+            validate_intake_promote_entry(e, thresholds, candidate_obj, artifact_obj, demand_obj, demand_digest, label)
     if previous_tiers is not None:
         missing = sorted(set(expected_actions) - seen)
         if missing:
@@ -4332,6 +4377,13 @@ def verify(previous_release_dir: pathlib.Path | None = None, intake_audit_dir: p
                 f"{previous_release['release_id']}"
             )
         else:
+            # Without the previous release the TRANSITION rule cannot be
+            # re-derived, but the committed manifest itself is still checked
+            # against this release's inputs and retained sources.
+            check_intake_decision_manifest(
+                candidate_obj, artifact_obj, demand_obj, demand, None,
+                intake_audit_dir if intake_audit_dir is not None else default_intake_audit_dir(),
+            )
             print(
                 f"verify: NOTICE: release {release_id} is artifact-bound and its "
                 "intake_decision_sha256 transition rule (SPEC-023 §3.7.8) was NOT re-derived; "

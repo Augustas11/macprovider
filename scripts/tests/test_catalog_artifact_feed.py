@@ -2894,24 +2894,24 @@ class IntakeDecisionManifestTest(unittest.TestCase):
         self.stats_bytes = self.write("stats-intake.json", self.stats_source())
         self.offers_bytes = self.write("model-admission-intake.json", self.offers_source())
 
-    def write(self, name: str, obj: dict) -> bytes:
+    def write(self, name: str, obj: dict, mode: int = 0o600) -> bytes:
         data = json.dumps(obj, sort_keys=True).encode()
-        (self.release_dir / name).write_bytes(data)
+        path = self.release_dir / name
+        path.write_bytes(data)
+        path.chmod(mode)
         return data
 
-    def stats_source(self, buckets: list | None = None, close_reason: str = "epoch_elapsed") -> dict:
+    def stats_source(self, buckets: list | None = None, window_end: str = "2026-09-30T00:00:00Z") -> dict:
         window = {
             "window_id": "3f1c0a9b7d2e4c6f8a1b3d5e7f9a0c2d",
             "window_start": "2026-08-31T00:00:00Z",
-            "window_end": "2026-09-30T00:00:00Z",
-            "close_reason": close_reason,
+            "window_end": window_end,
             "parameters": {
                 "key_buckets": 64, "principals_per_bucket": 64, "distinct_key_cap": 10000,
                 "buyer_request_floor": 250, "principal_cap_pct": 10, "principal_cap_requests": 25,
                 "k_anonymity_min": 3, "window_max_days": 30,
             },
             "eligibility_policy_id": "9a2e6c1d4b8f0a3e5c7d9b1f3a5c7e90",
-            "eligible_request_total": 1284,
             "buckets": [{"model_key": self.KEY, "lower_bound": 300, "count": 300, "error": 0}] if buckets is None else buckets,
             "suppressed_bucket_count": 7,
             "other_suppressed": {"request_count": 57, "request_count_saturated": False, "distinct_key_count": 41, "distinct_key_count_saturated": False},
@@ -2932,12 +2932,18 @@ class IntakeDecisionManifestTest(unittest.TestCase):
                 "window_start": "2026-08-31T12:00:00Z", "window_end": "2026-09-30T12:00:00Z",
                 "k_anonymity_min": 3, "provider_total": 12, "provider_suppressed": 3, "classes": classes,
             },
-            "methodology": {"version": "SPEC-017-v0.2.1"},
+            "methodology": {
+                "version": "SPEC-017-v0.2.1",
+                "unmatched_models": "SPEC-023 §16.2(a) Space-Saving summary over complete 30-day epochs only",
+                "fleet_ram": "verified, trusted hardware profiles bucketed by unified memory class floor",
+                "redaction": "aggregated counts only",
+            },
         }
 
     def offers_source(self, rows: list | None = None) -> dict:
         return {
             "schema": "model_admission_intake_offer_counts.v1",
+            "nonce": "5e8d1c2b3a4f60718293a4b5c6d7e8f9",
             "generated_at": "2026-09-30T12:00:00Z",
             "window_start": "2026-08-31T12:00:00Z",
             "window_end": "2026-09-30T12:00:00Z",
@@ -3077,7 +3083,7 @@ class IntakeDecisionManifestTest(unittest.TestCase):
         m["thresholds"]["INTAKE_UNKNOWN_KEY_BUCKETS"] = 32
         self.rejects(m, "differs from the selected window's parameters.key_buckets")
         m = self.manifest([self.admit_entry()])
-        m["thresholds"]["INTAKE_UNKNOWN_KEY_PRINCIPAL_CAP_PCT"] = 20
+        m["thresholds"]["INTAKE_UNKNOWN_KEY_PRINCIPAL_CAP_PCT"] = 5
         self.rejects(m, "parameters.principal_cap_pct")
 
     def test_source_digests_and_the_audit_store(self):
@@ -3184,11 +3190,11 @@ class IntakeDecisionManifestTest(unittest.TestCase):
         self.rejects(self.manifest([entry]), "ends more than 31 days before as_of")
         self.offers_bytes = self.write("model-admission-intake.json", self.offers_source())
         # A source whose only window is not complete is rejected at parse.
-        self.stats_bytes = self.write("stats-intake.json", self.stats_source(close_reason="aggregator_stopped"))
+        self.stats_bytes = self.write("stats-intake.json", self.stats_source(window_end="2026-09-05T00:00:00Z"))
         entry = self.admit_entry()
         entry["signals"]["unmatched_model_request_source_sha256"] = catalog_release.sha256(self.stats_bytes)
         entry["signals"]["fleet_fit_source_sha256"] = catalog_release.sha256(self.stats_bytes)
-        self.rejects(self.manifest([entry]), "close_reason must be epoch_elapsed")
+        self.rejects(self.manifest([entry]), "a served window is exactly 30 days")
         # No bucket for the key in the selected window → no_observations.
         self.stats_bytes = self.write("stats-intake.json", self.stats_source(buckets=[]))
         entry = self.admit_entry()
@@ -3243,3 +3249,81 @@ class IntakeDecisionManifestTest(unittest.TestCase):
         self.rejects(self.manifest([self.promote_entry()]), "reaches recommendable without a listed observation period", previous_tiers=previous)
         other = catalog_release.candidate_admission_tiers(CANDIDATE_OBJ)
         self.rejects(self.manifest([self.admit_entry()]), "is not admitted or promoted by this release", previous_tiers=other)
+
+    def test_source_hardening_rules(self):
+        # More than three windows is not a SPEC-017 response.
+        src = self.stats_source()
+        extra = [dict(src["unmatched_models"]["windows"][0], window_id=f"{i:032x}", window_start=f"2026-0{i}-01T00:00:00Z", window_end=f"2026-0{i}-31T00:00:00Z") for i in (5, 6, 7)]
+        src["unmatched_models"]["windows"] += extra
+        self.stats_bytes = self.write("stats-intake.json", src)
+        entry = self.admit_entry()
+        entry["signals"]["unmatched_model_request_source_sha256"] = catalog_release.sha256(self.stats_bytes)
+        entry["signals"]["fleet_fit_source_sha256"] = catalog_release.sha256(self.stats_bytes)
+        self.rejects(self.manifest([entry]), "more than 3 windows")
+        # A non-UTC or sub-second timestamp form is not one byte string per instant.
+        for bad in ("2026-09-30T12:00:00+00:00", "2026-09-30T12:00:00.000Z", "2026-09-30 12:00:00Z"):
+            src = self.stats_source()
+            src["generated_at"] = bad
+            self.stats_bytes = self.write("stats-intake.json", src)
+            entry = self.admit_entry()
+            entry["signals"]["unmatched_model_request_source_sha256"] = catalog_release.sha256(self.stats_bytes)
+            entry["signals"]["fleet_fit_source_sha256"] = catalog_release.sha256(self.stats_bytes)
+            self.rejects(self.manifest([entry]), "RFC3339 UTC timestamp with second precision")
+        # The per-principal cap never exceeds a tenth of the floor.
+        src = self.stats_source()
+        src["unmatched_models"]["windows"][0]["parameters"]["principal_cap_pct"] = 11
+        src["unmatched_models"]["windows"][0]["parameters"]["principal_cap_requests"] = 27
+        self.stats_bytes = self.write("stats-intake.json", src)
+        entry = self.admit_entry()
+        entry["signals"]["unmatched_model_request_source_sha256"] = catalog_release.sha256(self.stats_bytes)
+        entry["signals"]["fleet_fit_source_sha256"] = catalog_release.sha256(self.stats_bytes)
+        self.rejects(self.manifest([entry]), "principal_cap_pct in [1, 10]")
+        m = self.manifest([self.admit_entry()])
+        m["thresholds"]["INTAKE_UNKNOWN_KEY_PRINCIPAL_CAP_PCT"] = 11
+        self.rejects(m, "INTAKE_UNKNOWN_KEY_PRINCIPAL_CAP_PCT must be in [1, 10]")
+        # The methodology object is closed.
+        src = self.stats_source()
+        src["methodology"]["extra"] = "x"
+        self.stats_bytes = self.write("stats-intake.json", src)
+        entry = self.admit_entry()
+        entry["signals"]["unmatched_model_request_source_sha256"] = catalog_release.sha256(self.stats_bytes)
+        entry["signals"]["fleet_fit_source_sha256"] = catalog_release.sha256(self.stats_bytes)
+        self.rejects(self.manifest([entry]), "methodology: unknown key(s)")
+        # The fleet histogram's counts must reconcile with provider_total.
+        src = self.stats_source()
+        src["fleet_ram"]["provider_suppressed"] = 2
+        self.stats_bytes = self.write("stats-intake.json", src)
+        entry = self.admit_entry()
+        entry["signals"]["unmatched_model_request_source_sha256"] = catalog_release.sha256(self.stats_bytes)
+        entry["signals"]["fleet_fit_source_sha256"] = catalog_release.sha256(self.stats_bytes)
+        self.rejects(self.manifest([entry]), "provider_total must equal the emitted counts plus provider_suppressed")
+        # The amendment has landed (CONFORMANCE SPEC-017 >= 0.2.1): the
+        # not-landed reason is no longer a valid absence.
+        self.assertTrue(catalog_release.spec017_intake_amendment_landed())
+        entry = self.admit_entry()
+        s = entry["signals"]
+        s["unmatched_model_request_count"] = None
+        s["unmatched_model_request_absent_reason"] = "spec017_amendment_not_landed"
+        s["unmatched_model_request_source_sha256"] = None
+        s["unmatched_model_request_window_id"] = None
+        s["unmatched_model_request_window_start"] = None
+        s["unmatched_model_request_window_end"] = None
+        self.rejects(self.manifest([entry]), "spec017_amendment_not_landed is not a valid reason")
+        # A retained source readable by others is not an operator-private store.
+        self.stats_bytes = self.write("stats-intake.json", self.stats_source(), mode=0o644)
+        self.rejects(self.manifest([self.admit_entry()]), "must be mode 0600")
+        self.stats_bytes = self.write("stats-intake.json", self.stats_source())
+
+    def test_fleet_fit_ppm_is_floored_to_the_grid(self):
+        # 9 of 12 fit exactly (750 000); 7 of 12 (583 333) floors to 550 000.
+        src = self.stats_source()
+        fleet = src["fleet_ram"]
+        self.assertEqual(catalog_release.fleet_fit_fraction_ppm(fleet, 12), 750000)
+        classes = {c["ram_gb_floor"]: c for c in fleet["classes"]}
+        classes[16]["provider_count"] = 3
+        classes[32]["provider_count"] = 4
+        fleet["provider_total"] = 12
+        fleet["provider_suppressed"] = 5
+        self.assertEqual(catalog_release.fleet_fit_fraction_ppm(fleet, 12), 550000)
+        self.assertEqual(catalog_release.fleet_fit_fraction_ppm(fleet, 28), 300000)
+        self.assertIsNone(catalog_release.fleet_fit_fraction_ppm({**fleet, "provider_total": 0}, 12))

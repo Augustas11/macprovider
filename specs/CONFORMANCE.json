@@ -668,7 +668,10 @@
         "installer-autotune-policy"
       ],
       "supersedes": [],
-      "depends_on": [],
+      "depends_on": [
+        "SPEC-017",
+        "SPEC-047"
+      ],
       "implementation_status": "pending-reconciliation",
       "production_status": "pending-verification",
       "last_reconciled_commit": null,
@@ -1427,6 +1430,7 @@
         "SPEC-006",
         "SPEC-010",
         "SPEC-011",
+        "SPEC-014",
         "SPEC-015",
         "SPEC-018",
         "SPEC-019",
@@ -1622,20 +1626,35 @@
       "implementation": [
         "phase4-coordinator/internal/intake/aggregator.go:func (a *Aggregator) Observe",
         "phase4-coordinator/internal/intake/aggregator.go:func (a *Aggregator) Snapshot",
+        "phase4-coordinator/internal/intake/aggregator.go:func ValidateWindow",
         "phase4-coordinator/internal/buyer/intake_hook.go:func (s *Server) observeUnmatchedModel",
+        "phase4-coordinator/internal/buyer/intake_hook.go:func (s *Server) intakeAdmittedCatalogKey",
+        "phase4-coordinator/internal/config/config.go:func (c StatsIntakeConfig) EligibilityPolicyID",
         "phase4-coordinator/internal/stats/rollup/intake.go:func runIntakeTick",
         "phase4-coordinator/internal/stats/rollup/intake.go:func BuildFleetRAM",
         "phase4-coordinator/internal/stats/rollup/intake.go:func MergeIntakeWindows",
+        "phase4-coordinator/internal/stats/rollup/intake.go:func activeProviderMemory",
         "phase4-coordinator/internal/stats/intake_handler.go:func (h *Handler) handleIntake"
       ],
       "tests": [
-        "phase4-coordinator/internal/intake/aggregator_test.go::TestS4PrincipalCapAndSuppression",
+        "phase4-coordinator/internal/intake/aggregator_test.go::TestS4PrincipalCapAndFloorGatedEmission",
         "phase4-coordinator/internal/intake/aggregator_test.go::TestRawPrincipalIsTransientAndDumpIsOnlyTheOpenWindow",
         "phase4-coordinator/internal/intake/aggregator_test.go::TestMemoryBoundedUnderDistinctKeyFanout",
-        "phase4-coordinator/internal/intake/aggregator_test.go::TestWindowsCloseOnStopParamsAndEpoch",
+        "phase4-coordinator/internal/intake/aggregator_test.go::TestMemoryBoundedUnderDistinctPrincipalFanout",
+        "phase4-coordinator/internal/intake/aggregator_test.go::TestWindowsCloseExactlyAtTheDeadlineAndOnlyCompleteOnesAreServed",
         "phase4-coordinator/internal/buyer/intake_hook_test.go::TestIntakeHookObservesOnlyAuthenticatedUnmatchedRequests",
+        "phase4-coordinator/internal/buyer/intake_hook_test.go::TestIntakeHookAppliesExclusionAndAdmittedCatalogPredicate",
+        "phase4-coordinator/internal/buyer/server_test.go::TestRequestLogModelFieldSanitized",
+        "phase4-coordinator/internal/config/config_test.go::TestStatsIntakeConfigValidateAndPolicyID",
         "phase4-coordinator/internal/stats/rollup/intake_test.go::TestBuildFleetRAMClassesAndSuppression",
-        "phase4-coordinator/internal/stats/intake_handler_test.go::TestIntakeHandlerRequiresListedNonProviderBoundPartnerKey"
+        "phase4-coordinator/internal/stats/rollup/intake_test.go::TestBuildFleetRAMComplementaryTieBreaksToHighestFloor",
+        "phase4-coordinator/internal/stats/rollup/intake_test.go::TestFleetRAMPeriodFreeze",
+        "phase4-coordinator/internal/stats/rollup/intake_test.go::TestMergeIntakeWindowsValidatesAndFailsClosedOnConflict",
+        "phase4-coordinator/internal/stats/intake_handler_test.go::TestIntakeHandlerRequiresListedNonProviderBoundPartnerKey",
+        "phase4-coordinator/internal/stats/intake_handler_test.go::TestIntakeEndpointRoutedThroughMuxRequiresPartnerKey",
+        "phase4-coordinator/internal/stats/intake_handler_test.go::TestIntakeEndpointUnknownWhenDisabledAtMux",
+        "phase4-coordinator/internal/intake/aggregator_test.go::TestValidateWindowRejectsMalformedPersistedWindows",
+        "phase4-coordinator/internal/intake/aggregator_test.go::TestEmissionBoundedToThreeWindowsAndNinetyDays"
       ],
       "journeys": [],
       "evidence": [],
@@ -7597,7 +7616,7 @@
         "phase4-coordinator/internal/ws/model_admission_binding_test.go:TestModelAdmissionOfferTimeMatchOrdering",
         "phase4-coordinator/internal/ws/artifact_identity_test.go:TestReleaseStagingPublishesCatalogAndIdentitySetsAsOneGeneration",
         "phase4-coordinator/internal/ws/model_admission_intake_test.go::TestModelAdmissionIntakeAggregate",
-        "phase4-coordinator/internal/ws/model_admission_intake_test.go::TestBuildModelAdmissionIntakeRowsWindowAndCounting"
+        "phase4-coordinator/internal/ws/model_admission_intake_test.go::TestBuildModelAdmissionIntakeRowsCountsDistinctPairs"
       ],
       "journeys": [
         "JOURNEY-NETWORK-MODEL-ADMISSION"
@@ -7841,6 +7860,35 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1240",
         "rationale": "Local negative matrices now cover many CLI, coordinator, router, and buyer boundaries, but no signed JOURNEY-NETWORK-MODEL-ADMISSION result or production promotion workflow has been captured."
+      }
+    },
+    {
+      "requirement_id": "SPEC-047-R009",
+      "spec_id": "SPEC-047",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/ws/model_admission_intake.go:func BuildModelAdmissionIntakeRows",
+        "phase4-coordinator/internal/ws/model_admission_intake.go:func (s *Server) providerIntakeSanctioned",
+        "phase4-coordinator/internal/ws/model_admission_intake.go:func (s *Server) providerIntakeEligible",
+        "phase4-coordinator/internal/ws/model_admission_intake.go:func (s *Server) buildModelAdmissionIntakeSnapshot",
+        "phase4-coordinator/internal/ws/model_admission_intake.go:func (s *Server) handleAdminModelAdmissionIntake",
+        "phase4-coordinator/internal/ws/model_admission_binding.go:func intakeModelKeyForOffer",
+        "phase4-coordinator/internal/onboarding/store_pg.go:func (s *PGStore) ProviderHardwareTrustState"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/ws/model_admission_intake_test.go::TestModelAdmissionIntakeAggregate",
+        "phase4-coordinator/internal/ws/model_admission_intake_test.go::TestBuildModelAdmissionIntakeRowsCountsDistinctPairs",
+        "phase4-coordinator/internal/ws/model_admission_intake_test.go::TestModelAdmissionIntakeOfferPairsWindowIsInclusiveAtSecondGranularity"
+      ],
+      "journeys": [
+        "JOURNEY-NETWORK-MODEL-ADMISSION"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1453",
+        "rationale": "SPEC-047 v0.1.6 GET /admin/model-admission/intake (model_admission_intake_offer_counts.v1): the SPEC-023 \u00a716.2(b) distinct_provider_offer_count source, counted from the offer-time intake_model_key over DISTINCT (provider, key) pairs, sanction-excluded by provider_intake_sanctioned with active-trust-root eligibility, suppressed below the fixed k floor, materialized every 15 minutes with a per-build nonce and intake_unavailable instead of a partial count (BYOM v0.2 slice 5, #1453). Conformance needs the signed admission journey and a production read."
       }
     }
   ]
