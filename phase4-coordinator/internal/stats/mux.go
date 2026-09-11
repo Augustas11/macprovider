@@ -209,7 +209,9 @@ func (m *Mux) dispatch(w http.ResponseWriter, r *http.Request) {
 		var err error
 		ar, err = dispatchAuth(r.Context(), m.h.Store, r)
 		if err != nil {
-			if authHeaderPresent {
+			// Refund whatever slot was reserved (keyless intake reserves
+			// one too), mirroring the reservation and success-path guards.
+			if reservedKey != "" {
 				m.authFailLimit.refund(reservedKey, now)
 			}
 			writeError(w, r, http.StatusInternalServerError, codeInternal, "auth dispatch failed", now, nil)

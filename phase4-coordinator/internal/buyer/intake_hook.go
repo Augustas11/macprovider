@@ -65,6 +65,15 @@ func (s *Server) observeUnmatchedModel(rawModel, accountID string, authenticated
 	if s.intakeObserver == nil || !authenticated {
 		return
 	}
+	// The recover covers the ENTIRE hook body — catalog resolution and the
+	// exclusion checks as well as Observe — so no part of the intake path
+	// can fail or alter the buyer request (SPEC-017 §5.2b.2). The panic
+	// value is never logged: it could carry the request's model or account.
+	defer func() {
+		if recover() != nil {
+			s.log.Warn().Msg("intake hook panicked; request unaffected")
+		}
+	}()
 	accountID = strings.TrimSpace(accountID)
 	if accountID == "" || strings.HasPrefix(accountID, demoAccountPrefix) {
 		return
@@ -75,12 +84,5 @@ func (s *Server) observeUnmatchedModel(rawModel, accountID string, authenticated
 	if !s.intakeUnmatchedCatalogKey(rawModel) {
 		return
 	}
-	defer func() {
-		// The panic value is never logged: it could carry the request's
-		// model string or account.
-		if recover() != nil {
-			s.log.Warn().Msg("intake aggregator panicked; request unaffected")
-		}
-	}()
 	s.intakeObserver.Observe(rawModel, accountID)
 }

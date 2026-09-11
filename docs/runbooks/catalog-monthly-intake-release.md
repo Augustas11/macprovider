@@ -23,8 +23,14 @@ this runbook feeds into.
   the partner key you will read with (it is refused otherwise), and
   `stats.intake.excluded_accounts` lists EVERY keep-warm, canary,
   synthetic-load, and acceptance-harness buyer account. A missing exclusion
-  makes internal traffic look like buyer demand; add it, and note that the
-  change closes the open aggregator window.
+  makes internal traffic look like buyer demand; add it. **Intake
+  reconfiguration is restart-only:** the coordinator reads
+  `stats.intake.*` (the salt, the excluded set, the knobs, the reader
+  allowlist) once at startup, so a change takes effect only on a restart,
+  which closes the open aggregator window (`aggregator_stopped`) and opens
+  a fresh one — plan an excluded-set or knob change for a maintenance
+  restart, and expect the buyer-demand signal to need a full 30-day epoch
+  afterward.
 - `coordinator.require_gateway_context: true`. Only gateway-authenticated
   accounts feed the buyer-demand aggregator (SPEC-017 §5.2b.2); with the
   gateway context off the signal stays empty by construction.
