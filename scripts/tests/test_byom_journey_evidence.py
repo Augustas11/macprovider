@@ -240,6 +240,126 @@ class BYOMJourneyCaptureTests(unittest.TestCase):
             )
         )
 
+    def complete_catalog_economics_document(self) -> dict:
+        """A COMPLETE closed catalog-economics document shaped like the CLI's."""
+        return {
+            "schema": "model_catalog_economics.v1",
+            "generated_at": "2026-09-12T00:00:00Z",
+            "projection_sequence": 1,
+            "source": {
+                "cli_version": "1.8.123",
+                "cli_build_commit": "test",
+                "process_launch_id": "6c5c1f15-1e79-4c78-8b38-fc7d92dd6dbf",
+                "process_started_at": "2026-09-12T00:00:00Z",
+                "projection_protocol_version": "1",
+                "rate_card_source": "none",
+                "rate_card_digest": None,
+                "rate_card_signature_digest": None,
+                "demand_feed_digest": "b" * 64,
+                "candidate_feed_digest": "c" * 64,
+                "rate_card_max_age_seconds": 604800,
+            },
+            "warnings": [],
+            "rows": [
+                {
+                    "model_key": "local-candidate",
+                    "served_model_id": "local/byom",
+                    "display_model_id": "local/byom",
+                    "action_model_id": "local-candidate",
+                    "is_current": False,
+                    "weights_present_locally": True,
+                    "runtime_state": "ready",
+                    "estimated_gb": 1.0,
+                    "fit": "fits",
+                    "disabled_reason": None,
+                    "warning_codes": [],
+                    "admission": {
+                        "state": "not_offered",
+                        "source": "local_default",
+                        "coordinator_event_id": None,
+                        "state_observed_at": None,
+                        "catalog_economics_permitted": False,
+                        "settlement_capable": False,
+                    },
+                    "provider_guidance": {
+                        "state_label_key": "byom.local.not_offered",
+                        "state_meaning_key": "byom.local.not_offered",
+                        "next_action": "submit_offer",
+                        "transition_reason_code": None,
+                        "earning_path_class": "local_inventory_only",
+                    },
+                    "rate_card_version": None,
+                    "rate_card_generated_at": None,
+                    "rate_card_key": None,
+                    "rate_source": "none",
+                    "prompt_rate_usd_per_million_tokens": None,
+                    "completion_rate_usd_per_million_tokens": None,
+                    "provider_share_bps": None,
+                    "provider_prompt_payout_usd_per_million_tokens": None,
+                    "provider_completion_payout_usd_per_million_tokens": None,
+                    "economics_state": "blocked",
+                    "demand_rank": None,
+                    "demand_weight": None,
+                    "ready_provider_count": None,
+                    "supply_deficit_score": None,
+                    "switch": self.unavailable_action(),
+                    "prepare": self.unavailable_action(),
+                    "evaluate": self.unavailable_action(),
+                    "adopt_recommendation": self.unavailable_action(),
+                    "cleanup_staging": self.unavailable_action(),
+                }
+            ],
+        }
+
+    def unavailable_action(self) -> dict:
+        return {
+            "available": False,
+            "requires_confirmation": False,
+            "transaction_kind": None,
+            "transaction_id": None,
+            "action_timeout_seconds": None,
+            "estimated_bytes": None,
+            "unavailable_reason": "action_unavailable",
+        }
+
+    def write_catalog_economics_capture(self, root, payload: dict) -> None:
+        (root / "captures" / "catalog-economics-state-ladder.json").write_text(
+            json.dumps(payload, indent=2) + "\n", encoding="utf-8"
+        )
+
+    def add_catalog_economics_step(self, manifest: dict) -> None:
+        manifest["steps"][9]["documents"].append(
+            {
+                "id": "catalog-economics-state-ladder",
+                "schema": "model_catalog_economics.v1",
+                "path": "captures/catalog-economics-state-ladder.json",
+            }
+        )
+
+    def test_accepts_provider_guidance_in_catalog_economics_rows(self) -> None:
+        document = self.complete_catalog_economics_document()
+
+        def mutator(manifest, root):
+            self.add_catalog_economics_step(manifest)
+            self.write_catalog_economics_capture(root, document)
+
+        manifest, manifest_path = self.mutate("discovery", mutator)
+        self.capture("discovery", manifest, manifest_path)
+
+    def test_rejects_invalid_guidance_in_catalog_economics_rows(self) -> None:
+        document = self.complete_catalog_economics_document()
+        document["rows"][0]["provider_guidance"]["next_action"] = "serve_traffic"
+
+        def mutator(manifest, root):
+            self.add_catalog_economics_step(manifest)
+            self.write_catalog_economics_capture(root, document)
+
+        self.assert_capture_fails(
+            "discovery",
+            mutator,
+            "provider_guidance.next_action is not a permitted value: 'serve_traffic'",
+        )
+
     def guidance_document(self, **guidance) -> dict:
         document = self.complete_discovery_document()
         document["candidates"][0]["provider_guidance"].update(guidance)
