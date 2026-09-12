@@ -1305,7 +1305,7 @@
     {
       "spec_id": "SPEC-044",
       "title": "Malibu Model Catalog Economics",
-      "version": "0.2.9",
+      "version": "0.2.10",
       "path": "specs/SPEC-044-malibu-model-catalog-economics.md",
       "status": "draft",
       "owner": "@Augustas11",
