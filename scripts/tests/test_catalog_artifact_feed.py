@@ -677,6 +677,40 @@ class RateCardSourceTest(unittest.TestCase):
             with self.subTest(case["input"]):
                 self.assertEqual(catalog_release.normalize_model_key(case["input"]), case["expected"])
 
+
+class ReleaseSnapshotBindingTest(unittest.TestCase):
+    def test_legacy_feeds_may_omit_source_snapshot(self):
+        demand = json.loads(DEMAND_BYTES)
+        rate_card = json.loads(RATE_CARD_BYTES)
+        self.assertNotIn('source_snapshot', demand)
+        self.assertNotIn('source_snapshot', rate_card)
+        catalog_release.validate_demand(canonical(demand))
+        catalog_release.validate_rate_card(canonical(rate_card))
+        catalog_release.validate_release_inputs(CANDIDATE_OBJ, demand, rate_card)
+
+    def test_linked_feeds_must_use_the_same_digest(self):
+        demand = json.loads(DEMAND_BYTES)
+        rate_card = json.loads(RATE_CARD_BYTES)
+        shared = {"content_digest": "sha256:" + "a" * 64}
+        demand["source_snapshot"] = shared
+        rate_card["source_snapshot"] = shared
+        catalog_release.validate_demand(canonical(demand))
+        catalog_release.validate_rate_card(canonical(rate_card))
+        catalog_release.validate_release_inputs(CANDIDATE_OBJ, demand, rate_card)
+
+        rate_card["source_snapshot"] = {"content_digest": "sha256:" + "b" * 64}
+        with self.assertRaises(catalog_release.CatalogError) as caught:
+            catalog_release.validate_release_inputs(CANDIDATE_OBJ, demand, rate_card)
+        self.assertIn("digest must match", str(caught.exception))
+
+    def test_snapshot_linkage_must_be_symmetric(self):
+        demand = json.loads(DEMAND_BYTES)
+        rate_card = json.loads(RATE_CARD_BYTES)
+        demand["source_snapshot"] = {"content_digest": "sha256:" + "a" * 64}
+        with self.assertRaises(catalog_release.CatalogError) as caught:
+            catalog_release.validate_release_inputs(CANDIDATE_OBJ, demand, rate_card)
+        self.assertIn("both be present or both omitted", str(caught.exception))
+
     def test_source_top_level_is_closed(self):
         base = json.loads(RATE_CARD_SOURCE_BYTES)
         with self.assertRaises(catalog_release.CatalogError):
@@ -718,6 +752,14 @@ class RateCardSourceTest(unittest.TestCase):
         base["rows"]["qwen3-8b"]["rate_class"] = "class-8b"
         with self.assertRaises(catalog_release.CatalogError):
             catalog_release.validate_rate_card_source(canonical(base))
+
+    def test_source_snapshot_is_carried_into_the_published_rate_card(self):
+        source = json.loads(RATE_CARD_SOURCE_BYTES)
+        source["source_snapshot"] = {"content_digest": "sha256:" + "c" * 64}
+        source = catalog_release.validate_rate_card_source(canonical(source))
+        classes = catalog_release.artifact_rate_classes(artifact_source())
+        published = json.loads(catalog_release.expand_rate_card(source, classes, CANDIDATE_OBJ))
+        self.assertEqual(published["source_snapshot"], source["source_snapshot"])
 
     def test_unknown_class_name_is_rejected(self):
         base = json.loads(RATE_CARD_SOURCE_BYTES)

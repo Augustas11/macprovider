@@ -10,7 +10,8 @@
       {
         "date": "2026-08-04",
         "model_permaslug": "deepseek/deepseek-v4-flash-20260731",
-        "total_tokens": "57754587120"
+        "total_tokens": "57754587120",
+        "request_count": "12345678"
       }
     ],
     "meta": {
