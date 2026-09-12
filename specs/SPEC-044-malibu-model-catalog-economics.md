@@ -1,12 +1,12 @@
 # SPEC-044 - Malibu Model Catalog Economics
 
-**Version:** 0.2.8
+**Version:** 0.2.9
 
 ```json
 {
   "spec_id": "SPEC-044",
   "title": "Malibu Model Catalog Economics",
-  "version": "0.2.8",
+  "version": "0.2.9",
   "path": "specs/SPEC-044-malibu-model-catalog-economics.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -36,7 +36,7 @@
     "verdict": "DECISION_REQUIRED",
     "owner": "@Augustas11",
     "issue": "https://github.com/Augustas11/macprovider/issues/614",
-    "rationale": "The operator-owned v0.2.8 authority resolves the accepted formal Build 1 findings across conditional earning eligibility, source-aware admission copy, exact catalog-only trust and section isolation, category-aware v1/v2 compatibility grammar, constructive bounded non-live exit-3 failure dispatch, an exhaustive lock graph, cancel-visible failed-dispatch serialization, ACL creation, bounded cancellation, one authoritative total ranking, and canonically bound continuous-lock cleanup. Implementation, complete tests, signed release evidence, and the discovery/admission/settlement journeys remain pending."
+    "rationale": "The operator-owned v0.2.9 authority retains the accepted formal Build 1 decisions and adds conditional crash roll-forward for exact cancel-visible finals and published/staging cleanup phase finals after interrupted parent barriers. Implementation, complete tests, signed release evidence, and the discovery/admission/settlement journeys remain pending."
   }
 }
 ```
@@ -535,8 +535,10 @@ orders, retention boundaries, and release rules are:
    across its complete bounded predicate read and optional exact-marker
    publication/removal, then releases them in reverse order. It never takes
    `operation.lock`, a cleanup lock, `RecommendationAdoptionLock`, the control
-   socket, or a runtime reservation, and it never mutates history, recovery,
-   cleanup phase, artifact, model, adoption, or runtime state.
+   socket, or a runtime reservation, and it never mutates history, cleanup
+   phase, artifact, model, adoption, or runtime state. Its only recovery work
+   is the exact cancel-visible final-record parent barriers and readback below;
+   it does not compact history, advance a cleanup phase, or replay worker work.
 5. A live non-cleanup worker that already retains `operation.lock` may take
    `cancel.lock` directly only for one bounded periodic exact-marker read. It
    retains both only through that read, releases `cancel.lock` immediately, and
@@ -663,10 +665,27 @@ same `failure.lock` then `cancel.lock`. Whenever that failed dispatch is durable
 in pending or history at the cancel linearization point, cancel MUST return
 `terminal` with the record's exact `attempt_id`, never `recorded`,
 `already_recorded`, `stale`, or `not_active`, and it MUST never create a marker.
-Injected cancel reads between
-every temp sync, rename, parent barrier, readback, pending unlink, history
-replacement, eviction, and recovery step therefore observe only the state on
-one side of the lock-protected transition.
+An uninterrupted writer retains both locks through the pending parent barriers
+and readback; lock availability alone is not evidence of a crash or of
+publication. If those locks become available after an interrupted final rename,
+a surviving pending final is only a roll-forward candidate. Direct cancel,
+while retaining both locks, MUST complete only that final's parent `fsync` and
+`F_FULLFSYNC` and exact-record readback before applying `terminal`. Startup or
+recovery does the same under `operation.lock`, then `failure.lock`, then
+`cancel.lock`. Both paths MUST first validate the bounded closed record,
+transaction/attempt/kind, immutable event key, saved root identity, tuple and
+projection-binding digests, and exact final leaf. A surviving projected action
+MUST match the digests and identity. If it was already retired, the protected
+pending final remains the roll-forward witness; a separately durable matching
+history copy corroborates it but is not required. Both paths MUST reject a
+different, malformed, or conflicting final. Neither path may infer publication
+from a temp alone. If validation, either barrier, or
+readback fails, direct cancel exits 5 without an acknowledgement or marker and
+recovery fails closed without a terminal claim; neither emits or replays stdout.
+Injected cancel reads between every temp sync, rename, parent barrier,
+readback, pending unlink, history replacement, eviction, and recovery step
+therefore observe only the state on one side of an uninterrupted lock-protected
+transition. After an interrupted rename, the roll-forward checks apply.
 
 Once the pending record is durable, the attached process releases
 `cancel.lock` then `failure.lock`, emits exactly one terminal event with matching
@@ -678,10 +697,13 @@ pending record before publishing another one; startup/recovery may compact it
 under graph item 2. Failure to make the initial pending record durable emits no
 unbound event and exits 5.
 
-A crash before durable pending publication leaves only a recognized unique temp
-for bounded cleanup and no terminal claim. A crash after the pending record is
-durable but before event flush, after event flush but before compaction, or
-during compaction preserves the same immutable terminal record. Recovery takes
+A crash before the final rename leaves only a recognized unique temp for bounded
+cleanup and no terminal claim. A surviving exact pending final after rename but
+before its parent barriers/readback follows the conditional roll-forward above;
+if the final is absent after power loss, the temp cannot establish a terminal
+claim. A crash after the pending record is durable but before event flush, after
+event flush but before compaction, or during compaction preserves the same
+immutable terminal record. Recovery takes
 `operation.lock`, then `failure.lock`, then `cancel.lock`, compacts it exactly
 once into history, never creates live state, never emits replacement stdout
 without an attached invocation, and never replays network, staging,
@@ -779,6 +801,19 @@ as `not_active`. All writers of cancel-visible active, terminal, failed-
 dispatch, projected-reservation, and marker state hold the compatible lock
 sequence from the exhaustive graph, so no such publication, compaction, or
 eviction can change the predicate while the direct cancel retains both locks.
+For any surviving final-path active, ordinary terminal/history, failed-dispatch
+pending, projected-reservation, or exact-marker record used to choose an
+acknowledgement, the direct cancel MUST validate its closed schema, exact
+transaction/attempt and applicable immutable/root bindings, then complete that
+final's parent `fsync` and `F_FULLFSYNC` and read back the same bounded record
+while retaining `failure.lock` then `cancel.lock`. This barrier-only rule also
+applies to `cancel.json` before `already_recorded`; a final-path read cannot
+show whether its original writer finished the barriers. An intact unique temp
+without its final is never a committed witness. Any contradictory identity,
+failed barrier, or failed readback causes exit 5 with no acknowledgement or
+marker. The direct cancel cannot repair logical state or perform cleanup-object
+barriers; the distinct cleanup-phase recovery rule below applies to those
+phase finals.
 The worker checks a durable marker at least every 250 ms and in each bounded
 work loop.
 If cancellation wins before the applicable commit point, the worker emits
@@ -807,8 +842,11 @@ full-syncs `intent` with the exact transaction, attempt, immutable
 reserved same-parent tombstone leaf, and expected byte and file totals. It
 recomputes the keep set before rename and clears the intent if the target became
 protected. The sole cleanup commit evidence is a durable, readback-validated
-`tombstoned` phase record. A rename or parent barrier without that durable phase
-is precommit and reversible.
+`tombstoned` phase record. A rename or parent barrier without a surviving valid
+`tombstoned` final is precommit and reversible. A surviving valid phase final
+after an interrupted phase rename is a conditional postcommit cancellation
+fence: recovery must finish its exact barriers and readback before deletion or
+terminal success.
 
 Immediately before the exclusive final-to-tombstone rename, the worker retains
 the operation/cleanup locks, takes `cancel.lock`, performs the final exact-marker
@@ -823,8 +861,12 @@ retaining `operation.lock`. Only then may it take `failure.lock` followed by
 `cancel.lock` to commit ordinary terminal/history state; it never holds the
 cleanup lock and `failure.lock` together.
 
-Cancellation wins whenever an exact marker is durable before `tombstoned`
-becomes durable. Under `intent`, if no rename occurred, the worker durably
+Cancellation wins whenever an exact marker is durable before the worker's
+protected `tombstoned` publication, or before recovery when no valid
+`tombstoned` final survived. A marker recorded after a valid `tombstoned` final
+survives an interrupted publication does not reverse that phase, provided
+recovery validates and rolls it forward under the rules below. Under `intent`,
+if no rename occurred, the worker durably
 clears the intent; if the final is absent and the tombstone is present, it
 renames the descriptor-validated tombstone back to the exact final leaf, fully
 syncs the parent, verifies restoration, and durably clears intent. It then emits
@@ -837,16 +879,32 @@ Published-cleanup recovery never scans or guesses and uses only the recorded
 tuple, immutable event key, saved root locator/identity, final, and tombstone
 identity. Recovery takes the operation lock, then the cleanup lock, then
 `cancel.lock`, matching the worker's global order, and holds all three while it
-mutates recovery state. With `intent`, final present and tombstone absent means
-an exact marker clears intent and cancels; without a marker, recovery rechecks
+mutates recovery state. A surviving `tombstoned` final, including one renamed
+before an interrupted parent barrier/readback, takes precedence over a later
+exact marker only after recovery validates the closed phase, exact transaction/
+attempt/target, saved root locator/identity, and descriptor-observed target
+state, completes both `fsync` and `F_FULLFSYNC` of the recorded object's parent
+and the phase-record parent, and readback-validates the same phase and target
+identity. Before any resumed deletion it MUST observe final absent and the
+exact tombstone present; only then may it delete that tombstone. A barrier or
+readback failure, conflicting phase, mismatched root or target, or
+contradictory final/tombstone survival fails closed with no deletion or success
+claim. If no valid `tombstoned` final survives a power loss, the existing
+`intent` and exact-marker rules govern. With `intent`, final present and
+tombstone absent means an exact marker clears intent and cancels; without a
+marker, recovery rechecks
 the keep set and resumes rename or clears protected intent. With `intent`, final
 absent and tombstone present means an exact marker restores and fully syncs the
 final and cancels; without a marker, recovery revalidates the tombstone, repeats
 the parent barriers, durably commits and readback-validates `tombstoned`, and
 resumes deletion. Both present or both absent fails closed. With `tombstoned`,
 tombstone present resumes exact deletion; tombstone absent and final absent
-permits durable `removed`; final present fails closed. With `removed`, both
-absent permits record clear and any target present fails closed. Recovery MUST
+fails closed without separately durable `removed` evidence, including after a
+crash between successful deletion and `removed` publication; final present
+fails closed. Such ambiguous recovery retains the phase, surfaces recoverable
+`cleanup_failed` for operator reconciliation, and makes no success claim. With
+`removed`, both absent permits record clear and any target present fails closed.
+Recovery MUST
 NOT report `cancelled` after durable `tombstoned` evidence.
 Before recovery commits or compacts ordinary terminal/history state it must
 durably readback-validate the applicable cleanup state, release the cleanup
@@ -873,6 +931,10 @@ ordered locks first and sees no marker, it may complete the barriers and durable
 `tombstoned` phase before releasing the lock, after which a new marker is
 postcommit. These two successful lock acquisitions are the observable
 linearization order; `busy` establishes no state order.
+If a valid `tombstoned` final survived an interrupted phase publication, direct
+cancel may still record an exact marker under the ordinary active-attempt
+predicate, but the acknowledgement promises only marker durability; recovery
+applies the postcommit phase precedence above and ignores that later marker.
 
 Staging cleanup is separate and uses an attempt-owned recorded target plus the
 same reversible `intent` to same-parent tombstone to `tombstoned` to `removed`
@@ -882,14 +944,29 @@ mutation under operation/cleanup-then-cancel lock order and holds `cancel.lock`
 across the final marker check, rename, parent `fsync`/`F_FULLFSYNC`, and durable
 phase commit. Its direct cancel process takes `failure.lock` then `cancel.lock`,
 records the exact marker, and never mutates staging recovery state. A precommit
-crash with a
-marker restores and preserves the staging root plus
+crash with a marker restores and preserves the staging root plus
 `staging_cleanup_required`; the same state without a marker resumes and commits
 cleanup. After durable `tombstoned`, cleanup or recovery removes only the
 recorded tombstone and terminates `succeeded` or recoverable `cleanup_failed`,
 never `cancelled`. A retry resumes the durable phase for the same identity and
 MUST NOT create a second tombstone, delete published or legacy data, or turn
 incomplete recovery into success.
+The published-cleanup interrupted-phase rule applies equally to staging: a
+surviving exact `tombstoned` final fences a later marker only after recovery
+under `operation.lock`, the exact staging-cleanup lock, then `cancel.lock`
+revalidates the closed phase, attempt, saved root, staging parent and recorded
+target identities, completes that parent's and the phase parent `fsync` and
+`F_FULLFSYNC`, and readback-validates the same phase and target. Deletion
+requires final absent and exact tombstone present; any contradictory object or
+phase survival, failed barrier/readback, or mismatched identity fails closed
+without deletion or success. Direct cancel may record a marker per its active
+predicate but cannot advance the phase; recovery ignores a marker later than
+the surviving valid `tombstoned` final. If that final is absent after power
+loss, the durable `intent` and marker rules apply. Under `tombstoned`, both
+target leaves absent without separately durable `removed` evidence fails
+closed, including after deletion but before `removed` publication; it retains
+the phase, surfaces recoverable `cleanup_failed` for operator reconciliation,
+and makes no success claim.
 Before committing ordinary terminal/history state, the worker or recovery path
 durably readback-validates staging cleanup state, releases the staging cleanup
 lock while retaining `operation.lock`, and then acquires `failure.lock` followed
@@ -1189,14 +1266,22 @@ boundaries:
   before/during/after durable phase persistence, and before and after every
   preparation, published-cleanup, and staging-cleanup commit phase. Inject a
   crash after the parent barrier but before durable `tombstoned`, then prove a
-  marker recorded before recovery restores the final while no marker resumes to
-  durable `tombstoned`. Prove worker/recovery hold
-  operation-then-cleanup-then-cancel across final marker check, rename, barriers,
+  marker recorded before recovery restores the final when no `tombstoned` final
+  survived, while a surviving exact `tombstoned` final fences a later marker
+  only after recovery revalidates phase/root/target and completes both parent
+  `fsync`/`F_FULLFSYNC` barriers and readback. Prove both published and staging
+  recovery fail closed on mismatched or contradictory final/tombstone state,
+  failed barriers/readback, and both target leaves absent without separately
+  durable `removed` evidence; report `cleanup_failed`, retain the phase for
+  operator reconciliation, and claim no deletion or success. Prove worker and
+  recovery hold operation-then-cleanup-then-cancel across final marker check,
+  rename, barriers,
   and durable phase commit; after durable cleanup state they release cleanup
   before acquiring operation-then-failure-then-cancel for terminal/history
   compaction. Prove cleanup and failure locks never overlap. A live cancel cannot
   acquire `cancel.lock` inside the protected interval; the only marker race after
   rename/barrier and before `tombstoned` follows a crash that released the locks;
+  lock availability alone must not be used as proof of interruption;
 - table-test the exit-3 pre-work lifecycle after valid immutable action identity.
   For stale, unavailable, and conflict, require a fresh attempt and one durable
   closed `model_catalog_failed_dispatch.v1` record with the exact transaction/
@@ -1216,11 +1301,21 @@ boundaries:
   published before pending unlink, crash duplicates deduplicate by identity, and
   no durable terminal exists in neither place. Whenever the failed dispatch is
   durable in pending or history at the cancel linearization point, direct cancel
-  must return only `terminal` with the exact attempt and create no marker. Cover crash before
-  record publication, after durable record and before event flush, after event
-  flush and before later compaction, and during compaction; require bounded temp
+  must return only `terminal` with the exact attempt and create no marker. Cover
+  crash before pending rename (temp only), after final rename but before each
+  parent barrier/readback, after durable record and before event flush, after
+  event flush and before later compaction, and during compaction; require bounded temp
   recovery, idempotent history compaction, no fabricated stdout, and no work
-  replay. Saturate and evict across the shared 256-record/262,144-byte cap;
+  replay. For a surviving exact pending final, require direct cancel under
+  `failure.lock` then `cancel.lock` and startup under all three locks to finish
+  its parent barriers/readback before terminal inference; test a retired
+  projected reservation and matching history copy, mismatch and barrier fault,
+  exact exit 5/no acknowledgement/no marker on direct-cancel failure, and no
+  replayed stdout. Exercise all cancel-visible final records, especially
+  `cancel.json`, active, history, and reservation, at final rename before
+  barriers/readback: valid finals may support acknowledgements only after exact
+  validation and their own parent barriers/readback; temp-only does not.
+  Saturate and evict across the shared 256-record/262,144-byte cap;
 - run deterministic lock-trace tests for projection-reservation writers,
   failure-only creation/compaction/eviction, pre-active/live active creation,
   ordinary terminal/history compaction, startup and failed-dispatch recovery,
@@ -1314,13 +1409,13 @@ The first journey id is `JOURNEY-MALIBU-MODEL-ECONOMICS`. The journey should cov
 
 | Requirement/domain | Verdict | Owner | Issue | Evidence needed |
 |---|---|---|---|---|
-| `SPEC-044-R001..R012` | `DECISION_REQUIRED` | `@Augustas11` | `#614` | Implement the approved v0.2.8 projection, category-aware compatibility negotiation, transaction, failed-dispatch, cancellation, preparation-copy, cleanup, and accounting authority; then decide promotion only after automated tests and signed release evidence. |
+| `SPEC-044-R001..R012` | `DECISION_REQUIRED` | `@Augustas11` | `#614` | Implement the approved v0.2.9 projection, category-aware compatibility negotiation, transaction, failed-dispatch, cancellation, preparation-copy, cleanup, and accounting authority; then decide promotion only after automated tests and signed release evidence. |
 | `malibu-model-economics-ux` | `DECISION_REQUIRED` | `@Augustas11` | `#614` | Implement the operator-approved CLI-owned projection and Malibu rendering without app-side feed verification; production enablement remains an operator decision. |
 | `SPEC-046/SPEC-047 integration` | `DECISION_REQUIRED` | `@Augustas11` | `#1240` | Approval that SPEC-044 is narrowed to network economics and does not own provider-local BYOM discovery or network admission. |
 
 ## 6. Evidence
 
-Current implementation evidence predates the v0.2.8 Build 1 authority and is
+Current implementation evidence predates the v0.2.9 Build 1 authority and is
 partial and non-conformant:
 
 - `phase3-binary/app/Sources/Malibu/ModelManagement/ModelManagement.swift` already capability-gates model management and classifies current, ready, preparation-required, and blocked rows, but its row schema does not carry rate-card economics.
@@ -1350,6 +1445,13 @@ The app should preserve the current provider mental model: Malibu observes and a
 
 ## 8. Changelog and history
 
+- 0.2.9 - Closes the interrupted-final-rename gap: exact surviving cancel-visible
+  finals require parent barriers and readback before a direct-cancel claim;
+  failed-dispatch pending may roll forward without stdout replay; and published
+  or staging `tombstoned` finals conditionally fence later cancellation only
+  after exact recovery validation and barriers. Contradictory or ambiguous
+  cleanup state fails closed, including the deletion-before-`removed` crash
+  window, which requires operator reconciliation. Conformance remains pending.
 - 0.2.8 - Resolves the formal v9 authority finding by freezing distinct
   manifest-category and flat-status grammars for the shipped three-value v1
   advertisement and future v2 trio; the projection-schema companion remains
