@@ -3387,7 +3387,17 @@ class PearlUpdaterTests(unittest.TestCase):
             replacement_gates="public_identity",
         )
 
-    def test_runtime_only_rollout_accepts_disabled_buyer_canary_mode(self):
+    def test_runtime_only_rollout_accepts_required_buyer_canary_mode(self):
+        self.make_bundle(runtime_only=True)
+        release = self.verify()
+        self.updater.config = updater_module.dataclasses.replace(
+            self.updater.config,
+            buyer_canary_mode=updater_module.BUYER_CANARY_MODE_REQUIRED,
+        )
+
+        self.updater.verify_runtime_only_buyer_canary_policy(release)
+
+    def test_runtime_only_rollout_rejects_disabled_buyer_canary_mode(self):
         self.make_bundle(runtime_only=True)
         release = self.verify()
         self.updater.config = updater_module.dataclasses.replace(
@@ -3395,17 +3405,11 @@ class PearlUpdaterTests(unittest.TestCase):
             buyer_canary_mode=updater_module.BUYER_CANARY_MODE_DISABLED,
         )
 
-        self.updater.verify_runtime_only_buyer_canary_policy(release)
-
-    def test_runtime_only_disabled_canary_mode_uses_rollout_replacement_gates(self):
-        self.make_bundle(runtime_only=True)
-        release = self.verify()
-        self.updater.config = updater_module.dataclasses.replace(
-            self.updater.config,
-            buyer_canary_mode=updater_module.BUYER_CANARY_MODE_DISABLED,
-        )
-
-        self.updater.verify_runtime_only_buyer_canary_policy(release)
+        with self.assertRaisesRegex(
+            updater_module.UpdateError,
+            "runtime-only Pearl release requires buyer canary mode required",
+        ):
+            self.updater.verify_runtime_only_buyer_canary_policy(release)
 
     def test_run_canary_gate_rejects_disabled_mode(self):
         self.updater.config = updater_module.dataclasses.replace(

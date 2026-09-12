@@ -5281,6 +5281,10 @@ class Updater:
     def verify_runtime_only_buyer_canary_policy(self, release: Release) -> None:
         if release.catalog is None and self.config.buyer_canary_mode not in BUYER_CANARY_MODES:
             raise UpdateError("runtime-only Pearl release requires an explicit buyer canary mode")
+        if release.catalog is None and self.config.buyer_canary_mode == BUYER_CANARY_MODE_DISABLED:
+            raise UpdateError(
+                "runtime-only Pearl release requires buyer canary mode required"
+            )
 
     def verify_rollout(self, release: Release) -> None:
         self.verify_runtime_only_buyer_canary_policy(release)

@@ -383,10 +383,10 @@ sudo test ! -e /run/macprovider-canary-buyer/legacy-rollback.json
    the new coordinator may classify those same exact ID/model/version rows
    `legacy_bridge`; r6 accepts that classification only as a substitute for the
    missing direct signal while retaining every pool, routing, connection, and
-   heartbeat invariant. Before that canary starts, the updater requires three
-   consecutive authenticated public `/poolz` samples that contain every exact
-   protected provider as ready and routing-eligible and retain the captured
-   ready-provider floor. A failed or timed-out canary oneshot is explicitly
+   heartbeat invariant. Before that canary starts, the updater requires provider
+   reconnect, gateway serving, public TLS identity, and the configured
+   ready-provider floor; it does not wait for an exact previous protected-fleet
+   identity snapshot. A failed or timed-out canary oneshot is explicitly
    stopped and proven inactive with no queued job before rollback may touch
    state. The updater requires the post-activation run to exit `0` before it
    emits `provider_install_ready`. Any other reason, classified no-load status
