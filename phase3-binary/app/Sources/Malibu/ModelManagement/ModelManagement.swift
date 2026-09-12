@@ -803,8 +803,8 @@ struct MalibuModelCatalogEconomicsDocument: Decodable, Equatable, Sendable {
     }
 
     private static func providerGuidanceIsValid(
-        _ guidance: Row.ProviderGuidance,
-        admission: Row.Admission
+        _ guidance: ProviderGuidance,
+        admission: Admission
     ) -> Bool {
         let earningClasses = [
             "settlement_capable",
