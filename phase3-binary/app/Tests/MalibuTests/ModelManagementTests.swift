@@ -122,7 +122,7 @@ final class ModelManagementTests: XCTestCase {
                 exitCode: 0,
                 stdout: catalogEconomicsJSON(
                     rows: [
-                        localOnlyBYOMRowJSON(evaluateAction: Self.availableActionJSON(kind: "evaluate_model", timeout: 10, requiresConfirmation: false)),
+                        localOnlyBYOMRowJSON(evaluateAction: availableActionJSON(kind: "evaluate_model", timeout: 10, requiresConfirmation: false)),
                     ],
                     generatedAt: timestamp
                 ),
@@ -152,7 +152,7 @@ final class ModelManagementTests: XCTestCase {
                 exitCode: 0,
                 stdout: catalogEconomicsJSON(
                     rows: [
-                        localOnlyBYOMRowJSON(evaluateAction: Self.availableActionJSON(kind: "evaluate_model", timeout: 10, requiresConfirmation: false)),
+                        localOnlyBYOMRowJSON(evaluateAction: availableActionJSON(kind: "evaluate_model", timeout: 10, requiresConfirmation: false)),
                     ],
                     generatedAt: timestamp
                 ),
@@ -178,7 +178,9 @@ final class ModelManagementTests: XCTestCase {
         XCTAssertEqual(cli.invocations[2], ["models", "offer", "local-candidate", "--dry-run", "--json", "--config", configPath])
         XCTAssertEqual(Array(cli.invocations[3].dropLast(2)), ["models", "offer", "local-candidate", "--yes", "--json", "--config", configPath])
         XCTAssertEqual(Array(cli.invocations[3].suffix(2)), ["--evaluation-digest-sha256", digest])
-        XCTAssertEqual(Array(cli.invocations[4].dropLast(2)), ["models", "admission", "status", "local-candidate", "--json", "--config", configPath])
+        XCTAssertEqual(cli.invocations[4], ["models", "admission", "status", "local-candidate", "--json", "--config", configPath])
+        XCTAssertEqual(cli.invocations[5].prefix(5), ["models", "catalog-economics", "--json", "--config", configPath])
+        XCTAssertEqual(Array(cli.invocations[5].dropLast(2)), ["models", "catalog-economics", "--json", "--config", configPath])
     }
 
     func testCatalogEconomicsDecodeRejectsUnsupportedEnvelopeKeys() throws {
@@ -565,7 +567,7 @@ final class ModelManagementTests: XCTestCase {
                 stdout: {
                     let timestamp = Self.recentTimestamp()
                     return catalogEconomicsJSON(rows: [
-                        localOnlyBYOMRowJSON(evaluateAction: Self.availableActionJSON(kind: "evaluate_model", timeout: 10, requiresConfirmation: false)),
+                        localOnlyBYOMRowJSON(evaluateAction: availableActionJSON(kind: "evaluate_model", timeout: 10, requiresConfirmation: false)),
                         trustedEconomicsRowJSON(
                             rateCardGeneratedAt: timestamp,
                             stateObservedAt: timestamp
@@ -584,7 +586,7 @@ final class ModelManagementTests: XCTestCase {
         await store.refresh(currentModelID: "other/model", peer: peer(for: MalibuModelCapabilityManifest.catalogEconomics))
 
         XCTAssertEqual(cli.invocations.first?.prefix(3), ["models", "catalog-economics", "--json"])
-        XCTAssertEqual(store.rows.map(\.displayID), ["local/byom", "mlx-community/Qwen3-8B-4bit"])
+        XCTAssertEqual(store.rows.map({ row in row.displayID }), ["mlx-community/Qwen3-8B-4bit", "local/byom"])
         XCTAssertEqual(store.rows.first?.category, .networkCatalog)
         XCTAssertFalse(store.statusLine.localizedCaseInsensitiveContains("discovery failure"))
     }
@@ -647,7 +649,7 @@ final class ModelManagementTests: XCTestCase {
         await store.refresh(currentModelID: "org/current", peer: peer(for: MalibuModelCapabilityManifest.readySwitch))
         try await Task.sleep(nanoseconds: 400_000_000)
 
-        XCTAssertEqual(store.rows.map(\.displayID), ["org/current"])
+        XCTAssertEqual(store.rows.map({ row in row.displayID }), ["org/current"])
         XCTAssertEqual(store.listState, .ready)
         XCTAssertFalse(store.catalogProjectionRetryAvailable)
     }
@@ -695,7 +697,7 @@ final class ModelManagementTests: XCTestCase {
         await store.refresh(currentModelID: "other/model", peer: peer)
         await store.refresh(currentModelID: "other/model", peer: peer)
 
-        XCTAssertEqual(store.rows.map(\.displayID), ["mlx-community/Qwen3-8B-4bit"])
+        XCTAssertEqual(store.rows.map({ row in row.displayID }), ["mlx-community/Qwen3-8B-4bit"])
         XCTAssertEqual(store.listState, .viewOnly)
     }
 
@@ -1930,9 +1932,9 @@ final class ModelManagementTests: XCTestCase {
         """
     }
 
-    private func localOnlyBYOMRowJSON(evaluateAction: String = Self.unavailableActionJSON()) -> String {
+    private func localOnlyBYOMRowJSON(evaluateAction: String? = nil) -> String {
         """
-        {"model_key":"local-candidate","served_model_id":"local/byom","display_model_id":"local/byom","action_model_id":"local-candidate","is_current":false,"weights_present_locally":true,"runtime_state":"ready","estimated_gb":3.0,"fit":"fits","disabled_reason":"local_inventory_only","warning_codes":["admission_state_missing"],"admission":{"state":"local_only","source":"local_default","coordinator_event_id":null,"state_observed_at":null,"catalog_economics_permitted":false,"settlement_capable":false},"provider_guidance":{"state_label_key":"byom.local.local_only","state_meaning_key":"byom.local.local_only_not_earning","next_action":"fix_local_blocker","transition_reason_code":null,"earning_path_class":"local_inventory_only"},"rate_card_version":null,"rate_card_generated_at":null,"rate_card_key":null,"rate_source":"none","prompt_rate_usd_per_million_tokens":null,"completion_rate_usd_per_million_tokens":null,"provider_share_bps":null,"provider_prompt_payout_usd_per_million_tokens":null,"provider_completion_payout_usd_per_million_tokens":null,"economics_state":"blocked","demand_rank":null,"demand_weight":null,"ready_provider_count":null,"supply_deficit_score":null,"switch":\(Self.unavailableActionJSON()),"prepare":\(Self.unavailableActionJSON()),"evaluate":\(evaluateAction),"adopt_recommendation":\(Self.unavailableActionJSON()),"cleanup_staging":\(Self.unavailableActionJSON())}
+        {"model_key":"local-candidate","served_model_id":"local/byom","display_model_id":"local/byom","action_model_id":"local-candidate","is_current":false,"weights_present_locally":true,"runtime_state":"ready","estimated_gb":3.0,"fit":"fits","disabled_reason":"local_inventory_only","warning_codes":["admission_state_missing"],"admission":{"state":"local_only","source":"local_default","coordinator_event_id":null,"state_observed_at":null,"catalog_economics_permitted":false,"settlement_capable":false},"provider_guidance":{"state_label_key":"byom.local.local_only","state_meaning_key":"byom.local.local_only_not_earning","next_action":"fix_local_blocker","transition_reason_code":null,"earning_path_class":"local_inventory_only"},"rate_card_version":null,"rate_card_generated_at":null,"rate_card_key":null,"rate_source":"none","prompt_rate_usd_per_million_tokens":null,"completion_rate_usd_per_million_tokens":null,"provider_share_bps":null,"provider_prompt_payout_usd_per_million_tokens":null,"provider_completion_payout_usd_per_million_tokens":null,"economics_state":"blocked","demand_rank":null,"demand_weight":null,"ready_provider_count":null,"supply_deficit_score":null,"switch":\(Self.unavailableActionJSON()),"prepare":\(Self.unavailableActionJSON()),"evaluate":\(evaluateAction ?? Self.unavailableActionJSON()),"adopt_recommendation":\(Self.unavailableActionJSON()),"cleanup_staging":\(Self.unavailableActionJSON())}
         """
     }
 
