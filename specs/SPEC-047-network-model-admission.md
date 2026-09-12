@@ -1,6 +1,6 @@
 # SPEC-047 - Network Model Admission
 
-**Version:** 0.1.8
+**Version:** 0.1.9
 
 ```json
 {
@@ -98,7 +98,7 @@ discovery/evaluation.
 | `withdrawn` | The provider withdrew the candidate; local artifacts remain untouched and the candidate is not earning-eligible. | Submit a new signed offer if the provider wants to re-enter admission. | provider CLI withdrawal path | `offer_submitted` |
 | `revoked` | The coordinator removed admission because policy, identity, artifact, health, sanctions, or settlement prerequisites failed. | Resolve the reason code and submit a new signed offer with refreshed evidence if policy allows. | coordinator policy, trust, or sanctions path | `offer_submitted` |
 
-Re-entry from `offer_rejected`, `withdrawn`, or `revoked` to `offer_submitted` MUST require a new provider-signed offer with a fresh nonce or idempotency key and refreshed evidence digests. Demotion from `settlement_capable` or `catalog_priced` takes effect for routing and settlement before any later request attempt can be admitted under the older state.
+Re-entry from `offer_rejected`, `withdrawn`, or `revoked` to `offer_submitted` MUST require a new provider-signed offer with a fresh nonce or idempotency key and refreshed evidence digests. **[v0.1.9]** `offer_rejected` is RESERVED and unreachable in v0.2: no coordinator origin appends it (see §8 v0.1.5, "`offer_rejected` stated unreachable"), so this table lists its legal re-entry edge for enum completeness but the state is never entered and that edge is not exercised. The reachable fresh-evidence re-entry paths a v0.2 journey can prove are `withdrawn` and `revoked`. Demotion from `settlement_capable` or `catalog_priced` takes effect for routing and settlement before any later request attempt can be admitted under the older state.
 
 For rows whose allowed next state is `offer_submitted`, the outbound transition is provider-driven through the signed offer path even when the current state was established by the coordinator, sanctions policy, or a prior provider withdrawal.
 
@@ -203,6 +203,17 @@ implementation slices land. This amendment does not flip those verdicts.
 
 ## 8. Changelog and history
 
+- v0.1.9 - Reconciles `offer_rejected` with its own v0.1.5 unreachability.
+  R001 keeps `offer_rejected` in the closed state enum for wire
+  compatibility but states normatively that in v0.2 no coordinator origin
+  appends it, so its re-entry edge is reserved and not exercised; the
+  reachable fresh-evidence re-entry paths are `withdrawn` and `revoked`.
+  The JOURNEY-NETWORK-MODEL-ADMISSION evidence contract accordingly drops
+  the `rejected_reoffer_required_fresh_evidence` promotable observation
+  (an unreachable state cannot be exercised); `withdrawn_reoffer_` and
+  `revoked_reoffer_required_fresh_evidence` continue to prove the
+  SPEC-047-R001 / R006 fresh-evidence-on-re-entry invariant. No behavior
+  change; a journey-evidence-set change only (#1453 slice 7 capture, #1486).
 - v0.1.8 - Freezes the coordinator-backed `not_offered` English source meaning
   and requires localization/accessibility evidence that distinguishes it from
   the local-default state that has no offer-history authority.

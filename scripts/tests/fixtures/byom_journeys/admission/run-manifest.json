@@ -171,7 +171,7 @@
     {
       "id": "step-11-transition-validity",
       "status": "pass",
-      "assertion": "Invalid transition rejected; rejected, withdrawn, and revoked re-entry each demanded fresh evidence.",
+      "assertion": "Invalid transition rejected; withdrawn and revoked re-entry each demanded fresh evidence.",
       "requirement_ids": [
         "SPEC-047-R001",
         "SPEC-047-R006"
@@ -225,7 +225,6 @@
     "raw_completion_logged": false,
     "raw_prompt_logged": false,
     "rejected_opaque_endpoint_verified": true,
-    "rejected_reoffer_required_fresh_evidence": true,
     "revocation_on_drift_verified": true,
     "revoked_reoffer_required_fresh_evidence": true,
     "sandbox_probe_only_blocked_from_paid_routing": true,

@@ -1049,7 +1049,6 @@ class BYOMJourneyGovernanceValidatorTests(unittest.TestCase):
                         "synthetic_probe_used_provider_channel",
                         "settlement_capable_case_verified",
                         "transition_matrix_enforced",
-                        "rejected_reoffer_required_fresh_evidence",
                         "withdrawn_reoffer_required_fresh_evidence",
                         "revoked_reoffer_required_fresh_evidence",
                         "withdrawal_verified",
