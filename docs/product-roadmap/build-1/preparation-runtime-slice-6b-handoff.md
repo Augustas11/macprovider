@@ -4,7 +4,7 @@ Date: 2026-09-12
 
 ## Outcome
 
-The private preparation contract and codec foundation is implemented at commit `69d747fd524e1b5366b37bd4845c04d49296f7a1` and proposed in PR #1491. The exact diff passed independent code, security, and architecture gates at zero Critical, High, and Medium findings. Focused validation passed 19 XCTest cases.
+The private preparation contract and codec foundation is implemented at commit `fe9376d726df963992f261fd212ec85f38508db4` and proposed in PR #1491. After reopening the first review for an under-bound recovery-temp envelope, the complete corrected diff passed independent code, security, and architecture gates at zero Critical, High, and Medium findings. Focused validation passed 23 XCTest cases.
 
 ## Completed locally
 
@@ -12,6 +12,7 @@ The private preparation contract and codec foundation is implemented at commit `
 - Strict private records for root identity, reservation, active state, progress, cancellation acknowledgement, failed dispatch, publication receipt, and cleanup recovery.
 - Canonical receipt and artifact identity derivation with substitution and correlated-mutation rejection.
 - Negative coverage for malformed shapes, noncanonical numbers, unsafe leaves, invalid sizes/counters, root drift, tuple drift, event-key drift, receipt mutation, and illegal nullability.
+- Self-authenticating unique-temp recovery envelopes with exact durable target leaves, canonical payload encoding, filename binding, and v17 per-target size limits.
 
 ## Not yet implemented by this slice
 
@@ -24,8 +25,8 @@ The private preparation contract and codec foundation is implemented at commit `
 
 | Claim | State | Evidence or blocker |
 | --- | --- | --- |
-| Contract/codec implementation | Implemented locally | Commit `69d747fd`; PR #1491 |
-| Focused local verification | Verified | 19 XCTest tests passed |
+| Contract/codec implementation | Implemented locally | Commit `fe9376d7`; PR #1491 |
+| Focused local verification | Verified | 23 XCTest tests passed |
 | Full Swift package | Not green | Existing hang, unavailable MLX Metal library, and unrelated baseline failures recorded in the review artifact |
 | Physical Mac preparation | Unproven | Requires later runtime slices and Slice 7 physical evidence |
 | Valid network admission | Unproven | Requires coordinator journey after executable wiring |

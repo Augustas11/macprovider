@@ -5,7 +5,7 @@ Date: 2026-09-12
 ## Reviewed bytes
 
 - Repository base: `c8c97f6625a88fa7c83ae2b5cf4d68078409cc6f`
-- Runtime commit: `69d747fd524e1b5366b37bd4845c04d49296f7a1`
+- Runtime commit: `fe9376d726df963992f261fd212ec85f38508db4`
 - Runtime PR: https://github.com/Augustas11/macprovider/pull/1491
 - Files:
   - `phase3-binary/Sources/macprovider-cli/ModelPreparationContracts.swift`
@@ -21,7 +21,7 @@ All reviewers used native GPT-5.6 Sol subagents and independently inspected the 
 | Security | 0 | 0 | 0 | PASS |
 | Architecture/contracts | 0 | 0 | 0 | PASS |
 
-The exact-head confirmation followed the final whitespace-only removal of an extra blank line at EOF. All three lanes confirmed commit `69d747fd` at zero Critical, High, and Medium findings. `Package.resolved` was clean and absent from the commit.
+The first review at `69d747fd` was reopened after an independent storage-mapping pass found that the unique-temp record did not bind enough information to recover its durable target. The correction rounds added complete payload and digest binding, exact v17 durable target leaves, canonical base64 rejection, a constructible envelope cap, and the exact 4,096-byte cancellation cap. All three lanes then independently reviewed the complete cumulative diff from `c8c97f6625a88fa7c83ae2b5cf4d68078409cc6f` through `fe9376d7` and reported zero Critical, High, and Medium findings. `Package.resolved` was clean and absent from the diff.
 
 ## Material finding resolutions
 
@@ -30,13 +30,15 @@ The exact-head confirmation followed the final whitespace-only removal of an ext
 - `ModelPreparationPublicationReceipt` excludes `artifact_identity_digest`; its digest is computed over bounded canonical receipt bytes, eliminating the prior circular binding.
 - Cleanup records verify receipt digest plus tuple, root, and event correlations before deriving artifact identity.
 - Closed JSON shapes, duplicate-key rejection, canonical numeric spelling, size limits, exact root identity version, safe integer caps, and relative-leaf validation fail closed.
+- Unique-temp v2 envelopes bind durable record kind, exact target leaf, writer UUIDv4, generation, complete payload, and payload SHA-256. Decode rejects noncanonical base64 and filename disagreement.
+- Per-target payload limits match v17, including the exact 4,096-byte cancellation boundary. The 360,000-byte envelope cap can contain the largest permitted 262,144-byte payload after base64 framing.
 
 ## Fresh validation
 
 - `swift test --disable-automatic-resolution --filter ModelPreparationPrivateCodecTests`
-  - Result: PASS; 19 XCTest tests, 0 failures.
+  - Result: PASS; 23 XCTest tests, 0 failures.
   - The separate Swift Testing runner selected 0 tests and is not counted.
-- `git diff --check 69d747fd^ 69d747fd`
+- `git diff --check c8c97f6625a88fa7c83ae2b5cf4d68078409cc6f..fe9376d7`
   - Result: PASS.
 
 ## Broader validation limits
