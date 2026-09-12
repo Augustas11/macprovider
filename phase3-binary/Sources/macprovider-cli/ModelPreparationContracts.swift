@@ -11,10 +11,12 @@ enum ModelPreparationContracts {
     static let failedDispatchMaxBytes = 16_384
     static let eventMaxBytes = 16_384
     static let cancelAcknowledgementMaxBytes = 4_096
+    static let cancelRecordMaxBytes = 16_384
+    static let rootIdentityRecordMaxBytes = 4_096
     static let activeRecordMaxBytes = 65_536
     static let deletionRecordMaxBytes = 32_768
     static let publicationReceiptMaxBytes = 16_384
-    static let uniqueTempEnvelopeMaxBytes = 270_336
+    static let uniqueTempEnvelopeMaxBytes = 360_000
     static let reservationHistoryMaxBytes = 262_144
     static let inventoryMaxBytes = 262_144
     static let maxJavaScriptSafeInteger = 9_007_199_254_740_991
@@ -1659,13 +1661,12 @@ struct ModelPreparationCleanupRecord: Codable, Equatable, Sendable {
 }
 
 enum ModelPreparationUniqueTempRecordKind: String, Codable, CaseIterable, Sendable {
-    case failedDispatch = "failed_dispatch"
-    case transactionEvent = "transaction_event"
-    case cancelAcknowledgement = "cancel_acknowledgement"
-    case activeRecord = "active_record"
-    case cleanupRecord = "cleanup_record"
-    case reservationHistory = "reservation_history"
-    case inventory = "inventory"
+    case reservations
+    case active
+    case cancel
+    case publishedInventory = "published_inventory"
+    case deletion
+    case rootIdentity = "root_identity"
 }
 
 struct ModelPreparationUniqueTempRecord: Codable, Equatable, Sendable {
@@ -1727,7 +1728,7 @@ struct ModelPreparationUniqueTempRecord: Codable, Equatable, Sendable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         try container.requireExactlyKeys(CodingKeys.self)
         let payloadBase64 = try container.decode(String.self, forKey: .payloadBase64)
-        guard let payload = Data(base64Encoded: payloadBase64) else {
+        guard let payload = Data(base64Encoded: payloadBase64), payload.base64EncodedString() == payloadBase64 else {
             throw ModelPreparationContractError.malformed("payload_base64")
         }
         try self.init(
@@ -1754,25 +1755,23 @@ struct ModelPreparationUniqueTempRecord: Codable, Equatable, Sendable {
 
     static func expectedTargetLeaf(for recordKind: ModelPreparationUniqueTempRecordKind) -> String {
         switch recordKind {
-        case .failedDispatch: return "failed-dispatch.json"
-        case .transactionEvent: return "transaction-event.json"
-        case .cancelAcknowledgement: return "cancel-acknowledgement.json"
-        case .activeRecord: return "active.json"
-        case .cleanupRecord: return "cleanup-record.json"
-        case .reservationHistory: return "reservation-history.json"
-        case .inventory: return "inventory.json"
+        case .reservations: return "reservations.json"
+        case .active: return "active.json"
+        case .cancel: return "cancel.json"
+        case .publishedInventory: return "published-inventory.json"
+        case .deletion: return "deletion.json"
+        case .rootIdentity: return "root.identity"
         }
     }
 
     static func payloadMaxBytes(for recordKind: ModelPreparationUniqueTempRecordKind) -> Int {
         switch recordKind {
-        case .failedDispatch: return ModelPreparationContracts.failedDispatchMaxBytes
-        case .transactionEvent: return ModelPreparationContracts.eventMaxBytes
-        case .cancelAcknowledgement: return ModelPreparationContracts.cancelAcknowledgementMaxBytes
-        case .activeRecord: return ModelPreparationContracts.activeRecordMaxBytes
-        case .cleanupRecord: return ModelPreparationContracts.deletionRecordMaxBytes
-        case .reservationHistory: return ModelPreparationContracts.reservationHistoryMaxBytes
-        case .inventory: return ModelPreparationContracts.inventoryMaxBytes
+        case .reservations: return ModelPreparationContracts.reservationHistoryMaxBytes
+        case .active: return ModelPreparationContracts.activeRecordMaxBytes
+        case .cancel: return ModelPreparationContracts.cancelRecordMaxBytes
+        case .publishedInventory: return ModelPreparationContracts.inventoryMaxBytes
+        case .deletion: return ModelPreparationContracts.deletionRecordMaxBytes
+        case .rootIdentity: return ModelPreparationContracts.rootIdentityRecordMaxBytes
         }
     }
 
