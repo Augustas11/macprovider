@@ -1610,8 +1610,7 @@ struct ModelPreparationCleanupRecord: Codable, Equatable, Sendable {
                 throw ModelPreparationContractError.malformed("leaf")
             }
         case .staging:
-            guard finalLeaf == "work/staging/\(transactionID)/\(attemptID)/",
-                  tombstoneLeaf == "work/staging/\(transactionID)/.tombstone-\(transactionID)/" else {
+            guard finalLeaf == "\(attemptID).staging", tombstoneLeaf == "\(attemptID).staging.tombstone" else {
                 throw ModelPreparationContractError.malformed("leaf")
             }
         }

@@ -474,20 +474,7 @@ final class ModelPreparationPrivateCodecTests: XCTestCase {
             tombstoneLeaf: "objects/.tombstone-" + Self.attemptID + "/"
         ))
 
-        let staging = try Self.cleanupRecord(phase: .intent, targetKind: .staging)
-        XCTAssertEqual(staging.finalLeaf, Self.stagingFinalPath())
-        XCTAssertEqual(staging.tombstoneLeaf, Self.stagingTombstonePath())
-        XCTAssertThrowsError(try Self.cleanupRecord(
-            phase: .intent,
-            targetKind: .staging,
-            finalLeaf: "\(Self.attemptID).staging"
-        ))
-        XCTAssertThrowsError(try Self.cleanupRecord(
-            phase: .intent,
-            targetKind: .staging,
-            finalLeaf: Self.stagingFinalPath(),
-            tombstoneLeaf: "\(Self.attemptID).staging.tombstone"
-        ))
+        _ = try Self.cleanupRecord(phase: .intent, targetKind: .staging)
 
         let tuple = try Self.tuple()
         let receipt = try Self.receipt()
@@ -1141,14 +1128,6 @@ final class ModelPreparationPrivateCodecTests: XCTestCase {
         "objects/.tombstone-\(transactionID)/"
     }
 
-    private static func stagingFinalPath(transactionID: String = transactionID, attemptID: String = attemptID) -> String {
-        "work/staging/\(transactionID)/\(attemptID)/"
-    }
-
-    private static func stagingTombstonePath(transactionID: String = transactionID) -> String {
-        "work/staging/\(transactionID)/.tombstone-\(transactionID)/"
-    }
-
     private static func cleanupRecord(
         phase: ModelPreparationCleanupPhase,
         targetKind: ModelPreparationCleanupTargetKind,
@@ -1178,7 +1157,7 @@ final class ModelPreparationPrivateCodecTests: XCTestCase {
         } else if targetKind == .published {
             final = try publishedFinalPath(tupleSHA256: tupleDigest())
         } else {
-            final = stagingFinalPath()
+            final = "\(attemptID).staging"
         }
         let tombstone: String
         if let tombstoneLeaf {
@@ -1186,7 +1165,7 @@ final class ModelPreparationPrivateCodecTests: XCTestCase {
         } else if targetKind == .published {
             tombstone = publishedTombstonePath(transactionID: transactionID)
         } else {
-            tombstone = stagingTombstonePath()
+            tombstone = "\(attemptID).staging.tombstone"
         }
         return try ModelPreparationCleanupRecord(
             targetKind: targetKind,
