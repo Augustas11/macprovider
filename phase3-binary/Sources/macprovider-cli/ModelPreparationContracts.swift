@@ -11,7 +11,6 @@ enum ModelPreparationContracts {
     static let failedDispatchMaxBytes = 16_384
     static let eventMaxBytes = 16_384
     static let cancelAcknowledgementMaxBytes = 4_096
-    static let cancelRecordMaxBytes = 16_384
     static let rootIdentityRecordMaxBytes = 4_096
     static let activeRecordMaxBytes = 65_536
     static let deletionRecordMaxBytes = 32_768
@@ -1768,7 +1767,7 @@ struct ModelPreparationUniqueTempRecord: Codable, Equatable, Sendable {
         switch recordKind {
         case .reservations: return ModelPreparationContracts.reservationHistoryMaxBytes
         case .active: return ModelPreparationContracts.activeRecordMaxBytes
-        case .cancel: return ModelPreparationContracts.cancelRecordMaxBytes
+        case .cancel: return ModelPreparationContracts.cancelAcknowledgementMaxBytes
         case .publishedInventory: return ModelPreparationContracts.inventoryMaxBytes
         case .deletion: return ModelPreparationContracts.deletionRecordMaxBytes
         case .rootIdentity: return ModelPreparationContracts.rootIdentityRecordMaxBytes

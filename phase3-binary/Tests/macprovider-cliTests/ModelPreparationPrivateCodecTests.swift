@@ -822,12 +822,19 @@ final class ModelPreparationPrivateCodecTests: XCTestCase {
         let duplicate = Data(#"{"generation":1,"payload_base64":"e30=","payload_sha256":"44136fa355b3678a1146ad16f7e8649e94fb4f4e304fcba92fbf8a0a99603f3f","record_kind":"active","record_kind":"active","schema":"model_catalog_unique_temp.v2","target_leaf":"active.json","writer_uuid":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}"#.utf8)
         XCTAssertThrowsError(try ModelPreparationContracts.decode(ModelPreparationUniqueTempRecord.self, from: duplicate, maxBytes: ModelPreparationContracts.uniqueTempEnvelopeMaxBytes))
 
+        _ = try ModelPreparationUniqueTempRecord(
+            recordKind: .cancel,
+            targetLeaf: ModelPreparationUniqueTempRecord.expectedTargetLeaf(for: .cancel),
+            writerUUID: Self.writerUUID,
+            generation: 1,
+            payload: Data(count: ModelPreparationContracts.cancelAcknowledgementMaxBytes)
+        )
         XCTAssertThrowsError(try ModelPreparationUniqueTempRecord(
             recordKind: .cancel,
             targetLeaf: ModelPreparationUniqueTempRecord.expectedTargetLeaf(for: .cancel),
             writerUUID: Self.writerUUID,
             generation: 1,
-            payload: Data(count: ModelPreparationContracts.cancelRecordMaxBytes + 1)
+            payload: Data(count: ModelPreparationContracts.cancelAcknowledgementMaxBytes + 1)
         ))
 
         XCTAssertThrowsError(try ModelPreparationContracts.encode(record, maxBytes: data.count - 1))
