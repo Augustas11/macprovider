@@ -377,6 +377,32 @@ struct MalibuModelCatalogEconomicsDocument: Decodable, Equatable, Sendable {
         }
     }
 
+    struct ProviderGuidance: Decodable, Equatable, Sendable {
+        let stateLabelKey: String
+        let stateMeaningKey: String
+        let nextAction: String
+        let transitionReasonCode: String?
+        let earningPathClass: String
+
+        enum CodingKeys: String, CodingKey, CaseIterable {
+            case stateLabelKey = "state_label_key"
+            case stateMeaningKey = "state_meaning_key"
+            case nextAction = "next_action"
+            case transitionReasonCode = "transition_reason_code"
+            case earningPathClass = "earning_path_class"
+        }
+
+        init(from decoder: Decoder) throws {
+            try rejectUnknownKeys(decoder, allowed: CodingKeys.allCases.map(\.stringValue))
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            stateLabelKey = try container.decode(String.self, forKey: .stateLabelKey)
+            stateMeaningKey = try container.decode(String.self, forKey: .stateMeaningKey)
+            nextAction = try container.decode(String.self, forKey: .nextAction)
+            transitionReasonCode = try decodeExplicitNullableString(container, .transitionReasonCode)
+            earningPathClass = try container.decode(String.self, forKey: .earningPathClass)
+        }
+    }
+
     struct Action: Decodable, Equatable, Sendable {
         let available: Bool
         let requiresConfirmation: Bool
@@ -422,6 +448,7 @@ struct MalibuModelCatalogEconomicsDocument: Decodable, Equatable, Sendable {
         let disabledReason: String?
         let warningCodes: [String]
         let admission: Admission
+        let providerGuidance: ProviderGuidance
         let rateCardVersion: String?
         let rateCardGeneratedAt: String?
         let rateCardKey: String?
@@ -455,6 +482,7 @@ struct MalibuModelCatalogEconomicsDocument: Decodable, Equatable, Sendable {
             case disabledReason = "disabled_reason"
             case warningCodes = "warning_codes"
             case admission
+            case providerGuidance = "provider_guidance"
             case rateCardVersion = "rate_card_version"
             case rateCardGeneratedAt = "rate_card_generated_at"
             case rateCardKey = "rate_card_key"
@@ -491,6 +519,7 @@ struct MalibuModelCatalogEconomicsDocument: Decodable, Equatable, Sendable {
             disabledReason = try decodeExplicitNullableString(container, .disabledReason)
             warningCodes = try container.decode([String].self, forKey: .warningCodes)
             admission = try container.decode(Admission.self, forKey: .admission)
+            providerGuidance = try container.decode(ProviderGuidance.self, forKey: .providerGuidance)
             rateCardVersion = try decodeExplicitNullableString(container, .rateCardVersion)
             rateCardGeneratedAt = try decodeExplicitNullableString(container, .rateCardGeneratedAt)
             rateCardKey = try decodeExplicitNullableString(container, .rateCardKey)
@@ -564,7 +593,6 @@ struct MalibuModelCatalogEconomicsDocument: Decodable, Equatable, Sendable {
 
     func rowsForMalibu(currentModelID: String?, warmSwapAvailable: Bool) -> [MalibuModelRow] {
         rows.compactMap { row in
-            if Self.shouldHideLocalDefaultBYOM(row) { return nil }
             if (try? validate(row: row)) != nil {
                 return MalibuModelRow(
                     economics: row,
@@ -608,6 +636,7 @@ struct MalibuModelCatalogEconomicsDocument: Decodable, Equatable, Sendable {
               ["trusted", "fallback", "stale", "blocked", "unavailable"].contains(row.economicsState),
               row.warningCodes.allSatisfy(Self.closedWarnings.contains),
               admissionIsValid(row.admission),
+              Self.providerGuidanceIsValid(row.providerGuidance, admission: row.admission),
               row.estimatedGB == nil || row.estimatedGB! >= 0,
               row.providerShareBPS == nil || (0...10_000).contains(row.providerShareBPS!),
               nonNegative(row.promptRateUSDPerMillionTokens),
@@ -773,10 +802,44 @@ struct MalibuModelCatalogEconomicsDocument: Decodable, Equatable, Sendable {
         }
     }
 
-    private static func shouldHideLocalDefaultBYOM(_ row: Row) -> Bool {
-        row.admission.source == "local_default"
-            && row.admission.catalogEconomicsPermitted == false
-            && row.economicsState != "trusted"
+    private static func providerGuidanceIsValid(
+        _ guidance: Row.ProviderGuidance,
+        admission: Row.Admission
+    ) -> Bool {
+        let earningClasses = [
+            "settlement_capable",
+            "not_earning_yet_catalog_or_receipt_path_exists",
+            "no_earning_path_in_v0_1",
+            "local_inventory_only",
+        ]
+        let expectedStateLabelPrefix = admission.source == "local_default"
+            ? "byom.local."
+            : "byom.admission."
+        let expectedStateLabel = [
+            "local_only": "byom.local.local_only",
+            "not_offered": "byom.local.not_offered",
+            "offerable": "byom.local.offerable",
+            "offer_submitted": "byom.admission.offer_submitted",
+            "offer_rejected": "byom.admission.offer_rejected",
+            "sandbox_probe_only": "byom.admission.sandbox_probe_only",
+            "network_visible_unpriced": "byom.admission.network_visible_unpriced",
+            "network_admitted_unsettled": "byom.admission.network_admitted_unsettled",
+            "catalog_priced": "byom.admission.catalog_priced",
+            "settlement_capable": "byom.admission.settlement_capable",
+            "withdrawn": "byom.admission.withdrawn",
+            "revoked": "byom.admission.revoked",
+        ][admission.state]
+        return earningClasses.contains(guidance.earningPathClass)
+            && expectedStateLabel != nil
+            && expectedStateLabel == guidance.stateLabelKey
+            && guidance.stateLabelKey.hasPrefix(expectedStateLabelPrefix)
+            && !guidance.stateLabelKey.isEmpty
+            && !guidance.stateMeaningKey.isEmpty
+            && !guidance.nextAction.isEmpty
+            && !(
+                guidance.earningPathClass == "settlement_capable"
+                    && admission.settlementCapable == false
+            )
     }
 
     private func validate(action: Action) throws {
@@ -1868,7 +1931,7 @@ final class ModelManagementStore: ObservableObject {
                 warmSwapAvailable: readySwitchCapabilityAvailable
             ).sortedForDisplay()
             self.currentModelID = configuredModel ?? rows.first(where: { $0.category == .current })?.id
-            self.listState = rows.contains(where: { $0.action == .switchModel }) ? .ready : .viewOnly
+            self.listState = rows.contains(where: { $0.action != .none }) ? .ready : .viewOnly
             self.operation = .idle
             if rows.isEmpty {
                 self.statusLine = String(localized: "Network catalog has no admitted economics rows yet. Local BYOM discovery remains CLI-only in this release.", comment: "Catalog economics empty")
@@ -1983,6 +2046,100 @@ final class ModelManagementStore: ObservableObject {
         pendingSwitch = PendingSwitch(operationName: operationName, fromModelID: from, targetModelID: row.id)
         operation = .reconciling(target: row.id)
         statusLine = String(localized: "Reconciling runtime state… New model actions remain disabled until the provider confirms the loaded model.", comment: "Model runtime reconciliation")
+    }
+
+    func activate(_ row: MalibuModelRow) async {
+        guard row.action == .evaluate, canPerformModelAction else { return }
+        let from = currentModelID
+        operation = .loadingList
+        statusLine = String(localized: "Evaluating the BYOM candidate…", comment: "BYOM activation evaluation status")
+        do {
+            let evaluation = try await runBYOMCommand(
+                ["models", "evaluate", row.id, "--json", "--config", paths.configFile.path]
+            )
+            let dryRun = try await runBYOMCommand([
+                "models", "offer", row.id, "--dry-run", "--json", "--config", paths.configFile.path,
+            ])
+            guard let activation = try? Self.decodeBYOMActivationResults(
+                evaluation: evaluation,
+                dryRun: dryRun
+            ) else {
+                throw ModelManagementError.invalidCatalog
+            }
+            statusLine = String(localized: "Checking the offer package without changing coordinator state…", comment: "BYOM offer dry-run status")
+            guard activation.wouldSubmit else {
+                statusLine = String(localized: "Offer dry-run did not approve submission. No coordinator state was changed.", comment: "BYOM offer dry-run blocked")
+                operation = .idle
+                return
+            }
+            statusLine = String(localized: "Submitting the coordinator offer…", comment: "BYOM offer submission status")
+            var offerArguments = [
+                "models", "offer", row.id, "--yes", "--json", "--config", paths.configFile.path,
+            ]
+            if let digest = activation.digest {
+                offerArguments += ["--evaluation-digest-sha256", digest]
+            }
+            let offer = try await runBYOMCommand(offerArguments)
+            try Self.validateBYOMAdmissionStatus(offer.stdout)
+            statusLine = String(localized: "Reading the resulting admission status…", comment: "BYOM status refresh status")
+            let admissionStatus = try await runBYOMCommand([
+                "models", "admission", "status", row.id, "--json", "--config", paths.configFile.path,
+            ])
+            try Self.validateBYOMAdmissionStatus(admissionStatus.stdout)
+            statusLine = String(localized: "Offer submitted. Refreshing admission status…", comment: "BYOM offer submitted status")
+            operation = .idle
+            await refresh(currentModelID: currentModelID, peer: peerEvidence)
+        } catch {
+            recordFailure(
+                operation: "evaluate",
+                from: from,
+                to: row.id,
+                reason: safeOperationError(error)
+            )
+        }
+    }
+
+    private func runBYOMCommand(_ arguments: [String]) async throws -> ModelCLIResult {
+        let result = try await cli.run(
+            arguments: arguments,
+            peer: peerEvidence,
+            priority: .interactive,
+            onLine: { _ in }
+        )
+        guard result.exitCode == 0 else { throw ModelManagementError.invalidCatalog }
+        return result
+    }
+
+    private static func decodeBYOMActivationResults(
+        evaluation: ModelCLIResult,
+        dryRun: ModelCLIResult
+    ) throws -> (digest: String?, wouldSubmit: Bool) {
+        guard let evaluationData = evaluation.stdout.data(using: .utf8),
+              let dryRunData = dryRun.stdout.data(using: .utf8) else {
+            throw ModelManagementError.invalidCatalog
+        }
+        let evaluationObject = try JSONSerialization.jsonObject(with: evaluationData) as? [String: Any]
+        let dryRunObject = try JSONSerialization.jsonObject(with: dryRunData) as? [String: Any]
+        guard evaluationObject?["schema"] as? String == "provider_byom_evaluation.v1",
+              dryRunObject?["schema"] as? String == "model_admission_offer_dry_run.v1",
+              let wouldSubmit = dryRunObject?["would_submit"] as? Bool else {
+            throw ModelManagementError.invalidCatalog
+        }
+        if let digest = evaluationObject?["evaluation_digest_sha256"] as? String {
+            guard digest.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil else {
+                throw ModelManagementError.invalidCatalog
+            }
+            return (digest, wouldSubmit)
+        }
+        return (nil, wouldSubmit)
+    }
+
+    private static func validateBYOMAdmissionStatus(_ stdout: String) throws {
+        guard let data = stdout.data(using: .utf8),
+              let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              object["schema"] as? String == "model_admission_status.v1" else {
+            throw ModelManagementError.invalidCatalog
+        }
     }
 
     func revert() async {
@@ -2566,6 +2723,10 @@ struct MalibuModelRow: Identifiable, Equatable, Sendable {
     let estimatedGB: Double?
     let economicsState: String?
     let admissionState: String?
+    let earningPathClass: String?
+    let guidanceNextAction: String?
+    let admissionStateLabel: String?
+    let admissionStateMeaning: String?
     let providerPromptPayoutUSDPerMillionTokens: Double?
     let providerCompletionPayoutUSDPerMillionTokens: Double?
     let demandRank: Int?
@@ -2584,6 +2745,10 @@ struct MalibuModelRow: Identifiable, Equatable, Sendable {
         estimatedGB = row.estimatedGB
         economicsState = nil
         admissionState = nil
+        earningPathClass = nil
+        guidanceNextAction = nil
+        admissionStateLabel = nil
+        admissionStateMeaning = nil
         providerPromptPayoutUSDPerMillionTokens = nil
         providerCompletionPayoutUSDPerMillionTokens = nil
         demandRank = nil
@@ -2616,11 +2781,6 @@ struct MalibuModelRow: Identifiable, Equatable, Sendable {
         currentModelID: String?,
         warmSwapAvailable: Bool
     ) {
-        let hidesLocalDefaultBYOM = row.admission.source == "local_default"
-            && row.admission.catalogEconomicsPermitted == false
-            && row.economicsState != "trusted"
-        guard !hidesLocalDefaultBYOM else { return nil }
-
         let projectedID = row.actionModelID ?? row.modelKey
         id = projectedID
         displayID = row.displayModelID
@@ -2636,6 +2796,16 @@ struct MalibuModelRow: Identifiable, Equatable, Sendable {
         estimatedGB = row.estimatedGB
         economicsState = row.economicsState
         admissionState = row.admission.state
+        earningPathClass = row.providerGuidance.earningPathClass
+        guidanceNextAction = row.providerGuidance.nextAction
+        admissionStateLabel = Self.admissionStateLabel(
+            state: row.admission.state,
+            source: row.admission.source
+        )
+        admissionStateMeaning = Self.admissionStateMeaning(
+            state: row.admission.state,
+            source: row.admission.source
+        )
         warningCodes = row.warningCodes
         demandRank = row.economicsState == "trusted" ? row.demandRank : nil
         providerPromptPayoutUSDPerMillionTokens = row.economicsState == "trusted"
@@ -2687,10 +2857,6 @@ struct MalibuModelRow: Identifiable, Equatable, Sendable {
         unsupportedEconomics row: MalibuModelCatalogEconomicsDocument.Row,
         currentModelID: String?
     ) {
-        let hidesLocalDefaultBYOM = row.admission.source == "local_default"
-            && row.admission.catalogEconomicsPermitted == false
-            && row.economicsState != "trusted"
-        guard !hidesLocalDefaultBYOM else { return nil }
         let projectedID = row.actionModelID.flatMap { isSafeModelID($0) ? $0 : nil } ?? row.modelKey
         guard isSafeModelID(row.modelKey),
               isSafeModelID(row.servedModelID),
@@ -2707,6 +2873,10 @@ struct MalibuModelRow: Identifiable, Equatable, Sendable {
         estimatedGB = row.estimatedGB
         economicsState = "blocked"
         admissionState = row.admission.state
+        earningPathClass = nil
+        guidanceNextAction = nil
+        admissionStateLabel = nil
+        admissionStateMeaning = nil
         providerPromptPayoutUSDPerMillionTokens = nil
         providerCompletionPayoutUSDPerMillionTokens = nil
         demandRank = nil
@@ -2728,6 +2898,73 @@ struct MalibuModelRow: Identifiable, Equatable, Sendable {
         case .networkCatalog: return String(localized: "Network catalog", comment: "Model category")
         case .needsPreparation: return String(localized: "Needs preparation", comment: "Model category")
         case .blocked: return String(localized: "Blocked", comment: "Model category")
+        }
+    }
+
+    var earningVerdict: String? {
+        guard let earningPathClass else { return nil }
+        switch earningPathClass {
+        case "settlement_capable":
+            return String(localized: "Eligible to earn on qualifying settled requests", comment: "BYOM earning verdict")
+        case "not_earning_yet_catalog_or_receipt_path_exists":
+            return String(localized: "Not earning yet — \(guidanceNextAction ?? "")", comment: "BYOM not-earning verdict and next action")
+        case "no_earning_path_in_v0_1":
+            return String(localized: "Can't earn in this release", comment: "BYOM no earning path verdict")
+        case "local_inventory_only":
+            return String(localized: "Local only — not offered to the network", comment: "BYOM local inventory verdict")
+        default:
+            return nil
+        }
+    }
+
+    var earningDisclosure: String? {
+        switch earningPathClass {
+        case "no_earning_path_in_v0_1":
+            return String(localized: "This candidate can't earn in this release. It's shown so its state is honest, not hidden.", comment: "BYOM no earning path disclosure")
+        case "local_inventory_only":
+            return String(localized: "Local only — not offered to the network, so it isn't earning.", comment: "BYOM local inventory disclosure")
+        default:
+            return nil
+        }
+    }
+
+    private static func admissionStateLabel(state: String, source: String) -> String {
+        switch state {
+        case "local_only": return String(localized: "Local only", comment: "BYOM admission label")
+        case "not_offered": return String(localized: "Not offered", comment: "BYOM admission label")
+        case "offerable": return String(localized: "Ready to offer", comment: "BYOM admission label")
+        case "offer_submitted": return String(localized: "Offer submitted", comment: "BYOM admission label")
+        case "offer_rejected": return String(localized: "Offer rejected", comment: "BYOM admission label")
+        case "sandbox_probe_only": return String(localized: "Sandbox probe only", comment: "BYOM admission label")
+        case "network_visible_unpriced": return String(localized: "Network-visible (unpriced)", comment: "BYOM admission label")
+        case "network_admitted_unsettled": return String(localized: "Admitted (not settling)", comment: "BYOM admission label")
+        case "catalog_priced": return String(localized: "Catalog-priced", comment: "BYOM admission label")
+        case "settlement_capable": return String(localized: "Eligible to earn", comment: "BYOM admission label")
+        case "withdrawn": return String(localized: "Withdrawn", comment: "BYOM admission label")
+        case "revoked": return String(localized: "Revoked", comment: "BYOM admission label")
+        default: return String(localized: "Unknown admission state", comment: "BYOM admission fallback label")
+        }
+    }
+
+    private static func admissionStateMeaning(state: String, source: String) -> String {
+        if state == "not_offered" {
+            return source == "coordinator"
+                ? String(localized: "Coordinator reports no active network offer for this model.", comment: "BYOM coordinator not-offered meaning")
+                : String(localized: "Coordinator offer state is unavailable or has not been queried.", comment: "BYOM local not-offered meaning")
+        }
+        switch state {
+        case "local_only": return String(localized: "Retained as local inventory only; this admission state does not claim the model is prepared, installed, ready, reachable, or usable.", comment: "BYOM admission meaning")
+        case "offerable": return String(localized: "Passes local checks; you can submit an offer to the network.", comment: "BYOM admission meaning")
+        case "offer_submitted": return String(localized: "The coordinator has your offer and is deciding.", comment: "BYOM admission meaning")
+        case "offer_rejected": return String(localized: "The coordinator declined this offer; revise and re-offer.", comment: "BYOM admission meaning")
+        case "sandbox_probe_only": return String(localized: "Accepted for synthetic probing only; not buyer-visible and not earning.", comment: "BYOM admission meaning")
+        case "network_visible_unpriced": return String(localized: "Buyers can see it, but it carries no price and does not earn yet.", comment: "BYOM admission meaning")
+        case "network_admitted_unsettled": return String(localized: "Admitted to the network but not settlement-capable; no earnings yet.", comment: "BYOM admission meaning")
+        case "catalog_priced": return String(localized: "Carries a catalog price but is not yet settlement-capable; not earning yet.", comment: "BYOM admission meaning")
+        case "settlement_capable": return String(localized: "Eligible to earn only on qualifying settled requests; this does not state current income.", comment: "BYOM admission meaning")
+        case "withdrawn": return String(localized: "You withdrew this offer; re-offer with fresh evidence to earn.", comment: "BYOM admission meaning")
+        case "revoked": return String(localized: "The coordinator revoked admission (identity or policy drift); re-offer with fresh evidence.", comment: "BYOM admission meaning")
+        default: return String(localized: "Admission state is not available.", comment: "BYOM admission fallback meaning")
         }
     }
 
