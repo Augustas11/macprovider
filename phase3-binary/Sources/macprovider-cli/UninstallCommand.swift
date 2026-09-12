@@ -28,22 +28,20 @@ struct UninstallCommand: AsyncParsableCommand {
         } else {
             priorLifecycle = nil
         }
-        let validateSystemArtifactsAbsent = {
-            try Self.validateNoHeadlessSystemArtifactsPresent { arguments in
-                try runProcess("/bin/launchctl", arguments: arguments)
-            }
-        }
         let manifest: InstallManifest
         switch try Self.loadManifest(home: home) {
         case .loaded(let loaded):
             manifest = loaded
-            try validateSystemArtifactsAbsent()
         case .missing:
-            try validateSystemArtifactsAbsent()
             warnings.append("install manifest missing; using legacy uninstall locations")
             manifest = Self.legacyManifest(home: home)
         }
-        try Self.validateUninstallProfile(manifest)
+        let systemDomain = Self.installsInSystemDomain(manifest)
+        if !systemDomain {
+            try Self.validateNoHeadlessSystemArtifactsPresent { arguments in
+                try runProcess("/bin/launchctl", arguments: arguments)
+            }
+        }
 
         // SPEC-001 FR-12 / SPEC-020 R-4.14: an uninstall is a validated local
         // stop intent. Resolve the running provider PID now, and record the
@@ -62,9 +60,10 @@ struct UninstallCommand: AsyncParsableCommand {
             providerStopPID = nil
             warnings.append("could not resolve running provider PID; stop-intent marker not recorded (serve will exit nonzero, launchd job still booted out)")
         }
-        try Self.stopLaunchdServices(
+        try Self.stopUninstallServices(
             labels: manifest.launchdLabels,
             uid: getuid(),
+            systemDomain: systemDomain,
             run: { arguments in try runProcess("/bin/launchctl", arguments: arguments) },
             beforeBootout: { label in
                 guard label == ProviderConflictDetector.launchdLabel, let pid = providerStopPID else { return }
@@ -217,6 +216,7 @@ struct UninstallCommand: AsyncParsableCommand {
         case unexpectedServiceLabel(String)
         case unsupportedHeadlessInstallProfile
         case headlessProfileIndeterminateWithoutManifest(String, Int32)
+        case headlessUninstallPrivilegeRequired
         case invalidInstallManifest(String)
 
         var description: String {
@@ -236,6 +236,8 @@ struct UninstallCommand: AsyncParsableCommand {
                 return "headless_fleet uninstall is not supported until system-domain service stop and absence proof are implemented"
             case .headlessProfileIndeterminateWithoutManifest(let label, let status):
                 return "refusing legacy uninstall because system-domain service absence could not be verified without an install manifest: \(label) (launchctl print exited \(status))"
+            case .headlessUninstallPrivilegeRequired:
+                return "headless_fleet uninstall must stop system LaunchDaemons; run it with passwordless sudo launchctl access as the headless fleet user"
             case .invalidInstallManifest(let reason):
                 return "refusing uninstall because install manifest is invalid: \(reason)"
             }
@@ -293,6 +295,71 @@ struct UninstallCommand: AsyncParsableCommand {
         // has stopped. This closes the provider-first/watchdog-restart race.
         for label in managedLaunchdStopOrder {
             try verifyServiceAbsent(label: label, uid: uid, run: run, sleep: sleep)
+        }
+    }
+
+    /// Uninstall-specific launchd stop. GUI-domain installs retain the existing
+    /// behavior. A `headless_fleet` install owns system LaunchDaemons, so it
+    /// must stop those through `sudo launchctl` and prove absence in the system
+    /// domain; a GUI-domain `bootout` cannot stop (and must never be used as a
+    /// remedy for) a system-domain job.
+    static func stopUninstallServices(
+        labels: [String],
+        uid: uid_t,
+        systemDomain: Bool,
+        run: ([String]) throws -> Int32,
+        beforeBootout: (String) -> Void = { _ in },
+        sleep: (useconds_t) -> Void = { _ = usleep($0) }
+    ) throws {
+        guard systemDomain else {
+            try stopLaunchdServices(
+                labels: labels,
+                uid: uid,
+                run: run,
+                beforeBootout: beforeBootout,
+                sleep: sleep
+            )
+            return
+        }
+
+        let managedLabels = Set(managedLaunchdStopOrder)
+        for label in Set(labels) where !managedLabels.contains(label) {
+            throw UninstallError.unexpectedServiceLabel(label)
+        }
+
+        for label in managedLaunchdStopOrder {
+            beforeBootout(label)
+            let bootStatus = try run(["-n", "/bin/launchctl", "bootout", "system/\(label)"])
+            if bootStatus != 0 {
+                throw UninstallError.headlessUninstallPrivilegeRequired
+            }
+            try verifySystemServiceAbsent(label: label, run: run, sleep: sleep)
+        }
+        for label in managedLaunchdStopOrder {
+            try verifySystemServiceAbsent(label: label, run: run, sleep: sleep)
+        }
+    }
+
+    private static func verifySystemServiceAbsent(
+        label: String,
+        run: ([String]) throws -> Int32,
+        sleep: (useconds_t) -> Void
+    ) throws {
+        let target = "system/\(label)"
+        var attempt = 0
+        while true {
+            let printStatus = try run(["-n", "/bin/launchctl", "print", target])
+            if isLaunchdAbsentStatus(printStatus) {
+                return
+            }
+            guard printStatus == 0 else {
+                throw UninstallError.serviceAbsenceVerificationFailed(label, printStatus)
+            }
+            attempt += 1
+            if attempt >= serviceAbsenceMaxAttempts {
+                throw UninstallError.serviceStillLoaded(label)
+            }
+            sleep(serviceAbsencePollIntervalMicroseconds)
         }
     }
 
@@ -458,6 +525,14 @@ struct UninstallCommand: AsyncParsableCommand {
         }
     }
 
+    /// True for a `headless_fleet` install whose provider/watchdog jobs live in
+    /// launchd's system domain. Missing legacy fields are treated as a GUI
+    /// install; `validateNoHeadlessSystemArtifactsPresent` still fail-closes a
+    /// consumer uninstall when system-domain artifacts are present.
+    static func installsInSystemDomain(_ manifest: InstallManifest) -> Bool {
+        manifest.installProfile == "headless_fleet" || manifest.launchdDomain == "system"
+    }
+
     enum ManifestLoadResult: Equatable {
         case missing
         case loaded(InstallManifest)
@@ -558,6 +633,9 @@ struct UninstallCommand: AsyncParsableCommand {
 
     static func allowedRemovalPaths(home: URL, manifest: InstallManifest) throws -> AllowedRemovalPaths {
         let paths = artifactPaths(home: home)
+        let systemPlists = installsInSystemDomain(manifest)
+            ? managedSystemLaunchDaemonPlists
+            : []
         let installPrefix = URL(fileURLWithPath: manifest.installPrefix)
         // Only honor a manifest-supplied provider_state_root when it is exactly
         // the canonical location. A corrupt or tampered manifest must not be able
@@ -577,9 +655,11 @@ struct UninstallCommand: AsyncParsableCommand {
             plists: [
                 paths.plist.path,
                 paths.watchdogPlist.path,
+                home.appendingPathComponent("Library/LaunchAgents/live.malibu.provider.plist").path,
+                home.appendingPathComponent("Library/LaunchAgents/live.malibu.provider-watchdog.plist").path,
                 home.appendingPathComponent("Library/LaunchAgents/live.streamvc.macprovider.plist").path,
                 home.appendingPathComponent("Library/LaunchAgents/live.streamvc.macprovider-watchdog.plist").path,
-            ],
+            ] + systemPlists,
             symlinks: [
                 paths.binary.path,
                 paths.aliasBinary.path,

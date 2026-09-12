@@ -76,6 +76,15 @@ manifest, installs under `~/macprovider`, configures a user-level launchd
 service, runs local and coordinator visibility checks, and enrolls the provider
 in the autoupdate path.
 
+For SSH-only Mac mini fleets, use the headless install profile instead:
+
+```bash
+MACPROVIDER_HEADLESS=1 bash install.sh
+```
+
+See the [headless Mac mini runbook](docs/runbooks/headless-mini-productization.md)
+for install, reboot persistence, signed-bundle upgrade, and uninstall.
+
 Useful provider commands:
 
 ```bash
