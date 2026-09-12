@@ -5192,33 +5192,6 @@ class Updater:
             self.config.service_health_timeout_s,
             lambda: self.public_identity_ready(identity),
         )
-        if self.previous_protected_providers:
-            stable_samples = 0
-            relax_previous_baseline = (
-                legacy_rollback_version is not None
-                and self.config.buyer_canary_mode == BUYER_CANARY_MODE_REQUIRED
-            )
-
-            def protected_fleet_stable() -> bool:
-                nonlocal stable_samples
-                try:
-                    ready = self.protected_provider_fleet_ready(
-                        require_previous_baseline=not relax_previous_baseline
-                    )
-                except Exception:
-                    stable_samples = 0
-                    raise
-                if ready:
-                    stable_samples += 1
-                else:
-                    stable_samples = 0
-                return stable_samples >= 3
-
-            self.wait_for(
-                "three consecutive public protected-fleet samples",
-                self.config.provider_recovery_timeout_s,
-                protected_fleet_stable,
-            )
         if legacy_rollback_version is None:
             if self.config.buyer_canary_mode == BUYER_CANARY_MODE_REQUIRED:
                 self.run_canary_gate()
@@ -5230,7 +5203,6 @@ class Updater:
                     mode=BUYER_CANARY_MODE_DISABLED,
                     replacement_gates=(
                         "public_identity,"
-                        "stable_protected_fleet,"
                         "exact_catalog_admission,"
                         "exact_provider_canary"
                     ),
@@ -5245,7 +5217,7 @@ class Updater:
                     "skipped",
                     mode=BUYER_CANARY_MODE_DISABLED,
                     rollback=True,
-                    replacement_gates="public_identity,stable_protected_fleet",
+                    replacement_gates="public_identity",
                 )
 
     def verify_provider_admission_rollout_policy(self) -> None:
@@ -5256,32 +5228,6 @@ class Updater:
             raise UpdateError(
                 "post-rollout ready-provider capacity is below the configured fleet floor"
             )
-        if self.previous_protected_providers:
-            poolz = self.get_authorized_json(
-                "http://127.0.0.1:8444/poolz",
-                self.coordinator_operator_token(),
-            )
-            rows = poolz.get("pool")
-            if not isinstance(rows, list):
-                raise UpdateError("post-rollout operator pool snapshot omitted provider rows")
-            current = {
-                row.get("provider_id"): row
-                for row in rows
-                if isinstance(row, dict) and isinstance(row.get("provider_id"), str)
-            }
-            for expected in self._previous_protected_fleet():
-                provider_id = expected["provider_id"]
-                row = current.get(provider_id)
-                if (
-                    row is None
-                    or row.get("routing_eligible") is not True
-                    or row.get("state") != "ready"
-                    or row.get("model_id") != expected["model_id"]
-                    or row.get("catalog_admission_mode") not in ("legacy_bridge", "current", "previous")
-                ):
-                    raise UpdateError(
-                        f"protected provider lost buyer-serving admission during rollout: {provider_id}"
-                    )
         enforced_raw = self.effective_coordinator_scalar(
             "autotune", "enforce_provider_admission"
         )

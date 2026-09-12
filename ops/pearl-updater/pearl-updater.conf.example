@@ -30,8 +30,8 @@ PEARL_UPDATER_CANARY_TIMEOUT_S=720
 # Defaults to required. Use disabled only during an explicitly sealed production
 # window where both canary enable gates are absent, the root-owned empty 0644
 # DISABLED sentinel is present, and canary-buyer.timer/service are quiescent.
-# Disabled mode preserves the public identity, stable protected-fleet, exact
-# catalog-admission, and exact physical provider-canary rollout gates.
+# Disabled mode preserves the public identity, exact catalog-admission, and
+# exact physical provider-canary rollout gates.
 PEARL_UPDATER_BUYER_CANARY_MODE=required
 PEARL_UPDATER_REVOKED_VERSIONS_FILE=/etc/macprovider/pearl-updater.revoked
 

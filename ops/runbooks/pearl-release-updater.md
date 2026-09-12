@@ -135,9 +135,9 @@ An explicitly sealed production window may instead set
 configuration. That mode never starts the buyer canary. It requires both
 enable gates absent, an empty root-owned `0644` `DISABLED` sentinel, the timer
 disabled/inactive, and the oneshot service inactive. The updater rechecks that
-posture before state capture, after stable public fleet recovery, and after
-the exact physical catalog-provider proof. Public identity, three consecutive
-protected-fleet samples, admission policy, exact catalog admission, and the
+posture before state capture, after public identity recovery, and after
+the exact physical catalog-provider proof. Public identity, the configured
+ready-provider floor, admission policy, exact catalog admission, and the
 physical provider canary remain mandatory. The default remains `required`.
 Runtime-only `pearl_runtime` releases are not eligible for this disabled mode:
 because they deliberately omit the exact catalog/provider gates, apply requires
