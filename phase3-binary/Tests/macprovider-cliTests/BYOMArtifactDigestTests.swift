@@ -241,7 +241,8 @@ final class BYOMArtifactDigestTests: XCTestCase {
         ).discover().candidates.first
         let candidate = try XCTUnwrap(candidateValue)
         XCTAssertNil(store.resolver.knownDigest(forOllamaModel: "test-model:q4_k_m"), "nothing hashed before the offer")
-        let evidence = try XCTUnwrap(BYOMModelAdmissionRuntime.artifactEvidence(for: candidate, environment: environment))
+        let maybeEvidence = try await BYOMModelAdmissionRuntime.artifactEvidence(for: candidate, environment: environment, httpClient: BYOMURLSessionHTTPClient())
+        let evidence = try XCTUnwrap(maybeEvidence)
         XCTAssertEqual(evidence.hashes, [ModelArtifactIdentity.ggufFileV1: Self.sha256Hex(store.blobBytes)])
         XCTAssertEqual(evidence.locatorDigest, "sha256:" + store.manifestDigest)
         XCTAssertNotNil(store.resolver.knownDigest(forOllamaModel: "test-model:q4_k_m"), "the offer's computation is recorded")
@@ -267,7 +268,7 @@ final class BYOMArtifactDigestTests: XCTestCase {
         var times = [original.st_atimespec, original.st_mtimespec]
         XCTAssertEqual(utimensat(AT_FDCWD, blobPath, &times, 0), 0)
         XCTAssertEqual(store.resolver.knownDigest(forOllamaModel: "test-model:q4_k_m"), evidence.digest, "identity unchanged: the CLI still holds a digest for this file")
-        XCTAssertThrowsError(try BYOMModelAdmissionRuntime.artifactEvidence(for: digestMatched, environment: environment), "digest-backed candidate with tampered bytes fails closed") { error in
+        await XCTAssertThrowsErrorAsync(try await BYOMModelAdmissionRuntime.artifactEvidence(for: digestMatched, environment: environment, httpClient: BYOMURLSessionHTTPClient()), "digest-backed candidate with tampered bytes fails closed") { error in
             XCTAssertEqual(error as? BYOMModelAdmissionError, .artifactIdentityChanged)
         }
         try store.blobBytes.write(to: store.blobURL)
@@ -283,7 +284,7 @@ final class BYOMArtifactDigestTests: XCTestCase {
         }
         // The offer's hash has an explicit budget too: expiry fails the offer
         // closed with its own reason and records nothing new.
-        XCTAssertThrowsError(try BYOMModelAdmissionRuntime.artifactEvidence(for: candidate, environment: environment, deadline: Date.distantPast)) { error in
+        await XCTAssertThrowsErrorAsync(try await BYOMModelAdmissionRuntime.artifactEvidence(for: candidate, environment: environment, httpClient: BYOMURLSessionHTTPClient(), deadline: Date.distantPast)) { error in
             XCTAssertEqual(error as? BYOMModelAdmissionError, .artifactHashingTimedOut)
         }
         XCTAssertGreaterThan(BYOMModelAdmissionRuntime.artifactHashBudgetSeconds, BYOMEvaluationLimits.standard.artifactHashSeconds, "the binding report gets a more generous budget than the probe")
@@ -294,7 +295,7 @@ final class BYOMArtifactDigestTests: XCTestCase {
             httpClient: ArtifactStubHTTPClient(response: BYOMHTTPResponse(statusCode: 200, headers: [], body: missingTags))
         ).discover().candidates.first
         let absent = try XCTUnwrap(absentValue)
-        XCTAssertNil(try BYOMModelAdmissionRuntime.artifactEvidence(for: absent, environment: environment), "never artifact-backed: identity-less offer as v0.1")
+        await XCTAssertNilAsync(try await BYOMModelAdmissionRuntime.artifactEvidence(for: absent, environment: environment, httpClient: BYOMURLSessionHTTPClient()), "never artifact-backed: identity-less offer as v0.1")
         // The same unresolvable blob on a candidate discovery reported as
         // artifact-backed fails the offer closed.
         let backed = BYOMDiscoveryWire.Candidate(
@@ -304,7 +305,7 @@ final class BYOMArtifactDigestTests: XCTestCase {
             evaluationState: absent.evaluationState, admissionState: absent.admissionState, admissionStateSource: absent.admissionStateSource,
             providerGuidance: absent.providerGuidance, warningCodes: absent.warningCodes
         )
-        XCTAssertThrowsError(try BYOMModelAdmissionRuntime.artifactEvidence(for: backed, environment: environment)) { error in
+        await XCTAssertThrowsErrorAsync(try await BYOMModelAdmissionRuntime.artifactEvidence(for: backed, environment: environment, httpClient: BYOMURLSessionHTTPClient())) { error in
             XCTAssertEqual(error as? BYOMModelAdmissionError, .artifactIdentityChanged)
         }
         // A `catalog_matched` reached through the NAME leg alone (library tag,
@@ -318,7 +319,7 @@ final class BYOMArtifactDigestTests: XCTestCase {
             evaluationState: absent.evaluationState, admissionState: absent.admissionState, admissionStateSource: absent.admissionStateSource,
             providerGuidance: absent.providerGuidance, warningCodes: absent.warningCodes + [BYOMDiscoveryWarning.catalogMatchUnverified.rawValue]
         )
-        XCTAssertNil(try BYOMModelAdmissionRuntime.artifactEvidence(for: nameMatched, environment: environment), "name-leg catalog match without a GGUF is advisory: identity-less offer")
+        await XCTAssertNilAsync(try await BYOMModelAdmissionRuntime.artifactEvidence(for: nameMatched, environment: environment, httpClient: BYOMURLSessionHTTPClient()), "name-leg catalog match without a GGUF is advisory: identity-less offer")
         // A non-Ollama candidate carries no GGUF evidence.
         let mlx = BYOMDiscoveryWire.Candidate(
             candidateID: candidate.candidateID, runtimeSource: "mlx_cache", displayName: candidate.displayName, servedModelRef: "mlx-community/x",
@@ -327,7 +328,7 @@ final class BYOMArtifactDigestTests: XCTestCase {
             evaluationState: candidate.evaluationState, admissionState: candidate.admissionState, admissionStateSource: candidate.admissionStateSource,
             providerGuidance: candidate.providerGuidance, warningCodes: candidate.warningCodes
         )
-        XCTAssertNil(try BYOMModelAdmissionRuntime.artifactEvidence(for: mlx, environment: environment))
+        await XCTAssertNilAsync(try await BYOMModelAdmissionRuntime.artifactEvidence(for: mlx, environment: environment, httpClient: BYOMURLSessionHTTPClient()))
     }
 }
 
@@ -335,4 +336,25 @@ private struct ArtifactStubHTTPClient: BYOMDiscoveryHTTPClient {
     let response: BYOMHTTPResponse
     func get(_ url: URL, maxHeaderBytes: Int, maxBodyBytes: Int) async throws -> BYOMHTTPResponse { response }
     func post(_ url: URL, jsonBody: Data, maxHeaderBytes: Int, maxBodyBytes: Int) async throws -> BYOMHTTPResponse { response }
+}
+
+
+/// XCTest's assertion macros take autoclosures, which cannot contain `await`;
+/// these evaluate the async expression first, then assert.
+private func XCTAssertThrowsErrorAsync<T>(_ expression: @autoclosure () async throws -> T, _ message: String = "", file: StaticString = #filePath, line: UInt = #line, _ errorHandler: (Error) -> Void = { _ in }) async {
+    do {
+        _ = try await expression()
+        XCTFail(message.isEmpty ? "expected an error" : message, file: file, line: line)
+    } catch {
+        errorHandler(error)
+    }
+}
+
+private func XCTAssertNilAsync<T>(_ expression: @autoclosure () async throws -> T?, _ message: String = "", file: StaticString = #filePath, line: UInt = #line) async {
+    do {
+        let value = try await expression()
+        XCTAssertNil(value, message, file: file, line: line)
+    } catch {
+        XCTFail("unexpected error: \(error)", file: file, line: line)
+    }
 }

@@ -16,6 +16,8 @@ final class BYOMAdmissionTests: XCTestCase {
             "ollama:tiny-offer-1b-q4",
             "--json",
             "--skip-ollama",
+            "--skip-lmstudio",
+            "--skip-llamacpp",
             "--coordinator-url", "wss://coordinator.example/ws/provider",
             "--provider-id", "provider-byom-a",
         ])
@@ -261,6 +263,8 @@ final class BYOMAdmissionTests: XCTestCase {
             "ollama:tiny-offer-1b-q4",
             "--json",
             "--skip-ollama",
+            "--skip-lmstudio",
+            "--skip-llamacpp",
             "--coordinator-url", "wss://coordinator.example/ws/provider",
             "--provider-id", "provider-byom-a",
         ])

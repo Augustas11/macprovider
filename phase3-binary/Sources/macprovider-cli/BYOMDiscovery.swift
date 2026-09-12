@@ -1782,7 +1782,7 @@ struct BYOMModelAdmissionRuntime: Sendable {
         guard let identity = try identityStore.loadAdmissionIdentity(providerId: providerID) else {
             throw BYOMModelAdmissionError.missingAdmissionIdentity(providerID: providerID)
         }
-        let evidence = try Self.artifactEvidence(for: candidate, environment: environment, deadline: Date().addingTimeInterval(Self.artifactHashBudgetSeconds))
+        let evidence = try await Self.artifactEvidence(for: candidate, environment: environment, httpClient: httpClient, deadline: Date().addingTimeInterval(Self.artifactHashBudgetSeconds))
         let package = try BYOMOfferSubmissionBuilder.makePackage(
             providerID: providerID,
             candidate: candidate,
@@ -1795,8 +1795,11 @@ struct BYOMModelAdmissionRuntime: Sendable {
         // name is re-resolved and the file identity re-checked immediately
         // before the signed package leaves the machine.
         if let evidence {
+            // Re-probe: the runtime must still be serving the very file the
+            // digest was bound to when the package leaves.
+            let servedPathNow = await environment.runtimeArtifactPath(for: candidate, httpClient: httpClient)
             do {
-                try environment.artifactDigests.validateCurrent(evidence, forOllamaModel: candidate.servedModelRef)
+                try environment.artifactDigests.validateCurrent(evidence, runtimeSource: candidate.runtimeSource, servedModelRef: candidate.servedModelRef, runtimeArtifactPath: servedPathNow)
             } catch {
                 throw BYOMModelAdmissionError.artifactIdentityChanged
             }
@@ -1821,12 +1824,22 @@ struct BYOMModelAdmissionRuntime: Sendable {
     /// so a stalled or network-backed store cannot hang the command.
     static let artifactHashBudgetSeconds: Double = 600
 
-    static func artifactEvidence(for candidate: BYOMDiscoveryWire.Candidate, environment: BYOMDiscoveryEnvironment, deadline: Date? = nil) throws -> BYOMArtifactEvidence? {
-        guard candidate.runtimeSource == "ollama_loopback" else { return nil }
+    static func artifactEvidence(
+        for candidate: BYOMDiscoveryWire.Candidate,
+        environment: BYOMDiscoveryEnvironment,
+        httpClient: any BYOMDiscoveryHTTPClient,
+        deadline: Date? = nil
+    ) async throws -> BYOMArtifactEvidence? {
+        // #1478: every runtime with a CLI-side GGUF locator, not just Ollama.
+        guard BYOMDiscoveryEnvironment.artifactHashingRuntimes.contains(candidate.runtimeSource) else { return nil }
+        let runtime = candidate.runtimeSource
+        // Fresh proof at hashing time: the file the runtime says it is serving
+        // right now must be the one the operator-declared store resolves.
+        let servedPath = await environment.runtimeArtifactPath(for: candidate, httpClient: httpClient)
         let artifactBacked = candidate.identityState == "artifact_hash_available" ||
-            environment.artifactDigests.knownDigest(forOllamaModel: candidate.servedModelRef) != nil
+            environment.artifactDigests.knownDigest(runtimeSource: runtime, servedModelRef: candidate.servedModelRef, runtimeArtifactPath: servedPath) != nil
         do {
-            return try environment.artifactDigests.computeEvidence(forOllamaModel: candidate.servedModelRef, deadline: deadline)
+            return try environment.artifactDigests.computeEvidence(runtimeSource: runtime, servedModelRef: candidate.servedModelRef, runtimeArtifactPath: servedPath, deadline: deadline)
         } catch BYOMArtifactDigestError.unresolvedBlob where !artifactBacked {
             return nil
         } catch BYOMArtifactDigestError.notGGUF where !artifactBacked {
@@ -2047,9 +2060,20 @@ struct BYOMDiscoveryEnvironment: Sendable {
     /// OpenAI-compatible server has no well-known port, so this adapter has no
     /// default and stays unattempted until the operator names an origin.
     let openAICompatibleOrigin: String?
+    /// #1478: LM Studio loopback origin. Has a well-known default like Ollama
+    /// (nil only when the operator skips the adapter).
+    let lmstudioOrigin: String?
+    /// #1478: llama.cpp `llama-server` loopback origin (well-known default).
+    let llamacppOrigin: String?
     /// SPEC-010 v1.7 R007(a): the local Ollama store the served GGUF blob is
     /// resolved from, and the digest cache keyed by exact file identity.
     let ollamaModelsRoot: URL
+    /// #1478: the LM Studio models tree the served GGUF is resolved from.
+    let lmstudioModelsRoot: URL
+    /// #1478: operator-declared root llama.cpp GGUFs may be hashed from; nil ⇒ never.
+    let llamacppModelRoot: URL?
+    /// #1478 option (c): the one llama.cpp file the operator pins; overrides the root.
+    let llamacppModelPath: URL?
     let artifactDigestCacheURL: URL
 
     init(
@@ -2057,19 +2081,65 @@ struct BYOMDiscoveryEnvironment: Sendable {
         mlxCacheRoot: URL,
         ollamaOrigin: String?,
         openAICompatibleOrigin: String? = nil,
+        lmstudioOrigin: String? = nil,
+        llamacppOrigin: String? = nil,
         ollamaModelsRoot: URL? = nil,
+        lmstudioModelsRoot: URL? = nil,
+        llamacppModelRoot: URL? = nil,
+        llamacppModelPath: URL? = nil,
         artifactDigestCacheURL: URL? = nil
     ) {
         self.namespaceURL = namespaceURL
         self.mlxCacheRoot = mlxCacheRoot
         self.ollamaOrigin = ollamaOrigin
         self.openAICompatibleOrigin = openAICompatibleOrigin
+        self.lmstudioOrigin = lmstudioOrigin
+        self.llamacppOrigin = llamacppOrigin
         self.ollamaModelsRoot = ollamaModelsRoot ?? BYOMOllamaModelStore.defaultRoot()
+        self.lmstudioModelsRoot = lmstudioModelsRoot ?? BYOMLMStudioModelStore.defaultRoot()
+        self.llamacppModelRoot = llamacppModelRoot
+        self.llamacppModelPath = llamacppModelPath
         self.artifactDigestCacheURL = artifactDigestCacheURL ?? BYOMArtifactDigestCache.defaultURL()
     }
 
+    /// The runtime-reported artifact path that binds a candidate's artifact
+    /// leg, fetched fresh at the moment it is needed: discovery, evaluate,
+    /// offer, and the re-validation right before a signed package leaves the
+    /// machine. Only llama.cpp reports one; every other runtime gets nil and
+    /// its locator ignores the parameter. A probe failure is nil, which the
+    /// llama.cpp locator turns into "no artifact leg", never into an error.
+    func runtimeArtifactPath(for candidate: BYOMDiscoveryWire.Candidate, httpClient: any BYOMDiscoveryHTTPClient) async -> String? {
+        guard candidate.runtimeSource == BYOMLlamaCppDiscovery.runtimeSource,
+              let origin = llamacppOrigin,
+              let baseURL = BYOMLoopbackOriginValidator.validatedHTTPOrigin(origin)
+        else { return nil }
+        guard let props = try? await httpClient.get(
+            baseURL.appendingPathComponent("props"),
+            maxHeaderBytes: BYOMDiscoveryHTTPBounds.maxHeaderBytes,
+            maxBodyBytes: BYOMDiscoveryHTTPBounds.maxBodyBytes
+        ), props.statusCode == 200, props.body.count <= BYOMDiscoveryHTTPBounds.maxBodyBytes,
+              BYOMDiscoveryJSON.isLlamaCppProps(props.body)
+        else { return nil }
+        return BYOMDiscoveryJSON.llamaCppServedArtifactPath(from: props.body)
+    }
+
+    /// The runtimes whose candidates carry a CLI-computed GGUF artifact leg.
+    /// `openai_compatible_loopback` is deliberately absent (SPEC-023 §3.7.4).
+    static let artifactHashingRuntimes: Set<String> = [
+        "ollama_loopback",
+        BYOMLMStudioDiscovery.runtimeSource,
+        BYOMLlamaCppDiscovery.runtimeSource,
+    ]
+
     var artifactDigests: BYOMArtifactDigestResolver {
-        BYOMArtifactDigestResolver(store: BYOMOllamaModelStore(root: ollamaModelsRoot), cache: BYOMArtifactDigestCache(url: artifactDigestCacheURL))
+        BYOMArtifactDigestResolver(
+            locators: [
+                BYOMOllamaModelStore(root: ollamaModelsRoot),
+                BYOMLMStudioModelStore(root: lmstudioModelsRoot),
+                BYOMLlamaCppModelStore(root: llamacppModelRoot, pinnedFile: llamacppModelPath),
+            ],
+            cache: BYOMArtifactDigestCache(url: artifactDigestCacheURL)
+        )
     }
 
     static func production(
@@ -2077,6 +2147,9 @@ struct BYOMDiscoveryEnvironment: Sendable {
         mlxCacheDir: String?,
         ollamaOrigin: String?,
         openAICompatibleOrigin: String? = nil,
+        lmstudioOrigin: String? = nil,
+        llamacppOrigin: String? = nil,
+        llamacppSelector: BYOMLlamaCppArtifactSelector = .none,
         environment: [String: String] = ProcessInfo.processInfo.environment,
         homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
     ) -> BYOMDiscoveryEnvironment {
@@ -2085,7 +2158,12 @@ struct BYOMDiscoveryEnvironment: Sendable {
             mlxCacheRoot: mlxCacheDir.map(URL.init(fileURLWithPath:)) ?? defaultMLXCacheRoot(environment: environment, homeDirectory: homeDirectory),
             ollamaOrigin: ollamaOrigin,
             openAICompatibleOrigin: openAICompatibleOrigin,
+            lmstudioOrigin: lmstudioOrigin,
+            llamacppOrigin: llamacppOrigin,
             ollamaModelsRoot: BYOMOllamaModelStore.defaultRoot(environment: environment, homeDirectory: homeDirectory),
+            lmstudioModelsRoot: BYOMLMStudioModelStore.defaultRoot(environment: environment, homeDirectory: homeDirectory),
+            llamacppModelRoot: llamacppSelector.root,
+            llamacppModelPath: llamacppSelector.pinnedFile,
             artifactDigestCacheURL: BYOMArtifactDigestCache.defaultURL(homeDirectory: homeDirectory)
         )
     }
@@ -2278,6 +2356,44 @@ struct BYOMDiscoveryRunner {
             }
         }
 
+        // #1478: same contract as Ollama — a well-known loopback default, and a
+        // skipped adapter contributes no row at all.
+        if let lmstudioOrigin = environment.lmstudioOrigin,
+           !lmstudioOrigin.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let lmstudio = await BYOMLMStudioDiscovery(
+                origin: lmstudioOrigin,
+                namespace: namespace.bytes,
+                namespaceWarnings: namespace.warnings,
+                catalogMatcher: catalog,
+                httpClient: httpClient,
+                artifactDigests: environment.artifactDigests
+            ).discover()
+            adapters.append(lmstudio.adapter)
+            candidates.append(contentsOf: lmstudio.candidates)
+            warnings.formUnion(lmstudio.adapter.warningCodes)
+            for candidate in lmstudio.candidates {
+                warnings.formUnion(candidate.warningCodes)
+            }
+        }
+
+        if let llamacppOrigin = environment.llamacppOrigin,
+           !llamacppOrigin.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let llamacpp = await BYOMLlamaCppDiscovery(
+                origin: llamacppOrigin,
+                namespace: namespace.bytes,
+                namespaceWarnings: namespace.warnings,
+                catalogMatcher: catalog,
+                httpClient: httpClient,
+                artifactDigests: environment.artifactDigests
+            ).discover()
+            adapters.append(llamacpp.adapter)
+            candidates.append(contentsOf: llamacpp.candidates)
+            warnings.formUnion(llamacpp.adapter.warningCodes)
+            for candidate in llamacpp.candidates {
+                warnings.formUnion(candidate.warningCodes)
+            }
+        }
+
         // SPEC-046-R002: no well-known default, so the adapter is attempted only
         // when the operator supplies an origin. An adapter that was never
         // attempted contributes no row at all, exactly as the Ollama adapter
@@ -2425,9 +2541,12 @@ struct BYOMEvaluationRunner: Sendable {
         // by digest without hashing. Failure here — including exceeding the
         // explicit hashing budget — is not an evaluation failure: the candidate
         // simply stays without artifact identity.
-        if candidate.runtimeSource == "ollama_loopback" {
+        if BYOMDiscoveryEnvironment.artifactHashingRuntimes.contains(candidate.runtimeSource) {
+            let servedPath = await environment.runtimeArtifactPath(for: candidate, httpClient: httpClient)
             _ = try? environment.artifactDigests.computeDigest(
-                forOllamaModel: candidate.servedModelRef,
+                runtimeSource: candidate.runtimeSource,
+                servedModelRef: candidate.servedModelRef,
+                runtimeArtifactPath: servedPath,
                 deadline: Date().addingTimeInterval(limits.artifactHashSeconds)
             )
         }
@@ -2452,6 +2571,12 @@ struct BYOMEvaluationRunner: Sendable {
         case "ollama_loopback":
             origin = environment.ollamaOrigin
             prefix = "ollama:"
+        case BYOMLMStudioDiscovery.runtimeSource:
+            origin = environment.lmstudioOrigin
+            prefix = BYOMLMStudioDiscovery.servedModelRefPrefix
+        case BYOMLlamaCppDiscovery.runtimeSource:
+            origin = environment.llamacppOrigin
+            prefix = BYOMLlamaCppDiscovery.servedModelRefPrefix
         case BYOMOpenAICompatibleDiscovery.runtimeSource:
             origin = environment.openAICompatibleOrigin
             prefix = BYOMOpenAICompatibleDiscovery.servedModelRefPrefix
@@ -3742,6 +3867,399 @@ struct BYOMOllamaDiscovery: Sendable {
     }
 }
 
+/// SPEC-046-R002 `lmstudio_loopback` adapter (#1478).
+///
+/// A copy of `BYOMOllamaDiscovery` over the same #1246 harness — origin
+/// admission, byte bounds, strict parsing and redaction are all shared, none
+/// reimplemented. Inventory comes from LM Studio's native `GET /api/v0/models`
+/// (which also parses when the server only offers the OpenAI-shaped `/v1/models`).
+/// Unlike the deliberately opaque `openai_compatible_loopback` adapter, a
+/// candidate here is a first-class GGUF candidate: the artifact leg is the
+/// CLI's own `macprovider.gguf-file.v1` digest over the file
+/// `BYOMLMStudioModelStore` resolves from the model id, so `identity_state`
+/// is `catalog_matched` / `artifact_hash_available` / `runtime_reported` —
+/// never `opaque_endpoint`. MLX-format entries have no GGUF and stay
+/// `runtime_reported`.
+struct BYOMLMStudioDiscovery: Sendable {
+    static let runtimeSource = "lmstudio_loopback"
+    static let servedModelRefPrefix = BYOMLMStudioModelStore.servedModelRefPrefix
+    static let defaultOrigin = "http://127.0.0.1:1234"
+
+    private let origin: String
+    private let namespace: Data?
+    private let namespaceWarnings: [BYOMDiscoveryWarning]
+    private let catalogMatcher: BYOMCatalogMatcher
+    private let httpClient: any BYOMDiscoveryHTTPClient
+    private let artifactDigests: BYOMArtifactDigestResolver?
+
+    init(
+        origin: String,
+        namespace: Data?,
+        namespaceWarnings: [BYOMDiscoveryWarning] = [],
+        catalogMatcher: BYOMCatalogMatcher,
+        httpClient: any BYOMDiscoveryHTTPClient,
+        artifactDigests: BYOMArtifactDigestResolver? = nil
+    ) {
+        self.origin = origin
+        self.namespace = namespace
+        self.namespaceWarnings = namespaceWarnings
+        self.catalogMatcher = catalogMatcher
+        self.httpClient = httpClient
+        self.artifactDigests = artifactDigests
+    }
+
+    func discover() async -> (adapter: BYOMDiscoveryWire.Adapter, candidates: [BYOMDiscoveryWire.Candidate]) {
+        guard let baseURL = BYOMLoopbackOriginValidator.validatedHTTPOrigin(origin) else {
+            return (
+                BYOMDiscoveryWire.Adapter(
+                    runtimeSource: Self.runtimeSource,
+                    status: "rejected",
+                    originClass: "rejected",
+                    warningCodes: [BYOMDiscoveryWarning.adapterRejectedNonLoopback.rawValue]
+                ),
+                []
+            )
+        }
+        do {
+            var response = try await httpClient.get(
+                baseURL.appendingPathComponent("api/v0/models"),
+                maxHeaderBytes: BYOMDiscoveryHTTPBounds.maxHeaderBytes,
+                maxBodyBytes: BYOMDiscoveryHTTPBounds.maxBodyBytes
+            )
+            // An LM Studio that does not expose the native inventory (404) is
+            // read through the OpenAI-shaped /v1/models instead. That shape
+            // carries no `state`, so every candidate from it is
+            // `requires_preparation` until evaluate proves it serves.
+            if response.statusCode == 404 {
+                response = try await httpClient.get(
+                    baseURL.appendingPathComponent("v1/models"),
+                    maxHeaderBytes: BYOMDiscoveryHTTPBounds.maxHeaderBytes,
+                    maxBodyBytes: BYOMDiscoveryHTTPBounds.maxBodyBytes
+                )
+            }
+            guard response.statusCode == 200 else {
+                return adapterFailure(.adapterUnavailable, status: "unavailable")
+            }
+            guard BYOMDiscoveryHTTPBounds.headerBytes(response.headers) <= BYOMDiscoveryHTTPBounds.maxHeaderBytes else {
+                return adapterFailure(.adapterResponseTruncated, status: "truncated")
+            }
+            guard response.body.count <= BYOMDiscoveryHTTPBounds.maxBodyBytes else {
+                return adapterFailure(.adapterResponseTruncated, status: "truncated")
+            }
+            let inventory = try BYOMDiscoveryJSON.parseLMStudioModels(response.body)
+            return (
+                BYOMDiscoveryWire.Adapter(
+                    runtimeSource: Self.runtimeSource,
+                    status: "ok",
+                    originClass: "loopback_http",
+                    warningCodes: inventory.warningCodes.map(\.rawValue).sorted()
+                ),
+                inventory.models.map(buildCandidate)
+            )
+        } catch is CancellationError {
+            return adapterFailure(.adapterTimeout, status: "timeout")
+        } catch let error as URLError where error.code == .timedOut {
+            return adapterFailure(.adapterTimeout, status: "timeout")
+        } catch let error as BYOMDiscoveryAdapterError {
+            switch error {
+            case .malformed:
+                return adapterFailure(.adapterMalformedResponse, status: "malformed")
+            case .truncated:
+                return adapterFailure(.adapterResponseTruncated, status: "truncated")
+            case .rejectedNonLoopback:
+                return adapterFailure(.adapterRejectedNonLoopback, status: "rejected")
+            }
+        } catch {
+            return adapterFailure(.adapterUnavailable, status: "unavailable")
+        }
+    }
+
+    private func adapterFailure(
+        _ warning: BYOMDiscoveryWarning,
+        status: String
+    ) -> (adapter: BYOMDiscoveryWire.Adapter, candidates: [BYOMDiscoveryWire.Candidate]) {
+        (
+            BYOMDiscoveryWire.Adapter(
+                runtimeSource: Self.runtimeSource,
+                status: status,
+                originClass: "loopback_http",
+                warningCodes: [warning.rawValue]
+            ),
+            []
+        )
+    }
+
+    private func buildCandidate(_ model: BYOMDiscoveryJSON.LMStudioModel) -> BYOMDiscoveryWire.Candidate {
+        let servedModelRef = Self.servedModelRefPrefix + model.id
+        let (candidateID, idWarnings) = BYOMCandidateIdentity.candidateID(
+            namespace: namespace,
+            runtimeSource: Self.runtimeSource,
+            servedModelRef: servedModelRef
+        )
+        // The artifact leg matches only with the digest the CLI computed over
+        // the resolved GGUF (never anything the runtime reports). An MLX entry
+        // resolves to no GGUF and simply has no digest.
+        let computedDigest = model.compatibilityType == "mlx"
+            ? nil
+            : artifactDigests?.knownDigest(runtimeSource: Self.runtimeSource, servedModelRef: servedModelRef)
+        let catalogKey = catalogMatcher.catalogKey(for: model.id, runtimeSource: Self.runtimeSource, digest: computedDigest.map { "sha256:" + $0 })
+        var warnings = Set((namespaceWarnings + idWarnings + model.warningCodes + [.capabilityUnevaluated, .evaluationRequired]).map(\.rawValue))
+        if catalogKey != nil {
+            warnings.insert(BYOMDiscoveryWarning.catalogMatchUnverified.rawValue)
+        }
+        // Only a model LM Studio reports as loaded is ready. A downloaded but
+        // unloaded model is real inventory but not yet serviceable: it stays
+        // local-only (requires_preparation is a blocking warning) until
+        // `models evaluate` drives a load and proves a completion.
+        let readiness = model.loadState.isServiceable ? "ready" : "requires_preparation"
+        if !model.loadState.isServiceable {
+            warnings.insert(BYOMDiscoveryWarning.requiresPreparation.rawValue)
+        }
+        let fit = fitState(modelID: model.id)
+        let admission = localAdmissionState(
+            stableID: idWarnings.isEmpty,
+            readinessState: readiness,
+            fitState: fit,
+            blockingWarnings: warnings
+        )
+        return BYOMDiscoveryWire.Candidate(
+            candidateID: candidateID,
+            runtimeSource: Self.runtimeSource,
+            displayName: BYOMDiscoveryPrivacy.displayName(from: model.id),
+            servedModelRef: servedModelRef,
+            catalogModelKey: catalogKey,
+            identityState: catalogKey != nil ? "catalog_matched" : (computedDigest != nil ? "artifact_hash_available" : "runtime_reported"),
+            locality: "loopback_runtime",
+            estimatedGB: ModelFit.estimateWeightSizeGB(modelID: model.id).map(Double.init),
+            contextWindowTokens: model.maxContextLength,
+            capabilities: BYOMDiscoveryWire.Capabilities(
+                chatCompletions: true,
+                streaming: nil,
+                toolCallPassthrough: nil,
+                structuredOutputPassthrough: nil,
+                jsonMode: nil,
+                usageReporting: nil,
+                maxContextTokens: model.maxContextLength,
+                quantization: model.quantization,
+                family: model.arch,
+                runtimeVersion: nil
+            ),
+            readinessState: readiness,
+            fitState: fit,
+            evaluationState: "not_evaluated",
+            admissionState: admission,
+            admissionStateSource: "local_default",
+            providerGuidance: BYOMDiscoveryGuidance.guidance(forAdmissionState: admission, warnings: warnings),
+            warningCodes: Array(warnings).sorted()
+        )
+    }
+
+    private func fitState(modelID: String) -> String {
+        switch ModelFit.evaluate(modelID: modelID, ramGB: BYOMFitEnvironment.detectedRAMGB()) {
+        case .fits, .tight:
+            return "fits"
+        case .wontFit:
+            return "does_not_fit"
+        case .unknown:
+            return "unknown"
+        }
+    }
+}
+
+/// SPEC-046-R002 `llamacpp_loopback` adapter (#1478).
+///
+/// Same thin shape as `BYOMOllamaDiscovery` over the #1246 harness. Inventory
+/// is llama-server's `GET /v1/models`; a second bounded `GET /props` supplies
+/// the context window best-effort. The artifact leg is the CLI's own
+/// `macprovider.gguf-file.v1` digest over the file `BYOMLlamaCppModelStore`
+/// resolves from the model's file STEM under the operator-declared root —
+/// never from the path the runtime reports. `identity_state` is
+/// `catalog_matched` / `artifact_hash_available` / `runtime_reported`, never
+/// `opaque_endpoint`.
+struct BYOMLlamaCppDiscovery: Sendable {
+    static let runtimeSource = "llamacpp_loopback"
+    static let servedModelRefPrefix = BYOMLlamaCppModelStore.servedModelRefPrefix
+    static let defaultOrigin = "http://127.0.0.1:8080"
+
+    private let origin: String
+    private let namespace: Data?
+    private let namespaceWarnings: [BYOMDiscoveryWarning]
+    private let catalogMatcher: BYOMCatalogMatcher
+    private let httpClient: any BYOMDiscoveryHTTPClient
+    private let artifactDigests: BYOMArtifactDigestResolver?
+
+    init(
+        origin: String,
+        namespace: Data?,
+        namespaceWarnings: [BYOMDiscoveryWarning] = [],
+        catalogMatcher: BYOMCatalogMatcher,
+        httpClient: any BYOMDiscoveryHTTPClient,
+        artifactDigests: BYOMArtifactDigestResolver? = nil
+    ) {
+        self.origin = origin
+        self.namespace = namespace
+        self.namespaceWarnings = namespaceWarnings
+        self.catalogMatcher = catalogMatcher
+        self.httpClient = httpClient
+        self.artifactDigests = artifactDigests
+    }
+
+    func discover() async -> (adapter: BYOMDiscoveryWire.Adapter, candidates: [BYOMDiscoveryWire.Candidate]) {
+        guard let baseURL = BYOMLoopbackOriginValidator.validatedHTTPOrigin(origin) else {
+            return (
+                BYOMDiscoveryWire.Adapter(
+                    runtimeSource: Self.runtimeSource,
+                    status: "rejected",
+                    originClass: "rejected",
+                    warningCodes: [BYOMDiscoveryWarning.adapterRejectedNonLoopback.rawValue]
+                ),
+                []
+            )
+        }
+        do {
+            // Fingerprint first. llama-server's default port (8080) is also
+            // macprovider's own `serve` port, and both answer GET /v1/models —
+            // so on a provider Mac an unfingerprinted adapter would list the
+            // provider's own served model as a llama.cpp candidate. Only
+            // llama-server exposes /props with default_generation_settings;
+            // anything else on the origin is "not llama.cpp", not an inventory.
+            let props = try await httpClient.get(
+                baseURL.appendingPathComponent("props"),
+                maxHeaderBytes: BYOMDiscoveryHTTPBounds.maxHeaderBytes,
+                maxBodyBytes: BYOMDiscoveryHTTPBounds.maxBodyBytes
+            )
+            guard props.statusCode == 200,
+                  props.body.count <= BYOMDiscoveryHTTPBounds.maxBodyBytes,
+                  BYOMDiscoveryJSON.isLlamaCppProps(props.body)
+            else {
+                return adapterFailure(.adapterUnavailable, status: "unavailable")
+            }
+            let contextWindow = BYOMDiscoveryJSON.llamaCppContextWindow(from: props.body)
+            let servedPath = BYOMDiscoveryJSON.llamaCppServedArtifactPath(from: props.body)
+
+            let response = try await httpClient.get(
+                baseURL.appendingPathComponent("v1/models"),
+                maxHeaderBytes: BYOMDiscoveryHTTPBounds.maxHeaderBytes,
+                maxBodyBytes: BYOMDiscoveryHTTPBounds.maxBodyBytes
+            )
+            guard response.statusCode == 200 else {
+                return adapterFailure(.adapterUnavailable, status: "unavailable")
+            }
+            guard BYOMDiscoveryHTTPBounds.headerBytes(response.headers) <= BYOMDiscoveryHTTPBounds.maxHeaderBytes else {
+                return adapterFailure(.adapterResponseTruncated, status: "truncated")
+            }
+            guard response.body.count <= BYOMDiscoveryHTTPBounds.maxBodyBytes else {
+                return adapterFailure(.adapterResponseTruncated, status: "truncated")
+            }
+            let inventory = try BYOMDiscoveryJSON.parseLlamaCppModels(response.body)
+            return (
+                BYOMDiscoveryWire.Adapter(
+                    runtimeSource: Self.runtimeSource,
+                    status: "ok",
+                    originClass: "loopback_http",
+                    warningCodes: inventory.warningCodes.map(\.rawValue).sorted()
+                ),
+                inventory.modelStems.map { buildCandidate(stem: $0, contextWindow: contextWindow, servedPath: servedPath) }
+            )
+        } catch is CancellationError {
+            return adapterFailure(.adapterTimeout, status: "timeout")
+        } catch let error as URLError where error.code == .timedOut {
+            return adapterFailure(.adapterTimeout, status: "timeout")
+        } catch let error as BYOMDiscoveryAdapterError {
+            switch error {
+            case .malformed:
+                return adapterFailure(.adapterMalformedResponse, status: "malformed")
+            case .truncated:
+                return adapterFailure(.adapterResponseTruncated, status: "truncated")
+            case .rejectedNonLoopback:
+                return adapterFailure(.adapterRejectedNonLoopback, status: "rejected")
+            }
+        } catch {
+            return adapterFailure(.adapterUnavailable, status: "unavailable")
+        }
+    }
+
+    private func adapterFailure(
+        _ warning: BYOMDiscoveryWarning,
+        status: String
+    ) -> (adapter: BYOMDiscoveryWire.Adapter, candidates: [BYOMDiscoveryWire.Candidate]) {
+        (
+            BYOMDiscoveryWire.Adapter(
+                runtimeSource: Self.runtimeSource,
+                status: status,
+                originClass: "loopback_http",
+                warningCodes: [warning.rawValue]
+            ),
+            []
+        )
+    }
+
+    private func buildCandidate(stem: String, contextWindow: Int?, servedPath: String?) -> BYOMDiscoveryWire.Candidate {
+        let servedModelRef = Self.servedModelRefPrefix + stem
+        let (candidateID, idWarnings) = BYOMCandidateIdentity.candidateID(
+            namespace: namespace,
+            runtimeSource: Self.runtimeSource,
+            servedModelRef: servedModelRef
+        )
+        // The digest is read back only when the runtime's served path proves
+        // the operator-resolved file is the one being served.
+        let computedDigest = artifactDigests?.knownDigest(runtimeSource: Self.runtimeSource, servedModelRef: servedModelRef, runtimeArtifactPath: servedPath)
+        let catalogKey = catalogMatcher.catalogKey(for: stem, runtimeSource: Self.runtimeSource, digest: computedDigest.map { "sha256:" + $0 })
+        var warnings = Set((namespaceWarnings + idWarnings + [.capabilityUnevaluated, .evaluationRequired]).map(\.rawValue))
+        if catalogKey != nil {
+            warnings.insert(BYOMDiscoveryWarning.catalogMatchUnverified.rawValue)
+        }
+        let fit = fitState(modelID: stem)
+        let admission = localAdmissionState(
+            stableID: idWarnings.isEmpty,
+            readinessState: "ready",
+            fitState: fit,
+            blockingWarnings: warnings
+        )
+        return BYOMDiscoveryWire.Candidate(
+            candidateID: candidateID,
+            runtimeSource: Self.runtimeSource,
+            displayName: BYOMDiscoveryPrivacy.displayName(from: stem),
+            servedModelRef: servedModelRef,
+            catalogModelKey: catalogKey,
+            identityState: catalogKey != nil ? "catalog_matched" : (computedDigest != nil ? "artifact_hash_available" : "runtime_reported"),
+            locality: "loopback_runtime",
+            estimatedGB: ModelFit.estimateWeightSizeGB(modelID: stem).map(Double.init),
+            contextWindowTokens: contextWindow,
+            capabilities: BYOMDiscoveryWire.Capabilities(
+                chatCompletions: true,
+                streaming: nil,
+                toolCallPassthrough: nil,
+                structuredOutputPassthrough: nil,
+                jsonMode: nil,
+                usageReporting: nil,
+                maxContextTokens: contextWindow,
+                quantization: nil,
+                family: nil,
+                runtimeVersion: nil
+            ),
+            readinessState: "ready",
+            fitState: fit,
+            evaluationState: "not_evaluated",
+            admissionState: admission,
+            admissionStateSource: "local_default",
+            providerGuidance: BYOMDiscoveryGuidance.guidance(forAdmissionState: admission, warnings: warnings),
+            warningCodes: Array(warnings).sorted()
+        )
+    }
+
+    private func fitState(modelID: String) -> String {
+        switch ModelFit.evaluate(modelID: modelID, ramGB: BYOMFitEnvironment.detectedRAMGB()) {
+        case .fits, .tight:
+            return "fits"
+        case .wontFit:
+            return "does_not_fit"
+        case .unknown:
+            return "unknown"
+        }
+    }
+}
+
 /// SPEC-046-R002 `openai_compatible_loopback` adapter.
 ///
 /// Deliberately a thin wrapper over the same shared safety layer the Ollama
@@ -4003,6 +4521,172 @@ enum BYOMDiscoveryJSON {
             ))
         }
         return OllamaInventory(models: models, warningCodes: withheldReference ? [.modelReferenceRedacted] : [])
+    }
+
+    /// LM Studio's documented load states, closed. Anything not exactly
+    /// `loaded` (including an absent `state`, as on the plain `/v1/models`
+    /// shape) is treated as not serviceable until `models evaluate` proves it.
+    enum LMStudioLoadState: String, Equatable {
+        case loaded = "loaded"
+        case notLoaded = "not-loaded"
+        case unknown
+
+        var isServiceable: Bool { self == .loaded }
+    }
+
+    struct LMStudioModel: Equatable {
+        let id: String
+        let loadState: LMStudioLoadState
+        /// `gguf` / `mlx` as LM Studio reports it (`compatibility_type`), or nil.
+        let compatibilityType: String?
+        let arch: String?
+        let quantization: String?
+        let maxContextLength: Int?
+        let warningCodes: [BYOMDiscoveryWarning]
+    }
+
+    struct LMStudioInventory {
+        let models: [LMStudioModel]
+        let warningCodes: [BYOMDiscoveryWarning]
+    }
+
+    /// Parse LM Studio's native `GET /api/v0/models` (`{"data":[{id, type,
+    /// publisher, arch, compatibility_type, quantization, state,
+    /// max_context_length}]}`) through the same bounded strict parser as the
+    /// other adapters. Only `id` is required, so the plain OpenAI-shaped
+    /// `GET /v1/models` (`{"data":[{id}]}`) parses too; the extra labels are
+    /// sanitized exactly as Ollama's `details` are, and nothing else is kept.
+    static func parseLMStudioModels(_ data: Data) throws -> LMStudioInventory {
+        guard let text = String(data: data, encoding: .utf8),
+              case .object(let root) = try? StrictJSONParser.parse(text),
+              case .array(let rawModels)? = root["data"] else {
+            throw BYOMDiscoveryAdapterError.malformed
+        }
+        var models: [LMStudioModel] = []
+        var withheldReference = false
+        for value in BYOMDiscoveryHTTPBounds.boundedInventoryRecords(rawModels) {
+            guard case .object(let object) = value,
+                  case .string(let id)? = object["id"] else {
+                throw BYOMDiscoveryAdapterError.malformed
+            }
+            // LM Studio also lists embedding models (`type: "embedding"`); they
+            // cannot serve chat completions and are not BYOM candidates. Only a
+            // present, non-"llm" type is skipped so the type-less /v1/models
+            // shape still parses.
+            if case .string(let type)? = object["type"], type != "llm" {
+                continue
+            }
+            var warnings: [BYOMDiscoveryWarning] = []
+            let compatibility = try optionalLabel("compatibility_type", in: object, redactionWarning: .capabilityFamilyRedacted, warnings: &warnings)
+            let arch = try optionalLabel("arch", in: object, redactionWarning: .capabilityFamilyRedacted, warnings: &warnings)
+            let quantization = try optionalLabel("quantization", in: object, redactionWarning: .capabilityQuantizationRedacted, warnings: &warnings)
+            let loadState: LMStudioLoadState
+            switch object["state"] {
+            case .string(let raw)?: loadState = LMStudioLoadState(rawValue: raw) ?? .unknown
+            case nil, .null?: loadState = .unknown
+            default: throw BYOMDiscoveryAdapterError.malformed
+            }
+            var maxContext: Int?
+            switch object["max_context_length"] {
+            case .int(let n)? where n >= 0 && n <= 100_000_000:
+                maxContext = n
+            case .double(let d)? where d >= 0 && d <= 100_000_000 && d == d.rounded():
+                maxContext = Int(d)
+            case nil, .null?:
+                maxContext = nil
+            default:
+                throw BYOMDiscoveryAdapterError.malformed
+            }
+            guard BYOMDiscoveryPrivacy.isSafeRuntimeModelReference(id) else {
+                withheldReference = true
+                continue
+            }
+            models.append(LMStudioModel(
+                id: id,
+                loadState: loadState,
+                compatibilityType: compatibility?.lowercased(),
+                arch: arch,
+                quantization: quantization,
+                maxContextLength: maxContext,
+                warningCodes: warnings
+            ))
+        }
+        return LMStudioInventory(models: models, warningCodes: withheldReference ? [.modelReferenceRedacted] : [])
+    }
+
+    struct LlamaCppInventory {
+        /// Stems already reduced from path-shaped ids and checked safe.
+        let modelStems: [String]
+        let warningCodes: [BYOMDiscoveryWarning]
+    }
+
+    /// Parse llama-server's `GET /v1/models` (`{"data":[{id}]}`). llama-server
+    /// reports the loaded file's PATH as the id unless `--alias` is set; a
+    /// path must never become a served reference (the harness refuses `/`,
+    /// and a path on the wire would leak the operator's filesystem), so each
+    /// id is reduced to its file stem first and the safe-reference check runs
+    /// on the stem. Redaction and bounds are the shared harness's.
+    static func parseLlamaCppModels(_ data: Data) throws -> LlamaCppInventory {
+        guard let text = String(data: data, encoding: .utf8),
+              case .object(let root) = try? StrictJSONParser.parse(text),
+              case .array(let rawModels)? = root["data"] else {
+            throw BYOMDiscoveryAdapterError.malformed
+        }
+        var stems: [String] = []
+        var withheldReference = false
+        for value in BYOMDiscoveryHTTPBounds.boundedInventoryRecords(rawModels) {
+            guard case .object(let object) = value,
+                  case .string(let id)? = object["id"] else {
+                throw BYOMDiscoveryAdapterError.malformed
+            }
+            let stem = BYOMLlamaCppModelStore.stem(fromRuntimeModelID: id)
+            guard BYOMDiscoveryPrivacy.isSafeRuntimeModelReference(stem) else {
+                withheldReference = true
+                continue
+            }
+            stems.append(stem)
+        }
+        return LlamaCppInventory(modelStems: stems, warningCodes: withheldReference ? [.modelReferenceRedacted] : [])
+    }
+
+    /// llama-server identifies itself by a `/props` document carrying
+    /// `default_generation_settings` (an object). macprovider's own serve, a
+    /// bare OpenAI-compatible server, or a 404 page do not.
+    static func isLlamaCppProps(_ data: Data) -> Bool {
+        guard let text = String(data: data, encoding: .utf8),
+              case .object(let root) = try? StrictJSONParser.parse(text),
+              case .object? = root["default_generation_settings"] else {
+            return false
+        }
+        return true
+    }
+
+    /// The path llama-server reports it is serving (`/props.model_path`). Used
+    /// only as binding PROOF inside the CLI (BYOMLlamaCppModelStore); never
+    /// stored, never emitted. Absent or non-string ⇒ nil ⇒ no artifact leg.
+    static func llamaCppServedArtifactPath(from data: Data) -> String? {
+        guard let text = String(data: data, encoding: .utf8),
+              case .object(let root) = try? StrictJSONParser.parse(text),
+              case .string(let path)? = root["model_path"],
+              !path.isEmpty, path.utf8.count <= 4096
+        else { return nil }
+        return path
+    }
+
+    /// Best-effort context window from llama-server's `GET /props`
+    /// (`default_generation_settings.n_ctx`). Absent or malformed ⇒ nil; this
+    /// never fails the adapter.
+    static func llamaCppContextWindow(from data: Data) -> Int? {
+        guard let text = String(data: data, encoding: .utf8),
+              case .object(let root) = try? StrictJSONParser.parse(text),
+              case .object(let settings)? = root["default_generation_settings"] else {
+            return nil
+        }
+        switch settings["n_ctx"] {
+        case .int(let n)? where n > 0 && n <= 100_000_000: return n
+        case .double(let d)? where d > 0 && d <= 100_000_000 && d == d.rounded(): return Int(d)
+        default: return nil
+        }
     }
 
     struct OpenAIModelInventory {

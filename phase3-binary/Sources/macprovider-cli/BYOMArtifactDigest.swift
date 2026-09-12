@@ -61,7 +61,15 @@ enum BYOMArtifactDigestError: Error, Equatable, CustomStringConvertible {
 /// binds only while the file it resolved for the runtime instance is the same
 /// (path, size, inode, modification time) — SPEC-010-R007(a).
 struct BYOMArtifactFileIdentity: Codable, Equatable, Sendable {
-    let path: String
+    /// The canonical path this identity was taken for. In memory only: it is
+    /// neither persisted nor part of equality, so the digest cache never
+    /// records where an operator keeps model files (PR #1480 audit, LOW).
+    /// nil on identities decoded from the cache.
+    let path: String?
+    /// Lowercase SHA-256 of the canonical path: a non-reversible token that
+    /// still distinguishes two files with identical size/inode/device/mtime
+    /// on different paths. This is what is persisted and compared.
+    let pathDigest: String
     let sizeBytes: Int
     let inode: UInt64
     let device: UInt64
@@ -72,12 +80,46 @@ struct BYOMArtifactFileIdentity: Codable, Equatable, Sendable {
     let modifiedNanoseconds: Int64
 
     enum CodingKeys: String, CodingKey {
-        case path
+        case pathDigest = "path_sha256"
         case sizeBytes = "size_bytes"
         case inode
         case device
         case modifiedSeconds = "modified_seconds"
         case modifiedNanoseconds = "modified_nanoseconds"
+    }
+
+    init(path: String, sizeBytes: Int, inode: UInt64, device: UInt64, modifiedSeconds: Int64, modifiedNanoseconds: Int64) {
+        self.path = path
+        self.pathDigest = Self.digest(ofPath: path)
+        self.sizeBytes = sizeBytes
+        self.inode = inode
+        self.device = device
+        self.modifiedSeconds = modifiedSeconds
+        self.modifiedNanoseconds = modifiedNanoseconds
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        path = nil
+        pathDigest = try c.decode(String.self, forKey: .pathDigest)
+        sizeBytes = try c.decode(Int.self, forKey: .sizeBytes)
+        inode = try c.decode(UInt64.self, forKey: .inode)
+        device = try c.decode(UInt64.self, forKey: .device)
+        modifiedSeconds = try c.decode(Int64.self, forKey: .modifiedSeconds)
+        modifiedNanoseconds = try c.decode(Int64.self, forKey: .modifiedNanoseconds)
+    }
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.pathDigest == rhs.pathDigest
+            && lhs.sizeBytes == rhs.sizeBytes
+            && lhs.inode == rhs.inode
+            && lhs.device == rhs.device
+            && lhs.modifiedSeconds == rhs.modifiedSeconds
+            && lhs.modifiedNanoseconds == rhs.modifiedNanoseconds
+    }
+
+    static func digest(ofPath path: String) -> String {
+        Data(SHA256.hash(data: Data(path.utf8))).map { String(format: "%02x", $0) }.joined()
     }
 
     /// The identity the PATH currently resolves to.
@@ -121,12 +163,63 @@ struct BYOMArtifactEvidence: Equatable, Sendable {
     var hashes: [String: String] { [algorithm: digest] }
 }
 
+/// SPEC-046-R002 / SPEC-010 v1.7 R007(a): a runtime-specific step that maps a
+/// served model reference to the GGUF file on disk. Everything downstream —
+/// opening the descriptor, binding the identity, streaming the digest, the
+/// cache — is runtime-neutral and lives in `BYOMArtifactDigestResolver`.
+///
+/// Invariant every conformer keeps: the resolved file is a regular file
+/// contained in a root the OPERATOR declared (never one the runtime named),
+/// resolved through symlinks before the containment check, and identified by
+/// a `locator` that is stable for the runtime instance so the resolver can
+/// prove the reference still names the very file it hashed. Locators are never
+/// reported as digests.
+protocol BYOMGGUFArtifactLocator: Sendable {
+    /// The SPEC-046-R002 adapter this locator serves (`ollama_loopback`, ...).
+    var runtimeSource: String { get }
+    /// `servedModelRef` is the candidate's `served_model_ref`, prefix and all.
+    /// `runtimeArtifactPath` is the path the runtime itself reports it is
+    /// serving (llama-server `/props.model_path`), or nil when the runtime
+    /// reports none. It is PROOF, never a locator: a conformer may require it
+    /// to agree with what the operator-declared store resolves before it
+    /// returns anything, and it must never be persisted or emitted.
+    func resolveArtifact(servedModelRef: String, runtimeArtifactPath: String?) -> BYOMResolvedArtifact?
+}
+
+extension BYOMGGUFArtifactLocator {
+    func resolveArtifact(servedModelRef: String) -> BYOMResolvedArtifact? {
+        resolveArtifact(servedModelRef: servedModelRef, runtimeArtifactPath: nil)
+    }
+}
+
+struct BYOMResolvedArtifact: Equatable, Sendable {
+    /// Canonical (symlinks resolved) URL of the regular file to hash.
+    let fileURL: URL
+    /// Stable re-check token: the Ollama manifest layer digest, an LM Studio
+    /// path relative to its models root, a llama.cpp canonical path. Compared
+    /// verbatim by `validateCurrent`; never surfaced as a digest.
+    let locator: String
+}
+
+/// Shared containment check: `url`, after resolving symlinks, must be `root`
+/// or strictly beneath it. Used by every locator so a symlink or `..` cannot
+/// escape the operator-declared root.
+enum BYOMArtifactPathPolicy {
+    static func isContained(_ url: URL, in root: URL) -> Bool {
+        let target = url.resolvingSymlinksInPath().standardizedFileURL.path
+        let base = root.resolvingSymlinksInPath().standardizedFileURL.path
+        if target == base { return true }
+        return target.hasPrefix(base.hasSuffix("/") ? base : base + "/")
+    }
+}
+
 /// Locates the GGUF blob an Ollama model name is served from, in the local
 /// Ollama store (`$OLLAMA_MODELS`, default `~/.ollama/models`): the manifest at
 /// `manifests/registry.ollama.ai/<namespace>/<repo>/<tag>` names the model
 /// layer, whose digest LOCATES `blobs/sha256-<hex>`. Filesystem only — no
 /// network, no dereferencing anything the runtime reports beyond the name.
-struct BYOMOllamaModelStore: Sendable {
+struct BYOMOllamaModelStore: BYOMGGUFArtifactLocator, Sendable {
+    let runtimeSource = "ollama_loopback"
     let root: URL
     private let fileManager: FileManager
     private static let manifestMaxBytes = 256 * 1024
@@ -213,11 +306,14 @@ struct BYOMOllamaModelStore: Sendable {
         return components
     }
 
+    /// Ollama binds through its own manifest; the runtime path plays no part.
+    func resolveArtifact(servedModelRef: String, runtimeArtifactPath: String?) -> BYOMResolvedArtifact? {
+        guard let blob = resolveModelBlob(name: servedModelRef) else { return nil }
+        return BYOMResolvedArtifact(fileURL: blob.blobURL, locator: blob.locatorDigest)
+    }
+
     private func pathIsContained(_ url: URL, in root: URL) -> Bool {
-        let target = url.resolvingSymlinksInPath().standardizedFileURL.path
-        let base = root.resolvingSymlinksInPath().standardizedFileURL.path
-        if target == base { return true }
-        return target.hasPrefix(base.hasSuffix("/") ? base : base + "/")
+        BYOMArtifactPathPolicy.isContained(url, in: root)
     }
 
     private func boundedFileContents(at url: URL, maxBytes: Int) -> Data? {
@@ -229,6 +325,290 @@ struct BYOMOllamaModelStore: Sendable {
             return nil
         }
         return try? Data(contentsOf: resolved)
+    }
+}
+
+/// Locates the GGUF file an LM Studio model id is served from, in the local
+/// LM Studio models directory (default `~/.lmstudio/models`, layout
+/// `<publisher>/<repo>/<file>.gguf`). Filesystem only, from the NAME the
+/// runtime reports — the same principle as `BYOMOllamaModelStore`: the runtime
+/// never names the file that gets hashed.
+///
+/// Matching rule (v1, to be confirmed against a live LM Studio in the #1478
+/// hardware pass and adjusted in `matches(id:publisher:repo:fileStem:)` alone):
+/// the id equals, case-insensitively, one of `<publisher>/<repo>`, `<repo>`,
+/// `<repo>` minus a trailing `-gguf`, or the file stem. Exactly ONE `.gguf`
+/// file may answer; zero or several means no identity (fail closed, as an
+/// Ollama manifest with two model layers does). MLX-format LM Studio models
+/// have no `.gguf` and therefore never resolve here.
+struct BYOMLMStudioModelStore: BYOMGGUFArtifactLocator, Sendable {
+    let runtimeSource = "lmstudio_loopback"
+    static let servedModelRefPrefix = "lmstudio:"
+    let root: URL
+    private let fileManager: FileManager
+    /// Bounds the directory walk so a pathological models tree cannot turn a
+    /// read-only discovery into a filesystem scan.
+    private static let maxEntriesVisited = 8192
+    private static let idPart = try! NSRegularExpression(pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}(/[A-Za-z0-9][A-Za-z0-9._-]{0,127})?$")
+
+    init(root: URL, fileManager: FileManager = .default) {
+        self.root = root
+        self.fileManager = fileManager
+    }
+
+    static func defaultRoot(
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
+    ) -> URL {
+        // LM Studio has no runtime-defined env var (unlike OLLAMA_MODELS); the
+        // CLI-scoped override keeps the operator, not the runtime, in charge
+        // of which tree may be hashed.
+        if let models = environment["MACPROVIDER_LMSTUDIO_MODELS_ROOT"], !models.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return URL(fileURLWithPath: models)
+        }
+        return homeDirectory.appendingPathComponent(".lmstudio/models", isDirectory: true)
+    }
+
+    static func modelID(from servedModelRef: String) -> String? {
+        var id = servedModelRef.trimmingCharacters(in: .whitespacesAndNewlines)
+        if id.hasPrefix(servedModelRefPrefix) { id = String(id.dropFirst(servedModelRefPrefix.count)) }
+        let range = NSRange(id.startIndex..., in: id)
+        guard let match = idPart.firstMatch(in: id, range: range), match.range == range else { return nil }
+        return id
+    }
+
+    static func matches(id: String, publisher: String, repo: String, fileStem: String) -> Bool {
+        let wanted = id.lowercased()
+        let repoLower = repo.lowercased()
+        var repoTrimmed = repoLower
+        if repoTrimmed.hasSuffix("-gguf") { repoTrimmed.removeLast(5) }
+        return wanted == "\(publisher.lowercased())/\(repoLower)"
+            || wanted == repoLower
+            || wanted == repoTrimmed
+            || wanted == fileStem.lowercased()
+    }
+
+    /// LM Studio binds through its models directory from the id; the runtime
+    /// reports no artifact path and none is needed.
+    func resolveArtifact(servedModelRef: String, runtimeArtifactPath: String?) -> BYOMResolvedArtifact? {
+        guard let id = Self.modelID(from: servedModelRef) else { return nil }
+        let rootResolved = root.resolvingSymlinksInPath().standardizedFileURL
+        guard let publishers = try? fileManager.contentsOfDirectory(at: rootResolved, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) else {
+            return nil
+        }
+        var visited = 0
+        var hits: [(url: URL, relative: String)] = []
+        for publisherURL in publishers {
+            guard (try? publisherURL.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true else { continue }
+            let publisher = publisherURL.lastPathComponent
+            guard let repos = try? fileManager.contentsOfDirectory(at: publisherURL, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) else { continue }
+            for repoURL in repos {
+                visited += 1
+                if visited > Self.maxEntriesVisited { return nil }
+                guard (try? repoURL.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true else { continue }
+                let repo = repoURL.lastPathComponent
+                guard let files = try? fileManager.contentsOfDirectory(at: repoURL, includingPropertiesForKeys: [.isRegularFileKey], options: [.skipsHiddenFiles]) else { continue }
+                for fileURL in files {
+                    visited += 1
+                    if visited > Self.maxEntriesVisited { return nil }
+                    guard fileURL.pathExtension.lowercased() == "gguf" else { continue }
+                    let stem = fileURL.deletingPathExtension().lastPathComponent
+                    guard Self.matches(id: id, publisher: publisher, repo: repo, fileStem: stem) else { continue }
+                    let resolved = fileURL.resolvingSymlinksInPath().standardizedFileURL
+                    guard BYOMArtifactPathPolicy.isContained(resolved, in: rootResolved),
+                          (try? resolved.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile == true
+                    else { continue }
+                    hits.append((resolved, "\(publisher)/\(repo)/\(fileURL.lastPathComponent)"))
+                }
+            }
+        }
+        // One file answers or none does: several matching GGUFs (e.g. every
+        // quantization of a repo when the id names the repo) is ambiguous and
+        // must not pick silently.
+        guard hits.count == 1, let hit = hits.first else { return nil }
+        return BYOMResolvedArtifact(fileURL: hit.url, locator: hit.relative)
+    }
+}
+
+/// #1478 audit (MEDIUM): which llama.cpp file may be hashed is decided ONCE,
+/// from ONE source. If either CLI selector is given, both environment
+/// selectors are ignored, so an inherited `MACPROVIDER_LLAMACPP_MODEL_PATH`
+/// can never silently defeat an explicit `--llamacpp-model-root`. Two
+/// selectors from the same source are a conflict and an explicit error, not
+/// a precedence rule the operator has to know about.
+struct BYOMLlamaCppArtifactSelector: Equatable, Sendable {
+    let root: URL?
+    let pinnedFile: URL?
+
+    static let none = BYOMLlamaCppArtifactSelector(root: nil, pinnedFile: nil)
+
+    enum SelectionError: Error, Equatable, CustomStringConvertible {
+        case conflictingCLISelectors
+        case conflictingEnvironmentSelectors
+
+        var description: String {
+            switch self {
+            case .conflictingCLISelectors:
+                return "--llamacpp-model-root and --llamacpp-model-path are mutually exclusive; pass exactly one"
+            case .conflictingEnvironmentSelectors:
+                return "MACPROVIDER_LLAMACPP_MODEL_ROOT and MACPROVIDER_LLAMACPP_MODEL_PATH are both set; unset one (or pass a --llamacpp-model-* flag, which ignores both)"
+            }
+        }
+    }
+
+    static func resolve(
+        cliRoot: String?,
+        cliPath: String?,
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) throws -> BYOMLlamaCppArtifactSelector {
+        func clean(_ value: String?) -> String? {
+            guard let value else { return nil }
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+        }
+        let root = clean(cliRoot), path = clean(cliPath)
+        if root != nil || path != nil {
+            if root != nil && path != nil { throw SelectionError.conflictingCLISelectors }
+            return BYOMLlamaCppArtifactSelector(root: root.map(URL.init(fileURLWithPath:)), pinnedFile: path.map(URL.init(fileURLWithPath:)))
+        }
+        let envRoot = clean(environment["MACPROVIDER_LLAMACPP_MODEL_ROOT"]), envPath = clean(environment["MACPROVIDER_LLAMACPP_MODEL_PATH"])
+        if envRoot != nil && envPath != nil { throw SelectionError.conflictingEnvironmentSelectors }
+        return BYOMLlamaCppArtifactSelector(root: envRoot.map(URL.init(fileURLWithPath:)), pinnedFile: envPath.map(URL.init(fileURLWithPath:)))
+    }
+}
+
+/// Locates the GGUF file a llama.cpp `llama-server` model is served from,
+/// under an OPERATOR-declared root (`--llamacpp-model-root` /
+/// `MACPROVIDER_LLAMACPP_MODEL_ROOT`; no default). Filesystem only, from the
+/// NAME.
+///
+/// Why a name and not the path llama-server reports: `llama-server` exposes
+/// the loaded file's path both as the `/v1/models` id (absent `--alias`) and
+/// as `/props.model_path`. Adopting either would let the runtime choose which
+/// file gets recorded as artifact evidence (#1478 `harm:supply`), and the
+/// #1246 harness already refuses any served reference containing `/` so a
+/// filesystem path never reaches `candidate_id`, display names or evidence
+/// JSON. So the adapter reduces the id to its file stem (`foo-q4_k_m` for
+/// `/x/models/foo-q4_k_m.gguf`), and this store resolves that stem to exactly
+/// one `<stem>.gguf` under the root, one or two levels deep, symlink-resolved
+/// and root-contained. No root, an aliased server whose alias names no file,
+/// or several files with that stem ⇒ no identity (`runtime_reported`).
+struct BYOMLlamaCppModelStore: BYOMGGUFArtifactLocator, Sendable {
+    let runtimeSource = "llamacpp_loopback"
+    static let servedModelRefPrefix = "llamacpp:"
+    /// Option (a): a directory the stem may be resolved under. nil ⇒ off.
+    let root: URL?
+    /// Option (c): the ONE file the operator names. When set it takes
+    /// precedence over `root`: the served stem must equal this file's stem
+    /// and nothing else is ever considered. Strictest; the operator, not the
+    /// runtime and not a directory walk, names the artifact.
+    let pinnedFile: URL?
+    private let fileManager: FileManager
+    private static let maxEntriesVisited = 8192
+    private static let stemPart = try! NSRegularExpression(pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$")
+
+    init(root: URL?, pinnedFile: URL? = nil, fileManager: FileManager = .default) {
+        self.root = root
+        self.pinnedFile = pinnedFile
+        self.fileManager = fileManager
+    }
+
+
+    /// The served reference the adapter emits for a llama-server model id:
+    /// a path-shaped id becomes its file stem, anything else is kept as-is.
+    /// The harness's safe-reference check runs on the result, not here.
+    static func stem(fromRuntimeModelID id: String) -> String {
+        var value = id.trimmingCharacters(in: .whitespacesAndNewlines)
+        if value.contains("/") {
+            value = (value as NSString).lastPathComponent
+        }
+        if value.lowercased().hasSuffix(".gguf") { value.removeLast(5) }
+        return value
+    }
+
+    static func stem(from servedModelRef: String) -> String? {
+        var value = servedModelRef.trimmingCharacters(in: .whitespacesAndNewlines)
+        if value.hasPrefix(servedModelRefPrefix) { value = String(value.dropFirst(servedModelRefPrefix.count)) }
+        let range = NSRange(value.startIndex..., in: value)
+        guard let match = stemPart.firstMatch(in: value, range: range), match.range == range else { return nil }
+        return value
+    }
+
+    /// The runtime path is REQUIRED here. The stem alone locates a file the
+    /// operator allows; the served path proves it is the file the runtime is
+    /// actually serving. Without that proof, a server serving one file while
+    /// a same-stem file sits under the operator root would have the wrong
+    /// file hashed on its behalf (PR #1480 audit, HIGH). So:
+    ///   - no runtime path, a relative path, or a path whose stem differs
+    ///     from the served stem: no identity;
+    ///   - pinned mode: the canonical runtime path must EQUAL the pinned file;
+    ///   - root mode: the canonical runtime path must be contained in the
+    ///     root AND equal the single file the stem resolves to there.
+    /// Symlinks are resolved on both sides before comparison, and the
+    /// runtime path is never stored or emitted.
+    func resolveArtifact(servedModelRef: String, runtimeArtifactPath: String?) -> BYOMResolvedArtifact? {
+        guard let stem = Self.stem(from: servedModelRef),
+              let served = Self.canonicalServedPath(runtimeArtifactPath, expectedStem: stem)
+        else { return nil }
+        let wanted = stem.lowercased()
+
+        if let pinnedFile {
+            let resolved = pinnedFile.resolvingSymlinksInPath().standardizedFileURL
+            guard resolved.pathExtension.lowercased() == "gguf",
+                  resolved.deletingPathExtension().lastPathComponent.lowercased() == wanted,
+                  (try? resolved.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile == true,
+                  served.path == resolved.path
+            else { return nil }
+            return BYOMResolvedArtifact(fileURL: resolved, locator: resolved.path)
+        }
+
+        guard let root else { return nil }
+        let rootResolved = root.resolvingSymlinksInPath().standardizedFileURL
+        guard BYOMArtifactPathPolicy.isContained(served, in: rootResolved) else { return nil }
+        guard let hit = uniqueStemHit(wanted, under: rootResolved), hit.url.path == served.path else { return nil }
+        return BYOMResolvedArtifact(fileURL: hit.url, locator: hit.relative)
+    }
+
+    /// Canonicalizes a runtime-reported path and checks the two things the
+    /// runtime's own report must satisfy before it can serve as proof: it is
+    /// absolute, and its file stem is the served stem.
+    static func canonicalServedPath(_ raw: String?, expectedStem: String) -> URL? {
+        guard let raw, raw.hasPrefix("/") else { return nil }
+        let url = URL(fileURLWithPath: raw).resolvingSymlinksInPath().standardizedFileURL
+        guard url.pathExtension.lowercased() == "gguf",
+              url.deletingPathExtension().lastPathComponent.lowercased() == expectedStem.lowercased()
+        else { return nil }
+        return url
+    }
+
+    /// The single `<stem>.gguf` under `root`, one or two levels deep, or nil
+    /// when zero or several answer. Streams the directory rather than
+    /// materializing it, and counts every entry seen against the budget.
+    private func uniqueStemHit(_ wanted: String, under rootResolved: URL) -> (url: URL, relative: String)? {
+        guard let enumerator = fileManager.enumerator(
+            at: rootResolved,
+            includingPropertiesForKeys: [.isDirectoryKey, .isRegularFileKey],
+            options: [.skipsHiddenFiles, .skipsPackageDescendants]
+        ) else { return nil }
+        var visited = 0
+        var hits: [(url: URL, relative: String)] = []
+        while let entry = enumerator.nextObject() as? URL {
+            visited += 1
+            if visited > Self.maxEntriesVisited { return nil }
+            // Two levels: root/<file> or root/<dir>/<file>.
+            if enumerator.level >= 2 { enumerator.skipDescendants() }
+            guard entry.pathExtension.lowercased() == "gguf",
+                  entry.deletingPathExtension().lastPathComponent.lowercased() == wanted
+            else { continue }
+            let resolved = entry.resolvingSymlinksInPath().standardizedFileURL
+            guard BYOMArtifactPathPolicy.isContained(resolved, in: rootResolved),
+                  (try? resolved.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile == true
+            else { continue }
+            let relative = String(resolved.path.dropFirst(rootResolved.path.count)).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            hits.append((resolved, relative))
+        }
+        guard hits.count == 1 else { return nil }
+        return hits[0]
     }
 }
 
@@ -257,7 +637,7 @@ struct BYOMArtifactDigestCache: Sendable {
         var entries: [Entry]
     }
 
-    static let schema = "byom_artifact_digest_cache.v1"
+    static let schema = "byom_artifact_digest_cache.v2"   // v1 persisted raw paths; discarded on load
 
     init(url: URL, fileManager: FileManager = .default) {
         self.url = url
@@ -284,9 +664,11 @@ struct BYOMArtifactDigestCache: Sendable {
 
     func store(_ identity: BYOMArtifactFileIdentity, algorithm: String, digest: String, now: Date = Date()) {
         var document = load()
-        document.entries.removeAll { $0.file.path == identity.path && $0.algorithm == algorithm }
+        // One entry per (path token, algorithm): a rewritten file replaces its
+        // stale digest rather than accumulating beside it.
+        document.entries.removeAll { $0.file.pathDigest == identity.pathDigest && $0.algorithm == algorithm }
         document.entries.append(Entry(file: identity, algorithm: algorithm, digest: digest, computedAt: ModelSwitchingWireCodec.timestamp(now)))
-        document.entries.sort { ($0.file.path, $0.algorithm) < ($1.file.path, $1.algorithm) }
+        document.entries.sort { ($0.file.pathDigest, $0.algorithm) < ($1.file.pathDigest, $1.algorithm) }
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .prettyPrinted]
         guard let data = try? encoder.encode(document) else { return }
@@ -314,14 +696,33 @@ struct BYOMArtifactDigestCache: Sendable {
 /// `macprovider.gguf-file.v1` digest: resolve the blob, hash the complete
 /// bytes, and bind the result to the exact file identity.
 struct BYOMArtifactDigestResolver: Sendable {
-    let store: BYOMOllamaModelStore
+    /// Locators keyed by `runtime_source`. A runtime with no locator has no
+    /// artifact leg: `knownDigest` is nil and `computeEvidence` throws
+    /// `unresolvedBlob`, exactly as an unresolvable Ollama name does.
+    private let locators: [String: any BYOMGGUFArtifactLocator]
     let cache: BYOMArtifactDigestCache
+
+    init(locators: [any BYOMGGUFArtifactLocator], cache: BYOMArtifactDigestCache) {
+        var table: [String: any BYOMGGUFArtifactLocator] = [:]
+        for locator in locators {
+            precondition(table[locator.runtimeSource] == nil, "duplicate locator for \(locator.runtimeSource)")
+            table[locator.runtimeSource] = locator
+        }
+        self.locators = table
+        self.cache = cache
+    }
+
+    init(store: BYOMOllamaModelStore, cache: BYOMArtifactDigestCache) {
+        self.init(locators: [store], cache: cache)
+    }
+
+    // MARK: Runtime-neutral entry points
 
     /// Discovery-time: a digest previously computed over the SAME file (path,
     /// size, inode, mtime), or nil. Never hashes.
-    func knownDigest(forOllamaModel name: String) -> String? {
-        guard let blob = store.resolveModelBlob(name: name),
-              let identity = BYOMArtifactFileIdentity.current(of: blob.blobURL)
+    func knownDigest(runtimeSource: String, servedModelRef: String, runtimeArtifactPath: String? = nil) -> String? {
+        guard let artifact = locators[runtimeSource]?.resolveArtifact(servedModelRef: servedModelRef, runtimeArtifactPath: runtimeArtifactPath),
+              let identity = BYOMArtifactFileIdentity.current(of: artifact.fileURL)
         else {
             return nil
         }
@@ -333,17 +734,17 @@ struct BYOMArtifactDigestResolver: Sendable {
     /// the digest BOUND to the file so the caller can re-validate right
     /// before it reports (SPEC-010-R007(a)).
     ///
-    /// The blob is opened ONCE; the identity is taken from that descriptor
+    /// The file is opened ONCE; the identity is taken from that descriptor
     /// (`fstat`) before and after hashing, so the digest is bound to the file
     /// that was actually read. The pathname is then re-resolved and must name
     /// that same file: a path that pointed elsewhere while it was opened, or
-    /// a blob rewritten while it was read, fails closed. `deadline` bounds
+    /// a file rewritten while it was read, fails closed. `deadline` bounds
     /// the hashing; on expiry nothing is recorded.
-    func computeEvidence(forOllamaModel name: String, deadline: Date? = nil) throws -> BYOMArtifactEvidence {
-        guard let blob = store.resolveModelBlob(name: name) else {
+    func computeEvidence(runtimeSource: String, servedModelRef: String, runtimeArtifactPath: String? = nil, deadline: Date? = nil) throws -> BYOMArtifactEvidence {
+        guard let artifact = locators[runtimeSource]?.resolveArtifact(servedModelRef: servedModelRef, runtimeArtifactPath: runtimeArtifactPath) else {
             throw BYOMArtifactDigestError.unresolvedBlob
         }
-        let path = blob.blobURL.resolvingSymlinksInPath().standardizedFileURL.path
+        let path = artifact.fileURL.resolvingSymlinksInPath().standardizedFileURL.path
         guard let handle = FileHandle(forReadingAtPath: path) else {
             throw BYOMArtifactDigestError.unresolvedBlob
         }
@@ -355,26 +756,45 @@ struct BYOMArtifactDigestResolver: Sendable {
         guard BYOMArtifactFileIdentity.of(descriptor: handle.fileDescriptor, path: path) == before else {
             throw BYOMArtifactDigestError.fileIdentityChanged
         }
-        let evidence = BYOMArtifactEvidence(algorithm: ModelArtifactIdentity.ggufFileV1, digest: digest, file: before, locatorDigest: blob.locatorDigest)
-        try validateCurrent(evidence, forOllamaModel: name)
+        let evidence = BYOMArtifactEvidence(algorithm: ModelArtifactIdentity.ggufFileV1, digest: digest, file: before, locatorDigest: artifact.locator)
+        try validateCurrent(evidence, runtimeSource: runtimeSource, servedModelRef: servedModelRef, runtimeArtifactPath: runtimeArtifactPath)
         cache.store(before, algorithm: evidence.algorithm, digest: digest)
         return evidence
     }
 
-    func computeDigest(forOllamaModel name: String, deadline: Date? = nil) throws -> String {
-        try computeEvidence(forOllamaModel: name, deadline: deadline).digest
+    func computeDigest(runtimeSource: String, servedModelRef: String, runtimeArtifactPath: String? = nil, deadline: Date? = nil) throws -> String {
+        try computeEvidence(runtimeSource: runtimeSource, servedModelRef: servedModelRef, runtimeArtifactPath: runtimeArtifactPath, deadline: deadline).digest
     }
 
-    /// The name must STILL resolve — through the manifest — to the very file
-    /// the digest was computed over, with an unchanged identity: a manifest
-    /// retargeted to another blob, or a blob rewritten in place, fails closed.
-    func validateCurrent(_ evidence: BYOMArtifactEvidence, forOllamaModel name: String) throws {
-        guard let blob = store.resolveModelBlob(name: name),
-              blob.locatorDigest == evidence.locatorDigest,
-              let now = BYOMArtifactFileIdentity.current(of: blob.blobURL),
+    /// The reference must STILL resolve — through the runtime's locator — to
+    /// the very file the digest was computed over, with an unchanged identity:
+    /// a reference retargeted to another file, or a file rewritten in place,
+    /// fails closed.
+    func validateCurrent(_ evidence: BYOMArtifactEvidence, runtimeSource: String, servedModelRef: String, runtimeArtifactPath: String? = nil) throws {
+        guard let artifact = locators[runtimeSource]?.resolveArtifact(servedModelRef: servedModelRef, runtimeArtifactPath: runtimeArtifactPath),
+              artifact.locator == evidence.locatorDigest,
+              let now = BYOMArtifactFileIdentity.current(of: artifact.fileURL),
               now == evidence.file
         else {
             throw BYOMArtifactDigestError.fileIdentityChanged
         }
+    }
+
+    // MARK: Ollama-named shims (pre-#1478 call sites and tests)
+
+    func knownDigest(forOllamaModel name: String) -> String? {
+        knownDigest(runtimeSource: "ollama_loopback", servedModelRef: name)
+    }
+
+    func computeEvidence(forOllamaModel name: String, deadline: Date? = nil) throws -> BYOMArtifactEvidence {
+        try computeEvidence(runtimeSource: "ollama_loopback", servedModelRef: name, deadline: deadline)
+    }
+
+    func computeDigest(forOllamaModel name: String, deadline: Date? = nil) throws -> String {
+        try computeDigest(runtimeSource: "ollama_loopback", servedModelRef: name, deadline: deadline)
+    }
+
+    func validateCurrent(_ evidence: BYOMArtifactEvidence, forOllamaModel name: String) throws {
+        try validateCurrent(evidence, runtimeSource: "ollama_loopback", servedModelRef: name)
     }
 }
