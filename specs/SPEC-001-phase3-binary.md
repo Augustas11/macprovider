@@ -1,6 +1,11 @@
 # SPEC-001 — Phase 3 Binary: Mac Provider Inference CLI
 
-**Version:** 1.9.17 (2026-09-12, Build 1 catalog compatibility authority correction)
+**Version:** 1.9.18 (2026-09-12, Build 1 branch authority alignment)
+
+**Change log v1.9.18 (2026-09-12, Build 1 branch authority alignment):**
+Aligns the current Malibu/CLI catalog-economics consumer contract with
+SPEC-044 v0.2.10, including reserved `offer_rejected` quarantine and the
+rebased preparation recovery authority.
 
 **Change log v1.9.17 (2026-09-12, Build 1 catalog compatibility authority
 correction):** Reconciles the shipped v1 three-value catalog-economics
@@ -3399,7 +3404,7 @@ mutation, as defined by SPEC-044.
 Only the attached run worker may allocate `event_sequence` or emit transaction
 events. After syntax/framing and immutable projected-action identity validation,
 but before semantic freshness, availability, or conflict checks, a valid run
-creates a fresh attempt and enters SPEC-044 v0.2.8's bounded
+creates a fresh attempt and enters SPEC-044 v0.2.10's bounded
 `failure.lock`-then-`cancel.lock` lifecycle.
 For exit 3 it MUST durably write the bounded private non-live
 `model_catalog_failed_dispatch.v1` record before emitting exactly one terminal
@@ -3409,7 +3414,7 @@ binding, fresh attempt, and error code; it creates no active attempt, marker,
 network/staging work, model/adoption/runtime mutation, or incumbent displacement.
 Conflict reporting is not a second active worker. All failed-dispatch creation,
 compaction, eviction, recovery, and cancel-visible reads use the exhaustive
-SPEC-044 v0.2.8 lock graph. A failure-only path takes `failure.lock` then
+SPEC-044 v0.2.10 lock graph. A failure-only path takes `failure.lock` then
 `cancel.lock`; a normal or recovery path takes `operation.lock`, then
 `failure.lock`, then `cancel.lock`. Failure-only failure-then-cancel uses one
 total `CLOCK_MONOTONIC_RAW` deadline. A successful nonblocking
@@ -3458,7 +3463,7 @@ MUST launch the built CLI through Malibu's production process adapter and prove
 the complete matrix below, including exact stdout, stderr, exit status, and strict
 decoder behavior. Clients lacking the exact v2 generation trio and matching
 manifest tier retain the existing fallback and MUST NOT invoke the v2 mutation
-options. SPEC-044 v0.2.8
+options. SPEC-044 v0.2.10
 owns the
 projection, event, cancellation-acknowledgement, preparation-copy, action, and
 storage-accounting contracts.
