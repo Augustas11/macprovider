@@ -15,7 +15,7 @@ enum ModelPreparationContracts {
     static let activeRecordMaxBytes = 65_536
     static let deletionRecordMaxBytes = 32_768
     static let publicationReceiptMaxBytes = 16_384
-    static let uniqueTempEnvelopeMaxBytes = 360_000
+    static let privateStateEnvelopeMaxBytes = 360_000
     static let reservationHistoryMaxBytes = 262_144
     static let inventoryMaxBytes = 262_144
     static let maxJavaScriptSafeInteger = 9_007_199_254_740_991
@@ -1659,18 +1659,17 @@ struct ModelPreparationCleanupRecord: Codable, Equatable, Sendable {
     }
 }
 
-enum ModelPreparationUniqueTempRecordKind: String, Codable, CaseIterable, Sendable {
+enum ModelPreparationPrivateStateEnvelopeKind: String, Codable, CaseIterable, Sendable {
     case reservations
     case active
     case cancel
     case publishedInventory = "published_inventory"
     case deletion
-    case rootIdentity = "root_identity"
 }
 
-struct ModelPreparationUniqueTempRecord: Codable, Equatable, Sendable {
+struct ModelPreparationPrivateStateEnvelope: Codable, Equatable, Sendable {
     let schema: String
-    let recordKind: ModelPreparationUniqueTempRecordKind
+    let recordKind: ModelPreparationPrivateStateEnvelopeKind
     let targetLeaf: String
     let writerUUID: String
     let generation: Int
@@ -1688,15 +1687,15 @@ struct ModelPreparationUniqueTempRecord: Codable, Equatable, Sendable {
     }
 
     init(
-        schema: String = "model_catalog_unique_temp.v2",
-        recordKind: ModelPreparationUniqueTempRecordKind,
+        schema: String = "model_catalog_private_state_envelope.v1",
+        recordKind: ModelPreparationPrivateStateEnvelopeKind,
         targetLeaf: String,
         writerUUID: String,
         generation: Int,
         payload: Data,
         payloadSHA256: String? = nil
     ) throws {
-        guard schema == "model_catalog_unique_temp.v2" else { throw ModelPreparationContractError.malformed("schema") }
+        guard schema == "model_catalog_private_state_envelope.v1" else { throw ModelPreparationContractError.malformed("schema") }
         let expectedLeaf = Self.expectedTargetLeaf(for: recordKind)
         try ModelPreparationContracts.requirePathLeaf(targetLeaf, field: "target_leaf")
         guard targetLeaf == expectedLeaf else { throw ModelPreparationContractError.bindingMismatch("target_leaf") }
@@ -1720,7 +1719,7 @@ struct ModelPreparationUniqueTempRecord: Codable, Equatable, Sendable {
         self.generation = generation
         self.payload = payload
         self.payloadSHA256 = expectedPayloadSHA256
-        _ = try ModelPreparationContracts.encode(self, maxBytes: ModelPreparationContracts.uniqueTempEnvelopeMaxBytes)
+        _ = try ModelPreparationContracts.encode(self, maxBytes: ModelPreparationContracts.privateStateEnvelopeMaxBytes)
     }
 
     init(from decoder: Decoder) throws {
@@ -1732,7 +1731,7 @@ struct ModelPreparationUniqueTempRecord: Codable, Equatable, Sendable {
         }
         try self.init(
             schema: try container.decode(String.self, forKey: .schema),
-            recordKind: try container.decode(ModelPreparationUniqueTempRecordKind.self, forKey: .recordKind),
+            recordKind: try container.decode(ModelPreparationPrivateStateEnvelopeKind.self, forKey: .recordKind),
             targetLeaf: try container.decode(String.self, forKey: .targetLeaf),
             writerUUID: try container.decode(String.self, forKey: .writerUUID),
             generation: try container.decode(Int.self, forKey: .generation),
@@ -1752,29 +1751,27 @@ struct ModelPreparationUniqueTempRecord: Codable, Equatable, Sendable {
         try container.encode(payloadSHA256, forKey: .payloadSHA256)
     }
 
-    static func expectedTargetLeaf(for recordKind: ModelPreparationUniqueTempRecordKind) -> String {
+    static func expectedTargetLeaf(for recordKind: ModelPreparationPrivateStateEnvelopeKind) -> String {
         switch recordKind {
         case .reservations: return "reservations.json"
         case .active: return "active.json"
         case .cancel: return "cancel.json"
         case .publishedInventory: return "published-inventory.json"
         case .deletion: return "deletion.json"
-        case .rootIdentity: return "root.identity"
         }
     }
 
-    static func payloadMaxBytes(for recordKind: ModelPreparationUniqueTempRecordKind) -> Int {
+    static func payloadMaxBytes(for recordKind: ModelPreparationPrivateStateEnvelopeKind) -> Int {
         switch recordKind {
         case .reservations: return ModelPreparationContracts.reservationHistoryMaxBytes
         case .active: return ModelPreparationContracts.activeRecordMaxBytes
         case .cancel: return ModelPreparationContracts.cancelAcknowledgementMaxBytes
         case .publishedInventory: return ModelPreparationContracts.inventoryMaxBytes
         case .deletion: return ModelPreparationContracts.deletionRecordMaxBytes
-        case .rootIdentity: return ModelPreparationContracts.rootIdentityRecordMaxBytes
         }
     }
 
-    static func expectedFilename(recordKind: ModelPreparationUniqueTempRecordKind, targetLeaf: String, writerUUID: String) throws -> String {
+    static func expectedFilename(recordKind: ModelPreparationPrivateStateEnvelopeKind, targetLeaf: String, writerUUID: String) throws -> String {
         try ModelPreparationContracts.requirePathLeaf(targetLeaf, field: "target_leaf")
         guard targetLeaf == expectedTargetLeaf(for: recordKind) else {
             throw ModelPreparationContractError.bindingMismatch("target_leaf")
@@ -1787,9 +1784,16 @@ struct ModelPreparationUniqueTempRecord: Codable, Equatable, Sendable {
         try Self.expectedFilename(recordKind: recordKind, targetLeaf: targetLeaf, writerUUID: writerUUID)
     }
 
-    func validateFilename(_ filename: String) throws {
+    func validateTempFilename(_ filename: String) throws {
         guard filename == (try expectedFilename()) else {
             throw ModelPreparationContractError.bindingMismatch("filename")
+        }
+    }
+
+    func validateDurableTargetLeaf(_ leaf: String) throws {
+        try ModelPreparationContracts.requirePathLeaf(leaf, field: "target_leaf")
+        guard leaf == targetLeaf, leaf == Self.expectedTargetLeaf(for: recordKind) else {
+            throw ModelPreparationContractError.bindingMismatch("target_leaf")
         }
     }
 }
@@ -2075,7 +2079,7 @@ private enum ModelPreparationJSONShapeValidator {
         Set(ModelPreparationPublicationReceipt.CodingKeys.allCases.map(\.stringValue)),
         Set(ModelPreparationInventoryRecord.CodingKeys.allCases.map(\.stringValue)),
         Set(ModelPreparationCleanupRecord.CodingKeys.allCases.map(\.stringValue)),
-        Set(ModelPreparationUniqueTempRecord.CodingKeys.allCases.map(\.stringValue)),
+        Set(ModelPreparationPrivateStateEnvelope.CodingKeys.allCases.map(\.stringValue)),
     ]
 
     static func validate(_ data: Data) throws {

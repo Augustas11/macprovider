@@ -683,8 +683,8 @@ final class ModelPreparationPrivateCodecTests: XCTestCase {
         }
         let eventJSON = String(decoding: try ModelPreparationContracts.encode(try Self.failedEvent()), as: UTF8.self)
         XCTAssertThrowsError(try ModelPreparationContracts.decode(ModelPreparationTransactionEvent.self, from: Data(eventJSON.replacingOccurrences(of: #""event_sequence":1"#, with: #""event_sequence":1.0"#).utf8), maxBytes: ModelPreparationContracts.eventMaxBytes))
-        let tempJSON = String(decoding: try ModelPreparationContracts.encode(try Self.uniqueTempRecord()), as: UTF8.self)
-        XCTAssertThrowsError(try ModelPreparationContracts.decode(ModelPreparationUniqueTempRecord.self, from: Data(tempJSON.replacingOccurrences(of: #""generation":1"#, with: #""generation":1.0"#).utf8), maxBytes: ModelPreparationContracts.uniqueTempEnvelopeMaxBytes))
+        let tempJSON = String(decoding: try ModelPreparationContracts.encode(try Self.privateStateEnvelope()), as: UTF8.self)
+        XCTAssertThrowsError(try ModelPreparationContracts.decode(ModelPreparationPrivateStateEnvelope.self, from: Data(tempJSON.replacingOccurrences(of: #""generation":1"#, with: #""generation":1.0"#).utf8), maxBytes: ModelPreparationContracts.privateStateEnvelopeMaxBytes))
         let actionJSON = String(decoding: try ModelPreparationContracts.encode(try Self.cleanupRecord(phase: .intent, targetKind: .published)), as: UTF8.self)
         XCTAssertThrowsError(try ModelPreparationContracts.decode(ModelPreparationCleanupRecord.self, from: Data(actionJSON.replacingOccurrences(of: #""estimated_bytes":4096"#, with: #""estimated_bytes":4096.0"#).utf8), maxBytes: ModelPreparationContracts.deletionRecordMaxBytes))
     }
@@ -745,36 +745,38 @@ final class ModelPreparationPrivateCodecTests: XCTestCase {
             errorCode: .operationConflict,
             warningCode: nil
         ))
-        XCTAssertThrowsError(try ModelPreparationUniqueTempRecord(
+        XCTAssertThrowsError(try ModelPreparationPrivateStateEnvelope(
             recordKind: .deletion,
-            targetLeaf: ModelPreparationUniqueTempRecord.expectedTargetLeaf(for: .deletion),
+            targetLeaf: ModelPreparationPrivateStateEnvelope.expectedTargetLeaf(for: .deletion),
             writerUUID: Self.writerUUID,
             generation: ModelPreparationContracts.maxJavaScriptSafeInteger + 1,
             payload: Data(#"{}"#.utf8)
         ))
     }
 
-    func testUniqueTempEnvelopeRoundTripSerializationAndFilename() throws {
-        let record = try Self.uniqueTempRecord(payload: Data(#"{"ok":true}"#.utf8))
-        let data = try ModelPreparationContracts.encode(record, maxBytes: ModelPreparationContracts.uniqueTempEnvelopeMaxBytes)
+    func testPrivateStateEnvelopeRoundTripSerializationAndFilename() throws {
+        let record = try Self.privateStateEnvelope(payload: Data(#"{"ok":true}"#.utf8))
+        let data = try ModelPreparationContracts.encode(record, maxBytes: ModelPreparationContracts.privateStateEnvelopeMaxBytes)
         let json = String(decoding: data, as: UTF8.self)
         XCTAssertEqual(
             json,
-            #"{"generation":1,"payload_base64":"eyJvayI6dHJ1ZX0=","payload_sha256":"\#(ModelPreparationContracts.sha256Hex(for: Data(#"{"ok":true}"#.utf8)))","record_kind":"active","schema":"model_catalog_unique_temp.v2","target_leaf":"active.json","writer_uuid":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}"#
+            #"{"generation":1,"payload_base64":"eyJvayI6dHJ1ZX0=","payload_sha256":"\#(ModelPreparationContracts.sha256Hex(for: Data(#"{"ok":true}"#.utf8)))","record_kind":"active","schema":"model_catalog_private_state_envelope.v1","target_leaf":"active.json","writer_uuid":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}"#
         )
         let decoded = try ModelPreparationContracts.decode(
-            ModelPreparationUniqueTempRecord.self,
+            ModelPreparationPrivateStateEnvelope.self,
             from: data,
-            maxBytes: ModelPreparationContracts.uniqueTempEnvelopeMaxBytes
+            maxBytes: ModelPreparationContracts.privateStateEnvelopeMaxBytes
         )
         XCTAssertEqual(decoded, record)
         XCTAssertEqual(try record.expectedFilename(), "active.json.aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.tmp")
-        XCTAssertNoThrow(try record.validateFilename("active.json.aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.tmp"))
+        XCTAssertNoThrow(try record.validateTempFilename("active.json.aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.tmp"))
+        XCTAssertNoThrow(try record.validateDurableTargetLeaf("active.json"))
+        XCTAssertThrowsError(try record.validateDurableTargetLeaf("cancel.json"))
     }
 
-    func testUniqueTempEnvelopeRejectsMalformedBindingsAndCaps() throws {
-        let record = try Self.uniqueTempRecord()
-        let data = try ModelPreparationContracts.encode(record, maxBytes: ModelPreparationContracts.uniqueTempEnvelopeMaxBytes)
+    func testPrivateStateEnvelopeRejectsMalformedBindingsAndCaps() throws {
+        let record = try Self.privateStateEnvelope()
+        let data = try ModelPreparationContracts.encode(record, maxBytes: ModelPreparationContracts.privateStateEnvelopeMaxBytes)
         var object = try Self.object(data)
 
         object["record_kind"] = "unknown_kind"
@@ -796,19 +798,42 @@ final class ModelPreparationPrivateCodecTests: XCTestCase {
         object["writer_uuid"] = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".uppercased()
         XCTAssertThrowsError(try Self.decodeTemp(object))
 
-        XCTAssertThrowsError(try record.validateFilename("active.json.bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb.tmp"))
+        XCTAssertThrowsError(try record.validateTempFilename("active.json.bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb.tmp"))
 
         object = try Self.object(data)
         object["payload_base64"] = Data(#"{"ok":false}"#.utf8).base64EncodedString()
         XCTAssertThrowsError(try Self.decodeTemp(object))
 
-        XCTAssertThrowsError(try ModelPreparationUniqueTempRecord(
+        XCTAssertThrowsError(try ModelPreparationPrivateStateEnvelope(
             recordKind: .active,
             targetLeaf: "active.json",
             writerUUID: Self.writerUUID,
             generation: 1,
             payload: Data(#"{"ok":true}"#.utf8),
             payloadSHA256: Self.hexA
+        ))
+
+        XCTAssertThrowsError(try ModelPreparationPrivateStateEnvelope(
+            schema: "model_catalog_unique_temp.v2",
+            recordKind: .active,
+            targetLeaf: "active.json",
+            writerUUID: Self.writerUUID,
+            generation: 1,
+            payload: Data(#"{"ok":true}"#.utf8)
+        ))
+
+        XCTAssertThrowsError(try ModelPreparationPrivateStateEnvelope(
+            recordKind: .active,
+            targetLeaf: "root.identity",
+            writerUUID: Self.writerUUID,
+            generation: 1,
+            payload: Data(#"{"ok":true}"#.utf8)
+        ))
+
+        XCTAssertThrowsError(try ModelPreparationContracts.decode(
+            ModelPreparationPrivateStateEnvelope.self,
+            from: ModelPreparationContracts.encode(try Self.activeRecord()),
+            maxBytes: ModelPreparationContracts.privateStateEnvelopeMaxBytes
         ))
 
         object = try Self.object(data)
@@ -819,19 +844,19 @@ final class ModelPreparationPrivateCodecTests: XCTestCase {
         object["extra"] = true
         XCTAssertThrowsError(try Self.decodeTemp(object))
 
-        let duplicate = Data(#"{"generation":1,"payload_base64":"e30=","payload_sha256":"44136fa355b3678a1146ad16f7e8649e94fb4f4e304fcba92fbf8a0a99603f3f","record_kind":"active","record_kind":"active","schema":"model_catalog_unique_temp.v2","target_leaf":"active.json","writer_uuid":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}"#.utf8)
-        XCTAssertThrowsError(try ModelPreparationContracts.decode(ModelPreparationUniqueTempRecord.self, from: duplicate, maxBytes: ModelPreparationContracts.uniqueTempEnvelopeMaxBytes))
+        let duplicate = Data(#"{"generation":1,"payload_base64":"e30=","payload_sha256":"44136fa355b3678a1146ad16f7e8649e94fb4f4e304fcba92fbf8a0a99603f3f","record_kind":"active","record_kind":"active","schema":"model_catalog_private_state_envelope.v1","target_leaf":"active.json","writer_uuid":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}"#.utf8)
+        XCTAssertThrowsError(try ModelPreparationContracts.decode(ModelPreparationPrivateStateEnvelope.self, from: duplicate, maxBytes: ModelPreparationContracts.privateStateEnvelopeMaxBytes))
 
-        _ = try ModelPreparationUniqueTempRecord(
+        _ = try ModelPreparationPrivateStateEnvelope(
             recordKind: .cancel,
-            targetLeaf: ModelPreparationUniqueTempRecord.expectedTargetLeaf(for: .cancel),
+            targetLeaf: ModelPreparationPrivateStateEnvelope.expectedTargetLeaf(for: .cancel),
             writerUUID: Self.writerUUID,
             generation: 1,
             payload: Data(count: ModelPreparationContracts.cancelAcknowledgementMaxBytes)
         )
-        XCTAssertThrowsError(try ModelPreparationUniqueTempRecord(
+        XCTAssertThrowsError(try ModelPreparationPrivateStateEnvelope(
             recordKind: .cancel,
-            targetLeaf: ModelPreparationUniqueTempRecord.expectedTargetLeaf(for: .cancel),
+            targetLeaf: ModelPreparationPrivateStateEnvelope.expectedTargetLeaf(for: .cancel),
             writerUUID: Self.writerUUID,
             generation: 1,
             payload: Data(count: ModelPreparationContracts.cancelAcknowledgementMaxBytes + 1)
@@ -840,73 +865,79 @@ final class ModelPreparationPrivateCodecTests: XCTestCase {
         XCTAssertThrowsError(try ModelPreparationContracts.encode(record, maxBytes: data.count - 1))
     }
 
-    func testUniqueTempEnvelopeAllowedKindLeafInventoryAndMaxPayloadCaps() throws {
+    func testPrivateStateEnvelopeAllowedKindLeafInventoryAndMaxPayloadCaps() throws {
         XCTAssertEqual(
-            ModelPreparationUniqueTempRecordKind.allCases.map { "\($0.rawValue)->\(ModelPreparationUniqueTempRecord.expectedTargetLeaf(for: $0))" },
+            ModelPreparationPrivateStateEnvelopeKind.allCases.map { "\($0.rawValue)->\(ModelPreparationPrivateStateEnvelope.expectedTargetLeaf(for: $0))" },
             [
                 "reservations->reservations.json",
                 "active->active.json",
                 "cancel->cancel.json",
                 "published_inventory->published-inventory.json",
                 "deletion->deletion.json",
-                "root_identity->root.identity",
             ]
         )
 
-        XCTAssertThrowsError(try ModelPreparationUniqueTempRecord(
+        XCTAssertThrowsError(try ModelPreparationPrivateStateEnvelope(
             recordKind: .reservations,
-            targetLeaf: ModelPreparationUniqueTempRecord.expectedTargetLeaf(for: .active),
+            targetLeaf: ModelPreparationPrivateStateEnvelope.expectedTargetLeaf(for: .active),
             writerUUID: Self.writerUUID,
             generation: 1,
             payload: Data(#"{}"#.utf8)
         ))
 
-        for kind in [ModelPreparationUniqueTempRecordKind.reservations, .publishedInventory] {
-            let payload = Data(count: ModelPreparationUniqueTempRecord.payloadMaxBytes(for: kind))
-            let record = try ModelPreparationUniqueTempRecord(
+        for kind in [ModelPreparationPrivateStateEnvelopeKind.reservations, .publishedInventory] {
+            let payload = Data(count: ModelPreparationPrivateStateEnvelope.payloadMaxBytes(for: kind))
+            let record = try ModelPreparationPrivateStateEnvelope(
                 recordKind: kind,
-                targetLeaf: ModelPreparationUniqueTempRecord.expectedTargetLeaf(for: kind),
+                targetLeaf: ModelPreparationPrivateStateEnvelope.expectedTargetLeaf(for: kind),
                 writerUUID: Self.writerUUID,
                 generation: 1,
                 payload: payload
             )
-            let data = try ModelPreparationContracts.encode(record, maxBytes: ModelPreparationContracts.uniqueTempEnvelopeMaxBytes)
+            let data = try ModelPreparationContracts.encode(record, maxBytes: ModelPreparationContracts.privateStateEnvelopeMaxBytes)
             _ = try ModelPreparationContracts.decode(
-                ModelPreparationUniqueTempRecord.self,
+                ModelPreparationPrivateStateEnvelope.self,
                 from: data,
-                maxBytes: ModelPreparationContracts.uniqueTempEnvelopeMaxBytes
+                maxBytes: ModelPreparationContracts.privateStateEnvelopeMaxBytes
             )
-            XCTAssertThrowsError(try ModelPreparationUniqueTempRecord(
+            XCTAssertThrowsError(try ModelPreparationPrivateStateEnvelope(
                 recordKind: kind,
-                targetLeaf: ModelPreparationUniqueTempRecord.expectedTargetLeaf(for: kind),
+                targetLeaf: ModelPreparationPrivateStateEnvelope.expectedTargetLeaf(for: kind),
                 writerUUID: Self.writerUUID,
                 generation: 1,
-                payload: Data(count: ModelPreparationUniqueTempRecord.payloadMaxBytes(for: kind) + 1)
+                payload: Data(count: ModelPreparationPrivateStateEnvelope.payloadMaxBytes(for: kind) + 1)
             ))
         }
     }
 
-    func testUniqueTempEnvelopeRejectsNoncanonicalBase64AliasesAndBindsRootIdentity() throws {
-        let rootPayload = Data(#"{"root":true}"#.utf8)
-        let rootRecord = try ModelPreparationUniqueTempRecord(
-            recordKind: .rootIdentity,
-            targetLeaf: ModelPreparationUniqueTempRecord.expectedTargetLeaf(for: .rootIdentity),
-            writerUUID: Self.writerUUID,
-            generation: 1,
-            payload: rootPayload
+    func testPrivateStateEnvelopeRejectsNoncanonicalBase64AliasesAndKeepsRootIdentityRaw() throws {
+        let rootRecord = try ModelPreparationRootIdentityRecord(
+            version: "model_catalog_root_identity.v1",
+            nonceHex: String(repeating: "0", count: 64),
+            canonicalPath: "/tmp/macprovider-root",
+            stDev: 123,
+            stIno: 456
         )
-        let rootData = try ModelPreparationContracts.encode(rootRecord, maxBytes: ModelPreparationContracts.uniqueTempEnvelopeMaxBytes)
-        let decoded = try ModelPreparationContracts.decode(
-            ModelPreparationUniqueTempRecord.self,
+        let rootData = try ModelPreparationContracts.encode(rootRecord, maxBytes: ModelPreparationContracts.rootIdentityRecordMaxBytes)
+        let decodedRoot = try ModelPreparationContracts.decode(
+            ModelPreparationRootIdentityRecord.self,
             from: rootData,
-            maxBytes: ModelPreparationContracts.uniqueTempEnvelopeMaxBytes
+            maxBytes: ModelPreparationContracts.rootIdentityRecordMaxBytes
         )
-        XCTAssertEqual(decoded, rootRecord)
-        XCTAssertEqual(try rootRecord.expectedFilename(), "root.identity.aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.tmp")
-        XCTAssertNoThrow(try rootRecord.validateFilename("root.identity.aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.tmp"))
+        XCTAssertEqual(decodedRoot, rootRecord)
+        XCTAssertThrowsError(try ModelPreparationContracts.decode(
+            ModelPreparationPrivateStateEnvelope.self,
+            from: rootData,
+            maxBytes: ModelPreparationContracts.privateStateEnvelopeMaxBytes
+        ))
+        XCTAssertThrowsError(try ModelPreparationPrivateStateEnvelope.expectedFilename(
+            recordKind: .active,
+            targetLeaf: "root.identity",
+            writerUUID: Self.writerUUID
+        ))
 
-        let canonical = try Self.uniqueTempRecord(payload: Data(#"{}"#.utf8))
-        let data = try ModelPreparationContracts.encode(canonical, maxBytes: ModelPreparationContracts.uniqueTempEnvelopeMaxBytes)
+        let canonical = try Self.privateStateEnvelope(payload: Data(#"{}"#.utf8))
+        let data = try ModelPreparationContracts.encode(canonical, maxBytes: ModelPreparationContracts.privateStateEnvelopeMaxBytes)
         for alias in ["e31=", "e30=="] {
             var object = try Self.object(data)
             object["payload_base64"] = alias
@@ -1118,10 +1149,10 @@ final class ModelPreparationPrivateCodecTests: XCTestCase {
     }
 
 
-    private static func uniqueTempRecord(payload: Data = Data(#"{}"#.utf8)) throws -> ModelPreparationUniqueTempRecord {
-        try ModelPreparationUniqueTempRecord(
+    private static func privateStateEnvelope(payload: Data = Data(#"{}"#.utf8)) throws -> ModelPreparationPrivateStateEnvelope {
+        try ModelPreparationPrivateStateEnvelope(
             recordKind: .active,
-            targetLeaf: ModelPreparationUniqueTempRecord.expectedTargetLeaf(for: .active),
+            targetLeaf: ModelPreparationPrivateStateEnvelope.expectedTargetLeaf(for: .active),
             writerUUID: writerUUID,
             generation: 1,
             payload: payload
@@ -1187,11 +1218,11 @@ final class ModelPreparationPrivateCodecTests: XCTestCase {
         try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
     }
 
-    private static func decodeTemp(_ object: [String: Any]) throws -> ModelPreparationUniqueTempRecord {
+    private static func decodeTemp(_ object: [String: Any]) throws -> ModelPreparationPrivateStateEnvelope {
         try ModelPreparationContracts.decode(
-            ModelPreparationUniqueTempRecord.self,
+            ModelPreparationPrivateStateEnvelope.self,
             from: data(object),
-            maxBytes: ModelPreparationContracts.uniqueTempEnvelopeMaxBytes
+            maxBytes: ModelPreparationContracts.privateStateEnvelopeMaxBytes
         )
     }
 
