@@ -1450,7 +1450,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1240",
-        "rationale": "SPEC-047 v0.1.8 clarifies settlement-capable guidance as conditional eligibility, freezes coordinator-backed not-offered copy, and rejects catalog-only reuse of per-candidate admission authority. Local CLI/coordinator/routing/buyer safeguards exist and are mapped, but Issue #1240 still needs the full admission policy/probe lifecycle, updated copy evidence, and signed JOURNEY-NETWORK-MODEL-ADMISSION evidence before conformance or production status can be claimed."
+        "rationale": "SPEC-047 v0.1.9 marks offer_rejected reserved/unreachable and drops the rejected-reoffer journey observation; v0.1.8 clarifies settlement-capable guidance as conditional eligibility, freezes coordinator-backed not-offered copy, and rejects catalog-only reuse of per-candidate admission authority. Local CLI/coordinator/routing/buyer safeguards exist and are mapped, but Issue #1240 still needs the full admission policy/probe lifecycle, updated copy evidence, and signed JOURNEY-NETWORK-MODEL-ADMISSION evidence before conformance or production status can be claimed."
       }
     }
   ],

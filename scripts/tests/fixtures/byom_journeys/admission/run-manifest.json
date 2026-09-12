@@ -43,16 +43,16 @@
     {
       "id": "step-03-reject-opaque-endpoint",
       "status": "pass",
-      "assertion": "Opaque candidate was rejected with no catalog economics and no provider credit.",
+      "assertion": "Opaque endpoint refused by the CLI submission builder before any coordinator offer; local-default status only, no coordinator state, no provider credit.",
       "requirement_ids": [
         "SPEC-047-R003",
         "SPEC-047-R007"
       ],
       "documents": [
         {
-          "id": "opaque-endpoint-rejected-status",
+          "id": "opaque-endpoint-refused-status",
           "schema": "model_admission_status.v1",
-          "path": "captures/admission-status-offer-rejected.json"
+          "path": "captures/admission-status-opaque-endpoint-refused.json"
         }
       ]
     },

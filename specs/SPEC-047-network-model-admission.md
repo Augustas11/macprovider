@@ -6,7 +6,7 @@
 {
   "spec_id": "SPEC-047",
   "title": "Network Model Admission",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "path": "specs/SPEC-047-network-model-admission.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -210,7 +210,7 @@ implementation slices land. This amendment does not flip those verdicts.
   reachable fresh-evidence re-entry paths are `withdrawn` and `revoked`.
   The JOURNEY-NETWORK-MODEL-ADMISSION evidence contract accordingly drops
   the `rejected_reoffer_required_fresh_evidence` promotable observation
-  (an unreachable state cannot be exercised); `withdrawn_reoffer_` and
+  (an unreachable state cannot be exercised); `withdrawn_reoffer_required_fresh_evidence` and
   `revoked_reoffer_required_fresh_evidence` continue to prove the
   SPEC-047-R001 / R006 fresh-evidence-on-re-entry invariant. No behavior
   change; a journey-evidence-set change only (#1453 slice 7 capture, #1486).
