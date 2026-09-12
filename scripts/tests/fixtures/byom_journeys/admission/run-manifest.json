@@ -43,16 +43,16 @@
     {
       "id": "step-03-reject-opaque-endpoint",
       "status": "pass",
-      "assertion": "Opaque candidate was rejected with no catalog economics and no provider credit.",
+      "assertion": "Opaque endpoint refused by the CLI submission builder before any coordinator offer; local-default status only, no coordinator state, no provider credit.",
       "requirement_ids": [
         "SPEC-047-R003",
         "SPEC-047-R007"
       ],
       "documents": [
         {
-          "id": "opaque-endpoint-rejected-status",
+          "id": "opaque-endpoint-refused-status",
           "schema": "model_admission_status.v1",
-          "path": "captures/admission-status-offer-rejected.json"
+          "path": "captures/admission-status-opaque-endpoint-refused.json"
         }
       ]
     },
@@ -171,7 +171,7 @@
     {
       "id": "step-11-transition-validity",
       "status": "pass",
-      "assertion": "Invalid transition rejected; rejected, withdrawn, and revoked re-entry each demanded fresh evidence.",
+      "assertion": "Invalid transition rejected; withdrawn and revoked re-entry each demanded fresh evidence.",
       "requirement_ids": [
         "SPEC-047-R001",
         "SPEC-047-R006"
@@ -225,7 +225,6 @@
     "raw_completion_logged": false,
     "raw_prompt_logged": false,
     "rejected_opaque_endpoint_verified": true,
-    "rejected_reoffer_required_fresh_evidence": true,
     "revocation_on_drift_verified": true,
     "revoked_reoffer_required_fresh_evidence": true,
     "sandbox_probe_only_blocked_from_paid_routing": true,

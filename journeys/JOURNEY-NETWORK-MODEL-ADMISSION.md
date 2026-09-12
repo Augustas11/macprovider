@@ -65,9 +65,9 @@ The signed result MUST contain these passing steps:
    state meaning, next action, and the distinction between "not earning-eligible
    yet; catalog/receipt path exists" and "no earning path exists in this release".
 11. `step-11-transition-validity` - Attempt at least one invalid transition
-   outside the SPEC-047 matrix, one valid rejected-offer/re-offer path, one valid
-   withdrawal/re-offer path, and one valid revocation/re-offer path; confirm
-   invalid transitions are rejected and re-entry requires refreshed
+   outside the SPEC-047 matrix, one valid withdrawal/re-offer path, and one valid
+   revocation/re-offer path; confirm invalid transitions are rejected and re-entry
+   requires refreshed
    provider-signed evidence.
 12. `step-12-redaction-review` - Review offer packages, coordinator events,
    status, logs, and evidence artifacts for secret, prompt, completion, path,
@@ -110,7 +110,6 @@ The redacted evidence and signed result MUST set these booleans to `true`:
 - `synthetic_probe_used_provider_channel`
 - `settlement_capable_case_verified`
 - `transition_matrix_enforced`
-- `rejected_reoffer_required_fresh_evidence`
 - `withdrawn_reoffer_required_fresh_evidence`
 - `revoked_reoffer_required_fresh_evidence`
 - `withdrawal_verified`
