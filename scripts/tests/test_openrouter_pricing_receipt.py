@@ -25,6 +25,7 @@ ARCHIVE = REPO / "docs" / "research" / "openrouter-snapshots"
 SNAPSHOT = ARCHIVE / "openrouter-pricing-snapshot-2026-08-10T10-05-29Z-34126a58ac6728ec.json"
 PROPOSAL = ARCHIVE / "openrouter-rate-card-proposal-2026-08-10T10-06-14Z-d60d0d8d828bbd5c.json"
 POLICY = REPO / "scripts" / "openrouter_pricing_policy.json"
+LEGACY_POLICY = REPO / "scripts" / "tests" / "fixtures" / "openrouter_pricing" / "legacy-policy-2026-08-10.json"
 # The archived 2026-08-10 proposal was computed against the rate-card as it stood
 # then. The live catalog rate-card (phase3-binary/catalog/autotune/rate-card.json)
 # is a renewed feed whose generated_at is re-stamped for freshness, so binding the
@@ -75,8 +76,8 @@ class ReceiptTests(unittest.TestCase):
                 "snapshot_path": SNAPSHOT.relative_to(REPO).as_posix(),
                 "snapshot_content_digest": snapshot["content_digest"],
                 "snapshot_file_sha256": receipt.sha256_file(SNAPSHOT),
-                "policy_path": POLICY.relative_to(REPO).as_posix(),
-                "policy_file_sha256": receipt.sha256_file(POLICY),
+                "policy_path": LEGACY_POLICY.relative_to(REPO).as_posix(),
+                "policy_file_sha256": receipt.sha256_file(LEGACY_POLICY),
                 "rate_card_path": RATE_CARD.relative_to(REPO).as_posix(),
                 "rate_card_file_sha256": receipt.sha256_file(RATE_CARD),
             }

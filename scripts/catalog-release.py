@@ -382,8 +382,13 @@ def validate_candidate(data: bytes, *, require_provenance: bool = True) -> dict:
 
 def validate_demand(data: bytes) -> dict:
     value = strict_json(data, "demand-rank")
-    top = {"version", "generated_at", "source", "policy_version", "cold_start_floor", "diversification_band", "rows"}
-    exact_keys(value, top, top, "demand-rank")
+    top = {"version", "generated_at", "source", "policy_version", "cold_start_floor", "diversification_band", "source_snapshot", "rows"}
+    exact_keys(
+        value,
+        top,
+        top - {"source_snapshot"},
+        "demand-rank",
+    )
     if value["source"] not in {
         "openrouter_completion_token_rank_operator_curated",
         "macprovider_buyer_supply_deficit_v1",
@@ -394,6 +399,14 @@ def validate_demand(data: bytes) -> dict:
     if value["policy_version"] != "autotune-policy-v1":
         fail("demand-rank: policy_version required")
     parse_time(value["generated_at"], "demand-rank")
+    snapshot = value.get("source_snapshot")
+    if snapshot is not None:
+        if not isinstance(snapshot, dict):
+            fail("demand-rank: source_snapshot must be an object")
+        exact_keys(snapshot, {"content_digest"}, {"content_digest"}, "demand-rank source_snapshot")
+        digest = snapshot["content_digest"]
+        if not isinstance(digest, str) or not digest.startswith("sha256:") or len(digest) != len("sha256:") + 64 or any(c not in "0123456789abcdef" for c in digest[len("sha256:"):]):
+            fail("demand-rank: source_snapshot.content_digest must be sha256:<64 lowercase hex>")
     if not isinstance(value["cold_start_floor"], (int, float)) or isinstance(value["cold_start_floor"], bool) or value["cold_start_floor"] != 0.15:
         fail("demand-rank: cold_start_floor must equal 0.15")
     if not isinstance(value["diversification_band"], (int, float)) or isinstance(value["diversification_band"], bool) or value["diversification_band"] != 0.85:
@@ -404,6 +417,7 @@ def validate_demand(data: bytes) -> dict:
     allowed = {
         "demand_weight", "rank", "recommendable", "min_provider_target",
         "ready_provider_count", "supply_deficit_multiplier", "min_dwell_hours",
+        "or_completion_tokens_30d", "or_requests_30d",
     }
     required = {"demand_weight", "rank", "recommendable", "min_provider_target"}
     for key, row in rows.items():
@@ -427,6 +441,11 @@ def validate_demand(data: bytes) -> dict:
         dwell = row.get("min_dwell_hours")
         if dwell is not None and (not isinstance(dwell, int) or isinstance(dwell, bool) or not 0 <= dwell <= 720):
             fail(f"demand row {key}: min_dwell_hours must be in [0,720]")
+        for field in ("or_completion_tokens_30d", "or_requests_30d"):
+            if field not in row:
+                continue
+            if not isinstance(row[field], str) or not row[field].isdigit() or int(row[field]) < 0:
+                fail(f"demand row {key}: {field} must be a non-negative integer string")
     return value
 
 
@@ -703,6 +722,18 @@ def validate_pair(candidate_obj: dict, demand_obj: dict) -> None:
 
 def validate_release_inputs(candidate_obj: dict, demand_obj: dict, rate_card_obj: dict) -> None:
     validate_pair(candidate_obj, demand_obj)
+    demand_snapshot = demand_obj.get("source_snapshot")
+    rate_card_snapshot = rate_card_obj.get("source_snapshot")
+    if demand_snapshot is None and "source_snapshot" in demand_obj:
+        fail("demand-rank: source_snapshot must be an object")
+    if rate_card_snapshot is None and "source_snapshot" in rate_card_obj:
+        fail("rate-card: source_snapshot must be an object")
+    demand_digest = demand_snapshot.get("content_digest") if isinstance(demand_snapshot, dict) else None
+    rate_card_digest = rate_card_snapshot.get("content_digest") if isinstance(rate_card_snapshot, dict) else None
+    if (demand_digest is None) != (rate_card_digest is None):
+        fail("demand-rank and rate-card source_snapshot must both be present or both omitted")
+    if demand_digest != rate_card_digest:
+        fail("demand-rank and rate-card source_snapshot.content_digest must match")
     for field in ("generated_at", "policy_version"):
         if candidate_obj[field] != rate_card_obj[field]:
             fail(f"rate-card {field} must match the atomic release")
@@ -754,7 +785,7 @@ def validate_rate_card(data: bytes) -> dict:
     value = strict_json(data, "rate-card")
     exact_keys(
         value,
-        {"version", "policy_version", "generated_at", "usd_per_million_credits", "rows"},
+        {"version", "policy_version", "generated_at", "usd_per_million_credits", "source_snapshot", "rows"},
         {"version", "policy_version", "generated_at", "usd_per_million_credits", "rows"},
         "rate-card",
     )
@@ -763,6 +794,14 @@ def validate_rate_card(data: bytes) -> dict:
     if not isinstance(value["policy_version"], str) or not value["policy_version"].strip() or value["policy_version"].strip() != value["policy_version"]:
         fail("rate-card: policy_version required")
     parse_time(value["generated_at"], "rate-card generated_at")
+    snapshot = value.get("source_snapshot")
+    if snapshot is not None:
+        if not isinstance(snapshot, dict):
+            fail("rate-card: source_snapshot must be an object")
+        exact_keys(snapshot, {"content_digest"}, {"content_digest"}, "rate-card source_snapshot")
+        snapshot_digest = snapshot["content_digest"]
+        if not isinstance(snapshot_digest, str) or not snapshot_digest.startswith("sha256:") or len(snapshot_digest) != len("sha256:") + 64 or any(c not in "0123456789abcdef" for c in snapshot_digest[len("sha256:"):]):
+            fail("rate-card: source_snapshot.content_digest must be sha256:<64 lowercase hex>")
     usd = value["usd_per_million_credits"]
     if not isinstance(usd, (int, float)) or isinstance(usd, bool) or not math.isfinite(usd) or usd < 0:
         fail("rate-card: usd_per_million_credits must be finite and >= 0")
@@ -853,9 +892,17 @@ def validate_rate_card_source(data: bytes, label: str = "rate-card-source") -> d
     value = strict_json(data, label)
     top = {
         "schema_version", "generated_at", "policy_version", "usd_per_million_credits",
-        "provider_share_bps", "global_multiplier_ppm", "rows", "classes",
+        "provider_share_bps", "global_multiplier_ppm", "rows", "classes", "source_snapshot",
     }
-    exact_keys(value, top, top, label)
+    exact_keys(value, top, top - {"source_snapshot"}, label)
+    snapshot = value.get("source_snapshot")
+    if snapshot is not None:
+        if not isinstance(snapshot, dict):
+            fail(f"{label}: source_snapshot must be an object")
+        exact_keys(snapshot, {"content_digest"}, {"content_digest"}, f"{label} source_snapshot")
+        digest = snapshot["content_digest"]
+        if not isinstance(digest, str) or not digest.startswith("sha256:") or len(digest) != 71 or any(character not in "0123456789abcdef" for character in digest[7:]):
+            fail(f"{label} source_snapshot.content_digest must be sha256:<64 lowercase hex>")
     if value["schema_version"] != RATE_CARD_SOURCE_SCHEMA:
         fail(f"{label}: schema_version must be {RATE_CARD_SOURCE_SCHEMA}")
     if not isinstance(value["policy_version"], str) or value["policy_version"].strip() != value["policy_version"] or not value["policy_version"]:
@@ -971,10 +1018,13 @@ def expand_rate_card(source_obj: dict, rate_classes: dict[str, str], candidate_o
     value = {
         "generated_at": source_obj["generated_at"],
         "policy_version": source_obj["policy_version"],
+        "source_snapshot": source_obj.get("source_snapshot"),
         "rows": rows,
         "usd_per_million_credits": source_obj["usd_per_million_credits"],
         "version": "",
     }
+    if value["source_snapshot"] is None:
+        del value["source_snapshot"]
     value["version"] = rate_card_projection_hash(value)
     rate_card = canonical_sorted_bytes(value)
     rate_card_obj = validate_rate_card(rate_card)

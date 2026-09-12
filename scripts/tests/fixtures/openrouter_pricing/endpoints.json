@@ -1,6 +1,199 @@
 {
-  "openai/gpt-oss-20b": {"data": {"id": "openai/gpt-oss-20b", "endpoints": [{"provider_name": "CoreWeave", "status": 0, "pricing": {"prompt": "0.00000003", "completion": "0.00000013"}}, {"provider_name": "Inactive", "status": -2, "pricing": {"prompt": "0.00000001", "completion": "0.00000001"}}]}},
-  "google/gemma-4-26b-a4b-it": {"data": {"id": "google/gemma-4-26b-a4b-it", "endpoints": [{"provider_name": "Cloudflare", "status": 0, "pricing": {"prompt": "0.00000006", "completion": "0.00000030"}}]}},
-  "nvidia/nemotron-3-nano-30b-a3b": {"data": {"id": "nvidia/nemotron-3-nano-30b-a3b", "endpoints": [{"provider_name": "DeepInfra", "status": 0, "pricing": {"prompt": "0.00000004", "completion": "0.00000020"}}]}},
-  "example/new-model": {"data": {"id": "example/new-model", "endpoints": [{"provider_name": "ExampleCloud", "status": 0, "pricing": {"prompt": "0.00000005", "completion": "0.00000025"}}]}}
+  "openai/gpt-oss-20b": {
+    "data": {
+      "id": "openai/gpt-oss-20b",
+      "endpoints": [
+        {
+          "provider_name": "CoreWeave",
+          "status": 0,
+          "pricing": {
+            "prompt": "0.00000003",
+            "completion": "0.00000013"
+          },
+          "throughput_last_30m": "50",
+          "uptime_last_30d": "0.99"
+        },
+        {
+          "provider_name": "Inactive",
+          "status": -2,
+          "pricing": {
+            "prompt": "0.00000001",
+            "completion": "0.00000001"
+          },
+          "throughput_last_30m": "0",
+          "uptime_last_30d": "0"
+        }
+      ]
+    }
+  },
+  "google/gemma-4-26b-a4b-it": {
+    "data": {
+      "id": "google/gemma-4-26b-a4b-it",
+      "endpoints": [
+        {
+          "provider_name": "Cloudflare",
+          "status": 0,
+          "pricing": {
+            "prompt": "0.00000006",
+            "completion": "0.00000030"
+          },
+          "throughput_last_30m": "50",
+          "uptime_last_30d": "0.99"
+        }
+      ]
+    }
+  },
+  "nvidia/nemotron-3-nano-30b-a3b": {
+    "data": {
+      "id": "nvidia/nemotron-3-nano-30b-a3b",
+      "endpoints": [
+        {
+          "provider_name": "DeepInfra",
+          "status": 0,
+          "pricing": {
+            "prompt": "0.00000004",
+            "completion": "0.00000020"
+          },
+          "throughput_last_30m": "50",
+          "uptime_last_30d": "0.99"
+        }
+      ]
+    }
+  },
+  "example/new-model": {
+    "data": {
+      "id": "example/new-model",
+      "endpoints": [
+        {
+          "provider_name": "ExampleCloud",
+          "status": 0,
+          "pricing": {
+            "prompt": "0.00000005",
+            "completion": "0.00000025"
+          },
+          "throughput_last_30m": "50",
+          "uptime_last_30d": "0.99"
+        }
+      ]
+    }
+  },
+  "meta-llama/llama-3.2-3b-instruct": {
+    "data": {
+      "id": "meta-llama/llama-3.2-3b-instruct",
+      "endpoints": [
+        {
+          "provider_name": "Liquid-llama-3.2-3b-instruct",
+          "status": 0,
+          "throughput_last_30m": "20",
+          "uptime_last_30d": "0.98",
+          "pricing": {
+            "prompt": "0.00000008",
+            "completion": "0.00000020"
+          }
+        }
+      ]
+    }
+  },
+  "meta-llama/llama-3.1-8b-instruct": {
+    "data": {
+      "id": "meta-llama/llama-3.1-8b-instruct",
+      "endpoints": [
+        {
+          "provider_name": "Liquid-llama-3.1-8b-instruct",
+          "status": 0,
+          "throughput_last_30m": "20",
+          "uptime_last_30d": "0.98",
+          "pricing": {
+            "prompt": "0.00000008",
+            "completion": "0.00000020"
+          }
+        }
+      ]
+    }
+  },
+  "qwen/qwen3-8b": {
+    "data": {
+      "id": "qwen/qwen3-8b",
+      "endpoints": [
+        {
+          "provider_name": "Liquid-qwen3-8b",
+          "status": 0,
+          "throughput_last_30m": "20",
+          "uptime_last_30d": "0.98",
+          "pricing": {
+            "prompt": "0.00000008",
+            "completion": "0.00000020"
+          }
+        }
+      ]
+    }
+  },
+  "openai/gpt-oss-120b": {
+    "data": {
+      "id": "openai/gpt-oss-120b",
+      "endpoints": [
+        {
+          "provider_name": "Liquid-gpt-oss-120b",
+          "status": 0,
+          "throughput_last_30m": "20",
+          "uptime_last_30d": "0.98",
+          "pricing": {
+            "prompt": "0.00000008",
+            "completion": "0.00000020"
+          }
+        }
+      ]
+    }
+  },
+  "qwen/qwen3-32b": {
+    "data": {
+      "id": "qwen/qwen3-32b",
+      "endpoints": [
+        {
+          "provider_name": "Liquid-qwen3-32b",
+          "status": 0,
+          "throughput_last_30m": "20",
+          "uptime_last_30d": "0.98",
+          "pricing": {
+            "prompt": "0.00000008",
+            "completion": "0.00000020"
+          }
+        }
+      ]
+    }
+  },
+  "qwen/qwen3-coder-30b-a3b-instruct": {
+    "data": {
+      "id": "qwen/qwen3-coder-30b-a3b-instruct",
+      "endpoints": [
+        {
+          "provider_name": "Liquid-qwen3-coder-30b-a3b-instruct",
+          "status": 0,
+          "throughput_last_30m": "20",
+          "uptime_last_30d": "0.98",
+          "pricing": {
+            "prompt": "0.00000008",
+            "completion": "0.00000020"
+          }
+        }
+      ]
+    }
+  },
+  "qwen/qwen2.5-coder-32b-instruct": {
+    "data": {
+      "id": "qwen/qwen2.5-coder-32b-instruct",
+      "endpoints": [
+        {
+          "provider_name": "Liquid-qwen2.5-coder-32b-instruct",
+          "status": 0,
+          "throughput_last_30m": "20",
+          "uptime_last_30d": "0.98",
+          "pricing": {
+            "prompt": "0.00000008",
+            "completion": "0.00000020"
+          }
+        }
+      ]
+    }
+  }
 }

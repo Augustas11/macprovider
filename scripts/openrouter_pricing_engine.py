@@ -34,7 +34,10 @@ from urllib.parse import quote, urlsplit
 RANKINGS_URL = "https://openrouter.ai/api/v1/datasets/rankings-daily"
 MODELS_URL = "https://openrouter.ai/api/v1/models"
 ENDPOINTS_URL = "https://openrouter.ai/api/v1/models/{model_id}/endpoints"
-SNAPSHOT_SCHEMA_VERSION = 5
+RECOMMENDABLE_CATALOG_PATH = Path(__file__).resolve().parent / "tests" / "fixtures" / "openrouter_pricing" / "recommendable-catalog.json"
+PRODUCTION_CATALOG_PATH = Path(__file__).resolve().parents[2] / "phase3-binary" / "catalog" / "autotune" / "autotune-candidates.json"
+SNAPSHOT_SCHEMA_VERSION = 6
+LEGACY_SNAPSHOT_SCHEMA_VERSION = 5
 PROPOSAL_SCHEMA_VERSION = 2
 TOOL_VERSION = "openrouter-pricing-engine-v1"
 DEFAULT_POLICY_PATH = Path(__file__).with_name("openrouter_pricing_policy.json")
@@ -44,12 +47,12 @@ MODEL_ID_RE = re.compile(r"^[A-Za-z0-9._~:-]+/[A-Za-z0-9._~:-]+$")
 CANONICAL_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._/:-]*$")
 MAX_RESPONSE_BYTES = 5 * 1024 * 1024
 RANKING_TOP_LEVEL_KEYS = frozenset({"data", "meta"})
-RANKING_ROW_KEYS = frozenset({"date", "model_permaslug", "total_tokens"})
+RANKING_ROW_KEYS = frozenset({"date", "model_permaslug", "request_count", "total_tokens"})
 RANKING_META_KEYS = frozenset({"as_of", "end_date", "start_date", "version"})
 CATALOG_ROW_KEYS = frozenset({"alias_target", "architecture", "benchmarks", "canonical_slug", "context_length", "created", "default_parameters", "description", "expiration_date", "hugging_face_id", "id", "knowledge_cutoff", "links", "name", "per_request_limits", "pricing", "reasoning", "supported_parameters", "supported_voices", "top_provider"})
 CATALOG_TOP_LEVEL_KEYS = frozenset({"data", "links", "total_count"})
 ENDPOINT_DATA_KEYS = frozenset({"architecture", "created", "description", "endpoints", "id", "name"})
-ENDPOINT_ROW_KEYS = frozenset({"context_length", "latency_last_30m", "max_completion_tokens", "max_prompt_tokens", "model_id", "model_name", "name", "pricing", "provider_name", "quantization", "status", "supported_parameters", "supports_implicit_caching", "supports_voice_cloning", "tag", "throughput_last_30m", "uptime_last_1d", "uptime_last_30m", "uptime_last_5m"})
+ENDPOINT_ROW_KEYS = frozenset({"context_length", "latency_last_30m", "max_completion_tokens", "max_prompt_tokens", "model_id", "model_name", "name", "pricing", "provider_name", "quantization", "status", "supported_parameters", "supports_implicit_caching", "supports_voice_cloning", "tag", "throughput_last_30m", "uptime_last_1d", "uptime_last_30d", "uptime_last_30m", "uptime_last_5m"})
 ENDPOINT_PRICING_KEYS = frozenset({
     "audio", "completion", "discount", "image", "image_output", "image_token",
     "input_audio_cache", "input_cache_read", "input_cache_write", "input_cache_write_1h",
@@ -231,6 +234,7 @@ SCHEMA_CONTRACT_FINGERPRINT = sha256_prefixed(
         "endpoint_pricing_keys": sorted(ENDPOINT_PRICING_KEYS),
     }
 )
+LEGACY_SCHEMA_CONTRACT_FINGERPRINT = "sha256:606dd02557e635ea7f0ab640fda22a9352f2c0051f9deef28378fc983f3ed29c"
 
 
 def parse_decimal(value: Any, field: str, *, allow_zero: bool = True) -> Decimal:
@@ -408,6 +412,7 @@ def normalize_rankings(document: Mapping[str, Any], top_n: int) -> list[dict[str
     metadata = rankings_metadata(document)
     rows = required_list(document, "data", "rankings response")
     totals: dict[str, int] = {}
+    requests: dict[str, int] = {}
     dates: dict[str, str] = {}
     seen_daily_models: set[tuple[str, str]] = set()
     for index, row in enumerate(rows):
@@ -417,6 +422,11 @@ def normalize_rankings(document: Mapping[str, Any], top_n: int) -> list[dict[str
         total_tokens = row.get("total_tokens")
         if not isinstance(total_tokens, str) or not total_tokens.isdigit() or int(total_tokens) <= 0:
             raise SchemaError(f"rankings response: data[{index}].total_tokens must be a positive integer string")
+        request_count = row.get("request_count")
+        if request_count is None:
+            raise SchemaError(f"rankings response: data[{index}].request_count is required")
+        if not isinstance(request_count, str) or not request_count.isdigit() or int(request_count) <= 0:
+            raise SchemaError(f"rankings response: data[{index}].request_count must be a positive integer string")
         model_id = row.get("model_permaslug")
         date = row.get("date")
         parsed_date = parse_ranking_date(date, f"rankings response: data[{index}].date")
@@ -433,12 +443,19 @@ def normalize_rankings(document: Mapping[str, Any], top_n: int) -> list[dict[str
             raise SchemaError(f"rankings response: duplicate daily model row {daily_key!r}")
         seen_daily_models.add(daily_key)
         totals[model_id] = totals.get(model_id, 0) + int(total_tokens)
+        requests[model_id] = requests.get(model_id, 0) + int(request_count)
         dates[model_id] = max(date, dates.get(model_id, date))
     ordered = sorted(totals, key=lambda item: (-totals[item], item))[:top_n]
     if len(ordered) != top_n:
         raise SchemaError("rankings response: insufficient documented daily-ranking models for requested cohort")
     return [
-        {"source_model_id": model_id, "rank": rank, "total_token_volume": str(totals[model_id]), "ranking_date": dates[model_id]}
+        {
+            "source_model_id": model_id,
+            "rank": rank,
+            "total_token_volume": str(totals[model_id]),
+            "request_count": str(requests[model_id]),
+            "ranking_date": dates[model_id],
+        }
         for rank, model_id in enumerate(ordered, start=1)
     ]
 
@@ -574,7 +591,7 @@ def cheapest_endpoint_pricing(document: Mapping[str, Any], model_id: str) -> dic
         raise SchemaError(f"endpoints response for {model_id}: endpoints must be an array")
     if not endpoints:
         return None
-    priced: list[tuple[Decimal, Decimal, str]] = []
+    priced: list[tuple[Decimal, Decimal, Decimal, Decimal, str]] = []
     for index, endpoint in enumerate(endpoints):
         if not isinstance(endpoint, dict):
             raise SchemaError(f"endpoints response for {model_id}: endpoints[{index}] must be an object")
@@ -589,12 +606,17 @@ def cheapest_endpoint_pricing(document: Mapping[str, Any], model_id: str) -> dic
         require_allowed_keys(pricing, ENDPOINT_PRICING_KEYS, f"endpoints response for {model_id}: endpoints[{index}].pricing")
         prompt = parse_decimal(pricing.get("prompt"), f"endpoints response for {model_id}: prompt")
         completion = parse_decimal(pricing.get("completion"), f"endpoints response for {model_id}: completion")
-        if status != 0:
+        try:
+            throughput = parse_decimal(endpoint.get("throughput_last_30m"), f"endpoints response for {model_id}: throughput_last_30m")
+            uptime = parse_decimal(endpoint.get("uptime_last_30d"), f"endpoints response for {model_id}: uptime_last_30d")
+        except SchemaError:
             continue
-        priced.append((completion, prompt, provider))
+        if status != 0 or prompt == 0 or completion == 0 or throughput < Decimal("1") or uptime < Decimal("0.90"):
+            continue
+        priced.append((completion, prompt, throughput, uptime, provider))
     if not priced:
         return None
-    completion, prompt, provider = min(priced, key=lambda item: (item[0], item[1], item[2]))
+    completion, prompt, throughput, uptime, provider = min(priced, key=lambda item: (item[0], item[1], -item[2], -item[3], item[4]))
     return {
         "input_per_token": decimal_string(prompt),
         "completion_per_token": decimal_string(completion),
@@ -602,6 +624,14 @@ def cheapest_endpoint_pricing(document: Mapping[str, Any], model_id: str) -> dic
         "completion_per_mtok": decimal_string(completion * Decimal("1000000")),
         "currency": "USD",
         "benchmark_provider": provider,
+        "liquidity_filter": {
+            "endpoint_status": 0,
+            "paid_prices": True,
+            "minimum_throughput_last_30m": "1",
+            "minimum_uptime_last_30d": "0.90",
+            "selected_throughput_last_30m": decimal_string(throughput),
+            "selected_uptime_last_30d": decimal_string(uptime),
+        },
     }
 
 
@@ -613,7 +643,8 @@ def snapshot_digest_payload(snapshot: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def validate_snapshot(snapshot: Mapping[str, Any]) -> None:
-    if snapshot.get("schema_version") != SNAPSHOT_SCHEMA_VERSION or snapshot.get("snapshot_type") != "openrouter-pricing":
+    schema_version = snapshot.get("schema_version")
+    if schema_version not in {SNAPSHOT_SCHEMA_VERSION, LEGACY_SNAPSHOT_SCHEMA_VERSION} or snapshot.get("snapshot_type") != "openrouter-pricing":
         raise SchemaError("snapshot has unsupported schema version or type")
     parse_rfc3339_utc(snapshot.get("fetched_at"), "snapshot.fetched_at")
     expected_digest = sha256_prefixed(snapshot_digest_payload(snapshot))
@@ -628,7 +659,8 @@ def validate_snapshot(snapshot: Mapping[str, Any]) -> None:
         raise SchemaError("snapshot source has missing or unexpected provenance fields")
     if source["rankings_url"] != RANKINGS_URL or not isinstance(source["pricing_url_or_urls"], list) or not all(isinstance(url, str) and url.startswith("https://openrouter.ai/") for url in source["pricing_url_or_urls"]):
         raise SchemaError("snapshot source endpoints are invalid")
-    if source["observed_schema_version_or_fingerprint"] != SCHEMA_CONTRACT_FINGERPRINT or not isinstance(source["generator_version"], str):
+    expected_fingerprint = SCHEMA_CONTRACT_FINGERPRINT if schema_version == SNAPSHOT_SCHEMA_VERSION else LEGACY_SCHEMA_CONTRACT_FINGERPRINT
+    if source["observed_schema_version_or_fingerprint"] != expected_fingerprint or not isinstance(source["generator_version"], str):
         raise SchemaError("snapshot source schema/generator provenance is invalid")
     fetch_metadata = source["fetch_metadata"]
     required_fetch_metadata = {"successful_source_count", "observed_model_count", "requested_top_n", "demand_window_days", "ranking_window_start_date", "ranking_window_end_date", "demand_metric"}
@@ -667,9 +699,13 @@ def validate_snapshot(snapshot: Mapping[str, Any]) -> None:
             raise SchemaError(f"snapshot has duplicate source model id {source_id!r}")
         seen.add(canonical_id)
         seen_source_ids.add(source_id)
-        if not isinstance(demand, dict) or set(demand) != {"source_model_id", "rank", "total_token_volume", "ranking_date", "ranking_model_permaslug"}:
+        expected_demand_keys = {"source_model_id", "rank", "total_token_volume", "request_count", "ranking_date", "ranking_model_permaslug"}
+        if schema_version == LEGACY_SNAPSHOT_SCHEMA_VERSION:
+            expected_demand_keys.discard("request_count")
+        if not isinstance(demand, dict) or set(demand) != expected_demand_keys:
             raise SchemaError(f"snapshot.rows[{index}] has invalid demand")
-        if demand["source_model_id"] != source_id or not isinstance(demand.get("rank"), int) or demand["rank"] < 1 or not isinstance(demand.get("total_token_volume"), str) or not demand["total_token_volume"].isdigit() or int(demand["total_token_volume"]) <= 0 or not isinstance(demand.get("ranking_model_permaslug"), str) or not MODEL_ID_RE.fullmatch(demand["ranking_model_permaslug"]):
+        request_count = demand.get("request_count", "1")
+        if demand["source_model_id"] != source_id or not isinstance(demand.get("rank"), int) or demand["rank"] < 1 or not isinstance(demand.get("total_token_volume"), str) or not demand["total_token_volume"].isdigit() or int(demand["total_token_volume"]) <= 0 or not isinstance(request_count, str) or not request_count.isdigit() or int(request_count) <= 0 or not isinstance(demand.get("ranking_model_permaslug"), str) or not MODEL_ID_RE.fullmatch(demand["ranking_model_permaslug"]):
             raise SchemaError(f"snapshot.rows[{index}] has invalid demand")
         parse_ranking_date(demand.get("ranking_date"), f"snapshot.rows[{index}].demand.ranking_date")
         if demand["ranking_model_permaslug"] in seen_ranking_slugs:
@@ -681,10 +717,35 @@ def validate_snapshot(snapshot: Mapping[str, Any]) -> None:
         if pricing_status in {"no_active_priced_endpoint", "no_provider_endpoints"}:
             if pricing is not None:
                 raise SchemaError(f"snapshot.rows[{index}] unavailable pricing must be null")
-        elif not isinstance(pricing, dict) or set(pricing) != {"input_per_token", "completion_per_token", "input_per_mtok", "completion_per_mtok", "currency", "benchmark_provider"}:
+        elif pricing is not None:
+            expected_pricing_keys = {"input_per_token", "completion_per_token", "input_per_mtok", "completion_per_mtok", "currency", "benchmark_provider", "liquidity_filter"}
+            if schema_version == LEGACY_SNAPSHOT_SCHEMA_VERSION:
+                expected_pricing_keys.discard("liquidity_filter")
+            if not isinstance(pricing, dict) or set(pricing) != expected_pricing_keys:
+                raise SchemaError(f"snapshot.rows[{index}] has invalid pricing")
+        expected_pricing_keys = {"input_per_token", "completion_per_token", "input_per_mtok", "completion_per_mtok", "currency", "benchmark_provider", "liquidity_filter"}
+        if schema_version == LEGACY_SNAPSHOT_SCHEMA_VERSION:
+            expected_pricing_keys.discard("liquidity_filter")
+        if pricing_status == "active_priced" and (not isinstance(pricing, dict) or set(pricing) != expected_pricing_keys):
             raise SchemaError(f"snapshot.rows[{index}] has invalid pricing")
         if pricing_status == "active_priced" and (pricing["currency"] != "USD" or not isinstance(pricing["benchmark_provider"], str) or not pricing["benchmark_provider"]):
             raise SchemaError(f"snapshot.rows[{index}] has invalid pricing provenance")
+        if pricing_status == "active_priced" and schema_version != LEGACY_SNAPSHOT_SCHEMA_VERSION:
+            liquidity = pricing.get("liquidity_filter")
+            required_liquidity = {"endpoint_status", "paid_prices", "minimum_throughput_last_30m", "minimum_uptime_last_30d", "selected_throughput_last_30m", "selected_uptime_last_30d"}
+            if not isinstance(liquidity, dict) or set(liquidity) != required_liquidity:
+                raise SchemaError(f"snapshot.rows[{index}] has invalid liquidity filter")
+            if liquidity["endpoint_status"] != 0 or liquidity["paid_prices"] is not True or liquidity["minimum_throughput_last_30m"] != "1" or liquidity["minimum_uptime_last_30d"] != "0.90":
+                raise SchemaError(f"snapshot.rows[{index}] liquidity filter does not match the policy thresholds")
+            try:
+                selected_throughput = Decimal(liquidity["selected_throughput_last_30m"])
+                selected_uptime = Decimal(liquidity["selected_uptime_last_30d"])
+                selected_prompt = Decimal(pricing["input_per_mtok"])
+                selected_completion = Decimal(pricing["completion_per_mtok"])
+            except (InvalidOperation, ValueError) as error:
+                raise SchemaError(f"snapshot.rows[{index}] liquidity/pricing values are invalid") from error
+            if not selected_throughput.is_finite() or selected_throughput < Decimal("1") or not selected_uptime.is_finite() or selected_uptime < Decimal("0.90") or selected_prompt <= 0 or selected_completion <= 0:
+                raise SchemaError(f"snapshot.rows[{index}] liquidity-selected endpoint is not paid and liquid")
         if not isinstance(row.get("source_metadata"), dict) or set(row["source_metadata"]) != {"ranking_model_permaslug", "catalog_canonical_slug", "catalog_name", "identity_resolution", "endpoint_set_confirmation"}:
             raise SchemaError(f"snapshot.rows[{index}] has invalid source metadata")
         source_metadata = row["source_metadata"]
@@ -876,11 +937,11 @@ def validate_policy_model(model: Mapping[str, Any], index: int) -> None:
         raise SchemaError(f"policy.models[{index}].license.verification_note must be non-empty")
     expected_keys = {"source_model_id", "canonical_model_id", "serving_path", "license", "profile"}
     if profile["kind"] == "coding_dense":
-        expected_keys |= {"coding_specialist", "general_purpose_baseline_per_mtok"}
+        expected_keys.add("coding_specialist")
+        expected_keys.add("general_purpose_baseline_per_mtok")
         if model.get("coding_specialist") is not True:
             raise SchemaError(f"policy.models[{index}].coding_specialist must be true")
-        parse_decimal(model.get("general_purpose_baseline_per_mtok"), f"policy.models[{index}].general_purpose_baseline_per_mtok", allow_zero=False)
-    if set(model) != expected_keys:
+    if not set(model).issubset(expected_keys):
         raise SchemaError(f"policy.models[{index}] has missing or unexpected fields")
 
 
@@ -907,25 +968,25 @@ def policy_model_index(policy: Mapping[str, Any]) -> dict[str, Mapping[str, Any]
 
 def validate_policy(policy: Mapping[str, Any]) -> None:
     expected_keys = {
+        "policy_version", "demand_top_n", "undercut_fraction", "models",
+    }
+    legacy_keys = {
         "policy_version", "demand_top_n", "broad_fleet_undercut_fraction",
         "coding_minimum_undercut_fraction", "coding_premium_fraction", "models",
     }
-    if set(policy) != expected_keys:
+    if set(policy) not in (expected_keys, legacy_keys):
         raise SchemaError("policy has missing or unexpected fields")
     if not isinstance(policy.get("policy_version"), str) or not policy["policy_version"]:
         raise SchemaError("policy.policy_version must be non-empty")
     demand_top_n = policy.get("demand_top_n")
     if demand_top_n != 50:
         raise SchemaError("policy.demand_top_n must be exactly 50 for the documented daily rankings dataset")
-    undercut = parse_decimal(policy.get("broad_fleet_undercut_fraction"), "policy.broad_fleet_undercut_fraction", allow_zero=False)
+    undercut = parse_decimal(
+        policy.get("undercut_fraction", policy.get("broad_fleet_undercut_fraction")),
+        "policy undercut_fraction", allow_zero=False,
+    )
     if not Decimal("0.10") <= undercut <= Decimal("0.30"):
-        raise SchemaError("policy broad-fleet undercut fraction must be within 10%-30%")
-    coding_min = parse_decimal(policy.get("coding_minimum_undercut_fraction"), "policy.coding_minimum_undercut_fraction", allow_zero=False)
-    if coding_min < Decimal("0.10"):
-        raise SchemaError("policy coding minimum undercut fraction must be at least 10%")
-    premium = parse_decimal(policy.get("coding_premium_fraction"), "policy coding_premium_fraction", allow_zero=False)
-    if not Decimal("0.10") <= premium <= Decimal("0.30"):
-        raise SchemaError("policy coding premium fraction must be within 10%-30%")
+        raise SchemaError("policy undercut fraction must be within 10%-30%")
     policy_model_index(policy)
 
 
@@ -944,9 +1005,14 @@ def rate_card_digest(rate_card: Mapping[str, Any]) -> str:
 
 
 def validate_rate_card(rate_card: Mapping[str, Any]) -> None:
-    expected_top_level = {"version", "policy_version", "generated_at", "usd_per_million_credits", "rows"}
-    if set(rate_card) != expected_top_level:
+    allowed_top_level = {"version", "policy_version", "generated_at", "usd_per_million_credits", "rows", "source_snapshot"}
+    required_top_level = allowed_top_level - {"source_snapshot"}
+    if not set(rate_card) <= allowed_top_level or not required_top_level <= set(rate_card):
         raise SchemaError("rate card has missing or unexpected top-level fields")
+    snapshot = rate_card.get("source_snapshot")
+    if snapshot is not None:
+        if not isinstance(snapshot, dict) or set(snapshot) != {"content_digest"} or not isinstance(snapshot["content_digest"], str) or not snapshot["content_digest"].startswith("sha256:") or len(snapshot["content_digest"]) != 71 or any(character not in "0123456789abcdef" for character in snapshot["content_digest"][7:]):
+            raise SchemaError("rate card source_snapshot.content_digest is invalid")
     for field in ("version", "policy_version", "generated_at"):
         if not isinstance(rate_card.get(field), str) or not rate_card[field].strip():
             raise SchemaError(f"rate card {field} must be non-empty string")
@@ -969,16 +1035,21 @@ def validate_rate_card(rate_card: Mapping[str, Any]) -> None:
             raise SchemaError(f"rate card row {model_id!r} has invalid share or multiplier")
 
 
-def current_completion_rate(rate_rows: Mapping[str, Any], model_id: str) -> dict[str, int] | None:
+def current_rates(rate_rows: Mapping[str, Any], model_id: str, *, legacy: bool = False) -> dict[str, int] | None:
     current = rate_rows.get(model_id)
     if current is None:
         return None
     if not isinstance(current, dict):
         raise SchemaError(f"rate card row {model_id!r} must be an object")
-    value = current.get("completion_rate_per_mtok")
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        raise SchemaError(f"rate card row {model_id!r} has invalid completion_rate_per_mtok")
-    return {"rate_card_completion_rate_per_mtok": value}
+    completion = current.get("completion_rate_per_mtok")
+    if isinstance(completion, bool) or not isinstance(completion, int) or completion < 0:
+        raise SchemaError(f"rate card row {model_id!r} has invalid completion rate")
+    if legacy:
+        return {"rate_card_completion_rate_per_mtok": completion}
+    prompt = current.get("prompt_rate_per_mtok")
+    if isinstance(prompt, bool) or not isinstance(prompt, int) or prompt < 0:
+        raise SchemaError(f"rate card row {model_id!r} has invalid prompt rate")
+    return {"rate_card_completion_rate_per_mtok": completion, "rate_card_prompt_rate_per_mtok": prompt}
 
 
 def rate_card_economics(rate_card: Mapping[str, Any], model_id: str) -> tuple[Decimal, Decimal, Decimal, str]:
@@ -994,11 +1065,15 @@ def rate_card_economics(rate_card: Mapping[str, Any], model_id: str) -> tuple[De
     )
 
 
-def completion_rate_to_internal(value: Decimal, rate_card: Mapping[str, Any], model_id: str) -> int:
+def internal_rate(value: Decimal, rate_card: Mapping[str, Any], model_id: str) -> int:
     """Convert buyer USD/MTok to the reference card's credits/MTok encoding."""
     usd_per_million_credits, multiplier_ppm, _, _ = rate_card_economics(rate_card, model_id)
     credits_per_mtok = value * Decimal("1000000000000") / (multiplier_ppm * usd_per_million_credits)
     return int(credits_per_mtok.quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+
+
+def completion_rate_to_internal(value: Decimal, rate_card: Mapping[str, Any], model_id: str) -> int:
+    return internal_rate(value, rate_card, model_id)
 
 
 def provider_hourly_usd(internal_rate_per_mtok: int, tps: Decimal, rate_card: Mapping[str, Any], model_id: str) -> Decimal:
@@ -1080,42 +1155,53 @@ def eligibility(model: Mapping[str, Any], row: Mapping[str, Any], policy: Mappin
     return not reasons, reasons, completion
 
 
-def proposed_completion_price(
-    model: Mapping[str, Any], market_completion: Decimal, policy: Mapping[str, Any], rate_card: Mapping[str, Any], model_id: str
-) -> tuple[Decimal, int, list[str]]:
+def proposed_price(
+    model: Mapping[str, Any], market: Mapping[str, Any], policy: Mapping[str, Any], rate_card: Mapping[str, Any], model_id: str
+) -> tuple[Decimal, int, Decimal, int, list[str]]:
     profile = model["profile"]
     kind = profile["kind"]
+    market_completion = parse_decimal(market.get("completion_per_mtok"), "snapshot completion price")
+    market_prompt = parse_decimal(market.get("input_per_mtok"), "snapshot prompt price", allow_zero=False)
     if kind == "broad_fleet":
-        undercut = parse_decimal(policy["broad_fleet_undercut_fraction"], "policy broad_fleet_undercut_fraction")
+        undercut = parse_decimal(policy.get("undercut_fraction", policy.get("broad_fleet_undercut_fraction")), "policy undercut_fraction")
         target = market_completion * (Decimal("1") - undercut)
-        return target, completion_rate_to_internal(target, rate_card, model_id), [f"broad-fleet undercut fraction {decimal_string(undercut)}"]
+        target_prompt = market_prompt * (Decimal("1") - undercut)
+        return (
+            target,
+            internal_rate(target, rate_card, model_id),
+            target_prompt,
+            internal_rate(target_prompt, rate_card, model_id),
+            [f"undercut fraction {decimal_string(undercut)} on OpenRouter liquidity-filtered prompt and completion prices"],
+        )
     if kind != "coding_dense":
         raise SchemaError(f"unsupported profile kind {kind!r}")
-    undercut = parse_decimal(policy["coding_minimum_undercut_fraction"], "policy coding_minimum_undercut_fraction")
-    baseline = parse_decimal(model.get("general_purpose_baseline_per_mtok"), "coding model general_purpose_baseline_per_mtok", allow_zero=False)
-    premium = parse_decimal(policy.get("coding_premium_fraction"), "policy coding_premium_fraction")
-    if premium < Decimal("0.10") or premium > Decimal("0.30"):
-        raise SchemaError("policy coding premium fraction must be within 10%-30%")
-    premium_price = baseline * (Decimal("1") + premium)
-    market_cap = market_completion * (Decimal("1") - undercut)
-    target = min(premium_price, market_cap)
-    internal_rate = completion_rate_to_internal(target, rate_card, model_id)
+    undercut = parse_decimal(policy.get("undercut_fraction", policy.get("broad_fleet_undercut_fraction")), "policy undercut_fraction")
+    target = market_completion * (Decimal("1") - undercut)
+    coding_internal_rate = internal_rate(target, rate_card, model_id)
+    target_prompt = market_prompt * (Decimal("1") - undercut)
     tps = parse_decimal(profile["projected_tps"], "coding model projected_tps", allow_zero=False)
-    provider_hourly = provider_hourly_usd(internal_rate, tps, rate_card, model_id)
+    provider_hourly = provider_hourly_usd(coding_internal_rate, tps, rate_card, model_id)
     if provider_hourly < Decimal("0.10"):
         raise SchemaError("coding-dense target does not meet the $0.10/hour provider economics floor")
     _, _, _, basis_id = rate_card_economics(rate_card, model_id)
-    return target, internal_rate, [
-        f"coding premium fraction {decimal_string(premium)}",
-        f"coding market undercut fraction {decimal_string(undercut)}",
+    return (
+        target,
+        coding_internal_rate,
+        target_prompt,
+        internal_rate(target_prompt, rate_card, model_id),
+        [
+        f"undercut fraction {decimal_string(undercut)} on OpenRouter liquidity-filtered completion price",
         f"provider net hourly USD {decimal_string(provider_hourly)} using rate-card economics row {basis_id}",
-    ]
+        f"prompt undercut fraction {decimal_string(undercut)} on OpenRouter liquidity-filtered prompt price",
+        ],
+    )
 
 
 def build_proposal(
     snapshot: Mapping[str, Any], policy: Mapping[str, Any], rate_card: Mapping[str, Any], *, now: datetime
 ) -> dict[str, Any]:
     validate_snapshot(snapshot)
+    legacy_snapshot = snapshot.get("schema_version") == LEGACY_SNAPSHOT_SCHEMA_VERSION
     validate_policy(policy)
     validate_rate_card(rate_card)
     required_top_n = policy["demand_top_n"]
@@ -1198,7 +1284,7 @@ def build_proposal(
                         "model_id": canonical_id,
                         "source_model_id": source_model_id,
                         "action": "retained",
-                        "current_completion_rate": current_completion_rate(rate_rows, canonical_id),
+                        "current_completion_rate": current_rates(rate_rows, canonical_id, legacy=legacy_snapshot),
                         "eligibility": {"eligible": False, "reasons": [absent_reason]},
                         "market": market_unavailable(),
                         "policy_evidence": policy_evidence(model),
@@ -1212,7 +1298,7 @@ def build_proposal(
                         "model_id": canonical_id,
                         "source_model_id": source_model_id,
                         "action": "blocked",
-                        "current_completion_rate": current_completion_rate(rate_rows, canonical_id),
+                        "current_completion_rate": current_rates(rate_rows, canonical_id, legacy=legacy_snapshot),
                         "eligibility": {"eligible": False, "reasons": blocked_reasons},
                         "market": market_unavailable(),
                         "policy_evidence": policy_evidence(model),
@@ -1247,20 +1333,27 @@ def build_proposal(
             action = "blocked" if any(reason in block_reasons for reason in reasons) else "retained" if (canonical_id in rate_rows and canonical_id != "default") else "blocked"
             base.update({"action": action, "reasons": reasons})
             if canonical_id in rate_rows:
-                base["current_completion_rate"] = current_completion_rate(rate_rows, canonical_id)
+                base["current_completion_rate"] = current_rates(rate_rows, canonical_id, legacy=legacy_snapshot)
             result[base["action"]].append(base)
             continue
         try:
-            target, proposed_internal, formula_reasons = proposed_completion_price(model, market_completion, policy, rate_card, canonical_id)
+            target, proposed_internal, target_prompt, proposed_prompt_internal, formula_reasons = proposed_price(model, row["pricing"], policy, rate_card, canonical_id)
         except SchemaError as error:
             base.update({"action": "blocked", "reasons": [str(error)]})
             result["blocked"].append(base)
             continue
-        base["proposed_completion_rate"] = {
-            "usd_per_mtok": decimal_string(target),
-            "rate_card_completion_rate_per_mtok": proposed_internal,
-            "formula_reasons": formula_reasons,
-        }
+        if legacy_snapshot:
+            target, proposed_internal, formula_reasons = target, proposed_internal, [
+                f"broad-fleet undercut fraction {decimal_string(parse_decimal(policy.get('undercut_fraction', policy.get('broad_fleet_undercut_fraction')), 'policy undercut_fraction'))}"
+            ]
+        else:
+            base["proposed_rates"] = {
+                "completion_usd_per_mtok": decimal_string(target),
+                "completion_rate_per_mtok": proposed_internal,
+                "prompt_usd_per_mtok": decimal_string(target_prompt),
+                "prompt_rate_per_mtok": proposed_prompt_internal,
+                "formula_reasons": formula_reasons,
+            }
         usd_per_million_credits, multiplier_ppm, provider_share_bps, basis_id = rate_card_economics(rate_card, canonical_id)
         base["rate_card_economics"] = {
             "basis_row": basis_id,
@@ -1268,13 +1361,26 @@ def build_proposal(
             "global_multiplier_ppm": decimal_string(multiplier_ppm),
             "provider_share_bps": decimal_string(provider_share_bps),
         }
-        current_completion = current_completion_rate(rate_rows, canonical_id)
-        if current_completion is None:
+        current_rate_pair = current_rates(rate_rows, canonical_id, legacy=legacy_snapshot)
+        if current_rate_pair is None:
             base["action"] = "added"
             result["added"].append(base)
             continue
-        base["current_completion_rate"] = current_completion
-        if current_completion["rate_card_completion_rate_per_mtok"] == proposed_internal:
+        base["current_completion_rate"] = current_rate_pair
+        if legacy_snapshot:
+            if current_rate_pair["rate_card_completion_rate_per_mtok"] == proposed_internal:
+                base["action"] = "unchanged"
+                base["proposed_completion_rate"] = {
+                    "usd_per_mtok": decimal_string(target),
+                    "rate_card_completion_rate_per_mtok": proposed_internal,
+                    "formula_reasons": formula_reasons,
+                }
+                result["unchanged"].append(base)
+            else:
+                base["action"] = "changed"
+                result["changed"].append(base)
+            continue
+        if current_rate_pair["rate_card_completion_rate_per_mtok"] == proposed_internal and current_rate_pair["rate_card_prompt_rate_per_mtok"] == proposed_prompt_internal:
             base["action"] = "unchanged"
             result["unchanged"].append(base)
         else:
@@ -1288,7 +1394,7 @@ def build_proposal(
             {
                 "model_id": model_id,
                 "action": "blocked",
-                "current_completion_rate": current_completion_rate(rate_rows, model_id),
+                "current_completion_rate": current_rates(rate_rows, model_id, legacy=legacy_snapshot),
                 "eligibility": {"eligible": False, "reasons": ["no verified policy metadata/mapping for current rate-card row"]},
                 "market": market_unavailable(),
                 "policy_evidence": policy_evidence(None),
@@ -1303,12 +1409,63 @@ def build_proposal(
         "proposal_type": "openrouter-rate-card-proposal",
         "generated_at": rfc3339(now),
         "snapshot_digest": snapshot["content_digest"],
+        **({} if snapshot.get("schema_version") == LEGACY_SNAPSHOT_SCHEMA_VERSION else {"source_snapshot": {"content_digest": snapshot["content_digest"]}}),
         "policy_version": policy["policy_version"],
         "rate_card_reference_digest": rate_card_digest(rate_card),
         "summary": summary,
         **result,
     }
 
+
+def build_demand_proposal(
+    snapshot: Mapping[str, Any], policy: Mapping[str, Any], *, min_provider_targets: Mapping[str, int]
+) -> dict[str, Any]:
+    validate_snapshot(snapshot)
+    validate_policy(policy)
+    policy_models = policy_model_index(policy)
+    models_by_canonical = {model["canonical_model_id"]: model for model in policy["models"]}
+    catalog_path = RECOMMENDABLE_CATALOG_PATH if RECOMMENDABLE_CATALOG_PATH.exists() else PRODUCTION_CATALOG_PATH
+    catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
+    recommendable_keys = {key for key, row in catalog["rows"].items() if row.get("runtime_status") == "recommendable"}
+    expected_target_keys = set(models_by_canonical)
+    if expected_target_keys != recommendable_keys:
+        raise SchemaError("policy mappings must exactly cover the recommendable candidate catalog")
+    if not isinstance(min_provider_targets, dict) or set(min_provider_targets) != expected_target_keys or any(isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in min_provider_targets.values()):
+        raise SchemaError("minimum provider targets must exactly cover mapped canonical model IDs with non-negative integers")
+    models_by_source = {model["source_model_id"]: model for model in policy["models"]}
+    rows_by_source = {row["source_model_id"]: row for row in snapshot["rows"]}
+    tokens = {
+        model["canonical_model_id"]: int(rows_by_source[source_id]["demand"]["total_token_volume"])
+        for source_id, model in models_by_source.items()
+        if source_id in rows_by_source
+    }
+    tokens.update({canonical_id: 0 for canonical_id in expected_target_keys if canonical_id not in tokens})
+    max_tokens = max(tokens.values(), default=0)
+    rows: dict[str, dict[str, Any]] = {}
+    for canonical_id in sorted(tokens):
+        model = models_by_canonical[canonical_id]
+        row = rows_by_source.get(model["source_model_id"])
+        demand = row["demand"] if row is not None else {"rank": None, "total_token_volume": "0", "request_count": "0"}
+        rows[canonical_id] = {
+            "demand_weight": tokens[canonical_id] / max_tokens if max_tokens else 0,
+            "rank": demand["rank"],
+            "recommendable": True,
+            "min_provider_target": min_provider_targets[canonical_id],
+            "or_completion_tokens_30d": demand["total_token_volume"],
+            "or_requests_30d": demand.get("request_count", "0"),
+        }
+    return {
+        "schema_version": 1,
+        "proposal_type": "openrouter-demand-rank-proposal",
+        "generated_at": snapshot["fetched_at"],
+        "snapshot_digest": snapshot["content_digest"],
+        "source_snapshot": {"content_digest": snapshot["content_digest"]},
+        "policy_version": policy["policy_version"],
+        "source": "openrouter_completion_token_rank_operator_curated",
+        "cold_start_floor": 0.15,
+        "diversification_band": 0.85,
+        "rows": rows,
+    }
 
 def atomic_write_json(path: Path, value: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1341,6 +1498,14 @@ def artifact_suffix(value: Mapping[str, Any]) -> str:
 
 def snapshot_filename(now: datetime, snapshot: Mapping[str, Any]) -> str:
     return "openrouter-pricing-snapshot-" + now.astimezone(timezone.utc).strftime("%Y-%m-%dT%H-%M-%SZ-") + artifact_suffix(snapshot) + ".json"
+
+
+def rate_card_proposal_filename(now: datetime, proposal: Mapping[str, Any]) -> str:
+    return "openrouter-rate-card-proposal-" + now.astimezone(timezone.utc).strftime("%Y-%m-%dT%H-%M-%SZ-") + artifact_suffix(proposal) + ".json"
+
+
+def demand_proposal_filename(now: datetime, proposal: Mapping[str, Any]) -> str:
+    return "openrouter-demand-rank-proposal-" + now.astimezone(timezone.utc).strftime("%Y-%m-%dT%H-%M-%SZ-") + artifact_suffix(proposal) + ".json"
 
 
 def proposal_filename(now: datetime, proposal: Mapping[str, Any]) -> str:
@@ -1425,11 +1590,17 @@ def command_compute(args: argparse.Namespace) -> int:
     snapshot = load_json_file(Path(args.snapshot), "snapshot")
     policy = load_json_file(Path(args.policy), "policy")
     rate_card = load_json_file(Path(args.rate_card), "rate card")
+    min_provider_targets = load_json_file(Path(args.min_provider_targets), "minimum provider targets")
     now = utc_now()
-    proposal = build_proposal(snapshot, policy, rate_card, now=now)
-    target = Path(args.output_dir) / proposal_filename(now, proposal)
-    atomic_write_json(target, proposal)
-    print(target)
+    rate_card_proposal = build_proposal(snapshot, policy, rate_card, now=now)
+    demand_proposal = build_demand_proposal(snapshot, policy, min_provider_targets=min_provider_targets)
+    output_dir = Path(args.output_dir)
+    rate_card_target = output_dir / rate_card_proposal_filename(now, rate_card_proposal)
+    demand_target = output_dir / demand_proposal_filename(now, demand_proposal)
+    atomic_write_json(rate_card_target, rate_card_proposal)
+    atomic_write_json(demand_target, demand_proposal)
+    print(rate_card_target)
+    print(demand_target)
     return 0
 
 
@@ -1449,6 +1620,7 @@ def parser() -> argparse.ArgumentParser:
     compute.add_argument("--snapshot", required=True)
     compute.add_argument("--policy", default=str(DEFAULT_POLICY_PATH))
     compute.add_argument("--rate-card", required=True)
+    compute.add_argument("--min-provider-targets", required=True)
     compute.add_argument("--output-dir", required=True)
     compute.set_defaults(handler=command_compute)
     return result
