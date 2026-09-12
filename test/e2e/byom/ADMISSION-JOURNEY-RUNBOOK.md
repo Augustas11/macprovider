@@ -57,7 +57,7 @@ test/e2e/byom/run-cli-onboarding-e2e.py --journey-evidence \
   --settleable-ref mlx-community/Llama-3.2-3B-Instruct-4bit \
   --opaque-ref openai_compatible:<model id> \
   --gguf-ref ollama:<model> \
-  --drift-hook ./drift-hook.sh --rejection-hook ./rejection-hook.sh \
+  --drift-hook ./drift-hook.sh \
   --discovery-arg --skip-lmstudio --discovery-arg --skip-llamacpp
 ```
 
@@ -80,17 +80,16 @@ Changing the served catalog artifact feed also drifts
 (`catalog_artifact_feed_changed`) but requires re-signing the feed with the
 trusted key, which a rig cannot do.
 
-## The rejection hook (step 11)
+## Step 11 and `offer_rejected`
 
-Step 11 requires one valid rejected-offer/re-offer path. As of BYOM v0.2 no
-coordinator code path appends `offer_rejected`: a failed synthetic probe
-revokes (`synthetic_probe_failed`), and the intake surface does not reject.
-The runner therefore withdraws the settleable candidate, calls
-`--rejection-hook` once, re-offers, and requires the coordinator to answer
-`offer_rejected`; then re-offers again and requires a fresh signed event.
-Without a hook the run fails closed at step 11 with the gap named. This is
-tracked on #1486; a coordinator-side rejection mechanism (or a journey
-contract change) is needed before the observation can be measured.
+SPEC-047 v0.1.9 reserves `offer_rejected`: no coordinator code path appends
+it in v0.2 (a failed synthetic probe revokes with `synthetic_probe_failed`,
+and the intake surface does not reject), so the journey contract carries 15
+true observations and step 11 has no rejection leg. The runner probes one
+transition outside the SPEC-047 matrix and asserts the state is unchanged;
+the fresh-evidence-on-re-entry invariant (R001/R006) is measured on the two
+reachable paths, `revoked` (step 7) and `withdrawn` (step 8), each of which
+requires a re-offer to append a new provider-signed event. No hook is needed.
 
 ## After the run
 

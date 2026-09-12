@@ -135,7 +135,6 @@ class RigConfig:
     opaque_ref: str
     gguf_ref: str | None
     drift_hook: Path | None
-    rejection_hook: Path | None
     discovery_args: tuple[str, ...] = ()
 
     def validate(self) -> None:
@@ -148,9 +147,8 @@ class RigConfig:
         for name in (self.operator_secret_a_env, self.operator_secret_b_env, self.postgres_dsn_env):
             assert_true(bool(os.environ.get(name)), "environment variable is unset: " + name)
         assert_true(os.environ[self.operator_secret_a_env] != os.environ[self.operator_secret_b_env], "the two operator actors share one secret")
-        for hook in (self.drift_hook, self.rejection_hook):
-            if hook is not None:
-                assert_true(hook.is_file() and os.access(hook, os.X_OK), f"hook is not executable: {hook.name}")
+        if self.drift_hook is not None:
+            assert_true(self.drift_hook.is_file() and os.access(self.drift_hook, os.X_OK), "drift hook is not executable")
 
 
 class RigTransport(Protocol):
@@ -161,7 +159,6 @@ class RigTransport(Protocol):
     def admin_post(self, path: str, actor: str, body: dict[str, Any]) -> tuple[int, dict[str, Any]]: ...
     def ledger_counts(self) -> dict[str, int]: ...
     def induce_drift(self) -> None: ...
-    def induce_rejection(self) -> None: ...
     def request_log_since(self, marker: Any) -> int: ...
     def request_log_marker(self) -> Any: ...
 
@@ -239,15 +236,6 @@ class PhysicalRig:
         completed = subprocess.run([str(self.config.drift_hook)], capture_output=True, text=True, check=False)
         assert_true(completed.returncode == 0, "drift hook exited non-zero")
 
-    def induce_rejection(self) -> None:
-        # As of BYOM v0.2 no coordinator code path appends offer_rejected (a
-        # failed synthetic probe revokes; intake does not reject). The journey
-        # nevertheless requires a rejected-offer/re-offer path, so the
-        # mechanism is an operator-supplied hook, and its absence fails the run
-        # with the gap named rather than an observation set without measurement.
-        assert_true(self.config.rejection_hook is not None, "step 11 needs --rejection-hook: as of v0.2 no coordinator path produces offer_rejected, so the rig must supply the mechanism that makes the candidate's next offer be rejected; without it the rejected-reoffer observation cannot be measured")
-        completed = subprocess.run([str(self.config.rejection_hook)], capture_output=True, text=True, check=False)
-        assert_true(completed.returncode == 0, "rejection hook exited non-zero")
 
 
 # ---------------------------------------------------------------- manifest
@@ -627,22 +615,14 @@ class AdmissionJourneyRunner:
         code, _ = self.decide(self.config.operator_actor_a, self.settleable, illegal, "matrix_probe")
         assert_true(code >= 400, f"illegal transition {state} -> {illegal} was accepted (HTTP {code})")
         self.expect_state(self.settleable, state, "step 11 (state unchanged after illegal attempt)")
-        # Valid rejected-offer/re-offer path, measured on the settleable
-        # candidate: withdraw (a legal edge from its current state), arm the
-        # rig's rejection mechanism, re-offer and observe offer_rejected, then
-        # re-offer again and observe a fresh signed event.
-        withdrawn = self.rig.cli(["models", "admission", "withdraw", self.settleable.served_model_ref, "--reason-code", "transition_probe", *self._common()])
-        assert_true(withdrawn.get("resulting_admission_state") == "withdrawn", "withdrawal before the rejection probe did not land in withdrawn")
-        self.rig.induce_rejection()
-        rejected_submit_code, _, _ = self.rig.cli_raw(["models", "offer", self.settleable.served_model_ref, *self._common()])
-        rejected = self.status(self.settleable)
-        assert_true(rejected["admission_state"] == "offer_rejected" and rejected["admission_state_source"] == "coordinator", f"the armed rejection did not produce offer_rejected (submit exit {rejected_submit_code}, state {rejected['admission_state']!r})")
-        reoffer = self.rig.cli(["models", "offer", self.settleable.served_model_ref, *self._common()])
-        assert_true(reoffer.get("admission_state") == "offer_submitted" and reoffer.get("coordinator_event_id") not in (None, rejected.get("coordinator_event_id")), "re-offer after rejection did not append a fresh signed event")
-        self.m.observe("rejected_reoffer_required_fresh_evidence", True)
+        # SPEC-047 v0.1.9: offer_rejected is reserved and unreachable, so the
+        # fresh-evidence-on-re-entry invariant (R001/R006) is proven by the two
+        # reachable re-entry paths, revoked (step 7) and withdrawn (step 8),
+        # whose observations were set when each re-offer appended a fresh
+        # signed event.
         self.m.observe("transition_matrix_enforced", True)
         doc = self.m.capture("re-entry-status", "model_admission_status.v1", self.status(self.settleable))
-        self.m.add_step(STEP_IDS[10], "An out-of-matrix transition was rejected and left the state unchanged; rejected, withdrawn and revoked re-entries each required fresh provider-signed evidence.", [doc])
+        self.m.add_step(STEP_IDS[10], "An out-of-matrix transition was rejected and left the state unchanged; the withdrawn and revoked re-entry paths each required fresh provider-signed evidence (offer_rejected is reserved and unreachable in v0.2).", [doc])
 
     def step_12_redaction_review(self, transcript: str) -> None:
         status = self.status(self.settleable)
@@ -703,7 +683,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--opaque-ref", required=True, help="served_model_ref of an openai_compatible: opaque endpoint")
     parser.add_argument("--gguf-ref", default=None, help="optional GGUF candidate for the novel-candidate presentation and the R007(e) stop case")
     parser.add_argument("--drift-hook", type=Path, default=None, help="executable that changes the admitted predicate for step 7")
-    parser.add_argument("--rejection-hook", type=Path, default=None, help="executable that makes the candidate's next offer be rejected by the coordinator, for step 11 (no v0.2 code path does this on its own)")
     parser.add_argument("--discovery-arg", action="append", default=[], help="extra argv passed to every models command (e.g. --skip-ollama)")
     return parser
 
@@ -717,7 +696,6 @@ def main(argv: list[str] | None = None) -> int:
         operator_secret_a_env=args.operator_secret_a_env, operator_secret_b_env=args.operator_secret_b_env,
         postgres_dsn_env=args.postgres_dsn_env, settleable_ref=args.settleable_ref, opaque_ref=args.opaque_ref,
         gguf_ref=args.gguf_ref, drift_hook=args.drift_hook.resolve() if args.drift_hook else None,
-        rejection_hook=args.rejection_hook.resolve() if args.rejection_hook else None,
         discovery_args=tuple(args.discovery_arg),
     )
     transcript: list[str] = []
