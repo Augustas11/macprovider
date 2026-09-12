@@ -105,6 +105,18 @@ struct ModelCatalogEconomicsWire: Codable, Equatable, Sendable {
             )
         }
 
+        static func evaluateModel(transactionID: String, timeoutSeconds: Int = 10) -> Action {
+            Action(
+                available: true,
+                requiresConfirmation: false,
+                transactionKind: "evaluate_model",
+                transactionID: transactionID,
+                actionTimeoutSeconds: timeoutSeconds,
+                estimatedBytes: nil,
+                unavailableReason: nil
+            )
+        }
+
         func encode(to encoder: Encoder) throws {
             var container = encoder.container(keyedBy: CodingKeys.self)
             try container.encode(available, forKey: .available)
@@ -391,6 +403,7 @@ struct ModelCatalogEconomicsBuilder {
         let actionUnavailable = candidate.catalogModelKey == nil
             ? "model_not_supported"
             : "action_unavailable"
+        let evaluateAction = Self.evaluateAction(for: candidate, actionUnavailable: actionUnavailable)
         return ModelCatalogEconomicsWire.Row(
             modelKey: modelKey,
             servedModelID: candidate.servedModelRef,
@@ -426,10 +439,25 @@ struct ModelCatalogEconomicsBuilder {
             supplyDeficitScore: economics.state == "trusted" ? demandRow?.effectiveSupplyDeficitMultiplier : nil,
             switchAction: .unavailable(actionUnavailable),
             prepare: .unavailable(actionUnavailable),
-            evaluate: .unavailable("use_models_evaluate"),
+            evaluate: evaluateAction,
             adoptRecommendation: .unavailable(actionUnavailable),
             cleanupStaging: .unavailable("staging_cleanup_not_required")
         )
+    }
+
+    private static func evaluateAction(
+        for candidate: BYOMDiscoveryWire.Candidate,
+        actionUnavailable: String
+    ) -> ModelCatalogEconomicsWire.Action {
+        let evaluatable = candidate.candidateID.hasPrefix("byom_")
+            && !candidate.candidateID.hasPrefix("byom_unstable_")
+            && candidate.readinessState == "ready"
+            && candidate.fitState != "does_not_fit"
+            && Set(candidate.warningCodes).isDisjoint(with: BYOMDiscoveryWarning.submitBlockingWarningCodes)
+        guard evaluatable else {
+            return .unavailable(actionUnavailable == "model_not_supported" ? actionUnavailable : "candidate_not_evaluatable")
+        }
+        return .evaluateModel(transactionID: UUID().uuidString.lowercased())
     }
 
     private static func makeCatalogOnlyRow(

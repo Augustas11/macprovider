@@ -34,7 +34,12 @@ final class ModelCatalogEconomicsTests: XCTestCase {
         XCTAssertNil(row.providerPromptPayoutUSDPerMillionTokens)
         XCTAssertNil(row.providerCompletionPayoutUSDPerMillionTokens)
         XCTAssertFalse(row.switchAction.available)
-        XCTAssertEqual(row.evaluate.unavailableReason, "use_models_evaluate")
+        XCTAssertTrue(row.evaluate.available)
+        XCTAssertEqual(row.evaluate.transactionKind, "evaluate_model")
+        XCTAssertNotNil(row.evaluate.transactionID)
+        XCTAssertEqual(row.evaluate.actionTimeoutSeconds, 10)
+        XCTAssertFalse(row.evaluate.requiresConfirmation)
+        XCTAssertNil(row.evaluate.unavailableReason)
 
         let encoded = try ModelSwitchingWireCodec.encode(projection)
         let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(encoded.utf8)) as? [String: Any])
@@ -44,6 +49,32 @@ final class ModelCatalogEconomicsTests: XCTestCase {
         XCTAssertTrue(encodedRow["provider_prompt_payout_usd_per_million_tokens"] is NSNull)
         let source = try XCTUnwrap(object["source"] as? [String: Any])
         XCTAssertTrue(source["rate_card_signature_digest"] is NSNull)
+    }
+
+    func testProjectionEmitsEvaluateOnlyForEvaluatableCandidates() throws {
+        let inputs = try Self.staticInputs()
+        let blockedCandidate = Self.candidate(
+            warningCodes: [BYOMDiscoveryWarning.requiresPreparation.rawValue]
+        )
+        let projection = ModelCatalogEconomicsBuilder.makeProjection(
+            generatedAt: inputs.rateCard.value.generatedAt.addingTimeInterval(60),
+            currentModelID: nil,
+            discovery: Self.discovery(candidates: [blockedCandidate, Self.candidate()]),
+            admissionStatuses: [:],
+            demand: inputs.demand,
+            candidateCatalog: inputs.candidateCatalog,
+            rateCard: inputs.rateCard
+        )
+
+        let rows = projection.rows.filter { $0.actionModelID != nil }
+        let blockedRow = try XCTUnwrap(rows.first { $0.evaluate.available == false })
+        XCTAssertEqual(blockedRow.evaluate.unavailableReason, "candidate_not_evaluatable")
+        let availableRow = try XCTUnwrap(rows.first { $0.evaluate.available })
+        XCTAssertEqual(availableRow.evaluate.transactionKind, "evaluate_model")
+        XCTAssertNotNil(availableRow.evaluate.transactionID)
+        XCTAssertEqual(availableRow.evaluate.actionTimeoutSeconds, 10)
+        XCTAssertFalse(availableRow.evaluate.requiresConfirmation)
+        XCTAssertNil(availableRow.evaluate.unavailableReason)
     }
 
     func testCatalogPricedFreshSignedRateCardPermitsEconomicsWithoutSettlement() throws {

@@ -25,7 +25,7 @@ private enum ModelFeatureUI {
     static let adopt = String(localized: "Adopt", comment: "Recommendation action")
     static let notNow = String(localized: "Not now", comment: "Recommendation snooze action")
     static let stopBackground = String(localized: "Stop background recommendations", comment: "Recommendation opt-out action")
-    static let activate = String(localized: "Activate earning offer", comment: "BYOM guided activation action")
+    static let activate = String(localized: "Run offer preflight", comment: "BYOM guided activation action")
 
     static func operationLabel(_ raw: String) -> String {
         switch raw {

@@ -346,6 +346,17 @@ class BYOMJourneyCaptureTests(unittest.TestCase):
         manifest, manifest_path = self.mutate("discovery", mutator)
         self.capture("discovery", manifest, manifest_path)
 
+    def test_accepts_no_cli_transaction_catalog_disabled_reason(self) -> None:
+        document = self.complete_catalog_economics_document()
+        document["rows"][0]["disabled_reason"] = "no_cli_transaction_available"
+
+        def mutator(manifest, root):
+            self.add_catalog_economics_step(manifest)
+            self.write_catalog_economics_capture(root, document)
+
+        manifest, manifest_path = self.mutate("discovery", mutator)
+        self.capture("discovery", manifest, manifest_path)
+
     def test_rejects_invalid_guidance_in_catalog_economics_rows(self) -> None:
         document = self.complete_catalog_economics_document()
         document["rows"][0]["provider_guidance"]["next_action"] = "serve_traffic"
@@ -358,6 +369,67 @@ class BYOMJourneyCaptureTests(unittest.TestCase):
             "discovery",
             mutator,
             "provider_guidance.next_action is not a permitted value: 'serve_traffic'",
+        )
+
+    def test_rejects_invalid_catalog_economics_enums_and_actions(self) -> None:
+        invalid_document = self.complete_catalog_economics_document()
+        invalid_document["rows"][0]["runtime_state"] = "warm"
+
+        def invalid_runtime_state(manifest, root):
+            self.add_catalog_economics_step(manifest)
+            self.write_catalog_economics_capture(root, invalid_document)
+
+        self.assert_capture_fails(
+            "discovery",
+            invalid_runtime_state,
+            "runtime_state is not a permitted value: 'warm'",
+        )
+
+        economics_document = self.complete_catalog_economics_document()
+        economics_document["rows"][0]["economics_state"] = "healthy"
+
+        def invalid_economics_state(manifest, root):
+            self.add_catalog_economics_step(manifest)
+            self.write_catalog_economics_capture(root, economics_document)
+
+        self.assert_capture_fails(
+            "discovery",
+            invalid_economics_state,
+            "economics_state is not a permitted value: 'healthy'",
+        )
+
+        warning_document = self.complete_catalog_economics_document()
+        warning_document["rows"][0]["warning_codes"] = ["serve_traffic_disabled"]
+
+        def invalid_warning_code(manifest, root):
+            self.add_catalog_economics_step(manifest)
+            self.write_catalog_economics_capture(root, warning_document)
+
+        self.assert_capture_fails(
+            "discovery",
+            invalid_warning_code,
+            "warning_codes[0] is not a permitted value: 'serve_traffic_disabled'",
+        )
+
+        action_document = self.complete_catalog_economics_document()
+        action_document["rows"][0]["evaluate"] = {
+            **self.unavailable_action(),
+            "available": True,
+            "transaction_kind": "evaluate_model",
+            "transaction_id": "not-a-uuid",
+            "action_timeout_seconds": 10,
+            "unavailable_reason": "action_unavailable",
+        }
+
+        def available_action_with_reason(manifest, root):
+            self.add_catalog_economics_step(manifest)
+            self.write_catalog_economics_capture(root, action_document)
+
+        self.assert_capture_fails(
+            "discovery",
+            available_action_with_reason,
+            "evaluate: an available action must carry its typed transaction fields "
+            "and no unavailable_reason",
         )
 
     def guidance_document(self, **guidance) -> dict:

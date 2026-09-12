@@ -833,13 +833,21 @@ struct MalibuModelCatalogEconomicsDocument: Decodable, Equatable, Sendable {
             && expectedStateLabel != nil
             && expectedStateLabel == guidance.stateLabelKey
             && guidance.stateLabelKey.hasPrefix(expectedStateLabelPrefix)
+            && Self.isLocalizationKey(guidance.stateLabelKey)
+            && Self.isLocalizationKey(guidance.stateMeaningKey)
+            && Self.closedNextActions.contains(guidance.nextAction)
+            && guidance.transitionReasonCode.map(Self.closedTransitionReasonCodes.contains) ?? true
             && !guidance.stateLabelKey.isEmpty
             && !guidance.stateMeaningKey.isEmpty
             && !guidance.nextAction.isEmpty
             && !(
                 guidance.earningPathClass == "settlement_capable"
-                    && admission.settlementCapable == false
+                && admission.settlementCapable == false
             )
+    }
+
+    private static func isLocalizationKey(_ value: String) -> Bool {
+        value.range(of: "^byom(?:\\.[a-z0-9]+(?:_[a-z0-9_]+)*)+$", options: .regularExpression) != nil
     }
 
     private func validate(action: Action) throws {
@@ -868,7 +876,7 @@ struct MalibuModelCatalogEconomicsDocument: Decodable, Equatable, Sendable {
                   // time, so unknown values degrade safely rather than showing raw
                   // text.
                   let reason = action.unavailableReason,
-                  !reason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                  Self.closedUnavailableReasons.contains(reason) else {
                 throw ModelManagementError.invalidCatalog
             }
         }
@@ -927,6 +935,14 @@ struct MalibuModelCatalogEconomicsDocument: Decodable, Equatable, Sendable {
         "staging_cleanup_required",
     ]
 
+    private static let closedUnavailableReasons: Set<String> = [
+        "action_unavailable",
+        "model_not_supported",
+        "candidate_not_evaluatable",
+        "staging_cleanup_not_required",
+        "no_cli_transaction_available",
+    ]
+
     private static let trustedEconomicsBlockingWarnings: Set<String> = [
         "feed_fallback",
         "feed_stale",
@@ -966,6 +982,257 @@ struct MalibuModelCatalogEconomicsDocument: Decodable, Equatable, Sendable {
         "adopt_recommendation",
         "cleanup_staging",
     ]
+
+    private static let closedNextActions: Set<String> = [
+        "fix_local_blocker",
+        "evaluate",
+        "offer_dry_run",
+        "submit_offer",
+        "revise_and_reoffer",
+        "check_status",
+        "withdraw",
+        "wait_for_coordinator",
+        "maintain_runtime",
+        "none",
+    ]
+
+    private static let closedTransitionReasonCodes: Set<String> = [
+        "candidate_id_unstable",
+        "adapter_unavailable",
+        "adapter_timeout",
+        "adapter_rejected_non_loopback",
+        "adapter_malformed_response",
+        "adapter_response_truncated",
+        "catalog_match_unverified",
+        "capability_unevaluated",
+        "evaluation_required",
+        "evaluation_failed",
+        "requires_preparation",
+        "namespace_permission_invalid",
+        "coordinator_state_unavailable",
+        "no_trusted_catalog_match",
+        "catalog_binding_unverified",
+    ]
+}
+
+struct MalibuBYOMEvaluationDocument: Decodable, Equatable, Sendable {
+    struct CapabilityResult: Decodable, Equatable, Sendable {
+        let result: String
+        let source: String
+        let reasonCode: String?
+
+        enum CodingKeys: String, CodingKey, CaseIterable {
+            case result
+            case source
+            case reasonCode = "reason_code"
+        }
+    }
+
+    struct MutationSummary: Decodable, Equatable, Sendable {
+        let productionConfigMutated: Bool
+        let coordinatorStateMutated: Bool
+        let productionModelSwitched: Bool
+        let runtimeStarted: Bool
+        let downloadsStarted: Bool
+        let temporaryFilesCreated: Bool
+
+        enum CodingKeys: String, CodingKey, CaseIterable {
+            case productionConfigMutated = "production_config_mutated"
+            case coordinatorStateMutated = "coordinator_state_mutated"
+            case productionModelSwitched = "production_model_switched"
+            case runtimeStarted = "runtime_started"
+            case downloadsStarted = "downloads_started"
+            case temporaryFilesCreated = "temporary_files_created"
+        }
+    }
+
+    struct DiagnosticHashes: Decodable, Equatable, Sendable {
+        let promptSHA256: String
+        let responseBodySHA256: String?
+
+        enum CodingKeys: String, CodingKey, CaseIterable {
+            case promptSHA256 = "prompt_sha256"
+            case responseBodySHA256 = "response_body_sha256"
+        }
+    }
+
+    let schema: String
+    let generatedAt: String
+    let cliVersion: String
+    let candidateID: String
+    let runtimeSource: String
+    let servedModelRef: String
+    let catalogModelKey: String?
+    let adapterIdentity: String
+    let healthResult: String
+    let latencyMs: Int?
+    let completionTokens: Int?
+    let tokensPerSecond: Double?
+    let requestCount: Int
+    let outputBytes: Int
+    let usageReportingSource: String
+    let capabilityResults: [String: CapabilityResult]
+    let fitEstimateSource: String
+    let mutationSummary: MutationSummary
+    let diagnosticHashes: DiagnosticHashes
+    let providerGuidance: MalibuModelCatalogEconomicsDocument.ProviderGuidance
+    let offerPreconditionsAppearSatisfied: Bool
+    let warnings: [String]
+    let evaluationDigestSHA256: String?
+
+    enum CodingKeys: String, CodingKey, CaseIterable {
+        case schema
+        case generatedAt = "generated_at"
+        case cliVersion = "cli_version"
+        case candidateID = "candidate_id"
+        case runtimeSource = "runtime_source"
+        case servedModelRef = "served_model_ref"
+        case catalogModelKey = "catalog_model_key"
+        case adapterIdentity = "adapter_identity"
+        case healthResult = "health_result"
+        case latencyMs = "latency_ms"
+        case completionTokens = "completion_tokens"
+        case tokensPerSecond = "tokens_per_second"
+        case requestCount = "request_count"
+        case outputBytes = "output_bytes"
+        case usageReportingSource = "usage_reporting_source"
+        case capabilityResults = "capability_results"
+        case fitEstimateSource = "fit_estimate_source"
+        case mutationSummary = "mutation_summary"
+        case diagnosticHashes = "diagnostic_hashes"
+        case providerGuidance = "provider_guidance"
+        case offerPreconditionsAppearSatisfied = "offer_preconditions_appear_satisfied"
+        case warnings
+        case evaluationDigestSHA256 = "evaluation_digest_sha256"
+    }
+
+    init(from decoder: Decoder) throws {
+        try rejectUnknownKeys(decoder, allowed: CodingKeys.allCases.map(\.stringValue))
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        schema = try container.decode(String.self, forKey: .schema)
+        generatedAt = try container.decode(String.self, forKey: .generatedAt)
+        cliVersion = try container.decode(String.self, forKey: .cliVersion)
+        candidateID = try container.decode(String.self, forKey: .candidateID)
+        runtimeSource = try container.decode(String.self, forKey: .runtimeSource)
+        servedModelRef = try container.decode(String.self, forKey: .servedModelRef)
+        catalogModelKey = try decodeExplicitNullableString(container, .catalogModelKey)
+        adapterIdentity = try container.decode(String.self, forKey: .adapterIdentity)
+        healthResult = try container.decode(String.self, forKey: .healthResult)
+        latencyMs = try decodeExplicitNullableInt(container, .latencyMs)
+        completionTokens = try decodeExplicitNullableInt(container, .completionTokens)
+        tokensPerSecond = try decodeExplicitNullableDouble(container, .tokensPerSecond)
+        requestCount = try container.decode(Int.self, forKey: .requestCount)
+        outputBytes = try container.decode(Int.self, forKey: .outputBytes)
+        usageReportingSource = try container.decode(String.self, forKey: .usageReportingSource)
+        capabilityResults = try container.decode([String: CapabilityResult].self, forKey: .capabilityResults)
+        fitEstimateSource = try container.decode(String.self, forKey: .fitEstimateSource)
+        mutationSummary = try container.decode(MutationSummary.self, forKey: .mutationSummary)
+        diagnosticHashes = try container.decode(DiagnosticHashes.self, forKey: .diagnosticHashes)
+        providerGuidance = try container.decode(MalibuModelCatalogEconomicsDocument.ProviderGuidance.self, forKey: .providerGuidance)
+        offerPreconditionsAppearSatisfied = try container.decode(Bool.self, forKey: .offerPreconditionsAppearSatisfied)
+        warnings = try container.decode([String].self, forKey: .warnings)
+        evaluationDigestSHA256 = try decodeExplicitNullableString(container, .evaluationDigestSHA256)
+    }
+}
+
+struct MalibuBYOMOfferDryRunDocument: Decodable, Equatable, Sendable {
+    let schema: String
+    let generatedAt: String
+    let cliVersion: String
+    let candidateID: String
+    let servedModelRef: String
+    let catalogModelKey: String?
+    let wouldSubmit: Bool
+    let likelyAdmissionState: String
+    let likelyAdmissionStateSource: String
+    let providerGuidance: MalibuModelCatalogEconomicsDocument.ProviderGuidance
+    let reasonCode: String?
+    let warnings: [String]
+
+    enum CodingKeys: String, CodingKey, CaseIterable {
+        case schema
+        case generatedAt = "generated_at"
+        case cliVersion = "cli_version"
+        case candidateID = "candidate_id"
+        case servedModelRef = "served_model_ref"
+        case catalogModelKey = "catalog_model_key"
+        case wouldSubmit = "would_submit"
+        case likelyAdmissionState = "likely_admission_state"
+        case likelyAdmissionStateSource = "likely_admission_state_source"
+        case providerGuidance = "provider_guidance"
+        case reasonCode = "reason_code"
+        case warnings
+    }
+
+    init(from decoder: Decoder) throws {
+        try rejectUnknownKeys(decoder, allowed: CodingKeys.allCases.map(\.stringValue))
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        schema = try container.decode(String.self, forKey: .schema)
+        generatedAt = try container.decode(String.self, forKey: .generatedAt)
+        cliVersion = try container.decode(String.self, forKey: .cliVersion)
+        candidateID = try container.decode(String.self, forKey: .candidateID)
+        servedModelRef = try container.decode(String.self, forKey: .servedModelRef)
+        catalogModelKey = try decodeExplicitNullableString(container, .catalogModelKey)
+        wouldSubmit = try container.decode(Bool.self, forKey: .wouldSubmit)
+        likelyAdmissionState = try container.decode(String.self, forKey: .likelyAdmissionState)
+        likelyAdmissionStateSource = try container.decode(String.self, forKey: .likelyAdmissionStateSource)
+        providerGuidance = try container.decode(MalibuModelCatalogEconomicsDocument.ProviderGuidance.self, forKey: .providerGuidance)
+        reasonCode = try decodeExplicitNullableString(container, .reasonCode)
+        warnings = try container.decode([String].self, forKey: .warnings)
+    }
+}
+
+struct MalibuBYOMAdmissionStatusDocument: Decodable, Equatable, Sendable {
+    let schema: String
+    let generatedAt: String
+    let cliVersion: String
+    let providerID: String
+    let candidateID: String
+    let servedModelRef: String
+    let catalogModelKey: String?
+    let admissionState: String
+    let admissionStateSource: String
+    let coordinatorEventID: String?
+    let stateObservedAt: String?
+    let providerGuidance: MalibuModelCatalogEconomicsDocument.ProviderGuidance
+    let allowedNextStates: [String]
+    let warnings: [String]
+
+    enum CodingKeys: String, CodingKey, CaseIterable {
+        case schema
+        case generatedAt = "generated_at"
+        case cliVersion = "cli_version"
+        case providerID = "provider_id"
+        case candidateID = "candidate_id"
+        case servedModelRef = "served_model_ref"
+        case catalogModelKey = "catalog_model_key"
+        case admissionState = "admission_state"
+        case admissionStateSource = "admission_state_source"
+        case coordinatorEventID = "coordinator_event_id"
+        case stateObservedAt = "state_observed_at"
+        case providerGuidance = "provider_guidance"
+        case allowedNextStates = "allowed_next_states"
+        case warnings
+    }
+
+    init(from decoder: Decoder) throws {
+        try rejectUnknownKeys(decoder, allowed: CodingKeys.allCases.map(\.stringValue))
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        schema = try container.decode(String.self, forKey: .schema)
+        generatedAt = try container.decode(String.self, forKey: .generatedAt)
+        cliVersion = try container.decode(String.self, forKey: .cliVersion)
+        providerID = try container.decode(String.self, forKey: .providerID)
+        candidateID = try container.decode(String.self, forKey: .candidateID)
+        servedModelRef = try container.decode(String.self, forKey: .servedModelRef)
+        catalogModelKey = try decodeExplicitNullableString(container, .catalogModelKey)
+        admissionState = try container.decode(String.self, forKey: .admissionState)
+        admissionStateSource = try container.decode(String.self, forKey: .admissionStateSource)
+        coordinatorEventID = try decodeExplicitNullableString(container, .coordinatorEventID)
+        stateObservedAt = try decodeExplicitNullableString(container, .stateObservedAt)
+        providerGuidance = try container.decode(MalibuModelCatalogEconomicsDocument.ProviderGuidance.self, forKey: .providerGuidance)
+        allowedNextStates = try container.decode([String].self, forKey: .allowedNextStates)
+        warnings = try container.decode([String].self, forKey: .warnings)
+    }
 }
 
 struct MalibuModelSwitchEvent: Decodable, Equatable, Sendable {
@@ -2049,7 +2316,9 @@ final class ModelManagementStore: ObservableObject {
     }
 
     func activate(_ row: MalibuModelRow) async {
-        guard row.action == .evaluate, canPerformModelAction else { return }
+        guard row.action == .evaluate,
+              let evaluateTransaction = row.evaluateTransaction,
+              canPerformModelAction else { return }
         let from = currentModelID
         operation = .loadingList
         statusLine = String(localized: "Evaluating the BYOM candidate…", comment: "BYOM activation evaluation status")
@@ -2062,7 +2331,8 @@ final class ModelManagementStore: ObservableObject {
             ])
             guard let activation = try? Self.decodeBYOMActivationResults(
                 evaluation: evaluation,
-                dryRun: dryRun
+                dryRun: dryRun,
+                candidateID: row.id
             ) else {
                 throw ModelManagementError.invalidCatalog
             }
@@ -2112,32 +2382,30 @@ final class ModelManagementStore: ObservableObject {
 
     private static func decodeBYOMActivationResults(
         evaluation: ModelCLIResult,
-        dryRun: ModelCLIResult
+        dryRun: ModelCLIResult,
+        candidateID: String
     ) throws -> (digest: String?, wouldSubmit: Bool) {
-        guard let evaluationData = evaluation.stdout.data(using: .utf8),
-              let dryRunData = dryRun.stdout.data(using: .utf8) else {
+        let evaluation = try Self.decodeStrict(MalibuBYOMEvaluationDocument.self, from: evaluation.stdout)
+        let dryRun = try Self.decodeStrict(MalibuBYOMOfferDryRunDocument.self, from: dryRun.stdout)
+        guard evaluation.schema == "provider_byom_evaluation.v1",
+              evaluation.candidateID == candidateID,
+              evaluation.mutationSummary.coordinatorStateMutated == false,
+              dryRun.schema == "model_admission_offer_dry_run.v1",
+              dryRun.candidateID == candidateID else {
             throw ModelManagementError.invalidCatalog
         }
-        let evaluationObject = try JSONSerialization.jsonObject(with: evaluationData) as? [String: Any]
-        let dryRunObject = try JSONSerialization.jsonObject(with: dryRunData) as? [String: Any]
-        guard evaluationObject?["schema"] as? String == "provider_byom_evaluation.v1",
-              dryRunObject?["schema"] as? String == "model_admission_offer_dry_run.v1",
-              let wouldSubmit = dryRunObject?["would_submit"] as? Bool else {
-            throw ModelManagementError.invalidCatalog
-        }
-        if let digest = evaluationObject?["evaluation_digest_sha256"] as? String {
-            guard digest.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil else {
-                throw ModelManagementError.invalidCatalog
-            }
-            return (digest, wouldSubmit)
-        }
-        return (nil, wouldSubmit)
+        return (evaluation.evaluationDigestSHA256, dryRun.wouldSubmit)
     }
 
     private static func validateBYOMAdmissionStatus(_ stdout: String) throws {
-        guard let data = stdout.data(using: .utf8),
-              let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              object["schema"] as? String == "model_admission_status.v1" else {
+        _ = try Self.decodeStrict(MalibuBYOMAdmissionStatusDocument.self, from: stdout)
+    }
+
+    private static func decodeStrict<T: Decodable>(_ type: T.Type, from stdout: String) throws -> T {
+        guard let data = stdout.data(using: .utf8) else { throw ModelManagementError.invalidCatalog }
+        do {
+            return try JSONDecoder().decode(type, from: data)
+        } catch {
             throw ModelManagementError.invalidCatalog
         }
     }
@@ -2701,6 +2969,11 @@ struct MalibuModelRow: Identifiable, Equatable, Sendable {
         case evaluate
     }
 
+    struct EvaluateTransaction: Equatable, Sendable {
+        let transactionID: String
+        let timeoutSeconds: Int
+    }
+
     let id: String
     let displayID: String
     // The coordinator-verified catalog identity (catalog model key) for a
@@ -2727,6 +3000,7 @@ struct MalibuModelRow: Identifiable, Equatable, Sendable {
     let guidanceNextAction: String?
     let admissionStateLabel: String?
     let admissionStateMeaning: String?
+    let evaluateTransaction: EvaluateTransaction?
     let providerPromptPayoutUSDPerMillionTokens: Double?
     let providerCompletionPayoutUSDPerMillionTokens: Double?
     let demandRank: Int?
@@ -2749,6 +3023,7 @@ struct MalibuModelRow: Identifiable, Equatable, Sendable {
         guidanceNextAction = nil
         admissionStateLabel = nil
         admissionStateMeaning = nil
+        evaluateTransaction = nil
         providerPromptPayoutUSDPerMillionTokens = nil
         providerCompletionPayoutUSDPerMillionTokens = nil
         demandRank = nil
@@ -2763,7 +3038,7 @@ struct MalibuModelRow: Identifiable, Equatable, Sendable {
             blockReason = String(localized: "Warm swap is unavailable while the provider is offline.", comment: "Model row guard")
         } else if !row.weightsPresentLocally {
             category = .needsPreparation
-            action = .evaluate
+            action = .none
             blockReason = String(localized: "Weights are not installed locally. Evaluation requires explicit preparation.", comment: "Model row guard")
         } else if row.fit == "fits" {
             category = .ready
@@ -2806,6 +3081,7 @@ struct MalibuModelRow: Identifiable, Equatable, Sendable {
             state: row.admission.state,
             source: row.admission.source
         )
+        evaluateTransaction = Self.evaluateTransaction(from: row.evaluateAction)
         warningCodes = row.warningCodes
         demandRank = row.economicsState == "trusted" ? row.demandRank : nil
         providerPromptPayoutUSDPerMillionTokens = row.economicsState == "trusted"
@@ -2821,12 +3097,8 @@ struct MalibuModelRow: Identifiable, Equatable, Sendable {
             kind: "switch_model",
             actionModelID: row.actionModelID
         )
-        let evaluateAvailable = Self.actionIsAvailable(
-            row.evaluateAction,
-            kind: "evaluate_model",
-            actionModelID: row.actionModelID
-        )
         let isCurrent = row.isCurrent || currentModelID.map { modelIdentityKey($0) == modelIdentityKey(projectedID) } == true
+        let evaluateAction = evaluateTransaction != nil ? MalibuModelRow.Action.evaluate : MalibuModelRow.Action.none
 
         if isCurrent || row.runtimeState == "current" {
             category = .current
@@ -2838,19 +3110,32 @@ struct MalibuModelRow: Identifiable, Equatable, Sendable {
             blockReason = nil
         } else if row.runtimeState == "needs_preparation" || !row.weightsPresentLocally {
             category = .needsPreparation
-            action = evaluateAvailable ? .evaluate : .none
+            action = evaluateAction
             blockReason = Self.rowReason(row) ?? String(localized: "Needs preparation through the provider CLI before it can be used here.", comment: "Model row guard")
         } else if hasTrustedEconomics, row.fit != "does_not_fit" {
             category = .networkCatalog
-            action = .none
+            action = evaluateAction
             blockReason = row.admission.settlementCapable
                 ? nil
                 : String(localized: "Catalog rate only. Final provider credit still requires settlement-capable route and receipt checks.", comment: "Catalog row settlement guard")
         } else {
             category = .blocked
-            action = evaluateAvailable ? .evaluate : .none
+            action = evaluateAction
             blockReason = Self.rowReason(row) ?? String(localized: "Network catalog rate unavailable for this row.", comment: "Catalog row unavailable")
         }
+    }
+
+    private static func evaluateTransaction(from action: MalibuModelCatalogEconomicsDocument.Action) -> EvaluateTransaction? {
+        guard action.available,
+              action.transactionKind == "evaluate_model",
+              let transactionID = action.transactionID,
+              let timeout = action.actionTimeoutSeconds,
+              !action.requiresConfirmation,
+              (1...10).contains(timeout),
+              UUID(uuidString: transactionID) != nil else {
+            return nil
+        }
+        return EvaluateTransaction(transactionID: transactionID, timeoutSeconds: timeout)
     }
 
     fileprivate init?(
@@ -2877,6 +3162,7 @@ struct MalibuModelRow: Identifiable, Equatable, Sendable {
         guidanceNextAction = nil
         admissionStateLabel = nil
         admissionStateMeaning = nil
+        evaluateTransaction = nil
         providerPromptPayoutUSDPerMillionTokens = nil
         providerCompletionPayoutUSDPerMillionTokens = nil
         demandRank = nil
@@ -2907,13 +3193,30 @@ struct MalibuModelRow: Identifiable, Equatable, Sendable {
         case "settlement_capable":
             return String(localized: "Eligible to earn on qualifying settled requests", comment: "BYOM earning verdict")
         case "not_earning_yet_catalog_or_receipt_path_exists":
-            return String(localized: "Not earning yet — \(guidanceNextAction ?? "")", comment: "BYOM not-earning verdict and next action")
+            return String(localized: "Not earning yet — \(nextActionLabel ?? "")", comment: "BYOM not-earning verdict and next action")
         case "no_earning_path_in_v0_1":
             return String(localized: "Can't earn in this release", comment: "BYOM no earning path verdict")
         case "local_inventory_only":
             return String(localized: "Local only — not offered to the network", comment: "BYOM local inventory verdict")
         default:
             return nil
+        }
+    }
+
+    private var nextActionLabel: String? {
+        guard let guidanceNextAction else { return nil }
+        switch guidanceNextAction {
+        case "fix_local_blocker": return String(localized: "fix the local blocker", comment: "BYOM next action: fix local blocker")
+        case "evaluate": return String(localized: "evaluate the model", comment: "BYOM next action: evaluate")
+        case "offer_dry_run": return String(localized: "run the offer preflight", comment: "BYOM next action: offer dry run")
+        case "submit_offer": return String(localized: "submit the offer", comment: "BYOM next action: submit offer")
+        case "revise_and_reoffer": return String(localized: "revise and re-offer", comment: "BYOM next action: revise and reoffer")
+        case "check_status": return String(localized: "check admission status", comment: "BYOM next action: check status")
+        case "withdraw": return String(localized: "withdraw the offer", comment: "BYOM next action: withdraw")
+        case "wait_for_coordinator": return String(localized: "wait for the coordinator", comment: "BYOM next action: wait for coordinator")
+        case "maintain_runtime": return String(localized: "maintain the runtime", comment: "BYOM next action: maintain runtime")
+        case "none": return String(localized: "no further action", comment: "BYOM next action: none")
+        default: return nil
         }
     }
 
@@ -3014,7 +3317,7 @@ struct MalibuModelRow: Identifiable, Equatable, Sendable {
             copy.blockReason = String(localized: "Warm swap is unavailable while the provider is offline.", comment: "Model row guard")
         } else if !weightsPresentLocally {
             copy.category = .needsPreparation
-            copy.action = .evaluate
+            copy.action = .none
             copy.blockReason = String(localized: "Weights are not installed locally. Evaluation requires explicit preparation.", comment: "Model row guard")
         } else if fit == "fits" {
             copy.category = .ready
