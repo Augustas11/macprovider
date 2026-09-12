@@ -1601,15 +1601,17 @@ struct ModelPreparationCleanupRecord: Codable, Equatable, Sendable {
         guard artifactIdentityDigest == expectedArtifactIdentityDigest else {
             throw ModelPreparationContractError.bindingMismatch("artifact_identity_digest")
         }
-        try ModelPreparationContracts.requirePathLeaf(finalLeaf, field: "final_leaf")
-        try ModelPreparationContracts.requirePathLeaf(tombstoneLeaf, field: "tombstone_leaf")
+        try ModelPreparationContracts.requireSafeString(finalLeaf, field: "final_leaf", maxUTF8Bytes: 256)
+        try ModelPreparationContracts.requireSafeString(tombstoneLeaf, field: "tombstone_leaf", maxUTF8Bytes: 256)
         switch targetKind {
         case .published:
-            guard finalLeaf == artifactIdentityDigest, tombstoneLeaf == "\(artifactIdentityDigest).tombstone" else {
+            guard finalLeaf == "objects/\(tupleSHA256)/",
+                  tombstoneLeaf == "objects/.tombstone-\(transactionID)/" else {
                 throw ModelPreparationContractError.malformed("leaf")
             }
         case .staging:
-            guard finalLeaf == "\(attemptID).staging", tombstoneLeaf == "\(attemptID).staging.tombstone" else {
+            guard finalLeaf == "work/staging/\(transactionID)/\(attemptID)/",
+                  tombstoneLeaf == "work/staging/\(transactionID)/.tombstone-\(transactionID)/" else {
                 throw ModelPreparationContractError.malformed("leaf")
             }
         }

@@ -459,7 +459,35 @@ final class ModelPreparationPrivateCodecTests: XCTestCase {
             let data = try ModelPreparationContracts.encode(record, maxBytes: ModelPreparationContracts.deletionRecordMaxBytes)
             _ = try ModelPreparationContracts.decode(ModelPreparationCleanupRecord.self, from: data, maxBytes: ModelPreparationContracts.deletionRecordMaxBytes)
         }
-        _ = try Self.cleanupRecord(phase: .intent, targetKind: .staging)
+        let published = try Self.cleanupRecord(phase: .intent, targetKind: .published)
+        XCTAssertEqual(published.finalLeaf, try Self.publishedFinalPath())
+        XCTAssertEqual(published.tombstoneLeaf, Self.publishedTombstonePath())
+        XCTAssertThrowsError(try Self.cleanupRecord(
+            phase: .intent,
+            targetKind: .published,
+            finalLeaf: try Self.artifactDigest()
+        ))
+        XCTAssertThrowsError(try Self.cleanupRecord(
+            phase: .intent,
+            targetKind: .published,
+            finalLeaf: try Self.publishedFinalPath(),
+            tombstoneLeaf: "objects/.tombstone-" + Self.attemptID + "/"
+        ))
+
+        let staging = try Self.cleanupRecord(phase: .intent, targetKind: .staging)
+        XCTAssertEqual(staging.finalLeaf, Self.stagingFinalPath())
+        XCTAssertEqual(staging.tombstoneLeaf, Self.stagingTombstonePath())
+        XCTAssertThrowsError(try Self.cleanupRecord(
+            phase: .intent,
+            targetKind: .staging,
+            finalLeaf: "\(Self.attemptID).staging"
+        ))
+        XCTAssertThrowsError(try Self.cleanupRecord(
+            phase: .intent,
+            targetKind: .staging,
+            finalLeaf: Self.stagingFinalPath(),
+            tombstoneLeaf: "\(Self.attemptID).staging.tombstone"
+        ))
 
         let tuple = try Self.tuple()
         let receipt = try Self.receipt()
@@ -492,8 +520,8 @@ final class ModelPreparationPrivateCodecTests: XCTestCase {
             receipt: receipt,
             receiptSHA256: Self.hexA,
             artifactIdentityDigest: try Self.artifactDigest(),
-            finalLeaf: try Self.artifactDigest(),
-            tombstoneLeaf: "\(try Self.artifactDigest()).tombstone",
+            finalLeaf: try Self.publishedFinalPath(),
+            tombstoneLeaf: Self.publishedTombstonePath(),
             expectedBytes: 4096,
             expectedFiles: 1
         ))
@@ -560,8 +588,8 @@ final class ModelPreparationPrivateCodecTests: XCTestCase {
             receipt: mutatedReceipt,
             receiptSHA256: originalReceiptDigest,
             artifactIdentityDigest: originalDigest,
-            finalLeaf: originalDigest,
-            tombstoneLeaf: "\(originalDigest).tombstone",
+            finalLeaf: try Self.publishedFinalPath(),
+            tombstoneLeaf: Self.publishedTombstonePath(),
             expectedBytes: 4096,
             expectedFiles: 1
         ))
@@ -571,7 +599,6 @@ final class ModelPreparationPrivateCodecTests: XCTestCase {
         let record = try Self.cleanupRecord(phase: .intent, targetKind: .published)
         let mutatedReceipt = try Self.receipt(publishedAt: "2026-09-12T00:00:01.000Z")
         let mutatedReceiptSHA256 = try Self.receiptDigest(mutatedReceipt)
-        let mutatedArtifactDigest = try Self.artifactDigest(tuple: record.tuple, receiptSHA256: mutatedReceiptSHA256)
         XCTAssertThrowsError(try ModelPreparationCleanupRecord(
             targetKind: .published,
             phase: .intent,
@@ -583,7 +610,7 @@ final class ModelPreparationPrivateCodecTests: XCTestCase {
             tupleSHA256: record.tupleSHA256,
             receipt: mutatedReceipt,
             receiptSHA256: mutatedReceiptSHA256,
-            artifactIdentityDigest: mutatedArtifactDigest,
+            artifactIdentityDigest: record.artifactIdentityDigest,
             finalLeaf: record.finalLeaf,
             tombstoneLeaf: record.tombstoneLeaf,
             expectedBytes: record.expectedBytes,
@@ -1105,11 +1132,29 @@ final class ModelPreparationPrivateCodecTests: XCTestCase {
         )
     }
 
+    private static func publishedFinalPath(tupleSHA256: String? = nil) throws -> String {
+        let digest = try tupleSHA256 ?? Self.tupleDigest()
+        return "objects/\(digest)/"
+    }
+
+    private static func publishedTombstonePath(transactionID: String = transactionID) -> String {
+        "objects/.tombstone-\(transactionID)/"
+    }
+
+    private static func stagingFinalPath(transactionID: String = transactionID, attemptID: String = attemptID) -> String {
+        "work/staging/\(transactionID)/\(attemptID)/"
+    }
+
+    private static func stagingTombstonePath(transactionID: String = transactionID) -> String {
+        "work/staging/\(transactionID)/.tombstone-\(transactionID)/"
+    }
+
     private static func cleanupRecord(
         phase: ModelPreparationCleanupPhase,
         targetKind: ModelPreparationCleanupTargetKind,
         expectedBytes: Int64 = 4096,
         finalLeaf: String? = nil,
+        tombstoneLeaf: String? = nil,
         receiptSHA256: String? = nil,
         artifactIdentityDigest: String? = nil
     ) throws -> ModelPreparationCleanupRecord {
@@ -1127,8 +1172,22 @@ final class ModelPreparationPrivateCodecTests: XCTestCase {
         } else {
             selectedArtifactDigest = try Self.artifactDigest(tuple: tuple, receiptSHA256: selectedReceiptSHA256)
         }
-        let final = finalLeaf ?? (targetKind == .published ? selectedArtifactDigest : "\(attemptID).staging")
-        let tombstone = targetKind == .published ? "\(selectedArtifactDigest).tombstone" : "\(attemptID).staging.tombstone"
+        let final: String
+        if let finalLeaf {
+            final = finalLeaf
+        } else if targetKind == .published {
+            final = try publishedFinalPath(tupleSHA256: tupleDigest())
+        } else {
+            final = stagingFinalPath()
+        }
+        let tombstone: String
+        if let tombstoneLeaf {
+            tombstone = tombstoneLeaf
+        } else if targetKind == .published {
+            tombstone = publishedTombstonePath(transactionID: transactionID)
+        } else {
+            tombstone = stagingTombstonePath()
+        }
         return try ModelPreparationCleanupRecord(
             targetKind: targetKind,
             phase: phase,
