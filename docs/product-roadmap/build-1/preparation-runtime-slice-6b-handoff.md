@@ -4,7 +4,7 @@ Date: 2026-09-12
 
 ## Outcome
 
-The private preparation contract and codec foundation is implemented at commit `fe9376d726df963992f261fd212ec85f38508db4` and proposed in PR #1491. After reopening the first review for an under-bound recovery-temp envelope, the complete corrected diff passed independent code, security, and architecture gates at zero Critical, High, and Medium findings. Focused validation passed 23 XCTest cases.
+The private preparation contract and codec foundation is implemented at commit `9e72f1fdb6efefbfcd38e175e13444a6f88b17d8` and proposed in PR #1491. After reopening the review for an under-bound recovery envelope and then a root-identity representation contradiction, the approved v20 plan led to a separate five-kind durable-state envelope and raw root bootstrap contract. The complete corrected diff passed independent code, security, and architecture gates at zero Critical, High, and Medium findings. Focused validation passed 23 XCTest cases.
 
 ## Completed locally
 
@@ -12,7 +12,7 @@ The private preparation contract and codec foundation is implemented at commit `
 - Strict private records for root identity, reservation, active state, progress, cancellation acknowledgement, failed dispatch, publication receipt, and cleanup recovery.
 - Canonical receipt and artifact identity derivation with substitution and correlated-mutation rejection.
 - Negative coverage for malformed shapes, noncanonical numbers, unsafe leaves, invalid sizes/counters, root drift, tuple drift, event-key drift, receipt mutation, and illegal nullability.
-- Self-authenticating unique-temp recovery envelopes with exact durable target leaves, canonical payload encoding, filename binding, and v17 per-target size limits.
+- Self-authenticating five-kind private-state envelopes with byte-identical temp/durable representation, exact target leaves, canonical payload encoding, temp filename binding, and v20 inner/outer size limits. Root identity remains a separate raw record.
 
 ## Not yet implemented by this slice
 
@@ -25,7 +25,7 @@ The private preparation contract and codec foundation is implemented at commit `
 
 | Claim | State | Evidence or blocker |
 | --- | --- | --- |
-| Contract/codec implementation | Implemented locally | Commit `fe9376d7`; PR #1491 |
+| Contract/codec implementation | Implemented locally | Commit `9e72f1fd`; PR #1491 |
 | Focused local verification | Verified | 23 XCTest tests passed |
 | Full Swift package | Not green | Existing hang, unavailable MLX Metal library, and unrelated baseline failures recorded in the review artifact |
 | Physical Mac preparation | Unproven | Requires later runtime slices and Slice 7 physical evidence |

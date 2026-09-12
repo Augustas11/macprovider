@@ -5,7 +5,7 @@ Date: 2026-09-12
 ## Reviewed bytes
 
 - Repository base: `c8c97f6625a88fa7c83ae2b5cf4d68078409cc6f`
-- Runtime commit: `fe9376d726df963992f261fd212ec85f38508db4`
+- Runtime commit: `9e72f1fdb6efefbfcd38e175e13444a6f88b17d8`
 - Runtime PR: https://github.com/Augustas11/macprovider/pull/1491
 - Files:
   - `phase3-binary/Sources/macprovider-cli/ModelPreparationContracts.swift`
@@ -21,7 +21,7 @@ All reviewers used native GPT-5.6 Sol subagents and independently inspected the 
 | Security | 0 | 0 | 0 | PASS |
 | Architecture/contracts | 0 | 0 | 0 | PASS |
 
-The first review at `69d747fd` was reopened after an independent storage-mapping pass found that the unique-temp record did not bind enough information to recover its durable target. The correction rounds added complete payload and digest binding, exact v17 durable target leaves, canonical base64 rejection, a constructible envelope cap, and the exact 4,096-byte cancellation cap. All three lanes then independently reviewed the complete cumulative diff from `c8c97f6625a88fa7c83ae2b5cf4d68078409cc6f` through `fe9376d7` and reported zero Critical, High, and Medium findings. `Package.resolved` was clean and absent from the diff.
+The first review at `69d747fd` was reopened after independent storage mapping found that its temp record did not bind enough information to recover its durable target. Corrections through `fe9376d7` added payload/digest/target binding, but a subsequent storage-feasibility review found that renaming this envelope into `root.identity` would violate its exact closed raw schema. Secure-storage work paused while v18 and v19 plan reviews rejected stale exact-artifact gate references; the independently approved v20 plan/test resolved the representation and the gate wording. Commit `9e72f1fd` replaces the v17 temp schema with a five-kind byte-identical private-state temp/durable envelope while leaving raw root identity separate. All three lanes then independently reviewed the complete cumulative diff from `c8c97f6625a88fa7c83ae2b5cf4d68078409cc6f` through `9e72f1fd` and reported zero Critical, High, and Medium findings. `Package.resolved` was clean and absent from the diff.
 
 ## Material finding resolutions
 
@@ -30,15 +30,15 @@ The first review at `69d747fd` was reopened after an independent storage-mapping
 - `ModelPreparationPublicationReceipt` excludes `artifact_identity_digest`; its digest is computed over bounded canonical receipt bytes, eliminating the prior circular binding.
 - Cleanup records verify receipt digest plus tuple, root, and event correlations before deriving artifact identity.
 - Closed JSON shapes, duplicate-key rejection, canonical numeric spelling, size limits, exact root identity version, safe integer caps, and relative-leaf validation fail closed.
-- Unique-temp v2 envelopes bind durable record kind, exact target leaf, writer UUIDv4, generation, complete payload, and payload SHA-256. Decode rejects noncanonical base64 and filename disagreement.
-- Per-target payload limits match v17, including the exact 4,096-byte cancellation boundary. The 360,000-byte envelope cap can contain the largest permitted 262,144-byte payload after base64 framing.
+- V20 private-state envelopes bind one of five durable record kinds, exact target leaf, writer UUIDv4, generation, complete payload, and payload SHA-256. The same encoded bytes can be a UUID-named temp or durable target; only the temp requires filename UUID agreement. Decode rejects noncanonical base64 and the old v17 schema.
+- Raw `root.identity` is excluded from the envelope kind inventory. Per-target inner limits include the exact 4,096-byte cancellation boundary; the 360,000-byte outer cap contains the largest permitted 262,144-byte payload after base64 framing.
 
 ## Fresh validation
 
 - `swift test --disable-automatic-resolution --filter ModelPreparationPrivateCodecTests`
   - Result: PASS; 23 XCTest tests, 0 failures.
   - The separate Swift Testing runner selected 0 tests and is not counted.
-- `git diff --check c8c97f6625a88fa7c83ae2b5cf4d68078409cc6f..fe9376d7`
+- `git diff --check c8c97f6625a88fa7c83ae2b5cf4d68078409cc6f..9e72f1fd`
   - Result: PASS.
 
 ## Broader validation limits
