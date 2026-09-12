@@ -3270,6 +3270,7 @@ class PearlUpdaterTests(unittest.TestCase):
         self.updater.local_coordinator_identity_ready = mock.Mock(return_value=True)
         self.updater.gateway_serving_ready = mock.Mock(return_value=True)
         self.updater.public_identity_ready = mock.Mock(return_value=True)
+        self.updater.ready_provider_floor_met = mock.Mock(return_value=True)
         self.updater.run_canary_gate = mock.Mock()
         self.updater.wait_for = lambda _description, _timeout, check: self.assertTrue(check())
 
@@ -3287,6 +3288,7 @@ class PearlUpdaterTests(unittest.TestCase):
         self.updater.local_coordinator_identity_ready = mock.Mock(return_value=True)
         self.updater.gateway_serving_ready = mock.Mock(return_value=True)
         self.updater.public_identity_ready = mock.Mock(return_value=True)
+        self.updater.ready_provider_floor_met = mock.Mock(return_value=True)
         self.updater.protected_provider_fleet_ready = mock.Mock(return_value=True)
         self.updater.verify_disabled_buyer_canary_posture = mock.Mock()
         self.updater.run_canary_gate = mock.Mock()
@@ -3310,6 +3312,7 @@ class PearlUpdaterTests(unittest.TestCase):
                 "provider reconnect and warmup",
                 "gateway serving status",
                 "public TLS health/version",
+                "ready-provider floor",
             ],
         )
         self.updater.verify_disabled_buyer_canary_posture.assert_called_once_with()
@@ -3331,6 +3334,7 @@ class PearlUpdaterTests(unittest.TestCase):
         self.updater.local_coordinator_identity_ready = mock.Mock(return_value=True)
         self.updater.gateway_serving_ready = mock.Mock(return_value=True)
         self.updater.public_identity_ready = mock.Mock(return_value=True)
+        self.updater.ready_provider_floor_met = mock.Mock(return_value=True)
         self.updater.protected_provider_fleet_ready = mock.Mock(return_value=True)
         self.updater.run_canary_gate = mock.Mock()
         waited = []
@@ -3360,6 +3364,7 @@ class PearlUpdaterTests(unittest.TestCase):
         self.updater.local_coordinator_identity_ready = mock.Mock(return_value=True)
         self.updater.gateway_serving_ready = mock.Mock(return_value=True)
         self.updater.public_identity_ready = mock.Mock(return_value=True)
+        self.updater.ready_provider_floor_met = mock.Mock(return_value=True)
         self.updater.protected_provider_fleet_ready = mock.Mock(return_value=True)
         self.updater.verify_disabled_buyer_canary_posture = mock.Mock()
         self.updater.run_canary_gate = mock.Mock()
@@ -3455,6 +3460,7 @@ class PearlUpdaterTests(unittest.TestCase):
         self.updater.local_coordinator_identity_ready = mock.Mock(return_value=True)
         self.updater.gateway_serving_ready = mock.Mock(return_value=True)
         self.updater.public_identity_ready = mock.Mock(return_value=True)
+        self.updater.ready_provider_floor_met = mock.Mock(return_value=True)
         self.updater.protected_provider_fleet_ready = mock.Mock(
             side_effect=updater_module.UpdateError("exact 6-node identity snapshot must not gate serving")
         )
@@ -3478,6 +3484,7 @@ class PearlUpdaterTests(unittest.TestCase):
                 "provider reconnect and warmup",
                 "gateway serving status",
                 "public TLS health/version",
+                "ready-provider floor",
             ],
         )
         self.updater.run_canary_gate.assert_called_once_with()
@@ -3489,6 +3496,7 @@ class PearlUpdaterTests(unittest.TestCase):
         self.updater.local_coordinator_identity_ready = mock.Mock(return_value=True)
         self.updater.gateway_serving_ready = mock.Mock(return_value=True)
         self.updater.public_identity_ready = mock.Mock(return_value=True)
+        self.updater.ready_provider_floor_met = mock.Mock(return_value=True)
         self.updater.protected_provider_fleet_ready = mock.Mock(
             side_effect=updater_module.UpdateError("transient public sample failure")
         )
@@ -3506,6 +3514,38 @@ class PearlUpdaterTests(unittest.TestCase):
 
         self.updater.protected_provider_fleet_ready.assert_not_called()
         self.assertNotIn("three consecutive public protected-fleet samples", waited)
+        self.updater.run_canary_gate.assert_called_once_with()
+
+    def test_ready_provider_floor_uses_local_health_not_fleet_identity(self):
+        self.updater.get_json = mock.Mock(return_value={"pool_ready": 2})
+        self.assertTrue(self.updater.ready_provider_floor_met())
+        self.updater.get_json.assert_called_once_with("http://127.0.0.1:8444/healthz")
+
+        self.updater.get_json.return_value = {"pool_ready": 1}
+        self.assertFalse(self.updater.ready_provider_floor_met())
+
+        identity = updater_module.RuntimeIdentity("v1.8.36", "v1.8.36", "1.8.36")
+        self.updater.local_coordinator_identity_ready = mock.Mock(return_value=True)
+        self.updater.gateway_serving_ready = mock.Mock(return_value=True)
+        self.updater.public_identity_ready = mock.Mock(return_value=True)
+        self.updater.ready_provider_floor_met = mock.Mock(return_value=True)
+        self.updater.run_canary_gate = mock.Mock()
+        waited = []
+        original_wait = self.updater.wait_for
+
+        def record_wait(description, timeout, check):
+            waited.append(description)
+            original_wait(description, timeout, check)
+
+        self.updater.wait_for = record_wait
+        self.updater.prove_serving_recovery(identity)
+
+        self.assertIn("ready-provider floor", waited)
+        self.assertLess(
+            waited.index("ready-provider floor"),
+            waited.index("public TLS health/version") + 2,
+        )
+        self.assertEqual(waited[-1], "ready-provider floor")
         self.updater.run_canary_gate.assert_called_once_with()
 
     def test_public_protected_fleet_sample_requires_exact_ready_baseline(self):

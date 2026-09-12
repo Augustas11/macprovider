@@ -5175,6 +5175,11 @@ class Updater:
             for expected in self._previous_protected_fleet()
         )
 
+    def ready_provider_floor_met(self) -> bool:
+        health = self.get_json("http://127.0.0.1:8444/healthz")
+        pool_ready = health.get("pool_ready")
+        return type(pool_ready) is int and pool_ready >= self.config.minimum_pool_ready_after_rollout
+
     def prove_serving_recovery(
         self,
         identity: RuntimeIdentity,
@@ -5191,6 +5196,11 @@ class Updater:
             "public TLS health/version",
             self.config.service_health_timeout_s,
             lambda: self.public_identity_ready(identity),
+        )
+        self.wait_for(
+            "ready-provider floor",
+            self.config.provider_recovery_timeout_s,
+            self.ready_provider_floor_met,
         )
         if legacy_rollback_version is None:
             if self.config.buyer_canary_mode == BUYER_CANARY_MODE_REQUIRED:
