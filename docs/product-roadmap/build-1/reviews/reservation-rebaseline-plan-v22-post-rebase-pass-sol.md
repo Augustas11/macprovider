@@ -1,0 +1,7 @@
+# Build 1 v22 plan: independent post-rebase combined gate
+
+Status: **PASS — 0 Critical, 0 High, 0 Medium**. Native GPT-5.6 Sol read-only review of immutable HEAD `641def2c5588179fb4b564ae10226f70fa473914`, rebased onto `origin/main` `5ef8da5742e73892cd9f8e6be2e6ca2c5aca1145`. Exact SHA-256: SPEC-044 v0.2.10 `5333dbd2a4c86de0bda2832703cf4162b47a6583c3b391dd652a57c441e2dbd7`; v22 plan `91c846f6b56976c20bc52f65ad72db8642fbbf702e53847ec0cf1517a9c44c67`; v22 test specification `24e361052c6bb81508d41a4cccba9fc401543bc9f1c9b129c9f110d78d91da2c`.
+
+The newly landed SPEC-047 v0.1.9 `coordinator:offer_rejected` reservation is reconciled: the 12-value wire decoder remains closed-compatible, but current coordinator claims are inconsistent/non-actionable, with unavailable economics and no Prepare/admission/pricing authority. The v22 addenda narrowly supersede inherited v20 positive matrix tests while preserving valid local and coordinator `not_offered` cases. Prior seven-kind temp, lock graph, pending/deletion roll-forward and saved-root staging resolutions remain in force; new Pearl release-proof changes have no local preparation contract overlap. SPEC governance passed against the new base. No Swift runtime or physical acceptance is implied.
+
+One Low editorial issue remains: the explanatory SPEC-044 conformance gap rationale still describes v0.2.8 while the record and current authority are v0.2.10. The Swift app/CLI `offer_rejected` quarantine and the broader preparation journey remain implementation work, not reviewed behavior.
