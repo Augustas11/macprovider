@@ -1,12 +1,12 @@
 # SPEC-044 - Malibu Model Catalog Economics
 
-**Version:** 0.2.9
+**Version:** 0.2.10
 
 ```json
 {
   "spec_id": "SPEC-044",
   "title": "Malibu Model Catalog Economics",
-  "version": "0.2.9",
+  "version": "0.2.10",
   "path": "specs/SPEC-044-malibu-model-catalog-economics.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -36,7 +36,7 @@
     "verdict": "DECISION_REQUIRED",
     "owner": "@Augustas11",
     "issue": "https://github.com/Augustas11/macprovider/issues/614",
-    "rationale": "The operator-owned v0.2.9 authority retains the accepted formal Build 1 decisions and adds conditional crash roll-forward for exact cancel-visible finals and published/staging cleanup phase finals after interrupted parent barriers. Implementation, complete tests, signed release evidence, and the discovery/admission/settlement journeys remain pending."
+    "rationale": "The operator-owned v0.2.10 authority retains the accepted Build 1 decisions and reconciles the reserved, unreachable v0.2 coordinator offer_rejected state with fail-closed local preparation and economics projection. Implementation, complete tests, signed release evidence, and the discovery/admission/settlement journeys remain pending."
   }
 }
 ```
@@ -437,11 +437,29 @@ insufficient.
 |---|---|---|
 | `local_default` with `local_only`, `not_offered`, or `offerable` | `fallback`, `stale`, `blocked`, or `unavailable` | Locally motivated `prepare_model` MAY be available only when the verified signed primary `mlx_safetensors` artifact binding is current, `fit: fits`, `runtime_state: needs_preparation`, `action_model_id` is non-null, exact `estimated_bytes` is positive and at most 1 TiB, and no non-economic safety/storage block applies. Hide rates, payouts, provider share, and demand motivation; preserve the authoritative earning verdict and admission disclosure. |
 | `local_default` with any state | `trusted` | Invalid projection combination. Hide economics and disable Prepare with generic unsupported/action-unavailable copy. |
-| `coordinator` with `not_offered`, `offer_submitted`, `offer_rejected`, `sandbox_probe_only`, `network_visible_unpriced`, `network_admitted_unsettled`, `withdrawn`, or `revoked` | `fallback`, `stale`, `blocked`, or `unavailable` | The same locally motivated eligibility and copy MAY apply. Hide rates, payouts, provider share, and demand motivation; preserve the wire earning verdict and admission disclosure. |
-| Those non-priced coordinator states | `trusted` | Invalid because `catalog_economics_permitted` is false. Hide economics and disable Prepare with generic unsupported/action-unavailable copy. |
+| `coordinator` with `not_offered`, `offer_submitted`, `sandbox_probe_only`, `network_visible_unpriced`, `network_admitted_unsettled`, `withdrawn`, or `revoked` | `fallback`, `stale`, `blocked`, or `unavailable` | The same locally motivated eligibility and copy MAY apply. Hide rates, payouts, provider share, and demand motivation; preserve the wire earning verdict and admission disclosure. |
+| `coordinator` with `offer_rejected` | Any | Reserved wire value with no reachable coordinator origin in SPEC-047 v0.2. Decode the known enum for compatibility, but treat a current row as inconsistent and non-actionable; do not offer Prepare or infer an authoritative rejection event. Hide economics and use generic unsupported/action-unavailable copy. |
+| The reachable non-priced coordinator states in the first coordinator row | `trusted` | Invalid because `catalog_economics_permitted` is false. Hide economics and disable Prepare with generic unsupported/action-unavailable copy. |
 | `coordinator` with `catalog_priced` or `settlement_capable`, with `catalog_economics_permitted: true` | `trusted` | Trusted-economics `prepare_model` MAY be available when the same artifact, fit, runtime, target, size, and safety/storage prerequisites pass. Trusted rates may be shown under R004; earning/settlement copy still follows the admission state. |
 | `coordinator` with `catalog_priced` or `settlement_capable` | `fallback`, `stale`, `blocked`, or `unavailable` | Only the locally motivated classification MAY be available under the same prerequisites. Hide or neutralize rates, payouts, provider share, and demand for the action. |
 | Any source/state mismatch, malformed admission, inconsistent booleans, or any other combination | Any | Unavailable. Hide economics and use generic unsupported/action-unavailable copy. |
+
+For the current SPEC-047 v0.2 authority, `offer_rejected` remains one of the
+12 closed admission enum values so a decoder can recognize the wire value, but
+no coordinator origin can append it. A projected
+`source: "coordinator", state: "offer_rejected"` row is therefore inconsistent
+regardless of a claimed `coordinator_event_id`, observed time, economics class,
+or otherwise verified local artifact. The CLI MUST project it with
+`economics_state: "unavailable"`, `rate_source: "none"`, false
+`catalog_economics_permitted` and `settlement_capable`, null rate-card identity,
+rate, provider-share, payout, and demand fields, and every action unavailable.
+Malibu MUST show only generic unsupported/action-unavailable copy for that row;
+it MUST NOT present the claimed rejection as an authoritative admission event,
+show paid-admission, trust, pricing, or earning copy, or enable
+`prepare_model`. Neither CLI nor Malibu may synthesize a coordinator event to
+make the row appear reachable. This restriction does not change locally
+motivated Prepare for valid `local_default:not_offered` or authoritative
+`coordinator:not_offered` and the other reachable matrix states.
 
 For every locally motivated row, the exact app-localizable English source copy
 is: label **Prepare locally**; detail **Download and verify this model for local
@@ -1249,6 +1267,18 @@ boundaries:
   authoritative explicit-null-event response; reject null for every other
   coordinator state and reject any no-event row with a candidate/source/digest,
   timestamp, state, or guidance mismatch;
+- retain `offer_rejected` in the 12-value closed admission decoder, then inject
+  only synthetic current `coordinator:offer_rejected` inputs with both a null
+  event id and a claimed syntactically valid event id, each economics class,
+  and even otherwise valid signed artifact, fit, and storage prerequisites.
+  Every case MUST remain an inconsistent, non-actionable row with
+  `economics_state: "unavailable"`, `rate_source: "none"`, both admission
+  authorization booleans false, all nullable rate-card/rate/share/payout and
+  demand fields null, and all actions unavailable. One-fault mutations of each
+  forbidden field or action MUST fail closed in Malibu; require no Prepare,
+  authoritative rejection, paid admission, trust, pricing, or earning copy and
+  no synthesized coordinator event. Reprove valid `local_default:not_offered`
+  and authoritative `coordinator:not_offered` preparation positives separately;
 - table-test the in-lock cancellation-ack predicate precedence under concurrent
   active, ordinary terminal, failed-dispatch pending/history, projected,
   exact-marker, mismatched-marker, and new-attempt states, including transaction
@@ -1409,13 +1439,13 @@ The first journey id is `JOURNEY-MALIBU-MODEL-ECONOMICS`. The journey should cov
 
 | Requirement/domain | Verdict | Owner | Issue | Evidence needed |
 |---|---|---|---|---|
-| `SPEC-044-R001..R012` | `DECISION_REQUIRED` | `@Augustas11` | `#614` | Implement the approved v0.2.9 projection, category-aware compatibility negotiation, transaction, failed-dispatch, cancellation, preparation-copy, cleanup, and accounting authority; then decide promotion only after automated tests and signed release evidence. |
+| `SPEC-044-R001..R012` | `DECISION_REQUIRED` | `@Augustas11` | `#614` | Implement the approved v0.2.10 projection, category-aware compatibility negotiation, transaction, failed-dispatch, cancellation, preparation-copy, cleanup, and accounting authority; then decide promotion only after automated tests and signed release evidence. |
 | `malibu-model-economics-ux` | `DECISION_REQUIRED` | `@Augustas11` | `#614` | Implement the operator-approved CLI-owned projection and Malibu rendering without app-side feed verification; production enablement remains an operator decision. |
 | `SPEC-046/SPEC-047 integration` | `DECISION_REQUIRED` | `@Augustas11` | `#1240` | Approval that SPEC-044 is narrowed to network economics and does not own provider-local BYOM discovery or network admission. |
 
 ## 6. Evidence
 
-Current implementation evidence predates the v0.2.9 Build 1 authority and is
+Current implementation evidence predates the v0.2.10 Build 1 authority and is
 partial and non-conformant:
 
 - `phase3-binary/app/Sources/Malibu/ModelManagement/ModelManagement.swift` already capability-gates model management and classifies current, ready, preparation-required, and blocked rows, but its row schema does not carry rate-card economics.
@@ -1445,6 +1475,13 @@ The app should preserve the current provider mental model: Malibu observes and a
 
 ## 8. Changelog and history
 
+- 0.2.10 - Aligns Build 1 preparation with SPEC-047 v0.1.9: the closed decoder
+  still recognizes `offer_rejected`, but no v0.2 coordinator origin can append
+  it. A current coordinator row claiming that state is inconsistent and cannot
+  authorize Prepare, paid admission, trusted/priced economics, or any action;
+  the valid local and coordinator `not_offered` paths remain eligible under
+  their existing prerequisites. Synthetic negative fixtures prove the boundary
+  without inventing a coordinator event. Conformance remains pending.
 - 0.2.9 - Closes the interrupted-final-rename gap: exact surviving cancel-visible
   finals require parent barriers and readback before a direct-cancel claim;
   failed-dispatch pending may roll forward without stdout replay; and published
