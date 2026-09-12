@@ -130,6 +130,7 @@ struct ModelCatalogEconomicsWire: Codable, Equatable, Sendable {
         let disabledReason: String?
         let warningCodes: [String]
         let admission: Admission
+        let providerGuidance: BYOMDiscoveryWire.Guidance
         let rateCardVersion: String?
         let rateCardGeneratedAt: String?
         let rateCardKey: String?
@@ -163,6 +164,7 @@ struct ModelCatalogEconomicsWire: Codable, Equatable, Sendable {
             case disabledReason = "disabled_reason"
             case warningCodes = "warning_codes"
             case admission
+            case providerGuidance = "provider_guidance"
             case rateCardVersion = "rate_card_version"
             case rateCardGeneratedAt = "rate_card_generated_at"
             case rateCardKey = "rate_card_key"
@@ -198,6 +200,7 @@ struct ModelCatalogEconomicsWire: Codable, Equatable, Sendable {
             try encodeNullable(disabledReason, forKey: .disabledReason, into: &container)
             try container.encode(warningCodes, forKey: .warningCodes)
             try container.encode(admission, forKey: .admission)
+            try container.encode(providerGuidance, forKey: .providerGuidance)
             try encodeNullable(rateCardVersion, forKey: .rateCardVersion, into: &container)
             try encodeNullable(rateCardGeneratedAt, forKey: .rateCardGeneratedAt, into: &container)
             try encodeNullable(rateCardKey, forKey: .rateCardKey, into: &container)
@@ -406,6 +409,7 @@ struct ModelCatalogEconomicsBuilder {
             ),
             warningCodes: Array(warnings).sorted(),
             admission: admission,
+            providerGuidance: status?.providerGuidance ?? candidate.providerGuidance,
             rateCardVersion: economics.rateCardVersion,
             rateCardGeneratedAt: economics.rateCardGeneratedAt,
             rateCardKey: economics.rateCardKey,
@@ -459,6 +463,7 @@ struct ModelCatalogEconomicsBuilder {
             disabledReason: "no_cli_transaction_available",
             warningCodes: ["admission_state_not_settlement_capable", "model_not_local", "action_unavailable"],
             admission: admission,
+            providerGuidance: BYOMDiscoveryGuidance.guidance(forAdmissionState: "not_offered", warnings: []),
             rateCardVersion: nil,
             rateCardGeneratedAt: nil,
             rateCardKey: nil,
