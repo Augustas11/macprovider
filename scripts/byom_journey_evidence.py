@@ -725,6 +725,16 @@ ADMISSION_WITHDRAW_ENVELOPE_KEYS = frozenset({
     "previous_admission_state", "coordinator_event_id", "accepted_at",
     "resulting_admission_state", "provider_guidance", "warnings",
 })
+# SPEC-047 `models admission withdraw --reason-code`: the closed v0.1 enum
+# (mirrors BYOMWithdrawalBuilder.reasonCodes in the CLI).
+ADMISSION_WITHDRAWAL_REASON_CODES = frozenset({
+    "provider_requested",
+    "wrong_model",
+    "runtime_unavailable",
+    "identity_mismatch",
+    "policy_uncertain",
+    "other_operator_reason",
+})
 ADMISSION_STATE_SOURCES = frozenset({"local_default", "coordinator"})
 # SPEC-046-R003 `admission_state`, all twelve values.
 ADMISSION_STATES = frozenset({
@@ -1121,7 +1131,7 @@ def _validate_admission_withdraw(parsed: dict[str, Any], location: str) -> None:
     require_text(parsed["served_model_ref"], location + ".served_model_ref")
     require_nullable(parsed["catalog_model_key"], location + ".catalog_model_key", require_text)
     require_text(parsed["idempotency_key"], location + ".idempotency_key")
-    require_text(parsed["reason_code"], location + ".reason_code")
+    require_enum(parsed["reason_code"], ADMISSION_WITHDRAWAL_REASON_CODES, location + ".reason_code")
     previous = require_enum(
         parsed["previous_admission_state"], COORDINATOR_ADMISSION_STATES, location + ".previous_admission_state"
     )
