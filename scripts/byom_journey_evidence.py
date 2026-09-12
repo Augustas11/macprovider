@@ -660,7 +660,7 @@ CATALOG_ECONOMICS_ROW_KEYS = frozenset({
     "provider_completion_payout_usd_per_million_tokens", "provider_share_bps",
     "rate_source", "rate_card_key", "rate_card_version", "rate_card_generated_at",
     "adopt_recommendation", "prepare", "evaluate", "switch", "cleanup_staging",
-    "disabled_reason", "warning_codes",
+    "disabled_reason", "warning_codes", "provider_guidance",
 })
 CATALOG_ECONOMICS_ADMISSION_KEYS = frozenset({
     "state", "source", "settlement_capable", "catalog_economics_permitted",
@@ -1130,6 +1130,7 @@ def _validate_catalog_economics(parsed: dict[str, Any], location: str) -> None:
             row["admission"], CATALOG_ECONOMICS_ADMISSION_KEYS, where + ".admission"
         )
         _require_admission_pair(admission, "state", "source", where + ".admission")
+        _validate_guidance(row, where)
         require_bool(
             admission["catalog_economics_permitted"],
             where + ".admission.catalog_economics_permitted",
