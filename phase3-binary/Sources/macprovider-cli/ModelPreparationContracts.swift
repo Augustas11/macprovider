@@ -14,6 +14,7 @@ enum ModelPreparationContracts {
     static let activeRecordMaxBytes = 65_536
     static let deletionRecordMaxBytes = 32_768
     static let publicationReceiptMaxBytes = 16_384
+    static let uniqueTempEnvelopeMaxBytes = 270_336
     static let reservationHistoryMaxBytes = 262_144
     static let inventoryMaxBytes = 262_144
     static let maxJavaScriptSafeInteger = 9_007_199_254_740_991
@@ -1657,43 +1658,141 @@ struct ModelPreparationCleanupRecord: Codable, Equatable, Sendable {
     }
 }
 
+enum ModelPreparationUniqueTempRecordKind: String, Codable, CaseIterable, Sendable {
+    case failedDispatch = "failed_dispatch"
+    case transactionEvent = "transaction_event"
+    case cancelAcknowledgement = "cancel_acknowledgement"
+    case activeRecord = "active_record"
+    case cleanupRecord = "cleanup_record"
+    case reservationHistory = "reservation_history"
+    case inventory = "inventory"
+}
+
 struct ModelPreparationUniqueTempRecord: Codable, Equatable, Sendable {
     let schema: String
-    let targetKind: String
+    let recordKind: ModelPreparationUniqueTempRecordKind
+    let targetLeaf: String
+    let writerUUID: String
     let generation: Int
-    let checksumSHA256: String
-    let complete: Bool
+    let payload: Data
+    let payloadSHA256: String
 
     enum CodingKeys: String, CodingKey, CaseIterable {
         case schema
-        case targetKind = "target_kind"
+        case recordKind = "record_kind"
+        case targetLeaf = "target_leaf"
+        case writerUUID = "writer_uuid"
         case generation
-        case checksumSHA256 = "checksum_sha256"
-        case complete
+        case payloadBase64 = "payload_base64"
+        case payloadSHA256 = "payload_sha256"
     }
 
-    init(schema: String = "model_catalog_unique_temp.v1", targetKind: String, generation: Int, checksumSHA256: String, complete: Bool) throws {
-        guard schema == "model_catalog_unique_temp.v1" else { throw ModelPreparationContractError.malformed("schema") }
-        try ModelPreparationContracts.requireSafeString(targetKind, field: "target_kind", maxUTF8Bytes: 128)
+    init(
+        schema: String = "model_catalog_unique_temp.v2",
+        recordKind: ModelPreparationUniqueTempRecordKind,
+        targetLeaf: String,
+        writerUUID: String,
+        generation: Int,
+        payload: Data,
+        payloadSHA256: String? = nil
+    ) throws {
+        guard schema == "model_catalog_unique_temp.v2" else { throw ModelPreparationContractError.malformed("schema") }
+        let expectedLeaf = Self.expectedTargetLeaf(for: recordKind)
+        try ModelPreparationContracts.requirePathLeaf(targetLeaf, field: "target_leaf")
+        guard targetLeaf == expectedLeaf else { throw ModelPreparationContractError.bindingMismatch("target_leaf") }
+        try ModelPreparationContracts.requireUUIDv4(writerUUID, field: "writer_uuid")
         try ModelPreparationContracts.requireNonNegativeSafeInteger(generation, field: "generation")
-        try ModelPreparationContracts.requireHex64(checksumSHA256, field: "checksum_sha256")
+        let payloadMaxBytes = Self.payloadMaxBytes(for: recordKind)
+        guard payload.count <= payloadMaxBytes else {
+            throw ModelPreparationContractError.overLimit(limit: payloadMaxBytes)
+        }
+        let expectedPayloadSHA256 = ModelPreparationContracts.sha256Hex(for: payload)
+        if let payloadSHA256 {
+            try ModelPreparationContracts.requireHex64(payloadSHA256, field: "payload_sha256")
+            guard payloadSHA256 == expectedPayloadSHA256 else {
+                throw ModelPreparationContractError.bindingMismatch("payload_sha256")
+            }
+        }
         self.schema = schema
-        self.targetKind = targetKind
+        self.recordKind = recordKind
+        self.targetLeaf = targetLeaf
+        self.writerUUID = writerUUID
         self.generation = generation
-        self.checksumSHA256 = checksumSHA256
-        self.complete = complete
+        self.payload = payload
+        self.payloadSHA256 = expectedPayloadSHA256
+        _ = try ModelPreparationContracts.encode(self, maxBytes: ModelPreparationContracts.uniqueTempEnvelopeMaxBytes)
     }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         try container.requireExactlyKeys(CodingKeys.self)
+        let payloadBase64 = try container.decode(String.self, forKey: .payloadBase64)
+        guard let payload = Data(base64Encoded: payloadBase64) else {
+            throw ModelPreparationContractError.malformed("payload_base64")
+        }
         try self.init(
             schema: try container.decode(String.self, forKey: .schema),
-            targetKind: try container.decode(String.self, forKey: .targetKind),
+            recordKind: try container.decode(ModelPreparationUniqueTempRecordKind.self, forKey: .recordKind),
+            targetLeaf: try container.decode(String.self, forKey: .targetLeaf),
+            writerUUID: try container.decode(String.self, forKey: .writerUUID),
             generation: try container.decode(Int.self, forKey: .generation),
-            checksumSHA256: try container.decode(String.self, forKey: .checksumSHA256),
-            complete: try container.decode(Bool.self, forKey: .complete)
+            payload: payload,
+            payloadSHA256: try container.decode(String.self, forKey: .payloadSHA256)
         )
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(schema, forKey: .schema)
+        try container.encode(recordKind, forKey: .recordKind)
+        try container.encode(targetLeaf, forKey: .targetLeaf)
+        try container.encode(writerUUID, forKey: .writerUUID)
+        try container.encode(generation, forKey: .generation)
+        try container.encode(payload.base64EncodedString(), forKey: .payloadBase64)
+        try container.encode(payloadSHA256, forKey: .payloadSHA256)
+    }
+
+    static func expectedTargetLeaf(for recordKind: ModelPreparationUniqueTempRecordKind) -> String {
+        switch recordKind {
+        case .failedDispatch: return "failed-dispatch.json"
+        case .transactionEvent: return "transaction-event.json"
+        case .cancelAcknowledgement: return "cancel-acknowledgement.json"
+        case .activeRecord: return "active.json"
+        case .cleanupRecord: return "cleanup-record.json"
+        case .reservationHistory: return "reservation-history.json"
+        case .inventory: return "inventory.json"
+        }
+    }
+
+    static func payloadMaxBytes(for recordKind: ModelPreparationUniqueTempRecordKind) -> Int {
+        switch recordKind {
+        case .failedDispatch: return ModelPreparationContracts.failedDispatchMaxBytes
+        case .transactionEvent: return ModelPreparationContracts.eventMaxBytes
+        case .cancelAcknowledgement: return ModelPreparationContracts.cancelAcknowledgementMaxBytes
+        case .activeRecord: return ModelPreparationContracts.activeRecordMaxBytes
+        case .cleanupRecord: return ModelPreparationContracts.deletionRecordMaxBytes
+        case .reservationHistory: return ModelPreparationContracts.reservationHistoryMaxBytes
+        case .inventory: return ModelPreparationContracts.inventoryMaxBytes
+        }
+    }
+
+    static func expectedFilename(recordKind: ModelPreparationUniqueTempRecordKind, targetLeaf: String, writerUUID: String) throws -> String {
+        try ModelPreparationContracts.requirePathLeaf(targetLeaf, field: "target_leaf")
+        guard targetLeaf == expectedTargetLeaf(for: recordKind) else {
+            throw ModelPreparationContractError.bindingMismatch("target_leaf")
+        }
+        try ModelPreparationContracts.requireUUIDv4(writerUUID, field: "writer_uuid")
+        return "\(targetLeaf).\(writerUUID).tmp"
+    }
+
+    func expectedFilename() throws -> String {
+        try Self.expectedFilename(recordKind: recordKind, targetLeaf: targetLeaf, writerUUID: writerUUID)
+    }
+
+    func validateFilename(_ filename: String) throws {
+        guard filename == (try expectedFilename()) else {
+            throw ModelPreparationContractError.bindingMismatch("filename")
+        }
     }
 }
 

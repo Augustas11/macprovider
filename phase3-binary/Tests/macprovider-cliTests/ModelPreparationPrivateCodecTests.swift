@@ -272,7 +272,7 @@ final class ModelPreparationPrivateCodecTests: XCTestCase {
             available: true,
             requiresConfirmation: true,
             transactionKind: .cleanupPublishedArtifact,
-            transactionID: "22222222-2222-4222-8222-222222222222",
+            transactionID: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
             actionTimeoutSeconds: 30,
             estimatedBytes: 4096,
             unavailableReason: nil,
@@ -683,8 +683,8 @@ final class ModelPreparationPrivateCodecTests: XCTestCase {
         }
         let eventJSON = String(decoding: try ModelPreparationContracts.encode(try Self.failedEvent()), as: UTF8.self)
         XCTAssertThrowsError(try ModelPreparationContracts.decode(ModelPreparationTransactionEvent.self, from: Data(eventJSON.replacingOccurrences(of: #""event_sequence":1"#, with: #""event_sequence":1.0"#).utf8), maxBytes: ModelPreparationContracts.eventMaxBytes))
-        let tempJSON = #"{"checksum_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","complete":true,"generation":1.0,"schema":"model_catalog_unique_temp.v1","target_kind":"cleanup"}"#
-        XCTAssertThrowsError(try ModelPreparationContracts.decode(ModelPreparationUniqueTempRecord.self, from: Data(tempJSON.utf8), maxBytes: 1024))
+        let tempJSON = String(decoding: try ModelPreparationContracts.encode(try Self.uniqueTempRecord()), as: UTF8.self)
+        XCTAssertThrowsError(try ModelPreparationContracts.decode(ModelPreparationUniqueTempRecord.self, from: Data(tempJSON.replacingOccurrences(of: #""generation":1"#, with: #""generation":1.0"#).utf8), maxBytes: ModelPreparationContracts.uniqueTempEnvelopeMaxBytes))
         let actionJSON = String(decoding: try ModelPreparationContracts.encode(try Self.cleanupRecord(phase: .intent, targetKind: .published)), as: UTF8.self)
         XCTAssertThrowsError(try ModelPreparationContracts.decode(ModelPreparationCleanupRecord.self, from: Data(actionJSON.replacingOccurrences(of: #""estimated_bytes":4096"#, with: #""estimated_bytes":4096.0"#).utf8), maxBytes: ModelPreparationContracts.deletionRecordMaxBytes))
     }
@@ -745,7 +745,92 @@ final class ModelPreparationPrivateCodecTests: XCTestCase {
             errorCode: .operationConflict,
             warningCode: nil
         ))
-        XCTAssertThrowsError(try ModelPreparationUniqueTempRecord(targetKind: "cleanup", generation: ModelPreparationContracts.maxJavaScriptSafeInteger + 1, checksumSHA256: Self.hexA, complete: true))
+        XCTAssertThrowsError(try ModelPreparationUniqueTempRecord(
+            recordKind: .cleanupRecord,
+            targetLeaf: ModelPreparationUniqueTempRecord.expectedTargetLeaf(for: .cleanupRecord),
+            writerUUID: Self.writerUUID,
+            generation: ModelPreparationContracts.maxJavaScriptSafeInteger + 1,
+            payload: Data(#"{}"#.utf8)
+        ))
+    }
+
+    func testUniqueTempEnvelopeRoundTripSerializationAndFilename() throws {
+        let record = try Self.uniqueTempRecord(payload: Data(#"{"ok":true}"#.utf8))
+        let data = try ModelPreparationContracts.encode(record, maxBytes: ModelPreparationContracts.uniqueTempEnvelopeMaxBytes)
+        let json = String(decoding: data, as: UTF8.self)
+        XCTAssertEqual(
+            json,
+            #"{"generation":1,"payload_base64":"eyJvayI6dHJ1ZX0=","payload_sha256":"\#(ModelPreparationContracts.sha256Hex(for: Data(#"{"ok":true}"#.utf8)))","record_kind":"active_record","schema":"model_catalog_unique_temp.v2","target_leaf":"active.json","writer_uuid":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}"#
+        )
+        let decoded = try ModelPreparationContracts.decode(
+            ModelPreparationUniqueTempRecord.self,
+            from: data,
+            maxBytes: ModelPreparationContracts.uniqueTempEnvelopeMaxBytes
+        )
+        XCTAssertEqual(decoded, record)
+        XCTAssertEqual(try record.expectedFilename(), "active.json.aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.tmp")
+        XCTAssertNoThrow(try record.validateFilename("active.json.aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.tmp"))
+    }
+
+    func testUniqueTempEnvelopeRejectsMalformedBindingsAndCaps() throws {
+        let record = try Self.uniqueTempRecord()
+        let data = try ModelPreparationContracts.encode(record, maxBytes: ModelPreparationContracts.uniqueTempEnvelopeMaxBytes)
+        var object = try Self.object(data)
+
+        object["record_kind"] = "unknown_kind"
+        XCTAssertThrowsError(try Self.decodeTemp(object))
+
+        object = try Self.object(data)
+        object["target_leaf"] = "cleanup-record.json"
+        XCTAssertThrowsError(try Self.decodeTemp(object))
+
+        object = try Self.object(data)
+        object["target_leaf"] = "../active.json"
+        XCTAssertThrowsError(try Self.decodeTemp(object))
+
+        object = try Self.object(data)
+        object["writer_uuid"] = "22222222-2222-1222-8222-222222222222"
+        XCTAssertThrowsError(try Self.decodeTemp(object))
+
+        object = try Self.object(data)
+        object["writer_uuid"] = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".uppercased()
+        XCTAssertThrowsError(try Self.decodeTemp(object))
+
+        XCTAssertThrowsError(try record.validateFilename("active.json.bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb.tmp"))
+
+        object = try Self.object(data)
+        object["payload_base64"] = Data(#"{"ok":false}"#.utf8).base64EncodedString()
+        XCTAssertThrowsError(try Self.decodeTemp(object))
+
+        XCTAssertThrowsError(try ModelPreparationUniqueTempRecord(
+            recordKind: .activeRecord,
+            targetLeaf: "active.json",
+            writerUUID: Self.writerUUID,
+            generation: 1,
+            payload: Data(#"{"ok":true}"#.utf8),
+            payloadSHA256: Self.hexA
+        ))
+
+        object = try Self.object(data)
+        object.removeValue(forKey: "payload_sha256")
+        XCTAssertThrowsError(try Self.decodeTemp(object))
+
+        object = try Self.object(data)
+        object["extra"] = true
+        XCTAssertThrowsError(try Self.decodeTemp(object))
+
+        let duplicate = Data(#"{"generation":1,"payload_base64":"e30=","payload_sha256":"44136fa355b3678a1146ad16f7e8649e94fb4f4e304fcba92fbf8a0a99603f3f","record_kind":"active_record","record_kind":"active_record","schema":"model_catalog_unique_temp.v2","target_leaf":"active.json","writer_uuid":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}"#.utf8)
+        XCTAssertThrowsError(try ModelPreparationContracts.decode(ModelPreparationUniqueTempRecord.self, from: duplicate, maxBytes: ModelPreparationContracts.uniqueTempEnvelopeMaxBytes))
+
+        XCTAssertThrowsError(try ModelPreparationUniqueTempRecord(
+            recordKind: .cancelAcknowledgement,
+            targetLeaf: ModelPreparationUniqueTempRecord.expectedTargetLeaf(for: .cancelAcknowledgement),
+            writerUUID: Self.writerUUID,
+            generation: 1,
+            payload: Data(count: ModelPreparationContracts.cancelAcknowledgementMaxBytes + 1)
+        ))
+
+        XCTAssertThrowsError(try ModelPreparationContracts.encode(record, maxBytes: data.count - 1))
     }
 
     func testClosedAdmissionInventoryAndExactCopyConstants() {
@@ -788,6 +873,7 @@ final class ModelPreparationPrivateCodecTests: XCTestCase {
 
     private static let transactionID = "00000000-0000-4000-8000-000000000001"
     private static let attemptID = "11111111-1111-4111-8111-111111111111"
+    private static let writerUUID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
     private static let timestamp = "2026-09-12T00:00:00.000Z"
     private static let hexA = String(repeating: "a", count: 64)
     private static let hexB = String(repeating: "b", count: 64)
@@ -951,6 +1037,16 @@ final class ModelPreparationPrivateCodecTests: XCTestCase {
     }
 
 
+    private static func uniqueTempRecord(payload: Data = Data(#"{}"#.utf8)) throws -> ModelPreparationUniqueTempRecord {
+        try ModelPreparationUniqueTempRecord(
+            recordKind: .activeRecord,
+            targetLeaf: ModelPreparationUniqueTempRecord.expectedTargetLeaf(for: .activeRecord),
+            writerUUID: writerUUID,
+            generation: 1,
+            payload: payload
+        )
+    }
+
     private static func failedEvent() throws -> ModelPreparationTransactionEvent {
         try ModelPreparationTransactionEvent(
             transactionID: transactionID,
@@ -1008,6 +1104,14 @@ final class ModelPreparationPrivateCodecTests: XCTestCase {
 
     private static func data(_ object: [String: Any]) throws -> Data {
         try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+    }
+
+    private static func decodeTemp(_ object: [String: Any]) throws -> ModelPreparationUniqueTempRecord {
+        try ModelPreparationContracts.decode(
+            ModelPreparationUniqueTempRecord.self,
+            from: data(object),
+            maxBytes: ModelPreparationContracts.uniqueTempEnvelopeMaxBytes
+        )
     }
 
     private static func decodeFailed(_ object: [String: Any]) throws -> ModelPreparationFailedDispatchRecord {
