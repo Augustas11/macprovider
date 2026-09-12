@@ -105,6 +105,18 @@ struct ModelCatalogEconomicsWire: Codable, Equatable, Sendable {
             )
         }
 
+        static func evaluateModel(transactionID: String, timeoutSeconds: Int = 10) -> Action {
+            Action(
+                available: true,
+                requiresConfirmation: false,
+                transactionKind: "evaluate_model",
+                transactionID: transactionID,
+                actionTimeoutSeconds: timeoutSeconds,
+                estimatedBytes: nil,
+                unavailableReason: nil
+            )
+        }
+
         func encode(to encoder: Encoder) throws {
             var container = encoder.container(keyedBy: CodingKeys.self)
             try container.encode(available, forKey: .available)
@@ -130,6 +142,7 @@ struct ModelCatalogEconomicsWire: Codable, Equatable, Sendable {
         let disabledReason: String?
         let warningCodes: [String]
         let admission: Admission
+        let providerGuidance: BYOMDiscoveryWire.Guidance
         let rateCardVersion: String?
         let rateCardGeneratedAt: String?
         let rateCardKey: String?
@@ -163,6 +176,7 @@ struct ModelCatalogEconomicsWire: Codable, Equatable, Sendable {
             case disabledReason = "disabled_reason"
             case warningCodes = "warning_codes"
             case admission
+            case providerGuidance = "provider_guidance"
             case rateCardVersion = "rate_card_version"
             case rateCardGeneratedAt = "rate_card_generated_at"
             case rateCardKey = "rate_card_key"
@@ -198,6 +212,7 @@ struct ModelCatalogEconomicsWire: Codable, Equatable, Sendable {
             try encodeNullable(disabledReason, forKey: .disabledReason, into: &container)
             try container.encode(warningCodes, forKey: .warningCodes)
             try container.encode(admission, forKey: .admission)
+            try container.encode(providerGuidance, forKey: .providerGuidance)
             try encodeNullable(rateCardVersion, forKey: .rateCardVersion, into: &container)
             try encodeNullable(rateCardGeneratedAt, forKey: .rateCardGeneratedAt, into: &container)
             try encodeNullable(rateCardKey, forKey: .rateCardKey, into: &container)
@@ -388,6 +403,7 @@ struct ModelCatalogEconomicsBuilder {
         let actionUnavailable = candidate.catalogModelKey == nil
             ? "model_not_supported"
             : "action_unavailable"
+        let evaluateAction = Self.evaluateAction(for: candidate, actionUnavailable: actionUnavailable)
         return ModelCatalogEconomicsWire.Row(
             modelKey: modelKey,
             servedModelID: candidate.servedModelRef,
@@ -406,6 +422,7 @@ struct ModelCatalogEconomicsBuilder {
             ),
             warningCodes: Array(warnings).sorted(),
             admission: admission,
+            providerGuidance: status?.providerGuidance ?? candidate.providerGuidance,
             rateCardVersion: economics.rateCardVersion,
             rateCardGeneratedAt: economics.rateCardGeneratedAt,
             rateCardKey: economics.rateCardKey,
@@ -422,10 +439,25 @@ struct ModelCatalogEconomicsBuilder {
             supplyDeficitScore: economics.state == "trusted" ? demandRow?.effectiveSupplyDeficitMultiplier : nil,
             switchAction: .unavailable(actionUnavailable),
             prepare: .unavailable(actionUnavailable),
-            evaluate: .unavailable("use_models_evaluate"),
+            evaluate: evaluateAction,
             adoptRecommendation: .unavailable(actionUnavailable),
             cleanupStaging: .unavailable("staging_cleanup_not_required")
         )
+    }
+
+    private static func evaluateAction(
+        for candidate: BYOMDiscoveryWire.Candidate,
+        actionUnavailable: String
+    ) -> ModelCatalogEconomicsWire.Action {
+        let evaluatable = candidate.candidateID.hasPrefix("byom_")
+            && !candidate.candidateID.hasPrefix("byom_unstable_")
+            && candidate.readinessState == "ready"
+            && candidate.fitState != "does_not_fit"
+            && Set(candidate.warningCodes).isDisjoint(with: BYOMDiscoveryWarning.submitBlockingWarningCodes)
+        guard evaluatable else {
+            return .unavailable(actionUnavailable == "model_not_supported" ? actionUnavailable : "candidate_not_evaluatable")
+        }
+        return .evaluateModel(transactionID: UUID().uuidString.lowercased())
     }
 
     private static func makeCatalogOnlyRow(
@@ -459,6 +491,7 @@ struct ModelCatalogEconomicsBuilder {
             disabledReason: "no_cli_transaction_available",
             warningCodes: ["admission_state_not_settlement_capable", "model_not_local", "action_unavailable"],
             admission: admission,
+            providerGuidance: BYOMDiscoveryGuidance.guidance(forAdmissionState: "not_offered", warnings: []),
             rateCardVersion: nil,
             rateCardGeneratedAt: nil,
             rateCardKey: nil,

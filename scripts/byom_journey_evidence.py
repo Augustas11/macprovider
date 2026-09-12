@@ -339,7 +339,7 @@ def write_json_atomically(path: Path, value: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = json.dumps(value, indent=2, sort_keys=False) + "\n"
     with tempfile.NamedTemporaryFile(
-        "w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}.", delete=False
+        "w", encoding="utf-8", newline="", dir=path.parent, prefix=f".{path.name}.", delete=False
     ) as handle:
         temporary = Path(handle.name)
         handle.write(payload)
@@ -660,7 +660,7 @@ CATALOG_ECONOMICS_ROW_KEYS = frozenset({
     "provider_completion_payout_usd_per_million_tokens", "provider_share_bps",
     "rate_source", "rate_card_key", "rate_card_version", "rate_card_generated_at",
     "adopt_recommendation", "prepare", "evaluate", "switch", "cleanup_staging",
-    "disabled_reason", "warning_codes",
+    "disabled_reason", "warning_codes", "provider_guidance",
 })
 CATALOG_ECONOMICS_ADMISSION_KEYS = frozenset({
     "state", "source", "settlement_capable", "catalog_economics_permitted",
@@ -823,6 +823,39 @@ EVALUATION_CAPABILITY_SOURCES = frozenset({
 # are the hash fields the evaluation encoder emits. The R4 audit found a fixture
 # using `completion_sha256`, a key the CLI has never emitted.
 EVALUATION_DIAGNOSTIC_HASH_KEYS = frozenset({"prompt_sha256", "response_body_sha256"})
+# `model_catalog_economics.v1` vocabularies. The specs leave these to the
+# implementation, so the sets are frozen from `ModelCatalogEconomicsWire`.
+CATALOG_ECONOMICS_WARNING_CODES = WARNING_CODES | frozenset({
+    "model_not_local", "model_not_supported", "hardware_fit_unknown",
+    "hardware_does_not_fit", "admission_state_missing",
+    "admission_state_not_settlement_capable", "warm_swap_unavailable",
+    "action_unavailable", "old_cli_fallback", "projection_unavailable",
+    "projection_timeout", "staging_cleanup_required", "feed_fallback",
+    "feed_stale", "feed_signature_invalid", "feed_generation_mismatch",
+    "rate_multiplier_unknown", "catalog_rate_unavailable",
+})
+CATALOG_ECONOMICS_RUNTIME_STATES = frozenset({
+    "current", "ready", "catalog", "needs_preparation", "blocked",
+})
+CATALOG_ECONOMICS_ECONOMICS_STATES = frozenset({
+    "trusted", "fallback", "stale", "blocked", "unavailable",
+})
+CATALOG_ECONOMICS_RATE_SOURCES = frozenset({"none", "static_signed", "live_signed"})
+CATALOG_ECONOMICS_DISABLED_REASONS = frozenset({
+    "action_unavailable", "local_inventory_only", "model_not_local",
+    "model_not_supported", "hardware_fit_unknown", "hardware_does_not_fit",
+    "catalog_rate_unavailable", "admission_state_missing",
+    "admission_state_not_settlement_capable", "projection_unsupported",
+    "staging_cleanup_required", "no_cli_transaction_available",
+})
+CATALOG_ECONOMICS_TRANSACTION_KINDS = frozenset({
+    "switch_model", "switch_model_deferred", "prepare_model", "evaluate_model",
+    "adopt_recommendation", "cleanup_staging",
+})
+CATALOG_ECONOMICS_UNAVAILABLE_REASONS = frozenset({
+    "action_unavailable", "model_not_supported", "candidate_not_evaluatable",
+    "staging_cleanup_not_required", "no_cli_transaction_available",
+})
 
 
 def require_bool(value: Any, where: str) -> bool:
@@ -869,6 +902,13 @@ def require_enum(value: Any, allowed: frozenset[str], where: str) -> str:
     if value not in allowed:
         fail(f"{where} is not a permitted value: {value!r}")
     return value
+
+def require_nullable_enum(
+    value: Any, allowed: frozenset[str], where: str
+) -> str | None:
+    if value is None:
+        return None
+    return require_enum(value, allowed, where)
 
 
 def require_enum_list(value: Any, allowed: frozenset[str], where: str) -> list[str]:
@@ -1121,15 +1161,25 @@ def _validate_catalog_economics(parsed: dict[str, Any], location: str) -> None:
         require_nullable(row["action_model_id"], where + ".action_model_id", require_text)
         require_bool(row["is_current"], where + ".is_current")
         require_bool(row["weights_present_locally"], where + ".weights_present_locally")
-        require_text(row["runtime_state"], where + ".runtime_state")
+        require_enum(
+            row["runtime_state"], CATALOG_ECONOMICS_RUNTIME_STATES,
+            where + ".runtime_state",
+        )
         require_nullable(row["estimated_gb"], where + ".estimated_gb", require_number)
         require_enum(row["fit"], FIT_STATES, where + ".fit")
-        require_nullable(row["disabled_reason"], where + ".disabled_reason", require_text)
-        require_list(row["warning_codes"], where + ".warning_codes")
+        require_nullable_enum(
+            row["disabled_reason"], CATALOG_ECONOMICS_DISABLED_REASONS,
+            where + ".disabled_reason",
+        )
+        require_enum_list(
+            row["warning_codes"], CATALOG_ECONOMICS_WARNING_CODES,
+            where + ".warning_codes",
+        )
         admission = assert_exact_object(
             row["admission"], CATALOG_ECONOMICS_ADMISSION_KEYS, where + ".admission"
         )
         _require_admission_pair(admission, "state", "source", where + ".admission")
+        _validate_guidance(row, where)
         require_bool(
             admission["catalog_economics_permitted"],
             where + ".admission.catalog_economics_permitted",
@@ -1153,22 +1203,52 @@ def _validate_catalog_economics(parsed: dict[str, Any], location: str) -> None:
             require_nullable(row[field], f"{where}.{field}", require_int)
         for field in ("rate_card_version", "rate_card_generated_at", "rate_card_key"):
             require_nullable(row[field], f"{where}.{field}", require_text)
-        require_text(row["rate_source"], where + ".rate_source")
-        require_text(row["economics_state"], where + ".economics_state")
+        require_enum(
+            row["rate_source"], CATALOG_ECONOMICS_RATE_SOURCES,
+            where + ".rate_source",
+        )
+        require_enum(
+            row["economics_state"], CATALOG_ECONOMICS_ECONOMICS_STATES,
+            where + ".economics_state",
+        )
         for field in CATALOG_ECONOMICS_ACTION_FIELDS:
             action = assert_exact_object(
                 row[field], CATALOG_ECONOMICS_ACTION_KEYS, f"{where}.{field}"
             )
             require_bool(action["available"], f"{where}.{field}.available")
             require_bool(action["requires_confirmation"], f"{where}.{field}.requires_confirmation")
-            for nullable_text in ("transaction_kind", "transaction_id", "unavailable_reason"):
-                require_nullable(
-                    action[nullable_text], f"{where}.{field}.{nullable_text}", require_text
-                )
+            require_nullable(
+                action["transaction_kind"], f"{where}.{field}.transaction_kind",
+                lambda value, location: require_enum(
+                    value, CATALOG_ECONOMICS_TRANSACTION_KINDS, location
+                ),
+            )
+            require_nullable(
+                action["transaction_id"], f"{where}.{field}.transaction_id", require_text
+            )
+            require_nullable(
+                action["unavailable_reason"], f"{where}.{field}.unavailable_reason",
+                lambda value, location: require_enum(
+                    value, CATALOG_ECONOMICS_UNAVAILABLE_REASONS, location
+                ),
+            )
             for nullable_int in ("action_timeout_seconds", "estimated_bytes"):
                 require_nullable(
                     action[nullable_int], f"{where}.{field}.{nullable_int}", require_int
                 )
+            if action["available"]:
+                if not (
+                    action["transaction_kind"]
+                    and action["transaction_id"]
+                    and action["action_timeout_seconds"]
+                    and action["unavailable_reason"] is None
+                ):
+                    fail(
+                        f"{where}.{field}: an available action must carry its typed "
+                        "transaction fields and no unavailable_reason"
+                    )
+            elif action["unavailable_reason"] is None:
+                fail(f"{where}.{field}: an unavailable action must carry a reason")
 
 
 def validate_captured_cli_document(schema: Any, parsed: Any, location: str = "$") -> None:
