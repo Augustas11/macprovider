@@ -1,39 +1,199 @@
 {
-  "policy_version": "research-227-v3-engine-v2-daily-top-50",
+  "policy_version": "openrouter-market-feeds-v0.11.0",
   "demand_top_n": 50,
-  "broad_fleet_undercut_fraction": "0.20",
-  "coding_minimum_undercut_fraction": "0.10",
-  "coding_premium_fraction": "0.10",
+  "undercut_fraction": "0.20",
   "models": [
     {
       "source_model_id": "openai/gpt-oss-20b",
       "canonical_model_id": "openai/gpt-oss-20b",
-      "serving_path": {"verification_status": "verified", "reference": "https://huggingface.co/mlx-community/gpt-oss-20b-MXFP4-Q4"},
-      "license": {"commercial_permitted": true, "source_url": "https://huggingface.co/openai/gpt-oss-20b", "verification_note": "Apache-2.0 model-card license."},
-      "profile": {"kind": "broad_fleet", "active_params_b": "3.6", "residency_gb": "10.41", "projected_tps": "52"}
+      "serving_path": {
+        "verification_status": "verified",
+        "reference": "https://huggingface.co/mlx-community/gpt-oss-20b-MXFP4-Q4"
+      },
+      "license": {
+        "commercial_permitted": true,
+        "source_url": "https://huggingface.co/openai/gpt-oss-20b",
+        "verification_note": "Apache-2.0 model-card license."
+      },
+      "profile": {
+        "kind": "broad_fleet",
+        "active_params_b": "3.6",
+        "residency_gb": "10.41",
+        "projected_tps": "52"
+      }
     },
     {
       "source_model_id": "google/gemma-4-26b-a4b-it",
       "canonical_model_id": "google-gemma-4-26b-a4b-it",
-      "serving_path": {"verification_status": "verified", "reference": "https://huggingface.co/mlx-community/gemma-4-26b-a4b-it-4bit"},
-      "license": {"commercial_permitted": true, "source_url": "https://ai.google.dev/gemma/docs/core/model_card_4", "verification_note": "Google Gemma 4 model card identifies the model license as Apache 2.0."},
-      "profile": {"kind": "broad_fleet", "active_params_b": "4", "residency_gb": "14.54", "projected_tps": "50"}
+      "serving_path": {
+        "verification_status": "verified",
+        "reference": "https://huggingface.co/mlx-community/gemma-4-26b-a4b-it-4bit"
+      },
+      "license": {
+        "commercial_permitted": true,
+        "source_url": "https://ai.google.dev/gemma/docs/core/model_card_4",
+        "verification_note": "Google Gemma 4 model card identifies the model license as Apache 2.0."
+      },
+      "profile": {
+        "kind": "broad_fleet",
+        "active_params_b": "4",
+        "residency_gb": "14.54",
+        "projected_tps": "50"
+      }
     },
     {
       "source_model_id": "nvidia/nemotron-3-nano-30b-a3b",
-      "canonical_model_id": "nemotron-3-nano-30b-a3b",
-      "serving_path": {"verification_status": "verified", "reference": "https://huggingface.co/mlx-community/NVIDIA-Nemotron-3-Nano-30B-A3B-4bit"},
-      "license": {"commercial_permitted": true, "source_url": "https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/blob/f303f4dd6fc8f7202071617038e9962b26a21c03/README.md", "verification_note": "Pinned NVIDIA model card identifies the governing NVIDIA Nemotron Open Model License and describes commercial readiness subject to those terms."},
-      "profile": {"kind": "broad_fleet", "active_params_b": "3", "residency_gb": "16.55", "projected_tps": "55"}
+      "canonical_model_id": "nvidia/nemotron-3-nano-30b-a3b",
+      "serving_path": {
+        "verification_status": "verified",
+        "reference": "https://huggingface.co/mlx-community/NVIDIA-Nemotron-3-Nano-30B-A3B-4bit"
+      },
+      "license": {
+        "commercial_permitted": true,
+        "source_url": "https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/blob/f303f4dd6fc8f7202071617038e9962b26a21c03/README.md",
+        "verification_note": "Pinned NVIDIA model card identifies the governing NVIDIA Nemotron Open Model License and describes commercial readiness subject to those terms."
+      },
+      "profile": {
+        "kind": "broad_fleet",
+        "active_params_b": "3",
+        "residency_gb": "16.55",
+        "projected_tps": "55"
+      }
     },
     {
       "source_model_id": "qwen/qwen2.5-coder-32b-instruct",
       "canonical_model_id": "qwen2.5-coder-32b-instruct",
-      "serving_path": {"verification_status": "verified", "reference": "https://huggingface.co/mlx-community/Qwen2.5-Coder-32B-Instruct-4bit"},
-      "license": {"commercial_permitted": true, "source_url": "https://huggingface.co/Qwen/Qwen2.5-Coder-32B-Instruct", "verification_note": "Apache-2.0 model-card license."},
+      "serving_path": {
+        "verification_status": "verified",
+        "reference": "https://huggingface.co/mlx-community/Qwen2.5-Coder-32B-Instruct-4bit"
+      },
+      "license": {
+        "commercial_permitted": true,
+        "source_url": "https://huggingface.co/Qwen/Qwen2.5-Coder-32B-Instruct",
+        "verification_note": "Apache-2.0 model-card license."
+      },
       "coding_specialist": true,
-      "general_purpose_baseline_per_mtok": "0.220",
-      "profile": {"kind": "coding_dense", "active_params_b": "32", "residency_gb": "17.17", "projected_tps": "30"}
+      "profile": {
+        "kind": "coding_dense",
+        "active_params_b": "32",
+        "residency_gb": "17.17",
+        "projected_tps": "30"
+      }
+    },
+    {
+      "source_model_id": "meta-llama/llama-3.2-3b-instruct",
+      "canonical_model_id": "meta-llama/llama-3.2-3b-instruct",
+      "serving_path": {
+        "verification_status": "verified",
+        "reference": "https://huggingface.co/mlx-community/Llama-3.2-3B-Instruct-4bit"
+      },
+      "license": {
+        "commercial_permitted": true,
+        "source_url": "https://huggingface.co/meta-llama/Llama-3.2-3B-Instruct",
+        "verification_note": "Llama 3.2 model card identifies the governing Llama 3.2 license."
+      },
+      "profile": {
+        "kind": "broad_fleet",
+        "active_params_b": "3",
+        "residency_gb": "5.5",
+        "projected_tps": "70"
+      }
+    },
+    {
+      "source_model_id": "meta-llama/llama-3.1-8b-instruct",
+      "canonical_model_id": "meta-llama/llama-3.1-8b-instruct",
+      "serving_path": {
+        "verification_status": "verified",
+        "reference": "https://huggingface.co/mlx-community/Meta-Llama-3.1-8B-Instruct-4bit"
+      },
+      "license": {
+        "commercial_permitted": true,
+        "source_url": "https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct",
+        "verification_note": "Llama 3.1 model card identifies the governing Llama 3.1 license."
+      },
+      "profile": {
+        "kind": "broad_fleet",
+        "active_params_b": "8",
+        "residency_gb": "8.6",
+        "projected_tps": "40"
+      }
+    },
+    {
+      "source_model_id": "qwen/qwen3-8b",
+      "canonical_model_id": "qwen3-8b",
+      "serving_path": {
+        "verification_status": "verified",
+        "reference": "https://huggingface.co/mlx-community/Qwen3-8B-4bit"
+      },
+      "license": {
+        "commercial_permitted": true,
+        "source_url": "https://huggingface.co/Qwen/Qwen3-8B",
+        "verification_note": "Qwen3 model card identifies the governing Apache-2.0 license."
+      },
+      "profile": {
+        "kind": "broad_fleet",
+        "active_params_b": "8",
+        "residency_gb": "8.6",
+        "projected_tps": "40"
+      }
+    },
+    {
+      "source_model_id": "openai/gpt-oss-120b",
+      "canonical_model_id": "openai/gpt-oss-120b",
+      "serving_path": {
+        "verification_status": "verified",
+        "reference": "https://huggingface.co/mlx-community/gpt-oss-120b-4bit"
+      },
+      "license": {
+        "commercial_permitted": true,
+        "source_url": "https://huggingface.co/openai/gpt-oss-120b",
+        "verification_note": "GPT-OSS model card identifies the governing Apache-2.0 license."
+      },
+      "profile": {
+        "kind": "broad_fleet",
+        "active_params_b": "5.1",
+        "residency_gb": "62",
+        "projected_tps": "35"
+      }
+    },
+    {
+      "source_model_id": "qwen/qwen3-32b",
+      "canonical_model_id": "qwen3-32b",
+      "serving_path": {
+        "verification_status": "verified",
+        "reference": "https://huggingface.co/mlx-community/Qwen3-32B-4bit"
+      },
+      "license": {
+        "commercial_permitted": true,
+        "source_url": "https://huggingface.co/Qwen/Qwen3-32B",
+        "verification_note": "Qwen3 model card identifies the governing Apache-2.0 license."
+      },
+      "profile": {
+        "kind": "broad_fleet",
+        "active_params_b": "32",
+        "residency_gb": "20.5",
+        "projected_tps": "25"
+      }
+    },
+    {
+      "source_model_id": "qwen/qwen3-coder-30b-a3b-instruct",
+      "canonical_model_id": "qwen3-coder-30b-a3b-instruct",
+      "serving_path": {
+        "verification_status": "verified",
+        "reference": "https://huggingface.co/mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit"
+      },
+      "license": {
+        "commercial_permitted": true,
+        "source_url": "https://huggingface.co/Qwen/Qwen3-Coder-30B-A3B-Instruct",
+      "verification_note": "Qwen3-Coder model card identifies the governing Apache-2.0 license."
+    },
+      "coding_specialist": true,
+      "profile": {
+        "kind": "coding_dense",
+        "active_params_b": "30.5",
+        "residency_gb": "18.9",
+        "projected_tps": "35"
+      }
     }
   ]
 }
