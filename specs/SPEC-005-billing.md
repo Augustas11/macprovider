@@ -1,7 +1,9 @@
 # SPEC-005 - Billing, Settlement, and Provider Rewards
 
-**Version:** 0.6.6 (2026-09-11, D1a wholesale postpaid statement)
-**Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.5.6, SPEC-003 v0.7, SPEC-004 v0.3.2, SPEC-006 v0.9.8, SPEC-024 v0.2.1 (prefix-cache cache-isolation; its billing sections are superseded by this spec)
+**Version:** 0.6.7 (2026-09-11, #1484 signed rate-card is the only per-model money table)
+**Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.5.6, SPEC-003 v0.7, SPEC-004 v0.3.2, SPEC-006 v0.9.8, SPEC-024 v0.2.1 (prefix-cache cache-isolation; its billing sections are superseded by this spec). Lockstep with SPEC-023 v0.12.0 / SPEC-005-R011 is recorded in prose, not as a CONFORMANCE `depends_on` edge (avoids a cycle through SPEC-017/SPEC-047).
+
+**Change log v0.6.7 (2026-09-11, issue #1484):** Per-model credits are authored from one OpenRouter snapshot (SPEC-023 §3.3.2) and published as signed `rate-card.json` (`SPEC-005-R011`). MoneyTable-A: yaml is a required byte-parity copy and `RateFor` still reads yaml. MoneyTable-B: `RateFor` reads verified signed-feed bytes; yaml `default`+globals only; missing signed feed fails closed rather than billing yaml. Formula, ledger columns, lookup **order**, and 90/10 split are unchanged. Operator reopens D3 **storage and authoring path**; arithmetic / multiplier / `default` fallback are not reopened; option C (live-fetch) stays rejected. `SPEC-005-R010` remains the D1a wholesale statement unit from v0.6.6 and is not reused. Do not promote R011 from this close.
 
 **Change log v0.6.6 (2026-09-11, D1a wholesale partner postpaid USD statement):**
 - Operator SCOPE reopen of D1 **only** as D1a: public buyers stay donation-only (no Stripe, no checkout, no cards). A named wholesale partner class MAY be billed by an operator-issued monthly postpaid USD statement from metered settled usage on paid SKUs. Free SKUs are $0 to the partner. Provider `ComputeCredits` 90% `provider_share` still accrues for free and paid SKU work.
@@ -34,10 +36,11 @@
 
 ## Preliminary conformance unit IDs
 
-SPEC-005 v0.6.6 registers `SPEC-005-R001`..`SPEC-005-R010` in
+SPEC-005 v0.6.7 registers `SPEC-005-R001`..`SPEC-005-R011` in
 `specs/CONFORMANCE.json`. R001–R003 remain the paid-path formula, hot-path,
 and crash-recovery units. R004–R009 group additional existing obligation
-areas without changing them. R010 is the D1a wholesale statement unit:
+areas without changing them. R010 is the D1a wholesale statement unit.
+R011 is the v0.6.7 signed-feed money-table unit:
 
 - `SPEC-005-R001` — closed-form credit formula, units, rounding, and rate-card
   resolution (§5).
@@ -55,8 +58,11 @@ areas without changing them. R010 is the D1a wholesale statement unit:
 - `SPEC-005-R009` — operator quarantine resolutions (§4.10, §10.5).
 - `SPEC-005-R010` — D1a wholesale partner monthly USD statement ledger and
   operator export (§2.1a, §11.7).
+- `SPEC-005-R011` — MoneyTable-A then MoneyTable-B: signed feed authors
+  per-model rates; yaml is a parity copy until `RateFor` reads signed
+  bytes (§5.6, D3 storage/authoring).
 
-`requirement_id_migration` is `complete`. R004–R010 are not promoted from
+`requirement_id_migration` is `complete`. R004–R011 are not promoted from
 this close. Signed journey-result evidence is still required before any of
 those rows can become conformant.
 
@@ -631,8 +637,7 @@ This section implements the locked billing and unit decisions (D1)(D6) and the S
 ## 2. Locked decisions
 
 This section reproduces the operator pre-commitments from `specs/design/spec-005/SPEC-005-operator-decisions.md`.
-It is read-only. It records decisions; it does not reopen them.
-Any change to D1-D12 requires operator review and a reopened SCOPE stage.
+It is read-only except for the v0.6.7 **D3 storage and authoring-path** reopen (#1484): signed `rate-card.json` is the authoring source of truth (SPEC-023 §3.3.2); yaml is not the per-model book after MoneyTable-B. D3 arithmetic, global multiplier, and `default` fallback are **not** reopened. Option C (installer live-fetch of market rates) remains rejected. SCOPE is not otherwise reopened. Any further D1–D12 change still requires operator review and a reopened SCOPE stage.
 
 ### 2.1 D1 - Billing model
 
@@ -660,7 +665,8 @@ Any change to D1-D12 requires operator review and a reopened SCOPE stage.
 ### 2.3 D3 - Provider reward formula
 
 **Operator decision:** **B** - per-model rate card with global multiplier; initial rates (placeholder, tuned once live traffic data available): 7B models = 1,000,000 prompt / 2,000,000 completion credits per Mtok; 3B models = 500,000 prompt / 1,000,000 completion credits per Mtok; default fallback = 3B rates; `global_multiplier: 1.0`; rate card stored in coordinator.yaml (git-auditable), NOT in database; unknown models fall back to default.
-**Normative effect:** Implementations MUST satisfy D3 exactly as written.
+**v0.6.7 storage and authoring-path amendment (operator, #1484):** per-model credit **authoring** is SPEC-023 §3.3.2 (OpenRouter snapshot + undercut, operator-signed cut). Per-model credit **storage** is the signed `rate-card.json` feed. `coordinator.yaml` keeps `rewards.rate_card.default` and the release-global share/multiplier. MoneyTable-A still requires yaml as a byte-parity copy and `RateFor` still reads yaml. MoneyTable-B: `RateFor` reads verified signed-feed bytes; extra per-model yaml keys fail load. Still NOT in the database. Lookup **order** §5.5 is unchanged. Option C remains rejected (installer does not live-fetch). The placeholder 7B/3B credit examples above are historical.
+**Normative effect:** Implementations MUST satisfy D3 as amended in v0.6.7.
 **Reference discipline:** Later sections may cite D3; they MUST NOT weaken it.
 
 ### 2.4 D4 - Minimum payout threshold
@@ -1398,7 +1404,9 @@ analogous provider-favorable direction).
 ## 5.5 Model-key normalization and rate-card resolution
 
 Rate lookup (`RateFor`, `internal/billing/formula.go`) resolves a request `model` string against
-the coordinator.yaml rate card in this order, stopping at the first hit:
+the **active money table** (MoneyTable-A: coordinator.yaml, parity-checked against the signed feed;
+MoneyTable-B: verified signed `rate-card.json` bytes, the same bytes `/v1/rate-card` serves) in this
+order, stopping at the first hit:
 
 1. **Exact** `model` key.
 2. **Normalized** key via `NormalizeModelKey(model)` (below), if it differs from `model`.
@@ -1437,6 +1445,16 @@ dedicated column — it is captured only inside the full rate-card JSON in
 `ledger_config_snapshots.rate_card_json` (§4.7), which a request row is tied to through the
 `config_snapshot_id` linkage (§4.8), so historical cache-rate reconstruction goes through the
 config snapshot, not `ledger_request_credits`.
+
+## 5.6 Signed rate-card feed is the authoring source of truth (v0.6.7)
+
+**SPEC-005-R011.** Per-model credits are **authored** from one OpenRouter snapshot (SPEC-023 §3.3.2) and **published** in the signed `rate-card.json` feed.
+
+**MoneyTable-A:** signed feed is the authoring source of truth. yaml is a required byte-parity copy of every per-model row **including `default`** (SPEC-023 §3.3.1 rule 9). `RateFor` still reads yaml. Process MUST refuse to start if yaml disagrees with the verified signed feed on any key, `default` included. Missing or extra yaml keys fail.
+
+**MoneyTable-B (separate coordinator PR):** `RateFor` and `InsertConfigSnapshot` MUST use the verified signed-feed bytes. yaml MUST contain `rewards.rate_card.default` and globals only. Extra per-model yaml keys fail config load. If the signed feed is missing or unverified, do **not** bill from yaml per-model rows — fail closed.
+
+Lookup **order** (§5.5) is unchanged. Ledger snapshots still freeze resolved rates. Unknown models still fall back to `default`. Small-dense overlays MUST NOT appear as yaml-only rates. The engine MUST NOT apply. A snapshot whose digest-bound ranking window is older than 48 hours MUST NOT mint a new signed cut.
 
 ## 6. Credit calculation: D8 mapping
 
