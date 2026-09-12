@@ -2343,19 +2343,18 @@ class PearlUpdaterTests(unittest.TestCase):
         self.assertEqual(self.updater.audit.call_args.kwargs["pool_ready"], 3)
 
         self.updater.get_authorized_json.return_value = {"pool": admitted_rows[:-1]}
-        with self.assertRaisesRegex(updater_module.UpdateError, "protected provider lost"):
-            self.updater.verify_provider_admission_rollout_policy()
-        self.updater.get_authorized_json.return_value = {"pool": admitted_rows}
+        self.updater.verify_provider_admission_rollout_policy()
         self.updater.get_authorized_json.return_value = {
             "pool": [{**admitted_rows[0], "model_id": "drifted-model"}, *admitted_rows[1:]]
         }
-        with self.assertRaisesRegex(updater_module.UpdateError, "protected provider lost"):
-            self.updater.verify_provider_admission_rollout_policy()
-        self.updater.get_authorized_json.return_value = {"pool": admitted_rows}
+        self.updater.verify_provider_admission_rollout_policy()
+        self.updater.get_authorized_json.assert_not_called()
+        self.updater.get_authorized_json.reset_mock()
 
         self.updater.get_json.return_value = {"pool_size": 3, "pool_ready": 1}
         with self.assertRaisesRegex(updater_module.UpdateError, "fleet floor"):
             self.updater.verify_provider_admission_rollout_policy()
+        self.updater.get_authorized_json.assert_not_called()
 
     def test_bridge_rollout_rejects_strict_enforcement_or_expiring_window(self):
         coordinator = self.root / "coordinator.yaml"
@@ -3271,6 +3270,7 @@ class PearlUpdaterTests(unittest.TestCase):
         self.updater.local_coordinator_identity_ready = mock.Mock(return_value=True)
         self.updater.gateway_serving_ready = mock.Mock(return_value=True)
         self.updater.public_identity_ready = mock.Mock(return_value=True)
+        self.updater.ready_provider_floor_met = mock.Mock(return_value=True)
         self.updater.run_canary_gate = mock.Mock()
         self.updater.wait_for = lambda _description, _timeout, check: self.assertTrue(check())
 
@@ -3288,14 +3288,33 @@ class PearlUpdaterTests(unittest.TestCase):
         self.updater.local_coordinator_identity_ready = mock.Mock(return_value=True)
         self.updater.gateway_serving_ready = mock.Mock(return_value=True)
         self.updater.public_identity_ready = mock.Mock(return_value=True)
+        self.updater.ready_provider_floor_met = mock.Mock(return_value=True)
         self.updater.protected_provider_fleet_ready = mock.Mock(return_value=True)
         self.updater.verify_disabled_buyer_canary_posture = mock.Mock()
         self.updater.run_canary_gate = mock.Mock()
         self.updater.audit = mock.Mock()
+        waited = []
+        original_wait = self.updater.wait_for
+
+        def record_wait(description, timeout, check):
+            waited.append(description)
+            original_wait(description, timeout, check)
+
+        self.updater.wait_for = record_wait
 
         self.updater.prove_serving_recovery(identity)
 
-        self.assertEqual(self.updater.protected_provider_fleet_ready.call_count, 3)
+        self.updater.protected_provider_fleet_ready.assert_not_called()
+        self.assertNotIn("three consecutive public protected-fleet samples", waited)
+        self.assertEqual(
+            waited,
+            [
+                "provider reconnect and warmup",
+                "gateway serving status",
+                "public TLS health/version",
+                "ready-provider floor",
+            ],
+        )
         self.updater.verify_disabled_buyer_canary_posture.assert_called_once_with()
         self.updater.run_canary_gate.assert_not_called()
         self.updater.audit.assert_any_call(
@@ -3304,40 +3323,38 @@ class PearlUpdaterTests(unittest.TestCase):
             mode=updater_module.BUYER_CANARY_MODE_DISABLED,
             replacement_gates=(
                 "public_identity,"
-                "stable_protected_fleet,"
                 "exact_catalog_admission,"
                 "exact_provider_canary"
             ),
         )
 
-    def test_rollback_serving_proof_relaxes_baseline_only_with_required_canary(self):
+    def test_rollback_serving_proof_skips_protected_fleet_samples(self):
         identity = updater_module.RuntimeIdentity("v1.8.30", "v1.8.30", "1.8.30")
         self.updater.previous_protected_providers = ["provider-a", "provider-b"]
         self.updater.local_coordinator_identity_ready = mock.Mock(return_value=True)
         self.updater.gateway_serving_ready = mock.Mock(return_value=True)
         self.updater.public_identity_ready = mock.Mock(return_value=True)
+        self.updater.ready_provider_floor_met = mock.Mock(return_value=True)
         self.updater.protected_provider_fleet_ready = mock.Mock(return_value=True)
         self.updater.run_canary_gate = mock.Mock()
+        waited = []
+        original_wait = self.updater.wait_for
 
-        def wait_until_success(_description, _timeout, check):
-            for _ in range(4):
-                if check():
-                    return
-            self.fail("wait_for check did not succeed")
+        def record_wait(description, timeout, check):
+            waited.append(description)
+            original_wait(description, timeout, check)
 
-        self.updater.wait_for = wait_until_success
+        self.updater.wait_for = record_wait
 
         self.updater.prove_serving_recovery(identity, legacy_rollback_version="1.8.30")
 
-        self.assertEqual(
-            self.updater.protected_provider_fleet_ready.call_args_list,
-            [mock.call(require_previous_baseline=False)] * 3,
-        )
+        self.updater.protected_provider_fleet_ready.assert_not_called()
+        self.assertNotIn("three consecutive public protected-fleet samples", waited)
         self.updater.run_canary_gate.assert_called_once_with(
             legacy_rollback_version="1.8.30"
         )
 
-    def test_disabled_rollback_serving_proof_keeps_exact_baseline(self):
+    def test_disabled_rollback_serving_proof_skips_protected_fleet_samples(self):
         identity = updater_module.RuntimeIdentity("v1.8.30", "v1.8.30", "1.8.30")
         self.updater.config = updater_module.dataclasses.replace(
             self.updater.config,
@@ -3347,29 +3364,45 @@ class PearlUpdaterTests(unittest.TestCase):
         self.updater.local_coordinator_identity_ready = mock.Mock(return_value=True)
         self.updater.gateway_serving_ready = mock.Mock(return_value=True)
         self.updater.public_identity_ready = mock.Mock(return_value=True)
+        self.updater.ready_provider_floor_met = mock.Mock(return_value=True)
         self.updater.protected_provider_fleet_ready = mock.Mock(return_value=True)
         self.updater.verify_disabled_buyer_canary_posture = mock.Mock()
         self.updater.run_canary_gate = mock.Mock()
         self.updater.audit = mock.Mock()
+        waited = []
+        original_wait = self.updater.wait_for
 
-        def wait_until_success(_description, _timeout, check):
-            for _ in range(4):
-                if check():
-                    return
-            self.fail("wait_for check did not succeed")
+        def record_wait(description, timeout, check):
+            waited.append(description)
+            original_wait(description, timeout, check)
 
-        self.updater.wait_for = wait_until_success
+        self.updater.wait_for = record_wait
 
         self.updater.prove_serving_recovery(identity, legacy_rollback_version="1.8.30")
 
-        self.assertEqual(
-            self.updater.protected_provider_fleet_ready.call_args_list,
-            [mock.call(require_previous_baseline=True)] * 3,
-        )
+        self.updater.protected_provider_fleet_ready.assert_not_called()
+        self.assertNotIn("three consecutive public protected-fleet samples", waited)
         self.updater.verify_disabled_buyer_canary_posture.assert_called_once_with()
         self.updater.run_canary_gate.assert_not_called()
+        self.updater.audit.assert_any_call(
+            "buyer_canary_gate",
+            "skipped",
+            mode=updater_module.BUYER_CANARY_MODE_DISABLED,
+            rollback=True,
+            replacement_gates="public_identity",
+        )
 
-    def test_runtime_only_rollout_accepts_disabled_buyer_canary_mode(self):
+    def test_runtime_only_rollout_accepts_required_buyer_canary_mode(self):
+        self.make_bundle(runtime_only=True)
+        release = self.verify()
+        self.updater.config = updater_module.dataclasses.replace(
+            self.updater.config,
+            buyer_canary_mode=updater_module.BUYER_CANARY_MODE_REQUIRED,
+        )
+
+        self.updater.verify_runtime_only_buyer_canary_policy(release)
+
+    def test_runtime_only_rollout_rejects_disabled_buyer_canary_mode(self):
         self.make_bundle(runtime_only=True)
         release = self.verify()
         self.updater.config = updater_module.dataclasses.replace(
@@ -3377,17 +3410,11 @@ class PearlUpdaterTests(unittest.TestCase):
             buyer_canary_mode=updater_module.BUYER_CANARY_MODE_DISABLED,
         )
 
-        self.updater.verify_runtime_only_buyer_canary_policy(release)
-
-    def test_runtime_only_disabled_canary_mode_uses_rollout_replacement_gates(self):
-        self.make_bundle(runtime_only=True)
-        release = self.verify()
-        self.updater.config = updater_module.dataclasses.replace(
-            self.updater.config,
-            buyer_canary_mode=updater_module.BUYER_CANARY_MODE_DISABLED,
-        )
-
-        self.updater.verify_runtime_only_buyer_canary_policy(release)
+        with self.assertRaisesRegex(
+            updater_module.UpdateError,
+            "runtime-only Pearl release requires buyer canary mode required",
+        ):
+            self.updater.verify_runtime_only_buyer_canary_policy(release)
 
     def test_run_canary_gate_rejects_disabled_mode(self):
         self.updater.config = updater_module.dataclasses.replace(
@@ -3422,7 +3449,7 @@ class PearlUpdaterTests(unittest.TestCase):
             legacy_rollback_version="1.8.82",
         )
 
-    def test_serving_proof_requires_three_consecutive_public_fleet_samples(self):
+    def test_serving_proof_does_not_wait_for_protected_fleet_samples(self):
         identity = updater_module.RuntimeIdentity("v1.8.36", "v1.8.36", "1.8.36")
         self.updater.previous_pool_ready = 2
         self.updater.previous_protected_providers = ["provider-a", "provider-b"]
@@ -3433,38 +3460,92 @@ class PearlUpdaterTests(unittest.TestCase):
         self.updater.local_coordinator_identity_ready = mock.Mock(return_value=True)
         self.updater.gateway_serving_ready = mock.Mock(return_value=True)
         self.updater.public_identity_ready = mock.Mock(return_value=True)
+        self.updater.ready_provider_floor_met = mock.Mock(return_value=True)
         self.updater.protected_provider_fleet_ready = mock.Mock(
-            side_effect=[True, True, False, True, True, True]
+            side_effect=updater_module.UpdateError("exact 6-node identity snapshot must not gate serving")
         )
         self.updater.run_canary_gate = mock.Mock()
+        waited = []
+        original_wait = self.updater.wait_for
+
+        def record_wait(description, timeout, check):
+            waited.append(description)
+            original_wait(description, timeout, check)
+
+        self.updater.wait_for = record_wait
 
         self.updater.prove_serving_recovery(identity)
 
-        self.assertEqual(self.updater.protected_provider_fleet_ready.call_count, 6)
+        self.updater.protected_provider_fleet_ready.assert_not_called()
+        self.assertNotIn("three consecutive public protected-fleet samples", waited)
+        self.assertEqual(
+            waited,
+            [
+                "provider reconnect and warmup",
+                "gateway serving status",
+                "public TLS health/version",
+                "ready-provider floor",
+            ],
+        )
         self.updater.run_canary_gate.assert_called_once_with()
 
-    def test_serving_proof_resets_consecutive_samples_after_sample_error(self):
+    def test_serving_proof_ignores_protected_fleet_sample_errors(self):
         identity = updater_module.RuntimeIdentity("v1.8.36", "v1.8.36", "1.8.36")
         self.updater.previous_pool_ready = 2
         self.updater.previous_protected_providers = ["provider-a", "provider-b"]
         self.updater.local_coordinator_identity_ready = mock.Mock(return_value=True)
         self.updater.gateway_serving_ready = mock.Mock(return_value=True)
         self.updater.public_identity_ready = mock.Mock(return_value=True)
+        self.updater.ready_provider_floor_met = mock.Mock(return_value=True)
         self.updater.protected_provider_fleet_ready = mock.Mock(
-            side_effect=[
-                True,
-                True,
-                updater_module.UpdateError("transient public sample failure"),
-                True,
-                True,
-                True,
-            ]
+            side_effect=updater_module.UpdateError("transient public sample failure")
         )
         self.updater.run_canary_gate = mock.Mock()
+        waited = []
+        original_wait = self.updater.wait_for
+
+        def record_wait(description, timeout, check):
+            waited.append(description)
+            original_wait(description, timeout, check)
+
+        self.updater.wait_for = record_wait
 
         self.updater.prove_serving_recovery(identity)
 
-        self.assertEqual(self.updater.protected_provider_fleet_ready.call_count, 6)
+        self.updater.protected_provider_fleet_ready.assert_not_called()
+        self.assertNotIn("three consecutive public protected-fleet samples", waited)
+        self.updater.run_canary_gate.assert_called_once_with()
+
+    def test_ready_provider_floor_uses_local_health_not_fleet_identity(self):
+        self.updater.get_json = mock.Mock(return_value={"pool_ready": 2})
+        self.assertTrue(self.updater.ready_provider_floor_met())
+        self.updater.get_json.assert_called_once_with("http://127.0.0.1:8444/healthz")
+
+        self.updater.get_json.return_value = {"pool_ready": 1}
+        self.assertFalse(self.updater.ready_provider_floor_met())
+
+        identity = updater_module.RuntimeIdentity("v1.8.36", "v1.8.36", "1.8.36")
+        self.updater.local_coordinator_identity_ready = mock.Mock(return_value=True)
+        self.updater.gateway_serving_ready = mock.Mock(return_value=True)
+        self.updater.public_identity_ready = mock.Mock(return_value=True)
+        self.updater.ready_provider_floor_met = mock.Mock(return_value=True)
+        self.updater.run_canary_gate = mock.Mock()
+        waited = []
+        original_wait = self.updater.wait_for
+
+        def record_wait(description, timeout, check):
+            waited.append(description)
+            original_wait(description, timeout, check)
+
+        self.updater.wait_for = record_wait
+        self.updater.prove_serving_recovery(identity)
+
+        self.assertIn("ready-provider floor", waited)
+        self.assertLess(
+            waited.index("ready-provider floor"),
+            waited.index("public TLS health/version") + 2,
+        )
+        self.assertEqual(waited[-1], "ready-provider floor")
         self.updater.run_canary_gate.assert_called_once_with()
 
     def test_public_protected_fleet_sample_requires_exact_ready_baseline(self):

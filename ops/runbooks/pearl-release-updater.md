@@ -135,9 +135,9 @@ An explicitly sealed production window may instead set
 configuration. That mode never starts the buyer canary. It requires both
 enable gates absent, an empty root-owned `0644` `DISABLED` sentinel, the timer
 disabled/inactive, and the oneshot service inactive. The updater rechecks that
-posture before state capture, after stable public fleet recovery, and after
-the exact physical catalog-provider proof. Public identity, three consecutive
-protected-fleet samples, admission policy, exact catalog admission, and the
+posture before state capture, after public identity recovery, and after
+the exact physical catalog-provider proof. Public identity, the configured
+ready-provider floor, admission policy, exact catalog admission, and the
 physical provider canary remain mandatory. The default remains `required`.
 Runtime-only `pearl_runtime` releases are not eligible for this disabled mode:
 because they deliberately omit the exact catalog/provider gates, apply requires
@@ -383,10 +383,10 @@ sudo test ! -e /run/macprovider-canary-buyer/legacy-rollback.json
    the new coordinator may classify those same exact ID/model/version rows
    `legacy_bridge`; r6 accepts that classification only as a substitute for the
    missing direct signal while retaining every pool, routing, connection, and
-   heartbeat invariant. Before that canary starts, the updater requires three
-   consecutive authenticated public `/poolz` samples that contain every exact
-   protected provider as ready and routing-eligible and retain the captured
-   ready-provider floor. A failed or timed-out canary oneshot is explicitly
+   heartbeat invariant. Before that canary starts, the updater requires provider
+   reconnect, gateway serving, public TLS identity, and the configured
+   ready-provider floor; it does not wait for an exact previous protected-fleet
+   identity snapshot. A failed or timed-out canary oneshot is explicitly
    stopped and proven inactive with no queued job before rollback may touch
    state. The updater requires the post-activation run to exit `0` before it
    emits `provider_install_ready`. Any other reason, classified no-load status
