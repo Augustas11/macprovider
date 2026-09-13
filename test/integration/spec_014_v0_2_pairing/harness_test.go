@@ -293,8 +293,9 @@ func writeCoordinatorConfigWithOAuth(t *testing.T, path, dbPath string, provider
 			"global_multiplier": 1.0,
 			"provider_share":    0.9,
 			"rate_card": map[string]any{"default": map[string]any{
-				"prompt_credits_per_mtok":     500000,
-				"completion_credits_per_mtok": 1000000,
+				"prompt_credits_per_mtok":           500000,
+				"prompt_cache_hit_credits_per_mtok": 125000,
+				"completion_credits_per_mtok":       1000000,
 			}},
 		},
 		"settlement": map[string]any{
