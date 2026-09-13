@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"github.com/augstar/macprovider-coordinator/internal/billing"
 	"io"
+	"maps"
 	"math"
 	"net/http"
 	"os"
@@ -1118,8 +1119,38 @@ func WithAutotuneFeedsObserver(fn func(AutotuneFeeds, func())) Option {
 	}
 }
 
-// AutotuneFeedsForTest exposes the served feeds (tests only).
-func (s *Server) AutotuneFeedsForTest() AutotuneFeeds { return s.autotuneFeedsSnapshot() }
+// CurrentAutotuneFeeds returns the currently served signed feed bytes. The
+// coordinator SIGHUP path uses this when a reload retains live feed bytes while
+// applying a new effective billing config, so runtime economics parity is
+// checked against the bytes buyers will continue to see.
+func (s *Server) CurrentAutotuneFeeds() AutotuneFeeds {
+	return cloneAutotuneFeeds(s.autotuneFeedsSnapshot())
+}
+
+// AutotuneFeedsForTest exposes the served feeds for existing tests.
+func (s *Server) AutotuneFeedsForTest() AutotuneFeeds { return s.CurrentAutotuneFeeds() }
+
+func cloneAutotuneFeeds(feeds AutotuneFeeds) AutotuneFeeds {
+	feeds.RateCardJSON = append([]byte(nil), feeds.RateCardJSON...)
+	feeds.RateCardSig = append([]byte(nil), feeds.RateCardSig...)
+	feeds.DemandRankJSON = append([]byte(nil), feeds.DemandRankJSON...)
+	feeds.DemandRankSig = append([]byte(nil), feeds.DemandRankSig...)
+	feeds.AutotuneCandidatesJSON = append([]byte(nil), feeds.AutotuneCandidatesJSON...)
+	feeds.AutotuneCandidatesSig = append([]byte(nil), feeds.AutotuneCandidatesSig...)
+	feeds.CatalogArtifactsJSON = append([]byte(nil), feeds.CatalogArtifactsJSON...)
+	feeds.CatalogArtifactsSig = append([]byte(nil), feeds.CatalogArtifactsSig...)
+	if feeds.CandidateRowStatuses != nil {
+		feeds.CandidateRowStatuses = maps.Clone(feeds.CandidateRowStatuses)
+	}
+	if feeds.SourceConfig != nil {
+		cfg := *feeds.SourceConfig
+		if cfg.PublicKeys != nil {
+			cfg.PublicKeys = maps.Clone(cfg.PublicKeys)
+		}
+		feeds.SourceConfig = &cfg
+	}
+	return feeds
+}
 
 func (s *Server) autotuneFeedsSnapshot() AutotuneFeeds {
 	s.autotuneFeedsMu.RLock()

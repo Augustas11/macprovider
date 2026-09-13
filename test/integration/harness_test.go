@@ -316,22 +316,25 @@ type scenarioOpts struct {
 }
 
 type settlementCatalogFixture struct {
-	path                   string
-	publicKey              string
-	modelHash              string
-	rateCardPath           string
-	rateCardSHA256         string
-	rateCardVersion        string
-	rateCardSigPath        string
-	demandRankPath         string
-	demandRankSigPath      string
-	autotuneCatalogPath    string
-	autotuneCatalogSigPath string
-	autotuneCatalogSHA256  string
-	autotuneCatalogVersion string
-	autotunePolicyVersion  string
-	catalogID              string
-	catalogKeyID           string
+	path                    string
+	publicKey               string
+	modelHash               string
+	rateCardPath            string
+	rateCardSHA256          string
+	rateCardVersion         string
+	rateCardSigPath         string
+	runtimeRateCard         map[string]any
+	runtimeProviderShare    float64
+	runtimeGlobalMultiplier float64
+	demandRankPath          string
+	demandRankSigPath       string
+	autotuneCatalogPath     string
+	autotuneCatalogSigPath  string
+	autotuneCatalogSHA256   string
+	autotuneCatalogVersion  string
+	autotunePolicyVersion   string
+	catalogID               string
+	catalogKeyID            string
 }
 
 func newScenario(t *testing.T, opts scenarioOpts) *scenario {
@@ -634,16 +637,7 @@ func (s *scenario) writeCoordinatorYAML(buyerPort, provPort int, stickyEnabled b
 			"level":  "info",
 			"format": "json",
 		},
-		"rewards": map[string]any{
-			"global_multiplier": 1.0,
-			"provider_share":    0.9,
-			"rate_card": map[string]any{
-				"default": map[string]any{
-					"prompt_credits_per_mtok":     500000,
-					"completion_credits_per_mtok": 1000000,
-				},
-			},
-		},
+		"rewards": rewardsConfigForSettlementCatalog(settlementCatalog),
 		"settlement": map[string]any{
 			"cadence_days":                   7,
 			"min_payout_credits":             0,
@@ -694,6 +688,60 @@ func (s *scenario) writeCoordinatorYAML(buyerPort, provPort int, stickyEnabled b
 	}
 }
 
+func rewardsConfigForSettlementCatalog(settlementCatalog settlementCatalogFixture) map[string]any {
+	rateCard := map[string]any{
+		"default": map[string]any{
+			"prompt_credits_per_mtok":           500000,
+			"prompt_cache_hit_credits_per_mtok": 125000,
+			"completion_credits_per_mtok":       1000000,
+		},
+	}
+	providerShare := 0.9
+	globalMultiplier := 1.0
+	if settlementCatalog.runtimeRateCard != nil {
+		rateCard = settlementCatalog.runtimeRateCard
+		providerShare = settlementCatalog.runtimeProviderShare
+		globalMultiplier = settlementCatalog.runtimeGlobalMultiplier
+	}
+	return map[string]any{
+		"global_multiplier": globalMultiplier,
+		"provider_share":    providerShare,
+		"rate_card":         rateCard,
+	}
+}
+
+func runtimeRewardsFromRateCardFixture(t *testing.T, rows map[string]struct {
+	PromptRatePerMtok         int64 `json:"prompt_rate_per_mtok"`
+	PromptCacheHitRatePerMtok int64 `json:"prompt_cache_hit_rate_per_mtok"`
+	CompletionRatePerMtok     int64 `json:"completion_rate_per_mtok"`
+	ProviderShareBPS          int64 `json:"provider_share_bps"`
+	GlobalMultiplierPPM       int64 `json:"global_multiplier_ppm"`
+}) (map[string]any, float64, float64) {
+	t.Helper()
+	if len(rows) == 0 {
+		t.Fatal("rate-card fixture missing rows")
+	}
+	defaultRow, ok := rows["default"]
+	if !ok {
+		t.Fatal("rate-card fixture missing default row")
+	}
+	rateCard := make(map[string]any, len(rows))
+	for key, row := range rows {
+		if row.ProviderShareBPS != defaultRow.ProviderShareBPS {
+			t.Fatalf("rate-card fixture row %q provider_share_bps=%d differs from default %d", key, row.ProviderShareBPS, defaultRow.ProviderShareBPS)
+		}
+		if row.GlobalMultiplierPPM != defaultRow.GlobalMultiplierPPM {
+			t.Fatalf("rate-card fixture row %q global_multiplier_ppm=%d differs from default %d", key, row.GlobalMultiplierPPM, defaultRow.GlobalMultiplierPPM)
+		}
+		rateCard[key] = map[string]any{
+			"prompt_credits_per_mtok":           row.PromptRatePerMtok,
+			"prompt_cache_hit_credits_per_mtok": row.PromptCacheHitRatePerMtok,
+			"completion_credits_per_mtok":       row.CompletionRatePerMtok,
+		}
+	}
+	return rateCard, float64(defaultRow.ProviderShareBPS) / 10000.0, float64(defaultRow.GlobalMultiplierPPM) / 1000000.0
+}
+
 func verifiedModelSettlementMode(enforce bool) string {
 	if enforce {
 		return "enforce"
@@ -724,6 +772,13 @@ func (s *scenario) writeSettlementCatalogFixture() settlementCatalogFixture {
 	}
 	var rateCardMeta struct {
 		Version string `json:"version"`
+		Rows    map[string]struct {
+			PromptRatePerMtok         int64 `json:"prompt_rate_per_mtok"`
+			PromptCacheHitRatePerMtok int64 `json:"prompt_cache_hit_rate_per_mtok"`
+			CompletionRatePerMtok     int64 `json:"completion_rate_per_mtok"`
+			ProviderShareBPS          int64 `json:"provider_share_bps"`
+			GlobalMultiplierPPM       int64 `json:"global_multiplier_ppm"`
+		} `json:"rows"`
 	}
 	if err := json.Unmarshal(rateCardJSON, &rateCardMeta); err != nil {
 		s.t.Fatalf("parse rate-card fixture: %v", err)
@@ -731,6 +786,7 @@ func (s *scenario) writeSettlementCatalogFixture() settlementCatalogFixture {
 	if rateCardMeta.Version == "" {
 		s.t.Fatal("rate-card fixture missing version")
 	}
+	runtimeRateCard, runtimeProviderShare, runtimeGlobalMultiplier := runtimeRewardsFromRateCardFixture(s.t, rateCardMeta.Rows)
 	rateCardDigest := sha256.Sum256(rateCardJSON)
 	demandRankPath := filepath.Join(repoRoot, "phase3-binary", "dist", "static", "demand-rank.json")
 	demandRankSigPath := demandRankPath + ".sig"
@@ -814,22 +870,25 @@ func (s *scenario) writeSettlementCatalogFixture() settlementCatalogFixture {
 		s.t.Fatalf("write settlement catalog: %v", err)
 	}
 	return settlementCatalogFixture{
-		path:                   path,
-		publicKey:              base64.RawURLEncoding.EncodeToString(pub),
-		modelHash:              modelHash,
-		rateCardPath:           rateCardPath,
-		rateCardSHA256:         hex.EncodeToString(rateCardDigest[:]),
-		rateCardVersion:        rateCardMeta.Version,
-		rateCardSigPath:        rateCardSigPath,
-		demandRankPath:         demandRankPath,
-		demandRankSigPath:      demandRankSigPath,
-		autotuneCatalogPath:    autotuneCatalogPath,
-		autotuneCatalogSigPath: autotuneCatalogSigPath,
-		autotuneCatalogSHA256:  hex.EncodeToString(autotuneCatalogDigest[:]),
-		autotuneCatalogVersion: autotuneCatalog.Version,
-		autotunePolicyVersion:  autotuneCatalog.PolicyVersion,
-		catalogID:              body.CatalogID,
-		catalogKeyID:           file.Signature.KeyID,
+		path:                    path,
+		publicKey:               base64.RawURLEncoding.EncodeToString(pub),
+		modelHash:               modelHash,
+		rateCardPath:            rateCardPath,
+		rateCardSHA256:          hex.EncodeToString(rateCardDigest[:]),
+		rateCardVersion:         rateCardMeta.Version,
+		rateCardSigPath:         rateCardSigPath,
+		runtimeRateCard:         runtimeRateCard,
+		runtimeProviderShare:    runtimeProviderShare,
+		runtimeGlobalMultiplier: runtimeGlobalMultiplier,
+		demandRankPath:          demandRankPath,
+		demandRankSigPath:       demandRankSigPath,
+		autotuneCatalogPath:     autotuneCatalogPath,
+		autotuneCatalogSigPath:  autotuneCatalogSigPath,
+		autotuneCatalogSHA256:   hex.EncodeToString(autotuneCatalogDigest[:]),
+		autotuneCatalogVersion:  autotuneCatalog.Version,
+		autotunePolicyVersion:   autotuneCatalog.PolicyVersion,
+		catalogID:               body.CatalogID,
+		catalogKeyID:            file.Signature.KeyID,
 	}
 }
 

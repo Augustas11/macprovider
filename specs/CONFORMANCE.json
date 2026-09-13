@@ -2494,7 +2494,7 @@
     {
       "requirement_id": "SPEC-032-R003",
       "spec_id": "SPEC-032",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
         "phase4-coordinator/internal/pool/provider.go:func (p Provider) RoutingEligible",
         "phase4-coordinator/internal/pool/provider.go:func (p Provider) ServingCapable",
@@ -2531,7 +2531,12 @@
           "expires_at": "2026-12-02"
         }
       ],
-      "gap": null
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "Runtime reload lifecycle changes updated the mapped reloadCoordinatorConfig selector. Local regression checks pass, but the historical signed provider prebeta admission journey binds earlier selector bytes; fresh independently trusted journey evidence is required before restoring conformant status. Historical evidence is retained without redating or replacement."
+      }
     },
     {
       "requirement_id": "SPEC-033-R001",
@@ -5029,7 +5034,7 @@
     {
       "requirement_id": "SPEC-022-R006",
       "spec_id": "SPEC-022",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
         "phase4-coordinator/internal/billing/settlement_receipt_retrieval.go:LookupBuyerReceipt",
         "phase4-coordinator/internal/buyer/server.go:handleInternalSettlementReceipts",
@@ -5057,7 +5062,12 @@
           "expires_at": "2026-10-09"
         }
       ],
-      "gap": null
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/928",
+        "rationale": "Build 1 rate-card parity changes updated the mapped buyer paid-path journey test selector. Local regression checks pass, but the historical signed buyer-paid-path journey binds earlier selector bytes; fresh independently trusted journey evidence is required before restoring conformant status. Historical evidence is retained without redating or replacement."
+      }
     },
     {
       "requirement_id": "SPEC-022-R007",

@@ -25,14 +25,14 @@ const (
 	buyerPaidPathPromptTokens     = int64(8)
 	buyerPaidPathCompletionTokens = int64(12)
 	buyerPaidPathSettledTokens    = int64(20)
-	buyerPaidPathPromptRate       = int64(500000)
-	buyerPaidPathCompletionRate   = int64(1000000)
+	buyerPaidPathPromptRate       = int64(13500)
+	buyerPaidPathCompletionRate   = int64(27000)
 	buyerPaidPathMultiplierPPM    = int64(1000000)
 	buyerPaidPathShareBps         = int64(9000)
-	buyerPaidPathGrossCredits     = int64(16)
-	buyerPaidPathProviderCredits  = int64(14)
+	buyerPaidPathGrossCredits     = int64(0)
+	buyerPaidPathProviderCredits  = int64(0)
 	buyerPaidPathDeliveredPrefix  = "hello from fake provider"
-	buyerPaidPathRateCardMatch    = "default"
+	buyerPaidPathRateCardMatch    = staticLlama32CandidateKey
 )
 
 type buyerPaidPathStep struct {
@@ -139,7 +139,7 @@ func TestJourneyBuyerPaidPathIsolatedCandidate(t *testing.T) {
 	credits := waitForLedgerCredits(t, s, 1)
 	nonstreamCredit := credits[0]
 	assertPayableObserveCredit(t, nonstreamCredit, 0)
-	pass("step-04-ledger-credit", "coordinator ledger wrote a payable observe-mode credit whose persisted rates reproduce the default rate-card split", map[string]any{
+	pass("step-04-ledger-credit", "coordinator ledger wrote an observe-mode credit whose persisted rates reproduce the signed rate-card split", map[string]any{
 		"credit_id_fingerprint":    sha256Hex(fmt.Sprintf("%d", nonstreamCredit.ID)),
 		"gross_credits":            nonstreamCredit.GrossCredits,
 		"provider_credits":         nonstreamCredit.ProviderCredits,
@@ -411,13 +411,13 @@ func assertPayableObserveCredit(t *testing.T, row ledgerCreditRow, wantStream in
 		t.Fatalf("ledger tokens=%d/%d want fixture %d/%d", row.PromptTokens.Int64, row.CompletionTokens.Int64, buyerPaidPathPromptTokens, buyerPaidPathCompletionTokens)
 	}
 	if row.PromptRatePerMtok != buyerPaidPathPromptRate || row.CompletionRatePerMtok != buyerPaidPathCompletionRate {
-		t.Fatalf("ledger rates=%d/%d want default rate-card %d/%d", row.PromptRatePerMtok, row.CompletionRatePerMtok, buyerPaidPathPromptRate, buyerPaidPathCompletionRate)
+		t.Fatalf("ledger rates=%d/%d want signed rate-card %d/%d", row.PromptRatePerMtok, row.CompletionRatePerMtok, buyerPaidPathPromptRate, buyerPaidPathCompletionRate)
 	}
 	if row.GlobalMultiplierPPM != buyerPaidPathMultiplierPPM || row.ProviderShareBps != buyerPaidPathShareBps {
 		t.Fatalf("ledger multiplier/share=%d/%d want %d/%d", row.GlobalMultiplierPPM, row.ProviderShareBps, buyerPaidPathMultiplierPPM, buyerPaidPathShareBps)
 	}
 	if row.GrossCredits != buyerPaidPathGrossCredits || row.ProviderCredits != buyerPaidPathProviderCredits {
-		t.Fatalf("ledger credits=%d/%d want pinned default-row %d/%d", row.GrossCredits, row.ProviderCredits, buyerPaidPathGrossCredits, buyerPaidPathProviderCredits)
+		t.Fatalf("ledger credits=%d/%d want signed-row %d/%d", row.GrossCredits, row.ProviderCredits, buyerPaidPathGrossCredits, buyerPaidPathProviderCredits)
 	}
 	expectedGross := expectedGrossCredits(row.PromptTokens.Int64, row.CompletionTokens.Int64, row.PromptRatePerMtok, row.CompletionRatePerMtok, row.GlobalMultiplierPPM)
 	if row.GrossCredits != expectedGross {
