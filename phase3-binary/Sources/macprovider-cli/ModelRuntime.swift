@@ -1,5 +1,6 @@
 import Foundation
 import CryptoKit
+import Darwin
 import Jinja
 import MLX
 import MLXLLM
@@ -351,9 +352,346 @@ struct PagedKVRuntimeModelCapabilities: Equatable, Sendable {
     let requiresMoEDispatch: Bool
 }
 
-private struct ContinuousBatchRuntimeReplayAuthority: ContinuousBatchSchedulerReplayAuthority {
+struct PagedKVRuntimeMeasurementEnvironment: Sendable {
+    var metallibCandidatePaths: @Sendable () -> [String]
+    var fileExists: @Sendable (String) -> Bool
+    var readFileData: @Sendable (String) throws -> Data
+    var hardwareFingerprint: @Sendable () -> MachineFingerprint
+    var registeredKernelIdentifier: @Sendable () -> String?
+    var parityLabel: @Sendable (
+        _ metallibPath: String,
+        _ metallibSHA256: String,
+        _ kernelIdentifier: String,
+        _ modelID: String,
+        _ modelSHA256: String,
+        _ tokenizerSHA256: String?,
+        _ chatTemplateSHA256: String?,
+        _ hardwareClass: String
+    ) -> String?
+
+    static let live = PagedKVRuntimeMeasurementEnvironment(
+        metallibCandidatePaths: {
+            PagedKVMetallibGate.candidatePaths(
+                bundleURL: Bundle.main.resourceURL,
+                executableURL: Bundle.main.executableURL
+            )
+        },
+        fileExists: { FileManager.default.fileExists(atPath: $0) },
+        readFileData: { try Data(contentsOf: URL(fileURLWithPath: $0)) },
+        hardwareFingerprint: { MachineFingerprinter().sample() },
+        registeredKernelIdentifier: { PagedKVGatherKernel.registeredRuntimeKernelIdentifier() },
+        parityLabel: { _, _, _, _, _, _, _, _ in nil }
+    )
+}
+
+struct PagedKVRuntimeMeasurement: Equatable {
+    let observedRuntimeIdentity: PagedKVObservedRuntimeIdentity
+    let hardwareSizingProof: PagedKVHardwareSizingProof
+}
+
+private struct PagedKVRuntimeCapacityProof {
+    static func measuredMaxResidentTokens(config: PagedKVConfig, poolEpoch: Int) -> Int? {
+        guard config.effectiveEnabled, poolEpoch > 0 else { return nil }
+        guard config.blockSizeTokens > 0,
+              config.blockSizeTokens <= PagedKVConfig.maximumBlockSizeTokens,
+              config.maxPhysicalBlocks > 0,
+              config.maxPhysicalBlocks <= PagedKVConfig.maximumPhysicalBlocks
+        else {
+            return nil
+        }
+        let (residentTokens, overflow) = config.blockSizeTokens.multipliedReportingOverflow(by: config.maxPhysicalBlocks)
+        guard !overflow, residentTokens == config.maxResidentTokens else {
+            return nil
+        }
+        guard (try? PagedKVBlockAllocator(
+            blockSizeTokens: config.blockSizeTokens,
+            maxPhysicalBlocks: config.maxPhysicalBlocks,
+            poolEpoch: poolEpoch
+        )) != nil else {
+            return nil
+        }
+        return residentTokens
+    }
+}
+
+final class ContinuousBatchRuntimeReplayAuthority: ContinuousBatchSchedulerReplayAuthority, @unchecked Sendable {
+    private enum StoreError: Error {
+        case corrupt
+        case lockUnavailable
+    }
+
+    private struct ClaimRecord: Codable {
+        static let currentVersion = 1
+
+        let version: Int
+        let requestIDHash: String
+        let fingerprintSHA256: String
+
+        enum CodingKeys: String, CodingKey {
+            case version
+            case requestIDHash = "request_id_sha256"
+            case fingerprintSHA256 = "fingerprint_sha256"
+        }
+
+        init(requestIDHash: String, fingerprintSHA256: String) {
+            self.version = Self.currentVersion
+            self.requestIDHash = requestIDHash
+            self.fingerprintSHA256 = fingerprintSHA256
+        }
+    }
+
+    private let lock = NSLock()
+    private let storeURL: URL?
+    private let encoder = JSONEncoder()
+    private let decoder = JSONDecoder()
+    private var fingerprintsByRequestIDHash: [String: Data]
+    private var durableAvailableValue: Bool
+
+    init(
+        storeURL: URL? = ContinuousBatchRuntimeReplayAuthority.defaultStoreURL(),
+        fileManager: FileManager = .default
+    ) {
+        self.storeURL = storeURL
+        if let storeURL {
+            do {
+                var isDirectory = ObjCBool(false)
+                var createdDirectories: [URL] = []
+                if fileManager.fileExists(atPath: storeURL.path, isDirectory: &isDirectory) {
+                    guard isDirectory.boolValue else { throw StoreError.corrupt }
+                } else {
+                    createdDirectories = Self.missingDirectoryChain(for: storeURL, fileManager: fileManager)
+                    try fileManager.createDirectory(
+                        at: storeURL,
+                        withIntermediateDirectories: true,
+                        attributes: [.posixPermissions: 0o700]
+                    )
+                }
+                try fileManager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: storeURL.path)
+                try Self.syncDirectoryCreationPath(createdDirectories: createdDirectories, storeURL: storeURL)
+                self.fingerprintsByRequestIDHash = [:]
+                self.durableAvailableValue = true
+            } catch {
+                self.fingerprintsByRequestIDHash = [:]
+                self.durableAvailableValue = false
+            }
+        } else {
+            self.fingerprintsByRequestIDHash = [:]
+            self.durableAvailableValue = false
+        }
+        self.encoder.outputFormatting = [.sortedKeys]
+    }
+
+    static func inMemoryForTests(durableAvailable: Bool = false) -> ContinuousBatchRuntimeReplayAuthority {
+        let authority = ContinuousBatchRuntimeReplayAuthority(storeURL: nil)
+        authority.durableAvailableValue = durableAvailable
+        return authority
+    }
+
+    var durableAvailable: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return durableAvailableValue
+    }
+
     func claim(_ key: ContinuousBatchSchedulerReplayKey) throws -> ContinuousBatchSchedulerReplayClaim {
-        .claimed
+        let requestIDHash = Self.requestIDHash(key.requestID)
+        lock.lock()
+        defer { lock.unlock() }
+        if let storeURL {
+            return try Self.withStoreLock(for: storeURL) {
+                let claimURL = try Self.claimURL(for: requestIDHash, in: storeURL)
+                if let existing = try readClaim(at: claimURL, requestIDHash: requestIDHash) {
+                    fingerprintsByRequestIDHash[requestIDHash] = existing
+                    return existing == key.fingerprintSHA256 ? .duplicateSameRequest : .duplicateMismatchedRequest
+                }
+                if try writeClaim(
+                    requestIDHash: requestIDHash,
+                    fingerprintSHA256: key.fingerprintSHA256,
+                    to: claimURL
+                ) {
+                    fingerprintsByRequestIDHash[requestIDHash] = key.fingerprintSHA256
+                    return .claimed
+                }
+                guard let existing = try readClaim(at: claimURL, requestIDHash: requestIDHash) else {
+                    throw StoreError.corrupt
+                }
+                fingerprintsByRequestIDHash[requestIDHash] = existing
+                return existing == key.fingerprintSHA256 ? .duplicateSameRequest : .duplicateMismatchedRequest
+            }
+        }
+        if let existing = fingerprintsByRequestIDHash[requestIDHash] {
+            return existing == key.fingerprintSHA256 ? .duplicateSameRequest : .duplicateMismatchedRequest
+        }
+        fingerprintsByRequestIDHash[requestIDHash] = key.fingerprintSHA256
+        return .claimed
+    }
+
+    private static func defaultStoreURL(home: URL = FileManager.default.homeDirectoryForCurrentUser) -> URL {
+        home
+            .appendingPathComponent("Library/Application Support/macprovider/continuous-batching", isDirectory: true)
+            .appendingPathComponent("replay-claims-v1", isDirectory: true)
+    }
+
+    private static func requestIDHash(_ requestID: String) -> String {
+        hexString(SHA256.hash(data: Data(requestID.utf8)))
+    }
+
+    private static func claimURL(for requestIDHash: String, in storeURL: URL) throws -> URL {
+        let shard = String(requestIDHash.prefix(2))
+        let shardURL = storeURL.appendingPathComponent(shard, isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: shardURL,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: shardURL.path)
+        try syncDirectory(storeURL)
+        return shardURL.appendingPathComponent("\(requestIDHash).json", isDirectory: false)
+    }
+
+    private func readClaim(at url: URL, requestIDHash: String) throws -> Data? {
+        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+        let record = try decoder.decode(ClaimRecord.self, from: Data(contentsOf: url))
+        guard record.version == ClaimRecord.currentVersion,
+              record.requestIDHash == requestIDHash,
+              let fingerprint = Self.data(fromHexString: record.fingerprintSHA256)
+        else {
+            throw StoreError.corrupt
+        }
+        return fingerprint
+    }
+
+    private func writeClaim(requestIDHash: String, fingerprintSHA256: Data, to url: URL) throws -> Bool {
+        let data = try encoder.encode(ClaimRecord(
+            requestIDHash: requestIDHash,
+            fingerprintSHA256: Self.hexString(fingerprintSHA256)
+        ))
+        let fd = url.withUnsafeFileSystemRepresentation { path -> Int32 in
+            guard let path else { return -1 }
+            return open(path, O_CREAT | O_EXCL | O_WRONLY, S_IRUSR | S_IWUSR)
+        }
+        guard fd >= 0 else {
+            if errno == EEXIST { return false }
+            throw StoreError.corrupt
+        }
+        defer { close(fd) }
+        let wroteAll = data.withUnsafeBytes { rawBuffer -> Bool in
+            guard let base = rawBuffer.bindMemory(to: UInt8.self).baseAddress else {
+                return data.isEmpty
+            }
+            var offset = 0
+            while offset < data.count {
+                let written = Darwin.write(fd, base.advanced(by: offset), data.count - offset)
+                guard written > 0 else { return false }
+                offset += written
+            }
+            return true
+        }
+        guard wroteAll, fsync(fd) == 0 else {
+            throw StoreError.corrupt
+        }
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+        try Self.syncDirectory(url.deletingLastPathComponent())
+        return true
+    }
+
+    private static func syncDirectory(_ url: URL) throws {
+        let fd = url.withUnsafeFileSystemRepresentation { path -> Int32 in
+            guard let path else { return -1 }
+            return open(path, O_RDONLY)
+        }
+        guard fd >= 0 else { throw StoreError.corrupt }
+        defer { close(fd) }
+        guard fsync(fd) == 0 else { throw StoreError.corrupt }
+    }
+
+    private static func missingDirectoryChain(for url: URL, fileManager: FileManager) -> [URL] {
+        var missing: [URL] = []
+        var current = url
+        while true {
+            var isDirectory = ObjCBool(false)
+            if fileManager.fileExists(atPath: current.path, isDirectory: &isDirectory) {
+                break
+            }
+            missing.append(current)
+            let parent = current.deletingLastPathComponent()
+            guard parent.path != current.path else { break }
+            current = parent
+        }
+        return missing
+    }
+
+    private static func syncDirectoryCreationPath(createdDirectories: [URL], storeURL: URL) throws {
+        var synced: Set<String> = []
+        func syncOnce(_ url: URL) throws {
+            let path = url.standardizedFileURL.path
+            guard !synced.contains(path) else { return }
+            try syncDirectory(url)
+            synced.insert(path)
+        }
+
+        for directory in createdDirectories {
+            try syncOnce(directory)
+            let parent = directory.deletingLastPathComponent()
+            if parent.path != directory.path {
+                try syncOnce(parent)
+            }
+        }
+
+        let homeURL = FileManager.default.homeDirectoryForCurrentUser.standardizedFileURL
+        let storePath = storeURL.standardizedFileURL.path
+        let homePath = homeURL.path
+        if storePath == homePath || storePath.hasPrefix(homePath + "/") {
+            var current = storeURL
+            while true {
+                try syncOnce(current)
+                let standardized = current.standardizedFileURL
+                if standardized.path == homePath { break }
+                let parent = standardized.deletingLastPathComponent()
+                guard parent.path != standardized.path else { break }
+                current = parent
+            }
+        } else {
+            try syncOnce(storeURL)
+            let parent = storeURL.deletingLastPathComponent()
+            if parent.path != storeURL.path {
+                try syncOnce(parent)
+            }
+        }
+    }
+
+    private static func withStoreLock<T>(for storeURL: URL, _ operation: () throws -> T) throws -> T {
+        let lockURL = storeURL.appendingPathComponent(".lock", isDirectory: false)
+        let fd = lockURL.withUnsafeFileSystemRepresentation { path -> Int32 in
+            guard let path else { return -1 }
+            return open(path, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR)
+        }
+        guard fd >= 0 else { throw StoreError.lockUnavailable }
+        defer { close(fd) }
+        guard flock(fd, LOCK_EX) == 0 else { throw StoreError.lockUnavailable }
+        defer { _ = flock(fd, LOCK_UN) }
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: lockURL.path)
+        return try operation()
+    }
+
+    private static func hexString<S: Sequence>(_ bytes: S) -> String where S.Element == UInt8 {
+        bytes.map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func data(fromHexString hex: String) -> Data? {
+        guard hex.utf8.count % 2 == 0 else { return nil }
+        var data = Data()
+        data.reserveCapacity(hex.utf8.count / 2)
+        var index = hex.startIndex
+        while index < hex.endIndex {
+            let next = hex.index(index, offsetBy: 2)
+            guard let byte = UInt8(hex[index..<next], radix: 16) else {
+                return nil
+            }
+            data.append(byte)
+            index = next
+        }
+        return data
     }
 }
 
@@ -756,7 +1094,8 @@ actor ModelRuntime: ModelRuntimeServing {
     private var currentPagedKVModelCapabilities: PagedKVRuntimeModelCapabilities
     private var continuousBatchScheduler: ContinuousBatchScheduler?
     private let testContinuousBatchingBackend: (any ContinuousBatchSchedulerBackend)?
-    private let continuousBatchingDurableReplayAuthorityAvailable: Bool
+    private let continuousBatchReplayAuthority: ContinuousBatchRuntimeReplayAuthority
+    private var continuousBatchingDurableReplayAuthorityAvailable: Bool
     private let conversationCache: ConversationCache
     /// SPEC-037 stage 5 — set once the serve process activates the encrypted disk
     /// cold tier (FR-KVP7). Gates all per-request cold-tier context construction;
@@ -960,6 +1299,103 @@ actor ModelRuntime: ModelRuntimeServing {
         )
     }
 
+    nonisolated static func measurePagedKVRuntime(
+        config: PagedKVConfig,
+        modelID: String?,
+        modelSHA256: String?,
+        tokenizerSHA256: String?,
+        chatTemplateSHA256: String?,
+        modelCapabilities: PagedKVRuntimeModelCapabilities,
+        environment: PagedKVRuntimeMeasurementEnvironment = .live
+    ) -> PagedKVRuntimeMeasurement? {
+        guard config.effectiveEnabled,
+              let modelID = Self.nonEmpty(modelID),
+              let modelSHA256 = Self.nonEmpty(modelSHA256),
+              PagedKVAttachGate.recognizedModelFamilies.contains(modelCapabilities.modelFamily)
+        else {
+            return nil
+        }
+        guard let metallibPath = environment.metallibCandidatePaths().first(where: environment.fileExists),
+              let metallibData = try? environment.readFileData(metallibPath),
+              !metallibData.isEmpty
+        else {
+            return nil
+        }
+        let metallibSHA256 = hexString(SHA256.hash(data: metallibData))
+        guard let kernelIdentifier = Self.nonEmpty(environment.registeredKernelIdentifier()) else { return nil }
+        let fingerprint = environment.hardwareFingerprint()
+        let chip = fingerprint.chip.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !chip.isEmpty, chip.lowercased() != "unknown", fingerprint.ramGB > 0 else {
+            return nil
+        }
+        let hardwareClass = "apple-silicon:\(chip):ram-\(fingerprint.ramGB)gb"
+        guard let parityLabel = Self.nonEmpty(environment.parityLabel(
+            metallibPath,
+            metallibSHA256,
+            kernelIdentifier,
+            modelID,
+            modelSHA256,
+            tokenizerSHA256,
+            chatTemplateSHA256,
+            hardwareClass
+        )) else {
+            return nil
+        }
+        let poolEpoch = 1
+        guard let maxResidentTokens = PagedKVRuntimeCapacityProof.measuredMaxResidentTokens(
+            config: config,
+            poolEpoch: poolEpoch
+        ) else {
+            return nil
+        }
+        let observedIdentity = PagedKVObservedRuntimeIdentity(
+            hardwareClass: hardwareClass,
+            metallibSHA256: metallibSHA256,
+            kernelIdentifier: kernelIdentifier,
+            parityLabel: parityLabel,
+            moeDispatchProven: false,
+            poolEpoch: poolEpoch,
+            source: .runtimeMeasurement
+        )
+        guard observedIdentity.isCompleteRuntimeMeasurement else {
+            return nil
+        }
+        let proof = PagedKVHardwareSizingProof(
+            modelID: modelID,
+            modelSHA256: modelSHA256,
+            tokenizerSHA256: tokenizerSHA256,
+            chatTemplateSHA256: chatTemplateSHA256,
+            modelFamily: modelCapabilities.modelFamily,
+            hardwareClass: hardwareClass,
+            metallibSHA256: metallibSHA256,
+            kernelIdentifier: kernelIdentifier,
+            blockSizeTokens: config.blockSizeTokens,
+            maxPhysicalBlocks: config.maxPhysicalBlocks,
+            maxResidentTokens: maxResidentTokens,
+            poolEpoch: poolEpoch,
+            parityLabel: parityLabel
+        )
+        guard proof.covers(
+            config: config,
+            modelID: modelID,
+            modelSHA256: modelSHA256,
+            tokenizerSHA256: tokenizerSHA256,
+            chatTemplateSHA256: chatTemplateSHA256,
+            modelFamily: modelCapabilities.modelFamily,
+            observedHardwareClass: observedIdentity.hardwareClass,
+            observedMetallibSHA256: observedIdentity.metallibSHA256,
+            observedKernelIdentifier: observedIdentity.kernelIdentifier,
+            observedParityLabel: observedIdentity.parityLabel,
+            poolEpoch: observedIdentity.poolEpoch
+        ) else {
+            return nil
+        }
+        return PagedKVRuntimeMeasurement(
+            observedRuntimeIdentity: observedIdentity,
+            hardwareSizingProof: proof
+        )
+    }
+
     private static let pagedKVUnavailableCacheClass = "unavailable"
 
     private static func pagedKVRuntimeCacheClass(
@@ -1147,6 +1583,7 @@ actor ModelRuntime: ModelRuntimeServing {
         self.currentPagedKVModelCapabilities = Self.pagedKVModelCapabilities(modelID: modelID, configJSONData: nil)
         self.continuousBatchScheduler = nil
         self.testContinuousBatchingBackend = nil
+        self.continuousBatchReplayAuthority = ContinuousBatchRuntimeReplayAuthority()
         self.pagedKVAttachDecision = Self.pagedKVRuntimeCapabilityDecision(
             config: pagedKVConfig,
             modelID: modelID,
@@ -1163,7 +1600,7 @@ actor ModelRuntime: ModelRuntimeServing {
         self.blockingInferenceExecutor = BlockingInferenceExecutor(label: "live.malibu.provider.inference")
         self.continuousBatchingMode = continuousBatchingMode
         self.continuousBatchQueueLimit = continuousBatchQueueLimit
-        self.continuousBatchingDurableReplayAuthorityAvailable = continuousBatchingDurableReplayAuthorityAvailable
+        self.continuousBatchingDurableReplayAuthorityAvailable = false
         self.warmSwapEnabled = warmSwapEnabled
         self.swapDrainTimeoutSeconds = swapDrainTimeoutSeconds
         self.verifiedCatalogArtifactSHA256 = verifiedModelArtifactSHA256
@@ -1232,6 +1669,19 @@ actor ModelRuntime: ModelRuntimeServing {
         let modelCapabilities = Self.pagedKVModelCapabilities(modelID: modelID, directory: directory)
         self.pagedKVRuntimeCacheClass = runtimeCacheClass
         self.currentPagedKVModelCapabilities = modelCapabilities
+        if let measurement = Self.measurePagedKVRuntime(
+            config: self.pagedKVConfig,
+            modelID: modelID,
+            modelSHA256: self.currentModelHash,
+            tokenizerSHA256: tokenizerHashes.config,
+            chatTemplateSHA256: tokenizerHashes.template,
+            modelCapabilities: modelCapabilities
+        ) {
+            self.pagedKVObservedRuntimeIdentity = measurement.observedRuntimeIdentity
+            self.pagedKVHardwareSizingProof = measurement.hardwareSizingProof
+        }
+        let candidateSchedulerBackendInstalled = self.pagedKVObservedRuntimeIdentity != nil
+            && self.pagedKVHardwareSizingProof != nil
         self.pagedKVAttachDecision = Self.pagedKVRuntimeCapabilityDecision(
             config: self.pagedKVConfig,
             modelID: modelID,
@@ -1243,8 +1693,11 @@ actor ModelRuntime: ModelRuntimeServing {
             modelCapabilities: modelCapabilities,
             observedRuntimeIdentity: self.pagedKVObservedRuntimeIdentity,
             hardwareSizingProof: self.pagedKVHardwareSizingProof,
-            schedulerBackendInstalled: self.pagedKVSchedulerBackendInstalled
+            schedulerBackendInstalled: candidateSchedulerBackendInstalled
         )
+        if case .attached = self.pagedKVAttachDecision {
+            self.pagedKVSchedulerBackendInstalled = true
+        }
         self.continuousBatchScheduler = await Self.makeContinuousBatchScheduler(
             decision: self.pagedKVAttachDecision,
             tuple: self.continuousBatchingRequestedTuple(),
@@ -1257,8 +1710,27 @@ actor ModelRuntime: ModelRuntimeServing {
             modelSHA256: self.currentModelHash,
             weightsGeneration: self.currentSpecDecodeGeneration,
             kvBitsOverride: self.kvBitsOverride,
-            prefillStepSize: self.prefillStepSize
+            prefillStepSize: self.prefillStepSize,
+            replayAuthority: self.continuousBatchReplayAuthority
         )
+        if self.continuousBatchScheduler == nil {
+            self.pagedKVSchedulerBackendInstalled = false
+            self.pagedKVAttachDecision = Self.pagedKVRuntimeCapabilityDecision(
+                config: self.pagedKVConfig,
+                modelID: modelID,
+                modelHash: self.currentModelHash,
+                tokenizerSHA256: tokenizerHashes.config,
+                chatTemplateSHA256: tokenizerHashes.template,
+                kvBitsOverride: self.kvBitsOverride,
+                runtimeCacheClass: runtimeCacheClass,
+                modelCapabilities: modelCapabilities,
+                observedRuntimeIdentity: self.pagedKVObservedRuntimeIdentity,
+                hardwareSizingProof: self.pagedKVHardwareSizingProof,
+                schedulerBackendInstalled: false
+            )
+        }
+        self.continuousBatchingDurableReplayAuthorityAvailable =
+            self.continuousBatchScheduler != nil && self.continuousBatchReplayAuthority.durableAvailable
         Self.logPagedKVAttachDecision(self.pagedKVAttachDecision)
 
         if let draftModelID = normalizedDraftModelID {
@@ -1330,6 +1802,9 @@ actor ModelRuntime: ModelRuntimeServing {
         testSpeculativeStream: (@Sendable (RuntimeSnapshot, ChatCompletionRequest) async throws -> CompletionResult)? = nil
     ) {
         let normalizedDraftModelID = Self.nonEmpty(draftModelID)
+        let replayAuthority = ContinuousBatchRuntimeReplayAuthority.inMemoryForTests(
+            durableAvailable: continuousBatchingDurableReplayAuthorityAvailable
+        )
         self.modelID = modelID
         self.configuredModelLoadPath = nil
         self.catalogModelIDAlias = catalogModelIDAlias
@@ -1361,6 +1836,7 @@ actor ModelRuntime: ModelRuntimeServing {
         self.pagedKVHardwareSizingProof = pagedKVHardwareSizingProof
         self.pagedKVSchedulerBackendInstalled = pagedKVSchedulerBackendInstalled
         self.testContinuousBatchingBackend = continuousBatchingBackend
+        self.continuousBatchReplayAuthority = replayAuthority
         let boundedMaxBatch = min(max(1, maxBatch), ProviderCapacity.maxConcurrencyOverrideLimit)
         let resolvedPagedKVModelCapabilities = pagedKVModelCapabilities
             ?? Self.pagedKVModelCapabilities(modelID: modelID, configJSONData: nil)
@@ -1396,7 +1872,7 @@ actor ModelRuntime: ModelRuntimeServing {
         self.blockingInferenceExecutor = BlockingInferenceExecutor(label: "live.malibu.provider.inference")
         self.continuousBatchingMode = continuousBatchingMode
         self.continuousBatchQueueLimit = continuousBatchQueueLimit
-        self.continuousBatchingDurableReplayAuthorityAvailable = continuousBatchingDurableReplayAuthorityAvailable
+        self.continuousBatchingDurableReplayAuthorityAvailable = false
         self.warmSwapEnabled = warmSwapEnabled
         self.swapDrainTimeoutSeconds = swapDrainTimeoutSeconds
         self.providerStatus = providerStatus
@@ -1405,7 +1881,7 @@ actor ModelRuntime: ModelRuntimeServing {
         self.testCompletion = testCompletion
         self.testSpeculativeCompletion = testSpeculativeCompletion
         self.testSpeculativeStream = testSpeculativeStream
-        self.continuousBatchScheduler = Self.makeContinuousBatchScheduler(
+        let continuousBatchScheduler = Self.makeContinuousBatchScheduler(
             decision: self.pagedKVAttachDecision,
             tuple: requestedTuple,
             backend: continuousBatchingBackend,
@@ -1415,8 +1891,12 @@ actor ModelRuntime: ModelRuntimeServing {
             modelID: modelID,
             modelSHA256: modelHash,
             weightsGeneration: self.currentSpecDecodeGeneration,
-            prefillStepSize: self.prefillStepSize
+            prefillStepSize: self.prefillStepSize,
+            replayAuthority: replayAuthority
         )
+        self.continuousBatchScheduler = continuousBatchScheduler
+        self.continuousBatchingDurableReplayAuthorityAvailable =
+            continuousBatchScheduler != nil && replayAuthority.durableAvailable
     }
 
     func setProviderStatus(_ providerStatus: ProviderStatus) {
@@ -1989,6 +2469,7 @@ actor ModelRuntime: ModelRuntimeServing {
     private func continuousBatchingCapability(
         draftConfigured: Bool,
         requestHasConversationKey: Bool = false,
+        requestHasStableRequestID: Bool = true,
         requestStateRepresentable: Bool = true
     ) -> ContinuousBatchingCapability {
         let requestedTuple = continuousBatchingRequestedTuple()
@@ -2016,6 +2497,7 @@ actor ModelRuntime: ModelRuntimeServing {
             kvBits: kvBitsOverride,
             draftConfigured: draftConfigured,
             requestHasConversationKey: requestHasConversationKey,
+            requestHasStableRequestID: requestHasStableRequestID,
             requestStateRepresentable: requestStateRepresentable,
             schedulerBackendAvailable: schedulerBackendAvailable,
             durableReplayAuthorityAvailable: continuousBatchingDurableReplayAuthorityAvailable,
@@ -2085,6 +2567,7 @@ actor ModelRuntime: ModelRuntimeServing {
         modelSHA256: String?,
         weightsGeneration: Int,
         prefillStepSize: Int,
+        replayAuthority: any ContinuousBatchSchedulerReplayAuthority,
         contiguousCacheBridge: PagedKVRuntimeContiguousCacheBridge? = nil
     ) -> ContinuousBatchScheduler? {
         guard case .attached(let descriptor) = decision,
@@ -2119,7 +2602,7 @@ actor ModelRuntime: ModelRuntimeServing {
             ),
             allocator: allocator,
             backend: backend,
-            replayAuthority: ContinuousBatchRuntimeReplayAuthority(),
+            replayAuthority: replayAuthority,
             contiguousCacheBridge: contiguousCacheBridge
         )
     }
@@ -2136,7 +2619,8 @@ actor ModelRuntime: ModelRuntimeServing {
         modelSHA256: String?,
         weightsGeneration: Int,
         kvBitsOverride: Int?,
-        prefillStepSize: Int
+        prefillStepSize: Int,
+        replayAuthority: any ContinuousBatchSchedulerReplayAuthority
     ) async -> ContinuousBatchScheduler? {
         if let backendOverride {
             return makeContinuousBatchScheduler(
@@ -2149,7 +2633,8 @@ actor ModelRuntime: ModelRuntimeServing {
                 modelID: modelID,
                 modelSHA256: modelSHA256,
                 weightsGeneration: weightsGeneration,
-                prefillStepSize: prefillStepSize
+                prefillStepSize: prefillStepSize,
+                replayAuthority: replayAuthority
             )
         }
         guard case .attached(let descriptor) = decision,
@@ -2180,6 +2665,7 @@ actor ModelRuntime: ModelRuntimeServing {
             modelSHA256: modelSHA256,
             weightsGeneration: weightsGeneration,
             prefillStepSize: prefillStepSize,
+            replayAuthority: replayAuthority,
             contiguousCacheBridge: contiguousCacheBridge
         )
     }
@@ -2217,8 +2703,11 @@ actor ModelRuntime: ModelRuntimeServing {
             modelSHA256: currentModelHash,
             weightsGeneration: currentSpecDecodeGeneration,
             kvBitsOverride: kvBitsOverride,
-            prefillStepSize: prefillStepSize
+            prefillStepSize: prefillStepSize,
+            replayAuthority: continuousBatchReplayAuthority
         )
+        continuousBatchingDurableReplayAuthorityAvailable =
+            continuousBatchScheduler != nil && continuousBatchReplayAuthority.durableAvailable
     }
 
     /// A request is representable by the batched shared-forward contract only if
@@ -2256,6 +2745,10 @@ actor ModelRuntime: ModelRuntimeServing {
         return true
     }
 
+    nonisolated static func requestHasStableRequestID(_ request: ChatCompletionRequest) -> Bool {
+        nonEmpty(request.requestID) != nil
+    }
+
     /// True when a JSON field is present and not explicit null. `optionalJSONValue`
     /// preserves JSON `null` as `.null`, so a bare `!= nil` check would misclassify
     /// an explicit-null field as active.
@@ -2285,6 +2778,7 @@ actor ModelRuntime: ModelRuntimeServing {
         let capability = continuousBatchingCapability(
             draftConfigured: snapshot.hasTargetCompatibleDraft || currentDraftModelID != nil,
             requestHasConversationKey: Self.nonEmpty(request.conversationKey) != nil,
+            requestHasStableRequestID: Self.requestHasStableRequestID(request),
             requestStateRepresentable: Self.requestStateRepresentable(request)
         )
         // Telemetry is emitted once per request at preflight; execution paths
@@ -2416,6 +2910,22 @@ actor ModelRuntime: ModelRuntimeServing {
             : Self.pagedKVUnavailableCacheClass
         pagedKVRuntimeCacheClass = runtimeCacheClass
         currentPagedKVModelCapabilities = modelCapabilities
+        pagedKVObservedRuntimeIdentity = nil
+        pagedKVHardwareSizingProof = nil
+        pagedKVSchedulerBackendInstalled = false
+        if let measurement = Self.measurePagedKVRuntime(
+            config: pagedKVConfig,
+            modelID: modelID,
+            modelSHA256: modelHash,
+            tokenizerSHA256: tokenizerConfigSHA256,
+            chatTemplateSHA256: chatTemplateSHA256,
+            modelCapabilities: modelCapabilities
+        ) {
+            pagedKVObservedRuntimeIdentity = measurement.observedRuntimeIdentity
+            pagedKVHardwareSizingProof = measurement.hardwareSizingProof
+        }
+        let candidateSchedulerBackendInstalled = pagedKVObservedRuntimeIdentity != nil
+            && pagedKVHardwareSizingProof != nil
         pagedKVAttachDecision = Self.pagedKVRuntimeCapabilityDecision(
             config: pagedKVConfig,
             modelID: modelID,
@@ -2427,14 +2937,33 @@ actor ModelRuntime: ModelRuntimeServing {
             modelCapabilities: modelCapabilities,
             observedRuntimeIdentity: pagedKVObservedRuntimeIdentity,
             hardwareSizingProof: pagedKVHardwareSizingProof,
-            schedulerBackendInstalled: pagedKVSchedulerBackendInstalled
+            schedulerBackendInstalled: candidateSchedulerBackendInstalled
         )
+        if case .attached = pagedKVAttachDecision {
+            pagedKVSchedulerBackendInstalled = true
+        }
+        currentSpecDecodeGeneration += 1
         await rebuildContinuousBatchScheduler(container: container)
+        if continuousBatchScheduler == nil {
+            pagedKVSchedulerBackendInstalled = false
+            pagedKVAttachDecision = Self.pagedKVRuntimeCapabilityDecision(
+                config: pagedKVConfig,
+                modelID: modelID,
+                modelHash: modelHash,
+                tokenizerSHA256: tokenizerConfigSHA256,
+                chatTemplateSHA256: chatTemplateSHA256,
+                kvBitsOverride: kvBitsOverride,
+                runtimeCacheClass: runtimeCacheClass,
+                modelCapabilities: modelCapabilities,
+                observedRuntimeIdentity: pagedKVObservedRuntimeIdentity,
+                hardwareSizingProof: pagedKVHardwareSizingProof,
+                schedulerBackendInstalled: false
+            )
+        }
         Self.logPagedKVAttachDecision(pagedKVAttachDecision)
         currentDraftModelID = draftModelID
         currentDraftTargetModelID = draftModelID == nil ? nil : modelID
         currentDraftContainer = draftContainer
-        currentSpecDecodeGeneration += 1
         state = .ready
         targetModelID = nil
         if let draftFailureReason {
@@ -2750,6 +3279,9 @@ actor ModelRuntime: ModelRuntimeServing {
         guard let scheduler = continuousBatchScheduler else {
             throw Self.attachedPagedKVUnavailableError(code: "continuous_batching_scheduler_unavailable")
         }
+        guard let schedulerRequestID = Self.schedulerRequestID(for: request) else {
+            throw Self.attachedPagedKVUnavailableError(code: ContinuousBatchingUnsupportedReason.stableRequestIDUnavailable.apiCode)
+        }
         guard let container = snapshot.container else {
             throw APIError(status: 503, message: "Model not loaded", type: "server_error", code: "model_not_loaded")
         }
@@ -2795,7 +3327,7 @@ actor ModelRuntime: ModelRuntimeServing {
         do {
             result = try await Self.withDrainAndClientCancellation(drainCancelled, shouldCancel: shouldCancel) {
                 try await scheduler.submit(ContinuousBatchSchedulerRequest(
-                    id: UUID().uuidString,
+                    id: schedulerRequestID,
                     conversationKey: request.conversationKey ?? "",
                     promptTokens: prepared.promptTokens,
                     maxOutputTokens: maxOutputTokens,
@@ -2877,7 +3409,8 @@ actor ModelRuntime: ModelRuntimeServing {
                     ttftMilliseconds: nil,
                     generationMilliseconds: Int64(completionEndedAt.timeIntervalSince(completionStartedAt) * 1000),
                     toolCalls: parsed.toolCalls.isEmpty ? nil : parsed.toolCalls,
-                    modelHashObserved: Self.validObservedModelHash(snapshot.modelHash)
+                    modelHashObserved: Self.validObservedModelHash(snapshot.modelHash),
+                    settlementDisposition: result.settlementDisposition
                 ), request: request)
             }
             if let lease, let retainedCache = result.retainedCache {
@@ -2916,6 +3449,10 @@ actor ModelRuntime: ModelRuntimeServing {
         }
     }
 
+    nonisolated static func schedulerRequestID(for request: ChatCompletionRequest) -> String? {
+        nonEmpty(request.requestID)
+    }
+
     private func attachedContinuousBatchStreamingCompletion(
         request: ChatCompletionRequest,
         snapshot: RuntimeSnapshot,
@@ -2936,6 +3473,9 @@ actor ModelRuntime: ModelRuntimeServing {
         }
         guard let scheduler = continuousBatchScheduler else {
             throw Self.attachedPagedKVUnavailableError(code: "continuous_batching_scheduler_unavailable")
+        }
+        guard let schedulerRequestID = Self.schedulerRequestID(for: request) else {
+            throw Self.attachedPagedKVUnavailableError(code: ContinuousBatchingUnsupportedReason.stableRequestIDUnavailable.apiCode)
         }
         guard let container = snapshot.container else {
             throw APIError(status: 503, message: "Model not loaded", type: "server_error", code: "model_not_loaded")
@@ -2984,7 +3524,7 @@ actor ModelRuntime: ModelRuntimeServing {
         do {
             result = try await Self.withDrainAndClientCancellation(drainCancelled, shouldCancel: shouldCancel) {
                 try await scheduler.submit(ContinuousBatchSchedulerRequest(
-                    id: UUID().uuidString,
+                    id: schedulerRequestID,
                     conversationKey: request.conversationKey ?? "",
                     promptTokens: prepared.promptTokens,
                     maxOutputTokens: maxOutputTokens,
@@ -3088,7 +3628,8 @@ actor ModelRuntime: ModelRuntimeServing {
                     ttftMilliseconds: nil,
                     generationMilliseconds: Int64(completionEndedAt.timeIntervalSince(completionStartedAt) * 1000),
                     toolCalls: parsed.toolCalls.isEmpty ? nil : parsed.toolCalls,
-                    modelHashObserved: Self.validObservedModelHash(snapshot.modelHash)
+                    modelHashObserved: Self.validObservedModelHash(snapshot.modelHash),
+                    settlementDisposition: result.settlementDisposition
                 ), request: request)
             }
             let validated = try Self.validateStructuredStreamingCompletion(
@@ -5874,6 +6415,7 @@ struct CompletionResult: Sendable {
     let generationMilliseconds: Int64?
     let toolCalls: [ToolCall]?
     let modelHashObserved: String?
+    let settlementDisposition: ContinuousBatchSettlementDisposition
     let specDecodeDraftedTokens: Int
     let specDecodeAcceptedTokens: Int
     let specDecodeGeneration: Int?
@@ -5890,6 +6432,7 @@ struct CompletionResult: Sendable {
         generationMilliseconds: Int64? = nil,
         toolCalls: [ToolCall]? = nil,
         modelHashObserved: String? = nil,
+        settlementDisposition: ContinuousBatchSettlementDisposition = .eligibleOwner,
         specDecodeDraftedTokens: Int = 0,
         specDecodeAcceptedTokens: Int = 0,
         specDecodeGeneration: Int? = nil
@@ -5908,6 +6451,7 @@ struct CompletionResult: Sendable {
         self.generationMilliseconds = generationMilliseconds
         self.toolCalls = toolCalls
         self.modelHashObserved = modelHashObserved
+        self.settlementDisposition = settlementDisposition
         self.specDecodeDraftedTokens = max(0, specDecodeDraftedTokens)
         self.specDecodeAcceptedTokens = max(0, min(specDecodeAcceptedTokens, specDecodeDraftedTokens))
         self.specDecodeGeneration = specDecodeGeneration
@@ -5927,6 +6471,7 @@ struct CompletionResult: Sendable {
             generationMilliseconds: generationMilliseconds,
             toolCalls: toolCalls,
             modelHashObserved: observed,
+            settlementDisposition: settlementDisposition,
             specDecodeDraftedTokens: specDecodeDraftedTokens,
             specDecodeAcceptedTokens: specDecodeAcceptedTokens,
             specDecodeGeneration: specDecodeGeneration

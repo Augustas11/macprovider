@@ -14,6 +14,7 @@ enum ContinuousBatchingUnsupportedReason: String, Sendable, Equatable {
     case stickyCacheHandoffUnavailable = "sticky_cache_handoff_unavailable"
     case conversationKeyRolloutUnavailable = "conversation_key_rollout_unavailable"
     case durableReplayAuthorityUnavailable = "durable_replay_authority_unavailable"
+    case stableRequestIDUnavailable = "stable_request_id_unavailable"
     case moePromotionEvidenceUnavailable = "moe_promotion_evidence_unavailable"
     case requestStateUnrepresented = "request_local_state_unrepresented"
 
@@ -29,6 +30,8 @@ enum ContinuousBatchingUnsupportedReason: String, Sendable, Equatable {
             return "continuous_batching_conversation_key_rollout_unavailable"
         case .durableReplayAuthorityUnavailable:
             return "continuous_batching_durable_replay_authority_unavailable"
+        case .stableRequestIDUnavailable:
+            return "continuous_batching_request_id_unavailable"
         case .moePromotionEvidenceUnavailable:
             return "continuous_batching_moe_promotion_evidence_unavailable"
         case .requestStateUnrepresented:
@@ -44,6 +47,7 @@ enum ContinuousBatchingUnsupportedReason: String, Sendable, Equatable {
         case .kvBitsUnsupported, .draftSpecDecodeMutualExclusion,
              .stickyCacheHandoffUnavailable,
              .conversationKeyRolloutUnavailable,
+             .stableRequestIDUnavailable,
              .moePromotionEvidenceUnavailable,
              .requestStateUnrepresented,
              .tupleNotAdvertised:
@@ -160,6 +164,7 @@ enum ContinuousBatchingPolicy {
         kvBits: Int?,
         draftConfigured: Bool,
         requestHasConversationKey: Bool = false,
+        requestHasStableRequestID: Bool = true,
         requestStateRepresentable: Bool = true,
         schedulerBackendAvailable: Bool,
         durableReplayAuthorityAvailable: Bool = true,
@@ -173,6 +178,7 @@ enum ContinuousBatchingPolicy {
             kvBits: kvBits,
             draftConfigured: draftConfigured,
             requestHasConversationKey: requestHasConversationKey,
+            requestHasStableRequestID: requestHasStableRequestID,
             requestStateRepresentable: requestStateRepresentable,
             descriptor: pagedKVDecision.descriptor,
             tuple: requestedTuple,
@@ -190,6 +196,7 @@ enum ContinuousBatchingPolicy {
         kvBits: Int?,
         draftConfigured: Bool,
         requestHasConversationKey: Bool = false,
+        requestHasStableRequestID: Bool = true,
         requestStateRepresentable: Bool = true,
         descriptor: PagedKVDescriptor?,
         tuple: ContinuousBatchingRequestedTuple?,
@@ -243,6 +250,8 @@ enum ContinuousBatchingPolicy {
                     reason = .localCapabilityUnavailable
                 } else if !durableReplayAuthorityAvailable {
                     reason = .durableReplayAuthorityUnavailable
+                } else if !requestHasStableRequestID {
+                    reason = .stableRequestIDUnavailable
                 } else {
                     reason = nil
                 }
@@ -292,6 +301,8 @@ enum ContinuousBatchingPolicy {
             return "continuous batching conversation-keyed traffic is not in the current operator rollout scope"
         case .durableReplayAuthorityUnavailable:
             return "continuous batching requires durable replay authority before scheduler activation"
+        case .stableRequestIDUnavailable:
+            return "continuous batching requires a stable ingress request id before scheduler activation"
         case .moePromotionEvidenceUnavailable:
             return "continuous batching requires the representative MoE correctness fixture and live MSB-04 promotion evidence"
         case .requestStateUnrepresented:

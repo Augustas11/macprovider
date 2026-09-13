@@ -955,6 +955,63 @@ final class ServingKnobsConfigTests: XCTestCase {
         XCTAssertNotEqual(capability.unsupportedReason, .requestStateUnrepresented)
     }
 
+    func testStableRequestIDGateOnlyTripsWhenSchedulerWouldOtherwiseAttach() {
+        let descriptor = Self.pagedKVDescriptor()
+        let tuple = Self.continuousBatchingTuple()
+        let canary = ContinuousBatchingPolicy.capability(
+            mode: .canary,
+            maxBatch: 2,
+            queueLimit: nil,
+            kvBits: nil,
+            draftConfigured: false,
+            requestHasStableRequestID: false,
+            schedulerBackendAvailable: true,
+            durableReplayAuthorityAvailable: true,
+            pagedKVDecision: .attached(descriptor),
+            requestedTuple: tuple
+        )
+        XCTAssertEqual(canary.unsupportedReason, .stableRequestIDUnavailable)
+        XCTAssertTrue(canary.shouldUseSerialPath)
+        XCTAssertEqual(
+            ContinuousBatchingPolicy.serialRouteTelemetryLine(canary),
+            "event=batching_unsupported action=serial_routed reason=stable_request_id_unavailable\n"
+        )
+
+        let strict = ContinuousBatchingPolicy.capability(
+            mode: .on,
+            maxBatch: 2,
+            queueLimit: nil,
+            kvBits: nil,
+            draftConfigured: false,
+            requestHasStableRequestID: false,
+            schedulerBackendAvailable: true,
+            durableReplayAuthorityAvailable: true,
+            pagedKVDecision: .attached(descriptor),
+            requestedTuple: tuple
+        )
+        XCTAssertEqual(strict.unsupportedReason, .stableRequestIDUnavailable)
+        XCTAssertThrowsError(try ContinuousBatchingPolicy.validateStrictStartup(strict)) { error in
+            guard let apiError = error as? APIError else {
+                return XCTFail("expected APIError, got \(error)")
+            }
+            XCTAssertEqual(apiError.status, 400)
+            XCTAssertEqual(apiError.code, "continuous_batching_request_id_unavailable")
+        }
+
+        let missingLocalCapability = ContinuousBatchingPolicy.capability(
+            mode: .canary,
+            maxBatch: 2,
+            queueLimit: nil,
+            kvBits: nil,
+            draftConfigured: false,
+            requestHasStableRequestID: false,
+            schedulerBackendAvailable: false,
+            pagedKVDecision: .disabled,
+            requestedTuple: nil
+        )
+        XCTAssertEqual(missingLocalCapability.unsupportedReason, .pagedKVDisabled)
+    }
+
     func testMoETupleRemainsUnsupportedUntilCorrectnessAndMSB04EvidenceExist() {
         let descriptor = PagedKVDescriptor(
             blockSizeTokens: 16,

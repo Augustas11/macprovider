@@ -36,6 +36,7 @@ final class ReceiptAuditTests: XCTestCase {
             "streaming_request",
             "construction_failed",
             "write_failed",
+            "non_settling_replay",
         ])
         let got = try Set(ReceiptOmissionReason.allCases.map { reason in
             let payload = try payloadObject(ReceiptAudit.omittedPayload(providerID: "provider-a", requestID: "req-1", reason: reason))
@@ -80,6 +81,23 @@ final class ReceiptAuditTests: XCTestCase {
             modelHashSource: .warmSwapDisabled
         )
         XCTAssertEqual(result, RouterHandler.ReceiptHeaderResult.omitted(.noKeypair))
+    }
+
+    func testReceiptResultOmitsNonSettlingReplay() throws {
+        let result = try RouterHandler.receiptHeaderResult(
+            providerID: "provider-a",
+            receiptBuilder: ReceiptBuilder(keyStore: AuditEmptyReceiptKeyStore()),
+            request: fixtureRequest(),
+            outputContent: "answer",
+            outputToolCalls: nil,
+            finishReason: "stop",
+            ttftMs: 1,
+            tokensOut: 1,
+            unixTsSeconds: 1,
+            modelHashSource: .warmSwapDisabled,
+            settlementDisposition: .nonSettlingReplay
+        )
+        XCTAssertEqual(result, RouterHandler.ReceiptHeaderResult.omitted(.nonSettlingReplay))
     }
 
     func testErrorReceiptResultMapsNonNullUsageSuppressionToPreTokenCancel() throws {
