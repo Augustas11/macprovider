@@ -1423,8 +1423,21 @@ def _validate_catalog_economics(parsed: dict[str, Any], location: str) -> None:
                         f"{where}.{field}: an available action must carry its typed "
                         "transaction fields and no unavailable_reason"
                     )
-            elif action["unavailable_reason"] is None:
-                fail(f"{where}.{field}: an unavailable action must carry a reason")
+            else:
+                if action["unavailable_reason"] is None:
+                    fail(f"{where}.{field}: an unavailable action must carry a reason")
+                if any(
+                    action[field_name] is not None
+                    for field_name in (
+                        "transaction_kind",
+                        "transaction_id",
+                        "action_timeout_seconds",
+                    )
+                ):
+                    fail(
+                        f"{where}.{field}: an unavailable action must not carry "
+                        "transaction fields"
+                    )
 
 
 def validate_captured_cli_document(schema: Any, parsed: Any, location: str = "$") -> None:

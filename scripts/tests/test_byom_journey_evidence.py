@@ -432,6 +432,24 @@ class BYOMJourneyCaptureTests(unittest.TestCase):
             "and no unavailable_reason",
         )
 
+        unavailable_action_document = self.complete_catalog_economics_document()
+        unavailable_action_document["rows"][0]["evaluate"] = {
+            **self.unavailable_action(),
+            "transaction_kind": "evaluate_model",
+            "transaction_id": "not-a-uuid",
+            "action_timeout_seconds": 10,
+        }
+
+        def unavailable_action_with_transaction_fields(manifest, root):
+            self.add_catalog_economics_step(manifest)
+            self.write_catalog_economics_capture(root, unavailable_action_document)
+
+        self.assert_capture_fails(
+            "discovery",
+            unavailable_action_with_transaction_fields,
+            "evaluate: an unavailable action must not carry transaction fields",
+        )
+
     def guidance_document(self, **guidance) -> dict:
         document = self.complete_discovery_document()
         document["candidates"][0]["provider_guidance"].update(guidance)

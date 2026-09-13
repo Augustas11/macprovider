@@ -224,6 +224,154 @@ final class ModelManagementTests: XCTestCase {
         XCTAssertEqual(store.history.last?.outcome, "failed")
     }
 
+    @MainActor
+    func testBYOMActivationRejectsMismatchedCandidateBindingsAtEveryBoundary() async throws {
+        let digest = String(repeating: "a", count: 64)
+        let timestamp = Self.recentTimestamp()
+        let economics = ModelCLIResult(
+            exitCode: 0,
+            stdout: catalogEconomicsJSON(
+                rows: [
+                    localOnlyBYOMRowJSON(evaluateAction: availableActionJSON(kind: "evaluate_model", timeout: 10, requiresConfirmation: false)),
+                ],
+                generatedAt: timestamp
+            ),
+            stderr: ""
+        )
+        let localEvaluation = ModelCLIResult(
+            exitCode: 0,
+            stdout: Self.byomEvaluationJSON(candidateID: "local-candidate", digest: digest),
+            stderr: ""
+        )
+        let localDryRun = ModelCLIResult(
+            exitCode: 0,
+            stdout: Self.byomOfferDryRunJSON(candidateID: "local-candidate"),
+            stderr: ""
+        )
+        let localStatus = ModelCLIResult(
+            exitCode: 0,
+            stdout: Self.byomAdmissionStatusJSON(candidateID: "local-candidate"),
+            stderr: ""
+        )
+        let otherEvaluation = ModelCLIResult(
+            exitCode: 0,
+            stdout: Self.byomEvaluationJSON(candidateID: "other-candidate", digest: digest),
+            stderr: ""
+        )
+        let otherDryRun = ModelCLIResult(
+            exitCode: 0,
+            stdout: Self.byomOfferDryRunJSON(candidateID: "other-candidate"),
+            stderr: ""
+        )
+        let otherStatus = ModelCLIResult(
+            exitCode: 0,
+            stdout: Self.byomAdmissionStatusJSON(candidateID: "other-candidate"),
+            stderr: ""
+        )
+        let cases: [(name: String, results: [ModelCLIResult], expectedInvocations: Int)] = [
+            ("evaluation", [economics, otherEvaluation, localDryRun], 3),
+            ("dry-run", [economics, localEvaluation, otherDryRun], 3),
+            ("offer-result", [economics, localEvaluation, localDryRun, otherStatus], 4),
+            ("refreshed-status", [economics, localEvaluation, localDryRun, localStatus, otherStatus], 5),
+        ]
+
+        for (name, results, expectedInvocations) in cases {
+            let cli = FakeModelCLI(results: results)
+            let store = ModelManagementStore(
+                cli: cli,
+                paths: testProviderPaths(),
+                defaults: UserDefaults(suiteName: "ModelManagementTests.byomBinding.\(name).\(UUID().uuidString)")!
+            )
+            await store.refresh(
+                currentModelID: "other/model",
+                peer: peer(for: [MalibuModelCapabilityManifest.readySwitch, MalibuModelCapabilityManifest.catalogEconomics])
+            )
+            let row = try XCTUnwrap(store.rows.first { $0.id == "local-candidate" }, name)
+
+            await store.activate(row)
+
+            XCTAssertEqual(cli.invocations.count, expectedInvocations, name)
+            guard case .failed = store.operation else {
+                XCTFail("expected \(name) to fail closed on a mismatched candidate id")
+                continue
+            }
+            XCTAssertEqual(store.history.last?.outcome, "failed", name)
+        }
+    }
+
+    @MainActor
+    func testBYOMActivationRejectsAmbiguousOrNonClosedEvaluationJSON() async throws {
+        let digest = String(repeating: "a", count: 64)
+        let timestamp = Self.recentTimestamp()
+        let validEvaluation = Self.byomEvaluationJSON(candidateID: "local-candidate", digest: digest)
+        let mutations: [(name: String, evaluation: String)] = [
+            (
+                "duplicate-key",
+                validEvaluation.replacingOccurrences(
+                    of: #""candidate_id":"local-candidate""#,
+                    with: #""candidate_id":"local-candidate","candidate_id":"other-candidate""#
+                )
+            ),
+            (
+                "unknown-capability-field",
+                validEvaluation.replacingOccurrences(
+                    of: #""reason_code":null}},"fit_estimate_source""#,
+                    with: #""reason_code":null,"operator_secret":"x"}},"fit_estimate_source""#
+                )
+            ),
+            (
+                "unknown-mutation-field",
+                validEvaluation.replacingOccurrences(
+                    of: #""coordinator_state_mutated":false"#,
+                    with: #""coordinator_state_mutated":false,"operator_secret":true"#
+                )
+            ),
+            (
+                "state-mutating-evaluation",
+                validEvaluation.replacingOccurrences(
+                    of: #""coordinator_state_mutated":false"#,
+                    with: #""coordinator_state_mutated":true"#
+                )
+            ),
+        ]
+
+        for (name, evaluation) in mutations {
+            let cli = FakeModelCLI(results: [
+                ModelCLIResult(
+                    exitCode: 0,
+                    stdout: catalogEconomicsJSON(
+                        rows: [
+                            localOnlyBYOMRowJSON(evaluateAction: availableActionJSON(kind: "evaluate_model", timeout: 10, requiresConfirmation: false)),
+                        ],
+                        generatedAt: timestamp
+                    ),
+                    stderr: ""
+                ),
+                ModelCLIResult(exitCode: 0, stdout: evaluation, stderr: ""),
+                ModelCLIResult(exitCode: 0, stdout: Self.byomOfferDryRunJSON(candidateID: "local-candidate"), stderr: ""),
+            ])
+            let store = ModelManagementStore(
+                cli: cli,
+                paths: testProviderPaths(),
+                defaults: UserDefaults(suiteName: "ModelManagementTests.byomStrict.\(name).\(UUID().uuidString)")!
+            )
+            await store.refresh(
+                currentModelID: "other/model",
+                peer: peer(for: [MalibuModelCapabilityManifest.readySwitch, MalibuModelCapabilityManifest.catalogEconomics])
+            )
+            let row = try XCTUnwrap(store.rows.first { $0.id == "local-candidate" }, name)
+
+            await store.activate(row)
+
+            XCTAssertEqual(cli.invocations.count, 3, name)
+            guard case .failed = store.operation else {
+                XCTFail("expected \(name) to fail closed")
+                continue
+            }
+            XCTAssertEqual(store.history.last?.outcome, "failed", name)
+        }
+    }
+
     func testCatalogEconomicsDecodeRejectsUnsupportedEnvelopeKeys() throws {
         let json = catalogEconomicsJSON(rows: [trustedEconomicsRowJSON()])
             .replacingOccurrences(of: #""schema":"model_catalog_economics.v1""#, with: #""schema":"model_catalog_economics.v1","provider_secret_path":"/private/tmp/key""#)

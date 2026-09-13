@@ -850,6 +850,15 @@ struct MalibuModelCatalogEconomicsDocument: Decodable, Equatable, Sendable {
         value.range(of: "^byom(?:\\.[a-z0-9]+(?:_[a-z0-9_]+)*)+$", options: .regularExpression) != nil
     }
 
+    static func guidanceIsValid(_ guidance: ProviderGuidance) -> Bool {
+        ["local_inventory_only", "not_earning_yet_catalog_or_receipt_path_exists", "no_earning_path_in_v0_1", "settlement_capable"]
+            .contains(guidance.earningPathClass)
+            && isLocalizationKey(guidance.stateLabelKey)
+            && isLocalizationKey(guidance.stateMeaningKey)
+            && closedNextActions.contains(guidance.nextAction)
+            && guidance.transitionReasonCode.map(closedTransitionReasonCodes.contains) ?? true
+    }
+
     private func validate(action: Action) throws {
         if action.available {
             guard let kind = action.transactionKind,
@@ -901,7 +910,7 @@ struct MalibuModelCatalogEconomicsDocument: Decodable, Equatable, Sendable {
         return formatter.date(from: value)
     }
 
-    private static let closedWarnings: Set<String> = [
+    static let closedWarnings: Set<String> = [
         "feed_fallback",
         "feed_stale",
         "feed_signature_invalid",
@@ -1026,6 +1035,14 @@ struct MalibuBYOMEvaluationDocument: Decodable, Equatable, Sendable {
             case source
             case reasonCode = "reason_code"
         }
+
+        init(from decoder: Decoder) throws {
+            try rejectUnknownKeys(decoder, allowed: CodingKeys.allCases.map(\.stringValue))
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            result = try container.decode(String.self, forKey: .result)
+            source = try container.decode(String.self, forKey: .source)
+            reasonCode = try decodeExplicitNullableString(container, .reasonCode)
+        }
     }
 
     struct MutationSummary: Decodable, Equatable, Sendable {
@@ -1044,6 +1061,17 @@ struct MalibuBYOMEvaluationDocument: Decodable, Equatable, Sendable {
             case downloadsStarted = "downloads_started"
             case temporaryFilesCreated = "temporary_files_created"
         }
+
+        init(from decoder: Decoder) throws {
+            try rejectUnknownKeys(decoder, allowed: CodingKeys.allCases.map(\.stringValue))
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            productionConfigMutated = try container.decode(Bool.self, forKey: .productionConfigMutated)
+            coordinatorStateMutated = try container.decode(Bool.self, forKey: .coordinatorStateMutated)
+            productionModelSwitched = try container.decode(Bool.self, forKey: .productionModelSwitched)
+            runtimeStarted = try container.decode(Bool.self, forKey: .runtimeStarted)
+            downloadsStarted = try container.decode(Bool.self, forKey: .downloadsStarted)
+            temporaryFilesCreated = try container.decode(Bool.self, forKey: .temporaryFilesCreated)
+        }
     }
 
     struct DiagnosticHashes: Decodable, Equatable, Sendable {
@@ -1053,6 +1081,13 @@ struct MalibuBYOMEvaluationDocument: Decodable, Equatable, Sendable {
         enum CodingKeys: String, CodingKey, CaseIterable {
             case promptSHA256 = "prompt_sha256"
             case responseBodySHA256 = "response_body_sha256"
+        }
+
+        init(from decoder: Decoder) throws {
+            try rejectUnknownKeys(decoder, allowed: CodingKeys.allCases.map(\.stringValue))
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            promptSHA256 = try container.decode(String.self, forKey: .promptSHA256)
+            responseBodySHA256 = try decodeExplicitNullableString(container, .responseBodySHA256)
         }
     }
 
@@ -1133,6 +1168,49 @@ struct MalibuBYOMEvaluationDocument: Decodable, Equatable, Sendable {
         warnings = try container.decode([String].self, forKey: .warnings)
         evaluationDigestSHA256 = try decodeExplicitNullableString(container, .evaluationDigestSHA256)
     }
+
+    func validated(expectedCandidateID: String) throws {
+        guard schema == "provider_byom_evaluation.v1",
+              candidateID == expectedCandidateID,
+              ["passed", "failed", "blocked", "timed_out"].contains(healthResult),
+              ["runtime_reported", "absent", "not_evaluated"].contains(usageReportingSource),
+              ["discovery_fit_state"].contains(fitEstimateSource),
+              warnings.allSatisfy(MalibuModelCatalogEconomicsDocument.closedWarnings.contains),
+              !mutationSummary.productionConfigMutated,
+              !mutationSummary.coordinatorStateMutated,
+              !mutationSummary.productionModelSwitched,
+              !mutationSummary.runtimeStarted,
+              !mutationSummary.downloadsStarted,
+              !mutationSummary.temporaryFilesCreated,
+              MalibuModelCatalogEconomicsDocument.guidanceIsValid(providerGuidance) else {
+            throw ModelManagementError.invalidCatalog
+        }
+        for result in capabilityResults.values {
+            guard ["passed", "failed", "not_tested"].contains(result.result),
+                  ["evaluation", "not_evaluated", "runtime_reported", "absent"].contains(result.source) else {
+                throw ModelManagementError.invalidCatalog
+            }
+        }
+        guard Set(capabilityResults.keys).isSubset(of: [
+            "chat_completions",
+            "streaming",
+            "tool_call_passthrough",
+            "structured_output_passthrough",
+            "json_mode",
+            "usage_reporting",
+        ]),
+              ["mlx_cache", "ollama_loopback", "lmstudio_loopback", "llamacpp_loopback", "openai_compatible_loopback", "unknown"].contains(runtimeSource),
+              ["openai_compatible_loopback", "mlx_cache_local_artifact", "unknown"].contains(adapterIdentity),
+              evaluationDigestSHA256.map(Self.isLowercaseSHA256) ?? true,
+              Self.isLowercaseSHA256(diagnosticHashes.promptSHA256),
+              diagnosticHashes.responseBodySHA256.map(Self.isLowercaseSHA256) ?? true else {
+            throw ModelManagementError.invalidCatalog
+        }
+    }
+
+    private static func isLowercaseSHA256(_ value: String) -> Bool {
+        value.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil
+    }
 }
 
 struct MalibuBYOMOfferDryRunDocument: Decodable, Equatable, Sendable {
@@ -1179,6 +1257,22 @@ struct MalibuBYOMOfferDryRunDocument: Decodable, Equatable, Sendable {
         providerGuidance = try container.decode(MalibuModelCatalogEconomicsDocument.ProviderGuidance.self, forKey: .providerGuidance)
         reasonCode = try decodeExplicitNullableString(container, .reasonCode)
         warnings = try container.decode([String].self, forKey: .warnings)
+    }
+
+    func validated(expectedCandidateID: String) throws {
+        guard schema == "model_admission_offer_dry_run.v1",
+              candidateID == expectedCandidateID,
+              ["local_default", "coordinator"].contains(likelyAdmissionStateSource),
+              likelyAdmissionStateSource == "coordinator"
+                  ? [
+                      "not_offered", "offer_rejected", "sandbox_probe_only", "network_visible_unpriced",
+                      "network_admitted_unsettled", "catalog_priced", "settlement_capable", "withdrawn", "revoked",
+                  ].contains(likelyAdmissionState)
+                  : ["local_only", "not_offered", "offerable"].contains(likelyAdmissionState),
+              warnings.allSatisfy(MalibuModelCatalogEconomicsDocument.closedWarnings.contains),
+              MalibuModelCatalogEconomicsDocument.guidanceIsValid(providerGuidance) else {
+            throw ModelManagementError.invalidCatalog
+        }
     }
 }
 
@@ -1232,6 +1326,56 @@ struct MalibuBYOMAdmissionStatusDocument: Decodable, Equatable, Sendable {
         providerGuidance = try container.decode(MalibuModelCatalogEconomicsDocument.ProviderGuidance.self, forKey: .providerGuidance)
         allowedNextStates = try container.decode([String].self, forKey: .allowedNextStates)
         warnings = try container.decode([String].self, forKey: .warnings)
+    }
+
+    func validated(expectedCandidateID: String) throws {
+        guard schema == "model_admission_status.v1",
+              candidateID == expectedCandidateID,
+              ["local_default", "coordinator"].contains(admissionStateSource),
+              admissionStateSource == "coordinator"
+                  ? [
+                      "not_offered", "offer_submitted", "offer_rejected", "sandbox_probe_only", "network_visible_unpriced",
+                      "network_admitted_unsettled", "catalog_priced", "settlement_capable", "withdrawn", "revoked",
+                  ].contains(admissionState)
+                  : ["local_only", "not_offered", "offerable"].contains(admissionState),
+              admissionStateSource == "coordinator" || allowedNextStates.isEmpty,
+              admissionStateSource == "local_default" || Set(allowedNextStates).isSubset(of: Self.allowedNextStates(for: admissionState)),
+              ["offer_rejected", "withdrawn", "revoked"].contains(admissionState)
+                  ? providerGuidance.transitionReasonCode != nil
+                  : true,
+              warnings.allSatisfy(MalibuModelCatalogEconomicsDocument.closedWarnings.contains),
+              MalibuModelCatalogEconomicsDocument.guidanceIsValid(providerGuidance) else {
+            throw ModelManagementError.invalidCatalog
+        }
+    }
+
+    private static func allowedNextStates(for state: String) -> Set<String> {
+        switch state {
+        case "not_offered", "withdrawn", "revoked":
+            return ["offer_submitted"]
+        case "offer_rejected":
+            return ["offer_submitted", "revoked"]
+        case "offer_submitted":
+            return [
+                "offer_rejected", "sandbox_probe_only", "network_visible_unpriced",
+                "network_admitted_unsettled", "catalog_priced", "withdrawn", "revoked",
+            ]
+        case "sandbox_probe_only":
+            return [
+                "network_visible_unpriced", "network_admitted_unsettled",
+                "catalog_priced", "withdrawn", "revoked",
+            ]
+        case "network_visible_unpriced":
+            return ["network_admitted_unsettled", "catalog_priced", "withdrawn", "revoked"]
+        case "network_admitted_unsettled":
+            return ["catalog_priced", "settlement_capable", "withdrawn", "revoked"]
+        case "catalog_priced":
+            return ["network_admitted_unsettled", "settlement_capable", "withdrawn", "revoked"]
+        case "settlement_capable":
+            return ["network_admitted_unsettled", "catalog_priced", "withdrawn", "revoked"]
+        default:
+            return []
+        }
     }
 }
 
@@ -2317,7 +2461,7 @@ final class ModelManagementStore: ObservableObject {
 
     func activate(_ row: MalibuModelRow) async {
         guard row.action == .evaluate,
-              let evaluateTransaction = row.evaluateTransaction,
+              row.evaluateTransaction != nil,
               canPerformModelAction else { return }
         let from = currentModelID
         operation = .loadingList
@@ -2350,12 +2494,12 @@ final class ModelManagementStore: ObservableObject {
                 offerArguments += ["--evaluation-digest-sha256", digest]
             }
             let offer = try await runBYOMCommand(offerArguments)
-            try Self.validateBYOMAdmissionStatus(offer.stdout)
+            try Self.validateBYOMAdmissionStatus(offer.stdout, expectedCandidateID: row.id)
             statusLine = String(localized: "Reading the resulting admission status…", comment: "BYOM status refresh status")
             let admissionStatus = try await runBYOMCommand([
                 "models", "admission", "status", row.id, "--json", "--config", paths.configFile.path,
             ])
-            try Self.validateBYOMAdmissionStatus(admissionStatus.stdout)
+            try Self.validateBYOMAdmissionStatus(admissionStatus.stdout, expectedCandidateID: row.id)
             statusLine = String(localized: "Offer submitted. Refreshing admission status…", comment: "BYOM offer submitted status")
             operation = .idle
             await refresh(currentModelID: currentModelID, peer: peerEvidence)
@@ -2387,23 +2531,20 @@ final class ModelManagementStore: ObservableObject {
     ) throws -> (digest: String?, wouldSubmit: Bool) {
         let evaluation = try Self.decodeStrict(MalibuBYOMEvaluationDocument.self, from: evaluation.stdout)
         let dryRun = try Self.decodeStrict(MalibuBYOMOfferDryRunDocument.self, from: dryRun.stdout)
-        guard evaluation.schema == "provider_byom_evaluation.v1",
-              evaluation.candidateID == candidateID,
-              evaluation.mutationSummary.coordinatorStateMutated == false,
-              dryRun.schema == "model_admission_offer_dry_run.v1",
-              dryRun.candidateID == candidateID else {
-            throw ModelManagementError.invalidCatalog
-        }
+        try evaluation.validated(expectedCandidateID: candidateID)
+        try dryRun.validated(expectedCandidateID: candidateID)
         return (evaluation.evaluationDigestSHA256, dryRun.wouldSubmit)
     }
 
-    private static func validateBYOMAdmissionStatus(_ stdout: String) throws {
-        _ = try Self.decodeStrict(MalibuBYOMAdmissionStatusDocument.self, from: stdout)
+    private static func validateBYOMAdmissionStatus(_ stdout: String, expectedCandidateID: String) throws {
+        let status = try Self.decodeStrict(MalibuBYOMAdmissionStatusDocument.self, from: stdout)
+        try status.validated(expectedCandidateID: expectedCandidateID)
     }
 
     private static func decodeStrict<T: Decodable>(_ type: T.Type, from stdout: String) throws -> T {
         guard let data = stdout.data(using: .utf8) else { throw ModelManagementError.invalidCatalog }
         do {
+            try MalibuStrictJSON.rejectDuplicateKeys(data)
             return try JSONDecoder().decode(type, from: data)
         } catch {
             throw ModelManagementError.invalidCatalog

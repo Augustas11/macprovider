@@ -981,7 +981,7 @@ struct ModelCatalogEconomicsBuilder {
         let actionUnavailable = candidate.catalogModelKey == nil
             ? "model_not_supported"
             : "action_unavailable"
-        let evaluateAction = Self.evaluateAction(for: candidate, actionUnavailable: actionUnavailable)
+        let evaluateAction = Self.evaluateAction(for: candidate)
         return ModelCatalogEconomicsWire.Row(
             modelKey: modelKey,
             servedModelID: candidate.servedModelRef,
@@ -1023,17 +1023,14 @@ struct ModelCatalogEconomicsBuilder {
         )
     }
 
-    private static func evaluateAction(
-        for candidate: BYOMDiscoveryWire.Candidate,
-        actionUnavailable: String
-    ) -> ModelCatalogEconomicsWire.Action {
-        let evaluatable = candidate.candidateID.hasPrefix("byom_")
-            && !candidate.candidateID.hasPrefix("byom_unstable_")
+    private static func evaluateAction(for candidate: BYOMDiscoveryWire.Candidate) -> ModelCatalogEconomicsWire.Action {
+        let evaluatable = BYOMWithdrawalBuilder.isStableCandidateID(candidate.candidateID)
             && candidate.readinessState == "ready"
-            && candidate.fitState != "does_not_fit"
+            && candidate.fitState == "fits"
+            && candidate.catalogModelKey != nil
             && Set(candidate.warningCodes).isDisjoint(with: BYOMDiscoveryWarning.submitBlockingWarningCodes)
         guard evaluatable else {
-            return .unavailable(actionUnavailable == "model_not_supported" ? actionUnavailable : "candidate_not_evaluatable")
+            return .unavailable("candidate_not_evaluatable")
         }
         return .evaluateModel(transactionID: UUID().uuidString.lowercased())
     }

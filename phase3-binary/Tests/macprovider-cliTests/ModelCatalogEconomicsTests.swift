@@ -37,10 +37,6 @@ final class ModelCatalogEconomicsTests: XCTestCase {
         XCTAssertFalse(row.switchAction.available)
         XCTAssertTrue(row.evaluate.available)
         XCTAssertEqual(row.evaluate.transactionKind, "evaluate_model")
-        XCTAssertNotNil(row.evaluate.transactionID)
-        XCTAssertEqual(row.evaluate.actionTimeoutSeconds, 10)
-        XCTAssertFalse(row.evaluate.requiresConfirmation)
-        XCTAssertNil(row.evaluate.unavailableReason)
 
         let encoded = try ModelSwitchingWireCodec.encode(projection)
         let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(encoded.utf8)) as? [String: Any])
@@ -55,12 +51,30 @@ final class ModelCatalogEconomicsTests: XCTestCase {
     func testProjectionEmitsEvaluateOnlyForEvaluatableCandidates() throws {
         let inputs = try Self.staticInputs()
         let blockedCandidate = Self.candidate(
+            candidateID: "byom_" + String(repeating: "a", count: 52),
             warningCodes: [BYOMDiscoveryWarning.requiresPreparation.rawValue]
+        )
+        let unknownFitCandidate = Self.candidate(
+            candidateID: "byom_" + String(repeating: "b", count: 52),
+            fitState: "unknown"
+        )
+        let unboundCatalogCandidate = Self.candidate(
+            candidateID: "byom_" + String(repeating: "c", count: 52),
+            catalogModelKey: nil
+        )
+        let unstableCandidate = Self.candidate(
+            candidateID: "byom_unstable_000000000000000000000000000000000000000000000"
         )
         let projection = ModelCatalogEconomicsBuilder.makeProjection(
             generatedAt: inputs.rateCard.value.generatedAt.addingTimeInterval(60),
             currentModelID: nil,
-            discovery: Self.discovery(candidates: [blockedCandidate, Self.candidate()]),
+            discovery: Self.discovery(candidates: [
+                blockedCandidate,
+                unknownFitCandidate,
+                unboundCatalogCandidate,
+                unstableCandidate,
+                Self.candidate(),
+            ]),
             admissionStatuses: [:],
             demand: inputs.demand,
             candidateCatalog: inputs.candidateCatalog,
@@ -68,9 +82,18 @@ final class ModelCatalogEconomicsTests: XCTestCase {
         )
 
         let rows = projection.rows.filter { $0.actionModelID != nil }
-        let blockedRow = try XCTUnwrap(rows.first { $0.evaluate.available == false })
-        XCTAssertEqual(blockedRow.evaluate.unavailableReason, "candidate_not_evaluatable")
+        let blockedIDs = Set([
+            blockedCandidate.candidateID,
+            unknownFitCandidate.candidateID,
+            unboundCatalogCandidate.candidateID,
+            unstableCandidate.candidateID,
+        ])
+        let blockedRows = rows.filter { blockedIDs.contains($0.actionModelID ?? "") }
+        XCTAssertEqual(blockedRows.count, 4)
+        XCTAssertTrue(blockedRows.allSatisfy { $0.evaluate.available == false }, "all four negative candidates must be unavailable")
+        XCTAssertTrue(blockedRows.allSatisfy { $0.evaluate.unavailableReason == "candidate_not_evaluatable" })
         let availableRow = try XCTUnwrap(rows.first { $0.evaluate.available })
+        XCTAssertEqual(availableRow.actionModelID, Self.candidateID)
         XCTAssertEqual(availableRow.evaluate.transactionKind, "evaluate_model")
         XCTAssertNotNil(availableRow.evaluate.transactionID)
         XCTAssertEqual(availableRow.evaluate.actionTimeoutSeconds, 10)
@@ -551,7 +574,7 @@ final class ModelCatalogEconomicsTests: XCTestCase {
     }
 
 
-    private static let candidateID = "byom_test_0000000000000000000000000000000000000000000000"
+    private static let candidateID = "byom_abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrst"
     private static let catalogModelKey = "openai/gpt-oss-20b"
     private static let servedModelRef = "ollama:gpt-oss:20b"
 
