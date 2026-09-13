@@ -380,13 +380,20 @@ separate reviewed release before or after it.
 Paste the emitted `rewards.rate_card:` rows into
 `phase4-coordinator/dist/coordinator.yaml`, keeping the existing provenance
 comments. The generator emits rather than rewrites because that file carries
-reviewed money-path commentary. Parity is a statement about the committed
-`dist/coordinator.yaml`: a Pearl overlay (`coordinator.pearl-overlays.yaml`)
-can still override `rewards.*` at runtime, which this gate does not see. The
-§3.3.1 rule-9 parity gate then refuses to cut
-a release until both sides agree row-for-row and the release-global
+reviewed money-path commentary. The §3.3.1 rule-9 release gate then refuses to
+cut a release until both sides agree row-for-row and the release-global
 `provider_share_bps / 10000` and `global_multiplier_ppm / 1000000` equal
 `rewards.provider_share` and `rewards.global_multiplier`.
+
+Runtime overlays are guarded separately: when the coordinator boots or accepts
+a SIGHUP while signed rate-card bytes are or remain served, it compares the
+signed rate card against the overlay-effective `rewards.*` and
+`stats.rollup.usd_per_million_credits` before Tier-2 staging, billing reload,
+settlement config publication, catalog swaps, or feed swaps. A Pearl overlay
+(`coordinator.pearl-overlays.yaml`) that would price settlement differently
+from the signed public feed now fails boot or SIGHUP closed; disabling a live
+signed feed still requires restart because clearing feed paths on SIGHUP retains
+the incumbent signed release.
 
 ## Cutting the first artifact-bound release
 
