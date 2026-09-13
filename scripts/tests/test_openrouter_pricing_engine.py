@@ -191,7 +191,7 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
             {"date": "2026-08-03", "model_permaslug": "other", "total_tokens": "1"},
         ], "meta": {"as_of": "2026-08-04T02:00:00Z", "start_date": "2026-08-03", "end_date": "2026-08-03", "version": "v1"}}
         catalog = {"data": [{"id": "example/current-model", "canonical_slug": "example/old-model-20260101", "pricing": None}]}
-        endpoints = {"example/current-model": {"data": {"id": "example/current-model", "endpoints": [{"provider_name": "Provider", "status": 0, "throughput_last_30m": "50", "uptime_last_30d": "0.99", "pricing": {"prompt": "0.1", "completion": "0.2"}}]}}}
+        endpoints = {"example/current-model": {"data": {"id": "example/current-model", "endpoints": [{"provider_name": "Provider", "status": 0, "throughput_last_30m": "50", "uptime_last_30d": "0.99", "completion_tokens_last_30d": 1000000, "pricing": {"prompt": "0.1", "completion": "0.2"}}]}}}
         policy_document = policy()
         policy_document["models"] = []
         snapshot = engine.build_snapshot(rankings, catalog, endpoints, policy_document, now=NOW, top_n=1)
@@ -249,7 +249,7 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
             "bytedance-seed/seedream-4.5-20251203": {
                 "data": {
                     "id": "bytedance-seed/seedream-4.5",
-                    "endpoints": [{"provider_name": "Provider", "status": 0, "throughput_last_30m": "50", "uptime_last_30d": "0.99", "pricing": {"prompt": "0.1", "completion": "0.2"}}],
+                    "endpoints": [{"provider_name": "Provider", "status": 0, "throughput_last_30m": "50", "uptime_last_30d": "0.99", "completion_tokens_last_30d": 1000000, "pricing": {"prompt": "0.1", "completion": "0.2"}}],
                 }
             }
         }
@@ -648,7 +648,7 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
             "data": {
                 "id": regular_id,
                 "endpoints": [
-                    {"provider_name": "Provider", "status": 0, "throughput_last_30m": "50", "uptime_last_30d": "0.99", "pricing": {"prompt": "0.1", "completion": "0.2"}}
+                    {"provider_name": "Provider", "status": 0, "throughput_last_30m": "50", "uptime_last_30d": "0.99", "completion_tokens_last_30d": 1000000, "pricing": {"prompt": "0.1", "completion": "0.2"}}
                 ],
             }
         }
@@ -787,7 +787,7 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
         }
         catalog = {"data": [{"id": model_id, "canonical_slug": model_id, "name": "Example", "pricing": None}]}
         empty = {"data": {"id": model_id, "endpoints": []}}
-        priced = {"data": {"id": model_id, "endpoints": [{"provider_name": "Provider", "status": 0, "throughput_last_30m": "50", "uptime_last_30d": "0.99", "pricing": {"prompt": "0.1", "completion": "0.2"}}]}}
+        priced = {"data": {"id": model_id, "endpoints": [{"provider_name": "Provider", "status": 0, "throughput_last_30m": "50", "uptime_last_30d": "0.99", "completion_tokens_last_30d": 1000000, "pricing": {"prompt": "0.1", "completion": "0.2"}}]}}
         policy_document = policy()
         policy_document["models"] = []
         recovered_client = FakeHTTPClient({
@@ -874,9 +874,9 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
 
     def test_liquidity_filter_drops_free_dust_and_unreliable_quotes(self):
         document = {"data": {"id": "example/model", "endpoints": [
-            {"provider_name": "Free", "status": 0, "throughput_last_30m": "50", "uptime_last_30d": "0.99", "pricing": {"prompt": "0", "completion": "0"}},
-            {"provider_name": "Dust", "status": 0, "throughput_last_30m": "0.2", "uptime_last_30d": "0.99", "pricing": {"prompt": "0.1", "completion": "0.2"}},
-            {"provider_name": "Liquid", "status": 0, "throughput_last_30m": "2", "uptime_last_30d": "0.95", "pricing": {"prompt": "0.3", "completion": "0.4"}},
+            {"provider_name": "Free", "status": 0, "throughput_last_30m": "50", "uptime_last_30d": "0.99", "completion_tokens_last_30d": 1000000, "pricing": {"prompt": "0", "completion": "0"}},
+            {"provider_name": "Dust", "status": 0, "throughput_last_30m": "0.2", "uptime_last_30d": "0.99", "completion_tokens_last_30d": 1000000, "pricing": {"prompt": "0.1", "completion": "0.2"}},
+            {"provider_name": "Liquid", "status": 0, "throughput_last_30m": "2", "uptime_last_30d": "0.95", "completion_tokens_last_30d": 1000000, "pricing": {"prompt": "0.3", "completion": "0.4"}},
         ]}}
         pricing = engine.cheapest_endpoint_pricing(document, "example/model")
         self.assertEqual(pricing["benchmark_provider"], "Liquid")

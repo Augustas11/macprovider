@@ -11,7 +11,8 @@
             "completion": "0.00000013"
           },
           "throughput_last_30m": "50",
-          "uptime_last_30d": "0.99"
+          "uptime_last_30d": "0.99",
+          "completion_tokens_last_30d": 1000000
         },
         {
           "provider_name": "Inactive",
@@ -21,7 +22,8 @@
             "completion": "0.00000001"
           },
           "throughput_last_30m": "0",
-          "uptime_last_30d": "0"
+          "uptime_last_30d": "0",
+          "completion_tokens_last_30d": 1000000
         }
       ]
     }
@@ -38,7 +40,8 @@
             "completion": "0.00000030"
           },
           "throughput_last_30m": "50",
-          "uptime_last_30d": "0.99"
+          "uptime_last_30d": "0.99",
+          "completion_tokens_last_30d": 1000000
         }
       ]
     }
@@ -55,7 +58,8 @@
             "completion": "0.00000020"
           },
           "throughput_last_30m": "50",
-          "uptime_last_30d": "0.99"
+          "uptime_last_30d": "0.99",
+          "completion_tokens_last_30d": 1000000
         }
       ]
     }
@@ -72,7 +76,8 @@
             "completion": "0.00000025"
           },
           "throughput_last_30m": "50",
-          "uptime_last_30d": "0.99"
+          "uptime_last_30d": "0.99",
+          "completion_tokens_last_30d": 1000000
         }
       ]
     }
@@ -89,7 +94,8 @@
           "pricing": {
             "prompt": "0.00000008",
             "completion": "0.00000020"
-          }
+          },
+          "completion_tokens_last_30d": 1000000
         }
       ]
     }
@@ -106,7 +112,8 @@
           "pricing": {
             "prompt": "0.00000008",
             "completion": "0.00000020"
-          }
+          },
+          "completion_tokens_last_30d": 1000000
         }
       ]
     }
@@ -123,7 +130,8 @@
           "pricing": {
             "prompt": "0.00000008",
             "completion": "0.00000020"
-          }
+          },
+          "completion_tokens_last_30d": 1000000
         }
       ]
     }
@@ -140,7 +148,8 @@
           "pricing": {
             "prompt": "0.00000008",
             "completion": "0.00000020"
-          }
+          },
+          "completion_tokens_last_30d": 1000000
         }
       ]
     }
@@ -157,7 +166,8 @@
           "pricing": {
             "prompt": "0.00000008",
             "completion": "0.00000020"
-          }
+          },
+          "completion_tokens_last_30d": 1000000
         }
       ]
     }
@@ -174,7 +184,8 @@
           "pricing": {
             "prompt": "0.00000008",
             "completion": "0.00000020"
-          }
+          },
+          "completion_tokens_last_30d": 1000000
         }
       ]
     }
@@ -191,7 +202,8 @@
           "pricing": {
             "prompt": "0.00000008",
             "completion": "0.00000020"
-          }
+          },
+          "completion_tokens_last_30d": 1000000
         }
       ]
     }

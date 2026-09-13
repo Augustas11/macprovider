@@ -52,7 +52,7 @@ RANKING_META_KEYS = frozenset({"as_of", "end_date", "start_date", "version"})
 CATALOG_ROW_KEYS = frozenset({"alias_target", "architecture", "benchmarks", "canonical_slug", "context_length", "created", "default_parameters", "description", "expiration_date", "hugging_face_id", "id", "knowledge_cutoff", "links", "name", "per_request_limits", "pricing", "reasoning", "supported_parameters", "supported_voices", "top_provider"})
 CATALOG_TOP_LEVEL_KEYS = frozenset({"data", "links", "total_count"})
 ENDPOINT_DATA_KEYS = frozenset({"architecture", "created", "description", "endpoints", "id", "name"})
-ENDPOINT_ROW_KEYS = frozenset({"context_length", "latency_last_30m", "max_completion_tokens", "max_prompt_tokens", "model_id", "model_name", "name", "pricing", "provider_name", "quantization", "status", "supported_parameters", "supports_implicit_caching", "supports_voice_cloning", "tag", "throughput_last_30m", "uptime_last_1d", "uptime_last_30d", "uptime_last_30m", "uptime_last_5m"})
+ENDPOINT_ROW_KEYS = frozenset({"completion_tokens_last_30d", "context_length", "latency_last_30m", "max_completion_tokens", "max_prompt_tokens", "model_id", "model_name", "name", "pricing", "provider_name", "quantization", "status", "supported_parameters", "supports_implicit_caching", "supports_voice_cloning", "tag", "throughput_last_30m", "uptime_last_1d", "uptime_last_30d", "uptime_last_30m", "uptime_last_5m"})
 ENDPOINT_PRICING_KEYS = frozenset({
     "audio", "completion", "discount", "image", "image_output", "image_token",
     "input_audio_cache", "input_cache_read", "input_cache_write", "input_cache_write_1h",
@@ -384,6 +384,12 @@ def required_list(document: Mapping[str, Any], key: str, source: str) -> list[An
     return value
 
 
+def parse_nonnegative_integer(value: Any, field: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise SchemaError(f"{field} must be a non-negative integer")
+    return value
+
+
 def require_allowed_keys(value: Mapping[str, Any], allowed: frozenset[str], location: str) -> None:
     unexpected = sorted(set(value) - allowed)
     if unexpected:
@@ -570,7 +576,7 @@ def endpoint_set_is_empty(document: Mapping[str, Any], requested_model_id: str) 
     return not endpoints
 
 
-def cheapest_endpoint_pricing(document: Mapping[str, Any], model_id: str) -> dict[str, str] | None:
+def cheapest_endpoint_pricing(document: Mapping[str, Any], model_id: str, *, model_tokens_30d: int = 0) -> dict[str, Any] | None:
     require_allowed_keys(document, frozenset({"data"}), f"endpoints response for {model_id}")
     data = document.get("data")
     if not isinstance(data, dict):
@@ -601,14 +607,25 @@ def cheapest_endpoint_pricing(document: Mapping[str, Any], model_id: str) -> dic
         try:
             throughput = parse_decimal(endpoint.get("throughput_last_30m"), f"endpoints response for {model_id}: throughput_last_30m")
             uptime = parse_decimal(endpoint.get("uptime_last_30d"), f"endpoints response for {model_id}: uptime_last_30d")
+            completion_tokens = parse_nonnegative_integer(endpoint.get("completion_tokens_last_30d"), f"endpoints response for {model_id}: completion_tokens_last_30d")
         except SchemaError:
             continue
-        if status != 0 or prompt == 0 or completion == 0 or throughput < Decimal("1") or uptime < Decimal("0.90"):
+        volume_floor = max(1_000_000, int(Decimal("0.05") * model_tokens_30d))
+        if status != 0 or prompt == 0 or completion == 0 or completion_tokens < volume_floor or throughput < Decimal("1") or uptime < Decimal("0.90"):
             continue
-        priced.append((completion, prompt, throughput, uptime, provider))
+        priced.append((completion, prompt, throughput, uptime, provider, completion_tokens))
     if not priced:
         return None
-    completion, prompt, throughput, uptime, provider = min(priced, key=lambda item: (item[0], item[1], -item[2], -item[3], item[4]))
+    ordered = sorted(priced, key=lambda item: item[0])
+    cumulative = 0
+    total = sum(item[5] for item in ordered)
+    selected = ordered[-1]
+    for item in ordered:
+        cumulative += item[5]
+        if cumulative * 2 >= total:
+            selected = item
+            break
+    completion, prompt, throughput, uptime, provider, selected_tokens = selected
     return {
         "input_per_token": decimal_string(prompt),
         "completion_per_token": decimal_string(completion),
@@ -621,6 +638,8 @@ def cheapest_endpoint_pricing(document: Mapping[str, Any], model_id: str) -> dic
             "paid_prices": True,
             "minimum_throughput_last_30m": "1",
             "minimum_uptime_last_30d": "0.90",
+            "completion_tokens_last_30d": selected_tokens,
+            "volume_weighted_median": True,
             "selected_throughput_last_30m": decimal_string(throughput),
             "selected_uptime_last_30d": decimal_string(uptime),
         },
@@ -721,19 +740,20 @@ def validate_snapshot(snapshot: Mapping[str, Any]) -> None:
             raise SchemaError(f"snapshot.rows[{index}] has invalid pricing provenance")
         if pricing_status == "active_priced" and schema_version != LEGACY_SNAPSHOT_SCHEMA_VERSION:
             liquidity = pricing.get("liquidity_filter")
-            required_liquidity = {"endpoint_status", "paid_prices", "minimum_throughput_last_30m", "minimum_uptime_last_30d", "selected_throughput_last_30m", "selected_uptime_last_30d"}
+            required_liquidity = {"endpoint_status", "paid_prices", "minimum_throughput_last_30m", "minimum_uptime_last_30d", "completion_tokens_last_30d", "volume_weighted_median", "selected_throughput_last_30m", "selected_uptime_last_30d"}
             if not isinstance(liquidity, dict) or set(liquidity) != required_liquidity:
                 raise SchemaError(f"snapshot.rows[{index}] has invalid liquidity filter")
-            if liquidity["endpoint_status"] != 0 or liquidity["paid_prices"] is not True or liquidity["minimum_throughput_last_30m"] != "1" or liquidity["minimum_uptime_last_30d"] != "0.90":
+            if liquidity["endpoint_status"] != 0 or liquidity["paid_prices"] is not True or liquidity["minimum_throughput_last_30m"] != "1" or liquidity["minimum_uptime_last_30d"] != "0.90" or liquidity["volume_weighted_median"] is not True:
                 raise SchemaError(f"snapshot.rows[{index}] liquidity filter does not match the policy thresholds")
             try:
                 selected_throughput = Decimal(liquidity["selected_throughput_last_30m"])
                 selected_uptime = Decimal(liquidity["selected_uptime_last_30d"])
                 selected_prompt = Decimal(pricing["input_per_mtok"])
                 selected_completion = Decimal(pricing["completion_per_mtok"])
+                selected_completion_tokens = parse_nonnegative_integer(liquidity["completion_tokens_last_30d"], f"snapshot.rows[{index}].liquidity_filter.completion_tokens_last_30d")
             except (InvalidOperation, ValueError) as error:
                 raise SchemaError(f"snapshot.rows[{index}] liquidity/pricing values are invalid") from error
-            if not selected_throughput.is_finite() or selected_throughput < Decimal("1") or not selected_uptime.is_finite() or selected_uptime < Decimal("0.90") or selected_prompt <= 0 or selected_completion <= 0:
+            if not selected_throughput.is_finite() or selected_throughput < Decimal("1") or not selected_uptime.is_finite() or selected_uptime < Decimal("0.90") or selected_prompt <= 0 or selected_completion <= 0 or selected_completion_tokens < 1_000_000:
                 raise SchemaError(f"snapshot.rows[{index}] liquidity-selected endpoint is not paid and liquid")
         if not isinstance(row.get("source_metadata"), dict) or set(row["source_metadata"]) != {"ranking_model_permaslug", "catalog_canonical_slug", "catalog_name", "identity_resolution", "endpoint_set_confirmation"}:
             raise SchemaError(f"snapshot.rows[{index}] has invalid source metadata")
@@ -818,7 +838,11 @@ def build_snapshot(
         if source_model_id not in resolved_endpoints:
             raise SchemaError(f"partial pull: endpoints response missing for {source_model_id!r}")
         endpoint_document = resolved_endpoints[source_model_id]
-        endpoint_pricing = cheapest_endpoint_pricing(endpoint_document, source_model_id)
+        endpoint_pricing = cheapest_endpoint_pricing(
+            endpoint_document,
+            source_model_id,
+            model_tokens_30d=int(demand["total_token_volume"]),
+        )
         request_id = (
             demand["ranking_model_permaslug"]
             if demand["_identity_resolution"] in {"endpoint_alias_fallback", "endpoint_confirmed_catalog_candidate"}
