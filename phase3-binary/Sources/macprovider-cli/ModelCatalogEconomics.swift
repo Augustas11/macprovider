@@ -1027,7 +1027,6 @@ struct ModelCatalogEconomicsBuilder {
         let evaluatable = BYOMWithdrawalBuilder.isStableCandidateID(candidate.candidateID)
             && candidate.readinessState == "ready"
             && candidate.fitState == "fits"
-            && candidate.catalogModelKey != nil
             && Set(candidate.warningCodes).isDisjoint(with: BYOMDiscoveryWarning.submitBlockingWarningCodes)
         guard evaluatable else {
             return .unavailable("candidate_not_evaluatable")

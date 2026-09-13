@@ -380,12 +380,28 @@ final class ModelManagementTests: XCTestCase {
         XCTAssertNoThrow(try document.validated(expectedCandidateID: "local-candidate"))
     }
 
-    func testCatalogEconomicsSuppressesEvaluateActionWhenActionModelIDIsNull() throws {
-        // SPEC-044-R006: a row with a null action_model_id keeps every action
-        // unavailable, even when an evaluate_model action descriptor is available.
+    func testCatalogEconomicsRejectsNullActionModelIDWithAvailableAction() throws {
+        // SPEC-044-R006: a row with a null action_model_id has no addressable
+        // model and MUST carry no live action. A null-id row that exposes an
+        // AVAILABLE action is malformed and must fail validation fail-closed —
+        // it must not survive with economics intact and rely on UI-side button
+        // suppression.
         let rowJSON = trustedEconomicsRowJSON(
             evaluateAction: availableActionJSON(kind: "evaluate_model", timeout: 10, requiresConfirmation: false)
         ).replacingOccurrences(of: #""action_model_id":"candidate-qwen""#, with: #""action_model_id":null"#)
+        let document = try JSONDecoder().decode(
+            MalibuModelCatalogEconomicsDocument.self,
+            from: Data(catalogEconomicsJSON(rows: [rowJSON]).utf8)
+        )
+        XCTAssertThrowsError(try document.validated(now: ModelTestTimestamp.date))
+    }
+
+    func testCatalogEconomicsAcceptsConformantNullActionModelIDRow() throws {
+        // A null action_model_id row is VALID when every action is unavailable
+        // (null transaction fields + a nonempty reason) and the row carries a
+        // nonempty disabled_reason. It maps to a non-actionable, non-earning row.
+        let rowJSON = localOnlyBYOMRowJSON()
+            .replacingOccurrences(of: #""action_model_id":"local-candidate""#, with: #""action_model_id":null"#)
         let document = try JSONDecoder().decode(
             MalibuModelCatalogEconomicsDocument.self,
             from: Data(catalogEconomicsJSON(rows: [rowJSON]).utf8)
@@ -396,8 +412,49 @@ final class ModelManagementTests: XCTestCase {
             currentModelID: "other/model",
             warmSwapAvailable: true
         ))
-        XCTAssertNotEqual(mapped.action, .evaluate)
         XCTAssertEqual(mapped.action, .none)
+        XCTAssertNotEqual(mapped.earningPathClass, "settlement_capable")
+        XCTAssertNil(mapped.providerCompletionPayoutUSDPerMillionTokens)
+    }
+
+    func testCatalogEconomicsAcceptsCoordinatorNotOfferedStateLabel() throws {
+        // The coordinator emits state_label_key = "byom.admission." + state,
+        // including for not_offered. A coordinator-sourced not_offered row whose
+        // guidance carries "byom.admission.not_offered" must validate — the label
+        // is source-aware, not pinned to the local prefix.
+        let rowJSON = localOnlyBYOMRowJSON()
+            .replacingOccurrences(
+                of: #""state":"local_only","source":"local_default""#,
+                with: #""state":"not_offered","source":"coordinator""#
+            )
+            .replacingOccurrences(
+                of: #""state_label_key":"byom.local.local_only""#,
+                with: #""state_label_key":"byom.admission.not_offered""#
+            )
+        let document = try JSONDecoder().decode(
+            MalibuModelCatalogEconomicsDocument.self,
+            from: Data(catalogEconomicsJSON(rows: [rowJSON]).utf8)
+        )
+        let validated = try document.validated(now: ModelTestTimestamp.date)
+        XCTAssertEqual(validated.rows[0].admission.source, "coordinator")
+        XCTAssertEqual(validated.rows[0].admission.state, "not_offered")
+        XCTAssertEqual(validated.rows[0].providerGuidance.stateLabelKey, "byom.admission.not_offered")
+    }
+
+    func testCatalogEconomicsRejectsLocalDefaultNotOfferedWithAdmissionPrefixLabel() throws {
+        // A local_default not_offered row must use the "byom.local." prefix. A
+        // local_default row that carries "byom.admission.not_offered" is rejected.
+        let rowJSON = localOnlyBYOMRowJSON()
+            .replacingOccurrences(of: #""state":"local_only""#, with: #""state":"not_offered""#)
+            .replacingOccurrences(
+                of: #""state_label_key":"byom.local.local_only""#,
+                with: #""state_label_key":"byom.admission.not_offered""#
+            )
+        let document = try JSONDecoder().decode(
+            MalibuModelCatalogEconomicsDocument.self,
+            from: Data(catalogEconomicsJSON(rows: [rowJSON]).utf8)
+        )
+        XCTAssertThrowsError(try document.validated(now: ModelTestTimestamp.date))
     }
 
     func testBYOMEvaluationAcceptsRedactionWarningAndStaysNonEarning() throws {

@@ -450,6 +450,35 @@ class BYOMJourneyCaptureTests(unittest.TestCase):
             "evaluate: an unavailable action must not carry transaction fields",
         )
 
+    def test_rejects_null_action_model_id_row_with_available_action(self) -> None:
+        # SPEC-044-R006: a row with action_model_id null has no addressable model
+        # and MUST NOT carry any live action. An available action on such a row is
+        # malformed and must fail capture.
+        document = self.complete_catalog_economics_document()
+        row = document["rows"][0]
+        row["action_model_id"] = None
+        row["disabled_reason"] = "no_cli_transaction_available"
+        row["evaluate"] = {
+            **self.unavailable_action(),
+            "available": True,
+            "transaction_kind": "evaluate_model",
+            "transaction_id": "6c5c1f15-1e79-4c78-8b38-fc7d92dd6dbf",
+            "action_timeout_seconds": 10,
+            "unavailable_reason": None,
+        }
+
+        def mutator(manifest, root):
+            self.add_catalog_economics_step(manifest)
+            self.write_catalog_economics_capture(root, document)
+
+        self.assert_capture_fails(
+            "discovery",
+            mutator,
+            "evaluate: a null action_model_id row must expose this action as "
+            "unavailable with null transaction fields and a nonempty "
+            "unavailable_reason",
+        )
+
     def guidance_document(self, **guidance) -> dict:
         document = self.complete_discovery_document()
         document["candidates"][0]["provider_guidance"].update(guidance)

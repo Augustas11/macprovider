@@ -649,6 +649,32 @@ struct MalibuModelCatalogEconomicsDocument: Decodable, Equatable, Sendable {
               row.demandRank == nil || row.demandRank! >= 0 else {
             throw ModelManagementError.invalidCatalog
         }
+        // SPEC-044-R006: a row with action_model_id == null has no addressable
+        // model, so it MUST carry no live action. Enforce fail-closed for EVERY
+        // row regardless of economicsState: every action must be unavailable
+        // with null transaction fields and a nonempty unavailable_reason, and the
+        // row must carry a nonempty disabled_reason. This prevents a trusted row
+        // from surviving validation with economics/payout intact while relying on
+        // UI-side button suppression.
+        if row.actionModelID == nil {
+            let actions = [
+                row.switchAction,
+                row.prepareAction,
+                row.evaluateAction,
+                row.adoptRecommendationAction,
+                row.cleanupStagingAction,
+            ]
+            guard actions.allSatisfy({ action in
+                !action.available
+                    && action.transactionKind == nil
+                    && action.transactionID == nil
+                    && action.actionTimeoutSeconds == nil
+                    && action.unavailableReason?.isEmpty == false
+            }),
+                  row.disabledReason?.isEmpty == false else {
+                throw ModelManagementError.invalidCatalog
+            }
+        }
         if row.economicsState == "trusted" {
             guard row.admission.catalogEconomicsPermitted,
                   source.rateCardSource == "live_signed",
@@ -815,20 +841,28 @@ struct MalibuModelCatalogEconomicsDocument: Decodable, Equatable, Sendable {
         let expectedStateLabelPrefix = admission.source == "local_default"
             ? "byom.local."
             : "byom.admission."
-        let expectedStateLabel = [
-            "local_only": "byom.local.local_only",
-            "not_offered": "byom.local.not_offered",
-            "offerable": "byom.local.offerable",
-            "offer_submitted": "byom.admission.offer_submitted",
-            "offer_rejected": "byom.admission.offer_rejected",
-            "sandbox_probe_only": "byom.admission.sandbox_probe_only",
-            "network_visible_unpriced": "byom.admission.network_visible_unpriced",
-            "network_admitted_unsettled": "byom.admission.network_admitted_unsettled",
-            "catalog_priced": "byom.admission.catalog_priced",
-            "settlement_capable": "byom.admission.settlement_capable",
-            "withdrawn": "byom.admission.withdrawn",
-            "revoked": "byom.admission.revoked",
-        ][admission.state]
+        // The state-label key is the source-aware prefix plus the admission
+        // state. The coordinator emits "byom.admission." + state (including
+        // not_offered), so the label must be computed from the source rather
+        // than a hardcoded map that pinned not_offered to the local prefix. This
+        // is byte-identical to the previous map for every other entry.
+        let knownStates: Set<String> = [
+            "local_only",
+            "not_offered",
+            "offerable",
+            "offer_submitted",
+            "offer_rejected",
+            "sandbox_probe_only",
+            "network_visible_unpriced",
+            "network_admitted_unsettled",
+            "catalog_priced",
+            "settlement_capable",
+            "withdrawn",
+            "revoked",
+        ]
+        let expectedStateLabel: String? = knownStates.contains(admission.state)
+            ? expectedStateLabelPrefix + admission.state
+            : nil
         return earningClasses.contains(guidance.earningPathClass)
             && expectedStateLabel != nil
             && expectedStateLabel == guidance.stateLabelKey

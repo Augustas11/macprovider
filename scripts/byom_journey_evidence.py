@@ -1441,6 +1441,30 @@ def _validate_catalog_economics(parsed: dict[str, Any], location: str) -> None:
                         f"{where}.{field}: an unavailable action must not carry "
                         "transaction fields"
                     )
+        # SPEC-044-R006: a row with action_model_id null has no addressable model
+        # and MUST NOT carry any live action. Every action object must be
+        # unavailable with null transaction fields and a nonempty
+        # unavailable_reason, and the row must carry a nonempty disabled_reason.
+        if row["action_model_id"] is None:
+            if not row["disabled_reason"]:
+                fail(
+                    f"{where}: a row with action_model_id null must carry a "
+                    "nonempty disabled_reason"
+                )
+            for field in CATALOG_ECONOMICS_ACTION_FIELDS:
+                action = row[field]
+                if (
+                    action["available"]
+                    or action["transaction_kind"] is not None
+                    or action["transaction_id"] is not None
+                    or action["action_timeout_seconds"] is not None
+                    or not action["unavailable_reason"]
+                ):
+                    fail(
+                        f"{where}.{field}: a null action_model_id row must expose "
+                        "this action as unavailable with null transaction fields "
+                        "and a nonempty unavailable_reason"
+                    )
 
 
 def validate_captured_cli_document(schema: Any, parsed: Any, location: str = "$") -> None:

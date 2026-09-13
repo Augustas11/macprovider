@@ -82,23 +82,43 @@ final class ModelCatalogEconomicsTests: XCTestCase {
         )
 
         let rows = projection.rows.filter { $0.actionModelID != nil }
+        // Genuinely non-evaluatable candidates: unstable id, not-ready
+        // (requires preparation is submit-blocking), does-not-fit/unknown fit.
+        // A missing catalog binding is NOT one of these — a stable/ready/fits
+        // candidate is offerable as a non-earning v0.1 offer.
         let blockedIDs = Set([
             blockedCandidate.candidateID,
             unknownFitCandidate.candidateID,
-            unboundCatalogCandidate.candidateID,
             unstableCandidate.candidateID,
         ])
         let blockedRows = rows.filter { blockedIDs.contains($0.actionModelID ?? "") }
-        XCTAssertEqual(blockedRows.count, 4)
-        XCTAssertTrue(blockedRows.allSatisfy { $0.evaluate.available == false }, "all four negative candidates must be unavailable")
+        XCTAssertEqual(blockedRows.count, 3)
+        XCTAssertTrue(blockedRows.allSatisfy { $0.evaluate.available == false }, "all three negative candidates must be unavailable")
         XCTAssertTrue(blockedRows.allSatisfy { $0.evaluate.unavailableReason == "candidate_not_evaluatable" })
-        let availableRow = try XCTUnwrap(rows.first { $0.evaluate.available })
-        XCTAssertEqual(availableRow.actionModelID, Self.candidateID)
+
+        // The catalog-bound stable/ready/fits candidate is evaluatable.
+        let availableRow = try XCTUnwrap(rows.first { $0.actionModelID == Self.candidateID })
+        XCTAssertTrue(availableRow.evaluate.available)
         XCTAssertEqual(availableRow.evaluate.transactionKind, "evaluate_model")
         XCTAssertNotNil(availableRow.evaluate.transactionID)
         XCTAssertEqual(availableRow.evaluate.actionTimeoutSeconds, 10)
         XCTAssertFalse(availableRow.evaluate.requiresConfirmation)
         XCTAssertNil(availableRow.evaluate.unavailableReason)
+
+        // A stable/ready/fits candidate with NO catalog binding is now also
+        // evaluatable (offerable as a non-earning v0.1 offer), but its economics
+        // stay non-earning: no catalog key, no payout, and not settlement_capable.
+        let nonCatalogRow = try XCTUnwrap(rows.first { $0.actionModelID == unboundCatalogCandidate.candidateID })
+        XCTAssertTrue(nonCatalogRow.evaluate.available)
+        XCTAssertEqual(nonCatalogRow.evaluate.transactionKind, "evaluate_model")
+        XCTAssertNotNil(nonCatalogRow.evaluate.transactionID)
+        XCTAssertEqual(nonCatalogRow.evaluate.actionTimeoutSeconds, 10)
+        XCTAssertNil(nonCatalogRow.evaluate.unavailableReason)
+        XCTAssertNil(nonCatalogRow.rateCardKey)
+        XCTAssertNotEqual(nonCatalogRow.providerGuidance.earningPathClass, "settlement_capable")
+        XCTAssertFalse(nonCatalogRow.admission.settlementCapable)
+        XCTAssertNil(nonCatalogRow.providerPromptPayoutUSDPerMillionTokens)
+        XCTAssertNil(nonCatalogRow.providerCompletionPayoutUSDPerMillionTokens)
     }
 
     func testCatalogPricedFreshSignedRateCardPermitsEconomicsWithoutSettlement() throws {
