@@ -11,10 +11,12 @@ Run the readiness probe with the named wholesale/OpenRouter `mp_` key against
 public soak artifact:
 
 ```bash
+EXPECTED_GATEWAY_VERSION="$(git describe --always --tags origin/main)"
 MACPROVIDER_SPEC015_API_KEY="$OPENROUTER_WHOLESALE_MP_KEY" \
   python3 scripts/openrouter_readiness_probe.py \
     --base-url https://api.malibu.tech \
     --model mlx-community/Llama-3.2-3B-Instruct-4bit \
+    --expected-healthz-version "$EXPECTED_GATEWAY_VERSION" \
     --benchmark-requests 100 \
     --benchmark-concurrency 4 \
     --saturation-requests 16 \
@@ -84,10 +86,12 @@ runs a free-alias chat smoke. Use this command for the final OpenRouter
 application artifact:
 
 ```bash
+EXPECTED_GATEWAY_VERSION="$(git describe --always --tags origin/main)"
 MACPROVIDER_SPEC015_API_KEY="$OPENROUTER_WHOLESALE_MP_KEY" \
 OPERATOR_KEY="$OPERATOR_KEY" \
   python3 scripts/openrouter_readiness_probe.py \
     --base-url https://api.malibu.tech \
+    --expected-healthz-version "$EXPECTED_GATEWAY_VERSION" \
     --admin-url https://coordinator.internal \
     --statement-account-id acct_openrouter \
     --statement-period "$(date -u +%Y-%m)" \

@@ -19,6 +19,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -73,7 +74,16 @@ class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
 NO_REDIRECT_OPENER = urllib.request.build_opener(NoRedirectHandler)
 
 
-def http_request(method: str, url: str, *, token: str = "", body: object | None = None, stream: bool = False, timeout: float = 45.0):
+def http_request(
+    method: str,
+    url: str,
+    *,
+    token: str = "",
+    body: object | None = None,
+    stream: bool = False,
+    timeout: float = 45.0,
+    request_id: str = "",
+):
     parsed = urllib.parse.urlparse(url)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise ProbeError(f"invalid URL: {url}")
@@ -86,6 +96,8 @@ def http_request(method: str, url: str, *, token: str = "", body: object | None 
         headers["Content-Type"] = "application/json"
     if token:
         headers["Authorization"] = "Bearer " + token
+    if request_id:
+        headers["X-Request-ID"] = request_id
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
         return NO_REDIRECT_OPENER.open(req, timeout=timeout)
@@ -306,6 +318,22 @@ def check_privacy(base_url: str) -> dict:
     return {"http_status": 200, "mentions_90_days": True, "zdr_false": True, "training_corpus_denied": True}
 
 
+def check_healthz(base_url: str, expected_version: str = "") -> dict:
+    payload, status = read_json("GET", root_url(base_url, "/healthz"))
+    service_status = payload.get("status")
+    if service_status != "ok":
+        raise ProbeError(f"/healthz status={service_status!r}, want 'ok'")
+    version = payload.get("version")
+    if not isinstance(version, str) or not version:
+        raise ProbeError("/healthz missing non-empty version")
+    if expected_version and version != expected_version:
+        raise ProbeError(f"/healthz version={version!r}, want {expected_version!r}")
+    result = {"http_status": status, "status": service_status, "version": version}
+    if expected_version:
+        result["expected_version"] = expected_version
+    return result
+
+
 def usage_is_valid(value: object) -> bool:
     if not isinstance(value, dict):
         return False
@@ -331,7 +359,7 @@ def is_capacity_shed(result: dict) -> bool:
     return result.get("status") == 429 and result.get("error_code") == "no_provider_available"
 
 
-def chat_once(base_url: str, token: str, model: str, *, stream: bool, max_tokens: int) -> dict:
+def chat_once(base_url: str, token: str, model: str, *, stream: bool, max_tokens: int, request_id: str = "") -> dict:
     body = {
         "model": model,
         "messages": [{"role": "user", "content": DEFAULT_PROMPT}],
@@ -341,7 +369,15 @@ def chat_once(base_url: str, token: str, model: str, *, stream: bool, max_tokens
     if stream:
         body["stream_options"] = {"include_usage": True}
     started = time.perf_counter()
-    resp = http_request("POST", v1_url(base_url, "/chat/completions"), token=token, body=body, stream=stream, timeout=90)
+    resp = http_request(
+        "POST",
+        v1_url(base_url, "/chat/completions"),
+        token=token,
+        body=body,
+        stream=stream,
+        timeout=90,
+        request_id=request_id,
+    )
     try:
         status = response_status(resp)
         if status != 200:
@@ -458,7 +494,18 @@ def run_benchmark(
         batch_size = min(concurrency, remaining)
         batch = []
         with ThreadPoolExecutor(max_workers=batch_size) as executor:
-            futures = [executor.submit(chat_once, base_url, token, model, stream=True, max_tokens=max_tokens) for _ in range(batch_size)]
+            futures = [
+                executor.submit(
+                    chat_once,
+                    base_url,
+                    token,
+                    model,
+                    stream=True,
+                    max_tokens=max_tokens,
+                    request_id=str(uuid.uuid4()),
+                )
+                for _ in range(batch_size)
+            ]
             for future in as_completed(futures):
                 result = future.result()
                 batch.append(result)
@@ -632,12 +679,15 @@ def check_wholesale_statement(admin_url: str, token: str, account_id: str, perio
     }
 
 
-def load_token(env_name: str, path: str) -> str:
+def load_token(env_name: str, path: str, label: str) -> str:
     token = os.environ.get(env_name, "")
     if token:
         return token.strip()
     if path:
-        return Path(path).read_text(encoding="utf-8").strip()
+        try:
+            return Path(path).read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            raise ProbeError(f"{label} file is not readable: {path}") from exc
     return ""
 
 
@@ -647,6 +697,7 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--api-key-env", default="MACPROVIDER_SPEC015_API_KEY")
     parser.add_argument("--api-key-file", default="")
     parser.add_argument("--model", default=DEFAULT_MODEL)
+    parser.add_argument("--expected-healthz-version", default="", help="fail if /healthz.version does not match this exact value")
     parser.add_argument("--max-tokens", type=int, default=16)
     parser.add_argument("--benchmark-requests", type=int, default=0)
     parser.add_argument("--benchmark-concurrency", type=int, default=4)
@@ -667,6 +718,8 @@ def main(argv: list[str]) -> int:
     if args.min_success_ratio < 0 or args.min_success_ratio > 1:
         raise SystemExit("--min-success-ratio must be in [0,1]")
     if args.filing_mode:
+        if not args.expected_healthz_version:
+            raise SystemExit("--filing-mode requires --expected-healthz-version")
         if args.benchmark_requests < 100:
             raise SystemExit("--filing-mode requires --benchmark-requests >= 100")
         if args.saturation_requests < 1:
@@ -687,6 +740,7 @@ def main(argv: list[str]) -> int:
                 raise
 
     try:
+        record_check("healthz", lambda: check_healthz(args.base_url, args.expected_healthz_version))
         record_check(
             "models",
             lambda: check_models_document(
@@ -696,7 +750,18 @@ def main(argv: list[str]) -> int:
             ),
         )
         record_check("privacy", lambda: check_privacy(args.base_url))
-        token = load_token(args.api_key_env, args.api_key_file)
+        try:
+            token = load_token(args.api_key_env, args.api_key_file, "API key")
+        except ProbeError as exc:
+            report["checks"]["chat"] = {"ok": False, "error": str(exc)}
+            if args.filing_mode:
+                report["checks"]["chat_free"] = {"ok": False, "error": str(exc)}
+            report["checks"]["benchmark"] = {"ok": False, "error": str(exc)}
+            report["checks"]["saturation"] = {"ok": False, "error": str(exc)}
+            errors.append(f"api_key: {exc}")
+            if not args.continue_on_error:
+                raise
+            token = ""
         if token:
             record_check("chat", lambda: check_chat(args.base_url, token, args.model, args.max_tokens))
             if args.filing_mode:
@@ -733,12 +798,21 @@ def main(argv: list[str]) -> int:
                     ),
                 )
         else:
-            report["checks"]["chat"] = {"skipped": "missing API key"}
-            report["checks"]["benchmark"] = {"skipped": "missing API key"}
-            report["checks"]["saturation"] = {"skipped": "missing API key"}
+            for name in ("chat", "benchmark", "saturation"):
+                if name not in report["checks"]:
+                    report["checks"][name] = {"skipped": "missing API key"}
+            if args.filing_mode and "chat_free" not in report["checks"]:
+                report["checks"]["chat_free"] = {"skipped": "missing API key"}
             if args.filing_mode:
                 errors.append("filing mode requires API key")
-        operator_token = load_token(args.operator_key_env, args.operator_key_file)
+        try:
+            operator_token = load_token(args.operator_key_env, args.operator_key_file, "operator key")
+        except ProbeError as exc:
+            report["checks"]["wholesale_statement"] = {"ok": False, "error": str(exc)}
+            errors.append(f"wholesale_statement: {exc}")
+            if not args.continue_on_error:
+                raise
+            operator_token = ""
         if args.admin_url and operator_token and args.statement_account_id and args.statement_period:
             record_check(
                 "wholesale_statement",
@@ -751,7 +825,8 @@ def main(argv: list[str]) -> int:
                 ),
             )
         else:
-            report["checks"]["wholesale_statement"] = {"skipped": "admin URL, operator key, account id, or period missing"}
+            if "wholesale_statement" not in report["checks"]:
+                report["checks"]["wholesale_statement"] = {"skipped": "admin URL, operator key, account id, or period missing"}
             if args.filing_mode:
                 errors.append("filing mode requires wholesale statement evidence")
     except ProbeError as exc:
