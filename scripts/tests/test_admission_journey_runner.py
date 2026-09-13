@@ -11,6 +11,7 @@ is not zero.
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import hashlib
 import importlib.util
@@ -45,6 +46,13 @@ OPAQUE = "openai_compatible:opaque-mini-1b"
 GGUF = "ollama:tiny-ollama-1b-q4"
 NOW = "2027-01-15T08:00:00Z"
 CLI_VERSION = "1.8.124"
+PROVIDER_ID = "mp-" + "a" * 32
+
+
+def candidate_id(ref: str) -> str:
+    """A production-shaped stable BYOM id: byom_ + 52 base32 characters
+    (model_admission.go modelAdmissionCandidatePattern)."""
+    return "byom_" + base64.b32encode(hashlib.sha256(ref.encode()).digest()).decode().lower().rstrip("=")[:52]
 
 
 def guidance(state: str, earning: str) -> dict:
@@ -110,7 +118,8 @@ class FakeRig:
     def __init__(self, *, drift_is_operator_origin: bool = False, ledger_nonzero: str | None = None,
                  self_approval: tuple[int, str] | None = (409, "dual_control_required"),
                  illegal_transition: tuple[int, str] | None = (409, "invalid_transition"),
-                 surface_leaks: dict[str, str] | None = None):
+                 surface_leaks: dict[str, str] | None = None, mutate_on_duplicate_offer: bool = False,
+                 skip_stale_head_check: bool = False):
         self.state: dict[str, str] = {}
         self.events: dict[str, int] = {}
         self.reason: dict[str, str] = {}
@@ -121,6 +130,8 @@ class FakeRig:
         self.self_approval = self_approval          # None: accept (the bug the runner must catch)
         self.illegal_transition = illegal_transition  # None: accept (the bug the runner must catch)
         self.surface_leaks = surface_leaks or {}
+        self.mutate_on_duplicate_offer = mutate_on_duplicate_offer  # append an event while answering 409 (the bug step 2 must catch)
+        self.skip_stale_head_check = skip_stale_head_check          # approve against a moved head (the bug step 9 must catch)
         self.gguf_earning = "no_earning_path_in_v0_1"
         self.request_log = 0
 
@@ -140,7 +151,13 @@ class FakeRig:
         return "tiny-1b" if ref == SETTLEABLE else None
 
     def _candidate_id(self, ref: str) -> str:
-        return "byom_" + "".join(c if c.isalnum() else "x" for c in ref)[:20]
+        return candidate_id(ref)
+
+    def _ref_for(self, cid: str):
+        for ref in (SETTLEABLE, OPAQUE, GGUF):
+            if candidate_id(ref) == cid:
+                return ref
+        return None
 
     def _earning(self, ref: str) -> str:
         if ref == OPAQUE:
@@ -153,7 +170,7 @@ class FakeRig:
         if ref == OPAQUE:
             return {
                 "schema": "model_admission_status.v1", "generated_at": NOW, "cli_version": CLI_VERSION,
-                "provider_id": "mp-" + "a" * 32, "candidate_id": self._candidate_id(ref), "served_model_ref": ref,
+                "provider_id": PROVIDER_ID, "candidate_id": self._candidate_id(ref), "served_model_ref": ref,
                 "catalog_model_key": None, "admission_state": "local_only", "admission_state_source": "local_default",
                 "coordinator_event_id": None, "state_observed_at": None,
                 "provider_guidance": guidance("local_only", "local_inventory_only"), "allowed_next_states": [], "warnings": [],
@@ -163,7 +180,7 @@ class FakeRig:
         g["transition_reason_code"] = self.reason.get(ref)
         return {
             "schema": "model_admission_status.v1", "generated_at": NOW, "cli_version": CLI_VERSION,
-            "provider_id": "mp-" + "a" * 32, "candidate_id": self._candidate_id(ref),
+            "provider_id": PROVIDER_ID, "candidate_id": self._candidate_id(ref),
             "served_model_ref": ref, "catalog_model_key": self._catalog_key(ref),
             "admission_state": state, "admission_state_source": "coordinator",
             "coordinator_event_id": self._event_id(ref), "state_observed_at": NOW,
@@ -179,8 +196,10 @@ class FakeRig:
             if ref == OPAQUE:
                 self.calls.append("REFUSED opaque offer")
                 return 2, "", "BYOM candidate is not offerable; resolve the blocking local readiness, fit, or adapter warning first"
-            if self.state.get(ref, "not_offered") not in ("not_offered", "withdrawn", "revoked", "offer_rejected"):
+            if self.state.get(ref, "not_offered") not in ("not_offered", "withdrawn", "revoked"):
                 self.calls.append("REFUSED duplicate live offer")
+                if self.mutate_on_duplicate_offer:
+                    self._event(ref)
                 return 2, "", "coordinator model admission request failed with HTTP 409"
         try:
             return 0, json.dumps(self.cli(args)), ""
@@ -215,7 +234,7 @@ class FakeRig:
             assert reason in ADMISSION_WITHDRAWAL_REASON_CODES, "fake: the CLI refuses a withdrawal reason outside the closed enum"
             event = self._set(ref, "withdrawn", reason)
             return {"schema": "model_admission_withdraw.v1", "generated_at": NOW, "cli_version": CLI_VERSION,
-                    "provider_id": "mp-" + "a" * 32, "candidate_id": self._candidate_id(ref), "served_model_ref": ref,
+                    "provider_id": PROVIDER_ID, "candidate_id": self._candidate_id(ref), "served_model_ref": ref,
                     "catalog_model_key": self._catalog_key(ref), "idempotency_key": "k" * 16, "reason_code": reason,
                     "previous_admission_state": previous, "coordinator_event_id": event, "accepted_at": NOW,
                     "resulting_admission_state": "withdrawn",
@@ -231,24 +250,28 @@ class FakeRig:
 
     def _decision_response(self, ref: str, actor: str, reason: str, pending_id=None) -> dict:
         state = self.state[ref]
-        return {"schema": "model_admission_decision.v1", "provider_id": "mp-" + "a" * 32, "candidate_id": self._candidate_id(ref),
+        return {"schema": "model_admission_decision.v1", "provider_id": PROVIDER_ID, "candidate_id": self._candidate_id(ref),
                 "served_model_ref": ref, "catalog_model_key": self._catalog_key(ref), "previous_admission_state": state,
                 "admission_state": state, "reason_code": reason, "coordinator_event_id": self._event_id(ref), "accepted_at": NOW,
                 "decided_by": "operator:" + actor, "replayed": False, "pending_decision_id": pending_id, "bound_member": None}
 
     def admin_post(self, path: str, actor: str, body: dict) -> tuple[int, dict]:
         self.calls.append(f"POST {path} as {actor}")
-        ref = SETTLEABLE
         if path == aj.DECISIONS_PATH:
-            # modelAdmissionDecisionRequest.validate: closed schema, grammars.
+            # modelAdmissionDecisionRequest.validate: closed schema, grammars,
+            # then the candidate is looked up by (provider_id, candidate_id).
             if (set(body) != {"schema", "provider_id", "candidate_id", "next_state", "reason_code", "expected_coordinator_event_id", "idempotency_key"}
                     or body["schema"] != aj.DECISION_REQUEST_SCHEMA
+                    or not aj.PROVIDER_ID.match(body["provider_id"]) or not aj.CANDIDATE_ID.match(body["candidate_id"])
                     or not aj.OPERATOR_REASON_CODE.match(body["reason_code"])
                     or not aj.COORDINATOR_EVENT_ID.match(body["expected_coordinator_event_id"])
                     or not aj.IDEMPOTENCY_KEY.match(body["idempotency_key"])
                     or body["next_state"] not in ("network_visible_unpriced", "network_admitted_unsettled", "catalog_priced", "settlement_capable", "revoked")):
                 return refusal(400, "invalid_request")
-            current = self.state.get(ref, "not_offered")
+            ref = self._ref_for(body["candidate_id"])
+            if body["provider_id"] != PROVIDER_ID or ref is None or ref not in self.state:
+                return refusal(404, "no_offer")
+            current = self.state[ref]
             if body["expected_coordinator_event_id"] != self._event_id(ref):
                 return refusal(409, "stale_head")
             target = body["next_state"]
@@ -259,7 +282,8 @@ class FakeRig:
                 return refusal(*self.illegal_transition)
             if target == "settlement_capable":
                 pending_id = hashlib.md5(body["idempotency_key"].encode()).hexdigest()
-                self.pending[pending_id] = {"by": actor, "head": self._event_id(ref), "reason": body["reason_code"]}
+                self.pending[pending_id] = {"by": actor, "head": self._event_id(ref), "reason": body["reason_code"],
+                                            "provider_id": body["provider_id"], "candidate_id": body["candidate_id"]}
                 return 200, self._decision_response(ref, actor, body["reason_code"], pending_id)
             self._set(ref, target, body["reason_code"])
             return 200, self._decision_response(ref, actor, body["reason_code"])
@@ -271,16 +295,24 @@ class FakeRig:
                 return refusal(400, "invalid_request")
             if (set(body) != {"schema", "provider_id", "candidate_id", "pending_decision_id", "expected_coordinator_event_id", "idempotency_key"}
                     or body["schema"] != aj.APPROVE_REQUEST_SCHEMA or body["pending_decision_id"] != pending_id
+                    or not aj.PROVIDER_ID.match(body["provider_id"]) or not aj.CANDIDATE_ID.match(body["candidate_id"])
                     or not aj.COORDINATOR_EVENT_ID.match(body["expected_coordinator_event_id"])
                     or not aj.IDEMPOTENCY_KEY.match(body["idempotency_key"])):
                 return refusal(400, "invalid_request")
             record = self.pending.get(pending_id)
-            if record is not None and body["expected_coordinator_event_id"] != record["head"]:
+            # (a) bound fields must equal the record: provider, candidate, evaluated head.
+            if record is not None and (body["provider_id"], body["candidate_id"], body["expected_coordinator_event_id"]) != (record["provider_id"], record["candidate_id"], record["head"]):
                 return refusal(400, "invalid_request")
             if record is None:
                 return refusal(409, "no_pending_decision")
+            # (d) a distinct actor.
             if record["by"] == actor and self.self_approval is not None:
                 return refusal(*self.self_approval)
+            ref = self._ref_for(record["candidate_id"])
+            # (e) the head must still be the evaluated head, else the record dies.
+            if self._event_id(ref) != record["head"] and not self.skip_stale_head_check:
+                del self.pending[pending_id]
+                return refusal(409, "stale_head")
             self._set(ref, "settlement_capable", record["reason"])
             del self.pending[pending_id]
             response = self._decision_response(ref, actor, record["reason"])
@@ -295,7 +327,9 @@ class FakeRig:
                      "candidates": [{"candidate_id": self._candidate_id(r), "admission_state": st, "coordinator_event_id": self._event_id(r)} for r, st in self.state.items()]}
 
     def surfaces(self) -> dict:
-        base = {"cli_transcript": "\n".join(self.calls), "provider_log": "serve: ready\n", "coordinator_log": "admission: ok\n"}
+        # CLI calls only; the physical rig records admin routes relative to the
+        # origin, and the fake's POST/GET call log is bookkeeping, not a wire record.
+        base = {"cli_transcript": "\n".join(c for c in self.calls if c.startswith("models")), "provider_log": "serve: ready\n", "coordinator_log": "admission: ok\n"}
         for name, leak in self.surface_leaks.items():
             base[name] = base.get(name, "") + leak
         return base
@@ -516,6 +550,134 @@ class AdmissionJourneyRunnerTests(unittest.TestCase):
             child.unlink() if child.is_file() else child.rmdir()
         self.out.rmdir()
 
+    def test_fake_ids_are_production_shaped_and_the_runner_pins_the_grammar(self):
+        rig = FakeRig()
+        for ref in (SETTLEABLE, OPAQUE, GGUF):
+            self.assertRegex(rig._candidate_id(ref), r"^byom_[a-z2-7]{52}$")
+        self.assertRegex(PROVIDER_ID, r"^[a-zA-Z0-9_.-]{1,64}$")
+        # A status document whose candidate_id is not a stable byom_ id (an
+        # unprovisioned namespace) fails the run before any decision is made.
+        rig._candidate_id = lambda ref: "byom_unstable_" + "a" * 40
+        runner = aj.AdmissionJourneyRunner(rig, self.config, aj.ManifestBuilder(self.out, "r", CLI_VERSION), log=lambda _: None)
+        with self.assertRaises(aj.JourneyFailure) as caught:
+            runner.status(runner.settleable)
+        self.assertIn("not a stable byom_ id", str(caught.exception))
+
+    def test_fake_validates_and_routes_by_provider_and_candidate(self):
+        # model_admission_operator.go: provider/candidate grammar is checked
+        # before any transition (400 invalid_request); an unknown pair is 404
+        # no_offer; an approval whose bound fields differ from the pending
+        # record is 400 invalid_request.
+        rig = FakeRig()
+        rig._set(SETTLEABLE, "catalog_priced")
+        head = rig._event_id(SETTLEABLE)
+        good = {"schema": aj.DECISION_REQUEST_SCHEMA, "provider_id": PROVIDER_ID, "candidate_id": candidate_id(SETTLEABLE),
+                "next_state": "settlement_capable", "reason_code": aj.REASON_DUAL_CONTROL_SETTLEMENT,
+                "expected_coordinator_event_id": head, "idempotency_key": "k1"}
+        self.assertEqual(rig.admin_post(aj.DECISIONS_PATH, "rig_a", {**good, "candidate_id": "c"}), refusal(400, "invalid_request"))
+        self.assertEqual(rig.admin_post(aj.DECISIONS_PATH, "rig_a", {**good, "provider_id": "bad provider"}), refusal(400, "invalid_request"))
+        self.assertEqual(rig.admin_post(aj.DECISIONS_PATH, "rig_a", {**good, "provider_id": "mp-other"}), refusal(404, "no_offer"))
+        self.assertEqual(rig.admin_post(aj.DECISIONS_PATH, "rig_a", {**good, "candidate_id": candidate_id(GGUF)}), refusal(404, "no_offer"))
+        code, proposed = rig.admin_post(aj.DECISIONS_PATH, "rig_a", good)
+        self.assertEqual(code, 200)
+        pending_id = proposed["pending_decision_id"]
+        approve = {"schema": aj.APPROVE_REQUEST_SCHEMA, "provider_id": PROVIDER_ID, "candidate_id": candidate_id(SETTLEABLE),
+                   "pending_decision_id": pending_id, "expected_coordinator_event_id": head, "idempotency_key": "k2"}
+        route = f"{aj.DECISIONS_PATH}/{pending_id}/approve"
+        self.assertEqual(rig.admin_post(route, "rig_b", {**approve, "candidate_id": candidate_id(GGUF)}), refusal(400, "invalid_request"))
+        self.assertEqual(rig.admin_post(route, "rig_b", {**approve, "provider_id": "mp-other"}), refusal(400, "invalid_request"))
+        self.assertEqual(rig.admin_post(route, "rig_b", approve)[0], 200)
+
+    def test_approval_after_an_intervening_event_is_stale_head_and_the_run_fails(self):
+        # The pending record was evaluated against one head; if the candidate
+        # moved in between, the real coordinator answers 409 stale_head and
+        # invalidates the record. The fake does the same, and a fake that
+        # grants anyway (the pre-fix behaviour) is caught by the runner.
+        rig = FakeRig()
+        rig._set(SETTLEABLE, "catalog_priced")
+        runner = aj.AdmissionJourneyRunner(rig, self.config, aj.ManifestBuilder(self.out, "r", CLI_VERSION), log=lambda _: None)
+        runner.status(runner.settleable)
+        code, proposed = runner.decide("rig_a", runner.settleable, "settlement_capable", aj.REASON_DUAL_CONTROL_SETTLEMENT)
+        self.assertEqual(code, 200)
+        pending_id, head = proposed["pending_decision_id"], proposed["coordinator_event_id"]
+        rig._set(SETTLEABLE, "catalog_priced", "intervening")  # a new event on the same state
+        code, body = runner.approve("rig_b", runner.settleable, pending_id, head)
+        self.assertEqual((code, body["error"]["code"]), (409, "stale_head"))
+        self.assertNotIn(pending_id, rig.pending)
+        self.assertNotEqual(rig.state[SETTLEABLE], "settlement_capable")
+
+    def test_step_2_requires_the_head_to_be_unchanged_by_the_refused_duplicate(self):
+        with self.assertRaises(aj.JourneyFailure) as caught:
+            self.run_journey(FakeRig(mutate_on_duplicate_offer=True))
+        self.assertIn("refused duplicate offer appended a coordinator event", str(caught.exception))
+        self.assertFalse((self.out / "run-manifest.json").exists())
+
+    def test_redaction_review_rejects_urls_paths_ips_and_localhost_in_any_surface(self):
+        cases = [
+            ({"cli_transcript": "--config /Users/rig/.config/macprovider/config.yaml"}, "an absolute path"),
+            ({"provider_log": "cache at ~/.cache/huggingface"}, "a home-relative path"),
+            ({"coordinator_log": "admin origin http://127.0.0.1:18444/admin"}, "a url"),
+            ({"coordinator_log": "peer 10.0.0.7 connected"}, "an ipv4 literal"),
+            ({"provider_log": "listening on localhost"}, "a localhost reference"),
+        ]
+        for leaks, label in cases:
+            with self.subTest(label=label):
+                with self.assertRaises(aj.JourneyFailure) as caught:
+                    self.run_journey(FakeRig(surface_leaks=leaks))
+                self.assertIn(label, str(caught.exception))
+                self.assertIn("surface " + next(iter(leaks)), str(caught.exception))
+
+    def test_physical_rig_transcript_redacts_path_arguments(self):
+        self.assertEqual(aj.redact_argument("/Users/rig/config.yaml"), "<path>")
+        self.assertEqual(aj.redact_argument("~/models"), "<path>")
+        self.assertEqual(aj.redact_argument("--config"), "--config")
+        self.assertEqual(aj.redact_argument("mlx-community/Llama-3.2-3B-Instruct-4bit"), "mlx-community/Llama-3.2-3B-Instruct-4bit")
+        rig = aj.PhysicalRig(self.config)
+        rig.cli_raw(["models", "discover", "--json", "--config", str(self.config.provider_config)])
+        transcript = rig.surfaces()["cli_transcript"]
+        self.assertNotIn(str(self.config.provider_config), transcript)
+        self.assertIn("--config <path>", transcript)
+        # Admin exchanges are recorded as origin-relative routes, which the
+        # path scanner accepts.
+        rig._transcript.append("POST admin/model-admission/decisions as rig_a -> 200\n{}")
+        aj.evidence_contract.reject_unredacted_text_except_hostname(rig.surfaces()["cli_transcript"], "transcript")
+
+    def test_child_environment_drops_secrets_and_pg_for_every_subprocess(self):
+        os.environ["PGPASSWORD"] = "leak"
+        os.environ["MACPROVIDER_HOME"] = "keep"
+        try:
+            env = self.config.child_environment()
+            for name in ("T_OP_A", "T_OP_B", "T_DSN", "PGPASSWORD"):
+                self.assertNotIn(name, env)
+            self.assertEqual(env["MACPROVIDER_HOME"], "keep")
+            psql = self.config.child_environment(psql_service_file=Path("/x/pg_service.conf"))
+            self.assertEqual({k for k in psql if k.startswith("PG")}, {"PGSERVICEFILE", "PGSERVICE"})
+            self.assertNotIn("MACPROVIDER_HOME", psql)
+            self.assertTrue(set(psql) - {"PGSERVICEFILE", "PGSERVICE"} <= self.config.PSQL_ENVIRONMENT_ALLOWLIST | {k for k in psql if k.startswith("LC_")})
+        finally:
+            del os.environ["PGPASSWORD"], os.environ["MACPROVIDER_HOME"]
+        # cli_raw and induce_drift pass the scrubbed environment too.
+        seen = []
+        original = aj.subprocess.run
+
+        def fake_run(argv, **kwargs):
+            seen.append(kwargs.get("env"))
+            return subprocess.CompletedProcess(argv, 0, "{}", "")
+        aj.subprocess.run = fake_run
+        try:
+            hook = Path(self.tmp.name) / "drift.sh"
+            hook.write_text("#!/bin/sh\n"); hook.chmod(0o700)
+            rig = aj.PhysicalRig(self.config.__class__(**{**self.config.__dict__, "drift_hook": hook}))
+            rig.cli_raw(["models", "discover", "--json"])
+            rig.induce_drift()
+        finally:
+            aj.subprocess.run = original
+        self.assertEqual(len(seen), 2)
+        for env in seen:
+            self.assertIsNotNone(env)
+            for name in ("T_OP_A", "T_OP_B", "T_DSN"):
+                self.assertNotIn(name, env)
+
     def test_physical_rig_reviews_only_what_the_run_appended_to_the_logs(self):
         rig = aj.PhysicalRig(self.config)
         with self.provider_log.open("a") as handle:
@@ -535,6 +697,7 @@ class AdmissionJourneyRunnerTests(unittest.TestCase):
             seen["argv"] = list(argv)
             env = kwargs["env"]
             seen["env_pg"] = {k: v for k, v in env.items() if k.startswith("PG")}
+            seen["env_all"] = dict(env)
             service = Path(env["PGSERVICEFILE"])
             seen["mode"] = service.stat().st_mode & 0o777
             seen["dir_mode"] = service.parent.stat().st_mode & 0o777
@@ -552,6 +715,8 @@ class AdmissionJourneyRunnerTests(unittest.TestCase):
         self.assertEqual(seen["argv"][0], "psql")
         self.assertFalse(any(dsn in a or "pg-pass-" in a or "rigreader" in a or "127.0.0.1" in a for a in seen["argv"]), seen["argv"])
         self.assertEqual(set(seen["env_pg"]), {"PGSERVICEFILE", "PGSERVICE"})
+        for name in ("T_OP_A", "T_OP_B", "T_DSN"):
+            self.assertNotIn(name, seen["env_all"])
         self.assertEqual((seen["mode"], seen["dir_mode"]), (0o600, 0o700))
         self.assertIn("password=pg-pass-", seen["service"])
         self.assertIn("sslmode=disable", seen["service"])

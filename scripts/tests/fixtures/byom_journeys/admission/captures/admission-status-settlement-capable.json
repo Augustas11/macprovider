@@ -1,9 +1,27 @@
 {
   "admission_state": "settlement_capable",
   "admission_state_source": "coordinator",
-  "catalog_model_key": null,
+  "allowed_next_states": [
+    "catalog_priced",
+    "network_admitted_unsettled",
+    "revoked",
+    "withdrawn"
+  ],
+  "candidate_id": "byom_zjdngwat53ctycda6nm24ohmx4on7glftp3wrvsb2al6ebg36jza",
+  "catalog_model_key": "tiny-1b",
+  "cli_version": "1.8.124",
+  "coordinator_event_id": "2cdaae7be2f72af741715f6d9c417749252da30d168db93e00e66eeb50c23394",
+  "generated_at": "2027-01-15T08:00:00Z",
   "provider_guidance": {
-    "earning_path_class": "settlement_capable"
+    "earning_path_class": "settlement_capable",
+    "next_action": "check_status",
+    "state_label_key": "byom.admission.settlement_capable.label",
+    "state_meaning_key": "byom.admission.settlement_capable.meaning",
+    "transition_reason_code": "operator_dual_control_settlement"
   },
-  "schema": "model_admission_status.v1"
+  "provider_id": "mp-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "schema": "model_admission_status.v1",
+  "served_model_ref": "mlx-community/Tiny-1B-4bit",
+  "state_observed_at": "2027-01-15T08:00:00Z",
+  "warnings": []
 }

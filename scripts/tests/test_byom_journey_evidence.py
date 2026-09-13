@@ -309,11 +309,37 @@ class BYOMJourneyCaptureTests(unittest.TestCase):
     # spec does not define) cannot be digested into evidence -- whoever produced
     # it. These go through the real capture path, not the driver's copy.
     #
-    # Scoped to the DISCOVERY journey in this slice (epic #1453 slice 1b), which
-    # is why every case below mutates a discovery capture: the admission
-    # contract keeps redaction plus top-level `schema` equality until its own
-    # journey can be captured (slice 7). See
-    # `JourneyContract.typed_capture_validation`.
+    # The discovery cases below date from slice 1b; the admission contract is
+    # typed since slice 7 (see `JourneyContract.typed_capture_validation`), and
+    # the admission cases follow the discovery ones.
+    def test_admission_capture_rejects_a_withdrawal_reason_outside_the_enum(self) -> None:
+        # #1495 R2 #5: the closed withdrawal enum must bite at the evidence
+        # boundary, not only inside the driver.
+        def mutator(_manifest, root):
+            path = root / "captures" / "admission-withdraw.json"
+            document = json.loads(path.read_text(encoding="utf-8"))
+            document["reason_code"] = "operator_withdrawal"
+            path.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+        self.assert_capture_fails("admission", mutator, "reason_code is not a permitted value: 'operator_withdrawal'")
+
+    def test_admission_capture_rejects_an_incomplete_status_document(self) -> None:
+        def mutator(_manifest, root):
+            path = root / "captures" / "admission-status-settlement-capable.json"
+            document = json.loads(path.read_text(encoding="utf-8"))
+            del document["allowed_next_states"]
+            path.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+        self.assert_capture_fails("admission", mutator, "is missing required fields: allowed_next_states")
+
+    def test_admission_capture_rejects_a_settlement_claim_from_a_local_source(self) -> None:
+        # The SPEC-046-R003 cross-field rule, on an admission capture: a
+        # local_default document may not report a coordinator state.
+        def mutator(_manifest, root):
+            path = root / "captures" / "admission-status-settlement-capable.json"
+            document = json.loads(path.read_text(encoding="utf-8"))
+            document["admission_state_source"] = "local_default"
+            path.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+        self.assert_capture_fails("admission", mutator, "is not a permitted state for admission_state_source 'local_default'")
+
     def test_rejects_captured_document_missing_an_envelope_field(self) -> None:
         document = self.complete_discovery_document()
         del document["projection_sequence"]

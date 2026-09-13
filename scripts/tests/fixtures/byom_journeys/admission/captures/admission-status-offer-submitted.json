@@ -1,9 +1,28 @@
 {
-  "admission_state": "offer_submitted",
+  "admission_state": "sandbox_probe_only",
   "admission_state_source": "coordinator",
-  "catalog_model_key": null,
+  "allowed_next_states": [
+    "catalog_priced",
+    "network_admitted_unsettled",
+    "network_visible_unpriced",
+    "revoked",
+    "withdrawn"
+  ],
+  "candidate_id": "byom_zjdngwat53ctycda6nm24ohmx4on7glftp3wrvsb2al6ebg36jza",
+  "catalog_model_key": "tiny-1b",
+  "cli_version": "1.8.124",
+  "coordinator_event_id": "e11d81b0b8d022f39d3d696399828341cee92b8a92bbc1f7e62d254d343e8f28",
+  "generated_at": "2027-01-15T08:00:00Z",
   "provider_guidance": {
-    "earning_path_class": "not_earning_yet_catalog_or_receipt_path_exists"
+    "earning_path_class": "not_earning_yet_catalog_or_receipt_path_exists",
+    "next_action": "check_status",
+    "state_label_key": "byom.admission.sandbox_probe_only.label",
+    "state_meaning_key": "byom.admission.sandbox_probe_only.meaning",
+    "transition_reason_code": "synthetic_probe_required"
   },
-  "schema": "model_admission_status.v1"
+  "provider_id": "mp-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "schema": "model_admission_status.v1",
+  "served_model_ref": "mlx-community/Tiny-1B-4bit",
+  "state_observed_at": "2027-01-15T08:00:00Z",
+  "warnings": []
 }

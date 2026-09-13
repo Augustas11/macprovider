@@ -47,8 +47,12 @@ The DSN is never passed to `psql` on its command line either (argv is
 readable through process inspection). For each ledger read the runner
 writes it as a libpq service file, mode 0600 in a private 0700 directory
 that exists only for the duration of that read, and points `psql` at it
-through `PGSERVICEFILE`/`PGSERVICE`; every other `PG*` variable is dropped
-from the child's environment. The DSN may be a `postgresql://` URI or libpq
+through `PGSERVICEFILE`/`PGSERVICE`. Every subprocess the runner starts
+(the CLI, the drift hook, `psql`) gets a scrubbed environment: the two
+operator secret variables, the DSN variable and every `PG*` variable are
+dropped, and `psql` keeps only `PATH`, `HOME`, `LANG`, `LC_*`, `TMPDIR`,
+`TZ` plus the two service-file variables. The CLI signs with its own keys
+and never needs any of them. The DSN may be a `postgresql://` URI or libpq
 `key=value` pairs; only `host`, `hostaddr`, `port`, `dbname`, `user`,
 `password`, `sslmode`, `sslrootcert`, `application_name`, `connect_timeout`
 and `target_session_attrs` are carried, anything else fails the run.
@@ -97,7 +101,17 @@ verdict, never to "some 4xx": the proposer's own approval must be
 `409 dual_control_required`; the out-of-matrix transition in step 11 must be
 `409 invalid_transition` with the head and state unchanged. A `400
 invalid_request`, `401`, `404` or `409 stale_head` in either place fails the
-run, because it proves nothing about dual control or the matrix.
+run, because it proves nothing about dual control or the matrix. The
+`provider_id` and `candidate_id` the runner sends are the ones the CLI's
+status document reports, checked against the coordinator grammars
+(`^[a-zA-Z0-9_.-]{1,64}$`, `^byom_[a-z2-7]{52}$`); a `byom_unstable_` id
+means the local discovery namespace is not provisioned and the run stops.
+
+Step 2 measures "appended nothing" on the head: after the accepted offer
+the runner waits for the coordinator's own probe edge to land
+(`sandbox_probe_only`), reads the `coordinator_event_id`, attempts the
+duplicate offer, and requires the refusal to be `HTTP 409` with the same
+event id afterwards.
 
 ## The drift hook
 
@@ -123,10 +137,20 @@ the runner's own log, the verbatim transcript of every CLI invocation and
 operator-surface exchange, every captured document, the coordinator's event
 listing for the provider (`GET /admin/model-admission/offers`), and the bytes
 the provider and coordinator logs gained during the run. Each is checked for
-both operator secrets, the DSN and its password, the shared credential-shape
-scanner, the synthetic probe prompt (`Reply with ok.`) and chat request
-shapes, and chat completion shapes. A failure names the category and the
-surface, never the value.
+both operator secrets, the DSN and its password, the shared evidence scanner
+(credential shapes, URLs, absolute and home-relative paths, IPv4 and IPv6
+literals, `localhost`), the synthetic probe prompt (`Reply with ok.`) and
+chat request shapes, and chat completion shapes. A failure names the rule
+and the surface, never the value.
+
+Two consequences for the rig. The transcript records CLI arguments with
+absolute and `~/` paths replaced by `<path>` and admin exchanges as routes
+relative to the admin origin, so the runner's own record cannot fail its
+own review. The provider and coordinator log files handed to the run must
+therefore not gain a URL, filesystem path or IP literal while it runs;
+point the runner at logs at the default level (the admission operator
+surface logs `remote_addr` only on the ambiguous-bearer warning path) and
+keep debug request logging off for the duration of the run.
 
 ## Step 11 and `offer_rejected`
 

@@ -1,9 +1,24 @@
 {
-  "admission_state": "network_visible_unpriced",
+  "admission_state": "not_offered",
   "admission_state_source": "coordinator",
+  "allowed_next_states": [
+    "offer_submitted"
+  ],
+  "candidate_id": "byom_qosdnluufpsigfdyo35vpm4k6i2z7qon25qndsv53tsi2iexvpwq",
   "catalog_model_key": null,
+  "cli_version": "1.8.124",
+  "coordinator_event_id": "30ab035b4302247051806bf838ca441c35773fffc90f5ac7f3376b704c5e5100",
+  "generated_at": "2027-01-15T08:00:00Z",
   "provider_guidance": {
-    "earning_path_class": "no_earning_path_in_v0_1"
+    "earning_path_class": "no_earning_path_in_v0_1",
+    "next_action": "check_status",
+    "state_label_key": "byom.admission.not_offered.label",
+    "state_meaning_key": "byom.admission.not_offered.meaning",
+    "transition_reason_code": null
   },
-  "schema": "model_admission_status.v1"
+  "provider_id": "mp-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "schema": "model_admission_status.v1",
+  "served_model_ref": "ollama:tiny-ollama-1b-q4",
+  "state_observed_at": "2027-01-15T08:00:00Z",
+  "warnings": []
 }

@@ -212,13 +212,11 @@ class JourneyContract:
         self.false_observations = false_observations
         self.release_evidence_requirement_id = release_evidence_requirement_id
         # Whether `_digest_document` runs the typed closed-enum capture
-        # validators over this journey's documents. See the SCOPE note above
-        # `validate_captured_cli_document`: the discovery journey has a
-        # hermetic driver producing real CLI captures, so its documents are
-        # validated in full. The admission journey's captures cannot be
-        # produced end to end until catalog binding exists, so it keeps the
-        # earlier boundary (redaction scans plus top-level `schema` equality)
-        # until the admission-journey slice (epic #1453 slice 7) captures it.
+        # validators over this journey's documents. Both BYOM journeys have a
+        # driver that captures real CLI documents (the hermetic discovery
+        # driver, the physical admission driver), so both are validated in
+        # full; the flag stays so a future journey can be introduced with the
+        # narrower boundary until its driver exists.
         self.typed_capture_validation = typed_capture_validation
         self.money_path_tables = money_path_tables
 
@@ -259,8 +257,10 @@ ADMISSION_CONTRACT = JourneyContract(
     true_observations=NETWORK_MODEL_ADMISSION_TRUE_OBSERVATIONS,
     false_observations=NETWORK_MODEL_ADMISSION_FALSE_OBSERVATIONS,
     release_evidence_requirement_id="SPEC-047-R008",
-    # Scoped off in this slice; see `typed_capture_validation` above.
-    typed_capture_validation=False,
+    # Enabled with the admission-journey driver (epic #1453 slice 7): every
+    # admission capture is typed at the evidence boundary, so a document the
+    # driver would refuse cannot be digested into evidence either.
+    typed_capture_validation=True,
     money_path_tables=NETWORK_MODEL_ADMISSION_MONEY_PATH_TABLES,
 )
 CONTRACTS: dict[str, JourneyContract] = {
@@ -1219,14 +1219,12 @@ def _validate_catalog_economics(parsed: dict[str, Any], location: str) -> None:
 def validate_captured_cli_document(schema: Any, parsed: Any, location: str = "$") -> None:
     """Validate one captured CLI document against its complete closed schema.
 
-    Invoked from `_digest_document` for the DISCOVERY journey only in this slice
-    (epic #1453 slice 1b), so every discovery document that reaches evidence --
-    driver-produced or hand-authored -- is complete before its bytes are hashed.
-    An unrecognised schema fails closed: a document nobody enumerated cannot be
-    known to be complete, so it may not back a signed step. Consequently only
-    the five schemas the discovery driver emits are enumerated below;
-    `model_admission_withdraw.v1` appears in the admission journey alone and is
-    typed with that journey (slice 7).
+    Invoked from `_digest_document` for both BYOM journeys (discovery since
+    epic #1453 slice 1b, admission since slice 7), so every document that
+    reaches evidence -- driver-produced or hand-authored -- is complete before
+    its bytes are hashed. An unrecognised schema fails closed: a document
+    nobody enumerated cannot be known to be complete, so it may not back a
+    signed step. The six schemas the two drivers emit are enumerated below.
 
     "Complete" means the exact key set AND the values: R4 showed that key-set
     validation alone accepts `identity_state: declared_local`, capability results
@@ -1323,15 +1321,12 @@ def _digest_document(
     # here -- the one boundary every capture crosses -- rather than in whichever
     # harness produced the document.
     #
-    # SCOPE (epic #1453 slice 1b): typed validation is enabled for the DISCOVERY
-    # journey, whose hermetic driver produces every capture from a real CLI run,
-    # so the enums and cross-field rules are checked against documents the CLI
-    # actually emitted. The ADMISSION journey keeps the earlier boundary --
-    # redaction scans plus top-level `schema` equality, both already applied
-    # above -- because that journey cannot be captured end to end before catalog
-    # binding exists, so there is no real admission run to type the validators
-    # against. Typed validation of admission captures lands with the
-    # admission-journey slice (epic #1453 slice 7).
+    # Typed validation is enabled for both BYOM journeys: the discovery
+    # driver (epic #1453 slice 1b) and the admission driver (slice 7) each
+    # capture every document from a CLI run and apply these same validators
+    # at capture time, so a document that reaches this boundary incomplete,
+    # over-complete, or outside a closed enum is refused here too, whoever
+    # produced it.
     if contract.typed_capture_validation:
         validate_captured_cli_document(schema, parsed, f"{location}.document")
     return {

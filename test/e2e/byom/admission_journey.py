@@ -92,6 +92,10 @@ OFFERS_PATH = "/admin/model-admission/offers"
 # coordinator would refuse as invalid_request must be refused here first, so a
 # runner defect can never be mistaken for a coordinator verdict.
 OPERATOR_REASON_CODE = re.compile(r"^operator_[a-z0-9_]{2,56}$")
+PROVIDER_ID = re.compile(r"^[a-zA-Z0-9_.-]{1,64}$")
+# Stable BYOM candidate id (model_admission.go modelAdmissionCandidatePattern;
+# the CLI's BYOMWithdrawalBuilder.stableCandidatePattern is the same string).
+CANDIDATE_ID = re.compile(r"^byom_[a-z2-7]{52}$")
 COORDINATOR_EVENT_ID = re.compile(r"^[0-9a-f]{64}$")
 PENDING_DECISION_ID = re.compile(r"^[0-9a-f]{32}$")
 IDEMPOTENCY_KEY = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
@@ -130,6 +134,15 @@ class JourneyFailure(Exception):
 def assert_true(condition: bool, message: str) -> None:
     if not condition:
         raise JourneyFailure(message)
+
+
+def redact_argument(argument: str) -> str:
+    """A command-line argument as the transcript may keep it: absolute and
+    home-relative paths (the --config file, a model root) become a placeholder
+    so the transcript never carries the operator's filesystem layout."""
+    if argument.startswith(("/", "~/")):
+        return "<path>"
+    return argument
 
 
 def error_code(body: Any) -> str | None:
@@ -181,6 +194,24 @@ class RigConfig:
     coordinator_log: Path
     drift_hook: Path | None
     discovery_args: tuple[str, ...] = ()
+
+    # Variables a child process may keep when the runner spawns psql: the
+    # service-file pointer plus what a process needs to start at all.
+    PSQL_ENVIRONMENT_ALLOWLIST = frozenset({"PATH", "HOME", "LANG", "TMPDIR", "TZ"})
+
+    def child_environment(self, *, psql_service_file: Path | None = None) -> dict[str, str]:
+        """The environment for every subprocess the runner starts. The two
+        operator secrets, the ledger DSN and every PG* variable are dropped, so
+        no child (the CLI, the drift hook, psql) can read them back or leak
+        them; the CLI signs with its own keys and never needs them. psql
+        additionally gets only a minimal allowlist plus PGSERVICEFILE/PGSERVICE."""
+        secrets = {self.operator_secret_a_env, self.operator_secret_b_env, self.postgres_dsn_env}
+        env = {name: value for name, value in os.environ.items() if name not in secrets and not name.startswith("PG")}
+        if psql_service_file is None:
+            return env
+        env = {name: value for name, value in env.items() if name in self.PSQL_ENVIRONMENT_ALLOWLIST or name.startswith("LC_")}
+        env.update({"PGSERVICEFILE": str(psql_service_file), "PGSERVICE": "journey"})
+        return env
 
     def validate(self) -> None:
         assert_true(self.cli_binary.is_file() and os.access(self.cli_binary, os.X_OK), "cli binary is not executable")
@@ -235,9 +266,9 @@ class PhysicalRig:
         the evidence, so it must not be turned into a failure here."""
         completed = subprocess.run(
             [str(self.config.cli_binary), *args],
-            capture_output=True, text=True, check=False, cwd=str(ROOT),
+            capture_output=True, text=True, check=False, cwd=str(ROOT), env=self.config.child_environment(),
         )
-        self._transcript.append("$ macprovider-cli " + " ".join(args) + "\n" + completed.stdout + completed.stderr)
+        self._transcript.append("$ macprovider-cli " + " ".join(redact_argument(a) for a in args) + "\n" + completed.stdout + completed.stderr)
         return completed.returncode, completed.stdout, completed.stderr
 
     def cli(self, args: list[str]) -> dict[str, Any]:
@@ -267,7 +298,10 @@ class PhysicalRig:
                 status, payload = response.status, response.read().decode("utf-8") or "{}"
         except urllib.error.HTTPError as error:
             status, payload = error.code, error.read().decode("utf-8", errors="replace")
-        self._transcript.append(f"{method} {path} as {actor} -> {status}\n{payload}")
+        # The route is recorded relative to the admin origin (no origin, no
+        # leading slash): it is an API route, and the transcript is scanned
+        # for filesystem paths and endpoints in step 12.
+        self._transcript.append(f"{method} {path.lstrip('/')} as {actor} -> {status}\n{payload}")
         try:
             parsed = json.loads(payload)
         except json.JSONDecodeError:
@@ -332,9 +366,7 @@ class PhysicalRig:
             service_file = Path(private) / "pg_service.conf"
             with open(os.open(str(service_file), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w", encoding="utf-8") as handle:
                 handle.write("[journey]\n" + "".join(f"{key}={value}\n" for key, value in params.items()))
-            env = {name: value for name, value in os.environ.items() if not name.startswith("PG")}
-            env.update({"PGSERVICEFILE": str(service_file), "PGSERVICE": "journey"})
-            completed = subprocess.run(["psql", "-X", "-tA", "-F", "\t", "-c", sql], capture_output=True, text=True, check=False, env=env)
+            completed = subprocess.run(["psql", "-X", "-tA", "-F", "\t", "-c", sql], capture_output=True, text=True, check=False, env=self.config.child_environment(psql_service_file=service_file))
         assert_true(completed.returncode == 0, "ledger read failed; is psql on PATH and the DSN reachable")
         counts: dict[str, int] = {}
         for line in completed.stdout.splitlines():
@@ -352,7 +384,7 @@ class PhysicalRig:
 
     def induce_drift(self) -> None:
         assert_true(self.config.drift_hook is not None, "step 7 needs --drift-hook: a script that changes the admitted predicate (e.g. swaps the coordinator's catalog artifact feed and reloads)")
-        completed = subprocess.run([str(self.config.drift_hook)], capture_output=True, text=True, check=False)
+        completed = subprocess.run([str(self.config.drift_hook)], capture_output=True, text=True, check=False, env=self.config.child_environment())
         assert_true(completed.returncode == 0, "drift hook exited non-zero")
 
     def _log_since_start(self, name: str) -> str:
@@ -480,6 +512,8 @@ class AdmissionJourneyRunner:
 
     def status(self, candidate: Candidate) -> dict[str, Any]:
         document = self.rig.cli(["models", "admission", "status", candidate.served_model_ref, *self._common()])
+        assert_true(bool(PROVIDER_ID.match(document["provider_id"])), "status carries a provider_id outside the coordinator grammar")
+        assert_true(bool(CANDIDATE_ID.match(document["candidate_id"])), "status carries a candidate_id that is not a stable byom_ id; the local discovery namespace is not provisioned")
         candidate.candidate_id = document["candidate_id"]
         candidate.provider_id = document["provider_id"]
         candidate.catalog_model_key = document.get("catalog_model_key")
@@ -595,15 +629,18 @@ class AdmissionJourneyRunner:
         # live is refused by the coordinator's state machine (HTTP 409) and
         # appends nothing. Nonce-level replay is enforced on the raw request,
         # which the CLI never re-sends; it is covered by coordinator tests.
+        # "Appended nothing" is measured on the head: the coordinator applies
+        # its own probe policy right after an accepted offer (offer_submitted
+        # -> sandbox_probe_only is a coordinator-origin edge), so the head is
+        # read once that edge has landed, the duplicate is attempted, and the
+        # head is read again; the two event ids must be equal.
+        settled = self.wait_for_state(self.settleable, "sandbox_probe_only", "step 2 (coordinator probe policy applied)")
+        head = settled["coordinator_event_id"]
+        assert_true(head is not None and bool(COORDINATOR_EVENT_ID.match(head)), "post-submit status carries no coordinator event id")
         code, _, stderr = self.rig.cli_raw(["models", "offer", self.settleable.served_model_ref, *self._common()])
         assert_true(code != 0 and "HTTP 409" in stderr, "a duplicate live offer was accepted rather than refused with HTTP 409")
-        status = self.status(self.settleable)
-        assert_true(status["admission_state_source"] == "coordinator", "step 2: state is not coordinator-backed")
-        # By the time status is read the coordinator may already have applied
-        # its own probe policy (offer_submitted -> sandbox_probe_only is a
-        # coordinator-origin edge).
-        assert_true(status["admission_state"] in ("offer_submitted", "sandbox_probe_only"), f"step 2: post-submit state is {status['admission_state']!r}")
-        assert_true(status["coordinator_event_id"] is not None, "post-submit status carries no coordinator event id")
+        status = self.expect_state(self.settleable, "sandbox_probe_only", "step 2 (after the refused duplicate)")
+        assert_true(status["coordinator_event_id"] == head, "the refused duplicate offer appended a coordinator event")
         doc = self.m.capture("offer-submitted-status", "model_admission_status.v1", status)
         self.m.add_step(STEP_IDS[1], "One provider-signed offer was accepted by the coordinator and recorded as offer_submitted; a duplicate offer while it was live was refused with HTTP 409 and appended nothing.", [doc])
 
@@ -622,7 +659,7 @@ class AdmissionJourneyRunner:
         assert_true(status["provider_guidance"]["earning_path_class"] == "local_inventory_only", "opaque endpoint guidance does not confine it to local inventory")
         assert_true(self.rig.request_log_since(marker) == 0, "opaque endpoint handling produced buyer traffic")
         self.m.observe("rejected_opaque_endpoint_verified", True)
-        doc = self.m.capture("opaque-endpoint-rejected-status", "model_admission_status.v1", status)
+        doc = self.m.capture("opaque-endpoint-refused-status", "model_admission_status.v1", status)
         self.m.add_step(STEP_IDS[2], "An opaque endpoint candidate was refused by the CLI submission builder before any coordinator contact and remains confined to local inventory with no catalog key, no economics, and no buyer traffic.", [doc])
 
     def step_04_sandbox_probe_only(self) -> None:
@@ -824,8 +861,13 @@ class AdmissionJourneyRunner:
             text = surfaces[name]
             for category, needle in needles:
                 assert_true(needle not in text, f"redaction review: {category} found in surface {name}")
+            # The shared evidence scanner, every rule except the DNS-shape
+            # hostname rule (which would flag any dotted token in a log line):
+            # credential shapes, URLs, absolute and home-relative paths, IPv4
+            # and IPv6 literals, and localhost. Paths and endpoints are what
+            # the journey's step 12 exists to keep out of these surfaces.
             try:
-                evidence_contract.reject_secret_like_text(text, "surface " + name)
+                evidence_contract.reject_unredacted_text_except_hostname(text, "surface " + name)
             except evidence_contract.BYOMEvidenceError as exc:
                 raise JourneyFailure(f"redaction review: {exc}") from exc
         prompt_hits = [name for name in REDACTION_SURFACES if SYNTHETIC_PROBE_PROMPT in surfaces[name] or any(p.search(surfaces[name]) for p in RAW_PROMPT_SHAPES)]
@@ -836,7 +878,7 @@ class AdmissionJourneyRunner:
         self.m.observe("raw_prompt_logged", False)
         self.m.observe("raw_completion_logged", False)
         doc = self.m.capture("redaction-review-status", "model_admission_status.v1", status)
-        self.m.add_step(STEP_IDS[11], "The runner log, the CLI and operator-surface transcript, every captured document, the coordinator's event listing, and the provider and coordinator logs written during the run were reviewed; no operator secret, ledger credential, credential-shaped value, raw prompt or raw completion is persisted in any of them.", [doc])
+        self.m.add_step(STEP_IDS[11], "The runner log, the CLI and operator-surface transcript, every captured document, the coordinator's event listing, and the provider and coordinator logs written during the run were reviewed; no operator secret, ledger credential, credential-shaped value, URL, filesystem path, IP literal, loopback host name, raw prompt or raw completion is persisted in any of them.", [doc])
 
     # -- run --------------------------------------------------------------
 
