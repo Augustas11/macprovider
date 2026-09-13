@@ -359,9 +359,11 @@ final class UninstallCommandTests: XCTestCase {
                 sleep: { _ in }
             )
         ) { error in
+            // System-domain path fails closed with the system-domain error, not
+            // the gui/ analogue.
             XCTAssertEqual(
                 error as? UninstallCommand.UninstallError,
-                .serviceStillLoaded("live.malibu.provider")
+                .systemServiceStillLoaded("live.malibu.provider")
             )
         }
     }
@@ -586,18 +588,25 @@ final class UninstallCommandTests: XCTestCase {
             fileExists: { $0 == rootPlist },
             run: { arguments in
                 commands.append(arguments)
-                return 0
-            }
+                // Absence proof precedes the rm: print reports the job gone (113).
+                return arguments.contains("print") ? 113 : 0
+            },
+            sleep: { _ in }
         )
 
-        XCTAssertEqual(commands, [["/bin/rm", "-f", "--", rootPlist]])
+        XCTAssertEqual(commands, [
+            ["/bin/launchctl", "print", "system/live.malibu.provider"],
+            ["/bin/rm", "-f", "--", rootPlist],
+        ])
 
+        // A nonzero rm (with the job already proven absent) still fails closed.
         XCTAssertThrowsError(
             try UninstallCommand.removeSystemLaunchDaemonPlists(
                 allowedPaths: allowed.plists,
                 systemPlists: [watchdogPlist],
                 fileExists: { _ in true },
-                run: { _ in 1 }
+                run: { arguments in arguments.contains("print") ? 113 : 1 },
+                sleep: { _ in }
             )
         ) { error in
             XCTAssertEqual(
@@ -605,6 +614,125 @@ final class UninstallCommandTests: XCTestCase {
                 .headlessUninstallPrivilegeRequired
             )
         }
+    }
+
+    private func headlessSystemManifest() -> UninstallCommand.InstallManifest {
+        UninstallCommand.InstallManifest(
+            installPrefix: "/Users/fleet/macprovider",
+            launchdLabels: ["live.malibu.provider", "live.malibu.provider-watchdog"],
+            dataDirs: [],
+            version: nil,
+            binaryPath: nil,
+            symlinkPath: nil,
+            launchdPlists: [],
+            installProfile: "headless_fleet",
+            launchdDomain: "system"
+        )
+    }
+
+    // FIX 1 (HIGH) — the fixed managed plist set is broader than a modern
+    // manifest's recorded labels. A stale/legacy `live.streamvc.*` plist whose
+    // system job is STILL LOADED must not be deleted underneath the running job:
+    // removal proves each plist's own job absent first and fails closed. Would
+    // FAIL if the guard regressed to an unconditional `rm`.
+    func testRemoveSystemLaunchDaemonPlistsFailsClosedWhenLegacyJobStillLoaded() throws {
+        let home = URL(fileURLWithPath: "/Users/fleet", isDirectory: true)
+        let allowed = try UninstallCommand.allowedRemovalPaths(home: home, manifest: headlessSystemManifest())
+        let legacyPlist = "/Library/LaunchDaemons/live.streamvc.macprovider.plist"
+        var commands: [[String]] = []
+        XCTAssertThrowsError(
+            try UninstallCommand.removeSystemLaunchDaemonPlists(
+                allowedPaths: allowed.plists,
+                fileExists: { $0 == legacyPlist },
+                run: { arguments in
+                    commands.append(arguments)
+                    // The legacy job's print always reports loaded (status 0).
+                    return 0
+                },
+                sleep: { _ in }
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? UninstallCommand.UninstallError,
+                .systemServiceStillLoaded("live.streamvc.macprovider")
+            )
+        }
+        XCTAssertTrue(
+            commands.contains(["/bin/launchctl", "print", "system/live.streamvc.macprovider"]),
+            "removal must prove the legacy job's absence"
+        )
+        XCTAssertFalse(
+            commands.contains(["/bin/rm", "-f", "--", legacyPlist]),
+            "must NOT rm a legacy plist whose system job is still loaded"
+        )
+    }
+
+    // FIX 1 — a present legacy/unrecorded plist whose job is proven absent (113)
+    // is a stale artifact and is safely removed after the proof.
+    func testRemoveSystemLaunchDaemonPlistsRemovesLegacyPlistWhenJobAbsent() throws {
+        let home = URL(fileURLWithPath: "/Users/fleet", isDirectory: true)
+        let allowed = try UninstallCommand.allowedRemovalPaths(home: home, manifest: headlessSystemManifest())
+        let legacyPlist = "/Library/LaunchDaemons/live.streamvc.macprovider.plist"
+        var commands: [[String]] = []
+        try UninstallCommand.removeSystemLaunchDaemonPlists(
+            allowedPaths: allowed.plists,
+            fileExists: { $0 == legacyPlist },
+            run: { arguments in
+                commands.append(arguments)
+                return arguments.contains("print") ? 113 : 0
+            },
+            sleep: { _ in }
+        )
+        XCTAssertEqual(commands, [
+            ["/bin/launchctl", "print", "system/live.streamvc.macprovider"],
+            ["/bin/rm", "-f", "--", legacyPlist],
+        ])
+    }
+
+    // FIX 1 — even when the manifest records no labels (empty stopUninstall stop
+    // proof), removal itself proves each present plist's own job absent, so a
+    // loaded job blocks deletion and no `rm` is issued without a preceding proof.
+    func testRemoveSystemLaunchDaemonPlistsProvesEveryPresentPlistIndependentOfManifestLabels() throws {
+        let malibuPlist = "/Library/LaunchDaemons/live.malibu.provider.plist"
+        var commands: [[String]] = []
+        XCTAssertThrowsError(
+            try UninstallCommand.removeSystemLaunchDaemonPlists(
+                allowedPaths: UninstallCommand.managedSystemLaunchDaemonPlists,
+                fileExists: { $0 == malibuPlist },
+                run: { arguments in
+                    commands.append(arguments)
+                    return 0 // print reports the job still loaded
+                },
+                sleep: { _ in }
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? UninstallCommand.UninstallError,
+                .systemServiceStillLoaded("live.malibu.provider")
+            )
+        }
+        XCTAssertEqual(commands.first, ["/bin/launchctl", "print", "system/live.malibu.provider"])
+        XCTAssertFalse(commands.contains { $0.first == "/bin/rm" }, "no rm without an absence proof")
+    }
+
+    // FIX 2 (MEDIUM) — a system-domain absence failure surfaces the SYSTEM-domain
+    // remedy (`sudo launchctl ... system/<label>`), never the gui/ text.
+    func testSystemDomainAbsenceFailuresRenderSystemDomainRemedy() {
+        let stillLoaded = UninstallCommand.UninstallError.systemServiceStillLoaded("live.malibu.provider")
+        XCTAssertTrue(stillLoaded.description.contains("sudo launchctl bootout system/live.malibu.provider"))
+        XCTAssertFalse(stillLoaded.description.contains("gui/"))
+
+        let verifyFailed = UninstallCommand.UninstallError
+            .systemServiceAbsenceVerificationFailed("live.malibu.provider", 64)
+        XCTAssertTrue(verifyFailed.description.contains("sudo launchctl print system/live.malibu.provider"))
+        XCTAssertTrue(verifyFailed.description.contains("sudo launchctl bootout system/live.malibu.provider"))
+        XCTAssertFalse(verifyFailed.description.contains("gui/"))
+
+        // The gui/ analogues stay on the gui/ domain and are unchanged.
+        XCTAssertTrue(
+            UninstallCommand.UninstallError.serviceStillLoaded("live.malibu.provider")
+                .description.contains("gui/$(id -u)/live.malibu.provider")
+        )
     }
 
     func testLoadedConsumerManifestStillFailsClosedWhenSystemArtifactsExist() throws {
