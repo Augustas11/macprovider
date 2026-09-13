@@ -296,6 +296,44 @@ final class InferenceRelayTests: XCTestCase {
         XCTAssertEqual(error["code"] as? String, "invalid_message")
     }
 
+    func testMalformedInferenceRequestIDSendsNak() async throws {
+        let runtime = try await ModelRuntime(modelID: nil)
+        let status = ProviderStatus(
+            modelID: nil,
+            modelLoaded: false,
+            capacity: ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: nil)
+        )
+        let recorder = FrameRecorder()
+        let relay = InferenceRelay(
+            modelRuntime: runtime,
+            providerStatus: status,
+            loadedModelID: nil,
+            maxActiveRequests: 1,
+            maxBodyBytes: 1024,
+            sendFrame: { frame in
+                await recorder.append(frame)
+            }
+        )
+
+        try await relay.handleInferenceRequest([
+            "type": "inference_request",
+            "request_id": String(repeating: "x", count: 513),
+            "stream": false,
+            "body": #"{"model":"mlx-community/Test-Model","messages":[]}"#,
+        ])
+
+        let frames = try await waitForFrames { frames in
+            frames.contains { $0["type"] as? String == "nak" }
+        } from: {
+            await recorder.frames
+        }
+        XCTAssertEqual(frames.count, 1)
+        XCTAssertEqual(frames[0]["type"] as? String, "nak")
+        XCTAssertEqual(frames[0]["in_reply_to"] as? String, "inference_request")
+        let error = try XCTUnwrap(frames[0]["error"] as? [String: Any])
+        XCTAssertEqual(error["code"] as? String, "invalid_request_id")
+    }
+
     func testEncryptedInferenceRequestDecryptsAndEncryptsResponseChunk() async throws {
         let runtime = FakeCompletionRuntime()
         let status = ProviderStatus(

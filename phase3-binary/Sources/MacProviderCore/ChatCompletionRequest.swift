@@ -27,6 +27,7 @@ public struct ChatCompletionRequest: Sendable {
     public let responseFormat: ResponseFormat
     public let promptSource: ChatCompletionPromptSource
     public let conversationKey: String?
+    public let requestID: String?
     // SPEC-037 FR-KVP11: the ingest boundary this request arrived on. Defaults
     // to `.unknown` (non-persisting) at parse; each boundary stamps its own.
     public let ingestProvenance: KVIngestProvenance
@@ -129,6 +130,7 @@ public struct ChatCompletionRequest: Sendable {
             responseFormat: responseFormat,
             promptSource: promptSource,
             conversationKey: nil,
+            requestID: nil,
             ingestProvenance: .unknown
         )
     }
@@ -148,6 +150,27 @@ public struct ChatCompletionRequest: Sendable {
             responseFormat: responseFormat,
             promptSource: promptSource,
             conversationKey: Self.validConversationKey(key),
+            requestID: requestID,
+            ingestProvenance: ingestProvenance
+        )
+    }
+
+    public func withRequestID(_ id: String?) -> ChatCompletionRequest {
+        return ChatCompletionRequest(
+            model: model,
+            messages: messages,
+            maxTokens: maxTokens,
+            temperature: temperature,
+            topP: topP,
+            stream: stream,
+            stop: stop,
+            presencePenalty: presencePenalty,
+            frequencyPenalty: frequencyPenalty,
+            seed: seed,
+            responseFormat: responseFormat,
+            promptSource: promptSource,
+            conversationKey: conversationKey,
+            requestID: Self.validRequestID(id),
             ingestProvenance: ingestProvenance
         )
     }
@@ -169,6 +192,7 @@ public struct ChatCompletionRequest: Sendable {
             responseFormat: responseFormat,
             promptSource: promptSource,
             conversationKey: conversationKey,
+            requestID: requestID,
             ingestProvenance: provenance
         )
     }
@@ -189,6 +213,26 @@ public struct ChatCompletionRequest: Sendable {
         return trimmed
     }
 
+    public static func normalizedRequestID(_ id: String) -> String? {
+        let trimmed = id.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              trimmed.utf8.count <= 512
+        else {
+            return nil
+        }
+        guard trimmed.unicodeScalars.allSatisfy({ scalar in
+            scalar.value >= 0x20 && scalar.value != 0x7f
+        }) else {
+            return nil
+        }
+        return trimmed
+    }
+
+    private static func validRequestID(_ id: String?) -> String? {
+        guard let id else { return nil }
+        return normalizedRequestID(id)
+    }
+
     private init(
         model: String,
         messages: [ChatMessage],
@@ -203,6 +247,7 @@ public struct ChatCompletionRequest: Sendable {
         responseFormat: ResponseFormat,
         promptSource: ChatCompletionPromptSource,
         conversationKey: String?,
+        requestID: String?,
         ingestProvenance: KVIngestProvenance = .unknown
     ) {
         self.model = model
@@ -218,6 +263,7 @@ public struct ChatCompletionRequest: Sendable {
         self.responseFormat = responseFormat
         self.promptSource = promptSource
         self.conversationKey = conversationKey
+        self.requestID = requestID
         self.ingestProvenance = ingestProvenance
     }
 

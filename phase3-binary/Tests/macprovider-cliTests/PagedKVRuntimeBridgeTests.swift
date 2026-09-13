@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import MLX
 import MLXLMCommon
@@ -28,6 +29,254 @@ private final class RuntimeBridgeChunkRecorder: @unchecked Sendable {
 }
 
 final class PagedKVRuntimeBridgeTests: XCTestCase {
+    func testProductionRuntimeMeasurementMissingMetallibStaysNil() {
+        let measurement = ModelRuntime.measurePagedKVRuntime(
+            config: PagedKVConfig(enabled: true, blockSizeTokens: 32, maxPhysicalBlocks: 64),
+            modelID: "mlx-community/Qwen-Test",
+            modelSHA256: String(repeating: "a", count: 64),
+            tokenizerSHA256: nil,
+            chatTemplateSHA256: nil,
+            modelCapabilities: PagedKVRuntimeModelCapabilities(modelFamily: "qwen", requiresMoEDispatch: false),
+            environment: PagedKVRuntimeMeasurementEnvironment(
+                metallibCandidatePaths: { ["/tmp/absent/default.metallib"] },
+                fileExists: { _ in false },
+                readFileData: { _ in Data("not-used".utf8) },
+                hardwareFingerprint: {
+                    MachineFingerprint(
+                        ramGB: 32,
+                        chip: "Apple M-test",
+                        osVersion: "macOS test",
+                        binaryVersion: "test"
+                    )
+                },
+                registeredKernelIdentifier: { PagedKVGatherKernel.registeredKernelName },
+                parityLabel: { _, _, _, _, _, _, _, _ in "sdpa-parity-v1" }
+            )
+        )
+
+        XCTAssertNil(measurement)
+    }
+
+    func testProductionRuntimeMeasurementBuildsLiveIdentityAndSizingProof() throws {
+        let metallibBytes = Data("packaged metallib bytes".utf8)
+        let expectedMetallibSHA = SHA256.hash(data: metallibBytes).map { String(format: "%02x", $0) }.joined()
+        let modelID = "mlx-community/Qwen-Test"
+        let modelSHA = String(repeating: "a", count: 64)
+        let tokenizerSHA = String(repeating: "b", count: 64)
+        let templateSHA = String(repeating: "c", count: 64)
+        let config = PagedKVConfig(enabled: true, blockSizeTokens: 32, maxPhysicalBlocks: 64)
+
+        let measurement = try XCTUnwrap(ModelRuntime.measurePagedKVRuntime(
+            config: config,
+            modelID: modelID,
+            modelSHA256: modelSHA,
+            tokenizerSHA256: tokenizerSHA,
+            chatTemplateSHA256: templateSHA,
+            modelCapabilities: PagedKVRuntimeModelCapabilities(modelFamily: "qwen", requiresMoEDispatch: false),
+            environment: PagedKVRuntimeMeasurementEnvironment(
+                metallibCandidatePaths: { ["/tmp/present/default.metallib"] },
+                fileExists: { $0 == "/tmp/present/default.metallib" },
+                readFileData: { _ in metallibBytes },
+                hardwareFingerprint: {
+                    MachineFingerprint(
+                        ramGB: 64,
+                        chip: "Apple M-test",
+                        osVersion: "macOS test",
+                        binaryVersion: "test"
+                    )
+                },
+                registeredKernelIdentifier: { PagedKVGatherKernel.registeredKernelName },
+                parityLabel: { _, metallibSHA, kernelIdentifier, observedModelID, observedModelSHA, observedTokenizerSHA, observedTemplateSHA, hardwareClass in
+                    metallibSHA == expectedMetallibSHA
+                        && kernelIdentifier == PagedKVGatherKernel.registeredKernelName
+                        && observedModelID == modelID
+                        && observedModelSHA == modelSHA
+                        && observedTokenizerSHA == tokenizerSHA
+                        && observedTemplateSHA == templateSHA
+                        && hardwareClass == "apple-silicon:Apple M-test:ram-64gb"
+                        ? "sdpa-parity-v1"
+                        : nil
+                }
+            )
+        ))
+
+        XCTAssertEqual(measurement.observedRuntimeIdentity.source, .runtimeMeasurement)
+        XCTAssertEqual(measurement.observedRuntimeIdentity.metallibSHA256, expectedMetallibSHA)
+        XCTAssertEqual(measurement.observedRuntimeIdentity.kernelIdentifier, PagedKVGatherKernel.registeredKernelName)
+        XCTAssertEqual(measurement.observedRuntimeIdentity.parityLabel, "sdpa-parity-v1")
+        XCTAssertEqual(measurement.observedRuntimeIdentity.moeDispatchProven, false)
+        XCTAssertEqual(measurement.observedRuntimeIdentity.poolEpoch, 1)
+        XCTAssertEqual(measurement.observedRuntimeIdentity.hardwareClass, "apple-silicon:Apple M-test:ram-64gb")
+        XCTAssertTrue(measurement.hardwareSizingProof.covers(
+            config: config,
+            modelID: modelID,
+            modelSHA256: modelSHA,
+            tokenizerSHA256: tokenizerSHA,
+            chatTemplateSHA256: templateSHA,
+            modelFamily: "qwen",
+            observedHardwareClass: measurement.observedRuntimeIdentity.hardwareClass,
+            observedMetallibSHA256: measurement.observedRuntimeIdentity.metallibSHA256,
+            observedKernelIdentifier: measurement.observedRuntimeIdentity.kernelIdentifier,
+            observedParityLabel: measurement.observedRuntimeIdentity.parityLabel,
+            poolEpoch: measurement.observedRuntimeIdentity.poolEpoch
+        ))
+    }
+
+    func testProductionRuntimeMeasurementIgnoresAdjacentParitySidecarByDefault() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("macprovider-parity-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let metallibURL = directory.appendingPathComponent("default.metallib")
+        let manifestURL = metallibURL.appendingPathExtension("parity.json")
+        let metallibBytes = Data("packaged metallib bytes".utf8)
+        try metallibBytes.write(to: metallibURL)
+        let metallibSHA = SHA256.hash(data: metallibBytes).map { String(format: "%02x", $0) }.joined()
+        let kernelSourceSHA = SHA256.hash(data: Data(PagedKVGatherKernel.source.utf8))
+            .map { String(format: "%02x", $0) }
+            .joined()
+        let modelID = "mlx-community/Qwen-Test"
+        let modelSHA = String(repeating: "b", count: 64)
+        let tokenizerSHA = String(repeating: "c", count: 64)
+        let templateSHA = String(repeating: "d", count: 64)
+        let hardwareClass = "apple-silicon:Apple M-test:ram-64gb"
+
+        let body = """
+        {
+          "version": 1,
+          "metallib_sha256": "\(metallibSHA)",
+          "kernel_identifier": "\(PagedKVGatherKernel.registeredKernelName)",
+          "kernel_source_sha256": "\(kernelSourceSHA)",
+          "model_id": "\(modelID)",
+          "model_sha256": "\(modelSHA)",
+          "tokenizer_sha256": "\(tokenizerSHA)",
+          "chat_template_sha256": "\(templateSHA)",
+          "hardware_class": "\(hardwareClass)",
+          "parity_label": "sdpa-parity-v1"
+        }
+        """
+        try body.data(using: .utf8)?.write(to: manifestURL)
+
+        XCTAssertNil(ModelRuntime.measurePagedKVRuntime(
+            config: PagedKVConfig(enabled: true, blockSizeTokens: 32, maxPhysicalBlocks: 64),
+            modelID: modelID,
+            modelSHA256: modelSHA,
+            tokenizerSHA256: tokenizerSHA,
+            chatTemplateSHA256: templateSHA,
+            modelCapabilities: PagedKVRuntimeModelCapabilities(modelFamily: "qwen", requiresMoEDispatch: false),
+            environment: PagedKVRuntimeMeasurementEnvironment(
+                metallibCandidatePaths: { [metallibURL.path] },
+                fileExists: { FileManager.default.fileExists(atPath: $0) },
+                readFileData: { try Data(contentsOf: URL(fileURLWithPath: $0)) },
+                hardwareFingerprint: {
+                    MachineFingerprint(
+                        ramGB: 64,
+                        chip: "Apple M-test",
+                        osVersion: "macOS test",
+                        binaryVersion: "test"
+                    )
+                },
+                registeredKernelIdentifier: { PagedKVGatherKernel.registeredKernelName },
+                parityLabel: PagedKVRuntimeMeasurementEnvironment.live.parityLabel
+            )
+        ))
+    }
+
+    func testProductionRuntimeMeasurementRejectsIncompleteLiveInputs() {
+        let config = PagedKVConfig(enabled: true, blockSizeTokens: 32, maxPhysicalBlocks: 64)
+        let baseEnvironment = PagedKVRuntimeMeasurementEnvironment(
+            metallibCandidatePaths: { ["/tmp/present/default.metallib"] },
+            fileExists: { _ in true },
+            readFileData: { _ in Data("metallib".utf8) },
+            hardwareFingerprint: {
+                MachineFingerprint(
+                    ramGB: 64,
+                    chip: "Apple M-test",
+                    osVersion: "macOS test",
+                    binaryVersion: "test"
+                )
+            },
+            registeredKernelIdentifier: { PagedKVGatherKernel.registeredKernelName },
+            parityLabel: { _, _, _, _, _, _, _, _ in "sdpa-parity-v1" }
+        )
+
+        var noKernel = baseEnvironment
+        noKernel.registeredKernelIdentifier = { nil }
+        XCTAssertNil(ModelRuntime.measurePagedKVRuntime(
+            config: config,
+            modelID: "mlx-community/Qwen-Test",
+            modelSHA256: String(repeating: "a", count: 64),
+            tokenizerSHA256: nil,
+            chatTemplateSHA256: nil,
+            modelCapabilities: PagedKVRuntimeModelCapabilities(modelFamily: "qwen", requiresMoEDispatch: false),
+            environment: noKernel
+        ))
+
+        var noParity = baseEnvironment
+        noParity.parityLabel = { _, _, _, _, _, _, _, _ in nil }
+        XCTAssertNil(ModelRuntime.measurePagedKVRuntime(
+            config: config,
+            modelID: "mlx-community/Qwen-Test",
+            modelSHA256: String(repeating: "a", count: 64),
+            tokenizerSHA256: nil,
+            chatTemplateSHA256: nil,
+            modelCapabilities: PagedKVRuntimeModelCapabilities(modelFamily: "qwen", requiresMoEDispatch: false),
+            environment: noParity
+        ))
+
+        var noHardware = baseEnvironment
+        noHardware.hardwareFingerprint = {
+            MachineFingerprint(ramGB: 64, chip: "unknown", osVersion: "macOS test", binaryVersion: "test")
+        }
+        XCTAssertNil(ModelRuntime.measurePagedKVRuntime(
+            config: config,
+            modelID: "mlx-community/Qwen-Test",
+            modelSHA256: String(repeating: "a", count: 64),
+            tokenizerSHA256: nil,
+            chatTemplateSHA256: nil,
+            modelCapabilities: PagedKVRuntimeModelCapabilities(modelFamily: "qwen", requiresMoEDispatch: false),
+            environment: noHardware
+        ))
+    }
+
+    func testProductionReplayAuthorityClaimsStableRequestFingerprintOnce() throws {
+        let storeURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("macprovider-replay-\(UUID().uuidString)")
+            .appendingPathComponent("claims", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: storeURL.deletingLastPathComponent()) }
+        let authority = ContinuousBatchRuntimeReplayAuthority(storeURL: storeURL)
+        let same = ContinuousBatchSchedulerReplayKey(
+            requestID: "relay-request-1",
+            fingerprintSHA256: Data(repeating: 0x01, count: 32)
+        )
+        let mismatch = ContinuousBatchSchedulerReplayKey(
+            requestID: "relay-request-1",
+            fingerprintSHA256: Data(repeating: 0x02, count: 32)
+        )
+
+        XCTAssertEqual(try authority.claim(same), .claimed)
+        XCTAssertEqual(try authority.claim(same), .duplicateSameRequest)
+        XCTAssertEqual(try authority.claim(mismatch), .duplicateMismatchedRequest)
+        let concurrentInstance = ContinuousBatchRuntimeReplayAuthority(storeURL: storeURL)
+        XCTAssertEqual(try concurrentInstance.claim(same), .duplicateSameRequest)
+        XCTAssertEqual(try concurrentInstance.claim(mismatch), .duplicateMismatchedRequest)
+        let reloaded = ContinuousBatchRuntimeReplayAuthority(storeURL: storeURL)
+        XCTAssertTrue(reloaded.durableAvailable)
+        XCTAssertEqual(try reloaded.claim(same), .duplicateSameRequest)
+        XCTAssertEqual(try reloaded.claim(mismatch), .duplicateMismatchedRequest)
+    }
+
+    func testProductionSchedulerRequestIDUsesIngressIdentityWhenPresent() throws {
+        let request = try Self.chatRequest(modelID: "mlx-community/Qwen-Test", maxTokens: 1)
+            .withRequestID("relay-request-1500")
+
+        XCTAssertEqual(ModelRuntime.schedulerRequestID(for: request), "relay-request-1500")
+        XCTAssertNil(ModelRuntime.schedulerRequestID(for: try Self.chatRequest(
+            modelID: "mlx-community/Qwen-Test",
+            maxTokens: 1
+        )))
+    }
+
     func testRuntimeCapabilityRequiresMeasuredObservedIdentityAndBackend() async throws {
         let modelID = "mlx-community/Qwen-Test"
         let modelSHA = String(repeating: "a", count: 64)
@@ -373,6 +622,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
             loader: { _ in throw PagedKVRuntimeBridgeTestError.notExpected }
         )
         let request = try Self.chatRequest(modelID: modelID, maxTokens: 2)
+            .withRequestID("relay-request-1500")
 
         let completion = try await runtime.complete(request)
         XCTAssertEqual(completion.content, "3 3")
@@ -381,6 +631,11 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         XCTAssertEqual(completion.completionTokens, 2)
         let completionDecodeCalls = await backend.decodeCallCount()
         XCTAssertEqual(completionDecodeCalls, 2)
+        let completionDecodeBatches = await backend.decodeBatches()
+        XCTAssertEqual(completionDecodeBatches, [
+            ["relay-request-1500"],
+            ["relay-request-1500"],
+        ])
 
         let chunkRecorder = RuntimeBridgeChunkRecorder()
         let handle = try await runtime.acquireRequestHandle(request)
@@ -400,6 +655,11 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         XCTAssertEqual(chunkText, ["3", " 3"])
         let streamedDecodeCalls = await backend.decodeCallCount()
         XCTAssertEqual(streamedDecodeCalls, 4)
+        let allDecodeBatches = await backend.decodeBatches()
+        XCTAssertEqual(Array(allDecodeBatches.suffix(2)), [
+            ["relay-request-1500"],
+            ["relay-request-1500"],
+        ])
     }
 
     func testAttachedModelRuntimeCancelsBlockedCompletionSubmit() async throws {
@@ -412,6 +672,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         let modelID = "mlx-community/Qwen-Test"
         let runtime = Self.attachedRuntime(modelID: modelID, backend: backend)
         let request = try Self.chatRequest(modelID: modelID, maxTokens: 2)
+            .withRequestID("cancel-row")
         let cancellation = RuntimeBridgeCancellationFlag()
 
         let task = Task {
@@ -438,6 +699,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         let modelID = "mlx-community/Qwen-Test"
         let runtime = Self.attachedRuntime(modelID: modelID, backend: backend)
         let request = try Self.chatRequest(modelID: modelID, maxTokens: 2)
+            .withRequestID("cancel-stream-row")
         let cancellation = RuntimeBridgeCancellationFlag()
         let chunks = RuntimeBridgeChunkRecorder()
         let handle = try await runtime.acquireRequestHandle(request)

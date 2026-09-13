@@ -17,7 +17,7 @@ struct RecommendationInputs {
     var dbPath: String
 }
 
-struct MachineFingerprint: Equatable {
+struct MachineFingerprint: Equatable, Sendable {
     var ramGB: Int
     var chip: String
     var osVersion: String

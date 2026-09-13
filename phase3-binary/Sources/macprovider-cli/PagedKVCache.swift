@@ -26,6 +26,13 @@ struct PagedKVGatherKernel {
         )
     }
 
+    static func registeredRuntimeKernelIdentifier(
+        register: () -> MLXFast.MLXFastKernel = PagedKVGatherKernel.register
+    ) -> String? {
+        _ = register()
+        return registeredKernelName
+    }
+
     static func materialize(
         physical: MLXArray,
         blockIDs: MLXArray,
@@ -52,11 +59,11 @@ struct PagedKVGatherKernel {
 
 /// Compile-time `KVCache` seam for the future installed paged runtime bridge.
 ///
-/// Production `ModelRuntime` deliberately leaves the measured-observation path
-/// nil in this increment, so buyer traffic stays fail-closed. Attached test and
-/// future measured-runtime paths may instantiate this cache through the local
-/// bridge; the class remains type-checked against `mlx-swift-lm` so real gather
-/// execution and parity tests can evolve without changing public buyer behavior.
+/// Production `ModelRuntime` attempts measured observation and instantiates this
+/// cache only after packaged metallib/kernel/parity/sizing evidence opens attach.
+/// Missing evidence stays fail-closed. The class remains type-checked against
+/// `mlx-swift-lm` so real gather execution and parity tests can evolve without
+/// changing public buyer behavior.
 final class PagedKVCache: KVCache, CustomDebugStringConvertible {
     let descriptor: PagedKVDescriptor
     let binding: PagedKVStorageBinding

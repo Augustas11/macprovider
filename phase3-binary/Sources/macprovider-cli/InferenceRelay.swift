@@ -72,9 +72,14 @@ actor InferenceRelay {
     }
 
     func handleInferenceRequest(_ message: [String: Any]) async throws {
-        guard let requestID = message["request_id"] as? String, !requestID.isEmpty,
-              let stream = message["stream"] as? Bool
-        else {
+        guard let rawRequestID = message["request_id"] as? String,
+              let requestID = ChatCompletionRequest.normalizedRequestID(rawRequestID) else {
+            let reply = (message["request_id"] as? String).flatMap(ChatCompletionRequest.normalizedRequestID)
+                ?? "inference_request"
+            try await sendNAK(inReplyTo: reply, code: "invalid_request_id", message: "inference_request requires a non-empty request_id of at most 512 bytes with no control characters")
+            return
+        }
+        guard let stream = message["stream"] as? Bool else {
             try await sendNAK(inReplyTo: "inference_request", code: "invalid_message", message: "inference_request requires request_id, stream, and body")
             return
         }
@@ -423,10 +428,11 @@ actor InferenceRelay {
             let ingestProvenance: KVIngestProvenance = tier2Session != nil ? .tier2 : .relay
             let request: ChatCompletionRequest
             if let relayBlindOpened {
-                request = relayBlindOpened.request
+                request = relayBlindOpened.request.withRequestID(requestID)
             } else {
                 request = try ChatCompletionRequest.parse(data: requestData)
                     .withConversationKey(conversationKey)
+                    .withRequestID(requestID)
                     .withIngestProvenance(ingestProvenance)
             }
             telemetryModelID = request.model
@@ -759,6 +765,10 @@ actor InferenceRelay {
         terminalStateTSUnixMS: Int64? = nil
     ) -> String? {
         guard let receiptBuilder, let providerID, !providerID.isEmpty else {
+            return nil
+        }
+        guard completion.settlementDisposition == .eligibleOwner else {
+            ReceiptAudit.emitOmitted(providerID: providerID, requestID: requestID, reason: .nonSettlingReplay)
             return nil
         }
         // SPEC-015 §M.2.2 — refuse receipt construction when the

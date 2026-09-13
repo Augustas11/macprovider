@@ -515,14 +515,24 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         let receiptBuilder = receiptBuilder
         let providerID = providerID
         let requestAcceptedAt = Date()
-        let auditRequestID = requestHead?.headers.first(name: "X-Request-ID") ?? UUID().uuidString
+        let rawInboundRequestID = requestHead?.headers.first(name: "X-Request-ID")
+        let inboundRequestID = rawInboundRequestID.flatMap(ChatCompletionRequest.normalizedRequestID)
+        let auditRequestID = inboundRequestID ?? UUID().uuidString
         let settlementMetadata = Self.settlementMetadata(from: requestHead?.headers.first(name: Self.settlementMetadataHeaderName))
         var parsedRequest: ChatCompletionRequest?
 
         do {
+            if rawInboundRequestID != nil, inboundRequestID == nil {
+                throw APIError(
+                    status: 400,
+                    message: "X-Request-ID must be non-empty, at most 512 bytes, and contain no control characters",
+                    code: "invalid_request_id"
+                )
+            }
             try Self.validateContentEncoding(requestHead?.headers["Content-Encoding"] ?? [])
             let request = try ChatCompletionRequest.parse(data: data)
                 .withConversationKey(requestHead?.headers.first(name: "X-MacProvider-Provider-Conversation"))
+                .withRequestID(inboundRequestID)
                 .withIngestProvenance(.directHTTP)  // SPEC-037 FR-KVP11: operator direct-HTTP path
             parsedRequest = request
             if !warmSwapEnabled {
@@ -626,6 +636,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                         modelHashSource: modelHashSource,
                         requestID: auditRequestID,
                         settlementMetadata: settlementMetadata,
+                        settlementDisposition: completion.settlementDisposition,
                         terminalStateTSUnixMS: terminalStateTSUnixMS
                     )
                     switch receipt {
@@ -1009,6 +1020,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                         modelHashSource: modelHashSource,
                         requestID: requestID,
                         settlementMetadata: settlementMetadata,
+                        settlementDisposition: completion.settlementDisposition,
                         terminalStateTSUnixMS: terminalStateTSUnixMS
                     )
                     switch receipt {
@@ -1251,6 +1263,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         modelHashSource: ReceiptModelHashSource,
         requestID: String? = nil,
         settlementMetadata: SettlementReceiptMetadata? = nil,
+        settlementDisposition: ContinuousBatchSettlementDisposition = .eligibleOwner,
         terminalState: String = "normal_done",
         terminalStateTSUnixMS: Int64? = nil
     ) throws -> ReceiptHeaderResult {
@@ -1259,6 +1272,9 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         }
         guard let receiptBuilder else {
             return .omitted(.preV16Binary)
+        }
+        guard settlementDisposition == .eligibleOwner else {
+            return .omitted(.nonSettlingReplay)
         }
         // SPEC-015 §M.2.2 — fail-closed refusal BEFORE construction.
         // The .ambiguous provenance can only arise from a SPEC-011

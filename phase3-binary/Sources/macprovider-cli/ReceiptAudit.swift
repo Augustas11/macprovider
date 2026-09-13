@@ -8,6 +8,7 @@ enum ReceiptOmissionReason: String, CaseIterable {
     case streamingRequest = "streaming_request"
     case constructionFailed = "construction_failed"
     case writeFailed = "write_failed"
+    case nonSettlingReplay = "non_settling_replay"
 }
 
 private final class ReceiptAuditSink: @unchecked Sendable {
