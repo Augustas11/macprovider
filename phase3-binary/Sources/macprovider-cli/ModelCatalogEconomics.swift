@@ -919,6 +919,7 @@ struct ModelCatalogEconomicsBuilder {
                 catalogEconomicsPermitted: false,
                 settlementCapable: false
             ),
+            providerGuidance: BYOMDiscoveryGuidance.guidance(forAdmissionState: "not_offered", warnings: []),
             rateCardVersion: nil,
             rateCardGeneratedAt: nil,
             rateCardKey: nil,
