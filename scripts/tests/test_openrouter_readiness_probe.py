@@ -282,6 +282,18 @@ class OpenRouterReadinessProbeTests(unittest.TestCase):
             with self.assertRaisesRegex(probe.ProbeError, "non-capacity-shed"):
                 probe.run_benchmark("https://api.example.test", "secret", "model", 1, 1, 16, 0.0, 5000, 0.0, True)
 
+    def test_benchmark_non_capacity_failure_reports_aggregate_evidence(self):
+        upstream_error = {"status": 502, "ok": False, "error_code": "upstream_provider_error", "latency_ms": 1}
+        shed = {"status": 429, "ok": False, "error_code": "no_provider_available", "latency_ms": 1}
+        with mock.patch.object(probe, "chat_once", side_effect=[upstream_error, shed]):
+            with self.assertRaises(probe.ProbeError) as raised:
+                probe.run_benchmark("https://api.example.test", "secret", "model", 2, 2, 16, 0.0, 5000, 0.0, True)
+        message = str(raised.exception)
+        self.assertIn("'requests_sent': 2", message)
+        self.assertIn("'shed_429': 1", message)
+        self.assertIn("'non_capacity_failures': 1", message)
+        self.assertIn("upstream_provider_error", message)
+
     def test_benchmark_requires_429_when_saturation_is_requested(self):
         result = {
             "status": 200,

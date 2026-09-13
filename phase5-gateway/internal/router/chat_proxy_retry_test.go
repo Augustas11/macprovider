@@ -29,7 +29,7 @@ func TestGatewayCoord503RetryRecoversAfterTwoNoProviderResponses(t *testing.T) {
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		calls++
 		if calls <= 2 {
-			return responseWithBody(http.StatusServiceUnavailable, http.Header{"Content-Type": []string{"application/json"}}, noProviderBody()), nil
+			return responseWithBody(http.StatusServiceUnavailable, markedNoProviderHeaders(), noProviderBody()), nil
 		}
 		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, retryChatSuccessBody), nil
 	})}
@@ -61,7 +61,7 @@ func TestGatewayCoord503RetryExhaustsNoProviderResponses(t *testing.T) {
 	var calls int
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		calls++
-		return responseWithBody(http.StatusServiceUnavailable, http.Header{"Content-Type": []string{"application/json"}}, noProviderBody()), nil
+		return responseWithBody(http.StatusServiceUnavailable, markedNoProviderHeaders(), noProviderBody()), nil
 	})}
 	h, store, _, cfg := newRetryHarness(t, client, nil)
 	fullKey := createAccountAndKey(t, store, cfg, "acct_retry_exhausted")
@@ -89,10 +89,9 @@ func TestCapacityRejection503EchoesRequestIDAndRefundsAfterRetryExhaustion(t *te
 	var calls int
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		calls++
-		return responseWithBody(http.StatusServiceUnavailable, http.Header{
-			"Content-Type": []string{"application/json"},
-			"X-Request-ID": []string{"99999999-9999-4999-8999-999999999999"},
-		}, noProviderBody()), nil
+		hdr := markedNoProviderHeaders()
+		hdr.Set("X-Request-ID", "99999999-9999-4999-8999-999999999999")
+		return responseWithBody(http.StatusServiceUnavailable, hdr, noProviderBody()), nil
 	})}
 	h, store, dbPath, cfg := newRetryHarness(t, client, nil)
 	accountID := "acct_retry_exhausted_refunded"
@@ -116,10 +115,9 @@ func TestCapacityRejection503EchoesRequestIDAndRefundsAfterRetryExhaustion(t *te
 
 func TestCoordinatorSuppliedRetryExhaustedHeaderDoesNotCharge(t *testing.T) {
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-		return responseWithBody(http.StatusServiceUnavailable, http.Header{
-			"Content-Type":                          []string{"application/json"},
-			"X-MacProvider-Gateway-Retry-Exhausted": []string{"true"},
-		}, noProviderBody()), nil
+		hdr := markedNoProviderHeaders()
+		hdr.Set("X-MacProvider-Gateway-Retry-Exhausted", "true")
+		return responseWithBody(http.StatusServiceUnavailable, hdr, noProviderBody()), nil
 	})}
 	h, store, dbPath, cfg := newRetryHarness(t, client, func(cfg *config.Config) {
 		cfg.Retry503.Enabled = false
@@ -161,7 +159,7 @@ func TestGatewayCoord503RetryExhaustedStreamingRefunds(t *testing.T) {
 	var calls int
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		calls++
-		return responseWithBody(http.StatusServiceUnavailable, http.Header{"Content-Type": []string{"application/json"}}, noProviderBody()), nil
+		return responseWithBody(http.StatusServiceUnavailable, markedNoProviderHeaders(), noProviderBody()), nil
 	})}
 	h, store, dbPath, cfg := newRetryHarness(t, client, nil)
 	accountID := "acct_retry_exhausted_stream_refunded"
@@ -183,7 +181,7 @@ func TestNoProviderAuditRefundFailureReturnsSettlementFailed(t *testing.T) {
 	for _, stream := range []bool{false, true} {
 		t.Run(fmt.Sprintf("stream_%v", stream), func(t *testing.T) {
 			client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-				return responseWithBody(http.StatusServiceUnavailable, http.Header{"Content-Type": []string{"application/json"}}, noProviderBody()), nil
+				return responseWithBody(http.StatusServiceUnavailable, markedNoProviderHeaders(), noProviderBody()), nil
 			})}
 			_, store, dbPath, cfg := newRetryHarness(t, client, func(cfg *config.Config) {
 				cfg.Retry503.Enabled = false
@@ -215,7 +213,7 @@ func TestGatewayCoord503RetryMetricsUsesGatewayGeneratedRequestIDClass(t *testin
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		calls++
 		if calls == 1 {
-			return responseWithBody(http.StatusServiceUnavailable, http.Header{"Content-Type": []string{"application/json"}}, noProviderBody()), nil
+			return responseWithBody(http.StatusServiceUnavailable, markedNoProviderHeaders(), noProviderBody()), nil
 		}
 		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, retryChatSuccessBody), nil
 	})}
@@ -415,7 +413,7 @@ func TestGatewayCoord503RetryDisabledKeepsSingleDispatch(t *testing.T) {
 	var calls int
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		calls++
-		return responseWithBody(http.StatusServiceUnavailable, http.Header{"Content-Type": []string{"application/json"}}, noProviderBody()), nil
+		return responseWithBody(http.StatusServiceUnavailable, markedNoProviderHeaders(), noProviderBody()), nil
 	})}
 	h, store, _, cfg := newRetryHarness(t, client, func(cfg *config.Config) {
 		cfg.Retry503.Enabled = false
@@ -438,7 +436,7 @@ func TestGatewayCoord503NoProviderRetryDefaultOffKeepsSingleDispatch(t *testing.
 	var calls int
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		calls++
-		return responseWithBody(http.StatusServiceUnavailable, http.Header{"Content-Type": []string{"application/json"}}, noProviderBody()), nil
+		return responseWithBody(http.StatusServiceUnavailable, markedNoProviderHeaders(), noProviderBody()), nil
 	})}
 	h, store, _, cfg := newRetryHarness(t, client, func(cfg *config.Config) {
 		cfg.Retry503.RetryNoProviderAvailable = false
@@ -461,7 +459,7 @@ func TestGatewayCoord503RetryAttemptsRespectRequestRateLimit(t *testing.T) {
 	var calls int
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		calls++
-		return responseWithBody(http.StatusServiceUnavailable, http.Header{"Content-Type": []string{"application/json"}}, noProviderBody()), nil
+		return responseWithBody(http.StatusServiceUnavailable, markedNoProviderHeaders(), noProviderBody()), nil
 	})}
 	h, store, _, cfg := newRetryHarness(t, client, func(cfg *config.Config) {
 		cfg.Quotas.AccountRequestRatePerSecond = 1
@@ -490,7 +488,7 @@ func TestGatewayCoord503RetryReplaysIdenticalRequestBodies(t *testing.T) {
 		}
 		seen = append(seen, body)
 		if calls <= 2 {
-			return responseWithBody(http.StatusServiceUnavailable, http.Header{"Content-Type": []string{"application/json"}}, noProviderBody()), nil
+			return responseWithBody(http.StatusServiceUnavailable, markedNoProviderHeaders(), noProviderBody()), nil
 		}
 		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, retryChatSuccessBody), nil
 	})}
@@ -518,7 +516,7 @@ func TestGatewayCoord503RetryPreservesConcurrencyReservationAcrossAttempts(t *te
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		calls++
 		if calls <= 2 {
-			return responseWithBody(http.StatusServiceUnavailable, http.Header{"Content-Type": []string{"application/json"}}, noProviderBody()), nil
+			return responseWithBody(http.StatusServiceUnavailable, markedNoProviderHeaders(), noProviderBody()), nil
 		}
 		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, retryChatSuccessBody), nil
 	})}
@@ -551,7 +549,7 @@ func TestGatewayCoord503RetryAppliesBeforeStreamingSplit(t *testing.T) {
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		calls++
 		if calls == 1 {
-			return responseWithBody(http.StatusServiceUnavailable, http.Header{"Content-Type": []string{"application/json"}}, noProviderBody()), nil
+			return responseWithBody(http.StatusServiceUnavailable, markedNoProviderHeaders(), noProviderBody()), nil
 		}
 		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"text/event-stream; charset=utf-8"}}, "data: {\"id\":\"chatcmpl\",\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":4,\"total_tokens\":7},\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\ndata: [DONE]\n\n"), nil
 	})}
@@ -588,7 +586,7 @@ func TestGatewayCoord503RetrySleepStopsOnBuyerCancel(t *testing.T) {
 		if calls.Add(1) == 1 {
 			close(firstAttemptReturned)
 		}
-		return responseWithBody(http.StatusServiceUnavailable, http.Header{"Content-Type": []string{"application/json"}}, noProviderBody()), nil
+		return responseWithBody(http.StatusServiceUnavailable, markedNoProviderHeaders(), noProviderBody()), nil
 	})}
 	h, store, _, cfg := newRetryHarness(t, client, func(cfg *config.Config) {
 		cfg.Retry503.BackoffBaseMs = 5000
@@ -627,7 +625,7 @@ func TestGatewayCoord503RetryCancelDoesNotConsumeRetryRateToken(t *testing.T) {
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		if calls.Add(1) == 1 {
 			close(firstAttemptReturned)
-			return responseWithBody(http.StatusServiceUnavailable, http.Header{"Content-Type": []string{"application/json"}}, noProviderBody()), nil
+			return responseWithBody(http.StatusServiceUnavailable, markedNoProviderHeaders(), noProviderBody()), nil
 		}
 		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, retryChatSuccessBody), nil
 	})}
@@ -759,6 +757,34 @@ func TestGatewayRetriedProvider502ThenRouteSnapshotFailedDoesNotRefund(t *testin
 	}
 }
 
+func TestGatewayRetriedProvider502ThenMarkedNoProviderDoesNotRefund(t *testing.T) {
+	providerFailedBody := `{"error":{"message":"Selected provider failed; buyer should retry","type":"upstream_error","param":null,"code":"provider_failed","retryable":true,"request_id":null,"inference_ran":false,"settlement_ran":false}}`
+	var calls int
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		calls++
+		if calls == 1 {
+			return responseWithBody(http.StatusBadGateway, http.Header{"Content-Type": []string{"application/json"}}, providerFailedBody), nil
+		}
+		return responseWithBody(http.StatusServiceUnavailable, markedNoProviderHeaders(), noProviderBody()), nil
+	})}
+	h, store, _, cfg := newRetryHarness(t, client, nil)
+	fullKey := createAccountAndKey(t, store, cfg, "acct_retry_provider_then_no_provider")
+
+	resp := postChat(t, h, fullKey, chatBody(false), nil)
+
+	if calls != 3 {
+		t.Fatalf("coordinator calls=%d, want 3", calls)
+	}
+	if resp.Code != http.StatusBadGateway {
+		t.Fatalf("status=%d body=%s — no_provider after prior provider dispatch must settle as upstream_provider_error", resp.Code, resp.Body.String())
+	}
+	assertErrorCode(t, resp.Body.String(), "upstream_provider_error")
+	usageResp := assertStatus(t, h, http.MethodGet, "/v1/usage", fullKey, "", "1.2.3.4", http.StatusOK)
+	if used := readQuota(t, usageResp)["daily_tokens_used"].(float64); used == 0 {
+		t.Fatalf("daily_tokens_used=0 — no_provider after prior provider dispatch must charge the estimate")
+	}
+}
+
 // TestGatewayRetriedUnmarked503ThenRouteSnapshotFailedDoesNotRefund pins the
 // round-4 security HIGH: a provider is billed, then failover exhaustion returns
 // a retryable no_provider 503 (NOT a 502). Because a provider was already
@@ -884,6 +910,13 @@ func assertRetryMetricsContain(t *testing.T, h http.Handler, wants ...string) {
 			t.Fatalf("metrics missing %q in:\n%s", want, body)
 		}
 	}
+}
+
+func markedNoProviderHeaders() http.Header {
+	h := http.Header{}
+	h.Set("Content-Type", "application/json")
+	h.Set(settlementNoPriorDispatchHeader, "1")
+	return h
 }
 
 func noProviderBody() string {

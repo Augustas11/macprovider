@@ -32,12 +32,12 @@ import (
 //  3. Streaming committed early-exit (pre-first-chunk vs post-first-chunk
 //     semantics) — `renderCommitted` callback fires only on the streaming
 //     path; the other two leave it nil.
-//  4. WS-non-streaming queue-full bypasses the shouldRetry budget gate
-//     (always advances when a candidate exists) — `skipRetryBudgetCheck`
-//     callback returns true for wsForwardQueueFull. Streaming and HTTP
-//     never set the callback so the gate fires normally. Preserves the
-//     M2-1d-baseline behaviour pinned by forward_loop_test scenario
-//     TestM2_1D_RowSequence_WSNonStreamingQueueFullThroughAdvance.
+//  4. WS-backed queue-full bypasses the shouldRetry budget gate (always
+//     advances when a candidate exists) — `skipRetryBudgetCheck` callback
+//     returns true for wsForwardQueueFull on WS-non-streaming and WS
+//     streaming. Preserves the M2-1d-baseline non-streaming behaviour and
+//     lets streaming queue-full shed only after provider options are
+//     exhausted.
 //
 // Money-path invariant: attempt_n numbering + logAttempt row sequence MUST
 // stay byte-identical to the PR #91 baseline pinned by
@@ -229,14 +229,11 @@ func (s *Server) forwardWithFailover(
 		// error response and logs the attempt row with the
 		// transport-specific message.
 		//
-		// One transport opts OUT of this gate: WS-non-streaming's
-		// queue-full branch goes straight to advance without consulting
-		// shouldRetry — that bypass is the M2-1d-preserved behaviour the
-		// byte-identical contract pins via forward_loop_test scenario
-		// TestM2_1D_RowSequence_WSNonStreamingQueueFullThroughAdvance.
-		// The callback returns true to skip the gate for that branch
-		// only; other transports + other branches leave the callback
-		// nil so the gate fires as usual.
+		// Queue-full opts OUT of this gate on WS-backed transports and
+		// goes straight to advance without consulting shouldRetry. That
+		// preserves the M2-1d WS-non-streaming behaviour and keeps
+		// streaming queue-full capacity pressure from becoming final
+		// 503 while another provider is available.
 		if tx.skipRetryBudgetCheck == nil || !tx.skipRetryBudgetCheck(dispatched) {
 			if !s.shouldRetry(r, startedAt, state.explicitRetries, state.faultedProviders, tr.status, tr.err) {
 				tx.renderRetryExhausted(w, dispatched, state)
@@ -367,9 +364,10 @@ type transportCallbacks struct {
 
 	// skipRetryBudgetCheck returns true when the core should bypass the
 	// shouldRetry gate for this dispatched attempt and proceed directly
-	// to advanceToNextProvider. WS-non-streaming sets this for
-	// wsForwardQueueFull to preserve the M2-1d-baseline bypass; other
-	// transports leave it nil. Optional.
+	// to advanceToNextProvider. WS non-streaming and WS streaming set
+	// this for wsForwardQueueFull so busy-but-live providers do not burn
+	// the buyer retry budget while alternatives remain. HTTP leaves it
+	// nil. Optional.
 	skipRetryBudgetCheck func(dispatched dispatchedAttempt) bool
 
 	// renderRetryExhausted is the shouldRetry-returns-false render.

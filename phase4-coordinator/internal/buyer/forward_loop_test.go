@@ -1027,7 +1027,7 @@ func TestM2_1D_RowSequence_WSNonStreamingQueueFullThroughAdvance(t *testing.T) {
 	if len(rows) != 2 {
 		t.Fatalf("request_log rows = %d, want 2 (queue-full then success): %#v", len(rows), rows)
 	}
-	// Pin: row 0 = p1 queue-full with 502 and retried=0
+	// Pin: row 0 = p1 queue-full with 503 and retried=0
 	// (queue-full row is logged BEFORE advanceToNextProvider bumps
 	// explicitRetries — matches pre-M2-1d row order at server.go:1354).
 	if rows[0].ProviderAssignedID.String != "s1" {

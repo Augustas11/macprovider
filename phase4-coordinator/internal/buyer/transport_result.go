@@ -79,7 +79,7 @@ type transportResult struct {
 // drift.
 //
 // Status mapping (via statusForForwardResult): wsForwardComplete ->
-// 200; queue-full / disconnected / failed -> 502; unavailable -> 503;
+// 200; queue-full / unavailable -> 503; disconnected / failed -> 502;
 // timed-out -> 504; cancelled -> 502 default (unused — cancelled
 // caller skips status-keyed logging).
 func classifyWSResult(result wsForwardResult, attempt requestLogAttempt) transportResult {

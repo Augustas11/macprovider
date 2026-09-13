@@ -115,6 +115,27 @@ func TestNoPriorDispatchResponseWriterMarks(t *testing.T) {
 	}
 }
 
+func TestWriteStreamForwardErrorQueueFullIsCapacityShedding(t *testing.T) {
+	rr := httptest.NewRecorder()
+	writeStreamForwardError(rr, wsForwardQueueFull)
+
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", rr.Code)
+	}
+	var body struct {
+		Error struct {
+			Code string `json:"code"`
+			Type string `json:"type"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode body: %v; body=%s", err, rr.Body.String())
+	}
+	if body.Error.Code != "no_provider_available" || body.Error.Type != "service_unavailable" {
+		t.Fatalf("error = %s/%s, want no_provider_available/service_unavailable; body=%s", body.Error.Code, body.Error.Type, rr.Body.String())
+	}
+}
+
 func TestTokenPointersFromUsageObjectPreservesInvalidUsageForBillingFault(t *testing.T) {
 	prompt, _, completion := tokenPointersFromUsageObject(json.RawMessage(`{"prompt_tokens":-1,"completion_tokens":10}`))
 	if prompt == nil || *prompt != -1 || completion == nil || *completion != 10 {

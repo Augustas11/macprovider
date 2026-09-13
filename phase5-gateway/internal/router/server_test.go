@@ -3689,11 +3689,15 @@ func TestNoProvider503EchoesOnlyGatewayRequestID(t *testing.T) {
 				name = tc.name + "_stream"
 			}
 			t.Run(name, func(t *testing.T) {
+				headers := http.Header{
+					"Content-Type": []string{"application/json"},
+					"X-Request-ID": []string{"99999999-9999-4999-8999-999999999999"},
+				}
+				if tc.coordBody != "" {
+					headers.Set(settlementNoPriorDispatchHeader, "1")
+				}
 				client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-					return responseWithBody(http.StatusServiceUnavailable, http.Header{
-						"Content-Type": []string{"application/json"},
-						"X-Request-ID": []string{"99999999-9999-4999-8999-999999999999"},
-					}, tc.coordBody), nil
+					return responseWithBody(http.StatusServiceUnavailable, headers, tc.coordBody), nil
 				})}
 				h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
 					cfg.Coordinator.BuyerURL = "http://coordinator.test"
@@ -7883,6 +7887,33 @@ func TestCoordinatorPreDispatchNoChargeErrorGuards(t *testing.T) {
 	}
 	if coordinatorPreDispatchNoChargeError(http.StatusInternalServerError, []byte(`{"error":{"code":"internal_error"}}`), marked()) {
 		t.Fatal("a non-route_snapshot 500 must not be no-charge eligible")
+	}
+}
+
+func TestCoordinatorStructuredNoProviderNeedsSettlementGuards(t *testing.T) {
+	body := []byte(noProviderBody())
+	marked := func() http.Header {
+		h := http.Header{}
+		h.Set(settlementNoPriorDispatchHeader, "1")
+		return h
+	}
+	prior := marked()
+	prior.Set(gatewayPriorProviderDispatchHeader, "1")
+
+	if coordinatorStructuredNoProviderNeedsSettlement(http.StatusServiceUnavailable, body, marked()) {
+		t.Fatal("marked 503 no_provider_available must stay refundable clean capacity")
+	}
+	if !coordinatorStructuredNoProviderNeedsSettlement(http.StatusServiceUnavailable, body, http.Header{}) {
+		t.Fatal("unmarked structured 503 no_provider_available must settle conservatively")
+	}
+	if !coordinatorStructuredNoProviderNeedsSettlement(http.StatusServiceUnavailable, body, prior) {
+		t.Fatal("gateway prior-dispatch marker must force conservative settlement")
+	}
+	if coordinatorStructuredNoProviderNeedsSettlement(http.StatusServiceUnavailable, nil, http.Header{}) {
+		t.Fatal("empty 503 body must remain a legacy refundable capacity miss")
+	}
+	if coordinatorStructuredNoProviderNeedsSettlement(http.StatusBadGateway, body, http.Header{}) {
+		t.Fatal("non-503 no_provider_available must not use this classifier")
 	}
 }
 

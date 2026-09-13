@@ -16,14 +16,14 @@ import (
 
 func TestClassifyWSResultBehaviourFlags(t *testing.T) {
 	cases := []struct {
-		name             string
-		result           wsForwardResult
-		wantStatus       int
-		wantRetryable    bool
-		wantFailover     bool
-		wantMarkBusy     bool
-		wantCancelled    bool
-		wantCommitted    bool
+		name          string
+		result        wsForwardResult
+		wantStatus    int
+		wantRetryable bool
+		wantFailover  bool
+		wantMarkBusy  bool
+		wantCancelled bool
+		wantCommitted bool
 	}{
 		{"complete", wsForwardComplete, http.StatusOK, false, false, false, false, false},
 		{"timed_out", wsForwardTimedOut, http.StatusGatewayTimeout, true, false, false, false, false},
@@ -120,10 +120,10 @@ func TestClassifyStreamResultCoverage(t *testing.T) {
 		{"complete_zero_in", wsForwardComplete, 0, http.StatusOK, false, false, false, false, false},
 		{"complete_200_in", wsForwardComplete, http.StatusOK, http.StatusOK, false, false, false, false, false},
 		// Queue-full preserves the M1-2 / PR #36 markBusy+retryable
-		// fix on the streaming path. Status falls through (the
-		// streaming loop reads from forwardStreaming's returned
-		// status when logging).
-		{"queue_full", wsForwardQueueFull, http.StatusBadGateway, http.StatusBadGateway, true, false, true, false, false},
+		// fix on the streaming path while classifying as capacity
+		// shedding, not provider failure, for the retry-exhausted
+		// renderer and request log.
+		{"queue_full", wsForwardQueueFull, statusForForwardResult(wsForwardQueueFull), http.StatusServiceUnavailable, true, false, true, false, false},
 		// Timed-out / failed / unavailable: retryable (the streaming
 		// loop calls shouldRetry then advances at server.go:1156-1169).
 		{"timed_out", wsForwardTimedOut, http.StatusGatewayTimeout, http.StatusGatewayTimeout, true, false, false, false, false},
