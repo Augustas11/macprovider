@@ -33,6 +33,7 @@ def policy():
         "policy_version": "unit-test-v1",
         "demand_top_n": 50,
         "undercut_fraction": "0.20",
+        "cache_hit_fraction": "0.25",
         "models": [
             model("openai/gpt-oss-20b", "openai/gpt-oss-20b"),
             model("google/gemma-4-26b-a4b-it", "google-gemma-4-26b-a4b-it"),
@@ -149,7 +150,7 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
         template_endpoint = copy.deepcopy(endpoints["example/new-model"])
         for index in range(5, 44):
             model_id = f"unknown/model-{index}"
-            rankings["data"].append({"date": "2026-08-03", "model_permaslug": model_id, "total_tokens": str(9000 - index), "request_count": str(900 - index)})
+            rankings["data"].append({"date": "2026-08-03", "model_permaslug": model_id, "total_tokens": str(9000 - index)})
             models["data"].append({"id": model_id, "canonical_slug": model_id, "name": f"Unknown {index}", "pricing": None})
             endpoint = copy.deepcopy(template_endpoint)
             endpoint["data"]["id"] = model_id
@@ -186,8 +187,8 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
 
     def test_catalog_alias_resolution_preserves_ranking_provenance_and_ignores_zero_completion_nonmodels(self):
         rankings = {"data": [
-            {"date": "2026-08-03", "model_permaslug": "example/old-model-20260101", "total_tokens": "5", "request_count": "2"},
-            {"date": "2026-08-03", "model_permaslug": "other", "total_tokens": "1", "request_count": "1"},
+            {"date": "2026-08-03", "model_permaslug": "example/old-model-20260101", "total_tokens": "5"},
+            {"date": "2026-08-03", "model_permaslug": "other", "total_tokens": "1"},
         ], "meta": {"as_of": "2026-08-04T02:00:00Z", "start_date": "2026-08-03", "end_date": "2026-08-03", "version": "v1"}}
         catalog = {"data": [{"id": "example/current-model", "canonical_slug": "example/old-model-20260101", "pricing": None}]}
         endpoints = {"example/current-model": {"data": {"id": "example/current-model", "endpoints": [{"provider_name": "Provider", "status": 0, "throughput_last_30m": "50", "uptime_last_30d": "0.99", "pricing": {"prompt": "0.1", "completion": "0.2"}}]}}}
@@ -242,7 +243,7 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
             engine.resolve_rankings_to_catalog(rankings, catalog, endpoints)
 
     def test_catalog_missing_dated_ranking_uses_endpoint_confirmed_alias(self):
-        rankings = {"data": [{"date": "2026-08-04", "model_permaslug": "bytedance-seed/seedream-4.5-20251203", "total_tokens": "10", "request_count": "3"}], "meta": {"as_of": "2026-08-05T02:00:00Z", "start_date": "2026-08-04", "end_date": "2026-08-04", "version": "v1"}}
+        rankings = {"data": [{"date": "2026-08-04", "model_permaslug": "bytedance-seed/seedream-4.5-20251203", "total_tokens": "10"}], "meta": {"as_of": "2026-08-05T02:00:00Z", "start_date": "2026-08-04", "end_date": "2026-08-04", "version": "v1"}}
         catalog = {"data": [{"id": "example/other", "canonical_slug": "example/other", "pricing": None}]}
         endpoints = {
             "bytedance-seed/seedream-4.5-20251203": {
@@ -629,7 +630,7 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
         rankings_url = engine.daily_rankings_url(NOW, 30)
         endpoint_url = engine.ENDPOINTS_URL.format(model_id=dated_id)
         rankings = {
-            "data": [{"date": "2026-08-04", "model_permaslug": dated_id, "total_tokens": "10", "request_count": "3"}],
+            "data": [{"date": "2026-08-04", "model_permaslug": dated_id, "total_tokens": "10"}],
             "meta": {
                 "as_of": "2026-08-05T02:00:00Z",
                 "start_date": "2026-07-06",
@@ -683,7 +684,7 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
         rankings_url = engine.daily_rankings_url(NOW, 30)
         endpoint_url = engine.ENDPOINTS_URL.format(model_id=dated_id)
         rankings = {
-            "data": [{"date": "2026-08-04", "model_permaslug": dated_id, "total_tokens": "10", "request_count": "3"}],
+            "data": [{"date": "2026-08-04", "model_permaslug": dated_id, "total_tokens": "10"}],
             "meta": {
                 "as_of": "2026-08-05T02:00:00Z",
                 "start_date": "2026-07-06",
@@ -745,7 +746,7 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
         model_id = "example/model"
         endpoint_url = engine.ENDPOINTS_URL.format(model_id=model_id)
         rankings = {
-            "data": [{"date": "2026-08-04", "model_permaslug": model_id, "total_tokens": "10", "request_count": "3"}],
+            "data": [{"date": "2026-08-04", "model_permaslug": model_id, "total_tokens": "10"}],
             "meta": {"as_of": "2026-08-05T02:00:00Z", "start_date": "2026-07-06", "end_date": "2026-08-04", "version": "v1"},
         }
         catalog = {"data": [{"id": model_id, "canonical_slug": model_id, "name": "Example", "pricing": None}]}
@@ -781,7 +782,7 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
         model_id = "example/model"
         endpoint_url = engine.ENDPOINTS_URL.format(model_id=model_id)
         rankings = {
-            "data": [{"date": "2026-08-04", "model_permaslug": model_id, "total_tokens": "10", "request_count": "3"}],
+            "data": [{"date": "2026-08-04", "model_permaslug": model_id, "total_tokens": "10"}],
             "meta": {"as_of": "2026-08-05T02:00:00Z", "start_date": "2026-07-06", "end_date": "2026-08-04", "version": "v1"},
         }
         catalog = {"data": [{"id": model_id, "canonical_slug": model_id, "name": "Example", "pricing": None}]}

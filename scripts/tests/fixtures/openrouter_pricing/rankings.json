@@ -3,74 +3,62 @@
     {
       "date": "2026-08-02",
       "model_permaslug": "openai/gpt-oss-20b",
-      "total_tokens": "11000",
-      "request_count": "1100"
+      "total_tokens": "11000"
     },
     {
       "date": "2026-08-03",
       "model_permaslug": "openai/gpt-oss-20b",
-      "total_tokens": "11000",
-      "request_count": "1100"
+      "total_tokens": "11000"
     },
     {
       "date": "2026-08-03",
       "model_permaslug": "google/gemma-4-26b-a4b-it",
-      "total_tokens": "11000",
-      "request_count": "1100"
+      "total_tokens": "11000"
     },
     {
       "date": "2026-08-03",
       "model_permaslug": "nvidia/nemotron-3-nano-30b-a3b",
-      "total_tokens": "11000",
-      "request_count": "1100"
+      "total_tokens": "11000"
     },
     {
       "date": "2026-08-03",
       "model_permaslug": "example/new-model",
-      "total_tokens": "11000",
-      "request_count": "1100"
+      "total_tokens": "11000"
     },
     {
       "date": "2026-08-03",
       "model_permaslug": "meta-llama/llama-3.2-3b-instruct",
-      "total_tokens": "10000",
-      "request_count": "1000"
+      "total_tokens": "10000"
     },
     {
       "date": "2026-08-03",
       "model_permaslug": "meta-llama/llama-3.1-8b-instruct",
-      "total_tokens": "10000",
-      "request_count": "1000"
+      "total_tokens": "10000"
     },
     {
       "date": "2026-08-03",
       "model_permaslug": "qwen/qwen3-8b",
-      "total_tokens": "10000",
-      "request_count": "1000"
+      "total_tokens": "10000"
     },
     {
       "date": "2026-08-03",
       "model_permaslug": "openai/gpt-oss-120b",
-      "total_tokens": "10000",
-      "request_count": "1000"
+      "total_tokens": "10000"
     },
     {
       "date": "2026-08-03",
       "model_permaslug": "qwen/qwen3-32b",
-      "total_tokens": "10000",
-      "request_count": "1000"
+      "total_tokens": "10000"
     },
     {
       "date": "2026-08-03",
       "model_permaslug": "qwen/qwen3-coder-30b-a3b-instruct",
-      "total_tokens": "10000",
-      "request_count": "1000"
+      "total_tokens": "10000"
     },
     {
       "date": "2026-08-03",
       "model_permaslug": "qwen/qwen2.5-coder-32b-instruct",
-      "total_tokens": "10000",
-      "request_count": "1000"
+      "total_tokens": "10000"
     }
   ],
   "meta": {

@@ -1,5 +1,5 @@
 {
-  "policy_version": "openrouter-market-feeds-v0.11.0",
+  "policy_version": "openrouter-market-feeds-v0.12.0",
   "demand_top_n": 50,
   "undercut_fraction": "0.20",
   "models": [
@@ -185,8 +185,8 @@
       "license": {
         "commercial_permitted": true,
         "source_url": "https://huggingface.co/Qwen/Qwen3-Coder-30B-A3B-Instruct",
-      "verification_note": "Qwen3-Coder model card identifies the governing Apache-2.0 license."
-    },
+        "verification_note": "Qwen3-Coder model card identifies the governing Apache-2.0 license."
+      },
       "coding_specialist": true,
       "profile": {
         "kind": "coding_dense",
@@ -195,5 +195,6 @@
         "projected_tps": "35"
       }
     }
-  ]
+  ],
+  "cache_hit_fraction": "0.25"
 }

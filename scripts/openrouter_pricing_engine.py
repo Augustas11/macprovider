@@ -24,7 +24,7 @@ import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from decimal import Decimal, InvalidOperation, ROUND_FLOOR, ROUND_HALF_UP
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol
@@ -47,7 +47,7 @@ MODEL_ID_RE = re.compile(r"^[A-Za-z0-9._~:-]+/[A-Za-z0-9._~:-]+$")
 CANONICAL_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._/:-]*$")
 MAX_RESPONSE_BYTES = 5 * 1024 * 1024
 RANKING_TOP_LEVEL_KEYS = frozenset({"data", "meta"})
-RANKING_ROW_KEYS = frozenset({"date", "model_permaslug", "request_count", "total_tokens"})
+RANKING_ROW_KEYS = frozenset({"date", "model_permaslug", "total_tokens"})
 RANKING_META_KEYS = frozenset({"as_of", "end_date", "start_date", "version"})
 CATALOG_ROW_KEYS = frozenset({"alias_target", "architecture", "benchmarks", "canonical_slug", "context_length", "created", "default_parameters", "description", "expiration_date", "hugging_face_id", "id", "knowledge_cutoff", "links", "name", "per_request_limits", "pricing", "reasoning", "supported_parameters", "supported_voices", "top_provider"})
 CATALOG_TOP_LEVEL_KEYS = frozenset({"data", "links", "total_count"})
@@ -412,7 +412,6 @@ def normalize_rankings(document: Mapping[str, Any], top_n: int) -> list[dict[str
     metadata = rankings_metadata(document)
     rows = required_list(document, "data", "rankings response")
     totals: dict[str, int] = {}
-    requests: dict[str, int] = {}
     dates: dict[str, str] = {}
     seen_daily_models: set[tuple[str, str]] = set()
     for index, row in enumerate(rows):
@@ -422,11 +421,6 @@ def normalize_rankings(document: Mapping[str, Any], top_n: int) -> list[dict[str
         total_tokens = row.get("total_tokens")
         if not isinstance(total_tokens, str) or not total_tokens.isdigit() or int(total_tokens) <= 0:
             raise SchemaError(f"rankings response: data[{index}].total_tokens must be a positive integer string")
-        request_count = row.get("request_count")
-        if request_count is None:
-            raise SchemaError(f"rankings response: data[{index}].request_count is required")
-        if not isinstance(request_count, str) or not request_count.isdigit() or int(request_count) <= 0:
-            raise SchemaError(f"rankings response: data[{index}].request_count must be a positive integer string")
         model_id = row.get("model_permaslug")
         date = row.get("date")
         parsed_date = parse_ranking_date(date, f"rankings response: data[{index}].date")
@@ -443,7 +437,6 @@ def normalize_rankings(document: Mapping[str, Any], top_n: int) -> list[dict[str
             raise SchemaError(f"rankings response: duplicate daily model row {daily_key!r}")
         seen_daily_models.add(daily_key)
         totals[model_id] = totals.get(model_id, 0) + int(total_tokens)
-        requests[model_id] = requests.get(model_id, 0) + int(request_count)
         dates[model_id] = max(date, dates.get(model_id, date))
     ordered = sorted(totals, key=lambda item: (-totals[item], item))[:top_n]
     if len(ordered) != top_n:
@@ -453,7 +446,6 @@ def normalize_rankings(document: Mapping[str, Any], top_n: int) -> list[dict[str
             "source_model_id": model_id,
             "rank": rank,
             "total_token_volume": str(totals[model_id]),
-            "request_count": str(requests[model_id]),
             "ranking_date": dates[model_id],
         }
         for rank, model_id in enumerate(ordered, start=1)
@@ -699,13 +691,10 @@ def validate_snapshot(snapshot: Mapping[str, Any]) -> None:
             raise SchemaError(f"snapshot has duplicate source model id {source_id!r}")
         seen.add(canonical_id)
         seen_source_ids.add(source_id)
-        expected_demand_keys = {"source_model_id", "rank", "total_token_volume", "request_count", "ranking_date", "ranking_model_permaslug"}
-        if schema_version == LEGACY_SNAPSHOT_SCHEMA_VERSION:
-            expected_demand_keys.discard("request_count")
+        expected_demand_keys = {"source_model_id", "rank", "total_token_volume", "ranking_date", "ranking_model_permaslug"}
         if not isinstance(demand, dict) or set(demand) != expected_demand_keys:
             raise SchemaError(f"snapshot.rows[{index}] has invalid demand")
-        request_count = demand.get("request_count", "1")
-        if demand["source_model_id"] != source_id or not isinstance(demand.get("rank"), int) or demand["rank"] < 1 or not isinstance(demand.get("total_token_volume"), str) or not demand["total_token_volume"].isdigit() or int(demand["total_token_volume"]) <= 0 or not isinstance(request_count, str) or not request_count.isdigit() or int(request_count) <= 0 or not isinstance(demand.get("ranking_model_permaslug"), str) or not MODEL_ID_RE.fullmatch(demand["ranking_model_permaslug"]):
+        if demand["source_model_id"] != source_id or not isinstance(demand.get("rank"), int) or demand["rank"] < 1 or not isinstance(demand.get("total_token_volume"), str) or not demand["total_token_volume"].isdigit() or int(demand["total_token_volume"]) <= 0 or not isinstance(demand.get("ranking_model_permaslug"), str) or not MODEL_ID_RE.fullmatch(demand["ranking_model_permaslug"]):
             raise SchemaError(f"snapshot.rows[{index}] has invalid demand")
         parse_ranking_date(demand.get("ranking_date"), f"snapshot.rows[{index}].demand.ranking_date")
         if demand["ranking_model_permaslug"] in seen_ranking_slugs:
@@ -968,7 +957,8 @@ def policy_model_index(policy: Mapping[str, Any]) -> dict[str, Mapping[str, Any]
 
 def validate_policy(policy: Mapping[str, Any]) -> None:
     expected_keys = {
-        "policy_version", "demand_top_n", "undercut_fraction", "models",
+        "policy_version", "demand_top_n", "undercut_fraction",
+        "cache_hit_fraction", "models",
     }
     legacy_keys = {
         "policy_version", "demand_top_n", "broad_fleet_undercut_fraction",
@@ -987,6 +977,13 @@ def validate_policy(policy: Mapping[str, Any]) -> None:
     )
     if not Decimal("0.10") <= undercut <= Decimal("0.30"):
         raise SchemaError("policy undercut fraction must be within 10%-30%")
+    cache_hit_fraction = parse_decimal(
+        policy.get("cache_hit_fraction"),
+        "policy cache_hit_fraction",
+        allow_zero=True,
+    )
+    if not Decimal("0") <= cache_hit_fraction <= Decimal("1"):
+        raise SchemaError("policy cache_hit_fraction must be within 0-1")
     policy_model_index(policy)
 
 
@@ -1162,23 +1159,28 @@ def proposed_price(
     kind = profile["kind"]
     market_completion = parse_decimal(market.get("completion_per_mtok"), "snapshot completion price")
     market_prompt = parse_decimal(market.get("input_per_mtok"), "snapshot prompt price", allow_zero=False)
-    if kind == "broad_fleet":
-        undercut = parse_decimal(policy.get("undercut_fraction", policy.get("broad_fleet_undercut_fraction")), "policy undercut_fraction")
-        target = market_completion * (Decimal("1") - undercut)
-        target_prompt = market_prompt * (Decimal("1") - undercut)
-        return (
-            target,
-            internal_rate(target, rate_card, model_id),
-            target_prompt,
-            internal_rate(target_prompt, rate_card, model_id),
-            [f"undercut fraction {decimal_string(undercut)} on OpenRouter liquidity-filtered prompt and completion prices"],
-        )
-    if kind != "coding_dense":
+    if kind not in {"broad_fleet", "coding_dense"}:
         raise SchemaError(f"unsupported profile kind {kind!r}")
     undercut = parse_decimal(policy.get("undercut_fraction", policy.get("broad_fleet_undercut_fraction")), "policy undercut_fraction")
     target = market_completion * (Decimal("1") - undercut)
-    coding_internal_rate = internal_rate(target, rate_card, model_id)
     target_prompt = market_prompt * (Decimal("1") - undercut)
+    completion_internal = internal_rate(target, rate_card, model_id)
+    prompt_internal = internal_rate(target_prompt, rate_card, model_id)
+    cache_hit_fraction = parse_decimal(policy["cache_hit_fraction"], "policy cache_hit_fraction", allow_zero=True)
+    cache_hit_internal = int((prompt_internal * cache_hit_fraction).to_integral_value(rounding=ROUND_FLOOR))
+    if cache_hit_internal == 0 and cache_hit_fraction > 0:
+        raise SchemaError(f"rate card row {model_id!r} cache-hit credit rounds to zero")
+    if cache_hit_internal > prompt_internal:
+        raise SchemaError(f"rate card row {model_id!r} cache-hit credit exceeds prompt credit")
+    if kind == "broad_fleet":
+        return (
+            target,
+            completion_internal,
+            target_prompt,
+            prompt_internal,
+            [f"undercut fraction {decimal_string(undercut)} on OpenRouter liquidity-filtered prompt and completion prices"],
+        )
+    coding_internal_rate = completion_internal
     tps = parse_decimal(profile["projected_tps"], "coding model projected_tps", allow_zero=False)
     provider_hourly = provider_hourly_usd(coding_internal_rate, tps, rate_card, model_id)
     if provider_hourly < Decimal("0.10"):
@@ -1445,14 +1447,14 @@ def build_demand_proposal(
     for canonical_id in sorted(tokens):
         model = models_by_canonical[canonical_id]
         row = rows_by_source.get(model["source_model_id"])
-        demand = row["demand"] if row is not None else {"rank": None, "total_token_volume": "0", "request_count": "0"}
+        demand = row["demand"] if row is not None else {"rank": None, "total_token_volume": "0"}
         rows[canonical_id] = {
             "demand_weight": tokens[canonical_id] / max_tokens if max_tokens else 0,
             "rank": demand["rank"],
             "recommendable": True,
             "min_provider_target": min_provider_targets[canonical_id],
             "or_completion_tokens_30d": demand["total_token_volume"],
-            "or_requests_30d": demand.get("request_count", "0"),
+            "or_requests_30d": "0",
         }
     return {
         "schema_version": 1,
