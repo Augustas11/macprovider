@@ -835,7 +835,9 @@ final class ModelManagementTests: XCTestCase {
             MalibuModelCatalogEconomicsDocument.self,
             from: Data(catalogEconomicsJSON(rows: [
                 trustedEconomicsRowJSON(warningCodesJSON: #"["feed_stale"]"#),
-                trustedEconomicsRowJSON(stateObservedAt: staleAdmission),
+                trustedEconomicsRowJSON(stateObservedAt: staleAdmission)
+                    .replacingOccurrences(of: #""model_key":"qwen3-8b""#, with: #""model_key":"qwen3-8b-stale""#)
+                    .replacingOccurrences(of: #""action_model_id":"candidate-qwen""#, with: #""action_model_id":"candidate-qwen-stale""#),
             ]).utf8)
         )
 
@@ -900,8 +902,10 @@ final class ModelManagementTests: XCTestCase {
     func testCatalogEconomicsRejectsUnsafeProviderVisibleModelText() throws {
         let pathDisplay = trustedEconomicsRowJSON()
             .replacingOccurrences(of: #""display_model_id":"mlx-community/Qwen3-8B-4bit""#, with: #""display_model_id":"/private/tmp/will pay daily""#)
+            .replacingOccurrences(of: #""action_model_id":"candidate-qwen""#, with: #""action_model_id":"path-display""#)
         let bidiModel = trustedEconomicsRowJSON()
             .replacingOccurrences(of: #""served_model_id":"mlx-community/Qwen3-8B-4bit""#, with: #""served_model_id":"mlx-community/\u202Eevil""#)
+            .replacingOccurrences(of: #""action_model_id":"candidate-qwen""#, with: #""action_model_id":"bidi-model""#)
         let formatControlDisplay = trustedEconomicsRowJSON()
             .replacingOccurrences(of: "mlx-community/Qwen3-8B-4bit", with: "mlx-community/Hidden\\u200EText-4bit")
             .replacingOccurrences(of: #""action_model_id":"candidate-qwen""#, with: #""action_model_id":"format-control""#)
