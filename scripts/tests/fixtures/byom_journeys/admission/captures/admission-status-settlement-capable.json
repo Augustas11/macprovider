@@ -2,10 +2,10 @@
   "admission_state": "settlement_capable",
   "admission_state_source": "coordinator",
   "allowed_next_states": [
-    "catalog_priced",
     "network_admitted_unsettled",
-    "revoked",
-    "withdrawn"
+    "catalog_priced",
+    "withdrawn",
+    "revoked"
   ],
   "candidate_id": "byom_zjdngwat53ctycda6nm24ohmx4on7glftp3wrvsb2al6ebg36jza",
   "catalog_model_key": "tiny-1b",
@@ -14,10 +14,10 @@
   "generated_at": "2027-01-15T08:00:00Z",
   "provider_guidance": {
     "earning_path_class": "settlement_capable",
-    "next_action": "check_status",
-    "state_label_key": "byom.admission.settlement_capable.label",
-    "state_meaning_key": "byom.admission.settlement_capable.meaning",
-    "transition_reason_code": "operator_dual_control_settlement"
+    "next_action": "maintain_runtime",
+    "state_label_key": "byom.admission.settlement_capable",
+    "state_meaning_key": "byom.admission.not_earning",
+    "transition_reason_code": null
   },
   "provider_id": "mp-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   "schema": "model_admission_status.v1",

@@ -9,9 +9,9 @@
   "generated_at": "2027-01-15T08:00:00Z",
   "provider_guidance": {
     "earning_path_class": "local_inventory_only",
-    "next_action": "check_status",
-    "state_label_key": "byom.admission.local_only.label",
-    "state_meaning_key": "byom.admission.local_only.meaning",
+    "next_action": "evaluate",
+    "state_label_key": "byom.local.local_only",
+    "state_meaning_key": "byom.local.opaque_endpoint_not_earning",
     "transition_reason_code": null
   },
   "provider_id": "mp-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",

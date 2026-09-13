@@ -7,12 +7,12 @@
   "likely_admission_state_source": "local_default",
   "provider_guidance": {
     "earning_path_class": "not_earning_yet_catalog_or_receipt_path_exists",
-    "next_action": "check_status",
-    "state_label_key": "byom.admission.offerable.label",
-    "state_meaning_key": "byom.admission.offerable.meaning",
-    "transition_reason_code": null
+    "next_action": "submit_offer",
+    "state_label_key": "byom.offer_dry_run.would_submit",
+    "state_meaning_key": "byom.offer_dry_run.catalog_path_missing_trusted_binding",
+    "transition_reason_code": "catalog_binding_unverified"
   },
-  "reason_code": "no_trusted_catalog_match",
+  "reason_code": "catalog_binding_unverified",
   "schema": "model_admission_offer_dry_run.v1",
   "served_model_ref": "mlx-community/Tiny-1B-4bit",
   "warnings": [],

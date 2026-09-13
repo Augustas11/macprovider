@@ -196,7 +196,7 @@
         {
           "id": "redaction-review-status",
           "schema": "model_admission_status.v1",
-          "path": "captures/admission-status-offer-submitted.json"
+          "path": "captures/redaction-review-status.json"
         }
       ]
     }

@@ -10,10 +10,10 @@
   "coordinator_event_id": "08fd2fa2ab186e60bf45b5b1d20304684c37097eb3c8e92524e899996789134f",
   "generated_at": "2027-01-15T08:00:00Z",
   "provider_guidance": {
-    "earning_path_class": "not_earning_yet_catalog_or_receipt_path_exists",
-    "next_action": "check_status",
-    "state_label_key": "byom.admission.revoked.label",
-    "state_meaning_key": "byom.admission.revoked.meaning",
+    "earning_path_class": "no_earning_path_in_v0_1",
+    "next_action": "submit_offer",
+    "state_label_key": "byom.admission.revoked",
+    "state_meaning_key": "byom.admission.not_earning",
     "transition_reason_code": "catalog_artifact_feed_changed"
   },
   "provider_id": "mp-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",

@@ -8,11 +8,11 @@
   "idempotency_key": "kkkkkkkkkkkkkkkk",
   "previous_admission_state": "sandbox_probe_only",
   "provider_guidance": {
-    "earning_path_class": "not_earning_yet_catalog_or_receipt_path_exists",
-    "next_action": "check_status",
-    "state_label_key": "byom.admission.withdrawn.label",
-    "state_meaning_key": "byom.admission.withdrawn.meaning",
-    "transition_reason_code": null
+    "earning_path_class": "no_earning_path_in_v0_1",
+    "next_action": "submit_offer",
+    "state_label_key": "byom.admission.withdrawn",
+    "state_meaning_key": "byom.admission.not_earning",
+    "transition_reason_code": "provider_requested"
   },
   "provider_id": "mp-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   "reason_code": "provider_requested",

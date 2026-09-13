@@ -31,6 +31,8 @@ from byom_journey_evidence import (  # noqa: E402
     ADMISSION_CONTRACT,
     ADMISSION_WITHDRAWAL_REASON_CODES,
     BYOMEvidenceError,
+    COORDINATOR_ALLOWED_NEXT_STATES_ORDERED,
+    COORDINATOR_STATE_NEXT_ACTION,
     build_evidence,
     validate_captured_cli_document,
 )
@@ -47,6 +49,12 @@ GGUF = "ollama:tiny-ollama-1b-q4"
 NOW = "2027-01-15T08:00:00Z"
 CLI_VERSION = "1.8.124"
 PROVIDER_ID = "mp-" + "a" * 32
+# The only states whose coordinator guidance carries a transition reason: a
+# rejection, a withdrawal, and a revocation. Every other state the journey
+# reaches is a FORWARD transition (offer -> sandbox -> priced -> settlement),
+# which is not a demotion, so the coordinator leaves the reason null
+# (model_admission.go modelAdmissionDemotionRequiresReason).
+COORDINATOR_STATE_REASON_STATES = frozenset({"offer_rejected", "withdrawn", "revoked"})
 
 
 def candidate_id(ref: str) -> str:
@@ -56,10 +64,15 @@ def candidate_id(ref: str) -> str:
 
 
 def guidance(state: str, earning: str) -> dict:
+    # Mirror the coordinator's guidance emitter (model_admission.go): an
+    # unsuffixed state label key, a fixed meaning key (not_offered for
+    # not_offered, not_earning otherwise), and the state-derived next_action.
+    # `local_only` is CLI-side, not a coordinator state, so it keeps the neutral
+    # CLI action.
     return {
-        "state_label_key": f"byom.admission.{state}.label",
-        "state_meaning_key": f"byom.admission.{state}.meaning",
-        "next_action": "check_status",
+        "state_label_key": f"byom.admission.{state}",
+        "state_meaning_key": "byom.admission.not_offered" if state == "not_offered" else "byom.admission.not_earning",
+        "next_action": COORDINATOR_STATE_NEXT_ACTION.get(state, "check_status"),
         "transition_reason_code": None,
         "earning_path_class": earning,
     }
@@ -132,7 +145,7 @@ class FakeRig:
         self.surface_leaks = surface_leaks or {}
         self.mutate_on_duplicate_offer = mutate_on_duplicate_offer  # append an event while answering 409 (the bug step 2 must catch)
         self.skip_stale_head_check = skip_stale_head_check          # approve against a moved head (the bug step 9 must catch)
-        self.gguf_earning = "no_earning_path_in_v0_1"
+        self.gguf_earning = None  # fault-injection override for the GGUF earning; None => faithful state-based earning
         self.request_log = 0
 
     def _event(self, ref: str) -> str:
@@ -159,12 +172,21 @@ class FakeRig:
                 return ref
         return None
 
-    def _earning(self, ref: str) -> str:
-        if ref == OPAQUE:
+    def _earning(self, ref: str, state: str) -> str:
+        if ref == GGUF and self.gguf_earning is not None:
+            return self.gguf_earning  # fault injection for the step-10 negative test
+        # Mirror modelAdmissionProviderGuidance's earning exactly: withdrawn /
+        # revoked / offer_rejected and the default keep no_earning_path;
+        # not_offered is local_inventory_only; settlement_capable earns; the rest
+        # (offer_submitted, sandbox/network/catalog_priced) are nonSettlement of
+        # the catalog key.
+        if state in ("withdrawn", "revoked", "offer_rejected"):
+            return "no_earning_path_in_v0_1"
+        if state == "not_offered":
             return "local_inventory_only"
-        if ref == GGUF:
-            return self.gguf_earning
-        return "settlement_capable" if self.state.get(ref) == "settlement_capable" else "not_earning_yet_catalog_or_receipt_path_exists"
+        if state == "settlement_capable":
+            return "settlement_capable"
+        return "not_earning_yet_catalog_or_receipt_path_exists" if self._catalog_key(ref) else "no_earning_path_in_v0_1"
 
     def _status_doc(self, ref: str) -> dict:
         if ref == OPAQUE:
@@ -173,11 +195,35 @@ class FakeRig:
                 "provider_id": PROVIDER_ID, "candidate_id": self._candidate_id(ref), "served_model_ref": ref,
                 "catalog_model_key": None, "admission_state": "local_only", "admission_state_source": "local_default",
                 "coordinator_event_id": None, "state_observed_at": None,
-                "provider_guidance": guidance("local_only", "local_inventory_only"), "allowed_next_states": [], "warnings": [],
+                "provider_guidance": {
+                    "state_label_key": "byom.local.local_only",
+                    "state_meaning_key": "byom.local.opaque_endpoint_not_earning",
+                    "next_action": "evaluate", "transition_reason_code": None,
+                    "earning_path_class": "local_inventory_only"},
+                "allowed_next_states": [], "warnings": [],
+            }
+        if ref not in self.state:
+            # Never offered, but the coordinator IS reachable (this fake is one),
+            # so `models admission status` returns a COORDINATOR-sourced
+            # not_offered: null coordinator event id (no event exists),
+            # local_inventory_only, submit_offer, allowed_next_states
+            # [offer_submitted]. This is distinct from a SPEC-046 local_default
+            # not_offered (coordinator-unavailable), which asserts no offer history.
+            g = guidance("not_offered", "local_inventory_only")
+            return {
+                "schema": "model_admission_status.v1", "generated_at": NOW, "cli_version": CLI_VERSION,
+                "provider_id": PROVIDER_ID, "candidate_id": self._candidate_id(ref), "served_model_ref": ref,
+                "catalog_model_key": self._catalog_key(ref), "admission_state": "not_offered",
+                "admission_state_source": "coordinator", "coordinator_event_id": None, "state_observed_at": NOW,
+                "provider_guidance": g,
+                "allowed_next_states": list(COORDINATOR_ALLOWED_NEXT_STATES_ORDERED["not_offered"]), "warnings": [],
             }
         state = self.state.get(ref, "not_offered")
-        g = guidance(state, self._earning(ref))
-        g["transition_reason_code"] = self.reason.get(ref)
+        g = guidance(state, self._earning(ref, state))
+        # Only a rejection, withdrawal, or revocation carries a reason; every
+        # other state the journey reaches is a forward (non-demotion) transition,
+        # so the coordinator leaves the reason null.
+        g["transition_reason_code"] = self.reason.get(ref) if state in COORDINATOR_STATE_REASON_STATES else None
         return {
             "schema": "model_admission_status.v1", "generated_at": NOW, "cli_version": CLI_VERSION,
             "provider_id": PROVIDER_ID, "candidate_id": self._candidate_id(ref),
@@ -185,7 +231,7 @@ class FakeRig:
             "admission_state": state, "admission_state_source": "coordinator",
             "coordinator_event_id": self._event_id(ref), "state_observed_at": NOW,
             "provider_guidance": g,
-            "allowed_next_states": sorted(ADMISSION_ALLOWED_NEXT_STATES.get(state, frozenset())),
+            "allowed_next_states": list(COORDINATOR_ALLOWED_NEXT_STATES_ORDERED.get(state, [])),
             "warnings": [],
         }
 
@@ -214,8 +260,12 @@ class FakeRig:
             return {"schema": "model_admission_offer_dry_run.v1", "generated_at": NOW, "cli_version": CLI_VERSION,
                     "candidate_id": self._candidate_id(ref), "served_model_ref": ref, "catalog_model_key": self._catalog_key(ref),
                     "would_submit": True, "likely_admission_state": "offerable", "likely_admission_state_source": "local_default",
-                    "provider_guidance": guidance("offerable", "not_earning_yet_catalog_or_receipt_path_exists"),
-                    "reason_code": "no_trusted_catalog_match", "warnings": []}
+                    "provider_guidance": {
+                        "state_label_key": "byom.offer_dry_run.would_submit",
+                        "state_meaning_key": "byom.offer_dry_run.catalog_path_missing_trusted_binding",
+                        "next_action": "submit_offer", "transition_reason_code": "catalog_binding_unverified",
+                        "earning_path_class": "not_earning_yet_catalog_or_receipt_path_exists"},
+                    "reason_code": "catalog_binding_unverified", "warnings": []}
         if cmd[:2] == ["models", "offer"]:
             ref = args[2]
             assert ref != OPAQUE, "fake: opaque offers are refused by the CLI before the coordinator"
@@ -233,12 +283,14 @@ class FakeRig:
             reason = args[args.index("--reason-code") + 1]
             assert reason in ADMISSION_WITHDRAWAL_REASON_CODES, "fake: the CLI refuses a withdrawal reason outside the closed enum"
             event = self._set(ref, "withdrawn", reason)
+            g = guidance("withdrawn", "no_earning_path_in_v0_1")
+            g["transition_reason_code"] = reason
             return {"schema": "model_admission_withdraw.v1", "generated_at": NOW, "cli_version": CLI_VERSION,
                     "provider_id": PROVIDER_ID, "candidate_id": self._candidate_id(ref), "served_model_ref": ref,
                     "catalog_model_key": self._catalog_key(ref), "idempotency_key": "k" * 16, "reason_code": reason,
                     "previous_admission_state": previous, "coordinator_event_id": event, "accepted_at": NOW,
                     "resulting_admission_state": "withdrawn",
-                    "provider_guidance": guidance("withdrawn", "not_earning_yet_catalog_or_receipt_path_exists"), "warnings": []}
+                    "provider_guidance": g, "warnings": []}
         if cmd[:2] == ["models", "catalog-economics"]:
             state = self.state.get(SETTLEABLE, "not_offered")
             priced = state in ("catalog_priced", "settlement_capable")
@@ -465,6 +517,7 @@ class AdmissionJourneyRunnerTests(unittest.TestCase):
         for reason in (aj.REASON_EXPERIMENTAL_DISCLOSURE, aj.REASON_CATALOG_BINDING_VERIFIED, aj.REASON_DUAL_CONTROL_SETTLEMENT, aj.REASON_MATRIX_PROBE):
             self.assertRegex(reason, r"^operator_[a-z0-9_]{2,56}$")
         rig = FakeRig()
+        rig._set(SETTLEABLE, "sandbox_probe_only")  # coordinator-backed: an unoffered candidate has only a local_default status
         runner = aj.AdmissionJourneyRunner(rig, self.config, aj.ManifestBuilder(self.out, "r", CLI_VERSION), log=lambda _: None)
         runner.status(runner.settleable)
         with self.assertRaises(aj.JourneyFailure) as caught:

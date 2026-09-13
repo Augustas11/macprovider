@@ -1,8 +1,12 @@
 {
-  "admission_state": "not_offered",
+  "admission_state": "sandbox_probe_only",
   "admission_state_source": "coordinator",
   "allowed_next_states": [
-    "offer_submitted"
+    "network_visible_unpriced",
+    "network_admitted_unsettled",
+    "catalog_priced",
+    "withdrawn",
+    "revoked"
   ],
   "candidate_id": "byom_qosdnluufpsigfdyo35vpm4k6i2z7qon25qndsv53tsi2iexvpwq",
   "catalog_model_key": null,
@@ -11,9 +15,9 @@
   "generated_at": "2027-01-15T08:00:00Z",
   "provider_guidance": {
     "earning_path_class": "no_earning_path_in_v0_1",
-    "next_action": "check_status",
-    "state_label_key": "byom.admission.not_offered.label",
-    "state_meaning_key": "byom.admission.not_offered.meaning",
+    "next_action": "withdraw",
+    "state_label_key": "byom.admission.sandbox_probe_only",
+    "state_meaning_key": "byom.admission.not_earning",
     "transition_reason_code": null
   },
   "provider_id": "mp-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",

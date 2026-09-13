@@ -788,6 +788,57 @@ NEXT_ACTIONS = frozenset({
     "revise_and_reoffer", "check_status", "withdraw", "wait_for_coordinator",
     "maintain_runtime", "none",
 })
+# SPEC-047-R002 / SPEC-046-R003: for a coordinator-sourced status the provider
+# guidance is not free-form — the coordinator derives `next_action` from the
+# admission state (phase4-coordinator/internal/ws/model_admission.go guidance
+# switch). A capture whose guidance pairs a state with the wrong action is not
+# production-faithful, so the typed validator enforces the exact pairing.
+COORDINATOR_STATE_NEXT_ACTION = {
+    "not_offered": "submit_offer",
+    "offer_submitted": "wait_for_coordinator",
+    "offer_rejected": "revise_and_reoffer",
+    "sandbox_probe_only": "withdraw",
+    "network_visible_unpriced": "withdraw",
+    "network_admitted_unsettled": "withdraw",
+    "catalog_priced": "withdraw",
+    "settlement_capable": "maintain_runtime",
+    "withdrawn": "submit_offer",
+    "revoked": "submit_offer",
+}
+# States whose guidance MUST carry a non-null `transition_reason_code`: the
+# coordinator sets it from the event reason for a rejection, a withdrawal, and a
+# revocation (model_admission.go guidance switch).
+COORDINATOR_STATE_REQUIRES_TRANSITION_REASON = frozenset({
+    "offer_rejected", "withdrawn", "revoked",
+})
+# States for which the coordinator leaves transition_reason_code null
+# unconditionally. It only fills a reason for a rejection, withdrawal,
+# revocation, or a genuine demotion; per modelAdmissionDemotionRequiresReason a
+# demotion only targets `catalog_priced` / `network_admitted_unsettled`, so
+# `sandbox_probe_only` and `network_visible_unpriced` can never carry one either.
+# (`catalog_priced` / `network_admitted_unsettled` stay permissive: a demotion
+# into them legitimately carries a reason.)
+COORDINATOR_STATE_NO_TRANSITION_REASON = frozenset({
+    "not_offered", "offer_submitted", "settlement_capable",
+    "sandbox_probe_only", "network_visible_unpriced",
+})
+# Deterministic state-machine order the coordinator returns for
+# `allowed_next_states` (model_admission.go modelAdmissionAllowedNextStates); a
+# coordinator-sourced status must match it exactly, order included.
+COORDINATOR_ALLOWED_NEXT_STATES_ORDERED = {
+    "not_offered": ["offer_submitted"],
+    "withdrawn": ["offer_submitted"],
+    "revoked": ["offer_submitted"],
+    "offer_rejected": ["offer_submitted", "revoked"],
+    "offer_submitted": ["offer_rejected", "sandbox_probe_only", "network_visible_unpriced",
+                        "network_admitted_unsettled", "catalog_priced", "withdrawn", "revoked"],
+    "sandbox_probe_only": ["network_visible_unpriced", "network_admitted_unsettled",
+                          "catalog_priced", "withdrawn", "revoked"],
+    "network_visible_unpriced": ["network_admitted_unsettled", "catalog_priced", "withdrawn", "revoked"],
+    "network_admitted_unsettled": ["catalog_priced", "settlement_capable", "withdrawn", "revoked"],
+    "catalog_priced": ["network_admitted_unsettled", "settlement_capable", "withdrawn", "revoked"],
+    "settlement_capable": ["network_admitted_unsettled", "catalog_priced", "withdrawn", "revoked"],
+}
 EARNING_PATH_CLASSES = frozenset({
     "local_inventory_only", "not_earning_yet_catalog_or_receipt_path_exists",
     "no_earning_path_in_v0_1", "settlement_capable",
@@ -952,6 +1003,83 @@ def _validate_guidance(document: dict[str, Any], where: str) -> None:
     require_enum(
         guidance["earning_path_class"], EARNING_PATH_CLASSES, location + ".earning_path_class"
     )
+    # SPEC-047-R002: when the state is coordinator-derived, the coordinator fixes
+    # the state->next_action pairing, so a capture that pairs a state with a
+    # different action is not something the coordinator would ever emit. Reject
+    # it (a `local_default` source runs the CLI's own guidance and is exempt).
+    state = (
+        document.get("admission_state")
+        or document.get("likely_admission_state")
+        or document.get("resulting_admission_state")
+    )
+    source = document.get("admission_state_source") or document.get("likely_admission_state_source")
+    coordinator_backed = source == "coordinator" or (
+        source is None and bool(document.get("coordinator_event_id"))
+    )
+    if coordinator_backed and state in COORDINATOR_STATE_NEXT_ACTION:
+        expected = COORDINATOR_STATE_NEXT_ACTION[state]
+        if guidance["next_action"] != expected:
+            fail(
+                f"{location}.next_action is {guidance['next_action']!r} for coordinator "
+                f"state {state!r}; the coordinator emits {expected!r}"
+            )
+        if state in COORDINATOR_STATE_REQUIRES_TRANSITION_REASON and not (
+            isinstance(guidance["transition_reason_code"], str)
+            and guidance["transition_reason_code"].strip()
+        ):
+            fail(
+                f"{location}.transition_reason_code must be a non-empty reason for "
+                f"coordinator state {state!r}"
+            )
+        # The coordinator leaves the reason null for these states unconditionally
+        # (model_admission.go inits it nil and only fills it for a rejection,
+        # withdrawal, revocation, or a demotion — never for these). A non-null
+        # reason here is an impossible coordinator status.
+        if state in COORDINATOR_STATE_NO_TRANSITION_REASON and guidance["transition_reason_code"] is not None:
+            fail(
+                f"{location}.transition_reason_code must be null for coordinator "
+                f"state {state!r}, got {guidance['transition_reason_code']!r}"
+            )
+        # The coordinator emits an UNSUFFIXED state label key and a fixed meaning
+        # key (byom.admission.not_offered for not_offered, byom.admission.not_earning
+        # otherwise). A suffixed or arbitrary key is not coordinator-faithful.
+        expected_label = "byom.admission." + state
+        if guidance["state_label_key"] != expected_label:
+            fail(
+                f"{location}.state_label_key is {guidance['state_label_key']!r} for "
+                f"coordinator state {state!r}; the coordinator emits {expected_label!r}"
+            )
+        expected_meaning = "byom.admission.not_offered" if state == "not_offered" else "byom.admission.not_earning"
+        if guidance["state_meaning_key"] != expected_meaning:
+            fail(
+                f"{location}.state_meaning_key is {guidance['state_meaning_key']!r} for "
+                f"coordinator state {state!r}; the coordinator emits {expected_meaning!r}"
+            )
+        # The coordinator also fixes earning_path_class per state
+        # (modelAdmissionProviderGuidance): local_inventory_only for not_offered,
+        # settlement_capable for settlement_capable, no_earning_path for
+        # withdrawn/revoked/offer_rejected, and nonSettlement(catalog key) for the
+        # offer_submitted / probe / network / priced states (catalog key present
+        # => not_earning_yet, else no_earning_path). A capture whose earning does
+        # not match its state (and catalog key) is not coordinator-faithful.
+        if state == "not_offered":
+            expected_earning = "local_inventory_only"
+        elif state == "settlement_capable":
+            expected_earning = "settlement_capable"
+        elif state in ("withdrawn", "revoked", "offer_rejected"):
+            expected_earning = "no_earning_path_in_v0_1"
+        else:
+            expected_earning = (
+                "not_earning_yet_catalog_or_receipt_path_exists"
+                if document.get("catalog_model_key")
+                else "no_earning_path_in_v0_1"
+            )
+        if guidance["earning_path_class"] != expected_earning:
+            fail(
+                f"{location}.earning_path_class is {guidance['earning_path_class']!r} for "
+                f"coordinator state {state!r} (catalog_model_key="
+                f"{document.get('catalog_model_key')!r}); the coordinator emits {expected_earning!r}"
+            )
 
 
 def _validate_envelope_header(document: dict[str, Any], where: str) -> None:
@@ -1113,13 +1241,16 @@ def _validate_admission_status(parsed: dict[str, Any], location: str) -> None:
                 f"{location}.allowed_next_states must be empty for a local_default state"
             )
     else:
-        allowed = ADMISSION_ALLOWED_NEXT_STATES[state]
-        for index, next_state in enumerate(next_states):
-            if next_state not in allowed:
-                fail(
-                    f"{location}.allowed_next_states[{index}] {next_state!r} is not an "
-                    f"allowed transition from {state!r}"
-                )
+        # A coordinator-sourced status returns the exact deterministic list the
+        # coordinator emits (model_admission.go modelAdmissionAllowedNextStates),
+        # order included — the whole captured JSON is evidence, so an omitted
+        # legal edge or a re-sorted list is not coordinator-faithful.
+        expected_order = COORDINATOR_ALLOWED_NEXT_STATES_ORDERED.get(state)
+        if expected_order is not None and next_states != expected_order:
+            fail(
+                f"{location}.allowed_next_states is {next_states!r} for coordinator "
+                f"state {state!r}; the coordinator emits {expected_order!r}"
+            )
     require_enum_list(parsed["warnings"], WARNING_CODES, location + ".warnings")
 
 

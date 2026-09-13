@@ -787,12 +787,21 @@ class AdmissionJourneyRunner:
     def step_10_admission_status_presentation(self) -> None:
         matched = self.status(self.settleable)
         assert_true(matched["provider_guidance"]["earning_path_class"] in ("settlement_capable", "not_earning_yet_catalog_or_receipt_path_exists"), "catalog-matched status does not present an earning path")
-        # The novel non-catalog candidate is the GGUF one: local inventory can
-        # serve it, the coordinator can hold it, and SPEC-010 R007(e) gives it
-        # no earning path in v0.1. The opaque endpoint is not a substitute; it
-        # never reaches the coordinator at all (step 3).
+        # SPEC-047-R008 requires one NOVEL NON-CATALOG OFFER whose status says no
+        # earning path exists in v0.1 — not merely reading an unoffered candidate.
+        # The GGUF one is that candidate: the coordinator can hold an offer for it
+        # (SPEC-010 R007(e) gives it no earning path), but only an actual offer
+        # makes its status coordinator-backed. Without the offer the status is a
+        # local_default `not_offered` that cannot assert offer history. The opaque
+        # endpoint is not a substitute; it never reaches the coordinator (step 3).
+        novel_submit = self.rig.cli(["models", "offer", self.gguf.served_model_ref, *self._common()])
+        assert_true(novel_submit.get("schema") == "model_admission_offer_submit.v1", "novel offer did not return the submit document")
+        assert_true(novel_submit.get("admission_state_source") == "coordinator", "novel offer was not coordinator-backed")
+        assert_true(novel_submit.get("admission_state") == "offer_submitted", "novel offer did not land in offer_submitted")
+        assert_true(bool(novel_submit.get("coordinator_event_id")), "accepted novel offer carries no coordinator event id")
         novel = self.status(self.gguf)
-        assert_true(novel.get("catalog_model_key") is None, "the gguf candidate is catalog-matched; it cannot stand as the novel non-catalog candidate")
+        assert_true(novel["admission_state_source"] == "coordinator", "novel candidate status is not coordinator-backed after the offer; an unoffered local_default status cannot stand as the novel non-catalog offer")
+        assert_true(novel.get("catalog_model_key") is None, "the novel candidate resolved to a catalog key; an unmatched offer must yield catalog_model_key null")
         assert_true(novel["provider_guidance"]["earning_path_class"] == "no_earning_path_in_v0_1", f"novel candidate status reports {novel['provider_guidance']['earning_path_class']!r}, not no_earning_path_in_v0_1")
         for document in (matched, novel):
             guidance = document["provider_guidance"]
@@ -899,8 +908,11 @@ class AdmissionJourneyRunner:
 
 # --------------------------------------------------------------------- cli
 
-def cli_version(binary: Path) -> str:
-    completed = subprocess.run([str(binary), "--version"], capture_output=True, text=True, check=False)
+def cli_version(binary: Path, env: dict[str, str]) -> str:
+    # Same scrubbed child environment as every other subprocess: the operator
+    # secret vars, the ledger DSN, and PG* must never reach a child, this one
+    # included.
+    completed = subprocess.run([str(binary), "--version"], capture_output=True, text=True, check=False, env=env)
     assert_true(completed.returncode == 0, "cli --version failed")
     return completed.stdout.strip().split()[-1]
 
@@ -951,7 +963,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         prepare_out_dir(args.out)
         rig = PhysicalRig(config)
-        manifest = ManifestBuilder(args.out, uuid.uuid4().hex, cli_version(config.cli_binary))
+        manifest = ManifestBuilder(args.out, uuid.uuid4().hex, cli_version(config.cli_binary, config.child_environment()))
         path = AdmissionJourneyRunner(rig, config, manifest, log).run(lambda: "\n".join(transcript))
     except JourneyFailure as failure:
         print("admission journey FAILED: " + str(failure), file=sys.stderr)
