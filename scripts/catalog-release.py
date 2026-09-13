@@ -41,6 +41,8 @@ ARTIFACT_SOURCE_SCHEMA = "macprovider.autotune-artifacts-source.v1"
 ARTIFACT_FEED_SOURCE_VALUE = "operator_curated_autotune_artifact_catalog"
 RATE_CARD_SOURCE_PATH = CATALOG_DIR / "rate-card-source.json"
 RATE_CARD_SOURCE_SCHEMA = "macprovider.rate-card-source.v1"
+MARKET_PEG_BIND_PATH = CATALOG_DIR / "market-peg-bind.json"
+MARKET_PEG_BIND_SCHEMA = "macprovider.market-peg-bind.v1"
 INTAKE_DECISION_PATH = CATALOG_DIR / "intake-decision.json"
 LEDGER_SCHEMA_V2 = "macprovider.autotune-release-ledger.v2"
 LEDGER_SCHEMA_V3 = "macprovider.autotune-release-ledger.v3"
@@ -382,13 +384,8 @@ def validate_candidate(data: bytes, *, require_provenance: bool = True) -> dict:
 
 def validate_demand(data: bytes) -> dict:
     value = strict_json(data, "demand-rank")
-    top = {"version", "generated_at", "source", "policy_version", "cold_start_floor", "diversification_band", "source_snapshot", "rows"}
-    exact_keys(
-        value,
-        top,
-        top - {"source_snapshot"},
-        "demand-rank",
-    )
+    top = {"version", "generated_at", "source", "policy_version", "cold_start_floor", "diversification_band", "rows"}
+    exact_keys(value, top, top, "demand-rank")
     if value["source"] not in {
         "openrouter_completion_token_rank_operator_curated",
         "macprovider_buyer_supply_deficit_v1",
@@ -399,14 +396,6 @@ def validate_demand(data: bytes) -> dict:
     if value["policy_version"] != "autotune-policy-v1":
         fail("demand-rank: policy_version required")
     parse_time(value["generated_at"], "demand-rank")
-    snapshot = value.get("source_snapshot")
-    if snapshot is not None:
-        if not isinstance(snapshot, dict):
-            fail("demand-rank: source_snapshot must be an object")
-        exact_keys(snapshot, {"content_digest"}, {"content_digest"}, "demand-rank source_snapshot")
-        digest = snapshot["content_digest"]
-        if not isinstance(digest, str) or not digest.startswith("sha256:") or len(digest) != len("sha256:") + 64 or any(c not in "0123456789abcdef" for c in digest[len("sha256:"):]):
-            fail("demand-rank: source_snapshot.content_digest must be sha256:<64 lowercase hex>")
     if not isinstance(value["cold_start_floor"], (int, float)) or isinstance(value["cold_start_floor"], bool) or value["cold_start_floor"] != 0.15:
         fail("demand-rank: cold_start_floor must equal 0.15")
     if not isinstance(value["diversification_band"], (int, float)) or isinstance(value["diversification_band"], bool) or value["diversification_band"] != 0.85:
@@ -417,7 +406,6 @@ def validate_demand(data: bytes) -> dict:
     allowed = {
         "demand_weight", "rank", "recommendable", "min_provider_target",
         "ready_provider_count", "supply_deficit_multiplier", "min_dwell_hours",
-        "or_completion_tokens_30d", "or_requests_30d",
     }
     required = {"demand_weight", "rank", "recommendable", "min_provider_target"}
     for key, row in rows.items():
@@ -441,11 +429,6 @@ def validate_demand(data: bytes) -> dict:
         dwell = row.get("min_dwell_hours")
         if dwell is not None and (not isinstance(dwell, int) or isinstance(dwell, bool) or not 0 <= dwell <= 720):
             fail(f"demand row {key}: min_dwell_hours must be in [0,720]")
-        for field in ("or_completion_tokens_30d", "or_requests_30d"):
-            if field not in row:
-                continue
-            if not isinstance(row[field], str) or not row[field].isdigit() or int(row[field]) < 0:
-                fail(f"demand row {key}: {field} must be a non-negative integer string")
     return value
 
 
@@ -722,21 +705,96 @@ def validate_pair(candidate_obj: dict, demand_obj: dict) -> None:
 
 def validate_release_inputs(candidate_obj: dict, demand_obj: dict, rate_card_obj: dict) -> None:
     validate_pair(candidate_obj, demand_obj)
-    demand_snapshot = demand_obj.get("source_snapshot")
-    rate_card_snapshot = rate_card_obj.get("source_snapshot")
-    if demand_snapshot is None and "source_snapshot" in demand_obj:
-        fail("demand-rank: source_snapshot must be an object")
-    if rate_card_snapshot is None and "source_snapshot" in rate_card_obj:
-        fail("rate-card: source_snapshot must be an object")
-    demand_digest = demand_snapshot.get("content_digest") if isinstance(demand_snapshot, dict) else None
-    rate_card_digest = rate_card_snapshot.get("content_digest") if isinstance(rate_card_snapshot, dict) else None
-    if (demand_digest is None) != (rate_card_digest is None):
-        fail("demand-rank and rate-card source_snapshot must both be present or both omitted")
-    if demand_digest != rate_card_digest:
-        fail("demand-rank and rate-card source_snapshot.content_digest must match")
     for field in ("generated_at", "policy_version"):
         if candidate_obj[field] != rate_card_obj[field]:
             fail(f"rate-card {field} must match the atomic release")
+
+
+def validate_market_peg_bind(data: bytes) -> dict:
+    value = strict_json(data, "market-peg-bind")
+    fields = {"schema_version", "content_digest", "policy_digest", "engine_sha256", "ranking_window_end_date"}
+    exact_keys(value, fields, fields, "market-peg-bind")
+    if value["schema_version"] != MARKET_PEG_BIND_SCHEMA:
+        fail(f"market-peg-bind: schema_version must be {MARKET_PEG_BIND_SCHEMA}")
+    for field in ("content_digest", "policy_digest"):
+        digest = value[field]
+        if not isinstance(digest, str) or not digest.startswith("sha256:") or len(digest) != 71 or any(character not in "0123456789abcdef" for character in digest[7:]):
+            fail(f"market-peg-bind: {field} must be sha256:<64 lowercase hex>")
+    if not isinstance(value["engine_sha256"], str) or not HEX64.fullmatch(value["engine_sha256"]):
+        fail("market-peg-bind: engine_sha256 must be <64 lowercase hex>")
+    if not isinstance(value["ranking_window_end_date"], str) or not FULL_DATE.fullmatch(value["ranking_window_end_date"]):
+        fail("market-peg-bind: ranking_window_end_date must be YYYY-MM-DD")
+    return value
+
+
+def validate_market_peg(
+    rate_proposal_path: pathlib.Path,
+    demand_proposal_path: pathlib.Path,
+    snapshot_path: pathlib.Path,
+    policy_path: pathlib.Path,
+    candidate_obj: dict,
+    demand_obj: dict,
+    rate_card_obj: dict,
+) -> None:
+    import openrouter_pricing_engine
+
+    snapshot_bytes = snapshot_path.read_bytes()
+    policy_bytes = policy_path.read_bytes()
+    bind = validate_market_peg_bind(MARKET_PEG_BIND_PATH.read_bytes())
+    engine_bytes = (ROOT / "scripts" / "openrouter_pricing_engine.py").read_bytes()
+    if bind["engine_sha256"] != sha256(engine_bytes):
+        fail("market-peg-bind: engine_sha256 does not match the executed engine bytes")
+    if bind["policy_digest"] != "sha256:" + sha256(policy_bytes):
+        fail("market-peg-bind: policy_digest does not match the named policy bytes")
+    try:
+        snapshot = json.loads(snapshot_bytes.decode("utf-8"))
+        policy = json.loads(policy_bytes.decode("utf-8"))
+        rate_proposal = json.loads(rate_proposal_path.read_text(encoding="utf-8"))
+        demand_proposal = json.loads(demand_proposal_path.read_text(encoding="utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        fail(f"market-peg input is not valid UTF-8 JSON: {error}")
+    if not isinstance(snapshot, dict) or not isinstance(policy, dict) or not isinstance(rate_proposal, dict) or not isinstance(demand_proposal, dict):
+        fail("market-peg inputs must be JSON objects")
+    if bind["content_digest"] != snapshot.get("content_digest"):
+        fail("market-peg-bind: content_digest does not match the named snapshot")
+    metadata = snapshot.get("source", {}).get("fetch_metadata", {}) if isinstance(snapshot.get("source"), dict) else {}
+    if bind["ranking_window_end_date"] != metadata.get("ranking_window_end_date"):
+        fail("market-peg-bind: ranking_window_end_date does not match the named snapshot")
+    min_targets = {key: row["min_provider_target"] for key, row in demand_obj["rows"].items()}
+    try:
+        replayed_rate = openrouter_pricing_engine.build_proposal(
+            snapshot, policy, rate_card_obj,
+            now=datetime.fromisoformat(rate_proposal["generated_at"].replace("Z", "+00:00")).astimezone(timezone.utc),
+        )
+        replayed_demand = openrouter_pricing_engine.build_demand_proposal(snapshot, policy, min_provider_targets=min_targets)
+    except (openrouter_pricing_engine.EngineError, KeyError, TypeError, ValueError) as error:
+        fail(f"market-peg replay failed: {error}")
+    if canonical_sorted_bytes(rate_proposal) != canonical_sorted_bytes(replayed_rate):
+        fail("market-peg: rate-card proposal does not equal the engine replay")
+    if canonical_sorted_bytes(demand_proposal) != canonical_sorted_bytes(replayed_demand):
+        fail("market-peg: demand-rank proposal does not equal the engine replay")
+    rates_by_model = {
+        row["model_id"]: row["proposed_rates"]
+        for bucket in ("added", "changed", "unchanged")
+        for row in replayed_rate[bucket]
+    }
+    recommendable = {key for key, row in candidate_obj["rows"].items() if row.get("runtime_status") == "recommendable"}
+    for key in recommendable:
+        proposal_rates = rates_by_model.get(key)
+        if proposal_rates is None:
+            fail(f"market-peg: recommendable row {key!r} has no replayed proposal rate")
+        published = rate_card_obj["rows"].get(key)
+        if published is None:
+            fail(f"market-peg: recommendable row {key!r} has no published rate row")
+        for published_field, proposal_field in (
+            ("prompt_rate_per_mtok", "prompt_rate_per_mtok"),
+            ("prompt_cache_hit_rate_per_mtok", "prompt_cache_hit_rate_per_mtok"),
+            ("completion_rate_per_mtok", "completion_rate_per_mtok"),
+        ):
+            if published[published_field] != proposal_rates[proposal_field]:
+                fail(f"market-peg: rate-card row {key!r}.{published_field} does not match the proposal")
+        if demand_obj["rows"][key]["demand_weight"] != replayed_demand["rows"][key]["demand_weight"]:
+            fail(f"market-peg: demand-rank row {key!r}.demand_weight does not match the proposal")
 
 
 def rate_card_projection_hash(value: dict) -> str:
@@ -785,7 +843,7 @@ def validate_rate_card(data: bytes) -> dict:
     value = strict_json(data, "rate-card")
     exact_keys(
         value,
-        {"version", "policy_version", "generated_at", "usd_per_million_credits", "source_snapshot", "rows"},
+        {"version", "policy_version", "generated_at", "usd_per_million_credits", "rows"},
         {"version", "policy_version", "generated_at", "usd_per_million_credits", "rows"},
         "rate-card",
     )
@@ -794,14 +852,6 @@ def validate_rate_card(data: bytes) -> dict:
     if not isinstance(value["policy_version"], str) or not value["policy_version"].strip() or value["policy_version"].strip() != value["policy_version"]:
         fail("rate-card: policy_version required")
     parse_time(value["generated_at"], "rate-card generated_at")
-    snapshot = value.get("source_snapshot")
-    if snapshot is not None:
-        if not isinstance(snapshot, dict):
-            fail("rate-card: source_snapshot must be an object")
-        exact_keys(snapshot, {"content_digest"}, {"content_digest"}, "rate-card source_snapshot")
-        snapshot_digest = snapshot["content_digest"]
-        if not isinstance(snapshot_digest, str) or not snapshot_digest.startswith("sha256:") or len(snapshot_digest) != len("sha256:") + 64 or any(c not in "0123456789abcdef" for c in snapshot_digest[len("sha256:"):]):
-            fail("rate-card: source_snapshot.content_digest must be sha256:<64 lowercase hex>")
     usd = value["usd_per_million_credits"]
     if not isinstance(usd, (int, float)) or isinstance(usd, bool) or not math.isfinite(usd) or usd < 0:
         fail("rate-card: usd_per_million_credits must be finite and >= 0")
@@ -892,17 +942,9 @@ def validate_rate_card_source(data: bytes, label: str = "rate-card-source") -> d
     value = strict_json(data, label)
     top = {
         "schema_version", "generated_at", "policy_version", "usd_per_million_credits",
-        "provider_share_bps", "global_multiplier_ppm", "rows", "classes", "source_snapshot",
+        "provider_share_bps", "global_multiplier_ppm", "rows", "classes",
     }
-    exact_keys(value, top, top - {"source_snapshot"}, label)
-    snapshot = value.get("source_snapshot")
-    if snapshot is not None:
-        if not isinstance(snapshot, dict):
-            fail(f"{label}: source_snapshot must be an object")
-        exact_keys(snapshot, {"content_digest"}, {"content_digest"}, f"{label} source_snapshot")
-        digest = snapshot["content_digest"]
-        if not isinstance(digest, str) or not digest.startswith("sha256:") or len(digest) != 71 or any(character not in "0123456789abcdef" for character in digest[7:]):
-            fail(f"{label} source_snapshot.content_digest must be sha256:<64 lowercase hex>")
+    exact_keys(value, top, top, label)
     if value["schema_version"] != RATE_CARD_SOURCE_SCHEMA:
         fail(f"{label}: schema_version must be {RATE_CARD_SOURCE_SCHEMA}")
     if not isinstance(value["policy_version"], str) or value["policy_version"].strip() != value["policy_version"] or not value["policy_version"]:
@@ -1018,13 +1060,10 @@ def expand_rate_card(source_obj: dict, rate_classes: dict[str, str], candidate_o
     value = {
         "generated_at": source_obj["generated_at"],
         "policy_version": source_obj["policy_version"],
-        "source_snapshot": source_obj.get("source_snapshot"),
         "rows": rows,
         "usd_per_million_credits": source_obj["usd_per_million_credits"],
         "version": "",
     }
-    if value["source_snapshot"] is None:
-        del value["source_snapshot"]
     value["version"] = rate_card_projection_hash(value)
     rate_card = canonical_sorted_bytes(value)
     rate_card_obj = validate_rate_card(rate_card)
@@ -4115,6 +4154,7 @@ def generate(
     previous_release_dir: pathlib.Path | None = None,
     activate_artifact_feed: bool = False,
     intake_audit_dir: pathlib.Path | None = None,
+    market_peg: tuple[pathlib.Path, pathlib.Path, pathlib.Path, pathlib.Path] | None = None,
 ) -> None:
     candidate_path = CATALOG_DIR / "autotune-candidates.json"
     demand_path = CATALOG_DIR / "demand-rank.json"
@@ -4152,6 +4192,8 @@ def generate(
     rate_classes = artifact_rate_classes(artifact_obj) if artifact_obj is not None else {}
     rate_card = resolve_rate_card(rate_classes, candidate_obj)
     rate_card_obj = validate_rate_card(rate_card)
+    if market_peg is not None:
+        validate_market_peg(*market_peg, candidate_obj, demand_obj, rate_card_obj)
     if state == "activation":
         require_rate_card_unchanged_at_activation(rate_card_obj, release_history(ledger_before, candidate_obj["version"]))
     validate_release_inputs(candidate_obj, demand_obj, rate_card_obj)
@@ -4318,6 +4360,11 @@ def verify(previous_release_dir: pathlib.Path | None = None, intake_audit_dir: p
     candidate_obj = validate_candidate(candidate)
     demand_obj = validate_demand(demand)
     rate_card_obj = validate_rate_card(rate_card)
+    if MARKET_PEG_BIND_PATH.exists():
+        missing = [name for name in ("openrouter-rate-card-proposal.json", "openrouter-demand-rank-proposal.json", "openrouter-pricing-snapshot.json", "openrouter_pricing_policy.json") if not (ROOT / name).exists()]
+        if missing:
+            fail("market-peg-bind: named proposal/snapshot/policy inputs are missing: " + ", ".join(missing))
+        validate_market_peg(ROOT / "openrouter-rate-card-proposal.json", ROOT / "openrouter-demand-rank-proposal.json", ROOT / "openrouter-pricing-snapshot.json", ROOT / "openrouter_pricing_policy.json", candidate_obj, demand_obj, rate_card_obj)
     validate_release_inputs(candidate_obj, demand_obj, rate_card_obj)
     if candidate != canonical_bytes(candidate_obj) or demand != canonical_bytes(demand_obj) or rate_card != canonical_bytes(rate_card_obj):
         fail("canonical feed files must use deterministic compact JSON with no trailing newline")
@@ -4771,6 +4818,10 @@ def main() -> int:
             "Refused while any generator-side prerequisite is unmet; see `status`."
         ),
     )
+    generate_parser.add_argument("--market-rate-proposal", type=pathlib.Path)
+    generate_parser.add_argument("--market-demand-proposal", type=pathlib.Path)
+    generate_parser.add_argument("--market-snapshot", type=pathlib.Path)
+    generate_parser.add_argument("--market-policy", type=pathlib.Path)
     verify_parser = sub.add_parser("verify")
     verify_parser.add_argument("--intake-audit-dir", type=pathlib.Path, help="see generate --intake-audit-dir")
     verify_parser.add_argument(
@@ -4872,7 +4923,12 @@ def main() -> int:
         elif args.command == "restamp":
             restamp(args.release_id, args.generated_at)
         elif args.command == "generate":
-            generate(args.signer_key_id, args.previous_release_dir, args.activate_artifact_feed, args.intake_audit_dir)
+            market_args = (args.market_rate_proposal, args.market_demand_proposal, args.market_snapshot, args.market_policy)
+            if any(value is None for value in market_args):
+                if any(value is not None for value in market_args):
+                    fail("generate: market ingest requires all four --market-* paths")
+                market_args = None
+            generate(args.signer_key_id, args.previous_release_dir, args.activate_artifact_feed, args.intake_audit_dir, market_args)
         elif args.command == "verify":
             verify(args.previous_release_dir, args.intake_audit_dir)
         elif args.command == "status":

@@ -451,7 +451,7 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
         changed = next(item for item in proposal["changed"] if item["model_id"] == "openai/gpt-oss-20b")
         self.assertLess(changed["proposed_rates"]["prompt_rate_per_mtok"], 999999)
 
-    def test_proposal_contains_added_changed_retained_unchanged_and_blocked(self):
+    def test_proposal_contains_added_changed_unchanged_and_blocked(self):
         snapshot = self.snapshot()
         proposal_policy = policy()
         proposal_policy["models"][2]["license"]["commercial_permitted"] = False
@@ -481,11 +481,7 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
         dropped_ids = {row.get("model_id") for row in proposal["dropped"]}
         self.assertEqual(dropped_ids & served, set())
 
-    def test_absent_served_row_routing_matrix(self):
-        # A served row absent from the cohort is retained ONLY while its policy
-        # serving/license evidence is still valid. A fatal serving/license failure
-        # routes it to blocked (surfaced for a human), never silently retained --
-        # and never dropped.
+    def test_absent_served_row_fails_the_whole_compute(self):
         QWEN = "unmapped-kept"  # absent-from-cohort helper
 
         base_snapshot = self.snapshot()
@@ -502,28 +498,24 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
         def ids(prop, bucket):
             return {r["model_id"] for r in prop[bucket]}
 
-        valid = proposal_for(lambda m: None)
-        self.assertIn(QWEN, ids(valid, "retained"))
-        self.assertNotIn(QWEN, ids(valid, "blocked"))
-        self.assertEqual(valid["dropped"], [])
+        for mutate in (
+            lambda model: None,
+            lambda model: model["license"].__setitem__("commercial_permitted", False),
+            lambda model: model["serving_path"].__setitem__("verification_status", "unverified"),
+        ):
+            with self.assertRaises(engine.SchemaError) as caught:
+                proposal_for(mutate)
+            self.assertIn("market-pegged compute emits no proposals", str(caught.exception))
 
-        revoked_license = proposal_for(lambda m: m["license"].__setitem__("commercial_permitted", False))
-        self.assertIn(QWEN, ids(revoked_license, "blocked"))
-        self.assertNotIn(QWEN, ids(revoked_license, "retained"))
-        self.assertEqual(revoked_license["dropped"], [])
-
-        unverified_serving = proposal_for(lambda m: m["serving_path"].__setitem__("verification_status", "unverified"))
-        self.assertIn(QWEN, ids(unverified_serving, "blocked"))
-        self.assertNotIn(QWEN, ids(unverified_serving, "retained"))
-        self.assertEqual(unverified_serving["dropped"], [])
-
-    def test_proposal_schema_is_v2_with_retained_bucket(self):
+    def test_proposal_schema_is_v2_without_retain_on_absence(self):
         proposal = engine.build_proposal(self.snapshot(), policy(), reference_rate_card(), now=NOW)
         self.assertEqual(engine.PROPOSAL_SCHEMA_VERSION, 2)
         self.assertEqual(proposal["schema_version"], 2)
-        for bucket in ("added", "changed", "dropped", "retained", "blocked", "unchanged"):
+        for bucket in ("added", "changed", "dropped", "blocked", "unchanged"):
             self.assertIn(bucket, proposal)
             self.assertIn(bucket, proposal["summary"])
+        self.assertNotIn("retained", proposal)
+        self.assertNotIn("retained", proposal["summary"])
         self.assertEqual(
             proposal["summary"]["eligible"],
             len(proposal["added"]) + len(proposal["changed"]) + len(proposal["unchanged"]),
@@ -911,11 +903,11 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
             "or_requests_30d": "0",
         })
 
-    def test_engine_accepts_linked_rate_card_reference(self):
+    def test_engine_rejects_published_snapshot_fields_in_feed_schema_a(self):
         card = reference_rate_card()
         card["source_snapshot"] = {"content_digest": "sha256:" + "a" * 64}
-        engine.validate_rate_card(card)
-        engine.build_proposal(self.snapshot(), policy(), card, now=NOW)
+        with self.assertRaises(engine.SchemaError):
+            engine.validate_rate_card(card)
 
     def test_rate_card_reference_is_not_mutated(self):
         card = reference_rate_card()

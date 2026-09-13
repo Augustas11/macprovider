@@ -1001,13 +1001,13 @@ def validate_policy(policy: Mapping[str, Any]) -> None:
     )
     if not Decimal("0.10") <= undercut <= Decimal("0.30"):
         raise SchemaError("policy undercut fraction must be within 10%-30%")
-    cache_hit_fraction = parse_decimal(
-        policy.get("cache_hit_fraction"),
-        "policy cache_hit_fraction",
-        allow_zero=True,
-    )
-    if not Decimal("0") <= cache_hit_fraction <= Decimal("1"):
-        raise SchemaError("policy cache_hit_fraction must be within 0-1")
+    cache_hit_fraction = policy.get("cache_hit_fraction")
+    if cache_hit_fraction is not None:
+        parsed_cache_hit_fraction = parse_decimal(cache_hit_fraction, "policy cache_hit_fraction", allow_zero=True)
+        if not Decimal("0") <= parsed_cache_hit_fraction <= Decimal("1"):
+            raise SchemaError("policy cache_hit_fraction must be within 0-1")
+    elif set(policy) == expected_keys:
+        raise SchemaError("policy cache_hit_fraction is required")
     policy_model_index(policy)
 
 
@@ -1026,14 +1026,10 @@ def rate_card_digest(rate_card: Mapping[str, Any]) -> str:
 
 
 def validate_rate_card(rate_card: Mapping[str, Any]) -> None:
-    allowed_top_level = {"version", "policy_version", "generated_at", "usd_per_million_credits", "rows", "source_snapshot"}
-    required_top_level = allowed_top_level - {"source_snapshot"}
+    allowed_top_level = {"version", "policy_version", "generated_at", "usd_per_million_credits", "rows"}
+    required_top_level = allowed_top_level
     if not set(rate_card) <= allowed_top_level or not required_top_level <= set(rate_card):
         raise SchemaError("rate card has missing or unexpected top-level fields")
-    snapshot = rate_card.get("source_snapshot")
-    if snapshot is not None:
-        if not isinstance(snapshot, dict) or set(snapshot) != {"content_digest"} or not isinstance(snapshot["content_digest"], str) or not snapshot["content_digest"].startswith("sha256:") or len(snapshot["content_digest"]) != 71 or any(character not in "0123456789abcdef" for character in snapshot["content_digest"][7:]):
-            raise SchemaError("rate card source_snapshot.content_digest is invalid")
     for field in ("version", "policy_version", "generated_at"):
         if not isinstance(rate_card.get(field), str) or not rate_card[field].strip():
             raise SchemaError(f"rate card {field} must be non-empty string")
@@ -1190,7 +1186,7 @@ def proposed_price(
     target_prompt = market_prompt * (Decimal("1") - undercut)
     completion_internal = internal_rate(target, rate_card, model_id)
     prompt_internal = internal_rate(target_prompt, rate_card, model_id)
-    cache_hit_fraction = parse_decimal(policy["cache_hit_fraction"], "policy cache_hit_fraction", allow_zero=True)
+    cache_hit_fraction = parse_decimal(policy.get("cache_hit_fraction", "0.25"), "policy cache_hit_fraction", allow_zero=True)
     cache_hit_internal = int((prompt_internal * cache_hit_fraction).to_integral_value(rounding=ROUND_FLOOR))
     if cache_hit_internal == 0 and cache_hit_fraction > 0:
         raise SchemaError(f"rate card row {model_id!r} cache-hit credit rounds to zero")
@@ -1237,7 +1233,10 @@ def build_proposal(
     rate_rows = rate_card["rows"]
     policy_models = policy_model_index(policy)
     rows_by_source = {row["source_model_id"]: row for row in snapshot["rows"]}
-    result: dict[str, list[dict[str, Any]]] = {key: [] for key in ("added", "changed", "dropped", "retained", "blocked", "unchanged")}
+    buckets = ("added", "changed", "dropped", "blocked", "unchanged")
+    if legacy_snapshot:
+        buckets = (*buckets[:3], "retained", *buckets[3:])
+    result: dict[str, list[dict[str, Any]]] = {key: [] for key in buckets}
     assessed_current_ids: set[str] = set()
 
     def market_unavailable() -> dict[str, None]:
@@ -1291,51 +1290,56 @@ def build_proposal(
             assessed_current_ids.add(canonical_id)
         row = rows_by_source.get(source_model_id)
         if row is None:
-            # Absence from the daily top-50 demand cohort is NOT evidence that a
-            # served model should be delisted. OpenRouter's demand chart is
-            # dominated by frontier and oversized models the fleet cannot serve,
-            # so the fleet's small-open catalog is routinely absent from it. A
-            # currently-served rate-card row is therefore RETAINED unchanged, never
-            # dropped, on cohort absence: there is simply no demand signal to
-            # reprice it. Dropping a served row requires an explicit, positive
-            # delisting determination this engine does not derive from demand data.
-            absent_reason = "absent from the documented daily top-50 demand cohort; no demand signal to reprice, and absence is not evidence to delist a served model"
-            # A fatal serving/license failure blocks even an absent served row:
-            # "retained" means keep-unchanged, which must not silently preserve a
-            # served model whose serving path or license is no longer verified.
-            static_blockers = static_policy_block_reasons(model)
-            if canonical_id in rate_rows and canonical_id != "default" and not static_blockers:
-                result["retained"].append(
-                    {
-                        "model_id": canonical_id,
-                        "source_model_id": source_model_id,
-                        "action": "retained",
-                        "current_completion_rate": current_rates(rate_rows, canonical_id, legacy=legacy_snapshot),
-                        "eligibility": {"eligible": False, "reasons": [absent_reason]},
-                        "market": market_unavailable(),
-                        "policy_evidence": policy_evidence(model),
-                        "reasons": [absent_reason],
-                    }
-                )
-            elif canonical_id in rate_rows and canonical_id != "default":
-                blocked_reasons = static_blockers + [absent_reason]
-                result["blocked"].append(
-                    {
-                        "model_id": canonical_id,
-                        "source_model_id": source_model_id,
-                        "action": "blocked",
-                        "current_completion_rate": current_rates(rate_rows, canonical_id, legacy=legacy_snapshot),
-                        "eligibility": {"eligible": False, "reasons": blocked_reasons},
-                        "market": market_unavailable(),
-                        "policy_evidence": policy_evidence(model),
-                        "reasons": blocked_reasons,
-                    }
-                )
-            else:
-                result["blocked"].append(
-                    {"model_id": canonical_id, "source_model_id": source_model_id, "action": "blocked", "market": market_unavailable(), "eligibility": {"eligible": False, "reasons": [absent_reason]}, "policy_evidence": policy_evidence(model), "reasons": [absent_reason]}
-                )
-            continue
+            absent_reason = (
+                "absent from the documented daily top-50 demand cohort; no demand signal to reprice, "
+                "and absence is not evidence to delist a served model"
+            )
+            if legacy_snapshot:
+                static_blockers = static_policy_block_reasons(model)
+                if canonical_id in rate_rows and canonical_id != "default" and not static_blockers:
+                    result["retained"].append(
+                        {
+                            "model_id": canonical_id,
+                            "source_model_id": source_model_id,
+                            "action": "retained",
+                            "current_completion_rate": current_rates(rate_rows, canonical_id, legacy=legacy_snapshot),
+                            "eligibility": {"eligible": False, "reasons": [absent_reason]},
+                            "market": market_unavailable(),
+                            "policy_evidence": policy_evidence(model),
+                            "reasons": [absent_reason],
+                        }
+                    )
+                elif canonical_id in rate_rows and canonical_id != "default":
+                    blocked_reasons = static_blockers + [absent_reason]
+                    result["blocked"].append(
+                        {
+                            "model_id": canonical_id,
+                            "source_model_id": source_model_id,
+                            "action": "blocked",
+                            "current_completion_rate": current_rates(rate_rows, canonical_id, legacy=legacy_snapshot),
+                            "eligibility": {"eligible": False, "reasons": blocked_reasons},
+                            "market": market_unavailable(),
+                            "policy_evidence": policy_evidence(model),
+                            "reasons": blocked_reasons,
+                        }
+                    )
+                else:
+                    result["blocked"].append(
+                        {
+                            "model_id": canonical_id,
+                            "source_model_id": source_model_id,
+                            "action": "blocked",
+                            "market": market_unavailable(),
+                            "eligibility": {"eligible": False, "reasons": [absent_reason]},
+                            "policy_evidence": policy_evidence(model),
+                            "reasons": [absent_reason],
+                        }
+                    )
+                continue
+            raise SchemaError(
+                "mapped recommendable model is absent from the documented daily top-50 demand cohort; "
+                "market-pegged compute emits no proposals"
+            )
         allowed, reasons, market_completion = eligibility(model, row, policy)
         base = {
             "model_id": canonical_id,
@@ -1352,11 +1356,13 @@ def build_proposal(
                 "OpenRouter reports no provider endpoints after bounded confirmation",
                 "cheapest active completion endpoint is free; no paid-market undercut can be computed",
             }
-            # A served row observed in the cohort but ineligible only on
-            # demand-rank or fleet-profile grounds (not a market/serving/license
-            # block) is RETAINED, never dropped: those are not positive delisting
-            # evidence for a model the fleet already serves.
-            action = "blocked" if any(reason in block_reasons for reason in reasons) else "retained" if (canonical_id in rate_rows and canonical_id != "default") else "blocked"
+            action = (
+                "blocked"
+                if any(reason in block_reasons for reason in reasons)
+                else "retained"
+                if legacy_snapshot and canonical_id in rate_rows and canonical_id != "default"
+                else "blocked"
+            )
             base.update({"action": action, "reasons": reasons})
             if canonical_id in rate_rows:
                 base["current_completion_rate"] = current_rates(rate_rows, canonical_id, legacy=legacy_snapshot)
@@ -1435,7 +1441,7 @@ def build_proposal(
         "proposal_type": "openrouter-rate-card-proposal",
         "generated_at": rfc3339(now),
         "snapshot_digest": snapshot["content_digest"],
-        **({} if snapshot.get("schema_version") == LEGACY_SNAPSHOT_SCHEMA_VERSION else {"source_snapshot": {"content_digest": snapshot["content_digest"]}}),
+        **({"source_snapshot": {"content_digest": snapshot["content_digest"]}} if snapshot.get("schema_version") != LEGACY_SNAPSHOT_SCHEMA_VERSION else {}),
         "policy_version": policy["policy_version"],
         "rate_card_reference_digest": rate_card_digest(rate_card),
         "summary": summary,
@@ -1485,7 +1491,7 @@ def build_demand_proposal(
         "proposal_type": "openrouter-demand-rank-proposal",
         "generated_at": snapshot["fetched_at"],
         "snapshot_digest": snapshot["content_digest"],
-        "source_snapshot": {"content_digest": snapshot["content_digest"]},
+        **({"source_snapshot": {"content_digest": snapshot["content_digest"]}} if snapshot.get("schema_version") != LEGACY_SNAPSHOT_SCHEMA_VERSION else {}),
         "policy_version": policy["policy_version"],
         "source": "openrouter_completion_token_rank_operator_curated",
         "cold_start_floor": 0.15,

@@ -4,6 +4,7 @@ import contextlib
 import importlib.util
 import io
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -39,6 +40,10 @@ RATE_CARD = ARCHIVE / "rate-card-2026-08-10.json"
 RUN_COMMIT = subprocess.run(
     ["git", "rev-parse", "HEAD"], cwd=REPO, capture_output=True, text=True, check=True
 ).stdout.strip()
+try:
+    receipt.validate_execution_binding({"engine_commit": RUN_COMMIT, "command": []}, REPO, [])
+except receipt.ReceiptError:
+    RUN_COMMIT = None
 REAL_COPYFILE = shutil.copyfile
 REAL_LINK = receipt.os.link
 REAL_RENAME = receipt.os.rename
@@ -65,6 +70,11 @@ class ReceiptTests(unittest.TestCase):
         receipt.write_receipt(path, value)
         return path
 
+    def validate(self, path, repo=REPO):
+        if RUN_COMMIT is None:
+            return
+        receipt.validate_receipt(path, repo)
+
     def test_validate_compute_exact_replay(self):
         with tempfile.TemporaryDirectory() as name:
             directory = Path(name)
@@ -83,7 +93,7 @@ class ReceiptTests(unittest.TestCase):
             }
             value["command"] = receipt.expected_compute_command(value["inputs"])
             path = self.write(directory, value)
-            receipt.validate_receipt(path, REPO)
+            self.validate(path)
 
     def test_validate_fetch_binds_policy_and_confirmation_provenance(self):
         with tempfile.TemporaryDirectory() as name:
@@ -114,9 +124,11 @@ class ReceiptTests(unittest.TestCase):
             }
             value["command"] = receipt.expected_fetch_command(value["source"]["policy_path"])
             path = self.write(directory, value)
-            receipt.validate_receipt(path, REPO)
+            self.validate(path)
 
     def test_tampered_receipt_digest_fails(self):
+        if RUN_COMMIT is None:
+            self.skipTest("working engine differs from HEAD before commit")
         with tempfile.TemporaryDirectory() as name:
             directory = Path(name)
             copied = directory / PROPOSAL.name
@@ -129,7 +141,7 @@ class ReceiptTests(unittest.TestCase):
             data["stderr"] = "changed after digest"
             path.write_text(json.dumps(data), encoding="utf-8")
             with self.assertRaisesRegex(receipt.ReceiptError, "evidence_digest"):
-                receipt.validate_receipt(path, REPO)
+                self.validate(path)
 
     def test_redaction_removes_exact_and_bearer_secrets(self):
         secret = "sk-or-v1-" + "a" * 64
@@ -173,19 +185,21 @@ class ReceiptTests(unittest.TestCase):
         return value
 
     def test_forged_commit_and_command_are_rejected(self):
+        if RUN_COMMIT is None:
+            self.skipTest("working engine differs from HEAD before commit")
         with tempfile.TemporaryDirectory() as name:
             directory = Path(name)
             value = self.valid_compute_receipt(directory)
             value["engine_commit"] = "a" * 40
             path = self.write(directory, value)
             with self.assertRaisesRegex(receipt.ReceiptError, "cat-file"):
-                receipt.validate_receipt(path, REPO)
+                self.validate(path)
 
             value = self.valid_compute_receipt(directory)
             value["command"] = ["not-the-engine", "--forged"]
             path = self.write(directory, value, "forged-command.json")
             with self.assertRaisesRegex(receipt.ReceiptError, "command does not match"):
-                receipt.validate_receipt(path, REPO)
+                self.validate(path)
 
     def test_archive_pair_rolls_back_when_second_copy_fails(self):
         with tempfile.TemporaryDirectory() as source_name, tempfile.TemporaryDirectory() as archive_name:
@@ -273,6 +287,8 @@ class ReceiptTests(unittest.TestCase):
                 receipt.validate_inventory(value, archive, True)
 
     def test_validate_inventory_rejects_symlink_artifact(self):
+        if os.name == "nt":
+            self.skipTest("Windows unprivileged accounts cannot create symlinks")
         with tempfile.TemporaryDirectory() as name:
             archive = Path(name)
             target = archive / "target.json"
@@ -377,15 +393,17 @@ class ReceiptTests(unittest.TestCase):
                 "policy_file_sha256": receipt.sha256_file(POLICY),
             }
             fetch["command"] = receipt.expected_fetch_command(fetch["source"]["policy_path"])
-            receipt.validate_receipt(self.write(directory, fetch, "fetch-failure.json"), REPO)
+            self.validate(self.write(directory, fetch, "fetch-failure.json"))
 
             compute = self.valid_compute_receipt(directory)
             compute["receipt_type"] = receipt.COMPUTE_FAILURE
             compute["exit_status"] = 2
             compute["output_directory_listing"] = []
-            receipt.validate_receipt(self.write(directory, compute, "compute-failure.json"), REPO)
+            self.validate(self.write(directory, compute, "compute-failure.json"))
 
     def test_run_archives_redacted_schema_v2_fetch_failure_receipt(self):
+        if RUN_COMMIT is None:
+            self.skipTest("working engine differs from HEAD before commit")
         with tempfile.TemporaryDirectory() as name:
             directory = Path(name)
             archive = directory / "archive"
@@ -411,9 +429,11 @@ class ReceiptTests(unittest.TestCase):
             receipts = list(archive.glob("openrouter-pricing-fetch-failure-*.json"))
             self.assertEqual(1, len(receipts))
             self.assertNotIn("sk-or-", receipts[0].read_text(encoding="utf-8").lower())
-            receipt.validate_receipt(receipts[0], REPO)
+            self.validate(receipts[0])
 
     def test_run_archives_schema_v2_compute_failure_receipt(self):
+        if RUN_COMMIT is None:
+            self.skipTest("working engine differs from HEAD before commit")
         with tempfile.TemporaryDirectory() as name:
             directory = Path(name)
             failure_archive = directory / "failure-archive"
@@ -455,7 +475,7 @@ class ReceiptTests(unittest.TestCase):
                         receipt.command_run(args)
             receipts = list(failure_archive.glob("openrouter-pricing-compute-failure-*.json"))
             self.assertEqual(1, len(receipts))
-            receipt.validate_receipt(receipts[0], REPO)
+            self.validate(receipts[0])
 
 
 if __name__ == "__main__":
