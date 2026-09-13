@@ -13,7 +13,7 @@ For the normal desktop/Malibu.app install, use the standard installer without
 - macOS Apple Silicon Mac mini
 - SSH access as the intended non-root fleet user
 - Python 3 and Command Line Tools available on the Mac
-- Passwordless `sudo` for `/bin/launchctl` if you later run
+- Passwordless `sudo` for `/bin/launchctl` and `/bin/rm` if you later run
   `malibu-cli uninstall` from this account
 
 ## Install
