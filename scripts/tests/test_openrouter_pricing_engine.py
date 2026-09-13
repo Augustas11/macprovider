@@ -260,16 +260,15 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
         self.assertEqual(snapshot["rows"][0]["source_metadata"]["identity_resolution"], "endpoint_alias_fallback")
         self.assertIsNone(snapshot["rows"][0]["source_metadata"]["catalog_name"])
 
-    def test_no_active_priced_endpoint_is_snapshotted_and_blocked_not_dropped(self):
+    def test_no_active_priced_endpoint_is_snapshotted_but_fails_compute(self):
         rankings, models, endpoints = self.expanded_inputs()
         endpoints["openai/gpt-oss-20b"]["data"]["endpoints"][0]["status"] = -2
         snapshot = engine.build_snapshot(rankings, models, endpoints, policy(), now=NOW, top_n=50)
         row = next(item for item in snapshot["rows"] if item["source_model_id"] == "openai/gpt-oss-20b")
         self.assertEqual(row["pricing_status"], "no_active_priced_endpoint")
         self.assertIsNone(row["pricing"])
-        proposal = engine.build_proposal(snapshot, policy(), reference_rate_card(), now=NOW)
-        blocked = next(item for item in proposal["blocked"] if item["model_id"] == "openai/gpt-oss-20b")
-        self.assertIn("no active priced OpenRouter endpoint is available", blocked["reasons"])
+        with self.assertRaisesRegex(engine.SchemaError, "no active priced OpenRouter endpoint"):
+            engine.build_proposal(snapshot, policy(), reference_rate_card(), now=NOW)
 
     def test_malformed_inactive_endpoint_rows_abort_snapshot_generation(self):
         mutations = {
@@ -468,6 +467,7 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
         gpt_oss = next(row for row in proposal["changed"] if row["model_id"] == "openai/gpt-oss-20b")
         self.assertEqual(gpt_oss["proposed_rates"]["completion_rate_per_mtok"], 104000)
         self.assertEqual(gpt_oss["proposed_rates"]["prompt_rate_per_mtok"], 24000)
+        self.assertEqual(gpt_oss["proposed_rates"]["prompt_cache_hit_rate_per_mtok"], 6000)
 
     def test_served_row_is_never_dropped_by_the_proposal(self):
         # Regression lock for the false-drop fix: across the fixed fixture, no
@@ -580,10 +580,11 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
         card["usd_per_million_credits"] = 2.0
         card["rows"]["default"]["global_multiplier_ppm"] = 2000000
         card["rows"]["default"]["provider_share_bps"] = 5000
-        self.assertEqual(engine.completion_rate_to_internal(engine.Decimal("0.20"), card, "not-present"), 50000)
+        self.assertEqual(engine.completion_rate_to_internal(engine.Decimal("0.20"), card, "not-present"), 100000)
         coding = model("example/new-model", "example/new-model")
         coding.update({"coding_specialist": True})
         coding["profile"] = {"kind": "coding_dense", "active_params_b": "32", "residency_gb": "17", "projected_tps": "200"}
+        coding["profile"]["projected_tps"] = "20"
         with self.assertRaises(engine.SchemaError):
             engine.proposed_price(coding, {"input_per_mtok": "0.31", "completion_per_mtok": "0.25"}, policy(), card, "example/new-model")
 
@@ -710,7 +711,7 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
             self.assertEqual(list(Path(temporary).iterdir()), [])
         self.assertIn(endpoint_url, client.requested_urls)
 
-    def test_confirmed_empty_endpoint_set_completes_snapshot_and_is_blocked(self):
+    def test_confirmed_empty_endpoint_set_is_snapshotted_but_fails_compute(self):
         rankings, models, endpoints = self.expanded_inputs()
         endpoints["openai/gpt-oss-20b"]["data"]["endpoints"] = []
         snapshot = engine.build_snapshot(
@@ -726,12 +727,8 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
         self.assertEqual(row["pricing_status"], "no_provider_endpoints")
         self.assertIsNone(row["pricing"])
         self.assertEqual(snapshot["source"]["fetch_metadata"]["successful_source_count"], 53)
-        proposal = engine.build_proposal(snapshot, policy(), reference_rate_card(), now=NOW)
-        blocked = next(item for item in proposal["blocked"] if item.get("source_model_id") == "openai/gpt-oss-20b")
-        self.assertIn("OpenRouter reports no provider endpoints after bounded confirmation", blocked["reasons"])
-        self.assertIsNone(blocked["market"]["benchmark_provider"])
-        self.assertIsNone(blocked["market"]["completion_per_mtok"])
-        self.assertNotIn("proposed_rates", blocked)
+        with self.assertRaisesRegex(engine.SchemaError, "OpenRouter reports no provider endpoints"):
+            engine.build_proposal(snapshot, policy(), reference_rate_card(), now=NOW)
 
     def test_fetch_confirms_empty_endpoint_set_and_records_provenance(self):
         rankings_url = engine.daily_rankings_url(NOW, 30)
@@ -860,8 +857,10 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
         max_tokens = max(tokens.values())
         for canonical_id, source_row in mapped_snapshot_rows.items():
             row = demand_proposal["rows"][canonical_id]
-            self.assertEqual(row["or_completion_tokens_30d"], source_row["demand"]["total_token_volume"])
-            self.assertTrue(row["or_requests_30d"].isdigit())
+            self.assertEqual(row["or_completion_tokens_30d"], int(source_row["demand"]["total_token_volume"]))
+            self.assertIsInstance(row["or_completion_tokens_30d"], int)
+            self.assertEqual(row["or_requests_30d"], 0)
+            self.assertIsInstance(row["or_requests_30d"], int)
             self.assertAlmostEqual(row["demand_weight"], tokens[canonical_id] / max_tokens)
 
     def test_liquidity_filter_drops_free_dust_and_unreliable_quotes(self):
@@ -899,8 +898,8 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
             "rank": None,
             "recommendable": True,
             "min_provider_target": 15,
-            "or_completion_tokens_30d": "0",
-            "or_requests_30d": "0",
+            "or_completion_tokens_30d": 0,
+            "or_requests_30d": 0,
         })
 
     def test_engine_rejects_published_snapshot_fields_in_feed_schema_a(self):

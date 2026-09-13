@@ -386,10 +386,7 @@ def validate_demand(data: bytes) -> dict:
     value = strict_json(data, "demand-rank")
     top = {"version", "generated_at", "source", "policy_version", "cold_start_floor", "diversification_band", "rows"}
     exact_keys(value, top, top, "demand-rank")
-    if value["source"] not in {
-        "openrouter_completion_token_rank_operator_curated",
-        "macprovider_buyer_supply_deficit_v1",
-    }:
+    if value["source"] != "openrouter_completion_token_rank_operator_curated":
         fail("demand-rank: invalid source")
     if not isinstance(value["version"], str) or not value["version"] or value["version"].strip() != value["version"]:
         fail("demand-rank: version must be a non-empty trimmed string")
@@ -795,6 +792,15 @@ def validate_market_peg(
                 fail(f"market-peg: rate-card row {key!r}.{published_field} does not match the proposal")
         if demand_obj["rows"][key]["demand_weight"] != replayed_demand["rows"][key]["demand_weight"]:
             fail(f"market-peg: demand-rank row {key!r}.demand_weight does not match the proposal")
+    if demand_obj.get("source") != replayed_demand.get("source"):
+        fail("market-peg: demand-rank source does not match the OpenRouter proposal")
+    if not rates_by_model:
+        fail("market-peg: replay produced no proposal rates")
+    minimum_key = min(rates_by_model, key=lambda key: rates_by_model[key]["completion_rate_per_mtok"])
+    minimum_rates = rates_by_model[minimum_key]
+    for field in ("prompt_rate_per_mtok", "prompt_cache_hit_rate_per_mtok", "completion_rate_per_mtok"):
+        if rate_card_obj["rows"]["default"][field] != minimum_rates[field]:
+            fail(f"market-peg: rate-card default.{field} does not match the minimum-completion mapped row")
 
 
 def rate_card_projection_hash(value: dict) -> str:
@@ -4155,6 +4161,7 @@ def generate(
     activate_artifact_feed: bool = False,
     intake_audit_dir: pathlib.Path | None = None,
     market_peg: tuple[pathlib.Path, pathlib.Path, pathlib.Path, pathlib.Path] | None = None,
+    market_pegged: bool = False,
 ) -> None:
     candidate_path = CATALOG_DIR / "autotune-candidates.json"
     demand_path = CATALOG_DIR / "demand-rank.json"
@@ -4192,6 +4199,8 @@ def generate(
     rate_classes = artifact_rate_classes(artifact_obj) if artifact_obj is not None else {}
     rate_card = resolve_rate_card(rate_classes, candidate_obj)
     rate_card_obj = validate_rate_card(rate_card)
+    if market_peg is None and market_pegged:
+        fail("generate: market-pegged releases require all four named --market-* paths")
     if market_peg is not None:
         validate_market_peg(*market_peg, candidate_obj, demand_obj, rate_card_obj)
     if state == "activation":
@@ -4822,6 +4831,11 @@ def main() -> int:
     generate_parser.add_argument("--market-demand-proposal", type=pathlib.Path)
     generate_parser.add_argument("--market-snapshot", type=pathlib.Path)
     generate_parser.add_argument("--market-policy", type=pathlib.Path)
+    generate_parser.add_argument(
+        "--market-pegged",
+        action="store_true",
+        help="require the four --market-* inputs and bind this cut to the replayed OpenRouter proposals",
+    )
     verify_parser = sub.add_parser("verify")
     verify_parser.add_argument("--intake-audit-dir", type=pathlib.Path, help="see generate --intake-audit-dir")
     verify_parser.add_argument(
@@ -4928,7 +4942,7 @@ def main() -> int:
                 if any(value is not None for value in market_args):
                     fail("generate: market ingest requires all four --market-* paths")
                 market_args = None
-            generate(args.signer_key_id, args.previous_release_dir, args.activate_artifact_feed, args.intake_audit_dir, market_args)
+            generate(args.signer_key_id, args.previous_release_dir, args.activate_artifact_feed, args.intake_audit_dir, market_args, market_pegged=args.market_pegged)
         elif args.command == "verify":
             verify(args.previous_release_dir, args.intake_audit_dir)
         elif args.command == "status":

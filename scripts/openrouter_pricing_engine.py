@@ -24,7 +24,7 @@ import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal, InvalidOperation, ROUND_FLOOR, ROUND_HALF_UP
+from decimal import Decimal, InvalidOperation, ROUND_FLOOR
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol
@@ -576,6 +576,17 @@ def endpoint_set_is_empty(document: Mapping[str, Any], requested_model_id: str) 
     return not endpoints
 
 
+def weighted_median(priced: list[tuple[Decimal, ...]], value_index: int) -> tuple[Decimal, int]:
+    ordered = sorted(priced, key=lambda item: item[value_index])
+    total = sum(item[5] for item in ordered)
+    cumulative = 0
+    for item in ordered:
+        cumulative += item[5]
+        if cumulative * 2 >= total:
+            return item[value_index], item[5]
+    return ordered[-1][value_index], ordered[-1][5]
+
+
 def cheapest_endpoint_pricing(document: Mapping[str, Any], model_id: str, *, model_tokens_30d: int = 0) -> dict[str, Any] | None:
     require_allowed_keys(document, frozenset({"data"}), f"endpoints response for {model_id}")
     data = document.get("data")
@@ -616,16 +627,24 @@ def cheapest_endpoint_pricing(document: Mapping[str, Any], model_id: str, *, mod
         priced.append((completion, prompt, throughput, uptime, provider, completion_tokens))
     if not priced:
         return None
-    ordered = sorted(priced, key=lambda item: item[0])
-    cumulative = 0
-    total = sum(item[5] for item in ordered)
-    selected = ordered[-1]
-    for item in ordered:
-        cumulative += item[5]
-        if cumulative * 2 >= total:
-            selected = item
-            break
-    completion, prompt, throughput, uptime, provider, selected_tokens = selected
+    completion, _ = weighted_median(priced, 0)
+    prompt, selected_tokens = weighted_median(priced, 1)
+    selected = next(item for item in priced if item[0] == completion and item[1] == prompt and item[5] == selected_tokens)
+    _, _, throughput, uptime, provider, _ = selected
+    liquidity_candidates = [
+        {
+            "endpoint_status": status,
+            "provider_name": candidate_provider,
+            "prompt_usd_per_mtok": decimal_string(candidate_prompt * Decimal("1000000")),
+            "completion_usd_per_mtok": decimal_string(candidate_completion * Decimal("1000000")),
+            "completion_tokens_last_30d": candidate_tokens,
+            "throughput_last_30m": decimal_string(candidate_throughput),
+            "uptime_last_30d": decimal_string(candidate_uptime),
+        }
+        for status, candidate_provider, candidate_prompt, candidate_completion, candidate_throughput, candidate_uptime, candidate_tokens in (
+            (0, item[4], item[1], item[0], item[2], item[3], item[5]) for item in priced
+        )
+    ]
     return {
         "input_per_token": decimal_string(prompt),
         "completion_per_token": decimal_string(completion),
@@ -642,6 +661,7 @@ def cheapest_endpoint_pricing(document: Mapping[str, Any], model_id: str, *, mod
             "volume_weighted_median": True,
             "selected_throughput_last_30m": decimal_string(throughput),
             "selected_uptime_last_30d": decimal_string(uptime),
+            "eligible_endpoint_liquidity": liquidity_candidates,
         },
     }
 
@@ -740,7 +760,7 @@ def validate_snapshot(snapshot: Mapping[str, Any]) -> None:
             raise SchemaError(f"snapshot.rows[{index}] has invalid pricing provenance")
         if pricing_status == "active_priced" and schema_version != LEGACY_SNAPSHOT_SCHEMA_VERSION:
             liquidity = pricing.get("liquidity_filter")
-            required_liquidity = {"endpoint_status", "paid_prices", "minimum_throughput_last_30m", "minimum_uptime_last_30d", "completion_tokens_last_30d", "volume_weighted_median", "selected_throughput_last_30m", "selected_uptime_last_30d"}
+            required_liquidity = {"endpoint_status", "paid_prices", "minimum_throughput_last_30m", "minimum_uptime_last_30d", "completion_tokens_last_30d", "volume_weighted_median", "selected_throughput_last_30m", "selected_uptime_last_30d", "eligible_endpoint_liquidity"}
             if not isinstance(liquidity, dict) or set(liquidity) != required_liquidity:
                 raise SchemaError(f"snapshot.rows[{index}] has invalid liquidity filter")
             if liquidity["endpoint_status"] != 0 or liquidity["paid_prices"] is not True or liquidity["minimum_throughput_last_30m"] != "1" or liquidity["minimum_uptime_last_30d"] != "0.90" or liquidity["volume_weighted_median"] is not True:
@@ -750,6 +770,24 @@ def validate_snapshot(snapshot: Mapping[str, Any]) -> None:
                 selected_uptime = Decimal(liquidity["selected_uptime_last_30d"])
                 selected_prompt = Decimal(pricing["input_per_mtok"])
                 selected_completion = Decimal(pricing["completion_per_mtok"])
+                candidates = liquidity.get("eligible_endpoint_liquidity")
+                if not isinstance(candidates, list) or not candidates:
+                    raise SchemaError(f"snapshot.rows[{index}].liquidity_filter.eligible_endpoint_liquidity must be a non-empty array")
+                required_candidate = {"endpoint_status", "provider_name", "prompt_usd_per_mtok", "completion_usd_per_mtok", "completion_tokens_last_30d", "throughput_last_30m", "uptime_last_30d"}
+                for candidate_index, candidate in enumerate(candidates):
+                    if not isinstance(candidate, dict) or set(candidate) != required_candidate:
+                        raise SchemaError(f"snapshot.rows[{index}].liquidity_filter.eligible_endpoint_liquidity[{candidate_index}] has invalid fields")
+                    if candidate["endpoint_status"] != 0 or not isinstance(candidate["provider_name"], str) or not candidate["provider_name"]:
+                        raise SchemaError(f"snapshot.rows[{index}].liquidity_filter.eligible_endpoint_liquidity[{candidate_index}] is invalid")
+                    for field in ("prompt_usd_per_mtok", "completion_usd_per_mtok", "throughput_last_30m", "uptime_last_30d"):
+                        try:
+                            if Decimal(candidate[field]) <= 0:
+                                raise SchemaError
+                        except (InvalidOperation, ValueError, TypeError, SchemaError):
+                            raise SchemaError(f"snapshot.rows[{index}].liquidity_filter.eligible_endpoint_liquidity[{candidate_index}].{field} is invalid")
+                    candidate_tokens = candidate.get("completion_tokens_last_30d")
+                    if isinstance(candidate_tokens, bool) or not isinstance(candidate_tokens, int) or candidate_tokens < 0:
+                        raise SchemaError(f"snapshot.rows[{index}].liquidity_filter.eligible_endpoint_liquidity[{candidate_index}].completion_tokens_last_30d is invalid")
                 selected_completion_tokens = parse_nonnegative_integer(liquidity["completion_tokens_last_30d"], f"snapshot.rows[{index}].liquidity_filter.completion_tokens_last_30d")
             except (InvalidOperation, ValueError) as error:
                 raise SchemaError(f"snapshot.rows[{index}] liquidity/pricing values are invalid") from error
@@ -1063,10 +1101,14 @@ def current_rates(rate_rows: Mapping[str, Any], model_id: str, *, legacy: bool =
         raise SchemaError(f"rate card row {model_id!r} has invalid completion rate")
     if legacy:
         return {"rate_card_completion_rate_per_mtok": completion}
-    prompt = current.get("prompt_rate_per_mtok")
-    if isinstance(prompt, bool) or not isinstance(prompt, int) or prompt < 0:
-        raise SchemaError(f"rate card row {model_id!r} has invalid prompt rate")
-    return {"rate_card_completion_rate_per_mtok": completion, "rate_card_prompt_rate_per_mtok": prompt}
+    rates = {}
+    for field in ("prompt_rate_per_mtok", "prompt_cache_hit_rate_per_mtok"):
+        value = current.get(field)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise SchemaError(f"rate card row {model_id!r} has invalid {field}")
+        rates[f"rate_card_{field}"] = value
+    rates["rate_card_completion_rate_per_mtok"] = completion
+    return rates
 
 
 def rate_card_economics(rate_card: Mapping[str, Any], model_id: str) -> tuple[Decimal, Decimal, Decimal, str]:
@@ -1084,9 +1126,9 @@ def rate_card_economics(rate_card: Mapping[str, Any], model_id: str) -> tuple[De
 
 def internal_rate(value: Decimal, rate_card: Mapping[str, Any], model_id: str) -> int:
     """Convert buyer USD/MTok to the reference card's credits/MTok encoding."""
-    usd_per_million_credits, multiplier_ppm, _, _ = rate_card_economics(rate_card, model_id)
-    credits_per_mtok = value * Decimal("1000000000000") / (multiplier_ppm * usd_per_million_credits)
-    return int(credits_per_mtok.quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+    usd_per_million_credits, _, _, _ = rate_card_economics(rate_card, model_id)
+    credits_per_mtok = value * Decimal("1000000") / usd_per_million_credits
+    return int(credits_per_mtok.quantize(Decimal("1"), rounding=ROUND_FLOOR))
 
 
 def completion_rate_to_internal(value: Decimal, rate_card: Mapping[str, Any], model_id: str) -> int:
@@ -1174,7 +1216,7 @@ def eligibility(model: Mapping[str, Any], row: Mapping[str, Any], policy: Mappin
 
 def proposed_price(
     model: Mapping[str, Any], market: Mapping[str, Any], policy: Mapping[str, Any], rate_card: Mapping[str, Any], model_id: str
-) -> tuple[Decimal, int, Decimal, int, list[str]]:
+) -> tuple[Decimal, int, Decimal, int, int, list[str]]:
     profile = model["profile"]
     kind = profile["kind"]
     market_completion = parse_decimal(market.get("completion_per_mtok"), "snapshot completion price")
@@ -1198,6 +1240,7 @@ def proposed_price(
             completion_internal,
             target_prompt,
             prompt_internal,
+            cache_hit_internal,
             [f"undercut fraction {decimal_string(undercut)} on OpenRouter liquidity-filtered prompt and completion prices"],
         )
     coding_internal_rate = completion_internal
@@ -1210,7 +1253,8 @@ def proposed_price(
         target,
         coding_internal_rate,
         target_prompt,
-        internal_rate(target_prompt, rate_card, model_id),
+        prompt_internal,
+        cache_hit_internal,
         [
         f"undercut fraction {decimal_string(undercut)} on OpenRouter liquidity-filtered completion price",
         f"provider net hourly USD {decimal_string(provider_hourly)} using rate-card economics row {basis_id}",
@@ -1230,6 +1274,9 @@ def build_proposal(
     coverage = snapshot["source"]["fetch_metadata"]
     if coverage["requested_top_n"] < required_top_n or coverage["observed_model_count"] < required_top_n:
         raise SchemaError("snapshot does not contain the policy-required top-demand coverage")
+    ranking_end_date = coverage["ranking_window_end_date"]
+    if not legacy_snapshot and now.date() - parse_ranking_date(ranking_end_date, "snapshot ranking_window_end_date").date() > timedelta(days=2):
+        raise SchemaError("snapshot ranking window is older than 48 hours; market-pegged compute emits no proposals")
     rate_rows = rate_card["rows"]
     policy_models = policy_model_index(policy)
     rows_by_source = {row["source_model_id"]: row for row in snapshot["rows"]}
@@ -1356,6 +1403,10 @@ def build_proposal(
                 "OpenRouter reports no provider endpoints after bounded confirmation",
                 "cheapest active completion endpoint is free; no paid-market undercut can be computed",
             }
+            if not legacy_snapshot and any(reason in block_reasons for reason in reasons):
+                illiquid_reasons = block_reasons - {"MLX/GGUF serving path is not verified", "commercial license is not verified as permitted"}
+                if any(reason in illiquid_reasons for reason in reasons):
+                    raise SchemaError("; ".join(reasons))
             action = (
                 "blocked"
                 if any(reason in block_reasons for reason in reasons)
@@ -1369,8 +1420,10 @@ def build_proposal(
             result[base["action"]].append(base)
             continue
         try:
-            target, proposed_internal, target_prompt, proposed_prompt_internal, formula_reasons = proposed_price(model, row["pricing"], policy, rate_card, canonical_id)
+            target, proposed_internal, target_prompt, proposed_prompt_internal, proposed_cache_hit_internal, formula_reasons = proposed_price(model, row["pricing"], policy, rate_card, canonical_id)
         except SchemaError as error:
+            if not legacy_snapshot:
+                raise
             base.update({"action": "blocked", "reasons": [str(error)]})
             result["blocked"].append(base)
             continue
@@ -1384,6 +1437,7 @@ def build_proposal(
                 "completion_rate_per_mtok": proposed_internal,
                 "prompt_usd_per_mtok": decimal_string(target_prompt),
                 "prompt_rate_per_mtok": proposed_prompt_internal,
+                "prompt_cache_hit_rate_per_mtok": proposed_cache_hit_internal,
                 "formula_reasons": formula_reasons,
             }
         usd_per_million_credits, multiplier_ppm, provider_share_bps, basis_id = rate_card_economics(rate_card, canonical_id)
@@ -1412,7 +1466,7 @@ def build_proposal(
                 base["action"] = "changed"
                 result["changed"].append(base)
             continue
-        if current_rate_pair["rate_card_completion_rate_per_mtok"] == proposed_internal and current_rate_pair["rate_card_prompt_rate_per_mtok"] == proposed_prompt_internal:
+        if current_rate_pair["rate_card_completion_rate_per_mtok"] == proposed_internal and current_rate_pair["rate_card_prompt_rate_per_mtok"] == proposed_prompt_internal and current_rate_pair["rate_card_prompt_cache_hit_rate_per_mtok"] == proposed_cache_hit_internal:
             base["action"] = "unchanged"
             result["unchanged"].append(base)
         else:
@@ -1483,8 +1537,8 @@ def build_demand_proposal(
             "rank": demand["rank"],
             "recommendable": True,
             "min_provider_target": min_provider_targets[canonical_id],
-            "or_completion_tokens_30d": demand["total_token_volume"],
-            "or_requests_30d": "0",
+            "or_completion_tokens_30d": int(demand["total_token_volume"]),
+            "or_requests_30d": 0,
         }
     return {
         "schema_version": 1,
