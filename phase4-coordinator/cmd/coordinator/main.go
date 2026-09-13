@@ -150,6 +150,10 @@ func main() {
 		fmt.Fprintf(os.Stderr, "autotune feeds: %v\n", err)
 		os.Exit(1)
 	}
+	if err := validateAutotuneRuntimeEconomics(autotuneFeeds, cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "autotune runtime economics: %v\n", err)
+		os.Exit(1)
+	}
 	var autotuneCatalog *autotune.Catalog
 	var autotuneCompatibleCatalogs []*autotune.Catalog
 	if len(autotuneFeeds.AutotuneCandidatesJSON) > 0 {
@@ -1495,11 +1499,11 @@ func main() {
 }
 
 // loadPreviousAutotuneCatalog loads exactly the release recorded by the
-// deployer's root-owned .previous-target marker. It is signature/schema
+// deployer's root-owned retained-release pointer file. It is signature/schema
 // verified through the same loader as the active feed and is never discovered
 // from an unbounded directory scan.
 func loadPreviousAutotuneCatalog(cfg config.AutotuneFeedsConfig) ([]*autotune.Catalog, error) {
-	// One resolver for the deployer's `.previous-target` marker: the release
+	// One resolver for the deployer's retained-release pointer file: the release
 	// retained as compatible-previous here is the release whose identity
 	// set buyer.LoadPreviousAutotuneFeeds retains (SPEC-010-R004 v1.8).
 	dir, err := buyer.PreviousAutotuneReleaseTarget(cfg)
@@ -3168,6 +3172,22 @@ func walletMutationGuardHandler() http.Handler {
 	})
 }
 
+var configureDefaultStrict = tier2.ConfigureDefaultStrict
+
+func validateAutotuneRuntimeEconomics(feeds buyer.AutotuneFeeds, cfg config.Config) error {
+	return buyer.ValidateRuntimeRateCardParity(feeds, cfg.Rewards, cfg.Stats.Rollup.UsdPerMillionCredits)
+}
+
+func candidateAutotuneFeedsForRuntimeParity(buyerServer *buyer.Server, haveReloadedAutotune bool, reloadedAutotuneFeeds buyer.AutotuneFeeds) buyer.AutotuneFeeds {
+	if haveReloadedAutotune {
+		return reloadedAutotuneFeeds
+	}
+	if buyerServer == nil {
+		return buyer.AutotuneFeeds{}
+	}
+	return buyerServer.CurrentAutotuneFeeds()
+}
+
 func reloadTier2Config(configPath string, startupTier2 config.Tier2Config, logger zerolog.Logger, wsServer *providerws.Server, buyerServer *buyer.Server, autotuneCatalog *autotune.Catalog, billingStores ...*billing.Store) {
 	reloadCoordinatorConfig(configPath, "", startupTier2, logger, wsServer, buyerServer, autotuneCatalog, nil, nil, billingStores...)
 }
@@ -3237,6 +3257,10 @@ func reloadCoordinatorConfig(configPath, configOverlay string, startupTier2 conf
 		logger.Error().Msg("tier2 config reload rejected: startup-only tier2 fields require restart")
 		return
 	}
+	if err := validateAutotuneRuntimeEconomics(candidateAutotuneFeedsForRuntimeParity(buyerServer, haveReloadedAutotune, reloadedAutotuneFeeds), cfg); err != nil {
+		logger.Error().Err(err).Msg("autotune runtime economics reload rejected")
+		return
+	}
 	// M3-8d (audit TEST-4): build a fresh *Catalog and atomically swap the
 	// package singleton, rather than mutating the in-place global. A reader
 	// holding the old pointer mid-VerifyProviderHash completes against the
@@ -3254,7 +3278,7 @@ func reloadCoordinatorConfig(configPath, configOverlay string, startupTier2 conf
 	// #608 Partial: the optional guard rejects a reload that would install
 	// Tier-2 rows conflicting with the in-memory autotune admission catalog
 	// before the package singleton is swapped.
-	if _, err := tier2.ConfigureDefaultStrict(cfg.Tier2, logger, func(next *tier2.Catalog) error {
+	if _, err := configureDefaultStrict(cfg.Tier2, logger, func(next *tier2.Catalog) error {
 		return catalogbind.RequireActiveReleaseBinding(effectiveAutotuneCatalog, next)
 	}); err != nil {
 		logger.Error().Err(err).Msg("tier2 config reload rejected")
