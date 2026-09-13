@@ -543,6 +543,44 @@ final class ModelManagementTests: XCTestCase {
         XCTAssertNil(mapped.providerCompletionPayoutUSDPerMillionTokens)
     }
 
+    func testCatalogEconomicsRejectsDuplicateCanonicalRowIdentity() throws {
+        // SPEC-044-R005: the projection MUST contain no duplicate canonical row
+        // identity, and a duplicate makes the ENTIRE projection malformed —
+        // validated() rejects the whole document (not per-row demotion).
+        // Duplicate candidate identity: two rows share action_model_id even with
+        // distinct model_keys — the identity keys on (candidate, action_model_id).
+        let candidateRowA = trustedEconomicsRowJSON()
+        let candidateRowB = trustedEconomicsRowJSON()
+            .replacingOccurrences(of: #""model_key":"qwen3-8b""#, with: #""model_key":"qwen3-8b-alt""#)
+        let duplicateCandidate = catalogEconomicsJSON(rows: [candidateRowA, candidateRowB])
+        XCTAssertThrowsError(try JSONDecoder().decode(
+            MalibuModelCatalogEconomicsDocument.self,
+            from: Data(duplicateCandidate.utf8)
+        ).validated(now: ModelTestTimestamp.date))
+
+        // Duplicate catalog identity: two null-action rows share model_key.
+        let catalogRow = localOnlyBYOMRowJSON()
+            .replacingOccurrences(of: #""action_model_id":"local-candidate""#, with: #""action_model_id":null"#)
+        let duplicateCatalog = catalogEconomicsJSON(rows: [catalogRow, catalogRow])
+        XCTAssertThrowsError(try JSONDecoder().decode(
+            MalibuModelCatalogEconomicsDocument.self,
+            from: Data(duplicateCatalog.utf8)
+        ).validated(now: ModelTestTimestamp.date))
+    }
+
+    func testCatalogEconomicsAcceptsDistinctCanonicalRowIdentities() throws {
+        // Two rows with distinct canonical identities are a valid projection.
+        let rowA = trustedEconomicsRowJSON()
+        let rowB = trustedEconomicsRowJSON()
+            .replacingOccurrences(of: #""action_model_id":"candidate-qwen""#, with: #""action_model_id":"candidate-other""#)
+            .replacingOccurrences(of: #""model_key":"qwen3-8b""#, with: #""model_key":"other-8b""#)
+        let document = catalogEconomicsJSON(rows: [rowA, rowB])
+        XCTAssertNoThrow(try JSONDecoder().decode(
+            MalibuModelCatalogEconomicsDocument.self,
+            from: Data(document.utf8)
+        ).validated(now: ModelTestTimestamp.date))
+    }
+
     func testCatalogEconomicsDecodeRejectsUnsupportedEnvelopeKeys() throws {
         let json = catalogEconomicsJSON(rows: [trustedEconomicsRowJSON()])
             .replacingOccurrences(of: #""schema":"model_catalog_economics.v1""#, with: #""schema":"model_catalog_economics.v1","provider_secret_path":"/private/tmp/key""#)

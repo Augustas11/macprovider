@@ -588,6 +588,20 @@ struct MalibuModelCatalogEconomicsDocument: Decodable, Equatable, Sendable {
         for warning in warnings {
             guard Self.closedWarnings.contains(warning) else { throw ModelManagementError.invalidCatalog }
         }
+        // SPEC-044-R005: the projection MUST contain no duplicate canonical row
+        // identity. The identity is the tagged tuple (candidate, action_model_id)
+        // when action_model_id is non-null, otherwise (catalog, model_key); tag
+        // and value are compared as exact byte strings with no case/Unicode
+        // normalization. A duplicate makes the ENTIRE projection malformed
+        // (whole-document reject → static fallback), distinct from the per-row
+        // demotion applied to individually malformed rows.
+        var seenRowIdentities = Set<[String]>()
+        for row in rows {
+            let identity: [String] = row.actionModelID.map { ["candidate", $0] } ?? ["catalog", row.modelKey]
+            guard seenRowIdentities.insert(identity).inserted else {
+                throw ModelManagementError.invalidCatalog
+            }
+        }
         return self
     }
 

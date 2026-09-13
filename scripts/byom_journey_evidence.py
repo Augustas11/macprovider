@@ -1331,10 +1331,23 @@ def _validate_catalog_economics(parsed: dict[str, Any], location: str) -> None:
     require_int(parsed["projection_sequence"], location + ".projection_sequence")
     assert_exact_object(parsed["source"], CATALOG_ECONOMICS_SOURCE_KEYS, location + ".source")
     require_list(parsed["warnings"], location + ".warnings")
+    # SPEC-044-R005: the projection MUST contain no duplicate canonical row
+    # identity — (candidate, action_model_id) when action_model_id is non-null,
+    # otherwise (catalog, model_key), compared as exact strings with no
+    # normalization. A duplicate makes the whole projection malformed.
+    seen_row_identities: set[tuple[str, str]] = set()
     for index, row in enumerate(require_list(parsed["rows"], location + ".rows")):
         where = f"{location} rows[{index}]"
         assert_exact_object(row, CATALOG_ECONOMICS_ROW_KEYS, where)
         require_text(row["model_key"], where + ".model_key")
+        identity = (
+            ("candidate", row["action_model_id"])
+            if row["action_model_id"] is not None
+            else ("catalog", row["model_key"])
+        )
+        if identity in seen_row_identities:
+            fail(f"{where}: duplicate canonical row identity {identity!r}")
+        seen_row_identities.add(identity)
         require_text(row["served_model_id"], where + ".served_model_id")
         require_text(row["display_model_id"], where + ".display_model_id")
         require_nullable(row["action_model_id"], where + ".action_model_id", require_text)

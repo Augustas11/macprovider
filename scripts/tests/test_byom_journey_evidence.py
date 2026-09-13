@@ -479,6 +479,26 @@ class BYOMJourneyCaptureTests(unittest.TestCase):
             "unavailable_reason",
         )
 
+    def test_rejects_duplicate_canonical_row_identity(self) -> None:
+        # SPEC-044-R005: the projection MUST contain no duplicate canonical row
+        # identity ((candidate, action_model_id) or (catalog, model_key)). A
+        # duplicate makes the whole projection malformed.
+        document = self.complete_catalog_economics_document()
+        duplicate = json.loads(json.dumps(document["rows"][0]))
+        # Distinct model_key, same action_model_id → duplicate candidate identity.
+        duplicate["model_key"] = duplicate["model_key"] + "-alt"
+        document["rows"].append(duplicate)
+
+        def mutator(manifest, root):
+            self.add_catalog_economics_step(manifest)
+            self.write_catalog_economics_capture(root, document)
+
+        self.assert_capture_fails(
+            "discovery",
+            mutator,
+            "duplicate canonical row identity",
+        )
+
     def guidance_document(self, **guidance) -> dict:
         document = self.complete_discovery_document()
         document["candidates"][0]["provider_guidance"].update(guidance)
