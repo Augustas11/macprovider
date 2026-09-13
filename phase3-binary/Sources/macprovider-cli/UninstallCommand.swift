@@ -28,22 +28,20 @@ struct UninstallCommand: AsyncParsableCommand {
         } else {
             priorLifecycle = nil
         }
-        let validateSystemArtifactsAbsent = {
-            try Self.validateNoHeadlessSystemArtifactsPresent { arguments in
-                try runProcess("/bin/launchctl", arguments: arguments)
-            }
-        }
         let manifest: InstallManifest
         switch try Self.loadManifest(home: home) {
         case .loaded(let loaded):
             manifest = loaded
-            try validateSystemArtifactsAbsent()
         case .missing:
-            try validateSystemArtifactsAbsent()
             warnings.append("install manifest missing; using legacy uninstall locations")
             manifest = Self.legacyManifest(home: home)
         }
-        try Self.validateUninstallProfile(manifest)
+        let systemDomain = Self.installsInSystemDomain(manifest)
+        if !systemDomain {
+            try Self.validateNoHeadlessSystemArtifactsPresent { arguments in
+                try runProcess("/bin/launchctl", arguments: arguments)
+            }
+        }
 
         // SPEC-001 FR-12 / SPEC-020 R-4.14: an uninstall is a validated local
         // stop intent. Resolve the running provider PID now, and record the
@@ -62,10 +60,17 @@ struct UninstallCommand: AsyncParsableCommand {
             providerStopPID = nil
             warnings.append("could not resolve running provider PID; stop-intent marker not recorded (serve will exit nonzero, launchd job still booted out)")
         }
-        try Self.stopLaunchdServices(
+        let sudoCommandRun: ([String]) throws -> Int32 = { command in
+            try runProcess("/usr/bin/sudo", arguments: ["-n"] + command)
+        }
+        let launchdRun: ([String]) throws -> Int32 = systemDomain
+            ? sudoCommandRun
+            : { arguments in try runProcess("/bin/launchctl", arguments: arguments) }
+        try Self.stopUninstallServices(
             labels: manifest.launchdLabels,
             uid: getuid(),
-            run: { arguments in try runProcess("/bin/launchctl", arguments: arguments) },
+            systemDomain: systemDomain,
+            run: launchdRun,
             beforeBootout: { label in
                 guard label == ProviderConflictDetector.launchdLabel, let pid = providerStopPID else { return }
                 if !StopIntentMarker.record(targetPID: pid, reason: "uninstall", home: home) {
@@ -100,6 +105,13 @@ struct UninstallCommand: AsyncParsableCommand {
         // cryptographic identity reset; destroying the bearer while provider_id
         // survives would strand an already-used coordinator principal.
         let allowed = try Self.allowedRemovalPaths(home: home, manifest: manifest)
+        if systemDomain {
+            try Self.removeSystemLaunchDaemonPlists(
+                allowedPaths: allowed.plists,
+                fileExists: { FileManager.default.fileExists(atPath: $0) },
+                run: sudoCommandRun
+            )
+        }
         for plist in manifest.launchdPlists {
             removeIfPresent(URL(fileURLWithPath: plist), allowed: allowed.plists, label: "plist", warnings: &warnings)
         }
@@ -214,9 +226,16 @@ struct UninstallCommand: AsyncParsableCommand {
     enum UninstallError: Error, Equatable, CustomStringConvertible {
         case serviceStillLoaded(String)
         case serviceAbsenceVerificationFailed(String, Int32)
+        // System-domain (headless_fleet) analogues. The headless path stops and
+        // proves absence through `sudo launchctl ... system/<label>`, so its
+        // remedies must name the system domain and passwordless sudo — never the
+        // gui/ domain, which cannot address a system LaunchDaemon.
+        case systemServiceStillLoaded(String)
+        case systemServiceAbsenceVerificationFailed(String, Int32)
         case unexpectedServiceLabel(String)
         case unsupportedHeadlessInstallProfile
         case headlessProfileIndeterminateWithoutManifest(String, Int32)
+        case headlessUninstallPrivilegeRequired
         case invalidInstallManifest(String)
 
         var description: String {
@@ -230,12 +249,24 @@ struct UninstallCommand: AsyncParsableCommand {
                     + "\(label) (launchctl print exited \(status)). "
                     + "Remedy: inspect with `launchctl print gui/$(id -u)/\(label)`, boot it out with "
                     + "`launchctl bootout gui/$(id -u)/\(label)` (or reboot), then re-run `malibu-cli uninstall`."
+            case .systemServiceStillLoaded(let label):
+                return "refusing to remove provider artifacts while system launchd service remains loaded: \(label). "
+                    + "Remedy: stop it and re-run uninstall — `sudo launchctl bootout system/\(label)` "
+                    + "(or reboot), then `malibu-cli uninstall` as the headless fleet user with passwordless sudo launchctl/rm access."
+            case .systemServiceAbsenceVerificationFailed(let label, let status):
+                return "refusing to remove provider artifacts because system launchd service absence could not be verified: "
+                    + "\(label) (launchctl print exited \(status)). "
+                    + "Remedy: inspect with `sudo launchctl print system/\(label)`, boot it out with "
+                    + "`sudo launchctl bootout system/\(label)` (or reboot), then re-run `malibu-cli uninstall` "
+                    + "as the headless fleet user with passwordless sudo launchctl/rm access."
             case .unexpectedServiceLabel(let label):
                 return "refusing to use an unrecognized launchd service label from the install manifest: \(label)"
             case .unsupportedHeadlessInstallProfile:
                 return "headless_fleet uninstall is not supported until system-domain service stop and absence proof are implemented"
             case .headlessProfileIndeterminateWithoutManifest(let label, let status):
                 return "refusing legacy uninstall because system-domain service absence could not be verified without an install manifest: \(label) (launchctl print exited \(status))"
+            case .headlessUninstallPrivilegeRequired:
+                return "headless_fleet uninstall must stop and remove system LaunchDaemons; run it with passwordless sudo launchctl/rm access as the headless fleet user"
             case .invalidInstallManifest(let reason):
                 return "refusing uninstall because install manifest is invalid: \(reason)"
             }
@@ -245,12 +276,20 @@ struct UninstallCommand: AsyncParsableCommand {
     // Stop the watchdog before the provider so no managed process remains that
     // can bootstrap or kickstart the provider during uninstall. The fixed list
     // also prevents a user-writable manifest from targeting unrelated jobs.
-    static let managedLaunchdStopOrder = [
+    static let managedMalibuLaunchdStopOrder = [
         "live.malibu.provider-watchdog",
         "live.malibu.provider",
+    ]
+
+    // Legacy StreamVC labels are boot-out candidates only when an existing
+    // manifest explicitly records them; a clean modern install must not be
+    // blocked by booting out an unrelated-or-absent legacy job.
+    static let managedLegacyLaunchdStopOrder = [
         "live.streamvc.macprovider-watchdog",
         "live.streamvc.macprovider",
     ]
+
+    static let managedLaunchdStopOrder = managedMalibuLaunchdStopOrder + managedLegacyLaunchdStopOrder
 
     // `bootout` is asynchronous: it can return while the job is still in its
     // exiting state, during which `launchctl print` still reports status 0
@@ -296,12 +335,136 @@ struct UninstallCommand: AsyncParsableCommand {
         }
     }
 
+    /// Uninstall-specific launchd stop. GUI-domain installs retain the existing
+    /// behavior. A `headless_fleet` install owns system LaunchDaemons, so it
+    /// must stop those through `sudo launchctl` and prove absence in the system
+    /// domain; a GUI-domain `bootout` cannot stop (and must never be used as a
+    /// remedy for) a system-domain job.
+    static func stopUninstallServices(
+        labels: [String],
+        uid: uid_t,
+        systemDomain: Bool,
+        run: ([String]) throws -> Int32,
+        beforeBootout: (String) -> Void = { _ in },
+        sleep: (useconds_t) -> Void = { _ = usleep($0) }
+    ) throws {
+        guard systemDomain else {
+            try stopLaunchdServices(
+                labels: labels,
+                uid: uid,
+                run: run,
+                beforeBootout: beforeBootout,
+                sleep: sleep
+            )
+            return
+        }
+
+        let managedLabels = Set(managedLaunchdStopOrder)
+        for label in Set(labels) where !managedLabels.contains(label) {
+            throw UninstallError.unexpectedServiceLabel(label)
+        }
+        let stopOrder = managedLaunchdStopOrder.filter { Set(labels).contains($0) }
+        guard !stopOrder.isEmpty else {
+            return
+        }
+
+        for label in stopOrder {
+            beforeBootout(label)
+            _ = try run(["/bin/launchctl", "bootout", "system/\(label)"])
+            // A nonzero bootout may mean either "already absent" or a real
+            // privileged-command failure. The sudo launchctl print below is the
+            // authoritative proof either way; a sudo-auth failure (status 1)
+            // is distinguished from other indeterminate results.
+            try verifySystemServiceAbsent(label: label, run: run, sleep: sleep)
+        }
+        for label in stopOrder {
+            try verifySystemServiceAbsent(label: label, run: run, sleep: sleep)
+        }
+    }
+
+    private static func verifySystemServiceAbsent(
+        label: String,
+        run: ([String]) throws -> Int32,
+        sleep: (useconds_t) -> Void
+    ) throws {
+        let target = "system/\(label)"
+        var attempt = 0
+        while true {
+            let printStatus = try run(["/bin/launchctl", "print", target])
+            if isLaunchdAbsentStatus(printStatus) {
+                return
+            }
+            if printStatus == 1 {
+                throw UninstallError.headlessUninstallPrivilegeRequired
+            }
+            guard printStatus == 0 else {
+                throw UninstallError.systemServiceAbsenceVerificationFailed(label, printStatus)
+            }
+            attempt += 1
+            if attempt >= serviceAbsenceMaxAttempts {
+                throw UninstallError.systemServiceStillLoaded(label)
+            }
+            sleep(serviceAbsencePollIntervalMicroseconds)
+        }
+    }
+
     static let managedSystemLaunchDaemonPlists = [
         "/Library/LaunchDaemons/live.malibu.provider.plist",
         "/Library/LaunchDaemons/live.malibu.provider-watchdog.plist",
         "/Library/LaunchDaemons/live.streamvc.macprovider.plist",
         "/Library/LaunchDaemons/live.streamvc.macprovider-watchdog.plist",
     ]
+
+    /// The system-domain launchd label a managed LaunchDaemon plist loads: the
+    /// file basename minus the `.plist` suffix (e.g.
+    /// `/Library/LaunchDaemons/live.streamvc.macprovider.plist` →
+    /// `live.streamvc.macprovider`). Returns nil for any path that is not one of
+    /// the fixed allowlisted `managedSystemLaunchDaemonPlists`, so a removal caller
+    /// can fail closed rather than deriving a label for an unrecognized artifact.
+    static func systemLaunchdLabel(forPlistPath plistPath: String) -> String? {
+        guard managedSystemLaunchDaemonPlists.contains(plistPath) else { return nil }
+        let base = (plistPath as NSString).lastPathComponent
+        let suffix = ".plist"
+        guard base.hasSuffix(suffix), base.count > suffix.count else { return nil }
+        return String(base.dropLast(suffix.count))
+    }
+
+    /// launchd loads root-owned copies from `/Library/LaunchDaemons`; the
+    /// manifest's `launchd_plists` point at the installer's user-owned source
+    /// files. Fail closed: reporting success while leaving a system boot
+    /// artifact in place would break reinstall and profile isolation.
+    ///
+    /// Stop-before-delete (SPEC-001) is enforced per plist: the fixed managed set
+    /// is broader than any single manifest's recorded labels, so before removing
+    /// each present, allowlisted plist we prove ITS OWN launchd job absent in the
+    /// system domain. `verifySystemServiceAbsent` throws (fail closed) when the
+    /// job is still loaded, indeterminate, or a privilege failure — a stale/legacy
+    /// plist is deleted only once its job is proven absent (the accepted 113
+    /// path), never underneath a still-running job.
+    static func removeSystemLaunchDaemonPlists(
+        allowedPaths: [String],
+        systemPlists: [String] = managedSystemLaunchDaemonPlists,
+        fileExists: (String) -> Bool,
+        run: ([String]) throws -> Int32,
+        sleep: (useconds_t) -> Void = { _ = usleep($0) }
+    ) throws {
+        for plist in systemPlists where fileExists(plist) {
+            guard try path(plist, isAllowedBy: allowedPaths) else {
+                throw UninstallError.headlessUninstallPrivilegeRequired
+            }
+            guard let label = systemLaunchdLabel(forPlistPath: plist) else {
+                throw UninstallError.headlessUninstallPrivilegeRequired
+            }
+            // Prove this plist's own job absent before deleting it. A thrown
+            // still-loaded / indeterminate / privilege error propagates and the
+            // plist is left in place (fail closed).
+            try verifySystemServiceAbsent(label: label, run: run, sleep: sleep)
+            let status = try run(["/bin/rm", "-f", "--", plist])
+            guard status == 0 else {
+                throw UninstallError.headlessUninstallPrivilegeRequired
+            }
+        }
+    }
 
     static func validateNoHeadlessSystemArtifactsPresent(
         systemPlists: [String] = managedSystemLaunchDaemonPlists,
@@ -352,7 +515,7 @@ struct UninstallCommand: AsyncParsableCommand {
     }
 
     static func isLaunchdAbsentStatus(_ status: Int32) -> Bool {
-        status == 1 || status == 3 || status == 113
+        status == 113
     }
 
     /// True only when `url` is a symlink this tool owns: it points exactly at
@@ -458,6 +621,14 @@ struct UninstallCommand: AsyncParsableCommand {
         }
     }
 
+    /// True for a `headless_fleet` install whose provider/watchdog jobs live in
+    /// launchd's system domain. Missing legacy fields are treated as a GUI
+    /// install; `validateNoHeadlessSystemArtifactsPresent` still fail-closes a
+    /// consumer uninstall when system-domain artifacts are present.
+    static func installsInSystemDomain(_ manifest: InstallManifest) -> Bool {
+        manifest.installProfile == "headless_fleet" || manifest.launchdDomain == "system"
+    }
+
     enum ManifestLoadResult: Equatable {
         case missing
         case loaded(InstallManifest)
@@ -558,6 +729,9 @@ struct UninstallCommand: AsyncParsableCommand {
 
     static func allowedRemovalPaths(home: URL, manifest: InstallManifest) throws -> AllowedRemovalPaths {
         let paths = artifactPaths(home: home)
+        let systemPlists = installsInSystemDomain(manifest)
+            ? managedSystemLaunchDaemonPlists
+            : []
         let installPrefix = URL(fileURLWithPath: manifest.installPrefix)
         // Only honor a manifest-supplied provider_state_root when it is exactly
         // the canonical location. A corrupt or tampered manifest must not be able
@@ -577,9 +751,11 @@ struct UninstallCommand: AsyncParsableCommand {
             plists: [
                 paths.plist.path,
                 paths.watchdogPlist.path,
+                home.appendingPathComponent("Library/LaunchAgents/live.malibu.provider.plist").path,
+                home.appendingPathComponent("Library/LaunchAgents/live.malibu.provider-watchdog.plist").path,
                 home.appendingPathComponent("Library/LaunchAgents/live.streamvc.macprovider.plist").path,
                 home.appendingPathComponent("Library/LaunchAgents/live.streamvc.macprovider-watchdog.plist").path,
-            ],
+            ] + systemPlists,
             symlinks: [
                 paths.binary.path,
                 paths.aliasBinary.path,
