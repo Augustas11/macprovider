@@ -517,7 +517,7 @@ func TestIdlessDedupe_ErrorAttemptNotReplayed(t *testing.T) {
 		}
 		hits.Add(1)
 		return responseWithBody(http.StatusServiceUnavailable,
-			http.Header{"Content-Type": []string{"application/json"}},
+			markedNoProviderHeaders(),
 			`{"error":{"code":"no_provider_available","message":"No provider available","param":null,"type":"service_unavailable"}}`), nil
 	})}
 	h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {

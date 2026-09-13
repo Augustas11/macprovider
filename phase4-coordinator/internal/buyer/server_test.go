@@ -5666,6 +5666,97 @@ func TestChatCompletionsStreamingWSTunneledQueueFullMarksProviderBusy(t *testing
 	}
 }
 
+func TestChatCompletionsStreamingWSTunneledQueueFullExhaustionShedsCapacity(t *testing.T) {
+	reqLog, dbPath := openBuyerRequestLog(t)
+	defer reqLog.Close()
+	registry := pool.NewRegistry(nil)
+	registerWithPath(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, "", 10, pool.TierProvisional, pool.InferencePathWSTunneled)
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithRequestLog(reqLog),
+		buyer.WithRoutingConfig(config.RoutingConfig{
+			MaxRetries:              1,
+			RetryPerAttemptTimeoutS: 1,
+			StickyTTLS:              1800,
+			StickyMaxEntries:        10000,
+		}),
+		buyer.WithRelay(func(ctx context.Context, provider pool.Provider, requestID string, body []byte, stream bool) (*providerws.RelayStream, error) {
+			chunks := make(chan providerws.InferenceResponseChunk, 1)
+			done := make(chan providerws.InferenceResponseEnd, 1)
+			errs := make(chan error, 1)
+			done <- providerws.InferenceResponseEnd{Type: "inference_response_end", RequestID: requestID, Status: "error_queue_full"}
+			return &providerws.RelayStream{RequestID: requestID, Chunks: chunks, Done: done, Errors: errs}, nil
+		}, 10*time.Second),
+	)
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}],"stream":true}`), http.Header{"X-MacProvider-Retry": []string{"1"}})
+
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	assertOpenAIErrorEnvelope(t, rr, "no_provider_available", "service_unavailable")
+	if p1, ok := registry.Resolve("p1", ""); !ok || p1.State != pool.StateBusy {
+		t.Fatalf("p1 = %#v ok=%v, want busy", p1, ok)
+	}
+	rows := queryAllRequestLogRows(t, dbPath)
+	if len(rows) != 2 {
+		t.Fatalf("request_log rows = %d, want provider queue-full row + aggregate no-provider row: %#v", len(rows), rows)
+	}
+	if rows[0].ProviderAssignedID.String != "s1" || rows[0].Status != http.StatusServiceUnavailable || rows[0].Retried != 0 {
+		t.Fatalf("row = %+v, want s1/503/retried=0", rows[0])
+	}
+	if rows[0].ErrorCode.String != "error_queue_full" {
+		t.Fatalf("rows[0].ErrorCode = %#v, want error_queue_full", rows[0].ErrorCode)
+	}
+	if rows[1].ProviderAssignedID.Valid || rows[1].Status != http.StatusServiceUnavailable || rows[1].Retried != 0 {
+		t.Fatalf("row = %+v, want aggregate 503/retried=0 without provider assignment", rows[1])
+	}
+	if rows[1].Error.String != "No provider available for model model-a" {
+		t.Fatalf("rows[1].Error = %#v, want aggregate no-provider message", rows[1].Error)
+	}
+}
+
+func TestChatCompletionsStreamingWSTunneledQueueFullRefundsAdmissionQuota(t *testing.T) {
+	registry := pool.NewRegistry(nil)
+	registerWithPath(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, "", 10, pool.TierProvisional, pool.InferencePathWSTunneled)
+	adm := providerws.NewAdmissionManager(config.AdmissionConfig{
+		ProvisionalAdmissionRatePerHour: 10,
+		ProvisionalPoolMax:              10,
+		ProvisionalQuotaPerHour:         1,
+		ProvisionalTierWeight:           0.3,
+	}, time.Now)
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithAdmission(adm, 0.3),
+		buyer.WithRoutingConfig(config.RoutingConfig{
+			MaxRetries:              1,
+			RetryPerAttemptTimeoutS: 1,
+			StickyTTLS:              1800,
+			StickyMaxEntries:        10000,
+		}),
+		buyer.WithRelay(func(ctx context.Context, provider pool.Provider, requestID string, body []byte, stream bool) (*providerws.RelayStream, error) {
+			chunks := make(chan providerws.InferenceResponseChunk, 1)
+			done := make(chan providerws.InferenceResponseEnd, 1)
+			errs := make(chan error, 1)
+			done <- providerws.InferenceResponseEnd{Type: "inference_response_end", RequestID: requestID, Status: "error_queue_full"}
+			return &providerws.RelayStream{RequestID: requestID, Chunks: chunks, Done: done, Errors: errs}, nil
+		}, 10*time.Second),
+	)
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}],"stream":true}`), http.Header{"X-MacProvider-Retry": []string{"1"}})
+
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if !adm.TryReserveRequest(pool.Provider{ProviderID: "p1", Tier: pool.TierProvisional}) {
+		t.Fatal("streaming queue-full did not refund admission quota")
+	}
+}
+
 // Regression: M1-2 ARCH-1/CODE-1 divergence 2. Non-streaming QueueFull path must
 // increment explicitRetries (and faultedProviders) after the successful routing
 // transition, matching the timeout-retry pattern. Pre-fix: the retry hop after

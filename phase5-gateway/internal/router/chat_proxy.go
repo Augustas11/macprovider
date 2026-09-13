@@ -771,8 +771,9 @@ func (s *Server) doCoordinatorChatWithRetry(upCtx context.Context, r *http.Reque
 	// mode synthesizes prompt tokens for a dispatched-but-failed attempt), so
 	// a subsequent terminal route_snapshot_failed MUST NOT be refunded as
 	// "no provider ran" — that would erase real provider work the coordinator
-	// already credited (verified realizable trace, security lane). A retried
-	// 503 no_provider_available does NOT set this: no provider was dispatched.
+	// already credited (verified realizable trace, security lane). A marked
+	// retried 503 no_provider_available does NOT set this; an unmarked 503 is
+	// conservative evidence that provider work may already have been credited.
 	priorProviderDispatch := false
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		if err := upCtx.Err(); err != nil {
@@ -1877,6 +1878,13 @@ func (s *Server) passThroughNoProviderCoordinatorError(w http.ResponseWriter, r 
 		writeError(w, http.StatusBadGateway, "api_error", "upstream_provider_error", "Upstream provider error")
 		return
 	}
+	if coordinatorStructuredNoProviderNeedsSettlement(resp.StatusCode, body, resp.Header) {
+		if !s.settleBeforeResponseWithCoordinatorFinality(w, r, subject, promptEstimate, 0, maxUsageTokens, "gateway_estimated", "upstream_error", resp.Header) {
+			return
+		}
+		writeError(w, http.StatusBadGateway, "api_error", "upstream_provider_error", "Upstream provider error")
+		return
+	}
 	if (resp.StatusCode >= 500 && resp.StatusCode < 600) || coordinatorTier2PolicyError(resp.StatusCode, body) {
 		if !s.recordRefundedCoordinatorAudit(w, r, subject, window, refundedCoordinatorAuditOutcome(resp.StatusCode, body)) {
 			return
@@ -2104,6 +2112,23 @@ func coordinatorIdempotencyError(status int, body []byte) bool {
 
 func coordinatorPoolStateStaleError(status int, body []byte) bool {
 	return status == http.StatusConflict && openAIErrorCode(body) == "pool_state_stale"
+}
+
+// coordinatorStructuredNoProviderNeedsSettlement detects a coordinator 503 that
+// looks like clean capacity but cannot prove no provider work happened. Modern
+// pre-dispatch capacity errors carry the positive no-prior-dispatch marker; a
+// gateway retry that already saw provider-dispatched work carries the gateway
+// prior-dispatch marker. Structured no_provider_available without the positive
+// marker is therefore settled conservatively instead of refunded or converted
+// into the wholesale 429 contract.
+func coordinatorStructuredNoProviderNeedsSettlement(status int, body []byte, h http.Header) bool {
+	if status != http.StatusServiceUnavailable || openAIErrorCode(body) != "no_provider_available" {
+		return false
+	}
+	if strings.TrimSpace(h.Get(gatewayPriorProviderDispatchHeader)) != "" {
+		return true
+	}
+	return strings.TrimSpace(h.Get(settlementNoPriorDispatchHeader)) == ""
 }
 
 // coordinatorPreDispatchNoChargeError detects a coordinator 5xx emitted

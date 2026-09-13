@@ -467,6 +467,25 @@ def percentile(values: list[int], pct: float) -> int:
     return ordered[index]
 
 
+def benchmark_evidence(
+    requested: int,
+    results: list[dict],
+    statuses: dict[str, int],
+    ok_count: int,
+    shed_count: int,
+    failed: list[dict],
+) -> dict:
+    return {
+        "requests": requested,
+        "requests_sent": len(results),
+        "statuses": statuses,
+        "ok": ok_count,
+        "shed_429": shed_count,
+        "non_capacity_failures": len(failed),
+        "sample_failures": failed[:3],
+    }
+
+
 def run_benchmark(
     base_url: str,
     token: str,
@@ -529,7 +548,7 @@ def run_benchmark(
     shed_count = sum(1 for result in results if is_capacity_shed(result))
     failed = [result for result in results if not result.get("ok") and not is_capacity_shed(result)]
     if failed:
-        raise ProbeError(f"benchmark had non-capacity-shed failures: {failed[:3]}")
+        raise ProbeError(f"benchmark had non-capacity-shed failures: {benchmark_evidence(requests, results, statuses, ok_count, shed_count, failed)}")
     success_ratio = ok_count / len(results)
     if success_ratio < min_success_ratio:
         raise ProbeError(f"benchmark success ratio {success_ratio:.3f} below required {min_success_ratio:.3f}; statuses={statuses}")

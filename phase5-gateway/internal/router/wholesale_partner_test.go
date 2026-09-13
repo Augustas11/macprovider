@@ -15,7 +15,7 @@ func TestWholesaleNoProviderBecomes429(t *testing.T) {
 		if got := r.Header.Get(wholesaleInternalHeader); got != "1" {
 			t.Fatalf("wholesale header=%q want 1", got)
 		}
-		return responseWithBody(http.StatusServiceUnavailable, http.Header{"Content-Type": []string{"application/json"}}, noProviderBody()), nil
+		return responseWithBody(http.StatusServiceUnavailable, markedNoProviderHeaders(), noProviderBody()), nil
 	})}
 	accountID := "acct_wholesale_or"
 	h, store, _, cfg := newRetryHarness(t, client, func(cfg *config.Config) {
@@ -32,12 +32,37 @@ func TestWholesaleNoProviderBecomes429(t *testing.T) {
 	}
 }
 
+func TestWholesaleUnmarkedNoProviderSettlesInsteadOf429(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if got := r.Header.Get(wholesaleInternalHeader); got != "1" {
+			t.Fatalf("wholesale header=%q want 1", got)
+		}
+		return responseWithBody(http.StatusServiceUnavailable, http.Header{"Content-Type": []string{"application/json"}}, noProviderBody()), nil
+	})}
+	accountID := "acct_wholesale_unmarked_or"
+	h, store, _, cfg := newRetryHarness(t, client, func(cfg *config.Config) {
+		cfg.Auth.WholesaleAccountIDs = []string{accountID}
+		cfg.Retry503.Enabled = false
+	})
+	fullKey := createAccountAndKey(t, store, cfg, accountID)
+	resp := postChat(t, h, fullKey, chatBody(false), nil)
+
+	if resp.Code != http.StatusBadGateway {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	assertErrorCode(t, resp.Body.String(), "upstream_provider_error")
+	usageResp := assertStatus(t, h, http.MethodGet, "/v1/usage", fullKey, "", "1.2.3.4", http.StatusOK)
+	if used := readQuota(t, usageResp)["daily_tokens_used"].(float64); used == 0 {
+		t.Fatalf("daily_tokens_used=0 — unmarked no_provider_available must charge the estimate")
+	}
+}
+
 func TestPublicNoProviderStays503(t *testing.T) {
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		if got := r.Header.Get(wholesaleInternalHeader); got != "" {
 			t.Fatalf("public traffic leaked wholesale header %q", got)
 		}
-		return responseWithBody(http.StatusServiceUnavailable, http.Header{"Content-Type": []string{"application/json"}}, noProviderBody()), nil
+		return responseWithBody(http.StatusServiceUnavailable, markedNoProviderHeaders(), noProviderBody()), nil
 	})}
 	h, store, _, cfg := newRetryHarness(t, client, nil)
 	fullKey := createAccountAndKey(t, store, cfg, "acct_public_or")

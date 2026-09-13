@@ -2693,6 +2693,9 @@ func (s *Server) forwardStreamSequence(
 			s.logWSDeadMidRequest(originalRequestID, requestID, externalRequestID, state.provider, "fast_fail", "")
 			return false
 		},
+		skipRetryBudgetCheck: func(dispatched dispatchedAttempt) bool {
+			return dispatched.nativeResult == wsForwardQueueFull
+		},
 		renderRetryExhausted: func(w http.ResponseWriter, dispatched dispatchedAttempt, state *forwardState) {
 			// Curated attempt.Error: classifyStreamResult populated
 			// dispatched.tr.attempt with the curated error string;
@@ -2895,12 +2898,12 @@ func (s *Server) forwardWSNonStreamSequence(
 			writeError(w, http.StatusGatewayTimeout, "provider_timeout", "Selected provider timed out; buyer should retry")
 		},
 		logRetryAttempt: func(dispatched dispatchedAttempt, state *forwardState) {
-			// Timeout: classifier-mapped status (504). Queue-full: 502.
+			// Timeout: classifier-mapped status (504). Queue-full: 503.
 			// Matches pre-refactor pattern (timeout at server.go:1427,
 			// queue-full at :1487).
 			status := http.StatusGatewayTimeout
 			if dispatched.nativeResult == wsForwardQueueFull {
-				status = http.StatusBadGateway
+				status = http.StatusServiceUnavailable
 			}
 			if err := logAttempt(state.provider, status, dispatched.tr.attempt, state.explicitRetries); err != nil {
 				s.log.Warn().Err(err).Str("request_id", requestID).Str("provider_id", state.provider.ProviderID).Msg("ws retry attempt log failed")
@@ -3496,7 +3499,7 @@ func (s *Server) forwardWS(w http.ResponseWriter, r *http.Request, requestID str
 	}
 	if stream {
 		result, attempt := s.forwardWSStreaming(w, r, requestID, provider, relay, state, billingAttemptN)
-		if reserved && result == wsForwardProviderDisconnected {
+		if reserved && (result == wsForwardQueueFull || result == wsForwardProviderDisconnected) {
 			s.admission.RefundRequest(provider)
 		}
 		return result, attempt
@@ -5286,7 +5289,7 @@ func statusForForwardResult(result wsForwardResult) int {
 	switch result {
 	case wsForwardTimedOut:
 		return http.StatusGatewayTimeout
-	case wsForwardUnavailable:
+	case wsForwardQueueFull, wsForwardUnavailable:
 		return http.StatusServiceUnavailable
 	default:
 		return http.StatusBadGateway
@@ -5297,7 +5300,7 @@ func writeStreamForwardError(w http.ResponseWriter, result wsForwardResult) {
 	switch result {
 	case wsForwardTimedOut:
 		writeError(w, http.StatusGatewayTimeout, "provider_timeout", "Selected provider timed out; buyer should retry")
-	case wsForwardUnavailable:
+	case wsForwardQueueFull, wsForwardUnavailable:
 		writeError(w, http.StatusServiceUnavailable, "no_provider_available", "Selected provider is not reachable")
 	case wsForwardProviderDisconnected:
 		writeError(w, http.StatusBadGateway, "provider_disconnected", "Selected provider disconnected; buyer should retry")
