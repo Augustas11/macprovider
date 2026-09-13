@@ -701,7 +701,7 @@ class AdmissionJourneyRunner:
         admission = row["admission"]
         assert_true(admission.get("catalog_economics_permitted") is True, "catalog_priced candidate does not show trusted catalog economics")
         assert_true(row.get("model_key") == status["catalog_model_key"], "economics row does not carry the trusted catalog key")
-        assert_true(row.get("economics_state") == "permitted" and all(row.get(f) is not None for f in self.MONEY_FIELDS), "catalog_priced economics are not the signed catalog rates")
+        assert_true(row.get("economics_state") == "trusted" and all(row.get(f) is not None for f in self.MONEY_FIELDS), "catalog_priced economics are not the signed catalog rates")
         # The rates come from the signed catalog, never from a provider-asserted price.
         assert_true(row.get("rate_source") in ("live_signed", "baked_signed"), f"rate_source {row.get('rate_source')!r} is not a signed catalog source")
         self.m.observe("provider_price_treated_as_catalog_rate", False)

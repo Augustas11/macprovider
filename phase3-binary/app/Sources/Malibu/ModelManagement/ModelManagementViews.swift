@@ -25,6 +25,7 @@ private enum ModelFeatureUI {
     static let adopt = String(localized: "Adopt", comment: "Recommendation action")
     static let notNow = String(localized: "Not now", comment: "Recommendation snooze action")
     static let stopBackground = String(localized: "Stop background recommendations", comment: "Recommendation opt-out action")
+    static let activate = String(localized: "Run offer preflight", comment: "BYOM guided activation action")
 
     static func operationLabel(_ raw: String) -> String {
         switch raw {
@@ -152,9 +153,15 @@ struct ModelSwitcherSheet: View {
         ) {
             Button(pendingOperationName == "revert"
                    ? ModelFeatureUI.revert
-                   : (pendingSwitch?.category == .ready ? ModelFeatureUI.switchModel : ModelFeatureUI.evaluate)) {
+                   : (pendingSwitch?.category == .ready ? ModelFeatureUI.switchModel : ModelFeatureUI.activate)) {
                 if let row = pendingSwitch {
-                    Task { await store.switchTo(row, operationName: pendingOperationName) }
+                    Task {
+                        if row.action == .switchModel {
+                            await store.switchTo(row, operationName: pendingOperationName)
+                        } else {
+                            await store.activate(row)
+                        }
+                    }
                 }
             }
             Button(String(localized: "Cancel", comment: "Switch confirmation cancel"), role: .cancel) {}
@@ -290,7 +297,7 @@ struct ModelSwitcherSheet: View {
         if row.category == .ready {
             return String(localized: "Switch from \(store.currentModelID ?? "the current model") to \(row.id). No download is expected; the provider may load the local weights while serving, then drain active work before committing the new model.", comment: "Ready model switch confirmation")
         }
-        return String(localized: "This model needs preparation. An explicit recommendation check is required before adoption. No action will start until you confirm.", comment: "Preparation model confirmation")
+        return String(localized: "Malibu will run evaluate, offer dry-run, and offer through provider CLI typed transactions. No action will start until you confirm.", comment: "BYOM guided activation confirmation")
     }
 }
 
@@ -302,6 +309,12 @@ private struct ModelRowView: View {
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
             VStack(alignment: .leading, spacing: 3) {
+                if let earningVerdict = row.earningVerdict {
+                    Text(earningVerdict)
+                        .font(.callout.weight(.semibold))
+                        .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityIdentifier("byom.earning-verdict")
+                }
                 if let catalogVerifiedModelKey = row.catalogVerifiedModelKey {
                     // Present the coordinator-verified catalog identity as the
                     // authoritative name; the provider-reported display name is
@@ -327,6 +340,9 @@ private struct ModelRowView: View {
                 }
                 HStack(spacing: 8) {
                     Text(row.categoryLabel)
+                    if let admissionStateLabel = row.admissionStateLabel {
+                        Text(admissionStateLabel)
+                    }
                     Text(String(localized: "Fit: \(fitLabel(row.fit))", comment: "Model fit status"))
                     if let estimatedGB = row.estimatedGB {
                         let formattedSize = estimatedGB.formatted(.number.precision(.fractionLength(1)))
@@ -338,6 +354,18 @@ private struct ModelRowView: View {
                 }
                 .font(.caption)
                 .foregroundStyle(.secondary)
+                if let admissionStateMeaning = row.admissionStateMeaning {
+                    Text(admissionStateMeaning)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if let earningDisclosure = row.earningDisclosure {
+                    Text(earningDisclosure)
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 if let economicsAccessibilityLabel = row.economicsAccessibilityLabel {
                     // Rates and the non-earning caveat are one accessibility
                     // element voiced as a single announcement, so a catalog_priced
@@ -379,9 +407,8 @@ private struct ModelRowView: View {
                     .disabled(!enabled)
                     .accessibilityHint(Text(String(localized: "Shows a confirmation before the provider changes its served model.", comment: "Switch accessibility hint")))
             } else if row.action == .evaluate {
-                Button(ModelFeatureUI.evaluate, action: onAction)
-                    .disabled(true)
-                    .help(ModelFeatureUI.updateRequired)
+                Button(ModelFeatureUI.activate, action: onAction)
+                    .disabled(!enabled)
                     .accessibilityLabel(Text(String(localized: "Evaluate \(row.displayID)", comment: "Evaluation accessibility label")))
             }
         }

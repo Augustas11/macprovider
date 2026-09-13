@@ -35,7 +35,8 @@ final class ModelCatalogEconomicsTests: XCTestCase {
         XCTAssertNil(row.providerPromptPayoutUSDPerMillionTokens)
         XCTAssertNil(row.providerCompletionPayoutUSDPerMillionTokens)
         XCTAssertFalse(row.switchAction.available)
-        XCTAssertEqual(row.evaluate.unavailableReason, "use_models_evaluate")
+        XCTAssertTrue(row.evaluate.available)
+        XCTAssertEqual(row.evaluate.transactionKind, "evaluate_model")
 
         let encoded = try ModelSwitchingWireCodec.encode(projection)
         let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(encoded.utf8)) as? [String: Any])
@@ -45,6 +46,100 @@ final class ModelCatalogEconomicsTests: XCTestCase {
         XCTAssertTrue(encodedRow["provider_prompt_payout_usd_per_million_tokens"] is NSNull)
         let source = try XCTUnwrap(object["source"] as? [String: Any])
         XCTAssertTrue(source["rate_card_signature_digest"] is NSNull)
+    }
+
+    func testProjectionEmitsEvaluateOnlyForEvaluatableCandidates() throws {
+        let inputs = try Self.staticInputs()
+        let blockedCandidate = Self.candidate(
+            candidateID: "byom_" + String(repeating: "a", count: 52),
+            warningCodes: [BYOMDiscoveryWarning.requiresPreparation.rawValue]
+        )
+        let doesNotFitCandidate = Self.candidate(
+            candidateID: "byom_" + String(repeating: "b", count: 52),
+            fitState: "does_not_fit"
+        )
+        let unknownFitCandidate = Self.candidate(
+            candidateID: "byom_" + String(repeating: "d", count: 52),
+            fitState: "unknown"
+        )
+        let unboundCatalogCandidate = Self.candidate(
+            candidateID: "byom_" + String(repeating: "c", count: 52),
+            catalogModelKey: nil
+        )
+        let unstableCandidate = Self.candidate(
+            candidateID: "byom_unstable_000000000000000000000000000000000000000000000"
+        )
+        let projection = ModelCatalogEconomicsBuilder.makeProjection(
+            generatedAt: inputs.rateCard.value.generatedAt.addingTimeInterval(60),
+            currentModelID: nil,
+            discovery: Self.discovery(candidates: [
+                blockedCandidate,
+                doesNotFitCandidate,
+                unknownFitCandidate,
+                unboundCatalogCandidate,
+                unstableCandidate,
+                Self.candidate(),
+            ]),
+            admissionStatuses: [:],
+            demand: inputs.demand,
+            candidateCatalog: inputs.candidateCatalog,
+            rateCard: inputs.rateCard
+        )
+
+        let rows = projection.rows.filter { $0.actionModelID != nil }
+        // Genuinely non-evaluatable candidates: unstable id, not-ready
+        // (requires preparation is submit-blocking), does-not-fit. Unknown fit is
+        // NOT one of these — the real gates reject only does_not_fit and allow
+        // unknown (SPEC-044-R002). A missing catalog binding is likewise not
+        // blocking — a stable/ready candidate is offerable as a non-earning
+        // v0.1 offer.
+        let blockedIDs = Set([
+            blockedCandidate.candidateID,
+            doesNotFitCandidate.candidateID,
+            unstableCandidate.candidateID,
+        ])
+        let blockedRows = rows.filter { blockedIDs.contains($0.actionModelID ?? "") }
+        XCTAssertEqual(blockedRows.count, 3)
+        XCTAssertTrue(blockedRows.allSatisfy { $0.evaluate.available == false }, "all three negative candidates must be unavailable")
+        XCTAssertTrue(blockedRows.allSatisfy { $0.evaluate.unavailableReason == "candidate_not_evaluatable" })
+
+        // The catalog-bound stable/ready/fits candidate is evaluatable.
+        let availableRow = try XCTUnwrap(rows.first { $0.actionModelID == Self.candidateID })
+        XCTAssertTrue(availableRow.evaluate.available)
+        XCTAssertEqual(availableRow.evaluate.transactionKind, "evaluate_model")
+        XCTAssertNotNil(availableRow.evaluate.transactionID)
+        XCTAssertEqual(availableRow.evaluate.actionTimeoutSeconds, 10)
+        XCTAssertFalse(availableRow.evaluate.requiresConfirmation)
+        XCTAssertNil(availableRow.evaluate.unavailableReason)
+
+        // A stable/ready/fits candidate with NO catalog binding is now also
+        // evaluatable (offerable as a non-earning v0.1 offer), but its economics
+        // stay non-earning: no catalog key, no payout, and not settlement_capable.
+        let nonCatalogRow = try XCTUnwrap(rows.first { $0.actionModelID == unboundCatalogCandidate.candidateID })
+        XCTAssertTrue(nonCatalogRow.evaluate.available)
+        XCTAssertEqual(nonCatalogRow.evaluate.transactionKind, "evaluate_model")
+        XCTAssertNotNil(nonCatalogRow.evaluate.transactionID)
+        XCTAssertEqual(nonCatalogRow.evaluate.actionTimeoutSeconds, 10)
+        XCTAssertNil(nonCatalogRow.evaluate.unavailableReason)
+        XCTAssertNil(nonCatalogRow.rateCardKey)
+        XCTAssertNotEqual(nonCatalogRow.providerGuidance.earningPathClass, "settlement_capable")
+        XCTAssertFalse(nonCatalogRow.admission.settlementCapable)
+        XCTAssertNil(nonCatalogRow.providerPromptPayoutUSDPerMillionTokens)
+        XCTAssertNil(nonCatalogRow.providerCompletionPayoutUSDPerMillionTokens)
+
+        // A stable/ready candidate whose fit is UNKNOWN is evaluatable — the
+        // gate rejects only does_not_fit and allows unknown (SPEC-044-R002). Its
+        // economics stay non-earning like the nil-catalog positive.
+        let unknownFitRow = try XCTUnwrap(rows.first { $0.actionModelID == unknownFitCandidate.candidateID })
+        XCTAssertTrue(unknownFitRow.evaluate.available)
+        XCTAssertEqual(unknownFitRow.evaluate.transactionKind, "evaluate_model")
+        XCTAssertNotNil(unknownFitRow.evaluate.transactionID)
+        XCTAssertEqual(unknownFitRow.evaluate.actionTimeoutSeconds, 10)
+        XCTAssertNil(unknownFitRow.evaluate.unavailableReason)
+        XCTAssertNotEqual(unknownFitRow.providerGuidance.earningPathClass, "settlement_capable")
+        XCTAssertFalse(unknownFitRow.admission.settlementCapable)
+        XCTAssertNil(unknownFitRow.providerPromptPayoutUSDPerMillionTokens)
+        XCTAssertNil(unknownFitRow.providerCompletionPayoutUSDPerMillionTokens)
     }
 
     func testCatalogPricedFreshSignedRateCardPermitsEconomicsWithoutSettlement() throws {
@@ -520,7 +615,7 @@ final class ModelCatalogEconomicsTests: XCTestCase {
     }
 
 
-    private static let candidateID = "byom_test_0000000000000000000000000000000000000000000000"
+    private static let candidateID = "byom_abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrst"
     private static let catalogModelKey = "openai/gpt-oss-20b"
     private static let servedModelRef = "ollama:gpt-oss:20b"
 

@@ -95,18 +95,490 @@ final class ModelManagementTests: XCTestCase {
         XCTAssertEqual(mapped.action, .none)
     }
 
-    func testCatalogEconomicsHidesLocalDefaultBYOMRowsForThisRelease() throws {
+    func testCatalogEconomicsShowsLocalDefaultBYOMRowsWithWireVerdict() throws {
         let document = try JSONDecoder().decode(
             MalibuModelCatalogEconomicsDocument.self,
             from: Data(catalogEconomicsJSON(rows: [localOnlyBYOMRowJSON()]).utf8)
         )
         let validated = try document.validated(now: ModelTestTimestamp.date)
 
-        XCTAssertNil(MalibuModelRow(
+        let mapped = try XCTUnwrap(MalibuModelRow(
             economics: validated.rows[0],
             currentModelID: "other/model",
             warmSwapAvailable: true
         ))
+        XCTAssertEqual(mapped.earningVerdict, "Local only — not offered to the network")
+        XCTAssertEqual(mapped.earningDisclosure, "Local only — not offered to the network, so it isn't earning.")
+        XCTAssertEqual(mapped.admissionStateLabel, "Local only")
+        XCTAssertEqual(mapped.action, .none)
+    }
+
+    @MainActor
+    func testBYOMActivationRunsEvaluateDryRunAndTypedOffer() async throws {
+        let timestamp = Self.recentTimestamp()
+        let cli = FakeModelCLI(results: [
+            ModelCLIResult(
+                exitCode: 0,
+                stdout: catalogEconomicsJSON(
+                    rows: [
+                        localOnlyBYOMRowJSON(evaluateAction: availableActionJSON(kind: "evaluate_model", timeout: 10, requiresConfirmation: false)),
+                    ],
+                    generatedAt: timestamp
+                ),
+                stderr: ""
+            ),
+            ModelCLIResult(
+                exitCode: 0,
+                stdout: Self.byomEvaluationJSON(candidateID: "local-candidate"),
+                stderr: ""
+            ),
+            ModelCLIResult(
+                exitCode: 0,
+                stdout: Self.byomOfferDryRunJSON(candidateID: "local-candidate"),
+                stderr: ""
+            ),
+            ModelCLIResult(
+                exitCode: 0,
+                stdout: Self.byomAdmissionStatusJSON(candidateID: "local-candidate"),
+                stderr: ""
+            ),
+            ModelCLIResult(
+                exitCode: 0,
+                stdout: Self.byomAdmissionStatusJSON(candidateID: "local-candidate"),
+                stderr: ""
+            ),
+            ModelCLIResult(
+                exitCode: 0,
+                stdout: catalogEconomicsJSON(
+                    rows: [
+                        localOnlyBYOMRowJSON(evaluateAction: availableActionJSON(kind: "evaluate_model", timeout: 10, requiresConfirmation: false)),
+                    ],
+                    generatedAt: timestamp
+                ),
+                stderr: ""
+            ),
+        ])
+        let store = ModelManagementStore(
+            cli: cli,
+            paths: testProviderPaths(),
+            defaults: UserDefaults(suiteName: "ModelManagementTests.byomActivation.\(UUID().uuidString)")!
+        )
+        await store.refresh(
+            currentModelID: "other/model",
+            peer: peer(for: [MalibuModelCapabilityManifest.readySwitch, MalibuModelCapabilityManifest.catalogEconomics])
+        )
+        XCTAssertEqual(store.rows.count, 1)
+        let row = try XCTUnwrap(store.rows.first { $0.id == "local-candidate" })
+
+        await store.activate(row)
+
+        let configPath = cli.invocations[0][4]
+        XCTAssertEqual(cli.invocations[1], ["models", "evaluate", "local-candidate", "--json", "--config", configPath])
+        XCTAssertEqual(cli.invocations[2], ["models", "offer", "local-candidate", "--dry-run", "--json", "--config", configPath])
+        XCTAssertEqual(cli.invocations[3], ["models", "offer", "local-candidate", "--yes", "--json", "--config", configPath])
+        XCTAssertFalse(cli.invocations[3].contains("--evaluation-digest-sha256"))
+        XCTAssertEqual(cli.invocations[4], ["models", "admission", "status", "local-candidate", "--json", "--config", configPath])
+        XCTAssertEqual(cli.invocations[5].prefix(5), ["models", "catalog-economics", "--json", "--config", configPath])
+        XCTAssertEqual(Array(cli.invocations[5].dropLast(2)), ["models", "catalog-economics", "--json", "--config", configPath])
+    }
+
+    @MainActor
+    func testBYOMActivationRejectsPartialOrMismatchedCandidateJSON() async throws {
+        let timestamp = Self.recentTimestamp()
+        let cli = FakeModelCLI(results: [
+            ModelCLIResult(
+                exitCode: 0,
+                stdout: catalogEconomicsJSON(
+                    rows: [
+                        localOnlyBYOMRowJSON(evaluateAction: availableActionJSON(kind: "evaluate_model", timeout: 10, requiresConfirmation: false)),
+                    ],
+                    generatedAt: timestamp
+                ),
+                stderr: ""
+            ),
+            ModelCLIResult(
+                exitCode: 0,
+                stdout: #"{"schema":"provider_byom_evaluation.v1","candidate_id":"local-candidate"}"#,
+                stderr: ""
+            ),
+        ])
+        let store = ModelManagementStore(
+            cli: cli,
+            paths: testProviderPaths(),
+            defaults: UserDefaults(suiteName: "ModelManagementTests.byomActivationStrict.\(UUID().uuidString)")!
+        )
+        await store.refresh(
+            currentModelID: "other/model",
+            peer: peer(for: [MalibuModelCapabilityManifest.readySwitch, MalibuModelCapabilityManifest.catalogEconomics])
+        )
+        let row = try XCTUnwrap(store.rows.first { $0.id == "local-candidate" })
+
+        await store.activate(row)
+
+        XCTAssertEqual(cli.invocations.count, 3)
+        XCTAssertEqual(cli.invocations[2].prefix(3), ["models", "offer", "local-candidate"])
+        guard case .failed = store.operation else {
+            return XCTFail("expected activation to fail closed on partial evaluation JSON")
+        }
+        XCTAssertEqual(store.history.last?.outcome, "failed")
+    }
+
+    @MainActor
+    func testBYOMActivationRejectsMismatchedCandidateBindingsAtEveryBoundary() async throws {
+        let timestamp = Self.recentTimestamp()
+        let economics = ModelCLIResult(
+            exitCode: 0,
+            stdout: catalogEconomicsJSON(
+                rows: [
+                    localOnlyBYOMRowJSON(evaluateAction: availableActionJSON(kind: "evaluate_model", timeout: 10, requiresConfirmation: false)),
+                ],
+                generatedAt: timestamp
+            ),
+            stderr: ""
+        )
+        let localEvaluation = ModelCLIResult(
+            exitCode: 0,
+            stdout: Self.byomEvaluationJSON(candidateID: "local-candidate"),
+            stderr: ""
+        )
+        let localDryRun = ModelCLIResult(
+            exitCode: 0,
+            stdout: Self.byomOfferDryRunJSON(candidateID: "local-candidate"),
+            stderr: ""
+        )
+        let localStatus = ModelCLIResult(
+            exitCode: 0,
+            stdout: Self.byomAdmissionStatusJSON(candidateID: "local-candidate"),
+            stderr: ""
+        )
+        let otherEvaluation = ModelCLIResult(
+            exitCode: 0,
+            stdout: Self.byomEvaluationJSON(candidateID: "other-candidate"),
+            stderr: ""
+        )
+        let otherDryRun = ModelCLIResult(
+            exitCode: 0,
+            stdout: Self.byomOfferDryRunJSON(candidateID: "other-candidate"),
+            stderr: ""
+        )
+        let otherStatus = ModelCLIResult(
+            exitCode: 0,
+            stdout: Self.byomAdmissionStatusJSON(candidateID: "other-candidate"),
+            stderr: ""
+        )
+        let cases: [(name: String, results: [ModelCLIResult], expectedInvocations: Int)] = [
+            ("evaluation", [economics, otherEvaluation, localDryRun], 3),
+            ("dry-run", [economics, localEvaluation, otherDryRun], 3),
+            ("offer-result", [economics, localEvaluation, localDryRun, otherStatus], 4),
+            ("refreshed-status", [economics, localEvaluation, localDryRun, localStatus, otherStatus], 5),
+        ]
+
+        for (name, results, expectedInvocations) in cases {
+            let cli = FakeModelCLI(results: results)
+            let store = ModelManagementStore(
+                cli: cli,
+                paths: testProviderPaths(),
+                defaults: UserDefaults(suiteName: "ModelManagementTests.byomBinding.\(name).\(UUID().uuidString)")!
+            )
+            await store.refresh(
+                currentModelID: "other/model",
+                peer: peer(for: [MalibuModelCapabilityManifest.readySwitch, MalibuModelCapabilityManifest.catalogEconomics])
+            )
+            let row = try XCTUnwrap(store.rows.first { $0.id == "local-candidate" }, name)
+
+            await store.activate(row)
+
+            XCTAssertEqual(cli.invocations.count, expectedInvocations, name)
+            guard case .failed = store.operation else {
+                XCTFail("expected \(name) to fail closed on a mismatched candidate id")
+                continue
+            }
+            XCTAssertEqual(store.history.last?.outcome, "failed", name)
+        }
+    }
+
+    @MainActor
+    func testBYOMActivationRejectsAmbiguousOrNonClosedEvaluationJSON() async throws {
+        let timestamp = Self.recentTimestamp()
+        let validEvaluation = Self.byomEvaluationJSON(candidateID: "local-candidate")
+        let mutations: [(name: String, evaluation: String)] = [
+            (
+                "duplicate-key",
+                validEvaluation.replacingOccurrences(
+                    of: #""candidate_id":"local-candidate""#,
+                    with: #""candidate_id":"local-candidate","candidate_id":"other-candidate""#
+                )
+            ),
+            (
+                "unknown-capability-field",
+                validEvaluation.replacingOccurrences(
+                    of: #""reason_code":null}},"fit_estimate_source""#,
+                    with: #""reason_code":null,"operator_secret":"x"}},"fit_estimate_source""#
+                )
+            ),
+            (
+                "unknown-mutation-field",
+                validEvaluation.replacingOccurrences(
+                    of: #""coordinator_state_mutated":false"#,
+                    with: #""coordinator_state_mutated":false,"operator_secret":true"#
+                )
+            ),
+            (
+                "state-mutating-evaluation",
+                validEvaluation.replacingOccurrences(
+                    of: #""coordinator_state_mutated":false"#,
+                    with: #""coordinator_state_mutated":true"#
+                )
+            ),
+        ]
+
+        for (name, evaluation) in mutations {
+            let cli = FakeModelCLI(results: [
+                ModelCLIResult(
+                    exitCode: 0,
+                    stdout: catalogEconomicsJSON(
+                        rows: [
+                            localOnlyBYOMRowJSON(evaluateAction: availableActionJSON(kind: "evaluate_model", timeout: 10, requiresConfirmation: false)),
+                        ],
+                        generatedAt: timestamp
+                    ),
+                    stderr: ""
+                ),
+                ModelCLIResult(exitCode: 0, stdout: evaluation, stderr: ""),
+                ModelCLIResult(exitCode: 0, stdout: Self.byomOfferDryRunJSON(candidateID: "local-candidate"), stderr: ""),
+            ])
+            let store = ModelManagementStore(
+                cli: cli,
+                paths: testProviderPaths(),
+                defaults: UserDefaults(suiteName: "ModelManagementTests.byomStrict.\(name).\(UUID().uuidString)")!
+            )
+            await store.refresh(
+                currentModelID: "other/model",
+                peer: peer(for: [MalibuModelCapabilityManifest.readySwitch, MalibuModelCapabilityManifest.catalogEconomics])
+            )
+            let row = try XCTUnwrap(store.rows.first { $0.id == "local-candidate" }, name)
+
+            await store.activate(row)
+
+            XCTAssertEqual(cli.invocations.count, 3, name)
+            guard case .failed = store.operation else {
+                XCTFail("expected \(name) to fail closed")
+                continue
+            }
+            XCTAssertEqual(store.history.last?.outcome, "failed", name)
+        }
+    }
+
+    func testBYOMEvaluationDecodesRealCLIShapeWithoutDigestKey() throws {
+        // Regression: the CLI's provider_byom_evaluation.v1 payload never carries
+        // evaluation_digest_sha256 (a SPEC-047 offer-package field). The consumer
+        // must decode and validate real CLI output that omits it.
+        let document = try JSONDecoder().decode(
+            MalibuBYOMEvaluationDocument.self,
+            from: Data(Self.byomEvaluationJSON(candidateID: "local-candidate").utf8)
+        )
+        XCTAssertNoThrow(try document.validated(expectedCandidateID: "local-candidate"))
+    }
+
+    func testCatalogEconomicsRejectsNullActionModelIDWithAvailableAction() throws {
+        // SPEC-044-R006: a row with a null action_model_id has no addressable
+        // model and MUST carry no live action. A null-id row that exposes an
+        // AVAILABLE action is malformed. validated() checks only the envelope, so
+        // the fail-closed boundary is per-row in rowsForMalibu: validate(row:)
+        // rejects the malformed row and it is DEMOTED to the unsupported variant
+        // — never surviving as a live/earning row that relies on UI-side button
+        // suppression.
+        let rowJSON = trustedEconomicsRowJSON(
+            evaluateAction: availableActionJSON(kind: "evaluate_model", timeout: 10, requiresConfirmation: false)
+        ).replacingOccurrences(of: #""action_model_id":"candidate-qwen""#, with: #""action_model_id":null"#)
+        let document = try JSONDecoder().decode(
+            MalibuModelCatalogEconomicsDocument.self,
+            from: Data(catalogEconomicsJSON(rows: [rowJSON]).utf8)
+        )
+        let validated = try document.validated(now: ModelTestTimestamp.date)
+        let rows = validated.rowsForMalibu(currentModelID: "other/model", warmSwapAvailable: true)
+        // No mapped row is actionable or earning.
+        XCTAssertFalse(rows.contains { $0.action == .evaluate || $0.action == .switchModel })
+        XCTAssertFalse(rows.contains { $0.earningPathClass == "settlement_capable" })
+        XCTAssertFalse(rows.contains { $0.providerPromptPayoutUSDPerMillionTokens != nil })
+        XCTAssertFalse(rows.contains { $0.providerCompletionPayoutUSDPerMillionTokens != nil })
+        // The malformed row is demoted, not mapped intact: economics blanked.
+        let mapped = try XCTUnwrap(rows.first)
+        XCTAssertEqual(mapped.action, .none)
+        XCTAssertNil(mapped.earningPathClass)
+        XCTAssertEqual(mapped.economicsState, "blocked")
+    }
+
+    func testCatalogEconomicsAcceptsConformantNullActionModelIDRow() throws {
+        // The real CLI catalog-only row (makeCatalogOnlyRow) has action_model_id
+        // == null, disabled_reason "no_cli_transaction_available", and every
+        // action unavailable (null transaction fields + a nonempty reason). It is
+        // VALID and maps via the economics path to a non-actionable, non-earning
+        // row — it must NOT be demoted to unsupported. This also proves FIX B:
+        // without "no_cli_transaction_available" in closedDisabledReasons,
+        // validate(row:) would reject the row and it would be demoted
+        // (earningPathClass blanked to nil).
+        let rowJSON = localOnlyBYOMRowJSON()
+            .replacingOccurrences(of: #""action_model_id":"local-candidate""#, with: #""action_model_id":null"#)
+            .replacingOccurrences(of: #""runtime_state":"ready""#, with: #""runtime_state":"catalog""#)
+            .replacingOccurrences(of: #""disabled_reason":"local_inventory_only""#, with: #""disabled_reason":"no_cli_transaction_available""#)
+            .replacingOccurrences(
+                of: #""state":"local_only","source":"local_default""#,
+                with: #""state":"not_offered","source":"local_default""#
+            )
+            .replacingOccurrences(of: #""state_label_key":"byom.local.local_only""#, with: #""state_label_key":"byom.local.not_offered""#)
+            .replacingOccurrences(
+                of: #""warning_codes":["admission_state_not_settlement_capable"]"#,
+                with: #""warning_codes":["admission_state_not_settlement_capable","model_not_local","action_unavailable"]"#
+            )
+        let document = try JSONDecoder().decode(
+            MalibuModelCatalogEconomicsDocument.self,
+            from: Data(catalogEconomicsJSON(rows: [rowJSON]).utf8)
+        )
+        let validated = try document.validated(now: ModelTestTimestamp.date)
+        let rows = validated.rowsForMalibu(currentModelID: "other/model", warmSwapAvailable: true)
+        let mapped = try XCTUnwrap(rows.first)
+        // Mapped via the economics path (NOT demoted): earningPathClass carries
+        // the wire value and the row is not tagged projection_unsupported.
+        XCTAssertNotNil(mapped.earningPathClass)
+        XCTAssertFalse(mapped.warningCodes.contains("projection_unsupported"))
+        // Non-actionable + non-earning.
+        XCTAssertEqual(mapped.action, .none)
+        XCTAssertNotEqual(mapped.earningPathClass, "settlement_capable")
+        XCTAssertNil(mapped.providerPromptPayoutUSDPerMillionTokens)
+        XCTAssertNil(mapped.providerCompletionPayoutUSDPerMillionTokens)
+    }
+
+    func testCatalogEconomicsAcceptsCoordinatorNotOfferedStateLabel() throws {
+        // The coordinator emits state_label_key = "byom.admission." + state,
+        // including for not_offered. A coordinator-sourced not_offered row whose
+        // guidance carries "byom.admission.not_offered" must map via the economics
+        // path (NOT be demoted) — the source-aware label check accepts it.
+        let rowJSON = localOnlyBYOMRowJSON()
+            .replacingOccurrences(
+                of: #""state":"local_only","source":"local_default""#,
+                with: #""state":"not_offered","source":"coordinator""#
+            )
+            .replacingOccurrences(
+                of: #""state_label_key":"byom.local.local_only""#,
+                with: #""state_label_key":"byom.admission.not_offered""#
+            )
+        let document = try JSONDecoder().decode(
+            MalibuModelCatalogEconomicsDocument.self,
+            from: Data(catalogEconomicsJSON(rows: [rowJSON]).utf8)
+        )
+        let validated = try document.validated(now: ModelTestTimestamp.date)
+        XCTAssertEqual(validated.rows[0].admission.source, "coordinator")
+        XCTAssertEqual(validated.rows[0].admission.state, "not_offered")
+        XCTAssertEqual(validated.rows[0].providerGuidance.stateLabelKey, "byom.admission.not_offered")
+        let rows = validated.rowsForMalibu(currentModelID: "other/model", warmSwapAvailable: true)
+        let mapped = try XCTUnwrap(rows.first)
+        // Mapped via the economics path: the coordinator guidance survives, so
+        // earningPathClass is the wire value (not nil from demotion) and the row
+        // is not tagged projection_unsupported.
+        XCTAssertEqual(mapped.admissionState, "not_offered")
+        XCTAssertEqual(mapped.earningPathClass, "local_inventory_only")
+        XCTAssertFalse(mapped.warningCodes.contains("projection_unsupported"))
+    }
+
+    func testCatalogEconomicsRejectsLocalDefaultNotOfferedWithAdmissionPrefixLabel() throws {
+        // A local_default not_offered row must use the "byom.local." prefix. A
+        // local_default row carrying "byom.admission.not_offered" fails the
+        // source-aware label check in validate(row:). validated() does not check
+        // labels, so the fail-closed boundary is per-row: rowsForMalibu DEMOTES
+        // the row to the unsupported, non-actionable/non-earning variant.
+        let rowJSON = localOnlyBYOMRowJSON()
+            .replacingOccurrences(of: #""state":"local_only""#, with: #""state":"not_offered""#)
+            .replacingOccurrences(
+                of: #""state_label_key":"byom.local.local_only""#,
+                with: #""state_label_key":"byom.admission.not_offered""#
+            )
+        let document = try JSONDecoder().decode(
+            MalibuModelCatalogEconomicsDocument.self,
+            from: Data(catalogEconomicsJSON(rows: [rowJSON]).utf8)
+        )
+        let validated = try document.validated(now: ModelTestTimestamp.date)
+        let rows = validated.rowsForMalibu(currentModelID: "other/model", warmSwapAvailable: true)
+        let mapped = try XCTUnwrap(rows.first)
+        // Demoted to unsupported: non-actionable, non-earning, economics blanked.
+        XCTAssertEqual(mapped.action, .none)
+        XCTAssertNil(mapped.earningPathClass)
+        XCTAssertEqual(mapped.economicsState, "blocked")
+        XCTAssertTrue(mapped.warningCodes.contains("projection_unsupported"))
+        XCTAssertNil(mapped.providerPromptPayoutUSDPerMillionTokens)
+    }
+
+    func testBYOMEvaluationAcceptsRedactionWarningAndStaysNonEarning() throws {
+        // SPEC-046-R007: optional-label redaction codes are non-blocking warnings;
+        // the consumer must accept them and they must not confer an earning path.
+        let evaluationJSON = Self.byomEvaluationJSON(candidateID: "local-candidate")
+            .replacingOccurrences(of: #""warnings":[]"#, with: #""warnings":["model_reference_redacted"]"#)
+        let document = try JSONDecoder().decode(
+            MalibuBYOMEvaluationDocument.self,
+            from: Data(evaluationJSON.utf8)
+        )
+        XCTAssertNoThrow(try document.validated(expectedCandidateID: "local-candidate"))
+        XCTAssertEqual(document.warnings, ["model_reference_redacted"])
+        XCTAssertNotEqual(document.providerGuidance.earningPathClass, "settlement_capable")
+    }
+
+    func testCatalogEconomicsRowAcceptsRedactionWarningAndStaysNonEarning() throws {
+        // SPEC-046-R007 redaction codes must not block admission and must not make
+        // a catalog-economics row settlement-capable/earning.
+        let rowJSON = localOnlyBYOMRowJSON().replacingOccurrences(
+            of: #""warning_codes":["admission_state_not_settlement_capable"]"#,
+            with: #""warning_codes":["admission_state_not_settlement_capable","capability_family_redacted"]"#
+        )
+        let document = try JSONDecoder().decode(
+            MalibuModelCatalogEconomicsDocument.self,
+            from: Data(catalogEconomicsJSON(rows: [rowJSON]).utf8)
+        )
+        let validated = try document.validated(now: ModelTestTimestamp.date)
+        let mapped = try XCTUnwrap(MalibuModelRow(
+            economics: validated.rows[0],
+            currentModelID: "other/model",
+            warmSwapAvailable: true
+        ))
+        XCTAssertNotEqual(mapped.earningPathClass, "settlement_capable")
+        XCTAssertNil(mapped.providerCompletionPayoutUSDPerMillionTokens)
+    }
+
+    func testCatalogEconomicsRejectsDuplicateCanonicalRowIdentity() throws {
+        // SPEC-044-R005: the projection MUST contain no duplicate canonical row
+        // identity, and a duplicate makes the ENTIRE projection malformed —
+        // validated() rejects the whole document (not per-row demotion).
+        // Duplicate candidate identity: two rows share action_model_id even with
+        // distinct model_keys — the identity keys on (candidate, action_model_id).
+        let candidateRowA = trustedEconomicsRowJSON()
+        let candidateRowB = trustedEconomicsRowJSON()
+            .replacingOccurrences(of: #""model_key":"qwen3-8b""#, with: #""model_key":"qwen3-8b-alt""#)
+        let duplicateCandidate = catalogEconomicsJSON(rows: [candidateRowA, candidateRowB])
+        XCTAssertThrowsError(try JSONDecoder().decode(
+            MalibuModelCatalogEconomicsDocument.self,
+            from: Data(duplicateCandidate.utf8)
+        ).validated(now: ModelTestTimestamp.date))
+
+        // Duplicate catalog identity: two null-action rows share model_key.
+        let catalogRow = localOnlyBYOMRowJSON()
+            .replacingOccurrences(of: #""action_model_id":"local-candidate""#, with: #""action_model_id":null"#)
+        let duplicateCatalog = catalogEconomicsJSON(rows: [catalogRow, catalogRow])
+        XCTAssertThrowsError(try JSONDecoder().decode(
+            MalibuModelCatalogEconomicsDocument.self,
+            from: Data(duplicateCatalog.utf8)
+        ).validated(now: ModelTestTimestamp.date))
+    }
+
+    func testCatalogEconomicsAcceptsDistinctCanonicalRowIdentities() throws {
+        // Two rows with distinct canonical identities are a valid projection.
+        let rowA = trustedEconomicsRowJSON()
+        let rowB = trustedEconomicsRowJSON()
+            .replacingOccurrences(of: #""action_model_id":"candidate-qwen""#, with: #""action_model_id":"candidate-other""#)
+            .replacingOccurrences(of: #""model_key":"qwen3-8b""#, with: #""model_key":"other-8b""#)
+        let document = catalogEconomicsJSON(rows: [rowA, rowB])
+        XCTAssertNoThrow(try JSONDecoder().decode(
+            MalibuModelCatalogEconomicsDocument.self,
+            from: Data(document.utf8)
+        ).validated(now: ModelTestTimestamp.date))
     }
 
     func testCatalogEconomicsDecodeRejectsUnsupportedEnvelopeKeys() throws {
@@ -363,7 +835,9 @@ final class ModelManagementTests: XCTestCase {
             MalibuModelCatalogEconomicsDocument.self,
             from: Data(catalogEconomicsJSON(rows: [
                 trustedEconomicsRowJSON(warningCodesJSON: #"["feed_stale"]"#),
-                trustedEconomicsRowJSON(stateObservedAt: staleAdmission),
+                trustedEconomicsRowJSON(stateObservedAt: staleAdmission)
+                    .replacingOccurrences(of: #""model_key":"qwen3-8b""#, with: #""model_key":"qwen3-8b-stale""#)
+                    .replacingOccurrences(of: #""action_model_id":"candidate-qwen""#, with: #""action_model_id":"candidate-qwen-stale""#),
             ]).utf8)
         )
 
@@ -428,8 +902,10 @@ final class ModelManagementTests: XCTestCase {
     func testCatalogEconomicsRejectsUnsafeProviderVisibleModelText() throws {
         let pathDisplay = trustedEconomicsRowJSON()
             .replacingOccurrences(of: #""display_model_id":"mlx-community/Qwen3-8B-4bit""#, with: #""display_model_id":"/private/tmp/will pay daily""#)
+            .replacingOccurrences(of: #""action_model_id":"candidate-qwen""#, with: #""action_model_id":"path-display""#)
         let bidiModel = trustedEconomicsRowJSON()
             .replacingOccurrences(of: #""served_model_id":"mlx-community/Qwen3-8B-4bit""#, with: #""served_model_id":"mlx-community/\u202Eevil""#)
+            .replacingOccurrences(of: #""action_model_id":"candidate-qwen""#, with: #""action_model_id":"bidi-model""#)
         let formatControlDisplay = trustedEconomicsRowJSON()
             .replacingOccurrences(of: "mlx-community/Qwen3-8B-4bit", with: "mlx-community/Hidden\\u200EText-4bit")
             .replacingOccurrences(of: #""action_model_id":"candidate-qwen""#, with: #""action_model_id":"format-control""#)
@@ -493,7 +969,7 @@ final class ModelManagementTests: XCTestCase {
                 stdout: {
                     let timestamp = Self.recentTimestamp()
                     return catalogEconomicsJSON(rows: [
-                        localOnlyBYOMRowJSON(),
+                        localOnlyBYOMRowJSON(evaluateAction: availableActionJSON(kind: "evaluate_model", timeout: 10, requiresConfirmation: false)),
                         trustedEconomicsRowJSON(
                             rateCardGeneratedAt: timestamp,
                             stateObservedAt: timestamp
@@ -512,7 +988,7 @@ final class ModelManagementTests: XCTestCase {
         await store.refresh(currentModelID: "other/model", peer: peer(for: MalibuModelCapabilityManifest.catalogEconomics))
 
         XCTAssertEqual(cli.invocations.first?.prefix(3), ["models", "catalog-economics", "--json"])
-        XCTAssertEqual(store.rows.map(\.displayID), ["mlx-community/Qwen3-8B-4bit"])
+        XCTAssertEqual(store.rows.map({ row in row.displayID }), ["mlx-community/Qwen3-8B-4bit", "local/byom"])
         XCTAssertEqual(store.rows.first?.category, .networkCatalog)
         XCTAssertFalse(store.statusLine.localizedCaseInsensitiveContains("discovery failure"))
     }
@@ -575,7 +1051,7 @@ final class ModelManagementTests: XCTestCase {
         await store.refresh(currentModelID: "org/current", peer: peer(for: MalibuModelCapabilityManifest.readySwitch))
         try await Task.sleep(nanoseconds: 400_000_000)
 
-        XCTAssertEqual(store.rows.map(\.displayID), ["org/current"])
+        XCTAssertEqual(store.rows.map({ row in row.displayID }), ["org/current"])
         XCTAssertEqual(store.listState, .ready)
         XCTAssertFalse(store.catalogProjectionRetryAvailable)
     }
@@ -623,7 +1099,7 @@ final class ModelManagementTests: XCTestCase {
         await store.refresh(currentModelID: "other/model", peer: peer)
         await store.refresh(currentModelID: "other/model", peer: peer)
 
-        XCTAssertEqual(store.rows.map(\.displayID), ["mlx-community/Qwen3-8B-4bit"])
+        XCTAssertEqual(store.rows.map({ row in row.displayID }), ["mlx-community/Qwen3-8B-4bit"])
         XCTAssertEqual(store.listState, .viewOnly)
     }
 
@@ -938,7 +1414,7 @@ final class ModelManagementTests: XCTestCase {
         )
 
         XCTAssertEqual(row.category, .needsPreparation)
-        XCTAssertEqual(row.action, .evaluate)
+        XCTAssertEqual(row.action, .none)
     }
 
     func testRowClassificationBlocksModelsThatDoNotFit() {
@@ -1845,6 +2321,7 @@ final class ModelManagementTests: XCTestCase {
 
     private func trustedEconomicsRowJSON(
         switchAction: String? = nil,
+        evaluateAction: String? = nil,
         economicsState: String = "trusted",
         admissionState: String = "catalog_priced",
         settlementCapable: Bool = false,
@@ -1853,20 +2330,41 @@ final class ModelManagementTests: XCTestCase {
         warningCodesJSON: String = #"["admission_state_not_settlement_capable"]"#
     ) -> String {
         let switchAction = switchAction ?? Self.unavailableActionJSON()
+        let evaluateAction = evaluateAction ?? Self.unavailableActionJSON()
+        let guidanceNextAction = settlementCapable ? "maintain_runtime" : "withdraw"
         return """
-        {"model_key":"qwen3-8b","served_model_id":"mlx-community/Qwen3-8B-4bit","display_model_id":"mlx-community/Qwen3-8B-4bit","action_model_id":"candidate-qwen","is_current":false,"weights_present_locally":true,"runtime_state":"catalog","estimated_gb":4.0,"fit":"fits","disabled_reason":null,"warning_codes":\(warningCodesJSON),"admission":{"state":"\(admissionState)","source":"coordinator","coordinator_event_id":"event-1","state_observed_at":"\(stateObservedAt)","catalog_economics_permitted":true,"settlement_capable":\(settlementCapable)},"rate_card_version":"rates-v1","rate_card_generated_at":"\(rateCardGeneratedAt)","rate_card_key":"qwen3-8b","rate_source":"live_signed","prompt_rate_usd_per_million_tokens":0.2,"completion_rate_usd_per_million_tokens":0.4,"provider_share_bps":9000,"provider_prompt_payout_usd_per_million_tokens":0.18,"provider_completion_payout_usd_per_million_tokens":0.36,"economics_state":"\(economicsState)","demand_rank":7,"demand_weight":0.65,"ready_provider_count":4,"supply_deficit_score":1.5,"switch":\(switchAction),"prepare":\(Self.unavailableActionJSON()),"evaluate":\(Self.unavailableActionJSON()),"adopt_recommendation":\(Self.unavailableActionJSON()),"cleanup_staging":\(Self.unavailableActionJSON())}
+        {"model_key":"qwen3-8b","served_model_id":"mlx-community/Qwen3-8B-4bit","display_model_id":"mlx-community/Qwen3-8B-4bit","action_model_id":"candidate-qwen","is_current":false,"weights_present_locally":true,"runtime_state":"catalog","estimated_gb":4.0,"fit":"fits","disabled_reason":null,"warning_codes":\(warningCodesJSON),"admission":{"state":"\(admissionState)","source":"coordinator","coordinator_event_id":"event-1","state_observed_at":"\(stateObservedAt)","catalog_economics_permitted":true,"settlement_capable":\(settlementCapable)},"provider_guidance":{"state_label_key":"byom.admission.\(admissionState)","state_meaning_key":"byom.admission.not_earning","next_action":"\(guidanceNextAction)","transition_reason_code":null,"earning_path_class":\(settlementCapable ? "\"settlement_capable\"" : "\"not_earning_yet_catalog_or_receipt_path_exists\"")},"rate_card_version":"rates-v1","rate_card_generated_at":"\(rateCardGeneratedAt)","rate_card_key":"qwen3-8b","rate_source":"live_signed","prompt_rate_usd_per_million_tokens":0.2,"completion_rate_usd_per_million_tokens":0.4,"provider_share_bps":9000,"provider_prompt_payout_usd_per_million_tokens":0.18,"provider_completion_payout_usd_per_million_tokens":0.36,"economics_state":"\(economicsState)","demand_rank":7,"demand_weight":0.65,"ready_provider_count":4,"supply_deficit_score":1.5,"switch":\(switchAction),"prepare":\(Self.unavailableActionJSON()),"evaluate":\(evaluateAction),"adopt_recommendation":\(Self.unavailableActionJSON()),"cleanup_staging":\(Self.unavailableActionJSON())}
         """
     }
 
-    private func localOnlyBYOMRowJSON() -> String {
+    private func localOnlyBYOMRowJSON(evaluateAction: String? = nil) -> String {
         """
-        {"model_key":"local-candidate","served_model_id":"local/byom","display_model_id":"local/byom","action_model_id":"local-candidate","is_current":false,"weights_present_locally":true,"runtime_state":"ready","estimated_gb":3.0,"fit":"fits","disabled_reason":"local_inventory_only","warning_codes":["admission_state_missing"],"admission":{"state":"local_only","source":"local_default","coordinator_event_id":null,"state_observed_at":null,"catalog_economics_permitted":false,"settlement_capable":false},"rate_card_version":null,"rate_card_generated_at":null,"rate_card_key":null,"rate_source":"none","prompt_rate_usd_per_million_tokens":null,"completion_rate_usd_per_million_tokens":null,"provider_share_bps":null,"provider_prompt_payout_usd_per_million_tokens":null,"provider_completion_payout_usd_per_million_tokens":null,"economics_state":"blocked","demand_rank":null,"demand_weight":null,"ready_provider_count":null,"supply_deficit_score":null,"switch":\(Self.unavailableActionJSON()),"prepare":\(Self.unavailableActionJSON()),"evaluate":\(Self.unavailableActionJSON()),"adopt_recommendation":\(Self.unavailableActionJSON()),"cleanup_staging":\(Self.unavailableActionJSON())}
+        {"model_key":"local-candidate","served_model_id":"local/byom","display_model_id":"local/byom","action_model_id":"local-candidate","is_current":false,"weights_present_locally":true,"runtime_state":"ready","estimated_gb":3.0,"fit":"fits","disabled_reason":"local_inventory_only","warning_codes":["admission_state_not_settlement_capable"],"admission":{"state":"local_only","source":"local_default","coordinator_event_id":null,"state_observed_at":null,"catalog_economics_permitted":false,"settlement_capable":false},"provider_guidance":{"state_label_key":"byom.local.local_only","state_meaning_key":"byom.local.local_only_not_earning","next_action":"fix_local_blocker","transition_reason_code":null,"earning_path_class":"local_inventory_only"},"rate_card_version":null,"rate_card_generated_at":null,"rate_card_key":null,"rate_source":"none","prompt_rate_usd_per_million_tokens":null,"completion_rate_usd_per_million_tokens":null,"provider_share_bps":null,"provider_prompt_payout_usd_per_million_tokens":null,"provider_completion_payout_usd_per_million_tokens":null,"economics_state":"blocked","demand_rank":null,"demand_weight":null,"ready_provider_count":null,"supply_deficit_score":null,"switch":\(Self.unavailableActionJSON()),"prepare":\(Self.unavailableActionJSON()),"evaluate":\(evaluateAction ?? Self.unavailableActionJSON()),"adopt_recommendation":\(Self.unavailableActionJSON()),"cleanup_staging":\(Self.unavailableActionJSON())}
         """
     }
 
     private static func unavailableActionJSON() -> String {
         """
         {"available":false,"requires_confirmation":false,"transaction_kind":null,"transaction_id":null,"action_timeout_seconds":null,"estimated_bytes":null,"unavailable_reason":"action_unavailable"}
+        """
+    }
+
+    private static func byomEvaluationJSON(candidateID: String) -> String {
+        let promptDigest = String(repeating: "a", count: 64)
+        return """
+        {"schema":"provider_byom_evaluation.v1","generated_at":"2026-09-12T00:00:00Z","cli_version":"1.8.123","candidate_id":"\(candidateID)","runtime_source":"ollama_loopback","served_model_ref":"ollama:llama3.2:3b","catalog_model_key":"llama-3.2-3b","adapter_identity":"openai_compatible_loopback","health_result":"passed","latency_ms":100,"completion_tokens":8,"tokens_per_second":12.5,"request_count":1,"output_bytes":64,"usage_reporting_source":"runtime_reported","capability_results":{"chat_completions":{"result":"passed","source":"evaluation","reason_code":null}},"fit_estimate_source":"discovery_fit_state","mutation_summary":{"production_config_mutated":false,"coordinator_state_mutated":false,"production_model_switched":false,"runtime_started":false,"downloads_started":false,"temporary_files_created":false},"diagnostic_hashes":{"prompt_sha256":"\(promptDigest)","response_body_sha256":null},"provider_guidance":{"state_label_key":"byom.discovery.ready","state_meaning_key":"byom.discovery.local_only","next_action":"offer_dry_run","transition_reason_code":null,"earning_path_class":"local_inventory_only"},"offer_preconditions_appear_satisfied":true,"warnings":[]}
+        """
+    }
+
+    private static func byomOfferDryRunJSON(candidateID: String) -> String {
+        """
+        {"schema":"model_admission_offer_dry_run.v1","generated_at":"2026-09-12T00:00:00Z","cli_version":"1.8.123","candidate_id":"\(candidateID)","served_model_ref":"ollama:llama3.2:3b","catalog_model_key":"llama-3.2-3b","would_submit":true,"likely_admission_state":"offerable","likely_admission_state_source":"local_default","provider_guidance":{"state_label_key":"byom.offer_dry_run.would_submit","state_meaning_key":"byom.offer_dry_run.catalog_path_missing_trusted_binding","next_action":"submit_offer","transition_reason_code":null,"earning_path_class":"not_earning_yet_catalog_or_receipt_path_exists"},"reason_code":null,"warnings":[]}
+        """
+    }
+
+    private static func byomAdmissionStatusJSON(candidateID: String) -> String {
+        """
+        {"schema":"model_admission_status.v1","generated_at":"2026-09-12T00:00:00Z","cli_version":"1.8.123","provider_id":"provider-1","candidate_id":"\(candidateID)","served_model_ref":"ollama:llama3.2:3b","catalog_model_key":"llama-3.2-3b","admission_state":"offer_submitted","admission_state_source":"coordinator","coordinator_event_id":"event-1","state_observed_at":"2026-09-12T00:00:00Z","provider_guidance":{"state_label_key":"byom.admission.offer_submitted","state_meaning_key":"byom.admission.not_earning","next_action":"wait_for_coordinator","transition_reason_code":null,"earning_path_class":"not_earning_yet_catalog_or_receipt_path_exists"},"allowed_next_states":[],"warnings":[]}
         """
     }
 
@@ -1936,7 +2434,7 @@ final class ModelManagementTests: XCTestCase {
     }
 
     private static func recentTimestamp() -> String {
-        timestamp(offset: 0)
+        timestamp(offset: 2)
     }
 
     private static func timestamp(offset: TimeInterval) -> String {
