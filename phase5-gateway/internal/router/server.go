@@ -922,6 +922,8 @@ type statusModel struct {
 	ReadyProviderCount int    `json:"ready_provider_count"`
 	TotalSlots         int    `json:"total_slots"`
 	SlotsFree          int    `json:"slots_free"`
+	ReadySlotsTotal    int    `json:"-"`
+	ReadySlotsFree     int    `json:"-"`
 	MaxContextTokens   int    `json:"max_context_tokens"`
 	Degraded           bool   `json:"degraded"`
 	Available          bool   `json:"available"`
@@ -1073,6 +1075,8 @@ func aggregateStatus(poolz poolzResponse, readyThreshold int, now time.Time) sta
 		m.SlotsFree += p.SlotsFree
 		if p.State == "ready" {
 			m.ReadyProviderCount++
+			m.ReadySlotsTotal += p.SlotsTotal
+			m.ReadySlotsFree += p.SlotsFree
 		}
 		if p.MaxContextTokens > m.MaxContextTokens {
 			m.MaxContextTokens = p.MaxContextTokens

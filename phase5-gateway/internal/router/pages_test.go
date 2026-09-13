@@ -95,6 +95,8 @@ func TestPrivacyRouteRendersHonestRetention(t *testing.T) {
 		"compliance.zdr",
 		"train foundation models",
 		"us-east-1",
+		"90 days",
+		"storage.request_log_retention_days",
 	} {
 		if !strings.Contains(body, want) && !strings.Contains(lower, strings.ToLower(want)) {
 			t.Fatalf("privacy body missing %q: %s", want, body)
