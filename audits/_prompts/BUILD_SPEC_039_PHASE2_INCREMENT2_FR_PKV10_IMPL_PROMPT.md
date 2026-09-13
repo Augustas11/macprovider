@@ -1,9 +1,9 @@
 # BUILD: SPEC-039 Phase-2 Increment 2 — FR-PKV10 contiguous KVCache extraction (#887)
 
 > **2026-09-11 — Increment 2 landed** in #1476 (`44df935c`). Do not re-execute
-> this prompt. The SPEC-038 sticky/AC-19 consumer is
-> [#1477](https://github.com/Augustas11/macprovider/issues/1477) /
-> `audits/_prompts/BUILD_SPEC_038_INCREMENT3_STICKY_AC19_IMPL_PROMPT.md`.
+> this prompt. Increment 3 landed in #1489. The production observation slice is
+> [#1500](https://github.com/Augustas11/macprovider/issues/1500) /
+> `audits/_prompts/BUILD_SPEC_038_INCREMENT4_PRODUCTION_OBSERVATION_IMPL_PROMPT.md`.
 
 You are starting a **new** MacProvider implementation session. You have no
 memory of prior chats. Read this file end-to-end before writing code. Then
@@ -11,7 +11,7 @@ execute it. Do not re-triage, do not park, do not ask whether to implement.
 
 **Tracker:** https://github.com/Augustas11/macprovider/issues/887  
 **Predecessor (already merged, do not redo):** #1474 / #1475 (`c6a091d9`)  
-**Follow-on (do not implement here):** #1477  
+**Follow-on (do not implement here):** #1477 (landed), #1500  
 **Closed stale drafts (do not revive):** #889, #894
 
 ---

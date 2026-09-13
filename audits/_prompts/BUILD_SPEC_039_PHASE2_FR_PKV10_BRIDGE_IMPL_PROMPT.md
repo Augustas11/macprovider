@@ -2,8 +2,8 @@
 
 > **2026-09-11 — do not follow this bundled handoff.**
 > Increment 1 landed in #1475. Increment 2 / #887 landed in #1476.
-> Execute Increment 3 / [#1477](https://github.com/Augustas11/macprovider/issues/1477) from
-> `audits/_prompts/BUILD_SPEC_038_INCREMENT3_STICKY_AC19_IMPL_PROMPT.md`.
+> Execute Increment 4 / [#1500](https://github.com/Augustas11/macprovider/issues/1500) from
+> `audits/_prompts/BUILD_SPEC_038_INCREMENT4_PRODUCTION_OBSERVATION_IMPL_PROMPT.md`.
 > Closed drafts #889 / #894 must not be revived.
 
 Author: operator (a11) + Claude session 2026-08-04

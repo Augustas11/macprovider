@@ -6,7 +6,8 @@ execute it. Do not re-triage, do not park, do not ask whether to implement.
 
 **Tracker:** https://github.com/Augustas11/macprovider/issues/1474  
 **Follow-on Increment 2 (landed):** https://github.com/Augustas11/macprovider/issues/887  
-**Follow-on Increment 3 (do not implement here):** https://github.com/Augustas11/macprovider/issues/1477  
+**Follow-on Increment 3 (landed):** https://github.com/Augustas11/macprovider/issues/1477  
+**Follow-on Increment 4 (do not implement here):** https://github.com/Augustas11/macprovider/issues/1500  
 **Closed stale drafts (do not revive):** #889, #894 (`fix/889-spec039p2` was deleted)
 
 ---

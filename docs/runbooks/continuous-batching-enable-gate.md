@@ -125,13 +125,15 @@ authorization headers.
 ## Canary Enable
 
 No `canary` or `on` buyer traffic is currently enableable from implementation
-presence alone. #1477 may install retained paged-KV bridge code, but operators
-still need a packaged release-candidate tuple whose local descriptor admits the
+presence alone. #1477 landed retained paged-KV consumer code and #1500 is the
+production observation / durable-replay prerequisite. Operators still need a
+packaged release-candidate tuple whose local descriptor admits the
 requested path, whose runtime derives `schedulerBackendAvailable: true` from
-that installed state, and whose durable replay authority is wired to stable
-relay request identity plus usage/receipt settlement disposition. Until those
-proofs exist for the exact keyless tuple, strict `on` is rejected before
-provider readiness and `canary` serial-routes.
+a **measured** identity (not an injected test tuple), and whose durable replay
+authority is wired to stable relay request identity plus usage/receipt
+settlement disposition. The in-process always-claim stub is not that
+authority. Until those proofs exist for the exact keyless tuple, strict `on`
+is rejected before provider readiness and `canary` serial-routes.
 
 After that prerequisite lands, use `canary` only when every required proof
 above is present for the exact tuple. Leave `continuous_batch_queue_limit`
@@ -185,7 +187,8 @@ Model tuple:
 Entry 110 slots_total:
 SPEC-039 descriptor hash / tuple admission:
 #887 FR-PKV10 primitive status (landed #1476; not an enable signal):
-#1477 sticky/AC-19 consumer status:
+#1477 sticky/AC-19 consumer status (landed #1489; not an enable signal):
+#1500 production observation / durable replay status:
 Fresh-conversation scope proof:
 MSB-01:
 MSB-02:

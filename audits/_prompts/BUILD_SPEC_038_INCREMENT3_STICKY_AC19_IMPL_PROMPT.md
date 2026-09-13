@@ -1,5 +1,10 @@
 # BUILD: SPEC-038 Increment 3 — FR-CB4 sticky/cross-turn batching + AC-19 billing parity (#1477)
 
+> **2026-09-11 — Increment 3 landed** in #1489 (`84ef22e7`). Do not re-execute
+> this prompt. The production observation / durable-replay slice is
+> [#1500](https://github.com/Augustas11/macprovider/issues/1500) /
+> `audits/_prompts/BUILD_SPEC_038_INCREMENT4_PRODUCTION_OBSERVATION_IMPL_PROMPT.md`.
+
 You are starting a **new** MacProvider implementation session. You have no
 memory of prior chats. Read this file end-to-end before writing code. Then
 execute it. Do not re-triage, do not park, do not ask whether to implement.
@@ -8,6 +13,7 @@ execute it. Do not re-triage, do not park, do not ask whether to implement.
 **Predecessors (already merged, do not redo):**
 - Increment 1 #1474 / #1475 (`c6a091d9`) — observed-identity attach + shared `[B,1]`
 - Increment 2 #887 / #1476 (`44df935c`) — FR-PKV10 contiguous `KVCache` extraction
+**Follow-on (do not implement here):** #1500 production observation  
 **Closed stale drafts (do not revive):** #889, #894
 
 ---
@@ -329,9 +335,11 @@ Ship when tests pass and audits are at bar. Do not wait for "OK to PR?"
 - Merge gate: green **`ci-required`** and green **`spec-index / check`**, plus
   antfleet-ops approval, then squash-merge as Augustas11
   (`gh pr merge <n> --squash --delete-branch`). No `--admin`.
-- After merge: sync canonical `main` to `origin/main`. Do **not** start
-  canary enable or SPEC-024 cold-tier consumption in the same session unless
-  the operator names it.
+- After merge: sync canonical `main` to `origin/main`. Production
+  observation / durable replay is now
+  [#1500](https://github.com/Augustas11/macprovider/issues/1500), not a
+  continuation of this prompt. Do **not** start canary enable from this
+  session.
 
 Provider safety if you touch the live Mac: no broad `pkill`; narrow `pgrep`;
 bootout `live.malibu.provider-watchdog` then the provider via graceful
