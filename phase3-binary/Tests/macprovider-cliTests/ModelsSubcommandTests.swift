@@ -127,6 +127,47 @@ final class ModelsSubcommandTests: XCTestCase {
         XCTAssertTrue(capture.stderr.contains("models catalog-economics is JSON-only"))
     }
 
+
+    func testModelsCatalogEconomicsRemainsV1UntilPreparationTransactionsLand() async throws {
+        let command = try ModelsCatalogEconomicsCommand.parse([
+            "--json",
+            "--skip-coordinator-status",
+            "--skip-ollama",
+            "--skip-lmstudio",
+            "--skip-llamacpp",
+        ])
+
+        let capture = await captureOutput { try await command.run() }
+
+        XCTAssertNil(capture.error)
+        let line = try XCTUnwrap(capture.stdout.split(whereSeparator: \.isNewline).first)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any])
+        XCTAssertEqual(object["schema"] as? String, "model_catalog_economics.v1")
+        let source = try XCTUnwrap(object["source"] as? [String: Any])
+        XCTAssertEqual(source["projection_protocol_version"] as? String, "1")
+        XCTAssertNil(object["storage"])
+        XCTAssertNil(object["cleanup_targets"])
+    }
+
+    func testModelsCatalogEconomicsRejectsUnlandedActionFlagsAtParseTime() throws {
+        XCTAssertThrowsError(try ModelsCatalogEconomicsCommand.parse([
+            "--json",
+            "--run", "action-12345678",
+            "--skip-coordinator-status",
+            "--skip-ollama",
+            "--skip-lmstudio",
+            "--skip-llamacpp",
+        ]))
+        XCTAssertThrowsError(try ModelsCatalogEconomicsCommand.parse([
+            "--json",
+            "--cancel", "action-12345678",
+            "--skip-coordinator-status",
+            "--skip-ollama",
+            "--skip-lmstudio",
+            "--skip-llamacpp",
+        ]))
+    }
+
     func testModelsListConnectedPreservesSupportedModelWithoutRuntimeAuthority() async throws {
         let socketPath = try makeSocketPath()
         let server = ControlSocketServer(
