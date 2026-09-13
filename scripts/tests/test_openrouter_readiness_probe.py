@@ -4,10 +4,12 @@
 from __future__ import annotations
 
 import copy
+import json
 import os
 import sys
 import tempfile
 import unittest
+import uuid
 from unittest import mock
 from pathlib import Path
 
@@ -188,6 +190,31 @@ class OpenRouterReadinessProbeTests(unittest.TestCase):
         self.assertIsInstance(got, FakeHTTPResponse)
         self.assertEqual(mocked.call_count, 1)
 
+    def test_http_request_applies_request_id_header(self):
+        with mock.patch.object(probe.NO_REDIRECT_OPENER, "open", return_value=FakeHTTPResponse(b"{}")) as mocked:
+            probe.http_request("GET", "https://api.example.test/v1/models", request_id="req-test")
+        req = mocked.call_args.args[0]
+        self.assertEqual(req.get_header("X-request-id"), "req-test")
+
+    def test_healthz_reports_version_and_can_enforce_expected_version(self):
+        with mock.patch.object(
+            probe,
+            "read_json",
+            return_value=({"status": "ok", "version": "v1.8.124-9-g14e0159f"}, 200),
+        ):
+            got = probe.check_healthz("https://api.example.test", "v1.8.124-9-g14e0159f")
+        self.assertEqual(got["version"], "v1.8.124-9-g14e0159f")
+        self.assertEqual(got["expected_version"], "v1.8.124-9-g14e0159f")
+
+    def test_healthz_expected_version_mismatch_fails(self):
+        with mock.patch.object(
+            probe,
+            "read_json",
+            return_value=({"status": "ok", "version": "v1.8.124"}, 200),
+        ):
+            with self.assertRaisesRegex(probe.ProbeError, "version"):
+                probe.check_healthz("https://api.example.test", "v1.8.124-9-g14e0159f")
+
     def test_read_json_sanitizes_non_2xx_response_bodies(self):
         with mock.patch.object(probe, "http_request", return_value=FakeHTTPResponse(b'{"secret":"do-not-print"}', status=500)):
             with self.assertRaisesRegex(probe.ProbeError, "returned HTTP 500") as caught:
@@ -283,6 +310,23 @@ class OpenRouterReadinessProbeTests(unittest.TestCase):
         self.assertEqual(mocked.call_count, 2)
         self.assertEqual(got["requests_sent"], 2)
         self.assertEqual(got["shed_429"], 1)
+
+    def test_benchmark_stamps_unique_request_ids(self):
+        result = {
+            "status": 200,
+            "ok": True,
+            "ttft_ms": 20,
+            "latency_ms": 60,
+            "generation_ms": 40,
+            "output_tokens": 4,
+        }
+        with mock.patch.object(probe, "chat_once", side_effect=[result, result, result, result]) as mocked:
+            got = probe.run_benchmark("https://api.example.test", "secret", "model", 4, 2, 16, 1.0, 5000, 1.0)
+        request_ids = [call.kwargs.get("request_id", "") for call in mocked.call_args_list]
+        self.assertEqual(got["requests_sent"], 4)
+        self.assertEqual(len(set(request_ids)), 4)
+        for request_id in request_ids:
+            uuid.UUID(request_id)
 
     def test_benchmark_enforces_ttft_and_generated_token_throughput(self):
         slow_ttft = {
@@ -404,6 +448,117 @@ class OpenRouterReadinessProbeTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(probe.ProbeError, "usd_micro mismatch"):
                 probe.check_wholesale_statement("https://admin.example.test", "operator", "acct_openrouter", "2026-09")
+
+    def test_filing_mode_reports_missing_operator_key_file_without_traceback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "report.json"
+            missing_operator_key = Path(tmp) / "missing-operator-key"
+            argv = [
+                "--base-url",
+                "https://api.example.test",
+                "--expected-healthz-version",
+                "test-version",
+                "--api-key-env",
+                "MACPROVIDER_TEST_API_KEY",
+                "--admin-url",
+                "http://127.0.0.1:18444",
+                "--operator-key-env",
+                "MACPROVIDER_TEST_OPERATOR_KEY",
+                "--operator-key-file",
+                str(missing_operator_key),
+                "--statement-account-id",
+                "acct_openrouter",
+                "--statement-period",
+                "2026-09",
+                "--filing-mode",
+                "--continue-on-error",
+                "--benchmark-requests",
+                "100",
+                "--saturation-requests",
+                "1",
+                "--output",
+                str(output),
+            ]
+            bench = {"requests_sent": 1, "statuses": {"200": 1}, "ok": 1, "shed_429": 0}
+            with mock.patch.dict(os.environ, {"MACPROVIDER_TEST_API_KEY": "buyer-secret"}, clear=False), mock.patch.object(
+                probe, "read_json", return_value=(valid_doc(), 200)
+            ), mock.patch.object(probe, "check_privacy", return_value={"http_status": 200}), mock.patch.object(
+                probe, "check_healthz", return_value={"http_status": 200, "status": "ok", "version": "test-version"}
+            ), mock.patch.object(
+                probe, "check_chat", return_value={"ok": True}
+            ), mock.patch.object(probe, "run_benchmark", return_value=bench):
+                code = probe.main(argv)
+            self.assertEqual(code, 1)
+            report = json.loads(output.read_text(encoding="utf-8"))
+            self.assertFalse(report["ok"])
+            self.assertIn("operator key file is not readable", report["checks"]["wholesale_statement"]["error"])
+            self.assertTrue(any("wholesale_statement" in error for error in report["errors"]))
+
+    def test_filing_mode_requires_expected_healthz_version(self):
+        argv = [
+            "--base-url",
+            "https://api.example.test",
+            "--admin-url",
+            "http://127.0.0.1:18444",
+            "--statement-account-id",
+            "acct_openrouter",
+            "--statement-period",
+            "2026-09",
+            "--filing-mode",
+            "--benchmark-requests",
+            "100",
+            "--saturation-requests",
+            "1",
+        ]
+        with self.assertRaisesRegex(SystemExit, "expected-healthz-version"):
+            probe.main(argv)
+
+    def test_filing_mode_preserves_missing_api_key_file_evidence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "report.json"
+            missing_api_key = Path(tmp) / "missing-api-key"
+            argv = [
+                "--base-url",
+                "https://api.example.test",
+                "--expected-healthz-version",
+                "test-version",
+                "--api-key-env",
+                "MACPROVIDER_TEST_API_KEY",
+                "--api-key-file",
+                str(missing_api_key),
+                "--admin-url",
+                "http://127.0.0.1:18444",
+                "--operator-key-env",
+                "MACPROVIDER_TEST_OPERATOR_KEY",
+                "--statement-account-id",
+                "acct_openrouter",
+                "--statement-period",
+                "2026-09",
+                "--filing-mode",
+                "--continue-on-error",
+                "--benchmark-requests",
+                "100",
+                "--saturation-requests",
+                "1",
+                "--output",
+                str(output),
+            ]
+            with mock.patch.dict(os.environ, {"MACPROVIDER_TEST_OPERATOR_KEY": "operator-secret"}, clear=False), mock.patch.object(
+                probe, "read_json", return_value=(valid_doc(), 200)
+            ), mock.patch.object(probe, "check_privacy", return_value={"http_status": 200}), mock.patch.object(
+                probe, "check_healthz", return_value={"http_status": 200, "status": "ok", "version": "test-version"}
+            ), mock.patch.object(
+                probe,
+                "check_wholesale_statement",
+                return_value={"http_status": 200, "csv_status": 200, "request_count": 1},
+            ):
+                code = probe.main(argv)
+            self.assertEqual(code, 1)
+            report = json.loads(output.read_text(encoding="utf-8"))
+            for name in ("chat", "chat_free", "benchmark", "saturation"):
+                self.assertFalse(report["checks"][name]["ok"])
+                self.assertIn("API key file is not readable", report["checks"][name]["error"])
+            self.assertTrue(any("api_key" in error for error in report["errors"]))
 
     def test_emit_report_creates_private_non_overwritten_file(self):
         with tempfile.TemporaryDirectory() as tmp:
