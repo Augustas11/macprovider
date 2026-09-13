@@ -729,6 +729,19 @@ class BYOMJourneyCaptureTests(unittest.TestCase):
             "discovery", mutator, "mutation_summary is missing required fields: downloads_started"
         )
 
+    def test_rejects_captured_evaluation_that_reports_a_state_mutation(self) -> None:
+        def mutator(_manifest, root):
+            path = root / "captures" / "evaluate-candidate.json"
+            document = json.loads(path.read_text(encoding="utf-8"))
+            document["mutation_summary"]["coordinator_state_mutated"] = True
+            path.write_text(json.dumps(document), encoding="utf-8")
+
+        self.assert_capture_fails(
+            "discovery",
+            mutator,
+            "mutation_summary.coordinator_state_mutated must be false; evaluation must not mutate state",
+        )
+
     def test_rejects_a_captured_document_whose_schema_is_not_enumerated(self) -> None:
         def mutator(manifest, root):
             (root / "captures" / "discover-mlx-cache.json").write_text(

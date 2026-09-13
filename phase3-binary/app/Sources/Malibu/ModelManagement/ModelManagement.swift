@@ -928,6 +928,10 @@ struct MalibuModelCatalogEconomicsDocument: Decodable, Equatable, Sendable {
         "projection_unavailable",
         "projection_timeout",
         "staging_cleanup_required",
+        "capability_family_redacted",
+        "capability_quantization_redacted",
+        "capability_runtime_version_redacted",
+        "model_reference_redacted",
     ]
 
     private static let closedDisabledReasons: Set<String> = [
@@ -1113,7 +1117,6 @@ struct MalibuBYOMEvaluationDocument: Decodable, Equatable, Sendable {
     let providerGuidance: MalibuModelCatalogEconomicsDocument.ProviderGuidance
     let offerPreconditionsAppearSatisfied: Bool
     let warnings: [String]
-    let evaluationDigestSHA256: String?
 
     enum CodingKeys: String, CodingKey, CaseIterable {
         case schema
@@ -1138,7 +1141,6 @@ struct MalibuBYOMEvaluationDocument: Decodable, Equatable, Sendable {
         case providerGuidance = "provider_guidance"
         case offerPreconditionsAppearSatisfied = "offer_preconditions_appear_satisfied"
         case warnings
-        case evaluationDigestSHA256 = "evaluation_digest_sha256"
     }
 
     init(from decoder: Decoder) throws {
@@ -1166,7 +1168,6 @@ struct MalibuBYOMEvaluationDocument: Decodable, Equatable, Sendable {
         providerGuidance = try container.decode(MalibuModelCatalogEconomicsDocument.ProviderGuidance.self, forKey: .providerGuidance)
         offerPreconditionsAppearSatisfied = try container.decode(Bool.self, forKey: .offerPreconditionsAppearSatisfied)
         warnings = try container.decode([String].self, forKey: .warnings)
-        evaluationDigestSHA256 = try decodeExplicitNullableString(container, .evaluationDigestSHA256)
     }
 
     func validated(expectedCandidateID: String) throws {
@@ -1201,7 +1202,6 @@ struct MalibuBYOMEvaluationDocument: Decodable, Equatable, Sendable {
         ]),
               ["mlx_cache", "ollama_loopback", "lmstudio_loopback", "llamacpp_loopback", "openai_compatible_loopback", "unknown"].contains(runtimeSource),
               ["openai_compatible_loopback", "mlx_cache_local_artifact", "unknown"].contains(adapterIdentity),
-              evaluationDigestSHA256.map(Self.isLowercaseSHA256) ?? true,
               Self.isLowercaseSHA256(diagnosticHashes.promptSHA256),
               diagnosticHashes.responseBodySHA256.map(Self.isLowercaseSHA256) ?? true else {
             throw ModelManagementError.invalidCatalog
@@ -2473,7 +2473,7 @@ final class ModelManagementStore: ObservableObject {
             let dryRun = try await runBYOMCommand([
                 "models", "offer", row.id, "--dry-run", "--json", "--config", paths.configFile.path,
             ])
-            guard let activation = try? Self.decodeBYOMActivationResults(
+            guard let wouldSubmit = try? Self.decodeBYOMActivationResults(
                 evaluation: evaluation,
                 dryRun: dryRun,
                 candidateID: row.id
@@ -2481,18 +2481,15 @@ final class ModelManagementStore: ObservableObject {
                 throw ModelManagementError.invalidCatalog
             }
             statusLine = String(localized: "Checking the offer package without changing coordinator state…", comment: "BYOM offer dry-run status")
-            guard activation.wouldSubmit else {
+            guard wouldSubmit else {
                 statusLine = String(localized: "Offer dry-run did not approve submission. No coordinator state was changed.", comment: "BYOM offer dry-run blocked")
                 operation = .idle
                 return
             }
             statusLine = String(localized: "Submitting the coordinator offer…", comment: "BYOM offer submission status")
-            var offerArguments = [
+            let offerArguments = [
                 "models", "offer", row.id, "--yes", "--json", "--config", paths.configFile.path,
             ]
-            if let digest = activation.digest {
-                offerArguments += ["--evaluation-digest-sha256", digest]
-            }
             let offer = try await runBYOMCommand(offerArguments)
             try Self.validateBYOMAdmissionStatus(offer.stdout, expectedCandidateID: row.id)
             statusLine = String(localized: "Reading the resulting admission status…", comment: "BYOM status refresh status")
@@ -2528,12 +2525,12 @@ final class ModelManagementStore: ObservableObject {
         evaluation: ModelCLIResult,
         dryRun: ModelCLIResult,
         candidateID: String
-    ) throws -> (digest: String?, wouldSubmit: Bool) {
+    ) throws -> Bool {
         let evaluation = try Self.decodeStrict(MalibuBYOMEvaluationDocument.self, from: evaluation.stdout)
         let dryRun = try Self.decodeStrict(MalibuBYOMOfferDryRunDocument.self, from: dryRun.stdout)
         try evaluation.validated(expectedCandidateID: candidateID)
         try dryRun.validated(expectedCandidateID: candidateID)
-        return (evaluation.evaluationDigestSHA256, dryRun.wouldSubmit)
+        return dryRun.wouldSubmit
     }
 
     private static func validateBYOMAdmissionStatus(_ stdout: String, expectedCandidateID: String) throws {
@@ -3239,7 +3236,7 @@ struct MalibuModelRow: Identifiable, Equatable, Sendable {
             actionModelID: row.actionModelID
         )
         let isCurrent = row.isCurrent || currentModelID.map { modelIdentityKey($0) == modelIdentityKey(projectedID) } == true
-        let evaluateAction = evaluateTransaction != nil ? MalibuModelRow.Action.evaluate : MalibuModelRow.Action.none
+        let evaluateAction = (row.actionModelID != nil && evaluateTransaction != nil) ? MalibuModelRow.Action.evaluate : MalibuModelRow.Action.none
 
         if isCurrent || row.runtimeState == "current" {
             category = .current

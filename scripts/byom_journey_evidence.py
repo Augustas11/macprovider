@@ -1220,9 +1220,12 @@ def _validate_evaluation(parsed: dict[str, Any], location: str) -> None:
         location + ".mutation_summary",
     )
     # Every mutation flag is a hard SPEC-046-R006 claim; a missing or non-boolean
-    # value must not read as "no mutation".
+    # value must not read as "no mutation". Evaluation must not mutate state
+    # (SPEC-046-R005/R006), so any flag reported as true fails validation.
     for field in sorted(EVALUATION_MUTATION_SUMMARY_KEYS):
-        require_bool(mutations[field], f"{location}.mutation_summary.{field}")
+        where = f"{location}.mutation_summary.{field}"
+        if require_bool(mutations[field], where):
+            fail(f"{where} must be false; evaluation must not mutate state")
     hashes = assert_exact_object(
         parsed["diagnostic_hashes"], EVALUATION_DIAGNOSTIC_HASH_KEYS,
         location + ".diagnostic_hashes",

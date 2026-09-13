@@ -115,7 +115,6 @@ final class ModelManagementTests: XCTestCase {
 
     @MainActor
     func testBYOMActivationRunsEvaluateDryRunAndTypedOffer() async throws {
-        let digest = String(repeating: "a", count: 64)
         let timestamp = Self.recentTimestamp()
         let cli = FakeModelCLI(results: [
             ModelCLIResult(
@@ -130,7 +129,7 @@ final class ModelManagementTests: XCTestCase {
             ),
             ModelCLIResult(
                 exitCode: 0,
-                stdout: Self.byomEvaluationJSON(candidateID: "local-candidate", digest: digest),
+                stdout: Self.byomEvaluationJSON(candidateID: "local-candidate"),
                 stderr: ""
             ),
             ModelCLIResult(
@@ -176,8 +175,8 @@ final class ModelManagementTests: XCTestCase {
         let configPath = cli.invocations[0][4]
         XCTAssertEqual(cli.invocations[1], ["models", "evaluate", "local-candidate", "--json", "--config", configPath])
         XCTAssertEqual(cli.invocations[2], ["models", "offer", "local-candidate", "--dry-run", "--json", "--config", configPath])
-        XCTAssertEqual(Array(cli.invocations[3].dropLast(2)), ["models", "offer", "local-candidate", "--yes", "--json", "--config", configPath])
-        XCTAssertEqual(Array(cli.invocations[3].suffix(2)), ["--evaluation-digest-sha256", digest])
+        XCTAssertEqual(cli.invocations[3], ["models", "offer", "local-candidate", "--yes", "--json", "--config", configPath])
+        XCTAssertFalse(cli.invocations[3].contains("--evaluation-digest-sha256"))
         XCTAssertEqual(cli.invocations[4], ["models", "admission", "status", "local-candidate", "--json", "--config", configPath])
         XCTAssertEqual(cli.invocations[5].prefix(5), ["models", "catalog-economics", "--json", "--config", configPath])
         XCTAssertEqual(Array(cli.invocations[5].dropLast(2)), ["models", "catalog-economics", "--json", "--config", configPath])
@@ -226,7 +225,6 @@ final class ModelManagementTests: XCTestCase {
 
     @MainActor
     func testBYOMActivationRejectsMismatchedCandidateBindingsAtEveryBoundary() async throws {
-        let digest = String(repeating: "a", count: 64)
         let timestamp = Self.recentTimestamp()
         let economics = ModelCLIResult(
             exitCode: 0,
@@ -240,7 +238,7 @@ final class ModelManagementTests: XCTestCase {
         )
         let localEvaluation = ModelCLIResult(
             exitCode: 0,
-            stdout: Self.byomEvaluationJSON(candidateID: "local-candidate", digest: digest),
+            stdout: Self.byomEvaluationJSON(candidateID: "local-candidate"),
             stderr: ""
         )
         let localDryRun = ModelCLIResult(
@@ -255,7 +253,7 @@ final class ModelManagementTests: XCTestCase {
         )
         let otherEvaluation = ModelCLIResult(
             exitCode: 0,
-            stdout: Self.byomEvaluationJSON(candidateID: "other-candidate", digest: digest),
+            stdout: Self.byomEvaluationJSON(candidateID: "other-candidate"),
             stderr: ""
         )
         let otherDryRun = ModelCLIResult(
@@ -301,9 +299,8 @@ final class ModelManagementTests: XCTestCase {
 
     @MainActor
     func testBYOMActivationRejectsAmbiguousOrNonClosedEvaluationJSON() async throws {
-        let digest = String(repeating: "a", count: 64)
         let timestamp = Self.recentTimestamp()
-        let validEvaluation = Self.byomEvaluationJSON(candidateID: "local-candidate", digest: digest)
+        let validEvaluation = Self.byomEvaluationJSON(candidateID: "local-candidate")
         let mutations: [(name: String, evaluation: String)] = [
             (
                 "duplicate-key",
@@ -370,6 +367,72 @@ final class ModelManagementTests: XCTestCase {
             }
             XCTAssertEqual(store.history.last?.outcome, "failed", name)
         }
+    }
+
+    func testBYOMEvaluationDecodesRealCLIShapeWithoutDigestKey() throws {
+        // Regression: the CLI's provider_byom_evaluation.v1 payload never carries
+        // evaluation_digest_sha256 (a SPEC-047 offer-package field). The consumer
+        // must decode and validate real CLI output that omits it.
+        let document = try JSONDecoder().decode(
+            MalibuBYOMEvaluationDocument.self,
+            from: Data(Self.byomEvaluationJSON(candidateID: "local-candidate").utf8)
+        )
+        XCTAssertNoThrow(try document.validated(expectedCandidateID: "local-candidate"))
+    }
+
+    func testCatalogEconomicsSuppressesEvaluateActionWhenActionModelIDIsNull() throws {
+        // SPEC-044-R006: a row with a null action_model_id keeps every action
+        // unavailable, even when an evaluate_model action descriptor is available.
+        let rowJSON = trustedEconomicsRowJSON(
+            evaluateAction: availableActionJSON(kind: "evaluate_model", timeout: 10, requiresConfirmation: false)
+        ).replacingOccurrences(of: #""action_model_id":"candidate-qwen""#, with: #""action_model_id":null"#)
+        let document = try JSONDecoder().decode(
+            MalibuModelCatalogEconomicsDocument.self,
+            from: Data(catalogEconomicsJSON(rows: [rowJSON]).utf8)
+        )
+        let validated = try document.validated(now: ModelTestTimestamp.date)
+        let mapped = try XCTUnwrap(MalibuModelRow(
+            economics: validated.rows[0],
+            currentModelID: "other/model",
+            warmSwapAvailable: true
+        ))
+        XCTAssertNotEqual(mapped.action, .evaluate)
+        XCTAssertEqual(mapped.action, .none)
+    }
+
+    func testBYOMEvaluationAcceptsRedactionWarningAndStaysNonEarning() throws {
+        // SPEC-046-R007: optional-label redaction codes are non-blocking warnings;
+        // the consumer must accept them and they must not confer an earning path.
+        let evaluationJSON = Self.byomEvaluationJSON(candidateID: "local-candidate")
+            .replacingOccurrences(of: #""warnings":[]"#, with: #""warnings":["model_reference_redacted"]"#)
+        let document = try JSONDecoder().decode(
+            MalibuBYOMEvaluationDocument.self,
+            from: Data(evaluationJSON.utf8)
+        )
+        XCTAssertNoThrow(try document.validated(expectedCandidateID: "local-candidate"))
+        XCTAssertEqual(document.warnings, ["model_reference_redacted"])
+        XCTAssertNotEqual(document.providerGuidance.earningPathClass, "settlement_capable")
+    }
+
+    func testCatalogEconomicsRowAcceptsRedactionWarningAndStaysNonEarning() throws {
+        // SPEC-046-R007 redaction codes must not block admission and must not make
+        // a catalog-economics row settlement-capable/earning.
+        let rowJSON = localOnlyBYOMRowJSON().replacingOccurrences(
+            of: #""warning_codes":["admission_state_not_settlement_capable"]"#,
+            with: #""warning_codes":["admission_state_not_settlement_capable","capability_family_redacted"]"#
+        )
+        let document = try JSONDecoder().decode(
+            MalibuModelCatalogEconomicsDocument.self,
+            from: Data(catalogEconomicsJSON(rows: [rowJSON]).utf8)
+        )
+        let validated = try document.validated(now: ModelTestTimestamp.date)
+        let mapped = try XCTUnwrap(MalibuModelRow(
+            economics: validated.rows[0],
+            currentModelID: "other/model",
+            warmSwapAvailable: true
+        ))
+        XCTAssertNotEqual(mapped.earningPathClass, "settlement_capable")
+        XCTAssertNil(mapped.providerCompletionPayoutUSDPerMillionTokens)
     }
 
     func testCatalogEconomicsDecodeRejectsUnsupportedEnvelopeKeys() throws {
@@ -2136,11 +2199,10 @@ final class ModelManagementTests: XCTestCase {
         """
     }
 
-    private static func byomEvaluationJSON(candidateID: String, digest: String?) -> String {
-        let digestJSON = digest.map { #""\#($0)""# } ?? "null"
+    private static func byomEvaluationJSON(candidateID: String) -> String {
         let promptDigest = String(repeating: "a", count: 64)
         return """
-        {"schema":"provider_byom_evaluation.v1","generated_at":"2026-09-12T00:00:00Z","cli_version":"1.8.123","candidate_id":"\(candidateID)","runtime_source":"ollama_loopback","served_model_ref":"ollama:llama3.2:3b","catalog_model_key":"llama-3.2-3b","adapter_identity":"openai_compatible_loopback","health_result":"passed","latency_ms":100,"completion_tokens":8,"tokens_per_second":12.5,"request_count":1,"output_bytes":64,"usage_reporting_source":"runtime_reported","capability_results":{"chat_completions":{"result":"passed","source":"evaluation","reason_code":null}},"fit_estimate_source":"discovery_fit_state","mutation_summary":{"production_config_mutated":false,"coordinator_state_mutated":false,"production_model_switched":false,"runtime_started":false,"downloads_started":false,"temporary_files_created":false},"diagnostic_hashes":{"prompt_sha256":"\(promptDigest)","response_body_sha256":null},"provider_guidance":{"state_label_key":"byom.discovery.ready","state_meaning_key":"byom.discovery.local_only","next_action":"offer_dry_run","transition_reason_code":null,"earning_path_class":"local_inventory_only"},"offer_preconditions_appear_satisfied":true,"warnings":[],"evaluation_digest_sha256":\(digestJSON)}
+        {"schema":"provider_byom_evaluation.v1","generated_at":"2026-09-12T00:00:00Z","cli_version":"1.8.123","candidate_id":"\(candidateID)","runtime_source":"ollama_loopback","served_model_ref":"ollama:llama3.2:3b","catalog_model_key":"llama-3.2-3b","adapter_identity":"openai_compatible_loopback","health_result":"passed","latency_ms":100,"completion_tokens":8,"tokens_per_second":12.5,"request_count":1,"output_bytes":64,"usage_reporting_source":"runtime_reported","capability_results":{"chat_completions":{"result":"passed","source":"evaluation","reason_code":null}},"fit_estimate_source":"discovery_fit_state","mutation_summary":{"production_config_mutated":false,"coordinator_state_mutated":false,"production_model_switched":false,"runtime_started":false,"downloads_started":false,"temporary_files_created":false},"diagnostic_hashes":{"prompt_sha256":"\(promptDigest)","response_body_sha256":null},"provider_guidance":{"state_label_key":"byom.discovery.ready","state_meaning_key":"byom.discovery.local_only","next_action":"offer_dry_run","transition_reason_code":null,"earning_path_class":"local_inventory_only"},"offer_preconditions_appear_satisfied":true,"warnings":[]}
         """
     }
 
