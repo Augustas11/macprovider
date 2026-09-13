@@ -380,6 +380,79 @@ SELECT prompt_rate_per_mtok, completion_rate_per_mtok
 	}
 }
 
+// TestWriteHotPath_UsesFullRateCardForLlama32ServedAlias is the regression guard
+// for #1095: the mlx-community quantized Llama-3.2-3B served id must normalize to
+// the vendor-prefixed catalog key `meta-llama/llama-3.2-3b-instruct` (13500/27000),
+// and MUST NOT fall through to `default` (500000/1000000 ~= 37x overcredit). This
+// exercises the mlx-community -> `meta-llama/` prefixed-key path, distinct from the
+// bare-key qwen path in TestWriteHotPath_UsesFullRateCardForServedAlias above; the
+// namespace guard that broke exactly this in production was in NormalizeModelKey
+// (fixed by #900 / e8dba0ea, live since v1.8.124). Without a test on the exact live
+// served string this coupling could silently revert to `default`.
+func TestWriteHotPath_UsesFullRateCardForLlama32ServedAlias(t *testing.T) {
+	reqStore, store := newRequestAndBillingStores(t)
+	cfg := testRewards()
+	cfg.RateCard = map[string]RateCardEntry{
+		"meta-llama/llama-3.2-3b-instruct": {
+			PromptCreditsPerMtok:     13500,
+			CompletionCreditsPerMtok: 27000,
+		},
+		"default": {
+			PromptCreditsPerMtok:     500000,
+			CompletionCreditsPerMtok: 1000000,
+		},
+	}
+	ts := recoveryLegacyDefaultRateCutoffUTC.Add(time.Hour)
+	snapshotID, err := store.InsertConfigSnapshot(context.Background(), cfg, ts.Add(-time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	prompt, completion := int64(12), int64(8)
+	row := requestlog.Row{
+		TSUtc:              ts,
+		RequestID:          "hotpath-served-alias-llama32-rate-card",
+		AccountID:          "buyer-a",
+		Model:              "mlx-community/Llama-3.2-3B-Instruct-4bit",
+		ProviderAssignedID: "assigned-a",
+		PromptTokens:       &prompt,
+		CompletionTokens:   &completion,
+		Status:             200,
+		BuyerIP:            "127.0.0.1",
+	}
+	input := HotPathInput{
+		RequestID:                  row.RequestID,
+		AttemptN:                   0,
+		ProviderAssignedID:         row.ProviderAssignedID,
+		ProviderID:                 "provider-a",
+		Model:                      row.Model,
+		Status:                     row.Status,
+		TSUtc:                      ts,
+		PromptTokens:               &prompt,
+		CompletionTokens:           &completion,
+		ConfigSnapshotID:           snapshotID,
+		RateEntry:                  cfg.RateCard["default"],
+		RateCard:                   cfg.RateCard,
+		MultiplierPPM:              ParseMultiplierPPM(cfg.GlobalMultiplier),
+		ProviderShareBps:           ParseShareBps(cfg.ProviderShare),
+		SettlementAccountScopeHash: SettlementAccountScopeHash(AccountScopeForSettlement(row.AccountID)),
+		SettlementPolicyMode:       RouteSnapshotModeEnforce,
+		SettlementPolicyVersion:    RouteSnapshotPolicyVersion,
+	}
+	if err := store.WriteHotPath(context.Background(), reqStore, row, input); err != nil {
+		t.Fatal(err)
+	}
+	var promptRate, completionRate int64
+	if err := store.db.QueryRow(`
+SELECT prompt_rate_per_mtok, completion_rate_per_mtok
+  FROM ledger_request_credits
+ WHERE request_id = ? AND quarantined = 0`, row.RequestID).Scan(&promptRate, &completionRate); err != nil {
+		t.Fatal(err)
+	}
+	if promptRate != 13500 || completionRate != 27000 {
+		t.Fatalf("stored rates=%d/%d want normalized meta-llama/llama-3.2-3b-instruct 13500/27000 (not default 500000/1000000 — #1095)", promptRate, completionRate)
+	}
+}
+
 func TestRunSettlementUsesNanosecondOrderedTimestampText(t *testing.T) {
 	reqStore, store := newRequestAndBillingStores(t)
 	input, row := testHotPathInput(t, store)
