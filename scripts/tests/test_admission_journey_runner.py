@@ -78,10 +78,14 @@ def guidance(state: str, earning: str) -> dict:
     }
 
 
-def action(available: bool = False) -> dict:
+def action(unavailable_reason: str = "no_cli_transaction_available") -> dict:
+    # SPEC-044 / #1497: the hermetic journey mints no CLI transaction, so every
+    # catalog-economics action is unavailable with null transaction fields and a
+    # valid closed-set unavailable_reason (no_cli_transaction_available for the
+    # live actions, staging_cleanup_not_required for cleanup_staging).
     return {
-        "available": available, "requires_confirmation": False, "transaction_kind": None,
-        "transaction_id": None, "unavailable_reason": None if available else "not_applicable",
+        "available": False, "requires_confirmation": False, "transaction_kind": None,
+        "transaction_id": None, "unavailable_reason": unavailable_reason,
         "action_timeout_seconds": None, "estimated_bytes": None,
     }
 
@@ -94,21 +98,24 @@ ECONOMICS_SOURCE = {
 }
 
 
-def economics_row(candidate_id: str, model_key: str, state: str, event: str, *, priced: bool, settlement: bool) -> dict:
-    money = 0.013 if priced else None
+def economics_row(candidate_id: str, model_key: str, state: str, event: str, *, priced: bool, settlement: bool, guidance_obj: dict) -> dict:
     return {
         "model_key": model_key, "display_model_id": model_key, "served_model_id": model_key, "action_model_id": candidate_id,
-        "is_current": False, "runtime_state": "ready", "economics_state": "permitted" if priced else "blocked",
+        "is_current": False, "runtime_state": "ready", "economics_state": "trusted" if priced else "blocked",
         "admission": {"state": state, "source": "coordinator", "settlement_capable": settlement,
                       "catalog_economics_permitted": priced, "coordinator_event_id": event, "state_observed_at": NOW},
         "fit": "fits", "estimated_gb": 2.0, "weights_present_locally": True, "ready_provider_count": 1,
         "demand_rank": 3, "demand_weight": 0.2, "supply_deficit_score": 0.1,
-        "prompt_rate_usd_per_million_tokens": money, "completion_rate_usd_per_million_tokens": money,
-        "provider_prompt_payout_usd_per_million_tokens": money, "provider_completion_payout_usd_per_million_tokens": money,
-        "provider_share_bps": 7000 if priced else None, "rate_source": "live_signed" if priced else "none",
+        "prompt_rate_usd_per_million_tokens": 0.013 if priced else None,
+        "completion_rate_usd_per_million_tokens": 0.026 if priced else None,
+        "provider_prompt_payout_usd_per_million_tokens": 0.0117 if priced else None,
+        "provider_completion_payout_usd_per_million_tokens": 0.0234 if priced else None,
+        "provider_share_bps": 9000 if priced else None, "rate_source": "live_signed" if priced else "none",
         "rate_card_key": model_key if priced else None, "rate_card_version": "v1" if priced else None,
         "rate_card_generated_at": NOW if priced else None, "disabled_reason": None, "warning_codes": [],
-        "adopt_recommendation": action(), "cleanup_staging": action(), "evaluate": action(True), "prepare": action(), "switch": action(),
+        "provider_guidance": guidance_obj,
+        "adopt_recommendation": action(), "cleanup_staging": action("staging_cleanup_not_required"),
+        "evaluate": action(), "prepare": action(), "switch": action(),
     }
 
 
@@ -294,7 +301,10 @@ class FakeRig:
         if cmd[:2] == ["models", "catalog-economics"]:
             state = self.state.get(SETTLEABLE, "not_offered")
             priced = state in ("catalog_priced", "settlement_capable")
-            row = economics_row(self._candidate_id(SETTLEABLE), "tiny-1b", state, self._event_id(SETTLEABLE), priced=priced, settlement=state == "settlement_capable")
+            earning = "not_earning_yet_catalog_or_receipt_path_exists" if priced else "no_earning_path_in_v0_1"
+            row = economics_row(self._candidate_id(SETTLEABLE), "tiny-1b", state, self._event_id(SETTLEABLE),
+                                priced=priced, settlement=state == "settlement_capable",
+                                guidance_obj=guidance(state, earning))
             return {"schema": "model_catalog_economics.v1", "generated_at": NOW, "projection_sequence": 1, "source": dict(ECONOMICS_SOURCE), "rows": [row], "warnings": []}
         if cmd[:2] == ["models", "discover"]:
             return {"candidates": [{"served_model_ref": SETTLEABLE}, {"served_model_ref": OPAQUE}, {"served_model_ref": GGUF}]}
