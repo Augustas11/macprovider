@@ -252,6 +252,411 @@ struct ModelCatalogEconomicsWire: Codable, Equatable, Sendable {
     }
 }
 
+
+private extension ModelCatalogEconomicsWire {
+    func withProjectionProtocolVersion(_ version: String) -> ModelCatalogEconomicsWire {
+        let nextSource = Source(
+            cliVersion: source.cliVersion,
+            cliBuildCommit: source.cliBuildCommit,
+            processLaunchID: source.processLaunchID,
+            processStartedAt: source.processStartedAt,
+            projectionProtocolVersion: version,
+            rateCardSource: source.rateCardSource,
+            rateCardDigest: source.rateCardDigest,
+            rateCardSignatureDigest: source.rateCardSignatureDigest,
+            demandFeedDigest: source.demandFeedDigest,
+            candidateFeedDigest: source.candidateFeedDigest,
+            rateCardMaxAgeSeconds: source.rateCardMaxAgeSeconds
+        )
+        return ModelCatalogEconomicsWire(
+            generatedAt: generatedAt,
+            projectionSequence: projectionSequence,
+            source: nextSource,
+            rows: rows,
+            warnings: warnings
+        )
+    }
+}
+
+
+struct ModelCatalogEconomicsV2Wire: Encodable, Equatable, Sendable {
+    struct Action: Encodable, Equatable, Sendable {
+        let available: Bool
+        let requiresConfirmation: Bool
+        let transactionKind: String?
+        let transactionID: String?
+        let actionTimeoutSeconds: Int?
+        let estimatedBytes: Int64?
+        let artifactIdentityDigest: String?
+        let unavailableReason: String?
+
+        enum CodingKeys: String, CodingKey {
+            case available
+            case requiresConfirmation = "requires_confirmation"
+            case transactionKind = "transaction_kind"
+            case transactionID = "transaction_id"
+            case actionTimeoutSeconds = "action_timeout_seconds"
+            case estimatedBytes = "estimated_bytes"
+            case artifactIdentityDigest = "artifact_identity_digest"
+            case unavailableReason = "unavailable_reason"
+        }
+
+        init(
+            available: Bool,
+            requiresConfirmation: Bool,
+            transactionKind: String?,
+            transactionID: String?,
+            actionTimeoutSeconds: Int?,
+            estimatedBytes: Int64?,
+            artifactIdentityDigest: String?,
+            unavailableReason: String?
+        ) {
+            self.available = available
+            self.requiresConfirmation = requiresConfirmation
+            self.transactionKind = transactionKind
+            self.transactionID = transactionID
+            self.actionTimeoutSeconds = actionTimeoutSeconds
+            self.estimatedBytes = estimatedBytes
+            self.artifactIdentityDigest = artifactIdentityDigest
+            self.unavailableReason = unavailableReason
+        }
+
+        static func unavailable(_ reason: String) -> Action {
+            Action(
+                available: false,
+                requiresConfirmation: false,
+                transactionKind: nil,
+                transactionID: nil,
+                actionTimeoutSeconds: nil,
+                estimatedBytes: nil,
+                artifactIdentityDigest: nil,
+                unavailableReason: reason
+            )
+        }
+
+        init(_ v1: ModelCatalogEconomicsWire.Action) {
+            self.available = false
+            self.requiresConfirmation = false
+            self.transactionKind = nil
+            self.transactionID = nil
+            self.actionTimeoutSeconds = nil
+            self.estimatedBytes = nil
+            self.artifactIdentityDigest = nil
+            self.unavailableReason = v1.unavailableReason ?? "action_unavailable"
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(available, forKey: .available)
+            try container.encode(requiresConfirmation, forKey: .requiresConfirmation)
+            try encodeNullable(transactionKind, forKey: .transactionKind, into: &container)
+            try encodeNullable(transactionID, forKey: .transactionID, into: &container)
+            try encodeNullable(actionTimeoutSeconds, forKey: .actionTimeoutSeconds, into: &container)
+            try encodeNullable(estimatedBytes, forKey: .estimatedBytes, into: &container)
+            try encodeNullable(artifactIdentityDigest, forKey: .artifactIdentityDigest, into: &container)
+            try encodeNullable(unavailableReason, forKey: .unavailableReason, into: &container)
+        }
+    }
+
+    struct GuidanceBinding: Encodable, Equatable, Sendable {
+        let sourceSchema: String
+        let sourceSHA256: String
+        let sourceGeneratedAt: String
+        let sourceProjectionSequence: Int?
+        let sourceCoordinatorEventID: String?
+        let candidateID: String
+        let admissionSource: String
+        let admissionState: String
+
+        enum CodingKeys: String, CodingKey {
+            case sourceSchema = "source_schema"
+            case sourceSHA256 = "source_sha256"
+            case sourceGeneratedAt = "source_generated_at"
+            case sourceProjectionSequence = "source_projection_sequence"
+            case sourceCoordinatorEventID = "source_coordinator_event_id"
+            case candidateID = "candidate_id"
+            case admissionSource = "admission_source"
+            case admissionState = "admission_state"
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(sourceSchema, forKey: .sourceSchema)
+            try container.encode(sourceSHA256, forKey: .sourceSHA256)
+            try container.encode(sourceGeneratedAt, forKey: .sourceGeneratedAt)
+            try encodeNullable(sourceProjectionSequence, forKey: .sourceProjectionSequence, into: &container)
+            try encodeNullable(sourceCoordinatorEventID, forKey: .sourceCoordinatorEventID, into: &container)
+            try container.encode(candidateID, forKey: .candidateID)
+            try container.encode(admissionSource, forKey: .admissionSource)
+            try container.encode(admissionState, forKey: .admissionState)
+        }
+    }
+
+    struct Storage: Encodable, Equatable, Sendable {
+        let schema: String
+        let managedV3PublishedBytes: Int64?
+        let managedV3ReclaimableBytes: Int64?
+        let managedV3ObjectCount: Int?
+        let configuredLegacyProtectedBytes: Int64?
+        let configuredLegacyOtherDeviceBytes: Int64?
+        let managedBudgetChargeBytes: Int64?
+        let availableManagedBudgetBytes: Int64?
+        let globalManagedBudgetBytes: Int64
+        let configuredLegacyAccountingState: String
+        let managedV3OverflowDetected: Bool
+        let managedBudgetSource: String
+
+        enum CodingKeys: String, CodingKey {
+            case schema
+            case managedV3PublishedBytes = "managed_v3_published_bytes"
+            case managedV3ReclaimableBytes = "managed_v3_reclaimable_bytes"
+            case managedV3ObjectCount = "managed_v3_object_count"
+            case configuredLegacyProtectedBytes = "configured_legacy_protected_bytes"
+            case configuredLegacyOtherDeviceBytes = "configured_legacy_other_device_bytes"
+            case managedBudgetChargeBytes = "managed_budget_charge_bytes"
+            case availableManagedBudgetBytes = "available_managed_budget_bytes"
+            case globalManagedBudgetBytes = "global_managed_budget_bytes"
+            case configuredLegacyAccountingState = "configured_legacy_accounting_state"
+            case managedV3OverflowDetected = "managed_v3_overflow_detected"
+            case managedBudgetSource = "managed_budget_source"
+        }
+
+        static let unavailable = Storage(
+            schema: "model_catalog_storage.v1",
+            managedV3PublishedBytes: nil,
+            managedV3ReclaimableBytes: nil,
+            managedV3ObjectCount: nil,
+            configuredLegacyProtectedBytes: nil,
+            configuredLegacyOtherDeviceBytes: nil,
+            managedBudgetChargeBytes: nil,
+            availableManagedBudgetBytes: nil,
+            globalManagedBudgetBytes: 0,
+            configuredLegacyAccountingState: "unavailable",
+            managedV3OverflowDetected: false,
+            managedBudgetSource: "default"
+        )
+
+        func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(schema, forKey: .schema)
+            try encodeNullable(managedV3PublishedBytes, forKey: .managedV3PublishedBytes, into: &container)
+            try encodeNullable(managedV3ReclaimableBytes, forKey: .managedV3ReclaimableBytes, into: &container)
+            try encodeNullable(managedV3ObjectCount, forKey: .managedV3ObjectCount, into: &container)
+            try encodeNullable(configuredLegacyProtectedBytes, forKey: .configuredLegacyProtectedBytes, into: &container)
+            try encodeNullable(configuredLegacyOtherDeviceBytes, forKey: .configuredLegacyOtherDeviceBytes, into: &container)
+            try encodeNullable(managedBudgetChargeBytes, forKey: .managedBudgetChargeBytes, into: &container)
+            try encodeNullable(availableManagedBudgetBytes, forKey: .availableManagedBudgetBytes, into: &container)
+            try container.encode(globalManagedBudgetBytes, forKey: .globalManagedBudgetBytes)
+            try container.encode(configuredLegacyAccountingState, forKey: .configuredLegacyAccountingState)
+            try container.encode(managedV3OverflowDetected, forKey: .managedV3OverflowDetected)
+            try container.encode(managedBudgetSource, forKey: .managedBudgetSource)
+        }
+    }
+
+    struct CleanupTarget: Encodable, Equatable, Sendable {
+        let artifactIdentityDigest: String
+        let displayModelID: String
+        let modelRevision: String
+        let artifactID: String
+        let releaseID: String
+        let modelKey: String?
+        let eventModelKey: String
+        let rootIdentityDigest: String
+        let receiptSHA256: String
+        let estimatedBytes: Int64
+        let keepSetStatus: String
+        let protectedReason: String?
+        let cleanup: Action
+
+        enum CodingKeys: String, CodingKey {
+            case artifactIdentityDigest = "artifact_identity_digest"
+            case displayModelID = "display_model_id"
+            case modelRevision = "model_revision"
+            case artifactID = "artifact_id"
+            case releaseID = "release_id"
+            case modelKey = "model_key"
+            case eventModelKey = "event_model_key"
+            case rootIdentityDigest = "root_identity_digest"
+            case receiptSHA256 = "receipt_sha256"
+            case estimatedBytes = "estimated_bytes"
+            case keepSetStatus = "keep_set_status"
+            case protectedReason = "protected_reason"
+            case cleanup
+        }
+    }
+
+    struct Row: Encodable, Equatable, Sendable {
+        let modelKey: String
+        let servedModelID: String
+        let displayModelID: String
+        let actionModelID: String?
+        let candidateID: String?
+        let providerGuidance: BYOMDiscoveryWire.Guidance?
+        let guidanceBinding: GuidanceBinding?
+        let isCurrent: Bool
+        let weightsPresentLocally: Bool
+        let runtimeState: String
+        let estimatedGB: Double?
+        let fit: String
+        let disabledReason: String?
+        let warningCodes: [String]
+        let admission: ModelCatalogEconomicsWire.Admission
+        let rateCardVersion: String?
+        let rateCardGeneratedAt: String?
+        let rateCardKey: String?
+        let rateSource: String
+        let promptRateUSDPerMillionTokens: Double?
+        let completionRateUSDPerMillionTokens: Double?
+        let providerShareBPS: Int?
+        let providerPromptPayoutUSDPerMillionTokens: Double?
+        let providerCompletionPayoutUSDPerMillionTokens: Double?
+        let economicsState: String
+        let demandRank: Int?
+        let demandWeight: Double?
+        let readyProviderCount: Int?
+        let supplyDeficitScore: Double?
+        let switchAction: Action
+        let prepare: Action
+        let evaluate: Action
+        let adoptRecommendation: Action
+        let cleanupStaging: Action
+        let cleanupPublished: Action
+
+        enum CodingKeys: String, CodingKey {
+            case modelKey = "model_key"
+            case servedModelID = "served_model_id"
+            case displayModelID = "display_model_id"
+            case actionModelID = "action_model_id"
+            case candidateID = "candidate_id"
+            case providerGuidance = "provider_guidance"
+            case guidanceBinding = "guidance_binding"
+            case isCurrent = "is_current"
+            case weightsPresentLocally = "weights_present_locally"
+            case runtimeState = "runtime_state"
+            case estimatedGB = "estimated_gb"
+            case fit
+            case disabledReason = "disabled_reason"
+            case warningCodes = "warning_codes"
+            case admission
+            case rateCardVersion = "rate_card_version"
+            case rateCardGeneratedAt = "rate_card_generated_at"
+            case rateCardKey = "rate_card_key"
+            case rateSource = "rate_source"
+            case promptRateUSDPerMillionTokens = "prompt_rate_usd_per_million_tokens"
+            case completionRateUSDPerMillionTokens = "completion_rate_usd_per_million_tokens"
+            case providerShareBPS = "provider_share_bps"
+            case providerPromptPayoutUSDPerMillionTokens = "provider_prompt_payout_usd_per_million_tokens"
+            case providerCompletionPayoutUSDPerMillionTokens = "provider_completion_payout_usd_per_million_tokens"
+            case economicsState = "economics_state"
+            case demandRank = "demand_rank"
+            case demandWeight = "demand_weight"
+            case readyProviderCount = "ready_provider_count"
+            case supplyDeficitScore = "supply_deficit_score"
+            case switchAction = "switch"
+            case prepare
+            case evaluate
+            case adoptRecommendation = "adopt_recommendation"
+            case cleanupStaging = "cleanup_staging"
+            case cleanupPublished = "cleanup_published"
+        }
+
+        init(
+            v1: ModelCatalogEconomicsWire.Row,
+            candidate: BYOMDiscoveryWire.Candidate?,
+            binding: GuidanceBinding?,
+            guidance: BYOMDiscoveryWire.Guidance?,
+            forcedUnavailableReason: String? = nil
+        ) {
+            let offerRejected = v1.admission.source == "coordinator" && v1.admission.state == "offer_rejected"
+            let forceUnavailable = forcedUnavailableReason != nil || offerRejected
+            let actionUnavailableReason: String
+            if let forcedUnavailableReason {
+                actionUnavailableReason = forcedUnavailableReason
+            } else if offerRejected {
+                actionUnavailableReason = "action_unavailable"
+            } else if candidate == nil {
+                actionUnavailableReason = "no_local_candidate"
+            } else {
+                actionUnavailableReason = "no_cli_transaction_available"
+            }
+            let unavailable = Action.unavailable(actionUnavailableReason)
+            self.modelKey = v1.modelKey
+            self.servedModelID = v1.servedModelID
+            self.displayModelID = v1.displayModelID
+            self.actionModelID = v1.actionModelID
+            self.candidateID = candidate?.candidateID
+            self.providerGuidance = guidance
+            self.guidanceBinding = binding
+            self.isCurrent = v1.isCurrent
+            self.weightsPresentLocally = v1.weightsPresentLocally
+            self.runtimeState = v1.runtimeState
+            self.estimatedGB = v1.estimatedGB
+            self.fit = v1.fit
+            self.disabledReason = forceUnavailable ? actionUnavailableReason : v1.disabledReason
+            self.warningCodes = forceUnavailable ? Array(Set(v1.warningCodes + [actionUnavailableReason]).sorted()) : v1.warningCodes
+            self.admission = forceUnavailable ? ModelCatalogEconomicsWire.Admission(
+                state: v1.admission.state,
+                source: v1.admission.source,
+                coordinatorEventID: v1.admission.coordinatorEventID,
+                stateObservedAt: v1.admission.stateObservedAt,
+                catalogEconomicsPermitted: false,
+                settlementCapable: false
+            ) : v1.admission
+            self.rateCardVersion = forceUnavailable ? nil : v1.rateCardVersion
+            self.rateCardGeneratedAt = forceUnavailable ? nil : v1.rateCardGeneratedAt
+            self.rateCardKey = forceUnavailable ? nil : v1.rateCardKey
+            self.rateSource = forceUnavailable ? "none" : v1.rateSource
+            self.promptRateUSDPerMillionTokens = forceUnavailable ? nil : v1.promptRateUSDPerMillionTokens
+            self.completionRateUSDPerMillionTokens = forceUnavailable ? nil : v1.completionRateUSDPerMillionTokens
+            self.providerShareBPS = forceUnavailable ? nil : v1.providerShareBPS
+            self.providerPromptPayoutUSDPerMillionTokens = forceUnavailable ? nil : v1.providerPromptPayoutUSDPerMillionTokens
+            self.providerCompletionPayoutUSDPerMillionTokens = forceUnavailable ? nil : v1.providerCompletionPayoutUSDPerMillionTokens
+            self.economicsState = forceUnavailable ? "unavailable" : v1.economicsState
+            self.demandRank = forceUnavailable ? nil : v1.demandRank
+            self.demandWeight = forceUnavailable ? nil : v1.demandWeight
+            self.readyProviderCount = forceUnavailable ? nil : v1.readyProviderCount
+            self.supplyDeficitScore = forceUnavailable ? nil : v1.supplyDeficitScore
+            self.switchAction = unavailable
+            self.prepare = unavailable
+            self.evaluate = Action(v1.evaluate)
+            self.adoptRecommendation = unavailable
+            self.cleanupStaging = Action(v1.cleanupStaging)
+            self.cleanupPublished = Action.unavailable("cleanup_unavailable_without_private_store")
+        }
+    }
+
+    let schema: String
+    let generatedAt: String
+    let projectionSequence: Int
+    let source: ModelCatalogEconomicsWire.Source
+    let storage: Storage
+    let rows: [Row]
+    let cleanupTargets: [CleanupTarget]
+    let warnings: [String]
+
+    enum CodingKeys: String, CodingKey {
+        case schema
+        case generatedAt = "generated_at"
+        case projectionSequence = "projection_sequence"
+        case source
+        case storage
+        case rows
+        case cleanupTargets = "cleanup_targets"
+        case warnings
+    }
+
+    init(v1: ModelCatalogEconomicsWire, rows: [Row], warnings: [String]) {
+        self.schema = "model_catalog_economics.v2"
+        self.generatedAt = v1.generatedAt
+        self.projectionSequence = v1.projectionSequence
+        self.source = v1.source
+        self.storage = .unavailable
+        self.rows = rows
+        self.cleanupTargets = []
+        self.warnings = warnings
+    }
+}
+
 final class ModelCatalogEconomicsProcessState: @unchecked Sendable {
     static let shared = ModelCatalogEconomicsProcessState()
 
@@ -345,6 +750,179 @@ struct ModelCatalogEconomicsBuilder {
             source: source,
             rows: rows,
             warnings: Array(projectionWarnings).sorted()
+        )
+    }
+
+    static func makeProjectionV2(
+        generatedAt: Date = Date(),
+        cliVersion: String = CoordinatorClient.binaryVersion,
+        cliBuildCommit: String = "unknown",
+        processLaunchID: String = ModelCatalogEconomicsProcessState.shared.launchID,
+        processStartedAt: Date = ModelCatalogEconomicsProcessState.shared.startedAt,
+        projectionSequence: Int = ModelCatalogEconomicsProcessState.shared.nextSequence(),
+        currentModelID: String?,
+        discovery: BYOMDiscoveryWire,
+        admissionStatuses: [String: BYOMAdmissionStatusWire],
+        demand: AutotuneStaticSelection<DemandRank>,
+        candidateCatalog: AutotuneStaticSelection<CandidateCatalog>,
+        rateCard: AutotuneStaticSelection<RateCardProjection>
+    ) -> ModelCatalogEconomicsV2Wire {
+        let v1Document = makeProjection(
+            generatedAt: generatedAt,
+            cliVersion: cliVersion,
+            cliBuildCommit: cliBuildCommit,
+            processLaunchID: processLaunchID,
+            processStartedAt: processStartedAt,
+            projectionSequence: projectionSequence,
+            currentModelID: currentModelID,
+            discovery: discovery,
+            admissionStatuses: admissionStatuses,
+            demand: demand,
+            candidateCatalog: candidateCatalog,
+            rateCard: rateCard
+        )
+        let v1 = v1Document.withProjectionProtocolVersion("model_catalog_economics.v2")
+        var candidatesByID: [String: BYOMDiscoveryWire.Candidate] = [:]
+        for candidate in discovery.candidates where candidatesByID[candidate.candidateID] == nil {
+            candidatesByID[candidate.candidateID] = candidate
+        }
+        let discoveryText = try? ModelSwitchingWireCodec.encode(discovery)
+        let discoveryDigest = discoveryText.map { sha256Hex(Data($0.utf8)) }
+        let discoveryFresh = discoveryText != nil && sourceGeneratedAtIsFresh(discovery.generatedAt, at: generatedAt)
+        let rows = v1.rows.map { row -> ModelCatalogEconomicsV2Wire.Row in
+            guard let actionModelID = row.actionModelID, let candidate = candidatesByID[actionModelID] else {
+                return ModelCatalogEconomicsV2Wire.Row(v1: catalogOnlyV2Sentinel(row), candidate: nil, binding: nil, guidance: nil)
+            }
+            if let status = admissionStatuses[actionModelID], status.admissionStateSource == "coordinator" {
+                guard let statusText = try? ModelSwitchingWireCodec.encode(status),
+                      coordinatorStatusBinds(status, to: candidate, at: generatedAt)
+                else {
+                    return ModelCatalogEconomicsV2Wire.Row(
+                        v1: row,
+                        candidate: candidate,
+                        binding: nil,
+                        guidance: nil,
+                        forcedUnavailableReason: "source_binding_invalid"
+                    )
+                }
+                if status.admissionState == "offer_rejected" {
+                    return ModelCatalogEconomicsV2Wire.Row(
+                        v1: row,
+                        candidate: candidate,
+                        binding: nil,
+                        guidance: nil,
+                        forcedUnavailableReason: "action_unavailable"
+                    )
+                }
+                let binding = ModelCatalogEconomicsV2Wire.GuidanceBinding(
+                    sourceSchema: status.schema,
+                    sourceSHA256: sha256Hex(Data(statusText.utf8)),
+                    sourceGeneratedAt: status.generatedAt,
+                    sourceProjectionSequence: nil,
+                    sourceCoordinatorEventID: status.coordinatorEventID,
+                    candidateID: status.candidateID,
+                    admissionSource: status.admissionStateSource,
+                    admissionState: status.admissionState
+                )
+                return ModelCatalogEconomicsV2Wire.Row(v1: row, candidate: candidate, binding: binding, guidance: status.providerGuidance)
+            }
+            guard discoveryFresh, let discoveryDigest else {
+                return ModelCatalogEconomicsV2Wire.Row(
+                    v1: row,
+                    candidate: candidate,
+                    binding: nil,
+                    guidance: nil,
+                    forcedUnavailableReason: "source_binding_invalid"
+                )
+            }
+            let binding = ModelCatalogEconomicsV2Wire.GuidanceBinding(
+                sourceSchema: discovery.schema,
+                sourceSHA256: discoveryDigest,
+                sourceGeneratedAt: discovery.generatedAt,
+                sourceProjectionSequence: discovery.projectionSequence,
+                sourceCoordinatorEventID: nil,
+                candidateID: candidate.candidateID,
+                admissionSource: row.admission.source,
+                admissionState: row.admission.state
+            )
+            return ModelCatalogEconomicsV2Wire.Row(v1: row, candidate: candidate, binding: binding, guidance: candidate.providerGuidance)
+        }
+        return ModelCatalogEconomicsV2Wire(v1: v1, rows: rows, warnings: v1.warnings)
+    }
+
+    private static let v2SourceFreshnessSeconds: TimeInterval = 300
+
+    private static func coordinatorStatusBinds(
+        _ status: BYOMAdmissionStatusWire,
+        to candidate: BYOMDiscoveryWire.Candidate,
+        at projectionTime: Date
+    ) -> Bool {
+        guard status.admissionStateSource == "coordinator",
+              status.candidateID == candidate.candidateID,
+              status.servedModelRef == candidate.servedModelRef,
+              status.catalogModelKey == candidate.catalogModelKey,
+              sourceGeneratedAtIsFresh(status.generatedAt, at: projectionTime)
+        else {
+            return false
+        }
+        return true
+    }
+
+    private static func sourceGeneratedAtIsFresh(_ value: String, at projectionTime: Date) -> Bool {
+        guard let sourceTime = parseWireTimestamp(value) else { return false }
+        let age = projectionTime.timeIntervalSince(sourceTime)
+        return age >= 0 && age <= v2SourceFreshnessSeconds
+    }
+
+    private static func parseWireTimestamp(_ value: String) -> Date? {
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = fractional.date(from: value) { return date }
+        let wholeSeconds = ISO8601DateFormatter()
+        wholeSeconds.formatOptions = [.withInternetDateTime]
+        return wholeSeconds.date(from: value)
+    }
+
+    private static func catalogOnlyV2Sentinel(_ row: ModelCatalogEconomicsWire.Row) -> ModelCatalogEconomicsWire.Row {
+        ModelCatalogEconomicsWire.Row(
+            modelKey: row.modelKey,
+            servedModelID: row.servedModelID,
+            displayModelID: row.displayModelID,
+            actionModelID: nil,
+            isCurrent: row.isCurrent,
+            weightsPresentLocally: false,
+            runtimeState: "catalog",
+            estimatedGB: row.estimatedGB,
+            fit: row.fit,
+            disabledReason: "no_cli_transaction_available",
+            warningCodes: row.warningCodes,
+            admission: ModelCatalogEconomicsWire.Admission(
+                state: "not_offered",
+                source: "local_default",
+                coordinatorEventID: nil,
+                stateObservedAt: nil,
+                catalogEconomicsPermitted: false,
+                settlementCapable: false
+            ),
+            rateCardVersion: nil,
+            rateCardGeneratedAt: nil,
+            rateCardKey: nil,
+            rateSource: "none",
+            promptRateUSDPerMillionTokens: nil,
+            completionRateUSDPerMillionTokens: nil,
+            providerShareBPS: nil,
+            providerPromptPayoutUSDPerMillionTokens: nil,
+            providerCompletionPayoutUSDPerMillionTokens: nil,
+            economicsState: "unavailable",
+            demandRank: nil,
+            demandWeight: nil,
+            readyProviderCount: nil,
+            supplyDeficitScore: nil,
+            switchAction: .unavailable("no_cli_transaction_available"),
+            prepare: .unavailable("no_cli_transaction_available"),
+            evaluate: .unavailable("no_cli_transaction_available"),
+            adoptRecommendation: .unavailable("no_cli_transaction_available"),
+            cleanupStaging: .unavailable("staging_cleanup_not_required")
         )
     }
 
