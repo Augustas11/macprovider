@@ -151,7 +151,7 @@
     {
       "spec_id": "SPEC-006",
       "title": "Buyer API Gateway: Mac Provider's first public buyer surface",
-      "version": "0.9.23",
+      "version": "0.9.24",
       "path": "specs/SPEC-006-buyer-api.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -4734,8 +4734,12 @@
       ],
       "tests": [
         "phase5-gateway/internal/router/openrouter_models_test.go:TestProjectOpenRouterModelsDualLlamaSKU",
+        "phase5-gateway/internal/router/openrouter_models_test.go:TestProjectOpenRouterModelsRowsStaySchema24Native",
+        "phase5-gateway/internal/router/openrouter_models_test.go:TestProjectOpenRouterModelsCapacityTracksLiveSlots",
+        "phase5-gateway/internal/router/pages_test.go:TestPrivacyRouteRendersHonestRetention",
         "phase5-gateway/internal/router/wholesale_partner_test.go:TestWholesaleNoProviderBecomes429",
-        "phase4-coordinator/internal/billing/normalize_model_key_cases_test.go:TestNormalizeModelKeySharedCaseTable"
+        "phase4-coordinator/internal/billing/normalize_model_key_cases_test.go:TestNormalizeModelKeySharedCaseTable",
+        "scripts/tests/test_openrouter_readiness_probe.py:OpenRouterReadinessProbeTests"
       ],
       "journeys": [],
       "evidence": [],

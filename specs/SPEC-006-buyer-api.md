@@ -1,7 +1,12 @@
 # SPEC-006 - Buyer API Gateway: Mac Provider's first public buyer surface
 
-**Version:** 0.9.23 (2026-09-11, OpenRouter wholesale partner surface)
+**Version:** 0.9.24 (2026-09-13, OpenRouter schema-2.4 native rows)
 **Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.5.4, SPEC-003 v0.7, SPEC-004 v0.3.2
+
+**Change log v0.9.24 (2026-09-13, OpenRouter schema-2.4 native rows):**
+- `GET /v1/openrouter/models` now uses the current OpenRouter model document format for new provider integrations: each model row carries `schema_version: "2.4"`, typed `input_modalities` and `output_modalities`, modality-owned `pricing` and `capacity`, root request/concurrency capacity, an honest volunteer-fleet `deployment_region`, and no `datacenters` entry unless operator-verified geography metadata exists.
+- The legacy row fields `architecture`, `context_length`, root `cost_usd`, flat `supported_sampling_parameters`, `supported_features`, and `capacity_tpm` remain forbidden on this OpenRouter ingest path. Public `/v1/models` is unchanged.
+- `/privacy` MUST name the shipped 90-day default coordinator `storage.request_log_retention_days` window while continuing to disclose plaintext volunteer-Mac processing and `compliance.zdr=false`.
 
 **Change log v0.9.23 (2026-09-11, OpenRouter join on the live pool):**
 - Additive unauthenticated `GET /v1/openrouter/models` schema-2.4 document. Public `GET /v1/models` is unchanged (OpenAI list + integrity/`tier1_disclosure`). OpenRouter ingest MUST NOT be served the sanitized public list.
@@ -1420,33 +1425,65 @@ Authentication: unauthenticated. Subject to `kill_switch.all_public_api` like ot
 
 Response status:
 
-- `200` when the gateway can project from live pool state plus the coordinator rate card.
+- `200` when the gateway can project from live pool state plus complete, positive coordinator rate-card rows for every paid row it will publish.
 - `502` / `503` when coordinator pool or rate-card inputs are unavailable. The document MUST NOT invent `is_ready: true`.
 
 Document shape (schema 2.4):
 
 ```json
 {
-  "schema_version": "2.4",
   "data": [
     {
+      "schema_version": "2.4",
       "id": "mlx-community/Llama-3.2-3B-Instruct-4bit",
       "name": "Llama 3.2 3B Instruct (4-bit)",
-      "architecture": {
-        "input_modalities": ["text"],
-        "output_modalities": ["text"],
-        "modality": "text->text"
-      },
-      "context_length": 131072,
+      "created": 1729728000,
       "quantization": "int4",
+      "tokenizer": "Llama3",
       "hugging_face_id": "mlx-community/Llama-3.2-3B-Instruct-4bit",
+      "input_modalities": [
+        {
+          "type": "text",
+          "supported_inputs": {
+            "max_context_length": { "value": 50000, "unit": "token" }
+          },
+          "pricing": [
+            { "type": "prompt", "unit": "token", "cost_usd": "0.0000000135" }
+          ],
+          "capacity": [
+            { "type": "prompt", "unit": "token", "per": "minute", "value": 600 }
+          ]
+        }
+      ],
+      "output_modalities": [
+        {
+          "type": "text",
+          "max_length": { "value": 4096, "unit": "token" },
+          "streaming": true,
+          "supported_parameters": {
+            "max_tokens": { "type": "integer", "min": 1, "max": 4096, "unit": "token" },
+            "temperature": { "type": "range", "min": 0, "max": 2 },
+            "top_p": { "type": "range", "min": 0, "max": 1 },
+            "stop": { "type": "array", "max_items": 4 },
+            "stream": { "type": "boolean" }
+          },
+          "pricing": [
+            { "type": "completion", "unit": "token", "cost_usd": "0.000000027" }
+          ],
+          "capacity": [
+            { "type": "completion", "unit": "token", "per": "minute", "value": 600 }
+          ]
+        }
+      ],
+      "capacity": [
+        { "type": "request", "unit": "request", "per": "minute", "value": 1 },
+        { "type": "concurrency", "unit": "request", "value": 1 }
+      ],
+      "deployment_region": "global-volunteer-fleet",
+      "compliance": { "zdr": false },
       "is_ready": true,
       "is_free": false,
-      "cost_usd": {
-        "prompt": "0.0000000135",
-        "completion": "0.000000027"
-      },
-      "compliance": { "zdr": false }
+      "openrouter": { "slug": "meta-llama/llama-3.2-3b-instruct" }
     }
   ]
 }
@@ -1454,12 +1491,15 @@ Document shape (schema 2.4):
 
 Normative rules:
 
-- Dual Llama 3B rows when that pool id is present: paid id equals the pool `ModelID`; free id is that string plus `-free` with `is_free: true` and `$0` cost. OpenRouter's catalog `:free` suffix is **their** display form, not the wire id.
-- `is_ready` MUST be true only when that pool id currently has at least one ready slot (`slots_free > 0`).
-- `cost_usd` MUST be decimal per-token strings from the live rate card (`credits_per_mtok × usd_per_million_credits / 1e12`). Free rows MUST be `"0"`.
-- `compliance.zdr` MUST be `false`. Prompts are plaintext on provider Macs. MUST NOT invent a datacenter region such as `us-east-1`.
+- Dual Llama 3B rows when that pool id has enough ready-slot capacity to split without double-counting: paid id equals the pool `ModelID`; free id is that string plus `-free` with `is_free: true` and `$0` cost. OpenRouter's catalog `:free` suffix is **their** display form, not the wire id.
+- `is_ready` MUST be true only when that pool id currently has at least one free slot on a provider in `ready` state.
+- Modality-owned `pricing[].cost_usd` MUST be decimal per-token strings from the live rate card (`credits_per_mtok × usd_per_million_credits / 1e12`). Missing paid catalog keys, non-positive paid rates, and non-positive/non-finite USD conversion inputs MUST fail the document projection instead of emitting a paid `$0` row. Free rows MUST be `"0"`.
+- Root capacity MUST declare conservative request/minute and concurrency limits from live ready slots, and text modalities MUST declare prompt/completion token-per-minute capacity using a conservative generated-token filing cap rather than the maximum output length. Until the gateway carries coordinator per-provider throughput estimates into this projection, that filing cap is 10 generated tokens/second per ready slot. If multiple rows route to the same backing pool, their advertised per-row capacity MUST be split so the rows do not imply independent full-pool capacity.
+- `deployment_region` MUST be an honest volunteer-fleet descriptor. `datacenters` MUST be omitted unless the gateway has operator-verified country/region provenance for the live fleet. Neither field may invent a cloud datacenter region such as `us-east-1` or an unsupported country claim.
+- `compliance.zdr` MUST be `false`. Prompts are plaintext on provider Macs.
+- `openrouter.slug` MUST name the OpenRouter catalog slug for the row, not echo a Malibu pool id.
 - Qwen3-8B and other pool ids MUST stay off this document until the id has more than one warm ready provider.
-- The document MUST NOT include `compute_integrity`, `tier1_disclosure`, provider ids, hostnames, or IPs.
+- The document MUST NOT include legacy fields (`architecture`, `context_length`, root `cost_usd`, flat `supported_sampling_parameters`, `supported_features`, or `capacity_tpm`) and MUST NOT include `compute_integrity`, `tier1_disclosure`, provider ids, hostnames, or IPs.
 - Gateway sanitizer for `/v1/models` MUST NOT run on this path.
 
 ### 5.4 `POST /v1/chat/completions`
@@ -2062,7 +2102,7 @@ Unauthenticated HTML page. MUST state honestly:
 - Prompts and completions are processed as plaintext on volunteer Apple Silicon Macs.
 - There is no zero-data-retention (ZDR) guarantee. `compliance.zdr` on the OpenRouter document is `false`.
 - MacProvider does not train foundation models on buyer prompts.
-- Request metadata needed for routing, quota, settlement, and D1a wholesale statements is retained per coordinator `request_log` lifetime.
+- Request metadata needed for routing, quota, settlement, and D1a wholesale statements is retained for 90 days by default, matching the shipped coordinator `storage.request_log_retention_days` value. If an operator changes that configuration, the public page MUST be updated in the same change.
 
 MUST NOT claim private inference, hardware attestation, or a US datacenter region.
 

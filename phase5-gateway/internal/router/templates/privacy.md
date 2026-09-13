@@ -18,7 +18,7 @@ Mac Provider does not train foundation models on buyer prompts.
 
 ## What we retain
 
-Request metadata needed for routing, quota, settlement, and wholesale partner monthly statements is retained in coordinator `request_log` for the configured log lifetime. That metadata includes account identity, model id, token counts, timestamps, and settlement fields. Prompt and completion bodies are not stored as a training corpus.
+Request metadata needed for routing, quota, settlement, and wholesale partner monthly statements is retained in coordinator `request_log` for 90 days by default, matching the shipped coordinator `storage.request_log_retention_days` configuration. Operators may only change that by changing the coordinator configuration. That metadata includes account identity, model id, token counts, timestamps, and settlement fields. Prompt and completion bodies are not stored as a training corpus.
 
 ## Contact
 

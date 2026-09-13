@@ -1699,6 +1699,12 @@ func TestAggregateStatusExcludesBearerlessDuplicatesFromCapacity(t *testing.T) {
 	if m.SlotsFree != 3 {
 		t.Fatalf("model.SlotsFree=%d, want 3 (2 excluded slots omitted)", m.SlotsFree)
 	}
+	if m.ReadySlotsTotal != 3 {
+		t.Fatalf("model.ReadySlotsTotal=%d, want 3", m.ReadySlotsTotal)
+	}
+	if m.ReadySlotsFree != 3 {
+		t.Fatalf("model.ReadySlotsFree=%d, want 3", m.ReadySlotsFree)
+	}
 	if !m.Available || m.Availability != "available" {
 		t.Fatalf("model availability=%+v, want available", m)
 	}
