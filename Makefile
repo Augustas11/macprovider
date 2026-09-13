@@ -74,6 +74,7 @@ test-dist:
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_byom_contract_lock
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_byom_journey_evidence
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_discovery_journey_driver
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_admission_journey_runner
 	node --test phase3-binary/app/Tests/MalibuTests/payout-signer-chain.test.mjs
 	bash scripts/test-production-exceptions.sh
 	bash scripts/test-coordinator-advertised-version-test.sh
