@@ -54,8 +54,12 @@ final class ModelCatalogEconomicsTests: XCTestCase {
             candidateID: "byom_" + String(repeating: "a", count: 52),
             warningCodes: [BYOMDiscoveryWarning.requiresPreparation.rawValue]
         )
-        let unknownFitCandidate = Self.candidate(
+        let doesNotFitCandidate = Self.candidate(
             candidateID: "byom_" + String(repeating: "b", count: 52),
+            fitState: "does_not_fit"
+        )
+        let unknownFitCandidate = Self.candidate(
+            candidateID: "byom_" + String(repeating: "d", count: 52),
             fitState: "unknown"
         )
         let unboundCatalogCandidate = Self.candidate(
@@ -70,6 +74,7 @@ final class ModelCatalogEconomicsTests: XCTestCase {
             currentModelID: nil,
             discovery: Self.discovery(candidates: [
                 blockedCandidate,
+                doesNotFitCandidate,
                 unknownFitCandidate,
                 unboundCatalogCandidate,
                 unstableCandidate,
@@ -83,12 +88,14 @@ final class ModelCatalogEconomicsTests: XCTestCase {
 
         let rows = projection.rows.filter { $0.actionModelID != nil }
         // Genuinely non-evaluatable candidates: unstable id, not-ready
-        // (requires preparation is submit-blocking), does-not-fit/unknown fit.
-        // A missing catalog binding is NOT one of these — a stable/ready/fits
-        // candidate is offerable as a non-earning v0.1 offer.
+        // (requires preparation is submit-blocking), does-not-fit. Unknown fit is
+        // NOT one of these — the real gates reject only does_not_fit and allow
+        // unknown (SPEC-044-R002). A missing catalog binding is likewise not
+        // blocking — a stable/ready candidate is offerable as a non-earning
+        // v0.1 offer.
         let blockedIDs = Set([
             blockedCandidate.candidateID,
-            unknownFitCandidate.candidateID,
+            doesNotFitCandidate.candidateID,
             unstableCandidate.candidateID,
         ])
         let blockedRows = rows.filter { blockedIDs.contains($0.actionModelID ?? "") }
@@ -119,6 +126,20 @@ final class ModelCatalogEconomicsTests: XCTestCase {
         XCTAssertFalse(nonCatalogRow.admission.settlementCapable)
         XCTAssertNil(nonCatalogRow.providerPromptPayoutUSDPerMillionTokens)
         XCTAssertNil(nonCatalogRow.providerCompletionPayoutUSDPerMillionTokens)
+
+        // A stable/ready candidate whose fit is UNKNOWN is evaluatable — the
+        // gate rejects only does_not_fit and allows unknown (SPEC-044-R002). Its
+        // economics stay non-earning like the nil-catalog positive.
+        let unknownFitRow = try XCTUnwrap(rows.first { $0.actionModelID == unknownFitCandidate.candidateID })
+        XCTAssertTrue(unknownFitRow.evaluate.available)
+        XCTAssertEqual(unknownFitRow.evaluate.transactionKind, "evaluate_model")
+        XCTAssertNotNil(unknownFitRow.evaluate.transactionID)
+        XCTAssertEqual(unknownFitRow.evaluate.actionTimeoutSeconds, 10)
+        XCTAssertNil(unknownFitRow.evaluate.unavailableReason)
+        XCTAssertNotEqual(unknownFitRow.providerGuidance.earningPathClass, "settlement_capable")
+        XCTAssertFalse(unknownFitRow.admission.settlementCapable)
+        XCTAssertNil(unknownFitRow.providerPromptPayoutUSDPerMillionTokens)
+        XCTAssertNil(unknownFitRow.providerCompletionPayoutUSDPerMillionTokens)
     }
 
     func testCatalogPricedFreshSignedRateCardPermitsEconomicsWithoutSettlement() throws {

@@ -1026,7 +1026,7 @@ struct ModelCatalogEconomicsBuilder {
     private static func evaluateAction(for candidate: BYOMDiscoveryWire.Candidate) -> ModelCatalogEconomicsWire.Action {
         let evaluatable = BYOMWithdrawalBuilder.isStableCandidateID(candidate.candidateID)
             && candidate.readinessState == "ready"
-            && candidate.fitState == "fits"
+            && candidate.fitState != "does_not_fit"
             && Set(candidate.warningCodes).isDisjoint(with: BYOMDiscoveryWarning.submitBlockingWarningCodes)
         guard evaluatable else {
             return .unavailable("candidate_not_evaluatable")

@@ -976,6 +976,7 @@ struct MalibuModelCatalogEconomicsDocument: Decodable, Equatable, Sendable {
         "hardware_fit_unknown",
         "hardware_does_not_fit",
         "catalog_rate_unavailable",
+        "no_cli_transaction_available",
         "admission_state_missing",
         "admission_state_not_settlement_capable",
         "projection_unsupported",
