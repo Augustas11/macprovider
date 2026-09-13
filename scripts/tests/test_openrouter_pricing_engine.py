@@ -179,6 +179,32 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
         self.assertEqual(first["rows"][2]["canonical_model_id"], "google-gemma-4-26b-a4b-it")
         engine.validate_snapshot(first)
 
+    def test_prompt_and_completion_are_independent_volume_weighted_medians(self):
+        rankings, models, endpoints = self.expanded_inputs()
+        endpoints["openai/gpt-oss-20b"]["data"]["endpoints"] = [
+            {
+                "provider_name": "A", "status": 0, "throughput_last_30m": "10",
+                "uptime_last_30d": "0.99", "completion_tokens_last_30d": 2_000_000,
+                "pricing": {"prompt": "0.00000030", "completion": "0.00000010"},
+            },
+            {
+                "provider_name": "B", "status": 0, "throughput_last_30m": "10",
+                "uptime_last_30d": "0.99", "completion_tokens_last_30d": 4_000_000,
+                "pricing": {"prompt": "0.00000050", "completion": "0.00000020"},
+            },
+            {
+                "provider_name": "C", "status": 0, "throughput_last_30m": "10",
+                "uptime_last_30d": "0.99", "completion_tokens_last_30d": 4_000_000,
+                "pricing": {"prompt": "0.00000090", "completion": "0.00000030"},
+            },
+        ]
+        snapshot = engine.build_snapshot(rankings, models, endpoints, policy(), now=NOW, top_n=50)
+        pricing = next(row["pricing"] for row in snapshot["rows"] if row["source_model_id"] == "openai/gpt-oss-20b")
+        self.assertEqual(pricing["completion_per_mtok"], "0.2")
+        self.assertEqual(pricing["input_per_mtok"], "0.5")
+        candidates = pricing["liquidity_filter"]["eligible_endpoint_liquidity"]
+        self.assertEqual(len(candidates), 3)
+
     def test_recorded_openrouter_rankings_excerpt_fixture_is_normalizable_offline(self):
         recorded = fixture("recorded-rankings-response-excerpt.json")
         self.assertEqual(recorded["recording"]["source_url"], engine.RANKINGS_URL)

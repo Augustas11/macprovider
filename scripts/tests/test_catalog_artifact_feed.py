@@ -1974,6 +1974,19 @@ class HermeticReleaseTest(unittest.TestCase):
             )
             self.assertEqual(harness.ledger()["schema_version"], catalog_release.LEDGER_SCHEMA_V2)
 
+    def test_market_peg_bind_requires_named_market_inputs(self):
+        with self.harness() as harness:
+            (harness.catalog / "market-peg-bind.json").write_bytes(canonical({
+                "schema_version": catalog_release.MARKET_PEG_BIND_SCHEMA,
+                "content_digest": "sha256:" + "a" * 64,
+                "policy_digest": "sha256:" + "b" * 64,
+                "engine_sha256": "c" * 64,
+                "ranking_window_end_date": "2026-09-20",
+            }))
+            harness.bump("published-2026-09-20-market-v1", "2026-09-20T00:00:00Z")
+            with self.assertRaisesRegex(catalog_release.CatalogError, "market-pegged releases require all four"):
+                catalog_release.generate(harness.KEY_ID)
+
     def test_activation_requires_the_explicit_flag(self):
         with self.harness() as harness:
             harness.measure_sizes()

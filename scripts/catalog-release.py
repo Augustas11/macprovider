@@ -4197,6 +4197,7 @@ def generate(
             )
         artifacts, artifact_obj = resolve_artifact_feed(candidate, candidate_obj)
     rate_classes = artifact_rate_classes(artifact_obj) if artifact_obj is not None else {}
+    market_pegged = market_pegged or MARKET_PEG_BIND_PATH.exists()
     rate_card = resolve_rate_card(rate_classes, candidate_obj)
     rate_card_obj = validate_rate_card(rate_card)
     if market_peg is None and market_pegged:
