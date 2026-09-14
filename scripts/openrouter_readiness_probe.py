@@ -20,6 +20,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+from concurrent.futures import TimeoutError as FuturesTimeout
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -32,6 +33,7 @@ DEFAULT_MIN_SUCCESS_RATIO = 0.95
 DEFAULT_MAX_TTFT_P95_MS = 5000
 DEFAULT_MIN_OUTPUT_TOKENS_PER_SECOND = 10.0
 GATEWAY_KEEPALIVE_TICK_SECONDS = 15
+BENCHMARK_BATCH_TIMEOUT_SECONDS = 120
 LOCAL_AUTH_HOSTS = {"localhost", "127.0.0.1", "::1"}
 EXPECTED_OPENROUTER_SLUGS = {
     "mlx-community/Llama-3.2-3B-Instruct-4bit": "meta-llama/llama-3.2-3b-instruct",
@@ -107,6 +109,8 @@ def http_request(
         return exc
     except urllib.error.URLError as exc:
         raise ProbeError(str(exc)) from exc
+    except TimeoutError as exc:
+        raise ProbeError(f"request timed out: {url}") from exc
 
 
 def response_status(resp) -> int:
@@ -512,7 +516,10 @@ def run_benchmark(
     while remaining > 0:
         batch_size = min(concurrency, remaining)
         batch = []
-        with ThreadPoolExecutor(max_workers=batch_size) as executor:
+        executor = ThreadPoolExecutor(max_workers=batch_size)
+        futures = []
+        pending = set()
+        try:
             futures = [
                 executor.submit(
                     chat_once,
@@ -525,10 +532,34 @@ def run_benchmark(
                 )
                 for _ in range(batch_size)
             ]
-            for future in as_completed(futures):
-                result = future.result()
-                batch.append(result)
-                results.append(result)
+            pending = set(futures)
+            try:
+                for future in as_completed(futures, timeout=BENCHMARK_BATCH_TIMEOUT_SECONDS):
+                    pending.discard(future)
+                    try:
+                        result = future.result()
+                    except Exception as exc:
+                        result = {
+                            "status": "exception",
+                            "ok": False,
+                            "error_code": type(exc).__name__,
+                            "error": str(exc),
+                        }
+                    batch.append(result)
+                    results.append(result)
+            except FuturesTimeout:
+                for future in list(pending):
+                    future.cancel()
+                    result = {
+                        "status": "exception",
+                        "ok": False,
+                        "error_code": "benchmark_timeout",
+                        "error": f"benchmark request did not finish within {BENCHMARK_BATCH_TIMEOUT_SECONDS}s batch timeout",
+                    }
+                    batch.append(result)
+                    results.append(result)
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
         remaining -= batch_size
         if require_429 and any(is_capacity_shed(result) for result in batch):
             break
