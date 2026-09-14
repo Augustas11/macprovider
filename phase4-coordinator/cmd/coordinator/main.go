@@ -941,6 +941,7 @@ func main() {
 		buyer.WithRateCardUSDPerMillionCredits(cfg.Stats.Rollup.UsdPerMillionCredits),
 		buyer.WithAutotuneFeeds(autotuneFeeds),
 		buyer.WithModelAdmissionStore(byomOfferStore),
+		buyer.WithModelAdmissionTransport(wsServer.ModelAdmissionSessionAvailable, wsServer.CloseModelAdmissionTransport),
 		buyer.WithStreamingMetricsMaxSamples(cfg.Stats.StreamingMetrics.MaxSamples),
 		buyer.WithPreflight(func(provider pool.Provider, requestID string, estimatedTokens int, timeout time.Duration) (buyer.PreflightResult, bool, error) {
 			ack, ok, err := wsServer.Preflight(provider, requestID, estimatedTokens, timeout)
@@ -986,6 +987,12 @@ func main() {
 		logger.Info().Msg("trusted pools disabled; coordinator will not advertise pool support")
 	}
 	buyerServer := buyer.NewServer(registry, logger, startedAt, buyerOpts...)
+	if !buyerServer.ModelAdmissionAuthorityReady() {
+		logger.Fatal().Msg("model admission transport authority is unavailable")
+	}
+	if err := wsServer.SetModelAdmissionAuthority(buyerServer.ResolveModelAdmissionAuthority, buyerServer.PrepareModelAdmissionAuthority); err != nil {
+		logger.Fatal().Err(err).Msg("model admission authority installation failed")
+	}
 	providerAddr := listenAddress(cfg.Listen.BindAddress, cfg.Listen.ProviderPort)
 	buyerAddr := listenAddress(cfg.Listen.BindAddress, cfg.Listen.BuyerPort)
 	providerMux := http.NewServeMux()
