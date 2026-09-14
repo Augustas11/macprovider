@@ -132,6 +132,7 @@ type QuotasConfig struct {
 	DemoDailyTokensPerIP        int64 `yaml:"demo_daily_tokens_per_ip"`
 	DemoSessionsPerIPPerHour    int   `yaml:"demo_sessions_per_ip_per_hour"`
 	AccountConcurrency          int   `yaml:"account_concurrency"`
+	WholesaleAccountConcurrency int   `yaml:"wholesale_account_concurrency"`
 	AccountRequestRatePerSecond int   `yaml:"account_request_rate_per_second"`
 	DemoConcurrency             int   `yaml:"demo_concurrency"`
 	SignupAccountsPerIPPerDay   int   `yaml:"signup_accounts_per_ip_per_day"`
@@ -400,9 +401,11 @@ func Default() Config {
 			// to CoordinatorTimeout — an accidental DoS against
 			// paying buyers. Bumping the demo default to 3 would
 			// re-introduce that regression. Operators can override
-			// account_concurrency, account_request_rate_per_second,
-			// or demo_concurrency in gateway.yaml.
+			// account_concurrency, wholesale_account_concurrency,
+			// account_request_rate_per_second, or demo_concurrency
+			// in gateway.yaml.
 			AccountConcurrency:          4,
+			WholesaleAccountConcurrency: 0,
 			AccountRequestRatePerSecond: 30,
 			DemoConcurrency:             2,
 			SignupAccountsPerIPPerDay:   3,
@@ -682,6 +685,9 @@ func (c Config) Validate() error {
 	}
 	if c.Quotas.DemoConcurrency <= 0 {
 		return fmt.Errorf("quotas.demo_concurrency must be positive")
+	}
+	if c.Quotas.WholesaleAccountConcurrency < 0 {
+		return fmt.Errorf("quotas.wholesale_account_concurrency must be >= 0")
 	}
 	if c.Quotas.ReaperIntervalHours < 1 {
 		return fmt.Errorf("quotas.reaper_interval_hours must be >= 1")
