@@ -8,6 +8,7 @@ import json
 import os
 import sys
 import tempfile
+import threading
 import unittest
 import uuid
 from unittest import mock
@@ -34,6 +35,26 @@ class FakeHTTPResponse:
 
     def read(self):
         return self._body
+
+
+class BlockingStreamResponse:
+    status = 200
+
+    def __init__(self):
+        self.closed = False
+        self._closed = threading.Event()
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        if self._closed.wait(timeout=5):
+            raise StopIteration
+        raise TimeoutError("blocking stream was not closed")
+
+    def close(self):
+        self.closed = True
+        self._closed.set()
 
 
 def valid_doc():
@@ -293,6 +314,35 @@ class OpenRouterReadinessProbeTests(unittest.TestCase):
         self.assertIn("'shed_429': 1", message)
         self.assertIn("'non_capacity_failures': 1", message)
         self.assertIn("upstream_provider_error", message)
+
+    def test_benchmark_worker_exception_reports_aggregate_evidence(self):
+        with mock.patch.object(probe, "chat_once", side_effect=probe.ProbeError("request timed out")):
+            with self.assertRaises(probe.ProbeError) as raised:
+                probe.run_benchmark("https://api.example.test", "secret", "model", 1, 1, 16, 0.0, 5000, 0.0, True)
+        message = str(raised.exception)
+        self.assertIn("'status': 'exception'", message)
+        self.assertIn("'error_code': 'ProbeError'", message)
+        self.assertIn("request timed out", message)
+
+    def test_benchmark_batch_timeout_reports_pending_requests(self):
+        with mock.patch.object(probe, "chat_once", return_value={"status": 200, "ok": True}), mock.patch.object(
+            probe, "as_completed", side_effect=probe.FuturesTimeout
+        ):
+            with self.assertRaises(probe.ProbeError) as raised:
+                probe.run_benchmark("https://api.example.test", "secret", "model", 2, 2, 16, 0.0, 5000, 0.0, True)
+        message = str(raised.exception)
+        self.assertIn("'requests_sent': 2", message)
+        self.assertIn("'error_code': 'benchmark_timeout'", message)
+
+    def test_benchmark_batch_timeout_closes_active_stream_response(self):
+        response = BlockingStreamResponse()
+        with mock.patch.object(probe, "http_request", return_value=response), mock.patch.object(
+            probe, "BENCHMARK_BATCH_TIMEOUT_SECONDS", 0.05
+        ):
+            with self.assertRaises(probe.ProbeError) as raised:
+                probe.run_benchmark("https://api.example.test", "secret", "model", 1, 1, 16, 0.0, 5000, 0.0, True)
+        self.assertTrue(response.closed)
+        self.assertIn("benchmark_timeout", str(raised.exception))
 
     def test_benchmark_requires_429_when_saturation_is_requested(self):
         result = {
@@ -571,6 +621,29 @@ class OpenRouterReadinessProbeTests(unittest.TestCase):
                 self.assertFalse(report["checks"][name]["ok"])
                 self.assertIn("API key file is not readable", report["checks"][name]["error"])
             self.assertTrue(any("api_key" in error for error in report["errors"]))
+
+    def test_continue_on_error_writes_output_after_unexpected_check_exception(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "report.json"
+            argv = [
+                "--base-url",
+                "https://api.example.test",
+                "--expected-healthz-version",
+                "test-version",
+                "--continue-on-error",
+                "--output",
+                str(output),
+            ]
+            with mock.patch.object(probe, "check_healthz", side_effect=ValueError("malformed health payload")), mock.patch.object(
+                probe, "read_json", return_value=(valid_doc(), 200)
+            ), mock.patch.object(probe, "check_privacy", return_value={"http_status": 200}):
+                code = probe.main(argv)
+            self.assertEqual(code, 1)
+            report = json.loads(output.read_text(encoding="utf-8"))
+            self.assertFalse(report["ok"])
+            self.assertEqual(report["checks"]["healthz"]["error_code"], "ValueError")
+            self.assertIn("malformed health payload", report["checks"]["healthz"]["error"])
+            self.assertTrue(any("healthz: ValueError" in error for error in report["errors"]))
 
     def test_emit_report_creates_private_non_overwritten_file(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -15,11 +15,13 @@ import json
 import os
 import statistics
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+from concurrent.futures import TimeoutError as FuturesTimeout
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -32,6 +34,7 @@ DEFAULT_MIN_SUCCESS_RATIO = 0.95
 DEFAULT_MAX_TTFT_P95_MS = 5000
 DEFAULT_MIN_OUTPUT_TOKENS_PER_SECOND = 10.0
 GATEWAY_KEEPALIVE_TICK_SECONDS = 15
+BENCHMARK_BATCH_TIMEOUT_SECONDS = 120
 LOCAL_AUTH_HOSTS = {"localhost", "127.0.0.1", "::1"}
 EXPECTED_OPENROUTER_SLUGS = {
     "mlx-community/Llama-3.2-3B-Instruct-4bit": "meta-llama/llama-3.2-3b-instruct",
@@ -64,6 +67,43 @@ RECURSIVE_FORBIDDEN_DISCLOSURE_KEYS = {
 
 class ProbeError(Exception):
     pass
+
+
+class BenchmarkResponseTracker:
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._cancelled = False
+        self._responses = set()
+
+    def register(self, resp) -> bool:
+        with self._lock:
+            if self._cancelled:
+                close_response(resp)
+                return False
+            self._responses.add(resp)
+            return True
+
+    def unregister(self, resp) -> None:
+        with self._lock:
+            self._responses.discard(resp)
+
+    def cancelled(self) -> bool:
+        with self._lock:
+            return self._cancelled
+
+    def cancel(self) -> None:
+        with self._lock:
+            self._cancelled = True
+            responses = list(self._responses)
+        for resp in responses:
+            close_response(resp)
+
+
+def close_response(resp) -> None:
+    try:
+        resp.close()
+    except Exception:
+        pass
 
 
 class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -107,6 +147,8 @@ def http_request(
         return exc
     except urllib.error.URLError as exc:
         raise ProbeError(str(exc)) from exc
+    except TimeoutError as exc:
+        raise ProbeError(f"request timed out: {url}") from exc
 
 
 def response_status(resp) -> int:
@@ -359,7 +401,16 @@ def is_capacity_shed(result: dict) -> bool:
     return result.get("status") == 429 and result.get("error_code") == "no_provider_available"
 
 
-def chat_once(base_url: str, token: str, model: str, *, stream: bool, max_tokens: int, request_id: str = "") -> dict:
+def chat_once(
+    base_url: str,
+    token: str,
+    model: str,
+    *,
+    stream: bool,
+    max_tokens: int,
+    request_id: str = "",
+    response_tracker: BenchmarkResponseTracker | None = None,
+) -> dict:
     body = {
         "model": model,
         "messages": [{"role": "user", "content": DEFAULT_PROMPT}],
@@ -378,7 +429,12 @@ def chat_once(base_url: str, token: str, model: str, *, stream: bool, max_tokens
         timeout=90,
         request_id=request_id,
     )
+    response_registered = False
     try:
+        if response_tracker is not None:
+            response_registered = response_tracker.register(resp)
+            if not response_registered:
+                raise ProbeError("benchmark request cancelled")
         status = response_status(resp)
         if status != 200:
             raw = resp.read()
@@ -407,6 +463,8 @@ def chat_once(base_url: str, token: str, model: str, *, stream: bool, max_tokens
         first_content_ms = None
         usage = None
         for raw_line in resp:
+            if response_tracker is not None and response_tracker.cancelled():
+                raise ProbeError("benchmark request cancelled")
             line = raw_line.decode("utf-8", "replace").strip()
             if not line:
                 continue
@@ -444,7 +502,9 @@ def chat_once(base_url: str, token: str, model: str, *, stream: bool, max_tokens
             "output_tokens": usage.get("completion_tokens", 0) if usage_is_valid(usage) else 0,
         }
     finally:
-        resp.close()
+        if response_tracker is not None and response_registered:
+            response_tracker.unregister(resp)
+        close_response(resp)
 
 
 def check_chat(base_url: str, token: str, model: str, max_tokens: int) -> dict:
@@ -512,7 +572,11 @@ def run_benchmark(
     while remaining > 0:
         batch_size = min(concurrency, remaining)
         batch = []
-        with ThreadPoolExecutor(max_workers=batch_size) as executor:
+        executor = ThreadPoolExecutor(max_workers=batch_size)
+        futures = []
+        pending = set()
+        response_tracker = BenchmarkResponseTracker()
+        try:
             futures = [
                 executor.submit(
                     chat_once,
@@ -522,13 +586,39 @@ def run_benchmark(
                     stream=True,
                     max_tokens=max_tokens,
                     request_id=str(uuid.uuid4()),
+                    response_tracker=response_tracker,
                 )
                 for _ in range(batch_size)
             ]
-            for future in as_completed(futures):
-                result = future.result()
-                batch.append(result)
-                results.append(result)
+            pending = set(futures)
+            try:
+                for future in as_completed(futures, timeout=BENCHMARK_BATCH_TIMEOUT_SECONDS):
+                    pending.discard(future)
+                    try:
+                        result = future.result()
+                    except Exception as exc:
+                        result = {
+                            "status": "exception",
+                            "ok": False,
+                            "error_code": type(exc).__name__,
+                            "error": str(exc),
+                        }
+                    batch.append(result)
+                    results.append(result)
+            except FuturesTimeout:
+                response_tracker.cancel()
+                for future in list(pending):
+                    future.cancel()
+                    result = {
+                        "status": "exception",
+                        "ok": False,
+                        "error_code": "benchmark_timeout",
+                        "error": f"benchmark request did not finish within {BENCHMARK_BATCH_TIMEOUT_SECONDS}s batch timeout",
+                    }
+                    batch.append(result)
+                    results.append(result)
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
         remaining -= batch_size
         if require_429 and any(is_capacity_shed(result) for result in batch):
             break
@@ -755,6 +845,15 @@ def main(argv: list[str]) -> int:
         except ProbeError as exc:
             report["checks"][name] = {"ok": False, "error": str(exc)}
             errors.append(f"{name}: {exc}")
+            if not args.continue_on_error:
+                raise
+        except Exception as exc:
+            report["checks"][name] = {
+                "ok": False,
+                "error_code": type(exc).__name__,
+                "error": str(exc),
+            }
+            errors.append(f"{name}: {type(exc).__name__}: {exc}")
             if not args.continue_on_error:
                 raise
 
