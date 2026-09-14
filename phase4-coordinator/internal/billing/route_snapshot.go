@@ -6,12 +6,14 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
 	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/modelidentity"
+	"modernc.org/sqlite"
 )
 
 const (
@@ -33,6 +35,11 @@ const (
 var (
 	hex64Pattern        = regexp.MustCompile(`^[0-9a-f]{64}$`)
 	receiptKeyIDPattern = regexp.MustCompile(`^ed25519-sha256:[0-9a-f]{64}$`)
+
+	// ErrRouteSnapshotStorePressure marks transient persistence pressure before
+	// provider dispatch. Callers may shed capacity; settlement validation errors
+	// are never wrapped with this sentinel.
+	ErrRouteSnapshotStorePressure = errors.New("route snapshot store pressure")
 )
 
 type RouteSnapshot struct {
@@ -291,7 +298,7 @@ func (s *Store) InsertRouteSnapshot(ctx context.Context, snapshot RouteSnapshot)
 	conn, err := s.db.Conn(ctx)
 	s.observeSQLiteConnectionWait("route_snapshot", err, time.Since(connWaitStarted))
 	if err != nil {
-		return "", err
+		return "", wrapRouteSnapshotStorePressure(err)
 	}
 	defer conn.Close()
 
@@ -337,9 +344,36 @@ INSERT INTO settlement_route_snapshots (
 	)
 	s.observeSQLiteWrite("route_snapshot", "route_snapshot_insert", err, time.Since(started))
 	if err != nil {
-		return "", err
+		return "", wrapRouteSnapshotStorePressure(err)
 	}
 	return digest, nil
+}
+
+func wrapRouteSnapshotStorePressure(err error) error {
+	if err == nil {
+		return nil
+	}
+	if routeSnapshotStorePressure(err) {
+		return fmt.Errorf("%w: %w", ErrRouteSnapshotStorePressure, err)
+	}
+	return err
+}
+
+func routeSnapshotStorePressure(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var sqliteErr *sqlite.Error
+	if errors.As(err, &sqliteErr) {
+		switch sqliteErr.Code() & 0xff {
+		case 5, 6: // SQLITE_BUSY or SQLITE_LOCKED, including extended codes.
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Store) observeSQLiteConnectionWait(component string, err error, duration time.Duration) {

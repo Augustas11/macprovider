@@ -91,7 +91,7 @@ func TestWholesaleQuotaIsNotCappedAtPublicDailyLimit(t *testing.T) {
 
 func TestWholesaleStreamInjectsUsageAndKeepalive(t *testing.T) {
 	prev := wholesaleKeepaliveInterval
-	wholesaleKeepaliveInterval = 15 * time.Millisecond
+	wholesaleKeepaliveInterval = time.Hour
 	t.Cleanup(func() { wholesaleKeepaliveInterval = prev })
 
 	pr, pw := io.Pipe()
@@ -127,5 +127,8 @@ func TestWholesaleStreamInjectsUsageAndKeepalive(t *testing.T) {
 	}
 	if !strings.Contains(body, ": keepalive") {
 		t.Fatalf("wholesale stream missing keepalive comment: %s", body)
+	}
+	if keepaliveIndex, dataIndex := strings.Index(body, ": keepalive"), strings.Index(body, `data: {"choices"`); keepaliveIndex < 0 || dataIndex < 0 || keepaliveIndex > dataIndex {
+		t.Fatalf("keepalive was not emitted before provider data: %s", body)
 	}
 }
