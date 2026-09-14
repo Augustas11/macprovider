@@ -7,6 +7,7 @@ import argparse
 import base64
 import datetime as _dt
 import hashlib
+import importlib.util
 import json
 import math
 import os
@@ -17,10 +18,38 @@ import stat
 import subprocess
 import sys
 import tempfile
+import types
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+OPENROUTER_PRICING_ENGINE_PATH = ROOT / "scripts" / "openrouter_pricing_engine.py"
+
+
+def load_openrouter_pricing_engine():
+    source = OPENROUTER_PRICING_ENGINE_PATH.read_bytes()
+    module = types.ModuleType("openrouter_pricing_engine")
+    module.__file__ = str(OPENROUTER_PRICING_ENGINE_PATH)
+    module.__loader__ = None
+    module.__package__ = ""
+    module.__spec__ = importlib.util.spec_from_loader(
+        "openrouter_pricing_engine",
+        loader=None,
+        origin=str(OPENROUTER_PRICING_ENGINE_PATH),
+    )
+    sys.modules["openrouter_pricing_engine"] = module
+    try:
+        exec(compile(source, str(OPENROUTER_PRICING_ENGINE_PATH), "exec"), module.__dict__)
+    except Exception:
+        sys.modules.pop("openrouter_pricing_engine", None)
+        raise
+    return module, hashlib.sha256(source).hexdigest()
+
+
+openrouter_pricing_engine, OPENROUTER_PRICING_ENGINE_SHA256 = load_openrouter_pricing_engine()
+liquidity_volume_floor = openrouter_pricing_engine.liquidity_volume_floor
+
 CATALOG_DIR = ROOT / "phase3-binary" / "catalog" / "autotune"
 STATIC_DIR = ROOT / "phase3-binary" / "dist" / "static"
 SWIFT_SOURCE = ROOT / "phase3-binary" / "Sources" / "macprovider-cli" / "AutotuneRecommend.swift"
@@ -41,6 +70,8 @@ ARTIFACT_SOURCE_SCHEMA = "macprovider.autotune-artifacts-source.v1"
 ARTIFACT_FEED_SOURCE_VALUE = "operator_curated_autotune_artifact_catalog"
 RATE_CARD_SOURCE_PATH = CATALOG_DIR / "rate-card-source.json"
 RATE_CARD_SOURCE_SCHEMA = "macprovider.rate-card-source.v1"
+MARKET_PEG_BIND_PATH = CATALOG_DIR / "market-peg-bind.json"
+MARKET_PEG_BIND_SCHEMA = "macprovider.market-peg-bind.v1"
 INTAKE_DECISION_PATH = CATALOG_DIR / "intake-decision.json"
 LEDGER_SCHEMA_V2 = "macprovider.autotune-release-ledger.v2"
 LEDGER_SCHEMA_V3 = "macprovider.autotune-release-ledger.v3"
@@ -384,10 +415,7 @@ def validate_demand(data: bytes) -> dict:
     value = strict_json(data, "demand-rank")
     top = {"version", "generated_at", "source", "policy_version", "cold_start_floor", "diversification_band", "rows"}
     exact_keys(value, top, top, "demand-rank")
-    if value["source"] not in {
-        "openrouter_completion_token_rank_operator_curated",
-        "macprovider_buyer_supply_deficit_v1",
-    }:
+    if value["source"] != "openrouter_completion_token_rank_operator_curated":
         fail("demand-rank: invalid source")
     if not isinstance(value["version"], str) or not value["version"] or value["version"].strip() != value["version"]:
         fail("demand-rank: version must be a non-empty trimmed string")
@@ -708,6 +736,213 @@ def validate_release_inputs(candidate_obj: dict, demand_obj: dict, rate_card_obj
             fail(f"rate-card {field} must match the atomic release")
 
 
+def validate_market_peg_bind(data: bytes) -> dict:
+    value = strict_json(data, "market-peg-bind")
+    fields = {"schema_version", "content_digest", "policy_digest", "engine_sha256", "ranking_window_end_date"}
+    exact_keys(value, fields, fields, "market-peg-bind")
+    if value["schema_version"] != MARKET_PEG_BIND_SCHEMA:
+        fail(f"market-peg-bind: schema_version must be {MARKET_PEG_BIND_SCHEMA}")
+    for field in ("content_digest", "policy_digest"):
+        digest = value[field]
+        if not isinstance(digest, str) or not digest.startswith("sha256:") or len(digest) != 71 or any(character not in "0123456789abcdef" for character in digest[7:]):
+            fail(f"market-peg-bind: {field} must be sha256:<64 lowercase hex>")
+    if not isinstance(value["engine_sha256"], str) or not HEX64.fullmatch(value["engine_sha256"]):
+        fail("market-peg-bind: engine_sha256 must be <64 lowercase hex>")
+    if not isinstance(value["ranking_window_end_date"], str) or not FULL_DATE.fullmatch(value["ranking_window_end_date"]):
+        fail("market-peg-bind: ranking_window_end_date must be YYYY-MM-DD")
+    return value
+
+
+def market_decimal_string(value: Decimal) -> str:
+    rendered = format(value.normalize(), "f")
+    return "0" if rendered in {"-0", ""} else rendered
+
+
+def market_weighted_median(candidates: list[dict], field: str) -> tuple[str, dict]:
+    ordered = sorted(candidates, key=lambda item: Decimal(item[field]))
+    total = sum(int(item["completion_tokens_last_30d"]) for item in ordered)
+    cumulative = 0
+    for item in ordered:
+        cumulative += int(item["completion_tokens_last_30d"])
+        if cumulative * 2 >= total:
+            return market_decimal_string(Decimal(item[field])), item
+    selected = ordered[-1]
+    return market_decimal_string(Decimal(selected[field])), selected
+
+
+def validate_market_snapshot_liquidity_replay(snapshot: dict) -> None:
+    if snapshot.get("schema_version") == 5:
+        return
+    rows = snapshot.get("rows")
+    if not isinstance(rows, list):
+        fail("market-peg: snapshot rows must be an array")
+    metadata = snapshot.get("source", {}).get("fetch_metadata", {}) if isinstance(snapshot.get("source"), dict) else {}
+    try:
+        ranking_start = _dt.date.fromisoformat(metadata["ranking_window_start_date"])
+        ranking_end = _dt.date.fromisoformat(metadata["ranking_window_end_date"])
+    except (KeyError, TypeError, ValueError) as error:
+        fail(f"market-peg: snapshot ranking window is invalid: {error}")
+    for index, row in enumerate(rows):
+        if not isinstance(row, dict):
+            fail(f"market-peg: snapshot row {index} must be an object")
+        try:
+            row_date = _dt.date.fromisoformat(row["demand"]["ranking_date"])
+        except (KeyError, TypeError, ValueError) as error:
+            fail(f"market-peg: snapshot row {index} ranking_date is invalid: {error}")
+        if row_date < ranking_start or row_date > ranking_end:
+            fail(f"market-peg: snapshot row {index} ranking_date is outside the declared ranking window")
+        if row.get("pricing_status") != "active_priced":
+            continue
+        pricing = row.get("pricing")
+        liquidity = pricing.get("liquidity_filter") if isinstance(pricing, dict) else None
+        if not isinstance(liquidity, dict):
+            fail(f"market-peg: snapshot row {index} has no liquidity filter")
+        candidates = liquidity.get("eligible_endpoint_liquidity") if isinstance(liquidity, dict) else None
+        if not isinstance(candidates, list) or not candidates:
+            fail(f"market-peg: snapshot row {index} has no retained eligible endpoint liquidity")
+        try:
+            model_volume = int(row["demand"]["total_token_volume"])
+            volume_floor = liquidity_volume_floor(model_volume)
+            for candidate_index, candidate in enumerate(candidates):
+                endpoint_model_id = candidate["endpoint_model_id"]
+                prompt = Decimal(candidate["prompt_usd_per_mtok"])
+                completion = Decimal(candidate["completion_usd_per_mtok"])
+                tokens = int(candidate["completion_tokens_last_30d"])
+                if not isinstance(endpoint_model_id, str) or endpoint_model_id.endswith(":free"):
+                    fail(
+                        f"market-peg: snapshot row {index} retained endpoint {candidate_index} "
+                        "does not identify a paid endpoint"
+                    )
+                if candidate.get("endpoint_status") != 0 or prompt <= 0 or completion <= 0 or tokens < volume_floor:
+                    fail(
+                        f"market-peg: snapshot row {index} retained endpoint {candidate_index} "
+                        "does not satisfy the recomputed liquidity floor"
+                    )
+            completion_median, completion_endpoint = market_weighted_median(candidates, "completion_usd_per_mtok")
+            prompt_median, prompt_endpoint = market_weighted_median(candidates, "prompt_usd_per_mtok")
+        except (KeyError, TypeError, ValueError, InvalidOperation) as error:
+            fail(f"market-peg: snapshot row {index} retained liquidity is invalid: {error}")
+        if completion_median != pricing.get("completion_per_mtok"):
+            fail(f"market-peg: snapshot row {index} completion median does not match retained liquidity")
+        if prompt_median != pricing.get("input_per_mtok"):
+            fail(f"market-peg: snapshot row {index} prompt median does not match retained liquidity")
+        if liquidity.get("minimum_completion_tokens_last_30d") != volume_floor:
+            fail(f"market-peg: snapshot row {index} volume floor does not match retained liquidity")
+        if liquidity.get("completion_tokens_last_30d") != completion_endpoint["completion_tokens_last_30d"]:
+            fail(f"market-peg: snapshot row {index} completion median volume does not match retained liquidity")
+        if liquidity.get("selected_prompt_completion_tokens_last_30d") != prompt_endpoint["completion_tokens_last_30d"]:
+            fail(f"market-peg: snapshot row {index} prompt median volume does not match retained liquidity")
+
+
+def validate_market_snapshot_wall_clock_freshness(snapshot: dict) -> None:
+    if snapshot.get("schema_version") == 5:
+        return
+    metadata = snapshot.get("source", {}).get("fetch_metadata", {}) if isinstance(snapshot.get("source"), dict) else {}
+    try:
+        ranking_date = _dt.date.fromisoformat(metadata["ranking_window_end_date"])
+    except (KeyError, TypeError, ValueError) as error:
+        fail(f"market-peg: snapshot ranking_window_end_date is invalid: {error}")
+    age = datetime.now(timezone.utc).date() - ranking_date
+    if age < _dt.timedelta(0):
+        fail("market-peg: snapshot ranking window is in the future at release time")
+    # ranking_window_end_date is date-typed, not timestamped; reject at two
+    # calendar days old so accepted cuts stay within the 48-hour intent.
+    if age >= _dt.timedelta(days=2):
+        fail("market-peg: snapshot ranking window is older than 48 hours at release time")
+
+
+def validate_market_peg(
+    rate_proposal_path: pathlib.Path,
+    demand_proposal_path: pathlib.Path,
+    snapshot_path: pathlib.Path,
+    policy_path: pathlib.Path,
+    candidate_obj: dict,
+    demand_obj: dict,
+    rate_card_obj: dict,
+    *,
+    enforce_wall_clock_freshness: bool = True,
+) -> None:
+    snapshot_bytes = snapshot_path.read_bytes()
+    policy_bytes = policy_path.read_bytes()
+    bind = validate_market_peg_bind(MARKET_PEG_BIND_PATH.read_bytes())
+    engine_sha256 = sha256(OPENROUTER_PRICING_ENGINE_PATH.read_bytes())
+    if engine_sha256 != OPENROUTER_PRICING_ENGINE_SHA256:
+        fail("market-peg-bind: executed engine source changed after catalog-release loaded")
+    if bind["engine_sha256"] != OPENROUTER_PRICING_ENGINE_SHA256:
+        fail("market-peg-bind: engine_sha256 does not match the executed engine bytes")
+    if bind["policy_digest"] != "sha256:" + sha256(policy_bytes):
+        fail("market-peg-bind: policy_digest does not match the named policy bytes")
+    try:
+        snapshot = json.loads(snapshot_bytes.decode("utf-8"))
+        policy = json.loads(policy_bytes.decode("utf-8"))
+        rate_proposal = json.loads(rate_proposal_path.read_text(encoding="utf-8"))
+        demand_proposal = json.loads(demand_proposal_path.read_text(encoding="utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        fail(f"market-peg input is not valid UTF-8 JSON: {error}")
+    if not isinstance(snapshot, dict) or not isinstance(policy, dict) or not isinstance(rate_proposal, dict) or not isinstance(demand_proposal, dict):
+        fail("market-peg inputs must be JSON objects")
+    if snapshot.get("schema_version") != openrouter_pricing_engine.SNAPSHOT_SCHEMA_VERSION:
+        fail("market-peg: snapshot schema_version must be the current retained-liquidity schema")
+    if bind["content_digest"] != snapshot.get("content_digest"):
+        fail("market-peg-bind: content_digest does not match the named snapshot")
+    metadata = snapshot.get("source", {}).get("fetch_metadata", {}) if isinstance(snapshot.get("source"), dict) else {}
+    if bind["ranking_window_end_date"] != metadata.get("ranking_window_end_date"):
+        fail("market-peg-bind: ranking_window_end_date does not match the named snapshot")
+    validate_market_snapshot_liquidity_replay(snapshot)
+    if enforce_wall_clock_freshness:
+        validate_market_snapshot_wall_clock_freshness(snapshot)
+    min_targets = {key: row["min_provider_target"] for key, row in demand_obj["rows"].items()}
+    try:
+        replayed_rate = openrouter_pricing_engine.build_proposal(
+            snapshot, policy, rate_card_obj,
+            now=datetime.fromisoformat(rate_proposal["generated_at"].replace("Z", "+00:00")).astimezone(timezone.utc),
+        )
+        replayed_demand = openrouter_pricing_engine.build_demand_proposal(
+            snapshot,
+            policy,
+            min_provider_targets=min_targets,
+            recommendable_catalog=candidate_obj,
+            now=datetime.fromisoformat(rate_proposal["generated_at"].replace("Z", "+00:00")).astimezone(timezone.utc),
+        )
+    except (openrouter_pricing_engine.EngineError, KeyError, TypeError, ValueError) as error:
+        fail(f"market-peg replay failed: {error}")
+    if canonical_sorted_bytes(rate_proposal) != canonical_sorted_bytes(replayed_rate):
+        fail("market-peg: rate-card proposal does not equal the engine replay")
+    if canonical_sorted_bytes(demand_proposal) != canonical_sorted_bytes(replayed_demand):
+        fail("market-peg: demand-rank proposal does not equal the engine replay")
+    rates_by_model = {
+        row["model_id"]: row["proposed_rates"]
+        for bucket in ("added", "changed", "unchanged")
+        for row in replayed_rate[bucket]
+    }
+    recommendable = {key for key, row in candidate_obj["rows"].items() if row.get("runtime_status") == "recommendable"}
+    for key in recommendable:
+        proposal_rates = rates_by_model.get(key)
+        if proposal_rates is None:
+            fail(f"market-peg: recommendable row {key!r} has no replayed proposal rate")
+        published = resolved_rate_row(rate_card_obj["rows"], key)
+        if published is None:
+            fail(f"market-peg: recommendable row {key!r} has no published rate row")
+        for published_field, proposal_field in (
+            ("prompt_rate_per_mtok", "prompt_rate_per_mtok"),
+            ("prompt_cache_hit_rate_per_mtok", "prompt_cache_hit_rate_per_mtok"),
+            ("completion_rate_per_mtok", "completion_rate_per_mtok"),
+        ):
+            if published[published_field] != proposal_rates[proposal_field]:
+                fail(f"market-peg: rate-card row {key!r}.{published_field} does not match the proposal")
+        if demand_obj["rows"][key]["demand_weight"] != replayed_demand["rows"][key]["demand_weight"]:
+            fail(f"market-peg: demand-rank row {key!r}.demand_weight does not match the proposal")
+    if demand_obj.get("source") != replayed_demand.get("source"):
+        fail("market-peg: demand-rank source does not match the OpenRouter proposal")
+    if not rates_by_model:
+        fail("market-peg: replay produced no proposal rates")
+    minimum_key = min(rates_by_model, key=lambda key: rates_by_model[key]["completion_rate_per_mtok"])
+    minimum_rates = rates_by_model[minimum_key]
+    for field in ("prompt_rate_per_mtok", "prompt_cache_hit_rate_per_mtok", "completion_rate_per_mtok"):
+        if rate_card_obj["rows"]["default"][field] != minimum_rates[field]:
+            fail(f"market-peg: rate-card default.{field} does not match the minimum-completion mapped row")
+
+
 def rate_card_projection_hash(value: dict) -> str:
     def json_number(raw: int | float) -> str:
         if isinstance(raw, int):
@@ -1001,6 +1236,15 @@ def require_recommendable_rate_rows(candidate_obj: dict, rate_card_obj: dict) ->
             f"row by exact key or NormalizeModelKey ({normalized!r}); the default row "
             "does not satisfy SPEC-023 §3.3.1 rule 7"
         )
+
+
+def resolved_rate_row(rows: dict, key: str) -> dict | None:
+    if key in rows and key != "default":
+        return rows[key]
+    normalized = normalize_model_key(key)
+    if normalized in rows and normalized != "default":
+        return rows[normalized]
+    return None
 
 
 def parse_coordinator_rewards(text: str) -> tuple[float, float, dict[str, dict]]:
@@ -4065,6 +4309,8 @@ def generate(
     previous_release_dir: pathlib.Path | None = None,
     activate_artifact_feed: bool = False,
     intake_audit_dir: pathlib.Path | None = None,
+    market_peg: tuple[pathlib.Path, pathlib.Path, pathlib.Path, pathlib.Path] | None = None,
+    market_pegged: bool = False,
 ) -> None:
     candidate_path = CATALOG_DIR / "autotune-candidates.json"
     demand_path = CATALOG_DIR / "demand-rank.json"
@@ -4100,8 +4346,17 @@ def generate(
             )
         artifacts, artifact_obj = resolve_artifact_feed(candidate, candidate_obj)
     rate_classes = artifact_rate_classes(artifact_obj) if artifact_obj is not None else {}
+    # The market replay gate is scoped to releases that claim market provenance:
+    # either the operator passed --market-pegged or committed the provenance bind.
+    # Manual/non-market rate-card edits remain governed by parity plus activation
+    # unchanged-rate-card checks; forcing a market bind there would block them.
+    market_pegged = market_pegged or MARKET_PEG_BIND_PATH.exists()
     rate_card = resolve_rate_card(rate_classes, candidate_obj)
     rate_card_obj = validate_rate_card(rate_card)
+    if market_peg is None and market_pegged:
+        fail("generate: market-pegged releases require all four named --market-* paths")
+    if market_peg is not None:
+        validate_market_peg(*market_peg, candidate_obj, demand_obj, rate_card_obj)
     if state == "activation":
         require_rate_card_unchanged_at_activation(rate_card_obj, release_history(ledger_before, candidate_obj["version"]))
     validate_release_inputs(candidate_obj, demand_obj, rate_card_obj)
@@ -4268,6 +4523,23 @@ def verify(previous_release_dir: pathlib.Path | None = None, intake_audit_dir: p
     candidate_obj = validate_candidate(candidate)
     demand_obj = validate_demand(demand)
     rate_card_obj = validate_rate_card(rate_card)
+    if MARKET_PEG_BIND_PATH.exists():
+        missing = [name for name in ("openrouter-rate-card-proposal.json", "openrouter-demand-rank-proposal.json", "openrouter-pricing-snapshot.json", "openrouter_pricing_policy.json") if not (ROOT / name).exists()]
+        if missing:
+            fail("market-peg-bind: named proposal/snapshot/policy inputs are missing: " + ", ".join(missing))
+        validate_market_peg(
+            ROOT / "openrouter-rate-card-proposal.json",
+            ROOT / "openrouter-demand-rank-proposal.json",
+            ROOT / "openrouter-pricing-snapshot.json",
+            ROOT / "openrouter_pricing_policy.json",
+            candidate_obj,
+            demand_obj,
+            rate_card_obj,
+            # generate() enforces the 48-hour release-time freshness window.
+            # verify() audits already-committed historical releases, so replay
+            # must not start failing solely because wall-clock time advanced.
+            enforce_wall_clock_freshness=False,
+        )
     validate_release_inputs(candidate_obj, demand_obj, rate_card_obj)
     if candidate != canonical_bytes(candidate_obj) or demand != canonical_bytes(demand_obj) or rate_card != canonical_bytes(rate_card_obj):
         fail("canonical feed files must use deterministic compact JSON with no trailing newline")
@@ -4721,6 +4993,15 @@ def main() -> int:
             "Refused while any generator-side prerequisite is unmet; see `status`."
         ),
     )
+    generate_parser.add_argument("--market-rate-proposal", type=pathlib.Path)
+    generate_parser.add_argument("--market-demand-proposal", type=pathlib.Path)
+    generate_parser.add_argument("--market-snapshot", type=pathlib.Path)
+    generate_parser.add_argument("--market-policy", type=pathlib.Path)
+    generate_parser.add_argument(
+        "--market-pegged",
+        action="store_true",
+        help="require the four --market-* inputs and bind this cut to the replayed OpenRouter proposals",
+    )
     verify_parser = sub.add_parser("verify")
     verify_parser.add_argument("--intake-audit-dir", type=pathlib.Path, help="see generate --intake-audit-dir")
     verify_parser.add_argument(
@@ -4822,7 +5103,12 @@ def main() -> int:
         elif args.command == "restamp":
             restamp(args.release_id, args.generated_at)
         elif args.command == "generate":
-            generate(args.signer_key_id, args.previous_release_dir, args.activate_artifact_feed, args.intake_audit_dir)
+            market_args = (args.market_rate_proposal, args.market_demand_proposal, args.market_snapshot, args.market_policy)
+            if any(value is None for value in market_args):
+                if any(value is not None for value in market_args):
+                    fail("generate: market ingest requires all four --market-* paths")
+                market_args = None
+            generate(args.signer_key_id, args.previous_release_dir, args.activate_artifact_feed, args.intake_audit_dir, market_args, market_pegged=args.market_pegged)
         elif args.command == "verify":
             verify(args.previous_release_dir, args.intake_audit_dir)
         elif args.command == "status":

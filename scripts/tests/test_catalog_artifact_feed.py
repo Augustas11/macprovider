@@ -63,9 +63,12 @@ import math
 import pathlib
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
+from unittest.mock import Mock, patch
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -82,6 +85,10 @@ def _load(name: str, relative: str):
 
 catalog_release = _load("catalog_release", "scripts/catalog-release.py")
 compatibility_set = _load("compatibility_set_manifest", "scripts/compatibility-set-manifest.py")
+SCRIPTS = ROOT / "scripts"
+if str(SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS))
+import openrouter_pricing_engine  # noqa: E402
 
 CANDIDATE_BYTES = (CATALOG / "autotune-candidates.json").read_bytes()
 DEMAND_BYTES = (CATALOG / "demand-rank.json").read_bytes()
@@ -677,6 +684,34 @@ class RateCardSourceTest(unittest.TestCase):
             with self.subTest(case["input"]):
                 self.assertEqual(catalog_release.normalize_model_key(case["input"]), case["expected"])
 
+
+class ReleaseSnapshotBindingTest(unittest.TestCase):
+    def test_feed_schema_a_has_no_snapshot_fields(self):
+        demand = json.loads(DEMAND_BYTES)
+        rate_card = json.loads(RATE_CARD_BYTES)
+        self.assertNotIn('source_snapshot', demand)
+        self.assertNotIn('source_snapshot', rate_card)
+        catalog_release.validate_demand(canonical(demand))
+        catalog_release.validate_rate_card(canonical(rate_card))
+        catalog_release.validate_release_inputs(CANDIDATE_OBJ, demand, rate_card)
+
+    def test_published_snapshot_fields_fail_closed(self):
+        demand = json.loads(DEMAND_BYTES)
+        rate_card = json.loads(RATE_CARD_BYTES)
+        for value in (demand, rate_card):
+            value["source_snapshot"] = {"content_digest": "sha256:" + "a" * 64}
+        with self.assertRaises(catalog_release.CatalogError):
+            catalog_release.validate_demand(canonical(demand))
+        with self.assertRaises(catalog_release.CatalogError):
+            catalog_release.validate_rate_card(canonical(rate_card))
+
+    def test_published_openrouter_fields_fail_closed(self):
+        demand = json.loads(DEMAND_BYTES)
+        first_key = next(iter(demand["rows"]))
+        demand["rows"][first_key]["or_completion_tokens_30d"] = "0"
+        with self.assertRaises(catalog_release.CatalogError):
+            catalog_release.validate_demand(canonical(demand))
+
     def test_source_top_level_is_closed(self):
         base = json.loads(RATE_CARD_SOURCE_BYTES)
         with self.assertRaises(catalog_release.CatalogError):
@@ -719,6 +754,12 @@ class RateCardSourceTest(unittest.TestCase):
         with self.assertRaises(catalog_release.CatalogError):
             catalog_release.validate_rate_card_source(canonical(base))
 
+    def test_rate_card_source_snapshot_is_rejected(self):
+        source = json.loads(RATE_CARD_SOURCE_BYTES)
+        source["source_snapshot"] = {"content_digest": "sha256:" + "c" * 64}
+        with self.assertRaises(catalog_release.CatalogError):
+            catalog_release.validate_rate_card_source(canonical(source))
+
     def test_unknown_class_name_is_rejected(self):
         base = json.loads(RATE_CARD_SOURCE_BYTES)
         base["classes"]["class-13b"] = dict(base["classes"]["class-8b"])
@@ -730,6 +771,12 @@ class RateCardSourceTest(unittest.TestCase):
         for name in ("release.json", "release-ledger.json"):
             self.assertNotIn("rate-card-source.json", (CATALOG / name).read_text())
         self.assertFalse((ROOT / "phase3-binary" / "dist" / "static" / "rate-card-source.json").exists())
+
+    def test_market_peg_bind_is_never_published_or_release_bound(self):
+        self.assertFalse((CATALOG / "market-peg-bind.json").exists())
+        self.assertFalse((ROOT / "phase3-binary" / "dist" / "static" / "market-peg-bind.json").exists())
+        for name in ("release.json", "release-ledger.json"):
+            self.assertNotIn("market-peg-bind.json", (CATALOG / name).read_text())
 
 
 class CoordinatorParityTest(unittest.TestCase):
@@ -1624,6 +1671,318 @@ def promotion_manifest_bytes(harness, key: str, release_id: str, as_of: str) -> 
     }
     return json.dumps(manifest, indent=2, sort_keys=True).encode() + b"\n"
 
+
+def market_policy_fixture(model_id: str = "example/new-model") -> dict:
+    return {
+        "policy_version": "market-unit-v1",
+        "demand_top_n": 50,
+        "undercut_fraction": "0.20",
+        "cache_hit_fraction": "0.25",
+        "models": [{
+            "source_model_id": model_id,
+            "canonical_model_id": model_id,
+            "serving_path": {"verification_status": "verified", "reference": "https://example.test/mlx"},
+            "license": {
+                "commercial_permitted": True,
+                "source_url": "https://example.test/license",
+                "verification_note": "unit test",
+            },
+            "profile": {"kind": "broad_fleet", "active_params_b": "3", "residency_gb": "10", "projected_tps": "50"},
+        }],
+    }
+
+
+def market_rate_card_fixture(model_id: str = "example/new-model", *, published_model_id: str | None = None) -> dict:
+    row = {
+        "prompt_rate_per_mtok": 80000,
+        "prompt_cache_hit_rate_per_mtok": 20000,
+        "completion_rate_per_mtok": 160000,
+        "provider_share_bps": 9000,
+        "global_multiplier_ppm": 1000000,
+    }
+    default_row = dict(row)
+    published_key = published_model_id or model_id
+    return {
+        "version": "market-unit-v1",
+        "policy_version": "market-unit-v1",
+        "generated_at": "2026-09-14T00:00:00Z",
+        "usd_per_million_credits": 1.0,
+        "rows": {"default": default_row, published_key: dict(row)},
+    }
+
+
+def market_replay_inputs(
+    directory: pathlib.Path,
+    ranking_date: str,
+    *,
+    model_id: str = "example/new-model",
+    published_rate_key: str | None = None,
+    target_total_tokens: int = 10_000_000,
+    target_endpoint_tokens: tuple[int, ...] = (1_000_000,),
+) -> dict:
+    generated_at = datetime.fromisoformat(ranking_date + "T12:00:00+00:00")
+    policy = market_policy_fixture(model_id)
+    rate_card = market_rate_card_fixture(model_id, published_model_id=published_rate_key)
+    rankings = {
+        "data": [{
+            "date": ranking_date,
+            "model_permaslug": model_id,
+            "total_tokens": str(target_total_tokens),
+        }],
+        "meta": {
+            "as_of": generated_at.isoformat().replace("+00:00", "Z"),
+            "start_date": ranking_date,
+            "end_date": ranking_date,
+            "version": "v1",
+        },
+    }
+    catalog = {"data": [{"id": model_id, "canonical_slug": model_id, "name": "Example New Model", "pricing": None}]}
+    endpoints = {model_id: {"data": {"id": model_id, "endpoints": [
+        {
+            "provider_name": f"Provider{index}",
+            "status": 0,
+            "throughput_last_30m": "0.2",
+            "uptime_last_30d": "0.80",
+            "completion_tokens_last_30d": tokens,
+            "pricing": {"prompt": "0.00000010", "completion": "0.00000020"},
+        }
+        for index, tokens in enumerate(target_endpoint_tokens, start=1)
+    ]}}}
+    target_model_id = model_id
+    for index in range(2, 51):
+        unknown_model_id = f"unknown/model-{index}"
+        rankings["data"].append({
+            "date": ranking_date,
+            "model_permaslug": unknown_model_id,
+            "total_tokens": str(10000000 - index),
+        })
+        catalog["data"].append({
+            "id": unknown_model_id,
+            "canonical_slug": unknown_model_id,
+            "name": f"Unknown {index}",
+            "pricing": None,
+        })
+        endpoints[unknown_model_id] = {"data": {"id": unknown_model_id, "endpoints": [{
+            "provider_name": "Provider",
+            "status": 0,
+            "throughput_last_30m": "0.2",
+            "uptime_last_30d": "0.80",
+            "completion_tokens_last_30d": 1_000_000,
+            "pricing": {"prompt": "0.00000010", "completion": "0.00000020"},
+        }]}}
+    candidate_obj = {"rows": {target_model_id: {"runtime_status": "recommendable"}}}
+    candidate_path = directory / "autotune-candidates.json"
+    candidate_path.write_text(json.dumps(candidate_obj), encoding="utf-8")
+    snapshot = openrouter_pricing_engine.build_snapshot(rankings, catalog, endpoints, policy, now=generated_at, top_n=50)
+    rate_proposal = openrouter_pricing_engine.build_proposal(snapshot, policy, rate_card, now=generated_at)
+    demand_proposal = openrouter_pricing_engine.build_demand_proposal(
+        snapshot,
+        policy,
+        min_provider_targets={target_model_id: 1},
+        recommendable_catalog=candidate_obj,
+        now=generated_at,
+    )
+    paths = {
+        "rate_proposal": directory / "openrouter-rate-card-proposal.json",
+        "demand_proposal": directory / "openrouter-demand-rank-proposal.json",
+        "snapshot": directory / "openrouter-pricing-snapshot.json",
+        "policy": directory / "openrouter_pricing_policy.json",
+        "bind": directory / "market-peg-bind.json",
+        "candidate": candidate_path,
+    }
+    paths["rate_proposal"].write_bytes(canonical(rate_proposal))
+    paths["demand_proposal"].write_bytes(canonical(demand_proposal))
+    paths["snapshot"].write_bytes(canonical(snapshot))
+    paths["policy"].write_bytes(canonical(policy))
+    engine_bytes = (ROOT / "scripts" / "openrouter_pricing_engine.py").read_bytes()
+    paths["bind"].write_bytes(canonical({
+        "schema_version": catalog_release.MARKET_PEG_BIND_SCHEMA,
+        "content_digest": snapshot["content_digest"],
+        "policy_digest": "sha256:" + catalog_release.sha256(paths["policy"].read_bytes()),
+        "engine_sha256": catalog_release.sha256(engine_bytes),
+        "ranking_window_end_date": ranking_date,
+    }))
+    return {
+        "paths": paths,
+        "candidate_obj": candidate_obj,
+        "demand_obj": demand_proposal,
+        "rate_card_obj": rate_card,
+        "snapshot": snapshot,
+        "policy": policy,
+    }
+
+
+def validate_market_fixture(inputs: dict, *, enforce_wall_clock_freshness: bool = True) -> None:
+    paths = inputs["paths"]
+    with patch.object(catalog_release, "MARKET_PEG_BIND_PATH", paths["bind"]):
+        catalog_release.validate_market_peg(
+            paths["rate_proposal"],
+            paths["demand_proposal"],
+            paths["snapshot"],
+            paths["policy"],
+            inputs["candidate_obj"],
+            inputs["demand_obj"],
+            inputs["rate_card_obj"],
+            enforce_wall_clock_freshness=enforce_wall_clock_freshness,
+        )
+
+
+class MarketPegReplayTest(unittest.TestCase):
+    def test_market_peg_engine_loader_ignores_preloaded_module(self):
+        previous = sys.modules.get("openrouter_pricing_engine")
+        fake = type("FakeEngine", (), {"liquidity_volume_floor": staticmethod(lambda _tokens: 1)})()
+        try:
+            sys.modules["openrouter_pricing_engine"] = fake
+            loaded, executed_sha256 = catalog_release.load_openrouter_pricing_engine()
+            self.assertEqual(pathlib.Path(loaded.__file__).resolve(), ROOT / "scripts" / "openrouter_pricing_engine.py")
+            self.assertEqual(loaded.liquidity_volume_floor(20_000_001), 1_000_001)
+            self.assertEqual(executed_sha256, catalog_release.sha256((ROOT / "scripts" / "openrouter_pricing_engine.py").read_bytes()))
+        finally:
+            if previous is None:
+                sys.modules.pop("openrouter_pricing_engine", None)
+            else:
+                sys.modules["openrouter_pricing_engine"] = previous
+
+    def test_market_peg_accepts_recomputed_retained_liquidity(self):
+        with tempfile.TemporaryDirectory() as raw:
+            today = datetime.now(timezone.utc).date().isoformat()
+            inputs = market_replay_inputs(pathlib.Path(raw), today)
+            validate_market_fixture(inputs)
+
+    def test_market_peg_replay_uses_shared_ceiling_liquidity_floor(self):
+        with tempfile.TemporaryDirectory() as raw:
+            today = datetime.now(timezone.utc).date().isoformat()
+            inputs = market_replay_inputs(
+                pathlib.Path(raw),
+                today,
+                target_total_tokens=20_000_001,
+                target_endpoint_tokens=(1_000_000, 1_000_001),
+            )
+            liquidity = inputs["snapshot"]["rows"][0]["pricing"]["liquidity_filter"]
+            self.assertEqual(openrouter_pricing_engine.liquidity_volume_floor(20_000_001), 1_000_001)
+            self.assertIs(catalog_release.liquidity_volume_floor, openrouter_pricing_engine.liquidity_volume_floor)
+            self.assertEqual(liquidity["minimum_completion_tokens_last_30d"], 1_000_001)
+            self.assertEqual(
+                [candidate["completion_tokens_last_30d"] for candidate in liquidity["eligible_endpoint_liquidity"]],
+                [1_000_001],
+            )
+            validate_market_fixture(inputs)
+
+    def test_market_peg_accepts_normalized_published_rate_row(self):
+        with tempfile.TemporaryDirectory() as raw:
+            today = datetime.now(timezone.utc).date().isoformat()
+            inputs = market_replay_inputs(
+                pathlib.Path(raw),
+                today,
+                model_id="nvidia/nemotron-3-nano-30b-a3b",
+                published_rate_key="nemotron-3-nano-30b-a3b",
+            )
+            self.assertNotIn("nvidia/nemotron-3-nano-30b-a3b", inputs["rate_card_obj"]["rows"])
+            validate_market_fixture(inputs)
+
+    def test_market_peg_rejects_tampered_snapshot_median(self):
+        with tempfile.TemporaryDirectory() as raw:
+            today = datetime.now(timezone.utc).date().isoformat()
+            inputs = market_replay_inputs(pathlib.Path(raw), today)
+            snapshot = copy.deepcopy(inputs["snapshot"])
+            snapshot["rows"][0]["pricing"]["completion_per_mtok"] = "0.2000001"
+            snapshot["rows"][0]["pricing"]["completion_per_token"] = "0.0000002000001"
+            snapshot["content_digest"] = openrouter_pricing_engine.sha256_prefixed(
+                openrouter_pricing_engine.snapshot_digest_payload(snapshot)
+            )
+            paths = inputs["paths"]
+            paths["snapshot"].write_bytes(canonical(snapshot))
+            generated_at = datetime.fromisoformat(today + "T12:00:00+00:00")
+            with self.assertRaisesRegex(openrouter_pricing_engine.SchemaError, "median price"):
+                openrouter_pricing_engine.build_proposal(
+                    snapshot, inputs["policy"], inputs["rate_card_obj"], now=generated_at
+                )
+
+    def test_market_peg_rejects_retained_free_endpoint_identity(self):
+        with tempfile.TemporaryDirectory() as raw:
+            today = datetime.now(timezone.utc).date().isoformat()
+            inputs = market_replay_inputs(pathlib.Path(raw), today)
+            snapshot = copy.deepcopy(inputs["snapshot"])
+            candidate = snapshot["rows"][0]["pricing"]["liquidity_filter"]["eligible_endpoint_liquidity"][0]
+            candidate["endpoint_model_id"] = "example/new-model:free"
+            snapshot["content_digest"] = openrouter_pricing_engine.sha256_prefixed(
+                openrouter_pricing_engine.snapshot_digest_payload(snapshot)
+            )
+            paths = inputs["paths"]
+            paths["snapshot"].write_bytes(canonical(snapshot))
+            bind = json.loads(paths["bind"].read_text())
+            bind["content_digest"] = snapshot["content_digest"]
+            paths["bind"].write_bytes(canonical(bind))
+            inputs["snapshot"] = snapshot
+            with self.assertRaisesRegex(catalog_release.CatalogError, "paid endpoint"):
+                validate_market_fixture(inputs)
+
+    def test_market_peg_rejects_snapshot_stale_at_release_time(self):
+        with tempfile.TemporaryDirectory() as raw:
+            stale_date = (datetime.now(timezone.utc).date() - timedelta(days=10)).isoformat()
+            inputs = market_replay_inputs(pathlib.Path(raw), stale_date)
+            with self.assertRaisesRegex(catalog_release.CatalogError, "older than 48 hours"):
+                validate_market_fixture(inputs)
+
+    def test_market_peg_rejects_snapshot_two_calendar_days_old_at_release_time(self):
+        with tempfile.TemporaryDirectory() as raw:
+            boundary_date = (datetime.now(timezone.utc).date() - timedelta(days=2)).isoformat()
+            inputs = market_replay_inputs(pathlib.Path(raw), boundary_date)
+            with self.assertRaisesRegex(catalog_release.CatalogError, "older than 48 hours"):
+                validate_market_fixture(inputs)
+
+    def test_market_peg_rejects_future_snapshot_window(self):
+        with tempfile.TemporaryDirectory() as raw:
+            future_date = (datetime.now(timezone.utc).date() + timedelta(days=10)).isoformat()
+            inputs = market_replay_inputs(pathlib.Path(raw), future_date)
+            with self.assertRaisesRegex(catalog_release.CatalogError, "in the future"):
+                validate_market_fixture(inputs)
+
+    def test_market_peg_rejects_row_date_outside_declared_window(self):
+        with tempfile.TemporaryDirectory() as raw:
+            today = datetime.now(timezone.utc).date()
+            inputs = market_replay_inputs(pathlib.Path(raw), today.isoformat())
+            snapshot = copy.deepcopy(inputs["snapshot"])
+            metadata = snapshot["source"]["fetch_metadata"]
+            metadata["ranking_window_start_date"] = (today - timedelta(days=2)).isoformat()
+            metadata["ranking_window_end_date"] = today.isoformat()
+            metadata["demand_window_days"] = 3
+            snapshot["rows"][0]["demand"]["ranking_date"] = (today - timedelta(days=10)).isoformat()
+            snapshot["content_digest"] = openrouter_pricing_engine.sha256_prefixed(
+                openrouter_pricing_engine.snapshot_digest_payload(snapshot)
+            )
+            paths = inputs["paths"]
+            paths["snapshot"].write_bytes(canonical(snapshot))
+            bind = json.loads(paths["bind"].read_text())
+            bind["content_digest"] = snapshot["content_digest"]
+            paths["bind"].write_bytes(canonical(bind))
+            with self.assertRaisesRegex(catalog_release.CatalogError, "outside the declared ranking window"):
+                validate_market_fixture(inputs)
+
+    def test_market_peg_verify_replay_does_not_recheck_wall_clock_staleness(self):
+        with tempfile.TemporaryDirectory() as raw:
+            stale_date = (datetime.now(timezone.utc).date() - timedelta(days=10)).isoformat()
+            inputs = market_replay_inputs(pathlib.Path(raw), stale_date)
+            validate_market_fixture(inputs, enforce_wall_clock_freshness=False)
+
+    def test_market_peg_rejects_legacy_snapshot_schema(self):
+        with tempfile.TemporaryDirectory() as raw:
+            today = datetime.now(timezone.utc).date().isoformat()
+            inputs = market_replay_inputs(pathlib.Path(raw), today)
+            snapshot = copy.deepcopy(inputs["snapshot"])
+            snapshot["schema_version"] = openrouter_pricing_engine.LEGACY_SNAPSHOT_SCHEMA_VERSION
+            paths = inputs["paths"]
+            paths["snapshot"].write_bytes(canonical(snapshot))
+            with self.assertRaisesRegex(catalog_release.CatalogError, "current retained-liquidity schema"):
+                validate_market_fixture(inputs)
+
+    def test_cli_market_ingest_requires_all_named_inputs(self):
+        stream = io.StringIO()
+        argv = ["catalog-release.py", "generate", "--market-rate-proposal", "/tmp/rate.json"]
+        with patch.object(sys, "argv", argv), contextlib.redirect_stderr(stream):
+            self.assertEqual(catalog_release.main(), 1)
+        self.assertIn("market ingest requires all four --market-* paths", stream.getvalue())
+
 class IntakeDecisionTest(unittest.TestCase):
     """SPEC-023 §3.7.8: `intake_decision_sha256` is `null` ONLY for a release that
     adds no `listed` row and promotes no row to `recommendable`."""
@@ -1792,6 +2151,7 @@ class HermeticRelease:
         "ARTIFACT_FEED_PATH": "catalog/autotune-artifacts.json",
         "ARTIFACT_SOURCE_PATH": "catalog/autotune-artifacts-source.json",
         "RATE_CARD_SOURCE_PATH": "catalog/rate-card-source.json",
+        "MARKET_PEG_BIND_PATH": "catalog/market-peg-bind.json",
         "INTAKE_DECISION_PATH": "catalog/intake-decision.json",
         "COORDINATOR_YAML_PATH": "coordinator.yaml",
         "SWIFT_GENERATED": "AutotuneCatalog.generated.swift",
@@ -1933,6 +2293,98 @@ class HermeticReleaseTest(unittest.TestCase):
                 set(harness.manifest()["feeds"]), catalog_release.RATE_CARD_BOUND_LEDGER_FEEDS
             )
             self.assertEqual(harness.ledger()["schema_version"], catalog_release.LEDGER_SCHEMA_V2)
+
+    def test_market_peg_bind_requires_named_market_inputs(self):
+        """A committed bind claims market provenance, so generation enters the
+        replay gate and refuses to proceed without the named replay inputs."""
+        with self.harness() as harness:
+            (harness.catalog / "market-peg-bind.json").write_bytes(canonical({
+                "schema_version": catalog_release.MARKET_PEG_BIND_SCHEMA,
+                "content_digest": "sha256:" + "a" * 64,
+                "policy_digest": "sha256:" + "b" * 64,
+                "engine_sha256": "c" * 64,
+                "ranking_window_end_date": "2026-09-20",
+            }))
+            harness.bump("published-2026-09-20-market-v1", "2026-09-20T00:00:00Z")
+            with self.assertRaisesRegex(catalog_release.CatalogError, "market-pegged releases require all four"):
+                catalog_release.generate(harness.KEY_ID)
+
+    def test_verify_market_peg_bind_requires_named_market_inputs(self):
+        with self.harness() as harness:
+            (harness.catalog / "market-peg-bind.json").write_bytes(canonical({
+                "schema_version": catalog_release.MARKET_PEG_BIND_SCHEMA,
+                "content_digest": "sha256:" + "a" * 64,
+                "policy_digest": "sha256:" + "b" * 64,
+                "engine_sha256": "c" * 64,
+                "ranking_window_end_date": "2026-09-20",
+            }))
+            original_root = catalog_release.ROOT
+            catalog_release.ROOT = harness.root
+            try:
+                with self.assertRaisesRegex(catalog_release.CatalogError, "named proposal/snapshot/policy inputs are missing") as caught:
+                    catalog_release.verify()
+                message = str(caught.exception)
+                self.assertIn("openrouter-rate-card-proposal.json", message)
+                self.assertIn("openrouter-demand-rank-proposal.json", message)
+                self.assertIn("openrouter-pricing-snapshot.json", message)
+                self.assertIn("openrouter_pricing_policy.json", message)
+            finally:
+                catalog_release.ROOT = original_root
+
+    def test_non_market_generate_does_not_require_market_provenance_bind(self):
+        """Without the bind or --market-pegged flag, non-market authoring stays
+        on the normal release gates instead of forcing OpenRouter replay."""
+        with self.harness() as harness:
+            harness.bump("published-2026-09-20-manual-v1", "2026-09-20T00:00:00Z")
+            original = catalog_release.validate_market_peg
+            catalog_release.validate_market_peg = Mock(side_effect=catalog_release.CatalogError("unexpected market replay"))
+            try:
+                catalog_release.generate(harness.KEY_ID)
+                catalog_release.validate_market_peg.assert_not_called()
+            finally:
+                catalog_release.validate_market_peg = original
+
+    def test_generate_enforces_freshness_but_verify_accepts_historical_market_bind(self):
+        root_inputs = (
+            "openrouter-rate-card-proposal.json",
+            "openrouter-demand-rank-proposal.json",
+            "openrouter-pricing-snapshot.json",
+            "openrouter_pricing_policy.json",
+        )
+        with self.harness() as harness:
+            harness.bump("published-2026-09-20-market-v1", "2026-09-20T00:00:00Z")
+            harness.cut()
+            (harness.catalog / "market-peg-bind.json").write_bytes(canonical({
+                "schema_version": catalog_release.MARKET_PEG_BIND_SCHEMA,
+                "content_digest": "sha256:" + "a" * 64,
+                "policy_digest": "sha256:" + "b" * 64,
+                "engine_sha256": "c" * 64,
+                "ranking_window_end_date": "2026-09-20",
+            }))
+            for name in root_inputs:
+                (harness.root / name).write_text("{}\n", encoding="utf-8")
+
+            original_root = catalog_release.ROOT
+            original_validate = catalog_release.validate_market_peg
+            calls: list[bool] = []
+
+            def historical_freshness_sentinel(*args, **kwargs):
+                enforce = kwargs.get("enforce_wall_clock_freshness", True)
+                calls.append(enforce)
+                if enforce:
+                    raise catalog_release.CatalogError("market-peg: snapshot ranking window is older than 48 hours at release time")
+
+            catalog_release.ROOT = harness.root
+            catalog_release.validate_market_peg = historical_freshness_sentinel
+            try:
+                market_paths = tuple(harness.root / name for name in root_inputs)
+                with self.assertRaisesRegex(catalog_release.CatalogError, "older than 48 hours"):
+                    catalog_release.generate(harness.KEY_ID, market_peg=market_paths)
+                catalog_release.verify()
+                self.assertEqual(calls, [True, False])
+            finally:
+                catalog_release.validate_market_peg = original_validate
+                catalog_release.ROOT = original_root
 
     def test_activation_requires_the_explicit_flag(self):
         with self.harness() as harness:

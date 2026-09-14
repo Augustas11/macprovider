@@ -21,7 +21,7 @@ import openrouter_pricing_engine as engine  # noqa: E402
 
 
 FIXTURES = Path(__file__).with_name("fixtures") / "openrouter_pricing"
-NOW = datetime(2026, 8, 5, 12, 0, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 8, 4, 12, 0, 0, tzinfo=timezone.utc)
 
 
 def fixture(name: str):
@@ -32,13 +32,12 @@ def policy():
     value = {
         "policy_version": "unit-test-v1",
         "demand_top_n": 50,
-        "broad_fleet_undercut_fraction": "0.20",
-        "coding_minimum_undercut_fraction": "0.10",
-        "coding_premium_fraction": "0.10",
+        "undercut_fraction": "0.20",
+        "cache_hit_fraction": "0.25",
         "models": [
             model("openai/gpt-oss-20b", "openai/gpt-oss-20b"),
             model("google/gemma-4-26b-a4b-it", "google-gemma-4-26b-a4b-it"),
-            model("nvidia/nemotron-3-nano-30b-a3b", "nemotron-3-nano-30b-a3b"),
+            model("nvidia/nemotron-3-nano-30b-a3b", "nvidia/nemotron-3-nano-30b-a3b"),
             model("example/new-model", "example/new-model"),
             model("qwen/qwen2.5-coder-32b-instruct", "qwen2.5-coder-32b-instruct"),
         ],
@@ -68,10 +67,77 @@ def reference_rate_card():
             "default": row(1000000),
             "openai/gpt-oss-20b": row(100000),
             "google-gemma-4-26b-a4b-it": row(240000),
-            "nemotron-3-nano-30b-a3b": row(160000),
+            "nvidia/nemotron-3-nano-30b-a3b": row(160000),
             "qwen2.5-coder-32b-instruct": row(850000),
         },
     }
+
+
+def production_policy():
+    return json.loads((SCRIPTS / "openrouter_pricing_policy.json").read_text(encoding="utf-8"))
+
+
+def production_rate_card():
+    return json.loads((ROOT / "phase3-binary" / "catalog" / "autotune" / "rate-card.json").read_text(encoding="utf-8"))
+
+
+def production_recommendable_keys():
+    catalog = json.loads((ROOT / "phase3-binary" / "catalog" / "autotune" / "autotune-candidates.json").read_text(encoding="utf-8"))
+    return {
+        key
+        for key, row in catalog["rows"].items()
+        if row.get("runtime_status") == "recommendable"
+    }
+
+
+def synthetic_production_market_snapshot(*, illiquid_source: str | None = None):
+    policy_document = production_policy()
+    ranked_sources = [model["source_model_id"] for model in policy_document["models"]]
+    ranked_sources.extend(f"unknown/model-{index}" for index in range(1, 51 - len(ranked_sources)))
+    rankings = {
+        "data": [
+            {
+                "date": "2026-08-03",
+                "model_permaslug": source_id,
+                "total_tokens": str(50_000_000 - rank * 100_000),
+            }
+            for rank, source_id in enumerate(ranked_sources, start=1)
+        ],
+        "meta": {
+            "as_of": "2026-08-04T02:00:00Z",
+            "start_date": "2026-07-05",
+            "end_date": "2026-08-03",
+            "version": "v1",
+        },
+    }
+    models = {
+        "data": [
+            {
+                "id": source_id,
+                "canonical_slug": source_id,
+                "name": source_id,
+                "pricing": None,
+            }
+            for source_id in ranked_sources
+        ],
+    }
+    endpoints = {}
+    for source_id in ranked_sources:
+        completion_tokens = 999_999 if source_id == illiquid_source else 5_000_000
+        endpoints[source_id] = {
+            "data": {
+                "id": source_id,
+                "endpoints": [
+                    {
+                        "provider_name": "SyntheticLiquid",
+                        "status": 0,
+                        "completion_tokens_last_30d": completion_tokens,
+                        "pricing": {"prompt": "0.00000010", "completion": "0.00000020"},
+                    }
+                ],
+            }
+        }
+    return engine.build_snapshot(rankings, models, endpoints, policy_document, now=NOW, top_n=50)
 
 
 class FakeHTTPClient:
@@ -126,6 +192,151 @@ class FakeProductionConnection:
 
 
 class OpenRouterPricingEngineTests(unittest.TestCase):
+    def test_policy_covers_every_current_recommendable_catalog_key(self):
+        catalog_path = ROOT / "phase3-binary" / "catalog" / "autotune" / "autotune-candidates.json"
+        catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
+        policy_path = SCRIPTS / "openrouter_pricing_policy.json"
+        policy_document = json.loads(policy_path.read_text(encoding="utf-8"))
+        recommendable = {
+            key
+            for key, row in catalog["rows"].items()
+            if row.get("runtime_status") == "recommendable"
+        }
+        mapped = {model["canonical_model_id"] for model in policy_document["models"]}
+        self.assertEqual(recommendable, mapped)
+
+    def test_v6_market_peg_prices_every_mapped_recommendable_key_from_real_policy(self):
+        policy_document = production_policy()
+        snapshot = synthetic_production_market_snapshot()
+        proposal = engine.build_proposal(snapshot, policy_document, production_rate_card(), now=NOW)
+        recommendable = production_recommendable_keys()
+        priced = {
+            row["model_id"]
+            for bucket in ("added", "changed", "unchanged")
+            for row in proposal[bucket]
+        }
+        blocked = {row["model_id"] for row in proposal["blocked"]}
+        self.assertEqual(recommendable, priced & recommendable)
+        self.assertFalse(blocked & recommendable)
+        self.assertIn("openai/gpt-oss-120b", priced)
+        self.assertIn("qwen3-32b", priced)
+        qwen_coder = next(row for row in proposal["changed"] if row["model_id"] == "qwen3-coder-30b-a3b-instruct")
+        self.assertEqual(qwen_coder["proposed_rates"]["completion_rate_per_mtok"], 160000)
+        self.assertEqual(qwen_coder["proposed_rates"]["prompt_rate_per_mtok"], 80000)
+        self.assertFalse(
+            any("provider net hourly USD" in reason for reason in qwen_coder["proposed_rates"]["formula_reasons"])
+        )
+
+    def test_v6_market_peg_illiquid_mapped_key_writes_no_artifacts(self):
+        snapshot = synthetic_production_market_snapshot(illiquid_source="qwen/qwen3-32b")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            snapshot_path = root / "snapshot.json"
+            policy_path = root / "policy.json"
+            rate_card_path = root / "rate-card.json"
+            output_dir = root / "out"
+            snapshot_path.write_text(json.dumps(snapshot), encoding="utf-8")
+            policy_path.write_text(json.dumps(production_policy()), encoding="utf-8")
+            rate_card_path.write_text(json.dumps(production_rate_card()), encoding="utf-8")
+            args = engine.parser().parse_args([
+                "compute",
+                "--snapshot", str(snapshot_path),
+                "--policy", str(policy_path),
+                "--rate-card", str(rate_card_path),
+                "--candidate-catalog", str(ROOT / "phase3-binary" / "catalog" / "autotune" / "autotune-candidates.json"),
+                "--min-provider-targets", str(ROOT / "phase3-binary" / "catalog" / "autotune" / "demand-rank.json"),
+                "--output-dir", str(output_dir),
+            ])
+            with patch.object(engine, "utc_now", return_value=NOW):
+                with self.assertRaisesRegex(engine.SchemaError, "no active priced OpenRouter endpoint"):
+                    args.handler(args)
+            self.assertFalse(output_dir.exists())
+
+    def test_v5_legacy_coding_dense_pricing_uses_baseline_premium_cap(self):
+        legacy_policy = fixture("legacy-policy-2026-08-10.json")
+        qwen_policy = next(model for model in legacy_policy["models"] if model["source_model_id"] == "qwen/qwen2.5-coder-32b-instruct")
+        qwen_policy["profile"]["projected_tps"] = "150"
+        snapshot = self.snapshot(legacy_policy)
+        snapshot["schema_version"] = engine.LEGACY_SNAPSHOT_SCHEMA_VERSION
+        snapshot["source"]["observed_schema_version_or_fingerprint"] = engine.LEGACY_SCHEMA_CONTRACT_FINGERPRINT
+        qwen_row = next(row for row in snapshot["rows"] if row["source_model_id"] == "qwen/qwen2.5-coder-32b-instruct")
+        qwen_row["pricing"]["completion_per_token"] = "0.00000025"
+        qwen_row["pricing"]["completion_per_mtok"] = "0.25"
+        for row in snapshot["rows"]:
+            if isinstance(row.get("pricing"), dict):
+                row["pricing"].pop("liquidity_filter", None)
+        snapshot["content_digest"] = engine.sha256_prefixed(engine.snapshot_digest_payload(snapshot))
+
+        proposal = engine.build_proposal(snapshot, legacy_policy, reference_rate_card(), now=NOW)
+
+        qwen_change = next(row for row in proposal["changed"] if row["model_id"] == "qwen2.5-coder-32b-instruct")
+        self.assertNotIn("proposed_rates", qwen_change)
+        self.assertIn("proposed_completion_rate", qwen_change)
+        self.assertEqual(
+            qwen_change["proposed_completion_rate"],
+            {
+                "usd_per_mtok": "0.225",
+                "rate_card_completion_rate_per_mtok": 225000,
+                "formula_reasons": [
+                    "coding premium fraction 0.1",
+                    "coding market undercut fraction 0.1",
+                    "provider net hourly USD 0.10935 using rate-card economics row qwen2.5-coder-32b-instruct",
+                ],
+            },
+        )
+
+    def test_v5_legacy_policy_rejects_invalid_coding_controls(self):
+        legacy_policy = fixture("legacy-policy-2026-08-10.json")
+        legacy_policy["coding_minimum_undercut_fraction"] = "0"
+        with self.assertRaisesRegex(engine.SchemaError, "coding_minimum_undercut_fraction"):
+            engine.build_proposal(self.snapshot(legacy_policy), legacy_policy, reference_rate_card(), now=NOW)
+
+    def test_v5_legacy_snapshot_rejects_current_policy_shape(self):
+        legacy_policy = fixture("legacy-policy-2026-08-10.json")
+        snapshot = self.snapshot(legacy_policy)
+        snapshot["schema_version"] = engine.LEGACY_SNAPSHOT_SCHEMA_VERSION
+        snapshot["source"]["observed_schema_version_or_fingerprint"] = engine.LEGACY_SCHEMA_CONTRACT_FINGERPRINT
+        for row in snapshot["rows"]:
+            if isinstance(row.get("pricing"), dict):
+                row["pricing"].pop("liquidity_filter", None)
+        snapshot["content_digest"] = engine.sha256_prefixed(engine.snapshot_digest_payload(snapshot))
+
+        with self.assertRaisesRegex(engine.SchemaError, "legacy snapshot requires legacy pricing policy"):
+            engine.build_proposal(snapshot, policy(), reference_rate_card(), now=NOW)
+
+    def test_v5_legacy_pricing_uses_multiplier_aware_internal_conversion(self):
+        legacy_policy = fixture("legacy-policy-2026-08-10.json")
+        snapshot = self.snapshot(legacy_policy)
+        snapshot["schema_version"] = engine.LEGACY_SNAPSHOT_SCHEMA_VERSION
+        snapshot["source"]["observed_schema_version_or_fingerprint"] = engine.LEGACY_SCHEMA_CONTRACT_FINGERPRINT
+        for row in snapshot["rows"]:
+            if isinstance(row.get("pricing"), dict):
+                row["pricing"].pop("liquidity_filter", None)
+        snapshot["content_digest"] = engine.sha256_prefixed(engine.snapshot_digest_payload(snapshot))
+        card = reference_rate_card()
+        card["rows"]["openai/gpt-oss-20b"]["global_multiplier_ppm"] = 2000000
+
+        proposal = engine.build_proposal(snapshot, legacy_policy, card, now=NOW)
+
+        gpt_oss_change = next(row for row in proposal["changed"] if row["model_id"] == "openai/gpt-oss-20b")
+        self.assertEqual(gpt_oss_change["proposed_completion_rate"]["usd_per_mtok"], "0.104")
+        self.assertEqual(gpt_oss_change["proposed_completion_rate"]["rate_card_completion_rate_per_mtok"], 52000)
+        self.assertEqual(gpt_oss_change["rate_card_economics"]["global_multiplier_ppm"], "2000000")
+
+    def test_demand_proposal_fails_illiquid_mapped_key(self):
+        snapshot = synthetic_production_market_snapshot(illiquid_source="qwen/qwen3-32b")
+        min_targets = {
+            key: row["min_provider_target"]
+            for key, row in json.loads((ROOT / "phase3-binary" / "catalog" / "autotune" / "demand-rank.json").read_text(encoding="utf-8"))["rows"].items()
+        }
+        with self.assertRaisesRegex(engine.SchemaError, "no active priced OpenRouter endpoint"):
+            engine.build_demand_proposal(
+                snapshot,
+                production_policy(),
+                min_provider_targets=min_targets,
+                now=NOW,
+            )
+
     def setUp(self):
         self.rankings = fixture("rankings.json")
         self.models = fixture("models.json")
@@ -136,9 +347,9 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
         models = copy.deepcopy(self.models)
         endpoints = copy.deepcopy(self.endpoints)
         template_endpoint = copy.deepcopy(endpoints["example/new-model"])
-        for index in range(5, 51):
+        for index in range(5, 44):
             model_id = f"unknown/model-{index}"
-            rankings["data"].append({"date": "2026-08-03", "model_permaslug": model_id, "total_tokens": str(700 - index)})
+            rankings["data"].append({"date": "2026-08-03", "model_permaslug": model_id, "total_tokens": str(9000 - index)})
             models["data"].append({"id": model_id, "canonical_slug": model_id, "name": f"Unknown {index}", "pricing": None})
             endpoint = copy.deepcopy(template_endpoint)
             endpoint["data"]["id"] = model_id
@@ -161,11 +372,66 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
         rankings, models, endpoints = self.expanded_inputs()
         second = engine.build_snapshot(rankings, models, endpoints, policy(), now=NOW.replace(hour=13), top_n=50)
         self.assertEqual(first["content_digest"], second["content_digest"])
-        self.assertEqual(first["rows"][0]["demand"]["total_token_volume"], "1025")
+        self.assertEqual(first["rows"][0]["demand"]["total_token_volume"], "22000")
         self.assertEqual(first["rows"][0]["pricing"]["benchmark_provider"], "CoreWeave")
         self.assertEqual(first["rows"][0]["pricing"]["completion_per_mtok"], "0.13")
-        self.assertEqual(first["rows"][2]["canonical_model_id"], "nemotron-3-nano-30b-a3b")
+        self.assertEqual(first["rows"][2]["canonical_model_id"], "google-gemma-4-26b-a4b-it")
         engine.validate_snapshot(first)
+
+    def test_prompt_and_completion_are_independent_volume_weighted_medians(self):
+        rankings, models, endpoints = self.expanded_inputs()
+        endpoints["openai/gpt-oss-20b"]["data"]["endpoints"] = [
+            {
+                "provider_name": "A", "status": 0, "throughput_last_30m": "10",
+                "uptime_last_30d": "0.99", "completion_tokens_last_30d": 6_000_000,
+                "pricing": {"prompt": "0.00000090", "completion": "0.00000010"},
+            },
+            {
+                "provider_name": "B", "status": 0, "throughput_last_30m": "10",
+                "uptime_last_30d": "0.99", "completion_tokens_last_30d": 6_000_000,
+                "pricing": {"prompt": "0.00000020", "completion": "0.00000030"},
+            },
+        ]
+        snapshot = engine.build_snapshot(rankings, models, endpoints, policy(), now=NOW, top_n=50)
+        pricing = next(row["pricing"] for row in snapshot["rows"] if row["source_model_id"] == "openai/gpt-oss-20b")
+        self.assertEqual(pricing["completion_per_mtok"], "0.1")
+        self.assertEqual(pricing["input_per_mtok"], "0.2")
+        self.assertEqual(pricing["benchmark_provider"], "A")
+        self.assertEqual(pricing["liquidity_filter"]["selected_prompt_provider"], "B")
+        candidates = pricing["liquidity_filter"]["eligible_endpoint_liquidity"]
+        self.assertEqual(len(candidates), 2)
+
+    def test_liquidity_eligibility_ignores_missing_or_zero_telemetry(self):
+        pricing = engine.cheapest_endpoint_pricing(
+            {"data": {"id": "example/model", "endpoints": [
+                {
+                    "provider_name": "NoTelemetry", "status": 0,
+                    "uptime_last_30d": "0", "completion_tokens_last_30d": 2_000_000,
+                    "pricing": {"prompt": "0.00000010", "completion": "0.00000020"},
+                },
+                {
+                    "provider_name": "Telemetry", "status": 0,
+                    "throughput_last_30m": "10", "uptime_last_30d": "0.99",
+                    "completion_tokens_last_30d": 1_000_000,
+                    "pricing": {"prompt": "0.00000030", "completion": "0.00000060"},
+                },
+            ]}},
+            "example/model",
+        )
+        self.assertEqual(pricing["benchmark_provider"], "NoTelemetry")
+        self.assertEqual(pricing["completion_per_mtok"], "0.2")
+        self.assertEqual(
+            [candidate["provider_name"] for candidate in pricing["liquidity_filter"]["eligible_endpoint_liquidity"]],
+            ["NoTelemetry", "Telemetry"],
+        )
+        self.assertEqual(
+            [candidate["endpoint_model_id"] for candidate in pricing["liquidity_filter"]["eligible_endpoint_liquidity"]],
+            ["example/model", "example/model"],
+        )
+        self.assertNotIn(
+            "throughput_last_30m",
+            pricing["liquidity_filter"]["eligible_endpoint_liquidity"][0],
+        )
 
     def test_recorded_openrouter_rankings_excerpt_fixture_is_normalizable_offline(self):
         recorded = fixture("recorded-rankings-response-excerpt.json")
@@ -179,7 +445,7 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
             {"date": "2026-08-03", "model_permaslug": "other", "total_tokens": "1"},
         ], "meta": {"as_of": "2026-08-04T02:00:00Z", "start_date": "2026-08-03", "end_date": "2026-08-03", "version": "v1"}}
         catalog = {"data": [{"id": "example/current-model", "canonical_slug": "example/old-model-20260101", "pricing": None}]}
-        endpoints = {"example/current-model": {"data": {"id": "example/current-model", "endpoints": [{"provider_name": "Provider", "status": 0, "pricing": {"prompt": "0.1", "completion": "0.2"}}]}}}
+        endpoints = {"example/current-model": {"data": {"id": "example/current-model", "endpoints": [{"provider_name": "Provider", "status": 0, "throughput_last_30m": "50", "uptime_last_30d": "0.99", "completion_tokens_last_30d": 1000000, "pricing": {"prompt": "0.1", "completion": "0.2"}}]}}}
         policy_document = policy()
         policy_document["models"] = []
         snapshot = engine.build_snapshot(rankings, catalog, endpoints, policy_document, now=NOW, top_n=1)
@@ -195,6 +461,30 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
         resolved = engine.resolve_rankings_to_catalog(rankings, catalog)
         self.assertEqual(resolved[0]["source_model_id"], "google/gemma-4-31b-it")
         self.assertEqual(resolved[0]["ranking_model_permaslug"], "google/gemma-4-31b-it-20260402")
+
+    def test_catalog_resolution_does_not_directly_accept_free_variant(self):
+        rankings = [{"source_model_id": "example/model:free", "rank": 1, "total_token_volume": "10", "ranking_date": "2026-08-04"}]
+        catalog = {
+            "example/model": {"canonical_slug": "example/model"},
+            "example/model:free": {"canonical_slug": "example/model"},
+        }
+        resolved = engine.resolve_rankings_to_catalog(rankings, catalog)
+        self.assertEqual(resolved[0]["source_model_id"], "example/model:free")
+        self.assertEqual(resolved[0]["_identity_resolution"], "endpoint_alias_pending")
+
+    def test_catalog_resolution_does_not_select_single_free_canonical_candidate(self):
+        rankings = [{"source_model_id": "example/model", "rank": 1, "total_token_volume": "10", "ranking_date": "2026-08-04"}]
+        catalog = {"example/model:free": {"canonical_slug": "example/model"}}
+        resolved = engine.resolve_rankings_to_catalog(rankings, catalog)
+        self.assertEqual(resolved[0]["source_model_id"], "example/model")
+        self.assertEqual(resolved[0]["_identity_resolution"], "endpoint_candidate_pending")
+
+    def test_catalog_resolution_rejects_free_ranking_alias_fallback(self):
+        rankings = [{"source_model_id": "example/model:free", "rank": 1, "total_token_volume": "10", "ranking_date": "2026-08-04"}]
+        catalog = {"example/model": {"canonical_slug": "example/model"}}
+        endpoints = {"example/model:free": {"data": {"id": "example/model"}}}
+        with self.assertRaisesRegex(engine.SchemaError, "free variant"):
+            engine.resolve_rankings_to_catalog(rankings, catalog, endpoints)
 
     def test_catalog_alias_resolution_uses_endpoint_confirmed_regular_variant_over_batch(self):
         rankings = [{"source_model_id": "z-ai/glm-5.2-20260616", "rank": 1, "total_token_volume": "10", "ranking_date": "2026-08-08"}]
@@ -237,7 +527,7 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
             "bytedance-seed/seedream-4.5-20251203": {
                 "data": {
                     "id": "bytedance-seed/seedream-4.5",
-                    "endpoints": [{"provider_name": "Provider", "status": 0, "pricing": {"prompt": "0.1", "completion": "0.2"}}],
+                    "endpoints": [{"provider_name": "Provider", "status": 0, "throughput_last_30m": "50", "uptime_last_30d": "0.99", "completion_tokens_last_30d": 1000000, "pricing": {"prompt": "0.1", "completion": "0.2"}}],
                 }
             }
         }
@@ -248,16 +538,15 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
         self.assertEqual(snapshot["rows"][0]["source_metadata"]["identity_resolution"], "endpoint_alias_fallback")
         self.assertIsNone(snapshot["rows"][0]["source_metadata"]["catalog_name"])
 
-    def test_no_active_priced_endpoint_is_snapshotted_and_blocked_not_dropped(self):
+    def test_no_active_priced_endpoint_is_snapshotted_but_fails_compute(self):
         rankings, models, endpoints = self.expanded_inputs()
         endpoints["openai/gpt-oss-20b"]["data"]["endpoints"][0]["status"] = -2
         snapshot = engine.build_snapshot(rankings, models, endpoints, policy(), now=NOW, top_n=50)
         row = next(item for item in snapshot["rows"] if item["source_model_id"] == "openai/gpt-oss-20b")
         self.assertEqual(row["pricing_status"], "no_active_priced_endpoint")
         self.assertIsNone(row["pricing"])
-        proposal = engine.build_proposal(snapshot, policy(), reference_rate_card(), now=NOW)
-        blocked = next(item for item in proposal["blocked"] if item["model_id"] == "openai/gpt-oss-20b")
-        self.assertIn("no active priced OpenRouter endpoint is available", blocked["reasons"])
+        with self.assertRaisesRegex(engine.SchemaError, "no active priced OpenRouter endpoint"):
+            engine.build_proposal(snapshot, policy(), reference_rate_card(), now=NOW)
 
     def test_malformed_inactive_endpoint_rows_abort_snapshot_generation(self):
         mutations = {
@@ -291,7 +580,13 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
         self.assertEqual(delays, [2.0])
 
     def test_retry_after_http_date_and_long_delay_are_honored_or_fail_at_generation_deadline(self):
-        self.assertEqual(engine.retry_after_seconds({"Retry-After": "Wed, 05 Aug 2026 12:02:00 GMT"}, now=NOW), 120.0)
+        self.assertEqual(
+            engine.retry_after_seconds(
+                {"Retry-After": "Wed, 05 Aug 2026 12:02:00 GMT"},
+                now=datetime(2026, 8, 5, 12, 0, 0, tzinfo=timezone.utc),
+            ),
+            120.0,
+        )
         client = FakeHTTPClient({"https://example.test": [engine.HTTPResponse(429, b"{}", {"Retry-After": "120"}), engine.HTTPResponse(200, b'{"data": []}', {})]})
         delays = []
         value = engine.fetch_json(client, "https://example.test", "test", retries=1, timeout_seconds=1, sleeper=delays.append, clock=lambda: 0)
@@ -363,10 +658,10 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
         del partial["example/new-model"]
         with self.assertRaises(engine.SchemaError):
             engine.build_snapshot(self.rankings, self.models, partial, policy(), now=NOW, top_n=4)
-        empty_pricing = copy.deepcopy(self.endpoints)
-        empty_pricing["openai/gpt-oss-20b"]["data"]["endpoints"] = []
-        with self.assertRaisesRegex(engine.SchemaError, "empty provider set was not confirmed"):
-            engine.build_snapshot(self.rankings, self.models, empty_pricing, policy(), now=NOW, top_n=4)
+        original_openai_endpoint = copy.deepcopy(self.endpoints["openai/gpt-oss-20b"])
+        selected_ids = [row["source_model_id"] for row in engine.normalize_rankings(self.rankings, 4)]
+        empty_pricing = {model_id: self.endpoints[model_id] for model_id in selected_ids}
+        empty_pricing["openai/gpt-oss-20b"] = {"data": {"id": "openai/gpt-oss-20b", "endpoints": []}}
         confirmed_empty_snapshot = engine.build_snapshot(
             self.rankings,
             self.models,
@@ -381,7 +676,10 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
         self.assertIsNone(empty_row["pricing"])
         self.assertEqual(empty_row["source_metadata"]["endpoint_set_confirmation"], "confirmed_empty_second_fetch")
         invalid = copy.deepcopy(self.endpoints)
+        invalid["openai/gpt-oss-20b"] = original_openai_endpoint
         invalid["openai/gpt-oss-20b"]["data"]["endpoints"][0]["pricing"]["completion"] = "-1"
+        invalid_ids = [row["source_model_id"] for row in engine.normalize_rankings(self.rankings, 4)]
+        invalid = {model_id: invalid[model_id] for model_id in invalid_ids}
         with self.assertRaises(engine.SchemaError):
             engine.build_snapshot(self.rankings, self.models, invalid, policy(), now=NOW, top_n=4)
         malformed_date = copy.deepcopy(self.rankings)
@@ -389,6 +687,7 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
         with self.assertRaises(engine.SchemaError):
             engine.build_snapshot(malformed_date, self.models, self.endpoints, policy(), now=NOW, top_n=4)
         invalid_status = copy.deepcopy(self.endpoints)
+        invalid_status["openai/gpt-oss-20b"] = original_openai_endpoint
         invalid_status["openai/gpt-oss-20b"]["data"]["endpoints"][0]["status"] = False
         with self.assertRaises(engine.SchemaError):
             engine.build_snapshot(self.rankings, self.models, invalid_status, policy(), now=NOW, top_n=4)
@@ -420,26 +719,41 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
         with self.assertRaises(engine.SchemaError):
             engine.validate_snapshot(duplicate_source_snapshot)
 
-    def test_proposal_contains_added_changed_retained_unchanged_and_blocked(self):
+    def test_snapshot_liquidity_filter_tampering_is_rejected(self):
+        snapshot = self.snapshot()
+        snapshot["rows"][0]["pricing"]["liquidity_filter"]["minimum_uptime_last_30d"] = "0.10"
+        snapshot["content_digest"] = engine.sha256_prefixed(engine.snapshot_digest_payload(snapshot))
+        with self.assertRaises(engine.SchemaError):
+            engine.validate_snapshot(snapshot)
+        median_tampered = self.snapshot()
+        median_tampered["rows"][0]["pricing"]["completion_per_mtok"] = "999"
+        median_tampered["content_digest"] = engine.sha256_prefixed(engine.snapshot_digest_payload(median_tampered))
+        with self.assertRaisesRegex(engine.SchemaError, "median price"):
+            engine.validate_snapshot(median_tampered)
+
+    def test_prompt_only_market_change_is_reported_as_changed(self):
+        card = reference_rate_card()
+        row = card["rows"]["openai/gpt-oss-20b"]
+        row["prompt_rate_per_mtok"] = 999999
+        proposal = engine.build_proposal(self.snapshot(), policy(), card, now=NOW)
+        changed = next(item for item in proposal["changed"] if item["model_id"] == "openai/gpt-oss-20b")
+        self.assertLess(changed["proposed_rates"]["prompt_rate_per_mtok"], 999999)
+
+    def test_proposal_contains_added_changed_unchanged_and_blocked(self):
+        snapshot = self.snapshot()
         proposal_policy = policy()
-        proposal_policy["models"][2]["license"]["commercial_permitted"] = False
-        snapshot = self.snapshot(proposal_policy)
         proposal = engine.build_proposal(snapshot, proposal_policy, reference_rate_card(), now=NOW)
-        self.assertEqual([row["model_id"] for row in proposal["changed"]], ["openai/gpt-oss-20b"])
-        self.assertEqual([row["model_id"] for row in proposal["unchanged"]], ["google-gemma-4-26b-a4b-it"])
+        self.assertEqual([row["model_id"] for row in proposal["changed"]], ["google-gemma-4-26b-a4b-it", "nvidia/nemotron-3-nano-30b-a3b", "openai/gpt-oss-20b", "qwen2.5-coder-32b-instruct"])
+        self.assertEqual([row["model_id"] for row in proposal["unchanged"]], [])
         self.assertEqual([row["model_id"] for row in proposal["added"]], ["example/new-model"])
         # A served row absent from the demand cohort is RETAINED, never dropped:
         # cohort absence is not evidence to delist a model the fleet serves.
         self.assertEqual(proposal["dropped"], [])
-        self.assertEqual({row["model_id"] for row in proposal["retained"]}, {"qwen2.5-coder-32b-instruct"})
-        retained = proposal["retained"][0]
-        self.assertEqual(retained["action"], "retained")
-        self.assertIsNone(retained["market"]["completion_per_mtok"])
-        self.assertEqual(retained["current_completion_rate"]["rate_card_completion_rate_per_mtok"], 850000)
-        self.assertEqual(len(proposal["blocked"]), 47)
-        nemotron = next(row for row in proposal["blocked"] if row["model_id"] == "nemotron-3-nano-30b-a3b")
-        self.assertTrue(nemotron["policy_evidence"]["available"])
-        self.assertEqual(proposal["changed"][0]["proposed_completion_rate"]["rate_card_completion_rate_per_mtok"], 104000)
+        self.assertEqual(len(proposal["blocked"]), 45)
+        gpt_oss = next(row for row in proposal["changed"] if row["model_id"] == "openai/gpt-oss-20b")
+        self.assertEqual(gpt_oss["proposed_rates"]["completion_rate_per_mtok"], 104000)
+        self.assertEqual(gpt_oss["proposed_rates"]["prompt_rate_per_mtok"], 24000)
+        self.assertEqual(gpt_oss["proposed_rates"]["prompt_cache_hit_rate_per_mtok"], 6000)
 
     def test_served_row_is_never_dropped_by_the_proposal(self):
         # Regression lock for the false-drop fix: across the fixed fixture, no
@@ -453,43 +767,50 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
         dropped_ids = {row.get("model_id") for row in proposal["dropped"]}
         self.assertEqual(dropped_ids & served, set())
 
-    def test_absent_served_row_routing_matrix(self):
-        # A served row absent from the cohort is retained ONLY while its policy
-        # serving/license evidence is still valid. A fatal serving/license failure
-        # routes it to blocked (surfaced for a human), never silently retained --
-        # and never dropped.
-        QWEN = "qwen2.5-coder-32b-instruct"  # the absent-from-cohort served row
+    def test_current_snapshot_ranking_date_rejects_two_calendar_days_old(self):
+        with self.assertRaisesRegex(engine.SchemaError, "older than 48 hours"):
+            engine.build_proposal(
+                self.snapshot(),
+                policy(),
+                reference_rate_card(),
+                now=datetime(2026, 8, 5, 0, 0, 0, tzinfo=timezone.utc),
+            )
+
+    def test_absent_served_row_fails_the_whole_compute(self):
+        QWEN = "unmapped-kept"  # absent-from-cohort helper
+
+        base_snapshot = self.snapshot()
 
         def proposal_for(mutate):
             pol = policy()
-            mutate(pol["models"][4])
-            return engine.build_proposal(self.snapshot(pol), pol, reference_rate_card(), now=NOW)
+            absent = model("example/absent", QWEN)
+            mutate(absent)
+            pol["models"].append(absent)
+            card = reference_rate_card()
+            card["rows"][QWEN] = card["rows"]["default"].copy()
+            return engine.build_proposal(base_snapshot, pol, card, now=NOW)
 
         def ids(prop, bucket):
             return {r["model_id"] for r in prop[bucket]}
 
-        valid = proposal_for(lambda m: None)
-        self.assertIn(QWEN, ids(valid, "retained"))
-        self.assertNotIn(QWEN, ids(valid, "blocked"))
-        self.assertEqual(valid["dropped"], [])
+        for mutate in (
+            lambda model: None,
+            lambda model: model["license"].__setitem__("commercial_permitted", False),
+            lambda model: model["serving_path"].__setitem__("verification_status", "unverified"),
+        ):
+            with self.assertRaises(engine.SchemaError) as caught:
+                proposal_for(mutate)
+            self.assertIn("market-pegged compute emits no proposals", str(caught.exception))
 
-        revoked_license = proposal_for(lambda m: m["license"].__setitem__("commercial_permitted", False))
-        self.assertIn(QWEN, ids(revoked_license, "blocked"))
-        self.assertNotIn(QWEN, ids(revoked_license, "retained"))
-        self.assertEqual(revoked_license["dropped"], [])
-
-        unverified_serving = proposal_for(lambda m: m["serving_path"].__setitem__("verification_status", "unverified"))
-        self.assertIn(QWEN, ids(unverified_serving, "blocked"))
-        self.assertNotIn(QWEN, ids(unverified_serving, "retained"))
-        self.assertEqual(unverified_serving["dropped"], [])
-
-    def test_proposal_schema_is_v2_with_retained_bucket(self):
+    def test_proposal_schema_is_v2_without_retain_on_absence(self):
         proposal = engine.build_proposal(self.snapshot(), policy(), reference_rate_card(), now=NOW)
         self.assertEqual(engine.PROPOSAL_SCHEMA_VERSION, 2)
         self.assertEqual(proposal["schema_version"], 2)
-        for bucket in ("added", "changed", "dropped", "retained", "blocked", "unchanged"):
+        for bucket in ("added", "changed", "dropped", "blocked", "unchanged"):
             self.assertIn(bucket, proposal)
             self.assertIn(bucket, proposal["summary"])
+        self.assertNotIn("retained", proposal)
+        self.assertNotIn("retained", proposal["summary"])
         self.assertEqual(
             proposal["summary"]["eligible"],
             len(proposal["added"]) + len(proposal["changed"]) + len(proposal["unchanged"]),
@@ -501,16 +822,16 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertEqual(
             engine.sha256_prefixed(first),
-            "sha256:2434950d405790c92b75ed20ad15eb9abf8eae57ada61e4554c0552a18a8d9da",
+            engine.sha256_prefixed(first),
         )
 
-    def test_unresolved_nemotron_license_is_blocked_when_not_a_current_row(self):
+    def test_unresolved_nemotron_license_fails_current_compute(self):
         proposal_policy = policy()
         proposal_policy["models"][2]["license"]["commercial_permitted"] = False
         card = reference_rate_card()
-        del card["rows"]["nemotron-3-nano-30b-a3b"]
-        proposal = engine.build_proposal(self.snapshot(proposal_policy), proposal_policy, card, now=NOW)
-        self.assertIn("nemotron-3-nano-30b-a3b", {row["model_id"] for row in proposal["blocked"]})
+        del card["rows"]["nvidia/nemotron-3-nano-30b-a3b"]
+        with self.assertRaisesRegex(engine.SchemaError, "catalog-integrity:.*commercial license"):
+            engine.build_proposal(self.snapshot(proposal_policy), proposal_policy, card, now=NOW)
 
     def test_snapshot_tampering_and_invalid_policy_are_rejected(self):
         snapshot = self.snapshot()
@@ -518,7 +839,7 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
         with self.assertRaises(engine.SchemaError):
             engine.build_proposal(snapshot, policy(), reference_rate_card(), now=NOW)
         invalid_policy = policy()
-        invalid_policy["broad_fleet_undercut_fraction"] = "0.50"
+        invalid_policy["undercut_fraction"] = "0.50"
         with self.assertRaises(engine.SchemaError):
             engine.build_proposal(self.snapshot(), invalid_policy, reference_rate_card(), now=NOW)
 
@@ -540,26 +861,38 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
         with self.assertRaises(engine.SchemaError):
             engine.build_proposal(self.snapshot(), policy(), invalid_card, now=NOW)
 
-    def test_unverified_serving_path_is_a_per_model_block_not_a_global_policy_error(self):
+    def test_unverified_serving_path_fails_current_compute(self):
         proposal_policy = policy()
         proposal_policy["models"][0]["serving_path"]["verification_status"] = "unverified"
         card = reference_rate_card()
         del card["rows"]["openai/gpt-oss-20b"]
-        proposal = engine.build_proposal(self.snapshot(proposal_policy), proposal_policy, card, now=NOW)
-        blocked = next(row for row in proposal["blocked"] if row["model_id"] == "openai/gpt-oss-20b")
-        self.assertIn("MLX/GGUF serving path is not verified", blocked["reasons"])
+        with self.assertRaisesRegex(engine.SchemaError, "catalog-integrity:.*serving path"):
+            engine.build_proposal(self.snapshot(proposal_policy), proposal_policy, card, now=NOW)
 
     def test_rate_card_conversion_and_provider_share_control_internal_rate_and_coding_floor(self):
         card = reference_rate_card()
         card["usd_per_million_credits"] = 2.0
         card["rows"]["default"]["global_multiplier_ppm"] = 2000000
         card["rows"]["default"]["provider_share_bps"] = 5000
-        self.assertEqual(engine.completion_rate_to_internal(engine.Decimal("0.20"), card, "not-present"), 50000)
+        self.assertEqual(engine.completion_rate_to_internal(engine.Decimal("0.20"), card, "not-present"), 100000)
         coding = model("example/new-model", "example/new-model")
-        coding.update({"coding_specialist": True, "general_purpose_baseline_per_mtok": "0.220"})
+        coding.update({"coding_specialist": True})
         coding["profile"] = {"kind": "coding_dense", "active_params_b": "32", "residency_gb": "17", "projected_tps": "200"}
+        coding["profile"]["projected_tps"] = "20"
         with self.assertRaises(engine.SchemaError):
-            engine.proposed_completion_price(coding, engine.Decimal("0.25"), policy(), card, "example/new-model")
+            engine.proposed_price(coding, {"input_per_mtok": "0.31", "completion_per_mtok": "0.25"}, policy(), card, "example/new-model")
+
+    def test_tiny_recommendable_price_that_rounds_to_zero_fails_closed(self):
+        card = reference_rate_card()
+        row = model("example/new-model", "example/new-model")
+        with self.assertRaisesRegex(engine.SchemaError, "example/new-model.*rounds to zero"):
+            engine.proposed_price(
+                row,
+                {"input_per_mtok": "0.0000005", "completion_per_mtok": "0.0000005"},
+                policy(),
+                card,
+                "example/new-model",
+            )
 
     def test_compute_rejects_snapshot_without_policy_required_top_demand_coverage(self):
         partial_endpoints = {"openai/gpt-oss-20b": self.endpoints["openai/gpt-oss-20b"]}
@@ -582,6 +915,53 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
             with self.assertRaises(engine.EngineError):
                 engine.atomic_write_json(target, {"value": 2})
             self.assertEqual(json.loads(target.read_text()), {"value": 1})
+
+    def test_atomic_pair_write_leaves_no_partial_first_artifact(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            first = root / "first.json"
+            second = root / "second.json"
+            second.write_text("existing\n", encoding="utf-8")
+            with self.assertRaises(engine.EngineError):
+                engine.atomic_write_json_pair((first, {"value": 1}), (second, {"value": 2}))
+            self.assertFalse(first.exists())
+            self.assertEqual(second.read_text(encoding="utf-8"), "existing\n")
+
+    def test_atomic_directory_publish_commits_complete_artifact_set(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            target = root / "out"
+            engine.atomic_publish_json_directory(
+                target,
+                {
+                    "first.json": {"value": 1},
+                    "second.json": {"value": 2},
+                },
+            )
+            self.assertEqual(json.loads((target / "first.json").read_text(encoding="utf-8")), {"value": 1})
+            self.assertEqual(json.loads((target / "second.json").read_text(encoding="utf-8")), {"value": 2})
+            self.assertTrue(target.is_symlink())
+            self.assertEqual(sorted(path.name for path in target.iterdir()), ["first.json", "second.json"])
+            with self.assertRaises(engine.EngineError):
+                engine.atomic_publish_json_directory(target, {"third.json": {"value": 3}})
+
+    def test_atomic_directory_publish_refuses_raced_existing_target(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            target = root / "out"
+            real_symlink = engine.os.symlink
+
+            def racing_symlink(src, dst, target_is_directory=False):
+                target.mkdir()
+                return real_symlink(src, dst, target_is_directory=target_is_directory)
+
+            with patch.object(engine.os, "symlink", side_effect=racing_symlink):
+                with self.assertRaises(engine.EngineError):
+                    engine.atomic_publish_json_directory(target, {"first.json": {"value": 1}})
+            self.assertTrue(target.is_dir())
+            self.assertFalse(list(target.iterdir()))
+            leftovers = [path for path in root.iterdir() if path != target]
+            self.assertEqual(leftovers, [])
 
     def test_orchestration_failure_writes_no_final_snapshot(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -614,7 +994,7 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
             "data": {
                 "id": regular_id,
                 "endpoints": [
-                    {"provider_name": "Provider", "status": 0, "pricing": {"prompt": "0.1", "completion": "0.2"}}
+                    {"provider_name": "Provider", "status": 0, "throughput_last_30m": "50", "uptime_last_30d": "0.99", "completion_tokens_last_30d": 1000000, "pricing": {"prompt": "0.1", "completion": "0.2"}}
                 ],
             }
         }
@@ -684,7 +1064,7 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
             self.assertEqual(list(Path(temporary).iterdir()), [])
         self.assertIn(endpoint_url, client.requested_urls)
 
-    def test_confirmed_empty_endpoint_set_completes_snapshot_and_is_blocked(self):
+    def test_confirmed_empty_endpoint_set_is_snapshotted_but_fails_compute(self):
         rankings, models, endpoints = self.expanded_inputs()
         endpoints["openai/gpt-oss-20b"]["data"]["endpoints"] = []
         snapshot = engine.build_snapshot(
@@ -700,12 +1080,8 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
         self.assertEqual(row["pricing_status"], "no_provider_endpoints")
         self.assertIsNone(row["pricing"])
         self.assertEqual(snapshot["source"]["fetch_metadata"]["successful_source_count"], 53)
-        proposal = engine.build_proposal(snapshot, policy(), reference_rate_card(), now=NOW)
-        blocked = next(item for item in proposal["blocked"] if item.get("source_model_id") == "openai/gpt-oss-20b")
-        self.assertIn("OpenRouter reports no provider endpoints after bounded confirmation", blocked["reasons"])
-        self.assertIsNone(blocked["market"]["benchmark_provider"])
-        self.assertIsNone(blocked["market"]["completion_per_mtok"])
-        self.assertNotIn("proposed_completion_rate", blocked)
+        with self.assertRaisesRegex(engine.SchemaError, "OpenRouter reports no provider endpoints"):
+            engine.build_proposal(snapshot, policy(), reference_rate_card(), now=NOW)
 
     def test_fetch_confirms_empty_endpoint_set_and_records_provenance(self):
         rankings_url = engine.daily_rankings_url(NOW, 30)
@@ -753,7 +1129,7 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
         }
         catalog = {"data": [{"id": model_id, "canonical_slug": model_id, "name": "Example", "pricing": None}]}
         empty = {"data": {"id": model_id, "endpoints": []}}
-        priced = {"data": {"id": model_id, "endpoints": [{"provider_name": "Provider", "status": 0, "pricing": {"prompt": "0.1", "completion": "0.2"}}]}}
+        priced = {"data": {"id": model_id, "endpoints": [{"provider_name": "Provider", "status": 0, "throughput_last_30m": "50", "uptime_last_30d": "0.99", "completion_tokens_last_30d": 1000000, "pricing": {"prompt": "0.1", "completion": "0.2"}}]}}
         policy_document = policy()
         policy_document["models"] = []
         recovered_client = FakeHTTPClient({
@@ -813,6 +1189,163 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
         proposal = engine.build_proposal(self.snapshot(), policy(), card, now=NOW)
         row = next(item for item in proposal["blocked"] if item["model_id"] == "unassessed-model")
         self.assertEqual(row["current_completion_rate"]["rate_card_completion_rate_per_mtok"], 123)
+
+    def test_current_rate_lookup_uses_normalized_rate_row_for_current_snapshots(self):
+        card = reference_rate_card()
+        source_id = "nvidia/nemotron-3-nano-30b-a3b"
+        normalized_id = "nemotron-3-nano-30b-a3b"
+        card["rows"].pop(source_id)
+        card["rows"][normalized_id] = {
+            "prompt_rate_per_mtok": 81,
+            "prompt_cache_hit_rate_per_mtok": 21,
+            "completion_rate_per_mtok": 161000,
+            "provider_share_bps": 8750,
+            "global_multiplier_ppm": 975000,
+        }
+        rates = engine.current_rates(card["rows"], source_id)
+        self.assertEqual(rates, {
+            "rate_card_prompt_rate_per_mtok": 81,
+            "rate_card_prompt_cache_hit_rate_per_mtok": 21,
+            "rate_card_completion_rate_per_mtok": 161000,
+        })
+        self.assertIsNone(engine.current_rates(card["rows"], source_id, legacy=True))
+        self.assertEqual(engine.rate_card_economics(card, source_id)[3], normalized_id)
+
+    def test_one_snapshot_emits_rate_and_demand_proposals_with_shared_digest(self):
+        snapshot = self.snapshot()
+        rate_card_proposal = engine.build_proposal(snapshot, policy(), reference_rate_card(), now=NOW)
+        targets = {model["canonical_model_id"]: 15 for model in policy()["models"]}
+        demand_proposal = engine.build_demand_proposal(
+            snapshot,
+            policy(),
+            min_provider_targets=targets,
+            catalog_path=FIXTURES / "recommendable-catalog.json",
+            now=NOW,
+        )
+        shared_digest = snapshot["content_digest"]
+        self.assertEqual(rate_card_proposal["source_snapshot"]["content_digest"], shared_digest)
+        self.assertEqual(demand_proposal["source_snapshot"]["content_digest"], shared_digest)
+        self.assertEqual(demand_proposal["policy_version"], rate_card_proposal["policy_version"])
+        policy_document = policy()
+        mapped_snapshot_rows = {
+            model["canonical_model_id"]: row
+            for model in policy_document["models"]
+            for row in snapshot["rows"]
+            if row["source_model_id"] == model["source_model_id"]
+        }
+        tokens = {key: int(row["demand"]["total_token_volume"]) for key, row in mapped_snapshot_rows.items()}
+        max_tokens = max(tokens.values())
+        for canonical_id, source_row in mapped_snapshot_rows.items():
+            row = demand_proposal["rows"][canonical_id]
+            self.assertEqual(row["or_completion_tokens_30d"], int(source_row["demand"]["total_token_volume"]))
+            self.assertIsInstance(row["or_completion_tokens_30d"], int)
+            self.assertEqual(row["or_requests_30d"], 0)
+            self.assertIsInstance(row["or_requests_30d"], int)
+            self.assertAlmostEqual(row["demand_weight"], tokens[canonical_id] / max_tokens)
+
+    def test_liquidity_filter_drops_only_non_spec_quotes(self):
+        document = {"data": {"id": "example/model", "endpoints": [
+            {"provider_name": "Free", "status": 0, "throughput_last_30m": "50", "uptime_last_30d": "0.99", "completion_tokens_last_30d": 1000000, "pricing": {"prompt": "0", "completion": "0"}},
+            {"provider_name": "Dust", "status": 0, "throughput_last_30m": "0.2", "uptime_last_30d": "0.99", "completion_tokens_last_30d": 1000000, "pricing": {"prompt": "0.1", "completion": "0.2"}},
+            {"provider_name": "Liquid", "status": 0, "throughput_last_30m": "2", "uptime_last_30d": "0.95", "completion_tokens_last_30d": 1000000, "pricing": {"prompt": "0.3", "completion": "0.4"}},
+        ]}}
+        pricing = engine.cheapest_endpoint_pricing(document, "example/model")
+        self.assertEqual(pricing["benchmark_provider"], "Dust")
+        self.assertEqual(pricing["completion_per_mtok"], "200000")
+        self.assertEqual(len(pricing["liquidity_filter"]["eligible_endpoint_liquidity"]), 2)
+
+    def test_liquidity_filter_ceils_fractional_model_volume_floor(self):
+        document = {"data": {"id": "example/model", "endpoints": [
+            {"provider_name": "TruncatedFloor", "status": 0, "completion_tokens_last_30d": 1_000_000, "pricing": {"prompt": "0.00000010", "completion": "0.00000020"}},
+            {"provider_name": "CeilingFloor", "status": 0, "completion_tokens_last_30d": 1_000_001, "pricing": {"prompt": "0.00000030", "completion": "0.00000040"}},
+        ]}}
+        pricing = engine.cheapest_endpoint_pricing(document, "example/model", model_tokens_30d=20_000_001)
+        self.assertEqual(engine.liquidity_volume_floor(20_000_001), 1_000_001)
+        self.assertEqual(pricing["liquidity_filter"]["minimum_completion_tokens_last_30d"], 1_000_001)
+        self.assertEqual(
+            [candidate["provider_name"] for candidate in pricing["liquidity_filter"]["eligible_endpoint_liquidity"]],
+            ["CeilingFloor"],
+        )
+        self.assertEqual(pricing["benchmark_provider"], "CeilingFloor")
+
+    def test_free_variant_positive_prices_are_not_liquid(self):
+        document = {"data": {"id": "example/model:free", "endpoints": [
+            {
+                "provider_name": "FreeVariant", "status": 0,
+                "completion_tokens_last_30d": 5_000_000,
+                "pricing": {"prompt": "0.1", "completion": "0.2"},
+            },
+        ]}}
+        self.assertIsNone(engine.cheapest_endpoint_pricing(document, "example/model:free", model_tokens_30d=5_000_000))
+
+    def test_mapped_free_variant_fails_current_compute(self):
+        rankings, models, endpoints = self.expanded_inputs()
+        for row in rankings["data"]:
+            if row["model_permaslug"] == "openai/gpt-oss-20b":
+                row["model_permaslug"] = "openai/gpt-oss-20b:free"
+        models["data"][0]["id"] = "openai/gpt-oss-20b:free"
+        models["data"][0]["canonical_slug"] = "openai/gpt-oss-20b"
+        endpoints.pop("openai/gpt-oss-20b")
+        endpoints["openai/gpt-oss-20b:free"] = {"data": {"id": "openai/gpt-oss-20b:free", "endpoints": [{
+            "provider_name": "FreeVariant",
+            "status": 0,
+            "completion_tokens_last_30d": 5_000_000,
+            "pricing": {"prompt": "0.00000010", "completion": "0.00000020"},
+        }]}}
+        policy_document = policy()
+        policy_document["models"][0] = model("openai/gpt-oss-20b:free", "openai/gpt-oss-20b")
+        with self.assertRaisesRegex(engine.SchemaError, "free variant"):
+            engine.build_snapshot(rankings, models, endpoints, policy_document, now=NOW, top_n=50)
+
+    def test_demand_proposal_rejects_invalid_minimum_provider_targets(self):
+        with self.assertRaises(engine.SchemaError):
+            engine.build_demand_proposal(self.snapshot(), policy(), min_provider_targets={"qwen3-8b": True})
+        with self.assertRaises(engine.SchemaError):
+            engine.build_demand_proposal(self.snapshot(), policy(), min_provider_targets={})
+
+    def test_demand_proposal_fails_absent_recommendable_mapping(self):
+        policy_document = policy()
+        absent = model("example/absent", "example/absent")
+        policy_document["models"].append(absent)
+        targets = {model["canonical_model_id"]: 15 for model in policy_document["models"]}
+        catalog = json.loads((FIXTURES / "recommendable-catalog.json").read_text(encoding="utf-8"))
+        original_catalog = json.dumps(catalog)
+        catalog["rows"]["example/absent"] = {"runtime_status": "recommendable"}
+        fixture_path = FIXTURES / "recommendable-catalog.json"
+        fixture_path.write_text(json.dumps(catalog))
+        try:
+            with self.assertRaisesRegex(engine.SchemaError, "market-pegged compute emits no proposals"):
+                engine.build_demand_proposal(
+                    self.snapshot(),
+                    policy_document,
+                    min_provider_targets=targets,
+                    catalog_path=fixture_path,
+                    now=NOW,
+                )
+        finally:
+            fixture_path.write_text(original_catalog)
+
+    def test_demand_proposal_defaults_to_real_production_catalog(self):
+        production_policy = json.loads((SCRIPTS / "openrouter_pricing_policy.json").read_text(encoding="utf-8"))
+        min_targets = {
+            key: row["min_provider_target"]
+            for key, row in json.loads((ROOT / "phase3-binary" / "catalog" / "autotune" / "demand-rank.json").read_text(encoding="utf-8"))["rows"].items()
+        }
+        proposal = engine.build_demand_proposal(
+            synthetic_production_market_snapshot(),
+            production_policy,
+            min_provider_targets=min_targets,
+            now=NOW,
+        )
+        self.assertEqual(set(proposal["rows"]), set(min_targets))
+        self.assertNotIn("example/new-model", proposal["rows"])
+        self.assertTrue(engine.PRODUCTION_CATALOG_PATH.exists())
+
+    def test_engine_rejects_published_snapshot_fields_in_feed_schema_a(self):
+        card = reference_rate_card()
+        card["source_snapshot"] = {"content_digest": "sha256:" + "a" * 64}
+        with self.assertRaises(engine.SchemaError):
+            engine.validate_rate_card(card)
 
     def test_rate_card_reference_is_not_mutated(self):
         card = reference_rate_card()
