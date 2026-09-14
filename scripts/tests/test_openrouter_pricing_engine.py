@@ -179,6 +179,27 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
         self.assertEqual(first["rows"][2]["canonical_model_id"], "google-gemma-4-26b-a4b-it")
         engine.validate_snapshot(first)
 
+    def test_prompt_and_completion_medians_may_come_from_different_endpoints(self):
+        rankings, models, endpoints = self.expanded_inputs()
+        endpoints["openai/gpt-oss-20b"]["data"]["endpoints"] = [
+            {
+                "provider_name": "A", "status": 0, "throughput_last_30m": "10",
+                "uptime_last_30d": "0.99", "completion_tokens_last_30d": 5_000_000,
+                "pricing": {"prompt": "0.00000090", "completion": "0.00000030"},
+            },
+            {
+                "provider_name": "B", "status": 0, "throughput_last_30m": "10",
+                "uptime_last_30d": "0.99", "completion_tokens_last_30d": 4_000_000,
+                "pricing": {"prompt": "0.00000050", "completion": "0.00000010"},
+            },
+        ]
+        snapshot = engine.build_snapshot(rankings, models, endpoints, policy(), now=NOW, top_n=50)
+        pricing = next(row["pricing"] for row in snapshot["rows"] if row["source_model_id"] == "openai/gpt-oss-20b")
+        self.assertEqual(pricing["completion_per_mtok"], "0.3")
+        self.assertEqual(pricing["input_per_mtok"], "0.9")
+        self.assertEqual(pricing["benchmark_provider"], "A")
+        self.assertEqual(pricing["liquidity_filter"]["completion_tokens_last_30d"], 5_000_000)
+
     def test_prompt_and_completion_are_independent_volume_weighted_medians(self):
         rankings, models, endpoints = self.expanded_inputs()
         endpoints["openai/gpt-oss-20b"]["data"]["endpoints"] = [
@@ -463,7 +484,7 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
 
     def test_snapshot_liquidity_filter_tampering_is_rejected(self):
         snapshot = self.snapshot()
-        snapshot["rows"][0]["pricing"]["liquidity_filter"]["minimum_uptime_last_30d"] = "0.10"
+        snapshot["rows"][0]["pricing"]["liquidity_filter"]["volume_weighted_median"] = False
         snapshot["content_digest"] = engine.sha256_prefixed(engine.snapshot_digest_payload(snapshot))
         with self.assertRaises(engine.SchemaError):
             engine.validate_snapshot(snapshot)
@@ -563,6 +584,12 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
         del card["rows"]["nvidia/nemotron-3-nano-30b-a3b"]
         proposal = engine.build_proposal(self.snapshot(proposal_policy), proposal_policy, card, now=NOW)
         self.assertIn("nvidia/nemotron-3-nano-30b-a3b", {row["model_id"] for row in proposal["blocked"]})
+
+    def test_zero_credit_recommendable_rate_fails_closed(self):
+        card = reference_rate_card()
+        card["usd_per_million_credits"] = 1000000000.0
+        with self.assertRaisesRegex(engine.SchemaError, "credits round to zero"):
+            engine.build_proposal(self.snapshot(), policy(), card, now=NOW)
 
     def test_snapshot_tampering_and_invalid_policy_are_rejected(self):
         snapshot = self.snapshot()
@@ -889,15 +916,15 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
             self.assertIsInstance(row["or_requests_30d"], int)
             self.assertAlmostEqual(row["demand_weight"], tokens[canonical_id] / max_tokens)
 
-    def test_liquidity_filter_drops_free_dust_and_unreliable_quotes(self):
+    def test_liquidity_filter_drops_free_and_zero_volume_quotes(self):
         document = {"data": {"id": "example/model", "endpoints": [
             {"provider_name": "Free", "status": 0, "throughput_last_30m": "50", "uptime_last_30d": "0.99", "completion_tokens_last_30d": 1000000, "pricing": {"prompt": "0", "completion": "0"}},
-            {"provider_name": "Dust", "status": 0, "throughput_last_30m": "0.2", "uptime_last_30d": "0.99", "completion_tokens_last_30d": 1000000, "pricing": {"prompt": "0.1", "completion": "0.2"}},
+            {"provider_name": "Dust", "status": 0, "throughput_last_30m": "0.2", "uptime_last_30d": "0.91", "completion_tokens_last_30d": 999999, "pricing": {"prompt": "0.1", "completion": "0.2"}},
             {"provider_name": "Liquid", "status": 0, "throughput_last_30m": "2", "uptime_last_30d": "0.95", "completion_tokens_last_30d": 1000000, "pricing": {"prompt": "0.3", "completion": "0.4"}},
         ]}}
         pricing = engine.cheapest_endpoint_pricing(document, "example/model")
         self.assertEqual(pricing["benchmark_provider"], "Liquid")
-        self.assertEqual(pricing["liquidity_filter"]["minimum_throughput_last_30m"], "1")
+        self.assertEqual(len(pricing["liquidity_filter"]["eligible_endpoint_liquidity"]), 1)
 
     def test_demand_proposal_rejects_invalid_minimum_provider_targets(self):
         with self.assertRaises(engine.SchemaError):

@@ -1832,6 +1832,7 @@ class HermeticRelease:
         "ARTIFACT_FEED_PATH": "catalog/autotune-artifacts.json",
         "ARTIFACT_SOURCE_PATH": "catalog/autotune-artifacts-source.json",
         "RATE_CARD_SOURCE_PATH": "catalog/rate-card-source.json",
+        "MARKET_PEG_BIND_PATH": "catalog/market-peg-bind.json",
         "INTAKE_DECISION_PATH": "catalog/intake-decision.json",
         "COORDINATOR_YAML_PATH": "coordinator.yaml",
         "SWIFT_GENERATED": "AutotuneCatalog.generated.swift",

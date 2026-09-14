@@ -18,6 +18,7 @@ import subprocess
 import sys
 import tempfile
 from datetime import datetime, timezone
+from decimal import Decimal
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -585,7 +586,7 @@ def openssl_executable() -> str:
         if not candidate or candidate in checked:
             continue
         checked.append(candidate)
-        if os.geteuid() == 0 and not root_trusted_executable(candidate):
+        if hasattr(os, "geteuid") and os.geteuid() == 0 and not root_trusted_executable(candidate):
             continue
         try:
             result = subprocess.run(
@@ -724,6 +725,38 @@ def validate_market_peg_bind(data: bytes) -> dict:
     return value
 
 
+def replay_snapshot_liquidity(snapshot: dict) -> None:
+    import openrouter_pricing_engine
+
+    for row in snapshot.get("rows", []):
+        if not isinstance(row, dict):
+            continue
+        source_model_id = row.get("source_model_id")
+        pricing = row.get("pricing")
+        liquidity = pricing.get("liquidity_filter") if isinstance(pricing, dict) else None
+        candidates = liquidity.get("eligible_endpoint_liquidity") if isinstance(liquidity, dict) else None
+        if not isinstance(candidates, list) or not candidates:
+            continue
+        priced = [
+            (
+                openrouter_pricing_engine.parse_decimal(candidate["completion_usd_per_mtok"], "replay completion price"),
+                openrouter_pricing_engine.parse_decimal(candidate["prompt_usd_per_mtok"], "replay prompt price"),
+                candidate["completion_tokens_last_30d"],
+            )
+            for candidate in candidates
+        ]
+        completion, _ = openrouter_pricing_engine.weighted_median(priced, 0)
+        prompt, _ = openrouter_pricing_engine.weighted_median(priced, 1)
+        if pricing.get("completion_per_mtok") != openrouter_pricing_engine.decimal_string(completion):
+            fail(f"market-peg: snapshot row {source_model_id!r} completion median does not replay from retained liquidity")
+        if pricing.get("input_per_mtok") != openrouter_pricing_engine.decimal_string(prompt):
+            fail(f"market-peg: snapshot row {source_model_id!r} prompt median does not replay from retained liquidity")
+        model_tokens = int(row.get("demand", {}).get("total_token_volume", "0"))
+        volume_floor = max(1_000_000, int(Decimal("0.05") * model_tokens))
+        if any(item[2] < volume_floor for item in priced):
+            fail(f"market-peg: snapshot row {source_model_id!r} retained endpoint fails the volume floor")
+
+
 def validate_market_peg(
     rate_proposal_path: pathlib.Path,
     demand_proposal_path: pathlib.Path,
@@ -752,11 +785,15 @@ def validate_market_peg(
         fail(f"market-peg input is not valid UTF-8 JSON: {error}")
     if not isinstance(snapshot, dict) or not isinstance(policy, dict) or not isinstance(rate_proposal, dict) or not isinstance(demand_proposal, dict):
         fail("market-peg inputs must be JSON objects")
+    replay_snapshot_liquidity(snapshot)
     if bind["content_digest"] != snapshot.get("content_digest"):
         fail("market-peg-bind: content_digest does not match the named snapshot")
     metadata = snapshot.get("source", {}).get("fetch_metadata", {}) if isinstance(snapshot.get("source"), dict) else {}
     if bind["ranking_window_end_date"] != metadata.get("ranking_window_end_date"):
         fail("market-peg-bind: ranking_window_end_date does not match the named snapshot")
+    release_now = datetime.now(timezone.utc)
+    if release_now.date() - datetime.strptime(bind["ranking_window_end_date"], "%Y-%m-%d").date() > _dt.timedelta(days=2):
+        fail("market-peg-bind: ranking window is older than 48 hours at release time")
     min_targets = {key: row["min_provider_target"] for key, row in demand_obj["rows"].items()}
     try:
         replayed_rate = openrouter_pricing_engine.build_proposal(

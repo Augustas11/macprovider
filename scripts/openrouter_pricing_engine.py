@@ -622,15 +622,17 @@ def cheapest_endpoint_pricing(document: Mapping[str, Any], model_id: str, *, mod
         except SchemaError:
             continue
         volume_floor = max(1_000_000, int(Decimal("0.05") * model_tokens_30d))
-        if status != 0 or prompt == 0 or completion == 0 or completion_tokens < volume_floor or throughput < Decimal("1") or uptime < Decimal("0.90"):
+        if status != 0 or prompt == 0 or completion == 0 or completion_tokens < volume_floor:
             continue
         priced.append((completion, prompt, throughput, uptime, provider, completion_tokens))
     if not priced:
         return None
     completion, _ = weighted_median(priced, 0)
-    prompt, selected_tokens = weighted_median(priced, 1)
-    selected = next(item for item in priced if item[0] == completion and item[1] == prompt and item[5] == selected_tokens)
-    _, _, throughput, uptime, provider, _ = selected
+    prompt, _ = weighted_median(priced, 1)
+    completion_endpoint = next(item for item in priced if item[0] == completion)
+    prompt_endpoint = next(item for item in priced if item[1] == prompt)
+    throughput, uptime, provider = completion_endpoint[2], completion_endpoint[3], completion_endpoint[4]
+    selected_tokens = prompt_endpoint[5]
     liquidity_candidates = [
         {
             "endpoint_status": status,
@@ -655,8 +657,6 @@ def cheapest_endpoint_pricing(document: Mapping[str, Any], model_id: str, *, mod
         "liquidity_filter": {
             "endpoint_status": 0,
             "paid_prices": True,
-            "minimum_throughput_last_30m": "1",
-            "minimum_uptime_last_30d": "0.90",
             "completion_tokens_last_30d": selected_tokens,
             "volume_weighted_median": True,
             "selected_throughput_last_30m": decimal_string(throughput),
@@ -760,10 +760,10 @@ def validate_snapshot(snapshot: Mapping[str, Any]) -> None:
             raise SchemaError(f"snapshot.rows[{index}] has invalid pricing provenance")
         if pricing_status == "active_priced" and schema_version != LEGACY_SNAPSHOT_SCHEMA_VERSION:
             liquidity = pricing.get("liquidity_filter")
-            required_liquidity = {"endpoint_status", "paid_prices", "minimum_throughput_last_30m", "minimum_uptime_last_30d", "completion_tokens_last_30d", "volume_weighted_median", "selected_throughput_last_30m", "selected_uptime_last_30d", "eligible_endpoint_liquidity"}
+            required_liquidity = {"endpoint_status", "paid_prices", "completion_tokens_last_30d", "volume_weighted_median", "selected_throughput_last_30m", "selected_uptime_last_30d", "eligible_endpoint_liquidity"}
             if not isinstance(liquidity, dict) or set(liquidity) != required_liquidity:
                 raise SchemaError(f"snapshot.rows[{index}] has invalid liquidity filter")
-            if liquidity["endpoint_status"] != 0 or liquidity["paid_prices"] is not True or liquidity["minimum_throughput_last_30m"] != "1" or liquidity["minimum_uptime_last_30d"] != "0.90" or liquidity["volume_weighted_median"] is not True:
+            if liquidity["endpoint_status"] != 0 or liquidity["paid_prices"] is not True or liquidity["volume_weighted_median"] is not True:
                 raise SchemaError(f"snapshot.rows[{index}] liquidity filter does not match the policy thresholds")
             try:
                 selected_throughput = Decimal(liquidity["selected_throughput_last_30m"])
@@ -1228,6 +1228,8 @@ def proposed_price(
     target_prompt = market_prompt * (Decimal("1") - undercut)
     completion_internal = internal_rate(target, rate_card, model_id)
     prompt_internal = internal_rate(target_prompt, rate_card, model_id)
+    if completion_internal == 0 or prompt_internal == 0:
+        raise SchemaError(f"rate card row {model_id!r} prompt/completion credits round to zero")
     cache_hit_fraction = parse_decimal(policy.get("cache_hit_fraction", "0.25"), "policy cache_hit_fraction", allow_zero=True)
     cache_hit_internal = int((prompt_internal * cache_hit_fraction).to_integral_value(rounding=ROUND_FLOOR))
     if cache_hit_internal == 0 and cache_hit_fraction > 0:
