@@ -105,6 +105,19 @@ func (q *slotQueue) blocksProvider(providerID string, slotsFree int) bool {
 	return len(q.queues[providerID])+q.reserved[providerID] >= slotsFree
 }
 
+func (q *slotQueue) reserveProvider(providerID string, slotsFree int) bool {
+	if providerID == "" || slotsFree <= 0 {
+		return false
+	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if len(q.queues[providerID])+q.reserved[providerID] >= slotsFree {
+		return false
+	}
+	q.reserved[providerID]++
+	return true
+}
+
 func (q *slotQueue) reserveHead(waiter *slotWaiter, slotsFree int) bool {
 	if waiter == nil {
 		return false

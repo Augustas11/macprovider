@@ -116,8 +116,15 @@ func (m *Mux) Handler() http.Handler {
 	return with
 }
 
+func (m *Mux) now() time.Time {
+	if m != nil && m.h != nil {
+		return m.h.nowFn()
+	}
+	return time.Now().UTC()
+}
+
 func (m *Mux) dispatch(w http.ResponseWriter, r *http.Request) {
-	now := time.Now().UTC()
+	now := m.now()
 
 	// SPEC-017 §5.2b.7: a disabled intake endpoint does not exist for any
 	// method — OPTIONS included — so the check precedes the preflight
