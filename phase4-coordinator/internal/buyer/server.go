@@ -6004,10 +6004,6 @@ func hasPinnedRoute(headers http.Header) bool {
 	return headers.Get("X-MacProvider-Provider") != "" || headers.Get("X-MacProvider-Session") != ""
 }
 
-func wholesaleSkipQueue(headers http.Header) bool {
-	return strings.TrimSpace(headers.Get("X-MacProvider-Internal-Wholesale")) == "1"
-}
-
 func (s *Server) logWSDeadMidRequest(originalRequestID, requestID, externalRequestID string, provider pool.Provider, action, targetProviderID string) {
 	s.log.Warn().
 		Str("event", "ws_dead_mid_request").
@@ -6187,7 +6183,7 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 	result := routing.EligibleCandidates(providers, exSet, pool.Provider.SortKey, checker)
 	candidates := result.Eligible
 	queuedCandidates := []pool.Provider(nil)
-	queueEligible := !hasPinnedRoute(headers) && !wholesaleSkipQueue(headers)
+	queueEligible := !hasPinnedRoute(headers)
 	if queueEligible && len(candidates) > 0 {
 		var normalCandidates []pool.Provider
 		normalCandidates, queuedCandidates = s.splitQueuedCandidates(candidates)

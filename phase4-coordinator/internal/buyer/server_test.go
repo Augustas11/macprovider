@@ -8112,7 +8112,7 @@ func TestSlotQueueDoesNotApplyToHardPinnedProvider(t *testing.T) {
 	assertOpenAIErrorEnvelope(t, rr, "no_provider_available", "service_unavailable")
 }
 
-func TestSlotQueueDoesNotApplyToWholesalePartner(t *testing.T) {
+func TestSlotQueueAppliesToWholesalePartner(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Fatal("upstream should not receive wholesale busy request")
 	}))
@@ -8139,8 +8139,8 @@ func TestSlotQueueDoesNotApplyToWholesalePartner(t *testing.T) {
 	if rr.Code != http.StatusServiceUnavailable {
 		t.Fatalf("wholesale busy request status = %d, want 503 body=%s", rr.Code, rr.Body.String())
 	}
-	if elapsed := time.Since(start); elapsed > 50*time.Millisecond {
-		t.Fatalf("wholesale busy request waited %v; partner traffic should not enter slot queue", elapsed)
+	if elapsed := time.Since(start); elapsed < 80*time.Millisecond {
+		t.Fatalf("wholesale busy request returned before bounded slot queue deadline: elapsed=%v", elapsed)
 	}
 	assertOpenAIErrorEnvelope(t, rr, "no_provider_available", "service_unavailable")
 }
