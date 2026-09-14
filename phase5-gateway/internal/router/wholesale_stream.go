@@ -64,6 +64,11 @@ func (s *wholesaleStreamWriter) writeKeepalive() bool {
 
 func startWholesaleKeepalives(ctxDone <-chan struct{}, wrap *wholesaleStreamWriter) func() {
 	done := make(chan struct{})
+	if !wrap.writeKeepalive() {
+		return func() {
+			wrap.stopKeepalives()
+		}
+	}
 	go func() {
 		ticker := time.NewTicker(wholesaleKeepaliveInterval)
 		defer ticker.Stop()

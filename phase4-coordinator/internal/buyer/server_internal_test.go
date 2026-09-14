@@ -2,16 +2,21 @@ package buyer
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/augstar/macprovider-coordinator/internal/billing"
 	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
 	providerws "github.com/augstar/macprovider-coordinator/internal/ws"
+	"github.com/rs/zerolog"
 )
 
 func TestValidatePinnedProviderAcceptsCatalogKeyAlias(t *testing.T) {
@@ -37,6 +42,49 @@ func TestValidatePinnedProviderAcceptsCatalogKeyAlias(t *testing.T) {
 	}
 	if _, routeErr := validatePinnedProvider(p, "openai/gpt-oss-120b", 10, "Pinned provider not available"); routeErr == nil {
 		t.Fatal("unrelated catalog key must not satisfy pinned provider model match")
+	}
+}
+
+func TestWriteRouteSnapshotErrorShedsTransientStorePressure(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		err        error
+		wantStatus int
+		wantCode   string
+	}{
+		{
+			name:       "deadline",
+			err:        fmt.Errorf("insert route snapshot: %w", context.DeadlineExceeded),
+			wantStatus: http.StatusServiceUnavailable,
+			wantCode:   "no_provider_available",
+		},
+		{
+			name:       "billing_store_pressure",
+			err:        fmt.Errorf("insert route snapshot: %w", billing.ErrRouteSnapshotStorePressure),
+			wantStatus: http.StatusServiceUnavailable,
+			wantCode:   "no_provider_available",
+		},
+		{
+			name:       "semantic_integrity_error",
+			err:        errors.New("tier2 catalog does not match signed admission row"),
+			wantStatus: http.StatusInternalServerError,
+			wantCode:   "route_snapshot_failed",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := &Server{log: zerolog.Nop()}
+			rec := &billingRecorder{server: server, requestID: "req-route-snapshot-test"}
+			rr := httptest.NewRecorder()
+
+			writeRouteSnapshotError(rr, rec, tc.err)
+
+			if rr.Code != tc.wantStatus {
+				t.Fatalf("status=%d body=%s, want %d", rr.Code, rr.Body.String(), tc.wantStatus)
+			}
+			if !strings.Contains(rr.Body.String(), `"`+tc.wantCode+`"`) {
+				t.Fatalf("body=%s, want code %s", rr.Body.String(), tc.wantCode)
+			}
+		})
 	}
 }
 
