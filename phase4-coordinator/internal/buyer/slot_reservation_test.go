@@ -67,6 +67,32 @@ func TestSelectProviderReservationsShedAfterAllSlotsTaken(t *testing.T) {
 	}
 }
 
+func TestReservedSlotOverflowShedsWithoutQueueWait(t *testing.T) {
+	s, registry, _ := poolIsolationServer(t)
+	provider := poolProvider("p-one")
+	registry.Register(&provider, nil)
+	s.slotQueueDeadline = 100 * time.Millisecond
+	s.slotQueuePollInterval = time.Millisecond
+
+	state1 := &forwardState{slotReservationsEnabled: true}
+	if _, routeErr := s.selectProviderExcluding(context.Background(), "rid-1", poolChatReq(""), http.Header{}, nil, "2026-09-14", state1); routeErr != nil {
+		t.Fatalf("first selection rejected: %+v", routeErr)
+	}
+
+	state2 := &forwardState{slotReservationsEnabled: true}
+	started := time.Now()
+	_, routeErr := s.selectProviderExcluding(context.Background(), "rid-2", poolChatReq(""), http.Header{}, nil, "2026-09-14", state2)
+	if routeErr == nil || routeErr.status != http.StatusServiceUnavailable || routeErr.code != "no_provider_available" {
+		t.Fatalf("overflow selection with reserved slot: want 503 no_provider_available, got %+v", routeErr)
+	}
+	if state2.queueWait != 0 {
+		t.Fatalf("overflow selection queueWait=%s, want 0", state2.queueWait)
+	}
+	if elapsed := time.Since(started); elapsed >= s.slotQueueDeadline/2 {
+		t.Fatalf("overflow selection waited %s; local reservation overflow should shed without queueing", elapsed)
+	}
+}
+
 func TestSelectProviderReleasesDirectSlotOnPreflightReject(t *testing.T) {
 	s, registry, _ := poolIsolationServer(t)
 	provider := poolProvider("p-one")

@@ -99,8 +99,11 @@ blocker and the signed-pair release blocker. Publish a runtime-only Pearl
 release from the exact reviewed source as a GitHub prerelease/non-latest
 runtime bundle, run
 `macprovider-pearl-update --plan --tag vX.Y.Z`, then
-`macprovider-pearl-update --apply --tag vX.Y.Z` with the buyer canary gate
-reviewed/enabled and `PEARL_UPDATER_BUYER_CANARY_MODE=required`. After the
+`macprovider-pearl-update --apply --tag vX.Y.Z`. When the buyer canary has
+been retired, seal Pearl in the disabled posture first and set
+`PEARL_UPDATER_BUYER_CANARY_MODE=disabled`; the runtime-only lane then relies
+on public identity, live runtime binding, the configured ready-provider floor,
+and hard-disabled posture checks. After the
 signed coordinator/gateway pair is live, retry the direct deploy with
 `CONFIG_MODE=preserve-live` so the reviewed config classification is preserved
 without smuggling runtime or catalog changes through the deploy script.

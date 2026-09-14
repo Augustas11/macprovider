@@ -5185,6 +5185,7 @@ class Updater:
         identity: RuntimeIdentity,
         *,
         legacy_rollback_version: str | None = None,
+        disabled_replacement_gates: str | None = None,
     ) -> None:
         self.wait_for(
             "provider reconnect and warmup",
@@ -5211,7 +5212,7 @@ class Updater:
                     "buyer_canary_gate",
                     "skipped",
                     mode=BUYER_CANARY_MODE_DISABLED,
-                    replacement_gates=(
+                    replacement_gates=disabled_replacement_gates or (
                         "public_identity,"
                         "exact_catalog_admission,"
                         "exact_provider_canary"
@@ -5291,10 +5292,6 @@ class Updater:
     def verify_runtime_only_buyer_canary_policy(self, release: Release) -> None:
         if release.catalog is None and self.config.buyer_canary_mode not in BUYER_CANARY_MODES:
             raise UpdateError("runtime-only Pearl release requires an explicit buyer canary mode")
-        if release.catalog is None and self.config.buyer_canary_mode == BUYER_CANARY_MODE_DISABLED:
-            raise UpdateError(
-                "runtime-only Pearl release requires buyer canary mode required"
-            )
 
     def verify_rollout(self, release: Release) -> None:
         self.verify_runtime_only_buyer_canary_policy(release)
@@ -5317,7 +5314,16 @@ class Updater:
         self.wait_for("gateway health/version", self.config.service_health_timeout_s, lambda: self.local_gateway_ready(release))
         self.verify_live_runtime_binding(release)
         self.restore_auxiliary_services()
-        self.prove_serving_recovery(self.release_identity(release))
+        if release.catalog is None:
+            self.prove_serving_recovery(
+                self.release_identity(release),
+                disabled_replacement_gates=(
+                    "public_identity,live_runtime_binding,ready_provider_floor,"
+                    "hard_disabled_buyer_canary_posture"
+                ),
+            )
+        else:
+            self.prove_serving_recovery(self.release_identity(release))
         if release.catalog is not None:
             self.verify_provider_admission_rollout_policy()
             self.verify_exact_catalog_admission(release)
@@ -5525,6 +5531,52 @@ class Updater:
             rollback_completed_steps=completed,
             pending_action=None,
         )
+
+    def _runtime_only_rollback_can_adopt_disabled_canary_mode(
+        self,
+        payload: dict[str, Any],
+        recovered_phase: str,
+    ) -> bool:
+        if self.config.buyer_canary_mode != BUYER_CANARY_MODE_DISABLED:
+            return False
+        if payload.get("rollback_in_progress") is not True:
+            return False
+        if not (
+            recovered_phase.startswith("rollback_")
+            or recovered_phase == "reconciliation_started"
+        ):
+            return False
+        release = payload.get("release")
+        if not isinstance(release, dict):
+            return False
+        if release.get("release_lane") != RELEASE_LANE_RUNTIME:
+            return False
+        return not any(
+            key in release
+            for key in ("catalog_release_id", "catalog_policy_version", "catalog_files")
+        )
+
+    def _buyer_canary_mode_for_reconciliation(
+        self,
+        payload: dict[str, Any],
+        journal_mode: str,
+        recovered_phase: str,
+    ) -> str:
+        if (
+            journal_mode == BUYER_CANARY_MODE_REQUIRED
+            and self._runtime_only_rollback_can_adopt_disabled_canary_mode(
+                payload,
+                recovered_phase,
+            )
+        ):
+            self.audit(
+                "rollback_buyer_canary_mode_rebased",
+                "disabled",
+                recovered_phase=recovered_phase,
+                release_lane=RELEASE_LANE_RUNTIME,
+            )
+            return BUYER_CANARY_MODE_DISABLED
+        return journal_mode
 
     def _restore_binaries(self, tx: Path) -> None:
         for name in ("coordinator", "gateway"):
@@ -6066,6 +6118,11 @@ class Updater:
                 or buyer_canary_mode not in BUYER_CANARY_MODES
             ):
                 raise UpdateError("phase journal buyer canary mode is invalid")
+            buyer_canary_mode = self._buyer_canary_mode_for_reconciliation(
+                payload,
+                buyer_canary_mode,
+                recovered_phase,
+            )
             self.config = dataclasses.replace(
                 self.config,
                 buyer_canary_mode=buyer_canary_mode,
