@@ -1,10 +1,14 @@
 # SPEC-006 - Buyer API Gateway: Mac Provider's first public buyer surface
 
-**Version:** 0.9.25 (2026-09-14, wholesale bounded queue smoothing)
+**Version:** 0.9.26 (2026-09-14, OpenRouter overflow shedding)
 **Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.5.4, SPEC-003 v0.7, SPEC-004 v0.3.2
 
+**Change log v0.9.26 (2026-09-14, OpenRouter overflow shedding):**
+- The bounded slot queue distinguishes heartbeat-visible busy providers from coordinator-local reservation pressure. A non-pinned request MAY wait up to 3 seconds when an otherwise eligible provider reports `slots_free=0`, or while that provider is draining already admitted zero-slot waiters; requests that would exceed already reserved positive free slots with no existing zero-slot queue MUST shed immediately as retryable `no_provider_available`. This preserves OpenRouter benchmark smoothing without hiding true saturation overflow behind long queue waits.
+- The OpenRouter filing probe records benchmark request exceptions and batch timeouts as structured failures so `--continue-on-error` always produces an evidence artifact.
+
 **Change log v0.9.25 (2026-09-14, wholesale bounded queue smoothing):**
-- Named wholesale `mp_` accounts (`auth.wholesale_account_ids`) participate in the same bounded coordinator pre-dispatch slot queue as other non-pinned traffic. This preserves gateway `429 no_provider_available` capacity shedding for OpenRouter while allowing the 750 ms queue to smooth transient `slots_free=0` races during benchmark traffic.
+- Named wholesale `mp_` accounts (`auth.wholesale_account_ids`) participate in the same bounded coordinator pre-dispatch slot queue as other non-pinned traffic. This preserves gateway `429 no_provider_available` capacity shedding for OpenRouter while allowing the queue to smooth transient `slots_free=0` races during benchmark traffic.
 - Pinned provider/session requests still MUST NOT enter the bounded slot queue.
 
 **Change log v0.9.24 (2026-09-13, OpenRouter schema-2.4 native rows):**
@@ -2447,7 +2451,7 @@ The response MUST include `X-RateLimit-Reset`.
 
 The gateway MUST NOT queue requests indefinitely waiting for provider slots.
 
-For non-pinned requests, the coordinator MAY hold a request in a bounded pre-dispatch slot queue when at least one otherwise eligible `ready` provider for the model reports `slots_free=0`. The queue MUST be FIFO per `provider_id`, MUST cap pending waiters at 4 per `provider_id`, and MUST use a total deadline no longer than 750 ms.
+For non-pinned requests, the coordinator MAY hold a request in a bounded pre-dispatch slot queue when at least one otherwise eligible `ready` provider for the model reports `slots_free=0`, or while that provider is draining waiters already admitted during a zero-slot observation. The queue MUST be FIFO per `provider_id`, MUST cap pending waiters at 4 per `provider_id`, and MUST use a total deadline no longer than 3 seconds. The coordinator MUST NOT use this queue to park requests that are blocked only because the coordinator has already reserved the provider's positive `slots_free` capacity for other in-flight selections and there is no existing zero-slot queue for that provider; those same-moment overflow requests MUST shed immediately as retryable `no_provider_available`.
 
 If no slot becomes available before the bounded queue deadline, or if the candidate provider leaves `ready` state, return 503.
 

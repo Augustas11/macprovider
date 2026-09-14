@@ -357,7 +357,7 @@ const (
 	maxUpstreamResponseBodyBytes = int64(16 << 20)
 	requestLogWriteTimeout       = 6 * time.Second
 	slotQueueDefaultMaxPending   = 4
-	slotQueueDefaultDeadline     = 750 * time.Millisecond
+	slotQueueDefaultDeadline     = 3 * time.Second
 	slotQueueDefaultPollInterval = 25 * time.Millisecond
 )
 
@@ -7319,7 +7319,13 @@ func (s *Server) splitQueuedCandidates(candidates []pool.Provider) ([]pool.Provi
 	queued := make([]pool.Provider, 0, len(candidates))
 	for _, provider := range candidates {
 		if s.slotQueue.blocksProvider(provider.ProviderID, provider.SlotsFree) {
-			queued = append(queued, provider)
+			// A positive SlotsFree provider blocked only by coordinator-local
+			// reservations represents same-moment demand beyond advertised
+			// capacity. Shed that overflow immediately. Already admitted
+			// zero-slot waiters may keep draining through the bounded queue.
+			if provider.SlotsFree <= 0 || s.slotQueue.hasWaiters(provider.ProviderID) {
+				queued = append(queued, provider)
+			}
 			continue
 		}
 		normal = append(normal, provider)
