@@ -751,9 +751,12 @@ def replay_snapshot_liquidity(snapshot: dict, policy: dict) -> None:
         if pricing.get("input_per_mtok") != openrouter_pricing_engine.decimal_string(prompt):
             fail(f"market-peg: snapshot row {source_model_id!r} prompt median does not replay from retained liquidity")
         model_tokens = int(row.get("demand", {}).get("total_token_volume", "0"))
+        liquidity_floor = openrouter_pricing_engine.parse_decimal(
+            policy["liquidity_floor_fraction"], "policy liquidity_floor_fraction"
+        ) * model_tokens
         volume_floor = max(
             policy["min_endpoint_completion_tokens"],
-            int(openrouter_pricing_engine.parse_decimal(policy["liquidity_floor_fraction"], "policy liquidity_floor_fraction") * model_tokens),
+            int(liquidity_floor.to_integral_value(rounding=openrouter_pricing_engine.decimal.ROUND_CEILING)),
         )
         if any(item[2] < volume_floor for item in priced):
             fail(f"market-peg: snapshot row {source_model_id!r} retained endpoint fails the volume floor")

@@ -893,10 +893,11 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
         self.assertEqual(row["current_completion_rate"]["rate_card_completion_rate_per_mtok"], 123)
 
     def test_one_snapshot_emits_rate_and_demand_proposals_with_shared_digest(self):
-        snapshot = self.snapshot()
-        rate_card_proposal = engine.build_proposal(snapshot, policy(), reference_rate_card(), now=NOW)
-        targets = {model["canonical_model_id"]: 15 for model in policy()["models"]}
-        demand_proposal = engine.build_demand_proposal(snapshot, policy(), min_provider_targets=targets)
+        with patch.object(engine, "PRODUCTION_CATALOG_PATH", FIXTURES / "recommendable-catalog.json"):
+            snapshot = self.snapshot()
+            rate_card_proposal = engine.build_proposal(snapshot, policy(), reference_rate_card(), now=NOW)
+            targets = {model["canonical_model_id"]: 15 for model in policy()["models"]}
+            demand_proposal = engine.build_demand_proposal(snapshot, policy(), min_provider_targets=targets)
         shared_digest = snapshot["content_digest"]
         self.assertEqual(rate_card_proposal["source_snapshot"]["content_digest"], shared_digest)
         self.assertEqual(demand_proposal["source_snapshot"]["content_digest"], shared_digest)
@@ -928,11 +929,25 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
         self.assertEqual(pricing["benchmark_provider"], "Liquid")
         self.assertEqual(len(pricing["liquidity_filter"]["eligible_endpoint_liquidity"]), 1)
 
+    def test_liquidity_floor_uses_ceiling_not_truncation(self):
+        document = {"data": {"id": "example/model", "endpoints": [
+            {"provider_name": "Boundary", "status": 0, "throughput_last_30m": "50", "uptime_last_30d": "0.99", "completion_tokens_last_30d": 1000000, "pricing": {"prompt": "0.1", "completion": "0.2"}},
+            {"provider_name": "Liquid", "status": 0, "throughput_last_30m": "50", "uptime_last_30d": "0.99", "completion_tokens_last_30d": 1000001, "pricing": {"prompt": "0.3", "completion": "0.4"}},
+        ]}}
+        pricing = engine.cheapest_endpoint_pricing(
+            document, "example/model", model_tokens_30d=20000001, policy=policy()
+        )
+        self.assertEqual(
+            [item["provider_name"] for item in pricing["liquidity_filter"]["eligible_endpoint_liquidity"]],
+            ["Liquid"],
+        )
+
     def test_demand_proposal_rejects_invalid_minimum_provider_targets(self):
-        with self.assertRaises(engine.SchemaError):
-            engine.build_demand_proposal(self.snapshot(), policy(), min_provider_targets={"qwen3-8b": True})
-        with self.assertRaises(engine.SchemaError):
-            engine.build_demand_proposal(self.snapshot(), policy(), min_provider_targets={})
+        with patch.object(engine, "PRODUCTION_CATALOG_PATH", FIXTURES / "recommendable-catalog.json"):
+            with self.assertRaises(engine.SchemaError):
+                engine.build_demand_proposal(self.snapshot(), policy(), min_provider_targets={"qwen3-8b": True})
+            with self.assertRaises(engine.SchemaError):
+                engine.build_demand_proposal(self.snapshot(), policy(), min_provider_targets={})
 
     def test_demand_proposal_keeps_absent_recommendable_mapping_with_zero_demand(self):
         policy_document = policy()
@@ -942,7 +957,7 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
         catalog = json.loads((FIXTURES / "recommendable-catalog.json").read_text(encoding="utf-8"))
         original_catalog = json.dumps(catalog)
         catalog["rows"]["example/absent"] = {"runtime_status": "recommendable"}
-        with patch.object(engine, "RECOMMENDABLE_CATALOG_PATH", FIXTURES / "recommendable-catalog.json"):
+        with patch.object(engine, "PRODUCTION_CATALOG_PATH", FIXTURES / "recommendable-catalog.json"):
             (FIXTURES / "recommendable-catalog.json").write_text(json.dumps(catalog))
             try:
                 proposal = engine.build_demand_proposal(self.snapshot(), policy_document, min_provider_targets=targets)

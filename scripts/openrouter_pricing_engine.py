@@ -24,7 +24,7 @@ import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal, InvalidOperation, ROUND_FLOOR
+from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_FLOOR
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol
@@ -34,7 +34,6 @@ from urllib.parse import quote, urlsplit
 RANKINGS_URL = "https://openrouter.ai/api/v1/datasets/rankings-daily"
 MODELS_URL = "https://openrouter.ai/api/v1/models"
 ENDPOINTS_URL = "https://openrouter.ai/api/v1/models/{model_id}/endpoints"
-RECOMMENDABLE_CATALOG_PATH = Path(__file__).resolve().parent / "tests" / "fixtures" / "openrouter_pricing" / "recommendable-catalog.json"
 PRODUCTION_CATALOG_PATH = Path(__file__).resolve().parents[2] / "phase3-binary" / "catalog" / "autotune" / "autotune-candidates.json"
 SNAPSHOT_SCHEMA_VERSION = 6
 LEGACY_SNAPSHOT_SCHEMA_VERSION = 5
@@ -623,7 +622,7 @@ def cheapest_endpoint_pricing(document: Mapping[str, Any], model_id: str, *, mod
             continue
         minimum_tokens = policy.get("min_endpoint_completion_tokens", 1_000_000) if policy is not None else 1_000_000
         floor_fraction = parse_decimal(policy.get("liquidity_floor_fraction", "0.05") if policy is not None else "0.05", "policy liquidity_floor_fraction")
-        volume_floor = max(minimum_tokens, int(floor_fraction * model_tokens_30d))
+        volume_floor = max(minimum_tokens, int((floor_fraction * model_tokens_30d).to_integral_value(rounding=ROUND_CEILING)))
         if status != 0 or prompt == 0 or completion == 0 or completion_tokens < volume_floor:
             continue
         priced.append((completion, prompt, throughput, uptime, provider, completion_tokens))
@@ -1522,7 +1521,7 @@ def build_demand_proposal(
     validate_policy(policy)
     policy_models = policy_model_index(policy)
     models_by_canonical = {model["canonical_model_id"]: model for model in policy["models"]}
-    catalog_path = RECOMMENDABLE_CATALOG_PATH if RECOMMENDABLE_CATALOG_PATH.exists() else PRODUCTION_CATALOG_PATH
+    catalog_path = PRODUCTION_CATALOG_PATH
     catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
     recommendable_keys = {key for key, row in catalog["rows"].items() if row.get("runtime_status") == "recommendable"}
     expected_target_keys = set(models_by_canonical)
