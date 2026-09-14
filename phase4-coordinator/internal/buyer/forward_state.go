@@ -79,9 +79,15 @@ type forwardState struct {
 	// failover already mutate the active route through this struct.
 	phaseTiming requestPhaseTiming
 
-	// queuedSlotProviderID is set when the slot queue reserves a
-	// recovered provider slot for this request. It is released when
-	// the request leaves that active route.
+	// slotReservationsEnabled is true for real chat forwarding requests.
+	// Direct unit-test calls into selectProviderExcluding leave it false so
+	// helper-level assertions do not retain request-scoped capacity leases.
+	slotReservationsEnabled bool
+
+	// queuedSlotProviderID is set when routing reserves a provider slot for
+	// this request, either directly at selection time or after the slot queue
+	// observes a recovered provider slot. It is released when the request
+	// leaves that active route.
 	queuedSlotProviderID string
 
 	// explicitRetries is the retry counter the request_log.retried
@@ -141,4 +147,24 @@ type forwardState struct {
 
 	stickyResult     string
 	stickyMissReason string
+}
+
+func newForwardState(startedAt time.Time) *forwardState {
+	state := &forwardState{
+		routingDone:             startedAt,
+		faultedRoutes:           map[string]struct{}{},
+		slotReservationsEnabled: true,
+		// Snapshot the UTC daily-key bucket from startedAt (NOT a
+		// second s.now() call) so the request-start timestamp and the
+		// routing-seed bucket agree on the exact UTC-midnight boundary.
+		// Without this, a long-running retry that crosses UTC midnight
+		// produces a different seed than the first attempt, breaking
+		// FR-SR-17 reproducibility for the request. Issue #266 T1,
+		// R1 ARCHITECT audit LOW fix (atomic snapshot).
+		dailyKey: startedAt.UTC().Format("2006-01-02"),
+		// estimatedTokens is populated once the body is read + validated;
+		// retry-path PreflightResult derivation reads it.
+	}
+	state.phaseTiming.init(startedAt)
+	return state
 }
