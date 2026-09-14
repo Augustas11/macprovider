@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -275,6 +276,11 @@ func stringPtrOrNil(value string) *string {
 
 func writeRouteSnapshotError(w http.ResponseWriter, rec *billingRecorder, err error) {
 	rec.server.log.Warn().Err(err).Str("request_id", rec.requestID).Msg("route snapshot insert failed before provider dispatch")
+	if transientRouteSnapshotStorePressure(err) {
+		rec.logBuyerFailure(http.StatusServiceUnavailable, "Route snapshot storage is temporarily unavailable")
+		writeError(w, http.StatusServiceUnavailable, "no_provider_available", "No provider available for this model")
+		return
+	}
 	rec.logBuyerFailure(http.StatusInternalServerError, "Could not durably record route snapshot")
 	// The item-18 positive no-prior-dispatch marker is stamped centrally by
 	// noPriorDispatchResponseWriter at WriteHeader time (based on the ledger-exact
@@ -282,6 +288,16 @@ func writeRouteSnapshotError(w http.ResponseWriter, rec *billingRecorder, err er
 	// provider relayed this attempt — so the marker is present here iff no
 	// provider was billably credited earlier in this request.
 	writeError(w, http.StatusInternalServerError, "route_snapshot_failed", "Could not durably record route snapshot")
+}
+
+func transientRouteSnapshotStorePressure(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	return errors.Is(err, billing.ErrRouteSnapshotStorePressure)
 }
 
 const (

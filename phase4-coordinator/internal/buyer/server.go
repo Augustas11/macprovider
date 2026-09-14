@@ -2248,21 +2248,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// locals migrated into forwardState; M3-10 hoists the closure
 	// itself into *billingRecorder. The recorder still needs the live
 	// state values at log-write time, so it holds *forwardState.
-	state := &forwardState{
-		routingDone:   startedAt,
-		faultedRoutes: map[string]struct{}{},
-		// Snapshot the UTC daily-key bucket from startedAt (NOT a
-		// second s.now() call) so the request-start timestamp and the
-		// routing-seed bucket agree on the exact UTC-midnight boundary.
-		// Without this, a long-running retry that crosses UTC midnight
-		// produces a different seed than the first attempt, breaking
-		// FR-SR-17 reproducibility for the request. Issue #266 T1,
-		// R1 ARCHITECT audit LOW fix (atomic snapshot).
-		dailyKey: startedAt.UTC().Format("2006-01-02"),
-		// estimatedTokens is populated below once the body is read +
-		// validated; retry-path PreflightResult derivation reads it.
-	}
-	state.phaseTiming.init(startedAt)
+	state := newForwardState(startedAt)
 	w = &phaseTimingResponseWriter{ResponseWriter: w, state: state, now: s.now}
 	// M3-10 (ARCH-6 close-out): the previously-inline logRowWithBilling
 	// closure now lives as *billingRecorder. setModel / setStream /
@@ -6018,10 +6004,6 @@ func hasPinnedRoute(headers http.Header) bool {
 	return headers.Get("X-MacProvider-Provider") != "" || headers.Get("X-MacProvider-Session") != ""
 }
 
-func wholesaleSkipQueue(headers http.Header) bool {
-	return strings.TrimSpace(headers.Get("X-MacProvider-Internal-Wholesale")) == "1"
-}
-
 func (s *Server) logWSDeadMidRequest(originalRequestID, requestID, externalRequestID string, provider pool.Provider, action, targetProviderID string) {
 	s.log.Warn().
 		Str("event", "ws_dead_mid_request").
@@ -6139,7 +6121,7 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 				if !s.checkQuota(provider) {
 					return pool.Provider{}, &routeError{status: http.StatusTooManyRequests, code: "provisional_quota_exceeded", message: "Pinned metered provider is over request quota"}
 				}
-				return s.preflightCandidate(provider, requestID, estimatedTokens)
+				return s.selectReservedProvider(provider, req.Model, requestID, estimatedTokens, state)
 			}
 		}
 		return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "session_ended", message: "Pinned session has ended"}
@@ -6166,7 +6148,7 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 				if !s.checkQuota(provider) {
 					return pool.Provider{}, &routeError{status: http.StatusTooManyRequests, code: "provisional_quota_exceeded", message: "Pinned metered provider is over request quota"}
 				}
-				return s.preflightCandidate(provider, requestID, estimatedTokens)
+				return s.selectReservedProvider(provider, req.Model, requestID, estimatedTokens, state)
 			}
 		}
 		return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "no_provider_available", message: "Pinned provider not in pool"}
@@ -6201,7 +6183,7 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 	result := routing.EligibleCandidates(providers, exSet, pool.Provider.SortKey, checker)
 	candidates := result.Eligible
 	queuedCandidates := []pool.Provider(nil)
-	queueEligible := !hasPinnedRoute(headers) && !wholesaleSkipQueue(headers)
+	queueEligible := !hasPinnedRoute(headers)
 	if queueEligible && len(candidates) > 0 {
 		var normalCandidates []pool.Provider
 		normalCandidates, queuedCandidates = s.splitQueuedCandidates(candidates)
@@ -6312,8 +6294,10 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 	// omitted). routeKeyedFilterCounts converts routing.RejectionReason
 	// enum keys to SPEC-004 §7 stringly names.
 	s.logRoutingDecisionFullWithCache(requestID, len(providers), routeKeyedFilterCounts(result.Counts), candidates, objective, seed, draw, reason, "", balancedCache)
+	var capacityErr *routeError
+	preflightRejected := false
 	for _, candidate := range candidates {
-		provider, routeErr := s.preflightCandidate(candidate, requestID, estimatedTokens)
+		provider, routeErr := s.selectReservedProvider(candidate, req.Model, requestID, estimatedTokens, state)
 		if routeErr == nil {
 			if state != nil {
 				state.stickyResult = stickyResult
@@ -6325,8 +6309,48 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 			}
 			return provider, nil
 		}
+		if routeErr.code == "no_provider_available" {
+			capacityErr = routeErr
+			continue
+		}
+		preflightRejected = true
+	}
+	if capacityErr != nil && !preflightRejected {
+		return pool.Provider{}, capacityErr
 	}
 	return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "preflight_rejected", message: "All providers rejected the request"}
+}
+
+func (s *Server) selectReservedProvider(candidate pool.Provider, model string, requestID string, estimatedTokens int, state *forwardState) (pool.Provider, *routeError) {
+	if !s.reserveSelectedProviderSlot(candidate, state) {
+		return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "no_provider_available", message: "No provider available for model " + model}
+	}
+	provider, routeErr := s.preflightCandidate(candidate, requestID, estimatedTokens)
+	if routeErr != nil {
+		s.releaseQueuedSlotReservation(state)
+		return pool.Provider{}, routeErr
+	}
+	return provider, nil
+}
+
+func (s *Server) reserveSelectedProviderSlot(provider pool.Provider, state *forwardState) bool {
+	if s.slotQueue == nil || state == nil || !state.slotReservationsEnabled {
+		return true
+	}
+	if provider.ProviderID == "" {
+		return false
+	}
+	if state.queuedSlotProviderID == provider.ProviderID {
+		return true
+	}
+	if state.queuedSlotProviderID != "" {
+		s.releaseQueuedSlotReservation(state)
+	}
+	if !s.slotQueue.reserveProvider(provider.ProviderID, provider.SlotsFree) {
+		return false
+	}
+	state.queuedSlotProviderID = provider.ProviderID
+	return true
 }
 
 func poolRouteableSnapshotExpiredAt(snap trustpool.Snapshot, now time.Time) bool {
