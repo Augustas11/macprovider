@@ -3,6 +3,7 @@ package router
 import (
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -86,6 +87,62 @@ func TestWholesaleQuotaIsNotCappedAtPublicDailyLimit(t *testing.T) {
 	resp := postChat(t, h, fullKey, chatBody(false), nil)
 	if resp.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+}
+
+func TestWholesaleConcurrencyOverrideDoesNotThrottlePublicAccounts(t *testing.T) {
+	entered := make(chan string, 2)
+	release := make(chan struct{})
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		entered <- r.Header.Get(wholesaleInternalHeader)
+		<-release
+		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, retryChatSuccessBody), nil
+	})}
+	wholesaleAccountID := "acct_wholesale_concurrency"
+	h, store, _, cfg := newRetryHarness(t, client, func(cfg *config.Config) {
+		cfg.Auth.WholesaleAccountIDs = []string{wholesaleAccountID}
+		cfg.Quotas.AccountConcurrency = 8
+		cfg.Quotas.WholesaleAccountConcurrency = 1
+		cfg.Quotas.AccountRequestRatePerSecond = 100
+	})
+	wholesaleKey := createAccountAndKey(t, store, cfg, wholesaleAccountID)
+	publicKey := createAccountAndKey(t, store, cfg, "acct_public_concurrency")
+	body := chatBody(false)
+
+	done := make(chan *httptest.ResponseRecorder, 2)
+	go func() { done <- postChat(t, h, wholesaleKey, body, distinctRequestID(nil)) }()
+	select {
+	case marker := <-entered:
+		if marker != "1" {
+			t.Fatalf("first request wholesale marker=%q want 1", marker)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for first wholesale request")
+	}
+
+	rejected := postChat(t, h, wholesaleKey, body, distinctRequestID(nil))
+	if rejected.Code != http.StatusTooManyRequests {
+		t.Fatalf("second wholesale status=%d body=%s", rejected.Code, rejected.Body.String())
+	}
+	assertErrorCode(t, rejected.Body.String(), "account_concurrency_exceeded")
+	assertConcurrencyRejectHeaders(t, rejected, 1)
+
+	go func() { done <- postChat(t, h, publicKey, body, distinctRequestID(nil)) }()
+	select {
+	case marker := <-entered:
+		if marker != "" {
+			t.Fatalf("public request wholesale marker=%q want empty", marker)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("public account was throttled by wholesale override")
+	}
+
+	close(release)
+	for i := 0; i < 2; i++ {
+		resp := <-done
+		if resp.Code != http.StatusOK {
+			t.Fatalf("in-flight response status=%d body=%s", resp.Code, resp.Body.String())
+		}
 	}
 }
 

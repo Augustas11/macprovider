@@ -27,7 +27,7 @@ from pathlib import Path
 
 
 DEFAULT_MODEL = "mlx-community/Llama-3.2-3B-Instruct-4bit"
-DEFAULT_PROMPT = "OpenRouter provider readiness smoke. Reply with one short sentence."
+DEFAULT_PROMPT = "OpenRouter provider readiness smoke. Reply with OK."
 MAX_BENCHMARK_REQUESTS = 200
 MAX_BENCHMARK_CONCURRENCY = 8
 DEFAULT_MIN_SUCCESS_RATIO = 0.95
