@@ -139,9 +139,11 @@ posture before state capture, after public identity recovery, and after
 the exact physical catalog-provider proof. Public identity, the configured
 ready-provider floor, admission policy, exact catalog admission, and the
 physical provider canary remain mandatory. The default remains `required`.
-Runtime-only `pearl_runtime` releases are not eligible for this disabled mode:
-because they deliberately omit the exact catalog/provider gates, apply requires
-`PEARL_UPDATER_BUYER_CANARY_MODE=required` and a passing buyer canary.
+Runtime-only `pearl_runtime` releases are eligible for this disabled mode when
+Pearl is sealed in that posture; they deliberately omit catalog mutation and
+therefore rely on public identity, live runtime binding, the configured
+ready-provider floor, and repeated hard-disabled posture checks instead of
+starting the retired buyer canary.
 
 From the authority commit's reviewed checkout, install the four runtime files
 as executable root-owned files and the two units as non-executable root-owned
@@ -311,8 +313,10 @@ exact reviewed source commit. Runtime-only GitHub releases are deliberately
 published as prereleases with `make_latest=false`; they are never selected by
 the updater's automatic stable-release discovery and must be applied by
 explicit tag. Verify that tag with the command above, then run the updater
-against that same tag with `PEARL_UPDATER_BUYER_CANARY_MODE` left at
-`required` and the buyer canary gate reviewed/enabled:
+against that same tag. When the buyer canary has been retired, seal Pearl in
+the disabled posture above first, set `PEARL_UPDATER_BUYER_CANARY_MODE=disabled`,
+and keep relying on public identity, live runtime binding, the configured
+ready-provider floor, and hard-disabled posture checks:
 
 ```bash
 sudo /usr/local/sbin/macprovider-pearl-update --plan --tag vX.Y.Z

@@ -3402,7 +3402,7 @@ class PearlUpdaterTests(unittest.TestCase):
 
         self.updater.verify_runtime_only_buyer_canary_policy(release)
 
-    def test_runtime_only_rollout_rejects_disabled_buyer_canary_mode(self):
+    def test_runtime_only_rollout_accepts_disabled_buyer_canary_mode(self):
         self.make_bundle(runtime_only=True)
         release = self.verify()
         self.updater.config = updater_module.dataclasses.replace(
@@ -3410,11 +3410,42 @@ class PearlUpdaterTests(unittest.TestCase):
             buyer_canary_mode=updater_module.BUYER_CANARY_MODE_DISABLED,
         )
 
-        with self.assertRaisesRegex(
-            updater_module.UpdateError,
-            "runtime-only Pearl release requires buyer canary mode required",
-        ):
-            self.updater.verify_runtime_only_buyer_canary_policy(release)
+        self.updater.verify_runtime_only_buyer_canary_policy(release)
+
+    def test_runtime_only_disabled_rollout_records_actual_replacement_gates(self):
+        self.make_bundle(runtime_only=True)
+        release = self.verify()
+        self.updater.config = updater_module.dataclasses.replace(
+            self.updater.config,
+            buyer_canary_mode=updater_module.BUYER_CANARY_MODE_DISABLED,
+        )
+        self.updater.systemctl = mock.Mock()
+        self.updater.service_active = mock.Mock(return_value=True)
+        self.updater.local_coordinator_ready = mock.Mock(return_value=True)
+        self.updater.local_gateway_ready = mock.Mock(return_value=True)
+        self.updater.ensure_coordinator_request_log_indexes = mock.Mock()
+        self.updater.verify_live_runtime_binding = mock.Mock()
+        self.updater.restore_auxiliary_services = mock.Mock()
+        self.updater.prove_serving_recovery = mock.Mock()
+        self.updater.verify_provider_admission_rollout_policy = mock.Mock()
+        self.updater.verify_exact_catalog_admission = mock.Mock()
+        self.updater.verify_exact_provider_canary = mock.Mock()
+        self.updater.verify_buyer_canary_rollout_posture = mock.Mock()
+        self.updater.restore_auxiliary_timers = mock.Mock()
+        self.updater._restore_canary_timer = mock.Mock()
+        self.updater.wait_for = lambda _description, _timeout, check: self.assertTrue(check())
+
+        self.updater.verify_rollout(release)
+
+        self.updater.prove_serving_recovery.assert_called_once_with(
+            self.updater.release_identity(release),
+            disabled_replacement_gates=(
+                "public_identity,live_runtime_binding,ready_provider_floor,"
+                "hard_disabled_buyer_canary_posture"
+            ),
+        )
+        self.updater.verify_exact_catalog_admission.assert_not_called()
+        self.updater.verify_exact_provider_canary.assert_not_called()
 
     def test_run_canary_gate_rejects_disabled_mode(self):
         self.updater.config = updater_module.dataclasses.replace(
@@ -6306,6 +6337,62 @@ class PearlUpdaterTests(unittest.TestCase):
         self.assertEqual(
             self.updater.config.buyer_canary_mode,
             updater_module.BUYER_CANARY_MODE_DISABLED,
+        )
+
+    def test_runtime_only_rollback_journal_adopts_live_disabled_canary_mode(self):
+        self.make_bundle(runtime_only=True)
+        release = self.verify()
+        self.updater.config = updater_module.dataclasses.replace(
+            self.updater.config,
+            buyer_canary_mode=updater_module.BUYER_CANARY_MODE_REQUIRED,
+        )
+        self.updater._start_journal(release, updater_module.SemVer.parse("1.8.26"))
+        tx = self.root / "runtime-only-rollback"
+        tx.mkdir()
+        self.updater.journal.update(
+            {
+                "transaction": str(tx),
+                "rollback_armed": True,
+                "rollback_in_progress": True,
+                "live_mutation_started": True,
+                "previous_services": {
+                    "macprovider-coordinator.service": True,
+                    "macprovider-gateway.service": True,
+                },
+                "previous_auxiliary_units": {
+                    unit: False for unit in updater_module.AUXILIARY_UNITS
+                },
+                "previous_versions": {
+                    "coordinator": "v1.8.128",
+                    "gateway": "v1.8.128",
+                },
+                "previous_advertised_version": "1.8.123",
+                "canary_timer_was_active": False,
+                "canary_service_was_active": False,
+                "database_paths": [],
+                "rollback_completed_steps": list(updater_module.ROLLBACK_STEPS[:8]),
+            }
+        )
+        self.updater._journal_transition("rollback_serving_validation_pending")
+        self.updater.config = updater_module.dataclasses.replace(
+            self.updater.config,
+            buyer_canary_mode=updater_module.BUYER_CANARY_MODE_DISABLED,
+        )
+        self.updater.restore_transaction = mock.Mock()
+        self.updater.audit = mock.Mock()
+
+        self.assertTrue(self.updater.reconcile())
+
+        self.assertEqual(
+            self.updater.config.buyer_canary_mode,
+            updater_module.BUYER_CANARY_MODE_DISABLED,
+        )
+        self.updater.restore_transaction.assert_called_once_with()
+        self.updater.audit.assert_any_call(
+            "rollback_buyer_canary_mode_rebased",
+            "disabled",
+            recovered_phase="rollback_serving_validation_pending",
+            release_lane=updater_module.RELEASE_LANE_RUNTIME,
         )
 
     def test_phase_journal_restores_protected_fleet_model_baseline(self):
