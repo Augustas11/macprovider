@@ -1,7 +1,11 @@
 # SPEC-006 - Buyer API Gateway: Mac Provider's first public buyer surface
 
-**Version:** 0.9.24 (2026-09-13, OpenRouter schema-2.4 native rows)
+**Version:** 0.9.25 (2026-09-14, wholesale bounded queue smoothing)
 **Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.5.4, SPEC-003 v0.7, SPEC-004 v0.3.2
+
+**Change log v0.9.25 (2026-09-14, wholesale bounded queue smoothing):**
+- Named wholesale `mp_` accounts (`auth.wholesale_account_ids`) participate in the same bounded coordinator pre-dispatch slot queue as other non-pinned traffic. This preserves gateway `429 no_provider_available` capacity shedding for OpenRouter while allowing the 750 ms queue to smooth transient `slots_free=0` races during benchmark traffic.
+- Pinned provider/session requests still MUST NOT enter the bounded slot queue.
 
 **Change log v0.9.24 (2026-09-13, OpenRouter schema-2.4 native rows):**
 - `GET /v1/openrouter/models` now uses the current OpenRouter model document format for new provider integrations: each model row carries `schema_version: "2.4"`, typed `input_modalities` and `output_modalities`, modality-owned `pricing` and `capacity`, root request/concurrency capacity, an honest volunteer-fleet `deployment_region`, and no `datacenters` entry unless operator-verified geography metadata exists.
@@ -11,7 +15,7 @@
 **Change log v0.9.23 (2026-09-11, OpenRouter join on the live pool):**
 - Additive unauthenticated `GET /v1/openrouter/models` schema-2.4 document. Public `GET /v1/models` is unchanged (OpenAI list + integrity/`tier1_disclosure`). OpenRouter ingest MUST NOT be served the sanitized public list.
 - Dual Llama 3B SKUs: paid pool id `mlx-community/Llama-3.2-3B-Instruct-4bit` and free alias `mlx-community/Llama-3.2-3B-Instruct-4bit-free` that routes to the same pool after `NormalizeModelKey` strips `-free`. Qwen3-8B stays off this document until more than one warm node.
-- Named wholesale `mp_` accounts (`auth.wholesale_account_ids`): no 100k/day cap; coordinator `503 no_provider_available` becomes gateway `429`; skip SPEC-006 §7.8 750ms slot queue; always emit a final stream `usage` chunk; gateway-only SSE comment keepalives. SPEC-001 FR-5 keepalives stay on the provider binary.
+- Named wholesale `mp_` accounts (`auth.wholesale_account_ids`): no 100k/day cap; coordinator `503 no_provider_available` becomes gateway `429`; always emit a final stream `usage` chunk; gateway-only SSE comment keepalives. SPEC-001 FR-5 keepalives stay on the provider binary.
 - Chat remains `POST /v1/chat/completions` on `api.malibu.tech`. No second host and no `/partner/openrouter` remap.
 - Public `GET /privacy` retention page (`compliance.zdr` is false; prompts are plaintext on provider Macs).
 - Registers `SPEC-006-R010`. Wholesale USD statements remain SPEC-005 D1a.
@@ -2449,7 +2453,7 @@ If no slot becomes available before the bounded queue deadline, or if the candid
 
 Pinned provider or session requests MUST NOT enter this queue. If the pinned target has no immediately available slot, return 503.
 
-Wholesale partner accounts (`auth.wholesale_account_ids`) MUST NOT enter this queue. If no slot is immediately free, the coordinator MUST return `503 no_provider_available` without waiting; the gateway MUST translate that outcome to `429` with `retryable: true` and a `Retry-After` hint. OpenRouter scores HTTP 503 against uptime; 429 is capacity-shed.
+Wholesale partner accounts (`auth.wholesale_account_ids`) MAY enter this queue because they are non-pinned traffic. If no slot becomes available before the bounded queue deadline, the coordinator MUST return `503 no_provider_available`; the gateway MUST translate that outcome to `429` with `retryable: true` and a `Retry-After` hint. OpenRouter scores HTTP 503 against uptime; 429 is capacity-shed.
 
 If the account concurrency cap is reached, return 429.
 

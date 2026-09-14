@@ -92,3 +92,29 @@ func TestSelectProviderReleasesDirectSlotOnPreflightReject(t *testing.T) {
 		t.Fatalf("selection after preflight release provider=%q err=%+v, want %q nil", got.ProviderID, routeErr, provider.ProviderID)
 	}
 }
+
+func TestWholesaleSelectionUsesBoundedSlotQueue(t *testing.T) {
+	s, registry, _ := poolIsolationServer(t)
+	provider := poolProvider("p-one")
+	provider.SlotsFree = 0
+	registry.Register(&provider, nil)
+	s.slotQueueDeadline = 10 * time.Millisecond
+	s.slotQueuePollInterval = time.Millisecond
+
+	headers := http.Header{
+		"Authorization":                    []string{"Bearer gateway-secret"},
+		"X-MacProvider-Internal-Wholesale": []string{"1"},
+	}
+	state := &forwardState{slotReservationsEnabled: true}
+	started := time.Now()
+	_, routeErr := s.selectProviderExcluding(context.Background(), "rid-1", poolChatReq(""), headers, nil, "2026-09-14", state)
+	if routeErr == nil || routeErr.status != http.StatusServiceUnavailable || routeErr.code != "no_provider_available" {
+		t.Fatalf("wholesale queued selection: want 503 no_provider_available, got %+v", routeErr)
+	}
+	if state.queueWait <= 0 {
+		t.Fatal("wholesale request bypassed the bounded slot queue")
+	}
+	if elapsed := time.Since(started); elapsed < s.slotQueueDeadline {
+		t.Fatalf("wholesale selection returned before queue deadline: elapsed=%s deadline=%s", elapsed, s.slotQueueDeadline)
+	}
+}
