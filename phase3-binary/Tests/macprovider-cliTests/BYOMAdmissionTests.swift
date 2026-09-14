@@ -11,6 +11,373 @@ final class BYOMAdmissionTests: XCTestCase {
         super.tearDown()
     }
 
+    func testRetryPreservesExactEvidenceAndUsesFreshSignedEnvelope() throws {
+        let key = Curve25519.Signing.PrivateKey()
+        let candidate = byomAdmissionCandidate(
+            candidateID: stableBYOMAdmissionCandidateID("a"), servedModelRef: "ollama:tiny"
+        )
+        let original = try BYOMOfferSubmissionBuilder.makePackage(
+            providerID: "provider-byom-a", candidate: candidate, admissionIdentity: key,
+            evaluationDigestSHA256: String(repeating: "b", count: 64),
+            requestedDisclosureClass: "non_earning_provider_asserted"
+        ).request
+        let fresh = try BYOMOfferRetryBuilder.makePackage(
+            original: original, status: retryStatus(candidate), candidate: candidate,
+            admissionIdentity: key, nonce: "retry-nonce", idempotencyKey: "retry-key"
+        )
+        XCTAssertEqual(fresh.request.discoveryDigestSHA256, original.discoveryDigestSHA256)
+        XCTAssertEqual(fresh.request.evaluationDigestSHA256, original.evaluationDigestSHA256)
+        XCTAssertEqual(fresh.request.artifactHashes, original.artifactHashes)
+        XCTAssertEqual(fresh.request.requestedDisclosureClass, original.requestedDisclosureClass)
+        XCTAssertNotEqual(fresh.request.nonce, original.nonce)
+        XCTAssertNotEqual(fresh.request.idempotencyKey, original.idempotencyKey)
+        XCTAssertTrue(key.publicKey.isValidSignature(
+            try XCTUnwrap(Data(base64Encoded: fresh.request.providerSignature)),
+            for: Data(try RFC8785JCS.canonicalString(fresh.request.canonicalValue()).utf8)
+        ))
+    }
+
+    func testRetryRejectsTerminalStatesAndChangedDiscovery() throws {
+        let key = Curve25519.Signing.PrivateKey()
+        let candidate = byomAdmissionCandidate(
+            candidateID: stableBYOMAdmissionCandidateID("a"), servedModelRef: "ollama:tiny"
+        )
+        let original = try BYOMOfferSubmissionBuilder.makePackage(
+            providerID: "provider-byom-a", candidate: candidate, admissionIdentity: key,
+            evaluationDigestSHA256: nil, requestedDisclosureClass: "non_earning_provider_asserted"
+        ).request
+        for state in ["withdrawn", "revoked", "offer_rejected", "settlement_capable", "not_offered"] {
+            XCTAssertThrowsError(try BYOMOfferRetryBuilder.makePackage(
+                original: original, status: retryStatus(candidate, state: state),
+                candidate: candidate, admissionIdentity: key
+            )) { XCTAssertEqual($0 as? BYOMModelAdmissionError, .missingRetryTuple) }
+        }
+        let changed = byomAdmissionCandidate(
+            candidateID: candidate.candidateID, servedModelRef: candidate.servedModelRef,
+            warningCodes: ["evaluation_required"]
+        )
+        XCTAssertThrowsError(try BYOMOfferRetryBuilder.makePackage(
+            original: original, status: retryStatus(candidate), candidate: changed, admissionIdentity: key
+        )) { XCTAssertEqual($0 as? BYOMModelAdmissionError, .missingRetryTuple) }
+    }
+
+    func testRetryRejectsRotatedKeyAndTamperedOriginalSignature() throws {
+        let key = Curve25519.Signing.PrivateKey()
+        let candidate = byomAdmissionCandidate(
+            candidateID: stableBYOMAdmissionCandidateID("a"), servedModelRef: "ollama:tiny"
+        )
+        var original = try BYOMOfferSubmissionBuilder.makePackage(
+            providerID: "provider-byom-a", candidate: candidate, admissionIdentity: key,
+            evaluationDigestSHA256: nil, requestedDisclosureClass: "non_earning_provider_asserted"
+        ).request
+        XCTAssertThrowsError(try BYOMOfferRetryBuilder.makePackage(
+            original: original, status: retryStatus(candidate), candidate: candidate,
+            admissionIdentity: Curve25519.Signing.PrivateKey()
+        )) { XCTAssertEqual($0 as? BYOMModelAdmissionError, .missingRetryTuple) }
+        original.providerSignature = Data(repeating: 0, count: 64).base64EncodedString()
+        XCTAssertThrowsError(try BYOMOfferRetryBuilder.makePackage(
+            original: original, status: retryStatus(candidate), candidate: candidate, admissionIdentity: key
+        )) { XCTAssertEqual($0 as? BYOMModelAdmissionError, .missingRetryTuple) }
+    }
+
+    func testRetryClientUsesRetryRouteAndStrictCoordinatorReadback() async throws {
+        let key = Curve25519.Signing.PrivateKey()
+        let candidate = byomAdmissionCandidate(
+            candidateID: stableBYOMAdmissionCandidateID("a"), servedModelRef: "ollama:tiny"
+        )
+        let package = try BYOMOfferSubmissionBuilder.makePackage(
+            providerID: "provider-byom-a", candidate: candidate, admissionIdentity: key,
+            evaluationDigestSHA256: nil, requestedDisclosureClass: "non_earning_provider_asserted"
+        )
+        let response = try ModelSwitchingWireCodec.encode(retryStatus(candidate))
+        let session = makeBYOMAdmissionSession { request in
+            XCTAssertEqual(request.httpMethod, "POST")
+            XCTAssertEqual(request.url?.path, "/v1/provider/model-admission/retry")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer test-bearer")
+            XCTAssertEqual(byomAdmissionRequestBody(request), package.encodedRequest)
+            return BYOMAdmissionMockHTTPResponse(statusCode: 200, body: response)
+        }
+        let status = try await BYOMModelAdmissionClient(
+            baseURL: URL(string: "https://coordinator.test")!, session: session
+        ).retryOffer(package, bearerToken: "test-bearer")
+        XCTAssertEqual(status.admissionState, "offer_submitted")
+        XCTAssertEqual(status.admissionStateSource, "coordinator")
+    }
+
+    func testAmbiguousOfferPersistsBeforeHTTPAndRestartRetryPreservesTuple() async throws {
+        let fixture = try retryFixture()
+        let response = try ModelSwitchingWireCodec.encode(retryStatus(fixture.candidate))
+        let session = makeBYOMAdmissionSession { request in
+            let files = try FileManager.default.contentsOfDirectory(
+                at: fixture.environment.namespaceURL.deletingLastPathComponent().appendingPathComponent("pending-offers"),
+                includingPropertiesForKeys: nil
+            )
+            let url = try XCTUnwrap(files.first { $0.pathExtension == "json" })
+            let record = try JSONDecoder().decode(BYOMPendingOfferJournal.Record.self, from: Data(contentsOf: url))
+            XCTAssertEqual(record.envelope.evaluationDigestSHA256, String(repeating: "b", count: 64))
+            XCTAssertEqual(record.envelope, try JSONDecoder().decode(BYOMOfferSubmitRequestWire.self,
+                from: XCTUnwrap(byomAdmissionRequestBody(request))))
+            // A competing operation cannot modify the record while the HTTP
+            // outcome is unresolved, even within this same process.
+            XCTAssertThrowsError(try BYOMPendingOfferJournal.Operation(
+                namespaceURL: fixture.environment.namespaceURL, providerID: "provider-byom-a",
+                candidateID: fixture.candidate.candidateID
+            ))
+            throw URLError(.timedOut)
+        }
+        let first = retryRuntime(fixture, session: session)
+        do {
+            _ = try await first.submitOffer(providerID: "provider-byom-a", target: fixture.candidate.candidateID,
+                evaluationDigestSHA256: String(repeating: "b", count: 64),
+                requestedDisclosureClass: "non_earning_provider_asserted")
+            XCTFail("expected ambiguous transport result")
+        } catch { XCTAssertEqual((error as? URLError)?.code, .timedOut) }
+        let recordURL = try XCTUnwrap(FileManager.default.contentsOfDirectory(
+            at: fixture.environment.namespaceURL.deletingLastPathComponent().appendingPathComponent("pending-offers"),
+            includingPropertiesForKeys: nil
+        ).first { $0.pathExtension == "json" })
+        let before = try Data(contentsOf: recordURL)
+        let original = try JSONDecoder().decode(BYOMPendingOfferJournal.Record.self, from: before)
+        let rejectSession = makeBYOMAdmissionSession { request in
+            XCTAssertEqual(request.httpMethod, "GET", "different unresolved offer must never POST")
+            return BYOMAdmissionMockHTTPResponse(statusCode: 200, body: response)
+        }
+        do {
+            _ = try await retryRuntime(fixture, session: rejectSession).submitOffer(
+                providerID: "provider-byom-a", target: fixture.candidate.candidateID,
+                evaluationDigestSHA256: String(repeating: "c", count: 64),
+                requestedDisclosureClass: "non_earning_provider_asserted")
+            XCTFail("must preserve unresolved original")
+        } catch { XCTAssertTrue(error is BYOMPendingOfferJournal.JournalError) }
+        XCTAssertEqual(try Data(contentsOf: recordURL), before)
+        let retrySession = makeBYOMAdmissionSession { request in
+            if request.httpMethod == "POST" {
+                XCTAssertEqual(request.url?.path, "/v1/provider/model-admission/retry")
+                let retried = try JSONDecoder().decode(BYOMOfferSubmitRequestWire.self,
+                    from: XCTUnwrap(byomAdmissionRequestBody(request)))
+                XCTAssertEqual(retried.evaluationDigestSHA256, original.envelope.evaluationDigestSHA256)
+                XCTAssertEqual(retried.discoveryDigestSHA256, original.envelope.discoveryDigestSHA256)
+                XCTAssertNotEqual(retried.nonce, original.envelope.nonce)
+                let persisted = try JSONDecoder().decode(BYOMPendingOfferJournal.Record.self, from: Data(contentsOf: recordURL))
+                XCTAssertEqual(persisted.envelope, retried)
+                XCTAssertNotEqual(persisted.generation, original.generation)
+            }
+            return BYOMAdmissionMockHTTPResponse(statusCode: 200, body: response)
+        }
+        let restarted = retryRuntime(fixture, session: retrySession)
+        let result = try await restarted.retryOffer(providerID: "provider-byom-a", target: fixture.candidate.candidateID)
+        XCTAssertEqual(result.admissionStateSource, "coordinator")
+        XCTAssertEqual(result.admissionState, "offer_submitted")
+    }
+
+    func testRetryMissingOrCorruptJournalNeverPosts() async throws {
+        let fixture = try retryFixture()
+        let response = try ModelSwitchingWireCodec.encode(retryStatus(fixture.candidate))
+        let session = makeBYOMAdmissionSession { request in
+            XCTAssertEqual(request.httpMethod, "GET")
+            return BYOMAdmissionMockHTTPResponse(statusCode: 200, body: response)
+        }
+        let runtime = retryRuntime(fixture, session: session)
+        do {
+            _ = try await runtime.retryOffer(providerID: "provider-byom-a", target: fixture.candidate.candidateID)
+            XCTFail("missing record must fail")
+        } catch { XCTAssertEqual(error as? BYOMModelAdmissionError, .missingRetryTuple) }
+        let package = try BYOMOfferSubmissionBuilder.makePackage(
+            providerID: "provider-byom-a", candidate: fixture.candidate, admissionIdentity: fixture.key,
+            evaluationDigestSHA256: nil, requestedDisclosureClass: "non_earning_provider_asserted"
+        )
+        do {
+            let operation = try BYOMPendingOfferJournal.Operation(namespaceURL: fixture.environment.namespaceURL,
+                providerID: "provider-byom-a", candidateID: fixture.candidate.candidateID)
+            try operation.persist(package.request, replacing: nil)
+        }
+        let url = try XCTUnwrap(FileManager.default.contentsOfDirectory(
+            at: fixture.environment.namespaceURL.deletingLastPathComponent().appendingPathComponent("pending-offers"),
+            includingPropertiesForKeys: nil
+        ).first { $0.pathExtension == "json" })
+        try Data("corrupt".utf8).write(to: url)
+        do {
+            _ = try await runtime.retryOffer(providerID: "provider-byom-a", target: fixture.candidate.candidateID)
+            XCTFail("corrupt record must fail")
+        } catch { XCTAssertTrue(error is BYOMPendingOfferJournal.JournalError) }
+    }
+
+    func testCorruptJournalWithdrawalPreservesUnrelatedEnvelopeAndStillBlocksOffers() async throws {
+        let fixture = try retryFixture()
+        let url = try prepareWithdrawalJournal(fixture, corrupt: true)
+        let original = try Data(contentsOf: url)
+        let session = makeBYOMAdmissionSession { try Self.successfulWithdrawal($0) }
+        let capture = await captureBYOMAdmissionOutput {
+            let result = try await self.retryRuntime(fixture, session: session).withdraw(
+                providerID: "provider-byom-a", target: fixture.candidate.candidateID, reasonCode: "provider_requested")
+            XCTAssertEqual(result.resultingAdmissionState, "withdrawn")
+            XCTAssertEqual(result.warnings, [])
+        }
+        XCTAssertNil(capture.error)
+        XCTAssertEqual(capture.stdout, "")
+        XCTAssertTrue(capture.stderr.contains("coordinator withdrawal succeeded"))
+        XCTAssertTrue(capture.stderr.contains("new offers remain blocked"))
+        XCTAssertEqual(try Data(contentsOf: url), original)
+        let status = try ModelSwitchingWireCodec.encode(retryStatus(fixture.candidate))
+        let blockedSession = makeBYOMAdmissionSession { request in
+            XCTAssertEqual(request.httpMethod, "GET", "unrecoverable journal must never POST retry or replacement")
+            return BYOMAdmissionMockHTTPResponse(statusCode: 200, body: status)
+        }
+        let runtime = retryRuntime(fixture, session: blockedSession)
+        do {
+            _ = try await runtime.retryOffer(providerID: "provider-byom-a", target: fixture.candidate.candidateID)
+            XCTFail("unrecoverable record must block retry")
+        } catch { XCTAssertTrue(error is BYOMPendingOfferJournal.JournalError) }
+        do {
+            _ = try await runtime.submitOffer(providerID: "provider-byom-a", target: fixture.candidate.candidateID,
+                evaluationDigestSHA256: nil, requestedDisclosureClass: "non_earning_provider_asserted")
+            XCTFail("unrecoverable record must block fresh offers")
+        } catch { XCTAssertTrue(error is BYOMPendingOfferJournal.JournalError) }
+        XCTAssertEqual(try Data(contentsOf: url), original)
+    }
+
+    func testValidJournalWithdrawalRetiresRecordWithoutCorruptionWarning() async throws {
+        let fixture = try retryFixture()
+        let url = try prepareWithdrawalJournal(fixture, corrupt: false)
+        let session = makeBYOMAdmissionSession { try Self.successfulWithdrawal($0) }
+        let capture = await captureBYOMAdmissionOutput {
+            _ = try await self.retryRuntime(fixture, session: session).withdraw(
+                providerID: "provider-byom-a", target: fixture.candidate.candidateID, reasonCode: "provider_requested")
+        }
+        XCTAssertNil(capture.error)
+        XCTAssertFalse(capture.stderr.contains("unrecoverable"))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: url.path))
+    }
+
+    func testFailedWithdrawalPreservesCorruptBytesAndNeverClaimsSuccess() async throws {
+        for timeout in [false, true] {
+            let fixture = try retryFixture()
+            let url = try prepareWithdrawalJournal(fixture, corrupt: true)
+            let before = try Data(contentsOf: url)
+            let session = makeBYOMAdmissionSession { _ in
+                if timeout { throw URLError(.timedOut) }
+                return BYOMAdmissionMockHTTPResponse(statusCode: 503, body: "{}")
+            }
+            let capture = await captureBYOMAdmissionOutput {
+                _ = try await self.retryRuntime(fixture, session: session).withdraw(
+                    providerID: "provider-byom-a", target: fixture.candidate.candidateID, reasonCode: "provider_requested")
+            }
+            XCTAssertNotNil(capture.error)
+            XCTAssertFalse(capture.stderr.contains("withdrawal succeeded"))
+            XCTAssertEqual(try Data(contentsOf: url), before)
+        }
+    }
+
+    func testUnsafeJournalFileOrBrokenRootSymlinkBlocksWithdrawalBeforeHTTP() async throws {
+        for symlinkRoot in [false, true] {
+            let fixture = try retryFixture()
+            let url = try prepareWithdrawalJournal(fixture, corrupt: true)
+            if symlinkRoot {
+                let root = url.deletingLastPathComponent()
+                try FileManager.default.moveItem(at: root, to: root.appendingPathExtension("preserved"))
+                try FileManager.default.createSymbolicLink(at: root,
+                    withDestinationURL: root.appendingPathExtension("missing"))
+            } else {
+                try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: url.path)
+            }
+            let session = makeBYOMAdmissionSession { _ in
+                XCTFail("unsafe journal must prevent coordinator mutation")
+                throw URLError(.badServerResponse)
+            }
+            do {
+                _ = try await retryRuntime(fixture, session: session).withdraw(
+                    providerID: "provider-byom-a", target: fixture.candidate.candidateID, reasonCode: "provider_requested")
+                XCTFail("unsafe journal must fail closed")
+            } catch { XCTAssertTrue(error is BYOMPendingOfferJournal.JournalError) }
+        }
+    }
+
+    private func prepareWithdrawalJournal(_ fixture: RetryFixture, corrupt: Bool) throws -> URL {
+        let request = try BYOMOfferSubmissionBuilder.makePackage(providerID: "provider-byom-a",
+            candidate: fixture.candidate, admissionIdentity: fixture.key, evaluationDigestSHA256: nil,
+            requestedDisclosureClass: "non_earning_provider_asserted").request
+        do {
+            let operation = try BYOMPendingOfferJournal.Operation(namespaceURL: fixture.environment.namespaceURL,
+                providerID: "provider-byom-a", candidateID: fixture.candidate.candidateID)
+            try operation.persist(request, replacing: nil)
+        }
+        let url = try XCTUnwrap(FileManager.default.contentsOfDirectory(
+            at: fixture.environment.namespaceURL.deletingLastPathComponent().appendingPathComponent("pending-offers"),
+            includingPropertiesForKeys: nil).first { $0.pathExtension == "json" })
+        if corrupt {
+            let unrelated = try BYOMOfferSubmissionBuilder.makePackage(providerID: "unrelated-provider",
+                candidate: byomAdmissionCandidate(candidateID: stableBYOMAdmissionCandidateID("b"), servedModelRef: "ollama:unrelated"),
+                admissionIdentity: fixture.key, evaluationDigestSHA256: nil,
+                requestedDisclosureClass: "non_earning_provider_asserted").request
+            let object: [String: Any] = ["schema": "byom_pending_offer.v1", "generation": 42,
+                "envelope": try JSONSerialization.jsonObject(with: JSONEncoder().encode(unrelated))]
+            try JSONSerialization.data(withJSONObject: object).write(to: url)
+        }
+        return url
+    }
+
+    private static func successfulWithdrawal(_ request: URLRequest) throws -> BYOMAdmissionMockHTTPResponse {
+        XCTAssertEqual(request.httpMethod, "POST")
+        XCTAssertEqual(request.url?.path, "/v1/provider/model-admission/withdrawals")
+        let submitted = try JSONDecoder().decode(BYOMWithdrawRequestWire.self,
+            from: XCTUnwrap(byomAdmissionRequestBody(request)))
+        let result: [String: Any] = [
+            "schema": "model_admission_withdraw.v1", "generated_at": "2027-01-15T08:00:01Z", "cli_version": "test",
+            "provider_id": submitted.providerID, "candidate_id": submitted.candidateID,
+            "served_model_ref": submitted.servedModelRef, "catalog_model_key": submitted.catalogModelKey.map { $0 as Any } ?? NSNull(),
+            "idempotency_key": submitted.idempotencyKey, "reason_code": submitted.reasonCode,
+            "previous_admission_state": "offer_submitted", "coordinator_event_id": "withdraw-test-event",
+            "accepted_at": "2027-01-15T08:00:01Z", "resulting_admission_state": "withdrawn", "warnings": [],
+            "provider_guidance": ["state_label_key": "byom.admission.withdrawn", "state_meaning_key": "byom.admission.not_earning",
+                "next_action": "submit_offer", "transition_reason_code": submitted.reasonCode,
+                "earning_path_class": "no_earning_path_in_v0_1"],
+        ]
+        return BYOMAdmissionMockHTTPResponse(statusCode: 200,
+            body: String(decoding: try JSONSerialization.data(withJSONObject: result), as: UTF8.self))
+    }
+
+    private struct RetryFixture: Sendable {
+        let environment: BYOMDiscoveryEnvironment
+        let candidate: BYOMDiscoveryWire.Candidate
+        let key: Curve25519.Signing.PrivateKey
+    }
+
+    private func retryFixture() throws -> RetryFixture {
+        let root = try temporaryBYOMAdmissionDirectory("retry-runtime")
+        let namespace = root.appendingPathComponent("ns")
+        let cache = root.appendingPathComponent("hf")
+        try writeBYOMAdmissionNamespace(at: namespace)
+        try createBYOMAdmissionMLXSnapshot(cacheRoot: cache, modelID: "mlx-community/Tiny-1B-4bit")
+        let candidate = try XCTUnwrap(BYOMMLXCacheDiscovery(cacheRoot: cache,
+            namespace: Data(contentsOf: namespace), catalogMatcher: BYOMCatalogMatcher()).discover().candidates.first)
+        return RetryFixture(environment: BYOMDiscoveryEnvironment(namespaceURL: namespace, mlxCacheRoot: cache,
+            ollamaOrigin: nil), candidate: candidate, key: Curve25519.Signing.PrivateKey())
+    }
+
+    private func retryRuntime(_ fixture: RetryFixture, session: URLSession) -> BYOMModelAdmissionRuntime {
+        BYOMModelAdmissionRuntime(environment: fixture.environment,
+            credentialStore: BYOMAdmissionCredentialStore(token: "test-bearer"),
+            identityStore: BYOMAdmissionIdentityStore(identity: fixture.key),
+            client: BYOMModelAdmissionClient(baseURL: URL(string: "https://coordinator.test")!, session: session))
+    }
+
+    private func retryStatus(
+        _ candidate: BYOMDiscoveryWire.Candidate, state: String = "offer_submitted"
+    ) -> BYOMAdmissionStatusWire {
+        BYOMAdmissionStatusWire(
+            schema: "model_admission_status.v1", generatedAt: ModelSwitchingWireCodec.timestamp(),
+            cliVersion: "test", providerID: "provider-byom-a", candidateID: candidate.candidateID,
+            servedModelRef: candidate.servedModelRef, catalogModelKey: candidate.catalogModelKey,
+            admissionState: state, admissionStateSource: "coordinator", coordinatorEventID: "pending-event",
+            stateObservedAt: ModelSwitchingWireCodec.timestamp(),
+            providerGuidance: BYOMDiscoveryWire.Guidance(
+                stateLabelKey: "byom.admission.offer_submitted", stateMeaningKey: "byom.admission.not_earning",
+                nextAction: "wait_for_coordinator", transitionReasonCode: nil,
+                earningPathClass: "no_earning_path_in_v0_1"
+            ), allowedNextStates: [], warnings: []
+        )
+    }
+
     func testOfferCommandRequiresExplicitYesForCoordinatorMutation() async throws {
         let command = try ModelsOfferCommand.parse([
             "ollama:tiny-offer-1b-q4",

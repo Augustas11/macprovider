@@ -49,6 +49,12 @@ struct ModelSwitcherSheet: View {
     @State private var pendingSwitch: MalibuModelRow?
     @State private var pendingOperationName = "switch"
     @State private var showConfirmation = false
+    @State private var showLocalActivationConfirmation = false
+    @State private var pendingAdmission: MalibuModelRow?
+    @State private var showAdmissionConfirmation = false
+    @State private var retryAdmission = false
+    @State private var pendingCleanup: MalibuModelCatalogEconomicsDocument.Recovery?
+    @State private var showCleanupConfirmation = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -77,6 +83,40 @@ struct ModelSwitcherSheet: View {
                 .fixedSize(horizontal: false, vertical: true)
                 .accessibilityAddTraits(.updatesFrequently)
 
+            if store.catalogVerificationInProgress {
+                HStack {
+                    ProgressView()
+                    Text(String(localized: "Verified bytes: \(store.catalogVerifiedBytes)", comment: "Local verification byte progress"))
+                    Button(String(localized: "Stop verification", comment: "Stop owned local verification")) { store.stopCatalogVerification() }
+                }
+            }
+            if store.catalogReadWaitingForExit {
+                Text(String(localized: "Verification stopped; waiting for the reader to exit", comment: "Read child reclamation"))
+            }
+            if store.catalogResourcePreparationInProgress {
+                HStack {
+                    ProgressView()
+                    Button(String(localized: "Stop preparation", comment: "Abandon resource preparation")) { store.cancelCatalogPreparation() }
+                }
+            }
+            if store.pendingCatalogTransaction != nil {
+                if store.catalogTransactionCancelRequested {
+                    Text(String(localized: "Cancellation is pending until the provider confirms the outcome.", comment: "Cancellation pending disclosure"))
+                        .font(.caption)
+                        .accessibilityAddTraits(.updatesFrequently)
+                }
+                HStack {
+                    ProgressView()
+                    Button(String(localized: "Cancel operation", comment: "Transaction cancel button")) {
+                        Task { await store.requestCatalogCancellation() }
+                    }
+                    .accessibilityHint(Text(String(localized: "Requests cancellation from the provider. A completed commit cannot be undone.", comment: "Transaction cancellation hint")))
+                    Button(String(localized: "Check status", comment: "Transaction status button")) {
+                        Task { await store.reconcileCatalogTransaction() }
+                    }
+                }
+            }
+
             if let recommendation = store.recommendation {
                 recommendationCallout(recommendation)
             }
@@ -94,7 +134,7 @@ struct ModelSwitcherSheet: View {
                     }
                     .accessibilityLabel(Text(String(localized: "Retry model catalog refresh", comment: "Catalog retry accessibility label")))
                 }
-            } else if store.rows.isEmpty {
+            } else if store.rows.isEmpty && store.cleanupRecoveries.isEmpty {
                 Text(String(localized: "No supported models were returned by the provider.", comment: "Empty model catalog"))
                     .foregroundStyle(.secondary)
             } else {
@@ -106,8 +146,26 @@ struct ModelSwitcherSheet: View {
                                 .foregroundStyle(.secondary)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
+                        if !store.cleanupRecoveries.isEmpty {
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text(String(localized: "Staging cleanup", comment: "Independent cleanup section")).font(.headline)
+                                ForEach(store.cleanupRecoveries) { recovery in
+                                    HStack {
+                                        Text(recovery.targetModelID).font(.caption.monospaced()).textSelection(.enabled)
+                                        Spacer()
+                                        Button(String(localized: "Clean up staging", comment: "Independent cleanup action")) {
+                                            pendingCleanup = recovery
+                                            showCleanupConfirmation = true
+                                        }
+                                        .disabled(!store.canPerformCleanupRecovery)
+                                        .accessibilityIdentifier(recovery.id)
+                                    }
+                                }
+                            }
+                        }
                         section(ModelFeatureUI.current, category: .current)
-                        section(ModelFeatureUI.ready, category: .ready)
+                        section(store.rows.contains(where: { $0.localActivation && $0.category == .ready })
+                            ? String(localized: "Prepared models", comment: "Prepared models section") : ModelFeatureUI.ready, category: .ready)
                         section(ModelFeatureUI.networkCatalog, category: .networkCatalog)
                         section(ModelFeatureUI.needsPreparation, category: .needsPreparation)
                         section(ModelFeatureUI.blocked, category: .blocked)
@@ -147,19 +205,46 @@ struct ModelSwitcherSheet: View {
         .padding(20)
         .frame(width: 520, height: 620)
         .confirmationDialog(
-            String(localized: "Confirm model switch", comment: "Switch confirmation title"),
+            String(localized: "Confirm model action", comment: "Model confirmation title"),
             isPresented: $showConfirmation
         ) {
             Button(pendingOperationName == "revert"
                    ? ModelFeatureUI.revert
-                   : (pendingSwitch?.category == .ready ? ModelFeatureUI.switchModel : ModelFeatureUI.evaluate)) {
+                   : (pendingSwitch?.catalogActionLabel ?? ModelFeatureUI.switchModel)) {
                 if let row = pendingSwitch {
-                    Task { await store.switchTo(row, operationName: pendingOperationName) }
+                    Task {
+                        if row.catalogTransaction != nil { await store.performCatalogAction(row, confirmed: true) }
+                        else { await store.switchTo(row, operationName: pendingOperationName) }
+                    }
                 }
             }
             Button(String(localized: "Cancel", comment: "Switch confirmation cancel"), role: .cancel) {}
         } message: {
             Text(confirmationMessage(for: pendingSwitch))
+        }
+        .confirmationDialog(String(localized: "Confirm local activation", comment: "Local activation title"), isPresented: $showLocalActivationConfirmation) {
+            Button(String(localized: "Activate locally", comment: "Local activation action")) {
+                Task { await store.adoptRecommendation() }
+            }
+            Button(String(localized: "Cancel", comment: "Activation cancel"), role: .cancel) {}
+        } message: {
+            Text(String(localized: "Activate \(store.recommendation?.recommendedModel ?? "") using the verified signed MacProvider catalog and measured local recommendation. This changes the active model and does not authorize paid routing. Network admission and verified settlement remain separate.", comment: "Local activation confirmation"))
+        }
+        .confirmationDialog(String(localized: "Clean up staging", comment: "Cleanup confirmation title"), isPresented: $showCleanupConfirmation) {
+            Button(String(localized: "Clean up staging", comment: "Cleanup confirmation action")) {
+                if let recovery = pendingCleanup { Task { await store.performCleanupRecovery(recovery, confirmed: true) } }
+            }
+            Button(String(localized: "Cancel", comment: "Cleanup confirmation cancel"), role: .cancel) {}
+        } message: {
+            if let recovery = pendingCleanup { Text(store.cleanupConfirmation(recovery)) }
+        }
+        .confirmationDialog(String(localized: "Request network admission", comment: "Admission confirmation title"), isPresented: $showAdmissionConfirmation) {
+            Button(String(localized: "Submit signed offer", comment: "Admission submit action")) {
+                if let row = pendingAdmission { Task { await store.requestAdmission(for: row, confirmed: true, retry: retryAdmission) } }
+            }
+            Button(String(localized: "Cancel", comment: "Admission cancel"), role: .cancel) {}
+        } message: {
+            Text(String(localized: "Submit \(pendingAdmission?.id ?? "") through the provider CLI. The coordinator independently checks admission and pricing. Submission does not establish settlement eligibility or credit.", comment: "Admission confirmation disclosure"))
         }
         .task(id: "\(agent.snapshot.localProviderID ?? "unknown"):\(agent.snapshot.statusObservationID ?? "unknown")") {
             await refreshFromSnapshot()
@@ -191,13 +276,17 @@ struct ModelSwitcherSheet: View {
                     .truncationMode(.middle)
                     .textSelection(.enabled)
             }
-            if let rationale = recommendation.displayRationale {
+            if !store.recommendationIsLocalActivation, let rationale = recommendation.displayRationale {
                 Text(rationale)
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            ForEach(recommendation.displayEvidenceLines, id: \.self) { line in
+            if store.recommendationIsLocalActivation {
+                Text(String(localized: "Measured prepared model. Local activation does not authorize paid routing.", comment: "Local recommendation disclosure"))
+                    .font(.callout)
+            }
+            ForEach(store.recommendationIsLocalActivation ? [] : recommendation.displayEvidenceLines, id: \.self) { line in
                 Text(line)
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -206,13 +295,13 @@ struct ModelSwitcherSheet: View {
             Text(String(localized: "Scope: signed catalog \(recommendation.inputs.candidateCatalogVersion) for \(recommendation.hardware.chip), \(recommendation.hardware.memoryGB) GB.", comment: "Recommendation evidence scope"))
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            if let prompt = recommendation.promptRateUSDPerMillionTokens,
+            if !store.recommendationIsLocalActivation, let prompt = recommendation.promptRateUSDPerMillionTokens,
                let completion = recommendation.completionRateUSDPerMillionTokens {
                 Text(String(localized: "Estimated rates: prompt $\(prompt, format: .number.precision(.fractionLength(2...4))) / 1M; completion $\(completion, format: .number.precision(.fractionLength(2...4))) / 1M.", comment: "Recommendation estimated rates"))
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
-            if !recommendation.warnings.isEmpty {
+            if !store.recommendationIsLocalActivation, !recommendation.warnings.isEmpty {
                 Text(String(localized: "Warnings: \(recommendation.warnings.joined(separator: ", "))", comment: "Recommendation warnings"))
                     .font(.caption)
                     .foregroundStyle(.orange)
@@ -220,7 +309,8 @@ struct ModelSwitcherSheet: View {
             HStack {
                 if recommendation.isRecommendationResult {
                     Button(ModelFeatureUI.adopt) {
-                        Task { await store.adoptRecommendation() }
+                        if store.recommendationIsLocalActivation { showLocalActivationConfirmation = true }
+                        else { Task { await store.adoptRecommendation() } }
                     }
                     .disabled(!store.canAdoptRecommendation)
                     .keyboardShortcut(.defaultAction)
@@ -255,6 +345,30 @@ struct ModelSwitcherSheet: View {
                         pendingOperationName = "switch"
                         showConfirmation = true
                     }
+                    if row.needsLocalVerification {
+                        Button(String(localized: "Verify local files", comment: "Verify exact local model")) { Task { await store.verifyLocalFiles(row) } }
+                            .disabled(!store.canVerifyLocalFiles(row))
+                    }
+                    if row.category == .current && row.catalogModelKey != nil {
+                        HStack {
+                            Button(String(localized: "Request network admission", comment: "Admission action")) {
+                                pendingAdmission = row
+                                retryAdmission = false
+                                showAdmissionConfirmation = true
+                            }
+                            .disabled(!store.canRequestAdmission(for: row))
+                            Button(String(localized: "Retry qualification", comment: "Admission retry action")) {
+                                pendingAdmission = row
+                                retryAdmission = true
+                                showAdmissionConfirmation = true
+                            }
+                            .disabled(!store.canRetryAdmission(for: row))
+                            Button(String(localized: "Refresh admission", comment: "Admission refresh action")) {
+                                Task { await store.refreshAdmission(for: row) }
+                            }
+                            .disabled(!store.canRefreshAdmission(for: row))
+                        }
+                    }
                 }
             }
         }
@@ -287,6 +401,7 @@ struct ModelSwitcherSheet: View {
         guard let row else {
             return String(localized: "No model is selected.", comment: "Switch confirmation empty state")
         }
+        if row.catalogTransaction != nil { return store.catalogConfirmation(for: row) }
         if row.category == .ready {
             return String(localized: "Switch from \(store.currentModelID ?? "the current model") to \(row.id). No download is expected; the provider may load the local weights while serving, then drain active work before committing the new model.", comment: "Ready model switch confirmation")
         }
@@ -338,6 +453,13 @@ private struct ModelRowView: View {
                 }
                 .font(.caption)
                 .foregroundStyle(.secondary)
+                if let admission = row.admissionStatusLine {
+                    Text(admission)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityIdentifier("model.admission.status")
+                }
                 if let economicsAccessibilityLabel = row.economicsAccessibilityLabel {
                     // Rates and the non-earning caveat are one accessibility
                     // element voiced as a single announcement, so a catalog_priced
@@ -378,6 +500,11 @@ private struct ModelRowView: View {
                 Button(ModelFeatureUI.switchModel, action: onAction)
                     .disabled(!enabled)
                     .accessibilityHint(Text(String(localized: "Shows a confirmation before the provider changes its served model.", comment: "Switch accessibility hint")))
+            } else if row.catalogTransaction != nil {
+                Button(row.catalogActionLabel, action: onAction)
+                    .disabled(!enabled)
+                    .accessibilityLabel(Text("\(row.catalogActionLabel) \(row.displayID)"))
+                    .accessibilityHint(Text(String(localized: "Shows the exact target, size, and trust source before confirmation.", comment: "Preparation accessibility hint")))
             } else if row.action == .evaluate {
                 Button(ModelFeatureUI.evaluate, action: onAction)
                     .disabled(true)

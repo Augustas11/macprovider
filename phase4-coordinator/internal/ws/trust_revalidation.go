@@ -314,7 +314,7 @@ func (s *Server) disconnectAdmittedSessionForTrustRevalidation(admitted admitted
 		Str("assigned_id", provider.AssignedID).
 		Str("actor", actor).
 		Msg("draining provider session after hardware trust revocation")
-	time.AfterFunc(200*time.Millisecond, func() {
+	s.scheduleSessionClosure(session, 200*time.Millisecond, func() {
 		s.closeSession(session, CloseBanned, "hardware trust revoked for provider "+provider.ProviderID)
 	})
 }

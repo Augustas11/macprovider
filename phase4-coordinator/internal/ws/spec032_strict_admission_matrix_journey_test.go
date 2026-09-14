@@ -261,6 +261,7 @@ func spec032PhaseR002(t *testing.T, catalog *autotune.Catalog, now time.Time) []
 		if c.subjectTuple {
 			setAdmittedTupleValues(subject, "hashA", "apple m4 max", 64)
 		}
+		republishEncryptedHarnessProvider(t, s, subject)
 
 		control := spec032ControlProvider("control-r002", "control-r002-s")
 		setAdmittedTupleValues(control, "hashC", "apple m4 max", 64)
@@ -310,6 +311,7 @@ func spec032PhaseR003(t *testing.T, catalog *autotune.Catalog, now time.Time) []
 	// Evidence-absent subject: no admitted tuple => sandboxed on strict revalidate.
 	subject.ModelID = "small-model"
 	subject.MaxAdmittedMinRAMGB = 0
+	republishEncryptedHarnessProvider(t, s, subject)
 
 	control := spec032ControlProvider("control-r003", "control-r003-s")
 	setAdmittedTupleValues(control, "hashC", "apple m4 max", 64)

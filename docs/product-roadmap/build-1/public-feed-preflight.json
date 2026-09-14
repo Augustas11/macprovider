@@ -1,0 +1,26 @@
+{
+  "observed_at": "2026-09-10T06:09:43.097967+00:00",
+  "method": "Unauthenticated HTTPS GET with 12 second timeout, bounded to 1 MiB; response status and body digest only; no signature validation claimed.",
+  "results": [
+    {
+      "endpoint": "https://coordinator.malibu.tech/v1/catalog-artifacts",
+      "http_status": 404
+    },
+    {
+      "endpoint": "https://coordinator.malibu.tech/v1/catalog-artifacts.sig",
+      "http_status": 404
+    },
+    {
+      "endpoint": "https://coordinator.malibu.tech/v1/autotune-candidates",
+      "http_status": 200,
+      "bytes": 6744,
+      "sha256": "10b792ad574042c22d8cbb555c67baf14d6357ea6727e56164f4d8b73c03fa4a"
+    },
+    {
+      "endpoint": "https://coordinator.malibu.tech/v1/autotune-candidates.sig",
+      "http_status": 200,
+      "bytes": 160,
+      "sha256": "51df5ea17b9f6e6541a399d4f5340c825acd8ef16ca715c42133ac2f0231371f"
+    }
+  ]
+}

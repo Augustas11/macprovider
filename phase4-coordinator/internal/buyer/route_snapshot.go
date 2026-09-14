@@ -135,6 +135,12 @@ func (b *billingRecorder) recordRouteSnapshot(providerBody []byte, provider pool
 		PoolID: b.state.poolID,
 	}
 	applyBYOMRouteSnapshotBinding(&snapshot, byomBinding)
+	if byomBinding.ArtifactAdmissionEvidence != nil {
+		if b.artifactAdmissionByAttempt == nil {
+			b.artifactAdmissionByAttempt = map[int]billing.ArtifactAdmissionEvidence{}
+		}
+		b.artifactAdmissionByAttempt[attemptN] = *byomBinding.ArtifactAdmissionEvidence
+	}
 	computeIntegrityRequired, computeIntegrityCovered, computeIntegrityHardwareDigest, err := computeIntegrityRouteBinding(provider, routeMode)
 	if err != nil {
 		return nil, err

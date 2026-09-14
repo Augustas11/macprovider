@@ -3,6 +3,146 @@ import XCTest
 @testable import macprovider_cli
 
 final class ModelCatalogEconomicsTests: XCTestCase {
+    func testUnverifiedExistingArtifactCannotBecomePreparationOrReadyShortcut() throws {
+        let inputs = try Self.staticInputs()
+        let (modelKey, target) = try XCTUnwrap(inputs.candidateCatalog.value.rows.first)
+        let root = FileManager.default.temporaryDirectory.resolvingSymlinksInPath().appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let key = ModelCatalogLocalInspection.Key(modelKey: modelKey, modelID: target.modelID,
+            revision: String(repeating: "1", count: 40), sha256: String(repeating: "2", count: 64))
+        let location = try DurableModelArtifactStore(root: root).artifactURL(modelID: key.modelID, revision: key.revision, sha256: key.sha256)
+        try FileManager.default.createDirectory(at: location, withIntermediateDirectories: true)
+        let inspections = ModelCatalogLocalInspection(root: root)
+        XCTAssertEqual(try inspections.inspect(key: key).state, .unverified)
+        for current in [false, true] {
+            let projection = ModelCatalogEconomicsBuilder.makeProjection(
+                currentModelID: current ? target.modelID : nil, discovery: Self.discovery(candidates: []), admissionStatuses: [:],
+                demand: inputs.demand, candidateCatalog: inputs.candidateCatalog, rateCard: inputs.rateCard,
+                localActivation: true, localActions: [modelKey: Self.localPreparation(target: target.modelID)],
+                localInspection: inspections, transactionContextSHA256: String(repeating: "a", count: 64))
+            let row = try XCTUnwrap(projection.rows.first { $0.modelKey == modelKey })
+            XCTAssertEqual(row.localVerification?.state, .unverified)
+            XCTAssertFalse(row.weightsPresentLocally)
+            XCTAssertFalse(row.prepare.available)
+            XCTAssertFalse(row.evaluate.available)
+            XCTAssertFalse(row.adoptRecommendation.available)
+            XCTAssertEqual(row.disabledReason, "local_verification_required")
+            if !current { XCTAssertEqual(row.runtimeState, "verification_required") }
+            XCTAssertEqual(row.isCurrent, current)
+            XCTAssertFalse(row.warningCodes.contains("model_not_local"))
+        }
+    }
+
+    func testNegotiatedLocalPreparationDoesNotGrantEconomicsOrAdmission() throws {
+        let inputs = try Self.staticInputs()
+        let (key, target) = try XCTUnwrap(inputs.candidateCatalog.value.rows.first)
+        let actions = Self.localPreparation(target: target.modelID)
+        let projection = ModelCatalogEconomicsBuilder.makeProjection(
+            currentModelID: nil, discovery: Self.discovery(candidates: []), admissionStatuses: [:],
+            demand: inputs.demand, candidateCatalog: inputs.candidateCatalog, rateCard: inputs.rateCard,
+            localActivation: true, localActions: [key: actions], transactionContextSHA256: String(repeating: "a", count: 64)
+        )
+        let row = try XCTUnwrap(projection.rows.first { $0.modelKey == key })
+        XCTAssertEqual(projection.source.projectionProtocolVersion, "2")
+        XCTAssertEqual(row.actionModelID, target.modelID)
+        XCTAssertTrue(row.prepare.available)
+        XCTAssertEqual(row.runtimeState, "needs_preparation")
+        XCTAssertFalse(row.admission.catalogEconomicsPermitted)
+        XCTAssertFalse(row.admission.settlementCapable)
+        XCTAssertNil(row.providerCompletionPayoutUSDPerMillionTokens)
+        XCTAssertNil(row.promptRateUSDPerMillionTokens)
+        XCTAssertNil(row.demandRank)
+        XCTAssertFalse(row.evaluate.available)
+        XCTAssertFalse(row.adoptRecommendation.available)
+    }
+
+    func testLegacyProjectionIgnoresLocalActionReservations() throws {
+        let inputs = try Self.staticInputs()
+        let (key, target) = try XCTUnwrap(inputs.candidateCatalog.value.rows.first)
+        let projection = ModelCatalogEconomicsBuilder.makeProjection(
+            currentModelID: nil, discovery: Self.discovery(candidates: []), admissionStatuses: [:],
+            demand: inputs.demand, candidateCatalog: inputs.candidateCatalog, rateCard: inputs.rateCard,
+            localActions: [key: Self.localPreparation(target: target.modelID)]
+        )
+        let row = try XCTUnwrap(projection.rows.first { $0.modelKey == key })
+        XCTAssertEqual(projection.source.projectionProtocolVersion, "1")
+        XCTAssertNil(row.actionModelID)
+        XCTAssertFalse(row.prepare.available)
+    }
+
+    func testLocalPreparationReservationCannotEnableDifferentCatalogTarget() throws {
+        let inputs = try Self.staticInputs()
+        let (key, _) = try XCTUnwrap(inputs.candidateCatalog.value.rows.first)
+        let projection = ModelCatalogEconomicsBuilder.makeProjection(
+            currentModelID: nil, discovery: Self.discovery(candidates: []), admissionStatuses: [:],
+            demand: inputs.demand, candidateCatalog: inputs.candidateCatalog, rateCard: inputs.rateCard,
+            localActivation: true, localActions: [key: Self.localPreparation(target: "different/model")], transactionContextSHA256: String(repeating: "a", count: 64)
+        )
+        let row = try XCTUnwrap(projection.rows.first { $0.modelKey == key })
+        XCTAssertNil(row.actionModelID)
+        XCTAssertFalse(row.prepare.available)
+    }
+
+    func testRecoveryWireIsProtocolTwoOnlyAndCannotChangeModelRows() throws {
+        let inputs = try Self.staticInputs()
+        let (key, target) = try XCTUnwrap(inputs.candidateCatalog.value.rows.first)
+        let recovery = ModelCatalogEconomicsWire.Recovery(targetModelID: "removed/model", modelKey: key,
+            action: .init(available: true, requiresConfirmation: true, transactionKind: "cleanup_staging",
+                transactionID: "c83b4423-df93-4a2c-aa99-e4a1d40b7247", actionTimeoutSeconds: 1800,
+                estimatedBytes: nil, unavailableReason: nil, operationGeneration: "381e9d44-707f-4378-8e01-739f04e4ceac"))
+        func projection(local: Bool, recoveries: [ModelCatalogEconomicsWire.Recovery]) -> ModelCatalogEconomicsWire {
+            ModelCatalogEconomicsBuilder.makeProjection(currentModelID: target.modelID,
+                discovery: Self.discovery(candidates: []), admissionStatuses: [:], demand: inputs.demand,
+                candidateCatalog: inputs.candidateCatalog, rateCard: inputs.rateCard,
+                localActivation: local, localActions: [key: Self.localPreparation(target: target.modelID)],
+                transactionContextSHA256: String(repeating: "a", count: 64), recoveries: recoveries)
+        }
+        let plain = projection(local: true, recoveries: [])
+        let withRecovery = projection(local: true, recoveries: [recovery])
+        XCTAssertEqual(plain.rows, withRecovery.rows)
+        XCTAssertFalse(withRecovery.rows.contains { $0.cleanupStaging.available })
+        for local in [false, true] {
+            let encoded = try ModelSwitchingWireCodec.encode(projection(local: local, recoveries: [recovery]))
+            let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(encoded.utf8)) as? [String: Any])
+            let source = try XCTUnwrap(object["source"] as? [String: Any])
+            let rows = try XCTUnwrap(object["rows"] as? [[String: Any]])
+            let action = try XCTUnwrap(rows.first?["prepare"] as? [String: Any])
+            XCTAssertEqual(object.keys.contains("recoveries"), local)
+            XCTAssertEqual(rows.first?.keys.contains("local_verification"), local)
+            XCTAssertEqual(source.keys.contains("transaction_context_sha256"), local)
+            XCTAssertEqual(action.keys.contains("operation_generation"), local)
+            XCTAssertFalse(encoded.contains("config_path"))
+            XCTAssertFalse(encoded.contains("home_directory"))
+        }
+    }
+
+    func testUnboundProjectionNeverExposesLocalMutationOrRecovery() throws {
+        let inputs = try Self.staticInputs()
+        let (key, target) = try XCTUnwrap(inputs.candidateCatalog.value.rows.first)
+        for digest in [nil, "invalid"] as [String?] {
+            let projection = ModelCatalogEconomicsBuilder.makeProjection(currentModelID: nil,
+                discovery: Self.discovery(candidates: []), admissionStatuses: [:], demand: inputs.demand,
+                candidateCatalog: inputs.candidateCatalog, rateCard: inputs.rateCard,
+                localActivation: true, localActions: [key: Self.localPreparation(target: target.modelID)],
+                transactionContextSHA256: digest)
+            XCTAssertFalse(projection.rows.contains { $0.prepare.available || $0.evaluate.available || $0.adoptRecommendation.available })
+            XCTAssertNil(projection.source.transactionContextSHA256)
+            XCTAssertTrue(projection.recoveries.isEmpty)
+        }
+    }
+
+    private static func localPreparation(target: String) -> ModelCatalogLocalActions {
+        let unavailable = ModelCatalogEconomicsWire.Action.unavailable("action_unavailable")
+        return ModelCatalogLocalActions(
+            targetModelID: target,
+            prepare: .init(available: true, requiresConfirmation: true, transactionKind: "prepare_model",
+                           transactionID: "bde707e3-058b-4971-97cc-bc8fc94b0394", actionTimeoutSeconds: 1800,
+                           estimatedBytes: 4096, unavailableReason: nil, operationGeneration: "381e9d44-707f-4378-8e01-739f04e4ceac"),
+            evaluate: unavailable, adoptRecommendation: unavailable, cleanupStaging: unavailable
+        )
+    }
+
     func testLocalOnlyCandidateEncodesExplicitNullMoneyFields() throws {
         let inputs = try Self.staticInputs()
         let projection = ModelCatalogEconomicsBuilder.makeProjection(

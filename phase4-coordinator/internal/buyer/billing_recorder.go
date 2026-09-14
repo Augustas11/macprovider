@@ -46,10 +46,11 @@ import (
 //     recordRow call, preserving the pre-refactor value-at-fire-time
 //     contract.
 type billingRecorder struct {
-	server    *Server
-	state     *forwardState
-	req       *http.Request
-	startedAt time.Time
+	artifactAdmissionByAttempt map[int]billing.ArtifactAdmissionEvidence
+	server                     *Server
+	state                      *forwardState
+	req                        *http.Request
+	startedAt                  time.Time
 
 	// Late-bound per-request fields. Set as the request parses, before
 	// any provider-bound recordRow call. Pre-refactor these were
@@ -425,7 +426,6 @@ func (b *billingRecorder) recordRow(
 			StickyResult:                 b.state.stickyResult,
 			StickyMissReason:             b.state.stickyMissReason,
 			ConfigSnapshotID:             billingSnapshotID,
-			RateEntry:                    billing.RateFor(billingCfg.RateCard, row.Model),
 			RateCard:                     billingCfg.RateCard,
 			MultiplierPPM:                billing.ParseMultiplierPPM(billingCfg.GlobalMultiplier),
 			ProviderShareBps:             billing.ParseShareBps(billingCfg.ProviderShare),
@@ -437,6 +437,15 @@ func (b *billingRecorder) recordRow(
 			EffectivePrivacyOutcome:      row.EffectivePrivacyOutcome,
 			PositiveVerificationExcluded: row.PositiveVerificationExcluded,
 			RewardsExcluded:              row.RewardsExcluded,
+		}
+		if evidence, ok := b.artifactAdmissionByAttempt[attemptN]; ok {
+			billingInput.ConfigSnapshotID = evidence.ConfigSnapshotID
+			billingInput.RateCard = nil
+			billingInput.RateEntry = evidence.RateEntry()
+			billingInput.MultiplierPPM = evidence.GlobalMultiplierPPM
+			billingInput.ProviderShareBps = evidence.ProviderShareBPS
+		} else {
+			billingInput.RateEntry = billing.RateFor(billingCfg.RateCard, row.Model)
 		}
 		var err error
 		if b.hasAuthenticatedAccount {

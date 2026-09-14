@@ -1262,6 +1262,7 @@ enum BYOMModelAdmissionError: Error, Equatable, CustomStringConvertible {
     case invalidEvaluationDigest
     case invalidWithdrawalReason
     case missingWithdrawalTuple
+    case missingRetryTuple
     case invalidCoordinatorURL
     case httpStatus(Int)
     case invalidStatusSchema
@@ -1288,6 +1289,8 @@ enum BYOMModelAdmissionError: Error, Equatable, CustomStringConvertible {
             return "withdrawal reason must be one of provider_requested, wrong_model, runtime_unavailable, identity_mismatch, policy_uncertain, or other_operator_reason"
         case .missingWithdrawalTuple:
             return "coordinator status does not contain a withdrawable BYOM admission tuple"
+        case .missingRetryTuple:
+            return "retry requires the exact locally recorded pending offer; changed or missing evidence requires a fresh models offer"
         case .invalidCoordinatorURL:
             return "invalid coordinator URL; use wss:// or https://"
         case .httpStatus(let status):
@@ -1421,6 +1424,72 @@ struct BYOMOfferSubmissionBuilder {
         // over- nor under-promises the real submit. Unstable-id / namespace faults are
         // additionally rejected by the caller (makePackage) before canSubmit.
         return Set(candidate.warningCodes).isDisjoint(with: BYOMDiscoveryWarning.submitBlockingWarningCodes)
+    }
+}
+
+enum BYOMOfferRetryBuilder {
+    static let pendingStates: Set<String> = [
+        "offer_submitted", "sandbox_probe_only", "network_admitted_unsettled", "catalog_priced",
+    ]
+
+    static func makePackage(
+        original: BYOMOfferSubmitRequestWire,
+        status: BYOMAdmissionStatusWire,
+        candidate: BYOMDiscoveryWire.Candidate,
+        admissionIdentity: Curve25519.Signing.PrivateKey,
+        now: Date = Date(),
+        nonce: String = UUID().uuidString.lowercased(),
+        idempotencyKey: String = UUID().uuidString.lowercased()
+    ) throws -> BYOMOfferSubmissionPackage {
+        let currentKeyDigest = SHA256.hash(data: admissionIdentity.publicKey.rawRepresentation)
+            .map { String(format: "%02x", $0) }.joined()
+        guard status.admissionStateSource == "coordinator", pendingStates.contains(status.admissionState),
+              status.providerID == original.providerID,
+              status.candidateID == original.candidateID,
+              status.servedModelRef == original.servedModelRef,
+              (status.catalogModelKey ?? "") == original.catalogModelKey,
+              candidate.candidateID == original.candidateID,
+              candidate.runtimeSource == original.runtimeSource,
+              candidate.servedModelRef == original.servedModelRef,
+              (candidate.catalogModelKey ?? "") == original.catalogModelKey,
+              original.schema == "model_admission_offer_submit.v1",
+              original.signatureDomain == "macprovider.model_admission.offer.v1",
+              original.signatureAlgorithm == "ed25519",
+              original.signingKeyDigest == currentKeyDigest,
+              let originalSignature = Data(base64Encoded: original.providerSignature),
+              try admissionIdentity.publicKey.isValidSignature(
+                originalSignature, for: Data(RFC8785JCS.canonicalString(original.canonicalValue()).utf8)
+              ),
+              nonce != original.nonce, idempotencyKey != original.idempotencyKey,
+              try BYOMOfferSubmissionBuilder.discoveryDigest(candidate) == original.discoveryDigestSHA256 else {
+            throw BYOMModelAdmissionError.missingRetryTuple
+        }
+        // Reapply the ordinary local offerability gate. Retry never revives a
+        // no-longer-ready candidate or changes its recorded evaluation tuple.
+        let fresh = try BYOMOfferSubmissionBuilder.makePackage(
+            providerID: original.providerID, candidate: candidate, admissionIdentity: admissionIdentity,
+            evaluationDigestSHA256: original.evaluationDigestSHA256,
+            requestedDisclosureClass: original.requestedDisclosureClass,
+            now: now, nonce: nonce, idempotencyKey: idempotencyKey
+        ).request
+        var request = BYOMOfferSubmitRequestWire(
+            schema: fresh.schema, signatureDomain: fresh.signatureDomain,
+            providerID: original.providerID, candidateID: original.candidateID,
+            runtimeSource: original.runtimeSource, servedModelRef: original.servedModelRef,
+            catalogModelKey: original.catalogModelKey, discoveryDigestSHA256: original.discoveryDigestSHA256,
+            evaluationDigestSHA256: original.evaluationDigestSHA256, artifactHashes: original.artifactHashes,
+            advisoryCapabilities: original.advisoryCapabilities, fitEvidenceSource: original.fitEvidenceSource,
+            localReadiness: fresh.localReadiness, requestedDisclosureClass: original.requestedDisclosureClass,
+            timestamp: fresh.timestamp, nonce: fresh.nonce, idempotencyKey: fresh.idempotencyKey,
+            signingKeyDigest: fresh.signingKeyDigest, signatureAlgorithm: fresh.signatureAlgorithm,
+            providerSignature: "", cliVersion: fresh.cliVersion
+        )
+        let canonical = Data(try RFC8785JCS.canonicalString(request.canonicalValue()).utf8)
+        request.providerSignature = try admissionIdentity.signature(for: canonical).base64EncodedString()
+        return BYOMOfferSubmissionPackage(
+            request: request, encodedRequest: Data(try ModelSwitchingWireCodec.encode(request).utf8),
+            payloadDigestSHA256: SHA256.hash(data: canonical).map { String(format: "%02x", $0) }.joined()
+        )
     }
 }
 
@@ -1612,6 +1681,19 @@ struct BYOMModelAdmissionClient: Sendable {
         )
     }
 
+    func retryOffer(_ package: BYOMOfferSubmissionPackage, bearerToken: String) async throws -> BYOMAdmissionStatusWire {
+        var request = URLRequest(url: baseURL.appendingPathComponent("v1/provider/model-admission/retry"))
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(bearerToken)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
+        request.setValue("application/json", forHTTPHeaderField: "accept")
+        request.httpBody = package.encodedRequest
+        return try await perform(
+            request, expectedProviderID: package.request.providerID,
+            expectedCandidateID: package.request.candidateID
+        )
+    }
+
     func withdraw(_ package: BYOMWithdrawalPackage, bearerToken: String) async throws -> BYOMAdmissionWithdrawWire {
         var request = URLRequest(url: baseURL.appendingPathComponent("v1/provider/model-admission/withdrawals"))
         request.httpMethod = "POST"
@@ -1782,7 +1864,68 @@ struct BYOMModelAdmissionRuntime: Sendable {
             evaluationDigestSHA256: evaluationDigestSHA256,
             requestedDisclosureClass: requestedDisclosureClass
         )
-        return try await client.submitOffer(package, bearerToken: bearer)
+        let journal = try BYOMPendingOfferJournal.Operation(
+            namespaceURL: environment.namespaceURL, providerID: providerID, candidateID: candidate.candidateID
+        )
+        var previous = try journal.load()
+        if let prior = previous,
+           try BYOMPendingOfferJournal.protectedTupleDigest(prior.envelope)
+            != BYOMPendingOfferJournal.protectedTupleDigest(package.request) {
+            let current = try await client.status(
+                candidateID: candidate.candidateID, providerID: providerID, bearerToken: bearer
+            )
+            guard BYOMPendingOfferJournal.terminalStates.contains(current.admissionState),
+                  current.servedModelRef == prior.envelope.servedModelRef,
+                  (current.catalogModelKey ?? "") == prior.envelope.catalogModelKey else {
+                throw BYOMPendingOfferJournal.JournalError.unresolved
+            }
+            try journal.reconcile(generation: prior.generation, terminal: true)
+            previous = nil
+        }
+        // Commit replay material before any HTTP: a lost accepted response must
+        // leave the exact signed tuple available after process restart.
+        let record = try journal.persist(package.request, replacing: previous?.generation)
+        let status = try await client.submitOffer(package, bearerToken: bearer)
+        try Self.reconcileOffer(status, package: package, record: record, journal: journal)
+        return status
+    }
+
+    func retryOffer(providerID: String, target: String) async throws -> BYOMAdmissionStatusWire {
+        guard let client else { throw BYOMModelAdmissionError.missingCoordinatorURL }
+        guard let candidate = await resolveCandidate(target) else { throw BYOMModelAdmissionError.candidateNotFound }
+        guard let bearer = try credentialStore.load(providerID: providerID) else {
+            throw BYOMModelAdmissionError.missingBearer(providerID: providerID)
+        }
+        guard let identity = try identityStore.loadAdmissionIdentity(providerId: providerID) else {
+            throw BYOMModelAdmissionError.missingAdmissionIdentity(providerID: providerID)
+        }
+        let journal = try BYOMPendingOfferJournal.Operation(
+            namespaceURL: environment.namespaceURL, providerID: providerID, candidateID: candidate.candidateID
+        )
+        let current = try await client.status(candidateID: candidate.candidateID, providerID: providerID, bearerToken: bearer)
+        guard BYOMOfferRetryBuilder.pendingStates.contains(current.admissionState),
+              let original = try journal.load() else { throw BYOMModelAdmissionError.missingRetryTuple }
+        let package = try BYOMOfferRetryBuilder.makePackage(
+            original: original.envelope, status: current, candidate: candidate, admissionIdentity: identity
+        )
+        let record = try journal.persist(package.request, replacing: original.generation)
+        let status = try await client.retryOffer(package, bearerToken: bearer)
+        try Self.reconcileOffer(status, package: package, record: record, journal: journal)
+        return status
+    }
+
+    private static func reconcileOffer(
+        _ status: BYOMAdmissionStatusWire, package: BYOMOfferSubmissionPackage,
+        record: BYOMPendingOfferJournal.Record, journal: BYOMPendingOfferJournal.Operation
+    ) throws {
+        guard status.servedModelRef == package.request.servedModelRef,
+              (status.catalogModelKey ?? "") == package.request.catalogModelKey else {
+            throw BYOMModelAdmissionError.invalidStatusSchema
+        }
+        try journal.reconcile(
+            generation: record.generation,
+            terminal: BYOMPendingOfferJournal.terminalStates.contains(status.admissionState)
+        )
     }
 
     func status(providerID: String, target: String) async throws -> BYOMAdmissionStatusWire {
@@ -1906,6 +2049,25 @@ struct BYOMModelAdmissionRuntime: Sendable {
         guard let identity = try identityStore.loadAdmissionIdentity(providerId: providerID) else {
             throw BYOMModelAdmissionError.missingAdmissionIdentity(providerID: providerID)
         }
+        // Existing providers without a retry journal retain their withdrawal
+        // path. When one exists, serialize withdrawal with pending offers and
+        // retire replay material only after authoritative terminal readback.
+        let journalRoot = environment.namespaceURL.deletingLastPathComponent().appendingPathComponent("pending-offers")
+        var journalInfo = stat()
+        let hasJournal = lstat(journalRoot.path, &journalInfo) == 0
+        guard hasJournal || errno == ENOENT else { throw BYOMPendingOfferJournal.JournalError.unavailable }
+        let journal = hasJournal ? try BYOMPendingOfferJournal.Operation(
+            namespaceURL: environment.namespaceURL, providerID: providerID, candidateID: candidateID
+        ) : nil
+        defer { withExtendedLifetime(journal) {} }
+        let record: BYOMPendingOfferJournal.Record?
+        var preservesCorruptRecord = false
+        do {
+            record = try journal?.load()
+        } catch BYOMPendingOfferJournal.JournalError.corruptJSON {
+            record = nil
+            preservesCorruptRecord = true
+        }
         let package: BYOMWithdrawalPackage
         if let candidate {
             package = try BYOMWithdrawalBuilder.makePackage(
@@ -1933,7 +2095,15 @@ struct BYOMModelAdmissionRuntime: Sendable {
                 reasonCode: reasonCode
             )
         }
-        return try await client.withdraw(package, bearerToken: bearer)
+        let result = try await client.withdraw(package, bearerToken: bearer)
+        if preservesCorruptRecord {
+            FileHandle.standardError.write(Data(
+                "warning: coordinator withdrawal succeeded; the unrecoverable local pending-offer record was preserved. Local retry and new offers remain blocked pending review/recovery of the original signed envelope.\n".utf8
+            ))
+        } else if let journal, let record {
+            try journal.reconcile(generation: record.generation, terminal: result.resultingAdmissionState == "withdrawn")
+        }
+        return result
     }
 
     private func resolveCandidate(_ target: String) async -> BYOMDiscoveryWire.Candidate? {
@@ -1987,6 +2157,8 @@ private extension BYOMAdmissionStatusWire {
 struct BYOMDiscoveryEnvironment: Sendable {
     let namespaceURL: URL
     let mlxCacheRoot: URL
+    let durableArtifactRoot: URL?
+    let catalogMatcher: BYOMCatalogMatcher?
     let ollamaOrigin: String?
     /// Operator-supplied OpenAI-compatible loopback origin. SPEC-046-R002 allows
     /// an adapter endpoint to be either a well-known loopback default for that
@@ -1999,8 +2171,12 @@ struct BYOMDiscoveryEnvironment: Sendable {
         namespaceURL: URL,
         mlxCacheRoot: URL,
         ollamaOrigin: String?,
-        openAICompatibleOrigin: String? = nil
+        openAICompatibleOrigin: String? = nil,
+        durableArtifactRoot: URL? = nil,
+        catalogMatcher: BYOMCatalogMatcher? = nil
     ) {
+        self.durableArtifactRoot = durableArtifactRoot
+        self.catalogMatcher = catalogMatcher
         self.namespaceURL = namespaceURL
         self.mlxCacheRoot = mlxCacheRoot
         self.ollamaOrigin = ollamaOrigin
@@ -2012,6 +2188,8 @@ struct BYOMDiscoveryEnvironment: Sendable {
         mlxCacheDir: String?,
         ollamaOrigin: String?,
         openAICompatibleOrigin: String? = nil,
+        config: AppConfig? = nil,
+        catalogMatcher: BYOMCatalogMatcher? = nil,
         environment: [String: String] = ProcessInfo.processInfo.environment,
         homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
     ) -> BYOMDiscoveryEnvironment {
@@ -2019,7 +2197,11 @@ struct BYOMDiscoveryEnvironment: Sendable {
             namespaceURL: namespacePath.map(URL.init(fileURLWithPath:)) ?? defaultNamespaceURL(homeDirectory: homeDirectory),
             mlxCacheRoot: mlxCacheDir.map(URL.init(fileURLWithPath:)) ?? defaultMLXCacheRoot(environment: environment, homeDirectory: homeDirectory),
             ollamaOrigin: ollamaOrigin,
-            openAICompatibleOrigin: openAICompatibleOrigin
+            openAICompatibleOrigin: openAICompatibleOrigin,
+            durableArtifactRoot: CachedModelArtifactResolver.forConfig(
+                config, environment: environment, homeDirectory: homeDirectory
+            ).durableRoot,
+            catalogMatcher: catalogMatcher
         )
     }
 
@@ -2157,6 +2339,8 @@ enum BYOMDiscoveryAdapterError: Error {
 }
 
 struct BYOMDiscoveryRunner {
+    private let localInspection: ModelCatalogLocalInspection?
+    private let catalogMatcher: BYOMCatalogMatcher
     private let environment: BYOMDiscoveryEnvironment
     private let fileManager: FileManager
     private let httpClient: any BYOMDiscoveryHTTPClient
@@ -2164,8 +2348,12 @@ struct BYOMDiscoveryRunner {
     init(
         environment: BYOMDiscoveryEnvironment,
         fileManager: FileManager = .default,
-        httpClient: any BYOMDiscoveryHTTPClient = BYOMURLSessionHTTPClient()
+        httpClient: any BYOMDiscoveryHTTPClient = BYOMURLSessionHTTPClient(),
+        catalogMatcher: BYOMCatalogMatcher? = nil,
+        localInspection: ModelCatalogLocalInspection? = nil
     ) {
+        self.localInspection = localInspection
+        self.catalogMatcher = catalogMatcher ?? environment.catalogMatcher ?? BYOMCatalogMatcher()
         self.environment = environment
         self.fileManager = fileManager
         self.httpClient = httpClient
@@ -2174,7 +2362,7 @@ struct BYOMDiscoveryRunner {
     func discover() async -> BYOMDiscoveryWire {
         let namespace = BYOMDiscoveryNamespaceStore(fileManager: fileManager)
             .readNamespace(at: environment.namespaceURL)
-        let catalog = BYOMCatalogMatcher()
+        let catalog = catalogMatcher
         var adapters: [BYOMDiscoveryWire.Adapter] = []
         var candidates: [BYOMDiscoveryWire.Candidate] = []
         var warnings = Set(namespace.warnings.map(\.rawValue))
@@ -2186,10 +2374,30 @@ struct BYOMDiscoveryRunner {
             catalogMatcher: catalog,
             fileManager: fileManager
         ).discover()
-        adapters.append(mlx.adapter)
-        candidates.append(contentsOf: mlx.candidates)
-        warnings.formUnion(mlx.adapter.warningCodes)
         for candidate in mlx.candidates {
+            if let key = candidate.catalogModelKey {
+                localInspection?.observeCacheCandidate(modelKey: key, modelID: candidate.servedModelRef)
+            }
+        }
+        let durable = environment.durableArtifactRoot.map { root in
+            DurableModelDiscovery(
+                root: root, namespace: namespace.bytes, namespaceWarnings: namespace.warnings,
+                catalogMatcher: catalog, fileManager: fileManager, localInspection: localInspection
+            ).discover()
+        } ?? []
+        // A durable row owns the exact catalog target, including failure. A
+        // stale cache copy cannot turn a corrupt prepared target back to ready.
+        let durableIDs = Set(durable.map(\.candidateID))
+        let localCandidates = mlx.candidates.filter { !durableIDs.contains($0.candidateID) } + durable
+        let adapterWarnings = durable.isEmpty ? mlx.adapter.warningCodes : mlx.adapter.warningCodes.filter {
+            $0 != BYOMDiscoveryWarning.adapterUnavailable.rawValue
+        }
+        adapters.append(durable.isEmpty ? mlx.adapter : BYOMDiscoveryWire.Adapter(
+            runtimeSource: "mlx_cache", status: "ok", originClass: nil, warningCodes: adapterWarnings
+        ))
+        candidates.append(contentsOf: localCandidates)
+        warnings.formUnion(adapterWarnings)
+        for candidate in localCandidates {
             warnings.formUnion(candidate.warningCodes)
         }
 
@@ -2240,6 +2448,115 @@ struct BYOMDiscoveryRunner {
         }
         adapters.sort { $0.runtimeSource < $1.runtimeSource }
 
+        return BYOMDiscoveryWire(
+            adapters: adapters,
+            candidates: candidates,
+            warnings: Array(warnings).sorted()
+        )
+    }
+
+    func discoverCatalog() async throws -> BYOMDiscoveryWire {
+        guard let localInspection else { throw ModelCatalogInspectionError.incomplete }
+        func active() throws { try localInspection.budget?.check() }
+        try active()
+        try localInspection.validateCompleteObservations()
+        let namespace = BYOMDiscoveryNamespaceStore(fileManager: fileManager)
+            .readNamespace(at: environment.namespaceURL)
+        try active()
+        let catalog = catalogMatcher
+        var adapters: [BYOMDiscoveryWire.Adapter] = []
+        var candidates: [BYOMDiscoveryWire.Candidate] = []
+        var warnings = Set(namespace.warnings.map(\.rawValue))
+
+        let mlx = try BYOMMLXCacheDiscovery(
+            cacheRoot: environment.mlxCacheRoot,
+            namespace: namespace.bytes,
+            namespaceWarnings: namespace.warnings,
+            catalogMatcher: catalog,
+            fileManager: fileManager
+        ).discoverCatalog(check: active)
+        try active()
+        for candidate in mlx.candidates {
+            if let key = candidate.catalogModelKey {
+                localInspection.observeCacheCandidate(modelKey: key, modelID: candidate.servedModelRef)
+            }
+        }
+        let durable = environment.durableArtifactRoot.map { root in
+            DurableModelDiscovery(
+                root: root, namespace: namespace.bytes, namespaceWarnings: namespace.warnings,
+                catalogMatcher: catalog, fileManager: fileManager, localInspection: localInspection
+            ).discover()
+        } ?? []
+        try active()
+        // A durable row owns the exact catalog target, including failure. A
+        // stale cache copy cannot turn a corrupt prepared target back to ready.
+        let durableIDs = Set(durable.map(\.candidateID))
+        let localCandidates = mlx.candidates.filter { !durableIDs.contains($0.candidateID) } + durable
+        let adapterWarnings = durable.isEmpty ? mlx.adapter.warningCodes : mlx.adapter.warningCodes.filter {
+            $0 != BYOMDiscoveryWarning.adapterUnavailable.rawValue
+        }
+        adapters.append(durable.isEmpty ? mlx.adapter : BYOMDiscoveryWire.Adapter(
+            runtimeSource: "mlx_cache", status: "ok", originClass: nil, warningCodes: adapterWarnings
+        ))
+        candidates.append(contentsOf: localCandidates)
+        warnings.formUnion(adapterWarnings)
+        for candidate in localCandidates {
+            warnings.formUnion(candidate.warningCodes)
+        }
+
+        if let ollamaOrigin = environment.ollamaOrigin,
+           !ollamaOrigin.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            try active()
+            let ollama = await BYOMOllamaDiscovery(
+                origin: ollamaOrigin,
+                namespace: namespace.bytes,
+                namespaceWarnings: namespace.warnings,
+                catalogMatcher: catalog,
+                httpClient: httpClient
+            ).discover()
+            try active()
+            adapters.append(ollama.adapter)
+            candidates.append(contentsOf: ollama.candidates)
+            warnings.formUnion(ollama.adapter.warningCodes)
+            for candidate in ollama.candidates {
+                warnings.formUnion(candidate.warningCodes)
+            }
+        }
+
+        // SPEC-046-R002: no well-known default, so the adapter is attempted only
+        // when the operator supplies an origin. An adapter that was never
+        // attempted contributes no row at all, exactly as the Ollama adapter
+        // does when it is skipped. An absent row already means "not attempted",
+        // so inventing a status value for it would put an undefined string on
+        // the wire and change the no-flag projection for existing consumers.
+        let openAIOrigin = environment.openAICompatibleOrigin?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let openAIOrigin, !openAIOrigin.isEmpty {
+            try active()
+            let openAICompatible = await BYOMOpenAICompatibleDiscovery(
+                origin: openAIOrigin,
+                namespace: namespace.bytes,
+                namespaceWarnings: namespace.warnings,
+                httpClient: httpClient
+            ).discover()
+            try active()
+            adapters.append(openAICompatible.adapter)
+            candidates.append(contentsOf: openAICompatible.candidates)
+            warnings.formUnion(openAICompatible.adapter.warningCodes)
+            for candidate in openAICompatible.candidates {
+                warnings.formUnion(candidate.warningCodes)
+            }
+        }
+
+        candidates.sort {
+            if $0.runtimeSource == $1.runtimeSource {
+                return $0.servedModelRef < $1.servedModelRef
+            }
+            return $0.runtimeSource < $1.runtimeSource
+        }
+        adapters.sort { $0.runtimeSource < $1.runtimeSource }
+
+        try active()
+        try localInspection.validateCompleteObservations()
         return BYOMDiscoveryWire(
             adapters: adapters,
             candidates: candidates,
@@ -3074,7 +3391,7 @@ struct BYOMCandidateIdentity: Sendable {
 }
 
 struct BYOMCatalogMatcher: Sendable {
-    private let rows: [(key: String, modelID: String)]
+    private let rows: [(key: String, modelID: String, revision: String?, hash: String?)]
     /// SPEC-023 §3.7 artifact set (BYOM v0.2 slice 2c): the identities of the
     /// qualified artifact feed's artifacts. Identity only, never admission;
     /// empty for a rate-card-bound release, which keeps matching exactly as
@@ -3109,7 +3426,8 @@ struct BYOMCatalogMatcher: Sendable {
             rows = catalog.rows.compactMap { entry in
                 guard Self.matchableStatuses.contains(entry.value.runtimeStatus) else { return nil }
                 matchable.insert(entry.key)
-                return (key: entry.key, modelID: entry.value.modelID)
+                return (key: entry.key, modelID: entry.value.modelID,
+                        revision: entry.value.modelRevision, hash: entry.value.modelSHA256)
             }
         } else {
             rows = []
@@ -3117,6 +3435,23 @@ struct BYOMCatalogMatcher: Sendable {
         artifactIdentities = (artifactFeed?.artifactIdentities() ?? []).filter { matchable.contains($0.catalogKey) }
         artifactCoveredKeys = Set(artifactIdentities.map(\.catalogKey))
         qualifiedFeed = artifactFeed
+    }
+
+    /// Prepared storage is keyed by the signed primary candidate, never by an
+    /// arbitrary directory name or a name-only catalog match.
+    var durableTargets: [(modelID: String, identity: ArtifactFeed.ArtifactIdentity)] {
+        artifactIdentities.compactMap { identity in
+            guard identity.isPrimary, identity.runtimeFormat == "mlx_safetensors",
+                  identity.hashAlgorithm == "macprovider.snapshot-manifest.v1",
+                  identity.verificationStatus == "verified",
+                  identity.allowedRuntimeSources.contains("mlx_cache"),
+                  let row = rows.first(where: { $0.key == identity.catalogKey }),
+                  identity.sourceRef.repoID == row.modelID,
+                  identity.sourceRef.revision != nil,
+                  identity.sourceRef.revision == row.revision,
+                  identity.hash == row.hash else { return nil }
+            return (row.modelID, identity)
+        }
     }
 
     /// Catalog keys the qualified artifact feed carries an artifact for: their
@@ -3332,6 +3667,59 @@ struct BYOMMLXCacheDiscovery {
         )
     }
 
+    /// The owned catalog path never turns an interrupted metadata scan into
+    /// absence. All model/revision names fit one request-wide bounded scan.
+    func discoverCatalog(check: () throws -> Void) throws -> (adapter: BYOMDiscoveryWire.Adapter, candidates: [BYOMDiscoveryWire.Candidate]) {
+        var remaining = 10_000
+        func names(_ root: URL) throws -> [URL] {
+            try check()
+            var info = stat()
+            guard lstat(root.path, &info) == 0 else {
+                if errno == ENOENT { return [] }
+                throw ModelCatalogInspectionError.incomplete
+            }
+            guard info.st_mode & S_IFMT == S_IFDIR else { throw ModelCatalogInspectionError.invalid }
+            var enumerationError: Error?
+            guard let iterator = fileManager.enumerator(at: root, includingPropertiesForKeys: [],
+                options: [.skipsSubdirectoryDescendants], errorHandler: { _, error in enumerationError = error; return false }) else {
+                throw ModelCatalogInspectionError.incomplete
+            }
+            var values: [URL] = []
+            for case let entry as URL in iterator {
+                try check()
+                remaining -= 1
+                guard remaining >= 0, entry.path.utf8.count <= 4_096 else { throw ModelCatalogInspectionError.limit }
+                values.append(entry)
+                try check()
+            }
+            try check()
+            if enumerationError != nil { throw ModelCatalogInspectionError.incomplete }
+            return values.sorted { $0.lastPathComponent < $1.lastPathComponent }
+        }
+        let repositories = try names(cacheRoot)
+        var candidates: [BYOMDiscoveryWire.Candidate] = []
+        for repository in repositories {
+            try check()
+            guard let modelID = modelID(fromHFCacheDirectoryName: repository.lastPathComponent),
+                  BYOMDiscoveryPrivacy.isSafeModelReference(modelID) else { continue }
+            var info = stat()
+            guard lstat(repository.path, &info) == 0 else { throw ModelCatalogInspectionError.incomplete }
+            guard info.st_mode & S_IFMT == S_IFDIR else { throw ModelCatalogInspectionError.invalid }
+            let snapshots = try names(repository.appendingPathComponent("snapshots"))
+            let revisions = Set(snapshots.map(\.lastPathComponent).filter {
+                $0.count == 40 && $0.utf8.allSatisfy { (48...57).contains($0) || (97...102).contains($0) }
+            })
+            // Exact local readiness comes exclusively from the inspection map.
+            // Cache directory names alone are enough to prevent a missing-files
+            // preparation shortcut; no weight or config-content reads are needed.
+            candidates.append(buildCandidate(servedModelRef: modelID, revisions: revisions,
+                readinessState: "needs_weights", estimatedGB: estimatedGB(modelID: modelID, snapshotBytes: 0),
+                contextWindowTokens: nil, warningCodes: [.requiresPreparation]))
+            try check()
+        }
+        return (BYOMDiscoveryWire.Adapter(runtimeSource: "mlx_cache", status: "ok", originClass: nil, warningCodes: []), candidates)
+    }
+
     private func modelID(fromHFCacheDirectoryName name: String) -> String? {
         guard name.hasPrefix("models--") else { return nil }
         let modelID = String(name.dropFirst("models--".count))
@@ -3422,7 +3810,7 @@ struct BYOMMLXCacheDiscovery {
         return (gb * 100).rounded() / 100
     }
 
-    private func buildCandidate(
+    func buildCandidate(
         servedModelRef: String,
         revisions: Set<String>,
         readinessState: String,

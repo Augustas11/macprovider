@@ -141,13 +141,14 @@ func FixedPoolHeartbeatVerifier(c *Catalog) pool.RegistryOption {
 }
 
 var (
-	defaultCatalog atomic.Pointer[Catalog]
+	defaultCatalog       atomic.Pointer[Catalog]
+	defaultPublicationMu sync.RWMutex
 
 	nowUTC = func() time.Time { return time.Now().UTC() }
 )
 
 func init() {
-	defaultCatalog.Store(NewCatalog())
+	setDefault(NewCatalog())
 }
 
 // Default returns the package-singleton Catalog. Production wiring (main.go,
@@ -170,7 +171,9 @@ func setDefault(c *Catalog) {
 	if c == nil {
 		return
 	}
+	defaultPublicationMu.Lock()
 	defaultCatalog.Store(c)
+	defaultPublicationMu.Unlock()
 }
 
 // setDefaultForTest is for tier2 package tests only; do not use from
@@ -448,6 +451,10 @@ func (c *Catalog) CatalogSnapshot() (string, []byte, bool) {
 func (c *Catalog) RouteSnapshotMaterial(modelID, reportedHash string) (RouteSnapshotMaterial, bool) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
+	return c.routeSnapshotMaterialLocked(modelID, reportedHash)
+}
+
+func (c *Catalog) routeSnapshotMaterialLocked(modelID, reportedHash string) (RouteSnapshotMaterial, bool) {
 	parsed := activeParsedLocked(c.st)
 	if parsed == nil {
 		return RouteSnapshotMaterial{HashStatus: hashStatusForState(c.st, modelID, reportedHash)}, false
@@ -517,7 +524,7 @@ func SnapshotMaterial(modelID, reportedHash string) (RouteSnapshotMaterial, bool
 // legacy tests (cmd/coordinator/main_test.go, internal/buyer/server_test.go)
 // that still drive the package-level shim API.
 func ResetForTest() {
-	defaultCatalog.Store(NewCatalog())
+	setDefault(NewCatalog())
 	nowUTC = func() time.Time { return time.Now().UTC() }
 }
 

@@ -233,7 +233,7 @@ struct MalibuRecommendationDocument: Decodable, Equatable, Sendable {
         warnings = try c.decode([String].self, forKey: .warnings)
     }
 
-    func validated(now: Date = Date()) throws -> MalibuRecommendationDocument {
+    func validated(now: Date = Date(), localActivationTarget: String? = nil, localActivationModelKey: String? = nil) throws -> MalibuRecommendationDocument {
         guard schemaVersion == "autotune_recommend.v1",
               let generated = Self.parseTimestamp(generatedAt),
               generated <= now.addingTimeInterval(60),
@@ -279,7 +279,11 @@ struct MalibuRecommendationDocument: Decodable, Equatable, Sendable {
               serveConfig.model == recommendedModel,
               !serveConfig.donorMode,
               Self.validateServeConfig(serveConfig),
-              serveConfig.modelCatalogModelID == recommendedModel,
+              (localActivationTarget == nil
+                  ? serveConfig.modelCatalogModelID == recommendedModel
+                  : (serveConfig.modelCatalogModelID == localActivationTarget
+                     && serveConfig.modelCatalogKey == localActivationModelKey
+                     && recommendedModel == localActivationModelKey)),
               Self.validateRecommendedCandidateSemantics(
                   selectedCandidates[0],
                   selectedExplanation: selectedExplanation
@@ -313,6 +317,18 @@ struct MalibuRecommendationDocument: Decodable, Equatable, Sendable {
 
     var isActionable: Bool {
         false
+    }
+
+    // This is only a local eligibility check. The negotiated catalog action and
+    // CLI adoption validator still own exact signed authority and runtime safety.
+    var isEligibleForLocalActivation: Bool {
+        recommendedModel != nil && hardware.detected && serveConfig?.draftModel == nil
+            && warnings.allSatisfy({ ["candidate_catalog_fallback_used", "demand_rank_fallback_used",
+                                     "rate_card_fallback_used", "catalog_artifact_feed_fallback_used"].contains($0) })
+            && recommendedCandidate?.eligible == true
+            && selectedExplanation?.warningState == "ready"
+            && selectedExplanation?.throughputSource == "measured"
+            && selectedExplanation?.localHealth.warnings.isEmpty == true
     }
 
     var adoptionAdvisoryReason: String? {

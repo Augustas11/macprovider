@@ -308,7 +308,7 @@ func syncVerifiedReceiptLedgerCreditForAttemptTx(ctx context.Context, db settlem
 	var cachedPromptTokens, configSnapshotID sql.NullInt64
 	var ledgerPrompt, ledgerCompletion, ledgerEstimate sql.NullInt64
 	var ledgerGross, ledgerProvider int64
-	var accountScopeHash string
+	var accountScopeHash, accountScope string
 	var faultFlag, ledgerUsageSource string
 	var model string
 	var usageJSON string
@@ -329,7 +329,7 @@ SELECT lrc.id, lrc.model, lrc.cached_prompt_tokens,
          ORDER BY lpis.id DESC
             LIMIT 1
        ) AS config_snapshot_id,
-       sao.usage_canonical_json
+       sao.usage_canonical_json, srs.account_scope
   FROM ledger_request_credits lrc
   JOIN settlement_receipt_verdicts srv
     ON srv.account_scope_hash = lrc.settlement_account_scope_hash
@@ -366,11 +366,17 @@ SELECT lrc.id, lrc.model, lrc.cached_prompt_tokens,
 		requestID,
 		attemptN,
 		providerID,
-	).Scan(&requestCreditID, &model, &cachedPromptTokens, &ledgerPrompt, &ledgerCompletion, &ledgerEstimate, &promptRate, &completionRate, &multiplier, &share, &ledgerGross, &ledgerProvider, &accountScopeHash, &ledgerUsageSource, &faultFlag, &configSnapshotID, &usageJSON)
+	).Scan(&requestCreditID, &model, &cachedPromptTokens, &ledgerPrompt, &ledgerCompletion, &ledgerEstimate, &promptRate, &completionRate, &multiplier, &share, &ledgerGross, &ledgerProvider, &accountScopeHash, &ledgerUsageSource, &faultFlag, &configSnapshotID, &usageJSON, &accountScope)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return "", nil
 		}
+		return "", err
+	}
+	// A prior verified verdict cannot authorize synchronization from a route
+	// whose retained bytes no longer match its digest, even without cache use.
+	evidence, err := loadArtifactAdmissionForAttempt(ctx, db, SettlementReceiptIdentity{accountScope, requestID, attemptN, providerID})
+	if err != nil {
 		return "", err
 	}
 	var usage settlementUsageV04
@@ -420,7 +426,11 @@ SELECT lrc.id, lrc.model, lrc.cached_prompt_tokens,
 			}
 			return reason, nil
 		}
-		rateEntry = RateFor(rewards.RateCard, model)
+		if evidence != nil {
+			rateEntry = evidence.RateEntry()
+		} else {
+			rateEntry = RateFor(rewards.RateCard, model)
+		}
 		if rateEntry.PromptCreditsPerMtok != promptRate ||
 			rateEntry.CompletionCreditsPerMtok != completionRate ||
 			snapshotMultiplier != multiplier ||
@@ -781,7 +791,7 @@ func loadSettlementEvidenceConn(ctx context.Context, conn *sql.Conn, id Settleme
 	}, nil
 }
 
-func loadSettlementRouteSnapshotConn(ctx context.Context, conn *sql.Conn, id SettlementReceiptIdentity) (RouteSnapshot, string, error) {
+func loadSettlementRouteSnapshotConn(ctx context.Context, conn snapshotQueryer, id SettlementReceiptIdentity) (RouteSnapshot, string, error) {
 	var r RouteSnapshot
 	var providerSession, providerGeneration sql.NullString
 	var computeIntegrityHardwareDigest sql.NullString
@@ -833,6 +843,7 @@ WHERE account_scope = ? AND request_id = ? AND attempt_n = ? AND provider_id = ?
 		r.ProviderGenerationID = &providerGeneration.String
 	}
 	var recovered struct {
+		*ArtifactAdmissionEvidence
 		ProviderReported                     string `json:"provider_reported_model_hash_algorithm"`
 		ExpectedCatalog                      string `json:"expected_catalog_model_hash_algorithm"`
 		ModelAdmissionCandidateID            string `json:"model_admission_candidate_id"`
@@ -858,6 +869,7 @@ WHERE account_scope = ? AND request_id = ? AND attempt_n = ? AND provider_id = ?
 	r.ModelAdmissionCatalogModelKey = recovered.ModelAdmissionCatalogModelKey
 	r.ModelAdmissionDiscoveryDigestSHA256 = recovered.ModelAdmissionDiscoveryDigestSHA256
 	r.ModelAdmissionEvaluationDigestSHA256 = recovered.ModelAdmissionEvaluationDigestSHA256
+	r.ArtifactAdmissionEvidence = recovered.ArtifactAdmissionEvidence
 	r.PoolID = recovered.PoolID
 	r.ComputeIntegrityCaptureRequired = computeIntegrityCaptureRequired == 1
 	r.ComputeIntegritySamplingCovered = computeIntegritySamplingCovered == 1
@@ -870,6 +882,22 @@ WHERE account_scope = ? AND request_id = ? AND attempt_n = ? AND provider_id = ?
 	}
 	if digest != computed {
 		return RouteSnapshot{}, "", fmt.Errorf("settlement route snapshot digest mismatch")
+	}
+	if r.ArtifactAdmissionEvidence != nil {
+		// The ledger must have used these exact captured units; looking at
+		// today's mutable rate card could repair a substituted attempt.
+		var configID, prompt, completion, multiplier, share int64
+		err := conn.QueryRowContext(ctx, `SELECT i.config_snapshot_id,c.prompt_rate_per_mtok,c.completion_rate_per_mtok,c.global_multiplier_ppm,c.provider_share_bps FROM ledger_request_credits c JOIN ledger_provider_identity_snapshots i ON i.request_id=c.request_id AND i.attempt_n=c.attempt_n AND i.provider_id=c.provider_id AND i.provider_assigned_id=c.provider_assigned_id WHERE c.request_id=? AND c.attempt_n=? AND c.provider_id=? AND c.settlement_account_scope_hash=?`, id.RequestID, id.AttemptN, id.ProviderID, SettlementAccountScopeHash(id.AccountScope)).Scan(&configID, &prompt, &completion, &multiplier, &share)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return RouteSnapshot{}, "", err
+		}
+		e := r.ArtifactAdmissionEvidence
+		if err == nil && (configID != e.ConfigSnapshotID || prompt != e.PromptRatePerMtok || completion != e.CompletionRatePerMtok || multiplier != e.GlobalMultiplierPPM || share != e.ProviderShareBPS) {
+			return RouteSnapshot{}, "", fmt.Errorf("artifact admission ledger rates mismatch")
+		}
+		if err := verifyArtifactAdmissionConfig(ctx, conn, *r.ArtifactAdmissionEvidence); err != nil {
+			return RouteSnapshot{}, "", err
+		}
 	}
 	return r, computed, nil
 }

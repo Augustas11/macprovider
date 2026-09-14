@@ -4,6 +4,37 @@ import XCTest
 @testable import macprovider_cli
 
 final class CandidateProviderRunnerTests: XCTestCase {
+    func testConstructorFenceRejectsBeforePrivateConfigurationWrites() throws {
+        enum Fence: Error { case expired }
+        let temporaryRoot = URL(fileURLWithPath: "/tmp", isDirectory: true)
+        func roots() throws -> Set<String> {
+            Set(try FileManager.default.contentsOfDirectory(atPath: temporaryRoot.path).filter {
+                $0.hasPrefix("macprovider-autotune-config-")
+            })
+        }
+        let before = try roots()
+        // First reject at entry. Then allow creation of the owned directory but
+        // fence immediately before candidate.yaml; only that exact root is cleaned.
+        for refusal in [1, 4] {
+            var checks = 0
+            var checkedUnwrittenConfig = false
+            XCTAssertThrowsError(try CandidateProviderRunner(providerBinaryPath: "/usr/bin/true", publicationCheck: {
+                checks += 1
+                if checks == 4 {
+                    let created = try roots().subtracting(before)
+                    XCTAssertEqual(created.count, 1)
+                    for name in created {
+                        XCTAssertFalse(FileManager.default.fileExists(atPath: temporaryRoot.appendingPathComponent(name).appendingPathComponent("candidate.yaml").path))
+                    }
+                    checkedUnwrittenConfig = true
+                }
+                if checks == refusal { throw Fence.expired }
+            })) { XCTAssertTrue($0 is Fence) }
+            XCTAssertEqual(try roots(), before)
+            XCTAssertEqual(checkedUnwrittenConfig, refusal == 4)
+        }
+    }
+
     func testServeArgumentsIncludeNoJoinAndOptionalKnobs() throws {
         XCTAssertEqual(
             try CandidateProviderRunner.serveArguments(

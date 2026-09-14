@@ -302,6 +302,20 @@ SELECT rl.id, rl.ts_utc, rl.request_id, rl.account_id, rl.model, rl.provider_ass
 		if err != nil {
 			return err
 		}
+		evidence, err := loadArtifactAdmissionForAttempt(ctx, tx, SettlementReceiptIdentity{AccountScopeForSettlement(accountID.String), requestID, int64(attemptN), providerID})
+		if err != nil {
+			return err
+		}
+		var rateEntry RateCardEntry
+		rateCard := rewards.RateCard
+		if evidence != nil {
+			snapshotID = evidence.ConfigSnapshotID
+			rateEntry = evidence.RateEntry()
+			rateCard = nil
+			multiplier, share = evidence.GlobalMultiplierPPM, evidence.ProviderShareBPS
+		} else {
+			rateEntry = RateFor(rewards.RateCard, model)
+		}
 		input := HotPathInput{
 			RequestID:                    requestID,
 			AttemptN:                     attemptN,
@@ -319,8 +333,8 @@ SELECT rl.id, rl.ts_utc, rl.request_id, rl.account_id, rl.model, rl.provider_ass
 			ErrorCode:                    errorCode.String,
 			FaultFlag:                    FaultNone,
 			ConfigSnapshotID:             snapshotID,
-			RateEntry:                    RateFor(rewards.RateCard, model),
-			RateCard:                     rewards.RateCard,
+			RateEntry:                    rateEntry,
+			RateCard:                     rateCard,
 			MultiplierPPM:                multiplier,
 			ProviderShareBps:             share,
 			SettlementAccountScopeHash:   settlementHash,

@@ -66,13 +66,17 @@ final class CandidateProviderRunner {
     private let session: URLSession
     private let stateLock = NSLock()
     private var current: RunningProvider?
+    var publicationCheck: () throws -> Void = {}
 
     init(
         providerBinaryPath: String? = nil,
         configPath: String? = nil,
         logDirectory: URL = CandidateProviderRunner.defaultLogDirectory,
-        session: URLSession = .shared
+        session: URLSession = .shared,
+        publicationCheck: @escaping () throws -> Void = {}
     ) throws {
+        try publicationCheck()
+        self.publicationCheck = publicationCheck
         if let providerBinaryPath {
             self.providerBinaryPath = Self.absolutePath(providerBinaryPath)
         } else {
@@ -82,7 +86,7 @@ final class CandidateProviderRunner {
             self.configPath = Self.absolutePath(configPath)
             self.ownedCandidateConfigRoot = nil
         } else {
-            let root = try Self.makeCandidateConfigRoot()
+            let root = try Self.makeCandidateConfigRoot(check: publicationCheck)
             self.configPath = root.appendingPathComponent("candidate.yaml").path
             self.ownedCandidateConfigRoot = root
         }
@@ -142,6 +146,7 @@ final class CandidateProviderRunner {
         artifactBinding: CandidateArtifactBinding?,
         deadline: Date?
     ) throws {
+        try publicationCheck()
         let artifactArguments = try Self.artifactArguments(for: model, binding: artifactBinding, deadline: deadline)
         let arguments = try Self.serveArguments(
             model: model,
@@ -151,7 +156,8 @@ final class CandidateProviderRunner {
             maxBatch: maxBatch,
             configPath: configPath,
             modelArtifactPath: artifactArguments.path,
-            modelArtifactSHA256: artifactArguments.sha256
+            modelArtifactSHA256: artifactArguments.sha256,
+            parentPID: getpid()
         )
 
         try prepareForStart()
@@ -164,9 +170,11 @@ final class CandidateProviderRunner {
             throw CandidateProviderRunnerError.alreadyRunning(pid: current.process.processIdentifier)
         }
 
+        try publicationCheck()
         try FileManager.default.createDirectory(at: logDirectory, withIntermediateDirectories: true)
-        Self.pruneLogs(in: logDirectory)
+        try Self.pruneLogs(in: logDirectory, publicationCheck: publicationCheck)
         let logFileURL = Self.logFileURL(model: model, port: port, in: logDirectory)
+        try publicationCheck()
         try Data().write(to: logFileURL, options: .atomic)
         let logFileHandle = try FileHandle(forWritingTo: logFileURL)
 
@@ -174,6 +182,7 @@ final class CandidateProviderRunner {
         let stderrPipe = Pipe()
         let process: CandidateChildProcess
         do {
+            try publicationCheck()
             process = try CandidateChildProcess.spawn(
                 executablePath: providerBinaryPath,
                 arguments: arguments,
@@ -403,7 +412,8 @@ final class CandidateProviderRunner {
         maxBatch: Int?,
         configPath: String? = nil,
         modelArtifactPath: String? = nil,
-        modelArtifactSHA256: String? = nil
+        modelArtifactSHA256: String? = nil,
+        parentPID: Int32? = nil
     ) throws -> [String] {
         guard (1...65_535).contains(port) else {
             throw CandidateProviderRunnerError.invalidPort(port)
@@ -425,6 +435,10 @@ final class CandidateProviderRunner {
             "--model", model,
             "--port", String(port),
         ]
+        if let parentPID {
+            guard parentPID > 1 else { throw CandidateProviderRunnerError.invalidPort(port) }
+            arguments.append(contentsOf: ["--candidate-parent-pid", String(parentPID)])
+        }
         if let configPath, !configPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             arguments.append(contentsOf: ["--config", absolutePath(configPath)])
         }
@@ -504,10 +518,14 @@ final class CandidateProviderRunner {
         return "\(prefix)-\(digest)"
     }
 
-    private static func makeCandidateConfigRoot() throws -> URL {
+    private static func makeCandidateConfigRoot(check: () throws -> Void) throws -> URL {
         let root = URL(fileURLWithPath: "/tmp", isDirectory: true)
             .appendingPathComponent("macprovider-autotune-config-\(UUID().uuidString)", isDirectory: true)
+        try check()
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        var completed = false
+        defer { if !completed { try? FileManager.default.removeItem(at: root) } }
+        try check()
         guard chmod(root.path, mode_t(0o700)) == 0 else {
             try? FileManager.default.removeItem(at: root)
             throw CocoaError(.fileWriteNoPermission)
@@ -526,15 +544,19 @@ final class CandidateProviderRunner {
         idle_prewarm:
           enabled: false
         """
+        try check()
         try Data(contents.utf8).write(to: config, options: .atomic)
+        try check()
         guard chmod(config.path, mode_t(0o600)) == 0 else {
             try? FileManager.default.removeItem(at: root)
             throw CocoaError(.fileWriteNoPermission)
         }
+        completed = true
         return root
     }
 
-    private static func pruneLogs(in directory: URL, maxFiles: Int = 32, maxBytes: Int64 = 32 * 1024 * 1024) {
+    private static func pruneLogs(in directory: URL, maxFiles: Int = 32, maxBytes: Int64 = 32 * 1024 * 1024,
+                                  publicationCheck: () throws -> Void) throws {
         guard let urls = try? FileManager.default.contentsOfDirectory(
             at: directory,
             includingPropertiesForKeys: [.isRegularFileKey, .contentModificationDateKey, .fileSizeKey],
@@ -549,6 +571,7 @@ final class CandidateProviderRunner {
         for (index, url) in logs.enumerated() {
             let size = Int64((try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
             if index >= maxFiles || totalBytes + size > maxBytes {
+                try publicationCheck()
                 try? FileManager.default.removeItem(at: url)
             } else {
                 totalBytes += size

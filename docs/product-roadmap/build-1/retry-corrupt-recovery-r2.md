@@ -1,0 +1,7 @@
+# Build 1 corrupt retry journal recovery addendum r2
+
+Base: 914f7cafcdbcfc1805a10f4f34167218341d5587 (identical tree to approved f5edeaeb). Supplements retry-journal-addendum-r2; no implementation until independent approval.
+
+Never delete, quarantine, or replace an unrecoverable journal. After safely acquiring the operation lock, explicit withdrawal may use the current provider key and discovered/coordinator tuple despite record JSON decode failure. A confirmed withdrawn response leaves corrupt bytes byte-identical. Sanitized stderr must state that coordinator withdrawal succeeded but local retry/new-offer remain blocked pending review/recovery of the original signed envelope; stdout remains the strict coordinator wire response. Valid records retain generation-checked deletion. Unsafe, symlink, or inaccessible roots fail before mutation because a safe operation lock and bounded regular-file read are unavailable. No partial-envelope parser, automatic replacement, or inference that unrelated pending authority is terminal.
+
+Tests: malformed wrapper retaining an unrelated unresolved signed envelope survives withdrawal byte-for-byte; subsequent retry and new offer remain blocked; valid normal cleanup still succeeds; unsafe file/root still prevents mutation; rejected/timed-out withdrawal preserves bytes and does not emit success. No operator secrets or global identity stores change. Persistent unrecoverable local corruption is an explicit recovery limitation, never represented as reconciled paid authority.

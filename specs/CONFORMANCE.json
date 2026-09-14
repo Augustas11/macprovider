@@ -9,7 +9,7 @@
     {
       "spec_id": "SPEC-001",
       "title": "Phase 3 Binary: Mac Provider Inference CLI",
-      "version": "1.9.8",
+      "version": "1.9.9",
       "path": "specs/SPEC-001-phase3-binary.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -1301,7 +1301,7 @@
     {
       "spec_id": "SPEC-044",
       "title": "Malibu Model Catalog Economics",
-      "version": "0.1.1",
+      "version": "0.1.2",
       "path": "specs/SPEC-044-malibu-model-catalog-economics.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1411,7 +1411,7 @@
     {
       "spec_id": "SPEC-047",
       "title": "Network Model Admission",
-      "version": "0.1.3",
+      "version": "0.1.4",
       "path": "specs/SPEC-047-network-model-admission.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1807,6 +1807,23 @@
         }
       ],
       "gap": null
+    },
+    {
+      "requirement_id": "SPEC-010-R007",
+      "spec_id": "SPEC-010",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [
+        "JOURNEY-NETWORK-MODEL-ADMISSION"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1453",
+        "rationale": "The identifier is retained as a structured tombstone while this branch deliberately remains on SPEC-010 v1.6. The v1.7 GGUF artifact-identity implementation is active in unmerged PR #1469 and is not silently incorporated or claimed by Product Build 1. Reconcile this entry and its mappings only after that work lands or is explicitly adopted on a dependent branch."
+      }
     },
     {
       "requirement_id": "SPEC-018-R001",
@@ -2296,7 +2313,7 @@
     {
       "requirement_id": "SPEC-032-R002",
       "spec_id": "SPEC-032",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
         "phase4-coordinator/internal/pool/provider.go:func (r *Registry) SetAdmissionEvidenceStale",
         "phase4-coordinator/internal/ws/trust_revalidation.go:func (s *Server) runAdmissionEvidenceRevalidationSweep",
@@ -2328,7 +2345,12 @@
           "expires_at": "2026-12-02"
         }
       ],
-      "gap": null
+      "gap": {
+        "verdict": "CODE_BUG",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "Build 1 isolates caller-owned provider metadata at registry publication. Three mapped stale-evidence fixtures now publish their setup through the actual registry instead of mutating a retained input pointer. The prior commit and signed physical artifact remain historical evidence; their mapped test fragments are not the current implementation. Targeted race tests pass, but current complete-diff review, a reviewed commit evidence reference and any required current journey qualification remain pending. No hardware-evidence admission requirement or production posture is relaxed."
+      }
     },
     {
       "requirement_id": "SPEC-032-R003",
@@ -6626,7 +6648,7 @@
         "phase3-binary/Tests/macprovider-cliTests/ProviderStatusTests.swift::testStatusResponsePublishesVersionedLocalCapabilityContract",
         "phase3-binary/app/Tests/MalibuTests/ModelManagementTests.swift::testCapabilityManifestRequiresRecommendationAndAdoptionContracts",
         "phase3-binary/app/Tests/MalibuTests/ModelManagementTests.swift::testRefreshUsesCatalogEconomicsProjectionWhenAdvertised",
-        "phase3-binary/app/Tests/MalibuTests/ModelManagementTests.swift::testRefreshFallsBackToLegacyListWhenCatalogEconomicsCapabilityMissing"
+        "phase3-binary/app/Tests/MalibuTests/ModelManagementTests.swift::testRefreshDoesNotSpawnLegacyListWhenCatalogReadCapabilityMissing"
       ],
       "journeys": [],
       "evidence": [],
@@ -6751,7 +6773,7 @@
         "phase3-binary/app/Tests/MalibuTests/ModelManagementTests.swift::testCatalogEconomicsDegradesContradictorySwitchableRows",
         "phase3-binary/app/Tests/MalibuTests/ModelManagementTests.swift::testCatalogEconomicsDegradesTrustedRowsWithBlockingWarningsOrStaleAdmission",
         "phase3-binary/app/Tests/MalibuTests/ModelManagementTests.swift::testCatalogEconomicsSwitchReconciliationSuspendsCatalogActionsUntilRefresh",
-        "phase3-binary/app/Tests/MalibuTests/ModelManagementTests.swift::testRefreshFallsBackToLegacyListWhenCatalogEconomicsCapabilityMissing"
+        "phase3-binary/app/Tests/MalibuTests/ModelManagementTests.swift::testRefreshDoesNotSpawnLegacyListWhenCatalogReadCapabilityMissing"
       ],
       "journeys": [],
       "evidence": [],
@@ -6864,7 +6886,7 @@
       "tests": [
         "phase3-binary/app/Tests/MalibuTests/ModelManagementTests.swift::testRefreshUsesCatalogEconomicsProjectionWhenAdvertised",
         "phase3-binary/app/Tests/MalibuTests/ModelManagementTests.swift::testRefreshFallsBackToStaticCurrentStateWhenProjectionFails",
-        "phase3-binary/app/Tests/MalibuTests/ModelManagementTests.swift::testRefreshFallsBackToLegacyListWhenCatalogEconomicsCapabilityMissing",
+        "phase3-binary/app/Tests/MalibuTests/ModelManagementTests.swift::testRefreshDoesNotSpawnLegacyListWhenCatalogReadCapabilityMissing",
         "phase3-binary/app/Tests/MalibuTests/ModelManagementTests.swift::testCatalogProjectionExpiryClearsRowsDuringRuntimeConflict",
         "phase3-binary/app/Tests/MalibuTests/ModelManagementTests.swift::testCatalogProjectionExpiryClearsRowsDuringReconciliation",
         "phase3-binary/app/Tests/MalibuTests/ModelManagementTests.swift::testCatalogProjectionExpiryClearsRowsDuringStalledSwitch",

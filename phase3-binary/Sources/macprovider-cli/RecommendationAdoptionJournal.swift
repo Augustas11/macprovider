@@ -188,7 +188,7 @@ struct RecommendationAdoptionJournalStore {
     }
 
     func remove(_ url: URL) throws {
-        guard url.deletingLastPathComponent().standardizedFileURL == root.standardizedFileURL,
+        guard url.deletingLastPathComponent().standardizedFileURL.path == root.standardizedFileURL.path,
               url.pathExtension == "json" else {
             throw RecommendationAdoptionJournalError.invalidJournal
         }

@@ -45,8 +45,8 @@ func (s *stubTrustChecker) SessionsWithoutActiveTrust(_ context.Context, admitte
 
 // setAdmittedTuple stamps a harness provider with the admitted hardware tuple the
 // hello gate would have captured, so the tuple-aware sweep considers it a gated
-// session (issue #582 FIX B). The registry stores the provider pointer, so this
-// mutation is visible to Snapshot.
+// session (issue #582 FIX B). Publish configured harness entries explicitly;
+// Registry owns its accepted Provider value.
 func setAdmittedTuple(p *pool.Provider) {
 	setAdmittedTupleValues(p, "hashA", "apple m4 max", 64)
 }
@@ -55,6 +55,30 @@ func setAdmittedTupleValues(p *pool.Provider, hardwareIdentityHash, chipNormaliz
 	p.AdmittedHardwareIdentityHash = hardwareIdentityHash
 	p.AdmittedChipNormalized = chipNormalized
 	p.AdmittedUnifiedMemoryGB = unifiedMemoryGB
+}
+
+// republishEncryptedHarnessProvider publishes setup changes through the real
+// registry owner while retaining the harness's exact socket and session.
+func republishEncryptedHarnessProvider(t *testing.T, s *Server, p *pool.Provider) {
+	t.Helper()
+	expected := *p
+	conn, err := s.pool.Conn(p.ProviderID, p.AssignedID)
+	if err != nil {
+		t.Fatalf("resolve harness connection: %v", err)
+	}
+	if _, ok := s.pool.RegisterAt(p, conn, s.now()); !ok {
+		t.Fatal("republish harness provider failed")
+	}
+	live, ok := s.pool.Resolve(expected.ProviderID, expected.AssignedID)
+	if !ok || live.State != expected.State || live.ModelID != expected.ModelID || live.Tier2Session != expected.Tier2Session ||
+		live.MaxAdmittedModelID != expected.MaxAdmittedModelID || live.MaxAdmittedMinRAMGB != expected.MaxAdmittedMinRAMGB ||
+		live.CatalogAdmissionMode != expected.CatalogAdmissionMode || live.AdmittedHardwareIdentityHash != expected.AdmittedHardwareIdentityHash ||
+		live.AdmittedChipNormalized != expected.AdmittedChipNormalized || live.AdmittedUnifiedMemoryGB != expected.AdmittedUnifiedMemoryGB {
+		t.Fatal("published harness setup does not match configured session authority")
+	}
+	if current, err := s.pool.Conn(expected.ProviderID, expected.AssignedID); err != nil || current != conn {
+		t.Fatal("republishing harness setup changed its connection")
+	}
 }
 
 // TestTrustRevalidationSweepEvictsInactiveTrust asserts the batched bounded sweep
@@ -77,6 +101,7 @@ func TestTrustRevalidationSweepEvictsInactiveTrust(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			s, provider, _ := newEncryptedRelayHarness(t)
 			setAdmittedTuple(provider)
+			republishEncryptedHarnessProvider(t, s, provider)
 			checker := &stubTrustChecker{err: tc.err}
 			if tc.untrustsAll {
 				checker.untrusted = map[string]struct{}{provider.AdmittedHardwareIdentityHash: {}}
@@ -109,6 +134,7 @@ func TestTrustRevalidationSweepEvictsInactiveTrust(t *testing.T) {
 func TestTrustRevalidationSweepDoesNotDrainReplacementSession(t *testing.T) {
 	s, provider, _ := newEncryptedRelayHarness(t)
 	setAdmittedTupleValues(provider, "hashA", "apple m4 max", 64)
+	republishEncryptedHarnessProvider(t, s, provider)
 
 	replaced := false
 	checker := &stubTrustChecker{
@@ -160,6 +186,7 @@ func TestTrustRevalidationSweepSkipsUngatedProviders(t *testing.T) {
 	t.Run("no live session", func(t *testing.T) {
 		s, provider, _ := newEncryptedRelayHarness(t)
 		setAdmittedTuple(provider)
+		republishEncryptedHarnessProvider(t, s, provider)
 		s.sessions.Delete(sessionKey(provider.ProviderID, provider.AssignedID))
 		checker := &stubTrustChecker{untrusted: map[string]struct{}{"hashA": {}}}
 		s.providerTrust = checker
@@ -246,6 +273,7 @@ func TestFixANoCommitThenRefuse(t *testing.T) {
 func TestTrustSweepFailOpenBounded(t *testing.T) {
 	s, provider, _ := newEncryptedRelayHarness(t)
 	setAdmittedTuple(provider)
+	republishEncryptedHarnessProvider(t, s, provider)
 	checker := &stubTrustChecker{err: errors.New("trust store unreachable")}
 	s.providerTrust = checker
 

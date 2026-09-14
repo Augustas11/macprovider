@@ -48,6 +48,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/ecdh"
 	"crypto/ed25519"
 	"crypto/hmac"
 	"crypto/rand"
@@ -243,6 +244,11 @@ type scenario struct {
 }
 
 type scenarioOpts struct {
+	// Optional signed input import for parsed CLI composition fixtures only.
+	build1Catalog func(*scenario, settlementCatalogFixture) settlementCatalogFixture
+
+	build1ArtifactAdmission bool
+
 	// gatewayServiceToken, when non-nil, overrides the gateway's
 	// coordinator.service_token config field. nil = use
 	// scenario.serviceToken. A pointer to the empty string is the only
@@ -316,6 +322,8 @@ type scenarioOpts struct {
 }
 
 type settlementCatalogFixture struct {
+	build1 *build1FeedFixture
+
 	path                   string
 	publicKey              string
 	modelHash              string
@@ -413,13 +421,20 @@ func newScenario(t *testing.T, opts scenarioOpts) *scenario {
 	providerCfgs := make([]map[string]any, len(providerSlots))
 	for i, slot := range providerSlots {
 		providerCfgs[i] = map[string]any{"provider_id": slot.ID, "display_name": fmt.Sprintf("fake-integration-%d", i)}
-		if !opts.externalWebSocketProvider {
+		if !opts.externalWebSocketProvider && !opts.build1ArtifactAdmission {
 			providerCfgs[i]["endpoint_url"] = slot.URL
 		}
 	}
 	var settlementCatalog settlementCatalogFixture
 	if opts.settlementReceiptProvider {
 		settlementCatalog = s.writeSettlementCatalogFixture()
+		if opts.build1ArtifactAdmission {
+			if opts.build1Catalog != nil {
+				settlementCatalog = opts.build1Catalog(s, settlementCatalog)
+			} else {
+				settlementCatalog = s.writeBuild1Feeds(settlementCatalog)
+			}
+		}
 		s.modelHash = settlementCatalog.modelHash
 		s.rateCardSHA256 = settlementCatalog.rateCardSHA256
 		s.rateCardVersion = settlementCatalog.rateCardVersion
@@ -485,6 +500,7 @@ func newScenario(t *testing.T, opts scenarioOpts) *scenario {
 			}
 			if opts.settlementReceiptProvider {
 				fp.enableSettlementReceipts(settlementCatalog)
+				fp.build1 = settlementCatalog.build1
 			}
 			fp.start(ctx)
 			s.fakeProvs = append(s.fakeProvs, fp)
@@ -684,6 +700,9 @@ func (s *scenario) writeCoordinatorYAML(buyerPort, provPort int, stickyEnabled b
 				staticAutotuneSignerKeyID: staticAutotunePublicKeyBase64,
 			},
 		}
+	}
+	if settlementCatalog.build1 != nil {
+		configureBuild1Coordinator(cfg, settlementCatalog)
 	}
 	b, err := yaml.Marshal(cfg)
 	if err != nil {
@@ -1409,6 +1428,12 @@ func (s *scenario) jsonRequest(method, path string, headers map[string]string, b
 // serves OpenAI-shaped chat completions on the endpoint port.
 // Cancellation tears both halves down.
 type fakeProvider struct {
+	build1ECDH          *ecdh.PrivateKey
+	build1Cipher        *build1CipherState
+	build1              *build1FeedFixture
+	build1IdentityProof func(map[string]any, []byte) (map[string]any, error)
+	probeHits           int
+
 	t                     *testing.T
 	providerID            string
 	providerToken         string
@@ -1490,6 +1515,9 @@ func (p *fakeProvider) enableSettlementReceipts(catalog settlementCatalogFixture
 	}
 	p.settlementEnabled = true
 	p.modelID = settlementFixtureModelID
+	if catalog.build1 != nil && catalog.build1.modelID != "" {
+		p.modelID = catalog.build1.modelID
+	}
 	p.modelHash = catalog.modelHash
 	p.catalogReleaseID = catalog.autotuneCatalogVersion
 	p.catalogPolicy = catalog.autotunePolicyVersion
@@ -2176,11 +2204,23 @@ func (p *fakeProvider) runWS(ctx context.Context) {
 	defer conn.Close()
 
 	endpointURL := fmt.Sprintf("http://127.0.0.1:%d", p.httpPort)
+	if p.build1 != nil {
+		endpointURL = ""
+	}
 	if p.receiptEnabled || p.settlementEnabled {
 		providerECDH := make([]byte, 32)
 		if _, err := rand.Read(providerECDH); err != nil {
 			p.t.Errorf("provider ecdh key: %v", err)
 			return
+		}
+		if p.build1 != nil {
+			var err error
+			p.build1ECDH, err = ecdh.X25519().GenerateKey(rand.Reader)
+			if err != nil {
+				p.t.Error(err)
+				return
+			}
+			providerECDH = p.build1ECDH.PublicKey().Bytes()
 		}
 		initial := map[string]any{
 			"type":                        "auth_request",
@@ -2202,13 +2242,22 @@ func (p *fakeProvider) runWS(ctx context.Context) {
 			"publishes_supported_models":  true,
 			"tier2_capabilities":          map[string]any{"encrypted_leg": true, "attestation": false, "aead_suites": []string{"A256GCM"}},
 		}
+		if p.build1 != nil {
+			initial["tier2_capabilities"] = map[string]any{"encrypted_leg": true, "attestation": false, "aead_suites": []string{"A256GCM"}, "response_chunk_plaintext_envelope": true}
+		}
 		addCanonicalModelIdentity(initial, p.modelHash)
 		if p.catalogReleaseID != "" {
 			initial["catalog_release_id"] = p.catalogReleaseID
 			initial["catalog_policy_version"] = p.catalogPolicy
 			initial["catalog_candidate_sha256"] = p.catalogSHA256
 			initial["catalog_signer_key_id"] = staticAutotuneSignerKeyID
+			if p.build1 != nil {
+				initial["catalog_signer_key_id"] = p.build1.signer()
+			}
 			initial["catalog_row_identity"] = staticLlama32CandidateRowID
+			if p.build1 != nil && p.build1.rowIdentity != "" {
+				initial["catalog_row_identity"] = p.build1.rowIdentity
+			}
 		}
 		if err := writeJSONFrame(conn, initial); err != nil {
 			p.t.Errorf("auth initial write: %v", err)
@@ -2226,6 +2275,14 @@ func (p *fakeProvider) runWS(ctx context.Context) {
 			p.t.Errorf("decode auth_challenge: %v", err)
 			return
 		}
+		if p.build1 != nil {
+			var err error
+			p.build1Cipher, err = makeBuild1Cipher(p.build1ECDH, p.providerID, challengePayload)
+			if err != nil {
+				p.t.Error(err)
+				return
+			}
+		}
 		proof := map[string]any{
 			"type":                       "auth_request",
 			"version":                    2,
@@ -2235,6 +2292,20 @@ func (p *fakeProvider) runWS(ctx context.Context) {
 			"attestation_token":          nil,
 			"supported_models":           []string{p.modelID},
 			"publishes_supported_models": true,
+		}
+		if p.build1IdentityProof != nil {
+			identity, err := p.build1IdentityProof(initial, challengePayload)
+			if err != nil {
+				p.t.Errorf("fixture identity proof: %v", err)
+				return
+			}
+			for key, value := range identity {
+				if key != "identity_signature" && key != "identity_signature_transcript_sha256" {
+					p.t.Error("unexpected fixture identity proof field")
+					return
+				}
+				proof[key] = value
+			}
 		}
 		if err := writeJSONFrame(conn, proof); err != nil {
 			p.t.Errorf("auth proof write: %v", err)
@@ -2295,14 +2366,24 @@ func (p *fakeProvider) runWS(ctx context.Context) {
 	hbTick := time.NewTicker(1 * time.Second)
 	defer hbTick.Stop()
 
+	var writeMu sync.Mutex
 	// Reader goroutine
 	readDone := make(chan struct{})
 	go func() {
 		defer close(readDone)
 		for {
-			_, _, err := wsutil.ReadServerData(conn)
+			payload, _, err := wsutil.ReadServerData(conn)
 			if err != nil {
 				return
+			}
+			if p.build1 != nil {
+				writeMu.Lock()
+				err := p.respondBuild1Frame(conn, payload)
+				writeMu.Unlock()
+				if err != nil {
+					p.t.Errorf("Build1 WS fixture: %v", err)
+					return
+				}
 			}
 			// Silently drop frames; the coordinator doesn't actually
 			// send inference forwards in endpoint_url mode.
@@ -2332,7 +2413,10 @@ func (p *fakeProvider) runWS(ctx context.Context) {
 				"throughput_tps_since_last":  0.0,
 			}
 			addCanonicalModelIdentity(hb, p.modelHash)
-			if err := writeJSONFrame(conn, hb); err != nil {
+			writeMu.Lock()
+			err := writeJSONFrame(conn, hb)
+			writeMu.Unlock()
+			if err != nil {
 				return
 			}
 		}

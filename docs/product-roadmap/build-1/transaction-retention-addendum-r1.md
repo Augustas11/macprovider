@@ -1,0 +1,11 @@
+# Transaction reservation retention addendum r1
+
+Status: proposed, implementation gated on independent review.
+
+Scope: prevent ordinary read-only catalog polling from permanently exhausting the 1,024-record transaction journal. No new command, dependency, archive, or terminal-history deletion.
+
+Under the existing journal lock, search and return a matching fresh queued reservation before enforcing capacity. Reclaim only expired (at least 1,800 seconds old), never-started reservations whose record is a single queued event, has no committed intent, cancel request, cleanup requirement, result, cleanup stream, staging directory, or owner-lock file. Validate UUID, exact filename/record binding, regular private owned file and bounded decode first. Corrupt/unsafe entries are never reclaimed. Recheck the file identity before unlink and fsync the directory after successful reclamation. Keep active, started, pending recovery, cancelled, completed, result-bearing, and adoption-linked records indefinitely. This includes all records that could have exposed a usable measured result. Do not follow symlinks or remove other paths.
+
+Reclamation may run each reservation request; use one bounded directory scan and retain the existing 1,024-record cap for newly allocated records. At the cap of protected records, existing queued reuse and all status/cancel/result/cleanup operations remain available; new reservation allocation fails closed with a capacity error. This is an explicit finite lifetime limitation for 1,024 actually retained transactions, not normal polling exhaustion. Future terminal-history compaction or user-directed deletion requires a separate normative and architecture gate; this addendum does not authorize it.
+
+Tests: reuse succeeds at cap; expired untouched queued entries are reclaimed and new allocation succeeds through repeated polling; fresh queued reservations remain stable; each exclusion above prevents deletion; corrupt/private-file/symlink mismatches preserved byte-for-byte; terminal result retrievable at cap; active owner remains cancellable; reclamation and reservation serialized by existing lock. No active config, durable artifact, recommendation/adoption journal, or operator custody mutation.

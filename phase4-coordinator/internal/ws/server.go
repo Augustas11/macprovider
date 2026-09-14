@@ -130,16 +130,20 @@ type Server struct {
 	// mint behavior (e.g. mintFailingStore) without touching the
 	// validator. Codex architect review on PR #44 flagged the
 	// interface-segregation regression of mixing both on TokenValidator.
-	issuer          TokenIssuer
-	bootstrapTokens BootstrapTokenStore
-	referralPolicy  auth.ReferralPolicy
-	authStore       *auth.Store
-	githubOAuth     githubOAuthClient
-	admission       *AdmissionManager
-	sessions        sync.Map
-	started         time.Time
-	explorer        http.Handler
-	unauth          chan struct{}
+	issuer                       TokenIssuer
+	bootstrapTokens              BootstrapTokenStore
+	referralPolicy               auth.ReferralPolicy
+	authStore                    *auth.Store
+	githubOAuth                  githubOAuthClient
+	admission                    *AdmissionManager
+	sessions                     sync.Map
+	registeredSessions           sync.Map
+	sessionPublicationMu         sync.RWMutex
+	modelAdmissionAfterFunc      func(time.Duration, func())
+	modelAdmissionHeartbeatTicks func(time.Duration) (<-chan time.Time, func())
+	started                      time.Time
+	explorer                     http.Handler
+	unauth                       chan struct{}
 	// unauthPerIP counts concurrent unauthenticated WS handshakes by remote IP.
 	// Defense-in-depth against nginx limit_conn evasion: one host can still
 	// burn the global 64-slot semaphore without per-IP shaping (M1-4 / SECU-1).
@@ -157,54 +161,60 @@ type Server struct {
 	// hello admission reads them concurrently. Construction-time Options write
 	// the fields before Serve() starts any goroutine (happens-before), so they
 	// stay lock-free; every runtime read goes through a getter under RLock.
-	autotuneCatalogMu              sync.RWMutex
-	autotuneCatalog                *autotune.Catalog
-	autotuneCompatibleCatalogs     map[string]*autotune.Catalog
-	autotuneCatalogEnforced        bool
-	autotuneCatalogBridgeDeadline  time.Time
-	autotuneCatalogBridgeMu        sync.Mutex
-	autotuneEvidence               autotune.EvidenceStore
-	telemetryDriftMu               sync.RWMutex
-	telemetryDrift                 *pow.Evaluator
-	telemetryDriftGeneration       uint64
-	identitySignatures             IdentitySignatureStore
-	authPolicyAdmin                ProviderAuthPolicyAdminStore
-	hardwareTrustAdmin             HardwareTrustAdminStore
-	providerTrust                  ProviderTrustChecker
-	rewardsTrust                   ProviderRewardsTrustTierStore
-	admissionIdentityRecoveryAdmin AdmissionIdentityRecoveryAdminStore
-	idlePrewarm                    IdlePrewarmRecorder
-	idlePrewarmMetrics             IdlePrewarmMetrics
-	modelHashMismatchMetrics       ModelHashMismatchMetrics
-	credentialBootstrapMetrics     CredentialBootstrapMetrics
-	capacityOverClaimMetrics       CapacityOverClaimMetrics
-	connectionEvents               ConnectionEventStore
-	modelAdmissions                ModelAdmissionStore
-	modelAdmissionSubmitDisabled   bool
-	modelAdmissionAttemptMu        sync.Mutex
-	modelAdmissionAttempts         map[string][]time.Time
-	connectionEventMetrics         ConnectionEventMetrics
-	closeEventMeta                 sync.Map // net.Conn -> closeEventMeta
-	connectionEventQueue           chan connectionEventJob
-	connectionEventQueueMu         sync.Mutex
-	connectionEventWorkerOnce      sync.Once
-	connectionEventStopOnce        sync.Once
-	connectionEventDone            chan struct{}
-	connectionEventsStopped        atomic.Bool
-	computeIntegrityStatus         ComputeIntegrityStatusSource
-	admissionCeilingEventMu        sync.Mutex
-	admissionCeilingEvents         map[string]admissionCeilingEventRateState
-	providerConnWG                 sync.WaitGroup
-	anonymousEventMu               sync.Mutex
-	anonymousEventWindow           time.Time
-	anonymousEventCount            int
-	lastKnownFlushMu               sync.Mutex
-	lastKnownFlush                 map[string]time.Time
-	diagnosticLastKnownFlushMu     sync.Mutex
-	diagnosticLastKnownFlush       map[string]time.Time
-	bootstrapLimiter               *bootstrapMintLimiter
-	idlePrewarmLimits              sync.Map
-	idlePrewarmQueue               chan idlePrewarmRecord
+	autotuneCatalogMu                 sync.RWMutex
+	autotuneCatalog                   *autotune.Catalog
+	autotuneCompatibleCatalogs        map[string]*autotune.Catalog
+	autotuneCatalogEnforced           bool
+	autotuneCatalogBridgeDeadline     time.Time
+	autotuneCatalogBridgeMu           sync.Mutex
+	autotuneEvidence                  autotune.EvidenceStore
+	telemetryDriftMu                  sync.RWMutex
+	telemetryDrift                    *pow.Evaluator
+	telemetryDriftGeneration          uint64
+	identitySignatures                IdentitySignatureStore
+	authPolicyAdmin                   ProviderAuthPolicyAdminStore
+	hardwareTrustAdmin                HardwareTrustAdminStore
+	providerTrust                     ProviderTrustChecker
+	rewardsTrust                      ProviderRewardsTrustTierStore
+	admissionIdentityRecoveryAdmin    AdmissionIdentityRecoveryAdminStore
+	idlePrewarm                       IdlePrewarmRecorder
+	idlePrewarmMetrics                IdlePrewarmMetrics
+	modelHashMismatchMetrics          ModelHashMismatchMetrics
+	credentialBootstrapMetrics        CredentialBootstrapMetrics
+	capacityOverClaimMetrics          CapacityOverClaimMetrics
+	connectionEvents                  ConnectionEventStore
+	modelAdmissions                   ModelAdmissionStore
+	modelAdmissionAuthorityMu         sync.RWMutex
+	modelAdmissionAuthority           ModelAdmissionAuthorityResolver
+	modelAdmissionPrepare             ModelAdmissionAuthorityPreparer
+	modelAdmissionAuthorityGeneration uint64
+	modelAdmissionProbeMu             sync.Mutex
+	modelAdmissionProbes              map[string]time.Time
+	modelAdmissionSubmitDisabled      bool
+	modelAdmissionAttemptMu           sync.Mutex
+	modelAdmissionAttempts            map[string][]time.Time
+	connectionEventMetrics            ConnectionEventMetrics
+	closeEventMeta                    sync.Map // net.Conn -> closeEventMeta
+	connectionEventQueue              chan connectionEventJob
+	connectionEventQueueMu            sync.Mutex
+	connectionEventWorkerOnce         sync.Once
+	connectionEventStopOnce           sync.Once
+	connectionEventDone               chan struct{}
+	connectionEventsStopped           atomic.Bool
+	computeIntegrityStatus            ComputeIntegrityStatusSource
+	admissionCeilingEventMu           sync.Mutex
+	admissionCeilingEvents            map[string]admissionCeilingEventRateState
+	providerConnWG                    sync.WaitGroup
+	anonymousEventMu                  sync.Mutex
+	anonymousEventWindow              time.Time
+	anonymousEventCount               int
+	lastKnownFlushMu                  sync.Mutex
+	lastKnownFlush                    map[string]time.Time
+	diagnosticLastKnownFlushMu        sync.Mutex
+	diagnosticLastKnownFlush          map[string]time.Time
+	bootstrapLimiter                  *bootstrapMintLimiter
+	idlePrewarmLimits                 sync.Map
+	idlePrewarmQueue                  chan idlePrewarmRecord
 
 	// Epic #1235 Child B: heartbeat-driven durable telemetry refresh.
 	// hardwareProfileRefresher/autoupdateOutcomes are nil-checked optional
@@ -1425,6 +1435,7 @@ func (s *Server) Handler() http.Handler {
 		mux.HandleFunc("/admin/admission-canary/proof-of-weights", s.handleAdmissionCanaryProofOfWeights)
 	}
 	mux.HandleFunc("/v1/provider/model-admission/offers", s.handleProviderModelAdmissionOffer)
+	mux.HandleFunc("/v1/provider/model-admission/retry", s.handleProviderModelAdmissionRetry)
 	mux.HandleFunc("/v1/provider/model-admission/withdrawals", s.handleProviderModelAdmissionWithdrawal)
 	mux.HandleFunc("/v1/provider/model-admission/status", s.handleProviderModelAdmissionStatus)
 	if s.cfg.Auth.GitHubOAuth.Enabled {
@@ -1553,7 +1564,7 @@ func (s *Server) validateProviderToken(r *http.Request) (providerAuth, bool) {
 }
 
 func (s *Server) handleConn(conn net.Conn, auth providerAuth, releaseUnauthenticated func()) {
-	defer conn.Close()
+	defer s.closeConnection(conn)
 	defer func() { _ = s.takeCloseEvent(conn) }()
 	var releaseOnce sync.Once
 	releaseUnauth := func() {
@@ -3404,7 +3415,8 @@ func (s *Server) registerProviderSession(conn net.Conn, entry *pool.Provider) (*
 	session.useTier2Session(entry.Tier2Session)
 	session.probeWrites = true
 	session.onWriteFailure = s.handleProviderWriteFailure
-	s.sessions.Store(sessionKey(entry.ProviderID, entry.AssignedID), session)
+	s.storeProviderSession(sessionKey(entry.ProviderID, entry.AssignedID), session)
+	s.registeredSessions.Store(conn, session)
 	_ = s.takeCloseEvent(conn) // successful admission: drop pre-auth close metadata
 	s.rememberProviderSnapshot(*entry)
 	s.recordConnectionEvent(providerevents.Event{
@@ -3443,6 +3455,9 @@ func (s *Server) readProviderLoop(conn net.Conn, providerID, assignedID string) 
 		s.setReadDeadline(conn, s.providerReadTimeout(providerID, assignedID))
 		payload, op, err := s.readClientData(conn, controlReply)
 		if err != nil {
+			if session, ok := s.storedSessionFor(providerID, assignedID); ok {
+				session.beginClosing()
+			}
 			s.log.Warn().Err(err).Str("provider_id", providerID).Msg("provider websocket read failed")
 			return
 		}
@@ -3507,6 +3522,10 @@ func (s *Server) close(conn net.Conn, code gobwas.StatusCode, reason string) {
 // close(session.conn, ...) once runWriter is running — i.e. after
 // registerProviderSession has returned.
 func (s *Server) closeSession(session *providerSession, code gobwas.StatusCode, reason string) {
+	if session == nil {
+		return
+	}
+	session.beginClosing()
 	s.log.Warn().Int("close_code", int(code)).Str("reason", reason).Msg("provider websocket closing")
 	if session != nil {
 		session.closeEventOnce.Do(func() {
@@ -3531,13 +3550,11 @@ func (s *Server) closeSession(session *providerSession, code gobwas.StatusCode, 
 	if err := gobwas.WriteFrame(&buf, gobwas.NewCloseFrame(body)); err != nil {
 		// Writing to bytes.Buffer cannot realistically fail; fall back to a
 		// hard conn.Close so the session still tears down.
-		_ = session.conn.Close()
+		session.closeTransport()
 		return
 	}
 	_ = session.enqueueRaw(buf.Bytes())
-	time.AfterFunc(100*time.Millisecond, func() {
-		_ = session.conn.Close()
-	})
+	s.scheduleSessionClosure(session, 100*time.Millisecond, func() { session.closeTransport() })
 }
 
 func (s *Server) reserveUnauthenticatedConn() bool {
@@ -4060,7 +4077,7 @@ func (s *Server) handleDrainStatus(conn net.Conn, providerID, assignedID string,
 		Int("estimated_drain_seconds", status.EstimatedDrainSeconds).
 		Msg("provider drain progress")
 	if status.Phase == "complete" {
-		_ = conn.Close()
+		_ = s.CloseModelAdmissionTransport(providerID, assignedID, "drain_complete")
 	}
 }
 
@@ -4232,7 +4249,7 @@ func (s *Server) maybeRunModelAdmissionSyntheticProbeForOffer(ctx context.Contex
 		}
 		return current
 	}
-	return probed
+	return s.promoteModelAdmission(ctx, probed, provider, s.now())
 }
 
 func (s *Server) modelAdmissionSyntheticProbeProvider(providerID string) (pool.Provider, bool) {
@@ -4240,7 +4257,7 @@ func (s *Server) modelAdmissionSyntheticProbeProvider(providerID string) (pool.P
 	if !ok || !provider.IsWSTunneled() {
 		return pool.Provider{}, false
 	}
-	if _, ok := s.sessionFor(provider.ProviderID, provider.AssignedID); !ok {
+	if !s.ModelAdmissionSessionAvailable(provider.ProviderID, provider.AssignedID) {
 		return pool.Provider{}, false
 	}
 	return provider, true
@@ -4269,6 +4286,14 @@ func (s *Server) runModelAdmissionSyntheticProbe(ctx context.Context, current Mo
 		return ModelAdmissionEvent{}, errors.New("model admission synthetic probe requires sandbox_probe_only state")
 	}
 
+	passed, wireID, err := s.executeModelAdmissionWireProbe(ctx, current, provider)
+	if err != nil {
+		return current, err
+	}
+	return s.appendModelAdmissionSyntheticProbeResult(ctx, current, wireID, passed, targetState, experimentalVisibilityAuthorized)
+}
+
+func (s *Server) executeModelAdmissionWireProbe(ctx context.Context, current ModelAdmissionEvent, provider pool.Provider) (bool, string, error) {
 	body, err := json.Marshal(map[string]any{
 		"model": current.ServedModelRef,
 		"messages": []map[string]string{{
@@ -4279,14 +4304,14 @@ func (s *Server) runModelAdmissionSyntheticProbe(ctx context.Context, current Mo
 		"stream":     false,
 	})
 	if err != nil {
-		return ModelAdmissionEvent{}, err
+		return false, "", err
 	}
 	probeCtx, cancel := context.WithTimeout(ctx, modelAdmissionSyntheticProbeTimeout)
 	defer cancel()
 	requestID := "model-admission-probe-" + s.newUUID()
 	relay, err := s.DispatchInference(probeCtx, provider, requestID, body, false)
 	if err != nil {
-		return current, err
+		return false, "", err
 	}
 	passed := false
 	chunks := relay.Chunks
@@ -4301,11 +4326,11 @@ func (s *Server) runModelAdmissionSyntheticProbe(ctx context.Context, current Mo
 				passed = true
 			}
 		case end := <-relay.Done:
-			return s.appendModelAdmissionSyntheticProbeResult(ctx, current, relay.RequestID, end.Status == "complete" && passed, targetState, experimentalVisibilityAuthorized)
+			return end.Status == "complete" && passed, relay.RequestID, nil
 		case <-relay.Errors:
-			return s.appendModelAdmissionSyntheticProbeResult(ctx, current, relay.RequestID, false, targetState, experimentalVisibilityAuthorized)
+			return false, relay.RequestID, nil
 		case <-probeCtx.Done():
-			return s.appendModelAdmissionSyntheticProbeResult(ctx, current, relay.RequestID, false, targetState, experimentalVisibilityAuthorized)
+			return false, relay.RequestID, nil
 		}
 	}
 }
@@ -5091,9 +5116,9 @@ func (s *Server) CloseAllProviderSessions(reason string) {
 			Msg("closing provider session for shutdown")
 		_ = s.takeCloseEvent(session.conn)
 		session.close()
-		s.sessions.Delete(key)
+		s.deleteProviderSession(key)
 		if session.conn != nil {
-			_ = session.conn.Close()
+			session.closeTransport()
 		}
 		return true
 	})
@@ -5845,7 +5870,7 @@ func (s *Server) handleDisconnect(providerID, assignedID string) {
 	})
 	if session, ok := s.storedSessionFor(providerID, assignedID); ok {
 		session.close()
-		s.sessions.Delete(sessionKey(providerID, assignedID))
+		s.deleteProviderSession(sessionKey(providerID, assignedID))
 	}
 	if s.pool.RemoveIfSessionState(providerID, assignedID, pool.StateDraining) {
 		s.log.Info().Str("provider_id", providerID).Msg("draining provider removed after websocket close")
@@ -5867,6 +5892,7 @@ func (s *Server) handleProviderWriteFailure(session *providerSession, err error)
 	if session == nil {
 		return
 	}
+	session.beginClosing()
 	session.rekeyMu.Lock()
 	exchange := session.rekey
 	session.rekeyMu.Unlock()
@@ -5874,9 +5900,9 @@ func (s *Server) handleProviderWriteFailure(session *providerSession, err error)
 		return
 	}
 	s.clearWarmupGate(session.providerID, session.assignedID)
-	_ = session.conn.Close()
+	session.closeTransport()
 	session.close()
-	s.sessions.Delete(sessionKey(session.providerID, session.assignedID))
+	s.deleteProviderSession(sessionKey(session.providerID, session.assignedID))
 	if s.pool.MarkState(session.providerID, session.assignedID, pool.StateUnavailable) {
 		s.log.Warn().
 			Err(err).
@@ -5894,9 +5920,9 @@ func (s *Server) monitorHeartbeat(providerID, assignedID string, conn net.Conn) 
 	if tick > time.Second {
 		tick = time.Second
 	}
-	ticker := time.NewTicker(tick)
-	defer ticker.Stop()
-	for range ticker.C {
+	ticks, stop := s.heartbeatTicks(tick)
+	defer stop()
+	for range ticks {
 		provider, ok := s.pool.Resolve(providerID, assignedID)
 		if !ok {
 			return
@@ -5933,7 +5959,7 @@ func (s *Server) monitorHeartbeat(providerID, assignedID string, conn net.Conn) 
 			BinaryVersion: provider.BinaryVersion,
 			Diagnostic:    "liveness_threshold_exceeded",
 		})
-		_ = conn.Close()
+		_ = s.CloseModelAdmissionTransport(providerID, assignedID, "heartbeat_stale")
 		return
 	}
 }
@@ -6366,9 +6392,7 @@ func (s *Server) handleBlacklist(w http.ResponseWriter, r *http.Request) {
 		s.log.Warn().Err(err).Str("provider_id", provider.ProviderID).Msg("drain write failed during blacklist")
 	}
 	s.pool.MarkState(provider.ProviderID, provider.AssignedID, pool.StateDraining)
-	time.AfterFunc(time.Minute, func() {
-		_ = session.conn.Close()
-	})
+	s.scheduleSessionClosure(session, time.Minute, func() { session.closeTransport() })
 	s.log.Warn().Str("provider_id", provider.ProviderID).Str("assigned_id", provider.AssignedID).Str("reason", req.Reason).Msg("provider blacklisted")
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status":      "draining",

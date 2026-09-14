@@ -1,0 +1,36 @@
+# Independent transaction-control and admission-recovery plan gate — revision 4
+
+Verdict: **APPROVED at plan level** for the exact revision below. Open findings: **0 Critical, 0 High, 0 Medium, 0 Low**. No outcomes or prior acceptance requirements are dropped.
+
+Reviewed `transaction-control-addendum-r4.md`, independently verified SHA-256 `3bd808b21557a22a979446f300b22a2013f1717f06670c616ee9c858877679e3`. Context: base/HEAD `914f7cafcdbcfc1805a10f4f34167218341d5587`, tree-equivalent pinned prerequisite and the current incomplete Build 1 WIP. Reviewed the complete r3 contract during the preceding independent pass, every r3-to-r4 change, and the revised bootstrap/API/test sequence against actual config loading, root resolution, store setup/reservation and app process boundaries. The diff preserves the previously reviewed controls, namespace/privacy rules, operation selectors and admission predicates.
+
+Only this review artifact was written. No runtime source edits, subagents, secret access, external writes, runtime tests or physical acceptance were performed. This approves the plan; it does not qualify current implementation, production signing, release assets or the physical journey.
+
+## Prior finding dispositions
+
+| Finding | Disposition | Evidence and consequence |
+|---|---|---|
+| R3 M1: first projection has no conforming context-finalization interface | Closed at plan level | Section E now specifies `prepareProjection` → store-owned `prepareProjectionStore` and opaque identity receipt → reservations/data collection on that same store/config → read-only `finalizeProjection` → publication. Missing directories are allowed only in preparation, explicit authorized setup creates them, and only finalization constructs a bound context with a nonoptional digest. Failure withholds available actions. TC-16/17 cover clean-root bootstrap and config/ancestor/root/setup/reservation interleavings. |
+| R2 M1: supervisor death leaves a suspended orphan | Closed at plan level; preserved | No suspended execution or extra supervisor remains. Normal verified-snapshot spawn transfers the same flock open-file description, while early child deadline/parent/pipe guards bound cleanup after GUI death. Exact-child termination, output bounds, priority and real macOS crash/inheritance tests remain required. |
+| R2 M2: parent preflight does not bind consumed config | Closed at plan level; preserved | Bound commands validate one captured config input and the expected private context before store access. All ConfigLoader callbacks receive those bytes; nested consumers use the frozen namespace/root. Post-capture replacement cannot cause a second decode of replacement config. |
+| R1 M2: original UUID control can select newer cleanup | Closed at plan level; preserved | Expected kind and immutable generation select the exact stream under its journal lock before reconciliation, hashing, cleanup, cancellation or result access. Original terminal retrieval and old-cleanup unavailability cannot fall forward to a newer attempt. |
+
+## Independent feasibility and boundary assessment
+
+The bootstrap correction now matches actual code ordering. `ModelsSubcommand.swift:482–507` resolves config before local action production. `ModelCatalogTransactions.swift:742–756` constructs a store and reserves actions; `ModelCatalogTransactionStore.locked` at lines 145–149 currently secures the store before opening the lock. Separating authorized projection setup from pure config preparation and metadata finalization supplies the previously missing clean-install route. It does not require a directory identity before that directory exists, a second config read, or caller-fabricated digest.
+
+The new receipt is store-owned and opaque; finalization independently compares actual metadata to it and retains the original resolved config/root/namespace. A replacement directory cannot acquire old action authorization simply by being observed later. Setup/reservation failures withhold the digest and available actions; partial reservations remain CLI-owned without authorizing app dispatch. Existing-root projection follows the same sequence, avoiding a second configuration interpretation. TC-16/17 require those behaviors explicitly.
+
+Bound owner/control entry is a separate path that requires existing roots and validates expected context before journal construction or access. It cannot call the projection setup path as a fallback. This distinction must survive implementation: current `forConfig` and `locked` defaults cannot simply be reused unchanged where they would re-resolve environment or create a missing store. The plan assigns `forContext` and the explicit projection setup boundary to address this.
+
+The frozen-config implementation remains feasible through `ConfigLoader.load(cli:environment:fileExists:readFile:)` (`MacProviderCore/Config.swift:359–414`), including its multiple YAML-related callbacks. `CachedModelArtifactResolver.forConfig` (`AutotuneRecommend.swift:3581–3598`) accepts explicit environment and home, permitting the required frozen namespace instead of current-process/default-root lookup. Projection output adds only the opaque digest; config/root/home/identity fields remain in bounded private IPC/metadata, and mismatch errors must remain sanitized. None of this creates economic authority.
+
+Snapshot execution and helper lifetime retain a coherent operator-UID trust model. Safe derived snapshot paths, strict signature/CDHash checks, source-change checks, bounded copies/cleanup, sanitized environment and no fallback protect ordinary replacement/restart behavior without claiming malicious same-UID isolation. The early guard is limited to short controls, and helper exit cannot cancel or certify the long-running transaction. The inherited lock must remain held until actual child exit; current `ModelCatalogFileLock` explicitly calls `LOCK_UN` in its deinitializer (`ModelCatalogTransactions.swift:131`), so it is not a drop-in lease for the shared-description handoff. R4 correctly forbids that unlock and requires direct macOS inheritance/last-close tests.
+
+Admission readback remains available after recognized terminal failures; new offer and retry retain separate explicit gates. Fresh live-peer/projection requirements and CLI/coordinator custody, sanction, freshness and generation enforcement remain decisive. The offline control exception exposes only status/cancel/result, and terminal success still requires fresh projection/restored-peer reconciliation before readiness or pending-state clearing.
+
+## Acceptance scope
+
+No additional Critical, High, Medium or Low finding was identified in this revision. Implementation must satisfy the stated normative updates and exact interfaces, then produce TC-01–17 and AR-01–04 evidence. Real macOS descriptor/parent-death tests, actual signed snapshot controls and owner resource resolution, complete app Xcode tests, bounded output/interruption tests and cumulative code/security/architecture review remain required. Injected or unsigned DEBUG fixtures cannot substitute for production identity positives.
+
+This approval does not assert those tests pass, authorize release/production activation, or replace the independently qualified physical preparation-to-settled-request acceptance. Earlier full Build 1 outcomes and gates remain in force.

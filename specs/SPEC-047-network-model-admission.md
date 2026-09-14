@@ -1,12 +1,12 @@
 # SPEC-047 - Network Model Admission
 
-**Version:** 0.1.3
+**Version:** 0.1.4
 
 ```json
 {
   "spec_id": "SPEC-047",
   "title": "Network Model Admission",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "path": "specs/SPEC-047-network-model-admission.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -116,6 +116,114 @@ The v0.1 offer package MUST be a closed schema; unknown fields MUST be rejected 
 
 **SPEC-047-R003 - Settlement boundary.** A model in any state other than `settlement_capable`, including `not_offered`, `offer_submitted`, `offer_rejected`, `sandbox_probe_only`, `network_visible_unpriced`, `network_admitted_unsettled`, `catalog_priced`, `withdrawn`, or `revoked`, MUST NOT create buyer-final debit, default paid buyer routing, positive provider credit, earnings visibility, payout-ready rows, settlement ledger rows, or "verified" buyer-facing claims. `catalog_priced` MAY show signed rate-card economics only when SPEC-023 and SPEC-044 trust rules are satisfied, but it still MUST NOT create buyer-final debit, default paid buyer routing, positive provider settlement, or settlement ledger rows unless SPEC-022 receipt and route-time verification requirements are also satisfied and the state becomes `settlement_capable`. `catalog_priced` and `settlement_capable` require a trusted catalog identity/hash binding: the coordinator MUST bind the candidate to a trusted signed catalog row by catalog identity, exact catalog body digest, signing key identity, `catalog_model_key`, expected `model_hash`/algorithm, and route-time snapshot evidence under SPEC-010 and SPEC-022. **[amended v0.1.3]** That trusted binding MAY reference an artifact of the SPEC-023 §3.7 catalog artifact feed instead of the candidate row's single `model_sha256`. When it does, the recorded binding MUST include the artifact feed's exact body digest (`artifact_feed_sha256`), the artifact `hash`, and the artifact `hash_algorithm`, in addition to the candidate catalog's own exact body digest, signing key identity, and `catalog_model_key`; the artifact feed MUST be release-bound to that candidate catalog under SPEC-023 §3.7.4, and the artifact MUST carry `verification_status: "verified"`. The artifact feed's authenticated signer identity MUST be recorded alongside them as `artifact_feed_signer_key_id`; under SPEC-023 §3.7.2 that `key_id` MUST equal both the `release.json` artifact-feed `signer_key_id` and the authenticated candidate-feed signer of that release, so the artifact signer is not inherited from the candidate signer by assumption but recorded after that equality check succeeds. **[amended v0.1.3]** Artifact evidence MUST be captured in the IMMUTABLE route-time record, never only in mutable admission state. For a request attempt whose binding references a §3.7 artifact, the SPEC-022 route-time verification snapshot MUST carry — directly, or in a separate immutable artifact-binding record that the snapshot references by digest and that is itself immutable once written — all six of `artifact_feed_sha256`, `artifact_id`, the artifact `hash`, the artifact `hash_algorithm`, `artifact_feed_signer_key_id`, and the exact candidate-catalog body digest that feed is release-bound to. **That extension is a SPEC-047-owned OPTIONAL record. SPEC-022's minimum route-time snapshot field list is unchanged and SPEC-022 is NOT amended by this revision:** SPEC-022 states those fields as a minimum the snapshot "contains at least", which an owner spec may extend, and the settlement-capable receipt profile already binds the snapshot by digest, so the extension travels under the binding SPEC-022 already requires. At settlement the coordinator MUST re-verify that evidence against the snapshot and MUST fail closed — no buyer-final debit, no default paid routing, no positive provider settlement, no settlement ledger row — when the artifact evidence is **missing** (an artifact-derived binding whose snapshot carries none of the six values, or whose referenced record does not resolve to the digest the snapshot recorded), **changed** (any of the six values differs from the snapshot's), **cross-release** (an `artifact_feed_sha256` or candidate-catalog body digest belonging to a different release than the snapshot recorded, even when the artifact `hash` still matches), or **wrong-signer** (an `artifact_feed_signer_key_id` differing from the snapshot's, including a cryptographically valid signature by a different concurrently trusted key). Fail-closed here is a refusal to settle and never a repair: settlement MUST NOT consult a current artifact feed, a current `release.json`, or a current keyring to reconstruct evidence a snapshot does not carry. Only the **primary artifact** of that catalog model key — the artifact named by its SPEC-023 `primary_artifact_id`, whose `hash_algorithm` is `macprovider.snapshot-manifest.v1` and whose `hash` is byte-identical to the candidate row's `model_sha256` — may reach `catalog_priced` or `settlement_capable`, be used as the SPEC-010 `model_hash`/`model_hash_algorithm` pair, or bind a SPEC-022 route-time settlement snapshot. The model key of that binding is the one the globally unique SPEC-023 §3.7.4 `(hash_algorithm, hash)` pair resolves to; a provider-asserted `catalog_model_key` that disagrees with the resolved key MUST fail the binding closed rather than select a price. This is SPEC-010's existing requirement, not a new SPEC-047 restriction: SPEC-010-R001 defines the canonical identity digest as the `model_sha256` of the exact signed candidate-catalog row, and SPEC-010-R004 keeps that same row as session authority for later heartbeats and settlement snapshots. Every NON-primary artifact — a `gguf` artifact and a secondary `mlx_safetensors` quantization alike, since a different quantization has different bytes and therefore a different snapshot-manifest digest — MUST NOT reach `catalog_priced` or `settlement_capable`, MUST NOT be used as the SPEC-010 wire pair, and MUST NOT bind SPEC-022 route-time settlement; under SPEC-023 v0.10.0 it may reach `catalog_matched`, `sandbox_probe_only`, and `network_visible_unpriced` and nothing further, until SPEC-010 is amended to recognize a non-primary artifact-feed entry as a settlement identity. An artifact whose `hash_algorithm` is not a canonical wire pair named by SPEC-010-R002 — `macprovider.gguf-file.v1` today — is excluded on that independent ground as well. A missing, stale, integrity-failed, or release-mismatched artifact feed MUST fail closed for artifact-derived binding and MUST NOT be substituted by a provider-asserted or runtime-reported artifact identity. A release-manifest digest MAY be recorded as additional provenance only when its owner spec defines the field, but it is never an alternative to the exact catalog body digest required for settlement-capable route snapshots. Provider-asserted `catalog_model_key`, `served_model_ref`, display name, runtime-reported model name, or local artifact label is advisory only and is never sufficient for catalog economics or settlement capability. `settlement_capable` is the only v0.1 BYOM admission state that may participate in buyer-final debit, default paid buyer routing, positive provider settlement, and payout-ready ledger behavior, and only for request attempts whose route-time snapshot and receipt verification satisfy SPEC-022.
 
+**R002 bounded pending-offer retry clarification (v0.1.4).**
+`models admission retry TARGET --yes --json` MAY request a bounded coordinator
+re-evaluation through `POST /v1/provider/model-admission/retry`. `TARGET` resolves
+the same discovered candidate used by offer/status; it is not an endpoint or
+artifact path. The request MUST use the existing closed provider-signed offer
+envelope with a fresh nonce/idempotency key and current timestamp, authenticated
+by the same current provider admission key and transport rules as initial offer
+submission. It MUST bind the same provider/candidate, runtime source, served
+model reference, discovery/evaluation digests, catalog/hash evidence and
+requested disclosure class as the exact currently pending offer. A changed
+tuple requires the normal signed offer flow, not a retry shortcut. Withdrawn,
+revoked, rejected, replaced or already settlement-capable offers MUST NOT be
+reopened by retry. The coordinator MUST enforce bounds, replay protection and
+expected-current-event compare-and-swap before a promotion, and recheck current
+session/readiness and all R003 authority. Exact replay returns stored outcome
+without a duplicate probe or transition. A fresh authenticated retry grants no
+new trust and need not succeed; missing authority remains explicitly non-paid.
+CLI JSON readback MUST retain the existing `model_admission_status.v1` schema;
+no new state, provider-signing root, caller-supplied authority flag, or local
+inference of success is permitted.
+
+The coordinator's persisted admission evidence MAY add optional
+`runtime_source` from the signed offer so session and retry checks can compare
+it. This is an additive internal record field, not an extension to the closed
+v1 offer or status envelope. A legacy record without it cannot satisfy the new
+artifact-derived promotion's exact runtime match through inference; it requires
+fresh authenticated evidence under the normal offer path. Preserve old record
+and wire-schema interpretation.
+
+**R001/R003/R006 authority and immutable-evidence clarification (v0.1.4).**
+Artifact-derived admission MUST be constructed from coordinator-owned current
+session identity, authenticated signed candidate/artifact feeds, effective
+signed rate evidence, current sanctions, lease and session generation, a
+successful bounded authenticated wire probe, the required current receipt
+key/profile, settlement enforcement mode, and independently loaded Tier2
+reference material. Provider offer fields and a successful local
+prepare/evaluate/adopt action are advisory inputs, never promotion authority.
+The exact primary model/hash/algorithm MUST agree with both SPEC-010 session
+authority and Tier2 `SnapshotMaterial`; missing or mismatched reference material
+MUST leave the candidate non-paid. `catalog_priced` still precedes paid
+eligibility and MUST NOT be inferred from merely obtaining authentic rate bytes.
+
+Promotion MUST append events with an expected-current-event precondition and
+recheck current session/generation, offer identity, sanction, lease and probe
+validity when committing; it MUST NOT overwrite a withdrawal, reoffer,
+revocation, or newer decision. Matching live-session readiness or a bounded
+explicit retry MAY re-evaluate a pending offer under current authority. An
+idempotent replay of the original signed offer MUST NOT itself fabricate a new
+probe result or append duplicate transitions. Required predicates MUST be
+rechecked at routing and settlement; drift revokes or demotes before a later
+attempt can use older authority. Earlier settled ledger rows remain immutable.
+
+For artifact-derived promotion, validation and event commitment MUST be
+serialized against mutation of the current provider/session and receipt
+authority, exclusions/sanctions, effective billing/enforcement configuration,
+authenticated feed bundle, and independent reference material. An admission
+event compare-and-swap alone, or a fresh authority read whose protection ends
+before the append commits, is insufficient. Coordinator-owned session
+teardown MUST publish session ineligibility under the same serialization
+before closing or committing to a scheduled closure of its socket, unless
+an earlier serialized invalidation already excludes that exact session.
+Graceful transport shutdown MUST NOT defer admission invalidation until
+eventual reader cleanup. Subsequent artifact authority and paid-route
+revalidation MUST observe that same exact-session ineligibility even while
+a prior positive event remains stored; missing availability capability MUST
+fail closed for the artifact path. This observation does not hold commitment
+pins through routing or inference. Time-bounded authority MUST be
+valid at the serialized decision and MUST NOT be represented as current after
+its expiry. Offer, retry and status readback, including replay, MUST validate
+the latest positive outcome as a current observation; inability to establish
+current authority MUST return non-paid state or a transport error without a
+positive capability claim. Later routing and settlement checks remain required.
+
+The OPTIONAL artifact binding extension has these exact serialized field names:
+
+| Field | Captured authority |
+|---|---|
+| `artifact_feed_sha256` | SHA-256 of exact authenticated artifact-feed body bytes. |
+| `artifact_id` | Exact primary artifact identifier selected under that feed. |
+| `artifact_hash` | Exact artifact `hash`, equal to primary candidate `model_sha256` and the loaded session model hash. |
+| `artifact_hash_algorithm` | Artifact `hash_algorithm`, `macprovider.snapshot-manifest.v1` for this primary path. |
+| `artifact_feed_signer_key_id` | Authenticated signer after release/candidate signer equality checks. |
+| `candidate_catalog_sha256` | SHA-256 of exact signed candidate-catalog body bytes bound to that artifact feed's release. |
+
+These names apply to additive admission records and the immutable route-time
+snapshot or immutable referenced artifact-binding record. In particular,
+`candidate_catalog_sha256` MUST NOT repurpose `CatalogBodyDigest` / existing
+`catalog_body_digest`, which identify Tier2 catalog bytes; both authorities are
+retained separately. The extension is all-or-none: any nonempty/present field
+requires all six well-formed values, authenticated release/signer/primary
+consistency, and coverage by the immutable snapshot digest (directly or via an
+immutable record digest). A partial, empty-valued, substituted, wrong-signer or
+cross-release extension MUST fail closed. All six fields absent preserves the
+legacy record and its original version/digest interpretation, but such a record
+MUST NOT qualify for the new artifact-derived path. A migration MUST be additive
+and MUST NOT backfill authority from current feeds, reinterpret prior digest
+bytes, rewrite old snapshots, or promote legacy admissions by inference.
+
+Settlement MUST validate the captured immutable provenance and receipt binding,
+not reconstruct missing release/signature/reference evidence from today's
+mutable feed or keyring. Effective signed prompt, completion and cache rates,
+provider share, multiplier, price units and rate version MUST match the billing
+authority captured for that attempt. Missing, stale, mismatched or
+implementation-default-fallback pricing MUST block new artifact-derived
+admission. Receipt verification, ordinary billing caps, replay/deduplication and
+all SPEC-022 preconditions remain mandatory; no extension field creates credit
+or a stronger computation/attestation claim by itself.
+
 **SPEC-047-R004 - Pricing and economics.** Provider-proposed prices, local benchmark estimates, runtime-reported model names, and demand labels are advisory until converted into a signed MacProvider rate-card entry or a later billing-owner spec defines another trusted price source. The coordinator and Malibu MUST NOT display provider payout rates, expected earnings, higher-paying labels, or catalog economics for `not_offered`, `offer_submitted`, `offer_rejected`, `sandbox_probe_only`, `network_visible_unpriced`, `network_admitted_unsettled`, `withdrawn`, or `revoked` states. `catalog_priced` MAY display signed catalog economics under SPEC-044 while still hiding earning-eligible or settlement-ready claims until the state becomes `settlement_capable`. If an offer has no trusted price, buyer-visible surfaces MAY label it only as unpriced or experimental when explicitly opted in; provider-facing surfaces MUST state that the model is not earning-eligible. Provider-facing status MUST distinguish "not earning-eligible yet; catalog/receipt path exists" from "no earning path exists in this release because the model lacks a trusted price-conversion/catalog path."
 
 **SPEC-047-R005 - Buyer visibility and routing.** Default public buyer `/v1/models` and default buyer routing MUST include only models that are allowed by SPEC-006 and the active routing policy. Non-settlement BYOM states MUST be hidden from default paid routing. Experimental or unpriced visibility, if enabled, MUST require an explicit account, request, or operator policy opt-in and MUST return disclosure fields that distinguish provider-reported identity from catalog-verified identity. A sole-provider or low-supply condition MUST NOT relax catalog, admission, route-time snapshot, or settlement requirements.
@@ -124,7 +232,7 @@ The v0.1 offer package MUST be a closed schema; unknown fields MUST be rejected 
 
 **SPEC-047-R007 - Abuse and privacy controls.** Offer submission and withdrawal MUST be authenticated as the provider, signed with the SPEC-047-R002 current provider admission identity, rate-limited per provider identity, bounded by payload size and parser work, replay-protected by nonce or idempotency key, and audited. The coordinator MUST verify that the signing public key is the current coordinator-authoritative `provider_admission_public_key` for the `provider_id` at mutation time; pending or recovery keys can authorize BYOM mutation only after the SPEC-026 transaction has made them current, and previous keys remain limited to SPEC-026 rollback/readback compatibility. Stale, unknown, bearer-only, receipt-key-only, payout-key, wallet-key, buyer-key, pending-key-not-current, recovery-key-not-current, or previous-key-mutating signatures MUST fail closed. The coordinator MUST reject offers containing endpoint URLs, endpoint origins, hostnames, IP addresses, port values, Unix-domain socket paths, public/LAN/loopback/private/link-local/multicast address material, redirect targets, encoded network locations, secret-bearing fields, raw local absolute paths, HTML/script-bearing display names, control characters, ambiguous Unicode identifiers, or model identifiers that cannot be normalized under the chosen identity class. Offer state MUST be sanction-aware: a provider under a route, trust, payout, or registration sanction MUST NOT use BYOM admission to bypass that sanction.
 
-**SPEC-047-R008 - Release evidence.** Promotion beyond draft MUST include automated tests for offer dry-run non-submission, provider signature verification, replay rejection, closed-schema unknown-field rejection, endpoint/origin/socket/path rejection including loopback, localhost, IPv6 loopback, encoded IP, redirect, Unix-socket, and local-path variants, state-machine transition validity including rejected/withdrawn/revoked re-offer freshness, `models admission status` presentation of provider-facing state meaning, next action, and earning-path disclosure, synthetic probes using the provider wire protocol rather than coordinator dereference, settlement-boundary enforcement, default buyer invisibility for non-settlement states, explicit experimental disclosure if implemented, pricing trust nullability, revocation on drift, withdrawal, sanction interaction, payload redaction, parser/resource bounds, and SPEC-044 economics gating. Production promotion MUST include a signed journey result covering one rejected opaque endpoint, one sandbox-probe-only offer, one network-visible unpriced offer, one catalog-matched offer that is not yet settlement-capable, one novel non-catalog offer whose status says no earning path exists in v0.1, one rejected-offer re-entry requiring fresh evidence, one revoked drift case, one withdrawn re-entry requiring fresh evidence, and one settlement-capable catalog-verified case.
+**SPEC-047-R008 - Release evidence.** Promotion beyond draft MUST include automated tests for offer dry-run non-submission, provider signature verification, replay rejection, closed-schema unknown-field rejection, endpoint/origin/socket/path rejection including loopback, localhost, IPv6 loopback, encoded IP, redirect, Unix-socket, and local-path variants, state-machine transition validity including rejected/withdrawn/revoked re-offer freshness, `models admission status` presentation of provider-facing state meaning, next action, and earning-path disclosure, synthetic probes using the provider wire protocol rather than coordinator dereference, settlement-boundary enforcement, default buyer invisibility for non-settlement states, explicit experimental disclosure if implemented, pricing trust nullability, revocation on drift, withdrawal, sanction interaction, payload redaction, parser/resource bounds, and SPEC-044 economics gating. Artifact-derived admission MUST additionally test each captured authority predicate independently, event-precondition races with withdrawal/reoffer/revocation, all six extension fields and their digest coverage, cross-release and concurrently trusted wrong-signer substitutions, old snapshot digest compatibility, and actual receipt-verified settlement with exactly-once buyer debit/provider credit. Artifact promotion tests MUST deterministically exercise both promotion boundaries before validation and through durable commitment for session replacement, every local close/scheduled-close producer, exclusions/sanctions, effective billing/enforcement, feed and reference replacement. They MUST cover rollback, uncertain commit, expiry, replay/current readback, exact-session availability on actual route selection before status revocation, failed revocation persistence, readiness revival, missing capability wiring and replacement isolation. Fixture keys and deterministic runners MUST remain labeled as fixtures; local implementation evidence MUST NOT promote physical or production conformance. Production promotion MUST include a signed journey result covering one rejected opaque endpoint, one sandbox-probe-only offer, one network-visible unpriced offer, one catalog-matched offer that is not yet settlement-capable, one novel non-catalog offer whose status says no earning path exists in v0.1, one rejected-offer re-entry requiring fresh evidence, one revoked drift case, one withdrawn re-entry requiring fresh evidence, and one settlement-capable catalog-verified case.
 
 ## 4. Implementation, tests, and journeys
 
@@ -170,6 +278,7 @@ implementation slices land. This amendment does not flip those verdicts.
 
 ## 8. Changelog and history
 
+- v0.1.4 - Names the all-or-none immutable artifact extension, keeping candidate-catalog and Tier2 catalog digests distinct; clarifies coordinator-owned promotion predicates, concurrent event guards and legacy snapshot preservation. No state, trust tier, provider offer schema, billing formula, conformance state, or production-evidence promotion.
 - v0.1.3 - Minimal cross-spec amendment for the SPEC-023 v0.10.0 catalog
   pipeline (#1240). Defines `catalog_matched` for SPEC-047-R001/R002 as an
   artifact-hash match, bound with its hash algorithm, against a `verified`

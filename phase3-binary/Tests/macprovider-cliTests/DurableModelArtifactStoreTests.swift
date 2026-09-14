@@ -111,30 +111,50 @@ final class DurableModelArtifactStoreTests: XCTestCase {
         XCTAssertFalse(store.isModelMaterialized(modelID: "namespace/other"))
     }
 
-    func testAdoptRepairsCorruptDurableDestinationFromHealthyStaging() throws {
-        let root = try tempDir()
-        let store = DurableModelArtifactStore(root: root)
-        let staging = try tempDir()
-        try Data("healthy".utf8).write(to: staging.appendingPathComponent("weights.bin"))
-        let sha = try ModelArtifactVerifier.canonicalArtifactHash(directory: staging)
+    func testAdoptPreservesCorruptPublishedDestinationForRecovery() throws {
+        let store = DurableModelArtifactStore(root: try tempDir())
+        let source = try tempDir()
+        try Data("healthy".utf8).write(to: source.appendingPathComponent("weights.bin"))
+        let sha = try ModelArtifactVerifier.canonicalArtifactHash(directory: source)
         let revision = String(repeating: "e", count: 40)
-        let destination = try store.artifactURL(
-            modelID: "namespace/model",
-            revision: revision,
-            sha256: sha
-        )
+        let destination = try store.artifactURL(modelID: "namespace/model", revision: revision, sha256: sha)
         try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
-        XCTAssertEqual(symlink("missing.bin", destination.appendingPathComponent("broken.bin").path), 0)
+        let corrupt = destination.appendingPathComponent("weights.bin")
+        try Data("incumbent".utf8).write(to: corrupt)
+        XCTAssertThrowsError(try store.adoptVerifiedStaging(staging: source, modelID: "namespace/model", revision: revision, sha256: sha))
+        XCTAssertEqual(try Data(contentsOf: corrupt), Data("incumbent".utf8))
+    }
 
-        let adopted = try store.adoptVerifiedStaging(
-            staging: staging,
-            modelID: "namespace/model",
-            revision: revision,
-            sha256: sha
-        )
-        XCTAssertEqual(adopted.path, destination.path)
-        XCTAssertEqual(try ModelArtifactVerifier.canonicalArtifactHash(directory: adopted), sha)
-        XCTAssertEqual(try String(contentsOf: adopted.appendingPathComponent("weights.bin")), "healthy")
+    func testCancellationDuringCopyNeverPublishesOrRemovesIncumbent() throws {
+        let store = DurableModelArtifactStore(root: try tempDir())
+        let source = try tempDir()
+        try Data(repeating: 42, count: 3 * 1024 * 1024).write(to: source.appendingPathComponent("weights.bin"))
+        let sha = try ModelArtifactVerifier.canonicalArtifactHash(directory: source)
+        let revision = String(repeating: "e", count: 40)
+        var checks = 0
+        XCTAssertThrowsError(try store.adoptVerifiedStaging(staging: source, modelID: "namespace/model", revision: revision, sha256: sha,
+            checkCancellation: { checks += 1; if checks > 1 { throw CancellationError() } }))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: try store.artifactURL(modelID: "namespace/model", revision: revision, sha256: sha).path))
+        XCTAssertEqual(try Data(contentsOf: source.appendingPathComponent("weights.bin")).count, 3 * 1024 * 1024)
+    }
+
+    func testVerifiedCopyPublishesAtomicallyAndPreservesCorruptDestination() throws {
+        let store = DurableModelArtifactStore(root: try tempDir())
+        let source = try tempDir()
+        try Data("weights".utf8).write(to: source.appendingPathComponent("weights.bin"))
+        let sha = try ModelArtifactVerifier.canonicalArtifactHash(directory: source)
+        let revision = String(repeating: "a", count: 40)
+        let temporary = store.root.appendingPathComponent(".transactions/test-copy")
+        try store.stageVerifiedCopy(from: source, to: temporary, sha256: sha, checkCancellation: {})
+        let destination = try store.artifactURL(modelID: "namespace/model", revision: revision, sha256: sha)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: destination.path))
+        XCTAssertEqual(try store.publishVerifiedCopy(temporary, modelID: "namespace/model", revision: revision, sha256: sha), destination)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: temporary.path))
+        XCTAssertEqual(try ModelArtifactVerifier.canonicalArtifactHash(directory: destination), sha)
+        try Data("incumbent".utf8).write(to: destination.appendingPathComponent("weights.bin"))
+        try store.stageVerifiedCopy(from: source, to: temporary, sha256: sha, checkCancellation: {})
+        XCTAssertThrowsError(try store.publishVerifiedCopy(temporary, modelID: "namespace/model", revision: revision, sha256: sha))
+        XCTAssertEqual(try String(contentsOf: destination.appendingPathComponent("weights.bin")), "incumbent")
     }
 
     func testContainsRejectsSymlinkInDurablePath() throws {
@@ -181,6 +201,28 @@ final class DurableModelArtifactStoreTests: XCTestCase {
             XCTAssertTrue(String(describing: error).contains("symlink"), "\(error)")
         }
         XCTAssertThrowsError(try store.validatedContainedDirectory(destination.path))
+    }
+
+    func testStorageRootAndAncestorSymlinksRejectBeforeOutsideMutation() throws {
+        for suffix in ["", "/missing/models"] {
+            let base = try tempDir()
+            let outside = try tempDir()
+            XCTAssertEqual(chmod(outside.path, 0o755), 0)
+            let link = base.appendingPathComponent("link")
+            XCTAssertEqual(symlink(outside.path, link.path), 0)
+            let root = URL(fileURLWithPath: link.path + suffix)
+            let store = DurableModelArtifactStore(root: root)
+            let source = try tempDir()
+            try Data("weights".utf8).write(to: source.appendingPathComponent("weights.bin"))
+            let sha = try ModelArtifactVerifier.canonicalArtifactHash(directory: source)
+            XCTAssertThrowsError(try store.adoptVerifiedStaging(staging: source, modelID: "namespace/model",
+                revision: String(repeating: "a", count: 40), sha256: sha))
+            XCTAssertThrowsError(try ModelCatalogTransactionStore(root: root.appendingPathComponent(".transactions")).secure())
+            XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: outside.path), [])
+            var info = stat()
+            XCTAssertEqual(lstat(outside.path, &info), 0)
+            XCTAssertEqual(info.st_mode & 0o777, 0o755)
+        }
     }
 
     private func tempDir() throws -> URL {

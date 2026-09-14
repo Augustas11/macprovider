@@ -14,6 +14,27 @@ final class AutotuneRecommendTests: XCTestCase {
             .appendingPathComponent("catalog/autotune/testdata", isDirectory: true)
     }
 
+    func testEngineDocumentPreservesCatalogKeyAndCanonicalArtifactIdentityForAdoption() throws {
+        var request = try makeRequest()
+        request.generatedAt = Date()
+        for key in request.benchmarks.keys {
+            request.benchmarks[key]?.generatedAt = Date()
+        }
+        let result = AutotuneRecommendEngine().recommend(request)
+        let score = try XCTUnwrap(result.selectedCandidate)
+        let row = try XCTUnwrap(request.candidateCatalog.rows[score.catalogKey])
+        let benchmark = try XCTUnwrap(request.benchmarks[score.catalogKey])
+        let core = AutotuneCommand.recommendationCoreForConfig(selected: score, selectedBenchmark: benchmark,
+            selectedRow: row, catalogVersion: request.candidateCatalog.version,
+            catalogHash: request.candidateCatalogSHA256, hardware: request.hardware)
+        let document = try ModelsAdoptRecommendationCommand.parseRecommendation(data: Data(result.jsonString(serveConfig: core).utf8))
+        XCTAssertEqual(document.targetModelID, score.catalogKey)
+        XCTAssertEqual(document.core.modelCatalogModelID, row.modelID)
+        XCTAssertNotEqual(document.targetModelID, document.core.modelCatalogModelID)
+        XCTAssertNoThrow(try ModelsAdoptRecommendationCommand.validateSignedCatalogBinding(recommendation: document,
+            catalogKey: score.catalogKey, row: row))
+    }
+
     func testCandidateCatalogSharedNestedSchemaCorpus() throws {
         XCTAssertNoThrow(try AutotuneStaticInputs.decodeCandidateCatalog(
             Data(contentsOf: Self.catalogTestdata.appendingPathComponent("valid-workload-profile.json"))

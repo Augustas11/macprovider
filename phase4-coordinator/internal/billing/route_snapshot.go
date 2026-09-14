@@ -36,6 +36,7 @@ var (
 )
 
 type RouteSnapshot struct {
+	*ArtifactAdmissionEvidence
 	AccountScope                         string  `json:"account_scope"`
 	RequestID                            string  `json:"request_id"`
 	AttemptN                             int64   `json:"attempt_n"`
@@ -135,6 +136,17 @@ func (r RouteSnapshot) Value() map[string]any {
 		value["model_admission_discovery_digest_sha256"] = r.ModelAdmissionDiscoveryDigestSHA256
 		value["model_admission_evaluation_digest_sha256"] = r.ModelAdmissionEvaluationDigestSHA256
 	}
+	if r.ArtifactAdmissionEvidence != nil {
+		// Decode into json.Number to retain integer precision in the digest.
+		raw, _ := json.Marshal(r.ArtifactAdmissionEvidence)
+		var extension map[string]any
+		decoder := json.NewDecoder(strings.NewReader(string(raw)))
+		decoder.UseNumber()
+		_ = decoder.Decode(&extension)
+		for key, field := range extension {
+			value[key] = field
+		}
+	}
 	return value
 }
 
@@ -146,6 +158,20 @@ func (r RouteSnapshot) Digest() (digest string, canonical []byte, err error) {
 }
 
 func (r RouteSnapshot) Validate() error {
+	if e := r.ArtifactAdmissionEvidence; e != nil {
+		if err := e.Validate(); err != nil {
+			return err
+		}
+		if r.ModelAdmissionCandidateID == "" || e.CatalogModelKey != r.ModelAdmissionCatalogModelKey ||
+			e.ArtifactHash != r.ExpectedCatalogModelHash || e.ArtifactHash != r.ProviderReportedModelHash ||
+			e.ArtifactHashAlgorithm != r.ExpectedCatalogModelHashAlgorithm || e.ArtifactHashAlgorithm != r.ProviderReportedModelHashAlgorithm ||
+			r.ProviderSessionID == nil || *r.ProviderSessionID != e.ProviderSessionID || e.ProviderReceiptKeyID != r.ProviderReceiptKeyID ||
+			r.RouteSnapshotMode != RouteSnapshotModeEnforce || r.RouteDecisionTSUnixMS >= e.AuthorityExpiresAtUnixMS ||
+			r.RouteDecisionTSUnixMS >= e.ProbeExpiresAtUnixMS {
+			return fmt.Errorf("artifact admission route binding mismatch")
+		}
+	}
+
 	required := map[string]string{
 		"account_scope":                        r.AccountScope,
 		"request_id":                           r.RequestID,

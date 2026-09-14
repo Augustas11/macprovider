@@ -47,6 +47,8 @@ var (
 // release is artifact-bound — /v1/catalog-artifacts(+ .sig), replacing nginx
 // /static/* hosting.
 type AutotuneFeeds struct {
+	// Only the verified loader can authorize artifact-derived admission.
+	admissionAuthorityVerified     bool
 	RateCardJSON                   []byte
 	RateCardSig                    []byte
 	RateCardVerification           AutotuneFeedVerification
@@ -176,6 +178,7 @@ func LoadAutotuneFeeds(cfg config.AutotuneFeedsConfig) (AutotuneFeeds, error) {
 		}
 	}
 	return AutotuneFeeds{
+		admissionAuthorityVerified:     true,
 		RateCardJSON:                   rateCard.jsonBytes,
 		RateCardSig:                    rateCard.sigBytes,
 		RateCardVerification:           rateCard.verification,
@@ -983,7 +986,8 @@ func WithAutotuneFeeds(feeds AutotuneFeeds) Option {
 	return func(s *Server) {
 		s.autotuneFeedsMu.Lock()
 		defer s.autotuneFeedsMu.Unlock()
-		s.autotuneFeeds = feeds
+		s.autotuneFeeds = cloneAdmissionFeeds(feeds)
+		s.autotuneFeedsGeneration++
 	}
 }
 
@@ -994,13 +998,14 @@ func WithAutotuneFeeds(feeds AutotuneFeeds) Option {
 func (s *Server) SetAutotuneFeeds(feeds AutotuneFeeds) {
 	s.autotuneFeedsMu.Lock()
 	defer s.autotuneFeedsMu.Unlock()
-	s.autotuneFeeds = feeds
+	s.autotuneFeeds = cloneAdmissionFeeds(feeds)
+	s.autotuneFeedsGeneration++
 }
 
 func (s *Server) autotuneFeedsSnapshot() AutotuneFeeds {
 	s.autotuneFeedsMu.RLock()
 	defer s.autotuneFeedsMu.RUnlock()
-	return s.autotuneFeeds
+	return cloneAdmissionFeeds(s.autotuneFeeds)
 }
 
 func (s *Server) handleDemandRank(w http.ResponseWriter, r *http.Request) {

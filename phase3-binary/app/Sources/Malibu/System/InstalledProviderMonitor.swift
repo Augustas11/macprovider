@@ -534,7 +534,7 @@ enum InstalledProviderMonitor {
         return entry == nil
     }
 
-    private static func hasSafeDirectoryACL(_ descriptor: Int32) -> Bool {
+    static func hasSafeDirectoryACL(_ descriptor: Int32) -> Bool {
         errno = 0
         guard let acl = acl_get_fd_np(descriptor, ACL_TYPE_EXTENDED) else {
             return errno == 0 || errno == ENOENT

@@ -6,6 +6,59 @@ import XCTest
 @testable import macprovider_cli
 
 final class ModelsSubcommandTests: XCTestCase {
+    func testParsedAdoptionRejectsInvalidSignedAuthorityUnderXCTestBeforeMutation() async throws {
+        for scenario in ["signature", "candidate_digest", "canonical_model_id", "hardware"] {
+            let fixture = try AdoptionFixture(current: "old-model", target: "new-model", signedCommand: true)
+            defer { try? FileManager.default.removeItem(at: fixture.dir) }
+            let before = try Data(contentsOf: fixture.config)
+            let socket = fixture.dir.appendingPathComponent("uncontacted.sock")
+            var context = fixture.commandContext
+            switch scenario {
+            case "signature":
+                try Data(#"{"key_id":"build1-command-fixture","alg":"ed25519","signature":"AAAA"}"#.utf8)
+                    .write(to: fixture.signedInputs.directory.appendingPathComponent("autotune-candidates.sig"))
+            case "candidate_digest":
+                try mutateRecommendationFixture(fixture) {
+                    $0.replacingOccurrences(of: fixture.signedInputs.candidateSHA256,
+                                            with: String(repeating: "0", count: 64))
+                }
+            case "canonical_model_id":
+                try mutateRecommendationFixture(fixture) {
+                    $0.replacingOccurrences(of: #""model_catalog_model_id": "new-model""#,
+                                            with: #""model_catalog_model_id": "fixture/other-model""#)
+                }
+            default:
+                context.adoptionHardware = {
+                    MachineFingerprint(ramGB: 32, chip: "Apple M5", osVersion: "fixture", binaryVersion: "1.8.90")
+                }
+            }
+            let command = try ModelsAdoptRecommendationCommand.parse([
+                "--json", "--config", fixture.config.path,
+                "--recommendation-json", fixture.recommendation.path,
+                "--ctl-socket-path", socket.path,
+            ])
+            let capture = await captureOutput { try await command.run(context: context) }
+            XCTAssertEqual(capture.error as? ExitCode, ExitCode(2), scenario)
+            XCTAssertEqual(try decodeAdoptionEvents(capture.stdout).last?.reason, "signed_authority_invalid", scenario)
+            XCTAssertEqual(try Data(contentsOf: fixture.config), before, scenario)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: socket.path), scenario)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: context.adoptionJournalRoot.path), scenario)
+        }
+    }
+
+    func testExactConfigParityRejectsChangedCanonicalModelWithUnchangedCatalogKey() throws {
+        let fixture = try AdoptionFixture(current: "old-model", target: "new-model", signedCommand: true)
+        defer { try? FileManager.default.removeItem(at: fixture.dir) }
+        let recommendation = try ModelsAdoptRecommendationCommand.loadRecommendation(pathOrStdin: fixture.recommendation.path)
+        _ = try ConfigApplier(configPath: fixture.config).apply(recommendation: recommendation.core, now: Date())
+        var loaded = try ConfigLoader.load(cli: CLIOverrides(configPath: fixture.config.path))
+        XCTAssertTrue(ModelsAdoptRecommendationCommand.configOwnsRecommendation(loaded: loaded, recommendation: recommendation))
+        let key = loaded.modelCatalogKey
+        loaded.modelCatalogModelID = "fixture/different-canonical-model"
+        XCTAssertEqual(loaded.modelCatalogKey, key)
+        XCTAssertFalse(ModelsAdoptRecommendationCommand.configOwnsRecommendation(loaded: loaded, recommendation: recommendation))
+    }
+
     func testModelsStatusReturnsStatusResponse() async throws {
         let socketPath = try makeSocketPath()
         let server = ControlSocketServer(socketPath: socketPath, modelRuntime: makeRuntime(modelID: "old-model"))
@@ -292,7 +345,7 @@ final class ModelsSubcommandTests: XCTestCase {
 
     func testAdoptRecommendationSuccessAppliesOwnedConfigAndSwitches() async throws {
         let socketPath = try makeSocketPath()
-        let fixture = try AdoptionFixture(current: "old-model", target: "new-model")
+        let fixture = try AdoptionFixture(current: "old-model", target: "new-model", signedCommand: true)
         let server = ControlSocketServer(
             socketPath: socketPath,
             modelRuntime: makeRuntime(
@@ -310,10 +363,31 @@ final class ModelsSubcommandTests: XCTestCase {
             "--switch-state-path", makeStatePath().path,
         ])
 
-        let capture = await captureOutput { try await command.run() }
+        let capture = await captureOutput { try await command.run(context: fixture.commandContext) }
         await server.stop()
 
-        XCTAssertNil(capture.error)
+        let loaded = try ConfigLoader.load(cli: CLIOverrides(configPath: fixture.config.path))
+        let parsed = try ModelsAdoptRecommendationCommand.loadRecommendation(pathOrStdin: fixture.recommendation.path)
+        XCTAssertEqual(loaded.model, parsed.core.model)
+        XCTAssertEqual(loaded.modelCatalogKey, parsed.core.modelCatalogKey)
+        XCTAssertEqual(loaded.modelCatalogModelID, parsed.core.modelCatalogModelID)
+        XCTAssertEqual(loaded.modelCatalogRevision, parsed.core.modelCatalogRevision)
+        XCTAssertEqual(loaded.modelCatalogSHA256, parsed.core.modelCatalogSHA256)
+        XCTAssertEqual(loaded.modelCatalogVersion, parsed.core.modelCatalogVersion)
+        XCTAssertEqual(loaded.donorMode, parsed.donorMode)
+        XCTAssertEqual(loaded.modelCatalogHash, parsed.core.modelCatalogHash)
+        XCTAssertEqual(loaded.modelArtifactPath, parsed.core.modelArtifactPath)
+        XCTAssertEqual(loaded.modelArtifactSHA256, parsed.core.modelArtifactSHA256)
+        XCTAssertEqual(loaded.kvBitsOverride, parsed.core.knobs.kvBits)
+        XCTAssertEqual(loaded.maxContextOverride, parsed.core.knobs.maxContext)
+        XCTAssertEqual(loaded.maxConcurrencyOverride, parsed.core.knobs.maxBatch)
+        XCTAssertTrue(ModelsAdoptRecommendationCommand.configOwnsRecommendation(loaded: loaded, recommendation: parsed))
+        XCTAssertTrue(ModelsAdoptRecommendationCommand.ensureConfigParity(
+            applier: ConfigApplier(configPath: fixture.config), configPath: fixture.config, recommendation: parsed))
+        XCTAssertTrue(ModelsAdoptRecommendationCommand.ensureConfigParity(
+            applier: ConfigApplier(configPath: fixture.config.resolvingSymlinksInPath()),
+            configPath: fixture.config.resolvingSymlinksInPath(), recommendation: parsed))
+        XCTAssertNil(capture.error, capture.stdout + capture.stderr)
         let events = try decodeAdoptionEvents(capture.stdout)
         XCTAssertEqual(events.first?.type, "accepted")
         XCTAssertEqual(events.last?.type, "completed")
@@ -579,7 +653,7 @@ final class ModelsSubcommandTests: XCTestCase {
 
     func testAdoptRecommendationRollsBackOwnedConfigWhenSwitchFails() async throws {
         let socketPath = try makeSocketPath()
-        let fixture = try AdoptionFixture(current: "old-model", target: "new-model")
+        let fixture = try AdoptionFixture(current: "old-model", target: "new-model", signedCommand: true)
         let before = try String(contentsOf: fixture.config)
         let server = ControlSocketServer(
             socketPath: socketPath,
@@ -598,7 +672,7 @@ final class ModelsSubcommandTests: XCTestCase {
             "--switch-state-path", makeStatePath().path,
         ])
 
-        let capture = await captureOutput { try await command.run() }
+        let capture = await captureOutput { try await command.run(context: fixture.commandContext) }
         await server.stop()
 
         XCTAssertEqual(capture.error as? ExitCode, ExitCode(5))
@@ -624,7 +698,7 @@ final class ModelsSubcommandTests: XCTestCase {
             "--ctl-socket-path", try makeSocketPath().path,
         ])
 
-        let capture = await captureOutput { try await command.run() }
+        let capture = await captureOutput { try await command.run(context: fixture.commandContext) }
 
         XCTAssertEqual(capture.error as? ExitCode, ExitCode(2))
         let terminal = try XCTUnwrap(decodeAdoptionEvents(capture.stdout).last)
@@ -648,7 +722,7 @@ final class ModelsSubcommandTests: XCTestCase {
             "--ctl-socket-path", try makeSocketPath().path,
         ])
 
-        let capture = await captureOutput { try await command.run() }
+        let capture = await captureOutput { try await command.run(context: fixture.commandContext) }
 
         XCTAssertEqual(capture.error as? ExitCode, ExitCode(2))
         let terminal = try XCTUnwrap(decodeAdoptionEvents(capture.stdout).last)
@@ -722,7 +796,7 @@ final class ModelsSubcommandTests: XCTestCase {
             "--ctl-socket-path", try makeSocketPath().path,
         ])
 
-        let capture = await captureOutput { try await command.run() }
+        let capture = await captureOutput { try await command.run(context: fixture.commandContext) }
 
         XCTAssertEqual(capture.error as? ExitCode, ExitCode(2))
         XCTAssertEqual(try XCTUnwrap(decodeAdoptionEvents(capture.stdout).last).reason, "invalid_recommendation")
@@ -1190,7 +1264,7 @@ final class ModelsSubcommandTests: XCTestCase {
             "--ctl-socket-path", try makeSocketPath().path,
         ])
 
-        let capture = await captureOutput { try await command.run() }
+        let capture = await captureOutput { try await command.run(context: fixture.commandContext) }
 
         XCTAssertEqual(capture.error as? ExitCode, ExitCode(2), file: file, line: line)
         let terminal = try XCTUnwrap(decodeAdoptionEvents(capture.stdout).last, file: file, line: line)
@@ -1279,6 +1353,15 @@ private struct AdoptionFixture {
     let artifactSHA256: String
     let targetModelID: String
     let catalogModelID: String
+    let signedInputs: Build1CommandFixtureInputs
+
+    var commandContext: ModelCommandExecutionContext {
+        var context = ModelCommandExecutionContext.production
+        context.inputs = { signedInputs.loader() }
+        context.adoptionHardware = { MachineFingerprint(ramGB: 16, chip: "Apple Test", osVersion: "fixture", binaryVersion: "1.8.90") }
+        context.adoptionJournalRoot = dir.appendingPathComponent("adoption-journals")
+        return context
+    }
 
     var targetAuthority: (modelID: String, authority: ModelRuntimeTargetAuthority) {
         (
@@ -1304,10 +1387,10 @@ private struct AdoptionFixture {
         )
     }
 
-    init(current: String, target: String, catalogModelID: String? = nil) throws {
+    init(current: String, target: String, catalogModelID: String? = nil, signedCommand: Bool = false) throws {
         dir = URL(fileURLWithPath: "/tmp")
             .appendingPathComponent("mpm-adopt-\(getpid())-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         artifact = dir.appendingPathComponent("artifact", isDirectory: true)
         try FileManager.default.createDirectory(at: artifact, withIntermediateDirectories: true)
         try Data("""
@@ -1324,6 +1407,13 @@ private struct AdoptionFixture {
         let resolvedCatalogModelID = catalogModelID ?? target
         targetModelID = target
         self.catalogModelID = resolvedCatalogModelID
+        signedInputs = try Build1CommandFixtureInputs(directory: dir.appendingPathComponent("signed-inputs"),
+            catalogKey: target, modelID: resolvedCatalogModelID, artifactSHA256: artifactSHA256,
+            generatedAt: Self.generatedAt)
+        let durableRoot = dir.appendingPathComponent("durable-models")
+        _ = try DurableModelArtifactStore(root: durableRoot).adoptVerifiedStaging(
+            staging: artifact, modelID: resolvedCatalogModelID,
+            revision: String(repeating: "1", count: 40), sha256: artifactSHA256)
         config = dir.appendingPathComponent("config.yaml")
         try Data("""
         model: \(current)
@@ -1333,8 +1423,15 @@ private struct AdoptionFixture {
         max_context_override: 4000
         max_concurrency_override: 1
         coordinator_endpoint: https://coordinator.example
+        model_artifact_root: \(durableRoot.path)
         """.utf8).write(to: config)
         recommendation = dir.appendingPathComponent("recommendation.json")
+        // Unit rollback fixtures carry explicit calibrated context evidence; full
+        // bootstrap tests must consume the real owner's original result instead.
+        let calibration = AutotuneContextCalibrationResult(recommendedContext: 4000,
+            safeUpperBound: 32000, minimumContext: 4000, ttftCeilingMS: 8000, quantum: 1000,
+            measurements: [.init(contextTokens: 4000, ttftP95MS: 2000, decodeTPS: 100, replicates: 3, passed: true)])
+        let calibrationField = signedCommand ? "\"context_calibration\": \(calibration.jsonString)," : ""
         try Data("""
         {
           "schema_version": "autotune_recommend.v1",
@@ -1345,12 +1442,13 @@ private struct AdoptionFixture {
             "binary_version": "1.8.90"
           },
           "inputs": {
-            "rate_card_version": "test-catalog",
+            "rate_card_version": "\(signedInputs.rateVersion)",
             "demand_rank_version": "test-catalog",
             "candidate_catalog_version": "test-catalog"
           },
           "recommended_model": "\(target)",
           "warnings": [],
+          \(calibrationField)
           "candidates": [
             {"model": "\(target)", "eligible": true}
           ],
@@ -1363,7 +1461,7 @@ private struct AdoptionFixture {
             "model_catalog_revision": "\(String(repeating: "1", count: 40))",
             "model_catalog_sha256": "\(artifactSHA256)",
             "model_catalog_version": "test-catalog",
-            "model_catalog_hash": "\(String(repeating: "2", count: 64))",
+            "model_catalog_hash": "\(signedInputs.candidateSHA256)",
             "max_context_override": 4000,
             "max_concurrency_override": 1,
             "donor_mode": false

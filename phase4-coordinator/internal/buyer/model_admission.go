@@ -74,7 +74,11 @@ func (s *Server) byomRouteSnapshotBinding(ctx context.Context, p pool.Provider, 
 	} else if marked {
 		event, found, err = s.modelAdmissionStore.LatestModelAdmissionRouteStatus(ctx, p.ProviderID, servedModelRef, catalogModelKey)
 	} else {
-		event, found, err = s.modelAdmissionStore.LatestModelAdmissionRouteStatus(ctx, p.ProviderID, servedModelRef, catalogModelKey)
+		// Candidate keys and Tier2's runtime model keys are distinct. A new
+		// offer can arrive after WS registration, so the pool need not carry
+		// an admission marker yet. Resolve the exact served identity first;
+		// the immutable binding below still checks both authorities.
+		event, found, err = s.modelAdmissionStore.LatestModelAdmissionRouteStatus(ctx, p.ProviderID, servedModelRef, "")
 		if err == nil && !found {
 			event, found, err = s.modelAdmissionStore.LatestModelAdmissionRouteStatus(ctx, p.ProviderID, "", catalogModelKey)
 		}
@@ -102,14 +106,35 @@ func (s *Server) byomRouteSnapshotBinding(ctx context.Context, p pool.Provider, 
 			return providerws.ModelAdmissionSettlementBinding{}, true, false
 		}
 	}
+	if event.RuntimeSource != "" && event.ArtifactAdmissionEvidence == nil {
+		return providerws.ModelAdmissionSettlementBinding{}, true, false
+	}
+	if event.ArtifactAdmissionEvidence != nil {
+		refreshed, err := s.ResolveModelAdmissionAuthority(ctx, p, event)
+		if err != nil || refreshed.ArtifactAdmissionEvidence == nil {
+			s.revokeArtifactAdmission(ctx, event)
+			return providerws.ModelAdmissionSettlementBinding{}, true, false
+		}
+		captured := *event.ArtifactAdmissionEvidence
+		latest := *refreshed.ArtifactAdmissionEvidence
+		latest.ProbeExpiresAtUnixMS = captured.ProbeExpiresAtUnixMS
+		if captured != latest || s.now().UnixMilli() >= captured.ProbeExpiresAtUnixMS {
+			s.revokeArtifactAdmission(ctx, event)
+			return providerws.ModelAdmissionSettlementBinding{}, true, false
+		}
+	}
 	if !s.byomSettlementPrereqsReady(p, material) {
 		return providerws.ModelAdmissionSettlementBinding{}, true, false
+	}
+	bindingCatalogKey := material.CatalogModelKey
+	if event.ArtifactAdmissionEvidence != nil {
+		bindingCatalogKey = event.CatalogModelKey
 	}
 	binding, ok := providerws.ModelAdmissionSettlementBindingForRouteSnapshot(event, providerws.ModelAdmissionSettlementPredicate{
 		ProviderID:                        p.ProviderID,
 		CandidateID:                       event.CandidateID,
 		ServedModelRef:                    event.ServedModelRef,
-		CatalogModelKey:                   material.CatalogModelKey,
+		CatalogModelKey:                   bindingCatalogKey,
 		DiscoveryDigestSHA256:             event.DiscoveryDigestSHA256,
 		EvaluationDigestSHA256:            event.EvaluationDigestSHA256,
 		CatalogID:                         material.CatalogID,
@@ -157,10 +182,18 @@ func applyBYOMRouteSnapshotBinding(snapshot *billing.RouteSnapshot, binding prov
 	if snapshot == nil || binding.CandidateID == "" {
 		return
 	}
+	snapshot.ArtifactAdmissionEvidence = binding.ArtifactAdmissionEvidence
 	snapshot.ModelAdmissionCandidateID = binding.CandidateID
 	snapshot.ModelAdmissionCoordinatorEventID = binding.CoordinatorEventID
 	snapshot.ModelAdmissionServedModelRef = binding.ServedModelRef
 	snapshot.ModelAdmissionCatalogModelKey = binding.CatalogModelKey
 	snapshot.ModelAdmissionDiscoveryDigestSHA256 = binding.DiscoveryDigestSHA256
 	snapshot.ModelAdmissionEvaluationDigestSHA256 = binding.EvaluationDigestSHA256
+}
+
+func (s *Server) revokeArtifactAdmission(ctx context.Context, event providerws.ModelAdmissionEvent) {
+	if event.State != "settlement_capable" && event.State != "catalog_priced" {
+		return
+	}
+	_, _ = s.modelAdmissionStore.AppendModelAdmissionDecision(ctx, providerws.ModelAdmissionAuthorityRevocation(event, s.now()))
 }

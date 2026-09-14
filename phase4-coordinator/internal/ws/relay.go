@@ -183,6 +183,11 @@ type providerSession struct {
 	closeEventOnce sync.Once
 	writeMu        sync.Mutex
 	closed         bool
+	closing        bool
+	closingCh      chan struct{}
+	beforeEnqueue  func()
+	beforeClosing  func()
+	probeTimer     func(time.Duration) (<-chan time.Time, func())
 	activeMu       sync.Mutex
 	active         map[string]*relayActive
 	retired        map[string]retiredRelayRequest
@@ -277,6 +282,7 @@ func newProviderSession(providerID, assignedID string, conn net.Conn, bufferSize
 		retired:       map[string]retiredRelayRequest{},
 		activeChanged: make(chan struct{}, 1),
 		closedCh:      make(chan struct{}),
+		closingCh:     make(chan struct{}),
 	}
 }
 
@@ -296,10 +302,13 @@ func (ps *providerSession) runWriter() {
 		} else {
 			err = wsutil.WriteServerText(ps.conn, f.payload)
 		}
+		if err != nil {
+			ps.beginClosing()
+		}
 		ps.completeFrame(f, err)
 		if err != nil {
 			ps.failAll(ErrRelayClosed)
-			_ = ps.conn.Close()
+			ps.closeTransport()
 			if ps.onWriteFailure != nil {
 				ps.onWriteFailure(ps, err)
 			} else {
@@ -321,8 +330,12 @@ func (ps *providerSession) completeFrame(f providerFrame, err error) {
 }
 
 func (ps *providerSession) close() {
+	if ps.beforeClosing != nil {
+		ps.beforeClosing()
+	}
 	ps.closeOnce.Do(func() {
 		ps.writeMu.Lock()
+		ps.beginClosingLocked()
 		// Publish the closed-state to isOpen() (which reads closedCh lock-free)
 		// BEFORE flipping ps.closed, both under writeMu. This makes isOpen() a
 		// conservative signal: it can only observe closedCh-closed at-or-before
@@ -344,6 +357,8 @@ func (ps *providerSession) close() {
 // must not count as buyer-serving.
 func (ps *providerSession) isOpen() bool {
 	select {
+	case <-ps.closingCh:
+		return false
 	case <-ps.closedCh:
 		return false
 	default:
@@ -374,16 +389,16 @@ func (ps *providerSession) writeProbe(rawFrame []byte, timeout time.Duration) er
 	if err := ps.enqueueFrame(providerFrame{raw: true, payload: rawFrame, writeLimit: timeout, result: result}); err != nil {
 		return err
 	}
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
+	ticks, stop := ps.writeProbeTimer(timeout)
+	defer stop()
 	select {
 	case err := <-result:
 		if err != nil {
 			return ErrRelayClosed
 		}
 		return nil
-	case <-timer.C:
-		_ = ps.conn.Close()
+	case <-ticks:
+		ps.closeTransport()
 		ps.close()
 		return ErrRelayClosed
 	}
@@ -407,6 +422,9 @@ func (ps *providerSession) enqueueRaw(rawFrame []byte) error {
 }
 
 func (ps *providerSession) enqueueFrame(f providerFrame) error {
+	if ps.beforeEnqueue != nil {
+		ps.beforeEnqueue()
+	}
 	ps.writeMu.Lock()
 	defer ps.writeMu.Unlock()
 	if ps.closed {
@@ -1061,8 +1079,8 @@ func (s *Server) failTier2Rekey(session *providerSession, providerID, assignedID
 		return false
 	}
 	s.pool.MarkState(providerID, assignedID, pool.StateUnavailable)
-	s.sessions.Delete(sessionKey(providerID, assignedID))
-	_ = session.conn.Close()
+	s.deleteProviderSession(sessionKey(providerID, assignedID))
+	session.closeTransport()
 	exchange.err = err
 	session.rekey = nil
 	tier2.LogAEADRekeyFailed(s.log, providerID, assignedID, exchange.requestID, exchange.id, exchange.oldKID, reason)
@@ -1327,8 +1345,8 @@ func (s *Server) closeProviderForTier2SessionFailure(session *providerSession, p
 	tier2.LogEncryptedLegSessionClosed(s.log, providerID, assignedID, requestID, reason)
 	session.failActiveOrAll(requestID, relayErr)
 	s.pool.MarkState(providerID, assignedID, pool.StateUnavailable)
-	s.sessions.Delete(sessionKey(providerID, assignedID))
-	_ = session.conn.Close()
+	s.deleteProviderSession(sessionKey(providerID, assignedID))
+	session.closeTransport()
 	session.close()
 }
 
@@ -1491,8 +1509,8 @@ func (s *Server) handleInferenceChunk(providerID, assignedID string, payload []b
 		tier2.LogEncryptedLegSessionClosed(s.log, providerID, assignedID, requestID, "unencrypted_tier2_frame")
 		session.failActiveOrAll(envelope.RequestID, ErrRelayAEADFailed)
 		s.pool.MarkState(providerID, assignedID, pool.StateUnavailable)
-		s.sessions.Delete(sessionKey(providerID, assignedID))
-		_ = session.conn.Close()
+		s.deleteProviderSession(sessionKey(providerID, assignedID))
+		session.closeTransport()
 		session.close()
 		return
 	} else if err := json.Unmarshal(payload, &chunk); err != nil {
@@ -1735,8 +1753,8 @@ func (s *Server) handleNAK(providerID, assignedID string, payload []byte) {
 		session.failActiveOrAll(nak.InReplyTo, ErrRelayAEADFailed)
 		tier2.LogEncryptedLegSessionClosed(s.log, providerID, assignedID, nak.InReplyTo, nak.Error.Code)
 		s.pool.MarkState(providerID, assignedID, pool.StateUnavailable)
-		s.sessions.Delete(sessionKey(providerID, assignedID))
-		_ = session.conn.Close()
+		s.deleteProviderSession(sessionKey(providerID, assignedID))
+		session.closeTransport()
 		session.close()
 	} else if ok && nak.InReplyTo != "" {
 		if active, found := session.removeActive(nak.InReplyTo); found {

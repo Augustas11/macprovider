@@ -38,6 +38,7 @@ func TestAdmissionCanaryClearAdmittedTupleMutatesOnlyTuple(t *testing.T) {
 	provider.MaxAdmittedMinRAMGB = 8
 	provider.CatalogAdmissionMode = "current"
 	setAdmittedTupleValues(provider, "hashA", "apple m4 max", 64)
+	republishEncryptedHarnessProvider(t, s, provider)
 	ts := httptest.NewServer(s.Handler())
 	defer ts.Close()
 
@@ -82,6 +83,7 @@ func TestAdmissionCanaryClearAdmittedTupleRequiresAssignedID(t *testing.T) {
 	cfg.AdmissionCanaryHarness.Enabled = true
 	s, provider, _ := newEncryptedRelayHarnessWithConfig(t, cfg, zerolog.Nop(), time.Now())
 	setAdmittedTupleValues(provider, "hashA", "apple m4 max", 64)
+	republishEncryptedHarnessProvider(t, s, provider)
 	ts := httptest.NewServer(s.Handler())
 	defer ts.Close()
 
@@ -122,6 +124,7 @@ func TestAdmissionCanaryProofOfWeightsHotEnableReturnsFailClosedSnapshots(t *tes
 	s, subject, _ := newEncryptedRelayHarnessWithConfig(t, cfg, zerolog.Nop(), now)
 	subject.ModelID = "small-model"
 	subject.MaxAdmittedMinRAMGB = 0
+	republishEncryptedHarnessProvider(t, s, subject)
 
 	control := spec032ControlProvider("control-r003", "control-r003-s")
 	setAdmittedTupleValues(control, "hashC", "apple m4 max", 64)

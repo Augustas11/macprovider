@@ -1062,30 +1062,41 @@ SELECT resolution_kind
 	}
 }
 
-// Admin rate-limit bucket — every response code path (200, 404,
-// 422) consumes one token. With a 60-token capacity and 60/sec
-// refill, a burst of 600 requests in a tight loop MUST produce a
-// significant number of 429s (the bucket cannot refill faster than
-// it drains under burst).
+// Authenticated responses consume one shared admin token. Freeze the existing
+// limiter clock so database/race-instrumentation speed cannot refill the bucket
+// while the test is checking consumption; then advance it to verify refill.
 func TestAdminRateLimitBucketConsumesFailures(t *testing.T) {
 	store := quarantineFixture(t)
-	handler := store.HandlersWithQuarantineGate("operator", fakeTokens{}, true, 60, true)
+	bucket := newAdminRateLimiter()
+	now := bucket.last
+	bucket.now = func() time.Time { return now }
+	h := &handler{store: store, operatorKey: "operator", adminBucket: bucket}
 	const burst = 600
-	var ok429 int64
+	var limited int
 	for i := 0; i < burst; i++ {
 		req := httptest.NewRequest(http.MethodGet, "/admin/ledger/summary", nil)
 		req.Header.Set("Authorization", "Bearer operator")
 		w := httptest.NewRecorder()
-		handler.ServeHTTP(w, req)
-		if w.Code == http.StatusTooManyRequests {
-			ok429++
+		h.serveHTTP(w, req)
+		want := http.StatusOK
+		if i >= adminBucketCapacity {
+			want = http.StatusTooManyRequests
+			limited++
+		}
+		if w.Code != want {
+			t.Fatalf("request %d status=%d want %d", i, w.Code, want)
 		}
 	}
-	// With capacity 60 and a tight burst, expect at least 100 of the
-	// 600 calls to be rate-limited (defensive lower-bound — burst
-	// drain dominates timing-jitter refills).
-	if ok429 < 100 {
-		t.Fatalf("rate-limit fired only %d times in burst of %d — limiter is not consuming tokens", ok429, burst)
+	if limited != burst-adminBucketCapacity {
+		t.Fatalf("limited=%d want %d", limited, burst-adminBucketCapacity)
+	}
+	now = now.Add(time.Second)
+	req := httptest.NewRequest(http.MethodGet, "/admin/ledger/summary", nil)
+	req.Header.Set("Authorization", "Bearer operator")
+	w := httptest.NewRecorder()
+	h.serveHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("after refill status=%d want 200", w.Code)
 	}
 }
 

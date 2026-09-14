@@ -420,13 +420,13 @@ func TestModelAdmissionOfferHandlerProbeSurvivesSubmitterCancellation(t *testing
 	candidateID := "byom_" + strings.Repeat("v", 52)
 	payload := signedModelAdmissionProbeOffer(t, provider.ProviderID, candidateID, "ollama:qwen3-8b", priv, nil)
 	status, body := postModelAdmissionProbeOfferWithContext(t, ctx, server, bearer, payload)
-	if status != http.StatusOK {
+	if status != http.StatusServiceUnavailable {
 		t.Fatalf("offer status=%d body=%s", status, body)
 	}
 	<-probeDone
 	response := decodeModelAdmissionProbeMap(t, body)
-	if response["admission_state"] != "network_admitted_unsettled" {
-		t.Fatalf("request cancellation prevented probe result response: %#v", response)
+	if _, positive := response["admission_state"]; positive {
+		t.Fatalf("canceled readback returned an unobserved state: %#v", response)
 	}
 	latest, found, err := sqliteAdmissions.LatestModelAdmissionStatus(context.Background(), provider.ProviderID, candidateID)
 	if err != nil || !found {

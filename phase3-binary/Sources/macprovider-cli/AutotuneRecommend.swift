@@ -1557,6 +1557,8 @@ struct AutotuneStaticInputs {
     var trustedPublicKeys: [String: String]
     var verifySignature: ((Data, Data) -> Bool)?
     var now: () -> Date
+    let artifactFeedBakedBytes: Data?
+    let artifactFeedBakedSignerKeyID: String?
 
     init(
         fetch: @escaping (URL) async throws -> Data = { url in
@@ -1568,12 +1570,16 @@ struct AutotuneStaticInputs {
         },
         trustedPublicKeys: [String: String] = Self.defaultTrustedPublicKeys,
         verifySignature: ((Data, Data) -> Bool)? = nil,
-        now: @escaping () -> Date = Date.init
+        now: @escaping () -> Date = Date.init,
+        bakedArtifactFeed: Data? = AutotuneStaticInputs.bakedArtifactFeedBytes,
+        bakedArtifactFeedSignerKeyID: String? = AutotuneStaticInputs.bakedArtifactFeedSignerKeyID
     ) {
         self.fetch = fetch
         self.trustedPublicKeys = trustedPublicKeys
         self.verifySignature = verifySignature
         self.now = now
+        self.artifactFeedBakedBytes = bakedArtifactFeed
+        self.artifactFeedBakedSignerKeyID = bakedArtifactFeedSignerKeyID
     }
 
     func loadDemandRank() async -> AutotuneStaticSelection<DemandRank> {
@@ -1638,7 +1644,8 @@ struct AutotuneStaticInputs {
         // selected candidate catalog and bound to it; its warnings ride beside
         // the others but never block (§3.7.6 rule 6).
         let artifactFeed: AutotuneStaticSelection<QualifiedArtifactFeed?> = includeArtifactFeed
-            ? await loadArtifactFeed(candidate: release.candidate)
+            ? await loadArtifactFeed(candidate: release.candidate, bakedArtifactFeed: artifactFeedBakedBytes,
+                                     bakedArtifactFeedSignerKeyID: artifactFeedBakedSignerKeyID)
             : AutotuneStaticSelection(value: nil, selectedBytes: Data(), warnings: [], usedFallback: false, signerKeyID: nil)
         return (release.demand, release.candidate, rateCard, artifactFeed)
     }
@@ -3420,6 +3427,7 @@ struct HuggingFaceSnapshotDownloader {
     }
 
     static func assertDeadlineActive(_ deadline: Date?) throws {
+        try Task.checkCancellation()
         guard let deadline else { return }
         guard Date() < deadline else {
             throw AutotuneContextCalibrationError.deadlineExceeded
@@ -3577,12 +3585,24 @@ struct CachedModelArtifactResolver {
     }
 
     /// Overlay `model_artifact_root` from yaml/env the same way serve preflight does.
-    static func forConfig(_ config: AppConfig?) -> CachedModelArtifactResolver {
-        var resolver = CachedModelArtifactResolver()
-        if let root = config?.modelArtifactRoot, root.hasPrefix("/") {
-            resolver.durableRoot = URL(fileURLWithPath: root, isDirectory: true).standardizedFileURL
+    static func forConfig(
+        _ config: AppConfig?,
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
+    ) -> CachedModelArtifactResolver {
+        let hub: URL
+        if let value = environment["HF_HUB_CACHE"], value.hasPrefix("/") {
+            hub = URL(fileURLWithPath: value, isDirectory: true)
+        } else if let value = environment["HF_HOME"], value.hasPrefix("/") {
+            hub = URL(fileURLWithPath: value, isDirectory: true).appendingPathComponent("hub")
+        } else {
+            hub = homeDirectory.appendingPathComponent(".cache/huggingface/hub")
         }
-        return resolver
+        let configured = config?.modelArtifactRoot.flatMap { $0.hasPrefix("/") ? $0 : nil }
+        let environmental = environment["MACPROVIDER_MODEL_ARTIFACT_ROOT"].flatMap { $0.hasPrefix("/") ? $0 : nil }
+        let root = (configured ?? environmental).map { URL(fileURLWithPath: $0, isDirectory: true) }
+            ?? homeDirectory.appendingPathComponent("Library/Application Support/macprovider/models")
+        return CachedModelArtifactResolver(hubRoot: hub, durableRoot: root)
     }
 
     static var defaultHubRoot: URL {
@@ -3901,6 +3921,7 @@ struct ArtifactPrefetchOutcomes: Equatable {
 }
 
 struct AutotuneRecommendationBenchmarker {
+    var telemetryDirectory: URL = CandidateProviderRunner.defaultLogDirectory
     var artifactResolver: CachedModelArtifactResolver = CachedModelArtifactResolver()
     var runnerFactory: () throws -> CandidateProviderRunner = { try CandidateProviderRunner() }
     var prober: any Stage1Probing = Stage1Prober()
@@ -3985,6 +4006,22 @@ struct AutotuneRecommendationBenchmarker {
     ) async throws -> BenchmarkOutcomes {
         var results: [String: CandidateBenchmark] = [:]
         var diagnostics: [String: String] = [:]
+        // Validate the complete prepared map before creating any candidate runner.
+        if let prefetchedArtifacts {
+            let selected = request.candidateCatalog.rows.filter { candidateModelIDs?.contains($0.value.modelID) ?? true }
+            guard Set(prefetchedArtifacts.keys) == Set(selected.keys) else {
+                throw AutotuneRecommendError.invalidArtifact("prepared map must exactly cover selected catalog rows")
+            }
+            for (key, row) in selected {
+                guard let artifact = prefetchedArtifacts[key], artifact.modelKey == key,
+                      artifact.modelID == row.modelID, artifact.modelRevision == row.modelRevision,
+                      artifact.candidateRowIdentity == request.candidateCatalog.rowIdentity(for: key),
+                      artifact.sha256 == row.modelSHA256 else {
+                    throw AutotuneRecommendError.invalidArtifact("prepared map identity mismatch")
+                }
+                _ = try artifactResolver.verifiedExistingArtifact(for: row, at: URL(fileURLWithPath: artifact.path), deadline: deadline)
+            }
+        }
         for modelKey in request.candidateCatalog.rows.keys.sorted() {
             // ARCH-M-1: Between candidates, honor SIGTERM/SIGINT so we don't
             // race into a fresh subprocess spawn after the App has torn the
@@ -4111,7 +4148,8 @@ struct AutotuneRecommendationBenchmarker {
                         samples: safetySamples,
                         assessment: safety,
                         tps: medianTPS,
-                        ttftMS: p95TTFTMS
+                        ttftMS: p95TTFTMS,
+                        directory: telemetryDirectory
                     )
                     if safety.swapDetected || safety.thermalThrottleDetected || safety.swapObservedUnderLoad {
                         var flags: [String] = []
@@ -4189,7 +4227,8 @@ struct AutotuneRecommendationBenchmarker {
         samples: [ProbeSafetySample],
         assessment: ProbeSafetyAssessment,
         tps: Double,
-        ttftMS: Double
+        ttftMS: Double,
+        directory: URL = CandidateProviderRunner.defaultLogDirectory
     ) {
         let levels = samples.map(\.pressureLevel)
         let normal = levels.filter { $0 == .normal }.count
@@ -4201,7 +4240,7 @@ struct AutotuneRecommendationBenchmarker {
             + " swap_detected=\(assessment.swapDetected)"
             + " swap_observed_under_load=\(assessment.swapObservedUnderLoad)"
             + " tps=\(diagnosticNumber(tps)) ttft_ms=\(diagnosticNumber(ttftMS))"
-        let dir = CandidateProviderRunner.defaultLogDirectory
+        let dir = directory
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let url = dir.appendingPathComponent("probe-safety.log")
         // Round-1 audit fix (LOW): cap the local log so repeated recommendation
@@ -4252,12 +4291,21 @@ enum ModelArtifactVerifier {
         var capturedData: Data?
     }
 
-    static func canonicalArtifactHash(directory: URL, deadline: Date? = nil) throws -> String {
-        try inspectCanonicalArtifact(directory: directory, deadline: deadline).sha256
+    static func canonicalArtifactHash(directory: URL, deadline: Date? = nil, budget: ModelCatalogReadBudget? = nil, checkCancellation: () throws -> Void = {}) throws -> String {
+        try inspectCanonicalArtifact(directory: directory, deadline: deadline, budget: budget, checkCancellation: checkCancellation).sha256
     }
 
-    static func inspectCanonicalArtifact(directory: URL, deadline: Date? = nil) throws -> CanonicalArtifactInspection {
+    static func inspectCanonicalArtifact(directory: URL, deadline: Date? = nil, budget: ModelCatalogReadBudget? = nil, checkCancellation: () throws -> Void = {}) throws -> CanonicalArtifactInspection {
         try HuggingFaceSnapshotDownloader.assertDeadlineActive(deadline)
+        try checkCancellation()
+        if let budget {
+            func active() throws {
+                try budget.check(); try checkCancellation()
+                try HuggingFaceSnapshotDownloader.assertDeadlineActive(deadline)
+            }
+            let observation = try ModelCatalogVerifiedArtifactObservation(directory: directory, check: active)
+            return try inspectCanonicalArtifact(observation: observation, budget: budget, checkCancellation: active)
+        }
         let fm = FileManager.default
         var root = stat()
         guard lstat(directory.path, &root) == 0,
@@ -4272,14 +4320,22 @@ enum ModelArtifactVerifier {
         var entries: [(path: String, size: UInt64, sha: String)] = []
         var configJSONData: Data?
         var configSHA256: String?
+        var enumeratedCount = 0
+        var relativePaths = Set<String>()
         for case let url as URL in enumerator {
+            try checkCancellation()
             try HuggingFaceSnapshotDownloader.assertDeadlineActive(deadline)
+            enumeratedCount += 1
+            guard enumeratedCount <= 10_000 else { throw AutotuneRecommendError.invalidArtifact("entry limit") }
             let path = url.resolvingSymlinksInPath().path
             guard path.hasPrefix(basePath + "/") else {
                 throw AutotuneRecommendError.invalidArtifact("path escape \(url.lastPathComponent)")
             }
             let rel = String(path.dropFirst(basePath.count + 1))
             try ModelArtifactRelativePathPolicy.validate(rel)
+            guard rel.utf8.count <= 4_096, relativePaths.insert(rel).inserted else {
+                throw AutotuneRecommendError.invalidArtifact("path limit or duplicate")
+            }
             var statbuf = stat()
             guard lstat(url.path, &statbuf) == 0 else {
                 throw AutotuneRecommendError.invalidArtifact("lstat \(rel)")
@@ -4296,7 +4352,11 @@ enum ModelArtifactVerifier {
             guard statbuf.st_nlink <= 1 else {
                 throw AutotuneRecommendError.invalidArtifact("hardlink \(rel)")
             }
-            let fileHash = try hashFile(at: url, captureData: rel == "config.json", deadline: deadline)
+            guard statbuf.st_size >= 0, rel != "config.json" || statbuf.st_size <= 8 * 1_024 * 1_024 else {
+                throw AutotuneRecommendError.invalidArtifact("config limit")
+            }
+            try checkCancellation()
+            let fileHash = try hashFile(at: url, captureData: rel == "config.json", deadline: deadline, checkCancellation: checkCancellation)
             if rel == "config.json" {
                 configJSONData = fileHash.capturedData
                 configSHA256 = fileHash.sha256
@@ -4313,7 +4373,54 @@ enum ModelArtifactVerifier {
         )
     }
 
-    private static func hashFile(at url: URL, captureData: Bool, deadline: Date?) throws -> FileHashResult {
+    /// Exact-request verification keeps placement descriptors alive through final publication.
+    static func inspectCanonicalArtifact(
+        observation: ModelCatalogVerifiedArtifactObservation,
+        budget: ModelCatalogReadBudget? = nil,
+        checkCancellation: () throws -> Void = {},
+        measuredBytes: (UInt64) throws -> Void = { _ in }
+    ) throws -> CanonicalArtifactInspection {
+        func active() throws { try budget?.check(); try checkCancellation() }
+        try active()
+        var manifest: [(path: String, size: UInt64, sha: String)] = []
+        var configData: Data?, configHash: String?
+        // Capture the whole tree before any file-content read, then compare it
+        // with both the hashing walk and a fresh complete metadata traversal.
+        let before = try observation.snapshot(check: active)
+        let hashed = try observation.snapshot(check: active) { fd, path, info in
+            var hasher = SHA256(), total: UInt64 = 0
+            var capture: Data? = path == "config.json" ? Data() : nil
+            var buffer = [UInt8](repeating: 0, count: 1_048_576)
+            while true {
+                try active()
+                let count = Darwin.read(fd, &buffer, buffer.count)
+                if count < 0, errno == EINTR { continue }
+                guard count >= 0 else { throw ModelCatalogInspectionError.incomplete }
+                try active()
+                if count == 0 { break }
+                let (next, overflow) = total.addingReportingOverflow(UInt64(count))
+                guard !overflow, next <= UInt64(info.st_size) else { throw ModelCatalogInspectionError.invalid }
+                if capture != nil, next > 8 * 1_024 * 1_024 { throw ModelCatalogInspectionError.limit }
+                let bytes = Data(buffer.prefix(count))
+                hasher.update(data: bytes); capture?.append(bytes); total = next
+                try budget?.reportBytes(UInt64(count)); try measuredBytes(UInt64(count))
+                try active()
+            }
+            guard total == UInt64(info.st_size) else { throw ModelCatalogInspectionError.invalid }
+            let hash = Data(hasher.finalize()).hexLower
+            manifest.append((path, total, hash))
+            if path == "config.json" { configData = capture; configHash = hash }
+        }
+        guard hashed == before else { throw ModelCatalogInspectionError.invalid }
+        try observation.recordVerified(before, check: active)
+        let text = manifest.sorted { $0.path < $1.path }
+            .map { "\($0.path)\n\($0.size)\n\($0.sha)\n" }.joined()
+        try active()
+        return CanonicalArtifactInspection(sha256: Data(SHA256.hash(data: Data(text.utf8))).hexLower,
+                                           configJSONData: configData, configSHA256: configHash)
+    }
+
+    private static func hashFile(at url: URL, captureData: Bool, deadline: Date?, checkCancellation: () throws -> Void) throws -> FileHashResult {
         let chunkSize = 1024 * 1024
         let handle = try FileHandle(forReadingFrom: url)
         defer { try? handle.close() }
@@ -4321,13 +4428,19 @@ enum ModelArtifactVerifier {
         var size: UInt64 = 0
         var capturedData = captureData ? Data() : nil
         while true {
+            try checkCancellation()
             try HuggingFaceSnapshotDownloader.assertDeadlineActive(deadline)
             let chunk = try handle.read(upToCount: chunkSize) ?? Data()
             guard !chunk.isEmpty else {
                 break
             }
             hasher.update(data: chunk)
-            size += UInt64(chunk.count)
+            let (nextSize, overflow) = size.addingReportingOverflow(UInt64(chunk.count))
+            guard !overflow, !captureData || nextSize <= 8 * 1_024 * 1_024 else {
+                throw AutotuneRecommendError.invalidArtifact("file size limit")
+            }
+            size = nextSize
+            try checkCancellation()
             if captureData {
                 capturedData?.append(chunk)
             }

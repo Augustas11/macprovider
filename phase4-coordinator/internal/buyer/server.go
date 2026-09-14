@@ -219,6 +219,8 @@ type Server struct {
 	settlementRelay          SettlementRelayFunc
 	admission                *providerws.AdmissionManager
 	modelAdmissionStore      providerws.ModelAdmissionStore
+	modelAdmissionAvailable  func(string, string) bool
+	modelAdmissionClose      func(string, string, string) error
 	requestTimeout           time.Duration
 	failoverEnabled          bool
 	failoverTimeout          time.Duration
@@ -278,16 +280,18 @@ type Server struct {
 	// construction (config.go TrustedProxyPrefixes) so the hot path
 	// never re-parses. Default loopback-only — see WithTrustedProxies.
 	// Issue #125.
-	trustedProxies    []netip.Prefix
-	billingMu         sync.RWMutex
-	billing           *billing.Store
-	billingCfg        config.RewardsConfig
-	billingSnapshotID int64
-	rateCardUSDPerM   float64
-	autotuneFeedsMu   sync.RWMutex
-	autotuneFeeds     AutotuneFeeds
-	now               func() time.Time
-	version           string
+	trustedProxies             []netip.Prefix
+	billingMu                  sync.RWMutex
+	billingAuthorityGeneration uint64
+	billing                    *billing.Store
+	billingCfg                 config.RewardsConfig
+	billingSnapshotID          int64
+	rateCardUSDPerM            float64
+	autotuneFeedsMu            sync.RWMutex
+	autotuneFeedsGeneration    uint64
+	autotuneFeeds              AutotuneFeeds
+	now                        func() time.Time
+	version                    string
 	// terminalObserver is the #766 arbiter observation seam. Nil in
 	// production — no Option sets it and nothing in the serving path reads
 	// the arbiter's state; the production surface is the warn logs plus the
@@ -665,7 +669,8 @@ func WithBilling(store *billing.Store, cfg config.RewardsConfig) Option {
 		s.billingMu.Lock()
 		defer s.billingMu.Unlock()
 		s.billing = store
-		s.billingCfg = cfg
+		s.billingCfg = cloneAdmissionRewards(cfg)
+		s.billingAuthorityGeneration++
 	}
 }
 
@@ -682,6 +687,7 @@ func WithBillingSnapshotID(snapshotID int64) Option {
 		s.billingMu.Lock()
 		defer s.billingMu.Unlock()
 		s.billingSnapshotID = snapshotID
+		s.billingAuthorityGeneration++
 	}
 }
 
@@ -723,8 +729,10 @@ func WithSlotQueueConfig(maxPendingPerProvider int, deadline, pollInterval time.
 func (s *Server) SetBillingConfig(cfg config.RewardsConfig, snapshotID int64, usdPerMillionCredits float64) {
 	s.billingMu.Lock()
 	defer s.billingMu.Unlock()
-	s.billingCfg = cfg
+	s.billingCfg = cloneAdmissionRewards(cfg)
+	s.billingAuthorityGeneration++
 	s.billingSnapshotID = snapshotID
+	s.billingAuthorityGeneration++
 	if usdPerMillionCredits >= 0 && !math.IsNaN(usdPerMillionCredits) && !math.IsInf(usdPerMillionCredits, 0) {
 		s.rateCardUSDPerM = usdPerMillionCredits
 	}
@@ -733,13 +741,13 @@ func (s *Server) SetBillingConfig(cfg config.RewardsConfig, snapshotID int64, us
 func (s *Server) billingState() (*billing.Store, config.RewardsConfig, int64) {
 	s.billingMu.RLock()
 	defer s.billingMu.RUnlock()
-	return s.billing, s.billingCfg, s.billingSnapshotID
+	return s.billing, cloneAdmissionRewards(s.billingCfg), s.billingSnapshotID
 }
 
 func (s *Server) recommendationRateCardState() (config.RewardsConfig, float64) {
 	s.billingMu.RLock()
 	defer s.billingMu.RUnlock()
-	return s.billingCfg, s.rateCardUSDPerM
+	return cloneAdmissionRewards(s.billingCfg), s.rateCardUSDPerM
 }
 
 func NewServer(registry *pool.Registry, logger zerolog.Logger, startedAt time.Time, opts ...Option) *Server {
@@ -8500,6 +8508,10 @@ func (s *Server) handleProviderFailure(provider pool.Provider, status int) {
 }
 
 func (s *Server) closeProviderConn(provider pool.Provider, reason string) {
+	if s.modelAdmissionClose != nil {
+		_ = s.modelAdmissionClose(provider.ProviderID, provider.AssignedID, reason)
+		return
+	}
 	conn, err := s.pool.Conn(provider.ProviderID, provider.AssignedID)
 	if err != nil {
 		return

@@ -86,34 +86,125 @@ struct DurableModelArtifactStore {
         staging: URL,
         modelID: String,
         revision: String,
-        sha256: String
+        sha256: String,
+        checkCancellation: () throws -> Void = { try Task.checkCancellation() },
+        beforePublish: () throws -> Void = {},
+        didPublish: () throws -> Void = {}
     ) throws -> URL {
         let destination = try artifactURL(modelID: modelID, revision: revision, sha256: sha256)
         try ensureRoot()
-        try validateNoSymlinkAncestors(
-            of: destination,
-            requireComplete: fileManager.fileExists(atPath: destination.path)
-        )
+        try validateNoSymlinkAncestors(of: destination, requireComplete: fileManager.fileExists(atPath: destination.path))
         if fileManager.fileExists(atPath: destination.path) {
-            let existing: String?
-            do {
-                existing = try ModelArtifactVerifier.canonicalArtifactHash(directory: destination)
-            } catch {
-                existing = nil
+            guard try ModelArtifactVerifier.canonicalArtifactHash(directory: destination) == sha256 else {
+                // A corrupt published object can still be an incumbent/recovery reference.
+                // Repair must never erase it as a side effect of preparation.
+                throw AutotuneRecommendError.invalidArtifact("published artifact is corrupt; preserved for recovery")
             }
-            if existing != sha256 {
-                try fileManager.removeItem(at: destination)
-                try copyRegularTree(from: staging, to: destination)
+            try checkCancellation()
+            try beforePublish()
+            try didPublish()
+            return destination
+        }
+        try copyRegularTree(from: staging, to: destination, expectedSHA256: sha256,
+                            checkCancellation: checkCancellation, beforePublish: beforePublish, didPublish: didPublish)
+        return destination
+    }
+
+    /// Transaction-owned copy stays unpublished until the caller refreshes authority.
+    func stageVerifiedCopy(from source: URL, to temporary: URL, sha256: String,
+                           checkCancellation: () throws -> Void) throws {
+        try ensureRoot()
+        try validateNoSymlinkAncestors(of: temporary, requireComplete: false)
+        guard !fileManager.fileExists(atPath: temporary.path) else {
+            throw AutotuneRecommendError.invalidArtifact("transaction copy already exists")
+        }
+        try fileManager.createDirectory(at: temporary, withIntermediateDirectories: true)
+        var sourceInfo = stat()
+        guard lstat(source.path, &sourceInfo) == 0, (sourceInfo.st_mode & S_IFMT) == S_IFDIR else {
+            throw AutotuneRecommendError.invalidArtifact("source artifact is not a regular directory")
+        }
+        let sourceRoot = source.resolvingSymlinksInPath()
+        guard let enumerator = fileManager.enumerator(atPath: sourceRoot.path) else {
+            throw AutotuneRecommendError.invalidArtifact("cannot enumerate artifact")
+        }
+        for case let relative as String in enumerator {
+            try checkCancellation()
+            guard !relative.hasPrefix("/"), !relative.split(separator: "/").contains("..") else {
+                throw AutotuneRecommendError.invalidArtifact("unsafe relative artifact path")
             }
-        } else {
-            try copyRegularTree(from: staging, to: destination)
+            let url = sourceRoot.appendingPathComponent(relative)
+            var info = stat()
+            guard lstat(url.path, &info) == 0 else { throw AutotuneRecommendError.invalidArtifact("artifact changed during copy") }
+            if (info.st_mode & S_IFMT) == S_IFDIR { continue }
+            guard (info.st_mode & S_IFMT) == S_IFREG else {
+                throw AutotuneRecommendError.invalidArtifact("artifact contains unsafe file")
+            }
+            let target = temporary.appendingPathComponent(relative)
+            try fileManager.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
+            let fd = open(url.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+            guard fd >= 0 else { throw AutotuneRecommendError.invalidArtifact("cannot open artifact") }
+            let input = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+            defer { try? input.close() }
+            let outputFD = open(target.path, O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW | O_CLOEXEC, 0o600)
+            guard outputFD >= 0 else { throw AutotuneRecommendError.invalidArtifact("cannot create copy") }
+            let output = FileHandle(fileDescriptor: outputFD, closeOnDealloc: true)
+            defer { try? output.close() }
+            while let data = try input.read(upToCount: 1024 * 1024), !data.isEmpty {
+                try checkCancellation(); try output.write(contentsOf: data)
+            }
+            try output.synchronize()
         }
-        let actual = try ModelArtifactVerifier.canonicalArtifactHash(directory: destination)
-        guard actual == sha256 else {
-            throw AutotuneRecommendError.invalidArtifact(
-                "durable artifact hash mismatch expected=\(sha256) actual=\(actual)"
-            )
+        guard try ModelArtifactVerifier.canonicalArtifactHash(directory: temporary, checkCancellation: checkCancellation) == sha256 else {
+            throw AutotuneRecommendError.invalidArtifact("copied artifact hash mismatch")
         }
+        try checkCancellation()
+    }
+
+    func publishVerifiedCopy(_ temporary: URL, modelID: String, revision: String, sha256: String) throws -> URL {
+        let destination = try artifactURL(modelID: modelID, revision: revision, sha256: sha256)
+        try validateNoSymlinkAncestors(of: temporary, requireComplete: true)
+        try validateNoSymlinkAncestors(of: destination, requireComplete: false)
+        if fileManager.fileExists(atPath: destination.path) {
+            guard try ModelArtifactVerifier.canonicalArtifactHash(directory: destination) == sha256 else {
+                throw AutotuneRecommendError.invalidArtifact("published artifact corrupt; preserved")
+            }
+            return destination
+        }
+        try fileManager.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+        guard renamex_np(temporary.path, destination.path, UInt32(RENAME_EXCL)) == 0 else {
+            throw AutotuneRecommendError.invalidArtifact("atomic artifact publication failed")
+        }
+        let fd = open(destination.deletingLastPathComponent().path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
+        guard fd >= 0 else { throw AutotuneRecommendError.invalidArtifact("publication sync failed") }
+        defer { close(fd) }
+        guard fsync(fd) == 0 else { throw AutotuneRecommendError.invalidArtifact("publication sync failed") }
+        return destination
+    }
+
+    /// Parent creation is outside the journal lock. Publication itself never hashes.
+    func preparePublicationDirectory(_ destination: URL) throws -> Int32 {
+        try ensureRoot()
+        try validateNoSymlinkAncestors(of: destination, requireComplete: false)
+        try fileManager.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try validateNoSymlinkAncestors(of: destination.deletingLastPathComponent(), requireComplete: true)
+        return try ModelCatalogArtifactSnapshot.openDirectory(destination.deletingLastPathComponent())
+    }
+
+    func publishSealedCopy(_ temporary: URL, destination: URL,
+                           observation: ModelCatalogArtifactSnapshot.Observation, existing: Bool, destinationParent: Int32) throws -> URL {
+        try observation.validatePlacement()
+        if existing {
+            var info = stat()
+            guard fstatat(destinationParent, destination.lastPathComponent, &info, AT_SYMLINK_NOFOLLOW) == 0,
+                  ModelCatalogArtifactSnapshot.Identity(info) == observation.identity else { throw ModelCatalogTransactionError.invalidTransaction }
+            return destination
+        }
+        // The owner has already verified the source object; an unexpected
+        // incumbent wins the no-replace race and is preserved without hashing.
+        guard renameatx_np(observation.parentFD, observation.name, destinationParent, destination.lastPathComponent, UInt32(RENAME_EXCL)) == 0 else {
+            throw AutotuneRecommendError.invalidArtifact("atomic artifact publication failed")
+        }
+        guard fsync(destinationParent) == 0 else { throw AutotuneRecommendError.invalidArtifact("publication sync failed") }
         return destination
     }
 
@@ -122,6 +213,7 @@ struct DurableModelArtifactStore {
         let rootPath = root.standardizedFileURL.path
         guard fileManager.fileExists(atPath: rootPath) else { return }
         let kept = Set(keeping.map { URL(fileURLWithPath: $0).standardizedFileURL.path })
+        try validateNoSymlinkAncestors(of: root, requireComplete: true)
         try gcDirectory(root, keeping: kept)
     }
 
@@ -158,47 +250,67 @@ struct DurableModelArtifactStore {
         }
     }
 
-    private func ensureRoot() throws {
-        try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
-        var st = stat()
-        guard lstat(root.path, &st) == 0, (st.st_mode & S_IFMT) == S_IFDIR else {
-            throw AutotuneRecommendError.invalidArtifact("durable artifact root is not a directory")
+    /// Walk from the filesystem root with no-follow descriptors before any mutation.
+    /// macOS exposes these system-owned aliases; arbitrary user symlinks are rejected.
+    static func secureOwnedDirectory(_ url: URL) throws {
+        try walkDirectory(url, create: true, requireComplete: true)
+    }
+
+    private static func walkDirectory(_ url: URL, create: Bool, requireComplete: Bool) throws {
+        var path = url.standardizedFileURL.path
+        for alias in ["/var", "/tmp", "/etc"] where path == alias || path.hasPrefix(alias + "/") {
+            path = "/private" + path
+            break
         }
-        try FileManager.default.setAttributes(
-            [.posixPermissions: NSNumber(value: Int16(0o700))],
-            ofItemAtPath: root.path
-        )
+        guard path.hasPrefix("/"), path != "/" else {
+            throw AutotuneRecommendError.invalidArtifact("unsafe storage root")
+        }
+        var descriptor = open("/", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        guard descriptor >= 0 else { throw AutotuneRecommendError.invalidArtifact("cannot open filesystem root") }
+        defer { close(descriptor) }
+        for component in path.split(separator: "/").map(String.init) {
+            var next = openat(descriptor, component, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+            if next < 0, errno == ENOENT {
+                if !create {
+                    if !requireComplete { return }
+                    throw AutotuneRecommendError.invalidArtifact("storage directory is missing")
+                }
+                guard mkdirat(descriptor, component, 0o700) == 0 || errno == EEXIST else {
+                    throw AutotuneRecommendError.invalidArtifact("cannot create storage directory")
+                }
+                next = openat(descriptor, component, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+            }
+            guard next >= 0 else {
+                throw AutotuneRecommendError.invalidArtifact("symlink or unsafe storage directory")
+            }
+            close(descriptor); descriptor = next
+        }
+        if create {
+            var info = stat()
+            guard fstat(descriptor, &info) == 0, info.st_uid == getuid(), fchmod(descriptor, 0o700) == 0 else {
+                throw AutotuneRecommendError.invalidArtifact("storage directory ownership is unsafe")
+            }
+        }
+    }
+
+    private func ensureRoot() throws {
+        try Self.secureOwnedDirectory(root)
     }
 
     private func validateNoSymlinkAncestors(of url: URL, requireComplete: Bool) throws {
-        let rootURL = root.standardizedFileURL
-        var rootStat = stat()
-        if lstat(rootURL.path, &rootStat) == 0, (rootStat.st_mode & S_IFMT) == S_IFLNK {
-            throw AutotuneRecommendError.invalidArtifact("durable artifact root must not be a symlink")
-        }
-        let rootPath = rootURL.path
+        let rootPath = root.standardizedFileURL.path
         let targetPath = url.standardizedFileURL.path
         guard targetPath == rootPath || targetPath.hasPrefix(rootPath + "/") else {
             throw AutotuneRecommendError.invalidArtifact("durable path escapes artifact root")
         }
-        var current = rootURL
-        let relative = targetPath.dropFirst(rootPath.count).split(separator: "/").map(String.init)
-        for component in relative where !component.isEmpty {
-            current.appendPathComponent(component)
-            var st = stat()
-            if lstat(current.path, &st) != 0 {
-                if requireComplete {
-                    throw AutotuneRecommendError.invalidArtifact("durable path is missing")
-                }
-                return
-            }
-            if (st.st_mode & S_IFMT) == S_IFLNK {
-                throw AutotuneRecommendError.invalidArtifact("symlink in durable path")
-            }
-        }
+        try Self.walkDirectory(url, create: false, requireComplete: requireComplete)
     }
 
-    private func copyRegularTree(from source: URL, to destination: URL) throws {
+    private func copyRegularTree(
+        from source: URL, to destination: URL, expectedSHA256: String,
+        checkCancellation: () throws -> Void, beforePublish: () throws -> Void,
+        didPublish: () throws -> Void
+    ) throws {
         let destPath = destination.standardizedFileURL.path
         try validateNoSymlinkAncestors(of: destination.deletingLastPathComponent(), requireComplete: false)
         let rootPath = root.standardizedFileURL.path
@@ -220,6 +332,7 @@ struct DurableModelArtifactStore {
             }
             let basePath = source.resolvingSymlinksInPath().path
             for case let url as URL in enumerator {
+                try checkCancellation()
                 var statbuf = stat()
                 guard lstat(url.path, &statbuf) == 0 else {
                     throw AutotuneRecommendError.invalidArtifact("lstat during durable copy")
@@ -240,10 +353,29 @@ struct DurableModelArtifactStore {
                 let rel = String(path.dropFirst(basePath.count + 1))
                 let target = staging.appendingPathComponent(rel)
                 try fileManager.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
-                try fileManager.copyItem(at: url, to: target)
+                let input = try FileHandle(forReadingFrom: url)
+                defer { try? input.close() }
+                guard fileManager.createFile(atPath: target.path, contents: nil, attributes: [.posixPermissions: 0o600]) else {
+                    throw AutotuneRecommendError.invalidArtifact("cannot create durable staging file")
+                }
+                let output = try FileHandle(forWritingTo: target)
+                defer { try? output.close() }
+                while let chunk = try input.read(upToCount: 1024 * 1024), !chunk.isEmpty {
+                    try checkCancellation()
+                    try output.write(contentsOf: chunk)
+                }
+                try output.synchronize()
             }
-            try? fileManager.removeItem(at: destination)
+            guard try ModelArtifactVerifier.canonicalArtifactHash(directory: staging) == expectedSHA256 else {
+                throw AutotuneRecommendError.invalidArtifact("temporary durable artifact hash mismatch")
+            }
+            try checkCancellation()
+            try beforePublish()
+            try checkCancellation()
+            // moveItem fails if another publisher created the immutable destination.
+            // Never remove a published destination to make publication succeed.
             try fileManager.moveItem(at: staging, to: destination)
+            try didPublish()
         } catch {
             try? fileManager.removeItem(at: staging)
             throw error

@@ -15,6 +15,7 @@ struct ModelCatalogEconomicsWire: Codable, Equatable, Sendable {
         let demandFeedDigest: String?
         let candidateFeedDigest: String?
         let rateCardMaxAgeSeconds: Int
+        var transactionContextSHA256: String? = nil
 
         enum CodingKeys: String, CodingKey {
             case cliVersion = "cli_version"
@@ -28,6 +29,7 @@ struct ModelCatalogEconomicsWire: Codable, Equatable, Sendable {
             case demandFeedDigest = "demand_feed_digest"
             case candidateFeedDigest = "candidate_feed_digest"
             case rateCardMaxAgeSeconds = "rate_card_max_age_seconds"
+            case transactionContextSHA256 = "transaction_context_sha256"
         }
 
         func encode(to encoder: Encoder) throws {
@@ -43,6 +45,9 @@ struct ModelCatalogEconomicsWire: Codable, Equatable, Sendable {
             try encodeNullable(demandFeedDigest, forKey: .demandFeedDigest, into: &container)
             try encodeNullable(candidateFeedDigest, forKey: .candidateFeedDigest, into: &container)
             try container.encode(rateCardMaxAgeSeconds, forKey: .rateCardMaxAgeSeconds)
+            if projectionProtocolVersion == "2" {
+                try encodeNullable(transactionContextSHA256, forKey: .transactionContextSHA256, into: &container)
+            }
         }
     }
 
@@ -82,6 +87,7 @@ struct ModelCatalogEconomicsWire: Codable, Equatable, Sendable {
         let actionTimeoutSeconds: Int?
         let estimatedBytes: Int64?
         let unavailableReason: String?
+        var operationGeneration: String? = nil
 
         enum CodingKeys: String, CodingKey {
             case available
@@ -91,6 +97,7 @@ struct ModelCatalogEconomicsWire: Codable, Equatable, Sendable {
             case actionTimeoutSeconds = "action_timeout_seconds"
             case estimatedBytes = "estimated_bytes"
             case unavailableReason = "unavailable_reason"
+            case operationGeneration = "operation_generation"
         }
 
         static func unavailable(_ reason: String) -> Action {
@@ -106,6 +113,10 @@ struct ModelCatalogEconomicsWire: Codable, Equatable, Sendable {
         }
 
         func encode(to encoder: Encoder) throws {
+            try encode(to: encoder, includeGeneration: false)
+        }
+
+        func encode(to encoder: Encoder, includeGeneration: Bool) throws {
             var container = encoder.container(keyedBy: CodingKeys.self)
             try container.encode(available, forKey: .available)
             try container.encode(requiresConfirmation, forKey: .requiresConfirmation)
@@ -114,7 +125,14 @@ struct ModelCatalogEconomicsWire: Codable, Equatable, Sendable {
             try encodeNullable(actionTimeoutSeconds, forKey: .actionTimeoutSeconds, into: &container)
             try encodeNullable(estimatedBytes, forKey: .estimatedBytes, into: &container)
             try encodeNullable(unavailableReason, forKey: .unavailableReason, into: &container)
+            if includeGeneration {
+                try encodeNullable(operationGeneration, forKey: .operationGeneration, into: &container)
+            }
         }
+    }
+
+    struct LocalVerification: Codable, Equatable, Sendable {
+        let state: ModelCatalogLocalVerificationState
     }
 
     struct Row: Codable, Equatable, Sendable {
@@ -123,12 +141,12 @@ struct ModelCatalogEconomicsWire: Codable, Equatable, Sendable {
         let displayModelID: String
         let actionModelID: String?
         let isCurrent: Bool
-        let weightsPresentLocally: Bool
-        let runtimeState: String
+        var weightsPresentLocally: Bool
+        var runtimeState: String
         let estimatedGB: Double?
         let fit: String
-        let disabledReason: String?
-        let warningCodes: [String]
+        var disabledReason: String?
+        var warningCodes: [String]
         let admission: Admission
         let rateCardVersion: String?
         let rateCardGeneratedAt: String?
@@ -145,12 +163,15 @@ struct ModelCatalogEconomicsWire: Codable, Equatable, Sendable {
         let readyProviderCount: Int?
         let supplyDeficitScore: Double?
         let switchAction: Action
-        let prepare: Action
-        let evaluate: Action
-        let adoptRecommendation: Action
+        var prepare: Action
+        var evaluate: Action
+        var adoptRecommendation: Action
         let cleanupStaging: Action
+        var includeGenerationFields = false
+        var localVerification: LocalVerification? = nil
 
         enum CodingKeys: String, CodingKey {
+            case localVerification = "local_verification"
             case modelKey = "model_key"
             case servedModelID = "served_model_id"
             case displayModelID = "display_model_id"
@@ -186,6 +207,9 @@ struct ModelCatalogEconomicsWire: Codable, Equatable, Sendable {
 
         func encode(to encoder: Encoder) throws {
             var container = encoder.container(keyedBy: CodingKeys.self)
+            if includeGenerationFields {
+                try container.encode(localVerification ?? LocalVerification(state: .notApplicable), forKey: .localVerification)
+            }
             try container.encode(modelKey, forKey: .modelKey)
             try container.encode(servedModelID, forKey: .servedModelID)
             try container.encode(displayModelID, forKey: .displayModelID)
@@ -212,11 +236,28 @@ struct ModelCatalogEconomicsWire: Codable, Equatable, Sendable {
             try encodeNullable(demandWeight, forKey: .demandWeight, into: &container)
             try encodeNullable(readyProviderCount, forKey: .readyProviderCount, into: &container)
             try encodeNullable(supplyDeficitScore, forKey: .supplyDeficitScore, into: &container)
-            try container.encode(switchAction, forKey: .switchAction)
-            try container.encode(prepare, forKey: .prepare)
-            try container.encode(evaluate, forKey: .evaluate)
-            try container.encode(adoptRecommendation, forKey: .adoptRecommendation)
-            try container.encode(cleanupStaging, forKey: .cleanupStaging)
+            try switchAction.encode(to: container.superEncoder(forKey: .switchAction), includeGeneration: includeGenerationFields)
+            try prepare.encode(to: container.superEncoder(forKey: .prepare), includeGeneration: includeGenerationFields)
+            try evaluate.encode(to: container.superEncoder(forKey: .evaluate), includeGeneration: includeGenerationFields)
+            try adoptRecommendation.encode(to: container.superEncoder(forKey: .adoptRecommendation), includeGeneration: includeGenerationFields)
+            try cleanupStaging.encode(to: container.superEncoder(forKey: .cleanupStaging), includeGeneration: includeGenerationFields)
+        }
+    }
+
+    struct Recovery: Codable, Equatable, Sendable {
+        let targetModelID: String
+        let modelKey: String
+        let action: Action
+        enum CodingKeys: String, CodingKey {
+            case targetModelID = "target_model_id"
+            case modelKey = "model_key"
+            case action
+        }
+        func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(targetModelID, forKey: .targetModelID)
+            try container.encode(modelKey, forKey: .modelKey)
+            try action.encode(to: container.superEncoder(forKey: .action), includeGeneration: true)
         }
     }
 
@@ -226,6 +267,7 @@ struct ModelCatalogEconomicsWire: Codable, Equatable, Sendable {
     let source: Source
     let rows: [Row]
     let warnings: [String]
+    let recoveries: [Recovery]
 
     enum CodingKeys: String, CodingKey {
         case schema
@@ -234,6 +276,7 @@ struct ModelCatalogEconomicsWire: Codable, Equatable, Sendable {
         case source
         case rows
         case warnings
+        case recoveries
     }
 
     init(
@@ -241,7 +284,8 @@ struct ModelCatalogEconomicsWire: Codable, Equatable, Sendable {
         projectionSequence: Int,
         source: Source,
         rows: [Row],
-        warnings: [String]
+        warnings: [String],
+        recoveries: [Recovery] = []
     ) {
         schema = "model_catalog_economics.v1"
         self.generatedAt = generatedAt
@@ -249,6 +293,34 @@ struct ModelCatalogEconomicsWire: Codable, Equatable, Sendable {
         self.source = source
         self.rows = rows
         self.warnings = warnings
+        self.recoveries = recoveries
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        schema = try container.decode(String.self, forKey: .schema)
+        generatedAt = try container.decode(String.self, forKey: .generatedAt)
+        projectionSequence = try container.decode(Int.self, forKey: .projectionSequence)
+        source = try container.decode(Source.self, forKey: .source)
+        let localActivation = source.projectionProtocolVersion == "2"
+        rows = try container.decode([Row].self, forKey: .rows).map { row in
+            var row = row
+            row.includeGenerationFields = localActivation
+            return row
+        }
+        warnings = try container.decode([String].self, forKey: .warnings)
+        recoveries = try container.decodeIfPresent([Recovery].self, forKey: .recoveries) ?? []
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(schema, forKey: .schema)
+        try container.encode(generatedAt, forKey: .generatedAt)
+        try container.encode(projectionSequence, forKey: .projectionSequence)
+        try container.encode(source, forKey: .source)
+        try container.encode(rows, forKey: .rows)
+        try container.encode(warnings, forKey: .warnings)
+        if source.projectionProtocolVersion == "2" { try container.encode(recoveries, forKey: .recoveries) }
     }
 }
 
@@ -268,6 +340,17 @@ final class ModelCatalogEconomicsProcessState: @unchecked Sendable {
     }
 }
 
+/// CLI-reserved actions for a freshly verified primary catalog target. Callers
+/// construct these only after resolving transaction authority; discovery alone
+/// cannot make a download or activation actionable.
+struct ModelCatalogLocalActions {
+    let targetModelID: String
+    let prepare: ModelCatalogEconomicsWire.Action
+    let evaluate: ModelCatalogEconomicsWire.Action
+    let adoptRecommendation: ModelCatalogEconomicsWire.Action
+    let cleanupStaging: ModelCatalogEconomicsWire.Action
+}
+
 struct ModelCatalogEconomicsBuilder {
     static let protocolVersion = "1"
     static let rateCardMaxAgeSeconds = 604_800
@@ -284,8 +367,21 @@ struct ModelCatalogEconomicsBuilder {
         admissionStatuses: [String: BYOMAdmissionStatusWire],
         demand: AutotuneStaticSelection<DemandRank>,
         candidateCatalog: AutotuneStaticSelection<CandidateCatalog>,
-        rateCard: AutotuneStaticSelection<RateCardProjection>?
+        rateCard: AutotuneStaticSelection<RateCardProjection>?,
+        localActivation: Bool = false,
+        localActions: [String: ModelCatalogLocalActions] = [:],
+        localInspection: ModelCatalogLocalInspection? = nil,
+        transactionContextSHA256: String? = nil,
+        recoveries: [ModelCatalogEconomicsWire.Recovery] = []
     ) -> ModelCatalogEconomicsWire {
+        let hasBoundContext = transactionContextSHA256.map { value in
+            value.count == 64 && value.utf8.allSatisfy { (48...57).contains($0) || (97...102).contains($0) }
+        } ?? false
+        let localActions = hasBoundContext ? localActions : localActions.mapValues { value in
+            ModelCatalogLocalActions(targetModelID: value.targetModelID, prepare: .unavailable("action_unavailable"),
+                evaluate: .unavailable("action_unavailable"), adoptRecommendation: .unavailable("action_unavailable"),
+                cleanupStaging: .unavailable("action_unavailable"))
+        }
         let rateCardSource = source(for: rateCard)
         let feedWarnings = demand.warnings
             .union(candidateCatalog.warnings)
@@ -306,7 +402,8 @@ struct ModelCatalogEconomicsBuilder {
                 rateCard: rateCard,
                 rateCardSource: rateCardSource,
                 feedWarnings: feedWarnings,
-                generatedAt: generatedAt
+                generatedAt: generatedAt,
+                localActions: localActivation ? candidate.catalogModelKey.flatMap { localActions[$0] } : nil
             )
             rows.append(row)
             if let catalogKey = candidate.catalogModelKey {
@@ -321,30 +418,68 @@ struct ModelCatalogEconomicsBuilder {
                 catalogRow: catalogRow,
                 currentModelID: currentModelID,
                 demand: demand.value,
-                rateCardSource: rateCardSource
+                rateCardSource: rateCardSource,
+                localActions: localActivation ? localActions[key] : nil
             )
             rows.append(row)
         }
 
+        rows = rows.map { row in
+            var row = row
+            row.includeGenerationFields = localActivation
+            if localActivation {
+                let state = localInspection?.entry(modelKey: row.modelKey, modelID: row.servedModelID)?.state ?? .notApplicable
+                row.localVerification = .init(state: state)
+                if state != .notApplicable {
+                    row.weightsPresentLocally = state == .verified
+                    switch state {
+                    case .unverified, .incomplete:
+                        if !row.isCurrent { row.runtimeState = "verification_required" }
+                        row.disabledReason = "local_verification_required"
+                        row.warningCodes.removeAll { $0 == "model_not_local" || $0 == "requires_preparation" }
+                        row.prepare = .unavailable("local_verification_required")
+                        row.evaluate = .unavailable("local_verification_required")
+                        row.adoptRecommendation = .unavailable("local_verification_required")
+                    case .invalid:
+                        row.warningCodes.removeAll { $0 == "model_not_local" || $0 == "requires_preparation" }
+                        if !row.isCurrent { row.runtimeState = "blocked" }
+                        row.disabledReason = "local_artifact_invalid"
+                        row.prepare = .unavailable("local_artifact_invalid")
+                        row.evaluate = .unavailable("local_artifact_invalid")
+                        row.adoptRecommendation = .unavailable("local_artifact_invalid")
+                    case .missing:
+                        if !row.isCurrent { row.runtimeState = "needs_preparation" }
+                        row.evaluate = .unavailable("local_verification_required")
+                        row.adoptRecommendation = .unavailable("local_verification_required")
+                    case .verified:
+                        if !row.isCurrent { row.runtimeState = "ready" }
+                    case .notApplicable: break
+                    }
+                }
+            }
+            return row
+        }
         let source = ModelCatalogEconomicsWire.Source(
             cliVersion: cliVersion,
             cliBuildCommit: cliBuildCommit,
             processLaunchID: processLaunchID,
             processStartedAt: ModelSwitchingWireCodec.timestamp(processStartedAt),
-            projectionProtocolVersion: protocolVersion,
+            projectionProtocolVersion: localActivation ? "2" : protocolVersion,
             rateCardSource: rateCardSource,
             rateCardDigest: rateCard.map { sha256Hex($0.selectedBytes) },
             rateCardSignatureDigest: nil,
             demandFeedDigest: sha256Hex(demand.selectedBytes),
             candidateFeedDigest: sha256Hex(candidateCatalog.selectedBytes),
-            rateCardMaxAgeSeconds: rateCardMaxAgeSeconds
+            rateCardMaxAgeSeconds: rateCardMaxAgeSeconds,
+            transactionContextSHA256: localActivation && hasBoundContext ? transactionContextSHA256 : nil
         )
         return ModelCatalogEconomicsWire(
             generatedAt: ModelSwitchingWireCodec.timestamp(generatedAt),
             projectionSequence: projectionSequence,
             source: source,
             rows: rows,
-            warnings: Array(projectionWarnings).sorted()
+            warnings: Array(projectionWarnings).sorted(),
+            recoveries: localActivation && hasBoundContext ? recoveries : []
         )
     }
 
@@ -356,7 +491,8 @@ struct ModelCatalogEconomicsBuilder {
         rateCard: AutotuneStaticSelection<RateCardProjection>?,
         rateCardSource: String,
         feedWarnings: Set<AutotuneRecommendWarning>,
-        generatedAt: Date
+        generatedAt: Date,
+        localActions: ModelCatalogLocalActions?
     ) -> ModelCatalogEconomicsWire.Row {
         let admission = admissionSnapshot(candidate: candidate, status: status)
         let modelKey = candidate.catalogModelKey ?? candidate.candidateID
@@ -364,7 +500,6 @@ struct ModelCatalogEconomicsBuilder {
         let coordinatorIdentityMismatched = coordinatorPricedIdentityIsMissingOrMismatched(candidate: candidate, status: status)
         let hasCoordinatorBoundCatalogIdentity = pricingModelKey != nil
         let demandRow = candidate.catalogModelKey.flatMap { demand.rows[$0] }
-        let isCurrent = currentModelMatches(currentModelID, candidate.servedModelRef)
         let economics = economicsFields(
             modelKey: pricingModelKey,
             admission: admission,
@@ -388,11 +523,20 @@ struct ModelCatalogEconomicsBuilder {
         let actionUnavailable = candidate.catalogModelKey == nil
             ? "model_not_supported"
             : "action_unavailable"
+        let actions = localActions.flatMap { actions in
+            currentModelMatches(actions.targetModelID, candidate.servedModelRef) ? actions : nil
+        }
+        // Prepared adoption stores the signed catalog key in runtime config,
+        // while discovery names its canonical artifact repository. Only the
+        // verified local-action binding permits treating those as aliases.
+        let isCurrent = currentModelMatches(currentModelID, candidate.servedModelRef)
+            || (actions != nil && currentModelMatches(currentModelID, modelKey))
+        let hideLocalEconomics = actions != nil && economics.state != "trusted"
         return ModelCatalogEconomicsWire.Row(
             modelKey: modelKey,
             servedModelID: candidate.servedModelRef,
             displayModelID: candidate.displayName,
-            actionModelID: candidate.candidateID,
+            actionModelID: actions?.targetModelID ?? candidate.candidateID,
             isCurrent: isCurrent,
             weightsPresentLocally: candidate.readinessState == "ready",
             runtimeState: runtimeState(readinessState: candidate.readinessState, isCurrent: isCurrent),
@@ -410,20 +554,20 @@ struct ModelCatalogEconomicsBuilder {
             rateCardGeneratedAt: economics.rateCardGeneratedAt,
             rateCardKey: economics.rateCardKey,
             rateSource: economics.rateSource,
-            promptRateUSDPerMillionTokens: economics.promptRate,
-            completionRateUSDPerMillionTokens: economics.completionRate,
-            providerShareBPS: economics.providerShareBPS,
-            providerPromptPayoutUSDPerMillionTokens: economics.providerPromptPayout,
-            providerCompletionPayoutUSDPerMillionTokens: economics.providerCompletionPayout,
+            promptRateUSDPerMillionTokens: hideLocalEconomics ? nil : economics.promptRate,
+            completionRateUSDPerMillionTokens: hideLocalEconomics ? nil : economics.completionRate,
+            providerShareBPS: hideLocalEconomics ? nil : economics.providerShareBPS,
+            providerPromptPayoutUSDPerMillionTokens: hideLocalEconomics ? nil : economics.providerPromptPayout,
+            providerCompletionPayoutUSDPerMillionTokens: hideLocalEconomics ? nil : economics.providerCompletionPayout,
             economicsState: economics.state,
-            demandRank: demandRow?.rank,
+            demandRank: hideLocalEconomics ? nil : demandRow?.rank,
             demandWeight: economics.state == "trusted" ? demandRow?.demandWeight : nil,
             readyProviderCount: economics.state == "trusted" ? demandRow?.readyProviderCount : nil,
             supplyDeficitScore: economics.state == "trusted" ? demandRow?.effectiveSupplyDeficitMultiplier : nil,
             switchAction: .unavailable(actionUnavailable),
-            prepare: .unavailable(actionUnavailable),
-            evaluate: .unavailable("use_models_evaluate"),
-            adoptRecommendation: .unavailable(actionUnavailable),
+            prepare: actions?.prepare ?? .unavailable(actionUnavailable),
+            evaluate: actions?.evaluate ?? .unavailable("use_models_evaluate"),
+            adoptRecommendation: actions?.adoptRecommendation ?? .unavailable(actionUnavailable),
             cleanupStaging: .unavailable("staging_cleanup_not_required")
         )
     }
@@ -433,7 +577,8 @@ struct ModelCatalogEconomicsBuilder {
         catalogRow: CandidateCatalog.Row,
         currentModelID: String?,
         demand: DemandRank,
-        rateCardSource: String
+        rateCardSource: String,
+        localActions: ModelCatalogLocalActions?
     ) -> ModelCatalogEconomicsWire.Row {
         let admission = ModelCatalogEconomicsWire.Admission(
             state: "not_offered",
@@ -445,19 +590,22 @@ struct ModelCatalogEconomicsBuilder {
         )
         let demandRow = demand.rows[modelKey]
         let unavailable = ModelCatalogEconomicsWire.Action.unavailable("no_cli_transaction_available")
+        let actions = localActions.flatMap { $0.targetModelID == catalogRow.modelID ? $0 : nil }
         let isCurrent = currentModelMatches(currentModelID, catalogRow.modelID)
+            || (actions != nil && currentModelMatches(currentModelID, modelKey))
         return ModelCatalogEconomicsWire.Row(
             modelKey: modelKey,
             servedModelID: catalogRow.modelID,
             displayModelID: catalogRow.modelID,
-            actionModelID: nil,
+            actionModelID: actions?.targetModelID,
             isCurrent: isCurrent,
             weightsPresentLocally: false,
-            runtimeState: "catalog",
+            runtimeState: actions == nil ? "catalog" : "needs_preparation",
             estimatedGB: Double(catalogRow.minRAMGB),
             fit: ModelFit.detectRAMGB() >= catalogRow.minRAMGB ? "fits" : "does_not_fit",
-            disabledReason: "no_cli_transaction_available",
-            warningCodes: ["admission_state_not_settlement_capable", "model_not_local", "action_unavailable"],
+            disabledReason: actions?.prepare.available == true ? nil : "no_cli_transaction_available",
+            warningCodes: ["admission_state_not_settlement_capable", "model_not_local"]
+                + (actions?.prepare.available == true ? [] : ["action_unavailable"]),
             admission: admission,
             rateCardVersion: nil,
             rateCardGeneratedAt: nil,
@@ -469,15 +617,15 @@ struct ModelCatalogEconomicsBuilder {
             providerPromptPayoutUSDPerMillionTokens: nil,
             providerCompletionPayoutUSDPerMillionTokens: nil,
             economicsState: "blocked",
-            demandRank: demandRow?.rank,
+            demandRank: actions == nil ? demandRow?.rank : nil,
             demandWeight: nil,
             readyProviderCount: nil,
             supplyDeficitScore: nil,
             switchAction: unavailable,
-            prepare: unavailable,
+            prepare: actions?.prepare ?? unavailable,
             evaluate: unavailable,
             adoptRecommendation: unavailable,
-            cleanupStaging: ModelCatalogEconomicsWire.Action.unavailable("staging_cleanup_not_required")
+            cleanupStaging: .unavailable("staging_cleanup_not_required")
         )
     }
 

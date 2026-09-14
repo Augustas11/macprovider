@@ -1,4 +1,5 @@
 import XCTest
+import Metal
 import Darwin
 @testable import Malibu
 
@@ -186,13 +187,13 @@ final class ModelManagementTests: XCTestCase {
     @MainActor
     func testCatalogProjectionRejectsStaleReplyFromOlderProcess() async throws {
         let switchAction = availableActionJSON(kind: "switch_model", timeout: 20)
-        let newer = catalogEconomicsJSON(
+        let newer = managedCatalogEconomicsJSON(
             rows: [trustedEconomicsRowJSON(switchAction: switchAction)],
             generatedAt: Self.timestamp(offset: -10)
         )
         // A late reply from an OLDER CLI process: different process_launch_id and
         // an earlier generated_at, carrying no rows.
-        let olderProcess = catalogEconomicsJSON(rows: [], generatedAt: Self.timestamp(offset: -120))
+        let olderProcess = managedCatalogEconomicsJSON(rows: [], generatedAt: Self.timestamp(offset: -120))
             .replacingOccurrences(
                 of: "c13c5d4c-3e4f-47ac-b72d-7f8f172747a0",
                 with: "a1111111-2222-3333-4444-555555555555"
@@ -492,7 +493,7 @@ final class ModelManagementTests: XCTestCase {
                 exitCode: 0,
                 stdout: {
                     let timestamp = Self.recentTimestamp()
-                    return catalogEconomicsJSON(rows: [
+                    return managedCatalogEconomicsJSON(rows: [
                         localOnlyBYOMRowJSON(),
                         trustedEconomicsRowJSON(
                             rateCardGeneratedAt: timestamp,
@@ -509,7 +510,7 @@ final class ModelManagementTests: XCTestCase {
             defaults: UserDefaults(suiteName: "ModelManagementTests.catalog.\(UUID().uuidString)")!
         )
 
-        await store.refresh(currentModelID: "other/model", peer: peer(for: MalibuModelCapabilityManifest.catalogEconomics))
+        await store.refresh(currentModelID: "other/model", peer: localPeer())
 
         XCTAssertEqual(cli.invocations.first?.prefix(3), ["models", "catalog-economics", "--json"])
         XCTAssertEqual(store.rows.map(\.displayID), ["mlx-community/Qwen3-8B-4bit"])
@@ -518,7 +519,7 @@ final class ModelManagementTests: XCTestCase {
     }
 
     @MainActor
-    func testRefreshFallsBackToLegacyListWhenCatalogEconomicsCapabilityMissing() async throws {
+    func testRefreshDoesNotSpawnLegacyListWhenCatalogReadCapabilityMissing() async throws {
         let cli = FakeModelCLI(results: [
             ModelCLIResult(
                 exitCode: 0,
@@ -536,9 +537,10 @@ final class ModelManagementTests: XCTestCase {
 
         await store.refresh(currentModelID: "org/current", peer: peer(for: MalibuModelCapabilityManifest.readySwitch))
 
-        XCTAssertEqual(cli.invocations.first?.prefix(3), ["models", "list", "--json"])
-        XCTAssertEqual(store.rows.first?.category, .current)
-        XCTAssertEqual(store.listState, .ready)
+        XCTAssertTrue(cli.invocations.isEmpty)
+        XCTAssertTrue(store.rows.isEmpty)
+        XCTAssertEqual(store.currentModelID, "org/current")
+        XCTAssertEqual(store.listState, .viewOnly)
     }
 
     @MainActor
@@ -547,7 +549,7 @@ final class ModelManagementTests: XCTestCase {
         let cli = FakeModelCLI(results: [
             ModelCLIResult(
                 exitCode: 0,
-                stdout: catalogEconomicsJSON(
+                stdout: managedCatalogEconomicsJSON(
                     rows: [trustedEconomicsRowJSON(
                         rateCardGeneratedAt: expiringAt,
                         stateObservedAt: expiringAt
@@ -570,13 +572,14 @@ final class ModelManagementTests: XCTestCase {
             defaults: UserDefaults(suiteName: "ModelManagementTests.expiry.\(UUID().uuidString)")!
         )
 
-        await store.refresh(currentModelID: "other/model", peer: peer(for: MalibuModelCapabilityManifest.catalogEconomics))
+        await store.refresh(currentModelID: "other/model", peer: localPeer())
         XCTAssertFalse(store.rows.isEmpty)
         await store.refresh(currentModelID: "org/current", peer: peer(for: MalibuModelCapabilityManifest.readySwitch))
         try await Task.sleep(nanoseconds: 400_000_000)
 
-        XCTAssertEqual(store.rows.map(\.displayID), ["org/current"])
-        XCTAssertEqual(store.listState, .ready)
+        XCTAssertTrue(store.rows.isEmpty)
+        XCTAssertEqual(store.currentModelID, "org/current")
+        XCTAssertEqual(store.listState, .viewOnly)
         XCTAssertFalse(store.catalogProjectionRetryAvailable)
     }
 
@@ -587,7 +590,7 @@ final class ModelManagementTests: XCTestCase {
         let cli = FakeModelCLI(results: [
             ModelCLIResult(
                 exitCode: 0,
-                stdout: catalogEconomicsJSON(
+                stdout: managedCatalogEconomicsJSON(
                     rows: [trustedEconomicsRowJSON(
                         rateCardGeneratedAt: firstTimestamp,
                         stateObservedAt: firstTimestamp
@@ -599,7 +602,7 @@ final class ModelManagementTests: XCTestCase {
             ),
             ModelCLIResult(
                 exitCode: 0,
-                stdout: catalogEconomicsJSON(
+                stdout: managedCatalogEconomicsJSON(
                     rows: [
                         trustedEconomicsRowJSON(
                             rateCardGeneratedAt: secondTimestamp,
@@ -618,7 +621,7 @@ final class ModelManagementTests: XCTestCase {
             paths: testProviderPaths(),
             defaults: UserDefaults(suiteName: "ModelManagementTests.equalSequence.\(UUID().uuidString)")!
         )
-        let peer = peer(for: MalibuModelCapabilityManifest.catalogEconomics)
+        let peer = localPeer()
 
         await store.refresh(currentModelID: "other/model", peer: peer)
         await store.refresh(currentModelID: "other/model", peer: peer)
@@ -638,13 +641,13 @@ final class ModelManagementTests: XCTestCase {
             defaults: UserDefaults(suiteName: "ModelManagementTests.failure.\(UUID().uuidString)")!
         )
 
-        await store.refresh(currentModelID: "org/current", peer: peer(for: MalibuModelCapabilityManifest.catalogEconomics))
+        await store.refresh(currentModelID: "org/current", peer: localPeer())
 
         XCTAssertTrue(store.rows.isEmpty)
         XCTAssertEqual(store.currentModelID, "org/current")
         XCTAssertEqual(store.listState, .unavailable)
         XCTAssertTrue(store.catalogProjectionRetryAvailable)
-        XCTAssertTrue(store.statusLine.contains("projection_unavailable"))
+        XCTAssertTrue(store.statusLine.contains("could not be fully checked"))
     }
 
     @MainActor
@@ -655,7 +658,7 @@ final class ModelManagementTests: XCTestCase {
         let cli = FakeModelCLI(results: [
             ModelCLIResult(
                 exitCode: 0,
-                stdout: catalogEconomicsJSON(
+                stdout: managedCatalogEconomicsJSON(
                     rows: [trustedEconomicsRowJSON(
                         switchAction: action,
                         rateCardGeneratedAt: expiringAt,
@@ -707,7 +710,7 @@ final class ModelManagementTests: XCTestCase {
         let cli = FakeModelCLI(results: [
             ModelCLIResult(
                 exitCode: 0,
-                stdout: catalogEconomicsJSON(
+                stdout: managedCatalogEconomicsJSON(
                     rows: [trustedEconomicsRowJSON(
                         switchAction: action,
                         rateCardGeneratedAt: expiringAt,
@@ -759,7 +762,7 @@ final class ModelManagementTests: XCTestCase {
             results: [
                 ModelCLIResult(
                     exitCode: 0,
-                    stdout: catalogEconomicsJSON(
+                    stdout: managedCatalogEconomicsJSON(
                         rows: [trustedEconomicsRowJSON(
                             switchAction: action,
                             rateCardGeneratedAt: expiringAt,
@@ -808,7 +811,7 @@ final class ModelManagementTests: XCTestCase {
         let cli = FakeModelCLI(results: [
             ModelCLIResult(
                 exitCode: 0,
-                stdout: catalogEconomicsJSON(
+                stdout: managedCatalogEconomicsJSON(
                     rows: [trustedEconomicsRowJSON(
                         switchAction: action,
                         rateCardGeneratedAt: expiringAt,
@@ -857,7 +860,7 @@ final class ModelManagementTests: XCTestCase {
         let cli = FakeModelCLI(results: [
             ModelCLIResult(
                 exitCode: 0,
-                stdout: catalogEconomicsJSON(
+                stdout: managedCatalogEconomicsJSON(
                     rows: [
                         trustedEconomicsRowJSON(
                             switchAction: action,
@@ -1813,6 +1816,814 @@ final class ModelManagementTests: XCTestCase {
         XCTAssertFalse(ModelManagementStore.Operation.idle.blocksRefresh)
     }
 
+    // Deterministic app/CLI integration fixtures; these do not qualify real MLX execution.
+    func testLocalProjectionRequiresExplicitCapabilityNegotiation() throws {
+        let data = Data(localProjection().utf8)
+        let document = try JSONDecoder().decode(MalibuModelCatalogEconomicsDocument.self, from: data)
+        XCTAssertThrowsError(try document.validated())
+        let accepted = try document.validated(localActivationNegotiated: true)
+        let row = try XCTUnwrap(accepted.rowsForMalibu(currentModelID: nil, warmSwapAvailable: true).first)
+        XCTAssertEqual(row.action, .prepare)
+        XCTAssertTrue(row.localActivation)
+        XCTAssertEqual(row.catalogModelKey, "local-candidate")
+        XCTAssertNil(row.providerPromptPayoutUSDPerMillionTokens)
+        XCTAssertNil(row.providerCompletionPayoutUSDPerMillionTokens)
+        XCTAssertNil(row.demandRank)
+        XCTAssertTrue(row.economicsRateLines.isEmpty)
+        XCTAssertNil(row.economicsAccessibilityLabel)
+    }
+
+    func testLocalProjectionRejectsInjectedDemandAndUnconfirmedPreparation() throws {
+        for json in [
+            localProjection().replacingOccurrences(of: "\"demand_rank\":null", with: "\"demand_rank\":1"),
+            localProjection().replacingOccurrences(of: "\"requires_confirmation\":true", with: "\"requires_confirmation\":false"),
+            localProjection().replacingOccurrences(of: "\"admission_state_missing\"", with: "\"feed_signature_invalid\""),
+            localProjection().replacingOccurrences(of: "\"action_model_id\":\"local-candidate\"", with: "\"action_model_id\":null")
+        ] {
+            let document = try JSONDecoder().decode(MalibuModelCatalogEconomicsDocument.self, from: Data(json.utf8)).validated(localActivationNegotiated: true)
+            XCTAssertFalse(document.rowsForMalibu(currentModelID: nil, warmSwapAvailable: true).contains { $0.catalogTransaction != nil })
+        }
+    }
+
+    func testCatalogTransactionRejectsMalformedEventsAndForeignTargets() throws {
+        let original = transactionEvent(state: "running", sequence: 1)
+        for json in [
+            original.replacingOccurrences(of: "\"running\"", with: "\"unknown\""),
+            original.replacingOccurrences(of: "\"heartbeat\":true", with: "\"heartbeat\":false"),
+            original.replacingOccurrences(of: "\"progress\":", with: "\"unknown\":null,\"progress\":"),
+            original.replacingOccurrences(of: "\"prepare_model\"", with: "\"delete_all\"")
+        ] {
+            XCTAssertThrowsError(try JSONDecoder().decode(MalibuCatalogTransactionEvent.self, from: Data(json.utf8)))
+        }
+        let event = try JSONDecoder().decode(MalibuCatalogTransactionEvent.self, from: Data(original.utf8))
+        var transcript = MalibuCatalogTransactionTranscript()
+        XCTAssertThrowsError(try transcript.consume(event, id: "other", kind: "prepare_model", modelKey: "local-candidate", generation: transactionID))
+        XCTAssertThrowsError(try transcript.consume(event, id: transactionID, kind: "prepare_model", modelKey: "other", generation: transactionID))
+    }
+
+    func testCatalogTransactionReplayCannotRewriteTerminalOrGoBackward() throws {
+        var transcript = MalibuCatalogTransactionTranscript()
+        func event(_ state: String, _ sequence: UInt64) throws -> MalibuCatalogTransactionEvent {
+            try JSONDecoder().decode(MalibuCatalogTransactionEvent.self, from: Data(transactionEvent(state: state, sequence: sequence).utf8))
+        }
+        XCTAssertTrue(try transcript.consume(event("running", 2), id: transactionID, kind: "prepare_model", modelKey: "local-candidate", generation: transactionID))
+        XCTAssertFalse(try transcript.consume(event("running", 2), id: transactionID, kind: "prepare_model", modelKey: "local-candidate", generation: transactionID))
+        XCTAssertThrowsError(try transcript.consume(event("running", 1), id: transactionID, kind: "prepare_model", modelKey: "local-candidate", generation: transactionID))
+        XCTAssertTrue(try transcript.consume(event("succeeded", 3), id: transactionID, kind: "prepare_model", modelKey: "local-candidate", generation: transactionID))
+        XCTAssertThrowsError(try transcript.consume(event("failed", 3), id: transactionID, kind: "prepare_model", modelKey: "local-candidate", generation: transactionID))
+        XCTAssertThrowsError(try transcript.consume(event("running", 4), id: transactionID, kind: "prepare_model", modelKey: "local-candidate", generation: transactionID))
+    }
+
+    @MainActor
+    func testPreparedActionDispatchRequiresConfirmationAndFreshProjectionBeforeSuccess() async throws {
+        let terminal = transactionEvent(state: "succeeded", sequence: 2)
+        let cli = FakeModelCLI(results: [ok(localProjection()), ok(terminal), ok(quickProjection(localProjection(prepared: true, sequence: 2))), ok(localProjection(prepared: true, sequence: 3))])
+        let control = FakeModelCLI(results: [ok(terminal)])
+        let defaults = UserDefaults(suiteName: "build1-app-\(UUID())")!
+        let store = ModelManagementStore(cli: cli, transactionControlCLI: control, paths: testProviderPaths(), defaults: defaults)
+        await store.refresh(currentModelID: "incumbent/model", peer: localPeer())
+        let row = try XCTUnwrap(store.rows.first)
+        XCTAssertTrue(store.catalogConfirmation(for: row).contains("size is unavailable"))
+        XCTAssertTrue(store.catalogConfirmation(for: row).contains("Verified signed MacProvider catalog"))
+        await store.performCatalogAction(row, confirmed: false)
+        XCTAssertEqual(cli.invocations.count, 1)
+        await store.performCatalogAction(row, confirmed: true)
+        XCTAssertEqual(Array(cli.invocations[1].prefix(8)), ["models", "prepare", "local-candidate", "--transaction-id", transactionID, "--confirm", "--operation-generation", transactionID])
+        XCTAssertTrue(cli.invocations[0].contains("--local-activation"))
+        XCTAssertEqual(Array(control.invocations[0].prefix(8)), ["models", "transaction", "status", transactionID, "--model", "local-candidate", "--expected-kind", "prepare_model"])
+        XCTAssertNil(store.pendingCatalogTransaction)
+        XCTAssertEqual(store.operation, .idle)
+        XCTAssertEqual(store.currentModelID, "incumbent/model")
+        XCTAssertTrue(store.rows[0].weightsPresentLocally)
+    }
+
+    @MainActor
+    func testTerminalWithoutFreshProjectionRemainsPendingAndRecoversLater() async throws {
+        let terminal = transactionEvent(state: "succeeded", sequence: 2)
+        let cli = FakeModelCLI(results: [ok(localProjection()), ok(terminal), ModelCLIResult(exitCode: 1, stdout: "", stderr: "unavailable"), ok(quickProjection(localProjection(prepared: true, sequence: 2))), ok(localProjection(prepared: true, sequence: 3))])
+        let control = FakeModelCLI(results: [ok(terminal), ok(terminal)])
+        let store = ModelManagementStore(cli: cli, transactionControlCLI: control, paths: testProviderPaths(), defaults: UserDefaults(suiteName: "build1-app-\(UUID())")!)
+        await store.refresh(currentModelID: "incumbent/model", peer: localPeer())
+        await store.performCatalogAction(try XCTUnwrap(store.rows.first), confirmed: true)
+        XCTAssertNotNil(store.pendingCatalogTransaction)
+        XCTAssertEqual(store.operation, .catalogTransaction)
+        XCTAssertFalse(store.canPerformModelAction)
+        await store.reconcileCatalogTransaction()
+        XCTAssertNil(store.pendingCatalogTransaction)
+        XCTAssertEqual(store.operation, .idle)
+    }
+
+    @MainActor
+    func testRestartReconcilesPersistedTransactionAndDisclosesLateCancellation() async throws {
+        let defaults = UserDefaults(suiteName: "build1-app-\(UUID())")!
+        var pending = MalibuPendingCatalogTransaction(id: transactionID, target: "local-candidate", modelKey: "local-candidate", kind: "prepare_model", timeoutSeconds: 1800, startedAt: Date(), operationGeneration: transactionID, cancelRequested: true)
+        let paths = testProviderPaths()
+        pending.pin = try await FakeModelCLI(results: []).authorizeCatalog(pending, contextDigest: String(repeating: "a", count: 64), peer: localPeer(), paths: paths)
+        try MalibuTransactionFiles.save(pending, paths: paths)
+        let cli = FakeModelCLI(results: [ok(quickProjection(localProjection(prepared: true))), ok(localProjection(prepared: true, sequence: 2))])
+        let control = FakeModelCLI(results: [ok(transactionEvent(state: "succeeded", sequence: 2))])
+        let store = ModelManagementStore(cli: cli, transactionControlCLI: control, paths: paths, defaults: defaults)
+        XCTAssertEqual(store.operation, .catalogTransaction)
+        await store.refresh(currentModelID: "incumbent/model", peer: localPeer())
+        XCTAssertNil(store.pendingCatalogTransaction)
+        XCTAssertTrue(store.statusLine.contains("after commit"))
+        XCTAssertEqual(cli.invocations.count, 2)
+        XCTAssertEqual(control.invocations[0][2], "status")
+    }
+
+    @MainActor
+    func testDelayedTransactionKeepsCancellationAndUsesCLIControl() async throws {
+        let defaults = UserDefaults(suiteName: "build1-app-\(UUID())")!
+        var pending = MalibuPendingCatalogTransaction(id: transactionID, target: "local-candidate", modelKey: "local-candidate", kind: "prepare_model", timeoutSeconds: 1800, startedAt: Date(), operationGeneration: transactionID)
+        let paths = testProviderPaths()
+        pending.pin = try await FakeModelCLI(results: []).authorizeCatalog(pending, contextDigest: String(repeating: "a", count: 64), peer: localPeer(), paths: paths)
+        try MalibuTransactionFiles.save(pending, paths: paths)
+        let control = FakeModelCLI(results: [ok(transactionEvent(state: "cancel_requested", sequence: 1))])
+        let store = ModelManagementStore(cli: FakeModelCLI(results: []), transactionControlCLI: control, paths: paths, defaults: defaults)
+        store.updateCatalogTransactionDelay(now: Date().addingTimeInterval(31))
+        XCTAssertTrue(store.catalogTransactionDelayed)
+        XCTAssertNotNil(store.pendingCatalogTransaction)
+        await store.requestCatalogCancellation()
+        XCTAssertEqual(Array(control.invocations[0].prefix(8)), ["models", "transaction", "cancel", transactionID, "--model", "local-candidate", "--expected-kind", "prepare_model"])
+        XCTAssertTrue(store.catalogTransactionCancelRequested)
+        XCTAssertNotNil(store.pendingCatalogTransaction)
+    }
+
+    @MainActor
+    func testMeasuredLocalResultAdoptsOriginalEvidenceAndOffersWithoutEconomicsDisplay() async throws {
+        let terminal = transactionEvent(state: "succeeded", sequence: 2, kind: "evaluate_model")
+        let target = "mlx-community/Qwen3-8B-4bit"
+        let initial = localProjection(prepared: true, kind: "evaluate_model")
+            .replacingOccurrences(of: "\"model_key\":\"local-candidate\"", with: "\"model_key\":\"qwen3-8b\"")
+            .replacingOccurrences(of: "local-candidate", with: target)
+        let refreshed = localProjection(prepared: true, sequence: 2, kind: "evaluate_model", adoption: true)
+            .replacingOccurrences(of: "\"model_key\":\"local-candidate\"", with: "\"model_key\":\"qwen3-8b\"")
+            .replacingOccurrences(of: "local-candidate", with: target)
+        let events = terminal.replacingOccurrences(of: "local-candidate", with: "qwen3-8b")
+        let recommendation = localRecommendationJSON()
+        let adoption = """
+        {"schema_version":"model_adoption_event.v1","type":"accepted","transaction_id":"a13c5d4c-3e4f-47ac-b72d-7f8f172747a0","target_model_id":"qwen3-8b","from_model_id":"incumbent/model","phase":null,"reason":null,"rollback_state":null}
+        {"schema_version":"model_adoption_event.v1","type":"completed","transaction_id":"a13c5d4c-3e4f-47ac-b72d-7f8f172747a0","target_model_id":"qwen3-8b","from_model_id":"incumbent/model","phase":null,"reason":null,"rollback_state":null,"config_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+        """
+        func currentProjection(_ sequence: UInt64) -> String {
+            localProjection(prepared: true, sequence: sequence)
+                .replacingOccurrences(of: "\"model_key\":\"local-candidate\"", with: "\"model_key\":\"qwen3-8b\"")
+                .replacingOccurrences(of: "local-candidate", with: target)
+                .replacingOccurrences(of: "\"is_current\":false", with: "\"is_current\":true")
+                .replacingOccurrences(of: "\"state\":\"local_only\"", with: sequence >= 4 ? "\"state\":\"offer_submitted\"" : "\"state\":\"local_only\"")
+                .replacingOccurrences(of: "\"source\":\"local_default\"", with: sequence >= 4 ? "\"source\":\"coordinator\"" : "\"source\":\"local_default\"")
+        }
+        func sequence(_ json: String, _ value: UInt64) -> String {
+            var object = try! JSONSerialization.jsonObject(with: Data(json.utf8)) as! [String: Any]
+            object["projection_sequence"] = value
+            return String(decoding: try! JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]), as: UTF8.self)
+        }
+        let cli = FakeModelCLI(results: [ok(quickProjection(initial)), ok(sequence(initial, 2)), ok(events),
+            ok(quickProjection(sequence(refreshed, 3))), ok(sequence(refreshed, 4)), ok(adoption),
+            ok("{}"), ok(quickProjection(currentProjection(5))), ok("{}"), ok(quickProjection(currentProjection(6))),
+            ok(currentProjection(7)), ok("{}"), ok(quickProjection(currentProjection(8)))])
+        let control = FakeModelCLI(results: [ok(events), ok(recommendation)])
+        let store = ModelManagementStore(cli: cli, transactionControlCLI: control, paths: testProviderPaths(), defaults: UserDefaults(suiteName: "build1-app-\(UUID())")!)
+        await store.refresh(currentModelID: "incumbent/model", peer: localPeer())
+        await store.verifyLocalFiles(try XCTUnwrap(store.rows.first))
+        await store.performCatalogAction(try XCTUnwrap(store.rows.first), confirmed: true)
+        XCTAssertTrue(cli.invocations.contains { $0[1] == "recommend-prepared" })
+        XCTAssertEqual(control.invocations[1][2], "result")
+        XCTAssertTrue(store.recommendationIsLocalActivation)
+        XCTAssertNotNil(store.recommendation)
+        XCTAssertTrue(try XCTUnwrap(store.rows.first).economicsRateLines.isEmpty)
+        XCTAssertTrue(store.canAdoptRecommendation)
+        await store.adoptRecommendation()
+        let adoptionIndex = try XCTUnwrap(cli.invocations.firstIndex { $0[1] == "adopt-recommendation" })
+        XCTAssertEqual(cli.stdinPayloads[adoptionIndex], Data((recommendation + "\n").utf8))
+        XCTAssertEqual(store.operation, .reconciling(target: "qwen3-8b"))
+        await store.refresh(currentModelID: "qwen3-8b", peer: localPeer())
+        XCTAssertEqual(store.operation, .idle)
+        XCTAssertEqual(store.currentModelID, "qwen3-8b")
+        var activated = try XCTUnwrap(store.rows.first)
+        XCTAssertEqual(activated.category, .current)
+        let before = cli.invocations.count
+        await store.requestAdmission(for: activated, confirmed: false)
+        XCTAssertEqual(cli.invocations.count, before)
+        await store.requestAdmission(for: activated, confirmed: true)
+        XCTAssertTrue(cli.invocations.contains { Array($0.prefix(5)) == ["models", "offer", target, "--yes", "--json"] })
+        activated = try XCTUnwrap(store.rows.first)
+        await store.refreshAdmission(for: activated)
+        XCTAssertTrue(cli.invocations.contains { Array($0.prefix(5)) == ["models", "admission", "status", target, "--json"] })
+        await store.verifyLocalFiles(try XCTUnwrap(store.rows.first))
+        activated = try XCTUnwrap(store.rows.first)
+        await store.requestAdmission(for: activated, confirmed: true, retry: true)
+        XCTAssertTrue(cli.invocations.contains { Array($0.prefix(6)) == ["models", "admission", "retry", target, "--yes", "--json"] })
+        XCTAssertTrue(try XCTUnwrap(store.rows.first).economicsRateLines.isEmpty)
+    }
+
+    @MainActor
+    func testProjectionReadTimeoutKeepsPendingTransactionAndAllowsLateRecovery() async throws {
+        let terminal = transactionEvent(state: "succeeded", sequence: 2)
+        let cli = FakeModelCLI(results: [ok(localProjection()), ok(terminal), ok(quickProjection(localProjection(prepared: true, sequence: 2))), ok(quickProjection(localProjection(prepared: true, sequence: 3))), ok(localProjection(prepared: true, sequence: 4))], returnDelaysNanoseconds: [nil, nil, 100_000_000, nil])
+        let control = FakeModelCLI(results: [ok(terminal), ok(terminal)])
+        let store = ModelManagementStore(cli: cli, transactionControlCLI: control, catalogReadTimeoutNanoseconds: 20_000_000, paths: testProviderPaths(), defaults: UserDefaults(suiteName: "build1-app-\(UUID())")!)
+        await store.refresh(currentModelID: "incumbent/model", peer: localPeer())
+        await store.performCatalogAction(try XCTUnwrap(store.rows.first), confirmed: true)
+        XCTAssertNotNil(store.pendingCatalogTransaction)
+        XCTAssertEqual(store.operation, .catalogTransaction)
+        try await Task.sleep(nanoseconds: 120_000_000)
+        XCTAssertNotNil(store.pendingCatalogTransaction)
+        await store.reconcileCatalogTransaction()
+        XCTAssertNil(store.pendingCatalogTransaction)
+    }
+
+    @MainActor
+    func testPreparedRecommendationRestoresAfterAppRestartThroughResultOnly() async throws {
+        let target = "mlx-community/Qwen3-8B-4bit"
+        let projection = localProjection(prepared: true, kind: "evaluate_model", adoption: true)
+            .replacingOccurrences(of: "\"model_key\":\"local-candidate\"", with: "\"model_key\":\"qwen3-8b\"")
+            .replacingOccurrences(of: "local-candidate", with: target)
+        let control = FakeModelCLI(results: [ok(localRecommendationJSON())])
+        let cli = FakeModelCLI(results: [ok(quickProjection(projection)), ok(projection.replacingOccurrences(of: "\"projection_sequence\":1", with: "\"projection_sequence\":2"))])
+        let store = ModelManagementStore(cli: cli, transactionControlCLI: control, paths: testProviderPaths(), defaults: UserDefaults(suiteName: "build1-app-\(UUID())")!)
+        await store.refresh(currentModelID: "incumbent/model", peer: localPeer())
+        await store.verifyLocalFiles(try XCTUnwrap(store.rows.first))
+        XCTAssertEqual(cli.invocations.count, 2)
+        XCTAssertEqual(Array(control.invocations[0].prefix(8)), ["models", "transaction", "result", transactionID, "--model", target, "--expected-kind", "evaluate_model"])
+        XCTAssertTrue(store.canAdoptRecommendation)
+        XCTAssertTrue(store.recommendationIsLocalActivation)
+    }
+
+    @MainActor
+    func testCleanupIsTransactionScopedAndDoesNotClaimFreshFeedAuthority() async throws {
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(localProjection(prepared: true).utf8)) as? [String: Any])
+        var action = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(availableActionJSON(kind: "cleanup_staging", timeout: 1800).utf8)) as? [String: Any])
+        action["operation_generation"] = transactionID
+        object["recoveries"] = [["target_model_id": "removed/model", "model_key": "local-candidate", "action": action]]
+        let projection = String(decoding: try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]), as: UTF8.self)
+        let terminal = transactionEvent(state: "succeeded", sequence: 2, kind: "cleanup_staging")
+        let cli = FakeModelCLI(results: [ok(quickProjection(projection)), ok(terminal), ok(quickProjection(localProjection(prepared: true, sequence: 2))), ok(localProjection(prepared: true, sequence: 3))])
+        let control = FakeModelCLI(results: [ok(terminal)])
+        let store = ModelManagementStore(cli: cli, transactionControlCLI: control, paths: testProviderPaths(), defaults: UserDefaults(suiteName: "build1-app-\(UUID())")!)
+        await store.refresh(currentModelID: "incumbent/model", peer: localPeer())
+        let recovery = try XCTUnwrap(store.cleanupRecoveries.first)
+        XCTAssertEqual(store.rows.first?.action, MalibuModelRow.Action.none)
+        XCTAssertTrue(store.cleanupConfirmation(recovery).contains("CLI-owned"))
+        XCTAssertFalse(store.cleanupConfirmation(recovery).contains("Verified signed"))
+        XCTAssertTrue(store.cleanupConfirmation(recovery).contains("unavailable"))
+        await store.performCleanupRecovery(recovery, confirmed: true)
+        let command = try XCTUnwrap(cli.invocations.dropFirst().first)
+        XCTAssertEqual(Array(command.prefix(6)), ["models", "cleanup-staging", transactionID, "--model", "removed/model", "--confirm"])
+        XCTAssertTrue(command.contains("--operation-generation"))
+        XCTAssertNil(store.pendingCatalogTransaction)
+    }
+
+    func testLocalRecommendationBindsCatalogKeyAndCanonicalTargetWithoutChangingLegacy() throws {
+        let document = try JSONDecoder().decode(MalibuRecommendationDocument.self, from: Data(localRecommendationJSON().utf8))
+        XCTAssertThrowsError(try document.validated())
+        XCTAssertNoThrow(try document.validated(localActivationTarget: "mlx-community/Qwen3-8B-4bit", localActivationModelKey: "qwen3-8b"))
+        XCTAssertThrowsError(try document.validated(localActivationTarget: "wrong/model", localActivationModelKey: "qwen3-8b"))
+        XCTAssertThrowsError(try document.validated(localActivationTarget: "mlx-community/Qwen3-8B-4bit", localActivationModelKey: "wrong-key"))
+        XCTAssertFalse(document.isActionable)
+        XCTAssertTrue(document.isEligibleForLocalActivation)
+    }
+
+    func testLocalActivationPermitsAuthenticatedFallbackButBlocksStaleOrSafetyWarnings() throws {
+        let baseline = localRecommendationJSON()
+        for (warning, eligible) in [("rate_card_fallback_used", true), ("candidate_catalog_fallback_used", true), ("rate_card_stale", false), ("catalog_artifact_feed_integrity_failure", false), ("swap_observed_under_load", false)] {
+            let json = baseline.replacingOccurrences(of: #"}],"warnings":[]}"#, with: "}],\"warnings\":[\"\(warning)\"]}")
+            let document = try JSONDecoder().decode(MalibuRecommendationDocument.self, from: Data(json.utf8)).validated(localActivationTarget: "mlx-community/Qwen3-8B-4bit", localActivationModelKey: "qwen3-8b")
+            XCTAssertEqual(document.isEligibleForLocalActivation, eligible, warning)
+            XCTAssertFalse(document.isActionable)
+        }
+    }
+
+    @MainActor
+    func testCancelledTransactionCanReconcileWhenTargetLeavesCatalog() async throws {
+        let defaults = UserDefaults(suiteName: "build1-app-\(UUID())")!
+        var pending = MalibuPendingCatalogTransaction(id: transactionID, target: "local-candidate", modelKey: "local-candidate", kind: "prepare_model", timeoutSeconds: 1800, startedAt: Date(), operationGeneration: transactionID)
+        let paths = testProviderPaths()
+        pending.pin = try await FakeModelCLI(results: []).authorizeCatalog(pending, contextDigest: String(repeating: "a", count: 64), peer: localPeer(), paths: paths)
+        try MalibuTransactionFiles.save(pending, paths: paths)
+        let empty = managedCatalogEconomicsJSON(rows: [], generatedAt: ISO8601DateFormatter().string(from: Date()))
+        let store = ModelManagementStore(cli: FakeModelCLI(results: [ok(empty)]), transactionControlCLI: FakeModelCLI(results: [ok(transactionEvent(state: "cancelled", sequence: 2))]), paths: paths, defaults: defaults)
+        await store.refresh(currentModelID: "incumbent/model", peer: localPeer())
+        XCTAssertNil(store.pendingCatalogTransaction)
+        XCTAssertEqual(store.operation, .idle)
+        XCTAssertTrue(store.statusLine.contains("cancelled"))
+        XCTAssertEqual(store.currentModelID, "incumbent/model")
+    }
+
+    private func localRecommendationJSON() -> String {
+        recommendationJSON()
+            .replacingOccurrences(of: "2026-08-09T00:00:00Z", with: ISO8601DateFormatter().string(from: Date()))
+            .replacingOccurrences(of: "\"recommended_model\":\"mlx-community/Qwen3-8B-4bit\"", with: "\"recommended_model\":\"qwen3-8b\"")
+            .replacingOccurrences(of: "\"model\":\"mlx-community/Qwen3-8B-4bit\"", with: "\"model\":\"qwen3-8b\"")
+    }
+
+    func testRecoveryClosedShapeAndGenerationRejectMalformedSelectors() throws {
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(localProjection(prepared: true).utf8)) as? [String: Any])
+        var action = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(availableActionJSON(kind: "cleanup_staging", timeout: 1800).utf8)) as? [String: Any])
+        action["operation_generation"] = transactionID
+        let recovery: [String: Any] = ["target_model_id": "removed/model", "model_key": "historic-key", "action": action]
+        for mutation in 0..<5 {
+            var invalid = recovery
+            var invalidAction = action
+            if mutation == 0 { invalidAction["operation_generation"] = "invalid" }
+            if mutation == 1 { invalidAction["transaction_kind"] = "prepare_model" }
+            if mutation == 2 { invalidAction["requires_confirmation"] = false }
+            if mutation == 3 { invalid["unknown"] = true }
+            invalid["action"] = invalidAction
+            object["recoveries"] = mutation == 4 ? [recovery, recovery] : [invalid]
+            let data = try JSONSerialization.data(withJSONObject: object)
+            XCTAssertThrowsError(try JSONDecoder().decode(MalibuModelCatalogEconomicsDocument.self, from: data).validated(localActivationNegotiated: true))
+        }
+        object["recoveries"] = [recovery]
+        let valid = try JSONDecoder().decode(MalibuModelCatalogEconomicsDocument.self, from: JSONSerialization.data(withJSONObject: object)).validated(localActivationNegotiated: true)
+        let baseline = try JSONDecoder().decode(MalibuModelCatalogEconomicsDocument.self, from: Data(localProjection(prepared: true).utf8)).validated(localActivationNegotiated: true)
+        XCTAssertEqual(valid.rowsForMalibu(currentModelID: "local-candidate", warmSwapAvailable: true), baseline.rowsForMalibu(currentModelID: "local-candidate", warmSwapAvailable: true))
+        var legacy = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(catalogEconomicsJSON(rows: []).utf8)) as? [String: Any])
+        legacy["recoveries"] = []
+        XCTAssertThrowsError(try JSONDecoder().decode(MalibuModelCatalogEconomicsDocument.self, from: JSONSerialization.data(withJSONObject: legacy)))
+    }
+
+    func testTransactionGenerationCannotCrossCleanupAttempts() throws {
+        let event = try JSONDecoder().decode(MalibuCatalogTransactionEvent.self, from: Data(transactionEvent(state: "running", sequence: 19, kind: "cleanup_staging").utf8))
+        var transcript = MalibuCatalogTransactionTranscript()
+        XCTAssertThrowsError(try transcript.consume(event, id: transactionID, kind: "cleanup_staging", modelKey: "local-candidate", generation: UUID().uuidString.lowercased()))
+        XCTAssertTrue(transcript.events.isEmpty)
+        XCTAssertTrue(try transcript.consume(event, id: transactionID, kind: "cleanup_staging", modelKey: "local-candidate", generation: transactionID))
+    }
+
+    @MainActor
+    func testAdmissionTerminalReadAndFreshOfferRemainDistinctFromRetry() async throws {
+        for state in ["revoked", "withdrawn", "offer_rejected", "offer_submitted", "sandbox_probe_only", "network_admitted_unsettled", "catalog_priced"] {
+            let projection = localProjection(prepared: true)
+                .replacingOccurrences(of: "\"state\":\"local_only\"", with: "\"state\":\"\(state)\"")
+                .replacingOccurrences(of: "\"source\":\"local_default\"", with: "\"source\":\"coordinator\"")
+            let cli = FakeModelCLI(results: [ok(quickProjection(projection)), ok(projection.replacingOccurrences(of: "\"projection_sequence\":1", with: "\"projection_sequence\":2")), .init(exitCode: 1, stdout: "", stderr: "fixture unavailable")])
+            let store = ModelManagementStore(cli: cli, paths: testProviderPaths(), defaults: UserDefaults(suiteName: "gate-\(UUID())")!)
+            await store.refresh(currentModelID: "local-candidate", peer: localPeer())
+            await store.verifyLocalFiles(try XCTUnwrap(store.rows.first))
+            let row = try XCTUnwrap(store.rows.first)
+            XCTAssertTrue(store.canRefreshAdmission(for: row), state)
+            let terminal = ["revoked", "withdrawn", "offer_rejected"].contains(state)
+            XCTAssertEqual(store.canRequestAdmission(for: row), terminal, state)
+            XCTAssertEqual(store.canRetryAdmission(for: row), !terminal, state)
+            await store.refreshAdmission(for: row)
+            XCTAssertTrue(store.canRefreshAdmission(for: row), "failed read must remain retryable")
+            XCTAssertEqual(Array(cli.invocations.last!.prefix(3)), ["models", "admission", "status"])
+        }
+    }
+
+    @MainActor
+    func testLegacyPendingDoesNotEnableOfflineControlOrNewMutation() async throws {
+        let defaults = UserDefaults(suiteName: "legacy-pin-\(UUID())")!
+        defaults.set(Data("{}".utf8), forKey: "malibu.model-management.pending-catalog")
+        let cli = FakeModelCLI(results: [ok(localProjection())])
+        let control = FakeModelCLI(results: [])
+        let store = ModelManagementStore(cli: cli, transactionControlCLI: control, paths: testProviderPaths(), defaults: defaults)
+        await store.refresh(currentModelID: "incumbent", peer: localPeer())
+        XCTAssertTrue(store.catalogPersistenceBlocked)
+        XCTAssertFalse(store.canPerformModelAction)
+        await store.requestCatalogCancellation()
+        XCTAssertTrue(control.invocations.isEmpty)
+        XCTAssertNotNil(defaults.data(forKey: "malibu.model-management.pending-catalog"))
+    }
+
+    @MainActor
+    func testPendingFileRejectsSymlinkAndCrossOperationReplacement() async throws {
+        let paths = testProviderPaths()
+        var pending = MalibuPendingCatalogTransaction(id: transactionID, target: "target", modelKey: "key", kind: "prepare_model", timeoutSeconds: 1800, startedAt: Date(), operationGeneration: transactionID)
+        pending.pin = try await FakeModelCLI(results: []).authorizeCatalog(pending, contextDigest: String(repeating: "a", count: 64), peer: localPeer(), paths: paths)
+        try MalibuTransactionFiles.save(pending, paths: paths)
+        XCTAssertEqual(try MalibuTransactionFiles.load(paths: paths), pending)
+        var other = pending
+        other.operationGeneration = UUID().uuidString.lowercased()
+        XCTAssertThrowsError(try MalibuTransactionFiles.save(other, paths: paths))
+        XCTAssertEqual(try MalibuTransactionFiles.load(paths: paths), pending)
+        let url = MalibuTransactionFiles.pendingURL(paths)
+        let saved = url.appendingPathExtension("saved")
+        try FileManager.default.moveItem(at: url, to: saved)
+        try FileManager.default.createSymbolicLink(at: url, withDestinationURL: saved)
+        XCTAssertThrowsError(try MalibuTransactionFiles.load(paths: paths))
+    }
+
+    @MainActor
+    func testControlNormalSpawnInheritsLockAndReleasesAfterExit() async throws {
+        let paths = testProviderPaths()
+        let directory = MalibuTransactionFiles.directory(paths)
+        let script = """
+        import os, fcntl, sys
+        assert os.read(198, 4096) == b'{}'
+        fcntl.flock(199, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        other = os.open(sys.argv[1], os.O_RDWR)
+        try:
+            fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            raise RuntimeError('lock was released at spawn')
+        except BlockingIOError:
+            pass
+        os.close(other)
+        print('inherited-lock-verified')
+        """
+        let result = try await MalibuBoundedCatalogProcess.run(executable: URL(fileURLWithPath: "/usr/bin/python3"), arguments: ["-c", script, directory.appendingPathComponent("control.lock").path], expectation: Data("{}".utf8), environment: ["HOME": NSHomeDirectory(), "PATH": "/usr/bin:/bin"], lockDirectory: directory, control: true, timeout: 10, resultDocument: false, onLine: { _ in })
+        XCTAssertEqual(result.exitCode, 0, result.stderr)
+        XCTAssertTrue(result.stdout.contains("inherited-lock-verified"))
+        let descriptor = open(directory.appendingPathComponent("control.lock").path, O_RDWR)
+        defer { close(descriptor) }
+        XCTAssertEqual(flock(descriptor, LOCK_EX | LOCK_NB), 0)
+    }
+
+    @MainActor
+    func testControlTimeoutAndOutputOverflowReapChildAndReleaseLock() async throws {
+        let paths = testProviderPaths()
+        let directory = MalibuTransactionFiles.directory(paths)
+        for script in ["trap '' TERM; while :; do :; done", "while :; do printf 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx' >&2; done"] {
+            let start = Date()
+            do {
+                _ = try await MalibuBoundedCatalogProcess.run(executable: URL(fileURLWithPath: "/bin/sh"), arguments: ["-c", script], expectation: Data("{}".utf8), environment: ["HOME": NSHomeDirectory(), "PATH": "/usr/bin:/bin"], lockDirectory: directory, control: true, timeout: 0.3, resultDocument: false, onLine: { _ in })
+                XCTFail("bounded helper must fail")
+            } catch { }
+            XCTAssertLessThan(Date().timeIntervalSince(start), 2)
+            let descriptor = open(directory.appendingPathComponent("control.lock").path, O_RDWR)
+            XCTAssertGreaterThanOrEqual(descriptor, 0)
+            XCTAssertEqual(flock(descriptor, LOCK_EX | LOCK_NB), 0)
+            close(descriptor)
+        }
+    }
+
+    @MainActor
+    func testControlDeadlineDoesNotWaitForDescendantOutputPipe() async throws {
+        let paths = testProviderPaths()
+        let script = """
+        import os, time
+        os.read(198, 4096)
+        if os.fork() == 0:
+            os.close(199)
+            os.close(200)
+            time.sleep(3)
+            os._exit(0)
+        os._exit(0)
+        """
+        let start = Date()
+        do {
+            _ = try await MalibuBoundedCatalogProcess.run(executable: URL(fileURLWithPath: "/usr/bin/python3"), arguments: ["-c", script], expectation: Data("{}".utf8), environment: ["HOME": NSHomeDirectory(), "PATH": "/usr/bin:/bin"], lockDirectory: MalibuTransactionFiles.directory(paths), control: true, timeout: 1.5, resultDocument: false, onLine: { _ in })
+            XCTFail("retained pipe must not keep the control alive")
+        } catch { }
+        XCTAssertGreaterThanOrEqual(Date().timeIntervalSince(start), 1.4)
+        XCTAssertLessThan(Date().timeIntervalSince(start), 2.5)
+    }
+
+    private let transactionID = "c23c5d4c-3e4f-47ac-b72d-7f8f172747a0"
+    private func transactionEvent(state: String, sequence: UInt64, kind: String = "prepare_model") -> String {
+        let progress = ["running", "cancel_requested"].contains(state) ? #"{"stage_label_key":"preparing","heartbeat":true}"# : "null"
+        return """
+        {"schema":"model_catalog_transaction_event.v1","transaction_id":"\(transactionID)","transaction_kind":"\(kind)","operation_generation":"\(transactionID)","model_key":"local-candidate","event_sequence":\(sequence),"emitted_at":"2026-09-10T00:00:00Z","state":"\(state)","progress":\(progress),"error_code":null,"warning_code":null}
+        """
+    }
+    @MainActor
+    func testCatalogReadCapabilityMatrixNeverProbesUnsupportedCLI() async throws {
+        let supported = localPeer()
+        let variants = [
+            peer(for: MalibuModelCapabilityManifest.catalogEconomics),
+            peer(for: MalibuModelCapabilityManifest.readySwitch),
+            peer(capabilities: supported.capabilities.subtracting([MalibuModelCapabilityManifest.catalogReadLifecycle]), binaryVersion: "1.8.123"),
+            peer(capabilities: supported.capabilities.subtracting([MalibuModelCapabilityManifest.localActivation]), binaryVersion: "1.8.123"),
+            peer(capabilities: supported.capabilities, binaryVersion: "1.8.90"), .unavailable
+        ]
+        for variant in variants {
+            let cli = FakeModelCLI(results: [ok(localProjection())])
+            let store = ModelManagementStore(cli: cli, paths: testProviderPaths(), defaults: UserDefaults(suiteName: "read-matrix-\(UUID())")!)
+            await store.refresh(currentModelID: "incumbent/model", peer: variant)
+            XCTAssertTrue(cli.invocations.isEmpty)
+            XCTAssertTrue(store.rows.isEmpty)
+            XCTAssertFalse(store.canPerformModelAction)
+            XCTAssertFalse(store.catalogProjectionRetryAvailable)
+            XCTAssertEqual(store.listState, .viewOnly)
+        }
+        let cli = FakeModelCLI(results: [ok(localProjection())])
+        let store = ModelManagementStore(cli: cli, paths: testProviderPaths(), defaults: UserDefaults(suiteName: "read-positive-\(UUID())")!)
+        await store.refresh(currentModelID: "incumbent/model", peer: supported)
+        XCTAssertEqual(cli.invocations.count, 1)
+        XCTAssertTrue(cli.invocations[0].contains("--app-read-request"))
+        XCTAssertFalse(cli.invocations[0].contains("--ctl-socket-path"))
+    }
+
+    @MainActor
+    func testQuickProjectionCannotAdvertiseVerifiedBytes() async throws {
+        let cli = FakeModelCLI(results: [ok(localProjection(prepared: true, kind: "evaluate_model"))])
+        let store = ModelManagementStore(cli: cli, paths: testProviderPaths(), defaults: UserDefaults(suiteName: "read-truth-\(UUID())")!)
+        await store.refresh(currentModelID: "incumbent/model", peer: localPeer())
+        XCTAssertTrue(store.rows.isEmpty)
+        XCTAssertEqual(store.listState, .unavailable)
+    }
+
+    func testCatalogReadTranscriptRequiresExactCompleteCurrentProjection() throws {
+        let read = MalibuCatalogRead(mode: .verify, target: "local-candidate", modelKey: "local-candidate", context: String(repeating: "a", count: 64))
+        let accepted = try readEvent(read, kind: "accepted", sequence: 1, bytes: 0)
+        let completed = try readEvent(read, kind: "completed", sequence: 2, bytes: 123, projection: localProjection(prepared: true))
+        var transcript = MalibuCatalogReadTranscript()
+        try transcript.consume(accepted, read: read)
+        try transcript.consume(completed, read: read)
+        XCTAssertNotNil(transcript.projection)
+        XCTAssertThrowsError(try transcript.consume(completed, read: read))
+        for bad in [
+            String(decoding: accepted, as: UTF8.self).replacingOccurrences(of: read.id, with: UUID().uuidString.lowercased()),
+            String(decoding: accepted, as: UTF8.self).replacingOccurrences(of: "\"event_sequence\":1", with: "\"event_sequence\":2"),
+            String(decoding: accepted, as: UTF8.self).replacingOccurrences(of: "\"bytes_completed\":0", with: "\"bytes_completed\":1"),
+            String(decoding: accepted, as: UTF8.self).replacingOccurrences(of: "\"schema\":", with: "\"unexpected\":null,\"schema\":"),
+            String(decoding: accepted, as: UTF8.self).replacingOccurrences(of: "\"schema\":", with: "\"schema\":\"duplicate\",\"schema\":")
+        ] {
+            var rejected = MalibuCatalogReadTranscript()
+            XCTAssertThrowsError(try rejected.consume(Data(bad.utf8), read: read))
+        }
+        var incomplete = MalibuCatalogReadTranscript()
+        try incomplete.consume(accepted, read: read)
+        XCTAssertThrowsError(try incomplete.consume(readEvent(read, kind: "completed", sequence: 2, bytes: 10, projection: quickProjection(localProjection(prepared: true))), read: read))
+    }
+
+    @MainActor
+    func testOwnedReadTimeoutRetainsSlotUntilExactTermIgnoringChildIsReaped() async throws {
+        let executable = try compileReadFixture("signal(SIGTERM,SIG_IGN); for (;;) pause();")
+        let paths = testProviderPaths(), owner = ReadFixtureChild(), runner = MalibuCatalogReadRunner()
+        do {
+            _ = try await runner.run(read: .init(mode: .quick), paths: paths, timeout: 0.15,
+                resolve: { executable }, onSpawn: { _, pid in owner.set(pid) }, progress: { _ in })
+            XCTFail("The real child must time out")
+        } catch {}
+        XCTAssertTrue(runner.isBusy)
+        let pid = owner.get()
+        XCTAssertGreaterThan(pid, 0)
+        XCTAssertThrowsError(try MalibuCatalogReadRunner.openLock(paths: paths))
+        do {
+            _ = try await runner.run(read: .init(mode: .quick), paths: paths, resolve: { executable }, progress: { _ in })
+            XCTFail("Replacement must not overlap")
+        } catch {}
+        for _ in 0..<100 where runner.isBusy { try await Task.sleep(nanoseconds: 20_000_000) }
+        XCTAssertFalse(runner.isBusy)
+        var status: Int32 = 0
+        XCTAssertEqual(waitpid(pid, &status, WNOHANG), -1)
+        XCTAssertEqual(errno, ECHILD)
+        let lock = try MalibuCatalogReadRunner.openLock(paths: paths); close(lock)
+    }
+
+    @MainActor
+    func testOwnedVerificationContinuesMeasuredProgressBeyondTenSeconds() async throws {
+        let read = MalibuCatalogRead(mode: .verify, target: "local-candidate", modelKey: "local-candidate", context: String(repeating: "a", count: 64))
+        var body = "puts(\(cString(try readEvent(read, kind: "accepted", sequence: 1, bytes: 0)))); fflush(stdout);\n"
+        for index in 1...20 {
+            body += "usleep(1000000); puts(\(cString(try readEvent(read, kind: "progress", sequence: UInt64(index + 1), bytes: UInt64(index))))); fflush(stdout);\n"
+        }
+        body += "puts(\(cString(try readEvent(read, kind: "completed", sequence: 22, bytes: 20, projection: localProjection(prepared: true))))); fflush(stdout); return 0;"
+        let executable = try compileReadFixture(body), runner = MalibuCatalogReadRunner(), owner = ReadFixtureChild()
+        let start = Date()
+        var updates: [UInt64] = []
+        let result = try await runner.run(read: read, paths: testProviderPaths(), timeout: 30,
+            resolve: { executable }, onSpawn: { _, pid in owner.set(pid) }, progress: { updates.append($0.bytes) })
+        XCTAssertGreaterThan(Date().timeIntervalSince(start), 20)
+        XCTAssertEqual(result.exitCode, 0)
+        XCTAssertEqual(updates.max(), 20)
+        XCTAssertFalse(runner.isBusy)
+        XCTAssertTrue(result.stdout.contains("verified"))
+        var status: Int32 = 0
+        XCTAssertEqual(waitpid(owner.get(), &status, WNOHANG), -1)
+        XCTAssertEqual(errno, ECHILD)
+    }
+
+    func testLocalVerificationCannotGrantAuthorityToIncompleteOrInvalidRows() throws {
+        let verified = localProjection(prepared: true, kind: "evaluate_model")
+        let document = try JSONDecoder().decode(MalibuModelCatalogEconomicsDocument.self, from: Data(verified.utf8)).validated(localActivationNegotiated: true)
+        XCTAssertTrue(document.hasVerifiedLocalTarget("local-candidate", modelKey: "local-candidate"))
+        for state in ["not_applicable", "missing", "unverified", "incomplete", "invalid"] {
+            let bad = verified.replacingOccurrences(of: "\"state\":\"verified\"", with: "\"state\":\"\(state)\"")
+            let rejected = try JSONDecoder().decode(MalibuModelCatalogEconomicsDocument.self, from: Data(bad.utf8)).validated(localActivationNegotiated: true)
+            XCTAssertFalse(rejected.hasVerifiedLocalTarget("local-candidate", modelKey: "local-candidate"))
+            XCTAssertTrue(rejected.rowsForMalibu(currentModelID: nil, warmSwapAvailable: true).allSatisfy { $0.action == .none })
+        }
+        let read = MalibuCatalogRead(mode: .verify, target: "local-candidate", modelKey: "local-candidate", context: String(repeating: "a", count: 64))
+        for invalid in [verified.replacingOccurrences(of: "\"fit\":\"fits\"", with: "\"fit\":\"future_fit\""),
+                        verified.replacingOccurrences(of: "\"model_key\":\"local-candidate\"", with: "\"model_key\":\"other-key\"")] {
+            var transcript = MalibuCatalogReadTranscript()
+            try transcript.consume(readEvent(read, kind: "accepted", sequence: 1, bytes: 0), read: read)
+            XCTAssertThrowsError(try transcript.consume(readEvent(read, kind: "completed", sequence: 2, bytes: 1, projection: invalid), read: read))
+        }
+        for state in ["unverified", "incomplete"] {
+            let honest = quickProjection(verified).replacingOccurrences(of: "\"state\":\"unverified\"", with: "\"state\":\"\(state)\"")
+            let rows = try JSONDecoder().decode(MalibuModelCatalogEconomicsDocument.self, from: Data(honest.utf8)).validated(localActivationNegotiated: true).rowsForMalibu(currentModelID: nil, warmSwapAvailable: true)
+            let row = try XCTUnwrap(rows.first)
+            XCTAssertTrue(row.needsLocalVerification)
+            XCTAssertEqual(row.blockReason, "Local files need verification")
+            XCTAssertFalse(row.weightsPresentLocally)
+            XCTAssertNil(row.catalogTransaction)
+        }
+    }
+
+    func testCatalogReadLivenessSeparatesHeartbeatFromByteProgress() {
+        let second: UInt64 = 1_000_000_000
+        var state = MalibuCatalogReadLiveness(started: 0)
+        XCTAssertFalse(state.expired(now: 10 * second - 1))
+        XCTAssertTrue(state.expired(now: 10 * second))
+        state.observe(bytes: 0, now: second)
+        XCTAssertFalse(state.expired(now: 16 * second - 1))
+        XCTAssertTrue(state.expired(now: 16 * second))
+        state.observe(bytes: 1, now: 2 * second)
+        for time in stride(from: UInt64(5), through: 60, by: 5) {
+            state.observe(bytes: 1, now: time * second)
+        }
+        XCTAssertFalse(state.expired(now: 62 * second - 1))
+        XCTAssertTrue(state.expired(now: 62 * second))
+        state.observe(bytes: 2, now: 62 * second)
+        XCTAssertFalse(state.expired(now: 62 * second))
+    }
+
+    @MainActor
+    func testAbandonedReadPreflightNeverSpawnsOrReleasesSlotEarly() async throws {
+        let executable = try compileReadFixture("return 0;")
+        let runner = MalibuCatalogReadRunner(), child = ReadFixtureChild(), paths = testProviderPaths()
+        do {
+            _ = try await runner.run(read: .init(mode: .quick), paths: paths, timeout: 0.03,
+                resolve: { usleep(250_000); return executable }, onSpawn: { _, pid in child.set(pid) }, progress: { _ in XCTFail("late callback") })
+            XCTFail("deadline must abandon preflight")
+        } catch {}
+        XCTAssertTrue(runner.isBusy)
+        XCTAssertEqual(child.get(), 0)
+        for _ in 0..<30 where runner.isBusy { try await Task.sleep(nanoseconds: 20_000_000) }
+        XCTAssertFalse(runner.isBusy)
+        XCTAssertEqual(child.get(), 0)
+        let lease = try MalibuCatalogReadRunner.openLock(paths: paths); close(lease)
+    }
+
+    @MainActor
+    func testOwnedQuickReadDefaultDeadlineRejectsLateValidProjection() async throws {
+        let executable = try compileReadFixture("usleep(11000000); puts(\(cString(Data(localProjection().utf8)))); return 0;")
+        let cli = OwnedCatalogFixtureCLI(executable: executable)
+        let store = ModelManagementStore(cli: cli, paths: testProviderPaths(), defaults: UserDefaults(suiteName: "read-late-\(UUID())")!)
+        let start = Date()
+        await store.refresh(currentModelID: "incumbent/model", peer: localPeer())
+        XCTAssertGreaterThanOrEqual(Date().timeIntervalSince(start), 9.9)
+        XCTAssertLessThan(Date().timeIntervalSince(start), 12)
+        for _ in 0..<100 where cli.catalogReadIsBusy { try await Task.sleep(nanoseconds: 20_000_000) }
+        XCTAssertFalse(cli.catalogReadIsBusy)
+        XCTAssertTrue(store.rows.isEmpty)
+        XCTAssertEqual(store.listState, .unavailable)
+        XCTAssertEqual(store.currentModelID, "incumbent/model")
+        XCTAssertEqual(cli.spawned.get().count, 1)
+    }
+
+    @MainActor
+    func testOwnedVerificationRejectsMalformedTrailingNonzeroAndOversizedOutput() async throws {
+        let read = MalibuCatalogRead(mode: .verify, target: "local-candidate", modelKey: "local-candidate", context: String(repeating: "a", count: 64))
+        let accepted = try readEvent(read, kind: "accepted", sequence: 1, bytes: 0)
+        let completed = try readEvent(read, kind: "completed", sequence: 2, bytes: 10, projection: localProjection(prepared: true))
+        let good = "puts(\(cString(accepted))); puts(\(cString(completed))); fflush(stdout);"
+        let cases = [
+            "fputs(\(cString(accepted)), stdout); return 0;", // incomplete JSONL frame
+            "puts(\(cString(accepted))); puts(\(cString(accepted))); return 0;", // repeated sequence
+            good + "return 7;",
+            good + "puts(\(cString(accepted))); return 0;",
+            "puts(\(cString(accepted))); for(int i=0;i<1048577;i++) putchar('a'); fflush(stdout); return 0;",
+            "puts(\(cString(accepted))); for(int i=0;i<65537;i++) fputc('a',stderr); fflush(stderr); return 0;",
+            "puts(\(cString(accepted))); puts(\(cString(Data(String(decoding: completed, as: UTF8.self).replacingOccurrences(of: read.id, with: UUID().uuidString.lowercased()).utf8)))); return 0;"
+        ]
+        for body in cases {
+            let runner = MalibuCatalogReadRunner(), child = ReadFixtureChild(), executable = try compileReadFixture(body)
+            do {
+                _ = try await runner.run(read: read, paths: testProviderPaths(), timeout: 2,
+                    resolve: { executable }, onSpawn: { _, pid in child.set(pid) }, progress: { _ in })
+                XCTFail("unsafe output must not produce readiness")
+            } catch {}
+            for _ in 0..<100 where runner.isBusy { try await Task.sleep(nanoseconds: 20_000_000) }
+            XCTAssertFalse(runner.isBusy)
+            var status: Int32 = 0
+            XCTAssertEqual(waitpid(child.get(), &status, WNOHANG), -1)
+            XCTAssertEqual(errno, ECHILD)
+        }
+    }
+
+    @MainActor
+    func testActualCatalogCallerCapturesSpawnArgumentsForCLIParserBridge() async throws {
+        let repository = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let directory = repository.appendingPathComponent(".omx/qualification/catalog-read")
+        let input = directory.appendingPathComponent("input.json")
+        guard FileManager.default.fileExists(atPath: input.path) else { throw XCTSkip("CLI signed fixture input has not been produced") }
+        let values = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: input)) as? [String: Any])
+        func string(_ key: String) throws -> String { try XCTUnwrap(values[key] as? String, key) }
+        let quick = try string("quick_projection"), verified = try string("verified_projection"), recommendation = try string("recommendation_json")
+        let target = try string("target_model_id"), key = try string("model_key"), context = try string("context_sha256")
+        let read = MalibuCatalogRead(mode: .verify, id: "11111111-1111-4111-8111-111111111111", target: target, modelKey: key, context: context)
+        func printEvent(_ data: Data) -> String {
+            let parts = String(decoding: data, as: UTF8.self).components(separatedBy: read.id)
+            precondition(parts.count == 2)
+            return "fputs(\(cString(Data(parts[0].utf8))),stdout); fputs(request,stdout); puts(\(cString(Data(parts[1].utf8))));"
+        }
+        let body = """
+        char *mode="", *request="";
+        for(int i=1;i+1<argc;i++) { if(strcmp(argv[i],"--app-read-mode")==0)mode=argv[i+1]; if(strcmp(argv[i],"--app-read-request")==0)request=argv[i+1]; }
+        if(strcmp(mode,"quick")==0) { puts(\(cString(Data(quick.utf8)))); }
+        else if(strcmp(mode,"result")==0) { puts(\(cString(Data(recommendation.utf8)))); }
+        else if(strcmp(mode,"verify")==0) {
+            \(printEvent(try readEvent(read, kind: "accepted", sequence: 1, bytes: 0)))
+            \(printEvent(try readEvent(read, kind: "completed", sequence: 2, bytes: 1, projection: verified)))
+        } else return 9;
+        return 0;
+        """
+        let executable = try compileReadFixture(body), cli = OwnedCatalogFixtureCLI(executable: executable)
+        let home = URL(fileURLWithPath: try string("home"))
+        let support = home.appendingPathComponent("Library/Application Support/Malibu")
+        let paths = ProviderPaths(configFile: URL(fileURLWithPath: try string("config_path")), controlSocket: home.appendingPathComponent("fixture.sock"), cliLogFile: home.appendingPathComponent("cli.log"), launchdStdoutLog: home.appendingPathComponent("out.log"), launchdStderrLog: home.appendingPathComponent("err.log"), appSupport: support, appMarkerFile: support.appendingPathComponent("marker"), onboardingStateFile: support.appendingPathComponent("onboarding.json"), downloadsDirectory: support.appendingPathComponent("Downloads"))
+        let store = ModelManagementStore(cli: cli, transactionControlCLI: cli, paths: paths, defaults: UserDefaults(suiteName: "read-bridge-\(UUID())")!)
+        await store.refresh(currentModelID: "incumbent/model", peer: localPeer())
+        let row = try XCTUnwrap(store.rows.first(where: { $0.id == target }))
+        XCTAssertTrue(row.needsLocalVerification)
+        await store.verifyLocalFiles(row)
+        XCTAssertNotNil(store.recommendation, store.recommendationLine ?? store.statusLine)
+        XCTAssertTrue(store.recommendationIsLocalActivation)
+        let arrays = cli.spawned.get()
+        XCTAssertEqual(arrays.count, 3)
+        var artifact: [String: Any] = ["schema": "malibu_catalog_read_argv_fixture.v1"]
+        for name in ["quick", "verify", "result"] {
+            let arguments = try XCTUnwrap(arrays.first { args in args.firstIndex(of: "--app-read-mode").map { args[$0 + 1] == name } == true })
+            XCTAssertFalse(arguments.contains("--ctl-socket-path"))
+            artifact[name] = arguments
+        }
+        for name in ["config_path", "target_model_id", "model_key", "context_sha256", "transaction_id", "operation_generation"] { artifact[name] = try string(name) }
+        try JSONSerialization.data(withJSONObject: artifact, options: [.prettyPrinted, .sortedKeys]).write(to: directory.appendingPathComponent("app-argv.json"), options: .atomic)
+    }
+
+    private func readEvent(_ read: MalibuCatalogRead, kind: String, sequence: UInt64, bytes: UInt64, projection: String? = nil) throws -> Data {
+        let document: Any = try projection.map { try JSONSerialization.jsonObject(with: Data($0.utf8)) } ?? NSNull()
+        return try JSONSerialization.data(withJSONObject: ["schema":"model_catalog_read_event.v1", "request_id":read.id,
+            "event_sequence":sequence, "target_model_id":read.target!, "model_key":read.modelKey!, "kind":kind,
+            "bytes_completed":bytes, "error_code":NSNull(), "projection":document], options: [.sortedKeys])
+    }
+    private func cString(_ data: Data) -> String { String(decoding: try! JSONEncoder().encode(String(decoding: data, as: UTF8.self)), as: UTF8.self) }
+    private func compileReadFixture(_ body: String) throws -> URL {
+        let root = FileManager.default.temporaryDirectory.resolvingSymlinksInPath().appendingPathComponent("catalog-reader-\(UUID())")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+        let source = root.appendingPathComponent("reader.c"), binary = root.appendingPathComponent("reader")
+        try Data(("#include <stdio.h>\n#include <unistd.h>\n#include <signal.h>\n#include <string.h>\nint main(int argc, char **argv) {" + body + "}\n").utf8).write(to: source)
+        let compiler = Process(); compiler.executableURL = URL(fileURLWithPath: "/usr/bin/clang")
+        compiler.arguments = [source.path, "-o", binary.path]; compiler.standardOutput = FileHandle.nullDevice; compiler.standardError = FileHandle.nullDevice
+        try compiler.run(); compiler.waitUntilExit()
+        XCTAssertEqual(compiler.terminationStatus, 0)
+        return binary
+    }
+
+    private func ok(_ output: String) -> ModelCLIResult { ModelCLIResult(exitCode: 0, stdout: output, stderr: "") }
+    private func localPeer() -> MalibuModelPeerEvidence {
+        peer(for: [MalibuModelCapabilityManifest.catalogEconomics, MalibuModelCapabilityManifest.catalogTransactions, MalibuModelCapabilityManifest.localActivation, MalibuModelCapabilityManifest.recommendationAdoption, MalibuModelCapabilityManifest.catalogReadLifecycle])
+    }
+    private func localProjection(prepared: Bool = false, sequence: UInt64 = 1, kind: String = "prepare_model", adoption: Bool = false) -> String {
+        var row = localOnlyBYOMRowJSON()
+            .replacingOccurrences(of: "\"weights_present_locally\":true", with: "\"weights_present_locally\":\(prepared)")
+            .replacingOccurrences(of: "\"runtime_state\":\"ready\"", with: "\"runtime_state\":\"\(prepared ? "ready" : "needs_preparation")\"")
+        row = row.replacingOccurrences(of: "\"model_key\":", with: "\"local_verification\":{\"state\":\"\(prepared ? "verified" : "missing")\"},\"model_key\":")
+        let field = kind == "evaluate_model" ? "evaluate" : "prepare"
+        if !prepared || kind == "evaluate_model" {
+            row = row.replacingOccurrences(of: "\"\(field)\":\(Self.unavailableActionJSON())", with: "\"\(field)\":\(availableActionJSON(kind: kind, timeout: 1800))")
+        }
+        if adoption {
+            row = row.replacingOccurrences(of: "\"adopt_recommendation\":\(Self.unavailableActionJSON())", with: "\"adopt_recommendation\":\(availableActionJSON(kind: "adopt_recommendation", timeout: 1800))")
+        }
+        return catalogEconomicsJSON(rows: [row], generatedAt: ISO8601DateFormatter().string(from: Date()), projectionSequence: sequence)
+            .replacingOccurrences(of: "\"projection_protocol_version\":\"1\"", with: "\"projection_protocol_version\":\"2\"")
+            .replacingOccurrences(of: "\"rate_card_max_age_seconds\":604800", with: "\"rate_card_max_age_seconds\":604800,\"transaction_context_sha256\":\"" + String(repeating: "a", count: 64) + "\"")
+            .replacingOccurrences(of: "\"transaction_id\":null", with: "\"operation_generation\":null,\"transaction_id\":null")
+            .replacingOccurrences(of: "\"transaction_id\":\"\(transactionID)\"", with: "\"operation_generation\":\"\(transactionID)\",\"transaction_id\":\"\(transactionID)\"")
+    }
+
+    private func managedCatalogEconomicsJSON(rows: [String], generatedAt: String = "2026-08-09T00:00:00Z", rateCardSource: String = "live_signed", projectionSequence: UInt64 = 1) -> String {
+        var object = try! JSONSerialization.jsonObject(with: Data(catalogEconomicsJSON(rows: rows.filter { !$0.contains("\"source\":\"local_default\"") }, generatedAt: generatedAt, rateCardSource: rateCardSource, projectionSequence: projectionSequence).utf8)) as! [String: Any]
+        var source = object["source"] as! [String: Any]
+        source["projection_protocol_version"] = "2"
+        source["transaction_context_sha256"] = String(repeating: "a", count: 64)
+        object["source"] = source
+        object["rows"] = (object["rows"] as! [[String: Any]]).map { input in
+            var row = input
+            row["local_verification"] = ["state": "not_applicable"]
+            for key in ["switch", "prepare", "evaluate", "adopt_recommendation", "cleanup_staging"] {
+                var action = row[key] as! [String: Any]
+                action["operation_generation"] = key == "switch" ? NSNull() : action["transaction_id"]
+                row[key] = action
+            }
+            return row
+        }
+        return String(decoding: try! JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]), as: UTF8.self)
+    }
+    private func quickProjection(_ verified: String) -> String {
+        var document = try! JSONSerialization.jsonObject(with: Data(verified.utf8)) as! [String: Any]
+        document["rows"] = (document["rows"] as! [[String: Any]]).map { input in
+            var row = input
+            if (row["local_verification"] as? [String: String])?["state"] == "verified" {
+                row["local_verification"] = ["state": "unverified"]; row["weights_present_locally"] = false
+                row["runtime_state"] = row["is_current"] as? Bool == true ? "current" : "verification_required"
+                row["disabled_reason"] = "local_verification_required"
+                var disabled = try! JSONSerialization.jsonObject(with: Data(Self.unavailableActionJSON().utf8)) as! [String: Any]
+                disabled["operation_generation"] = NSNull(); disabled["unavailable_reason"] = "local_verification_required"
+                for action in ["prepare", "evaluate", "adopt_recommendation", "switch"] { row[action] = disabled }
+            }
+            return row
+        }
+        return String(decoding: try! JSONSerialization.data(withJSONObject: document, options: [.sortedKeys]), as: UTF8.self)
+    }
+
     private func catalogEconomicsJSON(
         rows: [String],
         generatedAt: String = "2026-08-09T00:00:00Z",
@@ -1873,7 +2684,9 @@ final class ModelManagementTests: XCTestCase {
         let manifest = MalibuModelCapabilityManifest.checkedIn
         var declaredCapabilities = Set<String>()
         var binaryVersion: String?
-        for capability in capabilities {
+        let effective = capabilities.contains(MalibuModelCapabilityManifest.catalogEconomics)
+            ? Array(Set(capabilities + [MalibuModelCapabilityManifest.catalogReadLifecycle, MalibuModelCapabilityManifest.catalogTransactions, MalibuModelCapabilityManifest.localActivation, MalibuModelCapabilityManifest.recommendationAdoption, MalibuModelCapabilityManifest.readySwitch])) : capabilities
+        for capability in effective {
             let tier = manifest.tiers[capability]!
             declaredCapabilities.formUnion(tier.localStatusCapabilities)
             declaredCapabilities.formUnion(tier.commandSchemas)
@@ -1901,7 +2714,7 @@ final class ModelManagementTests: XCTestCase {
     }
 
     private func testProviderPaths() -> ProviderPaths {
-        let root = FileManager.default.temporaryDirectory
+        let root = FileManager.default.temporaryDirectory.resolvingSymlinksInPath()
             .appendingPathComponent("malibu-model-management-tests-\(UUID().uuidString)", isDirectory: true)
         return ProviderPaths(
             configFile: root.appendingPathComponent("config.yaml"),
@@ -1988,12 +2801,39 @@ private enum ModelTestTimestamp {
 @MainActor
 private final class FakeModelCLI: MalibuModelCLIRunning {
     var invocations: [[String]] = []
+    var stdinPayloads: [Data?] = []
     private var results: [ModelCLIResult]
     private let returnDelaysNanoseconds: [UInt64?]
 
     init(results: [ModelCLIResult], returnDelaysNanoseconds: [UInt64?] = []) {
         self.results = results
         self.returnDelaysNanoseconds = returnDelaysNanoseconds
+    }
+
+    func readCatalog(_ read: MalibuCatalogRead, paths: ProviderPaths, peer: MalibuModelPeerEvidence, timeout: TimeInterval,
+                     progress: @escaping @MainActor @Sendable (MalibuCatalogReadProgress) -> Void) async throws -> ModelCLIResult {
+        let result = try await run(arguments: read.arguments(paths: paths), peer: peer, stdinData: nil, priority: .interactive, onLine: { _ in })
+        if invocations.count <= returnDelaysNanoseconds.count,
+           let delay = returnDelaysNanoseconds[invocations.count - 1], Double(delay) / 1_000_000_000 >= timeout { throw ModelManagementError.invalidCatalog }
+        return result
+    }
+    // State-machine tests fake native resource custody. Resource tests exercise
+    // the production clear path with explicit fixture identity verification.
+    func finishCatalog(_ pending: MalibuPendingCatalogTransaction, paths: ProviderPaths) async throws {
+        try MalibuTransactionFiles.save(nil, paths: paths)
+    }
+    func authorizeCatalog(_ pending: MalibuPendingCatalogTransaction, contextDigest: String, peer: MalibuModelPeerEvidence, paths: ProviderPaths) async throws -> MalibuTransactionPin {
+        let pin = MalibuTransactionPin(code: .init(cdHash: Data([1]), identifier: "fixture", team: "fixture"), configuredPath: "/fixture", binaryVersion: "1.8.90", capabilities: peer.capabilities,
+            manifestDigest: MalibuModelCapabilityManifest.checkedIn.controlDigest,
+            context: .init(transactionContextSHA256: contextDigest, configPath: paths.configFile.path, configDevice: 1, configInode: 1, configSize: 1, configSHA256: String(repeating: "a", count: 64), uid: UInt64(getuid()), homeDirectory: NSHomeDirectory()), inventory: fixturePayloadInventory())
+        var saved = pending; saved.pin = pin
+        try MalibuTransactionFiles.save(saved, paths: paths)
+        return pin
+    }
+    func runCatalog(_ pending: MalibuPendingCatalogTransaction, control: MalibuCatalogControl?, peer: MalibuModelPeerEvidence?, paths: ProviderPaths,
+                    onLine: @escaping @MainActor @Sendable (String) -> Void) async throws -> ModelCLIResult {
+        if control == .cancel { try MalibuTransactionFiles.save(pending, paths: paths) }
+        return try await run(arguments: pending.arguments(control: control, paths: paths), peer: peer, stdinData: nil, priority: .interactive, onLine: onLine)
     }
 
     func run(
@@ -2005,6 +2845,7 @@ private final class FakeModelCLI: MalibuModelCLIRunning {
     ) async throws -> ModelCLIResult {
         let invocationIndex = invocations.count
         invocations.append(arguments)
+        stdinPayloads.append(stdinData)
         guard !results.isEmpty else {
             return ModelCLIResult(exitCode: 1, stdout: "", stderr: "missing fake result")
         }
@@ -2017,5 +2858,406 @@ private final class FakeModelCLI: MalibuModelCLIRunning {
             onLine(String(line))
         }
         return result
+    }
+}
+
+private func fixturePayloadInventory() -> MalibuPayloadInventory {
+    let names = MalibuTransactionPayload.requiredFiles.union(MalibuTransactionPayload.localFiles.map { "compatibility-set-local/" + $0 }).union(MalibuTransactionPayload.catalogFiles.map { "catalog-release/" + $0 }).union(["swift-nio_NIOPosix.bundle/PrivacyInfo.xcprivacy", "swift-nio_NIOPosix.bundle/Info.plist"])
+    return .init(files: names.sorted().map { .init(relativePath: $0, size: 1, sha256: String(repeating: "a", count: 64)) }, directories: ["catalog-release", "compatibility-set-local", "swift-nio_NIOPosix.bundle"])
+}
+
+final class ModelTransactionResourceTests: XCTestCase {
+    private func root() throws -> URL {
+        let url = FileManager.default.temporaryDirectory.resolvingSymlinksInPath().appendingPathComponent("malibu-resource-" + UUID().uuidString.lowercased())
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        addTeardownBlock { try? FileManager.default.removeItem(at: url) }
+        return url
+    }
+    private func fixture(_ parent: URL, name: String = "source") throws -> URL {
+        let source = parent.appendingPathComponent(name)
+        try FileManager.default.createDirectory(at: source, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        for directory in fixturePayloadInventory().directories {
+            try FileManager.default.createDirectory(at: source.appendingPathComponent(directory), withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        }
+        for file in fixturePayloadInventory().files {
+            let url = source.appendingPathComponent(file.relativePath)
+            let data = file.relativePath.hasSuffix("Info.plist")
+                ? try PropertyListSerialization.data(fromPropertyList: ["CFBundleIdentifier": "fixture.resources"], format: .xml, options: 0)
+                : Data("fixture".utf8)
+            try data.write(to: url)
+            try FileManager.default.setAttributes([.posixPermissions: file.relativePath == "macprovider-cli" ? 0o700 : 0o600], ofItemAtPath: url.path)
+        }
+        return source
+    }
+    func testResourceCaptureCopiesOnlyCompleteNamedClosure() throws {
+        let parent = try root(), source = try fixture(parent), destination = parent.appendingPathComponent("payload")
+        try Data("untouched".utf8).write(to: source.appendingPathComponent("unrelated-operator-data"))
+        let before = try MalibuTransactionPayload.scan(source, source: true)
+        try MalibuTransactionPayload.copy(source: source, destination: destination, scan: before, request: MalibuTransactionRequest(timeout: 10))
+        XCTAssertEqual(try MalibuTransactionPayload.scan(destination, source: false).inventory, before.inventory)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: destination.appendingPathComponent("unrelated-operator-data").path))
+        try FileManager.default.removeItem(at: destination.appendingPathComponent("mlx.metallib"))
+        XCTAssertThrowsError(try MalibuTransactionPayload.scan(destination, source: false))
+        XCTAssertNoThrow(try MalibuTransactionPayload.scan(destination, source: false, complete: false))
+    }
+    func testSourceMutationCannotCompleteFrozenCopy() throws {
+        let parent = try root(), source = try fixture(parent)
+        let before = try MalibuTransactionPayload.scan(source, source: true)
+        try Data("changed".utf8).write(to: source.appendingPathComponent("mlx.metallib"))
+        XCTAssertThrowsError(try MalibuTransactionPayload.copy(source: source, destination: parent.appendingPathComponent("partial"), scan: before, request: MalibuTransactionRequest(timeout: 10)))
+        if FileManager.default.fileExists(atPath: parent.appendingPathComponent("partial").path) {
+            XCTAssertNoThrow(try MalibuTransactionPayload.removePartial(parent.appendingPathComponent("partial"), checkAbsent: {}))
+        }
+    }
+    func testInterruptedCopyAtEveryMemberRemainsDeletionOnly() throws {
+        let parent = try root(), source = try fixture(parent), observed = try MalibuTransactionPayload.scan(source, source: true)
+        for index in 1...observed.inventory.files.count {
+            let counter = ResourceWriteCounter(stop: index)
+            let request = MalibuTransactionRequest(timeout: 10, afterPayloadWrite: { counter.didWrite($0) })
+            let destination = parent.appendingPathComponent("partial-\(index)")
+            XCTAssertThrowsError(try MalibuTransactionPayload.copy(source: source, destination: destination, scan: observed, request: request))
+            XCTAssertNoThrow(try MalibuTransactionPayload.removePartial(destination, checkAbsent: {}))
+            XCTAssertFalse(FileManager.default.fileExists(atPath: destination.path))
+        }
+    }
+    func testRetirementCrashRestoresOnlyCompletePinnedPayload() throws {
+        let parent = try root(), source = try fixture(parent), observed = try MalibuTransactionPayload.scan(source, source: true)
+        let config = parent.appendingPathComponent("config.yaml"), support = parent.appendingPathComponent("Malibu")
+        let paths = ProviderPaths(configFile: config, controlSocket: parent.appendingPathComponent("ctl"), cliLogFile: parent.appendingPathComponent("log"), launchdStdoutLog: parent.appendingPathComponent("out"), launchdStderrLog: parent.appendingPathComponent("err"), appSupport: support, appMarkerFile: parent.appendingPathComponent("marker"), onboardingStateFile: parent.appendingPathComponent("onboard"), downloadsDirectory: parent.appendingPathComponent("downloads"))
+        let code = MalibuTransactionCodeIdentity(cdHash: Data([1, 2]), identifier: "fixture-only", team: "fixture-only")
+        let pin = MalibuTransactionPin(code: code, configuredPath: source.appendingPathComponent("macprovider-cli").path, binaryVersion: "1.8.90", capabilities: [], manifestDigest: String(repeating: "a", count: 64), context: .init(transactionContextSHA256: String(repeating: "a", count: 64), configPath: config.path, configDevice: 1, configInode: 1, configSize: 1, configSHA256: String(repeating: "b", count: 64), uid: UInt64(getuid()), homeDirectory: NSHomeDirectory()), inventory: observed.inventory)
+        let pending = MalibuPendingCatalogTransaction(id: UUID().uuidString.lowercased(), target: "model", modelKey: "model", kind: "prepare_model", timeoutSeconds: 30, startedAt: Date(), operationGeneration: UUID().uuidString.lowercased(), pin: pin)
+        let active = try MalibuTransactionFiles.payload(paths, id: pending.id, pin: pin), retired = try MalibuTransactionFiles.retired(paths, id: pending.id, pin: pin)
+        try MalibuTransactionFiles.ensureDirectory(active.deletingLastPathComponent())
+        try MalibuTransactionPayload.copy(source: source, destination: active, scan: observed, request: MalibuTransactionRequest(timeout: 10))
+        try MalibuTransactionFiles.save(pending, paths: paths)
+        XCTAssertThrowsError(try MalibuTransactionFiles.clear(pending, paths: paths, nativeIdentity: { _ in code }, afterRetirement: { throw ModelManagementError.invalidCatalog }))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: active.path))
+        XCTAssertEqual(try MalibuTransactionFiles.load(paths: paths), pending)
+        XCTAssertNoThrow(try MalibuTransactionFiles.restoreRetired(pending, paths: paths, request: MalibuTransactionRequest(timeout: 10), nativeIdentity: { _ in code }))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: active.path))
+        XCTAssertThrowsError(try MalibuTransactionFiles.clear(pending, paths: paths, nativeIdentity: { _ in code }, afterRetirement: { throw ModelManagementError.invalidCatalog }))
+        try FileManager.default.removeItem(at: retired.appendingPathComponent("mlx.metallib"))
+        XCTAssertThrowsError(try MalibuTransactionFiles.restoreRetired(pending, paths: paths, request: MalibuTransactionRequest(timeout: 10), nativeIdentity: { _ in code }))
+        XCTAssertThrowsError(try MalibuTransactionFiles.collectOrphans(paths: paths, request: MalibuTransactionRequest(timeout: 10)))
+        // Only confirmed removal of private pending metadata changes the custody
+        // predicate. This fixture models post-clear interrupted orphan deletion.
+        try FileManager.default.removeItem(at: MalibuTransactionFiles.pendingURL(paths))
+        XCTAssertNoThrow(try MalibuTransactionFiles.collectOrphans(paths: paths, request: MalibuTransactionRequest(timeout: 10)))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: retired.path))
+    }
+    func testPendingUnlinkSyncFailureRetainsCustodyAndRetryRequiresBarrier() throws {
+        let parent = try root(), source = try fixture(parent), observed = try MalibuTransactionPayload.scan(source, source: true)
+        let config = parent.appendingPathComponent("config.yaml"), support = parent.appendingPathComponent("Malibu")
+        let paths = ProviderPaths(configFile: config, controlSocket: parent.appendingPathComponent("ctl"), cliLogFile: parent.appendingPathComponent("log"), launchdStdoutLog: parent.appendingPathComponent("out"), launchdStderrLog: parent.appendingPathComponent("err"), appSupport: support, appMarkerFile: parent.appendingPathComponent("marker"), onboardingStateFile: parent.appendingPathComponent("onboard"), downloadsDirectory: parent.appendingPathComponent("downloads"))
+        let code = MalibuTransactionCodeIdentity(cdHash: Data([1, 2]), identifier: "fixture-only", team: "fixture-only")
+        let pin = MalibuTransactionPin(code: code, configuredPath: source.appendingPathComponent("macprovider-cli").path, binaryVersion: "1.8.90", capabilities: [], manifestDigest: String(repeating: "a", count: 64), context: .init(transactionContextSHA256: String(repeating: "a", count: 64), configPath: config.path, configDevice: 1, configInode: 1, configSize: 1, configSHA256: String(repeating: "b", count: 64), uid: UInt64(getuid()), homeDirectory: NSHomeDirectory()), inventory: observed.inventory)
+        let pending = MalibuPendingCatalogTransaction(id: UUID().uuidString.lowercased(), target: "model", modelKey: "model", kind: "prepare_model", timeoutSeconds: 30, startedAt: Date(), operationGeneration: UUID().uuidString.lowercased(), pin: pin)
+        let active = try MalibuTransactionFiles.payload(paths, id: pending.id, pin: pin), retired = try MalibuTransactionFiles.retired(paths, id: pending.id, pin: pin)
+        try MalibuTransactionFiles.ensureDirectory(active.deletingLastPathComponent())
+        try MalibuTransactionPayload.copy(source: source, destination: active, scan: observed, request: MalibuTransactionRequest(timeout: 10))
+        try MalibuTransactionFiles.save(pending, paths: paths)
+        var unlinkedBeforeFailure = false
+        XCTAssertThrowsError(try MalibuTransactionFiles.clear(pending, paths: paths, nativeIdentity: { _ in code }, pendingDirectorySync: { _ in
+            unlinkedBeforeFailure = try !MalibuTransactionFiles.exists(MalibuTransactionFiles.pendingURL(paths))
+            throw ModelManagementError.invalidCatalog
+        }))
+        XCTAssertTrue(unlinkedBeforeFailure)
+        XCTAssertEqual(try MalibuTransactionFiles.load(paths: paths), pending)
+        XCTAssertEqual(try MalibuTransactionPayload.scan(retired, source: false).inventory, observed.inventory)
+        XCTAssertThrowsError(try MalibuTransactionFiles.collectOrphans(paths: paths, request: MalibuTransactionRequest(timeout: 10)))
+        // A fresh instance can recover the crash-equivalent old-record/intact-
+        // retired state. No state from the failed caller is required.
+        XCTAssertNoThrow(try MalibuTransactionFiles.restoreRetired(try XCTUnwrap(MalibuTransactionFiles.load(paths: paths)), paths: paths, request: MalibuTransactionRequest(timeout: 10), nativeIdentity: { _ in code }))
+        XCTAssertTrue(try MalibuTransactionFiles.exists(active))
+        XCTAssertThrowsError(try MalibuTransactionFiles.clear(pending, paths: paths, nativeIdentity: { _ in code }, afterRetirement: { throw ModelManagementError.invalidCatalog }))
+        // Model app death immediately after unlink, before restoration or sync.
+        XCTAssertEqual(unlink(MalibuTransactionFiles.pendingURL(paths).path), 0)
+        XCTAssertThrowsError(try MalibuTransactionFiles.clear(pending, paths: paths, pendingDirectorySync: { _ in throw ModelManagementError.invalidCatalog }))
+        XCTAssertThrowsError(try MalibuTransactionFiles.collectOrphans(paths: paths, request: MalibuTransactionRequest(timeout: 10), pendingDirectorySync: { _ in throw ModelManagementError.invalidCatalog }))
+        XCTAssertEqual(try MalibuTransactionPayload.scan(retired, source: false).inventory, observed.inventory)
+        var completionSynced = false
+        XCTAssertNoThrow(try MalibuTransactionFiles.clear(pending, paths: paths, pendingDirectorySync: { url in
+            try MalibuTransactionFiles.syncDirectory(url); completionSynced = true
+        }))
+        XCTAssertTrue(completionSynced)
+        var disposalSynced = false
+        XCTAssertNoThrow(try MalibuTransactionFiles.collectOrphans(paths: paths, request: MalibuTransactionRequest(timeout: 10), pendingDirectorySync: { url in
+            XCTAssertTrue(try MalibuTransactionFiles.exists(retired.appendingPathComponent("mlx.metallib")))
+            try MalibuTransactionFiles.syncDirectory(url); disposalSynced = true
+        }))
+        XCTAssertTrue(disposalSynced)
+        XCTAssertFalse(try MalibuTransactionFiles.exists(retired))
+    }
+    func testPendingClearRejectsMissingBothPayloads() throws {
+        let parent = try root(), source = try fixture(parent), observed = try MalibuTransactionPayload.scan(source, source: true)
+        let config = parent.appendingPathComponent("config.yaml"), support = parent.appendingPathComponent("Malibu")
+        let paths = ProviderPaths(configFile: config, controlSocket: parent.appendingPathComponent("ctl"), cliLogFile: parent.appendingPathComponent("log"), launchdStdoutLog: parent.appendingPathComponent("out"), launchdStderrLog: parent.appendingPathComponent("err"), appSupport: support, appMarkerFile: parent.appendingPathComponent("marker"), onboardingStateFile: parent.appendingPathComponent("onboard"), downloadsDirectory: parent.appendingPathComponent("downloads"))
+        let code = MalibuTransactionCodeIdentity(cdHash: Data([1, 2]), identifier: "fixture-only", team: "fixture-only")
+        let pin = MalibuTransactionPin(code: code, configuredPath: source.appendingPathComponent("macprovider-cli").path, binaryVersion: "1.8.90", capabilities: [], manifestDigest: String(repeating: "a", count: 64), context: .init(transactionContextSHA256: String(repeating: "a", count: 64), configPath: config.path, configDevice: 1, configInode: 1, configSize: 1, configSHA256: String(repeating: "b", count: 64), uid: UInt64(getuid()), homeDirectory: NSHomeDirectory()), inventory: observed.inventory)
+        let pending = MalibuPendingCatalogTransaction(id: UUID().uuidString.lowercased(), target: "model", modelKey: "model", kind: "prepare_model", timeoutSeconds: 30, startedAt: Date(), operationGeneration: UUID().uuidString.lowercased(), pin: pin)
+        let active = try MalibuTransactionFiles.payload(paths, id: pending.id, pin: pin), retired = try MalibuTransactionFiles.retired(paths, id: pending.id, pin: pin)
+        try MalibuTransactionFiles.ensureDirectory(active.deletingLastPathComponent())
+        try MalibuTransactionPayload.copy(source: source, destination: active, scan: observed, request: MalibuTransactionRequest(timeout: 10))
+        try MalibuTransactionFiles.save(pending, paths: paths)
+        try FileManager.default.removeItem(at: active)
+        XCTAssertFalse(try MalibuTransactionFiles.exists(retired))
+        XCTAssertThrowsError(try MalibuTransactionFiles.clear(pending, paths: paths, nativeIdentity: { _ in code }))
+        XCTAssertEqual(try MalibuTransactionFiles.load(paths: paths), pending)
+    }
+    func testEverySelectedBundleRequiresFlatOrContentsMetadata() throws {
+        let parent = try root()
+        for bundleName in MalibuTransactionPayload.bundles.sorted() {
+            for useContents in [false, true] {
+                let source = try fixture(parent, name: UUID().uuidString)
+                let bundle = source.appendingPathComponent(bundleName)
+                try FileManager.default.createDirectory(at: bundle, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+                let flat = bundle.appendingPathComponent("Info.plist")
+                if try MalibuTransactionFiles.exists(flat) { try FileManager.default.removeItem(at: flat) }
+                XCTAssertThrowsError(try MalibuTransactionPayload.scan(source, source: true))
+                XCTAssertNoThrow(try MalibuTransactionPayload.scan(source, source: false, complete: false))
+                let metadata = useContents ? bundle.appendingPathComponent("Contents/Info.plist") : flat
+                try FileManager.default.createDirectory(at: metadata.deletingLastPathComponent(), withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+                try PropertyListSerialization.data(fromPropertyList: ["CFBundleIdentifier": "fixture.resources"], format: .xml, options: 0).write(to: metadata)
+                try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: metadata.path)
+                XCTAssertNoThrow(try MalibuTransactionPayload.scan(source, source: true))
+                try FileManager.default.removeItem(at: metadata)
+                XCTAssertThrowsError(try MalibuTransactionPayload.scan(source, source: true))
+                XCTAssertNoThrow(try MalibuTransactionPayload.removePartial(source, checkAbsent: {}))
+            }
+        }
+    }
+    func testResourceBundleRejectsExtraNativeAndExecutableMetadata() throws {
+        let parent = try root(), source = try fixture(parent)
+        let bundle = source.appendingPathComponent("swift-nio_NIOPosix.bundle")
+        try PropertyListSerialization.data(fromPropertyList: ["CFBundleExecutable": "helper"], format: .xml, options: 0).write(to: bundle.appendingPathComponent("Info.plist"))
+        XCTAssertThrowsError(try MalibuTransactionPayload.scan(source, source: true))
+        try PropertyListSerialization.data(fromPropertyList: ["CFBundleIdentifier": "fixture.resources"], format: .xml, options: 0).write(to: bundle.appendingPathComponent("Info.plist"))
+        try Data([0xcf,0xfa,0xed,0xfe,0,0,0,0]).write(to: source.appendingPathComponent("mlx.metallib"))
+        XCTAssertThrowsError(try MalibuTransactionPayload.scan(source, source: true))
+        try Data("fixture".utf8).write(to: source.appendingPathComponent("mlx.metallib"))
+        try Data().write(to: bundle.appendingPathComponent("unknown"))
+        XCTAssertThrowsError(try MalibuTransactionPayload.scan(source, source: true))
+        XCTAssertThrowsError(try MalibuTransactionPayload.removePartial(source, checkAbsent: {}))
+    }
+    func testResourceUnsafeLinksAndSparseOversizeRejectBeforeCopy() throws {
+        let parent = try root(), source = try fixture(parent)
+        let library = source.appendingPathComponent("mlx.metallib"), outside = parent.appendingPathComponent("outside")
+        try Data("outside".utf8).write(to: outside)
+        try FileManager.default.removeItem(at: library)
+        try FileManager.default.createSymbolicLink(at: library, withDestinationURL: outside)
+        XCTAssertThrowsError(try MalibuTransactionPayload.scan(source, source: true))
+        XCTAssertThrowsError(try MalibuTransactionPayload.removePartial(source, checkAbsent: {}))
+        try FileManager.default.removeItem(at: library)
+        XCTAssertEqual(link(outside.path, library.path), 0)
+        XCTAssertThrowsError(try MalibuTransactionPayload.scan(source, source: true))
+        try FileManager.default.removeItem(at: library)
+        let fd = open(library.path, O_CREAT | O_WRONLY, 0o600)
+        XCTAssertGreaterThanOrEqual(fd, 0)
+        XCTAssertEqual(ftruncate(fd, off_t(MalibuTransactionPayload.maximumBytes / 2 + 1)), 0); close(fd)
+        XCTAssertThrowsError(try MalibuTransactionPayload.scan(source, source: true))
+    }
+    func testPartialDisposalSurvivesEachMissingRequiredMemberAndEmptyDirectories() throws {
+        let parent = try root()
+        for (index, file) in fixturePayloadInventory().files.enumerated() {
+            let source = try fixture(parent, name: "partial-\(index)")
+            let original = try MalibuTransactionPayload.scan(source, source: false).inventory
+            try FileManager.default.removeItem(at: source.appendingPathComponent(file.relativePath))
+            if let surviving = try? MalibuTransactionPayload.scan(source, source: false).inventory { XCTAssertNotEqual(surviving, original) }
+            XCTAssertNoThrow(try MalibuTransactionPayload.removePartial(source, checkAbsent: {}))
+            XCTAssertFalse(FileManager.default.fileExists(atPath: source.path))
+        }
+        let empty = parent.appendingPathComponent("empty")
+        try FileManager.default.createDirectory(at: empty.appendingPathComponent("catalog-release"), withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        XCTAssertNoThrow(try MalibuTransactionPayload.removePartial(empty, checkAbsent: {}))
+    }
+    func testPartialDisposalRejectsConflictingPendingAndSubstitution() throws {
+        let parent = try root(), source = try fixture(parent)
+        XCTAssertThrowsError(try MalibuTransactionPayload.removePartial(source) { throw ModelManagementError.invalidCatalog })
+        XCTAssertTrue(FileManager.default.fileExists(atPath: source.appendingPathComponent("macprovider-cli").path))
+        var checks = 0
+        XCTAssertThrowsError(try MalibuTransactionPayload.removePartial(source) {
+            checks += 1
+            if checks == 2 {
+                try FileManager.default.moveItem(at: source, to: parent.appendingPathComponent("moved"))
+                try FileManager.default.createDirectory(at: source, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+            }
+        })
+        XCTAssertTrue(FileManager.default.fileExists(atPath: parent.appendingPathComponent("moved/macprovider-cli").path))
+    }
+    private func compileTool(_ arguments: [String]) throws {
+        let process = Process(); process.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun"); process.arguments = arguments
+        process.standardOutput = FileHandle.nullDevice; process.standardError = FileHandle.nullDevice
+        try process.run()
+        let timeout = DispatchWorkItem { if process.isRunning { process.terminate() } }
+        DispatchQueue.global().asyncAfter(deadline: .now() + 20, execute: timeout)
+        process.waitUntilExit(); timeout.cancel()
+        XCTAssertEqual(process.terminationStatus, 0, "Metal fixture compilation must succeed")
+    }
+    func testCompiledMetalLibraryLoadsFromCapturedPayload() throws {
+        let parent = try root(), source = try fixture(parent), destination = parent.appendingPathComponent("captured-metal")
+        let metal = parent.appendingPathComponent("probe.metal"), air = parent.appendingPathComponent("probe.air")
+        try Data("#include <metal_stdlib>\nusing namespace metal;\nkernel void snapshot_resource_probe(device uint* out [[buffer(0)]], uint id [[thread_position_in_grid]]) { out[id] = id + 1; }\n".utf8).write(to: metal)
+        try compileTool(["-sdk", "macosx", "metal", "-c", metal.path, "-o", air.path])
+        try compileTool(["-sdk", "macosx", "metallib", air.path, "-o", source.appendingPathComponent("mlx.metallib").path])
+        let observed = try MalibuTransactionPayload.scan(source, source: true)
+        try MalibuTransactionPayload.copy(source: source, destination: destination, scan: observed, request: MalibuTransactionRequest(timeout: 30))
+        XCTAssertEqual(try MalibuTransactionPayload.scan(destination, source: false).inventory, observed.inventory)
+        let device = try XCTUnwrap(MTLCreateSystemDefaultDevice())
+        let library = try device.makeLibrary(URL: destination.appendingPathComponent("mlx.metallib"))
+        XCTAssertNotNil(library.makeFunction(name: "snapshot_resource_probe"))
+        try FileManager.default.removeItem(at: destination.appendingPathComponent("mlx.metallib"))
+        XCTAssertThrowsError(try device.makeLibrary(URL: destination.appendingPathComponent("mlx.metallib")))
+    }
+    @MainActor
+    func testPinnedMLXExpressionUsesProductionResourceCopy() async throws {
+        var repository = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        while repository.lastPathComponent != "phase3-binary", repository.path != "/" { repository.deleteLastPathComponent() }
+        let probes = repository.deletingLastPathComponent().appendingPathComponent(".omx/qualification/mlx")
+        guard FileManager.default.fileExists(atPath: probes.appendingPathComponent("macprovider-cli").path),
+              FileManager.default.fileExists(atPath: probes.appendingPathComponent("mlx.metallib").path) else {
+            throw XCTSkip("Non-shipping pinned MLX helper and compiled library qualification artifacts are required")
+        }
+        let parent = try root(), source = try fixture(parent), destination = parent.appendingPathComponent("captured-mlx")
+        for name in ["macprovider-cli", "mlx.metallib"] {
+            try FileManager.default.removeItem(at: source.appendingPathComponent(name))
+            try FileManager.default.copyItem(at: probes.appendingPathComponent(name), to: source.appendingPathComponent(name))
+        }
+        let inventory = try await MalibuTransactionWorker().run(timeout: 30) { request in
+            let observed = try MalibuTransactionPayload.scan(source, source: true, request: request)
+            try MalibuTransactionPayload.copy(source: source, destination: destination, scan: observed, request: request)
+            let copied = try MalibuTransactionPayload.scan(destination, source: false, request: request)
+            guard copied.inventory == observed.inventory else { throw ModelManagementError.invalidCatalog }
+            return copied.inventory
+        }
+        XCTAssertTrue(inventory.files.contains { $0.relativePath == "mlx.metallib" && $0.size > 1_000_000 })
+        let result = try await MalibuBoundedCatalogProcess.run(executable: destination.appendingPathComponent("macprovider-cli"), arguments: [], expectation: Data("{}".utf8), environment: ["HOME": NSHomeDirectory(), "PATH": "/usr/bin:/bin"], lockDirectory: parent.appendingPathComponent("lease"), control: true, timeout: 10, resultDocument: true, onLine: { _ in })
+        XCTAssertEqual(result.exitCode, 0, result.stderr)
+        XCTAssertTrue(result.stdout.contains("MLX_GPU_PROBE_OK values=[3.0, 5.0, 7.0]"), result.stdout)
+        try FileManager.default.removeItem(at: destination.appendingPathComponent("mlx.metallib"))
+        XCTAssertThrowsError(try MalibuTransactionPayload.scan(destination, source: false))
+    }
+    func testInventoryClosedShapeBoundsAndTraversal() throws {
+        let valid = fixturePayloadInventory(), data = try JSONEncoder().encode(valid)
+        XCTAssertEqual(try JSONDecoder().decode(MalibuPayloadInventory.self, from: data), valid)
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        object["untrusted_path"] = "/outside"
+        XCTAssertThrowsError(try JSONDecoder().decode(MalibuPayloadInventory.self, from: JSONSerialization.data(withJSONObject: object)))
+        let bad = MalibuPayloadInventory(files: [.init(relativePath: "../mlx.metallib", size: 1, sha256: String(repeating: "a", count: 64))], directories: [])
+        XCTAssertThrowsError(try MalibuTransactionPayload.validate(bad, complete: false))
+        let oversized = MalibuPayloadInventory(files: [.init(relativePath: "mlx.metallib", size: MalibuTransactionPayload.maximumBytes, sha256: String(repeating: "a", count: 64))], directories: [])
+        XCTAssertThrowsError(try MalibuTransactionPayload.validate(oversized, complete: false))
+    }
+    @MainActor
+    func testStalledResourceReadTimesOutWithoutLateAuthorizationOrWorkerGrowth() async throws {
+        let parent = try root(), source = try fixture(parent)
+        let gate = ResourceReadGate(), worker = MalibuTransactionWorker()
+        let request = MalibuTransactionRequest(timeout: 10, beforeResourceRead: { gate.pauseOnce() })
+        let task = Task {
+            try await worker.run(request: request) { request in
+                _ = try MalibuTransactionPayload.scan(source, source: true, request: request)
+                gate.markAuthorized()
+                return true
+            }
+        }
+        while !gate.entered { try await Task.sleep(nanoseconds: 10_000_000) }
+        let started = Date()
+        do { _ = try await task.value; XCTFail("stalled resource validation must time out") } catch { }
+        XCTAssertLessThan(Date().timeIntervalSince(started), 10.8)
+        XCTAssertTrue(worker.isBusy)
+        for _ in 0..<3 {
+            do { _ = try await worker.run { _ in true }; XCTFail("retained worker must reject another request") } catch { }
+        }
+        XCTAssertFalse(gate.authorized)
+        gate.release()
+        while worker.isBusy { try await Task.sleep(nanoseconds: 10_000_000) }
+        XCTAssertFalse(gate.authorized)
+        let subsequent = try await worker.run { _ in true }
+        XCTAssertTrue(subsequent)
+    }
+    @MainActor
+    func testAbandonedPreflightKeepsLeaseUntilReadReturns() async throws {
+        let parent = try root(), source = try fixture(parent), gate = ResourceReadGate(), worker = MalibuTransactionWorker()
+        let request = MalibuTransactionRequest(timeout: 10, beforeResourceRead: { gate.pauseOnce() })
+        let lockPath = parent.appendingPathComponent("control.lock")
+        let task = Task {
+            try await worker.run(request: request) { request in
+                let fd = open(lockPath.path, O_CREAT | O_RDWR, 0o600); defer { close(fd) }
+                guard flock(fd, LOCK_EX | LOCK_NB) == 0 else { throw ModelManagementError.invalidCatalog }
+                _ = try MalibuTransactionPayload.scan(source, source: true, request: request)
+                gate.markAuthorized()
+                return true
+            }
+        }
+        while !gate.entered { try await Task.sleep(nanoseconds: 10_000_000) }
+        request.revoke()
+        do { _ = try await task.value; XCTFail("abandonment must finish the UI request") } catch { }
+        let other = open(lockPath.path, O_RDWR); defer { close(other) }
+        XCTAssertNotEqual(flock(other, LOCK_EX | LOCK_NB), 0)
+        XCTAssertTrue(worker.isBusy)
+        gate.release()
+        while worker.isBusy { try await Task.sleep(nanoseconds: 10_000_000) }
+        XCTAssertEqual(flock(other, LOCK_EX | LOCK_NB), 0)
+        XCTAssertFalse(gate.authorized)
+    }
+}
+
+private final class ResourceReadGate: @unchecked Sendable {
+    private let lock = NSLock(), semaphore = DispatchSemaphore(value: 0)
+    private var didEnter = false, didAuthorize = false
+    var entered: Bool { lock.lock(); defer { lock.unlock() }; return didEnter }
+    var authorized: Bool { lock.lock(); defer { lock.unlock() }; return didAuthorize }
+    func pauseOnce() {
+        lock.lock(); let first = !didEnter; didEnter = true; lock.unlock()
+        if first { semaphore.wait() }
+    }
+    func markAuthorized() { lock.lock(); didAuthorize = true; lock.unlock() }
+    func release() { semaphore.signal() }
+}
+
+private final class ResourceWriteCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+    private let stop: Int
+    init(stop: Int) { self.stop = stop }
+    func didWrite(_ request: MalibuTransactionRequest) {
+        lock.lock(); count += 1; let revoke = count == stop; lock.unlock()
+        if revoke { request.revoke() }
+    }
+}
+
+private final class ReadFixtureChild: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: pid_t = 0
+    func set(_ value: pid_t) { lock.lock(); self.value = value; lock.unlock() }
+    func get() -> pid_t { lock.lock(); defer { lock.unlock() }; return value }
+}
+
+
+private final class CatalogFixtureSpawns: @unchecked Sendable {
+    private let lock = NSLock()
+    private var arrays: [[String]] = []
+    func append(_ value: [String]) { lock.lock(); arrays.append(value); lock.unlock() }
+    func get() -> [[String]] { lock.lock(); defer { lock.unlock() }; return arrays }
+}
+
+@MainActor
+private final class OwnedCatalogFixtureCLI: MalibuModelCLIRunning {
+    let runner = MalibuCatalogReadRunner()
+    let executable: URL
+    let spawned = CatalogFixtureSpawns()
+    init(executable: URL) { self.executable = executable }
+    var catalogReadIsBusy: Bool { runner.isBusy }
+    func cancelCatalogRead() { runner.cancel() }
+    func readCatalog(_ read: MalibuCatalogRead, paths: ProviderPaths, peer: MalibuModelPeerEvidence, timeout: TimeInterval,
+                     progress: @escaping @MainActor @Sendable (MalibuCatalogReadProgress) -> Void) async throws -> ModelCLIResult {
+        let executable = self.executable, spawned = self.spawned
+        return try await runner.run(read: read, paths: paths, timeout: timeout, resolve: { executable },
+            onSpawn: { args, _ in spawned.append(args) }, progress: progress)
+    }
+    func run(arguments: [String], peer: MalibuModelPeerEvidence?, stdinData: Data?, priority: ModelCLIWorkPriority,
+             onLine: @escaping @MainActor @Sendable (String) -> Void) async throws -> ModelCLIResult {
+        XCTFail("Catalog caller escaped the owned runner")
+        throw ModelManagementError.invalidCatalog
     }
 }

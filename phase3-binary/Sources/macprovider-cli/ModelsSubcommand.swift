@@ -9,6 +9,10 @@ struct ModelsCommand: AsyncParsableCommand {
         abstract: "Inspect or switch the provider warm model.",
         subcommands: [
             ModelsListCommand.self,
+            ModelsPrepareCommand.self,
+            ModelsRecommendPreparedCommand.self,
+            ModelsTransactionCommand.self,
+            ModelsCleanupStagingCommand.self,
             ModelsDiscoverCommand.self,
             ModelsEvaluateCommand.self,
             ModelsOfferCommand.self,
@@ -27,6 +31,9 @@ struct ModelsDiscoverCommand: AsyncParsableCommand {
         commandName: "discover",
         abstract: "Discover provider-local BYOM candidates."
     )
+
+    @Option(help: "YAML config path.")
+    var config: String?
 
     @Flag(name: .customLong("json"), help: "Emit the strict provider_byom_discovery.v1 JSON contract.")
     var emitJSON = false
@@ -50,16 +57,23 @@ struct ModelsDiscoverCommand: AsyncParsableCommand {
     var skipOpenaiCompatible = false
 
     func run() async throws {
+        try await run(context: .production)
+    }
+
+    func run(context: ModelCommandExecutionContext) async throws {
         guard emitJSON else {
             writeStderr("models discover is JSON-only in this release; pass --json")
             throw ExitCode(2)
         }
-        let environment = BYOMDiscoveryEnvironment.production(
+        let selectedInputs = await context.inputs().loadRecommendationInputs()
+        let environment = context.discoveryEnvironment(BYOMDiscoveryEnvironment.production(
             namespacePath: localDiscoveryNamespacePath,
             mlxCacheDir: mlxCacheDir,
             ollamaOrigin: skipOllama ? nil : ollamaOrigin,
-            openAICompatibleOrigin: skipOpenaiCompatible ? nil : openaiCompatibleOrigin
-        )
+            openAICompatibleOrigin: skipOpenaiCompatible ? nil : openaiCompatibleOrigin,
+            config: try? ConfigLoader.load(cli: CLIOverrides(configPath: config)),
+            catalogMatcher: modelCatalogDiscoveryMatcher(inputs: selectedInputs)
+        ))
         let document = await BYOMDiscoveryRunner(environment: environment).discover()
         for warning in document.warnings.sorted() {
             writeStderr("models discover warning: \(warning)")
@@ -76,6 +90,9 @@ struct ModelsEvaluateCommand: AsyncParsableCommand {
 
     @Argument(help: "Candidate id, served model reference, or display name from models discover --json.")
     var candidate: String
+
+    @Option(help: "YAML config path.")
+    var config: String?
 
     @Flag(name: .customLong("json"), help: "Emit the strict provider_byom_evaluation.v1 JSON contract.")
     var emitJSON = false
@@ -103,11 +120,14 @@ struct ModelsEvaluateCommand: AsyncParsableCommand {
             writeStderr("models evaluate is JSON-only in this release; pass --json")
             throw ExitCode(2)
         }
+        let selectedInputs = await AutotuneStaticInputs().loadRecommendationInputs()
         let environment = BYOMDiscoveryEnvironment.production(
             namespacePath: localDiscoveryNamespacePath,
             mlxCacheDir: mlxCacheDir,
             ollamaOrigin: skipOllama ? nil : ollamaOrigin,
-            openAICompatibleOrigin: skipOpenaiCompatible ? nil : openaiCompatibleOrigin
+            openAICompatibleOrigin: skipOpenaiCompatible ? nil : openaiCompatibleOrigin,
+            config: try? ConfigLoader.load(cli: CLIOverrides(configPath: config)),
+            catalogMatcher: modelCatalogDiscoveryMatcher(inputs: selectedInputs)
         )
         let document = await BYOMEvaluationRunner(target: candidate, environment: environment).evaluate()
         for warning in document.warnings.sorted() {
@@ -169,6 +189,10 @@ struct ModelsOfferCommand: AsyncParsableCommand {
     var skipOpenaiCompatible = false
 
     func run() async throws {
+        try await run(context: .production)
+    }
+
+    func run(context: ModelCommandExecutionContext) async throws {
         guard emitJSON else {
             if dryRun {
                 writeStderr("models offer is dry-run JSON-only in this release; pass --json")
@@ -177,12 +201,15 @@ struct ModelsOfferCommand: AsyncParsableCommand {
             }
             throw ExitCode(2)
         }
-        let environment = BYOMDiscoveryEnvironment.production(
+        let selectedInputs = await context.inputs().loadRecommendationInputs()
+        let environment = context.discoveryEnvironment(BYOMDiscoveryEnvironment.production(
             namespacePath: localDiscoveryNamespacePath,
             mlxCacheDir: mlxCacheDir,
             ollamaOrigin: skipOllama ? nil : ollamaOrigin,
-            openAICompatibleOrigin: skipOpenaiCompatible ? nil : openaiCompatibleOrigin
-        )
+            openAICompatibleOrigin: skipOpenaiCompatible ? nil : openaiCompatibleOrigin,
+            config: try? ConfigLoader.load(cli: CLIOverrides(configPath: config)),
+            catalogMatcher: modelCatalogDiscoveryMatcher(inputs: selectedInputs)
+        ))
         if dryRun {
             let document = await BYOMOfferDryRunRunner(target: candidate, environment: environment).dryRun()
             for warning in document.warnings.sorted() {
@@ -201,11 +228,11 @@ struct ModelsOfferCommand: AsyncParsableCommand {
                 coordinatorURL: coordinatorURL,
                 providerID: providerID
             )
-            let client = try BYOMModelAdmissionClient(coordinatorURL: resolved.coordinatorURL)
+            let client = try context.admissionClient(resolved.coordinatorURL)
             let runtime = BYOMModelAdmissionRuntime(
                 environment: environment,
-                credentialStore: ProviderCredentialStoreFactory.providerStore(for: resolved.config),
-                identityStore: ProviderCredentialStoreFactory.receiptKeyStore(for: resolved.config),
+                credentialStore: context.providerStore(resolved.config),
+                identityStore: context.identityStore(resolved.config),
                 client: client
             )
             let status = try await runtime.submitOffer(
@@ -228,6 +255,7 @@ struct ModelsAdmissionCommand: AsyncParsableCommand {
         abstract: "Read or withdraw BYOM model admission state.",
         subcommands: [
             ModelsAdmissionStatusCommand.self,
+            ModelsAdmissionRetryCommand.self,
             ModelsAdmissionWithdrawCommand.self,
         ]
     )
@@ -278,6 +306,10 @@ struct ModelsAdmissionStatusCommand: AsyncParsableCommand {
     var skipOpenaiCompatible = false
 
     func run() async throws {
+        try await run(context: .production)
+    }
+
+    func run(context: ModelCommandExecutionContext) async throws {
         guard emitJSON else {
             writeStderr("models admission status is JSON-only in this release; pass --json")
             throw ExitCode(2)
@@ -288,17 +320,20 @@ struct ModelsAdmissionStatusCommand: AsyncParsableCommand {
                 coordinatorURL: coordinatorURL,
                 providerID: providerID
             )
-            let environment = BYOMDiscoveryEnvironment.production(
+            let selectedInputs = await context.inputs().loadRecommendationInputs()
+            let environment = context.discoveryEnvironment(BYOMDiscoveryEnvironment.production(
                 namespacePath: localDiscoveryNamespacePath,
                 mlxCacheDir: mlxCacheDir,
                 ollamaOrigin: skipOllama ? nil : ollamaOrigin,
-                openAICompatibleOrigin: skipOpenaiCompatible ? nil : openaiCompatibleOrigin
-            )
-            let client = try resolved.coordinatorURL.map { try BYOMModelAdmissionClient(coordinatorURL: $0) }
+                openAICompatibleOrigin: skipOpenaiCompatible ? nil : openaiCompatibleOrigin,
+                config: resolved.config,
+                catalogMatcher: modelCatalogDiscoveryMatcher(inputs: selectedInputs)
+            ))
+            let client = try resolved.coordinatorURL.map { try context.admissionClient($0) }
             let runtime = BYOMModelAdmissionRuntime(
                 environment: environment,
-                credentialStore: ProviderCredentialStoreFactory.providerStore(for: resolved.config),
-                identityStore: ProviderCredentialStoreFactory.receiptKeyStore(for: resolved.config),
+                credentialStore: context.providerStore(resolved.config),
+                identityStore: context.identityStore(resolved.config),
                 client: client
             )
             let status = try await runtime.status(providerID: resolved.providerID, target: candidate)
@@ -370,11 +405,14 @@ struct ModelsAdmissionWithdrawCommand: AsyncParsableCommand {
                 coordinatorURL: coordinatorURL,
                 providerID: providerID
             )
-            let environment = BYOMDiscoveryEnvironment.production(
+            let selectedInputs = await AutotuneStaticInputs().loadRecommendationInputs()
+        let environment = BYOMDiscoveryEnvironment.production(
                 namespacePath: localDiscoveryNamespacePath,
                 mlxCacheDir: mlxCacheDir,
                 ollamaOrigin: skipOllama ? nil : ollamaOrigin,
-                openAICompatibleOrigin: skipOpenaiCompatible ? nil : openaiCompatibleOrigin
+                openAICompatibleOrigin: skipOpenaiCompatible ? nil : openaiCompatibleOrigin,
+            config: try? ConfigLoader.load(cli: CLIOverrides(configPath: config)),
+            catalogMatcher: modelCatalogDiscoveryMatcher(inputs: selectedInputs)
             )
             let client = try BYOMModelAdmissionClient(coordinatorURL: resolved.coordinatorURL)
             let runtime = BYOMModelAdmissionRuntime(
@@ -405,6 +443,12 @@ struct ModelsCatalogEconomicsCommand: AsyncParsableCommand {
     @Flag(name: .customLong("json"), help: "Emit the strict model_catalog_economics.v1 JSON contract.")
     var emitJSON = false
 
+    @Flag(help: "Enable negotiated non-economic local model preparation and activation.")
+    var localActivation = false
+
+    @OptionGroup var readOptions: ModelCatalogReadOptions
+    @Option(help: .hidden) var verifyLocalModel: String?
+
     @Flag(help: "Do not read coordinator admission status; emit local/default admission gates only.")
     var skipCoordinatorStatus = false
 
@@ -433,7 +477,7 @@ struct ModelsCatalogEconomicsCommand: AsyncParsableCommand {
     var mlxCacheDir: String?
 
     @Option(help: "Ollama-compatible loopback origin to query. Must be http://127.0.0.0/8:<port> or http://[::1]:<port>.")
-    var ollamaOrigin: String = "http://127.0.0.1:11434"
+    var ollamaOrigin: String?
 
     @Flag(help: "Skip the Ollama-compatible loopback adapter during candidate lookup.")
     var skipOllama = false
@@ -445,40 +489,69 @@ struct ModelsCatalogEconomicsCommand: AsyncParsableCommand {
     var skipOpenaiCompatible = false
 
     func run() async throws {
+        try await run(context: .production)
+    }
+
+    func run(context: ModelCommandExecutionContext) async throws {
         guard emitJSON else {
             writeStderr("models catalog-economics is JSON-only in this release; pass --json")
             throw ExitCode(2)
         }
 
-        let modelsConfig = try? loadModelsConfig(
-            config: config,
-            model: model,
-            supportedModels: supportedModels,
-            ctlSocketPath: ctlSocketPath
-        )
+        if localActivation || readOptions.isPresent || verifyLocalModel != nil {
+            try await runLocalRead(context: context)
+            return
+        }
+
+        // App-bound projection captures configuration once, then creates only
+        // the authorized private store before finalizing its opaque context.
+        let prepared: PreparedModelTransactionContext?
+        if localActivation, model == nil, supportedModels == nil, ctlSocketPath == nil, coordinatorURL == nil, providerID == nil {
+            let namespace = try? ModelTransactionContextLoader.projectionEnvironment(context.projectionEnvironment)
+            let home = context.projectionHome ?? (try? ModelTransactionContextLoader.kernelHomeDirectory())
+            prepared = namespace.flatMap { environment in
+                home.flatMap { try? ModelTransactionContextLoader.prepareProjection(
+                    configPath: config, environment: environment, homeDirectory: $0) }
+            }
+        } else { prepared = nil }
+        let modelsConfig = localActivation ? prepared?.config : try? loadModelsConfig(
+            config: config, model: model, supportedModels: supportedModels, ctlSocketPath: ctlSocketPath)
+        let setup = prepared.flatMap { try? ModelCatalogTransactionStore.prepareProjectionStore($0) }
         let currentModelID = await readCurrentModelID(config: modelsConfig)
-        let environment = BYOMDiscoveryEnvironment.production(
+        let selectedInputs = await context.inputs().loadRecommendationInputs()
+        let environment = context.discoveryEnvironment(BYOMDiscoveryEnvironment.production(
             namespacePath: localDiscoveryNamespacePath,
             mlxCacheDir: mlxCacheDir,
-            ollamaOrigin: skipOllama ? nil : ollamaOrigin,
-            openAICompatibleOrigin: skipOpenaiCompatible ? nil : openaiCompatibleOrigin
-        )
+            ollamaOrigin: skipOllama ? nil : (ollamaOrigin ?? "http://127.0.0.1:11434"),
+            openAICompatibleOrigin: skipOpenaiCompatible ? nil : openaiCompatibleOrigin,
+            config: modelsConfig,
+            catalogMatcher: modelCatalogDiscoveryMatcher(inputs: selectedInputs)
+        ))
         // BYOM identity is resolved against the compiled-in release through the
         // one offline qualified selection (`BYOMCatalogMatcher()`), the same
         // authority `discover`, `evaluate`, and `offer` use; the live artifact
         // selection loaded below contributes its §3.7.6 warnings, reported here.
         let discovery = await BYOMDiscoveryRunner(environment: environment).discover()
-        let inputs = await AutotuneStaticInputs().loadRecommendationInputs()
+        let inputs = selectedInputs
         let admissions = await readAdmissionStatuses(
-            discovery: discovery
+            discovery: discovery, frozenConfig: modelsConfig, context: context
         )
+        let localActions = setup.map { makeModelCatalogLocalActions(inputs: inputs, config: modelsConfig, store: $0.store) } ?? [:]
+        let recoveries = setup.map { makeModelCatalogRecoveries(store: $0.store) } ?? []
+        let bound = prepared.flatMap { prepared in
+            setup.flatMap { try? ModelTransactionContextLoader.finalizeProjection(context: prepared, storeIdentity: $0.identity) }
+        }
         let document = ModelCatalogEconomicsBuilder.makeProjection(
             currentModelID: currentModelID,
             discovery: discovery,
             admissionStatuses: admissions,
             demand: inputs.demand,
             candidateCatalog: inputs.candidate,
-            rateCard: inputs.rateCard
+            rateCard: inputs.rateCard,
+            localActivation: localActivation,
+            localActions: localActions,
+            transactionContextSHA256: bound?.projectionDigest,
+            recoveries: recoveries
         )
         // SPEC-044's projection warning codes are a closed enum of v0.1 feed
         // classes; the artifact-feed classes are reported beside them here
@@ -493,7 +566,7 @@ struct ModelsCatalogEconomicsCommand: AsyncParsableCommand {
         try ModelSwitchingWireCodec.printJSON(document)
     }
 
-    private func readCurrentModelID(config: AppConfig?) async -> String? {
+    func readCurrentModelID(config: AppConfig?) async -> String? {
         guard let config else { return nil }
         let socketPath = ControlSocketPaths.resolve(ctlSocketPath: config.ctlSocketPath)
         guard let (connection, status) = try? await connectAndReadStatus(socketPath: socketPath) else {
@@ -503,17 +576,16 @@ struct ModelsCatalogEconomicsCommand: AsyncParsableCommand {
         return status.currentModelID
     }
 
-    private func readAdmissionStatuses(
-        discovery: BYOMDiscoveryWire
+    func readAdmissionStatuses(
+        discovery: BYOMDiscoveryWire, frozenConfig: AppConfig?, context: ModelCommandExecutionContext
     ) async -> [String: BYOMAdmissionStatusWire] {
         guard !skipCoordinatorStatus,
-              let resolved = try? loadModelAdmissionRuntimeConfig(),
-              let client = try? BYOMModelAdmissionClient(coordinatorURL: resolved.coordinatorURL)
+              let resolved = try? loadModelAdmissionRuntimeConfig(frozenConfig: frozenConfig),
+              let client = try? context.admissionClient(resolved.coordinatorURL)
         else {
             return [:]
         }
-        guard let bearer = try? ProviderCredentialStoreFactory
-            .providerStore(for: resolved.config)
+        guard let bearer = try? context.providerStore(resolved.config)
             .load(providerID: resolved.providerID) else {
             return [:]
         }
@@ -531,16 +603,19 @@ struct ModelsCatalogEconomicsCommand: AsyncParsableCommand {
         return statuses
     }
 
-    private func loadModelAdmissionRuntimeConfig() throws -> (
+    private func loadModelAdmissionRuntimeConfig(frozenConfig: AppConfig?) throws -> (
         config: AppConfig,
         coordinatorURL: String,
         providerID: String
     ) {
-        var resolved = try ConfigLoader.load(cli: CLIOverrides(
-            coordinatorURL: coordinatorURL,
-            providerID: providerID,
-            configPath: config
-        ))
+        var resolved: AppConfig
+        if localActivation {
+            guard let frozenConfig else { throw ModelTransactionContextError.unavailable }
+            resolved = frozenConfig
+        } else {
+            resolved = try ConfigLoader.load(cli: CLIOverrides(
+                coordinatorURL: coordinatorURL, providerID: providerID, configPath: config))
+        }
         guard let providerID = resolved.providerID?.trimmingCharacters(in: .whitespacesAndNewlines),
               !providerID.isEmpty else {
             throw BYOMModelAdmissionError.missingProviderID
@@ -586,7 +661,7 @@ private extension String {
     var nonEmpty: String? { isEmpty ? nil : self }
 }
 
-private func loadModelAdmissionConfig(
+func loadModelAdmissionConfig(
     config: String?,
     coordinatorURL: String?,
     providerID: String?
@@ -953,6 +1028,10 @@ struct ModelsAdoptRecommendationCommand: AsyncParsableCommand {
     var switchStatePath: String?
 
     func run() async throws {
+        try await run(context: .production)
+    }
+
+    func run(context: ModelCommandExecutionContext) async throws {
         guard emitJSON else {
             throw ValidationError("adopt-recommendation requires --json")
         }
@@ -1017,7 +1096,7 @@ struct ModelsAdoptRecommendationCommand: AsyncParsableCommand {
         }
         let signedAuthority: RecommendationAdoptionAuthority?
         do {
-            signedAuthority = try await Self.validateSignedAuthority(recommendation, configPath: config)
+            signedAuthority = try await Self.validateSignedAuthority(recommendation, configPath: config, context: context)
         } catch {
             try fail("signed_authority_invalid", exitCode: 2)
         }
@@ -1065,12 +1144,12 @@ struct ModelsAdoptRecommendationCommand: AsyncParsableCommand {
         let socketPath = ControlSocketPaths.resolve(ctlSocketPath: resolved.ctlSocketPath)
         let adoptionLock: RecommendationAdoptionLock
         do {
-            adoptionLock = try RecommendationAdoptionLock.acquire(configPath: effectiveConfigPath)
+            adoptionLock = try RecommendationAdoptionLock.acquire(configPath: effectiveConfigPath, root: context.adoptionJournalRoot)
         } catch {
             try fail("adoption_busy", exitCode: 6)
         }
         defer { withExtendedLifetime(adoptionLock) {} }
-        let journalStore = RecommendationAdoptionJournalStore()
+        let journalStore = RecommendationAdoptionJournalStore(root: context.adoptionJournalRoot)
         do {
             try await Self.recoverPendingTransactions(
                 store: journalStore,
@@ -1437,13 +1516,17 @@ extension ModelsAdoptRecommendationCommand {
         } else {
             data = try Data(contentsOf: URL(fileURLWithPath: ConfigLoader.expandTilde(pathOrStdin)))
         }
+        return try parseRecommendation(data: data)
+    }
+
+    static func parseRecommendation(data: Data, enforceFreshness: Bool = true) throws -> ParsedRecommendationAdoption {
         try AutotuneStrictJSON.rejectDuplicateKeys(data)
         guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               root["schema_version"] as? String == "autotune_recommend.v1",
               let generatedAt = root["generated_at"] as? String,
               let generatedDate = parseRecommendationTimestamp(generatedAt),
               generatedDate <= Date().addingTimeInterval(60),
-              Date().timeIntervalSince(generatedDate) <= 7 * 24 * 60 * 60,
+              (!enforceFreshness || Date().timeIntervalSince(generatedDate) <= 7 * 24 * 60 * 60),
               let recommendedModel = root["recommended_model"] as? String,
               let inputs = root["inputs"] as? [String: Any],
               let rateCardVersion = inputs["rate_card_version"] as? String,
@@ -1646,21 +1729,17 @@ extension ModelsAdoptRecommendationCommand {
 
     fileprivate static func validateSignedAuthority(
         _ recommendation: ParsedRecommendationAdoption,
-        configPath: String? = nil
+        configPath: String? = nil,
+        context: ModelCommandExecutionContext = .production
     ) async throws -> RecommendationAdoptionAuthority? {
-        #if DEBUG
-        if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
-            || ProcessInfo.processInfo.processName.lowercased().contains("xctest") {
-            return nil
-        }
-        #endif
         // Adoption is gated on the three v0.1 feeds only (§3.7.6 rule 6: the
         // artifact classes can never block it), so the artifact fetch is skipped.
-        let inputs = await AutotuneStaticInputs().loadRecommendationInputs(includeArtifactFeed: false)
+        let inputs = await context.inputs().loadRecommendationInputs(includeArtifactFeed: false)
         let warnings = inputs.demand.warnings
             .union(inputs.candidate.warnings)
             .union(inputs.rateCard.warnings)
         guard !AutotuneRecommendEngine.paidTrustBlocks(warnings),
+              warnings.isDisjoint(with: [.candidateCatalogStale, .rateCardStale, .demandRankStale]),
               recommendation.demandRankVersion == inputs.demand.value.version,
               recommendation.candidateCatalogVersion == inputs.candidate.value.version,
               recommendation.rateCardVersion == inputs.rateCard.value.version,
@@ -1671,7 +1750,7 @@ extension ModelsAdoptRecommendationCommand {
             throw ValidationError("recommendation is not bound to the current signed catalog inputs")
         }
         try validateSignedCatalogBinding(recommendation: recommendation, catalogKey: catalogKey, row: row)
-        let currentHardware = MachineFingerprinter().sample()
+        let currentHardware = context.adoptionHardware()
         guard recommendation.hardwareChip == currentHardware.chip,
               recommendation.hardwareMemoryGB == currentHardware.ramGB,
               recommendation.hardwareBinaryVersion == currentHardware.binaryVersion,
@@ -2257,7 +2336,7 @@ extension ModelsAdoptRecommendationCommand {
         }
     }
 
-    fileprivate static func configOwnsRecommendation(
+    static func configOwnsRecommendation(
         loaded: AppConfig,
         recommendation: ParsedRecommendationAdoption
     ) -> Bool {
@@ -2276,17 +2355,19 @@ extension ModelsAdoptRecommendationCommand {
             && loaded.donorMode == recommendation.donorMode
     }
 
-    fileprivate static func ensureConfigParity(
+    static func ensureConfigParity(
         applier: ConfigApplier,
         configPath: URL,
         recommendation: ParsedRecommendationAdoption
     ) -> Bool {
         func matches() -> Bool {
-            guard let loaded = try? ConfigLoader.load(cli: CLIOverrides(configPath: configPath.path)) else {
-                return false
-            }
-            return modelIDKey(loaded.model ?? "") == modelIDKey(recommendation.targetModelID)
-                && configOwnsRecommendation(loaded: loaded, recommendation: recommendation)
+            let loaded: AppConfig
+            do { loaded = try ConfigLoader.load(cli: CLIOverrides(configPath: configPath.path)) }
+            catch { return false }
+            // Config stores the signed catalog key; runtime switching uses its
+            // separately bound canonical model ID. Compare the complete original
+            // recommendation rather than conflating those identities.
+            return configOwnsRecommendation(loaded: loaded, recommendation: recommendation)
         }
         if matches() { return true }
         do {

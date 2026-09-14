@@ -28,6 +28,9 @@ struct MalibuModelCapabilityManifest: Decodable, Sendable {
     static let schemaVersion = "malibu_model_capabilities.v1"
     static let catalogJSON = "model_catalog_json_v1"
     static let catalogEconomics = "model_catalog_economics_v1"
+    static let catalogTransactions = "model_catalog_transactions_v1"
+    static let catalogReadLifecycle = "model_catalog_read_lifecycle_v1"
+    static let localActivation = "model_catalog_local_activation_v1"
     static let readySwitch = "model_ready_switch_v1"
     static let recommendationCheck = "model_recommendation_check_v1"
     static let recommendationAdoption = "model_recommendation_apply_switch_v1"
@@ -59,6 +62,14 @@ struct MalibuModelCapabilityManifest: Decodable, Sendable {
     init(schemaVersion: String, tiers: [String: Tier]) {
         self.schemaVersion = schemaVersion
         self.tiers = tiers
+    }
+
+    var controlDigest: String {
+        let value = tiers.keys.sorted().map { key in
+            let tier = tiers[key]!
+            return key + ":" + tier.firstSupportingBinaryVersion + ":" + (tier.localStatusCapabilities.union(tier.commandSchemas).union(tier.controlFrameSchemas)).sorted().joined(separator: ",")
+        }.joined(separator: "\n")
+        return malibuSHA256(Data(value.utf8))
     }
 
     func supports(_ capability: String, peer: MalibuModelPeerEvidence) -> Bool {
@@ -316,6 +327,7 @@ struct MalibuModelCatalogEconomicsDocument: Decodable, Equatable, Sendable {
         let demandFeedDigest: String?
         let candidateFeedDigest: String?
         let rateCardMaxAgeSeconds: Int
+        let transactionContextSHA256: String?
 
         enum CodingKeys: String, CodingKey, CaseIterable {
             case cliVersion = "cli_version"
@@ -329,6 +341,7 @@ struct MalibuModelCatalogEconomicsDocument: Decodable, Equatable, Sendable {
             case demandFeedDigest = "demand_feed_digest"
             case candidateFeedDigest = "candidate_feed_digest"
             case rateCardMaxAgeSeconds = "rate_card_max_age_seconds"
+            case transactionContextSHA256 = "transaction_context_sha256"
         }
 
         init(from decoder: Decoder) throws {
@@ -345,6 +358,9 @@ struct MalibuModelCatalogEconomicsDocument: Decodable, Equatable, Sendable {
             demandFeedDigest = try decodeExplicitNullableString(container, .demandFeedDigest)
             candidateFeedDigest = try decodeExplicitNullableString(container, .candidateFeedDigest)
             rateCardMaxAgeSeconds = try container.decode(Int.self, forKey: .rateCardMaxAgeSeconds)
+            if projectionProtocolVersion == "1", container.contains(.transactionContextSHA256) { throw ModelManagementError.invalidCatalog }
+            transactionContextSHA256 = try container.decodeIfPresent(String.self, forKey: .transactionContextSHA256)
+            if let transactionContextSHA256, !malibuDigest(transactionContextSHA256) { throw ModelManagementError.invalidCatalog }
         }
     }
 
@@ -382,6 +398,8 @@ struct MalibuModelCatalogEconomicsDocument: Decodable, Equatable, Sendable {
         let requiresConfirmation: Bool
         let transactionKind: String?
         let transactionID: String?
+        let operationGeneration: String?
+        let generationFieldPresent: Bool
         let actionTimeoutSeconds: Int?
         let estimatedBytes: Int64?
         let unavailableReason: String?
@@ -391,6 +409,7 @@ struct MalibuModelCatalogEconomicsDocument: Decodable, Equatable, Sendable {
             case requiresConfirmation = "requires_confirmation"
             case transactionKind = "transaction_kind"
             case transactionID = "transaction_id"
+            case operationGeneration = "operation_generation"
             case actionTimeoutSeconds = "action_timeout_seconds"
             case estimatedBytes = "estimated_bytes"
             case unavailableReason = "unavailable_reason"
@@ -403,13 +422,27 @@ struct MalibuModelCatalogEconomicsDocument: Decodable, Equatable, Sendable {
             requiresConfirmation = try container.decode(Bool.self, forKey: .requiresConfirmation)
             transactionKind = try decodeExplicitNullableString(container, .transactionKind)
             transactionID = try decodeExplicitNullableString(container, .transactionID)
+            generationFieldPresent = container.contains(.operationGeneration)
+            operationGeneration = try container.decodeIfPresent(String.self, forKey: .operationGeneration)
             actionTimeoutSeconds = try decodeExplicitNullableInt(container, .actionTimeoutSeconds)
             estimatedBytes = try decodeExplicitNullableInt64(container, .estimatedBytes)
             unavailableReason = try decodeExplicitNullableString(container, .unavailableReason)
         }
     }
 
+    struct LocalVerification: Decodable, Equatable, Sendable {
+        let state: String
+        enum CodingKeys: String, CodingKey { case state }
+        init(from decoder: Decoder) throws {
+            try rejectUnknownKeys(decoder, allowed: ["state"])
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            state = try c.decode(String.self, forKey: .state)
+            guard ["not_applicable", "missing", "unverified", "verified", "invalid", "incomplete"].contains(state) else { throw ModelManagementError.invalidCatalog }
+        }
+    }
+
     struct Row: Decodable, Equatable, Sendable {
+        let localVerification: LocalVerification?
         let modelKey: String
         let servedModelID: String
         let displayModelID: String
@@ -443,6 +476,7 @@ struct MalibuModelCatalogEconomicsDocument: Decodable, Equatable, Sendable {
         let cleanupStagingAction: Action
 
         enum CodingKeys: String, CodingKey, CaseIterable {
+            case localVerification = "local_verification"
             case modelKey = "model_key"
             case servedModelID = "served_model_id"
             case displayModelID = "display_model_id"
@@ -479,6 +513,8 @@ struct MalibuModelCatalogEconomicsDocument: Decodable, Equatable, Sendable {
         init(from decoder: Decoder) throws {
             try rejectUnknownKeys(decoder, allowed: CodingKeys.allCases.map(\.stringValue))
             let container = try decoder.container(keyedBy: CodingKeys.self)
+            if container.contains(.localVerification), try container.decodeNil(forKey: .localVerification) { throw ModelManagementError.invalidCatalog }
+            localVerification = try container.decodeIfPresent(LocalVerification.self, forKey: .localVerification)
             modelKey = try container.decode(String.self, forKey: .modelKey)
             servedModelID = try container.decode(String.self, forKey: .servedModelID)
             displayModelID = try container.decode(String.self, forKey: .displayModelID)
@@ -513,9 +549,27 @@ struct MalibuModelCatalogEconomicsDocument: Decodable, Equatable, Sendable {
         }
     }
 
+    struct Recovery: Decodable, Equatable, Sendable, Identifiable {
+        let targetModelID: String
+        let modelKey: String
+        let action: Action
+        var id: String { "cleanup:" + (action.transactionID ?? "") }
+        enum CodingKeys: String, CodingKey, CaseIterable {
+            case targetModelID = "target_model_id", modelKey = "model_key", action
+        }
+        init(from decoder: Decoder) throws {
+            try rejectUnknownKeys(decoder, allowed: CodingKeys.allCases.map(\.stringValue))
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            targetModelID = try c.decode(String.self, forKey: .targetModelID)
+            modelKey = try c.decode(String.self, forKey: .modelKey)
+            action = try c.decode(Action.self, forKey: .action)
+        }
+    }
+
     let schema: String
     let generatedAt: String
     let projectionSequence: UInt64
+    let recoveries: [Recovery]
     let source: Source
     let rows: [Row]
     let warnings: [String]
@@ -524,6 +578,7 @@ struct MalibuModelCatalogEconomicsDocument: Decodable, Equatable, Sendable {
         case schema
         case generatedAt = "generated_at"
         case projectionSequence = "projection_sequence"
+        case recoveries
         case source
         case rows
         case warnings
@@ -536,6 +591,8 @@ struct MalibuModelCatalogEconomicsDocument: Decodable, Equatable, Sendable {
         generatedAt = try container.decode(String.self, forKey: .generatedAt)
         projectionSequence = try container.decode(UInt64.self, forKey: .projectionSequence)
         source = try container.decode(Source.self, forKey: .source)
+        if source.projectionProtocolVersion == "1", container.contains(.recoveries) { throw ModelManagementError.invalidCatalog }
+        recoveries = try container.decodeIfPresent([Recovery].self, forKey: .recoveries) ?? []
         // Strict, closed-schema decode: any malformed / unknown-field row fails
         // the WHOLE projection (fail-closed) rather than being quarantined and the
         // rest of the trusted rows still rendered. A malformed row can indicate a
@@ -544,13 +601,13 @@ struct MalibuModelCatalogEconomicsDocument: Decodable, Equatable, Sendable {
         warnings = try container.decode([String].self, forKey: .warnings)
     }
 
-    func validated(now: Date = Date()) throws -> MalibuModelCatalogEconomicsDocument {
+    func validated(now: Date = Date(), localActivationNegotiated: Bool = false) throws -> MalibuModelCatalogEconomicsDocument {
         guard schema == "model_catalog_economics.v1",
               Self.isValidGeneratedAt(generatedAt),
               Self.isValidGeneratedAt(source.processStartedAt),
               UUID(uuidString: source.processLaunchID) != nil,
               source.processLaunchID == source.processLaunchID.lowercased(with: nil),
-              source.projectionProtocolVersion == "1",
+              (source.projectionProtocolVersion == "1" || (localActivationNegotiated && source.projectionProtocolVersion == "2")),
               ["live_signed", "static_signed", "none"].contains(source.rateCardSource),
               (300...604_800).contains(source.rateCardMaxAgeSeconds),
               generatedAtIsCurrent(now: now) else {
@@ -559,17 +616,35 @@ struct MalibuModelCatalogEconomicsDocument: Decodable, Equatable, Sendable {
         for warning in warnings {
             guard Self.closedWarnings.contains(warning) else { throw ModelManagementError.invalidCatalog }
         }
+        guard Set(recoveries.map(\.targetModelID)).count == recoveries.count,
+              Set(recoveries.map { $0.action.transactionID }).count == recoveries.count else { throw ModelManagementError.invalidCatalog }
+        for recovery in recoveries {
+            try validate(action: recovery.action)
+            guard source.projectionProtocolVersion == "2", isSafeModelID(recovery.targetModelID), isSafeModelID(recovery.modelKey),
+                  recovery.action.available, recovery.action.requiresConfirmation,
+                  recovery.action.transactionKind == "cleanup_staging", recovery.action.estimatedBytes == nil else { throw ModelManagementError.invalidCatalog }
+        }
+        if source.projectionProtocolVersion == "1" {
+            guard rows.flatMap({ [$0.switchAction, $0.prepareAction, $0.evaluateAction, $0.adoptRecommendationAction, $0.cleanupStagingAction] }).allSatisfy({ !$0.generationFieldPresent }) else { throw ModelManagementError.invalidCatalog }
+        }
         return self
+    }
+
+    func hasVerifiedLocalTarget(_ target: String, modelKey: String) -> Bool {
+        let matches = rows.filter { $0.actionModelID == target && $0.modelKey == modelKey }
+        guard matches.count == 1, let row = matches.first else { return false }
+        return row.localVerification?.state == "verified" && row.weightsPresentLocally && (try? validate(row: row)) != nil
     }
 
     func rowsForMalibu(currentModelID: String?, warmSwapAvailable: Bool) -> [MalibuModelRow] {
         rows.compactMap { row in
-            if Self.shouldHideLocalDefaultBYOM(row) { return nil }
+            if source.projectionProtocolVersion != "2", Self.shouldHideLocalDefaultBYOM(row) { return nil }
             if (try? validate(row: row)) != nil {
                 return MalibuModelRow(
                     economics: row,
                     currentModelID: currentModelID,
-                    warmSwapAvailable: warmSwapAvailable
+                    warmSwapAvailable: warmSwapAvailable,
+                    localActivation: source.projectionProtocolVersion == "2"
                 )
             }
             return MalibuModelRow(
@@ -601,7 +676,7 @@ struct MalibuModelCatalogEconomicsDocument: Decodable, Equatable, Sendable {
               isSafeModelID(row.servedModelID),
               isSafeDisplayID(row.displayModelID),
               row.actionModelID == nil || isSafeModelID(row.actionModelID),
-              ["current", "ready", "catalog", "needs_preparation", "blocked"].contains(row.runtimeState),
+              ["current", "ready", "catalog", "needs_preparation", "blocked", "verification_required"].contains(row.runtimeState),
               ["fits", "does_not_fit", "unknown"].contains(row.fit),
               ["live_signed", "static_signed", "none"].contains(row.rateSource),
               rowRateSourceIsNoLessConservativeThanProjection(row.rateSource),
@@ -620,6 +695,19 @@ struct MalibuModelCatalogEconomicsDocument: Decodable, Equatable, Sendable {
               row.demandRank == nil || row.demandRank! >= 0 else {
             throw ModelManagementError.invalidCatalog
         }
+        if source.projectionProtocolVersion == "2" {
+            guard let state = row.localVerification?.state else { throw ModelManagementError.invalidCatalog }
+            if state == "not_applicable" {
+                guard !row.prepareAction.available, !row.evaluateAction.available, !row.adoptRecommendationAction.available,
+                      row.economicsState == "trusted" || (!row.weightsPresentLocally && row.runtimeState != "ready") else { throw ModelManagementError.invalidCatalog }
+            }
+            if state != "not_applicable" && state != "verified" {
+                guard !row.weightsPresentLocally, !row.evaluateAction.available, !row.adoptRecommendationAction.available,
+                      row.runtimeState != "ready" else { throw ModelManagementError.invalidCatalog }
+            }
+            if ["unverified", "incomplete", "invalid"].contains(state), row.prepareAction.available { throw ModelManagementError.invalidCatalog }
+            if ["unverified", "incomplete"].contains(state), !row.isCurrent, row.runtimeState != "verification_required" { throw ModelManagementError.invalidCatalog }
+        } else if row.localVerification != nil || row.runtimeState == "verification_required" { throw ModelManagementError.invalidCatalog }
         if row.economicsState == "trusted" {
             guard row.admission.catalogEconomicsPermitted,
                   source.rateCardSource == "live_signed",
@@ -684,17 +772,35 @@ struct MalibuModelCatalogEconomicsDocument: Decodable, Equatable, Sendable {
             }
         }
         if row.economicsState != "trusted" {
-            guard !row.switchAction.available,
-                  !row.prepareAction.available,
-                  !row.adoptRecommendationAction.available,
-                  !row.cleanupStagingAction.available else {
-                throw ModelManagementError.invalidCatalog
-            }
-            if row.evaluateAction.available {
-                guard row.evaluateAction.transactionKind == "evaluate_model",
-                      row.evaluateAction.estimatedBytes == nil,
-                      (row.evaluateAction.actionTimeoutSeconds ?? 1_801) <= 10 else {
+            let local = source.projectionProtocolVersion == "2"
+            guard !row.switchAction.available else { throw ModelManagementError.invalidCatalog }
+            if local {
+                guard row.promptRateUSDPerMillionTokens == nil,
+                      row.completionRateUSDPerMillionTokens == nil, row.providerShareBPS == nil,
+                      row.providerPromptPayoutUSDPerMillionTokens == nil,
+                      row.providerCompletionPayoutUSDPerMillionTokens == nil,
+                      row.demandRank == nil, row.demandWeight == nil,
+                      row.readyProviderCount == nil, row.supplyDeficitScore == nil else {
                     throw ModelManagementError.invalidCatalog
+                }
+                if row.prepareAction.available || row.evaluateAction.available || row.adoptRecommendationAction.available {
+                    guard ["blocked", "unavailable"].contains(row.economicsState),
+                          !["revoked", "withdrawn", "offer_rejected"].contains(row.admission.state),
+                          Set(row.warningCodes + warnings).isDisjoint(with: ["feed_stale", "feed_signature_invalid", "feed_generation_mismatch", "model_not_supported", "hardware_does_not_fit"]),
+                          row.actionModelID != nil else { throw ModelManagementError.invalidCatalog }
+                }
+                if row.evaluateAction.available || row.adoptRecommendationAction.available {
+                    guard row.weightsPresentLocally, row.fit == "fits" else { throw ModelManagementError.invalidCatalog }
+                }
+            } else {
+                guard !row.prepareAction.available, !row.adoptRecommendationAction.available,
+                      !row.cleanupStagingAction.available else { throw ModelManagementError.invalidCatalog }
+                if row.evaluateAction.available {
+                    guard row.evaluateAction.transactionKind == "evaluate_model",
+                          row.evaluateAction.estimatedBytes == nil,
+                          (row.evaluateAction.actionTimeoutSeconds ?? 1_801) <= 10 else {
+                        throw ModelManagementError.invalidCatalog
+                    }
                 }
             }
         }
@@ -702,6 +808,7 @@ struct MalibuModelCatalogEconomicsDocument: Decodable, Equatable, Sendable {
            !Self.closedDisabledReasons.contains(disabledReason) {
             throw ModelManagementError.invalidCatalog
         }
+        if source.projectionProtocolVersion == "2", row.cleanupStagingAction.available { throw ModelManagementError.invalidCatalog }
         try [
             row.switchAction,
             row.prepareAction,
@@ -780,6 +887,13 @@ struct MalibuModelCatalogEconomicsDocument: Decodable, Equatable, Sendable {
     }
 
     private func validate(action: Action) throws {
+        if source.projectionProtocolVersion == "2" {
+            guard action.generationFieldPresent else { throw ModelManagementError.invalidCatalog }
+            if action.available, ["prepare_model", "evaluate_model", "cleanup_staging", "adopt_recommendation"].contains(action.transactionKind ?? "") {
+                guard action.operationGeneration.map(malibuCanonicalUUID) == true, action.transactionID.map(malibuCanonicalUUID) == true,
+                      source.transactionContextSHA256 != nil else { throw ModelManagementError.invalidCatalog }
+            } else if action.operationGeneration != nil { throw ModelManagementError.invalidCatalog }
+        }
         if action.available {
             guard let kind = action.transactionKind,
                   let transactionID = action.transactionID,
@@ -851,6 +965,7 @@ struct MalibuModelCatalogEconomicsDocument: Decodable, Equatable, Sendable {
     ]
 
     private static let closedDisabledReasons: Set<String> = [
+        "local_verification_required", "local_artifact_invalid",
         "action_unavailable",
         "local_inventory_only",
         "model_not_local",
@@ -1006,7 +1121,7 @@ private struct DynamicCodingKey: CodingKey {
     }
 }
 
-private func rejectUnknownKeys(_ decoder: Decoder, allowed: [String]) throws {
+func rejectUnknownKeys(_ decoder: Decoder, allowed: [String]) throws {
     let container = try decoder.container(keyedBy: DynamicCodingKey.self)
     let allowed = Set(allowed)
     if let extra = container.allKeys.first(where: { !allowed.contains($0.stringValue) }) {
@@ -1099,10 +1214,33 @@ protocol MalibuModelCLIRunning: AnyObject {
         onLine: @escaping @MainActor @Sendable (String) -> Void
     ) async throws -> ModelCLIResult
     func cancelCurrentOperation()
+    func cancelCatalogAuthorization()
+    var catalogReadIsBusy: Bool { get }
+    func cancelCatalogRead()
+    func readCatalog(_ read: MalibuCatalogRead, paths: ProviderPaths, peer: MalibuModelPeerEvidence, timeout: TimeInterval,
+                     progress: @escaping @MainActor @Sendable (MalibuCatalogReadProgress) -> Void) async throws -> ModelCLIResult
+    func finishCatalog(_ pending: MalibuPendingCatalogTransaction, paths: ProviderPaths) async throws
+    func authorizeCatalog(_ pending: MalibuPendingCatalogTransaction, contextDigest: String, peer: MalibuModelPeerEvidence, paths: ProviderPaths) async throws -> MalibuTransactionPin
+    func runCatalog(_ pending: MalibuPendingCatalogTransaction, control: MalibuCatalogControl?, peer: MalibuModelPeerEvidence?, paths: ProviderPaths,
+                    onLine: @escaping @MainActor @Sendable (String) -> Void) async throws -> ModelCLIResult
 }
 
 extension MalibuModelCLIRunning {
     func cancelCurrentOperation() {}
+    func cancelCatalogAuthorization() {}
+    var catalogReadIsBusy: Bool { false }
+    func cancelCatalogRead() {}
+    func readCatalog(_ read: MalibuCatalogRead, paths: ProviderPaths, peer: MalibuModelPeerEvidence, timeout: TimeInterval,
+                     progress: @escaping @MainActor @Sendable (MalibuCatalogReadProgress) -> Void) async throws -> ModelCLIResult { throw ModelManagementError.invalidCatalog }
+
+    func finishCatalog(_ pending: MalibuPendingCatalogTransaction, paths: ProviderPaths) async throws {
+        try await MalibuTransactionWorker.shared.run { request in
+            try MalibuTransactionFiles.clear(pending, paths: paths, request: request)
+        }
+    }
+    func authorizeCatalog(_ pending: MalibuPendingCatalogTransaction, contextDigest: String, peer: MalibuModelPeerEvidence, paths: ProviderPaths) async throws -> MalibuTransactionPin { throw ModelManagementError.invalidCatalog }
+    func runCatalog(_ pending: MalibuPendingCatalogTransaction, control: MalibuCatalogControl?, peer: MalibuModelPeerEvidence?, paths: ProviderPaths,
+                    onLine: @escaping @MainActor @Sendable (String) -> Void) async throws -> ModelCLIResult { throw ModelManagementError.invalidCatalog }
 
     func run(
         arguments: [String],
@@ -1211,6 +1349,7 @@ final class MalibuModelCLI: MalibuModelCLIRunning {
 
     static let shared = MalibuModelCLI()
     private let cancellation = ModelCLIProcessCancellation()
+    var catalogAuthorization: (MalibuPendingCatalogTransaction, MalibuTransactionRequest)?
 
     func cancelCurrentOperation() {
         cancellation.cancel()
@@ -1305,7 +1444,7 @@ final class MalibuModelCLI: MalibuModelCLIRunning {
         }
     }
 
-    func resolveExecutable(
+    nonisolated func resolveExecutable(
         peer: MalibuModelPeerEvidence? = nil,
         environment: [String: String] = ProcessInfo.processInfo.environment,
         bundleURL: URL = Bundle.main.bundleURL
@@ -1353,7 +1492,7 @@ final class MalibuModelCLI: MalibuModelCLIRunning {
         throw Error.executableUnavailable
     }
 
-    private static func isSignedProviderCLI(at url: URL, runningPID: Int?) -> Bool {
+    nonisolated static func isSignedProviderCLI(at url: URL, runningPID: Int?) -> Bool {
         var code: SecStaticCode?
         guard SecStaticCodeCreateWithPath(url as CFURL, [], &code) == errSecSuccess,
               let code else { return false }
@@ -1383,7 +1522,7 @@ final class MalibuModelCLI: MalibuModelCLIRunning {
         return expectedHash == runningHash
     }
 
-    private func launchdProgramPath() -> String? {
+    nonisolated private func launchdProgramPath() -> String? {
         let process = Process()
         let pipe = Pipe()
         process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
@@ -1493,11 +1632,12 @@ final class ModelManagementStore: ObservableObject {
         case cooldown(target: String, secondsRemaining: Int)
         case checkingRecommendation(phase: String)
         case adoptingRecommendation(target: String, phase: String)
+        case catalogTransaction
         case failed(String)
 
         var blocksRefresh: Bool {
             switch self {
-            case .loadingList, .switching, .reconciling, .runtimeConflict,
+            case .loadingList, .switching, .reconciling, .runtimeConflict, .catalogTransaction,
                  .checkingRecommendation, .adoptingRecommendation:
                 return true
             case .idle, .cooldown, .failed:
@@ -1524,8 +1664,33 @@ final class ModelManagementStore: ObservableObject {
     @Published private(set) var recommendation: MalibuRecommendationDocument?
     @Published private(set) var previousModelID: String?
     @Published private(set) var history: [ModelActivityEntry] = []
-    @Published private(set) var backgroundRecommendationsEnabled: Bool
+    @Published private(set) var backgroundRecommendationsEnabled: Bool = true
 
+    @Published private(set) var cleanupRecoveries: [MalibuModelCatalogEconomicsDocument.Recovery] = []
+    @Published private(set) var catalogPersistenceBlocked = false
+    @Published private(set) var catalogVerificationInProgress = false
+    @Published private(set) var catalogReadWaitingForExit = false
+    @Published private(set) var catalogVerifiedBytes: UInt64 = 0
+    private var catalogReadNonce: String?
+    private var catalogReadReclaimTask: Task<Void, Never>?
+
+    private var transactionContextDigest: String?
+    @Published private(set) var pendingCatalogTransaction: MalibuPendingCatalogTransaction?
+    @Published private(set) var catalogTransactionDelayed = false
+    @Published private(set) var catalogTransactionCancelRequested = false
+    @Published private(set) var recommendationIsLocalActivation = false
+    private var catalogTranscript = MalibuCatalogTransactionTranscript()
+    private var catalogTransactionInvalid = false
+    private var catalogTransactionLastEventAt = Date()
+    private var catalogTransactionWatchdog: Task<Void, Never>?
+    private var catalogReconciliationInFlight = false
+    @Published private(set) var catalogResourcePreparationInProgress = false
+    private var catalogResourceRecoveryTask: Task<Void, Never>?
+    private var catalogCompletionRemovalStarted: MalibuPendingCatalogTransaction?
+    private var catalogControlInFlight = false
+    private var catalogCancelQueued = false
+    private let catalogReadTimeoutNanoseconds: UInt64
+    private let transactionControlCLI: any MalibuModelCLIRunning
     private let cli: any MalibuModelCLIRunning
     private let paths: ProviderPaths
     private let defaults: UserDefaults
@@ -1542,6 +1707,7 @@ final class ModelManagementStore: ObservableObject {
     private var lastSwitchEventReason: String?
     private var recommendationSchedule = MalibuRecommendationSchedule()
     private var recommendationJSON: Data?
+    private var localRecommendationTransactionID: String?
     private var backgroundCheckSafetyCancelled = false
     private var catalogProjectionProcessLaunchID: String?
     private var catalogProjectionSequence: UInt64?
@@ -1550,14 +1716,33 @@ final class ModelManagementStore: ObservableObject {
 
     init(
         cli: any MalibuModelCLIRunning = MalibuModelCLI.shared,
+        transactionControlCLI: (any MalibuModelCLIRunning)? = nil,
+        catalogReadTimeoutNanoseconds: UInt64 = 10_000_000_000,
         paths: ProviderPaths = .current,
         defaults: UserDefaults = .standard,
         powerMonitor: MalibuPowerMonitor = MalibuPowerMonitor()
     ) {
         self.cli = cli
+        self.transactionControlCLI = transactionControlCLI ?? MalibuModelCLI()
+        self.catalogReadTimeoutNanoseconds = catalogReadTimeoutNanoseconds
         self.paths = paths
         self.defaults = defaults
         self.powerMonitor = powerMonitor
+        do {
+            pendingCatalogTransaction = try MalibuTransactionFiles.load(paths: paths)
+            if pendingCatalogTransaction == nil, defaults.data(forKey: "malibu.model-management.pending-catalog") != nil {
+                catalogPersistenceBlocked = true
+            }
+        } catch { catalogPersistenceBlocked = true }
+        if let pending = pendingCatalogTransaction {
+            catalogTransactionCancelRequested = pending.cancelRequested
+            operation = .catalogTransaction
+            statusLine = String(localized: "Reconnecting to the model transaction…", comment: "Transaction recovery")
+        }
+        if catalogPersistenceBlocked {
+            operation = .failed("transaction_authorization_unavailable")
+            statusLine = String(localized: "Saved transaction authorization is unavailable. Restore the original provider installation and configuration before recovery.", comment: "Transaction authorization blocked")
+        }
         if let data = defaults.data(forKey: "malibu.model-management.state"),
            let persisted = try? JSONDecoder().decode(ModelManagementPersistedState.self, from: data) {
             previousModelID = persisted.previousModelID
@@ -1584,16 +1769,28 @@ final class ModelManagementStore: ObservableObject {
         )
     }
 
+    private var recommendationActionTarget: String? {
+        recommendationIsLocalActivation ? recommendation?.serveConfig?.modelCatalogModelID : recommendation?.recommendedModel
+    }
+
     var canAdoptRecommendation: Bool {
-        guard let target = recommendation?.recommendedModel,
+        guard !catalogPersistenceBlocked, pendingCatalogTransaction == nil,
+              let target = recommendationActionTarget,
+              !recommendationIsLocalActivation || rows.contains(where: {
+                  $0.id == target && $0.catalogModelKey == recommendation?.recommendedModel
+                    && $0.localAdoptionTransactionID == localRecommendationTransactionID
+                    && localRecommendationTransactionID != nil
+              }),
               !Self.recommendationTargetIsCurrent(target, currentModelID: currentModelID),
+              !Self.recommendationTargetIsCurrent(recommendation?.recommendedModel ?? target, currentModelID: currentModelID),
               Self.recommendationTargetIsReadyForAdoption(
                   target,
                   listState: listState,
                   rows: rows
               ),
-              recommendation?.isActionable == true,
+              (recommendationIsLocalActivation ? recommendation?.isEligibleForLocalActivation : recommendation?.isActionable) == true,
               recommendationJSON != nil,
+              (!recommendationIsLocalActivation || localActivationCapabilityAvailable),
               recommendationAdoptionCapabilityAvailable,
               peerObservationFresh,
               peerEvidence.isFresh(),
@@ -1602,8 +1799,8 @@ final class ModelManagementStore: ObservableObject {
     }
 
     var recommendationAdoptionUnavailableReason: String? {
-        guard let recommendation, let target = recommendation.recommendedModel else { return nil }
-        if let advisoryReason = recommendation.adoptionAdvisoryReason {
+        guard let recommendation, let target = recommendationActionTarget else { return nil }
+        if !recommendationIsLocalActivation, let advisoryReason = recommendation.adoptionAdvisoryReason {
             return advisoryReason
         }
         if Self.recommendationTargetIsCurrent(target, currentModelID: currentModelID) {
@@ -1653,9 +1850,9 @@ final class ModelManagementStore: ObservableObject {
         guard listState == .ready else { return false }
         let targetKey = modelIdentityKey(target)
         return rows.contains { row in
-            modelIdentityKey(row.id) == targetKey
+            (modelIdentityKey(row.id) == targetKey || (row.localActivation && row.catalogModelKey.map(modelIdentityKey) == targetKey))
                 && row.weightsPresentLocally
-                && row.action == .switchModel
+                && (row.action == .switchModel || (row.localActivation && row.localAdoptionAvailable && row.fit == "fits"))
         }
     }
 
@@ -1697,12 +1894,20 @@ final class ModelManagementStore: ObservableObject {
         )
     }
 
+    var localActivationCapabilityAvailable: Bool {
+        [MalibuModelCapabilityManifest.catalogTransactions, MalibuModelCapabilityManifest.localActivation,
+         MalibuModelCapabilityManifest.recommendationAdoption].allSatisfy {
+            MalibuModelCapabilityManifest.checkedIn.supports($0, peer: peerEvidence)
+        }
+    }
+
+    var catalogReadCapabilityAvailable: Bool { MalibuModelCLI.supportsCatalogRead(peerEvidence) }
     var catalogProjectionRetryAvailable: Bool {
-        listState == .unavailable && catalogEconomicsCapabilityAvailable
+        listState == .unavailable && catalogReadCapabilityAvailable && !cli.catalogReadIsBusy && !transactionControlCLI.catalogReadIsBusy && !catalogReadWaitingForExit
     }
 
     var canPerformModelAction: Bool {
-        guard readySwitchCapabilityAvailable, peerObservationFresh, peerEvidence.isFresh() else { return false }
+        guard !catalogPersistenceBlocked, catalogReadCapabilityAvailable, !catalogReadWaitingForExit, pendingCatalogTransaction == nil, (readySwitchCapabilityAvailable || localActivationCapabilityAvailable), peerObservationFresh, peerEvidence.isFresh() else { return false }
         if let cooldownUntil { return cooldownUntil <= Date() }
         return listState == .ready && operation == .idle
     }
@@ -1747,6 +1952,13 @@ final class ModelManagementStore: ObservableObject {
         peer: MalibuModelPeerEvidence = .unavailable
     ) async {
         updatePeerEvidence(peer)
+        if pendingCatalogTransaction != nil {
+            if peerObservationFresh, let currentModelID { self.currentModelID = currentModelID }
+            if catalogTransactionWatchdog == nil && !catalogReconciliationInFlight {
+                await reconcileCatalogTransaction()
+            }
+            return
+        }
         if let pendingSwitch {
             switch operation {
             case .reconciling:
@@ -1792,46 +2004,376 @@ final class ModelManagementStore: ObservableObject {
         }
         let configuredModel = currentModelID ?? ProviderConfig.readModel(paths: paths)
         self.currentModelID = configuredModel
-        let supportsLegacyList = readySwitchCapabilityAvailable
-        if catalogEconomicsCapabilityAvailable {
-            await refreshCatalogEconomics(configuredModel: configuredModel)
-            return
-        }
+        guard catalogReadCapabilityAvailable else { showUnsupportedCatalogRead(); return }
+        await refreshCatalogEconomics(configuredModel: configuredModel)
+    }
+
+    private func showUnsupportedCatalogRead() {
         clearCatalogProjectionTracking()
-        guard supportsLegacyList else {
-            listState = .viewOnly
-            operation = .idle
-            statusLine = configuredModel == nil
-                ? String(localized: "Model controls require a fresh compatible provider update. The current model remains view-only.", comment: "Model capability gate")
-                : String(localized: "Configured model: \(configuredModel ?? "unknown"). Live switching is unavailable until the provider is running with warm swap.", comment: "Configured model capability gate")
-            return
+        rows = []; cleanupRecoveries = []; transactionContextDigest = nil
+        listState = .viewOnly
+        if pendingCatalogTransaction == nil { operation = .idle }
+        statusLine = pendingCatalogTransaction != nil
+            ? String(localized: "Saved transaction needs compatible provider software for verification", comment: "Unsupported pending catalog")
+            : peerEvidence.isFresh()
+                ? String(localized: "Update or repair provider software to use the model catalog", comment: "Unsupported catalog reader")
+                : String(localized: "Waiting for fresh provider status", comment: "Stale catalog reader")
+    }
+
+    func canRefreshAdmission(for row: MalibuModelRow) -> Bool {
+        let usableOperation = operation == .idle || operation == .failed("admission_unavailable")
+        return !catalogPersistenceBlocked && catalogReadCapabilityAvailable && localActivationCapabilityAvailable && peerObservationFresh && peerEvidence.isFresh()
+            && usableOperation && pendingCatalogTransaction == nil && rows.contains(row)
+            && row.category == .current && row.catalogModelKey != nil
+    }
+    func canRequestAdmission(for row: MalibuModelRow) -> Bool {
+        canRefreshAdmission(for: row) && row.weightsPresentLocally && row.fit == "fits"
+            && ["local_only", "not_offered", "offerable", "revoked", "withdrawn", "offer_rejected"].contains(row.admissionState ?? "")
+    }
+    func canRetryAdmission(for row: MalibuModelRow) -> Bool {
+        canRefreshAdmission(for: row) && row.weightsPresentLocally && row.fit == "fits"
+            && ["offer_submitted", "sandbox_probe_only", "network_admitted_unsettled", "catalog_priced"].contains(row.admissionState ?? "")
+    }
+
+    func requestAdmission(for row: MalibuModelRow, confirmed: Bool, retry: Bool = false) async {
+        guard confirmed, retry ? canRetryAdmission(for: row) : canRequestAdmission(for: row), rows.contains(row) else { return }
+        operation = .loadingList
+        statusLine = String(localized: "Submitting the provider-signed offer. Network admission is pending.", comment: "Admission offer pending")
+        do {
+            let result = try await cli.run(arguments: (retry ? ["models", "admission", "retry"] : ["models", "offer"]) + [row.id, "--yes", "--json", "--config", paths.configFile.path], peer: peerEvidence, onLine: { _ in })
+            guard result.exitCode == 0 else { throw ModelManagementError.invalidCatalog }
+            await refreshCatalogEconomics(configuredModel: currentModelID)
+            statusLine = String(localized: "Offer submitted. Admission, catalog pricing, and settlement eligibility depend on coordinator verification; no settled credit is established here.", comment: "Admission offer submitted")
+        } catch {
+            operation = .failed("admission_unavailable")
+            statusLine = String(localized: "Offer could not be confirmed. Refresh admission status before retrying.", comment: "Admission offer failed")
         }
-        listState = .checking
+    }
+
+    func refreshAdmission(for row: MalibuModelRow) async {
+        guard canRefreshAdmission(for: row), rows.contains(row) else { return }
         operation = .loadingList
         do {
-            let result = try await cli.run(
-                arguments: [
-                    "models", "list", "--json",
-                    "--config", paths.configFile.path,
-                    "--ctl-socket-path", paths.controlSocket.path,
-                ],
-                peer: peerEvidence,
-                onLine: { _ in }
-            )
+            let result = try await cli.run(arguments: ["models", "admission", "status", row.id, "--json", "--config", paths.configFile.path], peer: peerEvidence, onLine: { _ in })
             guard result.exitCode == 0 else { throw ModelManagementError.invalidCatalog }
-            let document = try decodeList(result.stdout).validated()
-            self.currentModelID = document.currentModelID ?? configuredModel
-            self.rows = document.rows.map { MalibuModelRow(row: $0, currentModelID: self.currentModelID, warmSwapAvailable: document.warmSwapAvailable) }
-            self.listState = document.warmSwapAvailable ? .ready : .viewOnly
-            self.statusLine = document.warmSwapAvailable
-                ? String(localized: "Model controls ready.", comment: "Model activity status")
-                : String(localized: "Provider is not running with warm swap; model controls are view-only.", comment: "Model activity status")
-            self.operation = .idle
+            await refreshCatalogEconomics(configuredModel: currentModelID)
         } catch {
-            self.listState = .unavailable
-            self.operation = .failed(error.localizedDescription)
-            self.statusLine = String(localized: "Model controls unavailable. The current model remains visible from provider status.", comment: "Model activity status")
+            operation = .failed("admission_unavailable")
+            statusLine = String(localized: "Admission status is unavailable. Local activation does not authorize paid routing.", comment: "Admission status unavailable")
         }
+    }
+
+    func catalogConfirmation(for row: MalibuModelRow) -> String {
+        let size: String
+        if let bytes = row.catalogTransaction?.estimatedBytes {
+            size = String(localized: "Estimated download or recoverable staging size: \(ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)).", comment: "Preparation size")
+        } else {
+            size = String(localized: "Download or staging size is unavailable.", comment: "Preparation unknown size")
+        }
+        if row.action == .cleanup {
+            return String(localized: "Target: \(row.id). Clean only this CLI-owned transaction's staging. \(size) Published and active models are preserved.", comment: "Cleanup confirmation")
+        }
+        return String(localized: "Target: \(row.id). Verified signed MacProvider catalog. \(size) Preparation and measurement leave the active model unchanged. Local activation requires separate confirmation and does not authorize paid routing.", comment: "Local model confirmation")
+    }
+
+    var canPerformCleanupRecovery: Bool {
+        !catalogPersistenceBlocked && catalogReadCapabilityAvailable && pendingCatalogTransaction == nil && localActivationCapabilityAvailable
+            && peerObservationFresh && peerEvidence.isFresh() && operation == .idle && transactionContextDigest != nil
+            && (listState == .ready || listState == .viewOnly)
+    }
+    func cleanupConfirmation(_ recovery: MalibuModelCatalogEconomicsDocument.Recovery) -> String {
+        String(localized: "Target: \(recovery.targetModelID). Clean only this CLI-owned transaction's staging. Staging size is unavailable. Published and active models are preserved.", comment: "Independent staging recovery confirmation")
+    }
+    func performCleanupRecovery(_ recovery: MalibuModelCatalogEconomicsDocument.Recovery, confirmed: Bool) async {
+        guard confirmed, canPerformCleanupRecovery, cleanupRecoveries.contains(recovery) else { return }
+        await dispatchCatalog(action: recovery.action, target: recovery.targetModelID, modelKey: recovery.modelKey)
+    }
+    func performCatalogAction(_ row: MalibuModelRow, confirmed: Bool) async {
+        guard confirmed, canPerformModelAction, localActivationCapabilityAvailable,
+              rows.contains(row), let action = row.catalogTransaction, let key = row.catalogModelKey,
+              ["prepare_model", "evaluate_model"].contains(action.transactionKind ?? "") else { return }
+        await dispatchCatalog(action: action, target: row.id, modelKey: key)
+    }
+    private func dispatchCatalog(action: MalibuModelCatalogEconomicsDocument.Action, target: String, modelKey: String) async {
+        guard !catalogPersistenceBlocked, pendingCatalogTransaction == nil, let digest = transactionContextDigest,
+              action.available, action.requiresConfirmation, let id = action.transactionID,
+              let kind = action.transactionKind, let generation = action.operationGeneration,
+              let timeout = action.actionTimeoutSeconds else { return }
+        var pending = MalibuPendingCatalogTransaction(id: id, target: target, modelKey: modelKey, kind: kind,
+            timeoutSeconds: timeout, startedAt: Date(), operationGeneration: generation)
+        operation = .catalogTransaction
+        catalogResourcePreparationInProgress = true
+        statusLine = String(localized: "Preparing verified transaction resources…", comment: "Resource preparation")
+        do {
+            pending.pin = try await cli.authorizeCatalog(pending, contextDigest: digest, peer: peerEvidence, paths: paths)
+            pendingCatalogTransaction = pending
+        } catch {
+            statusLine = String(localized: "Transaction validation is finishing. Controls remain busy; no new operation will start from late validation.", comment: "Resource validation retained")
+            scheduleCatalogResourceRecovery()
+            return
+        }
+        catalogResourcePreparationInProgress = false
+        catalogTranscript = MalibuCatalogTransactionTranscript()
+        catalogTransactionInvalid = false
+        catalogTransactionCancelRequested = false
+        operation = .catalogTransaction
+        startCatalogWatchdog()
+        do {
+            _ = try await cli.runCatalog(pending, control: nil, peer: peerEvidence, paths: paths, onLine: { [weak self, pending] line in
+                guard self?.pendingCatalogTransaction?.sameOperation(as: pending) == true else { return }
+                self?.consumeCatalogLine(line)
+            })
+        } catch {
+            statusLine = String(localized: "Transaction response unavailable. Reconcile its status before starting another action.", comment: "Transaction interrupted")
+        }
+        catalogTransactionWatchdog?.cancel()
+        catalogTransactionWatchdog = nil
+        await reconcileCatalogTransaction()
+    }
+
+    func requestCatalogCancellation() async {
+        guard var pending = pendingCatalogTransaction else { return }
+        pending.cancelRequested = true
+        pendingCatalogTransaction = pending
+        catalogTransactionCancelRequested = true
+        if catalogControlInFlight || MalibuTransactionWorker.shared.isBusy {
+            catalogCancelQueued = true
+            statusLine = String(localized: "Cancellation intent is waiting to be saved. Resource validation remains busy.", comment: "Cancellation persistence waiting")
+            scheduleCatalogResourceRecovery()
+            return
+        }
+        catalogCancelQueued = false
+        statusLine = String(localized: "Cancellation requested. Waiting for the provider's committed outcome…", comment: "Transaction cancelling")
+        do {
+            _ = try await runPendingControl(pending, control: .cancel, onLine: { [weak self, pending] line in
+                guard self?.pendingCatalogTransaction?.sameOperation(as: pending) == true else { return }
+                self?.consumeCatalogLine(line)
+            })
+        } catch {
+            statusLine = String(localized: "Cancellation could not be confirmed. Retry status or cancellation; the operation may still be running.", comment: "Cancellation unavailable")
+        }
+    }
+
+    func reconcileCatalogTransaction() async {
+        guard let pending = pendingCatalogTransaction, !catalogReconciliationInFlight, !catalogControlInFlight else { return }
+        catalogReconciliationInFlight = true
+        defer { catalogReconciliationInFlight = false }
+        operation = .catalogTransaction
+        do {
+            if catalogCompletionRemovalStarted?.sameOperation(as: pending) != true {
+                let result = try await runPendingControl(pending, control: .status, onLine: { [weak self, pending] line in
+                    guard self?.pendingCatalogTransaction?.sameOperation(as: pending) == true else { return }
+                    self?.consumeCatalogLine(line)
+                })
+                guard result.exitCode == 0 else { throw ModelManagementError.invalidCatalog }
+            }
+            guard !catalogTransactionInvalid, let terminal = catalogTranscript.terminal else {
+                statusLine = String(localized: "Waiting for a verified terminal result. Retry status; cancellation remains available.", comment: "Transaction awaiting terminal")
+                return
+            }
+            let previousProjection = catalogProjectionAcceptedGeneratedAt
+            let previousSequence = catalogProjectionSequence
+            let previousProcess = catalogProjectionProcessLaunchID
+            guard await refreshCatalogEconomics(configuredModel: currentModelID) else { return }
+            if terminal.state == "succeeded", ["prepare_model", "evaluate_model"].contains(pending.kind) {
+                guard await refreshCatalogEconomics(configuredModel: currentModelID, verificationTarget: (pending.target, pending.modelKey)) else { return }
+            }
+            guard listState != .unavailable, peerObservationFresh, peerEvidence.isFresh(),
+                  catalogProjectionAcceptedGeneratedAt != previousProjection || catalogProjectionSequence != previousSequence || catalogProjectionProcessLaunchID != previousProcess,
+                  terminal.state != "succeeded" || pending.kind == "cleanup_staging"
+                    || rows.contains(where: { $0.id == pending.target && $0.weightsPresentLocally }) else {
+                operation = .catalogTransaction
+                statusLine = String(localized: "The transaction ended; fresh model state is still pending. Retry status before further actions.", comment: "Transaction refresh pending")
+                return
+            }
+            if terminal.state == "succeeded", pending.kind == "evaluate_model",
+               catalogCompletionRemovalStarted?.sameOperation(as: pending) != true {
+                let result = try await runPendingControl(pending, control: .result, onLine: { _ in })
+                let data = Data(result.stdout.utf8)
+                try MalibuStrictJSON.rejectDuplicateKeys(data)
+                guard result.exitCode == 0,
+                      let document = try? JSONDecoder().decode(MalibuRecommendationDocument.self, from: data).validated(localActivationTarget: pending.target, localActivationModelKey: pending.modelKey),
+                      document.isEligibleForLocalActivation else { throw ModelManagementError.invalidCatalog }
+                recommendation = document
+                recommendationJSON = data
+                recommendationIsLocalActivation = true
+                localRecommendationTransactionID = pending.id
+            }
+            catalogCompletionRemovalStarted = pending
+            try await cli.finishCatalog(pending, paths: paths)
+            catalogCompletionRemovalStarted = nil
+            pendingCatalogTransaction = nil
+            defaults.removeObject(forKey: "malibu.model-management.pending-catalog")
+            operation = .idle
+            catalogTransactionDelayed = false
+            if terminal.state == "succeeded" {
+                statusLine = pending.cancelRequested
+                    ? String(localized: "Cancellation arrived after commit. The local operation completed; network admission and settlement are separate.", comment: "Cancellation too late")
+                    : String(localized: "Local operation completed and model state refreshed. Network admission and settlement are separate.", comment: "Local operation complete")
+            } else {
+                statusLine = terminal.state == "cancelled"
+                    ? String(localized: "Operation cancelled. The active model is unchanged.", comment: "Transaction cancelled")
+                    : String(localized: "Local operation failed or timed out. Model state has been refreshed; inspect any staging cleanup action.", comment: "Transaction failed")
+            }
+            MalibuAccessibility.announce(statusLine)
+        } catch {
+            operation = .catalogTransaction
+            statusLine = String(localized: "Transaction recovery is incomplete. Retry status before starting another action.", comment: "Transaction recovery incomplete")
+        }
+    }
+
+    private func runPendingControl(_ pending: MalibuPendingCatalogTransaction, control: MalibuCatalogControl,
+        onLine: @escaping @MainActor @Sendable (String) -> Void) async throws -> ModelCLIResult {
+        guard !catalogControlInFlight else { throw ModelManagementError.invalidCatalog }
+        catalogControlInFlight = true
+        defer {
+            catalogControlInFlight = false
+            if catalogCancelQueued {
+                catalogCancelQueued = false
+                Task { await self.requestCatalogCancellation() }
+            }
+        }
+        return try await transactionControlCLI.runCatalog(pending, control: control, peer: nil, paths: paths, onLine: onLine)
+    }
+
+    private func consumeCatalogLine(_ line: String) {
+        guard let pending = pendingCatalogTransaction else { return }
+        do {
+            let data = Data(line.utf8)
+            try MalibuStrictJSON.rejectDuplicateKeys(data)
+            let event = try JSONDecoder().decode(MalibuCatalogTransactionEvent.self, from: data)
+            guard try catalogTranscript.consume(event, id: pending.id, kind: pending.kind, modelKey: pending.modelKey, generation: pending.operationGeneration) else { return }
+            catalogTransactionLastEventAt = Date()
+            catalogTransactionDelayed = false
+            if event.state == "cancel_requested" { catalogTransactionCancelRequested = true }
+            let stage: String
+            switch event.progress?.stageLabelKey {
+            case "queued": stage = String(localized: "Queued", comment: "Transaction queued stage")
+            case "preparing": stage = String(localized: "Preparing weights", comment: "Transaction prepare stage")
+            case "evaluating": stage = String(localized: "Measuring prepared model", comment: "Transaction evaluate stage")
+            case "cancelling": stage = String(localized: "Cancelling", comment: "Transaction cancel stage")
+            case "cleanup": stage = String(localized: "Cleaning owned staging", comment: "Transaction cleanup stage")
+            default: stage = String(localized: "Local model operation", comment: "Transaction generic stage")
+            }
+            if event.warningCode == "staging_cleanup_required" {
+                statusLine = String(localized: "Owned staging requires cleanup after this operation. The provider will expose a cleanup action.", comment: "Transaction cleanup required")
+            } else if !event.isTerminal {
+                if let percent = event.progress?.percentComplete {
+                    statusLine = String(localized: "\(stage): \(Int(percent))% complete. Waiting for verified completion.", comment: "Transaction percentage")
+                } else {
+                    statusLine = String(localized: "\(stage). Waiting for verified completion.", comment: "Transaction heartbeat")
+                }
+            }
+        } catch {
+            catalogTransactionInvalid = true
+            statusLine = String(localized: "Unsupported transaction response. Actions remain disabled until the provider state can be verified.", comment: "Transaction malformed")
+        }
+    }
+
+    private func startCatalogWatchdog() {
+        catalogTransactionLastEventAt = Date()
+        catalogTransactionWatchdog?.cancel()
+        catalogTransactionWatchdog = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                do { try await Task.sleep(nanoseconds: 1_000_000_000) } catch { return }
+                guard let self, let pending = self.pendingCatalogTransaction else { return }
+                self.updateCatalogTransactionDelay(now: Date())
+                if Date().timeIntervalSince(pending.startedAt) >= Double(pending.timeoutSeconds), !self.catalogTransactionCancelRequested {
+                    await self.requestCatalogCancellation()
+                }
+            }
+        }
+    }
+
+    func updateCatalogTransactionDelay(now: Date) {
+        guard pendingCatalogTransaction != nil, catalogTranscript.terminal == nil else { return }
+        if now.timeIntervalSince(catalogTransactionLastEventAt) >= 30 {
+            catalogTransactionDelayed = true
+            statusLine = String(localized: "Response delayed. The operation may still be running; cancellation remains available.", comment: "Transaction delayed")
+        }
+    }
+
+    func cancelCatalogPreparation() {
+        cli.cancelCatalogAuthorization()
+        statusLine = String(localized: "Transaction preparation stopped. Waiting for resource validation to finish safely.", comment: "Resource preparation abandoned")
+    }
+    private func scheduleCatalogResourceRecovery() {
+        guard catalogResourceRecoveryTask == nil else { return }
+        catalogResourceRecoveryTask = Task { @MainActor [weak self] in
+            defer { self?.catalogResourceRecoveryTask = nil }
+            while MalibuTransactionWorker.shared.isBusy {
+                do { try await Task.sleep(nanoseconds: 200_000_000) } catch { return }
+            }
+            guard let self else { return }
+            let recoveryPaths = self.paths
+            do {
+                let saved = try await MalibuTransactionWorker.shared.run { _ in try MalibuTransactionFiles.load(paths: recoveryPaths) }
+                self.catalogResourcePreparationInProgress = false
+                if let saved {
+                    self.pendingCatalogTransaction = saved
+                    self.operation = .catalogTransaction
+                    self.statusLine = String(localized: "Transaction launch is not confirmed. Check status before another action.", comment: "Resource late pending persistence")
+                } else if self.pendingCatalogTransaction == nil {
+                    self.operation = .idle
+                    self.statusLine = String(localized: "Transaction preparation did not complete. You can retry after refreshing the catalog.", comment: "Resource preparation retry")
+                }
+                if self.catalogCancelQueued, self.pendingCatalogTransaction != nil {
+                    self.catalogCancelQueued = false
+                    await self.requestCatalogCancellation()
+                }
+            } catch {
+                self.catalogResourcePreparationInProgress = false
+                self.catalogPersistenceBlocked = true
+                self.statusLine = String(localized: "Saved transaction authorization is unavailable. Restore the original provider installation and configuration before recovery.", comment: "Transaction authorization blocked")
+            }
+        }
+    }
+
+    private func runCatalogRead(using runner: any MalibuModelCLIRunning, read: MalibuCatalogRead) async throws -> ModelCLIResult {
+        guard catalogReadCapabilityAvailable, catalogReadNonce == nil, !runner.catalogReadIsBusy else { throw ModelManagementError.invalidCatalog }
+        catalogReadNonce = read.id
+        defer { if catalogReadNonce == read.id { catalogReadNonce = nil } }
+        do {
+            let result = try await runner.readCatalog(read, paths: paths, peer: peerEvidence,
+                timeout: read.mode == .verify ? 1800 : Double(catalogReadTimeoutNanoseconds) / 1_000_000_000,
+                progress: { [weak self] update in
+                    guard let self, self.catalogReadNonce == read.id else { return }
+                    self.catalogVerifiedBytes = update.bytes
+                    self.statusLine = update.elapsed >= 30
+                        ? String(localized: "Verification is taking longer. Only fully checked files can become ready.", comment: "Verification delayed")
+                        : String(localized: "Verifying local files", comment: "Catalog verification progress")
+                })
+            guard catalogReadNonce == read.id else { throw ModelManagementError.invalidCatalog }
+            return result
+        } catch {
+            catalogReadWaitingForExit = runner.catalogReadIsBusy
+            if catalogReadWaitingForExit {
+                catalogReadReclaimTask?.cancel()
+                catalogReadReclaimTask = Task { @MainActor [weak self] in
+                    while runner.catalogReadIsBusy {
+                        do { try await Task.sleep(nanoseconds: 50_000_000) } catch { return }
+                    }
+                    self?.catalogReadWaitingForExit = false
+                }
+            }
+            throw error
+        }
+    }
+
+    func stopCatalogVerification() {
+        catalogReadNonce = nil
+        cli.cancelCatalogRead()
+        statusLine = String(localized: "Verification stopped; waiting for the reader to exit", comment: "Catalog verification stopping")
+    }
+
+    func canVerifyLocalFiles(_ row: MalibuModelRow) -> Bool {
+        catalogReadCapabilityAvailable && !catalogPersistenceBlocked && pendingCatalogTransaction == nil && operation == .idle
+            && !catalogVerificationInProgress && !catalogReadWaitingForExit && !cli.catalogReadIsBusy
+            && catalogReadNonce == nil && rows.contains(row) && row.needsLocalVerification && transactionContextDigest != nil
+    }
+    func verifyLocalFiles(_ row: MalibuModelRow) async {
+        guard canVerifyLocalFiles(row) else { return }
+        _ = await refreshCatalogEconomics(configuredModel: currentModelID, verificationTarget: (row.id, row.catalogModelKey ?? ""))
     }
 
     private func clearCatalogProjectionTracking() {
@@ -1842,33 +2384,45 @@ final class ModelManagementStore: ObservableObject {
         catalogProjectionAcceptedGeneratedAt = nil
     }
 
-    private func refreshCatalogEconomics(configuredModel: String?) async {
+    @discardableResult
+    private func refreshCatalogEconomics(configuredModel: String?, verificationTarget: (String, String)? = nil) async -> Bool {
+        guard catalogReadCapabilityAvailable else { showUnsupportedCatalogRead(); return false }
+        guard !cli.catalogReadIsBusy && !catalogReadWaitingForExit else { return false }
+        catalogVerificationInProgress = verificationTarget != nil
+        if verificationTarget != nil {
+            catalogVerifiedBytes = 0
+            statusLine = String(localized: "Verifying local files", comment: "Catalog verification progress")
+        }
+        defer { catalogVerificationInProgress = false }
+
         let previousListState = listState
         listState = .checking
         operation = .loadingList
         do {
-            let result = try await cli.run(
-                arguments: [
-                    "models", "catalog-economics", "--json",
-                    "--config", paths.configFile.path,
-                    "--ctl-socket-path", paths.controlSocket.path,
-                ],
-                peer: peerEvidence,
-                onLine: { _ in }
-            )
+            let read = MalibuCatalogRead(mode: verificationTarget == nil ? .quick : .verify,
+                target: verificationTarget?.0, modelKey: verificationTarget?.1, context: verificationTarget == nil ? nil : transactionContextDigest)
+            let result = try await runCatalogRead(using: cli, read: read)
             guard result.exitCode == 0 else { throw ModelManagementError.invalidCatalog }
-            let document = try decodeCatalogEconomics(result.stdout).validated()
+            let document = try decodeCatalogEconomics(result.stdout).validated(localActivationNegotiated: localActivationCapabilityAvailable)
+            guard document.source.projectionProtocolVersion == "2", document.source.transactionContextSHA256 != nil,
+                  verificationTarget != nil || document.rows.allSatisfy({ $0.localVerification?.state != "verified" }) else { throw ModelManagementError.invalidCatalog }
+            if let (target, key) = verificationTarget {
+                guard document.source.transactionContextSHA256 == read.context,
+                      document.hasVerifiedLocalTarget(target, modelKey: key) else { throw ModelManagementError.invalidCatalog }
+            }
             guard acceptCatalogProjection(document) else {
                 self.listState = previousListState
                 self.operation = .idle
-                return
+                return false
             }
+            self.cleanupRecoveries = document.recoveries
+            self.transactionContextDigest = document.source.transactionContextSHA256
             self.rows = document.rowsForMalibu(
                 currentModelID: configuredModel,
                 warmSwapAvailable: readySwitchCapabilityAvailable
             ).sortedForDisplay()
             self.currentModelID = configuredModel ?? rows.first(where: { $0.category == .current })?.id
-            self.listState = rows.contains(where: { $0.action == .switchModel }) ? .ready : .viewOnly
+            self.listState = !cleanupRecoveries.isEmpty || rows.contains(where: { $0.action == .switchModel || $0.catalogTransaction != nil || $0.localAdoptionAvailable }) ? .ready : .viewOnly
             self.operation = .idle
             if rows.isEmpty {
                 self.statusLine = String(localized: "Network catalog has no admitted economics rows yet. Local BYOM discovery remains CLI-only in this release.", comment: "Catalog economics empty")
@@ -1878,12 +2432,43 @@ final class ModelManagementStore: ObservableObject {
                 self.statusLine = String(localized: "Network catalog loaded with no trusted rate rows available.", comment: "Catalog economics no trusted rates")
             }
             scheduleCatalogProjectionExpiry(document)
+            if pendingCatalogTransaction == nil, recommendation == nil, localActivationCapabilityAvailable,
+               let prepared = rows.first(where: { $0.localAdoptionAvailable && $0.category != .current }),
+               let id = prepared.localAdoptionTransactionID {
+                if let generation = prepared.localAdoptionGeneration {
+                    await restorePreparedRecommendation(id: id, target: prepared.id, modelKey: prepared.catalogModelKey ?? "", generation: generation)
+                }
+            }
+            return true
         } catch {
             self.rows = []
+            self.cleanupRecoveries = []
+            self.transactionContextDigest = nil
             self.listState = .unavailable
-            self.operation = .failed("projection_unavailable")
+            self.operation = pendingCatalogTransaction == nil ? .failed("projection_unavailable") : .catalogTransaction
             catalogProjectionExpiryTask?.cancel()
-            self.statusLine = String(localized: "Model catalog unavailable. Warning: projection_unavailable. The current model remains visible from provider status.", comment: "Catalog economics unavailable")
+            self.statusLine = error is MalibuCatalogReadError
+                ? String(localized: "Catalog and cleanup recovery are unavailable because this response exceeds the supported size", comment: "Oversized catalog response")
+                : String(localized: "Catalog and cleanup recovery could not be fully checked; retry after the reader exits", comment: "Incomplete catalog recovery")
+            return false
+        }
+    }
+
+    private func restorePreparedRecommendation(id: String, target: String, modelKey: String, generation: String) async {
+        do {
+            guard let context = transactionContextDigest else { throw ModelManagementError.invalidCatalog }
+            let result = try await runCatalogRead(using: transactionControlCLI, read: .init(mode: .result, target: target, modelKey: modelKey, context: context, transactionID: id, generation: generation))
+            let data = Data(result.stdout.utf8)
+            try MalibuStrictJSON.rejectDuplicateKeys(data)
+            guard result.exitCode == 0,
+                  let document = try? JSONDecoder().decode(MalibuRecommendationDocument.self, from: data).validated(localActivationTarget: target, localActivationModelKey: modelKey),
+                  document.isEligibleForLocalActivation else { return }
+            recommendation = document
+            recommendationJSON = data
+            recommendationIsLocalActivation = true
+            localRecommendationTransactionID = id
+        } catch {
+            recommendationLine = String(localized: "Prepared recommendation could not be restored. Measure the prepared model again before activation.", comment: "Prepared recommendation unavailable")
         }
     }
 
@@ -1933,6 +2518,8 @@ final class ModelManagementStore: ObservableObject {
                   self.catalogProjectionSequence == sequence else { return }
             self.catalogProjectionExpiryTask = nil
             self.rows = []
+            self.cleanupRecoveries = []
+            self.transactionContextDigest = nil
             self.listState = .unavailable
             if !self.operation.blocksRefresh {
                 self.operation = .failed("projection_unavailable")
@@ -2053,6 +2640,7 @@ final class ModelManagementStore: ObservableObject {
             return
         }
         guard recommendation == nil else { return }
+        recommendationIsLocalActivation = false
         let now = Date()
         guard recommendationSchedule.isEligible(at: now) else {
             if let next = [recommendationSchedule.nextEligibleAt, recommendationSchedule.snoozedUntil]
@@ -2214,6 +2802,7 @@ final class ModelManagementStore: ObservableObject {
     }
 
     func adoptRecommendation() async {
+        guard recommendation.map({ (try? $0.validated(localActivationTarget: recommendationIsLocalActivation ? $0.serveConfig?.modelCatalogModelID : nil, localActivationModelKey: recommendationIsLocalActivation ? $0.serveConfig?.modelCatalogKey : nil)) != nil }) == true else { return }
         guard canAdoptRecommendation,
               let recommendation,
               let target = recommendation.recommendedModel,
@@ -2542,6 +3131,8 @@ struct MalibuModelRow: Identifiable, Equatable, Sendable {
         case none
         case switchModel
         case evaluate
+        case prepare
+        case cleanup
     }
 
     let id: String
@@ -2572,6 +3163,13 @@ struct MalibuModelRow: Identifiable, Equatable, Sendable {
     let warningCodes: [String]
     var action: Action
     var blockReason: String?
+    var catalogModelKey: String? = nil
+    var catalogTransaction: MalibuModelCatalogEconomicsDocument.Action? = nil
+    var needsLocalVerification = false
+    var localActivation = false
+    var localAdoptionAvailable = false
+    var localAdoptionTransactionID: String? = nil
+    var localAdoptionGeneration: String? = nil
 
     init(row: MalibuModelsListDocument.Row, currentModelID: String?, warmSwapAvailable: Bool) {
         id = row.actionModelID
@@ -2614,12 +3212,13 @@ struct MalibuModelRow: Identifiable, Equatable, Sendable {
     init?(
         economics row: MalibuModelCatalogEconomicsDocument.Row,
         currentModelID: String?,
-        warmSwapAvailable: Bool
+        warmSwapAvailable: Bool,
+        localActivation: Bool = false
     ) {
         let hidesLocalDefaultBYOM = row.admission.source == "local_default"
             && row.admission.catalogEconomicsPermitted == false
             && row.economicsState != "trusted"
-        guard !hidesLocalDefaultBYOM else { return nil }
+        guard localActivation || !hidesLocalDefaultBYOM else { return nil }
 
         let projectedID = row.actionModelID ?? row.modelKey
         id = projectedID
@@ -2656,12 +3255,48 @@ struct MalibuModelRow: Identifiable, Equatable, Sendable {
             kind: "evaluate_model",
             actionModelID: row.actionModelID
         )
-        let isCurrent = row.isCurrent || currentModelID.map { modelIdentityKey($0) == modelIdentityKey(projectedID) } == true
+        catalogModelKey = row.modelKey
+        self.localActivation = localActivation && row.economicsState != "trusted"
+        localAdoptionAvailable = self.localActivation && Self.actionIsAvailable(
+            row.adoptRecommendationAction, kind: "adopt_recommendation", actionModelID: row.actionModelID
+        ) && row.adoptRecommendationAction.estimatedBytes == nil
+        localAdoptionTransactionID = localAdoptionAvailable ? row.adoptRecommendationAction.transactionID : nil
+        localAdoptionGeneration = localAdoptionAvailable ? row.adoptRecommendationAction.operationGeneration : nil
+        let prepareAvailable = localActivation && Self.actionIsAvailable(row.prepareAction, kind: "prepare_model", actionModelID: row.actionModelID)
+        let cleanupAvailable = localActivation && Self.actionIsAvailable(row.cleanupStagingAction, kind: "cleanup_staging", actionModelID: row.actionModelID)
+        if cleanupAvailable { catalogTransaction = row.cleanupStagingAction }
+        else if prepareAvailable { catalogTransaction = row.prepareAction }
+        else if localActivation && evaluateAvailable { catalogTransaction = row.evaluateAction }
+        let isCurrent = row.isCurrent || currentModelID.map {
+            modelIdentityKey($0) == modelIdentityKey(projectedID)
+                || (localActivation && modelIdentityKey($0) == modelIdentityKey(row.modelKey))
+        } == true
 
-        if isCurrent || row.runtimeState == "current" {
+        needsLocalVerification = localActivation && ["unverified", "incomplete"].contains(row.localVerification?.state ?? "") && row.actionModelID != nil
+        if needsLocalVerification {
+            category = isCurrent ? .current : .needsPreparation
+            action = .none
+            blockReason = String(localized: "Local files need verification", comment: "Unverified local model")
+        } else if cleanupAvailable {
+            category = .needsPreparation
+            action = .cleanup
+            blockReason = String(localized: "Owned staging needs cleanup. Published and active models are preserved.", comment: "Staging recovery")
+        } else if prepareAvailable {
+            category = .needsPreparation
+            action = .prepare
+            blockReason = String(localized: "Preparation downloads verified weights without changing the active model. Network admission is separate.", comment: "Local preparation disclosure")
+        } else if row.localVerification?.state == "invalid" {
+            category = isCurrent ? .current : .blocked
+            action = .none
+            blockReason = String(localized: "Local files failed verification. Repair is required before local use.", comment: "Invalid local artifact")
+        } else if isCurrent || row.runtimeState == "current" {
             category = .current
             action = .none
             blockReason = nil
+        } else if localActivation && evaluateAvailable && row.weightsPresentLocally {
+            category = .ready
+            action = .evaluate
+            blockReason = String(localized: "Prepared locally. Measure this model before confirming local activation. Paid routing requires separate admission.", comment: "Prepared model disclosure")
         } else if switchAvailable, warmSwapAvailable, row.weightsPresentLocally, row.fit == "fits" {
             category = .ready
             action = .switchModel
@@ -2706,7 +3341,7 @@ struct MalibuModelRow: Identifiable, Equatable, Sendable {
         fit = Self.displayFit(row.fit)
         estimatedGB = row.estimatedGB
         economicsState = "blocked"
-        admissionState = row.admission.state
+        admissionState = nil
         providerPromptPayoutUSDPerMillionTokens = nil
         providerCompletionPayoutUSDPerMillionTokens = nil
         demandRank = nil
@@ -2721,7 +3356,42 @@ struct MalibuModelRow: Identifiable, Equatable, Sendable {
         }
     }
 
+    var catalogActionLabel: String {
+        switch action {
+        case .prepare: return String(localized: "Prepare", comment: "Prepare model action")
+        case .cleanup: return String(localized: "Clean up staging", comment: "Cleanup model action")
+        case .evaluate: return String(localized: "Measure prepared model", comment: "Measure prepared model action")
+        default: return String(localized: "Switch", comment: "Switch model action")
+        }
+    }
+
+    var admissionStatusLine: String? {
+        guard let admissionState else { return nil }
+        if ["catalog_priced", "settlement_capable"].contains(admissionState), economicsState != "trusted" {
+            return String(localized: "Fresh coordinator pricing and settlement authority are unavailable.", comment: "Admission authority unavailable")
+        }
+        switch admissionState {
+        case "settlement_capable":
+            return String(localized: "Coordinator settlement eligibility confirmed. Credit still requires an accepted request, verified receipt, and settlement.", comment: "Settlement eligibility status")
+        case "catalog_priced":
+            return String(localized: "Catalog priced. Settlement eligibility is not yet confirmed.", comment: "Catalog priced status")
+        case "network_admitted_unsettled":
+            return String(localized: "Network admitted. Pricing and settlement checks are pending.", comment: "Network admitted status")
+        case "network_visible_unpriced":
+            return String(localized: "Network visible; pricing is not yet authorized.", comment: "Network visible status")
+        case "offer_submitted", "sandbox_probe_only":
+            return String(localized: "Network qualification pending. Local readiness does not authorize paid routing.", comment: "Admission pending status")
+        case "revoked", "withdrawn", "offer_rejected":
+            return String(localized: "Network admission is withdrawn, revoked, or rejected. Paid routing is unavailable.", comment: "Admission rejected status")
+        default:
+            return String(localized: "Local model only. Network admission and pricing are separate.", comment: "Local admission status")
+        }
+    }
+
     var categoryLabel: String {
+        if localActivation && category == .ready {
+            return String(localized: "Prepared locally", comment: "Prepared category")
+        }
         switch category {
         case .current: return String(localized: "Current", comment: "Model category")
         case .ready: return String(localized: "Ready to switch", comment: "Model category")
@@ -2803,7 +3473,10 @@ struct MalibuModelRow: Identifiable, Equatable, Sendable {
     private func catalogActionSuspendedAfterSwitch(currentModelID: String?) -> MalibuModelRow {
         var copy = self
         copy.action = .none
-        if currentModelID.map({ modelIdentityKey(id) == modelIdentityKey($0) }) == true {
+        copy.catalogTransaction = nil
+        copy.localAdoptionAvailable = false
+        copy.localAdoptionTransactionID = nil
+        if currentModelID.map({ modelIdentityKey(id) == modelIdentityKey($0) || (localActivation && catalogModelKey.map(modelIdentityKey) == modelIdentityKey($0)) }) == true {
             copy.category = .current
             copy.blockReason = nil
         } else if category == .ready {
@@ -2906,5 +3579,124 @@ private extension Array where Element == MalibuModelRow {
         case .needsPreparation: return 3
         case .blocked: return 4
         }
+    }
+}
+
+// CLI-owned preparation protocol. Replays must agree byte-for-byte semantically
+// with the event previously observed at that sequence; a later frame cannot
+// rewrite a terminal outcome.
+struct MalibuCatalogTransactionEvent: Decodable, Equatable, Sendable {
+    struct Progress: Decodable, Equatable, Sendable {
+        let stageLabelKey: String
+        let bytesCompleted: Int64?
+        let bytesExpected: Int64?
+        let percentComplete: Double?
+        let heartbeat: Bool?
+        enum CodingKeys: String, CodingKey, CaseIterable {
+            case stageLabelKey = "stage_label_key", bytesCompleted = "bytes_completed"
+            case bytesExpected = "bytes_expected", percentComplete = "percent_complete", heartbeat
+        }
+        init(from decoder: Decoder) throws {
+            try rejectUnknownKeys(decoder, allowed: CodingKeys.allCases.map(\.stringValue))
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            stageLabelKey = try c.decode(String.self, forKey: .stageLabelKey)
+            bytesCompleted = try c.decodeIfPresent(Int64.self, forKey: .bytesCompleted)
+            bytesExpected = try c.decodeIfPresent(Int64.self, forKey: .bytesExpected)
+            percentComplete = try c.decodeIfPresent(Double.self, forKey: .percentComplete)
+            heartbeat = try c.decodeIfPresent(Bool.self, forKey: .heartbeat)
+            guard !stageLabelKey.isEmpty, stageLabelKey.count <= 80,
+                  stageLabelKey.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "_" || $0 == ".") }),
+                  bytesCompleted != nil || percentComplete != nil || heartbeat == true,
+                  bytesCompleted.map({ $0 >= 0 }) ?? true,
+                  bytesExpected.map({ $0 >= 0 }) ?? true,
+                  percentComplete.map({ $0.isFinite && (0...100).contains($0) }) ?? true,
+                  bytesCompleted == nil || bytesExpected == nil || bytesCompleted! <= bytesExpected! else {
+                throw ModelManagementError.invalidCatalog
+            }
+        }
+    }
+    let schema: String
+    let transactionID: String
+    let transactionKind: String
+    let operationGeneration: String
+    let modelKey: String
+    let eventSequence: UInt64
+    let emittedAt: String
+    let state: String
+    let progress: Progress?
+    let errorCode: String?
+    let warningCode: String?
+    enum CodingKeys: String, CodingKey, CaseIterable {
+        case schema, transactionID = "transaction_id", transactionKind = "transaction_kind"
+        case operationGeneration = "operation_generation"
+        case modelKey = "model_key", eventSequence = "event_sequence", emittedAt = "emitted_at"
+        case state, progress, errorCode = "error_code", warningCode = "warning_code"
+    }
+    init(from decoder: Decoder) throws {
+        try rejectUnknownKeys(decoder, allowed: CodingKeys.allCases.map(\.stringValue))
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        guard Set(CodingKeys.allCases.map(\.stringValue)).isSubset(of: Set(c.allKeys.map(\.stringValue))) else { throw ModelManagementError.invalidCatalog }
+        schema = try c.decode(String.self, forKey: .schema)
+        transactionID = try c.decode(String.self, forKey: .transactionID)
+        transactionKind = try c.decode(String.self, forKey: .transactionKind)
+        operationGeneration = try c.decode(String.self, forKey: .operationGeneration)
+        modelKey = try c.decode(String.self, forKey: .modelKey)
+        eventSequence = try c.decode(UInt64.self, forKey: .eventSequence)
+        emittedAt = try c.decode(String.self, forKey: .emittedAt)
+        state = try c.decode(String.self, forKey: .state)
+        progress = try c.decodeIfPresent(Progress.self, forKey: .progress)
+        errorCode = try c.decodeIfPresent(String.self, forKey: .errorCode)
+        warningCode = try c.decodeIfPresent(String.self, forKey: .warningCode)
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        guard schema == "model_catalog_transaction_event.v1", malibuCanonicalUUID(transactionID), malibuCanonicalUUID(operationGeneration),
+              ["prepare_model", "evaluate_model", "cleanup_staging"].contains(transactionKind),
+              isSafeModelID(modelKey),
+              ["queued", "running", "cancel_requested", "cancelled", "succeeded", "failed", "timed_out"].contains(state),
+              formatter.date(from: emittedAt) != nil || ISO8601DateFormatter().date(from: emittedAt) != nil,
+              warningCode == nil || warningCode == "staging_cleanup_required",
+              errorCode.map({ $0.count <= 100 && !$0.isEmpty && $0.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "_") } }) ?? true else {
+            throw ModelManagementError.invalidCatalog
+        }
+    }
+    var isTerminal: Bool { ["cancelled", "succeeded", "failed", "timed_out"].contains(state) }
+}
+
+struct MalibuCatalogTransactionTranscript: Sendable {
+    private(set) var events: [MalibuCatalogTransactionEvent] = []
+    var terminal: MalibuCatalogTransactionEvent? { events.last.flatMap { $0.isTerminal ? $0 : nil } }
+    mutating func consume(_ event: MalibuCatalogTransactionEvent, id: String, kind: String, modelKey: String, generation: String) throws -> Bool {
+        guard event.transactionID == id, event.transactionKind == kind, event.modelKey == modelKey, event.operationGeneration == generation else { throw ModelManagementError.invalidCatalog }
+        if let old = events.first(where: { $0.eventSequence == event.eventSequence }) {
+            guard old == event else { throw ModelManagementError.invalidCatalog }
+            return false
+        }
+        guard terminal == nil, events.last.map({ event.eventSequence > $0.eventSequence }) ?? true else { throw ModelManagementError.invalidCatalog }
+        events.append(event)
+        return true
+    }
+}
+
+struct MalibuPendingCatalogTransaction: Codable, Equatable, Sendable {
+    let id: String
+    let target: String
+    let modelKey: String
+    let kind: String
+    let timeoutSeconds: Int
+    let startedAt: Date
+    var operationGeneration: String = ""
+    var pin: MalibuTransactionPin? = nil
+    var cancelRequested = false
+    var validBinding: Bool {
+        malibuCanonicalUUID(id) && malibuCanonicalUUID(operationGeneration) && isSafeModelID(target) && isSafeModelID(modelKey)
+            && ["prepare_model", "evaluate_model", "cleanup_staging"].contains(kind) && (1...1800).contains(timeoutSeconds)
+    }
+    func sameOperation(as other: Self) -> Bool { id == other.id && target == other.target && modelKey == other.modelKey && kind == other.kind && operationGeneration == other.operationGeneration }
+    func arguments(control: MalibuCatalogControl?, paths: ProviderPaths) -> [String] {
+        let prefix: [String]
+        if let control { prefix = ["models", "transaction", control.rawValue, id, "--model", target, "--expected-kind", kind] }
+        else if kind == "cleanup_staging" { prefix = ["models", "cleanup-staging", id, "--model", target, "--confirm"] }
+        else { prefix = ["models", kind == "prepare_model" ? "prepare" : "recommend-prepared", target, "--transaction-id", id, "--confirm"] }
+        return prefix + ["--operation-generation", operationGeneration, "--json", "--config", paths.configFile.path]
     }
 }

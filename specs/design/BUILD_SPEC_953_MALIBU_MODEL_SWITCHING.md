@@ -1466,6 +1466,23 @@ Acceptance:
   cannot produce config-only drift or a rejected live `switch_request`.
 - BS953-AC066: The transaction writes only `ConfigApplier.recommendationOwnedKeys`.
 
+**Confirmed primary bootstrap extension (SPEC-044 v0.1.2).** BS953-R014
+adoption MAY be offered before coordinator admission only under negotiated
+`model_catalog_local_activation_v1`, `model_catalog_transactions_v1`, and
+`model_recommendation_apply_switch_v1`, with SPEC-044 protocol `2` and all
+non-economic confirmation/suppression rules. The exact primary target MUST
+already be verified ready. `models recommend-prepared` performs a confirmed
+real, measured, single-target evaluation without downloading or applying config;
+`models transaction result` returns its complete `autotune_recommend.v1` for the
+existing adoption validator. This is an additional explicit local-activation
+producer, not the background estimate-only check adapter. No catalog-threshold
+benchmark, hand-built eligible recommendation, unsupported target, stale feed,
+missing prefetched artifact, or app-local config application qualifies. Existing
+BS953-R014/R015 signed authority, hash/fit, transaction ownership, runtime commit,
+journal, rollback and recovery checks remain unchanged. Until separately
+coordinator-admitted, UI copy describes local preparation/activation only, with
+no trusted economics or paid-routing implication.
+
 ### BS953-R015 - Deterministic config recovery and incumbent continuity
 
 Recommendation adoption MUST be rollback-first on every failure before the

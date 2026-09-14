@@ -1301,6 +1301,20 @@ func providerCreditsToUSDC(credits int64) float64 {
 func (s *Store) SettlementConfig(defaultCfg SettlementConfig) SettlementConfig {
 	s.settlementMu.RLock()
 	defer s.settlementMu.RUnlock()
+	return s.settlementConfigLocked(defaultCfg)
+}
+
+// TryPinSettlementConfig keeps the effective mode stable through an admission
+// decision's durable commit. It never waits while another authority is pinned.
+// A successful caller must release exactly once, without calling locking getters.
+func (s *Store) TryPinSettlementConfig(defaultCfg SettlementConfig) (effective SettlementConfig, release func(), ok bool) {
+	if !s.settlementMu.TryRLock() {
+		return SettlementConfig{}, nil, false
+	}
+	return s.settlementConfigLocked(defaultCfg), s.settlementMu.RUnlock, true
+}
+
+func (s *Store) settlementConfigLocked(defaultCfg SettlementConfig) SettlementConfig {
 	if s.settlement.CadenceDays == 0 {
 		return defaultCfg
 	}

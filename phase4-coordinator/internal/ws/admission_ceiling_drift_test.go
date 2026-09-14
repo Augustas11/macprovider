@@ -343,6 +343,7 @@ func TestAdmissionEvidenceRevalidationRouteExcludesExpiredEvidence(t *testing.T)
 	provider.MaxAdmittedModelID = "small-model"
 	provider.CatalogAdmissionMode = "current"
 	setAdmittedTupleValues(provider, "hashA", "apple m4 max", 64)
+	republishEncryptedHarnessProvider(t, s, provider)
 	s.autotuneCatalog = catalog
 	s.autotuneEvidence = staticAdmissionEvidence{ok: false}
 	powCfg := s.proofOfWeightsConfig()
@@ -383,6 +384,7 @@ func TestAdmissionEvidenceRevalidationRejectsTupleMismatch(t *testing.T) {
 	provider.MaxAdmittedModelID = "small-model"
 	provider.CatalogAdmissionMode = "current"
 	setAdmittedTupleValues(provider, "hashA", "apple m4 max", 64)
+	republishEncryptedHarnessProvider(t, s, provider)
 	s.autotuneCatalog = catalog
 	s.autotuneEvidence = staticAdmissionEvidence{
 		ok:       true,
@@ -411,6 +413,7 @@ func TestAdmissionEvidenceRevalidationRejectsMissingAdmittedTuple(t *testing.T) 
 	provider.MaxAdmittedMinRAMGB = 8
 	provider.MaxAdmittedModelID = "small-model"
 	provider.CatalogAdmissionMode = "current"
+	republishEncryptedHarnessProvider(t, s, provider)
 	s.autotuneCatalog = catalog
 	s.autotuneEvidence = staticAdmissionEvidence{
 		ok:       true,

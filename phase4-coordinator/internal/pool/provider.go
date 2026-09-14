@@ -976,6 +976,11 @@ func (r *Registry) RegisterAtDetailed(p *Provider, conn net.Conn, now time.Time)
 	delete(r.recoveryHolds, p.ProviderID)
 	delete(r.lastBreakerRecoveries, p.ProviderID)
 	r.applyCanarySanctionLocked(p)
+	// Preserve normalization on the caller's entry, but publish an owned value
+	// so caller-retained scalars and receipt buffers cannot bypass Registry.mu.
+	owned := cloneProviderSnapshot(p)
+	r.providers[p.ProviderID] = &owned
+	r.sessions[p.AssignedID] = &owned
 	return old, true, RegisterRefusalNone
 }
 
@@ -1219,7 +1224,7 @@ func (r *Registry) SetTier(providerID string, tier Tier) (Provider, bool) {
 	}
 	p.Tier = tier
 	r.applyCanarySanctionLocked(p)
-	cp := *p
+	cp := cloneProviderSnapshot(p)
 	cp.conn = nil
 	return cp, true
 }
@@ -1232,7 +1237,7 @@ func (r *Registry) SetEarnedTrustTier(providerID string, tier Tier) (Provider, b
 		return Provider{}, false
 	}
 	if p.Tier == TierPinned {
-		cp := *p
+		cp := cloneProviderSnapshot(p)
 		cp.conn = nil
 		return cp, true
 	}
@@ -1246,7 +1251,7 @@ func (r *Registry) SetEarnedTrustTier(providerID string, tier Tier) (Provider, b
 	}
 	p.Tier = tier
 	r.applyCanarySanctionLocked(p)
-	cp := *p
+	cp := cloneProviderSnapshot(p)
 	cp.conn = nil
 	return cp, true
 }
@@ -1256,7 +1261,7 @@ func (r *Registry) UpdateHashStatuses(statusFor func(Provider) HashStatus) int {
 	defer r.mu.Unlock()
 	updated := 0
 	for _, p := range r.providers {
-		cp := *p
+		cp := cloneProviderSnapshot(p)
 		cp.conn = nil
 		next := statusFor(cp)
 		if p.HashStatus != next {
@@ -1294,7 +1299,7 @@ func (r *Registry) ExpireLegacyModelHashAdmissions() []Provider {
 		if strings.TrimSpace(p.ModelHashAlgorithm) != "" {
 			continue
 		}
-		cp := *p
+		cp := cloneProviderSnapshot(p)
 		cp.conn = nil
 		expired = append(expired, cp)
 		p.HashStatus = HashStatusInvalid
@@ -1560,7 +1565,7 @@ func (r *Registry) SetBuyerServingPredicate(fn func(Provider) bool) {
 // gate, which requires ws config the pool package cannot see.
 func (r *Registry) isBuyerServingLocked(p *Provider) bool {
 	if r.buyerServing != nil {
-		return r.buyerServing(*p)
+		return r.buyerServing(cloneProviderSnapshot(p))
 	}
 	return p.RoutingEligible() && p.MaxContextTokens > 0
 }
@@ -2400,7 +2405,7 @@ func (r *Registry) applyHeartbeatLocked(providerID, assignedID string, hb Heartb
 			CompletedAt:            hb.At,
 		}
 	}
-	cp := *p
+	cp := cloneProviderSnapshot(p)
 	var gap time.Duration
 	if !prev.IsZero() {
 		gap = hb.At.Sub(prev)
@@ -2567,7 +2572,7 @@ func (r *Registry) ApplyStateUpdate(providerID, assignedID string, update StateU
 		at = time.Now().UTC()
 	}
 	rotationEvent := r.commitPendingReceiptPubkeyLocked(p, at)
-	cp := *p
+	cp := cloneProviderSnapshot(p)
 	emitter := r.receiptRotationEmitter
 	r.mu.Unlock()
 	if rotationEvent != nil && emitter != nil {
@@ -2616,7 +2621,7 @@ func (r *Registry) Resolve(providerID, assignedID string) (Provider, bool) {
 	if p == nil || (assignedID != "" && p.AssignedID != assignedID) {
 		return Provider{}, false
 	}
-	cp := *p
+	cp := cloneProviderSnapshot(p)
 	cp.conn = nil
 	return cp, true
 }
@@ -2650,10 +2655,8 @@ func (r *Registry) Snapshot() []Provider {
 	defer r.mu.RUnlock()
 	out := make([]Provider, 0, len(r.providers))
 	for _, p := range r.providers {
-		cp := *p
+		cp := cloneProviderSnapshot(p)
 		cp.conn = nil
-		cp.HardwareCapacity = cloneProviderHardwareCapacity(p.HardwareCapacity)
-		cp.SafetyTelemetry = cloneProviderSafetyTelemetry(p.SafetyTelemetry)
 		out = append(out, cp)
 	}
 	return out

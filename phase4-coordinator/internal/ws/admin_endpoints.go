@@ -192,7 +192,7 @@ func (s *Server) handleAdminReject(w http.ResponseWriter, r *http.Request) {
 		if session, ok := s.sessionFor(provider.ProviderID, provider.AssignedID); ok {
 			_ = session.send([]byte(`{"type":"drain"}`))
 			s.pool.MarkState(provider.ProviderID, provider.AssignedID, pool.StateDraining)
-			time.AfterFunc(200*time.Millisecond, func() {
+			s.scheduleSessionClosure(session, 200*time.Millisecond, func() {
 				s.closeSession(session, CloseBanned, "banned: provider "+providerID+" has been rejected by operator")
 			})
 		}

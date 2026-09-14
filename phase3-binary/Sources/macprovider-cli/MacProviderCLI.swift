@@ -486,9 +486,17 @@ struct ServeCommand: AsyncParsableCommand {
     @Flag(name: .customLong("autotune-candidate"), help: .private)
     var autotuneCandidate = false
 
+    @Option(name: .customLong("candidate-parent-pid"), help: .private)
+    var candidateParentPID: Int32?
+
     mutating func validate() throws {
         guard !autotuneCandidate || noJoin else {
             throw ValidationError("--autotune-candidate requires --no-join")
+        }
+        if let candidateParentPID {
+            guard candidateParentPID > 1, autotuneCandidate, noJoin else {
+                throw ValidationError("--candidate-parent-pid requires a non-joining autotune candidate")
+            }
         }
     }
 
@@ -1409,6 +1417,8 @@ struct ServeCommand: AsyncParsableCommand {
     }
 
     func run() async throws {
+        let parentLifetime = candidateParentPID.map { CandidateParentLifetimeGuard(expectedParentPID: $0) }
+        defer { withExtendedLifetime(parentLifetime) {} }
         var resolved = try ConfigLoader.load(
             cli: CLIOverrides(
                 port: port,
