@@ -55,6 +55,7 @@ from __future__ import annotations
 import base64
 import contextlib
 import copy
+import importlib
 import re
 import importlib.util
 import io
@@ -63,9 +64,12 @@ import math
 import pathlib
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
+from unittest import mock
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -82,6 +86,17 @@ def _load(name: str, relative: str):
 
 catalog_release = _load("catalog_release", "scripts/catalog-release.py")
 compatibility_set = _load("compatibility_set_manifest", "scripts/compatibility-set-manifest.py")
+
+# `catalog-release.py` imports the pricing engine by bare module name. Ensure
+# that import works even when this module is the only test selected, so replay
+# tests do not depend on unittest discovery ordering.
+if str(ROOT / "scripts") not in sys.path:
+    sys.path.insert(0, str(ROOT / "scripts"))
+openrouter_pricing_engine = importlib.import_module("openrouter_pricing_engine")
+
+
+def harness_key_id() -> str:
+    return HermeticRelease.KEY_ID
 
 CANDIDATE_BYTES = (CATALOG / "autotune-candidates.json").read_bytes()
 DEMAND_BYTES = (CATALOG / "demand-rank.json").read_bytes()
@@ -1987,6 +2002,120 @@ class HermeticReleaseTest(unittest.TestCase):
             harness.bump("published-2026-09-20-market-v1", "2026-09-20T00:00:00Z")
             with self.assertRaisesRegex(catalog_release.CatalogError, "market-pegged releases require all four"):
                 catalog_release.generate(harness.KEY_ID)
+
+    def test_generate_cli_rejects_partial_market_inputs(self):
+        """The CLI's all-four gate must run before `generate` can mutate state."""
+        argv = sys.argv
+        sys.argv = [
+            "catalog-release.py", "generate",
+            "--signer-key-id", harness_key_id(),
+            "--market-rate-proposal", "rate.json",
+        ]
+        stderr = io.StringIO()
+        try:
+            with contextlib.redirect_stderr(stderr):
+                self.assertEqual(catalog_release.main(), 1)
+        finally:
+            sys.argv = argv
+        self.assertIn("market ingest requires all four --market-* paths", stderr.getvalue())
+
+    def test_verify_rejects_market_bind_without_named_inputs(self):
+        with self.harness() as harness:
+            (harness.catalog / "market-peg-bind.json").write_bytes(canonical({
+                "schema_version": catalog_release.MARKET_PEG_BIND_SCHEMA,
+                "content_digest": "sha256:" + "a" * 64,
+                "policy_digest": "sha256:" + "b" * 64,
+                "engine_sha256": "c" * 64,
+                "ranking_window_end_date": "2026-09-20",
+            }))
+            harness.bump("published-2026-09-20-market-v1", "2026-09-20T00:00:00Z")
+            harness.sign()
+            self.assertFalse((harness.root / "openrouter-rate-card-proposal.json").exists())
+            with self.assertRaisesRegex(catalog_release.CatalogError, "named proposal/snapshot/policy inputs are missing"):
+                catalog_release.verify()
+
+    def market_pricing_fixtures(self):
+        pricing_fixtures = pathlib.Path(__file__).with_name("fixtures") / "openrouter_pricing"
+        rankings = json.loads((pricing_fixtures / "rankings.json").read_text(encoding="utf-8"))
+        models = json.loads((pricing_fixtures / "models.json").read_text(encoding="utf-8"))
+        endpoints = json.loads((pricing_fixtures / "endpoints.json").read_text(encoding="utf-8"))
+        policy_document = {
+            "policy_version": "unit-test-v1",
+            "demand_top_n": 50,
+            "undercut_fraction": "0.20",
+            "cache_hit_fraction": "0.25",
+            "min_endpoint_completion_tokens": 1_000_000,
+            "liquidity_floor_fraction": "0.05",
+            "models": [],
+        }
+        now = datetime(2026, 8, 5, 12, 0, 0, tzinfo=timezone.utc)
+        selected_ids = {
+            demand["source_model_id"]
+            for demand in openrouter_pricing_engine.resolve_rankings_to_catalog(
+                openrouter_pricing_engine.normalize_rankings(rankings, 4),
+                openrouter_pricing_engine.validate_catalog(models),
+            )
+        }
+        snapshot = openrouter_pricing_engine.build_snapshot(
+            rankings,
+            models,
+            {model_id: endpoints[model_id] for model_id in selected_ids},
+            policy_document,
+            now=now,
+            top_n=4,
+        )
+        return snapshot, policy_document, now
+
+    def test_replay_rejects_a_tampered_stored_median(self):
+        snapshot, policy_document, _ = self.market_pricing_fixtures()
+        for row in snapshot["rows"]:
+            pricing = row.get("pricing")
+            liquidity = pricing.get("liquidity_filter") if isinstance(pricing, dict) else None
+            if isinstance(liquidity, dict) and liquidity.get("eligible_endpoint_liquidity"):
+                pricing["completion_per_mtok"] = "999.999"
+                break
+        else:
+            self.fail("fixture snapshot has no row with retained endpoint liquidity")
+        with self.assertRaisesRegex(catalog_release.CatalogError, "completion median does not replay"):
+            catalog_release.replay_snapshot_liquidity(snapshot, policy_document)
+
+    def test_market_peg_rejects_a_ranking_window_stale_at_release_time(self):
+        snapshot, policy_document, _ = self.market_pricing_fixtures()
+        stale_date = (datetime.now(timezone.utc).date() - timedelta(days=3)).isoformat()
+        snapshot["source"]["fetch_metadata"]["ranking_window_end_date"] = stale_date
+        engine_bytes = (ROOT / "scripts" / "openrouter_pricing_engine.py").read_bytes()
+        with tempfile.TemporaryDirectory() as raw:
+            root = pathlib.Path(raw)
+            snapshot_path = root / "openrouter-pricing-snapshot.json"
+            policy_path = root / "openrouter_pricing_policy.json"
+            bind_path = root / "market-peg-bind.json"
+            snapshot_path.write_bytes(json.dumps(snapshot).encode("utf-8"))
+            policy_path.write_bytes(json.dumps(policy_document).encode("utf-8"))
+            bind_path.write_bytes(canonical({
+                "schema_version": catalog_release.MARKET_PEG_BIND_SCHEMA,
+                "content_digest": snapshot["content_digest"],
+                "policy_digest": "sha256:" + catalog_release.sha256(policy_path.read_bytes()),
+                "engine_sha256": catalog_release.sha256(engine_bytes),
+                "ranking_window_end_date": stale_date,
+            }))
+            saved_bind_path = catalog_release.MARKET_PEG_BIND_PATH
+            catalog_release.MARKET_PEG_BIND_PATH = bind_path
+            try:
+                with self.assertRaisesRegex(
+                    catalog_release.CatalogError,
+                    "ranking window is older than 48 hours at release time",
+                ):
+                    catalog_release.validate_market_peg(
+                        snapshot_path,
+                        snapshot_path,
+                        snapshot_path,
+                        policy_path,
+                        CANDIDATE_OBJ,
+                        json.loads(DEMAND_BYTES),
+                        catalog_release.validate_rate_card(RATE_CARD_BYTES),
+                    )
+            finally:
+                catalog_release.MARKET_PEG_BIND_PATH = saved_bind_path
 
     def test_activation_requires_the_explicit_flag(self):
         with self.harness() as harness:

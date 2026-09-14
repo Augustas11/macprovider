@@ -34,6 +34,8 @@ def policy():
         "demand_top_n": 50,
         "undercut_fraction": "0.20",
         "cache_hit_fraction": "0.25",
+        "min_endpoint_completion_tokens": 1_000_000,
+        "liquidity_floor_fraction": "0.05",
         "models": [
             model("openai/gpt-oss-20b", "openai/gpt-oss-20b"),
             model("google/gemma-4-26b-a4b-it", "google-gemma-4-26b-a4b-it"),

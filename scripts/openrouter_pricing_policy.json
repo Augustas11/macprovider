@@ -196,5 +196,7 @@
       }
     }
   ],
-  "cache_hit_fraction": "0.25"
+  "cache_hit_fraction": "0.25",
+  "min_endpoint_completion_tokens": 1000000,
+  "liquidity_floor_fraction": "0.05"
 }

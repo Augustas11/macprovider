@@ -578,16 +578,16 @@ def endpoint_set_is_empty(document: Mapping[str, Any], requested_model_id: str) 
 
 def weighted_median(priced: list[tuple[Decimal, ...]], value_index: int) -> tuple[Decimal, int]:
     ordered = sorted(priced, key=lambda item: item[value_index])
-    total = sum(item[5] for item in ordered)
+    total = sum(item[-1] for item in ordered)
     cumulative = 0
     for item in ordered:
-        cumulative += item[5]
+        cumulative += item[-1]
         if cumulative * 2 >= total:
-            return item[value_index], item[5]
-    return ordered[-1][value_index], ordered[-1][5]
+            return item[value_index], item[-1]
+    return ordered[-1][value_index], ordered[-1][-1]
 
 
-def cheapest_endpoint_pricing(document: Mapping[str, Any], model_id: str, *, model_tokens_30d: int = 0) -> dict[str, Any] | None:
+def cheapest_endpoint_pricing(document: Mapping[str, Any], model_id: str, *, model_tokens_30d: int = 0, policy: Mapping[str, Any] | None = None) -> dict[str, Any] | None:
     require_allowed_keys(document, frozenset({"data"}), f"endpoints response for {model_id}")
     data = document.get("data")
     if not isinstance(data, dict):
@@ -621,7 +621,9 @@ def cheapest_endpoint_pricing(document: Mapping[str, Any], model_id: str, *, mod
             completion_tokens = parse_nonnegative_integer(endpoint.get("completion_tokens_last_30d"), f"endpoints response for {model_id}: completion_tokens_last_30d")
         except SchemaError:
             continue
-        volume_floor = max(1_000_000, int(Decimal("0.05") * model_tokens_30d))
+        minimum_tokens = policy.get("min_endpoint_completion_tokens", 1_000_000) if policy is not None else 1_000_000
+        floor_fraction = parse_decimal(policy.get("liquidity_floor_fraction", "0.05") if policy is not None else "0.05", "policy liquidity_floor_fraction")
+        volume_floor = max(minimum_tokens, int(floor_fraction * model_tokens_30d))
         if status != 0 or prompt == 0 or completion == 0 or completion_tokens < volume_floor:
             continue
         priced.append((completion, prompt, throughput, uptime, provider, completion_tokens))
@@ -841,6 +843,7 @@ def build_snapshot(
     demand_window_days: int | None = None,
     endpoint_confirmations: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
+    validate_policy(policy)
     rankings = normalize_rankings(rankings_document, top_n)
     ranking_meta = rankings_metadata(rankings_document)
     observed_window_days = (parse_ranking_date(ranking_meta["end_date"], "rankings response: meta.end_date") - parse_ranking_date(ranking_meta["start_date"], "rankings response: meta.start_date")).days + 1
@@ -880,6 +883,7 @@ def build_snapshot(
             endpoint_document,
             source_model_id,
             model_tokens_30d=int(demand["total_token_volume"]),
+            policy=policy,
         )
         request_id = (
             demand["ranking_model_permaslug"]
@@ -1020,7 +1024,7 @@ def policy_model_index(policy: Mapping[str, Any]) -> dict[str, Mapping[str, Any]
 def validate_policy(policy: Mapping[str, Any]) -> None:
     expected_keys = {
         "policy_version", "demand_top_n", "undercut_fraction",
-        "cache_hit_fraction", "models",
+        "cache_hit_fraction", "min_endpoint_completion_tokens", "liquidity_floor_fraction", "models",
     }
     legacy_keys = {
         "policy_version", "demand_top_n", "broad_fleet_undercut_fraction",
@@ -1046,6 +1050,12 @@ def validate_policy(policy: Mapping[str, Any]) -> None:
             raise SchemaError("policy cache_hit_fraction must be within 0-1")
     elif set(policy) == expected_keys:
         raise SchemaError("policy cache_hit_fraction is required")
+    minimum_endpoint_completion_tokens = policy.get("min_endpoint_completion_tokens")
+    if isinstance(minimum_endpoint_completion_tokens, bool) or not isinstance(minimum_endpoint_completion_tokens, int) or minimum_endpoint_completion_tokens != 1_000_000:
+        raise SchemaError("policy min_endpoint_completion_tokens must be exactly 1000000")
+    liquidity_floor_fraction = parse_decimal(policy.get("liquidity_floor_fraction"), "policy liquidity_floor_fraction")
+    if liquidity_floor_fraction != Decimal("0.05"):
+        raise SchemaError("policy liquidity_floor_fraction must be exactly 0.05")
     policy_model_index(policy)
 
 

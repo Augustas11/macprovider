@@ -18,7 +18,6 @@ import subprocess
 import sys
 import tempfile
 from datetime import datetime, timezone
-from decimal import Decimal
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -725,7 +724,7 @@ def validate_market_peg_bind(data: bytes) -> dict:
     return value
 
 
-def replay_snapshot_liquidity(snapshot: dict) -> None:
+def replay_snapshot_liquidity(snapshot: dict, policy: dict) -> None:
     import openrouter_pricing_engine
 
     for row in snapshot.get("rows", []):
@@ -752,7 +751,10 @@ def replay_snapshot_liquidity(snapshot: dict) -> None:
         if pricing.get("input_per_mtok") != openrouter_pricing_engine.decimal_string(prompt):
             fail(f"market-peg: snapshot row {source_model_id!r} prompt median does not replay from retained liquidity")
         model_tokens = int(row.get("demand", {}).get("total_token_volume", "0"))
-        volume_floor = max(1_000_000, int(Decimal("0.05") * model_tokens))
+        volume_floor = max(
+            policy["min_endpoint_completion_tokens"],
+            int(openrouter_pricing_engine.parse_decimal(policy["liquidity_floor_fraction"], "policy liquidity_floor_fraction") * model_tokens),
+        )
         if any(item[2] < volume_floor for item in priced):
             fail(f"market-peg: snapshot row {source_model_id!r} retained endpoint fails the volume floor")
 
@@ -785,7 +787,7 @@ def validate_market_peg(
         fail(f"market-peg input is not valid UTF-8 JSON: {error}")
     if not isinstance(snapshot, dict) or not isinstance(policy, dict) or not isinstance(rate_proposal, dict) or not isinstance(demand_proposal, dict):
         fail("market-peg inputs must be JSON objects")
-    replay_snapshot_liquidity(snapshot)
+    replay_snapshot_liquidity(snapshot, policy)
     if bind["content_digest"] != snapshot.get("content_digest"):
         fail("market-peg-bind: content_digest does not match the named snapshot")
     metadata = snapshot.get("source", {}).get("fetch_metadata", {}) if isinstance(snapshot.get("source"), dict) else {}
