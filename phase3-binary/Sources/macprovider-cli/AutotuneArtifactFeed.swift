@@ -551,7 +551,7 @@ extension AutotuneStaticInputs {
         return []
     }
 
-    /// The single binding step both qualifiers share: `feed` (the decoded form
+    /// The single binding step all qualifiers share: `feed` (the decoded form
     /// of `bytes`) bound to the candidate catalog selected for the same run.
     /// Throws the §3.7.6 class (`integrity` / `releaseMismatch`).
     private static func qualify(
@@ -598,6 +598,26 @@ extension AutotuneStaticInputs {
         return try? qualify(
             feed: feed, bytes: bytes, signerKeyID: bakedSignerKeyID, manifestSignerKeyID: bakedSignerKeyID,
             catalog: catalog, candidateBytes: candidateBytes, candidateSignerKeyID: candidateSignerKeyID
+        )
+    }
+
+    static func qualifyArtifactFeed(
+        feed: ArtifactFeed,
+        bytes: Data,
+        signerKeyID: String?,
+        manifestSignerKeyID: String? = nil,
+        catalog: CandidateCatalog,
+        candidateBytes: Data,
+        candidateSignerKeyID: String?
+    ) throws -> QualifiedArtifactFeed {
+        try qualify(
+            feed: feed,
+            bytes: bytes,
+            signerKeyID: signerKeyID,
+            manifestSignerKeyID: manifestSignerKeyID,
+            catalog: catalog,
+            candidateBytes: candidateBytes,
+            candidateSignerKeyID: candidateSignerKeyID
         )
     }
 

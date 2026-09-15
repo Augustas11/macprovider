@@ -1,4 +1,5 @@
 import ArgumentParser
+import CryptoKit
 import Darwin
 import Foundation
 import MacProviderCore
@@ -291,16 +292,52 @@ final class ModelsSubcommandTests: XCTestCase {
         XCTAssertEqual(events.first?.errorCode, .actionUnavailable)
     }
 
-    func testModelsPrepareLaneAGuardsFailClosedUntilArtifactAuthorityLands() async throws {
+    func testModelsPrepareRejectsPlainHTTPStagingCoordinatorHost() async throws {
         let command = try ModelsPrepareCommand.parse([
-            Build1LaneAPrepareProfile.artifactModelID,
+            Build1LaneAPrepareProfile.catalogKey,
             "--json",
             "--yes",
-            "--profile", Build1LaneAPrepareProfile.profile,
-            "--coordinator-url", "wss://api-staging.malibu.tech/ws/provider",
+            "--coordinator-url", "http://api-staging.malibu.tech/ws/provider",
         ])
 
         let capture = await captureOutput { try await command.run() }
+
+        XCTAssertEqual(capture.error as? ExitCode, ExitCode(2))
+        XCTAssertTrue(capture.stderr.contains("staging_coordinator_required"))
+        let events = try decodePreparationEvents(capture.stdout)
+        XCTAssertEqual(events.count, 1)
+        XCTAssertEqual(events.first?.errorCode, .actionUnavailable)
+    }
+
+    func testModelsPrepareRejectsNonDefaultStagingCoordinatorPort() async throws {
+        let command = try ModelsPrepareCommand.parse([
+            Build1LaneAPrepareProfile.catalogKey,
+            "--json",
+            "--yes",
+            "--coordinator-url", "wss://api-staging.malibu.tech:8443/ws/provider",
+        ])
+
+        let capture = await captureOutput { try await command.run() }
+
+        XCTAssertEqual(capture.error as? ExitCode, ExitCode(2))
+        XCTAssertTrue(capture.stderr.contains("staging_coordinator_required"))
+        let events = try decodePreparationEvents(capture.stdout)
+        XCTAssertEqual(events.count, 1)
+        XCTAssertEqual(events.first?.errorCode, .actionUnavailable)
+    }
+
+    func testModelsPrepareLaneAGuardsFailClosedWithoutArtifactAuthority() async throws {
+        let inputs = AutotuneStaticInputs(fetch: { _ in throw URLError(.cannotConnectToHost) })
+        let capture = try await withPrepareStaticInputs(inputs) {
+            let command = try ModelsPrepareCommand.parse([
+                Build1LaneAPrepareProfile.artifactModelID,
+                "--json",
+                "--yes",
+                "--profile", Build1LaneAPrepareProfile.profile,
+                "--coordinator-url", "wss://api-staging.malibu.tech/ws/provider",
+            ])
+            return await captureOutput { try await command.run() }
+        }
 
         XCTAssertEqual(capture.error as? ExitCode, ExitCode(2))
         XCTAssertTrue(capture.stderr.contains(Build1LaneAPrepareProfile.unsupportedReason))
@@ -315,6 +352,78 @@ final class ModelsSubcommandTests: XCTestCase {
         XCTAssertEqual(events[1].transactionKind, .prepareModel)
         XCTAssertEqual(events[1].modelKey, Build1LaneAPrepareProfile.catalogKey)
         XCTAssertEqual(events[1].eventSequence, 2)
+        XCTAssertEqual(events[1].state, .failed)
+        XCTAssertEqual(events[1].errorCode, .authorityUnavailable)
+    }
+
+    func testModelsPrepareVerifiesLaneAArtifactAuthorityBeforeStagingBlocker() async throws {
+        let fixture = try Self.laneAArtifactFeedFixture()
+        let inputs = AutotuneStaticInputs(
+            fetch: { url in
+                XCTAssertEqual(url.scheme, "https")
+                XCTAssertEqual(url.host, "api-staging.malibu.tech")
+                switch url.path {
+                case "/v1/catalog-artifacts":
+                    return fixture.feedBytes
+                case "/v1/catalog-artifacts.sig":
+                    return fixture.sidecarBytes
+                default:
+                    throw URLError(.unsupportedURL)
+                }
+            },
+            trustedPublicKeys: fixture.trustedPublicKeys,
+            now: { Self.prepareDate("2026-09-02T01:00:00Z") }
+        )
+        let capture = try await withPrepareStaticInputs(inputs) {
+            let command = try ModelsPrepareCommand.parse([
+                Build1LaneAPrepareProfile.catalogKey,
+                "--json",
+                "--yes",
+                "--profile", Build1LaneAPrepareProfile.profile,
+                "--coordinator-url", "wss://api-staging.malibu.tech/ws/provider",
+            ])
+            return await captureOutput { try await command.run() }
+        }
+
+        XCTAssertEqual(capture.error as? ExitCode, ExitCode(2))
+        XCTAssertTrue(capture.stderr.contains(Build1LaneAPrepareProfile.stagingUnavailableReason))
+        let events = try decodePreparationEvents(capture.stdout)
+        XCTAssertEqual(events.count, 3)
+        XCTAssertEqual(Set(events.map(\.transactionID)).count, 1)
+        XCTAssertEqual(events[0].state, .queued)
+        XCTAssertEqual(events[1].state, .running)
+        XCTAssertEqual(events[1].progress?.stageLabelKey, "artifact_authority_verified")
+        XCTAssertEqual(events[1].progress?.bytesCompleted, 0)
+        XCTAssertEqual(events[1].progress?.bytesExpected, Int64(fixture.laneAArtifactSizeBytes))
+        XCTAssertEqual(events[1].progress?.percentComplete, 0)
+        XCTAssertNil(events[1].errorCode)
+        XCTAssertEqual(events[2].eventSequence, 3)
+        XCTAssertEqual(events[2].state, .failed)
+        XCTAssertEqual(events[2].errorCode, .actionUnavailable)
+    }
+
+    func testModelsPrepareRejectsSignedFeedWithWrongLaneAPrimaryArtifactID() async throws {
+        let fixture = try Self.laneAArtifactFeedFixture(laneAArtifactID: "alternate")
+        let inputs = AutotuneStaticInputs(
+            fetch: { url in url.path.hasSuffix(".sig") ? fixture.sidecarBytes : fixture.feedBytes },
+            trustedPublicKeys: fixture.trustedPublicKeys,
+            now: { Self.prepareDate("2026-09-02T01:00:00Z") }
+        )
+        let capture = try await withPrepareStaticInputs(inputs) {
+            let command = try ModelsPrepareCommand.parse([
+                Build1LaneAPrepareProfile.catalogKey,
+                "--json",
+                "--yes",
+                "--profile", Build1LaneAPrepareProfile.profile,
+                "--coordinator-url", "http://127.0.0.1:19090/ws/provider",
+            ])
+            return await captureOutput { try await command.run() }
+        }
+
+        XCTAssertEqual(capture.error as? ExitCode, ExitCode(2))
+        XCTAssertTrue(capture.stderr.contains(Build1LaneAPrepareProfile.unsupportedReason))
+        let events = try decodePreparationEvents(capture.stdout)
+        XCTAssertEqual(events.count, 2)
         XCTAssertEqual(events[1].state, .failed)
         XCTAssertEqual(events[1].errorCode, .authorityUnavailable)
     }
@@ -1380,6 +1489,94 @@ final class ModelsSubcommandTests: XCTestCase {
             }
             return try JSONDecoder().decode(ModelPreparationTransactionEvent.self, from: data)
         }
+    }
+
+    private func withPrepareStaticInputs<T>(
+        _ inputs: AutotuneStaticInputs,
+        _ body: () async throws -> T
+    ) async rethrows -> T {
+        let original = Build1LaneAArtifactAuthorityResolver.makeStaticInputs
+        Build1LaneAArtifactAuthorityResolver.makeStaticInputs = { _ in inputs }
+        defer { Build1LaneAArtifactAuthorityResolver.makeStaticInputs = original }
+        return try await body()
+    }
+
+    private struct LaneAArtifactFeedFixture {
+        var feedBytes: Data
+        var sidecarBytes: Data
+        var trustedPublicKeys: [String: String]
+        var laneAArtifactSizeBytes: Int
+    }
+
+    private static func laneAArtifactFeedFixture(
+        laneAArtifactID: String = Build1LaneAPrepareProfile.artifactID
+    ) throws -> LaneAArtifactFeedFixture {
+        let candidateBytes = Data(AutotuneStaticInputs.bakedCandidateCatalogJSON.utf8)
+        let catalog = try AutotuneStaticInputs.decodeSignedStaticCandidateCatalog(candidateBytes)
+        let generatedAt = try XCTUnwrap(ArtifactFeed.rawGeneratedAt(in: candidateBytes))
+        let catalogSHA256 = AutotuneStaticInputs.candidateCatalogSHA256(bytes: candidateBytes)
+        let laneAArtifactSizeBytes = 2_345_678_901
+        var models: [String: Any] = [:]
+        for key in catalog.rows.keys.sorted() {
+            let row = catalog.rows[key]!
+            if row.runtimeStatus == "blocked" {
+                continue
+            }
+            let modelSHA256 = try XCTUnwrap(row.modelSHA256)
+            let artifactID = key == Build1LaneAPrepareProfile.catalogKey ? laneAArtifactID : Build1LaneAPrepareProfile.artifactID
+            let sizeBytes = key == Build1LaneAPrepareProfile.catalogKey ? laneAArtifactSizeBytes : 1
+            models[key] = [
+                "rate_class": "class-3b",
+                "primary_artifact_id": artifactID,
+                "artifacts": [
+                    artifactID: [
+                        "runtime_format": "mlx_safetensors",
+                        "quantization": "4bit",
+                        "source_ref": [
+                            "kind": "huggingface_revision",
+                            "repo_id": row.modelID,
+                            "revision": row.modelRevision,
+                        ],
+                        "hash_algorithm": "macprovider.snapshot-manifest.v1",
+                        "hash": modelSHA256,
+                        "size_bytes": sizeBytes,
+                        "min_ram_gb": row.minRAMGB,
+                        "allowed_runtime_sources": [Build1LaneAPrepareProfile.runtimeSource],
+                        "verification_status": "verified",
+                        "verified_at": "2026-09-02",
+                    ],
+                ],
+            ]
+        }
+        let feed: [String: Any] = [
+            "version": catalog.version,
+            "generated_at": generatedAt,
+            "policy_version": catalog.policyVersion,
+            "source": ArtifactFeed.source,
+            "release_id": catalog.version,
+            "candidate_catalog_sha256": catalogSHA256,
+            "models": models,
+        ]
+        let feedBytes = try JSONSerialization.data(
+            withJSONObject: feed,
+            options: [.sortedKeys, .withoutEscapingSlashes]
+        )
+        let privateKey = Curve25519.Signing.PrivateKey()
+        let keyID = AutotuneStaticInputs.bakedCatalogSignerKeyID ?? AutotuneStaticInputs.keyID
+        let signature = try privateKey.signature(for: feedBytes).base64EncodedString()
+        let sidecarBytes = Data("{\"key_id\":\"\(keyID)\",\"alg\":\"ed25519\",\"signature\":\"\(signature)\"}".utf8)
+        var trustedPublicKeys = AutotuneStaticInputs.defaultTrustedPublicKeys
+        trustedPublicKeys[keyID] = privateKey.publicKey.rawRepresentation.base64EncodedString()
+        return LaneAArtifactFeedFixture(
+            feedBytes: feedBytes,
+            sidecarBytes: sidecarBytes,
+            trustedPublicKeys: trustedPublicKeys,
+            laneAArtifactSizeBytes: laneAArtifactSizeBytes
+        )
+    }
+
+    private static func prepareDate(_ raw: String) -> Date {
+        ISO8601DateFormatter.autotuneInternet.date(from: raw)!
     }
 
     private func mutateRecommendationFixture(
