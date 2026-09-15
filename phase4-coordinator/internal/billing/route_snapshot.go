@@ -295,7 +295,11 @@ func (s *Store) InsertRouteSnapshot(ctx context.Context, snapshot RouteSnapshot)
 		return "", err
 	}
 	connWaitStarted := time.Now()
-	conn, err := s.db.Conn(ctx)
+	db := s.routeSnapshotHandle()
+	if db == nil {
+		return "", fmt.Errorf("billing store is closed")
+	}
+	conn, err := db.Conn(ctx)
 	s.observeSQLiteConnectionWait("route_snapshot", err, time.Since(connWaitStarted))
 	if err != nil {
 		return "", wrapRouteSnapshotStorePressure(err)

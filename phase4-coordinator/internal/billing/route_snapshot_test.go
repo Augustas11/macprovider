@@ -2,11 +2,17 @@ package billing
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/modelidentity"
+	"github.com/augstar/macprovider-coordinator/internal/requestlog"
+	"github.com/augstar/macprovider-coordinator/internal/sqliteutil"
 )
 
 func TestRouteSnapshotStrictKeysAndDigestSensitivity(t *testing.T) {
@@ -226,6 +232,50 @@ WHERE account_scope = ? AND request_id = ? AND attempt_n = ? AND provider_id = ?
 	}
 	if got := scalar(t, store.db, `SELECT COUNT(*) FROM settlement_route_snapshots`); got != 1 {
 		t.Fatalf("snapshot rows=%d want 1", got)
+	}
+}
+
+func TestInsertRouteSnapshotDedicatedHandleBypassesRequestLogPoolWait(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "coordinator.db")
+	reqStore, err := requestlog.OpenStore(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reqStore.Close() })
+	store, err := NewStore(reqStore.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	heldSharedConn, err := reqStore.DB().Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer heldSharedConn.Close()
+
+	blockedCtx, blockedCancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	_, err = store.InsertRouteSnapshot(blockedCtx, testRouteSnapshot())
+	blockedCancel()
+	if !errors.Is(err, ErrRouteSnapshotStorePressure) || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("shared route snapshot insert err=%v, want deadline-wrapped store pressure", err)
+	}
+
+	routeSnapshotDB, err := sql.Open("sqlite", sqliteutil.WithManualWALCheckpointPragmas(dbPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	routeSnapshotDB.SetMaxOpenConns(1)
+	routeSnapshotDB.SetMaxIdleConns(1)
+	t.Cleanup(func() { _ = routeSnapshotDB.Close() })
+	store.SetRouteSnapshotDB(routeSnapshotDB)
+
+	snapshot := testRouteSnapshot()
+	snapshot.RequestID = "req-dedicated-route-snapshot"
+	snapshot.AttemptN = 1
+	insertCtx, insertCancel := context.WithTimeout(context.Background(), time.Second)
+	defer insertCancel()
+	if _, err := store.InsertRouteSnapshot(insertCtx, snapshot); err != nil {
+		t.Fatalf("dedicated route snapshot insert: %v", err)
 	}
 }
 

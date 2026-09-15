@@ -24,8 +24,13 @@ type Store struct {
 	db           *sql.DB
 	now          func() time.Time
 	sqliteMetric SQLiteMetrics
-	settlementMu sync.RWMutex
-	settlement   SettlementConfig
+	// routeSnapshotDB is an optional same-file SQLite handle reserved for
+	// durable pre-dispatch route snapshots. It avoids queueing those writes
+	// behind request_log pool users while SQLite still serializes the writer
+	// lock and enforces the same WAL/synchronous pragmas.
+	routeSnapshotDB atomic.Pointer[sql.DB]
+	settlementMu    sync.RWMutex
+	settlement      SettlementConfig
 	// SPEC-005 v0.4 §13.2 — billing.quarantine_resolution_force_void_enabled
 	// route-layer flag. Held as atomic.Bool so the handler reads it on
 	// every request (no re-wire of the HTTP handler on reload).
@@ -68,6 +73,23 @@ func (s *Store) SetSQLiteMetrics(metrics SQLiteMetrics) {
 		return
 	}
 	s.sqliteMetric = metrics
+}
+
+func (s *Store) SetRouteSnapshotDB(db *sql.DB) {
+	if s == nil {
+		return
+	}
+	s.routeSnapshotDB.Store(db)
+}
+
+func (s *Store) routeSnapshotHandle() *sql.DB {
+	if s == nil {
+		return nil
+	}
+	if db := s.routeSnapshotDB.Load(); db != nil {
+		return db
+	}
+	return s.db
 }
 
 func (s *Store) migrate(ctx context.Context) error {
