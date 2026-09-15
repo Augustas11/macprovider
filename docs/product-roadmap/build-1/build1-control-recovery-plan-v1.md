@@ -1,9 +1,9 @@
 # Build 1 Control Recovery Plan v1
 
-Status: proposed control ledger
+Status: active control ledger
 Date: 2026-09-15
-Base evidence: `origin/main` at `c4238cfa`
-Decision: freeze new Build 1 implementation slices until they name one Build 1 lane from this document.
+Base evidence: `origin/main` at `68b90269`
+Decision: freeze new Build 1 implementation slices unless they name one Build 1 lane from this document.
 
 ## Purpose
 
@@ -60,6 +60,7 @@ future sessions will keep interpreting stale handoffs as active work.
 | #1510 | `5a4e3735` | v2 storage projection is grounded in private inventory and the old dependency is merged. | Not Build 1 product acceptance; no public prepare/adopt/cancel path or staging journey. |
 | #1512 | `ab181787` | Narrow MVP evidence validation is guarded against overclaiming and the old dependency is merged. | Does not create the physical evidence bundle, provider execution path, or product acceptance. |
 | #1519 | `82e8f7c7` | Configured v2 storage budget groundwork is landed behind private boundaries. | No public v2 status, env/YAML runtime parser, preparation action, admission, settlement, payout, release, or production activation. |
+| #1525 | `68b90269` | Lane A `macprovider-cli models prepare` exists behind exact tuple, staging coordinator, `--json`, and `--yes` guards, and fails closed with transaction events. | No signed artifact authority, artifact download, staging, durable adoption, physical provider run, admission, settlement, payout, release, or production activation. |
 
 Current open PRs as of 2026-09-15 are not Build 1 control blockers:
 
@@ -88,8 +89,10 @@ Current open PRs as of 2026-09-15 are not Build 1 control blockers:
 
 Lane A blockers:
 
-- Select and document the executable provider path that can produce the narrow
-  staging evidence bundle.
+- Wire signed artifact authority into the guarded `models prepare` path for the
+  exact Lane A tuple.
+- Stage and verify the exact MLX artifact before durable adoption, without
+  changing the active model on any failure or cancellation.
 - Produce a measured, artifact-bound staging release or equivalent staging
   input for the selected Llama 3B tuple.
 - Run the physical Apple Silicon staging journey against staging
@@ -111,15 +114,18 @@ Lane B blockers:
 
 ## Next Authorized Action
 
-The next implementation work, if Build 1 continues, is not another historical
-slice. It is a Lane A executable-provider-path PRD and test spec that maps each
-planned change to one remaining Lane A blocker above.
+The next implementation work, if Build 1 continues, is the Lane A artifact
+authority slice for the guarded `models prepare` path. It should fetch or load
+only the staging signed artifact feed for the approved Llama 3B tuple, validate
+the signed authority fields needed for preparation, and preserve the current
+fail-closed behavior unless the exact authority is present.
 
-That PRD/test spec must state:
+That PR or handoff must state:
 
-- Selected lane: Lane A, Lane B, or Lane C.
+- Selected lane: Lane A.
 - Requirement source: `SPEC-044`, `narrow-mvp-plan-v6.md`,
-  `narrow-mvp-test-spec-v6.md`, or another named authority.
+  `narrow-mvp-test-spec-v6.md`, and
+  `lane-a-executable-provider-path-prd-v1.md`.
 - What the PR will prove.
 - What the PR will not prove.
 - Stop condition.
