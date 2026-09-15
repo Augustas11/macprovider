@@ -21,6 +21,10 @@ type ModelAdmissionRouteGuard interface {
 	CompareAndInsertModelAdmissionRouteSnapshot(context.Context, providerws.ModelAdmissionRouteExpectation, func() error) error
 }
 
+type modelAdmissionEventsEmptyStore interface {
+	ModelAdmissionEventsEmpty(context.Context) (bool, error)
+}
+
 // byomAdmissionCandidate reports whether the session carries a
 // coordinator-derived session-to-candidate binding (SPEC-047-R003 v0.1.5).
 // Provider-reported names and keys are never a binding.
@@ -61,8 +65,23 @@ func (s *Server) byomLegacyRoutingEligible(ctx context.Context, p pool.Provider)
 	if byomAdmissionCandidate(p) || p.ArtifactIdentity != nil {
 		return false
 	}
+	if s.modelAdmissionEventsEmpty(ctx) {
+		return true
+	}
 	_, found, err := s.modelAdmissionStore.LatestModelAdmissionRouteStatus(ctx, p.ProviderID, "", "")
 	return err == nil && !found
+}
+
+func (s *Server) modelAdmissionEventsEmpty(ctx context.Context) bool {
+	if s == nil || s.modelAdmissionStore == nil {
+		return false
+	}
+	store, ok := s.modelAdmissionStore.(modelAdmissionEventsEmptyStore)
+	if !ok {
+		return false
+	}
+	empty, err := store.ModelAdmissionEventsEmpty(ctx)
+	return err == nil && empty
 }
 
 // byomMaterialHash is the tier-2 material lookup digest for a session: the
