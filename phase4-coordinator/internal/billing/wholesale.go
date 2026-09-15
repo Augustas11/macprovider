@@ -22,6 +22,9 @@ const (
 	wholesaleStatementsPath  = "/admin/ledger/wholesale-statements"
 	wholesaleStatementDraft  = "draft"
 	wholesaleStatementIssued = "issued"
+
+	wholesaleStatementMaxAttempts = 4
+	wholesaleStatementRetryBase   = 125 * time.Millisecond
 )
 
 var (
@@ -149,6 +152,27 @@ func creditsToUSDMicro(credits int64, usdPerMillionCredits float64) int64 {
 }
 
 func (s *Store) GenerateWholesaleStatement(ctx context.Context, accountID, period string, force bool) (WholesaleStatement, error) {
+	return generateWholesaleStatementWithRetry(ctx, func(ctx context.Context) (WholesaleStatement, error) {
+		return s.generateWholesaleStatementOnce(ctx, accountID, period, force)
+	}, sleepWholesaleStatementRetry)
+}
+
+func generateWholesaleStatementWithRetry(ctx context.Context, op func(context.Context) (WholesaleStatement, error), sleep func(context.Context, int) bool) (WholesaleStatement, error) {
+	var lastErr error
+	for attempt := 0; attempt < wholesaleStatementMaxAttempts; attempt++ {
+		stmt, err := op(ctx)
+		if err == nil || !transientWholesaleStatementStorePressure(err) || attempt == wholesaleStatementMaxAttempts-1 {
+			return stmt, err
+		}
+		lastErr = err
+		if !sleep(ctx, attempt) {
+			return WholesaleStatement{}, lastErr
+		}
+	}
+	return WholesaleStatement{}, lastErr
+}
+
+func (s *Store) generateWholesaleStatementOnce(ctx context.Context, accountID, period string, force bool) (WholesaleStatement, error) {
 	accountID = strings.TrimSpace(accountID)
 	if accountID == "" {
 		return WholesaleStatement{}, errWholesaleAccountRequired
@@ -292,6 +316,31 @@ INSERT INTO wholesale_statement_line_items (
 		return WholesaleStatement{}, err
 	}
 	return s.getWholesaleStatement(ctx, id)
+}
+
+func transientWholesaleStatementStorePressure(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	return errors.Is(err, ErrRouteSnapshotStorePressure) || routeSnapshotStorePressure(err)
+}
+
+func sleepWholesaleStatementRetry(ctx context.Context, attempt int) bool {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	delay := wholesaleStatementRetryBase << attempt
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
 }
 
 func (s *Store) ListWholesaleStatements(ctx context.Context, accountID, period string) ([]WholesaleStatement, error) {

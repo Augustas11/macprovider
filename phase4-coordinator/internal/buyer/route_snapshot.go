@@ -279,8 +279,8 @@ func stringPtrOrNil(value string) *string {
 
 func writeRouteSnapshotError(w http.ResponseWriter, rec *billingRecorder, err error) {
 	rec.server.log.Warn().Err(err).Str("request_id", rec.requestID).Msg("route snapshot insert failed before provider dispatch")
-	if transientRouteSnapshotStorePressure(err) {
-		rec.logBuyerFailure(http.StatusServiceUnavailable, "Route snapshot storage is temporarily unavailable")
+	if routeSnapshotShouldCapacityShed(err) {
+		rec.logBuyerFailure(http.StatusServiceUnavailable, "Route snapshot guard is temporarily unavailable")
 		writeError(w, http.StatusServiceUnavailable, "no_provider_available", "No provider available for this model")
 		return
 	}
@@ -293,14 +293,11 @@ func writeRouteSnapshotError(w http.ResponseWriter, rec *billingRecorder, err er
 	writeError(w, http.StatusInternalServerError, "route_snapshot_failed", "Could not durably record route snapshot")
 }
 
-func transientRouteSnapshotStorePressure(err error) bool {
+func routeSnapshotShouldCapacityShed(err error) bool {
 	if err == nil {
 		return false
 	}
-	if errors.Is(err, context.DeadlineExceeded) {
-		return true
-	}
-	return errors.Is(err, billing.ErrRouteSnapshotStorePressure)
+	return errors.Is(err, billing.ErrRouteSnapshotStorePressure) || errors.Is(err, providerws.ErrModelAdmissionRouteDrift)
 }
 
 const (
