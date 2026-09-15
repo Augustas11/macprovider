@@ -201,3 +201,53 @@ func TestReconcileForwardedSlotAvailablePublishesReadySlot(t *testing.T) {
 		t.Fatalf("provider capacity after reconciliation = state %q slots_free %d, want ready/1", got.State, got.SlotsFree)
 	}
 }
+
+func TestForwardWithFailoverCommittedStreamPublishesReadySlot(t *testing.T) {
+	s, registry, _ := poolIsolationServer(t)
+	provider := poolProvider("p-committed")
+	provider.State = pool.StateBusy
+	provider.SlotsFree = 0
+	registry.Register(&provider, nil)
+
+	startedAt := time.Unix(1716768000, 0)
+	state := &forwardState{
+		provider:                provider,
+		slotReservationsEnabled: true,
+		queuedSlotProviderID:    provider.ProviderID,
+		faultedRoutes:           map[string]struct{}{},
+	}
+	req, _ := http.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	rec := &billingRecorder{
+		server:    s,
+		state:     state,
+		req:       req,
+		startedAt: startedAt,
+		requestID: "rid-committed",
+	}
+	committedRendered := false
+
+	s.forwardWithFailover(nil, req, poolChatReq(""), "rid-committed", "rid-committed", startedAt, state, map[string]struct{}{}, rec, transportCallbacks{
+		dispatch: func(http.ResponseWriter, *http.Request, chatRequest, string, string, time.Time, *forwardState, *billingRecorder) (dispatchedAttempt, bool) {
+			return dispatchedAttempt{tr: transportResult{
+				committed: true,
+				status:    http.StatusOK,
+				attempt:   requestLogAttempt{Status: http.StatusOK},
+			}}, true
+		},
+		renderCommitted: func(http.ResponseWriter, *http.Request, dispatchedAttempt, *forwardState) bool {
+			committedRendered = true
+			return true
+		},
+	})
+
+	if !committedRendered {
+		t.Fatal("committed stream was not rendered")
+	}
+	got, ok := registry.Resolve(provider.ProviderID, provider.AssignedID)
+	if !ok {
+		t.Fatal("provider missing after committed stream")
+	}
+	if got.State != pool.StateReady || got.SlotsFree != 1 {
+		t.Fatalf("provider capacity after committed stream = state %q slots_free %d, want ready/1", got.State, got.SlotsFree)
+	}
+}

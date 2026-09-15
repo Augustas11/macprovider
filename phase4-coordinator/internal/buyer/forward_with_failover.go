@@ -147,6 +147,7 @@ func (s *Server) forwardWithFailover(
 		// gating on cancelled). HTTP / WS-non-streaming leave this nil.
 		if tr.committed && tx.renderCommitted != nil {
 			if tx.renderCommitted(w, r, dispatched, state) {
+				s.reconcileForwardedSlotAvailable(state)
 				return false
 			}
 		}
