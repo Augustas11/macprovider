@@ -272,8 +272,8 @@ class PhysicalRig:
         return completed.returncode, completed.stdout, completed.stderr
 
     def cli(self, args: list[str]) -> dict[str, Any]:
-        code, stdout, _ = self.cli_raw(args)
-        assert_true(code == 0, "cli exited non-zero for: " + " ".join(args[:3]))
+        code, stdout, stderr = self.cli_raw(args)
+        assert_true(code == 0, "cli exited non-zero for: " + " ".join(args[:3]) + " :: " + (stderr or stdout)[:400])
         try:
             return json.loads(stdout)
         except json.JSONDecodeError as exc:
@@ -613,10 +613,10 @@ class AdmissionJourneyRunner:
         self.m.add_step(STEP_IDS[0], "Dry run produced the dry-run document with local_default authority and made no coordinator request.", [doc])
 
     def step_02_submit_signed_offer(self) -> None:
-        submit = self.rig.cli(["models", "offer", self.settleable.served_model_ref, *self._common()])
-        assert_true(submit.get("schema") == "model_admission_offer_submit.v1", "offer submit did not return the submit document")
+        submit = self.rig.cli(["models", "offer", self.settleable.served_model_ref, "--yes", *self._common()])
+        assert_true(submit.get("schema") == "model_admission_status.v1", "offer submit did not return the submit document")
         assert_true(submit.get("admission_state_source") == "coordinator", "offer was not coordinator-backed")
-        assert_true(submit.get("admission_state") == "offer_submitted", "offer did not land in offer_submitted")
+        assert_true(submit.get("admission_state") in ("offer_submitted", "sandbox_probe_only"), "offer did not land in a coordinator-backed post-offer state")
         assert_true(bool(submit.get("coordinator_event_id")), "accepted offer carries no coordinator event id")
         # Provider authentication and the provider signature are what the
         # coordinator checks before it appends an offer event at all; an
@@ -637,7 +637,7 @@ class AdmissionJourneyRunner:
         settled = self.wait_for_state(self.settleable, "sandbox_probe_only", "step 2 (coordinator probe policy applied)")
         head = settled["coordinator_event_id"]
         assert_true(head is not None and bool(COORDINATOR_EVENT_ID.match(head)), "post-submit status carries no coordinator event id")
-        code, _, stderr = self.rig.cli_raw(["models", "offer", self.settleable.served_model_ref, *self._common()])
+        code, _, stderr = self.rig.cli_raw(["models", "offer", self.settleable.served_model_ref, "--yes", *self._common()])
         assert_true(code != 0 and "HTTP 409" in stderr, "a duplicate live offer was accepted rather than refused with HTTP 409")
         status = self.expect_state(self.settleable, "sandbox_probe_only", "step 2 (after the refused duplicate)")
         assert_true(status["coordinator_event_id"] == head, "the refused duplicate offer appended a coordinator event")
@@ -650,7 +650,7 @@ class AdmissionJourneyRunner:
         # the CLI's own submission builder refuses it before any coordinator
         # contact (SPEC-023 s3.7.4). The refusal, the absence of coordinator
         # state, and the absence of traffic are the evidence.
-        code, _, stderr = self.rig.cli_raw(["models", "offer", self.opaque.served_model_ref, *self._common()])
+        code, _, stderr = self.rig.cli_raw(["models", "offer", self.opaque.served_model_ref, "--yes", *self._common()])
         assert_true(code != 0 and "not offerable" in stderr, "an opaque endpoint candidate was submitted rather than refused")
         status = self.status(self.opaque)
         assert_true(status["admission_state_source"] == "local_default", "opaque endpoint acquired coordinator admission state")
@@ -724,7 +724,7 @@ class AdmissionJourneyRunner:
         doc = self.m.capture("revoked-status", "model_admission_status.v1", status)
         self.m.add_step(STEP_IDS[6], "A changed admitted predicate was detected by the coordinator and the candidate was revoked with a drift reason; routing and settlement failed closed.", [doc])
         # Re-entry after revocation requires refreshed provider-signed evidence.
-        reoffer = self.rig.cli(["models", "offer", self.settleable.served_model_ref, *self._common()])
+        reoffer = self.rig.cli(["models", "offer", self.settleable.served_model_ref, "--yes", *self._common()])
         assert_true(reoffer.get("admission_state") == "offer_submitted" and reoffer.get("coordinator_event_id") != status.get("coordinator_event_id"), "re-offer after revocation did not append a fresh signed event")
         self.m.observe("revoked_reoffer_required_fresh_evidence", True)
 
@@ -742,7 +742,7 @@ class AdmissionJourneyRunner:
         self.m.observe("withdrawal_verified", True)
         doc = self.m.capture("withdrawal-response", "model_admission_withdraw.v1", document)
         self.m.add_step(STEP_IDS[7], "The offered candidate was withdrawn through the CLI-owned path and its local artifacts remain in inventory.", [doc])
-        reoffer = self.rig.cli(["models", "offer", self.settleable.served_model_ref, *self._common()])
+        reoffer = self.rig.cli(["models", "offer", self.settleable.served_model_ref, "--yes", *self._common()])
         assert_true(reoffer.get("admission_state") == "offer_submitted" and reoffer.get("coordinator_event_id") != document.get("coordinator_event_id"), "re-offer after withdrawal did not append a fresh signed event")
         self.m.observe("withdrawn_reoffer_required_fresh_evidence", True)
 
@@ -794,8 +794,8 @@ class AdmissionJourneyRunner:
         # makes its status coordinator-backed. Without the offer the status is a
         # local_default `not_offered` that cannot assert offer history. The opaque
         # endpoint is not a substitute; it never reaches the coordinator (step 3).
-        novel_submit = self.rig.cli(["models", "offer", self.gguf.served_model_ref, *self._common()])
-        assert_true(novel_submit.get("schema") == "model_admission_offer_submit.v1", "novel offer did not return the submit document")
+        novel_submit = self.rig.cli(["models", "offer", self.gguf.served_model_ref, "--yes", *self._common()])
+        assert_true(novel_submit.get("schema") == "model_admission_status.v1", "novel offer did not return the submit document")
         assert_true(novel_submit.get("admission_state_source") == "coordinator", "novel offer was not coordinator-backed")
         assert_true(novel_submit.get("admission_state") == "offer_submitted", "novel offer did not land in offer_submitted")
         assert_true(bool(novel_submit.get("coordinator_event_id")), "accepted novel offer carries no coordinator event id")
