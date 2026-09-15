@@ -204,22 +204,23 @@ type Server struct {
 	trustPoolStatusStore *trustpool.Store
 	// poolRejectionTimingFloor is the SPEC-043-R007 active minimum for
 	// pool_unavailable rejection paths. Zero defaults to 50 ms.
-	poolRejectionTimingFloor time.Duration
-	log                      zerolog.Logger
-	createdAt                int64
-	preflight                PreflightFunc
-	preflightThreshold       int
-	preflightTimeout         time.Duration
-	recoveryBackoff          time.Duration
-	recoveryMaxRetries       int
-	recoveryProbe            bool
-	breakerThreshold         int
-	breakerWindow            time.Duration
-	relay                    RelayFunc
-	settlementRelay          SettlementRelayFunc
-	admission                *providerws.AdmissionManager
-	modelAdmissionStore      providerws.ModelAdmissionStore
-	modelAdmissionRouteGuard ModelAdmissionRouteGuard
+	poolRejectionTimingFloor       time.Duration
+	log                            zerolog.Logger
+	createdAt                      int64
+	preflight                      PreflightFunc
+	preflightThreshold             int
+	preflightTimeout               time.Duration
+	recoveryBackoff                time.Duration
+	recoveryMaxRetries             int
+	recoveryProbe                  bool
+	breakerThreshold               int
+	breakerWindow                  time.Duration
+	relay                          RelayFunc
+	settlementRelay                SettlementRelayFunc
+	admission                      *providerws.AdmissionManager
+	modelAdmissionStore            providerws.ModelAdmissionStore
+	modelAdmissionRouteGuard       ModelAdmissionRouteGuard
+	modelAdmissionLegacyRouteCache sync.Map
 	// intakeObserver receives unmatched-model requests (SPEC-017 v0.2.1
 	// §5.2b.2); nil disables the hook.
 	intakeObserver    IntakeObserver

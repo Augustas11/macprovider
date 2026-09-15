@@ -21,8 +21,22 @@ type ModelAdmissionRouteGuard interface {
 	CompareAndInsertModelAdmissionRouteSnapshot(context.Context, providerws.ModelAdmissionRouteExpectation, func() error) error
 }
 
+type modelAdmissionRouteGenerationSource interface {
+	ModelAdmissionBindingGeneration(providerID string) uint64
+}
+
 type modelAdmissionEventsEmptyStore interface {
 	ModelAdmissionEventsEmpty(context.Context) (bool, error)
+}
+
+type modelAdmissionProviderRouteGenerationStore interface {
+	ModelAdmissionProviderRouteGeneration(context.Context, string) (uint64, error)
+}
+
+type modelAdmissionLegacyRouteCacheEntry struct {
+	routeGeneration uint64
+	storeGeneration uint64
+	eligible        bool
 }
 
 // byomAdmissionCandidate reports whether the session carries a
@@ -65,11 +79,31 @@ func (s *Server) byomLegacyRoutingEligible(ctx context.Context, p pool.Provider)
 	if byomAdmissionCandidate(p) || p.ArtifactIdentity != nil {
 		return false
 	}
+	routeGeneration, cacheable := s.legacyModelAdmissionRouteGeneration(p.ProviderID)
+	storeGeneration, storeCacheable := s.legacyModelAdmissionStoreGeneration(ctx, p.ProviderID)
+	cacheable = cacheable && storeCacheable
+	if cacheable {
+		if eligible, ok := s.cachedLegacyModelAdmissionRouteEligibility(p.ProviderID, routeGeneration, storeGeneration); ok {
+			return eligible
+		}
+	}
+	storeEligibility := func(eligible bool) bool {
+		if cacheable {
+			s.storeLegacyModelAdmissionRouteEligibility(ctx, p.ProviderID, routeGeneration, storeGeneration, eligible)
+		}
+		return eligible
+	}
+	eligible := false
 	if s.modelAdmissionEventsEmpty(ctx) {
-		return true
+		eligible = true
+		return storeEligibility(eligible)
 	}
 	_, found, err := s.modelAdmissionStore.LatestModelAdmissionRouteStatus(ctx, p.ProviderID, "", "")
-	return err == nil && !found
+	if err != nil {
+		return false
+	}
+	eligible = !found
+	return storeEligibility(eligible)
 }
 
 func (s *Server) modelAdmissionEventsEmpty(ctx context.Context) bool {
@@ -82,6 +116,66 @@ func (s *Server) modelAdmissionEventsEmpty(ctx context.Context) bool {
 	}
 	empty, err := store.ModelAdmissionEventsEmpty(ctx)
 	return err == nil && empty
+}
+
+func (s *Server) cachedLegacyModelAdmissionRouteEligibility(providerID string, routeGeneration, storeGeneration uint64) (bool, bool) {
+	if s == nil || providerID == "" {
+		return false, false
+	}
+	value, ok := s.modelAdmissionLegacyRouteCache.Load(providerID)
+	if !ok {
+		return false, false
+	}
+	entry, ok := value.(modelAdmissionLegacyRouteCacheEntry)
+	if !ok || entry.routeGeneration != routeGeneration || entry.storeGeneration != storeGeneration {
+		return false, false
+	}
+	return entry.eligible, true
+}
+
+func (s *Server) storeLegacyModelAdmissionRouteEligibility(ctx context.Context, providerID string, routeGeneration, storeGeneration uint64, eligible bool) {
+	if s == nil || providerID == "" {
+		return
+	}
+	currentGeneration, ok := s.legacyModelAdmissionRouteGeneration(providerID)
+	if !ok || currentGeneration != routeGeneration {
+		return
+	}
+	currentStoreGeneration, ok := s.legacyModelAdmissionStoreGeneration(ctx, providerID)
+	if !ok || currentStoreGeneration != storeGeneration {
+		return
+	}
+	s.modelAdmissionLegacyRouteCache.Store(providerID, modelAdmissionLegacyRouteCacheEntry{
+		routeGeneration: routeGeneration,
+		storeGeneration: storeGeneration,
+		eligible:        eligible,
+	})
+}
+
+func (s *Server) legacyModelAdmissionRouteGeneration(providerID string) (uint64, bool) {
+	if s == nil || providerID == "" || s.modelAdmissionRouteGuard == nil {
+		return 0, false
+	}
+	source, ok := s.modelAdmissionRouteGuard.(modelAdmissionRouteGenerationSource)
+	if !ok {
+		return 0, false
+	}
+	return source.ModelAdmissionBindingGeneration(providerID), true
+}
+
+func (s *Server) legacyModelAdmissionStoreGeneration(ctx context.Context, providerID string) (uint64, bool) {
+	if s == nil || providerID == "" || s.modelAdmissionStore == nil {
+		return 0, false
+	}
+	store, ok := s.modelAdmissionStore.(modelAdmissionProviderRouteGenerationStore)
+	if !ok {
+		return 0, false
+	}
+	generation, err := store.ModelAdmissionProviderRouteGeneration(ctx, providerID)
+	if err != nil {
+		return 0, false
+	}
+	return generation, true
 }
 
 // byomMaterialHash is the tier-2 material lookup digest for a session: the
