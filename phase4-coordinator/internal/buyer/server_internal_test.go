@@ -115,6 +115,50 @@ func TestRouteSnapshotGuardPressureWrapsDedicatedDeadline(t *testing.T) {
 	}
 }
 
+func TestRouteSnapshotDispatchContextUsesShortBudget(t *testing.T) {
+	if routeSnapshotDispatchTimeout >= requestLogWriteTimeout {
+		t.Fatalf("route snapshot dispatch timeout=%s must stay below request log write timeout=%s", routeSnapshotDispatchTimeout, requestLogWriteTimeout)
+	}
+	if routeSnapshotDispatchTimeout > time.Second {
+		t.Fatalf("route snapshot dispatch timeout=%s must stay below OpenRouter p95 recovery budget", routeSnapshotDispatchTimeout)
+	}
+	before := time.Now()
+	ctx, cancel := newRouteSnapshotDispatchContext(context.Background())
+	defer cancel()
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		t.Fatal("route snapshot dispatch context must carry a deadline")
+	}
+	if maxDeadline := before.Add(routeSnapshotDispatchTimeout + 50*time.Millisecond); deadline.Before(before) || deadline.After(maxDeadline) {
+		t.Fatalf("deadline=%s, want within route snapshot dispatch timeout from %s", deadline, before)
+	}
+}
+
+func TestWriteRouteSnapshotErrorSeparatesRequestCancellation(t *testing.T) {
+	if routeSnapshotShouldCapacityShed(context.Canceled) {
+		t.Fatal("request cancellation must not be classified as route snapshot store pressure")
+	}
+	rr := httptest.NewRecorder()
+	rec := &billingRecorder{server: &Server{log: zerolog.Nop()}, requestID: "req-canceled-route-snapshot"}
+
+	writeRouteSnapshotError(rr, rec, context.Canceled)
+
+	if rr.Code != statusClientClosedRequest {
+		t.Fatalf("status=%d, want %d body=%s", rr.Code, statusClientClosedRequest, rr.Body.String())
+	}
+	var envelope struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("decode error envelope: %v", err)
+	}
+	if envelope.Error.Code != "request_canceled" {
+		t.Fatalf("error code=%q, want request_canceled", envelope.Error.Code)
+	}
+}
+
 func TestProviderMatchesRequestClassMemberCatalogKeyAlias(t *testing.T) {
 	s := &Server{}
 	class := &config.ModelClassConfig{
@@ -827,7 +871,7 @@ var coordinatorEmittedErrorCodes = []string{
 	"provider_disconnected", "provider_error", "provider_failed",
 	"provider_not_found", "provider_response_too_large", "provider_stream_downgraded",
 	"provider_timeout", "provisional_quota_exceeded", "rate_limited",
-	"request_body_too_large", "request_content_encoding_unsupported", "request_log_failed",
+	"request_body_too_large", "request_canceled", "request_content_encoding_unsupported", "request_log_failed",
 	"response_byte_cap_exceeded", "route_snapshot_failed", "session_ended",
 	"settlement_finality_failed", "settlement_receipt_lookup_failed", "stream_output_exceeded", "streaming_json_object_unsupported",
 	"streaming_json_schema_unsupported", "tier2_aead_decrypt_failed", "tier2_attestation_required",

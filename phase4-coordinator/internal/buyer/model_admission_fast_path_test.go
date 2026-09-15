@@ -5,17 +5,21 @@ import (
 	"net/http"
 	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/augstar/macprovider-coordinator/internal/config"
 	providerws "github.com/augstar/macprovider-coordinator/internal/ws"
 )
 
 type routeStatusCountingAdmissionStore struct {
 	providerws.ModelAdmissionStore
-	empty            atomic.Bool
-	found            atomic.Bool
-	generation       atomic.Uint64
-	routeStatusCalls atomic.Int64
-	afterRouteStatus func()
+	empty                     atomic.Bool
+	found                     atomic.Bool
+	generation                atomic.Uint64
+	routeStatusCalls          atomic.Int64
+	afterRouteStatus          func()
+	waitRouteStatusForContext bool
+	routeStatusErr            error
 }
 
 type routeStatusGenerationGuard struct {
@@ -34,10 +38,17 @@ func (s *routeStatusCountingAdmissionStore) ModelAdmissionEventsEmpty(context.Co
 	return s.empty.Load(), nil
 }
 
-func (s *routeStatusCountingAdmissionStore) LatestModelAdmissionRouteStatus(context.Context, string, string, string) (providerws.ModelAdmissionEvent, bool, error) {
+func (s *routeStatusCountingAdmissionStore) LatestModelAdmissionRouteStatus(ctx context.Context, _, _, _ string) (providerws.ModelAdmissionEvent, bool, error) {
 	s.routeStatusCalls.Add(1)
 	if s.afterRouteStatus != nil {
 		s.afterRouteStatus()
+	}
+	if s.waitRouteStatusForContext {
+		<-ctx.Done()
+		return providerws.ModelAdmissionEvent{}, false, ctx.Err()
+	}
+	if s.routeStatusErr != nil {
+		return providerws.ModelAdmissionEvent{}, false, s.routeStatusErr
 	}
 	return providerws.ModelAdmissionEvent{}, s.found.Load(), nil
 }
@@ -83,6 +94,292 @@ func TestNonEmptyModelAdmissionStoreKeepsLegacyRouteStatusGate(t *testing.T) {
 	}
 	if calls := store.routeStatusCalls.Load(); calls == 0 {
 		t.Fatal("LatestModelAdmissionRouteStatus was not called once store is non-empty")
+	}
+}
+
+func TestLegacyModelAdmissionSelectionPressureUsesSharedRetryableBudget(t *testing.T) {
+	s, registry, _ := poolIsolationServer(t)
+	store := &routeStatusCountingAdmissionStore{waitRouteStatusForContext: true}
+	store.empty.Store(false)
+	s.modelAdmissionStore = store
+	for _, id := range []string{"p-one", "p-two", "p-three"} {
+		provider := poolProvider(id)
+		registry.Register(&provider, nil)
+	}
+
+	started := time.Now()
+	_, routeErr := s.selectProviderExcluding(context.Background(), "rid", poolChatReq(""), http.Header{}, nil, "2026-09-15", &forwardState{})
+	elapsed := time.Since(started)
+
+	if routeErr == nil || routeErr.status != http.StatusServiceUnavailable || routeErr.code != "no_provider_available" {
+		t.Fatalf("routeErr=%+v, want retryable no_provider_available", routeErr)
+	}
+	if elapsed > 2*routeSnapshotDispatchTimeout {
+		t.Fatalf("selection elapsed=%s, want bounded by shared admission budget %s", elapsed, routeSnapshotDispatchTimeout)
+	}
+	if calls := store.routeStatusCalls.Load(); calls < 2 {
+		t.Fatalf("LatestModelAdmissionRouteStatus calls=%d, want multiple candidates sharing one expired context", calls)
+	}
+}
+
+func TestLegacyModelAdmissionPinnedPressureUsesRetryableBudget(t *testing.T) {
+	s, registry, _ := poolIsolationServer(t)
+	store := &routeStatusCountingAdmissionStore{waitRouteStatusForContext: true}
+	store.empty.Store(false)
+	s.modelAdmissionStore = store
+	provider := poolProvider("p-pinned")
+	registry.Register(&provider, nil)
+
+	started := time.Now()
+	_, routeErr := s.selectProviderExcluding(context.Background(), "rid", poolChatReq(""), http.Header{
+		"X-MacProvider-Provider": []string{provider.ProviderID},
+	}, nil, "2026-09-15", &forwardState{})
+	elapsed := time.Since(started)
+
+	if routeErr == nil || routeErr.status != http.StatusServiceUnavailable || routeErr.code != "no_provider_available" {
+		t.Fatalf("routeErr=%+v, want retryable no_provider_available", routeErr)
+	}
+	if elapsed > 2*routeSnapshotDispatchTimeout {
+		t.Fatalf("pinned selection elapsed=%s, want bounded by admission budget %s", elapsed, routeSnapshotDispatchTimeout)
+	}
+}
+
+func TestLegacyModelAdmissionPinnedSessionPressureUsesRetryableBudget(t *testing.T) {
+	s, registry, _ := poolIsolationServer(t)
+	store := &routeStatusCountingAdmissionStore{waitRouteStatusForContext: true}
+	store.empty.Store(false)
+	s.modelAdmissionStore = store
+	provider := poolProvider("p-session")
+	registry.Register(&provider, nil)
+
+	started := time.Now()
+	_, routeErr := s.selectProviderExcluding(context.Background(), "rid", poolChatReq(""), http.Header{
+		"X-MacProvider-Session": []string{provider.AssignedID},
+	}, nil, "2026-09-15", &forwardState{})
+	elapsed := time.Since(started)
+
+	if routeErr == nil || routeErr.status != http.StatusServiceUnavailable || routeErr.code != "no_provider_available" {
+		t.Fatalf("routeErr=%+v, want retryable no_provider_available", routeErr)
+	}
+	if elapsed > 2*routeSnapshotDispatchTimeout {
+		t.Fatalf("pinned session selection elapsed=%s, want bounded by admission budget %s", elapsed, routeSnapshotDispatchTimeout)
+	}
+}
+
+func TestLegacyModelAdmissionSelectionCancellationUsesRequestCanceled(t *testing.T) {
+	s, registry, _ := poolIsolationServer(t)
+	store := &routeStatusCountingAdmissionStore{waitRouteStatusForContext: true}
+	store.empty.Store(false)
+	s.modelAdmissionStore = store
+	provider := poolProvider("p-canceled")
+	registry.Register(&provider, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, routeErr := s.selectProviderExcluding(ctx, "rid", poolChatReq(""), http.Header{}, nil, "2026-09-15", &forwardState{})
+
+	if routeErr == nil || routeErr.status != statusClientClosedRequest || routeErr.code != "request_canceled" {
+		t.Fatalf("routeErr=%+v, want request_canceled", routeErr)
+	}
+}
+
+func TestLegacyModelAdmissionPinnedCancellationUsesRequestCanceled(t *testing.T) {
+	s, registry, _ := poolIsolationServer(t)
+	store := &routeStatusCountingAdmissionStore{waitRouteStatusForContext: true}
+	store.empty.Store(false)
+	s.modelAdmissionStore = store
+	provider := poolProvider("p-pinned-canceled")
+	registry.Register(&provider, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, routeErr := s.selectProviderExcluding(ctx, "rid", poolChatReq(""), http.Header{
+		"X-MacProvider-Provider": []string{provider.ProviderID},
+	}, nil, "2026-09-15", &forwardState{})
+
+	if routeErr == nil || routeErr.status != statusClientClosedRequest || routeErr.code != "request_canceled" {
+		t.Fatalf("routeErr=%+v, want request_canceled", routeErr)
+	}
+}
+
+func TestLegacyModelAdmissionQueuedSelectionCancellationUsesRequestCanceled(t *testing.T) {
+	s, registry, _ := poolIsolationServer(t)
+	store := &routeStatusCountingAdmissionStore{}
+	store.empty.Store(true)
+	s.modelAdmissionStore = store
+	provider := poolProvider("p-queued-canceled")
+	provider.SlotsFree = 0
+	registry.Register(&provider, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, routeErr := s.selectProviderExcluding(ctx, "rid", poolChatReq(""), http.Header{}, nil, "2026-09-15", &forwardState{})
+
+	if routeErr == nil || routeErr.status != statusClientClosedRequest || routeErr.code != "request_canceled" {
+		t.Fatalf("routeErr=%+v, want request_canceled from queue wait", routeErr)
+	}
+}
+
+func TestLegacyModelAdmissionQueuePressureUsesRetryableBudget(t *testing.T) {
+	s, registry, _ := poolIsolationServer(t)
+	store := &routeStatusCountingAdmissionStore{waitRouteStatusForContext: true}
+	store.empty.Store(false)
+	s.modelAdmissionStore = store
+	provider := poolProvider("p-queued")
+	registry.Register(&provider, nil)
+	waiter, ok := s.slotQueue.enter(provider.ProviderID)
+	if !ok {
+		t.Fatal("enter returned no waiter")
+	}
+	defer s.slotQueue.leave(waiter)
+
+	started := time.Now()
+	_, status := s.pollQueuedProviderWithContext(context.Background(), waiter, provider.ModelID, nil, 100, &forwardState{})
+	elapsed := time.Since(started)
+
+	if status != queuedProviderAdmissionStorePressure {
+		t.Fatalf("queue status=%v, want admission store pressure", status)
+	}
+	if elapsed > 2*routeSnapshotDispatchTimeout {
+		t.Fatalf("queue poll elapsed=%s, want bounded by admission budget %s", elapsed, routeSnapshotDispatchTimeout)
+	}
+}
+
+func TestLegacyModelAdmissionQueueWaitsForSlotBeforeStorePressure(t *testing.T) {
+	s, registry, _ := poolIsolationServer(t)
+	store := &routeStatusCountingAdmissionStore{waitRouteStatusForContext: true}
+	store.empty.Store(false)
+	s.modelAdmissionStore = store
+	provider := poolProvider("p-queued-full")
+	provider.SlotsFree = 0
+	registry.Register(&provider, nil)
+	waiter, ok := s.slotQueue.enter(provider.ProviderID)
+	if !ok {
+		t.Fatal("enter returned no waiter")
+	}
+	defer s.slotQueue.leave(waiter)
+
+	_, status := s.pollQueuedProviderWithContext(context.Background(), waiter, provider.ModelID, nil, 100, &forwardState{})
+
+	if status != queuedProviderWait {
+		t.Fatalf("queue status=%v, want wait while provider has no free slot", status)
+	}
+	if calls := store.routeStatusCalls.Load(); calls != 0 {
+		t.Fatalf("LatestModelAdmissionRouteStatus calls=%d, want no admission-store read before a slot is free", calls)
+	}
+}
+
+func TestLegacyModelAdmissionQueuedSelectionDoesNotReadStoreWhileSaturated(t *testing.T) {
+	s, registry, _ := poolIsolationServer(t)
+	store := &routeStatusCountingAdmissionStore{waitRouteStatusForContext: true}
+	store.empty.Store(false)
+	s.modelAdmissionStore = store
+	s.slotQueueDeadline = 40 * time.Millisecond
+	s.slotQueuePollInterval = 5 * time.Millisecond
+	provider := poolProvider("p-queued-full")
+	provider.SlotsFree = 0
+	registry.Register(&provider, nil)
+
+	started := time.Now()
+	_, routeErr := s.selectProviderExcluding(context.Background(), "rid", poolChatReq(""), http.Header{}, nil, "2026-09-15", &forwardState{})
+	elapsed := time.Since(started)
+
+	if routeErr == nil || routeErr.status != http.StatusServiceUnavailable || routeErr.code != "no_provider_available" {
+		t.Fatalf("routeErr=%+v, want bounded queue no_provider_available", routeErr)
+	}
+	if elapsed > routeSnapshotDispatchTimeout {
+		t.Fatalf("queued selection elapsed=%s, want queue deadline to win before admission budget %s", elapsed, routeSnapshotDispatchTimeout)
+	}
+	if calls := store.routeStatusCalls.Load(); calls != 0 {
+		t.Fatalf("LatestModelAdmissionRouteStatus calls=%d, want no admission-store read while provider stays saturated", calls)
+	}
+}
+
+func TestLegacyModelAdmissionPressureShedsBeforeMixedSaturatedQueueWait(t *testing.T) {
+	s, registry, _ := poolIsolationServer(t)
+	store := &routeStatusCountingAdmissionStore{waitRouteStatusForContext: true}
+	store.empty.Store(false)
+	s.modelAdmissionStore = store
+	s.slotQueueDeadline = 2 * time.Second
+	s.slotQueuePollInterval = 5 * time.Millisecond
+	pressured := poolProvider("p-pressure")
+	registry.Register(&pressured, nil)
+	saturated := poolProvider("p-queued-full")
+	saturated.SlotsFree = 0
+	registry.Register(&saturated, nil)
+
+	started := time.Now()
+	_, routeErr := s.selectProviderExcluding(context.Background(), "rid", poolChatReq(""), http.Header{}, nil, "2026-09-15", &forwardState{})
+	elapsed := time.Since(started)
+
+	if routeErr == nil || routeErr.status != http.StatusServiceUnavailable || routeErr.code != "no_provider_available" {
+		t.Fatalf("routeErr=%+v, want retryable no_provider_available from admission pressure", routeErr)
+	}
+	if elapsed > 2*routeSnapshotDispatchTimeout {
+		t.Fatalf("mixed pressure+queue elapsed=%s, want pressure budget to win before queue deadline %s", elapsed, s.slotQueueDeadline)
+	}
+}
+
+func TestLegacyModelAdmissionPressureOutranksMixedFleetTerminalError(t *testing.T) {
+	s, registry, _ := poolIsolationServer(t)
+	store := &routeStatusCountingAdmissionStore{waitRouteStatusForContext: true}
+	store.empty.Store(false)
+	s.modelAdmissionStore = store
+	ready := poolProvider("p-ready")
+	registry.Register(&ready, nil)
+	tooSmall := poolProvider("p-small")
+	tooSmall.MaxContextTokens = 1
+	registry.Register(&tooSmall, nil)
+
+	_, routeErr := s.selectProviderExcluding(context.Background(), "rid", poolChatReq(""), http.Header{}, nil, "2026-09-15", &forwardState{})
+	if routeErr == nil || routeErr.status != http.StatusServiceUnavailable || routeErr.code != "no_provider_available" {
+		t.Fatalf("routeErr=%+v, want retryable no_provider_available under otherwise dispatchable store pressure", routeErr)
+	}
+}
+
+func TestLegacyModelAdmissionPressurePreservesPinnedExactModelAgainstClassFallback(t *testing.T) {
+	s, registry, tp := poolIsolationServer(t)
+	store := &routeStatusCountingAdmissionStore{waitRouteStatusForContext: true}
+	store.empty.Store(false)
+	s.modelAdmissionStore = store
+	s.SetRoutingClasses(map[string]config.ModelClassConfig{
+		"model-a": {Models: []string{"model-b"}, Objective: "fast"},
+	})
+	provider := poolProvider("p-pinned-exact")
+	registry.Register(&provider, nil)
+	tp.AddMember("P", provider.ProviderID)
+	if err := tp.SetModelAllowlist("P", []string{"model-a"}); err != nil {
+		t.Fatalf("SetModelAllowlist: %v", err)
+	}
+
+	_, routeErr := s.selectProviderExcluding(context.Background(), "rid", poolChatReq("P"), http.Header{
+		"X-MacProvider-Provider": []string{provider.ProviderID},
+	}, nil, "2026-09-15", &forwardState{})
+	if routeErr == nil || routeErr.status != http.StatusServiceUnavailable || routeErr.code != "no_provider_available" {
+		t.Fatalf("routeErr=%+v, want retryable no_provider_available instead of class allowlist failure", routeErr)
+	}
+}
+
+func TestLegacyModelAdmissionPressurePreservesPinnedSessionExactModelAgainstClassFallback(t *testing.T) {
+	s, registry, tp := poolIsolationServer(t)
+	store := &routeStatusCountingAdmissionStore{waitRouteStatusForContext: true}
+	store.empty.Store(false)
+	s.modelAdmissionStore = store
+	s.SetRoutingClasses(map[string]config.ModelClassConfig{
+		"model-a": {Models: []string{"model-b"}, Objective: "fast"},
+	})
+	provider := poolProvider("p-session-exact")
+	registry.Register(&provider, nil)
+	tp.AddMember("P", provider.ProviderID)
+	if err := tp.SetModelAllowlist("P", []string{"model-a"}); err != nil {
+		t.Fatalf("SetModelAllowlist: %v", err)
+	}
+
+	_, routeErr := s.selectProviderExcluding(context.Background(), "rid", poolChatReq("P"), http.Header{
+		"X-MacProvider-Session": []string{provider.AssignedID},
+	}, nil, "2026-09-15", &forwardState{})
+	if routeErr == nil || routeErr.status != http.StatusServiceUnavailable || routeErr.code != "no_provider_available" {
+		t.Fatalf("routeErr=%+v, want retryable no_provider_available instead of class allowlist failure", routeErr)
 	}
 }
 

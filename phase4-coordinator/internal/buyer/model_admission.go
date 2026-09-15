@@ -2,6 +2,7 @@ package buyer
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -41,6 +42,8 @@ type modelAdmissionLegacyRouteCacheEntry struct {
 
 type modelAdmissionPaidRoutingEligibility struct {
 	eligible                         bool
+	storePressure                    bool
+	requestCanceled                  bool
 	legacyProviderRouteGeneration    uint64
 	hasLegacyProviderRouteGeneration bool
 }
@@ -57,6 +60,12 @@ func (s *Server) byomDefaultPaidRoutingEligible(p pool.Provider) bool {
 }
 
 func (s *Server) byomDefaultPaidRoutingEligibility(p pool.Provider) modelAdmissionPaidRoutingEligibility {
+	ctx, cancel := context.WithTimeout(context.Background(), requestLogWriteTimeout)
+	defer cancel()
+	return s.byomDefaultPaidRoutingEligibilityWithContext(ctx, p)
+}
+
+func (s *Server) byomDefaultPaidRoutingEligibilityWithContext(ctx context.Context, p pool.Provider) modelAdmissionPaidRoutingEligibility {
 	bound := byomAdmissionCandidate(p)
 	// SPEC-010-R007(d): a session bound to a feed member routes only with the
 	// admission evidence its route snapshot must carry (which needs a store).
@@ -66,13 +75,17 @@ func (s *Server) byomDefaultPaidRoutingEligibility(p pool.Provider) modelAdmissi
 	if s == nil || s.modelAdmissionStore == nil {
 		return modelAdmissionPaidRoutingEligibility{eligible: !bound}
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), requestLogWriteTimeout)
-	defer cancel()
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	material, ok := tier2.SnapshotMaterial(p.ModelID, byomMaterialHash(p))
 	if !ok {
 		return s.byomLegacyRoutingEligible(ctx, p)
 	}
-	_, found, eligible := s.byomRouteSnapshotBinding(ctx, p, material)
+	_, found, eligible, err := s.byomRouteSnapshotBinding(ctx, p, material)
+	if err != nil {
+		return modelAdmissionEligibilityFromError(err)
+	}
 	if found {
 		return modelAdmissionPaidRoutingEligibility{eligible: eligible}
 	}
@@ -90,7 +103,10 @@ func (s *Server) byomLegacyRoutingEligible(ctx context.Context, p pool.Provider)
 		return modelAdmissionPaidRoutingEligibility{}
 	}
 	routeGeneration, cacheable := s.legacyModelAdmissionRouteGeneration(p.ProviderID)
-	storeGeneration, storeCacheable := s.legacyModelAdmissionStoreGeneration(ctx, p.ProviderID)
+	storeGeneration, storeCacheable, err := s.legacyModelAdmissionStoreGeneration(ctx, p.ProviderID)
+	if err != nil {
+		return modelAdmissionEligibilityFromError(err)
+	}
 	cacheable = cacheable && storeCacheable
 	if cacheable {
 		if eligible, ok := s.cachedLegacyModelAdmissionRouteEligibility(p.ProviderID, routeGeneration, storeGeneration); ok {
@@ -112,16 +128,30 @@ func (s *Server) byomLegacyRoutingEligible(ctx context.Context, p pool.Provider)
 		}
 	}
 	eligible := false
-	if s.modelAdmissionEventsEmpty(ctx) {
+	empty, err := s.modelAdmissionEventsEmpty(ctx)
+	if err != nil {
+		return modelAdmissionEligibilityFromError(err)
+	}
+	if empty {
 		eligible = true
 		return storeEligibility(eligible)
 	}
 	_, found, err := s.modelAdmissionStore.LatestModelAdmissionRouteStatus(ctx, p.ProviderID, "", "")
 	if err != nil {
-		return modelAdmissionPaidRoutingEligibility{}
+		return modelAdmissionEligibilityFromError(err)
 	}
 	eligible = !found
 	return storeEligibility(eligible)
+}
+
+func modelAdmissionEligibilityFromError(err error) modelAdmissionPaidRoutingEligibility {
+	if errors.Is(err, context.Canceled) {
+		return modelAdmissionPaidRoutingEligibility{requestCanceled: true}
+	}
+	if billing.IsRouteSnapshotStorePressure(err) {
+		return modelAdmissionPaidRoutingEligibility{storePressure: true}
+	}
+	return modelAdmissionPaidRoutingEligibility{}
 }
 
 func (s *Server) rememberLegacyModelAdmissionRouteExpectation(state *forwardState, p pool.Provider, eligibility modelAdmissionPaidRoutingEligibility) {
@@ -140,16 +170,19 @@ func (s *Server) rememberLegacyModelAdmissionRouteExpectation(state *forwardStat
 	state.legacyModelAdmissionRouteSet = true
 }
 
-func (s *Server) modelAdmissionEventsEmpty(ctx context.Context) bool {
+func (s *Server) modelAdmissionEventsEmpty(ctx context.Context) (bool, error) {
 	if s == nil || s.modelAdmissionStore == nil {
-		return false
+		return false, nil
 	}
 	store, ok := s.modelAdmissionStore.(modelAdmissionEventsEmptyStore)
 	if !ok {
-		return false
+		return false, nil
 	}
 	empty, err := store.ModelAdmissionEventsEmpty(ctx)
-	return err == nil && empty
+	if err != nil {
+		return false, err
+	}
+	return empty, nil
 }
 
 func (s *Server) cachedLegacyModelAdmissionRouteEligibility(providerID string, routeGeneration, storeGeneration uint64) (bool, bool) {
@@ -175,8 +208,8 @@ func (s *Server) storeLegacyModelAdmissionRouteEligibility(ctx context.Context, 
 	if !ok || currentGeneration != routeGeneration {
 		return
 	}
-	currentStoreGeneration, ok := s.legacyModelAdmissionStoreGeneration(ctx, providerID)
-	if !ok || currentStoreGeneration != storeGeneration {
+	currentStoreGeneration, ok, err := s.legacyModelAdmissionStoreGeneration(ctx, providerID)
+	if err != nil || !ok || currentStoreGeneration != storeGeneration {
 		return
 	}
 	s.modelAdmissionLegacyRouteCache.Store(providerID, modelAdmissionLegacyRouteCacheEntry{
@@ -197,19 +230,19 @@ func (s *Server) legacyModelAdmissionRouteGeneration(providerID string) (uint64,
 	return source.ModelAdmissionBindingGeneration(providerID), true
 }
 
-func (s *Server) legacyModelAdmissionStoreGeneration(ctx context.Context, providerID string) (uint64, bool) {
+func (s *Server) legacyModelAdmissionStoreGeneration(ctx context.Context, providerID string) (uint64, bool, error) {
 	if s == nil || providerID == "" || s.modelAdmissionStore == nil {
-		return 0, false
+		return 0, false, nil
 	}
 	store, ok := s.modelAdmissionStore.(modelAdmissionProviderRouteGenerationStore)
 	if !ok {
-		return 0, false
+		return 0, false, nil
 	}
 	generation, err := store.ModelAdmissionProviderRouteGeneration(ctx, providerID)
 	if err != nil {
-		return 0, false
+		return 0, false, err
 	}
-	return generation, true
+	return generation, true, nil
 }
 
 // byomMaterialHash is the tier-2 material lookup digest for a session: the
@@ -229,9 +262,9 @@ func byomMaterialHash(p pool.Provider) string {
 // the decision's bound member by CONTENT, and the route-time snapshot
 // carries the session's CURRENT binding provenance. Returns (binding,
 // found, eligible): found=false only when the session carries no binding.
-func (s *Server) byomRouteSnapshotBinding(ctx context.Context, p pool.Provider, material tier2.RouteSnapshotMaterial) (providerws.ModelAdmissionSettlementBinding, bool, bool) {
+func (s *Server) byomRouteSnapshotBinding(ctx context.Context, p pool.Provider, material tier2.RouteSnapshotMaterial) (providerws.ModelAdmissionSettlementBinding, bool, bool, error) {
 	if s == nil || s.modelAdmissionStore == nil || !byomAdmissionCandidate(p) {
-		return providerws.ModelAdmissionSettlementBinding{}, false, false
+		return providerws.ModelAdmissionSettlementBinding{}, false, false, nil
 	}
 	if ctx == nil {
 		ctx = context.Background()
@@ -239,18 +272,18 @@ func (s *Server) byomRouteSnapshotBinding(ctx context.Context, p pool.Provider, 
 	candidateID := strings.TrimSpace(p.ModelAdmissionCandidateID)
 	event, found, err := s.modelAdmissionStore.LatestModelAdmissionStatus(ctx, p.ProviderID, candidateID)
 	if err != nil || !found {
-		return providerws.ModelAdmissionSettlementBinding{}, true, false
+		return providerws.ModelAdmissionSettlementBinding{}, true, false, err
 	}
 	// Route-time event-id equality: the binding must name the candidate's
 	// latest event (a revocation refreshes the binding to the terminal event).
 	if event.CoordinatorEventID == "" || event.CoordinatorEventID != strings.TrimSpace(p.ModelAdmissionCoordinatorEventID) {
-		return providerws.ModelAdmissionSettlementBinding{}, true, false
+		return providerws.ModelAdmissionSettlementBinding{}, true, false, nil
 	}
 	if !s.byomSettlementPrereqsReady(p, material) {
-		return providerws.ModelAdmissionSettlementBinding{}, true, false
+		return providerws.ModelAdmissionSettlementBinding{}, true, false, nil
 	}
 	if !byomBoundMemberMatchesSession(p, event) {
-		return providerws.ModelAdmissionSettlementBinding{}, true, false
+		return providerws.ModelAdmissionSettlementBinding{}, true, false, nil
 	}
 	expectedAlgorithm, expectedHash := byomExpectedIdentity(p, material)
 	predicate := providerws.ModelAdmissionSettlementPredicate{
@@ -269,7 +302,7 @@ func (s *Server) byomRouteSnapshotBinding(ctx context.Context, p pool.Provider, 
 	}
 	byomArtifactPredicate(p, &predicate)
 	binding, ok := providerws.ModelAdmissionSettlementBindingForRouteSnapshot(event, predicate)
-	return binding, true, ok
+	return binding, true, ok, nil
 }
 
 // byomBoundMemberMatchesSession compares the decision's bound member to the
@@ -371,7 +404,10 @@ func validProviderReceiptPubkey(p pool.Provider) bool {
 }
 
 func (s *Server) requireBYOMRouteSnapshotBinding(ctx context.Context, p pool.Provider, material tier2.RouteSnapshotMaterial) (providerws.ModelAdmissionSettlementBinding, error) {
-	binding, found, eligible := s.byomRouteSnapshotBinding(ctx, p, material)
+	binding, found, eligible, err := s.byomRouteSnapshotBinding(ctx, p, material)
+	if err != nil {
+		return providerws.ModelAdmissionSettlementBinding{}, err
+	}
 	if !found && !byomAdmissionCandidate(p) {
 		return providerws.ModelAdmissionSettlementBinding{}, nil
 	}

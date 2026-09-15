@@ -20,7 +20,10 @@ import (
 	providerws "github.com/augstar/macprovider-coordinator/internal/ws"
 )
 
-const promptHashBasisCoordinatorV1 = "coordinator_prompt_canonical_v1"
+const (
+	promptHashBasisCoordinatorV1 = "coordinator_prompt_canonical_v1"
+	statusClientClosedRequest    = 499
+)
 
 func (b *billingRecorder) recordRouteSnapshot(providerBody []byte, provider pool.Provider) (*providerws.SettlementReceiptMetadata, error) {
 	attemptN := b.routeSnapshotAttemptN
@@ -37,7 +40,11 @@ func (b *billingRecorder) recordRouteSnapshot(providerBody []byte, provider pool
 			return nil, fmt.Errorf("tier2 catalog does not match signed admission row")
 		}
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), requestLogWriteTimeout)
+	parentCtx := context.Background()
+	if b.req != nil {
+		parentCtx = b.req.Context()
+	}
+	ctx, cancel := newRouteSnapshotDispatchContext(parentCtx)
 	defer cancel()
 	if err := b.server.verifyLegacyModelAdmissionRouteFresh(ctx, provider, b.state); err != nil {
 		return nil, wrapRouteSnapshotGuardPressure(err)
@@ -279,6 +286,11 @@ func stringPtrOrNil(value string) *string {
 
 func writeRouteSnapshotError(w http.ResponseWriter, rec *billingRecorder, err error) {
 	rec.server.log.Warn().Err(err).Str("request_id", rec.requestID).Msg("route snapshot insert failed before provider dispatch")
+	if errors.Is(err, context.Canceled) {
+		rec.logBuyerFailure(statusClientClosedRequest, "Buyer canceled before route snapshot dispatch")
+		writeError(w, statusClientClosedRequest, "request_canceled", "Request canceled before provider dispatch")
+		return
+	}
 	if routeSnapshotShouldCapacityShed(err) {
 		rec.logBuyerFailure(http.StatusServiceUnavailable, "Route snapshot guard is temporarily unavailable")
 		writeError(w, http.StatusServiceUnavailable, "no_provider_available", "No provider available for this model")
@@ -308,6 +320,13 @@ func routeSnapshotShouldCapacityShed(err error) bool {
 		return false
 	}
 	return errors.Is(err, billing.ErrRouteSnapshotStorePressure) || errors.Is(err, providerws.ErrModelAdmissionRouteDrift)
+}
+
+func newRouteSnapshotDispatchContext(parent context.Context) (context.Context, context.CancelFunc) {
+	if parent == nil {
+		parent = context.Background()
+	}
+	return context.WithTimeout(parent, routeSnapshotDispatchTimeout)
 }
 
 const (
