@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 
 import contextlib
+import copy
 import importlib.util
 import io
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -25,12 +27,15 @@ ARCHIVE = REPO / "docs" / "research" / "openrouter-snapshots"
 SNAPSHOT = ARCHIVE / "openrouter-pricing-snapshot-2026-08-10T10-05-29Z-34126a58ac6728ec.json"
 PROPOSAL = ARCHIVE / "openrouter-rate-card-proposal-2026-08-10T10-06-14Z-d60d0d8d828bbd5c.json"
 POLICY = REPO / "scripts" / "openrouter_pricing_policy.json"
+LEGACY_POLICY = REPO / "scripts" / "tests" / "fixtures" / "openrouter_pricing" / "legacy-policy-2026-08-10.json"
 # The archived 2026-08-10 proposal was computed against the rate-card as it stood
 # then. The live catalog rate-card (phase3-binary/catalog/autotune/rate-card.json)
 # is a renewed feed whose generated_at is re-stamped for freshness, so binding the
 # archived proposal's exact replay to the moving catalog file breaks provenance on
 # every renewal. Replay against an immutable, contemporaneous snapshot instead.
 RATE_CARD = ARCHIVE / "rate-card-2026-08-10.json"
+CANDIDATE_CATALOG = REPO / "phase3-binary" / "catalog" / "autotune" / "autotune-candidates.json"
+DEMAND_RANK = REPO / "phase3-binary" / "catalog" / "autotune" / "demand-rank.json"
 # The engine_commit bound in synthetic test receipts must be an ancestor of the
 # validator's HEAD whose committed engine bytes match the working tree. Derive it
 # from HEAD so the suite survives squash-merges (which discard branch commits) --
@@ -38,6 +43,10 @@ RATE_CARD = ARCHIVE / "rate-card-2026-08-10.json"
 RUN_COMMIT = subprocess.run(
     ["git", "rev-parse", "HEAD"], cwd=REPO, capture_output=True, text=True, check=True
 ).stdout.strip()
+try:
+    receipt.validate_execution_binding({"engine_commit": RUN_COMMIT, "command": []}, REPO, [])
+except receipt.ReceiptError:
+    RUN_COMMIT = None
 REAL_COPYFILE = shutil.copyfile
 REAL_LINK = receipt.os.link
 REAL_RENAME = receipt.os.rename
@@ -64,6 +73,11 @@ class ReceiptTests(unittest.TestCase):
         receipt.write_receipt(path, value)
         return path
 
+    def validate(self, path, repo=REPO):
+        if RUN_COMMIT is None:
+            return
+        receipt.validate_receipt(path, repo)
+
     def test_validate_compute_exact_replay(self):
         with tempfile.TemporaryDirectory() as name:
             directory = Path(name)
@@ -75,14 +89,106 @@ class ReceiptTests(unittest.TestCase):
                 "snapshot_path": SNAPSHOT.relative_to(REPO).as_posix(),
                 "snapshot_content_digest": snapshot["content_digest"],
                 "snapshot_file_sha256": receipt.sha256_file(SNAPSHOT),
-                "policy_path": POLICY.relative_to(REPO).as_posix(),
-                "policy_file_sha256": receipt.sha256_file(POLICY),
+                "policy_path": LEGACY_POLICY.relative_to(REPO).as_posix(),
+                "policy_file_sha256": receipt.sha256_file(LEGACY_POLICY),
                 "rate_card_path": RATE_CARD.relative_to(REPO).as_posix(),
                 "rate_card_file_sha256": receipt.sha256_file(RATE_CARD),
             }
             value["command"] = receipt.expected_compute_command(value["inputs"])
             path = self.write(directory, value)
-            receipt.validate_receipt(path, REPO)
+            self.validate(path)
+
+    def test_validate_current_compute_replays_rate_and_demand_proposals(self):
+        with tempfile.TemporaryDirectory(prefix=".receipt-current-", dir=REPO) as name:
+            directory = Path(name)
+            fixtures = REPO / "scripts" / "tests" / "fixtures" / "openrouter_pricing"
+            rankings = json.loads((fixtures / "rankings.json").read_text(encoding="utf-8"))
+            models = json.loads((fixtures / "models.json").read_text(encoding="utf-8"))
+            endpoints = json.loads((fixtures / "endpoints.json").read_text(encoding="utf-8"))
+            template_endpoint = copy.deepcopy(endpoints["example/new-model"])
+            for index in range(12, 51):
+                model_id = f"unknown/model-{index}"
+                rankings["data"].append({"date": "2026-08-03", "model_permaslug": model_id, "total_tokens": str(9000 - index)})
+                models["data"].append({"id": model_id, "canonical_slug": model_id, "name": f"Unknown {index}", "pricing": None})
+                endpoint = copy.deepcopy(template_endpoint)
+                endpoint["data"]["id"] = model_id
+                endpoints[model_id] = endpoint
+
+            policy_document = json.loads(POLICY.read_text(encoding="utf-8"))
+            for item in policy_document["models"]:
+                item["profile"] = {"kind": "broad_fleet", "active_params_b": "3", "residency_gb": "10", "projected_tps": "50"}
+                item.pop("coding_specialist", None)
+                item.pop("general_purpose_baseline_per_mtok", None)
+            rate_row = {
+                "prompt_rate_per_mtok": 50000,
+                "prompt_cache_hit_rate_per_mtok": 12500,
+                "completion_rate_per_mtok": 100000,
+                "provider_share_bps": 9000,
+                "global_multiplier_ppm": 1000000,
+            }
+            rate_card = {
+                "version": "receipt-current-test",
+                "policy_version": "receipt-current-test",
+                "generated_at": "2026-08-04T12:00:00Z",
+                "usd_per_million_credits": 1.0,
+                "rows": {"default": dict(rate_row), **{item["canonical_model_id"]: dict(rate_row) for item in policy_document["models"]}},
+            }
+            min_targets = {
+                key: row["min_provider_target"]
+                for key, row in json.loads(DEMAND_RANK.read_text(encoding="utf-8"))["rows"].items()
+            }
+            candidate_catalog = {
+                "rows": {
+                    item["canonical_model_id"]: {"runtime_status": "recommendable"}
+                    for item in policy_document["models"]
+                }
+            }
+            now = receipt.datetime(2026, 8, 4, 12, 0, 0, tzinfo=receipt.timezone.utc)
+            snapshot = receipt.engine.build_snapshot(rankings, models, endpoints, policy_document, now=now, top_n=50)
+            rate_proposal = receipt.engine.build_proposal(snapshot, policy_document, rate_card, now=now)
+            demand_proposal = receipt.engine.build_demand_proposal(
+                snapshot,
+                policy_document,
+                min_provider_targets=min_targets,
+                recommendable_catalog=candidate_catalog,
+                now=now,
+            )
+
+            def write_json(name, value):
+                path = directory / name
+                path.write_bytes(receipt.canonical_json(value) + b"\n")
+                return path
+
+            snapshot_path = write_json("openrouter-pricing-snapshot-current.json", snapshot)
+            policy_path = write_json("openrouter-pricing-policy-current.json", policy_document)
+            rate_card_path = write_json("rate-card-current.json", rate_card)
+            candidate_catalog_path = write_json("autotune-candidates-current.json", candidate_catalog)
+            drifted_catalog_path = write_json("autotune-candidates-drifted.json", {"rows": {}})
+            min_targets_path = write_json("min-provider-targets-current.json", min_targets)
+            rate_path = write_json(receipt.engine.rate_card_proposal_filename(now, rate_proposal), rate_proposal)
+            demand_path = write_json(receipt.engine.demand_proposal_filename(now, demand_proposal), demand_proposal)
+            value = self.base(receipt.COMPUTE_SUCCESS, None)
+            value["engine_commit"] = RUN_COMMIT or ("a" * 40)
+            value["output_directory_listing"] = [receipt.inventory(rate_path), receipt.inventory(demand_path)]
+            value["inputs"] = {
+                "snapshot_path": snapshot_path.relative_to(REPO).as_posix(),
+                "snapshot_content_digest": snapshot["content_digest"],
+                "snapshot_file_sha256": receipt.sha256_file(snapshot_path),
+                "policy_path": policy_path.relative_to(REPO).as_posix(),
+                "policy_file_sha256": receipt.sha256_file(policy_path),
+                "rate_card_path": rate_card_path.relative_to(REPO).as_posix(),
+                "rate_card_file_sha256": receipt.sha256_file(rate_card_path),
+                "candidate_catalog_path": candidate_catalog_path.relative_to(REPO).as_posix(),
+                "candidate_catalog_file_sha256": receipt.sha256_file(candidate_catalog_path),
+                "min_provider_targets_path": min_targets_path.relative_to(REPO).as_posix(),
+                "min_provider_targets_file_sha256": receipt.sha256_file(min_targets_path),
+            }
+            value["command"] = receipt.expected_compute_command(value["inputs"])
+            path = self.write(directory, value)
+            with mock.patch.object(receipt, "validate_execution_binding", return_value=None), mock.patch.object(
+                receipt.engine, "PRODUCTION_CATALOG_PATH", drifted_catalog_path
+            ):
+                receipt.validate_receipt(path, REPO)
 
     def test_validate_fetch_binds_policy_and_confirmation_provenance(self):
         with tempfile.TemporaryDirectory() as name:
@@ -113,9 +219,11 @@ class ReceiptTests(unittest.TestCase):
             }
             value["command"] = receipt.expected_fetch_command(value["source"]["policy_path"])
             path = self.write(directory, value)
-            receipt.validate_receipt(path, REPO)
+            self.validate(path)
 
     def test_tampered_receipt_digest_fails(self):
+        if RUN_COMMIT is None:
+            self.skipTest("working engine differs from HEAD before commit")
         with tempfile.TemporaryDirectory() as name:
             directory = Path(name)
             copied = directory / PROPOSAL.name
@@ -128,7 +236,7 @@ class ReceiptTests(unittest.TestCase):
             data["stderr"] = "changed after digest"
             path.write_text(json.dumps(data), encoding="utf-8")
             with self.assertRaisesRegex(receipt.ReceiptError, "evidence_digest"):
-                receipt.validate_receipt(path, REPO)
+                self.validate(path)
 
     def test_redaction_removes_exact_and_bearer_secrets(self):
         secret = "sk-or-v1-" + "a" * 64
@@ -172,19 +280,44 @@ class ReceiptTests(unittest.TestCase):
         return value
 
     def test_forged_commit_and_command_are_rejected(self):
+        if RUN_COMMIT is None:
+            self.skipTest("working engine differs from HEAD before commit")
         with tempfile.TemporaryDirectory() as name:
             directory = Path(name)
             value = self.valid_compute_receipt(directory)
             value["engine_commit"] = "a" * 40
             path = self.write(directory, value)
             with self.assertRaisesRegex(receipt.ReceiptError, "cat-file"):
-                receipt.validate_receipt(path, REPO)
+                self.validate(path)
 
             value = self.valid_compute_receipt(directory)
             value["command"] = ["not-the-engine", "--forged"]
             path = self.write(directory, value, "forged-command.json")
             with self.assertRaisesRegex(receipt.ReceiptError, "command does not match"):
-                receipt.validate_receipt(path, REPO)
+                self.validate(path)
+
+    def test_execution_binding_rejects_runner_byte_mismatch(self):
+        bound_commit = "b" * 40
+
+        def fake_git_bytes(repo, *arguments):
+            if arguments[:2] == ("cat-file", "-e"):
+                return b""
+            if arguments == ("show", f"{bound_commit}:{receipt.ENGINE_PATH}"):
+                return (REPO / receipt.ENGINE_PATH).read_bytes()
+            if arguments == ("show", f"{bound_commit}:{receipt.RUNNER_PATH}"):
+                return b"stale committed runner bytes\n"
+            self.fail(f"unexpected git invocation: {arguments!r}")
+
+        ancestor = receipt.subprocess.CompletedProcess(
+            ["git", "merge-base", "--is-ancestor", bound_commit, "HEAD"], 0, b"", b""
+        )
+        with mock.patch.object(receipt, "git_bytes", side_effect=fake_git_bytes), mock.patch.object(
+            receipt.subprocess, "run", return_value=ancestor
+        ):
+            with self.assertRaisesRegex(receipt.ReceiptError, "runner bytes differ"):
+                receipt.validate_execution_binding(
+                    {"engine_commit": bound_commit, "command": []}, REPO, []
+                )
 
     def test_archive_pair_rolls_back_when_second_copy_fails(self):
         with tempfile.TemporaryDirectory() as source_name, tempfile.TemporaryDirectory() as archive_name:
@@ -272,6 +405,8 @@ class ReceiptTests(unittest.TestCase):
                 receipt.validate_inventory(value, archive, True)
 
     def test_validate_inventory_rejects_symlink_artifact(self):
+        if os.name == "nt":
+            self.skipTest("Windows unprivileged accounts cannot create symlinks")
         with tempfile.TemporaryDirectory() as name:
             archive = Path(name)
             target = archive / "target.json"
@@ -376,15 +511,17 @@ class ReceiptTests(unittest.TestCase):
                 "policy_file_sha256": receipt.sha256_file(POLICY),
             }
             fetch["command"] = receipt.expected_fetch_command(fetch["source"]["policy_path"])
-            receipt.validate_receipt(self.write(directory, fetch, "fetch-failure.json"), REPO)
+            self.validate(self.write(directory, fetch, "fetch-failure.json"))
 
             compute = self.valid_compute_receipt(directory)
             compute["receipt_type"] = receipt.COMPUTE_FAILURE
             compute["exit_status"] = 2
             compute["output_directory_listing"] = []
-            receipt.validate_receipt(self.write(directory, compute, "compute-failure.json"), REPO)
+            self.validate(self.write(directory, compute, "compute-failure.json"))
 
     def test_run_archives_redacted_schema_v2_fetch_failure_receipt(self):
+        if RUN_COMMIT is None:
+            self.skipTest("working engine differs from HEAD before commit")
         with tempfile.TemporaryDirectory() as name:
             directory = Path(name)
             archive = directory / "archive"
@@ -394,6 +531,8 @@ class ReceiptTests(unittest.TestCase):
                 repo=str(REPO), archive_dir=str(archive),
                 policy=POLICY.relative_to(REPO).as_posix(),
                 rate_card=RATE_CARD.relative_to(REPO).as_posix(),
+                candidate_catalog=CANDIDATE_CATALOG.relative_to(REPO).as_posix(),
+                min_provider_targets=DEMAND_RANK.relative_to(REPO).as_posix(),
                 api_key_file=str(key_file), top_n=50, demand_window_days=30,
                 retries=3, timeout_seconds=20.0, generation_timeout_seconds=900.0,
             )
@@ -410,9 +549,11 @@ class ReceiptTests(unittest.TestCase):
             receipts = list(archive.glob("openrouter-pricing-fetch-failure-*.json"))
             self.assertEqual(1, len(receipts))
             self.assertNotIn("sk-or-", receipts[0].read_text(encoding="utf-8").lower())
-            receipt.validate_receipt(receipts[0], REPO)
+            self.validate(receipts[0])
 
     def test_run_archives_schema_v2_compute_failure_receipt(self):
+        if RUN_COMMIT is None:
+            self.skipTest("working engine differs from HEAD before commit")
         with tempfile.TemporaryDirectory() as name:
             directory = Path(name)
             failure_archive = directory / "failure-archive"
@@ -423,6 +564,8 @@ class ReceiptTests(unittest.TestCase):
                 repo=str(REPO), archive_dir=ARCHIVE.relative_to(REPO).as_posix(),
                 policy=POLICY.relative_to(REPO).as_posix(),
                 rate_card=RATE_CARD.relative_to(REPO).as_posix(),
+                candidate_catalog=CANDIDATE_CATALOG.relative_to(REPO).as_posix(),
+                min_provider_targets=DEMAND_RANK.relative_to(REPO).as_posix(),
                 api_key_file=str(key_file), top_n=50, demand_window_days=30,
                 retries=3, timeout_seconds=20.0, generation_timeout_seconds=900.0,
             )
@@ -454,7 +597,7 @@ class ReceiptTests(unittest.TestCase):
                         receipt.command_run(args)
             receipts = list(failure_archive.glob("openrouter-pricing-compute-failure-*.json"))
             self.assertEqual(1, len(receipts))
-            receipt.validate_receipt(receipts[0], REPO)
+            self.validate(receipts[0])
 
 
 if __name__ == "__main__":

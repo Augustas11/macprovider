@@ -185,6 +185,8 @@ def validate_execution_binding(receipt: Mapping[str, Any], repo: Path, expected_
         raise ReceiptError("engine_commit does not contain the receipt runner")
     if committed_engine != (repo / ENGINE_PATH).read_bytes():
         raise ReceiptError("current engine bytes differ from the engine bound by engine_commit")
+    if committed_runner != (repo / RUNNER_PATH).read_bytes():
+        raise ReceiptError("current receipt runner bytes differ from the runner bound by engine_commit")
     if receipt["command"] != expected_command:
         raise ReceiptError("receipt command does not match its type and bound inputs")
 
@@ -199,48 +201,70 @@ def expected_fetch_command(policy_path: str) -> list[str]:
 
 
 def expected_compute_command(inputs: Mapping[str, Any]) -> list[str]:
-    return [
+    command = [
         "python", ENGINE_PATH, "compute", "--snapshot", inputs["snapshot_path"],
         "--policy", inputs["policy_path"], "--rate-card", inputs["rate_card_path"],
-        "--output-dir", "<temporary-artifact-directory>",
     ]
+    if "candidate_catalog_path" in inputs:
+        command.extend(["--candidate-catalog", inputs["candidate_catalog_path"]])
+    if "min_provider_targets_path" in inputs:
+        command.extend(["--min-provider-targets", inputs["min_provider_targets_path"]])
+    command.extend(["--output-dir", "<temporary-artifact-directory>"])
+    return command
 
 
 def validate_inventory(
     receipt: Mapping[str, Any], archive: Path, success: bool, receipt_type: str | None = None,
-) -> Path | None:
+) -> tuple[Path, ...]:
     listing = receipt.get("output_directory_listing")
     if not success:
         if listing != []:
             raise ReceiptError("failure receipt must have an empty artifact inventory")
-        return None
-    if not isinstance(listing, list) or len(listing) != 1 or not isinstance(listing[0], dict):
+        return ()
+    if not isinstance(listing, list) or not listing or not all(isinstance(item, dict) for item in listing):
+        raise ReceiptError("success receipt artifact inventory is malformed")
+    if receipt_type == FETCH_SUCCESS and len(listing) != 1:
+        raise ReceiptError("fetch success receipt must inventory exactly one artifact")
+    if receipt_type == COMPUTE_SUCCESS and len(listing) not in {1, 2}:
+        raise ReceiptError("compute success receipt must inventory one legacy proposal or two current proposals")
+    if receipt_type is None and len(listing) != 1:
         raise ReceiptError("success receipt must inventory exactly one artifact")
-    item = listing[0]
-    if set(item) != {"filename", "bytes", "sha256"} or not isinstance(item["filename"], str):
-        raise ReceiptError("receipt artifact inventory is malformed")
-    filename = item["filename"]
-    if not filename or Path(filename).name != filename:
-        raise ReceiptError("receipt artifact filename must be a basename")
-    if receipt_type == FETCH_SUCCESS:
-        pattern = r"openrouter-pricing-snapshot-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}Z-[0-9a-f]{16}\.json"
-    elif receipt_type == COMPUTE_SUCCESS:
-        pattern = r"openrouter-rate-card-proposal-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}Z-[0-9a-f]{16}\.json"
-    else:
-        pattern = None
-    if pattern is not None and not re.fullmatch(pattern, filename):
-        raise ReceiptError("receipt artifact filename does not match its receipt type")
-    artifact_path = archive / filename
-    if artifact_path.is_symlink():
-        raise ReceiptError("receipt artifact must be a regular file, not a symlink")
-    artifact = artifact_path.resolve()
-    if artifact.parent != archive.resolve():
-        raise ReceiptError("receipt artifact escapes its receipt directory")
-    if not artifact.is_file():
-        raise ReceiptError(f"archived artifact is missing: {artifact.name}")
-    if item["bytes"] != artifact.stat().st_size or item["sha256"] != sha256_file(artifact):
-        raise ReceiptError(f"archived artifact bytes or SHA-256 do not match receipt: {artifact.name}")
-    return artifact
+    patterns = {
+        "snapshot": r"openrouter-pricing-snapshot-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}Z-[0-9a-f]{16}\.json",
+        "rate": r"openrouter-rate-card-proposal-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}Z-[0-9a-f]{16}\.json",
+        "demand": r"openrouter-demand-rank-proposal-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}Z-[0-9a-f]{16}\.json",
+    }
+    artifacts: list[Path] = []
+    filenames: set[str] = set()
+    for item in listing:
+        if set(item) != {"filename", "bytes", "sha256"} or not isinstance(item["filename"], str):
+            raise ReceiptError("receipt artifact inventory is malformed")
+        filename = item["filename"]
+        if not filename or Path(filename).name != filename or filename in filenames:
+            raise ReceiptError("receipt artifact filename must be a unique basename")
+        filenames.add(filename)
+        if receipt_type == FETCH_SUCCESS and not re.fullmatch(patterns["snapshot"], filename):
+            raise ReceiptError("receipt artifact filename does not match its receipt type")
+        if receipt_type == COMPUTE_SUCCESS and not (
+            re.fullmatch(patterns["rate"], filename) or re.fullmatch(patterns["demand"], filename)
+        ):
+            raise ReceiptError("receipt artifact filename does not match its receipt type")
+        artifact_path = archive / filename
+        if artifact_path.is_symlink():
+            raise ReceiptError("receipt artifact must be a regular file, not a symlink")
+        artifact = artifact_path.resolve()
+        if artifact.parent != archive.resolve():
+            raise ReceiptError("receipt artifact escapes its receipt directory")
+        if not artifact.is_file():
+            raise ReceiptError(f"archived artifact is missing: {artifact.name}")
+        if item["bytes"] != artifact.stat().st_size or item["sha256"] != sha256_file(artifact):
+            raise ReceiptError(f"archived artifact bytes or SHA-256 do not match receipt: {artifact.name}")
+        artifacts.append(artifact)
+    if receipt_type == COMPUTE_SUCCESS and len(artifacts) == 2:
+        names = {path.name for path in artifacts}
+        if not any(name.startswith("openrouter-rate-card-proposal-") for name in names) or not any(name.startswith("openrouter-demand-rank-proposal-") for name in names):
+            raise ReceiptError("compute success receipt must inventory rate-card and demand-rank proposals")
+    return tuple(artifacts)
 
 
 def validate_receipt(receipt_path: Path, repo: Path) -> None:
@@ -276,7 +300,7 @@ def validate_receipt(receipt_path: Path, repo: Path) -> None:
     reject_secrets(receipt)
     if receipt.get("evidence_digest") != evidence_digest(receipt):
         raise ReceiptError("receipt evidence_digest mismatch")
-    artifact = validate_inventory(receipt, receipt_path.parent, success, receipt_type)
+    artifacts = validate_inventory(receipt, receipt_path.parent, success, receipt_type)
 
     policy_path: Path
     if receipt_type in {FETCH_SUCCESS, FETCH_FAILURE}:
@@ -298,8 +322,9 @@ def validate_receipt(receipt_path: Path, repo: Path) -> None:
         validate_execution_binding(receipt, repo, expected_fetch_command(source["policy_path"]))
         if not success:
             return
-        assert artifact is not None
-        snapshot = read_object(artifact, "snapshot")
+        if len(artifacts) != 1:
+            raise ReceiptError("fetch success receipt must bind exactly one snapshot artifact")
+        snapshot = read_object(artifacts[0], "snapshot")
         try:
             engine.validate_snapshot(snapshot)
         except engine.EngineError as error:
@@ -321,11 +346,15 @@ def validate_receipt(receipt_path: Path, repo: Path) -> None:
         return
 
     inputs = receipt["inputs"]
-    expected = {
+    expected_legacy = {
         "snapshot_path", "snapshot_content_digest", "snapshot_file_sha256",
         "policy_path", "policy_file_sha256", "rate_card_path", "rate_card_file_sha256",
     }
-    if not isinstance(inputs, dict) or set(inputs) != expected:
+    expected_current = expected_legacy | {
+        "candidate_catalog_path", "candidate_catalog_file_sha256",
+        "min_provider_targets_path", "min_provider_targets_file_sha256",
+    }
+    if not isinstance(inputs, dict) or (set(inputs) != expected_legacy and set(inputs) != expected_current):
         raise ReceiptError("compute receipt input binding is malformed")
     snapshot_path = resolve_repo_path(repo, inputs["snapshot_path"], "inputs.snapshot_path")
     policy_path = resolve_repo_path(repo, inputs["policy_path"], "inputs.policy_path")
@@ -336,6 +365,15 @@ def validate_receipt(receipt_path: Path, repo: Path) -> None:
     ):
         if sha256_file(path) != inputs[field]:
             raise ReceiptError(f"compute receipt {field} does not match exact input bytes")
+    min_provider_targets_path = None
+    candidate_catalog_path = None
+    if set(inputs) == expected_current:
+        candidate_catalog_path = resolve_repo_path(repo, inputs["candidate_catalog_path"], "inputs.candidate_catalog_path")
+        if sha256_file(candidate_catalog_path) != inputs["candidate_catalog_file_sha256"]:
+            raise ReceiptError("compute receipt candidate_catalog_file_sha256 does not match exact input bytes")
+        min_provider_targets_path = resolve_repo_path(repo, inputs["min_provider_targets_path"], "inputs.min_provider_targets_path")
+        if sha256_file(min_provider_targets_path) != inputs["min_provider_targets_file_sha256"]:
+            raise ReceiptError("compute receipt min_provider_targets_file_sha256 does not match exact input bytes")
     snapshot = read_object(snapshot_path, "snapshot")
     if snapshot.get("content_digest") != inputs["snapshot_content_digest"]:
         raise ReceiptError("compute receipt snapshot semantic digest mismatch")
@@ -343,21 +381,53 @@ def validate_receipt(receipt_path: Path, repo: Path) -> None:
         engine.validate_snapshot(snapshot)
     except engine.EngineError as error:
         raise ReceiptError(f"snapshot validation failed: {error}") from error
+    legacy_compute_receipt = snapshot.get("schema_version") == engine.LEGACY_SNAPSHOT_SCHEMA_VERSION and set(inputs) == expected_legacy
+    if not legacy_compute_receipt and min_provider_targets_path is None:
+        raise ReceiptError("current compute receipt must bind minimum provider targets")
+    if not legacy_compute_receipt and candidate_catalog_path is None:
+        raise ReceiptError("current compute receipt must bind candidate catalog")
     validate_execution_binding(receipt, repo, expected_compute_command(inputs))
     if not success:
         return
-    assert artifact is not None
-    proposal = read_object(artifact, "proposal")
-    generated_at = parse_time(proposal.get("generated_at"), "proposal.generated_at")
+    if legacy_compute_receipt:
+        if len(artifacts) != 1:
+            raise ReceiptError("legacy compute receipt must inventory exactly one proposal")
+    elif len(artifacts) != 2:
+        raise ReceiptError("current compute receipt must inventory rate-card and demand-rank proposals")
+    proposals = {path.name: read_object(path, "proposal") for path in artifacts}
+    rate_name = next((name for name in proposals if name.startswith("openrouter-rate-card-proposal-")), None)
+    if rate_name is None:
+        raise ReceiptError("compute receipt is missing a rate-card proposal")
+    rate_proposal = proposals[rate_name]
+    generated_at = parse_time(rate_proposal.get("generated_at"), "proposal.generated_at")
     try:
-        replay = engine.build_proposal(
+        replay_rate = engine.build_proposal(
             snapshot, read_object(policy_path, "policy"), read_object(rate_card_path, "rate card"),
             now=generated_at,
         )
+        replay_demand = None
+        if not legacy_compute_receipt:
+            assert candidate_catalog_path is not None
+            assert min_provider_targets_path is not None
+            replay_demand = engine.build_demand_proposal(
+                snapshot,
+                read_object(policy_path, "policy"),
+                min_provider_targets=engine.normalize_min_provider_targets(
+                    read_object(min_provider_targets_path, "minimum provider targets")
+                ),
+                catalog_path=candidate_catalog_path,
+                now=generated_at,
+            )
     except engine.EngineError as error:
         raise ReceiptError(f"proposal replay failed: {error}") from error
-    if proposal != replay:
-        raise ReceiptError("archived proposal does not exactly replay from bound inputs")
+    if rate_proposal != replay_rate:
+        raise ReceiptError("archived rate-card proposal does not exactly replay from bound inputs")
+    if not legacy_compute_receipt:
+        demand_name = next((name for name in proposals if name.startswith("openrouter-demand-rank-proposal-")), None)
+        if demand_name is None:
+            raise ReceiptError("compute receipt is missing a demand-rank proposal")
+        if proposals[demand_name] != replay_demand:
+            raise ReceiptError("archived demand-rank proposal does not exactly replay from bound inputs")
 
 
 def run_child(repo: Path, arguments: list[str], api_key: str, temporary: Path) -> tuple[datetime, datetime, subprocess.CompletedProcess[str]]:
@@ -380,6 +450,8 @@ def unique_artifact(directory: Path, pattern: str) -> Path:
 
 
 def require_empty_failure_output(directory: Path) -> None:
+    if not directory.exists():
+        return
     if any(directory.iterdir()):
         raise ReceiptError("failed stage emitted unexpected output; refusing an empty-inventory receipt")
 
@@ -487,17 +559,22 @@ def command_run(args: argparse.Namespace) -> int:
     archive = (repo / args.archive_dir).resolve()
     policy = (repo / args.policy).resolve()
     rate_card = (repo / args.rate_card).resolve()
+    candidate_catalog = (repo / args.candidate_catalog).resolve()
+    min_provider_targets = (repo / args.min_provider_targets).resolve()
     policy_relative = policy.relative_to(repo).as_posix()
     rate_card_relative = rate_card.relative_to(repo).as_posix()
+    candidate_catalog_relative = candidate_catalog.relative_to(repo).as_posix()
+    min_provider_targets_relative = min_provider_targets.relative_to(repo).as_posix()
     policy_hash = sha256_file(policy)
     rate_card_hash = sha256_file(rate_card)
+    candidate_catalog_hash = sha256_file(candidate_catalog)
+    min_provider_targets_hash = sha256_file(min_provider_targets)
 
     with tempfile.TemporaryDirectory(prefix="openrouter-pricing-run-") as temporary_name:
         temporary = Path(temporary_name)
         fetch_dir = temporary / "fetch"
         compute_dir = temporary / "compute"
         fetch_dir.mkdir()
-        compute_dir.mkdir()
         fetch_args = [
             "scripts/openrouter_pricing_engine.py", "fetch", "--policy", policy_relative,
             "--output-dir", str(fetch_dir), "--top-n", str(args.top_n),
@@ -572,15 +649,22 @@ def command_run(args: argparse.Namespace) -> int:
             "snapshot_file_sha256": sha256_file(snapshot_path),
             "policy_path": policy_relative, "policy_file_sha256": policy_hash,
             "rate_card_path": rate_card_relative, "rate_card_file_sha256": rate_card_hash,
+            "candidate_catalog_path": candidate_catalog_relative,
+            "candidate_catalog_file_sha256": candidate_catalog_hash,
+            "min_provider_targets_path": min_provider_targets_relative,
+            "min_provider_targets_file_sha256": min_provider_targets_hash,
         }
         compute_args = [
             ENGINE_PATH, "compute", "--snapshot", str(archived_snapshot),
             "--policy", policy_relative, "--rate-card", rate_card_relative,
+            "--candidate-catalog", candidate_catalog_relative,
+            "--min-provider-targets", min_provider_targets_relative,
             "--output-dir", str(compute_dir),
         ]
         compute_started, compute_finished, computed = run_child(repo, compute_args, api_key, temporary)
         if computed.returncode != 0:
             require_empty_failure_output(compute_dir)
+            compute_dir.mkdir(exist_ok=True)
             compute_failure = {
                 "schema_version": RECEIPT_SCHEMA_VERSION,
                 "receipt_type": COMPUTE_FAILURE,
@@ -602,7 +686,8 @@ def command_run(args: argparse.Namespace) -> int:
             print(archived_snapshot)
             print(archived_failure)
             raise ReceiptError(f"compute failed with exit {computed.returncode}; archived redacted failure receipt")
-        proposal_path = unique_artifact(compute_dir, "openrouter-rate-card-proposal-*.json")
+        rate_proposal_path = unique_artifact(compute_dir, "openrouter-rate-card-proposal-*.json")
+        demand_proposal_path = unique_artifact(compute_dir, "openrouter-demand-rank-proposal-*.json")
         compute_receipt = {
             "schema_version": RECEIPT_SCHEMA_VERSION,
             "receipt_type": COMPUTE_SUCCESS,
@@ -613,15 +698,18 @@ def command_run(args: argparse.Namespace) -> int:
             "exit_status": computed.returncode,
             "stdout": redact(computed.stdout, api_key, temporary),
             "stderr": redact(computed.stderr, api_key, temporary),
-            "output_directory_listing": [inventory(proposal_path)],
+            "output_directory_listing": [inventory(rate_proposal_path), inventory(demand_proposal_path)],
         }
         compute_receipt_path = compute_dir / f"openrouter-pricing-compute-success-{receipt_stamp(compute_started)}.json"
         write_receipt(compute_receipt_path, compute_receipt)
         validate_receipt(compute_receipt_path, repo)
-        archived_compute, archived_proposal = archive_pair(compute_receipt_path, proposal_path, archive)
+        archived_compute, archived_rate_proposal, archived_demand_proposal = archive_files(
+            (compute_receipt_path, rate_proposal_path, demand_proposal_path),
+            archive,
+        )
         validate_receipt(archived_fetch, repo)
         validate_receipt(archived_compute, repo)
-        for path in (archived_fetch, archived_snapshot, archived_compute, archived_proposal):
+        for path in (archived_fetch, archived_snapshot, archived_compute, archived_rate_proposal, archived_demand_proposal):
             print(path)
     return 0
 
@@ -638,6 +726,8 @@ def parser() -> argparse.ArgumentParser:
     run.add_argument("--archive-dir", default="docs/research/openrouter-snapshots")
     run.add_argument("--policy", default="scripts/openrouter_pricing_policy.json")
     run.add_argument("--rate-card", default="phase3-binary/catalog/autotune/rate-card.json")
+    run.add_argument("--candidate-catalog", default="phase3-binary/catalog/autotune/autotune-candidates.json")
+    run.add_argument("--min-provider-targets", default="phase3-binary/catalog/autotune/demand-rank.json")
     run.add_argument("--api-key-file", help=argparse.SUPPRESS)
     run.add_argument("--top-n", type=int, default=50)
     run.add_argument("--demand-window-days", type=int, default=30)
