@@ -119,8 +119,8 @@ func TestRouteSnapshotDispatchContextUsesShortBudget(t *testing.T) {
 	if routeSnapshotDispatchTimeout >= requestLogWriteTimeout {
 		t.Fatalf("route snapshot dispatch timeout=%s must stay below request log write timeout=%s", routeSnapshotDispatchTimeout, requestLogWriteTimeout)
 	}
-	if routeSnapshotDispatchTimeout > time.Second {
-		t.Fatalf("route snapshot dispatch timeout=%s must stay below OpenRouter p95 recovery budget", routeSnapshotDispatchTimeout)
+	if routeSnapshotDispatchTimeout*2 >= requestLogWriteTimeout {
+		t.Fatalf("two route snapshot dispatch phases at %s must leave retry/request-log recovery headroom under %s", routeSnapshotDispatchTimeout, requestLogWriteTimeout)
 	}
 	before := time.Now()
 	ctx, cancel := newRouteSnapshotDispatchContext(context.Background())
