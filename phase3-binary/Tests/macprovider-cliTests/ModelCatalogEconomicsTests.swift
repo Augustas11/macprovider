@@ -615,6 +615,328 @@ final class ModelCatalogEconomicsTests: XCTestCase {
     }
 
 
+    func testV2ProjectionPublishesCleanupTargetFromRootValidatedPrivateStore() throws {
+        let fixture = try StoreFixture.make("model-catalog-v2-storage-reclaimable")
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let boot = try fixture.store.bootstrapWithLockCustody()
+        defer { boot.lockCustody.close() }
+        let target = try Self.cleanupTarget(root: boot.snapshot.rootLocator, suffix: "a", estimatedBytes: 4_096, keepSetStatus: .reclaimable)
+        try Self.writeInventory([target], fixture: fixture, boot: boot)
+        let snapshot = ModelCatalogEconomicsBuilder.loadPrivateStorageSnapshot(
+            store: fixture.store,
+            rootLocator: boot.snapshot.rootLocator,
+            volumeCapacityBytes: 2_000_000
+        )
+
+        let projection = try Self.v2Projection(privateStorage: snapshot)
+
+        XCTAssertEqual(projection.storage.managedV3PublishedBytes, 4_096)
+        XCTAssertEqual(projection.storage.managedV3ReclaimableBytes, 4_096)
+        XCTAssertEqual(projection.storage.managedV3ObjectCount, 1)
+        XCTAssertEqual(projection.storage.configuredLegacyAccountingState, "not_configured")
+        XCTAssertEqual(projection.storage.configuredLegacyProtectedBytes, 0)
+        XCTAssertEqual(projection.storage.configuredLegacyOtherDeviceBytes, 0)
+        XCTAssertEqual(projection.storage.managedBudgetChargeBytes, 4_096)
+        XCTAssertEqual(projection.storage.globalManagedBudgetBytes, 1_400_000)
+        XCTAssertEqual(projection.storage.availableManagedBudgetBytes, 1_395_904)
+        XCTAssertEqual(projection.storage.managedBudgetSource, "default")
+        XCTAssertFalse(projection.storage.managedV3OverflowDetected)
+        let cleanupTarget = try XCTUnwrap(projection.cleanupTargets.first)
+        XCTAssertEqual(projection.cleanupTargets.count, 1)
+        XCTAssertEqual(cleanupTarget.artifactIdentityDigest, target.artifactIdentityDigest)
+        XCTAssertEqual(cleanupTarget.keepSetStatus, "reclaimable")
+        XCTAssertTrue(cleanupTarget.cleanup.available)
+        XCTAssertEqual(cleanupTarget.cleanup.transactionKind, "cleanup_published_artifact")
+        XCTAssertEqual(cleanupTarget.cleanup.artifactIdentityDigest, target.artifactIdentityDigest)
+        XCTAssertEqual(cleanupTarget.cleanup.estimatedBytes, 4_096)
+        let row = try XCTUnwrap(projection.rows.first { $0.actionModelID == Self.candidateID })
+        XCTAssertFalse(row.cleanupPublished.available)
+        XCTAssertEqual(row.cleanupPublished.unavailableReason, "cleanup_unavailable_without_private_store")
+    }
+
+    func testV2ProjectionPublishesProtectedTargetWithoutCleanupAuthority() throws {
+        let fixture = try StoreFixture.make("model-catalog-v2-storage-protected")
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let boot = try fixture.store.bootstrapWithLockCustody()
+        defer { boot.lockCustody.close() }
+        let target = try Self.cleanupTarget(root: boot.snapshot.rootLocator, suffix: "p", estimatedBytes: 8_192, keepSetStatus: .protected)
+        try Self.writeInventory([target], fixture: fixture, boot: boot)
+        let snapshot = ModelCatalogEconomicsBuilder.loadPrivateStorageSnapshot(
+            store: fixture.store,
+            rootLocator: boot.snapshot.rootLocator,
+            volumeCapacityBytes: 2_000_000
+        )
+
+        let projection = try Self.v2Projection(privateStorage: snapshot)
+
+        XCTAssertEqual(projection.storage.managedV3PublishedBytes, 8_192)
+        XCTAssertEqual(projection.storage.managedV3ReclaimableBytes, 0)
+        XCTAssertEqual(projection.storage.managedV3ObjectCount, 1)
+        let cleanupTarget = try XCTUnwrap(projection.cleanupTargets.first)
+        XCTAssertEqual(cleanupTarget.keepSetStatus, "protected")
+        XCTAssertEqual(cleanupTarget.protectedReason, "current_model")
+        XCTAssertFalse(cleanupTarget.cleanup.available)
+        XCTAssertNil(cleanupTarget.cleanup.artifactIdentityDigest)
+        XCTAssertNil(cleanupTarget.cleanup.estimatedBytes)
+        let row = try XCTUnwrap(projection.rows.first { $0.actionModelID == Self.candidateID })
+        XCTAssertFalse(row.cleanupPublished.available)
+    }
+
+    func testV2ProjectionPublishesMixedInventorySortedByDigestAndDefaultBudget() throws {
+        let fixture = try StoreFixture.make("model-catalog-v2-storage-mixed")
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let boot = try fixture.store.bootstrapWithLockCustody()
+        defer { boot.lockCustody.close() }
+        let first = try Self.cleanupTarget(root: boot.snapshot.rootLocator, suffix: "m1", estimatedBytes: 6_000, keepSetStatus: .reclaimable)
+        let second = try Self.cleanupTarget(root: boot.snapshot.rootLocator, suffix: "m2", estimatedBytes: 7_000, keepSetStatus: .protected)
+        let sorted = [first, second].sorted { $0.artifactIdentityDigest < $1.artifactIdentityDigest }
+        try Self.writeInventory(sorted, fixture: fixture, boot: boot)
+        let snapshot = ModelCatalogEconomicsBuilder.loadPrivateStorageSnapshot(
+            store: fixture.store,
+            rootLocator: boot.snapshot.rootLocator,
+            volumeCapacityBytes: 10_000
+        )
+
+        let projection = try Self.v2Projection(privateStorage: snapshot)
+
+        XCTAssertEqual(projection.cleanupTargets.map(\.artifactIdentityDigest), sorted.map(\.artifactIdentityDigest))
+        XCTAssertEqual(projection.storage.managedV3PublishedBytes, 13_000)
+        XCTAssertEqual(projection.storage.managedV3ReclaimableBytes, 6_000)
+        XCTAssertEqual(projection.storage.managedBudgetChargeBytes, 13_000)
+        XCTAssertEqual(projection.storage.globalManagedBudgetBytes, 7_000)
+        XCTAssertEqual(projection.storage.availableManagedBudgetBytes, 0)
+    }
+
+    func testV2ProjectionUsesConfiguredBudgetWhenSelected() throws {
+        let fixture = try StoreFixture.make("model-catalog-v2-storage-configured-budget")
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let boot = try fixture.store.bootstrapWithLockCustody()
+        defer { boot.lockCustody.close() }
+        let target = try Self.cleanupTarget(root: boot.snapshot.rootLocator, suffix: "cb", estimatedBytes: 4_096, keepSetStatus: .reclaimable)
+        try Self.writeInventory([target], fixture: fixture, boot: boot)
+        let snapshot = ModelCatalogEconomicsBuilder.loadPrivateStorageSnapshot(
+            store: fixture.store,
+            rootLocator: boot.snapshot.rootLocator,
+            volumeCapacityBytes: 0,
+            configuredBudgetBytes: 9_000
+        )
+
+        let projection = try Self.v2Projection(privateStorage: snapshot)
+
+        XCTAssertEqual(projection.storage.managedBudgetSource, "configured")
+        XCTAssertEqual(projection.storage.globalManagedBudgetBytes, 9_000)
+        XCTAssertEqual(projection.storage.managedBudgetChargeBytes, 4_096)
+        XCTAssertEqual(projection.storage.availableManagedBudgetBytes, 4_904)
+        XCTAssertEqual(projection.cleanupTargets.count, 1)
+    }
+
+    func testV2ProjectionAcceptsMaximumConfiguredBudget() throws {
+        let fixture = try StoreFixture.make("model-catalog-v2-storage-configured-budget-max")
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let boot = try fixture.store.bootstrapWithLockCustody()
+        defer { boot.lockCustody.close() }
+        let target = try Self.cleanupTarget(root: boot.snapshot.rootLocator, suffix: "cbm", estimatedBytes: 4_096, keepSetStatus: .reclaimable)
+        try Self.writeInventory([target], fixture: fixture, boot: boot)
+        let snapshot = ModelCatalogEconomicsBuilder.loadPrivateStorageSnapshot(
+            store: fixture.store,
+            rootLocator: boot.snapshot.rootLocator,
+            volumeCapacityBytes: 1,
+            configuredBudgetBytes: Int64(ModelPreparationContracts.maxEstimatedBytes)
+        )
+
+        let projection = try Self.v2Projection(privateStorage: snapshot)
+
+        XCTAssertEqual(projection.storage.managedBudgetSource, "configured")
+        XCTAssertEqual(projection.storage.globalManagedBudgetBytes, Int64(ModelPreparationContracts.maxEstimatedBytes))
+        XCTAssertEqual(projection.storage.managedBudgetChargeBytes, 4_096)
+        XCTAssertEqual(
+            projection.storage.availableManagedBudgetBytes,
+            Int64(ModelPreparationContracts.maxEstimatedBytes) - 4_096
+        )
+        XCTAssertEqual(projection.cleanupTargets.count, 1)
+    }
+
+    func testV2ProjectionRejectsInvalidConfiguredBudgetWithoutFallingBackToDefault() throws {
+        let fixture = try StoreFixture.make("model-catalog-v2-storage-invalid-configured-budget")
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let boot = try fixture.store.bootstrapWithLockCustody()
+        defer { boot.lockCustody.close() }
+        let target = try Self.cleanupTarget(root: boot.snapshot.rootLocator, suffix: "icb", estimatedBytes: 4_096, keepSetStatus: .reclaimable)
+        try Self.writeInventory([target], fixture: fixture, boot: boot)
+        let cases: [(String, Int64)] = [
+            ("zero", 0),
+            ("negative", -1),
+            ("over-limit", Int64(ModelPreparationContracts.maxEstimatedBytes) + 1),
+        ]
+
+        for (name, configuredBudgetBytes) in cases {
+            let snapshot = ModelCatalogEconomicsBuilder.loadPrivateStorageSnapshot(
+                store: fixture.store,
+                rootLocator: boot.snapshot.rootLocator,
+                volumeCapacityBytes: 2_000_000,
+                configuredBudgetBytes: configuredBudgetBytes
+            )
+            let projection = try Self.v2Projection(privateStorage: snapshot)
+
+            Self.assertUnavailableStorage(projection.storage, overflow: false, file: #filePath, line: #line)
+            XCTAssertEqual(projection.storage.globalManagedBudgetBytes, 0, name)
+            XCTAssertEqual(projection.storage.managedBudgetSource, "default", name)
+            XCTAssertEqual(projection.cleanupTargets, [], name)
+        }
+    }
+
+    func testV2ProjectionConfiguredBudgetSaturatesAvailableBudgetAtZero() throws {
+        let fixture = try StoreFixture.make("model-catalog-v2-storage-configured-budget-saturated")
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let boot = try fixture.store.bootstrapWithLockCustody()
+        defer { boot.lockCustody.close() }
+        let target = try Self.cleanupTarget(root: boot.snapshot.rootLocator, suffix: "cbs", estimatedBytes: 4_096, keepSetStatus: .reclaimable)
+        try Self.writeInventory([target], fixture: fixture, boot: boot)
+        let snapshot = ModelCatalogEconomicsBuilder.loadPrivateStorageSnapshot(
+            store: fixture.store,
+            rootLocator: boot.snapshot.rootLocator,
+            volumeCapacityBytes: 2_000_000,
+            configuredBudgetBytes: 1
+        )
+
+        let projection = try Self.v2Projection(privateStorage: snapshot)
+
+        XCTAssertEqual(projection.storage.managedBudgetSource, "configured")
+        XCTAssertEqual(projection.storage.globalManagedBudgetBytes, 1)
+        XCTAssertEqual(projection.storage.managedBudgetChargeBytes, 4_096)
+        XCTAssertEqual(projection.storage.availableManagedBudgetBytes, 0)
+        XCTAssertEqual(projection.cleanupTargets.count, 1)
+    }
+
+    func testV2ProjectionRejectsWrongRootAndMalformedStoreInventory() throws {
+        let fixture = try StoreFixture.make("model-catalog-v2-storage-wrong-root")
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let boot = try fixture.store.bootstrapWithLockCustody()
+        defer { boot.lockCustody.close() }
+        let target = try Self.cleanupTarget(root: boot.snapshot.rootLocator, suffix: "w", estimatedBytes: 4_096, keepSetStatus: .reclaimable)
+        try Self.writeInventory([target], fixture: fixture, boot: boot)
+        let drifted = try StorePayloadFactory.driftedRoot(from: boot.snapshot.rootLocator)
+        let wrongRoot = ModelCatalogEconomicsBuilder.loadPrivateStorageSnapshot(
+            store: fixture.store,
+            rootLocator: drifted,
+            volumeCapacityBytes: 2_000_000
+        )
+        let wrongRootProjection = try Self.v2Projection(privateStorage: wrongRoot)
+        Self.assertUnavailableStorage(wrongRootProjection.storage, overflow: false)
+        XCTAssertEqual(wrongRootProjection.cleanupTargets, [])
+
+        try Self.writeHostileInventoryEnvelopePayload(
+            Data("{\"schema\":\"model_catalog_published_inventory.v1\"}".utf8),
+            fixture: fixture,
+            generation: 2
+        )
+        let malformed = ModelCatalogEconomicsBuilder.loadPrivateStorageSnapshot(
+            store: fixture.store,
+            rootLocator: boot.snapshot.rootLocator,
+            volumeCapacityBytes: 2_000_000
+        )
+        let malformedProjection = try Self.v2Projection(privateStorage: malformed)
+        Self.assertUnavailableStorage(malformedProjection.storage, overflow: false)
+        XCTAssertEqual(malformedProjection.cleanupTargets, [])
+        let encoded = try ModelSwitchingWireCodec.encode(malformedProjection)
+        XCTAssertFalse(encoded.contains(fixture.root.path))
+        XCTAssertFalse(encoded.contains(boot.snapshot.rootLocator.canonicalPath))
+    }
+
+    func testV2ProjectionRejectsBadCleanupBindingFailClosed() throws {
+        let fixture = try StoreFixture.make("model-catalog-v2-storage-bad-binding")
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let boot = try fixture.store.bootstrapWithLockCustody()
+        defer { boot.lockCustody.close() }
+        let target = try Self.cleanupTarget(root: boot.snapshot.rootLocator, suffix: "b", estimatedBytes: 4_096, keepSetStatus: .reclaimable)
+        let payload = try Self.inventoryPayload(root: boot.snapshot.rootLocator, targets: [target])
+        let mutated = try Self.mutatingInventoryPayload(payload) { object in
+            var targets = object["targets"] as! [[String: Any]]
+            var first = targets[0]
+            var cleanup = first["cleanup"] as! [String: Any]
+            cleanup["estimated_bytes"] = 4_095
+            first["cleanup"] = cleanup
+            targets[0] = first
+            object["targets"] = targets
+        }
+        try Self.writeHostileInventoryEnvelopePayload(mutated, fixture: fixture, generation: 1)
+        let snapshot = ModelCatalogEconomicsBuilder.loadPrivateStorageSnapshot(
+            store: fixture.store,
+            rootLocator: boot.snapshot.rootLocator,
+            volumeCapacityBytes: 2_000_000
+        )
+
+        let projection = try Self.v2Projection(privateStorage: snapshot)
+
+        Self.assertUnavailableStorage(projection.storage, overflow: false)
+        XCTAssertEqual(projection.cleanupTargets, [])
+    }
+
+    func testV2ProjectionRejectsInvalidVolumeCapacityAndReportsExplicitOverflow() throws {
+        let fixture = try StoreFixture.make("model-catalog-v2-storage-overflow")
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let boot = try fixture.store.bootstrapWithLockCustody()
+        defer { boot.lockCustody.close() }
+        let target = try Self.cleanupTarget(root: boot.snapshot.rootLocator, suffix: "o", estimatedBytes: 4_096, keepSetStatus: .reclaimable)
+        try Self.writeInventory([target], fixture: fixture, boot: boot)
+
+        let invalidBudget = ModelCatalogEconomicsBuilder.loadPrivateStorageSnapshot(
+            store: fixture.store,
+            rootLocator: boot.snapshot.rootLocator,
+            volumeCapacityBytes: 0
+        )
+        let invalidBudgetProjection = try Self.v2Projection(privateStorage: invalidBudget)
+        Self.assertUnavailableStorage(invalidBudgetProjection.storage, overflow: false)
+        XCTAssertEqual(invalidBudgetProjection.cleanupTargets, [])
+
+        let hugeCapacity = ModelCatalogEconomicsBuilder.loadPrivateStorageSnapshot(
+            store: fixture.store,
+            rootLocator: boot.snapshot.rootLocator,
+            volumeCapacityBytes: Int64.max
+        )
+        let hugeCapacityProjection = try Self.v2Projection(privateStorage: hugeCapacity)
+        XCTAssertEqual(hugeCapacityProjection.storage.globalManagedBudgetBytes, Int64(ModelPreparationContracts.maxEstimatedBytes))
+        XCTAssertEqual(hugeCapacityProjection.storage.availableManagedBudgetBytes, Int64(ModelPreparationContracts.maxEstimatedBytes) - target.estimatedBytes)
+        XCTAssertEqual(hugeCapacityProjection.storage.managedBudgetSource, "default")
+
+        let overflow = ModelCatalogEconomicsBuilder.loadPrivateStorageSnapshot(
+            store: fixture.store,
+            rootLocator: boot.snapshot.rootLocator,
+            volumeCapacityBytes: 2_000_000,
+            overflowDetected: true
+        )
+        let overflowProjection = try Self.v2Projection(privateStorage: overflow)
+        Self.assertUnavailableStorage(overflowProjection.storage, overflow: true)
+        XCTAssertEqual(overflowProjection.cleanupTargets, [])
+    }
+
+    func testV2ProjectionNeverAttachesRowCleanupByCurrentCatalogFields() throws {
+        let fixture = try StoreFixture.make("model-catalog-v2-storage-row-cleanup")
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let boot = try fixture.store.bootstrapWithLockCustody()
+        defer { boot.lockCustody.close() }
+        let target = try Self.cleanupTarget(root: boot.snapshot.rootLocator, suffix: "r", estimatedBytes: 4_096, keepSetStatus: .reclaimable, modelKey: Self.catalogModelKey)
+        try Self.writeInventory([target], fixture: fixture, boot: boot)
+        let snapshot = ModelCatalogEconomicsBuilder.loadPrivateStorageSnapshot(
+            store: fixture.store,
+            rootLocator: boot.snapshot.rootLocator,
+            volumeCapacityBytes: 2_000_000
+        )
+
+        let offeredProjection = try Self.v2Projection(privateStorage: snapshot)
+        XCTAssertEqual(offeredProjection.cleanupTargets.count, 1)
+        XCTAssertTrue(offeredProjection.rows.allSatisfy { $0.cleanupPublished.available == false })
+
+        let offerRejectedProjection = try Self.v2Projection(
+            privateStorage: snapshot,
+            admissionStatuses: [Self.candidateID: Self.status(state: "offer_rejected", source: "coordinator")]
+        )
+        XCTAssertEqual(offerRejectedProjection.cleanupTargets.count, 1)
+        XCTAssertTrue(offerRejectedProjection.rows.allSatisfy { $0.cleanupPublished.available == false })
+    }
+
+
+
     private static let candidateID = "byom_abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrst"
     private static let catalogModelKey = "openai/gpt-oss-20b"
     private static let servedModelRef = "ollama:gpt-oss:20b"
@@ -631,6 +953,166 @@ final class ModelCatalogEconomicsTests: XCTestCase {
             fatalError("invalid test timestamp: \(value)")
         }
         return date
+    }
+
+
+    private static func v2Projection(
+        privateStorage: ModelCatalogEconomicsBuilder.PrivateStorageSnapshot?,
+        admissionStatuses: [String: BYOMAdmissionStatusWire]? = nil
+    ) throws -> ModelCatalogEconomicsV2Wire {
+        let inputs = try staticInputs()
+        return ModelCatalogEconomicsBuilder.makeProjectionV2(
+            generatedAt: date("2027-01-15T08:01:00Z"),
+            cliVersion: "test",
+            cliBuildCommit: "test",
+            processLaunchID: "launch-test",
+            processStartedAt: date("2027-01-15T08:00:00Z"),
+            projectionSequence: 10,
+            currentModelID: servedModelRef,
+            discovery: discovery(candidate: candidate()),
+            admissionStatuses: admissionStatuses ?? [candidateID: status(state: "catalog_priced", source: "coordinator")],
+            demand: inputs.demand,
+            candidateCatalog: inputs.candidateCatalog,
+            rateCard: inputs.rateCard,
+            privateStorage: privateStorage
+        )
+    }
+
+    private static func writeInventory(
+        _ targets: [ModelPreparationCleanupTarget],
+        fixture: StoreFixture,
+        boot: (snapshot: ModelPreparationPrivateStore.BootstrapSnapshot, lockCustody: ModelPreparationPrivateStore.LockCustody)
+    ) throws {
+        let payload = try inventoryPayload(root: boot.snapshot.rootLocator, targets: targets)
+        try fixture.store.writeRecord(
+            kind: .publishedInventory,
+            payload: payload,
+            generation: 1,
+            rootLocator: boot.snapshot.rootLocator,
+            lockCustody: boot.lockCustody
+        )
+    }
+
+    private static func writeHostileInventoryEnvelopePayload(
+        _ payload: Data,
+        fixture: StoreFixture,
+        generation: Int
+    ) throws {
+        let state = fixture.authority.appendingPathComponent("state", isDirectory: true)
+        let target = state.appendingPathComponent(ModelPreparationPrivateStateEnvelope.expectedTargetLeaf(for: .publishedInventory))
+        let envelope: [String: Any] = [
+            "schema": "model_catalog_private_state_envelope.v1",
+            "record_kind": ModelPreparationPrivateStateEnvelopeKind.publishedInventory.rawValue,
+            "target_leaf": ModelPreparationPrivateStateEnvelope.expectedTargetLeaf(for: .publishedInventory),
+            "writer_uuid": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            "generation": generation,
+            "payload_base64": payload.base64EncodedString(),
+            "payload_sha256": sha256Hex(payload)
+        ]
+        let data = try JSONSerialization.data(withJSONObject: envelope, options: [.sortedKeys, .withoutEscapingSlashes])
+        try data.write(to: target)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: target.path)
+    }
+
+    private static func inventoryPayload(root: ModelPreparationRootLocator, targets: [ModelPreparationCleanupTarget]) throws -> Data {
+        try ModelPreparationContracts.encode(
+            try ModelPreparationInventoryRecord(root: root, targets: targets, generatedAt: "2027-01-15T08:00:00Z"),
+            maxBytes: ModelPreparationContracts.inventoryMaxBytes
+        )
+    }
+
+    private static func cleanupTarget(
+        root: ModelPreparationRootLocator,
+        suffix: String,
+        estimatedBytes: Int64,
+        keepSetStatus: ModelPreparationKeepSetStatus,
+        modelKey: String? = nil
+    ) throws -> ModelPreparationCleanupTarget {
+        let receiptSHA = sha256Hex(Data("receipt-\(suffix)".utf8))
+        let display = "Display \(suffix)"
+        let revision = "revision-\(suffix)"
+        let artifact = "artifact-\(suffix)"
+        let release = "release-\(suffix)"
+        let digest = try ModelPreparationContracts.artifactIdentityDigest(
+            displayModelID: display,
+            modelRevision: revision,
+            artifactID: artifact,
+            releaseID: release,
+            rootIdentityDigest: root.rootIdentityDigest,
+            receiptSHA256: receiptSHA
+        )
+        let action: ModelPreparationAction
+        let protectedReason: String?
+        switch keepSetStatus {
+        case .reclaimable:
+            action = try ModelPreparationAction(
+                available: true,
+                requiresConfirmation: true,
+                transactionKind: .cleanupPublishedArtifact,
+                transactionID: uuidForSuffix(suffix),
+                actionTimeoutSeconds: 60,
+                estimatedBytes: estimatedBytes,
+                unavailableReason: nil,
+                artifactIdentityDigest: digest
+            )
+            protectedReason = nil
+        case .protected:
+            action = try ModelPreparationAction(
+                available: false,
+                requiresConfirmation: false,
+                transactionKind: nil,
+                transactionID: nil,
+                actionTimeoutSeconds: nil,
+                estimatedBytes: nil,
+                unavailableReason: "current_model",
+                artifactIdentityDigest: nil
+            )
+            protectedReason = "current_model"
+        }
+        return try ModelPreparationCleanupTarget(
+            artifactIdentityDigest: digest,
+            displayModelID: display,
+            modelRevision: revision,
+            artifactID: artifact,
+            releaseID: release,
+            modelKey: modelKey,
+            eventModelKey: "catalog/model-\(suffix)",
+            rootIdentityDigest: root.rootIdentityDigest,
+            receiptSHA256: receiptSHA,
+            estimatedBytes: estimatedBytes,
+            keepSetStatus: keepSetStatus,
+            protectedReason: protectedReason,
+            cleanup: action
+        )
+    }
+
+    private static func uuidForSuffix(_ suffix: String) -> String {
+        let byte = UInt8(suffix.utf8.reduce(0) { (Int($0) + Int($1)) % 10 })
+        return "10000000-0000-4000-8000-00000000000\(byte)"
+    }
+
+    private static func mutatingInventoryPayload(
+        _ payload: Data,
+        mutate: (inout [String: Any]) -> Void
+    ) throws -> Data {
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: payload) as? [String: Any])
+        mutate(&object)
+        return try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+    }
+
+    private static func assertUnavailableStorage(
+        _ storage: ModelCatalogEconomicsV2Wire.Storage,
+        overflow: Bool,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        XCTAssertNil(storage.managedV3PublishedBytes, file: file, line: line)
+        XCTAssertNil(storage.managedV3ReclaimableBytes, file: file, line: line)
+        XCTAssertNil(storage.managedV3ObjectCount, file: file, line: line)
+        XCTAssertNil(storage.managedBudgetChargeBytes, file: file, line: line)
+        XCTAssertNil(storage.availableManagedBudgetBytes, file: file, line: line)
+        XCTAssertEqual(storage.configuredLegacyAccountingState, "unavailable", file: file, line: line)
+        XCTAssertEqual(storage.managedV3OverflowDetected, overflow, file: file, line: line)
     }
 
     private static func staticInputs() throws -> (

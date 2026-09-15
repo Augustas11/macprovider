@@ -21,6 +21,30 @@ type ModelAdmissionRouteGuard interface {
 	CompareAndInsertModelAdmissionRouteSnapshot(context.Context, providerws.ModelAdmissionRouteExpectation, func() error) error
 }
 
+type modelAdmissionRouteGenerationSource interface {
+	ModelAdmissionBindingGeneration(providerID string) uint64
+}
+
+type modelAdmissionEventsEmptyStore interface {
+	ModelAdmissionEventsEmpty(context.Context) (bool, error)
+}
+
+type modelAdmissionProviderRouteGenerationStore interface {
+	ModelAdmissionProviderRouteGeneration(context.Context, string) (uint64, error)
+}
+
+type modelAdmissionLegacyRouteCacheEntry struct {
+	routeGeneration uint64
+	storeGeneration uint64
+	eligible        bool
+}
+
+type modelAdmissionPaidRoutingEligibility struct {
+	eligible                         bool
+	legacyProviderRouteGeneration    uint64
+	hasLegacyProviderRouteGeneration bool
+}
+
 // byomAdmissionCandidate reports whether the session carries a
 // coordinator-derived session-to-candidate binding (SPEC-047-R003 v0.1.5).
 // Provider-reported names and keys are never a binding.
@@ -29,14 +53,18 @@ func byomAdmissionCandidate(p pool.Provider) bool {
 }
 
 func (s *Server) byomDefaultPaidRoutingEligible(p pool.Provider) bool {
+	return s.byomDefaultPaidRoutingEligibility(p).eligible
+}
+
+func (s *Server) byomDefaultPaidRoutingEligibility(p pool.Provider) modelAdmissionPaidRoutingEligibility {
 	bound := byomAdmissionCandidate(p)
 	// SPEC-010-R007(d): a session bound to a feed member routes only with the
 	// admission evidence its route snapshot must carry (which needs a store).
 	if p.ArtifactIdentity != nil && (s == nil || s.modelAdmissionStore == nil) {
-		return false
+		return modelAdmissionPaidRoutingEligibility{}
 	}
 	if s == nil || s.modelAdmissionStore == nil {
-		return !bound
+		return modelAdmissionPaidRoutingEligibility{eligible: !bound}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), requestLogWriteTimeout)
 	defer cancel()
@@ -46,7 +74,7 @@ func (s *Server) byomDefaultPaidRoutingEligible(p pool.Provider) bool {
 	}
 	_, found, eligible := s.byomRouteSnapshotBinding(ctx, p, material)
 	if found {
-		return eligible
+		return modelAdmissionPaidRoutingEligibility{eligible: eligible}
 	}
 	return s.byomLegacyRoutingEligible(ctx, p)
 }
@@ -57,12 +85,131 @@ func (s *Server) byomDefaultPaidRoutingEligible(p pool.Provider) bool {
 // never routed by default (served-model-name or asserted-key lookups are
 // never a fallback, SPEC-047-R003 v0.1.5). SPEC-010-R007(d): a session bound
 // to a feed member is excluded on every fallback.
-func (s *Server) byomLegacyRoutingEligible(ctx context.Context, p pool.Provider) bool {
+func (s *Server) byomLegacyRoutingEligible(ctx context.Context, p pool.Provider) modelAdmissionPaidRoutingEligibility {
 	if byomAdmissionCandidate(p) || p.ArtifactIdentity != nil {
-		return false
+		return modelAdmissionPaidRoutingEligibility{}
+	}
+	routeGeneration, cacheable := s.legacyModelAdmissionRouteGeneration(p.ProviderID)
+	storeGeneration, storeCacheable := s.legacyModelAdmissionStoreGeneration(ctx, p.ProviderID)
+	cacheable = cacheable && storeCacheable
+	if cacheable {
+		if eligible, ok := s.cachedLegacyModelAdmissionRouteEligibility(p.ProviderID, routeGeneration, storeGeneration); ok {
+			return modelAdmissionPaidRoutingEligibility{
+				eligible:                         eligible,
+				legacyProviderRouteGeneration:    storeGeneration,
+				hasLegacyProviderRouteGeneration: true,
+			}
+		}
+	}
+	storeEligibility := func(eligible bool) modelAdmissionPaidRoutingEligibility {
+		if cacheable {
+			s.storeLegacyModelAdmissionRouteEligibility(ctx, p.ProviderID, routeGeneration, storeGeneration, eligible)
+		}
+		return modelAdmissionPaidRoutingEligibility{
+			eligible:                         eligible,
+			legacyProviderRouteGeneration:    storeGeneration,
+			hasLegacyProviderRouteGeneration: storeCacheable,
+		}
+	}
+	eligible := false
+	if s.modelAdmissionEventsEmpty(ctx) {
+		eligible = true
+		return storeEligibility(eligible)
 	}
 	_, found, err := s.modelAdmissionStore.LatestModelAdmissionRouteStatus(ctx, p.ProviderID, "", "")
-	return err == nil && !found
+	if err != nil {
+		return modelAdmissionPaidRoutingEligibility{}
+	}
+	eligible = !found
+	return storeEligibility(eligible)
+}
+
+func (s *Server) rememberLegacyModelAdmissionRouteExpectation(state *forwardState, p pool.Provider, eligibility modelAdmissionPaidRoutingEligibility) {
+	if state == nil {
+		return
+	}
+	state.legacyModelAdmissionRouteProviderID = ""
+	state.legacyModelAdmissionRouteGeneration = 0
+	state.legacyModelAdmissionRouteSet = false
+	if s == nil || s.modelAdmissionStore == nil || !eligibility.eligible || !eligibility.hasLegacyProviderRouteGeneration ||
+		byomAdmissionCandidate(p) || p.ArtifactIdentity != nil {
+		return
+	}
+	state.legacyModelAdmissionRouteProviderID = p.ProviderID
+	state.legacyModelAdmissionRouteGeneration = eligibility.legacyProviderRouteGeneration
+	state.legacyModelAdmissionRouteSet = true
+}
+
+func (s *Server) modelAdmissionEventsEmpty(ctx context.Context) bool {
+	if s == nil || s.modelAdmissionStore == nil {
+		return false
+	}
+	store, ok := s.modelAdmissionStore.(modelAdmissionEventsEmptyStore)
+	if !ok {
+		return false
+	}
+	empty, err := store.ModelAdmissionEventsEmpty(ctx)
+	return err == nil && empty
+}
+
+func (s *Server) cachedLegacyModelAdmissionRouteEligibility(providerID string, routeGeneration, storeGeneration uint64) (bool, bool) {
+	if s == nil || providerID == "" {
+		return false, false
+	}
+	value, ok := s.modelAdmissionLegacyRouteCache.Load(providerID)
+	if !ok {
+		return false, false
+	}
+	entry, ok := value.(modelAdmissionLegacyRouteCacheEntry)
+	if !ok || entry.routeGeneration != routeGeneration || entry.storeGeneration != storeGeneration {
+		return false, false
+	}
+	return entry.eligible, true
+}
+
+func (s *Server) storeLegacyModelAdmissionRouteEligibility(ctx context.Context, providerID string, routeGeneration, storeGeneration uint64, eligible bool) {
+	if s == nil || providerID == "" {
+		return
+	}
+	currentGeneration, ok := s.legacyModelAdmissionRouteGeneration(providerID)
+	if !ok || currentGeneration != routeGeneration {
+		return
+	}
+	currentStoreGeneration, ok := s.legacyModelAdmissionStoreGeneration(ctx, providerID)
+	if !ok || currentStoreGeneration != storeGeneration {
+		return
+	}
+	s.modelAdmissionLegacyRouteCache.Store(providerID, modelAdmissionLegacyRouteCacheEntry{
+		routeGeneration: routeGeneration,
+		storeGeneration: storeGeneration,
+		eligible:        eligible,
+	})
+}
+
+func (s *Server) legacyModelAdmissionRouteGeneration(providerID string) (uint64, bool) {
+	if s == nil || providerID == "" || s.modelAdmissionRouteGuard == nil {
+		return 0, false
+	}
+	source, ok := s.modelAdmissionRouteGuard.(modelAdmissionRouteGenerationSource)
+	if !ok {
+		return 0, false
+	}
+	return source.ModelAdmissionBindingGeneration(providerID), true
+}
+
+func (s *Server) legacyModelAdmissionStoreGeneration(ctx context.Context, providerID string) (uint64, bool) {
+	if s == nil || providerID == "" || s.modelAdmissionStore == nil {
+		return 0, false
+	}
+	store, ok := s.modelAdmissionStore.(modelAdmissionProviderRouteGenerationStore)
+	if !ok {
+		return 0, false
+	}
+	generation, err := store.ModelAdmissionProviderRouteGeneration(ctx, providerID)
+	if err != nil {
+		return 0, false
+	}
+	return generation, true
 }
 
 // byomMaterialHash is the tier-2 material lookup digest for a session: the
@@ -239,9 +386,32 @@ func (s *Server) requireBYOMRouteSnapshotBinding(ctx context.Context, p pool.Pro
 // head, binding, binding generation, validated release generation). A
 // server composed with an admission store but no guard fails every
 // BYOM-bound route closed: there is no weaker path.
-func (s *Server) insertBYOMRouteSnapshot(ctx context.Context, p pool.Provider, binding providerws.ModelAdmissionSettlementBinding, insert func() error) error {
-	if binding.CandidateID == "" {
+func (s *Server) verifyLegacyModelAdmissionRouteFresh(ctx context.Context, p pool.Provider, state *forwardState) error {
+	if s == nil || s.modelAdmissionStore == nil || byomAdmissionCandidate(p) || p.ArtifactIdentity != nil {
+		return nil
+	}
+	return s.compareAndInsertLegacyModelAdmissionRouteSnapshot(ctx, p, state, func() error { return nil })
+}
+
+func (s *Server) compareAndInsertLegacyModelAdmissionRouteSnapshot(ctx context.Context, p pool.Provider, state *forwardState, insert func() error) error {
+	if s == nil || s.modelAdmissionStore == nil {
 		return insert()
+	}
+	if s.modelAdmissionRouteGuard == nil || state == nil || !state.legacyModelAdmissionRouteSet ||
+		state.legacyModelAdmissionRouteProviderID != p.ProviderID {
+		return providerws.ErrModelAdmissionRouteStale
+	}
+	return s.modelAdmissionRouteGuard.CompareAndInsertModelAdmissionRouteSnapshot(ctx, providerws.ModelAdmissionRouteExpectation{
+		ProviderID:              p.ProviderID,
+		BindingGeneration:       p.ModelAdmissionBindingGeneration,
+		ProviderRouteGeneration: state.legacyModelAdmissionRouteGeneration,
+		SessionEpoch:            p.ModelAdmissionSessionEpoch,
+	}, insert)
+}
+
+func (s *Server) insertBYOMRouteSnapshot(ctx context.Context, p pool.Provider, binding providerws.ModelAdmissionSettlementBinding, state *forwardState, insert func() error) error {
+	if binding.CandidateID == "" {
+		return s.compareAndInsertLegacyModelAdmissionRouteSnapshot(ctx, p, state, insert)
 	}
 	if s.modelAdmissionRouteGuard == nil {
 		return providerws.ErrModelAdmissionRouteStale

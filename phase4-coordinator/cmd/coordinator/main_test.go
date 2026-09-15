@@ -798,6 +798,65 @@ func TestConfiguredPayoutReadDBUsesAlternateSQLitePath(t *testing.T) {
 	}
 }
 
+func TestConfiguredModelAdmissionRouteReadStoreUsesDistinctSQLiteReader(t *testing.T) {
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "coordinator.sqlite")
+	defaultStore, err := requestlog.OpenStore(path)
+	if err != nil {
+		t.Fatalf("open default store: %v", err)
+	}
+	t.Cleanup(func() { _ = defaultStore.Close() })
+	writer, err := providerws.NewSQLiteModelAdmissionStore(defaultStore.DB())
+	if err != nil {
+		t.Fatalf("open writer admission store: %v", err)
+	}
+
+	cfg := config.Default()
+	cfg.Storage.DBPath = path
+	reader, closeReader, err := configuredModelAdmissionRouteReadStore(cfg, writer)
+	if err != nil {
+		t.Fatalf("route read store: %v", err)
+	}
+	t.Cleanup(closeReader)
+	sqliteReader, ok := reader.(*providerws.SQLiteModelAdmissionStore)
+	if !ok {
+		t.Fatalf("route read store type = %T, want *SQLiteModelAdmissionStore", reader)
+	}
+	if sqliteReader == writer {
+		t.Fatal("route read store reused the writer-backed model admission store")
+	}
+
+	providerID := "provider-byom-reader"
+	candidateID := "byom_" + strings.Repeat("r", 52)
+	before, err := sqliteReader.ModelAdmissionProviderRouteGeneration(context.Background(), providerID)
+	if err != nil || before != 0 {
+		t.Fatalf("initial reader generation=%d err=%v, want 0 nil", before, err)
+	}
+	stored, replay, err := writer.AppendModelAdmissionOffer(context.Background(), providerws.ModelAdmissionEvent{
+		ProviderID:               providerID,
+		CandidateID:              candidateID,
+		ServedModelRef:           "ollama:qwen3-8b",
+		DiscoveryDigestSHA256:    strings.Repeat("a", 64),
+		RequestedDisclosureClass: "non_earning_provider_asserted",
+		RequestID:                "request_reader_generation",
+		Nonce:                    "nonce_reader_generation",
+		PayloadDigestSHA256:      strings.Repeat("b", 64),
+		SignatureDigestSHA256:    strings.Repeat("c", 64),
+		CreatedAt:                time.Unix(1800000023, 0).UTC(),
+	})
+	if err != nil || replay {
+		t.Fatalf("writer append replay=%v err=%v", replay, err)
+	}
+	readback, found, err := reader.LatestModelAdmissionStatus(context.Background(), providerID, candidateID)
+	if err != nil || !found || readback.CoordinatorEventID != stored.CoordinatorEventID {
+		t.Fatalf("reader readback found=%v event=%+v stored=%+v err=%v", found, readback, stored, err)
+	}
+	after, err := sqliteReader.ModelAdmissionProviderRouteGeneration(context.Background(), providerID)
+	if err != nil || after <= before {
+		t.Fatalf("post-append reader generation=%d before=%d err=%v, want increase", after, before, err)
+	}
+}
+
 func TestBuyerRegisterRouteFeatureGate(t *testing.T) {
 	base := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "base", http.StatusTeapot)

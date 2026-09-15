@@ -37,6 +37,11 @@ func (b *billingRecorder) recordRouteSnapshot(providerBody []byte, provider pool
 			return nil, fmt.Errorf("tier2 catalog does not match signed admission row")
 		}
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), requestLogWriteTimeout)
+	defer cancel()
+	if err := b.server.verifyLegacyModelAdmissionRouteFresh(ctx, provider, b.state); err != nil {
+		return nil, err
+	}
 
 	store, _, _ := b.server.billingState()
 	if store == nil {
@@ -93,8 +98,6 @@ func (b *billingRecorder) recordRouteSnapshot(providerBody []byte, provider pool
 	if material.HashStatus != pool.HashStatusVerified || material.ExpectedModelHash != admittedRowHash {
 		return nil, fmt.Errorf("tier2 catalog does not match signed admission row")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), requestLogWriteTimeout)
-	defer cancel()
 	byomBinding, err := b.server.requireBYOMRouteSnapshotBinding(ctx, provider, material)
 	if err != nil {
 		return nil, err
@@ -170,7 +173,7 @@ func (b *billingRecorder) recordRouteSnapshot(providerBody []byte, provider pool
 	snapshot.ComputeIntegritySamplingCovered = computeIntegrityCovered
 	snapshot.ComputeIntegrityHardwareDigest = computeIntegrityHardwareDigest
 	var digest string
-	if err := b.server.insertBYOMRouteSnapshot(ctx, provider, byomBinding, func() error {
+	if err := b.server.insertBYOMRouteSnapshot(ctx, provider, byomBinding, b.state, func() error {
 		inserted, err := store.InsertRouteSnapshot(ctx, snapshot)
 		digest = inserted
 		return err

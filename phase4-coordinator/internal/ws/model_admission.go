@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/config"
@@ -253,6 +254,7 @@ type memoryModelAdmissionStore struct {
 	nonces        map[string]ModelAdmissionEvent
 	candidates    map[string]map[string]struct{}
 	providerEvent map[string][]time.Time
+	providerGen   map[string]uint64
 	pending       map[string]PendingModelAdmissionDecision
 	pendingByReq  map[string]string
 }
@@ -264,6 +266,7 @@ func NewMemoryModelAdmissionStore() ModelAdmissionStore {
 		nonces:        map[string]ModelAdmissionEvent{},
 		candidates:    map[string]map[string]struct{}{},
 		providerEvent: map[string][]time.Time{},
+		providerGen:   map[string]uint64{},
 	}
 }
 
@@ -336,6 +339,7 @@ func (s *memoryModelAdmissionStore) appendProviderModelAdmissionEvent(event Mode
 	s.latest[event.ProviderID+"|"+event.CandidateID] = event
 	s.requestIDs[event.ProviderID+"|"+event.RequestID] = event
 	s.nonces[event.ProviderID+"|"+event.Nonce] = event
+	s.providerGen[event.ProviderID]++
 	s.invalidatePendingLocked(event.ProviderID, event.CandidateID)
 	return event, false, nil
 }
@@ -431,6 +435,7 @@ func (s *memoryModelAdmissionStore) appendCoordinatorModelAdmissionEvent(event M
 	s.latest[event.ProviderID+"|"+event.CandidateID] = event
 	s.requestIDs[event.ProviderID+"|"+event.RequestID] = event
 	s.nonces[event.ProviderID+"|"+event.Nonce] = event
+	s.providerGen[event.ProviderID]++
 	s.invalidatePendingLocked(event.ProviderID, event.CandidateID)
 	if approval != nil {
 		s.consumePendingLocked(*approval, event)
@@ -514,6 +519,18 @@ func (s *memoryModelAdmissionStore) LatestModelAdmissionRouteStatus(_ context.Co
 	return latestModelAdmissionRouteStatusFromEvents(s.events, providerID, servedModelRef, catalogModelKey)
 }
 
+func (s *memoryModelAdmissionStore) ModelAdmissionProviderRouteGeneration(_ context.Context, providerID string) (uint64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.providerGen[providerID], nil
+}
+
+func (s *memoryModelAdmissionStore) ModelAdmissionEventsEmpty(_ context.Context) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.events) == 0, nil
+}
+
 func (s *memoryModelAdmissionStore) SettlementCapableModelAdmissionStatusesForServedModel(_ context.Context, providerID, servedModelRef string) ([]ModelAdmissionEvent, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -539,7 +556,8 @@ func (s *memoryModelAdmissionStore) SettlementCapableModelAdmissionStatusesForSe
 }
 
 type SQLiteModelAdmissionStore struct {
-	db *sql.DB
+	db        *sql.DB
+	hasEvents atomic.Bool
 }
 
 func NewSQLiteModelAdmissionStore(db *sql.DB) (*SQLiteModelAdmissionStore, error) {
@@ -612,7 +630,42 @@ CREATE INDEX IF NOT EXISTS model_admission_events_provider_latest
 ON model_admission_events(provider_id, id DESC)`); err != nil {
 		return nil, err
 	}
-	return &SQLiteModelAdmissionStore{db: db}, nil
+	store := &SQLiteModelAdmissionStore{db: db}
+	empty, err := sqliteModelAdmissionEventsEmpty(context.Background(), db)
+	if err != nil {
+		return nil, err
+	}
+	store.hasEvents.Store(!empty)
+	return store, nil
+}
+
+// NewSQLiteModelAdmissionReadStore opens the model-admission store on a
+// schema-ready read-only SQLite handle. It deliberately performs no DDL so
+// buyer route checks can use a separate reader without contending on the
+// request-log/billing writer connection.
+func NewSQLiteModelAdmissionReadStore(db *sql.DB) (*SQLiteModelAdmissionStore, error) {
+	if db == nil {
+		return nil, fmt.Errorf("db is required")
+	}
+	store := &SQLiteModelAdmissionStore{db: db}
+	empty, err := sqliteModelAdmissionEventsEmpty(context.Background(), db)
+	if err != nil {
+		return nil, err
+	}
+	store.hasEvents.Store(!empty)
+	return store, nil
+}
+
+func sqliteModelAdmissionEventsEmpty(ctx context.Context, db *sql.DB) (bool, error) {
+	var exists int
+	err := db.QueryRowContext(ctx, `SELECT 1 FROM model_admission_events LIMIT 1`).Scan(&exists)
+	if errors.Is(err, sql.ErrNoRows) {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return false, nil
 }
 
 func ensureSQLiteModelAdmissionColumns(db *sql.DB) error {
@@ -786,6 +839,7 @@ func (s *SQLiteModelAdmissionStore) appendProviderModelAdmissionEvent(ctx contex
 			return errModelAdmissionReplayConflict
 		}
 		if matched {
+			s.hasEvents.Store(true)
 			stored = replayed
 			replay = true
 			return nil
@@ -834,6 +888,7 @@ SELECT COUNT(DISTINCT candidate_id) FROM model_admission_events WHERE provider_i
 			return errModelAdmissionReplayConflict
 		}
 		event = prepareModelAdmissionTransition(event, previousState, modelAdmissionActorProvider, nextState)
+		s.hasEvents.Store(true)
 		if _, err := conn.ExecContext(txCtx, `
 INSERT INTO model_admission_events(
     provider_id, candidate_id, served_model_ref, catalog_model_key,
@@ -985,6 +1040,7 @@ func (s *SQLiteModelAdmissionStore) appendCoordinatorModelAdmissionEventCAS(ctx 
 			return errModelAdmissionReplayConflict
 		}
 		if matched {
+			s.hasEvents.Store(true)
 			stored = replayed
 			replay = true
 			return nil
@@ -1017,6 +1073,7 @@ func (s *SQLiteModelAdmissionStore) appendCoordinatorModelAdmissionEventCAS(ctx 
 			actor = event.Actor
 		}
 		event = prepareModelAdmissionTransition(event, previous.State, actor, event.State)
+		s.hasEvents.Store(true)
 		if _, err := conn.ExecContext(txCtx, `
 INSERT INTO model_admission_events(
     provider_id, candidate_id, served_model_ref, catalog_model_key,
@@ -1128,6 +1185,41 @@ func (s *SQLiteModelAdmissionStore) LatestModelAdmissionRouteStatus(ctx context.
  WHERE provider_id = ? AND served_model_ref = ? AND LOWER(catalog_model_key) = ?
  ORDER BY id DESC
  LIMIT 1`), providerID, servedModelRef, catalogModelKey)
+}
+
+func (s *SQLiteModelAdmissionStore) ModelAdmissionProviderRouteGeneration(ctx context.Context, providerID string) (uint64, error) {
+	if s == nil || s.db == nil {
+		return 0, fmt.Errorf("model admission store is not initialized")
+	}
+	var generation int64
+	err := s.db.QueryRowContext(ctx, `
+SELECT COALESCE(MAX(id), 0)
+  FROM model_admission_events
+ WHERE provider_id = ?`, providerID).Scan(&generation)
+	if err != nil {
+		return 0, err
+	}
+	if generation < 0 {
+		return 0, nil
+	}
+	return uint64(generation), nil
+}
+
+func (s *SQLiteModelAdmissionStore) ModelAdmissionEventsEmpty(ctx context.Context) (bool, error) {
+	if s == nil || s.db == nil {
+		return false, fmt.Errorf("model admission store is not initialized")
+	}
+	if s.hasEvents.Load() {
+		return false, nil
+	}
+	empty, err := sqliteModelAdmissionEventsEmpty(ctx, s.db)
+	if err != nil {
+		return false, err
+	}
+	if !empty {
+		s.hasEvents.Store(true)
+	}
+	return empty, nil
 }
 
 func (s *SQLiteModelAdmissionStore) SettlementCapableModelAdmissionStatusesForServedModel(ctx context.Context, providerID, servedModelRef string) ([]ModelAdmissionEvent, error) {

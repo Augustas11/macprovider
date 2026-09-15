@@ -61,6 +61,9 @@ quotas:
   demo_daily_tokens_per_ip: 1000
   demo_sessions_per_ip_per_hour: 10
   account_concurrency: 4
+  # Optional lower per-account in-flight cap for auth.wholesale_account_ids.
+  # Zero keeps wholesale accounts on account_concurrency.
+  wholesale_account_concurrency: 0
   account_request_rate_per_second: 30
   demo_concurrency: 2
   signup_accounts_per_ip_per_day: 3

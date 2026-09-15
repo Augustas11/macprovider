@@ -110,6 +110,13 @@ func (s *Server) dailyQuotaForAccount(ctx context.Context, accountID string) int
 	return s.effectiveAccountDailyQuota(ctx)
 }
 
+func (s *Server) concurrencyLimitForAccount(accountID string) int {
+	if s.isWholesaleAccount(accountID) && s.cfg.Quotas.WholesaleAccountConcurrency > 0 {
+		return s.cfg.Quotas.WholesaleAccountConcurrency
+	}
+	return s.cfg.Quotas.AccountConcurrency
+}
+
 type authResult struct {
 	Bearer        *storage.KeyValidation
 	WalletSession *walletSessionAuth

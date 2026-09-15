@@ -542,7 +542,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// subject.AccountID is already "demo:<ip>" with IPv6 normalized to /64
 	// (see auth.normalizeDemoIP), so the existing per-AccountID reservation
 	// machinery keys correctly without further per-IP tracking.
-	concurrencyLimit := s.cfg.Quotas.AccountConcurrency
+	concurrencyLimit := s.concurrencyLimitForAccount(subject.AccountID)
 	concurrencyErrCode := "account_concurrency_exceeded"
 	concurrencyErrMsg := "Account concurrency limit exceeded"
 	if authn.Demo {

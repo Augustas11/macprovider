@@ -117,6 +117,15 @@ type forwardState struct {
 	// state.provider to drive their dispatch.
 	provider pool.Provider
 
+	// legacyModelAdmissionRouteGeneration is the durable provider admission
+	// generation observed by the route eligibility decision for an unbound
+	// legacy provider. The dispatch/snapshot guard rechecks this exact value
+	// so an offer that lands after selection cannot be treated as fresh legacy
+	// evidence.
+	legacyModelAdmissionRouteProviderID string
+	legacyModelAdmissionRouteGeneration uint64
+	legacyModelAdmissionRouteSet        bool
+
 	// dailyKey is the UTC YYYY-MM-DD bucket snapshot captured ONCE at
 	// request start (handleChatCompletions, derived from startedAt
 	// for atomic snapshot at the UTC-midnight boundary) and reused by

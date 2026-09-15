@@ -22,8 +22,19 @@ func TestAccountAdmissionDefaults(t *testing.T) {
 	if cfg.Quotas.AccountConcurrency != 4 {
 		t.Fatalf("AccountConcurrency=%d want 4", cfg.Quotas.AccountConcurrency)
 	}
+	if cfg.Quotas.WholesaleAccountConcurrency != 0 {
+		t.Fatalf("WholesaleAccountConcurrency=%d want 0", cfg.Quotas.WholesaleAccountConcurrency)
+	}
 	if cfg.Quotas.AccountRequestRatePerSecond != 30 {
 		t.Fatalf("AccountRequestRatePerSecond=%d want 30", cfg.Quotas.AccountRequestRatePerSecond)
+	}
+}
+
+func TestWholesaleAccountConcurrencyValidation(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.Quotas.WholesaleAccountConcurrency = -1
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "quotas.wholesale_account_concurrency must be >= 0") {
+		t.Fatalf("Validate() err=%v, want wholesale concurrency rejection", err)
 	}
 }
 
