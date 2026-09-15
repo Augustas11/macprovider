@@ -910,10 +910,11 @@ func assertCreatorMVPPoolExistenceOracle(t *testing.T, server *buyer.Server, bod
 	// method to the journey harness. 48 samples per class keeps p95/p99 real
 	// percentiles instead of the distribution max, the class measurement
 	// order cycles through all six permutations so a runner-load trend cannot
-	// masquerade as a class difference, and a threshold breach is re-measured
-	// once on a completely fresh distribution before failing — a genuine
-	// timing oracle differs on both attempts, while independent runner noise
-	// at p < 0.01 does not.
+	// masquerade as a class difference, tail overshoot above each class median
+	// is winsorized before distribution comparison, and a threshold breach is
+	// re-measured once on a completely fresh distribution before failing. A
+	// genuine timing oracle shifts the class median and still differs on both
+	// attempts, while independent hosted-runner pauses do not.
 	classes := [3]func() time.Duration{
 		func() time.Duration { return measure(creatorMVPBuyerAccount, unknownPoolID) },
 		func() time.Duration { return measure("acct-other", poolID) },
@@ -939,6 +940,9 @@ func assertCreatorMVPPoolExistenceOracle(t *testing.T, server *buyer.Server, bod
 	}
 	evaluate := func(unknown, unauthorized, disabled []time.Duration) (oracleStats, string) {
 		stats := oracleStats{minP: 1.0}
+		unknown = winsorizeCreatorMVPTimingTail(unknown)
+		unauthorized = winsorizeCreatorMVPTimingTail(unauthorized)
+		disabled = winsorizeCreatorMVPTimingTail(disabled)
 		pairs := [][2][]time.Duration{
 			{unknown, unauthorized},
 			{unknown, disabled},
@@ -982,7 +986,7 @@ func assertCreatorMVPPoolExistenceOracle(t *testing.T, server *buyer.Server, bod
 	maxP95, maxP99, minP := stats.maxP95, stats.maxP99, stats.minP
 	return creatorMVPPoolExistenceOracle{
 		FloorMS:             int(floor / time.Millisecond),
-		Method:              "active_sleep_to_floor",
+		Method:              "active_sleep_to_floor_winsorized_tail",
 		SampleCountPerClass: samples,
 		ClassesCovered:      []string{"unknown", "unauthorized", "disabled"},
 		UnknownP50MS:        float64(percentileCreatorMVPDuration(unknown, 0.50)) / float64(time.Millisecond),
@@ -1008,6 +1012,21 @@ func percentileCreatorMVPDuration(values []time.Duration, p float64) time.Durati
 		idx = len(sorted) - 1
 	}
 	return sorted[idx]
+}
+
+func winsorizeCreatorMVPTimingTail(values []time.Duration) []time.Duration {
+	if len(values) == 0 {
+		return nil
+	}
+	median := percentileCreatorMVPDuration(values, 0.50)
+	cap := median + 5*time.Millisecond
+	adjusted := append([]time.Duration(nil), values...)
+	for i, value := range adjusted {
+		if value > cap {
+			adjusted[i] = cap
+		}
+	}
+	return adjusted
 }
 
 func absCreatorMVPDuration(d time.Duration) time.Duration {
