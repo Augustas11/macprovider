@@ -232,6 +232,14 @@ func main() {
 	moneyCheckpointDB.SetMaxOpenConns(1)
 	moneyCheckpointDB.SetMaxIdleConns(1)
 	defer moneyCheckpointDB.Close()
+	routeSnapshotDB, err := sql.Open("sqlite", sqliteutil.WithManualWALCheckpointPragmas(cfg.Storage.DBPath))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "route snapshot sqlite: %v\n", err)
+		os.Exit(1)
+	}
+	routeSnapshotDB.SetMaxOpenConns(1)
+	routeSnapshotDB.SetMaxIdleConns(1)
+	defer routeSnapshotDB.Close()
 	payoutReadDB, closePayoutReadDB, err := configuredPayoutReadDB(cfg, reqLogStore)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "payout read db: %v\n", err)
@@ -305,6 +313,7 @@ func main() {
 		os.Exit(1)
 	}
 	billingStore.SetSQLiteMetrics(metricsHandle)
+	billingStore.SetRouteSnapshotDB(routeSnapshotDB)
 	// R4 fix (CODE-M2): set the route-layer flag atomic BEFORE the
 	// startup snapshot so the snapshot's canonical hash captures the
 	// initial flag state (SPEC-005 v0.4 §11.6.4 / §13.2). The
