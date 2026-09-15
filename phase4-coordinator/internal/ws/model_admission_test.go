@@ -1025,6 +1025,45 @@ func TestSQLiteModelAdmissionStorePersistsAppendOnlyStatus(t *testing.T) {
 	}
 }
 
+func TestSQLiteModelAdmissionEventsEmptyObservesExternalAppend(t *testing.T) {
+	db, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	first, err := providerws.NewSQLiteModelAdmissionStore(db.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	empty, err := first.ModelAdmissionEventsEmpty(context.Background())
+	if err != nil || !empty {
+		t.Fatalf("initial empty=%v err=%v, want true nil", empty, err)
+	}
+	second, err := providerws.NewSQLiteModelAdmissionStore(db.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	event := providerws.ModelAdmissionEvent{
+		ProviderID:               "provider-byom-external",
+		CandidateID:              stableModelAdmissionCandidateID("e"),
+		ServedModelRef:           "ollama:qwen3-8b",
+		DiscoveryDigestSHA256:    stringsOf("a", 64),
+		RequestedDisclosureClass: "non_earning_provider_asserted",
+		RequestID:                "request_external",
+		Nonce:                    "nonce_external",
+		PayloadDigestSHA256:      stringsOf("b", 64),
+		SignatureDigestSHA256:    stringsOf("c", 64),
+		CreatedAt:                time.Unix(1800000020, 0).UTC(),
+	}
+	if _, replay, err := second.AppendModelAdmissionOffer(context.Background(), event); err != nil || replay {
+		t.Fatalf("external append replay=%v err=%v", replay, err)
+	}
+	empty, err = first.ModelAdmissionEventsEmpty(context.Background())
+	if err != nil || empty {
+		t.Fatalf("post-append empty=%v err=%v, want false nil", empty, err)
+	}
+}
+
 func modelAdmissionDecisionLifecycle(t *testing.T, store providerws.ModelAdmissionStore, tag string) (providerws.ModelAdmissionEvent, providerws.ModelAdmissionEvent) {
 	t.Helper()
 	offer := providerws.ModelAdmissionEvent{
