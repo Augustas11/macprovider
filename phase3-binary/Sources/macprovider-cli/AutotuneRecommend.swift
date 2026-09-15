@@ -3851,6 +3851,24 @@ struct CachedModelArtifactResolver {
         return try verifiedExistingArtifact(for: row, at: prefetched)
     }
 
+    /// Verify a hash-qualified staging snapshot without adopting it into the
+    /// durable MacProvider artifact store.
+    func verifiedStagedArtifactPreservingExisting(
+        for row: CandidateCatalog.Row,
+        deadline: Date? = nil
+    ) throws -> VerifiedModelArtifact {
+        try HuggingFaceSnapshotDownloader.assertDeadlineActive(deadline)
+        guard let revision = row.modelRevision, let expectedSHA256 = row.modelSHA256 else {
+            throw AutotuneRecommendError.invalidArtifact("missing revision/hash")
+        }
+        let staged = prefetchSnapshotURL(
+            modelID: row.modelID,
+            revision: revision,
+            sha256: expectedSHA256
+        )
+        return try verifiedStagedArtifact(for: row, at: staged, deadline: deadline)
+    }
+
     func verifiedExistingArtifact(for row: CandidateCatalog.Row, deadline: Date? = nil) throws -> VerifiedModelArtifact {
         try HuggingFaceSnapshotDownloader.assertDeadlineActive(deadline)
         guard let revision = row.modelRevision, let expected = row.modelSHA256 else {
@@ -3924,6 +3942,69 @@ struct CachedModelArtifactResolver {
             configJSONData: durableInspection.configJSONData,
             configSHA256: durableInspection.configSHA256
         )
+    }
+
+    private func verifiedStagedArtifact(
+        for row: CandidateCatalog.Row,
+        at snapshot: URL,
+        deadline: Date? = nil
+    ) throws -> VerifiedModelArtifact {
+        try HuggingFaceSnapshotDownloader.assertDeadlineActive(deadline)
+        guard let revision = row.modelRevision, let expected = row.modelSHA256 else {
+            throw AutotuneRecommendError.invalidArtifact("missing revision/hash")
+        }
+        try validateNoSymlinkCachePath(of: snapshot, requireComplete: true)
+        var st = stat()
+        guard lstat(snapshot.path, &st) == 0,
+              (st.st_mode & S_IFMT) == S_IFDIR
+        else {
+            throw AutotuneRecommendError.invalidArtifact("missing pinned staging snapshot \(row.modelID)@\(revision)")
+        }
+        let inspection = try ModelArtifactVerifier.inspectCanonicalArtifact(directory: snapshot, deadline: deadline)
+        try HuggingFaceSnapshotDownloader.assertDeadlineActive(deadline)
+        guard inspection.sha256 == expected else {
+            throw AutotuneRecommendError.invalidArtifact(
+                "hash mismatch \(row.modelID)@\(revision) expected=\(expected) actual=\(inspection.sha256)"
+            )
+        }
+        return VerifiedModelArtifact(
+            modelArgument: URL(fileURLWithPath: snapshot.path).standardizedFileURL.path,
+            sha256: inspection.sha256,
+            configJSONData: inspection.configJSONData,
+            configSHA256: inspection.configSHA256
+        )
+    }
+
+    private func validateNoSymlinkCachePath(of url: URL, requireComplete: Bool) throws {
+        let root = hubRoot.standardizedFileURL
+        let target = url.standardizedFileURL
+        guard target.path == root.path || target.path.hasPrefix(root.path + "/") else {
+            throw AutotuneRecommendError.invalidArtifact("Hugging Face staging path escapes cache root")
+        }
+
+        var current = root
+        var rootInfo = stat()
+        guard lstat(current.path, &rootInfo) == 0,
+              (rootInfo.st_mode & S_IFMT) == S_IFDIR,
+              (rootInfo.st_mode & S_IFMT) != S_IFLNK
+        else {
+            throw AutotuneRecommendError.invalidArtifact("Hugging Face cache root is not a safe directory")
+        }
+
+        let relative = target.path.dropFirst(root.path.count).split(separator: "/").map(String.init)
+        for component in relative where !component.isEmpty {
+            current.appendPathComponent(component)
+            var info = stat()
+            if lstat(current.path, &info) != 0 {
+                if requireComplete {
+                    throw AutotuneRecommendError.invalidArtifact("Hugging Face staging path is missing")
+                }
+                return
+            }
+            if (info.st_mode & S_IFMT) == S_IFLNK {
+                throw AutotuneRecommendError.invalidArtifact("symlink in Hugging Face cache path")
+            }
+        }
     }
 
     func snapshotURL(modelID: String, revision: String) -> URL {
