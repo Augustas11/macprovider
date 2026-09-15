@@ -1643,6 +1643,95 @@ struct AutotuneStaticInputs {
         return (release.demand, release.candidate, rateCard, artifactFeed)
     }
 
+    func loadLiveArtifactFeed(
+        candidate: AutotuneStaticSelection<CandidateCatalog>,
+        baseURL: URL
+    ) async -> AutotuneStaticSelection<QualifiedArtifactFeed?> {
+        let feedURL = Self.staticFeedURL(baseURL: baseURL, name: "catalog-artifacts")
+        let sigURL = Self.staticFeedURL(baseURL: baseURL, name: "catalog-artifacts.sig")
+        let feedBytes: Data
+        do {
+            feedBytes = try await fetch(feedURL)
+        } catch {
+            return AutotuneStaticSelection(
+                value: nil,
+                selectedBytes: Data(),
+                warnings: [],
+                usedFallback: false,
+                signerKeyID: nil
+            )
+        }
+
+        let sigBytes: Data
+        do {
+            sigBytes = try await fetch(sigURL)
+        } catch {
+            return AutotuneStaticSelection(
+                value: nil,
+                selectedBytes: feedBytes,
+                warnings: [.catalogArtifactFeedIntegrityFailure],
+                usedFallback: false,
+                signerKeyID: nil
+            )
+        }
+
+        guard let sidecar = parsedSidecar(sigBytes),
+              signatureIsValid(jsonBytes: feedBytes, sidecarBytes: sigBytes, sidecar: sidecar)
+        else {
+            return AutotuneStaticSelection(
+                value: nil,
+                selectedBytes: feedBytes,
+                warnings: [.catalogArtifactFeedIntegrityFailure],
+                usedFallback: false,
+                signerKeyID: nil
+            )
+        }
+
+        let feed: ArtifactFeed
+        do {
+            feed = try Self.decodeArtifactFeed(feedBytes)
+        } catch {
+            return AutotuneStaticSelection(
+                value: nil,
+                selectedBytes: feedBytes,
+                warnings: [.catalogArtifactFeedIntegrityFailure],
+                usedFallback: false,
+                signerKeyID: sidecar.keyID
+            )
+        }
+
+        var warnings = Self.artifactFeedFreshnessWarnings(generatedAt: feed.generatedAt, now: now())
+        let qualified: QualifiedArtifactFeed?
+        do {
+            qualified = try Self.qualifyArtifactFeed(
+                feed: feed,
+                bytes: feedBytes,
+                signerKeyID: sidecar.keyID,
+                catalog: candidate.value,
+                candidateBytes: candidate.selectedBytes,
+                candidateSignerKeyID: candidate.signerKeyID
+            )
+        } catch ArtifactFeedError.integrity {
+            warnings.insert(.catalogArtifactFeedIntegrityFailure)
+            qualified = nil
+        } catch {
+            warnings.insert(.catalogArtifactFeedUpdateRequired)
+            qualified = nil
+        }
+        let usable = warnings.isDisjoint(with: [
+            .catalogArtifactFeedIntegrityFailure,
+            .catalogArtifactFeedUpdateRequired,
+            .catalogArtifactFeedStale,
+        ])
+        return AutotuneStaticSelection(
+            value: usable ? qualified : nil,
+            selectedBytes: feedBytes,
+            warnings: warnings,
+            usedFallback: false,
+            signerKeyID: sidecar.keyID
+        )
+    }
+
     func loadRateCard() async -> AutotuneStaticSelection<RateCardProjection> {
         await loadSignedStatic(
             name: "rate-card",
@@ -1652,6 +1741,12 @@ struct AutotuneStaticInputs {
             updateWarning: .rateCardUpdateRequired,
             staleWarning: .rateCardStale
         ) { try Self.decodeRateCard($0) }
+    }
+
+    static func staticFeedURL(baseURL: URL, name: String) -> URL {
+        baseURL
+            .appendingPathComponent("v1", isDirectory: true)
+            .appendingPathComponent(name, isDirectory: false)
     }
 
     func loadSignedStatic<T>(

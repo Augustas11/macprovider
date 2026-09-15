@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -87,6 +88,47 @@ func TestGenerateWholesaleStatementPaidVersusFreeSKU(t *testing.T) {
 	}
 	if stmt.USDMicro != creditsToUSDMicro(paidBilled.GrossCredits, 1) {
 		t.Fatalf("statement usd_micro=%d want paid-only %d", stmt.USDMicro, creditsToUSDMicro(paidBilled.GrossCredits, 1))
+	}
+}
+
+func TestWholesaleStatementRetriesTransientStorePressure(t *testing.T) {
+	attempts := 0
+	stmt, err := generateWholesaleStatementWithRetry(context.Background(), func(context.Context) (WholesaleStatement, error) {
+		attempts++
+		if attempts == 1 {
+			return WholesaleStatement{}, ErrRouteSnapshotStorePressure
+		}
+		return WholesaleStatement{WholesaleStatementID: "ws_ok"}, nil
+	}, func(context.Context, int) bool { return true })
+	if err != nil {
+		t.Fatalf("generateWholesaleStatementWithRetry transient err: %v", err)
+	}
+	if attempts != 2 || stmt.WholesaleStatementID != "ws_ok" {
+		t.Fatalf("attempts/statement = %d/%q, want 2/ws_ok", attempts, stmt.WholesaleStatementID)
+	}
+
+	attempts = 0
+	_, err = generateWholesaleStatementWithRetry(context.Background(), func(context.Context) (WholesaleStatement, error) {
+		attempts++
+		return WholesaleStatement{}, errors.New("permanent ledger mismatch")
+	}, func(context.Context, int) bool { return true })
+	if err == nil {
+		t.Fatal("permanent error returned nil")
+	}
+	if attempts != 1 {
+		t.Fatalf("permanent attempts=%d, want 1", attempts)
+	}
+
+	for _, err := range []error{
+		context.DeadlineExceeded,
+		ErrRouteSnapshotStorePressure,
+	} {
+		if !transientWholesaleStatementStorePressure(err) {
+			t.Fatalf("transientWholesaleStatementStorePressure(%v)=false, want true", err)
+		}
+	}
+	if transientWholesaleStatementStorePressure(errors.New("permanent ledger mismatch")) {
+		t.Fatal("permanent error classified as transient wholesale statement store pressure")
 	}
 }
 

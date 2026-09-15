@@ -45,7 +45,7 @@ func TestValidatePinnedProviderAcceptsCatalogKeyAlias(t *testing.T) {
 	}
 }
 
-func TestWriteRouteSnapshotErrorShedsTransientStorePressure(t *testing.T) {
+func TestWriteRouteSnapshotErrorShedsPreDispatchCapacityPressure(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
 		err        error
@@ -55,14 +55,26 @@ func TestWriteRouteSnapshotErrorShedsTransientStorePressure(t *testing.T) {
 		{
 			name:       "deadline",
 			err:        fmt.Errorf("insert route snapshot: %w", context.DeadlineExceeded),
-			wantStatus: http.StatusServiceUnavailable,
-			wantCode:   "no_provider_available",
+			wantStatus: http.StatusInternalServerError,
+			wantCode:   "route_snapshot_failed",
 		},
 		{
 			name:       "billing_store_pressure",
 			err:        fmt.Errorf("insert route snapshot: %w", billing.ErrRouteSnapshotStorePressure),
 			wantStatus: http.StatusServiceUnavailable,
 			wantCode:   "no_provider_available",
+		},
+		{
+			name:       "model_admission_route_drift",
+			err:        fmt.Errorf("insert route snapshot: %w", providerws.ErrModelAdmissionRouteDrift),
+			wantStatus: http.StatusServiceUnavailable,
+			wantCode:   "no_provider_available",
+		},
+		{
+			name:       "model_admission_route_stale_misconfiguration",
+			err:        fmt.Errorf("insert route snapshot: %w", providerws.ErrModelAdmissionRouteStale),
+			wantStatus: http.StatusInternalServerError,
+			wantCode:   "route_snapshot_failed",
 		},
 		{
 			name:       "semantic_integrity_error",
@@ -85,6 +97,21 @@ func TestWriteRouteSnapshotErrorShedsTransientStorePressure(t *testing.T) {
 				t.Fatalf("body=%s, want code %s", rr.Body.String(), tc.wantCode)
 			}
 		})
+	}
+}
+
+func TestRouteSnapshotGuardPressureWrapsDedicatedDeadline(t *testing.T) {
+	err := wrapRouteSnapshotGuardPressure(fmt.Errorf("admission route generation lookup: %w", context.DeadlineExceeded))
+	if !errors.Is(err, billing.ErrRouteSnapshotStorePressure) {
+		t.Fatalf("wrapped err=%v, want route snapshot store pressure", err)
+	}
+	if !routeSnapshotShouldCapacityShed(err) {
+		t.Fatalf("wrapped err=%v, want capacity shed", err)
+	}
+
+	raw := fmt.Errorf("caller deadline: %w", context.DeadlineExceeded)
+	if routeSnapshotShouldCapacityShed(raw) {
+		t.Fatalf("raw deadline must not capacity shed before route-snapshot guard wrapping")
 	}
 }
 
