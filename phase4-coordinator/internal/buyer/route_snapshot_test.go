@@ -963,6 +963,7 @@ func TestBYOMHiddenProviderDoesNotShadowModelClassAlias(t *testing.T) {
 		zerolog.Nop(),
 		time.Unix(1716768000, 0),
 		buyer.WithModelAdmissionStore(store),
+		buyer.WithModelAdmissionRouteGuard(testRouteGuard{registry: registry, store: store}),
 		buyer.WithRoutingConfig(config.RoutingConfig{
 			ModelClasses: map[string]config.ModelClassConfig{
 				"mlx-fast": {Models: []string{"model-a"}, Objective: "fast"},
@@ -1827,6 +1828,30 @@ type testRouteGuard struct {
 }
 
 func (g testRouteGuard) CompareAndInsertModelAdmissionRouteSnapshot(ctx context.Context, expect providerws.ModelAdmissionRouteExpectation, insert func() error) error {
+	if expect.CandidateID == "" {
+		generationStore, ok := g.store.(interface {
+			ModelAdmissionProviderRouteGeneration(context.Context, string) (uint64, error)
+		})
+		if !ok {
+			return providerws.ErrModelAdmissionRouteStale
+		}
+		provider, ok := g.registry.Resolve(expect.ProviderID, "")
+		if !ok || provider.ModelAdmissionCandidateID != "" || provider.ArtifactIdentity != nil {
+			return providerws.ErrModelAdmissionRouteStale
+		}
+		generation, err := generationStore.ModelAdmissionProviderRouteGeneration(ctx, expect.ProviderID)
+		if err != nil || generation != expect.ProviderRouteGeneration {
+			return providerws.ErrModelAdmissionRouteStale
+		}
+		if err := insert(); err != nil {
+			return err
+		}
+		generation, err = generationStore.ModelAdmissionProviderRouteGeneration(ctx, expect.ProviderID)
+		if err != nil || generation != expect.ProviderRouteGeneration {
+			return providerws.ErrModelAdmissionRouteStale
+		}
+		return nil
+	}
 	head, found, err := g.store.LatestModelAdmissionStatus(ctx, expect.ProviderID, expect.CandidateID)
 	if err != nil || !found || head.CoordinatorEventID != expect.CoordinatorEventID || head.State != "settlement_capable" {
 		return providerws.ErrModelAdmissionRouteStale

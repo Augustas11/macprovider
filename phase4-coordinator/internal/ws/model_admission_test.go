@@ -21,6 +21,7 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/modelidentity"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
+	"github.com/augstar/macprovider-coordinator/internal/requestlog"
 	providerws "github.com/augstar/macprovider-coordinator/internal/ws"
 )
 
@@ -1101,6 +1102,57 @@ func TestSQLiteModelAdmissionProviderRouteGenerationObservesExternalAppend(t *te
 	after, err := first.ModelAdmissionProviderRouteGeneration(context.Background(), providerID)
 	if err != nil || after <= before {
 		t.Fatalf("post-append generation=%d before=%d err=%v, want increase", after, before, err)
+	}
+}
+
+func TestSQLiteModelAdmissionReadStoreObservesWriterAppends(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "coordinator.db")
+	db, err := auth.OpenStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	writer, err := providerws.NewSQLiteModelAdmissionStore(db.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	readDB, err := requestlog.OpenStoreReadOnly(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer readDB.Close()
+	reader, err := providerws.NewSQLiteModelAdmissionReadStore(readDB.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	providerID := "provider-byom-readonly"
+	before, err := reader.ModelAdmissionProviderRouteGeneration(context.Background(), providerID)
+	if err != nil || before != 0 {
+		t.Fatalf("initial reader generation=%d err=%v, want 0 nil", before, err)
+	}
+	event := providerws.ModelAdmissionEvent{
+		ProviderID:               providerID,
+		CandidateID:              stableModelAdmissionCandidateID("r"),
+		ServedModelRef:           "ollama:qwen3-8b",
+		DiscoveryDigestSHA256:    stringsOf("a", 64),
+		RequestedDisclosureClass: "non_earning_provider_asserted",
+		RequestID:                "request_readonly_generation",
+		Nonce:                    "nonce_readonly_generation",
+		PayloadDigestSHA256:      stringsOf("b", 64),
+		SignatureDigestSHA256:    stringsOf("c", 64),
+		CreatedAt:                time.Unix(1800000022, 0).UTC(),
+	}
+	stored, replay, err := writer.AppendModelAdmissionOffer(context.Background(), event)
+	if err != nil || replay {
+		t.Fatalf("writer append replay=%v err=%v", replay, err)
+	}
+	readback, found, err := reader.LatestModelAdmissionStatus(context.Background(), providerID, event.CandidateID)
+	if err != nil || !found || readback.CoordinatorEventID != stored.CoordinatorEventID {
+		t.Fatalf("reader readback found=%v event=%+v stored=%+v err=%v", found, readback, stored, err)
+	}
+	after, err := reader.ModelAdmissionProviderRouteGeneration(context.Background(), providerID)
+	if err != nil || after <= before {
+		t.Fatalf("post-append reader generation=%d before=%d err=%v, want increase", after, before, err)
 	}
 }
 

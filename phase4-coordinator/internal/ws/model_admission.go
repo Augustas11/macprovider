@@ -639,6 +639,23 @@ ON model_admission_events(provider_id, id DESC)`); err != nil {
 	return store, nil
 }
 
+// NewSQLiteModelAdmissionReadStore opens the model-admission store on a
+// schema-ready read-only SQLite handle. It deliberately performs no DDL so
+// buyer route checks can use a separate reader without contending on the
+// request-log/billing writer connection.
+func NewSQLiteModelAdmissionReadStore(db *sql.DB) (*SQLiteModelAdmissionStore, error) {
+	if db == nil {
+		return nil, fmt.Errorf("db is required")
+	}
+	store := &SQLiteModelAdmissionStore{db: db}
+	empty, err := sqliteModelAdmissionEventsEmpty(context.Background(), db)
+	if err != nil {
+		return nil, err
+	}
+	store.hasEvents.Store(!empty)
+	return store, nil
+}
+
 func sqliteModelAdmissionEventsEmpty(ctx context.Context, db *sql.DB) (bool, error) {
 	var exists int
 	err := db.QueryRowContext(ctx, `SELECT 1 FROM model_admission_events LIMIT 1`).Scan(&exists)

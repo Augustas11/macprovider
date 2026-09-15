@@ -275,6 +275,12 @@ func main() {
 		fmt.Fprintf(os.Stderr, "BYOM offer storage: %v\n", err)
 		os.Exit(1)
 	}
+	byomRouteReadStore, closeBYOMRouteReadStore, err := configuredModelAdmissionRouteReadStore(cfg, byomOfferStore)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "BYOM route read storage: %v\n", err)
+		os.Exit(1)
+	}
+	defer closeBYOMRouteReadStore()
 	// #1248 disablement matrix, "Offer submit" row. Unset/"enabled" keeps the
 	// current behaviour; "disabled" rejects new SPEC-047 offer submissions
 	// while status readback and withdrawals stay served from the same store.
@@ -1022,7 +1028,7 @@ func main() {
 			generation := wsServer.PublishArtifactIdentitySetsWith(sets, sets == nil, commit)
 			logger.Info().Uint64("release_generation", generation).Int("identity_sets", len(sets)).Str("event", "autotune_feed_sighup_reload").Msg("release published")
 		}),
-		buyer.WithModelAdmissionStore(byomOfferStore),
+		buyer.WithModelAdmissionStore(byomRouteReadStore),
 		// SPEC-047-R001 v0.1.5: BYOM route snapshots are created by the
 		// coordinator's compare-and-insert — pre/post release-generation,
 		// head, binding and session-epoch checks around the insert.
@@ -3123,6 +3129,22 @@ func configuredPayoutReadDB(cfg config.Config, defaultStore *requestlog.Store) (
 		return nil, nil, err
 	}
 	return payoutStore.DB(), func() { _ = payoutStore.Close() }, nil
+}
+
+func configuredModelAdmissionRouteReadStore(cfg config.Config, writer *providerws.SQLiteModelAdmissionStore) (providerws.ModelAdmissionStore, func(), error) {
+	if writer == nil {
+		return nil, nil, errors.New("model admission writer store is required")
+	}
+	readStore, err := requestlog.OpenStoreReadOnly(cfg.Storage.DBPath)
+	if err != nil {
+		return nil, nil, err
+	}
+	modelAdmissionReadStore, err := providerws.NewSQLiteModelAdmissionReadStore(readStore.DB())
+	if err != nil {
+		_ = readStore.Close()
+		return nil, nil, err
+	}
+	return modelAdmissionReadStore, func() { _ = readStore.Close() }, nil
 }
 
 func sameFilePath(a, b string) bool {

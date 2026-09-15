@@ -161,6 +161,62 @@ func TestModelAdmissionRouteCompareAndInsertFailsClosedOnConcurrentAppend(t *tes
 	}
 }
 
+// R008: a legacy/no-BYOM route selected before a provider submits an offer
+// still fails closed at route-snapshot time when the append is visible on the
+// writer side. This protects buyer routing when its read-only store saw the
+// pre-commit generation but the durable writer serializes the route snapshot
+// after the offer.
+func TestModelAdmissionLegacyRouteCompareAndInsertFailsClosedOnConcurrentOffer(t *testing.T) {
+	f := newBindingFixture(t)
+	s := f.server
+	generationStore := s.modelAdmissions.(interface {
+		ModelAdmissionProviderRouteGeneration(context.Context, string) (uint64, error)
+	})
+
+	f.registerSession(t, "p-legacy", "s-legacy", "model-a", true)
+	p, _ := s.pool.Resolve("p-legacy", "")
+	routeGeneration, err := generationStore.ModelAdmissionProviderRouteGeneration(context.Background(), "p-legacy")
+	if err != nil {
+		t.Fatalf("legacy route generation: %v", err)
+	}
+	expect := ModelAdmissionRouteExpectation{
+		ProviderID:              "p-legacy",
+		BindingGeneration:       p.ModelAdmissionBindingGeneration,
+		ProviderRouteGeneration: routeGeneration,
+		SessionEpoch:            p.ModelAdmissionSessionEpoch,
+	}
+	inserted := 0
+	if err := s.CompareAndInsertModelAdmissionRouteSnapshot(context.Background(), expect, func() error { inserted++; return nil }); err != nil {
+		t.Fatalf("clean legacy compare-and-insert: %v", err)
+	}
+	err = s.CompareAndInsertModelAdmissionRouteSnapshot(context.Background(), expect, func() error {
+		inserted++
+		f.offer(t, "p-legacy", "l", "mlx_cache", map[string]string{modelidentity.SnapshotManifestV1: bindingRowHash})
+		return nil
+	})
+	if !errors.Is(err, ErrModelAdmissionRouteStale) || inserted != 2 {
+		t.Fatalf("racing legacy offer must fail closed after insert: err=%v inserted=%d", err, inserted)
+	}
+
+	f.registerSession(t, "p-legacy-pre", "s-legacy-pre", "model-a", true)
+	pre, _ := s.pool.Resolve("p-legacy-pre", "")
+	preGeneration, err := generationStore.ModelAdmissionProviderRouteGeneration(context.Background(), "p-legacy-pre")
+	if err != nil {
+		t.Fatalf("pre legacy route generation: %v", err)
+	}
+	stale := ModelAdmissionRouteExpectation{
+		ProviderID:              "p-legacy-pre",
+		BindingGeneration:       pre.ModelAdmissionBindingGeneration,
+		ProviderRouteGeneration: preGeneration,
+		SessionEpoch:            pre.ModelAdmissionSessionEpoch,
+	}
+	f.offer(t, "p-legacy-pre", "m", "mlx_cache", map[string]string{modelidentity.SnapshotManifestV1: bindingRowHash})
+	preInserted := 0
+	if err := s.CompareAndInsertModelAdmissionRouteSnapshot(context.Background(), stale, func() error { preInserted++; return nil }); !errors.Is(err, ErrModelAdmissionRouteStale) || preInserted != 0 {
+		t.Fatalf("pre-existing legacy offer must fail before insert: err=%v inserted=%d", err, preInserted)
+	}
+}
+
 // R008: same-model identity drift observed by the registry between a route
 // attempt's evaluation and its compare-and-insert — before the drift path
 // appended anything — fails the attempt closed through the session epoch.

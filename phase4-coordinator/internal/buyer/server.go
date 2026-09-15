@@ -6115,7 +6115,7 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 				if poolActive && !poolModelAllowed(req.Model, class, poolModelAllowlist) {
 					return pool.Provider{}, &routeError{status: http.StatusBadRequest, code: "pool_model_not_allowed", message: "Requested model is not allowed by the selected pool"}
 				}
-				provider, routeErr := s.validatePinnedProviderForRequest(p, req.Model, estimatedTokens, "Pinned session not available", class, poolRequiresSettlementEnforce)
+				provider, routeErr := s.validatePinnedProviderForRequestWithState(p, req.Model, estimatedTokens, "Pinned session not available", class, poolRequiresSettlementEnforce, state)
 				if routeErr != nil {
 					return provider, routeErr
 				}
@@ -6142,7 +6142,7 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 				if poolActive && !poolModelAllowed(req.Model, class, poolModelAllowlist) {
 					return pool.Provider{}, &routeError{status: http.StatusBadRequest, code: "pool_model_not_allowed", message: "Requested model is not allowed by the selected pool"}
 				}
-				provider, routeErr := s.validatePinnedProviderForRequest(p, req.Model, estimatedTokens, "Pinned provider not available", class, poolRequiresSettlementEnforce)
+				provider, routeErr := s.validatePinnedProviderForRequestWithState(p, req.Model, estimatedTokens, "Pinned provider not available", class, poolRequiresSettlementEnforce, state)
 				if routeErr != nil {
 					return provider, routeErr
 				}
@@ -6164,6 +6164,7 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 	}
 	checker := &eligibilityCtx{
 		s:                 s,
+		state:             state,
 		model:             req.Model,
 		class:             class,
 		estimatedTokens:   estimatedTokens,
@@ -6301,6 +6302,7 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 		provider, routeErr := s.selectReservedProvider(candidate, req.Model, requestID, estimatedTokens, state)
 		if routeErr == nil {
 			if state != nil {
+				checker.rememberSelectedProvider(provider)
 				state.stickyResult = stickyResult
 				state.stickyMissReason = stickyMissReason
 				if stickyResult == "hit" && provider.ProviderID != candidates[0].ProviderID {
@@ -7013,10 +7015,15 @@ func (s *Server) internalBearerAuthorizedFull(headers http.Header, remoteAddr, p
 }
 
 func (s *Server) validatePinnedProviderForRequest(p pool.Provider, model string, estimatedTokens int, unavailableMessage string, class *config.ModelClassConfig, poolRequiresSettlementEnforce bool) (pool.Provider, *routeError) {
+	return s.validatePinnedProviderForRequestWithState(p, model, estimatedTokens, unavailableMessage, class, poolRequiresSettlementEnforce, nil)
+}
+
+func (s *Server) validatePinnedProviderForRequestWithState(p pool.Provider, model string, estimatedTokens int, unavailableMessage string, class *config.ModelClassConfig, poolRequiresSettlementEnforce bool, state *forwardState) (pool.Provider, *routeError) {
 	if !s.providerMatchesRequest(p, model, class) {
 		return pool.Provider{}, &routeError{status: http.StatusNotFound, code: "model_not_found", message: "Pinned provider serves different model"}
 	}
-	if !s.byomDefaultPaidRoutingEligible(p) {
+	byomEligibility := s.byomDefaultPaidRoutingEligibility(p)
+	if !byomEligibility.eligible {
 		return pool.Provider{}, byomNonSettlementRouteError(model)
 	}
 	// #768 self-route preflight gate. The pinned/self-route path bypasses
@@ -7060,6 +7067,7 @@ func (s *Server) validatePinnedProviderForRequest(p pool.Provider, model string,
 			typ:     "invalid_request",
 		}
 	}
+	s.rememberLegacyModelAdmissionRouteExpectation(state, p, byomEligibility)
 	return p, nil
 }
 
@@ -7224,7 +7232,11 @@ func (s *Server) pollQueuedProvider(waiter *slotWaiter, model string, class *con
 		if s.poolSettlementModeUnsatisfied(state) {
 			return pool.Provider{}, queuedProviderPoolSettlementUnsatisfied
 		}
-		if !s.providerMatchesRequest(provider, model, class) || !s.byomDefaultPaidRoutingEligible(provider) || provider.MaxContextTokens < estimatedTokens {
+		if !s.providerMatchesRequest(provider, model, class) {
+			return pool.Provider{}, queuedProviderTerminal
+		}
+		byomEligibility := s.byomDefaultPaidRoutingEligibility(provider)
+		if !byomEligibility.eligible || provider.MaxContextTokens < estimatedTokens {
 			return pool.Provider{}, queuedProviderTerminal
 		}
 		// #768 audit R1 (security+architect MEDIUM): the waiter stores only
@@ -7258,6 +7270,7 @@ func (s *Server) pollQueuedProvider(waiter *slotWaiter, model string, class *con
 		if !s.slotQueue.reserveHead(waiter, provider.SlotsFree) {
 			return pool.Provider{}, queuedProviderWait
 		}
+		s.rememberLegacyModelAdmissionRouteExpectation(state, provider, byomEligibility)
 		return provider, queuedProviderAvailable
 	}
 	return pool.Provider{}, queuedProviderTerminal
@@ -7422,6 +7435,7 @@ func (s *Server) checkQuota(provider pool.Provider) bool {
 // importing buyer-internal types. Phase C step 2 wiring.
 type eligibilityCtx struct {
 	s               *Server
+	state           *forwardState
 	model           string
 	class           *config.ModelClassConfig
 	estimatedTokens int
@@ -7454,6 +7468,8 @@ type eligibilityCtx struct {
 	// poolModelAllowlist is the selected pool's manifest request-model
 	// allowlist. Empty means no allowlist -> inert.
 	poolModelAllowlist []string
+
+	legacyModelAdmissionRouteGenerations map[string]uint64
 }
 
 // ProviderMatchesRequest combines the model/class match and the
@@ -7466,7 +7482,26 @@ func (c *eligibilityCtx) ProviderMatchesRequest(p pool.Provider) bool {
 }
 
 func (c *eligibilityCtx) ProviderBYOMSettlementEligible(p pool.Provider) bool {
-	return c.s.byomDefaultPaidRoutingEligible(p)
+	eligibility := c.s.byomDefaultPaidRoutingEligibility(p)
+	if eligibility.eligible && eligibility.hasLegacyProviderRouteGeneration {
+		if c.legacyModelAdmissionRouteGenerations == nil {
+			c.legacyModelAdmissionRouteGenerations = map[string]uint64{}
+		}
+		c.legacyModelAdmissionRouteGenerations[p.SortKey()] = eligibility.legacyProviderRouteGeneration
+	}
+	return eligibility.eligible
+}
+
+func (c *eligibilityCtx) rememberSelectedProvider(p pool.Provider) {
+	if c == nil || c.s == nil || c.state == nil {
+		return
+	}
+	generation, ok := c.legacyModelAdmissionRouteGenerations[p.SortKey()]
+	c.s.rememberLegacyModelAdmissionRouteExpectation(c.state, p, modelAdmissionPaidRoutingEligibility{
+		eligible:                         ok,
+		legacyProviderRouteGeneration:    generation,
+		hasLegacyProviderRouteGeneration: ok,
+	})
 }
 
 // ProviderMeetsModelVersionFloor delegates to the shared #768 gate. See

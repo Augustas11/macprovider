@@ -926,6 +926,11 @@ type ModelAdmissionRouteExpectation struct {
 	CandidateID        string
 	CoordinatorEventID string
 	BindingGeneration  uint64
+	// ProviderRouteGeneration is the latest model_admission_events id for
+	// this provider observed by an unbound legacy route. It is ignored for a
+	// candidate-bound BYOM route, where CoordinatorEventID is the stronger
+	// head check.
+	ProviderRouteGeneration uint64
 	// SessionEpoch is the session identity epoch the attempt evaluated
 	// (pool.Provider.ModelAdmissionSessionEpoch): identity drift the drift
 	// path has not yet appended still fails the attempt closed.
@@ -951,6 +956,9 @@ var ErrModelAdmissionRouteStale = errors.New("BYOM model admission route snapsho
 func (s *Server) CompareAndInsertModelAdmissionRouteSnapshot(ctx context.Context, expect ModelAdmissionRouteExpectation, insert func() error) error {
 	if s.modelAdmissions == nil || s.pool == nil {
 		return ErrModelAdmissionRouteStale
+	}
+	if strings.TrimSpace(expect.CandidateID) == "" {
+		return s.compareAndInsertLegacyModelAdmissionRouteSnapshot(ctx, expect, insert)
 	}
 	provider, ok := s.pool.Resolve(expect.ProviderID, "")
 	if !ok {
@@ -988,6 +996,41 @@ func (s *Server) CompareAndInsertModelAdmissionRouteSnapshot(ctx context.Context
 	if !ok || after.ModelAdmissionCandidateID != expect.CandidateID || after.ModelAdmissionCoordinatorEventID != expect.CoordinatorEventID ||
 		after.ModelAdmissionBindingGeneration != provider.ModelAdmissionBindingGeneration || after.ModelAdmissionSessionEpoch != expect.SessionEpoch ||
 		after.ModelAdmissionValidatedReleaseGeneration != generation {
+		return ErrModelAdmissionRouteStale
+	}
+	return nil
+}
+
+func (s *Server) compareAndInsertLegacyModelAdmissionRouteSnapshot(ctx context.Context, expect ModelAdmissionRouteExpectation, insert func() error) error {
+	generationStore, ok := s.modelAdmissions.(interface {
+		ModelAdmissionProviderRouteGeneration(context.Context, string) (uint64, error)
+	})
+	if !ok {
+		return ErrModelAdmissionRouteStale
+	}
+	provider, ok := s.pool.Resolve(expect.ProviderID, "")
+	if !ok || provider.ModelAdmissionCandidateID != "" || provider.ArtifactIdentity != nil ||
+		provider.ModelAdmissionSessionEpoch != expect.SessionEpoch ||
+		s.modelAdmissionSections.get(expect.ProviderID).generation.Load() != expect.BindingGeneration {
+		return ErrModelAdmissionRouteStale
+	}
+	generationOK := func() bool {
+		generation, err := generationStore.ModelAdmissionProviderRouteGeneration(ctx, expect.ProviderID)
+		return err == nil && generation == expect.ProviderRouteGeneration
+	}
+	if !generationOK() {
+		return ErrModelAdmissionRouteStale
+	}
+	if err := insert(); err != nil {
+		return err
+	}
+	if !generationOK() || s.modelAdmissionSections.get(expect.ProviderID).generation.Load() != expect.BindingGeneration {
+		return ErrModelAdmissionRouteStale
+	}
+	after, ok := s.pool.Resolve(expect.ProviderID, "")
+	if !ok || after.ModelAdmissionCandidateID != "" || after.ArtifactIdentity != nil ||
+		after.ModelAdmissionBindingGeneration != provider.ModelAdmissionBindingGeneration ||
+		after.ModelAdmissionSessionEpoch != expect.SessionEpoch {
 		return ErrModelAdmissionRouteStale
 	}
 	return nil
