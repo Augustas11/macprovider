@@ -98,6 +98,7 @@ var spec018RetryableByCode = map[string]bool{
 	"pool_settlement_mode_unsatisfied":     false, // 503, pool members exist but none satisfy enforce-mode settlement prerequisites
 	// Permanent/client errors — retrying will not help (SPEC-006 §5.2).
 	"model_not_found":                                         false,
+	"request_canceled":                                        false,
 	"context_exceeds_capacity":                                false,
 	"unsupported_content_shape":                               false,
 	"invalid_request":                                         false,
@@ -357,6 +358,8 @@ const (
 	maxRequestLogUsageTokens     = int64(10000000)
 	maxUpstreamResponseBodyBytes = int64(16 << 20)
 	requestLogWriteTimeout       = 6 * time.Second
+	// Keep pre-dispatch route snapshot pressure inside gateway retry budget.
+	routeSnapshotDispatchTimeout = 750 * time.Millisecond
 	slotQueueDefaultMaxPending   = 4
 	slotQueueDefaultDeadline     = 3 * time.Second
 	slotQueueDefaultPollInterval = 25 * time.Millisecond
@@ -5979,6 +5982,14 @@ func byomNonSettlementRouteError(model string) *routeError {
 	}
 }
 
+func requestCanceledRouteError() *routeError {
+	return &routeError{
+		status:  statusClientClosedRequest,
+		code:    "request_canceled",
+		message: "Request canceled before provider dispatch",
+	}
+}
+
 func (s *Server) selectProvider(ctx context.Context, requestID string, req chatRequest, headers http.Header, dailyKey string, state *forwardState) (pool.Provider, *routeError) {
 	return s.selectProviderExcluding(ctx, requestID, req, headers, nil, dailyKey, state)
 }
@@ -6042,7 +6053,13 @@ func (s *Server) recordBreakerFault(provider pool.Provider, fault breakerFault, 
 func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, req chatRequest, headers http.Header, excluded map[string]struct{}, dailyKey string, state *forwardState) (pool.Provider, *routeError) {
 	providers := s.pool.Snapshot()
 	estimatedTokens := estimateTokens(req.raw)
-	class := s.classForRequest(req.Model, providers)
+	admissionCtx, admissionCancel := newRouteSnapshotDispatchContext(ctx)
+	defer admissionCancel()
+	classResolution := s.classForRequestWithBYOMContext(req.Model, providers, admissionCtx)
+	if classResolution.requestCanceled {
+		return pool.Provider{}, requestCanceledRouteError()
+	}
+	class := classResolution.class
 	tier2Cfg := s.tier2Config()
 	// SPEC-042 R005: capture a single consistent membership+generation
 	// snapshot for the selected pool (nil for global). poolActive gates
@@ -6115,7 +6132,7 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 				if poolActive && !poolModelAllowed(req.Model, class, poolModelAllowlist) {
 					return pool.Provider{}, &routeError{status: http.StatusBadRequest, code: "pool_model_not_allowed", message: "Requested model is not allowed by the selected pool"}
 				}
-				provider, routeErr := s.validatePinnedProviderForRequestWithState(p, req.Model, estimatedTokens, "Pinned session not available", class, poolRequiresSettlementEnforce, state)
+				provider, routeErr := s.validatePinnedProviderForRequestWithState(p, req.Model, estimatedTokens, "Pinned session not available", class, poolRequiresSettlementEnforce, admissionCtx, state)
 				if routeErr != nil {
 					return provider, routeErr
 				}
@@ -6142,7 +6159,7 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 				if poolActive && !poolModelAllowed(req.Model, class, poolModelAllowlist) {
 					return pool.Provider{}, &routeError{status: http.StatusBadRequest, code: "pool_model_not_allowed", message: "Requested model is not allowed by the selected pool"}
 				}
-				provider, routeErr := s.validatePinnedProviderForRequestWithState(p, req.Model, estimatedTokens, "Pinned provider not available", class, poolRequiresSettlementEnforce, state)
+				provider, routeErr := s.validatePinnedProviderForRequestWithState(p, req.Model, estimatedTokens, "Pinned provider not available", class, poolRequiresSettlementEnforce, admissionCtx, state)
 				if routeErr != nil {
 					return provider, routeErr
 				}
@@ -6165,6 +6182,7 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 	checker := &eligibilityCtx{
 		s:                 s,
 		state:             state,
+		routeAdmissionCtx: admissionCtx,
 		model:             req.Model,
 		class:             class,
 		estimatedTokens:   estimatedTokens,
@@ -6194,6 +6212,12 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 	if len(candidates) == 0 {
 		if queueEligible {
 			queuedCandidates = append(queuedCandidates, s.slotQueueCandidates(providers, exSet, checker)...)
+		}
+		if checker.byomAdmissionRequestCanceled {
+			return pool.Provider{}, requestCanceledRouteError()
+		}
+		if checker.byomAdmissionStorePressure {
+			return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "no_provider_available", message: "No provider available for model " + req.Model}
 		}
 		if len(queuedCandidates) > 0 {
 			provider, routeErr, queued := s.trySelectQueuedProvider(ctx, requestID, req.Model, queuedCandidates, headers, class, dailyKey, estimatedTokens, state)
@@ -6486,15 +6510,37 @@ func stringSliceEqual(a, b []string) bool {
 }
 
 func (s *Server) classForRequest(model string, providers []pool.Provider) *config.ModelClassConfig {
+	ctx, cancel := context.WithTimeout(context.Background(), requestLogWriteTimeout)
+	defer cancel()
+	return s.classForRequestWithBYOMContext(model, providers, ctx).class
+}
+
+type modelClassResolution struct {
+	class                  *config.ModelClassConfig
+	admissionStorePressure bool
+	requestCanceled        bool
+}
+
+func (s *Server) classForRequestWithBYOMContext(model string, providers []pool.Provider, ctx context.Context) modelClassResolution {
 	for _, p := range providers {
-		if !s.byomDefaultPaidRoutingEligible(p) {
+		if !modelIDEqual(p.ModelID, model) {
 			continue
 		}
-		if modelIDEqual(p.ModelID, model) {
-			return nil
+		if s.providerSlotQueueEligible(p) {
+			return modelClassResolution{}
+		}
+		eligibility := s.byomDefaultPaidRoutingEligibilityWithContext(ctx, p)
+		if eligibility.requestCanceled {
+			return modelClassResolution{requestCanceled: true}
+		}
+		if eligibility.storePressure {
+			return modelClassResolution{admissionStorePressure: true}
+		}
+		if eligibility.eligible {
+			return modelClassResolution{}
 		}
 	}
-	return s.resolveModelClass(model)
+	return modelClassResolution{class: s.resolveModelClass(model)}
 }
 
 func (s *Server) providerMatchesRequest(provider pool.Provider, model string, class *config.ModelClassConfig) bool {
@@ -7015,15 +7061,23 @@ func (s *Server) internalBearerAuthorizedFull(headers http.Header, remoteAddr, p
 }
 
 func (s *Server) validatePinnedProviderForRequest(p pool.Provider, model string, estimatedTokens int, unavailableMessage string, class *config.ModelClassConfig, poolRequiresSettlementEnforce bool) (pool.Provider, *routeError) {
-	return s.validatePinnedProviderForRequestWithState(p, model, estimatedTokens, unavailableMessage, class, poolRequiresSettlementEnforce, nil)
+	admissionCtx, admissionCancel := newRouteSnapshotDispatchContext(context.Background())
+	defer admissionCancel()
+	return s.validatePinnedProviderForRequestWithState(p, model, estimatedTokens, unavailableMessage, class, poolRequiresSettlementEnforce, admissionCtx, nil)
 }
 
-func (s *Server) validatePinnedProviderForRequestWithState(p pool.Provider, model string, estimatedTokens int, unavailableMessage string, class *config.ModelClassConfig, poolRequiresSettlementEnforce bool, state *forwardState) (pool.Provider, *routeError) {
+func (s *Server) validatePinnedProviderForRequestWithState(p pool.Provider, model string, estimatedTokens int, unavailableMessage string, class *config.ModelClassConfig, poolRequiresSettlementEnforce bool, admissionCtx context.Context, state *forwardState) (pool.Provider, *routeError) {
 	if !s.providerMatchesRequest(p, model, class) {
 		return pool.Provider{}, &routeError{status: http.StatusNotFound, code: "model_not_found", message: "Pinned provider serves different model"}
 	}
-	byomEligibility := s.byomDefaultPaidRoutingEligibility(p)
+	byomEligibility := s.byomDefaultPaidRoutingEligibilityWithContext(admissionCtx, p)
 	if !byomEligibility.eligible {
+		if byomEligibility.requestCanceled {
+			return pool.Provider{}, requestCanceledRouteError()
+		}
+		if byomEligibility.storePressure {
+			return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "no_provider_available", message: unavailableMessage}
+		}
 		return pool.Provider{}, byomNonSettlementRouteError(model)
 	}
 	// #768 self-route preflight gate. The pinned/self-route path bypasses
@@ -7139,7 +7193,7 @@ func (s *Server) trySelectQueuedProvider(ctx context.Context, requestID, model s
 		}
 		queueSegmentStart := time.Now()
 		for {
-			provider, status := s.pollQueuedProvider(waiter, model, class, estimatedTokens, state)
+			provider, status := s.pollQueuedProviderWithContext(waitCtx, waiter, model, class, estimatedTokens, state)
 			switch status {
 			case queuedProviderAvailable:
 				s.slotQueue.leave(waiter)
@@ -7168,6 +7222,16 @@ func (s *Server) trySelectQueuedProvider(ctx context.Context, requestID, model s
 				poolSettlementUnsatisfied = true
 				tried[waiter.providerID] = struct{}{}
 				goto nextQueueCandidate
+			case queuedProviderAdmissionStorePressure:
+				s.slotQueue.leave(waiter)
+				queueWait += time.Since(queueSegmentStart)
+				state.queueWait = queueWait
+				return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "no_provider_available", message: "No provider available for model " + model}, true
+			case queuedProviderRequestCanceled:
+				s.slotQueue.leave(waiter)
+				queueWait += time.Since(queueSegmentStart)
+				state.queueWait = queueWait
+				return pool.Provider{}, requestCanceledRouteError(), true
 			default:
 			}
 			select {
@@ -7175,6 +7239,9 @@ func (s *Server) trySelectQueuedProvider(ctx context.Context, requestID, model s
 				s.slotQueue.leave(waiter)
 				queueWait += time.Since(queueSegmentStart)
 				state.queueWait = queueWait
+				if errors.Is(waitCtx.Err(), context.Canceled) {
+					return pool.Provider{}, requestCanceledRouteError(), true
+				}
 				return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "no_provider_available", message: "No provider available for model " + model}, true
 			case <-ticker.C:
 			}
@@ -7200,9 +7267,15 @@ const (
 	queuedProviderAvailable
 	queuedProviderTerminal
 	queuedProviderPoolSettlementUnsatisfied
+	queuedProviderAdmissionStorePressure
+	queuedProviderRequestCanceled
 )
 
 func (s *Server) pollQueuedProvider(waiter *slotWaiter, model string, class *config.ModelClassConfig, estimatedTokens int, state *forwardState) (pool.Provider, queuedProviderStatus) {
+	return s.pollQueuedProviderWithContext(context.Background(), waiter, model, class, estimatedTokens, state)
+}
+
+func (s *Server) pollQueuedProviderWithContext(ctx context.Context, waiter *slotWaiter, model string, class *config.ModelClassConfig, estimatedTokens int, state *forwardState) (pool.Provider, queuedProviderStatus) {
 	if !s.slotQueue.head(waiter) {
 		return pool.Provider{}, queuedProviderWait
 	}
@@ -7235,7 +7308,21 @@ func (s *Server) pollQueuedProvider(waiter *slotWaiter, model string, class *con
 		if !s.providerMatchesRequest(provider, model, class) {
 			return pool.Provider{}, queuedProviderTerminal
 		}
-		byomEligibility := s.byomDefaultPaidRoutingEligibility(provider)
+		if !provider.CapacityEligible() || provider.State != pool.StateReady || s.tier2ProviderExcluded(provider) || !s.checkQuota(provider) {
+			return pool.Provider{}, queuedProviderTerminal
+		}
+		if provider.SlotsFree <= 0 {
+			return pool.Provider{}, queuedProviderWait
+		}
+		admissionCtx, admissionCancel := newRouteSnapshotDispatchContext(ctx)
+		byomEligibility := s.byomDefaultPaidRoutingEligibilityWithContext(admissionCtx, provider)
+		admissionCancel()
+		if byomEligibility.requestCanceled {
+			return pool.Provider{}, queuedProviderRequestCanceled
+		}
+		if byomEligibility.storePressure {
+			return pool.Provider{}, queuedProviderAdmissionStorePressure
+		}
 		if !byomEligibility.eligible || provider.MaxContextTokens < estimatedTokens {
 			return pool.Provider{}, queuedProviderTerminal
 		}
@@ -7258,12 +7345,6 @@ func (s *Server) pollQueuedProvider(waiter *slotWaiter, model string, class *con
 			}
 			return pool.Provider{}, queuedProviderTerminal
 		}
-		if !provider.CapacityEligible() || provider.State != pool.StateReady || s.tier2ProviderExcluded(provider) || !s.checkQuota(provider) {
-			return pool.Provider{}, queuedProviderTerminal
-		}
-		if provider.SlotsFree <= 0 {
-			return pool.Provider{}, queuedProviderWait
-		}
 		if !provider.RoutingEligible() {
 			return pool.Provider{}, queuedProviderTerminal
 		}
@@ -7285,7 +7366,7 @@ func (s *Server) slotQueueCandidates(providers []pool.Provider, excluded routing
 		if excluded.Has(provider.SortKey()) || !s.providerSlotQueueEligible(provider) {
 			continue
 		}
-		if !s.providerMatchesRequest(provider, checker.model, checker.class) || !s.byomDefaultPaidRoutingEligible(provider) || !checker.ProviderContextSufficient(provider) {
+		if !s.providerMatchesRequest(provider, checker.model, checker.class) || !checker.ProviderContextSufficient(provider) {
 			continue
 		}
 		// SPEC-042 R005: the slot queue re-derives the routing gate by hand,
@@ -7434,12 +7515,15 @@ func (s *Server) checkQuota(provider pool.Provider) bool {
 // can apply SPEC-002 + SPEC-004 FR-SR-18 composition gates without
 // importing buyer-internal types. Phase C step 2 wiring.
 type eligibilityCtx struct {
-	s               *Server
-	state           *forwardState
-	model           string
-	class           *config.ModelClassConfig
-	estimatedTokens int
-	tier2Cfg        config.Tier2Config
+	s                            *Server
+	state                        *forwardState
+	routeAdmissionCtx            context.Context
+	byomAdmissionStorePressure   bool
+	byomAdmissionRequestCanceled bool
+	model                        string
+	class                        *config.ModelClassConfig
+	estimatedTokens              int
+	tier2Cfg                     config.Tier2Config
 	// settlementEnforce is snapshotted ONCE at checker construction
 	// (like tier2Cfg) so the EligibilityChecker contract "config
 	// snapshots MUST NOT change mid-loop" holds across the per-provider
@@ -7482,7 +7566,13 @@ func (c *eligibilityCtx) ProviderMatchesRequest(p pool.Provider) bool {
 }
 
 func (c *eligibilityCtx) ProviderBYOMSettlementEligible(p pool.Provider) bool {
-	eligibility := c.s.byomDefaultPaidRoutingEligibility(p)
+	eligibility := c.s.byomDefaultPaidRoutingEligibilityWithContext(c.routeAdmissionCtx, p)
+	if eligibility.requestCanceled {
+		c.byomAdmissionRequestCanceled = true
+	}
+	if eligibility.storePressure {
+		c.byomAdmissionStorePressure = c.byomAdmissionStorePressure || c.pressuredProviderWouldDispatch(p)
+	}
 	if eligibility.eligible && eligibility.hasLegacyProviderRouteGeneration {
 		if c.legacyModelAdmissionRouteGenerations == nil {
 			c.legacyModelAdmissionRouteGenerations = map[string]uint64{}
@@ -7490,6 +7580,16 @@ func (c *eligibilityCtx) ProviderBYOMSettlementEligible(p pool.Provider) bool {
 		c.legacyModelAdmissionRouteGenerations[p.SortKey()] = eligibility.legacyProviderRouteGeneration
 	}
 	return eligibility.eligible
+}
+
+func (c *eligibilityCtx) pressuredProviderWouldDispatch(p pool.Provider) bool {
+	if !c.ProviderMeetsModelVersionFloor(p) || !c.ProviderHasSettlementReceiptKey(p) || !c.ProviderContextSufficient(p) {
+		return false
+	}
+	if reason, _ := c.Tier2Decision(p); reason != 0 {
+		return false
+	}
+	return c.QuotaPermits(p)
 }
 
 func (c *eligibilityCtx) rememberSelectedProvider(p pool.Provider) {

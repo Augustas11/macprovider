@@ -420,11 +420,23 @@ func TestAdminRateLimitRunsAfterAuthentication(t *testing.T) {
 
 func TestUnknownAdminLedgerPathRequiresAuthAndAuthenticatedRequestsConsumeLimiter(t *testing.T) {
 	_, store := newRequestAndBillingStores(t)
-	handler := store.Handlers("operator", fakeTokens{}, true, 60)
+	bucket := newAdminRateLimiter()
+	now := time.Unix(1_700_000_000, 0)
+	bucket.now = func() time.Time { return now }
+	bucket.last = now
+	ledgerHandler := http.HandlerFunc((&handler{
+		store:                   store,
+		operatorKey:             "operator",
+		tokenStore:              fakeTokens{},
+		requireProviderTokens:   true,
+		earningsRateLimitPerMin: 60,
+		lastEarnings:            map[string][]time.Time{},
+		adminBucket:             bucket,
+	}).serveHTTP)
 
 	req := httptest.NewRequest(http.MethodGet, "/admin/ledger/not-a-route", nil)
 	w := httptest.NewRecorder()
-	handler.ServeHTTP(w, req)
+	ledgerHandler.ServeHTTP(w, req)
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("unauth status=%d body=%s want 403", w.Code, w.Body.String())
 	}
@@ -433,7 +445,7 @@ func TestUnknownAdminLedgerPathRequiresAuthAndAuthenticatedRequestsConsumeLimite
 		req := httptest.NewRequest(http.MethodGet, "/admin/ledger/not-a-route", nil)
 		req.Header.Set("Authorization", "Bearer operator")
 		w := httptest.NewRecorder()
-		handler.ServeHTTP(w, req)
+		ledgerHandler.ServeHTTP(w, req)
 		if w.Code != http.StatusNotFound {
 			t.Fatalf("auth unknown request %d status=%d body=%s want 404", i, w.Code, w.Body.String())
 		}
@@ -441,7 +453,7 @@ func TestUnknownAdminLedgerPathRequiresAuthAndAuthenticatedRequestsConsumeLimite
 	req = httptest.NewRequest(http.MethodGet, "/admin/ledger/not-a-route", nil)
 	req.Header.Set("Authorization", "Bearer operator")
 	w = httptest.NewRecorder()
-	handler.ServeHTTP(w, req)
+	ledgerHandler.ServeHTTP(w, req)
 	if w.Code != http.StatusTooManyRequests {
 		t.Fatalf("post-drain status=%d body=%s want 429", w.Code, w.Body.String())
 	}
