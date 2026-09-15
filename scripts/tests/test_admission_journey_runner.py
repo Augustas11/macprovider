@@ -282,7 +282,12 @@ class FakeRig:
             assert "offer_submitted" in ADMISSION_ALLOWED_NEXT_STATES.get(current, frozenset({"offer_submitted"})), f"fake: illegal offer from {current}"
             event = self._set(ref, "offer_submitted")
             self._set(ref, "sandbox_probe_only", "synthetic_probe_required")
-            return {"schema": "model_admission_offer_submit.v1", "admission_state": "offer_submitted", "admission_state_source": "coordinator", "coordinator_event_id": event}
+            # `models offer submit` prints the coordinator status readback
+            # (BYOMAdmissionStatusWire -> model_admission_status.v1), not the
+            # model_admission_offer_submit.v1 request-package schema it signs and
+            # sends. Model the command's stdout contract, not the wire request.
+            return {"schema": "model_admission_status.v1", "generated_at": NOW, "cli_version": CLI_VERSION,
+                    "admission_state": "offer_submitted", "admission_state_source": "coordinator", "coordinator_event_id": event}
         if cmd == ["models", "admission", "status"]:
             return self._status_doc(args[3])
         if cmd == ["models", "admission", "withdraw"]:
