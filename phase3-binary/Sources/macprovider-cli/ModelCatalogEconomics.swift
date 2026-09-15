@@ -360,6 +360,17 @@ struct ModelCatalogEconomicsV2Wire: Encodable, Equatable, Sendable {
             self.unavailableReason = v1.unavailableReason ?? "action_unavailable"
         }
 
+        init(_ privateAction: ModelPreparationAction) {
+            self.available = privateAction.available
+            self.requiresConfirmation = privateAction.requiresConfirmation
+            self.transactionKind = privateAction.transactionKind?.rawValue
+            self.transactionID = privateAction.transactionID
+            self.actionTimeoutSeconds = privateAction.actionTimeoutSeconds
+            self.estimatedBytes = privateAction.estimatedBytes
+            self.artifactIdentityDigest = privateAction.artifactIdentityDigest
+            self.unavailableReason = privateAction.unavailableReason
+        }
+
         func encode(to encoder: Encoder) throws {
             var container = encoder.container(keyedBy: CodingKeys.self)
             try container.encode(available, forKey: .available)
@@ -436,20 +447,24 @@ struct ModelCatalogEconomicsV2Wire: Encodable, Equatable, Sendable {
             case managedBudgetSource = "managed_budget_source"
         }
 
-        static let unavailable = Storage(
-            schema: "model_catalog_storage.v1",
-            managedV3PublishedBytes: nil,
-            managedV3ReclaimableBytes: nil,
-            managedV3ObjectCount: nil,
-            configuredLegacyProtectedBytes: nil,
-            configuredLegacyOtherDeviceBytes: nil,
-            managedBudgetChargeBytes: nil,
-            availableManagedBudgetBytes: nil,
-            globalManagedBudgetBytes: 0,
-            configuredLegacyAccountingState: "unavailable",
-            managedV3OverflowDetected: false,
-            managedBudgetSource: "default"
-        )
+        static let unavailable = unavailableStorage()
+
+        static func unavailableStorage(overflowDetected: Bool = false) -> Storage {
+            Storage(
+                schema: "model_catalog_storage.v1",
+                managedV3PublishedBytes: nil,
+                managedV3ReclaimableBytes: nil,
+                managedV3ObjectCount: nil,
+                configuredLegacyProtectedBytes: nil,
+                configuredLegacyOtherDeviceBytes: nil,
+                managedBudgetChargeBytes: nil,
+                availableManagedBudgetBytes: nil,
+                globalManagedBudgetBytes: 0,
+                configuredLegacyAccountingState: "unavailable",
+                managedV3OverflowDetected: overflowDetected,
+                managedBudgetSource: "default"
+            )
+        }
 
         func encode(to encoder: Encoder) throws {
             var container = encoder.container(keyedBy: CodingKeys.self)
@@ -660,14 +675,20 @@ struct ModelCatalogEconomicsV2Wire: Encodable, Equatable, Sendable {
         case warnings
     }
 
-    init(v1: ModelCatalogEconomicsWire, rows: [Row], warnings: [String]) {
+    init(
+        v1: ModelCatalogEconomicsWire,
+        rows: [Row],
+        storage: Storage = .unavailable,
+        cleanupTargets: [CleanupTarget] = [],
+        warnings: [String]
+    ) {
         self.schema = "model_catalog_economics.v2"
         self.generatedAt = v1.generatedAt
         self.projectionSequence = v1.projectionSequence
         self.source = v1.source
-        self.storage = .unavailable
+        self.storage = storage
         self.rows = rows
-        self.cleanupTargets = []
+        self.cleanupTargets = cleanupTargets
         self.warnings = warnings
     }
 }
@@ -691,6 +712,91 @@ final class ModelCatalogEconomicsProcessState: @unchecked Sendable {
 struct ModelCatalogEconomicsBuilder {
     static let protocolVersion = "1"
     static let rateCardMaxAgeSeconds = 604_800
+
+    struct PrivateStorageBudget: Equatable, Sendable {
+        let globalManagedBudgetBytes: Int64
+        let managedBudgetSource = "default"
+
+        private init(globalManagedBudgetBytes: Int64) {
+            self.globalManagedBudgetBytes = globalManagedBudgetBytes
+        }
+
+        static func defaultBudget(volumeCapacityBytes: Int64) -> PrivateStorageBudget? {
+            guard volumeCapacityBytes > 0 else { return nil }
+            let quotient = volumeCapacityBytes / 100
+            let remainder = volumeCapacityBytes % 100
+            let multipliedQuotient = quotient.multipliedReportingOverflow(by: 70)
+            guard !multipliedQuotient.overflow else { return nil }
+            let multipliedRemainder = remainder * 70
+            let computed = multipliedQuotient.partialValue.addingReportingOverflow(multipliedRemainder / 100)
+            guard !computed.overflow else { return nil }
+            let capped = min(Int64(ModelPreparationContracts.maxEstimatedBytes), computed.partialValue)
+            guard capped > 0, capped <= ModelPreparationContracts.maxJavaScriptSafeInteger else { return nil }
+            return PrivateStorageBudget(globalManagedBudgetBytes: capped)
+        }
+    }
+
+    struct PrivateStorageSnapshot: Equatable, Sendable {
+        let inventory: ModelPreparationInventoryRecord?
+        let budget: PrivateStorageBudget?
+        let overflowDetected: Bool
+
+        fileprivate init(
+            inventory: ModelPreparationInventoryRecord?,
+            budget: PrivateStorageBudget?,
+            overflowDetected: Bool
+        ) {
+            self.inventory = inventory
+            self.budget = budget
+            self.overflowDetected = overflowDetected
+        }
+
+        static func unavailable(overflowDetected: Bool = false) -> PrivateStorageSnapshot {
+            PrivateStorageSnapshot(inventory: nil, budget: nil, overflowDetected: overflowDetected)
+        }
+    }
+
+    static func loadPrivateStorageSnapshot(
+        store: ModelPreparationPrivateStore,
+        rootLocator: ModelPreparationRootLocator,
+        volumeCapacityBytes: Int64,
+        overflowDetected: Bool = false
+    ) -> PrivateStorageSnapshot {
+        if overflowDetected { return .unavailable(overflowDetected: true) }
+        do {
+            let payload = try store.readRecord(kind: .publishedInventory, rootLocator: rootLocator)
+            return loadPrivateStorageSnapshotPayload(
+                payload,
+                rootLocator: rootLocator,
+                volumeCapacityBytes: volumeCapacityBytes
+            )
+        } catch {
+            return .unavailable()
+        }
+    }
+
+    private static func loadPrivateStorageSnapshotPayload(
+        _ payload: Data?,
+        rootLocator: ModelPreparationRootLocator,
+        volumeCapacityBytes: Int64
+    ) -> PrivateStorageSnapshot {
+        guard let budget = PrivateStorageBudget.defaultBudget(volumeCapacityBytes: volumeCapacityBytes),
+              let payload
+        else {
+            return .unavailable()
+        }
+        do {
+            let inventory = try ModelPreparationContracts.decode(
+                ModelPreparationInventoryRecord.self,
+                from: payload,
+                maxBytes: ModelPreparationContracts.inventoryMaxBytes
+            )
+            guard inventory.root == rootLocator else { return .unavailable() }
+            return PrivateStorageSnapshot(inventory: inventory, budget: budget, overflowDetected: false)
+        } catch {
+            return .unavailable()
+        }
+    }
 
     static func makeProjection(
         generatedAt: Date = Date(),
@@ -780,7 +886,8 @@ struct ModelCatalogEconomicsBuilder {
         admissionStatuses: [String: BYOMAdmissionStatusWire],
         demand: AutotuneStaticSelection<DemandRank>,
         candidateCatalog: AutotuneStaticSelection<CandidateCatalog>,
-        rateCard: AutotuneStaticSelection<RateCardProjection>
+        rateCard: AutotuneStaticSelection<RateCardProjection>,
+        privateStorage: PrivateStorageSnapshot? = nil
     ) -> ModelCatalogEconomicsV2Wire {
         let v1Document = makeProjection(
             generatedAt: generatedAt,
@@ -862,10 +969,116 @@ struct ModelCatalogEconomicsBuilder {
             )
             return ModelCatalogEconomicsV2Wire.Row(v1: row, candidate: candidate, binding: binding, guidance: candidate.providerGuidance)
         }
-        return ModelCatalogEconomicsV2Wire(v1: v1, rows: rows, warnings: v1.warnings)
+        let storageProjection = makePrivateStorageProjection(privateStorage)
+        return ModelCatalogEconomicsV2Wire(
+            v1: v1,
+            rows: rows,
+            storage: storageProjection.storage,
+            cleanupTargets: storageProjection.cleanupTargets,
+            warnings: v1.warnings
+        )
     }
 
     private static let v2SourceFreshnessSeconds: TimeInterval = 300
+
+    private static func makePrivateStorageProjection(
+        _ snapshot: PrivateStorageSnapshot?
+    ) -> (storage: ModelCatalogEconomicsV2Wire.Storage, cleanupTargets: [ModelCatalogEconomicsV2Wire.CleanupTarget]) {
+        guard let snapshot else { return (.unavailable, []) }
+        if snapshot.overflowDetected { return (.unavailableStorage(overflowDetected: true), []) }
+        guard let inventory = snapshot.inventory, let budget = snapshot.budget else { return (.unavailable, []) }
+
+        do {
+            let targets = try inventory.targets.map { try v2CleanupTarget(from: $0) }
+            guard targets.map(\.artifactIdentityDigest) == targets.map(\.artifactIdentityDigest).sorted() else {
+                return (.unavailable, [])
+            }
+            var publishedBytes: Int64 = 0
+            var reclaimableBytes: Int64 = 0
+            for target in targets {
+                publishedBytes = try checkedAdd(publishedBytes, target.estimatedBytes)
+                if target.keepSetStatus == ModelPreparationKeepSetStatus.reclaimable.rawValue {
+                    reclaimableBytes = try checkedAdd(reclaimableBytes, target.estimatedBytes)
+                }
+            }
+            try ModelPreparationContracts.requireNonNegativeSafeInteger(targets.count, field: "managed_v3_object_count")
+            let chargeBytes = publishedBytes
+            let availableBudget = max(0, budget.globalManagedBudgetBytes - chargeBytes)
+            let storage = ModelCatalogEconomicsV2Wire.Storage(
+                schema: "model_catalog_storage.v1",
+                managedV3PublishedBytes: publishedBytes,
+                managedV3ReclaimableBytes: reclaimableBytes,
+                managedV3ObjectCount: targets.count,
+                configuredLegacyProtectedBytes: 0,
+                configuredLegacyOtherDeviceBytes: 0,
+                managedBudgetChargeBytes: chargeBytes,
+                availableManagedBudgetBytes: availableBudget,
+                globalManagedBudgetBytes: budget.globalManagedBudgetBytes,
+                configuredLegacyAccountingState: "not_configured",
+                managedV3OverflowDetected: false,
+                managedBudgetSource: budget.managedBudgetSource
+            )
+            return (storage, targets)
+        } catch {
+            return (.unavailable, [])
+        }
+    }
+
+    private static func v2CleanupTarget(from target: ModelPreparationCleanupTarget) throws -> ModelCatalogEconomicsV2Wire.CleanupTarget {
+        try ModelPreparationContracts.requireHex64(target.artifactIdentityDigest, field: "artifact_identity_digest")
+        try ModelPreparationContracts.requireHex64(target.rootIdentityDigest, field: "root_identity_digest")
+        try ModelPreparationContracts.requireHex64(target.receiptSHA256, field: "receipt_sha256")
+        try ModelPreparationContracts.requireNonNegativeSafeInteger(target.estimatedBytes, field: "estimated_bytes")
+        try ModelPreparationContracts.requireSafeString(target.eventModelKey, field: "event_model_key")
+        switch target.keepSetStatus {
+        case .reclaimable:
+            try ModelPreparationContracts.validateCleanupBinding(rowAction: target.cleanup, target: target)
+            guard target.cleanup.available,
+                  target.cleanup.transactionKind == .cleanupPublishedArtifact,
+                  target.cleanup.artifactIdentityDigest == target.artifactIdentityDigest,
+                  target.cleanup.estimatedBytes == target.estimatedBytes,
+                  target.protectedReason == nil
+            else {
+                throw ModelPreparationContractError.malformed("reclaimable cleanup")
+            }
+        case .protected:
+            guard let protectedReason = target.protectedReason else {
+                throw ModelPreparationContractError.malformed("protected_reason")
+            }
+            try ModelPreparationContracts.requireSafeString(protectedReason, field: "protected_reason", maxUTF8Bytes: 512)
+            guard !target.cleanup.available,
+                  target.cleanup.transactionKind == nil,
+                  target.cleanup.transactionID == nil,
+                  target.cleanup.actionTimeoutSeconds == nil,
+                  target.cleanup.estimatedBytes == nil,
+                  target.cleanup.artifactIdentityDigest == nil
+            else {
+                throw ModelPreparationContractError.malformed("protected cleanup")
+            }
+        }
+        return ModelCatalogEconomicsV2Wire.CleanupTarget(
+            artifactIdentityDigest: target.artifactIdentityDigest,
+            displayModelID: target.displayModelID,
+            modelRevision: target.modelRevision,
+            artifactID: target.artifactID,
+            releaseID: target.releaseID,
+            modelKey: target.modelKey,
+            eventModelKey: target.eventModelKey,
+            rootIdentityDigest: target.rootIdentityDigest,
+            receiptSHA256: target.receiptSHA256,
+            estimatedBytes: target.estimatedBytes,
+            keepSetStatus: target.keepSetStatus.rawValue,
+            protectedReason: target.protectedReason,
+            cleanup: ModelCatalogEconomicsV2Wire.Action(target.cleanup)
+        )
+    }
+
+    private static func checkedAdd(_ lhs: Int64, _ rhs: Int64) throws -> Int64 {
+        let result = lhs.addingReportingOverflow(rhs)
+        guard !result.overflow else { throw ModelPreparationContractError.malformed("integer overflow") }
+        try ModelPreparationContracts.requireNonNegativeSafeInteger(result.partialValue, field: "sum")
+        return result.partialValue
+    }
 
     private static func coordinatorStatusBinds(
         _ status: BYOMAdmissionStatusWire,
