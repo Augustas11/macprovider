@@ -3142,6 +3142,7 @@ func (s *Server) forwardHTTPSequence(
 					cancelAttempt()
 					return cancelled, true
 				}
+				s.reconcileForwardedSlotAvailable(state)
 				w.WriteHeader(http.StatusOK)
 				s.stickyStore(r.Header, state.provider, req.Model)
 				_, _ = w.Write(respBody)
@@ -7308,7 +7309,13 @@ func (s *Server) pollQueuedProviderWithContext(ctx context.Context, waiter *slot
 		if !s.providerMatchesRequest(provider, model, class) {
 			return pool.Provider{}, queuedProviderTerminal
 		}
-		if !provider.CapacityEligible() || provider.State != pool.StateReady || s.tier2ProviderExcluded(provider) || !s.checkQuota(provider) {
+		if !provider.CapacityEligible() || s.tier2ProviderExcluded(provider) || !s.checkQuota(provider) {
+			return pool.Provider{}, queuedProviderTerminal
+		}
+		if provider.State != pool.StateReady {
+			if provider.State == pool.StateBusy && provider.SlotsFree <= 0 {
+				return pool.Provider{}, queuedProviderWait
+			}
 			return pool.Provider{}, queuedProviderTerminal
 		}
 		if provider.SlotsFree <= 0 {
@@ -7429,7 +7436,10 @@ func (s *Server) splitQueuedCandidates(candidates []pool.Provider) ([]pool.Provi
 }
 
 func (s *Server) providerSlotQueueEligible(provider pool.Provider) bool {
-	return provider.CapacityEligible() && provider.State == pool.StateReady && provider.SlotsTotal > 0 && provider.SlotsFree == 0
+	return provider.CapacityEligible() &&
+		(provider.State == pool.StateReady || provider.State == pool.StateBusy) &&
+		provider.SlotsTotal > 0 &&
+		provider.SlotsFree == 0
 }
 
 func (s *Server) releaseQueuedSlotReservation(state *forwardState) {
@@ -7438,6 +7448,27 @@ func (s *Server) releaseQueuedSlotReservation(state *forwardState) {
 	}
 	s.slotQueue.releaseReservation(state.queuedSlotProviderID)
 	state.queuedSlotProviderID = ""
+}
+
+func (s *Server) reconcileForwardedSlotAvailable(state *forwardState) {
+	if s == nil || s.pool == nil || state == nil {
+		return
+	}
+	provider := state.provider
+	if provider.ProviderID == "" || provider.AssignedID == "" || provider.SlotsTotal <= 0 {
+		return
+	}
+	if !state.slotReservationsEnabled || state.queuedSlotProviderID != provider.ProviderID {
+		return
+	}
+	slotsFree := provider.SlotsFree
+	if slotsFree <= 0 {
+		slotsFree = 1
+	}
+	if slotsFree > provider.SlotsTotal {
+		slotsFree = provider.SlotsTotal
+	}
+	s.pool.MarkForwardedSlotAvailable(provider.ProviderID, provider.AssignedID, slotsFree)
 }
 
 func validatePinnedProvider(p pool.Provider, model string, estimatedTokens int, unavailableMessage string) (pool.Provider, *routeError) {

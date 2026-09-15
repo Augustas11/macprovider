@@ -7993,6 +7993,63 @@ func TestSlotQueueWaitsForReadyProviderCapacity(t *testing.T) {
 	}
 }
 
+func TestHTTPSuccessReconcilesStaleBusyCapacity(t *testing.T) {
+	received := make(chan struct{})
+	release := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(received)
+		<-release
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"ok","choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":4,"completion_tokens":1,"total_tokens":5}}`))
+	}))
+	defer upstream.Close()
+
+	registry := pool.NewRegistry([]config.ProviderConfig{{ProviderID: "p1", EndpointURL: upstream.URL}})
+	registerWithEndpoint(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, upstream.URL, 10)
+	reqLog, dbPath := openBuyerRequestLog(t)
+	defer reqLog.Close()
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithRequestLog(reqLog),
+		buyer.WithSlotQueueConfig(4, 100*time.Millisecond, time.Millisecond),
+	)
+
+	errs := make(chan error, 1)
+	go func() {
+		rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`), http.Header{"X-Request-ID": []string{"http-reconcile"}})
+		if rr.Code != http.StatusOK {
+			errs <- fmt.Errorf("HTTP route status = %d, want 200 body=%s", rr.Code, rr.Body.String())
+			return
+		}
+		errs <- nil
+	}()
+
+	select {
+	case <-received:
+	case <-time.After(time.Second):
+		t.Fatal("upstream did not receive routed request")
+	}
+	zero := 0
+	registry.ApplyStateUpdate("p1", "s1", pool.StateUpdate{State: pool.StateBusy, SlotsFree: &zero, At: time.Now().UTC()})
+	close(release)
+	if err := <-errs; err != nil {
+		t.Fatal(err)
+	}
+	got, ok := registry.Resolve("p1", "s1")
+	if !ok {
+		t.Fatal("provider missing after HTTP success")
+	}
+	if got.State != pool.StateReady || got.SlotsFree != 1 {
+		t.Fatalf("provider after HTTP success = state %q slots_free %d, want ready/1", got.State, got.SlotsFree)
+	}
+	rows := queryAllRequestLogRowsWithQueueWait(t, dbPath)
+	if len(rows) != 1 {
+		t.Fatalf("request_log rows = %d, want 1: %#v", len(rows), rows)
+	}
+}
+
 func TestSlotQueueExpiresToNoProviderAvailable(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Fatal("upstream should not receive expired queued request")

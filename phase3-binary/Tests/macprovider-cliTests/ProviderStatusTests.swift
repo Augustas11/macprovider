@@ -420,6 +420,20 @@ final class ProviderStatusTests: XCTestCase {
         XCTAssertNotEqual(ready.transitionID, busy.transitionID)
     }
 
+    func testRequestCapacityTransitionsNotifyHandler() async {
+        let status = ProviderStatus(modelID: "m", modelLoaded: true, capacity: makeCapacity(maxConcurrency: 1))
+        let recorder = RequestCapacityReasonRecorder()
+        await status.setRequestCapacityChangeHandler { transition in
+            recorder.record(transition.reason)
+        }
+
+        let startedAt = await status.beginRequest(requestID: "request-1")
+        await status.finishRequest(startedAt: startedAt, completion: nil, failed: false, requestID: "request-1")
+        await status.setRequestCapacityChangeHandler(nil)
+
+        XCTAssertEqual(recorder.reasons, ["request_capacity_full", "request_capacity_available"])
+    }
+
     func testSpecDecodeStatusFieldsAreDisabledWithoutDraftConfig() async {
         let status = ProviderStatus(modelID: "m", modelLoaded: true, capacity: makeCapacity())
         let snap = await status.snapshot()
@@ -1302,5 +1316,20 @@ private final class TransitionRecorder: @unchecked Sendable {
     var count: Int { lock.lock(); defer { lock.unlock() }; return entries.count }
     var transitions: [(ProcessInfo.ThermalState, ProcessInfo.ThermalState)] {
         lock.lock(); defer { lock.unlock() }; return entries
+    }
+}
+
+private final class RequestCapacityReasonRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var entries: [String] = []
+
+    func record(_ reason: String) {
+        lock.lock(); defer { lock.unlock() }
+        entries.append(reason)
+    }
+
+    var reasons: [String] {
+        lock.lock(); defer { lock.unlock() }
+        return entries
     }
 }

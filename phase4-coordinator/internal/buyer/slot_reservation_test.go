@@ -144,3 +144,60 @@ func TestWholesaleSelectionUsesBoundedSlotQueue(t *testing.T) {
 		t.Fatalf("wholesale selection returned before queue deadline: elapsed=%s deadline=%s", elapsed, s.slotQueueDeadline)
 	}
 }
+
+func TestSlotQueueWaitsForBusyProviderCapacity(t *testing.T) {
+	s, registry, _ := poolIsolationServer(t)
+	provider := poolProvider("p-busy")
+	provider.State = pool.StateBusy
+	provider.SlotsFree = 0
+	registry.Register(&provider, nil)
+	s.slotQueueDeadline = 100 * time.Millisecond
+	s.slotQueuePollInterval = time.Millisecond
+
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		one := 1
+		registry.ApplyStateUpdate(provider.ProviderID, provider.AssignedID, pool.StateUpdate{
+			State:     pool.StateReady,
+			SlotsFree: &one,
+			At:        time.Now().UTC(),
+		})
+	}()
+
+	state := &forwardState{slotReservationsEnabled: true}
+	got, routeErr := s.selectProviderExcluding(context.Background(), "rid-busy", poolChatReq(""), http.Header{}, nil, "2026-09-15", state)
+	if routeErr != nil {
+		t.Fatalf("busy queued selection rejected: %+v", routeErr)
+	}
+	if got.ProviderID != provider.ProviderID {
+		t.Fatalf("busy queued provider = %q, want %q", got.ProviderID, provider.ProviderID)
+	}
+	if state.queueWait <= 0 {
+		t.Fatal("busy provider selection bypassed the bounded slot queue")
+	}
+	if state.queuedSlotProviderID != provider.ProviderID {
+		t.Fatalf("reservation provider %q, want %q", state.queuedSlotProviderID, provider.ProviderID)
+	}
+}
+
+func TestReconcileForwardedSlotAvailablePublishesReadySlot(t *testing.T) {
+	s, registry, _ := poolIsolationServer(t)
+	provider := poolProvider("p-recovered")
+	provider.State = pool.StateBusy
+	provider.SlotsFree = 0
+	registry.Register(&provider, nil)
+
+	s.reconcileForwardedSlotAvailable(&forwardState{
+		provider:                provider,
+		slotReservationsEnabled: true,
+		queuedSlotProviderID:    provider.ProviderID,
+	})
+
+	got, ok := registry.Resolve(provider.ProviderID, provider.AssignedID)
+	if !ok {
+		t.Fatal("provider missing after capacity reconciliation")
+	}
+	if got.State != pool.StateReady || got.SlotsFree != 1 {
+		t.Fatalf("provider capacity after reconciliation = state %q slots_free %d, want ready/1", got.State, got.SlotsFree)
+	}
+}

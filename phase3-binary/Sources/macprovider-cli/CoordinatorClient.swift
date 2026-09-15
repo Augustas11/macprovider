@@ -382,6 +382,10 @@ actor CoordinatorClient {
     private var acceptedAssignedProviderID: String?
     private var lastConnectionFailureDiagnostic: String?
     private var lastConnectionFailureAt: Date?
+    private var pendingRequestCapacityTransitions: [Int: RequestCapacityTransitionSnapshot] = [:]
+    private var nextRequestCapacityTransitionSequence: Int?
+    private var sendingRequestCapacityTransitions = false
+    private var requestCapacityTransitionGeneration = 0
 
     init?(
         config: AppConfig,
@@ -663,6 +667,7 @@ actor CoordinatorClient {
         heartbeatTask?.cancel()
         heartbeatWatchdogTask?.cancel()
         swapHeartbeatTask?.cancel()
+        await clearRequestCapacityStateUpdateHandler()
         setSleepAssertionDesired(false)
         await inferenceRelay?.cancelAllAndClear()
         inferenceRelay = nil
@@ -707,6 +712,48 @@ actor CoordinatorClient {
         webSocket = nil
     }
 
+    private func installRequestCapacityStateUpdateHandler() async {
+        requestCapacityTransitionGeneration &+= 1
+        let generation = requestCapacityTransitionGeneration
+        pendingRequestCapacityTransitions.removeAll()
+        nextRequestCapacityTransitionSequence = 1
+        sendingRequestCapacityTransitions = false
+        await providerStatus.setRequestCapacityChangeHandler { [weak self] transition in
+            Task { [weak self] in
+                await self?.enqueueRequestCapacityStateUpdate(transition, generation: generation)
+            }
+        }
+    }
+
+    private func clearRequestCapacityStateUpdateHandler() async {
+        requestCapacityTransitionGeneration &+= 1
+        await providerStatus.setRequestCapacityChangeHandler(nil)
+        pendingRequestCapacityTransitions.removeAll()
+        nextRequestCapacityTransitionSequence = nil
+        sendingRequestCapacityTransitions = false
+    }
+
+    private func enqueueRequestCapacityStateUpdate(_ transition: RequestCapacityTransitionSnapshot, generation: Int) async {
+        guard generation == requestCapacityTransitionGeneration,
+              coordinatorSessionAccepted,
+              !stopped
+        else { return }
+        pendingRequestCapacityTransitions[transition.sequence] = transition
+        guard !sendingRequestCapacityTransitions else { return }
+        sendingRequestCapacityTransitions = true
+        defer { sendingRequestCapacityTransitions = false }
+        while let nextSequence = nextRequestCapacityTransitionSequence,
+              let nextTransition = pendingRequestCapacityTransitions.removeValue(forKey: nextSequence) {
+            nextRequestCapacityTransitionSequence = nextSequence + 1
+            do {
+                guard generation == requestCapacityTransitionGeneration else { return }
+                try await sendStateUpdate(transition: nextTransition, generation: generation)
+            } catch {
+                Self.keepaliveDebug("request_capacity_state_update_error error=\(error)")
+            }
+        }
+    }
+
     func sendIdlePrewarmEvent(event rawEvent: String, reason: String?) async {
         guard coordinatorSessionAccepted else {
             return
@@ -747,6 +794,7 @@ actor CoordinatorClient {
                         // selected catalog row.
                         catalogWarmSwapInvalidated = true
                         coordinatorSessionAccepted = false
+                        await clearRequestCapacityStateUpdateHandler()
                         await providerStatus.setCatalogCompatibilityConfirmed(false)
                         Self.keepaliveDebug("catalog warm swap requires model-specific re-admission")
                         closeWebSocketAfterKeepaliveFailure()
@@ -1946,6 +1994,7 @@ actor CoordinatorClient {
         webSocket?.cancel(with: .goingAway, reason: nil)
         webSocket = nil
         coordinatorSessionAccepted = false
+        await clearRequestCapacityStateUpdateHandler()
         autoupdateCoordinatorPayload = [:]
         autoupdateCoordinatorPayloadIsV2 = false
         autoupdateAssignedProviderTokenAdopted = false
@@ -3000,9 +3049,10 @@ actor CoordinatorClient {
         if !operatorPaused {
             setSleepAssertionDesired(true)
         }
-	        startHeartbeat(intervalSeconds: interval)
-	        try await sendStateUpdate(state: nil, reason: reason)
-	        if operatorPaused {
+        await installRequestCapacityStateUpdateHandler()
+        startHeartbeat(intervalSeconds: interval)
+        try await sendStateUpdate(state: nil, reason: reason)
+        if operatorPaused {
             _ = try recordLifecycleTransition(
                 to: .pausedByOperator,
                 reasonCode: "operator_pause_restored_after_admission",
@@ -5449,6 +5499,41 @@ actor CoordinatorClient {
         if coordinatorSessionAccepted {
             do {
                 try await sendDiagnosticStatus(reason: reason)
+            } catch {
+                Self.keepaliveDebug("diagnostic_status_send_error error=\(Self.sanitizedDiagnosticText(String(describing: error)))")
+            }
+        }
+    }
+
+    private func sendStateUpdate(transition: RequestCapacityTransitionSnapshot, generation: Int) async throws {
+        var payload: [String: Any] = [
+            "type": "state_update",
+            "state": transition.state.rawValue,
+            "reason": transition.reason,
+            "since": ISO8601DateFormatter().string(from: transition.observedAt),
+            "metrics_snapshot": [
+                "slots_free": transition.slotsFree,
+                "slots_total": transition.slotsTotal,
+                "requests_served_since_last": transition.requestsServedSinceLast,
+                "avg_latency_ms_since_last": nullableNumber(transition.avgLatencyMSSinceLast),
+                "throughput_tps_since_last": nullableNumber(transition.throughputTPSSinceLast),
+            ],
+        ]
+        if let event = await AutoUpdateEventStore.shared.lastWireObject() {
+            payload["last_autoupdate_event"] = event
+        }
+        payload["service_instance_id"] = RouterHandler.serviceInstanceID
+        if let supervisorEvent = SupervisorBeaconReader.lastWireObject() {
+            payload["last_supervisor_event"] = supervisorEvent
+        }
+        guard generation == requestCapacityTransitionGeneration,
+              coordinatorSessionAccepted,
+              !stopped
+        else { return }
+        try await send(payload)
+        if coordinatorSessionAccepted {
+            do {
+                try await sendDiagnosticStatus(reason: transition.reason)
             } catch {
                 Self.keepaliveDebug("diagnostic_status_send_error error=\(Self.sanitizedDiagnosticText(String(describing: error)))")
             }

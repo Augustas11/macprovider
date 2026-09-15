@@ -494,6 +494,243 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertEqual(frames[0]["estimated_wait_ms"] as? Int, 0)
     }
 
+    func testRequestCapacityTransitionsSendCoordinatorStateUpdates() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let compatibilitySetID = "Augustas11/macprovider:v1.8.3@bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let client = try await makeClient(
+            status: status,
+            recorder: recorder,
+            connectAndRunOverride: {
+                try await Task.sleep(nanoseconds: 1_000_000_000)
+            },
+            compatibilitySetIDOverride: compatibilitySetID
+        )
+        await client.start()
+        defer {
+            Task { await client.stop() }
+        }
+        let session = try Tier2ProviderSession(
+            providerID: "provider-test",
+            assignedID: "assigned-v2",
+            selectedAEAD: Tier2ProviderSession.aeadSuite,
+            keyID: "kid-test",
+            c2pKey: Data(repeating: 0x11, count: 32),
+            p2cKey: Data(repeating: 0x22, count: 32),
+            c2pNonceBase: Data(repeating: 0x33, count: 4),
+            p2cNonceBase: Data(repeating: 0x44, count: 4)
+        )
+        try await client.acceptAuthResponseForTest([
+            "type": "auth_response",
+            "version": 2,
+            "status": "accepted",
+            "assigned_id": "assigned-v2",
+            "heartbeat_interval_s": 30,
+            "compatibility_policy": "configured",
+            "accepted_compatibility_set_id": compatibilitySetID,
+            "recommended_compatibility_set_id": compatibilitySetID,
+            "tier2_session": [
+                "encrypted_leg": [
+                    "enabled": true,
+                    "alg": Tier2ProviderSession.aeadSuite,
+                    "kid": "kid-test",
+                ],
+            ],
+        ], session: session)
+        let initialFrameCount = await recorder.frames.count
+
+        let startedAtCandidate = await status.beginRequestIfAccepting(requestID: "req-capacity")
+        let startedAt = try XCTUnwrap(startedAtCandidate)
+        try await Self.waitUntil {
+            let frames = await recorder.frames.dropFirst(initialFrameCount)
+            return frames.contains { frame in
+                guard frame["type"] as? String == "state_update",
+                      frame["state"] as? String == "busy",
+                      frame["reason"] as? String == "request_capacity_full",
+                      let metrics = frame["metrics_snapshot"] as? [String: Any]
+                else { return false }
+                return metrics["slots_free"] as? Int == 0 && metrics["slots_total"] as? Int == 1
+            }
+        }
+
+        await status.finishRequest(startedAt: startedAt, completion: nil, failed: false, requestID: "req-capacity")
+        try await Self.waitUntil {
+            let frames = await recorder.frames.dropFirst(initialFrameCount)
+            return frames.contains { frame in
+                guard frame["type"] as? String == "state_update",
+                      frame["state"] as? String == "ready",
+                      frame["reason"] as? String == "request_capacity_available",
+                      let metrics = frame["metrics_snapshot"] as? [String: Any]
+                else { return false }
+                return metrics["slots_free"] as? Int == 1 && metrics["slots_total"] as? Int == 1
+            }
+        }
+        await client.stop()
+    }
+
+    func testRequestCapacityStateUpdatesKeepTransitionOrderWhenSendIsBlocked() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let gate = CapacityStateUpdateGate()
+        let compatibilitySetID = "Augustas11/macprovider:v1.8.3@bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let sendOverride: CoordinatorClient.SendOverride = { frame in
+            if frame["type"] as? String == "state_update",
+               (frame["reason"] as? String)?.hasPrefix("request_capacity_") == true {
+                await gate.waitUntilReleased()
+            }
+            await recorder.append(frame)
+        }
+        let client = try await makeClient(
+            status: status,
+            recorder: recorder,
+            connectAndRunOverride: {
+                try await Task.sleep(nanoseconds: 1_000_000_000)
+            },
+            sendOverride: sendOverride,
+            compatibilitySetIDOverride: compatibilitySetID
+        )
+        await client.start()
+        defer {
+            Task { await client.stop() }
+        }
+        let session = try Tier2ProviderSession(
+            providerID: "provider-test",
+            assignedID: "assigned-v2",
+            selectedAEAD: Tier2ProviderSession.aeadSuite,
+            keyID: "kid-test",
+            c2pKey: Data(repeating: 0x11, count: 32),
+            p2cKey: Data(repeating: 0x22, count: 32),
+            c2pNonceBase: Data(repeating: 0x33, count: 4),
+            p2cNonceBase: Data(repeating: 0x44, count: 4)
+        )
+        try await client.acceptAuthResponseForTest([
+            "type": "auth_response",
+            "version": 2,
+            "status": "accepted",
+            "assigned_id": "assigned-v2",
+            "heartbeat_interval_s": 30,
+            "compatibility_policy": "configured",
+            "accepted_compatibility_set_id": compatibilitySetID,
+            "recommended_compatibility_set_id": compatibilitySetID,
+            "tier2_session": [
+                "encrypted_leg": [
+                    "enabled": true,
+                    "alg": Tier2ProviderSession.aeadSuite,
+                    "kid": "kid-test",
+                ],
+            ],
+        ], session: session)
+        let initialFrameCount = await recorder.frames.count
+
+        let startedAtCandidate = await status.beginRequestIfAccepting(requestID: "req-capacity")
+        let startedAt = try XCTUnwrap(startedAtCandidate)
+        try await Self.waitUntil {
+            await gate.blockedCount >= 1
+        }
+        await status.finishRequest(startedAt: startedAt, completion: nil, failed: false, requestID: "req-capacity")
+        try await Task.sleep(nanoseconds: 50_000_000)
+        let frameCountBeforeRelease = await recorder.frames.count
+        XCTAssertEqual(frameCountBeforeRelease, initialFrameCount)
+
+        await gate.release()
+        try await Self.waitUntil {
+            await recorder.frames.dropFirst(initialFrameCount).count >= 2
+        }
+        let frames = await recorder.frames.dropFirst(initialFrameCount).filter { $0["type"] as? String == "state_update" }
+        XCTAssertGreaterThanOrEqual(frames.count, 2)
+        XCTAssertEqual(frames[0]["reason"] as? String, "request_capacity_full")
+        XCTAssertEqual(frames[0]["state"] as? String, "busy")
+        XCTAssertEqual((frames[0]["metrics_snapshot"] as? [String: Any])?["slots_free"] as? Int, 0)
+        XCTAssertEqual(frames[1]["reason"] as? String, "request_capacity_available")
+        XCTAssertEqual(frames[1]["state"] as? String, "ready")
+        XCTAssertEqual((frames[1]["metrics_snapshot"] as? [String: Any])?["slots_free"] as? Int, 1)
+        await client.stop()
+    }
+
+    func testRequestCapacityTransitionsIgnorePreAcceptedSequenceGaps() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let compatibilitySetID = "Augustas11/macprovider:v1.8.3@bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let client = try await makeClient(
+            status: status,
+            recorder: recorder,
+            connectAndRunOverride: {
+                try await Task.sleep(nanoseconds: 1_000_000_000)
+            },
+            compatibilitySetIDOverride: compatibilitySetID
+        )
+        await client.start()
+        defer {
+            Task { await client.stop() }
+        }
+
+        let preAcceptedStartedAtCandidate = await status.beginRequestIfAccepting(requestID: "req-pre-auth")
+        let preAcceptedStartedAt = try XCTUnwrap(preAcceptedStartedAtCandidate)
+        await status.finishRequest(startedAt: preAcceptedStartedAt, completion: nil, failed: false, requestID: "req-pre-auth")
+
+        let session = try Tier2ProviderSession(
+            providerID: "provider-test",
+            assignedID: "assigned-v2",
+            selectedAEAD: Tier2ProviderSession.aeadSuite,
+            keyID: "kid-test",
+            c2pKey: Data(repeating: 0x11, count: 32),
+            p2cKey: Data(repeating: 0x22, count: 32),
+            c2pNonceBase: Data(repeating: 0x33, count: 4),
+            p2cNonceBase: Data(repeating: 0x44, count: 4)
+        )
+        try await client.acceptAuthResponseForTest([
+            "type": "auth_response",
+            "version": 2,
+            "status": "accepted",
+            "assigned_id": "assigned-v2",
+            "heartbeat_interval_s": 30,
+            "compatibility_policy": "configured",
+            "accepted_compatibility_set_id": compatibilitySetID,
+            "recommended_compatibility_set_id": compatibilitySetID,
+            "tier2_session": [
+                "encrypted_leg": [
+                    "enabled": true,
+                    "alg": Tier2ProviderSession.aeadSuite,
+                    "kid": "kid-test",
+                ],
+            ],
+        ], session: session)
+        let initialFrameCount = await recorder.frames.count
+
+        let startedAtCandidate = await status.beginRequestIfAccepting(requestID: "req-capacity")
+        let startedAt = try XCTUnwrap(startedAtCandidate)
+        try await Self.waitUntil {
+            let frames = await recorder.frames.dropFirst(initialFrameCount)
+            return frames.contains { frame in
+                frame["type"] as? String == "state_update" &&
+                    frame["reason"] as? String == "request_capacity_full" &&
+                    frame["state"] as? String == "busy"
+            }
+        }
+        await status.finishRequest(startedAt: startedAt, completion: nil, failed: false, requestID: "req-capacity")
+        try await Self.waitUntil {
+            let frames = await recorder.frames.dropFirst(initialFrameCount)
+            return frames.contains { frame in
+                frame["type"] as? String == "state_update" &&
+                    frame["reason"] as? String == "request_capacity_available" &&
+                    frame["state"] as? String == "ready"
+            }
+        }
+        await client.stop()
+    }
+
     func testEncryptedLosslessnessProbeRejectsCarrierRequestIDMismatch() async throws {
         let recorder = CoordinatorFrameRecorder()
         let status = ProviderStatus(
@@ -6707,6 +6944,29 @@ private actor CoordinatorFrameRecorder {
 
     func append(_ frame: [String: Any]) {
         frames.append(frame)
+    }
+}
+
+private actor CapacityStateUpdateGate {
+    private(set) var blockedCount = 0
+    private var released = false
+    private var continuations: [CheckedContinuation<Void, Never>] = []
+
+    func waitUntilReleased() async {
+        if released { return }
+        blockedCount += 1
+        await withCheckedContinuation { continuation in
+            continuations.append(continuation)
+        }
+    }
+
+    func release() {
+        released = true
+        let pending = continuations
+        continuations.removeAll()
+        for continuation in pending {
+            continuation.resume()
+        }
     }
 }
 
