@@ -4,11 +4,13 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -30,6 +32,8 @@ const (
 	RouteSnapshotModeObserve         = "observe"
 	RouteSnapshotModeEnforce         = "enforce"
 	MaxPendingReceiptDeadlineSeconds = 900
+	routeSnapshotRetryInitialDelay   = 10 * time.Millisecond
+	routeSnapshotRetryMaxDelay       = 100 * time.Millisecond
 )
 
 var (
@@ -305,9 +309,18 @@ func (s *Store) InsertRouteSnapshot(ctx context.Context, snapshot RouteSnapshot)
 		return "", wrapRouteSnapshotStorePressure(err)
 	}
 	defer conn.Close()
+	if err := s.applyRouteSnapshotBusyTimeout(ctx, conn); err != nil {
+		return "", wrapRouteSnapshotStorePressure(err)
+	}
 
-	started := time.Now()
-	_, err = conn.ExecContext(ctx, `
+	hasDeadline := false
+	if _, ok := ctx.Deadline(); ok {
+		hasDeadline = true
+	}
+	attempt := 0
+	for {
+		started := time.Now()
+		_, err = conn.ExecContext(ctx, `
 INSERT INTO settlement_route_snapshots (
     account_scope, request_id, attempt_n, provider_id,
     provider_session_id, provider_generation_id, pool_id, paid_entrypoint,
@@ -333,24 +346,70 @@ INSERT INTO settlement_route_snapshots (
     ?, ?, ?, ?, ?,
     ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now')
 )`,
-		snapshot.AccountScope, snapshot.RequestID, snapshot.AttemptN, snapshot.ProviderID,
-		nullableString(snapshot.ProviderSessionID), nullableString(snapshot.ProviderGenerationID), nullString(snapshot.PoolID), snapshot.PaidEntrypoint,
-		snapshot.ProviderReceiptKeyID, snapshot.ProviderReceiptKeySource,
-		snapshot.ModelID, snapshot.ProviderReportedModelHash, snapshot.ExpectedCatalogModelHash,
-		snapshot.CatalogID, snapshot.CatalogBodyDigest, snapshot.CatalogSignatureKeyID,
-		snapshot.CatalogSignaturePubkeyFingerprint, snapshot.CatalogExpiresAtUnixMS,
-		snapshot.Spec008HashStatus, snapshot.RouteSnapshotPolicyVersion, snapshot.RouteSnapshotMode,
-		snapshot.RouteDecisionTSUnixMS, snapshot.RequestStartTSUnixMS, snapshot.PendingDeadlineSeconds,
-		snapshot.PromptHashBasis, snapshot.PromptHash,
-		boolInt(snapshot.ComputeIntegrityCaptureRequired), boolInt(snapshot.ComputeIntegritySamplingCovered), nullString(snapshot.ComputeIntegrityHardwareDigest),
-		digest, string(rendered),
-		string(canonical),
-	)
-	s.observeSQLiteWrite("route_snapshot", "route_snapshot_insert", err, time.Since(started))
-	if err != nil {
-		return "", wrapRouteSnapshotStorePressure(err)
+			snapshot.AccountScope, snapshot.RequestID, snapshot.AttemptN, snapshot.ProviderID,
+			nullableString(snapshot.ProviderSessionID), nullableString(snapshot.ProviderGenerationID), nullString(snapshot.PoolID), snapshot.PaidEntrypoint,
+			snapshot.ProviderReceiptKeyID, snapshot.ProviderReceiptKeySource,
+			snapshot.ModelID, snapshot.ProviderReportedModelHash, snapshot.ExpectedCatalogModelHash,
+			snapshot.CatalogID, snapshot.CatalogBodyDigest, snapshot.CatalogSignatureKeyID,
+			snapshot.CatalogSignaturePubkeyFingerprint, snapshot.CatalogExpiresAtUnixMS,
+			snapshot.Spec008HashStatus, snapshot.RouteSnapshotPolicyVersion, snapshot.RouteSnapshotMode,
+			snapshot.RouteDecisionTSUnixMS, snapshot.RequestStartTSUnixMS, snapshot.PendingDeadlineSeconds,
+			snapshot.PromptHashBasis, snapshot.PromptHash,
+			boolInt(snapshot.ComputeIntegrityCaptureRequired), boolInt(snapshot.ComputeIntegritySamplingCovered), nullString(snapshot.ComputeIntegrityHardwareDigest),
+			digest, string(rendered),
+			string(canonical),
+		)
+		s.observeSQLiteWrite("route_snapshot", "route_snapshot_insert", err, time.Since(started))
+		if err == nil {
+			return digest, nil
+		}
+		if !routeSnapshotStorePressure(err) {
+			return "", err
+		}
+		if !hasDeadline || !sleepRouteSnapshotRetry(ctx, attempt) {
+			return "", wrapRouteSnapshotStorePressure(err)
+		}
+		attempt++
 	}
-	return digest, nil
+}
+
+func (s *Store) applyRouteSnapshotBusyTimeout(ctx context.Context, conn *sql.Conn) error {
+	if s == nil || conn == nil {
+		return nil
+	}
+	ms := s.routeSnapshotBusyTimeoutMS.Load()
+	if ms <= 0 {
+		return nil
+	}
+	_, err := conn.ExecContext(ctx, "PRAGMA busy_timeout = "+strconv.FormatInt(ms, 10))
+	return err
+}
+
+func sleepRouteSnapshotRetry(ctx context.Context, attempt int) bool {
+	delay := routeSnapshotRetryInitialDelay
+	for i := 0; i < attempt && delay < routeSnapshotRetryMaxDelay; i++ {
+		delay *= 2
+	}
+	if delay > routeSnapshotRetryMaxDelay {
+		delay = routeSnapshotRetryMaxDelay
+	}
+	if deadline, ok := ctx.Deadline(); ok {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return false
+		}
+		if delay > remaining {
+			delay = remaining
+		}
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
 }
 
 func wrapRouteSnapshotStorePressure(err error) error {

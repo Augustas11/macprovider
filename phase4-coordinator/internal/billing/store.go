@@ -28,9 +28,10 @@ type Store struct {
 	// durable pre-dispatch route snapshots. It avoids queueing those writes
 	// behind request_log pool users while SQLite still serializes the writer
 	// lock and enforces the same WAL/synchronous pragmas.
-	routeSnapshotDB atomic.Pointer[sql.DB]
-	settlementMu    sync.RWMutex
-	settlement      SettlementConfig
+	routeSnapshotDB            atomic.Pointer[sql.DB]
+	routeSnapshotBusyTimeoutMS atomic.Int64
+	settlementMu               sync.RWMutex
+	settlement                 SettlementConfig
 	// SPEC-005 v0.4 §13.2 — billing.quarantine_resolution_force_void_enabled
 	// route-layer flag. Held as atomic.Bool so the handler reads it on
 	// every request (no re-wire of the HTTP handler on reload).
@@ -80,6 +81,21 @@ func (s *Store) SetRouteSnapshotDB(db *sql.DB) {
 		return
 	}
 	s.routeSnapshotDB.Store(db)
+}
+
+func (s *Store) SetRouteSnapshotBusyTimeout(timeout time.Duration) {
+	if s == nil {
+		return
+	}
+	if timeout <= 0 {
+		s.routeSnapshotBusyTimeoutMS.Store(0)
+		return
+	}
+	ms := timeout.Milliseconds()
+	if ms < 1 {
+		ms = 1
+	}
+	s.routeSnapshotBusyTimeoutMS.Store(ms)
 }
 
 func (s *Store) routeSnapshotHandle() *sql.DB {
