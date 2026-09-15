@@ -359,6 +359,13 @@ func wrapRouteSnapshotStorePressure(err error) error {
 	return err
 }
 
+// IsRouteSnapshotStorePressure reports whether err is transient pressure from
+// the route-snapshot persistence path. Settlement validation errors are not
+// classified as pressure.
+func IsRouteSnapshotStorePressure(err error) bool {
+	return errors.Is(err, ErrRouteSnapshotStorePressure) || routeSnapshotStorePressure(err)
+}
+
 func routeSnapshotStorePressure(err error) bool {
 	if err == nil {
 		return false

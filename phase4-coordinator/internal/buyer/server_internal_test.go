@@ -100,6 +100,21 @@ func TestWriteRouteSnapshotErrorShedsPreDispatchCapacityPressure(t *testing.T) {
 	}
 }
 
+func TestRouteSnapshotGuardPressureWrapsDedicatedDeadline(t *testing.T) {
+	err := wrapRouteSnapshotGuardPressure(fmt.Errorf("admission route generation lookup: %w", context.DeadlineExceeded))
+	if !errors.Is(err, billing.ErrRouteSnapshotStorePressure) {
+		t.Fatalf("wrapped err=%v, want route snapshot store pressure", err)
+	}
+	if !routeSnapshotShouldCapacityShed(err) {
+		t.Fatalf("wrapped err=%v, want capacity shed", err)
+	}
+
+	raw := fmt.Errorf("caller deadline: %w", context.DeadlineExceeded)
+	if routeSnapshotShouldCapacityShed(raw) {
+		t.Fatalf("raw deadline must not capacity shed before route-snapshot guard wrapping")
+	}
+}
+
 func TestProviderMatchesRequestClassMemberCatalogKeyAlias(t *testing.T) {
 	s := &Server{}
 	class := &config.ModelClassConfig{

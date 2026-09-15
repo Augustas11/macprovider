@@ -40,7 +40,7 @@ func (b *billingRecorder) recordRouteSnapshot(providerBody []byte, provider pool
 	ctx, cancel := context.WithTimeout(context.Background(), requestLogWriteTimeout)
 	defer cancel()
 	if err := b.server.verifyLegacyModelAdmissionRouteFresh(ctx, provider, b.state); err != nil {
-		return nil, err
+		return nil, wrapRouteSnapshotGuardPressure(err)
 	}
 
 	store, _, _ := b.server.billingState()
@@ -100,7 +100,7 @@ func (b *billingRecorder) recordRouteSnapshot(providerBody []byte, provider pool
 	}
 	byomBinding, err := b.server.requireBYOMRouteSnapshotBinding(ctx, provider, material)
 	if err != nil {
-		return nil, err
+		return nil, wrapRouteSnapshotGuardPressure(err)
 	}
 	// SPEC-010-R007(d): a session whose identity resolved through the feed —
 	// a GGUF member OR a secondary snapshot member — settles only with the
@@ -178,7 +178,7 @@ func (b *billingRecorder) recordRouteSnapshot(providerBody []byte, provider pool
 		digest = inserted
 		return err
 	}); err != nil {
-		return nil, err
+		return nil, wrapRouteSnapshotGuardPressure(err)
 	}
 	b.settlementAttemptN = attemptN
 	b.hasSettlementAttemptN = true
@@ -291,6 +291,16 @@ func writeRouteSnapshotError(w http.ResponseWriter, rec *billingRecorder, err er
 	// provider relayed this attempt — so the marker is present here iff no
 	// provider was billably credited earlier in this request.
 	writeError(w, http.StatusInternalServerError, "route_snapshot_failed", "Could not durably record route snapshot")
+}
+
+func wrapRouteSnapshotGuardPressure(err error) error {
+	if err == nil || errors.Is(err, billing.ErrRouteSnapshotStorePressure) {
+		return err
+	}
+	if billing.IsRouteSnapshotStorePressure(err) {
+		return fmt.Errorf("%w: %w", billing.ErrRouteSnapshotStorePressure, err)
+	}
+	return err
 }
 
 func routeSnapshotShouldCapacityShed(err error) bool {
