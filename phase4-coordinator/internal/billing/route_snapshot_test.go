@@ -279,6 +279,112 @@ func TestInsertRouteSnapshotDedicatedHandleBypassesRequestLogPoolWait(t *testing
 	}
 }
 
+func TestInsertRouteSnapshotRetriesShortSQLiteBusyUntilWriterLockClears(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "coordinator.db")
+	reqStore, err := requestlog.OpenStore(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reqStore.Close() })
+	store, err := NewStore(reqStore.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	routeSnapshotDB, err := sql.Open("sqlite", sqliteutil.WithManualWALCheckpointPragmas(dbPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	routeSnapshotDB.SetMaxOpenConns(1)
+	routeSnapshotDB.SetMaxIdleConns(1)
+	t.Cleanup(func() { _ = routeSnapshotDB.Close() })
+	store.SetRouteSnapshotDB(routeSnapshotDB)
+	store.SetRouteSnapshotBusyTimeout(10 * time.Millisecond)
+
+	lockDB, err := sql.Open("sqlite", sqliteutil.WithManualWALCheckpointPragmas(dbPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lockDB.SetMaxOpenConns(1)
+	lockDB.SetMaxIdleConns(1)
+	t.Cleanup(func() { _ = lockDB.Close() })
+	lockConn, err := lockDB.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lockConn.Close()
+	if _, err := lockConn.ExecContext(context.Background(), `BEGIN IMMEDIATE`); err != nil {
+		t.Fatal(err)
+	}
+	released := make(chan struct{})
+	go func() {
+		defer close(released)
+		time.Sleep(100 * time.Millisecond)
+		_, _ = lockConn.ExecContext(context.Background(), `ROLLBACK`)
+	}()
+
+	snapshot := testRouteSnapshot()
+	snapshot.RequestID = "req-route-snapshot-short-busy-retry"
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if _, err := store.InsertRouteSnapshot(ctx, snapshot); err != nil {
+		t.Fatalf("route snapshot insert should retry until writer lock clears: %v", err)
+	}
+	<-released
+}
+
+func TestInsertRouteSnapshotShortSQLiteBusyHonorsCallerDeadline(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "coordinator.db")
+	reqStore, err := requestlog.OpenStore(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reqStore.Close() })
+	store, err := NewStore(reqStore.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	routeSnapshotDB, err := sql.Open("sqlite", sqliteutil.WithManualWALCheckpointPragmas(dbPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	routeSnapshotDB.SetMaxOpenConns(1)
+	routeSnapshotDB.SetMaxIdleConns(1)
+	t.Cleanup(func() { _ = routeSnapshotDB.Close() })
+	store.SetRouteSnapshotDB(routeSnapshotDB)
+	store.SetRouteSnapshotBusyTimeout(10 * time.Millisecond)
+
+	lockDB, err := sql.Open("sqlite", sqliteutil.WithManualWALCheckpointPragmas(dbPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lockDB.SetMaxOpenConns(1)
+	lockDB.SetMaxIdleConns(1)
+	t.Cleanup(func() { _ = lockDB.Close() })
+	lockConn, err := lockDB.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lockConn.Close()
+	if _, err := lockConn.ExecContext(context.Background(), `BEGIN IMMEDIATE`); err != nil {
+		t.Fatal(err)
+	}
+	defer lockConn.ExecContext(context.Background(), `ROLLBACK`)
+
+	snapshot := testRouteSnapshot()
+	snapshot.RequestID = "req-route-snapshot-short-busy-deadline"
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	_, err = store.InsertRouteSnapshot(ctx, snapshot)
+	elapsed := time.Since(started)
+	if !errors.Is(err, ErrRouteSnapshotStorePressure) {
+		t.Fatalf("route snapshot insert err=%v, want store pressure", err)
+	}
+	if elapsed > time.Second {
+		t.Fatalf("route snapshot insert held dedicated conn for %s, want caller deadline not sqlite busy timeout", elapsed)
+	}
+}
+
 func TestSettlementRouteSnapshotIsImmutable(t *testing.T) {
 	_, store := newRequestAndBillingStores(t)
 	snapshot := testRouteSnapshot()

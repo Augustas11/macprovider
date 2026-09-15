@@ -314,6 +314,7 @@ func main() {
 	}
 	billingStore.SetSQLiteMetrics(metricsHandle)
 	billingStore.SetRouteSnapshotDB(routeSnapshotDB)
+	billingStore.SetRouteSnapshotBusyTimeout(50 * time.Millisecond)
 	// R4 fix (CODE-M2): set the route-layer flag atomic BEFORE the
 	// startup snapshot so the snapshot's canonical hash captures the
 	// initial flag state (SPEC-005 v0.4 §11.6.4 / §13.2). The
@@ -1397,7 +1398,7 @@ func main() {
 			Source: referralapi.SQLiteServingEvidence{Path: cfg.Storage.DBPath},
 			Store:  tokenStore,
 			Policy: referralPolicy,
-		}, logger)
+		}, moneySQLiteActivity, logger)
 		if cfg.Referrals.EnableSocialInviteBonus {
 			xClient, err := referralapi.NewXAPIClient(cfg.Referrals.XAPIBearerToken, cfg.Referrals.JoinBaseURL)
 			if err != nil {
@@ -1406,7 +1407,7 @@ func main() {
 			advocacy.PostVerifier = xClient
 			referralChallenge = advocacy.HandleChallenge
 			referralVerify = advocacy.HandleVerify
-			startSocialVerificationPromotionReconciler(shutdownCtx, tokenStore, referralPolicy, xClient, logger)
+			startSocialVerificationPromotionReconciler(shutdownCtx, tokenStore, referralPolicy, xClient, moneySQLiteActivity, logger)
 		}
 		logger.Info().
 			Bool("social_invite_bonus", cfg.Referrals.EnableSocialInviteBonus).
@@ -1423,7 +1424,7 @@ func main() {
 	startSettlementStartupScan(context.Background(), billingStore, cfg.Settlement, time.Now().UTC(), logger)
 	billingStore.StartNightlyReconcile(shutdownCtx, cfg.Settlement)
 	billingStore.StartWeeklySettlement(shutdownCtx, cfg.Settlement)
-	flushSettlementReceiptAuditOutbox := startSettlementReceiptAuditOutboxDrainer(shutdownCtx, billingStore, settlementReceiptAuditStore, cfg.Storage.AuditLogRetentionDays, metricsHandle, logger)
+	flushSettlementReceiptAuditOutbox := startSettlementReceiptAuditOutboxDrainer(shutdownCtx, billingStore, settlementReceiptAuditStore, cfg.Storage.AuditLogRetentionDays, metricsHandle, moneySQLiteActivity, logger)
 	startRequestLogRetentionPruner(shutdownCtx, reqLogStore, cfg.Storage.RequestLogRetentionDays, cfg.Storage.RequestLogPruneOnStartup, logger)
 	startAuditLogRetentionPruner(shutdownCtx, auditStore, cfg.Storage.AuditLogRetentionDays, cfg.Storage.AuditLogPruneOnStartup, logger)
 	startAuditLogRetentionPruner(shutdownCtx, settlementReceiptAuditStore, cfg.Storage.AuditLogRetentionDays, cfg.Storage.AuditLogPruneOnStartup, logger)
@@ -1599,6 +1600,8 @@ type settlementReceiptAuditOutboxObserver interface {
 const (
 	moneySQLiteCheckpointPollInterval   = 30 * time.Second
 	moneySQLiteCheckpointIdleInterval   = 30 * time.Second
+	moneySQLiteMaintenanceMinIdle       = 10 * time.Second
+	moneySQLiteMaintenanceMaxDeferral   = 2 * time.Minute
 	moneySQLiteCheckpointMinTimeout     = 15 * time.Second
 	moneySQLiteCheckpointMaxTimeout     = 5 * time.Minute
 	moneySQLiteCheckpointBytesPerSecond = 32 << 20
@@ -1650,6 +1653,40 @@ func (a *moneySQLiteActivity) IdleFor(now time.Time) time.Duration {
 		return 0
 	}
 	return now.Sub(time.Unix(0, last))
+}
+
+type moneySQLiteMaintenanceAttemptState struct {
+	lastAttemptUnixNano atomic.Int64
+}
+
+func newMoneySQLiteMaintenanceAttemptState(now time.Time) *moneySQLiteMaintenanceAttemptState {
+	s := &moneySQLiteMaintenanceAttemptState{}
+	s.MarkAttempt(now)
+	return s
+}
+
+func (s *moneySQLiteMaintenanceAttemptState) MarkAttempt(now time.Time) {
+	if s == nil {
+		return
+	}
+	s.lastAttemptUnixNano.Store(now.UnixNano())
+}
+
+func shouldYieldMoneySQLiteMaintenance(idle moneySQLiteIdleTracker, minIdle time.Duration, attempts *moneySQLiteMaintenanceAttemptState, maxDeferral time.Duration, now time.Time) bool {
+	if idle == nil || minIdle <= 0 {
+		return false
+	}
+	if idle.IdleFor(now) >= minIdle {
+		return false
+	}
+	if attempts == nil || maxDeferral <= 0 {
+		return false
+	}
+	lastAttempt := attempts.lastAttemptUnixNano.Load()
+	if lastAttempt <= 0 {
+		return false
+	}
+	return now.Sub(time.Unix(0, lastAttempt)) < maxDeferral
 }
 
 func withMoneySQLiteActivity(next http.Handler, activity *moneySQLiteActivity) http.Handler {
@@ -1780,7 +1817,7 @@ func startSettlementStartupScan(ctx context.Context, scanner settlementStartupSc
 	}
 }
 
-func startSettlementReceiptAuditOutboxDrainer(ctx context.Context, store settlementReceiptAuditOutboxDrainer, sink billing.SettlementReceiptAuditSink, retentionDays int, observer settlementReceiptAuditOutboxObserver, logger zerolog.Logger) func(context.Context) {
+func startSettlementReceiptAuditOutboxDrainer(ctx context.Context, store settlementReceiptAuditOutboxDrainer, sink billing.SettlementReceiptAuditSink, retentionDays int, observer settlementReceiptAuditOutboxObserver, idle moneySQLiteIdleTracker, logger zerolog.Logger) func(context.Context) {
 	if store == nil || sink == nil {
 		return func(context.Context) {}
 	}
@@ -1843,10 +1880,12 @@ func startSettlementReceiptAuditOutboxDrainer(ctx context.Context, store settlem
 		observeStats(runCtx)
 		return drained, err
 	}
+	attempts := newMoneySQLiteMaintenanceAttemptState(time.Now())
 	flushOne := func(runCtx context.Context) {
 		if runCtx == nil {
 			runCtx = context.Background()
 		}
+		attempts.MarkAttempt(time.Now())
 		_, _ = drain(runCtx)
 	}
 	flushAll := func(runCtx context.Context) {
@@ -1863,6 +1902,17 @@ func startSettlementReceiptAuditOutboxDrainer(ctx context.Context, store settlem
 			}
 		}
 	}
+	flushOneIfIdle := func(runCtx context.Context) {
+		if runCtx == nil {
+			runCtx = context.Background()
+		}
+		if shouldYieldMoneySQLiteMaintenance(idle, moneySQLiteMaintenanceMinIdle, attempts, moneySQLiteMaintenanceMaxDeferral, time.Now()) {
+			observeStats(runCtx)
+			logger.Debug().Msg("settlement receipt audit outbox drain skipped during active buyer money-path traffic")
+			return
+		}
+		flushOne(runCtx)
+	}
 	flushOne(ctx)
 	go func() {
 		ticker := time.NewTicker(drainInterval)
@@ -1872,7 +1922,7 @@ func startSettlementReceiptAuditOutboxDrainer(ctx context.Context, store settlem
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				flushOne(ctx)
+				flushOneIfIdle(ctx)
 			}
 		}
 	}()
@@ -2083,12 +2133,14 @@ func startAppTrackReferralMintReconciler(ctx context.Context, handler appTrackRe
 	}()
 }
 
-func startReferralServingReconciler(ctx context.Context, reconciler referralapi.ServingReconciler, logger zerolog.Logger) {
+func startReferralServingReconciler(ctx context.Context, reconciler referralapi.ServingReconciler, idle moneySQLiteIdleTracker, logger zerolog.Logger) {
 	if reconciler.Source == nil || reconciler.Store == nil || !reconciler.Policy.RequireForRegistration {
 		return
 	}
 	go func() {
+		attempts := newMoneySQLiteMaintenanceAttemptState(time.Now())
 		reconcile := func() {
+			attempts.MarkAttempt(time.Now())
 			reconcileCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 			defer cancel()
 			qualified, err := reconciler.Reconcile(reconcileCtx)
@@ -2100,6 +2152,13 @@ func startReferralServingReconciler(ctx context.Context, reconciler referralapi.
 				logger.Info().Int("qualified", qualified).Msg("provider referral invite capacity awarded from verified serving evidence")
 			}
 		}
+		reconcileIfIdle := func() {
+			if shouldYieldMoneySQLiteMaintenance(idle, moneySQLiteMaintenanceMinIdle, attempts, moneySQLiteMaintenanceMaxDeferral, time.Now()) {
+				logger.Debug().Msg("referral serving qualification reconciliation skipped during active buyer money-path traffic")
+				return
+			}
+			reconcile()
+		}
 		reconcile()
 		ticker := time.NewTicker(time.Minute)
 		defer ticker.Stop()
@@ -2108,7 +2167,7 @@ func startReferralServingReconciler(ctx context.Context, reconciler referralapi.
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				reconcile()
+				reconcileIfIdle()
 			}
 		}
 	}()
@@ -2123,6 +2182,7 @@ func startSocialVerificationPromotionReconciler(
 	store *auth.Store,
 	policy auth.ReferralPolicy,
 	verifier socialAuthorLookup,
+	idle moneySQLiteIdleTracker,
 	logger zerolog.Logger,
 ) {
 	if store == nil || verifier == nil || !policy.EnableSocialBonus {
@@ -2142,7 +2202,9 @@ func startSocialVerificationPromotionReconciler(
 		return nil
 	}
 	go func() {
+		attempts := newMoneySQLiteMaintenanceAttemptState(time.Now())
 		reconcile := func() {
+			attempts.MarkAttempt(time.Now())
 			reconcileCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
 			defer cancel()
 			granted, err := store.PromoteMaturedSocialVerifications(reconcileCtx, policy, time.Now().UTC(), recheck)
@@ -2154,6 +2216,13 @@ func startSocialVerificationPromotionReconciler(
 				logger.Info().Int("granted", granted).Msg("social invite bonus granted exactly once")
 			}
 		}
+		reconcileIfIdle := func() {
+			if shouldYieldMoneySQLiteMaintenance(idle, moneySQLiteMaintenanceMinIdle, attempts, moneySQLiteMaintenanceMaxDeferral, time.Now()) {
+				logger.Debug().Msg("social verification promotion skipped during active buyer money-path traffic")
+				return
+			}
+			reconcile()
+		}
 		reconcile()
 		ticker := time.NewTicker(5 * time.Minute)
 		defer ticker.Stop()
@@ -2162,7 +2231,7 @@ func startSocialVerificationPromotionReconciler(
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				reconcile()
+				reconcileIfIdle()
 			}
 		}
 	}()

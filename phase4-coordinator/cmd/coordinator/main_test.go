@@ -357,6 +357,62 @@ func TestMoneySQLiteActivityMiddlewareMarksRequests(t *testing.T) {
 	}
 }
 
+func TestMoneySQLiteMaintenanceYieldHonorsMaxDeferral(t *testing.T) {
+	now := time.Unix(200, 0)
+	attempts := newMoneySQLiteMaintenanceAttemptState(now)
+	if !shouldYieldMoneySQLiteMaintenance(fixedIdleTracker{idleFor: 0}, 10*time.Second, attempts, time.Minute, now.Add(30*time.Second)) {
+		t.Fatal("recent traffic before max deferral should yield maintenance")
+	}
+	if shouldYieldMoneySQLiteMaintenance(fixedIdleTracker{idleFor: 0}, 10*time.Second, attempts, time.Minute, now.Add(time.Minute)) {
+		t.Fatal("recent traffic at max deferral should force maintenance")
+	}
+	if shouldYieldMoneySQLiteMaintenance(fixedIdleTracker{idleFor: time.Hour}, 10*time.Second, attempts, time.Minute, now.Add(30*time.Second)) {
+		t.Fatal("idle traffic should not yield maintenance")
+	}
+}
+
+func TestSettlementReceiptAuditOutboxDrainerStartupRunsDuringRecentTraffic(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	store := &settlementReceiptAuditOutboxDrainerStub{
+		drainCalled:  make(chan struct{}, 1),
+		pruneCalled:  make(chan struct{}, 1),
+		statsPending: 7,
+	}
+	observer := &settlementReceiptAuditOutboxObserverStub{
+		drainOutcomes: make(chan string, 1),
+		rowOps:        make(chan string, 1),
+		statsObserved: make(chan int64, 1),
+	}
+
+	startSettlementReceiptAuditOutboxDrainer(ctx, store, settlementReceiptAuditSinkStub{}, 90, observer, fixedIdleTracker{idleFor: 0}, zerolog.Nop())
+
+	assertSignal(t, store.drainCalled, "startup audit outbox drain")
+	assertSignal(t, store.pruneCalled, "startup audit outbox prune")
+	assertInt64Signal(t, observer.statsObserved, 7, "audit outbox stats")
+}
+
+func TestSettlementReceiptAuditOutboxDrainerRunsAfterIdle(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	store := &settlementReceiptAuditOutboxDrainerStub{
+		drained:     1,
+		drainCalled: make(chan struct{}, 2),
+		pruneCalled: make(chan struct{}, 2),
+	}
+	observer := &settlementReceiptAuditOutboxObserverStub{
+		drainOutcomes: make(chan string, 2),
+		rowOps:        make(chan string, 2),
+		statsObserved: make(chan int64, 2),
+	}
+
+	startSettlementReceiptAuditOutboxDrainer(ctx, store, settlementReceiptAuditSinkStub{}, 90, observer, fixedIdleTracker{idleFor: time.Hour}, zerolog.Nop())
+
+	assertSignal(t, store.drainCalled, "audit outbox drain after idle")
+	assertSignal(t, store.pruneCalled, "audit outbox prune after idle")
+	assertStringSignal(t, observer.drainOutcomes, "success", "audit outbox drain outcome")
+}
+
 func TestSettlementReceiptAuditOutboxDrainerPrunesAfterDrainError(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -372,7 +428,7 @@ func TestSettlementReceiptAuditOutboxDrainerPrunesAfterDrainError(t *testing.T) 
 		rowOps:        make(chan string, 4),
 	}
 
-	startSettlementReceiptAuditOutboxDrainer(ctx, store, settlementReceiptAuditSinkStub{}, 90, observer, zerolog.Nop())
+	startSettlementReceiptAuditOutboxDrainer(ctx, store, settlementReceiptAuditSinkStub{}, 90, observer, nil, zerolog.Nop())
 
 	assertSignal(t, store.drainCalled, "audit outbox drain")
 	assertSignal(t, store.pruneCalled, "audit outbox prune")
@@ -389,7 +445,7 @@ func TestSettlementReceiptAuditOutboxShutdownFlushDrains(t *testing.T) {
 		pruneCalled:    make(chan struct{}, 2),
 	}
 
-	flush := startSettlementReceiptAuditOutboxDrainer(ctx, store, settlementReceiptAuditSinkStub{}, 0, nil, zerolog.Nop())
+	flush := startSettlementReceiptAuditOutboxDrainer(ctx, store, settlementReceiptAuditSinkStub{}, 0, nil, nil, zerolog.Nop())
 	assertSignal(t, store.drainCalled, "initial audit outbox drain")
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), time.Second)
@@ -417,7 +473,7 @@ func TestSettlementReceiptAuditOutboxShutdownFlushContinuesAfterPartialError(t *
 		pruneCalled: make(chan struct{}, 5),
 	}
 
-	flush := startSettlementReceiptAuditOutboxDrainer(ctx, store, settlementReceiptAuditSinkStub{}, 0, nil, zerolog.Nop())
+	flush := startSettlementReceiptAuditOutboxDrainer(ctx, store, settlementReceiptAuditSinkStub{}, 0, nil, nil, zerolog.Nop())
 	assertSignal(t, store.drainCalled, "initial audit outbox drain")
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), time.Second)
@@ -527,9 +583,17 @@ func (settlementReceiptAuditSinkStub) InsertSettlementReceiptOutbox(context.Cont
 type settlementReceiptAuditOutboxObserverStub struct {
 	drainOutcomes chan string
 	rowOps        chan string
+	statsObserved chan int64
 }
 
-func (s *settlementReceiptAuditOutboxObserverStub) ObserveSettlementReceiptAuditOutbox(int64, time.Duration) {
+func (s *settlementReceiptAuditOutboxObserverStub) ObserveSettlementReceiptAuditOutbox(pending int64, _ time.Duration) {
+	if s.statsObserved == nil {
+		return
+	}
+	select {
+	case s.statsObserved <- pending:
+	default:
+	}
 }
 
 func (s *settlementReceiptAuditOutboxObserverStub) IncSettlementReceiptAuditOutboxDrain(outcome string) {
@@ -558,6 +622,18 @@ func assertStringSignal(t *testing.T, ch <-chan string, want, name string) {
 	case got := <-ch:
 		if got != want {
 			t.Fatalf("%s=%q want %q", name, got, want)
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("%s did not run", name)
+	}
+}
+
+func assertInt64Signal(t *testing.T, ch <-chan int64, want int64, name string) {
+	t.Helper()
+	select {
+	case got := <-ch:
+		if got != want {
+			t.Fatalf("%s=%d want %d", name, got, want)
 		}
 	case <-time.After(time.Second):
 		t.Fatalf("%s did not run", name)
