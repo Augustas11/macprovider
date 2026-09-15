@@ -65,6 +65,7 @@ func TestPreBYOMProviderStaysListedAndRoutableWithModelAdmissionStoreWired(t *te
 
 	// The admission store is wired and empty, exactly as a coordinator that
 	// has been upgraded to BYOM but whose fleet has not.
+	admissions := providerws.NewMemoryModelAdmissionStore()
 	server := buyer.NewServer(
 		registry,
 		zerolog.Nop(),
@@ -72,7 +73,8 @@ func TestPreBYOMProviderStaysListedAndRoutableWithModelAdmissionStoreWired(t *te
 		buyer.WithRequestLog(reqLog),
 		buyer.WithBilling(billingStore, cfg),
 		buyer.WithBillingSnapshotID(snapshotID),
-		buyer.WithModelAdmissionStore(providerws.NewMemoryModelAdmissionStore()),
+		buyer.WithModelAdmissionStore(admissions),
+		buyer.WithModelAdmissionRouteGuard(testRouteGuard{registry: registry, store: admissions}),
 	)
 
 	modelsRR := httptest.NewRecorder()
