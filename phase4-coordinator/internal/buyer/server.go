@@ -358,8 +358,10 @@ const (
 	maxRequestLogUsageTokens     = int64(10000000)
 	maxUpstreamResponseBodyBytes = int64(16 << 20)
 	requestLogWriteTimeout       = 6 * time.Second
-	// Keep pre-dispatch route snapshot pressure inside gateway retry budget.
-	routeSnapshotDispatchTimeout = 750 * time.Millisecond
+	// Keep pre-dispatch route snapshot pressure bounded while allowing the
+	// shared SQLite money-path writer to drain transient contention during
+	// filing probes and other light concurrent buyer traffic.
+	routeSnapshotDispatchTimeout = 2500 * time.Millisecond
 	slotQueueDefaultMaxPending   = 4
 	slotQueueDefaultDeadline     = 3 * time.Second
 	slotQueueDefaultPollInterval = 25 * time.Millisecond
