@@ -168,6 +168,157 @@ final class ModelsSubcommandTests: XCTestCase {
         ]))
     }
 
+    func testModelsPrepareRequiresJSON() async throws {
+        let command = try ModelsPrepareCommand.parse([
+            Build1LaneAPrepareProfile.catalogKey,
+            "--yes",
+            "--coordinator-url", "ws://127.0.0.1:19090/ws/provider",
+        ])
+
+        let capture = await captureOutput { try await command.run() }
+
+        XCTAssertEqual(capture.error as? ExitCode, ExitCode(2))
+        XCTAssertTrue(capture.stderr.contains("models prepare is JSON-only"))
+        XCTAssertEqual(capture.stdout, "")
+    }
+
+    func testModelsPrepareRequiresConfirmation() async throws {
+        let command = try ModelsPrepareCommand.parse([
+            Build1LaneAPrepareProfile.catalogKey,
+            "--json",
+            "--coordinator-url", "ws://127.0.0.1:19090/ws/provider",
+        ])
+
+        let capture = await captureOutput { try await command.run() }
+
+        XCTAssertEqual(capture.error as? ExitCode, ExitCode(2))
+        XCTAssertTrue(capture.stderr.contains("confirmation_required"))
+        let events = try decodePreparationEvents(capture.stdout)
+        XCTAssertEqual(events.count, 1)
+        let event = try XCTUnwrap(events.first)
+        XCTAssertEqual(event.schema, "model_catalog_transaction_event.v1")
+        XCTAssertEqual(event.transactionKind, .prepareModel)
+        XCTAssertEqual(event.modelKey, Build1LaneAPrepareProfile.catalogKey)
+        XCTAssertEqual(event.state, .failed)
+        XCTAssertEqual(event.errorCode, .actionUnavailable)
+    }
+
+    func testModelsPrepareRejectsUnsupportedProfile() async throws {
+        let command = try ModelsPrepareCommand.parse([
+            Build1LaneAPrepareProfile.catalogKey,
+            "--json",
+            "--yes",
+            "--profile", "default",
+            "--coordinator-url", "ws://127.0.0.1:19090/ws/provider",
+        ])
+
+        let capture = await captureOutput { try await command.run() }
+
+        XCTAssertEqual(capture.error as? ExitCode, ExitCode(2))
+        XCTAssertTrue(capture.stderr.contains("unsupported_profile"))
+        let events = try decodePreparationEvents(capture.stdout)
+        XCTAssertEqual(events.count, 1)
+        XCTAssertEqual(events.first?.errorCode, .actionUnavailable)
+    }
+
+    func testModelsPrepareRejectsUnsupportedTuple() async throws {
+        let command = try ModelsPrepareCommand.parse([
+            "mlx-community/Qwen3-8B-4bit",
+            "--json",
+            "--yes",
+            "--coordinator-url", "ws://127.0.0.1:19090/ws/provider",
+        ])
+
+        let capture = await captureOutput { try await command.run() }
+
+        XCTAssertEqual(capture.error as? ExitCode, ExitCode(2))
+        XCTAssertTrue(capture.stderr.contains("unsupported_model_tuple"))
+        let events = try decodePreparationEvents(capture.stdout)
+        XCTAssertEqual(events.count, 1)
+        let event = try XCTUnwrap(events.first)
+        XCTAssertEqual(event.modelKey, "unsupported")
+        XCTAssertEqual(event.errorCode, .actionUnavailable)
+    }
+
+    func testModelsPrepareRejectsProductionCoordinator() async throws {
+        let command = try ModelsPrepareCommand.parse([
+            Build1LaneAPrepareProfile.catalogKey,
+            "--json",
+            "--yes",
+            "--coordinator-url", "wss://coordinator.malibu.tech/ws/provider",
+        ])
+
+        let capture = await captureOutput { try await command.run() }
+
+        XCTAssertEqual(capture.error as? ExitCode, ExitCode(2))
+        XCTAssertTrue(capture.stderr.contains("staging_coordinator_required"))
+        let events = try decodePreparationEvents(capture.stdout)
+        XCTAssertEqual(events.count, 1)
+        XCTAssertEqual(events.first?.errorCode, .actionUnavailable)
+    }
+
+    func testModelsPrepareRejectsProductionCoordinatorHostVariant() async throws {
+        let command = try ModelsPrepareCommand.parse([
+            Build1LaneAPrepareProfile.catalogKey,
+            "--json",
+            "--yes",
+            "--coordinator-url", "wss://coordinator.malibu.tech./ws/provider",
+        ])
+
+        let capture = await captureOutput { try await command.run() }
+
+        XCTAssertEqual(capture.error as? ExitCode, ExitCode(2))
+        XCTAssertTrue(capture.stderr.contains("staging_coordinator_required"))
+        let events = try decodePreparationEvents(capture.stdout)
+        XCTAssertEqual(events.count, 1)
+        XCTAssertEqual(events.first?.errorCode, .actionUnavailable)
+    }
+
+    func testModelsPrepareRejectsArbitraryCoordinatorHost() async throws {
+        let command = try ModelsPrepareCommand.parse([
+            Build1LaneAPrepareProfile.catalogKey,
+            "--json",
+            "--yes",
+            "--coordinator-url", "wss://staging.example.invalid/ws/provider",
+        ])
+
+        let capture = await captureOutput { try await command.run() }
+
+        XCTAssertEqual(capture.error as? ExitCode, ExitCode(2))
+        XCTAssertTrue(capture.stderr.contains("staging_coordinator_required"))
+        let events = try decodePreparationEvents(capture.stdout)
+        XCTAssertEqual(events.count, 1)
+        XCTAssertEqual(events.first?.errorCode, .actionUnavailable)
+    }
+
+    func testModelsPrepareLaneAGuardsFailClosedUntilArtifactAuthorityLands() async throws {
+        let command = try ModelsPrepareCommand.parse([
+            Build1LaneAPrepareProfile.artifactModelID,
+            "--json",
+            "--yes",
+            "--profile", Build1LaneAPrepareProfile.profile,
+            "--coordinator-url", "wss://api-staging.malibu.tech/ws/provider",
+        ])
+
+        let capture = await captureOutput { try await command.run() }
+
+        XCTAssertEqual(capture.error as? ExitCode, ExitCode(2))
+        XCTAssertTrue(capture.stderr.contains(Build1LaneAPrepareProfile.unsupportedReason))
+        let events = try decodePreparationEvents(capture.stdout)
+        XCTAssertEqual(events.count, 2)
+        XCTAssertEqual(Set(events.map(\.transactionID)).count, 1)
+        XCTAssertEqual(events[0].transactionKind, .prepareModel)
+        XCTAssertEqual(events[0].modelKey, Build1LaneAPrepareProfile.catalogKey)
+        XCTAssertEqual(events[0].eventSequence, 1)
+        XCTAssertEqual(events[0].state, .queued)
+        XCTAssertNil(events[0].errorCode)
+        XCTAssertEqual(events[1].transactionKind, .prepareModel)
+        XCTAssertEqual(events[1].modelKey, Build1LaneAPrepareProfile.catalogKey)
+        XCTAssertEqual(events[1].eventSequence, 2)
+        XCTAssertEqual(events[1].state, .failed)
+        XCTAssertEqual(events[1].errorCode, .authorityUnavailable)
+    }
+
     func testModelsListConnectedPreservesSupportedModelWithoutRuntimeAuthority() async throws {
         let socketPath = try makeSocketPath()
         let server = ControlSocketServer(
@@ -1210,6 +1361,24 @@ final class ModelsSubcommandTests: XCTestCase {
                 return nil
             }
             return try JSONDecoder().decode(ModelAdoptionEventWire.self, from: data)
+        }
+    }
+
+    private func decodePreparationEvents(_ stdout: String) throws -> [ModelPreparationTransactionEvent] {
+        var lines = stdout.split(separator: "\n", omittingEmptySubsequences: false)
+        if lines.last == "" {
+            lines.removeLast()
+        }
+        return try lines.map {
+            guard !$0.isEmpty else {
+                throw ModelsSubcommandTestError.unexpectedContainerLoader
+            }
+            let data = Data($0.utf8)
+            guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  object["schema"] as? String == "model_catalog_transaction_event.v1" else {
+                throw ModelsSubcommandTestError.unexpectedContainerLoader
+            }
+            return try JSONDecoder().decode(ModelPreparationTransactionEvent.self, from: data)
         }
     }
 
