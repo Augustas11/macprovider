@@ -254,6 +254,7 @@ type memoryModelAdmissionStore struct {
 	nonces        map[string]ModelAdmissionEvent
 	candidates    map[string]map[string]struct{}
 	providerEvent map[string][]time.Time
+	providerGen   map[string]uint64
 	pending       map[string]PendingModelAdmissionDecision
 	pendingByReq  map[string]string
 }
@@ -265,6 +266,7 @@ func NewMemoryModelAdmissionStore() ModelAdmissionStore {
 		nonces:        map[string]ModelAdmissionEvent{},
 		candidates:    map[string]map[string]struct{}{},
 		providerEvent: map[string][]time.Time{},
+		providerGen:   map[string]uint64{},
 	}
 }
 
@@ -337,6 +339,7 @@ func (s *memoryModelAdmissionStore) appendProviderModelAdmissionEvent(event Mode
 	s.latest[event.ProviderID+"|"+event.CandidateID] = event
 	s.requestIDs[event.ProviderID+"|"+event.RequestID] = event
 	s.nonces[event.ProviderID+"|"+event.Nonce] = event
+	s.providerGen[event.ProviderID]++
 	s.invalidatePendingLocked(event.ProviderID, event.CandidateID)
 	return event, false, nil
 }
@@ -432,6 +435,7 @@ func (s *memoryModelAdmissionStore) appendCoordinatorModelAdmissionEvent(event M
 	s.latest[event.ProviderID+"|"+event.CandidateID] = event
 	s.requestIDs[event.ProviderID+"|"+event.RequestID] = event
 	s.nonces[event.ProviderID+"|"+event.Nonce] = event
+	s.providerGen[event.ProviderID]++
 	s.invalidatePendingLocked(event.ProviderID, event.CandidateID)
 	if approval != nil {
 		s.consumePendingLocked(*approval, event)
@@ -513,6 +517,12 @@ func (s *memoryModelAdmissionStore) LatestModelAdmissionRouteStatus(_ context.Co
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return latestModelAdmissionRouteStatusFromEvents(s.events, providerID, servedModelRef, catalogModelKey)
+}
+
+func (s *memoryModelAdmissionStore) ModelAdmissionProviderRouteGeneration(_ context.Context, providerID string) (uint64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.providerGen[providerID], nil
 }
 
 func (s *memoryModelAdmissionStore) ModelAdmissionEventsEmpty(_ context.Context) (bool, error) {
@@ -1158,6 +1168,24 @@ func (s *SQLiteModelAdmissionStore) LatestModelAdmissionRouteStatus(ctx context.
  WHERE provider_id = ? AND served_model_ref = ? AND LOWER(catalog_model_key) = ?
  ORDER BY id DESC
  LIMIT 1`), providerID, servedModelRef, catalogModelKey)
+}
+
+func (s *SQLiteModelAdmissionStore) ModelAdmissionProviderRouteGeneration(ctx context.Context, providerID string) (uint64, error) {
+	if s == nil || s.db == nil {
+		return 0, fmt.Errorf("model admission store is not initialized")
+	}
+	var generation int64
+	err := s.db.QueryRowContext(ctx, `
+SELECT COALESCE(MAX(id), 0)
+  FROM model_admission_events
+ WHERE provider_id = ?`, providerID).Scan(&generation)
+	if err != nil {
+		return 0, err
+	}
+	if generation < 0 {
+		return 0, nil
+	}
+	return uint64(generation), nil
 }
 
 func (s *SQLiteModelAdmissionStore) ModelAdmissionEventsEmpty(ctx context.Context) (bool, error) {
