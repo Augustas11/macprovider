@@ -2,6 +2,7 @@ package pool
 
 import (
 	"bytes"
+	"crypto/ed25519"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
@@ -13,6 +14,94 @@ import (
 
 	"github.com/augstar/macprovider-coordinator/internal/modelidentity"
 )
+
+func TestMarkForwardedSlotAvailablePromotesOnlyServingBusySession(t *testing.T) {
+	registry := NewRegistry(nil)
+	provider := &Provider{
+		ProviderID:       "p1",
+		AssignedID:       "s1",
+		State:            StateBusy,
+		SlotsTotal:       2,
+		SlotsFree:        0,
+		MaxConcurrency:   2,
+		MaxContextTokens: 8192,
+	}
+	registry.Register(provider, nil)
+
+	if !registry.MarkForwardedSlotAvailable("p1", "s1", 1) {
+		t.Fatal("MarkForwardedSlotAvailable returned false for serving busy provider")
+	}
+	got, ok := registry.Resolve("p1", "s1")
+	if !ok {
+		t.Fatal("provider missing after slot reconciliation")
+	}
+	if got.State != StateReady || got.SlotsFree != 1 {
+		t.Fatalf("provider after slot reconciliation = state %q slots_free %d, want ready/1", got.State, got.SlotsFree)
+	}
+}
+
+func TestMarkForwardedSlotAvailableRefusesNonRoutableStates(t *testing.T) {
+	for _, state := range []State{StateDraining, StateDegraded, StateUnavailable} {
+		t.Run(string(state), func(t *testing.T) {
+			registry := NewRegistry(nil)
+			provider := &Provider{
+				ProviderID:       "p1",
+				AssignedID:       "s1",
+				State:            state,
+				SlotsTotal:       1,
+				SlotsFree:        0,
+				MaxConcurrency:   1,
+				MaxContextTokens: 8192,
+			}
+			registry.Register(provider, nil)
+
+			if registry.MarkForwardedSlotAvailable("p1", "s1", 1) {
+				t.Fatalf("MarkForwardedSlotAvailable returned true for %s provider", state)
+			}
+			got, ok := registry.Resolve("p1", "s1")
+			if !ok {
+				t.Fatal("provider missing after refused slot reconciliation")
+			}
+			if got.State != state || got.SlotsFree != 0 {
+				t.Fatalf("provider after refused reconciliation = state %q slots_free %d, want %q/0", got.State, got.SlotsFree, state)
+			}
+		})
+	}
+}
+
+func TestMarkForwardedSlotAvailableDoesNotPublishPendingReceiptKey(t *testing.T) {
+	registry := NewRegistry(nil)
+	pub, _, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	provider := &Provider{
+		ProviderID:       "p1",
+		AssignedID:       "s1",
+		State:            StateBusy,
+		AuthState:        AuthBearerValidated,
+		SlotsTotal:       1,
+		SlotsFree:        0,
+		MaxConcurrency:   1,
+		MaxContextTokens: 8192,
+		ReceiptPubkey:    pub,
+	}
+	registry.Register(provider, nil)
+
+	if registry.MarkForwardedSlotAvailable("p1", "s1", 1) {
+		t.Fatal("MarkForwardedSlotAvailable returned true for pending receipt-key provider")
+	}
+	got, ok := registry.Resolve("p1", "s1")
+	if !ok {
+		t.Fatal("provider missing after refused pending-key reconciliation")
+	}
+	if len(got.ReceiptPubkey) != 0 || !bytes.Equal(got.PendingReceiptPubkey, pub) {
+		t.Fatal("pending receipt key was published by coordinator-local slot reconciliation")
+	}
+	if got.State != StateBusy || got.SlotsFree != 0 {
+		t.Fatalf("provider after pending-key reconciliation = state %q slots_free %d, want busy/0", got.State, got.SlotsFree)
+	}
+}
 
 func TestAirLlamaHeartbeatKeepsCatalogArtifactAndWeightsIdentitiesSeparate(t *testing.T) {
 	const artifactHash = "3975387f249977e5e8bfb7ed0d352f8258ac3d630f961ce1dd952f428ee7216a"
@@ -2792,15 +2881,15 @@ func TestRegisterMigratesMDAProofAcrossReconnect(t *testing.T) {
 	chain := [][]byte{[]byte("leaf-der"), []byte("root-der")}
 
 	_, ok, refusal := registry.RegisterAtDetailed(&Provider{
-		ProviderID:   "p-mda",
-		AssignedID:   "s1",
-		ModelID:      "model-a",
-		State:        StateReady,
-		SlotsFree:    1,
-		SlotsTotal:   1,
-		SEPublicKey:  seKey,
-		AuthState:    AuthBearerValidated,
-		MaxConcurrency: 1,
+		ProviderID:       "p-mda",
+		AssignedID:       "s1",
+		ModelID:          "model-a",
+		State:            StateReady,
+		SlotsFree:        1,
+		SlotsTotal:       1,
+		SEPublicKey:      seKey,
+		AuthState:        AuthBearerValidated,
+		MaxConcurrency:   1,
 		MaxContextTokens: 8000,
 	}, nil, now)
 	if !ok || refusal != RegisterRefusalNone {
@@ -2811,17 +2900,17 @@ func TestRegisterMigratesMDAProofAcrossReconnect(t *testing.T) {
 	}
 
 	_, ok, refusal = registry.RegisterAtDetailed(&Provider{
-		ProviderID:   "p-mda",
-		AssignedID:   "s2",
-		ModelID:      "model-a",
-		State:        StateReady,
-		SlotsFree:    1,
-		SlotsTotal:   1,
-		SEPublicKey:  append([]byte(nil), seKey...),
-		AuthState:    AuthBearerValidated,
-		MaxConcurrency: 1,
+		ProviderID:       "p-mda",
+		AssignedID:       "s2",
+		ModelID:          "model-a",
+		State:            StateReady,
+		SlotsFree:        1,
+		SlotsTotal:       1,
+		SEPublicKey:      append([]byte(nil), seKey...),
+		AuthState:        AuthBearerValidated,
+		MaxConcurrency:   1,
 		MaxContextTokens: 8000,
-		AttestationTier: AttestationTierSelfSigned,
+		AttestationTier:  AttestationTierSelfSigned,
 	}, nil, now.Add(time.Minute))
 	if !ok || refusal != RegisterRefusalNone {
 		t.Fatalf("register s2: ok=%v refusal=%q", ok, refusal)

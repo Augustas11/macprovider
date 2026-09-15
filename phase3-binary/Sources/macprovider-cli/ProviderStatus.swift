@@ -363,7 +363,21 @@ struct ProviderSnapshot: Sendable {
     }
 }
 
+struct RequestCapacityTransitionSnapshot: Sendable {
+    let sequence: Int
+    let state: ProviderHealthState
+    let reason: String
+    let observedAt: Date
+    let slotsFree: Int
+    let slotsTotal: Int
+    let requestsServedSinceLast: Int
+    let avgLatencyMSSinceLast: Double?
+    let throughputTPSSinceLast: Double?
+}
+
 actor ProviderStatus {
+    typealias RequestCapacityChangeHandler = @Sendable (_ transition: RequestCapacityTransitionSnapshot) -> Void
+
     private let startedAt = Date()
     private var modelID: String?
     private var modelHash: String?
@@ -412,6 +426,8 @@ actor ProviderStatus {
     private var transitionID = UUID().uuidString.lowercased()
     private var transitionAt = Date()
     private var transitionReason: String
+    private var requestCapacityChangeHandler: RequestCapacityChangeHandler?
+    private var requestCapacityTransitionSequence = 0
     private var lastObservedThermalThrottle = false
 
     init(
@@ -462,6 +478,13 @@ actor ProviderStatus {
         }
         refreshAvailabilityState()
         return Date()
+    }
+
+    func setRequestCapacityChangeHandler(_ handler: RequestCapacityChangeHandler?) {
+        if handler != nil {
+            requestCapacityTransitionSequence = 0
+        }
+        requestCapacityChangeHandler = handler
     }
 
     /// Atomically fences new work once an operator pause or drain begins.
@@ -748,18 +771,38 @@ actor ProviderStatus {
         guard modelLoaded, status == .ready || status == .busy else {
             return
         }
-        transition(
-            to: requestsInFlight >= capacity.maxConcurrency ? .busy : .ready,
-            reason: requestsInFlight >= capacity.maxConcurrency ? "request_capacity_full" : "request_capacity_available"
+        let nextState: ProviderHealthState = requestsInFlight >= capacity.maxConcurrency ? .busy : .ready
+        let reason = requestsInFlight >= capacity.maxConcurrency ? "request_capacity_full" : "request_capacity_available"
+        if transition(to: nextState, reason: reason) {
+            requestCapacityChangeHandler?(requestCapacityTransitionSnapshot(state: nextState, reason: reason))
+        }
+    }
+
+    private func requestCapacityTransitionSnapshot(state: ProviderHealthState, reason: String) -> RequestCapacityTransitionSnapshot {
+        requestCapacityTransitionSequence += 1
+        let avgLatency = windowRequests > 0 ? windowLatencyMS / Double(windowRequests) : nil
+        let throughput = windowGenerationSeconds > 0 ? Double(windowCompletionTokens) / windowGenerationSeconds : nil
+        return RequestCapacityTransitionSnapshot(
+            sequence: requestCapacityTransitionSequence,
+            state: state,
+            reason: reason,
+            observedAt: Date(),
+            slotsFree: max(0, capacity.maxConcurrency - requestsInFlight),
+            slotsTotal: capacity.maxConcurrency,
+            requestsServedSinceLast: windowRequests,
+            avgLatencyMSSinceLast: avgLatency,
+            throughputTPSSinceLast: throughput
         )
     }
 
-    private func transition(to newState: ProviderHealthState, reason: String) {
-        guard status != newState else { return }
+    @discardableResult
+    private func transition(to newState: ProviderHealthState, reason: String) -> Bool {
+        guard status != newState else { return false }
         status = newState
         transitionID = UUID().uuidString.lowercased()
         transitionAt = Date()
         transitionReason = reason
+        return true
     }
 
     private func rolloverDayCountersIfNeeded(now: Date = Date()) {

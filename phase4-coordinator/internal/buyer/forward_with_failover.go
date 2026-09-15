@@ -170,6 +170,7 @@ func (s *Server) forwardWithFailover(
 		// signature lets future success-with-continue cases plug in
 		// without revisiting the core).
 		if dispatched.success {
+			s.reconcileForwardedSlotAvailable(state)
 			tx.renderSuccess(w, r, req, dispatched, state)
 			return false
 		}

@@ -1530,6 +1530,34 @@ func (r *Registry) MarkState(providerID, assignedID string, state State) bool {
 	return true
 }
 
+func (r *Registry) MarkForwardedSlotAvailable(providerID, assignedID string, slotsFreeHint int) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	p := r.providers[providerID]
+	if p == nil || p.AssignedID != assignedID {
+		return false
+	}
+	// This is a coordinator-local compatibility hint after a completed
+	// reserved route, not a provider-origin state_update. Keep all serving
+	// trust gates intact and avoid receipt-publication side effects.
+	if !p.ServingCapable() || p.SlotsTotal <= 0 {
+		return false
+	}
+	slotsFree := p.SlotsFree
+	if slotsFree < slotsFreeHint {
+		slotsFree = slotsFreeHint
+	}
+	if slotsFree <= 0 {
+		slotsFree = 1
+	}
+	if slotsFree > p.SlotsTotal {
+		slotsFree = p.SlotsTotal
+	}
+	r.setStateLocked(p, StateReady)
+	p.SlotsFree = slotsFree
+	return true
+}
+
 func (r *Registry) MarkDegradedForRecovery(providerID, assignedID string, reason RecoveryReason) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
