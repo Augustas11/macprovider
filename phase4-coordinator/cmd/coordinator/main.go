@@ -314,7 +314,7 @@ func main() {
 	}
 	billingStore.SetSQLiteMetrics(metricsHandle)
 	billingStore.SetRouteSnapshotDB(routeSnapshotDB)
-	billingStore.SetRouteSnapshotBusyTimeout(50 * time.Millisecond)
+	billingStore.SetRouteSnapshotBusyTimeout(routeSnapshotSQLiteBusyTimeout)
 	// R4 fix (CODE-M2): set the route-layer flag atomic BEFORE the
 	// startup snapshot so the snapshot's canonical hash captures the
 	// initial flag state (SPEC-005 v0.4 §11.6.4 / §13.2). The
@@ -1605,6 +1605,7 @@ const (
 	moneySQLiteCheckpointMinTimeout     = 15 * time.Second
 	moneySQLiteCheckpointMaxTimeout     = 5 * time.Minute
 	moneySQLiteCheckpointBytesPerSecond = 32 << 20
+	routeSnapshotSQLiteBusyTimeout      = 500 * time.Millisecond
 )
 
 type moneySQLiteWALCheckpointerConfig struct {

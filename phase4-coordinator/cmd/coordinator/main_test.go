@@ -210,6 +210,15 @@ func TestRetentionPrunersDefaultToStartupDelete(t *testing.T) {
 	assertImmediatePrune(t, auditPruner.called, "audit_log")
 }
 
+func TestRouteSnapshotSQLiteBusyTimeoutAbsorbsShortMoneyPathOverlap(t *testing.T) {
+	if routeSnapshotSQLiteBusyTimeout < 250*time.Millisecond {
+		t.Fatalf("route snapshot busy timeout=%s, want enough headroom for short SQLite writer overlap", routeSnapshotSQLiteBusyTimeout)
+	}
+	if routeSnapshotSQLiteBusyTimeout > time.Second {
+		t.Fatalf("route snapshot busy timeout=%s, want bounded pre-dispatch latency", routeSnapshotSQLiteBusyTimeout)
+	}
+}
+
 func TestMoneySQLiteWALCheckpointerRunsWhileBusy(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "checkpoint.db")
 	db, err := sql.Open("sqlite", sqliteutil.WithPragmas(dbPath))
