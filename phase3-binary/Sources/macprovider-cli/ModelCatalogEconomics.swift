@@ -715,10 +715,11 @@ struct ModelCatalogEconomicsBuilder {
 
     struct PrivateStorageBudget: Equatable, Sendable {
         let globalManagedBudgetBytes: Int64
-        let managedBudgetSource = "default"
+        let managedBudgetSource: String
 
-        private init(globalManagedBudgetBytes: Int64) {
+        private init(globalManagedBudgetBytes: Int64, managedBudgetSource: String) {
             self.globalManagedBudgetBytes = globalManagedBudgetBytes
+            self.managedBudgetSource = managedBudgetSource
         }
 
         static func defaultBudget(volumeCapacityBytes: Int64) -> PrivateStorageBudget? {
@@ -732,7 +733,17 @@ struct ModelCatalogEconomicsBuilder {
             guard !computed.overflow else { return nil }
             let capped = min(Int64(ModelPreparationContracts.maxEstimatedBytes), computed.partialValue)
             guard capped > 0, capped <= ModelPreparationContracts.maxJavaScriptSafeInteger else { return nil }
-            return PrivateStorageBudget(globalManagedBudgetBytes: capped)
+            return PrivateStorageBudget(globalManagedBudgetBytes: capped, managedBudgetSource: "default")
+        }
+
+        static func configuredBudget(bytes: Int64) -> PrivateStorageBudget? {
+            guard bytes > 0,
+                  bytes <= Int64(ModelPreparationContracts.maxEstimatedBytes),
+                  bytes <= ModelPreparationContracts.maxJavaScriptSafeInteger
+            else {
+                return nil
+            }
+            return PrivateStorageBudget(globalManagedBudgetBytes: bytes, managedBudgetSource: "configured")
         }
     }
 
@@ -760,6 +771,7 @@ struct ModelCatalogEconomicsBuilder {
         store: ModelPreparationPrivateStore,
         rootLocator: ModelPreparationRootLocator,
         volumeCapacityBytes: Int64,
+        configuredBudgetBytes: Int64? = nil,
         overflowDetected: Bool = false
     ) -> PrivateStorageSnapshot {
         if overflowDetected { return .unavailable(overflowDetected: true) }
@@ -768,7 +780,8 @@ struct ModelCatalogEconomicsBuilder {
             return loadPrivateStorageSnapshotPayload(
                 payload,
                 rootLocator: rootLocator,
-                volumeCapacityBytes: volumeCapacityBytes
+                volumeCapacityBytes: volumeCapacityBytes,
+                configuredBudgetBytes: configuredBudgetBytes
             )
         } catch {
             return .unavailable()
@@ -778,10 +791,16 @@ struct ModelCatalogEconomicsBuilder {
     private static func loadPrivateStorageSnapshotPayload(
         _ payload: Data?,
         rootLocator: ModelPreparationRootLocator,
-        volumeCapacityBytes: Int64
+        volumeCapacityBytes: Int64,
+        configuredBudgetBytes: Int64?
     ) -> PrivateStorageSnapshot {
-        guard let budget = PrivateStorageBudget.defaultBudget(volumeCapacityBytes: volumeCapacityBytes),
-              let payload
+        let budget: PrivateStorageBudget?
+        if let configuredBudgetBytes {
+            budget = PrivateStorageBudget.configuredBudget(bytes: configuredBudgetBytes)
+        } else {
+            budget = PrivateStorageBudget.defaultBudget(volumeCapacityBytes: volumeCapacityBytes)
+        }
+        guard let budget, let payload
         else {
             return .unavailable()
         }
