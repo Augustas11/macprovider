@@ -139,7 +139,7 @@ func TestModelAdmissionRouteCompareAndInsertFailsClosedOnConcurrentAppend(t *tes
 		}
 		return nil
 	})
-	if !errors.Is(err, ErrModelAdmissionRouteStale) || inserted != 2 {
+	if !errors.Is(err, ErrModelAdmissionRouteStale) || !errors.Is(err, ErrModelAdmissionRouteDrift) || inserted != 2 {
 		t.Fatalf("racing append must fail the attempt closed after the insert: err=%v inserted=%d", err, inserted)
 	}
 	// A binding generation that moved since evaluation fails before insert.
@@ -149,14 +149,14 @@ func TestModelAdmissionRouteCompareAndInsertFailsClosedOnConcurrentAppend(t *tes
 	p2, _ := s.pool.Resolve("p2", "")
 	stale := ModelAdmissionRouteExpectation{ProviderID: "p2", CandidateID: settled2.CandidateID, CoordinatorEventID: settled2.CoordinatorEventID, BindingGeneration: p2.ModelAdmissionBindingGeneration - 1, SessionEpoch: p2.ModelAdmissionSessionEpoch}
 	inserted = 0
-	if err := s.CompareAndInsertModelAdmissionRouteSnapshot(context.Background(), stale, func() error { inserted++; return nil }); !errors.Is(err, ErrModelAdmissionRouteStale) || inserted != 0 {
+	if err := s.CompareAndInsertModelAdmissionRouteSnapshot(context.Background(), stale, func() error { inserted++; return nil }); !errors.Is(err, ErrModelAdmissionRouteStale) || !errors.Is(err, ErrModelAdmissionRouteDrift) || inserted != 0 {
 		t.Fatalf("stale binding generation must fail before insert: err=%v inserted=%d", err, inserted)
 	}
 	// A second candidate for the same row appended while the first is
 	// routable: the binding generation moves, the in-flight attempt fails.
 	current := ModelAdmissionRouteExpectation{ProviderID: "p2", CandidateID: settled2.CandidateID, CoordinatorEventID: settled2.CoordinatorEventID, BindingGeneration: p2.ModelAdmissionBindingGeneration, SessionEpoch: p2.ModelAdmissionSessionEpoch}
 	f.offer(t, "p2", "c", "mlx_cache", map[string]string{modelidentity.SnapshotManifestV1: bindingRowHash})
-	if err := s.CompareAndInsertModelAdmissionRouteSnapshot(context.Background(), current, func() error { inserted++; return nil }); !errors.Is(err, ErrModelAdmissionRouteStale) || inserted != 0 {
+	if err := s.CompareAndInsertModelAdmissionRouteSnapshot(context.Background(), current, func() error { inserted++; return nil }); !errors.Is(err, ErrModelAdmissionRouteStale) || !errors.Is(err, ErrModelAdmissionRouteDrift) || inserted != 0 {
 		t.Fatalf("offer for candidate B must fail the in-flight attempt for A: err=%v", err)
 	}
 }
@@ -194,7 +194,7 @@ func TestModelAdmissionLegacyRouteCompareAndInsertFailsClosedOnConcurrentOffer(t
 		f.offer(t, "p-legacy", "l", "mlx_cache", map[string]string{modelidentity.SnapshotManifestV1: bindingRowHash})
 		return nil
 	})
-	if !errors.Is(err, ErrModelAdmissionRouteStale) || inserted != 2 {
+	if !errors.Is(err, ErrModelAdmissionRouteStale) || !errors.Is(err, ErrModelAdmissionRouteDrift) || inserted != 2 {
 		t.Fatalf("racing legacy offer must fail closed after insert: err=%v inserted=%d", err, inserted)
 	}
 
@@ -212,7 +212,7 @@ func TestModelAdmissionLegacyRouteCompareAndInsertFailsClosedOnConcurrentOffer(t
 	}
 	f.offer(t, "p-legacy-pre", "m", "mlx_cache", map[string]string{modelidentity.SnapshotManifestV1: bindingRowHash})
 	preInserted := 0
-	if err := s.CompareAndInsertModelAdmissionRouteSnapshot(context.Background(), stale, func() error { preInserted++; return nil }); !errors.Is(err, ErrModelAdmissionRouteStale) || preInserted != 0 {
+	if err := s.CompareAndInsertModelAdmissionRouteSnapshot(context.Background(), stale, func() error { preInserted++; return nil }); !errors.Is(err, ErrModelAdmissionRouteStale) || !errors.Is(err, ErrModelAdmissionRouteDrift) || preInserted != 0 {
 		t.Fatalf("pre-existing legacy offer must fail before insert: err=%v inserted=%d", err, preInserted)
 	}
 }
@@ -414,7 +414,7 @@ func TestModelAdmissionPublicationRefreshesSessionsBeforeSweep(t *testing.T) {
 		t.Fatalf("sweep after refresh must revoke the no-longer-verified session's candidate: %+v", latest)
 	}
 	inserted := 0
-	if err := s.CompareAndInsertModelAdmissionRouteSnapshot(context.Background(), expect, func() error { inserted++; return nil }); !errors.Is(err, ErrModelAdmissionRouteStale) || inserted != 0 {
+	if err := s.CompareAndInsertModelAdmissionRouteSnapshot(context.Background(), expect, func() error { inserted++; return nil }); !errors.Is(err, ErrModelAdmissionRouteStale) || !errors.Is(err, ErrModelAdmissionRouteDrift) || inserted != 0 {
 		t.Fatalf("in-flight attempt must fail closed: err=%v inserted=%d", err, inserted)
 	}
 }
