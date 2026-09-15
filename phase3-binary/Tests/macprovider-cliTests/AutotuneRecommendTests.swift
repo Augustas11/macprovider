@@ -2946,6 +2946,107 @@ final class AutotuneRecommendTests: XCTestCase {
         )
     }
 
+    func testVerifiedStagedArtifactPreservingExistingVerifiesHashQualifiedSnapshotWithoutDurableAdoption() throws {
+        let hub = try tempDir()
+        let durable = try tempDir()
+        let revision = String(repeating: "d", count: 40)
+        let expectedDirectory = try tempDir()
+        try Data("staged-replacement".utf8).write(to: expectedDirectory.appendingPathComponent("weights.bin"))
+        let expected = try ModelArtifactVerifier.canonicalArtifactHash(directory: expectedDirectory)
+        let row = CandidateCatalog.Row(
+            modelID: "namespace/model",
+            modelRevision: revision,
+            modelSHA256: expected,
+            minRAMGB: 1,
+            minBandwidthTier: .c,
+            benchGate: CandidateCatalog.BenchGate(minSustainedTPS: 1, max4KTTFTMS: 1_000),
+            runtimeStatus: "recommendable",
+            notes: nil
+        )
+        let resolver = CachedModelArtifactResolver(hubRoot: hub, durableRoot: durable)
+        let staged = resolver.prefetchSnapshotURL(modelID: row.modelID, revision: revision, sha256: expected)
+        try FileManager.default.createDirectory(at: staged, withIntermediateDirectories: true)
+        try Data("staged-replacement".utf8).write(to: staged.appendingPathComponent("weights.bin"))
+
+        let artifact = try resolver.verifiedStagedArtifactPreservingExisting(for: row)
+        let durableArtifact = try resolver.durableStore.artifactURL(
+            modelID: row.modelID,
+            revision: revision,
+            sha256: expected
+        )
+
+        XCTAssertEqual(artifact.modelArgument, staged.path)
+        XCTAssertEqual(artifact.sha256, expected)
+        XCTAssertEqual(try String(contentsOf: staged.appendingPathComponent("weights.bin")), "staged-replacement")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: durableArtifact.path))
+    }
+
+    func testVerifiedStagedArtifactPreservingExistingRejectsHashMismatchWithoutDurableAdoption() throws {
+        let hub = try tempDir()
+        let durable = try tempDir()
+        let revision = String(repeating: "e", count: 40)
+        let expected = String(repeating: "1", count: 64)
+        let row = CandidateCatalog.Row(
+            modelID: "namespace/model",
+            modelRevision: revision,
+            modelSHA256: expected,
+            minRAMGB: 1,
+            minBandwidthTier: .c,
+            benchGate: CandidateCatalog.BenchGate(minSustainedTPS: 1, max4KTTFTMS: 1_000),
+            runtimeStatus: "recommendable",
+            notes: nil
+        )
+        let resolver = CachedModelArtifactResolver(hubRoot: hub, durableRoot: durable)
+        let staged = resolver.prefetchSnapshotURL(modelID: row.modelID, revision: revision, sha256: expected)
+        try FileManager.default.createDirectory(at: staged, withIntermediateDirectories: true)
+        try Data("unexpected".utf8).write(to: staged.appendingPathComponent("weights.bin"))
+
+        do {
+            _ = try resolver.verifiedStagedArtifactPreservingExisting(for: row)
+            XCTFail("staged artifact hash mismatch must fail")
+        } catch {
+            XCTAssertTrue(String(describing: error).contains("hash mismatch"))
+        }
+        let durableArtifact = try resolver.durableStore.artifactURL(
+            modelID: row.modelID,
+            revision: revision,
+            sha256: expected
+        )
+        XCTAssertFalse(FileManager.default.fileExists(atPath: durableArtifact.path))
+    }
+
+    func testVerifiedStagedArtifactPreservingExistingRejectsSymlinkedSnapshotAncestor() throws {
+        let hub = try tempDir()
+        let outside = try tempDir()
+        let revision = String(repeating: "f", count: 40)
+        let modelRoot = hub.appendingPathComponent("models--namespace--model", isDirectory: true)
+        try FileManager.default.createDirectory(at: modelRoot, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(
+            at: modelRoot.appendingPathComponent("snapshots", isDirectory: true),
+            withDestinationURL: outside
+        )
+        let row = CandidateCatalog.Row(
+            modelID: "namespace/model",
+            modelRevision: revision,
+            modelSHA256: String(repeating: "2", count: 64),
+            minRAMGB: 1,
+            minBandwidthTier: .c,
+            benchGate: CandidateCatalog.BenchGate(minSustainedTPS: 1, max4KTTFTMS: 1_000),
+            runtimeStatus: "recommendable",
+            notes: nil
+        )
+
+        do {
+            _ = try CachedModelArtifactResolver(hubRoot: hub)
+                .verifiedStagedArtifactPreservingExisting(for: row)
+            XCTFail("symlinked snapshots ancestor must fail closed")
+        } catch {
+            let message = String(describing: error)
+            XCTAssertTrue(message.contains("symlink in Hugging Face cache path"), message)
+        }
+        XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: outside.path).isEmpty)
+    }
+
     func testPrefetchReceiptRejectsCatalogDriftAndBenchmarkNeverDownloadsAfterBinding() async throws {
         let modelKey = "qwen3-coder-30b-a3b-instruct"
         var request = try makeRequest(modelKey: modelKey)
