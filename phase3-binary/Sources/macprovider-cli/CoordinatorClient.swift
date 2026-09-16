@@ -4303,14 +4303,12 @@ actor CoordinatorClient {
                 if Task.isCancelled { return }
                 if elapsed >= tolerance {
                     let holdActive = await self.admissionPendingHoldActive
-                    let accepted = await self.coordinatorSessionAccepted
-                    let socket = await self.webSocket
-                    if holdActive || !accepted || socket == nil {
-                        // A synthetic probe, replacement hello, or reconnect
-                        // already in flight can stall heartbeats without
-                        // meaning the process is wedged. Reconnect; do not
-                        // Darwin.exit (the physical admission-journey rig
-                        // has no launchd KeepAlive).
+                    if holdActive {
+                        // A pending BYOM admission can stall heartbeats
+                        // (synthetic probe, replacement hello) without the
+                        // process being wedged. Reconnect; do not Darwin.exit
+                        // — the physical admission-journey rig has no
+                        // launchd KeepAlive.
                         await self.closeWebSocketAfterKeepaliveFailure()
                         return
                     }
