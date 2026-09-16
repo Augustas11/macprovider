@@ -211,6 +211,9 @@ func TestRetentionPrunersDefaultToStartupDelete(t *testing.T) {
 }
 
 func TestRouteSnapshotSQLiteBusyTimeoutAbsorbsShortMoneyPathOverlap(t *testing.T) {
+	if routeSnapshotSQLiteMaxOpenConns < 4 {
+		t.Fatalf("route snapshot SQLite max open conns=%d, want enough dedicated waiters for OpenRouter c4 benchmark traffic", routeSnapshotSQLiteMaxOpenConns)
+	}
 	if routeSnapshotSQLiteBusyTimeout < 250*time.Millisecond {
 		t.Fatalf("route snapshot busy timeout=%s, want enough headroom for short SQLite writer overlap", routeSnapshotSQLiteBusyTimeout)
 	}
