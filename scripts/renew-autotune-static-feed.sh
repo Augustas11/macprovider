@@ -145,6 +145,10 @@ if [ -n "${GITHUB_SHA:-}" ]; then
   git -C "$REPO_ROOT" cat-file -e "${GITHUB_SHA}^{commit}" \
     || fatal "GITHUB_SHA $GITHUB_SHA is not in this checkout"
   git -C "$REPO_ROOT" worktree add --quiet --detach "$WORKTREE" "$GITHUB_SHA"
+  # generate reads the previous ledger via CATALOG_RELEASE_BASE_REF (default
+  # origin/main). A fetch-depth:1 Actions checkout has the SHA but not that
+  # remote-tracking ref. Bind the ledger to the same reviewed commit.
+  export CATALOG_RELEASE_BASE_REF="$GITHUB_SHA"
   log "built ephemeral worktree at $WORKTREE (GITHUB_SHA ${GITHUB_SHA:0:12})"
 else
   git -C "$REPO_ROOT" fetch --quiet origin
