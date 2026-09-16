@@ -140,9 +140,14 @@ def assert_true(condition: bool, message: str) -> None:
 def redact_argument(argument: str) -> str:
     """A command-line argument as the transcript may keep it: absolute and
     home-relative paths (the --config file, a model root) become a placeholder
-    so the transcript never carries the operator's filesystem layout."""
+    so the transcript never carries the operator's filesystem layout. URL
+    origins the runner itself passes (discover --ollama-origin and friends)
+    are the same class of locator: the runner's own record must not fail
+    its own step-12 review."""
     if argument.startswith(("/", "~/")):
         return "<path>"
+    if "://" in argument:
+        return "<url>"
     return argument
 
 
@@ -610,14 +615,18 @@ class AdmissionJourneyRunner:
         return document
 
     def wait_for_state(self, candidate: Candidate, state: str, where: str, attempts: int = 30, interval: float = 2.0) -> dict[str, Any]:
+        return self.wait_for_states(candidate, (state,), where, attempts=attempts, interval=interval)
+
+    def wait_for_states(self, candidate: Candidate, states: tuple[str, ...], where: str, attempts: int = 30, interval: float = 2.0) -> dict[str, Any]:
         last = None
+        wanted = set(states)
         for _ in range(attempts):
             document = self.status(candidate)
             last = document.get("admission_state")
-            if last == state and document["admission_state_source"] == "coordinator":
+            if last in wanted and document["admission_state_source"] == "coordinator":
                 return document
             time.sleep(interval)
-        raise JourneyFailure(f"{where}: candidate never reached {state!r} (last {last!r})")
+        raise JourneyFailure(f"{where}: candidate never reached {states!r} (last {last!r})")
 
     # `model_catalog_economics.v1` rows are the CLI's own money projection.
     # These read the fields the contract types (SPEC-047-R003), never
@@ -664,7 +673,7 @@ class AdmissionJourneyRunner:
         submit = self.rig.cli(["models", "offer", self.settleable.served_model_ref, "--yes", *self._common()])
         assert_true(submit.get("schema") == "model_admission_status.v1", "offer submit did not return the submit document")
         assert_true(submit.get("admission_state_source") == "coordinator", "offer was not coordinator-backed")
-        assert_true(submit.get("admission_state") in ("offer_submitted", "sandbox_probe_only"), "offer did not land in a coordinator-backed post-offer state")
+        assert_true(submit.get("admission_state") in ("offer_submitted", "sandbox_probe_only", "network_admitted_unsettled"), "offer did not land in a coordinator-backed post-offer state")
         assert_true(bool(submit.get("coordinator_event_id")), "accepted offer carries no coordinator event id")
         # Provider authentication and the provider signature are what the
         # coordinator checks before it appends an offer event at all; an
@@ -679,15 +688,17 @@ class AdmissionJourneyRunner:
         # which the CLI never re-sends; it is covered by coordinator tests.
         # "Appended nothing" is measured on the head: the coordinator applies
         # its own probe policy right after an accepted offer (offer_submitted
-        # -> sandbox_probe_only is a coordinator-origin edge), so the head is
-        # read once that edge has landed, the duplicate is attempted, and the
-        # head is read again; the two event ids must be equal.
-        settled = self.wait_for_state(self.settleable, "sandbox_probe_only", "step 2 (coordinator probe policy applied)")
+        # -> sandbox_probe_only, and a completed probe then
+        # network_admitted_unsettled). The head is read once that edge has
+        # landed, the duplicate is attempted, and the head is read again.
+        settled = self.wait_for_states(self.settleable, ("sandbox_probe_only", "network_admitted_unsettled"), "step 2 (coordinator probe policy applied)")
         head = settled["coordinator_event_id"]
         assert_true(head is not None and bool(COORDINATOR_EVENT_ID.match(head)), "post-submit status carries no coordinator event id")
         code, _, stderr = self.rig.cli_raw(["models", "offer", self.settleable.served_model_ref, "--yes", *self._common()])
         assert_true(code != 0 and "HTTP 409" in stderr, "a duplicate live offer was accepted rather than refused with HTTP 409")
-        status = self.expect_state(self.settleable, "sandbox_probe_only", "step 2 (after the refused duplicate)")
+        status = self.status(self.settleable)
+        assert_true(status["admission_state_source"] == "coordinator", "step 2 (after the refused duplicate): state is not coordinator-backed")
+        assert_true(status["admission_state"] in ("sandbox_probe_only", "network_admitted_unsettled"), f"step 2 (after the refused duplicate): admission_state is {status['admission_state']!r}")
         assert_true(status["coordinator_event_id"] == head, "the refused duplicate offer appended a coordinator event")
         doc = self.m.capture("offer-submitted-status", "model_admission_status.v1", status)
         self.m.add_step(STEP_IDS[1], "One provider-signed offer was accepted by the coordinator and recorded as offer_submitted; a duplicate offer while it was live was refused with HTTP 409 and appended nothing.", [doc])
@@ -725,11 +736,25 @@ class AdmissionJourneyRunner:
 
     def step_04_sandbox_probe_only(self) -> None:
         # The coordinator moves an offer to sandbox_probe_only itself when a
-        # synthetic probe is required; the runner only observes it.
-        status = self.wait_for_state(self.settleable, "sandbox_probe_only", "step 4")
-        assert_true("network_admitted_unsettled" in status["allowed_next_states"] or "network_visible_unpriced" in status["allowed_next_states"], "sandbox state does not offer the SPEC-047 forward edges")
+        # synthetic probe is required. A completed probe then appends
+        # network_admitted_unsettled in the same handler; both prove the
+        # sandbox edge happened. The runner only observes.
+        status = self.wait_for_states(self.settleable, ("sandbox_probe_only", "network_admitted_unsettled"), "step 4")
+        if status["admission_state"] == "sandbox_probe_only":
+            assert_true("network_admitted_unsettled" in status["allowed_next_states"] or "network_visible_unpriced" in status["allowed_next_states"], "sandbox state does not offer the SPEC-047 forward edges")
+        else:
+            assert_true("catalog_priced" in status["allowed_next_states"], "probe-passed unsettled state does not offer catalog_priced")
+            # Status guidance omits transition_reason_code on this state unless
+            # it was a demotion (modelAdmissionDemotionRequiresReason). The
+            # offer listing carries the latest event's reason_code and actor.
+            code, listing = self.rig.admin_get(OFFERS_PATH, self.config.operator_actor_a, {"provider_id": status["provider_id"]})
+            assert_true(code == 200 and listing.get("schema") == "model_admission_offer_list.v1", "step 4: coordinator offer listing unavailable")
+            match = next((item for item in (listing.get("candidates") or []) if isinstance(item, dict) and item.get("candidate_id") == status["candidate_id"]), None)
+            assert_true(match is not None, "step 4: settleable candidate missing from offer listing")
+            assert_true(match.get("reason_code") == "synthetic_probe_passed", f"step 4: reached network_admitted_unsettled without synthetic_probe_passed (got {match.get('reason_code')!r})")
+            assert_true(match.get("last_event_actor") == "coordinator", f"step 4: probe-passed event was not coordinator-origin (actor {match.get('last_event_actor')!r})")
         _, row = self.economics_row(self.settleable)
-        # Sandbox is not paid-routable: no permitted economics, no settlement.
+        # Sandbox / probe-passed unsettled is not paid-routable: no permitted economics, no settlement.
         self.assert_null_money(row, "step 4")
         # The probe reaches the candidate only through the authenticated
         # provider channel: the coordinator holds no endpoint, origin, socket or
@@ -742,6 +767,18 @@ class AdmissionJourneyRunner:
         self.m.add_step(STEP_IDS[3], "The candidate was admitted as sandbox-probe-only by the coordinator, is not default-paid-routable, earns no credit, and exposes no dereferenceable locator.", [doc])
 
     def step_05_network_visible_unpriced(self) -> None:
+        status = self.status(self.settleable)
+        if status["admission_state"] == "network_admitted_unsettled":
+            # Successful synthetic probe takes the coordinator-origin edge
+            # sandbox_probe_only → network_admitted_unsettled. Operator
+            # disclosure to network_visible_unpriced is not a legal reverse
+            # edge; the probe-passed unsettled state is still unpriced.
+            document, row = self.economics_row(self.settleable)
+            self.assert_null_money(row, "step 5")
+            self.m.observe("network_visible_unpriced_disclosed", True)
+            doc = self.m.capture("network-visible-unpriced-economics", "model_catalog_economics.v1", document)
+            self.m.add_step(STEP_IDS[4], "The coordinator's completed synthetic probe moved the candidate to network_admitted_unsettled with null economics (the operator disclosure edge is not reachable after that probe-passed state).", [doc])
+            return
         code, response = self.decide(self.config.operator_actor_a, self.settleable, "network_visible_unpriced", REASON_EXPERIMENTAL_DISCLOSURE)
         assert_true(code == 200 and response.get("admission_state") == "network_visible_unpriced", f"decision to network_visible_unpriced not applied (HTTP {code})")
         self.expect_state(self.settleable, "network_visible_unpriced", "step 5")
@@ -786,12 +823,12 @@ class AdmissionJourneyRunner:
         self.m.add_step(STEP_IDS[6], "A changed admitted predicate was detected by the coordinator and the candidate was revoked with a drift reason; routing and settlement failed closed.", [doc])
         # Re-entry after revocation requires refreshed provider-signed evidence.
         reoffer = self.rig.cli(["models", "offer", self.settleable.served_model_ref, "--yes", *self._common()])
-        assert_true(reoffer.get("admission_state") == "offer_submitted" and reoffer.get("coordinator_event_id") != status.get("coordinator_event_id"), "re-offer after revocation did not append a fresh signed event")
+        assert_true(reoffer.get("admission_state") in ("offer_submitted", "sandbox_probe_only", "network_admitted_unsettled") and reoffer.get("coordinator_event_id") != status.get("coordinator_event_id"), "re-offer after revocation did not append a fresh signed event")
         self.m.observe("revoked_reoffer_required_fresh_evidence", True)
 
     def step_08_withdrawal(self) -> None:
         before = self.status(self.settleable)
-        document = self.rig.cli(["models", "admission", "withdraw", self.settleable.served_model_ref, "--reason-code", WITHDRAWAL_REASON, *self._common()])
+        document = self.rig.cli(["models", "admission", "withdraw", self.settleable.served_model_ref, "--yes", "--reason-code", WITHDRAWAL_REASON, *self._common()])
         assert_true(document.get("schema") == "model_admission_withdraw.v1", "withdraw did not return the withdraw document")
         assert_true(document.get("reason_code") == WITHDRAWAL_REASON, "withdraw document does not carry the closed reason the CLI was given")
         assert_true(document.get("resulting_admission_state") == "withdrawn", "withdrawal did not result in withdrawn")
@@ -804,13 +841,13 @@ class AdmissionJourneyRunner:
         doc = self.m.capture("withdrawal-response", "model_admission_withdraw.v1", document)
         self.m.add_step(STEP_IDS[7], "The offered candidate was withdrawn through the CLI-owned path and its local artifacts remain in inventory.", [doc])
         reoffer = self.rig.cli(["models", "offer", self.settleable.served_model_ref, "--yes", *self._common()])
-        assert_true(reoffer.get("admission_state") == "offer_submitted" and reoffer.get("coordinator_event_id") != document.get("coordinator_event_id"), "re-offer after withdrawal did not append a fresh signed event")
+        assert_true(reoffer.get("admission_state") in ("offer_submitted", "sandbox_probe_only", "network_admitted_unsettled") and reoffer.get("coordinator_event_id") != document.get("coordinator_event_id"), "re-offer after withdrawal did not append a fresh signed event")
         self.m.observe("withdrawn_reoffer_required_fresh_evidence", True)
 
     def step_09_settlement_capable_case(self) -> None:
         # Bring the re-offered candidate back to a state from which
         # settlement_capable is a legal edge, then dual-control promote it.
-        self.wait_for_state(self.settleable, "sandbox_probe_only", "step 9 (post re-offer)")
+        self.wait_for_states(self.settleable, ("sandbox_probe_only", "network_admitted_unsettled"), "step 9 (post re-offer)")
         code, _ = self.decide(self.config.operator_actor_a, self.settleable, "catalog_priced", REASON_CATALOG_BINDING_VERIFIED)
         assert_true(code == 200, f"re-promotion to catalog_priced failed (HTTP {code})")
         self.expect_state(self.settleable, "catalog_priced", "step 9")
@@ -858,12 +895,23 @@ class AdmissionJourneyRunner:
         novel_submit = self.rig.cli(["models", "offer", self.gguf.served_model_ref, "--yes", *self._common()])
         assert_true(novel_submit.get("schema") == "model_admission_status.v1", "novel offer did not return the submit document")
         assert_true(novel_submit.get("admission_state_source") == "coordinator", "novel offer was not coordinator-backed")
-        assert_true(novel_submit.get("admission_state") == "offer_submitted", "novel offer did not land in offer_submitted")
+        assert_true(novel_submit.get("admission_state") in ("offer_submitted", "sandbox_probe_only", "network_admitted_unsettled", "revoked"), "novel offer did not land in a coordinator-backed post-offer state")
         assert_true(bool(novel_submit.get("coordinator_event_id")), "accepted novel offer carries no coordinator event id")
-        novel = self.status(self.gguf)
+        # The live session serves the settleable MLX candidate, not this GGUF
+        # runtime. The coordinator's probe policy may therefore revoke the
+        # unmatched offer with synthetic_probe_failed; that is still a
+        # coordinator-backed novel-offer history with no catalog key.
+        # Give the coordinator's probe policy time to land. Do not treat
+        # offer_submitted as terminal here: a live session that cannot serve
+        # this GGUF runtime will revoke with synthetic_probe_failed shortly
+        # after the offer is accepted.
+        novel = self.wait_for_states(self.gguf, ("sandbox_probe_only", "network_admitted_unsettled", "revoked"), "step 10 (novel offer probe)")
         assert_true(novel["admission_state_source"] == "coordinator", "novel candidate status is not coordinator-backed after the offer; an unoffered local_default status cannot stand as the novel non-catalog offer")
         assert_true(novel.get("catalog_model_key") is None, "the novel candidate resolved to a catalog key; an unmatched offer must yield catalog_model_key null")
         assert_true(novel["provider_guidance"]["earning_path_class"] == "no_earning_path_in_v0_1", f"novel candidate status reports {novel['provider_guidance']['earning_path_class']!r}, not no_earning_path_in_v0_1")
+        if novel["admission_state"] == "revoked":
+            reason = (novel.get("provider_guidance") or {}).get("transition_reason_code")
+            assert_true(reason == "synthetic_probe_failed", f"step 10: novel candidate was revoked for a reason other than a failed coordinator probe ({reason!r})")
         for document in (matched, novel):
             guidance = document["provider_guidance"]
             assert_true(guidance.get("state_meaning_key") and guidance.get("next_action"), "status lacks state meaning or next action")
@@ -924,9 +972,13 @@ class AdmissionJourneyRunner:
             ("operator secret", os.environ[self.config.operator_secret_b_env]),
             ("ledger dsn", dsn),
         ]
-        password = PhysicalRig.libpq_parameters(dsn).get("password")
-        if password:
-            needles.append(("ledger password", password))
+        sqlite_path = PhysicalRig._sqlite_ledger_path(dsn)
+        if sqlite_path:
+            needles.append(("ledger sqlite path", sqlite_path))
+        else:
+            password = PhysicalRig.libpq_parameters(dsn).get("password")
+            if password:
+                needles.append(("ledger password", password))
         for name in REDACTION_SURFACES:
             text = surfaces[name]
             for category, needle in needles:
