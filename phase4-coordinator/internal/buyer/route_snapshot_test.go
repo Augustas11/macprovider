@@ -201,6 +201,68 @@ func TestRouteSnapshotsPersistBeforeDispatchAndRetryAttempts(t *testing.T) {
 	}
 }
 
+func TestRouteSnapshotLegacyGuardRunsOnceAtInsertBoundary(t *testing.T) {
+	tier2.ResetForTest()
+	t.Cleanup(tier2.ResetForTest)
+	raw, pubkey := routeSnapshotCatalogFixture(t, "legacy-guard-boundary-catalog", time.Now().UTC().Add(time.Hour))
+	if err := tier2.Configure(config.Tier2Config{
+		ObserveEnabled:      true,
+		CatalogPath:         writeRouteSnapshotCatalog(t, raw),
+		CatalogPublicKey:    pubkey,
+		RequireHashVerified: true,
+	}, zerolog.Nop()); err != nil {
+		t.Fatalf("tier2.Configure: %v", err)
+	}
+
+	reqLog, dbPath := openBuyerRequestLog(t)
+	t.Cleanup(func() { _ = reqLog.Close() })
+	billingStore, err := billing.NewStore(reqLog.DB())
+	if err != nil {
+		t.Fatalf("billing.NewStore: %v", err)
+	}
+	setSettlementModeForTest(billingStore, billing.RouteSnapshotModeObserve)
+	cfg := config.Default().Rewards
+	snapshotID, err := billingStore.InsertConfigSnapshot(context.Background(), cfg, time.Unix(1716768000, 0).UTC())
+	if err != nil {
+		t.Fatalf("InsertConfigSnapshot: %v", err)
+	}
+
+	var reachedProvider bool
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reachedProvider = true
+		writeProviderOK(w)
+	}))
+	defer upstream.Close()
+
+	registry := pool.NewRegistry(nil)
+	registerSettlementProvider(registry, "p1", "session-1", upstream.URL, 30, bytes.Repeat([]byte{0x71}, 32))
+	guard := &countingLegacyRouteGuard{generation: 7}
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithRequestLog(reqLog),
+		buyer.WithBilling(billingStore, cfg),
+		buyer.WithBillingSnapshotID(snapshotID),
+		buyer.WithModelAdmissionStore(providerws.NewMemoryModelAdmissionStore()),
+		buyer.WithModelAdmissionRouteGuard(guard),
+	)
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`), nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if !reachedProvider {
+		t.Fatal("provider was not reached")
+	}
+	if guard.calls != 1 {
+		t.Fatalf("legacy route guard calls=%d, want 1 insert-boundary compare", guard.calls)
+	}
+	if got := routeSnapshotCount(t, dbPath); got != 1 {
+		t.Fatalf("route snapshots=%d want 1", got)
+	}
+}
+
 // TestRouteSnapshotPendingDeadlineUsesDedicatedKeyNotRecoveryGrace locks the
 // money-path wiring: settlement.pending_deadline_seconds and
 // settlement.recovery_grace_seconds are set to distinct values and the
@@ -2034,6 +2096,26 @@ func (g pressureRouteGuard) CompareAndInsertModelAdmissionRouteSnapshot(_ contex
 		}
 	}
 	return g.err
+}
+
+type countingLegacyRouteGuard struct {
+	generation uint64
+	calls      int
+}
+
+func (g *countingLegacyRouteGuard) ModelAdmissionBindingGeneration(string) uint64 {
+	return g.generation
+}
+
+func (g *countingLegacyRouteGuard) CompareAndInsertModelAdmissionRouteSnapshot(_ context.Context, expect providerws.ModelAdmissionRouteExpectation, insert func() error) error {
+	g.calls++
+	if expect.CandidateID != "" {
+		return providerws.ErrModelAdmissionRouteStale
+	}
+	if insert != nil {
+		return insert()
+	}
+	return nil
 }
 
 // bindBYOMSession installs the coordinator-derived session-to-candidate
