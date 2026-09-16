@@ -203,6 +203,85 @@ final class BYOMAdmissionTests: XCTestCase {
         XCTAssertNil(environment.artifactDigests.knownDigest(forOllamaModel: "tiny-offer-1b:q4"), "nothing is recorded for the non-GGUF bytes")
     }
 
+    /// #1486 / SPEC-047-R002 at the production boundary: `models offer` for an
+    /// mlx_cache candidate posts `artifact_hashes` carrying the
+    /// `macprovider.snapshot-manifest.v1` hash computed over the served/durable
+    /// artifact directory, so the coordinator's SPEC-047 primary-row match can
+    /// bind it (the map was previously empty for mlx_cache, so the candidate
+    /// never reached catalog_priced). The attestation is confined to the served
+    /// candidate: a servedModelID matching neither the candidate's served ref
+    /// nor its catalog key posts NO hash for this artifact.
+    func testMLXCacheOfferCarriesSnapshotManifestHash() async throws {
+        let root = try temporaryBYOMAdmissionDirectory("byom-admission-mlx-hash")
+        let namespace = root.appendingPathComponent("ns")
+        let cache = root.appendingPathComponent("hf", isDirectory: true)
+        try writeBYOMAdmissionNamespace(at: namespace)
+        try createBYOMAdmissionMLXSnapshot(cacheRoot: cache, modelID: "mlx-community/Tiny-1B-4bit")
+
+        // The served/durable artifact directory holds real files (no symlinks),
+        // as canonicalArtifactHash requires — this is what config
+        // model_artifact_path points at in production.
+        let served = root.appendingPathComponent("durable", isDirectory: true)
+        try FileManager.default.createDirectory(at: served, withIntermediateDirectories: true)
+        try Data("{\"model_type\":\"llama\"}".utf8).write(to: served.appendingPathComponent("config.json"))
+        try Data(repeating: 0x24, count: 4096).write(to: served.appendingPathComponent("model.safetensors"))
+        let expected = try ModelArtifactVerifier.canonicalArtifactHash(directory: served)
+
+        let identity = Curve25519.Signing.PrivateKey()
+        let posted = BYOMAdmissionPostedHashes()
+        func makeRuntime() -> BYOMModelAdmissionRuntime {
+            let session = makeBYOMAdmissionSession { request in
+                let body = try XCTUnwrap(byomAdmissionRequestBody(request))
+                let object = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
+                XCTAssertEqual(object["runtime_source"] as? String, "mlx_cache")
+                posted.record(object["artifact_hashes"] as? [String: String] ?? [:])
+                let candidateID = try XCTUnwrap(object["candidate_id"] as? String)
+                return BYOMAdmissionMockHTTPResponse(
+                    statusCode: 200,
+                    body: """
+                    {"admission_state":"offer_submitted","admission_state_source":"coordinator","allowed_next_states":["sandbox_probe_only"],"candidate_id":"\(candidateID)","catalog_model_key":null,"cli_version":"test","coordinator_event_id":"event_test","generated_at":"2027-01-15T08:00:00Z","provider_guidance":{"earning_path_class":"no_earning_path_in_v0_1","next_action":"wait_for_coordinator","state_label_key":"byom.admission.offer_submitted","state_meaning_key":"byom.admission.not_earning","transition_reason_code":null},"provider_id":"provider-byom-a","schema":"model_admission_status.v1","served_model_ref":"mlx-community/Tiny-1B-4bit","state_observed_at":"2027-01-15T08:00:00Z","warnings":[]}
+                    """
+                )
+            }
+            return BYOMModelAdmissionRuntime(
+                environment: BYOMDiscoveryEnvironment(namespaceURL: namespace, mlxCacheRoot: cache, ollamaOrigin: nil),
+                credentialStore: BYOMAdmissionCredentialStore(token: "provider-token-test"),
+                identityStore: BYOMAdmissionIdentityStore(identity: identity),
+                client: BYOMModelAdmissionClient(baseURL: URL(string: "https://coordinator.test")!, session: session),
+                httpClient: BYOMAdmissionDiscoveryHTTPClient()
+            )
+        }
+
+        // Served model matches the candidate's served ref -> the
+        // snapshot-manifest hash of the served artifact is attested.
+        let status = try await makeRuntime().submitOffer(
+            providerID: "provider-byom-a",
+            target: "mlx-community/Tiny-1B-4bit",
+            evaluationDigestSHA256: String(repeating: "b", count: 64),
+            requestedDisclosureClass: "non_earning_provider_asserted",
+            servedArtifactPath: served.path,
+            servedModelID: "mlx-community/Tiny-1B-4bit"
+        )
+        XCTAssertEqual(status.admissionState, "offer_submitted")
+        XCTAssertEqual(posted.hashes[ModelArtifactIdentity.snapshotManifestV1], expected,
+                       "an mlx_cache offer must carry the snapshot-manifest hash of the served artifact")
+
+        // Guard: a servedModelID that is neither the candidate's served ref nor
+        // its catalog key attests NO artifact hash for this candidate.
+        posted.record([:])
+        let guarded = try await makeRuntime().submitOffer(
+            providerID: "provider-byom-a",
+            target: "mlx-community/Tiny-1B-4bit",
+            evaluationDigestSHA256: String(repeating: "b", count: 64),
+            requestedDisclosureClass: "non_earning_provider_asserted",
+            servedArtifactPath: served.path,
+            servedModelID: "mlx-community/Some-Other-Model-4bit"
+        )
+        XCTAssertEqual(guarded.admissionState, "offer_submitted")
+        XCTAssertNil(posted.hashes[ModelArtifactIdentity.snapshotManifestV1],
+                     "a candidate that is not the served model must not be attested with this artifact")
+    }
+
     func testAdmissionStatusClientReadsCandidateStatus() async throws {
         let session = makeBYOMAdmissionSession { request in
             XCTAssertEqual(request.httpMethod, "GET")
