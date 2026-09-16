@@ -525,13 +525,19 @@ sleep 5
 # that happens to be recent; an exact match proves the coordinator reloaded THIS
 # release. generated_at is second-precision and unique to this run.
 SERVED_JSON="$(curl -fsS --max-time 20 "$COORDINATOR_HEALTH_URL" 2>/dev/null)" || { rollback; fatal "served rate-card unreachable after reload"; }
+# The check body is plain Python with no backslashes: a backslash-escaped
+# quote inside a bash single-quoted f-string is a SyntaxError at deploy time
+# (2026-09-16 renewal rolled back a GOOD reload on exactly that), and a
+# verifier that cannot run is indistinguishable from a failed activation.
+# scripts/tests/test_renew_served_feed_check.py executes this exact block.
 if ! printf '%s' "$SERVED_JSON" | python3 -c '
 import json, sys
 expected = sys.argv[1]
 served = json.loads(sys.stdin.read())
 gen = served.get("generated_at", "")
 ok = gen == expected
-print(f"served generated_at={gen} (expected exactly {expected}) -> {\"OK\" if ok else \"MISMATCH\"}", file=sys.stderr)
+verdict = "OK" if ok else "MISMATCH"
+print("served generated_at=%s (expected exactly %s) -> %s" % (gen, expected, verdict), file=sys.stderr)
 sys.exit(0 if ok else 1)
 ' "$NOW_ISO"; then
   rollback
