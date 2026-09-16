@@ -383,6 +383,27 @@ func TestMoneySQLiteMaintenanceYieldHonorsMaxDeferral(t *testing.T) {
 	}
 }
 
+func TestMoneySQLiteRollupGateYieldsButHonorsMaxDeferral(t *testing.T) {
+	now := time.Unix(250, 0)
+	gate := newMoneySQLiteRollupGate(fixedIdleTracker{idleFor: 0})
+	if !gate.ShouldYield("overview", now) {
+		t.Fatal("active buyer traffic should yield first rollup tick")
+	}
+	if gate.ShouldYield("overview", now.Add(moneySQLiteMaintenanceMaxDeferral)) {
+		t.Fatal("max deferral should force a rollup tick")
+	}
+	if !gate.ShouldYield("overview", now.Add(moneySQLiteMaintenanceMaxDeferral+time.Second)) {
+		t.Fatal("recent forced tick should reset the deferral window")
+	}
+}
+
+func TestMoneySQLiteRollupGateRunsWhenIdle(t *testing.T) {
+	gate := newMoneySQLiteRollupGate(fixedIdleTracker{idleFor: time.Hour})
+	if gate.ShouldYield("overview", time.Unix(300, 0)) {
+		t.Fatal("idle buyer traffic should not yield rollup ticks")
+	}
+}
+
 func TestSettlementReceiptAuditOutboxDrainerStartupRunsDuringRecentTraffic(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

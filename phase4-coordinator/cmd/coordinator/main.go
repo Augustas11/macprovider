@@ -16,6 +16,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -510,6 +511,7 @@ func main() {
 			fmt.Fprintf(os.Stderr, "stats rollup: %v\n", err)
 			os.Exit(1)
 		}
+		statsRollup.WithTickGate(newMoneySQLiteRollupGate(moneySQLiteActivity).ShouldYield)
 		statsRollup.Start(shutdownCtx)
 		logger.Info().Str("backfill_mode", mode).Int64("partial_history_since_unix", partialUnix).Msg("SPEC-017 stats rollup started (overview/timeseries/leaderboards/rewards_populated/nightly_rebuild)")
 	}
@@ -1689,6 +1691,34 @@ func shouldYieldMoneySQLiteMaintenance(idle moneySQLiteIdleTracker, minIdle time
 		return false
 	}
 	return now.Sub(time.Unix(0, lastAttempt)) < maxDeferral
+}
+
+type moneySQLiteRollupGate struct {
+	idle     moneySQLiteIdleTracker
+	attempts sync.Map
+}
+
+func newMoneySQLiteRollupGate(idle moneySQLiteIdleTracker) *moneySQLiteRollupGate {
+	return &moneySQLiteRollupGate{idle: idle}
+}
+
+func (g *moneySQLiteRollupGate) ShouldYield(job string, now time.Time) bool {
+	if g == nil {
+		return false
+	}
+	if job == "" {
+		job = "unknown"
+	}
+	value, _ := g.attempts.LoadOrStore(job, newMoneySQLiteMaintenanceAttemptState(now))
+	attempts, ok := value.(*moneySQLiteMaintenanceAttemptState)
+	if !ok {
+		return false
+	}
+	if shouldYieldMoneySQLiteMaintenance(g.idle, moneySQLiteMaintenanceMinIdle, attempts, moneySQLiteMaintenanceMaxDeferral, now) {
+		return true
+	}
+	attempts.MarkAttempt(now)
+	return false
 }
 
 func withMoneySQLiteActivity(next http.Handler, activity *moneySQLiteActivity) http.Handler {
