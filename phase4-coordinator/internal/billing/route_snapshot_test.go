@@ -323,6 +323,79 @@ func TestInsertRouteSnapshotDedicatedHandleAllowsFilingConcurrencyWaiters(t *tes
 	}
 }
 
+func TestInsertRouteSnapshotJournalBuffersMainWriterPressure(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "coordinator.db")
+	reqStore, err := requestlog.OpenStore(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reqStore.Close() })
+	store, err := NewStore(reqStore.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	journalDB, err := sql.Open("sqlite", sqliteutil.WithManualWALCheckpointPragmas(dbPath+".route-snapshots"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	journalDB.SetMaxOpenConns(1)
+	journalDB.SetMaxIdleConns(1)
+	t.Cleanup(func() { _ = journalDB.Close() })
+	store.SetRouteSnapshotJournalDB(journalDB)
+	if err := store.InitRouteSnapshotJournal(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	lockDB, err := sql.Open("sqlite", sqliteutil.WithManualWALCheckpointPragmas(dbPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lockDB.SetMaxOpenConns(1)
+	lockDB.SetMaxIdleConns(1)
+	t.Cleanup(func() { _ = lockDB.Close() })
+	lockConn, err := lockDB.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lockConn.Close()
+	if _, err := lockConn.ExecContext(context.Background(), `BEGIN IMMEDIATE`); err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot := testRouteSnapshot()
+	snapshot.RequestID = "req-route-snapshot-journal-buffer"
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	digest, err := store.InsertRouteSnapshot(ctx, snapshot)
+	cancel()
+	if err != nil {
+		t.Fatalf("journal-backed route snapshot insert under main writer lock: %v", err)
+	}
+	if digest == "" {
+		t.Fatal("journal-backed route snapshot insert returned empty digest")
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM settlement_route_snapshots WHERE request_id='req-route-snapshot-journal-buffer'`); got != 0 {
+		t.Fatalf("main route snapshot rows under held writer lock=%d want 0", got)
+	}
+	if got := scalar(t, journalDB, `SELECT COUNT(*) FROM settlement_route_snapshot_journal WHERE request_id='req-route-snapshot-journal-buffer'`); got != 1 {
+		t.Fatalf("journal route snapshot rows=%d want 1", got)
+	}
+
+	if _, err := lockConn.ExecContext(context.Background(), `ROLLBACK`); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MirrorRouteSnapshotForAttempt(context.Background(), SettlementReceiptIdentity{
+		AccountScope: snapshot.AccountScope,
+		RequestID:    snapshot.RequestID,
+		AttemptN:     snapshot.AttemptN,
+		ProviderID:   snapshot.ProviderID,
+	}); err != nil {
+		t.Fatalf("mirror route snapshot from journal: %v", err)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM settlement_route_snapshots WHERE request_id='req-route-snapshot-journal-buffer'`); got != 1 {
+		t.Fatalf("main mirrored route snapshot rows=%d want 1", got)
+	}
+}
+
 func TestInsertRouteSnapshotRetriesShortSQLiteBusyUntilWriterLockClears(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "coordinator.db")
 	reqStore, err := requestlog.OpenStore(dbPath)

@@ -29,6 +29,7 @@ type Store struct {
 	// behind request_log pool users while SQLite still serializes the writer
 	// lock and enforces the same WAL/synchronous pragmas.
 	routeSnapshotDB            atomic.Pointer[sql.DB]
+	routeSnapshotJournalDB     atomic.Pointer[sql.DB]
 	routeSnapshotBusyTimeoutMS atomic.Int64
 	settlementMu               sync.RWMutex
 	settlement                 SettlementConfig
@@ -81,6 +82,13 @@ func (s *Store) SetRouteSnapshotDB(db *sql.DB) {
 		return
 	}
 	s.routeSnapshotDB.Store(db)
+}
+
+func (s *Store) SetRouteSnapshotJournalDB(db *sql.DB) {
+	if s == nil {
+		return
+	}
+	s.routeSnapshotJournalDB.Store(db)
 }
 
 func (s *Store) SetRouteSnapshotBusyTimeout(timeout time.Duration) {

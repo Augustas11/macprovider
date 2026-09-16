@@ -34,6 +34,7 @@ const (
 	MaxPendingReceiptDeadlineSeconds = 900
 	routeSnapshotRetryInitialDelay   = 10 * time.Millisecond
 	routeSnapshotRetryMaxDelay       = 100 * time.Millisecond
+	routeSnapshotPrimaryMirrorBudget = 25 * time.Millisecond
 )
 
 var (
@@ -298,19 +299,37 @@ func (s *Store) InsertRouteSnapshot(ctx context.Context, snapshot RouteSnapshot)
 	if err != nil {
 		return "", err
 	}
-	connWaitStarted := time.Now()
-	db := s.routeSnapshotHandle()
-	if db == nil {
-		return "", fmt.Errorf("billing store is closed")
+	if journalDB := s.routeSnapshotJournalDB.Load(); journalDB != nil {
+		if err := s.insertRouteSnapshotRow(ctx, journalDB, "route_snapshot_journal", "settlement_route_snapshot_journal", snapshot, digest, string(rendered), string(canonical), true); err != nil {
+			return "", err
+		}
+		mirrorCtx, cancel := routeSnapshotMirrorContext(ctx, routeSnapshotPrimaryMirrorBudget)
+		_ = s.insertRouteSnapshotRow(mirrorCtx, s.routeSnapshotHandle(), "route_snapshot", "settlement_route_snapshots", snapshot, digest, string(rendered), string(canonical), false)
+		cancel()
+		return digest, nil
 	}
+	if err := s.insertRouteSnapshotRow(ctx, s.routeSnapshotHandle(), "route_snapshot", "settlement_route_snapshots", snapshot, digest, string(rendered), string(canonical), true); err != nil {
+		return "", err
+	}
+	return digest, nil
+}
+
+func (s *Store) insertRouteSnapshotRow(ctx context.Context, db *sql.DB, component, table string, snapshot RouteSnapshot, digest, rendered, canonical string, retry bool) error {
+	if db == nil {
+		return fmt.Errorf("billing store is closed")
+	}
+	if table != "settlement_route_snapshots" && table != "settlement_route_snapshot_journal" {
+		return fmt.Errorf("unsupported route snapshot table %q", table)
+	}
+	connWaitStarted := time.Now()
 	conn, err := db.Conn(ctx)
-	s.observeSQLiteConnectionWait("route_snapshot", err, time.Since(connWaitStarted))
+	s.observeSQLiteConnectionWait(component, err, time.Since(connWaitStarted))
 	if err != nil {
-		return "", wrapRouteSnapshotStorePressure(err)
+		return wrapRouteSnapshotStorePressure(err)
 	}
 	defer conn.Close()
 	if err := s.applyRouteSnapshotBusyTimeout(ctx, conn); err != nil {
-		return "", wrapRouteSnapshotStorePressure(err)
+		return wrapRouteSnapshotStorePressure(err)
 	}
 
 	hasDeadline := false
@@ -321,7 +340,7 @@ func (s *Store) InsertRouteSnapshot(ctx context.Context, snapshot RouteSnapshot)
 	for {
 		started := time.Now()
 		_, err = conn.ExecContext(ctx, `
-INSERT INTO settlement_route_snapshots (
+INSERT INTO `+table+` (
     account_scope, request_id, attempt_n, provider_id,
     provider_session_id, provider_generation_id, pool_id, paid_entrypoint,
     provider_receipt_key_id, provider_receipt_key_source,
@@ -356,21 +375,318 @@ INSERT INTO settlement_route_snapshots (
 			snapshot.RouteDecisionTSUnixMS, snapshot.RequestStartTSUnixMS, snapshot.PendingDeadlineSeconds,
 			snapshot.PromptHashBasis, snapshot.PromptHash,
 			boolInt(snapshot.ComputeIntegrityCaptureRequired), boolInt(snapshot.ComputeIntegritySamplingCovered), nullString(snapshot.ComputeIntegrityHardwareDigest),
-			digest, string(rendered),
-			string(canonical),
+			digest, rendered,
+			canonical,
 		)
-		s.observeSQLiteWrite("route_snapshot", "route_snapshot_insert", err, time.Since(started))
+		s.observeSQLiteWrite(component, "route_snapshot_insert", err, time.Since(started))
 		if err == nil {
-			return digest, nil
+			return nil
 		}
 		if !routeSnapshotStorePressure(err) {
-			return "", err
+			return err
 		}
-		if !hasDeadline || !sleepRouteSnapshotRetry(ctx, attempt) {
-			return "", wrapRouteSnapshotStorePressure(err)
+		if !retry || !hasDeadline || !sleepRouteSnapshotRetry(ctx, attempt) {
+			return wrapRouteSnapshotStorePressure(err)
 		}
 		attempt++
 	}
+}
+
+func routeSnapshotMirrorContext(parent context.Context, budget time.Duration) (context.Context, context.CancelFunc) {
+	if parent == nil {
+		parent = context.Background()
+	}
+	if budget <= 0 {
+		return context.WithCancel(parent)
+	}
+	if deadline, ok := parent.Deadline(); ok {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return context.WithCancel(parent)
+		}
+		if remaining < budget {
+			budget = remaining
+		}
+	}
+	return context.WithTimeout(parent, budget)
+}
+
+func (s *Store) InitRouteSnapshotJournal(ctx context.Context) error {
+	if s == nil {
+		return fmt.Errorf("billing store is nil")
+	}
+	db := s.routeSnapshotJournalDB.Load()
+	if db == nil {
+		return nil
+	}
+	_, err := db.ExecContext(ctx, `
+PRAGMA journal_mode=WAL;
+CREATE TABLE IF NOT EXISTS settlement_route_snapshot_journal (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_scope TEXT NOT NULL,
+    request_id TEXT NOT NULL,
+    attempt_n INTEGER NOT NULL CHECK(attempt_n >= 0),
+    provider_id TEXT NOT NULL,
+    provider_session_id TEXT NULL,
+    provider_generation_id TEXT NULL,
+    pool_id TEXT NULL,
+    paid_entrypoint TEXT NOT NULL,
+    provider_receipt_key_id TEXT NOT NULL CHECK(length(provider_receipt_key_id) = 79 AND substr(provider_receipt_key_id, 1, 15) = 'ed25519-sha256:' AND substr(provider_receipt_key_id, 16) NOT GLOB '*[^0-9a-f]*'),
+    provider_receipt_key_source TEXT NOT NULL CHECK(provider_receipt_key_source IN ('auth_session','rotation_grace','operator_pin')),
+    model_id TEXT NOT NULL,
+    provider_reported_model_hash TEXT NOT NULL CHECK(length(provider_reported_model_hash) = 64 AND provider_reported_model_hash NOT GLOB '*[^0-9a-f]*'),
+    expected_catalog_model_hash TEXT NOT NULL CHECK(length(expected_catalog_model_hash) = 64 AND expected_catalog_model_hash NOT GLOB '*[^0-9a-f]*'),
+    catalog_id TEXT NOT NULL,
+    catalog_body_digest TEXT NOT NULL CHECK(length(catalog_body_digest) = 64 AND catalog_body_digest NOT GLOB '*[^0-9a-f]*'),
+    catalog_signature_key_id TEXT NOT NULL,
+    catalog_signature_pubkey_fingerprint TEXT NOT NULL CHECK(length(catalog_signature_pubkey_fingerprint) = 79 AND substr(catalog_signature_pubkey_fingerprint, 1, 15) = 'ed25519-sha256:' AND substr(catalog_signature_pubkey_fingerprint, 16) NOT GLOB '*[^0-9a-f]*'),
+    catalog_expires_at_unix_ms INTEGER NOT NULL CHECK(catalog_expires_at_unix_ms > 0),
+    spec008_hash_status TEXT NOT NULL,
+    route_snapshot_policy_version TEXT NOT NULL,
+    route_snapshot_mode TEXT NOT NULL CHECK(route_snapshot_mode IN ('observe','enforce')),
+    route_decision_ts_unix_ms INTEGER NOT NULL CHECK(route_decision_ts_unix_ms > 0),
+    request_start_ts_unix_ms INTEGER NOT NULL CHECK(request_start_ts_unix_ms > 0),
+    pending_deadline_seconds INTEGER NOT NULL CHECK(pending_deadline_seconds BETWEEN 1 AND 900),
+    prompt_hash_basis TEXT NOT NULL,
+    prompt_hash TEXT NOT NULL CHECK(length(prompt_hash) = 64 AND prompt_hash NOT GLOB '*[^0-9a-f]*'),
+    compute_integrity_capture_required INTEGER NOT NULL DEFAULT 0 CHECK(compute_integrity_capture_required IN (0,1)),
+    compute_integrity_sampling_profile_covered INTEGER NOT NULL DEFAULT 0 CHECK(compute_integrity_sampling_profile_covered IN (0,1)),
+    compute_integrity_hardware_runtime_class_digest TEXT NULL CHECK(compute_integrity_hardware_runtime_class_digest IS NULL OR (length(compute_integrity_hardware_runtime_class_digest) = 71 AND substr(compute_integrity_hardware_runtime_class_digest, 1, 7) = 'sha256:' AND substr(compute_integrity_hardware_runtime_class_digest, 8) NOT GLOB '*[^0-9a-f]*')),
+    route_snapshot_digest TEXT NOT NULL CHECK(length(route_snapshot_digest) = 64 AND route_snapshot_digest NOT GLOB '*[^0-9a-f]*'),
+    route_snapshot_json TEXT NOT NULL,
+    route_snapshot_canonical_json TEXT NOT NULL,
+    created_at_utc TEXT NOT NULL,
+    mirrored_at_utc TEXT NULL,
+    UNIQUE(account_scope, request_id, attempt_n, provider_id)
+);
+CREATE INDEX IF NOT EXISTS idx_srsj_request ON settlement_route_snapshot_journal(account_scope, request_id, attempt_n);
+CREATE INDEX IF NOT EXISTS idx_srsj_provider ON settlement_route_snapshot_journal(provider_id, created_at_utc);
+CREATE INDEX IF NOT EXISTS idx_srsj_digest ON settlement_route_snapshot_journal(route_snapshot_digest);
+CREATE TRIGGER IF NOT EXISTS trg_srsj_immutable
+BEFORE UPDATE OF account_scope, request_id, attempt_n, provider_id,
+                 provider_session_id, provider_generation_id, pool_id,
+                 paid_entrypoint, provider_receipt_key_id,
+                 provider_receipt_key_source, model_id,
+                 provider_reported_model_hash, expected_catalog_model_hash,
+                 catalog_id, catalog_body_digest, catalog_signature_key_id,
+                 catalog_signature_pubkey_fingerprint,
+                 catalog_expires_at_unix_ms, spec008_hash_status,
+                 route_snapshot_policy_version, route_snapshot_mode,
+                 route_decision_ts_unix_ms, request_start_ts_unix_ms,
+                 pending_deadline_seconds, prompt_hash_basis, prompt_hash,
+                 compute_integrity_capture_required,
+                 compute_integrity_sampling_profile_covered,
+                 compute_integrity_hardware_runtime_class_digest,
+                 route_snapshot_digest, route_snapshot_json,
+                 route_snapshot_canonical_json, created_at_utc
+ON settlement_route_snapshot_journal
+BEGIN
+    SELECT RAISE(ABORT, 'settlement route snapshot journal is immutable');
+END;
+`)
+	return err
+}
+
+type persistedRouteSnapshotRow struct {
+	AccountScope                      string
+	RequestID                         string
+	AttemptN                          int64
+	ProviderID                        string
+	ProviderSession                   sql.NullString
+	ProviderGeneration                sql.NullString
+	PoolID                            sql.NullString
+	PaidEntrypoint                    string
+	ProviderReceiptKeyID              string
+	ProviderReceiptKeySource          string
+	ModelID                           string
+	ProviderReportedModelHash         string
+	ExpectedCatalogModelHash          string
+	CatalogID                         string
+	CatalogBodyDigest                 string
+	CatalogSignatureKeyID             string
+	CatalogSignaturePubkeyFingerprint string
+	CatalogExpiresAtUnixMS            int64
+	Spec008HashStatus                 string
+	RouteSnapshotPolicyVersion        string
+	RouteSnapshotMode                 string
+	RouteDecisionTSUnixMS             int64
+	RequestStartTSUnixMS              int64
+	PendingDeadlineSeconds            int64
+	PromptHashBasis                   string
+	PromptHash                        string
+	ComputeIntegrityCaptureRequired   int
+	ComputeIntegritySamplingCovered   int
+	ComputeIntegrityHardwareDigest    sql.NullString
+	RouteSnapshotDigest               string
+	RouteSnapshotJSON                 string
+	RouteSnapshotCanonicalJSON        string
+	CreatedAtUTC                      string
+}
+
+func (s *Store) MirrorRouteSnapshotForAttempt(ctx context.Context, id SettlementReceiptIdentity) error {
+	if s == nil {
+		return fmt.Errorf("billing store is nil")
+	}
+	journalDB := s.routeSnapshotJournalDB.Load()
+	if journalDB == nil {
+		return nil
+	}
+	row, found, err := loadRouteSnapshotJournalRow(ctx, journalDB, id)
+	if err != nil || !found {
+		return err
+	}
+	if err := s.insertPersistedRouteSnapshot(ctx, row); err != nil {
+		return err
+	}
+	_, err = journalDB.ExecContext(ctx, `
+UPDATE settlement_route_snapshot_journal
+   SET mirrored_at_utc = COALESCE(mirrored_at_utc, strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+ WHERE account_scope = ? AND request_id = ? AND attempt_n = ? AND provider_id = ?`,
+		id.AccountScope, id.RequestID, id.AttemptN, id.ProviderID)
+	return err
+}
+
+func (s *Store) MirrorPendingRouteSnapshots(ctx context.Context, limit int) (int, error) {
+	if s == nil {
+		return 0, fmt.Errorf("billing store is nil")
+	}
+	journalDB := s.routeSnapshotJournalDB.Load()
+	if journalDB == nil {
+		return 0, nil
+	}
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := journalDB.QueryContext(ctx, `
+SELECT account_scope, request_id, attempt_n, provider_id
+  FROM settlement_route_snapshot_journal
+ WHERE mirrored_at_utc IS NULL
+ ORDER BY id
+ LIMIT ?`, limit)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	var ids []SettlementReceiptIdentity
+	for rows.Next() {
+		var id SettlementReceiptIdentity
+		if err := rows.Scan(&id.AccountScope, &id.RequestID, &id.AttemptN, &id.ProviderID); err != nil {
+			return 0, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	mirrored := 0
+	for _, id := range ids {
+		if err := s.MirrorRouteSnapshotForAttempt(ctx, id); err != nil {
+			return mirrored, err
+		}
+		mirrored++
+	}
+	return mirrored, nil
+}
+
+func loadRouteSnapshotJournalRow(ctx context.Context, db *sql.DB, id SettlementReceiptIdentity) (persistedRouteSnapshotRow, bool, error) {
+	var row persistedRouteSnapshotRow
+	err := db.QueryRowContext(ctx, `
+SELECT account_scope, request_id, attempt_n, provider_id,
+       provider_session_id, provider_generation_id, pool_id, paid_entrypoint,
+       provider_receipt_key_id, provider_receipt_key_source,
+       model_id, provider_reported_model_hash, expected_catalog_model_hash,
+       catalog_id, catalog_body_digest, catalog_signature_key_id,
+       catalog_signature_pubkey_fingerprint, catalog_expires_at_unix_ms,
+       spec008_hash_status, route_snapshot_policy_version, route_snapshot_mode,
+       route_decision_ts_unix_ms, request_start_ts_unix_ms, pending_deadline_seconds,
+       prompt_hash_basis, prompt_hash, compute_integrity_capture_required,
+       compute_integrity_sampling_profile_covered, compute_integrity_hardware_runtime_class_digest,
+       route_snapshot_digest, route_snapshot_json, route_snapshot_canonical_json, created_at_utc
+  FROM settlement_route_snapshot_journal
+ WHERE account_scope = ? AND request_id = ? AND attempt_n = ? AND provider_id = ?`,
+		id.AccountScope, id.RequestID, id.AttemptN, id.ProviderID,
+	).Scan(
+		&row.AccountScope, &row.RequestID, &row.AttemptN, &row.ProviderID,
+		&row.ProviderSession, &row.ProviderGeneration, &row.PoolID, &row.PaidEntrypoint,
+		&row.ProviderReceiptKeyID, &row.ProviderReceiptKeySource,
+		&row.ModelID, &row.ProviderReportedModelHash, &row.ExpectedCatalogModelHash,
+		&row.CatalogID, &row.CatalogBodyDigest, &row.CatalogSignatureKeyID,
+		&row.CatalogSignaturePubkeyFingerprint, &row.CatalogExpiresAtUnixMS,
+		&row.Spec008HashStatus, &row.RouteSnapshotPolicyVersion, &row.RouteSnapshotMode,
+		&row.RouteDecisionTSUnixMS, &row.RequestStartTSUnixMS, &row.PendingDeadlineSeconds,
+		&row.PromptHashBasis, &row.PromptHash, &row.ComputeIntegrityCaptureRequired,
+		&row.ComputeIntegritySamplingCovered, &row.ComputeIntegrityHardwareDigest,
+		&row.RouteSnapshotDigest, &row.RouteSnapshotJSON, &row.RouteSnapshotCanonicalJSON, &row.CreatedAtUTC,
+	)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return persistedRouteSnapshotRow{}, false, nil
+		}
+		return persistedRouteSnapshotRow{}, false, err
+	}
+	return row, true, nil
+}
+
+func (s *Store) insertPersistedRouteSnapshot(ctx context.Context, row persistedRouteSnapshotRow) error {
+	if s == nil || s.db == nil {
+		return fmt.Errorf("billing store is closed")
+	}
+	_, err := s.db.ExecContext(ctx, `
+INSERT OR IGNORE INTO settlement_route_snapshots (
+    account_scope, request_id, attempt_n, provider_id,
+    provider_session_id, provider_generation_id, pool_id, paid_entrypoint,
+    provider_receipt_key_id, provider_receipt_key_source,
+    model_id, provider_reported_model_hash, expected_catalog_model_hash,
+    catalog_id, catalog_body_digest, catalog_signature_key_id,
+    catalog_signature_pubkey_fingerprint, catalog_expires_at_unix_ms,
+    spec008_hash_status, route_snapshot_policy_version, route_snapshot_mode,
+    route_decision_ts_unix_ms, request_start_ts_unix_ms, pending_deadline_seconds,
+    prompt_hash_basis, prompt_hash, compute_integrity_capture_required,
+    compute_integrity_sampling_profile_covered, compute_integrity_hardware_runtime_class_digest,
+    route_snapshot_digest, route_snapshot_json,
+    route_snapshot_canonical_json, created_at_utc
+) VALUES (
+    ?, ?, ?, ?,
+    ?, ?, ?, ?,
+    ?, ?,
+    ?, ?, ?,
+    ?, ?, ?,
+    ?, ?,
+    ?, ?, ?,
+    ?, ?, ?,
+    ?, ?, ?, ?, ?,
+    ?, ?, ?, ?
+)`,
+		row.AccountScope, row.RequestID, row.AttemptN, row.ProviderID,
+		row.ProviderSession, row.ProviderGeneration, row.PoolID, row.PaidEntrypoint,
+		row.ProviderReceiptKeyID, row.ProviderReceiptKeySource,
+		row.ModelID, row.ProviderReportedModelHash, row.ExpectedCatalogModelHash,
+		row.CatalogID, row.CatalogBodyDigest, row.CatalogSignatureKeyID,
+		row.CatalogSignaturePubkeyFingerprint, row.CatalogExpiresAtUnixMS,
+		row.Spec008HashStatus, row.RouteSnapshotPolicyVersion, row.RouteSnapshotMode,
+		row.RouteDecisionTSUnixMS, row.RequestStartTSUnixMS, row.PendingDeadlineSeconds,
+		row.PromptHashBasis, row.PromptHash, row.ComputeIntegrityCaptureRequired,
+		row.ComputeIntegritySamplingCovered, row.ComputeIntegrityHardwareDigest,
+		row.RouteSnapshotDigest, row.RouteSnapshotJSON,
+		row.RouteSnapshotCanonicalJSON, row.CreatedAtUTC,
+	)
+	if err != nil {
+		return wrapRouteSnapshotStorePressure(err)
+	}
+	var existingDigest string
+	err = s.db.QueryRowContext(ctx, `
+SELECT route_snapshot_digest
+  FROM settlement_route_snapshots
+ WHERE account_scope = ? AND request_id = ? AND attempt_n = ? AND provider_id = ?`,
+		row.AccountScope, row.RequestID, row.AttemptN, row.ProviderID,
+	).Scan(&existingDigest)
+	if err != nil {
+		return wrapRouteSnapshotStorePressure(err)
+	}
+	if existingDigest != row.RouteSnapshotDigest {
+		return fmt.Errorf("route snapshot mirror digest mismatch for request %s attempt %d provider %s", row.RequestID, row.AttemptN, row.ProviderID)
+	}
+	return nil
 }
 
 func (s *Store) applyRouteSnapshotBusyTimeout(ctx context.Context, conn *sql.Conn) error {

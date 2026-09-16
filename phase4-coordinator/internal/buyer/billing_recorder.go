@@ -648,6 +648,14 @@ func (b *billingRecorder) recordSettlementAttemptOutput(ctx context.Context, sto
 			ObservedOutputTokens: observedOutput,
 		},
 	}
+	if err := store.MirrorRouteSnapshotForAttempt(ctx, billing.SettlementReceiptIdentity{
+		AccountScope: attempt.AccountScope,
+		RequestID:    attempt.RequestID,
+		AttemptN:     attempt.AttemptN,
+		ProviderID:   attempt.ProviderID,
+	}); err != nil {
+		return err
+	}
 	_, err := store.InsertSettlementAttemptOutput(ctx, attempt)
 	if err == nil {
 		b.outputCursorByte = start + delivered
