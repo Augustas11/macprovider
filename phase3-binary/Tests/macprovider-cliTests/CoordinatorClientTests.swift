@@ -5499,9 +5499,11 @@ final class CoordinatorClientTests: XCTestCase {
             store = ProviderLifecycleStateStore(
                 url: root.appendingPathComponent("lifecycle", isDirectory: true).appendingPathComponent("state-v1.json")
             )
+            // Seed where serve stands when the coordinator accepts the
+            // session: locally ready, awaiting the readiness verdict.
             _ = try store.transition(
-                to: .startingProvider,
-                reasonCode: "launchd_service_started",
+                to: .locallyReadyConnecting,
+                reasonCode: "local_http_ready_awaiting_coordinator",
                 writer: .serve,
                 providerID: "provider-test",
                 modelID: "model-a",
@@ -5605,8 +5607,10 @@ final class CoordinatorClientTests: XCTestCase {
         let record = try fixture.record()
         XCTAssertEqual(record.state, .locallyReadyConnecting)
         XCTAssertEqual(record.reasonCode, "buyer_serving_readiness_unconfirmed")
+        // makeClient disables the retry interval, so the budget collapses to
+        // one read; the point is that the hold path never ran (no promotion).
         let calls = await script.calls
-        XCTAssertEqual(calls, 3, "an unheld false is retried on the readiness budget")
+        XCTAssertEqual(calls, 1)
         await client.cleanupConnectionForTest()
     }
 
