@@ -439,6 +439,11 @@ func WithFailoverConfig(enabled bool, timeout time.Duration) Option {
 
 func WithRoutingConfig(cfg config.RoutingConfig) Option {
 	return func(s *Server) {
+		s.SetSlotQueueConfig(
+			cfg.SlotQueueMaxPendingPerProvider,
+			time.Duration(cfg.SlotQueueDeadlineS)*time.Second,
+			time.Duration(cfg.SlotQueuePollIntervalMS)*time.Millisecond,
+		)
 		s.tiebreakRandomize = cfg.TiebreakRandomize
 		s.tiebreakEpsilon = cfg.TiebreakEpsilon
 		s.routingMu.Lock()
@@ -733,15 +738,7 @@ func WithPoolCheckLimiter(maxEntries int, ttl time.Duration) Option {
 
 func WithSlotQueueConfig(maxPendingPerProvider int, deadline, pollInterval time.Duration) Option {
 	return func(s *Server) {
-		if maxPendingPerProvider > 0 {
-			s.slotQueue = newSlotQueue(maxPendingPerProvider)
-		}
-		if deadline > 0 {
-			s.slotQueueDeadline = deadline
-		}
-		if pollInterval > 0 {
-			s.slotQueuePollInterval = pollInterval
-		}
+		s.SetSlotQueueConfig(maxPendingPerProvider, deadline, pollInterval)
 	}
 }
 
@@ -6627,6 +6624,18 @@ func (s *Server) SetRoutingDefaultObjective(objective string) (changed bool) {
 	}
 	s.defaultObjective = objective
 	return true
+}
+
+func (s *Server) SetSlotQueueConfig(maxPendingPerProvider int, deadline, pollInterval time.Duration) {
+	if maxPendingPerProvider > 0 {
+		s.slotQueue = newSlotQueue(maxPendingPerProvider)
+	}
+	if deadline > 0 {
+		s.slotQueueDeadline = deadline
+	}
+	if pollInterval > 0 {
+		s.slotQueuePollInterval = pollInterval
+	}
 }
 
 // sortCandidates delegates to routing.SortCandidatesWithScores. The
