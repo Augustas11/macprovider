@@ -65,7 +65,7 @@ var (
 	}
 	allowSettlementReceiptAuditOutboxOutcome   = map[string]bool{"success": true, "error": true}
 	allowSettlementReceiptAuditOutboxOperation = map[string]bool{
-		"drained": true, "pruned": true,
+		"drained": true, "poisoned": true, "pruned": true,
 	}
 	allowReferralOutcome = map[string]bool{
 		"disabled": true, "busy": true, "rate_limited": true,
@@ -130,6 +130,8 @@ func TestLabelHygiene(t *testing.T) {
 	m.ObserveSQLiteWALCheckpointDuration("raw-attacker-value", "success", time.Millisecond)
 	m.ObserveSQLiteWALCheckpointDuration("wal_checkpoint", "raw-attacker-value", time.Millisecond)
 	m.SetSettlementReceiptAuditOutboxPendingRows(12)
+	m.SetSettlementReceiptAuditOutboxPoisonedRows(2)
+	m.SetSettlementReceiptAuditOutboxPoisonedRetainedRows(3)
 	m.SetSettlementReceiptAuditOutboxOldestPendingAge(3 * time.Second)
 	for outcome := range allowSettlementReceiptAuditOutboxOutcome {
 		m.IncSettlementReceiptAuditOutboxDrain(outcome)
@@ -245,11 +247,14 @@ func TestSettlementReceiptAuditOutboxHelpers(t *testing.T) {
 	m := New(reg)
 
 	m.SetSettlementReceiptAuditOutboxPendingRows(-1)
+	m.SetSettlementReceiptAuditOutboxPoisonedRows(-1)
+	m.SetSettlementReceiptAuditOutboxPoisonedRetainedRows(-1)
 	m.SetSettlementReceiptAuditOutboxOldestPendingAge(-time.Second)
 	m.IncSettlementReceiptAuditOutboxDrain("success")
 	m.IncSettlementReceiptAuditOutboxDrain("error")
 	m.IncSettlementReceiptAuditOutboxDrain("raw-attacker-value")
 	m.AddSettlementReceiptAuditOutboxRows("drained", 3)
+	m.AddSettlementReceiptAuditOutboxRows("poisoned", 2)
 	m.AddSettlementReceiptAuditOutboxRows("pruned", 4)
 	m.AddSettlementReceiptAuditOutboxRows("drained", 0)
 	m.AddSettlementReceiptAuditOutboxRows("pruned", -1)
@@ -261,10 +266,13 @@ func TestSettlementReceiptAuditOutboxHelpers(t *testing.T) {
 	}
 
 	assertMetricValue(t, families, "settlement_receipt_audit_outbox_pending_rows", nil, 0)
+	assertMetricValue(t, families, "settlement_receipt_audit_outbox_poisoned_rows", nil, 0)
+	assertMetricValue(t, families, "settlement_receipt_audit_outbox_poisoned_retained_rows", nil, 0)
 	assertMetricValue(t, families, "settlement_receipt_audit_outbox_oldest_pending_age_seconds", nil, 0)
 	assertMetricValue(t, families, "settlement_receipt_audit_outbox_drain_total", map[string]string{"outcome": "success"}, 1)
 	assertMetricValue(t, families, "settlement_receipt_audit_outbox_drain_total", map[string]string{"outcome": "error"}, 1)
 	assertMetricValue(t, families, "settlement_receipt_audit_outbox_rows_total", map[string]string{"operation": "drained"}, 3)
+	assertMetricValue(t, families, "settlement_receipt_audit_outbox_rows_total", map[string]string{"operation": "poisoned"}, 2)
 	assertMetricValue(t, families, "settlement_receipt_audit_outbox_rows_total", map[string]string{"operation": "pruned"}, 4)
 
 	if metricExists(families, "settlement_receipt_audit_outbox_drain_total", map[string]string{"outcome": "raw-attacker-value"}) {

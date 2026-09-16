@@ -3,6 +3,7 @@ package audit
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -216,6 +217,13 @@ func TestInsertSettlementReceiptOutboxRefusesMismatchedDuplicate(t *testing.T) {
 				t.Fatal("mismatched duplicate inserted=true want false")
 			}
 			assertErrorContains(t, err, "already exists with different audit event")
+			var conflict SettlementReceiptOutboxConflictError
+			if !errors.As(err, &conflict) {
+				t.Fatalf("mismatched duplicate err type=%T want SettlementReceiptOutboxConflictError", err)
+			}
+			if conflict.OutboxID != 42 {
+				t.Fatalf("conflict OutboxID=%d want 42", conflict.OutboxID)
+			}
 
 			var count int
 			var gotTS, gotEventType, gotProvider, gotPayload string

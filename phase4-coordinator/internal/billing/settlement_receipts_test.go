@@ -139,12 +139,12 @@ func TestSettlementReceiptAuditOutboxSurvivesPostCommitDrainFailure(t *testing.T
 	if _, err := store.db.Exec(`UPDATE settlement_receipt_audit_outbox SET drained_at_utc = NULL`); err != nil {
 		t.Fatal(err)
 	}
-	drained, err := store.DrainSettlementReceiptAuditOutbox(context.Background(), settlementReceiptTestAuditSink{db: store.db}, 10)
+	result, err := store.DrainSettlementReceiptAuditOutbox(context.Background(), settlementReceiptTestAuditSink{db: store.db}, 10)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if drained != 2 {
-		t.Fatalf("retry drain rows=%d want 2 marked after idempotent sink replay", drained)
+	if result.DrainedRows != 2 || result.PoisonedRows != 0 {
+		t.Fatalf("retry drain result=%+v want 2 drained and 0 poisoned after idempotent sink replay", result)
 	}
 	if got := scalar(t, store.db, `SELECT COUNT(*) FROM audit_log WHERE event_type='settlement_receipt_ingested'`); got != 1 {
 		t.Fatalf("ingested audit rows after replay=%d want 1", got)
@@ -152,12 +152,12 @@ func TestSettlementReceiptAuditOutboxSurvivesPostCommitDrainFailure(t *testing.T
 	if got := scalar(t, store.db, `SELECT COUNT(*) FROM audit_log WHERE event_type='settlement_receipt_verdict'`); got != 1 {
 		t.Fatalf("verdict audit rows after replay=%d want 1", got)
 	}
-	drained, err = store.DrainSettlementReceiptAuditOutbox(context.Background(), settlementReceiptTestAuditSink{db: store.db}, 10)
+	result, err = store.DrainSettlementReceiptAuditOutbox(context.Background(), settlementReceiptTestAuditSink{db: store.db}, 10)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if drained != 0 {
-		t.Fatalf("second drain rows=%d want 0", drained)
+	if result.ProgressedRows() != 0 {
+		t.Fatalf("second drain result=%+v want 0 progressed", result)
 	}
 	assertSettlementReceiptVerdictAuditContract(t, store.db, state)
 	assertSettlementReceiptAuditRedacted(t, store.db, input.Header, fixtures.ProviderReceiptPubkeyB64)
@@ -193,15 +193,15 @@ WHERE drained_at_utc IS NULL`).Scan(&failOutboxID, &healthyOutboxID); err != nil
 		t.Fatal(err)
 	}
 
-	drained, err := store.DrainSettlementReceiptAuditOutbox(context.Background(), failingSettlementReceiptAuditSink{
+	result, err := store.DrainSettlementReceiptAuditOutbox(context.Background(), failingSettlementReceiptAuditSink{
 		failOutboxID: failOutboxID,
 		next:         settlementReceiptTestAuditSink{db: store.db},
 	}, 10)
 	if err == nil {
 		t.Fatal("drain err=nil want first row failure")
 	}
-	if drained != 1 {
-		t.Fatalf("drained rows=%d want healthy row drained despite first-row failure", drained)
+	if result.DrainedRows != 1 || result.PoisonedRows != 0 {
+		t.Fatalf("drain result=%+v want healthy row drained despite first-row failure and no poison rows", result)
 	}
 	if got := scalar(t, store.db, `SELECT COUNT(*) FROM settlement_receipt_audit_outbox WHERE id = ? AND drained_at_utc IS NULL`, failOutboxID); got != 1 {
 		t.Fatalf("failed row pending count=%d want 1", got)
@@ -222,6 +222,72 @@ WHERE drained_at_utc IS NULL`).Scan(&failOutboxID, &healthyOutboxID); err != nil
 	}
 	if got := scalar(t, store.db, `SELECT COUNT(*) FROM settlement_receipt_audit_outbox`); got != 1 {
 		t.Fatalf("remaining outbox rows=%d want only failed pending row", got)
+	}
+}
+
+func TestSettlementReceiptAuditOutboxConflictMarksPoisonRow(t *testing.T) {
+	fixtures := loadSettlementVerifierFixtures(t)
+	pubkey := decodeSettlementVerifierPubkey(t, fixtures.ProviderReceiptPubkeyB64)
+	tuple := firstSettlementTupleWithNegativeVariant(t, fixtures, "normal_done")
+	input := settlementVerifierInputFromFixture(t, fixtures, tuple, pubkey)
+	_, store := newRequestAndBillingStores(t)
+	createSettlementReceiptAuditLog(t, store.db)
+	seedSettlementReceiptEvidence(t, store, input)
+	setSettlementReceiptNow(store, input.ReceiptReceivedUnixMS)
+	if _, err := store.IngestSettlementReceipt(context.Background(), SettlementReceiptIngestionInput{
+		SettlementReceiptIdentity: SettlementReceiptIdentity{
+			AccountScope: input.AccountScope,
+			RequestID:    input.RequestID,
+			AttemptN:     input.AttemptN,
+			ProviderID:   input.ProviderID,
+		},
+		Header:                input.Header,
+		ProviderReceiptPubkey: pubkey,
+		receiptReceivedUnixMS: input.ReceiptReceivedUnixMS,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var conflictOutboxID, healthyOutboxID int64
+	if err := store.db.QueryRow(`
+SELECT MIN(id), MAX(id)
+FROM settlement_receipt_audit_outbox
+WHERE drained_at_utc IS NULL`).Scan(&conflictOutboxID, &healthyOutboxID); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := store.DrainSettlementReceiptAuditOutbox(context.Background(), conflictSettlementReceiptAuditSink{
+		conflictOutboxID: conflictOutboxID,
+		next:             settlementReceiptTestAuditSink{db: store.db},
+	}, 10)
+	if err == nil {
+		t.Fatal("drain err=nil want typed outbox conflict")
+	}
+	if result.DrainedRows != 1 || result.PoisonedRows != 1 || result.ProgressedRows() != 2 {
+		t.Fatalf("drain result=%+v want 1 drained, 1 poisoned, 2 progressed", result)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM settlement_receipt_audit_outbox WHERE id = ? AND drained_at_utc IS NULL AND poisoned_at_utc IS NOT NULL AND poison_reason <> ''`, conflictOutboxID); got != 1 {
+		t.Fatalf("conflict row poison count=%d want 1", got)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM settlement_receipt_audit_outbox WHERE id = ? AND drained_at_utc IS NOT NULL`, healthyOutboxID); got != 1 {
+		t.Fatalf("healthy row drained count=%d want 1", got)
+	}
+	stats, err := store.SettlementReceiptAuditOutboxStats(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.PendingRows != 0 || stats.PoisonedRows != 1 {
+		t.Fatalf("stats pending/poisoned=%d/%d want 0/1", stats.PendingRows, stats.PoisonedRows)
+	}
+
+	result, err = store.DrainSettlementReceiptAuditOutbox(context.Background(), conflictSettlementReceiptAuditSink{
+		conflictOutboxID: conflictOutboxID,
+		next:             settlementReceiptTestAuditSink{db: store.db},
+	}, 10)
+	if err != nil {
+		t.Fatalf("second drain err=%v want nil after poison row was quarantined", err)
+	}
+	if result.ProgressedRows() != 0 {
+		t.Fatalf("second drain result=%+v want 0 progressed", result)
 	}
 }
 
@@ -992,15 +1058,39 @@ func (s failingSettlementReceiptAuditSink) InsertSettlementReceiptOutbox(ctx con
 	return s.next.InsertSettlementReceiptOutbox(ctx, ts, eventType, providerID, payloadJSON, outboxID)
 }
 
+type testSettlementReceiptAuditOutboxConflict struct {
+	outboxID int64
+}
+
+func (e testSettlementReceiptAuditOutboxConflict) Error() string {
+	return "settlement receipt audit outbox conflict"
+}
+
+func (e testSettlementReceiptAuditOutboxConflict) SettlementReceiptAuditOutboxConflict() bool {
+	return true
+}
+
+type conflictSettlementReceiptAuditSink struct {
+	conflictOutboxID int64
+	next             settlementReceiptTestAuditSink
+}
+
+func (s conflictSettlementReceiptAuditSink) InsertSettlementReceiptOutbox(ctx context.Context, ts time.Time, eventType, providerID, payloadJSON string, outboxID int64) (bool, error) {
+	if outboxID == s.conflictOutboxID {
+		return false, testSettlementReceiptAuditOutboxConflict{outboxID: outboxID}
+	}
+	return s.next.InsertSettlementReceiptOutbox(ctx, ts, eventType, providerID, payloadJSON, outboxID)
+}
+
 func drainSettlementReceiptAuditOutboxToBillingAuditLog(t *testing.T, store *Store, want int) {
 	t.Helper()
 	createSettlementReceiptAuditLog(t, store.db)
-	drained, err := store.DrainSettlementReceiptAuditOutbox(context.Background(), settlementReceiptTestAuditSink{db: store.db}, 100)
+	result, err := store.DrainSettlementReceiptAuditOutbox(context.Background(), settlementReceiptTestAuditSink{db: store.db}, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if drained != want {
-		t.Fatalf("drained rows=%d want %d", drained, want)
+	if result.DrainedRows != want || result.PoisonedRows != 0 {
+		t.Fatalf("drain result=%+v want %d drained and 0 poisoned", result, want)
 	}
 }
 

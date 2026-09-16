@@ -1139,12 +1139,27 @@ type SettlementReceiptAuditSink interface {
 	InsertSettlementReceiptOutbox(context.Context, time.Time, string, string, string, int64) (bool, error)
 }
 
+type settlementReceiptAuditOutboxConflict interface {
+	SettlementReceiptAuditOutboxConflict() bool
+}
+
 // SettlementReceiptAuditOutboxStats is the low-cardinality health surface for
 // the compact money-DB audit outbox.
 type SettlementReceiptAuditOutboxStats struct {
 	PendingRows             int64
+	PoisonedRows            int64
+	RetainedPoisonedRows    int64
 	OldestPendingCreatedAt  time.Time
 	HasOldestPendingCreated bool
+}
+
+type SettlementReceiptAuditOutboxDrainResult struct {
+	DrainedRows  int
+	PoisonedRows int
+}
+
+func (r SettlementReceiptAuditOutboxDrainResult) ProgressedRows() int {
+	return r.DrainedRows + r.PoisonedRows
 }
 
 func insertSettlementReceiptVerdictAuditConn(ctx context.Context, conn *sql.Conn, state SettlementReceiptState, attemptedReceivedAtUnixMS int64) error {
@@ -1159,9 +1174,9 @@ func insertSettlementReceiptVerdictAuditConn(ctx context.Context, conn *sql.Conn
 // DrainSettlementReceiptAuditOutbox drains pending settlement receipt audit
 // events after the hot receipt transaction commits. It is safe to call at
 // startup or from a background loop.
-func (s *Store) DrainSettlementReceiptAuditOutbox(ctx context.Context, sink SettlementReceiptAuditSink, limit int) (int, error) {
+func (s *Store) DrainSettlementReceiptAuditOutbox(ctx context.Context, sink SettlementReceiptAuditSink, limit int) (SettlementReceiptAuditOutboxDrainResult, error) {
 	if sink == nil {
-		return 0, fmt.Errorf("settlement receipt audit sink is required")
+		return SettlementReceiptAuditOutboxDrainResult{}, fmt.Errorf("settlement receipt audit sink is required")
 	}
 	if limit <= 0 {
 		limit = 100
@@ -1170,26 +1185,27 @@ func (s *Store) DrainSettlementReceiptAuditOutbox(ctx context.Context, sink Sett
 SELECT id
 FROM settlement_receipt_audit_outbox
 WHERE drained_at_utc IS NULL
+  AND poisoned_at_utc IS NULL
 ORDER BY id
-LIMIT ?`, limit)
+	LIMIT ?`, limit)
 	if err != nil {
-		return 0, err
+		return SettlementReceiptAuditOutboxDrainResult{}, err
 	}
 	ids := []int64{}
 	for rows.Next() {
 		var id int64
 		if err := rows.Scan(&id); err != nil {
 			_ = rows.Close()
-			return 0, err
+			return SettlementReceiptAuditOutboxDrainResult{}, err
 		}
 		ids = append(ids, id)
 	}
 	if err := rows.Err(); err != nil {
 		_ = rows.Close()
-		return 0, err
+		return SettlementReceiptAuditOutboxDrainResult{}, err
 	}
 	if err := rows.Close(); err != nil {
-		return 0, err
+		return SettlementReceiptAuditOutboxDrainResult{}, err
 	}
 	return s.drainSettlementReceiptAuditOutboxIDs(ctx, sink, ids)
 }
@@ -1200,8 +1216,22 @@ func (s *Store) SettlementReceiptAuditOutboxStats(ctx context.Context) (Settleme
 	err := s.db.QueryRowContext(ctx, `
 SELECT COUNT(*), MIN(created_at_utc)
 FROM settlement_receipt_audit_outbox
-WHERE drained_at_utc IS NULL`).Scan(&stats.PendingRows, &oldest)
+WHERE drained_at_utc IS NULL
+  AND poisoned_at_utc IS NULL`).Scan(&stats.PendingRows, &oldest)
 	if err != nil {
+		return stats, err
+	}
+	if err := s.db.QueryRowContext(ctx, `
+SELECT COUNT(*)
+FROM settlement_receipt_audit_outbox
+WHERE poisoned_at_utc IS NOT NULL
+  AND poison_acknowledged_at_utc IS NULL`).Scan(&stats.PoisonedRows); err != nil {
+		return stats, err
+	}
+	if err := s.db.QueryRowContext(ctx, `
+SELECT COUNT(*)
+FROM settlement_receipt_audit_outbox
+WHERE poisoned_at_utc IS NOT NULL`).Scan(&stats.RetainedPoisonedRows); err != nil {
 		return stats, err
 	}
 	if oldest.Valid && oldest.String != "" {
@@ -1215,22 +1245,25 @@ WHERE drained_at_utc IS NULL`).Scan(&stats.PendingRows, &oldest)
 	return stats, nil
 }
 
-func (s *Store) drainSettlementReceiptAuditOutboxIDs(ctx context.Context, sink SettlementReceiptAuditSink, ids []int64) (int, error) {
-	drained := 0
+func (s *Store) drainSettlementReceiptAuditOutboxIDs(ctx context.Context, sink SettlementReceiptAuditSink, ids []int64) (SettlementReceiptAuditOutboxDrainResult, error) {
+	var result SettlementReceiptAuditOutboxDrainResult
 	var firstErr error
 	for _, id := range ids {
-		ok, err := s.drainSettlementReceiptAuditOutboxID(ctx, sink, id)
+		outcome, err := s.drainSettlementReceiptAuditOutboxID(ctx, sink, id)
+		switch outcome {
+		case settlementReceiptAuditOutboxDrainOutcomeDrained:
+			result.DrainedRows++
+		case settlementReceiptAuditOutboxDrainOutcomePoisoned:
+			result.PoisonedRows++
+		}
 		if err != nil {
 			if firstErr == nil {
 				firstErr = err
 			}
 			continue
 		}
-		if ok {
-			drained++
-		}
 	}
-	return drained, firstErr
+	return result, firstErr
 }
 
 func (s *Store) PruneSettlementReceiptAuditOutbox(ctx context.Context, cutoff time.Time, limit int) (int64, error) {
@@ -1254,10 +1287,18 @@ DELETE FROM settlement_receipt_audit_outbox
 	return res.RowsAffected()
 }
 
-func (s *Store) drainSettlementReceiptAuditOutboxID(ctx context.Context, sink SettlementReceiptAuditSink, outboxID int64) (bool, error) {
+type settlementReceiptAuditOutboxDrainOutcome string
+
+const (
+	settlementReceiptAuditOutboxDrainOutcomeNone     settlementReceiptAuditOutboxDrainOutcome = ""
+	settlementReceiptAuditOutboxDrainOutcomeDrained  settlementReceiptAuditOutboxDrainOutcome = "drained"
+	settlementReceiptAuditOutboxDrainOutcomePoisoned settlementReceiptAuditOutboxDrainOutcome = "poisoned"
+)
+
+func (s *Store) drainSettlementReceiptAuditOutboxID(ctx context.Context, sink SettlementReceiptAuditSink, outboxID int64) (settlementReceiptAuditOutboxDrainOutcome, error) {
 	eventType, accountScopeHash, state, attemptedReceivedAtUnixMS, eventTime, found, err := s.loadSettlementReceiptAuditOutbox(ctx, outboxID)
 	if err != nil || !found {
-		return false, err
+		return settlementReceiptAuditOutboxDrainOutcomeNone, err
 	}
 	verdict := eventType == settlementReceiptEventVerdict
 	var checks *SettlementVerificationChecks
@@ -1266,12 +1307,62 @@ func (s *Store) drainSettlementReceiptAuditOutboxID(ctx context.Context, sink Se
 	}
 	payload, err := settlementReceiptAuditPayloadForAccountHash(accountScopeHash, state, checks, verdict, attemptedReceivedAtUnixMS, outboxID)
 	if err != nil {
-		return false, err
+		return settlementReceiptAuditOutboxDrainOutcomeNone, err
 	}
 	if _, err := sink.InsertSettlementReceiptOutbox(ctx, eventTime, eventType, state.ProviderID, payload, outboxID); err != nil {
-		return false, err
+		if settlementReceiptAuditConflict(err) {
+			poisoned, markErr := s.markSettlementReceiptAuditOutboxPoisoned(ctx, outboxID, err)
+			if markErr != nil {
+				return settlementReceiptAuditOutboxDrainOutcomeNone, fmt.Errorf("%w; mark poison outbox: %v", err, markErr)
+			}
+			if poisoned {
+				return settlementReceiptAuditOutboxDrainOutcomePoisoned, err
+			}
+			return settlementReceiptAuditOutboxDrainOutcomeNone, err
+		}
+		return settlementReceiptAuditOutboxDrainOutcomeNone, err
 	}
-	return s.markSettlementReceiptAuditOutboxDrained(ctx, outboxID)
+	drained, err := s.markSettlementReceiptAuditOutboxDrained(ctx, outboxID)
+	if drained {
+		return settlementReceiptAuditOutboxDrainOutcomeDrained, err
+	}
+	return settlementReceiptAuditOutboxDrainOutcomeNone, err
+}
+
+func settlementReceiptAuditConflict(err error) bool {
+	var marker settlementReceiptAuditOutboxConflict
+	return errors.As(err, &marker) && marker.SettlementReceiptAuditOutboxConflict()
+}
+
+func (s *Store) markSettlementReceiptAuditOutboxPoisoned(ctx context.Context, outboxID int64, cause error) (bool, error) {
+	reason := "audit_sink_conflict"
+	if cause != nil {
+		reason = cause.Error()
+	}
+	if len(reason) > 512 {
+		reason = reason[:512]
+	}
+	poisoned := false
+	err := sqliteutil.Transact(ctx, s.db, func(ctx context.Context, conn *sql.Conn) error {
+		res, err := conn.ExecContext(ctx, `
+UPDATE settlement_receipt_audit_outbox
+   SET poisoned_at_utc = ?,
+       poison_reason = ?
+ WHERE id = ?
+   AND drained_at_utc IS NULL
+   AND poisoned_at_utc IS NULL`,
+			time.Now().UTC().Format(time.RFC3339Nano), reason, outboxID)
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		poisoned = n > 0
+		return nil
+	})
+	return poisoned, err
 }
 
 func (s *Store) loadSettlementReceiptAuditOutbox(ctx context.Context, outboxID int64) (string, string, SettlementReceiptState, int64, time.Time, bool, error) {
@@ -1294,7 +1385,9 @@ func (s *Store) markSettlementReceiptAuditOutboxDrained(ctx context.Context, out
 		res, err := conn.ExecContext(ctx, `
 UPDATE settlement_receipt_audit_outbox
    SET drained_at_utc = ?
- WHERE id = ? AND drained_at_utc IS NULL`,
+ WHERE id = ?
+   AND drained_at_utc IS NULL
+   AND poisoned_at_utc IS NULL`,
 			time.Now().UTC().Format(time.RFC3339Nano), outboxID)
 		if err != nil {
 			return err
@@ -1330,7 +1423,9 @@ SELECT event_type, account_scope_hash, attempted_received_at_unix_ms,
        output_hash, usage_digest, receipt_tuple_canonical_sha256, checks_json,
        created_at_utc
   FROM settlement_receipt_audit_outbox o
- WHERE o.id = ? AND o.drained_at_utc IS NULL`, outboxID).Scan(
+ WHERE o.id = ?
+   AND o.drained_at_utc IS NULL
+   AND o.poisoned_at_utc IS NULL`, outboxID).Scan(
 		&eventType, &accountScopeHash, &attemptedReceivedAtUnixMS,
 		&state.RequestID, &state.AttemptN, &state.ProviderID, &state.IdempotencyStatus,
 		&receiptPresent,

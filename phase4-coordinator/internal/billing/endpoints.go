@@ -145,6 +145,7 @@ const settlementReceiptDiagnosticsDisclosure = "Settlement receipt diagnostics e
 
 const settlementReceiptDiagnosticsDefaultWindow = 31 * 24 * time.Hour
 const idlePrewarmEarningsReadTimeout = 250 * time.Millisecond
+const settlementReceiptAuditOutboxPoisonPath = "/admin/ledger/settlement-receipt-audit-outbox/poisoned"
 
 type settlementReceiptSummary struct {
 	ReceiptProfile        string                        `json:"receipt_profile"`
@@ -273,6 +274,29 @@ func (h *handler) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		h.wholesaleStatementItem(w, r)
 		return
 	}
+	if r.URL.Path == settlementReceiptAuditOutboxPoisonPath {
+		h.settlementReceiptAuditOutboxPoisonListHandler(w, r)
+		return
+	}
+	if m := matchSettlementReceiptAuditOutboxPoisonAckPath(r.URL.Path); m.matched {
+		if !auth.OperatorOnlyBearerMatches(r.Header, h.operatorKey) {
+			writeError(w, http.StatusForbidden, "forbidden", "operator key required")
+			return
+		}
+		if !h.allowAdminRequest(w) {
+			return
+		}
+		if r.Method != http.MethodPost {
+			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
+			return
+		}
+		if m.badID {
+			writeError(w, http.StatusBadRequest, "bad_request", "outbox id must be a base-10 int64")
+			return
+		}
+		h.settlementReceiptAuditOutboxPoisonAckHandler(w, r, m.id)
+		return
+	}
 	switch {
 	case r.URL.Path == "/admin/ledger/summary":
 		h.admin(w, r, h.summary)
@@ -287,6 +311,195 @@ func (h *handler) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeError(w, http.StatusNotFound, "not_found", "not found")
 	}
+}
+
+type settlementReceiptAuditOutboxPoisonAckPathMatch struct {
+	matched bool
+	badID   bool
+	id      int64
+}
+
+func matchSettlementReceiptAuditOutboxPoisonAckPath(path string) settlementReceiptAuditOutboxPoisonAckPathMatch {
+	prefix := settlementReceiptAuditOutboxPoisonPath + "/"
+	const suffix = "/acknowledge"
+	if !strings.HasPrefix(path, prefix) || !strings.HasSuffix(path, suffix) {
+		return settlementReceiptAuditOutboxPoisonAckPathMatch{}
+	}
+	idStr := strings.TrimSuffix(strings.TrimPrefix(path, prefix), suffix)
+	if idStr == "" || strings.Contains(idStr, "/") {
+		return settlementReceiptAuditOutboxPoisonAckPathMatch{matched: true, badID: true}
+	}
+	for _, c := range idStr {
+		if c < '0' || c > '9' {
+			return settlementReceiptAuditOutboxPoisonAckPathMatch{matched: true, badID: true}
+		}
+	}
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		return settlementReceiptAuditOutboxPoisonAckPathMatch{matched: true, badID: true}
+	}
+	return settlementReceiptAuditOutboxPoisonAckPathMatch{matched: true, id: id}
+}
+
+func (h *handler) settlementReceiptAuditOutboxPoisonListHandler(w http.ResponseWriter, r *http.Request) {
+	if !auth.OperatorOnlyBearerMatches(r.Header, h.operatorKey) {
+		writeError(w, http.StatusForbidden, "forbidden", "operator key required")
+		return
+	}
+	if !h.allowAdminRequest(w) {
+		return
+	}
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
+		return
+	}
+	status := r.URL.Query().Get("status")
+	if status == "" {
+		status = "open"
+	}
+	if status != "open" && status != "acknowledged" && status != "all" {
+		writeError(w, http.StatusBadRequest, "bad_request", "status must be open, acknowledged, or all")
+		return
+	}
+	limit := 100
+	if rawLimit := r.URL.Query().Get("limit"); rawLimit != "" {
+		parsed, err := strconv.Atoi(rawLimit)
+		if err != nil || parsed <= 0 || parsed > 500 {
+			writeError(w, http.StatusBadRequest, "bad_request", "limit must be between 1 and 500")
+			return
+		}
+		limit = parsed
+	}
+	where := "poisoned_at_utc IS NOT NULL AND poison_acknowledged_at_utc IS NULL"
+	switch status {
+	case "acknowledged":
+		where = "poisoned_at_utc IS NOT NULL AND poison_acknowledged_at_utc IS NOT NULL"
+	case "all":
+		where = "poisoned_at_utc IS NOT NULL"
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	rows, err := h.store.db.QueryContext(ctx, `
+SELECT id, event_type, request_id, attempt_n, provider_id, created_at_utc,
+       poisoned_at_utc, poison_reason, poison_acknowledged_at_utc,
+       poison_acknowledged_by, poison_acknowledge_reason
+  FROM settlement_receipt_audit_outbox
+ WHERE `+where+`
+ ORDER BY poisoned_at_utc DESC, id DESC
+ LIMIT ?`, limit)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "query settlement receipt audit outbox poison rows: "+err.Error())
+		return
+	}
+	defer rows.Close()
+	items := []map[string]any{}
+	for rows.Next() {
+		var id, attemptN int64
+		var eventType, requestID, providerID, createdAtUTC string
+		var poisonedAtUTC, poisonReason, ackedBy, ackReason string
+		var ackedAtUTC sql.NullString
+		if err := rows.Scan(&id, &eventType, &requestID, &attemptN, &providerID, &createdAtUTC, &poisonedAtUTC, &poisonReason, &ackedAtUTC, &ackedBy, &ackReason); err != nil {
+			writeError(w, http.StatusInternalServerError, "internal_error", "scan settlement receipt audit outbox poison rows: "+err.Error())
+			return
+		}
+		items = append(items, map[string]any{
+			"outbox_id":                        id,
+			"event_type":                       eventType,
+			"request_id":                       requestID,
+			"attempt_n":                        attemptN,
+			"provider_id":                      providerID,
+			"created_at_utc":                   createdAtUTC,
+			"poisoned_at_utc":                  poisonedAtUTC,
+			"poison_reason":                    poisonReason,
+			"poison_acknowledged_at_utc":       nullStringOrNil(ackedAtUTC),
+			"poison_acknowledged_by":           emptyStringOrNil(ackedBy),
+			"poison_acknowledge_reason":        emptyStringOrNil(ackReason),
+			"reconciliation_lifecycle":         "inspect_repair_audit_sink_acknowledge",
+			"active_metric_until_acknowledged": !ackedAtUTC.Valid,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "read settlement receipt audit outbox poison rows: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status": status,
+		"count":  len(items),
+		"items":  items,
+	})
+}
+
+func (h *handler) settlementReceiptAuditOutboxPoisonAckHandler(w http.ResponseWriter, r *http.Request, outboxID int64) {
+	if ct := r.Header.Get("Content-Type"); !isJSONContentType(ct) {
+		writeError(w, http.StatusUnsupportedMediaType, "unsupported_media_type", "content-type must be application/json")
+		return
+	}
+	if r.ContentLength > maxBodyBytes {
+		writeError(w, http.StatusRequestEntityTooLarge, "request_too_large", "body exceeds 4 KiB")
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes+1)
+	defer r.Body.Close()
+	body, ok := decodeForceVoidBody(w, r)
+	if !ok {
+		return
+	}
+	if errCode := validateOperatorID(body.OperatorID); errCode != "" {
+		writeValidationError(w, errCode, "operator_id rejected: "+errCode)
+		return
+	}
+	if errCode := validateReason(body.Reason); errCode != "" {
+		writeValidationError(w, errCode, "reason rejected: "+errCode)
+		return
+	}
+	operatorID := trimSpaceASCII(body.OperatorID)
+	reason := trimSpaceASCII(body.Reason)
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	res, err := h.store.db.ExecContext(ctx, `
+UPDATE settlement_receipt_audit_outbox
+   SET poison_acknowledged_at_utc = ?,
+       poison_acknowledged_by = ?,
+       poison_acknowledge_reason = ?
+ WHERE id = ?
+   AND poisoned_at_utc IS NOT NULL
+   AND poison_acknowledged_at_utc IS NULL`, now, operatorID, reason, outboxID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "acknowledge settlement receipt audit outbox poison row: "+err.Error())
+		return
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "acknowledge settlement receipt audit outbox poison row: "+err.Error())
+		return
+	}
+	if affected == 0 {
+		var exists, acknowledged int
+		if err := h.store.db.QueryRowContext(ctx, `
+SELECT COUNT(*), COALESCE(MAX(CASE WHEN poison_acknowledged_at_utc IS NOT NULL THEN 1 ELSE 0 END), 0)
+  FROM settlement_receipt_audit_outbox
+ WHERE id = ? AND poisoned_at_utc IS NOT NULL`, outboxID).Scan(&exists, &acknowledged); err != nil {
+			writeError(w, http.StatusInternalServerError, "internal_error", "lookup settlement receipt audit outbox poison row: "+err.Error())
+			return
+		}
+		if exists == 0 {
+			writeError(w, http.StatusNotFound, "not_found", "poison row not found")
+			return
+		}
+		if acknowledged != 0 {
+			writeError(w, http.StatusConflict, "conflict", "poison row already acknowledged")
+			return
+		}
+		writeError(w, http.StatusConflict, "conflict", "poison row was not acknowledged")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"outbox_id":                  outboxID,
+		"poison_acknowledged_at_utc": now,
+		"poison_acknowledged_by":     operatorID,
+		"poison_acknowledge_reason":  reason,
+	})
 }
 
 func (h *handler) quarantineListHandler(w http.ResponseWriter, r *http.Request) {
@@ -1413,4 +1626,11 @@ func nullStringAny(v sql.NullString) any {
 		return nil
 	}
 	return v.String
+}
+
+func emptyStringOrNil(v string) any {
+	if v == "" {
+		return nil
+	}
+	return v
 }

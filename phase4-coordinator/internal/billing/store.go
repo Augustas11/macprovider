@@ -456,10 +456,13 @@ CREATE TABLE IF NOT EXISTS settlement_receipt_audit_outbox (
     receipt_tuple_canonical_sha256 TEXT NULL CHECK(receipt_tuple_canonical_sha256 IS NULL OR (length(receipt_tuple_canonical_sha256) = 64 AND receipt_tuple_canonical_sha256 NOT GLOB '*[^0-9a-f]*')),
     checks_json TEXT NOT NULL DEFAULT '{}',
     created_at_utc TEXT NOT NULL,
-    drained_at_utc TEXT NULL
+    drained_at_utc TEXT NULL,
+    poisoned_at_utc TEXT NULL,
+    poison_reason TEXT NOT NULL DEFAULT '',
+    poison_acknowledged_at_utc TEXT NULL,
+    poison_acknowledged_by TEXT NOT NULL DEFAULT '',
+    poison_acknowledge_reason TEXT NOT NULL DEFAULT ''
 );
-CREATE INDEX IF NOT EXISTS idx_srao_pending ON settlement_receipt_audit_outbox(drained_at_utc, id)
-    WHERE drained_at_utc IS NULL;
 CREATE INDEX IF NOT EXISTS idx_srao_verdict ON settlement_receipt_audit_outbox(settlement_receipt_verdict_id, id);
 
 -- SPEC-005 v0.5 (issue #253) — MIG-005-011
@@ -584,6 +587,11 @@ func (s *Store) ensureSettlementReceiptAuditOutboxSnapshotColumns(ctx context.Co
 		{"usage_digest", `ALTER TABLE settlement_receipt_audit_outbox ADD COLUMN usage_digest TEXT NULL CHECK(usage_digest IS NULL OR (length(usage_digest) = 64 AND usage_digest NOT GLOB '*[^0-9a-f]*'))`},
 		{"receipt_tuple_canonical_sha256", `ALTER TABLE settlement_receipt_audit_outbox ADD COLUMN receipt_tuple_canonical_sha256 TEXT NULL CHECK(receipt_tuple_canonical_sha256 IS NULL OR (length(receipt_tuple_canonical_sha256) = 64 AND receipt_tuple_canonical_sha256 NOT GLOB '*[^0-9a-f]*'))`},
 		{"checks_json", `ALTER TABLE settlement_receipt_audit_outbox ADD COLUMN checks_json TEXT NOT NULL DEFAULT '{}'`},
+		{"poisoned_at_utc", `ALTER TABLE settlement_receipt_audit_outbox ADD COLUMN poisoned_at_utc TEXT NULL`},
+		{"poison_reason", `ALTER TABLE settlement_receipt_audit_outbox ADD COLUMN poison_reason TEXT NOT NULL DEFAULT ''`},
+		{"poison_acknowledged_at_utc", `ALTER TABLE settlement_receipt_audit_outbox ADD COLUMN poison_acknowledged_at_utc TEXT NULL`},
+		{"poison_acknowledged_by", `ALTER TABLE settlement_receipt_audit_outbox ADD COLUMN poison_acknowledged_by TEXT NOT NULL DEFAULT ''`},
+		{"poison_acknowledge_reason", `ALTER TABLE settlement_receipt_audit_outbox ADD COLUMN poison_acknowledge_reason TEXT NOT NULL DEFAULT ''`},
 	}
 	for _, col := range add {
 		exists, err := s.columnExists(ctx, "settlement_receipt_audit_outbox", col.name)
@@ -596,6 +604,16 @@ func (s *Store) ensureSettlementReceiptAuditOutboxSnapshotColumns(ctx context.Co
 		if _, err := s.db.ExecContext(ctx, col.sql); err != nil {
 			return err
 		}
+	}
+	if _, err := s.db.ExecContext(ctx, `
+CREATE INDEX IF NOT EXISTS idx_srao_pending_active ON settlement_receipt_audit_outbox(drained_at_utc, poisoned_at_utc, id)
+    WHERE drained_at_utc IS NULL AND poisoned_at_utc IS NULL;
+CREATE INDEX IF NOT EXISTS idx_srao_poisoned ON settlement_receipt_audit_outbox(poisoned_at_utc, id)
+    WHERE poisoned_at_utc IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_srao_poisoned_open ON settlement_receipt_audit_outbox(poisoned_at_utc, id)
+    WHERE poisoned_at_utc IS NOT NULL AND poison_acknowledged_at_utc IS NULL;
+DROP INDEX IF EXISTS idx_srao_pending;`); err != nil {
+		return err
 	}
 	return nil
 }
