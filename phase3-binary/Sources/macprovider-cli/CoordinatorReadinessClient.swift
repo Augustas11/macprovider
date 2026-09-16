@@ -22,6 +22,54 @@ enum CoordinatorBuyerServingHold {
 /// proves transport, while this endpoint applies the coordinator's full pool,
 /// catalog, capacity, and routing eligibility checks.
 enum CoordinatorReadinessClient {
+    /// Closed coordinator reasons for `buyer_serving: false` that an accepted
+    /// session must be HELD through rather than dropped and reconnected.
+    enum BuyerServingHold: String, Equatable, Sendable {
+        /// SPEC-047-R003(iv): the session is bound to a BYOM candidate whose
+        /// admission is pending (`offer_submitted` … `catalog_priced`). Buyer
+        /// serving needs `settlement_capable`, and `settlement_capable` needs
+        /// THIS live session to stay bound and hash-verified at approval time;
+        /// SPEC-047-R006 clears the binding on every disconnect. The
+        /// coordinator derives the hold from its registry binding and the
+        /// admission store; it is never provider-asserted.
+        case modelAdmissionPending = "model_admission_pending"
+    }
+
+    /// The coordinator's buyer-routing verdict for one accepted session.
+    /// `nil`/`false`/`true` literals keep the three-valued `Bool?` reading
+    /// (indeterminate / authoritative not-serving / confirmed) that every
+    /// existing consumer relies on; only `notServing` can carry a hold.
+    enum Readiness: Equatable, Sendable, ExpressibleByBooleanLiteral, ExpressibleByNilLiteral {
+        case confirmed
+        case notServing(hold: BuyerServingHold?)
+        case indeterminate
+
+        init(booleanLiteral value: Bool) {
+            self = value ? .confirmed : .notServing(hold: nil)
+        }
+
+        init(nilLiteral: ()) {
+            self = .indeterminate
+        }
+
+        /// Lift a plain three-valued verdict (no hold information).
+        init(buyerServing: Bool?) {
+            switch buyerServing {
+            case .some(true): self = .confirmed
+            case .some(false): self = .notServing(hold: nil)
+            case .none: self = .indeterminate
+            }
+        }
+
+        var buyerServing: Bool? {
+            switch self {
+            case .confirmed: return true
+            case .notServing: return false
+            case .indeterminate: return nil
+            }
+        }
+    }
+
     struct ExpectedCatalogEnvelope: Equatable, Sendable {
         let releaseID: String
         let policyVersion: String
@@ -74,6 +122,24 @@ enum CoordinatorReadinessClient {
         timeout: TimeInterval = 2,
         session: URLSession = .shared
     ) async -> Bool? {
+        await fetchReadiness(
+            coordinatorURL: coordinatorURL,
+            providerID: providerID,
+            assignedID: assignedID,
+            expected: expected,
+            timeout: timeout,
+            session: session
+        ).buyerServing
+    }
+
+    static func fetchReadiness(
+        coordinatorURL: String?,
+        providerID: String?,
+        assignedID: String?,
+        expected: ExpectedCatalogEnvelope? = nil,
+        timeout: TimeInterval = 2,
+        session: URLSession = .shared
+    ) async -> Readiness {
         guard let providerID = providerID?.trimmingCharacters(in: .whitespacesAndNewlines),
               let assignedID = assignedID?.trimmingCharacters(in: .whitespacesAndNewlines),
               let url = readinessURL(
@@ -82,7 +148,7 @@ enum CoordinatorReadinessClient {
                   assignedID: assignedID
               )
         else {
-            return nil
+            return .indeterminate
         }
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
@@ -101,7 +167,7 @@ enum CoordinatorReadinessClient {
                     ))
                     continue
                 }
-                return verdict(
+                return readiness(
                     data: data,
                     response: response,
                     requestURL: url,
@@ -110,10 +176,10 @@ enum CoordinatorReadinessClient {
                     expected: expected
                 )
             } catch {
-                return nil
+                return .indeterminate
             }
         }
-        return nil
+        return .indeterminate
     }
 
     static func retryDelayNanoseconds(providerID: String, retryAfterHeader: String?) -> UInt64 {
@@ -135,12 +201,30 @@ enum CoordinatorReadinessClient {
         assignedID: String,
         expected: ExpectedCatalogEnvelope? = nil
     ) -> Bool? {
+        readiness(
+            data: data,
+            response: response,
+            requestURL: requestURL,
+            providerID: providerID,
+            assignedID: assignedID,
+            expected: expected
+        ).buyerServing
+    }
+
+    static func readiness(
+        data: Data,
+        response: URLResponse,
+        requestURL: URL,
+        providerID: String,
+        assignedID: String,
+        expected: ExpectedCatalogEnvelope? = nil
+    ) -> Readiness {
         guard let http = response as? HTTPURLResponse,
               // URLSession follows redirects by default. Only the exact
               // coordinator endpoint requested is authoritative.
               http.url == requestURL
         else {
-            return nil
+            return .indeterminate
         }
         // A 404 here usually means the coordinator no longer has the specific
         // assigned session the app last observed (for example immediately after
@@ -148,7 +232,7 @@ enum CoordinatorReadinessClient {
         // indeterminate readiness refresh instead of authoritative
         // not_buyer_serving so Malibu does not tell a verified provider it is
         // ineligible during assigned_id churn.
-        if http.statusCode == 404 { return nil }
+        if http.statusCode == 404 { return .indeterminate }
         guard (200 ..< 300).contains(http.statusCode),
               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               object["provider_id"] as? String == providerID,
@@ -156,13 +240,18 @@ enum CoordinatorReadinessClient {
               object["catalog_evidence_source"] as? String == "provider_reported",
               let buyerServing = object["buyer_serving"] as? Bool
         else {
-            return nil
+            return .indeterminate
         }
-        guard buyerServing else { return false }
+        guard buyerServing else {
+            // The hold is meaningful only on an authoritative `false`; an
+            // unknown value is no hold (fail closed to the reconnect path).
+            let hold = (object["buyer_serving_hold"] as? String).flatMap(BuyerServingHold.init(rawValue:))
+            return .notServing(hold: hold)
+        }
         guard let admissionMode = object["catalog_admission_mode"] as? String,
               admissionMode == "current" || admissionMode == "previous"
         else {
-            return nil
+            return .indeterminate
         }
         if let expected {
             guard object["catalog_release_id"] as? String == expected.releaseID,
@@ -171,10 +260,10 @@ enum CoordinatorReadinessClient {
                   object["catalog_signer_key_id"] as? String == expected.signerKeyID,
                   normalizedDigest(object["catalog_row_identity"] as? String) == normalizedDigest(expected.rowIdentity)
             else {
-                return nil
+                return .indeterminate
             }
         }
-        return true
+        return .confirmed
     }
 
     private static func normalizedDigest(_ raw: String?) -> String? {

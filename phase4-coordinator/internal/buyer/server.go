@@ -1504,6 +1504,10 @@ type poolCheckResponse struct {
 	CatalogSignerKeyID     string     `json:"catalog_signer_key_id,omitempty"`
 	CandidateRowIdentity   string     `json:"catalog_row_identity,omitempty"`
 	CatalogEvidenceSource  string     `json:"catalog_evidence_source,omitempty"`
+	// BuyerServingHold is set only with buyer_serving=false on the readiness
+	// path: a closed reason the provider must hold its session through
+	// (`model_admission_pending`, see byomBuyerServingHold).
+	BuyerServingHold string `json:"buyer_serving_hold,omitempty"`
 }
 
 type receiptKeysResponse struct {
@@ -1572,6 +1576,11 @@ func (s *Server) handlePoolCheck(w http.ResponseWriter, r *http.Request) {
 	if includeDeploymentEvidence || includeReadinessEvidence {
 		buyerServing := s.providerBuyerServing(p)
 		response.BuyerServing = &buyerServing
+		if !buyerServing && includeReadinessEvidence {
+			holdCtx, cancel := context.WithTimeout(r.Context(), requestLogWriteTimeout)
+			response.BuyerServingHold = s.byomBuyerServingHold(holdCtx, p)
+			cancel()
+		}
 		response.CatalogAdmissionMode = p.CatalogAdmissionMode
 		response.CatalogReleaseID = p.CatalogReleaseID
 		response.CatalogPolicyVersion = p.CatalogPolicyVersion

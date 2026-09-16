@@ -55,6 +55,42 @@ func byomAdmissionCandidate(p pool.Provider) bool {
 	return strings.TrimSpace(p.ModelAdmissionCandidateID) != ""
 }
 
+// buyerServingHoldModelAdmissionPending is the closed `buyer_serving_hold`
+// value /v1/pool/check?details=readiness publishes for a session that is
+// bound to a BYOM candidate whose admission is still pending. The provider
+// CLI holds its accepted session through that hold instead of reconnecting:
+// SPEC-047-R003(iv) admits `settlement_capable` only while THIS live session
+// is bound and hash-verified, and SPEC-047-R006 clears the binding on every
+// disconnect, so a provider that drops the session on `buyer_serving:false`
+// can never be settled (buyer serving needs settlement, settlement needs
+// the session).
+const buyerServingHoldModelAdmissionPending = "model_admission_pending"
+
+// byomBuyerServingHold names the readiness hold for a bound BYOM session
+// whose candidate's latest event is a pre-settlement, non-terminal state.
+// It is coordinator-derived (the registry binding and the admission store),
+// never provider-asserted, and it is empty for an unbound session, for
+// `settlement_capable` (readiness then depends on the ordinary gates), and
+// for a terminal candidate (`withdrawn`, `revoked`), whose session must
+// re-derive through a fresh hello.
+func (s *Server) byomBuyerServingHold(ctx context.Context, p pool.Provider) string {
+	if s == nil || s.modelAdmissionStore == nil || !byomAdmissionCandidate(p) {
+		return ""
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	event, found, err := s.modelAdmissionStore.LatestModelAdmissionStatus(ctx, p.ProviderID, strings.TrimSpace(p.ModelAdmissionCandidateID))
+	if err != nil || !found {
+		return ""
+	}
+	switch event.State {
+	case "offer_submitted", "sandbox_probe_only", "network_visible_unpriced", "network_admitted_unsettled", "catalog_priced":
+		return buyerServingHoldModelAdmissionPending
+	}
+	return ""
+}
+
 func (s *Server) byomDefaultPaidRoutingEligible(p pool.Provider) bool {
 	return s.byomDefaultPaidRoutingEligibility(p).eligible
 }

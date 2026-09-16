@@ -1940,6 +1940,101 @@ func TestPoolCheckReadinessAppliesBYOMSettlementGate(t *testing.T) {
 	if response["buyer_serving"] != false {
 		t.Fatalf("non-settlement BYOM must not be buyer_serving via readiness: %+v", response)
 	}
+	if response["buyer_serving_hold"] != "model_admission_pending" {
+		t.Fatalf("a bound pre-settlement BYOM session must publish the model_admission_pending hold: %+v", response)
+	}
+}
+
+func TestPoolCheckReadinessHoldNamesOnlyPendingBYOMAdmission(t *testing.T) {
+	// The provider CLI holds its accepted session through buyer_serving=false
+	// only when the coordinator names the SPEC-047-R003 admission hold. The
+	// hold is derived from the registry binding plus the admission store and
+	// is published for every pre-settlement, non-terminal state, never for a
+	// terminal candidate (whose session re-derives through a fresh hello) and
+	// never for a session that carries no binding.
+	cases := []struct {
+		name  string
+		bound bool
+		state string
+		want  string
+	}{
+		{name: "offer_submitted", bound: true, state: "offer_submitted", want: "model_admission_pending"},
+		{name: "catalog_priced", bound: true, state: "catalog_priced", want: "model_admission_pending"},
+		{name: "revoked", bound: true, state: "revoked", want: ""},
+		{name: "withdrawn", bound: true, state: "withdrawn", want: ""},
+		{name: "unbound legacy session", bound: false, state: "", want: ""},
+	}
+	// catalog_priced needs the trusted Tier-2 material the decision binds.
+	tier2.ResetForTest()
+	t.Cleanup(tier2.ResetForTest)
+	raw, pubkey := routeSnapshotCatalogFixture(t, "hold-catalog", time.Now().UTC().Add(time.Hour))
+	if err := tier2.Configure(config.Tier2Config{
+		ObserveEnabled:      true,
+		CatalogPath:         writeRouteSnapshotCatalog(t, raw),
+		CatalogPublicKey:    pubkey,
+		RequireHashVerified: true,
+	}, zerolog.Nop()); err != nil {
+		t.Fatalf("tier2.Configure: %v", err)
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			registry := pool.NewRegistry(nil)
+			now := time.Now().UTC()
+			p := pool.Provider{
+				ProviderID:       "byom-hold",
+				AssignedID:       "session-1",
+				Hostname:         "byom-hold.local",
+				ModelID:          "model-a",
+				ModelHash:        buyerTestHash,
+				MaxContextTokens: 20000,
+				MaxConcurrency:   1,
+				SlotsFree:        1,
+				SlotsTotal:       1,
+				Tier:             pool.TierPinned,
+				InferencePath:    pool.InferencePathHTTPForwarding,
+				State:            pool.StateReady,
+				LastHeartbeatAt:  now,
+				LastActivityAt:   now,
+				ConnectedAt:      now,
+				// A legacy (catalog-envelope-less) session is never buyer
+				// serving, so the unbound case exercises buyer_serving=false
+				// without a hold.
+				CatalogAdmissionMode: "legacy",
+			}
+			if tc.bound {
+				p = byomAdmissionProvider(t, p)
+			}
+			registry.Register(&p, nil)
+			store := providerws.NewMemoryModelAdmissionStore()
+			if tc.bound {
+				seedBYOMNonSettlementAdmissionState(t, store, p, tc.state)
+			}
+			server := buyer.NewServer(
+				registry,
+				zerolog.Nop(),
+				time.Unix(1716768000, 0),
+				buyer.WithModelAdmissionStore(store),
+			)
+			req := httptest.NewRequest(http.MethodGet, "/v1/pool/check?provider_id=byom-hold&assigned_id=session-1&details=readiness", nil)
+			req.RemoteAddr = "198.51.100.1:12345"
+			rr := httptest.NewRecorder()
+			server.Handler().ServeHTTP(rr, req)
+			if rr.Code != http.StatusOK {
+				t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+			}
+			var response map[string]any
+			if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
+				t.Fatalf("decode response: %v", err)
+			}
+			if response["buyer_serving"] != false {
+				t.Fatalf("expected buyer_serving=false: %+v", response)
+			}
+			got, _ := response["buyer_serving_hold"].(string)
+			if got != tc.want {
+				t.Fatalf("buyer_serving_hold=%q want %q: %+v", got, tc.want, response)
+			}
+		})
+	}
 }
 
 func TestPoolCheckReadinessEvidenceIsPublicAndLegacyIsNotBuyerServing(t *testing.T) {

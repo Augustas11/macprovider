@@ -807,6 +807,51 @@ final class ProviderStatusTests: XCTestCase {
         ), false)
     }
 
+    func testCoordinatorReadinessHoldIsCarriedOnlyOnAuthoritativeNotServing() throws {
+        let requestURL = try XCTUnwrap(CoordinatorReadinessClient.readinessURL(
+            coordinatorURL: "wss://coordinator.malibu.tech/v1/ws/provider",
+            providerID: "provider-a",
+            assignedID: "session-a"
+        ))
+        let response = try XCTUnwrap(HTTPURLResponse(
+            url: requestURL,
+            statusCode: 200,
+            httpVersion: nil,
+            headerFields: nil
+        ))
+        func body(serving: Bool, hold: String?) throws -> Data {
+            var object: [String: Any] = [
+                "provider_id": "provider-a",
+                "assigned_id": "session-a",
+                "buyer_serving": serving,
+                "catalog_admission_mode": "current",
+                "catalog_evidence_source": "provider_reported",
+            ]
+            if let hold { object["buyer_serving_hold"] = hold }
+            return try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+        }
+        func readiness(_ data: Data) -> CoordinatorReadinessClient.Readiness {
+            CoordinatorReadinessClient.readiness(
+                data: data, response: response, requestURL: requestURL, providerID: "provider-a", assignedID: "session-a"
+            )
+        }
+
+        // SPEC-047-R003(iv): the coordinator's admission hold rides on an
+        // authoritative not-serving verdict.
+        XCTAssertEqual(readiness(try body(serving: false, hold: "model_admission_pending")), .notServing(hold: .modelAdmissionPending))
+        // No hold, or a hold outside the closed set, is the plain fail-closed false.
+        XCTAssertEqual(readiness(try body(serving: false, hold: nil)), .notServing(hold: nil))
+        XCTAssertEqual(readiness(try body(serving: false, hold: "something_else")), .notServing(hold: nil))
+        // A hold never upgrades or downgrades a serving verdict.
+        XCTAssertEqual(readiness(try body(serving: true, hold: "model_admission_pending")), .confirmed)
+        // The Bool? projection every existing reader uses is unchanged.
+        XCTAssertEqual(CoordinatorReadinessClient.Readiness.notServing(hold: .modelAdmissionPending).buyerServing, false)
+        XCTAssertEqual(CoordinatorReadinessClient.Readiness.confirmed.buyerServing, true)
+        XCTAssertNil(CoordinatorReadinessClient.Readiness.indeterminate.buyerServing)
+        XCTAssertEqual(CoordinatorReadinessClient.Readiness(booleanLiteral: false), .notServing(hold: nil))
+        XCTAssertEqual(CoordinatorReadinessClient.Readiness(nilLiteral: ()), .indeterminate)
+    }
+
     func testCoordinatorReadinessVerdictRequiresExactCatalogEnvelopeForUpdateCommit() throws {
         let requestURL = try XCTUnwrap(CoordinatorReadinessClient.readinessURL(
             coordinatorURL: "wss://coordinator.malibu.tech/v1/ws/provider",
