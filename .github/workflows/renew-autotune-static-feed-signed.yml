@@ -1,8 +1,9 @@
 name: Renew signed autotune static feed
 
 # Protected weekly freshness re-stamp for the SPEC-023 signed autotune feed.
-# Signs on a macos-15-intel runner (Swift CryptoKit + sealed OpenSSL 3 verify),
-# then rsyncs only signed bytes to Pearl and SIGHUPs the coordinator.
+# Signs on a macos-15-intel runner (Swift CryptoKit + sealed Go Tier-2
+# verifier + sealed OpenSSL 3 verify), then rsyncs only signed bytes to
+# Pearl and SIGHUPs the coordinator.
 #
 # The feed key MUST NOT live on Pearl. It is an autotune-feed-renewal secret
 # (AUTOTUNE_STATIC_V4_PRIVATE_KEY_BASE64). Do not reuse the discovery-head
@@ -47,6 +48,27 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.RELEASE_POSTURE_TOKEN }}
         run: POSTURE_PROFILE=unattended bash scripts/verify-github-release-posture.sh "$GITHUB_REPOSITORY" autotune-feed-renewal 28995904
+
+      - name: Set up Go for the Tier-2 signature verifier
+        # Pinned to actions/setup-go v7.0.0. Re-resolve deliberately.
+        # catalog-release.py generate authenticates the previous signed
+        # release against a fixed absolute Go path, not PATH.
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: phase4-coordinator/go.mod
+          cache: false
+
+      - name: Seal the Tier-2 verifier toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_root="$(go env GOROOT)"
+          sudo test ! -e /private/var/macprovider-go-verifier
+          sudo install -d -o root -g wheel -m 0755 /private/var/macprovider-go-verifier
+          sudo cp -a "$source_root/." /private/var/macprovider-go-verifier/
+          sudo chown -R root:wheel /private/var/macprovider-go-verifier
+          sudo chmod -R go-w /private/var/macprovider-go-verifier
+          sudo test -x /private/var/macprovider-go-verifier/bin/go
 
       - name: Seal reviewed OpenSSL 3
         id: protected_openssl
@@ -99,4 +121,5 @@ jobs:
           export PEARL_SSH_IDENTITY="$ssh_key"
           export PEARL_SSH_KNOWN_HOSTS="$GITHUB_WORKSPACE/scripts/dist/malibu-download-known_hosts"
           export PEARL_SSH="root@159.223.165.194"
+          export CATALOG_RELEASE_REQUIRE_SEALED_GO_VERIFIER=1
           bash scripts/renew-autotune-static-feed.sh --deploy

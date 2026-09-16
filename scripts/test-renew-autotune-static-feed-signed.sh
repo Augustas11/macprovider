@@ -65,6 +65,14 @@ for requirement in (
     "scripts/verify-github-release-posture.sh",
     "RELEASE_POSTURE_TOKEN",
     'cron: "0 16 * * 3"',
+    "uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e",
+    "go-version-file: phase4-coordinator/go.mod",
+    "cache: false",
+    "/private/var/macprovider-go-verifier",
+    "Seal the Tier-2 verifier toolchain",
+    'source_root="$(go env GOROOT)"',
+    "CATALOG_RELEASE_REQUIRE_SEALED_GO_VERIFIER=1",
+    "sudo chown -R root:wheel /private/var/macprovider-go-verifier",
 ):
     if requirement not in workflow:
         raise SystemExit(f"signed renewal workflow omits: {requirement}")
@@ -83,8 +91,16 @@ if "AUTOTUNE_STATIC_V4_PRIVATE_KEY_BASE64: ${{ secrets.AUTOTUNE_STATIC_V4_PRIVAT
     raise SystemExit("feed key must not be in env before the deploy step")
 seal_idx = workflow.find("- name: Seal reviewed OpenSSL 3")
 posture_idx = workflow.find("- name: Verify protected GitHub release posture")
+setup_go_idx = workflow.find("- name: Set up Go for the Tier-2 signature verifier")
+seal_go_idx = workflow.find("- name: Seal the Tier-2 verifier toolchain")
 if posture_idx < 0 or seal_idx < 0 or posture_idx > seal_idx:
     raise SystemExit("posture check must run before OpenSSL seal")
+if min(setup_go_idx, seal_go_idx) < 0 or setup_go_idx > seal_go_idx:
+    raise SystemExit("setup-go must run before the Go verifier is sealed")
+if seal_go_idx > seal_idx:
+    raise SystemExit("sealed Go verifier must be installed before OpenSSL seal / deploy")
+if "CATALOG_RELEASE_REQUIRE_SEALED_GO_VERIFIER" in before_secrets:
+    raise SystemExit("sealed Go requirement must be set only on the secret-bearing deploy step")
 
 if 'cron: "0 16 * * 1"' in workflow:
     raise SystemExit("signed renewal must not share Monday 16:00 UTC with discovery-head")
@@ -125,6 +141,8 @@ if "cat \"$key\"" in deploy or "cat \"$ssh_key\"" in deploy:
     raise SystemExit("deploy step must not print key material")
 if 'printf \'%s\\n\' "$AUTOTUNE_STATIC_V4_PRIVATE_KEY_BASE64" > "$key"' not in deploy:
     raise SystemExit("deploy step must materialize the feed key to a 0600 file")
+if "CATALOG_RELEASE_REQUIRE_SEALED_GO_VERIFIER=1" not in deploy:
+    raise SystemExit("deploy must require the sealed Go verifier")
 
 top_level, _, rest = workflow.partition("\njobs:\n")
 if "contents: write" in top_level or "contents: write" in rest:
@@ -247,6 +265,10 @@ if "environment: autotune-feed-renewal" not in runbook:
     raise SystemExit("runbook must name the unattended autotune-feed-renewal environment")
 if "approval still pending" in runbook or "antfleet-ops approval" in runbook:
     raise SystemExit("runbook must not describe a human approval gate for signed renewal")
+if "/private/var/macprovider-go-verifier" not in runbook:
+    raise SystemExit("runbook must name the sealed Go verifier path")
+if "CATALOG_RELEASE_REQUIRE_SEALED_GO_VERIFIER" not in runbook:
+    raise SystemExit("runbook must require the sealed Go verifier on Actions")
 PY
 
 python3 -m py_compile "$helper"
