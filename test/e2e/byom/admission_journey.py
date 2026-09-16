@@ -30,6 +30,7 @@ import json
 import os
 import re
 import shlex
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -353,13 +354,60 @@ class PhysicalRig:
             assert_true("\n" not in value and "\r" not in value, f"ledger DSN parameter {key!r} contains a line break")
         return params
 
+    @staticmethod
+    def _sqlite_ledger_path(dsn: str) -> str | None:
+        # A SQLite-backed coordinator keeps the ten money-path ledgers in its
+        # own storage.db (billing.NewStore(reqLogStore.DB())), not Postgres.
+        # Accept an explicit ``sqlite:`` / ``sqlite3:`` scheme, or a bare path
+        # to a .db/.sqlite/.sqlite3 file, and read the ledgers in-process.
+        candidate = dsn
+        for scheme in ("sqlite:///", "sqlite://", "sqlite:", "sqlite3:"):
+            if candidate.startswith(scheme):
+                candidate = candidate[len(scheme):]
+                return candidate or None
+        if candidate.endswith((".db", ".sqlite", ".sqlite3")):
+            return candidate
+        return None
+
+    def _sqlite_ledger_counts(self, path: str) -> dict[str, int]:
+        assert_true(os.path.isfile(path), "SQLite ledger DB not found: " + path)
+        counts: dict[str, int] = {}
+        connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        try:
+            existing = {
+                str(r[0])
+                for r in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
+            for table in MONEY_PATH_TABLES:
+                # A money-path ledger table the coordinator creates lazily (only
+                # on its first write, e.g. spec022_payable_request_credits) is
+                # absent until money moves. Absent => definitionally zero rows,
+                # which is exactly the money_path_zero_rows invariant this run
+                # must prove; a missing table is reported as 0, never an error.
+                if table not in existing:
+                    counts[table] = 0
+                    continue
+                row = connection.execute(f"SELECT count(*) FROM {table}").fetchone()
+                counts[table] = int(row[0])
+        finally:
+            connection.close()
+        return counts
+
     def ledger_counts(self) -> dict[str, int]:
+        # SQLite-backed coordinator: read the money-path ledgers from its own
+        # storage.db directly (the live store), not a Postgres mirror.
+        raw_dsn = os.environ[self.config.postgres_dsn_env]
+        sqlite_path = self._sqlite_ledger_path(raw_dsn)
+        if sqlite_path is not None:
+            return self._sqlite_ledger_counts(sqlite_path)
         # The DSN is credential-bearing, so it never goes on the psql command
         # line (argv is world-readable through process inspection). It is
         # written to a 0600 libpq service file in a 0700 private directory
         # that exists only for the duration of the read, and psql is pointed
         # at it through PGSERVICEFILE/PGSERVICE.
-        params = self.libpq_parameters(os.environ[self.config.postgres_dsn_env])
+        params = self.libpq_parameters(raw_dsn)
         sql = " UNION ALL ".join(f"SELECT '{t}', count(*) FROM {t}" for t in MONEY_PATH_TABLES)
         with tempfile.TemporaryDirectory(prefix="byom-journey-pg-") as private:
             os.chmod(private, 0o700)
@@ -653,7 +701,20 @@ class AdmissionJourneyRunner:
         code, _, stderr = self.rig.cli_raw(["models", "offer", self.opaque.served_model_ref, "--yes", *self._common()])
         assert_true(code != 0 and "not offerable" in stderr, "an opaque endpoint candidate was submitted rather than refused")
         status = self.status(self.opaque)
-        assert_true(status["admission_state_source"] == "local_default", "opaque endpoint acquired coordinator admission state")
+        # SPEC-046-R003: `models admission status` reads coordinator admission
+        # state when a coordinator is configured and reachable, and otherwise
+        # falls back to the local ladder. Against a REAL (reachable) coordinator
+        # an opaque candidate legitimately returns the first-class SPEC-046-R003
+        # `coordinator:not_offered` state (the coordinator authoritatively holds
+        # no admission record for it); only against an unreachable coordinator is
+        # it `local_default:not_offered`. Both prove the opaque endpoint was never
+        # admitted. The invariant this step enforces is non-admission plus the
+        # absence of any catalog/economics binding and of buyer traffic (proven
+        # by the assertions below), not the source label, which only reflects
+        # coordinator reachability. The earlier `== "local_default"` assertion
+        # held only against the hermetic fake coordinator, which 404s unknown
+        # candidates so the CLI falls back to local_default.
+        assert_true(status["admission_state_source"] in ("local_default", "coordinator"), f"opaque endpoint status carried an unexpected source {status['admission_state_source']!r}")
         assert_true(status["admission_state"] in ("local_only", "not_offered"), f"opaque endpoint is {status['admission_state']!r}; must be confined to local inventory")
         assert_true(status.get("catalog_model_key") is None, "opaque endpoint acquired a catalog key")
         assert_true(status["provider_guidance"]["earning_path_class"] == "local_inventory_only", "opaque endpoint guidance does not confine it to local inventory")
