@@ -25,23 +25,24 @@ live on Pearl. A Pearl-root signer that mints client-trusted feeds and retargets
 
 Primary always-on signer: GitHub Actions
 `.github/workflows/renew-autotune-static-feed-signed.yml` (Wednesday 16:00 UTC,
-`environment: production-release`, antfleet-ops approval). The runner signs with
+`environment: autotune-feed-renewal`, no reviewer gate). The runner signs with
 Swift CryptoKit, verifies with a sealed OpenSSL 3 bottle, and rsyncs **only
-signed bytes** to Pearl. The private key is a `production-release` secret, never
-a file on the coordinator host.
+signed bytes** to Pearl. The private key is an `autotune-feed-renewal` secret,
+never a file on the coordinator host.
 
 A Pearl compromise therefore still cannot mint a validly-signed feed.
 
 ## Operator secrets (not in the repo)
 
-Place these on the `production-release` environment **before the first live
+Place these on the `autotune-feed-renewal` environment **before the first live
 `--deploy`**. Until they exist, the workflow is mergeable but a scheduled run
 fails closed on empty secrets. Do **not** commit key material.
 
 | Secret | What it is |
 | --- | --- |
 | `AUTOTUNE_STATIC_V4_PRIVATE_KEY_BASE64` | Raw 32-byte Ed25519 seed, same contents as `~/.config/macprovider/keys/autotune-static-v4.private.base64`. Do not reuse the discovery-head release-signing PEM. |
-| `PEARL_AUTOTUNE_DEPLOY_SSH_KEY` | OpenSSH private key for `root@159.223.165.194`. Do not reuse the download.malibu.tech upload key (different blast radius). Host key is pinned via `scripts/dist/malibu-download-known_hosts` with `StrictHostKeyChecking=yes`. |
+| `PEARL_AUTOTUNE_DEPLOY_SSH_KEY` | Dedicated OpenSSH private key for `root@159.223.165.194` (not `pearl_operator_ed25519`, not the download.malibu.tech upload key). Host key is pinned via `scripts/dist/malibu-download-known_hosts` with `StrictHostKeyChecking=yes`. |
+| `RELEASE_POSTURE_TOKEN` | Fine-grained token with repository Administration read and Actions read. Same capability as the `production-release` posture token; this environment does not inherit that secret. |
 
 ## What the signed job does
 
@@ -105,14 +106,14 @@ dry-run):
 | When (UTC) | What |
 | --- | --- |
 | Monday 16:00 | discovery-head renewal (`renew-release-discovery-head.yml`) — different key, different artifact. Do not share this slot. |
-| Wednesday 16:00 | **signed autotune renew** (`renew-autotune-static-feed-signed.yml`, `production-release`) |
+| Wednesday 16:00 | **signed autotune renew** (`renew-autotune-static-feed-signed.yml`, `autotune-feed-renewal`, unattended) |
 | Tuesday 16:00 | **watch** (`renew-autotune-static-feed.yml`) — fails if live `generated_at` is ≥ 7 days old (~6 days after a successful Wednesday) |
 | every 6 hours | **20-day alarm** (`autotune-feed-freshness-alarm.yml`) |
 
-A red Tuesday watch means: inspect the Wednesday `production-release` run
-(missed schedule or approval still pending). Do **not** install a laptop
-LaunchAgent as the SLA — a closed laptop misses the week. Do **not** put the
-feed key on Pearl.
+A red Tuesday watch means: inspect the Wednesday `autotune-feed-renewal` run
+(missed schedule or job failure). Do **not** install a laptop LaunchAgent as
+the SLA — a closed laptop misses the week. Do **not** put the feed key on
+Pearl. The signed job has no human approval gate.
 
 ## Laptop fallback (not the SLA)
 

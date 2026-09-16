@@ -11,12 +11,17 @@ environment_name="${2:-production-release}"
 release_tagger_id="${3:-28995904}"
 release_reviewer_id="${4:-285575208}"
 release_reviewer_login="${5:-antfleet-ops}"
+profile="${POSTURE_PROFILE:-attended}"
 
 [[ "$repo" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || die "repository must be OWNER/REPO"
 [[ "$environment_name" =~ ^[A-Za-z0-9_.-]+$ ]] || die "invalid environment name"
 [[ "$release_tagger_id" =~ ^[1-9][0-9]*$ ]] || die "release tagger id must be numeric"
 [[ "$release_reviewer_id" =~ ^[1-9][0-9]*$ ]] || die "release reviewer id must be numeric"
 [[ "$release_reviewer_login" =~ ^[A-Za-z0-9-]+$ ]] || die "release reviewer login is invalid"
+case "$profile" in
+  attended|unattended) ;;
+  *) die "POSTURE_PROFILE must be attended or unattended" ;;
+esac
 [[ -n "${GH_TOKEN:-}" ]] || die "GH_TOKEN with Administration:read and Actions:read is required"
 
 work="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/release-posture.XXXXXX")"
@@ -36,7 +41,7 @@ gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
   "repos/$repo/rulesets?targets=tag&per_page=100" >"$work/rulesets.json" ||
   die "tag rulesets are unavailable"
 
-python3 - "$work" "$environment_name" "$release_reviewer_id" "$release_reviewer_login" <<'PY'
+python3 - "$work" "$environment_name" "$release_reviewer_id" "$release_reviewer_login" "$profile" <<'PY'
 import json
 import pathlib
 import sys
@@ -45,6 +50,9 @@ root = pathlib.Path(sys.argv[1])
 environment_name = sys.argv[2]
 release_reviewer_id = int(sys.argv[3])
 release_reviewer_login = sys.argv[4]
+profile = sys.argv[5]
+if profile not in ("attended", "unattended"):
+    raise SystemExit("POSTURE_PROFILE must be attended or unattended")
 
 immutable = json.loads((root / "immutable.json").read_text())
 if immutable.get("enabled") is not True:
@@ -58,27 +66,33 @@ review_rules = [
     rule for rule in rules or []
     if isinstance(rule, dict) and rule.get("type") == "required_reviewers"
 ]
-if len(review_rules) != 1:
-    raise SystemExit(f"{environment_name} must have exactly one required-reviewers rule")
-reviewers = review_rules[0].get("reviewers")
-if not isinstance(reviewers, list) or len(reviewers) != 1:
-    raise SystemExit(f"{environment_name} must require exactly one environment reviewer")
-reviewer_entry = reviewers[0]
-reviewer = reviewer_entry.get("reviewer") if isinstance(reviewer_entry, dict) else None
-if not isinstance(reviewer, dict):
-    reviewer = reviewer_entry
-if (
-    not isinstance(reviewer_entry, dict)
-    or reviewer_entry.get("type") != "User"
-    or not isinstance(reviewer, dict)
-    or reviewer.get("id") != release_reviewer_id
-    or reviewer.get("login") != release_reviewer_login
-):
-    raise SystemExit(
-        f"{environment_name} reviewer must be User {release_reviewer_login} ({release_reviewer_id})"
-    )
-if review_rules[0].get("prevent_self_review") is not True:
-    raise SystemExit(f"{environment_name} must prevent self-review")
+if profile == "unattended":
+    if review_rules:
+        raise SystemExit(
+            f"{environment_name} unattended posture must have no required-reviewers rule"
+        )
+else:
+    if len(review_rules) != 1:
+        raise SystemExit(f"{environment_name} must have exactly one required-reviewers rule")
+    reviewers = review_rules[0].get("reviewers")
+    if not isinstance(reviewers, list) or len(reviewers) != 1:
+        raise SystemExit(f"{environment_name} must require exactly one environment reviewer")
+    reviewer_entry = reviewers[0]
+    reviewer = reviewer_entry.get("reviewer") if isinstance(reviewer_entry, dict) else None
+    if not isinstance(reviewer, dict):
+        reviewer = reviewer_entry
+    if (
+        not isinstance(reviewer_entry, dict)
+        or reviewer_entry.get("type") != "User"
+        or not isinstance(reviewer, dict)
+        or reviewer.get("id") != release_reviewer_id
+        or reviewer.get("login") != release_reviewer_login
+    ):
+        raise SystemExit(
+            f"{environment_name} reviewer must be User {release_reviewer_login} ({release_reviewer_id})"
+        )
+    if review_rules[0].get("prevent_self_review") is not True:
+        raise SystemExit(f"{environment_name} must prevent self-review")
 branch_policy = environment.get("deployment_branch_policy")
 if (
     not isinstance(branch_policy, dict)

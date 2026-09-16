@@ -1968,11 +1968,11 @@ case "$endpoint" in
       printf '%s\n' '{"enabled":true}'
     fi
     ;;
-  repos/*/environments/production-release)
-    cat "$FIXTURE_DIR/environment.json"
-    ;;
-  repos/*/environments/production-release/deployment-branch-policies*)
+  repos/*/environments/*/deployment-branch-policies*)
     cat "$FIXTURE_DIR/policies.json"
+    ;;
+  repos/*/environments/*)
+    cat "$FIXTURE_DIR/environment.json"
     ;;
   repos/*/rulesets\?*)
     cat "$FIXTURE_DIR/rulesets.json"
@@ -2003,6 +2003,42 @@ EOF
 
 PATH="$work/bin:$PATH" FIXTURE_DIR="$work/fixtures" GH_TOKEN=test \
   bash "$guard" Augustas11/macprovider production-release >/dev/null
+
+cp "$work/fixtures/environment.json" "$work/fixtures/environment.attended"
+printf '%s\n' '{"can_admins_bypass":false,"protection_rules":[],"deployment_branch_policy":{"protected_branches":false,"custom_branch_policies":true}}' \
+  > "$work/fixtures/environment.json"
+PATH="$work/bin:$PATH" FIXTURE_DIR="$work/fixtures" GH_TOKEN=test \
+  POSTURE_PROFILE=unattended \
+  bash "$guard" Augustas11/macprovider autotune-feed-renewal >/dev/null
+
+printf '%s\n' '{"can_admins_bypass":false,"protection_rules":[{"type":"required_reviewers","prevent_self_review":true,"reviewers":[{"type":"User","reviewer":{"type":"User","id":285575208,"login":"antfleet-ops"}}]}],"deployment_branch_policy":{"protected_branches":false,"custom_branch_policies":true}}' \
+  > "$work/fixtures/environment.json"
+if PATH="$work/bin:$PATH" FIXTURE_DIR="$work/fixtures" GH_TOKEN=test \
+  POSTURE_PROFILE=unattended \
+  bash "$guard" Augustas11/macprovider autotune-feed-renewal >"$work/unattended-reviewer.out" 2>&1; then
+  echo "unattended posture accepted a required reviewer" >&2
+  exit 1
+fi
+grep -q 'unattended posture must have no required-reviewers rule' "$work/unattended-reviewer.out"
+
+printf '%s\n' '{"can_admins_bypass":true,"protection_rules":[],"deployment_branch_policy":{"protected_branches":false,"custom_branch_policies":true}}' \
+  > "$work/fixtures/environment.json"
+if PATH="$work/bin:$PATH" FIXTURE_DIR="$work/fixtures" GH_TOKEN=test \
+  POSTURE_PROFILE=unattended \
+  bash "$guard" Augustas11/macprovider autotune-feed-renewal >"$work/unattended-bypass.out" 2>&1; then
+  echo "unattended posture accepted environment admin bypass" >&2
+  exit 1
+fi
+grep -q 'must disable admin bypass' "$work/unattended-bypass.out"
+mv "$work/fixtures/environment.attended" "$work/fixtures/environment.json"
+
+if PATH="$work/bin:$PATH" FIXTURE_DIR="$work/fixtures" GH_TOKEN=test \
+  POSTURE_PROFILE=nope \
+  bash "$guard" Augustas11/macprovider production-release >"$work/profile.out" 2>&1; then
+  echo "posture guard accepted an invalid POSTURE_PROFILE" >&2
+  exit 1
+fi
+grep -q 'POSTURE_PROFILE must be attended or unattended' "$work/profile.out"
 
 if PATH="$work/bin:$PATH" FIXTURE_DIR="$work/fixtures" GH_TOKEN=test \
   FIXTURE_IMMUTABLE='{"enabled":false}' \
