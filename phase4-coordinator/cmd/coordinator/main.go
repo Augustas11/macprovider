@@ -3506,6 +3506,11 @@ func reloadCoordinatorConfig(configPath, configOverlay string, startupTier2 conf
 			Str("event", "spec004_fr_sr_5_class_reload").
 			Msg("routing.model_classes reload: shape changed; sticky entries invalidated")
 	}
+	if buyerServer.SetRoutingDefaultObjective(cfg.Routing.DefaultObjective) {
+		logger.Info().
+			Str("default_objective", cfg.Routing.DefaultObjective).
+			Msg("routing.default_objective reload: objective changed")
+	}
 	if trustPoolAdminReloader != nil {
 		trustPoolAdminReloader.SetCreatorAdminConfig(creatorAdminCredentials, cfg.TrustedPools.CreatorAdminProviderIDs, cfg.TrustedPools.CreatorAdminProviderDelegatedIDs, cfg.TrustedPools.CreatorAdminBuyerAccountIDs)
 		logger.Info().

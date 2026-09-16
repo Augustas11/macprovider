@@ -921,6 +921,7 @@ type RoutingConfig struct {
 	RequestTimeoutS               int                         `yaml:"request_timeout_s"`
 	FailoverEnabled               bool                        `yaml:"failover_enabled"`
 	FailoverTimeoutS              int                         `yaml:"failover_timeout_s"`
+	DefaultObjective              string                      `yaml:"default_objective"`
 	TiebreakRandomize             bool                        `yaml:"tiebreak_randomize"`
 	TiebreakEpsilon               float64                     `yaml:"tiebreak_epsilon"`
 	MaxRetries                    int                         `yaml:"max_retries"`
@@ -1481,6 +1482,7 @@ func Default() Config {
 			RequestTimeoutS:               900,
 			FailoverEnabled:               true,
 			FailoverTimeoutS:              5,
+			DefaultObjective:              "default",
 			TiebreakRandomize:             false,
 			TiebreakEpsilon:               0,
 			MaxRetries:                    0,
@@ -2514,6 +2516,11 @@ func (c Config) Validate() error {
 	}
 	if c.Routing.StickyTTLS <= 0 || c.Routing.StickyMaxEntries <= 0 {
 		return fmt.Errorf("routing sticky settings must be > 0")
+	}
+	switch c.Routing.DefaultObjective {
+	case "", "default", "fast", "balanced", "accurate":
+	default:
+		return fmt.Errorf("routing.default_objective must be default, fast, balanced, or accurate")
 	}
 	if c.ProviderHTTP.TimeoutS <= 0 {
 		return fmt.Errorf("provider_http.timeout_s must be > 0")

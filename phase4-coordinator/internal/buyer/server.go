@@ -229,13 +229,14 @@ type Server struct {
 	requestTimeout    time.Duration
 	failoverEnabled   bool
 	failoverTimeout   time.Duration
+	defaultObjective  string
 	tiebreakRandomize bool
 	tiebreakEpsilon   float64
-	// routingMu guards modelClasses, which is hot-swapped on SIGHUP
-	// when routing.model_classes shape changes (issue #266 T1).
+	// routingMu guards defaultObjective and modelClasses, which are hot-swapped
+	// on SIGHUP when routing config changes (issue #266 T1).
 	// Pre-SIGHUP readers (handleModels iteration at modelEntry build;
-	// resolveModelClass per-request hot path) MUST take a read lock
-	// or use the snapshot accessors below — never read s.modelClasses
+	// resolveModelClass/objectiveForRequest per-request hot paths) MUST take a
+	// read lock or use the snapshot accessors below — never read s.modelClasses
 	// directly outside the routingMu critical section.
 	routingMu              sync.RWMutex
 	modelClasses           map[string]config.ModelClassConfig
@@ -441,6 +442,9 @@ func WithRoutingConfig(cfg config.RoutingConfig) Option {
 		s.tiebreakRandomize = cfg.TiebreakRandomize
 		s.tiebreakEpsilon = cfg.TiebreakEpsilon
 		s.routingMu.Lock()
+		if cfg.DefaultObjective != "" {
+			s.defaultObjective = cfg.DefaultObjective
+		}
 		s.modelClasses = cloneModelClasses(cfg.ModelClasses)
 		s.routingMu.Unlock()
 		s.maxRetries = cfg.MaxRetries
@@ -778,6 +782,7 @@ func NewServer(registry *pool.Registry, logger zerolog.Logger, startedAt time.Ti
 		requestTimeout:           300 * time.Second,
 		failoverEnabled:          true,
 		failoverTimeout:          5 * time.Second,
+		defaultObjective:         "default",
 		retryPerAttemptTimeout:   60 * time.Second,
 		stickyTTL:                30 * time.Minute,
 		stickyMaxEntries:         10000,
@@ -6601,8 +6606,27 @@ func (s *Server) objectiveForRequest(headers http.Header, class *config.ModelCla
 	case "fast", "accurate":
 		return headers.Get("X-MacProvider-Pref")
 	default:
+		s.routingMu.RLock()
+		objective := s.defaultObjective
+		s.routingMu.RUnlock()
+		if objective != "" {
+			return objective
+		}
 		return "default"
 	}
+}
+
+func (s *Server) SetRoutingDefaultObjective(objective string) (changed bool) {
+	if objective == "" {
+		objective = "default"
+	}
+	s.routingMu.Lock()
+	defer s.routingMu.Unlock()
+	if s.defaultObjective == objective {
+		return false
+	}
+	s.defaultObjective = objective
+	return true
 }
 
 // sortCandidates delegates to routing.SortCandidatesWithScores. The

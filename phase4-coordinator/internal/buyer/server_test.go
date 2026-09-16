@@ -7808,6 +7808,43 @@ func TestDefaultConfigPreservesBaselineProviderSelection(t *testing.T) {
 	}
 }
 
+func TestRoutingDefaultObjectiveFastAppliesToDirectModelRequests(t *testing.T) {
+	upstream1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"id":"p1","choices":[{"message":{"content":"p1"}}]}`))
+	}))
+	defer upstream1.Close()
+	upstream2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"id":"p2","choices":[{"message":{"content":"p2"}}]}`))
+	}))
+	defer upstream2.Close()
+
+	registry := pool.NewRegistry([]config.ProviderConfig{
+		{ProviderID: "p1", EndpointURL: upstream1.URL},
+		{ProviderID: "p2", EndpointURL: upstream2.URL},
+	})
+	registerWithEndpoint(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, upstream1.URL, 10)
+	registerWithEndpoint(registry, "p2", "s2", "model-a", pool.StateReady, 20000, 4, upstream2.URL, 30)
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithRoutingConfig(config.RoutingConfig{
+			DefaultObjective:        "fast",
+			RetryPerAttemptTimeoutS: 60,
+			StickyTTLS:              1800,
+			StickyMaxEntries:        10000,
+		}),
+	)
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`), nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if got := rr.Header().Get("X-MacProvider-Provider"); got != "p2" {
+		t.Fatalf("default_objective=fast routed to %q, want p2", got)
+	}
+}
+
 // TestStickyAccountMismatchEmitsWarnLog — issue #266 T3e HTTP-path
 // integration test for the sticky_account_mismatch warn emission
 // added in T1. Pre-T3 we had a unit test on sticky.Map.Update
@@ -7971,7 +8008,7 @@ func TestSlotQueueWaitsForReadyProviderCapacity(t *testing.T) {
 		zerolog.Nop(),
 		time.Unix(1716768000, 0),
 		buyer.WithRequestLog(reqLog),
-		buyer.WithSlotQueueConfig(4, 100*time.Millisecond, time.Millisecond),
+		buyer.WithSlotQueueConfig(4, 300*time.Millisecond, time.Millisecond),
 	)
 
 	go func() {
@@ -8582,7 +8619,7 @@ func TestSlotQueueAppliesToHTTPRetryReplacementProvider(t *testing.T) {
 		case <-time.After(time.Second):
 			return
 		}
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(50 * time.Millisecond)
 		one := 1
 		registry.ApplyStateUpdate("queued", "s2", pool.StateUpdate{State: pool.StateReady, SlotsFree: &one, At: time.Now().UTC()})
 	}()
@@ -8636,7 +8673,7 @@ func TestSlotQueueWaitDoesNotCarryIntoImmediateRetryAttempt(t *testing.T) {
 		time.Unix(1716768000, 0),
 		buyer.WithRequestLog(reqLog),
 		buyer.WithRoutingConfig(config.RoutingConfig{MaxRetries: 1, RetryPerAttemptTimeoutS: 1}),
-		buyer.WithSlotQueueConfig(4, 120*time.Millisecond, time.Millisecond),
+		buyer.WithSlotQueueConfig(4, 300*time.Millisecond, time.Millisecond),
 	)
 	go func() {
 		time.Sleep(10 * time.Millisecond)
@@ -8692,7 +8729,7 @@ func TestSlotQueueAppliesToWSFailoverReplacementProvider(t *testing.T) {
 		}, time.Second),
 	)
 	go func() {
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(50 * time.Millisecond)
 		one := 1
 		registry.ApplyStateUpdate("p2", "s2", pool.StateUpdate{State: pool.StateReady, SlotsFree: &one, At: time.Now().UTC()})
 	}()
