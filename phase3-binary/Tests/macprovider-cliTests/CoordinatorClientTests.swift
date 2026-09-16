@@ -3409,7 +3409,8 @@ final class CoordinatorClientTests: XCTestCase {
         await client.seedLastHeartbeatSuccessForTest(ageNanoseconds: 16 * 1_000_000_000)
         await client.startHeartbeatWatchdogForTest(intervalSeconds: 1)
         try await Task.sleep(nanoseconds: 2_000_000_000)
-        XCTAssertNil(await captured.value(), "admission hold must reconnect instead of Darwin.exit")
+        let reason = await captured.value()
+        XCTAssertNil(reason, "admission hold must reconnect instead of Darwin.exit")
         await client.cancelHeartbeatWatchdogForTest()
     }
 

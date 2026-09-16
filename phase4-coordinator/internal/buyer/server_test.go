@@ -1955,10 +1955,11 @@ func TestPoolCheckReadinessHoldNamesOnlyPendingBYOMAdmission(t *testing.T) {
 	// candidate, and never for a session whose model matches no pending
 	// candidate.
 	cases := []struct {
-		name  string
-		bound bool
-		state string
-		want  string
+		name    string
+		bound   bool
+		state   string
+		keyOnly bool
+		want    string
 	}{
 		{name: "offer_submitted", bound: true, state: "offer_submitted", want: "model_admission_pending"},
 		{name: "catalog_priced", bound: true, state: "catalog_priced", want: "model_admission_pending"},
@@ -1966,6 +1967,7 @@ func TestPoolCheckReadinessHoldNamesOnlyPendingBYOMAdmission(t *testing.T) {
 		{name: "withdrawn", bound: true, state: "withdrawn", want: ""},
 		{name: "unbound legacy session", bound: false, state: "", want: ""},
 		{name: "unbound matching pending offer", bound: false, state: "offer_submitted", want: "model_admission_pending"},
+		{name: "unbound catalog-key coincidence", bound: false, state: "offer_submitted", keyOnly: true, want: ""},
 	}
 	// catalog_priced needs the trusted Tier-2 material the decision binds.
 	tier2.ResetForTest()
@@ -2013,8 +2015,13 @@ func TestPoolCheckReadinessHoldNamesOnlyPendingBYOMAdmission(t *testing.T) {
 				seedProvider := p
 				if !tc.bound {
 					seedProvider = byomAdmissionProvider(t, p)
-					seedProvider.ModelAdmissionServedModelRef = p.ModelID
-					seedProvider.ModelAdmissionCatalogModelKey = p.ModelID
+					if tc.keyOnly {
+						seedProvider.ModelAdmissionServedModelRef = "other-served-model"
+						seedProvider.ModelAdmissionCatalogModelKey = p.ModelID
+					} else {
+						seedProvider.ModelAdmissionServedModelRef = p.ModelID
+						seedProvider.ModelAdmissionCatalogModelKey = p.ModelID
+					}
 				}
 				seedBYOMNonSettlementAdmissionState(t, store, seedProvider, tc.state)
 			}

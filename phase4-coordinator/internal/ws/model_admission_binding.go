@@ -185,8 +185,10 @@ func ModelAdmissionSessionPendingHold(provider pool.Provider, events []ModelAdmi
 		if !ModelAdmissionPendingHoldState(event.State) {
 			continue
 		}
+		// Match the session's served model against the candidate's served
+		// ref or catalog row id only. CatalogModelKey is a catalog identifier
+		// and can coincide with an unrelated session ModelID.
 		if autotune.NormalizeModelID(event.CatalogRowModelID) == served ||
-			autotune.NormalizeModelID(event.CatalogModelKey) == served ||
 			autotune.NormalizeModelID(event.ServedModelRef) == served {
 			return true
 		}
