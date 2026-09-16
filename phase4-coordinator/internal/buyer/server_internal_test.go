@@ -134,6 +134,21 @@ func TestRouteSnapshotDispatchContextUsesShortBudget(t *testing.T) {
 	}
 }
 
+func TestRouteSnapshotDispatchContextFitsOpenRouterRetryBudget(t *testing.T) {
+	const (
+		openRouterTTFTP95Budget          = 5 * time.Second
+		gatewayDefaultRetryBackoffBudget = 750 * time.Millisecond
+		minProviderFirstTokenHeadroom    = 2 * time.Second
+		preDispatchTimeoutPhasesPerTry   = 2
+		gatewayAttemptsBeforeSuccess     = 3
+	)
+	worstCaseBeforeUsefulWork := time.Duration(preDispatchTimeoutPhasesPerTry*gatewayAttemptsBeforeSuccess)*routeSnapshotDispatchTimeout + gatewayDefaultRetryBackoffBudget
+	if worstCaseBeforeUsefulWork+minProviderFirstTokenHeadroom > openRouterTTFTP95Budget {
+		t.Fatalf("pre-dispatch waits plus gateway retry backoff=%s leaves less than %s first-token headroom under %s",
+			worstCaseBeforeUsefulWork, minProviderFirstTokenHeadroom, openRouterTTFTP95Budget)
+	}
+}
+
 func TestWriteRouteSnapshotErrorSeparatesRequestCancellation(t *testing.T) {
 	if routeSnapshotShouldCapacityShed(context.Canceled) {
 		t.Fatal("request cancellation must not be classified as route snapshot store pressure")
