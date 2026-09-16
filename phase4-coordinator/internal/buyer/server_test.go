@@ -8030,6 +8030,57 @@ func TestSlotQueueWaitsForReadyProviderCapacity(t *testing.T) {
 	}
 }
 
+func TestRoutingThroughputFloorExcludesReadyProvider(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("below-floor provider must not receive traffic")
+	}))
+	defer upstream.Close()
+
+	registry := pool.NewRegistry([]config.ProviderConfig{{ProviderID: "slow", EndpointURL: upstream.URL}})
+	registerWithEndpoint(registry, "slow", "s1", "model-a", pool.StateReady, 20000, 1, upstream.URL, 0.25)
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithRoutingConfig(config.RoutingConfig{MinProviderThroughputTPS: 1.0}),
+	)
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`), http.Header{"X-Request-ID": []string{"throughput-floor-ready"}})
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503 body=%s", rr.Code, rr.Body.String())
+	}
+	assertOpenAIErrorEnvelope(t, rr, "no_provider_available", "service_unavailable")
+}
+
+func TestSlotQueueExcludesBelowThroughputFloor(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("below-floor queued provider must not receive traffic")
+	}))
+	defer upstream.Close()
+
+	registry := pool.NewRegistry([]config.ProviderConfig{{ProviderID: "slow", EndpointURL: upstream.URL}})
+	registerWithEndpoint(registry, "slow", "s1", "model-a", pool.StateReady, 20000, 1, upstream.URL, 0.25)
+	zero := 0
+	registry.ApplyStateUpdate("slow", "s1", pool.StateUpdate{State: pool.StateReady, SlotsFree: &zero, At: time.Now().UTC()})
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithRoutingConfig(config.RoutingConfig{MinProviderThroughputTPS: 1.0}),
+		buyer.WithSlotQueueConfig(4, 200*time.Millisecond, time.Millisecond),
+	)
+
+	started := time.Now()
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`), http.Header{"X-Request-ID": []string{"throughput-floor-queue"}})
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503 body=%s", rr.Code, rr.Body.String())
+	}
+	if elapsed := time.Since(started); elapsed >= 100*time.Millisecond {
+		t.Fatalf("below-floor provider entered slot queue; elapsed=%s", elapsed)
+	}
+	assertOpenAIErrorEnvelope(t, rr, "no_provider_available", "service_unavailable")
+}
+
 func TestHTTPSuccessReconcilesStaleBusyCapacity(t *testing.T) {
 	received := make(chan struct{})
 	release := make(chan struct{})

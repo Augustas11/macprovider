@@ -41,6 +41,10 @@ const (
 	// coordinator_advertised_version.per_model_required_binary_version,
 	// or is unparseable while such a floor is in force (#768).
 	ReasonModelVersionFloor
+	// ReasonProviderThroughputFloor — provider's live throughput estimate is
+	// below the operator-configured public routing quality floor. Default
+	// configuration leaves this gate inert.
+	ReasonProviderThroughputFloor
 	// ReasonReceiptKeyMissing — verified_model_settlement_mode=enforce
 	// and the provider has no active settlement receipt public key, so a
 	// route snapshot can never be recorded for it (SPEC-022 R-2.4/R-2.5:
@@ -121,6 +125,12 @@ type EligibilityChecker interface {
 	// configured the implementation MUST return true for every
 	// provider so selection stays byte-identical to pre-#768.
 	ProviderMeetsModelVersionFloor(p pool.Provider) bool
+
+	// ProviderMeetsRoutingQuality reports whether the provider satisfies the
+	// operator-configured public routing quality floor. A false return is
+	// reported as ReasonProviderThroughputFloor. Implementations MUST return
+	// true when no floor is configured so default selection stays byte-identical.
+	ProviderMeetsRoutingQuality(p pool.Provider) bool
 
 	// ProviderHasSettlementReceiptKey reports whether the provider can
 	// have a route snapshot recorded under the active settlement mode.
@@ -235,7 +245,8 @@ type FilterResult struct {
 //     (#768). Runs after the BYOM money gate because hidden admission states
 //     must not enter paid routing even when their binary version is current;
 //     a no-op when no floors are configured.
-//     4b. ProviderHasSettlementReceiptKey — ReasonReceiptKeyMissing
+//     4b. ProviderMeetsRoutingQuality — ReasonProviderThroughputFloor
+//     4c. ProviderHasSettlementReceiptKey — ReasonReceiptKeyMissing
 //     (SPEC-022 R-2.4/R-2.5). A no-op in observe mode / when the
 //     settlement store is unavailable, so default / observe selection
 //     stays byte-identical; under enforce it drops providers with no
@@ -304,6 +315,10 @@ func EligibleCandidates(
 		}
 		if !checker.ProviderMeetsModelVersionFloor(p) {
 			res.Counts[ReasonModelVersionFloor]++
+			continue
+		}
+		if !checker.ProviderMeetsRoutingQuality(p) {
+			res.Counts[ReasonProviderThroughputFloor]++
 			continue
 		}
 		if !checker.ProviderHasSettlementReceiptKey(p) {
