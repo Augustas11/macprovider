@@ -98,6 +98,15 @@ after revocation its candidate is terminal => unbound => ordinary catalog sessio
 serving). Verify this end-to-end before trusting it; adjust if the coordinator closes the
 replaced socket in a way the CLI treats as fatal.
 
+## Update 2026-09-16 (later): first --deploy rolled back on a script bug
+
+The operator's first `--deploy` uploaded and hot-reloaded a good release, then the script's own
+post-SIGHUP activation check (inline `python3 -c` f-string with backslash-escaped quotes) raised
+SyntaxError and the script rolled back (Pearl `current` back on published-2026-09-02, lock released).
+Fixed in PR #1552 (`fix/renew-feed-served-check-quoting`, worktree `/Users/augstar/macprovider-renew-verify-fix`)
+with `scripts/tests/test_renew_served_feed_check.py`. Re-deploy command (operator):
+`cd /Users/augstar/macprovider-renew-verify-fix && bash scripts/renew-autotune-static-feed.sh --deploy 2>&1 | tee /Users/augstar/.byom-slice7-rig/renew-deploy.log`
+
 ## Immediate next steps (in order)
 
 1. `cd /Users/augstar/macprovider-1486-serve-hold/phase3-binary && swift test --filter 'CoordinatorClientTests/testCoordinatorSessionHolds|CoordinatorClientTests/testCoordinatorSessionStillFailsClosed|CoordinatorClientTests/testCoordinatorHeldSession|ProviderStatusTests/testCoordinatorReadiness'`
