@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -1998,4 +1999,44 @@ func signedReloadCatalogFixture(t *testing.T, expiresAt time.Time, sha string) (
 		t.Fatalf("catalog marshal: %v", err)
 	}
 	return raw, base64.RawURLEncoding.EncodeToString(publicKey)
+}
+
+func TestProviderMuxServesPoolCheckBesideWebsocketCatchall(t *testing.T) {
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller")
+	}
+	src, err := os.ReadFile(filepath.Join(filepath.Dir(thisFile), "main.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(src)
+	catchAll := `providerMux.Handle("/", wsServer.Handler())`
+	poolCheck := `providerMux.Handle("/v1/pool/check", buyerServer.Handler())`
+	catchIdx := strings.Index(text, catchAll)
+	poolIdx := strings.Index(text, poolCheck)
+	if catchIdx < 0 || poolIdx < 0 {
+		t.Fatal("provider listener must mount websocket catch-all and /v1/pool/check")
+	}
+	if poolIdx < catchIdx {
+		t.Fatal("/v1/pool/check must be registered in addition to the websocket catch-all")
+	}
+
+	mux := http.NewServeMux()
+	mux.Handle("/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(599)
+	}))
+	mux.Handle("/v1/pool/check", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(204)
+	}))
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/pool/check?details=readiness", nil))
+	if rec.Code != 204 {
+		t.Fatalf("pool/check status=%d want 204", rec.Code)
+	}
+	rec = httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/ws", nil))
+	if rec.Code != 599 {
+		t.Fatalf("catchall status=%d want 599", rec.Code)
+	}
 }

@@ -667,20 +667,68 @@ final class BYOMAdmissionTests: XCTestCase {
             servedModelRef: "ollama:qwen3-8b",
             warningCodes: ["evaluation_required"]
         )
-        XCTAssertNoThrow(try BYOMOfferSubmissionBuilder.makePackage(
+        let omitted = try BYOMOfferSubmissionBuilder.makePackage(
             providerID: "provider-byom-a",
             candidate: candidate,
             admissionIdentity: identity,
             evaluationDigestSHA256: nil,
-            requestedDisclosureClass: "non_earning_provider_asserted"
-        ))
-        XCTAssertNoThrow(try BYOMOfferSubmissionBuilder.makePackage(
+            requestedDisclosureClass: "non_earning_provider_asserted",
+            now: Date(timeIntervalSince1970: 1_800_000_000),
+            nonce: "nonce_omitted_eval",
+            idempotencyKey: "request_omitted_eval"
+        )
+        XCTAssertEqual(
+            omitted.request.evaluationDigestSHA256,
+            BYOMOfferSubmissionBuilder.omittedEvaluationDigest(
+                candidateID: candidate.candidateID,
+                nonce: "nonce_omitted_eval",
+                timestamp: ModelSwitchingWireCodec.timestamp(Date(timeIntervalSince1970: 1_800_000_000))
+            )
+        )
+        XCTAssertEqual(omitted.request.evaluationDigestSHA256.count, 64)
+        let supplied = try BYOMOfferSubmissionBuilder.makePackage(
             providerID: "provider-byom-a",
             candidate: candidate,
             admissionIdentity: identity,
             evaluationDigestSHA256: String(repeating: "b", count: 64),
             requestedDisclosureClass: "non_earning_provider_asserted"
-        ))
+        )
+        XCTAssertEqual(supplied.request.evaluationDigestSHA256, String(repeating: "b", count: 64))
+    }
+
+    func testOfferPackageOmittedEvaluationDigestIsUniquePerSubmission() throws {
+        // SPEC-047-R001 re-entry (withdrawn/revoked → offer_submitted) requires
+        // refreshed evidence. Two omitted-evaluation submits of the same
+        // candidate must not carry the same evaluation digest, or the
+        // coordinator 409s them as same-evidence.
+        let identity = Curve25519.Signing.PrivateKey()
+        let candidate = byomAdmissionCandidate(
+            candidateID: stableBYOMAdmissionCandidateID("f"),
+            servedModelRef: "ollama:qwen3-8b"
+        )
+        let first = try BYOMOfferSubmissionBuilder.makePackage(
+            providerID: "provider-byom-a",
+            candidate: candidate,
+            admissionIdentity: identity,
+            evaluationDigestSHA256: nil,
+            requestedDisclosureClass: "non_earning_provider_asserted",
+            now: Date(timeIntervalSince1970: 1_800_000_000),
+            nonce: "nonce_reentry_one",
+            idempotencyKey: "request_reentry_one"
+        )
+        let second = try BYOMOfferSubmissionBuilder.makePackage(
+            providerID: "provider-byom-a",
+            candidate: candidate,
+            admissionIdentity: identity,
+            evaluationDigestSHA256: nil,
+            requestedDisclosureClass: "non_earning_provider_asserted",
+            now: Date(timeIntervalSince1970: 1_800_000_000),
+            nonce: "nonce_reentry_two",
+            idempotencyKey: "request_reentry_two"
+        )
+        XCTAssertNotEqual(first.request.evaluationDigestSHA256, second.request.evaluationDigestSHA256)
+        XCTAssertEqual(try BYOMOfferSubmissionBuilder.discoveryDigest(candidate), first.request.discoveryDigestSHA256)
+        XCTAssertEqual(first.request.discoveryDigestSHA256, second.request.discoveryDigestSHA256)
     }
 
     func testOfferPackageStillRejectsHardLocalBlockers() throws {

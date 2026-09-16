@@ -141,7 +141,7 @@ actor CoordinatorClient {
         String,
         String,
         CoordinatorReadinessClient.ExpectedCatalogEnvelope
-    ) async -> Bool?
+    ) async -> CoordinatorReadinessClient.Readiness
     typealias CatalogArtifactIdentity = @Sendable (String?) async -> String?
     typealias InstalledCompatibilityManifest = @Sendable (URL, String) -> CompatibilitySetManifest?
     typealias ReloadHelperFence = @Sendable () throws -> Void
@@ -289,6 +289,14 @@ actor CoordinatorClient {
     // If the heartbeat task itself stalls (App Nap, cooperative-task
     // starvation), the watchdog fires watchdogExitHook so launchd respawns.
     private var heartbeatWatchdogTask: Task<Void, Never>?
+    /// SPEC-047-R003(iv) hold: polls readiness for an accepted session whose
+    /// buyer serving the coordinator is holding on a pending BYOM admission.
+    private var admissionPendingReadinessWatchTask: Task<Void, Never>?
+    /// True while the accepted session is held for a pending BYOM admission.
+    /// The Issue #189 watchdog must reconnect this session, not Darwin.exit:
+    /// launchd KeepAlive is not present on the physical admission-journey rig,
+    /// and exiting drops the live binding SPEC-047-R003(iv) requires.
+    private var admissionPendingHoldActive = false
     private var lastHeartbeatSuccessNanoseconds: UInt64 = 0
     private let watchdogExitHook: @Sendable (String) -> Void
     private var swapHeartbeatTask: Task<Void, Never>?
@@ -370,6 +378,7 @@ actor CoordinatorClient {
     private let coordinatorReadiness: CoordinatorReadiness
     private let coordinatorReadinessAttempts: Int
     private let coordinatorReadinessRetryNanoseconds: UInt64
+    private let admissionPendingReadinessPollNanoseconds: UInt64
     private let autoupdateMarkerStore: AutoUpdateMarkerStore
     private let autoupdateLocalHealthRequiredConsecutiveSamples: Int
     private let autoupdateLocalStatusProbe: @Sendable () async -> [String: Any]?
@@ -426,6 +435,7 @@ actor CoordinatorClient {
         coordinatorReadiness: CoordinatorReadiness? = nil,
         coordinatorReadinessAttempts: Int = 15,
         coordinatorReadinessRetryNanoseconds: UInt64 = 2_000_000_000,
+        admissionPendingReadinessPollNanoseconds: UInt64 = 15_000_000_000,
         autoupdateMarkerStore: AutoUpdateMarkerStore = AutoUpdateMarkerStore(),
         autoupdateLocalHealthRequiredConsecutiveSamples: Int = SelfUpdate.localHealthRequiredConsecutiveSamples,
         autoupdateLocalStatusProbe: (@Sendable () async -> [String: Any]?)? = nil,
@@ -605,7 +615,7 @@ actor CoordinatorClient {
             return try? ModelArtifactVerifier.canonicalArtifactHash(directory: directory)
         }
         self.coordinatorReadiness = coordinatorReadiness ?? { providerID, assignedProviderID, expected in
-            await CoordinatorReadinessClient.fetch(
+            await CoordinatorReadinessClient.fetchReadiness(
                 coordinatorURL: config.coordinatorURL,
                 providerID: providerID,
                 assignedID: assignedProviderID,
@@ -614,6 +624,7 @@ actor CoordinatorClient {
         }
         self.coordinatorReadinessAttempts = max(1, coordinatorReadinessAttempts)
         self.coordinatorReadinessRetryNanoseconds = coordinatorReadinessRetryNanoseconds
+        self.admissionPendingReadinessPollNanoseconds = max(1, admissionPendingReadinessPollNanoseconds)
         self.autoupdateMarkerStore = autoupdateMarkerStore
         self.autoupdateLocalHealthRequiredConsecutiveSamples = max(
             1,
@@ -666,6 +677,8 @@ actor CoordinatorClient {
         runTask?.cancel()
         heartbeatTask?.cancel()
         heartbeatWatchdogTask?.cancel()
+        admissionPendingReadinessWatchTask?.cancel()
+        admissionPendingHoldActive = false
         swapHeartbeatTask?.cancel()
         await clearRequestCapacityStateUpdateHandler()
         setSleepAssertionDesired(false)
@@ -708,6 +721,7 @@ actor CoordinatorClient {
         runTask = nil
         heartbeatTask = nil
         heartbeatWatchdogTask = nil
+        admissionPendingReadinessWatchTask = nil
         swapHeartbeatTask = nil
         webSocket = nil
     }
@@ -947,7 +961,7 @@ actor CoordinatorClient {
                     return
                 }
                 if failedAttempts >= 3 {
-                    print("WARN coordinator reconnect failed attempt_count=\(failedAttempts) last_error=\(error)")
+                    print("WARN coordinator reconnect failed attempt_count=\(failedAttempts) last_error=\(Self.redactedDiagnosticText(String(describing: error)))")
                 }
                 await runSignedRecoveryDiscoveryIfDue()
                 try? await Task.sleep(nanoseconds: backoffNanoseconds)
@@ -1980,6 +1994,9 @@ actor CoordinatorClient {
         heartbeatTask = nil
         heartbeatWatchdogTask?.cancel()
         heartbeatWatchdogTask = nil
+        admissionPendingReadinessWatchTask?.cancel()
+        admissionPendingReadinessWatchTask = nil
+        admissionPendingHoldActive = false
         // Deliberately do NOT release the sleep assertion here: cleanupConnection
         // runs on every disconnect, and the provider must keep the Mac awake
         // while reconnecting. Serving intent is cleared explicitly instead — at
@@ -2420,6 +2437,10 @@ actor CoordinatorClient {
     // and verify it fires the exit hook when last-success is stale.
     func startHeartbeatWatchdogForTest(intervalSeconds: Int) {
         startHeartbeatWatchdog(intervalSeconds: intervalSeconds)
+    }
+
+    func setAdmissionPendingHoldActiveForTest(_ active: Bool) {
+        admissionPendingHoldActive = active
     }
 
     static func heartbeatWatchdogToleranceNanosecondsForTest(intervalSeconds: Int) -> UInt64 {
@@ -3062,25 +3083,55 @@ actor CoordinatorClient {
             )
             return
         }
+        var buyerServingHeldForAdmission = false
         if lifecycleOperationID != nil {
-            let servingCapabilityConfirmed = await waitForCoordinatorServingCapability()
-            guard servingCapabilityConfirmed else {
-                _ = try recordLifecycleTransition(
-                    to: .locallyReadyConnecting,
-                    reasonCode: "buyer_serving_readiness_unconfirmed",
-                    compatibilitySetID: installedCompatibilitySetID()
-                )
+            switch await waitForCoordinatorServingCapabilityOutcome() {
+            case .confirmed:
+                break
+            case .admissionPending:
+                // SPEC-047-R003(iv): `settlement_capable` is granted only
+                // while THIS live session is bound and hash-verified, and
+                // SPEC-047-R006 clears the binding on disconnect. A BYOM
+                // candidate is therefore legitimately not buyer-serving
+                // until it is settled, and dropping the session here would
+                // make settlement unreachable. Hold the accepted session
+                // (heartbeats keep the binding alive) and promote to
+                // serving_buyers once the coordinator confirms readiness.
+                buyerServingHeldForAdmission = true
+                enterAdmissionPendingHold()
+            case .unconfirmed:
+                do {
+                    _ = try recordLifecycleTransition(
+                        to: .locallyReadyConnecting,
+                        reasonCode: "buyer_serving_readiness_unconfirmed",
+                        compatibilitySetID: installedCompatibilitySetID()
+                    )
+                } catch {
+                    // Reconnect can race serve startup (`validating_catalog`).
+                    // The readiness throw below is the fail-closed contract;
+                    // a lifecycle matrix miss must not replace it.
+                }
                 throw CoordinatorAuthError.invalidMessage("coordinator buyer-serving readiness was not confirmed")
             }
         }
-        _ = try recordLifecycleTransition(
-            to: .servingBuyers,
-            reasonCode: "coordinator_buyer_serving_confirmed",
-            compatibilitySetID: installedCompatibilitySetID()
-        )
-        await finalizeAdmissionBoundaryAfterServingProof(
-            successReason: "coordinator_admitted_serving_capability_confirmed"
-        )
+        if !buyerServingHeldForAdmission {
+            do {
+                _ = try recordLifecycleTransition(
+                    to: .servingBuyers,
+                    reasonCode: "coordinator_buyer_serving_confirmed",
+                    compatibilitySetID: installedCompatibilitySetID()
+                )
+            } catch {
+                // Same reconnect race: the wire session is accepted.
+            }
+            await finalizeAdmissionBoundaryAfterServingProof(
+                successReason: "coordinator_admitted_serving_capability_confirmed"
+            )
+        }
+        // A session that connected before any offer (ordinary catalog
+        // readiness) still has to enter the hold when an offer later
+        // flips buyer_serving to false. The watch is cheap HTTP.
+        startAdmissionPendingReadinessWatch()
         if let recommended = payload["recommended_binary_version"] as? String {
             let trust = currentAutoupdateTrustState()
             guard trust.isEligible else {
@@ -3669,6 +3720,22 @@ actor CoordinatorClient {
     /// current or previous signed catalog. A connected/accepted WebSocket alone
     /// is insufficient, while a busy provider remains serving-capable.
     private func waitForCoordinatorServingCapability() async -> Bool {
+        await waitForCoordinatorServingCapabilityOutcome() == .confirmed
+    }
+
+    private enum ServingCapabilityOutcome: Equatable {
+        case confirmed
+        case unconfirmed
+        /// The coordinator holds buyer serving on a pending BYOM admission
+        /// (`buyer_serving_hold: model_admission_pending`). Authoritative and
+        /// operator-gated, so it is not retried on the readiness budget.
+        case admissionPending
+    }
+
+    static let admissionPendingLifecycleReasonCode = "byom_admission_pending_buyer_serving"
+    static let admissionConfirmedLifecycleReasonCode = "coordinator_buyer_serving_confirmed_after_admission"
+
+    private func acceptedReadinessEnvelope() -> (assignedProviderID: String, expected: CoordinatorReadinessClient.ExpectedCatalogEnvelope)? {
         guard let assignedProviderID = acceptedAssignedProviderID,
               !assignedProviderID.isEmpty,
               let releaseID = catalogReleaseID,
@@ -3677,18 +3744,32 @@ actor CoordinatorClient {
               let signerKeyID = catalogSignerKeyID,
               let rowIdentity = catalogRowIdentity
         else {
-            return false
+            return nil
         }
-        let expected = CoordinatorReadinessClient.ExpectedCatalogEnvelope(
-            releaseID: releaseID,
-            policyVersion: policyVersion,
-            candidateSHA256: candidateSHA256,
-            signerKeyID: signerKeyID,
-            rowIdentity: rowIdentity
+        return (
+            assignedProviderID,
+            CoordinatorReadinessClient.ExpectedCatalogEnvelope(
+                releaseID: releaseID,
+                policyVersion: policyVersion,
+                candidateSHA256: candidateSHA256,
+                signerKeyID: signerKeyID,
+                rowIdentity: rowIdentity
+            )
         )
+    }
+
+    private func waitForCoordinatorServingCapabilityOutcome() async -> ServingCapabilityOutcome {
+        guard let (assignedProviderID, expected) = acceptedReadinessEnvelope() else {
+            return .unconfirmed
+        }
         for attempt in 0 ..< coordinatorReadinessAttempts {
-            if await coordinatorReadiness(providerID, assignedProviderID, expected) == true {
-                return true
+            switch await coordinatorReadiness(providerID, assignedProviderID, expected) {
+            case .confirmed:
+                return .confirmed
+            case .notServing(hold: .modelAdmissionPending):
+                return .admissionPending
+            case .notServing(hold: nil), .indeterminate:
+                break
             }
             guard attempt + 1 < coordinatorReadinessAttempts,
                   coordinatorReadinessRetryNanoseconds > 0,
@@ -3698,7 +3779,85 @@ actor CoordinatorClient {
             }
             try? await Task.sleep(nanoseconds: coordinatorReadinessRetryNanoseconds)
         }
-        return false
+        return .unconfirmed
+    }
+
+    /// While the coordinator holds buyer serving on a pending BYOM admission,
+    /// re-read readiness on a fixed cadence. Confirmation promotes the held
+    /// session to `serving_buyers` exactly as the accept path would have; a
+    /// `false` that no longer carries the hold (the candidate went terminal,
+    /// or another readiness gate now applies) closes the socket so the
+    /// ordinary reconnect path re-derives the session at the next hello.
+    private func startAdmissionPendingReadinessWatch() {
+        admissionPendingReadinessWatchTask?.cancel()
+        let pollNanoseconds = admissionPendingReadinessPollNanoseconds
+        admissionPendingReadinessWatchTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: pollNanoseconds)
+                if Task.isCancelled { return }
+                guard let self else { return }
+                if await self.pollAdmissionPendingReadiness() { return }
+            }
+        }
+    }
+
+    /// Record the hold and keep the accepted session. Lifecycle bookkeeping
+    /// must not drop the live session (reconnect can still be in
+    /// `validating_catalog`).
+    private func enterAdmissionPendingHold() {
+        admissionPendingHoldActive = true
+        do {
+            _ = try recordLifecycleTransition(
+                to: .locallyReadyConnecting,
+                reasonCode: Self.admissionPendingLifecycleReasonCode,
+                compatibilitySetID: installedCompatibilitySetID()
+            )
+        } catch {}
+        print("Coordinator session accepted; buyer serving held while model admission is pending")
+    }
+
+    /// One readiness poll for an accepted session. Returns true when the watch
+    /// is finished (torn down). Confirmation after a hold promotes; a later
+    /// offer can re-enter the hold, so confirmation does not stop the watch.
+    private func pollAdmissionPendingReadiness() async -> Bool {
+        guard coordinatorSessionAccepted,
+              let (assignedProviderID, expected) = acceptedReadinessEnvelope()
+        else {
+            return true
+        }
+        switch await coordinatorReadiness(providerID, assignedProviderID, expected) {
+        case .confirmed:
+            if admissionPendingHoldActive {
+                admissionPendingHoldActive = false
+                _ = try? recordLifecycleTransition(
+                    to: .servingBuyers,
+                    reasonCode: Self.admissionConfirmedLifecycleReasonCode,
+                    compatibilitySetID: installedCompatibilitySetID()
+                )
+                await finalizeAdmissionBoundaryAfterServingProof(
+                    successReason: "coordinator_admitted_serving_capability_confirmed_after_admission"
+                )
+                print("Coordinator confirmed buyer serving after model admission")
+            }
+            return false
+        case .notServing(hold: .modelAdmissionPending):
+            if !admissionPendingHoldActive {
+                enterAdmissionPendingHold()
+            }
+            return false
+        case .indeterminate:
+            return false
+        case .notServing(hold: nil):
+            admissionPendingHoldActive = false
+            _ = try? recordLifecycleTransition(
+                to: .locallyReadyConnecting,
+                reasonCode: "buyer_serving_readiness_unconfirmed",
+                compatibilitySetID: installedCompatibilitySetID()
+            )
+            print("Coordinator buyer-serving readiness was not confirmed after the model admission hold ended; reconnecting")
+            closeWebSocketAfterKeepaliveFailure()
+            return true
+        }
     }
 
     @discardableResult
@@ -4143,6 +4302,16 @@ actor CoordinatorClient {
                 // could otherwise lose the race to Darwin.exit(1).
                 if Task.isCancelled { return }
                 if elapsed >= tolerance {
+                    let holdActive = await self.admissionPendingHoldActive
+                    if holdActive {
+                        // A pending BYOM admission can stall heartbeats
+                        // (synthetic probe, replacement hello) without the
+                        // process being wedged. Reconnect; do not Darwin.exit
+                        // — the physical admission-journey rig has no
+                        // launchd KeepAlive.
+                        await self.closeWebSocketAfterKeepaliveFailure()
+                        return
+                    }
                     hook("heartbeat liveness exceeded tolerance: \(elapsed / 1_000_000_000)s since last success >= \(tolerance / 1_000_000_000)s")
                     return
                 }

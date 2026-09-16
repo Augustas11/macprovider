@@ -735,12 +735,14 @@ func (s *Server) authorizedProviderAuthPolicyOperator(r *http.Request) (string, 
 	if !validOperatorActor(actor) {
 		return "", false
 	}
+	// Success path: event + key + actor only. `path` and `remote_addr` stay
+	// on the ambiguous-bearer warning above (JOURNEY-NETWORK-MODEL-ADMISSION
+	// step 12: operator admission must not persist URL-paths or IP literals
+	// at the default info level).
 	s.log.Info().
 		Str("event", "internal_bearer_accepted").
 		Str("key", "operator_keys").
 		Str("actor", actor).
-		Str("path", r.URL.Path).
-		Str("remote_addr", r.RemoteAddr).
 		Msg("internal bearer accepted")
 	return actor, true
 }

@@ -388,10 +388,14 @@ struct ProviderLifecycleLeaseStore: @unchecked Sendable {
         self.environment = environment
     }
 
-    static func defaultURL() -> URL {
-        FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support/macprovider/lifecycle", isDirectory: true)
-            .appendingPathComponent("lease.json")
+    static func defaultURL(
+        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> URL {
+        ProviderLifecycleStateStore.resolvedLifecycleDirectory(
+            homeDirectory: homeDirectory,
+            environment: environment
+        ).appendingPathComponent("lease.json")
     }
 
     static func candidateURL(rootDirectory: URL) -> URL {

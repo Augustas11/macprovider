@@ -3389,6 +3389,31 @@ final class CoordinatorClientTests: XCTestCase {
         await client.cancelHeartbeatWatchdogForTest()
     }
 
+    func testHeartbeatWatchdogReconnectsInsteadOfExitDuringAdmissionHold() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let captured = CapturedWatchdogReason()
+        let client = try await makeClient(
+            status: status,
+            recorder: recorder,
+            watchdogExitHook: { reason in
+                Task { await captured.set(reason) }
+            }
+        )
+
+        await client.setAdmissionPendingHoldActiveForTest(true)
+        await client.seedLastHeartbeatSuccessForTest(ageNanoseconds: 16 * 1_000_000_000)
+        await client.startHeartbeatWatchdogForTest(intervalSeconds: 1)
+        try await Task.sleep(nanoseconds: 2_000_000_000)
+        let reason = await captured.value()
+        XCTAssertNil(reason, "admission hold must reconnect instead of Darwin.exit")
+        await client.cancelHeartbeatWatchdogForTest()
+    }
+
     func testHeartbeatWatchdogToleranceExceedsBoundedSendTimeout() {
         let expected = UInt64(15 * 1_000_000_000)
         XCTAssertEqual(
@@ -5465,6 +5490,236 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertTrue(pendingStatus.migrationPending)
     }
 
+    // SPEC-047-R003(iv) / R006: a session bound to a BYOM candidate whose
+    // admission is pending is legitimately not buyer-serving, and it must
+    // stay connected (settlement_capable needs this very session bound at
+    // approval time). The coordinator names that hold on the readiness
+    // verdict; the client holds through it and promotes on confirmation.
+    private actor ReadinessScript {
+        private var verdicts: [CoordinatorReadinessClient.Readiness]
+        private let final: CoordinatorReadinessClient.Readiness
+        private(set) var calls = 0
+
+        init(_ verdicts: [CoordinatorReadinessClient.Readiness], then final: CoordinatorReadinessClient.Readiness) {
+            self.verdicts = verdicts
+            self.final = final
+        }
+
+        func next() -> CoordinatorReadinessClient.Readiness {
+            calls += 1
+            if verdicts.isEmpty { return final }
+            return verdicts.removeFirst()
+        }
+    }
+
+    private struct LifecycleFixture {
+        let root: URL
+        let store: ProviderLifecycleStateStore
+        let operationID = "serve:\(UUID().uuidString.lowercased())"
+
+        init(initialState: ProviderLifecycleState = .locallyReadyConnecting) throws {
+            root = FileManager.default.temporaryDirectory
+                .appendingPathComponent("coordinator-client-lifecycle-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+            store = ProviderLifecycleStateStore(
+                url: root.appendingPathComponent("lifecycle", isDirectory: true).appendingPathComponent("state-v1.json")
+            )
+            // Seed where serve stands when the coordinator accepts the
+            // session: locally ready, awaiting the readiness verdict.
+            // Tests that race a restart pass `validatingCatalog`.
+            _ = try store.transition(
+                to: initialState,
+                reasonCode: initialState == .locallyReadyConnecting
+                    ? "local_http_ready_awaiting_coordinator"
+                    : "startup_preflight",
+                writer: .serve,
+                providerID: "provider-test",
+                modelID: "model-a",
+                operationID: operationID
+            )
+        }
+
+        func record() throws -> ProviderLifecycleStateRecord {
+            guard case .valid(let record) = store.inspect() else {
+                throw NSError(domain: "LifecycleFixture", code: 1)
+            }
+            return record
+        }
+    }
+
+    private func makeHeldSessionClient(
+        fixture: LifecycleFixture,
+        script: ReadinessScript
+    ) async throws -> CoordinatorClient {
+        try await makeClient(
+            status: ProviderStatus(
+                modelID: "model-a",
+                modelLoaded: true,
+                capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+            ),
+            recorder: CoordinatorFrameRecorder(),
+            catalogReleaseID: "release-a",
+            catalogPolicyVersion: "policy-a",
+            catalogCandidateSHA256: String(repeating: "a", count: 64),
+            catalogSignerKeyID: "operator-2026-01",
+            catalogRowIdentity: String(repeating: "b", count: 64),
+            // No installed compatibility manifest: the hello_ack under test
+            // carries no compatibility policy.
+            installedCompatibilityManifest: { _, _ in nil },
+            coordinatorReadiness: { _, _, _ in await script.next() },
+            coordinatorReadinessAttempts: 3,
+            admissionPendingReadinessPollNanoseconds: 20_000_000,
+            lifecycleStateStore: fixture.store,
+            lifecycleOperationID: fixture.operationID
+        )
+    }
+
+    private func waitForLifecycleReason(_ fixture: LifecycleFixture, _ reason: String) async throws -> ProviderLifecycleStateRecord {
+        for _ in 0 ..< 200 {
+            let record = try fixture.record()
+            if record.reasonCode == reason { return record }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        return try fixture.record()
+    }
+
+    func testCoordinatorSessionHoldsThroughPendingBYOMAdmissionThenPromotes() async throws {
+        let fixture = try LifecycleFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let script = ReadinessScript(
+            [.notServing(hold: .modelAdmissionPending), .notServing(hold: .modelAdmissionPending)],
+            then: .confirmed
+        )
+        let client = try await makeHeldSessionClient(fixture: fixture, script: script)
+
+        // The accept path must not throw: the session is held, not dropped.
+        try await client.handleCoordinatorPayloadForTest([
+            "type": "hello_ack",
+            "assigned_id": "assigned-a",
+            "heartbeat_interval_s": 30,
+            "catalog_compatible": true,
+        ])
+        let held = try fixture.record()
+        XCTAssertEqual(held.state, .locallyReadyConnecting)
+        XCTAssertEqual(held.reasonCode, CoordinatorClient.admissionPendingLifecycleReasonCode)
+        // The hold is authoritative: one readiness read, no retry burn.
+        let callsAtHold = await script.calls
+        XCTAssertEqual(callsAtHold, 1)
+
+        let promoted = try await waitForLifecycleReason(fixture, CoordinatorClient.admissionConfirmedLifecycleReasonCode)
+        XCTAssertEqual(promoted.state, .servingBuyers)
+        XCTAssertEqual(promoted.reasonCode, CoordinatorClient.admissionConfirmedLifecycleReasonCode)
+        await client.cleanupConnectionForTest()
+    }
+
+    func testCoordinatorSessionStillFailsClosedWhenReadinessIsUnconfirmedWithoutAdmissionHold() async throws {
+        let fixture = try LifecycleFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        // An authoritative `false` with no hold keeps the pre-existing
+        // fail-closed contract: the accept path throws and the reconnect loop
+        // re-derives the session.
+        let script = ReadinessScript([], then: .notServing(hold: nil))
+        let client = try await makeHeldSessionClient(fixture: fixture, script: script)
+
+        do {
+            try await client.handleCoordinatorPayloadForTest([
+                "type": "hello_ack",
+                "assigned_id": "assigned-a",
+                "heartbeat_interval_s": 30,
+                "catalog_compatible": true,
+            ])
+            XCTFail("unconfirmed readiness without a hold must fail closed")
+        } catch {
+            // expected
+        }
+        let record = try fixture.record()
+        XCTAssertEqual(record.state, .locallyReadyConnecting)
+        XCTAssertEqual(record.reasonCode, "buyer_serving_readiness_unconfirmed")
+        // makeClient disables the retry interval, so the budget collapses to
+        // one read; the point is that the hold path never ran (no promotion).
+        let calls = await script.calls
+        XCTAssertEqual(calls, 1)
+        await client.cleanupConnectionForTest()
+    }
+
+    func testCoordinatorHeldSessionReconnectsWhenAdmissionHoldEndsUnconfirmed() async throws {
+        let fixture = try LifecycleFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        // The candidate went terminal (revoked) or another readiness gate now
+        // applies: the hold disappears from an authoritative false, so the
+        // held session is torn down for the ordinary reconnect path instead
+        // of being promoted or held forever.
+        let script = ReadinessScript([.notServing(hold: .modelAdmissionPending)], then: .notServing(hold: nil))
+        let client = try await makeHeldSessionClient(fixture: fixture, script: script)
+
+        try await client.handleCoordinatorPayloadForTest([
+            "type": "hello_ack",
+            "assigned_id": "assigned-a",
+            "heartbeat_interval_s": 30,
+            "catalog_compatible": true,
+        ])
+        XCTAssertEqual(try fixture.record().reasonCode, CoordinatorClient.admissionPendingLifecycleReasonCode)
+
+        let ended = try await waitForLifecycleReason(fixture, "buyer_serving_readiness_unconfirmed")
+        XCTAssertEqual(ended.state, .locallyReadyConnecting)
+        XCTAssertEqual(ended.reasonCode, "buyer_serving_readiness_unconfirmed")
+        await client.cleanupConnectionForTest()
+    }
+
+    func testCoordinatorSessionHoldSurvivesLifecycleRaceFromValidatingCatalog() async throws {
+        // Reconnect after a watchdog/KeepAlive restart can still be in
+        // validating_catalog. Holding the accepted session is load-bearing
+        // (SPEC-047-R003(iv)); the locally_ready_connecting predecessor
+        // list includes validating_catalog so the hold is recorded.
+        let fixture = try LifecycleFixture(initialState: .validatingCatalog)
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let script = ReadinessScript(
+            [.notServing(hold: .modelAdmissionPending)],
+            then: .confirmed
+        )
+        let client = try await makeHeldSessionClient(fixture: fixture, script: script)
+
+        try await client.handleCoordinatorPayloadForTest([
+            "type": "hello_ack",
+            "assigned_id": "assigned-a",
+            "heartbeat_interval_s": 30,
+            "catalog_compatible": true,
+        ])
+        let held = try fixture.record()
+        XCTAssertEqual(held.state, .locallyReadyConnecting)
+        XCTAssertEqual(held.reasonCode, CoordinatorClient.admissionPendingLifecycleReasonCode)
+        await client.cleanupConnectionForTest()
+    }
+
+    func testCoordinatorSessionEntersAdmissionHoldAfterConfirmedAccept() async throws {
+        // The physical journey starts the serve (ordinary catalog readiness)
+        // before any offer. The hold must still engage when a later poll
+        // names model_admission_pending, or the session is fail-closed and
+        // settlement_capable can never bind THIS live session.
+        let fixture = try LifecycleFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let script = ReadinessScript(
+            [.confirmed, .notServing(hold: .modelAdmissionPending)],
+            then: .confirmed
+        )
+        let client = try await makeHeldSessionClient(fixture: fixture, script: script)
+
+        try await client.handleCoordinatorPayloadForTest([
+            "type": "hello_ack",
+            "assigned_id": "assigned-a",
+            "heartbeat_interval_s": 30,
+            "catalog_compatible": true,
+        ])
+        XCTAssertEqual(try fixture.record().state, .servingBuyers)
+
+        let held = try await waitForLifecycleReason(fixture, CoordinatorClient.admissionPendingLifecycleReasonCode)
+        XCTAssertEqual(held.state, .locallyReadyConnecting)
+
+        let promoted = try await waitForLifecycleReason(fixture, CoordinatorClient.admissionConfirmedLifecycleReasonCode)
+        XCTAssertEqual(promoted.state, .servingBuyers)
+        await client.cleanupConnectionForTest()
+    }
+
     func testCoordinatorAutoupdateCommitsAfterAuthoritativeServingCapability() async throws {
         let fixture = try Self.makeAutoupdateRecoveryFixture(targetVersion: CoordinatorClient.binaryVersion)
         defer { try? FileManager.default.removeItem(at: fixture.home) }
@@ -5498,13 +5753,13 @@ final class CoordinatorClientTests: XCTestCase {
             catalogSignerKeyID: "operator-2026-01",
             catalogRowIdentity: String(repeating: "b", count: 64),
             coordinatorReadiness: { providerID, assignedID, envelope in
-                providerID == "provider-test"
+                CoordinatorReadinessClient.Readiness(buyerServing: providerID == "provider-test"
                     && assignedID == "assigned-a"
                     && envelope.releaseID == "release-a"
                     && envelope.policyVersion == "policy-a"
                     && envelope.candidateSHA256 == String(repeating: "a", count: 64)
                     && envelope.signerKeyID == "operator-2026-01"
-                    && envelope.rowIdentity == String(repeating: "b", count: 64)
+                    && envelope.rowIdentity == String(repeating: "b", count: 64))
             },
             autoupdateMarkerStore: fixture.store,
             configPath: configURL.path,
@@ -6390,6 +6645,9 @@ final class CoordinatorClientTests: XCTestCase {
         catalogArtifactIdentity: CoordinatorClient.CatalogArtifactIdentity? = nil,
         coordinatorReadiness: CoordinatorClient.CoordinatorReadiness? = nil,
         coordinatorReadinessAttempts: Int = 1,
+        admissionPendingReadinessPollNanoseconds: UInt64 = 15_000_000_000,
+        lifecycleStateStore: ProviderLifecycleStateStore? = nil,
+        lifecycleOperationID: String? = nil,
         autoupdateMarkerStore: AutoUpdateMarkerStore = AutoUpdateMarkerStore(),
         autoupdateLocalHealthRequiredConsecutiveSamples: Int = SelfUpdate.localHealthRequiredConsecutiveSamples,
         autoupdateLocalStatusProbe: (@Sendable () async -> [String: Any]?)? = nil,
@@ -6457,6 +6715,7 @@ final class CoordinatorClientTests: XCTestCase {
             coordinatorReadiness: coordinatorReadiness,
             coordinatorReadinessAttempts: coordinatorReadinessAttempts,
             coordinatorReadinessRetryNanoseconds: 0,
+            admissionPendingReadinessPollNanoseconds: admissionPendingReadinessPollNanoseconds,
             autoupdateMarkerStore: autoupdateMarkerStore,
             autoupdateLocalHealthRequiredConsecutiveSamples: autoupdateLocalHealthRequiredConsecutiveSamples,
             autoupdateLocalStatusProbe: autoupdateLocalStatusProbe,
@@ -6470,6 +6729,8 @@ final class CoordinatorClientTests: XCTestCase {
             providerCredentialStore: providerCredentialStore,
             credentialStatusRuntime: credentialStatusRuntime,
             admissionIdentityStatusRuntime: admissionIdentityStatusRuntime,
+            lifecycleStateStore: lifecycleStateStore ?? ProviderLifecycleStateStore(),
+            lifecycleOperationID: lifecycleOperationID,
             watchdogExitPreparation: watchdogExitPreparation ?? {},
             watchdogExitHook: watchdogExitHook ?? defaultWatchdogHook
         ))

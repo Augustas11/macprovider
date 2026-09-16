@@ -1098,6 +1098,10 @@ func main() {
 	buyerAddr := listenAddress(cfg.Listen.BindAddress, cfg.Listen.BuyerPort)
 	providerMux := http.NewServeMux()
 	providerMux.Handle("/", wsServer.Handler())
+	// The CLI derives /v1/pool/check from the coordinator WebSocket origin.
+	// Split-port rigs must serve that path on the provider listener or the
+	// session fail-closes before the SPEC-047-R003 hold is visible.
+	providerMux.Handle("/v1/pool/check", buyerServer.Handler())
 	providerMux.Handle("/internal/", buyerServer.InternalHandler())
 	var trustPoolAdminReloader trustpool.CreatorAdminConfigReloader
 	if cfg.TrustedPools.Enabled && trustPoolStore != nil && trustPoolRegistry != nil {

@@ -153,6 +153,49 @@ func modelAdmissionStateTerminal(state string) bool {
 	return false
 }
 
+// ModelAdmissionPendingHoldState is the closed set of pre-settlement,
+// non-terminal admission states that /v1/pool/check names with
+// buyer_serving_hold=model_admission_pending.
+func ModelAdmissionPendingHoldState(state string) bool {
+	switch state {
+	case modelAdmissionOfferSubmitted, "sandbox_probe_only", "network_visible_unpriced", "network_admitted_unsettled", "catalog_priced":
+		return true
+	}
+	return false
+}
+
+// ModelAdmissionSessionPendingHold reports whether this session must be held
+// through buyer_serving=false: it is bound to a pending candidate, or it is
+// unbound but this provider already has a pending candidate for the same
+// served model (offer just landed, or the next hello has not rebound yet).
+func ModelAdmissionSessionPendingHold(provider pool.Provider, events []ModelAdmissionEvent) bool {
+	if id := strings.TrimSpace(provider.ModelAdmissionCandidateID); id != "" {
+		for _, event := range events {
+			if event.CandidateID == id {
+				return ModelAdmissionPendingHoldState(event.State)
+			}
+		}
+		return false
+	}
+	served := autotune.NormalizeModelID(provider.ModelID)
+	if served == "" {
+		return false
+	}
+	for _, event := range events {
+		if !ModelAdmissionPendingHoldState(event.State) {
+			continue
+		}
+		// Match the session's served model against the candidate's served
+		// ref or catalog row id only. CatalogModelKey is a catalog identifier
+		// and can coincide with an unrelated session ModelID.
+		if autotune.NormalizeModelID(event.CatalogRowModelID) == served ||
+			autotune.NormalizeModelID(event.ServedModelRef) == served {
+			return true
+		}
+	}
+	return false
+}
+
 func modelAdmissionStateDecided(state string) bool {
 	return state == "catalog_priced" || state == "settlement_capable"
 }

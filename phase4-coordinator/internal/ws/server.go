@@ -3807,7 +3807,13 @@ func (s *Server) readProviderLoop(conn net.Conn, providerID, assignedID string) 
 		s.setReadDeadline(conn, s.providerReadTimeout(providerID, assignedID))
 		payload, op, err := s.readClientData(conn, controlReply)
 		if err != nil {
-			s.log.Warn().Err(err).Str("provider_id", providerID).Msg("provider websocket read failed")
+			// Do not log the raw net.OpError: it embeds loopback TCP
+			// tuples (`127.0.0.1:18444->127.0.0.1:N`) which the physical
+			// admission-journey step-12 redaction scan refuses.
+			s.log.Warn().
+				Str("provider_id", providerID).
+				Str("reason", providerWSReadFailReason(err)).
+				Msg("provider websocket read failed")
 			return
 		}
 		if op != gobwas.OpText {
@@ -3815,6 +3821,21 @@ func (s *Server) readProviderLoop(conn net.Conn, providerID, assignedID string) 
 			continue
 		}
 		s.handleMessage(conn, providerID, assignedID, payload)
+	}
+}
+
+func providerWSReadFailReason(err error) string {
+	if err == nil {
+		return "read_failed"
+	}
+	msg := err.Error()
+	switch {
+	case errors.Is(err, net.ErrClosed) || strings.Contains(msg, "use of closed network connection"):
+		return "connection_closed"
+	case errors.Is(err, io.EOF) || strings.Contains(msg, "EOF"):
+		return "eof"
+	default:
+		return "read_failed"
 	}
 }
 
