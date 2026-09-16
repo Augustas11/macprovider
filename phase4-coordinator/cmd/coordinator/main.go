@@ -1441,7 +1441,7 @@ func main() {
 	errs := make(chan error, 2)
 
 	startSettlementStartupScan(context.Background(), billingStore, cfg.Settlement, time.Now().UTC(), logger)
-	startRouteSnapshotJournalMirror(shutdownCtx, billingStore, logger)
+	startRouteSnapshotJournalMirror(shutdownCtx, billingStore, moneySQLiteActivity, logger)
 	billingStore.StartNightlyReconcile(shutdownCtx, cfg.Settlement)
 	billingStore.StartWeeklySettlement(shutdownCtx, cfg.Settlement)
 	flushSettlementReceiptAuditOutbox := startSettlementReceiptAuditOutboxDrainer(shutdownCtx, billingStore, settlementReceiptAuditStore, cfg.Storage.AuditLogRetentionDays, metricsHandle, moneySQLiteActivity, logger)
@@ -1615,6 +1615,14 @@ type routeSnapshotJournalMirror interface {
 	MirrorPendingRouteSnapshots(context.Context, int) (int, error)
 }
 
+type routeSnapshotJournalMirrorConfig struct {
+	Interval    time.Duration
+	Timeout     time.Duration
+	Batch       int
+	MinIdle     time.Duration
+	MaxDeferral time.Duration
+}
+
 type settlementReceiptAuditOutboxObserver interface {
 	ObserveSettlementReceiptAuditOutbox(int64, int64, int64, time.Duration)
 	IncSettlementReceiptAuditOutboxDrain(string)
@@ -1636,6 +1644,16 @@ const (
 	routeSnapshotJournalMirrorTimeout      = 2 * time.Second
 	routeSnapshotJournalMirrorBatch        = 100
 )
+
+func defaultRouteSnapshotJournalMirrorConfig() routeSnapshotJournalMirrorConfig {
+	return routeSnapshotJournalMirrorConfig{
+		Interval:    routeSnapshotJournalMirrorInterval,
+		Timeout:     routeSnapshotJournalMirrorTimeout,
+		Batch:       routeSnapshotJournalMirrorBatch,
+		MinIdle:     moneySQLiteMaintenanceMinIdle,
+		MaxDeferral: moneySQLiteMaintenanceMaxDeferral,
+	}
+}
 
 func routeSnapshotJournalDBPath(dbPath string) string {
 	if strings.TrimSpace(dbPath) == "" || dbPath == ":memory:" {
@@ -1882,40 +1900,56 @@ func startSettlementStartupScan(ctx context.Context, scanner settlementStartupSc
 	}
 }
 
-func startRouteSnapshotJournalMirror(ctx context.Context, mirror routeSnapshotJournalMirror, logger zerolog.Logger) {
+func startRouteSnapshotJournalMirror(ctx context.Context, mirror routeSnapshotJournalMirror, idle moneySQLiteIdleTracker, logger zerolog.Logger) {
+	startRouteSnapshotJournalMirrorWithConfig(ctx, mirror, idle, logger, defaultRouteSnapshotJournalMirrorConfig())
+}
+
+func startRouteSnapshotJournalMirrorWithConfig(ctx context.Context, mirror routeSnapshotJournalMirror, idle moneySQLiteIdleTracker, logger zerolog.Logger, cfg routeSnapshotJournalMirrorConfig) {
 	if mirror == nil {
 		return
 	}
+	if cfg.Interval <= 0 || cfg.Timeout <= 0 || cfg.Batch <= 0 {
+		return
+	}
+	attempts := newMoneySQLiteMaintenanceAttemptState(time.Now())
 	flush := func(runCtx context.Context) {
 		if runCtx == nil {
 			runCtx = context.Background()
 		}
+		attempts.MarkAttempt(time.Now())
 		for {
 			if runCtx.Err() != nil {
 				return
 			}
-			mirrorCtx, cancel := context.WithTimeout(runCtx, routeSnapshotJournalMirrorTimeout)
-			mirrored, err := mirror.MirrorPendingRouteSnapshots(mirrorCtx, routeSnapshotJournalMirrorBatch)
+			mirrorCtx, cancel := context.WithTimeout(runCtx, cfg.Timeout)
+			mirrored, err := mirror.MirrorPendingRouteSnapshots(mirrorCtx, cfg.Batch)
 			cancel()
 			if err != nil {
 				logger.Warn().Err(err).Int("mirrored_rows", mirrored).Msg("route snapshot journal mirror failed")
 				return
 			}
-			if mirrored == 0 || mirrored < routeSnapshotJournalMirrorBatch {
+			if mirrored == 0 || mirrored < cfg.Batch {
 				return
 			}
 		}
 	}
+	flushIfIdle := func(runCtx context.Context) {
+		if shouldYieldMoneySQLiteMaintenance(idle, cfg.MinIdle, attempts, cfg.MaxDeferral, time.Now()) {
+			logger.Debug().Msg("route snapshot journal mirror skipped during active buyer money-path traffic")
+			return
+		}
+		flush(runCtx)
+	}
 	flush(context.Background())
 	go func() {
-		ticker := time.NewTicker(routeSnapshotJournalMirrorInterval)
+		ticker := time.NewTicker(cfg.Interval)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				flush(ctx)
+				flushIfIdle(ctx)
 			}
 		}
 	}()
