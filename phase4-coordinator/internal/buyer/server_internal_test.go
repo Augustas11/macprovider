@@ -123,6 +123,26 @@ func TestRouteSnapshotGuardPressureWrapsDedicatedDeadline(t *testing.T) {
 	}
 }
 
+func TestRouteSnapshotObserveCanSkipOnlyStorePressure(t *testing.T) {
+	pressureErr := fmt.Errorf("insert route snapshot: %w", billing.ErrRouteSnapshotStorePressure)
+	if !routeSnapshotObserveCanSkipStorePressure(billing.RouteSnapshotModeObserve, pressureErr, true) {
+		t.Fatal("observe mode should skip transient route snapshot store pressure")
+	}
+	if routeSnapshotObserveCanSkipStorePressure(billing.RouteSnapshotModeEnforce, pressureErr, true) {
+		t.Fatal("enforce mode must not skip route snapshot store pressure")
+	}
+	if routeSnapshotObserveCanSkipStorePressure("", pressureErr, true) ||
+		routeSnapshotObserveCanSkipStorePressure("shadow", pressureErr, true) {
+		t.Fatal("unknown route snapshot modes must not skip route snapshot store pressure")
+	}
+	if routeSnapshotObserveCanSkipStorePressure(billing.RouteSnapshotModeObserve, pressureErr, false) {
+		t.Fatal("observe mode must not skip pressure unless it came from the insert callback")
+	}
+	if routeSnapshotObserveCanSkipStorePressure(billing.RouteSnapshotModeObserve, errors.New("tier2 catalog does not match signed admission row"), true) {
+		t.Fatal("observe mode must not skip semantic route snapshot integrity errors")
+	}
+}
+
 func TestRouteSnapshotDispatchContextUsesShortBudget(t *testing.T) {
 	if routeSnapshotDispatchTimeout >= requestLogWriteTimeout {
 		t.Fatalf("route snapshot dispatch timeout=%s must stay below request log write timeout=%s", routeSnapshotDispatchTimeout, requestLogWriteTimeout)
