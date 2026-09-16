@@ -1819,6 +1819,11 @@ struct BYOMModelAdmissionRuntime: Sendable {
             }
             return false
         }()
+        // When an mlx_cache hash is attested, the durable directory it was
+        // computed over is retained so the identity can be re-checked immediately
+        // before the signed package leaves the machine (SPEC-010-R007(a) parity
+        // with the GGUF path below).
+        var mlxAttestedArtifactPath: String?
         if candidate.runtimeSource == "mlx_cache",
            hashes[ModelArtifactIdentity.snapshotManifestV1] == nil,
            let servedArtifactPath, !servedArtifactPath.isEmpty,
@@ -1829,6 +1834,7 @@ struct BYOMModelAdmissionRuntime: Sendable {
                     deadline: Date().addingTimeInterval(Self.artifactHashBudgetSeconds)
                 )
                 hashes[ModelArtifactIdentity.snapshotManifestV1] = h
+                mlxAttestedArtifactPath = servedArtifactPath
             } catch AutotuneContextCalibrationError.deadlineExceeded {
                 // Mirror the GGUF policy in `artifactEvidence`: a blown hashing
                 // budget fails the offer closed rather than shipping partial.
@@ -1838,6 +1844,22 @@ struct BYOMModelAdmissionRuntime: Sendable {
                 // (missing path, not a directory, symlink) leaves the offer to
                 // submit with whatever hashes it has — the candidate simply
                 // won't catalog-match, exactly as today.
+            }
+        }
+        // SPEC-010-R007(a) for the mlx_cache leg: recompute the served artifact's
+        // canonical hash and fail closed if the durable directory changed since it
+        // was attested. This runs BEFORE the package is signed so the signature
+        // timestamp stays fresh (the coordinator enforces a signed-payload skew
+        // window); the only work between this check and submit is the in-memory
+        // package build, which touches no artifact bytes. A recompute failure
+        // becomes nil and fails closed (nil != attested).
+        if let mlxAttestedArtifactPath, let attested = hashes[ModelArtifactIdentity.snapshotManifestV1] {
+            let current = try? ModelArtifactVerifier.canonicalArtifactHash(
+                directory: URL(fileURLWithPath: mlxAttestedArtifactPath),
+                deadline: Date().addingTimeInterval(Self.artifactHashBudgetSeconds)
+            )
+            guard current == attested else {
+                throw BYOMModelAdmissionError.artifactIdentityChanged
             }
         }
         let package = try BYOMOfferSubmissionBuilder.makePackage(
