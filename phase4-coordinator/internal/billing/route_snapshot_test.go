@@ -279,6 +279,42 @@ func TestInsertRouteSnapshotDedicatedHandleBypassesRequestLogPoolWait(t *testing
 	}
 }
 
+func TestInsertRouteSnapshotDedicatedHandleAllowsSpareWaiter(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "coordinator.db")
+	reqStore, err := requestlog.OpenStore(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reqStore.Close() })
+	store, err := NewStore(reqStore.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	routeSnapshotDB, err := sql.Open("sqlite", sqliteutil.WithManualWALCheckpointPragmas(dbPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	routeSnapshotDB.SetMaxOpenConns(2)
+	routeSnapshotDB.SetMaxIdleConns(2)
+	t.Cleanup(func() { _ = routeSnapshotDB.Close() })
+	store.SetRouteSnapshotDB(routeSnapshotDB)
+
+	heldRouteSnapshotConn, err := routeSnapshotDB.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer heldRouteSnapshotConn.Close()
+
+	snapshot := testRouteSnapshot()
+	snapshot.RequestID = "req-dedicated-route-snapshot-spare-waiter"
+	insertCtx, insertCancel := context.WithTimeout(context.Background(), time.Second)
+	defer insertCancel()
+	if _, err := store.InsertRouteSnapshot(insertCtx, snapshot); err != nil {
+		t.Fatalf("dedicated route snapshot insert with one held conn: %v", err)
+	}
+}
+
 func TestInsertRouteSnapshotRetriesShortSQLiteBusyUntilWriterLockClears(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "coordinator.db")
 	reqStore, err := requestlog.OpenStore(dbPath)

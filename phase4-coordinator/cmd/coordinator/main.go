@@ -237,8 +237,8 @@ func main() {
 		fmt.Fprintf(os.Stderr, "route snapshot sqlite: %v\n", err)
 		os.Exit(1)
 	}
-	routeSnapshotDB.SetMaxOpenConns(1)
-	routeSnapshotDB.SetMaxIdleConns(1)
+	routeSnapshotDB.SetMaxOpenConns(routeSnapshotSQLiteMaxOpenConns)
+	routeSnapshotDB.SetMaxIdleConns(routeSnapshotSQLiteMaxOpenConns)
 	defer routeSnapshotDB.Close()
 	payoutReadDB, closePayoutReadDB, err := configuredPayoutReadDB(cfg, reqLogStore)
 	if err != nil {
@@ -1605,6 +1605,7 @@ const (
 	moneySQLiteCheckpointMinTimeout     = 15 * time.Second
 	moneySQLiteCheckpointMaxTimeout     = 5 * time.Minute
 	moneySQLiteCheckpointBytesPerSecond = 32 << 20
+	routeSnapshotSQLiteMaxOpenConns     = 4
 	routeSnapshotSQLiteBusyTimeout      = 500 * time.Millisecond
 )
 
