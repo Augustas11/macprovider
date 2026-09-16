@@ -52,7 +52,9 @@ fails closed on empty secrets. Do **not** commit key material.
 dry-run):
 
 1. Builds an **ephemeral git worktree**. On Actions, restamps `GITHUB_SHA`
-   (the approved workflow commit), not a floating `origin/main`. Locally,
+   (the approved workflow commit), not a floating `origin/main`, and sets
+   `CATALOG_RELEASE_BASE_REF` to that SHA so `generate` can read the ledger
+   from a `fetch-depth: 1` checkout that has no `origin/main` ref. Locally,
    restamps `origin/main`.
 2. `catalog-release.py restamp --release-id … --generated-at …` re-stamps the
    release **source** inputs: `version` + `generated_at` on candidate/demand, and

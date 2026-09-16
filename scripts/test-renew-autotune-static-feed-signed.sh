@@ -202,10 +202,15 @@ for requirement in (
     "dry-run makes no contact with",
     'staged_artifact_bound="$(python3 - "$CAT_DIR/release.json"',
     "release.json does not bind autotune-artifacts.json but",
+    # fetch-depth:1 checkouts have GITHUB_SHA but not origin/main; generate
+    # must read the ledger from the same reviewed commit.
+    'export CATALOG_RELEASE_BASE_REF="$GITHUB_SHA"',
 ):
     if requirement not in script:
         raise SystemExit(f"renew script omits: {requirement}")
 before_generate = script.split('catalog-release.py "${GENERATE_ARGS[@]}"', 1)[0]
+if 'export CATALOG_RELEASE_BASE_REF="$GITHUB_SHA"' not in before_generate:
+    raise SystemExit("Actions ledger base must be set before generate")
 if 'cat_dir / "rate-card.json"' in before_generate:
     raise SystemExit("renewal must not re-stamp the GENERATED rate-card.json; the generator writes it")
 if 'AUTOTUNE_PREVIOUS_RELEASE_DIR="$PREVIOUS_RELEASE_DIR"' not in before_generate:
@@ -269,6 +274,8 @@ if "/private/var/macprovider-go-verifier" not in runbook:
     raise SystemExit("runbook must name the sealed Go verifier path")
 if "CATALOG_RELEASE_REQUIRE_SEALED_GO_VERIFIER" not in runbook:
     raise SystemExit("runbook must require the sealed Go verifier on Actions")
+if "CATALOG_RELEASE_BASE_REF" not in runbook:
+    raise SystemExit("runbook must bind the Actions ledger base to GITHUB_SHA")
 PY
 
 python3 -m py_compile "$helper"
