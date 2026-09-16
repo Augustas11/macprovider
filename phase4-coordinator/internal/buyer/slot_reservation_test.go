@@ -202,6 +202,26 @@ func TestReconcileForwardedSlotAvailablePublishesReadySlot(t *testing.T) {
 	}
 }
 
+func TestReconcileForwardedSlotAvailablePublishesGlobalReadySlot(t *testing.T) {
+	s, registry, _ := poolIsolationServer(t)
+	provider := poolProvider("p-global-recovered")
+	provider.State = pool.StateBusy
+	provider.SlotsFree = 0
+	registry.Register(&provider, nil)
+
+	s.reconcileForwardedSlotAvailable(&forwardState{
+		provider: provider,
+	})
+
+	got, ok := registry.Resolve(provider.ProviderID, provider.AssignedID)
+	if !ok {
+		t.Fatal("provider missing after global capacity reconciliation")
+	}
+	if got.State != pool.StateReady || got.SlotsFree != 1 {
+		t.Fatalf("provider capacity after global reconciliation = state %q slots_free %d, want ready/1", got.State, got.SlotsFree)
+	}
+}
+
 func TestForwardWithFailoverCommittedStreamPublishesReadySlot(t *testing.T) {
 	s, registry, _ := poolIsolationServer(t)
 	provider := poolProvider("p-committed")
@@ -242,6 +262,12 @@ func TestForwardWithFailoverCommittedStreamPublishesReadySlot(t *testing.T) {
 
 	if !committedRendered {
 		t.Fatal("committed stream was not rendered")
+	}
+	if state.queuedSlotProviderID != "" {
+		t.Fatalf("slot reservation leaked after committed stream: %q", state.queuedSlotProviderID)
+	}
+	if s.slotQueue.blocksProvider(provider.ProviderID, 1) {
+		t.Fatal("slot queue still blocks provider after committed stream")
 	}
 	got, ok := registry.Resolve(provider.ProviderID, provider.AssignedID)
 	if !ok {

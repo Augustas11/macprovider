@@ -7465,11 +7465,11 @@ func (s *Server) reconcileForwardedSlotAvailable(state *forwardState) {
 	if s == nil || s.pool == nil || state == nil {
 		return
 	}
+	if state.slotReservationsEnabled && state.queuedSlotProviderID != "" {
+		defer s.releaseQueuedSlotReservation(state)
+	}
 	provider := state.provider
 	if provider.ProviderID == "" || provider.AssignedID == "" || provider.SlotsTotal <= 0 {
-		return
-	}
-	if !state.slotReservationsEnabled || state.queuedSlotProviderID != provider.ProviderID {
 		return
 	}
 	slotsFree := provider.SlotsFree
