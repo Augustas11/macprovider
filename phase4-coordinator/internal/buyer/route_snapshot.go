@@ -184,13 +184,13 @@ func (b *billingRecorder) recordRouteSnapshot(providerBody []byte, provider pool
 		return err
 	}); err != nil {
 		err = wrapRouteSnapshotGuardPressure(err)
-		if routeSnapshotObserveCanSkipStorePressure(routeMode, err, insertStorePressure) {
+		if routeSnapshotCanSkipStorePressure(routeMode, err, insertStorePressure) {
 			b.server.log.Warn().
 				Err(err).
 				Str("request_id", b.requestID).
 				Str("provider_id", provider.ProviderID).
 				Str("route_snapshot_mode", routeMode).
-				Msg("route snapshot store pressure skipped in observe mode")
+				Msg("route snapshot store pressure skipped before provider dispatch")
 			return nil, nil
 		}
 		return nil, err
@@ -331,8 +331,13 @@ func routeSnapshotShouldCapacityShed(err error) bool {
 	return errors.Is(err, billing.ErrRouteSnapshotStorePressure) || errors.Is(err, providerws.ErrModelAdmissionRouteDrift)
 }
 
-func routeSnapshotObserveCanSkipStorePressure(routeMode string, err error, insertStorePressure bool) bool {
-	return routeMode == billing.RouteSnapshotModeObserve && insertStorePressure && errors.Is(err, billing.ErrRouteSnapshotStorePressure)
+func routeSnapshotCanSkipStorePressure(routeMode string, err error, insertStorePressure bool) bool {
+	switch routeMode {
+	case billing.RouteSnapshotModeObserve, billing.RouteSnapshotModeEnforce:
+		return insertStorePressure && errors.Is(err, billing.ErrRouteSnapshotStorePressure)
+	default:
+		return false
+	}
 }
 
 func newRouteSnapshotDispatchContext(parent context.Context) (context.Context, context.CancelFunc) {

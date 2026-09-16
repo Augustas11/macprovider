@@ -1492,6 +1492,79 @@ func TestRouteSnapshotObserveStorePressureStillDispatches(t *testing.T) {
 	}
 }
 
+func TestRouteSnapshotEnforceStorePressureStillDispatches(t *testing.T) {
+	tier2.ResetForTest()
+	t.Cleanup(tier2.ResetForTest)
+	raw, pubkey := routeSnapshotCatalogFixture(t, "enforce-pressure-catalog", time.Now().UTC().Add(time.Hour))
+	if err := tier2.Configure(config.Tier2Config{
+		ObserveEnabled:      true,
+		CatalogPath:         writeRouteSnapshotCatalog(t, raw),
+		CatalogPublicKey:    pubkey,
+		RequireHashVerified: true,
+	}, zerolog.Nop()); err != nil {
+		t.Fatalf("tier2.Configure: %v", err)
+	}
+
+	reqLog, dbPath := openBuyerRequestLog(t)
+	t.Cleanup(func() { _ = reqLog.Close() })
+	billingStore, err := billing.NewStore(reqLog.DB())
+	if err != nil {
+		t.Fatalf("billing.NewStore: %v", err)
+	}
+	setSettlementModeForTest(billingStore, billing.RouteSnapshotModeEnforce)
+	routeSnapshotDB, err := sql.Open("sqlite", sqliteutil.WithManualWALCheckpointPragmas(dbPath))
+	if err != nil {
+		t.Fatalf("open dedicated route snapshot db: %v", err)
+	}
+	routeSnapshotDB.SetMaxOpenConns(1)
+	routeSnapshotDB.SetMaxIdleConns(1)
+	t.Cleanup(func() { _ = routeSnapshotDB.Close() })
+	billingStore.SetRouteSnapshotDB(routeSnapshotDB)
+	heldRouteSnapshotConn, err := routeSnapshotDB.Conn(context.Background())
+	if err != nil {
+		t.Fatalf("hold route snapshot conn: %v", err)
+	}
+	defer heldRouteSnapshotConn.Close()
+
+	cfg := config.Default().Rewards
+	snapshotID, err := billingStore.InsertConfigSnapshot(context.Background(), cfg, time.Unix(1716768000, 0).UTC())
+	if err != nil {
+		t.Fatalf("InsertConfigSnapshot: %v", err)
+	}
+
+	var reachedProvider bool
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reachedProvider = true
+		writeProviderOK(w)
+	}))
+	defer upstream.Close()
+
+	registry := pool.NewRegistry(nil)
+	registerSettlementProvider(registry, "p1", "session-1", upstream.URL, 30, bytes.Repeat([]byte{0x77}, 32))
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithRequestLog(reqLog),
+		buyer.WithBilling(billingStore, cfg),
+		buyer.WithBillingSnapshotID(snapshotID),
+	)
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`), nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if !reachedProvider {
+		t.Fatal("provider was not reached after enforce-mode route snapshot store pressure")
+	}
+	if got := routeSnapshotCount(t, dbPath); got != 0 {
+		t.Fatalf("route snapshots=%d want 0 when enforce-mode persistence is under pressure", got)
+	}
+	if verdicts := querySettlementReceiptVerdicts(t, dbPath); len(verdicts) != 0 {
+		t.Fatalf("receipt verdict rows=%d want 0 without route snapshot metadata: %#v", len(verdicts), verdicts)
+	}
+}
+
 func TestRouteSnapshotObserveGuardPressureDoesNotDispatch(t *testing.T) {
 	for _, tc := range []struct {
 		name           string
