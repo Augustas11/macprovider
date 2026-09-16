@@ -223,7 +223,7 @@ func TestPoolPredicateErrors_SettlementPolicyQueuedNoReceiptKeyUsesPoolCode(t *t
 		poolRequiresSettlementEnforce: true,
 	}
 
-	_, routeErr, queued := s.trySelectQueuedProvider(context.Background(), "rid", "model-a", []pool.Provider{candidate}, http.Header{}, nil, "2024-01-01", 100, state)
+	_, routeErr, queued := s.trySelectQueuedProvider(context.Background(), "rid", "model-a", []pool.Provider{candidate}, http.Header{}, nil, "2024-01-01", 100, state, slotWaiterStandard)
 	if !queued {
 		t.Fatal("trySelectQueuedProvider queued=false, want queued path exercised")
 	}

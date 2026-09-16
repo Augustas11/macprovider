@@ -6028,6 +6028,14 @@ func hasPinnedRoute(headers http.Header) bool {
 	return headers.Get("X-MacProvider-Provider") != "" || headers.Get("X-MacProvider-Session") != ""
 }
 
+func hasWholesaleRoutingHeader(headers http.Header) bool {
+	return strings.TrimSpace(headers.Get("X-MacProvider-Internal-Wholesale")) == "1"
+}
+
+func (s *Server) hasTrustedWholesaleRoutingHeader(headers http.Header) bool {
+	return hasWholesaleRoutingHeader(headers) && s.internalBearerAuthorized(headers)
+}
+
 func (s *Server) logWSDeadMidRequest(originalRequestID, requestID, externalRequestID string, provider pool.Provider, action, targetProviderID string) {
 	s.log.Warn().
 		Str("event", "ws_dead_mid_request").
@@ -6121,8 +6129,12 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 			state.poolGenSet = true
 		}
 	}
-	if hasInternalRoutingHeader(headers) && !s.internalBearerAuthorized(headers) {
-		return pool.Provider{}, &routeError{status: http.StatusBadRequest, code: "invalid_request", message: "Internal routing header is not accepted on the buyer port"}
+	trustedInternalRouting := false
+	if hasInternalRoutingHeader(headers) {
+		if !s.internalBearerAuthorized(headers) {
+			return pool.Provider{}, &routeError{status: http.StatusBadRequest, code: "invalid_request", message: "Internal routing header is not accepted on the buyer port"}
+		}
+		trustedInternalRouting = true
 	}
 	if session := headers.Get("X-MacProvider-Session"); session != "" {
 		for _, p := range providers {
@@ -6216,9 +6228,10 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 	candidates := result.Eligible
 	queuedCandidates := []pool.Provider(nil)
 	queueEligible := !hasPinnedRoute(headers)
+	queueReservationOverflow := queueEligible && trustedInternalRouting && hasWholesaleRoutingHeader(headers)
 	if queueEligible && len(candidates) > 0 {
 		var normalCandidates []pool.Provider
-		normalCandidates, queuedCandidates = s.splitQueuedCandidates(candidates)
+		normalCandidates, queuedCandidates = s.splitQueuedCandidates(candidates, queueReservationOverflow)
 		candidates = normalCandidates
 	}
 	if len(candidates) == 0 {
@@ -6232,7 +6245,11 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 			return pool.Provider{}, routeSnapshotPressureRouteError("No provider available for model " + req.Model)
 		}
 		if len(queuedCandidates) > 0 {
-			provider, routeErr, queued := s.trySelectQueuedProvider(ctx, requestID, req.Model, queuedCandidates, headers, class, dailyKey, estimatedTokens, state)
+			waiterKind := slotWaiterStandard
+			if queueReservationOverflow {
+				waiterKind = slotWaiterReservationOverflow
+			}
+			provider, routeErr, queued := s.trySelectQueuedProvider(ctx, requestID, req.Model, queuedCandidates, headers, class, dailyKey, estimatedTokens, state, waiterKind)
 			if queued {
 				return provider, routeErr
 			}
@@ -6355,6 +6372,15 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 		preflightRejected = true
 	}
 	if capacityErr != nil && !preflightRejected {
+		if queueReservationOverflow {
+			queueOverflow := s.wholesaleReservationOverflowQueueCandidates(queuedCandidates, candidates)
+			if len(queueOverflow) > 0 {
+				provider, routeErr, queued := s.trySelectQueuedProvider(ctx, requestID, req.Model, queueOverflow, headers, class, dailyKey, estimatedTokens, state, slotWaiterReservationOverflow)
+				if queued {
+					return provider, routeErr
+				}
+			}
+		}
 		return pool.Provider{}, capacityErr
 	}
 	return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "preflight_rejected", message: "All providers rejected the request"}
@@ -7156,14 +7182,14 @@ func (s *Server) preflightCandidate(provider pool.Provider, requestID string, es
 }
 
 func (s *Server) selectQueuedProvider(ctx context.Context, requestID, model string, candidates []pool.Provider, headers http.Header, class *config.ModelClassConfig, dailyKey string, estimatedTokens int, state *forwardState) (pool.Provider, *routeError) {
-	provider, routeErr, queued := s.trySelectQueuedProvider(ctx, requestID, model, candidates, headers, class, dailyKey, estimatedTokens, state)
+	provider, routeErr, queued := s.trySelectQueuedProvider(ctx, requestID, model, candidates, headers, class, dailyKey, estimatedTokens, state, slotWaiterStandard)
 	if queued {
 		return provider, routeErr
 	}
 	return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "no_provider_available", message: "No provider available for model " + model}
 }
 
-func (s *Server) trySelectQueuedProvider(ctx context.Context, requestID, model string, candidates []pool.Provider, headers http.Header, class *config.ModelClassConfig, dailyKey string, estimatedTokens int, state *forwardState) (pool.Provider, *routeError, bool) {
+func (s *Server) trySelectQueuedProvider(ctx context.Context, requestID, model string, candidates []pool.Provider, headers http.Header, class *config.ModelClassConfig, dailyKey string, estimatedTokens int, state *forwardState, waiterKind slotWaiterKind) (pool.Provider, *routeError, bool) {
 	if s.slotQueue == nil || state == nil || len(candidates) == 0 {
 		return pool.Provider{}, nil, false
 	}
@@ -7196,7 +7222,7 @@ func (s *Server) trySelectQueuedProvider(ctx context.Context, requestID, model s
 		queueCandidates = append(queueCandidates, poolQueueCandidate{providerID: candidate.ProviderID})
 	}
 	for len(tried) < len(queueCandidates) {
-		waiter, ok := s.slotQueue.enterBest(queueCandidates, tried)
+		waiter, ok := s.slotQueue.enterBestWithKind(queueCandidates, tried, waiterKind)
 		if !ok {
 			if len(tried) == 0 {
 				return pool.Provider{}, nil, false
@@ -7424,7 +7450,32 @@ func (s *Server) slotQueueCandidates(providers []pool.Provider, excluded routing
 	return out
 }
 
-func (s *Server) splitQueuedCandidates(candidates []pool.Provider) ([]pool.Provider, []pool.Provider) {
+func (s *Server) wholesaleReservationOverflowQueueCandidates(queuedCandidates, racedCandidates []pool.Provider) []pool.Provider {
+	queueOverflow := make([]pool.Provider, 0, len(queuedCandidates)+len(racedCandidates))
+	seen := make(map[string]struct{}, len(queuedCandidates)+len(racedCandidates))
+	for _, candidate := range queuedCandidates {
+		key := candidate.SortKey()
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		queueOverflow = append(queueOverflow, candidate)
+	}
+	for _, candidate := range racedCandidates {
+		if !s.providerSlotQueueOverflowEligible(candidate) {
+			continue
+		}
+		key := candidate.SortKey()
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		queueOverflow = append(queueOverflow, candidate)
+	}
+	return queueOverflow
+}
+
+func (s *Server) splitQueuedCandidates(candidates []pool.Provider, queueReservationOverflow bool) ([]pool.Provider, []pool.Provider) {
 	if s.slotQueue == nil {
 		return candidates, nil
 	}
@@ -7434,9 +7485,10 @@ func (s *Server) splitQueuedCandidates(candidates []pool.Provider) ([]pool.Provi
 		if s.slotQueue.blocksProvider(provider.ProviderID, provider.SlotsFree) {
 			// A positive SlotsFree provider blocked only by coordinator-local
 			// reservations represents same-moment demand beyond advertised
-			// capacity. Shed that overflow immediately. Already admitted
-			// zero-slot waiters may keep draining through the bounded queue.
-			if provider.SlotsFree <= 0 || s.slotQueue.hasWaiters(provider.ProviderID) {
+			// capacity. Public traffic sheds that overflow immediately.
+			// Wholesale traffic may queue it because upstream provider
+			// integrations prefer bounded capacity waits over retry churn.
+			if provider.SlotsFree <= 0 || s.slotQueue.hasStandardWaiters(provider.ProviderID) || queueReservationOverflow {
 				queued = append(queued, provider)
 			}
 			continue
@@ -7451,6 +7503,13 @@ func (s *Server) providerSlotQueueEligible(provider pool.Provider) bool {
 		(provider.State == pool.StateReady || provider.State == pool.StateBusy) &&
 		provider.SlotsTotal > 0 &&
 		provider.SlotsFree == 0
+}
+
+func (s *Server) providerSlotQueueOverflowEligible(provider pool.Provider) bool {
+	return provider.CapacityEligible() &&
+		provider.State == pool.StateReady &&
+		provider.SlotsTotal > 0 &&
+		provider.SlotsFree > 0
 }
 
 func (s *Server) releaseQueuedSlotReservation(state *forwardState) {
