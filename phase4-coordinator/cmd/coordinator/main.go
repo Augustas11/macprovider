@@ -1607,7 +1607,7 @@ const (
 	moneySQLiteCheckpointMinTimeout     = 15 * time.Second
 	moneySQLiteCheckpointMaxTimeout     = 5 * time.Minute
 	moneySQLiteCheckpointBytesPerSecond = 32 << 20
-	routeSnapshotSQLiteMaxOpenConns     = 4
+	routeSnapshotSQLiteMaxOpenConns     = 1
 	routeSnapshotSQLiteBusyTimeout      = 500 * time.Millisecond
 )
 
