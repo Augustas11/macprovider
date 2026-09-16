@@ -405,6 +405,63 @@ func TestMoneySQLiteRollupGateRunsWhenIdle(t *testing.T) {
 	}
 }
 
+func TestRouteSnapshotJournalMirrorStartupRunsDuringRecentTraffic(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	mirror := &routeSnapshotJournalMirrorStub{
+		called: make(chan struct{}, 4),
+	}
+
+	startRouteSnapshotJournalMirrorWithConfig(ctx, mirror, fixedIdleTracker{idleFor: 0}, zerolog.Nop(), routeSnapshotJournalMirrorConfig{
+		Interval:    10 * time.Millisecond,
+		Timeout:     time.Second,
+		Batch:       100,
+		MinIdle:     10 * time.Second,
+		MaxDeferral: time.Hour,
+	})
+
+	assertSignal(t, mirror.called, "startup route snapshot journal mirror")
+	assertNoSignal(t, mirror.called, "periodic route snapshot journal mirror during active buyer traffic")
+}
+
+func TestRouteSnapshotJournalMirrorRunsAfterIdle(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	mirror := &routeSnapshotJournalMirrorStub{
+		called: make(chan struct{}, 4),
+	}
+
+	startRouteSnapshotJournalMirrorWithConfig(ctx, mirror, fixedIdleTracker{idleFor: time.Hour}, zerolog.Nop(), routeSnapshotJournalMirrorConfig{
+		Interval:    10 * time.Millisecond,
+		Timeout:     time.Second,
+		Batch:       100,
+		MinIdle:     10 * time.Second,
+		MaxDeferral: time.Hour,
+	})
+
+	assertSignal(t, mirror.called, "startup route snapshot journal mirror")
+	assertSignal(t, mirror.called, "periodic route snapshot journal mirror after idle")
+}
+
+func TestRouteSnapshotJournalMirrorHonorsMaxDeferral(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	mirror := &routeSnapshotJournalMirrorStub{
+		called: make(chan struct{}, 4),
+	}
+
+	startRouteSnapshotJournalMirrorWithConfig(ctx, mirror, fixedIdleTracker{idleFor: 0}, zerolog.Nop(), routeSnapshotJournalMirrorConfig{
+		Interval:    10 * time.Millisecond,
+		Timeout:     time.Second,
+		Batch:       100,
+		MinIdle:     10 * time.Second,
+		MaxDeferral: 25 * time.Millisecond,
+	})
+
+	assertSignal(t, mirror.called, "startup route snapshot journal mirror")
+	assertSignal(t, mirror.called, "forced route snapshot journal mirror after max deferral")
+}
+
 func TestSettlementReceiptAuditOutboxDrainerStartupRunsDuringRecentTraffic(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -574,6 +631,22 @@ type fixedIdleTracker struct {
 
 func (t fixedIdleTracker) IdleFor(time.Time) time.Duration {
 	return t.idleFor
+}
+
+type routeSnapshotJournalMirrorStub struct {
+	called  chan struct{}
+	batches []int
+	err     error
+}
+
+func (s *routeSnapshotJournalMirrorStub) MirrorPendingRouteSnapshots(context.Context, int) (int, error) {
+	s.called <- struct{}{}
+	if len(s.batches) > 0 {
+		n := s.batches[0]
+		s.batches = s.batches[1:]
+		return n, s.err
+	}
+	return 0, s.err
 }
 
 type settlementReceiptAuditOutboxDrainerStub struct {
