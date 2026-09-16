@@ -358,10 +358,9 @@ const (
 	maxRequestLogUsageTokens     = int64(10000000)
 	maxUpstreamResponseBodyBytes = int64(16 << 20)
 	requestLogWriteTimeout       = 6 * time.Second
-	// Keep pre-dispatch route snapshot pressure bounded tightly enough that
-	// gateway retries cannot turn storage contention into multi-second TTFT
-	// tails during OpenRouter filing probes.
-	routeSnapshotDispatchTimeout = 350 * time.Millisecond
+	// Keep pre-dispatch route snapshot pressure bounded with enough headroom for
+	// the gateway to return OpenRouter-facing capacity sheds inside the TTFT SLO.
+	routeSnapshotDispatchTimeout = 1400 * time.Millisecond
 	slotQueueDefaultMaxPending   = 4
 	slotQueueDefaultDeadline     = 3 * time.Second
 	slotQueueDefaultPollInterval = 25 * time.Millisecond
@@ -5970,10 +5969,11 @@ func rawStringNonEmpty(raw json.RawMessage) bool {
 }
 
 type routeError struct {
-	status  int
-	code    string
-	message string
-	typ     string
+	status                int
+	code                  string
+	message               string
+	typ                   string
+	routeSnapshotPressure bool
 }
 
 func byomNonSettlementRouteError(model string) *routeError {
@@ -5990,6 +5990,15 @@ func requestCanceledRouteError() *routeError {
 		status:  statusClientClosedRequest,
 		code:    "request_canceled",
 		message: "Request canceled before provider dispatch",
+	}
+}
+
+func routeSnapshotPressureRouteError(message string) *routeError {
+	return &routeError{
+		status:                http.StatusServiceUnavailable,
+		code:                  "no_provider_available",
+		message:               message,
+		routeSnapshotPressure: true,
 	}
 }
 
@@ -6220,7 +6229,7 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 			return pool.Provider{}, requestCanceledRouteError()
 		}
 		if checker.byomAdmissionStorePressure {
-			return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "no_provider_available", message: "No provider available for model " + req.Model}
+			return pool.Provider{}, routeSnapshotPressureRouteError("No provider available for model " + req.Model)
 		}
 		if len(queuedCandidates) > 0 {
 			provider, routeErr, queued := s.trySelectQueuedProvider(ctx, requestID, req.Model, queuedCandidates, headers, class, dailyKey, estimatedTokens, state)
@@ -7079,7 +7088,7 @@ func (s *Server) validatePinnedProviderForRequestWithState(p pool.Provider, mode
 			return pool.Provider{}, requestCanceledRouteError()
 		}
 		if byomEligibility.storePressure {
-			return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "no_provider_available", message: unavailableMessage}
+			return pool.Provider{}, routeSnapshotPressureRouteError(unavailableMessage)
 		}
 		return pool.Provider{}, byomNonSettlementRouteError(model)
 	}
@@ -7229,7 +7238,7 @@ func (s *Server) trySelectQueuedProvider(ctx context.Context, requestID, model s
 				s.slotQueue.leave(waiter)
 				queueWait += time.Since(queueSegmentStart)
 				state.queueWait = queueWait
-				return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "no_provider_available", message: "No provider available for model " + model}, true
+				return pool.Provider{}, routeSnapshotPressureRouteError("No provider available for model " + model), true
 			case queuedProviderRequestCanceled:
 				s.slotQueue.leave(waiter)
 				queueWait += time.Since(queueSegmentStart)
@@ -8936,6 +8945,9 @@ func writeErrorWithParam(w http.ResponseWriter, status int, code, message, param
 }
 
 func writeRouteError(w http.ResponseWriter, err *routeError) {
+	if err.routeSnapshotPressure {
+		w.Header().Set(routeSnapshotPressureHeader, "1")
+	}
 	if err.typ != "" {
 		writeErrorTyped(w, err.status, err.typ, err.code, err.message)
 		return

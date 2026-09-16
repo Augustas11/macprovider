@@ -85,6 +85,56 @@ func TestGatewayCoord503RetryExhaustsNoProviderResponses(t *testing.T) {
 	)
 }
 
+func TestGatewayDoesNotRetryRouteSnapshotPressureNoProvider(t *testing.T) {
+	logs := captureRetryLogs(t)
+	var calls int
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		calls++
+		return responseWithBody(http.StatusServiceUnavailable, routeSnapshotPressureNoProviderHeaders(), noProviderBody()), nil
+	})}
+	accountID := "acct_route_snapshot_pressure_wholesale"
+	h, store, dbPath, cfg := newRetryHarness(t, client, func(cfg *config.Config) {
+		cfg.Auth.WholesaleAccountIDs = []string{accountID}
+	})
+	fullKey := createAccountAndKey(t, store, cfg, accountID)
+
+	resp := postChat(t, h, fullKey, chatBody(false), nil)
+
+	if resp.Code != http.StatusTooManyRequests {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	assertErrorCode(t, resp.Body.String(), "no_provider_available")
+	if calls != 1 {
+		t.Fatalf("coordinator calls=%d want 1", calls)
+	}
+	assertRetryLogCounts(t, logs.String(), 0, 0, 0)
+	assertRefundedNoProviderAudit(t, dbPath, accountID)
+}
+
+func TestGatewayDoesNotRetryPublicRouteSnapshotPressureNoProvider(t *testing.T) {
+	logs := captureRetryLogs(t)
+	var calls int
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		calls++
+		return responseWithBody(http.StatusServiceUnavailable, routeSnapshotPressureNoProviderHeaders(), noProviderBody()), nil
+	})}
+	h, store, dbPath, cfg := newRetryHarness(t, client, nil)
+	accountID := "acct_route_snapshot_pressure_public"
+	fullKey := createAccountAndKey(t, store, cfg, accountID)
+
+	resp := postChat(t, h, fullKey, chatBody(false), nil)
+
+	if resp.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	assertErrorCode(t, resp.Body.String(), "no_provider_available")
+	if calls != 1 {
+		t.Fatalf("coordinator calls=%d want 1", calls)
+	}
+	assertRetryLogCounts(t, logs.String(), 0, 0, 0)
+	assertRefundedNoProviderAudit(t, dbPath, accountID)
+}
+
 func TestCapacityRejection503EchoesRequestIDAndRefundsAfterRetryExhaustion(t *testing.T) {
 	var calls int
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
@@ -916,6 +966,12 @@ func markedNoProviderHeaders() http.Header {
 	h := http.Header{}
 	h.Set("Content-Type", "application/json")
 	h.Set(settlementNoPriorDispatchHeader, "1")
+	return h
+}
+
+func routeSnapshotPressureNoProviderHeaders() http.Header {
+	h := markedNoProviderHeaders()
+	h.Set(routeSnapshotPressureHeader, "1")
 	return h
 }
 

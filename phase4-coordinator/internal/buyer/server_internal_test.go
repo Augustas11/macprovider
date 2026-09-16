@@ -47,10 +47,11 @@ func TestValidatePinnedProviderAcceptsCatalogKeyAlias(t *testing.T) {
 
 func TestWriteRouteSnapshotErrorShedsPreDispatchCapacityPressure(t *testing.T) {
 	for _, tc := range []struct {
-		name       string
-		err        error
-		wantStatus int
-		wantCode   string
+		name               string
+		err                error
+		wantStatus         int
+		wantCode           string
+		wantPressureHeader bool
 	}{
 		{
 			name:       "deadline",
@@ -59,16 +60,18 @@ func TestWriteRouteSnapshotErrorShedsPreDispatchCapacityPressure(t *testing.T) {
 			wantCode:   "route_snapshot_failed",
 		},
 		{
-			name:       "billing_store_pressure",
-			err:        fmt.Errorf("insert route snapshot: %w", billing.ErrRouteSnapshotStorePressure),
-			wantStatus: http.StatusServiceUnavailable,
-			wantCode:   "no_provider_available",
+			name:               "billing_store_pressure",
+			err:                fmt.Errorf("insert route snapshot: %w", billing.ErrRouteSnapshotStorePressure),
+			wantStatus:         http.StatusServiceUnavailable,
+			wantCode:           "no_provider_available",
+			wantPressureHeader: true,
 		},
 		{
-			name:       "model_admission_route_drift",
-			err:        fmt.Errorf("insert route snapshot: %w", providerws.ErrModelAdmissionRouteDrift),
-			wantStatus: http.StatusServiceUnavailable,
-			wantCode:   "no_provider_available",
+			name:               "model_admission_route_drift",
+			err:                fmt.Errorf("insert route snapshot: %w", providerws.ErrModelAdmissionRouteDrift),
+			wantStatus:         http.StatusServiceUnavailable,
+			wantCode:           "no_provider_available",
+			wantPressureHeader: true,
 		},
 		{
 			name:       "model_admission_route_stale_misconfiguration",
@@ -95,6 +98,11 @@ func TestWriteRouteSnapshotErrorShedsPreDispatchCapacityPressure(t *testing.T) {
 			}
 			if !strings.Contains(rr.Body.String(), `"`+tc.wantCode+`"`) {
 				t.Fatalf("body=%s, want code %s", rr.Body.String(), tc.wantCode)
+			}
+			if got := rr.Header().Get(routeSnapshotPressureHeader); tc.wantPressureHeader && got != "1" {
+				t.Fatalf("%s=%q, want 1", routeSnapshotPressureHeader, got)
+			} else if !tc.wantPressureHeader && got != "" {
+				t.Fatalf("%s=%q, want empty", routeSnapshotPressureHeader, got)
 			}
 		})
 	}
@@ -136,16 +144,45 @@ func TestRouteSnapshotDispatchContextUsesShortBudget(t *testing.T) {
 
 func TestRouteSnapshotDispatchContextFitsOpenRouterRetryBudget(t *testing.T) {
 	const (
-		openRouterTTFTP95Budget          = 5 * time.Second
-		gatewayDefaultRetryBackoffBudget = 750 * time.Millisecond
-		minProviderFirstTokenHeadroom    = 2 * time.Second
-		preDispatchTimeoutPhasesPerTry   = 2
-		gatewayAttemptsBeforeSuccess     = 3
+		openRouterTTFTP95Budget       = 5 * time.Second
+		minProviderFirstTokenHeadroom = 2 * time.Second
+		minGatewayOverheadHeadroom    = 100 * time.Millisecond
+		preDispatchTimeoutPhases      = 2
 	)
-	worstCaseBeforeUsefulWork := time.Duration(preDispatchTimeoutPhasesPerTry*gatewayAttemptsBeforeSuccess)*routeSnapshotDispatchTimeout + gatewayDefaultRetryBackoffBudget
-	if worstCaseBeforeUsefulWork+minProviderFirstTokenHeadroom > openRouterTTFTP95Budget {
-		t.Fatalf("pre-dispatch waits plus gateway retry backoff=%s leaves less than %s first-token headroom under %s",
-			worstCaseBeforeUsefulWork, minProviderFirstTokenHeadroom, openRouterTTFTP95Budget)
+	worstCaseBeforeUsefulWork := time.Duration(preDispatchTimeoutPhases) * routeSnapshotDispatchTimeout
+	if worstCaseBeforeUsefulWork+minProviderFirstTokenHeadroom+minGatewayOverheadHeadroom > openRouterTTFTP95Budget {
+		t.Fatalf("pre-dispatch waits=%s leave less than %s first-token and %s gateway headroom under %s",
+			worstCaseBeforeUsefulWork, minProviderFirstTokenHeadroom, minGatewayOverheadHeadroom, openRouterTTFTP95Budget)
+	}
+}
+
+func TestWriteRouteErrorMarksRouteSnapshotPressure(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		routeErr   *routeError
+		wantHeader bool
+	}{
+		{
+			name:       "pressure",
+			routeErr:   routeSnapshotPressureRouteError("No provider available"),
+			wantHeader: true,
+		},
+		{
+			name:     "ordinary_no_provider",
+			routeErr: &routeError{status: http.StatusServiceUnavailable, code: "no_provider_available", message: "No provider available"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rr := httptest.NewRecorder()
+
+			writeRouteError(rr, tc.routeErr)
+
+			if got := rr.Header().Get(routeSnapshotPressureHeader); tc.wantHeader && got != "1" {
+				t.Fatalf("%s=%q, want 1", routeSnapshotPressureHeader, got)
+			} else if !tc.wantHeader && got != "" {
+				t.Fatalf("%s=%q, want empty", routeSnapshotPressureHeader, got)
+			}
+		})
 	}
 }
 

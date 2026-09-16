@@ -350,8 +350,8 @@ func newScenario(t *testing.T, opts scenarioOpts) *scenario {
 		gatewayDB:     filepath.Join(tempDir, "gateway.db"),
 		coordYAML:     filepath.Join(tempDir, "coordinator.yaml"),
 		gatewayYAML:   filepath.Join(tempDir, "gateway.yaml"),
-		operatorKey:   randHex(t, 32),
-		serviceToken:  randHex(t, 32),
+		operatorKey:   strongHexSecret(t),
+		serviceToken:  strongHexSecret(t),
 		keyHashSecret: randHex(t, 32),
 		demoSecret:    randHex(t, 32),
 		accountID:     "acct_" + randHex(t, 8),
@@ -523,6 +523,32 @@ func randHex(t *testing.T, n int) string {
 		t.Fatalf("rand: %v", err)
 	}
 	return hex.EncodeToString(b)
+}
+
+func strongHexSecret(t *testing.T) string {
+	t.Helper()
+	for range 100 {
+		secret := randHex(t, 64)
+		if secretEntropyBitsPerByte(secret) >= 3.5 {
+			return secret
+		}
+	}
+	t.Fatal("could not generate high-entropy test secret")
+	return ""
+}
+
+func secretEntropyBitsPerByte(s string) float64 {
+	counts := make(map[byte]int, len(s))
+	for _, b := range []byte(s) {
+		counts[b]++
+	}
+	var entropy float64
+	n := float64(len(s))
+	for _, count := range counts {
+		p := float64(count) / n
+		entropy -= p * math.Log2(p)
+	}
+	return entropy
 }
 
 // writeCoordinatorYAML drops the minimal config the coordinator needs

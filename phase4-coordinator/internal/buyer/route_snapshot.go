@@ -293,6 +293,7 @@ func writeRouteSnapshotError(w http.ResponseWriter, rec *billingRecorder, err er
 	}
 	if routeSnapshotShouldCapacityShed(err) {
 		rec.logBuyerFailure(http.StatusServiceUnavailable, "Route snapshot guard is temporarily unavailable")
+		w.Header().Set(routeSnapshotPressureHeader, "1")
 		writeError(w, http.StatusServiceUnavailable, "no_provider_available", "No provider available for this model")
 		return
 	}
@@ -349,6 +350,10 @@ const (
 	// streaming/WS paths the marker is decided from the outward wire status, which
 	// can render a non-billable 503 as 502 — see SPEC-006 §17.7.
 	settlementNoPriorDispatchHeader = "X-MacProvider-Settlement-No-Prior-Dispatch"
+	// routeSnapshotPressureHeader marks a pre-dispatch no_provider 503 caused by
+	// route-snapshot store pressure. Gateways preserve the existing no_provider
+	// settlement/refund contract but must not retry these overloaded attempts.
+	routeSnapshotPressureHeader = "X-MacProvider-Route-Snapshot-Pressure"
 )
 
 var settlementOutcomeHeaderNames = []string{
