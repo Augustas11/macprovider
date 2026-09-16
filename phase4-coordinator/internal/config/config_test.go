@@ -317,6 +317,40 @@ func TestRoutingDefaultObjectiveValidation(t *testing.T) {
 	}
 }
 
+func TestRoutingSlotQueueValidation(t *testing.T) {
+	tests := []struct {
+		name    string
+		mutate  func(*Config)
+		wantErr string
+	}{
+		{
+			name:    "max pending",
+			mutate:  func(cfg *Config) { cfg.Routing.SlotQueueMaxPendingPerProvider = 0 },
+			wantErr: "routing.slot_queue_max_pending_per_provider",
+		},
+		{
+			name:    "deadline",
+			mutate:  func(cfg *Config) { cfg.Routing.SlotQueueDeadlineS = 0 },
+			wantErr: "routing.slot_queue_deadline_s",
+		},
+		{
+			name:    "poll interval",
+			mutate:  func(cfg *Config) { cfg.Routing.SlotQueuePollIntervalMS = 0 },
+			wantErr: "routing.slot_queue_poll_interval_ms",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validTestConfig()
+			tt.mutate(&cfg)
+			if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("Validate error=%v, want %s", err, tt.wantErr)
+			}
+		})
+	}
+}
+
 // TestValidateRejectsWhitespaceEquivalentServiceToken pins the audit-r2
 // fix for the whitespace-bypass MEDIUM: auth.BearerTokenMatchesHeader
 // trims both sides before matching, so "X" and "X " or "X\n" collapse

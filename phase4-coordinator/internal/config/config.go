@@ -916,21 +916,24 @@ type LosslessnessProbeConfig struct {
 }
 
 type RoutingConfig struct {
-	PreflightThresholdTokens      int                         `yaml:"preflight_threshold_tokens"`
-	PreflightTimeoutS             int                         `yaml:"preflight_timeout_s"`
-	RequestTimeoutS               int                         `yaml:"request_timeout_s"`
-	FailoverEnabled               bool                        `yaml:"failover_enabled"`
-	FailoverTimeoutS              int                         `yaml:"failover_timeout_s"`
-	DefaultObjective              string                      `yaml:"default_objective"`
-	TiebreakRandomize             bool                        `yaml:"tiebreak_randomize"`
-	TiebreakEpsilon               float64                     `yaml:"tiebreak_epsilon"`
-	MaxRetries                    int                         `yaml:"max_retries"`
-	RetryPerAttemptTimeoutS       int                         `yaml:"retry_per_attempt_timeout_s"`
-	MaxProvidersFaultedPerRequest int                         `yaml:"max_providers_faulted_per_request"`
-	StickyEnabled                 bool                        `yaml:"sticky_enabled"`
-	StickyTTLS                    int                         `yaml:"sticky_ttl_s"`
-	StickyMaxEntries              int                         `yaml:"sticky_max_entries"`
-	ModelClasses                  map[string]ModelClassConfig `yaml:"model_classes"`
+	PreflightThresholdTokens       int                         `yaml:"preflight_threshold_tokens"`
+	PreflightTimeoutS              int                         `yaml:"preflight_timeout_s"`
+	RequestTimeoutS                int                         `yaml:"request_timeout_s"`
+	FailoverEnabled                bool                        `yaml:"failover_enabled"`
+	FailoverTimeoutS               int                         `yaml:"failover_timeout_s"`
+	SlotQueueMaxPendingPerProvider int                         `yaml:"slot_queue_max_pending_per_provider"`
+	SlotQueueDeadlineS             int                         `yaml:"slot_queue_deadline_s"`
+	SlotQueuePollIntervalMS        int                         `yaml:"slot_queue_poll_interval_ms"`
+	DefaultObjective               string                      `yaml:"default_objective"`
+	TiebreakRandomize              bool                        `yaml:"tiebreak_randomize"`
+	TiebreakEpsilon                float64                     `yaml:"tiebreak_epsilon"`
+	MaxRetries                     int                         `yaml:"max_retries"`
+	RetryPerAttemptTimeoutS        int                         `yaml:"retry_per_attempt_timeout_s"`
+	MaxProvidersFaultedPerRequest  int                         `yaml:"max_providers_faulted_per_request"`
+	StickyEnabled                  bool                        `yaml:"sticky_enabled"`
+	StickyTTLS                     int                         `yaml:"sticky_ttl_s"`
+	StickyMaxEntries               int                         `yaml:"sticky_max_entries"`
+	ModelClasses                   map[string]ModelClassConfig `yaml:"model_classes"`
 }
 
 type ModelClassConfig struct {
@@ -1477,21 +1480,24 @@ func Default() Config {
 			},
 		},
 		Routing: RoutingConfig{
-			PreflightThresholdTokens:      4096,
-			PreflightTimeoutS:             5,
-			RequestTimeoutS:               900,
-			FailoverEnabled:               true,
-			FailoverTimeoutS:              5,
-			DefaultObjective:              "default",
-			TiebreakRandomize:             false,
-			TiebreakEpsilon:               0,
-			MaxRetries:                    0,
-			RetryPerAttemptTimeoutS:       60,
-			MaxProvidersFaultedPerRequest: 0,
-			StickyEnabled:                 false,
-			StickyTTLS:                    1800,
-			StickyMaxEntries:              10000,
-			ModelClasses:                  map[string]ModelClassConfig{},
+			PreflightThresholdTokens:       4096,
+			PreflightTimeoutS:              5,
+			RequestTimeoutS:                900,
+			FailoverEnabled:                true,
+			FailoverTimeoutS:               5,
+			SlotQueueMaxPendingPerProvider: 4,
+			SlotQueueDeadlineS:             3,
+			SlotQueuePollIntervalMS:        25,
+			DefaultObjective:               "default",
+			TiebreakRandomize:              false,
+			TiebreakEpsilon:                0,
+			MaxRetries:                     0,
+			RetryPerAttemptTimeoutS:        60,
+			MaxProvidersFaultedPerRequest:  0,
+			StickyEnabled:                  false,
+			StickyTTLS:                     1800,
+			StickyMaxEntries:               10000,
+			ModelClasses:                   map[string]ModelClassConfig{},
 		},
 		ProviderHTTP: ProviderHTTPConfig{
 			TimeoutS: 900,
@@ -2501,6 +2507,15 @@ func (c Config) Validate() error {
 	}
 	if c.Routing.PreflightTimeoutS <= 0 || c.Routing.RequestTimeoutS <= 0 || c.Routing.FailoverTimeoutS <= 0 {
 		return fmt.Errorf("routing timeouts must be > 0")
+	}
+	if c.Routing.SlotQueueMaxPendingPerProvider <= 0 {
+		return fmt.Errorf("routing.slot_queue_max_pending_per_provider must be > 0")
+	}
+	if c.Routing.SlotQueueDeadlineS <= 0 {
+		return fmt.Errorf("routing.slot_queue_deadline_s must be > 0")
+	}
+	if c.Routing.SlotQueuePollIntervalMS <= 0 {
+		return fmt.Errorf("routing.slot_queue_poll_interval_ms must be > 0")
 	}
 	if c.Routing.TiebreakEpsilon < 0 {
 		return fmt.Errorf("routing.tiebreak_epsilon must be >= 0")

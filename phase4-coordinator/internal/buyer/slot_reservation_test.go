@@ -6,8 +6,29 @@ import (
 	"testing"
 	"time"
 
+	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
 )
+
+func TestRoutingConfigAppliesSlotQueueConfig(t *testing.T) {
+	s, _, _ := poolIsolationServer(t)
+
+	WithRoutingConfig(config.RoutingConfig{
+		SlotQueueMaxPendingPerProvider: 7,
+		SlotQueueDeadlineS:             11,
+		SlotQueuePollIntervalMS:        50,
+	})(s)
+
+	if s.slotQueue == nil || s.slotQueue.maxPending != 7 {
+		t.Fatalf("slot queue maxPending = %v, want 7", s.slotQueue)
+	}
+	if s.slotQueueDeadline != 11*time.Second {
+		t.Fatalf("slotQueueDeadline = %s, want 11s", s.slotQueueDeadline)
+	}
+	if s.slotQueuePollInterval != 50*time.Millisecond {
+		t.Fatalf("slotQueuePollInterval = %s, want 50ms", s.slotQueuePollInterval)
+	}
+}
 
 func TestSelectProviderReservesDirectSlot(t *testing.T) {
 	s, registry, _ := poolIsolationServer(t)
