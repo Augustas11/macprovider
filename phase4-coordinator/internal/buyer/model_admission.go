@@ -417,18 +417,6 @@ func (s *Server) requireBYOMRouteSnapshotBinding(ctx context.Context, p pool.Pro
 	return binding, nil
 }
 
-// insertBYOMRouteSnapshot performs the SPEC-047-R001 compare-and-insert for
-// a BYOM-bound route through the coordinator's guard (release read lock,
-// head, binding, binding generation, validated release generation). A
-// server composed with an admission store but no guard fails every
-// BYOM-bound route closed: there is no weaker path.
-func (s *Server) verifyLegacyModelAdmissionRouteFresh(ctx context.Context, p pool.Provider, state *forwardState) error {
-	if s == nil || s.modelAdmissionStore == nil || byomAdmissionCandidate(p) || p.ArtifactIdentity != nil {
-		return nil
-	}
-	return s.compareAndInsertLegacyModelAdmissionRouteSnapshot(ctx, p, state, func() error { return nil })
-}
-
 func (s *Server) compareAndInsertLegacyModelAdmissionRouteSnapshot(ctx context.Context, p pool.Provider, state *forwardState, insert func() error) error {
 	if s == nil || s.modelAdmissionStore == nil {
 		return insert()

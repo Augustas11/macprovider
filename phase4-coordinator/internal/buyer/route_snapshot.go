@@ -46,10 +46,6 @@ func (b *billingRecorder) recordRouteSnapshot(providerBody []byte, provider pool
 	}
 	ctx, cancel := newRouteSnapshotDispatchContext(parentCtx)
 	defer cancel()
-	if err := b.server.verifyLegacyModelAdmissionRouteFresh(ctx, provider, b.state); err != nil {
-		return nil, wrapRouteSnapshotGuardPressure(err)
-	}
-
 	store, _, _ := b.server.billingState()
 	if store == nil {
 		return nil, nil
