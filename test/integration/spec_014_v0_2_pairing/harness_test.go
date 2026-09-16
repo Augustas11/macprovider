@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"net/http/cookiejar"
@@ -277,8 +278,8 @@ func writeCoordinatorConfigWithOAuth(t *testing.T, path, dbPath string, provider
 			"response_time_anomaly_min_ms":       10000,
 		},
 		"auth": map[string]any{
-			"operator_key":            randHex(t, 32),
-			"gateway_service_token":   randHex(t, 32),
+			"operator_key":            strongHexSecret(t),
+			"gateway_service_token":   strongHexSecret(t),
 			"require_provider_tokens": false,
 			"github_oauth":            githubOAuth,
 		},
@@ -496,6 +497,32 @@ func randHex(t *testing.T, n int) string {
 		t.Fatalf("rand: %v", err)
 	}
 	return hex.EncodeToString(b)
+}
+
+func strongHexSecret(t *testing.T) string {
+	t.Helper()
+	for range 100 {
+		secret := randHex(t, 64)
+		if secretEntropyBitsPerByte(secret) >= 3.5 {
+			return secret
+		}
+	}
+	t.Fatal("could not generate high-entropy test secret")
+	return ""
+}
+
+func secretEntropyBitsPerByte(s string) float64 {
+	counts := make(map[byte]int, len(s))
+	for _, b := range []byte(s) {
+		counts[b]++
+	}
+	var entropy float64
+	n := float64(len(s))
+	for _, count := range counts {
+		p := float64(count) / n
+		entropy -= p * math.Log2(p)
+	}
+	return entropy
 }
 
 func timeText(t time.Time) string {
