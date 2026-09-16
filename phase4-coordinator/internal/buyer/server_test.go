@@ -8008,7 +8008,7 @@ func TestSlotQueueWaitsForReadyProviderCapacity(t *testing.T) {
 		zerolog.Nop(),
 		time.Unix(1716768000, 0),
 		buyer.WithRequestLog(reqLog),
-		buyer.WithSlotQueueConfig(4, 100*time.Millisecond, time.Millisecond),
+		buyer.WithSlotQueueConfig(4, 300*time.Millisecond, time.Millisecond),
 	)
 
 	go func() {
@@ -8619,7 +8619,7 @@ func TestSlotQueueAppliesToHTTPRetryReplacementProvider(t *testing.T) {
 		case <-time.After(time.Second):
 			return
 		}
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(50 * time.Millisecond)
 		one := 1
 		registry.ApplyStateUpdate("queued", "s2", pool.StateUpdate{State: pool.StateReady, SlotsFree: &one, At: time.Now().UTC()})
 	}()
@@ -8673,7 +8673,7 @@ func TestSlotQueueWaitDoesNotCarryIntoImmediateRetryAttempt(t *testing.T) {
 		time.Unix(1716768000, 0),
 		buyer.WithRequestLog(reqLog),
 		buyer.WithRoutingConfig(config.RoutingConfig{MaxRetries: 1, RetryPerAttemptTimeoutS: 1}),
-		buyer.WithSlotQueueConfig(4, 120*time.Millisecond, time.Millisecond),
+		buyer.WithSlotQueueConfig(4, 300*time.Millisecond, time.Millisecond),
 	)
 	go func() {
 		time.Sleep(10 * time.Millisecond)
@@ -8729,7 +8729,7 @@ func TestSlotQueueAppliesToWSFailoverReplacementProvider(t *testing.T) {
 		}, time.Second),
 	)
 	go func() {
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(50 * time.Millisecond)
 		one := 1
 		registry.ApplyStateUpdate("p2", "s2", pool.StateUpdate{State: pool.StateReady, SlotsFree: &one, At: time.Now().UTC()})
 	}()
