@@ -1565,20 +1565,22 @@ func TestRouteSnapshotEnforceStorePressureStillDispatches(t *testing.T) {
 	}
 }
 
-func TestRouteSnapshotObserveGuardPressureDoesNotDispatch(t *testing.T) {
+func TestRouteSnapshotLegacyGuardStorePressureStillDispatches(t *testing.T) {
 	for _, tc := range []struct {
-		name           string
-		insertFirst    bool
-		wantErrMessage string
+		name               string
+		insertFirst        bool
+		wantErrMessage     string
+		wantSnapshotsCount int
 	}{
 		{
 			name:           "before_insert",
 			wantErrMessage: "pre-insert route guard pressure",
 		},
 		{
-			name:           "after_insert",
-			insertFirst:    true,
-			wantErrMessage: "post-insert route guard pressure",
+			name:               "after_insert",
+			insertFirst:        true,
+			wantErrMessage:     "post-insert route guard pressure",
+			wantSnapshotsCount: 1,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1616,11 +1618,6 @@ func TestRouteSnapshotObserveGuardPressureDoesNotDispatch(t *testing.T) {
 
 			registry := pool.NewRegistry(nil)
 			registerSettlementProvider(registry, "p1", "session-1", upstream.URL, 30, bytes.Repeat([]byte{0x78}, 32))
-			provider := byomAdmissionProvider(t, registry.Snapshot()[0])
-			store := providerws.NewMemoryModelAdmissionStore()
-			event := seedBYOMAdmissionState(t, store, provider, "settlement_capable")
-			routeProvider := bindBYOMSession(clearBYOMAdmissionFields(provider), event)
-			registry.Register(&routeProvider, nil)
 			server := buyer.NewServer(
 				registry,
 				zerolog.Nop(),
@@ -1628,22 +1625,26 @@ func TestRouteSnapshotObserveGuardPressureDoesNotDispatch(t *testing.T) {
 				buyer.WithRequestLog(reqLog),
 				buyer.WithBilling(billingStore, cfg),
 				buyer.WithBillingSnapshotID(snapshotID),
-				buyer.WithModelAdmissionStore(store),
-				buyer.WithModelAdmissionRouteGuard(pressureRouteGuard{
+				buyer.WithModelAdmissionStore(providerws.NewMemoryModelAdmissionStore()),
+				buyer.WithModelAdmissionRouteGuard(pressureLegacyRouteGuard{
+					generation:  7,
 					insertFirst: tc.insertFirst,
 					err:         fmt.Errorf("%s: %w", tc.wantErrMessage, billing.ErrRouteSnapshotStorePressure),
 				}),
 			)
 
 			rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`), nil)
-			if rr.Code != http.StatusServiceUnavailable {
-				t.Fatalf("status=%d body=%s, want 503 route guard pressure", rr.Code, rr.Body.String())
+			if rr.Code != http.StatusOK {
+				t.Fatalf("status=%d body=%s, want 200 after transient route guard pressure", rr.Code, rr.Body.String())
 			}
-			if reachedProvider {
-				t.Fatal("provider was reached after route guard pressure")
+			if !reachedProvider {
+				t.Fatal("provider was not reached after transient route guard pressure")
 			}
-			if got := routeSnapshotCount(t, dbPath); got != 0 {
-				t.Fatalf("route snapshots=%d want 0 when route guard pressure aborts dispatch", got)
+			if got := routeSnapshotCount(t, dbPath); got != tc.wantSnapshotsCount {
+				t.Fatalf("route snapshots=%d want %d after transient route guard pressure", got, tc.wantSnapshotsCount)
+			}
+			if verdicts := querySettlementReceiptVerdicts(t, dbPath); len(verdicts) != 0 {
+				t.Fatalf("receipt verdict rows=%d want 0 without route snapshot metadata: %#v", len(verdicts), verdicts)
 			}
 		})
 	}
@@ -2163,6 +2164,28 @@ type pressureRouteGuard struct {
 }
 
 func (g pressureRouteGuard) CompareAndInsertModelAdmissionRouteSnapshot(_ context.Context, _ providerws.ModelAdmissionRouteExpectation, insert func() error) error {
+	if g.insertFirst {
+		if err := insert(); err != nil {
+			return err
+		}
+	}
+	return g.err
+}
+
+type pressureLegacyRouteGuard struct {
+	generation  uint64
+	insertFirst bool
+	err         error
+}
+
+func (g pressureLegacyRouteGuard) ModelAdmissionBindingGeneration(string) uint64 {
+	return g.generation
+}
+
+func (g pressureLegacyRouteGuard) CompareAndInsertModelAdmissionRouteSnapshot(_ context.Context, expect providerws.ModelAdmissionRouteExpectation, insert func() error) error {
+	if expect.CandidateID != "" {
+		return providerws.ErrModelAdmissionRouteStale
+	}
 	if g.insertFirst {
 		if err := insert(); err != nil {
 			return err

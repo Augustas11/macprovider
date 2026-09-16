@@ -123,7 +123,7 @@ func TestRouteSnapshotGuardPressureWrapsDedicatedDeadline(t *testing.T) {
 	}
 }
 
-func TestRouteSnapshotCanSkipOnlyInsertStorePressure(t *testing.T) {
+func TestRouteSnapshotCanSkipOnlyStorePressure(t *testing.T) {
 	pressureErr := fmt.Errorf("insert route snapshot: %w", billing.ErrRouteSnapshotStorePressure)
 	if !routeSnapshotCanSkipStorePressure(billing.RouteSnapshotModeObserve, pressureErr, true) {
 		t.Fatal("observe mode should skip transient route snapshot store pressure")
@@ -131,12 +131,12 @@ func TestRouteSnapshotCanSkipOnlyInsertStorePressure(t *testing.T) {
 	if !routeSnapshotCanSkipStorePressure(billing.RouteSnapshotModeEnforce, pressureErr, true) {
 		t.Fatal("enforce mode should skip transient route snapshot store pressure from the insert callback")
 	}
+	if !routeSnapshotCanSkipStorePressure(billing.RouteSnapshotModeEnforce, pressureErr, false) {
+		t.Fatal("enforce mode should skip transient route snapshot store pressure from the route guard")
+	}
 	if routeSnapshotCanSkipStorePressure("", pressureErr, true) ||
 		routeSnapshotCanSkipStorePressure("shadow", pressureErr, true) {
 		t.Fatal("unknown route snapshot modes must not skip route snapshot store pressure")
-	}
-	if routeSnapshotCanSkipStorePressure(billing.RouteSnapshotModeObserve, pressureErr, false) {
-		t.Fatal("observe mode must not skip pressure unless it came from the insert callback")
 	}
 	if routeSnapshotCanSkipStorePressure(billing.RouteSnapshotModeObserve, errors.New("tier2 catalog does not match signed admission row"), true) {
 		t.Fatal("observe mode must not skip semantic route snapshot integrity errors")

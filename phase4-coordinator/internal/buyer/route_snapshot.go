@@ -334,7 +334,7 @@ func routeSnapshotShouldCapacityShed(err error) bool {
 func routeSnapshotCanSkipStorePressure(routeMode string, err error, insertStorePressure bool) bool {
 	switch routeMode {
 	case billing.RouteSnapshotModeObserve, billing.RouteSnapshotModeEnforce:
-		return insertStorePressure && errors.Is(err, billing.ErrRouteSnapshotStorePressure)
+		return errors.Is(err, billing.ErrRouteSnapshotStorePressure)
 	default:
 		return false
 	}
