@@ -241,6 +241,14 @@ func main() {
 	routeSnapshotDB.SetMaxOpenConns(routeSnapshotSQLiteMaxOpenConns)
 	routeSnapshotDB.SetMaxIdleConns(routeSnapshotSQLiteMaxOpenConns)
 	defer routeSnapshotDB.Close()
+	routeSnapshotJournalDB, err := sql.Open("sqlite", sqliteutil.WithManualWALCheckpointPragmas(routeSnapshotJournalDBPath(cfg.Storage.DBPath)))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "route snapshot journal sqlite: %v\n", err)
+		os.Exit(1)
+	}
+	routeSnapshotJournalDB.SetMaxOpenConns(routeSnapshotJournalSQLiteMaxOpenConns)
+	routeSnapshotJournalDB.SetMaxIdleConns(routeSnapshotJournalSQLiteMaxOpenConns)
+	defer routeSnapshotJournalDB.Close()
 	payoutReadDB, closePayoutReadDB, err := configuredPayoutReadDB(cfg, reqLogStore)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "payout read db: %v\n", err)
@@ -315,7 +323,12 @@ func main() {
 	}
 	billingStore.SetSQLiteMetrics(metricsHandle)
 	billingStore.SetRouteSnapshotDB(routeSnapshotDB)
+	billingStore.SetRouteSnapshotJournalDB(routeSnapshotJournalDB)
 	billingStore.SetRouteSnapshotBusyTimeout(routeSnapshotSQLiteBusyTimeout)
+	if err := billingStore.InitRouteSnapshotJournal(context.Background()); err != nil {
+		fmt.Fprintf(os.Stderr, "route snapshot journal init: %v\n", err)
+		os.Exit(1)
+	}
 	// R4 fix (CODE-M2): set the route-layer flag atomic BEFORE the
 	// startup snapshot so the snapshot's canonical hash captures the
 	// initial flag state (SPEC-005 v0.4 §11.6.4 / §13.2). The
@@ -1428,6 +1441,7 @@ func main() {
 	errs := make(chan error, 2)
 
 	startSettlementStartupScan(context.Background(), billingStore, cfg.Settlement, time.Now().UTC(), logger)
+	startRouteSnapshotJournalMirror(shutdownCtx, billingStore, logger)
 	billingStore.StartNightlyReconcile(shutdownCtx, cfg.Settlement)
 	billingStore.StartWeeklySettlement(shutdownCtx, cfg.Settlement)
 	flushSettlementReceiptAuditOutbox := startSettlementReceiptAuditOutboxDrainer(shutdownCtx, billingStore, settlementReceiptAuditStore, cfg.Storage.AuditLogRetentionDays, metricsHandle, moneySQLiteActivity, logger)
@@ -1597,6 +1611,10 @@ type settlementReceiptAuditOutboxDrainer interface {
 	SettlementReceiptAuditOutboxStats(context.Context) (billing.SettlementReceiptAuditOutboxStats, error)
 }
 
+type routeSnapshotJournalMirror interface {
+	MirrorPendingRouteSnapshots(context.Context, int) (int, error)
+}
+
 type settlementReceiptAuditOutboxObserver interface {
 	ObserveSettlementReceiptAuditOutbox(int64, int64, int64, time.Duration)
 	IncSettlementReceiptAuditOutboxDrain(string)
@@ -1604,16 +1622,27 @@ type settlementReceiptAuditOutboxObserver interface {
 }
 
 const (
-	moneySQLiteCheckpointPollInterval   = 30 * time.Second
-	moneySQLiteCheckpointIdleInterval   = 30 * time.Second
-	moneySQLiteMaintenanceMinIdle       = 10 * time.Second
-	moneySQLiteMaintenanceMaxDeferral   = 2 * time.Minute
-	moneySQLiteCheckpointMinTimeout     = 15 * time.Second
-	moneySQLiteCheckpointMaxTimeout     = 5 * time.Minute
-	moneySQLiteCheckpointBytesPerSecond = 32 << 20
-	routeSnapshotSQLiteMaxOpenConns     = 4
-	routeSnapshotSQLiteBusyTimeout      = 500 * time.Millisecond
+	moneySQLiteCheckpointPollInterval      = 30 * time.Second
+	moneySQLiteCheckpointIdleInterval      = 30 * time.Second
+	moneySQLiteMaintenanceMinIdle          = 10 * time.Second
+	moneySQLiteMaintenanceMaxDeferral      = 2 * time.Minute
+	moneySQLiteCheckpointMinTimeout        = 15 * time.Second
+	moneySQLiteCheckpointMaxTimeout        = 5 * time.Minute
+	moneySQLiteCheckpointBytesPerSecond    = 32 << 20
+	routeSnapshotSQLiteMaxOpenConns        = 4
+	routeSnapshotJournalSQLiteMaxOpenConns = 4
+	routeSnapshotSQLiteBusyTimeout         = 500 * time.Millisecond
+	routeSnapshotJournalMirrorInterval     = 250 * time.Millisecond
+	routeSnapshotJournalMirrorTimeout      = 2 * time.Second
+	routeSnapshotJournalMirrorBatch        = 100
 )
+
+func routeSnapshotJournalDBPath(dbPath string) string {
+	if strings.TrimSpace(dbPath) == "" || dbPath == ":memory:" {
+		return dbPath
+	}
+	return dbPath + ".route-snapshots"
+}
 
 type moneySQLiteWALCheckpointerConfig struct {
 	PollInterval   time.Duration
@@ -1851,6 +1880,45 @@ func startSettlementStartupScan(ctx context.Context, scanner settlementStartupSc
 	if err := scanner.StartStartupScan(ctx, settlement, now); err != nil {
 		logger.Warn().Err(err).Msg("billing startup scan failed")
 	}
+}
+
+func startRouteSnapshotJournalMirror(ctx context.Context, mirror routeSnapshotJournalMirror, logger zerolog.Logger) {
+	if mirror == nil {
+		return
+	}
+	flush := func(runCtx context.Context) {
+		if runCtx == nil {
+			runCtx = context.Background()
+		}
+		for {
+			if runCtx.Err() != nil {
+				return
+			}
+			mirrorCtx, cancel := context.WithTimeout(runCtx, routeSnapshotJournalMirrorTimeout)
+			mirrored, err := mirror.MirrorPendingRouteSnapshots(mirrorCtx, routeSnapshotJournalMirrorBatch)
+			cancel()
+			if err != nil {
+				logger.Warn().Err(err).Int("mirrored_rows", mirrored).Msg("route snapshot journal mirror failed")
+				return
+			}
+			if mirrored == 0 || mirrored < routeSnapshotJournalMirrorBatch {
+				return
+			}
+		}
+	}
+	flush(context.Background())
+	go func() {
+		ticker := time.NewTicker(routeSnapshotJournalMirrorInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				flush(ctx)
+			}
+		}
+	}()
 }
 
 func startSettlementReceiptAuditOutboxDrainer(ctx context.Context, store settlementReceiptAuditOutboxDrainer, sink billing.SettlementReceiptAuditSink, retentionDays int, observer settlementReceiptAuditOutboxObserver, idle moneySQLiteIdleTracker, logger zerolog.Logger) func(context.Context) {

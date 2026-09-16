@@ -226,6 +226,9 @@ func (s *Store) RecordMissingSettlementReceipt(ctx context.Context, input Settle
 }
 
 func (s *Store) applySettlementReceiptVerdict(ctx context.Context, id SettlementReceiptIdentity, receiptPresent bool, receivedAtUnixMS int64, verify func(settlementEvidence, bool) SettlementVerifyResult) (SettlementReceiptState, error) {
+	if err := s.MirrorRouteSnapshotForAttempt(ctx, id); err != nil {
+		return SettlementReceiptState{}, err
+	}
 	var outcome SettlementReceiptState
 	err := sqliteutil.Transact(ctx, s.db, func(ctx context.Context, conn *sql.Conn) error {
 		existing, found, err := loadSettlementReceiptStateConn(ctx, conn, id)
