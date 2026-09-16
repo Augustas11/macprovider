@@ -26,9 +26,11 @@ live on Pearl. A Pearl-root signer that mints client-trusted feeds and retargets
 Primary always-on signer: GitHub Actions
 `.github/workflows/renew-autotune-static-feed-signed.yml` (Wednesday 16:00 UTC,
 `environment: autotune-feed-renewal`, no reviewer gate). The runner signs with
-Swift CryptoKit, verifies with a sealed OpenSSL 3 bottle, and rsyncs **only
-signed bytes** to Pearl. The private key is an `autotune-feed-renewal` secret,
-never a file on the coordinator host.
+Swift CryptoKit, authenticates the previous signed release with a sealed Go
+verifier at `/private/var/macprovider-go-verifier/bin/go`, verifies signatures
+with a sealed OpenSSL 3 bottle, and rsyncs **only signed bytes** to Pearl.
+The private key is an `autotune-feed-renewal` secret, never a file on the
+coordinator host. `catalog-release.py` does not take Go from PATH.
 
 A Pearl compromise therefore still cannot mint a validly-signed feed.
 
@@ -74,8 +76,11 @@ dry-run):
    `scripts/test-renew-autotune-static-feed-signed.sh`.
 3. `catalog-release.py generate` → canonical bytes + manifest + ledger, then
    `resign-autotune-static.sh` signs the three static feeds — four once the
-   release is artifact-bound (`autotune-artifacts.json`). `verify-directory`
-   uses `OPENSSL_BIN` when set (CI sealed bottle).
+   release is artifact-bound (`autotune-artifacts.json`). On Actions, generate
+   requires `CATALOG_RELEASE_REQUIRE_SEALED_GO_VERIFIER=1` so Tier-2
+   authentication uses the sealed Go at `/private/var/macprovider-go-verifier`
+   rather than Homebrew/`PATH`. `verify-directory` uses `OPENSSL_BIN` when set
+   (CI sealed bottle).
 4. Assembles the release dir (9 files; 11 once artifact-bound: the artifact
    feed and its `.sig`) and gates it with
    `catalog-release.py verify-directory`.
