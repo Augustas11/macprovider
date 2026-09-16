@@ -93,6 +93,188 @@ func TestReservedSlotOverflowShedsWithoutQueueWait(t *testing.T) {
 	}
 }
 
+func TestWholesaleReservedSlotOverflowUsesBoundedQueue(t *testing.T) {
+	s, registry, _ := poolIsolationServer(t)
+	provider := poolProvider("p-one")
+	registry.Register(&provider, nil)
+	s.slotQueueDeadline = 100 * time.Millisecond
+	s.slotQueuePollInterval = time.Millisecond
+
+	state1 := &forwardState{slotReservationsEnabled: true}
+	if _, routeErr := s.selectProviderExcluding(context.Background(), "rid-1", poolChatReq(""), http.Header{}, nil, "2026-09-14", state1); routeErr != nil {
+		t.Fatalf("first selection rejected: %+v", routeErr)
+	}
+	if state1.queuedSlotProviderID != provider.ProviderID {
+		t.Fatalf("first selection reservation provider %q, want %q", state1.queuedSlotProviderID, provider.ProviderID)
+	}
+	if !s.slotQueue.blocksProvider(provider.ProviderID, provider.SlotsFree) {
+		t.Fatal("first reservation did not block the provider's advertised slot")
+	}
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		s.releaseQueuedSlotReservation(state1)
+	}()
+
+	headers := make(http.Header)
+	headers.Set("Authorization", "Bearer gateway-secret")
+	headers.Set("X-MacProvider-Internal-Wholesale", "1")
+	if !s.hasTrustedWholesaleRoutingHeader(headers) {
+		t.Fatal("test headers were not classified as trusted wholesale")
+	}
+	state2 := &forwardState{slotReservationsEnabled: true}
+	started := time.Now()
+	got, routeErr := s.selectProviderExcluding(context.Background(), "rid-2", poolChatReq(""), headers, nil, "2026-09-14", state2)
+	if routeErr != nil {
+		t.Fatalf("wholesale overflow selection rejected after %s queueWait=%s: %+v", time.Since(started), state2.queueWait, routeErr)
+	}
+	if got.ProviderID != provider.ProviderID {
+		t.Fatalf("wholesale queued provider %q, want %q", got.ProviderID, provider.ProviderID)
+	}
+	if state2.queueWait <= 0 {
+		t.Fatal("wholesale reserved-slot overflow bypassed the bounded slot queue")
+	}
+	if state2.queuedSlotProviderID != provider.ProviderID {
+		t.Fatalf("reservation provider %q, want %q", state2.queuedSlotProviderID, provider.ProviderID)
+	}
+	if elapsed := time.Since(started); elapsed >= s.slotQueueDeadline {
+		t.Fatalf("wholesale overflow waited %s; should claim slot before deadline %s", elapsed, s.slotQueueDeadline)
+	}
+	s.releaseQueuedSlotReservation(state2)
+}
+
+func TestSpoofedWholesaleHeaderRejectedBeforeReservationOverflowQueue(t *testing.T) {
+	s, registry, _ := poolIsolationServer(t)
+	provider := poolProvider("p-one")
+	registry.Register(&provider, nil)
+	s.slotQueueDeadline = 100 * time.Millisecond
+	s.slotQueuePollInterval = time.Millisecond
+
+	state1 := &forwardState{slotReservationsEnabled: true}
+	if _, routeErr := s.selectProviderExcluding(context.Background(), "rid-1", poolChatReq(""), http.Header{}, nil, "2026-09-14", state1); routeErr != nil {
+		t.Fatalf("first selection rejected: %+v", routeErr)
+	}
+	defer s.releaseQueuedSlotReservation(state1)
+
+	headers := make(http.Header)
+	headers.Set("X-MacProvider-Internal-Wholesale", "1")
+	if s.hasTrustedWholesaleRoutingHeader(headers) {
+		t.Fatal("spoofed wholesale header was classified as trusted")
+	}
+	state2 := &forwardState{slotReservationsEnabled: true}
+	_, routeErr := s.selectProviderExcluding(context.Background(), "rid-spoof", poolChatReq(""), headers, nil, "2026-09-14", state2)
+	if routeErr == nil || routeErr.status != http.StatusBadRequest || routeErr.code != "invalid_request" {
+		t.Fatalf("spoofed wholesale header: want 400 invalid_request, got %+v", routeErr)
+	}
+	if state2.queueWait != 0 {
+		t.Fatalf("spoofed wholesale header queueWait=%s, want 0", state2.queueWait)
+	}
+}
+
+func TestPublicRequestDoesNotFollowWholesaleReservationOverflowWaiter(t *testing.T) {
+	s, registry, _ := poolIsolationServer(t)
+	provider := poolProvider("p-one")
+	registry.Register(&provider, nil)
+	s.slotQueueDeadline = 100 * time.Millisecond
+	s.slotQueuePollInterval = time.Millisecond
+
+	state1 := &forwardState{slotReservationsEnabled: true}
+	if _, routeErr := s.selectProviderExcluding(context.Background(), "rid-1", poolChatReq(""), http.Header{}, nil, "2026-09-14", state1); routeErr != nil {
+		t.Fatalf("first selection rejected: %+v", routeErr)
+	}
+
+	headers := make(http.Header)
+	headers.Set("Authorization", "Bearer gateway-secret")
+	headers.Set("X-MacProvider-Internal-Wholesale", "1")
+	wholesaleStarted := make(chan struct{})
+	wholesaleDone := make(chan *routeError, 1)
+	go func() {
+		state := &forwardState{slotReservationsEnabled: true}
+		close(wholesaleStarted)
+		_, routeErr := s.selectProviderExcluding(context.Background(), "rid-wholesale", poolChatReq(""), headers, nil, "2026-09-14", state)
+		wholesaleDone <- routeErr
+	}()
+	<-wholesaleStarted
+
+	deadline := time.Now().Add(25 * time.Millisecond)
+	for time.Now().Before(deadline) && !s.slotQueue.hasWaiters(provider.ProviderID) {
+		time.Sleep(time.Millisecond)
+	}
+	if !s.slotQueue.hasWaiters(provider.ProviderID) {
+		t.Fatal("wholesale overflow waiter did not enter the queue")
+	}
+
+	statePublic := &forwardState{slotReservationsEnabled: true}
+	started := time.Now()
+	_, routeErr := s.selectProviderExcluding(context.Background(), "rid-public", poolChatReq(""), http.Header{}, nil, "2026-09-14", statePublic)
+	if routeErr == nil || routeErr.status != http.StatusServiceUnavailable || routeErr.code != "no_provider_available" {
+		t.Fatalf("public request behind wholesale overflow waiter: want 503 no_provider_available, got %+v", routeErr)
+	}
+	if statePublic.queueWait != 0 {
+		t.Fatalf("public request queueWait=%s, want 0", statePublic.queueWait)
+	}
+	if elapsed := time.Since(started); elapsed >= s.slotQueueDeadline/2 {
+		t.Fatalf("public request waited %s behind wholesale overflow waiter", elapsed)
+	}
+
+	s.releaseQueuedSlotReservation(state1)
+	if routeErr := <-wholesaleDone; routeErr != nil {
+		t.Fatalf("wholesale waiter rejected after public shed: %+v", routeErr)
+	}
+}
+
+func TestQueuedProviderClaimsReleasedLocalReservation(t *testing.T) {
+	s, registry, _ := poolIsolationServer(t)
+	provider := poolProvider("p-one")
+	registry.Register(&provider, nil)
+	s.slotQueueDeadline = 100 * time.Millisecond
+	s.slotQueuePollInterval = time.Millisecond
+
+	state1 := &forwardState{slotReservationsEnabled: true}
+	if _, routeErr := s.selectProviderExcluding(context.Background(), "rid-1", poolChatReq(""), http.Header{}, nil, "2026-09-14", state1); routeErr != nil {
+		t.Fatalf("first selection rejected: %+v", routeErr)
+	}
+
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		s.releaseQueuedSlotReservation(state1)
+	}()
+
+	state2 := &forwardState{slotReservationsEnabled: true}
+	got, routeErr, queued := s.trySelectQueuedProvider(context.Background(), "rid-2", "model-a", []pool.Provider{provider}, http.Header{}, nil, "2026-09-14", 1, state2, slotWaiterStandard)
+	if !queued {
+		t.Fatal("trySelectQueuedProvider did not enter the queue")
+	}
+	if routeErr != nil {
+		t.Fatalf("queued provider rejected after queueWait=%s: %+v", state2.queueWait, routeErr)
+	}
+	if got.ProviderID != provider.ProviderID {
+		t.Fatalf("queued provider %q, want %q", got.ProviderID, provider.ProviderID)
+	}
+	if state2.queueWait <= 0 {
+		t.Fatal("queued provider did not wait for the local reservation")
+	}
+	s.releaseQueuedSlotReservation(state2)
+}
+
+func TestWholesaleReservationOverflowFallbackPreservesSplitQueuedCandidates(t *testing.T) {
+	s, _, _ := poolIsolationServer(t)
+	queued := poolProvider("p-queued")
+	raced := poolProvider("p-raced")
+	dupe := queued
+	dupe.AssignedID = queued.AssignedID
+	busy := poolProvider("p-busy")
+	busy.State = pool.StateBusy
+	busy.SlotsFree = 0
+
+	got := s.wholesaleReservationOverflowQueueCandidates([]pool.Provider{queued}, []pool.Provider{raced, dupe, busy})
+	if len(got) != 2 {
+		t.Fatalf("fallback candidates len=%d want 2: %+v", len(got), got)
+	}
+	if got[0].ProviderID != queued.ProviderID || got[1].ProviderID != raced.ProviderID {
+		t.Fatalf("fallback candidates = [%q %q], want [%q %q]", got[0].ProviderID, got[1].ProviderID, queued.ProviderID, raced.ProviderID)
+	}
+}
+
 func TestSelectProviderReleasesDirectSlotOnPreflightReject(t *testing.T) {
 	s, registry, _ := poolIsolationServer(t)
 	provider := poolProvider("p-one")
@@ -127,10 +309,9 @@ func TestWholesaleSelectionUsesBoundedSlotQueue(t *testing.T) {
 	s.slotQueueDeadline = 10 * time.Millisecond
 	s.slotQueuePollInterval = time.Millisecond
 
-	headers := http.Header{
-		"Authorization":                    []string{"Bearer gateway-secret"},
-		"X-MacProvider-Internal-Wholesale": []string{"1"},
-	}
+	headers := make(http.Header)
+	headers.Set("Authorization", "Bearer gateway-secret")
+	headers.Set("X-MacProvider-Internal-Wholesale", "1")
 	state := &forwardState{slotReservationsEnabled: true}
 	started := time.Now()
 	_, routeErr := s.selectProviderExcluding(context.Background(), "rid-1", poolChatReq(""), headers, nil, "2026-09-14", state)

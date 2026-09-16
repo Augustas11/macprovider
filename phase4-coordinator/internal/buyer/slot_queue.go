@@ -9,8 +9,16 @@ type slotQueue struct {
 	reserved   map[string]int
 }
 
+type slotWaiterKind int
+
+const (
+	slotWaiterStandard slotWaiterKind = iota
+	slotWaiterReservationOverflow
+)
+
 type slotWaiter struct {
 	providerID string
+	kind       slotWaiterKind
 }
 
 type poolQueueCandidate struct {
@@ -29,18 +37,26 @@ func newSlotQueue(maxPending int) *slotQueue {
 }
 
 func (q *slotQueue) enter(providerID string) (*slotWaiter, bool) {
+	return q.enterWithKind(providerID, slotWaiterStandard)
+}
+
+func (q *slotQueue) enterWithKind(providerID string, kind slotWaiterKind) (*slotWaiter, bool) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	queue := q.queues[providerID]
 	if len(queue) >= q.maxPending {
 		return nil, false
 	}
-	waiter := &slotWaiter{providerID: providerID}
+	waiter := &slotWaiter{providerID: providerID, kind: kind}
 	q.queues[providerID] = append(queue, waiter)
 	return waiter, true
 }
 
 func (q *slotQueue) enterBest(candidates []poolQueueCandidate, tried map[string]struct{}) (*slotWaiter, bool) {
+	return q.enterBestWithKind(candidates, tried, slotWaiterStandard)
+}
+
+func (q *slotQueue) enterBestWithKind(candidates []poolQueueCandidate, tried map[string]struct{}, kind slotWaiterKind) (*slotWaiter, bool) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	bestProviderID := ""
@@ -62,7 +78,7 @@ func (q *slotQueue) enterBest(candidates []poolQueueCandidate, tried map[string]
 	if bestProviderID == "" {
 		return nil, false
 	}
-	waiter := &slotWaiter{providerID: bestProviderID}
+	waiter := &slotWaiter{providerID: bestProviderID, kind: kind}
 	q.queues[bestProviderID] = append(q.queues[bestProviderID], waiter)
 	return waiter, true
 }
@@ -109,6 +125,17 @@ func (q *slotQueue) hasWaiters(providerID string) bool {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	return len(q.queues[providerID]) > 0
+}
+
+func (q *slotQueue) hasStandardWaiters(providerID string) bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	for _, waiter := range q.queues[providerID] {
+		if waiter.kind == slotWaiterStandard {
+			return true
+		}
+	}
+	return false
 }
 
 func (q *slotQueue) reserveProvider(providerID string, slotsFree int) bool {
