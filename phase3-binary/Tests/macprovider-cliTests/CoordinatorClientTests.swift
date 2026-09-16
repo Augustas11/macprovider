@@ -3389,6 +3389,30 @@ final class CoordinatorClientTests: XCTestCase {
         await client.cancelHeartbeatWatchdogForTest()
     }
 
+    func testHeartbeatWatchdogReconnectsInsteadOfExitDuringAdmissionHold() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let captured = CapturedWatchdogReason()
+        let client = try await makeClient(
+            status: status,
+            recorder: recorder,
+            watchdogExitHook: { reason in
+                Task { await captured.set(reason) }
+            }
+        )
+
+        await client.setAdmissionPendingHoldActiveForTest(true)
+        await client.seedLastHeartbeatSuccessForTest(ageNanoseconds: 16 * 1_000_000_000)
+        await client.startHeartbeatWatchdogForTest(intervalSeconds: 1)
+        try await Task.sleep(nanoseconds: 2_000_000_000)
+        XCTAssertNil(await captured.value(), "admission hold must reconnect instead of Darwin.exit")
+        await client.cancelHeartbeatWatchdogForTest()
+    }
+
     func testHeartbeatWatchdogToleranceExceedsBoundedSendTimeout() {
         let expected = UInt64(15 * 1_000_000_000)
         XCTAssertEqual(

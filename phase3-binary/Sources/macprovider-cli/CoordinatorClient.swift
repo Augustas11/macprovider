@@ -2439,6 +2439,10 @@ actor CoordinatorClient {
         startHeartbeatWatchdog(intervalSeconds: intervalSeconds)
     }
 
+    func setAdmissionPendingHoldActiveForTest(_ active: Bool) {
+        admissionPendingHoldActive = active
+    }
+
     static func heartbeatWatchdogToleranceNanosecondsForTest(intervalSeconds: Int) -> UInt64 {
         heartbeatWatchdogToleranceNanoseconds(intervalSeconds: intervalSeconds)
     }

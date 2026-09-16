@@ -14,6 +14,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/augstar/macprovider-coordinator/internal/modelidentity"
+	"github.com/rs/zerolog"
 )
 
 type operatorClient struct {
@@ -491,4 +492,24 @@ type erroringProviderTokens struct{ noReadOnlyProviderTokens }
 
 func (erroringProviderTokens) ValidateTokenReadOnly(context.Context, string) (string, bool, error) {
 	return "", false, errors.New("token store unavailable")
+}
+
+func TestOperatorAdmissionAcceptedLogOmitsLocators(t *testing.T) {
+	f := newBindingFixture(t)
+	var logs bytes.Buffer
+	f.server.log = zerolog.New(&logs)
+	s := f.server
+	s.cfg.Auth.OperatorKeys = map[string]string{"alice": "alice-secret"}
+	c := operatorClient{t: t, s: s}
+	code, _ := c.do(http.MethodGet, "/admin/model-admission/offers?provider_id=p1", "alice-secret", nil)
+	if code != http.StatusOK {
+		t.Fatalf("status=%d want 200", code)
+	}
+	out := logs.String()
+	if !strings.Contains(out, `"event":"internal_bearer_accepted"`) {
+		t.Fatalf("missing accepted operator log: %s", out)
+	}
+	if strings.Contains(out, `"path"`) || strings.Contains(out, `"remote_addr"`) || strings.Contains(out, "127.0.0.1") {
+		t.Fatalf("accepted operator log leaked a locator: %s", out)
+	}
 }
