@@ -30,12 +30,28 @@ type Runner struct {
 	stopOnce sync.Once
 	wg       sync.WaitGroup
 	metrics  *metrics.Metrics // optional; nil → no metric emit
+	tickGate TickGate         // optional; nil → every scheduled tick runs
 }
 
 // WithMetrics attaches a Step 4.C metrics handle. Optional;
 // callers that don't need metric emission omit this.
 func (r *Runner) WithMetrics(m *metrics.Metrics) *Runner {
 	r.metrics = m
+	return r
+}
+
+// TickGate lets the embedding process defer background rollup ticks
+// when a higher-priority local resource is under buyer-path pressure.
+// Returning true skips the scheduled tick; the next ticker fire will
+// evaluate the gate again. The runner still owns panic/error recovery
+// for ticks that do run.
+type TickGate func(job string, now time.Time) bool
+
+// WithTickGate attaches an optional scheduler gate. It is intended for
+// coordinator-local resource protection; normal stats deployments can
+// leave it unset.
+func (r *Runner) WithTickGate(g TickGate) *Runner {
+	r.tickGate = g
 	return r
 }
 
@@ -205,16 +221,27 @@ func (r *Runner) spawnTick(ctx context.Context, name string, interval time.Durat
 		// First tick fires immediately so the operator can
 		// verify the rollup is producing data without waiting
 		// for the cadence interval.
-		r.runOne(ctx, name, c, fn)
+		r.runOneIfAllowed(ctx, name, c, fn)
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				r.runOne(ctx, name, c, fn)
+				r.runOneIfAllowed(ctx, name, c, fn)
 			}
 		}
 	}()
+}
+
+func (r *Runner) runOneIfAllowed(ctx context.Context, name string, c component, fn func(context.Context) error) {
+	if r.tickGate != nil && r.tickGate(name, time.Now()) {
+		r.logger.Debug().
+			Str("event", "stats_rollup_tick_deferred").
+			Str("job", name).
+			Msg("stats rollup tick deferred by scheduler gate")
+		return
+	}
+	r.runOne(ctx, name, c, fn)
 }
 
 // runOne wraps a single tick with per-tick panic recovery so a

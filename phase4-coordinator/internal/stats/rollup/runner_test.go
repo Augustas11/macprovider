@@ -61,6 +61,30 @@ func TestRunNightlyRebuildOnceRecoversPanicAndEmitsMetrics(t *testing.T) {
 	}
 }
 
+func TestRunOneIfAllowedDefersWhenTickGateYields(t *testing.T) {
+	r := &Runner{
+		logger: zerolog.Nop(),
+		tickGate: func(job string, _ time.Time) bool {
+			return job == "overview"
+		},
+	}
+	called := false
+	r.runOneIfAllowed(context.Background(), "overview", "", func(context.Context) error {
+		called = true
+		return nil
+	})
+	if called {
+		t.Fatal("deferred tick ran")
+	}
+	r.runOneIfAllowed(context.Background(), "routability", "", func(context.Context) error {
+		called = true
+		return nil
+	})
+	if !called {
+		t.Fatal("ungated tick did not run")
+	}
+}
+
 func counterValue(t *testing.T, families []*dto.MetricFamily, name, labelName, labelValue string) float64 {
 	t.Helper()
 	for _, family := range families {
