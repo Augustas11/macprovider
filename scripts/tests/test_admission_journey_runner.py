@@ -699,6 +699,7 @@ class AdmissionJourneyRunnerTests(unittest.TestCase):
         self.assertEqual(aj.redact_argument("/Users/rig/config.yaml"), "<path>")
         self.assertEqual(aj.redact_argument("~/models"), "<path>")
         self.assertEqual(aj.redact_argument("--config"), "--config")
+        self.assertEqual(aj.redact_argument("http://example.invalid:11434"), "<url>")
         self.assertEqual(aj.redact_argument("mlx-community/Llama-3.2-3B-Instruct-4bit"), "mlx-community/Llama-3.2-3B-Instruct-4bit")
         rig = aj.PhysicalRig(self.config)
         rig.cli_raw(["models", "discover", "--json", "--config", str(self.config.provider_config)])
