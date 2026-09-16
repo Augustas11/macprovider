@@ -924,6 +924,7 @@ type RoutingConfig struct {
 	SlotQueueMaxPendingPerProvider int                         `yaml:"slot_queue_max_pending_per_provider"`
 	SlotQueueDeadlineS             int                         `yaml:"slot_queue_deadline_s"`
 	SlotQueuePollIntervalMS        int                         `yaml:"slot_queue_poll_interval_ms"`
+	MinProviderThroughputTPS       float64                     `yaml:"min_provider_throughput_tps"`
 	DefaultObjective               string                      `yaml:"default_objective"`
 	TiebreakRandomize              bool                        `yaml:"tiebreak_randomize"`
 	TiebreakEpsilon                float64                     `yaml:"tiebreak_epsilon"`
@@ -1488,6 +1489,7 @@ func Default() Config {
 			SlotQueueMaxPendingPerProvider: 4,
 			SlotQueueDeadlineS:             3,
 			SlotQueuePollIntervalMS:        25,
+			MinProviderThroughputTPS:       0,
 			DefaultObjective:               "default",
 			TiebreakRandomize:              false,
 			TiebreakEpsilon:                0,
@@ -2516,6 +2518,9 @@ func (c Config) Validate() error {
 	}
 	if c.Routing.SlotQueuePollIntervalMS <= 0 {
 		return fmt.Errorf("routing.slot_queue_poll_interval_ms must be > 0")
+	}
+	if c.Routing.MinProviderThroughputTPS < 0 {
+		return fmt.Errorf("routing.min_provider_throughput_tps must be >= 0")
 	}
 	if c.Routing.TiebreakEpsilon < 0 {
 		return fmt.Errorf("routing.tiebreak_epsilon must be >= 0")

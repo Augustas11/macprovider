@@ -3297,6 +3297,41 @@ func TestPoolzDeniesWhenOperatorKeyEmpty(t *testing.T) {
 	}
 }
 
+func TestPoolzRoutingEligibleHonorsThroughputFloor(t *testing.T) {
+	h := newProviderHarness(t, func(cfg *config.Config) {
+		cfg.Routing.MinProviderThroughputTPS = 1.0
+	})
+	defer h.HTTP.Close()
+	now := time.Now().UTC()
+	if _, ok := h.Registry.Register(&pool.Provider{
+		ProviderID:            "m4-anon",
+		AssignedID:            "session-1",
+		Hostname:              "m4-anon.local",
+		ModelID:               "llama",
+		MaxContextTokens:      8192,
+		MaxConcurrency:        1,
+		SlotsFree:             1,
+		SlotsTotal:            1,
+		ThroughputTPSEstimate: 0.25,
+		EndpointURL:           "https://m4.malibu.tech",
+		Tier:                  pool.TierPinned,
+		InferencePath:         pool.InferencePathHTTPForwarding,
+		State:                 pool.StateReady,
+		LastHeartbeatAt:       now,
+		ConnectedAt:           now,
+	}, nil); !ok {
+		t.Fatal("register provider failed")
+	}
+
+	got := fetchPoolz(t, h.HTTP.URL)
+	if len(got.Pool) != 1 {
+		t.Fatalf("pool rows = %d, want 1", len(got.Pool))
+	}
+	if got.Pool[0].RoutingEligible {
+		t.Fatalf("routing_eligible = true, want false below throughput floor: %+v", got.Pool[0])
+	}
+}
+
 func TestProviderHealthzReportsInjectedVersion(t *testing.T) {
 	harness := newProviderHarnessWithServerOptions(t, nil, []providerws.Option{
 		providerws.WithVersion("v1.3.0-7-gabcdef0"),
@@ -3875,6 +3910,7 @@ type poolzResponse struct {
 		Endpoint          string                  `json:"endpoint_url"`
 		Tier              string                  `json:"tier"`
 		InferencePath     string                  `json:"inference_path"`
+		RoutingEligible   bool                    `json:"routing_eligible"`
 		ReceiptPubkey     *string                 `json:"receipt_pubkey"`
 		ReceiptPubkeyPrev *poolzReceiptPubkeyPrev `json:"receipt_pubkey_prev"`
 	} `json:"pool"`

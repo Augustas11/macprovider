@@ -88,6 +88,7 @@ routing:
   request_timeout_s: 900
   failover_enabled: true
   failover_timeout_s: 5
+  min_provider_throughput_tps: 0
   tiebreak_randomize: false
   tiebreak_epsilon: 0.0
   max_retries: 0

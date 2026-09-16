@@ -338,6 +338,11 @@ func TestRoutingSlotQueueValidation(t *testing.T) {
 			mutate:  func(cfg *Config) { cfg.Routing.SlotQueuePollIntervalMS = 0 },
 			wantErr: "routing.slot_queue_poll_interval_ms",
 		},
+		{
+			name:    "throughput floor",
+			mutate:  func(cfg *Config) { cfg.Routing.MinProviderThroughputTPS = -0.1 },
+			wantErr: "routing.min_provider_throughput_tps",
+		},
 	}
 
 	for _, tt := range tests {

@@ -1193,6 +1193,7 @@ func NewServer(cfg config.Config, registry *pool.Registry, logger zerolog.Logger
 //     excludes an HTTPForwardingOnly peer with no endpoint; AND
 //   - MaxContextTokens > 0 — a sanity gate excluding the degenerate zero window; AND
 //   - not Tier-2-excluded (hash/encryption/attestation) — in-memory config + catalog.
+//   - not below the operator routing throughput floor, when configured.
 //
 // It deliberately does NOT evaluate REQUEST-DEPENDENT eligibility, because the floor
 // runs without a request in hand:
@@ -1245,6 +1246,9 @@ func (s *Server) canaryBuyerServing(p pool.Provider) bool {
 		return false
 	}
 	if s.tier2WarmupExcluded(p) {
+		return false
+	}
+	if floor := s.cfg.Routing.MinProviderThroughputTPS; floor > 0 && p.ThroughputTPSEstimate < floor {
 		return false
 	}
 	// #768: a peer below the per-model version floor is not routable, so it
@@ -6643,7 +6647,7 @@ func (s *Server) handlePoolz(w http.ResponseWriter, r *http.Request) {
 		}
 		poolz = append(poolz, poolzProvider{
 			Provider:          provider,
-			RoutingEligible:   provider.RoutingEligible(),
+			RoutingEligible:   s.canaryBuyerServing(provider),
 			CanaryFailCount:   provider.CanaryFailCount,
 			ReceiptPubkey:     receiptPubkey,
 			ReceiptPubkeyPrev: receiptPubkeyPrev,

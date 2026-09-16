@@ -67,6 +67,7 @@ routing:
   slot_queue_max_pending_per_provider: 4
   slot_queue_deadline_s: 3
   slot_queue_poll_interval_ms: 25
+  min_provider_throughput_tps: 0
   # PR #302 (2026-07-01) — sticky conversation affinity via X-MacProvider-Conversation.
   # StickyTTLS + StickyMaxEntries defaults live in code (1800s / 10000 entries).
   # Enabled on Pearl directly after #302 landed; restored here 2026-07-02 after

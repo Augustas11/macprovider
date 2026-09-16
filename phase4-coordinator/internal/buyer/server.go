@@ -281,6 +281,7 @@ type Server struct {
 	slotQueue             *slotQueue
 	slotQueueDeadline     time.Duration
 	slotQueuePollInterval time.Duration
+	minProviderThroughput float64
 	// trustedProxies is the parsed CIDR set whose X-Forwarded-For /
 	// X-Real-IP headers the rate-limit keying honors. Pre-parsed at
 	// construction (config.go TrustedProxyPrefixes) so the hot path
@@ -446,6 +447,7 @@ func WithRoutingConfig(cfg config.RoutingConfig) Option {
 		)
 		s.tiebreakRandomize = cfg.TiebreakRandomize
 		s.tiebreakEpsilon = cfg.TiebreakEpsilon
+		s.minProviderThroughput = cfg.MinProviderThroughputTPS
 		s.routingMu.Lock()
 		if cfg.DefaultObjective != "" {
 			s.defaultObjective = cfg.DefaultObjective
@@ -589,6 +591,22 @@ func (s *Server) providerMeetsModelVersionFloor(p pool.Provider) bool {
 		Str("required_binary_version", result.Floor).
 		Bool("binary_version_malformed", result.Malformed).
 		Msg("provider excluded by per-model binary version floor")
+	return false
+}
+
+func (s *Server) providerMeetsRoutingQuality(p pool.Provider) bool {
+	floor := s.minProviderThroughput
+	if floor <= 0 || p.ThroughputTPSEstimate >= floor {
+		return true
+	}
+	s.log.Debug().
+		Str("event", "provider_throughput_floor_excluded").
+		Str("provider_id", p.ProviderID).
+		Str("assigned_id", p.AssignedID).
+		Str("model_id", p.ModelID).
+		Float64("throughput_tps_estimate", p.ThroughputTPSEstimate).
+		Float64("min_provider_throughput_tps", floor).
+		Msg("provider excluded by routing throughput floor")
 	return false
 }
 
@@ -1578,7 +1596,7 @@ func (s *Server) providerBuyerServing(p pool.Provider) bool {
 	// this gate a non-settlement BYOM provider (catalog_priced, offer_submitted,
 	// withdrawn, revoked, ...) would advertise paid-serving readiness before it is
 	// settlement_capable, diverging from the main routing paths that all apply it.
-	return p.ServingCapable() && !s.tier2ProviderExcluded(p) && s.checkQuota(p) && s.byomDefaultPaidRoutingEligible(p)
+	return p.ServingCapable() && s.providerMeetsRoutingQuality(p) && !s.tier2ProviderExcluded(p) && s.checkQuota(p) && s.byomDefaultPaidRoutingEligible(p)
 }
 
 func (s *Server) handleReceiptKeys(w http.ResponseWriter, r *http.Request) {
@@ -6914,6 +6932,8 @@ func routeKeyedFilterCounts(counts map[routing.RejectionReason]int) map[string]i
 			key = "pool_binary_too_old" // SPEC-042 R004/R010: under-version pool member, observable distinctly
 		case routing.ReasonBYOMNonSettlement:
 			key = "byom_non_settlement"
+		case routing.ReasonProviderThroughputFloor:
+			key = "provider_throughput_floor"
 		default:
 			key = "other"
 		}
@@ -7410,6 +7430,9 @@ func (s *Server) pollQueuedProviderWithContext(ctx context.Context, waiter *slot
 		if !s.providerMeetsModelVersionFloor(provider) {
 			return pool.Provider{}, queuedProviderTerminal
 		}
+		if !s.providerMeetsRoutingQuality(provider) {
+			return pool.Provider{}, queuedProviderTerminal
+		}
 		// SPEC-022 R-2.4/R-2.5: re-check the enforce-mode receipt-key gate at
 		// poll time. Like the #768 floor above, the waiter stores only
 		// providerID, so a same-ID reconnect that lost its active receipt key
@@ -7465,6 +7488,9 @@ func (s *Server) slotQueueCandidates(providers []pool.Provider, excluded routing
 		// still be queued for (and eventually served) the model it is too old
 		// to run.
 		if !checker.ProviderMeetsModelVersionFloor(provider) {
+			continue
+		}
+		if !checker.ProviderMeetsRoutingQuality(provider) {
 			continue
 		}
 		// SPEC-022 R-2.4/R-2.5: re-apply the enforce-mode receipt-key gate
@@ -7717,7 +7743,7 @@ func (c *eligibilityCtx) ProviderBYOMSettlementEligible(p pool.Provider) bool {
 }
 
 func (c *eligibilityCtx) pressuredProviderWouldDispatch(p pool.Provider) bool {
-	if !c.ProviderMeetsModelVersionFloor(p) || !c.ProviderHasSettlementReceiptKey(p) || !c.ProviderContextSufficient(p) {
+	if !c.ProviderMeetsModelVersionFloor(p) || !c.ProviderMeetsRoutingQuality(p) || !c.ProviderHasSettlementReceiptKey(p) || !c.ProviderContextSufficient(p) {
 		return false
 	}
 	if reason, _ := c.Tier2Decision(p); reason != 0 {
@@ -7742,6 +7768,10 @@ func (c *eligibilityCtx) rememberSelectedProvider(p pool.Provider) {
 // Server.providerMeetsModelVersionFloor.
 func (c *eligibilityCtx) ProviderMeetsModelVersionFloor(p pool.Provider) bool {
 	return c.s.providerMeetsModelVersionFloor(p)
+}
+
+func (c *eligibilityCtx) ProviderMeetsRoutingQuality(p pool.Provider) bool {
+	return c.s.providerMeetsRoutingQuality(p)
 }
 
 func (c *eligibilityCtx) ProviderContextSufficient(p pool.Provider) bool {
