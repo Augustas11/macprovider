@@ -301,6 +301,22 @@ func TestModelClassRejectsMembersAndModelsTogether(t *testing.T) {
 	}
 }
 
+func TestRoutingDefaultObjectiveValidation(t *testing.T) {
+	for _, objective := range []string{"", "default", "fast", "balanced", "accurate"} {
+		cfg := validTestConfig()
+		cfg.Routing.DefaultObjective = objective
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("DefaultObjective %q should validate: %v", objective, err)
+		}
+	}
+
+	cfg := validTestConfig()
+	cfg.Routing.DefaultObjective = "cheap"
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "routing.default_objective") {
+		t.Fatalf("Validate error=%v, want routing.default_objective rejection", err)
+	}
+}
+
 // TestValidateRejectsWhitespaceEquivalentServiceToken pins the audit-r2
 // fix for the whitespace-bypass MEDIUM: auth.BearerTokenMatchesHeader
 // trims both sides before matching, so "X" and "X " or "X\n" collapse

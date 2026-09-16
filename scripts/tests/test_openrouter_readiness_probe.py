@@ -152,6 +152,27 @@ def wholesale_statement(line_items: list[dict]) -> dict:
     }
 
 
+def ready_pool(slots: int = 4) -> dict:
+    return {
+        "classification": "model_pool_ready",
+        "matching_slots_total": slots,
+        "matching_slots_free": slots,
+    }
+
+
+def valid_filing_doc():
+    doc = valid_doc()
+    free = copy.deepcopy(doc["data"][0])
+    free["id"] += "-free"
+    free["is_free"] = True
+    free["is_ready"] = True
+    free["openrouter"]["slug"] += ":free"
+    free["input_modalities"][0]["pricing"][0]["cost_usd"] = "0"
+    free["output_modalities"][0]["pricing"][0]["cost_usd"] = "0"
+    doc["data"].append(free)
+    return doc
+
+
 class OpenRouterReadinessProbeTests(unittest.TestCase):
     def test_valid_schema_24_native_document_passes(self):
         got = probe.check_models_document(valid_doc(), "mlx-community/Llama-3.2-3B-Instruct-4bit")
@@ -229,6 +250,50 @@ class OpenRouterReadinessProbeTests(unittest.TestCase):
         del doc["data"][0]["capacity"]
         with self.assertRaisesRegex(probe.ProbeError, "capacity"):
             probe.check_models_document(doc)
+
+    def test_capacity_rejects_duplicates_and_windowed_concurrency(self):
+        doc = valid_doc()
+        doc["data"][0]["capacity"].append({"type": "request", "unit": "request", "per": "minute", "value": 1})
+        with self.assertRaisesRegex(probe.ProbeError, "duplicate capacity type"):
+            probe.check_models_document(doc)
+        doc = valid_doc()
+        for entry in doc["data"][0]["capacity"]:
+            if entry["type"] == "concurrency":
+                entry["per"] = "minute"
+        with self.assertRaisesRegex(probe.ProbeError, "concurrency entries must not declare a per window"):
+            probe.check_models_document(doc)
+
+    def test_filing_capacity_must_match_live_pool_slots(self):
+        models = probe.check_models_document(
+            valid_filing_doc(),
+            "mlx-community/Llama-3.2-3B-Instruct-4bit",
+            True,
+        )
+        got = probe.check_model_capacity_against_pool(
+            models,
+            ready_pool(4),
+            "mlx-community/Llama-3.2-3B-Instruct-4bit",
+        )
+        self.assertEqual(got["classification"], "model_capacity_consistent")
+        fantasy = valid_filing_doc()
+        for row in fantasy["data"]:
+            for entry in row["capacity"]:
+                entry["value"] = 10**18
+            for entry in row["input_modalities"][0]["capacity"]:
+                entry["value"] = 10**18
+            for entry in row["output_modalities"][0]["capacity"]:
+                entry["value"] = 10**18
+        models = probe.check_models_document(
+            fantasy,
+            "mlx-community/Llama-3.2-3B-Instruct-4bit",
+            True,
+        )
+        with self.assertRaisesRegex(probe.EvidenceProbeError, "exceeds"):
+            probe.check_model_capacity_against_pool(
+                models,
+                ready_pool(4),
+                "mlx-community/Llama-3.2-3B-Instruct-4bit",
+            )
 
     def test_price_strings_must_be_finite_decimals(self):
         for bad in ("", "-0.1", "NaN", "Infinity", "-Infinity"):
@@ -573,10 +638,12 @@ class OpenRouterReadinessProbeTests(unittest.TestCase):
             "Prompt records are retained. Those records are used as training material for adapters.",
             "Prompt records are retained. Those records are used as training material.",
             "Prompt records are used as training material, but those records are not sold.",
+            "Prompt records are not sold and are used as training material.",
             "We train models on prompt records.",
             "Buyers may opt-in to zero-data-retention.",
             "ZDR is offered as an opt-in feature.",
             "Buyers can request ZDR support.",
+            "We provide zero-data-retention to buyers.",
             "Prompt data is incorporated into fine-tuning datasets.",
         ]
         for phrase in contradictions:
@@ -1411,7 +1478,7 @@ class OpenRouterReadinessProbeTests(unittest.TestCase):
             ), mock.patch.object(
                 probe, "run_load_ladder", return_value={"steps": [], "first_blocker": "", "max_clean_concurrency": 4}
             ), mock.patch.object(
-                probe, "check_pool_topology", return_value={"classification": "model_pool_ready"}
+                probe, "check_pool_topology", return_value=ready_pool()
             ) as pool_topology:
                 code = probe.main(argv)
             self.assertEqual(code, 0)
@@ -1541,7 +1608,7 @@ class OpenRouterReadinessProbeTests(unittest.TestCase):
             ), mock.patch.object(
                 probe, "run_load_ladder", return_value={"steps": [], "first_blocker": "", "max_clean_concurrency": 4}
             ), mock.patch.object(
-                probe, "check_pool_topology", return_value={"classification": "model_pool_ready"}
+                probe, "check_pool_topology", return_value=ready_pool()
             ), mock.patch.object(
                 probe,
                 "check_wholesale_statement",

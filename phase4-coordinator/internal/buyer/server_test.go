@@ -7808,6 +7808,43 @@ func TestDefaultConfigPreservesBaselineProviderSelection(t *testing.T) {
 	}
 }
 
+func TestRoutingDefaultObjectiveFastAppliesToDirectModelRequests(t *testing.T) {
+	upstream1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"id":"p1","choices":[{"message":{"content":"p1"}}]}`))
+	}))
+	defer upstream1.Close()
+	upstream2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"id":"p2","choices":[{"message":{"content":"p2"}}]}`))
+	}))
+	defer upstream2.Close()
+
+	registry := pool.NewRegistry([]config.ProviderConfig{
+		{ProviderID: "p1", EndpointURL: upstream1.URL},
+		{ProviderID: "p2", EndpointURL: upstream2.URL},
+	})
+	registerWithEndpoint(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, upstream1.URL, 10)
+	registerWithEndpoint(registry, "p2", "s2", "model-a", pool.StateReady, 20000, 4, upstream2.URL, 30)
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithRoutingConfig(config.RoutingConfig{
+			DefaultObjective:        "fast",
+			RetryPerAttemptTimeoutS: 60,
+			StickyTTLS:              1800,
+			StickyMaxEntries:        10000,
+		}),
+	)
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`), nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if got := rr.Header().Get("X-MacProvider-Provider"); got != "p2" {
+		t.Fatalf("default_objective=fast routed to %q, want p2", got)
+	}
+}
+
 // TestStickyAccountMismatchEmitsWarnLog — issue #266 T3e HTTP-path
 // integration test for the sticky_account_mismatch warn emission
 // added in T1. Pre-T3 we had a unit test on sticky.Map.Update

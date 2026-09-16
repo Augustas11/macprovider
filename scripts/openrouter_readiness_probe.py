@@ -41,6 +41,8 @@ DEFAULT_BENCHMARK_CONCURRENCY = 4
 DEFAULT_SATURATION_CONCURRENCY = 8
 PRODUCTION_BASE_URL = "https://api.malibu.tech"
 PRODUCTION_ADMIN_URL = "https://coordinator.malibu.tech"
+FILING_MAX_REQUESTS_PER_MINUTE_PER_SLOT = 60
+FILING_MAX_TOKENS_PER_MINUTE_PER_SLOT = 120_000
 GATEWAY_KEEPALIVE_TICK_SECONDS = 15
 BENCHMARK_BATCH_TIMEOUT_SECONDS = 120
 LOCAL_AUTH_HOSTS = {"localhost", "127.0.0.1", "::1"}
@@ -249,22 +251,28 @@ def is_non_empty_text(value: object) -> bool:
     return isinstance(value, str) and value.strip() != ""
 
 
-def check_capacity(entries: object, label: str, expected_types: set[str]) -> None:
+def check_capacity(entries: object, label: str, expected_types: set[str]) -> dict[str, int]:
     if not isinstance(entries, list) or not entries:
         raise ProbeError(f"{label} must be a non-empty capacity array")
     observed_types = set()
+    values = {}
     for entry in entries:
         if not isinstance(entry, dict):
             raise ProbeError(f"{label} entries must be objects")
         capacity_type = entry.get("type")
         if capacity_type not in expected_types:
             raise ProbeError(f"{label} type must be one of {sorted(expected_types)}")
+        if capacity_type in observed_types:
+            raise ProbeError(f"{label} duplicate capacity type {capacity_type}")
         observed_types.add(capacity_type)
         if not is_positive_int(entry.get("value")):
             raise ProbeError(f"{label} value must be a positive integer")
+        values[capacity_type] = entry["value"]
         if capacity_type == "concurrency":
             if entry.get("unit") != "request":
                 raise ProbeError(f"{label} concurrency unit must be request")
+            if "per" in entry:
+                raise ProbeError(f"{label} concurrency entries must not declare a per window")
             continue
         expected_unit = "request" if capacity_type == "request" else "token"
         if entry.get("unit") != expected_unit:
@@ -273,6 +281,7 @@ def check_capacity(entries: object, label: str, expected_types: set[str]) -> Non
             raise ProbeError(f"{label} non-concurrency entries need a valid per window")
     if observed_types != expected_types:
         raise ProbeError(f"{label} must declare capacity types {sorted(expected_types)}")
+    return values
 
 
 def check_pricing(entry: object, label: str, expected_type: str) -> decimal.Decimal:
@@ -346,9 +355,16 @@ def sentence_has_privacy_negation(sentence: str) -> bool:
 def privacy_claim_is_denial(segment: str, claim_terms: tuple[str, ...]) -> bool:
     if not any(term in segment for term in claim_terms):
         return False
+    claim_group = "|".join(re.escape(term) for term in claim_terms)
     denial_patterns = (
-        r"\b(no|not|never|without|neither)\b[^,;]{0,80}\b(" + "|".join(re.escape(term) for term in claim_terms) + r")\b",
-        r"\b(does not|do not|did not|doesn't|don't|didn't)\b[^,;]{0,80}\b(" + "|".join(re.escape(term) for term in claim_terms) + r")\b",
+        r"\b(?:does not|do not|did not|doesn't|don't|didn't|never|not)\s+"
+        r"(?:train|training|fine[- ]?tun(?:e|ing))\b",
+        r"\b(?:does not|do not|did not|doesn't|don't|didn't|never|not)\s+"
+        r"(?:train|training|fine[- ]?tun(?:e|ing)|use|uses|used|store|stores|stored|retain|retains|retained|keep|keeps|kept)\b"
+        r"[^,;]{0,80}\b(" + claim_group + r")\b",
+        r"\b(?:is|are|was|were|be|being|been)?\s*(?:never|not)\s+"
+        r"(?:used|stored|retained|kept)\b[^,;]{0,80}\b(" + claim_group + r")\b",
+        r"\bnot\s+stored\s+as\s+(?:a\s+)?training\s+corpus\b",
     )
     return any(re.search(pattern, segment) for pattern in denial_patterns)
 
@@ -365,6 +381,7 @@ def check_models_document(doc: dict, expected_model: str = "", require_free_alia
     if not isinstance(rows, list) or not rows:
         raise ProbeError("models document must contain non-empty data array")
     by_id = {}
+    capacities_by_id = {}
     for row in rows:
         if not isinstance(row, dict):
             raise ProbeError("model rows must be objects")
@@ -421,9 +438,14 @@ def check_models_document(doc: dict, expected_model: str = "", require_free_alia
             if param not in text_out["supported_parameters"]:
                 raise ProbeError(f"{row['id']} missing supported parameter {param}")
         validate_supported_parameters(text_out["supported_parameters"], row["id"])
-        check_capacity(row.get("capacity"), f"{row['id']} root capacity", {"request", "concurrency"})
-        check_capacity(text_in.get("capacity"), f"{row['id']} input capacity", {"prompt"})
-        check_capacity(text_out.get("capacity"), f"{row['id']} output capacity", {"completion"})
+        root_capacity = check_capacity(row.get("capacity"), f"{row['id']} root capacity", {"request", "concurrency"})
+        input_capacity = check_capacity(text_in.get("capacity"), f"{row['id']} input capacity", {"prompt"})
+        output_capacity = check_capacity(text_out.get("capacity"), f"{row['id']} output capacity", {"completion"})
+        capacities_by_id[row["id"]] = {
+            "root": root_capacity,
+            "input": input_capacity,
+            "output": output_capacity,
+        }
         if "datacenters" in row:
             raise ProbeError(f"{row['id']} must omit datacenters until verified geography provenance exists")
         if row.get("deployment_region") != "global-volunteer-fleet":
@@ -459,7 +481,51 @@ def check_models_document(doc: dict, expected_model: str = "", require_free_alia
         slug = free.get("openrouter", {}).get("slug") if isinstance(free.get("openrouter"), dict) else ""
         if not isinstance(slug, str) or not slug.endswith(":free"):
             raise ProbeError(f"free alias {free_id} openrouter.slug must end with :free")
-    return {"rows": len(rows), "ids": [row["id"] for row in rows]}
+    return {"rows": len(rows), "ids": [row["id"] for row in rows], "capacities": capacities_by_id}
+
+
+def check_model_capacity_against_pool(models_check: dict, pool_check: dict, expected_model: str) -> dict:
+    capacities = models_check.get("capacities") if isinstance(models_check, dict) else None
+    if not isinstance(capacities, dict):
+        raise ProbeError("models check missing normalized capacity evidence")
+    free_id = expected_free_model_id(expected_model)
+    paid = capacities.get(expected_model)
+    free = capacities.get(free_id)
+    if not isinstance(paid, dict) or not isinstance(free, dict):
+        raise ProbeError("models check missing paid/free capacity evidence")
+    slots_total = pool_check.get("matching_slots_total") if isinstance(pool_check, dict) else None
+    if not is_positive_int(slots_total):
+        raise ProbeError("pool topology missing positive matching slot capacity")
+    paid_concurrency = paid["root"]["concurrency"]
+    free_concurrency = free["root"]["concurrency"]
+    combined_concurrency = paid_concurrency + free_concurrency
+    max_requests_per_minute = slots_total * FILING_MAX_REQUESTS_PER_MINUTE_PER_SLOT
+    max_tokens_per_minute = slots_total * FILING_MAX_TOKENS_PER_MINUTE_PER_SLOT
+    paid_requests = paid["root"]["request"]
+    free_requests = free["root"]["request"]
+    combined_requests = paid_requests + free_requests
+    combined_prompt = paid["input"]["prompt"] + free["input"]["prompt"]
+    combined_completion = paid["output"]["completion"] + free["output"]["completion"]
+    evidence = {
+        "expected_model": expected_model,
+        "expected_free_model": free_id,
+        "matching_slots_total": slots_total,
+        "combined_concurrency": combined_concurrency,
+        "max_concurrency": slots_total,
+        "combined_request_per_minute": combined_requests,
+        "max_request_per_minute": max_requests_per_minute,
+        "combined_prompt_tokens_per_minute": combined_prompt,
+        "combined_completion_tokens_per_minute": combined_completion,
+        "max_tokens_per_minute": max_tokens_per_minute,
+    }
+    if combined_concurrency > slots_total:
+        raise EvidenceProbeError("model capacity exceeds live pool concurrency", evidence)
+    if combined_requests > max_requests_per_minute:
+        raise EvidenceProbeError("model request capacity exceeds conservative live pool bound", evidence)
+    if combined_prompt > max_tokens_per_minute or combined_completion > max_tokens_per_minute:
+        raise EvidenceProbeError("model token capacity exceeds conservative live pool bound", evidence)
+    evidence["classification"] = "model_capacity_consistent"
+    return evidence
 
 
 def check_privacy(base_url: str) -> dict:
@@ -563,10 +629,10 @@ def check_privacy(base_url: str) -> dict:
         if not any(ref in sentence for ref in ("those records", "the records", "those data", "that data", "this data", "they")):
             prior_prompt_context = ""
     zdr_offer_patterns = (
-        r"\b(opt[- ]?in|enable[sd]?|available|offer(?:ed|s)?|mode)\b[^.]{0,120}\bzero[- ]?data[- ]?retention\b",
-        r"\bzero[- ]?data[- ]?retention\b[^.]{0,120}\b(opt[- ]?in|enable[sd]?|available|offer(?:ed|s)?|mode)\b",
-        r"\b(opt[- ]?in|enable[sd]?|available|offer(?:ed|s)?|mode|request|support)\b[^.]{0,120}\bzdr\b",
-        r"\bzdr\b[^.]{0,120}\b(opt[- ]?in|enable[sd]?|available|offer(?:ed|s)?|mode|request|support)\b",
+        r"\b(opt[- ]?in|enable[sd]?|available|offer(?:ed|s)?|provid(?:e|es|ed|ing)?|mode)\b[^.]{0,120}\bzero[- ]?data[- ]?retention\b",
+        r"\bzero[- ]?data[- ]?retention\b[^.]{0,120}\b(opt[- ]?in|enable[sd]?|available|offer(?:ed|s)?|provid(?:e|es|ed|ing)?|mode)\b",
+        r"\b(opt[- ]?in|enable[sd]?|available|offer(?:ed|s)?|provid(?:e|es|ed|ing)?|mode|request|support)\b[^.]{0,120}\bzdr\b",
+        r"\bzdr\b[^.]{0,120}\b(opt[- ]?in|enable[sd]?|available|offer(?:ed|s)?|provid(?:e|es|ed|ing)?|mode|request|support)\b",
     )
     for pattern in zdr_offer_patterns:
         if re.search(pattern, lower):
@@ -1715,6 +1781,15 @@ def main(argv: list[str]) -> int:
                 "pool_topology",
                 lambda: check_pool_topology(args.admin_url, operator_token, args.model, args.benchmark_concurrency),
             )
+            if args.filing_mode and report["checks"].get("models", {}).get("ids") and report["checks"].get("pool_topology", {}).get("classification"):
+                record_check(
+                    "model_capacity",
+                    lambda: check_model_capacity_against_pool(
+                        report["checks"]["models"],
+                        report["checks"]["pool_topology"],
+                        args.model,
+                    ),
+                )
         if args.admin_url and operator_token and args.statement_account_id and args.statement_period:
             record_check(
                 "wholesale_statement",
