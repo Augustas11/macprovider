@@ -2589,8 +2589,8 @@ func (s *Server) forwardStreamSequence(
 				return dispatchedAttempt{}, false
 			}
 			defer endPoolDelivery()
-			// Route snapshot durably recorded; dispatching to the provider now
-			// (item 18 no-charge marker: any non-503 terminal from here bills).
+			// Settlement pre-dispatch guard passed; dispatching to the provider
+			// now (item 18 no-charge marker: any non-503 terminal from here bills).
 			rec.markProviderDispatched()
 			wsTunneled := state.provider.IsWSTunneled()
 			var tr transportResult
@@ -2809,7 +2809,7 @@ func (s *Server) forwardWSNonStreamSequence(
 				return dispatchedAttempt{}, false
 			}
 			defer endPoolDelivery()
-			// Route snapshot durably recorded; we are now dispatching to the
+			// Settlement pre-dispatch guard passed; we are now dispatching to the
 			// provider. Any non-503 terminal from here bills (item 18).
 			rec.markProviderDispatched()
 			result, attempt := s.forwardWS(w, r, requestID, dispatchBody, state.provider, false, s.attemptTimeout(r), logSuccess, settlementMetadata, state, rec.attemptN)
@@ -3015,8 +3015,8 @@ func (s *Server) forwardHTTPSequence(
 				return dispatchedAttempt{}, false
 			}
 			defer endPoolDelivery()
-			// Route snapshot durably recorded; dispatching to the provider now
-			// (item 18 no-charge marker: any non-503 terminal from here bills).
+			// Settlement pre-dispatch guard passed; dispatching to the provider
+			// now (item 18 no-charge marker: any non-503 terminal from here bills).
 			rec.markProviderDispatched()
 			upstreamURL := state.provider.EndpointURL + "/v1/chat/completions"
 			attemptCtx := r.Context()

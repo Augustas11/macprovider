@@ -180,12 +180,24 @@ func (b *billingRecorder) recordRouteSnapshot(providerBody []byte, provider pool
 	snapshot.ComputeIntegritySamplingCovered = computeIntegrityCovered
 	snapshot.ComputeIntegrityHardwareDigest = computeIntegrityHardwareDigest
 	var digest string
+	insertStorePressure := false
 	if err := b.server.insertBYOMRouteSnapshot(ctx, provider, byomBinding, b.state, func() error {
 		inserted, err := store.InsertRouteSnapshot(ctx, snapshot)
+		insertStorePressure = errors.Is(wrapRouteSnapshotGuardPressure(err), billing.ErrRouteSnapshotStorePressure)
 		digest = inserted
 		return err
 	}); err != nil {
-		return nil, wrapRouteSnapshotGuardPressure(err)
+		err = wrapRouteSnapshotGuardPressure(err)
+		if routeSnapshotObserveCanSkipStorePressure(routeMode, err, insertStorePressure) {
+			b.server.log.Warn().
+				Err(err).
+				Str("request_id", b.requestID).
+				Str("provider_id", provider.ProviderID).
+				Str("route_snapshot_mode", routeMode).
+				Msg("route snapshot store pressure skipped in observe mode")
+			return nil, nil
+		}
+		return nil, err
 	}
 	b.settlementAttemptN = attemptN
 	b.hasSettlementAttemptN = true
@@ -321,6 +333,10 @@ func routeSnapshotShouldCapacityShed(err error) bool {
 		return false
 	}
 	return errors.Is(err, billing.ErrRouteSnapshotStorePressure) || errors.Is(err, providerws.ErrModelAdmissionRouteDrift)
+}
+
+func routeSnapshotObserveCanSkipStorePressure(routeMode string, err error, insertStorePressure bool) bool {
+	return routeMode == billing.RouteSnapshotModeObserve && insertStorePressure && errors.Is(err, billing.ErrRouteSnapshotStorePressure)
 }
 
 func newRouteSnapshotDispatchContext(parent context.Context) (context.Context, context.CancelFunc) {
