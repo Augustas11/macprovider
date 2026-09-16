@@ -279,7 +279,7 @@ func TestInsertRouteSnapshotDedicatedHandleBypassesRequestLogPoolWait(t *testing
 	}
 }
 
-func TestInsertRouteSnapshotDedicatedHandleAllowsSpareWaiter(t *testing.T) {
+func TestInsertRouteSnapshotDedicatedHandleAllowsFilingConcurrencyWaiters(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "coordinator.db")
 	reqStore, err := requestlog.OpenStore(dbPath)
 	if err != nil {
@@ -295,23 +295,31 @@ func TestInsertRouteSnapshotDedicatedHandleAllowsSpareWaiter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	routeSnapshotDB.SetMaxOpenConns(2)
-	routeSnapshotDB.SetMaxIdleConns(2)
+	routeSnapshotDB.SetMaxOpenConns(4)
+	routeSnapshotDB.SetMaxIdleConns(4)
 	t.Cleanup(func() { _ = routeSnapshotDB.Close() })
 	store.SetRouteSnapshotDB(routeSnapshotDB)
 
-	heldRouteSnapshotConn, err := routeSnapshotDB.Conn(context.Background())
-	if err != nil {
-		t.Fatal(err)
+	var heldRouteSnapshotConns []*sql.Conn
+	for i := 0; i < 3; i++ {
+		conn, err := routeSnapshotDB.Conn(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		heldRouteSnapshotConns = append(heldRouteSnapshotConns, conn)
 	}
-	defer heldRouteSnapshotConn.Close()
+	defer func() {
+		for _, conn := range heldRouteSnapshotConns {
+			_ = conn.Close()
+		}
+	}()
 
 	snapshot := testRouteSnapshot()
-	snapshot.RequestID = "req-dedicated-route-snapshot-spare-waiter"
+	snapshot.RequestID = "req-dedicated-route-snapshot-c4-waiter"
 	insertCtx, insertCancel := context.WithTimeout(context.Background(), time.Second)
 	defer insertCancel()
 	if _, err := store.InsertRouteSnapshot(insertCtx, snapshot); err != nil {
-		t.Fatalf("dedicated route snapshot insert with one held conn: %v", err)
+		t.Fatalf("dedicated route snapshot insert with three held conns: %v", err)
 	}
 }
 

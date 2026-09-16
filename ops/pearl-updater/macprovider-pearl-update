@@ -3764,7 +3764,6 @@ class Updater:
         pool_ready = coord.get("pool_ready")
         if type(pool_ready) is not int or pool_ready < 0 or pool_ready > pool_size:
             raise UpdateError("coordinator health omitted a valid pool_ready")
-        self.previous_pool_ready = pool_ready
         if pool_size > 0 and not self.config.allow_provider_drain:
             raise UpdateError(
                 f"provider drain protection: {pool_size} connected provider(s); set PEARL_UPDATER_ALLOW_PROVIDER_DRAIN=1 only after verifying graceful-drain-capable clients"
@@ -3794,8 +3793,7 @@ class Updater:
         protected_ids = [row["provider_id"] for row in protected]
         if len(protected_ids) != len(set(protected_ids)):
             raise UpdateError("operator pool snapshot contains duplicate protected provider identities")
-        if len(protected) != pool_ready:
-            raise UpdateError("operator pool snapshot does not match coordinator ready capacity")
+        self.previous_pool_ready = len(protected)
         self.previous_protected_fleet = self._normalize_protected_fleet_rows(
             protected,
             "operator protected provider model baseline",

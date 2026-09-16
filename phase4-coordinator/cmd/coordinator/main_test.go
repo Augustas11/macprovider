@@ -211,8 +211,8 @@ func TestRetentionPrunersDefaultToStartupDelete(t *testing.T) {
 }
 
 func TestRouteSnapshotSQLiteKeepsBoundedDedicatedWriterLane(t *testing.T) {
-	if routeSnapshotSQLiteMaxOpenConns != 2 {
-		t.Fatalf("route snapshot SQLite max open conns=%d, want primary writer plus one spare waiter for OpenRouter admission bursts", routeSnapshotSQLiteMaxOpenConns)
+	if routeSnapshotSQLiteMaxOpenConns != 4 {
+		t.Fatalf("route snapshot SQLite max open conns=%d, want one dedicated connection per OpenRouter c4 filing benchmark request", routeSnapshotSQLiteMaxOpenConns)
 	}
 	if routeSnapshotSQLiteBusyTimeout < 250*time.Millisecond {
 		t.Fatalf("route snapshot busy timeout=%s, want enough headroom for short SQLite writer overlap", routeSnapshotSQLiteBusyTimeout)
