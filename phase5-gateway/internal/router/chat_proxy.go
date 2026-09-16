@@ -70,6 +70,7 @@ const (
 	// phase4-coordinator/internal/buyer/route_snapshot.go (deploy coordinator
 	// first, roll back in reverse).
 	settlementNoPriorDispatchHeader    = "X-MacProvider-Settlement-No-Prior-Dispatch"
+	routeSnapshotPressureHeader        = "X-MacProvider-Route-Snapshot-Pressure"
 	gatewayPriorProviderDispatchHeader = "X-MacProvider-Gateway-Prior-Provider-Dispatch"
 	// settlementPolicyVersion is the current coordinator route-snapshot
 	// policy version (see billing.RouteSnapshotPolicyVersion). It was
@@ -815,7 +816,7 @@ func (s *Server) doCoordinatorChatWithRetry(upCtx context.Context, r *http.Reque
 			resp.Body = io.NopCloser(bytes.NewReader(body))
 		}
 		resp.ContentLength = int64(len(body))
-		if readErr != nil || !isCoordinatorChatRetryEligible(resp.StatusCode, body, s.cfg.Retry503) {
+		if readErr != nil || !isCoordinatorChatRetryEligible(resp.StatusCode, body, resp.Header, s.cfg.Retry503) {
 			return resp, false, priorProviderDispatch, nil
 		}
 		if attempt == maxAttempts {
@@ -2209,11 +2210,18 @@ func coordinatorTier2PolicyError(status int, body []byte) bool {
 // coordinator capacity-empty 503s are additionally gated by
 // retry_503.retry_no_provider_available so operators can avoid amplifying an
 // empty provider pool.
-func isCoordinatorChatRetryEligible(status int, body []byte, cfg config.Retry503Config) bool {
+func isCoordinatorChatRetryEligible(status int, body []byte, header http.Header, cfg config.Retry503Config) bool {
+	if isCoordinatorRouteSnapshotPressure(status, body, header) {
+		return false
+	}
 	if cfg.RetryNoProviderAvailable && isCoordNoProviderAvailable503(status, body) {
 		return true
 	}
 	return isCoordTransientProvider502(status, body)
+}
+
+func isCoordinatorRouteSnapshotPressure(status int, body []byte, header http.Header) bool {
+	return isCoordNoProviderAvailable503(status, body) && strings.TrimSpace(header.Get(routeSnapshotPressureHeader)) != ""
 }
 
 // isCoordTransientProvider502 returns true for coordinator 502 responses that

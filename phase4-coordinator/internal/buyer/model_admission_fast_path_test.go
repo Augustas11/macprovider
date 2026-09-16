@@ -57,6 +57,13 @@ func (s *routeStatusCountingAdmissionStore) ModelAdmissionProviderRouteGeneratio
 	return s.generation.Load(), nil
 }
 
+func assertRouteSnapshotPressureRouteErr(t *testing.T, routeErr *routeError) {
+	t.Helper()
+	if routeErr == nil || routeErr.status != http.StatusServiceUnavailable || routeErr.code != "no_provider_available" || !routeErr.routeSnapshotPressure {
+		t.Fatalf("routeErr=%+v, want route-snapshot-pressure no_provider_available", routeErr)
+	}
+}
+
 func TestEmptyModelAdmissionStoreSkipsLegacyRouteStatusLookup(t *testing.T) {
 	s, registry, _ := poolIsolationServer(t)
 	store := &routeStatusCountingAdmissionStore{}
@@ -111,9 +118,7 @@ func TestLegacyModelAdmissionSelectionPressureUsesSharedRetryableBudget(t *testi
 	_, routeErr := s.selectProviderExcluding(context.Background(), "rid", poolChatReq(""), http.Header{}, nil, "2026-09-15", &forwardState{})
 	elapsed := time.Since(started)
 
-	if routeErr == nil || routeErr.status != http.StatusServiceUnavailable || routeErr.code != "no_provider_available" {
-		t.Fatalf("routeErr=%+v, want retryable no_provider_available", routeErr)
-	}
+	assertRouteSnapshotPressureRouteErr(t, routeErr)
 	if elapsed > 2*routeSnapshotDispatchTimeout {
 		t.Fatalf("selection elapsed=%s, want bounded by shared admission budget %s", elapsed, routeSnapshotDispatchTimeout)
 	}
@@ -136,9 +141,7 @@ func TestLegacyModelAdmissionPinnedPressureUsesRetryableBudget(t *testing.T) {
 	}, nil, "2026-09-15", &forwardState{})
 	elapsed := time.Since(started)
 
-	if routeErr == nil || routeErr.status != http.StatusServiceUnavailable || routeErr.code != "no_provider_available" {
-		t.Fatalf("routeErr=%+v, want retryable no_provider_available", routeErr)
-	}
+	assertRouteSnapshotPressureRouteErr(t, routeErr)
 	if elapsed > 2*routeSnapshotDispatchTimeout {
 		t.Fatalf("pinned selection elapsed=%s, want bounded by admission budget %s", elapsed, routeSnapshotDispatchTimeout)
 	}
@@ -158,9 +161,7 @@ func TestLegacyModelAdmissionPinnedSessionPressureUsesRetryableBudget(t *testing
 	}, nil, "2026-09-15", &forwardState{})
 	elapsed := time.Since(started)
 
-	if routeErr == nil || routeErr.status != http.StatusServiceUnavailable || routeErr.code != "no_provider_available" {
-		t.Fatalf("routeErr=%+v, want retryable no_provider_available", routeErr)
-	}
+	assertRouteSnapshotPressureRouteErr(t, routeErr)
 	if elapsed > 2*routeSnapshotDispatchTimeout {
 		t.Fatalf("pinned session selection elapsed=%s, want bounded by admission budget %s", elapsed, routeSnapshotDispatchTimeout)
 	}
@@ -287,6 +288,9 @@ func TestLegacyModelAdmissionQueuedSelectionDoesNotReadStoreWhileSaturated(t *te
 	if routeErr == nil || routeErr.status != http.StatusServiceUnavailable || routeErr.code != "no_provider_available" {
 		t.Fatalf("routeErr=%+v, want bounded queue no_provider_available", routeErr)
 	}
+	if routeErr.routeSnapshotPressure {
+		t.Fatalf("routeErr=%+v, want saturated queue timeout without route-snapshot pressure marker", routeErr)
+	}
 	if elapsed > routeSnapshotDispatchTimeout {
 		t.Fatalf("queued selection elapsed=%s, want queue deadline to win before admission budget %s", elapsed, routeSnapshotDispatchTimeout)
 	}
@@ -312,9 +316,7 @@ func TestLegacyModelAdmissionPressureShedsBeforeMixedSaturatedQueueWait(t *testi
 	_, routeErr := s.selectProviderExcluding(context.Background(), "rid", poolChatReq(""), http.Header{}, nil, "2026-09-15", &forwardState{})
 	elapsed := time.Since(started)
 
-	if routeErr == nil || routeErr.status != http.StatusServiceUnavailable || routeErr.code != "no_provider_available" {
-		t.Fatalf("routeErr=%+v, want retryable no_provider_available from admission pressure", routeErr)
-	}
+	assertRouteSnapshotPressureRouteErr(t, routeErr)
 	if elapsed > 2*routeSnapshotDispatchTimeout {
 		t.Fatalf("mixed pressure+queue elapsed=%s, want pressure budget to win before queue deadline %s", elapsed, s.slotQueueDeadline)
 	}
@@ -332,9 +334,7 @@ func TestLegacyModelAdmissionPressureOutranksMixedFleetTerminalError(t *testing.
 	registry.Register(&tooSmall, nil)
 
 	_, routeErr := s.selectProviderExcluding(context.Background(), "rid", poolChatReq(""), http.Header{}, nil, "2026-09-15", &forwardState{})
-	if routeErr == nil || routeErr.status != http.StatusServiceUnavailable || routeErr.code != "no_provider_available" {
-		t.Fatalf("routeErr=%+v, want retryable no_provider_available under otherwise dispatchable store pressure", routeErr)
-	}
+	assertRouteSnapshotPressureRouteErr(t, routeErr)
 }
 
 func TestLegacyModelAdmissionPressurePreservesPinnedExactModelAgainstClassFallback(t *testing.T) {
@@ -355,9 +355,7 @@ func TestLegacyModelAdmissionPressurePreservesPinnedExactModelAgainstClassFallba
 	_, routeErr := s.selectProviderExcluding(context.Background(), "rid", poolChatReq("P"), http.Header{
 		"X-MacProvider-Provider": []string{provider.ProviderID},
 	}, nil, "2026-09-15", &forwardState{})
-	if routeErr == nil || routeErr.status != http.StatusServiceUnavailable || routeErr.code != "no_provider_available" {
-		t.Fatalf("routeErr=%+v, want retryable no_provider_available instead of class allowlist failure", routeErr)
-	}
+	assertRouteSnapshotPressureRouteErr(t, routeErr)
 }
 
 func TestLegacyModelAdmissionPressurePreservesPinnedSessionExactModelAgainstClassFallback(t *testing.T) {
@@ -378,9 +376,7 @@ func TestLegacyModelAdmissionPressurePreservesPinnedSessionExactModelAgainstClas
 	_, routeErr := s.selectProviderExcluding(context.Background(), "rid", poolChatReq("P"), http.Header{
 		"X-MacProvider-Session": []string{provider.AssignedID},
 	}, nil, "2026-09-15", &forwardState{})
-	if routeErr == nil || routeErr.status != http.StatusServiceUnavailable || routeErr.code != "no_provider_available" {
-		t.Fatalf("routeErr=%+v, want retryable no_provider_available instead of class allowlist failure", routeErr)
-	}
+	assertRouteSnapshotPressureRouteErr(t, routeErr)
 }
 
 func TestLegacyModelAdmissionRouteStatusCachesByRouteGeneration(t *testing.T) {
