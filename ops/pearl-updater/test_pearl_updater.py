@@ -1640,6 +1640,61 @@ class PearlUpdaterTests(unittest.TestCase):
             expected_providers,
         )
 
+    def test_capture_rollout_state_uses_routing_eligible_ready_baseline(self):
+        protected_providers = [
+            {"provider_id": "fast-a", "model_id": "model-a"},
+            {"provider_id": "fast-b", "model_id": "model-b"},
+        ]
+        self.updater.capture_database_paths = mock.Mock()
+        self.updater.get_json = mock.Mock(
+            return_value={"pool_size": 5, "pool_ready": 3}
+        )
+        self.updater.coordinator_operator_token = mock.Mock(return_value="operator-token")
+        self.updater.get_authorized_json = mock.Mock(return_value={
+            "pool": [
+                {
+                    **row,
+                    "state": "ready",
+                    "routing_eligible": True,
+                }
+                for row in protected_providers
+            ] + [
+                {
+                    "provider_id": "slow-ready",
+                    "model_id": "model-slow",
+                    "state": "ready",
+                    "routing_eligible": False,
+                },
+                {
+                    "provider_id": "offline",
+                    "model_id": "model-offline",
+                    "state": "unavailable",
+                    "routing_eligible": False,
+                },
+            ]
+        })
+        self.updater.config = updater_module.dataclasses.replace(
+            self.updater.config, allow_provider_drain=True
+        )
+        self.updater.service_active = mock.Mock(return_value=True)
+        self.updater.read_installed_versions = mock.Mock(
+            return_value={"coordinator": "v1.8.30", "gateway": "v1.8.30"}
+        )
+        self.updater._journal_transition = mock.Mock()
+
+        self.updater.capture_rollout_state()
+
+        self.assertEqual(self.updater.previous_pool_ready, 2)
+        self.assertEqual(
+            self.updater.previous_protected_providers,
+            ["fast-a", "fast-b"],
+        )
+        self.assertEqual(self.updater.previous_protected_fleet, protected_providers)
+        self.assertEqual(
+            self.updater._journal_transition.call_args.kwargs["previous_pool_ready"],
+            2,
+        )
+
     def test_capture_rollout_state_uses_live_tuple_baseline_despite_stale_expected_fleet(self):
         expected_fleet = self.root / "stale-capture-expected-fleet.json"
         expected_fleet.write_text(
