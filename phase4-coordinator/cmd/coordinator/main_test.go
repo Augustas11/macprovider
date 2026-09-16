@@ -384,14 +384,18 @@ func TestSettlementReceiptAuditOutboxDrainerStartupRunsDuringRecentTraffic(t *te
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	store := &settlementReceiptAuditOutboxDrainerStub{
-		drainCalled:  make(chan struct{}, 1),
-		pruneCalled:  make(chan struct{}, 1),
-		statsPending: 7,
+		drainCalled:           make(chan struct{}, 1),
+		pruneCalled:           make(chan struct{}, 1),
+		statsPending:          7,
+		statsPoisoned:         2,
+		statsRetainedPoisoned: 3,
 	}
 	observer := &settlementReceiptAuditOutboxObserverStub{
-		drainOutcomes: make(chan string, 1),
-		rowOps:        make(chan string, 1),
-		statsObserved: make(chan int64, 1),
+		drainOutcomes:               make(chan string, 1),
+		rowOps:                      make(chan string, 1),
+		statsObserved:               make(chan int64, 1),
+		poisonStatsObserved:         make(chan int64, 1),
+		retainedPoisonStatsObserved: make(chan int64, 1),
 	}
 
 	startSettlementReceiptAuditOutboxDrainer(ctx, store, settlementReceiptAuditSinkStub{}, 90, observer, fixedIdleTracker{idleFor: 0}, zerolog.Nop())
@@ -399,6 +403,8 @@ func TestSettlementReceiptAuditOutboxDrainerStartupRunsDuringRecentTraffic(t *te
 	assertSignal(t, store.drainCalled, "startup audit outbox drain")
 	assertSignal(t, store.pruneCalled, "startup audit outbox prune")
 	assertInt64Signal(t, observer.statsObserved, 7, "audit outbox stats")
+	assertInt64Signal(t, observer.poisonStatsObserved, 2, "audit outbox poison stats")
+	assertInt64Signal(t, observer.retainedPoisonStatsObserved, 3, "audit outbox retained poison stats")
 }
 
 func TestSettlementReceiptAuditOutboxDrainerRunsAfterIdle(t *testing.T) {
@@ -427,6 +433,7 @@ func TestSettlementReceiptAuditOutboxDrainerPrunesAfterDrainError(t *testing.T) 
 	defer cancel()
 	store := &settlementReceiptAuditOutboxDrainerStub{
 		drained:      1,
+		poisoned:     1,
 		drainErr:     errors.New("poison outbox row"),
 		drainCalled:  make(chan struct{}, 2),
 		pruneCalled:  make(chan struct{}, 2),
@@ -443,6 +450,7 @@ func TestSettlementReceiptAuditOutboxDrainerPrunesAfterDrainError(t *testing.T) 
 	assertSignal(t, store.pruneCalled, "audit outbox prune")
 	assertStringSignal(t, observer.drainOutcomes, "error", "audit outbox drain outcome")
 	assertStringSignal(t, observer.rowOps, "drained", "audit outbox drained row metric")
+	assertStringSignal(t, observer.rowOps, "poisoned", "audit outbox poisoned row metric")
 }
 
 func TestSettlementReceiptAuditOutboxShutdownFlushDrains(t *testing.T) {
@@ -544,17 +552,20 @@ func (t fixedIdleTracker) IdleFor(time.Time) time.Duration {
 }
 
 type settlementReceiptAuditOutboxDrainerStub struct {
-	drained        int
-	drainedBatches []int
-	drainErrs      []error
-	drainErr       error
-	pruned         int64
-	drainCalled    chan struct{}
-	pruneCalled    chan struct{}
-	statsPending   int64
+	drained               int
+	poisoned              int
+	drainedBatches        []int
+	drainErrs             []error
+	drainErr              error
+	pruned                int64
+	drainCalled           chan struct{}
+	pruneCalled           chan struct{}
+	statsPending          int64
+	statsPoisoned         int64
+	statsRetainedPoisoned int64
 }
 
-func (s *settlementReceiptAuditOutboxDrainerStub) DrainSettlementReceiptAuditOutbox(context.Context, billing.SettlementReceiptAuditSink, int) (int, error) {
+func (s *settlementReceiptAuditOutboxDrainerStub) DrainSettlementReceiptAuditOutbox(context.Context, billing.SettlementReceiptAuditSink, int) (billing.SettlementReceiptAuditOutboxDrainResult, error) {
 	s.drainCalled <- struct{}{}
 	err := s.drainErr
 	if len(s.drainErrs) > 0 {
@@ -564,9 +575,9 @@ func (s *settlementReceiptAuditOutboxDrainerStub) DrainSettlementReceiptAuditOut
 	if len(s.drainedBatches) > 0 {
 		drained := s.drainedBatches[0]
 		s.drainedBatches = s.drainedBatches[1:]
-		return drained, err
+		return billing.SettlementReceiptAuditOutboxDrainResult{DrainedRows: drained}, err
 	}
-	return s.drained, err
+	return billing.SettlementReceiptAuditOutboxDrainResult{DrainedRows: s.drained, PoisonedRows: s.poisoned}, err
 }
 
 func (s *settlementReceiptAuditOutboxDrainerStub) PruneSettlementReceiptAuditOutbox(context.Context, time.Time, int) (int64, error) {
@@ -575,7 +586,11 @@ func (s *settlementReceiptAuditOutboxDrainerStub) PruneSettlementReceiptAuditOut
 }
 
 func (s *settlementReceiptAuditOutboxDrainerStub) SettlementReceiptAuditOutboxStats(context.Context) (billing.SettlementReceiptAuditOutboxStats, error) {
-	stats := billing.SettlementReceiptAuditOutboxStats{PendingRows: s.statsPending}
+	stats := billing.SettlementReceiptAuditOutboxStats{
+		PendingRows:          s.statsPending,
+		PoisonedRows:         s.statsPoisoned,
+		RetainedPoisonedRows: s.statsRetainedPoisoned,
+	}
 	if s.statsPending > 0 {
 		stats.OldestPendingCreatedAt = time.Now().Add(-time.Minute)
 		stats.HasOldestPendingCreated = true
@@ -590,18 +605,31 @@ func (settlementReceiptAuditSinkStub) InsertSettlementReceiptOutbox(context.Cont
 }
 
 type settlementReceiptAuditOutboxObserverStub struct {
-	drainOutcomes chan string
-	rowOps        chan string
-	statsObserved chan int64
+	drainOutcomes               chan string
+	rowOps                      chan string
+	statsObserved               chan int64
+	poisonStatsObserved         chan int64
+	retainedPoisonStatsObserved chan int64
 }
 
-func (s *settlementReceiptAuditOutboxObserverStub) ObserveSettlementReceiptAuditOutbox(pending int64, _ time.Duration) {
-	if s.statsObserved == nil {
-		return
+func (s *settlementReceiptAuditOutboxObserverStub) ObserveSettlementReceiptAuditOutbox(pending, poisoned, retainedPoisoned int64, _ time.Duration) {
+	if s.statsObserved != nil {
+		select {
+		case s.statsObserved <- pending:
+		default:
+		}
 	}
-	select {
-	case s.statsObserved <- pending:
-	default:
+	if s.poisonStatsObserved != nil {
+		select {
+		case s.poisonStatsObserved <- poisoned:
+		default:
+		}
+	}
+	if s.retainedPoisonStatsObserved != nil {
+		select {
+		case s.retainedPoisonStatsObserved <- retainedPoisoned:
+		default:
+		}
 	}
 }
 

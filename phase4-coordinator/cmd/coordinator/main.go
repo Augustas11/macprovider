@@ -1586,13 +1586,13 @@ type settlementStartupScanner interface {
 }
 
 type settlementReceiptAuditOutboxDrainer interface {
-	DrainSettlementReceiptAuditOutbox(context.Context, billing.SettlementReceiptAuditSink, int) (int, error)
+	DrainSettlementReceiptAuditOutbox(context.Context, billing.SettlementReceiptAuditSink, int) (billing.SettlementReceiptAuditOutboxDrainResult, error)
 	PruneSettlementReceiptAuditOutbox(context.Context, time.Time, int) (int64, error)
 	SettlementReceiptAuditOutboxStats(context.Context) (billing.SettlementReceiptAuditOutboxStats, error)
 }
 
 type settlementReceiptAuditOutboxObserver interface {
-	ObserveSettlementReceiptAuditOutbox(int64, time.Duration)
+	ObserveSettlementReceiptAuditOutbox(int64, int64, int64, time.Duration)
 	IncSettlementReceiptAuditOutboxDrain(string)
 	AddSettlementReceiptAuditOutboxRows(string, int64)
 }
@@ -1845,13 +1845,13 @@ func startSettlementReceiptAuditOutboxDrainer(ctx context.Context, store settlem
 			}
 		}
 		if observer != nil {
-			observer.ObserveSettlementReceiptAuditOutbox(stats.PendingRows, oldestAge)
+			observer.ObserveSettlementReceiptAuditOutbox(stats.PendingRows, stats.PoisonedRows, stats.RetainedPoisonedRows, oldestAge)
 		}
 	}
-	drain := func(runCtx context.Context) (int, error) {
+	drain := func(runCtx context.Context) (billing.SettlementReceiptAuditOutboxDrainResult, error) {
 		drainCtx, cancel := context.WithTimeout(runCtx, drainTimeout)
 		defer cancel()
-		drained, err := store.DrainSettlementReceiptAuditOutbox(drainCtx, sink, batchLimit)
+		result, err := store.DrainSettlementReceiptAuditOutbox(drainCtx, sink, batchLimit)
 		outcome := "success"
 		if err != nil {
 			outcome = "error"
@@ -1859,10 +1859,14 @@ func startSettlementReceiptAuditOutboxDrainer(ctx context.Context, store settlem
 		}
 		if observer != nil {
 			observer.IncSettlementReceiptAuditOutboxDrain(outcome)
-			observer.AddSettlementReceiptAuditOutboxRows("drained", int64(drained))
+			observer.AddSettlementReceiptAuditOutboxRows("drained", int64(result.DrainedRows))
+			observer.AddSettlementReceiptAuditOutboxRows("poisoned", int64(result.PoisonedRows))
 		}
-		if drained > 0 {
-			logger.Info().Int("drained_rows", drained).Msg("settlement receipt audit outbox drained rows")
+		if result.DrainedRows > 0 || result.PoisonedRows > 0 {
+			logger.Info().
+				Int("drained_rows", result.DrainedRows).
+				Int("poisoned_rows", result.PoisonedRows).
+				Msg("settlement receipt audit outbox processed rows")
 		}
 		if retentionDays > 0 {
 			cutoff := time.Now().UTC().AddDate(0, 0, -retentionDays)
@@ -1879,7 +1883,7 @@ func startSettlementReceiptAuditOutboxDrainer(ctx context.Context, store settlem
 			}
 		}
 		observeStats(runCtx)
-		return drained, err
+		return result, err
 	}
 	attempts := newMoneySQLiteMaintenanceAttemptState(time.Now())
 	flushOne := func(runCtx context.Context) {
@@ -1897,8 +1901,8 @@ func startSettlementReceiptAuditOutboxDrainer(ctx context.Context, store settlem
 			if runCtx.Err() != nil {
 				return
 			}
-			drained, err := drain(runCtx)
-			if drained == 0 || (err == nil && drained < batchLimit) {
+			result, err := drain(runCtx)
+			if result.ProgressedRows() == 0 || (err == nil && result.ProgressedRows() < batchLimit) {
 				return
 			}
 		}

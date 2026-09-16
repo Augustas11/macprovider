@@ -62,6 +62,57 @@ func TestBillingMigration(t *testing.T) {
 	}
 }
 
+func TestBillingMigrationAddsSettlementReceiptAuditOutboxPoisonColumnsAfterLegacyTable(t *testing.T) {
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "legacy-outbox.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	createRequestLogForTest(t, db)
+	if _, err := db.Exec(`
+CREATE TABLE settlement_receipt_audit_outbox (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    settlement_receipt_verdict_id INTEGER NULL,
+    created_at_utc TEXT NOT NULL,
+    drained_at_utc TEXT NULL
+);
+CREATE INDEX idx_srao_pending ON settlement_receipt_audit_outbox(drained_at_utc, id)
+    WHERE drained_at_utc IS NULL;`); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := NewStore(db); err != nil {
+		t.Fatalf("NewStore legacy settlement receipt audit outbox migration: %v", err)
+	}
+	if !columnExists(t, db, "settlement_receipt_audit_outbox", "poisoned_at_utc") {
+		t.Fatal("missing settlement_receipt_audit_outbox.poisoned_at_utc after migration")
+	}
+	if !columnExists(t, db, "settlement_receipt_audit_outbox", "poison_reason") {
+		t.Fatal("missing settlement_receipt_audit_outbox.poison_reason after migration")
+	}
+	if !columnExists(t, db, "settlement_receipt_audit_outbox", "poison_acknowledged_at_utc") {
+		t.Fatal("missing settlement_receipt_audit_outbox.poison_acknowledged_at_utc after migration")
+	}
+	if !columnExists(t, db, "settlement_receipt_audit_outbox", "poison_acknowledged_by") {
+		t.Fatal("missing settlement_receipt_audit_outbox.poison_acknowledged_by after migration")
+	}
+	if !columnExists(t, db, "settlement_receipt_audit_outbox", "poison_acknowledge_reason") {
+		t.Fatal("missing settlement_receipt_audit_outbox.poison_acknowledge_reason after migration")
+	}
+	if !indexExists(t, db, "settlement_receipt_audit_outbox", "idx_srao_pending_active") {
+		t.Fatal("missing idx_srao_pending_active after migration")
+	}
+	if !indexExists(t, db, "settlement_receipt_audit_outbox", "idx_srao_poisoned") {
+		t.Fatal("missing idx_srao_poisoned after migration")
+	}
+	if !indexExists(t, db, "settlement_receipt_audit_outbox", "idx_srao_poisoned_open") {
+		t.Fatal("missing idx_srao_poisoned_open after migration")
+	}
+	if indexExists(t, db, "settlement_receipt_audit_outbox", "idx_srao_pending") {
+		t.Fatal("legacy idx_srao_pending survived migration")
+	}
+}
+
 func TestBillingMigrationUpgradesQuarantineResolutionsV04ToV05(t *testing.T) {
 	_, store := newRequestAndBillingStores(t)
 	insertCreditWithRequest(t, store.db, "legacy-resolution-row", "provider-a", time.Now().UTC(), 100)

@@ -17,6 +17,22 @@ import (
 
 var errStoreClosed = errors.New("audit store is closed")
 
+// SettlementReceiptOutboxConflictError reports that a compact money-DB outbox
+// row maps to an audit DB row that already exists with different contents.
+// Callers may treat this as a poison row: the audit sink cannot accept a second
+// event for the same outbox id, so retrying the same row will never succeed.
+type SettlementReceiptOutboxConflictError struct {
+	OutboxID int64
+}
+
+func (e SettlementReceiptOutboxConflictError) Error() string {
+	return fmt.Sprintf("settlement receipt audit outbox id %d already exists with different audit event", e.OutboxID)
+}
+
+func (e SettlementReceiptOutboxConflictError) SettlementReceiptAuditOutboxConflict() bool {
+	return true
+}
+
 type Store struct {
 	db                             *sql.DB
 	settlementReceiptOutboxEnabled bool
@@ -222,7 +238,7 @@ WHERE settlement_receipt_audit_outbox_id = ?`, outboxID).Scan(&gotTS, &gotEventT
 		gotProvider.Valid != provider.Valid ||
 		(gotProvider.Valid && gotProvider.String != provider.String) ||
 		gotPayload != payloadJSON {
-		return false, fmt.Errorf("settlement receipt audit outbox id %d already exists with different audit event", outboxID)
+		return false, SettlementReceiptOutboxConflictError{OutboxID: outboxID}
 	}
 	return false, nil
 }

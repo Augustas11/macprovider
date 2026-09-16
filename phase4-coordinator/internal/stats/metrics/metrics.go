@@ -9,6 +9,8 @@
 //	stats_rate_limit_exceeded_total{tier,endpoint}             — Counter
 //	stats_idle_prewarm_event_total{event,reason}                — Counter
 //	settlement_receipt_audit_outbox_pending_rows                — Gauge
+//	settlement_receipt_audit_outbox_poisoned_rows               — Gauge
+//	settlement_receipt_audit_outbox_poisoned_retained_rows      — Gauge
 //	settlement_receipt_audit_outbox_oldest_pending_age_seconds  — Gauge
 //	settlement_receipt_audit_outbox_drain_total{outcome}        — Counter
 //	settlement_receipt_audit_outbox_rows_total{operation}       — Counter
@@ -53,7 +55,7 @@
 //     outcome values "success" / "error".
 //
 //   - `settlement_receipt_audit_outbox_rows_total{operation}` uses closed
-//     operation values "drained" / "pruned".
+//     operation values "drained" / "poisoned" / "pruned".
 //
 // No label takes an operator- or attacker-controllable string directly.
 // A `Reset` method exists for test isolation.
@@ -66,10 +68,10 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
-// Metrics holds the five SPEC-017 v0.1.8 metrics. New() takes a
-// prometheus.Registerer so tests can use a fresh registry per
-// case; production code passes prometheus.DefaultRegisterer (or
-// a coordinator-owned named registry).
+// Metrics holds coordinator Prometheus collectors. New() takes a
+// prometheus.Registerer so tests can use a fresh registry per case; production
+// code passes prometheus.DefaultRegisterer (or a coordinator-owned named
+// registry).
 type Metrics struct {
 	RequestTotal                                        *prometheus.CounterVec
 	PartnerKeyRequestTotal                              *prometheus.CounterVec
@@ -91,6 +93,8 @@ type Metrics struct {
 	MoneySQLiteWALCheckpoint                            *prometheus.GaugeVec
 	MoneySQLiteWALCheckpointTime                        *prometheus.HistogramVec
 	SettlementReceiptAuditOutboxPendingRows             prometheus.Gauge
+	SettlementReceiptAuditOutboxPoisonedRows            prometheus.Gauge
+	SettlementReceiptAuditOutboxPoisonedRetainedRows    prometheus.Gauge
 	SettlementReceiptAuditOutboxOldestPendingAgeSeconds prometheus.Gauge
 	SettlementReceiptAuditOutboxDrainTotal              *prometheus.CounterVec
 	SettlementReceiptAuditOutboxRowsTotal               *prometheus.CounterVec
@@ -256,6 +260,18 @@ func New(reg prometheus.Registerer) *Metrics {
 			prometheus.GaugeOpts{
 				Name: "settlement_receipt_audit_outbox_pending_rows",
 				Help: "Latest count of undrained settlement receipt audit outbox rows.",
+			},
+		),
+		SettlementReceiptAuditOutboxPoisonedRows: f.NewGauge(
+			prometheus.GaugeOpts{
+				Name: "settlement_receipt_audit_outbox_poisoned_rows",
+				Help: "Latest count of unacknowledged settlement receipt audit outbox rows dead-lettered for operator reconciliation.",
+			},
+		),
+		SettlementReceiptAuditOutboxPoisonedRetainedRows: f.NewGauge(
+			prometheus.GaugeOpts{
+				Name: "settlement_receipt_audit_outbox_poisoned_retained_rows",
+				Help: "Latest count of all retained settlement receipt audit outbox rows dead-lettered for operator reconciliation, including acknowledged rows.",
 			},
 		),
 		SettlementReceiptAuditOutboxOldestPendingAgeSeconds: f.NewGauge(
@@ -451,6 +467,26 @@ func (m *Metrics) SetSettlementReceiptAuditOutboxPendingRows(rows int64) {
 	m.SettlementReceiptAuditOutboxPendingRows.Set(float64(rows))
 }
 
+func (m *Metrics) SetSettlementReceiptAuditOutboxPoisonedRows(rows int64) {
+	if m == nil || m.SettlementReceiptAuditOutboxPoisonedRows == nil {
+		return
+	}
+	if rows < 0 {
+		rows = 0
+	}
+	m.SettlementReceiptAuditOutboxPoisonedRows.Set(float64(rows))
+}
+
+func (m *Metrics) SetSettlementReceiptAuditOutboxPoisonedRetainedRows(rows int64) {
+	if m == nil || m.SettlementReceiptAuditOutboxPoisonedRetainedRows == nil {
+		return
+	}
+	if rows < 0 {
+		rows = 0
+	}
+	m.SettlementReceiptAuditOutboxPoisonedRetainedRows.Set(float64(rows))
+}
+
 func (m *Metrics) SetSettlementReceiptAuditOutboxOldestPendingAge(age time.Duration) {
 	if m == nil || m.SettlementReceiptAuditOutboxOldestPendingAgeSeconds == nil {
 		return
@@ -461,8 +497,10 @@ func (m *Metrics) SetSettlementReceiptAuditOutboxOldestPendingAge(age time.Durat
 	m.SettlementReceiptAuditOutboxOldestPendingAgeSeconds.Set(age.Seconds())
 }
 
-func (m *Metrics) ObserveSettlementReceiptAuditOutbox(pendingRows int64, oldestPendingAge time.Duration) {
+func (m *Metrics) ObserveSettlementReceiptAuditOutbox(pendingRows, poisonedRows, retainedPoisonedRows int64, oldestPendingAge time.Duration) {
 	m.SetSettlementReceiptAuditOutboxPendingRows(pendingRows)
+	m.SetSettlementReceiptAuditOutboxPoisonedRows(poisonedRows)
+	m.SetSettlementReceiptAuditOutboxPoisonedRetainedRows(retainedPoisonedRows)
 	m.SetSettlementReceiptAuditOutboxOldestPendingAge(oldestPendingAge)
 }
 
@@ -527,7 +565,7 @@ func allowSettlementReceiptAuditOutboxDrainOutcome(outcome string) bool {
 
 func allowSettlementReceiptAuditOutboxRowsOperation(operation string) bool {
 	switch operation {
-	case "drained", "pruned":
+	case "drained", "poisoned", "pruned":
 		return true
 	default:
 		return false

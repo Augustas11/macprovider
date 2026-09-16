@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -456,6 +457,140 @@ func TestUnknownAdminLedgerPathRequiresAuthAndAuthenticatedRequestsConsumeLimite
 	ledgerHandler.ServeHTTP(w, req)
 	if w.Code != http.StatusTooManyRequests {
 		t.Fatalf("post-drain status=%d body=%s want 429", w.Code, w.Body.String())
+	}
+}
+
+func TestSettlementReceiptAuditOutboxPoisonOperatorLifecycle(t *testing.T) {
+	fixtures := loadSettlementVerifierFixtures(t)
+	pubkey := decodeSettlementVerifierPubkey(t, fixtures.ProviderReceiptPubkeyB64)
+	tuple := firstSettlementTupleWithNegativeVariant(t, fixtures, "normal_done")
+	input := settlementVerifierInputFromFixture(t, fixtures, tuple, pubkey)
+	_, store := newRequestAndBillingStores(t)
+	seedSettlementReceiptEvidence(t, store, input)
+	setSettlementReceiptNow(store, input.ReceiptReceivedUnixMS)
+	if _, err := store.IngestSettlementReceipt(context.Background(), SettlementReceiptIngestionInput{
+		SettlementReceiptIdentity: SettlementReceiptIdentity{
+			AccountScope: input.AccountScope,
+			RequestID:    input.RequestID,
+			AttemptN:     input.AttemptN,
+			ProviderID:   input.ProviderID,
+		},
+		Header:                input.Header,
+		ProviderReceiptPubkey: pubkey,
+		receiptReceivedUnixMS: input.ReceiptReceivedUnixMS,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	outboxID := scalar(t, store.db, `SELECT MIN(id) FROM settlement_receipt_audit_outbox`)
+	if _, err := store.db.Exec(`
+UPDATE settlement_receipt_audit_outbox
+   SET poisoned_at_utc = '2026-09-16T00:00:00Z',
+       poison_reason = 'settlement receipt audit outbox conflict'
+ WHERE id = ?`, outboxID); err != nil {
+		t.Fatal(err)
+	}
+
+	handler := store.Handlers("operator", fakeTokens{}, true, 60)
+	unauth := httptest.NewRecorder()
+	handler.ServeHTTP(unauth, httptest.NewRequest(http.MethodGet, settlementReceiptAuditOutboxPoisonPath, nil))
+	if unauth.Code != http.StatusForbidden {
+		t.Fatalf("unauth status=%d want 403", unauth.Code)
+	}
+
+	openReq := httptest.NewRequest(http.MethodGet, settlementReceiptAuditOutboxPoisonPath, nil)
+	openReq.Header.Set("Authorization", "Bearer operator")
+	openW := httptest.NewRecorder()
+	handler.ServeHTTP(openW, openReq)
+	if openW.Code != http.StatusOK {
+		t.Fatalf("open status=%d body=%s", openW.Code, openW.Body.String())
+	}
+	var openBody struct {
+		Count int `json:"count"`
+		Items []struct {
+			OutboxID                      int64  `json:"outbox_id"`
+			RequestID                     string `json:"request_id"`
+			ActiveMetricUntilAcknowledged bool   `json:"active_metric_until_acknowledged"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(openW.Body.Bytes(), &openBody); err != nil {
+		t.Fatal(err)
+	}
+	if openBody.Count != 1 || len(openBody.Items) != 1 {
+		t.Fatalf("open count/items=%d/%d want 1/1 body=%s", openBody.Count, len(openBody.Items), openW.Body.String())
+	}
+	if openBody.Items[0].OutboxID != outboxID || openBody.Items[0].RequestID != input.RequestID || !openBody.Items[0].ActiveMetricUntilAcknowledged {
+		t.Fatalf("open item=%+v want outbox/request/active", openBody.Items[0])
+	}
+	stats, err := store.SettlementReceiptAuditOutboxStats(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.PoisonedRows != 1 || stats.RetainedPoisonedRows != 1 {
+		t.Fatalf("poisoned/retained rows before ack=%d/%d want 1/1", stats.PoisonedRows, stats.RetainedPoisonedRows)
+	}
+
+	ackReq := httptest.NewRequest(http.MethodPost, settlementReceiptAuditOutboxPoisonPath+"/"+strconv.FormatInt(outboxID, 10)+"/acknowledge", strings.NewReader(`{"operator_id":"alice","reason":"audit DB row inspected and retained"}`))
+	ackReq.Header.Set("Authorization", "Bearer operator")
+	ackReq.Header.Set("Content-Type", "application/json")
+	ackW := httptest.NewRecorder()
+	handler.ServeHTTP(ackW, ackReq)
+	if ackW.Code != http.StatusOK {
+		t.Fatalf("ack status=%d body=%s", ackW.Code, ackW.Body.String())
+	}
+	stats, err = store.SettlementReceiptAuditOutboxStats(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.PoisonedRows != 0 || stats.RetainedPoisonedRows != 1 {
+		t.Fatalf("poisoned/retained rows after ack=%d/%d want 0/1", stats.PoisonedRows, stats.RetainedPoisonedRows)
+	}
+
+	openAfterReq := httptest.NewRequest(http.MethodGet, settlementReceiptAuditOutboxPoisonPath, nil)
+	openAfterReq.Header.Set("Authorization", "Bearer operator")
+	openAfterW := httptest.NewRecorder()
+	handler.ServeHTTP(openAfterW, openAfterReq)
+	if openAfterW.Code != http.StatusOK {
+		t.Fatalf("open-after status=%d body=%s", openAfterW.Code, openAfterW.Body.String())
+	}
+	var openAfterBody struct {
+		Count int `json:"count"`
+	}
+	if err := json.Unmarshal(openAfterW.Body.Bytes(), &openAfterBody); err != nil {
+		t.Fatal(err)
+	}
+	if openAfterBody.Count != 0 {
+		t.Fatalf("open-after count=%d want 0 body=%s", openAfterBody.Count, openAfterW.Body.String())
+	}
+
+	ackedReq := httptest.NewRequest(http.MethodGet, settlementReceiptAuditOutboxPoisonPath+"?status=acknowledged", nil)
+	ackedReq.Header.Set("Authorization", "Bearer operator")
+	ackedW := httptest.NewRecorder()
+	handler.ServeHTTP(ackedW, ackedReq)
+	if ackedW.Code != http.StatusOK {
+		t.Fatalf("acked status=%d body=%s", ackedW.Code, ackedW.Body.String())
+	}
+	var ackedBody struct {
+		Count int `json:"count"`
+		Items []struct {
+			OutboxID                int64  `json:"outbox_id"`
+			PoisonAcknowledgedBy    string `json:"poison_acknowledged_by"`
+			PoisonAcknowledgeReason string `json:"poison_acknowledge_reason"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(ackedW.Body.Bytes(), &ackedBody); err != nil {
+		t.Fatal(err)
+	}
+	if ackedBody.Count != 1 || len(ackedBody.Items) != 1 || ackedBody.Items[0].OutboxID != outboxID || ackedBody.Items[0].PoisonAcknowledgedBy != "alice" || ackedBody.Items[0].PoisonAcknowledgeReason == "" {
+		t.Fatalf("acked body=%+v want retained acknowledged poison row", ackedBody)
+	}
+
+	ackAgainReq := httptest.NewRequest(http.MethodPost, settlementReceiptAuditOutboxPoisonPath+"/"+strconv.FormatInt(outboxID, 10)+"/acknowledge", strings.NewReader(`{"operator_id":"alice","reason":"repeat"}`))
+	ackAgainReq.Header.Set("Authorization", "Bearer operator")
+	ackAgainReq.Header.Set("Content-Type", "application/json")
+	ackAgainW := httptest.NewRecorder()
+	handler.ServeHTTP(ackAgainW, ackAgainReq)
+	if ackAgainW.Code != http.StatusConflict {
+		t.Fatalf("second ack status=%d want 409 body=%s", ackAgainW.Code, ackAgainW.Body.String())
 	}
 }
 
