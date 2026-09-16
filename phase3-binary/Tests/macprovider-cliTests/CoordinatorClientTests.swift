@@ -5492,7 +5492,7 @@ final class CoordinatorClientTests: XCTestCase {
         let store: ProviderLifecycleStateStore
         let operationID = "serve:\(UUID().uuidString.lowercased())"
 
-        init() throws {
+        init(initialState: ProviderLifecycleState = .locallyReadyConnecting) throws {
             root = FileManager.default.temporaryDirectory
                 .appendingPathComponent("coordinator-client-lifecycle-\(UUID().uuidString)", isDirectory: true)
             try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
@@ -5501,9 +5501,12 @@ final class CoordinatorClientTests: XCTestCase {
             )
             // Seed where serve stands when the coordinator accepts the
             // session: locally ready, awaiting the readiness verdict.
+            // Tests that race a restart pass `validatingCatalog`.
             _ = try store.transition(
-                to: .locallyReadyConnecting,
-                reasonCode: "local_http_ready_awaiting_coordinator",
+                to: initialState,
+                reasonCode: initialState == .locallyReadyConnecting
+                    ? "local_http_ready_awaiting_coordinator"
+                    : "startup_preflight",
                 writer: .serve,
                 providerID: "provider-test",
                 modelID: "model-a",
@@ -5635,6 +5638,60 @@ final class CoordinatorClientTests: XCTestCase {
         let ended = try await waitForLifecycleReason(fixture, "buyer_serving_readiness_unconfirmed")
         XCTAssertEqual(ended.state, .locallyReadyConnecting)
         XCTAssertEqual(ended.reasonCode, "buyer_serving_readiness_unconfirmed")
+        await client.cleanupConnectionForTest()
+    }
+
+    func testCoordinatorSessionHoldSurvivesLifecycleRaceFromValidatingCatalog() async throws {
+        // Reconnect after a watchdog/KeepAlive restart can still be in
+        // validating_catalog. Holding the accepted session is load-bearing
+        // (SPEC-047-R003(iv)); the locally_ready_connecting predecessor
+        // list includes validating_catalog so the hold is recorded.
+        let fixture = try LifecycleFixture(initialState: .validatingCatalog)
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let script = ReadinessScript(
+            [.notServing(hold: .modelAdmissionPending)],
+            then: .confirmed
+        )
+        let client = try await makeHeldSessionClient(fixture: fixture, script: script)
+
+        try await client.handleCoordinatorPayloadForTest([
+            "type": "hello_ack",
+            "assigned_id": "assigned-a",
+            "heartbeat_interval_s": 30,
+            "catalog_compatible": true,
+        ])
+        let held = try fixture.record()
+        XCTAssertEqual(held.state, .locallyReadyConnecting)
+        XCTAssertEqual(held.reasonCode, CoordinatorClient.admissionPendingLifecycleReasonCode)
+        await client.cleanupConnectionForTest()
+    }
+
+    func testCoordinatorSessionEntersAdmissionHoldAfterConfirmedAccept() async throws {
+        // The physical journey starts the serve (ordinary catalog readiness)
+        // before any offer. The hold must still engage when a later poll
+        // names model_admission_pending, or the session is fail-closed and
+        // settlement_capable can never bind THIS live session.
+        let fixture = try LifecycleFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let script = ReadinessScript(
+            [.confirmed, .notServing(hold: .modelAdmissionPending)],
+            then: .confirmed
+        )
+        let client = try await makeHeldSessionClient(fixture: fixture, script: script)
+
+        try await client.handleCoordinatorPayloadForTest([
+            "type": "hello_ack",
+            "assigned_id": "assigned-a",
+            "heartbeat_interval_s": 30,
+            "catalog_compatible": true,
+        ])
+        XCTAssertEqual(try fixture.record().state, .servingBuyers)
+
+        let held = try await waitForLifecycleReason(fixture, CoordinatorClient.admissionPendingLifecycleReasonCode)
+        XCTAssertEqual(held.state, .locallyReadyConnecting)
+
+        let promoted = try await waitForLifecycleReason(fixture, CoordinatorClient.admissionConfirmedLifecycleReasonCode)
+        XCTAssertEqual(promoted.state, .servingBuyers)
         await client.cleanupConnectionForTest()
     }
 

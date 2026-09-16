@@ -548,6 +548,30 @@ final class ProviderLifecycleStateTests: XCTestCase {
         )
     }
 
+    func testDefaultURLHonorsAbsoluteLifecycleRootOverride() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("lifecycle-root-\(UUID().uuidString)", isDirectory: true)
+        let environment = ["MACPROVIDER_LIFECYCLE_ROOT": root.path]
+        let ignoredHome = FileManager.default.temporaryDirectory
+            .appendingPathComponent("lifecycle-home-ignored-\(UUID().uuidString)", isDirectory: true)
+
+        XCTAssertEqual(
+            ProviderLifecycleStateStore.defaultURL(homeDirectory: ignoredHome, environment: environment),
+            root.appendingPathComponent("state-v1.json")
+        )
+        XCTAssertEqual(
+            ProviderLifecycleLeaseStore.defaultURL(homeDirectory: ignoredHome, environment: environment),
+            root.appendingPathComponent("lease.json")
+        )
+        XCTAssertEqual(
+            ProviderLifecycleStateStore.defaultURL(
+                homeDirectory: ignoredHome,
+                environment: ["MACPROVIDER_LIFECYCLE_ROOT": "relative-not-absolute"]
+            ),
+            ProviderLifecycleStateStore.defaultURL(homeDirectory: ignoredHome, environment: [:])
+        )
+    }
+
     /// Candidate mode changes ONLY the persistence file: the full transition
     /// graph is still a release gate. A candidate-scoped store rejects an
     /// illegal transition exactly as the incumbent store would.

@@ -66,26 +66,37 @@ func byomAdmissionCandidate(p pool.Provider) bool {
 // the session).
 const buyerServingHoldModelAdmissionPending = "model_admission_pending"
 
-// byomBuyerServingHold names the readiness hold for a bound BYOM session
-// whose candidate's latest event is a pre-settlement, non-terminal state.
-// It is coordinator-derived (the registry binding and the admission store),
-// never provider-asserted, and it is empty for an unbound session, for
-// `settlement_capable` (readiness then depends on the ordinary gates), and
-// for a terminal candidate (`withdrawn`, `revoked`), whose session must
-// re-derive through a fresh hello.
+// byomBuyerServingHold names the readiness hold for a session that must stay
+// up through a pending BYOM admission. SPEC-047-R003(iv) grants
+// settlement_capable only while THIS live session is bound; SPEC-047-R006
+// clears the binding on disconnect. The CLI fail-closes an authoritative
+// buyer_serving=false that carries no hold, so the coordinator must name the
+// hold whenever dropping the session would make settlement unreachable:
+// (1) the session is already bound to a pre-settlement, non-terminal
+// candidate, or (2) the session is not yet bound but this provider already
+// has a pending candidate for the same served model (the offer just landed,
+// or the next hello has not rebound yet). Empty for `settlement_capable`,
+// for terminal candidates, and for a session whose model matches no pending
+// candidate (ordinary fail-closed).
 func (s *Server) byomBuyerServingHold(ctx context.Context, p pool.Provider) string {
-	if s == nil || s.modelAdmissionStore == nil || !byomAdmissionCandidate(p) {
+	if s == nil || s.modelAdmissionStore == nil {
 		return ""
 	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	event, found, err := s.modelAdmissionStore.LatestModelAdmissionStatus(ctx, p.ProviderID, strings.TrimSpace(p.ModelAdmissionCandidateID))
-	if err != nil || !found {
-		return ""
+	events, err := s.modelAdmissionStore.LatestModelAdmissionStatusesForProvider(ctx, p.ProviderID)
+	if err != nil {
+		if !byomAdmissionCandidate(p) {
+			return ""
+		}
+		event, found, latestErr := s.modelAdmissionStore.LatestModelAdmissionStatus(ctx, p.ProviderID, strings.TrimSpace(p.ModelAdmissionCandidateID))
+		if latestErr != nil || !found || !providerws.ModelAdmissionPendingHoldState(event.State) {
+			return ""
+		}
+		return buyerServingHoldModelAdmissionPending
 	}
-	switch event.State {
-	case "offer_submitted", "sandbox_probe_only", "network_visible_unpriced", "network_admitted_unsettled", "catalog_priced":
+	if providerws.ModelAdmissionSessionPendingHold(p, events) {
 		return buyerServingHoldModelAdmissionPending
 	}
 	return ""

@@ -328,7 +328,7 @@ struct ProviderLifecycleStateRecord: Codable, Equatable, Sendable {
             ]
         case .locallyReadyConnecting, .networkOffline, .coordinatorUnavailable, .catalogIncompatible:
             [
-                .loadingModel, .locallyReadyConnecting, .networkOffline, .coordinatorUnavailable,
+                .validatingCatalog, .loadingModel, .locallyReadyConnecting, .networkOffline, .coordinatorUnavailable,
                 .authenticationRequired, .identityMigrationRequired, .catalogIncompatible,
                 .servingBuyers, .degradedServing, .pausedByOperator,
             ]
@@ -472,9 +472,29 @@ struct ProviderLifecycleStateStore: @unchecked Sendable {
         self.expectedOwnerUID = expectedOwnerUID
     }
 
-    static func defaultURL(homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser) -> URL {
-        homeDirectory
+    /// Directory that holds `state-v1.json` / `lease.json`. An absolute
+    /// `MACPROVIDER_LIFECYCLE_ROOT` isolates a second live `serve` (the
+    /// SPEC-047-R006 replacement-hello path) from the incumbent's file;
+    /// `FileManager.homeDirectoryForCurrentUser` ignores `$HOME`, so the
+    /// override cannot be faked that way.
+    static func resolvedLifecycleDirectory(
+        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> URL {
+        let override = environment["MACPROVIDER_LIFECYCLE_ROOT"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if override.hasPrefix("/") {
+            return URL(fileURLWithPath: override, isDirectory: true)
+        }
+        return homeDirectory
             .appendingPathComponent("Library/Application Support/macprovider/lifecycle", isDirectory: true)
+    }
+
+    static func defaultURL(
+        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> URL {
+        resolvedLifecycleDirectory(homeDirectory: homeDirectory, environment: environment)
             .appendingPathComponent("state-v1.json")
     }
 

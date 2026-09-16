@@ -1347,8 +1347,8 @@ struct BYOMOfferSubmissionBuilder {
               !candidate.warningCodes.contains(BYOMDiscoveryWarning.namespacePermissionInvalid.rawValue) else {
             throw BYOMModelAdmissionError.candidateUnstable
         }
-        let evaluationDigest = evaluationDigestSHA256?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        if !evaluationDigest.isEmpty, !Self.isLowercaseSHA256(evaluationDigest) {
+        let trimmedEvaluation = evaluationDigestSHA256?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !trimmedEvaluation.isEmpty, !Self.isLowercaseSHA256(trimmedEvaluation) {
             throw BYOMModelAdmissionError.invalidEvaluationDigest
         }
         guard Self.canSubmit(candidate: candidate) else {
@@ -1356,6 +1356,16 @@ struct BYOMOfferSubmissionBuilder {
         }
         let publicKey = admissionIdentity.publicKey.rawRepresentation
         let signingKeyDigest = Self.sha256Hex(publicKey)
+        let timestamp = ModelSwitchingWireCodec.timestamp(now)
+        // SPEC-047-R001: re-entry from withdrawn/revoked requires refreshed
+        // evidence digests. Discovery of the same candidate is stable, and
+        // omitting --evaluation-digest-sha256 (SPEC-047-R002) used to ship an
+        // empty digest on every submit, so a fresh nonce still 409'd as
+        // same-evidence. Bind an omitted evaluation to this signed offer
+        // instance so a new submit is refreshed evidence.
+        let evaluationDigest = trimmedEvaluation.isEmpty
+            ? Self.omittedEvaluationDigest(candidateID: candidate.candidateID, nonce: nonce, timestamp: timestamp)
+            : trimmedEvaluation
         var request = BYOMOfferSubmitRequestWire(
             schema: "model_admission_offer_submit.v1",
             signatureDomain: "macprovider.model_admission.offer.v1",
@@ -1371,7 +1381,7 @@ struct BYOMOfferSubmissionBuilder {
             fitEvidenceSource: "local_discovery",
             localReadiness: candidate.readinessState,
             requestedDisclosureClass: requestedDisclosureClass,
-            timestamp: ModelSwitchingWireCodec.timestamp(now),
+            timestamp: timestamp,
             nonce: nonce,
             idempotencyKey: idempotencyKey,
             signingKeyDigest: signingKeyDigest,
@@ -1403,6 +1413,15 @@ struct BYOMOfferSubmissionBuilder {
             "admission_state": .string(candidate.admissionState),
             "warning_codes": .array(candidate.warningCodes.sorted().map(RFC8785JCS.Value.string)),
         ]))
+    }
+
+    static func omittedEvaluationDigest(candidateID: String, nonce: String, timestamp: String) -> String {
+        sha256Hex(Data([
+            "macprovider.model_admission.omitted_evaluation.v1",
+            candidateID,
+            nonce,
+            timestamp,
+        ].joined(separator: "\u{0}").utf8))
     }
 
     private static func sha256Hex(_ data: Data) -> String {

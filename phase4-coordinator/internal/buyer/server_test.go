@@ -1948,10 +1948,12 @@ func TestPoolCheckReadinessAppliesBYOMSettlementGate(t *testing.T) {
 func TestPoolCheckReadinessHoldNamesOnlyPendingBYOMAdmission(t *testing.T) {
 	// The provider CLI holds its accepted session through buyer_serving=false
 	// only when the coordinator names the SPEC-047-R003 admission hold. The
-	// hold is derived from the registry binding plus the admission store and
-	// is published for every pre-settlement, non-terminal state, never for a
-	// terminal candidate (whose session re-derives through a fresh hello) and
-	// never for a session that carries no binding.
+	// hold is derived from the admission store (and the registry binding when
+	// one exists) and is published for every pre-settlement, non-terminal
+	// state, including an unbound session whose served model already matches
+	// a pending candidate (the offer just landed). Never for a terminal
+	// candidate, and never for a session whose model matches no pending
+	// candidate.
 	cases := []struct {
 		name  string
 		bound bool
@@ -1963,6 +1965,7 @@ func TestPoolCheckReadinessHoldNamesOnlyPendingBYOMAdmission(t *testing.T) {
 		{name: "revoked", bound: true, state: "revoked", want: ""},
 		{name: "withdrawn", bound: true, state: "withdrawn", want: ""},
 		{name: "unbound legacy session", bound: false, state: "", want: ""},
+		{name: "unbound matching pending offer", bound: false, state: "offer_submitted", want: "model_admission_pending"},
 	}
 	// catalog_priced needs the trusted Tier-2 material the decision binds.
 	tier2.ResetForTest()
@@ -2006,8 +2009,14 @@ func TestPoolCheckReadinessHoldNamesOnlyPendingBYOMAdmission(t *testing.T) {
 			}
 			registry.Register(&p, nil)
 			store := providerws.NewMemoryModelAdmissionStore()
-			if tc.bound {
-				seedBYOMNonSettlementAdmissionState(t, store, p, tc.state)
+			if tc.state != "" {
+				seedProvider := p
+				if !tc.bound {
+					seedProvider = byomAdmissionProvider(t, p)
+					seedProvider.ModelAdmissionServedModelRef = p.ModelID
+					seedProvider.ModelAdmissionCatalogModelKey = p.ModelID
+				}
+				seedBYOMNonSettlementAdmissionState(t, store, seedProvider, tc.state)
 			}
 			server := buyer.NewServer(
 				registry,
