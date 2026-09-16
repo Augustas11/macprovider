@@ -1759,7 +1759,9 @@ struct BYOMModelAdmissionRuntime: Sendable {
         providerID: String,
         target: String,
         evaluationDigestSHA256: String?,
-        requestedDisclosureClass: String
+        requestedDisclosureClass: String,
+        servedArtifactPath: String? = nil,
+        servedModelID: String? = nil
     ) async throws -> BYOMAdmissionStatusWire {
         guard let client else {
             throw BYOMModelAdmissionError.missingCoordinatorURL
@@ -1783,13 +1785,90 @@ struct BYOMModelAdmissionRuntime: Sendable {
             throw BYOMModelAdmissionError.missingAdmissionIdentity(providerID: providerID)
         }
         let evidence = try await Self.artifactEvidence(for: candidate, environment: environment, httpClient: httpClient, deadline: Date().addingTimeInterval(Self.artifactHashBudgetSeconds))
+        var hashes = evidence?.hashes ?? [:]
+        // SPEC-047 primary-row catalog match binds an mlx_cache candidate's
+        // `macprovider.snapshot-manifest.v1` hash against the catalog row's
+        // model_sha256, but the BYOMArtifactDigest subsystem is GGUF-only, so an
+        // mlx_cache offer would otherwise carry no artifact hash and never reach
+        // catalog_priced/settlement_capable. Hash the durable SERVED artifact
+        // (config modelArtifactPath) here: canonicalArtifactHash rejects
+        // symlinks, so the symlinked Hugging Face cache snapshot cannot be
+        // hashed — only the resolved store directory.
+        //
+        // The attestation is confined to the candidate this provider is
+        // configured to serve: `servedModelID` is the config `model` (the
+        // catalog id it serves, e.g. `meta-llama/llama-3.2-3b-instruct`), while
+        // the mlx_cache candidate's `served_model_ref` is the artifact repo id
+        // (e.g. `mlx-community/Llama-3.2-3B-Instruct-4bit`) and its
+        // `catalog_model_key` is the catalog id it resolves to. A settleable
+        // provider serves the artifact under the catalog id, so the served
+        // artifact corresponds to the candidate when EITHER the candidate's
+        // served ref OR its catalog key matches the configured model — matching
+        // only the raw served ref would refuse the ordinary catalog-provider
+        // case. A candidate that resolves to a different model (e.g. a second
+        // cached mlx model) fails both and is never attested with this artifact.
+        let servesConfiguredModel: Bool = {
+            guard let servedModelID else { return false }
+            let target = BYOMCandidateIdentity.normalizedServedModelRef(servedModelID)
+            if BYOMCandidateIdentity.normalizedServedModelRef(candidate.servedModelRef) == target {
+                return true
+            }
+            if let key = candidate.catalogModelKey,
+               BYOMCandidateIdentity.normalizedServedModelRef(key) == target {
+                return true
+            }
+            return false
+        }()
+        // When an mlx_cache hash is attested, the durable directory it was
+        // computed over is retained so the identity can be re-checked immediately
+        // before the signed package leaves the machine (SPEC-010-R007(a) parity
+        // with the GGUF path below).
+        var mlxAttestedArtifactPath: String?
+        if candidate.runtimeSource == "mlx_cache",
+           hashes[ModelArtifactIdentity.snapshotManifestV1] == nil,
+           let servedArtifactPath, !servedArtifactPath.isEmpty,
+           servesConfiguredModel {
+            do {
+                let h = try ModelArtifactVerifier.canonicalArtifactHash(
+                    directory: URL(fileURLWithPath: servedArtifactPath),
+                    deadline: Date().addingTimeInterval(Self.artifactHashBudgetSeconds)
+                )
+                hashes[ModelArtifactIdentity.snapshotManifestV1] = h
+                mlxAttestedArtifactPath = servedArtifactPath
+            } catch AutotuneContextCalibrationError.deadlineExceeded {
+                // Mirror the GGUF policy in `artifactEvidence`: a blown hashing
+                // budget fails the offer closed rather than shipping partial.
+                throw BYOMModelAdmissionError.artifactHashingTimedOut
+            } catch {
+                // Fail-soft to current behavior: any other hashing failure
+                // (missing path, not a directory, symlink) leaves the offer to
+                // submit with whatever hashes it has — the candidate simply
+                // won't catalog-match, exactly as today.
+            }
+        }
+        // SPEC-010-R007(a) for the mlx_cache leg: recompute the served artifact's
+        // canonical hash and fail closed if the durable directory changed since it
+        // was attested. This runs BEFORE the package is signed so the signature
+        // timestamp stays fresh (the coordinator enforces a signed-payload skew
+        // window); the only work between this check and submit is the in-memory
+        // package build, which touches no artifact bytes. A recompute failure
+        // becomes nil and fails closed (nil != attested).
+        if let mlxAttestedArtifactPath, let attested = hashes[ModelArtifactIdentity.snapshotManifestV1] {
+            let current = try? ModelArtifactVerifier.canonicalArtifactHash(
+                directory: URL(fileURLWithPath: mlxAttestedArtifactPath),
+                deadline: Date().addingTimeInterval(Self.artifactHashBudgetSeconds)
+            )
+            guard current == attested else {
+                throw BYOMModelAdmissionError.artifactIdentityChanged
+            }
+        }
         let package = try BYOMOfferSubmissionBuilder.makePackage(
             providerID: providerID,
             candidate: candidate,
             admissionIdentity: identity,
             evaluationDigestSHA256: evaluationDigestSHA256,
             requestedDisclosureClass: requestedDisclosureClass,
-            artifactHashes: evidence?.hashes ?? [:]
+            artifactHashes: hashes
         )
         // SPEC-010-R007(a): the binding must survive through the report. The
         // name is re-resolved and the file identity re-checked immediately

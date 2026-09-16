@@ -276,7 +276,9 @@ struct ModelsOfferCommand: AsyncParsableCommand {
                 providerID: resolved.providerID,
                 target: candidate,
                 evaluationDigestSHA256: evaluationDigestSHA256,
-                requestedDisclosureClass: requestedDisclosureClass
+                requestedDisclosureClass: requestedDisclosureClass,
+                servedArtifactPath: resolved.config.modelArtifactPath,
+                servedModelID: resolved.config.model
             )
             try ModelSwitchingWireCodec.printJSON(status)
         } catch let error as BYOMModelAdmissionError {
