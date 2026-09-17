@@ -428,6 +428,10 @@ actor ProviderStatus {
     private var transitionReason: String
     private var requestCapacityChangeHandler: RequestCapacityChangeHandler?
     private var requestCapacityTransitionSequence = 0
+    private var lastPublishedRequestCapacitySlotsFree: Int?
+    private var lastPublishedRequestCapacitySlotsTotal: Int?
+    private var pendingRequestCapacitySlotsFree: Int?
+    private var pendingRequestCapacitySlotsTotal: Int?
     private var lastObservedThermalThrottle = false
 
     init(
@@ -470,32 +474,64 @@ actor ProviderStatus {
         }
     }
 
-    func beginRequest(requestID: String? = nil) -> Date {
+    func beginRequest(requestID: String? = nil) async -> Date {
         noteRealRequestStart()
         requestsInFlight += 1
         if let requestID {
             activeRequestIDs.insert(requestID)
         }
-        refreshAvailabilityState()
+        await refreshAvailabilityState()
         return Date()
     }
 
     func setRequestCapacityChangeHandler(_ handler: RequestCapacityChangeHandler?) {
         if handler != nil {
             requestCapacityTransitionSequence = 0
+            lastPublishedRequestCapacitySlotsFree = nil
+            lastPublishedRequestCapacitySlotsTotal = nil
+            pendingRequestCapacitySlotsFree = nil
+            pendingRequestCapacitySlotsTotal = nil
+        } else {
+            lastPublishedRequestCapacitySlotsFree = nil
+            lastPublishedRequestCapacitySlotsTotal = nil
+            pendingRequestCapacitySlotsFree = nil
+            pendingRequestCapacitySlotsTotal = nil
         }
         requestCapacityChangeHandler = handler
+    }
+
+    func markRequestCapacitySnapshotPublished(slotsFree: Int, slotsTotal: Int, supersedesPending: Bool = false) {
+        lastPublishedRequestCapacitySlotsFree = slotsFree
+        lastPublishedRequestCapacitySlotsTotal = slotsTotal
+        if supersedesPending {
+            pendingRequestCapacitySlotsFree = nil
+            pendingRequestCapacitySlotsTotal = nil
+            return
+        }
+        if pendingRequestCapacitySlotsFree == slotsFree,
+           pendingRequestCapacitySlotsTotal == slotsTotal {
+            pendingRequestCapacitySlotsFree = nil
+            pendingRequestCapacitySlotsTotal = nil
+        }
+    }
+
+    func markRequestCapacitySnapshotFailed(slotsFree: Int, slotsTotal: Int) {
+        if pendingRequestCapacitySlotsFree == slotsFree,
+           pendingRequestCapacitySlotsTotal == slotsTotal {
+            pendingRequestCapacitySlotsFree = nil
+            pendingRequestCapacitySlotsTotal = nil
+        }
     }
 
     /// Atomically fences new work once an operator pause or drain begins.
     /// Requests admitted before the transition remain counted and are drained;
     /// requests racing after it are rejected without entering the runtime.
-    func beginRequestIfAccepting(requestID: String? = nil) -> Date? {
+    func beginRequestIfAccepting(requestID: String? = nil) async -> Date? {
         guard status != .draining, status != .unavailable else { return nil }
-        return beginRequest(requestID: requestID)
+        return await beginRequest(requestID: requestID)
     }
 
-    func finishRequest(startedAt: Date, completion: CompletionResult?, failed: Bool, requestID: String? = nil) {
+    func finishRequest(startedAt: Date, completion: CompletionResult?, failed: Bool, requestID: String? = nil) async {
         noteRealRequestEnd()
         requestsInFlight = max(0, requestsInFlight - 1)
         if let requestID {
@@ -523,7 +559,7 @@ actor ProviderStatus {
                 completionTokens: completion.completionTokens
             )
         }
-        refreshAvailabilityState()
+        await refreshAvailabilityState()
         persistStats()
     }
 
@@ -554,7 +590,7 @@ actor ProviderStatus {
         maxConcurrency: Int? = nil,
         specDecodeDraftModelID: String? = nil,
         specDecodeNumDraftTokens: Int? = nil
-    ) {
+    ) async {
         self.modelID = modelID
         self.modelHash = modelHash
         self.modelHashAlgorithm = modelHashAlgorithm
@@ -571,7 +607,7 @@ actor ProviderStatus {
             transition(to: .ready, reason: "target_swap_completed")
         }
         setSpecDecodeConfig(draftModelID: specDecodeDraftModelID, numDraftTokens: specDecodeNumDraftTokens)
-        refreshAvailabilityState()
+        await refreshAvailabilityState()
     }
 
     func recordError() {
@@ -767,18 +803,44 @@ actor ProviderStatus {
         return true
     }
 
-    private func refreshAvailabilityState() {
+    private func refreshAvailabilityState() async {
         guard modelLoaded, status == .ready || status == .busy else {
             return
         }
-        let nextState: ProviderHealthState = requestsInFlight >= capacity.maxConcurrency ? .busy : .ready
-        let reason = requestsInFlight >= capacity.maxConcurrency ? "request_capacity_full" : "request_capacity_available"
-        if transition(to: nextState, reason: reason) {
-            requestCapacityChangeHandler?(requestCapacityTransitionSnapshot(state: nextState, reason: reason))
+        await refreshThermalObservation()
+        guard status == .ready || status == .busy else {
+            return
+        }
+        let capacityFull = requestsInFlight >= capacity.maxConcurrency
+        let nextState: ProviderHealthState = capacityFull ? .busy : .ready
+        let reason = lastObservedThermalThrottle
+            ? "thermal_throttled"
+            : (capacityFull ? "request_capacity_full" : "request_capacity_available")
+        let stateChanged = transition(to: nextState, reason: reason)
+        let emittedState = lastObservedThermalThrottle ? .busy : nextState
+        let slotsFree = lastObservedThermalThrottle ? 0 : max(0, capacity.maxConcurrency - requestsInFlight)
+        let baselineSlotsFree = pendingRequestCapacitySlotsFree ?? lastPublishedRequestCapacitySlotsFree
+        let baselineSlotsTotal = pendingRequestCapacitySlotsTotal ?? lastPublishedRequestCapacitySlotsTotal
+        let slotsChanged = baselineSlotsFree != slotsFree
+            || baselineSlotsTotal != capacity.maxConcurrency
+        if stateChanged || slotsChanged {
+            pendingRequestCapacitySlotsFree = slotsFree
+            pendingRequestCapacitySlotsTotal = capacity.maxConcurrency
+            requestCapacityChangeHandler?(requestCapacityTransitionSnapshot(state: emittedState, reason: reason, slotsFree: slotsFree))
         }
     }
 
-    private func requestCapacityTransitionSnapshot(state: ProviderHealthState, reason: String) -> RequestCapacityTransitionSnapshot {
+    private func refreshThermalObservation() async {
+        let throttled = await thermalGate?.isThrottled() ?? false
+        if throttled != lastObservedThermalThrottle {
+            lastObservedThermalThrottle = throttled
+            transitionID = UUID().uuidString.lowercased()
+            transitionAt = Date()
+            transitionReason = throttled ? "thermal_throttled" : "thermal_recovered"
+        }
+    }
+
+    private func requestCapacityTransitionSnapshot(state: ProviderHealthState, reason: String, slotsFree: Int) -> RequestCapacityTransitionSnapshot {
         requestCapacityTransitionSequence += 1
         let avgLatency = windowRequests > 0 ? windowLatencyMS / Double(windowRequests) : nil
         let throughput = windowGenerationSeconds > 0 ? Double(windowCompletionTokens) / windowGenerationSeconds : nil
@@ -787,7 +849,7 @@ actor ProviderStatus {
             state: state,
             reason: reason,
             observedAt: Date(),
-            slotsFree: max(0, capacity.maxConcurrency - requestsInFlight),
+            slotsFree: slotsFree,
             slotsTotal: capacity.maxConcurrency,
             requestsServedSinceLast: windowRequests,
             avgLatencyMSSinceLast: avgLatency,
