@@ -611,26 +611,16 @@ func TestRelayClosedSendMarksProviderUnavailable(t *testing.T) {
 	}
 }
 
-func TestProviderLivenessThresholdCapsB1ProvidersAtSixtySeconds(t *testing.T) {
+func TestProviderLivenessThresholdHonorsConfiguredMissThreshold(t *testing.T) {
 	cfg := config.Default()
 	cfg.Pool.HeartbeatMissThresholdS = 90
 	s := NewServer(cfg, pool.NewRegistry(nil), zerolog.Nop())
 
-	legacy := s.providerLivenessThreshold(pool.Provider{BinaryVersion: "1.8.0"})
-	if legacy != 90*time.Second {
-		t.Fatalf("legacy threshold = %v, want 90s", legacy)
-	}
-	b1 := s.providerLivenessThreshold(pool.Provider{BinaryVersion: "1.8.1"})
-	if b1 != 60*time.Second {
-		t.Fatalf("b1 threshold = %v, want 60s", b1)
-	}
-	next := s.providerLivenessThreshold(pool.Provider{BinaryVersion: "1.8.2"})
-	if next != 60*time.Second {
-		t.Fatalf("next release threshold = %v, want 60s", next)
-	}
-	malformed := s.providerLivenessThreshold(pool.Provider{BinaryVersion: "1.8.2-dev"})
-	if malformed != 90*time.Second {
-		t.Fatalf("malformed threshold = %v, want 90s", malformed)
+	for _, version := range []string{"1.8.0", "1.8.1", "1.8.2", "1.8.2-dev", "1.8.123"} {
+		got := s.providerLivenessThreshold(pool.Provider{BinaryVersion: version})
+		if got != 90*time.Second {
+			t.Fatalf("version %s threshold = %v, want 90s", version, got)
+		}
 	}
 
 	cfg.Pool.HeartbeatMissThresholdS = 10
