@@ -434,6 +434,97 @@ final class ProviderStatusTests: XCTestCase {
         XCTAssertEqual(recorder.reasons, ["request_capacity_full", "request_capacity_available"])
     }
 
+    func testRequestCapacityTransitionsNotifyEverySlotDelta() async {
+        let status = ProviderStatus(modelID: "m", modelLoaded: true, capacity: makeCapacity(maxConcurrency: 4))
+        let recorder = RequestCapacitySnapshotRecorder()
+        await status.setRequestCapacityChangeHandler { transition in
+            recorder.record(transition)
+        }
+
+        let first = await status.beginRequest(requestID: "request-1")
+        let second = await status.beginRequest(requestID: "request-2")
+        let third = await status.beginRequest(requestID: "request-3")
+        let fourth = await status.beginRequest(requestID: "request-4")
+        await status.finishRequest(startedAt: fourth, completion: nil, failed: false, requestID: "request-4")
+        await status.finishRequest(startedAt: third, completion: nil, failed: false, requestID: "request-3")
+        await status.finishRequest(startedAt: second, completion: nil, failed: false, requestID: "request-2")
+        await status.finishRequest(startedAt: first, completion: nil, failed: false, requestID: "request-1")
+        await status.setRequestCapacityChangeHandler(nil)
+
+        XCTAssertEqual(recorder.slotsFree, [3, 2, 1, 0, 1, 2, 3, 4])
+        XCTAssertEqual(recorder.states, [.ready, .ready, .ready, .busy, .ready, .ready, .ready, .ready])
+        XCTAssertEqual(recorder.reasons, [
+            "request_capacity_available",
+            "request_capacity_available",
+            "request_capacity_available",
+            "request_capacity_full",
+            "request_capacity_available",
+            "request_capacity_available",
+            "request_capacity_available",
+            "request_capacity_available",
+        ])
+    }
+
+    func testRequestCapacityTransitionsUseEffectiveThermalSlots() async {
+        let gate = ThermalGate(stateProvider: FixedThermalProvider(state: .serious))
+        let status = ProviderStatus(modelID: "m", modelLoaded: true, capacity: makeCapacity(maxConcurrency: 4), thermalGate: gate)
+        _ = await status.snapshot()
+        let recorder = RequestCapacitySnapshotRecorder()
+        await status.setRequestCapacityChangeHandler { transition in
+            recorder.record(transition)
+        }
+
+        let startedAt = await status.beginRequest(requestID: "request-1")
+        await status.finishRequest(startedAt: startedAt, completion: nil, failed: false, requestID: "request-1")
+        await status.setRequestCapacityChangeHandler(nil)
+
+        XCTAssertEqual(recorder.slotsFree, [0])
+        XCTAssertEqual(recorder.states, [.busy])
+        XCTAssertEqual(recorder.reasons, ["thermal_throttled"])
+    }
+
+    func testRequestCapacityTransitionsEmitAfterPublishedThermalZeroRecovers() async {
+        let thermalProvider = MutableThermalProvider(initial: .serious)
+        let gate = ThermalGate(stateProvider: thermalProvider)
+        let status = ProviderStatus(modelID: "m", modelLoaded: true, capacity: makeCapacity(maxConcurrency: 4), thermalGate: gate)
+        _ = await status.snapshot()
+        let recorder = RequestCapacitySnapshotRecorder()
+        await status.setRequestCapacityChangeHandler { transition in
+            recorder.record(transition)
+        }
+
+        let throttledStartedAt = await status.beginRequest(requestID: "request-throttled")
+        await status.finishRequest(startedAt: throttledStartedAt, completion: nil, failed: false, requestID: "request-throttled")
+        await gate.inject(state: .nominal)
+        let recoveredStartedAt = await status.beginRequest(requestID: "request-recovered")
+        await status.finishRequest(startedAt: recoveredStartedAt, completion: nil, failed: false, requestID: "request-recovered")
+        await status.setRequestCapacityChangeHandler(nil)
+
+        XCTAssertEqual(recorder.slotsFree, [0, 3, 4])
+        XCTAssertEqual(recorder.states, [.busy, .ready, .ready])
+        XCTAssertEqual(recorder.reasons, [
+            "thermal_throttled",
+            "request_capacity_available",
+            "request_capacity_available",
+        ])
+    }
+
+    func testRequestCapacityTransitionsNotifySlotsTotalDelta() async {
+        let status = ProviderStatus(modelID: "m", modelLoaded: true, capacity: makeCapacity(maxConcurrency: 2))
+        let recorder = RequestCapacitySnapshotRecorder()
+        await status.setRequestCapacityChangeHandler { transition in
+            recorder.record(transition)
+        }
+
+        let startedAt = await status.beginRequest(requestID: "request-1")
+        await status.completeTargetSwap(modelID: "m", modelHash: nil, maxConcurrency: 4)
+        await status.finishRequest(startedAt: startedAt, completion: nil, failed: false, requestID: "request-1")
+        await status.setRequestCapacityChangeHandler(nil)
+
+        XCTAssertEqual(Array(recorder.slotsTotal.prefix(2)), [2, 4])
+        XCTAssertEqual(Array(recorder.slotsFree.prefix(2)), [1, 3])
+    }
+
     func testSpecDecodeStatusFieldsAreDisabledWithoutDraftConfig() async {
         let status = ProviderStatus(modelID: "m", modelLoaded: true, capacity: makeCapacity())
         let snap = await status.snapshot()
@@ -1274,6 +1365,26 @@ final class ProviderStatusTests: XCTestCase {
         XCTAssertEqual(after.requestsServedSinceLast, 0, "window must reset cleanly after reentrant finishRequest")
     }
 
+    func testCapacityRefreshDoesNotOverwriteLifecycleFenceAfterThermalAwait() async {
+        let gate = ThermalGate(
+            stateProvider: FixedThermalProvider(state: .nominal),
+            isThrottledArtificialDelayNanos: 50_000_000
+        )
+        let status = ProviderStatus(modelID: "m", modelLoaded: true, capacity: makeCapacity(maxConcurrency: 1), thermalGate: gate)
+
+        let beginTask = Task {
+            await status.beginRequest(requestID: "r-racing")
+        }
+        try? await Task.sleep(nanoseconds: 10_000_000)
+        await status.setState(.draining, reason: "operator_pause_draining")
+        _ = await beginTask.value
+
+        let fenced = await status.snapshot()
+        XCTAssertEqual(fenced.status, .draining)
+        let rejected = await status.beginRequestIfAccepting(requestID: "r-after-fence")
+        XCTAssertNil(rejected, "capacity refresh resuming from thermal await must not reopen admission")
+    }
+
     func testRapidThermalTransitionsAllReachTheGate() async {
         // Regression: notifications captured at the edge feed a single
         // ordered drain task, so a rapid `.serious → .fair` doesn't drop
@@ -1376,5 +1487,35 @@ private final class RequestCapacityReasonRecorder: @unchecked Sendable {
     var reasons: [String] {
         lock.lock(); defer { lock.unlock() }
         return entries
+    }
+}
+
+private final class RequestCapacitySnapshotRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var entries: [RequestCapacityTransitionSnapshot] = []
+
+    func record(_ transition: RequestCapacityTransitionSnapshot) {
+        lock.lock(); defer { lock.unlock() }
+        entries.append(transition)
+    }
+
+    var slotsFree: [Int] {
+        lock.lock(); defer { lock.unlock() }
+        return entries.map(\.slotsFree)
+    }
+
+    var slotsTotal: [Int] {
+        lock.lock(); defer { lock.unlock() }
+        return entries.map(\.slotsTotal)
+    }
+
+    var states: [ProviderHealthState] {
+        lock.lock(); defer { lock.unlock() }
+        return entries.map(\.state)
+    }
+
+    var reasons: [String] {
+        lock.lock(); defer { lock.unlock() }
+        return entries.map(\.reason)
     }
 }

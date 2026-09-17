@@ -75,6 +75,14 @@ struct CoordinatorHeartbeatSendTimeout: Error, CustomStringConvertible, Equatabl
     }
 }
 
+struct CoordinatorCapacityStateUpdateTimeout: Error, CustomStringConvertible, Equatable {
+    let timeoutSeconds: Double
+
+    var description: String {
+        String(format: "coordinator capacity state_update send timed out after %.1fs", timeoutSeconds)
+    }
+}
+
 struct CoordinatorReceiptRotationTimeout: Error, CustomStringConvertible, Equatable {
     let timeoutSeconds: Double
 
@@ -392,9 +400,16 @@ actor CoordinatorClient {
     private var lastConnectionFailureDiagnostic: String?
     private var lastConnectionFailureAt: Date?
     private var pendingRequestCapacityTransitions: [Int: RequestCapacityTransitionSnapshot] = [:]
+    private var latestCoalescedRequestCapacityTransition: RequestCapacityTransitionSnapshot?
     private var nextRequestCapacityTransitionSequence: Int?
     private var sendingRequestCapacityTransitions = false
+    private var activeRequestCapacityTransitionGeneration: Int?
     private var requestCapacityTransitionGeneration = 0
+    private var stateUpdateSendInFlight = false
+    private var stateUpdateSendWaiters: [CheckedContinuation<Void, Never>] = []
+    private static let requestCapacityStateUpdateCoalesceNanoseconds: UInt64 = 20_000_000
+    private static let defaultCapacityStateUpdateSendTimeoutNanoseconds: UInt64 = 1_000_000_000
+    private var capacityStateUpdateSendTimeoutNanoseconds = CoordinatorClient.defaultCapacityStateUpdateSendTimeoutNanoseconds
 
     init?(
         config: AppConfig,
@@ -730,8 +745,10 @@ actor CoordinatorClient {
         requestCapacityTransitionGeneration &+= 1
         let generation = requestCapacityTransitionGeneration
         pendingRequestCapacityTransitions.removeAll()
+        latestCoalescedRequestCapacityTransition = nil
         nextRequestCapacityTransitionSequence = 1
         sendingRequestCapacityTransitions = false
+        activeRequestCapacityTransitionGeneration = nil
         await providerStatus.setRequestCapacityChangeHandler { [weak self] transition in
             Task { [weak self] in
                 await self?.enqueueRequestCapacityStateUpdate(transition, generation: generation)
@@ -743,8 +760,10 @@ actor CoordinatorClient {
         requestCapacityTransitionGeneration &+= 1
         await providerStatus.setRequestCapacityChangeHandler(nil)
         pendingRequestCapacityTransitions.removeAll()
+        latestCoalescedRequestCapacityTransition = nil
         nextRequestCapacityTransitionSequence = nil
         sendingRequestCapacityTransitions = false
+        activeRequestCapacityTransitionGeneration = nil
     }
 
     private func enqueueRequestCapacityStateUpdate(_ transition: RequestCapacityTransitionSnapshot, generation: Int) async {
@@ -752,20 +771,72 @@ actor CoordinatorClient {
               coordinatorSessionAccepted,
               !stopped
         else { return }
+        if let nextSequence = nextRequestCapacityTransitionSequence,
+           transition.sequence < nextSequence {
+            return
+        }
+        if sendingRequestCapacityTransitions {
+            if latestCoalescedRequestCapacityTransition == nil ||
+                transition.sequence >= latestCoalescedRequestCapacityTransition!.sequence {
+                latestCoalescedRequestCapacityTransition = transition
+            }
+            return
+        }
         pendingRequestCapacityTransitions[transition.sequence] = transition
-        guard !sendingRequestCapacityTransitions else { return }
         sendingRequestCapacityTransitions = true
-        defer { sendingRequestCapacityTransitions = false }
-        while let nextSequence = nextRequestCapacityTransitionSequence,
-              let nextTransition = pendingRequestCapacityTransitions.removeValue(forKey: nextSequence) {
-            nextRequestCapacityTransitionSequence = nextSequence + 1
+        activeRequestCapacityTransitionGeneration = generation
+        defer {
+            if activeRequestCapacityTransitionGeneration == generation {
+                sendingRequestCapacityTransitions = false
+                activeRequestCapacityTransitionGeneration = nil
+            }
+        }
+        try? await Task.sleep(nanoseconds: Self.requestCapacityStateUpdateCoalesceNanoseconds)
+        while true {
+            guard generation == requestCapacityTransitionGeneration else { return }
+            let nextTransition: RequestCapacityTransitionSnapshot
+            if let coalescedTransition = latestCoalescedRequestCapacityTransition {
+                latestCoalescedRequestCapacityTransition = nil
+                pendingRequestCapacityTransitions = pendingRequestCapacityTransitions.filter { $0.key > coalescedTransition.sequence }
+                nextRequestCapacityTransitionSequence = coalescedTransition.sequence + 1
+                nextTransition = coalescedTransition
+            } else if let nextSequence = nextRequestCapacityTransitionSequence,
+               let orderedTransition = pendingRequestCapacityTransitions.removeValue(forKey: nextSequence) {
+                nextRequestCapacityTransitionSequence = nextSequence + 1
+                nextTransition = orderedTransition
+            } else {
+                break
+            }
             do {
                 guard generation == requestCapacityTransitionGeneration else { return }
                 try await sendStateUpdate(transition: nextTransition, generation: generation)
             } catch {
+                await providerStatus.markRequestCapacitySnapshotFailed(
+                    slotsFree: nextTransition.slotsFree,
+                    slotsTotal: nextTransition.slotsTotal
+                )
                 Self.keepaliveDebug("request_capacity_state_update_error error=\(error)")
             }
         }
+    }
+
+    private func acquireStateUpdateSendPermit() async {
+        if !stateUpdateSendInFlight {
+            stateUpdateSendInFlight = true
+            return
+        }
+        await withCheckedContinuation { continuation in
+            stateUpdateSendWaiters.append(continuation)
+        }
+    }
+
+    private func releaseStateUpdateSendPermit() {
+        guard !stateUpdateSendWaiters.isEmpty else {
+            stateUpdateSendInFlight = false
+            return
+        }
+        let next = stateUpdateSendWaiters.removeFirst()
+        next.resume()
     }
 
     func sendIdlePrewarmEvent(event rawEvent: String, reason: String?) async {
@@ -2382,6 +2453,18 @@ actor CoordinatorClient {
 
     func acceptAuthResponseForTest(_ response: [String: Any], session: Tier2ProviderSession) async throws {
         try await acceptAuthResponse(response, session: session)
+    }
+
+    func reinstallRequestCapacityStateUpdateHandlerForTest() async {
+        await installRequestCapacityStateUpdateHandler()
+    }
+
+    func setCapacityStateUpdateSendTimeoutForTest(nanoseconds: UInt64) {
+        capacityStateUpdateSendTimeoutNanoseconds = nanoseconds
+    }
+
+    func setWebSocketForTest(_ socket: ProviderWebSocketTask?) {
+        webSocket = socket
     }
 
     private func handleOwnershipEvent(_ payload: [String: Any]) async throws {
@@ -5639,6 +5722,8 @@ actor CoordinatorClient {
         if let newState {
             await providerStatus.setState(newState, reason: reason)
         }
+        await acquireStateUpdateSendPermit()
+        defer { releaseStateUpdateSendPermit() }
         let snapshot = await providerStatus.snapshot()
         var payload: [String: Any] = [
             "type": "state_update",
@@ -5665,6 +5750,11 @@ actor CoordinatorClient {
             payload["last_supervisor_event"] = supervisorEvent
         }
         try await send(payload)
+        await providerStatus.markRequestCapacitySnapshotPublished(
+            slotsFree: snapshot.slotsFree,
+            slotsTotal: snapshot.slotsTotal,
+            supersedesPending: true
+        )
         if coordinatorSessionAccepted {
             do {
                 try await sendDiagnosticStatus(reason: reason)
@@ -5675,19 +5765,13 @@ actor CoordinatorClient {
     }
 
     private func sendStateUpdate(transition: RequestCapacityTransitionSnapshot, generation: Int) async throws {
-        var payload: [String: Any] = [
-            "type": "state_update",
-            "state": transition.state.rawValue,
-            "reason": transition.reason,
-            "since": ISO8601DateFormatter().string(from: transition.observedAt),
-            "metrics_snapshot": [
-                "slots_free": transition.slotsFree,
-                "slots_total": transition.slotsTotal,
-                "requests_served_since_last": transition.requestsServedSinceLast,
-                "avg_latency_ms_since_last": nullableNumber(transition.avgLatencyMSSinceLast),
-                "throughput_tps_since_last": nullableNumber(transition.throughputTPSSinceLast),
-            ],
-        ]
+        await acquireStateUpdateSendPermit()
+        defer { releaseStateUpdateSendPermit() }
+        if let latestTransition = latestCoalescedRequestCapacityTransition,
+           latestTransition.sequence > transition.sequence {
+            return
+        }
+        var payload: [String: Any] = [:]
         if let event = await AutoUpdateEventStore.shared.lastWireObject() {
             payload["last_autoupdate_event"] = event
         }
@@ -5695,17 +5779,76 @@ actor CoordinatorClient {
         if let supervisorEvent = SupervisorBeaconReader.lastWireObject() {
             payload["last_supervisor_event"] = supervisorEvent
         }
+        if let latestTransition = latestCoalescedRequestCapacityTransition,
+           latestTransition.sequence > transition.sequence {
+            return
+        }
+        let finalSnapshot = await providerStatus.snapshot()
+        guard finalSnapshot.status == .ready || finalSnapshot.status == .busy else {
+            return
+        }
+        let wireSlotsFree = finalSnapshot.slotsFree
+        let wireSlotsTotal = finalSnapshot.slotsTotal
+        let wireState: ProviderHealthState = wireSlotsFree > 0 ? .ready : .busy
+        let wireReason: String = finalSnapshot.thermallyThrottled
+            ? "thermal_throttled"
+            : (wireSlotsFree > 0 ? "request_capacity_available" : "request_capacity_full")
+        payload["type"] = "state_update"
+        payload["state"] = wireState.rawValue
+        payload["reason"] = wireReason
+        payload["since"] = ISO8601DateFormatter().string(from: transition.observedAt)
+        payload["metrics_snapshot"] = [
+            "slots_free": wireSlotsFree,
+            "slots_total": wireSlotsTotal,
+            "requests_served_since_last": transition.requestsServedSinceLast,
+            "avg_latency_ms_since_last": nullableNumber(transition.avgLatencyMSSinceLast),
+            "throughput_tps_since_last": nullableNumber(transition.throughputTPSSinceLast),
+        ]
+        guard generation == requestCapacityTransitionGeneration,
+              coordinatorSessionAccepted,
+              !stopped,
+              finalSnapshot.status == .ready || finalSnapshot.status == .busy
+        else { return }
+        try await sendCapacityStateUpdateBounded(payload)
         guard generation == requestCapacityTransitionGeneration,
               coordinatorSessionAccepted,
               !stopped
         else { return }
-        try await send(payload)
-        if coordinatorSessionAccepted {
-            do {
-                try await sendDiagnosticStatus(reason: transition.reason)
-            } catch {
-                Self.keepaliveDebug("diagnostic_status_send_error error=\(Self.sanitizedDiagnosticText(String(describing: error)))")
+        await providerStatus.markRequestCapacitySnapshotPublished(
+            slotsFree: wireSlotsFree,
+            slotsTotal: wireSlotsTotal
+        )
+    }
+
+    private func sendCapacityStateUpdateBounded(_ payload: sending [String: Any]) async throws {
+        var preparedPayload = payload
+        try applyAdmissionCanaryHeartbeatOverride(to: &preparedPayload)
+        if let sendOverride {
+            try await sendOverride(preparedPayload)
+            return
+        }
+        guard let socketRef = webSocket else { throw CancellationError() }
+        let data = try JSONSerialization.data(withJSONObject: preparedPayload, options: [.withoutEscapingSlashes])
+        let text = String(decoding: data, as: UTF8.self)
+        let message = URLSessionWebSocketTask.Message.string(text)
+        if let type = preparedPayload["type"] as? String {
+            Self.keepaliveDebug("ws_send type=\(type) bytes=\(text.utf8.count)")
+        }
+        let timeoutNanoseconds = capacityStateUpdateSendTimeoutNanoseconds
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            group.addTask {
+                let wsSendStart = clockMonotonicMicros()
+                try await socketRef.send(message)
+                EgressPerfTraceKey.current?.recordWSSend(durationMicros: clockMonotonicMicros() &- wsSendStart)
             }
+            group.addTask {
+                try await Task.sleep(nanoseconds: timeoutNanoseconds)
+                socketRef.cancel(with: .goingAway, reason: nil)
+                let timeoutSeconds = Double(timeoutNanoseconds) / 1_000_000_000
+                throw CoordinatorCapacityStateUpdateTimeout(timeoutSeconds: timeoutSeconds)
+            }
+            defer { group.cancelAll() }
+            try await group.next()
         }
     }
 
