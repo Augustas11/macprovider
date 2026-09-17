@@ -6385,19 +6385,12 @@ func (s *Server) activeRelayReadTimeout(provider pool.Provider) time.Duration {
 	return threshold
 }
 
-func (s *Server) providerLivenessThreshold(provider pool.Provider) time.Duration {
-	threshold := s.cfg.HeartbeatMissThreshold()
-	if providerSupportsInternalActivityLiveness(provider.BinaryVersion) {
-		if internalActivityThreshold := 60 * time.Second; threshold > internalActivityThreshold {
-			threshold = internalActivityThreshold
-		}
-	}
-	return threshold
-}
-
-func providerSupportsInternalActivityLiveness(binaryVersion string) bool {
-	cmp, ok := compareSemver(binaryVersion, "1.8.1")
-	return ok && cmp >= 0
+// providerLivenessThreshold is the idle-socket reap bound. Every CLI honors
+// pool.heartbeat_miss_threshold_s (SPEC-002 F-4). Dispatch write-probes stay
+// the fail-fast path for dead sockets at buyer-hit time; this threshold only
+// reaps silent half-open connections.
+func (s *Server) providerLivenessThreshold(_ pool.Provider) time.Duration {
+	return s.cfg.HeartbeatMissThreshold()
 }
 
 func validState(state pool.State) bool {
