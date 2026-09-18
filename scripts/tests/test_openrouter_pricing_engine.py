@@ -462,15 +462,24 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
         self.assertEqual(resolved[0]["source_model_id"], "google/gemma-4-31b-it")
         self.assertEqual(resolved[0]["ranking_model_permaslug"], "google/gemma-4-31b-it-20260402")
 
-    def test_catalog_resolution_does_not_directly_accept_free_variant(self):
+    def test_free_only_ranked_model_with_paid_sibling_is_skipped_not_pending(self):
+        # A :free ranking permaslug is never auto-accepted as a paid identity.
+        # It shares no canonical-slug link with the paid sibling here, so it
+        # cannot be pinned to a unique paid row and is dropped from the cohort
+        # with a recorded reason rather than being carried as a pending endpoint
+        # fetch (which used to force a fetch of the :free endpoint and abort).
         rankings = [{"source_model_id": "example/model:free", "rank": 1, "total_token_volume": "10", "ranking_date": "2026-08-04"}]
         catalog = {
             "example/model": {"canonical_slug": "example/model"},
             "example/model:free": {"canonical_slug": "example/model"},
         }
-        resolved = engine.resolve_rankings_to_catalog(rankings, catalog)
-        self.assertEqual(resolved[0]["source_model_id"], "example/model:free")
-        self.assertEqual(resolved[0]["_identity_resolution"], "endpoint_alias_pending")
+        skipped: list[dict] = []
+        resolved = engine.resolve_rankings_to_catalog(rankings, catalog, skipped_sink=skipped)
+        self.assertEqual(resolved, [])
+        self.assertEqual(
+            skipped,
+            [{"ranking_model_permaslug": "example/model:free", "reason": "dropped_free_variant"}],
+        )
 
     def test_catalog_resolution_does_not_select_single_free_canonical_candidate(self):
         rankings = [{"source_model_id": "example/model", "rank": 1, "total_token_volume": "10", "ranking_date": "2026-08-04"}]
@@ -479,12 +488,24 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
         self.assertEqual(resolved[0]["source_model_id"], "example/model")
         self.assertEqual(resolved[0]["_identity_resolution"], "endpoint_candidate_pending")
 
-    def test_catalog_resolution_rejects_free_ranking_alias_fallback(self):
+    def test_free_only_ranked_model_is_skipped_not_fatal(self):
+        # Regression: a :free ranked permaslug with no unique paid catalog row
+        # must be dropped from the cohort with a logged reason, NOT abort the
+        # whole fetch. The skip is identical whether or not endpoint documents
+        # are supplied, so the endpoint-fetch never requests the :free slug.
         rankings = [{"source_model_id": "example/model:free", "rank": 1, "total_token_volume": "10", "ranking_date": "2026-08-04"}]
         catalog = {"example/model": {"canonical_slug": "example/model"}}
         endpoints = {"example/model:free": {"data": {"id": "example/model"}}}
-        with self.assertRaisesRegex(engine.SchemaError, "free variant"):
-            engine.resolve_rankings_to_catalog(rankings, catalog, endpoints)
+        for endpoint_documents in (None, endpoints):
+            skipped: list[dict] = []
+            resolved = engine.resolve_rankings_to_catalog(
+                rankings, catalog, endpoint_documents, skipped_sink=skipped
+            )
+            self.assertEqual(resolved, [])
+            self.assertEqual(
+                skipped,
+                [{"ranking_model_permaslug": "example/model:free", "reason": "dropped_free_variant"}],
+            )
 
     def test_catalog_alias_resolution_uses_endpoint_confirmed_regular_variant_over_batch(self):
         rankings = [{"source_model_id": "z-ai/glm-5.2-20260616", "rank": 1, "total_token_volume": "10", "ranking_date": "2026-08-08"}]
@@ -1278,24 +1299,29 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
         ]}}
         self.assertIsNone(engine.cheapest_endpoint_pricing(document, "example/model:free", model_tokens_30d=5_000_000))
 
-    def test_mapped_free_variant_fails_current_compute(self):
+    def test_mapped_free_variant_is_skipped_not_fatal(self):
+        # A :free permaslug that reaches the mapped cohort is dropped before the
+        # endpoint fetch, and the rest of the top-N still produces a valid
+        # snapshot instead of aborting the entire run.
         rankings, models, endpoints = self.expanded_inputs()
         for row in rankings["data"]:
             if row["model_permaslug"] == "openai/gpt-oss-20b":
                 row["model_permaslug"] = "openai/gpt-oss-20b:free"
         models["data"][0]["id"] = "openai/gpt-oss-20b:free"
         models["data"][0]["canonical_slug"] = "openai/gpt-oss-20b"
+        # The :free slug is skipped before the endpoint fetch, so its endpoint is
+        # never requested; drop it from the hand-built endpoints set to mirror the
+        # live fetch loop (which only fetches selected, non-free rows).
         endpoints.pop("openai/gpt-oss-20b")
-        endpoints["openai/gpt-oss-20b:free"] = {"data": {"id": "openai/gpt-oss-20b:free", "endpoints": [{
-            "provider_name": "FreeVariant",
-            "status": 0,
-            "completion_tokens_last_30d": 5_000_000,
-            "pricing": {"prompt": "0.00000010", "completion": "0.00000020"},
-        }]}}
         policy_document = policy()
         policy_document["models"][0] = model("openai/gpt-oss-20b:free", "openai/gpt-oss-20b")
-        with self.assertRaisesRegex(engine.SchemaError, "free variant"):
-            engine.build_snapshot(rankings, models, endpoints, policy_document, now=NOW, top_n=50)
+        snapshot = engine.build_snapshot(rankings, models, endpoints, policy_document, now=NOW, top_n=50)
+        row_ids = {row["source_model_id"] for row in snapshot["rows"]}
+        self.assertNotIn("openai/gpt-oss-20b:free", row_ids)
+        self.assertNotIn("openai/gpt-oss-20b", row_ids)
+        # The remaining cohort is intact and internally consistent.
+        self.assertEqual(len(snapshot["rows"]), len(endpoints))
+        self.assertEqual(snapshot["source"]["fetch_metadata"]["observed_model_count"], len(endpoints))
 
     def test_demand_proposal_rejects_invalid_minimum_provider_targets(self):
         with self.assertRaises(engine.SchemaError):

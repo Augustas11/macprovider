@@ -62,7 +62,7 @@ RANKING_META_KEYS = frozenset({"as_of", "end_date", "start_date", "version"})
 CATALOG_ROW_KEYS = frozenset({"alias_target", "architecture", "benchmarks", "canonical_slug", "context_length", "created", "default_parameters", "description", "expiration_date", "hugging_face_id", "id", "knowledge_cutoff", "links", "name", "per_request_limits", "pricing", "reasoning", "supported_parameters", "supported_voices", "top_provider"})
 CATALOG_TOP_LEVEL_KEYS = frozenset({"data", "links", "total_count"})
 ENDPOINT_DATA_KEYS = frozenset({"architecture", "created", "description", "endpoints", "id", "name"})
-ENDPOINT_ROW_KEYS = frozenset({"completion_tokens_last_30d", "context_length", "latency_last_30m", "max_completion_tokens", "max_prompt_tokens", "model_id", "model_name", "name", "pricing", "provider_name", "quantization", "status", "supported_parameters", "supports_implicit_caching", "supports_voice_cloning", "tag", "throughput_last_30m", "uptime_last_1d", "uptime_last_30d", "uptime_last_30m", "uptime_last_5m"})
+ENDPOINT_ROW_KEYS = frozenset({"completion_tokens_last_30d", "context_length", "latency_last_30m", "max_completion_tokens", "max_prompt_tokens", "model_id", "model_name", "name", "perf_last_30m_by_workload", "pricing", "provider_name", "quantization", "status", "supported_parameters", "supports_implicit_caching", "supports_tool_choice", "supports_voice_cloning", "tag", "throughput_last_30m", "uptime_last_1d", "uptime_last_30d", "uptime_last_30m", "uptime_last_5m"})
 ENDPOINT_PRICING_KEYS = frozenset({
     "audio", "completion", "discount", "image", "image_output", "image_token",
     "input_audio_cache", "input_cache_read", "input_cache_write", "input_cache_write_1h",
@@ -534,6 +534,8 @@ def resolve_rankings_to_catalog(
     rankings: list[dict[str, Any]],
     catalog: Mapping[str, Mapping[str, Any]],
     endpoint_documents: Mapping[str, Mapping[str, Any]] | None = None,
+    *,
+    skipped_sink: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Resolve ranking permaslugs to the catalog ID accepted by endpoints API.
 
@@ -544,6 +546,15 @@ def resolve_rankings_to_catalog(
     the endpoint response for the exact ranking permaslug may select one only
     if its returned ID is exactly one of those catalog candidates. All other
     ambiguity is a coverage failure, never a guess.
+
+    A ranked identity that is itself a ``:free`` variant and cannot be pinned to
+    a unique paid catalog row is dropped from the returned cohort (a ``:free``
+    endpoint has no paid price and no earning potential); each drop is recorded
+    in ``skipped_sink`` when supplied. The skip decision depends only on the
+    ranking permaslug and catalog, so it is identical whether or not
+    ``endpoint_documents`` is provided, keeping the two resolution phases and the
+    endpoint-fetch cohort in lockstep. Genuine (non-free) ambiguity and schema
+    errors still fail closed.
     """
     canonical_index: dict[str, list[str]] = {}
     for model_id, catalog_row in catalog.items():
@@ -570,6 +581,22 @@ def resolve_rankings_to_catalog(
                     catalog_id = paid_candidates[0]
                     identity_resolution = "catalog_paid_variant"
                 else:
+                    if is_free_variant(ranking_slug):
+                        # A :free ranked identity with no unique paid catalog row
+                        # cannot be priced (its endpoint is $0) and has no earning
+                        # potential. Drop it from the cohort with a logged reason
+                        # instead of aborting the whole fetch. This is decided
+                        # from ranking_slug + catalog only, so both resolution
+                        # passes drop the same rows and the endpoint-fetch set
+                        # stays exactly aligned.
+                        if skipped_sink is not None:
+                            skipped_sink.append(
+                                {
+                                    "ranking_model_permaslug": ranking_slug,
+                                    "reason": "dropped_free_variant",
+                                }
+                            )
+                        continue
                     if endpoint_documents is None:
                         # Fetch the ranking permaslug itself first.  It is a
                         # temporary request identity, not a selected catalog
@@ -955,6 +982,13 @@ def build_snapshot(
     if any(value not in {"confirmed_empty_second_fetch", "recovered_nonempty_on_confirmation"} for value in confirmations.values()):
         raise SchemaError("endpoint confirmation provenance is invalid")
     rankings = resolve_rankings_to_catalog(rankings, catalog, endpoints_documents)
+    # Free-only ranked models are dropped by the resolver. Re-compact the
+    # surviving cohort to contiguous demand ranks (1..N) so the snapshot keeps
+    # its rank-contiguity invariant while preserving demand order and each
+    # model's absolute total_token_volume. This is a no-op when nothing dropped.
+    rankings.sort(key=lambda demand: demand["rank"])
+    for new_rank, demand in enumerate(rankings, start=1):
+        demand["rank"] = new_rank
     resolved_endpoints: dict[str, Mapping[str, Any]] = {}
     for demand in rankings:
         request_id = (
@@ -1972,7 +2006,16 @@ def fetch_live_snapshot(
     rankings = fetch_json(client, rankings_url, "daily rankings", retries=retries, timeout_seconds=timeout_seconds, sleeper=sleeper, deadline=deadline, clock=clock)
     catalog = fetch_json(client, MODELS_URL, "models catalog", retries=retries, timeout_seconds=timeout_seconds, sleeper=sleeper, deadline=deadline, clock=clock)
     catalog_index = validate_catalog(catalog)
-    ranking_rows = resolve_rankings_to_catalog(normalize_rankings(rankings, top_n), catalog_index)
+    skipped_ranked_models: list[dict[str, Any]] = []
+    ranking_rows = resolve_rankings_to_catalog(
+        normalize_rankings(rankings, top_n), catalog_index, skipped_sink=skipped_ranked_models
+    )
+    for entry in skipped_ranked_models:
+        print(
+            "openrouter pricing engine: skipped free-only ranked model "
+            f"{entry['ranking_model_permaslug']!r} ({entry['reason']})",
+            file=sys.stderr,
+        )
     endpoints: dict[str, Mapping[str, Any]] = {}
     endpoint_confirmations: dict[str, str] = {}
     for demand in ranking_rows:
