@@ -105,6 +105,16 @@ class ReceiptTests(unittest.TestCase):
             rankings = json.loads((fixtures / "rankings.json").read_text(encoding="utf-8"))
             models = json.loads((fixtures / "models.json").read_text(encoding="utf-8"))
             endpoints = json.loads((fixtures / "endpoints.json").read_text(encoding="utf-8"))
+            # OpenRouter replaced the per-endpoint 30-day completion-token
+            # volume with a 30-minute request-count activity signal. Mirror
+            # each endpoint's completion_tokens_last_30d into the new
+            # perf_last_30m_by_workload field (without editing the checked-in
+            # fixture JSON) so the request-weighted median still selects the
+            # same endpoint this fixture was built to exercise.
+            for endpoint_document in endpoints.values():
+                for endpoint in endpoint_document["data"]["endpoints"]:
+                    if "perf_last_30m_by_workload" not in endpoint and isinstance(endpoint.get("completion_tokens_last_30d"), int):
+                        endpoint["perf_last_30m_by_workload"] = {"text_generation": {"request_count": endpoint["completion_tokens_last_30d"]}}
             template_endpoint = copy.deepcopy(endpoints["example/new-model"])
             for index in range(12, 51):
                 model_id = f"unknown/model-{index}"

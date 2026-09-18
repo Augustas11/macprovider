@@ -34,6 +34,7 @@ def policy():
         "demand_top_n": 50,
         "undercut_fraction": "0.20",
         "cache_hit_fraction": "0.25",
+        "min_endpoint_request_count_30m": 1,
         "models": [
             model("openai/gpt-oss-20b", "openai/gpt-oss-20b"),
             model("google/gemma-4-26b-a4b-it", "google-gemma-4-26b-a4b-it"),
@@ -71,6 +72,30 @@ def reference_rate_card():
             "qwen2.5-coder-32b-instruct": row(850000),
         },
     }
+
+
+def with_request_activity(endpoints_by_model):
+    """Inject perf_last_30m_by_workload derived from completion_tokens_last_30d.
+
+    OpenRouter replaced the per-endpoint 30-day completion-token volume with a
+    30-minute request-count activity signal. The checked-in fixtures still
+    carry completion_tokens_last_30d for readability, so this mirrors that
+    same integer into the new field (without editing the fixture JSON) --
+    the request-weighted median then selects the same endpoint the fixtures
+    were built to exercise.
+    """
+    endpoints_by_model = copy.deepcopy(endpoints_by_model)
+    for document in endpoints_by_model.values():
+        endpoints = document.get("data", {}).get("endpoints")
+        if not isinstance(endpoints, list):
+            continue
+        for endpoint in endpoints:
+            if "perf_last_30m_by_workload" in endpoint:
+                continue
+            count = endpoint.get("completion_tokens_last_30d")
+            if isinstance(count, int) and not isinstance(count, bool):
+                endpoint["perf_last_30m_by_workload"] = {"text_generation": {"request_count": count}}
+    return endpoints_by_model
 
 
 def production_policy():
@@ -123,7 +148,11 @@ def synthetic_production_market_snapshot(*, illiquid_source: str | None = None):
     }
     endpoints = {}
     for source_id in ranked_sources:
-        completion_tokens = 999_999 if source_id == illiquid_source else 5_000_000
+        # Illiquidity is now expressed as 30-minute request activity below the
+        # policy floor (min_endpoint_request_count_30m), not a per-model
+        # token-volume floor. 0 fails the default floor of 1; any real
+        # activity count clears it.
+        request_count = 0 if source_id == illiquid_source else 5_000_000
         endpoints[source_id] = {
             "data": {
                 "id": source_id,
@@ -131,7 +160,7 @@ def synthetic_production_market_snapshot(*, illiquid_source: str | None = None):
                     {
                         "provider_name": "SyntheticLiquid",
                         "status": 0,
-                        "completion_tokens_last_30d": completion_tokens,
+                        "perf_last_30m_by_workload": {"text_generation": {"request_count": request_count}},
                         "pricing": {"prompt": "0.00000010", "completion": "0.00000020"},
                     }
                 ],
@@ -340,7 +369,7 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
     def setUp(self):
         self.rankings = fixture("rankings.json")
         self.models = fixture("models.json")
-        self.endpoints = fixture("endpoints.json")
+        self.endpoints = with_request_activity(fixture("endpoints.json"))
 
     def expanded_inputs(self):
         rankings = copy.deepcopy(self.rankings)
@@ -383,12 +412,14 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
         endpoints["openai/gpt-oss-20b"]["data"]["endpoints"] = [
             {
                 "provider_name": "A", "status": 0, "throughput_last_30m": "10",
-                "uptime_last_30d": "0.99", "completion_tokens_last_30d": 6_000_000,
+                "uptime_last_30d": "0.99",
+                "perf_last_30m_by_workload": {"text_generation": {"request_count": 6_000_000}},
                 "pricing": {"prompt": "0.00000090", "completion": "0.00000010"},
             },
             {
                 "provider_name": "B", "status": 0, "throughput_last_30m": "10",
-                "uptime_last_30d": "0.99", "completion_tokens_last_30d": 6_000_000,
+                "uptime_last_30d": "0.99",
+                "perf_last_30m_by_workload": {"text_generation": {"request_count": 6_000_000}},
                 "pricing": {"prompt": "0.00000020", "completion": "0.00000030"},
             },
         ]
@@ -401,32 +432,44 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
         candidates = pricing["liquidity_filter"]["eligible_endpoint_liquidity"]
         self.assertEqual(len(candidates), 2)
 
-    def test_liquidity_eligibility_ignores_missing_or_zero_telemetry(self):
+    def test_liquidity_eligibility_excludes_endpoints_missing_or_zero_request_activity(self):
+        # New activity signal: eligibility now turns entirely on
+        # perf_last_30m_by_workload[*].request_count. An endpoint reporting no
+        # request_count anywhere is treated as inactive (activity None) and
+        # excluded, exactly like one that reports an explicit zero count below
+        # the policy floor (default min_request_count_30m=1). Unrelated legacy
+        # telemetry fields (throughput/uptime) never factor into eligibility.
         pricing = engine.cheapest_endpoint_pricing(
             {"data": {"id": "example/model", "endpoints": [
                 {
-                    "provider_name": "NoTelemetry", "status": 0,
-                    "uptime_last_30d": "0", "completion_tokens_last_30d": 2_000_000,
+                    "provider_name": "NoActivityReported", "status": 0,
+                    "uptime_last_30d": "0",
                     "pricing": {"prompt": "0.00000010", "completion": "0.00000020"},
                 },
                 {
-                    "provider_name": "Telemetry", "status": 0,
+                    "provider_name": "ZeroActivity", "status": 0,
+                    "uptime_last_30d": "0.99",
+                    "perf_last_30m_by_workload": {"text_generation": {"request_count": 0}},
+                    "pricing": {"prompt": "0.00000015", "completion": "0.00000025"},
+                },
+                {
+                    "provider_name": "ActiveTelemetry", "status": 0,
                     "throughput_last_30m": "10", "uptime_last_30d": "0.99",
-                    "completion_tokens_last_30d": 1_000_000,
+                    "perf_last_30m_by_workload": {"text_generation": {"request_count": 1_000_000}},
                     "pricing": {"prompt": "0.00000030", "completion": "0.00000060"},
                 },
             ]}},
             "example/model",
         )
-        self.assertEqual(pricing["benchmark_provider"], "NoTelemetry")
-        self.assertEqual(pricing["completion_per_mtok"], "0.2")
+        self.assertEqual(pricing["benchmark_provider"], "ActiveTelemetry")
+        self.assertEqual(pricing["completion_per_mtok"], "0.6")
         self.assertEqual(
             [candidate["provider_name"] for candidate in pricing["liquidity_filter"]["eligible_endpoint_liquidity"]],
-            ["NoTelemetry", "Telemetry"],
+            ["ActiveTelemetry"],
         )
         self.assertEqual(
             [candidate["endpoint_model_id"] for candidate in pricing["liquidity_filter"]["eligible_endpoint_liquidity"]],
-            ["example/model", "example/model"],
+            ["example/model"],
         )
         self.assertNotIn(
             "throughput_last_30m",
@@ -445,7 +488,7 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
             {"date": "2026-08-03", "model_permaslug": "other", "total_tokens": "1"},
         ], "meta": {"as_of": "2026-08-04T02:00:00Z", "start_date": "2026-08-03", "end_date": "2026-08-03", "version": "v1"}}
         catalog = {"data": [{"id": "example/current-model", "canonical_slug": "example/old-model-20260101", "pricing": None}]}
-        endpoints = {"example/current-model": {"data": {"id": "example/current-model", "endpoints": [{"provider_name": "Provider", "status": 0, "throughput_last_30m": "50", "uptime_last_30d": "0.99", "completion_tokens_last_30d": 1000000, "pricing": {"prompt": "0.1", "completion": "0.2"}}]}}}
+        endpoints = {"example/current-model": {"data": {"id": "example/current-model", "endpoints": [{"provider_name": "Provider", "status": 0, "throughput_last_30m": "50", "uptime_last_30d": "0.99", "completion_tokens_last_30d": 1000000, "perf_last_30m_by_workload": {"text_generation": {"request_count": 1000000}}, "pricing": {"prompt": "0.1", "completion": "0.2"}}]}}}
         policy_document = policy()
         policy_document["models"] = []
         snapshot = engine.build_snapshot(rankings, catalog, endpoints, policy_document, now=NOW, top_n=1)
@@ -548,7 +591,7 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
             "bytedance-seed/seedream-4.5-20251203": {
                 "data": {
                     "id": "bytedance-seed/seedream-4.5",
-                    "endpoints": [{"provider_name": "Provider", "status": 0, "throughput_last_30m": "50", "uptime_last_30d": "0.99", "completion_tokens_last_30d": 1000000, "pricing": {"prompt": "0.1", "completion": "0.2"}}],
+                    "endpoints": [{"provider_name": "Provider", "status": 0, "throughput_last_30m": "50", "uptime_last_30d": "0.99", "completion_tokens_last_30d": 1000000, "perf_last_30m_by_workload": {"text_generation": {"request_count": 1000000}}, "pricing": {"prompt": "0.1", "completion": "0.2"}}],
                 }
             }
         }
@@ -1015,7 +1058,7 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
             "data": {
                 "id": regular_id,
                 "endpoints": [
-                    {"provider_name": "Provider", "status": 0, "throughput_last_30m": "50", "uptime_last_30d": "0.99", "completion_tokens_last_30d": 1000000, "pricing": {"prompt": "0.1", "completion": "0.2"}}
+                    {"provider_name": "Provider", "status": 0, "throughput_last_30m": "50", "uptime_last_30d": "0.99", "completion_tokens_last_30d": 1000000, "perf_last_30m_by_workload": {"text_generation": {"request_count": 1000000}}, "pricing": {"prompt": "0.1", "completion": "0.2"}}
                 ],
             }
         }
@@ -1150,7 +1193,7 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
         }
         catalog = {"data": [{"id": model_id, "canonical_slug": model_id, "name": "Example", "pricing": None}]}
         empty = {"data": {"id": model_id, "endpoints": []}}
-        priced = {"data": {"id": model_id, "endpoints": [{"provider_name": "Provider", "status": 0, "throughput_last_30m": "50", "uptime_last_30d": "0.99", "completion_tokens_last_30d": 1000000, "pricing": {"prompt": "0.1", "completion": "0.2"}}]}}
+        priced = {"data": {"id": model_id, "endpoints": [{"provider_name": "Provider", "status": 0, "throughput_last_30m": "50", "uptime_last_30d": "0.99", "completion_tokens_last_30d": 1000000, "perf_last_30m_by_workload": {"text_generation": {"request_count": 1000000}}, "pricing": {"prompt": "0.1", "completion": "0.2"}}]}}
         policy_document = policy()
         policy_document["models"] = []
         recovered_client = FakeHTTPClient({
@@ -1266,38 +1309,45 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
 
     def test_liquidity_filter_drops_only_non_spec_quotes(self):
         document = {"data": {"id": "example/model", "endpoints": [
-            {"provider_name": "Free", "status": 0, "throughput_last_30m": "50", "uptime_last_30d": "0.99", "completion_tokens_last_30d": 1000000, "pricing": {"prompt": "0", "completion": "0"}},
-            {"provider_name": "Dust", "status": 0, "throughput_last_30m": "0.2", "uptime_last_30d": "0.99", "completion_tokens_last_30d": 1000000, "pricing": {"prompt": "0.1", "completion": "0.2"}},
-            {"provider_name": "Liquid", "status": 0, "throughput_last_30m": "2", "uptime_last_30d": "0.95", "completion_tokens_last_30d": 1000000, "pricing": {"prompt": "0.3", "completion": "0.4"}},
+            {"provider_name": "Free", "status": 0, "throughput_last_30m": "50", "uptime_last_30d": "0.99", "perf_last_30m_by_workload": {"text_generation": {"request_count": 1000000}}, "pricing": {"prompt": "0", "completion": "0"}},
+            {"provider_name": "Dust", "status": 0, "throughput_last_30m": "0.2", "uptime_last_30d": "0.99", "perf_last_30m_by_workload": {"text_generation": {"request_count": 1000000}}, "pricing": {"prompt": "0.1", "completion": "0.2"}},
+            {"provider_name": "Liquid", "status": 0, "throughput_last_30m": "2", "uptime_last_30d": "0.95", "perf_last_30m_by_workload": {"text_generation": {"request_count": 1000000}}, "pricing": {"prompt": "0.3", "completion": "0.4"}},
         ]}}
         pricing = engine.cheapest_endpoint_pricing(document, "example/model")
         self.assertEqual(pricing["benchmark_provider"], "Dust")
         self.assertEqual(pricing["completion_per_mtok"], "200000")
         self.assertEqual(len(pricing["liquidity_filter"]["eligible_endpoint_liquidity"]), 2)
 
-    def test_liquidity_filter_ceils_fractional_model_volume_floor(self):
+    def test_liquidity_filter_excludes_endpoints_below_minimum_request_count(self):
+        # The floor used to be model-relative:
+        # liquidity_volume_floor(model_tokens_30d) = max(1_000_000, tokens/20),
+        # applied against each endpoint's own 30-day completion-token volume.
+        # That function and the per-model volume input are both gone. The
+        # floor is now the fixed policy value min_endpoint_request_count_30m,
+        # applied against each endpoint's 30-minute request_count -- an
+        # endpoint below the caller-supplied threshold is excluded even though
+        # it is otherwise a valid, actively priced endpoint.
         document = {"data": {"id": "example/model", "endpoints": [
-            {"provider_name": "TruncatedFloor", "status": 0, "completion_tokens_last_30d": 1_000_000, "pricing": {"prompt": "0.00000010", "completion": "0.00000020"}},
-            {"provider_name": "CeilingFloor", "status": 0, "completion_tokens_last_30d": 1_000_001, "pricing": {"prompt": "0.00000030", "completion": "0.00000040"}},
+            {"provider_name": "BelowThreshold", "status": 0, "perf_last_30m_by_workload": {"text_generation": {"request_count": 999}}, "pricing": {"prompt": "0.00000010", "completion": "0.00000020"}},
+            {"provider_name": "AtThreshold", "status": 0, "perf_last_30m_by_workload": {"text_generation": {"request_count": 1000}}, "pricing": {"prompt": "0.00000030", "completion": "0.00000040"}},
         ]}}
-        pricing = engine.cheapest_endpoint_pricing(document, "example/model", model_tokens_30d=20_000_001)
-        self.assertEqual(engine.liquidity_volume_floor(20_000_001), 1_000_001)
-        self.assertEqual(pricing["liquidity_filter"]["minimum_completion_tokens_last_30d"], 1_000_001)
+        pricing = engine.cheapest_endpoint_pricing(document, "example/model", min_request_count_30m=1000)
+        self.assertEqual(pricing["liquidity_filter"]["minimum_request_count_last_30m"], 1000)
         self.assertEqual(
             [candidate["provider_name"] for candidate in pricing["liquidity_filter"]["eligible_endpoint_liquidity"]],
-            ["CeilingFloor"],
+            ["AtThreshold"],
         )
-        self.assertEqual(pricing["benchmark_provider"], "CeilingFloor")
+        self.assertEqual(pricing["benchmark_provider"], "AtThreshold")
 
     def test_free_variant_positive_prices_are_not_liquid(self):
         document = {"data": {"id": "example/model:free", "endpoints": [
             {
                 "provider_name": "FreeVariant", "status": 0,
-                "completion_tokens_last_30d": 5_000_000,
+                "perf_last_30m_by_workload": {"text_generation": {"request_count": 5_000_000}},
                 "pricing": {"prompt": "0.1", "completion": "0.2"},
             },
         ]}}
-        self.assertIsNone(engine.cheapest_endpoint_pricing(document, "example/model:free", model_tokens_30d=5_000_000))
+        self.assertIsNone(engine.cheapest_endpoint_pricing(document, "example/model:free"))
 
     def test_mapped_free_variant_is_skipped_not_fatal(self):
         # A :free permaslug that reaches the mapped cohort is dropped before the
@@ -1322,6 +1372,25 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
         # The remaining cohort is intact and internally consistent.
         self.assertEqual(len(snapshot["rows"]), len(endpoints))
         self.assertEqual(snapshot["source"]["fetch_metadata"]["observed_model_count"], len(endpoints))
+
+    def test_market_peg_coverage_accepts_observed_shortfall_from_free_drops(self):
+        # A :free-variant drop leaves observed_model_count legitimately below the
+        # requested top-N. Market-peg coverage is asserted on the REQUESTED
+        # cohort, not the observed count, so the shortfall must not raise.
+        base = {
+            "schema_version": engine.SNAPSHOT_SCHEMA_VERSION,
+            "source": {"fetch_metadata": {
+                "requested_top_n": 50,
+                "observed_model_count": 42,
+                "ranking_window_end_date": "2026-08-04",
+            }},
+        }
+        engine.validate_market_peg_snapshot_requirements(base, policy(), now=NOW)
+        # A genuinely short REQUESTED cohort (partial/failed fetch) still fails closed.
+        short = copy.deepcopy(base)
+        short["source"]["fetch_metadata"]["requested_top_n"] = 49
+        with self.assertRaisesRegex(engine.SchemaError, "top-demand coverage"):
+            engine.validate_market_peg_snapshot_requirements(short, policy(), now=NOW)
 
     def test_demand_proposal_rejects_invalid_minimum_provider_targets(self):
         with self.assertRaises(engine.SchemaError):

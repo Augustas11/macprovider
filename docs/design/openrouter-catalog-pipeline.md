@@ -122,6 +122,40 @@ HF mlx-community probe ─▶ servability + residency ────────�
 **Human gate stays on the money-path apply** (PR merge). Everything else — fetch,
 compute, select, tier, materialize, sign, deploy — is automated mechanics.
 
+## Pricing basis change (money path) — OpenRouter removed the liquidity input
+
+OpenRouter restructured its endpoints API: it **removed per-endpoint
+`completion_tokens_last_30d`** (also `max_prompt_tokens`, `uptime_last_30d`) and
+added `perf_last_30m_by_workload` (nested latency/throughput percentiles +
+`request_count`) and `supports_tool_choice`. The engine's market peg was a
+**liquidity-weighted median weighted by 30-day token volume** — with that input
+gone, every endpoint failed the liquidity filter and **no model could be priced**.
+
+There is no replacement for global per-endpoint 30d volume: the endpoints API no
+longer exposes it, and the "user activity grouped by endpoint" analytics API is
+**account-scoped** (our own usage, needs a management key), not market-wide.
+
+**Adaptation (implemented):** peg to the market with a **request-weighted
+median** over active (`status:0`) paid endpoints, weighted and floor-gated by the
+surviving global signal `perf_last_30m_by_workload.<wk>.request_count` (a
+30-*minute* request count). A new policy field `min_endpoint_request_count_30m`
+(default 1) is the anti-thin-liquidity floor; the request-weighting preserves the
+original manipulation-resistance intent (a single-request endpoint has negligible
+weight). The `liquidity_filter` provenance is renamed honestly
+(`liquidity_signal: "openrouter_request_count_last_30m"`,
+`request_weighted_median`, `request_count_last_30m`), and the policy version is
+bumped to `openrouter-market-feeds-v0.13.0`. `validate_snapshot` re-derives and
+cross-checks the request-weighted median. This is a money-path methodology change
+and goes through the 3-lane audit.
+
+**Live evidence (2026-09-18, valid key):** 40/42 rows now `active_priced`.
+`gpt-oss-120b` request-weighted completion **$0.36/Mtok** (Google endpoint, 47.7k
+reqs/30m) vs the deployed feed's stale $0.136 → ~$0.29/Mtok after undercut. Note
+this corrects the brief's $0.60 figure ($0.17 was a low-traffic provider; $0.36 is
+the activity-weighted market). Demand-dominant rows are closed-weight frontier
+models (deepseek-v4-flash 50T tok, gpt-5.6, claude, gemini) — not MLX-servable, so
+they are demand context, not catalog candidates.
+
 ## Build plan (split, per GOAL)
 
 **PR 1 (this branch) — design + blocking fixes + working proposer:**

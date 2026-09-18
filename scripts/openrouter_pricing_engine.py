@@ -44,7 +44,7 @@ TOOL_VERSION = "openrouter-pricing-engine-v1"
 DEFAULT_POLICY_PATH = Path(__file__).with_name("openrouter_pricing_policy.json")
 CURRENT_POLICY_KEYS = frozenset({
     "policy_version", "demand_top_n", "undercut_fraction",
-    "cache_hit_fraction", "models",
+    "cache_hit_fraction", "min_endpoint_request_count_30m", "models",
 })
 LEGACY_POLICY_KEYS = frozenset({
     "policy_version", "demand_top_n", "broad_fleet_undercut_fraction",
@@ -672,11 +672,38 @@ def weighted_median(
     return ordered[-1][value_index], ordered[-1]
 
 
-def liquidity_volume_floor(model_tokens_30d: int) -> int:
-    return max(1_000_000, (model_tokens_30d + 19) // 20)
+def endpoint_request_activity(endpoint: Mapping[str, Any], model_id: str, index: int) -> int | None:
+    """Recent per-endpoint request activity from ``perf_last_30m_by_workload``.
+
+    OpenRouter removed the per-endpoint 30-day token volume
+    (``completion_tokens_last_30d``) that the liquidity filter used to weight by.
+    The surviving global, per-endpoint activity signal is
+    ``perf_last_30m_by_workload.<workload>.request_count`` -- a 30-minute request
+    count -- summed across workloads. Returns ``None`` when no ``request_count``
+    is reported (the endpoint is treated as inactive and excluded, mirroring the
+    old skip on missing volume); malformed values fail closed.
+    """
+    perf = endpoint.get("perf_last_30m_by_workload")
+    if perf is None:
+        return None
+    if not isinstance(perf, dict):
+        raise SchemaError(f"endpoints response for {model_id}: endpoints[{index}].perf_last_30m_by_workload must be an object")
+    total = 0
+    observed = False
+    for workload, stats in perf.items():
+        if not isinstance(stats, dict):
+            raise SchemaError(f"endpoints response for {model_id}: endpoints[{index}].perf_last_30m_by_workload[{workload!r}] must be an object")
+        count = stats.get("request_count")
+        if count is None:
+            continue
+        if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+            raise SchemaError(f"endpoints response for {model_id}: endpoints[{index}].perf_last_30m_by_workload[{workload!r}].request_count is invalid")
+        total += count
+        observed = True
+    return total if observed else None
 
 
-def cheapest_endpoint_pricing(document: Mapping[str, Any], model_id: str, *, model_tokens_30d: int = 0) -> dict[str, Any] | None:
+def cheapest_endpoint_pricing(document: Mapping[str, Any], model_id: str, *, min_request_count_30m: int = 1) -> dict[str, Any] | None:
     require_allowed_keys(document, frozenset({"data"}), f"endpoints response for {model_id}")
     data = document.get("data")
     if not isinstance(data, dict):
@@ -692,7 +719,6 @@ def cheapest_endpoint_pricing(document: Mapping[str, Any], model_id: str, *, mod
     if not endpoints:
         return None
     priced: list[tuple[Decimal, Decimal, str, int, str]] = []
-    volume_floor = liquidity_volume_floor(model_tokens_30d)
     for index, endpoint in enumerate(endpoints):
         if not isinstance(endpoint, dict):
             raise SchemaError(f"endpoints response for {model_id}: endpoints[{index}] must be an object")
@@ -714,19 +740,18 @@ def cheapest_endpoint_pricing(document: Mapping[str, Any], model_id: str, *, mod
             endpoint_model_id = model_id
         if not isinstance(endpoint_model_id, str) or not MODEL_ID_RE.fullmatch(endpoint_model_id):
             raise SchemaError(f"endpoints response for {model_id}: endpoints[{index}].model_id is invalid")
-        try:
-            completion_tokens = parse_nonnegative_integer(endpoint.get("completion_tokens_last_30d"), f"endpoints response for {model_id}: completion_tokens_last_30d")
-        except SchemaError:
+        activity = endpoint_request_activity(endpoint, model_id, index)
+        if activity is None:
             continue
-        if status != 0 or prompt == 0 or completion == 0 or completion_tokens < volume_floor:
+        if status != 0 or prompt == 0 or completion == 0 or activity < min_request_count_30m:
             continue
-        priced.append((completion, prompt, provider, completion_tokens, endpoint_model_id))
+        priced.append((completion, prompt, provider, activity, endpoint_model_id))
     if not priced:
         return None
     completion, completion_endpoint = weighted_median(priced, 0)
     prompt, prompt_endpoint = weighted_median(priced, 1)
-    _, _, provider, selected_tokens, _ = completion_endpoint
-    _, _, prompt_provider, prompt_tokens, _ = prompt_endpoint
+    _, _, provider, selected_activity, _ = completion_endpoint
+    _, _, prompt_provider, prompt_activity, _ = prompt_endpoint
     liquidity_candidates = [
         {
             "endpoint_status": status,
@@ -734,9 +759,9 @@ def cheapest_endpoint_pricing(document: Mapping[str, Any], model_id: str, *, mod
             "provider_name": candidate_provider,
             "prompt_usd_per_mtok": decimal_string(candidate_prompt * Decimal("1000000")),
             "completion_usd_per_mtok": decimal_string(candidate_completion * Decimal("1000000")),
-            "completion_tokens_last_30d": candidate_tokens,
+            "request_count_last_30m": candidate_activity,
         }
-        for status, candidate_model_id, candidate_provider, candidate_prompt, candidate_completion, candidate_tokens in (
+        for status, candidate_model_id, candidate_provider, candidate_prompt, candidate_completion, candidate_activity in (
             (0, item[4], item[2], item[1], item[0], item[3]) for item in priced
         )
     ]
@@ -750,11 +775,12 @@ def cheapest_endpoint_pricing(document: Mapping[str, Any], model_id: str, *, mod
         "liquidity_filter": {
             "endpoint_status": 0,
             "paid_prices": True,
-            "minimum_completion_tokens_last_30d": volume_floor,
-            "completion_tokens_last_30d": selected_tokens,
-            "volume_weighted_median": True,
+            "liquidity_signal": "openrouter_request_count_last_30m",
+            "minimum_request_count_last_30m": min_request_count_30m,
+            "request_count_last_30m": selected_activity,
+            "request_weighted_median": True,
             "selected_prompt_provider": prompt_provider,
-            "selected_prompt_completion_tokens_last_30d": prompt_tokens,
+            "selected_prompt_request_count_last_30m": prompt_activity,
             "eligible_endpoint_liquidity": liquidity_candidates,
         },
     }
@@ -858,10 +884,10 @@ def validate_snapshot(snapshot: Mapping[str, Any]) -> None:
             raise SchemaError(f"snapshot.rows[{index}] active pricing cannot derive from a free variant")
         if pricing_status == "active_priced" and schema_version != LEGACY_SNAPSHOT_SCHEMA_VERSION:
             liquidity = pricing.get("liquidity_filter")
-            required_liquidity = {"endpoint_status", "paid_prices", "minimum_completion_tokens_last_30d", "completion_tokens_last_30d", "volume_weighted_median", "selected_prompt_provider", "selected_prompt_completion_tokens_last_30d", "eligible_endpoint_liquidity"}
+            required_liquidity = {"endpoint_status", "paid_prices", "liquidity_signal", "minimum_request_count_last_30m", "request_count_last_30m", "request_weighted_median", "selected_prompt_provider", "selected_prompt_request_count_last_30m", "eligible_endpoint_liquidity"}
             if not isinstance(liquidity, dict) or set(liquidity) != required_liquidity:
                 raise SchemaError(f"snapshot.rows[{index}] has invalid liquidity filter")
-            if liquidity["endpoint_status"] != 0 or liquidity["paid_prices"] is not True or liquidity["volume_weighted_median"] is not True:
+            if liquidity["endpoint_status"] != 0 or liquidity["paid_prices"] is not True or liquidity["request_weighted_median"] is not True or liquidity["liquidity_signal"] != "openrouter_request_count_last_30m":
                 raise SchemaError(f"snapshot.rows[{index}] liquidity filter does not match the policy thresholds")
             try:
                 selected_prompt = Decimal(pricing["input_per_mtok"])
@@ -869,7 +895,7 @@ def validate_snapshot(snapshot: Mapping[str, Any]) -> None:
                 candidates = liquidity.get("eligible_endpoint_liquidity")
                 if not isinstance(candidates, list) or not candidates:
                     raise SchemaError(f"snapshot.rows[{index}].liquidity_filter.eligible_endpoint_liquidity must be a non-empty array")
-                required_candidate = {"endpoint_status", "endpoint_model_id", "provider_name", "prompt_usd_per_mtok", "completion_usd_per_mtok", "completion_tokens_last_30d"}
+                required_candidate = {"endpoint_status", "endpoint_model_id", "provider_name", "prompt_usd_per_mtok", "completion_usd_per_mtok", "request_count_last_30m"}
                 weighted_candidates: list[tuple[Decimal, Decimal, str, int, str]] = []
                 for candidate_index, candidate in enumerate(candidates):
                     if not isinstance(candidate, dict) or set(candidate) != required_candidate:
@@ -885,37 +911,34 @@ def validate_snapshot(snapshot: Mapping[str, Any]) -> None:
                                 raise SchemaError
                         except (InvalidOperation, ValueError, TypeError, SchemaError):
                             raise SchemaError(f"snapshot.rows[{index}].liquidity_filter.eligible_endpoint_liquidity[{candidate_index}].{field} is invalid")
-                    candidate_tokens = candidate.get("completion_tokens_last_30d")
-                    if isinstance(candidate_tokens, bool) or not isinstance(candidate_tokens, int) or candidate_tokens < 0:
-                        raise SchemaError(f"snapshot.rows[{index}].liquidity_filter.eligible_endpoint_liquidity[{candidate_index}].completion_tokens_last_30d is invalid")
+                    candidate_activity = candidate.get("request_count_last_30m")
+                    if isinstance(candidate_activity, bool) or not isinstance(candidate_activity, int) or candidate_activity < 0:
+                        raise SchemaError(f"snapshot.rows[{index}].liquidity_filter.eligible_endpoint_liquidity[{candidate_index}].request_count_last_30m is invalid")
                     weighted_candidates.append(
                         (
                             Decimal(candidate["completion_usd_per_mtok"]),
                             Decimal(candidate["prompt_usd_per_mtok"]),
                             candidate["provider_name"],
-                            candidate_tokens,
+                            candidate_activity,
                             endpoint_model_id,
                         )
                     )
-                selected_completion_tokens = parse_nonnegative_integer(liquidity["completion_tokens_last_30d"], f"snapshot.rows[{index}].liquidity_filter.completion_tokens_last_30d")
-                minimum_completion_tokens = parse_nonnegative_integer(liquidity["minimum_completion_tokens_last_30d"], f"snapshot.rows[{index}].liquidity_filter.minimum_completion_tokens_last_30d")
-                selected_prompt_tokens = parse_nonnegative_integer(liquidity["selected_prompt_completion_tokens_last_30d"], f"snapshot.rows[{index}].liquidity_filter.selected_prompt_completion_tokens_last_30d")
+                selected_activity = parse_nonnegative_integer(liquidity["request_count_last_30m"], f"snapshot.rows[{index}].liquidity_filter.request_count_last_30m")
+                minimum_activity = parse_nonnegative_integer(liquidity["minimum_request_count_last_30m"], f"snapshot.rows[{index}].liquidity_filter.minimum_request_count_last_30m")
+                selected_prompt_activity = parse_nonnegative_integer(liquidity["selected_prompt_request_count_last_30m"], f"snapshot.rows[{index}].liquidity_filter.selected_prompt_request_count_last_30m")
             except (InvalidOperation, ValueError) as error:
                 raise SchemaError(f"snapshot.rows[{index}] liquidity/pricing values are invalid") from error
-            if not isinstance(liquidity["selected_prompt_provider"], str) or not liquidity["selected_prompt_provider"] or selected_prompt <= 0 or selected_completion <= 0 or minimum_completion_tokens < 1_000_000 or selected_completion_tokens < minimum_completion_tokens or selected_prompt_tokens < minimum_completion_tokens:
-                raise SchemaError(f"snapshot.rows[{index}] liquidity-selected endpoint is not paid and liquid")
-            expected_floor = liquidity_volume_floor(int(demand["total_token_volume"]))
-            if minimum_completion_tokens != expected_floor:
-                raise SchemaError(f"snapshot.rows[{index}] liquidity filter has invalid volume floor")
-            if any(candidate[3] < expected_floor for candidate in weighted_candidates):
-                raise SchemaError(f"snapshot.rows[{index}] liquidity filter includes an illiquid endpoint")
+            if not isinstance(liquidity["selected_prompt_provider"], str) or not liquidity["selected_prompt_provider"] or selected_prompt <= 0 or selected_completion <= 0 or minimum_activity < 1 or selected_activity < minimum_activity or selected_prompt_activity < minimum_activity:
+                raise SchemaError(f"snapshot.rows[{index}] liquidity-selected endpoint is not paid and active")
+            if any(candidate[3] < minimum_activity for candidate in weighted_candidates):
+                raise SchemaError(f"snapshot.rows[{index}] liquidity filter includes an inactive endpoint")
             expected_completion, completion_endpoint = weighted_median(weighted_candidates, 0)
             expected_prompt, prompt_endpoint = weighted_median(weighted_candidates, 1)
             if selected_completion != expected_completion or selected_prompt != expected_prompt:
                 raise SchemaError(f"snapshot.rows[{index}] liquidity-filtered median price is invalid")
-            if pricing["benchmark_provider"] != completion_endpoint[2] or selected_completion_tokens != completion_endpoint[3]:
+            if pricing["benchmark_provider"] != completion_endpoint[2] or selected_activity != completion_endpoint[3]:
                 raise SchemaError(f"snapshot.rows[{index}] liquidity-filtered completion endpoint is invalid")
-            if liquidity["selected_prompt_provider"] != prompt_endpoint[2] or selected_prompt_tokens != prompt_endpoint[3]:
+            if liquidity["selected_prompt_provider"] != prompt_endpoint[2] or selected_prompt_activity != prompt_endpoint[3]:
                 raise SchemaError(f"snapshot.rows[{index}] liquidity-filtered prompt endpoint is invalid")
         if not isinstance(row.get("source_metadata"), dict) or set(row["source_metadata"]) != {"ranking_model_permaslug", "catalog_canonical_slug", "catalog_name", "identity_resolution", "endpoint_set_confirmation"}:
             raise SchemaError(f"snapshot.rows[{index}] has invalid source metadata")
@@ -1001,6 +1024,7 @@ def build_snapshot(
             raise SchemaError(f"endpoint alias resolution produced duplicate model id {source_model_id!r}")
         resolved_endpoints[source_model_id] = endpoints_documents[request_id]
     policy_models = policy_model_index(policy)
+    min_request_count_30m = policy.get("min_endpoint_request_count_30m", 1)
     normalized_rows: list[dict[str, Any]] = []
     for demand in rankings:
         source_model_id = demand["source_model_id"]
@@ -1010,7 +1034,7 @@ def build_snapshot(
         endpoint_pricing = cheapest_endpoint_pricing(
             endpoint_document,
             source_model_id,
-            model_tokens_30d=int(demand["total_token_volume"]),
+            min_request_count_30m=min_request_count_30m,
         )
         request_id = (
             demand["ranking_model_permaslug"]
@@ -1181,6 +1205,12 @@ def validate_policy(policy: Mapping[str, Any]) -> None:
             raise SchemaError("policy cache_hit_fraction must be within 0-1")
     elif set(policy) == CURRENT_POLICY_KEYS:
         raise SchemaError("policy cache_hit_fraction is required")
+    # Minimum per-endpoint 30-minute request activity for an endpoint to enter
+    # the priced cohort. Replaces the removed 30-day token-volume liquidity
+    # floor; the request-weighted median still provides manipulation resistance.
+    min_requests = policy.get("min_endpoint_request_count_30m")
+    if isinstance(min_requests, bool) or not isinstance(min_requests, int) or min_requests < 1:
+        raise SchemaError("policy min_endpoint_request_count_30m must be an integer of at least 1")
     policy_model_index(policy)
 
 
@@ -1405,7 +1435,15 @@ def market_peg_eligibility(model: Mapping[str, Any], row: Mapping[str, Any]) -> 
 def validate_market_peg_snapshot_requirements(snapshot: Mapping[str, Any], policy: Mapping[str, Any], *, now: datetime) -> None:
     required_top_n = policy["demand_top_n"]
     coverage = snapshot["source"]["fetch_metadata"]
-    if coverage["requested_top_n"] < required_top_n or coverage["observed_model_count"] < required_top_n:
+    # Coverage is asserted on the REQUESTED cohort, not observed_model_count.
+    # The fetch requests the full top-N demand cohort; :free-variant ranked
+    # models are then dropped (they have no paid price), so observed_model_count
+    # is legitimately below required_top_n whenever the live top-N contains free
+    # variants. Every other reason a requested row would not be observed (partial
+    # endpoint pull, ambiguous identity, schema drift) already fails closed in
+    # build_snapshot before a snapshot exists, so requested_top_n >= required is
+    # a sufficient and honest coverage guarantee.
+    if coverage["requested_top_n"] < required_top_n:
         raise SchemaError("snapshot does not contain the policy-required top-demand coverage")
     if snapshot.get("schema_version") == LEGACY_SNAPSHOT_SCHEMA_VERSION:
         return
