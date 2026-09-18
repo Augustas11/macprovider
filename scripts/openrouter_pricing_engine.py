@@ -2147,6 +2147,12 @@ OPEN_WEIGHT_VENDORS = frozenset({
     "baidu", "moonshotai", "inclusionai", "stepfun", "nousresearch",
 })
 CLOSED_MODEL_MARKERS = ("gemini", "gpt-5", "gpt-6", "gpt-4", "grok", "claude", "o1-", "o3-", "o4-")
+# Vision-language pipeline tags whose models are, in practice, served for TEXT via
+# mlx-vlm and are top-yield earners (the Qwen3-VL and Gemma-3 families). The
+# servability resolver conservatively marks them `unresolved` (it will not certify
+# a text-only path from remote metadata); `propose` includes them as a flagged
+# text-serving class so the highest-yield families are not silently dropped.
+VISION_LANGUAGE_TEXT_TAGS = frozenset({"image-text-to-text"})
 
 
 def assign_ram_tier(required_gb: Decimal, tiers: Sequence[int] = CATALOG_RAM_TIERS_GB, safety_margin_gb: int = CATALOG_SAFETY_MARGIN_GB) -> int | None:
@@ -2234,7 +2240,18 @@ def build_catalog_proposal(
             excluded.append({"model_id": model_id, "reason": f"demand {demand} req/30m below floor {demand_floor_request_count_30m}"})
             continue
         verdict = servability.get("verdict")
-        if verdict != "review":
+        pipeline_tag = servability.get("pipeline_tag")
+        if verdict == "review":
+            serving_path = "text"
+            servability_note = (servability.get("reasons") or [""])[0]
+        elif verdict == "unresolved" and pipeline_tag in VISION_LANGUAGE_TEXT_TAGS and servability.get("required_gb") is not None:
+            # Vision-language model served for TEXT (Qwen3-VL / Gemma-3 families):
+            # a top-yield earner in practice, not dropped for the VL pipeline tag.
+            # required_gb already counts the vision tower, so the tier fit stays
+            # conservative; the operator confirms the mlx-vlm text serving path.
+            serving_path = "vision_language_text"
+            servability_note = f"vision-language model ({pipeline_tag}) served for text via mlx-vlm; confirm the text serving path before pricing"
+        else:
             excluded.append({"model_id": model_id, "reason": f"not servable ({verdict}): {(servability.get('reasons') or [''])[0]}"})
             continue
         try:
@@ -2250,6 +2267,7 @@ def build_catalog_proposal(
             "model_id": model_id,
             "min_ram_gb_tier": tier,
             "required_residency_gb": decimal_string(required_gb),
+            "serving_path": serving_path,
             "mlx_repo": servability.get("mlx_repo"),
             "quant": servability.get("quant"),
             "market_completion_per_mtok": pricing["completion_per_mtok"],
@@ -2259,7 +2277,7 @@ def build_catalog_proposal(
             "benchmark_provider": pricing["benchmark_provider"],
             "demand_request_count_30m": demand,
             "endpoint_count": int(record.get("endpoint_count") or 0),
-            "servability_note": (servability.get("reasons") or [""])[0],
+            "servability_note": servability_note,
         })
     selected.sort(key=lambda row: (row["min_ram_gb_tier"], -Decimal(row["market_completion_per_mtok"]), row["model_id"]))
     excluded.sort(key=lambda row: row["model_id"])

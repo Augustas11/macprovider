@@ -137,13 +137,34 @@ class BuildCatalogProposalTests(unittest.TestCase):
         self.assertEqual(out["selected"], [])
         self.assertIn("below floor", out["excluded"][0]["reason"])
 
-    def test_unservable_verdict_is_excluded_with_reason(self):
+    def test_vision_language_model_is_included_as_text_serving(self):
+        # Qwen3-VL / Gemma-3 families are tagged image-text-to-text but are served
+        # for text and are top-yield earners -- they must NOT be dropped.
         rec = record("qwen/qwen3.6-35b-a3b", pricing_dict=pricing("1.00"),
-                     servability={"verdict": "unresolved", "reasons": ["pipeline_tag 'image-text-to-text' is a vision-language pipeline"]})
+                     servability={"verdict": "unresolved", "pipeline_tag": "image-text-to-text",
+                                  "required_gb": "20.0", "mlx_repo": "mlx-community/Qwen3.6-35B-A3B-4bit",
+                                  "quant": "4bit", "reasons": ["pipeline_tag 'image-text-to-text' is a vision-language pipeline"]})
+        out = propose([rec])
+        self.assertEqual(len(out["selected"]), 1)
+        row = out["selected"][0]
+        self.assertEqual(row["serving_path"], "vision_language_text")
+        self.assertEqual(row["min_ram_gb_tier"], 32)
+        self.assertIn("served for text via mlx-vlm", row["servability_note"])
+
+    def test_non_vision_unresolved_is_still_excluded(self):
+        # An unresolved verdict for a non-vision reason (no confirmed text path)
+        # stays excluded -- only vision-language pipelines are included as text.
+        rec = record("some/model", pricing_dict=pricing("1.00"),
+                     servability={"verdict": "unresolved", "pipeline_tag": None, "required_gb": "20.0",
+                                  "reasons": ["no pipeline_tag and no causal-LM architecture in config"]})
         out = propose([rec])
         self.assertEqual(out["selected"], [])
         self.assertIn("not servable (unresolved)", out["excluded"][0]["reason"])
-        self.assertIn("vision-language", out["excluded"][0]["reason"])
+
+    def test_text_verdict_has_text_serving_path(self):
+        rec = record("z-ai/glm-4.5-air", pricing_dict=pricing("0.85"), servability=servable("78.2"))
+        out = propose([rec])
+        self.assertEqual(out["selected"][0]["serving_path"], "text")
 
     def test_residency_exceeding_largest_tier_is_excluded(self):
         rec = record("huge/model", pricing_dict=pricing("1.00"), servability=servable("300"))
