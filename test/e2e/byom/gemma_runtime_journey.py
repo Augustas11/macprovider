@@ -138,7 +138,10 @@ class GemmaRigConfig:
         assert_true(self.provider_log.is_file(), "the runner-owned serve log --provider-log must exist (the runner creates it before serve starts); step 7 reviews what serve appends")
         assert_true(self.coordinator_log.is_file(), "step 7 reviews the rig coordinator log; --coordinator-log must name an existing file")
         assert_true(bool(OLLAMA_SERVED_REF.match(self.served_ref)), "--served-ref must be an ollama:<tag> loopback ref, e.g. ollama:gemma3:270m")
-        assert_true("llama" not in self.served_ref.lower(), "this lane proves the Gemma runtime; a Llama served ref belongs to the admission journey")
+        # Reject a Llama MODEL tag, but check the tag AFTER the `ollama:` runtime
+        # prefix -- the prefix "ollama" itself contains the substring "llama".
+        _served_tag = self.served_ref.split(":", 1)[1] if ":" in self.served_ref else self.served_ref
+        assert_true("llama" not in _served_tag.lower(), "this lane proves the Gemma runtime; a Llama served ref belongs to the admission journey")
         assert_true(bool(LOOPBACK_ORIGIN.match(self.coordinator_admin_origin)), "coordinator admin origin must be loopback http")
         assert_true(bool(ACTOR_ID.match(self.operator_actor)), "operator actor id is not in the operator actor grammar")
         for name in (self.operator_secret_env, self.postgres_dsn_env):
@@ -473,7 +476,9 @@ class GemmaRuntimeJourneyRunner:
         assert_true(isinstance(session, dict), "the coordinator offer listing carries no live session for this provider; the serve hello was not observed")
         assert_true(session.get("runtime_source") == RUNTIME_SOURCE, f"the live session runtime_source is {session.get('runtime_source')!r}, expected ollama_loopback")
         assert_true(session.get("served_model_ref") == self.config.served_ref, f"the live session served_model_ref is {session.get('served_model_ref')!r}, expected {self.config.served_ref}; a Llama hello fails this lane")
-        assert_true("llama" not in str(session.get("served_model_ref", "")).lower(), "the live hello names a Llama model; the Gemma runtime session is required")
+        _hello_ref = str(session.get("served_model_ref", ""))
+        _hello_tag = _hello_ref.split(":", 1)[1] if ":" in _hello_ref else _hello_ref
+        assert_true("llama" not in _hello_tag.lower(), "the live hello names a Llama model; the Gemma runtime session is required")
         # Pass-bar 1: the serve hello's model_hash_algorithm is the gguf-file.v1
         # label recomputed over the local GGUF file bytes, never an Ollama
         # manifest/layer digest. Asserted directly from the coordinator-side

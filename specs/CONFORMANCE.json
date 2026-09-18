@@ -912,7 +912,7 @@
     {
       "spec_id": "SPEC-032",
       "title": "Autotune Hardware-Evidence Admission Gate, OPoI & Proof-of-Weights Boundary",
-      "version": "v0.2.5",
+      "version": "v0.2.6",
       "path": "specs/SPEC-032-proof-of-weights-hello-gate.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -2503,6 +2503,7 @@
         "phase4-coordinator/internal/ws/server.go:func (s *Server) SetProofOfWeightsConfig",
         "phase4-coordinator/internal/ws/server.go:func (s *Server) revalidateProofOfWeightsAdmissions",
         "phase4-coordinator/internal/ws/server.go:func (s *Server) checkAutotuneHelloGateWithCatalog",
+        "phase4-coordinator/internal/ws/model_admission.go:func isBYOMLoopbackRuntimeSource",
         "phase4-coordinator/cmd/coordinator/main.go:func reloadCoordinatorConfig",
         "phase4-coordinator/cmd/coordinator/main.go:func telemetryDriftEvaluatorForReload"
       ],
@@ -2512,7 +2513,9 @@
         "phase4-coordinator/internal/ws/autotune_hello_gate_test.go:TestAutotuneHelloGateSandboxesMissingEvidence",
         "phase4-coordinator/internal/ws/autotune_hello_gate_test.go:TestProofOfWeightsReloadSandboxesExistingUnverifiedSession",
         "phase4-coordinator/internal/ws/autotune_hello_gate_test.go:TestAutotuneHelloGateRechecksEvidenceAfterChallenge",
-        "phase4-coordinator/internal/ws/autotune_hello_gate_test.go:TestAutotuneHelloGateV1SandboxKeepsProviderBuyerUnroutable"
+        "phase4-coordinator/internal/ws/autotune_hello_gate_test.go:TestAutotuneHelloGateV1SandboxKeepsProviderBuyerUnroutable",
+        "phase4-coordinator/internal/ws/autotune_hello_gate_test.go:TestAutotuneHelloGateExemptsBYOMLoopbackAsSandbox",
+        "phase4-coordinator/internal/ws/autotune_hello_gate_test.go:TestAutotuneHelloGateStillHardClosesNonBYOMUncatalogued"
       ],
       "journeys": [
         "JOURNEY-PROVIDER-PREBETA-ADMISSION"

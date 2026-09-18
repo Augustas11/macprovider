@@ -2716,8 +2716,26 @@ func validModelAdmissionToken(value string) bool {
 }
 
 func validModelAdmissionRuntimeSource(value string) bool {
+	// The coordinator's admission runtime-source vocabulary matches SPEC-046-R002:
+	// `mlx_cache` (catalog MLX) plus the four BYOM loopback adapters. Accepting all
+	// four keeps offer/admission/hello parse consistent with SPEC-032 FR-HG8's
+	// isBYOMLoopbackRuntimeSource exemption. (Which of these the shipped
+	// macprovider-cli can actually SERVE is a separate CLI concern; the coordinator
+	// vocabulary is client-agnostic and forward-compatible.)
+	if value == "mlx_cache" {
+		return true
+	}
+	return isBYOMLoopbackRuntimeSource(value)
+}
+
+// isBYOMLoopbackRuntimeSource reports whether a hello runtime_source is a SPEC-046
+// bring-your-own-model loopback adapter. These serve non-catalog models by design,
+// so SPEC-032 FR-HG8 exempts them from the catalog proof-of-weights hard-close and
+// admits them as non-earning route-excluded sandbox sessions. `mlx_cache` (catalog
+// MLX) is deliberately excluded and stays fully gated.
+func isBYOMLoopbackRuntimeSource(value string) bool {
 	switch value {
-	case "mlx_cache", "ollama_loopback":
+	case "ollama_loopback", "lmstudio_loopback", "llamacpp_loopback", "openai_compatible_loopback":
 		return true
 	default:
 		return false

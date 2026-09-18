@@ -55,7 +55,19 @@ func TestParseHelloRuntimeSource(t *testing.T) {
 		t.Fatalf("hello runtime_source = %q, want ollama_loopback", h.RuntimeSource)
 	}
 
-	if _, badField, err := ParseHello(with("openai_compatible_loopback")); err == nil || badField != "runtime_source" {
+	// SPEC-046-R002 vocabulary: all four BYOM loopback adapters are accepted.
+	for _, src := range []string{"lmstudio_loopback", "llamacpp_loopback", "openai_compatible_loopback", "mlx_cache"} {
+		hh, _, err := ParseHello(with(src))
+		if err != nil {
+			t.Fatalf("ParseHello rejected valid runtime_source %q: %v", src, err)
+		}
+		if hh.RuntimeSource != src {
+			t.Fatalf("hello runtime_source = %q, want %q", hh.RuntimeSource, src)
+		}
+	}
+
+	// A genuinely-unknown runtime_source is still rejected on the closed vocabulary.
+	if _, badField, err := ParseHello(with("http_public_endpoint")); err == nil || badField != "runtime_source" {
 		t.Fatalf("ParseHello accepted unknown runtime_source: badField=%q err=%v", badField, err)
 	}
 

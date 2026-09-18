@@ -1,6 +1,10 @@
 # SPEC-032 — Autotune Hardware-Evidence Admission Gate, OPoI & Proof-of-Weights Boundary
 
-**Status:** v0.2.5-draft
+**Status:** v0.2.6-draft
+**Amendment (v0.2.6, #1569):** FR-HG8 exempts SPEC-046 BYOM loopback `runtime_source`
+models from the catalog proof-of-weights hard-close; they admit as non-earning,
+route-excluded `admission_sandboxed` sessions governed by SPEC-047. Reconciles this gate
+with BYOM (SPEC-046/047); preserves every earning/buyer-serving protection.
 **Date:** 2026-08-02
 **Depends on:** SPEC-002 (coordinator admission, provider state machine; F-2 defines provisional/pinned tiers), SPEC-003 (open onboarding, tiers), **SPEC-008 (Tier-2 — authoritative on the model-hash routing-exclusion predicate and attestation; this spec MUST NOT override it)**, SPEC-031 (canary probe mechanism — OPoI reuses it), and the item-10 hardware-verifier verdict spec (owns `hardware-verifier.v2`, consumed here as an input). SPEC-020 (provider *autoupdate* trust table) is only tangentially related and is **not** the tier-definition source.
 **Related (distinct, cross-referenced only):** SPEC-030 (losslessness probe — a separate distributional probe family)
@@ -223,7 +227,7 @@ apply **only** to the evidence-absent-from-expiry case:
 | `autotune_gate_unavailable` | **coordinator-fault** | catalog/evidence store not wired, **or any evidence lookup/decode/binding error** (DB/query failure, malformed envelope, immutable-binding mismatch) | rejects (operator must fix) |
 | `autotune_evidence_required` | **evidence-absent** | no verified evidence in-window (never submitted, or **expired**) | sandbox-connects, never buyer-routable |
 | `autotune_evidence_invalid` | **no-passing-benchmark** (affirmative shortfall, catalog staleness, **or** provider semantic misbinding) | evidence present but **no benchmark passes the *current* gate** — a genuine hardware shortfall (**thermal throttle only**; the advisory `bench_gate.min_sustained_tps`/`max_4k_ttft_ms` are NEVER a rejection cause, #687); a policy-staleness case (catalog-SHA / model-id / artifact-SHA mismatch after a catalog rotation); **or** a provider-submitted **semantic misbinding** — the verifier accepts evidence on *syntactic*/trust bindings (e.g. `model_key` non-empty/unique, `candidate_catalog_sha256` well-formed) but does **not** value-check those bindings against the signed catalog, so the *gate* is where a mismatched **`model_key`, model-id, artifact-SHA, or a provider-misbound catalog-SHA** (distinct from a genuine catalog rotation) is caught | rejects |
-| `autotune_model_uncatalogued` | **policy-unverifiable** | claimed model not in the catalog — the coordinator cannot *evaluate* the claim (not proof of shortfall) | rejects |
+| `autotune_model_uncatalogued` | **policy-unverifiable** | claimed model not in the catalog — the coordinator cannot *evaluate* the claim (not proof of shortfall). **[amended #1569, FR-HG8]** does NOT apply to a BYOM loopback `runtime_source`, which is exempt and sandbox-admitted (non-earning) rather than hard-closed | rejects (except BYOM loopback → sandbox, FR-HG8) |
 | `autotune_model_cap_exceeded` | **affirmative shortfall** | claimed model's `MinRAMGB` > verified capacity ceiling | rejects |
 
 **[amended #687 — `evidence_invalid` MUST NOT be raised on advisory bench_gate
@@ -378,6 +382,40 @@ closes.
 > (catalogued **and** `MinRAMGB` ≤ ceiling) into the routing-eligibility predicate and
 > re-evaluating it on model change is a **CRITICAL-severity** Gap and a required part
 > of making the hello-gate meaningful; it is on the §14 re-enable/hardening bar.
+
+**FR-HG8 — BYOM loopback runtime exemption (non-earning sandbox).** The catalog
+proof-of-weights hello gate (FR-HG2–FR-HG4) governs admission of models the provider
+claims from the **signed autotune/model catalog** for catalog/earning routing. A hello
+whose `runtime_source` is a SPEC-046 bring-your-own-model **loopback adapter**
+(`ollama_loopback`, `lmstudio_loopback`, `llamacpp_loopback`, or
+`openai_compatible_loopback`) advertises a BYOM candidate that is, **by SPEC-046/047
+design, not expected to be in the signed catalog** — treating "not in the catalog" as
+the `autotune_model_uncatalogued` hard-close (FR-HG4) for such a hello contradicts the
+entire purpose of BYOM. Therefore, when the gate is active, a hello bearing a BYOM
+loopback `runtime_source` MUST NOT be hard-closed as `autotune_model_uncatalogued`;
+the coordinator MUST instead admit it with the FR-HG4 **`admission_sandboxed`**
+semantics — connected, operator- and internal-probe eligible, **never routing-eligible
+or buyer-serving, and receiving no newly minted durable provider credentials** — and its
+network eligibility is then governed solely by SPEC-047 (network model admission). The
+exemption is keyed **strictly** on the BYOM loopback `runtime_source`; `mlx_cache`
+(the catalog MLX runtime) and any absent/other `runtime_source` remain fully gated by
+FR-HG2–FR-HG4. The exemption grants **no** earning or buyer-serving capability and is
+**not** a gate weakening: a BYOM candidate keeps a null `catalog_model_key`, so
+SPEC-047-R003/R005 keep it non-`settlement_capable` and out of default paid routing, and
+the `admission_sandboxed` flag keeps the session route-excluded, so FR-HG7 (an
+uncatalogued served model is never routing-eligible) is preserved unchanged. A provider
+that mis-declares `runtime_source` to obtain the exemption gains **only** a non-earning,
+route-excluded sandbox session; it reaches neither catalog pricing, settlement, nor buyer
+routing. This FR reconciles SPEC-032 with SPEC-046/SPEC-047 and is what lets the
+production gate-ON coordinator admit and synthetically probe a BYOM runtime as designed.
+The exemption is evaluated **after** the FR-HG4 dependency-wired check, so an unwired
+gate still fails closed (`autotune_gate_unavailable`) for every hello including BYOM;
+and because a sandbox candidate never serves, the exemption also does not apply the
+FR-HG3/FR-HG7 hardware capacity-ceiling (`autotune_model_cap_exceeded`) — a BYOM
+candidate is not cap-checked precisely because it is non-routing. Note that
+`openai_compatible_loopback` may enter this sandbox but can **never** bind a `verified`
+catalog artifact (SPEC-010/SPEC-023 forbid it from `allowed_runtime_sources`), so its
+non-earning status is doubly enforced.
 
 ## Part B — OPoI / proof-of-weights honesty
 

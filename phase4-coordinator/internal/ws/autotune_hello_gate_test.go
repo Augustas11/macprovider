@@ -2065,3 +2065,112 @@ func mustAutotuneRowIdentity(t *testing.T, catalog *autotune.Catalog, key string
 	}
 	return rowIdentity
 }
+
+// TestAutotuneHelloGateExemptsBYOMLoopbackAsSandbox pins SPEC-032 FR-HG8: with the
+// gate ON and verified evidence present (so an uncatalogued model would normally
+// hard-close autotune_model_uncatalogued), a hello whose runtime_source is a BYOM
+// loopback adapter is instead admitted as a route-excluded, non-earning sandbox.
+func TestAutotuneHelloGateExemptsBYOMLoopbackAsSandbox(t *testing.T) {
+	catalog := mustAutotuneCatalog(t)
+	evidence := autotune.VerifiedEvidence{
+		ProbeProtocol:          "spec-023-harmony-stream.v2",
+		BinaryVersion:          "0.1.0",
+		ExecutableSHA256:       "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+		CandidateCatalogSHA256: catalog.SHA256,
+		Benchmarks: []autotune.VerifiedBenchmark{
+			{
+				ModelKey:               "small",
+				ModelID:                "mlx-community/Llama-3.2-3B-Instruct-4bit",
+				SustainedTPS:           20,
+				TTFTMS:                 1000,
+				ArtifactSHA256:         "3975387f249977e5e8bfb7ed0d352f8258ac3d630f961ce1dd952f428ee7216a",
+				CandidateCatalogSHA256: catalog.SHA256,
+				CandidateRowIdentity:   mustAutotuneRowIdentity(t, catalog, "small"),
+			},
+		},
+	}
+	h := newProviderHarnessWithServerOptions(t, nil, []providerws.Option{
+		providerws.WithAutotuneHelloGate(catalog, stubAutotuneEvidence{evidence: evidence, ok: true}),
+	}, func(cfg *config.Config) {
+		cfg.ProofOfWeights.RequireAutotuneHelloGate = true
+		cfg.ProofOfWeights.AutotuneEvidenceTTLDays = 30
+	})
+	defer h.HTTP.Close()
+
+	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	hello := validHello("m4-anon")
+	hello["model_id"] = "ollama:gemma3:270m"
+	hello["runtime_source"] = "ollama_loopback"
+	if err := wsutil.WriteClientText(conn, mustJSON(hello)); err != nil {
+		t.Fatalf("write hello: %v", err)
+	}
+	payload, op, err := wsutil.ReadServerData(conn)
+	if err != nil {
+		t.Fatalf("read ack: %v", err)
+	}
+	if op != gobwas.OpText {
+		t.Fatalf("op=%v, want text", op)
+	}
+	var ack map[string]any
+	if err := json.Unmarshal(payload, &ack); err != nil {
+		t.Fatalf("ack json: %v", err)
+	}
+	if ack["type"] != "hello_ack" {
+		t.Fatalf("BYOM loopback hello must be admitted (not hard-closed); ack=%v", ack)
+	}
+	provider, ok := h.Registry.Resolve("m4-anon", ack["assigned_id"].(string))
+	if !ok {
+		t.Fatal("provider not registered")
+	}
+	if !provider.AdmissionSandboxed || provider.RoutingEligible() || provider.ServingCapable() {
+		t.Fatalf("BYOM loopback provider must be sandboxed and buyer-unroutable (FR-HG8): %+v", provider)
+	}
+	if provider.RuntimeSource != "ollama_loopback" {
+		t.Fatalf("runtime_source not carried onto the admitted session: %q", provider.RuntimeSource)
+	}
+}
+
+// TestAutotuneHelloGateStillHardClosesNonBYOMUncatalogued pins that FR-HG8 does NOT
+// weaken the gate for a non-BYOM runtime: an uncatalogued model claimed with no BYOM
+// loopback runtime_source is still hard-closed autotune_model_uncatalogued.
+func TestAutotuneHelloGateStillHardClosesNonBYOMUncatalogued(t *testing.T) {
+	catalog := mustAutotuneCatalog(t)
+	evidence := autotune.VerifiedEvidence{
+		ProbeProtocol:          "spec-023-harmony-stream.v2",
+		BinaryVersion:          "0.1.0",
+		ExecutableSHA256:       "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+		CandidateCatalogSHA256: catalog.SHA256,
+		Benchmarks: []autotune.VerifiedBenchmark{
+			{
+				ModelKey:               "small",
+				ModelID:                "mlx-community/Llama-3.2-3B-Instruct-4bit",
+				SustainedTPS:           20,
+				TTFTMS:                 1000,
+				ArtifactSHA256:         "3975387f249977e5e8bfb7ed0d352f8258ac3d630f961ce1dd952f428ee7216a",
+				CandidateCatalogSHA256: catalog.SHA256,
+				CandidateRowIdentity:   mustAutotuneRowIdentity(t, catalog, "small"),
+			},
+		},
+	}
+	h := newProviderHarnessWithServerOptions(t, nil, []providerws.Option{
+		providerws.WithAutotuneHelloGate(catalog, stubAutotuneEvidence{evidence: evidence, ok: true}),
+	}, func(cfg *config.Config) {
+		cfg.Providers = nil
+		cfg.ProofOfWeights.RequireAutotuneHelloGate = true
+		cfg.ProofOfWeights.AutotuneEvidenceTTLDays = 30
+	})
+	defer h.HTTP.Close()
+
+	hello := validHello("m4-anon")
+	hello["model_id"] = "some/uncatalogued-model-not-in-catalog"
+	// No BYOM loopback runtime_source (mlx_cache is the catalog runtime and is NOT exempt).
+	hello["runtime_source"] = "mlx_cache"
+	code, reason := sendHelloExpectClose(t, h.HTTP.URL, hello)
+	if code != providerws.CloseInvalidHello || reason != "autotune_model_uncatalogued" {
+		t.Fatalf("non-BYOM uncatalogued must still hard-close autotune_model_uncatalogued; code=%d reason=%q", code, reason)
+	}
+}

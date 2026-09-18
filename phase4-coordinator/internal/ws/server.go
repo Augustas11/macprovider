@@ -3450,6 +3450,26 @@ func (s *Server) checkAutotuneHelloGateWithCatalog(conn net.Conn, hello Hello, c
 		}
 		return autotuneAdmissionObservation{}, true
 	}
+	// SPEC-032 FR-HG8 (#1569): a SPEC-046 BYOM loopback runtime source advertises a
+	// bring-your-own-model candidate that is, by design, not in the signed catalog.
+	// The catalog proof-of-weights gate governs catalog/earning admission, so it MUST
+	// NOT hard-close such a hello as autotune_model_uncatalogued. Admit it as a
+	// route-excluded, non-earning `admission_sandboxed` session (FR-HG8 semantics),
+	// leaving network eligibility to SPEC-047. The sandbox flag keeps it non-routable
+	// and a null catalog_model_key keeps it non-settlement-capable (SPEC-047-R003/R005),
+	// so no earning/buyer-serving path is opened. mlx_cache (catalog MLX) and any
+	// absent/other runtime source stay fully gated below. This runs AFTER the
+	// dependency-wired check so an unwired gate still fails closed for everyone
+	// (autotune_gate_unavailable), not silently sandbox-admits.
+	if requireGate && isBYOMLoopbackRuntimeSource(hello.RuntimeSource) {
+		s.log.Info().
+			Str("provider_id", hello.ProviderID).
+			Str("event", "autotune_byom_loopback_sandboxed").
+			Str("model_id", hello.ModelID).
+			Str("runtime_source", hello.RuntimeSource).
+			Msg("autotune hello gate exempted a BYOM loopback runtime as a non-earning sandbox (SPEC-032 FR-HG8)")
+		return autotuneAdmissionObservation{Sandboxed: true}, true
+	}
 	ttl := time.Duration(powCfg.AutotuneEvidenceTTLDays) * 24 * time.Hour
 	ctx, cancel := context.WithTimeout(context.Background(), autotuneEvidenceLookupTimeout)
 	defer cancel()
