@@ -171,3 +171,54 @@ A non-production onboarding smoke is complete when:
 - `specs/SPEC-006-buyer-api.md`
 - `specs/SPEC-020-provider-autoupdate.md`
 - `specs/SPEC-035-provider-connection-diagnostics.md`
+
+---
+
+## Pi Harness Integration
+
+### Setup Maliby API with Qwen3 Coder 30B A3B Instruct
+
+1. **Get buyer API key** from https://api.malibu.tech/auth/github/start
+2. **Configure Pi provider** (`~/.pi/agent/models.json`):
+
+```json
+{
+  "providers": {
+    "malibu": {
+      "baseUrl": "https://api.malibu.tech/v1",
+      "api": "openai-completions", 
+      "apiKey": "$MALIBU_API_KEY",
+      "models": [{
+        "id": "qwen3-coder-30b-a3b-instruct",
+        "name": "Qwen3 Coder 30B A3B Instruct",
+        "reasoning": true,
+        "input": ["text"],
+        "contextWindow": 128000,
+        "maxTokens": 32768,
+        "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
+        "compat": {
+          "thinkingFormat": "qwen",
+          "supportsDeveloperRole": false,
+          "requiresToolResultName": true,
+          "supportsEagerToolInputStreaming": false
+        }
+      }]
+    }
+  }
+}
+```
+
+3. **Store API key** in `~/.pi/agent/auth.json`:
+```json
+{"malibu": {"type": "api_key", "key": "<key>"}}
+```
+
+4. **Test**: `pi --provider malibu --model qwen3-coder-30b-a3b-instruct -p "hello" --print`
+
+### Tool Calling Fix
+For full tool calling support, add these compat settings to the malibu provider model configuration (see above):
+- `requiresToolResultName: true`
+- `supportsEagerToolInputStreaming: false`
+- `supportsDeveloperRole: false`
+
+This ensures Pi's OpenAI-completions format translates correctly through the Malibu gateway.
