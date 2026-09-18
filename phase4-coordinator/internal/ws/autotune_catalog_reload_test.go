@@ -121,6 +121,45 @@ func TestResolveProviderCatalogSurvivesSwap(t *testing.T) {
 	}
 }
 
+func TestResolveProviderCatalogUsesSHAForSameVersionRestamp(t *testing.T) {
+	t.Parallel()
+	current := reloadTestCatalog(t, "published-restamp")
+	restampBytes := []byte(fmt.Sprintf(`{
+		"version":"published-restamp",
+		"generated_at":"2026-07-08T12:00:00Z",
+		"source":"operator_curated_autotune_candidate_catalog",
+		"policy_version":"autotune-policy-v1",
+		"rows":{"small":{"model_id":"mlx-community/Llama-3.2-3B-Instruct-4bit","min_ram_gb":4,"min_bandwidth_tier":"C","bench_gate":{"min_sustained_tps":15,"max_4k_ttft_ms":2500},"runtime_status":"recommendable"}}
+	}`))
+	restamp, err := autotune.ParseCatalog(restampBytes)
+	if err != nil {
+		t.Fatalf("ParseCatalog(restamp): %v", err)
+	}
+	if restamp.SHA256 == current.SHA256 {
+		t.Fatal("restamp SHA must differ")
+	}
+	server := NewServer(admissionCeilingEnforcementConfig(), pool.NewRegistry(nil), zerolog.Nop(),
+		WithAutotuneCatalog(current, restamp),
+	)
+	session := pool.Provider{
+		ProviderID:             "p1",
+		AssignedID:             "s1",
+		CatalogAdmissionMode:   "previous",
+		CatalogReleaseID:       current.Version,
+		CandidateCatalogSHA256: restamp.SHA256,
+	}
+	resolved, _, isCurrent, ok := server.resolveProviderCatalog(session)
+	if !ok || isCurrent || resolved == nil || resolved.SHA256 != restamp.SHA256 {
+		t.Fatalf("resolve leftover restamp = (%v isCurrent=%v ok=%v sha=%q)", resolved, isCurrent, ok, restamp.SHA256)
+	}
+	wrong := session
+	wrong.CandidateCatalogSHA256 = current.SHA256
+	resolved, _, isCurrent, ok = server.resolveProviderCatalog(wrong)
+	if !ok || !isCurrent || resolved == nil || resolved.SHA256 != current.SHA256 {
+		t.Fatalf("resolve current SHA = (%v isCurrent=%v ok=%v), want current", resolved, isCurrent, ok)
+	}
+}
+
 // TestAdmissionHelpersPinPassedCatalogGeneration locks in the #1268 MED-2 fix:
 // the *WithCatalog admission helpers must evaluate against the catalog
 // generation the caller pins, not a fresh live snapshot. prepareProviderAdmission
