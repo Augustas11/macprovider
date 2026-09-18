@@ -88,6 +88,10 @@ routing:
   request_timeout_s: 900
   failover_enabled: true
   failover_timeout_s: 5
+  # Optional public-routing skip floor (tokens/sec). Default 0 disables it.
+  # Dispatch filter only — not a /v1/pool/check buyer_serving / session-kill
+  # gate. Keep the default at 0; a positive floor is an explicit later
+  # operator choice, not part of this change.
   min_provider_throughput_tps: 0
   tiebreak_randomize: false
   tiebreak_epsilon: 0.0

@@ -67,6 +67,13 @@ routing:
   slot_queue_max_pending_per_provider: 4
   slot_queue_deadline_s: 3
   slot_queue_poll_interval_ms: 25
+  # Optional public-routing skip floor (tokens/sec). Default 0 disables it.
+  # Dispatch filter only: it must not fail /v1/pool/check buyer_serving for
+  # an admitted heartbeat-healthy session. CLI 1.8.123 treats authoritative
+  # buyer_serving=false (no model_admission_pending hold) as a reconnect.
+  # Pearl 2026-09-18: operator-set 10.0 made every 3B Mac under 10 TPS flap
+  # ~every 35s; hotfix restored 0. Keep Pearl and the repo default at 0;
+  # a positive floor is an explicit later operator choice, not a deploy.
   min_provider_throughput_tps: 0
   # PR #302 (2026-07-01) — sticky conversation affinity via X-MacProvider-Conversation.
   # StickyTTLS + StickyMaxEntries defaults live in code (1800s / 10000 entries).

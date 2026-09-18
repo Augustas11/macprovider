@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -8190,6 +8191,157 @@ func TestSlotQueueExcludesBelowThroughputFloor(t *testing.T) {
 		t.Fatalf("below-floor provider entered slot queue; elapsed=%s", elapsed)
 	}
 	assertOpenAIErrorEnvelope(t, rr, "no_provider_available", "service_unavailable")
+}
+
+func TestThroughputFloorSkipsDispatchWithoutFailingPoolCheckReadiness(t *testing.T) {
+	// Pearl 2026-09-18: routing.min_provider_throughput_tps=10.0 made
+	// /v1/pool/check buyer_serving=false for every 3B Mac under 10 TPS, and
+	// CLI 1.8.123 treated that as a websocket reconnect. The floor must stay
+	// a dispatch skip, not a session-liveness gate.
+	for _, mode := range []string{"current", "previous"} {
+		t.Run(mode, func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				t.Fatal("below-floor provider must not receive traffic")
+			}))
+			defer upstream.Close()
+
+			now := time.Now().UTC()
+			registry := pool.NewRegistry([]config.ProviderConfig{{ProviderID: "slow", EndpointURL: upstream.URL}})
+			if _, ok := registry.Register(&pool.Provider{
+				ProviderID:            "slow",
+				AssignedID:            "s1",
+				Hostname:              "slow.local",
+				ModelID:               "model-a",
+				MaxContextTokens:      20000,
+				MaxConcurrency:        1,
+				SlotsFree:             1,
+				SlotsTotal:            1,
+				ThroughputTPSEstimate: 0.25,
+				EndpointURL:           upstream.URL,
+				Tier:                  pool.TierPinned,
+				InferencePath:         pool.InferencePathHTTPForwarding,
+				State:                 pool.StateReady,
+				LastHeartbeatAt:       now,
+				LastActivityAt:        now,
+				ConnectedAt:           now,
+				CatalogAdmissionMode:  mode,
+			}, nil); !ok {
+				t.Fatal("register provider failed")
+			}
+			server := buyer.NewServer(
+				registry,
+				zerolog.Nop(),
+				time.Unix(1716768000, 0),
+				buyer.WithRoutingConfig(config.RoutingConfig{MinProviderThroughputTPS: 1.0}),
+			)
+
+			rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`), http.Header{"X-Request-ID": []string{"throughput-floor-readiness-" + mode}})
+			if rr.Code != http.StatusServiceUnavailable {
+				t.Fatalf("status = %d, want 503 body=%s", rr.Code, rr.Body.String())
+			}
+			assertOpenAIErrorEnvelope(t, rr, "no_provider_available", "service_unavailable")
+
+			req := httptest.NewRequest(http.MethodGet, "/v1/pool/check?provider_id=slow&assigned_id=s1&details=readiness", nil)
+			req.RemoteAddr = "198.51.100.80:12345"
+			check := httptest.NewRecorder()
+			server.Handler().ServeHTTP(check, req)
+			if check.Code != http.StatusOK {
+				t.Fatalf("pool check status = %d, want 200 body=%s", check.Code, check.Body.String())
+			}
+			var response map[string]any
+			if err := json.Unmarshal(check.Body.Bytes(), &response); err != nil {
+				t.Fatalf("decode pool check: %v", err)
+			}
+			if response["buyer_serving"] != true {
+				t.Fatalf("buyer_serving = %v, want true below dispatch floor: %+v", response["buyer_serving"], response)
+			}
+			if response["catalog_admission_mode"] != mode {
+				t.Fatalf("catalog_admission_mode = %v, want %q", response["catalog_admission_mode"], mode)
+			}
+		})
+	}
+}
+
+func TestSetMinProviderThroughputTPSHotReloadsDispatchFloor(t *testing.T) {
+	var served atomic.Bool
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		served.Store(true)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"ok","choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":4,"completion_tokens":1,"total_tokens":5}}`))
+	}))
+	defer upstream.Close()
+
+	now := time.Now().UTC()
+	registry := pool.NewRegistry([]config.ProviderConfig{{ProviderID: "slow", EndpointURL: upstream.URL}})
+	if _, ok := registry.Register(&pool.Provider{
+		ProviderID:            "slow",
+		AssignedID:            "s1",
+		Hostname:              "slow.local",
+		ModelID:               "model-a",
+		MaxContextTokens:      20000,
+		MaxConcurrency:        1,
+		SlotsFree:             1,
+		SlotsTotal:            1,
+		ThroughputTPSEstimate: 0.25,
+		EndpointURL:           upstream.URL,
+		Tier:                  pool.TierPinned,
+		InferencePath:         pool.InferencePathHTTPForwarding,
+		State:                 pool.StateReady,
+		LastHeartbeatAt:       now,
+		LastActivityAt:        now,
+		ConnectedAt:           now,
+		CatalogAdmissionMode:  "current",
+	}, nil); !ok {
+		t.Fatal("register provider failed")
+	}
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0))
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`), http.Header{"X-Request-ID": []string{"throughput-floor-reload-open"}})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("default floor status = %d, want 200 body=%s", rr.Code, rr.Body.String())
+	}
+	if !served.Load() {
+		t.Fatal("default floor 0 must dispatch to the below-10-tps provider")
+	}
+
+	if !server.SetMinProviderThroughputTPS(1.0) {
+		t.Fatal("raising the floor must report changed")
+	}
+	if server.SetMinProviderThroughputTPS(1.0) {
+		t.Fatal("identical floor must be a no-op")
+	}
+	served.Store(false)
+	rr = postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`), http.Header{"X-Request-ID": []string{"throughput-floor-reload-closed"}})
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("raised floor status = %d, want 503 body=%s", rr.Code, rr.Body.String())
+	}
+	if served.Load() {
+		t.Fatal("raised floor must not dispatch")
+	}
+	assertOpenAIErrorEnvelope(t, rr, "no_provider_available", "service_unavailable")
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/pool/check?provider_id=slow&assigned_id=s1&details=readiness", nil)
+	req.RemoteAddr = "198.51.100.81:12345"
+	check := httptest.NewRecorder()
+	server.Handler().ServeHTTP(check, req)
+	if check.Code != http.StatusOK {
+		t.Fatalf("pool check status = %d, want 200 body=%s", check.Code, check.Body.String())
+	}
+	var response map[string]any
+	if err := json.Unmarshal(check.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode pool check: %v", err)
+	}
+	if response["buyer_serving"] != true {
+		t.Fatalf("buyer_serving = %v, want true after floor hot-reload: %+v", response["buyer_serving"], response)
+	}
+
+	if !server.SetMinProviderThroughputTPS(0) {
+		t.Fatal("clearing the floor must report changed")
+	}
+	rr = postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`), http.Header{"X-Request-ID": []string{"throughput-floor-reload-cleared"}})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("cleared floor status = %d, want 200 body=%s", rr.Code, rr.Body.String())
+	}
 }
 
 func TestHTTPSuccessReconcilesStaleBusyCapacity(t *testing.T) {

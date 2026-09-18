@@ -3332,6 +3332,55 @@ func TestPoolzRoutingEligibleHonorsThroughputFloor(t *testing.T) {
 	}
 }
 
+func TestSetMinProviderThroughputTPSUpdatesPoolzRoutingEligible(t *testing.T) {
+	h := newProviderHarness(t)
+	defer h.HTTP.Close()
+	now := time.Now().UTC()
+	if _, ok := h.Registry.Register(&pool.Provider{
+		ProviderID:            "m4-anon",
+		AssignedID:            "session-1",
+		Hostname:              "m4-anon.local",
+		ModelID:               "llama",
+		MaxContextTokens:      8192,
+		MaxConcurrency:        1,
+		SlotsFree:             1,
+		SlotsTotal:            1,
+		ThroughputTPSEstimate: 0.25,
+		EndpointURL:           "https://m4.malibu.tech",
+		Tier:                  pool.TierPinned,
+		InferencePath:         pool.InferencePathHTTPForwarding,
+		State:                 pool.StateReady,
+		LastHeartbeatAt:       now,
+		ConnectedAt:           now,
+	}, nil); !ok {
+		t.Fatal("register provider failed")
+	}
+
+	got := fetchPoolz(t, h.HTTP.URL)
+	if len(got.Pool) != 1 {
+		t.Fatalf("pool rows = %d, want 1", len(got.Pool))
+	}
+	if !got.Pool[0].RoutingEligible {
+		t.Fatalf("routing_eligible = false, want true at default floor 0: %+v", got.Pool[0])
+	}
+
+	if !h.Provider.SetMinProviderThroughputTPS(1.0) {
+		t.Fatal("raising the floor must report changed")
+	}
+	got = fetchPoolz(t, h.HTTP.URL)
+	if got.Pool[0].RoutingEligible {
+		t.Fatalf("routing_eligible = true, want false after floor hot-reload: %+v", got.Pool[0])
+	}
+
+	if !h.Provider.SetMinProviderThroughputTPS(0) {
+		t.Fatal("clearing the floor must report changed")
+	}
+	got = fetchPoolz(t, h.HTTP.URL)
+	if !got.Pool[0].RoutingEligible {
+		t.Fatalf("routing_eligible = false, want true after floor cleared: %+v", got.Pool[0])
+	}
+}
+
 func TestProviderHealthzReportsInjectedVersion(t *testing.T) {
 	harness := newProviderHarnessWithServerOptions(t, nil, []providerws.Option{
 		providerws.WithVersion("v1.3.0-7-gabcdef0"),

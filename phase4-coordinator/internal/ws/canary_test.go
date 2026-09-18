@@ -258,6 +258,59 @@ func TestFloorUsesInstalledPredicateExcludesTier2Peer(t *testing.T) {
 	}
 }
 
+func TestThroughputFloorDoesNotLiftCanaryLastProviderProtection(t *testing.T) {
+	registry := pool.NewRegistry(nil)
+	cfg := config.Default()
+	cfg.Pool.CanaryFailureThreshold = 1
+	cfg.Routing.MinProviderThroughputTPS = 1.0
+	s := NewServer(cfg, registry, zerolog.Nop())
+
+	now := time.Now().UTC()
+	if _, ok := registry.Register(&pool.Provider{
+		ProviderID:            "slow",
+		AssignedID:            "s1",
+		ModelID:               "model-a",
+		Hostname:              "slow.local",
+		Tier:                  pool.TierPinned,
+		InferencePath:         pool.InferencePathHTTPForwarding,
+		State:                 pool.StateReady,
+		SlotsFree:             1,
+		SlotsTotal:            1,
+		MaxConcurrency:        1,
+		MaxContextTokens:      4096,
+		ThroughputTPSEstimate: 0.25,
+		EndpointURL:           "https://slow.example",
+		LastHeartbeatAt:       now,
+		ConnectedAt:           now,
+	}, nil); !ok {
+		t.Fatal("register provider failed")
+	}
+	p, ok := registry.Resolve("slow", "s1")
+	if !ok {
+		t.Fatal("lookup provider failed")
+	}
+	if !s.canaryBuyerServing(p) {
+		t.Fatal("canaryBuyerServing must stay true below the dispatch floor")
+	}
+	if s.publicRoutingEligible(p) {
+		t.Fatal("publicRoutingEligible must be false below the dispatch floor")
+	}
+	if n := registry.BuyerServingCountForModel("model-a"); n != 1 {
+		t.Fatalf("BuyerServingCountForModel = %d, want 1 (below-floor session still last-provider)", n)
+	}
+	res := registry.RecordCanaryResult("slow", "s1", false, now, 1)
+	if res.Tripped != pool.CanaryTripFloorHeld {
+		t.Fatalf("below-floor last provider result = %+v, want CanaryTripFloorHeld", res)
+	}
+	after, ok := registry.Resolve("slow", "s1")
+	if !ok {
+		t.Fatal("lookup after canary failed")
+	}
+	if after.State != pool.StateReady {
+		t.Fatalf("state = %s, want ready — dispatch floor must not canary-degrade the last session", after.State)
+	}
+}
+
 // TestFloorDoesNotSpareTier2ExcludedTarget verifies the installed production
 // predicate applies symmetrically to the target. An otherwise-ready HTTP provider
 // excluded by Tier-2 is not the sole buyer-serving provider and therefore takes
