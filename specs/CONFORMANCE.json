@@ -145,7 +145,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1023",
-        "rationale": "SPEC-005-R001/R002 promoted from signed JOURNEY-BUYER-PAID-PATH. SPEC-005-R003 promoted from signed JOURNEY-BUYER-CRASH-RECOVERY (#1057). R004\u2013R009 remain pending evidencable units (D8/settlement/attempt/endpoint/account-scope/quarantine). R010 is the D1a wholesale statement unit (#1023). R011 (#1484) is a new pending unit for the signed rate-card money table; do not promote from this close. requirement_id_migration is complete after #1023. Do not promote R004\u2013R011 from this close. No enforce claim."
+        "rationale": "SPEC-005-R001/R002 signed JOURNEY-BUYER-PAID-PATH evidence expired 2026-09-16; those rows are pending until a fresh protected paid-path envelope is consumed (#1022). SPEC-005-R003 signed JOURNEY-BUYER-CRASH-RECOVERY evidence expired 2026-09-17; that row is pending until a fresh protected crash-recovery envelope is consumed (#1043/#1057). R004\u2013R009 remain pending evidencable units (D8/settlement/attempt/endpoint/account-scope/quarantine). R010 is the D1a wholesale statement unit (#1023). R011 (#1484) is a new pending unit for the signed rate-card money table; do not promote from this close. requirement_id_migration is complete after #1023. Do not promote R004\u2013R011 from this close. No enforce claim."
       }
     },
     {
@@ -654,7 +654,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "SPEC-022-R001..R006 and R010 promoted from signed observe-mode JOURNEY-BUYER-PAID-PATH. Isolated JOURNEY-BUYER-ENFORCE (#1044) is the candidate harness for R007/R008/R009/R011; observe-mode paid-path must not promote R007/R008. No production Pearl / enforce activation."
+        "rationale": "SPEC-022-R001/R002/R003/R010 signed observe-mode JOURNEY-BUYER-PAID-PATH evidence expired 2026-09-16; those rows are pending until a fresh protected paid-path envelope is consumed (#1022). R004 remains conformant on later in-date paid-path evidence. R005/R006 remain pending on still-in-date paid-path evidence until a selector-fresh consume. Isolated JOURNEY-BUYER-ENFORCE (#1044) is the candidate harness for R007/R008/R009/R011; R007/R009 signed evidence expired 2026-09-17 and those rows are pending. Observe-mode paid-path must not promote R007/R008. No production Pearl / enforce activation."
       }
     },
     {
@@ -4247,7 +4247,7 @@
     {
       "requirement_id": "SPEC-005-R001",
       "spec_id": "SPEC-005",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
         "phase4-coordinator/internal/billing/formula.go:ComputeCredits",
         "phase4-coordinator/internal/billing/formula.go:ComputeCreditsWithCache",
@@ -4262,26 +4262,18 @@
       "journeys": [
         "JOURNEY-BUYER-PAID-PATH"
       ],
-      "evidence": [
-        {
-          "artifact": "commit:5ed5d7190bd878fe3623fff9a5684e71eddfb8f1",
-          "source": null,
-          "captured_at": "2026-08-17",
-          "expires_at": "2026-09-16"
-        },
-        {
-          "artifact": "sha256:77b9de93bbbdc7a853e1196379769bb25d93c0bd1d683c1ca62a80038237d389",
-          "source": "journeys/evidence/buyer-paid-path-20260817T045519Z.spec-005-r001-spec-005-r002-spec-006-r001-spec-006-r002-spec-006-r003-spec-015-r001-spec-022-r001-spec-022-r002-spec-022-r003-spec-022-r004-spec-022-r005-spec-022-r010.journey-result.signed.json",
-          "captured_at": "2026-08-17",
-          "expires_at": "2026-09-16"
-        }
-      ],
-      "gap": null
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1022",
+        "rationale": "The previously consumed signed JOURNEY-BUYER-PAID-PATH envelope expired on 2026-09-16, so this row is no longer claimed conformant. Implementation, tests, and journey mappings remain as local coverage. Restore conformant only after a fresh signed envelope is produced by the protected promote-signed-buyer-paid-path-journey.yml workflow on main and consumed into CONFORMANCE. Expired artifacts are not retained here because expired evidence fails spec-index even when pending."
+      }
     },
     {
       "requirement_id": "SPEC-005-R002",
       "spec_id": "SPEC-005",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
         "phase4-coordinator/internal/billing/hotpath.go:WriteHotPath",
         "phase4-coordinator/internal/billing/store.go:NewStore"
@@ -4294,26 +4286,18 @@
       "journeys": [
         "JOURNEY-BUYER-PAID-PATH"
       ],
-      "evidence": [
-        {
-          "artifact": "commit:5ed5d7190bd878fe3623fff9a5684e71eddfb8f1",
-          "source": null,
-          "captured_at": "2026-08-17",
-          "expires_at": "2026-09-16"
-        },
-        {
-          "artifact": "sha256:77b9de93bbbdc7a853e1196379769bb25d93c0bd1d683c1ca62a80038237d389",
-          "source": "journeys/evidence/buyer-paid-path-20260817T045519Z.spec-005-r001-spec-005-r002-spec-006-r001-spec-006-r002-spec-006-r003-spec-015-r001-spec-022-r001-spec-022-r002-spec-022-r003-spec-022-r004-spec-022-r005-spec-022-r010.journey-result.signed.json",
-          "captured_at": "2026-08-17",
-          "expires_at": "2026-09-16"
-        }
-      ],
-      "gap": null
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1022",
+        "rationale": "The previously consumed signed JOURNEY-BUYER-PAID-PATH envelope expired on 2026-09-16, so this row is no longer claimed conformant. Implementation, tests, and journey mappings remain as local coverage. Restore conformant only after a fresh signed envelope is produced by the protected promote-signed-buyer-paid-path-journey.yml workflow on main and consumed into CONFORMANCE. Expired artifacts are not retained here because expired evidence fails spec-index even when pending."
+      }
     },
     {
       "requirement_id": "SPEC-005-R003",
       "spec_id": "SPEC-005",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
         "phase4-coordinator/internal/billing/recovery.go:StartStartupScan"
       ],
@@ -4326,21 +4310,13 @@
       "journeys": [
         "JOURNEY-BUYER-CRASH-RECOVERY"
       ],
-      "evidence": [
-        {
-          "artifact": "commit:caa6ae4aec712c5d6353a3d307aab551911bea65",
-          "source": null,
-          "captured_at": "2026-08-18",
-          "expires_at": "2026-09-17"
-        },
-        {
-          "artifact": "sha256:553f8eb085674daa557277cf4aaf476ad8269e50e5c7f9b89dcf77bf5587706b",
-          "source": "journeys/evidence/buyer-crash-recovery-20260818T065904Z.spec-005-r003.journey-result.signed.json",
-          "captured_at": "2026-08-18",
-          "expires_at": "2026-09-17"
-        }
-      ],
-      "gap": null
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1043",
+        "rationale": "The previously consumed signed JOURNEY-BUYER-CRASH-RECOVERY envelope expired on 2026-09-17, so this row is no longer claimed conformant. Implementation, tests, and journey mappings remain as local coverage. Restore conformant only after a fresh signed envelope is produced by the protected promote-signed-buyer-crash-recovery-journey.yml workflow on main and consumed into CONFORMANCE. Expired artifacts are not retained here because expired evidence fails spec-index even when pending. This demote is not a paid-path recapture."
+      }
     },
     {
       "requirement_id": "SPEC-005-R004",
@@ -4502,7 +4478,7 @@
     {
       "requirement_id": "SPEC-006-R001",
       "spec_id": "SPEC-006",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
         "phase5-gateway/internal/auth/keys.go:Validate"
       ],
@@ -4514,21 +4490,13 @@
       "journeys": [
         "JOURNEY-BUYER-PAID-PATH"
       ],
-      "evidence": [
-        {
-          "artifact": "commit:5ed5d7190bd878fe3623fff9a5684e71eddfb8f1",
-          "source": null,
-          "captured_at": "2026-08-17",
-          "expires_at": "2026-09-16"
-        },
-        {
-          "artifact": "sha256:77b9de93bbbdc7a853e1196379769bb25d93c0bd1d683c1ca62a80038237d389",
-          "source": "journeys/evidence/buyer-paid-path-20260817T045519Z.spec-005-r001-spec-005-r002-spec-006-r001-spec-006-r002-spec-006-r003-spec-015-r001-spec-022-r001-spec-022-r002-spec-022-r003-spec-022-r004-spec-022-r005-spec-022-r010.journey-result.signed.json",
-          "captured_at": "2026-08-17",
-          "expires_at": "2026-09-16"
-        }
-      ],
-      "gap": null
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1022",
+        "rationale": "The previously consumed signed JOURNEY-BUYER-PAID-PATH envelope expired on 2026-09-16, so this row is no longer claimed conformant. Implementation, tests, and journey mappings remain as local coverage. Restore conformant only after a fresh signed envelope is produced by the protected promote-signed-buyer-paid-path-journey.yml workflow on main and consumed into CONFORMANCE. Expired artifacts are not retained here because expired evidence fails spec-index even when pending."
+      }
     },
     {
       "requirement_id": "SPEC-006-R002",
@@ -4547,25 +4515,12 @@
       "journeys": [
         "JOURNEY-BUYER-PAID-PATH"
       ],
-      "evidence": [
-        {
-          "artifact": "commit:5ed5d7190bd878fe3623fff9a5684e71eddfb8f1",
-          "source": null,
-          "captured_at": "2026-08-17",
-          "expires_at": "2026-09-16"
-        },
-        {
-          "artifact": "sha256:77b9de93bbbdc7a853e1196379769bb25d93c0bd1d683c1ca62a80038237d389",
-          "source": "journeys/evidence/buyer-paid-path-20260817T045519Z.spec-005-r001-spec-005-r002-spec-006-r001-spec-006-r002-spec-006-r003-spec-015-r001-spec-022-r001-spec-022-r002-spec-022-r003-spec-022-r004-spec-022-r005-spec-022-r010.journey-result.signed.json",
-          "captured_at": "2026-08-17",
-          "expires_at": "2026-09-16"
-        }
-      ],
+      "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/928",
-        "rationale": "Relay-blind integration changes mapped implementation selectors. Local regression checks pass, but historical signed deployment journeys bind earlier selector bytes; fresh independently trusted journey evidence is required before restoring conformant status. Historical evidence is retained without redating or replacement."
+        "issue": "https://github.com/Augustas11/macprovider/issues/1022",
+        "rationale": "The previously consumed signed JOURNEY-BUYER-PAID-PATH envelope expired on 2026-09-16, so this row is no longer claimed conformant. Implementation, tests, and journey mappings remain as local coverage. Restore conformant only after a fresh signed envelope is produced by the protected promote-signed-buyer-paid-path-journey.yml workflow on main and consumed into CONFORMANCE. Expired artifacts are not retained here because expired evidence fails spec-index even when pending."
       }
     },
     {
@@ -4881,7 +4836,7 @@
     {
       "requirement_id": "SPEC-022-R001",
       "spec_id": "SPEC-022",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
         "phase4-coordinator/internal/config/config.go:SettlementConfig",
         "phase4-coordinator/internal/buyer/server.go:settlementEnforceMode"
@@ -4893,26 +4848,18 @@
       "journeys": [
         "JOURNEY-BUYER-PAID-PATH"
       ],
-      "evidence": [
-        {
-          "artifact": "commit:5ed5d7190bd878fe3623fff9a5684e71eddfb8f1",
-          "source": null,
-          "captured_at": "2026-08-17",
-          "expires_at": "2026-09-16"
-        },
-        {
-          "artifact": "sha256:77b9de93bbbdc7a853e1196379769bb25d93c0bd1d683c1ca62a80038237d389",
-          "source": "journeys/evidence/buyer-paid-path-20260817T045519Z.spec-005-r001-spec-005-r002-spec-006-r001-spec-006-r002-spec-006-r003-spec-015-r001-spec-022-r001-spec-022-r002-spec-022-r003-spec-022-r004-spec-022-r005-spec-022-r010.journey-result.signed.json",
-          "captured_at": "2026-08-17",
-          "expires_at": "2026-09-16"
-        }
-      ],
-      "gap": null
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1022",
+        "rationale": "The previously consumed signed JOURNEY-BUYER-PAID-PATH envelope expired on 2026-09-16, so this row is no longer claimed conformant. Implementation, tests, and journey mappings remain as local coverage. Restore conformant only after a fresh signed envelope is produced by the protected promote-signed-buyer-paid-path-journey.yml workflow on main and consumed into CONFORMANCE. Expired artifacts are not retained here because expired evidence fails spec-index even when pending."
+      }
     },
     {
       "requirement_id": "SPEC-022-R002",
       "spec_id": "SPEC-022",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
         "phase4-coordinator/internal/buyer/server.go:selectProvider"
       ],
@@ -4922,26 +4869,18 @@
       "journeys": [
         "JOURNEY-BUYER-PAID-PATH"
       ],
-      "evidence": [
-        {
-          "artifact": "commit:5ed5d7190bd878fe3623fff9a5684e71eddfb8f1",
-          "source": null,
-          "captured_at": "2026-08-17",
-          "expires_at": "2026-09-16"
-        },
-        {
-          "artifact": "sha256:77b9de93bbbdc7a853e1196379769bb25d93c0bd1d683c1ca62a80038237d389",
-          "source": "journeys/evidence/buyer-paid-path-20260817T045519Z.spec-005-r001-spec-005-r002-spec-006-r001-spec-006-r002-spec-006-r003-spec-015-r001-spec-022-r001-spec-022-r002-spec-022-r003-spec-022-r004-spec-022-r005-spec-022-r010.journey-result.signed.json",
-          "captured_at": "2026-08-17",
-          "expires_at": "2026-09-16"
-        }
-      ],
-      "gap": null
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1022",
+        "rationale": "The previously consumed signed JOURNEY-BUYER-PAID-PATH envelope expired on 2026-09-16, so this row is no longer claimed conformant. Implementation, tests, and journey mappings remain as local coverage. Restore conformant only after a fresh signed envelope is produced by the protected promote-signed-buyer-paid-path-journey.yml workflow on main and consumed into CONFORMANCE. Expired artifacts are not retained here because expired evidence fails spec-index even when pending."
+      }
     },
     {
       "requirement_id": "SPEC-022-R003",
       "spec_id": "SPEC-022",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
         "phase4-coordinator/internal/billing/route_snapshot.go:Digest"
       ],
@@ -4953,21 +4892,13 @@
       "journeys": [
         "JOURNEY-BUYER-PAID-PATH"
       ],
-      "evidence": [
-        {
-          "artifact": "commit:5ed5d7190bd878fe3623fff9a5684e71eddfb8f1",
-          "source": null,
-          "captured_at": "2026-08-17",
-          "expires_at": "2026-09-16"
-        },
-        {
-          "artifact": "sha256:77b9de93bbbdc7a853e1196379769bb25d93c0bd1d683c1ca62a80038237d389",
-          "source": "journeys/evidence/buyer-paid-path-20260817T045519Z.spec-005-r001-spec-005-r002-spec-006-r001-spec-006-r002-spec-006-r003-spec-015-r001-spec-022-r001-spec-022-r002-spec-022-r003-spec-022-r004-spec-022-r005-spec-022-r010.journey-result.signed.json",
-          "captured_at": "2026-08-17",
-          "expires_at": "2026-09-16"
-        }
-      ],
-      "gap": null
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1022",
+        "rationale": "The previously consumed signed JOURNEY-BUYER-PAID-PATH envelope expired on 2026-09-16, so this row is no longer claimed conformant. Implementation, tests, and journey mappings remain as local coverage. Restore conformant only after a fresh signed envelope is produced by the protected promote-signed-buyer-paid-path-journey.yml workflow on main and consumed into CONFORMANCE. Expired artifacts are not retained here because expired evidence fails spec-index even when pending."
+      }
     },
     {
       "requirement_id": "SPEC-022-R004",
@@ -5078,7 +5009,7 @@
     {
       "requirement_id": "SPEC-022-R007",
       "spec_id": "SPEC-022",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
         "phase4-coordinator/internal/billing/settlement_receipts.go:IngestSettlementReceipt",
         "phase4-coordinator/internal/billing/settlement.go:RunSettlement"
@@ -5092,21 +5023,13 @@
       "journeys": [
         "JOURNEY-BUYER-ENFORCE"
       ],
-      "evidence": [
-        {
-          "artifact": "commit:caa6ae4aec712c5d6353a3d307aab551911bea65",
-          "source": null,
-          "captured_at": "2026-08-18",
-          "expires_at": "2026-09-17"
-        },
-        {
-          "artifact": "sha256:5ede794fefc03470f1e3e5c0c401e95c8b9842c2c4aa0ac0fb7fcefd0ee39e14",
-          "source": "journeys/evidence/buyer-enforce-20260818T065941Z.spec-022-r007-spec-022-r008-spec-022-r009-spec-022-r011.journey-result.signed.json",
-          "captured_at": "2026-08-18",
-          "expires_at": "2026-09-17"
-        }
-      ],
-      "gap": null
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1044",
+        "rationale": "The previously consumed signed JOURNEY-BUYER-ENFORCE envelope expired on 2026-09-17, so this row is no longer claimed conformant. Implementation, tests, and journey mappings remain as local coverage. Restore conformant only after a fresh signed envelope is produced by the protected promote-signed-buyer-enforce-journey.yml workflow on main and consumed into CONFORMANCE. Expired artifacts are not retained here because expired evidence fails spec-index even when pending. Isolated enforce recapture is not a production Pearl settlement-mode flip."
+      }
     },
     {
       "requirement_id": "SPEC-022-R008",
@@ -5149,7 +5072,7 @@
     {
       "requirement_id": "SPEC-022-R009",
       "spec_id": "SPEC-022",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
         "phase4-coordinator/internal/billing/recovery.go:recoveredSettlementPolicyTx"
       ],
@@ -5161,26 +5084,18 @@
       "journeys": [
         "JOURNEY-BUYER-ENFORCE"
       ],
-      "evidence": [
-        {
-          "artifact": "commit:caa6ae4aec712c5d6353a3d307aab551911bea65",
-          "source": null,
-          "captured_at": "2026-08-18",
-          "expires_at": "2026-09-17"
-        },
-        {
-          "artifact": "sha256:5ede794fefc03470f1e3e5c0c401e95c8b9842c2c4aa0ac0fb7fcefd0ee39e14",
-          "source": "journeys/evidence/buyer-enforce-20260818T065941Z.spec-022-r007-spec-022-r008-spec-022-r009-spec-022-r011.journey-result.signed.json",
-          "captured_at": "2026-08-18",
-          "expires_at": "2026-09-17"
-        }
-      ],
-      "gap": null
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1044",
+        "rationale": "The previously consumed signed JOURNEY-BUYER-ENFORCE envelope expired on 2026-09-17, so this row is no longer claimed conformant. Implementation, tests, and journey mappings remain as local coverage. Restore conformant only after a fresh signed envelope is produced by the protected promote-signed-buyer-enforce-journey.yml workflow on main and consumed into CONFORMANCE. Expired artifacts are not retained here because expired evidence fails spec-index even when pending. Isolated enforce recapture is not a production Pearl settlement-mode flip."
+      }
     },
     {
       "requirement_id": "SPEC-022-R010",
       "spec_id": "SPEC-022",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
         "phase5-gateway/internal/router/disclosure.go:makeTier1Disclosure",
         "phase5-gateway/internal/router/disclosure.go:makeVerifiedModelSettlementDisclosure"
@@ -5192,21 +5107,13 @@
       "journeys": [
         "JOURNEY-BUYER-PAID-PATH"
       ],
-      "evidence": [
-        {
-          "artifact": "commit:5ed5d7190bd878fe3623fff9a5684e71eddfb8f1",
-          "source": null,
-          "captured_at": "2026-08-17",
-          "expires_at": "2026-09-16"
-        },
-        {
-          "artifact": "sha256:77b9de93bbbdc7a853e1196379769bb25d93c0bd1d683c1ca62a80038237d389",
-          "source": "journeys/evidence/buyer-paid-path-20260817T045519Z.spec-005-r001-spec-005-r002-spec-006-r001-spec-006-r002-spec-006-r003-spec-015-r001-spec-022-r001-spec-022-r002-spec-022-r003-spec-022-r004-spec-022-r005-spec-022-r010.journey-result.signed.json",
-          "captured_at": "2026-08-17",
-          "expires_at": "2026-09-16"
-        }
-      ],
-      "gap": null
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1022",
+        "rationale": "The previously consumed signed JOURNEY-BUYER-PAID-PATH envelope expired on 2026-09-16, so this row is no longer claimed conformant. Implementation, tests, and journey mappings remain as local coverage. Restore conformant only after a fresh signed envelope is produced by the protected promote-signed-buyer-paid-path-journey.yml workflow on main and consumed into CONFORMANCE. Expired artifacts are not retained here because expired evidence fails spec-index even when pending."
+      }
     },
     {
       "requirement_id": "SPEC-022-R011",
