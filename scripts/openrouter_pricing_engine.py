@@ -2241,10 +2241,11 @@ def build_catalog_proposal(
             continue
         verdict = servability.get("verdict")
         pipeline_tag = servability.get("pipeline_tag")
+        is_multimodal_text = pipeline_tag in VISION_LANGUAGE_TEXT_TAGS or servability.get("serving_class") == "multimodal_text"
         if verdict == "review":
             serving_path = "text"
             servability_note = (servability.get("reasons") or [""])[0]
-        elif verdict == "unresolved" and pipeline_tag in VISION_LANGUAGE_TEXT_TAGS and servability.get("required_gb") is not None:
+        elif verdict == "unresolved" and is_multimodal_text and servability.get("required_gb") is not None:
             # Vision-language model served for TEXT (Qwen3-VL / Gemma-3 families):
             # a top-yield earner in practice, not dropped for the VL pipeline tag.
             # required_gb already counts the vision tower, so the tier fit stays
@@ -2345,6 +2346,14 @@ def fetch_catalog_records(
 def command_propose(args: argparse.Namespace) -> int:
     policy = load_json_file(Path(args.policy), "policy")
     validate_policy(policy)
+    if not os.environ.get("OPENROUTER_API_KEY"):
+        raise FetchError("OPENROUTER_API_KEY is required for the documented OpenRouter APIs")
+    # Always pull /models to build the id -> hugging_face_id map: the resolver
+    # uses the canonical HF id as its servability search stem (OpenRouter slugs
+    # and HF repo names diverge, e.g. mistral-small-2603 vs Mistral-Small-4-119B).
+    catalog = fetch_json(UrllibHTTPClient(), MODELS_URL, "models catalog", retries=args.retries, timeout_seconds=args.timeout_seconds, sleeper=time.sleep, deadline=time.monotonic() + 120, clock=time.monotonic)
+    catalog_rows = [row for row in catalog.get("data", []) if isinstance(row, dict) and isinstance(row.get("id"), str)]
+    hf_id_by_model = {row["id"]: row.get("hugging_face_id") for row in catalog_rows}
     if args.candidates:
         loaded = json.loads(Path(args.candidates).read_text(encoding="utf-8"))
         candidate_ids = loaded["models"] if isinstance(loaded, dict) else loaded
@@ -2352,20 +2361,13 @@ def command_propose(args: argparse.Namespace) -> int:
             raise SchemaError("candidates file must be a JSON list of model ids or {\"models\": [...]}")
         candidate_ids = sorted(dict.fromkeys(candidate_ids))
     else:
-        if not os.environ.get("OPENROUTER_API_KEY"):
-            raise FetchError("OPENROUTER_API_KEY is required to pull the OpenRouter models catalog")
-        catalog_client = UrllibHTTPClient()
-        catalog = fetch_json(catalog_client, MODELS_URL, "models catalog", retries=args.retries, timeout_seconds=args.timeout_seconds, sleeper=time.sleep, deadline=time.monotonic() + 120, clock=time.monotonic)
-        model_ids = [row.get("id") for row in catalog.get("data", []) if isinstance(row, dict)]
-        candidate_ids = select_open_weight_candidates(model_ids)
+        candidate_ids = select_open_weight_candidates(row["id"] for row in catalog_rows)
     if not candidate_ids:
         raise SchemaError("no candidate models to propose")
-    if not os.environ.get("OPENROUTER_API_KEY"):
-        raise FetchError("OPENROUTER_API_KEY is required for the documented OpenRouter APIs")
     import openrouter_mlx_candidates as mlx  # lazy: servability resolver, avoids import cycle
     hf_client = mlx.real_client(args.hf_timeout_seconds)
     def resolver(model_id: str, max_residency: Decimal) -> Mapping[str, Any]:
-        return mlx.resolve_row(model_id, max_residency, hf_client)
+        return mlx.resolve_row(model_id, max_residency, hf_client, hugging_face_id=hf_id_by_model.get(model_id))
     records = fetch_catalog_records(
         candidate_ids, policy,
         or_client=UrllibHTTPClient(),

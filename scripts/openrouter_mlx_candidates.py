@@ -74,6 +74,11 @@ PACKAGING_TOKENS = frozenset({
     "4bit", "5bit", "6bit", "8bit", "3bit", "2bit", "mxfp4", "nvfp4", "mixed",
     "bf16", "fp16", "fp32", "f16", "f32", "q4", "q5", "q6", "q8", "dwq", "gs",
     "it", "instruct", "chat", "mlx", "hf", "text",
+    # mtp = Multi-Token Prediction: a serving/decoding variant of the SAME base
+    # model, not a different derivative. It must not be penalised as an unknown
+    # token, or the clean text-generation `-MTP-4bit` build loses to the
+    # vision-language `-4bit` build for VL model families (Qwen3-VL, etc.).
+    "mtp",
 })
 TEXT_PIPELINE_TAGS = frozenset({"text-generation"})
 # Multimodal tags that DO emit text but are not a pure text serving path.
@@ -208,6 +213,21 @@ def unrecognised_suffix_tokens(name: str, stem: str) -> list[str]:
     return [token for token in residual if not _is_packaging_token(token)]
 
 
+def hf_base_stem(hugging_face_id: object) -> str | None:
+    """The base-model name from an OpenRouter `hugging_face_id` (`org/Name`).
+
+    OpenRouter slugs and HuggingFace repo names use different versioning schemes
+    (e.g. slug `mistral-small-2603` vs repo `Mistral-Small-4-119B-2603`), so the
+    slug tail cannot always locate the mlx-community build. When OpenRouter
+    publishes the canonical `hugging_face_id`, its model portion is the reliable
+    stem for the mlx-community search.
+    """
+    if not isinstance(hugging_face_id, str) or not hugging_face_id.strip():
+        return None
+    stem = hugging_face_id.split("/", 1)[-1].strip()
+    return stem or None
+
+
 def pick_canonical_build(builds: list[dict], stem: str) -> tuple[dict | None, bool]:
     """Choose the most canonical fleet-quant build, or None with a matched flag.
 
@@ -237,6 +257,13 @@ def pick_canonical_build(builds: list[dict], stem: str) -> tuple[dict | None, bo
         scored.append((len(variant), MLX_QUANT_TAGS.index(quant), len(name), repo_id, quant, item.get("pipeline_tag"), variant))
     if not scored:
         return None, matched_any
+    # Order by fewest variant tokens, then fleet-quant preference, then shortest
+    # name -- which favours the complete base checkpoint (e.g. `-4bit`) over a
+    # partial serving-delta repo (e.g. an `-MTP-4bit` head-only build whose
+    # safetensors are a fraction of the model). Pipeline-tag is NOT a tiebreaker:
+    # preferring a text-generation build could pick such a partial repo and report
+    # a bogus tiny residency; VL base builds carry the full weights and are
+    # included downstream as a flagged text-serving class.
     scored.sort()
     _, _, _, repo_id, quant, list_pipeline_tag, variant = scored[0]
     return {"repo": repo_id, "quant": quant, "list_pipeline_tag": list_pipeline_tag, "variant_tokens": variant}, matched_any
@@ -300,6 +327,16 @@ def is_causal_lm(config: dict | None) -> bool:
     return any(isinstance(arch, str) and arch.lower().endswith(CAUSAL_LM_ARCH_SUFFIX) for arch in architectures)
 
 
+def is_conditional_generation_arch(config: dict | None) -> bool:
+    """True for a `...ForConditionalGeneration` decoder architecture -- the shape
+    modern multimodal LLMs (Mistral3, Gemma3, Llava) use. Served for text via
+    mlx-vlm; treated as the multimodal-text class, not a confirmed text-only path."""
+    architectures = (config or {}).get("architectures")
+    if not isinstance(architectures, list):
+        return False
+    return any(isinstance(arch, str) and arch.lower().endswith("forconditionalgeneration") for arch in architectures)
+
+
 def classify(repo_id: str, quant: str | None, residency_gb: Decimal, pipeline_tag: str | None, config: dict | None, max_residency: Decimal, variant_tokens: list[str] | tuple = ()) -> dict:
     required_gb = residency_gb * RESIDENCY_OVERHEAD
     evidence = {"mlx_repo": repo_id, "quant": quant, "residency_gb": f"{residency_gb:.1f}", "required_gb": f"{required_gb:.1f}", "pipeline_tag": pipeline_tag}
@@ -329,6 +366,14 @@ def classify(repo_id: str, quant: str | None, residency_gb: Decimal, pipeline_ta
         return {**evidence, "verdict": "unresolved", "reasons": [f"pipeline_tag {pipeline_tag!r} is a vision-language pipeline, not a confirmed text-only serving path"]}
     elif pipeline_tag is None and is_causal_lm(config):
         reason = f"no HF pipeline_tag; config architecture {architectures} is a causal LM; confirm the text-only serving path before pricing"
+    elif pipeline_tag is None and is_conditional_generation_arch(config):
+        # A `...ForConditionalGeneration` decoder (e.g. Mistral3ForConditionalGeneration,
+        # the Mistral-Small vision-language family) is a multimodal LLM served for
+        # TEXT via mlx-vlm -- the same real class as an image-text-to-text pipeline,
+        # signalled by architecture rather than pipeline_tag. Mark it so downstream
+        # includes it as a flagged text-serving candidate rather than dropping it.
+        return {**evidence, "verdict": "unresolved", "serving_class": "multimodal_text",
+                "reasons": [f"config architecture {architectures} is a conditional-generation multimodal LLM served for text; confirm the mlx-vlm text path before pricing"]}
     elif pipeline_tag is None:
         return {**evidence, "verdict": "unresolved", "reasons": ["no pipeline_tag and no causal-LM architecture in config; cannot confirm the text serving path"]}
     else:
@@ -341,11 +386,13 @@ def classify(repo_id: str, quant: str | None, residency_gb: Decimal, pipeline_ta
     return {**evidence, "verdict": "review", "reasons": [reason]}
 
 
-def resolve_row(source_model_id: str, max_residency: Decimal, client: Client) -> dict:
+def resolve_row(source_model_id: str, max_residency: Decimal, client: Client, *, hugging_face_id: object = None) -> dict:
     vendor = source_model_id.split("/", 1)[0].lower()
     if vendor in CLOSED_WEIGHT_VENDORS:
         return {"verdict": "not_servable", "reasons": [f"{vendor} publishes closed-weight API models; no local MLX build is possible"]}
-    stem = model_stem(source_model_id)
+    # Prefer OpenRouter's canonical hugging_face_id as the search stem; fall back
+    # to the slug tail. The slug and HF repo names can diverge (e.g. mistral).
+    stem = hf_base_stem(hugging_face_id) or model_stem(source_model_id)
     builds = search_builds(stem, client)
     picked, matched_any = pick_canonical_build(builds, stem)
     if picked is None:

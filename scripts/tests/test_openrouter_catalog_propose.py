@@ -151,6 +151,21 @@ class BuildCatalogProposalTests(unittest.TestCase):
         self.assertEqual(row["min_ram_gb_tier"], 32)
         self.assertIn("served for text via mlx-vlm", row["servability_note"])
 
+    def test_conditional_generation_multimodal_text_is_included(self):
+        # Mistral3ForConditionalGeneration (Mistral-Small VL family) has no
+        # pipeline_tag; the resolver marks it serving_class=multimodal_text. It is
+        # a top-demand model served for text and must be included, not dropped.
+        rec = record("mistralai/mistral-small-2603", pricing_dict=pricing("0.60"),
+                     servability={"verdict": "unresolved", "pipeline_tag": None,
+                                  "serving_class": "multimodal_text", "required_gb": "88.1",
+                                  "mlx_repo": "mlx-community/Mistral-Small-4-119B-2603-4bit", "quant": "4bit",
+                                  "reasons": ["conditional-generation multimodal LLM served for text"]},
+                     demand=22307)
+        out = propose([rec])
+        self.assertEqual(len(out["selected"]), 1)
+        self.assertEqual(out["selected"][0]["serving_path"], "vision_language_text")
+        self.assertEqual(out["selected"][0]["min_ram_gb_tier"], 96)
+
     def test_non_vision_unresolved_is_still_excluded(self):
         # An unresolved verdict for a non-vision reason (no confirmed text path)
         # stays excluded -- only vision-language pipelines are included as text.

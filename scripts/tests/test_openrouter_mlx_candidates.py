@@ -349,5 +349,41 @@ class MLXCandidateTests(unittest.TestCase):
         self.assertIn("audit trail", text)
 
 
+class ServabilityCoverageTests(unittest.TestCase):
+    def test_hf_base_stem_uses_repo_name_from_hugging_face_id(self):
+        # OpenRouter slug and HF repo diverge; the HF id is the reliable stem.
+        self.assertEqual(mlx.hf_base_stem("mistralai/Mistral-Small-4-119B-2603"), "Mistral-Small-4-119B-2603")
+        self.assertEqual(mlx.hf_base_stem("Qwen/Qwen3.6-35B-A3B"), "Qwen3.6-35B-A3B")
+        self.assertIsNone(mlx.hf_base_stem(None))
+        self.assertIsNone(mlx.hf_base_stem(""))
+
+    def test_mtp_is_recognised_packaging_not_a_variant(self):
+        # `-MTP-4bit` is a serving variant of the same base, not a derivative.
+        self.assertEqual(mlx.unrecognised_suffix_tokens("qwen3.6-35b-a3b-mtp-4bit", "qwen3.6-35b-a3b"), [])
+
+    def test_is_conditional_generation_arch(self):
+        self.assertTrue(mlx.is_conditional_generation_arch({"architectures": ["Mistral3ForConditionalGeneration"]}))
+        self.assertFalse(mlx.is_conditional_generation_arch({"architectures": ["Qwen3ForCausalLM"]}))
+        self.assertFalse(mlx.is_conditional_generation_arch({}))
+
+    def test_classify_conditional_generation_marks_multimodal_text(self):
+        # A ForConditionalGeneration decoder with no pipeline_tag is a multimodal
+        # LLM served for text -> unresolved but flagged serving_class=multimodal_text
+        # so the proposer includes it (Mistral-Small VL family).
+        result = mlx.classify(
+            "mlx-community/Mistral-Small-4-119B-2603-4bit", "4bit", Decimal("60"),
+            None, {"architectures": ["Mistral3ForConditionalGeneration"]}, Decimal("256"))
+        self.assertEqual(result["verdict"], "unresolved")
+        self.assertEqual(result["serving_class"], "multimodal_text")
+        self.assertIn("required_gb", result)
+
+    def test_classify_unknown_arch_without_pipeline_stays_plain_unresolved(self):
+        result = mlx.classify(
+            "mlx-community/Foo-4bit", "4bit", Decimal("10"), None,
+            {"architectures": ["FooSeq2SeqModel"]}, Decimal("256"))
+        self.assertEqual(result["verdict"], "unresolved")
+        self.assertNotIn("serving_class", result)
+
+
 if __name__ == "__main__":
     unittest.main()
