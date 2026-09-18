@@ -73,6 +73,7 @@ All rows except the last are **already on `main`**. Next candidate = current
 | Pricing metadata only from validated endpoints | merged | #1455 |
 | OpenRouter slot-delta / stale-capacity routing on CLI path | merged | #1571 #1535 |
 | Live Ollama serve + Gemma tokens (non-earning) | in progress | #1569 #1576 |
+| Installer 404 fix: paginate latest-release lookup, de-quadratic parser | in progress | #1582 (#1574) |
 
 #1453 closes when a candidate that includes the **merged** rows is promoted to
 the fleet. #1569 is a later CLI. Spec promotion #1583 is not a CLI change.
