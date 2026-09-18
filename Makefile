@@ -22,10 +22,11 @@ test-byom-e2e:
 	test/e2e/byom/run-cli-onboarding-e2e.py
 
 # Hermetic JOURNEY-PROVIDER-BYOM-DISCOVERY gate (#1453 slice 1). Runs the
-# ten-step discovery-journey driver, then feeds its run manifest through the
-# real evidence pipeline (capture -> build -> preflight): the pipeline is the
-# acceptance test for the driver. Signing stays an operator step and is not run
-# here. See docs/runbooks/byom-journey-evidence.md.
+# ten-step discovery-journey driver, then capture. While SPEC-046-R001..R008
+# are pending, it also builds and preflights an unsigned payload. After signed
+# promotion it validates the landed envelope instead of attempting a second
+# promotion. Signing stays an operator step. See
+# docs/runbooks/byom-journey-evidence.md.
 test-byom-discovery-journey:
 	bash scripts/test-byom-discovery-journey.sh
 

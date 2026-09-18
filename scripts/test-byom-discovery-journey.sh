@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # Hermetic JOURNEY-PROVIDER-BYOM-DISCOVERY gate (#1453 slice 1).
 #
-# Runs the ten-step driver, then feeds its run manifest through the real
-# evidence pipeline: capture -> build -> preflight. The pipeline IS the
-# acceptance test for the driver -- a manifest that capture's step tables,
-# requirement tables, observation tables, or fail-closed redaction scan reject
-# fails this gate.
+# Runs the ten-step driver, then capture. While SPEC-046-R001..R008 are
+# pending, it also builds and preflights an unsigned payload. After those
+# rows are signed-promoted, build/preflight would fail closed on purpose
+# (they refuse a second promotion), so the gate validates the landed
+# signed envelope instead. Capture still rejects a manifest that the
+# step/requirement/observation tables or fail-closed redaction scan reject.
 #
 # Nothing here signs or promotes anything: signing needs the operator
 # acceptance key and stays out of CI (docs/runbooks/byom-journey-evidence.md
@@ -83,24 +84,80 @@ python3 scripts/capture-byom-journey-evidence.py \
   --candidate "$(git rev-parse --short HEAD)" \
   --summary "hermetic discovery journey"
 
-# The builder verifies the evidence bytes against a commit that contains them,
-# so give it one without touching the branch: a temporary index produces the
-# tree, and commit-tree produces an unreferenced commit whose parent is HEAD.
-GIT_INDEX_FILE="$INDEX" git read-tree HEAD
-GIT_INDEX_FILE="$INDEX" git update-index --add "$EVIDENCE"
-EVIDENCE_TREE="$(GIT_INDEX_FILE="$INDEX" git write-tree)"
-EVIDENCE_SHA="$(git commit-tree "$EVIDENCE_TREE" -p "$SOURCE_SHA" -m "ephemeral discovery-journey evidence")"
+# Build + preflight are the unsigned promotion path: they require the eight
+# SPEC-046 rows to still be pending. After signed promotion those rows are
+# conformant, so the same commands fail closed on purpose. In that case the
+# gate still runs driver + capture, then validates the landed signed envelope
+# instead of attempting a second promotion.
+DISCOVERY_LEDGER_STATE="$(python3 - "$REQUIREMENT_IDS" <<'PY'
+import json
+import sys
+from pathlib import Path
 
-python3 scripts/build-byom-discovery-journey-result.py \
-  "$EVIDENCE" \
-  --output "$UNSIGNED" \
-  --source-sha "$SOURCE_SHA" \
-  --evidence-sha "$EVIDENCE_SHA" \
-  --requirement-ids "$REQUIREMENT_IDS"
+ids = [item.strip() for item in sys.argv[1].split(",") if item.strip()]
+conformance = json.loads(Path("specs/CONFORMANCE.json").read_text(encoding="utf-8"))
+rows = {
+    row["requirement_id"]: row
+    for row in conformance.get("requirements", [])
+    if isinstance(row, dict) and isinstance(row.get("requirement_id"), str)
+}
+states = []
+sources = set()
+for requirement_id in ids:
+    row = rows.get(requirement_id)
+    if not isinstance(row, dict):
+        raise SystemExit(f"missing requirement {requirement_id}")
+    state = row.get("state")
+    states.append(state)
+    for item in row.get("evidence") or []:
+        if isinstance(item, dict) and str(item.get("artifact", "")).startswith("sha256:"):
+            source = item.get("source")
+            if isinstance(source, str) and source:
+                sources.add(source)
+if all(state == "pending" for state in states):
+    print("pending")
+    print("")
+elif all(state == "conformant" for state in states) and len(sources) == 1:
+    print("conformant")
+    print(next(iter(sources)))
+else:
+    raise SystemExit(
+        "SPEC-046 discovery rows must be uniformly pending or uniformly "
+        f"conformant with one signed source, not {states!r} / {sorted(sources)!r}"
+    )
+PY
+)"
+LEDGER_STATE="${DISCOVERY_LEDGER_STATE%%$'\n'*}"
+SIGNED_SOURCE="${DISCOVERY_LEDGER_STATE#*$'\n'}"
 
-python3 scripts/preflight-signed-journey-promotion.py \
-  --source-sha "$SOURCE_SHA" \
-  --requirement-ids "$REQUIREMENT_IDS" \
-  --journey-id JOURNEY-PROVIDER-BYOM-DISCOVERY
+if [[ "$LEDGER_STATE" == "pending" ]]; then
+  # The builder verifies the evidence bytes against a commit that contains them,
+  # so give it one without touching the branch: a temporary index produces the
+  # tree, and commit-tree produces an unreferenced commit whose parent is HEAD.
+  GIT_INDEX_FILE="$INDEX" git read-tree HEAD
+  GIT_INDEX_FILE="$INDEX" git update-index --add "$EVIDENCE"
+  EVIDENCE_TREE="$(GIT_INDEX_FILE="$INDEX" git write-tree)"
+  EVIDENCE_SHA="$(git commit-tree "$EVIDENCE_TREE" -p "$SOURCE_SHA" -m "ephemeral discovery-journey evidence")"
 
-echo "test-byom-discovery-journey: driver, capture, build, and preflight passed"
+  python3 scripts/build-byom-discovery-journey-result.py \
+    "$EVIDENCE" \
+    --output "$UNSIGNED" \
+    --source-sha "$SOURCE_SHA" \
+    --evidence-sha "$EVIDENCE_SHA" \
+    --requirement-ids "$REQUIREMENT_IDS"
+
+  python3 scripts/preflight-signed-journey-promotion.py \
+    --source-sha "$SOURCE_SHA" \
+    --requirement-ids "$REQUIREMENT_IDS" \
+    --journey-id JOURNEY-PROVIDER-BYOM-DISCOVERY
+
+  echo "test-byom-discovery-journey: driver, capture, build, and preflight passed"
+elif [[ "$LEDGER_STATE" == "conformant" && -n "$SIGNED_SOURCE" ]]; then
+  python3 scripts/validate-signed-journey-result.py \
+    "$SIGNED_SOURCE" \
+    --requirement-ids "$REQUIREMENT_IDS"
+  echo "test-byom-discovery-journey: driver, capture, and signed envelope validation passed"
+else
+  echo "test-byom-discovery-journey: unexpected SPEC-046 ledger state" >&2
+  exit 1
+fi
