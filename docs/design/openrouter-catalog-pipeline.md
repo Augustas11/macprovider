@@ -135,18 +135,22 @@ There is no replacement for global per-endpoint 30d volume: the endpoints API no
 longer exposes it, and the "user activity grouped by endpoint" analytics API is
 **account-scoped** (our own usage, needs a management key), not market-wide.
 
-**Adaptation (implemented):** peg to the market with a **request-weighted
-median** over active (`status:0`) paid endpoints, weighted and floor-gated by the
-surviving global signal `perf_last_30m_by_workload.<wk>.request_count` (a
-30-*minute* request count). A new policy field `min_endpoint_request_count_30m`
-(default 1) is the anti-thin-liquidity floor; the request-weighting preserves the
-original manipulation-resistance intent (a single-request endpoint has negligible
-weight). The `liquidity_filter` provenance is renamed honestly
-(`liquidity_signal: "openrouter_request_count_last_30m"`,
-`request_weighted_median`, `request_count_last_30m`), and the policy version is
-bumped to `openrouter-market-feeds-v0.13.0`. `validate_snapshot` re-derives and
-cross-checks the request-weighted median. This is a money-path methodology change
-and goes through the 3-lane audit.
+**Adaptation (implemented):** peg to the market with an **unweighted median over
+active (`status:0`) paid endpoints** — each eligible endpoint counts once, so no
+endpoint can move the pegged price by inflating its API-reported activity. Only
+the `perf_last_30m_by_workload.text_generation.request_count` (a 30-*minute* text
+request count) gates ELIGIBILITY: a policy field `min_endpoint_request_count_30m`
+(default **30**, operator-tunable) is the anti-thin-liquidity floor (a
+single-request endpoint is not liquid in a money-path sense). The `liquidity_filter`
+provenance is renamed honestly (`liquidity_signal:
+"openrouter_request_count_last_30m"`, `price_median_method:
+"unweighted_over_active_endpoints"`, `minimum_request_count_last_30m`,
+`request_count_last_30m`), the snapshot records `skipped_free_ranked_models` so the
+observed cohort shortfall is auditable (`observed + skipped == requested`), and the
+policy version is bumped to `openrouter-market-feeds-v0.13.0`. `validate_snapshot`
+re-derives and cross-checks the unweighted median; `catalog-release.py` delegates
+its release-side replay to that same validator (single source of truth). This is a
+money-path methodology change and goes through the 3-lane audit.
 
 **Live evidence (2026-09-18, valid key):** 40/42 rows now `active_priced`.
 `gpt-oss-120b` request-weighted completion **$0.36/Mtok** (Google endpoint, 47.7k

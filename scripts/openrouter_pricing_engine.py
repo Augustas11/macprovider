@@ -594,6 +594,7 @@ def resolve_rankings_to_catalog(
                                 {
                                     "ranking_model_permaslug": ranking_slug,
                                     "reason": "dropped_free_variant",
+                                    "rank": demand["rank"],
                                 }
                             )
                         continue
@@ -673,34 +674,50 @@ def weighted_median(
 
 
 def endpoint_request_activity(endpoint: Mapping[str, Any], model_id: str, index: int) -> int | None:
-    """Recent per-endpoint request activity from ``perf_last_30m_by_workload``.
+    """Recent per-endpoint TEXT request activity from ``perf_last_30m_by_workload``.
 
     OpenRouter removed the per-endpoint 30-day token volume
-    (``completion_tokens_last_30d``) that the liquidity filter used to weight by.
-    The surviving global, per-endpoint activity signal is
-    ``perf_last_30m_by_workload.<workload>.request_count`` -- a 30-minute request
-    count -- summed across workloads. Returns ``None`` when no ``request_count``
-    is reported (the endpoint is treated as inactive and excluded, mirroring the
-    old skip on missing volume); malformed values fail closed.
+    (``completion_tokens_last_30d``). The surviving per-endpoint activity signal
+    is ``perf_last_30m_by_workload.text_generation.request_count`` -- a 30-minute
+    request count. We read ONLY the ``text_generation`` workload: an endpoint's
+    non-text traffic (tool_use, embeddings, etc.) must not qualify it for the text
+    price. Returns ``None`` when no text ``request_count`` is reported (the
+    endpoint is treated as not text-serving and excluded); malformed values fail
+    closed. This is an ELIGIBILITY signal only -- it is never used as a price
+    weight (see ``endpoint_price_median``).
     """
     perf = endpoint.get("perf_last_30m_by_workload")
     if perf is None:
         return None
     if not isinstance(perf, dict):
         raise SchemaError(f"endpoints response for {model_id}: endpoints[{index}].perf_last_30m_by_workload must be an object")
-    total = 0
-    observed = False
-    for workload, stats in perf.items():
-        if not isinstance(stats, dict):
-            raise SchemaError(f"endpoints response for {model_id}: endpoints[{index}].perf_last_30m_by_workload[{workload!r}] must be an object")
-        count = stats.get("request_count")
-        if count is None:
-            continue
-        if isinstance(count, bool) or not isinstance(count, int) or count < 0:
-            raise SchemaError(f"endpoints response for {model_id}: endpoints[{index}].perf_last_30m_by_workload[{workload!r}].request_count is invalid")
-        total += count
-        observed = True
-    return total if observed else None
+    stats = perf.get("text_generation")
+    if stats is None:
+        return None
+    if not isinstance(stats, dict):
+        raise SchemaError(f"endpoints response for {model_id}: endpoints[{index}].perf_last_30m_by_workload['text_generation'] must be an object")
+    count = stats.get("request_count")
+    if count is None:
+        return None
+    if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+        raise SchemaError(f"endpoints response for {model_id}: endpoints[{index}].perf_last_30m_by_workload['text_generation'].request_count is invalid")
+    return count
+
+
+def endpoint_price_median(
+    priced: list[tuple[Decimal, Decimal, str, int, str]],
+    value_index: int,
+) -> tuple[Decimal, tuple[Decimal, Decimal, str, int, str]]:
+    """UNWEIGHTED median price over the eligible (active, paid) endpoints.
+
+    Each eligible endpoint counts once, so no endpoint can move the pegged price
+    by inflating its API-reported ``request_count`` (that value gates eligibility,
+    it is not a weight). The deterministic LOWER median selects a real endpoint's
+    quote (never an average) -- conservative for a peg we then undercut -- tie
+    broken by provider then model id."""
+    ordered = sorted(priced, key=lambda item: (item[value_index], item[2], item[4]))
+    chosen = ordered[(len(ordered) - 1) // 2]
+    return chosen[value_index], chosen
 
 
 def cheapest_endpoint_pricing(document: Mapping[str, Any], model_id: str, *, min_request_count_30m: int = 1) -> dict[str, Any] | None:
@@ -748,8 +765,8 @@ def cheapest_endpoint_pricing(document: Mapping[str, Any], model_id: str, *, min
         priced.append((completion, prompt, provider, activity, endpoint_model_id))
     if not priced:
         return None
-    completion, completion_endpoint = weighted_median(priced, 0)
-    prompt, prompt_endpoint = weighted_median(priced, 1)
+    completion, completion_endpoint = endpoint_price_median(priced, 0)
+    prompt, prompt_endpoint = endpoint_price_median(priced, 1)
     _, _, provider, selected_activity, _ = completion_endpoint
     _, _, prompt_provider, prompt_activity, _ = prompt_endpoint
     liquidity_candidates = [
@@ -778,7 +795,7 @@ def cheapest_endpoint_pricing(document: Mapping[str, Any], model_id: str, *, min
             "liquidity_signal": "openrouter_request_count_last_30m",
             "minimum_request_count_last_30m": min_request_count_30m,
             "request_count_last_30m": selected_activity,
-            "request_weighted_median": True,
+            "price_median_method": "unweighted_over_active_endpoints",
             "selected_prompt_provider": prompt_provider,
             "selected_prompt_request_count_last_30m": prompt_activity,
             "eligible_endpoint_liquidity": liquidity_candidates,
@@ -815,8 +832,28 @@ def validate_snapshot(snapshot: Mapping[str, Any]) -> None:
         raise SchemaError("snapshot source schema/generator provenance is invalid")
     fetch_metadata = source["fetch_metadata"]
     required_fetch_metadata = {"successful_source_count", "observed_model_count", "requested_top_n", "demand_window_days", "ranking_window_start_date", "ranking_window_end_date", "demand_metric"}
+    if schema_version == SNAPSHOT_SCHEMA_VERSION:
+        # Current snapshots record every :free row dropped from the requested
+        # top-N so the observed shortfall is auditable, not merely trusted.
+        required_fetch_metadata = required_fetch_metadata | {"skipped_free_ranked_models"}
     if not isinstance(fetch_metadata, dict) or set(fetch_metadata) != required_fetch_metadata:
         raise SchemaError("snapshot fetch_metadata has missing or unexpected fields")
+    if schema_version == SNAPSHOT_SCHEMA_VERSION:
+        skipped_free = fetch_metadata["skipped_free_ranked_models"]
+        if not isinstance(skipped_free, list):
+            raise SchemaError("snapshot fetch_metadata.skipped_free_ranked_models must be an array")
+        for entry in skipped_free:
+            if not isinstance(entry, dict) or set(entry) != {"ranking_model_permaslug", "reason", "rank"}:
+                raise SchemaError("snapshot fetch_metadata.skipped_free_ranked_models entry has invalid fields")
+            if entry["reason"] != "dropped_free_variant" or not is_free_variant(entry["ranking_model_permaslug"]):
+                raise SchemaError("snapshot fetch_metadata.skipped_free_ranked_models entry is not a dropped free variant")
+            if isinstance(entry["rank"], bool) or not isinstance(entry["rank"], int) or entry["rank"] < 1:
+                raise SchemaError("snapshot fetch_metadata.skipped_free_ranked_models entry has an invalid rank")
+        # Completeness: every requested top-N row is either observed or a recorded
+        # free drop. This is what makes the market-peg coverage gate auditable --
+        # a truncated snapshot cannot pass by claiming an unexplained shortfall.
+        if fetch_metadata["observed_model_count"] + len(skipped_free) != fetch_metadata["requested_top_n"]:
+            raise SchemaError("snapshot fetch_metadata: observed_model_count + skipped_free_ranked_models must equal requested_top_n")
     for key in ("successful_source_count", "observed_model_count", "requested_top_n", "demand_window_days"):
         if isinstance(fetch_metadata[key], bool) or not isinstance(fetch_metadata[key], int) or fetch_metadata[key] < 1:
             raise SchemaError(f"snapshot fetch_metadata.{key} must be a positive integer")
@@ -884,10 +921,10 @@ def validate_snapshot(snapshot: Mapping[str, Any]) -> None:
             raise SchemaError(f"snapshot.rows[{index}] active pricing cannot derive from a free variant")
         if pricing_status == "active_priced" and schema_version != LEGACY_SNAPSHOT_SCHEMA_VERSION:
             liquidity = pricing.get("liquidity_filter")
-            required_liquidity = {"endpoint_status", "paid_prices", "liquidity_signal", "minimum_request_count_last_30m", "request_count_last_30m", "request_weighted_median", "selected_prompt_provider", "selected_prompt_request_count_last_30m", "eligible_endpoint_liquidity"}
+            required_liquidity = {"endpoint_status", "paid_prices", "liquidity_signal", "minimum_request_count_last_30m", "request_count_last_30m", "price_median_method", "selected_prompt_provider", "selected_prompt_request_count_last_30m", "eligible_endpoint_liquidity"}
             if not isinstance(liquidity, dict) or set(liquidity) != required_liquidity:
                 raise SchemaError(f"snapshot.rows[{index}] has invalid liquidity filter")
-            if liquidity["endpoint_status"] != 0 or liquidity["paid_prices"] is not True or liquidity["request_weighted_median"] is not True or liquidity["liquidity_signal"] != "openrouter_request_count_last_30m":
+            if liquidity["endpoint_status"] != 0 or liquidity["paid_prices"] is not True or liquidity["price_median_method"] != "unweighted_over_active_endpoints" or liquidity["liquidity_signal"] != "openrouter_request_count_last_30m":
                 raise SchemaError(f"snapshot.rows[{index}] liquidity filter does not match the policy thresholds")
             try:
                 selected_prompt = Decimal(pricing["input_per_mtok"])
@@ -932,8 +969,8 @@ def validate_snapshot(snapshot: Mapping[str, Any]) -> None:
                 raise SchemaError(f"snapshot.rows[{index}] liquidity-selected endpoint is not paid and active")
             if any(candidate[3] < minimum_activity for candidate in weighted_candidates):
                 raise SchemaError(f"snapshot.rows[{index}] liquidity filter includes an inactive endpoint")
-            expected_completion, completion_endpoint = weighted_median(weighted_candidates, 0)
-            expected_prompt, prompt_endpoint = weighted_median(weighted_candidates, 1)
+            expected_completion, completion_endpoint = endpoint_price_median(weighted_candidates, 0)
+            expected_prompt, prompt_endpoint = endpoint_price_median(weighted_candidates, 1)
             if selected_completion != expected_completion or selected_prompt != expected_prompt:
                 raise SchemaError(f"snapshot.rows[{index}] liquidity-filtered median price is invalid")
             if pricing["benchmark_provider"] != completion_endpoint[2] or selected_activity != completion_endpoint[3]:
@@ -1004,14 +1041,18 @@ def build_snapshot(
         raise SchemaError("endpoint confirmation set contains an unrequested model")
     if any(value not in {"confirmed_empty_second_fetch", "recovered_nonempty_on_confirmation"} for value in confirmations.values()):
         raise SchemaError("endpoint confirmation provenance is invalid")
-    rankings = resolve_rankings_to_catalog(rankings, catalog, endpoints_documents)
+    skipped_free_ranked_models: list[dict[str, Any]] = []
+    rankings = resolve_rankings_to_catalog(rankings, catalog, endpoints_documents, skipped_sink=skipped_free_ranked_models)
     # Free-only ranked models are dropped by the resolver. Re-compact the
     # surviving cohort to contiguous demand ranks (1..N) so the snapshot keeps
     # its rank-contiguity invariant while preserving demand order and each
     # model's absolute total_token_volume. This is a no-op when nothing dropped.
+    # The dropped rows (with their ORIGINAL rank) are recorded in fetch_metadata
+    # so the observed shortfall is auditable: `observed + skipped == requested`.
     rankings.sort(key=lambda demand: demand["rank"])
     for new_rank, demand in enumerate(rankings, start=1):
         demand["rank"] = new_rank
+    skipped_free_ranked_models.sort(key=lambda entry: entry["rank"])
     resolved_endpoints: dict[str, Mapping[str, Any]] = {}
     for demand in rankings:
         request_id = (
@@ -1099,6 +1140,7 @@ def build_snapshot(
                 "ranking_window_start_date": ranking_meta["start_date"],
                 "ranking_window_end_date": ranking_meta["end_date"],
                 "demand_metric": "aggregated_daily_total_tokens",
+                "skipped_free_ranked_models": skipped_free_ranked_models,
             },
         },
         "rows": normalized_rows,
@@ -1447,6 +1489,25 @@ def validate_market_peg_snapshot_requirements(snapshot: Mapping[str, Any], polic
         raise SchemaError("snapshot does not contain the policy-required top-demand coverage")
     if snapshot.get("schema_version") == LEGACY_SNAPSHOT_SCHEMA_VERSION:
         return
+    # Coverage on the requested cohort is only trustworthy because the snapshot
+    # is proven complete (validate_snapshot enforces observed + skipped == requested).
+    # Assert it explicitly here too: the OBSERVED cohort plus the recorded free
+    # drops must still cover the required top-N.
+    skipped_free = coverage.get("skipped_free_ranked_models")
+    if not isinstance(skipped_free, list):
+        raise SchemaError("snapshot fetch_metadata is missing the skipped_free_ranked_models provenance")
+    if coverage["observed_model_count"] + len(skipped_free) < required_top_n:
+        raise SchemaError("snapshot observed cohort plus recorded free drops does not cover the policy-required top-demand")
+    # Bind the snapshot's pricing basis to THIS compute policy: every active-priced
+    # row must have been priced under the current request-count floor, so a snapshot
+    # produced under a looser floor cannot be repriced under a stricter policy.
+    policy_floor = policy.get("min_endpoint_request_count_30m", 1)
+    for index, row in enumerate(snapshot.get("rows", [])):
+        if not isinstance(row, dict) or row.get("pricing_status") != "active_priced":
+            continue
+        recorded_floor = ((row.get("pricing") or {}).get("liquidity_filter") or {}).get("minimum_request_count_last_30m")
+        if recorded_floor != policy_floor:
+            raise SchemaError(f"snapshot.rows[{index}] priced under request-count floor {recorded_floor!r} but policy floor is {policy_floor!r}; re-fetch under the current policy")
     ranking_end_date = coverage["ranking_window_end_date"]
     # ranking_window_end_date is date-typed, so reject at two calendar days
     # old to keep the accepted window within SPEC's 48-hour intent.
@@ -2260,6 +2321,9 @@ def build_catalog_proposal(
         except (InvalidOperation, TypeError, ValueError):
             excluded.append({"model_id": model_id, "reason": "servability record has no numeric required_gb"})
             continue
+        if not required_gb.is_finite() or required_gb <= 0:
+            excluded.append({"model_id": model_id, "reason": f"servability required_gb is not a positive finite value ({required_gb})"})
+            continue
         tier = assign_ram_tier(required_gb, tiers)
         if tier is None:
             excluded.append({"model_id": model_id, "reason": f"runtime residency {required_gb} GB exceeds largest tier {max(tiers)} GB"})
@@ -2279,12 +2343,21 @@ def build_catalog_proposal(
             "demand_request_count_30m": demand,
             "endpoint_count": int(record.get("endpoint_count") or 0),
             "servability_note": servability_note,
+            # A proposal never assigns a rate_class or promotes a row: SPEC-023
+            # §3.3.1 keeps the enum closed and §16 requires an explicit operator
+            # decision. These machine-readable gates say so.
+            "rate_class_required_before_promotion": True,
+            "manual_serving_verification_required": serving_path == "vision_language_text",
         })
     selected.sort(key=lambda row: (row["min_ram_gb_tier"], -Decimal(row["market_completion_per_mtok"]), row["model_id"]))
     excluded.sort(key=lambda row: row["model_id"])
     return {
         "proposal_type": "openrouter-catalog-proposal",
         "schema_version": CATALOG_PROPOSAL_SCHEMA_VERSION,
+        # Machine-readable: this artifact is a review input only. It is never a
+        # signed feed, is never applied, and every recommendable promotion still
+        # requires an explicit operator decision (SPEC-023 §16).
+        "status": "proposal_only_never_applied",
         "generated_at": rfc3339(now),
         "generator_version": TOOL_VERSION,
         "policy_version": policy["policy_version"],
@@ -2298,6 +2371,53 @@ def build_catalog_proposal(
         "selected": selected,
         "excluded": excluded,
     }
+
+
+CATALOG_PROPOSAL_TOP_KEYS = frozenset({
+    "proposal_type", "schema_version", "status", "generated_at", "generator_version",
+    "policy_version", "selection", "selected", "excluded",
+})
+CATALOG_PROPOSAL_SELECTED_KEYS = frozenset({
+    "model_id", "min_ram_gb_tier", "required_residency_gb", "serving_path", "mlx_repo",
+    "quant", "market_completion_per_mtok", "market_input_per_mtok",
+    "proposed_completion_per_mtok", "proposed_input_per_mtok", "benchmark_provider",
+    "demand_request_count_30m", "endpoint_count", "servability_note",
+    "rate_class_required_before_promotion", "manual_serving_verification_required",
+})
+
+
+def validate_catalog_proposal(proposal: Mapping[str, Any]) -> None:
+    """Closed-schema validation of a catalog proposal artifact (fail-closed).
+
+    A proposal is a review input, never a signed/applied feed. This rejects
+    unknown fields and malformed rows so downstream automation cannot mistake a
+    drifted artifact for a valid one."""
+    if not isinstance(proposal, dict) or set(proposal) != CATALOG_PROPOSAL_TOP_KEYS:
+        raise SchemaError("catalog proposal has missing or unexpected top-level fields")
+    if proposal["proposal_type"] != "openrouter-catalog-proposal" or proposal["schema_version"] != CATALOG_PROPOSAL_SCHEMA_VERSION:
+        raise SchemaError("catalog proposal type/schema_version is invalid")
+    if proposal["status"] != "proposal_only_never_applied":
+        raise SchemaError("catalog proposal status must be proposal_only_never_applied")
+    if not isinstance(proposal["selected"], list) or not isinstance(proposal["excluded"], list):
+        raise SchemaError("catalog proposal selected/excluded must be arrays")
+    for index, row in enumerate(proposal["selected"]):
+        if not isinstance(row, dict) or set(row) != CATALOG_PROPOSAL_SELECTED_KEYS:
+            raise SchemaError(f"catalog proposal selected[{index}] has missing or unexpected fields")
+        if not isinstance(row["model_id"], str) or not MODEL_ID_RE.fullmatch(row["model_id"]):
+            raise SchemaError(f"catalog proposal selected[{index}].model_id is invalid")
+        if row["serving_path"] not in {"text", "vision_language_text"}:
+            raise SchemaError(f"catalog proposal selected[{index}].serving_path is invalid")
+        if row["rate_class_required_before_promotion"] is not True:
+            raise SchemaError(f"catalog proposal selected[{index}] must require a rate_class before promotion")
+        if row["serving_path"] == "vision_language_text" and row["manual_serving_verification_required"] is not True:
+            raise SchemaError(f"catalog proposal selected[{index}] vision_language_text row must require manual serving verification")
+        for field in ("proposed_completion_per_mtok", "market_completion_per_mtok"):
+            parse_decimal(row.get(field), f"catalog proposal selected[{index}].{field}", allow_zero=True)
+        if isinstance(row["min_ram_gb_tier"], bool) or not isinstance(row["min_ram_gb_tier"], int) or row["min_ram_gb_tier"] < 1:
+            raise SchemaError(f"catalog proposal selected[{index}].min_ram_gb_tier is invalid")
+    for index, row in enumerate(proposal["excluded"]):
+        if not isinstance(row, dict) or set(row) != {"model_id", "reason"}:
+            raise SchemaError(f"catalog proposal excluded[{index}] has missing or unexpected fields")
 
 
 def fetch_catalog_records(
@@ -2322,8 +2442,15 @@ def fetch_catalog_records(
     deadline = clock() + generation_timeout_seconds
     records: list[dict[str, Any]] = []
     for model_id in candidate_ids:
-        url = ENDPOINTS_URL.format(model_id=quote(model_id, safe="/"))
         record: dict[str, Any] = {"model_id": model_id, "pricing": None, "demand_request_count_30m": 0, "endpoint_count": 0, "servability": {}}
+        if clock() >= deadline:
+            # The wall-clock budget is exhausted; record the remaining candidates
+            # as skipped (surfaced in the proposal's excluded trail) rather than
+            # running unbounded OpenRouter + HuggingFace probes past the budget.
+            record["servability"] = {"verdict": "error", "reasons": ["scan budget exhausted before this candidate was probed"]}
+            records.append(record)
+            continue
+        url = ENDPOINTS_URL.format(model_id=quote(model_id, safe="/"))
         try:
             document = fetch_json(or_client, url, f"endpoints {model_id}", retries=retries, timeout_seconds=timeout_seconds, sleeper=sleeper, deadline=deadline, clock=clock)
             record["demand_request_count_30m"] = model_demand_activity(document)
@@ -2333,6 +2460,10 @@ def fetch_catalog_records(
             record["pricing"] = cheapest_endpoint_pricing(document, model_id, min_request_count_30m=min_endpoint_requests)
         except EngineError as error:
             record["servability"] = {"verdict": "error", "reasons": [f"OpenRouter endpoint pricing failed: {error}"]}
+            records.append(record)
+            continue
+        if clock() >= deadline:
+            record["servability"] = {"verdict": "error", "reasons": ["scan budget exhausted before the servability probe"]}
             records.append(record)
             continue
         try:
@@ -2362,8 +2493,16 @@ def command_propose(args: argparse.Namespace) -> int:
         candidate_ids = sorted(dict.fromkeys(candidate_ids))
     else:
         candidate_ids = select_open_weight_candidates(row["id"] for row in catalog_rows)
+    # Every candidate must be a well-formed OpenRouter model id BEFORE it reaches
+    # URL construction: the host stays pinned, but this also constrains the path
+    # to the documented {provider}/{model} shape (no extra-slash injection).
+    for model_id in candidate_ids:
+        if not MODEL_ID_RE.fullmatch(model_id):
+            raise SchemaError(f"candidate model id has unsafe shape: {model_id!r}")
     if not candidate_ids:
         raise SchemaError("no candidate models to propose")
+    if len(candidate_ids) > args.max_candidates:
+        raise SchemaError(f"candidate universe {len(candidate_ids)} exceeds --max-candidates {args.max_candidates}; narrow the candidate set")
     import openrouter_mlx_candidates as mlx  # lazy: servability resolver, avoids import cycle
     hf_client = mlx.real_client(args.hf_timeout_seconds)
     def resolver(model_id: str, max_residency: Decimal) -> Mapping[str, Any]:
@@ -2374,6 +2513,7 @@ def command_propose(args: argparse.Namespace) -> int:
         servability_resolver=resolver,
         retries=args.retries,
         timeout_seconds=args.timeout_seconds,
+        generation_timeout_seconds=args.generation_timeout_seconds,
     )
     proposal = build_catalog_proposal(
         records, policy,
@@ -2381,6 +2521,7 @@ def command_propose(args: argparse.Namespace) -> int:
         yield_floor_completion_per_mtok=parse_decimal(args.yield_floor_per_mtok, "yield floor", allow_zero=True),
         demand_floor_request_count_30m=args.demand_floor_request_count,
     )
+    validate_catalog_proposal(proposal)
     output_dir = Path(args.output_dir)
     name = f"openrouter-catalog-proposal-{proposal['generated_at'].replace(':', '-')}.json"
     atomic_publish_json_directory(output_dir, {name: proposal})
@@ -2417,6 +2558,8 @@ def parser() -> argparse.ArgumentParser:
     propose.add_argument("--retries", type=int, default=2)
     propose.add_argument("--timeout-seconds", type=float, default=15.0)
     propose.add_argument("--hf-timeout-seconds", type=float, default=15.0)
+    propose.add_argument("--max-candidates", type=int, default=200, help="hard cap on candidates scanned (bounds OpenRouter+HF probes)")
+    propose.add_argument("--generation-timeout-seconds", type=float, default=1800.0, help="overall wall-clock budget for the scan")
     propose.set_defaults(handler=command_propose)
     return result
 

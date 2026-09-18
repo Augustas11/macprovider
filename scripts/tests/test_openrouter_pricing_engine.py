@@ -288,6 +288,7 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
         snapshot = self.snapshot(legacy_policy)
         snapshot["schema_version"] = engine.LEGACY_SNAPSHOT_SCHEMA_VERSION
         snapshot["source"]["observed_schema_version_or_fingerprint"] = engine.LEGACY_SCHEMA_CONTRACT_FINGERPRINT
+        snapshot["source"]["fetch_metadata"].pop("skipped_free_ranked_models", None)
         qwen_row = next(row for row in snapshot["rows"] if row["source_model_id"] == "qwen/qwen2.5-coder-32b-instruct")
         qwen_row["pricing"]["completion_per_token"] = "0.00000025"
         qwen_row["pricing"]["completion_per_mtok"] = "0.25"
@@ -325,6 +326,7 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
         snapshot = self.snapshot(legacy_policy)
         snapshot["schema_version"] = engine.LEGACY_SNAPSHOT_SCHEMA_VERSION
         snapshot["source"]["observed_schema_version_or_fingerprint"] = engine.LEGACY_SCHEMA_CONTRACT_FINGERPRINT
+        snapshot["source"]["fetch_metadata"].pop("skipped_free_ranked_models", None)
         for row in snapshot["rows"]:
             if isinstance(row.get("pricing"), dict):
                 row["pricing"].pop("liquidity_filter", None)
@@ -338,6 +340,7 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
         snapshot = self.snapshot(legacy_policy)
         snapshot["schema_version"] = engine.LEGACY_SNAPSHOT_SCHEMA_VERSION
         snapshot["source"]["observed_schema_version_or_fingerprint"] = engine.LEGACY_SCHEMA_CONTRACT_FINGERPRINT
+        snapshot["source"]["fetch_metadata"].pop("skipped_free_ranked_models", None)
         for row in snapshot["rows"]:
             if isinstance(row.get("pricing"), dict):
                 row["pricing"].pop("liquidity_filter", None)
@@ -521,7 +524,7 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
         self.assertEqual(resolved, [])
         self.assertEqual(
             skipped,
-            [{"ranking_model_permaslug": "example/model:free", "reason": "dropped_free_variant"}],
+            [{"ranking_model_permaslug": "example/model:free", "reason": "dropped_free_variant", "rank": 1}],
         )
 
     def test_catalog_resolution_does_not_select_single_free_canonical_candidate(self):
@@ -547,7 +550,7 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
             self.assertEqual(resolved, [])
             self.assertEqual(
                 skipped,
-                [{"ranking_model_permaslug": "example/model:free", "reason": "dropped_free_variant"}],
+                [{"ranking_model_permaslug": "example/model:free", "reason": "dropped_free_variant", "rank": 1}],
             )
 
     def test_catalog_alias_resolution_uses_endpoint_confirmed_regular_variant_over_batch(self):
@@ -1373,24 +1376,43 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
         self.assertEqual(len(snapshot["rows"]), len(endpoints))
         self.assertEqual(snapshot["source"]["fetch_metadata"]["observed_model_count"], len(endpoints))
 
-    def test_market_peg_coverage_accepts_observed_shortfall_from_free_drops(self):
-        # A :free-variant drop leaves observed_model_count legitimately below the
-        # requested top-N. Market-peg coverage is asserted on the REQUESTED
-        # cohort, not the observed count, so the shortfall must not raise.
-        base = {
+    def _coverage_snapshot(self, observed, skipped_count, *, requested=50, rows=None):
+        return {
             "schema_version": engine.SNAPSHOT_SCHEMA_VERSION,
+            "rows": rows or [],
             "source": {"fetch_metadata": {
-                "requested_top_n": 50,
-                "observed_model_count": 42,
+                "requested_top_n": requested,
+                "observed_model_count": observed,
+                "skipped_free_ranked_models": [
+                    {"ranking_model_permaslug": f"v/m{i}:free", "reason": "dropped_free_variant", "rank": i}
+                    for i in range(1, skipped_count + 1)
+                ],
                 "ranking_window_end_date": "2026-08-04",
             }},
         }
-        engine.validate_market_peg_snapshot_requirements(base, policy(), now=NOW)
-        # A genuinely short REQUESTED cohort (partial/failed fetch) still fails closed.
-        short = copy.deepcopy(base)
-        short["source"]["fetch_metadata"]["requested_top_n"] = 49
+
+    def test_market_peg_coverage_accepts_observed_plus_skipped_covering_topn(self):
+        # observed + recorded free drops == requested top-N -> coverage holds.
+        engine.validate_market_peg_snapshot_requirements(self._coverage_snapshot(42, 8), policy(), now=NOW)
+
+    def test_market_peg_coverage_rejects_unexplained_shortfall(self):
+        # A truncated snapshot (shortfall NOT explained by recorded free drops)
+        # must fail closed even though requested_top_n alone is satisfied.
+        with self.assertRaisesRegex(engine.SchemaError, "does not cover"):
+            engine.validate_market_peg_snapshot_requirements(self._coverage_snapshot(1, 0), policy(), now=NOW)
+
+    def test_market_peg_coverage_rejects_short_requested_cohort(self):
         with self.assertRaisesRegex(engine.SchemaError, "top-demand coverage"):
-            engine.validate_market_peg_snapshot_requirements(short, policy(), now=NOW)
+            engine.validate_market_peg_snapshot_requirements(self._coverage_snapshot(49, 1, requested=49), policy(), now=NOW)
+
+    def test_market_peg_rejects_snapshot_priced_under_a_different_floor(self):
+        # A row priced under request-count floor 999 cannot be computed under a
+        # policy whose floor is 1: the pricing basis is bound to the compute policy.
+        row = {"pricing_status": "active_priced",
+               "pricing": {"liquidity_filter": {"minimum_request_count_last_30m": 999}}}
+        snap = self._coverage_snapshot(50, 0, rows=[row])
+        with self.assertRaisesRegex(engine.SchemaError, "request-count floor"):
+            engine.validate_market_peg_snapshot_requirements(snap, policy(), now=NOW)
 
     def test_demand_proposal_rejects_invalid_minimum_provider_targets(self):
         with self.assertRaises(engine.SchemaError):

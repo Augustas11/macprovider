@@ -1678,6 +1678,7 @@ def market_policy_fixture(model_id: str = "example/new-model") -> dict:
         "demand_top_n": 50,
         "undercut_fraction": "0.20",
         "cache_hit_fraction": "0.25",
+        "min_endpoint_request_count_30m": 1,
         "models": [{
             "source_model_id": model_id,
             "canonical_model_id": model_id,
@@ -1743,7 +1744,7 @@ def market_replay_inputs(
             "status": 0,
             "throughput_last_30m": "0.2",
             "uptime_last_30d": "0.80",
-            "completion_tokens_last_30d": tokens,
+            "perf_last_30m_by_workload": {"text_generation": {"request_count": tokens}},
             "pricing": {"prompt": "0.00000010", "completion": "0.00000020"},
         }
         for index, tokens in enumerate(target_endpoint_tokens, start=1)
@@ -1767,7 +1768,7 @@ def market_replay_inputs(
             "status": 0,
             "throughput_last_30m": "0.2",
             "uptime_last_30d": "0.80",
-            "completion_tokens_last_30d": 1_000_000,
+            "perf_last_30m_by_workload": {"text_generation": {"request_count": 1_000_000}},
             "pricing": {"prompt": "0.00000010", "completion": "0.00000020"},
         }]}}
     candidate_obj = {"rows": {target_model_id: {"runtime_status": "recommendable"}}}
@@ -1835,7 +1836,10 @@ class MarketPegReplayTest(unittest.TestCase):
             sys.modules["openrouter_pricing_engine"] = fake
             loaded, executed_sha256 = catalog_release.load_openrouter_pricing_engine()
             self.assertEqual(pathlib.Path(loaded.__file__).resolve(), ROOT / "scripts" / "openrouter_pricing_engine.py")
-            self.assertEqual(loaded.liquidity_volume_floor(20_000_001), 1_000_001)
+            # The real module is loaded, not the preloaded fake: it carries no
+            # liquidity_volume_floor (that basis was removed) and has the real API.
+            self.assertFalse(hasattr(loaded, "liquidity_volume_floor"))
+            self.assertEqual(loaded.SNAPSHOT_SCHEMA_VERSION, openrouter_pricing_engine.SNAPSHOT_SCHEMA_VERSION)
             self.assertEqual(executed_sha256, catalog_release.sha256((ROOT / "scripts" / "openrouter_pricing_engine.py").read_bytes()))
         finally:
             if previous is None:
@@ -1849,22 +1853,26 @@ class MarketPegReplayTest(unittest.TestCase):
             inputs = market_replay_inputs(pathlib.Path(raw), today)
             validate_market_fixture(inputs)
 
-    def test_market_peg_replay_uses_shared_ceiling_liquidity_floor(self):
+    def test_market_peg_replay_retains_active_endpoints_by_request_floor(self):
+        # OpenRouter removed the 30d token volume, so the model-relative volume
+        # floor is gone; the engine now gates on a fixed 30m request_count floor
+        # and takes an unweighted median over active endpoints. Both endpoints
+        # above the default floor (1) are retained, and the release-side replay
+        # delegates to the engine validator.
         with tempfile.TemporaryDirectory() as raw:
             today = datetime.now(timezone.utc).date().isoformat()
             inputs = market_replay_inputs(
                 pathlib.Path(raw),
                 today,
                 target_total_tokens=20_000_001,
-                target_endpoint_tokens=(1_000_000, 1_000_001),
+                target_endpoint_tokens=(500, 1500),
             )
             liquidity = inputs["snapshot"]["rows"][0]["pricing"]["liquidity_filter"]
-            self.assertEqual(openrouter_pricing_engine.liquidity_volume_floor(20_000_001), 1_000_001)
-            self.assertIs(catalog_release.liquidity_volume_floor, openrouter_pricing_engine.liquidity_volume_floor)
-            self.assertEqual(liquidity["minimum_completion_tokens_last_30d"], 1_000_001)
+            self.assertEqual(liquidity["price_median_method"], "unweighted_over_active_endpoints")
+            self.assertEqual(liquidity["minimum_request_count_last_30m"], 1)
             self.assertEqual(
-                [candidate["completion_tokens_last_30d"] for candidate in liquidity["eligible_endpoint_liquidity"]],
-                [1_000_001],
+                sorted(candidate["request_count_last_30m"] for candidate in liquidity["eligible_endpoint_liquidity"]),
+                [500, 1500],
             )
             validate_market_fixture(inputs)
 
@@ -1914,7 +1922,9 @@ class MarketPegReplayTest(unittest.TestCase):
             bind["content_digest"] = snapshot["content_digest"]
             paths["bind"].write_bytes(canonical(bind))
             inputs["snapshot"] = snapshot
-            with self.assertRaisesRegex(catalog_release.CatalogError, "paid endpoint"):
+            # The release replay now delegates to the engine validator, which
+            # rejects a :free endpoint identity in the retained liquidity.
+            with self.assertRaisesRegex(catalog_release.CatalogError, "endpoint_model_id is invalid"):
                 validate_market_fixture(inputs)
 
     def test_market_peg_rejects_snapshot_stale_at_release_time(self):

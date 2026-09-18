@@ -363,8 +363,21 @@ class ServabilityCoverageTests(unittest.TestCase):
 
     def test_is_conditional_generation_arch(self):
         self.assertTrue(mlx.is_conditional_generation_arch({"architectures": ["Mistral3ForConditionalGeneration"]}))
+        self.assertTrue(mlx.is_conditional_generation_arch({"architectures": ["Gemma3ForConditionalGeneration"], "model_type": "gemma3"}))
         self.assertFalse(mlx.is_conditional_generation_arch({"architectures": ["Qwen3ForCausalLM"]}))
         self.assertFalse(mlx.is_conditional_generation_arch({}))
+        # seq2seq ForConditionalGeneration models must NOT be admitted as text.
+        self.assertFalse(mlx.is_conditional_generation_arch({"architectures": ["T5ForConditionalGeneration"], "model_type": "t5"}))
+        self.assertFalse(mlx.is_conditional_generation_arch({"architectures": ["BartForConditionalGeneration"], "model_type": "bart"}))
+        # an unrecognised ForConditionalGeneration family fails closed (not admitted).
+        self.assertFalse(mlx.is_conditional_generation_arch({"architectures": ["FooBarForConditionalGeneration"], "model_type": "foobar"}))
+
+    def test_classify_t5_seq2seq_is_not_multimodal_text(self):
+        result = mlx.classify(
+            "mlx-community/T5-Base-4bit", "4bit", Decimal("2"), None,
+            {"architectures": ["T5ForConditionalGeneration"], "model_type": "t5"}, Decimal("256"))
+        self.assertEqual(result["verdict"], "unresolved")
+        self.assertNotIn("serving_class", result)
 
     def test_classify_conditional_generation_marks_multimodal_text(self):
         # A ForConditionalGeneration decoder with no pipeline_tag is a multimodal

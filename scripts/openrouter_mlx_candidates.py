@@ -92,6 +92,20 @@ MULTIMODAL_ARCH_MARKERS = frozenset({"llava", "fuyu", "vision", "clip", "whisper
 # ...OmniForCausalLM, ...AudioForCausalLM).
 MULTIMODAL_ARCH_PATTERNS = ("vlfor", "omnifor", "audiofor", "visionfor", "speechfor", "imagefor")
 CAUSAL_LM_ARCH_SUFFIX = "forcausallm"
+# Known decoder-multimodal LLM families that ship as `...ForConditionalGeneration`
+# and are served for TEXT via mlx-vlm. Matched against architecture + model_type.
+# Deliberately an allowlist: an unrecognised `ForConditionalGeneration` model is
+# NOT admitted as text (fail closed), because the suffix is also used by
+# encoder-decoder seq2seq models.
+MULTIMODAL_TEXT_MODEL_FAMILIES = frozenset({
+    "mistral3", "gemma3", "gemma3n", "llava", "llava_next", "llava-next", "llavanext",
+    "qwen2_vl", "qwen2-vl", "qwen2vl", "qwen2_5_vl", "qwen2_5vl", "qwen3_vl", "qwen3vl",
+    "paligemma", "pixtral", "idefics2", "idefics3", "internvl", "minicpmv", "phi3_v",
+    "phi4_multimodal", "aya_vision", "llama4", "smolvlm",
+})
+# Encoder-decoder seq2seq families that also end in `ForConditionalGeneration` but
+# are a different (non-chat, non-mlx-vlm) serving path -- always excluded.
+SEQ2SEQ_MODEL_MARKERS = ("t5", "bart", "pegasus", "marian", "mbart", "mt5", "led", "bigbird_pegasus", "prophetnet", "blenderbot", "m2m")
 # Conservative multiplier over safetensors weight bytes to cover loader,
 # activation, and KV-cache residency (weight bytes are file size, not runtime RAM).
 RESIDENCY_OVERHEAD = Decimal("1.3")
@@ -101,6 +115,9 @@ class ResolveError(Exception):
     """Fail-closed condition while resolving a single candidate row."""
 
 
+MAX_HF_RESPONSE_BYTES = 8 * 1024 * 1024
+
+
 def real_client(timeout: float) -> Client:
     def fetch(url: str) -> object:
         request = urllib.request.Request(url, headers={"Accept": "application/json", "User-Agent": "macprovider-mlx-candidates"})
@@ -108,7 +125,19 @@ def real_client(timeout: float) -> Client:
             with urllib.request.urlopen(request, timeout=timeout) as response:
                 if response.status != 200:
                     raise ResolveError(f"HuggingFace returned HTTP {response.status}")
-                payload = response.read()
+                # Fail closed on an oversized response instead of reading it all
+                # into memory: cap by Content-Length and by a bounded read (a
+                # hostile/broken response could otherwise exhaust memory).
+                declared = response.headers.get("Content-Length")
+                if declared is not None:
+                    try:
+                        if int(declared) > MAX_HF_RESPONSE_BYTES:
+                            raise ResolveError(f"HuggingFace response too large ({declared} bytes)")
+                    except ValueError as error:
+                        raise ResolveError("HuggingFace Content-Length is not an integer") from error
+                payload = response.read(MAX_HF_RESPONSE_BYTES + 1)
+                if len(payload) > MAX_HF_RESPONSE_BYTES:
+                    raise ResolveError(f"HuggingFace response exceeds {MAX_HF_RESPONSE_BYTES} bytes")
         except (urllib.error.URLError, http.client.HTTPException, TimeoutError, OSError) as error:
             raise ResolveError(f"HuggingFace request failed: {error}") from error
         try:
@@ -328,13 +357,22 @@ def is_causal_lm(config: dict | None) -> bool:
 
 
 def is_conditional_generation_arch(config: dict | None) -> bool:
-    """True for a `...ForConditionalGeneration` decoder architecture -- the shape
-    modern multimodal LLMs (Mistral3, Gemma3, Llava) use. Served for text via
-    mlx-vlm; treated as the multimodal-text class, not a confirmed text-only path."""
+    """True only for a `...ForConditionalGeneration` decoder that is a KNOWN
+    multimodal LLM served for text (Mistral3, Gemma3, Llava, ...), identified by
+    model_type/architecture family -- NOT for encoder-decoder seq2seq models that
+    share the `ForConditionalGeneration` suffix (T5/BART/Pegasus/...), which are a
+    different serving path and must not be admitted as text. Bare suffix matching
+    would false-positive on seq2seq; the allowlist keeps admission narrow and
+    fail-closed for unrecognised families."""
     architectures = (config or {}).get("architectures")
     if not isinstance(architectures, list):
         return False
-    return any(isinstance(arch, str) and arch.lower().endswith("forconditionalgeneration") for arch in architectures)
+    if not any(isinstance(arch, str) and arch.lower().endswith("forconditionalgeneration") for arch in architectures):
+        return False
+    blob = _arch_blob(config)
+    if any(marker in blob for marker in SEQ2SEQ_MODEL_MARKERS):
+        return False
+    return any(family in blob for family in MULTIMODAL_TEXT_MODEL_FAMILIES)
 
 
 def classify(repo_id: str, quant: str | None, residency_gb: Decimal, pipeline_tag: str | None, config: dict | None, max_residency: Decimal, variant_tokens: list[str] | tuple = ()) -> dict:

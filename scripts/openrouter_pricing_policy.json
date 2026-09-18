@@ -2,7 +2,7 @@
   "policy_version": "openrouter-market-feeds-v0.13.0",
   "demand_top_n": 50,
   "undercut_fraction": "0.20",
-  "min_endpoint_request_count_30m": 1,
+  "min_endpoint_request_count_30m": 30,
   "models": [
     {
       "source_model_id": "openai/gpt-oss-20b",

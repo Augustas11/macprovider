@@ -205,5 +205,38 @@ class BuildCatalogProposalTests(unittest.TestCase):
         self.assertEqual(order, ["b/small-hi", "c/small-lo", "a/big-lowyield"])
 
 
+class ValidateCatalogProposalTests(unittest.TestCase):
+    def test_build_output_passes_the_validator(self):
+        recs = [
+            record("z-ai/glm-4.5-air", pricing_dict=pricing("0.85"), servability=servable("78.2")),
+            record("qwen/qwen3.6-35b-a3b", pricing_dict=pricing("1.00"),
+                   servability={"verdict": "unresolved", "pipeline_tag": "image-text-to-text",
+                                "required_gb": "20.0", "mlx_repo": "mlx-community/Qwen3.6-35B-A3B-4bit",
+                                "quant": "4bit", "reasons": ["vision-language"]}),
+        ]
+        out = propose(recs)
+        engine.validate_catalog_proposal(out)  # must not raise
+
+    def test_validator_rejects_unknown_top_level_field(self):
+        out = propose([record("z-ai/glm-4.5-air", pricing_dict=pricing("0.85"), servability=servable("78.2"))])
+        out["surprise"] = 1
+        with self.assertRaisesRegex(engine.SchemaError, "top-level fields"):
+            engine.validate_catalog_proposal(out)
+
+    def test_validator_rejects_non_proposal_status(self):
+        out = propose([record("z-ai/glm-4.5-air", pricing_dict=pricing("0.85"), servability=servable("78.2"))])
+        out["status"] = "applied"
+        with self.assertRaisesRegex(engine.SchemaError, "proposal_only_never_applied"):
+            engine.validate_catalog_proposal(out)
+
+    def test_validator_requires_manual_verification_flag_for_vl_rows(self):
+        out = propose([record("qwen/qwen3.6-35b-a3b", pricing_dict=pricing("1.00"),
+                              servability={"verdict": "unresolved", "pipeline_tag": "image-text-to-text",
+                                           "required_gb": "20.0", "mlx_repo": "r", "quant": "4bit", "reasons": ["vl"]})])
+        out["selected"][0]["manual_serving_verification_required"] = False
+        with self.assertRaisesRegex(engine.SchemaError, "manual serving verification"):
+            engine.validate_catalog_proposal(out)
+
+
 if __name__ == "__main__":
     unittest.main()
