@@ -1,0 +1,192 @@
+{
+  "schema_version": "macprovider.journey-result-envelope.v1",
+  "signatures": [
+    {
+      "algorithm": "ecdsa-p256-sha256",
+      "key_id": "macprovider-acceptance-p256-v1",
+      "signature": "MEYCIQDoIpHEhe/kGTm1Yxv969axkBXa5HpgCk0u8NCxWl/PDgIhAIeuLuMmsuSAuMfbLufsNaiucuKqEvjjVx3No+vs3r9i",
+      "signed_sha256": "bf6048b2b2bd22604d602f56281e9401703192fe1157e21721ce4b91d95373fb",
+      "verified_at": "2026-09-18T04:17:47Z",
+      "verifier": ".github/workflows/promote-signed-network-model-admission-journey.yml:35306377225:1"
+    }
+  ],
+  "signed": {
+    "schema_version": "macprovider.journey-result.v1",
+    "journey_id": "JOURNEY-NETWORK-MODEL-ADMISSION",
+    "requirement_ids": [
+      "SPEC-047-R001",
+      "SPEC-047-R002",
+      "SPEC-047-R003",
+      "SPEC-047-R004",
+      "SPEC-047-R005",
+      "SPEC-047-R006",
+      "SPEC-047-R007",
+      "SPEC-047-R008"
+    ],
+    "repository": {
+      "name": "Augustas11/macprovider",
+      "commit": "9b5ddbc14ebed939cf2297cc0e99d662ea52e96b"
+    },
+    "captured_at": "2026-09-16T13:50:00Z",
+    "expires_at": "2026-10-16",
+    "operator": {
+      "role": "release-operator",
+      "identity_fingerprint": "4b5b0c550f52d4126d5ae8cabca0416a9355a6da95179d1d893097baccae2ee0"
+    },
+    "environment": {
+      "class": "physical-provider",
+      "hardware_profile": "operator-apple-silicon-32gb",
+      "candidate": "cli-1.8.123"
+    },
+    "artifacts": [
+      {
+        "id": "redacted-network-model-admission",
+        "sha256": "62562c948b8917916d6a2a2b4ffd7133281b9aa6bdd693296b34261943c77d64",
+        "source": "journeys/evidence/network-model-admission-20260916T135000Z.redacted.json"
+      }
+    ],
+    "result": {
+      "status": "pass",
+      "summary": "physical admission journey passed settlement-capable MLX case with money-path zeros"
+    },
+    "steps": [
+      {
+        "id": "step-01-offer-dry-run",
+        "status": "pass",
+        "assertion": "Dry run produced the dry-run document with local_default authority and made no coordinator request.",
+        "artifacts": [
+          "redacted-network-model-admission"
+        ]
+      },
+      {
+        "id": "step-02-submit-signed-offer",
+        "status": "pass",
+        "assertion": "One provider-signed offer was accepted by the coordinator and recorded as offer_submitted; a duplicate offer while it was live was refused with HTTP 409 and appended nothing.",
+        "artifacts": [
+          "redacted-network-model-admission"
+        ]
+      },
+      {
+        "id": "step-03-reject-opaque-endpoint",
+        "status": "pass",
+        "assertion": "An opaque endpoint candidate was refused by the CLI submission builder before any coordinator contact and remains confined to local inventory with no catalog key, no economics, and no buyer traffic.",
+        "artifacts": [
+          "redacted-network-model-admission"
+        ]
+      },
+      {
+        "id": "step-04-sandbox-probe-only",
+        "status": "pass",
+        "assertion": "The candidate was admitted as sandbox-probe-only by the coordinator, is not default-paid-routable, earns no credit, and exposes no dereferenceable locator.",
+        "artifacts": [
+          "redacted-network-model-admission"
+        ]
+      },
+      {
+        "id": "step-05-network-visible-unpriced",
+        "status": "pass",
+        "assertion": "The coordinator's completed synthetic probe moved the candidate to network_admitted_unsettled with null economics (the operator disclosure edge is not reachable after that probe-passed state).",
+        "artifacts": [
+          "redacted-network-model-admission"
+        ]
+      },
+      {
+        "id": "step-06-catalog-matched-not-settlement",
+        "status": "pass",
+        "assertion": "A catalog-matched candidate reached catalog_priced with trusted economics shown and no buyer debit, paid routing, ledger row, or provider settlement.",
+        "artifacts": [
+          "redacted-network-model-admission"
+        ]
+      },
+      {
+        "id": "step-07-revocation-on-drift",
+        "status": "pass",
+        "assertion": "A changed admitted predicate was detected by the coordinator and the candidate was revoked with a drift reason; routing and settlement failed closed.",
+        "artifacts": [
+          "redacted-network-model-admission"
+        ]
+      },
+      {
+        "id": "step-08-withdrawal",
+        "status": "pass",
+        "assertion": "The offered candidate was withdrawn through the CLI-owned path and its local artifacts remain in inventory.",
+        "artifacts": [
+          "redacted-network-model-admission"
+        ]
+      },
+      {
+        "id": "step-09-settlement-capable-case",
+        "status": "pass",
+        "assertion": "A catalog-verified candidate was promoted to settlement_capable under dual control with a route-time artifact binding; the proposing actor could not self-approve; route-snapshot and receipt gates remain armed with zero rows.",
+        "artifacts": [
+          "redacted-network-model-admission"
+        ]
+      },
+      {
+        "id": "step-10-admission-status-presentation",
+        "status": "pass",
+        "assertion": "Status output distinguishes a catalog-matched candidate with an earning path from a novel candidate with none, each with state meaning and next action.",
+        "artifacts": [
+          "redacted-network-model-admission"
+        ]
+      },
+      {
+        "id": "step-11-transition-validity",
+        "status": "pass",
+        "assertion": "An out-of-matrix transition was rejected and left the state unchanged; the withdrawn and revoked re-entry paths each required fresh provider-signed evidence (offer_rejected is reserved and unreachable in v0.2).",
+        "artifacts": [
+          "redacted-network-model-admission"
+        ]
+      },
+      {
+        "id": "step-12-redaction-review",
+        "status": "pass",
+        "assertion": "The runner log, the CLI and operator-surface transcript, every captured document, the coordinator's event listing, and the provider and coordinator logs written during the run were reviewed; no operator secret, ledger credential, credential-shaped value, URL, filesystem path, IP literal, loopback host name, raw prompt or raw completion is persisted in any of them.",
+        "artifacts": [
+          "redacted-network-model-admission"
+        ]
+      }
+    ],
+    "redaction": {
+      "secrets_redacted": true,
+      "operator_identity_redacted": true,
+      "local_account_names_redacted": true
+    },
+    "run_id": "a03a715cb5c541ef9f5a6375ed3f0a4a",
+    "execution_mode": "provider-byom-network-admission",
+    "observations": {
+      "catalog_matched_not_settlement_verified": true,
+      "default_buyer_invisibility_verified": true,
+      "dry_run_did_not_submit": true,
+      "earning_path_disclosure_verified": true,
+      "network_visible_unpriced_disclosed": true,
+      "non_settlement_state_created_provider_credit": false,
+      "provider_price_treated_as_catalog_rate": false,
+      "provider_signature_verified": true,
+      "raw_completion_logged": false,
+      "raw_prompt_logged": false,
+      "rejected_opaque_endpoint_verified": true,
+      "revocation_on_drift_verified": true,
+      "revoked_reoffer_required_fresh_evidence": true,
+      "sandbox_probe_only_blocked_from_paid_routing": true,
+      "secret_field_persisted": false,
+      "settlement_capable_case_verified": true,
+      "synthetic_probe_used_provider_channel": true,
+      "transition_matrix_enforced": true,
+      "withdrawal_verified": true,
+      "withdrawn_reoffer_required_fresh_evidence": true,
+      "money_path_zero_rows": {
+        "ledger_operator_credits": 0,
+        "ledger_payout_ready": 0,
+        "ledger_quarantine_resolutions": 0,
+        "ledger_request_credits": 0,
+        "payout_attempts": 0,
+        "request_log": 0,
+        "settlement_attempt_outputs": 0,
+        "settlement_receipt_verdicts": 0,
+        "settlement_route_snapshots": 0,
+        "spec022_payable_request_credits": 0
+      }
+    }
+  }
+}
