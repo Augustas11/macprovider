@@ -9426,77 +9426,143 @@ validate_inputs() {
 }
 
 latest_release_tag() {
-  # Scan the recent release list and pick the newest tag that names a
-  # macprovider-cli release (tag matches ^v[0-9], e.g. v1.3.1). The
+  # Scan the release list and pick the newest tag that names a macprovider-cli
+  # release (tag matches ^v[0-9]+\.[0-9]+\.[0-9]+$, e.g. v1.3.1). The
   # /releases/latest endpoint can't be trusted on its own: it returns
   # whichever release is flagged "Latest" repo-wide, so any unrelated
   # release published under the same repo (e.g. macprovider-verify
   # under tag verify-vX.Y.Z) silently hijacks the installer.
-  api_url="https://api.github.com/repos/${GITHUB_REPO}/releases?per_page=30"
-  # Bound network stalls: --connect-timeout guards a captive portal / black-holed
-  # socket, --speed-limit/--speed-time abort a mid-transfer stall, and --retry
-  # rides out transient failures. Without these the installer hangs indefinitely
-  # on a stalled GitHub API socket and the Malibu UI is stuck at "Starting
-  # installer…" (its progress monitor only tracks macprovider-cli processes).
-  json="$(curl -fsSL --connect-timeout 15 --speed-limit 1024 --speed-time 120 --retry 3 --retry-connrefused --retry-max-time 300 "$api_url")" || die 3 "failed to query GitHub Releases API: $api_url"
-  tag="$(
-    printf "%s" "$json" \
-      | awk '
-          function maybe_print_release(obj, tag, prerelease) {
-            tag = ""
-            prerelease = "false"
-            if (match(obj, /"tag_name"[[:space:]]*:[[:space:]]*"[^"]+"/)) {
-              tag = substr(obj, RSTART, RLENGTH)
-              sub(/^"tag_name"[[:space:]]*:[[:space:]]*"/, "", tag)
-              sub(/"$/, "", tag)
+  #
+  # We must paginate. GitHub returns releases newest-first, and the recent
+  # release stream can be a long run of consecutive prereleases (candidate
+  # builds), pushing the newest STABLE release past the first page. Fetching a
+  # single page then leaves zero stable tags after the prerelease /
+  # non-vMAJOR.MINOR.PATCH filter, so "latest" resolves to nothing and the whole
+  # install 404s (observed live 2026-09-18: 29+ candidate prereleases preceded
+  # the newest stable v1.8.123, which sat past a 30-item window). Walk pages
+  # newest-first until the parser yields a matching stable tag, an empty page
+  # marks the end of the release list, or a bounded page cap is reached.
+  #
+  # Ordering: GitHub returns releases newest-first both within and across pages,
+  # and the awk parser prints only the first matching object it sees (later
+  # matches on the same page are ignored), so the first match while walking pages
+  # in ascending order is always the newest stable release. We never pick an
+  # older stable over a newer one.
+  page=1
+  max_pages=10
+  tag=""
+  while [ "$page" -le "$max_pages" ]; do
+    api_url="https://api.github.com/repos/${GITHUB_REPO}/releases?per_page=100&page=${page}"
+    # Bound network stalls: --connect-timeout guards a captive portal / black-holed
+    # socket, --speed-limit/--speed-time abort a mid-transfer stall, and --retry
+    # rides out transient failures. Without these the installer hangs indefinitely
+    # on a stalled GitHub API socket and the Malibu UI is stuck at "Starting
+    # installer…" (its progress monitor only tracks macprovider-cli processes).
+    json="$(curl -fsSL --connect-timeout 15 --speed-limit 1024 --speed-time 120 --retry 3 --retry-connrefused --retry-max-time 300 "$api_url")" || die 3 "failed to query GitHub Releases API: $api_url"
+    # End of the release list: an empty array (or whitespace) means no more
+    # pages exist, so stop rather than spending the full page budget.
+    case "$(printf "%s" "$json" | tr -d '[:space:]')" in
+      ""|"[]") break ;;
+    esac
+    # Streaming, string-aware, single-pass parser. It prints the first top-level
+    # release object whose tag_name matches ^v[0-9]+.[0-9]+.[0-9]+$ and whose
+    # prerelease is not true, then drains the rest of stdin (it does not exit
+    # early — see the "found" note below for why). cdepth counts {} and [] structural
+    # nesting: the outer array is cdepth 1 and a release object's own fields live
+    # at cdepth 2, so nested author/assets/reactions structures (cdepth >= 3) are
+    # ignored. String contents are tracked, so any brace, bracket, colon, comma,
+    # or fake "tag_name"/"prerelease" text inside a string value (e.g. the
+    # release body) can never be mistaken for structure — the hijack-safety of
+    # the previous object parser is preserved.
+    #
+    # It must be single-pass and O(n). GitHub returns each release with its full
+    # asset list, so a per_page=100 page is multiple MB; the previous parser read
+    # it with substr(data, i, 1) over one concatenated string, which is O(n^2) in
+    # the BSD awk shipped on macOS and made the installer hang for minutes on a
+    # single page. This version scans each line's characters via split() (O(1)
+    # indexing) and never accumulates long value strings, so it parses a
+    # multi-MB page in well under a second.
+    tag="$(
+      printf "%s" "$json" \
+        | awk '
+          function finalize_literal() {
+            if (last_key == "prerelease") {
+              if (lit == "true") cur_pre = "true"
+              else if (lit == "false") cur_pre = "false"
             }
-            if (match(obj, /"prerelease"[[:space:]]*:[[:space:]]*true/)) {
-              prerelease = "true"
-            }
-            if (tag ~ /^v[0-9]+\.[0-9]+\.[0-9]+$/ && prerelease != "true") {
-              print tag
-              exit
+            lit = ""
+          }
+          function eval_object() {
+            if (!found && cur_tag ~ /^v[0-9]+\.[0-9]+\.[0-9]+$/ && cur_pre != "true") {
+              print cur_tag
+              found = 1
             }
           }
+          BEGIN {
+            cdepth = 0; in_string = 0; escaped = 0
+            is_key = 0; last_key = ""; sval = ""; want_sval = 0
+            cur_tag = ""; cur_pre = ""; lit = ""; found = 0
+          }
+          # Once the newest stable tag is printed, keep consuming stdin instead of
+          # exiting. An early awk exit would SIGPIPE the "printf %s $json" producer;
+          # under set -euo pipefail that makes the pipeline return 141 and aborts
+          # the installer even though the correct tag was already found. Draining to
+          # EOF lets the producer finish cleanly (pipeline status 0). The remaining
+          # lines are skipped cheaply, so this stays O(n).
+          found { next }
           {
-            data = data $0 "\n"
-          }
-          END {
-            depth = 0
-            in_string = 0
-            escaped = 0
-            start = 0
-            for (i = 1; i <= length(data); i++) {
-              ch = substr(data, i, 1)
+            n = split($0, ch, "")
+            for (i = 1; i <= n; i++) {
+              c = ch[i]
               if (in_string) {
                 if (escaped) {
+                  if (want_sval) sval = sval c
                   escaped = 0
-                } else if (ch == "\\") {
+                } else if (c == "\\") {
                   escaped = 1
-                } else if (ch == "\"") {
+                } else if (c == "\"") {
                   in_string = 0
+                  if (cdepth == 2) {
+                    if (is_key) { last_key = sval; is_key = 0 }
+                    else if (last_key == "tag_name") cur_tag = sval
+                  }
+                } else if (want_sval) {
+                  sval = sval c
                 }
                 continue
               }
-              if (ch == "\"") {
-                in_string = 1
-              } else if (ch == "{") {
-                depth++
-                if (depth == 1) {
-                  start = i
+              if (c == "\"") {
+                in_string = 1; sval = ""
+                want_sval = (cdepth == 2 && (is_key || last_key == "tag_name"))
+                continue
+              }
+              if (c == "{" || c == "[") {
+                if (cdepth == 2) finalize_literal()
+                cdepth++
+                if (cdepth == 2 && c == "{") {
+                  cur_tag = ""; cur_pre = ""; is_key = 1; last_key = ""; lit = ""
                 }
-              } else if (ch == "}") {
-                if (depth == 1 && start > 0) {
-                  maybe_print_release(substr(data, start, i - start + 1))
-                  start = 0
-                }
-                depth--
+                continue
+              }
+              if (c == "}" || c == "]") {
+                if (cdepth == 2) finalize_literal()
+                if (cdepth == 2 && c == "}") eval_object()
+                cdepth--
+                continue
+              }
+              if (cdepth == 2) {
+                if (c == ",") { finalize_literal(); is_key = 1; last_key = "" }
+                else if (c == ":") { finalize_literal(); is_key = 0 }
+                else if (c !~ /[[:space:]]/ && !is_key) lit = lit c
               }
             }
           }
         '
-  )"
-  [ -n "$tag" ] || die 3 "no non-prerelease macprovider-cli release (tag ^v[0-9]) found in recent GitHub Releases"
+    )"
+    [ -n "$tag" ] && break
+    page=$((page + 1))
+  done
+  [ -n "$tag" ] || die 3 "no non-prerelease macprovider-cli release (tag ^v[0-9]+.[0-9]+.[0-9]+) found in the first ${max_pages} pages of GitHub Releases"
   printf "%s" "$tag"
 }
 

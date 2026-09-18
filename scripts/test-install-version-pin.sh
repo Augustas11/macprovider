@@ -113,6 +113,7 @@ checksums_sig_path=""
 ACCEPTANCE_METADATA_PATH=""
 ACCEPTANCE_METADATA_SIGNATURE_PATH=""
 DOWNLOAD_LOG="$workdir/downloads.log"
+RELEASE_PAGE_LOG="$workdir/release-pages.log"
 LOG_FILE="$workdir/log.out"
 BINARY_PATH="$workdir/installed-macprovider-cli"
 INSTALL_DIR="$workdir"
@@ -158,8 +159,24 @@ curl() {
   done
 
   case "$url" in
-    *"/releases?per_page=30")
-      printf '%s' "$MOCK_RELEASES_JSON"
+    *"/releases?per_page=100&page="*)
+      # Page-aware release mock. install.sh paginates newest-first; each fetched
+      # page is logged so tests can assert early-stop on an empty page. Page N is
+      # served from MOCK_RELEASES_PAGE_N when set; page 1 otherwise falls back to
+      # the single-blob MOCK_RELEASES_JSON (keeps pre-pagination cases working)
+      # and later pages default to an empty array (end of the release list).
+      page="${url##*page=}"
+      printf '%s\n' "$page" >> "$RELEASE_PAGE_LOG"
+      var="MOCK_RELEASES_PAGE_${page}"
+      body="${!var:-}"
+      if [ -z "$body" ]; then
+        if [ "$page" = "1" ]; then
+          body="$MOCK_RELEASES_JSON"
+        else
+          body="[]"
+        fi
+      fi
+      printf '%s' "$body"
       ;;
     *"/healthz")
       printf '%s' "$MOCK_HEALTH_JSON"
@@ -206,7 +223,11 @@ report() {
 
 reset_mocks() {
   : > "$DOWNLOAD_LOG"
+  : > "$RELEASE_PAGE_LOG"
   : > "$LOG_FILE"
+  # Clear any per-page release fixtures left by a previous case so pagination
+  # tests start from a clean slate (page 1 falls back to MOCK_RELEASES_JSON).
+  unset "${!MOCK_RELEASES_PAGE_@}" 2>/dev/null || true
   VALIDATE_CALLED=0
   MOCK_SHA="goodhash"
   MOCK_SIGNATURE_FAIL=0
@@ -941,6 +962,157 @@ MACPROVIDER_VERSION="v9999999999.8.39"
 rc=0
 ( resolve_release_tag ) >/dev/null 2>&1 || rc=$?
 report "case22-oversized-version-component-rejected" 7 "$rc"
+
+################################################################
+# Case 23 — latest-release resolution paginates past a long run of
+# consecutive prereleases (issue #1574). A full page of candidate
+# prereleases precedes the newest stable, which lands on page 2.
+################################################################
+build_prerelease_page() {
+  # 100 consecutive candidate prereleases, newest-first, no stable tag.
+  local i out="["
+  for i in $(seq 224 -1 125); do
+    out="${out}{\"tag_name\":\"v1.8.${i}\",\"prerelease\":true},"
+  done
+  out="${out%,}]"
+  printf '%s' "$out"
+}
+reset_mocks
+MOCK_RELEASES_PAGE_1="$(build_prerelease_page)"
+MOCK_RELEASES_PAGE_2='[{"tag_name":"v1.8.124","prerelease":true},{"tag_name":"v1.8.123","prerelease":false},{"tag_name":"verify-v1.0.0","prerelease":false},{"tag_name":"v1.7.11","prerelease":false}]'
+tag="$(latest_release_tag)"
+report "case23-pagination-finds-stable-past-first-page" "v1.8.123" "$tag"
+report "case23-walked-exactly-two-pages" 2 "$(wc -l < "$RELEASE_PAGE_LOG" | tr -d ' ')"
+
+# Resolve-release-tag (the unpinned production path) uses the paginated latest.
+reset_mocks
+MOCK_RELEASES_PAGE_1="$(build_prerelease_page)"
+MOCK_RELEASES_PAGE_2='[{"tag_name":"v1.8.123","prerelease":false}]'
+tag="$(resolve_release_tag)"
+report "case23-resolve-release-tag-uses-pagination" "v1.8.123" "$tag"
+
+################################################################
+# Case 24 — a newer stable on an earlier page always wins over an
+# older stable on a later page (ordering assumption in the fix).
+################################################################
+reset_mocks
+MOCK_RELEASES_PAGE_1='[{"tag_name":"v1.8.9","prerelease":true},{"tag_name":"v1.8.123","prerelease":false}]'
+MOCK_RELEASES_PAGE_2='[{"tag_name":"v1.7.11","prerelease":false}]'
+tag="$(latest_release_tag)"
+report "case24-newest-stable-earlier-page-wins" "v1.8.123" "$tag"
+report "case24-stops-on-first-matching-page" 1 "$(wc -l < "$RELEASE_PAGE_LOG" | tr -d ' ')"
+
+# Within a single page the first (newest) stable is chosen.
+reset_mocks
+MOCK_RELEASES_PAGE_1='[{"tag_name":"v1.8.123","prerelease":false},{"tag_name":"v1.7.11","prerelease":false}]'
+tag="$(latest_release_tag)"
+report "case24-newest-stable-within-page-first" "v1.8.123" "$tag"
+
+################################################################
+# Case 25 — no stable release within the page budget fails clearly
+# (exit 3), and an empty page ends the walk early instead of
+# spending the full 10-page budget.
+################################################################
+reset_mocks
+MOCK_RELEASES_PAGE_1='[{"tag_name":"v1.8.124","prerelease":true}]'
+MOCK_RELEASES_PAGE_2='[]'
+rc=0
+( latest_release_tag ) >/dev/null 2>&1 || rc=$?
+report "case25-no-stable-within-budget-fails" 3 "$rc"
+report "case25-empty-page-stops-early" 2 "$(wc -l < "$RELEASE_PAGE_LOG" | tr -d ' ')"
+
+################################################################
+# Case 26 — hijack-safety: a release body (free text) that embeds fake
+# "tag_name"/"prerelease" fields, braces, and brackets must never be
+# parsed as structure. The parser is string-aware, so the newer poisoned
+# prerelease is skipped and the real stable is selected.
+################################################################
+reset_mocks
+MOCK_RELEASES_PAGE_1='[{"tag_name":"v9.9.9","prerelease":true,"body":"pwn \"tag_name\": \"v8.8.8\", \"prerelease\": false } {[("},{"tag_name":"v1.8.123","prerelease":false}]'
+tag="$(latest_release_tag)"
+report "case26-body-injection-cannot-hijack" "v1.8.123" "$tag"
+
+# A newer stable whose prerelease flag is nested inside its own assets array
+# (not a top-level field) must still be treated by its real top-level flag.
+reset_mocks
+MOCK_RELEASES_PAGE_1='[{"tag_name":"v1.8.123","assets":[{"name":"macprovider-cli.pkg","prerelease":true}],"prerelease":false},{"tag_name":"v1.7.11","prerelease":false}]'
+tag="$(latest_release_tag)"
+report "case26-nested-prerelease-flag-ignored" "v1.8.123" "$tag"
+
+################################################################
+# Case 27 — scale / O(n) guard. GitHub returns each release with its full
+# asset list, so a per_page=100 page is multiple MB of pretty-printed JSON.
+# Parse a realistic large page (99 prereleases with big bodies + asset
+# arrays, then the newest stable) and assert the correct tag. A parser that
+# regressed to the previous O(n^2) character scan would exceed this suite's
+# time budget rather than return, so this doubles as a performance guard.
+big_page="$(python3 - <<'PY'
+import json
+releases = []
+for i in range(223, 124, -1):  # 99 newest-first candidate prereleases
+    releases.append({
+        "tag_name": f"v1.8.{i}",
+        "name": f"Candidate v1.8.{i}",
+        "prerelease": True,
+        "draft": False,
+        "body": ("release notes " * 400) + 'embedded "tag_name": "v0.0.1" and "prerelease": false and braces {[(}])]',
+        "author": {"login": "ci-bot", "id": 1},
+        "assets": [
+            {"name": f"macprovider-cli-v1.8.{i}-darwin-arm64.pkg", "size": 1234,
+             "browser_download_url": f"https://example/v1.8.{i}/cli.pkg"},
+            {"name": "checksums.txt", "size": 99,
+             "browser_download_url": f"https://example/v1.8.{i}/checksums.txt"},
+        ],
+    })
+releases.append({
+    "tag_name": "v1.8.123", "name": "Stable v1.8.123", "prerelease": False, "draft": False,
+    "body": "stable", "author": {"login": "ci-bot", "id": 1},
+    "assets": [{"name": "checksums.txt", "size": 99,
+                "browser_download_url": "https://example/v1.8.123/checksums.txt"}],
+})
+print(json.dumps(releases, indent=2))
+PY
+)"
+reset_mocks
+MOCK_RELEASES_PAGE_1="$big_page"
+tag="$(latest_release_tag)"
+report "case27-large-realistic-page-finds-stable" "v1.8.123" "$tag"
+report "case27-large-page-single-request" 1 "$(wc -l < "$RELEASE_PAGE_LOG" | tr -d ' ')"
+
+################################################################
+# Case 28 — early-match SIGPIPE guard. When the newest stable is at the
+# START of a large multi-MB page, the parser matches almost immediately.
+# If it exited then, the "printf %s $json | awk" producer would take
+# SIGPIPE and, under set -euo pipefail, the pipeline would return 141 and
+# abort the installer even though the correct tag was found. The parser
+# must instead drain to EOF and return the tag with exit status 0.
+early_big_page="$(python3 - <<'PY'
+import json
+releases = []
+releases.append({
+    "tag_name": "v1.8.223", "name": "Stable v1.8.223", "prerelease": False, "draft": False,
+    "body": "stable", "author": {"login": "ci-bot", "id": 1},
+    "assets": [{"name": "checksums.txt", "size": 99,
+                "browser_download_url": "https://example/v1.8.223/checksums.txt"}],
+})
+for i in range(222, 122, -1):  # 100 large prerelease objects AFTER the stable
+    releases.append({
+        "tag_name": f"v1.8.{i}", "name": f"Candidate v1.8.{i}",
+        "prerelease": True, "draft": False,
+        "body": ("release notes " * 800) + 'embedded "tag_name": "v0.0.1" {[(}])]',
+        "author": {"login": "ci-bot", "id": 1},
+        "assets": [{"name": f"macprovider-cli-v1.8.{i}-darwin-arm64.pkg", "size": 1234,
+                    "browser_download_url": f"https://example/v1.8.{i}/cli.pkg"}],
+    })
+print(json.dumps(releases, indent=2))
+PY
+)"
+reset_mocks
+MOCK_RELEASES_PAGE_1="$early_big_page"
+rc=0
+tag="$(latest_release_tag)" || rc=$?
+report "case28-early-match-large-page-no-sigpipe" 0 "$rc"
+report "case28-early-match-large-page-tag" "v1.8.223" "$tag"
 
 if [ "$fail" -ne 0 ]; then
   printf '[install-version-pin-test] %d failed, %d passed\n' "$fail" "$pass" >&2
