@@ -90,6 +90,8 @@ test-dist:
 	bash scripts/test-swift-package-lock.sh
 	bash scripts/test-signed-payout-journey-workflow.sh
 	bash scripts/test-signed-provider-prebeta-journey-workflow.sh
+	bash scripts/test-signed-byom-discovery-journey-workflow.sh
+	bash scripts/test-signed-network-model-admission-journey-workflow.sh
 	bash scripts/test-signed-buyer-paid-path-journey-workflow.sh
 	bash scripts/test-signed-buyer-crash-recovery-journey-workflow.sh
 	bash scripts/test-signed-buyer-enforce-journey-workflow.sh
