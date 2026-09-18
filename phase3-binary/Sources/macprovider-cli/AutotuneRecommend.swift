@@ -303,6 +303,46 @@ enum AutotuneModelContextCap {
         return saneContext(failClosedMaxContext + additionalTokens)
     }
 
+    /// SPEC-023-R009 §9.2 step 1: the largest concurrent batch depth whose
+    /// per-slot KV cache at the emitted production `calibrationContextTokens`
+    /// fits the SAME §5/§9 memory-safety envelope `memorySafeContextTokens`
+    /// uses for single-slot context sizing. `usableKVBytes` is the shared KV
+    /// budget (3/4 of spare RAM after weights + reserve); dividing by one
+    /// slot's KV footprint (`bytesPerToken * context`) yields the slot count.
+    /// Returns nil when the verified config is unavailable or its bytes do not
+    /// hash to `verifiedConfigSHA256`, or the KV geometry is unreadable — the
+    /// caller then falls back to the CONSERVATIVE chip/RAM tier constant (never
+    /// the served hard cap), so a box whose memory fit cannot be proven is never
+    /// swept above the capacity it already advertises. Clamped to >= 1.
+    static func memoryFitBatchDepth(
+        configData: Data,
+        verifiedConfigSHA256: String,
+        hardwareMemoryGB: Int,
+        catalogMinRAMGB: Int,
+        calibrationContextTokens: Int
+    ) -> Int? {
+        guard calibrationContextTokens >= 1,
+              Data(SHA256.hash(data: configData)).hexLower == verifiedConfigSHA256,
+              let root = strictConfigRoot(configData),
+              let bytesPerToken = kvCacheBytesPerToken(in: root)
+        else {
+            return nil
+        }
+        let reservedGB = max(catalogMinRAMGB, 1) + AutotuneRecommendEngine.safetyMarginGB
+        let spareGB = max(0, hardwareMemoryGB - reservedGB)
+        let usableKVBytes = UInt64(spareGB) * bytesPerGB * UInt64(memorySafetyFractionNumerator)
+            / UInt64(memorySafetyFractionDenominator)
+        // One slot holds a full-context KV cache; guard the product against
+        // overflow before dividing.
+        guard let perSlotKVBytes = checkedProduct([UInt64(bytesPerToken), UInt64(calibrationContextTokens)]),
+              perSlotKVBytes > 0
+        else {
+            return nil
+        }
+        let slots = usableKVBytes / perSlotKVBytes
+        return max(1, Int(min(slots, UInt64(Int.max))))
+    }
+
     private static func strictConfigRoot(_ configData: Data) -> [String: Any]? {
         guard (try? AutotuneStrictJSON.rejectDuplicateKeys(configData)) != nil,
               let root = try? JSONSerialization.jsonObject(with: configData) as? [String: Any]
@@ -2101,6 +2141,7 @@ struct AutotuneRecommendResult: Equatable {
     /// benchmark_id is null / no eligible model was found.
     var probeDiagnostics: [String: String] = [:]
     var contextCalibration: AutotuneContextCalibrationResult? = nil
+    var concurrencyCalibration: AutotuneConcurrencyCalibrationResult? = nil
 }
 
 struct AutotuneRecommendEngine {
@@ -2765,6 +2806,12 @@ extension AutotuneRecommendResult {
         let contextCalibrationField = contextCalibration.map {
             ",\"context_calibration\":\($0.jsonString)"
         } ?? ""
+        // SPEC-023-R009 §6: concurrency_calibration immediately follows
+        // context_calibration (or serve_config when context calibration was not
+        // requested), present only when --calibrate-concurrency succeeded.
+        let concurrencyCalibrationField = concurrencyCalibration.map {
+            ",\"concurrency_calibration\":\($0.jsonString)"
+        } ?? ""
         let selectedExplanationJSON = selectedCandidate.map { Self.explanationJSON($0.explanation) } ?? "null"
         let alternativeExplanations = candidates
             .filter { candidate in
@@ -2775,7 +2822,7 @@ extension AutotuneRecommendResult {
             .joined(separator: ",")
         let donorFallbackExplanationJSON = donorFallbackCandidate.map { Self.explanationJSON($0.explanation) } ?? "null"
         return """
-        {"schema_version":"autotune_recommend.v1","generated_at":\(ISO8601DateFormatter.autotuneInternet.string(from: generatedAt).jsonEscaped),"hardware":{"machine":\(hardware.machine?.jsonEscaped ?? "null"),"chip":\(hardware.chip.jsonEscaped),"memory_gb":\(hardware.memoryGB),"bandwidth_tier":\(hardware.bandwidthTier.rawValue.jsonEscaped),"detected":\(hardware.detected),"os_version":\(hardware.osVersion.jsonEscaped),"binary_version":\(hardware.binaryVersion.jsonEscaped)},"inputs":{"rate_card_version":\(rateCardVersion.jsonEscaped),"demand_rank_version":\(demandRankVersion.jsonEscaped),"candidate_catalog_version":\(candidateCatalogVersion.jsonEscaped)},"recommended_model":\(recommendedModel?.jsonEscaped ?? "null"),"prompt_rate_usd_per_million_tokens":\(promptRatePerMillionTokens?.jsonNumber ?? "null"),"completion_rate_usd_per_million_tokens":\(completionRatePerMillionTokens?.jsonNumber ?? "null"),"serve_config":\(serveConfigJSON)\(contextCalibrationField),"candidates":[\(candidatesJSON)],"warnings":[\(warningsJSON)],"selected_explanation":\(selectedExplanationJSON),"alternative_explanations":[\(alternativeExplanations)],"donor_fallback_explanation":\(donorFallbackExplanationJSON)}
+        {"schema_version":"autotune_recommend.v1","generated_at":\(ISO8601DateFormatter.autotuneInternet.string(from: generatedAt).jsonEscaped),"hardware":{"machine":\(hardware.machine?.jsonEscaped ?? "null"),"chip":\(hardware.chip.jsonEscaped),"memory_gb":\(hardware.memoryGB),"bandwidth_tier":\(hardware.bandwidthTier.rawValue.jsonEscaped),"detected":\(hardware.detected),"os_version":\(hardware.osVersion.jsonEscaped),"binary_version":\(hardware.binaryVersion.jsonEscaped)},"inputs":{"rate_card_version":\(rateCardVersion.jsonEscaped),"demand_rank_version":\(demandRankVersion.jsonEscaped),"candidate_catalog_version":\(candidateCatalogVersion.jsonEscaped)},"recommended_model":\(recommendedModel?.jsonEscaped ?? "null"),"prompt_rate_usd_per_million_tokens":\(promptRatePerMillionTokens?.jsonNumber ?? "null"),"completion_rate_usd_per_million_tokens":\(completionRatePerMillionTokens?.jsonNumber ?? "null"),"serve_config":\(serveConfigJSON)\(contextCalibrationField)\(concurrencyCalibrationField),"candidates":[\(candidatesJSON)],"warnings":[\(warningsJSON)],"selected_explanation":\(selectedExplanationJSON),"alternative_explanations":[\(alternativeExplanations)],"donor_fallback_explanation":\(donorFallbackExplanationJSON)}
         """
     }
 
@@ -2864,6 +2911,9 @@ extension AutotuneRecommendResult {
         let contextCalibrationField = contextCalibration.map {
             ",\"context_calibration\":\($0.jsonString)"
         } ?? ""
+        let concurrencyCalibrationField = concurrencyCalibration.map {
+            ",\"concurrency_calibration\":\($0.jsonString)"
+        } ?? ""
         if let hardwareEvidence {
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.sortedKeys]
@@ -2877,7 +2927,7 @@ extension AutotuneRecommendResult {
             evidenceJSON = "null"
         }
         return """
-        {"generated_at":\(ISO8601DateFormatter.autotuneInternet.string(from: generatedAt).jsonEscaped),"rate_card_version":\(rateCardVersion.jsonEscaped),"demand_rank_version":\(demandRankVersion.jsonEscaped),"candidate_catalog_version":\(candidateCatalogVersion.jsonEscaped),"candidate_catalog_sha256":\(candidateCatalogSHA256.jsonEscaped),"benchmark_id":\(benchmarkID?.jsonEscaped ?? "null"),"benchmark_generated_at":\(benchmarkGeneratedAt.map { ISO8601DateFormatter.autotuneInternet.string(from: $0).jsonEscaped } ?? "null"),"binary_version":\(hardware.binaryVersion.jsonEscaped),"hardware_identity_hash":\(hardware.hardwareIdentityHash.jsonEscaped),"recommended_model":\(recommendedModel?.jsonEscaped ?? "null"),"probe_diagnostics":{\(diagnosticsJSON)}\(contextCalibrationField),"hardware_evidence":\(evidenceJSON)}
+        {"generated_at":\(ISO8601DateFormatter.autotuneInternet.string(from: generatedAt).jsonEscaped),"rate_card_version":\(rateCardVersion.jsonEscaped),"demand_rank_version":\(demandRankVersion.jsonEscaped),"candidate_catalog_version":\(candidateCatalogVersion.jsonEscaped),"candidate_catalog_sha256":\(candidateCatalogSHA256.jsonEscaped),"benchmark_id":\(benchmarkID?.jsonEscaped ?? "null"),"benchmark_generated_at":\(benchmarkGeneratedAt.map { ISO8601DateFormatter.autotuneInternet.string(from: $0).jsonEscaped } ?? "null"),"binary_version":\(hardware.binaryVersion.jsonEscaped),"hardware_identity_hash":\(hardware.hardwareIdentityHash.jsonEscaped),"recommended_model":\(recommendedModel?.jsonEscaped ?? "null"),"probe_diagnostics":{\(diagnosticsJSON)}\(contextCalibrationField)\(concurrencyCalibrationField),"hardware_evidence":\(evidenceJSON)}
         """
     }
 
@@ -2944,6 +2994,7 @@ struct LastRecommendationState: Decodable, Equatable {
     var recommendedModel: String?
     var probeDiagnostics: [String: String]
     var contextCalibration: AutotuneContextCalibrationResult?
+    var concurrencyCalibration: AutotuneConcurrencyCalibrationResult?
     var hardwareEvidence: AutotuneHardwareEvidenceSnapshot?
 
     enum CodingKeys: String, CodingKey {
@@ -2959,6 +3010,7 @@ struct LastRecommendationState: Decodable, Equatable {
         case recommendedModel = "recommended_model"
         case probeDiagnostics = "probe_diagnostics"
         case contextCalibration = "context_calibration"
+        case concurrencyCalibration = "concurrency_calibration"
         case hardwareEvidence = "hardware_evidence"
     }
 
@@ -2975,6 +3027,7 @@ struct LastRecommendationState: Decodable, Equatable {
         recommendedModel: String?,
         probeDiagnostics: [String: String] = [:],
         contextCalibration: AutotuneContextCalibrationResult? = nil,
+        concurrencyCalibration: AutotuneConcurrencyCalibrationResult? = nil,
         hardwareEvidence: AutotuneHardwareEvidenceSnapshot? = nil
     ) {
         self.generatedAt = generatedAt
@@ -2989,6 +3042,7 @@ struct LastRecommendationState: Decodable, Equatable {
         self.recommendedModel = recommendedModel
         self.probeDiagnostics = probeDiagnostics
         self.contextCalibration = contextCalibration
+        self.concurrencyCalibration = concurrencyCalibration
         self.hardwareEvidence = hardwareEvidence
     }
 
@@ -3013,6 +3067,10 @@ struct LastRecommendationState: Decodable, Equatable {
         contextCalibration = try c.decodeIfPresent(
             AutotuneContextCalibrationResult.self,
             forKey: .contextCalibration
+        )
+        concurrencyCalibration = try c.decodeIfPresent(
+            AutotuneConcurrencyCalibrationResult.self,
+            forKey: .concurrencyCalibration
         )
         hardwareEvidence = try c.decodeIfPresent(AutotuneHardwareEvidenceSnapshot.self, forKey: .hardwareEvidence)
     }

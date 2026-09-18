@@ -435,6 +435,105 @@ final class AutotuneRecommendTests: XCTestCase {
         XCTAssertEqual(root["recommended_model"] as? String, result.recommendedModel)
     }
 
+    func testConcurrencyCalibrationJSONAndApplyAreOptIn() throws {
+        let request = try makeRequest()
+        let result = AutotuneRecommendEngine().recommend(request)
+        let selected = try XCTUnwrap(result.selectedCandidate)
+        let benchmark = try XCTUnwrap(request.benchmarks[selected.catalogKey])
+        let row = try XCTUnwrap(request.candidateCatalog.rows[selected.catalogKey])
+
+        // Opt-out: without --calibrate-concurrency the field is absent and the
+        // serve config carries the blind chip/RAM tier constant.
+        let tierCore = AutotuneCommand.recommendationCoreForConfig(
+            selected: selected,
+            selectedBenchmark: benchmark,
+            selectedRow: row,
+            catalogVersion: request.candidateCatalog.version,
+            catalogHash: request.candidateCatalogSHA256,
+            hardware: request.hardware
+        )
+        let baselineRoot = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(result.jsonString(serveConfig: tierCore).utf8)) as? [String: Any]
+        )
+        XCTAssertFalse(baselineRoot.keys.contains("concurrency_calibration"))
+        let baselineServe = try XCTUnwrap(baselineRoot["serve_config"] as? [String: Any])
+        XCTAssertEqual(baselineServe["max_concurrency_override"] as? Int, request.hardware.recommendedMaxBatch)
+
+        // Opt-in: a successful calibration attaches the field and overrides the
+        // emitted/applied max_concurrency_override with the measured depth.
+        let calibration = AutotuneConcurrencyCalibrationResult(
+            recommendedMaxBatch: 3,
+            tierConstantMaxBatch: request.hardware.recommendedMaxBatch,
+            memoryFitCap: 5,
+            hardCap: 8,
+            ttftCeilingMS: 8_000,
+            ttftRegressionFactor: 1.5,
+            minAggregateGainFraction: 0.15,
+            calibrationContextTokens: tierCore.knobs.maxContext,
+            promptReserveTokens: 256,
+            completionTokens: 64,
+            draftPinned: false,
+            measurements: [
+                AutotuneConcurrencyCalibrationMeasurement(
+                    batchDepth: 1, streams: 1, aggregateTPS: 100, perStreamP95TTFTMS: 1_000, passed: true
+                ),
+                AutotuneConcurrencyCalibrationMeasurement(
+                    batchDepth: 3, streams: 3, aggregateTPS: 240, perStreamP95TTFTMS: 1_200, passed: true
+                ),
+            ]
+        )
+        var calibrated = result
+        calibrated.concurrencyCalibration = calibration
+        let calibratedCore = AutotuneCommand.recommendationCoreForConfig(
+            selected: selected,
+            selectedBenchmark: benchmark,
+            selectedRow: row,
+            catalogVersion: request.candidateCatalog.version,
+            catalogHash: request.candidateCatalogSHA256,
+            hardware: request.hardware,
+            maxBatchOverride: calibration.recommendedMaxBatch
+        )
+        let calibratedJSON = calibrated.jsonString(serveConfig: calibratedCore)
+        let calibratedRoot = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(calibratedJSON.utf8)) as? [String: Any]
+        )
+        let concurrency = try XCTUnwrap(calibratedRoot["concurrency_calibration"] as? [String: Any])
+        XCTAssertEqual(concurrency["recommended_max_batch"] as? Int, 3)
+        XCTAssertEqual(concurrency["schema_version"] as? String, "autotune_concurrency_calibration.v1")
+        // Fixed §6 order: concurrency_calibration follows serve_config.
+        let serveIdx = try XCTUnwrap(calibratedJSON.range(of: "\"serve_config\""))
+        let concIdx = try XCTUnwrap(calibratedJSON.range(of: "\"concurrency_calibration\""))
+        XCTAssertLessThan(serveIdx.lowerBound, concIdx.lowerBound)
+        let calibratedServe = try XCTUnwrap(calibratedRoot["serve_config"] as? [String: Any])
+        XCTAssertEqual(calibratedServe["max_concurrency_override"] as? Int, 3)
+
+        // With both calibrations, concurrency_calibration follows context_calibration.
+        calibrated.contextCalibration = AutotuneContextCalibrationResult(
+            recommendedContext: 8_000,
+            safeUpperBound: 50_000,
+            minimumContext: 4_000,
+            ttftCeilingMS: 8_000,
+            quantum: 1_000,
+            measurements: []
+        )
+        let bothJSON = calibrated.jsonString(serveConfig: calibratedCore)
+        let contextIdx = try XCTUnwrap(bothJSON.range(of: "\"context_calibration\""))
+        let concurrencyIdx = try XCTUnwrap(bothJSON.range(of: "\"concurrency_calibration\""))
+        XCTAssertLessThan(contextIdx.lowerBound, concurrencyIdx.lowerBound)
+
+        // Apply writes the calibrated depth as max_concurrency_override.
+        let dir = try tempDir()
+        let configURL = dir.appendingPathComponent("config.yaml")
+        try "".write(to: configURL, atomically: true, encoding: .utf8)
+        _ = try ConfigApplier(configPath: configURL).apply(
+            recommendation: calibratedCore,
+            now: Date(),
+            donorMode: false
+        )
+        let loaded = try ConfigLoader.load(cli: CLIOverrides(configPath: configURL.path))
+        XCTAssertEqual(loaded.maxConcurrencyOverride, 3)
+    }
+
     func testRecommendationJSONUsesNullServeConfigWhenNotProvided() throws {
         let request = try makeRequest()
         let result = AutotuneRecommendEngine().recommend(request)
