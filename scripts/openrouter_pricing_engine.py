@@ -28,7 +28,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_FLOOR, ROUND_HALF_UP
 from email.utils import parsedate_to_datetime
 from pathlib import Path
-from typing import Any, Callable, Mapping, Protocol
+from typing import Any, Callable, Iterable, Mapping, Protocol, Sequence
 from urllib.parse import quote, urlsplit
 
 
@@ -2124,6 +2124,250 @@ def command_compute(args: argparse.Namespace) -> int:
     return 0
 
 
+# --- propose mode: build a best-in-class servable catalog proposal ------------
+#
+# The `fetch`/`compute` pipeline selects by OpenRouter top-50 demand rank, then
+# prices. Verified 2026-09-18, that is the wrong universe: the highest-yield
+# MLX-servable models (Qwen a3b/27B at $1-2.2/Mtok, GLM-4.5-Air, Mistral-Small,
+# Gemma-3-27B) sit OUTSIDE OpenRouter's top-50 demand rank, yet OpenRouter prices
+# them all by id. `propose` flips to a yield-first scan over an explicit
+# candidate universe: price each model by id (request-weighted median), gauge
+# demand from 30m request_count, resolve MLX servability + residency, bucket by
+# Mac RAM tier, and rank by yield within tier. It emits a reviewable proposal;
+# it never applies, signs, or deploys.
+CATALOG_PROPOSAL_SCHEMA_VERSION = 1
+CATALOG_RAM_TIERS_GB = (32, 48, 64, 96, 128, 192, 256)
+CATALOG_SAFETY_MARGIN_GB = 4
+# Open-weight vendors that publish (or have community) MLX builds. Closed-weight
+# API vendors and closed model families are excluded from the default universe;
+# the HF servability resolver is the authoritative servability gate downstream.
+OPEN_WEIGHT_VENDORS = frozenset({
+    "qwen", "google", "meta-llama", "nvidia", "mistralai", "deepseek", "openai",
+    "microsoft", "z-ai", "zhipu", "01-ai", "allenai", "cohere", "ibm-granite",
+    "baidu", "moonshotai", "inclusionai", "stepfun", "nousresearch",
+})
+CLOSED_MODEL_MARKERS = ("gemini", "gpt-5", "gpt-6", "gpt-4", "grok", "claude", "o1-", "o3-", "o4-")
+
+
+def assign_ram_tier(required_gb: Decimal, tiers: Sequence[int] = CATALOG_RAM_TIERS_GB, safety_margin_gb: int = CATALOG_SAFETY_MARGIN_GB) -> int | None:
+    """Smallest RAM tier whose usable capacity holds the runtime residency."""
+    for tier in sorted(tiers):
+        if required_gb <= Decimal(tier - safety_margin_gb):
+            return int(tier)
+    return None
+
+
+def model_demand_activity(endpoints_document: Mapping[str, Any]) -> int:
+    """Advisory model-level demand gauge: sum of 30m request_count across every
+    endpoint and workload. OpenRouter removed 30-day token volume, so this is the
+    surviving activity proxy. Lenient by design (skips malformed telemetry) --
+    it is review context, not a money value; the price path stays fail-closed.
+    """
+    data = endpoints_document.get("data")
+    endpoints = data.get("endpoints") if isinstance(data, dict) else None
+    if not isinstance(endpoints, list):
+        return 0
+    total = 0
+    for endpoint in endpoints:
+        if not isinstance(endpoint, dict):
+            continue
+        perf = endpoint.get("perf_last_30m_by_workload")
+        if not isinstance(perf, dict):
+            continue
+        for stats in perf.values():
+            if isinstance(stats, dict):
+                count = stats.get("request_count")
+                if isinstance(count, int) and not isinstance(count, bool) and count >= 0:
+                    total += count
+    return total
+
+
+def select_open_weight_candidates(model_ids: Iterable[str]) -> list[str]:
+    """Filter an OpenRouter /models id list to the default open-weight universe."""
+    result: list[str] = []
+    for model_id in model_ids:
+        if not isinstance(model_id, str) or "/" not in model_id:
+            continue
+        lowered = model_id.lower()
+        if lowered.endswith(":free") or ":" in model_id.split("/", 1)[1]:
+            continue
+        vendor = model_id.split("/", 1)[0].lower()
+        if vendor not in OPEN_WEIGHT_VENDORS:
+            continue
+        if vendor == "openai" and not model_id.split("/", 1)[1].startswith("gpt-oss"):
+            continue
+        if any(marker in lowered for marker in CLOSED_MODEL_MARKERS):
+            continue
+        result.append(model_id)
+    return sorted(dict.fromkeys(result))
+
+
+def build_catalog_proposal(
+    records: list[Mapping[str, Any]],
+    policy: Mapping[str, Any],
+    *,
+    now: datetime,
+    yield_floor_completion_per_mtok: Decimal,
+    demand_floor_request_count_30m: int,
+    tiers: Sequence[int] = CATALOG_RAM_TIERS_GB,
+) -> dict[str, Any]:
+    """Pure core: gate priced+servable records by yield/demand/servability, bucket
+    by RAM tier, rank by yield within tier. Emits selected + an excluded audit
+    trail. Every input record was produced by the network stage below."""
+    undercut = parse_decimal(policy.get("undercut_fraction"), "policy undercut_fraction")
+    selected: list[dict[str, Any]] = []
+    excluded: list[dict[str, Any]] = []
+    for record in records:
+        model_id = record["model_id"]
+        pricing = record.get("pricing")
+        servability = record.get("servability") or {}
+        demand = int(record.get("demand_request_count_30m") or 0)
+        if pricing is None:
+            excluded.append({"model_id": model_id, "reason": "no active priced OpenRouter endpoint"})
+            continue
+        completion = parse_decimal(pricing["completion_per_mtok"], f"{model_id} completion price")
+        prompt = parse_decimal(pricing["input_per_mtok"], f"{model_id} prompt price")
+        if completion < yield_floor_completion_per_mtok:
+            excluded.append({"model_id": model_id, "reason": f"completion yield {completion}/Mtok below floor {yield_floor_completion_per_mtok}/Mtok"})
+            continue
+        if demand < demand_floor_request_count_30m:
+            excluded.append({"model_id": model_id, "reason": f"demand {demand} req/30m below floor {demand_floor_request_count_30m}"})
+            continue
+        verdict = servability.get("verdict")
+        if verdict != "review":
+            excluded.append({"model_id": model_id, "reason": f"not servable ({verdict}): {(servability.get('reasons') or [''])[0]}"})
+            continue
+        try:
+            required_gb = Decimal(str(servability.get("required_gb")))
+        except (InvalidOperation, TypeError, ValueError):
+            excluded.append({"model_id": model_id, "reason": "servability record has no numeric required_gb"})
+            continue
+        tier = assign_ram_tier(required_gb, tiers)
+        if tier is None:
+            excluded.append({"model_id": model_id, "reason": f"runtime residency {required_gb} GB exceeds largest tier {max(tiers)} GB"})
+            continue
+        selected.append({
+            "model_id": model_id,
+            "min_ram_gb_tier": tier,
+            "required_residency_gb": decimal_string(required_gb),
+            "mlx_repo": servability.get("mlx_repo"),
+            "quant": servability.get("quant"),
+            "market_completion_per_mtok": pricing["completion_per_mtok"],
+            "market_input_per_mtok": pricing["input_per_mtok"],
+            "proposed_completion_per_mtok": decimal_string(completion * (Decimal("1") - undercut)),
+            "proposed_input_per_mtok": decimal_string(prompt * (Decimal("1") - undercut)),
+            "benchmark_provider": pricing["benchmark_provider"],
+            "demand_request_count_30m": demand,
+            "endpoint_count": int(record.get("endpoint_count") or 0),
+            "servability_note": (servability.get("reasons") or [""])[0],
+        })
+    selected.sort(key=lambda row: (row["min_ram_gb_tier"], -Decimal(row["market_completion_per_mtok"]), row["model_id"]))
+    excluded.sort(key=lambda row: row["model_id"])
+    return {
+        "proposal_type": "openrouter-catalog-proposal",
+        "schema_version": CATALOG_PROPOSAL_SCHEMA_VERSION,
+        "generated_at": rfc3339(now),
+        "generator_version": TOOL_VERSION,
+        "policy_version": policy["policy_version"],
+        "selection": {
+            "undercut_fraction": decimal_string(undercut),
+            "yield_floor_completion_per_mtok": decimal_string(yield_floor_completion_per_mtok),
+            "demand_floor_request_count_30m": demand_floor_request_count_30m,
+            "ram_tiers_gb": [int(t) for t in sorted(tiers)],
+            "liquidity_signal": "openrouter_request_count_last_30m",
+        },
+        "selected": selected,
+        "excluded": excluded,
+    }
+
+
+def fetch_catalog_records(
+    candidate_ids: Sequence[str],
+    policy: Mapping[str, Any],
+    *,
+    or_client: HTTPClient,
+    servability_resolver: Callable[[str, Decimal], Mapping[str, Any]],
+    tiers: Sequence[int] = CATALOG_RAM_TIERS_GB,
+    retries: int = 2,
+    timeout_seconds: float = 15.0,
+    sleeper: Callable[[float], None] = time.sleep,
+    clock: Callable[[], float] = time.monotonic,
+    generation_timeout_seconds: float = 1800.0,
+) -> list[dict[str, Any]]:
+    """Network stage: per candidate, fetch OpenRouter endpoints -> request-weighted
+    price + demand gauge, and resolve MLX servability/residency. A per-candidate
+    error is recorded in the record (surfaced in the proposal's excluded trail),
+    never aborting the whole scan -- a proposal is reviewed by a human."""
+    min_endpoint_requests = policy.get("min_endpoint_request_count_30m", 1)
+    max_residency = Decimal(str(max(tiers)))
+    deadline = clock() + generation_timeout_seconds
+    records: list[dict[str, Any]] = []
+    for model_id in candidate_ids:
+        url = ENDPOINTS_URL.format(model_id=quote(model_id, safe="/"))
+        record: dict[str, Any] = {"model_id": model_id, "pricing": None, "demand_request_count_30m": 0, "endpoint_count": 0, "servability": {}}
+        try:
+            document = fetch_json(or_client, url, f"endpoints {model_id}", retries=retries, timeout_seconds=timeout_seconds, sleeper=sleeper, deadline=deadline, clock=clock)
+            record["demand_request_count_30m"] = model_demand_activity(document)
+            data = document.get("data") if isinstance(document, dict) else None
+            endpoints = data.get("endpoints") if isinstance(data, dict) else None
+            record["endpoint_count"] = len(endpoints) if isinstance(endpoints, list) else 0
+            record["pricing"] = cheapest_endpoint_pricing(document, model_id, min_request_count_30m=min_endpoint_requests)
+        except EngineError as error:
+            record["servability"] = {"verdict": "error", "reasons": [f"OpenRouter endpoint pricing failed: {error}"]}
+            records.append(record)
+            continue
+        try:
+            record["servability"] = dict(servability_resolver(model_id, max_residency))
+        except Exception as error:  # servability probe is best-effort; surface, don't abort
+            record["servability"] = {"verdict": "error", "reasons": [f"servability probe failed: {type(error).__name__}: {error}"]}
+        records.append(record)
+    return records
+
+
+def command_propose(args: argparse.Namespace) -> int:
+    policy = load_json_file(Path(args.policy), "policy")
+    validate_policy(policy)
+    if args.candidates:
+        loaded = json.loads(Path(args.candidates).read_text(encoding="utf-8"))
+        candidate_ids = loaded["models"] if isinstance(loaded, dict) else loaded
+        if not isinstance(candidate_ids, list) or not all(isinstance(m, str) for m in candidate_ids):
+            raise SchemaError("candidates file must be a JSON list of model ids or {\"models\": [...]}")
+        candidate_ids = sorted(dict.fromkeys(candidate_ids))
+    else:
+        if not os.environ.get("OPENROUTER_API_KEY"):
+            raise FetchError("OPENROUTER_API_KEY is required to pull the OpenRouter models catalog")
+        catalog_client = UrllibHTTPClient()
+        catalog = fetch_json(catalog_client, MODELS_URL, "models catalog", retries=args.retries, timeout_seconds=args.timeout_seconds, sleeper=time.sleep, deadline=time.monotonic() + 120, clock=time.monotonic)
+        model_ids = [row.get("id") for row in catalog.get("data", []) if isinstance(row, dict)]
+        candidate_ids = select_open_weight_candidates(model_ids)
+    if not candidate_ids:
+        raise SchemaError("no candidate models to propose")
+    if not os.environ.get("OPENROUTER_API_KEY"):
+        raise FetchError("OPENROUTER_API_KEY is required for the documented OpenRouter APIs")
+    import openrouter_mlx_candidates as mlx  # lazy: servability resolver, avoids import cycle
+    hf_client = mlx.real_client(args.hf_timeout_seconds)
+    def resolver(model_id: str, max_residency: Decimal) -> Mapping[str, Any]:
+        return mlx.resolve_row(model_id, max_residency, hf_client)
+    records = fetch_catalog_records(
+        candidate_ids, policy,
+        or_client=UrllibHTTPClient(),
+        servability_resolver=resolver,
+        retries=args.retries,
+        timeout_seconds=args.timeout_seconds,
+    )
+    proposal = build_catalog_proposal(
+        records, policy,
+        now=utc_now(),
+        yield_floor_completion_per_mtok=parse_decimal(args.yield_floor_per_mtok, "yield floor", allow_zero=True),
+        demand_floor_request_count_30m=args.demand_floor_request_count,
+    )
+    output_dir = Path(args.output_dir)
+    name = f"openrouter-catalog-proposal-{proposal['generated_at'].replace(':', '-')}.json"
+    atomic_publish_json_directory(output_dir, {name: proposal})
+    print(output_dir / name)
+    return 0
+
+
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description=__doc__)
     subcommands = result.add_subparsers(dest="command", required=True)
@@ -2144,6 +2388,16 @@ def parser() -> argparse.ArgumentParser:
     compute.add_argument("--min-provider-targets", required=True)
     compute.add_argument("--output-dir", required=True)
     compute.set_defaults(handler=command_compute)
+    propose = subcommands.add_parser("propose", help="propose a best-in-class servable catalog by yield-first by-id scan")
+    propose.add_argument("--policy", default=str(DEFAULT_POLICY_PATH))
+    propose.add_argument("--output-dir", required=True)
+    propose.add_argument("--candidates", default=None, help="JSON file of model ids to consider; omit to pull+filter the OpenRouter models catalog")
+    propose.add_argument("--yield-floor-per-mtok", default="0.30", help="minimum request-weighted completion price ($/Mtok) to select")
+    propose.add_argument("--demand-floor-request-count", type=int, default=500, help="minimum summed 30m request_count to select")
+    propose.add_argument("--retries", type=int, default=2)
+    propose.add_argument("--timeout-seconds", type=float, default=15.0)
+    propose.add_argument("--hf-timeout-seconds", type=float, default=15.0)
+    propose.set_defaults(handler=command_propose)
     return result
 
 

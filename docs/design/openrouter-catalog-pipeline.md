@@ -156,6 +156,40 @@ the activity-weighted market). Demand-dominant rows are closed-weight frontier
 models (deepseek-v4-flash 50T tok, gpt-5.6, claude, gemini) — not MLX-servable, so
 they are demand context, not catalog candidates.
 
+## `propose` mode (implemented) — yield-first over the servable universe
+
+Cross-checking a reference set of high-earning MLX-served models against the
+OpenRouter dry-run (2026-09-18) showed the **demand-rank entry point is the wrong
+universe**: the best-yield servable models — Qwen `a3b`/27B at **$1–2.2/Mtok**,
+GLM-4.5-Air, Mistral-Small, Gemma-3-27B — sit **outside** OpenRouter's top-50
+demand rank, yet OpenRouter prices them all by id. Selecting from the top-50 would
+*miss the best earners*; the frozen catalog serves the low-yield tail
+(gpt-oss-20b $0.14, gemma-4-26b $0.30).
+
+So the engine gained a `propose` subcommand that flips to **yield-first over an
+explicit candidate universe**:
+1. Candidate universe: an explicit `--candidates` list, or the OpenRouter
+   `/models` catalog filtered to open-weight vendors (`select_open_weight_candidates`).
+2. Price each model **by id** via `/endpoints` (the request-weighted median),
+   independent of demand rank.
+3. Gauge demand from summed 30m `request_count` (`model_demand_activity`).
+4. Resolve MLX servability + residency via the HF resolver
+   (`openrouter_mlx_candidates.resolve_row`) — fail-closed to `review` only; a
+   vision-language pipeline or missing build is excluded with a reason.
+5. Gate on yield floor, demand floor, servability, and RAM-tier fit
+   (`assign_ram_tier`, tiers 32/48/64/96/128/192/256 GB, 4 GB safety margin);
+   rank by yield within tier; apply the policy undercut to the proposed price.
+6. Emit `openrouter-catalog-proposal` (selected + an excluded audit trail). It
+   **never applies, signs, or deploys** — it is the reviewable "select" step.
+
+Live proof (2026-09-18): a 12-model candidate run selected `qwen3-30b-a3b-2507`
+(32 GB, $0.30→$0.24, 42.7k reqs), `glm-4.5-air` (96 GB, $0.85→$0.68), and
+`gpt-oss-120b` (96 GB, 364k reqs); it correctly excluded the vision-flagged Qwen
+3.5/3.6/3.8 and Gemma-3/4 (need a human text-tower confirmation) and the
+sub-floor-yield models. `achievable_tps` (the revenue/sec multiplier) is still
+bench-gated and composes with SPEC-038; `propose` ranks by yield within tier as
+the honest first cut.
+
 ## Build plan (split, per GOAL)
 
 **PR 1 (this branch) — design + blocking fixes + working proposer:**
