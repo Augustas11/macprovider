@@ -157,6 +157,17 @@ type ModelAdmissionEvent struct {
 	ArtifactCandidateCatalogSHA256 string
 	BoundMemberSource              string
 	EvaluatedReleaseGeneration     uint64
+	// SyntheticProbeCompletionTokens is the INTEGER `usage.completion_tokens`
+	// observed on the bounded synthetic probe response. It supports the
+	// SPEC-047-R008 release-evidence requirement that a probe uses the provider
+	// wire and returns real output, by letting the #1569 journey assert `> 0`
+	// without the coordinator ever persisting the probe's completion text,
+	// choices, or delta. It is recorded on the `synthetic_probe_passed` decision
+	// only (zero on every other event). This is a #1569 implementation field,
+	// not a normatively-defined SPEC-047 admission field, and is deliberately
+	// excluded from the event-id and replay-key digests so probe replay stays
+	// idempotent; it is provider-reported and non-earning (never billing input).
+	SyntheticProbeCompletionTokens int
 }
 
 // ModelAdmissionCatalogMember is one recorded, admissible member of the
@@ -718,6 +729,8 @@ func ensureSQLiteModelAdmissionColumns(db *sql.DB) error {
 		{name: "artifact_candidate_catalog_sha256", sql: `ALTER TABLE model_admission_events ADD COLUMN artifact_candidate_catalog_sha256 TEXT NOT NULL DEFAULT ''`},
 		{name: "bound_member_source", sql: `ALTER TABLE model_admission_events ADD COLUMN bound_member_source TEXT NOT NULL DEFAULT ''`},
 		{name: "evaluated_release_generation", sql: `ALTER TABLE model_admission_events ADD COLUMN evaluated_release_generation INTEGER NOT NULL DEFAULT 0`},
+		// SPEC-047-R008 v0.1.6 integer token evidence for a passed synthetic probe.
+		{name: "synthetic_probe_completion_tokens", sql: `ALTER TABLE model_admission_events ADD COLUMN synthetic_probe_completion_tokens INTEGER NOT NULL DEFAULT 0`},
 	} {
 		if columns[column.name] {
 			continue
@@ -904,8 +917,9 @@ INSERT INTO model_admission_events(
     catalog_candidate_sha256, catalog_signer_key_id, catalog_members_json,
     artifact_feed_sha256, artifact_id, artifact_hash, artifact_hash_algorithm,
     artifact_feed_signer_key_id, artifact_candidate_catalog_sha256,
-    bound_member_source, evaluated_release_generation, intake_model_key
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    bound_member_source, evaluated_release_generation, intake_model_key,
+    synthetic_probe_completion_tokens
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			event.ProviderID,
 			event.CandidateID,
 			event.ServedModelRef,
@@ -948,6 +962,7 @@ INSERT INTO model_admission_events(
 			event.BoundMemberSource,
 			int64(event.EvaluatedReleaseGeneration),
 			event.IntakeModelKey,
+			int64(event.SyntheticProbeCompletionTokens),
 		); err != nil {
 			return err
 		}
@@ -1089,8 +1104,9 @@ INSERT INTO model_admission_events(
     catalog_candidate_sha256, catalog_signer_key_id, catalog_members_json,
     artifact_feed_sha256, artifact_id, artifact_hash, artifact_hash_algorithm,
     artifact_feed_signer_key_id, artifact_candidate_catalog_sha256,
-    bound_member_source, evaluated_release_generation, intake_model_key
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    bound_member_source, evaluated_release_generation, intake_model_key,
+    synthetic_probe_completion_tokens
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			event.ProviderID,
 			event.CandidateID,
 			event.ServedModelRef,
@@ -1133,6 +1149,7 @@ INSERT INTO model_admission_events(
 			event.BoundMemberSource,
 			int64(event.EvaluatedReleaseGeneration),
 			event.IntakeModelKey,
+			int64(event.SyntheticProbeCompletionTokens),
 		); err != nil {
 			return err
 		}
@@ -1304,6 +1321,7 @@ func scanModelAdmissionEventRow(row modelAdmissionScanner) (ModelAdmissionEvent,
 	var event ModelAdmissionEvent
 	var createdAt, membersJSON string
 	var evaluatedGeneration int64
+	var syntheticProbeCompletionTokens int64
 	err := row.Scan(
 		&event.CoordinatorEventID,
 		&event.Actor,
@@ -1347,6 +1365,7 @@ func scanModelAdmissionEventRow(row modelAdmissionScanner) (ModelAdmissionEvent,
 		&event.BoundMemberSource,
 		&evaluatedGeneration,
 		&event.IntakeModelKey,
+		&syntheticProbeCompletionTokens,
 	)
 	if err != nil {
 		return ModelAdmissionEvent{}, err
@@ -1357,6 +1376,7 @@ func scanModelAdmissionEventRow(row modelAdmissionScanner) (ModelAdmissionEvent,
 	}
 	event.CatalogMembers = members
 	event.EvaluatedReleaseGeneration = uint64(evaluatedGeneration)
+	event.SyntheticProbeCompletionTokens = int(syntheticProbeCompletionTokens)
 	parsed, err := time.Parse(time.RFC3339Nano, createdAt)
 	if err != nil {
 		return ModelAdmissionEvent{}, err
@@ -1377,7 +1397,8 @@ func modelAdmissionEventSelect(tail string) string {
        catalog_candidate_sha256, catalog_signer_key_id, catalog_members_json,
        artifact_feed_sha256, artifact_id, artifact_hash, artifact_hash_algorithm,
        artifact_feed_signer_key_id, artifact_candidate_catalog_sha256,
-       bound_member_source, evaluated_release_generation, intake_model_key` + tail
+       bound_member_source, evaluated_release_generation, intake_model_key,
+       synthetic_probe_completion_tokens` + tail
 }
 
 func scanModelAdmissionEvents(ctx context.Context, q interface {
@@ -1568,7 +1589,12 @@ type modelAdmissionSyntheticProbeResult struct {
 	TargetState                      string
 	ExperimentalVisibilityAuthorized bool
 	ReasonCode                       string
-	CreatedAt                        time.Time
+	// CompletionTokens is the INTEGER `usage.completion_tokens` parsed from the
+	// probe's non-streaming chat-completion response. It is recorded as token
+	// evidence on a passed decision only; the raw completion text is never read
+	// or persisted.
+	CompletionTokens int
+	CreatedAt        time.Time
 }
 
 // modelAdmissionSandboxProbeDecision builds the coordinator decision that moves
@@ -1606,7 +1632,15 @@ func modelAdmissionSyntheticProbeDecision(current ModelAdmissionEvent, result mo
 			return ModelAdmissionEvent{}, false
 		}
 	}
-	return modelAdmissionCoordinatorDecisionFromCurrent(current, targetState, reasonCode, "macprovider.model_admission.synthetic_probe_decision.v1", wireRequestID, result.CreatedAt), true
+	decision := modelAdmissionCoordinatorDecisionFromCurrent(current, targetState, reasonCode, "macprovider.model_admission.synthetic_probe_decision.v1", wireRequestID, result.CreatedAt)
+	// Token evidence rides a passed decision only. A revoked/failed probe carries
+	// no positive token claim. The value is deliberately excluded from the replay
+	// key + coordinator event id digests (it is evidence, not identity), so a
+	// retry stays idempotent.
+	if result.Passed && result.CompletionTokens > 0 {
+		decision.SyntheticProbeCompletionTokens = result.CompletionTokens
+	}
+	return decision, true
 }
 
 func modelAdmissionCoordinatorDecisionFromCurrent(current ModelAdmissionEvent, targetState, reasonCode, domain, evidence string, now time.Time) ModelAdmissionEvent {
@@ -2682,8 +2716,26 @@ func validModelAdmissionToken(value string) bool {
 }
 
 func validModelAdmissionRuntimeSource(value string) bool {
+	// The coordinator's admission runtime-source vocabulary matches SPEC-046-R002:
+	// `mlx_cache` (catalog MLX) plus the four BYOM loopback adapters. Accepting all
+	// four keeps offer/admission/hello parse consistent with SPEC-032 FR-HG8's
+	// isBYOMLoopbackRuntimeSource exemption. (Which of these the shipped
+	// macprovider-cli can actually SERVE is a separate CLI concern; the coordinator
+	// vocabulary is client-agnostic and forward-compatible.)
+	if value == "mlx_cache" {
+		return true
+	}
+	return isBYOMLoopbackRuntimeSource(value)
+}
+
+// isBYOMLoopbackRuntimeSource reports whether a hello runtime_source is a SPEC-046
+// bring-your-own-model loopback adapter. These serve non-catalog models by design,
+// so SPEC-032 FR-HG8 exempts them from the catalog proof-of-weights hard-close and
+// admits them as non-earning route-excluded sandbox sessions. `mlx_cache` (catalog
+// MLX) is deliberately excluded and stays fully gated.
+func isBYOMLoopbackRuntimeSource(value string) bool {
 	switch value {
-	case "mlx_cache", "ollama_loopback":
+	case "ollama_loopback", "lmstudio_loopback", "llamacpp_loopback", "openai_compatible_loopback":
 		return true
 	default:
 		return false

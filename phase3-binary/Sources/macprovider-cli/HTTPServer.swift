@@ -105,7 +105,7 @@ actor ProviderAdmissionIdentityStatusRuntime {
 
 struct HTTPServer: Sendable {
     let config: AppConfig
-    let modelRuntime: ModelRuntime
+    let modelRuntime: any ModelRuntimeServing
     let providerStatus: ProviderStatus
     let receiptBuilder: ReceiptBuilder?
     let idlePrewarmer: IdlePrewarmer?
@@ -120,7 +120,7 @@ struct HTTPServer: Sendable {
 
     init(
         config: AppConfig,
-        modelRuntime: ModelRuntime,
+        modelRuntime: any ModelRuntimeServing,
         providerStatus: ProviderStatus,
         receiptBuilder: ReceiptBuilder?,
         idlePrewarmer: IdlePrewarmer? = nil,
@@ -280,7 +280,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
     private let modelID: String?
     private let providerID: String?
     private let coordinatorURL: String?
-    private let modelRuntime: ModelRuntime
+    private let modelRuntime: any ModelRuntimeServing
     private let providerStatus: ProviderStatus
     private let warmSwapEnabled: Bool
     private let maxBodyBytes: Int
@@ -301,7 +301,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         modelID: String?,
         providerID: String?,
         coordinatorURL: String?,
-        modelRuntime: ModelRuntime,
+        modelRuntime: any ModelRuntimeServing,
         providerStatus: ProviderStatus,
         warmSwapEnabled: Bool,
         maxBodyBytes: Int,
@@ -870,7 +870,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
     private func handleStreamingChatCompletions(
         request: ChatCompletionRequest,
         writer: ResponseWriter,
-        modelRuntime: ModelRuntime,
+        modelRuntime: any ModelRuntimeServing,
         warmSwapEnabled: Bool,
         receiptBuilder: ReceiptBuilder?,
         providerID: String?,
@@ -922,7 +922,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
 
                 let toolCallOpenEmitted = StreamedFlag()
                 let streamedAnyToolCallDelta = StreamedFlag()
-                let completion = try await modelRuntime.stream(request, with: handle) { chunk in
+                let completion = try await modelRuntime.stream(request, with: handle, shouldCancel: { false }) { chunk in
                     switch chunk {
                     case .content(let text):
                         writer.writeSSEJSON(

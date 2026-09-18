@@ -29,6 +29,17 @@ protocol ModelRuntimeServing: Actor {
     func acquireRequestHandle(_ request: ChatCompletionRequest) throws -> RequestHandle
     func unregisterInFlight(_ id: Int)
     func currentSnapshot() async -> RuntimeSnapshot
+    /// Identity/status surface the serve command reads to build ProviderStatus.
+    /// The concrete MLX `ModelRuntime` witnesses these with actor-isolated
+    /// members; loopback runtimes report their own GGUF-file identity. Every
+    /// conformer implements them explicitly -- no protocol-extension default,
+    /// which on an actor conformer would shadow the synchronous witness in an
+    /// `await` context and silently no-op status/identity reads.
+    var loadedModelHash: String? { get async }
+    var loadedModelHashAlgorithm: String? { get async }
+    var loadedWeightsManifestSHA256: String? { get async }
+    var isLoaded: Bool { get async }
+    func setProviderStatus(_ providerStatus: ProviderStatus) async
 }
 
 struct RelayBlindPreparedRequest: @unchecked Sendable {

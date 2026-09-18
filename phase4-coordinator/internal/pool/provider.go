@@ -110,6 +110,7 @@ type Provider struct {
 	AssignedID              string  `json:"assigned_id"`
 	Hostname                string  `json:"hostname"`
 	ModelID                 string  `json:"model_id"`
+	RuntimeSource           string  `json:"runtime_source,omitempty"` // SPEC-047 v0.1.6 hello adapter (mlx_cache/ollama_loopback); provider assertion, never dereferenced
 	ModelParamsB            float64 `json:"model_params_b"`
 	RAMGB                   int     `json:"ram_gb"`
 	MaxContextTokens        int     `json:"max_context_tokens"`

@@ -196,7 +196,7 @@ func TestRunModelAdmissionSyntheticProbeUsesProviderWireSession(t *testing.T) {
 	provider := &pool.Provider{
 		ProviderID:      "provider-byom-wire",
 		AssignedID:      "session-wire",
-		ModelID:         "catalog-default",
+		ModelID:         "ollama:qwen3-8b",
 		EndpointURL:     "http://127.0.0.1:11434/forbidden",
 		Tier:            pool.TierProvisional,
 		InferencePath:   pool.InferencePathWSTunneled,
@@ -274,7 +274,7 @@ func TestModelAdmissionOfferHandlerTriggersProviderWireProbe(t *testing.T) {
 	provider := &pool.Provider{
 		ProviderID:      "provider-byom-trigger",
 		AssignedID:      "session-trigger",
-		ModelID:         "catalog-default",
+		ModelID:         "ollama:qwen3-8b",
 		EndpointURL:     endpoint.URL,
 		Tier:            pool.TierProvisional,
 		InferencePath:   pool.InferencePathWSTunneled,
@@ -366,7 +366,7 @@ func TestModelAdmissionOfferHandlerProbeSurvivesSubmitterCancellation(t *testing
 	provider := &pool.Provider{
 		ProviderID:      "provider-byom-cancel",
 		AssignedID:      "session-cancel",
-		ModelID:         "catalog-default",
+		ModelID:         "ollama:qwen3-8b",
 		EndpointURL:     "http://127.0.0.1:11434/forbidden",
 		Tier:            pool.TierProvisional,
 		InferencePath:   pool.InferencePathWSTunneled,

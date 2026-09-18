@@ -3319,6 +3319,7 @@ func (s *Server) prepareProviderAdmissionWithQuotaCheck(conn net.Conn, auth prov
 		AssignedID:             assignedID,
 		Hostname:               hello.Hostname,
 		ModelID:                hello.ModelID,
+		RuntimeSource:          hello.RuntimeSource,
 		ModelParamsB:           hello.ModelParamsB,
 		RAMGB:                  hello.RAMGB,
 		MaxContextTokens:       hello.MaxContextTokens,
@@ -3448,6 +3449,26 @@ func (s *Server) checkAutotuneHelloGateWithCatalog(conn net.Conn, hello Hello, c
 			return autotuneAdmissionObservation{}, false
 		}
 		return autotuneAdmissionObservation{}, true
+	}
+	// SPEC-032 FR-HG8 (#1569): a SPEC-046 BYOM loopback runtime source advertises a
+	// bring-your-own-model candidate that is, by design, not in the signed catalog.
+	// The catalog proof-of-weights gate governs catalog/earning admission, so it MUST
+	// NOT hard-close such a hello as autotune_model_uncatalogued. Admit it as a
+	// route-excluded, non-earning `admission_sandboxed` session (FR-HG8 semantics),
+	// leaving network eligibility to SPEC-047. The sandbox flag keeps it non-routable
+	// and a null catalog_model_key keeps it non-settlement-capable (SPEC-047-R003/R005),
+	// so no earning/buyer-serving path is opened. mlx_cache (catalog MLX) and any
+	// absent/other runtime source stay fully gated below. This runs AFTER the
+	// dependency-wired check so an unwired gate still fails closed for everyone
+	// (autotune_gate_unavailable), not silently sandbox-admits.
+	if requireGate && isBYOMLoopbackRuntimeSource(hello.RuntimeSource) {
+		s.log.Info().
+			Str("provider_id", hello.ProviderID).
+			Str("event", "autotune_byom_loopback_sandboxed").
+			Str("model_id", hello.ModelID).
+			Str("runtime_source", hello.RuntimeSource).
+			Msg("autotune hello gate exempted a BYOM loopback runtime as a non-earning sandbox (SPEC-032 FR-HG8)")
+		return autotuneAdmissionObservation{Sandboxed: true}, true
 	}
 	ttl := time.Duration(powCfg.AutotuneEvidenceTTLDays) * 24 * time.Hour
 	ctx, cancel := context.WithTimeout(context.Background(), autotuneEvidenceLookupTimeout)
@@ -4717,6 +4738,20 @@ func (s *Server) runModelAdmissionSyntheticProbe(ctx context.Context, current Mo
 	if provider.ProviderID != current.ProviderID || !provider.IsWSTunneled() {
 		return ModelAdmissionEvent{}, errors.New("model admission synthetic probe requires matching provider wire session")
 	}
+	// SPEC-047-R008: the probe body carries current.ServedModelRef, but the
+	// bound WS session must actually be serving that model. A leftover session
+	// (e.g. a warm-swapped Llama) must NOT satisfy a different candidate's
+	// (e.g. Gemma) probe — otherwise a passed probe would credit token
+	// evidence to the wrong served model. Bind the live session's served ref
+	// (and, where both sides carry one, its reported hash) to the candidate.
+	if !strings.EqualFold(strings.TrimSpace(provider.ModelID), strings.TrimSpace(current.ServedModelRef)) {
+		return ModelAdmissionEvent{}, errors.New("model admission synthetic probe requires the bound session to serve the offered model ref")
+	}
+	if expected := strings.TrimSpace(current.ExpectedCatalogModelHash); expected != "" {
+		if reported := strings.TrimSpace(provider.ModelHash); reported != "" && !strings.EqualFold(reported, expected) {
+			return ModelAdmissionEvent{}, errors.New("model admission synthetic probe requires the bound session hash to match the offered candidate")
+		}
+	}
 	switch current.State {
 	case modelAdmissionOfferSubmitted:
 		decision, ok := modelAdmissionSandboxProbeDecision(current, "synthetic_probe_required", s.now())
@@ -4753,6 +4788,11 @@ func (s *Server) runModelAdmissionSyntheticProbe(ctx context.Context, current Mo
 		return current, err
 	}
 	passed := false
+	// completionTokens is additional INTEGER token evidence parsed from the
+	// non-streaming probe response's `usage.completion_tokens`. warmupChunkHasOutput
+	// stays the pass predicate; the token count is recorded alongside it. The
+	// probe's completion text/choices/delta are never read here.
+	completionTokens := 0
 	chunks := relay.Chunks
 	for {
 		select {
@@ -4764,17 +4804,23 @@ func (s *Server) runModelAdmissionSyntheticProbe(ctx context.Context, current Mo
 			if warmupChunkHasOutput(chunk.Data) {
 				passed = true
 			}
+			if tokens := probeCompletionTokens(chunk.Data); tokens > completionTokens {
+				completionTokens = tokens
+			}
 		case end := <-relay.Done:
-			return s.appendModelAdmissionSyntheticProbeResult(ctx, current, relay.RequestID, end.Status == "complete" && passed, targetState, experimentalVisibilityAuthorized)
+			if tokens := warmupCompletionTokens(end.Usage); tokens > completionTokens {
+				completionTokens = tokens
+			}
+			return s.appendModelAdmissionSyntheticProbeResult(ctx, current, relay.RequestID, end.Status == "complete" && passed, targetState, experimentalVisibilityAuthorized, completionTokens)
 		case <-relay.Errors:
-			return s.appendModelAdmissionSyntheticProbeResult(ctx, current, relay.RequestID, false, targetState, experimentalVisibilityAuthorized)
+			return s.appendModelAdmissionSyntheticProbeResult(ctx, current, relay.RequestID, false, targetState, experimentalVisibilityAuthorized, 0)
 		case <-probeCtx.Done():
-			return s.appendModelAdmissionSyntheticProbeResult(ctx, current, relay.RequestID, false, targetState, experimentalVisibilityAuthorized)
+			return s.appendModelAdmissionSyntheticProbeResult(ctx, current, relay.RequestID, false, targetState, experimentalVisibilityAuthorized, 0)
 		}
 	}
 }
 
-func (s *Server) appendModelAdmissionSyntheticProbeResult(ctx context.Context, current ModelAdmissionEvent, providerWireRequestID string, passed bool, targetState string, experimentalVisibilityAuthorized bool) (ModelAdmissionEvent, error) {
+func (s *Server) appendModelAdmissionSyntheticProbeResult(ctx context.Context, current ModelAdmissionEvent, providerWireRequestID string, passed bool, targetState string, experimentalVisibilityAuthorized bool, completionTokens int) (ModelAdmissionEvent, error) {
 	reasonCode := "synthetic_probe_failed"
 	if passed {
 		reasonCode = "synthetic_probe_passed"
@@ -4785,6 +4831,7 @@ func (s *Server) appendModelAdmissionSyntheticProbeResult(ctx context.Context, c
 		TargetState:                      targetState,
 		ExperimentalVisibilityAuthorized: experimentalVisibilityAuthorized,
 		ReasonCode:                       reasonCode,
+		CompletionTokens:                 completionTokens,
 		CreatedAt:                        s.now(),
 	})
 	if !ok {
@@ -5418,6 +5465,65 @@ func warmupUsagePassed(raw json.RawMessage) bool {
 		return false
 	}
 	return usage.CompletionTokens > 0
+}
+
+// warmupCompletionTokens returns the INTEGER `usage.completion_tokens` from a
+// chat-completion `usage` object, or 0 when absent/negative/unparseable. It reads
+// only the integer count and never touches choices/message/delta text.
+func warmupCompletionTokens(raw json.RawMessage) int {
+	if len(raw) == 0 {
+		return 0
+	}
+	var usage struct {
+		CompletionTokens int `json:"completion_tokens"`
+	}
+	if err := json.Unmarshal(raw, &usage); err != nil {
+		return 0
+	}
+	if usage.CompletionTokens < 0 {
+		return 0
+	}
+	return usage.CompletionTokens
+}
+
+// probeCompletionTokens extracts `usage.completion_tokens` from a synthetic probe
+// response chunk. The probe is dispatched with stream:false, so the chunk carries
+// the full non-streaming chat-completion JSON with a top-level `usage`; the SSE
+// `data:` framing is handled defensively in case a relay wraps it. Only the
+// integer token count is read — never the completion text.
+func probeCompletionTokens(data string) int {
+	// The probe is dispatched with stream:false, so the common case is a single
+	// whole-body chat-completion JSON. Try that first so a completion whose text
+	// happens to contain a `data:`-prefixed line cannot mask the real usage.
+	if tokens := payloadCompletionTokens([]byte(data)); tokens > 0 {
+		return tokens
+	}
+	// Fall back to SSE `data:` framing in case a relay wraps the response.
+	best := 0
+	for _, line := range strings.Split(data, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if payload == "" || payload == "[DONE]" {
+			continue
+		}
+		if tokens := payloadCompletionTokens([]byte(payload)); tokens > best {
+			best = tokens
+		}
+	}
+	return best
+}
+
+func payloadCompletionTokens(raw []byte) int {
+	var resp struct {
+		Usage json.RawMessage `json:"usage"`
+	}
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return 0
+	}
+	return warmupCompletionTokens(resp.Usage)
 }
 
 func warmupCompletionUsagePassed(raw []byte) bool {

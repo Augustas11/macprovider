@@ -811,6 +811,22 @@ struct ServeCommand: AsyncParsableCommand {
         artifactResolver: CachedModelArtifactResolver = CachedModelArtifactResolver(),
         persistConfigMigration: Bool = false
     ) async throws -> CatalogRuntimeTrust? {
+        // SPEC-046-R002 / SPEC-010-R007(e) loopback serving (#1569): an
+        // `ollama_loopback` model carries a `macprovider.gguf-file.v1` identity
+        // resolved from the local Ollama store at serve time, not a catalog
+        // artifact SHA. It is intentionally uncatalogued and non-earning, so it
+        // neither requires nor runs the MLX catalog-artifact preflight. Returning
+        // nil (no catalog trust) lets the daemon stay connected instead of
+        // exiting `catalog_incompatible`. It never becomes buyer-serving because
+        // the candidate keeps a null `catalog_model_key` and so can never reach
+        // a settlement/`catalog_priced` state — the coordinator's BYOM paid-
+        // routing gate (`byomDefaultPaidRoutingEligible` →
+        // `ReasonBYOMNonSettlement`) excludes it. That money-path gate, not the
+        // SPEC-032 hello-gate ceiling flag (which is set only when the gate is
+        // ON), is what holds in the gate-off E2E posture (SPEC-047-R003/R005).
+        if OllamaLoopbackServeModel.isOllamaLoopbackRef(resolved.model ?? "") {
+            return nil
+        }
         var artifactResolver = artifactResolver
         if let root = resolved.modelArtifactRoot, root.hasPrefix("/") {
             artifactResolver.durableRoot = URL(fileURLWithPath: root, isDirectory: true).standardizedFileURL
@@ -1796,37 +1812,54 @@ struct ServeCommand: AsyncParsableCommand {
             modelID: resolved.model,
             operationID: lifecycleOperationID
         )
-        let modelRuntime: ModelRuntime
+        let modelRuntime: any ModelRuntimeServing
+        // Non-nil only when a SPEC-046 loopback adapter serves (issue #1569);
+        // threaded to the coordinator hello as `runtime_source`.
+        let helloRuntimeSource: String?
         // Upstream mlx-swift-lm #424 can corrupt speculative rollback after a
         // model-specific rotating-cache wrap. Keep one source of truth for both
         // execution and advertised heartbeat capability until the tagged fix and
         // cache-wrap parity gate are green.
         do {
-            modelRuntime = try await ModelRuntime(
-                modelID: resolved.model,
-                modelLoadPath: resolved.modelArtifactPath,
-                draftModelID: resolved.draftModel,
-                draftModelLoadPath: verifiedDraftModelLoadPath,
-                numDraftTokens: resolved.numDraftTokens,
-                speculativeCacheWrapValidated: speculativeCacheWrapValidated,
-                maxContextTokensOverride: resolved.maxContextOverride,
-                kvBitsOverride: effectiveKVBits,
-                pagedKVConfig: resolved.pagedKV,
-                prefillStepSize: resolved.prefillStepSize,
-                maxBatch: resolved.maxConcurrencyOverride ?? 1,
-                continuousBatchingMode: resolved.continuousBatching,
-                continuousBatchQueueLimit: resolved.continuousBatchQueueLimit,
-                warmSwapEnabled: resolved.enableWarmSwap,
-                swapDrainTimeoutSeconds: resolved.swapDrainTimeoutSeconds,
-                catalogModelIDAlias: catalogModelIDAlias,
-                verifiedModelArtifactSHA256: resolved.modelArtifactSHA256,
-                // MEDIUM-5 (FR-KVP4): thread the catalog REVISION separately from the
-                // artifact SHA so the cold-tier envelope carries both as distinct identity
-                // fields; nil ⇒ cold tier treats identity as unavailable (no promote/persist).
-                verifiedModelCatalogRevision: resolved.modelCatalogRevision,
-                targetAuthorities: targetAuthorities,
-                authorizedSwitchModelIDs: authorizedSwitchModelIDs
-            )
+            if let ollamaServedRef = resolved.model, OllamaLoopbackServeModel.isOllamaLoopbackRef(ollamaServedRef) {
+                // SPEC-046-R002 / SPEC-010-R007(e) loopback serving (#1569):
+                // proxy inference to the validated loopback Ollama origin. ONE
+                // process, ONE model — no MLX weights are loaded. Non-earning:
+                // relay-blind and signed receipts are disabled on this path.
+                helloRuntimeSource = OllamaLoopbackServeModel.runtimeSource
+                modelRuntime = try OllamaLoopbackRuntime(
+                    servedModelRef: ollamaServedRef,
+                    origin: OllamaLoopbackServeModel.resolveOrigin(),
+                    catalogModelIDAlias: catalogModelIDAlias
+                )
+            } else {
+                helloRuntimeSource = nil
+                modelRuntime = try await ModelRuntime(
+                    modelID: resolved.model,
+                    modelLoadPath: resolved.modelArtifactPath,
+                    draftModelID: resolved.draftModel,
+                    draftModelLoadPath: verifiedDraftModelLoadPath,
+                    numDraftTokens: resolved.numDraftTokens,
+                    speculativeCacheWrapValidated: speculativeCacheWrapValidated,
+                    maxContextTokensOverride: resolved.maxContextOverride,
+                    kvBitsOverride: effectiveKVBits,
+                    pagedKVConfig: resolved.pagedKV,
+                    prefillStepSize: resolved.prefillStepSize,
+                    maxBatch: resolved.maxConcurrencyOverride ?? 1,
+                    continuousBatchingMode: resolved.continuousBatching,
+                    continuousBatchQueueLimit: resolved.continuousBatchQueueLimit,
+                    warmSwapEnabled: resolved.enableWarmSwap,
+                    swapDrainTimeoutSeconds: resolved.swapDrainTimeoutSeconds,
+                    catalogModelIDAlias: catalogModelIDAlias,
+                    verifiedModelArtifactSHA256: resolved.modelArtifactSHA256,
+                    // MEDIUM-5 (FR-KVP4): thread the catalog REVISION separately from the
+                    // artifact SHA so the cold-tier envelope carries both as distinct identity
+                    // fields; nil ⇒ cold tier treats identity as unavailable (no promote/persist).
+                    verifiedModelCatalogRevision: resolved.modelCatalogRevision,
+                    targetAuthorities: targetAuthorities,
+                    authorizedSwitchModelIDs: authorizedSwitchModelIDs
+                )
+            }
         } catch {
             _ = try? lifecycleStateStore.transition(
                 to: .failed,
@@ -1858,14 +1891,18 @@ struct ServeCommand: AsyncParsableCommand {
             }
         }
         var kvDiskTier: KVDiskTier?
-        if resolved.kvDiskCache.effectiveEnabled,
+        // SPEC-037 encrypted KV survival is an MLX-runtime data path; the SPEC-046
+        // loopback serving runtime holds no local KV cache, so the tier is only
+        // activated when an MLX `ModelRuntime` is serving.
+        if let mlxRuntime = modelRuntime as? ModelRuntime,
+           resolved.kvDiskCache.effectiveEnabled,
            let kvProviderID = resolved.providerID?.trimmingCharacters(in: .whitespacesAndNewlines),
            !kvProviderID.isEmpty {
             let kvTTL = Int(ConversationCache.Config.fromEnvironment().ttlSeconds)
             let tier = KVDiskTier(config: resolved.kvDiskCache, namespaceID: kvProviderID, eligibilityTTLSeconds: kvTTL)
             switch await tier.activateForServeDetailed() {
             case .activated:
-                await modelRuntime.attachKVDiskTier(tier)
+                await mlxRuntime.attachKVDiskTier(tier)
                 kvDiskTier = tier
             case .dormantLock, .dormantKeychain:
                 // FR-KVP7 (M-13): the namespace lock is held by another writer, OR
@@ -1873,8 +1910,8 @@ struct ServeCommand: AsyncParsableCommand {
                 // tier and retry with bounded backoff in the background, running full
                 // recovery and attaching once the condition clears.
                 kvDiskTier = tier
-                Task { [modelRuntime] in
-                    await tier.retryActivationUntilAcquired { await modelRuntime.attachKVDiskTier(tier) }
+                Task { [mlxRuntime] in
+                    await tier.retryActivationUntilAcquired { await mlxRuntime.attachKVDiskTier(tier) }
                 }
             case .quarantined, .disabled:
                 break
@@ -1891,7 +1928,14 @@ struct ServeCommand: AsyncParsableCommand {
         )
         let throughputEstimate = await Self.startupThroughputEstimate(
             autotuneCandidate: autotuneCandidate,
-            measure: { await modelRuntime.measureStartupThroughput() }
+            // The loopback serving runtime has no local generation to measure;
+            // it reports a 0 startup estimate (advisory capacity only).
+            measure: {
+                if let mlxRuntime = modelRuntime as? ModelRuntime {
+                    return await mlxRuntime.measureStartupThroughput()
+                }
+                return 0
+            }
         )
         let thermalGate = ThermalGate()
         // `slots_free` in the log reflects the throttle-driven free-slot
@@ -2154,6 +2198,7 @@ struct ServeCommand: AsyncParsableCommand {
                 config: resolved,
                 modelRuntime: modelRuntime,
                 providerStatus: providerStatus,
+                runtimeSource: helloRuntimeSource,
                 attestationGenerator: {
                     #if arch(arm64)
                     if let seGen = SecureEnclaveAttestationGenerator.loadIfAvailable() {
@@ -2301,9 +2346,10 @@ struct ServeCommand: AsyncParsableCommand {
 	        let malibuAccrualClient = try? MalibuAccrualClient(coordinatorURL: resolved.coordinatorURL)
 	        let providerWalletStatusClient = try? ProviderWalletStatusClient(coordinatorURL: resolved.coordinatorURL)
 	        let providerRewardAuditClient = try? ProviderRewardAuditClient(coordinatorURL: resolved.coordinatorURL)
+	        if let mlxRuntime = modelRuntime as? ModelRuntime {
 	        controlSocket = ControlSocketServer(
             socketPath: socketURL,
-            modelRuntime: modelRuntime,
+            modelRuntime: mlxRuntime,
             supportedModels: resolved.supportedModels,
             receiptRotator: receiptRotator,
             receiptRotationProviderID: resolved.providerID?.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -2319,6 +2365,11 @@ struct ServeCommand: AsyncParsableCommand {
             watchdogCleanup: coordinatorClient == nil ? nil : watchdogCleanup,
             kvDiskTier: kvDiskTier
         )
+        } else {
+            // SPEC-046 loopback serving runtime (#1569) exposes no MLX warm-swap,
+            // model-adoption, or hot-conversation-purge control surface.
+            controlSocket = nil
+        }
         do {
             try await controlSocket?.start()
         } catch {

@@ -24,6 +24,7 @@ type Hello struct {
 	ProviderID             string                 `json:"provider_id"`
 	Hostname               string                 `json:"hostname"`
 	ModelID                string                 `json:"model_id"`
+	RuntimeSource          string                 `json:"runtime_source,omitempty"`
 	ModelHash              string                 `json:"model_hash,omitempty"`
 	ModelHashAlgorithm     string                 `json:"model_hash_algorithm,omitempty"`
 	WeightsManifestSHA256  string                 `json:"weights_manifest_sha256,omitempty"`
@@ -101,6 +102,7 @@ type AuthRequest struct {
 	ProviderID                     string                 `json:"provider_id"`
 	Hostname                       string                 `json:"hostname,omitempty"`
 	ModelID                        string                 `json:"model_id,omitempty"`
+	RuntimeSource                  string                 `json:"runtime_source,omitempty"`
 	ModelHash                      string                 `json:"model_hash,omitempty"`
 	ModelHashAlgorithm             string                 `json:"model_hash_algorithm,omitempty"`
 	WeightsManifestSHA256          string                 `json:"weights_manifest_sha256,omitempty"`
@@ -585,6 +587,9 @@ func ParseHello(payload []byte) (Hello, string, error) {
 	if len([]byte(h.ModelID)) > maxHandshakeModelIDBytes {
 		return Hello{}, "model_id", fmt.Errorf("model_id exceeds %d bytes", maxHandshakeModelIDBytes)
 	}
+	if field, err := parseOptionalRuntimeSource(raw, &h.RuntimeSource); err != nil {
+		return Hello{}, field, err
+	}
 	if v, ok := raw["model_hash"]; ok && string(v) != "null" {
 		if err := json.Unmarshal(v, &h.ModelHash); err != nil {
 			return Hello{}, "model_hash", err
@@ -736,6 +741,9 @@ func parseAuthInitial(raw map[string]json.RawMessage, req AuthRequest) (AuthRequ
 	}
 	if len([]byte(req.ModelID)) > maxHandshakeModelIDBytes {
 		return AuthRequest{}, Spec010Presence{}, "model_id", fmt.Errorf("model_id exceeds %d bytes", maxHandshakeModelIDBytes)
+	}
+	if field, err := parseOptionalRuntimeSource(raw, &req.RuntimeSource); err != nil {
+		return AuthRequest{}, Spec010Presence{}, field, err
 	}
 	if v, ok := raw["model_hash"]; ok && string(v) != "null" {
 		if err := json.Unmarshal(v, &req.ModelHash); err != nil {
@@ -997,6 +1005,7 @@ func (r AuthRequest) Hello() Hello {
 		ProviderID:             r.ProviderID,
 		Hostname:               r.Hostname,
 		ModelID:                r.ModelID,
+		RuntimeSource:          r.RuntimeSource,
 		ModelHash:              r.ModelHash,
 		ModelHashAlgorithm:     r.ModelHashAlgorithm,
 		WeightsManifestSHA256:  r.WeightsManifestSHA256,
@@ -1019,6 +1028,27 @@ func (r AuthRequest) Hello() Hello {
 		ReferralCode:           r.ReferralCode,
 		RelayBlindKeyRecords:   append([]relayblind.KeyRecord(nil), r.RelayBlindKeyRecords...),
 	}
+}
+
+// parseOptionalRuntimeSource parses the SPEC-047 v0.1.6 hello/auth `runtime_source`
+// declaration. It is optional (MLX providers omit it) but, when present, must be a
+// known adapter source under the same closed vocabulary the offer path enforces.
+// The coordinator never dereferences it; it is stored on the session and echoed to
+// operator/harness readbacks so an ollama_loopback sandbox session is identifiable.
+func parseOptionalRuntimeSource(raw map[string]json.RawMessage, out *string) (string, error) {
+	v, ok := raw["runtime_source"]
+	if !ok || string(v) == "null" {
+		return "", nil
+	}
+	var value string
+	if err := json.Unmarshal(v, &value); err != nil {
+		return "runtime_source", fmt.Errorf("runtime_source must be a string")
+	}
+	if !validModelAdmissionRuntimeSource(value) {
+		return "runtime_source", fmt.Errorf("runtime_source is not a recognized adapter source")
+	}
+	*out = value
+	return "", nil
 }
 
 func parseRelayBlindKeyRecords(raw map[string]json.RawMessage, out *[]relayblind.KeyRecord) (string, error) {

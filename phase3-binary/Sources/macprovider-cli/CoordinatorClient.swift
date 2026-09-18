@@ -167,7 +167,10 @@ actor CoordinatorClient {
     private let providerID: String
     private let endpointURL: String?
     private let wsTunneledMode: Bool
-    private let modelRuntime: ModelRuntime
+    private let modelRuntime: any ModelRuntimeServing
+    /// Non-nil only for non-MLX serving runtimes (SPEC-046 loopback adapters,
+    /// e.g. `ollama_loopback`); emitted as the `runtime_source` hello field.
+    private let runtimeSource: String?
     private let loadedModelID: String?
     private let maxBodyBytes: Int
     private let maxActiveRequests: Int
@@ -413,8 +416,9 @@ actor CoordinatorClient {
 
     init?(
         config: AppConfig,
-        modelRuntime: ModelRuntime,
+        modelRuntime: any ModelRuntimeServing,
         providerStatus: ProviderStatus,
+        runtimeSource: String? = nil,
         sendOverride: SendOverride? = nil,
         reconnectGraceNanoseconds: UInt64 = 10 * 1_000_000_000,
         reconnectInitialBackoffNanoseconds: UInt64 = 1_000_000_000,
@@ -557,6 +561,7 @@ actor CoordinatorClient {
         self.endpointURL = config.endpointURL?.isEmpty == false ? config.endpointURL : nil
         self.wsTunneledMode = self.endpointURL == nil && (config.wsTunneledMode ?? true)
         self.modelRuntime = modelRuntime
+        self.runtimeSource = runtimeSource
         self.loadedModelID = config.model
         self.maxBodyBytes = config.maxRequestBodyBytes
         self.maxActiveRequests = 1
@@ -859,6 +864,9 @@ actor CoordinatorClient {
     }
 
     private func consumeSwapSignals() async {
+        // Warm-swap signals are MLX-runtime specific; loopback serving runtimes
+        // (SPEC-046 adapters) never swap, so there is nothing to consume.
+        guard let modelRuntime = modelRuntime as? ModelRuntime else { return }
         let stream = await modelRuntime.swapSignals()
         for await signal in stream {
             if Task.isCancelled {
@@ -1390,6 +1398,7 @@ actor CoordinatorClient {
             config: recoveryConfig,
             modelRuntime: modelRuntime,
             providerStatus: providerStatus,
+            runtimeSource: runtimeSource,
             reconnectGraceNanoseconds: reconnectGraceNanoseconds,
             reconnectInitialBackoffNanoseconds: reconnectInitialBackoffNanoseconds,
             receiptKeyRotationTimeoutNanoseconds: receiptKeyRotationTimeoutNanoseconds,
@@ -6108,6 +6117,12 @@ actor CoordinatorClient {
         appendCatalogAdmissionMetadata(to: &message, wireModelID: wireModelIDForHello)
         if let compatibilitySetID {
             message["compatibility_set_id"] = compatibilitySetID
+        }
+        // NEW (#1569): non-MLX serving runtimes declare their SPEC-046 loopback
+        // adapter so the coordinator can admit them as route-excluded sandbox
+        // sessions. Omitted for the MLX path (back-compat: no new wire field).
+        if let runtimeSource {
+            message["runtime_source"] = runtimeSource
         }
         return message
     }

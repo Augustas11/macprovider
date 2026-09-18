@@ -229,6 +229,12 @@ private actor CountingTokenRuntime: ModelRuntimeServing {
     private let tokenCount: Int
     init(tokens: Int) { self.tokenCount = tokens }
 
+    var loadedModelHash: String? { nil }
+    var loadedModelHashAlgorithm: String? { nil }
+    var loadedWeightsManifestSHA256: String? { nil }
+    var isLoaded: Bool { true }
+    func setProviderStatus(_ providerStatus: ProviderStatus) {}
+
     func complete(
         _ request: ChatCompletionRequest,
         shouldCancel: @escaping @Sendable () -> Bool
@@ -274,6 +280,11 @@ private actor CountingTokenRuntime: ModelRuntimeServing {
 // MARK: - No-op runtime for init tests
 
 private actor NullRuntime: ModelRuntimeServing {
+    var loadedModelHash: String? { nil }
+    var loadedModelHashAlgorithm: String? { nil }
+    var loadedWeightsManifestSHA256: String? { nil }
+    var isLoaded: Bool { true }
+    func setProviderStatus(_ providerStatus: ProviderStatus) {}
     func complete(_ request: ChatCompletionRequest, shouldCancel: @escaping @Sendable () -> Bool) async throws -> CompletionResult {
         CompletionResult(content: "", finishReason: "stop", promptTokens: 0, completionTokens: 0)
     }
