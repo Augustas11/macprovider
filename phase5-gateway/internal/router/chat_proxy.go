@@ -281,6 +281,11 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request_error", "invalid_request", err.Error())
 		return
 	}
+	// Pi / OpenAI-compat clients mint IDs that SPEC-018 AC-31 rejects
+	// (short call_*, ns.bash:0, toolu_*, hyphenated UUIDs). Rewrite those
+	// onto deterministic call_[a-f0-9]{32} values before coordinator
+	// validation. Already-valid IDs are unchanged.
+	body = rewriteChatRequestToolCallIDs(body)
 	model = chat.Model
 	streamMode = chat.Stream
 	if chat.N != nil && *chat.N != 1 {

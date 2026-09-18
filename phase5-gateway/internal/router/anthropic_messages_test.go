@@ -2014,11 +2014,16 @@ func TestAnthropicMessagesToolResultRequestTranslation(t *testing.T) {
 	}
 	assistant := messages[0].(map[string]any)
 	toolCalls := assistant["tool_calls"].([]any)
-	if assistant["role"] != "assistant" || toolCalls[0].(map[string]any)["id"] != "toolu_a" {
+	assistantID, _ := toolCalls[0].(map[string]any)["id"].(string)
+	if assistant["role"] != "assistant" || !spec018RequestAcceptedToolCallID(assistantID) {
 		t.Fatalf("assistant tool_use translation wrong: %v", assistant)
 	}
 	tool := messages[1].(map[string]any)
-	if tool["role"] != "tool" || tool["tool_call_id"] != "toolu_a" || tool["content"] != "result" {
+	toolID, _ := tool["tool_call_id"].(string)
+	if tool["role"] != "tool" || toolID != assistantID || tool["content"] != "result" {
 		t.Fatalf("tool_result translation wrong: %v", tool)
+	}
+	if assistantID == "toolu_a" {
+		t.Fatalf("anthropic toolu_a leaked to coordinator: %v", tool)
 	}
 }

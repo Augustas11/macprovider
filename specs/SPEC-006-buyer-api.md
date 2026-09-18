@@ -1,7 +1,11 @@
 # SPEC-006 - Buyer API Gateway: Mac Provider's first public buyer surface
 
-**Version:** 0.9.26 (2026-09-14, OpenRouter overflow shedding)
+**Version:** 0.9.27 (2026-09-18, OpenAI-compat tool_call_id rewrite)
 **Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.5.4, SPEC-003 v0.7, SPEC-004 v0.3.2
+
+**Change log v0.9.27 (2026-09-18, OpenAI-compat tool_call_id rewrite):**
+- `POST /v1/chat/completions` (and translated `/v1/messages` / `/v1/responses` bodies) rewrite inbound `messages[].tool_calls[].id` and `role:"tool".tool_call_id` values that do not already match SPEC-018 AC-31 `^call_[A-Za-z0-9]{16,64}$` to a deterministic `call_` + 32 lowercase hex SHA-256 prefix before coordinator validation. Empty or missing IDs still fail with `invalid_tool_call_id`. Matching assistant/tool IDs in the same request stay paired. Already-valid IDs MUST be forwarded unchanged.
+- Registers `SPEC-006-R011`. Coordinator and provider SPEC-018 AC-31 validators stay strict on the rewritten body.
 
 **Change log v0.9.26 (2026-09-14, OpenRouter overflow shedding):**
 - The bounded slot queue distinguishes heartbeat-visible busy providers from coordinator-local reservation pressure. A non-pinned request MAY wait up to 3 seconds when an otherwise eligible provider reports `slots_free=0`, or while that provider is draining already admitted zero-slot waiters; requests that would exceed already reserved positive free slots with no existing zero-slot queue MUST shed immediately as retryable `no_provider_available`. This preserves OpenRouter benchmark smoothing without hiding true saturation overflow behind long queue waits.
@@ -1558,6 +1562,8 @@ The free SKU wire id `mlx-community/Llama-3.2-3B-Instruct-4bit-free` MUST route 
 
 `logprobs` is accepted syntactically and forwarded to the provider as part of the request body. SPEC-001 v1.2.2 § 6.4 specifies unknown-field tolerance, so the provider MAY ignore unknown OpenAI-compatible fields including `logprobs`. Behavior is model-dependent; the gateway MUST NOT enforce `logprobs`-specific semantics.
 
+Inbound tool-call identifiers that OpenAI-compatible clients actually send (short `call_*` IDs, namespaced IDs such as `ns.bash:0`, Anthropic `toolu_*` IDs, hyphenated UUIDs) do not match SPEC-018 AC-31. Before forwarding to the coordinator, the gateway MUST rewrite those non-empty IDs to a deterministic `call_[a-f0-9]{32}` form so assistant `tool_calls[].id` and matching `role:"tool".tool_call_id` stay paired. IDs that already match `^call_[A-Za-z0-9]{16,64}$` MUST be forwarded unchanged. Empty or missing IDs remain coordinator-rejected as `invalid_tool_call_id`. Coordinator and provider validation stay SPEC-018-strict on the rewritten body.
+
 For `system` and `user` messages, `content` MAY be a non-empty JSON string
 or a text-only structured content array such as
 `[{"type":"text","text":"hello"}]`. The buyer boundary MUST normalize
@@ -1636,7 +1642,9 @@ flag is enabled.
 The facade does not certify full Claude Code, Claude Agent SDK, or Anthropic SDK
 product compatibility. Compatibility claims MUST be limited to the supported
 wire subset above until a live end-to-end smoke explicitly proves a wider
-client workflow.
+client workflow. Translated `tool_use.id` / `tool_result.tool_use_id` values
+are subject to the same SPEC-018 AC-31 rewrite as `POST /v1/chat/completions`
+before coordinator validation.
 
 The gateway MUST strip these inbound buyer request headers before forwarding to the coordinator:
 
