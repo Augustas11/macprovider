@@ -168,7 +168,7 @@ func main() {
 			os.Exit(1)
 		}
 		autotuneCatalog.SignerKeyID = autotuneFeeds.AutotuneCandidatesVerification.KeyID
-		autotuneCompatibleCatalogs, err = loadPreviousAutotuneCatalog(cfg.AutotuneFeeds)
+		autotuneCompatibleCatalogs, err = loadCompatibleAutotuneCatalogs(cfg.AutotuneFeeds, autotuneCatalog)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "autotune previous catalog: %v\n", err)
 			os.Exit(1)
@@ -1569,6 +1569,90 @@ func loadPreviousAutotuneCatalog(cfg config.AutotuneFeedsConfig) ([]*autotune.Ca
 	return []*autotune.Catalog{previous}, nil
 }
 
+// loadCompatibleAutotuneCatalogs is previous-target plus leftover same-id
+// freshness restamps that still sit under releases/. Previous-target stays
+// fail-closed. Restamp leftovers skip unverified dirs so a stale stamp cannot
+// block boot.
+func loadCompatibleAutotuneCatalogs(cfg config.AutotuneFeedsConfig, current *autotune.Catalog) ([]*autotune.Catalog, error) {
+	previous, err := loadPreviousAutotuneCatalog(cfg)
+	if err != nil {
+		return nil, err
+	}
+	return append(previous, loadSameVersionRestampCatalogs(cfg, current)...), nil
+}
+
+var maxSameVersionRestampCatalogs = 16
+
+// loadSameVersionRestampCatalogs loads signed candidate catalogs whose directory
+// name is current.Version + "-" + sha16. That is the renew-script restamp
+// layout. It is not a walk of arbitrary historical releases. The cap counts
+// matching candidate dirs examined, including verify failures, so a pile of
+// stale stamps cannot force an unbounded scan. Same-version leftovers must
+// also keep the active catalog's signer; another trusted key is not a restamp.
+func loadSameVersionRestampCatalogs(cfg config.AutotuneFeedsConfig, current *autotune.Catalog) []*autotune.Catalog {
+	if current == nil || strings.TrimSpace(current.Version) == "" || cfg.AutotuneCandidatesPath == "" {
+		return nil
+	}
+	releases := filepath.Join(filepath.Dir(filepath.Dir(cfg.AutotuneCandidatesPath)), "releases")
+	entries, err := os.ReadDir(releases)
+	if err != nil {
+		return nil
+	}
+	prefix := current.Version + "-"
+	out := make([]*autotune.Catalog, 0, 4)
+	examined := 0
+	for _, entry := range entries {
+		if !entry.IsDir() || !isSameVersionRestampDir(entry.Name(), prefix) {
+			continue
+		}
+		if examined >= maxSameVersionRestampCatalogs {
+			break
+		}
+		examined++
+		target := filepath.Join("releases", entry.Name())
+		restampCfg := cfg
+		restampCfg.DemandRankPath = ""
+		restampCfg.DemandRankSigPath = ""
+		restampCfg.AutotuneCandidatesPath = filepath.Join(releases, entry.Name(), "autotune-candidates.json")
+		restampCfg.AutotuneCandidatesSigPath = restampCfg.AutotuneCandidatesPath + ".sig"
+		feeds, err := buyer.LoadPreviousAutotuneCandidateFeed(restampCfg)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "autotune restamp catalog %s: %v\n", target, err)
+			continue
+		}
+		catalog, err := autotune.ParseCatalog(feeds.AutotuneCandidatesJSON)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "autotune restamp catalog %s: %v\n", target, err)
+			continue
+		}
+		catalog.SignerKeyID = feeds.AutotuneCandidatesVerification.KeyID
+		if catalog.Version != current.Version ||
+			strings.EqualFold(catalog.SHA256, current.SHA256) ||
+			catalog.SignerKeyID != current.SignerKeyID {
+			continue
+		}
+		out = append(out, catalog)
+	}
+	return out
+}
+
+func isSameVersionRestampDir(name, prefix string) bool {
+	if !strings.HasPrefix(name, prefix) {
+		return false
+	}
+	suffix := name[len(prefix):]
+	if len(suffix) != 16 {
+		return false
+	}
+	for i := 0; i < len(suffix); i++ {
+		c := suffix[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
 // loadAutotuneCatalogForReload re-loads and verifies the signed autotune feed
 // set the same way boot does (main), for the SIGHUP hot-reload (#1268). It
 // returns the served feed bytes, the parsed active catalog, and the compatible
@@ -1590,7 +1674,7 @@ func loadAutotuneCatalogForReload(cfg config.AutotuneFeedsConfig) (buyer.Autotun
 		return buyer.AutotuneFeeds{}, nil, nil, fmt.Errorf("autotune candidate catalog: release ID %q is permanently rejected", catalog.Version)
 	}
 	catalog.SignerKeyID = feeds.AutotuneCandidatesVerification.KeyID
-	compatible, err := loadPreviousAutotuneCatalog(cfg)
+	compatible, err := loadCompatibleAutotuneCatalogs(cfg, catalog)
 	if err != nil {
 		return buyer.AutotuneFeeds{}, nil, nil, fmt.Errorf("autotune previous catalog: %w", err)
 	}

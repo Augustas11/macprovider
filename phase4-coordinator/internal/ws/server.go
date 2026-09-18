@@ -535,18 +535,38 @@ func WithAutotuneCatalog(catalog *autotune.Catalog, compatible ...*autotune.Cata
 	}
 }
 
-// buildCompatibleCatalogSet rebuilds the previous/compatible admission map with
-// the invariant that a compatible entry is a non-rejected, distinctly-versioned
-// prior release. Shared by construction and the SIGHUP swap so both apply the
-// same rules.
+// buildCompatibleCatalogSet rebuilds the previous/compatible admission map.
+// Distinct version IDs are keyed by version (the #1268 previous-release path).
+// A freshness restamp that keeps the same version id but changes generated_at
+// (and therefore SHA) is keyed by SHA so a live process that still hellos the
+// leftover signed bytes can be admitted without flipping current. Identical
+// SHA to the active catalog is still dropped (not a leftover).
 func buildCompatibleCatalogSet(catalog *autotune.Catalog, compatible []*autotune.Catalog) map[string]*autotune.Catalog {
-	next := make(map[string]*autotune.Catalog, len(compatible))
+	next := make(map[string]*autotune.Catalog, len(compatible)*2)
 	for _, previous := range compatible {
-		if previous != nil && previous.Version != "" && !autotune.IsPermanentlyRejectedReleaseID(previous.Version) && (catalog == nil || previous.Version != catalog.Version) {
+		if previous == nil || previous.Version == "" || autotune.IsPermanentlyRejectedReleaseID(previous.Version) {
+			continue
+		}
+		if catalog != nil && previous.Version == catalog.Version && previous.SignerKeyID != catalog.SignerKeyID {
+			continue
+		}
+		if catalog == nil || previous.Version != catalog.Version {
 			next[previous.Version] = previous
 		}
+		sha := strings.ToLower(strings.TrimSpace(previous.SHA256))
+		if sha == "" || (catalog != nil && strings.EqualFold(sha, catalog.SHA256)) {
+			continue
+		}
+		next[sha] = previous
 	}
 	return next
+}
+
+func compatibleCatalogBySHA(compatible map[string]*autotune.Catalog, sha string) *autotune.Catalog {
+	if compatible == nil {
+		return nil
+	}
+	return compatible[strings.ToLower(strings.TrimSpace(sha))]
 }
 
 // currentAutotuneCatalog returns the active catalog under RLock. The pointer is
@@ -737,6 +757,16 @@ func (s *Server) resolveProviderCatalog(provider pool.Provider) (resolved, curre
 func resolveProviderCatalogIn(provider pool.Provider, cur *autotune.Catalog, compatible map[string]*autotune.Catalog) (resolved, current *autotune.Catalog, isCurrent, ok bool) {
 	if provider.CatalogAdmissionMode != "current" && provider.CatalogAdmissionMode != "previous" {
 		return nil, nil, false, false
+	}
+	if sha := strings.ToLower(strings.TrimSpace(provider.CandidateCatalogSHA256)); sha != "" {
+		// SHA first: same-id restamps share CatalogReleaseID with current, so
+		// resolving by version alone would bind them to the active bytes.
+		if cur != nil && strings.EqualFold(sha, cur.SHA256) {
+			return cur, cur, true, true
+		}
+		if prev := compatible[sha]; prev != nil {
+			return prev, cur, false, true
+		}
 	}
 	if provider.CatalogReleaseID != "" {
 		// Resolve by the exact release the session presented. This is the case
@@ -3246,7 +3276,11 @@ func (s *Server) prepareProviderAdmissionWithQuotaCheck(conn net.Conn, auth prov
 			Msg("admitting update-only first-hop bridge session")
 	} else {
 		var gateOK bool
-		admissionObservation, gateOK := s.checkAutotuneHelloGateWithCatalog(conn, hello, admissionCurrent)
+		gateCatalog := resolveAdmissionCatalog(hello, catalogAdmissionMode, admissionCurrent, admissionCompatible)
+		if gateCatalog == nil {
+			gateCatalog = admissionCurrent
+		}
+		admissionObservation, gateOK := s.checkAutotuneHelloGateWithCatalog(conn, hello, gateCatalog)
 		if !gateOK {
 			return nil, false
 		}
@@ -3341,10 +3375,7 @@ func (s *Server) expectedAdmissionModelHash(hello Hello, admissionMode string) s
 // those reads must not mix an old current with a new compatible within one hello
 // (#1268 MED-2).
 func (s *Server) expectedAdmissionModelHashWithCatalog(hello Hello, admissionMode string, current *autotune.Catalog, compatible map[string]*autotune.Catalog) string {
-	catalog := current
-	if admissionMode == "previous" {
-		catalog = compatible[hello.CatalogReleaseID]
-	}
+	catalog := resolveAdmissionCatalog(hello, admissionMode, current, compatible)
 	if catalog == nil || (admissionMode != "current" && admissionMode != "previous") {
 		return ""
 	}
@@ -3353,6 +3384,20 @@ func (s *Server) expectedAdmissionModelHashWithCatalog(hello Hello, admissionMod
 		return ""
 	}
 	return strings.TrimSpace(row.ModelSHA256)
+}
+
+func resolveAdmissionCatalog(hello Hello, admissionMode string, current *autotune.Catalog, compatible map[string]*autotune.Catalog) *autotune.Catalog {
+	if admissionMode == "previous" {
+		catalog := compatibleCatalogBySHA(compatible, hello.CandidateCatalogSHA256)
+		if catalog == nil {
+			catalog = compatible[hello.CatalogReleaseID]
+		}
+		return catalog
+	}
+	if admissionMode == "current" {
+		return current
+	}
+	return nil
 }
 
 func (s *Server) expectedProviderModelHash(providerID, assignedID, modelID string) string {
@@ -3526,14 +3571,21 @@ func (s *Server) catalogAdmissionWithCatalog(hello Hello, catalog *autotune.Cata
 	}
 	providerCatalog := catalog
 	admissionMode := "current"
-	if hello.CatalogReleaseID != catalog.Version {
-		providerCatalog = compatible[hello.CatalogReleaseID]
+	if !strings.EqualFold(hello.CandidateCatalogSHA256, catalog.SHA256) {
 		admissionMode = "previous"
+		providerCatalog = compatibleCatalogBySHA(compatible, hello.CandidateCatalogSHA256)
+		if providerCatalog == nil {
+			providerCatalog = compatible[hello.CatalogReleaseID]
+		}
 	}
 	if providerCatalog == nil ||
+		hello.CatalogReleaseID != providerCatalog.Version ||
 		hello.CatalogPolicyVersion != providerCatalog.PolicyVersion ||
 		hello.CatalogSignerKeyID != providerCatalog.SignerKeyID ||
 		!strings.EqualFold(hello.CandidateCatalogSHA256, providerCatalog.SHA256) {
+		return "", false
+	}
+	if admissionMode == "previous" && providerCatalog.Version == catalog.Version && providerCatalog.SignerKeyID != catalog.SignerKeyID {
 		return "", false
 	}
 	key, _, ok := providerCatalog.HighestClaimedTier(hello.ModelID)
