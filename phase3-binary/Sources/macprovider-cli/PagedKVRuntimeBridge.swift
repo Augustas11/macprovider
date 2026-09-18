@@ -432,7 +432,9 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     }
 
     private let container: ModelContainer
-    private let descriptor: PagedKVDescriptor
+    private let blockSizeTokens: Int
+    private let maxPhysicalBlocks: Int
+    private let poolEpoch: Int
     private let layerCount: Int
     private let contiguousCacheBridge: (any PagedKVRuntimeCacheBridge)?
     private let lock = NSLock()
@@ -443,14 +445,39 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
 
     init(
         container: ModelContainer,
-        descriptor: PagedKVDescriptor,
+        blockSizeTokens: Int,
+        maxPhysicalBlocks: Int,
+        poolEpoch: Int,
         layerCount: Int,
         contiguousCacheBridge: (any PagedKVRuntimeCacheBridge)? = nil
     ) {
         self.container = container
-        self.descriptor = descriptor
+        self.blockSizeTokens = blockSizeTokens
+        self.maxPhysicalBlocks = maxPhysicalBlocks
+        self.poolEpoch = poolEpoch
         self.layerCount = max(1, layerCount)
         self.contiguousCacheBridge = contiguousCacheBridge
+    }
+
+    /// Descriptor-sourced convenience initializer. Kept for existing production and test
+    /// call sites that still build a full `PagedKVDescriptor`; forwards only the three
+    /// primitive fields this backend actually reads. NOT used by the load-time probe seam,
+    /// which never constructs a `PagedKVDescriptor` (that memberwise init is internal to
+    /// `MacProviderCore` and invisible from this module).
+    convenience init(
+        container: ModelContainer,
+        descriptor: PagedKVDescriptor,
+        layerCount: Int,
+        contiguousCacheBridge: (any PagedKVRuntimeCacheBridge)? = nil
+    ) {
+        self.init(
+            container: container,
+            blockSizeTokens: descriptor.blockSizeTokens,
+            maxPhysicalBlocks: descriptor.maxPhysicalBlocks,
+            poolEpoch: descriptor.poolEpoch,
+            layerCount: layerCount,
+            contiguousCacheBridge: contiguousCacheBridge
+        )
     }
 
     func prefill(rows inputs: [ContinuousBatchPrefillInput]) async throws -> [ContinuousBatchPrefillOutput] {
@@ -632,7 +659,9 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         return RowState(
             caches: (0 ..< layerCount).map { _ in
                 PagedKVCache(
-                    descriptor: descriptor,
+                    blockSizeTokens: blockSizeTokens,
+                    maxPhysicalBlocks: maxPhysicalBlocks,
+                    poolEpoch: poolEpoch,
                     binding: binding,
                     initialOffset: initialOffset
                 )
