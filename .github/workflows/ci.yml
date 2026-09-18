@@ -404,6 +404,13 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
+          # Full history: the hermetic BYOM discovery-journey gate below
+          # (make test-byom-discovery-journey -> validate-signed-journey-result.py)
+          # validates the landed signed envelope's repository.commit is a real,
+          # reachable object (git cat-file -e). Once SPEC-046-R001..R008 were
+          # signed-promoted (#1583) that commit is #1577's, which a shallow
+          # (depth-1) checkout does not contain -> "commit is not reachable".
+          fetch-depth: 0
 
       - name: Select Xcode
         run: sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
