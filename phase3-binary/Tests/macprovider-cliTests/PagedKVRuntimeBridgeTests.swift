@@ -37,6 +37,8 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
             tokenizerSHA256: nil,
             chatTemplateSHA256: nil,
             modelCapabilities: PagedKVRuntimeModelCapabilities(modelFamily: "qwen", requiresMoEDispatch: false),
+            parityProbe: Self.establishedParityProbe(),
+            moeProbe: nil,
             environment: PagedKVRuntimeMeasurementEnvironment(
                 metallibCandidatePaths: { ["/tmp/absent/default.metallib"] },
                 fileExists: { _ in false },
@@ -49,8 +51,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
                         binaryVersion: "test"
                     )
                 },
-                registeredKernelIdentifier: { PagedKVGatherKernel.registeredKernelName },
-                parityLabel: { _, _, _, _, _, _, _, _ in "sdpa-parity-v1" }
+                registeredKernelIdentifier: { PagedKVGatherKernel.registeredKernelName }
             )
         )
 
@@ -65,6 +66,15 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         let tokenizerSHA = String(repeating: "b", count: 64)
         let templateSHA = String(repeating: "c", count: 64)
         let config = PagedKVConfig(enabled: true, blockSizeTokens: 32, maxPhysicalBlocks: 64)
+        let hardwareClass = "apple-silicon:Apple M-test:ram-64gb"
+        // Mirrors `measurePagedKVRuntime`'s own tuple-bound label derivation exactly: a
+        // SHA256 over every identity-relevant field plus the fixed algorithm tag. This is
+        // NOT a scripted stand-in (the old `parityLabel` environment closure the previous
+        // version of this test used) — it is the actual formula under test, so a genuine
+        // established parity probe is what produces it now.
+        let expectedParityLabel = SHA256.hash(data: Data(
+            "\(expectedMetallibSHA)|\(PagedKVGatherKernel.registeredKernelName)|\(modelSHA)|\(tokenizerSHA)|\(templateSHA)|\(hardwareClass)|\(modelID)|blk\(config.blockSizeTokens)|max\(config.maxPhysicalBlocks)|sdpa-parity-v1".utf8
+        )).map { String(format: "%02x", $0) }.joined()
 
         let measurement = try XCTUnwrap(ModelRuntime.measurePagedKVRuntime(
             config: config,
@@ -73,6 +83,8 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
             tokenizerSHA256: tokenizerSHA,
             chatTemplateSHA256: templateSHA,
             modelCapabilities: PagedKVRuntimeModelCapabilities(modelFamily: "qwen", requiresMoEDispatch: false),
+            parityProbe: Self.establishedParityProbe(),
+            moeProbe: nil,
             environment: PagedKVRuntimeMeasurementEnvironment(
                 metallibCandidatePaths: { ["/tmp/present/default.metallib"] },
                 fileExists: { $0 == "/tmp/present/default.metallib" },
@@ -85,25 +97,14 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
                         binaryVersion: "test"
                     )
                 },
-                registeredKernelIdentifier: { PagedKVGatherKernel.registeredKernelName },
-                parityLabel: { _, metallibSHA, kernelIdentifier, observedModelID, observedModelSHA, observedTokenizerSHA, observedTemplateSHA, hardwareClass in
-                    metallibSHA == expectedMetallibSHA
-                        && kernelIdentifier == PagedKVGatherKernel.registeredKernelName
-                        && observedModelID == modelID
-                        && observedModelSHA == modelSHA
-                        && observedTokenizerSHA == tokenizerSHA
-                        && observedTemplateSHA == templateSHA
-                        && hardwareClass == "apple-silicon:Apple M-test:ram-64gb"
-                        ? "sdpa-parity-v1"
-                        : nil
-                }
+                registeredKernelIdentifier: { PagedKVGatherKernel.registeredKernelName }
             )
         ))
 
         XCTAssertEqual(measurement.observedRuntimeIdentity.source, .runtimeMeasurement)
         XCTAssertEqual(measurement.observedRuntimeIdentity.metallibSHA256, expectedMetallibSHA)
         XCTAssertEqual(measurement.observedRuntimeIdentity.kernelIdentifier, PagedKVGatherKernel.registeredKernelName)
-        XCTAssertEqual(measurement.observedRuntimeIdentity.parityLabel, "sdpa-parity-v1")
+        XCTAssertEqual(measurement.observedRuntimeIdentity.parityLabel, expectedParityLabel)
         XCTAssertEqual(measurement.observedRuntimeIdentity.moeDispatchProven, false)
         XCTAssertEqual(measurement.observedRuntimeIdentity.poolEpoch, 1)
         XCTAssertEqual(measurement.observedRuntimeIdentity.hardwareClass, "apple-silicon:Apple M-test:ram-64gb")
@@ -157,6 +158,10 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         """
         try body.data(using: .utf8)?.write(to: manifestURL)
 
+        // No sidecar-reading mechanism exists any more (production derives the parity
+        // label only from a genuinely established `parityProbe`), so passing no probe is
+        // itself the regression check: an adjacent `.parity.json` manifest sitting next to
+        // the metallib must NOT be consulted, by construction, to manufacture a label.
         XCTAssertNil(ModelRuntime.measurePagedKVRuntime(
             config: PagedKVConfig(enabled: true, blockSizeTokens: 32, maxPhysicalBlocks: 64),
             modelID: modelID,
@@ -164,6 +169,8 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
             tokenizerSHA256: tokenizerSHA,
             chatTemplateSHA256: templateSHA,
             modelCapabilities: PagedKVRuntimeModelCapabilities(modelFamily: "qwen", requiresMoEDispatch: false),
+            parityProbe: nil,
+            moeProbe: nil,
             environment: PagedKVRuntimeMeasurementEnvironment(
                 metallibCandidatePaths: { [metallibURL.path] },
                 fileExists: { FileManager.default.fileExists(atPath: $0) },
@@ -176,8 +183,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
                         binaryVersion: "test"
                     )
                 },
-                registeredKernelIdentifier: { PagedKVGatherKernel.registeredKernelName },
-                parityLabel: PagedKVRuntimeMeasurementEnvironment.live.parityLabel
+                registeredKernelIdentifier: { PagedKVGatherKernel.registeredKernelName }
             )
         ))
     }
@@ -196,10 +202,11 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
                     binaryVersion: "test"
                 )
             },
-            registeredKernelIdentifier: { PagedKVGatherKernel.registeredKernelName },
-            parityLabel: { _, _, _, _, _, _, _, _ in "sdpa-parity-v1" }
+            registeredKernelIdentifier: { PagedKVGatherKernel.registeredKernelName }
         )
 
+        // Kernel identifier missing: an otherwise-genuine established parity probe must
+        // NOT be enough on its own — the kernel-registration gate is independent.
         var noKernel = baseEnvironment
         noKernel.registeredKernelIdentifier = { nil }
         XCTAssertNil(ModelRuntime.measurePagedKVRuntime(
@@ -209,11 +216,13 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
             tokenizerSHA256: nil,
             chatTemplateSHA256: nil,
             modelCapabilities: PagedKVRuntimeModelCapabilities(modelFamily: "qwen", requiresMoEDispatch: false),
+            parityProbe: Self.establishedParityProbe(),
+            moeProbe: nil,
             environment: noKernel
         ))
 
-        var noParity = baseEnvironment
-        noParity.parityLabel = { _, _, _, _, _, _, _, _ in nil }
+        // Parity probe entirely absent (fail-closed default): even a fully valid
+        // environment must not manufacture a label out of nothing.
         XCTAssertNil(ModelRuntime.measurePagedKVRuntime(
             config: config,
             modelID: "mlx-community/Qwen-Test",
@@ -221,7 +230,9 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
             tokenizerSHA256: nil,
             chatTemplateSHA256: nil,
             modelCapabilities: PagedKVRuntimeModelCapabilities(modelFamily: "qwen", requiresMoEDispatch: false),
-            environment: noParity
+            parityProbe: nil,
+            moeProbe: nil,
+            environment: baseEnvironment
         ))
 
         var noHardware = baseEnvironment
@@ -235,8 +246,211 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
             tokenizerSHA256: nil,
             chatTemplateSHA256: nil,
             modelCapabilities: PagedKVRuntimeModelCapabilities(modelFamily: "qwen", requiresMoEDispatch: false),
+            parityProbe: Self.establishedParityProbe(),
+            moeProbe: nil,
             environment: noHardware
         ))
+    }
+
+    // MARK: - SPEC-039 probe-fed measurement: fail-closed / tuple-bound / MoE gates
+
+    /// (a) A missing parity probe is the production default (`ModelRuntime` only ever
+    /// calls the measurement seam with `nil` when paged KV is off or the model family is
+    /// unrecognized) and must fail CLOSED at both layers: no measurement is produced, and
+    /// a runtime that consequently has no observed identity/proof never attaches.
+    func testParityProbeAbsentFailsClosedToNoMeasurementAndNoAttach() async throws {
+        let config = PagedKVConfig(enabled: true, blockSizeTokens: 32, maxPhysicalBlocks: 64)
+        let measurement = ModelRuntime.measurePagedKVRuntime(
+            config: config,
+            modelID: "mlx-community/Qwen-Test",
+            modelSHA256: String(repeating: "a", count: 64),
+            tokenizerSHA256: nil,
+            chatTemplateSHA256: nil,
+            modelCapabilities: PagedKVRuntimeModelCapabilities(modelFamily: "qwen", requiresMoEDispatch: false),
+            parityProbe: nil,
+            moeProbe: nil,
+            environment: Self.liveMeasurementEnvironment()
+        )
+        XCTAssertNil(measurement)
+
+        let runtime = ModelRuntime(
+            modelID: "mlx-community/Qwen-Test",
+            modelHash: String(repeating: "a", count: 64),
+            pagedKVConfig: config,
+            maxBatch: 1,
+            continuousBatchingMode: .on,
+            warmSwapEnabled: false,
+            pagedKVObservedRuntimeIdentity: nil,
+            pagedKVHardwareSizingProof: nil,
+            pagedKVRuntimeCacheClass: "KVCacheSimple",
+            pagedKVSchedulerBackendInstalled: true,
+            loader: { _ in throw PagedKVRuntimeBridgeTestError.notExpected }
+        )
+        let decision = await runtime.pagedKVDecisionForTest()
+        XCTAssertNil(decision.descriptor)
+    }
+
+    /// (b)/(c) The parity label is derived from a SHA256 over every identity field
+    /// (metallib/kernel/model/tokenizer/template/hardware), so two distinct identity
+    /// tuples must produce two distinct labels, and a proof/label established for tuple X
+    /// must NOT satisfy the attach gate's `covers()` check — nor the full attach decision
+    /// — for a different tuple Y.
+    func testParityLabelIsTupleBoundAndRejectsMismatchedIdentity() async throws {
+        let config = PagedKVConfig(enabled: true, blockSizeTokens: 32, maxPhysicalBlocks: 64)
+        let capabilities = PagedKVRuntimeModelCapabilities(modelFamily: "qwen", requiresMoEDispatch: false)
+
+        // tokenizerSHA256/chatTemplateSHA256 are held constant at `nil` across both tuples
+        // (rather than varied too) because the `ModelRuntime` test initializer below always
+        // computes its attach decision with `tokenizerSHA256: nil, chatTemplateSHA256: nil`
+        // regardless of what is passed to it — matching that lets the SAME two
+        // measurements feed both the direct `measurePagedKVRuntime`/`covers()` checks AND
+        // the end-to-end attach-decision checks. `modelSHA256` alone is varied, which is
+        // sufficient to prove the label and gate are tuple-bound.
+        func measure(modelSHA: String) throws -> PagedKVRuntimeMeasurement {
+            try XCTUnwrap(ModelRuntime.measurePagedKVRuntime(
+                config: config,
+                modelID: "mlx-community/Qwen-Test",
+                modelSHA256: modelSHA,
+                tokenizerSHA256: nil,
+                chatTemplateSHA256: nil,
+                modelCapabilities: capabilities,
+                parityProbe: Self.establishedParityProbe(),
+                moeProbe: nil,
+                environment: Self.liveMeasurementEnvironment()
+            ))
+        }
+
+        let tupleX = try measure(modelSHA: String(repeating: "a", count: 64))
+        let tupleY = try measure(modelSHA: String(repeating: "d", count: 64))
+
+        XCTAssertNotEqual(tupleX.observedRuntimeIdentity.parityLabel, tupleY.observedRuntimeIdentity.parityLabel)
+
+        // Tuple X's proof, asked to cover tuple Y's identity fields (even reusing tuple
+        // X's own label), must refuse.
+        XCTAssertFalse(tupleX.hardwareSizingProof.covers(
+            config: config,
+            modelID: "mlx-community/Qwen-Test",
+            modelSHA256: String(repeating: "d", count: 64),
+            tokenizerSHA256: nil,
+            chatTemplateSHA256: nil,
+            modelFamily: "qwen",
+            observedHardwareClass: tupleX.observedRuntimeIdentity.hardwareClass,
+            observedMetallibSHA256: tupleX.observedRuntimeIdentity.metallibSHA256,
+            observedKernelIdentifier: tupleX.observedRuntimeIdentity.kernelIdentifier,
+            observedParityLabel: tupleX.observedRuntimeIdentity.parityLabel,
+            poolEpoch: tupleX.observedRuntimeIdentity.poolEpoch
+        ))
+
+        // End-to-end: a runtime holding tuple X's observed identity/proof but reporting
+        // tuple Y's model hash at decision time must not attach.
+        let mismatchedRuntime = ModelRuntime(
+            modelID: "mlx-community/Qwen-Test",
+            modelHash: String(repeating: "d", count: 64),
+            pagedKVConfig: config,
+            maxBatch: 1,
+            continuousBatchingMode: .on,
+            warmSwapEnabled: false,
+            pagedKVObservedRuntimeIdentity: tupleX.observedRuntimeIdentity,
+            pagedKVHardwareSizingProof: tupleX.hardwareSizingProof,
+            pagedKVRuntimeCacheClass: "KVCacheSimple",
+            pagedKVSchedulerBackendInstalled: true,
+            loader: { _ in throw PagedKVRuntimeBridgeTestError.notExpected }
+        )
+        let mismatchedDecision = await mismatchedRuntime.pagedKVDecisionForTest()
+        XCTAssertNil(mismatchedDecision.descriptor)
+
+        // Control: tuple X's own identity/proof against its own model hash attaches fine.
+        let matchedRuntime = ModelRuntime(
+            modelID: "mlx-community/Qwen-Test",
+            modelHash: String(repeating: "a", count: 64),
+            pagedKVConfig: config,
+            maxBatch: 1,
+            continuousBatchingMode: .on,
+            warmSwapEnabled: false,
+            pagedKVObservedRuntimeIdentity: tupleX.observedRuntimeIdentity,
+            pagedKVHardwareSizingProof: tupleX.hardwareSizingProof,
+            pagedKVRuntimeCacheClass: "KVCacheSimple",
+            pagedKVSchedulerBackendInstalled: true,
+            loader: { _ in throw PagedKVRuntimeBridgeTestError.notExpected }
+        )
+        let matchedDecision = await matchedRuntime.pagedKVDecisionForTest()
+        XCTAssertNotNil(matchedDecision.descriptor)
+    }
+
+    /// (d) A model that requires MoE dispatch must only attach when the shared-forward
+    /// input-isolation probe is genuinely `proven` (both rows decoded through the real
+    /// batched path, zero row failures, zero cross-row divergences). Any degenerate
+    /// result — absent, or `proven == false` for any individual reason — fails CLOSED;
+    /// `proven == true` establishes the measurement with `moeDispatchProven == true`.
+    func testMoEDispatchGateRequiresGenuinelyProvenSharedForwardIsolation() {
+        let config = PagedKVConfig(enabled: true, blockSizeTokens: 32, maxPhysicalBlocks: 64)
+        let moeCapabilities = PagedKVRuntimeModelCapabilities(modelFamily: "qwen", requiresMoEDispatch: true)
+
+        func measure(moeProbe: PagedKVRuntimeMoEProbeResult?) -> PagedKVRuntimeMeasurement? {
+            ModelRuntime.measurePagedKVRuntime(
+                config: config,
+                modelID: "mlx-community/Qwen-Test",
+                modelSHA256: String(repeating: "a", count: 64),
+                tokenizerSHA256: nil,
+                chatTemplateSHA256: nil,
+                modelCapabilities: moeCapabilities,
+                parityProbe: Self.establishedParityProbe(),
+                moeProbe: moeProbe,
+                environment: Self.liveMeasurementEnvironment()
+            )
+        }
+
+        XCTAssertNil(measure(moeProbe: nil), "no MoE probe at all must fail closed")
+        XCTAssertNil(measure(moeProbe: .failClosed), "the probe's own fail-closed sentinel must not attach")
+        XCTAssertNil(measure(moeProbe: PagedKVRuntimeMoEProbeResult(
+            proven: false,
+            rowsDecodedInSharedForward: 1,
+            rowFailures: 0,
+            crossRowDivergences: 0,
+            challengeDistinguishing: true
+        )), "only one row decoded through the shared forward is degenerate")
+        XCTAssertNil(measure(moeProbe: PagedKVRuntimeMoEProbeResult(
+            proven: false,
+            rowsDecodedInSharedForward: 2,
+            rowFailures: 1,
+            crossRowDivergences: 0,
+            challengeDistinguishing: true
+        )), "any row failure must refuse")
+        XCTAssertNil(measure(moeProbe: PagedKVRuntimeMoEProbeResult(
+            proven: false,
+            rowsDecodedInSharedForward: 2,
+            rowFailures: 0,
+            crossRowDivergences: 1,
+            challengeDistinguishing: true
+        )), "any cross-row divergence must refuse")
+        // Inconsistent probe result: `proven` claims success but the raw counters
+        // contradict it. The measurement must consume the full shape and refuse, never
+        // trust `proven` alone.
+        XCTAssertNil(measure(moeProbe: PagedKVRuntimeMoEProbeResult(
+            proven: true,
+            rowsDecodedInSharedForward: 1,
+            rowFailures: 1,
+            crossRowDivergences: 1,
+            challengeDistinguishing: false
+        )), "proven:true with contradicting counters must still fail closed")
+        // A non-distinguishing challenge (identical row references) cannot prove
+        // isolation even with two clean, matching rows.
+        XCTAssertNil(measure(moeProbe: PagedKVRuntimeMoEProbeResult(
+            proven: true,
+            rowsDecodedInSharedForward: 2,
+            rowFailures: 0,
+            crossRowDivergences: 0,
+            challengeDistinguishing: false
+        )), "a non-distinguishing challenge must not prove MoE isolation")
+
+        let proven = try? XCTUnwrap(measure(moeProbe: PagedKVRuntimeMoEProbeResult(
+            proven: true,
+            rowsDecodedInSharedForward: 2,
+            rowFailures: 0,
+            crossRowDivergences: 0,
+            challengeDistinguishing: true
+        )))
+        XCTAssertEqual(proven?.observedRuntimeIdentity.moeDispatchProven, true)
     }
 
     func testProductionReplayAuthorityClaimsStableRequestFingerprintOnce() throws {
@@ -1106,6 +1320,44 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
             maxPhysicalBlocks: 64,
             maxResidentTokens: 2048,
             parityLabel: "sdpa-parity-v1"
+        )
+    }
+
+    /// A parity probe result that satisfies every gate in `measurePagedKVRuntime`
+    /// (`established`, `gatherKernelCalls == nLayers * nNew * 2`, `maxLogicalBlocks >= 3`,
+    /// `nonIdentityPermutation`). Used wherever a test needs the parity leg of the
+    /// pipeline to be genuinely satisfied so it can isolate a DIFFERENT gate (kernel
+    /// identifier, hardware fingerprint, MoE proof, tuple binding) as the thing under test.
+    private static func establishedParityProbe(nLayers: Int = 2, nNew: Int = 4) -> PagedKVRuntimeParityProbeResult {
+        PagedKVRuntimeParityProbeResult(
+            established: true,
+            nLayers: nLayers,
+            nNew: nNew,
+            gatherKernelCalls: nLayers * nNew * 2,
+            maxLogicalBlocks: 3,
+            nonIdentityPermutation: true
+        )
+    }
+
+    /// A `PagedKVRuntimeMeasurementEnvironment` with a present, readable metallib and a
+    /// valid hardware fingerprint — the "everything the environment itself needs to say
+    /// yes" fixture, reused by tests that vary the parity/MoE probe instead.
+    private static func liveMeasurementEnvironment(
+        metallibBytes: Data = Data("packaged metallib bytes".utf8)
+    ) -> PagedKVRuntimeMeasurementEnvironment {
+        PagedKVRuntimeMeasurementEnvironment(
+            metallibCandidatePaths: { ["/tmp/present/default.metallib"] },
+            fileExists: { $0 == "/tmp/present/default.metallib" },
+            readFileData: { _ in metallibBytes },
+            hardwareFingerprint: {
+                MachineFingerprint(
+                    ramGB: 64,
+                    chip: "Apple M-test",
+                    osVersion: "macOS test",
+                    binaryVersion: "test"
+                )
+            },
+            registeredKernelIdentifier: { PagedKVGatherKernel.registeredKernelName }
         )
     }
 

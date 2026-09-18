@@ -369,16 +369,6 @@ struct PagedKVRuntimeMeasurementEnvironment: Sendable {
     var readFileData: @Sendable (String) throws -> Data
     var hardwareFingerprint: @Sendable () -> MachineFingerprint
     var registeredKernelIdentifier: @Sendable () -> String?
-    var parityLabel: @Sendable (
-        _ metallibPath: String,
-        _ metallibSHA256: String,
-        _ kernelIdentifier: String,
-        _ modelID: String,
-        _ modelSHA256: String,
-        _ tokenizerSHA256: String?,
-        _ chatTemplateSHA256: String?,
-        _ hardwareClass: String
-    ) -> String?
 
     static let live = PagedKVRuntimeMeasurementEnvironment(
         metallibCandidatePaths: {
@@ -390,8 +380,54 @@ struct PagedKVRuntimeMeasurementEnvironment: Sendable {
         fileExists: { FileManager.default.fileExists(atPath: $0) },
         readFileData: { try Data(contentsOf: URL(fileURLWithPath: $0)) },
         hardwareFingerprint: { MachineFingerprinter().sample() },
-        registeredKernelIdentifier: { PagedKVGatherKernel.registeredRuntimeKernelIdentifier() },
-        parityLabel: { _, _, _, _, _, _, _, _ in nil }
+        registeredKernelIdentifier: { PagedKVGatherKernel.registeredRuntimeKernelIdentifier() }
+    )
+}
+
+/// Injectable seam over the on-device runtime self-measurement probes. Production
+/// uses `.live` (the real MLX-driven probes on the resident model); tests inject a
+/// stub so unit coverage of the measurement→attach pipeline needs no MLX/metallib.
+struct PagedKVRuntimeProber: Sendable {
+    var parity: @Sendable (
+        _ container: ModelContainer,
+        _ modelID: String,
+        _ blockSizeTokens: Int,
+        _ maxPhysicalBlocks: Int,
+        _ promptTokens: [Int],
+        _ nNew: Int
+    ) async -> PagedKVRuntimeParityProbeResult
+    var moe: @Sendable (
+        _ container: ModelContainer,
+        _ blockSizeTokens: Int,
+        _ maxPhysicalBlocks: Int,
+        _ poolEpoch: Int,
+        _ layerCount: Int,
+        _ promptA: [Int],
+        _ promptB: [Int]
+    ) async -> PagedKVRuntimeMoEProbeResult
+
+    static let live = PagedKVRuntimeProber(
+        parity: { container, modelID, blockSizeTokens, maxPhysicalBlocks, promptTokens, nNew in
+            await PagedKVRuntimeParityProbe.runParityProbe(
+                container: container,
+                modelID: modelID,
+                blockSizeTokens: blockSizeTokens,
+                maxPhysicalBlocks: maxPhysicalBlocks,
+                promptTokens: promptTokens,
+                nNew: nNew
+            )
+        },
+        moe: { container, blockSizeTokens, maxPhysicalBlocks, poolEpoch, layerCount, promptA, promptB in
+            await PagedKVRuntimeParityProbe.runMoEInputIsolationProbe(
+                container: container,
+                blockSizeTokens: blockSizeTokens,
+                maxPhysicalBlocks: maxPhysicalBlocks,
+                poolEpoch: poolEpoch,
+                layerCount: layerCount,
+                promptA: promptA,
+                promptB: promptB
+            )
+        }
     )
 }
 
@@ -1105,6 +1141,11 @@ actor ModelRuntime: ModelRuntimeServing {
     private var currentPagedKVModelCapabilities: PagedKVRuntimeModelCapabilities
     private var continuousBatchScheduler: ContinuousBatchScheduler?
     private let testContinuousBatchingBackend: (any ContinuousBatchSchedulerBackend)?
+    /// Injectable seam over the on-device SPEC-039 parity/MoE self-measurement probes.
+    /// Production uses `.live`; tests inject a stub so unit coverage of the
+    /// measurement→attach pipeline needs no MLX/metallib. Mirrors
+    /// `testContinuousBatchingBackend`'s production-default / test-injected wiring.
+    private let pagedKVRuntimeProber: PagedKVRuntimeProber
     private let continuousBatchReplayAuthority: ContinuousBatchRuntimeReplayAuthority
     private var continuousBatchingDurableReplayAuthorityAvailable: Bool
     private let conversationCache: ConversationCache
@@ -1317,6 +1358,8 @@ actor ModelRuntime: ModelRuntimeServing {
         tokenizerSHA256: String?,
         chatTemplateSHA256: String?,
         modelCapabilities: PagedKVRuntimeModelCapabilities,
+        parityProbe: PagedKVRuntimeParityProbeResult?,
+        moeProbe: PagedKVRuntimeMoEProbeResult?,
         environment: PagedKVRuntimeMeasurementEnvironment = .live
     ) -> PagedKVRuntimeMeasurement? {
         guard config.effectiveEnabled,
@@ -1340,17 +1383,43 @@ actor ModelRuntime: ModelRuntimeServing {
             return nil
         }
         let hardwareClass = "apple-silicon:\(chip):ram-\(fingerprint.ramGB)gb"
-        guard let parityLabel = Self.nonEmpty(environment.parityLabel(
-            metallibPath,
-            metallibSHA256,
-            kernelIdentifier,
-            modelID,
-            modelSHA256,
-            tokenizerSHA256,
-            chatTemplateSHA256,
-            hardwareClass
-        )) else {
+        // The parity label is derived ONLY from a genuinely established on-device gather
+        // parity probe: token-for-token argmax equality against stock KVCacheSimple, plus
+        // proof the real Metal gather ran for every layer at every forward pass over BOTH
+        // K and V (`nLayers * nNew * 2`) across a non-degenerate (>= 3 block),
+        // boundary-crossing, non-identity layout. Anything short of that fails closed —
+        // no measured parity, no label, no attach.
+        guard let parity = parityProbe,
+              parity.established,
+              parity.nLayers > 0,
+              parity.nNew > 0,
+              parity.gatherKernelCalls == parity.nLayers * parity.nNew * 2,
+              parity.maxLogicalBlocks >= 3,
+              parity.nonIdentityPermutation
+        else {
             return nil
+        }
+        let parityLabel = hexString(SHA256.hash(data: Data(
+            "\(metallibSHA256)|\(kernelIdentifier)|\(modelSHA256)|\(tokenizerSHA256 ?? "")|\(chatTemplateSHA256 ?? "")|\(hardwareClass)|\(modelID)|blk\(config.blockSizeTokens)|max\(config.maxPhysicalBlocks)|sdpa-parity-v1".utf8
+        )))
+        // MoE models attach only when a batched shared-forward step is proven to keep
+        // rows isolated. Validate the FULL probe result shape — not just `proven` — so an
+        // inconsistent result (e.g. proven:true but rowsDecoded != 2, a row failure, a
+        // cross-row divergence, or a non-distinguishing challenge) can never open attach.
+        // `challengeDistinguishing` guarantees the two probe rows have different serial
+        // references, so a shared forward that swapped/leaked row logits is detectable.
+        let moeDispatchProven: Bool
+        if modelCapabilities.requiresMoEDispatch {
+            guard let moe = moeProbe,
+                  moe.proven,
+                  moe.challengeDistinguishing,
+                  moe.rowsDecodedInSharedForward == 2,
+                  moe.rowFailures == 0,
+                  moe.crossRowDivergences == 0
+            else { return nil }
+            moeDispatchProven = true
+        } else {
+            moeDispatchProven = false
         }
         let poolEpoch = 1
         guard let maxResidentTokens = PagedKVRuntimeCapacityProof.measuredMaxResidentTokens(
@@ -1364,7 +1433,7 @@ actor ModelRuntime: ModelRuntimeServing {
             metallibSHA256: metallibSHA256,
             kernelIdentifier: kernelIdentifier,
             parityLabel: parityLabel,
-            moeDispatchProven: false,
+            moeDispatchProven: moeDispatchProven,
             poolEpoch: poolEpoch,
             source: .runtimeMeasurement
         )
@@ -1405,6 +1474,96 @@ actor ModelRuntime: ModelRuntimeServing {
             observedRuntimeIdentity: observedIdentity,
             hardwareSizingProof: proof
         )
+    }
+
+    /// Fixed canned prompt for the SPEC-039 parity self-test. Long enough (well over
+    /// 200 words) to tokenize past 3 * the default `blockSizeTokens` (16), so the
+    /// gather diagnostics observe a non-degenerate, boundary-crossing layout at typical
+    /// configured block sizes. A short/degenerate tokenization at an unusually large
+    /// configured block size fails the probe CLOSED (see `measurePagedKVRuntime`'s
+    /// `maxLogicalBlocks >= 3` gate) rather than silently skipping the check.
+    private static let pagedKVRuntimeParityProbePrompt = """
+        The lighthouse keeper climbed the spiral stairs before dawn, counting each \
+        worn stone step out of habit rather than need. Below, the harbor lay quiet \
+        under a thin fog that softened the outlines of the fishing boats moored along \
+        the pier. She had kept this light for eleven years, through storms that tore \
+        shingles from the roof and summers so still the sea looked like glass from \
+        sunrise to dusk. Every night the same ritual: check the lamp, check the fuel, \
+        check the logbook, and note the weather in careful, unhurried handwriting. \
+        Tonight she paused at the gallery railing and watched a single trawler cut a \
+        slow wake toward open water, its running lights blinking red and green against \
+        the gray. Somewhere past the point, gulls were already arguing over the first \
+        catch of the morning, their calls carried thin and sharp across the water. She \
+        thought, not for the first time, that the work suited her precisely because it \
+        asked so little in the way of explanation and so much in the way of attention. \
+        The light did not care about her opinions; it only needed tending, faithfully, \
+        one revolution after another, long after the boats and the gulls and the fog \
+        had gone their own separate ways into the widening day.
+        """
+
+    /// A second, distinct canned prompt for the SPEC-039 MoE input-isolation self-test,
+    /// deliberately short — `runMoEInputIsolationProbe` only requires each prompt be
+    /// non-empty, and the proof it establishes (row isolation across a batched shared
+    /// forward) does not depend on prompt length the way the parity gather probe does.
+    private static let pagedKVRuntimeMoEProbePromptA = "Draft a short summary of today's shipping forecast."
+    private static let pagedKVRuntimeMoEProbePromptB = "List three ingredients commonly used in a simple tomato soup."
+
+    /// Runs the SPEC-039 on-device self-measurement probes (parity, and MoE input
+    /// isolation when the resident model requires MoE dispatch) against `container`.
+    /// Returns `(nil, nil)` immediately, without touching the model, unless paged KV is
+    /// configured on AND the model family is one the attach gate recognizes — so this
+    /// never runs extra forward passes on a model/config combination that could not
+    /// attach anyway. Called at both load-time and warm-swap adoption sites, strictly
+    /// before the runtime is marked ready and before any buyer request is served.
+    private func computePagedKVRuntimeProbes(
+        container: ModelContainer,
+        modelID: String,
+        modelCapabilities: PagedKVRuntimeModelCapabilities,
+        runtimeCacheClass: String
+    ) async -> (PagedKVRuntimeParityProbeResult?, PagedKVRuntimeMoEProbeResult?) {
+        // Skip the real model forwards for tuples the (unchanged) attach gate will reject
+        // anyway: disabled paged KV, unrecognized family, quantized KV, or a cache class
+        // outside the allowlist. This avoids spending Metal work that cannot open attach.
+        guard pagedKVConfig.effectiveEnabled,
+              kvBitsOverride == nil,
+              PagedKVAttachGate.recognizedModelFamilies.contains(modelCapabilities.modelFamily),
+              PagedKVAttachGate.allowedCacheClasses.contains(runtimeCacheClass)
+        else {
+            return (nil, nil)
+        }
+        let promptTokens = await container.perform { context in
+            context.tokenizer.encode(text: Self.pagedKVRuntimeParityProbePrompt, addSpecialTokens: true)
+        }
+        let parityProbe = await pagedKVRuntimeProber.parity(
+            container,
+            modelID,
+            pagedKVConfig.blockSizeTokens,
+            pagedKVConfig.maxPhysicalBlocks,
+            promptTokens,
+            32
+        )
+        var moeProbe: PagedKVRuntimeMoEProbeResult?
+        if modelCapabilities.requiresMoEDispatch {
+            let layerCount = await container.perform { context in
+                context.model.newCache(parameters: nil).count
+            }
+            let promptA = await container.perform { context in
+                context.tokenizer.encode(text: Self.pagedKVRuntimeMoEProbePromptA, addSpecialTokens: true)
+            }
+            let promptB = await container.perform { context in
+                context.tokenizer.encode(text: Self.pagedKVRuntimeMoEProbePromptB, addSpecialTokens: true)
+            }
+            moeProbe = await pagedKVRuntimeProber.moe(
+                container,
+                pagedKVConfig.blockSizeTokens,
+                pagedKVConfig.maxPhysicalBlocks,
+                1,
+                layerCount,
+                promptA,
+                promptB
+            )
+        }
+        return (parityProbe, moeProbe)
     }
 
     private static let pagedKVUnavailableCacheClass = "unavailable"
@@ -1594,6 +1753,7 @@ actor ModelRuntime: ModelRuntimeServing {
         self.currentPagedKVModelCapabilities = Self.pagedKVModelCapabilities(modelID: modelID, configJSONData: nil)
         self.continuousBatchScheduler = nil
         self.testContinuousBatchingBackend = nil
+        self.pagedKVRuntimeProber = .live
         self.continuousBatchReplayAuthority = ContinuousBatchRuntimeReplayAuthority()
         self.pagedKVAttachDecision = Self.pagedKVRuntimeCapabilityDecision(
             config: pagedKVConfig,
@@ -1680,13 +1840,21 @@ actor ModelRuntime: ModelRuntimeServing {
         let modelCapabilities = Self.pagedKVModelCapabilities(modelID: modelID, directory: directory)
         self.pagedKVRuntimeCacheClass = runtimeCacheClass
         self.currentPagedKVModelCapabilities = modelCapabilities
+        let (parityProbe, moeProbe) = await self.computePagedKVRuntimeProbes(
+            container: container,
+            modelID: modelID,
+            modelCapabilities: modelCapabilities,
+            runtimeCacheClass: runtimeCacheClass
+        )
         if let measurement = Self.measurePagedKVRuntime(
             config: self.pagedKVConfig,
             modelID: modelID,
             modelSHA256: self.currentModelHash,
             tokenizerSHA256: tokenizerHashes.config,
             chatTemplateSHA256: tokenizerHashes.template,
-            modelCapabilities: modelCapabilities
+            modelCapabilities: modelCapabilities,
+            parityProbe: parityProbe,
+            moeProbe: moeProbe
         ) {
             self.pagedKVObservedRuntimeIdentity = measurement.observedRuntimeIdentity
             self.pagedKVHardwareSizingProof = measurement.hardwareSizingProof
@@ -1806,6 +1974,7 @@ actor ModelRuntime: ModelRuntimeServing {
         pagedKVModelCapabilities: PagedKVRuntimeModelCapabilities? = nil,
         container: ModelContainer? = nil,
         continuousBatchingBackend: (any ContinuousBatchSchedulerBackend)? = nil,
+        pagedKVRuntimeProber: PagedKVRuntimeProber = .live,
         loader: @escaping @Sendable (String) async throws -> (ModelContainer, String, String?),
         testLoader: (@Sendable (String) async throws -> (String, String?))? = nil,
         testCompletion: (@Sendable (RuntimeSnapshot, ChatCompletionRequest) async throws -> CompletionResult)? = nil,
@@ -1843,10 +2012,31 @@ actor ModelRuntime: ModelRuntimeServing {
         self.prefillStepSize = max(1, prefillStepSize)
         self.pagedKVConfig = pagedKVConfig
         self.pagedKVRuntimeCacheClass = pagedKVRuntimeCacheClass
-        self.pagedKVObservedRuntimeIdentity = pagedKVObservedRuntimeIdentity
-        self.pagedKVHardwareSizingProof = pagedKVHardwareSizingProof
-        self.pagedKVSchedulerBackendInstalled = pagedKVSchedulerBackendInstalled
+        // Defense-in-depth (mirrors the prober fence): only DEBUG/test builds may inject
+        // prebuilt paged-KV attach evidence. A release provider ignores caller-supplied
+        // identity/proof/backend flags and can only attach from real on-device measurement,
+        // so this test initializer can never become a self-authored-evidence bypass.
+        #if DEBUG
+        let effectiveObservedIdentity = pagedKVObservedRuntimeIdentity
+        let effectiveSizingProof = pagedKVHardwareSizingProof
+        let effectiveBackendInstalled = pagedKVSchedulerBackendInstalled
+        #else
+        let effectiveObservedIdentity: PagedKVObservedRuntimeIdentity? = nil
+        let effectiveSizingProof: PagedKVHardwareSizingProof? = nil
+        let effectiveBackendInstalled = false
+        #endif
+        self.pagedKVObservedRuntimeIdentity = effectiveObservedIdentity
+        self.pagedKVHardwareSizingProof = effectiveSizingProof
+        self.pagedKVSchedulerBackendInstalled = effectiveBackendInstalled
         self.testContinuousBatchingBackend = continuousBatchingBackend
+        // Defense-in-depth: only DEBUG/test builds may inject a non-`.live` prober. A
+        // release provider always re-derives evidence via the real on-device `.live`
+        // probes, so an injected prober can never revive the "self-authored" attach path.
+        #if DEBUG
+        self.pagedKVRuntimeProber = pagedKVRuntimeProber
+        #else
+        self.pagedKVRuntimeProber = .live
+        #endif
         self.continuousBatchReplayAuthority = replayAuthority
         let boundedMaxBatch = min(max(1, maxBatch), ProviderCapacity.maxConcurrencyOverrideLimit)
         let resolvedPagedKVModelCapabilities = pagedKVModelCapabilities
@@ -1861,9 +2051,9 @@ actor ModelRuntime: ModelRuntimeServing {
             kvBitsOverride: kvBitsOverride,
             runtimeCacheClass: pagedKVRuntimeCacheClass,
             modelCapabilities: resolvedPagedKVModelCapabilities,
-            observedRuntimeIdentity: pagedKVObservedRuntimeIdentity,
-            hardwareSizingProof: pagedKVHardwareSizingProof,
-            schedulerBackendInstalled: pagedKVSchedulerBackendInstalled
+            observedRuntimeIdentity: effectiveObservedIdentity,
+            hardwareSizingProof: effectiveSizingProof,
+            schedulerBackendInstalled: effectiveBackendInstalled
         )
         let requestedTuple = Self.continuousBatchingRequestedTuple(
             decision: self.pagedKVAttachDecision,
@@ -1874,7 +2064,7 @@ actor ModelRuntime: ModelRuntimeServing {
             kvBitsOverride: kvBitsOverride,
             runtimeCacheClass: pagedKVRuntimeCacheClass,
             modelCapabilities: resolvedPagedKVModelCapabilities,
-            observedRuntimeIdentity: pagedKVObservedRuntimeIdentity
+            observedRuntimeIdentity: effectiveObservedIdentity
         )
         self.continuousBatchScheduler = nil
         self.conversationCache = ConversationCache()
@@ -2924,13 +3114,26 @@ actor ModelRuntime: ModelRuntimeServing {
         pagedKVObservedRuntimeIdentity = nil
         pagedKVHardwareSizingProof = nil
         pagedKVSchedulerBackendInstalled = false
+        let (parityProbe, moeProbe): (PagedKVRuntimeParityProbeResult?, PagedKVRuntimeMoEProbeResult?)
+        if let container {
+            (parityProbe, moeProbe) = await self.computePagedKVRuntimeProbes(
+                container: container,
+                modelID: modelID,
+                modelCapabilities: modelCapabilities,
+                runtimeCacheClass: runtimeCacheClass
+            )
+        } else {
+            (parityProbe, moeProbe) = (nil, nil)
+        }
         if let measurement = Self.measurePagedKVRuntime(
             config: pagedKVConfig,
             modelID: modelID,
             modelSHA256: modelHash,
             tokenizerSHA256: tokenizerConfigSHA256,
             chatTemplateSHA256: chatTemplateSHA256,
-            modelCapabilities: modelCapabilities
+            modelCapabilities: modelCapabilities,
+            parityProbe: parityProbe,
+            moeProbe: moeProbe
         ) {
             pagedKVObservedRuntimeIdentity = measurement.observedRuntimeIdentity
             pagedKVHardwareSizingProof = measurement.hardwareSizingProof

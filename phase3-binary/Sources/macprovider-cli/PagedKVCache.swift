@@ -65,7 +65,9 @@ struct PagedKVGatherKernel {
 /// `mlx-swift-lm` so real gather execution and parity tests can evolve without
 /// changing public buyer behavior.
 final class PagedKVCache: KVCache, CustomDebugStringConvertible {
-    let descriptor: PagedKVDescriptor
+    let blockSizeTokens: Int
+    let maxPhysicalBlocks: Int
+    let poolEpoch: Int
     let binding: PagedKVStorageBinding
 
     private let gatherKernel: PagedKVGatherKernel
@@ -95,15 +97,38 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
     }
 
     init(
+        blockSizeTokens: Int,
+        maxPhysicalBlocks: Int,
+        poolEpoch: Int,
+        binding: PagedKVStorageBinding,
+        gatherKernel: PagedKVGatherKernel = PagedKVGatherKernel(),
+        initialOffset: Int? = nil
+    ) {
+        self.blockSizeTokens = blockSizeTokens
+        self.maxPhysicalBlocks = maxPhysicalBlocks
+        self.poolEpoch = poolEpoch
+        self.binding = binding
+        self.gatherKernel = gatherKernel
+        self.offset = initialOffset ?? binding.currentTable.logicalTokenCount
+    }
+
+    /// Descriptor-sourced convenience initializer. Kept for existing production and test
+    /// call sites that still build a full `PagedKVDescriptor`; forwards only the three
+    /// primitive fields this cache actually reads.
+    convenience init(
         descriptor: PagedKVDescriptor,
         binding: PagedKVStorageBinding,
         gatherKernel: PagedKVGatherKernel = PagedKVGatherKernel(),
         initialOffset: Int? = nil
     ) {
-        self.descriptor = descriptor
-        self.binding = binding
-        self.gatherKernel = gatherKernel
-        self.offset = initialOffset ?? binding.currentTable.logicalTokenCount
+        self.init(
+            blockSizeTokens: descriptor.blockSizeTokens,
+            maxPhysicalBlocks: descriptor.maxPhysicalBlocks,
+            poolEpoch: descriptor.poolEpoch,
+            binding: binding,
+            gatherKernel: gatherKernel,
+            initialOffset: initialOffset
+        )
     }
 
     var maxSize: Int? { maxResidentTokens }
@@ -153,7 +178,7 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
         // shader before any `physical[...]` read — remains a REQUIRED before-runtime-enable
         // gate item and is intentionally NOT added in this inert (non-serving) merge; the
         // kernel source is frozen here because the seam regression test pins it.
-        let blockSize = descriptor.blockSizeTokens
+        let blockSize = blockSizeTokens
         guard logical.ndim == 4 else { return logical }
         let H = logical.dim(1)
         let S = logical.dim(2)
@@ -245,8 +270,8 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
             [
                 "macprovider_paged_kv_v1",
                 "handle=\(binding.handle.handleID.uuidString)",
-                "block_size_tokens=\(descriptor.blockSizeTokens)",
-                "pool_epoch=\(descriptor.poolEpoch)",
+                "block_size_tokens=\(blockSizeTokens)",
+                "pool_epoch=\(poolEpoch)",
             ]
         }
         set {
@@ -276,7 +301,13 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
     }
 
     func concreteCopy() -> PagedKVCache {
-        let copied = PagedKVCache(descriptor: descriptor, binding: binding, gatherKernel: gatherKernel)
+        let copied = PagedKVCache(
+            blockSizeTokens: blockSizeTokens,
+            maxPhysicalBlocks: maxPhysicalBlocks,
+            poolEpoch: poolEpoch,
+            binding: binding,
+            gatherKernel: gatherKernel
+        )
         copied.state = state
         return copied
     }
@@ -286,7 +317,7 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
         table: PagedKVBlockTable
     ) throws -> PagedKVRuntimePhysicalLayerBlocks {
         guard offset == table.logicalTokenCount,
-              table.blockSizeTokens == descriptor.blockSizeTokens,
+              table.blockSizeTokens == blockSizeTokens,
               keyBlocks.count == valueBlocks.count,
               keyBlocks.count == table.physicalBlocks.count
         else {
@@ -341,11 +372,11 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
     }
 
     var debugDescription: String {
-        "PagedKVCache(offset=\(offset), blockSizeTokens=\(descriptor.blockSizeTokens), blocks=\(keyBlocks.count))"
+        "PagedKVCache(offset=\(offset), blockSizeTokens=\(blockSizeTokens), blocks=\(keyBlocks.count))"
     }
 
     private var maxResidentTokens: Int {
-        let (value, overflow) = descriptor.blockSizeTokens.multipliedReportingOverflow(by: descriptor.maxPhysicalBlocks)
+        let (value, overflow) = blockSizeTokens.multipliedReportingOverflow(by: maxPhysicalBlocks)
         return overflow ? Int.max : value
     }
 
@@ -369,7 +400,7 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
         var blocks: [MLXArray] = []
         var start = 0
         while start < tokens {
-            let end = min(start + descriptor.blockSizeTokens, tokens)
+            let end = min(start + blockSizeTokens, tokens)
             blocks.append(array[.ellipsis, start ..< end, 0...])
             start = end
         }
