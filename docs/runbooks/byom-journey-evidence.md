@@ -325,6 +325,15 @@ commit the private key. Prefer running this in the `production-release`
 environment the sibling promotion workflows use, so the key never lands on a
 laptop.
 
+After the redacted artifacts are on `main`, dispatch:
+
+- `.github/workflows/promote-signed-byom-discovery-journey.yml`
+- `.github/workflows/promote-signed-network-model-admission-journey.yml`
+
+Those workflows build, preflight, sign with `MACPROVIDER_ACCEPTANCE_SIGNING_KEY_PEM`,
+rewrite `specs/CONFORMANCE.json` in the runner, and export a 1-day artifact. They
+do not push. Land the signed envelope plus ledger rewrite in a follow-up PR.
+
 ## Step 7 — promote and reconcile conformance
 
 ```bash
