@@ -54,8 +54,8 @@ it can no longer drift. Do not hand-edit the table; edit each spec's
 | SPEC-043 | Trusted Pool Creator Onboarding MVP | 0.1.0 | normative | complete | pending: 12 | [SPEC-043-trusted-pool-creator-onboarding.md](SPEC-043-trusted-pool-creator-onboarding.md) |
 | SPEC-044 | Malibu Model Catalog Economics | 0.2.10 | draft | complete | pending: 12 | [SPEC-044-malibu-model-catalog-economics.md](SPEC-044-malibu-model-catalog-economics.md) |
 | SPEC-045 | Local Consumer Endpoint Mode | 0.1.0 | draft | complete | conformant: 4, pending: 4 | [SPEC-045-local-consumer-endpoint-mode.md](SPEC-045-local-consumer-endpoint-mode.md) |
-| SPEC-046 | Provider BYOM Discovery | 0.1.5 | draft | complete | pending: 8 | [SPEC-046-provider-byom-discovery.md](SPEC-046-provider-byom-discovery.md) |
-| SPEC-047 | Network Model Admission | 0.1.9 | draft | complete | pending: 9 | [SPEC-047-network-model-admission.md](SPEC-047-network-model-admission.md) |
+| SPEC-046 | Provider BYOM Discovery | 0.1.5 | draft | complete | conformant: 8 | [SPEC-046-provider-byom-discovery.md](SPEC-046-provider-byom-discovery.md) |
+| SPEC-047 | Network Model Admission | 0.1.9 | draft | complete | conformant: 8, pending: 1 | [SPEC-047-network-model-admission.md](SPEC-047-network-model-admission.md) |
 <!-- AUTOGEN:spec-index END -->
 
 **Version of record is each spec's own `**Version:**` header, not this table.**

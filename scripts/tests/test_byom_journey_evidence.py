@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import importlib.util
 import json
 import shutil
@@ -32,6 +33,22 @@ from scripts.check_spec_governance import (
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FIXTURES = REPO_ROOT / "scripts" / "tests" / "fixtures" / "byom_journeys"
 OPERATOR_FINGERPRINT = "a" * 64
+PROMOTABLE_BYOM_REQUIREMENT_IDS = frozenset(
+    [f"SPEC-046-R{index:03d}" for index in range(1, 9)]
+    + [f"SPEC-047-R{index:03d}" for index in range(1, 9)]
+)
+DISCOVERY_SIGNED_SOURCE = (
+    "journeys/evidence/provider-byom-discovery-20260918T033355Z."
+    "spec-046-r001-spec-046-r002-spec-046-r003-spec-046-r004-"
+    "spec-046-r005-spec-046-r006-spec-046-r007-spec-046-r008."
+    "journey-result.signed.json"
+)
+ADMISSION_SIGNED_SOURCE = (
+    "journeys/evidence/network-model-admission-20260916T135000Z."
+    "spec-047-r001-spec-047-r002-spec-047-r003-spec-047-r004-"
+    "spec-047-r005-spec-047-r006-spec-047-r007-spec-047-r008."
+    "journey-result.signed.json"
+)
 
 
 def load_module(name: str, filename: str):
@@ -1067,7 +1084,15 @@ class BYOMJourneyRoundTripTests(unittest.TestCase):
         (root / "specs").mkdir(parents=True)
         (root / "journeys" / "evidence").mkdir(parents=True)
         self.git(root, "init", "-q", "-b", "main")
-        shutil.copy(REPO_ROOT / "specs" / "CONFORMANCE.json", root / "specs" / "CONFORMANCE.json")
+        conformance = json.loads((REPO_ROOT / "specs" / "CONFORMANCE.json").read_text(encoding="utf-8"))
+        for row in conformance.get("requirements", []):
+            if row.get("requirement_id") in PROMOTABLE_BYOM_REQUIREMENT_IDS:
+                row["state"] = "pending"
+                row["evidence"] = []
+        (root / "specs" / "CONFORMANCE.json").write_text(
+            json.dumps(conformance, indent=2) + "\n",
+            encoding="utf-8",
+        )
         self.git(root, "add", "specs/CONFORMANCE.json")
         self.git(root, "commit", "-qm", "source")
         return root
@@ -1774,21 +1799,37 @@ class BYOMJourneyGovernanceSourceTests(unittest.TestCase):
 
 
 class BYOMJourneyConformanceMappingTests(unittest.TestCase):
-    """The journey ids the tooling emits must stay mapped and pending in CONFORMANCE.json."""
+    """Signed SPEC-046/047 promotion must stay mapped; R009 remains the open intake gap."""
 
-    def test_every_promotable_requirement_is_pending_and_mapped(self) -> None:
+    def test_promoted_requirements_are_conformant_and_mapped(self) -> None:
         conformance = json.loads((REPO_ROOT / "specs" / "CONFORMANCE.json").read_text(encoding="utf-8"))
         rows = {row["requirement_id"]: row for row in conformance["requirements"]}
-        for journey_id, prefix in (
-            (PROVIDER_BYOM_DISCOVERY_JOURNEY_ID, "SPEC-046"),
-            (NETWORK_MODEL_ADMISSION_JOURNEY_ID, "SPEC-047"),
+        for journey_id, prefix, signed_source in (
+            (PROVIDER_BYOM_DISCOVERY_JOURNEY_ID, "SPEC-046", DISCOVERY_SIGNED_SOURCE),
+            (NETWORK_MODEL_ADMISSION_JOURNEY_ID, "SPEC-047", ADMISSION_SIGNED_SOURCE),
         ):
+            signed_path = REPO_ROOT / signed_source
+            self.assertTrue(signed_path.is_file(), signed_source)
+            digest = hashlib.sha256(signed_path.read_bytes()).hexdigest()
             for index in range(1, 9):
                 requirement_id = f"{prefix}-R{index:03d}"
                 row = rows[requirement_id]
                 self.assertIn(journey_id, row["journeys"], requirement_id)
-                self.assertEqual("pending", row["state"], requirement_id)
-                self.assertEqual([], row["evidence"], requirement_id)
+                self.assertEqual("conformant", row["state"], requirement_id)
+                self.assertIsNone(row["gap"], requirement_id)
+                sha_items = [
+                    item
+                    for item in row["evidence"]
+                    if str(item.get("artifact", "")).startswith("sha256:")
+                ]
+                self.assertEqual(1, len(sha_items), requirement_id)
+                self.assertEqual(f"sha256:{digest}", sha_items[0]["artifact"], requirement_id)
+                self.assertEqual(signed_source, sha_items[0]["source"], requirement_id)
+
+        r009 = rows["SPEC-047-R009"]
+        self.assertEqual("pending", r009["state"])
+        self.assertIn(NETWORK_MODEL_ADMISSION_JOURNEY_ID, r009["journeys"])
+        self.assertEqual([], r009["evidence"])
 
 
 if __name__ == "__main__":
