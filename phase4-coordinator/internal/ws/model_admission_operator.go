@@ -893,7 +893,11 @@ func modelAdmissionOfferListItem(event ModelAdmissionEvent, provider pool.Provid
 		"catalog_signer_key_id":    nullString(event.CatalogSignerKeyID),
 		"catalog_members":          members,
 		"last_event_actor":         event.Actor,
-		"session":                  nil,
+		// Integer token evidence (#1569) recorded on a passed synthetic probe
+		// (0 on every other event); supports the SPEC-047-R008 real-output
+		// requirement. No completion text is ever exposed.
+		"synthetic_probe_completion_tokens": event.SyntheticProbeCompletionTokens,
+		"session":                           nil,
 	}
 	if hasSession {
 		bound := provider.ModelAdmissionCandidateID == event.CandidateID
@@ -904,6 +908,17 @@ func modelAdmissionOfferListItem(event ModelAdmissionEvent, provider pool.Provid
 			"verified_member":              nil,
 			"receipt_key_present":          sessionReceiptKeyPresent(provider),
 			"catalog_release_id":           nullString(provider.CatalogReleaseID),
+			// SPEC-047 v0.1.6 hello-declared adapter for the live session
+			// (e.g. `ollama_loopback`); a provider assertion the coordinator
+			// never dereferences. Empty for legacy/MLX sessions that omit it.
+			"runtime_source":   nullString(provider.RuntimeSource),
+			"served_model_ref": nullString(provider.ModelID),
+			// SPEC-010-R007(a) identity descriptor the live session reported.
+			// The algorithm label lets a journey assert `macprovider.gguf-file.v1`
+			// directly (issue #1569 pass bar 1). This is the provider-reported
+			// hash the coordinator recomputes/verifies elsewhere, never a
+			// runtime-dereferenced value.
+			"model_hash_algorithm": nullString(provider.ModelHashAlgorithm),
 		}
 		if bound {
 			session["bound_coordinator_event_id"] = provider.ModelAdmissionCoordinatorEventID

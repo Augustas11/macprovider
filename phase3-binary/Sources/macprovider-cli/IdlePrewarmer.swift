@@ -125,7 +125,7 @@ struct IdlePrewarmLogger: Sendable {
 }
 
 actor IdlePrewarmer {
-    private let modelRuntime: ModelRuntime
+    private let modelRuntime: any ModelRuntimeServing
     private let providerStatus: ProviderStatus
     private let thermalGate: ThermalGate
     private let powerSource: PowerSourceReporting
@@ -136,7 +136,7 @@ actor IdlePrewarmer {
     private var stopped = false
 
     init(
-        modelRuntime: ModelRuntime,
+        modelRuntime: any ModelRuntimeServing,
         providerStatus: ProviderStatus,
         thermalGate: ThermalGate,
         powerSource: PowerSourceReporting,
@@ -154,7 +154,7 @@ actor IdlePrewarmer {
     }
 
     init(
-        modelRuntime: ModelRuntime,
+        modelRuntime: any ModelRuntimeServing,
         providerStatus: ProviderStatus,
         thermalGate: ThermalGate,
         powerSource: PowerSourceReporting,
@@ -281,6 +281,12 @@ actor IdlePrewarmer {
             "on_battery": onBattery,
         ])
         let task = Task { [modelRuntime, providerStatus, weak self, token] in
+            // Internal prewarm drives the MLX generation path; a SPEC-046
+            // loopback serving runtime has no local model to warm (#1569).
+            guard let modelRuntime = modelRuntime as? ModelRuntime else {
+                await self?.clearWarmup(id: id)
+                return
+            }
             await providerStatus.noteInternalPrewarm(at: startedAt, elapsedMS: 0)
             do {
                 let result = try await modelRuntime.runInternalWarmup(

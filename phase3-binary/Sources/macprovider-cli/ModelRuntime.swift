@@ -29,6 +29,15 @@ protocol ModelRuntimeServing: Actor {
     func acquireRequestHandle(_ request: ChatCompletionRequest) throws -> RequestHandle
     func unregisterInFlight(_ id: Int)
     func currentSnapshot() async -> RuntimeSnapshot
+    /// Identity/status surface the serve command reads to build ProviderStatus.
+    /// The concrete MLX `ModelRuntime` witnesses these with actor-isolated
+    /// members; loopback runtimes report their own GGUF-file identity. Defaults
+    /// keep test-stub conformers (which never build ProviderStatus) compiling.
+    var loadedModelHash: String? { get async }
+    var loadedModelHashAlgorithm: String? { get async }
+    var loadedWeightsManifestSHA256: String? { get async }
+    var isLoaded: Bool { get async }
+    func setProviderStatus(_ providerStatus: ProviderStatus) async
 }
 
 struct RelayBlindPreparedRequest: @unchecked Sendable {
@@ -182,6 +191,12 @@ private enum StructuredStreamingIdleRaceResult<T: Sendable>: Sendable {
 }
 
 extension ModelRuntimeServing {
+    var loadedModelHash: String? { get async { nil } }
+    var loadedModelHashAlgorithm: String? { get async { nil } }
+    var loadedWeightsManifestSHA256: String? { get async { nil } }
+    var isLoaded: Bool { get async { false } }
+    func setProviderStatus(_ providerStatus: ProviderStatus) async {}
+
     func relayBlindPrepare(_ request: ChatCompletionRequest) async throws -> RelayBlindPreparedRequest {
         throw RelayBlindProviderError.providerUnsupported
     }
