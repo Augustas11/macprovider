@@ -16,6 +16,7 @@ import (
 	"reflect"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1929,6 +1930,99 @@ func TestReloadCoordinatorConfigReloadsTrustedPoolsCreatorAdminConfig(t *testing
 	}
 	if got := reloader.buyerAccountIDs["creator-a"]; len(got) != 1 || got[0] != "acct-b" {
 		t.Fatalf("buyer allowlist = %#v, want acct-b", reloader.buyerAccountIDs)
+	}
+}
+
+func TestReloadCoordinatorConfigReloadsMinProviderThroughput(t *testing.T) {
+	startup, registry, wsServer, buyerServer := reloadTestServers(config.Default())
+	var served atomic.Bool
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		served.Store(true)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"ok","choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":4,"completion_tokens":1,"total_tokens":5}}`))
+	}))
+	t.Cleanup(upstream.Close)
+	now := time.Now().UTC()
+	if _, ok := registry.Register(&pool.Provider{
+		ProviderID:            "slow",
+		AssignedID:            "s1",
+		Hostname:              "slow.local",
+		ModelID:               "model-a",
+		MaxContextTokens:      20000,
+		MaxConcurrency:        1,
+		SlotsFree:             1,
+		SlotsTotal:            1,
+		ThroughputTPSEstimate: 0.25,
+		EndpointURL:           upstream.URL,
+		Tier:                  pool.TierPinned,
+		InferencePath:         pool.InferencePathHTTPForwarding,
+		State:                 pool.StateReady,
+		LastHeartbeatAt:       now,
+		LastActivityAt:        now,
+		ConnectedAt:           now,
+		CatalogAdmissionMode:  "current",
+	}, nil); !ok {
+		t.Fatal("register provider failed")
+	}
+
+	postChat := func(requestID string) *httptest.ResponseRecorder {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`))
+		req.Header.Set("X-Request-ID", requestID)
+		rr := httptest.NewRecorder()
+		buyerServer.Handler().ServeHTTP(rr, req)
+		return rr
+	}
+	poolCheck := func(remote string) map[string]any {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, "/v1/pool/check?provider_id=slow&assigned_id=s1&details=readiness", nil)
+		req.RemoteAddr = remote
+		rr := httptest.NewRecorder()
+		buyerServer.Handler().ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("pool check status=%d body=%s", rr.Code, rr.Body.String())
+		}
+		var response map[string]any
+		if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
+			t.Fatalf("decode pool check: %v", err)
+		}
+		return response
+	}
+
+	if rr := postChat("throughput-floor-sighup-open"); rr.Code != http.StatusOK {
+		t.Fatalf("default floor status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if !served.Load() {
+		t.Fatal("default floor 0 must dispatch")
+	}
+	if got := poolCheck("198.51.100.90:12345"); got["buyer_serving"] != true {
+		t.Fatalf("buyer_serving=%v, want true before floor reload: %+v", got["buyer_serving"], got)
+	}
+
+	next := startup
+	next.Routing.MinProviderThroughputTPS = 1.0
+	var logs bytes.Buffer
+	reloadCoordinatorConfig(writeReloadConfig(t, next), "", startup.Tier2, zerolog.New(&logs), wsServer, buyerServer, nil, nil, nil)
+	if !strings.Contains(logs.String(), `"min_provider_throughput_tps":1`) || !strings.Contains(logs.String(), "routing.min_provider_throughput_tps reload") {
+		t.Fatalf("reload log missing floor change: %s", logs.String())
+	}
+
+	served.Store(false)
+	if rr := postChat("throughput-floor-sighup-closed"); rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("raised floor status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if served.Load() {
+		t.Fatal("SIGHUP floor must skip dispatch")
+	}
+	if got := poolCheck("198.51.100.91:12345"); got["buyer_serving"] != true {
+		t.Fatalf("buyer_serving=%v, want true after floor reload: %+v", got["buyer_serving"], got)
+	}
+
+	next.Routing.MinProviderThroughputTPS = 0
+	logs.Reset()
+	reloadCoordinatorConfig(writeReloadConfig(t, next), "", startup.Tier2, zerolog.New(&logs), wsServer, buyerServer, nil, nil, nil)
+	if rr := postChat("throughput-floor-sighup-cleared"); rr.Code != http.StatusOK {
+		t.Fatalf("cleared floor status=%d body=%s", rr.Code, rr.Body.String())
 	}
 }
 

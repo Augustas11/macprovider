@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math"
 	"math/big"
 	"net"
 	"net/http"
@@ -71,6 +72,7 @@ type admissionCeilingEventRateState struct {
 
 type Server struct {
 	cfg                       config.Config
+	minProviderThroughputBits atomic.Uint64
 	proofOfWeightsAdmissionMu sync.RWMutex
 	proofOfWeightsMu          sync.RWMutex
 	proofOfWeights            config.ProofOfWeightsConfig
@@ -1123,6 +1125,7 @@ func NewServer(cfg config.Config, registry *pool.Registry, logger zerolog.Logger
 		modelAdmissionAttempts: map[string][]time.Time{},
 		version:                "dev",
 	}
+	s.minProviderThroughputBits.Store(math.Float64bits(cfg.Routing.MinProviderThroughputTPS))
 	s.authAttempts = newAuthAttemptStore(1024)
 	s.bootstrapLimiter = newBootstrapMintLimiter(cfg.Auth)
 	s.admission = NewAdmissionManager(cfg.Admission, s.now)
@@ -1193,7 +1196,12 @@ func NewServer(cfg config.Config, registry *pool.Registry, logger zerolog.Logger
 //     excludes an HTTPForwardingOnly peer with no endpoint; AND
 //   - MaxContextTokens > 0 — a sanity gate excluding the degenerate zero window; AND
 //   - not Tier-2-excluded (hash/encryption/attestation) — in-memory config + catalog.
-//   - not below the operator routing throughput floor, when configured.
+//
+// routing.min_provider_throughput_tps is intentionally omitted. That floor is a
+// public-dispatch skip (/poolz.routing_eligible via publicRoutingEligible).
+// Folding it into this predicate would let a canary trip degrade the last
+// below-floor admitted session, which then fails /v1/pool/check buyer_serving
+// through ServingCapable. Session liveness stays on heartbeat/admission gates.
 //
 // It deliberately does NOT evaluate REQUEST-DEPENDENT eligibility, because the floor
 // runs without a request in hand:
@@ -1246,9 +1254,6 @@ func (s *Server) canaryBuyerServing(p pool.Provider) bool {
 		return false
 	}
 	if s.tier2WarmupExcluded(p) {
-		return false
-	}
-	if floor := s.cfg.Routing.MinProviderThroughputTPS; floor > 0 && p.ThroughputTPSEstimate < floor {
 		return false
 	}
 	// #768: a peer below the per-model version floor is not routable, so it
@@ -1316,6 +1321,28 @@ func (s *Server) SetTier2Config(cfg config.Tier2Config) {
 	} else {
 		s.cancelModelHashLegacyDeadline()
 	}
+}
+
+// SetMinProviderThroughputTPS hot-swaps the dispatch-quality floor used by
+// /poolz.routing_eligible. A value <= 0 disables the skip. Session liveness
+// (/v1/pool/check buyer_serving) and FR-CAN22 last-provider protection do
+// not consult this floor.
+func (s *Server) SetMinProviderThroughputTPS(floor float64) (changed bool) {
+	prev := math.Float64frombits(s.minProviderThroughputBits.Swap(math.Float64bits(floor)))
+	return prev != floor
+}
+
+func (s *Server) providerMeetsDispatchThroughputFloor(p pool.Provider) bool {
+	floor := math.Float64frombits(s.minProviderThroughputBits.Load())
+	return floor <= 0 || p.ThroughputTPSEstimate >= floor
+}
+
+// publicRoutingEligible is the /poolz.routing_eligible predicate: request-
+// independent buyer-serving gates plus the optional public-dispatch
+// throughput skip. FR-CAN22 last-provider protection uses canaryBuyerServing
+// without this skip so a below-floor admitted session is not canary-degraded.
+func (s *Server) publicRoutingEligible(p pool.Provider) bool {
+	return s.canaryBuyerServing(p) && s.providerMeetsDispatchThroughputFloor(p)
 }
 
 func (s *Server) proofOfWeightsConfig() config.ProofOfWeightsConfig {
@@ -6661,7 +6688,7 @@ func (s *Server) handlePoolz(w http.ResponseWriter, r *http.Request) {
 		}
 		poolz = append(poolz, poolzProvider{
 			Provider:          provider,
-			RoutingEligible:   s.canaryBuyerServing(provider),
+			RoutingEligible:   s.publicRoutingEligible(provider),
 			CanaryFailCount:   provider.CanaryFailCount,
 			ReceiptPubkey:     receiptPubkey,
 			ReceiptPubkeyPrev: receiptPubkeyPrev,

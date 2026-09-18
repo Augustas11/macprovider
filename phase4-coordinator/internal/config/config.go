@@ -916,25 +916,32 @@ type LosslessnessProbeConfig struct {
 }
 
 type RoutingConfig struct {
-	PreflightThresholdTokens       int                         `yaml:"preflight_threshold_tokens"`
-	PreflightTimeoutS              int                         `yaml:"preflight_timeout_s"`
-	RequestTimeoutS                int                         `yaml:"request_timeout_s"`
-	FailoverEnabled                bool                        `yaml:"failover_enabled"`
-	FailoverTimeoutS               int                         `yaml:"failover_timeout_s"`
-	SlotQueueMaxPendingPerProvider int                         `yaml:"slot_queue_max_pending_per_provider"`
-	SlotQueueDeadlineS             int                         `yaml:"slot_queue_deadline_s"`
-	SlotQueuePollIntervalMS        int                         `yaml:"slot_queue_poll_interval_ms"`
-	MinProviderThroughputTPS       float64                     `yaml:"min_provider_throughput_tps"`
-	DefaultObjective               string                      `yaml:"default_objective"`
-	TiebreakRandomize              bool                        `yaml:"tiebreak_randomize"`
-	TiebreakEpsilon                float64                     `yaml:"tiebreak_epsilon"`
-	MaxRetries                     int                         `yaml:"max_retries"`
-	RetryPerAttemptTimeoutS        int                         `yaml:"retry_per_attempt_timeout_s"`
-	MaxProvidersFaultedPerRequest  int                         `yaml:"max_providers_faulted_per_request"`
-	StickyEnabled                  bool                        `yaml:"sticky_enabled"`
-	StickyTTLS                     int                         `yaml:"sticky_ttl_s"`
-	StickyMaxEntries               int                         `yaml:"sticky_max_entries"`
-	ModelClasses                   map[string]ModelClassConfig `yaml:"model_classes"`
+	PreflightThresholdTokens       int  `yaml:"preflight_threshold_tokens"`
+	PreflightTimeoutS              int  `yaml:"preflight_timeout_s"`
+	RequestTimeoutS                int  `yaml:"request_timeout_s"`
+	FailoverEnabled                bool `yaml:"failover_enabled"`
+	FailoverTimeoutS               int  `yaml:"failover_timeout_s"`
+	SlotQueueMaxPendingPerProvider int  `yaml:"slot_queue_max_pending_per_provider"`
+	SlotQueueDeadlineS             int  `yaml:"slot_queue_deadline_s"`
+	SlotQueuePollIntervalMS        int  `yaml:"slot_queue_poll_interval_ms"`
+	// MinProviderThroughputTPS is an optional public-dispatch skip floor
+	// (tokens/sec). Values <= 0 disable it; the repo default is 0. This is
+	// not a session-liveness gate: /v1/pool/check buyer_serving must stay
+	// true for an admitted heartbeat-healthy current/previous catalog
+	// session even when the provider is below the floor. CLI reconnect
+	// treats authoritative buyer_serving=false as a websocket teardown
+	// (Pearl 2026-09-18: operator-set 10.0 flapped the 3B Mac fleet).
+	MinProviderThroughputTPS      float64                     `yaml:"min_provider_throughput_tps"`
+	DefaultObjective              string                      `yaml:"default_objective"`
+	TiebreakRandomize             bool                        `yaml:"tiebreak_randomize"`
+	TiebreakEpsilon               float64                     `yaml:"tiebreak_epsilon"`
+	MaxRetries                    int                         `yaml:"max_retries"`
+	RetryPerAttemptTimeoutS       int                         `yaml:"retry_per_attempt_timeout_s"`
+	MaxProvidersFaultedPerRequest int                         `yaml:"max_providers_faulted_per_request"`
+	StickyEnabled                 bool                        `yaml:"sticky_enabled"`
+	StickyTTLS                    int                         `yaml:"sticky_ttl_s"`
+	StickyMaxEntries              int                         `yaml:"sticky_max_entries"`
+	ModelClasses                  map[string]ModelClassConfig `yaml:"model_classes"`
 }
 
 type ModelClassConfig struct {

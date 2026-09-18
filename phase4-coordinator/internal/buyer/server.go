@@ -232,12 +232,14 @@ type Server struct {
 	defaultObjective  string
 	tiebreakRandomize bool
 	tiebreakEpsilon   float64
-	// routingMu guards defaultObjective and modelClasses, which are hot-swapped
-	// on SIGHUP when routing config changes (issue #266 T1).
+	// routingMu guards defaultObjective, modelClasses, and
+	// minProviderThroughput, which are hot-swapped on SIGHUP when routing
+	// config changes (issue #266 T1 + min_provider_throughput_tps).
 	// Pre-SIGHUP readers (handleModels iteration at modelEntry build;
-	// resolveModelClass/objectiveForRequest per-request hot paths) MUST take a
-	// read lock or use the snapshot accessors below — never read s.modelClasses
-	// directly outside the routingMu critical section.
+	// resolveModelClass/objectiveForRequest per-request hot paths;
+	// providerMeetsRoutingQuality) MUST take a read lock or use the snapshot
+	// accessors below — never read those fields directly outside the routingMu
+	// critical section.
 	routingMu              sync.RWMutex
 	modelClasses           map[string]config.ModelClassConfig
 	maxRetries             int
@@ -447,8 +449,8 @@ func WithRoutingConfig(cfg config.RoutingConfig) Option {
 		)
 		s.tiebreakRandomize = cfg.TiebreakRandomize
 		s.tiebreakEpsilon = cfg.TiebreakEpsilon
-		s.minProviderThroughput = cfg.MinProviderThroughputTPS
 		s.routingMu.Lock()
+		s.minProviderThroughput = cfg.MinProviderThroughputTPS
 		if cfg.DefaultObjective != "" {
 			s.defaultObjective = cfg.DefaultObjective
 		}
@@ -595,7 +597,9 @@ func (s *Server) providerMeetsModelVersionFloor(p pool.Provider) bool {
 }
 
 func (s *Server) providerMeetsRoutingQuality(p pool.Provider) bool {
+	s.routingMu.RLock()
 	floor := s.minProviderThroughput
+	s.routingMu.RUnlock()
 	if floor <= 0 || p.ThroughputTPSEstimate >= floor {
 		return true
 	}
@@ -1605,7 +1609,13 @@ func (s *Server) providerBuyerServing(p pool.Provider) bool {
 	// this gate a non-settlement BYOM provider (catalog_priced, offer_submitted,
 	// withdrawn, revoked, ...) would advertise paid-serving readiness before it is
 	// settlement_capable, diverging from the main routing paths that all apply it.
-	return p.ServingCapable() && s.providerMeetsRoutingQuality(p) && !s.tier2ProviderExcluded(p) && s.checkQuota(p) && s.byomDefaultPaidRoutingEligible(p)
+	//
+	// routing.min_provider_throughput_tps is intentionally omitted. That floor
+	// is a public-dispatch skip, not a session-liveness gate. CLI 1.8.123
+	// treats authoritative buyer_serving=false (no model_admission_pending
+	// hold) as a websocket reconnect; Pearl 2026-09-18 showed a 10.0 floor
+	// flapping every 3B Mac under 10 TPS about every 35s.
+	return p.ServingCapable() && !s.tier2ProviderExcluded(p) && s.checkQuota(p) && s.byomDefaultPaidRoutingEligible(p)
 }
 
 func (s *Server) handleReceiptKeys(w http.ResponseWriter, r *http.Request) {
@@ -6650,6 +6660,19 @@ func (s *Server) SetRoutingDefaultObjective(objective string) (changed bool) {
 		return false
 	}
 	s.defaultObjective = objective
+	return true
+}
+
+// SetMinProviderThroughputTPS hot-swaps the public-dispatch throughput floor.
+// A value <= 0 disables the skip. This does not change /v1/pool/check
+// buyer_serving; the floor is a routing filter only.
+func (s *Server) SetMinProviderThroughputTPS(floor float64) (changed bool) {
+	s.routingMu.Lock()
+	defer s.routingMu.Unlock()
+	if s.minProviderThroughput == floor {
+		return false
+	}
+	s.minProviderThroughput = floor
 	return true
 }
 

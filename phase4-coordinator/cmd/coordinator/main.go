@@ -3617,6 +3617,11 @@ func reloadCoordinatorConfig(configPath, configOverlay string, startupTier2 conf
 			Str("default_objective", cfg.Routing.DefaultObjective).
 			Msg("routing.default_objective reload: objective changed")
 	}
+	if buyerChanged, wsChanged := buyerServer.SetMinProviderThroughputTPS(cfg.Routing.MinProviderThroughputTPS), wsServer.SetMinProviderThroughputTPS(cfg.Routing.MinProviderThroughputTPS); buyerChanged || wsChanged {
+		logger.Info().
+			Float64("min_provider_throughput_tps", cfg.Routing.MinProviderThroughputTPS).
+			Msg("routing.min_provider_throughput_tps reload: floor changed")
+	}
 	if trustPoolAdminReloader != nil {
 		trustPoolAdminReloader.SetCreatorAdminConfig(creatorAdminCredentials, cfg.TrustedPools.CreatorAdminProviderIDs, cfg.TrustedPools.CreatorAdminProviderDelegatedIDs, cfg.TrustedPools.CreatorAdminBuyerAccountIDs)
 		logger.Info().
