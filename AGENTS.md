@@ -108,13 +108,26 @@ changes go through PR review. Docs-only narrative changes may go direct to
 `origin/main`, and the change touches no executable, config, schema, release,
 catalog, rate-card, workflow, or runtime-affecting path.
 
-After any PR squash-merge or direct docs push, sync canonical main:
+After any PR squash-merge or direct docs push, sync canonical main **and
+delete the finished task worktree so it does not keep occupying disk**:
 
 ```bash
-git -C /Users/augstar/macprovider-poc fetch origin
+git -C /Users/augstar/macprovider-poc fetch origin --prune
 git -C /Users/augstar/macprovider-poc checkout main
 git -C /Users/augstar/macprovider-poc reset --hard origin/main
+git -C /Users/augstar/macprovider-poc worktree remove --force /Users/augstar/macprovider-<topic>
+git -C /Users/augstar/macprovider-poc worktree prune
+git -C /Users/augstar/macprovider-poc branch -D <scope>/<topic>
 ```
+
+`git worktree remove` deletes the checkout directory. Squash-merged local
+branches are not ancestors of `main`, so use `-D`. Do not leave stale
+`~/macprovider-<topic>` directories, install scratch trees, or CLI backup
+folders behind after the PR is on `main`.
+
+Keep a sibling worktree only when it still has an **open** PR, or the user
+explicitly said the checkout is still in use. Do not mass-delete Codex
+worktrees under `~/.codex/worktrees/` unless that session created them.
 
 Do not force-push `main`, admin-merge, bypass branch protection, or merge with
 red required checks unless the user gives explicit written approval for that
