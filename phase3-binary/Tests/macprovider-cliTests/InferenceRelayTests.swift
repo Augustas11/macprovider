@@ -919,6 +919,12 @@ private actor FakeReceiptCompletionRuntime: ModelRuntimeServing {
         self.servedSnapshot = servedSnapshot
     }
 
+    var loadedModelHash: String? { nil }
+    var loadedModelHashAlgorithm: String? { nil }
+    var loadedWeightsManifestSHA256: String? { nil }
+    var isLoaded: Bool { true }
+    func setProviderStatus(_ providerStatus: ProviderStatus) {}
+
     func currentSnapshot() async -> RuntimeSnapshot {
         servedSnapshot
     }
@@ -962,6 +968,12 @@ private actor FakeCancelAfterCompletionReceiptRuntime: ModelRuntimeServing {
     init(servedSnapshot: RuntimeSnapshot) {
         self.servedSnapshot = servedSnapshot
     }
+
+    var loadedModelHash: String? { nil }
+    var loadedModelHashAlgorithm: String? { nil }
+    var loadedWeightsManifestSHA256: String? { nil }
+    var isLoaded: Bool { true }
+    func setProviderStatus(_ providerStatus: ProviderStatus) {}
 
     func currentSnapshot() async -> RuntimeSnapshot {
         servedSnapshot
@@ -1064,6 +1076,11 @@ private final class KVCacheTelemetryCapture: @unchecked Sendable {
 }
 
 private actor FakeStreamingRuntime: ModelRuntimeServing {
+    var loadedModelHash: String? { nil }
+    var loadedModelHashAlgorithm: String? { nil }
+    var loadedWeightsManifestSHA256: String? { nil }
+    var isLoaded: Bool { true }
+    func setProviderStatus(_ providerStatus: ProviderStatus) {}
     func complete(
         _ request: ChatCompletionRequest,
         shouldCancel: @escaping @Sendable () -> Bool
@@ -1100,6 +1117,11 @@ private actor FakeStreamingRuntime: ModelRuntimeServing {
 }
 
 private actor FakePreflightRejectRuntime: ModelRuntimeServing {
+    var loadedModelHash: String? { nil }
+    var loadedModelHashAlgorithm: String? { nil }
+    var loadedWeightsManifestSHA256: String? { nil }
+    var isLoaded: Bool { true }
+    func setProviderStatus(_ providerStatus: ProviderStatus) {}
     func currentSnapshot() async -> RuntimeSnapshot {
         RuntimeSnapshot(state: .ready, container: nil, modelID: "mlx-community/Test-Model", modelHash: nil)
     }
@@ -1147,6 +1169,12 @@ private actor FakePreflightRejectRuntime: ModelRuntimeServing {
 
 private actor FakeCompletionRuntime: ModelRuntimeServing {
     private var conversationKeys: [String?] = []
+
+    var loadedModelHash: String? { nil }
+    var loadedModelHashAlgorithm: String? { nil }
+    var loadedWeightsManifestSHA256: String? { nil }
+    var isLoaded: Bool { true }
+    func setProviderStatus(_ providerStatus: ProviderStatus) {}
 
     func observedConversationKeys() -> [String?] {
         conversationKeys

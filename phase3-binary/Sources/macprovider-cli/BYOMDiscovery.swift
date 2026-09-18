@@ -1608,20 +1608,6 @@ struct BYOMModelAdmissionClient: Sendable {
                 return nil
             }
             return loopbackURL
-        case "ws":
-            // Symmetric with CoordinatorClient's #1354 S2 loopback exemption
-            // (serve accepts ws:// for localhost/127.0.0.1/::1): a ws:// loopback
-            // coordinator maps to an http:// loopback admin origin for offer
-            // submission, still gated by the explicit insecure-loopback opt-in
-            // and the loopback-literal host check in validatedHTTPOrigin.
-            var httpComponents = components
-            httpComponents.scheme = "http"
-            guard allowInsecureLoopbackHTTP,
-                  let httpString = httpComponents.string,
-                  let loopbackURL = BYOMLoopbackOriginValidator.validatedHTTPOrigin(httpString) else {
-                return nil
-            }
-            return loopbackURL
         default:
             return nil
         }

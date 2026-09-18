@@ -114,6 +114,12 @@ private actor RelayBlindFixtureRuntime: ModelRuntimeServing {
         self.streamDelayNanoseconds = UInt64(streamDelayMs) * 1_000_000
     }
 
+    var loadedModelHash: String? { nil }
+    var loadedModelHashAlgorithm: String? { nil }
+    var loadedWeightsManifestSHA256: String? { nil }
+    var isLoaded: Bool { true }
+    func setProviderStatus(_ providerStatus: ProviderStatus) {}
+
     func currentSnapshot() -> RuntimeSnapshot {
         RuntimeSnapshot(state: .ready, container: nil, modelID: model, modelHash: nil)
     }

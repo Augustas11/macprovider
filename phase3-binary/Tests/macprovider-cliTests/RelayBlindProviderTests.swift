@@ -798,6 +798,11 @@ private actor RelayBlindTestRuntime: ModelRuntimeServing {
     }
     func completionCount() -> Int { completions }
     func usedPreparedHandleForGeneration() -> Bool { usedPreparedHandle }
+    var loadedModelHash: String? { nil }
+    var loadedModelHashAlgorithm: String? { nil }
+    var loadedWeightsManifestSHA256: String? { nil }
+    var isLoaded: Bool { true }
+    func setProviderStatus(_ providerStatus: ProviderStatus) {}
     func currentSnapshot() -> RuntimeSnapshot {
         RuntimeSnapshot(state: .ready, container: nil, modelID: model, modelHash: nil)
     }
