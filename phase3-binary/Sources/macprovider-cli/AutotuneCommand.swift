@@ -53,6 +53,9 @@ struct AutotuneCommand: AsyncParsableCommand {
     @Flag(help: "With --recommend, measure the selected model's largest interactive context before emitting or applying config.")
     var calibrateContext = false
 
+    @Flag(help: "With --recommend, opt-in empirical max-batch calibration: measure the selected model's aggregate concurrent throughput before emitting or applying config.")
+    var calibrateConcurrency = false
+
     @Option(help: "Relative throughput tie band for TTFT tiebreak.")
     var tpsTieEpsilon = 0.02
 
@@ -747,6 +750,12 @@ struct AutotuneCommand: AsyncParsableCommand {
         if calibrateContext && (checkOnly || prefetch || freshnessCheck) {
             throw ValidationError("--calibrate-context cannot be combined with --check-only, --prefetch, or --freshness-check")
         }
+        if calibrateConcurrency && !recommend {
+            throw ValidationError("--calibrate-concurrency requires --recommend")
+        }
+        if calibrateConcurrency && (checkOnly || prefetch || freshnessCheck) {
+            throw ValidationError("--calibrate-concurrency cannot be combined with --check-only, --prefetch, or --freshness-check")
+        }
         guard tpsTieEpsilon >= 0 else {
             throw ValidationError("--tps-tie-epsilon must be >= 0")
         }
@@ -852,6 +861,11 @@ struct AutotuneCommand: AsyncParsableCommand {
         func recommendationDeadlineExceeded() -> Bool {
             Date() > recommendationDeadline
         }
+        // Either opt-in calibration defers recommendation-state/config mutation
+        // until AFTER the measurement completes, so a mid-calibration failure
+        // (probe, baseline, interrupt, deadline) fails closed without touching
+        // state or config, leaving the tier-constant recommendation intact.
+        let calibrationActive = calibrateContext || calibrateConcurrency
 
         let staticInputs = AutotuneStaticInputs()
         let inputs = await staticInputs.loadRecommendationInputs()
@@ -958,7 +972,7 @@ struct AutotuneCommand: AsyncParsableCommand {
             result = Self.disclosingInstalledOnlyEstimate(result)
         }
         result.probeDiagnostics = outcomes.diagnostics
-        if !calibrateContext {
+        if !calibrationActive {
             try RecommendationStateStore.write(result, benchmarks: request.benchmarks)
         }
         if AutotuneRecommendEngine.networkSubmissionBlocks(Set(result.warnings)) {
@@ -990,7 +1004,7 @@ struct AutotuneCommand: AsyncParsableCommand {
                 FileHandle.standardError.write(Data("[warn] hardware evidence submission failed: \(reason)\n".utf8))
             }
         }
-        if !calibrateContext {
+        if !calibrationActive {
             try await submitHardwareEvidenceIfNeeded()
         }
         let paidSelected = result.recommendedModel.flatMap { recommendedModel in
@@ -1072,8 +1086,98 @@ struct AutotuneCommand: AsyncParsableCommand {
                 maxContextOverride: calibration.recommendedContext
             )
         }
+        if calibrateConcurrency {
+            guard let selected = selectedForConfig,
+                  let selectedBenchmark = request.benchmarks[selected.catalogKey],
+                  let selectedRow = catalog.value.rows[selected.catalogKey],
+                  let core = serveConfig
+            else {
+                throw ValidationError("concurrency calibration requires a selected, benchmarked catalog model")
+            }
+            // The calibration context is the emitted production context — the
+            // context-calibrated value when --calibrate-context also ran, else
+            // the tier context already resolved into the serve config.
+            let calibrationContext = core.knobs.maxContext
+            // §9.2 step 1: bound the sweep by memory fit. When the verified
+            // config/KV geometry is unavailable, fall back to the CONSERVATIVE
+            // chip/RAM tier constant (never the served hard cap): a box whose
+            // memory fit cannot be proven must not be swept above the capacity
+            // it already advertises today, since that value is advertised 1:1 as
+            // coordinator slots and over-advertising risks buyer-TTFT breach and
+            // thermal/swap pressure under real full-context traffic.
+            let hardCap = ProviderCapacity.maxConcurrencyOverrideLimit
+            let memoryFitCap: Int
+            if let selectedBenchmarkConfigData = selectedBenchmark.modelConfigJSONData,
+               let selectedBenchmarkConfigSHA = selectedBenchmark.modelConfigSHA256,
+               let fit = AutotuneModelContextCap.memoryFitBatchDepth(
+                   configData: selectedBenchmarkConfigData,
+                   verifiedConfigSHA256: selectedBenchmarkConfigSHA,
+                   hardwareMemoryGB: hardware.memoryGB,
+                   catalogMinRAMGB: selectedRow.minRAMGB,
+                   calibrationContextTokens: calibrationContext
+               ) {
+                memoryFitCap = fit
+            } else {
+                memoryFitCap = max(1, min(hardware.recommendedMaxBatch, hardCap))
+            }
+            let draftConfigured = !((resolvedConfig?.draftModel ?? "").isEmpty)
+            // §9.2 step 3 gates each depth on the buyer-facing TTFT ceiling. Honor
+            // the operator's `--buyer-ttft-ceiling-ms` when set (0 = disabled),
+            // tightening — never loosening — the fixed 8000ms calibration ceiling,
+            // so a stricter buyer SLO cannot be undercut by a slow concurrency
+            // depth.
+            let calibrationTTFTCeilingMS = buyerTTFTCeilingMS > 0
+                ? min(buyerTTFTCeilingMS, 8_000)
+                : 8_000
+            let calibration: AutotuneConcurrencyCalibrationResult
+            do {
+                calibration = try await AutotuneConcurrencyCalibrator(ttftCeilingMS: calibrationTTFTCeilingMS).calibrate(
+                    memoryFitCap: memoryFitCap,
+                    tierConstant: hardware.recommendedMaxBatch,
+                    draftConfigured: draftConfigured,
+                    calibrationContext: calibrationContext,
+                    promptReserveTokens: 256,
+                    completionTokens: 64,
+                    prober: Stage1ConcurrencyCalibrationAdapter(
+                        model: selectedBenchmark.modelArtifactPath,
+                        port: port,
+                        artifactBinding: CandidateArtifactBinding(
+                            path: selectedBenchmark.modelArtifactPath,
+                            sha256: selectedBenchmark.artifactSHA256
+                        )
+                    ),
+                    deadline: recommendationDeadline,
+                    isInterrupted: { interruptFlag.isSet() },
+                    hasDeadlineExpired: recommendationDeadlineExceeded
+                )
+            } catch AutotuneConcurrencyCalibrationError.interrupted {
+                FileHandle.standardError.write(
+                    Data("autotune --recommend interrupted during concurrency calibration; no state or config was changed\n".utf8)
+                )
+                throw ExitCode(130)
+            } catch AutotuneConcurrencyCalibrationError.deadlineExceeded {
+                FileHandle.standardError.write(
+                    Data("autotune --recommend concurrency calibration exceeded --max-duration; no state or config was changed\n".utf8)
+                )
+                throw ExitCode(1)
+            }
+            result.concurrencyCalibration = calibration
+            // Preserve any context calibration by keeping the resolved context,
+            // and override the applied/emitted max_concurrency_override with the
+            // calibrated depth.
+            serveConfig = Self.recommendationCoreForConfig(
+                selected: selected,
+                selectedBenchmark: selectedBenchmark,
+                selectedRow: selectedRow,
+                catalogVersion: catalog.value.version,
+                catalogHash: catalogSHA,
+                hardware: hardware,
+                maxContextOverride: calibrationContext,
+                maxBatchOverride: calibration.recommendedMaxBatch
+            )
+        }
         let calibratedApplyConfig: (() throws -> ConfigApplier.AppliedConfig)?
-        if calibrateContext, apply, let selected = selectedForConfig {
+        if calibrationActive, apply, let selected = selectedForConfig {
             guard request.benchmarks[selected.catalogKey] != nil else {
                 throw ValidationError("selected recommendation lacks verified benchmark artifact")
             }
@@ -1098,7 +1202,7 @@ struct AutotuneCommand: AsyncParsableCommand {
         } else {
             calibratedApplyConfig = nil
         }
-        if calibrateContext {
+        if calibrationActive {
             configurationApplied = try await Self.commitCalibratedRecommendationMutation(
                 interruptFlag: interruptFlag,
                 writeInterrupted: {
@@ -1154,8 +1258,8 @@ struct AutotuneCommand: AsyncParsableCommand {
         }
         if emitJSON {
             print(result.jsonString(serveConfig: serveConfig, donorMode: applyingDonorFallback))
-        } else if calibrateContext {
-            print(result.contextCalibrationHumanTranscript(configurationApplied: configurationApplied))
+        } else if calibrationActive {
+            print(result.calibrationHumanTranscript(configurationApplied: configurationApplied))
         } else {
             print(result.humanTranscript(configurationApplied: configurationApplied))
         }
@@ -1483,14 +1587,15 @@ struct AutotuneCommand: AsyncParsableCommand {
         catalogVersion: String,
         catalogHash: String,
         hardware: AutotuneRecommendHardware,
-        maxContextOverride: Int? = nil
+        maxContextOverride: Int? = nil,
+        maxBatchOverride: Int? = nil
     ) -> RecommendationCore {
         RecommendationCore(
             model: selected.model,
             targetContext: Self.spec023RecommendationProbeContext,
             knobs: WinningKnobs(
                 kvBits: nil,
-                maxBatch: hardware.recommendedMaxBatch,
+                maxBatch: maxBatchOverride ?? hardware.recommendedMaxBatch,
                 maxContext: maxContextOverride ?? hardware.recommendedMaxContext(
                     modelID: selectedRow.modelID,
                     verifiedConfigJSONData: selectedBenchmark.modelConfigJSONData,
