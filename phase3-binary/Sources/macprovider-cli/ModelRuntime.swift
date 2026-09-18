@@ -1584,7 +1584,22 @@ actor ModelRuntime: ModelRuntimeServing {
                 temperature: 0.0,
                 topP: 1.0
             )
-            return Self.pagedKVRuntimeCacheClass(model: context.model, baseParameters: parameters)
+            // The paged / continuous-batching path never uses the memory-capped serve
+            // cache: batched rows are stored in the SPEC-039 paged block pool (which
+            // bounds memory the way `maxKVSize` bounds the non-batched serve cache).
+            // `makeServeGenerateParameters` always sets `maxKVSize = maxContextTokens`,
+            // which makes `LanguageModel.newCache` allocate a `RotatingKVCache` — never
+            // the `KVCacheSimple` the paged engine's allowlist (SPEC-039 FR-PKV12)
+            // requires — so probing the default serve params would reject EVERY
+            // memory-capped serve config regardless of whether the model is paging-
+            // compatible. Probe the class the batched path actually pages
+            // (`maxKVSize = nil` → `KVCacheSimple`); a model that still returns a
+            // rotating/other class uncapped (e.g. genuine sliding-window attention)
+            // remains correctly rejected.
+            return Self.pagedKVRuntimeCacheClass(
+                model: context.model,
+                baseParameters: Self.cacheParameters(parameters, forceSimpleKV: true)
+            )
         }
     }
 

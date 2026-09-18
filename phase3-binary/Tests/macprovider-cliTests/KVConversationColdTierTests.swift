@@ -774,17 +774,60 @@ final class KVConversationColdTierTests: XCTestCase {
             "non-eligible params must select RotatingKVCache")
     }
 
-    func testPagedKVCacheClassProbeUsesUnforcedServeParameters() {
+    /// The paged/continuous-batching attach probe must classify the cache the BATCHED
+    /// (paged) path actually uses, not the memory-capped non-batched serve cache.
+    /// `makeServeGenerateParameters` always sets `maxKVSize`, so `newCache` returns a
+    /// `RotatingKVCache` — even for a full-attention model whose KV is contiguous and
+    /// paging-compatible. The batched path never uses that capped cache: it pages KV in
+    /// the SPEC-039 block pool (which bounds memory the way `maxKVSize` bounds the serve
+    /// cache), so the attach probe evaluates the `maxKVSize=nil` (`KVCacheSimple`) class.
+    /// A model that returns a rotating/other class even UNCAPPED (genuine sliding-window
+    /// attention) still classifies non-simple and stays correctly rejected (FR-PKV12).
+    func testPagedKVAttachProbeResolvesSimpleKVForMemoryCappedFullAttentionModel() {
         let model = FakeDimensionModel(layers: 3)
         let base = GenerateParameters(
             maxTokens: 128, maxKVSize: 4096, kvBits: nil,
             temperature: 0.0, topP: 1.0, prefillStepSize: 512)
 
-        let forced = ModelRuntime.serveCache(model: model, baseParameters: base, eligible: true)
-        XCTAssertNotNil(forced as? [KVCacheSimple])
+        // Non-batched serve cache (unforced, capped) is rotating — a full-attention model
+        // is rotating ONLY because of the memory cap, not because it needs a window.
+        let servedClass = ModelRuntime.pagedKVRuntimeCacheClass(model: model, baseParameters: base)
+        XCTAssertEqual(servedClass, "RotatingKVCache",
+            "the non-batched serve cache is memory-capped → RotatingKVCache")
 
-        let observed = ModelRuntime.pagedKVRuntimeCacheClass(model: model, baseParameters: base)
-        XCTAssertEqual(observed, "RotatingKVCache")
+        // The attach probe now classifies the paged path's cache: dropping maxKVSize
+        // (as the container-level probe does via cacheParameters(forceSimpleKV:true))
+        // resolves KVCacheSimple, so a memory-capped full-attention model can attach.
+        let attachClass = ModelRuntime.pagedKVRuntimeCacheClass(
+            model: model,
+            baseParameters: ModelRuntime.cacheParameters(base, forceSimpleKV: true))
+        XCTAssertEqual(attachClass, "KVCacheSimple",
+            "attach probe must resolve KVCacheSimple for a paging-compatible full-attention model")
+        XCTAssertTrue(PagedKVAttachGate.allowedCacheClasses.contains(attachClass),
+            "resolved attach class must be on the paged allowlist so attach proceeds")
+    }
+
+    /// SPEC-039 AC-13 negative case (the second of the "both cases are exercised"
+    /// clause): a model that GENUINELY needs windowing returns `RotatingKVCache` even
+    /// with `maxKVSize=nil`, so the attach probe classifies it non-`KVCacheSimple` even
+    /// uncapped and paging stays fail-safe. This is what preserves the FR-PKV12
+    /// windowed-masking correctness invariant while the sibling positive test opens a
+    /// memory-capped full-attention model.
+    func testPagedKVAttachProbeKeepsGenuineWindowedModelFailSafeEvenUncapped() {
+        let model = FakeWindowedModel(layers: 3)
+        let base = GenerateParameters(
+            maxTokens: 128, maxKVSize: 4096, kvBits: nil,
+            temperature: 0.0, topP: 1.0, prefillStepSize: 512)
+
+        // Even with the memory cap removed (as the attach probe does), a genuine
+        // sliding-window model still resolves RotatingKVCache -> off the allowlist.
+        let attachClass = ModelRuntime.pagedKVRuntimeCacheClass(
+            model: model,
+            baseParameters: ModelRuntime.cacheParameters(base, forceSimpleKV: true))
+        XCTAssertEqual(attachClass, "RotatingKVCache",
+            "a genuine windowed model must classify non-simple even uncapped")
+        XCTAssertFalse(PagedKVAttachGate.allowedCacheClasses.contains(attachClass),
+            "a windowed class must NOT be on the paged allowlist — paging stays fail-safe")
     }
 
     func testPagedKVCacheSeamRegistersKernelWithoutExecutingMetal() async throws {
@@ -911,6 +954,24 @@ final class KVConversationColdTierTests: XCTestCase {
         init(layers: Int) {
             self.kvHeads = Array(repeating: 1, count: layers)
             super.init()
+        }
+        func prepare(_ input: LMInput, cache: [KVCache], windowSize: Int?) throws -> PrepareResult {
+            fatalError("prepare is not exercised by the newCache cache-class invariant test")
+        }
+    }
+
+    /// A model that GENUINELY needs windowing: it OVERRIDES `newCache` to return
+    /// `RotatingKVCache` regardless of `maxKVSize` (as real sliding-window / hybrid
+    /// families do). Uncapped it still classifies non-`KVCacheSimple`, so the paged
+    /// attach probe keeps it fail-safe — the FR-PKV12 windowed-masking invariant.
+    private final class FakeWindowedModel: Module, LanguageModel, KVCacheDimensionProvider {
+        let kvHeads: [Int]
+        init(layers: Int) {
+            self.kvHeads = Array(repeating: 1, count: layers)
+            super.init()
+        }
+        func newCache(parameters: GenerateParameters?) -> [KVCache] {
+            kvHeads.map { _ in RotatingKVCache(maxSize: 4096) }
         }
         func prepare(_ input: LMInput, cache: [KVCache], windowSize: Int?) throws -> PrepareResult {
             fatalError("prepare is not exercised by the newCache cache-class invariant test")
