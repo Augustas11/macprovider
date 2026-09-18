@@ -1,0 +1,172 @@
+{
+  "schema_version": "macprovider.journey-result-envelope.v1",
+  "signatures": [
+    {
+      "algorithm": "ecdsa-p256-sha256",
+      "key_id": "macprovider-acceptance-p256-v1",
+      "signature": "MEYCIQDbZoblV+pRyX4tpwXWKI3e7hhH2C9884b0buQufukwjwIhAN0FgFWSEvxarfnejlhIOUZy6p6StXHkV8LNfe0zUkID",
+      "signed_sha256": "1757a1a70c40e9d11b35ea000276bce666f2f350b5615549ab3a0b0c6d1ebb6b",
+      "verified_at": "2026-09-18T04:22:40Z",
+      "verifier": ".github/workflows/promote-signed-buyer-paid-path-journey.yml:35306694729:1"
+    }
+  ],
+  "signed": {
+    "schema_version": "macprovider.journey-result.v1",
+    "journey_id": "JOURNEY-BUYER-PAID-PATH",
+    "requirement_ids": [
+      "SPEC-005-R001",
+      "SPEC-005-R002",
+      "SPEC-006-R001",
+      "SPEC-006-R002",
+      "SPEC-022-R001",
+      "SPEC-022-R002",
+      "SPEC-022-R003",
+      "SPEC-022-R010"
+    ],
+    "repository": {
+      "name": "Augustas11/macprovider",
+      "commit": "160d0e2ff62b0e40c65dd3741a35de4be322ea8e"
+    },
+    "captured_at": "2026-09-18T03:45:32Z",
+    "expires_at": "2026-10-18",
+    "operator": {
+      "identity_fingerprint": "19fc9a8b5b9134d581ac7089082d4d6da1f4ea4e3049c6c52bd963be62e93295",
+      "role": "acceptance-operator"
+    },
+    "environment": {
+      "candidate": "commit:160d0e2ff62b0e40c65dd3741a35de4be322ea8e",
+      "class": "isolated-candidate-paid-path",
+      "hardware_profile": "local-macos-redacted"
+    },
+    "artifacts": [
+      {
+        "id": "redacted-buyer-paid-path",
+        "sha256": "af1d1a816e2325fc110574f455e83c1b4362c40b98caf64c49a83a083867f903",
+        "source": "journeys/evidence/buyer-paid-path-20260918T034532Z.redacted.json"
+      }
+    ],
+    "result": {
+      "status": "pass",
+      "summary": "isolated candidate paid-path journey passed in observe mode without payout-ready mutation"
+    },
+    "steps": [
+      {
+        "id": "step-01-capture-config",
+        "status": "pass",
+        "assertion": "isolated candidate captured in observe mode with an API-key subject and no settlement runner",
+        "artifacts": [
+          "redacted-buyer-paid-path"
+        ]
+      },
+      {
+        "id": "step-02-nonstream-chat",
+        "status": "pass",
+        "assertion": "API-key non-streaming chat returned 200 with OpenAI-compatible usage",
+        "artifacts": [
+          "redacted-buyer-paid-path"
+        ]
+      },
+      {
+        "id": "step-03-quota-settlement",
+        "status": "pass",
+        "assertion": "gateway quota reservation settled after the 200 and did not leak",
+        "artifacts": [
+          "redacted-buyer-paid-path"
+        ]
+      },
+      {
+        "id": "step-04-ledger-credit",
+        "status": "pass",
+        "assertion": "coordinator ledger wrote an observe-mode credit whose persisted rates reproduce the signed rate-card split",
+        "artifacts": [
+          "redacted-buyer-paid-path"
+        ]
+      },
+      {
+        "id": "step-05-receipt-ingest",
+        "status": "pass",
+        "assertion": "SPEC-015 v0.4 settlement receipt was ingested and verified in observe mode",
+        "artifacts": [
+          "redacted-buyer-paid-path"
+        ]
+      },
+      {
+        "id": "step-06-streaming-chat",
+        "status": "pass",
+        "assertion": "streaming chat terminated cleanly; settled completion tokens equal the 12-token fixture prefix, not a byte-length estimate",
+        "artifacts": [
+          "redacted-buyer-paid-path"
+        ]
+      },
+      {
+        "id": "step-07-failure-refund",
+        "status": "pass",
+        "assertion": "pre-dispatch failure returned a buyer error envelope and refunded quota with no provider credit",
+        "artifacts": [
+          "redacted-buyer-paid-path"
+        ]
+      },
+      {
+        "id": "step-08-disclosure",
+        "status": "pass",
+        "assertion": "buyer models disclosure names paid entrypoints and observe-mode prose; it does not claim currently enforcing",
+        "artifacts": [
+          "redacted-buyer-paid-path"
+        ]
+      },
+      {
+        "id": "step-09-receipt-retrieval",
+        "status": "pass",
+        "assertion": "owner GET /v1/receipts/{id} returns metadata-only 200; missing is 404; unauthenticated is 401",
+        "artifacts": [
+          "redacted-buyer-paid-path"
+        ]
+      },
+      {
+        "id": "step-10-redaction",
+        "status": "pass",
+        "assertion": "retained artifacts contain fingerprints only; bearer tokens, private keys, and raw prompt/output are absent",
+        "artifacts": [
+          "redacted-buyer-paid-path"
+        ]
+      },
+      {
+        "id": "step-11-restore-config",
+        "status": "pass",
+        "assertion": "settlement mode remained observe, no payout-ready mutation, and enforce was not activated",
+        "artifacts": [
+          "redacted-buyer-paid-path"
+        ]
+      }
+    ],
+    "redaction": {
+      "local_account_names_redacted": true,
+      "operator_identity_redacted": true,
+      "secrets_redacted": true
+    },
+    "run_id": "buyer-paid-path-20260918T034532Z",
+    "execution_mode": "isolated-candidate-paid-path",
+    "observations": {
+      "bearer_tokens_redacted": true,
+      "buyer_receipt_retrieval_exposed": true,
+      "enforce_activated": false,
+      "isolated_environment": true,
+      "payout_ready_mutated": false,
+      "production_side_effects": false,
+      "raw_prompt_output_redacted": true,
+      "settlement_mode": "observe"
+    },
+    "candidate_identity": {
+      "autotune_catalog_sha256": "10b792ad574042c22d8cbb555c67baf14d6357ea6727e56164f4d8b73c03fa4a",
+      "autotune_catalog_version": "published-2026-09-02-gpt-oss-120b-v1",
+      "coordinator_config_sha256": "6eeca20c3f54e9bcd1dafed6cf9fae03d061f4d73d894e2dc00040f6d71df119",
+      "gateway_base_url_sha256": "bb14044ec06c65fc17327f6d3dbf4f87ab7b27d2c4830db5b3cd2f2b85304018",
+      "rate_card_matched_key": "meta-llama/llama-3.2-3b-instruct",
+      "rate_card_sha256": "1615f682eb3808c6ed92663633c6d099930a4e5df82c577ec951c6e098231a07",
+      "rate_card_version": "e751f78b773dc2eeff4c615dea315c440a3086f71c9c12c5b2e81df63e86fe1d",
+      "signed_catalog_id": "integration-catalog",
+      "signed_catalog_key_id": "integration-catalog-key",
+      "verified_model_sha256": "e7e5bff4248768b4db7a53afb3b514ba5867b800f63d1abd0330eaf08e54aa90"
+    }
+  }
+}
