@@ -45,8 +45,9 @@ binary the Mac runs.
 
 ## Next CLI — net changes vs 1.8.123
 
-All rows except the last are **already on `main`**. Next candidate = current
-`main`. Last built candidate `v1.8.163` is old — do not promote it.
+All rows are **already on `main`** — the train is fully merged, so the next
+candidate cut off current `main` carries every row. Last built candidate
+`v1.8.163` is old — do not promote it.
 
 | Net change in CLI / Malibu / installer | Status | PR |
 |---|---|---|
@@ -73,7 +74,7 @@ All rows except the last are **already on `main`**. Next candidate = current
 | Pricing metadata only from validated endpoints | merged | #1455 |
 | OpenRouter slot-delta / stale-capacity routing on CLI path | merged | #1571 #1535 |
 | Installer 404 fix: paginate latest-release lookup, de-quadratic parser | merged | #1582 (#1574) |
-| Live Ollama serve + Gemma tokens (non-earning) | in progress | #1569 #1576 |
+| Live Ollama serve + Gemma tokens (non-earning) | merged | #1576 (#1569) |
 
 #1453 closes when a candidate that includes the **merged** rows is promoted to
 the fleet. #1569 is a later CLI. Spec promotion #1583 is not a CLI change.
@@ -110,8 +111,9 @@ combined candidate**.
 - **Harness:** `test/e2e/byom/run-cli-onboarding-e2e.py` · runbook
   `test/e2e/byom/CANDIDATE-E2E-RUNBOOK.md`
 - **Gate:** Ollama actually serving, probe returns tokens, marked non-earning.
-- **Last run:** in progress. Skip this track unless this promotion is shipping
-  #1569.
+- **Last run:** #1569 landed (#1576 merged, issue closed) — the BYOM CLI change
+  is now in the train. Re-run Track B on the combined candidate before promoting
+  if that promotion ships BYOM earning.
 
 ## Promotion gate (checklist)
 
