@@ -124,7 +124,7 @@ final class ConsumeTrustedMetadataTransportMatrixTests: XCTestCase {
             records: &records
         )
 
-        let matrixRateCard = try MatrixSignedRateCardFixture(generatedAt: "2026-09-02T12:00:00Z")
+        let matrixRateCard = try MatrixSignedRateCardFixture(generatedAt: "2026-09-19T12:00:00Z")
         let loaderServer = try await LocalTLSTestServer(
             identity: validLeaf.identity,
             response: .pathMapped([
@@ -155,7 +155,7 @@ final class ConsumeTrustedMetadataTransportMatrixTests: XCTestCase {
             trustedPublicKeys: matrixRateCard.trustedPublicKeys,
             expectedPolicyVersion: matrixRateCard.policyVersion,
             endpointValidator: { validatedEndpoints.contains($0) },
-            now: { MatrixSignedRateCardFixture.date("2026-09-03T00:00:00Z") }
+            now: { MatrixSignedRateCardFixture.date("2026-09-20T00:00:00Z") }
         )
         let matrixState = await matrixLoader.load(from: "https://api.example.test:\(loaderServer.port)")
         let resolvedHosts = await loaderRecorder.resolvedHosts()

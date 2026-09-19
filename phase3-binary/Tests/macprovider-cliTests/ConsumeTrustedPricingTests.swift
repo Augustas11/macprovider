@@ -86,7 +86,7 @@ final class ConsumeTrustedPricingTests: XCTestCase {
     }
 
     func testLoaderFetchesCanonicalEndpointsAndFailsClosedWithoutFallback() async throws {
-        let fixture = try SignedRateCardFixture(generatedAt: "2026-09-02T12:00:00Z")
+        let fixture = try SignedRateCardFixture(generatedAt: "2026-09-19T12:00:00Z")
         let loader = ConsumeTrustedPricingLoader(
             resolveEndpoint: { _ in "8.8.8.8" },
             fetch: { url, endpoint in
@@ -102,7 +102,7 @@ final class ConsumeTrustedPricingTests: XCTestCase {
             },
             trustedPublicKeys: fixture.trustedPublicKeys,
             expectedPolicyVersion: fixture.policyVersion,
-            now: { SignedRateCardFixture.date("2026-09-03T00:00:00Z") }
+            now: { SignedRateCardFixture.date("2026-09-20T00:00:00Z") }
         )
 
         let loaded = await loader.load(from: "https://api.example.test")
@@ -172,9 +172,9 @@ final class ConsumeTrustedPricingTests: XCTestCase {
     }
 
     func testPricingFetchRejectsPrivateResolutionBeforeRateCardRequest() async throws {
-        let fixture = try SignedRateCardFixture(generatedAt: "2026-09-02T12:00:00Z")
+        let fixture = try SignedRateCardFixture(generatedAt: "2026-09-19T12:00:00Z")
         let recorder = PricingTransportRecorder(endpoints: ["127.0.0.1"], fixture: fixture)
-        let loader = fixture.loader(now: "2026-09-03T00:00:00Z", recorder: recorder)
+        let loader = fixture.loader(now: "2026-09-20T00:00:00Z", recorder: recorder)
 
         let result = await loader.load(from: "https://api.example.test")
         let resolvedHosts = await recorder.resolvedHosts()
@@ -185,9 +185,9 @@ final class ConsumeTrustedPricingTests: XCTestCase {
     }
 
     func testPricingFetchRepeatsResolutionAndRejectsPrivateSidecarRebinding() async throws {
-        let fixture = try SignedRateCardFixture(generatedAt: "2026-09-02T12:00:00Z")
+        let fixture = try SignedRateCardFixture(generatedAt: "2026-09-19T12:00:00Z")
         let recorder = PricingTransportRecorder(endpoints: ["8.8.8.8", "127.0.0.1"], fixture: fixture)
-        let loader = fixture.loader(now: "2026-09-03T00:00:00Z", recorder: recorder)
+        let loader = fixture.loader(now: "2026-09-20T00:00:00Z", recorder: recorder)
 
         let result = await loader.load(from: "https://api.example.test")
         let resolvedHosts = await recorder.resolvedHosts()

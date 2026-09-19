@@ -117,7 +117,12 @@ import pathlib
 import sys
 
 matrix = json.loads(pathlib.Path(sys.argv[1]).read_text())
-matrix["providers"][0]["evidence"]["benchmarks"] = matrix["providers"][0]["evidence"]["benchmarks"][:-1]
+# Drop a named recommendable row, not the last key: listed intake appends new
+# keys and must not retarget this quorum assertion.
+matrix["providers"][0]["evidence"]["benchmarks"] = [
+    row for row in matrix["providers"][0]["evidence"]["benchmarks"]
+    if row["model_key"] != "qwen3-coder-30b-a3b-instruct"
+]
 pathlib.Path(sys.argv[2]).write_text(json.dumps(matrix, separators=(",", ":")))
 PY
 if python3 "$AUDIT" --candidate "$CANDIDATE" --matrix "$TMP/incomplete.json" \
