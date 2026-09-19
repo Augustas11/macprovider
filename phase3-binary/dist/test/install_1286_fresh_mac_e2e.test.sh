@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# End-to-end proof for #1286: on a fresh, non-developer Mac (python3 is only the
-# /usr/bin/python3 Command Line Tools stub, no CLT installed), the installer must
-# FAIL FAST with an actionable error instead of hanging on the hidden CLT dialog.
+# End-to-end proof for #1286/#1575: on a fresh, non-developer Mac (python3 is
+# only the /usr/bin/python3 Command Line Tools stub, no CLT installed), the
+# installer must NOT hang on the hidden CLT dialog. With a bootstrapped
+# interpreter it must proceed; with bootstrap disabled it fail-fasts exit 8.
 # Drives install.sh exactly as Malibu does: `bash -s -- <flags>` fed on stdin.
 set -euo pipefail
 [ "$(uname -s)" = "Darwin" ] || { echo "SKIP: macOS only" >&2; exit 0; }
@@ -32,13 +33,25 @@ case "${1:-}" in -p|--print-path) echo "xcode-select: error: no developer tools"
 EOF
 chmod +x "$TMP/nocltbin/xcode-select"
 
-echo "== #1286 fresh-Mac (no-CLT) e2e =="
+echo "== #1286/#1575 fresh-Mac (no-CLT) e2e =="
 
-# 1) WITH the guard (this branch): must exit 8 fast, NOT hang, with the message.
-r="$(run_installer "$INSTALL_SH" "$TMP/nocltbin" 12)"
+# 1) Bootstrap disabled: must exit 8 fast, NOT hang, with an actionable message.
+r="$(MACPROVIDER_PYTHON_BOOTSTRAP_DISABLE=1 run_installer "$INSTALL_SH" "$TMP/nocltbin" 12)"
 [ "$r" = "EXIT:8" ] || { echo "FAIL: expected fast EXIT:8, got '$r'"; tail -5 "$TMP/out.log"; exit 1; }
-grep -qiE "Command Line Developer Tools" "$TMP/out.log" || { echo "FAIL: missing actionable CLT message"; tail -5 "$TMP/out.log"; exit 1; }
-pass "guarded installer FAILS FAST (exit 8, ~instant) with actionable CLT message — no hang"
+grep -qiE "Command Line Developer Tools|no usable python3" "$TMP/out.log" || { echo "FAIL: missing actionable python3/CLT message"; tail -5 "$TMP/out.log"; exit 1; }
+pass "bootstrap-disabled installer FAILS FAST (exit 8, ~instant) — no hang"
+
+# 1b) #1575: stub python3 + supplied standalone interpreter -> dry-run proceeds.
+# Wrapper lives in its own bin/ as python3 so PATH prepend resolves it, and it
+# must not be /usr/bin/python3 or the stub detector still fires.
+REALPY="$(command -v python3)"
+[ -n "$REALPY" ] || { echo "FAIL: host has no python3 to wrap as bootstrap" >&2; exit 1; }
+mkdir -p "$TMP/bootbin"
+printf '#!/bin/bash\nexec %q "$@"\n' "$REALPY" > "$TMP/bootbin/python3"
+chmod +x "$TMP/bootbin/python3"
+r="$(MACPROVIDER_TEST_ALLOW_BOOTSTRAP_OVERRIDE=1 MACPROVIDER_BOOTSTRAP_PYTHON3="$TMP/bootbin/python3" run_installer "$INSTALL_SH" "$TMP/nocltbin" 25)"
+[ "$r" = "EXIT:0" ] || { echo "FAIL: stub+bootstrap should complete dry-run (EXIT:0), got '$r'"; tail -20 "$TMP/out.log"; exit 1; }
+pass "fresh-Mac stub + bootstrapped python3 proceeds (dry-run EXIT:0) — no CLT click"
 
 # 2) COUNTERFACTUAL — old installer (origin/main, pre-guard) with a BLOCKING
 #    python3 stub HANGS. Proves the guard fixes a real hang.

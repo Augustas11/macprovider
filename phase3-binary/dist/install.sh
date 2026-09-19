@@ -73,6 +73,17 @@ HEADLESS_RECOVERY_TRUST_PATH="/Library/Application Support/macprovider/install-r
 SUDO_BIN="/usr/bin/sudo"
 LAUNCHCTL_BIN="/bin/launchctl"
 ROOT_PYTHON3_BIN="/usr/bin/python3"
+# Resolved interpreter after ensure_python3_usable. Empty until the gate runs.
+INSTALL_PYTHON3=""
+# Pinned standalone CPython used when /usr/bin/python3 is Apple's CLT stub
+# (#1575). Downloaded with curl and verified with shasum; never invoke the stub.
+# Asset is astral-sh/python-build-standalone install_only_stripped, darwin-arm64.
+BOOTSTRAP_PYTHON_RELEASE="20260901"
+BOOTSTRAP_PYTHON_ASSET="cpython-3.12.14+20260901-aarch64-apple-darwin-install_only_stripped.tar.gz"
+BOOTSTRAP_PYTHON_SHA256="81a359f1cfadd4da11766534c5913791cea55f26e1bb902cacd2a531bb1e4b2b"
+BOOTSTRAP_PYTHON_URL="https://github.com/astral-sh/python-build-standalone/releases/download/${BOOTSTRAP_PYTHON_RELEASE}/${BOOTSTRAP_PYTHON_ASSET}"
+# Headless LaunchDaemon / sudo helpers must not execute a user-writable tree.
+ROOT_INSTALL_PYTHON_DIR="/Library/Application Support/macprovider/install-python"
 SYSTEM_LAUNCHD_DIR="/Library/LaunchDaemons"
 LOCAL_USER_HOME_ROOT="/Users"
 LIVE_CONFIG_PATH="$CONFIG_PATH"
@@ -600,7 +611,7 @@ verify_published_launchd_plist() {
   source_path="$1"
   bootstrap_path="$2"
   [ "$HEADLESS" = "1" ] || return 0
-  "${SUDO_BIN:-/usr/bin/sudo}" -n /usr/bin/python3 - "$source_path" "$bootstrap_path" "$(id -u)" <<'PY'
+  "${SUDO_BIN:-/usr/bin/sudo}" -n "${ROOT_PYTHON3_BIN:-/usr/bin/python3}" - "$source_path" "$bootstrap_path" "$(id -u)" <<'PY'
 import ctypes
 import errno
 import os
@@ -3026,6 +3037,8 @@ write_install_recovery_artifacts() {
     fi
     printf 'REC_INSTALL_LOCK_PATH=%q\n' "$INSTALL_LOCK_PATH"
     printf 'REC_INSTALL_LOCK_TOKEN=%q\n' "$INSTALL_LOCK_TOKEN"
+    printf 'REC_INSTALL_PYTHON3=%q\n' "${INSTALL_PYTHON3:-python3}"
+    printf 'REC_ROOT_PYTHON3_BIN=%q\n' "${ROOT_PYTHON3_BIN:-/usr/bin/python3}"
     printf 'REC_INSTALLER_PID=%q\n' "$$"
     printf 'REC_INSTALLER_PROCESS_START=%q\n' "$(ps -p $$ -o lstart= 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
     printf 'REC_INSTALLER_BOOT_SESSION=%q\n' "$(/usr/sbin/sysctl -n kern.bootsessionuuid 2>/dev/null || true)"
@@ -3064,6 +3077,12 @@ write_install_recovery_artifacts() {
 set -u
 
 RECOVERY_DIR="$(cd "$(dirname "$0")" && pwd)" || exit 70
+# LaunchAgent recovery has launchd's default PATH. Prefer the installer-pinned
+# interpreter symlink written next to this script so we never invoke the CLT stub.
+if [ -x "$RECOVERY_DIR/python3" ]; then
+  PATH="$RECOVERY_DIR:$PATH"
+  export PATH
+fi
 verify_recovery_artifact() {
   artifact_path="$1"
   expected_payload="${2-}"
@@ -3139,6 +3158,16 @@ for recovery_marker in cutover-started provider-service-created watchdog-service
 done
 # shellcheck disable=SC1091
 . "$RECOVERY_DIR/state.sh" || exit 70
+# Privileged recovery helpers must use the root-owned interpreter, never a
+# user-writable cache and never an unset fallback to the CLT stub.
+case "${REC_ROOT_PYTHON3_BIN:-/usr/bin/python3}" in
+  /usr/bin/python3|/Library/Application\ Support/macprovider/install-python/bin/python3)
+    ROOT_PYTHON3_BIN="${REC_ROOT_PYTHON3_BIN:-/usr/bin/python3}"
+    ;;
+  *)
+    ROOT_PYTHON3_BIN="/usr/bin/python3"
+    ;;
+esac
 REC_PROVIDER_LABEL="${REC_PROVIDER_LABEL:-live.malibu.provider}"
 REC_LEGACY_PROVIDER_LABEL="${REC_LEGACY_PROVIDER_LABEL:-live.streamvc.macprovider}"
 REC_LEGACY_PLIST_PATH="${REC_LEGACY_PLIST_PATH:-$HOME/Library/LaunchAgents/live.streamvc.macprovider.plist}"
@@ -3483,7 +3512,7 @@ recovery_publish_root_file_from_base64() {
   target_path="$1"
   mode="$2"
   payload_b64="$3"
-  MACPROVIDER_ROOT_FILE_B64="$payload_b64" /usr/bin/sudo -n /usr/bin/python3 - "$target_path" "$mode" <<'PY'
+  MACPROVIDER_ROOT_FILE_B64="$payload_b64" /usr/bin/sudo -n "${ROOT_PYTHON3_BIN:-/usr/bin/python3}" - "$target_path" "$mode" <<'PY'
 import base64
 import os
 import sys
@@ -6815,6 +6844,9 @@ fsync_directory_path "$(dirname "$RESTORE_STAGING_DIR")" \
 exit 0
 RECOVERY_SCRIPT
   bash -n "$recovery_script" || return 1
+  if [ -n "${INSTALL_PYTHON3:-}" ] && [ -x "$INSTALL_PYTHON3" ]; then
+    ln -sfn "$INSTALL_PYTHON3" "$recovery_dir/python3" || return 1
+  fi
   observer_script="$recovery_dir/observe.sh"
   write_atomic_install_file "$observer_script" 0700 <<'OBSERVER_SCRIPT'
 #!/usr/bin/env bash
@@ -6823,6 +6855,10 @@ set -u
 RECOVERY_DIR="$(cd "$(dirname "$0")" && pwd)" || exit 70
 # shellcheck disable=SC1091
 . "$RECOVERY_DIR/state.sh" || exit 70
+if [ -n "${REC_INSTALL_PYTHON3:-}" ] && [ -x "$REC_INSTALL_PYTHON3" ]; then
+  PATH="$(dirname "$REC_INSTALL_PYTHON3"):$PATH"
+  export PATH
+fi
 
 process_start() {
   ps -p "$1" -o lstart= 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
@@ -6835,7 +6871,7 @@ while [ -d "$RECOVERY_DIR" ] \
 done
 
 [ -d "$RECOVERY_DIR" ] || exit 0
-exec python3 - "$RECOVERY_DIR" "$REC_INSTALL_LOCK_PATH" \
+exec "${REC_INSTALL_PYTHON3:-python3}" - "$RECOVERY_DIR" "$REC_INSTALL_LOCK_PATH" \
   "$REC_INSTALL_RECOVERY_PLIST_PATH" "$REC_UID" "$REC_INSTALL_RECOVERY_LABEL" <<'PY'
 import fcntl
 import os
@@ -7605,9 +7641,10 @@ require_tool() {
 # "Install Command Line Developer Tools" dialog, which appears BEHIND the Malibu
 # window and blocks the installer indefinitely (looks like a hang at
 # "Starting installer"). Detect the non-functional stub WITHOUT invoking it
-# (xcode-select -p does not trigger the install prompt), kick off the CLT
-# installer for the user (consumer/GUI only), and exit fast with a dedicated,
-# actionable code the app surfaces as a clear message. (#1285)
+# (xcode-select -p does not trigger the install prompt). #1285/#1286 fail-fast
+# instead of hanging. #1575: do not require a GUI CLT click — bootstrap a
+# hash-pinned standalone CPython with curl/tar/shasum and use that instead.
+#
 # Bounded "does this python3 actually run?" probe. Executes a trivial program
 # with a hard time budget so a BROKEN or BLOCKING interpreter (e.g. a hung shim
 # earlier in PATH, or a python3 with a missing dylib) fails fast with die 8
@@ -7620,6 +7657,142 @@ require_tool() {
 # `python3 -`, which would let the probe pass and the installer still hang. (#1286)
 # Returns 0 only if python3 exits 0 within the budget; non-zero on failure/crash;
 # 124 on timeout.
+
+# True when $1 is Apple's /usr/bin/python3 CLT stub (or a stale xcode-select
+# path). Must not execute the stub: that opens the hidden install dialog.
+_python3_is_clt_stub() {
+  local py="$1" devdir
+  [ "$py" = "/usr/bin/python3" ] || return 1
+  devdir="$(xcode-select -p 2>/dev/null || true)"
+  [ -z "$devdir" ] || [ ! -x "$devdir/usr/bin/python3" ]
+}
+
+_prepend_path_dir() {
+  local dir="$1" rest
+  [ -n "$dir" ] || return 0
+  rest=":$PATH:"
+  rest="${rest//:$dir:/:}"
+  rest="${rest#:}"
+  rest="${rest%:}"
+  PATH="$dir${rest:+:$rest}"
+  export PATH
+}
+
+_bootstrap_overrides_allowed() {
+  [ "${MACPROVIDER_TEST_ALLOW_BOOTSTRAP_OVERRIDE:-0}" = "1" ]
+}
+
+_install_python_cache_dir() {
+  local dir="$HOME/.local/share/macprovider/install-python"
+  if _bootstrap_overrides_allowed; then
+    dir="${MACPROVIDER_BOOTSTRAP_PYTHON_DIR:-$dir}"
+  fi
+  printf '%s' "$dir"
+}
+
+_bootstrap_python_die() {
+  die 8 "This Mac has no usable python3 (Apple's Command Line Tools stub or missing interpreter), and the installer could not bootstrap a pinned standalone interpreter: $*. Put a working python3 on PATH or install Apple's Command Line Developer Tools (xcode-select --install), then retry."
+}
+
+# Install or reuse the pinned standalone CPython. Sets INSTALL_PYTHON3.
+# MACPROVIDER_PYTHON_BOOTSTRAP_DISABLE=1: fail closed (tests of the missing
+# interpreter path). URL/SHA256/dir/interpreter overrides are ignored unless
+# MACPROVIDER_TEST_ALLOW_BOOTSTRAP_OVERRIDE=1 (test-only; production curl|bash
+# must use the in-script pin).
+bootstrap_standalone_python3() {
+  local override="" cache_dir tmp tarball actual py url expected asset
+  if _bootstrap_overrides_allowed; then
+    override="${MACPROVIDER_BOOTSTRAP_PYTHON3:-}"
+  fi
+  if [ -n "$override" ]; then
+    [ -x "$override" ] || _bootstrap_python_die "MACPROVIDER_BOOTSTRAP_PYTHON3 is not executable"
+    INSTALL_PYTHON3="$override"
+    return 0
+  fi
+  if [ "${MACPROVIDER_PYTHON_BOOTSTRAP_DISABLE:-0}" = "1" ]; then
+    return 1
+  fi
+  url="$BOOTSTRAP_PYTHON_URL"
+  expected="$BOOTSTRAP_PYTHON_SHA256"
+  asset="$BOOTSTRAP_PYTHON_ASSET"
+  cache_dir="$(_install_python_cache_dir)"
+  if _bootstrap_overrides_allowed; then
+    url="${MACPROVIDER_BOOTSTRAP_PYTHON_URL:-$url}"
+    expected="${MACPROVIDER_BOOTSTRAP_PYTHON_SHA256:-$expected}"
+    asset="$(basename "${MACPROVIDER_BOOTSTRAP_PYTHON_ASSET:-$asset}")"
+  fi
+  py="$cache_dir/bin/python3"
+  if [ -x "$py" ] \
+     && [ -f "$cache_dir/.macprovider-python.tar.gz" ] \
+     && [ "$(shasum -a 256 "$cache_dir/.macprovider-python.tar.gz" | awk '{print $1}')" = "$expected" ] \
+     && _python3_runs_quickly "$py"; then
+    INSTALL_PYTHON3="$py"
+    log "Reusing standalone python3 at $INSTALL_PYTHON3"
+    return 0
+  fi
+
+  tmp="$(mktemp -d "${TMPDIR:-/tmp}/macprovider-python.XXXXXX")" \
+    || _bootstrap_python_die "could not create a temporary directory"
+  tarball="$tmp/$asset"
+  log "Downloading pinned standalone python3 ($asset) so setup can continue without Command Line Tools."
+  curl -fL --connect-timeout 15 --speed-limit 1024 --speed-time 120 --retry 3 --retry-connrefused --retry-max-time 300 \
+    "$url" -o "$tarball" \
+    || { rm -rf "$tmp"; _bootstrap_python_die "download failed"; }
+  actual="$(shasum -a 256 "$tarball" | awk '{print $1}')"
+  [ "$actual" = "$expected" ] \
+    || { rm -rf "$tmp"; _bootstrap_python_die "SHA-256 mismatch"; }
+  if tar tzf "$tarball" | grep -E '(^/)|(^\.\./)|(/\.\./)' >/dev/null; then
+    rm -rf "$tmp"
+    _bootstrap_python_die "tarball contains unsafe paths"
+  fi
+  tar -xzf "$tarball" -C "$tmp" \
+    || { rm -rf "$tmp"; _bootstrap_python_die "extract failed"; }
+  [ -x "$tmp/python/bin/python3" ] \
+    || { rm -rf "$tmp"; _bootstrap_python_die "extracted tree has no python3"; }
+
+  mkdir -p "$(dirname "$cache_dir")" \
+    || { rm -rf "$tmp"; _bootstrap_python_die "could not create cache parent"; }
+  rm -rf "$cache_dir"
+  mv "$tmp/python" "$cache_dir" \
+    || { rm -rf "$tmp"; _bootstrap_python_die "could not install python tree"; }
+  chmod 700 "$cache_dir" 2>/dev/null || true
+  cp "$tarball" "$cache_dir/.macprovider-python.tar.gz" \
+    || { rm -rf "$cache_dir"; _bootstrap_python_die "could not persist pinned tarball"; }
+  printf '%s\n' "$expected" > "$cache_dir/.macprovider-sha256" \
+    || { rm -rf "$cache_dir"; _bootstrap_python_die "could not record pin"; }
+  rm -rf "$tmp"
+  py="$cache_dir/bin/python3"
+  _python3_runs_quickly "$py" \
+    || _bootstrap_python_die "bootstrapped interpreter did not run"
+  INSTALL_PYTHON3="$py"
+  log "Using standalone python3 at $INSTALL_PYTHON3"
+}
+
+# Copy the hash-verified user cache to a root-owned tree for headless sudo
+# helpers and the system watchdog. Never sudo a user-writable interpreter.
+publish_root_install_python() {
+  local src dest tarball expected actual extract
+  src="$(_install_python_cache_dir)"
+  dest="${ROOT_INSTALL_PYTHON_DIR:-/Library/Application Support/macprovider/install-python}"
+  tarball="$src/.macprovider-python.tar.gz"
+  expected="$BOOTSTRAP_PYTHON_SHA256"
+  if _bootstrap_overrides_allowed; then
+    expected="${MACPROVIDER_BOOTSTRAP_PYTHON_SHA256:-$expected}"
+  fi
+  [ -f "$tarball" ] || return 1
+  actual="$(shasum -a 256 "$tarball" | awk '{print $1}')"
+  [ "$actual" = "$expected" ] || return 1
+  extract="$(mktemp -d "${TMPDIR:-/tmp}/macprovider-python-root.XXXXXX")" || return 1
+  tar -xzf "$tarball" -C "$extract" || { rm -rf "$extract"; return 1; }
+  [ -x "$extract/python/bin/python3" ] || { rm -rf "$extract"; return 1; }
+  "${SUDO_BIN:-/usr/bin/sudo}" -n /bin/mkdir -p "$dest" || { rm -rf "$extract"; return 1; }
+  "${SUDO_BIN:-/usr/bin/sudo}" -n /usr/bin/ditto "$extract/python" "$dest" || { rm -rf "$extract"; return 1; }
+  rm -rf "$extract"
+  "${SUDO_BIN:-/usr/bin/sudo}" -n /usr/sbin/chown -R root:wheel "$dest" || return 1
+  "${SUDO_BIN:-/usr/bin/sudo}" -n /bin/chmod -R a-w,a+rX "$dest" || return 1
+  [ -x "$dest/bin/python3" ]
+}
+
 _python3_runs_quickly() {
   local py="$1" budget waited=0 pid
   # Validate/clamp the (normally-unset) budget override so a bogus or huge value
@@ -7650,47 +7823,59 @@ PYEOF
   wait "$pid"
 }
 
-# Confirm one python3 path is present AND genuinely usable, or die 8. For the CLT
-# stub at /usr/bin/python3 we must NOT execute it blindly (that pops the hidden
-# "Install Command Line Developer Tools" dialog and hangs), so we first prove the
-# selected developer directory actually contains a real python3; only then is it
-# safe to probe. Any other python3 is a real interpreter path we probe directly —
-# presence via `command -v` is not enough, since a broken/blocking python3 would
-# otherwise sail through and hang the next real call. (#1285/#1286)
+# Confirm one python3 path is present AND genuinely usable, or die 8. Callers
+# must bootstrap a standalone interpreter instead of passing the CLT stub;
+# this probe never opens the GUI installer (#1285/#1286/#1575). Presence via
+# `command -v` is not enough: a broken/blocking shim would hang the next call.
 _python3_usable_or_die() {
-  local py="$1" ctx="$2" devdir
-  [ -n "$py" ] || die 8 "This Mac is missing python3, which provider setup requires ($ctx). Install Apple's Command Line Developer Tools (xcode-select --install) or a working python3, then try again."
-  if [ "$py" = "/usr/bin/python3" ]; then
-    # `xcode-select -p` only prints the selected path (no install prompt) and can
-    # be stale/removed, so require the resolved tool to actually exist+execute
-    # before we dare run /usr/bin/python3.
-    devdir="$(xcode-select -p 2>/dev/null || true)"
-    if [ -z "$devdir" ] || [ ! -x "$devdir/usr/bin/python3" ]; then
-      if [ "${HEADLESS:-0}" != "1" ]; then
-        # Best-effort: open the GUI Command Line Tools installer for the user.
-        xcode-select --install >/dev/null 2>&1 || true
-        die 8 "This Mac needs Apple's Command Line Developer Tools to finish provider setup (they include python3). A system installer has been opened — click Install, wait for it to finish, then reopen Malibu."
-      fi
-      die 8 "This Mac is missing Apple's Command Line Developer Tools, which provider setup requires (they include python3). Install them with: xcode-select --install, then re-run the installer."
-    fi
-    # CLT is selected and backed by a real python3 -> /usr/bin/python3 delegates
-    # to it and is safe to probe below.
+  local py="$1" ctx="$2"
+  [ -n "$py" ] || die 8 "This Mac is missing python3, which provider setup requires ($ctx). Put a working python3 on PATH or retry so the installer can bootstrap a pinned standalone interpreter."
+  if _python3_is_clt_stub "$py"; then
+    die 8 "This Mac's python3 ($py, $ctx) is Apple's Command Line Tools stub. The installer should have bootstrapped a standalone interpreter before probing it."
   fi
   _python3_runs_quickly "$py" \
-    || die 8 "This Mac's python3 ($py) is present but did not run correctly ($ctx) — it may be broken or a stub. Install Apple's Command Line Developer Tools (xcode-select --install) or a working python3, then try again."
+    || die 8 "This Mac's python3 ($py) is present but did not run correctly ($ctx) — it may be broken or a stub. Put a working python3 on PATH or retry so the installer can bootstrap a pinned standalone interpreter."
 }
 
 ensure_python3_usable() {
+  local py shimdir user_py
   # (1) The interpreter that user-context python3 calls resolve to (the first is
   # validate_install_dir, immediately after this guard).
-  _python3_usable_or_die "$(command -v python3 2>/dev/null || true)" "user interpreter"
-  # (2) In headless mode, privileged root helpers ALWAYS run ROOT_PYTHON3_BIN
-  # (/usr/bin/python3) under sudo. When the resolved user interpreter is a
-  # different python3 (e.g. Homebrew), the check above does NOT prove the system
-  # interpreter is usable, so validate it independently. (#1286 MEDIUM)
-  if [ "${HEADLESS:-0}" = "1" ] \
-     && [ "$(command -v python3 2>/dev/null || true)" != "${ROOT_PYTHON3_BIN:-/usr/bin/python3}" ]; then
-    _python3_usable_or_die "${ROOT_PYTHON3_BIN:-/usr/bin/python3}" "system root interpreter"
+  py="$(command -v python3 2>/dev/null || true)"
+  if [ -z "$py" ] || _python3_is_clt_stub "$py"; then
+    log "System python3 is missing or is Apple's Command Line Tools stub; bootstrapping a pinned standalone interpreter."
+    bootstrap_standalone_python3 \
+      || die 8 "This Mac has no usable python3 (Apple's Command Line Tools stub or missing interpreter). Put a working python3 on PATH or install Apple's Command Line Developer Tools (xcode-select --install), then retry."
+    py="$INSTALL_PYTHON3"
+  fi
+  _python3_usable_or_die "$py" "user interpreter"
+  INSTALL_PYTHON3="$py"
+  if [ "$(basename "$py")" != "python3" ]; then
+    shimdir="$(_install_python_cache_dir)/bin"
+    mkdir -p "$shimdir" || die 8 "could not create python3 shim directory"
+    ln -sf "$py" "$shimdir/python3" || die 8 "could not link python3 shim"
+    INSTALL_PYTHON3="$shimdir/python3"
+  fi
+  _prepend_path_dir "$(dirname "$INSTALL_PYTHON3")"
+  # (2) In headless mode, privileged root helpers run ROOT_PYTHON3_BIN under
+  # sudo. When /usr/bin/python3 is the CLT stub, publish the pinned tree to a
+  # root-owned prefix — never sudo a user-writable interpreter (#1575 / #1286).
+  if [ "${HEADLESS:-0}" = "1" ]; then
+    if _python3_is_clt_stub "${ROOT_PYTHON3_BIN:-/usr/bin/python3}"; then
+      user_py="$INSTALL_PYTHON3"
+      if [ ! -x "$(_install_python_cache_dir)/bin/python3" ]; then
+        bootstrap_standalone_python3 \
+          || die 8 "headless mode could not bootstrap a pinned python3 for root helpers"
+        INSTALL_PYTHON3="$user_py"
+        _prepend_path_dir "$(dirname "$INSTALL_PYTHON3")"
+      fi
+      publish_root_install_python \
+        || die 8 "headless mode could not publish a root-owned python3 for LaunchDaemon helpers"
+      ROOT_PYTHON3_BIN="${ROOT_INSTALL_PYTHON_DIR}/bin/python3"
+    fi
+    if [ "$INSTALL_PYTHON3" != "${ROOT_PYTHON3_BIN:-/usr/bin/python3}" ]; then
+      _python3_usable_or_die "${ROOT_PYTHON3_BIN:-/usr/bin/python3}" "system root interpreter"
+    fi
   fi
 }
 
@@ -11631,7 +11816,7 @@ local_status_restart_recommended() {
   fi
   curl_bin="${MACPROVIDER_CURL:-/usr/bin/curl}"
   status_body="$("$curl_bin" -fsS --max-time 2 "http://127.0.0.1:${port}/v1/status" 2>/dev/null)" || return 1
-  STATUS_BODY="$status_body" python3 <<'PY'
+  STATUS_BODY="$status_body" "${MACPROVIDER_PYTHON3:-python3}" <<'PY'
 import json
 import os
 import sys
@@ -11669,7 +11854,7 @@ valid_lifecycle_lease_record() {
   expected_pid="${2:-}"
   boot_id="$(current_boot_id || true)"
   [ -n "$boot_id" ] || return 1
-  /usr/bin/python3 - \
+  "${MACPROVIDER_PYTHON3:-python3}" - \
     "$LIFECYCLE_LEASE_PATH" \
     "$LIFECYCLE_LEASE_OWNER_UID" \
     "$boot_id" \
@@ -11976,7 +12161,7 @@ capture_supervisor_status_fields() {
   fi
   curl_bin="${MACPROVIDER_CURL:-/usr/bin/curl}"
   body="$("$curl_bin" -fsS --max-time 2 "http://127.0.0.1:${port}/v1/status" 2>/dev/null)" || return 0
-  fields="$(STATUS_BODY="$body" python3 <<'PY' 2>/dev/null || true
+  fields="$(STATUS_BODY="$body" "${MACPROVIDER_PYTHON3:-python3}" <<'PY' 2>/dev/null || true)
 import json, os, re
 try:
     b = json.loads(os.environ.get("STATUS_BODY", ""))
@@ -12302,16 +12487,27 @@ render_watchdog_plist() {
   watchdog_search_path="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
   launchctl_environment_entry=""
   lifecycle_lease_environment_entry=""
+  python_environment_entry=""
+  watchdog_python=""
   if [ "$HEADLESS" = "1" ]; then
     credential_store="protected_file"
-    watchdog_search_path="/usr/bin:/bin:/usr/sbin:/sbin"
+    watchdog_python="${ROOT_PYTHON3_BIN:-/usr/bin/python3}"
+    watchdog_search_path="$(dirname "$watchdog_python"):/usr/bin:/bin:/usr/sbin:/sbin"
     launchctl_environment_entry="    <key>MACPROVIDER_LAUNCHCTL</key>
     <string>/bin/launchctl</string>"
     lifecycle_lease_environment_entry="    <key>MACPROVIDER_LIFECYCLE_LEASE_PATH</key>
     <string>$(xml_escape "$LIFECYCLE_LEASE_PATH")</string>
     <key>MACPROVIDER_LIFECYCLE_LEASE_OWNER_UID</key>
     <string>$(id -u)</string>"
+  elif [ -n "${INSTALL_PYTHON3:-}" ]; then
+    watchdog_python="$INSTALL_PYTHON3"
+    watchdog_search_path="$(dirname "$watchdog_python"):$watchdog_search_path"
   fi
+  if [ -n "$watchdog_python" ]; then
+    python_environment_entry="    <key>MACPROVIDER_PYTHON3</key>
+    <string>$(xml_escape "$watchdog_python")</string>"
+  fi
+  watchdog_search_path_xml="$(xml_escape "$watchdog_search_path")"
   cat <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
@@ -12340,7 +12536,8 @@ render_watchdog_plist() {
     <!-- Issue #191 R4 architect HIGH: include /usr/sbin and /sbin
          so the watchdog finds sysctl + netstat under launchd's
          minimal PATH. -->
-    <string>$watchdog_search_path</string>
+    <string>$watchdog_search_path_xml</string>
+$python_environment_entry
     <key>MACPROVIDER_WATCHDOG_LABEL</key>
     <string>live.malibu.provider</string>
     <key>MACPROVIDER_CONFIG_PATH</key>
@@ -13874,9 +14071,9 @@ main() {
   done
   # python3 is intentionally NOT in the generic require_tool loop: on a stock Mac
   # the only python3 is the CLT stub, which passes command -v but hangs the first
-  # real invocation, and a Mac with no python3 at all must surface the same
-  # actionable die 8 (not a generic "missing required tool: python3" exit 2).
-  # ensure_python3_usable is the sole authority for python3 presence+usability. (#1285)
+  # real invocation. ensure_python3_usable is the sole authority: it bootstraps a
+  # pinned standalone interpreter when the stub is the only option (#1285/#1575)
+  # and still fail-fasts on a broken/blocking PATH shim (#1286).
   ensure_python3_usable
   validate_install_dir
   remediate_repair_home_write_acl

@@ -23,6 +23,8 @@
     <string>__HOME__</string>
     <key>PATH</key>
     <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>MACPROVIDER_PYTHON3</key>
+    <string>python3</string>
     <key>MACPROVIDER_WATCHDOG_LABEL</key>
     <string>live.malibu.provider</string>
     <key>MACPROVIDER_CONFIG_PATH</key>

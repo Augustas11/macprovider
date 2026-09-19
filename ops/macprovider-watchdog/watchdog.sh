@@ -211,7 +211,7 @@ local_status_restart_recommended() {
   fi
   curl_bin="${MACPROVIDER_CURL:-/usr/bin/curl}"
   status_body="$("$curl_bin" -fsS --max-time 2 "http://127.0.0.1:${port}/v1/status" 2>/dev/null)" || return 1
-  STATUS_BODY="$status_body" python3 <<'PY'
+  STATUS_BODY="$status_body" "${MACPROVIDER_PYTHON3:-python3}" <<'PY'
 import json
 import os
 import sys
@@ -249,7 +249,7 @@ valid_lifecycle_lease_record() {
   expected_pid="${2:-}"
   boot_id="$(current_boot_id || true)"
   [ -n "$boot_id" ] || return 1
-  /usr/bin/python3 - \
+  "${MACPROVIDER_PYTHON3:-python3}" - \
     "$LIFECYCLE_LEASE_PATH" \
     "$LIFECYCLE_LEASE_OWNER_UID" \
     "$boot_id" \
@@ -557,7 +557,7 @@ capture_supervisor_status_fields() {
   fi
   curl_bin="${MACPROVIDER_CURL:-/usr/bin/curl}"
   body="$("$curl_bin" -fsS --max-time 2 "http://127.0.0.1:${port}/v1/status" 2>/dev/null)" || return 0
-  fields="$(STATUS_BODY="$body" python3 <<'PY' 2>/dev/null || true
+  fields="$(STATUS_BODY="$body" "${MACPROVIDER_PYTHON3:-python3}" <<'PY' 2>/dev/null || true)
 import json, os, re
 try:
     b = json.loads(os.environ.get("STATUS_BODY", ""))

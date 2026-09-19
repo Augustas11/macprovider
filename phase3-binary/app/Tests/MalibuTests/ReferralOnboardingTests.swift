@@ -251,9 +251,9 @@ final class ReferralOnboardingTests: XCTestCase {
     }
 
     func testExit8MapsToDeveloperToolsRequiredNotInvite() {
-        // install.sh die 8 = missing/unusable Command Line Developer Tools (python3
-        // CLT stub). It must surface an actionable "install developer tools" message,
-        // never the invite-required copy, in both new-join and repair flows. (#1285/#1286)
+        // install.sh die 8 = no usable python3 (CLT stub and bootstrap failed).
+        // It must surface an actionable Developer Tools / retry message, never
+        // the invite-required copy, in both new-join and repair flows. (#1285/#1575)
         for repair in [false, true] {
             switch CLIInstallRunner.classifiedInstallError(exitCode: 8, repairExistingInstall: repair) {
             case .developerToolsRequired?:

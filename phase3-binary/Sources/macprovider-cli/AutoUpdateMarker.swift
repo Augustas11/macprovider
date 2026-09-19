@@ -2134,6 +2134,7 @@ struct AutoUpdateMarkerStore: @unchecked Sendable {
         cutoverCheckpoint: ((CompatibilitySetCutoverPhase) throws -> Void)?
     ) throws {
         let coordinatorHost = try installedWatchdogCoordinatorHost()
+        let python3 = try installedWatchdogPython3()
         let staging = installDirectory.appendingPathComponent(
             ".macprovider-cli.external-activation-\(UUID().uuidString.lowercased())",
             isDirectory: true
@@ -2155,9 +2156,12 @@ struct AutoUpdateMarkerStore: @unchecked Sendable {
             replacements: replacements
         )
         try validateProviderPlist(providerPlist, installDirectory: installDirectory)
-        let watchdogPlist = try renderPlistTemplate(
-            artifactDirectory.appendingPathComponent("watchdog-launch-agent.plist.template"),
-            replacements: replacements
+        let watchdogPlist = try applyPreservedWatchdogPython3(
+            try renderPlistTemplate(
+                artifactDirectory.appendingPathComponent("watchdog-launch-agent.plist.template"),
+                replacements: replacements
+            ),
+            python3: python3
         )
         try validateWatchdogPlist(watchdogPlist, installDirectory: installDirectory, coordinatorHost: coordinatorHost)
 
@@ -2208,6 +2212,39 @@ struct AutoUpdateMarkerStore: @unchecked Sendable {
               Self.isTrustedCoordinatorHostValue(host)
         else { throw AutoUpdateMarkerError.trustedRootInvalid("installed_watchdog_plist_invalid") }
         return host
+    }
+
+    /// Preserve the installer-chosen interpreter across compatibility-set
+    /// watchdog rewrites. New installs pin an absolute standalone CPython.
+    /// Pre-#1575 plists have no key: keep unqualified `python3` so launchd PATH
+    /// resolution is unchanged (do not force the CLT stub).
+    private func installedWatchdogPython3() throws -> String {
+        let fallback = "python3"
+        guard fileManager.fileExists(atPath: watchdogPlistURL.path) else {
+            return fallback
+        }
+        let data = try readRegularFileNoFollow(watchdogPlistURL)
+        guard let plist = try PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
+              let environment = plist["EnvironmentVariables"] as? [String: Any]
+        else { throw AutoUpdateMarkerError.trustedRootInvalid("installed_watchdog_plist_invalid") }
+        if let python3 = environment["MACPROVIDER_PYTHON3"] as? String,
+           python3.hasPrefix("/"),
+           !python3.contains("..")
+        {
+            return python3
+        }
+        return fallback
+    }
+
+    /// Overlay the preserved interpreter after token render so this release's
+    /// template can stay incumbent-compatible (no new `__TOKEN__`).
+    private func applyPreservedWatchdogPython3(_ data: Data, python3: String) throws -> Data {
+        guard var plist = try PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
+              var environment = plist["EnvironmentVariables"] as? [String: Any]
+        else { throw AutoUpdateMarkerError.trustedRootInvalid("rendered_watchdog_plist_invalid") }
+        environment["MACPROVIDER_PYTHON3"] = python3
+        plist["EnvironmentVariables"] = environment
+        return try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0)
     }
 
     /// The installed watchdog coordinator host may carry an optional `:port`

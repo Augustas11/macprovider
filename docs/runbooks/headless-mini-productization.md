@@ -12,7 +12,7 @@ For the normal desktop/Malibu.app install, use the standard installer without
 
 - macOS Apple Silicon Mac mini
 - SSH access as the intended non-root fleet user
-- Python 3 and Command Line Tools available on the Mac
+- A usable python3. The installer bootstraps a pinned standalone CPython when `/usr/bin/python3` is only Apple's Command Line Tools stub; Command Line Tools are not required for first-run setup.
 - Passwordless `sudo` for `/bin/launchctl` and `/bin/rm` if you later run
   `malibu-cli uninstall` from this account
 
