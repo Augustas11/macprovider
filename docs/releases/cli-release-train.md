@@ -45,12 +45,14 @@ binary the Mac runs.
 
 ## Next CLI — net changes vs 1.8.123
 
-All rows are **already on `main`** — the train is fully merged, so the next
-candidate cut off current `main` carries every row. Last built candidates
-`v1.8.163` and `v1.8.164` are old — do not promote them.
+One CLI row is still **in progress** (uncatalogued BYOM loopback hold). Do not
+cut a promotable candidate until that row is `merged`. Last built candidates
+`v1.8.163`, `v1.8.164`, `v1.8.167`, and `v1.8.168` are old or off-train — do
+not promote them.
 
 | Net change in CLI / Malibu / installer | Status | PR |
 |---|---|---|
+| Uncatalogued BYOM loopback serve holds WS instead of self-flapping | in progress | #1609 |
 | Serve stays connected while BYOM admission is pending | merged | #1557 |
 | MLX `models offer` sends snapshot hash (catalog-match works) | merged | #1548 |
 | Malibu shows BYOM admission states | merged | #1497 |
@@ -96,10 +98,12 @@ promoted **and** `get.malibu.tech/install.sh` is republished.
 
 | Field | Value |
 |---|---|
-| Last built candidates | `v1.8.163` @ `8c0c51d2`; `v1.8.164` BYOM @ `cdbb0257` |
-| Status | **Do not promote either.** Both predate #1595/#1596/#1599 and current `main`. |
-| Next candidate | cut off current `main` (`e1980879` or newer tip after this file lands) |
-| Why this cut | Pi/Qwen tool-call correctness on the Mac, 256-cap gone on the provider, #1582 install.sh pagination, plus the already-merged BYOM / paged-KV / autotune train |
+| Last built from `main` | `v1.8.168` @ `646f22f84984fd994151f3512c8432992cf9b36f` ([run 35425108016](https://github.com/Augustas11/macprovider/actions/runs/35425108016)), branch `release/candidate-1.8.168-spec038` |
+| Off-train E2E candidate | `v1.8.167` @ `7f833a2f63ddee6b2e146c821341099d89aec169` ([run 35417249468](https://github.com/Augustas11/macprovider/actions/runs/35417249468)) — signed hold-branch CLI used for the 2026-09-19 Pearl Track B run |
+| Older | `v1.8.163` @ `8c0c51d2`; `v1.8.164` BYOM @ `cdbb0257` |
+| Status | **Do not promote any of the above.** `v1.8.168` predates this hold and later `main` (#1600/#1601/#1602). `v1.8.167` proved Track B but is not current `main`. |
+| Next candidate | cut off current `main` **after** the loopback-hold row is `merged` |
+| Why the next cut | Pi/Qwen tool-call correctness on the Mac, 256-cap gone, #1582 install.sh pagination, paged-KV attach, BYOM serve (#1576) **plus** the uncatalogued loopback hold so Pearl Gemma serve stays on the wire |
 
 ## E2E tracks (independent gates)
 
@@ -122,12 +126,26 @@ combined candidate**.
 ### Track B — BYOM Ollama / Gemma
 
 - **Owner / tracker:** #1569 (not #1453)
-- **Harness:** `test/e2e/byom/run-cli-onboarding-e2e.py` · runbook
-  `test/e2e/byom/CANDIDATE-E2E-RUNBOOK.md`
-- **Gate:** Ollama actually serving, probe returns tokens, marked non-earning.
-- **Last run:** #1569 landed (#1576 merged, issue closed) — the BYOM CLI change
-  is now in the train. Re-run Track B on the combined candidate before promoting
-  if that promotion ships BYOM earning.
+- **Harness:** `test/e2e/byom/gemma_runtime_journey.py` · runbook
+  `test/e2e/byom/GEMMA-RUNTIME-JOURNEY-RUNBOOK.md` (onboarding sibling:
+  `test/e2e/byom/run-cli-onboarding-e2e.py`)
+- **Gate:** one signed CLI process serving `ollama:gemma3:270m` with
+  `runtime_source=ollama_loopback` and `macprovider.gguf-file.v1`; coordinator
+  synthetic probe returns `synthetic_probe_passed` and
+  `synthetic_probe_completion_tokens > 0`; `catalog_model_key` stays null;
+  never `catalog_priced` / `settlement_capable`. Delete this provider's
+  `model_admission_events` after the run or catalog Llama de-routes.
+- **Last run:** 2026-09-19 live Pearl (`wss://coordinator.malibu.tech/ws/provider`)
+  with signed `v1.8.167` @ `7f833a2f`. Serve `ollama:gemma3:270m` /
+  `ollama_loopback`. Offer coordinator-backed,
+  `coordinator_event_id` `bcdbd3cedfa2e4149b4094ddb6ae6629fc131fd7e78aa7954fdc4a67555506c6`.
+  Probe: `synthetic_probe_passed` → `network_admitted_unsettled`,
+  `synthetic_probe_completion_tokens=4`. Admission rows deleted afterward;
+  stock earner restored to `1.8.123` `buyer_serving` / `live_verified`.
+  A signed candidate from a non-install path must not re-exec into
+  `~/macprovider/macprovider-cli` (that is how 167 first looked like an MLX
+  load). Re-run Track B on the first candidate that includes this hold before
+  promoting a BYOM-serve CLI. `v1.8.168` does **not** include the hold.
 
 ### Track C — Pi / Qwen tool-call smoke (this cut)
 
@@ -146,9 +164,10 @@ combined candidate**.
 
 1. All in-scope CLI rows above are `merged`.
 2. Cut one candidate off `main` (`acceptance-candidate.yml`). Do **not** reuse
-   `v1.8.163` / `v1.8.164`.
-3. In-scope e2e green on **that** candidate (Track A this cut; Track B only if
-   shipping #1569 earning).
+   `v1.8.163` / `v1.8.164` / `v1.8.167` / `v1.8.168`.
+3. In-scope e2e green on **that** candidate (Track A this cut; Track B on a
+   candidate that includes the loopback hold before promoting a BYOM-serve CLI;
+   Track B is not #1453 close).
 4. Live smoke on the candidate (not a substitute for Track A): Pi/Qwen3-Coder
    stream+tools concat is one JSON object (never `{}` / `{}{`); unclosed
    function-XML becomes a real `bash` tool call; 257+ messages are not rejected
