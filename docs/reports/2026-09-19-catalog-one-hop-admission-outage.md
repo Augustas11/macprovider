@@ -71,3 +71,6 @@ multiline pointer as invalid and will refuse previous catalogs entirely.
 Catalog publish / freshness restamp must **prepend** the outgoing current and
 keep at most three unique lines. Replacing the file with a single hop repeats
 this outage on the next cut.
+
+The three-release window is incident mitigation, not the lasting primitive.
+Design follow-up: https://github.com/Augustas11/macprovider/issues/1615
