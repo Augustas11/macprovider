@@ -1385,6 +1385,21 @@ final class AutotuneRecommendTests: XCTestCase {
         }
     }
 
+    func testGLMRateCardLookupUsesCatalogKey() throws {
+        let rateCard = try AutotuneStaticInputs.decodeRateCard(Data(AutotuneStaticInputs.bakedRateCardJSON.utf8))
+
+        for modelKey in [
+            "z-ai/glm-4.5-air",
+            "glm-4.5-air",
+            "mlx-community/GLM-4.5-Air-4bit",
+        ] {
+            let row = rateCard.rowForRecommendation(modelKey: modelKey)
+            XCTAssertEqual(row?.key, "z-ai/glm-4.5-air", modelKey)
+            XCTAssertEqual(row?.row.promptRatePerMtok, 112_000)
+            XCTAssertEqual(row?.row.completionRatePerMtok, 688_000)
+        }
+    }
+
     func testNemotronRecommendationKeepsPublicServedModelWithNormalizedRateCard() throws {
         let modelKey = "nvidia/nemotron-3-nano-30b-a3b"
         var request = try makeRequest(modelKey: modelKey)
@@ -1876,7 +1891,7 @@ final class AutotuneRecommendTests: XCTestCase {
 
     func testSignedStaticFallbackAndStaleWarnings() async throws {
         let validFetched = Data(AutotuneStaticInputs.bakedDemandRankJSON
-            .replacingOccurrences(of: "published-2026-09-19-openrouter-listed-v1", with: "fetched-2026-09-09")
+            .replacingOccurrences(of: "published-2026-09-19-openrouter-priced-v1", with: "fetched-2026-09-09")
             .replacingOccurrences(of: "2026-09-19T00:00:00Z", with: "2026-09-20T00:00:00Z")
             .utf8)
         let signature = Data(repeating: 0, count: 64).base64EncodedString()
@@ -2003,7 +2018,7 @@ final class AutotuneRecommendTests: XCTestCase {
 
     func testSignedStaticRejectsSidecarWithExtraFields() async throws {
         let fetched = Data(AutotuneStaticInputs.bakedDemandRankJSON
-            .replacingOccurrences(of: "published-2026-09-19-openrouter-listed-v1", with: "fetched-2026-07-29")
+            .replacingOccurrences(of: "published-2026-09-19-openrouter-priced-v1", with: "fetched-2026-07-29")
             .replacingOccurrences(of: "2026-09-19T00:00:00Z", with: "2026-07-29T09:00:00Z")
             .utf8)
         let sidecar = Data(#"{"key_id":"streamvc-autotune-static-v4","alg":"ed25519","signature":"AA==","extra":true}"#.utf8)

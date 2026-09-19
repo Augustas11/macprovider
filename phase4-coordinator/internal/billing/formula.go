@@ -88,6 +88,8 @@ func NormalizeModelKey(model string) string {
 		return strings.TrimPrefix(key, "nvidia-")
 	case servedAliasNamespace(namespace, "openai") && strings.HasPrefix(key, "gpt-oss-"):
 		return "openai/" + key
+	case servedAliasNamespace(namespace, "z-ai") && strings.HasPrefix(key, "glm-"):
+		return "z-ai/" + key
 	default:
 		return key
 	}

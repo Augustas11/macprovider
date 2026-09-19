@@ -504,7 +504,7 @@ class RateCardSourceTest(unittest.TestCase):
         self.assertEqual(json.loads(expanded)["rows"], published["rows"])
 
     def test_every_committed_key_resolves_a_rate_row_through_its_declared_class(self):
-        """AC-CAT-10 / §3.3.1 rules 5+7: each of the ten seeded keys resolves to a
+        """AC-CAT-10 / §3.3.1 rules 5+7: each recommendable key resolves to a
         concrete published row, by exact key or by `NormalizeModelKey`, even where
         its declared class carries no rates (`class-30b-moe`, `class-32b`)."""
         classes = catalog_release.artifact_rate_classes(json.loads(ARTIFACT_SOURCE_BYTES))

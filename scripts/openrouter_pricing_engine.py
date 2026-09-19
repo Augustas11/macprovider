@@ -252,6 +252,8 @@ def normalize_model_key(model: str) -> str:
         return key[len("nvidia-"):]
     if served_alias("openai") and key.startswith("gpt-oss-"):
         return "openai/" + key
+    if served_alias("z-ai") and key.startswith("glm-"):
+        return "z-ai/" + key
     return key
 
 

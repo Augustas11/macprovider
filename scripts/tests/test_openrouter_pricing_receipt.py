@@ -116,7 +116,19 @@ class ReceiptTests(unittest.TestCase):
                     if "perf_last_30m_by_workload" not in endpoint and isinstance(endpoint.get("completion_tokens_last_30d"), int):
                         endpoint["perf_last_30m_by_workload"] = {"text_generation": {"request_count": endpoint["completion_tokens_last_30d"]}}
             template_endpoint = copy.deepcopy(endpoints["example/new-model"])
-            for index in range(12, 51):
+            policy_document = json.loads(POLICY.read_text(encoding="utf-8"))
+            existing_ranked = {row["model_permaslug"] for row in rankings["data"]}
+            for item in policy_document["models"]:
+                source_id = item["source_model_id"]
+                if source_id in existing_ranked:
+                    continue
+                rankings["data"].append({"date": "2026-08-03", "model_permaslug": source_id, "total_tokens": "10000"})
+                models["data"].append({"id": source_id, "canonical_slug": source_id, "name": source_id, "pricing": None})
+                endpoint = copy.deepcopy(template_endpoint)
+                endpoint["data"]["id"] = source_id
+                endpoints[source_id] = endpoint
+                existing_ranked.add(source_id)
+            for index in range(12, 44):
                 model_id = f"unknown/model-{index}"
                 rankings["data"].append({"date": "2026-08-03", "model_permaslug": model_id, "total_tokens": str(9000 - index)})
                 models["data"].append({"id": model_id, "canonical_slug": model_id, "name": f"Unknown {index}", "pricing": None})
@@ -124,7 +136,6 @@ class ReceiptTests(unittest.TestCase):
                 endpoint["data"]["id"] = model_id
                 endpoints[model_id] = endpoint
 
-            policy_document = json.loads(POLICY.read_text(encoding="utf-8"))
             # The single-provider replay fixture predates the distinct-provider
             # quorum and request floor; relax them for this deterministic replay.
             policy_document["min_distinct_providers"] = 1
