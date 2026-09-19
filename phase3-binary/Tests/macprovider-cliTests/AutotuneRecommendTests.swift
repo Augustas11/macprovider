@@ -3443,6 +3443,203 @@ final class AutotuneRecommendTests: XCTestCase {
         XCTAssertEqual(prober.probedModels, [artifactPath])
     }
 
+    func testBenchmarksEmitsPerModelProgressAndReusesDurableProbeCache() async throws {
+        let modelKey = "qwen3-coder-30b-a3b-instruct"
+        var request = try makeRequest(modelKey: modelKey)
+        request.benchmarks = [:]
+        let row = try XCTUnwrap(request.candidateCatalog.rows[modelKey])
+        let revision = try XCTUnwrap(row.modelRevision)
+        let hub = try tempDir()
+        let snapshot = hub
+            .appendingPathComponent("models--mlx-community--Qwen3-Coder-30B-A3B-Instruct-4bit", isDirectory: true)
+            .appendingPathComponent("snapshots", isDirectory: true)
+            .appendingPathComponent(revision, isDirectory: true)
+        try FileManager.default.createDirectory(at: snapshot, withIntermediateDirectories: true)
+        try Data("weights".utf8).write(to: snapshot.appendingPathComponent("weights.bin"))
+        request.candidateCatalog.rows[modelKey]?.modelSHA256 = try ModelArtifactVerifier.canonicalArtifactHash(directory: snapshot)
+        let artifactPath = try durableArtifactPath(
+            hubRoot: hub,
+            modelID: row.modelID,
+            revision: revision,
+            sha256: try XCTUnwrap(request.candidateCatalog.rows[modelKey]?.modelSHA256)
+        )
+        let cacheURL = (try tempDir()).appendingPathComponent("autotune-probe-cache.json")
+        var progress: [String] = []
+        let firstProber = RecordingStage1Prober(results: [
+            artifactPath: .feasible(medianTPS: 88, p95TTFTMS: 900)
+        ])
+        let first = AutotuneRecommendationBenchmarker(
+            artifactResolver: CachedModelArtifactResolver(hubRoot: hub),
+            runnerFactory: { try CandidateProviderRunner(providerBinaryPath: "/bin/true") },
+            prober: firstProber,
+            safetySampler: StaticProbeSafetySampler(),
+            clock: { Self.date("2026-07-02T00:00:00Z") },
+            progress: { progress.append($0) },
+            probeCache: AutotuneProbeCacheStore(url: cacheURL, now: { Self.date("2026-07-02T00:00:00Z") })
+        )
+        let firstOutcomes = try await first.benchmarks(
+            request: request,
+            targetContext: 4_000,
+            gateTTFTMS: 3_000,
+            replicates: 1,
+            port: 18080
+        )
+        XCTAssertEqual(firstProber.probedModels, [artifactPath])
+        XCTAssertEqual(firstOutcomes.benchmarks[modelKey]?.sustainedTPS, 88)
+        XCTAssertTrue(progress.contains(where: { $0.contains("starting 1 eligible") }))
+        XCTAssertTrue(progress.contains(where: { $0.contains("downloading+benchmarking") }))
+        XCTAssertTrue(progress.contains(where: { $0.contains("done \(row.modelID)") }))
+
+        progress.removeAll()
+        let secondProber = RecordingStage1Prober(results: [
+            artifactPath: .feasible(medianTPS: 1, p95TTFTMS: 9_000)
+        ])
+        let second = AutotuneRecommendationBenchmarker(
+            artifactResolver: CachedModelArtifactResolver(hubRoot: hub),
+            runnerFactory: { throw AutotuneRecommendError.invalidStaticJSON("cached probe must not start a runner") },
+            prober: secondProber,
+            safetySampler: StaticProbeSafetySampler(),
+            clock: { Self.date("2026-07-02T00:00:00Z") },
+            progress: { progress.append($0) },
+            probeCache: AutotuneProbeCacheStore(url: cacheURL, now: { Self.date("2026-07-02T00:00:00Z") })
+        )
+        let secondOutcomes = try await second.benchmarks(
+            request: request,
+            targetContext: 4_000,
+            gateTTFTMS: 3_000,
+            replicates: 1,
+            port: 18080
+        )
+        XCTAssertEqual(secondProber.probedModels, [])
+        XCTAssertEqual(secondOutcomes.benchmarks[modelKey]?.sustainedTPS, 88)
+        XCTAssertTrue(progress.contains(where: { $0.contains("reused cached probe") }))
+        XCTAssertFalse(progress.contains(where: { $0.contains("downloading+benchmarking") }))
+    }
+
+    func testProbeCacheDoesNotReuseSwapOrThermalVetoes() async throws {
+        let modelKey = "qwen3-coder-30b-a3b-instruct"
+        var request = try makeRequest(modelKey: modelKey)
+        request.benchmarks = [:]
+        let row = try XCTUnwrap(request.candidateCatalog.rows[modelKey])
+        let revision = try XCTUnwrap(row.modelRevision)
+        let hub = try tempDir()
+        let snapshot = hub
+            .appendingPathComponent("models--mlx-community--Qwen3-Coder-30B-A3B-Instruct-4bit", isDirectory: true)
+            .appendingPathComponent("snapshots", isDirectory: true)
+            .appendingPathComponent(revision, isDirectory: true)
+        try FileManager.default.createDirectory(at: snapshot, withIntermediateDirectories: true)
+        try Data("weights".utf8).write(to: snapshot.appendingPathComponent("weights.bin"))
+        request.candidateCatalog.rows[modelKey]?.modelSHA256 = try ModelArtifactVerifier.canonicalArtifactHash(directory: snapshot)
+        let artifactPath = try durableArtifactPath(
+            hubRoot: hub,
+            modelID: row.modelID,
+            revision: revision,
+            sha256: try XCTUnwrap(request.candidateCatalog.rows[modelKey]?.modelSHA256)
+        )
+        let cacheURL = (try tempDir()).appendingPathComponent("autotune-probe-cache.json")
+        let firstProber = RecordingStage1Prober(results: [
+            artifactPath: .feasible(medianTPS: 88, p95TTFTMS: 900)
+        ])
+        let first = try await AutotuneRecommendationBenchmarker(
+            artifactResolver: CachedModelArtifactResolver(hubRoot: hub),
+            runnerFactory: { try CandidateProviderRunner(providerBinaryPath: "/bin/true") },
+            prober: firstProber,
+            safetySampler: CriticalProbeSafetySampler(),
+            clock: { Self.date("2026-07-02T00:00:00Z") },
+            probeCache: AutotuneProbeCacheStore(url: cacheURL, now: { Self.date("2026-07-02T00:00:00Z") })
+        ).benchmarks(
+            request: request,
+            targetContext: 4_000,
+            gateTTFTMS: 3_000,
+            replicates: 1,
+            port: 18080
+        )
+        XCTAssertEqual(firstProber.probedModels, [artifactPath])
+        XCTAssertEqual(first.benchmarks[modelKey]?.swapDetected, true)
+
+        let secondProber = RecordingStage1Prober(results: [
+            artifactPath: .feasible(medianTPS: 40, p95TTFTMS: 1_200)
+        ])
+        let second = try await AutotuneRecommendationBenchmarker(
+            artifactResolver: CachedModelArtifactResolver(hubRoot: hub),
+            runnerFactory: { try CandidateProviderRunner(providerBinaryPath: "/bin/true") },
+            prober: secondProber,
+            safetySampler: StaticProbeSafetySampler(),
+            clock: { Self.date("2026-07-02T00:00:00Z") },
+            probeCache: AutotuneProbeCacheStore(url: cacheURL, now: { Self.date("2026-07-02T00:00:00Z") })
+        ).benchmarks(
+            request: request,
+            targetContext: 4_000,
+            gateTTFTMS: 3_000,
+            replicates: 1,
+            port: 18080
+        )
+        XCTAssertEqual(secondProber.probedModels, [artifactPath])
+        XCTAssertEqual(second.benchmarks[modelKey]?.sustainedTPS, 40)
+        XCTAssertEqual(second.benchmarks[modelKey]?.swapDetected, false)
+    }
+
+    func testProbeCacheRejectsStaleOrMismatchedHardware() async throws {
+        let modelKey = "qwen3-coder-30b-a3b-instruct"
+        var request = try makeRequest(modelKey: modelKey)
+        request.benchmarks = [:]
+        let row = try XCTUnwrap(request.candidateCatalog.rows[modelKey])
+        let revision = try XCTUnwrap(row.modelRevision)
+        let hub = try tempDir()
+        let snapshot = hub
+            .appendingPathComponent("models--mlx-community--Qwen3-Coder-30B-A3B-Instruct-4bit", isDirectory: true)
+            .appendingPathComponent("snapshots", isDirectory: true)
+            .appendingPathComponent(revision, isDirectory: true)
+        try FileManager.default.createDirectory(at: snapshot, withIntermediateDirectories: true)
+        try Data("weights".utf8).write(to: snapshot.appendingPathComponent("weights.bin"))
+        request.candidateCatalog.rows[modelKey]?.modelSHA256 = try ModelArtifactVerifier.canonicalArtifactHash(directory: snapshot)
+        let artifactPath = try durableArtifactPath(
+            hubRoot: hub,
+            modelID: row.modelID,
+            revision: revision,
+            sha256: try XCTUnwrap(request.candidateCatalog.rows[modelKey]?.modelSHA256)
+        )
+        let cacheURL = (try tempDir()).appendingPathComponent("autotune-probe-cache.json")
+        let firstProber = RecordingStage1Prober(results: [
+            artifactPath: .feasible(medianTPS: 88, p95TTFTMS: 900)
+        ])
+        _ = try await AutotuneRecommendationBenchmarker(
+            artifactResolver: CachedModelArtifactResolver(hubRoot: hub),
+            runnerFactory: { try CandidateProviderRunner(providerBinaryPath: "/bin/true") },
+            prober: firstProber,
+            safetySampler: StaticProbeSafetySampler(),
+            clock: { Self.date("2026-07-02T00:00:00Z") },
+            probeCache: AutotuneProbeCacheStore(url: cacheURL, now: { Self.date("2026-07-02T00:00:00Z") })
+        ).benchmarks(
+            request: request,
+            targetContext: 4_000,
+            gateTTFTMS: 3_000,
+            replicates: 1,
+            port: 18080
+        )
+
+        request.hardware.hardwareIdentityHash = "other-hardware"
+        let secondProber = RecordingStage1Prober(results: [
+            artifactPath: .feasible(medianTPS: 40, p95TTFTMS: 1_200)
+        ])
+        let mismatched = try await AutotuneRecommendationBenchmarker(
+            artifactResolver: CachedModelArtifactResolver(hubRoot: hub),
+            runnerFactory: { try CandidateProviderRunner(providerBinaryPath: "/bin/true") },
+            prober: secondProber,
+            safetySampler: StaticProbeSafetySampler(),
+            clock: { Self.date("2026-07-02T00:00:00Z") },
+            probeCache: AutotuneProbeCacheStore(url: cacheURL, now: { Self.date("2026-07-02T00:00:00Z") })
+        ).benchmarks(
+            request: request,
+            targetContext: 4_000,
+            gateTTFTMS: 3_000,
+            replicates: 1,
+            port: 18080
+        )
+        XCTAssertEqual(secondProber.probedModels, [artifactPath])
+        XCTAssertEqual(mismatched.benchmarks[modelKey]?.sustainedTPS, 40)
+    }
+
     func testBenchmarkingRethrowsUnexpectedRunnerFailures() async throws {
         var request = try makeRequest()
         let modelKey = "qwen3-coder-30b-a3b-instruct"
@@ -5369,5 +5566,11 @@ private final class RecordingStage1Prober: Stage1Probing {
 private struct StaticProbeSafetySampler: ProbeSafetySampling {
     func sample() -> ProbeSafetySample {
         ProbeSafetySample(pressureLevel: .normal, thermalState: .nominal)
+    }
+}
+
+private struct CriticalProbeSafetySampler: ProbeSafetySampling {
+    func sample() -> ProbeSafetySample {
+        ProbeSafetySample(pressureLevel: .critical, thermalState: .serious)
     }
 }

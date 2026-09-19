@@ -265,12 +265,117 @@ run_upgrade_missing_catalog_identity_case() {
     || die "missing catalog identity reached the staged CLI instead of resolving before cutover"
 }
 
+run_fresh_candidate_models_case() {
+  : > "$FAKE_CLI_LOG"
+  model="initial/model"
+  SKIP_PROVIDER_START=0
+  rm -f "$CONFIG_PATH"
+  AUTOTUNE_UPGRADE_CANDIDATE_MODEL_ID=""
+  AUTOTUNE_PREFETCH_RECEIPT_PATH=""
+  autotune_candidate_args=()
+  MACPROVIDER_CANDIDATE_MODELS="mlx-community/Llama-3.2-3B-Instruct-4bit"
+  MACPROVIDER_MAX_MODEL_SIZE="70B"
+  append_fresh_autotune_operator_bounds
+  [ "${autotune_candidate_args[*]}" = "--candidate-models mlx-community/Llama-3.2-3B-Instruct-4bit" ] \
+    || die "fresh bounds should pass only --candidate-models, got: ${autotune_candidate_args[*]}"
+  run_autotune_recommend_apply
+  unset MACPROVIDER_CANDIDATE_MODELS
+  unset MACPROVIDER_MAX_MODEL_SIZE
+  apply_line="$(grep -F -- 'autotune --recommend --apply' "$FAKE_CLI_LOG" | tail -n 1)"
+  printf '%s\n' "$apply_line" | grep -Fq -- '--candidate-models mlx-community/Llama-3.2-3B-Instruct-4bit' \
+    || die "fresh path did not pass MACPROVIDER_CANDIDATE_MODELS to autotune --recommend (got: $apply_line)"
+  if printf '%s\n' "$apply_line" | grep -F -- '--max-model-size' >/dev/null; then
+    die "fresh path passed --max-model-size together with --candidate-models (got: $apply_line)"
+  fi
+}
+
+run_fresh_max_model_size_case() {
+  : > "$FAKE_CLI_LOG"
+  model="initial/model"
+  SKIP_PROVIDER_START=0
+  rm -f "$CONFIG_PATH"
+  AUTOTUNE_UPGRADE_CANDIDATE_MODEL_ID=""
+  AUTOTUNE_PREFETCH_RECEIPT_PATH=""
+  MACPROVIDER_MAX_MODEL_SIZE="8B"
+  run_autotune_recommend_apply
+  unset MACPROVIDER_MAX_MODEL_SIZE
+  apply_line="$(grep -F -- 'autotune --recommend --apply' "$FAKE_CLI_LOG" | tail -n 1)"
+  printf '%s\n' "$apply_line" | grep -Fq -- '--max-model-size 8B' \
+    || die "fresh path did not pass MACPROVIDER_MAX_MODEL_SIZE to autotune --recommend (got: $apply_line)"
+}
+
+run_fresh_invalid_max_model_size_case() {
+  AUTOTUNE_UPGRADE_CANDIDATE_MODEL_ID=""
+  AUTOTUNE_PREFETCH_RECEIPT_PATH=""
+  autotune_candidate_args=()
+  MACPROVIDER_MAX_MODEL_SIZE="huge"
+  if ( append_fresh_autotune_operator_bounds ) >/dev/null 2>&1; then
+    unset MACPROVIDER_MAX_MODEL_SIZE
+    die "invalid MACPROVIDER_MAX_MODEL_SIZE must fail closed"
+  fi
+  unset MACPROVIDER_MAX_MODEL_SIZE
+}
+
+run_fresh_zero_max_model_size_case() {
+  AUTOTUNE_UPGRADE_CANDIDATE_MODEL_ID=""
+  AUTOTUNE_PREFETCH_RECEIPT_PATH=""
+  autotune_candidate_args=()
+  for size in 0 0B 0.0; do
+    MACPROVIDER_MAX_MODEL_SIZE="$size"
+    if ( append_fresh_autotune_operator_bounds ) >/dev/null 2>&1; then
+      unset MACPROVIDER_MAX_MODEL_SIZE
+      die "MACPROVIDER_MAX_MODEL_SIZE=$size must fail closed"
+    fi
+  done
+  unset MACPROVIDER_MAX_MODEL_SIZE
+}
+
+run_fresh_empty_candidate_cell_case() {
+  AUTOTUNE_UPGRADE_CANDIDATE_MODEL_ID=""
+  AUTOTUNE_PREFETCH_RECEIPT_PATH=""
+  autotune_candidate_args=()
+  MACPROVIDER_CANDIDATE_MODELS="mlx-community/Llama-3.2-3B-Instruct-4bit,,mlx-community/Qwen3-8B"
+  if ( append_fresh_autotune_operator_bounds ) >/dev/null 2>&1; then
+    unset MACPROVIDER_CANDIDATE_MODELS
+    die "empty MACPROVIDER_CANDIDATE_MODELS cell must fail closed"
+  fi
+  unset MACPROVIDER_CANDIDATE_MODELS
+}
+
+run_upgrade_ignores_fresh_bounds_case() {
+  : > "$FAKE_CLI_LOG"
+  write_recommendation_config "org/existing-model" "/tmp/macprovider-existing-snapshot"
+  AUTOTUNE_UPGRADE_CANDIDATE_MODEL_ID="namespace/existing-model"
+  AUTOTUNE_PREFETCH_RECEIPT_PATH="$workdir/receipt.json"
+  printf '{"fixture":true}\n' > "$AUTOTUNE_PREFETCH_RECEIPT_PATH"
+  chmod 600 "$AUTOTUNE_PREFETCH_RECEIPT_PATH"
+  MACPROVIDER_CANDIDATE_MODELS="mlx-community/Llama-3.2-3B-Instruct-4bit"
+  MACPROVIDER_MAX_MODEL_SIZE="8B"
+  model="initial/model"
+  SKIP_PROVIDER_START=0
+  run_autotune_recommend_apply
+  unset MACPROVIDER_CANDIDATE_MODELS
+  unset MACPROVIDER_MAX_MODEL_SIZE
+  apply_line="$(grep -F -- 'autotune --recommend --apply' "$FAKE_CLI_LOG" | tail -n 1)"
+  printf '%s\n' "$apply_line" | grep -Fq -- '--candidate-models namespace/existing-model' \
+    || die "upgrade path must keep the installed-model allowlist (got: $apply_line)"
+  if printf '%s\n' "$apply_line" | grep -F -- 'mlx-community/Llama-3.2-3B-Instruct-4bit' >/dev/null; then
+    die "upgrade path must not mix MACPROVIDER_CANDIDATE_MODELS into the prefetch allowlist (got: $apply_line)"
+  fi
+}
+
 run_upgrade_prefetch_case
 run_upgrade_missing_catalog_identity_case
 run_paid_apply_case
 run_donor_apply_case
 run_fresh_reuse_case
 run_fresh_donor_reuse_case
+run_fresh_candidate_models_case
+run_fresh_max_model_size_case
+run_fresh_invalid_max_model_size_case
+run_fresh_zero_max_model_size_case
+run_fresh_empty_candidate_cell_case
+run_upgrade_ignores_fresh_bounds_case
 
 grep -Fq \
   'autotune --recommend --apply --candidate-models namespace/existing-model --prefetch-receipt' \

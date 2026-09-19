@@ -14,7 +14,12 @@ trap 'rm -rf "$TMP"' EXIT
 # retry-loop control flow is exercised in isolation.
 python3 - "$INSTALL_SH" > "$TMP/fn.sh" <<'PY'
 import sys
-names = {"run_autotune_recommend_apply"}
+names = {
+    "run_autotune_recommend_apply",
+    "append_fresh_autotune_operator_bounds",
+    "validate_autotune_model_size_flag",
+    "validate_autotune_candidate_model_id",
+}
 lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
 i = 0
 while i < len(lines):
