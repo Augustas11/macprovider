@@ -1075,14 +1075,9 @@ private enum RequestValidation {
     static let toolResultsAggregateByteCap = 1024 * 1024
     static let toolCallArgumentsPerCallByteCap = 1024 * 1024
     static let toolCallArgumentsAggregateByteCap = 2 * 1024 * 1024
-    static let maxMessages = 256
     static let maxAssistantToolCalls = 128
 
     static func validate(_ messages: [ChatMessage]) throws {
-        guard messages.count <= maxMessages else {
-            throw APIError(status: 400, message: "messages may contain at most 256 entries", code: "messages_too_long")
-        }
-
         var assistantIDs: [String: Int] = [:]
         var duplicateAssistantID: String?
         var totalToolCalls = 0
