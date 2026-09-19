@@ -2610,6 +2610,7 @@ func (s *Server) forwardStreamSequence(
 			}
 			providerStream := true
 			if chatRequestDeclaresTools(req.raw) {
+				state.declaredFunctionNames = declaredFunctionNames(req.raw)
 				if rewritten, rewriteErr := rewriteJSONBoolField(dispatchBody, "stream", false); rewriteErr == nil {
 					dispatchBody = rewritten
 					providerStream = false
@@ -3688,6 +3689,7 @@ func (s *Server) forwardWSNonStreaming(w http.ResponseWriter, r *http.Request, r
 				attempt.Logged = true
 			}
 			if state != nil && state.materializeBuyerSSEFromJSON {
+				checkedBody = maybeRecoverQwenXMLToolCalls(checkedBody, state)
 				sse, err := chatCompletionJSONToSSE(checkedBody)
 				if err != nil {
 					writeError(w, http.StatusBadGateway, "provider_failed", "Provider returned invalid tool-call completion")
@@ -3717,6 +3719,7 @@ func (s *Server) forwardWSNonStreaming(w http.ResponseWriter, r *http.Request, r
 				return wsForwardCancelled, requestLogAttempt{}
 			}
 			w.WriteHeader(http.StatusOK)
+			checkedBody = maybeRecoverQwenXMLToolCalls(checkedBody, state)
 			_, _ = w.Write(checkedBody)
 			return wsForwardComplete, attempt
 		case err := <-relay.Errors:
@@ -4236,6 +4239,7 @@ func (s *Server) forwardStreamingJSONAsBuyerSSE(
 		markProviderDone()
 		return wsForwardFailed, http.StatusBadGateway, requestLogAttempt{Status: http.StatusBadGateway, Error: "Provider response exceeded coordinator limit"}
 	}
+	raw = maybeRecoverQwenXMLToolCalls(raw, state)
 	sse, err := chatCompletionJSONToSSE(raw)
 	if err != nil {
 		markProviderDone()
