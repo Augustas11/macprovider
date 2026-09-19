@@ -157,7 +157,20 @@ struct AutotuneCommand: AsyncParsableCommand {
         // typos like `a,,b`) at flag-parse time per FR-A.1 / FR-B.1
         // "reject invalid cells at flag-parse time." candidatePlan() is a
         // pure function; the call here is just a parse-time gate.
-        _ = try candidatePlan()
+        // `--recommend` does not use the SPEC-013 default list, so a tight
+        // `--max-model-size` must not fail closed against those 5 rows.
+        if recommend {
+            _ = try recommendCandidateModelFilter(catalog: nil)
+            _ = try maxModelSize.map(Self.parseSizeB)
+            _ = try minModelSize.map(Self.parseSizeB)
+            if let minSize = try minModelSize.map(Self.parseSizeB),
+               let maxSize = try maxModelSize.map(Self.parseSizeB),
+               minSize > maxSize {
+                throw ValidationError("--min-model-size must be <= --max-model-size")
+            }
+        } else {
+            _ = try candidatePlan()
+        }
     }
 
     func run() async throws {
@@ -564,14 +577,70 @@ struct AutotuneCommand: AsyncParsableCommand {
     }
 
     /// When `--candidate-models` is set, `--recommend` probes only catalog rows
-    /// whose HuggingFace `model_id` appears in the operator list.
-    private func recommendCandidateModelFilter() throws -> Set<String>? {
-        guard let candidateModels,
-              !candidateModels.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    /// whose HuggingFace `model_id` appears in the operator list. Otherwise
+    /// `--max-model-size` / `--min-model-size` trim signed catalog rows by the
+    /// first `N`/`N.N`+`B` token in the model id (e.g. `30B` in `...-30B-A3B-...`).
+    func recommendCandidateModelFilter(catalog: CandidateCatalog?) throws -> Set<String>? {
+        if let candidateModels, !candidateModels.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let models = try Self.parseCSVStrict(candidateModels, flag: "--candidate-models")
+            guard !models.isEmpty else {
+                throw ValidationError("--candidate-models must contain at least one model id")
+            }
+            if catalog != nil, maxModelSize != nil || minModelSize != nil {
+                FileHandle.standardError.write(
+                    Data("warning: --candidate-models supplied; ignoring --max-model-size/--min-model-size\n".utf8)
+                )
+            }
+            return Set(models)
+        }
+        guard maxModelSize != nil || minModelSize != nil else {
+            return nil
+        }
+        guard let catalog else {
+            return nil
+        }
+        let maxSize = try maxModelSize.map(Self.parseSizeB)
+        let minSize = try minModelSize.map(Self.parseSizeB)
+        if let minSize, let maxSize, minSize > maxSize {
+            throw ValidationError("--min-model-size must be <= --max-model-size")
+        }
+        var allowed = Set<String>()
+        var skippedUnparsed: [String] = []
+        for row in catalog.rows.values {
+            guard let size = Self.inferredSizeB(fromModelID: row.modelID) else {
+                skippedUnparsed.append(row.modelID)
+                continue
+            }
+            if let maxSize, size > maxSize { continue }
+            if let minSize, size < minSize { continue }
+            allowed.insert(row.modelID)
+        }
+        if !skippedUnparsed.isEmpty {
+            FileHandle.standardError.write(
+                Data(
+                    "warning: --max-model-size/--min-model-size skipped catalog rows with no parseable size token: \(skippedUnparsed.sorted().joined(separator: ", "))\n".utf8
+                )
+            )
+        }
+        guard !allowed.isEmpty else {
+            throw ValidationError("model-size filters removed every signed catalog candidate")
+        }
+        return allowed
+    }
+
+    /// First standalone `N`/`N.N`+`B` token in a HuggingFace id. `A3B` MoE
+    /// expert counts are ignored because they sit behind a letter.
+    static func inferredSizeB(fromModelID modelID: String) -> Double? {
+        let pattern = #"(?:^|[^0-9A-Za-z])([0-9]+(?:\.[0-9]+)?)[Bb](?:$|[^0-9A-Za-z])"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+        let range = NSRange(modelID.startIndex..., in: modelID)
+        guard let match = regex.firstMatch(in: modelID, options: [], range: range),
+              match.numberOfRanges >= 2,
+              let capture = Range(match.range(at: 1), in: modelID)
         else {
             return nil
         }
-        return Set(try Self.parseCSVStrict(candidateModels, flag: "--candidate-models"))
+        return Double(modelID[capture])
     }
 
     static let specVersion = "SPEC-013 v0.3"
@@ -879,7 +948,7 @@ struct AutotuneCommand: AsyncParsableCommand {
         let identity = HMACIdentity.derive(secret: secret, fingerprint: fingerprint, providerID: resolvedConfig?.providerID)
         let hardware = AutotuneRecommendHardware(fingerprint: fingerprint, hmacIdentity: identity)
         let catalogSHA = AutotuneStaticInputs.candidateCatalogSHA256(bytes: catalog.selectedBytes)
-        let candidateModelFilter = try recommendCandidateModelFilter()
+        let candidateModelFilter = try recommendCandidateModelFilter(catalog: catalog.value)
         let prefetchedArtifacts: [String: PrefetchedModelArtifact]?
         if let prefetchReceipt {
             let receiptURL = URL(fileURLWithPath: ConfigLoader.expandTilde(prefetchReceipt))
@@ -938,9 +1007,14 @@ struct AutotuneCommand: AsyncParsableCommand {
         )
         let outcomes: BenchmarkOutcomes
         do {
+            FileHandle.standardError.write(
+                Data("paid-yield: probing eligible catalog models; this can take a long time. Progress is printed per model. Interrupt and re-run to resume cached probes.\n".utf8)
+            )
             outcomes = try await AutotuneRecommendationBenchmarker(
                 artifactResolver: CachedModelArtifactResolver.forConfig(resolvedConfig),
-                runnerFactory: { try CandidateProviderRunner() }
+                runnerFactory: { try CandidateProviderRunner() },
+                progress: { FileHandle.standardError.write(Data(($0 + "\n").utf8)) },
+                probeCache: AutotuneProbeCacheStore()
             ).benchmarks(
                 request: request,
                 targetContext: Self.spec023RecommendationProbeContext,
@@ -1305,7 +1379,7 @@ struct AutotuneCommand: AsyncParsableCommand {
             throw ValidationError("--check-only requires --installed-only; background checks never benchmark or populate shared caches")
         }
         let checkID = UUID().uuidString.lowercased()
-        let candidateModelFilter = try recommendCandidateModelFilter()
+        let candidateModelFilter = try recommendCandidateModelFilter(catalog: nil)
         let candidateEventID = candidateModelFilter?.sorted().joined(separator: ",")
         let startedAt = Date()
         var terminalEventEmitted = false
@@ -1528,7 +1602,7 @@ struct AutotuneCommand: AsyncParsableCommand {
             throw ValidationError(AutotuneRecommendEngine.paidTrustBlockMessage(warnings))
         }
 
-        guard let requestedModelIDs = try recommendCandidateModelFilter(), !requestedModelIDs.isEmpty else {
+        guard let requestedModelIDs = try recommendCandidateModelFilter(catalog: nil), !requestedModelIDs.isEmpty else {
             throw ValidationError("--prefetch requires an explicit --candidate-models allowlist")
         }
         let outcome = try await AutotuneRecommendationBenchmarker(

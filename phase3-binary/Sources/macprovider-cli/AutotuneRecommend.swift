@@ -4212,6 +4212,8 @@ struct AutotuneRecommendationBenchmarker {
     var prober: any Stage1Probing = Stage1Prober()
     var safetySampler: ProbeSafetySampling = SystemProbeSafetySampler()
     var clock: () -> Date = Date.init
+    var progress: (String) -> Void = { _ in }
+    var probeCache: AutotuneProbeCacheStore? = nil
 
     func prefetchArtifacts(
         candidateCatalog: CandidateCatalog,
@@ -4291,7 +4293,23 @@ struct AutotuneRecommendationBenchmarker {
     ) async throws -> BenchmarkOutcomes {
         var results: [String: CandidateBenchmark] = [:]
         var diagnostics: [String: String] = [:]
+        var planned: [String] = []
         for modelKey in request.candidateCatalog.rows.keys.sorted() {
+            guard let row = request.candidateCatalog.rows[modelKey] else {
+                continue
+            }
+            if let candidateModelIDs, !candidateModelIDs.contains(row.modelID) {
+                continue
+            }
+            if let reason = Self.ineligibilityReason(row: row, hardware: request.hardware) {
+                diagnostics[modelKey] = reason
+                continue
+            }
+            planned.append(modelKey)
+        }
+        let plannedCount = planned.count
+        progress("paid-yield: starting \(plannedCount) eligible candidate(s); re-runs reuse cached probes")
+        for (index, modelKey) in planned.enumerated() {
             // ARCH-M-1: Between candidates, honor SIGTERM/SIGINT so we don't
             // race into a fresh subprocess spawn after the App has torn the
             // group down. The cascading signal handler will already have sent
@@ -4304,13 +4322,19 @@ struct AutotuneRecommendationBenchmarker {
             guard let row = request.candidateCatalog.rows[modelKey] else {
                 continue
             }
-            if let candidateModelIDs, !candidateModelIDs.contains(row.modelID) {
+            let step = "[\(index + 1)/\(plannedCount)]"
+            if let cached = try? reuseCachedProbe(
+                modelKey: modelKey,
+                row: row,
+                request: request,
+                prefetchedArtifacts: prefetchedArtifacts,
+                deadline: deadline
+            ) {
+                results[modelKey] = cached
+                progress("paid-yield: \(step) reused cached probe for \(row.modelID)")
                 continue
             }
-            if let reason = Self.ineligibilityReason(row: row, hardware: request.hardware) {
-                diagnostics[modelKey] = reason
-                continue
-            }
+            progress("paid-yield: \(step) downloading+benchmarking \(row.modelID) (min_ram \(row.minRAMGB)GB)")
             do {
                 let artifact: VerifiedModelArtifact
                 if let prefetchedArtifacts {
@@ -4391,10 +4415,11 @@ struct AutotuneRecommendationBenchmarker {
                             )
                         }
                         diagnostics[modelKey] = invalidDiagnostic
+                        progress("paid-yield: \(step) skipped \(row.modelID): \(invalidDiagnostic)")
                         continue
                     }
                     let generatedAt = clock()
-                    results[modelKey] = CandidateBenchmark(
+                    let recorded = CandidateBenchmark(
                         modelKey: modelKey,
                         sustainedTPS: medianTPS,
                         ttftMS: Int(p95TTFTMS.rounded(.up)),
@@ -4412,6 +4437,8 @@ struct AutotuneRecommendationBenchmarker {
                         hardwareIdentityHash: request.hardware.hardwareIdentityHash,
                         candidateRowIdentity: request.candidateCatalog.rowIdentity(for: modelKey) ?? ""
                     )
+                    results[modelKey] = recorded
+                    probeCache?.store(recorded)
                     Self.appendProbeSafetyTelemetry(
                         modelKey: modelKey,
                         samples: safetySamples,
@@ -4426,6 +4453,7 @@ struct AutotuneRecommendationBenchmarker {
                         if safety.swapObservedUnderLoad { flags.append("swap observed under load (advisory)") }
                         diagnostics[modelKey] = "feasible but " + flags.joined(separator: ", ")
                     }
+                    progress("paid-yield: \(step) done \(row.modelID) (tps=\(medianTPS.rounded6), ttft=\(recorded.ttftMS)ms)")
                 case .infeasible(let reason, let nErr):
                     let diagnostic = "\(reason) (n_err=\(nErr))"
                     if prefetchedArtifacts != nil {
@@ -4435,6 +4463,7 @@ struct AutotuneRecommendationBenchmarker {
                         )
                     }
                     diagnostics[modelKey] = diagnostic
+                    progress("paid-yield: \(step) skipped \(row.modelID): \(diagnostic)")
                 }
             } catch let error as AutotuneRecommendError {
                 if prefetchedArtifacts != nil {
@@ -4442,12 +4471,45 @@ struct AutotuneRecommendationBenchmarker {
                 }
                 if case .invalidArtifact(let message) = error {
                     diagnostics[modelKey] = message
+                    progress("paid-yield: \(step) skipped \(row.modelID): \(message)")
                     continue
                 }
                 throw error
             }
         }
         return BenchmarkOutcomes(benchmarks: results, diagnostics: diagnostics)
+    }
+
+    private func reuseCachedProbe(
+        modelKey: String,
+        row: CandidateCatalog.Row,
+        request: AutotuneRecommendRequest,
+        prefetchedArtifacts: [String: PrefetchedModelArtifact]?,
+        deadline: Date?
+    ) throws -> CandidateBenchmark? {
+        guard let cached = probeCache?.loadAdmitted(modelKey: modelKey, request: request) else {
+            return nil
+        }
+        if let prefetchedArtifacts {
+            guard let prefetched = prefetchedArtifacts[modelKey],
+                  prefetched.sha256 == cached.artifactSHA256
+            else {
+                return nil
+            }
+        }
+        let artifact = try artifactResolver.verifiedExistingArtifact(
+            for: row,
+            at: URL(fileURLWithPath: cached.modelArtifactPath),
+            deadline: deadline
+        )
+        guard artifact.sha256 == cached.artifactSHA256 else {
+            return nil
+        }
+        var reused = cached
+        reused.modelArtifactPath = artifact.modelArgument
+        reused.modelConfigJSONData = artifact.configJSONData
+        reused.modelConfigSHA256 = artifact.configSHA256
+        return reused
     }
 
     private static func assertDeadlineActive(_ deadline: Date?) throws {

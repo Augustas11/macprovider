@@ -1248,6 +1248,15 @@ Environment overrides:
                                  MACPROVIDER_VERSION; commits only through an
                                  active legacy_bridge admission
   MACPROVIDER_SKIP_HF_CHECK=1    skip HuggingFace lookup on custom model id
+  MACPROVIDER_CANDIDATE_MODELS   comma-separated HuggingFace ids passed to
+                                 autotune --recommend --candidate-models on
+                                 the fresh path (ignored during an upgrade
+                                 that is already pinned to the installed model)
+  MACPROVIDER_MAX_MODEL_SIZE     e.g. 8B; passed to autotune --recommend
+                                 --max-model-size on the fresh path so the
+                                 first paid-yield sweep can skip larger
+                                 catalog rows. Ignored when
+                                 MACPROVIDER_CANDIDATE_MODELS is set.
 USAGE
 }
 
@@ -10944,6 +10953,72 @@ submit_required_hardware_evidence() {
     || die 6 "authenticated hardware evidence admission failed before service start"
 }
 
+validate_autotune_model_size_flag() {
+  raw="$1"
+  printf '%s' "$raw" | grep -Eq '^[0-9]+([.][0-9]+)?[Bb]?$' \
+    || die 7 "MACPROVIDER_MAX_MODEL_SIZE must be a positive size like 16B (got: $raw)"
+  digits="$(printf '%s' "$raw" | sed 's/[Bb]$//')"
+  awk -v n="$digits" 'BEGIN { exit !(n + 0 > 0) }' \
+    || die 7 "MACPROVIDER_MAX_MODEL_SIZE must be a positive size like 16B (got: $raw)"
+}
+
+validate_autotune_candidate_model_id() {
+  id="$1"
+  case "$id" in
+    *$'\n'*|*$'\r'*) die 7 "MACPROVIDER_CANDIDATE_MODELS entries must not contain newlines" ;;
+    */*/*|*/) die 7 "MACPROVIDER_CANDIDATE_MODELS entries must be org/name (got: $id)" ;;
+    */*) ;;
+    *) die 7 "MACPROVIDER_CANDIDATE_MODELS entries must be org/name (got: $id)" ;;
+  esac
+  case "$id" in
+    *[!A-Za-z0-9._/-]*) die 7 "MACPROVIDER_CANDIDATE_MODELS contains invalid characters; allowed: A-Z a-z 0-9 . _ - /" ;;
+  esac
+  hf_org="${id%/*}"
+  hf_name="${id##*/}"
+  case "$hf_org" in
+    ''|.|..) die 7 "MACPROVIDER_CANDIDATE_MODELS org/name is invalid (got: $id)" ;;
+  esac
+  case "$hf_name" in
+    ''|.|..) die 7 "MACPROVIDER_CANDIDATE_MODELS org/name is invalid (got: $id)" ;;
+  esac
+}
+
+append_fresh_autotune_operator_bounds() {
+  # Upgrade prefetch already pinned --candidate-models to the installed
+  # signed row. Do not mix operator bounds with that receipt allowlist.
+  if [ "${#autotune_candidate_args[@]}" -gt 0 ]; then
+    return 0
+  fi
+  candidate_models="${MACPROVIDER_CANDIDATE_MODELS:-}"
+  max_model_size="${MACPROVIDER_MAX_MODEL_SIZE:-}"
+  if [ -n "$candidate_models" ]; then
+    normalized=""
+    while IFS= read -r cell; do
+      cell="${cell#"${cell%%[![:space:]]*}"}"
+      cell="${cell%"${cell##*[![:space:]]}"}"
+      [ -n "$cell" ] || die 7 "MACPROVIDER_CANDIDATE_MODELS contains an empty cell; check for stray commas"
+      validate_autotune_candidate_model_id "$cell"
+      if [ -n "$normalized" ]; then
+        normalized="$normalized,$cell"
+      else
+        normalized="$cell"
+      fi
+    done <<EOF
+$(printf '%s\n' "$candidate_models" | tr ',' '\n')
+EOF
+    [ -n "$normalized" ] || die 7 "MACPROVIDER_CANDIDATE_MODELS must contain at least one model id"
+    autotune_candidate_args+=(--candidate-models "$normalized")
+    if [ -n "$max_model_size" ]; then
+      log "MACPROVIDER_CANDIDATE_MODELS is set; ignoring MACPROVIDER_MAX_MODEL_SIZE."
+    fi
+    return 0
+  fi
+  if [ -n "$max_model_size" ]; then
+    validate_autotune_model_size_flag "$max_model_size"
+    autotune_candidate_args+=(--max-model-size "$max_model_size")
+  fi
+}
+
 select_autotune_benchmark_port() {
   requested="${MACPROVIDER_AUTOTUNE_PORT:-}"
   if [ -n "$requested" ]; then
@@ -10997,6 +11072,7 @@ run_autotune_recommend_apply() {
       --prefetch-receipt "$AUTOTUNE_PREFETCH_RECEIPT_PATH"
     )
   fi
+  append_fresh_autotune_operator_bounds
   # A fresh Mac's very first benchmark can run cold or under thermal throttling
   # and transiently under-report sustained TPS, sinking an otherwise-eligible
   # paid model (#1269). Concluding "no paid model" from a single such sample
@@ -11017,6 +11093,7 @@ run_autotune_recommend_apply() {
   while : ; do
     if [ "$recommend_attempt" -eq 1 ]; then
       log "Running paid-yield recommendation before service start."
+      log "macprovider-cli prints per-model progress. Interrupt and re-run to resume cached probes. Bound the sweep with MACPROVIDER_CANDIDATE_MODELS or MACPROVIDER_MAX_MODEL_SIZE."
     else
       log "Re-running paid-yield recommendation (attempt $recommend_attempt of $recommend_max_attempts)."
     fi

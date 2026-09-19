@@ -58,6 +58,68 @@ final class AutotuneCommandTests: XCTestCase {
         XCTAssertFalse(plan.candidates.contains("mlx-community/Qwen2.5-14B-Instruct-4bit"))
     }
 
+    func testInferredSizeBIgnoresMoEExpertCount() {
+        XCTAssertEqual(
+            AutotuneCommand.inferredSizeB(fromModelID: "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit"),
+            30
+        )
+        XCTAssertEqual(
+            AutotuneCommand.inferredSizeB(fromModelID: "mlx-community/Llama-3.2-3B-Instruct-4bit"),
+            3
+        )
+        XCTAssertEqual(
+            AutotuneCommand.inferredSizeB(fromModelID: "mlx-community/Meta-Llama-3.1-8B-Instruct-4bit"),
+            8
+        )
+        XCTAssertNil(AutotuneCommand.inferredSizeB(fromModelID: "mlx-community/mystery-model-4bit"))
+    }
+
+    func testRecommendMaxModelSizeDoesNotFailClosedAgainstClassicDefaultList() throws {
+        XCTAssertNoThrow(try AutotuneCommand.parse([
+            "--recommend",
+            "--max-model-size", "0.5B",
+            "--dry-run",
+        ]))
+        XCTAssertThrowsError(try AutotuneCommand.parse([
+            "--max-model-size", "0.5B",
+            "--dry-run",
+        ]))
+    }
+
+    func testRecommendMaxModelSizeFiltersSignedCatalogRows() throws {
+        let command = try AutotuneCommand.parse([
+            "--recommend",
+            "--max-model-size", "8B",
+            "--dry-run",
+        ])
+        let catalog = try AutotuneStaticInputs.decodeCandidateCatalog(
+            Data(AutotuneStaticInputs.bakedCandidateCatalogJSON.utf8)
+        )
+        let filter = try XCTUnwrap(command.recommendCandidateModelFilter(catalog: catalog))
+        XCTAssertTrue(filter.contains("mlx-community/Llama-3.2-3B-Instruct-4bit")
+            || catalog.rows.values.contains(where: { $0.modelID.contains("3B") && filter.contains($0.modelID) }))
+        XCTAssertFalse(filter.contains("mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit"))
+        for modelID in filter {
+            let size = try XCTUnwrap(AutotuneCommand.inferredSizeB(fromModelID: modelID))
+            XCTAssertLessThanOrEqual(size, 8)
+        }
+        XCTAssertFalse(filter.contains("mlx-community/GLM-4.5-Air-4bit"))
+    }
+
+    func testRecommendMaxModelSizeWarnsAndSkipsUnparseableCatalogIds() throws {
+        let command = try AutotuneCommand.parse([
+            "--recommend",
+            "--max-model-size", "120B",
+            "--dry-run",
+        ])
+        let catalog = try AutotuneStaticInputs.decodeCandidateCatalog(
+            Data(AutotuneStaticInputs.bakedCandidateCatalogJSON.utf8)
+        )
+        let filter = try XCTUnwrap(command.recommendCandidateModelFilter(catalog: catalog))
+        XCTAssertFalse(filter.contains("mlx-community/GLM-4.5-Air-4bit"))
+        XCTAssertTrue(filter.contains("mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit"))
+    }
+
     func testMaxContextAxisRejectsBelowTargetCell() throws {
         XCTAssertThrowsError(
             try AutotuneCommand.parse([
