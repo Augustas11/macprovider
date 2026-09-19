@@ -26,6 +26,23 @@ func maybeRecoverQwenXMLToolCalls(raw []byte, state *forwardState) []byte {
 	return recovered
 }
 
+// buyerSSEFromProviderJSONCompletion converts a non-stream chat.completion JSON
+// chunk into concat-safe buyer SSE. Fleet 1.8.123 still returns this shape when
+// the CLI parser leaks function-XML into message.content; live Pi now keeps
+// provider stream=true, so the WS path must recover those JSON completions.
+func buyerSSEFromProviderJSONCompletion(raw []byte, state *forwardState) ([]byte, bool) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || trimmed[0] != '{' || bytes.HasPrefix(trimmed, []byte("data:")) {
+		return nil, false
+	}
+	recovered := maybeRecoverQwenXMLToolCalls(trimmed, state)
+	sse, err := chatCompletionJSONToSSE(recovered)
+	if err != nil {
+		return nil, false
+	}
+	return sse, true
+}
+
 func recoverQwenFunctionXMLCompletion(raw []byte, allowed map[string]struct{}) ([]byte, bool) {
 	trimmed := bytes.TrimSpace(raw)
 	if len(trimmed) == 0 || bytes.HasPrefix(trimmed, []byte("data:")) {
