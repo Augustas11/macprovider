@@ -52,7 +52,7 @@ not promote them.
 
 | Net change in CLI / Malibu / installer | Status | PR |
 |---|---|---|
-| Uncatalogued BYOM loopback serve holds WS instead of self-flapping | in progress | this PR |
+| Uncatalogued BYOM loopback serve holds WS instead of self-flapping | in progress | #1609 |
 | Serve stays connected while BYOM admission is pending | merged | #1557 |
 | MLX `models offer` sends snapshot hash (catalog-match works) | merged | #1548 |
 | Malibu shows BYOM admission states | merged | #1497 |
