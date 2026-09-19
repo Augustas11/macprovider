@@ -1949,7 +1949,7 @@
       "journeys": [],
       "evidence": [
         {
-          "artifact": "commit:70cf7547b0fb0b62995451c25d473bd4e3b6ca0f",
+          "artifact": "commit:bccb979b7d2e612b87d15c6b0594ee4f3fc54edd",
           "source": null,
           "captured_at": "2026-09-19",
           "expires_at": "2027-09-19"
