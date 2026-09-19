@@ -117,14 +117,14 @@ func TestMultiTurnRequestValidationMatrix(t *testing.T) {
 }
 
 func TestMultiTurnAggregateCaps(t *testing.T) {
-	t.Run("messages_too_long", func(t *testing.T) {
-		messages := make([]map[string]any, maxChatMessages+1)
+	t.Run("coding_agent_session_over_256_is_accepted", func(t *testing.T) {
+		messages := make([]map[string]any, 300)
 		for i := range messages {
 			messages[i] = map[string]any{"role": "user", "content": "hello"}
 		}
-		_, status, code, _ := validateChatRequest(multiTurnBody(messages))
-		if status != http.StatusBadRequest || code != "messages_too_long" {
-			t.Fatalf("status=%d code=%s", status, code)
+		_, status, code, msg := validateChatRequest(multiTurnBody(messages))
+		if status != 0 {
+			t.Fatalf("status=%d code=%s msg=%s", status, code, msg)
 		}
 	})
 

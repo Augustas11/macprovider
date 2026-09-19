@@ -58,6 +58,14 @@ final class MultiTurnTests: XCTestCase {
         }
     }
 
+    func testLongCodingAgentSessionIsNotRejectedByMessageCount() throws {
+        let messages = (0..<300).map { _ in
+            ["role": "user", "content": "hello"]
+        }
+
+        XCTAssertNoThrow(try Self.request(messages: messages))
+    }
+
     func testToolResultPerMessageCap() throws {
         var messages = Self.validMultiTurnMessages()
         messages[2]["content"] = String(repeating: "x", count: 256 * 1024 + 1)

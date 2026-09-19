@@ -1,8 +1,8 @@
 # SPEC-018 — Agentic tool calling (provider-side response synthesis)
 
-**Version:** 0.2.7 (2026-07-31, Qwen3-Coder function-XML tool-call grammar amendment)
+**Version:** 0.2.8 (2026-09-19, #1594 drop independent messages[] count cap)
 **Depends on:** SPEC-001 v1.6, SPEC-002 v1.5.5, SPEC-006 v0.9, SPEC-008 (Pillar A model-hash trust layer — referenced by §10a), SPEC-011 v0.5 (warm-swap heartbeat `model_hash` — referenced by §10a), SPEC-015 v0.3 (receipts canonical output binding — see AC-17)
-**Status:** **LOCKED** at v0.2.7 by the Qwen3-Coder function-XML tool-call grammar amendment (documents the `<function=…><parameter=…>` XML body that Qwen3-Coder emits as a Qwen-row §3.1 body-grammar alternative, with OpenAI/MCP name charset; pending IMPL/conformance already landed on branch `fix/qwen3coder-toolcall-parse`); previously LOCKED at v0.2.6 by #784 C2b admission-timeout reconciliation — v0.2.4 spec PR #202 and IMPL PR #209 both landed (multi-turn acceptance, token-incremental streaming, `tool_call_id` validation, 1 MiB/2 MiB byte caps). v0.2.5 adds gpt-oss/OpenAI Harmony response parsing as a pending implementation/conformance gap. codex 4-lane r4 0/0/0; Claude blind-spot r2 0/0/0. SPEC-019 already depends on this as "LOCKED". The former "LOCK CANDIDATE pending PR" line was never flipped after merge. (Resolved gap, 2026-07-14, runbook item 15: AC-45's `X-MacProvider-Streaming-Mode` header — set by the coordinator on streaming `200` responses — was stripped by the public gateway's blanket `X-MacProvider-*` filter, making the "header absent" fail condition live on `api.malibu.tech`. Fixed by adding the header to the SPEC-006 v0.9.9 § 5.4 response-pass-through allowlist and un-stripping it at the gateway, validated against AC-45's closed enum. Chosen over scoping AC-45 to the coordinator surface because buyers hit the gateway, so scoping would have left AC-45's buyer-visible promise unmet. AC-45's normative text is unchanged; this is a documentation reconciliation, not a lock amendment. Residual: the coordinator currently emits the diagnostic only on the streaming success path — non-streaming AC-45 emission is a separate coordinator-side completeness item, out of scope for the gateway-strip fix.)
+**Status:** **LOCKED** at v0.2.8 by the #1594 OpenRouter-aligned AC-53 amendment (no independent messages[] count cap). Previously LOCKED at v0.2.7 by the Qwen3-Coder function-XML tool-call grammar amendment (documents the `<function=…><parameter=…>` XML body that Qwen3-Coder emits as a Qwen-row §3.1 body-grammar alternative, with OpenAI/MCP name charset; pending IMPL/conformance already landed on branch `fix/qwen3coder-toolcall-parse`); previously LOCKED at v0.2.6 by #784 C2b admission-timeout reconciliation — v0.2.4 spec PR #202 and IMPL PR #209 both landed (multi-turn acceptance, token-incremental streaming, `tool_call_id` validation, 1 MiB/2 MiB byte caps). v0.2.5 adds gpt-oss/OpenAI Harmony response parsing as a pending implementation/conformance gap. codex 4-lane r4 0/0/0; Claude blind-spot r2 0/0/0. SPEC-019 already depends on this as "LOCKED". The former "LOCK CANDIDATE pending PR" line was never flipped after merge. (Resolved gap, 2026-07-14, runbook item 15: AC-45's `X-MacProvider-Streaming-Mode` header — set by the coordinator on streaming `200` responses — was stripped by the public gateway's blanket `X-MacProvider-*` filter, making the "header absent" fail condition live on `api.malibu.tech`. Fixed by adding the header to the SPEC-006 v0.9.9 § 5.4 response-pass-through allowlist and un-stripping it at the gateway, validated against AC-45's closed enum. Chosen over scoping AC-45 to the coordinator surface because buyers hit the gateway, so scoping would have left AC-45's buyer-visible promise unmet. AC-45's normative text is unchanged; this is a documentation reconciliation, not a lock amendment. Residual: the coordinator currently emits the diagnostic only on the streaming success path — non-streaming AC-45 emission is a separate coordinator-side completeness item, out of scope for the gateway-strip fix.)
 
 ## Quick orientation
 
@@ -17,6 +17,12 @@ SPEC-018 is the **provider-side response synthesis contract** for OpenAI-wire to
 **Money-path**: all v0.2 changes preserve v0.1.5 settlement protection (`FaultBreakerQualifying` + zero credits on malformed streams via `billing_recorder.go:176` + `formula.go:112`).
 
 ## Change log
+
+**v0.2.8 buyer-visible deltas (read this if you're skimming):**
+- v0.2.8 removes the independent 256-entry `messages[]` count cap. Coding-agent sessions (Pi, Cline, and similar) routinely exceed 256 messages via tool calls, file reads, edits, and user prompts. Admission follows OpenRouter: no message-count limit. Remaining bounds are AC-50 raw request body, AC-51 aggregate tool-result bytes, AC-52 aggregate assistant-history arguments, AC-54 total assistant-history tool calls, and the served model's context window.
+- Implementations MUST NOT reject a request solely because `messages[]` length is greater than 256. `messages_too_long` remains in the error-code table for old-binary compatibility and MUST NOT be emitted for count-based rejection.
+
+- **v0.2.8 (2026-09-19, #1594 OpenRouter-aligned admission):** **Load-bearing amendment:** amends AC-53 and §10d.1. Historical v0.2.0–v0.2.7 text required HTTP 400 `messages_too_long` when `messages[]` length exceeded 256. That count cap is not a model constraint and blocks legitimate long coding-agent sessions. This is a §10c.1 lock-amendment (Amendment 3): a previously LOCKED MUST is removed. Replacement mitigation: AC-50 / SPEC-006 request-body caps plus AC-51, AC-52, AC-54, AC-55 linear validation, and the served context window. Residual risk: a large-but-under-body-cap `messages[]` array can still cost CPU during validation; AC-55 requires that cost stay linear.
 
 **v0.2.7 buyer-visible deltas (read this if you're skimming):**
 - v0.2.7 documents the `<function=NAME><parameter=key>value</parameter></function>` XML tool-call body as a recognized alternative body grammar for the §3.1 Qwen row. Qwen3-Coder emits this native XML form (not the `<tool_call>{json}` Hermes form) for many tool calls; the parser already handled it via the shared function-XML path, but §3.1 previously described only JSON/Python bodies for Qwen, so the grammar path was undocumented (and thus non-compliant under §3/§3.7).
@@ -40,7 +46,7 @@ SPEC-018 is the **provider-side response synthesis contract** for OpenAI-wire to
 **v0.2.4 buyer-visible deltas (read this if you're skimming):**
 - v0.2.4 is the SPEC PR candidate.
 - AC-44 timing evidence keeps the 100 ms NTP-anchored skew bound and skew-corrected p95 calculation, but no longer cites SPEC-006 as the source of that prerequisite. NTP on provider Macs and gateway hosts is a v0.2 prerequisite for AC-44 measurability.
-- AC-56 and `prompt_aggregate_too_large` are deleted. Aggregate prompt admission remains bounded by AC-50 raw request body cap, AC-51 aggregate tool-result cap, AC-52 aggregate assistant-history arguments cap, AC-53 message count, AC-54 total tool calls, and AC-55 linear validation.
+- AC-56 and `prompt_aggregate_too_large` are deleted. Aggregate prompt admission remains bounded by AC-50 raw request body cap, AC-51 aggregate tool-result cap, AC-52 aggregate assistant-history arguments cap, AC-53 (v0.2.8: no independent message count cap), AC-54 total tool calls, and AC-55 linear validation.
 - §3 now carries a local subsection-order note and an explicit §3.9 deleted stub pointing to §10c.1 Amendment 2.
 - §10c.1 now states that v0.2.4 treats locked-content amendments and in-flight draft-content revisions under the same amendment discipline, with governance refinement deferred to v0.3.
 
@@ -693,7 +699,9 @@ AC-51. **#1 Aggregate tool-result content cap.** The sum of all `role:"tool".con
 
 AC-52. **#1 Aggregate assistant-history arguments cap.** The sum of all assistant-history `tool_calls[].function.arguments` UTF-8 byte lengths across `messages[]` greater than 2 MiB fails before inference with HTTP 413 `tool_call_arguments_aggregate_too_large`. The per-call 1 MiB `tool_call_arguments_too_large` cap remains independently enforced. Fail condition: aggregate >2 MiB succeeds, is silently truncated, or is reported only after provider inference starts.
 
-AC-53. **#1 Maximum messages array length.** A request with `messages[]` array length greater than 256 fails before inference with HTTP 400 `messages_too_long`. Fail condition: 257 or more messages reach prompt rendering or provider inference.
+AC-53. **#1 Maximum messages array length.** AMENDED v0.2.8. Historical (v0.2.0–v0.2.7): a request with `messages[]` array length greater than 256 failed before inference with HTTP 400 `messages_too_long`. Fail condition then: 257 or more messages reached prompt rendering or provider inference.
+
+v0.2.8: there is no independent `messages[]` count cap. A request MUST NOT be rejected solely because `messages[]` length exceeds 256. Admission remains bounded by AC-50 raw request body, AC-51 aggregate tool-result bytes, AC-52 aggregate assistant-history arguments, AC-54 total assistant-history tool calls, and the served model's context window. Fail condition: a well-formed request under those caps is rejected with `messages_too_long` or otherwise fails before inference solely due to message count.
 
 AC-54. **#1 Maximum assistant-history tool calls.** A request whose assistant messages contain more than 128 total `tool_calls[]` entries across all messages fails before inference with HTTP 400 `too_many_tool_calls`. Fail condition: 129 or more assistant-history tool calls reach prompt rendering or provider inference.
 
@@ -779,6 +787,7 @@ Silent scope cuts of locked invariants are NON-COMPLIANT. Future SPEC-018 versio
 Amendment log:
 - Amendment 1 (v0.2.1): §10c v0.1.3-locked model-hash registry requirement → deferred to v0.3. Rationale: narrow v0.2 scope makes registry curation strategically premature. Mitigation: AC-46 model-hash observation channel + §8.4.2 final-close tightening.
 - Amendment 2 (v0.2.3): §3.9 v0.2.1-introduced minimal prompt-echo guard → DELETED. Rationale: minimal guard had three exploitable defects making it net-negative vs. no guard (whitespace bypass; scope incomplete; self-DoS via Cline reading SPEC-018.md). Residual risk: same-family echo attack remains unmitigated in v0.2. Mitigation: deferred to v0.3 full guard.
+- Amendment 3 (v0.2.8): AC-53 / §10d.1 v0.2.0-locked maximum `messages[]` length 256 → DELETED as an independent cap. Rationale: the count cap is not a model constraint and blocks legitimate coding-agent sessions (Pi/Cline 300+ messages); OpenRouter and OrcaRouter impose no message-count limit. Residual risk: large-but-under-body-cap arrays still cost validation CPU. Mitigation: AC-50 4 MiB raw-body cap (public gateway SPEC-006 default `request_body_bytes` may be stricter), AC-51/AC-52 aggregate byte caps, AC-54 tool-call count, AC-55 linear validation, and the served context window.
 
 Note: §10c.1 covers both locked-content amendments (e.g., Amendment 1 amended §10c which was v0.1.3-locked) AND in-flight draft-content revisions (e.g., Amendment 2 deleted §3.9 which was v0.2.1-introduced and not yet locked). v0.3 governance MAY refine this distinction; v0.2.4 treats both classes under the same (a)-(d) discipline.
 
@@ -861,10 +870,10 @@ Aggregate request-side caps for v0.2:
 - Total raw request body cap: 4 MiB at the coordinator/provider boundary. Gateway deployments using SPEC-006 defaults may be stricter (`request_body_bytes: 1048576` in SPEC-006 §13.5, with request-body limit enforced before quota/admission per §7.4 and 413 semantics per §15.1).
 - Total decoded `role:"tool"` content bytes across all messages: 1 MiB.
 - Total assistant-history `function.arguments` bytes across all messages: 2 MiB, aligned with the §10d.7 per-response aggregate cap.
-- Maximum `messages[]` array length: 256.
+- No independent `messages[]` array-length cap (AMENDED v0.2.8; historical v0.2.0–v0.2.7 maximum was 256).
 - Maximum total tool calls across all assistant messages: 128.
 
-`messages[]` length greater than 256 returns HTTP 400 `messages_too_long`. This is user-actionable for Cline and other long-session clients: split or summarize long sessions before retrying.
+`messages[]` length is not independently capped. Long coding-agent sessions MUST be admitted when they remain inside the body, aggregate-byte, tool-call-count, and context-window bounds. Implementations MUST NOT emit `messages_too_long` for count-based rejection.
 
 The implementation MUST enforce raw-body caps before JSON parse where possible, decoded string caps during parse/validation, and cross-message `tool_call_id` validation before prompt rendering. Cross-message validation MUST be O(messages[] + tool_calls[]) using maps/sets for IDs; O(N^2) repeated scans across the conversation are non-compliant.
 
@@ -884,7 +893,7 @@ Request-side failure modes:
 | Aggregate assistant-history `function.arguments` bytes > 2 MiB | HTTP 413 `tool_call_arguments_aggregate_too_large` |
 | `role:"tool"` content > 256 KiB | HTTP 413 `tool_result_too_large` |
 | Aggregate `role:"tool"` content bytes > 1 MiB | HTTP 413 `tool_results_aggregate_too_large` |
-| `messages[]` length > 256 | HTTP 400 `messages_too_long` |
+| `messages[]` length > 256 | Admit when inside remaining caps (AMENDED v0.2.8; historical HTTP 400 `messages_too_long`) |
 | Total assistant-history `tool_calls[]` entries > 128 | HTTP 400 `too_many_tool_calls` |
 | No §3.8 profile maps for a multi-turn `modelID` | HTTP 400 `unsupported_modelID_for_multi_turn` |
 

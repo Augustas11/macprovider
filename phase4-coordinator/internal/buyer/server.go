@@ -53,7 +53,6 @@ const (
 	maxJSONSchemaDepth                 = 32
 	maxToolResultBytes                 = 256 * 1024
 	maxToolResultsAggregateBytes       = 1_048_576
-	maxChatMessages                    = 256
 	maxAssistantToolCalls              = 128
 	maxSettlementTerminalTimestampSkew = time.Minute
 	settlementMetadataHeaderName       = "X-MacProvider-Settlement-Metadata"
@@ -5761,10 +5760,6 @@ func jsonSchemaNumberOperand(node map[string]json.RawMessage, keyword string) (f
 }
 
 func validateMessages(messages []chatMessage, rawMessages []map[string]json.RawMessage) (bool, int, string, string) {
-	if len(messages) > maxChatMessages {
-		return false, http.StatusBadRequest, "messages_too_long", "messages may contain at most 256 entries"
-	}
-
 	allIDs := map[string]int{}
 	var parsedByMessage = make([][]requestToolCall, len(messages))
 	totalToolCalls := 0
