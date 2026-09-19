@@ -1534,45 +1534,46 @@ func main() {
 	}
 }
 
-// loadPreviousAutotuneCatalog loads exactly the release recorded by the
-// deployer's root-owned retained-release pointer file. It is signature/schema
-// verified through the same loader as the active feed and is never discovered
-// from an unbounded directory scan.
+// loadPreviousAutotuneCatalog loads every release recorded by the deployer's
+// root-owned retained-release pointer file (current + up to three previous).
+// Each line is signature/schema verified through the same loader as the active
+// feed. The set is never discovered from an unbounded directory scan.
 func loadPreviousAutotuneCatalog(cfg config.AutotuneFeedsConfig) ([]*autotune.Catalog, error) {
-	// One resolver for the deployer's retained-release pointer file: the release
-	// retained as compatible-previous here is the release whose identity
-	// set buyer.LoadPreviousAutotuneFeeds retains (SPEC-010-R004 v1.8).
-	dir, err := buyer.PreviousAutotuneReleaseTarget(cfg)
-	if err != nil || dir == "" {
+	dirs, err := buyer.PreviousAutotuneReleaseTargets(cfg)
+	if err != nil || len(dirs) == 0 {
 		return nil, err
 	}
-	root := filepath.Dir(dir)
-	target := filepath.Base(dir)
-	if filepath.Base(root) == "releases" {
-		root = filepath.Dir(root)
-		target = filepath.Join("releases", filepath.Base(dir))
+	out := make([]*autotune.Catalog, 0, len(dirs))
+	for _, dir := range dirs {
+		root := filepath.Dir(dir)
+		target := filepath.Base(dir)
+		if filepath.Base(root) == "releases" {
+			root = filepath.Dir(root)
+			target = filepath.Join("releases", filepath.Base(dir))
+		}
+		previousCfg := cfg
+		previousCfg.DemandRankPath = ""
+		previousCfg.DemandRankSigPath = ""
+		previousCfg.AutotuneCandidatesPath = filepath.Join(root, target, "autotune-candidates.json")
+		previousCfg.AutotuneCandidatesSigPath = previousCfg.AutotuneCandidatesPath + ".sig"
+		feeds, err := buyer.LoadPreviousAutotuneCandidateFeed(previousCfg)
+		if err != nil {
+			return nil, fmt.Errorf("verify %s: %w", target, err)
+		}
+		previous, err := autotune.ParseCatalog(feeds.AutotuneCandidatesJSON)
+		if err != nil {
+			return nil, fmt.Errorf("parse %s: %w", target, err)
+		}
+		previous.SignerKeyID = feeds.AutotuneCandidatesVerification.KeyID
+		out = append(out, previous)
 	}
-	previousCfg := cfg
-	previousCfg.DemandRankPath = ""
-	previousCfg.DemandRankSigPath = ""
-	previousCfg.AutotuneCandidatesPath = filepath.Join(root, target, "autotune-candidates.json")
-	previousCfg.AutotuneCandidatesSigPath = previousCfg.AutotuneCandidatesPath + ".sig"
-	feeds, err := buyer.LoadPreviousAutotuneCandidateFeed(previousCfg)
-	if err != nil {
-		return nil, fmt.Errorf("verify %s: %w", target, err)
-	}
-	previous, err := autotune.ParseCatalog(feeds.AutotuneCandidatesJSON)
-	if err != nil {
-		return nil, fmt.Errorf("parse %s: %w", target, err)
-	}
-	previous.SignerKeyID = feeds.AutotuneCandidatesVerification.KeyID
-	return []*autotune.Catalog{previous}, nil
+	return out, nil
 }
 
-// loadCompatibleAutotuneCatalogs is previous-target plus leftover same-id
-// freshness restamps that still sit under releases/. Previous-target stays
-// fail-closed. Restamp leftovers skip unverified dirs so a stale stamp cannot
-// block boot.
+// loadCompatibleAutotuneCatalogs is the previous-target window (up to three
+// deployer-recorded releases) plus leftover same-id freshness restamps that
+// still sit under releases/. Previous-target stays fail-closed. Restamp
+// leftovers skip unverified dirs so a stale stamp cannot block boot.
 func loadCompatibleAutotuneCatalogs(cfg config.AutotuneFeedsConfig, current *autotune.Catalog) ([]*autotune.Catalog, error) {
 	previous, err := loadPreviousAutotuneCatalog(cfg)
 	if err != nil {

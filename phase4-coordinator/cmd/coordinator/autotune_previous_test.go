@@ -27,3 +27,20 @@ func TestLoadPreviousAutotuneCatalogOmitsTombstonedBridge(t *testing.T) {
 		t.Fatalf("compatible catalogs = %d, want 0", len(compatible))
 	}
 }
+
+func TestLoadPreviousAutotuneCatalogRejectsFourTargets(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(
+		filepath.Join(root, ".previous-target"),
+		[]byte("releases/a\nreleases/b\nreleases/c\nreleases/d\n"),
+		0o600,
+	); err != nil {
+		t.Fatalf("write previous target: %v", err)
+	}
+	_, err := loadPreviousAutotuneCatalog(config.AutotuneFeedsConfig{
+		AutotuneCandidatesPath: filepath.Join(root, "current", "autotune-candidates.json"),
+	})
+	if err == nil {
+		t.Fatal("four previous-target lines must fail closed")
+	}
+}
