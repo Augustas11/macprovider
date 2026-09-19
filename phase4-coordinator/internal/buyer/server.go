@@ -2608,6 +2608,14 @@ func (s *Server) forwardStreamSequence(
 				writeError(w, http.StatusBadGateway, "provider_failed", "Selected provider failed; buyer should retry")
 				return dispatchedAttempt{}, false
 			}
+			providerStream := true
+			if chatRequestDeclaresTools(req.raw) {
+				if rewritten, rewriteErr := rewriteJSONBoolField(dispatchBody, "stream", false); rewriteErr == nil {
+					dispatchBody = rewritten
+					providerStream = false
+					state.materializeBuyerSSEFromJSON = true
+				}
+			}
 			settlementMetadata, err := rec.recordRouteSnapshot(dispatchBody, state.provider)
 			if err != nil {
 				writeRouteSnapshotError(w, rec, err)
@@ -2634,7 +2642,7 @@ func (s *Server) forwardStreamSequence(
 			var tr transportResult
 			var nativeResult wsForwardResult
 			if wsTunneled {
-				result, attempt := s.forwardWS(w, r, requestID, dispatchBody, state.provider, true, s.attemptTimeout(r), nil, settlementMetadata, state, rec.attemptN)
+				result, attempt := s.forwardWS(w, r, requestID, dispatchBody, state.provider, providerStream, s.attemptTimeout(r), nil, settlementMetadata, state, rec.attemptN)
 				tr = classifyStreamResult(result, statusForForwardResult(result), attempt)
 				nativeResult = result
 			} else {
@@ -3679,6 +3687,27 @@ func (s *Server) forwardWSNonStreaming(w http.ResponseWriter, r *http.Request, r
 				}
 				attempt.Logged = true
 			}
+			if state != nil && state.materializeBuyerSSEFromJSON {
+				sse, err := chatCompletionJSONToSSE(checkedBody)
+				if err != nil {
+					writeError(w, http.StatusBadGateway, "provider_failed", "Provider returned invalid tool-call completion")
+					return wsForwardFailed, requestLogAttempt{Status: http.StatusBadGateway, Error: "Provider returned invalid tool-call completion", ErrorCode: "provider_failed", FaultFlag: billing.FaultBreakerQualifying, SettlementOutput: settlementOutputUnavailableFor(billing.TerminalStateProviderError)}
+				}
+				w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+				w.Header().Set("X-Accel-Buffering", "no")
+				w.Header().Set("Cache-Control", "no-cache")
+				w.Header().Set("X-MacProvider-Provider", provider.ProviderID)
+				w.Header().Set("X-MacProvider-Route", provider.AssignedID)
+				w.Header().Set(streamingModeHeader, streamingModeIncremental)
+				setReceiptHeaderForProvider(w.Header(), receiptValue, provider)
+				markProviderDone()
+				if s.poolAttemptCancelledBeforeCommit(r, state, provider.ProviderID) {
+					return wsForwardCancelled, requestLogAttempt{}
+				}
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write(sse)
+				return wsForwardComplete, attempt
+			}
 			w.Header().Set("Content-Type", "application/json")
 			w.Header().Set("X-MacProvider-Provider", provider.ProviderID)
 			w.Header().Set("X-MacProvider-Route", provider.AssignedID)
@@ -4184,6 +4213,65 @@ func (s *Server) forwardWSStreamingBuffered(w http.ResponseWriter, r *http.Reque
 	}
 }
 
+func (s *Server) forwardStreamingJSONAsBuyerSSE(
+	w http.ResponseWriter,
+	r *http.Request,
+	resp *http.Response,
+	provider pool.Provider,
+	state *forwardState,
+	billingAttemptN int,
+	markProviderDone func(),
+) (wsForwardResult, int, requestLogAttempt) {
+	body := io.Reader(resp.Body)
+	if state != nil {
+		body = &firstByteTimingReader{
+			r: resp.Body,
+			mark: func() {
+				state.phaseTiming.markProviderFirstByte(phaseTimingNow(s))
+			},
+		}
+	}
+	raw, err := readLimitedBody(body, maxUpstreamResponseBodyBytes)
+	if err != nil {
+		markProviderDone()
+		return wsForwardFailed, http.StatusBadGateway, requestLogAttempt{Status: http.StatusBadGateway, Error: "Provider response exceeded coordinator limit"}
+	}
+	sse, err := chatCompletionJSONToSSE(raw)
+	if err != nil {
+		markProviderDone()
+		return wsForwardFailed, http.StatusBadGateway, requestLogAttempt{Status: http.StatusBadGateway, Error: "Provider returned invalid tool-call completion", ErrorCode: "provider_failed", FaultFlag: billing.FaultBreakerQualifying, SettlementOutput: settlementOutputUnavailableFor(billing.TerminalStateProviderError)}
+	}
+	promptTok, cachedPromptTok, completionTok := tokenPointersFromChatResponse(raw)
+	output, outputOK := settlementOutputFromChatResponseAt(raw, billing.TerminalStateNormalDone, time.Now().UTC().UnixMilli())
+	if !outputOK {
+		output = settlementOutputUnavailable()
+	}
+	attempt := requestLogAttempt{
+		Status:              http.StatusOK,
+		PromptTokens:        promptTok,
+		CachedPromptTokens:  cachedPromptTok,
+		CompletionTokens:    completionTok,
+		EstimatedCompTokens: s.observedCompletionTokensFromBytes(len(raw)),
+		SettlementOutput:    output,
+	}
+	_ = billingAttemptN
+	markProviderDone()
+	if s.poolAttemptCancelledBeforeCommit(r, state, provider.ProviderID) {
+		return wsForwardCancelled, 0, requestLogAttempt{}
+	}
+	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("X-MacProvider-Provider", provider.ProviderID)
+	w.Header().Set("X-MacProvider-Route", provider.AssignedID)
+	w.Header().Set(streamingModeHeader, streamingModeIncremental)
+	w.WriteHeader(http.StatusOK)
+	if _, err := w.Write(sse); err != nil {
+		return wsForwardCancelled, http.StatusOK, requestLogAttempt{Status: http.StatusOK, Error: "Buyer disconnected during request"}
+	}
+	return wsForwardComplete, http.StatusOK, attempt
+}
+
 func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, requestID string, body []byte, provider pool.Provider, modelScope string, timeout time.Duration, settlementMetadata *providerws.SettlementReceiptMetadata, state *forwardState, billingAttemptN int) (wsForwardResult, int, requestLogAttempt) {
 	upstreamURL := provider.EndpointURL + "/v1/chat/completions"
 	started := time.Now()
@@ -4255,6 +4343,12 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 			return wsForwardTimedOut, resp.StatusCode, attempt
 		}
 		return wsForwardFailed, resp.StatusCode, attempt
+	}
+	if state != nil && state.materializeBuyerSSEFromJSON {
+		ct := strings.ToLower(resp.Header.Get("Content-Type"))
+		if !strings.Contains(ct, "text/event-stream") {
+			return s.forwardStreamingJSONAsBuyerSSE(w, r, resp, provider, state, billingAttemptN, markProviderDone)
+		}
 	}
 	if streamingMode != streamingModeIncremental {
 		return s.forwardStreamingBuffered(w, r, requestID, resp, provider, modelScope, streamingMode, streamingBuyer, state, billingAttemptN)
@@ -4711,6 +4805,131 @@ func consolidatedToolCallSSE(raw []byte) ([]byte, error) {
 	}}}
 	var out bytes.Buffer
 	for _, event := range []map[string]any{chunk, finish} {
+		data, err := json.Marshal(event)
+		if err != nil {
+			return nil, err
+		}
+		out.WriteString("data: ")
+		out.Write(data)
+		out.WriteString("\n\n")
+	}
+	out.WriteString("data: [DONE]\n\n")
+	return out.Bytes(), nil
+}
+
+func chatCompletionJSONToSSE(raw []byte) ([]byte, error) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 {
+		return nil, errors.New("empty chat completion")
+	}
+	if bytes.HasPrefix(trimmed, []byte("data:")) {
+		return nil, errors.New("expected chat.completion JSON, got SSE")
+	}
+	var resp struct {
+		ID      string `json:"id"`
+		Created any    `json:"created"`
+		Model   string `json:"model"`
+		Choices []struct {
+			Index   int `json:"index"`
+			Message struct {
+				Content   json.RawMessage `json:"content"`
+				ToolCalls []struct {
+					ID       string `json:"id"`
+					Type     string `json:"type"`
+					Function struct {
+						Name      string `json:"name"`
+						Arguments string `json:"arguments"`
+					} `json:"function"`
+				} `json:"tool_calls"`
+			} `json:"message"`
+			FinishReason string `json:"finish_reason"`
+		} `json:"choices"`
+		Usage json.RawMessage `json:"usage"`
+	}
+	if err := json.Unmarshal(trimmed, &resp); err != nil {
+		return nil, err
+	}
+	if len(resp.Choices) == 0 {
+		return nil, errors.New("chat completion missing choices")
+	}
+	choice := resp.Choices[0]
+	chunkMeta := func(delta map[string]any, finish any) map[string]any {
+		event := map[string]any{
+			"object": "chat.completion.chunk",
+			"choices": []map[string]any{{
+				"index":         choice.Index,
+				"delta":         delta,
+				"finish_reason": finish,
+			}},
+		}
+		if resp.ID != "" {
+			event["id"] = resp.ID
+		}
+		if resp.Model != "" {
+			event["model"] = resp.Model
+		}
+		if resp.Created != nil {
+			event["created"] = resp.Created
+		}
+		return event
+	}
+	events := []map[string]any{
+		chunkMeta(map[string]any{"role": "assistant", "content": ""}, nil),
+	}
+	if len(choice.Message.ToolCalls) > 0 {
+		toolCalls := make([]map[string]any, 0, len(choice.Message.ToolCalls))
+		for i, call := range choice.Message.ToolCalls {
+			typ := call.Type
+			if typ == "" {
+				typ = "function"
+			}
+			toolCalls = append(toolCalls, map[string]any{
+				"index": i,
+				"id":    call.ID,
+				"type":  typ,
+				"function": map[string]any{
+					"name":      call.Function.Name,
+					"arguments": call.Function.Arguments,
+				},
+			})
+		}
+		events = append(events, chunkMeta(map[string]any{"tool_calls": toolCalls}, nil))
+	} else {
+		content := ""
+		if len(choice.Message.Content) > 0 && !bytes.Equal(bytes.TrimSpace(choice.Message.Content), []byte("null")) {
+			if err := json.Unmarshal(choice.Message.Content, &content); err != nil {
+				content = string(choice.Message.Content)
+			}
+		}
+		if content != "" {
+			events = append(events, chunkMeta(map[string]any{"content": content}, nil))
+		}
+	}
+	finish := choice.FinishReason
+	if finish == "" {
+		if len(choice.Message.ToolCalls) > 0 {
+			finish = "tool_calls"
+		} else {
+			finish = "stop"
+		}
+	}
+	events = append(events, chunkMeta(map[string]any{}, finish))
+	if len(bytes.TrimSpace(resp.Usage)) > 0 && !bytes.Equal(bytes.TrimSpace(resp.Usage), []byte("null")) {
+		usageEvent := map[string]any{
+			"object":  "chat.completion.chunk",
+			"choices": []any{},
+			"usage":   json.RawMessage(resp.Usage),
+		}
+		if resp.ID != "" {
+			usageEvent["id"] = resp.ID
+		}
+		if resp.Model != "" {
+			usageEvent["model"] = resp.Model
+		}
+		events = append(events, usageEvent)
+	}
+	var out bytes.Buffer
+	for _, event := range events {
 		data, err := json.Marshal(event)
 		if err != nil {
 			return nil, err
@@ -5443,7 +5662,131 @@ func countTopLevelField(body []byte, field string) (int, bool, error) {
 // chatRequest-typed call sites in forward*Sequence without leaking
 // the buyer-internal chatRequest type past the package boundary.
 func dispatchBodyForProvider(req chatRequest, provider pool.Provider) ([]byte, error) {
-	return routing.RewriteModel(req.raw, req.Model, provider.ModelID)
+	body, err := routing.RewriteModel(req.raw, req.Model, provider.ModelID)
+	if err != nil {
+		return nil, err
+	}
+	return neutralizeUnsupportedToolChoice(body), nil
+}
+
+func chatRequestDeclaresTools(raw json.RawMessage) bool {
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		return false
+	}
+	v, ok := obj["tools"]
+	if !ok || len(bytes.TrimSpace(v)) == 0 || bytes.Equal(bytes.TrimSpace(v), []byte("null")) {
+		return false
+	}
+	var tools []json.RawMessage
+	if err := json.Unmarshal(v, &tools); err != nil {
+		return false
+	}
+	return len(tools) > 0
+}
+
+func rewriteJSONBoolField(rawBody []byte, field string, value bool) ([]byte, error) {
+	replacement, err := json.Marshal(value)
+	if err != nil {
+		return nil, err
+	}
+	return rewriteJSONRawField(rawBody, field, replacement)
+}
+
+func rewriteJSONRawField(rawBody []byte, field string, replacement []byte) ([]byte, error) {
+	dec := json.NewDecoder(bytes.NewReader(rawBody))
+	token, err := dec.Token()
+	if err != nil {
+		return nil, err
+	}
+	if delim, ok := token.(json.Delim); !ok || delim != '{' {
+		return nil, errors.New("chat request body is not a JSON object")
+	}
+	var start, end int
+	found := false
+	for dec.More() {
+		keyToken, err := dec.Token()
+		if err != nil {
+			return nil, err
+		}
+		key, ok := keyToken.(string)
+		if !ok {
+			return nil, errors.New("chat request body contains a non-string object key")
+		}
+		keyEnd := int(dec.InputOffset())
+		valueStart, err := jsonValueStartForRewrite(rawBody, keyEnd)
+		if err != nil {
+			return nil, err
+		}
+		var raw json.RawMessage
+		if err := dec.Decode(&raw); err != nil {
+			return nil, err
+		}
+		if key == field {
+			if found {
+				return nil, errors.New("chat request body contains duplicate " + field + " fields")
+			}
+			found = true
+			start = valueStart
+			end = int(dec.InputOffset())
+		} else if strings.EqualFold(key, field) {
+			return nil, errors.New("chat request body contains non-canonical " + field + " field")
+		}
+	}
+	if _, err := dec.Token(); err != nil {
+		return nil, err
+	}
+	if !found {
+		return nil, errors.New("chat request body missing " + field + " field")
+	}
+	out := make([]byte, 0, len(rawBody)-(end-start)+len(replacement))
+	out = append(out, rawBody[:start]...)
+	out = append(out, replacement...)
+	out = append(out, rawBody[end:]...)
+	return out, nil
+}
+
+func neutralizeUnsupportedToolChoice(body []byte) []byte {
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(body, &obj); err != nil {
+		return body
+	}
+	raw, ok := obj["tool_choice"]
+	if !ok || len(bytes.TrimSpace(raw)) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return body
+	}
+	var choice string
+	if err := json.Unmarshal(raw, &choice); err == nil {
+		if choice == "auto" {
+			return body
+		}
+		if choice != "required" {
+			return body
+		}
+	}
+	rewritten, err := rewriteJSONRawField(body, "tool_choice", []byte(`"auto"`))
+	if err != nil {
+		return body
+	}
+	return rewritten
+}
+
+func jsonValueStartForRewrite(raw []byte, keyEnd int) (int, error) {
+	i := keyEnd
+	for i < len(raw) && (raw[i] == ' ' || raw[i] == '\n' || raw[i] == '\r' || raw[i] == '\t') {
+		i++
+	}
+	if i >= len(raw) || raw[i] != ':' {
+		return 0, errors.New("chat request body object key missing colon")
+	}
+	i++
+	for i < len(raw) && (raw[i] == ' ' || raw[i] == '\n' || raw[i] == '\r' || raw[i] == '\t') {
+		i++
+	}
+	if i >= len(raw) {
+		return 0, errors.New("chat request body object key missing value")
+	}
+	return i, nil
 }
 
 func validateOptionalFields(raw map[string]json.RawMessage, stream bool) (int, string, string) {

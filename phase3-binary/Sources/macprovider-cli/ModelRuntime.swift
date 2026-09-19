@@ -6352,7 +6352,9 @@ actor ModelRuntime: ModelRuntimeServing {
     private static func isSupportedToolChoice(_ value: MacProviderCore.JSONValue) -> Bool {
         switch value {
         case .string(let choice):
-            return choice == "auto"
+            // OpenAI/Pi send "required". We do not force a call, but rejecting it
+            // with 400/502 is worse than treating it as auto.
+            return choice == "auto" || choice == "required"
         case .null:
             return true
         default:
@@ -6405,14 +6407,18 @@ struct NativeToolCallStreamEmitter {
             let afterStart = start.upperBound
             let bodyEnd = text.range(of: endDelimiter, range: afterStart..<text.endIndex)?.lowerBound ?? text.endIndex
             let body = String(text[afterStart..<bodyEnd])
-            let isClosed = text.range(of: endDelimiter, range: afterStart..<text.endIndex) != nil
+            var isClosed = text.range(of: endDelimiter, range: afterStart..<text.endIndex) != nil
             if allowsFunctionXML, body.contains("<function=") {
+                if body.contains("</function>") {
+                    isClosed = true
+                }
                 return observeNemotronXML(body: body, isClosed: isClosed)
             }
             return observeJSONToolCall(body: body, isClosed: isClosed)
         }
         if allowsFunctionXML, text.contains("<function=") {
-            return observeNemotronXML(body: text, isClosed: false)
+            let isClosed = text.contains("</function>") || text.contains(endDelimiter)
+            return observeNemotronXML(body: text, isClosed: isClosed)
         }
         return []
     }
@@ -6451,18 +6457,16 @@ struct NativeToolCallStreamEmitter {
     }
 
     private mutating func observeNemotronXML(body: String, isClosed: Bool) -> [StreamChunk] {
-        guard let name = ToolCallParser.nemotronFunctionName(in: body),
-              let arguments = ToolCallParser.nemotronArgumentsJSON(in: body, includeIncomplete: isClosed)
-        else {
+        guard let name = ToolCallParser.nemotronFunctionName(in: body) else {
             return []
         }
         // Fail closed: never stream a tool-call delta for an undeclared function name.
         guard let allowed = allowedFunctionNames, allowed.contains(name) else {
             return []
         }
-        // Byte-cap parity with the final parser (SPEC-018 §3.4 / §10a #7): never stream oversized
-        // arguments; stop the emitter once the cumulative arguments exceed the per-call cap.
-        guard arguments.utf8.count <= ToolCallParser.SPEC018_ARGUMENTS_PER_CALL_BYTE_CAP else {
+
+        let arguments = isClosed ? ToolCallParser.nemotronArgumentsJSON(in: body, includeIncomplete: true) : nil
+        if isClosed, let arguments, arguments.utf8.count > ToolCallParser.SPEC018_ARGUMENTS_PER_CALL_BYTE_CAP {
             closed = true
             return []
         }
@@ -6472,12 +6476,18 @@ struct NativeToolCallStreamEmitter {
             opened = true
             events.append(.toolCallDelta(StreamToolCallDelta(index: 0, id: callID, type: "function", functionName: name, arguments: "")))
         }
-        let fragment = Self.delta(from: emittedArguments, to: arguments)
-        if !fragment.isEmpty {
-            emittedArguments = arguments
-            events.append(.toolCallDelta(StreamToolCallDelta(index: 0, id: nil, type: nil, functionName: nil, arguments: fragment)))
-        }
+        // Function-XML arguments are re-serialized as whole JSON objects (sorted keys),
+        // so they are not concat-safe prefixes. Hold until </function> then emit once.
+        // Emitting "{}" on the open tag made clients run tools with empty args and made
+        // later `{"command":...}` concat into malformed JSON.
         if isClosed {
+            if let arguments {
+                let fragment = Self.delta(from: emittedArguments, to: arguments)
+                if !fragment.isEmpty {
+                    emittedArguments = arguments
+                    events.append(.toolCallDelta(StreamToolCallDelta(index: 0, id: nil, type: nil, functionName: nil, arguments: fragment)))
+                }
+            }
             closed = true
         }
         return events
@@ -6534,7 +6544,9 @@ struct NativeToolCallStreamEmitter {
 
     private static func delta(from old: String, to new: String) -> String {
         guard new.hasPrefix(old) else {
-            return new
+            // A replacement that is not a prefix is not concat-safe on the OpenAI
+            // wire (`{}` + `{"command":...}`). Skip rather than emit a second object.
+            return ""
         }
         return String(new.dropFirst(old.count))
     }
@@ -6735,6 +6747,28 @@ private final class WarmupCancellationRecorder: @unchecked Sendable {
         lock.lock()
         cancelled = true
         lock.unlock()
+    }
+}
+
+final class StreamedToolCallArgs: @unchecked Sendable {
+    private let lock = NSLock()
+    private var byIndex: [Int: String] = [:]
+
+    func note(index: Int, fragment: String?) {
+        lock.lock()
+        if byIndex[index] == nil {
+            byIndex[index] = ""
+        }
+        if let fragment, !fragment.isEmpty {
+            byIndex[index, default: ""] += fragment
+        }
+        lock.unlock()
+    }
+
+    func snapshot() -> [Int: String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return byIndex
     }
 }
 

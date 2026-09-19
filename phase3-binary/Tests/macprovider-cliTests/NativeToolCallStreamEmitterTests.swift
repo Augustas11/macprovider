@@ -75,4 +75,67 @@ final class NativeToolCallStreamEmitterTests: XCTestCase {
         )
         XCTAssertFalse(hasAnyToolDelta(events), "no declared tools => no streamed tool_call delta")
     }
+
+    func testFunctionXMLDoesNotEmitEmptyObjectBeforeClose() {
+        var emitter = NativeToolCallStreamEmitter(
+            modelID: "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
+            allowedFunctionNames: ["bash"]
+        )
+        let open = emitter.observe("<function=bash>")
+        XCTAssertEqual(toolDeltaNames(open), ["bash"])
+        XCTAssertEqual(argumentFragments(open), [], "open tag must not stream empty {} arguments")
+
+        let mid = emitter.observe("<function=bash><parameter=command>echo hello")
+        XCTAssertEqual(argumentFragments(mid), [], "incomplete parameter must not stream arguments")
+
+        let closed = emitter.observe(
+            #"<function=bash><parameter=command>echo hello</parameter></function>"#
+        )
+        XCTAssertEqual(argumentFragments(closed).joined(), #"{"command":"echo hello"}"#)
+    }
+
+    func testFunctionXMLArgumentFragmentsConcatToValidJSON() {
+        var emitter = NativeToolCallStreamEmitter(
+            modelID: "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
+            allowedFunctionNames: ["bash"]
+        )
+        var args = ""
+        let snapshots = [
+            "<function=bash>",
+            "<function=bash><parameter=command>echo hello",
+            #"<function=bash><parameter=command>echo hello</parameter></function>"#,
+        ]
+        for text in snapshots {
+            args += argumentFragments(emitter.observe(text)).joined()
+        }
+        XCTAssertEqual(args, #"{"command":"echo hello"}"#)
+        XCTAssertFalse(args.contains("{}{"), "concat must not glue an empty object onto the real payload")
+    }
+
+    private func argumentFragments(_ events: [StreamChunk]) -> [String] {
+        events.compactMap { chunk in
+            if case let .toolCallDelta(delta) = chunk {
+                return delta.arguments
+            }
+            return nil
+        }
+        .compactMap { $0 }
+        .filter { !$0.isEmpty }
+    }
+
+    func testFallbackEmitsRemainderAfterNameOpen() {
+        let call = ToolCall(
+            id: "call_0123456789abcdef",
+            functionName: "bash",
+            arguments: #"{"command":"echo hello"}"#
+        )
+        let deltas = ToolCall.openAIFallbackDeltas(
+            toolCalls: [call],
+            streamedArgumentsByIndex: [0: ""]
+        )
+        XCTAssertEqual(deltas.count, 1)
+        let function = deltas[0][0]["function"] as? [String: Any]
+        XCTAssertEqual(function?["arguments"] as? String, #"{"command":"echo hello"}"#)
+        XCTAssertNil(deltas[0][0]["id"], "remainder must not reopen the tool call")
+    }
 }

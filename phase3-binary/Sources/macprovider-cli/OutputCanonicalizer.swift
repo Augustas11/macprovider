@@ -45,6 +45,40 @@ extension ToolCall {
             ],
         ]
     }
+
+    /// OpenAI tool-call SSE fallback after generation ends.
+    ///
+    /// If no deltas were streamed, emit the full name + arguments. If a prefix of
+    /// `arguments` already went out (including an empty name-open), emit only the
+    /// remainder so clients that concatenate by `tool_calls[].index` get valid JSON.
+    /// Non-prefix replacements (legacy `{}` then a full object) are skipped.
+    static func openAIFallbackDeltas(
+        toolCalls: [ToolCall],
+        streamedArgumentsByIndex: [Int: String]
+    ) -> [[[String: Any]]] {
+        if streamedArgumentsByIndex.isEmpty {
+            var chunks: [[[String: Any]]] = []
+            for (index, call) in toolCalls.enumerated() {
+                chunks.append([call.openAIInitialDelta(index: index)])
+                if !call.arguments.isEmpty {
+                    chunks.append([call.openAIArgumentsDelta(index: index, fragment: call.arguments)])
+                }
+            }
+            return chunks
+        }
+        var chunks: [[[String: Any]]] = []
+        for (index, call) in toolCalls.enumerated() {
+            let already = streamedArgumentsByIndex[index] ?? ""
+            guard call.arguments.hasPrefix(already) else {
+                continue
+            }
+            let rest = String(call.arguments.dropFirst(already.count))
+            if !rest.isEmpty {
+                chunks.append([call.openAIArgumentsDelta(index: index, fragment: rest)])
+            }
+        }
+        return chunks
+    }
 }
 
 enum OutputCanonicalizer {
