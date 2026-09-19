@@ -47,10 +47,11 @@ binary the Mac runs.
 
 All in-scope CLI rows are **merged**. Last built candidates `v1.8.163`,
 `v1.8.164`, `v1.8.167`, and `v1.8.168` are old or off-train — do not promote
-them. The next candidate can be cut off current `main` (includes #1609).
+them. The next candidate can be cut off current `main` (includes #1612).
 
 | Net change in CLI / Malibu / installer | Status | PR |
 |---|---|---|
+| Baked OpenRouter priced catalog + GLM served-id rate rewrite | merged | #1612 (#1603 listed bake) |
 | Uncatalogued BYOM loopback serve holds WS instead of self-flapping | merged | #1609 |
 | Serve stays connected while BYOM admission is pending | merged | #1557 |
 | MLX `models offer` sends snapshot hash (catalog-match works) | merged | #1548 |
