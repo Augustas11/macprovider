@@ -45,12 +45,13 @@ binary the Mac runs.
 
 ## Next CLI — net changes vs 1.8.123
 
-All rows are **already on `main`** — the train is fully merged, so the next
-candidate cut off current `main` carries every row. Last built candidate
-`v1.8.163` is old — do not promote it.
+All in-scope CLI rows are **merged**. Last built candidates `v1.8.163`,
+`v1.8.164`, `v1.8.167`, and `v1.8.168` are old or off-train — do not promote
+them. The next candidate can be cut off current `main` (includes #1609).
 
 | Net change in CLI / Malibu / installer | Status | PR |
 |---|---|---|
+| Uncatalogued BYOM loopback serve holds WS instead of self-flapping | merged | #1609 |
 | Serve stays connected while BYOM admission is pending | merged | #1557 |
 | MLX `models offer` sends snapshot hash (catalog-match works) | merged | #1548 |
 | Malibu shows BYOM admission states | merged | #1497 |
@@ -75,17 +76,33 @@ candidate cut off current `main` carries every row. Last built candidate
 | OpenRouter slot-delta / stale-capacity routing on CLI path | merged | #1571 #1535 |
 | Installer 404 fix: paginate latest-release lookup, de-quadratic parser | merged | #1582 (#1574) |
 | Live Ollama serve + Gemma tokens (non-earning) | merged | #1576 (#1569) |
+| Drop independent 256-message chat cap | merged | #1595 (#1594) |
+| Concat-safe native tool-call streaming (hold XML args until `</function>`) | merged | #1596 |
+| Recover inner Qwen function-XML when `</tool_call>` is missing | merged | #1599 |
+| SPEC-038 on-device parity + MoE-isolation self-measurement | merged | #1591 |
+| Paged-KV attach gates so SPEC-038/039 can engage on real MoE hardware | merged | #1597 |
+| Opt-in empirical max_batch concurrency calibration | merged | #1590 |
 
 #1453 closes when a candidate that includes the **merged** rows is promoted to
 the fleet. #1569 is a later CLI. Spec promotion #1583 is not a CLI change.
+
+Coordinator-only (already on Pearl `v1.8.162-29-gee089f0f`, **not** this CLI
+cut): #1601 Pi stream TTFT / concat-safe coalesce, #1599 coordinator XML
+rewrite, #1595 coordinator message-count drop. Fleet Macs still run **1.8.123**
+until this CLI is promoted. #1600 is the install.sh consumer-health alarm
+(scripts/CI), not the Mac binary — it stays red until this CLI (with #1582) is
+promoted **and** `get.malibu.tech/install.sh` is republished.
 
 ## Active candidate
 
 | Field | Value |
 |---|---|
-| Last built candidate | `v1.8.163` @ `8c0c51d2` |
-| Status | **Do not promote.** Older than current `main`. |
-| Next candidate | cut off current `main` |
+| Last built from `main` | `v1.8.168` @ `646f22f84984fd994151f3512c8432992cf9b36f` ([run 35425108016](https://github.com/Augustas11/macprovider/actions/runs/35425108016)), branch `release/candidate-1.8.168-spec038` |
+| Off-train E2E candidate | `v1.8.167` @ `7f833a2f63ddee6b2e146c821341099d89aec169` ([run 35417249468](https://github.com/Augustas11/macprovider/actions/runs/35417249468)) — signed hold-branch CLI used for the 2026-09-19 Pearl Track B run |
+| Older | `v1.8.163` @ `8c0c51d2`; `v1.8.164` BYOM @ `cdbb0257` |
+| Status | **Do not promote any of the above.** `v1.8.168` predates #1609 and later `main` (#1600/#1601/#1602). `v1.8.167` proved Track B but is not current `main`. |
+| Next candidate | cut off current `main` (hold #1609 is merged) |
+| Why the next cut | Pi/Qwen tool-call correctness on the Mac, 256-cap gone, #1582 install.sh pagination, paged-KV attach, BYOM serve (#1576) **plus** the uncatalogued loopback hold (#1609) so Pearl Gemma serve stays on the wire |
 
 ## E2E tracks (independent gates)
 
@@ -108,23 +125,59 @@ combined candidate**.
 ### Track B — BYOM Ollama / Gemma
 
 - **Owner / tracker:** #1569 (not #1453)
-- **Harness:** `test/e2e/byom/run-cli-onboarding-e2e.py` · runbook
-  `test/e2e/byom/CANDIDATE-E2E-RUNBOOK.md`
-- **Gate:** Ollama actually serving, probe returns tokens, marked non-earning.
-- **Last run:** #1569 landed (#1576 merged, issue closed) — the BYOM CLI change
-  is now in the train. Re-run Track B on the combined candidate before promoting
-  if that promotion ships BYOM earning.
+- **Harness:** `test/e2e/byom/gemma_runtime_journey.py` · runbook
+  `test/e2e/byom/GEMMA-RUNTIME-JOURNEY-RUNBOOK.md` (onboarding sibling:
+  `test/e2e/byom/run-cli-onboarding-e2e.py`)
+- **Gate:** one signed CLI process serving `ollama:gemma3:270m` with
+  `runtime_source=ollama_loopback` and `macprovider.gguf-file.v1`; coordinator
+  synthetic probe returns `synthetic_probe_passed` and
+  `synthetic_probe_completion_tokens > 0`; `catalog_model_key` stays null;
+  never `catalog_priced` / `settlement_capable`. Delete this provider's
+  `model_admission_events` after the run or catalog Llama de-routes.
+- **Last run:** 2026-09-19 live Pearl (`wss://coordinator.malibu.tech/ws/provider`)
+  with signed `v1.8.167` @ `7f833a2f`. Serve `ollama:gemma3:270m` /
+  `ollama_loopback`. Offer coordinator-backed,
+  `coordinator_event_id` `bcdbd3cedfa2e4149b4094ddb6ae6629fc131fd7e78aa7954fdc4a67555506c6`.
+  Probe: `synthetic_probe_passed` → `network_admitted_unsettled`,
+  `synthetic_probe_completion_tokens=4`. Admission rows deleted afterward;
+  stock earner restored to `1.8.123` `buyer_serving` / `live_verified`.
+  A signed candidate from a non-install path must not re-exec into
+  `~/macprovider/macprovider-cli` (that is how 167 first looked like an MLX
+  load). Re-run Track B on the next candidate (it will include #1609) before
+  promoting a BYOM-serve CLI. `v1.8.168` does **not** include the hold.
+
+### Track C — Pi / Qwen tool-call smoke (this cut)
+
+- **Owner / tracker:** #1594, #1596, #1599 (Pearl coordinator already hotfixed;
+  this track proves the **Mac CLI**).
+- **Gate:** against a candidate-installed provider: stream+tools bash args are
+  one complete JSON object; leaked `<function=bash>…</function>` without
+  `</tool_call>` becomes `tool_calls` (Pi runs bash, no XML in chat); CLI no
+  longer returns `messages_too_long` at 256. Prefill TTFT on Pi’s ~4.5k system
+  prompt is **not** a gate — that is hardware, not this cut.
+- **Last run:** 2026-09-19 live on Pearl coordinator + fleet **1.8.123** —
+  coordinator path green; CLI path still the old binary. Re-run on the next
+  candidate after it is installed on a Mac.
 
 ## Promotion gate (checklist)
 
 1. All in-scope CLI rows above are `merged`.
-2. Cut one candidate off `main` (`acceptance-candidate.yml`).
-3. In-scope e2e green on **that** candidate (Track A this cut; Track B only if
-   shipping #1569).
-4. Physical acceptance (`promote-acceptance-candidate.yml`) — this is what
+2. Cut one candidate off `main` (`acceptance-candidate.yml`). Do **not** reuse
+   `v1.8.163` / `v1.8.164` / `v1.8.167` / `v1.8.168`.
+3. In-scope e2e green on **that** candidate (Track A this cut; Track B on the
+   next candidate, which includes #1609, before promoting a BYOM-serve CLI;
+   Track B is not #1453 close).
+4. Live smoke on the candidate (not a substitute for Track A): Pi/Qwen3-Coder
+   stream+tools concat is one JSON object (never `{}` / `{}{`); unclosed
+   function-XML becomes a real `bash` tool call; 257+ messages are not rejected
+   with `messages_too_long` on the CLI.
+5. Physical acceptance (`promote-acceptance-candidate.yml`) — this is what
    bumps `binaryVersion` and moves the fleet.
-5. `verify-live-coordinator-release-rollout` before publishing discovery.
-6. Byte-identity check: `docs/runbooks/provider-cli-release-verification.md`.
+6. `verify-live-coordinator-release-rollout` before publishing discovery.
+7. Byte-identity check: `docs/runbooks/provider-cli-release-verification.md`.
+8. Republish `https://get.malibu.tech/install.sh` from the promoted tag so
+   #1582 pagination is what `curl | bash` runs. Confirm
+   `scripts/check-install-sh-consumer-health.sh` is green (#1600 / #1588).
 
 ## Session protocol
 

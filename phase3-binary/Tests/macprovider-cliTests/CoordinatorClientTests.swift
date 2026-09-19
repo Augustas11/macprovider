@@ -6340,6 +6340,75 @@ final class CoordinatorClientTests: XCTestCase {
         return try fixture.record()
     }
 
+    func testBYOMLoopbackSessionHoldsWithoutCatalogServingCapabilityCheck() async throws {
+        // #1569 serve-flap fix: an uncatalogued BYOM loopback serve has no
+        // signed catalog envelope, so the ordinary buyer-serving readiness
+        // path would short-circuit to .unconfirmed and throw
+        // ("coordinator buyer-serving readiness was not confirmed"),
+        // flapping the accepted session. A BYOM loopback runtime_source must
+        // instead hold the session WITHOUT ever consulting coordinator
+        // serving capability.
+        // All four SPEC-046 loopback adapters must hold identically, so a
+        // regression dropping one from the classifier is caught.
+        for source in ["ollama_loopback", "lmstudio_loopback", "llamacpp_loopback", "openai_compatible_loopback"] {
+            let fixture = try LifecycleFixture()
+            defer { try? FileManager.default.removeItem(at: fixture.root) }
+            // If serving capability were ever consulted this verdict would fail
+            // the accept; the fix must never call it, so calls must stay 0.
+            let script = ReadinessScript([.indeterminate], then: .indeterminate)
+            let client = try await makeClient(
+                status: ProviderStatus(
+                    modelID: "ollama:gemma3:270m",
+                    modelLoaded: true,
+                    capacity: ProviderCapacity(maxContextOverride: 2048, maxConcurrencyOverride: 1)
+                ),
+                recorder: CoordinatorFrameRecorder(),
+                // No catalog envelope: uncatalogued BYOM has no release/signer/row.
+                runtimeSource: source,
+                installedCompatibilityManifest: { _, _ in nil },
+                coordinatorReadiness: { _, _, _ in await script.next() },
+                coordinatorReadinessAttempts: 3,
+                admissionPendingReadinessPollNanoseconds: 20_000_000,
+                lifecycleStateStore: fixture.store,
+                lifecycleOperationID: fixture.operationID
+            )
+
+            // The accept path must NOT throw: the BYOM loopback session is held,
+            // not dropped for a missing catalog serving capability.
+            try await client.handleCoordinatorPayloadForTest([
+                "type": "hello_ack",
+                "assigned_id": "assigned-\(source)",
+                "heartbeat_interval_s": 30,
+                "catalog_compatible": true,
+            ])
+
+            // The fix short-circuits before any coordinator serving-capability read.
+            let calls = await script.calls
+            XCTAssertEqual(calls, 0, "\(source) must not consult coordinator serving capability")
+            // It never records the readiness-unconfirmed failure lifecycle.
+            if case .valid(let record) = fixture.store.inspect() {
+                XCTAssertNotEqual(record.reasonCode, "buyer_serving_readiness_unconfirmed")
+            }
+        }
+    }
+
+    func testCatalogRuntimeStillRequiresServingCapabilityConfirmation() async throws {
+        // Contrast: a non-loopback (catalog) runtime with an unconfirmable
+        // readiness still fails closed — the fix is loopback-scoped.
+        let fixture = try LifecycleFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let script = ReadinessScript([.indeterminate], then: .indeterminate)
+        let client = try await makeHeldSessionClient(fixture: fixture, script: script)
+        await XCTAssertThrowsErrorAsync(
+            try await client.handleCoordinatorPayloadForTest([
+                "type": "hello_ack",
+                "assigned_id": "assigned-catalog",
+                "heartbeat_interval_s": 30,
+                "catalog_compatible": true,
+            ])
+        )
+    }
+
     func testCoordinatorSessionHoldsThroughPendingBYOMAdmissionThenPromotes() async throws {
         let fixture = try LifecycleFixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
@@ -7396,6 +7465,7 @@ final class CoordinatorClientTests: XCTestCase {
         catalogCandidateSHA256: String? = nil,
         catalogSignerKeyID: String? = nil,
         catalogRowIdentity: String? = nil,
+        runtimeSource: String? = nil,
         compatibilitySetIDOverride: String? = nil,
         installedCompatibilityManifest: CoordinatorClient.InstalledCompatibilityManifest? = nil,
         catalogModelSHA256: String? = nil,
@@ -7448,6 +7518,7 @@ final class CoordinatorClientTests: XCTestCase {
             config: config,
             modelRuntime: runtime,
             providerStatus: status,
+            runtimeSource: runtimeSource,
             sendOverride: useDefaultSendOverride ? (sendOverride ?? defaultSendOverride) : sendOverride,
             reconnectGraceNanoseconds: reconnectGraceNanoseconds,
             reconnectInitialBackoffNanoseconds: reconnectInitialBackoffNanoseconds,

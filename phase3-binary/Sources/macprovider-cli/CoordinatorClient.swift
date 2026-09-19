@@ -171,6 +171,21 @@ actor CoordinatorClient {
     /// Non-nil only for non-MLX serving runtimes (SPEC-046 loopback adapters,
     /// e.g. `ollama_loopback`); emitted as the `runtime_source` hello field.
     private let runtimeSource: String?
+
+    /// True when `value` is a SPEC-046 BYOM loopback adapter's hello
+    /// `runtime_source`. These serve non-catalog models by design, so they
+    /// carry no signed catalog serving-capability envelope and must not be
+    /// held to the catalog buyer-serving readiness contract (see the
+    /// serve-flap hold in the post-auth path). Mirrors the coordinator's
+    /// `isBYOMLoopbackRuntimeSource` vocabulary.
+    static func isBYOMLoopbackRuntimeSource(_ value: String?) -> Bool {
+        switch value {
+        case "ollama_loopback", "lmstudio_loopback", "llamacpp_loopback", "openai_compatible_loopback":
+            return true
+        default:
+            return false
+        }
+    }
     private let loadedModelID: String?
     private let maxBodyBytes: Int
     private let maxActiveRequests: Int
@@ -3177,6 +3192,40 @@ actor CoordinatorClient {
         }
         var buyerServingHeldForAdmission = false
         if lifecycleOperationID != nil {
+            if CoordinatorClient.isBYOMLoopbackRuntimeSource(runtimeSource) {
+                // SPEC-046/047 (#1569 serve-flap fix): a BYOM loopback runtime
+                // serves a non-catalog model and is non-buyer-serving by
+                // design. It has no signed catalog envelope
+                // (catalogReleaseID/catalogSignerKeyID/catalogRowIdentity are
+                // nil), so waitForCoordinatorServingCapabilityOutcome() short-
+                // circuits to .unconfirmed WITHOUT ever calling the
+                // coordinator, and the .unconfirmed throw below would fail
+                // closed and flap the accepted session before it can ever be
+                // admitted or synthetically probed. Hold the accepted session
+                // instead: it is non-earning (never promotes to serving_buyers,
+                // and the coordinator's money-path admission gate keeps it
+                // non-settleable), and the coordinator's model admission and
+                // synthetic probe run over this held wire. The admission-
+                // pending readiness watch started below is a no-op for it —
+                // pollAdmissionPendingReadiness() ends immediately once
+                // acceptedReadinessEnvelope() is nil.
+                buyerServingHeldForAdmission = true
+                // A held loopback session never promotes to serving_buyers, so
+                // it would otherwise never reach finalizeAdmissionBoundaryAfter-
+                // ServingProof and a self-updated loopback's pending autoupdate
+                // marker would stay uncommitted for the life of the session.
+                // Finalize the boundary here as every other admitted session
+                // eventually does, but pass servingConfirmed:false because a
+                // held loopback has NOT confirmed buyer-serving — so a pending
+                // local-signed marker commits only after waitForStableLocal-
+                // AutoupdateHealth (matching startup recovery), and every other
+                // marker (or no marker) stays .pendingRollback / .noPendingUpdate.
+                // Connect+auth+hold alone never retires rollback.
+                await finalizeAdmissionBoundaryAfterServingProof(
+                    successReason: "byom_loopback_session_held",
+                    servingConfirmed: false
+                )
+            } else {
             switch await waitForCoordinatorServingCapabilityOutcome() {
             case .confirmed:
                 break
@@ -3204,6 +3253,7 @@ actor CoordinatorClient {
                     // a lifecycle matrix miss must not replace it.
                 }
                 throw CoordinatorAuthError.invalidMessage("coordinator buyer-serving readiness was not confirmed")
+            }
             }
         }
         if !buyerServingHeldForAdmission {
@@ -3509,7 +3559,7 @@ actor CoordinatorClient {
         case pendingRollback
     }
 
-    private func commitPendingAutoupdateAfterServingProof() async -> AdmissionUpdateBoundary {
+    private func commitPendingAutoupdateAfterServingProof(servingConfirmed: Bool = true) async -> AdmissionUpdateBoundary {
         guard let completedAutoupdate = try? autoupdateMarkerStore.readPending() else {
             return .noPendingUpdate
         }
@@ -3577,6 +3627,18 @@ actor CoordinatorClient {
             guard await waitForCoordinatorServingCapability() else {
                 return .pendingRollback
             }
+        } else if !servingConfirmed {
+            // A caller that did not confirm coordinator buyer-serving (a held
+            // BYOM loopback, which by design never becomes buyer-serving)
+            // commits a local-signed marker only after the SAME local health
+            // proof startup recovery requires (waitForStableLocalAutoupdate-
+            // Health). Connect+auth+hello_ack alone is not sufficient to retire
+            // rollback for a self-updated binary whose local serving path may be
+            // broken; without this a serving-broken signed self-update would be
+            // committed and lose auto-rollback.
+            guard await waitForStableLocalAutoupdateHealth(completedAutoupdate) else {
+                return .pendingRollback
+            }
         }
         do {
             let transactionLock = try autoupdateMarkerStore.acquireRecoveryLock()
@@ -3609,8 +3671,8 @@ actor CoordinatorClient {
         }
     }
 
-    private func finalizeAdmissionBoundaryAfterServingProof(successReason: String) async {
-        let updateBoundary = await commitPendingAutoupdateAfterServingProof()
+    private func finalizeAdmissionBoundaryAfterServingProof(successReason: String, servingConfirmed: Bool = true) async {
+        let updateBoundary = await commitPendingAutoupdateAfterServingProof(servingConfirmed: servingConfirmed)
         if updateBoundary != .pendingRollback {
             // A pre-v1.8.34 rollback binary cannot read CLI Keychain. Commit
             // the coordinator update transaction before removing its YAML
