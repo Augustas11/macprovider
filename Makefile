@@ -132,6 +132,7 @@ test-dist:
 	bash scripts/test-select-discovery-renewal-base.sh
 	bash scripts/test-renew-release-discovery-head.sh
 	bash scripts/test-autotune-feed-freshness-alarm.sh
+	bash scripts/test-install-sh-consumer-health-alarm.sh
 	bash scripts/test-renew-autotune-static-feed-signed.sh
 	bash -n scripts/renew-autotune-static-feed.sh
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_autotune_feed_freshness

@@ -171,6 +171,20 @@ every 6 hours against the latest release tag and FAILS (notifying) on drift, so
 a missed republish surfaces within a quarter day instead of stranding new
 installs. Treat a red parity alarm as a release step that did not complete.
 
+Byte-parity is necessary but not sufficient. The served installer can match the
+latest tag and still be unable to resolve an installable release (observed
+#1574/#1588: v1.8.123 `latest_release_tag()` used `?per_page=30`, leading
+prereleases hid the stable tag, the resolver died 3, and `checksums.txt`
+404'd while parity stayed green). The scheduled
+`.github/workflows/install-sh-consumer-health-alarm.yml` fetches the served
+`install.sh`, runs that copy's `latest_release_tag()` against the live
+unauthenticated GitHub API (the view a fresh host gets — do not use `gh` /
+`GITHUB_TOKEN`), and asserts `checksums.txt` plus a `darwin-arm64` platform
+asset return HTTP 200. Run it locally with
+`bash scripts/check-install-sh-consumer-health.sh`. A red health alarm with
+green parity means the curl channel is serving a broken resolver; fix the
+installer, cut the next stable CLI, and republish.
+
 ## What not to count as release proof
 
 - matching `malibu-cli --version`

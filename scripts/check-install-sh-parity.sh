@@ -15,6 +15,11 @@
 # release tag, so "served must equal the released install.sh". Run locally to
 # confirm a republish landed. Read-only: no secrets, no writes, no deploy.
 #
+# Byte identity only. Resolver health (served latest_release_tag() against the
+# live unauthenticated GitHub API, plus checksums/asset HTTP 200) is
+# scripts/check-install-sh-consumer-health.sh /
+# .github/workflows/install-sh-consumer-health-alarm.yml (#1588).
+#
 # Exit codes: 0 = parity (or --allow-ahead and served is a known older release),
 #             1 = drift (served != expected), 2 = usage/fetch error.
 set -euo pipefail
