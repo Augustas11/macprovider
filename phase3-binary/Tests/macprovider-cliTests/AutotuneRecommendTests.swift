@@ -1385,6 +1385,21 @@ final class AutotuneRecommendTests: XCTestCase {
         }
     }
 
+    func testGLMRateCardLookupUsesCatalogKey() throws {
+        let rateCard = try AutotuneStaticInputs.decodeRateCard(Data(AutotuneStaticInputs.bakedRateCardJSON.utf8))
+
+        for modelKey in [
+            "z-ai/glm-4.5-air",
+            "glm-4.5-air",
+            "mlx-community/GLM-4.5-Air-4bit",
+        ] {
+            let row = rateCard.rowForRecommendation(modelKey: modelKey)
+            XCTAssertEqual(row?.key, "z-ai/glm-4.5-air", modelKey)
+            XCTAssertEqual(row?.row.promptRatePerMtok, 112_000)
+            XCTAssertEqual(row?.row.completionRatePerMtok, 688_000)
+        }
+    }
+
     func testNemotronRecommendationKeepsPublicServedModelWithNormalizedRateCard() throws {
         let modelKey = "nvidia/nemotron-3-nano-30b-a3b"
         var request = try makeRequest(modelKey: modelKey)

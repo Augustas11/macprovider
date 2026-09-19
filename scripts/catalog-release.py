@@ -506,6 +506,8 @@ def normalize_model_key(model: str) -> str:
         return key[len("nvidia-"):]
     if served_alias("openai") and key.startswith("gpt-oss-"):
         return "openai/" + key
+    if served_alias("z-ai") and key.startswith("glm-"):
+        return "z-ai/" + key
     return key
 
 
@@ -1176,15 +1178,30 @@ def require_recommendable_rate_rows(candidate_obj: dict, rate_card_obj: dict) ->
         if row["runtime_status"] != "recommendable":
             continue
         if key in rows and key != "default":
-            continue
-        normalized = normalize_model_key(key)
-        if normalized in rows and normalized != "default":
-            continue
-        fail(
-            f"rate-card: recommendable candidate row {key!r} resolves to no rate-card "
-            f"row by exact key or NormalizeModelKey ({normalized!r}); the default row "
-            "does not satisfy SPEC-023 §3.3.1 rule 7"
-        )
+            key_row = rows[key]
+        else:
+            normalized = normalize_model_key(key)
+            if normalized not in rows or normalized == "default":
+                fail(
+                    f"rate-card: recommendable candidate row {key!r} resolves to no rate-card "
+                    f"row by exact key or NormalizeModelKey ({normalized!r}); the default row "
+                    "does not satisfy SPEC-023 §3.3.1 rule 7"
+                )
+            key_row = rows[normalized]
+        served = row.get("model_id")
+        if isinstance(served, str) and served:
+            served_row = resolved_rate_row(rows, served)
+            if served_row is None:
+                fail(
+                    f"rate-card: recommendable candidate row {key!r} served model_id {served!r} "
+                    "resolves to no rate-card row by exact key or NormalizeModelKey; the default "
+                    "row does not satisfy SPEC-023 §3.3.1 rule 7"
+                )
+            if served_row != key_row:
+                fail(
+                    f"rate-card: recommendable candidate row {key!r} and served model_id "
+                    f"{served!r} resolve to different rate-card rows"
+                )
 
 
 def resolved_rate_row(rows: dict, key: str) -> dict | None:
