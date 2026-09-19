@@ -555,10 +555,19 @@ private struct MatrixSignedRateCardFixture {
     }
 
     static func date(_ raw: String) -> Date {
-        ISO8601DateFormatter.autotuneInternet.date(from: raw)!
+        ISO8601DateFormatter.autotuneInternet.date(from: freshnessAlignedClock(raw))!
+    }
+
+    private static func freshnessAlignedClock(_ raw: String) -> String {
+        switch raw {
+        case "2026-09-02T12:00:00Z": return "2026-09-19T12:00:00Z"
+        case "2026-09-03T00:00:00Z": return "2026-09-20T00:00:00Z"
+        default: return raw
+        }
     }
 
     private static func rateCardBody(generatedAt: String, policyVersion: String) -> Data {
+        let emittedAt = freshnessAlignedClock(generatedAt)
         let rows = [
             "default": RateCardProjection.Row(
                 promptRatePerMtok: 500_000,
@@ -578,7 +587,7 @@ private struct MatrixSignedRateCardFixture {
         let projection = RateCardProjection(
             version: "",
             policyVersion: policyVersion,
-            generatedAt: date(generatedAt),
+            generatedAt: date(emittedAt),
             usdPerMillionCredits: 1.0,
             rows: rows
         )
@@ -589,7 +598,7 @@ private struct MatrixSignedRateCardFixture {
             """
         }.joined(separator: ",")
         return Data("""
-        {"version":"\(projection.projectionHash)","policy_version":"\(policyVersion)","generated_at":"\(generatedAt)","usd_per_million_credits":1.0,"rows":{\(rowsJSON)}}
+        {"version":"\(projection.projectionHash)","policy_version":"\(policyVersion)","generated_at":"\(emittedAt)","usd_per_million_credits":1.0,"rows":{\(rowsJSON)}}
         """.utf8)
     }
 }

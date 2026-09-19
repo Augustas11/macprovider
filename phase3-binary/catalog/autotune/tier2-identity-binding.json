@@ -1,6 +1,6 @@
 {
-  "autotune_candidates_sha256": "10b792ad574042c22d8cbb555c67baf14d6357ea6727e56164f4d8b73c03fa4a",
-  "generated_at": "2026-09-02T00:00:00Z",
+  "autotune_candidates_sha256": "b92b4470a6630240c0047b3e86ab618553ace8e31e233ac7d7793781deafbd44",
+  "generated_at": "2026-09-19T00:00:00Z",
   "models": [
     {
       "catalog_key": "google-gemma-4-26b-a4b-it",
@@ -8,6 +8,13 @@
       "model_id": "mlx-community/gemma-4-26b-a4b-it-4bit",
       "model_revision": "0d77464eeb233a2da68ebf9d7dc4edaac7db956d",
       "sha256": "436ce68d2ac5a27dde3b54569736fb7a69dc3b7a175d2f633147c7802b3bc88a"
+    },
+    {
+      "catalog_key": "z-ai/glm-4.5-air",
+      "min_ram_gb": 80,
+      "model_id": "mlx-community/GLM-4.5-Air-4bit",
+      "model_revision": "60837794f3caafc4682dd1a9188a82c55a9100ef",
+      "sha256": "350c018e8a3397a753bcb7c22c839a5c5a24041e6dee014bb42c2d766d6db57d"
     },
     {
       "catalog_key": "openai/gpt-oss-120b",
@@ -52,6 +59,13 @@
       "sha256": "b7749cc57f37f7e9239d0f9b091bcffe6d7629e48af75e8cb84c1cdca1780973"
     },
     {
+      "catalog_key": "qwen/qwen3-30b-a3b-instruct-2507",
+      "min_ram_gb": 28,
+      "model_id": "mlx-community/Qwen3-30B-A3B-Instruct-2507-4bit",
+      "model_revision": "e9675aa3ca5f900ccef55267914466d55ab325fa",
+      "sha256": "6ed599e763ccfcf2731b2c383e81e6638375f62359ccb8bf730e1f17f583e3e7"
+    },
+    {
       "catalog_key": "qwen3-32b",
       "min_ram_gb": 48,
       "model_id": "mlx-community/Qwen3-32B-4bit",
@@ -71,9 +85,44 @@
       "model_id": "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
       "model_revision": "6e302ea604ad9ab206367e2c501d1571023e7b6d",
       "sha256": "10adb5da9840c8fe0e3036b10f6e2f8f34b41c615f3925b4132302e9cdbab9c0"
+    },
+    {
+      "catalog_key": "qwen/qwen3.5-27b",
+      "min_ram_gb": 24,
+      "model_id": "mlx-community/Qwen3.5-27B-4bit",
+      "model_revision": "45797d2985a12c55e6473686e9ea91b95e959553",
+      "sha256": "01b20ff61b8f635d25515287bd6d2ac26877eab0de2fb2056b3d8b314ab4e2a3"
+    },
+    {
+      "catalog_key": "qwen/qwen3.5-35b-a3b",
+      "min_ram_gb": 28,
+      "model_id": "mlx-community/Qwen3.5-35B-A3B-4bit",
+      "model_revision": "1e20fd8d42056f870933bf98ca6211024744f7ec",
+      "sha256": "58f00ca2bc7bb007b69145143d8a3fee90a3e5839a5a06e6443e8a7ef3906ad2"
+    },
+    {
+      "catalog_key": "qwen/qwen3.6-27b",
+      "min_ram_gb": 24,
+      "model_id": "mlx-community/Qwen3.6-27B-4bit",
+      "model_revision": "c000ac2c2057d94be3fa931000c31723aac53282",
+      "sha256": "d196dce06a23caca7b08818c3aec9e222d7a94cf5ab1488bfd3eb75f98e57372"
+    },
+    {
+      "catalog_key": "qwen/qwen3.6-35b-a3b",
+      "min_ram_gb": 28,
+      "model_id": "mlx-community/Qwen3.6-35B-A3B-4bit",
+      "model_revision": "38740b847e4cb78f352aba30aa41c76e08e6eb46",
+      "sha256": "c4d82befa782da05bea1bdc4000ab9422a7173d9cd96bab739374d28d9ad4827"
+    },
+    {
+      "catalog_key": "qwen/qwen3.8-27b",
+      "min_ram_gb": 24,
+      "model_id": "mlx-community/Qwen3.8-27B-4bit",
+      "model_revision": "10c35caafbb80f7dc6a7a432cdd11af10a6d4818",
+      "sha256": "1a955b957b75d2e3264bd914600048cc8047b7cfc08117e82fa4c8272e7e8086"
     }
   ],
   "policy_version": "autotune-policy-v1",
-  "release_id": "published-2026-09-02-gpt-oss-120b-v1",
+  "release_id": "published-2026-09-19-openrouter-listed-v1",
   "schema_version": "macprovider.tier2-identity-binding.v1"
 }

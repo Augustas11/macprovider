@@ -491,7 +491,12 @@ class RateCardSourceTest(unittest.TestCase):
         state the seeded source is in for `class-30b-moe` and `class-32b`.
         """
         classes = catalog_release.artifact_rate_classes(json.loads(ARTIFACT_SOURCE_BYTES))
-        self.assertEqual(len(classes), len(CANDIDATE_OBJ["rows"]))
+        recommendable = {
+            key for key, row in CANDIDATE_OBJ["rows"].items()
+            if row["runtime_status"] == "recommendable"
+        }
+        # Listed rows need a verified primary artifact, not a rate_class.
+        self.assertEqual(set(classes), recommendable)
         source = catalog_release.validate_rate_card_source(RATE_CARD_SOURCE_BYTES)
         expanded = catalog_release.expand_rate_card(source, classes, CANDIDATE_OBJ)
         self.assertEqual(expanded, RATE_CARD_BYTES)

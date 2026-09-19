@@ -372,7 +372,7 @@ final class ModelsSubcommandTests: XCTestCase {
                 }
             },
             trustedPublicKeys: fixture.trustedPublicKeys,
-            now: { Self.prepareDate("2026-09-02T01:00:00Z") }
+            now: { Self.prepareDate("2026-09-19T01:00:00Z") }
         )
         let capture = try await withPrepareStaticInputs(inputs) {
             let command = try ModelsPrepareCommand.parse([
@@ -407,7 +407,7 @@ final class ModelsSubcommandTests: XCTestCase {
         let inputs = AutotuneStaticInputs(
             fetch: { url in url.path.hasSuffix(".sig") ? fixture.sidecarBytes : fixture.feedBytes },
             trustedPublicKeys: fixture.trustedPublicKeys,
-            now: { Self.prepareDate("2026-09-02T01:00:00Z") }
+            now: { Self.prepareDate("2026-09-19T01:00:00Z") }
         )
         let capture = try await withPrepareStaticInputs(inputs) {
             let command = try ModelsPrepareCommand.parse([

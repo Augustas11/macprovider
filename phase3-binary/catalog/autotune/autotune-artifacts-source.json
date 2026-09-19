@@ -150,6 +150,150 @@
       "primary_artifact_id": "mlx-mxfp4-q8",
       "rate_class": "class-20b-moe"
     },
+    "qwen/qwen3-30b-a3b-instruct-2507": {
+      "artifacts": {
+        "mlx-4bit": {
+          "allowed_runtime_sources": [
+            "mlx_cache"
+          ],
+          "hash": "6ed599e763ccfcf2731b2c383e81e6638375f62359ccb8bf730e1f17f583e3e7",
+          "hash_algorithm": "macprovider.snapshot-manifest.v1",
+          "min_ram_gb": 28,
+          "notes": "Primary MLX artifact; identity mirrors this release's signed candidate row. size_bytes unmeasured (artifact feed pre-activation).",
+          "quantization": "4bit",
+          "runtime_format": "mlx_safetensors",
+          "size_bytes": null,
+          "source_ref": {
+            "kind": "huggingface_revision",
+            "repo_id": "mlx-community/Qwen3-30B-A3B-Instruct-2507-4bit",
+            "revision": "e9675aa3ca5f900ccef55267914466d55ab325fa"
+          },
+          "verification_status": "verified",
+          "verified_at": "2026-09-19"
+        }
+      },
+      "primary_artifact_id": "mlx-4bit"
+    },
+    "qwen/qwen3.5-27b": {
+      "artifacts": {
+        "mlx-4bit": {
+          "allowed_runtime_sources": [
+            "mlx_cache"
+          ],
+          "hash": "01b20ff61b8f635d25515287bd6d2ac26877eab0de2fb2056b3d8b314ab4e2a3",
+          "hash_algorithm": "macprovider.snapshot-manifest.v1",
+          "min_ram_gb": 24,
+          "notes": "Primary MLX artifact; identity mirrors this release's signed candidate row. size_bytes unmeasured (artifact feed pre-activation).",
+          "quantization": "4bit",
+          "runtime_format": "mlx_safetensors",
+          "size_bytes": null,
+          "source_ref": {
+            "kind": "huggingface_revision",
+            "repo_id": "mlx-community/Qwen3.5-27B-4bit",
+            "revision": "45797d2985a12c55e6473686e9ea91b95e959553"
+          },
+          "verification_status": "verified",
+          "verified_at": "2026-09-19"
+        }
+      },
+      "primary_artifact_id": "mlx-4bit"
+    },
+    "qwen/qwen3.5-35b-a3b": {
+      "artifacts": {
+        "mlx-4bit": {
+          "allowed_runtime_sources": [
+            "mlx_cache"
+          ],
+          "hash": "58f00ca2bc7bb007b69145143d8a3fee90a3e5839a5a06e6443e8a7ef3906ad2",
+          "hash_algorithm": "macprovider.snapshot-manifest.v1",
+          "min_ram_gb": 28,
+          "notes": "Primary MLX artifact; identity mirrors this release's signed candidate row. size_bytes unmeasured (artifact feed pre-activation).",
+          "quantization": "4bit",
+          "runtime_format": "mlx_safetensors",
+          "size_bytes": null,
+          "source_ref": {
+            "kind": "huggingface_revision",
+            "repo_id": "mlx-community/Qwen3.5-35B-A3B-4bit",
+            "revision": "1e20fd8d42056f870933bf98ca6211024744f7ec"
+          },
+          "verification_status": "verified",
+          "verified_at": "2026-09-19"
+        }
+      },
+      "primary_artifact_id": "mlx-4bit"
+    },
+    "qwen/qwen3.6-27b": {
+      "artifacts": {
+        "mlx-4bit": {
+          "allowed_runtime_sources": [
+            "mlx_cache"
+          ],
+          "hash": "d196dce06a23caca7b08818c3aec9e222d7a94cf5ab1488bfd3eb75f98e57372",
+          "hash_algorithm": "macprovider.snapshot-manifest.v1",
+          "min_ram_gb": 24,
+          "notes": "Primary MLX artifact; identity mirrors this release's signed candidate row. size_bytes unmeasured (artifact feed pre-activation).",
+          "quantization": "4bit",
+          "runtime_format": "mlx_safetensors",
+          "size_bytes": null,
+          "source_ref": {
+            "kind": "huggingface_revision",
+            "repo_id": "mlx-community/Qwen3.6-27B-4bit",
+            "revision": "c000ac2c2057d94be3fa931000c31723aac53282"
+          },
+          "verification_status": "verified",
+          "verified_at": "2026-09-19"
+        }
+      },
+      "primary_artifact_id": "mlx-4bit"
+    },
+    "qwen/qwen3.6-35b-a3b": {
+      "artifacts": {
+        "mlx-4bit": {
+          "allowed_runtime_sources": [
+            "mlx_cache"
+          ],
+          "hash": "c4d82befa782da05bea1bdc4000ab9422a7173d9cd96bab739374d28d9ad4827",
+          "hash_algorithm": "macprovider.snapshot-manifest.v1",
+          "min_ram_gb": 28,
+          "notes": "Primary MLX artifact; identity mirrors this release's signed candidate row. size_bytes unmeasured (artifact feed pre-activation).",
+          "quantization": "4bit",
+          "runtime_format": "mlx_safetensors",
+          "size_bytes": null,
+          "source_ref": {
+            "kind": "huggingface_revision",
+            "repo_id": "mlx-community/Qwen3.6-35B-A3B-4bit",
+            "revision": "38740b847e4cb78f352aba30aa41c76e08e6eb46"
+          },
+          "verification_status": "verified",
+          "verified_at": "2026-09-19"
+        }
+      },
+      "primary_artifact_id": "mlx-4bit"
+    },
+    "qwen/qwen3.8-27b": {
+      "artifacts": {
+        "mlx-4bit": {
+          "allowed_runtime_sources": [
+            "mlx_cache"
+          ],
+          "hash": "1a955b957b75d2e3264bd914600048cc8047b7cfc08117e82fa4c8272e7e8086",
+          "hash_algorithm": "macprovider.snapshot-manifest.v1",
+          "min_ram_gb": 24,
+          "notes": "Primary MLX artifact; identity mirrors this release's signed candidate row. size_bytes unmeasured (artifact feed pre-activation).",
+          "quantization": "4bit",
+          "runtime_format": "mlx_safetensors",
+          "size_bytes": null,
+          "source_ref": {
+            "kind": "huggingface_revision",
+            "repo_id": "mlx-community/Qwen3.8-27B-4bit",
+            "revision": "10c35caafbb80f7dc6a7a432cdd11af10a6d4818"
+          },
+          "verification_status": "verified",
+          "verified_at": "2026-09-19"
+        }
+      },
+      "primary_artifact_id": "mlx-4bit"
+    },
     "qwen2.5-coder-32b-instruct": {
       "artifacts": {
         "mlx-4bit": {
@@ -249,6 +393,30 @@
       },
       "primary_artifact_id": "mlx-4bit",
       "rate_class": "class-30b-moe"
+    },
+    "z-ai/glm-4.5-air": {
+      "artifacts": {
+        "mlx-4bit": {
+          "allowed_runtime_sources": [
+            "mlx_cache"
+          ],
+          "hash": "350c018e8a3397a753bcb7c22c839a5c5a24041e6dee014bb42c2d766d6db57d",
+          "hash_algorithm": "macprovider.snapshot-manifest.v1",
+          "min_ram_gb": 80,
+          "notes": "Primary MLX artifact; identity mirrors this release's signed candidate row. size_bytes unmeasured (artifact feed pre-activation).",
+          "quantization": "4bit",
+          "runtime_format": "mlx_safetensors",
+          "size_bytes": null,
+          "source_ref": {
+            "kind": "huggingface_revision",
+            "repo_id": "mlx-community/GLM-4.5-Air-4bit",
+            "revision": "60837794f3caafc4682dd1a9188a82c55a9100ef"
+          },
+          "verification_status": "verified",
+          "verified_at": "2026-09-19"
+        }
+      },
+      "primary_artifact_id": "mlx-4bit"
     }
   },
   "schema_version": "macprovider.autotune-artifacts-source.v1",

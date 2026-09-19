@@ -1,20 +1,20 @@
 {
   "feeds": {
     "autotune-candidates.json": {
-      "bytes": 6744,
-      "sha256": "10b792ad574042c22d8cbb555c67baf14d6357ea6727e56164f4d8b73c03fa4a",
+      "bytes": 13234,
+      "sha256": "b92b4470a6630240c0047b3e86ab618553ace8e31e233ac7d7793781deafbd44",
       "signer_key_id": "streamvc-autotune-static-v4",
-      "version": "published-2026-09-02-gpt-oss-120b-v1"
+      "version": "published-2026-09-19-openrouter-listed-v1"
     },
     "demand-rank.json": {
-      "bytes": 1282,
-      "sha256": "e0c8eb12e822a05856a7aa00f9a1c8e86271bffa2bb19b5d6398352b0a3e2981",
+      "bytes": 1995,
+      "sha256": "85a4a8dca9681c11d28fea550f3d37e43cff919a7997b1fc83418807eb1ffc54",
       "signer_key_id": "streamvc-autotune-static-v4",
-      "version": "published-2026-09-02-gpt-oss-120b-v1"
+      "version": "published-2026-09-19-openrouter-listed-v1"
     },
     "rate-card.json": {
       "bytes": 2419,
-      "sha256": "1615f682eb3808c6ed92663633c6d099930a4e5df82c577ec951c6e098231a07",
+      "sha256": "e64bd702592eb3f56f92e0372878bb78f53940308d1b4f1e2e48ca772bfd7ea6",
       "signer_key_id": "streamvc-autotune-static-v4",
       "version": "e751f78b773dc2eeff4c615dea315c440a3086f71c9c12c5b2e81df63e86fe1d"
     },
@@ -25,8 +25,8 @@
       "version": "macprovider-tier2-model-catalog-2026-07-07-p2-qwen3-8b"
     }
   },
-  "generated_at": "2026-09-02T00:00:00Z",
+  "generated_at": "2026-09-19T00:00:00Z",
   "policy_version": "autotune-policy-v1",
-  "release_id": "published-2026-09-02-gpt-oss-120b-v1",
+  "release_id": "published-2026-09-19-openrouter-listed-v1",
   "schema_version": "macprovider.autotune-release.v1"
 }

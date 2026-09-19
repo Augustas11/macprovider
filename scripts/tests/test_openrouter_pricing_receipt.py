@@ -147,10 +147,9 @@ class ReceiptTests(unittest.TestCase):
                 "usd_per_million_credits": 1.0,
                 "rows": {"default": dict(rate_row), **{item["canonical_model_id"]: dict(rate_row) for item in policy_document["models"]}},
             }
-            min_targets = {
-                key: row["min_provider_target"]
-                for key, row in json.loads(DEMAND_RANK.read_text(encoding="utf-8"))["rows"].items()
-            }
+            min_targets = receipt.engine.normalize_min_provider_targets(
+                json.loads(DEMAND_RANK.read_text(encoding="utf-8"))
+            )
             candidate_catalog = {
                 "rows": {
                     item["canonical_model_id"]: {"runtime_status": "recommendable"}

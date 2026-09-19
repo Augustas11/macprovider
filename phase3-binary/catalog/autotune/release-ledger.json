@@ -203,6 +203,36 @@
       },
       "generated_at": "2026-09-02T00:00:00Z",
       "policy_version": "autotune-policy-v1"
+    },
+    "published-2026-09-19-openrouter-listed-v1": {
+      "feeds": {
+        "autotune-candidates.json": {
+          "bytes": 13234,
+          "sha256": "b92b4470a6630240c0047b3e86ab618553ace8e31e233ac7d7793781deafbd44",
+          "signer_key_id": "streamvc-autotune-static-v4",
+          "version": "published-2026-09-19-openrouter-listed-v1"
+        },
+        "demand-rank.json": {
+          "bytes": 1995,
+          "sha256": "85a4a8dca9681c11d28fea550f3d37e43cff919a7997b1fc83418807eb1ffc54",
+          "signer_key_id": "streamvc-autotune-static-v4",
+          "version": "published-2026-09-19-openrouter-listed-v1"
+        },
+        "rate-card.json": {
+          "bytes": 2419,
+          "sha256": "e64bd702592eb3f56f92e0372878bb78f53940308d1b4f1e2e48ca772bfd7ea6",
+          "signer_key_id": "streamvc-autotune-static-v4",
+          "version": "e751f78b773dc2eeff4c615dea315c440a3086f71c9c12c5b2e81df63e86fe1d"
+        },
+        "tier2-catalog.json": {
+          "bytes": 3449,
+          "sha256": "ec2a2b64ed3a00bb0b185840ea5d9edee6a07d4ecb551775db5f69316e463d92",
+          "signer_key_id": "tier2-coordinator-key:707a860299e6a37f",
+          "version": "macprovider-tier2-model-catalog-2026-07-07-p2-qwen3-8b"
+        }
+      },
+      "generated_at": "2026-09-19T00:00:00Z",
+      "policy_version": "autotune-policy-v1"
     }
   },
   "schema_version": "macprovider.autotune-release-ledger.v2",

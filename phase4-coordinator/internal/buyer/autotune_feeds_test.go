@@ -76,7 +76,7 @@ func TestAutotuneFeedsServeLiteralSignedBytes(t *testing.T) {
 		if verification.KeyID != "streamvc-autotune-static-v4" {
 			t.Fatalf("%s key ID=%q", name, verification.KeyID)
 		}
-		if name != "rate_card" && verification.Version != "published-2026-09-02-gpt-oss-120b-v1" {
+		if name != "rate_card" && verification.Version != "published-2026-09-19-openrouter-listed-v1" {
 			t.Fatalf("%s version=%q", name, verification.Version)
 		}
 		if name == "rate_card" && verification.Version != "e751f78b773dc2eeff4c615dea315c440a3086f71c9c12c5b2e81df63e86fe1d" {
@@ -157,7 +157,7 @@ func TestAutotuneFeedsServeLiteralSignedBytes(t *testing.T) {
 	if err := json.Unmarshal(rr.Body.Bytes(), &release); err != nil {
 		t.Fatalf("decode autotune release: %v", err)
 	}
-	if release.Status != "live_verified" || release.ReleaseID != "published-2026-09-02-gpt-oss-120b-v1" || release.PolicyVersion != "autotune-policy-v1" {
+	if release.Status != "live_verified" || release.ReleaseID != "published-2026-09-19-openrouter-listed-v1" || release.PolicyVersion != "autotune-policy-v1" {
 		t.Fatalf("autotune release metadata=%+v", release)
 	}
 	if release.Feeds["autotune_candidates"].SHA256 != feeds.AutotuneCandidatesVerification.SHA256 || release.Feeds["demand_rank"].SignerKeyID != "streamvc-autotune-static-v4" {

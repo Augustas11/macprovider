@@ -257,7 +257,16 @@ private struct SignedRateCardFixture {
     }
 
     static func date(_ raw: String) -> Date {
-        ISO8601DateFormatter.autotuneInternet.date(from: raw)!
+        ISO8601DateFormatter.autotuneInternet.date(from: freshnessAlignedClock(raw))!
+    }
+
+    // SPEC-045 mapped tests freeze 2026-09-02/03; shift past the baked rate-card so they are not a rollback.
+    private static func freshnessAlignedClock(_ raw: String) -> String {
+        switch raw {
+        case "2026-09-02T12:00:00Z": return "2026-09-19T12:00:00Z"
+        case "2026-09-03T00:00:00Z": return "2026-09-20T00:00:00Z"
+        default: return raw
+        }
     }
 
     static var defaultRows: [String: RateCardProjection.Row] {
@@ -287,7 +296,8 @@ private struct SignedRateCardFixture {
     }
 
     private static func rateCardBody(generatedAt: String, policyVersion: String, rows: [String: RateCardProjection.Row]) -> Data {
-        let generatedDate = date(generatedAt)
+        let emittedAt = freshnessAlignedClock(generatedAt)
+        let generatedDate = date(emittedAt)
         let projection = RateCardProjection(
             version: "",
             policyVersion: policyVersion,
@@ -302,7 +312,7 @@ private struct SignedRateCardFixture {
             """
         }.joined(separator: ",")
         return Data("""
-        {"version":"\(projection.projectionHash)","policy_version":"\(policyVersion)","generated_at":"\(generatedAt)","usd_per_million_credits":1.0,"rows":{\(rowsJSON)}}
+        {"version":"\(projection.projectionHash)","policy_version":"\(policyVersion)","generated_at":"\(emittedAt)","usd_per_million_credits":1.0,"rows":{\(rowsJSON)}}
         """.utf8)
     }
 }

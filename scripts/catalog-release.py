@@ -840,7 +840,7 @@ def validate_market_peg(
     validate_market_snapshot_liquidity_replay(snapshot)
     if enforce_wall_clock_freshness:
         validate_market_snapshot_wall_clock_freshness(snapshot)
-    min_targets = {key: row["min_provider_target"] for key, row in demand_obj["rows"].items()}
+    min_targets = openrouter_pricing_engine.normalize_min_provider_targets(demand_obj)
     try:
         replayed_rate = openrouter_pricing_engine.build_proposal(
             snapshot, policy, rate_card_obj,
