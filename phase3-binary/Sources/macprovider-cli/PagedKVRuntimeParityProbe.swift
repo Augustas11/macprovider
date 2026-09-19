@@ -61,6 +61,47 @@ struct PagedKVRuntimeMoEProbeResult: Sendable, Equatable {
 }
 
 enum PagedKVRuntimeParityProbe {
+    /// SPEC-038 FR-CB6 "accepted numerical tolerance" for the load-time batched isolation
+    /// self-test: the maximum logit gap below a row's OWN serial argmax at which that row's
+    /// batched greedy token — when it is the row's own serial runner-up — counts as a
+    /// floating-point tie rather than a divergence. Batched vs serial differ only in fp
+    /// accumulation order (batched matmuls / MoE routing); observed reorder ties on MoE are
+    /// a few tenths of a logit, while a leaked other-row token lands many logits below a
+    /// row's own argmax — so this bound admits genuine ties without admitting leaks. It is
+    /// paired with a hard "must be this row's own runner-up" rank gate and an explicit
+    /// other-row-token guard, so relaxing exact argmax does not relax cross-row isolation.
+    static let batchedArgmaxLogitTolerance: Float = 1.0
+
+    /// A row's stock serial next-token distribution: greedy argmax, runner-up, and the full
+    /// last-position logits (so a candidate token's gap below the argmax can be measured).
+    struct SerialReference: Sendable {
+        let top1: Int
+        let top2: Int
+        let logits: [Float]
+    }
+
+    /// SPEC-038 FR-CB6 conformance test for one batched row's greedy token against that
+    /// row's own serial distribution. Conformant iff the token is the row's own serial
+    /// argmax, or its own serial runner-up within `tolerance` logits of its serial argmax
+    /// (an own-distribution numerical tie). An explicit leak guard rejects a token equal to
+    /// the OTHER row's serial argmax even if it happens to also be this row's runner-up, so
+    /// admitting numerical ties never admits a cross-row leak. Pure and side-effect-free so
+    /// the isolation-preserving behavior is unit-tested without a model.
+    static func batchedTokenIsConformant(
+        decoded: Int,
+        own: SerialReference,
+        otherRowSerialTop1: Int?,
+        tolerance: Float
+    ) -> Bool {
+        if decoded == own.top1 { return true }
+        if let other = otherRowSerialTop1, decoded == other { return false }
+        guard decoded == own.top2,
+              own.logits.indices.contains(decoded),
+              own.logits.indices.contains(own.top1)
+        else { return false }
+        return (own.logits[own.top1] - own.logits[decoded]) <= tolerance
+    }
+
     /// AC-1/AC-2 self-test: greedy-generate `nNew` tokens on a fixed canned prompt
     /// through stock `KVCacheSimple` vs `PagedKVCache` (whose `update()` round-trips
     /// logical K/V through the REAL Metal gather over a reversed, boundary-crossing
@@ -193,23 +234,46 @@ enum PagedKVRuntimeParityProbe {
             }
 
             // Serial reference: the greedy next token after each full prompt, computed
-            // independently through stock KVCacheSimple. A correct batched shared forward
-            // must reproduce it for every row.
-            let referenceA = try await Self.serialReferenceToken(container: container, prompt: promptA, layerCount: layerCount)
-            let referenceB = try await Self.serialReferenceToken(container: container, prompt: promptB, layerCount: layerCount)
+            // independently through stock KVCacheSimple, plus the row's own runner-up and
+            // full logits. A correct batched shared forward must reproduce each row's
+            // serial argmax — within the SPEC-038 FR-CB6 accepted numerical tolerance.
+            let referenceA = try await Self.serialReference(container: container, prompt: promptA, layerCount: layerCount)
+            let referenceB = try await Self.serialReference(container: container, prompt: promptB, layerCount: layerCount)
             let referenceByID = ["moe-probe-a": referenceA, "moe-probe-b": referenceB]
 
+            // SPEC-038 FR-CB6 requires the batched temperature-0 output to match the serial
+            // path "within the accepted numerical tolerance" — NOT bit-exactly. Batched and
+            // serial differ only in floating-point ACCUMULATION ORDER (batched matmuls / MoE
+            // expert routing vs a single row), which can flip greedy argmax between two
+            // near-tied tokens of the SAME row's own distribution. Such a numerical tie is
+            // conformant; a token the row's own distribution did not nearly choose — most
+            // importantly the OTHER row's token — is a genuine divergence/leak and must fail.
+            //
+            // A row's batched token is conformant iff:
+            //   (a) it equals the row's own serial argmax (exact), or
+            //   (b) it equals the row's own serial RUNNER-UP and is within
+            //       `batchedArgmaxLogitTolerance` logits of the row's serial argmax
+            //       (a genuine own-distribution near-tie),
+            // AND, as an explicit leak guard, it is not the OTHER row's serial argmax.
             var crossRowDivergences = 0
-            for (requestID, reference) in referenceByID {
+            for (requestID, ref) in referenceByID {
                 guard let decoded = decodedTokenByID[requestID] else { continue }
-                if decoded != reference { crossRowDivergences += 1 }
+                let otherTop1 = referenceByID.first(where: { $0.key != requestID })?.value.top1
+                if !Self.batchedTokenIsConformant(
+                    decoded: decoded,
+                    own: ref,
+                    otherRowSerialTop1: otherTop1,
+                    tolerance: Self.batchedArgmaxLogitTolerance
+                ) {
+                    crossRowDivergences += 1
+                }
             }
 
             // The challenge only proves isolation if the two rows have DIFFERENT serial
-            // references: with identical references a shared forward that swapped/leaked
+            // argmax tokens: with identical references a shared forward that swapped/leaked
             // one row's logits into the other would still match both references and hide
             // the leak. Require distinct references and fail closed otherwise.
-            let challengeDistinguishing = referenceA != referenceB
+            let challengeDistinguishing = referenceA.top1 != referenceB.top1
             let proven = challengeDistinguishing
                 && rowsDecoded == 2
                 && rowFailures == 0
@@ -318,16 +382,26 @@ enum PagedKVRuntimeParityProbe {
         return MoEProbeRow(handle: handle, prefill: prefill, decode: decode)
     }
 
-    private static func serialReferenceToken(
+    /// The stock serial next-token distribution for a prompt: the greedy argmax (`top1`),
+    /// the immediate runner-up (`top2`), and the full last-position logits so the batched
+    /// isolation check can measure the logit gap of any candidate token against `top1`.
+    private static func serialReference(
         container: ModelContainer,
         prompt: [Int],
         layerCount: Int
-    ) async throws -> Int {
+    ) async throws -> SerialReference {
         await container.perform { context in
             let cache: [KVCache] = (0 ..< layerCount).map { _ in KVCacheSimple() }
             let y = MLXArray(prompt.map { Int32($0) }).reshaped([1, prompt.count])
             let logits = context.model(y, cache: cache)
-            return Int(lastTokenArgmax(logits))
+            let vocab = logits.dim(logits.ndim - 1)
+            let flat = logits.reshaped([-1, vocab])
+            let row = flat[flat.dim(0) - 1]
+            let order = argSort(row, axis: -1) // ascending; last entries are the largest
+            let n = order.dim(0)
+            let top1 = n >= 1 ? Int(order[n - 1].item(Int32.self)) : 0
+            let top2 = n >= 2 ? Int(order[n - 2].item(Int32.self)) : top1
+            return SerialReference(top1: top1, top2: top2, logits: row.asArray(Float.self))
         }
     }
 }
