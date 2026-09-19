@@ -213,12 +213,15 @@ the honest first cut.
    priced to ~market) as evidence. Tests: `test_openrouter_pricing_engine`,
    receipt suite, `test_catalog_artifact_feed`, `make test-dist`.
 
-**PR 2 (follow-up) — gated deploy loop:**
-6. Scheduled proposer workflow (`fetch`+`compute`+select) that opens the proposal
-   as a PR/diff; on merge, a gated-apply job runs `catalog-release generate` →
-   resign v4 → Pearl deploy. Reconcile with the Wed restamp job (whose
-   content-continuity guard blocks catalog changes — the apply must be its own
-   job). Add a **fail-loud 401 / stale-snapshot alarm** on the fetch side.
+**PR 2 (this branch) — propose loop, not auto-apply:**
+6. Scheduled `propose` workflow opens a **docs-only** PR under
+   `docs/research/openrouter-snapshots/` when the proposal digest is new.
+   SPEC-023: `propose` NEVER applies, signs, mints a `rate_class`, or feeds
+   `catalog-release`. Recommendable promotion stays an explicit §16 operator
+   decision. The Wednesday restamp job keeps its content-continuity guard.
+   Fail-loud 401 / stale-snapshot alarm: `openrouter-fetch-health-alarm.yml`
+   plus `scripts/check-openrouter-fetch-health.py`. CI secret:
+   `gh secret set OPENROUTER_API_KEY` (never print/commit the key).
 
 ## Non-goals / guardrails
 

@@ -1,0 +1,20 @@
+{
+  "models": [
+    "qwen/qwen3.8-27b",
+    "qwen/qwen3.6-27b",
+    "qwen/qwen3.6-35b-a3b",
+    "qwen/qwen3.5-27b",
+    "qwen/qwen3.5-35b-a3b",
+    "qwen/qwen3.5-122b-a10b",
+    "qwen/qwen3.5-9b",
+    "z-ai/glm-4.5-air",
+    "qwen/qwen3-30b-a3b-instruct-2507",
+    "openai/gpt-oss-120b",
+    "openai/gpt-oss-20b",
+    "qwen/qwen3-32b",
+    "qwen/qwen3-8b",
+    "mistralai/mistral-small-2603",
+    "google/gemma-3-27b-it",
+    "meta-llama/llama-3.2-3b-instruct"
+  ]
+}

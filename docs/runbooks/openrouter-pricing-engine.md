@@ -26,6 +26,39 @@ The commands are noninteractive and have useful exit codes, so an operator can
 schedule `fetch` and then `compute` externally. Do not schedule an apply step:
 there is intentionally no apply mode in this tool.
 
+`propose` is the yield-first catalog selector. It also never applies:
+
+```bash
+python3 scripts/openrouter_pricing_engine.py propose \
+  --policy scripts/openrouter_pricing_policy.json \
+  --candidates scripts/openrouter_catalog_seed_candidates.json \
+  --output-dir /var/tmp/openrouter-pricing \
+  --max-candidates 32
+```
+
+The artifact is `openrouter-catalog-proposal-*.json` with
+`status: "proposal_only_never_applied"`. Every recommendable promotion still
+requires an explicit SPEC-023 §16 operator decision. Do not pipe this file into
+`catalog-release generate`.
+
+## Scheduled health and propose (CI)
+
+Set the GitHub Actions secret (once; never print the value):
+
+```bash
+gh secret set OPENROUTER_API_KEY
+```
+
+- `.github/workflows/openrouter-fetch-health-alarm.yml` — every 6 hours, probes
+  `https://openrouter.ai/api/v1/key` and fails on HTTP 401/403 or a snapshot
+  archive older than 48 hours (`scripts/check-openrouter-fetch-health.py`).
+- `.github/workflows/openrouter-catalog-propose.yml` — daily 17:00 UTC, runs
+  `propose` over the seed candidate list and opens a docs-only review PR under
+  `docs/research/openrouter-snapshots/` when the proposal digest is new. The
+  job aborts if any catalog/billing path is dirty.
+
+Pearl does not run this engine and must not receive the key.
+
 ## Refresh and archive operations
 
 Run the workflow once per day after the UTC ranking window closes. Archive
