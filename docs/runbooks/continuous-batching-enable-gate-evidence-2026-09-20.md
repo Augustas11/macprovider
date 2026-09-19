@@ -35,27 +35,28 @@ Attach eligibility + per-request isolation on the real model were proven prior:
 ## Results (production tuple, block size 16)
 
 Production serial single-stream (today's serve decode path, `generate()` over
-`KVCacheSimple`): **105.9 tok/s** decode p50 (CV 0.2%).
+`KVCacheSimple`, same 1024-token prompt as the batched rows): **106.4 tok/s**
+decode p50 (CV < 0.3%).
 
 Paged-KV continuous-batching aggregate decode throughput:
 
-| Rows | Paged single-row (tok/s) | Aggregate TG (tok/s) | Uplift vs paged 1-row | Aggregate ÷ serial 105.9 | Per-row fraction | Peak RSS | Agg CV |
+| Rows | Paged single-row (tok/s) | Aggregate TG (tok/s) | Uplift vs paged 1-row | Aggregate ÷ serial 106.4 | Per-row fraction | Peak RSS | Agg CV |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 2 (MSB-04) | 35.4 | 42.6 | 1.20× | **0.40×** | 0.60 | 32.3 GB | 0.1% |
-| 4 (MSB-02) | 35.4 | 47.0 | 1.33× | **0.44×** | 0.33 | 32.3 GB | 0.2% |
-| 6 | 35.4 | 47.7 | 1.35× | **0.45×** | 0.22 | 32.3 GB | 0.3% |
-| 8 | 35.1 | 46.6 | 1.33× | **0.44×** | 0.17 | 32.4 GB | 0.0% |
+| 2 (MSB-04) | 35.2 | 42.3 | 1.20× | **0.40×** | 0.60 | 32.2 GB | 0.2% |
+| 4 (MSB-02) | 35.4 | 46.5 | 1.31× | **0.44×** | 0.33 | 32.3 GB | 0.4% |
+| 6 | 35.3 | 47.5 | 1.34× | **0.45×** | 0.22 | 32.3 GB | 0.1% |
+| 8 | 34.9 | 46.8 | 1.34× | **0.44×** | 0.17 | 32.4 GB | 0.1% |
 
-- **MSB-01 baseline:** serial 105.9 tok/s; paged single-row 35.4 tok/s. Stable (all CV < 0.3%),
+- **MSB-01 baseline:** serial 106.4 tok/s; paged single-row ~35 tok/s. Stable (all CV < 0.4%),
   zero correctness/row failures, peak RSS 32 GB ≪ 85%-of-256 GB (217.6 GB) bound.
-- **MSB-04 (2-row MoE):** aggregate 42.6 tok/s = **1.20×** paged single-row; below the MSB-04
+- **MSB-04 (2-row MoE):** aggregate 42.3 tok/s = **1.20×** paged single-row; below the MSB-04
   gate of **>1.3×**. Per-row 0.60 (≥0.45 ✓) but the gate is not met, and aggregate is only
   0.40× the serial serve rate.
-- **MSB-02 (4-row):** aggregate 47.0 tok/s = 1.33× paged single-row; below the MSB-02 gate of
+- **MSB-02 (4-row):** aggregate 46.5 tok/s = 1.31× paged single-row; below the MSB-02 gate of
   **>1.5×**.
 - **Concurrency sweep (6, 8 rows):** aggregate **saturates at ~47 tok/s and then declines**
-  (42.6 → 47.0 → 47.7 → 46.6); per-row throughput collapses (0.60 → 0.17). Batching never
-  approaches the 105.9 tok/s serial rate at any tested concurrency.
+  (42.3 → 46.5 → 47.5 → 46.8); per-row throughput collapses (0.60 → 0.17). Batching never
+  approaches the 106.4 tok/s serial rate at any tested concurrency.
 
 ## Interpretation
 

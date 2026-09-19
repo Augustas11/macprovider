@@ -1,15 +1,15 @@
 {
-  "aggregateCVPct" : 0.04797415408275101,
+  "aggregateCVPct" : 0.08969379350728683,
   "aggregateTPSRuns" : [
-    46.67845089344064,
-    46.63362170041915,
-    46.63364727037897,
-    46.61961155511202,
-    46.647920949190436
+    46.771131657654486,
+    46.763992250967824,
+    46.77859906036272,
+    46.79238211494925,
+    46.685739913142996
   ],
-  "aggregateTPSp50" : 46.63364727037897,
-  "aggregateUpliftVsPagedSingleRow" : 1.3268997773047233,
-  "aggregateVsProductionSerial" : 0.4372228780060814,
+  "aggregateTPSp50" : 46.771131657654486,
+  "aggregateUpliftVsPagedSingleRow" : 1.3394146866827579,
+  "aggregateVsProductionSerial" : 0.44200619735825486,
   "blockSizeTokens" : 16,
   "decodeTokensPerRow" : 256,
   "layerCount" : 48,
@@ -17,30 +17,31 @@
   "mlxSwiftLMPin" : "mlxlm-3.31.4",
   "modelID" : "\/Users\/a1\/.cache\/huggingface\/hub\/models--mlx-community--Qwen3-Coder-30B-A3B-Instruct-4bit\/snapshots\/6e302ea604ad9ab206367e2c501d1571023e7b6d",
   "modelTag" : "6e302ea604ad9ab206367e2c501d1571023e7b6d",
-  "pagedSingleRowCVPct" : 0.9019666024268556,
+  "pagedSingleRowCVPct" : 0.2188875365617556,
   "pagedSingleRowTPSRuns" : [
-    35.26574990236362,
-    35.144815055364596,
-    35.77533041372207,
-    34.979506381410026,
-    35.04001474514628
+    34.89986487026959,
+    34.919082284732546,
+    34.97954455585788,
+    34.953357672774544,
+    34.78152642616034
   ],
-  "pagedSingleRowTPSp50" : 35.144815055364596,
-  "peakRSSMB" : 33140,
-  "perRowFractionOfPagedSingleRow" : 0.1658624721630904,
-  "perRowTPSp50" : 5.8292059087973715,
-  "productionSerialCVPct" : 0.0906521106889046,
+  "pagedSingleRowTPSp50" : 34.919082284732546,
+  "peakRSSMB" : 33141,
+  "perRowFractionOfPagedSingleRow" : 0.16742683583534473,
+  "perRowTPSp50" : 5.846391457206811,
+  "productionSerialCVPct" : 0.07882812365864988,
+  "productionSerialPromptTokens" : 1024,
   "productionSerialTPSRuns" : [
-    106.80783276187157,
-    106.61627840387823,
-    106.54850642655732,
-    106.69688723886135,
-    106.65875373001488
+    105.9773741148231,
+    105.81555629127423,
+    105.79399567332516,
+    105.77201143400455,
+    105.88501554142539
   ],
-  "productionSerialTPSp50" : 106.65875373001488,
+  "productionSerialTPSp50" : 105.81555629127423,
   "promptTokensPerRow" : 1024,
   "rows" : 8,
   "runs" : 5,
   "schemaVersion" : 2,
-  "timestamp" : "2026-09-19T23:15:41Z"
+  "timestamp" : "2026-09-19T23:44:07Z"
 }
