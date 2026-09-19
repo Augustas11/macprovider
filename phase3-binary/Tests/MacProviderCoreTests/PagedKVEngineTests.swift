@@ -263,6 +263,44 @@ final class PagedKVEngineTests: XCTestCase {
         ))
     }
 
+    func testAttachGateRecognizesGPTOSSOnlyWithMeasuredProof() throws {
+        let config = PagedKVConfig(enabled: true, blockSizeTokens: 32, maxPhysicalBlocks: 64)
+        let proof = sizingProof(modelFamily: "gpt_oss", blockSizeTokens: 32, maxPhysicalBlocks: 64)
+        let decision = decide(
+            config: config,
+            runtimeCacheClass: "KVCacheSimple",
+            kvBits: nil,
+            modelFamily: "gpt_oss",
+            requiresMoEDispatch: true,
+            gates: attachableGates(proof: proof, moeDispatchProven: true)
+        )
+        let descriptor = try XCTUnwrap(decision.descriptor)
+        XCTAssertTrue(descriptor.admits(
+            modelID: proofModelID,
+            modelSHA256: proofModelSHA256,
+            tokenizerSHA256: proofTokenizerSHA256,
+            chatTemplateSHA256: proofChatTemplateSHA256,
+            cacheClass: "KVCacheSimple",
+            kvDType: .fp16,
+            requiresMoE: true,
+            hardwareClass: "apple-silicon-test",
+            metallibSHA256: proof.metallibSHA256,
+            kernelIdentifier: proof.kernelIdentifier,
+            parityLabel: proof.parityLabel,
+            poolEpoch: proof.poolEpoch
+        ))
+
+        let noMeasuredProof = decide(
+            config: config,
+            runtimeCacheClass: "KVCacheSimple",
+            kvBits: nil,
+            modelFamily: "gpt_oss",
+            requiresMoEDispatch: true,
+            gates: .runtimeClosed(identityAvailable: true)
+        )
+        XCTAssertEqual(noMeasuredProof, .fallback(.metallib))
+    }
+
     func testAttachDescriptorIsSingleSourceOfTruth() {
         let descriptor = PagedKVDescriptor(
             blockSizeTokens: 32,

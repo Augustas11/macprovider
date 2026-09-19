@@ -1,7 +1,7 @@
 # SPEC-039 — Paged KV / paged-attention engine
 
-Version: v0.1.1
-Status: draft (normative design). v0.1.1 clarifies FR-PKV12 / AC-13: the attach-class probe evaluates the paged path's cache with the serve memory cap removed (`maxKVSize = nil`), so a full-context model that is `RotatingKVCache` only because the serve path caps KV for memory attaches to paged mode (the block pool bounds memory), while a genuine sliding-window model stays fail-safe. IMPL lands with this revision.
+Version: v0.1.2
+Status: draft (normative design). v0.1.2 admits `gpt_oss` as the first non-Qwen/Llama paged-KV family only through config-derived family identity plus the same per-model runtime exact-parity and batched-isolation measurement gates; other catalog families remain fail-closed until their own family fixtures are added. v0.1.1 clarified FR-PKV12 / AC-13: the attach-class probe evaluates the paged path's cache with the serve memory cap removed (`maxKVSize = nil`), so a full-context model that is `RotatingKVCache` only because the serve path caps KV for memory attaches to paged mode (the block pool bounds memory), while a genuine sliding-window model stays fail-safe. IMPL lands with this revision.
 Owner: provider runtime / inference engine
 Decision source: `docs/research/RESEARCH_232_ADDENDUM_PAGED_REDECISION_2026-07-29.md` plus the verified spike sequence `SPIKE_PAGED_ATTN_PHASE0_RESULT_2026-07-29.md` (`e5ded571`), `SPIKE_PAGED_ATTN_PHASE2_RESULT_2026-07-29.md` (`acc30b1e`), and `SPIKE_PAGED_ATTN_PHASE3_MOE_RESULT_2026-07-29.md` (`da21af53`).
 Audit history: three-lane codex SPEC audit (code / security / architect). Convergence and any carried LOW/INFO findings are recorded in the SPEC PR body and `audits/2026-07-29/SPEC-039-rN-audit.md`.
@@ -275,6 +275,13 @@ The parity fixture set MUST include at least:
    architecture; and
 3. a MoE Qwen3-family model matching the production attention/cache shape.
 
+Any newly admitted model family beyond Llama/Qwen MUST add its own
+environment-gated real-model fixture before the family is added to the
+attach-time admission allowlist. For v0.1.2, the only additional admitted
+family is `gpt_oss`, with a fixture over `gpt-oss-20b-MXFP4-Q8`; `gemma4`,
+`glm4_moe`, `nemotron_h`, and other catalog families remain outside the
+allowlist until they have equivalent FR-PKV4 evidence.
+
 The implementation MUST fail closed if parity is not established for a model
 or cache class selected for paged mode. Tolerance-based tensor comparison MAY
 be used as a diagnostic, but it is not a substitute for exact greedy token
@@ -458,6 +465,13 @@ that could drift from what the engine actually serves. The descriptor MUST be
 derivable at attach time and MUST reflect the FR-PKV12 attach-time allowlist
 result for the resident model.
 
+Family identity MUST be derived from the resident model's `config.json`
+metadata when available, using `model_type` / `architectures` rather than only
+repository-name substrings. Malformed or unknown config metadata MUST NOT
+expand support by guesswork: the resident tuple remains outside the descriptor
+unless its canonical family label is in the explicit admission allowlist and
+all runtime measurement gates pass.
+
 ### FR-PKV12 — cache-class allowlist and attach-time admission gate (SPEC-039-R012)
 
 At model attach, the engine MUST inspect the runtime `newCache()` class and the
@@ -577,6 +591,14 @@ The implementation PR for this SPEC MUST include fixtures that prove:
   with paged K and V exercised every layer and step, under the same
   non-degenerate multi-block / non-identity-permutation / boundary-crossing
   layout as AC-1.
+- **AC-18 admitted-family exact parity (`gpt_oss`):** the first admitted
+  non-Qwen/Llama family has its own real-model fixture
+  (`gpt-oss-20b-MXFP4-Q8`) proving the same FR-PKV4 exact gather parity. Since
+  `gpt_oss` is MoE-shaped, the fixture set MUST also include the SPEC-038
+  batched shared-forward input-isolation probe for that resident model before
+  paged attach may open. Other parsed family labels (`gemma4`, `glm4_moe`,
+  `nemotron_h`, etc.) are explicitly non-admitted and fail closed until this
+  acceptance criterion is repeated for each family.
 - **AC-4 allocator/block-table correctness:** allocation, free-list reuse,
   eviction/reclaim, out-of-range block IDs, duplicate writable blocks,
   missing blocks, invalid tail lengths, and logical ordering are covered by
