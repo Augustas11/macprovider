@@ -1,7 +1,7 @@
 # SPEC-039 — Paged KV / paged-attention engine
 
-Version: v0.1
-Status: draft (normative design; no IMPL in this SPEC)
+Version: v0.1.1
+Status: draft (normative design). v0.1.1 clarifies FR-PKV12 / AC-13: the attach-class probe evaluates the paged path's cache with the serve memory cap removed (`maxKVSize = nil`), so a full-context model that is `RotatingKVCache` only because the serve path caps KV for memory attaches to paged mode (the block pool bounds memory), while a genuine sliding-window model stays fail-safe. IMPL lands with this revision.
 Owner: provider runtime / inference engine
 Decision source: `docs/research/RESEARCH_232_ADDENDUM_PAGED_REDECISION_2026-07-29.md` plus the verified spike sequence `SPIKE_PAGED_ATTN_PHASE0_RESULT_2026-07-29.md` (`e5ded571`), `SPIKE_PAGED_ATTN_PHASE2_RESULT_2026-07-29.md` (`acc30b1e`), and `SPIKE_PAGED_ATTN_PHASE3_MOE_RESULT_2026-07-29.md` (`da21af53`).
 Audit history: three-lane codex SPEC audit (code / security / architect). Convergence and any carried LOW/INFO findings are recorded in the SPEC PR body and `audits/2026-07-29/SPEC-039-rN-audit.md`.
@@ -359,8 +359,9 @@ revision:
   pool exhaustion at preflight (FR-PKV2);
 - `paged_fallback_kernel` — Metal kernel registration or dispatch failure
   (FR-PKV3);
-- `paged_fallback_metallib` — `default.metallib` missing, version-mismatched,
-  or undiscoverable (FR-PKV8);
+- `paged_fallback_metallib` — the packaged MLX metallib (`mlx.metallib` or
+  `mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib`) missing,
+  version-mismatched, or undiscoverable (FR-PKV8);
 - `paged_fallback_parity` — a required parity gate is not established for the
   selected model/cache class (FR-PKV4);
 - `paged_fallback_identity` — a required served-model/cache compatibility
@@ -372,13 +373,19 @@ revision:
 
 ### FR-PKV8 — metallib packaging invariant (SPEC-039-R008)
 
-The provider build and release path MUST package the MLX `default.metallib`
-resource required by the pinned MLX stack deliberately. A plain `swift build`
-artifact MUST NOT be assumed to have regenerated or bundled that resource.
+The provider build and release path MUST package the MLX Metal library
+required by the pinned MLX stack deliberately. The release ships it as
+`mlx.metallib` (adjacent to the CLI binary, or under `Contents/MacOS/` in the
+Malibu.app bundle) together with the mlx-swift resource bundle's
+`mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib` — the names the
+release-artifact checker accepts (`scripts/check-tier2-provider-artifact.sh`).
+A plain `swift build` artifact MUST NOT be assumed to have regenerated or
+bundled that resource, and the runtime metallib gate MUST probe those shipped
+names (not only the bare `default.metallib`).
 
 The acceptance suite MUST include a packaging check that exercises a
 Metal-backed MLX operation in the packaged provider artifact, not only in an
-Xcode or local development build. If `default.metallib` is absent,
+Xcode or local development build. If the packaged metallib is absent,
 version-mismatched, or not discoverable at runtime, paged mode MUST fail
 closed before serving in paged mode.
 
@@ -470,6 +477,26 @@ the model's own windowed masking and produce **wrong tokens billed as
 correct** — so a non-allowlisted cache class MUST never be served in paged
 mode, exactly as SPEC-037 AC-10 fails a non-`KVCacheSimple` family safe to a
 miss with an observable skip.
+
+**Serve-time memory cap vs. model attention type (v0.1.1 clarification).** The
+runtime `newCache()` class conflates two independent reasons a model presents a
+`RotatingKVCache`: (a) the model's **attention type** genuinely needs windowing
+(sliding-window / hybrid), and (b) the **serve path capped KV size** for memory
+(`maxKVSize != nil`) on an otherwise **full-context** model, which makes
+`LanguageModel.newCache` return a `RotatingKVCache` even though the model's
+attention is full-causal and its KV layout is contiguous. Only case (a) is a
+correctness hazard for the full-context gather. The attach-time class the engine
+inspects MUST therefore be the class the **paged path itself** would use — i.e.
+evaluated with the serve memory cap removed (`maxKVSize = nil`), because a paged
+row's memory is bounded by the FR-PKV2 block pool, not by KV rotation. A
+full-context model that resolves to `KVCacheSimple` uncapped is allowlisted and
+attaches (the block pool assumes the memory-bounding role the cap held for the
+non-batched serve cache); a model that resolves to `RotatingKVCache` (or another
+non-allowlisted class) **even uncapped** genuinely needs windowing/hybrid/
+quantized handling and MUST still fail safe with `paged_fallback_cache_class`.
+This preserves the windowed-masking correctness invariant above while not
+rejecting a paging-compatible full-context model solely for a memory cap that
+paging replaces.
 
 ### FR-PKV13 — servability / sizing obligation and overhead ceiling (SPEC-039-R013)
 
@@ -589,7 +616,12 @@ The implementation PR for this SPEC MUST include fixtures that prove:
   exercised — fails safe to the stock contiguous path with an observable
   `paged_fallback_cache_class`, logged once at attach, and paged mode is not
   advertised in the FR-PKV11 descriptor; an allowlisted fp16 `KVCacheSimple`
-  attaches to paged mode. This mirrors SPEC-037 AC-10.
+  attaches to paged mode. This mirrors SPEC-037 AC-10. **The attach-class probe
+  is evaluated with the serve memory cap removed (`maxKVSize = nil`):** a
+  full-context model that the serve path caps to a `RotatingKVCache` for memory
+  resolves to `KVCacheSimple` uncapped and **attaches** (the block pool bounds
+  memory), while a genuine sliding-window model resolves to `RotatingKVCache`
+  **even uncapped** and stays fail-safe. Both cases are exercised.
 - **AC-14 capability descriptor handshake (FR-PKV11):** the engine advertises a
   machine-readable descriptor (block size, model families, allowed cache
   classes, KV dtype, MoE-dispatch support) that reflects the attach-time

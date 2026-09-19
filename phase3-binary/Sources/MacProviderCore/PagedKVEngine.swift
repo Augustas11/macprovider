@@ -1295,15 +1295,31 @@ public enum PagedKVMetallibGate {
     }
 
     public static func candidatePaths(bundleURL: URL?, executableURL: URL?) -> [String] {
+        // The metallib actually shipped by the provider release is named `mlx.metallib`
+        // (adjacent to the binary / under Contents/MacOS for the app) plus the mlx-swift
+        // resource bundle's `mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib`.
+        // These are the two names the release-artifact checker accepts
+        // (scripts/check-tier2-provider-artifact.sh:130). Probe those first so the gate
+        // matches on real installs. The legacy `default.metallib` /
+        // `mlx-swift_Cmlx.bundle/default.metallib` names never matched a shipped macOS
+        // layout; they are kept as harmless fallbacks so no other layout regresses.
+        let relativeNames = [
+            "mlx.metallib",
+            "mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib",
+            "default.metallib",
+            "mlx-swift_Cmlx.bundle/default.metallib",
+        ]
         var paths: [String] = []
         if let bundleURL {
-            paths.append(bundleURL.appendingPathComponent("default.metallib").path)
-            paths.append(bundleURL.appendingPathComponent("mlx-swift_Cmlx.bundle/default.metallib").path)
+            for name in relativeNames {
+                paths.append(bundleURL.appendingPathComponent(name).path)
+            }
         }
         if let executableURL {
             let dir = executableURL.deletingLastPathComponent()
-            paths.append(dir.appendingPathComponent("default.metallib").path)
-            paths.append(dir.appendingPathComponent("mlx-swift_Cmlx.bundle/default.metallib").path)
+            for name in relativeNames {
+                paths.append(dir.appendingPathComponent(name).path)
+            }
         }
         var seen = Set<String>()
         return paths.filter { seen.insert($0).inserted }

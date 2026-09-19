@@ -1367,19 +1367,30 @@ actor ModelRuntime: ModelRuntimeServing {
               let modelSHA256 = Self.nonEmpty(modelSHA256),
               PagedKVAttachGate.recognizedModelFamilies.contains(modelCapabilities.modelFamily)
         else {
+            // Stay silent in the normal disabled case (the fleet default) so this feature
+            // is invisible when off; only name the failing precondition once the operator
+            // has actually opted in, where knowing WHICH precondition blocked is useful.
+            if config.effectiveEnabled {
+                PagedKVRuntimeDiagnostics.log("measure nil: preconditions (family=\(modelCapabilities.modelFamily) recognized=\(PagedKVAttachGate.recognizedModelFamilies.contains(modelCapabilities.modelFamily)) modelID=\(Self.nonEmpty(modelID) != nil) modelSHA=\(Self.nonEmpty(modelSHA256) != nil))")
+            }
             return nil
         }
         guard let metallibPath = environment.metallibCandidatePaths().first(where: environment.fileExists),
               let metallibData = try? environment.readFileData(metallibPath),
               !metallibData.isEmpty
         else {
+            PagedKVRuntimeDiagnostics.log("measure nil: metallib file absent/unreadable/empty (candidates=\(environment.metallibCandidatePaths()))")
             return nil
         }
         let metallibSHA256 = hexString(SHA256.hash(data: metallibData))
-        guard let kernelIdentifier = Self.nonEmpty(environment.registeredKernelIdentifier()) else { return nil }
+        guard let kernelIdentifier = Self.nonEmpty(environment.registeredKernelIdentifier()) else {
+            PagedKVRuntimeDiagnostics.log("measure nil: kernel identifier not registered")
+            return nil
+        }
         let fingerprint = environment.hardwareFingerprint()
         let chip = fingerprint.chip.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !chip.isEmpty, chip.lowercased() != "unknown", fingerprint.ramGB > 0 else {
+            PagedKVRuntimeDiagnostics.log("measure nil: hardware fingerprint unresolved (chip=\(chip) ramGB=\(fingerprint.ramGB))")
             return nil
         }
         let hardwareClass = "apple-silicon:\(chip):ram-\(fingerprint.ramGB)gb"
@@ -1397,35 +1408,51 @@ actor ModelRuntime: ModelRuntimeServing {
               parity.maxLogicalBlocks >= 3,
               parity.nonIdentityPermutation
         else {
+            if let p = parityProbe {
+                PagedKVRuntimeDiagnostics.log(
+                    "measure nil: parity gate (established=\(p.established) nLayers=\(p.nLayers) nNew=\(p.nNew) gatherKernelCalls=\(p.gatherKernelCalls) expect=\(p.nLayers * p.nNew * 2) maxLogicalBlocks=\(p.maxLogicalBlocks)>=3? nonIdentity=\(p.nonIdentityPermutation))")
+            } else {
+                PagedKVRuntimeDiagnostics.log("measure nil: parity probe result nil")
+            }
             return nil
         }
         let parityLabel = hexString(SHA256.hash(data: Data(
             "\(metallibSHA256)|\(kernelIdentifier)|\(modelSHA256)|\(tokenizerSHA256 ?? "")|\(chatTemplateSHA256 ?? "")|\(hardwareClass)|\(modelID)|blk\(config.blockSizeTokens)|max\(config.maxPhysicalBlocks)|sdpa-parity-v1".utf8
         )))
-        // MoE models attach only when a batched shared-forward step is proven to keep
-        // rows isolated. Validate the FULL probe result shape — not just `proven` — so an
-        // inconsistent result (e.g. proven:true but rowsDecoded != 2, a row failure, a
-        // cross-row divergence, or a non-distinguishing challenge) can never open attach.
-        // `challengeDistinguishing` guarantees the two probe rows have different serial
-        // references, so a shared forward that swapped/leaked row logits is detectable.
-        let moeDispatchProven: Bool
-        if modelCapabilities.requiresMoEDispatch {
-            guard let moe = moeProbe,
-                  moe.proven,
-                  moe.challengeDistinguishing,
-                  moe.rowsDecodedInSharedForward == 2,
-                  moe.rowFailures == 0,
-                  moe.crossRowDivergences == 0
-            else { return nil }
-            moeDispatchProven = true
-        } else {
-            moeDispatchProven = false
+        // EVERY paging-eligible model attaches only when a batched shared-forward step is
+        // proven to keep rows isolated — the SPEC-038 FR-CB6 determinism/isolation
+        // invariant that the serve-time batched `decode(rows:)` path relies on for dense
+        // and MoE models alike (the cross-row `makeMask` runs regardless of family).
+        // Validate the FULL probe result shape — not just `proven` — so an inconsistent
+        // result (proven:true but rowsDecoded != 2, a row failure, a cross-row divergence,
+        // or a non-distinguishing challenge) can never open attach. `challengeDistinguishing`
+        // guarantees the two probe rows have different serial references, so a shared
+        // forward that swapped/leaked row logits is detectable.
+        guard let batched = moeProbe,
+              batched.proven,
+              batched.challengeDistinguishing,
+              batched.rowsDecodedInSharedForward == 2,
+              batched.rowFailures == 0,
+              batched.crossRowDivergences == 0
+        else {
+            if let m = moeProbe {
+                PagedKVRuntimeDiagnostics.log(
+                    "measure nil: batched-isolation gate (proven=\(m.proven) challengeDistinguishing=\(m.challengeDistinguishing) rowsDecoded=\(m.rowsDecodedInSharedForward) rowFailures=\(m.rowFailures) crossRowDivergences=\(m.crossRowDivergences))")
+            } else {
+                PagedKVRuntimeDiagnostics.log("measure nil: batched-isolation probe result nil")
+            }
+            return nil
         }
+        // `moeDispatchProven` stays MoE-specific: it feeds the descriptor's
+        // `supportsMoEDispatch` and the attach gate's `requiresMoEDispatch` check, so a
+        // dense model must NOT report it true even though it passed the same probe.
+        let moeDispatchProven = modelCapabilities.requiresMoEDispatch
         let poolEpoch = 1
         guard let maxResidentTokens = PagedKVRuntimeCapacityProof.measuredMaxResidentTokens(
             config: config,
             poolEpoch: poolEpoch
         ) else {
+            PagedKVRuntimeDiagnostics.log("measure nil: capacity sizing unmeasured (blockSize=\(config.blockSizeTokens) maxPhysicalBlocks=\(config.maxPhysicalBlocks))")
             return nil
         }
         let observedIdentity = PagedKVObservedRuntimeIdentity(
@@ -1438,6 +1465,7 @@ actor ModelRuntime: ModelRuntimeServing {
             source: .runtimeMeasurement
         )
         guard observedIdentity.isCompleteRuntimeMeasurement else {
+            PagedKVRuntimeDiagnostics.log("measure nil: observed identity incomplete (parityLabel=\(observedIdentity.parityLabel.isEmpty ? "empty" : "set") moeProven=\(observedIdentity.moeDispatchProven))")
             return nil
         }
         let proof = PagedKVHardwareSizingProof(
@@ -1468,8 +1496,10 @@ actor ModelRuntime: ModelRuntimeServing {
             observedParityLabel: observedIdentity.parityLabel,
             poolEpoch: observedIdentity.poolEpoch
         ) else {
+            PagedKVRuntimeDiagnostics.log("measure nil: sizing proof does not cover observed identity")
             return nil
         }
+        PagedKVRuntimeDiagnostics.log("measure OK: runtime measurement complete, paged-KV attach eligible for model=\(modelID)")
         return PagedKVRuntimeMeasurement(
             observedRuntimeIdentity: observedIdentity,
             hardwareSizingProof: proof
@@ -1542,27 +1572,40 @@ actor ModelRuntime: ModelRuntimeServing {
             promptTokens,
             32
         )
-        var moeProbe: PagedKVRuntimeMoEProbeResult?
-        if modelCapabilities.requiresMoEDispatch {
-            let layerCount = await container.perform { context in
-                context.model.newCache(parameters: nil).count
-            }
-            let promptA = await container.perform { context in
-                context.tokenizer.encode(text: Self.pagedKVRuntimeMoEProbePromptA, addSpecialTokens: true)
-            }
-            let promptB = await container.perform { context in
-                context.tokenizer.encode(text: Self.pagedKVRuntimeMoEProbePromptB, addSpecialTokens: true)
-            }
-            moeProbe = await pagedKVRuntimeProber.moe(
-                container,
-                pagedKVConfig.blockSizeTokens,
-                pagedKVConfig.maxPhysicalBlocks,
-                1,
-                layerCount,
-                promptA,
-                promptB
-            )
+        // The batched shared-forward isolation probe exercises the cross-row attention
+        // mask (`PagedKVBatchLayerCache.makeMask`) and per-row decode isolation — the
+        // SPEC-038 FR-CB6 determinism/isolation invariant — which the serve-time batched
+        // `decode(rows:)` path uses for EVERY paging-eligible model, dense or MoE. Run it
+        // for all recognized families (not only `requiresMoEDispatch`) so a dense model
+        // cannot attach on the single-row parity probe alone and then serve a batched path
+        // that was never proven. For MoE it additionally proves expert dispatch stays
+        // per-row.
+        let layerCount = await container.perform { context in
+            context.model.newCache(parameters: nil).count
         }
+        let promptA = await container.perform { context in
+            context.tokenizer.encode(text: Self.pagedKVRuntimeMoEProbePromptA, addSpecialTokens: true)
+        }
+        let promptB = await container.perform { context in
+            context.tokenizer.encode(text: Self.pagedKVRuntimeMoEProbePromptB, addSpecialTokens: true)
+        }
+        let moeProbe = await pagedKVRuntimeProber.moe(
+            container,
+            pagedKVConfig.blockSizeTokens,
+            pagedKVConfig.maxPhysicalBlocks,
+            1,
+            layerCount,
+            promptA,
+            promptB
+        )
+        let p = parityProbe
+        PagedKVRuntimeDiagnostics.log(
+            "parity model=\(modelID) established=\(p.established) nLayers=\(p.nLayers) nNew=\(p.nNew) gatherKernelCalls=\(p.gatherKernelCalls) expectCalls=\(p.nLayers * p.nNew * 2) maxLogicalBlocks=\(p.maxLogicalBlocks) nonIdentityPermutation=\(p.nonIdentityPermutation)"
+        )
+        let m = moeProbe
+        PagedKVRuntimeDiagnostics.log(
+            "batched-isolation model=\(modelID) requiresMoE=\(modelCapabilities.requiresMoEDispatch) proven=\(m.proven) rowsDecoded=\(m.rowsDecodedInSharedForward) rowFailures=\(m.rowFailures) crossRowDivergences=\(m.crossRowDivergences) challengeDistinguishing=\(m.challengeDistinguishing)"
+        )
         return (parityProbe, moeProbe)
     }
 
@@ -1584,7 +1627,22 @@ actor ModelRuntime: ModelRuntimeServing {
                 temperature: 0.0,
                 topP: 1.0
             )
-            return Self.pagedKVRuntimeCacheClass(model: context.model, baseParameters: parameters)
+            // The paged / continuous-batching path never uses the memory-capped serve
+            // cache: batched rows are stored in the SPEC-039 paged block pool (which
+            // bounds memory the way `maxKVSize` bounds the non-batched serve cache).
+            // `makeServeGenerateParameters` always sets `maxKVSize = maxContextTokens`,
+            // which makes `LanguageModel.newCache` allocate a `RotatingKVCache` — never
+            // the `KVCacheSimple` the paged engine's allowlist (SPEC-039 FR-PKV12)
+            // requires — so probing the default serve params would reject EVERY
+            // memory-capped serve config regardless of whether the model is paging-
+            // compatible. Probe the class the batched path actually pages
+            // (`maxKVSize = nil` → `KVCacheSimple`); a model that still returns a
+            // rotating/other class uncapped (e.g. genuine sliding-window attention)
+            // remains correctly rejected.
+            return Self.pagedKVRuntimeCacheClass(
+                model: context.model,
+                baseParameters: Self.cacheParameters(parameters, forceSimpleKV: true)
+            )
         }
     }
 

@@ -132,6 +132,7 @@ enum PagedKVRuntimeParityProbe {
                 )
             }
         } catch {
+            PagedKVRuntimeDiagnostics.log("parity-probe threw, failing closed: \(error)")
             return .failClosed(nNew: nNew)
         }
     }
@@ -221,6 +222,7 @@ enum PagedKVRuntimeParityProbe {
                 challengeDistinguishing: challengeDistinguishing
             )
         } catch {
+            PagedKVRuntimeDiagnostics.log("moe-isolation-probe threw, failing closed: \(error)")
             return .failClosed
         }
     }
