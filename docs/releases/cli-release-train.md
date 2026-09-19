@@ -106,9 +106,10 @@ confirm bytes are unchanged).
 | Field | Value |
 |---|---|
 | Last built from `main` | `v1.8.168` @ `646f22f84984fd994151f3512c8432992cf9b36f` ([run 35425108016](https://github.com/Augustas11/macprovider/actions/runs/35425108016)), branch `release/candidate-1.8.168-spec038` |
+| Mac Studio serving canary | `v1.8.170` @ `b8faebae0cb144301de77b2f0b43b5864bfeb2fe` — signed, staged on Mac Studio at `/Users/a1/candidate-v1.8.170/` (serve not yet swapped in). It is current `main` **minus #1610** (dd55a5eb: install.sh + AutoUpdateMarker.swift) and one train-doc commit. Serving/runtime code is current; installer + autoupdate-marker are not. |
 | Off-train E2E candidate | `v1.8.167` @ `7f833a2f63ddee6b2e146c821341099d89aec169` ([run 35417249468](https://github.com/Augustas11/macprovider/actions/runs/35417249468)) — signed hold-branch CLI used for the 2026-09-19 Pearl Track B run |
-| Older | `v1.8.163` @ `8c0c51d2`; `v1.8.164` BYOM @ `cdbb0257` |
-| Status | **Do not promote any of the above.** `v1.8.168` predates #1609 and later `main` (#1600/#1601/#1602). `v1.8.167` proved Track B but is not current `main`. |
+| Older | `v1.8.163` @ `8c0c51d2`; `v1.8.164` BYOM @ `cdbb0257`; `v1.8.166` @ `00ce3625` |
+| Status | **Do not promote any of the above.** The fleet-promote candidate must be cut off **current `main`** so it carries **#1610** (its own directive: the served `install.sh` must be republished from a release that includes it). `v1.8.170` is fine as a Mac Studio serving/SPEC-038 canary because #1610 is installer/autoupdate-only, but it is **not** the promote target. |
 | Next candidate | cut off current `main` (hold #1609 is merged) |
 | Why the next cut | Pi/Qwen tool-call correctness on the Mac, 256-cap gone, paged-KV attach, BYOM serve (#1576) **plus** the uncatalogued loopback hold (#1609) so Pearl Gemma serve stays on the wire. Curl-channel #1582/#1610 is already live from `main`; promoting this CLI is what turns the install.sh **parity** alarm green vs the new stable tag. |
 
