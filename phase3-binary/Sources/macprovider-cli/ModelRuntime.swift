@@ -1367,19 +1367,25 @@ actor ModelRuntime: ModelRuntimeServing {
               let modelSHA256 = Self.nonEmpty(modelSHA256),
               PagedKVAttachGate.recognizedModelFamilies.contains(modelCapabilities.modelFamily)
         else {
+            PagedKVRuntimeDiagnostics.log("measure nil: preconditions (enabled=\(config.effectiveEnabled) family=\(modelCapabilities.modelFamily) recognized=\(PagedKVAttachGate.recognizedModelFamilies.contains(modelCapabilities.modelFamily)) modelID=\(Self.nonEmpty(modelID) != nil) modelSHA=\(Self.nonEmpty(modelSHA256) != nil))")
             return nil
         }
         guard let metallibPath = environment.metallibCandidatePaths().first(where: environment.fileExists),
               let metallibData = try? environment.readFileData(metallibPath),
               !metallibData.isEmpty
         else {
+            PagedKVRuntimeDiagnostics.log("measure nil: metallib file absent/unreadable/empty (candidates=\(environment.metallibCandidatePaths()))")
             return nil
         }
         let metallibSHA256 = hexString(SHA256.hash(data: metallibData))
-        guard let kernelIdentifier = Self.nonEmpty(environment.registeredKernelIdentifier()) else { return nil }
+        guard let kernelIdentifier = Self.nonEmpty(environment.registeredKernelIdentifier()) else {
+            PagedKVRuntimeDiagnostics.log("measure nil: kernel identifier not registered")
+            return nil
+        }
         let fingerprint = environment.hardwareFingerprint()
         let chip = fingerprint.chip.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !chip.isEmpty, chip.lowercased() != "unknown", fingerprint.ramGB > 0 else {
+            PagedKVRuntimeDiagnostics.log("measure nil: hardware fingerprint unresolved (chip=\(chip) ramGB=\(fingerprint.ramGB))")
             return nil
         }
         let hardwareClass = "apple-silicon:\(chip):ram-\(fingerprint.ramGB)gb"
@@ -1397,6 +1403,12 @@ actor ModelRuntime: ModelRuntimeServing {
               parity.maxLogicalBlocks >= 3,
               parity.nonIdentityPermutation
         else {
+            if let p = parityProbe {
+                PagedKVRuntimeDiagnostics.log(
+                    "measure nil: parity gate (established=\(p.established) nLayers=\(p.nLayers) nNew=\(p.nNew) gatherKernelCalls=\(p.gatherKernelCalls) expect=\(p.nLayers * p.nNew * 2) maxLogicalBlocks=\(p.maxLogicalBlocks)>=3? nonIdentity=\(p.nonIdentityPermutation))")
+            } else {
+                PagedKVRuntimeDiagnostics.log("measure nil: parity probe result nil")
+            }
             return nil
         }
         let parityLabel = hexString(SHA256.hash(data: Data(
@@ -1416,7 +1428,15 @@ actor ModelRuntime: ModelRuntimeServing {
                   moe.rowsDecodedInSharedForward == 2,
                   moe.rowFailures == 0,
                   moe.crossRowDivergences == 0
-            else { return nil }
+            else {
+                if let m = moeProbe {
+                    PagedKVRuntimeDiagnostics.log(
+                        "measure nil: moe gate (proven=\(m.proven) challengeDistinguishing=\(m.challengeDistinguishing) rowsDecoded=\(m.rowsDecodedInSharedForward) rowFailures=\(m.rowFailures) crossRowDivergences=\(m.crossRowDivergences))")
+                } else {
+                    PagedKVRuntimeDiagnostics.log("measure nil: moe probe result nil (model requires MoE dispatch)")
+                }
+                return nil
+            }
             moeDispatchProven = true
         } else {
             moeDispatchProven = false
@@ -1426,6 +1446,7 @@ actor ModelRuntime: ModelRuntimeServing {
             config: config,
             poolEpoch: poolEpoch
         ) else {
+            PagedKVRuntimeDiagnostics.log("measure nil: capacity sizing unmeasured (blockSize=\(config.blockSizeTokens) maxPhysicalBlocks=\(config.maxPhysicalBlocks))")
             return nil
         }
         let observedIdentity = PagedKVObservedRuntimeIdentity(
@@ -1438,6 +1459,7 @@ actor ModelRuntime: ModelRuntimeServing {
             source: .runtimeMeasurement
         )
         guard observedIdentity.isCompleteRuntimeMeasurement else {
+            PagedKVRuntimeDiagnostics.log("measure nil: observed identity incomplete (parityLabel=\(observedIdentity.parityLabel.isEmpty ? "empty" : "set") moeProven=\(observedIdentity.moeDispatchProven))")
             return nil
         }
         let proof = PagedKVHardwareSizingProof(
@@ -1468,8 +1490,10 @@ actor ModelRuntime: ModelRuntimeServing {
             observedParityLabel: observedIdentity.parityLabel,
             poolEpoch: observedIdentity.poolEpoch
         ) else {
+            PagedKVRuntimeDiagnostics.log("measure nil: sizing proof does not cover observed identity")
             return nil
         }
+        PagedKVRuntimeDiagnostics.log("measure OK: runtime measurement complete, paged-KV attach eligible for model=\(modelID)")
         return PagedKVRuntimeMeasurement(
             observedRuntimeIdentity: observedIdentity,
             hardwareSizingProof: proof
@@ -1562,6 +1586,19 @@ actor ModelRuntime: ModelRuntimeServing {
                 promptA,
                 promptB
             )
+        }
+        let p = parityProbe
+        PagedKVRuntimeDiagnostics.log(
+            "parity model=\(modelID) established=\(p.established) nLayers=\(p.nLayers) nNew=\(p.nNew) gatherKernelCalls=\(p.gatherKernelCalls) expectCalls=\(p.nLayers * p.nNew * 2) maxLogicalBlocks=\(p.maxLogicalBlocks) nonIdentityPermutation=\(p.nonIdentityPermutation)"
+        )
+        if modelCapabilities.requiresMoEDispatch {
+            if let m = moeProbe {
+                PagedKVRuntimeDiagnostics.log(
+                    "moe model=\(modelID) proven=\(m.proven) rowsDecoded=\(m.rowsDecodedInSharedForward) rowFailures=\(m.rowFailures) crossRowDivergences=\(m.crossRowDivergences) challengeDistinguishing=\(m.challengeDistinguishing)"
+                )
+            } else {
+                PagedKVRuntimeDiagnostics.log("moe model=\(modelID) result=nil (probe not run or returned nil)")
+            }
         }
         return (parityProbe, moeProbe)
     }
