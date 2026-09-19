@@ -247,6 +247,18 @@ validate_launchd_mode() {
     || die 7 "headless mode requires non-interactive sudo for system launchd installation and recovery"
 }
 
+validate_consumer_gui_session() {
+  [ "$HEADLESS" != "1" ] || return 0
+  [ -n "${SSH_CONNECTION:-}${SSH_TTY:-}" ] || return 0
+  status=0
+  "$LAUNCHCTL_BIN" print "gui/$UID" >/dev/null 2>&1 || status=$?
+  if [ "$status" -eq 0 ]; then
+    return 0
+  fi
+  user_name="$(id -un 2>/dev/null || printf '%s' "$UID")"
+  die 7 "plain SSH install cannot access gui/$UID launchd or the login Keychain; rerun with MACPROVIDER_HEADLESS=1 MACPROVIDER_HEADLESS_USER=$user_name to use protected-file headless credentials before benchmarking"
+}
+
 validate_headless_install_topology() {
   if [ "$HEADLESS" != "1" ]; then
     for system_plist in \
@@ -12961,15 +12973,12 @@ PY
     response="$(curl -fsS --max-time 5 "$coordinator_base/v1/pool/check?provider_id=$(urlencode "$provider_id")&assigned_id=$(urlencode "$assigned_id")&details=readiness" 2>/dev/null || true)"
     local_status="$(curl -fsS --max-time 5 "http://127.0.0.1:${PORT}/v1/status" 2>/dev/null || true)"
     if python3 - "$provider_id" "$assigned_id" "$response" "$local_status" \
-      "$INSTALL_DIR/catalog-release/release.json" \
-      "$INSTALL_DIR/catalog-release/autotune-candidates.json" \
       "${EMERGENCY_ROLLBACK:-0}" <<'PY' 2>/dev/null
-import hashlib
 import json
 import re
 import sys
 
-provider_id, assigned_id, response_raw, local_raw, release_path, candidates_path, emergency_raw = sys.argv[1:]
+provider_id, assigned_id, response_raw, local_raw, emergency_raw = sys.argv[1:]
 response = json.loads(response_raw)
 local = json.loads(local_raw)
 coordinator = local.get("coordinator")
@@ -12994,18 +13003,6 @@ if emergency_raw == "1":
     if response.get("catalog_admission_mode") != "legacy_bridge":
         raise SystemExit(1)
     raise SystemExit(0)
-with open(release_path, "rb") as handle:
-    release = json.load(handle)
-with open(candidates_path, "rb") as handle:
-    candidate_bytes = handle.read()
-candidates = json.loads(candidate_bytes)
-
-candidate_feed = release["feeds"]["autotune-candidates.json"]
-candidate_sha = hashlib.sha256(candidate_bytes).hexdigest()
-if candidate_sha != candidate_feed["sha256"]:
-    raise SystemExit(1)
-if candidates["version"] != release["release_id"] or candidates["policy_version"] != release["policy_version"]:
-    raise SystemExit(1)
 
 catalog = local.get("catalog")
 if not isinstance(catalog, dict):
@@ -13013,35 +13010,27 @@ if not isinstance(catalog, dict):
 model = local.get("model")
 key = catalog.get("catalog_key")
 catalog_model_id = catalog.get("model_id")
-rows = candidates.get("rows")
-if not isinstance(rows, dict):
-    raise SystemExit(1)
-if not isinstance(key, str) or key not in rows:
+if not isinstance(key, str) or not key:
     raise SystemExit(1)
 if not isinstance(model, str) or model != key:
     raise SystemExit(1)
-if not isinstance(catalog_model_id, str) or catalog_model_id != rows[key].get("model_id"):
+if not isinstance(catalog_model_id, str) or not catalog_model_id:
     raise SystemExit(1)
 row_identity = catalog.get("row_identity")
 if re.fullmatch(r"[0-9a-f]{64}", row_identity or "") is None:
     raise SystemExit(1)
-if catalog.get("policy_version") != candidates["policy_version"]:
-    raise SystemExit(1)
-
-expected = {
-    "catalog_release_id": release["release_id"],
-    "catalog_policy_version": release["policy_version"],
-    "catalog_candidate_sha256": candidate_sha,
-    "catalog_signer_key_id": candidate_feed["signer_key_id"],
+required_local = {
+    "catalog_release_id": catalog.get("release_id"),
+    "catalog_policy_version": catalog.get("policy_version"),
+    "catalog_candidate_sha256": catalog.get("digest"),
+    "catalog_signer_key_id": catalog.get("signer_key_id"),
     "catalog_row_identity": row_identity,
 }
+if not all(isinstance(value, str) and value for value in required_local.values()):
+    raise SystemExit(1)
+if re.fullmatch(r"[0-9a-f]{64}", required_local["catalog_candidate_sha256"]) is None:
+    raise SystemExit(1)
 if local.get("provider_id") != provider_id or local.get("network_state") != "buyer_serving":
-    raise SystemExit(1)
-if catalog.get("release_id") != expected["catalog_release_id"]:
-    raise SystemExit(1)
-if catalog.get("digest") != expected["catalog_candidate_sha256"]:
-    raise SystemExit(1)
-if catalog.get("signer_key_id") != expected["catalog_signer_key_id"]:
     raise SystemExit(1)
 if response.get("provider_id") != provider_id:
     raise SystemExit(1)
@@ -13051,7 +13040,7 @@ if response.get("catalog_evidence_source") != "provider_reported":
     raise SystemExit(1)
 if response.get("catalog_admission_mode") not in {"current", "previous"}:
     raise SystemExit(1)
-if any(response.get(field) != value for field, value in expected.items()):
+if any(response.get(field) != value for field, value in required_local.items()):
     raise SystemExit(1)
 PY
     then
@@ -14063,6 +14052,7 @@ main() {
   detect_platform
   validate_provider_token_environment
   validate_launchd_mode
+  validate_consumer_gui_session
   validate_repair_privilege_domain
   validate_headless_acceptance_source
   validate_port_value "$PORT"

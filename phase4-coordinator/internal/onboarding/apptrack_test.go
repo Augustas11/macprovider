@@ -655,7 +655,7 @@ func TestHandleHardwareEvidenceReturnsExistingReplayBeforeProviderRateLimit(t *t
 	}
 }
 
-func TestHandleHardwareEvidenceDoesNotReplayDifferentPayloadByHardwareIdentity(t *testing.T) {
+func TestHandleHardwareEvidenceReturnsExistingForActiveSameHardwareIdentityBeforeProviderRateLimit(t *testing.T) {
 	now := time.Date(2026, 7, 31, 13, 0, 0, 0, time.UTC)
 	body, err := json.Marshal(validHardwareEvidenceBody(now))
 	if err != nil {
@@ -690,11 +690,19 @@ func TestHandleHardwareEvidenceDoesNotReplayDifferentPayloadByHardwareIdentity(t
 
 	handler.HandleHardwareEvidence(rr, req)
 
-	if rr.Code != http.StatusTooManyRequests {
+	if rr.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
 	}
-	if stats.evidenceProviderID != "" || stats.identityReplayProviderID != "" {
-		t.Fatal("same-identity payload reached the queue or an identity replay lookup")
+	if !strings.Contains(rr.Body.String(), `"status":"`+hardwareEvidenceResponseExisting+`"`) {
+		t.Fatalf("body=%s want existing replay", rr.Body.String())
+	}
+	if stats.evidenceProviderID != "" {
+		t.Fatal("same-identity replay inserted a new verification job")
+	}
+	if stats.identityReplayProviderID != "mac" ||
+		stats.identityReplayHash != evidence.Hardware.HardwareIdentityHash ||
+		stats.identityReplaySHA != evidenceSHA {
+		t.Fatalf("identity replay lookup provider=%q hash=%q sha=%q", stats.identityReplayProviderID, stats.identityReplayHash, stats.identityReplaySHA)
 	}
 }
 
