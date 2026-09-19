@@ -165,3 +165,46 @@ func TestLoadPreviousAutotuneFeedsFollowsPreviousTarget(t *testing.T) {
 		t.Fatalf("no previous target: %v %v", feeds, err)
 	}
 }
+
+func TestLoadPreviousAutotuneFeedsLoadsThreeTargets(t *testing.T) {
+	t.Parallel()
+	publicKey, privateKey := testSigningKey(t)
+	keyring := map[string]ed25519.PublicKey{"test-key": publicKey}
+	root := t.TempDir()
+	names := []string{"release-a", "release-b", "release-c"}
+	hashes := []string{strings.Repeat("1", 64), strings.Repeat("2", 64), strings.Repeat("3", 64)}
+	var cfg config.AutotuneFeedsConfig
+	var lines []string
+	for i, name := range names {
+		hash := hashes[i]
+		set := artifactBoundFeedSet(t, func(sha string) []byte {
+			return catalogArtifactsFeedWithModels("test-release", "2026-07-10T00:00:00Z", "autotune-policy-v1", sha, `"test-model":`+artifactModelJSON(verifiedGGUF(hash)))
+		}, privateKey, "test-key", keyring, privateKey)
+		releaseDir := filepath.Join(root, "releases", name)
+		if err := os.MkdirAll(releaseDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		for src, dst := range map[string]string{
+			set.cfg.AutotuneCandidatesPath: "autotune-candidates.json", set.cfg.AutotuneCandidatesSigPath: "autotune-candidates.json.sig",
+			set.cfg.CatalogArtifactsPath: "autotune-artifacts.json", set.cfg.CatalogArtifactsSigPath: "autotune-artifacts.json.sig",
+		} {
+			data, err := os.ReadFile(src)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(releaseDir, dst), data, 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		lines = append(lines, "releases/"+name)
+		cfg = set.cfg
+	}
+	if err := os.WriteFile(filepath.Join(root, ".previous-target"), []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg.AutotuneCandidatesPath = filepath.Join(root, "current", "autotune-candidates.json")
+	feeds, err := buyer.LoadPreviousAutotuneFeeds(cfg)
+	if err != nil || len(feeds) != 3 {
+		t.Fatalf("three previous feeds: %v n=%d", err, len(feeds))
+	}
+}

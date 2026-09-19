@@ -242,8 +242,10 @@ if "/tmp/macprovider-autotune-lock-validate." in script:
 if "/etc/macprovider/keys" in script:
     raise SystemExit("renew script must not place the feed key on Pearl")
 remote = script.split("<<'REMOTE'", 1)[1].split("\nREMOTE", 1)[0]
-if remote.find("mutated=1") > remote.find('printf \'%s\\n\' "$prev" > "$root/.previous-target"'):
+if remote.find("mutated=1") > remote.find("previous-target window"):
     raise SystemExit("mutated=1 must be set before writing .previous-target")
+if "len(out) == 3" not in remote:
+    raise SystemExit("catalog publish must keep a 3-deep previous-target window")
 under_lock = remote.split("Re-check dates-only continuity under the lock", 1)[1].split("\nPY", 1)[0]
 for requirement in (
     'artifact = "autotune-artifacts.json"',

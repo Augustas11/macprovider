@@ -13,8 +13,17 @@ is correct.
 **The fix is to re-date + re-sign the feed on a schedule.** Since #1268 the
 coordinator hot-reloads the feed on `SIGHUP` (`reloadCoordinatorConfig` swaps
 the WS admission catalog and the buyer-served `/v1/*` bytes atomically,
-fail-closed), so renewal is now **zero-disruption**: no coordinator restart,
-every provider WebSocket stays connected.
+fail-closed). A **dates-only restamp** is zero-disruption for already-connected
+sockets. A **content catalog cut** is not: hello `catalog_release_id` is frozen
+at `serve` start (live fetch or the CLI baked catalog). One `.previous-target`
+hop is the wrong primitive for that — it used up listed-v1 on 2026-09-19 and
+kicked Llama-3.2-3B boxes still advertising inband-v1 or baked gpt-oss-v1.
+See `docs/reports/2026-09-19-catalog-one-hop-admission-outage.md`.
+
+`.previous-target` is a window of **at most three** `releases/<id>` lines.
+Publish prepends the outgoing current and keeps the next two unique retained
+releases. A fourth line is fail-closed. Do not replace the file with a single
+hop.
 
 ## Security model — signing stays off the production host
 
