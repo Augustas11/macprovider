@@ -153,11 +153,10 @@ Get a buyer API key at `https://api.malibu.tech/auth/github/start`.
 
 For buyers who need to access the Malibu gateway (e.g., to use Pi harness integration):
 
-1. **Navigate to console**: Go to `https://malibu.tech/console` (or `https://malibu.tech/console` redirect).
-2. **Authenticate with GitHub**: Click "Login with GitHub" and authorize the Malibu application.
-3. **Generate API Key**: Once logged in, navigate to the account/API section and click "Generate New API Key".
-4. **Copy the key** (format: `mp_...`). This is your buyer API key.
-5. **Store securely**: Place the key in `~/.pi/agent/auth.json` or set the `MALIBU_API_KEY` environment variable. Do not commit secrets.
+1. **Get an API key**: Open `https://api.malibu.tech/auth/github/start` and complete GitHub login.
+2. **Generate API Key**: Once logged in, navigate to the account/API section and click "Generate New API Key".
+3. **Copy the key** (format: `mp_...`). This is your buyer API key.
+4. **Store securely**: Place the key in `~/.pi/agent/auth.json` or set the `MALIBU_API_KEY` environment variable. Do not commit secrets.
 
 The same flow applies for Pi harness setup: after obtaining the key, configure `models.json` with the `malibu` provider pointing to `https://api.malibu.tech/v1` and reference the key via `$MALIBU_API_KEY`.
 
