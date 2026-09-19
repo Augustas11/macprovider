@@ -64,4 +64,17 @@ final class PagedKVBatchedToleranceTests: XCTestCase {
         XCTAssertTrue(conformant(5, r, other: 42, tol: 0.0))
         XCTAssertFalse(conformant(9, r, other: 42, tol: 0.0))
     }
+
+    func testGapExactlyEqualToToleranceIsConformant() {
+        // Pins the inclusive `<=` boundary: a silent flip to `<` would regress this.
+        let r = reference(top1: 5, top1Logit: 10.0, top2: 9, top2Logit: 9.0)
+        XCTAssertTrue(conformant(9, r, other: 42, tol: 1.0)) // gap == 1.0
+    }
+
+    func testDecodedTokenOutsideVocabFailsClosedWithoutTrapping() {
+        // The `logits.indices.contains` guard must yield a divergence (not crash) for an
+        // out-of-range decoded id.
+        let r = reference(top1: 5, top1Logit: 10.0, top2: 9, top2Logit: 9.75, vocab: 128)
+        XCTAssertFalse(conformant(9999, r, other: 42))
+    }
 }
