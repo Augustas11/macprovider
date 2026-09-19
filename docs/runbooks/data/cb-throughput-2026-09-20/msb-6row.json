@@ -1,36 +1,46 @@
 {
-  "aggregateCVPct" : 0.2381350749230984,
+  "aggregateCVPct" : 0.32035530512877786,
   "aggregateTPSRuns" : [
-    89.2206111249165,
-    89.10192389633669,
-    89.56044744754152,
-    89.58689418513428,
-    89.3000415253553
+    47.868822867742004,
+    47.83991268824578,
+    47.68486263207665,
+    47.561574401019236,
+    47.53894798816518
   ],
-  "aggregateTPSp50" : 89.3000415253553,
-  "aggregateUpliftVsBaseline" : 1.5617425812204098,
-  "baselineSingleRowCVPct" : 0.0902029049050983,
-  "baselineSingleRowTPSRuns" : [
-    57.259446514110344,
-    57.17974434402152,
-    57.12511938176823,
-    57.15196478507304,
-    57.20496638253629
-  ],
-  "baselineSingleRowTPSp50" : 57.17974434402152,
-  "blockSizeTokens" : 256,
+  "aggregateTPSp50" : 47.68486263207665,
+  "aggregateUpliftVsPagedSingleRow" : 1.3467445751597782,
+  "aggregateVsProductionSerial" : 0.4505268794782375,
+  "blockSizeTokens" : 16,
   "decodeTokensPerRow" : 256,
   "layerCount" : 48,
   "maxPhysicalBlocks" : 1024,
   "mlxSwiftLMPin" : "mlxlm-3.31.4",
   "modelID" : "\/Users\/a1\/.cache\/huggingface\/hub\/models--mlx-community--Qwen3-Coder-30B-A3B-Instruct-4bit\/snapshots\/6e302ea604ad9ab206367e2c501d1571023e7b6d",
   "modelTag" : "6e302ea604ad9ab206367e2c501d1571023e7b6d",
-  "peakRSSMB" : 33021,
-  "perRowFractionOfBaseline" : 0.2602904302034016,
-  "perRowTPSp50" : 14.883340254225882,
+  "pagedSingleRowCVPct" : 0.2455572510093746,
+  "pagedSingleRowTPSRuns" : [
+    35.44506571301136,
+    35.45369063925629,
+    35.407503034804726,
+    35.34519288384834,
+    35.24375609231325
+  ],
+  "pagedSingleRowTPSp50" : 35.407503034804726,
+  "peakRSSMB" : 33101,
+  "perRowFractionOfPagedSingleRow" : 0.22445742919329636,
+  "perRowTPSp50" : 7.947477105346108,
+  "productionSerialCVPct" : 0.1473059690671329,
+  "productionSerialTPSRuns" : [
+    105.73696389093375,
+    105.59713649753847,
+    105.84243649857532,
+    105.93220305524606,
+    105.98595449078421
+  ],
+  "productionSerialTPSp50" : 105.84243649857532,
   "promptTokensPerRow" : 1024,
   "rows" : 6,
   "runs" : 5,
-  "schemaVersion" : 1,
-  "timestamp" : "2026-09-19T22:42:27Z"
+  "schemaVersion" : 2,
+  "timestamp" : "2026-09-19T23:09:44Z"
 }

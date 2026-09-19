@@ -19,8 +19,11 @@ Sanitized: token counts and tokens/sec only; no tokens, keys, or bearer headers.
 - **Model tuple:** `mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit` (MoE, `requiresMoE=true`),
   snapshot `6e302ea604ad9ab206367e2c501d1571023e7b6d`, 4-bit, `KVCacheSimple` class, no `kv_bits`,
   48 KV layers
-- **Workload:** 1024 prompt tokens/row, 256 decode tokens/row, temperature 0, distinct prompt
-  per row, 1 warmup + 5 timed runs, decode-only wall-clock (TTFT/prefill excluded)
+- **Paged-KV tuple:** `blockSizeTokens=16`, `maxPhysicalBlocks=1024` — the production
+  `PagedKVConfig` defaults, i.e. the tuple an operator would actually enable
+- **Workload:** 1024 prompt tokens/row, 256 timed decode tokens/row, temperature 0, distinct
+  topical prompt per row, 1 warmup + 5 timed runs, decode-only wall-clock (one untimed warm
+  step after prefill produces the TTFT-boundary token, then the timed window)
 
 ## Correctness precondition (proven separately, merged)
 
@@ -29,47 +32,52 @@ Attach eligibility + per-request isolation on the real model were proven prior:
 `measure OK: paged-KV attach eligible`. FR-CB6 numerical tolerance (#1608) and attach gates
 (#1597) are merged to `main`. This bundle measures **throughput only**.
 
-## Results
+## Results (production tuple, block size 16)
 
-Production serial single-stream (today's serve decode path, `decode-bench`, `KVCacheSimple`):
-**105.6 tok/s** decode p50 (prefill 1931 tok/s).
+Production serial single-stream (today's serve decode path, `generate()` over
+`KVCacheSimple`): **105.9 tok/s** decode p50 (CV 0.2%).
 
 Paged-KV continuous-batching aggregate decode throughput:
 
-| Rows | Paged single-row (tok/s) | Aggregate TG (tok/s) | Uplift vs paged 1-row | Aggregate vs serial 105.6 | Per-row fraction | Peak RSS | CV |
+| Rows | Paged single-row (tok/s) | Aggregate TG (tok/s) | Uplift vs paged 1-row | Aggregate ÷ serial 105.9 | Per-row fraction | Peak RSS | Agg CV |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 2 (MSB-04) | 57.1 | 68.6 | 1.20× | 0.65× | 0.60 | 32.3 GB | 0.0% |
-| 4 (MSB-02) | 57.0 | 81.5 | 1.43× | 0.77× | 0.36 | 32.2 GB | 0.3% |
-| 6 | 57.2 | 89.3 | 1.56× | 0.85× | 0.26 | 32.2 GB | 0.2% |
-| 8 | 56.8 | 93.7 | 1.65× | 0.89× | 0.21 | 32.3 GB | 0.2% |
+| 2 (MSB-04) | 35.4 | 42.6 | 1.20× | **0.40×** | 0.60 | 32.3 GB | 0.1% |
+| 4 (MSB-02) | 35.4 | 47.0 | 1.33× | **0.44×** | 0.33 | 32.3 GB | 0.2% |
+| 6 | 35.4 | 47.7 | 1.35× | **0.45×** | 0.22 | 32.3 GB | 0.3% |
+| 8 | 35.1 | 46.6 | 1.33× | **0.44×** | 0.17 | 32.4 GB | 0.0% |
 
-- **MSB-01 baseline:** serial 105.6 tok/s; paged single-row 57 tok/s. Stable (CV < 0.3%),
-  zero correctness failures, peak RSS 32 GB ≪ 85%-of-256 GB (217.6 GB) bound.
-- **MSB-04 (2-row MoE):** aggregate 68.6 tok/s = **1.20×** the paged single-row baseline.
-  Below the runbook/RESEARCH_232 MSB-04 gate of **>1.3×**. Per-row 0.60 (≥0.45 ✓) but the
-  gate is not met.
-- **MSB-02 (4-row):** aggregate 81.5 tok/s = 1.43× paged single-row; below the MSB-02 gate
-  of **>1.5×**.
-- **Concurrency sweep (6, 8 rows):** aggregate rises monotonically but concavely
-  (68.6 → 81.5 → 89.3 → 93.7; deltas 12.9 / 7.8 / 4.4), asymptoting near ~100 tok/s and
-  **never exceeding the 105.6 tok/s serial rate within 2–8 rows.**
+- **MSB-01 baseline:** serial 105.9 tok/s; paged single-row 35.4 tok/s. Stable (all CV < 0.3%),
+  zero correctness/row failures, peak RSS 32 GB ≪ 85%-of-256 GB (217.6 GB) bound.
+- **MSB-04 (2-row MoE):** aggregate 42.6 tok/s = **1.20×** paged single-row; below the MSB-04
+  gate of **>1.3×**. Per-row 0.60 (≥0.45 ✓) but the gate is not met, and aggregate is only
+  0.40× the serial serve rate.
+- **MSB-02 (4-row):** aggregate 47.0 tok/s = 1.33× paged single-row; below the MSB-02 gate of
+  **>1.5×**.
+- **Concurrency sweep (6, 8 rows):** aggregate **saturates at ~47 tok/s and then declines**
+  (42.6 → 47.0 → 47.7 → 46.6); per-row throughput collapses (0.60 → 0.17). Batching never
+  approaches the 105.9 tok/s serial rate at any tested concurrency.
 
 ## Interpretation
 
-The paged-KV engine's own single-row decode (57 tok/s) is ~54% of the production serial
-decode (105.6 tok/s). The per-token gap is ~8 ms (17.5 ms paged vs 9.5 ms serial). Per-step
-block-allocator bookkeeping is a handful of in-process actor hops (microseconds in the
-single-threaded measurement window), so the gap is the **Metal paged-gather tax**, not harness
-overhead — confirmed by the sub-linear aggregate scaling (fixed CPU overhead would amortize to
-near-linear scaling; the observed concave curve is GPU-forward cost rising with batch depth).
+At the production block size (16), the paged-KV engine's single-row decode (35.4 tok/s) is
+only ~33% of the production serial decode (105.9 tok/s): ~28 ms/token vs ~9 ms/token, an ~19
+ms/token **Metal paged-gather tax** (each 1280-token row spans ~80 physical blocks the gather
+kernel must reconstruct every step). Per-step block-allocator bookkeeping is a handful of
+in-process actor hops (microseconds in the single-threaded measurement window), so the gap is
+the gather cost, not harness overhead — confirmed by the saturating/declining aggregate curve
+(fixed CPU overhead would amortize toward linear scaling).
 
 MoE compounds this: the model's value is sparse expert activation, so batching distinct rows
-activates *more* total experts and yields less weight-reuse benefit than dense-model batching —
-consistent with the modest 1.20× at 2-way.
+activates *more* total experts and yields little weight-reuse benefit — the batched uplift
+saturates at ~1.35× regardless of depth.
 
-**Net:** on this exact tuple, continuous batching increases the paged engine's aggregate
-throughput (1.20×–1.65×) but does not beat today's serial serve rate at any tested concurrency.
-Enabling it would trade raw throughput for concurrency/latency, not gain tokens/sec.
+Block size is a real lever: at a non-production `blockSizeTokens=256` the paging tax roughly
+halves (paged single-row 57 tok/s; aggregate reaches 0.89× serial at 8 rows), but production
+uses 16 for KV memory efficiency. Neither tuple beats serial.
+
+**Net:** on the production tuple, continuous batching would roughly **halve** the box's token
+throughput (aggregate ≤ 0.45× serial) while adding concurrency/latency headroom. It is not a
+throughput or earnings win on Qwen3-Coder-30B-A3B here.
 
 - **MSB-03 (ragged prompts):** not run — harness uses equal-length prompts. Follow-up.
 - **MSB-05 (vs oMLX oracle):** not run — no pinned oMLX sidecar on this box. Follow-up.
@@ -82,14 +90,16 @@ provider/buyer tokens, keys, or authorization headers are printed. Confirmed.
 ## Decision
 
 **Keep `continuous_batching: off` on this tuple for throughput purposes.** The FR-CB15 /
-MSB-04 throughput gate is **not met**: measured aggregate batched throughput is below the
-serial serve rate at 2–8 concurrent rows. Correctness (attach + FR-CB6 isolation) remains
-proven; the paging engine is ready for capacity/latency use cases, but continuous batching is
-not a throughput/earnings win on Qwen3-Coder-30B-A3B here.
+MSB-04 throughput gate is **not met**: measured aggregate batched throughput saturates at
+≤0.45× the serial serve rate at 2–8 concurrent rows on the production paged-KV tuple.
+Correctness (attach + FR-CB6 isolation) remains proven; the paging engine is ready for
+capacity/latency use cases (many concurrent long-context streams within a flat ~32 GB RSS),
+but continuous batching is not a throughput/earnings win on this MoE model.
 
 **Follow-ups (do before any canary reconsideration):**
-1. Reduce the paged-gather per-token cost (kernel) — the dominant tax.
-2. Re-measure on a dense (non-MoE) catalog model, where batching weight-reuse is higher.
+1. Reduce the paged-gather per-token cost (kernel / larger effective block, streamed gather) —
+   the dominant tax; a ~2–3× gather speedup is the minimum needed to reach serial parity.
+2. Re-measure on a dense (non-MoE) catalog model, where batching weight-reuse is far higher.
 3. MSB-03 (ragged) and MSB-05 (oMLX oracle) for scheduler fairness and an upper-bound oracle.
 4. Measure current N-independent-serial-stream aggregate (MSB-05 Q1) to confirm the serial
-   baseline under real concurrency.
+   baseline under real concurrency (contention may lower it, narrowing the gap).

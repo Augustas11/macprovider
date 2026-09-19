@@ -1,36 +1,46 @@
 {
-  "aggregateCVPct" : 0.21849188097919103,
+  "aggregateCVPct" : 0.04797415408275101,
   "aggregateTPSRuns" : [
-    93.82474256599278,
-    93.67293289198179,
-    93.88797926762753,
-    93.51925304177634,
-    93.39842349110667
+    46.67845089344064,
+    46.63362170041915,
+    46.63364727037897,
+    46.61961155511202,
+    46.647920949190436
   ],
-  "aggregateTPSp50" : 93.67293289198179,
-  "aggregateUpliftVsBaseline" : 1.6479524533073406,
-  "baselineSingleRowCVPct" : 0.18655838086528773,
-  "baselineSingleRowTPSRuns" : [
-    56.68917861466748,
-    56.77256815331031,
-    56.86898483097323,
-    56.97203008846477,
-    56.84201185779717
-  ],
-  "baselineSingleRowTPSp50" : 56.84201185779717,
-  "blockSizeTokens" : 256,
+  "aggregateTPSp50" : 46.63364727037897,
+  "aggregateUpliftVsPagedSingleRow" : 1.3268997773047233,
+  "aggregateVsProductionSerial" : 0.4372228780060814,
+  "blockSizeTokens" : 16,
   "decodeTokensPerRow" : 256,
   "layerCount" : 48,
   "maxPhysicalBlocks" : 1024,
   "mlxSwiftLMPin" : "mlxlm-3.31.4",
   "modelID" : "\/Users\/a1\/.cache\/huggingface\/hub\/models--mlx-community--Qwen3-Coder-30B-A3B-Instruct-4bit\/snapshots\/6e302ea604ad9ab206367e2c501d1571023e7b6d",
   "modelTag" : "6e302ea604ad9ab206367e2c501d1571023e7b6d",
-  "peakRSSMB" : 33036,
-  "perRowFractionOfBaseline" : 0.20599405666341758,
-  "perRowTPSp50" : 11.709116611497723,
+  "pagedSingleRowCVPct" : 0.9019666024268556,
+  "pagedSingleRowTPSRuns" : [
+    35.26574990236362,
+    35.144815055364596,
+    35.77533041372207,
+    34.979506381410026,
+    35.04001474514628
+  ],
+  "pagedSingleRowTPSp50" : 35.144815055364596,
+  "peakRSSMB" : 33140,
+  "perRowFractionOfPagedSingleRow" : 0.1658624721630904,
+  "perRowTPSp50" : 5.8292059087973715,
+  "productionSerialCVPct" : 0.0906521106889046,
+  "productionSerialTPSRuns" : [
+    106.80783276187157,
+    106.61627840387823,
+    106.54850642655732,
+    106.69688723886135,
+    106.65875373001488
+  ],
+  "productionSerialTPSp50" : 106.65875373001488,
   "promptTokensPerRow" : 1024,
   "rows" : 8,
   "runs" : 5,
-  "schemaVersion" : 1,
-  "timestamp" : "2026-09-19T22:45:42Z"
+  "schemaVersion" : 2,
+  "timestamp" : "2026-09-19T23:15:41Z"
 }
