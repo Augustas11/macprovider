@@ -2613,6 +2613,9 @@ func (s *Server) forwardStreamSequence(
 			// function.arguments until they are one complete JSON object so
 			// fleet 1.8.123's "{}"-then-object shape cannot reach Pi.
 			providerStream := true
+			if chatRequestDeclaresTools(req.raw) {
+				state.declaredFunctionNames = declaredFunctionNames(req.raw)
+			}
 			settlementMetadata, err := rec.recordRouteSnapshot(dispatchBody, state.provider)
 			if err != nil {
 				writeRouteSnapshotError(w, rec, err)
@@ -3693,6 +3696,7 @@ func (s *Server) forwardWSNonStreaming(w http.ResponseWriter, r *http.Request, r
 				return wsForwardCancelled, requestLogAttempt{}
 			}
 			w.WriteHeader(http.StatusOK)
+			checkedBody = maybeRecoverQwenXMLToolCalls(checkedBody, state)
 			_, _ = w.Write(checkedBody)
 			return wsForwardComplete, attempt
 		case err := <-relay.Errors:
@@ -3871,6 +3875,9 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 		return true, wsForwardFailed
 	}
 	writeChunk := func(data string) (bool, wsForwardResult) {
+		if sse, ok := buyerSSEFromProviderJSONCompletion([]byte(data), state); ok {
+			data = string(sse)
+		}
 		if data != "" && !ttftLogged {
 			ttftLogged = true
 			if state != nil {
@@ -4259,6 +4266,7 @@ func (s *Server) forwardStreamingJSONAsBuyerSSE(
 		markProviderDone()
 		return wsForwardFailed, http.StatusBadGateway, requestLogAttempt{Status: http.StatusBadGateway, Error: "Provider response exceeded coordinator limit"}
 	}
+	raw = maybeRecoverQwenXMLToolCalls(raw, state)
 	sse, err := chatCompletionJSONToSSE(raw)
 	if err != nil {
 		markProviderDone()

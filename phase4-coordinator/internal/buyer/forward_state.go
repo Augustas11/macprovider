@@ -156,6 +156,11 @@ type forwardState struct {
 
 	stickyResult     string
 	stickyMissReason string
+
+	// declaredFunctionNames is the buyer-declared tools[] function.name set.
+	// Used to recover Qwen function-XML that leaked into message.content when
+	// the provider CLI failed to close </tool_call> (Pi then never runs bash).
+	declaredFunctionNames map[string]struct{}
 }
 
 func newForwardState(startedAt time.Time) *forwardState {

@@ -318,6 +318,55 @@ func TestPiShapedStreamingToolRequestIsAdmittedAndCoalescesArgs(t *testing.T) {
 	}
 }
 
+const providerLeakedQwenXMLJSON = `{
+  "id":"chatcmpl-test",
+  "object":"chat.completion",
+  "created":1716768000,
+  "model":"mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
+  "choices":[{
+    "index":0,
+    "message":{
+      "role":"assistant",
+      "content":"Let me look at the issue to understand what needs to be inspected:\n\n<tool_call>\n<function=bash>\n<parameter=command>\necho hello\n</parameter>\n</function>\n<tool_call>"
+    },
+    "finish_reason":"stop"
+  }],
+  "usage":{"prompt_tokens":12,"completion_tokens":57,"total_tokens":69}
+}`
+
+func TestStreamingToolsWSRecoversLeakedQwenFunctionXML(t *testing.T) {
+	registry := pool.NewRegistry(nil)
+	registerWSStreamingTestProvider(registry, "provider-x", "session-1", "model-a")
+
+	server := NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0),
+		WithRelay(func(ctx context.Context, provider pool.Provider, requestID string, body []byte, stream bool) (*providerws.RelayStream, error) {
+			chunks := make(chan providerws.InferenceResponseChunk, 1)
+			done := make(chan providerws.InferenceResponseEnd, 1)
+			errs := make(chan error, 1)
+			chunks <- providerws.InferenceResponseChunk{
+				Type:      "inference_response_chunk",
+				RequestID: requestID,
+				Seq:       0,
+				Data:      providerLeakedQwenXMLJSON,
+			}
+			done <- providerws.InferenceResponseEnd{Type: "inference_response_end", RequestID: requestID, Status: "complete", ChunksSent: 1}
+			return &providerws.RelayStream{RequestID: requestID, Chunks: chunks, Done: done, Errors: errs}, nil
+		}, time.Second),
+	)
+
+	rr := postRawChat(t, server, []byte(streamingToolsChatBody))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rr.Code, rr.Body.String())
+	}
+	got := concatSSEToolArguments(t, rr.Body.Bytes())
+	if got != `{"command":"echo hello"}` {
+		t.Fatalf("buyer concatenated arguments = %q body=%s", got, rr.Body.String())
+	}
+	if strings.Contains(rr.Body.String(), "<function=") {
+		t.Fatalf("native function-XML leaked to buyer SSE: %s", rr.Body.String())
+	}
+}
+
 func TestPiMultiTurnToolResultReplay(t *testing.T) {
 	turn2, err := json.Marshal(map[string]any{
 		"model":          "model-a",
