@@ -79,6 +79,7 @@ them. The next candidate can be cut off current `main` (includes #1609).
 | Drop independent 256-message chat cap | merged | #1595 (#1594) |
 | Concat-safe native tool-call streaming (hold XML args until `</function>`) | merged | #1596 |
 | Recover inner Qwen function-XML when `</tool_call>` is missing | merged | #1599 |
+| Fresh-Mac install bootstraps pinned python3 instead of CLT GUI die 8 | merged | #1610 (#1575) |
 | SPEC-038 on-device parity + MoE-isolation self-measurement | merged | #1591 |
 | Paged-KV attach gates so SPEC-038/039 can engage on real MoE hardware | merged | #1597 |
 | Opt-in empirical max_batch concurrency calibration | merged | #1590 |
@@ -90,8 +91,15 @@ Coordinator-only (already on Pearl `v1.8.162-29-gee089f0f`, **not** this CLI
 cut): #1601 Pi stream TTFT / concat-safe coalesce, #1599 coordinator XML
 rewrite, #1595 coordinator message-count drop. Fleet Macs still run **1.8.123**
 until this CLI is promoted. #1600 is the install.sh consumer-health alarm
-(scripts/CI), not the Mac binary — it stays red until this CLI (with #1582) is
-promoted **and** `get.malibu.tech/install.sh` is republished.
+(scripts/CI), not the Mac binary. Curl-channel `get.malibu.tech/install.sh`
+was republished **from `main`** on 2026-09-19 after #1610 (SHA-256
+`c90fb44d9a780041233928f4376d7d92b71af087d034ae44c3a275fd9381d7c4`, pearl
+backup `install.sh.bak-20260919T121720Z`) so `curl | bash` already has #1582
+pagination and the #1575/#1610 CLT-stub bootstrap. Consumer health is green
+against fleet **v1.8.123**. The parity alarm still compares served bytes to
+the latest **stable tag** (v1.8.123) and stays red until this CLI is promoted
+and the tag's `install.sh` matches served (re-publish from that tag, or
+confirm bytes are unchanged).
 
 ## Active candidate
 
@@ -102,7 +110,7 @@ promoted **and** `get.malibu.tech/install.sh` is republished.
 | Older | `v1.8.163` @ `8c0c51d2`; `v1.8.164` BYOM @ `cdbb0257` |
 | Status | **Do not promote any of the above.** `v1.8.168` predates #1609 and later `main` (#1600/#1601/#1602). `v1.8.167` proved Track B but is not current `main`. |
 | Next candidate | cut off current `main` (hold #1609 is merged) |
-| Why the next cut | Pi/Qwen tool-call correctness on the Mac, 256-cap gone, #1582 install.sh pagination, paged-KV attach, BYOM serve (#1576) **plus** the uncatalogued loopback hold (#1609) so Pearl Gemma serve stays on the wire |
+| Why the next cut | Pi/Qwen tool-call correctness on the Mac, 256-cap gone, paged-KV attach, BYOM serve (#1576) **plus** the uncatalogued loopback hold (#1609) so Pearl Gemma serve stays on the wire. Curl-channel #1582/#1610 is already live from `main`; promoting this CLI is what turns the install.sh **parity** alarm green vs the new stable tag. |
 
 ## E2E tracks (independent gates)
 
@@ -175,13 +183,23 @@ combined candidate**.
    bumps `binaryVersion` and moves the fleet.
 6. `verify-live-coordinator-release-rollout` before publishing discovery.
 7. Byte-identity check: `docs/runbooks/provider-cli-release-verification.md`.
-8. Republish `https://get.malibu.tech/install.sh` from the promoted tag so
-   #1582 pagination is what `curl | bash` runs. Confirm
-   `scripts/check-install-sh-consumer-health.sh` is green (#1600 / #1588).
+8. Curl-channel `https://get.malibu.tech/install.sh`:
+   - **On promotion:** republish from the promoted tag (or confirm served
+     bytes still match that tag) so `scripts/check-install-sh-parity.sh`
+     against the tag is green. Confirm
+     `scripts/check-install-sh-consumer-health.sh` is green (#1600 / #1588).
+   - **Off-cycle from `main`:** allowed when the public one-liner must
+     change before the next CLI promotion (fresh-Mac CLT wall, pagination).
+     Record date + SHA-256 in this file. Expect the parity alarm vs the
+     current stable tag to go red until a successor stable includes the
+     same `install.sh`. Do not skip consumer-health after a main publish.
 
 ## Session protocol
 
 - Merge a CLI change, cut a candidate, or run an e2e track → update this file
   in the same PR/commit.
+- Republish `get.malibu.tech/install.sh` from `main` or from a tag → update
+  this file the same day (date, SHA-256, whether parity vs current stable is
+  expected red).
 - Live-coordinator candidate test: add its `compatibility_set_id` to
   `accepted_ids` (keep `target_id`), restart coordinator, revert after.
