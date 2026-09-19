@@ -21,6 +21,7 @@ names = [
     "run_macprovider_cli_with_amfi_retry",
     "validate_provider_token_environment",
     "validate_launchd_mode",
+    "validate_consumer_gui_session",
     "version_at_least",
     "validate_macprovider_version_tag",
     "validate_headless_release_tag",
@@ -345,6 +346,18 @@ FUNCTION_PATH="$TMP/functions.sh" SYSTEM_DIR="$TMP/system" USERS_DIR="$TMP/users
     echo "headless mode unexpectedly accepted MACPROVIDER_NO_WATCHDOG=1" >&2
     exit 1
   fi
+  if (HEADLESS=0; export SSH_CONNECTION="127.0.0.1 1 127.0.0.1 22"; export LAUNCHD_PRINT_STATUS=125; validate_consumer_gui_session); then
+    echo "consumer SSH install unexpectedly accepted a missing GUI launchd session" >&2
+    exit 1
+  fi
+  if (HEADLESS=0; export SSH_CONNECTION="127.0.0.1 1 127.0.0.1 22"; export LAUNCHD_PRINT_STATUS=1; validate_consumer_gui_session); then
+    echo "consumer SSH install unexpectedly accepted an unverified GUI launchd session" >&2
+    exit 1
+  fi
+  (HEADLESS=0; unset SSH_CONNECTION SSH_TTY; export LAUNCHD_PRINT_STATUS=125; validate_consumer_gui_session)
+  (HEADLESS=0; export SSH_CONNECTION="127.0.0.1 1 127.0.0.1 22"; export LAUNCHD_PRINT_STATUS=0; validate_consumer_gui_session)
+  (HEADLESS=1; export SSH_CONNECTION="127.0.0.1 1 127.0.0.1 22"; export LAUNCHD_PRINT_STATUS=125; validate_consumer_gui_session)
+  HEADLESS=1
 
   mkdir -p "$INSTALL_TX_BACKUP"
   printf "state=fixture\n" > "$INSTALL_TX_BACKUP/state.sh"
