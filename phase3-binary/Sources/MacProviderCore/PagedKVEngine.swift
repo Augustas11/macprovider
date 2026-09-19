@@ -341,7 +341,7 @@ public enum PagedKVAttachDecision: Equatable, Sendable {
 
 public enum PagedKVAttachGate {
     public static let allowedCacheClasses = ["KVCacheSimple"]
-    public static let recognizedModelFamilies = ["llama", "qwen"]
+    public static let recognizedModelFamilies = ["gpt_oss", "llama", "qwen"]
 
     public static func decide(
         config: PagedKVConfig,

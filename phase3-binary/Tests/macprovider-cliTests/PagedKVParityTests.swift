@@ -15,6 +15,7 @@
 // the local HF cache does not fail:
 //   MACPROVIDER_RUN_PAGED_PARITY=1      → AC-1 (Llama-3.2-3B), AC-2 (Qwen2.5-7B)
 //   MACPROVIDER_RUN_PAGED_PARITY_MOE=1  → AC-3 (Qwen3-Coder-30B-A3B MoE, ~17GB)
+//   MACPROVIDER_RUN_PAGED_PARITY_GPT_OSS=1  → AC-18 (gpt-oss-20b MoE, ~13GB)
 //
 // Models load ONLY from `~/.cache/huggingface/hub` (no download).
 
@@ -91,7 +92,7 @@ final class PagedKVParityTests: XCTestCase {
             maxPhysicalBlocks: maxBlocks,
             modelID: "mlx-community/\(modelName)",
             modelSHA256: String(repeating: "0", count: 64),
-            supportedModelFamilies: ["llama", "qwen"],
+            supportedModelFamilies: ["gpt_oss", "llama", "qwen"],
             supportsMoEDispatch: true,
             metallibSHA256: String(repeating: "0", count: 64),
             kernelIdentifier: PagedKVGatherKernel.registeredKernelName,
@@ -216,6 +217,16 @@ final class PagedKVParityTests: XCTestCase {
         try await assertParity("Qwen3-Coder-30B-A3B-Instruct-4bit", "AC-3")
     }
 
+    // MARK: - AC-18 admitted gpt-oss MoE (~13GB — separately gated)
+
+    func testAC18_MoEGPTOSS20B_ParityWithRealGather() async throws {
+        try XCTSkipUnless(
+            ProcessInfo.processInfo.environment["MACPROVIDER_RUN_PAGED_PARITY_GPT_OSS"] == "1",
+            "set MACPROVIDER_RUN_PAGED_PARITY_GPT_OSS=1 to run the gpt-oss-20b MoE paged parity (~13GB)"
+        )
+        try await assertParity("gpt-oss-20b-MXFP4-Q8", "AC-18")
+    }
+
     // MARK: - Batched shared-forward input-isolation probe (real attention model)
     //
     // The single-row AC-1/2/3 gather-parity tests above never exercise the batched
@@ -229,12 +240,24 @@ final class PagedKVParityTests: XCTestCase {
     // attention/mask path, so it is a valid discriminator for the mask correctness.
     //
     //   MACPROVIDER_RUN_PAGED_MOE_ISOLATION=1  → Qwen3-8B-4bit (~5GB)
+    //   MACPROVIDER_RUN_PAGED_MOE_ISOLATION_GPT_OSS=1  → gpt-oss-20b-MXFP4-Q8 (~13GB)
     func testBatchedSharedForward_InputIsolation_RealModel() async throws {
         try XCTSkipUnless(
             ProcessInfo.processInfo.environment["MACPROVIDER_RUN_PAGED_MOE_ISOLATION"] == "1",
             "set MACPROVIDER_RUN_PAGED_MOE_ISOLATION=1 to run the batched shared-forward isolation probe (needs local HF model)"
         )
-        let modelName = "Qwen3-8B-4bit"
+        try await assertBatchedSharedForwardIsolation(modelName: "Qwen3-8B-4bit", label: "moe-isolation")
+    }
+
+    func testBatchedSharedForward_InputIsolation_GPTOSSRealModel() async throws {
+        try XCTSkipUnless(
+            ProcessInfo.processInfo.environment["MACPROVIDER_RUN_PAGED_MOE_ISOLATION_GPT_OSS"] == "1",
+            "set MACPROVIDER_RUN_PAGED_MOE_ISOLATION_GPT_OSS=1 to run the gpt-oss batched shared-forward isolation probe (needs local HF model)"
+        )
+        try await assertBatchedSharedForwardIsolation(modelName: "gpt-oss-20b-MXFP4-Q8", label: "gpt-oss-isolation")
+    }
+
+    private func assertBatchedSharedForwardIsolation(modelName: String, label: String) async throws {
         guard let dir = findSnapshotDir(modelName) else {
             throw XCTSkip("snapshot for \(modelName) not found in local HF cache")
         }
@@ -245,7 +268,7 @@ final class PagedKVParityTests: XCTestCase {
         // Same strings and tokenization as production (ModelRuntime.swift:1532-1533,1575-1578).
         let promptA = ctx.tokenizer.encode(text: "Draft a short summary of today's shipping forecast.", addSpecialTokens: true)
         let promptB = ctx.tokenizer.encode(text: "List three ingredients commonly used in a simple tomato soup.", addSpecialTokens: true)
-        print("  [moe-isolation] \(modelName) loaded; layers=\(layerCount); promptA=\(promptA.count) tok; promptB=\(promptB.count) tok")
+        print("  [\(label)] \(modelName) loaded; layers=\(layerCount); promptA=\(promptA.count) tok; promptB=\(promptB.count) tok")
 
         let result = await PagedKVRuntimeParityProbe.runMoEInputIsolationProbe(
             container: container,
@@ -256,7 +279,7 @@ final class PagedKVParityTests: XCTestCase {
             promptA: promptA,
             promptB: promptB
         )
-        print("  [moe-isolation] proven=\(result.proven) rowsDecoded=\(result.rowsDecodedInSharedForward) "
+        print("  [\(label)] proven=\(result.proven) rowsDecoded=\(result.rowsDecodedInSharedForward) "
             + "rowFailures=\(result.rowFailures) crossRowDivergences=\(result.crossRowDivergences) "
             + "challengeDistinguishing=\(result.challengeDistinguishing)")
 
