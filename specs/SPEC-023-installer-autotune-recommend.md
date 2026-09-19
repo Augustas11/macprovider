@@ -1,12 +1,26 @@
 # SPEC-023 — Installer-Integrated Autotune Recommend
 
-version: v0.14.0
+version: v0.14.1
 status: LOCKED
 owner: operator (a11)
 last-locked: 2026-09-19
 lockstep: SPEC-005 v0.6.7 (SPEC-005-R011 money-table owner). CONFORMANCE `depends_on` does not list SPEC-005; the lockstep is recorded in prose only, avoiding a dependency cycle (SPEC-005 likewise does not list SPEC-023 in its `depends_on`).
 
 ## Change log
+
+- **v0.14.1 (2026-09-20)** — Row-continuity admission design for content-only
+  catalog cuts (#1615). A provider's hello `catalog_release_id` is the signed
+  candidate-catalog document selected at `serve` start, not proof that the Mac is
+  serving a different model. A content publish MUST NOT require a provider restart
+  when the selected row's identity and admission-authoritative policy are unchanged.
+  New §3.6.1 and `SPEC-023-R010` define row-continuity admission: the coordinator
+  may admit an older signed catalog document only from authenticated row-continuity
+  evidence, only when the current catalog contains the same selected row identity
+  and `PolicyEquivalent` structured policy, and never by walking arbitrary
+  `releases/` directories. `.previous-target` remains a bounded rollback/deploy
+  window, not the long-term serving-compatibility primitive. AC-CAT-22 pins the
+  positive and fail-closed cases. This is a docs-and-governance design revision;
+  implementation remains pending.
 
 - **v0.14.0 (2026-09-19)** — Market-peg liquidity basis re-defined after OpenRouter removed per-endpoint 30-day volume (implemented on branch `feat/openrouter-catalog-pipeline`; NOT docs-only). OpenRouter's `GET /api/v1/models/{id}/endpoints` response no longer carries per-endpoint `completion_tokens_last_30d` (removed API-wide and confirmed absent from the documented `PublicEndpoint` schema, verified 2026-09-18). The v0.12.0 §3.3 rule 4 basis — **volume-weighted median gated by a 30-day completion-token floor** — is therefore uncomputable, and its own stated remedy ("extend the snapshot schema until [30-day tokens] are present") is impossible because the upstream source no longer publishes the field. v0.13.0 already shipped as the concurrency-calibration revision (SPEC-023-R009), so this market-peg change is v0.14.0.
   1. **New liquidity aggregator (supersedes v0.12.0 §3.3 rule 4).** The liquid price is the **UNWEIGHTED median** over eligible paid endpoints, **collapsed to ONE representative quote per distinct provider** (that provider's lowest), gated by per-endpoint 30-minute `perf_last_30m_by_workload.text_generation.request_count >= min_endpoint_request_count_30m` (policy default `30`), and requiring at least `min_distinct_providers` (policy default `2`) distinct providers or the key is illiquid. `request_count` gates **eligibility only; it is NEVER a median weight** — weighting by an API-controlled activity value is manipulable, whereas an unweighted median over collapsed distinct providers is not. Cheapest-print stays forbidden as the published rate; a mapped recommendable key with no priced result still fails the **whole compute** (no proposals).
@@ -695,6 +709,60 @@ target adjustment) does not invalidate an otherwise-valid verified admission. Th
 implementation that computes `admission_policy_sha256` and matches admission on it
 is Stage-2 prerequisite §12.2(b)(i); this section is the normative contract it
 must satisfy.
+
+#### 3.6.1 Row-continuity admission across catalog document rollover
+
+Hello `catalog_release_id` identifies the signed candidate-catalog document a
+provider process selected when `serve` started. It is document provenance and
+diagnostic state; it is not, by itself, the serving model identity. A catalog
+publish is therefore not allowed to kick an already-running provider merely
+because the document release ID changed while the provider's selected model row
+did not.
+
+**SPEC-023-R010 — Row-continuity admission.** A coordinator MAY admit a provider
+whose hello catalog document is older than the active current catalog, without
+requiring a provider restart, only when all of the following are true:
+
+1. The provider supplies a complete catalog envelope (`catalog_release_id`,
+   `catalog_policy_version`, `catalog_signer_key_id`,
+   `catalog_candidate_sha256`, and `catalog_row_identity`) for the document it
+   selected at `serve` start. Partial catalog metadata remains incompatible.
+2. The coordinator authenticates that older document through an explicit
+   A-side row-continuity evidence source. Valid A-side sources are: a bounded
+   operator-retained compatible-previous release; or a separately authenticated
+   row-continuity record that carries the older document's release ID, body
+   digest, signer key, policy version, selected model key, row identity, row
+   `model_sha256`, and any SPEC-010-R007 artifact evidence needed for that row.
+   The current signed catalog is only the C-side comparison input; it cannot
+   authenticate A's release ID, body digest, signer, tombstone status, or
+   artifact-feed lineage. The coordinator MUST verify the A-side record's
+   signature/key lineage and MUST reject tombstoned release IDs. A directory
+   walk over every `releases/` entry, or trusting an arbitrary release ID because
+   files exist on disk, is non-conforming.
+3. The active current catalog resolves the provider's `model_id` to a row whose
+   row identity equals the older document's selected row identity, case-folded,
+   and whose admission-authoritative structured policy is equivalent under
+   `autotune.Catalog.PolicyEquivalent` (`draft_candidates` and
+   `workload_profiles`, with omitted and explicit-null optional fields treated
+   identically). The base serving fields (`model_id`, `model_revision`,
+   `model_sha256`, `min_ram_gb`, `min_bandwidth_tier`, and `runtime_status`) are
+   covered by the equal row-identity requirement, not by `PolicyEquivalent`.
+4. The hello-gate, model-hash gate, route snapshot, and settlement path bind to
+   the admitted row or artifact identity exactly as SPEC-010-R004/R007 require.
+   Row-continuity admission authorizes only the same selected row identity. It
+   MUST fail closed when the current row is absent, the row identity changes, the
+   structured policy changes, an artifact-feed binding is unavailable or
+   mismatched, the signer/key lineage is untrusted, or the older document is
+   otherwise unverifiable.
+
+`.previous-target` is a rollback and deploy-retention window for exact signed
+release bytes. It MAY be used as one row-continuity evidence source, but it is
+not the semantic compatibility primitive. The durable compatibility primitive is
+the row identity plus `PolicyEquivalent` check above. A CLI baked catalog is not
+hostile merely because it is not the newest document; it is admitted only through
+the same row-continuity rule, and diagnostics SHOULD report it as
+`baked_fallback` / refresh-recommended provenance rather than as
+`catalog_incompatible` when the selected row is still current-equivalent.
 
 ### 3.7 Catalog artifact feed (v0.10.0)
 
@@ -1585,6 +1653,26 @@ AC-MKT-12 (`SPEC-023-R008`, retain-on-absence repealed): compute that would have
 AC-MKT-13 (`SPEC-023-R008`, default minima): mapped completions `{64000, 136000}` ⇒ published `default.completion_rate_per_mtok == 64000` and default prompt/cache-hit equal that same min-completion row's prompt/cache-hit. `1000000` default completion fails. MoneyTable-A yaml `default` must byte-equal the signed-feed `default`.
 
 AC-CAT-21 (`SPEC-023-R006`, intake decisions are reconstructible from the release record): A release that admits a key to `listed` or promotes a key to `recommendable` commits an `intake-decision.json` (§16.8, `schema_version: "macprovider.intake-decision.v1"`) whose lowercase 64-hex digest is recorded as `intake_decision_sha256` in that release's §3.7.8 ledger row; a release that changes a row's tier without a committed manifest, or whose ledger row records a digest that does not match the committed bytes, fails closed at generation. The manifest is closed at every level: an unknown key, a missing key, or a wrong-typed value at the top level, inside `thresholds`, inside a `decisions` element, or inside its `signals` object fails the release closed. `thresholds` contains every §16.4 knob at the value in force for the release, with no omissions and no additions. `decisions` contains exactly one entry per added or promoted key and none for any other key, each recording the evaluated signal values with the authenticated source snapshot digests they were read from, an absent signal as `null` with a closed `*_absent_reason`, the observation window bounds and `as_of` timestamp, the per-signal suppression state, the selected `admission_clause` and `fit_clause`, `coldstart_slot_used`, `listed_since` (non-null exactly for `promote_recommendable`), and the `operator_decision` and `operator_role`. A manifest that names a suppressed signal as its `admission_clause`, that sets `coldstart_slot_used` on more entries than `INTAKE_COLDSTART_SLOTS`, or whose observation window ends more than one §16.5 cadence period before `as_of` fails closed. The manifest carries no provider id, pseudonym, hardware fingerprint, buyer account, API key, IP address, raw principal identifier, or §16.2(a) item-7 principal token in any field, hashed or otherwise. Given the manifest, its ledger-recorded digest, the release's signed feeds, and the retained intake audit store responses (rule 9), an auditor with access to the private intake audit store re-evaluates the §16.3 rule for every changed key and reaches the same verdict without re-running the generator. **[v0.10.4]** The test set MUST also cover rule 9 and the fixed floor: a recorded `*_source_sha256` that does not equal the retained file's digest fails closed; a retained source file the manifest does not cite fails closed; a missing audit store fails closed; a source whose `k_anonymity_min` is not 3, or a manifest `INTAKE_K_ANONYMITY_MIN` other than 3, fails closed; a manifest `thresholds` value that differs from the selected window's `parameters` fails closed; a source file with an unknown key fails closed; a recorded `distinct_provider_offer_count`, `fleet_fit_fraction_ppm`, or `unmatched_model_request_count` that the committed bytes do not reproduce fails closed; a non-null unmatched signal whose window is open, incomplete, or not the latest complete window fails closed; `unmatched_model_request_suppressed: true` fails closed against a `macprovider.stats-intake.v1` source; a null signal with a null digest whose reason is neither `spec017_amendment_not_landed` nor `source_unavailable` fails closed; and a manifest whose per-signal windows disagree with the committed sources, or whose `observation_window_*` envelope is not the min/max of them, fails closed. The test set MUST also cover: an `admit_listed` entry with a `null` `openrouter_demand_rank`, `distinct_provider_offer_count`, and `fleet_fit_fraction_ppm` each carrying its own non-null `*_absent_reason` (accepted); the same entry with a `null` signal and a `null` `*_absent_reason` (fails closed); a non-null signal with a non-null `*_absent_reason` (fails closed); and one `promote_recommendable` entry with `signals`, `admission_clause`, and `fit_clause` `null` and a complete `promotion` object (accepted) versus the same entry carrying an `admission_clause` value or a `null` `promotion` (fails closed).
+
+AC-CAT-22 (`SPEC-023-R010`, row-continuity admission): With current release C
+and older signed release A, a provider whose hello carries A's complete catalog
+envelope is admitted without restart when an authenticated row-continuity evidence
+source proves A's selected row for the provider's `model_id`, C resolves that
+same model to an equal `catalog_row_identity`, and A's selected row is
+`PolicyEquivalent` to C's row. The provider's admission mode records that it was
+admitted by row continuity, diagnostics preserve A's release ID and full catalog
+body digest, and the hello ack still advertises C as current so the provider can
+refresh opportunistically. The negative matrix MUST cover: missing any hello
+catalog field; no authenticated evidence for A; tombstoned A; signer/key lineage
+mismatch; current row absent; row identity mismatch; policy mismatch in
+`min_ram_gb`, `runtime_status`, `draft_candidates`, or `workload_profiles`;
+artifact-derived identity requested without authenticated artifact evidence for
+A; and an implementation that finds A only by walking arbitrary `releases/`
+directories. Every negative case fails closed as catalog-incompatible, or the
+more specific already-defined hard-close reason, and does not fall back to
+buyer-routable admission. A CLI baked-catalog hello for A is accepted by the same
+positive rule when row-continuity evidence proves equivalence and is reported as
+baked fallback / refresh recommended, not as hostile unknown catalog state.
 
 
 ## 12. oMLX-seeded provisional catalog gates
