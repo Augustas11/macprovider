@@ -70,12 +70,14 @@ class AssignRamTierTests(unittest.TestCase):
 
 
 class ModelDemandActivityTests(unittest.TestCase):
-    def test_sums_request_count_across_endpoints_and_workloads(self):
+    def test_sums_text_generation_request_count_only(self):
+        # Non-text workloads (tool_use) must NOT count toward the text demand
+        # gauge: 100 + 20 text requests = 120, ignoring the 5 tool_use requests.
         doc = {"data": {"endpoints": [
             {"perf_last_30m_by_workload": {"text_generation": {"request_count": 100}, "tool_use": {"request_count": 5}}},
             {"perf_last_30m_by_workload": {"text_generation": {"request_count": 20}}},
         ]}}
-        self.assertEqual(engine.model_demand_activity(doc), 125)
+        self.assertEqual(engine.model_demand_activity(doc), 120)
 
     def test_lenient_on_missing_or_malformed_telemetry(self):
         doc = {"data": {"endpoints": [
@@ -141,9 +143,9 @@ class BuildCatalogProposalTests(unittest.TestCase):
         # Qwen3-VL / Gemma-3 families are tagged image-text-to-text but are served
         # for text and are top-yield earners -- they must NOT be dropped.
         rec = record("qwen/qwen3.6-35b-a3b", pricing_dict=pricing("1.00"),
-                     servability={"verdict": "unresolved", "pipeline_tag": "image-text-to-text",
+                     servability={"verdict": "unresolved", "pipeline_tag": "image-text-to-text", "serving_class": "multimodal_text",
                                   "required_gb": "20.0", "mlx_repo": "mlx-community/Qwen3.6-35B-A3B-4bit",
-                                  "quant": "4bit", "reasons": ["pipeline_tag 'image-text-to-text' is a vision-language pipeline"]})
+                                  "quant": "4bit", "reasons": ["multimodal LLM (pipeline_tag 'image-text-to-text') served for text via mlx-vlm; confirm the mlx-vlm text path before pricing"]})
         out = propose([rec])
         self.assertEqual(len(out["selected"]), 1)
         row = out["selected"][0]
@@ -210,7 +212,7 @@ class ValidateCatalogProposalTests(unittest.TestCase):
         recs = [
             record("z-ai/glm-4.5-air", pricing_dict=pricing("0.85"), servability=servable("78.2")),
             record("qwen/qwen3.6-35b-a3b", pricing_dict=pricing("1.00"),
-                   servability={"verdict": "unresolved", "pipeline_tag": "image-text-to-text",
+                   servability={"verdict": "unresolved", "pipeline_tag": "image-text-to-text", "serving_class": "multimodal_text",
                                 "required_gb": "20.0", "mlx_repo": "mlx-community/Qwen3.6-35B-A3B-4bit",
                                 "quant": "4bit", "reasons": ["vision-language"]}),
         ]
@@ -229,9 +231,27 @@ class ValidateCatalogProposalTests(unittest.TestCase):
         with self.assertRaisesRegex(engine.SchemaError, "proposal_only_never_applied"):
             engine.validate_catalog_proposal(out)
 
+    def test_validator_rejects_non_finite_or_negative_values(self):
+        out = propose([record("z-ai/glm-4.5-air", pricing_dict=pricing("0.85"), servability=servable("78.2"))])
+        for field, bad in (("required_residency_gb", "NaN"), ("proposed_input_per_mtok", "Infinity"),
+                           ("market_completion_per_mtok", "-1")):
+            proposal = dict(out)
+            row = dict(out["selected"][0])
+            row[field] = bad
+            proposal["selected"] = [row]
+            with self.assertRaises(engine.SchemaError):
+                engine.validate_catalog_proposal(proposal)
+
+    def test_validator_rejects_negative_counts(self):
+        out = propose([record("z-ai/glm-4.5-air", pricing_dict=pricing("0.85"), servability=servable("78.2"))])
+        row = dict(out["selected"][0]); row["demand_request_count_30m"] = -1
+        out["selected"] = [row]
+        with self.assertRaises(engine.SchemaError):
+            engine.validate_catalog_proposal(out)
+
     def test_validator_requires_manual_verification_flag_for_vl_rows(self):
         out = propose([record("qwen/qwen3.6-35b-a3b", pricing_dict=pricing("1.00"),
-                              servability={"verdict": "unresolved", "pipeline_tag": "image-text-to-text",
+                              servability={"verdict": "unresolved", "pipeline_tag": "image-text-to-text", "serving_class": "multimodal_text",
                                            "required_gb": "20.0", "mlx_repo": "r", "quant": "4bit", "reasons": ["vl"]})])
         out["selected"][0]["manual_serving_verification_required"] = False
         with self.assertRaisesRegex(engine.SchemaError, "manual serving verification"):

@@ -109,8 +109,8 @@ class ReceiptTests(unittest.TestCase):
             # volume with a 30-minute request-count activity signal. Mirror
             # each endpoint's completion_tokens_last_30d into the new
             # perf_last_30m_by_workload field (without editing the checked-in
-            # fixture JSON) so the request-weighted median still selects the
-            # same endpoint this fixture was built to exercise.
+            # fixture JSON) so the unweighted median still selects over the
+            # same eligible endpoints this fixture was built to exercise.
             for endpoint_document in endpoints.values():
                 for endpoint in endpoint_document["data"]["endpoints"]:
                     if "perf_last_30m_by_workload" not in endpoint and isinstance(endpoint.get("completion_tokens_last_30d"), int):
@@ -125,6 +125,10 @@ class ReceiptTests(unittest.TestCase):
                 endpoints[model_id] = endpoint
 
             policy_document = json.loads(POLICY.read_text(encoding="utf-8"))
+            # The single-provider replay fixture predates the distinct-provider
+            # quorum and request floor; relax them for this deterministic replay.
+            policy_document["min_distinct_providers"] = 1
+            policy_document["min_endpoint_request_count_30m"] = 1
             for item in policy_document["models"]:
                 item["profile"] = {"kind": "broad_fleet", "active_params_b": "3", "residency_gb": "10", "projected_tps": "50"}
                 item.pop("coding_specialist", None)

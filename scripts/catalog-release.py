@@ -20,7 +20,6 @@ import sys
 import tempfile
 import types
 from datetime import datetime, timezone
-from decimal import Decimal, InvalidOperation
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]

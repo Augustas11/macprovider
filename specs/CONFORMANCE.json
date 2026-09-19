@@ -660,7 +660,7 @@
     {
       "spec_id": "SPEC-023",
       "title": "Installer-Integrated Autotune Recommend",
-      "version": "v0.13.0",
+      "version": "v0.14.0",
       "path": "specs/SPEC-023-installer-autotune-recommend.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -2434,7 +2434,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1484",
-        "rationale": "SPEC-023 v0.12.0 specifies market-pegged rate-card and demand-rank authoring from one OpenRouter snapshot: credit mint with the \u00d71e6 factor, a numeric liquidity floor plus volume-weighted median (cheapest-print forbidden), FeedSchema-A, MoneyTable-A, Score-A, an unpublished market-peg-bind.v1 sidecar (never on release.json or the v3 ledger), and a catalog-release recompute from engine bytes. or_completion_tokens_30d is sourced from the OpenRouter rankings-daily total_tokens field (the sole per-model 30-day volume OpenRouter publishes); or_requests_30d is informational and is 0 when the ranking source exposes no per-model request count. Lockstep with SPEC-005-R011; CONFORMANCE depends_on omits SPEC-005 to avoid a cycle. Unimplemented in this revision: the engine mapping of every recommendable key, ingest, and the MoneyTable-A publisher (impl on #1484). Score-B / FeedSchema-B / MoneyTable-B are later belts, not R008 promotion blockers. Do not promote from this close."
+        "rationale": "SPEC-023 v0.14.0 specifies market-pegged rate-card and demand-rank authoring from one OpenRouter snapshot: credit mint with the \u00d71e6 factor, and (v0.14.0, after OpenRouter removed per-endpoint 30-day volume) a per-endpoint 30-minute text request-count eligibility floor plus an unweighted median over endpoints collapsed to one quote per distinct provider with a distinct-provider quorum (cheapest-print forbidden; request_count is eligibility only, never a weight), FeedSchema-A, MoneyTable-A, Score-A, an unpublished market-peg-bind.v1 sidecar (never on release.json or the v3 ledger), and a catalog-release recompute from engine bytes. or_completion_tokens_30d is sourced from the OpenRouter rankings-daily total_tokens field (the sole per-model 30-day volume OpenRouter publishes); or_requests_30d is informational and is 0 when the ranking source exposes no per-model request count. Lockstep with SPEC-005-R011; CONFORMANCE depends_on omits SPEC-005 to avoid a cycle. Unimplemented in this revision: the engine mapping of every recommendable key, ingest, and the MoneyTable-A publisher (impl on #1484). Score-B / FeedSchema-B / MoneyTable-B are later belts, not R008 promotion blockers. Do not promote from this close."
       }
     },
     {

@@ -35,6 +35,7 @@ def policy():
         "undercut_fraction": "0.20",
         "cache_hit_fraction": "0.25",
         "min_endpoint_request_count_30m": 1,
+        "min_distinct_providers": 1,
         "models": [
             model("openai/gpt-oss-20b", "openai/gpt-oss-20b"),
             model("google/gemma-4-26b-a4b-it", "google-gemma-4-26b-a4b-it"),
@@ -81,8 +82,8 @@ def with_request_activity(endpoints_by_model):
     30-minute request-count activity signal. The checked-in fixtures still
     carry completion_tokens_last_30d for readability, so this mirrors that
     same integer into the new field (without editing the fixture JSON) --
-    the request-weighted median then selects the same endpoint the fixtures
-    were built to exercise.
+    the unweighted median then selects over the same eligible endpoints the
+    fixtures were built to exercise.
     """
     endpoints_by_model = copy.deepcopy(endpoints_by_model)
     for document in endpoints_by_model.values():
@@ -153,6 +154,9 @@ def synthetic_production_market_snapshot(*, illiquid_source: str | None = None):
         # token-volume floor. 0 fails the default floor of 1; any real
         # activity count clears it.
         request_count = 0 if source_id == illiquid_source else 5_000_000
+        # Two distinct providers with identical prices: meets the distinct-provider
+        # quorum (production policy = 2) without changing the median. When
+        # illiquid (request_count 0) both fall below the floor -> still no price.
         endpoints[source_id] = {
             "data": {
                 "id": source_id,
@@ -162,7 +166,13 @@ def synthetic_production_market_snapshot(*, illiquid_source: str | None = None):
                         "status": 0,
                         "perf_last_30m_by_workload": {"text_generation": {"request_count": request_count}},
                         "pricing": {"prompt": "0.00000010", "completion": "0.00000020"},
-                    }
+                    },
+                    {
+                        "provider_name": "SyntheticLiquidTwo",
+                        "status": 0,
+                        "perf_last_30m_by_workload": {"text_generation": {"request_count": request_count}},
+                        "pricing": {"prompt": "0.00000010", "completion": "0.00000020"},
+                    },
                 ],
             }
         }
@@ -410,7 +420,7 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
         self.assertEqual(first["rows"][2]["canonical_model_id"], "google-gemma-4-26b-a4b-it")
         engine.validate_snapshot(first)
 
-    def test_prompt_and_completion_are_independent_volume_weighted_medians(self):
+    def test_prompt_and_completion_are_independent_unweighted_medians(self):
         rankings, models, endpoints = self.expanded_inputs()
         endpoints["openai/gpt-oss-20b"]["data"]["endpoints"] = [
             {
@@ -1321,6 +1331,32 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
         self.assertEqual(pricing["completion_per_mtok"], "200000")
         self.assertEqual(len(pricing["liquidity_filter"]["eligible_endpoint_liquidity"]), 2)
 
+    def _ep(self, provider, completion, prompt="0.0000001", rc=1000):
+        return {"provider_name": provider, "status": 0,
+                "perf_last_30m_by_workload": {"text_generation": {"request_count": rc}},
+                "pricing": {"prompt": prompt, "completion": completion}}
+
+    def test_pricing_requires_distinct_provider_quorum(self):
+        one = {"data": {"id": "example/model", "endpoints": [self._ep("Solo", "0.0000002"), self._ep("Solo", "0.0000002")]}}
+        self.assertIsNone(engine.cheapest_endpoint_pricing(one, "example/model", min_distinct_providers=2))
+        two = {"data": {"id": "example/model", "endpoints": [self._ep("A", "0.0000002"), self._ep("B", "0.0000002")]}}
+        priced = engine.cheapest_endpoint_pricing(two, "example/model", min_distinct_providers=2)
+        self.assertIsNotNone(priced)
+        self.assertEqual(priced["liquidity_filter"]["distinct_provider_count"], 2)
+        self.assertEqual(priced["liquidity_filter"]["min_distinct_providers"], 2)
+
+    def test_pricing_collapses_endpoints_to_one_vote_per_provider(self):
+        # A Sybil provider with 3 endpoints at $2.0 gets ONE vote (its lowest), so
+        # the unweighted lower median of the 3 distinct providers stays at the two
+        # honest $0.2 quotes -- it cannot be steered to $2.0 by adding endpoints.
+        doc = {"data": {"id": "example/model", "endpoints": [
+            self._ep("Honest1", "0.0000002"), self._ep("Honest2", "0.0000002"),
+            self._ep("Sybil", "0.0000020"), self._ep("Sybil", "0.0000020"), self._ep("Sybil", "0.0000020"),
+        ]}}
+        priced = engine.cheapest_endpoint_pricing(doc, "example/model", min_distinct_providers=2)
+        self.assertEqual(priced["liquidity_filter"]["distinct_provider_count"], 3)
+        self.assertEqual(priced["completion_per_mtok"], "0.2")
+
     def test_liquidity_filter_excludes_endpoints_below_minimum_request_count(self):
         # The floor used to be model-relative:
         # liquidity_volume_floor(model_tokens_30d) = max(1_000_000, tokens/20),
@@ -1409,10 +1445,22 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
         # A row priced under request-count floor 999 cannot be computed under a
         # policy whose floor is 1: the pricing basis is bound to the compute policy.
         row = {"pricing_status": "active_priced",
-               "pricing": {"liquidity_filter": {"minimum_request_count_last_30m": 999}}}
+               "pricing": {"liquidity_filter": {"minimum_request_count_last_30m": 999, "min_distinct_providers": 1}}}
         snap = self._coverage_snapshot(50, 0, rows=[row])
         with self.assertRaisesRegex(engine.SchemaError, "request-count floor"):
             engine.validate_market_peg_snapshot_requirements(snap, policy(), now=NOW)
+
+    def test_market_peg_rejects_snapshot_priced_under_a_different_quorum(self):
+        # A row priced under a 1-provider quorum cannot be computed under a policy
+        # that requires 2 distinct providers -- the Sybil quorum is policy-bound
+        # exactly like the request-count floor.
+        row = {"pricing_status": "active_priced",
+               "pricing": {"liquidity_filter": {"minimum_request_count_last_30m": 1, "min_distinct_providers": 1}}}
+        snap = self._coverage_snapshot(50, 0, rows=[row])
+        quorum_policy = policy()
+        quorum_policy["min_distinct_providers"] = 2
+        with self.assertRaisesRegex(engine.SchemaError, "distinct-provider quorum"):
+            engine.validate_market_peg_snapshot_requirements(snap, quorum_policy, now=NOW)
 
     def test_demand_proposal_rejects_invalid_minimum_provider_targets(self):
         with self.assertRaises(engine.SchemaError):

@@ -379,6 +379,25 @@ class ServabilityCoverageTests(unittest.TestCase):
         self.assertEqual(result["verdict"], "unresolved")
         self.assertNotIn("serving_class", result)
 
+    def test_classify_vlm_family_not_shadowed_by_multimodal_veto(self):
+        # A Qwen3-VL build matches the generic multimodal arch pattern AND is a
+        # known VLM-text family. The allowlist runs BEFORE the veto, so it is
+        # marked multimodal_text (previously the veto shadowed it -> excluded).
+        result = mlx.classify(
+            "mlx-community/Qwen3.6-35B-A3B-4bit", "4bit", Decimal("18"), "image-text-to-text",
+            {"architectures": ["Qwen3VLMoeForConditionalGeneration"], "model_type": "qwen3_vl_moe"}, Decimal("256"))
+        self.assertEqual(result["verdict"], "unresolved")
+        self.assertEqual(result["serving_class"], "multimodal_text")
+
+    def test_classify_pure_vision_model_is_vetoed_without_serving_class(self):
+        # Multimodal-shaped but NOT a known text-servable VLM family and no
+        # image-text-to-text tag -> vetoed, no serving_class (not proposed).
+        result = mlx.classify(
+            "mlx-community/SomeClip-4bit", "4bit", Decimal("2"), None,
+            {"architectures": ["CLIPVisionModel"], "model_type": "clip"}, Decimal("256"))
+        self.assertEqual(result["verdict"], "unresolved")
+        self.assertNotIn("serving_class", result)
+
     def test_classify_conditional_generation_marks_multimodal_text(self):
         # A ForConditionalGeneration decoder with no pipeline_tag is a multimodal
         # LLM served for text -> unresolved but flagged serving_class=multimodal_text

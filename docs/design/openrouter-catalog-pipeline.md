@@ -1,7 +1,7 @@
 # OpenRouter → Best-in-Class Catalog Pipeline (design)
 
-Status: design / pre-implementation. Owner: operator (a11). Target branch:
-`feat/openrouter-catalog-pipeline`.
+Status: PR 1 implemented (proposer + request-count peg + SPEC-023 revision).
+Owner: operator (a11). Target branch: `feat/openrouter-catalog-pipeline`.
 
 ## Goal
 
@@ -18,8 +18,8 @@ catalog cut**, not a rewrite of billing or a new SPEC.
 - **Proposer**: `scripts/openrouter_pricing_engine.py` — `fetch` (live snapshot,
   key from `OPENROUTER_API_KEY` env) → `compute` (rate-card + demand-rank
   proposals). Deliberately **non-apply** (runbook: "there is intentionally no
-  apply mode"). Market price = liquidity-filtered volume-weighted median across
-  endpoints; Malibu price = market × `(1 − undercut_fraction 0.20)`
+  apply mode"). Market price = unweighted median over distinct paid providers
+  gated by 30m request-count eligibility; Malibu price = market × `(1 − undercut_fraction 0.20)`
   (`proposed_price`, ~L1385).
 - **Selection seed**: `scripts/openrouter_mlx_candidates.py` — read-only HF probe
   that resolves a canonical `mlx-community/*` fleet-quant build per unmapped
@@ -153,10 +153,10 @@ its release-side replay to that same validator (single source of truth). This is
 money-path methodology change and goes through the 3-lane audit.
 
 **Live evidence (2026-09-18, valid key):** 40/42 rows now `active_priced`.
-`gpt-oss-120b` request-weighted completion **$0.36/Mtok** (Google endpoint, 47.7k
-reqs/30m) vs the deployed feed's stale $0.136 → ~$0.29/Mtok after undercut. Note
-this corrects the brief's $0.60 figure ($0.17 was a low-traffic provider; $0.36 is
-the activity-weighted market). Demand-dominant rows are closed-weight frontier
+`gpt-oss-120b` unweighted-median completion was **$0.36/Mtok** on that snapshot
+(Google endpoint, 47.7k reqs/30m) vs the deployed feed's stale $0.136 → ~$0.29/Mtok
+after undercut. Note this corrects the brief's $0.60 figure ($0.17 was a
+low-traffic provider). Demand-dominant rows are closed-weight frontier
 models (deepseek-v4-flash 50T tok, gpt-5.6, claude, gemini) — not MLX-servable, so
 they are demand context, not catalog candidates.
 
@@ -174,7 +174,7 @@ So the engine gained a `propose` subcommand that flips to **yield-first over an
 explicit candidate universe**:
 1. Candidate universe: an explicit `--candidates` list, or the OpenRouter
    `/models` catalog filtered to open-weight vendors (`select_open_weight_candidates`).
-2. Price each model **by id** via `/endpoints` (the request-weighted median),
+2. Price each model **by id** via `/endpoints` (the unweighted median over distinct providers),
    independent of demand rank.
 3. Gauge demand from summed 30m `request_count` (`model_demand_activity`).
 4. Resolve MLX servability + residency via the HF resolver

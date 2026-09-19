@@ -1679,6 +1679,7 @@ def market_policy_fixture(model_id: str = "example/new-model") -> dict:
         "undercut_fraction": "0.20",
         "cache_hit_fraction": "0.25",
         "min_endpoint_request_count_30m": 1,
+        "min_distinct_providers": 1,
         "models": [{
             "source_model_id": model_id,
             "canonical_model_id": model_id,

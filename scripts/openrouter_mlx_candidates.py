@@ -381,9 +381,18 @@ def classify(repo_id: str, quant: str | None, residency_gb: Decimal, pipeline_ta
     architectures = (config or {}).get("architectures")
     if required_gb > max_residency:
         return {**evidence, "verdict": "not_servable", "reasons": [f"conservative runtime residency {required_gb:.1f} GB (weights {residency_gb:.1f} GB x {RESIDENCY_OVERHEAD} headroom) exceeds the {max_residency} GB fleet band"]}
+    # A multimodal LLM served for TEXT via mlx-vlm -- an image-text-to-text VLM,
+    # or a conditional-generation decoder in the known-family allowlist -- is
+    # nominated as `multimodal_text` BEFORE the generic multimodal veto below.
+    # Otherwise VLM families that also match the veto markers (llava, qwen*-vl,
+    # internvl, pixtral) would be dropped without a serving_class and excluded
+    # from the proposal. `any-to-any` (omni) is deliberately NOT included here.
+    if pipeline_tag == "image-text-to-text" or is_conditional_generation_arch(config):
+        return {**evidence, "verdict": "unresolved", "serving_class": "multimodal_text",
+                "reasons": [f"multimodal LLM (pipeline_tag {pipeline_tag!r}, architecture {architectures}) served for text via mlx-vlm; confirm the mlx-vlm text path before pricing"]}
     # Architecture evidence VETOES a clean text verdict: a multimodal-shaped
-    # architecture conflicts with a text-only serving path even when the HF
-    # pipeline_tag claims text-generation (stale/mistagged repositories exist).
+    # architecture (that is NOT a known text-servable VLM family above) conflicts
+    # with a text-only serving path even when the pipeline_tag claims text.
     if is_multimodal_arch(config):
         return {**evidence, "verdict": "unresolved", "reasons": [f"config architecture {architectures} is multimodal-shaped and conflicts with any text-only serving path (pipeline_tag {pipeline_tag!r})"]}
     # The strongest positive verdict this tool emits is "review": HuggingFace
@@ -404,14 +413,6 @@ def classify(repo_id: str, quant: str | None, residency_gb: Decimal, pipeline_ta
         return {**evidence, "verdict": "unresolved", "reasons": [f"pipeline_tag {pipeline_tag!r} is a vision-language pipeline, not a confirmed text-only serving path"]}
     elif pipeline_tag is None and is_causal_lm(config):
         reason = f"no HF pipeline_tag; config architecture {architectures} is a causal LM; confirm the text-only serving path before pricing"
-    elif pipeline_tag is None and is_conditional_generation_arch(config):
-        # A `...ForConditionalGeneration` decoder (e.g. Mistral3ForConditionalGeneration,
-        # the Mistral-Small vision-language family) is a multimodal LLM served for
-        # TEXT via mlx-vlm -- the same real class as an image-text-to-text pipeline,
-        # signalled by architecture rather than pipeline_tag. Mark it so downstream
-        # includes it as a flagged text-serving candidate rather than dropping it.
-        return {**evidence, "verdict": "unresolved", "serving_class": "multimodal_text",
-                "reasons": [f"config architecture {architectures} is a conditional-generation multimodal LLM served for text; confirm the mlx-vlm text path before pricing"]}
     elif pipeline_tag is None:
         return {**evidence, "verdict": "unresolved", "reasons": ["no pipeline_tag and no causal-LM architecture in config; cannot confirm the text serving path"]}
     else:
