@@ -215,4 +215,55 @@ final class PagedKVParityTests: XCTestCase {
         )
         try await assertParity("Qwen3-Coder-30B-A3B-Instruct-4bit", "AC-3")
     }
+
+    // MARK: - Batched shared-forward input-isolation probe (real attention model)
+    //
+    // The single-row AC-1/2/3 gather-parity tests above never exercise the batched
+    // `[B,1]` shared forward that `runMoEInputIsolationProbe` uses to gate MoE attach,
+    // and no other test runs that path against a real attention model. The probe's
+    // `makeMask` builds a variable-length causal mask across rows; a wrong (pre-update)
+    // `lengths` masks each row's own current token when rows differ in length, which
+    // shows up here as `crossRowDivergences > 0` / `proven=false`. The production probe
+    // prompts tokenize to different lengths (10 vs 11 with the Qwen3 tokenizer), so this
+    // test takes exactly that unequal-length path. Qwen3-8B is dense but shares the same
+    // attention/mask path, so it is a valid discriminator for the mask correctness.
+    //
+    //   MACPROVIDER_RUN_PAGED_MOE_ISOLATION=1  → Qwen3-8B-4bit (~5GB)
+    func testBatchedSharedForward_InputIsolation_RealModel() async throws {
+        try XCTSkipUnless(
+            ProcessInfo.processInfo.environment["MACPROVIDER_RUN_PAGED_MOE_ISOLATION"] == "1",
+            "set MACPROVIDER_RUN_PAGED_MOE_ISOLATION=1 to run the batched shared-forward isolation probe (needs local HF model)"
+        )
+        let modelName = "Qwen3-8B-4bit"
+        guard let dir = findSnapshotDir(modelName) else {
+            throw XCTSkip("snapshot for \(modelName) not found in local HF cache")
+        }
+        MLX.GPU.set(cacheLimit: 256 * 1024 * 1024)
+        let ctx = try await loadLocal(dir)
+        let container = ModelContainer(context: ctx)
+        let layerCount = ctx.model.newCache(parameters: nil).count
+        // Same strings and tokenization as production (ModelRuntime.swift:1532-1533,1575-1578).
+        let promptA = ctx.tokenizer.encode(text: "Draft a short summary of today's shipping forecast.", addSpecialTokens: true)
+        let promptB = ctx.tokenizer.encode(text: "List three ingredients commonly used in a simple tomato soup.", addSpecialTokens: true)
+        print("  [moe-isolation] \(modelName) loaded; layers=\(layerCount); promptA=\(promptA.count) tok; promptB=\(promptB.count) tok")
+
+        let result = await PagedKVRuntimeParityProbe.runMoEInputIsolationProbe(
+            container: container,
+            blockSizeTokens: 16,
+            maxPhysicalBlocks: 1024,
+            poolEpoch: 1,
+            layerCount: layerCount,
+            promptA: promptA,
+            promptB: promptB
+        )
+        print("  [moe-isolation] proven=\(result.proven) rowsDecoded=\(result.rowsDecodedInSharedForward) "
+            + "rowFailures=\(result.rowFailures) crossRowDivergences=\(result.crossRowDivergences) "
+            + "challengeDistinguishing=\(result.challengeDistinguishing)")
+
+        XCTAssertTrue(result.challengeDistinguishing, "probe prompts must have distinct serial references to be a valid isolation challenge")
+        XCTAssertEqual(result.rowsDecodedInSharedForward, 2, "batched shared forward must decode both rows (a degenerate single-row path decodes fewer)")
+        XCTAssertEqual(result.rowFailures, 0, "no row may fail in the shared forward")
+        XCTAssertEqual(result.crossRowDivergences, 0, "each row's batched token must match its serial KVCacheSimple reference (a wrong mask masks the row's own current token)")
+        XCTAssertTrue(result.proven, "batched shared-forward input isolation must be proven")
+    }
 }
