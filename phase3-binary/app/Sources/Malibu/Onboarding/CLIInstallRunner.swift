@@ -55,7 +55,7 @@ enum CLIInstallRunner {
             case .bundledCLINotFound:
                 return "Provider software for repair was not found in Malibu. Your provider identity was not changed."
             case .developerToolsRequired:
-                return "This Mac needs Apple's Command Line Developer Tools to finish setup (they include python3). A system installer should have opened — click Install, wait for it to finish, then reopen Malibu."
+                return "This Mac needs a working python3 to finish setup. The installer could not bootstrap one automatically (network or checksum failure) and Apple's Command Line Developer Tools are not available. Check the network and try again, or install the Developer Tools and reopen Malibu."
             case let .nonZeroExit(code):
                 return "Provider software install failed (exit \(code)). Your provider identity was not changed."
             case .launchFailed(_):

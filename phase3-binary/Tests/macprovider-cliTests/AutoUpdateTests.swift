@@ -3826,6 +3826,7 @@ final class AutoUpdateTests: XCTestCase {
         <key>EnvironmentVariables</key><dict>
         <key>MACPROVIDER_BINARY_PATH</key><string>__INSTALL_DIR__/macprovider-cli</string>
         <key>MACPROVIDER_COORDINATOR_HOST</key><string>__COORDINATOR_HOST__</string>
+        <key>MACPROVIDER_PYTHON3</key><string>python3</string>
         </dict>
         </dict></plist>
         """
