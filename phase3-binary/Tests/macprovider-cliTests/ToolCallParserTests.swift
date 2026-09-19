@@ -510,6 +510,95 @@ buzz messages send --channel 7d5f1966-d036-431e-821e-3a4083f145fe --content "buz
         )
     }
 
+    // Pi session 2026-09-19: Qwen wrote a complete inner <function=bash> then opened a
+    // second <tool_call> instead of closing the first. The delimited parser threw and
+    // leaked XML as assistant text, so Pi never ran curl.
+    func testQwen3CoderUnclosedToolCallWrapperRecoversInnerFunctionXML() throws {
+        let raw = """
+        Let me look at the issue to understand what needs to be inspected:
+
+        <tool_call>
+        <function=bash>
+        <parameter=command>
+        curl -s https://api.github.com/repos/Augustas11/macprovider/issues/1588
+        </parameter>
+        </function>
+        <tool_call>
+        """
+        let parsed = ToolCallParser.parseToolCalls(
+            rawOutput: raw,
+            modelID: "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
+            allowedFunctionNames: ["bash"]
+        )
+
+        let call = try XCTUnwrap(parsed.toolCalls.first)
+        XCTAssertEqual(parsed.toolCalls.count, 1)
+        XCTAssertEqual(call.functionName, "bash")
+        XCTAssertEqual(
+            try argumentValue(call.arguments, key: "command") as? String,
+            "curl -s https://api.github.com/repos/Augustas11/macprovider/issues/1588"
+        )
+        XCTAssertEqual(
+            parsed.cleanedContent,
+            "Let me look at the issue to understand what needs to be inspected:"
+        )
+        XCTAssertFalse(parsed.cleanedContent?.contains("<function=") ?? false)
+        XCTAssertFalse(parsed.cleanedContent?.contains("<tool_call>") ?? false)
+    }
+
+    func testQwen3CoderMissingToolCallCloseRecoversInnerFunctionXML() throws {
+        let raw = """
+        <tool_call>
+        <function=bash>
+        <parameter=command>
+        echo hello
+        </parameter>
+        </function>
+        """
+        let parsed = ToolCallParser.parseToolCalls(
+            rawOutput: raw,
+            modelID: "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
+            allowedFunctionNames: ["bash"]
+        )
+        let call = try XCTUnwrap(parsed.toolCalls.first)
+        XCTAssertEqual(call.functionName, "bash")
+        XCTAssertEqual(try argumentValue(call.arguments, key: "command") as? String, "echo hello")
+        XCTAssertNil(parsed.cleanedContent)
+    }
+
+    func testQwen3CoderUnclosedWrapperUndeclaredFunctionStillFailsClosed() {
+        let raw = """
+        <tool_call>
+        <function=evil-dev-mcp__wipe>
+        <parameter=path>/</parameter>
+        </function>
+        <tool_call>
+        """
+        let parsed = ToolCallParser.parseToolCalls(
+            rawOutput: raw,
+            modelID: "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
+            allowedFunctionNames: ["bash"]
+        )
+        XCTAssertTrue(parsed.toolCalls.isEmpty)
+        XCTAssertEqual(parsed.cleanedContent, raw)
+    }
+
+    func testQwen3CoderUnclosedFunctionDoesNotRecoverTruncatedCommand() {
+        let raw = """
+        <tool_call>
+        <function=bash>
+        <parameter=command>
+        curl -s https://api.github.com/repos/Augustas11/macprovider/issues/1588
+        """
+        let parsed = ToolCallParser.parseToolCalls(
+            rawOutput: raw,
+            modelID: "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
+            allowedFunctionNames: ["bash"]
+        )
+        XCTAssertTrue(parsed.toolCalls.isEmpty, "truncated command must not become a tool call")
+        XCTAssertEqual(parsed.cleanedContent, raw)
+    }
+
     // Exact shape captured on the wire from Qwen3-Coder on the Malibu gateway: a bare
     // <function=…> block with an orphan trailing </tool_call> and no opening <tool_call>.
     func testQwen3CoderHyphenatedMCPToolName_BareFunctionFormWithOrphanClose() throws {

@@ -29,26 +29,67 @@ enum ToolCallParser {
                 }
                 return parsed
             }
-            // Function-XML (`<function=…>`) is a Qwen-row body grammar only (SPEC-018 §3.1
-            // v0.2.7). Do NOT run it for other families (e.g. Llama-3.3), whose §3.1 rows
-            // define only JSON/Python bodies — keep the parser-family boundary tight.
-            if format == .qwen25, rawOutput.contains("<function=") {
-                let bare = try parseBareNemotronCalls(rawOutput)
-                if !bare.toolCalls.isEmpty {
-                    if let allowedFunctionNames,
-                       bare.toolCalls.contains(where: { !allowedFunctionNames.contains($0.functionName) })
-                    {
-                        fputs("warning: tool-call output contains undeclared function for \(modelID)\n", stderr)
-                        return (nilIfBlank(rawOutput), [])
-                    }
-                    return bare
-                }
+            if let recovered = recoverBareFunctionXML(
+                rawOutput,
+                format: format,
+                modelID: modelID,
+                allowedFunctionNames: allowedFunctionNames
+            ) {
+                return recovered
             }
             return parsed
         } catch {
             fputs("warning: malformed tool-call output for \(modelID): \(error)\n", stderr)
+            // Qwen3-Coder often emits a complete inner <function=…></function> and then
+            // stops before </tool_call> (or opens a second <tool_call>). parseDelimited
+            // throws missingEndDelimiter and used to leak the XML as assistant text, so
+            // OpenAI clients never ran the tool. Recover the inner function-XML instead.
+            if let recovered = recoverBareFunctionXML(
+                rawOutput,
+                format: format,
+                modelID: modelID,
+                allowedFunctionNames: allowedFunctionNames
+            ) {
+                return recovered
+            }
             return (nilIfBlank(rawOutput), [])
         }
+    }
+
+    private static func recoverBareFunctionXML(
+        _ rawOutput: String,
+        format: ToolCallFormat,
+        modelID: String,
+        allowedFunctionNames: Set<String>?
+    ) -> (cleanedContent: String?, toolCalls: [ToolCall])? {
+        // Function-XML (`<function=…>`) is a Qwen-row body grammar only (SPEC-018 §3.1
+        // v0.2.7). Require a closed </function> so we do not turn a truncated command
+        // into a dispatchable tool call.
+        guard format == .qwen25,
+              rawOutput.contains("<function="),
+              rawOutput.contains("</function>")
+        else {
+            return nil
+        }
+        guard let bare = try? parseBareNemotronCalls(rawOutput), !bare.toolCalls.isEmpty else {
+            return nil
+        }
+        if let allowedFunctionNames,
+           bare.toolCalls.contains(where: { !allowedFunctionNames.contains($0.functionName) })
+        {
+            fputs("warning: tool-call output contains undeclared function for \(modelID)\n", stderr)
+            return (nilIfBlank(rawOutput), [])
+        }
+        return (stripToolCallWrappers(bare.cleanedContent), bare.toolCalls)
+    }
+
+    private static func stripToolCallWrappers(_ content: String?) -> String? {
+        guard var text = content else {
+            return nil
+        }
+        text = text.replacingOccurrences(of: "<tool_call>", with: "")
+        text = text.replacingOccurrences(of: "</tool_call>", with: "")
+        return nilIfBlank(text)
     }
 
     private static func parseDelimited(_ rawOutput: String, format: ToolCallFormat) throws -> (cleanedContent: String?, toolCalls: [ToolCall]) {

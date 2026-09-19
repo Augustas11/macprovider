@@ -157,13 +157,10 @@ type forwardState struct {
 	stickyResult     string
 	stickyMissReason string
 
-	// materializeBuyerSSEFromJSON is set when the buyer asked for stream=true
-	// with tools declared, but the coordinator asks the provider for a non-stream
-	// completion. Current macprovider-cli XML streaming emits "{}" then a
-	// non-prefix object; Pi concatenates that into empty or malformed tool args.
-	// The non-stream parser already returns complete arguments, so we convert
-	// that JSON completion into buyer SSE.
-	materializeBuyerSSEFromJSON bool
+	// declaredFunctionNames is the buyer-declared tools[] function.name set.
+	// Used to recover Qwen function-XML that leaked into message.content when
+	// the provider CLI failed to close </tool_call> (Pi then never runs bash).
+	declaredFunctionNames map[string]struct{}
 }
 
 func newForwardState(startedAt time.Time) *forwardState {
