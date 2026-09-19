@@ -46,8 +46,8 @@ binary the Mac runs.
 ## Next CLI — net changes vs 1.8.123
 
 All rows are **already on `main`** — the train is fully merged, so the next
-candidate cut off current `main` carries every row. Last built candidate
-`v1.8.163` is old — do not promote it.
+candidate cut off current `main` carries every row. Last built candidates
+`v1.8.163` and `v1.8.164` are old — do not promote them.
 
 | Net change in CLI / Malibu / installer | Status | PR |
 |---|---|---|
@@ -75,17 +75,31 @@ candidate cut off current `main` carries every row. Last built candidate
 | OpenRouter slot-delta / stale-capacity routing on CLI path | merged | #1571 #1535 |
 | Installer 404 fix: paginate latest-release lookup, de-quadratic parser | merged | #1582 (#1574) |
 | Live Ollama serve + Gemma tokens (non-earning) | merged | #1576 (#1569) |
+| Drop independent 256-message chat cap | merged | #1595 (#1594) |
+| Concat-safe native tool-call streaming (hold XML args until `</function>`) | merged | #1596 |
+| Recover inner Qwen function-XML when `</tool_call>` is missing | merged | #1599 |
+| SPEC-038 on-device parity + MoE-isolation self-measurement | merged | #1591 |
+| Paged-KV attach gates so SPEC-038/039 can engage on real MoE hardware | merged | #1597 |
+| Opt-in empirical max_batch concurrency calibration | merged | #1590 |
 
 #1453 closes when a candidate that includes the **merged** rows is promoted to
 the fleet. #1569 is a later CLI. Spec promotion #1583 is not a CLI change.
+
+Coordinator-only (already on Pearl `v1.8.162-29-gee089f0f`, **not** this CLI
+cut): #1601 Pi stream TTFT / concat-safe coalesce, #1599 coordinator XML
+rewrite, #1595 coordinator message-count drop. Fleet Macs still run **1.8.123**
+until this CLI is promoted. #1600 is the install.sh consumer-health alarm
+(scripts/CI), not the Mac binary — it stays red until this CLI (with #1582) is
+promoted **and** `get.malibu.tech/install.sh` is republished.
 
 ## Active candidate
 
 | Field | Value |
 |---|---|
-| Last built candidate | `v1.8.163` @ `8c0c51d2` |
-| Status | **Do not promote.** Older than current `main`. |
-| Next candidate | cut off current `main` |
+| Last built candidates | `v1.8.163` @ `8c0c51d2`; `v1.8.164` BYOM @ `cdbb0257` |
+| Status | **Do not promote either.** Both predate #1595/#1596/#1599 and current `main`. |
+| Next candidate | cut off current `main` (`e1980879` or newer tip after this file lands) |
+| Why this cut | Pi/Qwen tool-call correctness on the Mac, 256-cap gone on the provider, #1582 install.sh pagination, plus the already-merged BYOM / paged-KV / autotune train |
 
 ## E2E tracks (independent gates)
 
@@ -115,16 +129,37 @@ combined candidate**.
   is now in the train. Re-run Track B on the combined candidate before promoting
   if that promotion ships BYOM earning.
 
+### Track C — Pi / Qwen tool-call smoke (this cut)
+
+- **Owner / tracker:** #1594, #1596, #1599 (Pearl coordinator already hotfixed;
+  this track proves the **Mac CLI**).
+- **Gate:** against a candidate-installed provider: stream+tools bash args are
+  one complete JSON object; leaked `<function=bash>…</function>` without
+  `</tool_call>` becomes `tool_calls` (Pi runs bash, no XML in chat); CLI no
+  longer returns `messages_too_long` at 256. Prefill TTFT on Pi’s ~4.5k system
+  prompt is **not** a gate — that is hardware, not this cut.
+- **Last run:** 2026-09-19 live on Pearl coordinator + fleet **1.8.123** —
+  coordinator path green; CLI path still the old binary. Re-run on the next
+  candidate after it is installed on a Mac.
+
 ## Promotion gate (checklist)
 
 1. All in-scope CLI rows above are `merged`.
-2. Cut one candidate off `main` (`acceptance-candidate.yml`).
+2. Cut one candidate off `main` (`acceptance-candidate.yml`). Do **not** reuse
+   `v1.8.163` / `v1.8.164`.
 3. In-scope e2e green on **that** candidate (Track A this cut; Track B only if
-   shipping #1569).
-4. Physical acceptance (`promote-acceptance-candidate.yml`) — this is what
+   shipping #1569 earning).
+4. Live smoke on the candidate (not a substitute for Track A): Pi/Qwen3-Coder
+   stream+tools concat is one JSON object (never `{}` / `{}{`); unclosed
+   function-XML becomes a real `bash` tool call; 257+ messages are not rejected
+   with `messages_too_long` on the CLI.
+5. Physical acceptance (`promote-acceptance-candidate.yml`) — this is what
    bumps `binaryVersion` and moves the fleet.
-5. `verify-live-coordinator-release-rollout` before publishing discovery.
-6. Byte-identity check: `docs/runbooks/provider-cli-release-verification.md`.
+6. `verify-live-coordinator-release-rollout` before publishing discovery.
+7. Byte-identity check: `docs/runbooks/provider-cli-release-verification.md`.
+8. Republish `https://get.malibu.tech/install.sh` from the promoted tag so
+   #1582 pagination is what `curl | bash` runs. Confirm
+   `scripts/check-install-sh-consumer-health.sh` is green (#1600 / #1588).
 
 ## Session protocol
 
