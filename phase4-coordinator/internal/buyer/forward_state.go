@@ -156,6 +156,14 @@ type forwardState struct {
 
 	stickyResult     string
 	stickyMissReason string
+
+	// materializeBuyerSSEFromJSON is set when the buyer asked for stream=true
+	// with tools declared, but the coordinator asks the provider for a non-stream
+	// completion. Current macprovider-cli XML streaming emits "{}" then a
+	// non-prefix object; Pi concatenates that into empty or malformed tool args.
+	// The non-stream parser already returns complete arguments, so we convert
+	// that JSON completion into buyer SSE.
+	materializeBuyerSSEFromJSON bool
 }
 
 func newForwardState(startedAt time.Time) *forwardState {

@@ -918,7 +918,7 @@ actor InferenceRelay {
                 finishReason: NSNull()
             )))
 
-            let streamedAnyToolCallDelta = StreamedFlag()
+            let streamedToolArgs = StreamedToolCallArgs()
             // T3-01: accumulate content-token deltas until streamInterval tokens,
             // then emit one combined SSE frame. Tool-call deltas flush any pending
             // content immediately and are never batched.
@@ -953,7 +953,7 @@ actor InferenceRelay {
                         pendingContent = ""
                         pendingCount = 0
                     }
-                    streamedAnyToolCallDelta.set()
+                    streamedToolArgs.note(index: toolDelta.index, fragment: toolDelta.arguments)
                     _ = buffer.enqueue(sseEvent(chatCompletionChunk(
                         id: id,
                         created: created,
@@ -1023,11 +1023,13 @@ actor InferenceRelay {
                 return completion
             }
 
-            // Fallback for non-streaming-incremental path: if tool calls landed only
-            // in the final CompletionResult and were never streamed via .toolCallDelta
-            // chunks, emit them now.
-            if !streamedAnyToolCallDelta.get(), let toolCalls = completion.toolCalls, !toolCalls.isEmpty {
-                for delta in toolCallDeltaChunks(toolCalls) {
+            // If tool calls landed in the final CompletionResult, emit any
+            // concat-safe argument remainder (or the full call if nothing streamed).
+            if let toolCalls = completion.toolCalls, !toolCalls.isEmpty {
+                for delta in ToolCall.openAIFallbackDeltas(
+                    toolCalls: toolCalls,
+                    streamedArgumentsByIndex: streamedToolArgs.snapshot()
+                ) {
                     _ = buffer.enqueue(sseEvent(chatCompletionChunk(
                         id: id,
                         created: created,

@@ -921,7 +921,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                 )
 
                 let toolCallOpenEmitted = StreamedFlag()
-                let streamedAnyToolCallDelta = StreamedFlag()
+                let streamedToolArgs = StreamedToolCallArgs()
                 let completion = try await modelRuntime.stream(request, with: handle, shouldCancel: { false }) { chunk in
                     switch chunk {
                     case .content(let text):
@@ -939,7 +939,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                             let unixMs = Int64(Date().timeIntervalSince1970 * 1000)
                             writer.writeRawSSE(": macprovider_tool_call_open unix_ms=\(unixMs)\n\n")
                         }
-                        streamedAnyToolCallDelta.set()
+                        streamedToolArgs.note(index: toolDelta.index, fragment: toolDelta.arguments)
                         writer.writeSSEJSON(
                             Self.chatCompletionChunk(
                                 id: id,
@@ -960,11 +960,13 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                     completion: completion
                 )
 
-                // Fallback for non-streaming-incremental path: if tool calls landed only
-                // in the final CompletionResult (e.g. buffered/downgrade/test paths) and
-                // were never streamed via .toolCallDelta chunks, emit them now.
-                if !streamedAnyToolCallDelta.get(), let toolCalls = completion.toolCalls, !toolCalls.isEmpty {
-                    for delta in Self.toolCallDeltaChunks(toolCalls) {
+                // If tool calls landed in the final CompletionResult, emit any
+                // concat-safe argument remainder (or the full call if nothing streamed).
+                if let toolCalls = completion.toolCalls, !toolCalls.isEmpty {
+                    for delta in ToolCall.openAIFallbackDeltas(
+                        toolCalls: toolCalls,
+                        streamedArgumentsByIndex: streamedToolArgs.snapshot()
+                    ) {
                         writer.writeSSEJSON(
                             Self.chatCompletionChunk(
                                 id: id,
