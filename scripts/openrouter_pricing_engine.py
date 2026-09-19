@@ -1979,7 +1979,15 @@ def normalize_min_provider_targets(document: Mapping[str, Any]) -> dict[str, int
         rows = document.get("rows")
         if not isinstance(rows, dict):
             raise SchemaError("minimum provider targets rows must be an object")
-        return {key: row["min_provider_target"] for key, row in rows.items() if isinstance(row, dict) and "min_provider_target" in row}
+        targets: dict[str, int] = {}
+        for key, row in rows.items():
+            if not isinstance(row, dict) or "min_provider_target" not in row:
+                continue
+            # demand-rank.json also carries listed keys. Compute only prices recommendable ones.
+            if "recommendable" in row and row.get("recommendable") is not True:
+                continue
+            targets[key] = row["min_provider_target"]
+        return targets
     return dict(document)
 
 

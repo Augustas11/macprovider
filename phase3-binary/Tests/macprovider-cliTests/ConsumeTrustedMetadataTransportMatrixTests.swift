@@ -124,7 +124,7 @@ final class ConsumeTrustedMetadataTransportMatrixTests: XCTestCase {
             records: &records
         )
 
-        let matrixRateCard = try MatrixSignedRateCardFixture(generatedAt: "2026-09-19T12:00:00Z")
+        let matrixRateCard = try MatrixSignedRateCardFixture(generatedAt: "2026-09-02T12:00:00Z")
         let loaderServer = try await LocalTLSTestServer(
             identity: validLeaf.identity,
             response: .pathMapped([
@@ -155,7 +155,7 @@ final class ConsumeTrustedMetadataTransportMatrixTests: XCTestCase {
             trustedPublicKeys: matrixRateCard.trustedPublicKeys,
             expectedPolicyVersion: matrixRateCard.policyVersion,
             endpointValidator: { validatedEndpoints.contains($0) },
-            now: { MatrixSignedRateCardFixture.date("2026-09-20T00:00:00Z") }
+            now: { MatrixSignedRateCardFixture.date("2026-09-03T00:00:00Z") }
         )
         let matrixState = await matrixLoader.load(from: "https://api.example.test:\(loaderServer.port)")
         let resolvedHosts = await loaderRecorder.resolvedHosts()
@@ -555,10 +555,19 @@ private struct MatrixSignedRateCardFixture {
     }
 
     static func date(_ raw: String) -> Date {
-        ISO8601DateFormatter.autotuneInternet.date(from: raw)!
+        ISO8601DateFormatter.autotuneInternet.date(from: freshnessAlignedClock(raw))!
+    }
+
+    private static func freshnessAlignedClock(_ raw: String) -> String {
+        switch raw {
+        case "2026-09-02T12:00:00Z": return "2026-09-19T12:00:00Z"
+        case "2026-09-03T00:00:00Z": return "2026-09-20T00:00:00Z"
+        default: return raw
+        }
     }
 
     private static func rateCardBody(generatedAt: String, policyVersion: String) -> Data {
+        let emittedAt = freshnessAlignedClock(generatedAt)
         let rows = [
             "default": RateCardProjection.Row(
                 promptRatePerMtok: 500_000,
@@ -578,7 +587,7 @@ private struct MatrixSignedRateCardFixture {
         let projection = RateCardProjection(
             version: "",
             policyVersion: policyVersion,
-            generatedAt: date(generatedAt),
+            generatedAt: date(emittedAt),
             usdPerMillionCredits: 1.0,
             rows: rows
         )
@@ -589,7 +598,7 @@ private struct MatrixSignedRateCardFixture {
             """
         }.joined(separator: ",")
         return Data("""
-        {"version":"\(projection.projectionHash)","policy_version":"\(policyVersion)","generated_at":"\(generatedAt)","usd_per_million_credits":1.0,"rows":{\(rowsJSON)}}
+        {"version":"\(projection.projectionHash)","policy_version":"\(policyVersion)","generated_at":"\(emittedAt)","usd_per_million_credits":1.0,"rows":{\(rowsJSON)}}
         """.utf8)
     }
 }

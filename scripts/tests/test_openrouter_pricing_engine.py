@@ -116,6 +116,12 @@ def production_recommendable_keys():
     }
 
 
+def production_min_provider_targets():
+    return engine.normalize_min_provider_targets(
+        json.loads((ROOT / "phase3-binary" / "catalog" / "autotune" / "demand-rank.json").read_text(encoding="utf-8"))
+    )
+
+
 def synthetic_production_market_snapshot(*, illiquid_source: str | None = None):
     policy_document = production_policy()
     ranked_sources = [model["source_model_id"] for model in policy_document["models"]]
@@ -367,10 +373,7 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
 
     def test_demand_proposal_fails_illiquid_mapped_key(self):
         snapshot = synthetic_production_market_snapshot(illiquid_source="qwen/qwen3-32b")
-        min_targets = {
-            key: row["min_provider_target"]
-            for key, row in json.loads((ROOT / "phase3-binary" / "catalog" / "autotune" / "demand-rank.json").read_text(encoding="utf-8"))["rows"].items()
-        }
+        min_targets = production_min_provider_targets()
         with self.assertRaisesRegex(engine.SchemaError, "no active priced OpenRouter endpoint"):
             engine.build_demand_proposal(
                 snapshot,
@@ -1490,12 +1493,15 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
         finally:
             fixture_path.write_text(original_catalog)
 
+    def test_normalize_min_provider_targets_skips_listed_demand_rank_rows(self):
+        targets = production_min_provider_targets()
+        self.assertEqual(set(targets), production_recommendable_keys())
+        self.assertNotIn("qwen/qwen3.8-27b", targets)
+        self.assertNotIn("z-ai/glm-4.5-air", targets)
+
     def test_demand_proposal_defaults_to_real_production_catalog(self):
         production_policy = json.loads((SCRIPTS / "openrouter_pricing_policy.json").read_text(encoding="utf-8"))
-        min_targets = {
-            key: row["min_provider_target"]
-            for key, row in json.loads((ROOT / "phase3-binary" / "catalog" / "autotune" / "demand-rank.json").read_text(encoding="utf-8"))["rows"].items()
-        }
+        min_targets = production_min_provider_targets()
         proposal = engine.build_demand_proposal(
             synthetic_production_market_snapshot(),
             production_policy,
