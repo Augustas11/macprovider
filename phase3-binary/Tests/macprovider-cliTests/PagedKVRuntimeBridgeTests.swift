@@ -84,7 +84,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
             chatTemplateSHA256: templateSHA,
             modelCapabilities: PagedKVRuntimeModelCapabilities(modelFamily: "qwen", requiresMoEDispatch: false),
             parityProbe: Self.establishedParityProbe(),
-            moeProbe: nil,
+            moeProbe: Self.provenBatchedProbe(),
             environment: PagedKVRuntimeMeasurementEnvironment(
                 metallibCandidatePaths: { ["/tmp/present/default.metallib"] },
                 fileExists: { $0 == "/tmp/present/default.metallib" },
@@ -315,7 +315,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
                 chatTemplateSHA256: nil,
                 modelCapabilities: capabilities,
                 parityProbe: Self.establishedParityProbe(),
-                moeProbe: nil,
+                moeProbe: Self.provenBatchedProbe(),
                 environment: Self.liveMeasurementEnvironment()
             ))
         }
@@ -1336,6 +1336,21 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
             gatherKernelCalls: nLayers * nNew * 2,
             maxLogicalBlocks: 3,
             nonIdentityPermutation: true
+        )
+    }
+
+    /// A fully-proven batched shared-forward isolation probe. `measurePagedKVRuntime` now
+    /// requires this for EVERY paging-eligible model (dense and MoE alike), since the
+    /// serve-time batched decode path's cross-row mask is family-independent, so dense
+    /// tests must supply it too. `moeDispatchProven` stays MoE-specific and is derived
+    /// from `requiresMoEDispatch`, not from this probe.
+    private static func provenBatchedProbe() -> PagedKVRuntimeMoEProbeResult {
+        PagedKVRuntimeMoEProbeResult(
+            proven: true,
+            rowsDecodedInSharedForward: 2,
+            rowFailures: 0,
+            crossRowDivergences: 0,
+            challengeDistinguishing: true
         )
     }
 
