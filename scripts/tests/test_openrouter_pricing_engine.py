@@ -1496,8 +1496,17 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
     def test_normalize_min_provider_targets_skips_listed_demand_rank_rows(self):
         targets = production_min_provider_targets()
         self.assertEqual(set(targets), production_recommendable_keys())
-        self.assertNotIn("qwen/qwen3.8-27b", targets)
-        self.assertNotIn("z-ai/glm-4.5-air", targets)
+        self.assertIn("qwen/qwen3.8-27b", targets)
+        self.assertIn("z-ai/glm-4.5-air", targets)
+        skipped = engine.normalize_min_provider_targets(
+            {
+                "rows": {
+                    "qwen3-8b": {"min_provider_target": 15, "recommendable": True},
+                    "listed-only/example": {"min_provider_target": 5, "recommendable": False},
+                }
+            }
+        )
+        self.assertEqual(skipped, {"qwen3-8b": 15})
 
     def test_demand_proposal_defaults_to_real_production_catalog(self):
         production_policy = json.loads((SCRIPTS / "openrouter_pricing_policy.json").read_text(encoding="utf-8"))

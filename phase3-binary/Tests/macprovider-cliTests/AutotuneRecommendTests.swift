@@ -1876,7 +1876,7 @@ final class AutotuneRecommendTests: XCTestCase {
 
     func testSignedStaticFallbackAndStaleWarnings() async throws {
         let validFetched = Data(AutotuneStaticInputs.bakedDemandRankJSON
-            .replacingOccurrences(of: "published-2026-09-19-openrouter-listed-v1", with: "fetched-2026-09-09")
+            .replacingOccurrences(of: "published-2026-09-19-openrouter-priced-v1", with: "fetched-2026-09-09")
             .replacingOccurrences(of: "2026-09-19T00:00:00Z", with: "2026-09-20T00:00:00Z")
             .utf8)
         let signature = Data(repeating: 0, count: 64).base64EncodedString()
@@ -2003,7 +2003,7 @@ final class AutotuneRecommendTests: XCTestCase {
 
     func testSignedStaticRejectsSidecarWithExtraFields() async throws {
         let fetched = Data(AutotuneStaticInputs.bakedDemandRankJSON
-            .replacingOccurrences(of: "published-2026-09-19-openrouter-listed-v1", with: "fetched-2026-07-29")
+            .replacingOccurrences(of: "published-2026-09-19-openrouter-priced-v1", with: "fetched-2026-07-29")
             .replacingOccurrences(of: "2026-09-19T00:00:00Z", with: "2026-07-29T09:00:00Z")
             .utf8)
         let sidecar = Data(#"{"key_id":"streamvc-autotune-static-v4","alg":"ed25519","signature":"AA==","extra":true}"#.utf8)

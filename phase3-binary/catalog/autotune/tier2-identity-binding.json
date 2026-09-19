@@ -1,5 +1,5 @@
 {
-  "autotune_candidates_sha256": "b92b4470a6630240c0047b3e86ab618553ace8e31e233ac7d7793781deafbd44",
+  "autotune_candidates_sha256": "c83a28f3d54f3515df8fb40d7fe672edde3c6e181dc80535b6e669b1d559f932",
   "generated_at": "2026-09-19T00:00:00Z",
   "models": [
     {
@@ -123,6 +123,6 @@
     }
   ],
   "policy_version": "autotune-policy-v1",
-  "release_id": "published-2026-09-19-openrouter-listed-v1",
+  "release_id": "published-2026-09-19-openrouter-priced-v1",
   "schema_version": "macprovider.tier2-identity-binding.v1"
 }

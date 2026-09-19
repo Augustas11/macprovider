@@ -238,6 +238,9 @@ expected_history = {
     # Superseded by published-2026-09-19-openrouter-listed-v1; retained by the
     # append-only ledger (was the current release before OpenRouter listed intake).
     "published-2026-09-02-gpt-oss-120b-v1",
+    # Superseded by published-2026-09-19-openrouter-priced-v1; retained by the
+    # append-only ledger (was the current release before the OpenRouter priced cut).
+    "published-2026-09-19-openrouter-listed-v1",
     release_id,
 }
 if set(ledger["releases"]) != expected_history:
