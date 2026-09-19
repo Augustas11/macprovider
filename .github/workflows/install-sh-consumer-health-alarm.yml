@@ -1,0 +1,59 @@
+name: Install.sh consumer-surface health alarm
+
+# Read-only backstop for the public one-liner installer. Byte-parity
+# (install-sh-parity-alarm.yml) only asserts served install.sh == the latest
+# stable tag's dist/install.sh. That stayed green during #1574 because the
+# served copy was v1.8.123, and v1.8.123's latest_release_tag() used
+# ?per_page=30 — leading prereleases hid the stable tag, the resolver died 3,
+# and checksums.txt 404'd. This alarm fetches the SERVED installer, runs its
+# latest_release_tag() against the live unauthenticated GitHub API (the view a
+# fresh host gets), and asserts checksums.txt plus a darwin-arm64 asset are
+# HTTP 200. No secrets, no writes, no deploy, and no GH_TOKEN. An authenticated
+# probe is not faithful (drafts become visible; #1588).
+#
+# A red run with a green parity alarm means "served bytes match a broken
+# release". That is a true alarm, not a flake. It stays red until the next
+# promoted stable CLI that contains the #1582 paginated resolver is
+# republished to get.malibu.tech.
+
+on:
+  schedule:
+    # Every 6 hours: same cadence as the byte-parity alarm, so a resolver
+    # outage is caught within a quarter day instead of by stranded installs.
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: install-sh-consumer-health-alarm
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Alarm when the public installer cannot resolve a stable release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GITHUB_TOKEN: ""
+      GH_TOKEN: ""
+      GH_ENTERPRISE_TOKEN: ""
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Probe served install.sh resolver unauthenticated
+        shell: bash
+        # Deliberately no GH_TOKEN / GITHUB_TOKEN mapping. Do not inject the
+        # Actions token into this job's environment.
+        run: |
+          set -euo pipefail
+          unset GITHUB_TOKEN GH_TOKEN GH_ENTERPRISE_TOKEN || true
+          # Pin the production curl channel. Do not honor a repo/org env override
+          # that would point the extractor at a different script.
+          export INSTALL_SH_URL="https://get.malibu.tech/install.sh"
+          bash scripts/check-install-sh-consumer-health.sh
