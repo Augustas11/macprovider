@@ -2608,14 +2608,11 @@ func (s *Server) forwardStreamSequence(
 				writeError(w, http.StatusBadGateway, "provider_failed", "Selected provider failed; buyer should retry")
 				return dispatchedAttempt{}, false
 			}
+			// Buyer stream+tools stay stream=true so the Mac can flush role /
+			// name-open while generating. concatSafeToolStream holds
+			// function.arguments until they are one complete JSON object so
+			// fleet 1.8.123's "{}"-then-object shape cannot reach Pi.
 			providerStream := true
-			if chatRequestDeclaresTools(req.raw) {
-				if rewritten, rewriteErr := rewriteJSONBoolField(dispatchBody, "stream", false); rewriteErr == nil {
-					dispatchBody = rewritten
-					providerStream = false
-					state.materializeBuyerSSEFromJSON = true
-				}
-			}
 			settlementMetadata, err := rec.recordRouteSnapshot(dispatchBody, state.provider)
 			if err != nil {
 				writeRouteSnapshotError(w, rec, err)
@@ -3687,27 +3684,6 @@ func (s *Server) forwardWSNonStreaming(w http.ResponseWriter, r *http.Request, r
 				}
 				attempt.Logged = true
 			}
-			if state != nil && state.materializeBuyerSSEFromJSON {
-				sse, err := chatCompletionJSONToSSE(checkedBody)
-				if err != nil {
-					writeError(w, http.StatusBadGateway, "provider_failed", "Provider returned invalid tool-call completion")
-					return wsForwardFailed, requestLogAttempt{Status: http.StatusBadGateway, Error: "Provider returned invalid tool-call completion", ErrorCode: "provider_failed", FaultFlag: billing.FaultBreakerQualifying, SettlementOutput: settlementOutputUnavailableFor(billing.TerminalStateProviderError)}
-				}
-				w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
-				w.Header().Set("X-Accel-Buffering", "no")
-				w.Header().Set("Cache-Control", "no-cache")
-				w.Header().Set("X-MacProvider-Provider", provider.ProviderID)
-				w.Header().Set("X-MacProvider-Route", provider.AssignedID)
-				w.Header().Set(streamingModeHeader, streamingModeIncremental)
-				setReceiptHeaderForProvider(w.Header(), receiptValue, provider)
-				markProviderDone()
-				if s.poolAttemptCancelledBeforeCommit(r, state, provider.ProviderID) {
-					return wsForwardCancelled, requestLogAttempt{}
-				}
-				w.WriteHeader(http.StatusOK)
-				_, _ = w.Write(sse)
-				return wsForwardComplete, attempt
-			}
 			w.Header().Set("Content-Type", "application/json")
 			w.Header().Set("X-MacProvider-Provider", provider.ProviderID)
 			w.Header().Set("X-MacProvider-Route", provider.AssignedID)
@@ -3791,6 +3767,7 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 	if streamingMode != streamingModeIncremental {
 		return s.forwardWSStreamingBuffered(w, r, requestID, provider, relay, streamingMode, streamingBuyer, state, billingAttemptN)
 	}
+	coalescer := newConcatSafeToolStream()
 	commit := func() {
 		if committed {
 			return
@@ -3804,14 +3781,7 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 		w.WriteHeader(http.StatusOK)
 		committed = true
 	}
-	writeChunk := func(data string) (bool, wsForwardResult) {
-		if data != "" && !ttftLogged {
-			ttftLogged = true
-			if state != nil {
-				state.phaseTiming.markProviderFirstByte(phaseTimingNow(s))
-			}
-			guard.LogTTFT(time.Since(started))
-		}
+	writeBuyerSSE := func(data string) (bool, wsForwardResult) {
 		checked, stop, err := guard.CheckStreamingChunk(data)
 		if err != nil {
 			relay.Cancel("tier2_encoding_invalid")
@@ -3886,6 +3856,47 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 		}
 		return false, ""
 	}
+	failMalformedToolCall := func() (bool, wsForwardResult) {
+		relay.Cancel("malformed_tool_call_stream")
+		if s.streamingDowngrade != nil {
+			s.streamingDowngrade.recordMalformed(streamingBuyer, provider.ProviderID, s.now())
+		}
+		commit()
+		markProviderDone()
+		setStreamFailureAttempt(http.StatusOK, "Provider emitted malformed tool-call stream", "malformed_tool_call")
+		writeSSEError(w, "Provider emitted malformed tool-call stream", "malformed_tool_call")
+		if flusher != nil {
+			flusher.Flush()
+		}
+		return true, wsForwardFailed
+	}
+	writeChunk := func(data string) (bool, wsForwardResult) {
+		if data != "" && !ttftLogged {
+			ttftLogged = true
+			if state != nil {
+				state.phaseTiming.markProviderFirstByte(phaseTimingNow(s))
+			}
+			guard.LogTTFT(time.Since(started))
+		}
+		coalesced, err := coalescer.observeBlock([]byte(data))
+		if err != nil {
+			return failMalformedToolCall()
+		}
+		if len(coalesced) == 0 {
+			return false, ""
+		}
+		return writeBuyerSSE(string(coalesced))
+	}
+	flushCoalesced := func() (bool, wsForwardResult) {
+		flushed, err := coalescer.flush()
+		if err != nil {
+			return failMalformedToolCall()
+		}
+		if len(flushed) == 0 {
+			return false, ""
+		}
+		return writeBuyerSSE(string(flushed))
+	}
 	for {
 		select {
 		case <-r.Context().Done():
@@ -3928,6 +3939,18 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 					}
 				default:
 					chunks = nil
+				}
+			}
+			if end.Status == "complete" {
+				if done, result := flushCoalesced(); done {
+					faultFlag := billing.FaultNone
+					if result == wsForwardFailed {
+						if hasStreamFailureAttempt {
+							return result, streamFailureAttempt
+						}
+						faultFlag = billing.FaultBreakerQualifying
+					}
+					return result, progressAttempt("", faultFlag)
 				}
 			}
 			if !committed && end.Status != "complete" && end.Status != "cancelled" {
@@ -4344,11 +4367,9 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 		}
 		return wsForwardFailed, resp.StatusCode, attempt
 	}
-	if state != nil && state.materializeBuyerSSEFromJSON {
-		ct := strings.ToLower(resp.Header.Get("Content-Type"))
-		if !strings.Contains(ct, "text/event-stream") {
-			return s.forwardStreamingJSONAsBuyerSSE(w, r, resp, provider, state, billingAttemptN, markProviderDone)
-		}
+	ct := strings.ToLower(resp.Header.Get("Content-Type"))
+	if chatRequestDeclaresTools(body) && !strings.Contains(ct, "text/event-stream") {
+		return s.forwardStreamingJSONAsBuyerSSE(w, r, resp, provider, state, billingAttemptN, markProviderDone)
 	}
 	if streamingMode != streamingModeIncremental {
 		return s.forwardStreamingBuffered(w, r, requestID, resp, provider, modelScope, streamingMode, streamingBuyer, state, billingAttemptN)
@@ -4376,6 +4397,7 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 	reader := bufio.NewReader(resp.Body)
 	toolFinal := newStreamToolCallFinalValidator()
 	settlementTracker := newSettlementStreamOutputTracker()
+	coalescer := newConcatSafeToolStream()
 	var preCommit bytes.Buffer
 	var lineBuf bytes.Buffer
 	sawCommitWorthyDataLine := false
@@ -4446,8 +4468,8 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 			if state != nil {
 				state.phaseTiming.markProviderFirstByte(phaseTimingNow(s))
 			}
-			if preCommit.Len()+lineBuf.Len() >= maxPreCommitStreamingBytes {
-				s.log.Warn().Int("bytes", preCommit.Len()+lineBuf.Len()).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("streaming provider exceeded pre-commit buffer cap")
+			if preCommit.Len()+lineBuf.Len()+coalescer.heldBytes() >= maxPreCommitStreamingBytes {
+				s.log.Warn().Int("bytes", preCommit.Len()+lineBuf.Len()+coalescer.heldBytes()).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("streaming provider exceeded pre-commit buffer cap")
 				return errPreCommitCapExceeded
 			}
 			lineBuf.WriteByte(b)
@@ -4472,8 +4494,18 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 				terminalSSEErrorCode = code
 				sawCommitWorthyDataLine = true
 			}
+			coalesced, coalesceErr := coalescer.observeLine(line)
+			if coalesceErr != nil {
+				s.log.Warn().Err(coalesceErr).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("streaming provider emitted invalid pre-commit tool_calls stream")
+				return errPreCommitMalformedToolCalls
+			}
+			if len(coalesced) == 0 {
+				lineBuf.Reset()
+				continue
+			}
+			line = coalesced
 			if outputByteCeiling > 0 {
-				if deltaBytes, ok := streamingOutputDeltaBytesFromSSELine(line); ok && deltaBytes > 0 {
+				if deltaBytes := streamingOutputDeltaBytesFromSSEBlock(line); deltaBytes > 0 {
 					projected := contentEmittedBytes + deltaBytes
 					if projected > outputByteCeiling {
 						s.log.Warn().Int64("projected_content_bytes", projected).Int64("hard_byte_ceiling", outputByteCeiling).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("streaming provider exceeded requested max_tokens before commit")
@@ -4482,29 +4514,35 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 					contentEmittedBytes = projected
 				}
 			}
-			status := inspectCommitWorthyDataLine(line)
-			if status == commitLineMalformedToolCalls {
-				s.log.Warn().Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("streaming provider emitted malformed pre-commit tool_calls delta")
-				return errPreCommitMalformedToolCalls
-			}
-			if err := toolFinal.observeLine(line); err != nil {
+			if err := toolFinal.observeBlock(string(line)); err != nil {
 				s.log.Warn().Err(err).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("streaming provider emitted invalid pre-commit tool_calls stream")
 				return errPreCommitMalformedToolCalls
 			}
-			if err := settlementTracker.observeLine(line); err != nil {
+			if err := settlementTracker.observeBlock(line); err != nil {
 				s.log.Warn().Err(err).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("streaming provider emitted malformed settlement data before commit")
 				return errPreCommitMalformedToolCalls
 			}
-			preCommit.Write(line)
-			lineBuf.Reset()
-			if isSSEBlankLine(line) {
-				if sawCommitWorthyDataLine {
-					return nil // commit
+			commitNow := false
+			for _, outLine := range bytes.SplitAfter(line, []byte("\n")) {
+				if len(outLine) == 0 {
+					continue
 				}
-				continue
+				status := inspectCommitWorthyDataLine(outLine)
+				if status == commitLineMalformedToolCalls {
+					s.log.Warn().Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("streaming provider emitted malformed pre-commit tool_calls delta")
+					return errPreCommitMalformedToolCalls
+				}
+				if status == commitLineWorthy {
+					sawCommitWorthyDataLine = true
+				}
+				preCommit.Write(outLine)
+				if isSSEBlankLine(outLine) && sawCommitWorthyDataLine {
+					commitNow = true
+				}
 			}
-			if status == commitLineWorthy {
-				sawCommitWorthyDataLine = true
+			lineBuf.Reset()
+			if commitNow {
+				return nil // commit
 			}
 		}
 	}()
@@ -4580,7 +4618,24 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 			if code := terminalSSEErrorCodeFromLine(line); isSpec019TerminalSSEErrorCode(code) {
 				terminalSSEErrorCode = code
 			}
-			if observeErr := toolFinal.observeLine(line); observeErr != nil {
+			coalesced, coalesceErr := coalescer.observeLine(line)
+			if coalesceErr != nil {
+				s.log.Warn().Err(coalesceErr).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("streaming provider failed tool-call final-close validation")
+				if s.streamingDowngrade != nil {
+					s.streamingDowngrade.recordMalformed(streamingBuyer, provider.ProviderID, s.now())
+				}
+				writeSSEError(w, "Provider emitted malformed tool-call stream", "malformed_tool_call")
+				if flusher != nil {
+					flusher.Flush()
+				}
+				markProviderDone()
+				return wsForwardProviderDisconnectedCommitted, http.StatusOK, progressUnavailableAttempt("Provider emitted malformed tool-call stream", "malformed_tool_call", billing.FaultBreakerQualifying)
+			}
+			if len(coalesced) == 0 {
+				continue
+			}
+			line = coalesced
+			if observeErr := toolFinal.observeBlock(string(line)); observeErr != nil {
 				s.log.Warn().Err(observeErr).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("streaming provider failed tool-call final-close validation")
 				if s.streamingDowngrade != nil {
 					s.streamingDowngrade.recordMalformed(streamingBuyer, provider.ProviderID, s.now())
@@ -4593,7 +4648,7 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 				return wsForwardProviderDisconnectedCommitted, http.StatusOK, progressUnavailableAttempt("Provider emitted malformed tool-call stream", "malformed_tool_call", billing.FaultBreakerQualifying)
 			}
 			if outputByteCeiling > 0 {
-				if deltaBytes, ok := streamingOutputDeltaBytesFromSSELine(line); ok && deltaBytes > 0 {
+				if deltaBytes := streamingOutputDeltaBytesFromSSEBlock(line); deltaBytes > 0 {
 					projected := contentEmittedBytes + deltaBytes
 					if projected > outputByteCeiling {
 						s.log.Warn().Int64("projected_content_bytes", projected).Int64("hard_byte_ceiling", outputByteCeiling).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("streaming provider exceeded requested max_tokens after commit")
@@ -4608,7 +4663,7 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 					contentEmittedBytes = projected
 				}
 			}
-			if err := settlementTracker.observeLine(line); err != nil {
+			if err := settlementTracker.observeBlock(line); err != nil {
 				s.log.Warn().Err(err).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("streaming provider emitted malformed settlement data")
 				if s.streamingDowngrade != nil {
 					s.streamingDowngrade.recordMalformed(streamingBuyer, provider.ProviderID, s.now())
@@ -4634,6 +4689,70 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 			continue
 		}
 		if err == io.EOF {
+			flushed, flushErr := coalescer.flush()
+			if flushErr != nil {
+				s.log.Warn().Err(flushErr).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("streaming provider failed tool-call argument flush")
+				if s.streamingDowngrade != nil {
+					s.streamingDowngrade.recordMalformed(streamingBuyer, provider.ProviderID, s.now())
+				}
+				writeSSEError(w, "Provider emitted malformed tool-call stream", "malformed_tool_call")
+				if flusher != nil {
+					flusher.Flush()
+				}
+				markProviderDone()
+				return wsForwardProviderDisconnectedCommitted, http.StatusOK, progressUnavailableAttempt("Provider emitted malformed tool-call stream", "malformed_tool_call", billing.FaultBreakerQualifying)
+			}
+			if len(flushed) > 0 {
+				if outputByteCeiling > 0 {
+					if deltaBytes := streamingOutputDeltaBytesFromSSEBlock(flushed); deltaBytes > 0 {
+						projected := contentEmittedBytes + deltaBytes
+						if projected > outputByteCeiling {
+							s.log.Warn().Int64("projected_content_bytes", projected).Int64("hard_byte_ceiling", outputByteCeiling).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("streaming provider exceeded requested max_tokens after commit")
+							writeSSEError(w, "Provider stream exceeded requested max_tokens", "stream_output_exceeded", requestID)
+							if flusher != nil {
+								flusher.Flush()
+							}
+							markProviderDone()
+							cancelAttempt()
+							return wsForwardProviderDisconnectedCommitted, http.StatusOK, outputExceededAttempt()
+						}
+						contentEmittedBytes = projected
+					}
+				}
+				if observeErr := toolFinal.observeBlock(string(flushed)); observeErr != nil {
+					s.log.Warn().Err(observeErr).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("streaming provider failed tool-call final-close validation")
+					if s.streamingDowngrade != nil {
+						s.streamingDowngrade.recordMalformed(streamingBuyer, provider.ProviderID, s.now())
+					}
+					writeSSEError(w, "Provider emitted malformed tool-call stream", "malformed_tool_call")
+					if flusher != nil {
+						flusher.Flush()
+					}
+					markProviderDone()
+					return wsForwardProviderDisconnectedCommitted, http.StatusOK, progressUnavailableAttempt("Provider emitted malformed tool-call stream", "malformed_tool_call", billing.FaultBreakerQualifying)
+				}
+				if settleErr := settlementTracker.observeBlock(flushed); settleErr != nil {
+					s.log.Warn().Err(settleErr).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("streaming provider emitted malformed settlement data")
+					if s.streamingDowngrade != nil {
+						s.streamingDowngrade.recordMalformed(streamingBuyer, provider.ProviderID, s.now())
+					}
+					writeSSEError(w, "Provider emitted malformed settlement stream", "malformed_settlement_stream")
+					if flusher != nil {
+						flusher.Flush()
+					}
+					markProviderDone()
+					return wsForwardProviderDisconnectedCommitted, http.StatusOK, progressUnavailableAttempt("Provider emitted malformed settlement stream", "malformed_settlement_stream", billing.FaultBreakerQualifying)
+				}
+				if _, writeErr := w.Write(flushed); writeErr != nil {
+					s.log.Warn().Err(writeErr).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("buyer streaming write failed")
+					markProviderDone()
+					return wsForwardCancelled, 0, progressAttempt("Buyer disconnected during streaming", billing.FaultNone)
+				}
+				bytesEmitted += len(flushed)
+				if flusher != nil {
+					flusher.Flush()
+				}
+			}
 			markProviderDone()
 			receiptValue := normalizeReceiptHeaderValue(resp.Trailer.Get("X-MacProvider-Receipt"))
 			if terminalSSEErrorCode != "" {
@@ -5007,7 +5126,7 @@ func collectStreamingToolCalls(raw []byte) ([]bufferedToolCall, error) {
 					call.Name = delta.Function.Name
 				}
 				if delta.Function.Arguments != nil {
-					call.Arguments += *delta.Function.Arguments
+					call.Arguments = coalesceToolArguments(call.Arguments, *delta.Function.Arguments)
 				}
 			}
 		}
@@ -5372,7 +5491,7 @@ func (v *streamToolCallFinalValidator) observeToolCall(raw json.RawMessage) erro
 	if fn.Arguments == nil {
 		return nil
 	}
-	next := v.arguments[index] + *fn.Arguments
+	next := coalesceToolArguments(v.arguments[index], *fn.Arguments)
 	nextBytes := len([]byte(next))
 	prevBytes := len([]byte(v.arguments[index]))
 	if nextBytes > maxToolCallArgumentsBytes {
@@ -8541,6 +8660,21 @@ func streamingOutputDeltaBytesFromSSELine(line []byte) (int64, bool) {
 		return 0, true
 	}
 	return streamingCompletionDeltaBytes(data)
+}
+
+func streamingOutputDeltaBytesFromSSEBlock(block []byte) int64 {
+	var total int64
+	for _, line := range bytes.SplitAfter(block, []byte("\n")) {
+		if len(bytes.TrimSpace(line)) == 0 {
+			continue
+		}
+		deltaBytes, ok := streamingOutputDeltaBytesFromSSELine(line)
+		if !ok {
+			continue
+		}
+		total += deltaBytes
+	}
+	return total
 }
 
 func streamingCompletionDeltaBytes(data string) (int64, bool) {

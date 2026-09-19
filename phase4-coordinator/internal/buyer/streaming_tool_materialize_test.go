@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -53,7 +54,7 @@ func TestChatCompletionJSONToSSEConcatenatesCompleteToolArguments(t *testing.T) 
 	}
 }
 
-func TestStreamingToolsWSMaterializesCompleteArguments(t *testing.T) {
+func TestStreamingToolsWSCoalescesFleetEmptyObject(t *testing.T) {
 	registry := pool.NewRegistry(nil)
 	registerWSStreamingTestProvider(registry, "provider-x", "session-1", "model-a")
 
@@ -69,16 +70,10 @@ func TestStreamingToolsWSMaterializesCompleteArguments(t *testing.T) {
 				t.Fatalf("provider body json: %v", err)
 			}
 			bodyStream = req["stream"]
-			chunks := make(chan providerws.InferenceResponseChunk, 1)
+			chunks := make(chan providerws.InferenceResponseChunk)
 			done := make(chan providerws.InferenceResponseEnd, 1)
 			errs := make(chan error, 1)
-			chunks <- providerws.InferenceResponseChunk{
-				Type:      "inference_response_chunk",
-				RequestID: requestID,
-				Seq:       0,
-				Data:      providerCompleteToolJSON,
-			}
-			done <- providerws.InferenceResponseEnd{Type: "inference_response_end", RequestID: requestID, Status: "complete", ChunksSent: 1}
+			go sendFleetStreamingToolSSE(chunks, done, requestID)
 			return &providerws.RelayStream{RequestID: requestID, Chunks: chunks, Done: done, Errors: errs}, nil
 		}, time.Second),
 	)
@@ -87,11 +82,11 @@ func TestStreamingToolsWSMaterializesCompleteArguments(t *testing.T) {
 	if !relayCalled {
 		t.Fatal("expected provider relay to be invoked")
 	}
-	if providerStream {
-		t.Fatal("provider envelope stream must be false so current CLI uses the non-stream parser")
+	if !providerStream {
+		t.Fatal("provider envelope stream must stay true so the Mac can flush role/name-open")
 	}
-	if bodyStream != false {
-		t.Fatalf("provider body stream = %v, want false", bodyStream)
+	if bodyStream != true {
+		t.Fatalf("provider body stream = %v, want true", bodyStream)
 	}
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d body=%s", rr.Code, rr.Body.String())
@@ -99,9 +94,15 @@ func TestStreamingToolsWSMaterializesCompleteArguments(t *testing.T) {
 	if !strings.Contains(rr.Header().Get("Content-Type"), "text/event-stream") {
 		t.Fatalf("content-type = %q, want SSE", rr.Header().Get("Content-Type"))
 	}
+	if !strings.Contains(rr.Body.String(), `"name":"bash"`) {
+		t.Fatalf("buyer SSE missing name-open: %s", rr.Body.String())
+	}
 	got := concatSSEToolArguments(t, rr.Body.Bytes())
 	if got != `{"command":"echo hello"}` {
 		t.Fatalf("buyer concatenated arguments = %q body=%s", got, rr.Body.String())
+	}
+	if strings.Contains(got, "{}{") {
+		t.Fatalf("Pi concat glued empty object onto arguments: %s", rr.Body.String())
 	}
 }
 
@@ -136,17 +137,22 @@ func TestStreamingWithoutToolsKeepsProviderStream(t *testing.T) {
 	}
 }
 
-func TestStreamingToolsHTTPMaterializesCompleteArguments(t *testing.T) {
+func TestStreamingToolsHTTPCoalescesFleetEmptyObject(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req map[string]any
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Fatalf("upstream json: %v", err)
 		}
-		if req["stream"] != false {
-			t.Fatalf("upstream stream = %v, want false", req["stream"])
+		if req["stream"] != true {
+			t.Fatalf("upstream stream = %v, want true", req["stream"])
 		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(providerCompleteToolJSON))
+		w.Header().Set("Content-Type", "text/event-stream")
+		for _, data := range fleetStreamingToolSSE("req-http") {
+			_, _ = w.Write([]byte(data))
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+		}
 	}))
 	defer upstream.Close()
 
@@ -160,6 +166,53 @@ func TestStreamingToolsHTTPMaterializesCompleteArguments(t *testing.T) {
 	}
 	if !strings.Contains(rr.Header().Get("Content-Type"), "text/event-stream") {
 		t.Fatalf("content-type = %q, want SSE", rr.Header().Get("Content-Type"))
+	}
+	got := concatSSEToolArguments(t, rr.Body.Bytes())
+	if got != `{"command":"echo hello"}` {
+		t.Fatalf("buyer concatenated arguments = %q body=%s", got, rr.Body.String())
+	}
+}
+
+func TestStreamingToolsBufferedKillSwitchCoalescesFleetEmptyObject(t *testing.T) {
+	t.Setenv("COORDINATOR_STREAMING_FORCE_BUFFERED", "1")
+	registry := pool.NewRegistry(nil)
+	registerWSStreamingTestProvider(registry, "provider-x", "session-1", "model-a")
+	server := NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0),
+		WithRelay(func(ctx context.Context, provider pool.Provider, requestID string, body []byte, stream bool) (*providerws.RelayStream, error) {
+			chunks := make(chan providerws.InferenceResponseChunk)
+			done := make(chan providerws.InferenceResponseEnd, 1)
+			errs := make(chan error, 1)
+			go sendFleetStreamingToolSSE(chunks, done, requestID)
+			return &providerws.RelayStream{RequestID: requestID, Chunks: chunks, Done: done, Errors: errs}, nil
+		}, time.Second),
+	)
+	rr := postRawChat(t, server, []byte(streamingToolsChatBody))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if rr.Header().Get(streamingModeHeader) != streamingModeBufferedKillSwitch {
+		t.Fatalf("streaming mode = %q, want %s", rr.Header().Get(streamingModeHeader), streamingModeBufferedKillSwitch)
+	}
+	got := concatSSEToolArguments(t, rr.Body.Bytes())
+	if got != `{"command":"echo hello"}` {
+		t.Fatalf("buffered concat arguments=%q body=%s", got, rr.Body.String())
+	}
+}
+
+func TestStreamingToolsHTTPJSONFallbackStillMaterializes(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(providerCompleteToolJSON))
+	}))
+	defer upstream.Close()
+
+	registry := pool.NewRegistry([]config.ProviderConfig{{ProviderID: "provider-x", EndpointURL: upstream.URL}})
+	registerStreamingTestProvider(registry, "provider-x", "session-1", "model-a", upstream.URL)
+	server := NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0))
+
+	rr := postRawChat(t, server, []byte(streamingToolsChatBody))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rr.Code, rr.Body.String())
 	}
 	got := concatSSEToolArguments(t, rr.Body.Bytes())
 	if got != `{"command":"echo hello"}` {
@@ -213,7 +266,7 @@ func TestEmptyObjectIsCompleteJSONForPiClient(t *testing.T) {
 	}
 }
 
-func TestPiShapedStreamingToolRequestIsAdmittedAndMaterializesArgs(t *testing.T) {
+func TestPiShapedStreamingToolRequestIsAdmittedAndCoalescesArgs(t *testing.T) {
 	_, status, code, msg := validateChatRequest([]byte(piShapedStreamingToolsBody))
 	if status != 0 {
 		t.Fatalf("Pi-shaped request rejected status=%d code=%s msg=%s", status, code, msg)
@@ -229,8 +282,8 @@ func TestPiShapedStreamingToolRequestIsAdmittedAndMaterializesArgs(t *testing.T)
 			if err := json.Unmarshal(body, &req); err != nil {
 				t.Fatalf("provider body json: %v", err)
 			}
-			if req["stream"] != false {
-				t.Fatalf("provider body stream=%v want false", req["stream"])
+			if req["stream"] != true {
+				t.Fatalf("provider body stream=%v want true", req["stream"])
 			}
 			if req["tool_choice"] != "auto" {
 				t.Fatalf("provider tool_choice=%v want auto (required is rewritten)", req["tool_choice"])
@@ -241,11 +294,10 @@ func TestPiShapedStreamingToolRequestIsAdmittedAndMaterializesArgs(t *testing.T)
 			if _, ok := req["tools"]; !ok {
 				t.Fatal("tools must be forwarded")
 			}
-			chunks := make(chan providerws.InferenceResponseChunk, 1)
+			chunks := make(chan providerws.InferenceResponseChunk)
 			done := make(chan providerws.InferenceResponseEnd, 1)
 			errs := make(chan error, 1)
-			chunks <- providerws.InferenceResponseChunk{Type: "inference_response_chunk", RequestID: requestID, Seq: 0, Data: providerCompleteToolJSON}
-			done <- providerws.InferenceResponseEnd{Type: "inference_response_end", RequestID: requestID, Status: "complete", ChunksSent: 1}
+			go sendFleetStreamingToolSSE(chunks, done, requestID)
 			return &providerws.RelayStream{RequestID: requestID, Chunks: chunks, Done: done, Errors: errs}, nil
 		}, time.Second),
 	)
@@ -254,8 +306,8 @@ func TestPiShapedStreamingToolRequestIsAdmittedAndMaterializesArgs(t *testing.T)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
 	}
-	if providerStream {
-		t.Fatal("Pi always streams; coordinator must still ask the provider for non-stream JSON")
+	if !providerStream {
+		t.Fatal("Pi always streams; coordinator must keep provider stream=true")
 	}
 	got := concatSSEToolArguments(t, rr.Body.Bytes())
 	if got != `{"command":"echo hello"}` {
@@ -310,17 +362,28 @@ func TestPiMultiTurnToolResultReplay(t *testing.T) {
 
 	registry := pool.NewRegistry(nil)
 	registerWSStreamingTestProvider(registry, "provider-x", "session-1", "model-a")
-	finalJSON := `{"id":"chatcmpl-turn2","object":"chat.completion","created":1716768000,"model":"model-a","choices":[{"index":0,"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}],"usage":{"prompt_tokens":40,"completion_tokens":1,"total_tokens":41}}`
 	server := NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0),
 		WithRelay(func(ctx context.Context, provider pool.Provider, requestID string, body []byte, stream bool) (*providerws.RelayStream, error) {
-			if stream {
-				t.Fatal("turn-2 still declares tools; provider stream must be false")
+			if !stream {
+				t.Fatal("turn-2 still declares tools; provider stream must stay true")
 			}
-			chunks := make(chan providerws.InferenceResponseChunk, 1)
+			chunks := make(chan providerws.InferenceResponseChunk, 2)
 			done := make(chan providerws.InferenceResponseEnd, 1)
 			errs := make(chan error, 1)
-			chunks <- providerws.InferenceResponseChunk{Type: "inference_response_chunk", RequestID: requestID, Seq: 0, Data: finalJSON}
-			done <- providerws.InferenceResponseEnd{Type: "inference_response_end", RequestID: requestID, Status: "complete", ChunksSent: 1}
+			chunks <- providerws.InferenceResponseChunk{
+				Type:      "inference_response_chunk",
+				RequestID: requestID,
+				Seq:       0,
+				Data:      `data: {"id":"chatcmpl-turn2","choices":[{"index":0,"delta":{"role":"assistant","content":"hello"},"finish_reason":null}]}` + "\n\n",
+			}
+			chunks <- providerws.InferenceResponseChunk{
+				Type:      "inference_response_chunk",
+				RequestID: requestID,
+				Seq:       1,
+				Data:      `data: {"id":"chatcmpl-turn2","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}` + "\n\ndata: [DONE]\n\n",
+			}
+			close(chunks)
+			done <- providerws.InferenceResponseEnd{Type: "inference_response_end", RequestID: requestID, Status: "complete", ChunksSent: 2}
 			return &providerws.RelayStream{RequestID: requestID, Chunks: chunks, Done: done, Errors: errs}, nil
 		}, time.Second),
 	)
@@ -333,6 +396,111 @@ func TestPiMultiTurnToolResultReplay(t *testing.T) {
 	}
 	if !strings.Contains(rr.Body.String(), `"content":"hello"`) {
 		t.Fatalf("turn-2 missing assistant content: %s", rr.Body.String())
+	}
+}
+
+func TestStreamingToolsWSFlushesNameOpenBeforeFinish(t *testing.T) {
+	registry := pool.NewRegistry(nil)
+	registerWSStreamingTestProvider(registry, "provider-x", "session-1", "model-a")
+
+	releaseRest := make(chan struct{})
+	server := NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0),
+		WithRelay(func(ctx context.Context, provider pool.Provider, requestID string, body []byte, stream bool) (*providerws.RelayStream, error) {
+			chunks := make(chan providerws.InferenceResponseChunk, 8)
+			done := make(chan providerws.InferenceResponseEnd, 1)
+			errs := make(chan error, 1)
+			chunks <- providerws.InferenceResponseChunk{
+				Type: "inference_response_chunk", RequestID: requestID, Seq: 0,
+				Data: `data: {"id":"chatcmpl-test","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}` + "\n\n",
+			}
+			chunks <- providerws.InferenceResponseChunk{
+				Type: "inference_response_chunk", RequestID: requestID, Seq: 1,
+				Data: `data: {"id":"chatcmpl-test","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_0123456789abcdef","type":"function","function":{"name":"bash","arguments":"{}"}}]},"finish_reason":null}]}` + "\n\n",
+			}
+			go func() {
+				<-releaseRest
+				chunks <- providerws.InferenceResponseChunk{
+					Type: "inference_response_chunk", RequestID: requestID, Seq: 2,
+					Data: `data: {"id":"chatcmpl-test","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"command\":\"echo hello\"}"}}]},"finish_reason":null}]}` + "\n\n",
+				}
+				chunks <- providerws.InferenceResponseChunk{
+					Type: "inference_response_chunk", RequestID: requestID, Seq: 3,
+					Data: `data: {"id":"chatcmpl-test","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}` + "\n\ndata: [DONE]\n\n",
+				}
+				close(chunks)
+				done <- providerws.InferenceResponseEnd{Type: "inference_response_end", RequestID: requestID, Status: "complete", ChunksSent: 4}
+			}()
+			return &providerws.RelayStream{RequestID: requestID, Chunks: chunks, Done: done, Errors: errs}, nil
+		}, time.Second),
+	)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader([]byte(streamingToolsChatBody)))
+	firstWrite := make(chan struct{})
+	w := &firstWriteRecorder{ResponseRecorder: httptest.NewRecorder(), firstWrite: firstWrite}
+	done := make(chan struct{})
+	go func() {
+		server.Handler().ServeHTTP(w, req)
+		close(done)
+	}()
+	select {
+	case <-firstWrite:
+	case <-time.After(2 * time.Second):
+		t.Fatal("buyer received no SSE bytes until the Mac finished generating")
+	}
+	close(releaseRest)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("request did not complete after remaining chunks")
+	}
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"name":"bash"`) {
+		t.Fatalf("missing name-open: %s", w.Body.String())
+	}
+	got := concatSSEToolArguments(t, w.Body.Bytes())
+	if got != `{"command":"echo hello"}` {
+		t.Fatalf("concatenated arguments=%q body=%s", got, w.Body.String())
+	}
+}
+
+type firstWriteRecorder struct {
+	*httptest.ResponseRecorder
+	firstWrite chan struct{}
+	once       sync.Once
+}
+
+func (w *firstWriteRecorder) Write(p []byte) (int, error) {
+	n, err := w.ResponseRecorder.Write(p)
+	if n > 0 {
+		w.once.Do(func() { close(w.firstWrite) })
+	}
+	return n, err
+}
+
+func (w *firstWriteRecorder) Flush() {}
+
+func sendFleetStreamingToolSSE(chunks chan providerws.InferenceResponseChunk, done chan providerws.InferenceResponseEnd, requestID string) {
+	for i, data := range fleetStreamingToolSSE(requestID) {
+		chunks <- providerws.InferenceResponseChunk{
+			Type:      "inference_response_chunk",
+			RequestID: requestID,
+			Seq:       i,
+			Data:      data,
+		}
+	}
+	done <- providerws.InferenceResponseEnd{Type: "inference_response_end", RequestID: requestID, Status: "complete", ChunksSent: 5}
+}
+
+func fleetStreamingToolSSE(requestID string) []string {
+	_ = requestID
+	return []string{
+		`data: {"id":"chatcmpl-test","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}` + "\n\n",
+		`data: {"id":"chatcmpl-test","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_0123456789abcdef","type":"function","function":{"name":"bash","arguments":"{}"}}]},"finish_reason":null}]}` + "\n\n",
+		`data: {"id":"chatcmpl-test","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"command\":\"echo hello\"}"}}]},"finish_reason":null}]}` + "\n\n",
+		`data: {"id":"chatcmpl-test","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":12,"completion_tokens":8,"total_tokens":20}}` + "\n\n",
+		"data: [DONE]\n\n",
 	}
 }
 
