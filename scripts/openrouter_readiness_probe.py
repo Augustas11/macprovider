@@ -46,10 +46,25 @@ FILING_MAX_TOKENS_PER_MINUTE_PER_SLOT = 120_000
 GATEWAY_KEEPALIVE_TICK_SECONDS = 15
 BENCHMARK_BATCH_TIMEOUT_SECONDS = 120
 LOCAL_AUTH_HOSTS = {"localhost", "127.0.0.1", "::1"}
+# Expected `openrouter.slug` for each served catalog model, keyed by the served
+# (paid) model id the gateway publishes in /v1/openrouter/models. These are the
+# priced-v1 catalog rows (published-2026-09-19-openrouter-priced-v1), whose
+# pricing/identity come from the OpenRouter engine. Slugs are org-prefixed to
+# match the gateway convention (cf. the shipped "qwen/qwen3-8b"). This pin only
+# fires for a model that is actually present in the models document, so listing
+# a model here is inert until the gateway's openRouterListings exposes it; when a
+# family is added there, its OpenRouterSlug must equal the value below.
 EXPECTED_OPENROUTER_SLUGS = {
     "mlx-community/Llama-3.2-3B-Instruct-4bit": "meta-llama/llama-3.2-3b-instruct",
     "mlx-community/Llama-3.2-3B-Instruct-4bit-free": "meta-llama/llama-3.2-3b-instruct:free",
+    "mlx-community/Meta-Llama-3.1-8B-Instruct-4bit": "meta-llama/llama-3.1-8b-instruct",
     "mlx-community/Qwen3-8B-4bit": "qwen/qwen3-8b",
+    "mlx-community/Qwen3-32B-4bit": "qwen/qwen3-32b",
+    "mlx-community/Qwen2.5-Coder-32B-Instruct-4bit": "qwen/qwen2.5-coder-32b-instruct",
+    "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit": "qwen/qwen3-coder-30b-a3b-instruct",
+    "mlx-community/gemma-4-26b-a4b-it-4bit": "google/gemma-4-26b-a4b-it",
+    "mlx-community/gpt-oss-20b-MXFP4-Q8": "openai/gpt-oss-20b",
+    "mlx-community/NVIDIA-Nemotron-3-Nano-30B-A3B-4bit": "nvidia/nemotron-3-nano-30b-a3b",
 }
 ROOT_FORBIDDEN_MODEL_KEYS = {
     "architecture",
