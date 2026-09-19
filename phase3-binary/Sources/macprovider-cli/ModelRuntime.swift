@@ -1367,7 +1367,12 @@ actor ModelRuntime: ModelRuntimeServing {
               let modelSHA256 = Self.nonEmpty(modelSHA256),
               PagedKVAttachGate.recognizedModelFamilies.contains(modelCapabilities.modelFamily)
         else {
-            PagedKVRuntimeDiagnostics.log("measure nil: preconditions (enabled=\(config.effectiveEnabled) family=\(modelCapabilities.modelFamily) recognized=\(PagedKVAttachGate.recognizedModelFamilies.contains(modelCapabilities.modelFamily)) modelID=\(Self.nonEmpty(modelID) != nil) modelSHA=\(Self.nonEmpty(modelSHA256) != nil))")
+            // Stay silent in the normal disabled case (the fleet default) so this feature
+            // is invisible when off; only name the failing precondition once the operator
+            // has actually opted in, where knowing WHICH precondition blocked is useful.
+            if config.effectiveEnabled {
+                PagedKVRuntimeDiagnostics.log("measure nil: preconditions (family=\(modelCapabilities.modelFamily) recognized=\(PagedKVAttachGate.recognizedModelFamilies.contains(modelCapabilities.modelFamily)) modelID=\(Self.nonEmpty(modelID) != nil) modelSHA=\(Self.nonEmpty(modelSHA256) != nil))")
+            }
             return nil
         }
         guard let metallibPath = environment.metallibCandidatePaths().first(where: environment.fileExists),
@@ -1414,33 +1419,34 @@ actor ModelRuntime: ModelRuntimeServing {
         let parityLabel = hexString(SHA256.hash(data: Data(
             "\(metallibSHA256)|\(kernelIdentifier)|\(modelSHA256)|\(tokenizerSHA256 ?? "")|\(chatTemplateSHA256 ?? "")|\(hardwareClass)|\(modelID)|blk\(config.blockSizeTokens)|max\(config.maxPhysicalBlocks)|sdpa-parity-v1".utf8
         )))
-        // MoE models attach only when a batched shared-forward step is proven to keep
-        // rows isolated. Validate the FULL probe result shape — not just `proven` — so an
-        // inconsistent result (e.g. proven:true but rowsDecoded != 2, a row failure, a
-        // cross-row divergence, or a non-distinguishing challenge) can never open attach.
-        // `challengeDistinguishing` guarantees the two probe rows have different serial
-        // references, so a shared forward that swapped/leaked row logits is detectable.
-        let moeDispatchProven: Bool
-        if modelCapabilities.requiresMoEDispatch {
-            guard let moe = moeProbe,
-                  moe.proven,
-                  moe.challengeDistinguishing,
-                  moe.rowsDecodedInSharedForward == 2,
-                  moe.rowFailures == 0,
-                  moe.crossRowDivergences == 0
-            else {
-                if let m = moeProbe {
-                    PagedKVRuntimeDiagnostics.log(
-                        "measure nil: moe gate (proven=\(m.proven) challengeDistinguishing=\(m.challengeDistinguishing) rowsDecoded=\(m.rowsDecodedInSharedForward) rowFailures=\(m.rowFailures) crossRowDivergences=\(m.crossRowDivergences))")
-                } else {
-                    PagedKVRuntimeDiagnostics.log("measure nil: moe probe result nil (model requires MoE dispatch)")
-                }
-                return nil
+        // EVERY paging-eligible model attaches only when a batched shared-forward step is
+        // proven to keep rows isolated — the SPEC-038 FR-CB6 determinism/isolation
+        // invariant that the serve-time batched `decode(rows:)` path relies on for dense
+        // and MoE models alike (the cross-row `makeMask` runs regardless of family).
+        // Validate the FULL probe result shape — not just `proven` — so an inconsistent
+        // result (proven:true but rowsDecoded != 2, a row failure, a cross-row divergence,
+        // or a non-distinguishing challenge) can never open attach. `challengeDistinguishing`
+        // guarantees the two probe rows have different serial references, so a shared
+        // forward that swapped/leaked row logits is detectable.
+        guard let batched = moeProbe,
+              batched.proven,
+              batched.challengeDistinguishing,
+              batched.rowsDecodedInSharedForward == 2,
+              batched.rowFailures == 0,
+              batched.crossRowDivergences == 0
+        else {
+            if let m = moeProbe {
+                PagedKVRuntimeDiagnostics.log(
+                    "measure nil: batched-isolation gate (proven=\(m.proven) challengeDistinguishing=\(m.challengeDistinguishing) rowsDecoded=\(m.rowsDecodedInSharedForward) rowFailures=\(m.rowFailures) crossRowDivergences=\(m.crossRowDivergences))")
+            } else {
+                PagedKVRuntimeDiagnostics.log("measure nil: batched-isolation probe result nil")
             }
-            moeDispatchProven = true
-        } else {
-            moeDispatchProven = false
+            return nil
         }
+        // `moeDispatchProven` stays MoE-specific: it feeds the descriptor's
+        // `supportsMoEDispatch` and the attach gate's `requiresMoEDispatch` check, so a
+        // dense model must NOT report it true even though it passed the same probe.
+        let moeDispatchProven = modelCapabilities.requiresMoEDispatch
         let poolEpoch = 1
         guard let maxResidentTokens = PagedKVRuntimeCapacityProof.measuredMaxResidentTokens(
             config: config,
@@ -1566,40 +1572,40 @@ actor ModelRuntime: ModelRuntimeServing {
             promptTokens,
             32
         )
-        var moeProbe: PagedKVRuntimeMoEProbeResult?
-        if modelCapabilities.requiresMoEDispatch {
-            let layerCount = await container.perform { context in
-                context.model.newCache(parameters: nil).count
-            }
-            let promptA = await container.perform { context in
-                context.tokenizer.encode(text: Self.pagedKVRuntimeMoEProbePromptA, addSpecialTokens: true)
-            }
-            let promptB = await container.perform { context in
-                context.tokenizer.encode(text: Self.pagedKVRuntimeMoEProbePromptB, addSpecialTokens: true)
-            }
-            moeProbe = await pagedKVRuntimeProber.moe(
-                container,
-                pagedKVConfig.blockSizeTokens,
-                pagedKVConfig.maxPhysicalBlocks,
-                1,
-                layerCount,
-                promptA,
-                promptB
-            )
+        // The batched shared-forward isolation probe exercises the cross-row attention
+        // mask (`PagedKVBatchLayerCache.makeMask`) and per-row decode isolation — the
+        // SPEC-038 FR-CB6 determinism/isolation invariant — which the serve-time batched
+        // `decode(rows:)` path uses for EVERY paging-eligible model, dense or MoE. Run it
+        // for all recognized families (not only `requiresMoEDispatch`) so a dense model
+        // cannot attach on the single-row parity probe alone and then serve a batched path
+        // that was never proven. For MoE it additionally proves expert dispatch stays
+        // per-row.
+        let layerCount = await container.perform { context in
+            context.model.newCache(parameters: nil).count
         }
+        let promptA = await container.perform { context in
+            context.tokenizer.encode(text: Self.pagedKVRuntimeMoEProbePromptA, addSpecialTokens: true)
+        }
+        let promptB = await container.perform { context in
+            context.tokenizer.encode(text: Self.pagedKVRuntimeMoEProbePromptB, addSpecialTokens: true)
+        }
+        let moeProbe = await pagedKVRuntimeProber.moe(
+            container,
+            pagedKVConfig.blockSizeTokens,
+            pagedKVConfig.maxPhysicalBlocks,
+            1,
+            layerCount,
+            promptA,
+            promptB
+        )
         let p = parityProbe
         PagedKVRuntimeDiagnostics.log(
             "parity model=\(modelID) established=\(p.established) nLayers=\(p.nLayers) nNew=\(p.nNew) gatherKernelCalls=\(p.gatherKernelCalls) expectCalls=\(p.nLayers * p.nNew * 2) maxLogicalBlocks=\(p.maxLogicalBlocks) nonIdentityPermutation=\(p.nonIdentityPermutation)"
         )
-        if modelCapabilities.requiresMoEDispatch {
-            if let m = moeProbe {
-                PagedKVRuntimeDiagnostics.log(
-                    "moe model=\(modelID) proven=\(m.proven) rowsDecoded=\(m.rowsDecodedInSharedForward) rowFailures=\(m.rowFailures) crossRowDivergences=\(m.crossRowDivergences) challengeDistinguishing=\(m.challengeDistinguishing)"
-                )
-            } else {
-                PagedKVRuntimeDiagnostics.log("moe model=\(modelID) result=nil (probe not run or returned nil)")
-            }
-        }
+        let m = moeProbe
+        PagedKVRuntimeDiagnostics.log(
+            "batched-isolation model=\(modelID) requiresMoE=\(modelCapabilities.requiresMoEDispatch) proven=\(m.proven) rowsDecoded=\(m.rowsDecodedInSharedForward) rowFailures=\(m.rowFailures) crossRowDivergences=\(m.crossRowDivergences) challengeDistinguishing=\(m.challengeDistinguishing)"
+        )
         return (parityProbe, moeProbe)
     }
 

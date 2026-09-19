@@ -18,6 +18,10 @@ enum PagedKVRuntimeDiagnostics {
     static let tag = "[paged-kv]"
 
     static func log(_ message: @autoclosure () -> String) {
-        FileHandle.standardError.write(Data("\(tag) \(message())\n".utf8))
+        // `write(contentsOf:)` throws (recoverably) on I/O failure such as EPIPE when
+        // stderr is closed; the deprecated `write(_:)` raises an uncatchable ObjC
+        // exception that would terminate the provider. A dropped diagnostic line must
+        // never crash serving, so swallow the error.
+        try? FileHandle.standardError.write(contentsOf: Data("\(tag) \(message())\n".utf8))
     }
 }

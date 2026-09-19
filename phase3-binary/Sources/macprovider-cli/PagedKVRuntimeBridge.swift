@@ -814,6 +814,17 @@ private final class PagedKVBatchLayerCache: KVCache, @unchecked Sendable {
         // Equal-length rows have no cross-row padding post-update, so a single query
         // token correctly attends every key (including itself) with no mask.
         if n == 1, Set(preUpdateOffsets).count <= 1 { return .none }
+        // Fail-safe: the single shared causal `offset` (max) below is only correct when
+        // every row advances by the same `n` from a comparable base. Today `decode(rows:)`
+        // — the sole batched caller — is always n==1, so this is unreachable; a future
+        // n>1 batched caller with unequal per-row offsets would need per-row query offsets
+        // this single-offset mask cannot express, and would silently miscompute. Trap in
+        // debug/CI (compiled out in release) so such a caller is caught at development time.
+        assert(
+            n == 1 || rowCaches.count == 1 || Set(preUpdateOffsets).count == 1,
+            "PagedKVBatchLayerCache.makeMask: unsupported batched multi-token shape "
+                + "(n=\(n), rows=\(rowCaches.count), distinctOffsets=\(Set(preUpdateOffsets).count))"
+        )
         // `createCausalMask` masks key position j unless `j < lengths[b]`. `lengths[b]`
         // must therefore be the count of VALID keys row b holds AFTER this forward's
         // update (`offset_b + n`), so each row's own current token(s) stay attendable

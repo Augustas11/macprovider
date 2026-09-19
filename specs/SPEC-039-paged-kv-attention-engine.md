@@ -359,8 +359,9 @@ revision:
   pool exhaustion at preflight (FR-PKV2);
 - `paged_fallback_kernel` — Metal kernel registration or dispatch failure
   (FR-PKV3);
-- `paged_fallback_metallib` — `default.metallib` missing, version-mismatched,
-  or undiscoverable (FR-PKV8);
+- `paged_fallback_metallib` — the packaged MLX metallib (`mlx.metallib` or
+  `mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib`) missing,
+  version-mismatched, or undiscoverable (FR-PKV8);
 - `paged_fallback_parity` — a required parity gate is not established for the
   selected model/cache class (FR-PKV4);
 - `paged_fallback_identity` — a required served-model/cache compatibility
@@ -372,13 +373,19 @@ revision:
 
 ### FR-PKV8 — metallib packaging invariant (SPEC-039-R008)
 
-The provider build and release path MUST package the MLX `default.metallib`
-resource required by the pinned MLX stack deliberately. A plain `swift build`
-artifact MUST NOT be assumed to have regenerated or bundled that resource.
+The provider build and release path MUST package the MLX Metal library
+required by the pinned MLX stack deliberately. The release ships it as
+`mlx.metallib` (adjacent to the CLI binary, or under `Contents/MacOS/` in the
+Malibu.app bundle) together with the mlx-swift resource bundle's
+`mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib` — the names the
+release-artifact checker accepts (`scripts/check-tier2-provider-artifact.sh`).
+A plain `swift build` artifact MUST NOT be assumed to have regenerated or
+bundled that resource, and the runtime metallib gate MUST probe those shipped
+names (not only the bare `default.metallib`).
 
 The acceptance suite MUST include a packaging check that exercises a
 Metal-backed MLX operation in the packaged provider artifact, not only in an
-Xcode or local development build. If `default.metallib` is absent,
+Xcode or local development build. If the packaged metallib is absent,
 version-mismatched, or not discoverable at runtime, paged mode MUST fail
 closed before serving in paged mode.
 
