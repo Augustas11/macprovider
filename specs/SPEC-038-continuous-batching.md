@@ -1,6 +1,6 @@
 # SPEC-038 — Continuous batching for concurrent provider inference
 
-Version: v0.2
+Version: v0.2.1
 Status: draft (normative design; no IMPL in this SPEC - implementation is a separate PR behind a disabled-by-default flag)
 Owner: provider runtime / inference scheduler
 Decision source: `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md` (original memo, commit `8d80f6c4`), `docs/research/RESEARCH_232_ADDENDUM_PAGED_REDECISION_2026-07-29.md`, `docs/research/SPIKE_PAGED_ATTN_PHASE0_RESULT_2026-07-29.md` (commit `e5ded571`), `docs/research/SPIKE_PAGED_ATTN_PHASE2_RESULT_2026-07-29.md` (commit `acc30b1e`), and `docs/research/SPIKE_PAGED_ATTN_PHASE3_MOE_RESULT_2026-07-29.md` (commit `da21af53`).
@@ -285,6 +285,21 @@ non-receipt diagnostic telemetry (FR-CB14) and MUST NOT alter buyer-visible
 token accounting. Deterministic (temperature-0) output for a request under
 batching MUST match its serial-path output within the accepted numerical
 tolerance.
+
+The accepted numerical tolerance recognizes that a shared batched forward and
+a serial forward differ only in floating-point ACCUMULATION ORDER (batched
+matmuls and MoE expert routing versus a single row), which can flip greedy
+argmax between two near-tied tokens of the SAME request's own distribution. For
+the load-time batched isolation self-test (the MoE input-isolation probe), a
+row's greedy token is therefore conformant when it is EITHER the row's own
+serial-path argmax, OR the row's own serial-path runner-up whose logit is within
+a fixed small tolerance of that row's serial argmax logit — a genuine
+own-distribution numerical tie. Any other token is a divergence; in particular a
+token equal to ANOTHER row's serial argmax MUST always be treated as a
+divergence (a leak), never as a tie. This tolerance applies ONLY to the
+batched-versus-serial argmax comparison; it does NOT relax the SPEC-039 single-
+row paged-gather parity gate, which shares the serial computation's accumulation
+order and so remains exact.
 
 ### FR-CB7 - single-owner actor isolation (SPEC-038-R007)
 
