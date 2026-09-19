@@ -149,15 +149,17 @@ struct MSBThroughputCommand: AsyncParsableCommand {
         // Production serial single-stream baseline (today's serve decode path:
         // `generate()` over contiguous KVCacheSimple). This is the rate the box
         // delivers today, and the denominator that decides whether continuous
-        // batching is a throughput win.
-        let serialPromptText = buildPromptText(index: 9973, targetTokens: promptTokens)
+        // batching is a throughput win. It decodes from the SAME exact prompt
+        // token array as a batched row (identical length and content) so the
+        // `aggregateVsProductionSerial` ratio is token-comparable, not skewed by
+        // a different prompt length.
         var serialRunTPS: [Double] = []
         _ = try await runProductionSerialOnce(
-            container: container, promptText: serialPromptText, maxTokens: decodeTokens
+            container: container, promptTokens: baselinePrompt, timedDecodeTokens: decodeTokens
         ) // warmup
         for _ in 0..<runs {
             let tps = try await runProductionSerialOnce(
-                container: container, promptText: serialPromptText, maxTokens: decodeTokens
+                container: container, promptTokens: baselinePrompt, timedDecodeTokens: decodeTokens
             )
             serialRunTPS.append(tps)
             peakRSSMB = max(peakRSSMB, memoryRSSMB())
@@ -212,6 +214,7 @@ struct MSBThroughputCommand: AsyncParsableCommand {
             rows: rows,
             promptTokensPerRow: promptTokens,
             decodeTokensPerRow: decodeTokens,
+            productionSerialPromptTokens: baselinePrompt.count,
             layerCount: layerCount,
             blockSizeTokens: blockSizeTokens,
             maxPhysicalBlocks: maxPhysicalBlocks,
@@ -454,18 +457,21 @@ struct MSBThroughputCommand: AsyncParsableCommand {
     /// One production serial single-stream decode via the `generate()` path
     /// (contiguous KVCacheSimple) — the decode rate today's serve delivers.
     /// Generation-only TPS (excludes TTFT), mirroring `DecodeBenchCommand.runOnce`.
+    /// Decodes from the exact `promptTokens` array (same as a batched row) and
+    /// requests `timedDecodeTokens + 1` so the first (TTFT-boundary) token is
+    /// excluded and exactly `timedDecodeTokens` tokens fall inside the timed
+    /// window — matching the batched path's token convention.
     private func runProductionSerialOnce(
         container: ModelContainer,
-        promptText: String,
-        maxTokens: Int
+        promptTokens: [Int],
+        timedDecodeTokens: Int
     ) async throws -> Double {
         let prefillStart = Date()
         nonisolated(unsafe) var firstTokenAt: Date? = nil
         var generationTokens = 0
         try await container.perform { context in
-            let input = UserInput(chat: [.user(promptText)])
-            let lmInput = try await context.processor.prepare(input: input)
-            let parameters = GenerateParameters(maxTokens: maxTokens, temperature: 0.0, topP: 1.0)
+            let lmInput = LMInput(tokens: MLXArray(promptTokens.map { Int32($0) }))
+            let parameters = GenerateParameters(maxTokens: timedDecodeTokens + 1, temperature: 0.0, topP: 1.0)
             let result: GenerateResult = try generate(
                 input: lmInput, parameters: parameters, context: context
             ) { tokens in
@@ -571,6 +577,7 @@ struct MSBThroughputReport: Codable, Sendable {
     let rows: Int
     let promptTokensPerRow: Int
     let decodeTokensPerRow: Int
+    let productionSerialPromptTokens: Int
     let layerCount: Int
     let blockSizeTokens: Int
     let maxPhysicalBlocks: Int
