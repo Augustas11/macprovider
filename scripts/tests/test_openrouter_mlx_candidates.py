@@ -349,5 +349,73 @@ class MLXCandidateTests(unittest.TestCase):
         self.assertIn("audit trail", text)
 
 
+class ServabilityCoverageTests(unittest.TestCase):
+    def test_hf_base_stem_uses_repo_name_from_hugging_face_id(self):
+        # OpenRouter slug and HF repo diverge; the HF id is the reliable stem.
+        self.assertEqual(mlx.hf_base_stem("mistralai/Mistral-Small-4-119B-2603"), "Mistral-Small-4-119B-2603")
+        self.assertEqual(mlx.hf_base_stem("Qwen/Qwen3.6-35B-A3B"), "Qwen3.6-35B-A3B")
+        self.assertIsNone(mlx.hf_base_stem(None))
+        self.assertIsNone(mlx.hf_base_stem(""))
+
+    def test_mtp_is_recognised_packaging_not_a_variant(self):
+        # `-MTP-4bit` is a serving variant of the same base, not a derivative.
+        self.assertEqual(mlx.unrecognised_suffix_tokens("qwen3.6-35b-a3b-mtp-4bit", "qwen3.6-35b-a3b"), [])
+
+    def test_is_conditional_generation_arch(self):
+        self.assertTrue(mlx.is_conditional_generation_arch({"architectures": ["Mistral3ForConditionalGeneration"]}))
+        self.assertTrue(mlx.is_conditional_generation_arch({"architectures": ["Gemma3ForConditionalGeneration"], "model_type": "gemma3"}))
+        self.assertFalse(mlx.is_conditional_generation_arch({"architectures": ["Qwen3ForCausalLM"]}))
+        self.assertFalse(mlx.is_conditional_generation_arch({}))
+        # seq2seq ForConditionalGeneration models must NOT be admitted as text.
+        self.assertFalse(mlx.is_conditional_generation_arch({"architectures": ["T5ForConditionalGeneration"], "model_type": "t5"}))
+        self.assertFalse(mlx.is_conditional_generation_arch({"architectures": ["BartForConditionalGeneration"], "model_type": "bart"}))
+        # an unrecognised ForConditionalGeneration family fails closed (not admitted).
+        self.assertFalse(mlx.is_conditional_generation_arch({"architectures": ["FooBarForConditionalGeneration"], "model_type": "foobar"}))
+
+    def test_classify_t5_seq2seq_is_not_multimodal_text(self):
+        result = mlx.classify(
+            "mlx-community/T5-Base-4bit", "4bit", Decimal("2"), None,
+            {"architectures": ["T5ForConditionalGeneration"], "model_type": "t5"}, Decimal("256"))
+        self.assertEqual(result["verdict"], "unresolved")
+        self.assertNotIn("serving_class", result)
+
+    def test_classify_vlm_family_not_shadowed_by_multimodal_veto(self):
+        # A Qwen3-VL build matches the generic multimodal arch pattern AND is a
+        # known VLM-text family. The allowlist runs BEFORE the veto, so it is
+        # marked multimodal_text (previously the veto shadowed it -> excluded).
+        result = mlx.classify(
+            "mlx-community/Qwen3.6-35B-A3B-4bit", "4bit", Decimal("18"), "image-text-to-text",
+            {"architectures": ["Qwen3VLMoeForConditionalGeneration"], "model_type": "qwen3_vl_moe"}, Decimal("256"))
+        self.assertEqual(result["verdict"], "unresolved")
+        self.assertEqual(result["serving_class"], "multimodal_text")
+
+    def test_classify_pure_vision_model_is_vetoed_without_serving_class(self):
+        # Multimodal-shaped but NOT a known text-servable VLM family and no
+        # image-text-to-text tag -> vetoed, no serving_class (not proposed).
+        result = mlx.classify(
+            "mlx-community/SomeClip-4bit", "4bit", Decimal("2"), None,
+            {"architectures": ["CLIPVisionModel"], "model_type": "clip"}, Decimal("256"))
+        self.assertEqual(result["verdict"], "unresolved")
+        self.assertNotIn("serving_class", result)
+
+    def test_classify_conditional_generation_marks_multimodal_text(self):
+        # A ForConditionalGeneration decoder with no pipeline_tag is a multimodal
+        # LLM served for text -> unresolved but flagged serving_class=multimodal_text
+        # so the proposer includes it (Mistral-Small VL family).
+        result = mlx.classify(
+            "mlx-community/Mistral-Small-4-119B-2603-4bit", "4bit", Decimal("60"),
+            None, {"architectures": ["Mistral3ForConditionalGeneration"]}, Decimal("256"))
+        self.assertEqual(result["verdict"], "unresolved")
+        self.assertEqual(result["serving_class"], "multimodal_text")
+        self.assertIn("required_gb", result)
+
+    def test_classify_unknown_arch_without_pipeline_stays_plain_unresolved(self):
+        result = mlx.classify(
+            "mlx-community/Foo-4bit", "4bit", Decimal("10"), None,
+            {"architectures": ["FooSeq2SeqModel"]}, Decimal("256"))
+        self.assertEqual(result["verdict"], "unresolved")
+        self.assertNotIn("serving_class", result)
+
+
 if __name__ == "__main__":
     unittest.main()

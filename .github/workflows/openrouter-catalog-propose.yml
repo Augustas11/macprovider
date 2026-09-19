@@ -1,0 +1,141 @@
+name: OpenRouter catalog propose
+
+# Scheduled yield-first proposer. Emits an openrouter-catalog-proposal
+# (status: proposal_only_never_applied) as a reviewable Actions artifact
+# and, on digest change, a docs-only PR under docs/research/openrouter-snapshots/.
+#
+# This is NOT catalog apply. SPEC-023 forbids propose from minting a
+# rate_class or feeding catalog-release. The Wednesday restamp job
+# (renew-autotune-static-feed-signed.yml) has a content-continuity guard
+# that aborts on catalog changes — do not smuggle apply through it.
+# A recommendable promotion still needs an explicit §16 operator decision.
+
+on:
+  schedule:
+    # Daily 17:00 UTC: after the UTC ranking window, offset from Wednesday restamp.
+    - cron: "0 17 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: openrouter-catalog-propose
+  cancel-in-progress: false
+
+jobs:
+  propose:
+    name: Fetch-health + yield-first catalog proposal
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+
+      - name: Fail loud if the OpenRouter key is dead
+        shell: bash
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${OPENROUTER_API_KEY:-}" ]; then
+            echo "::error::OPENROUTER_API_KEY GitHub secret is missing; gh secret set OPENROUTER_API_KEY. Do not print the key." >&2
+            exit 1
+          fi
+          python3 scripts/check-openrouter-fetch-health.py
+
+      - name: Propose a best-in-class servable catalog
+        shell: bash
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: |
+          set -euo pipefail
+          out="$(mktemp -d)"
+          python3 scripts/openrouter_pricing_engine.py propose \
+            --policy scripts/openrouter_pricing_policy.json \
+            --candidates scripts/openrouter_catalog_seed_candidates.json \
+            --output-dir "$out" \
+            --max-candidates 32 \
+            --generation-timeout-seconds 1800
+          proposal="$(ls -1 "$out"/openrouter-catalog-proposal-*.json | head -1)"
+          test -s "$proposal"
+          python3 -c 'import json,sys; p=json.load(open(sys.argv[1])); assert p["status"]=="proposal_only_never_applied"' "$proposal"
+          mkdir -p "$GITHUB_WORKSPACE/docs/research/openrouter-snapshots"
+          cp "$proposal" "$GITHUB_WORKSPACE/docs/research/openrouter-snapshots/"
+          echo "PROPOSAL_PATH=docs/research/openrouter-snapshots/$(basename "$proposal")" >> "$GITHUB_ENV"
+          echo "PROPOSAL_ABS=$GITHUB_WORKSPACE/docs/research/openrouter-snapshots/$(basename "$proposal")" >> "$GITHUB_ENV"
+
+      - name: Guard that propose did not touch catalog money files
+        shell: bash
+        run: |
+          set -euo pipefail
+          dirty="$(git status --porcelain --untracked-files=all)"
+          echo "$dirty"
+          [ -n "$dirty" ] || {
+            echo "::error::propose produced no git-visible proposal file" >&2
+            exit 1
+          }
+          paths="$(echo "$dirty" | awk '{print $NF}')"
+          money="$(echo "$paths" | grep -E '^(phase3-binary/catalog/|phase4-coordinator/internal/billing/)' || true)"
+          if [ -n "$money" ]; then
+            echo "::error::propose dirty tree includes catalog/billing paths; aborting without PR" >&2
+            exit 1
+          fi
+          extra="$(echo "$paths" | grep -vE '^docs/research/openrouter-snapshots/openrouter-catalog-proposal-' || true)"
+          if [ -n "$extra" ]; then
+            echo "::error::propose wrote files outside the snapshot archive:" >&2
+            echo "$extra" >&2
+            exit 1
+          fi
+
+      - name: Open a docs-only review PR when the proposal is new
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          digest="$(python3 -c 'import hashlib,pathlib,sys; print(hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest()[:16])' "$PROPOSAL_ABS")"
+          branch="chore/openrouter-catalog-proposal-$digest"
+          if git ls-remote --exit-code origin "refs/heads/$branch" >/dev/null 2>&1; then
+            echo "branch $branch already exists; proposal digest unchanged enough to skip a new PR"
+            exit 0
+          fi
+          git checkout -b "$branch"
+          git add -- "$PROPOSAL_PATH"
+          git commit -m "$(cat <<EOF
+          archive OpenRouter catalog proposal $digest
+
+          Review-only. status=proposal_only_never_applied. Does not apply, sign, or deploy.
+          EOF
+          )"
+          git push -u origin HEAD
+          gh pr create --title "OpenRouter catalog proposal $digest" --body "$(cat <<EOF
+          ## Summary
+          - Scheduled \`propose\` output for operator review (SPEC-023 §16).
+          - \`status: proposal_only_never_applied\` — this PR MUST NOT change signed catalog feeds, rate-card.json, or coordinator.yaml.
+
+          ## Test plan
+          - [ ] Confirm selected rows are MLX-servable and priced from live endpoints
+          - [ ] Confirm no files under \`phase3-binary/catalog/\` changed
+          - [ ] Any recommendable promotion is a separate operator §16 decision, not this PR
+
+          SPEC-GOVERNANCE-DECLARATION-BEGIN
+          {
+            "schema_version": "spec-pr-governance-v1",
+            "behavior_change": "yes",
+            "contract_change": "none",
+            "specs": ["SPEC-023"],
+            "requirements": ["SPEC-023-R008"],
+            "authority_domains": ["installer-autotune-policy"],
+            "arbitration": ["DECISION_REQUIRED"],
+            "tests": ["scripts/tests/test_openrouter_catalog_propose.py"],
+            "journeys": ["not-required"]
+          }
+          SPEC-GOVERNANCE-DECLARATION-END
+          EOF
+          )"

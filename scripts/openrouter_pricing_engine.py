@@ -28,7 +28,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_FLOOR, ROUND_HALF_UP
 from email.utils import parsedate_to_datetime
 from pathlib import Path
-from typing import Any, Callable, Mapping, Protocol
+from typing import Any, Callable, Iterable, Mapping, Protocol, Sequence
 from urllib.parse import quote, urlsplit
 
 
@@ -44,7 +44,8 @@ TOOL_VERSION = "openrouter-pricing-engine-v1"
 DEFAULT_POLICY_PATH = Path(__file__).with_name("openrouter_pricing_policy.json")
 CURRENT_POLICY_KEYS = frozenset({
     "policy_version", "demand_top_n", "undercut_fraction",
-    "cache_hit_fraction", "models",
+    "cache_hit_fraction", "min_endpoint_request_count_30m",
+    "min_distinct_providers", "models",
 })
 LEGACY_POLICY_KEYS = frozenset({
     "policy_version", "demand_top_n", "broad_fleet_undercut_fraction",
@@ -62,7 +63,7 @@ RANKING_META_KEYS = frozenset({"as_of", "end_date", "start_date", "version"})
 CATALOG_ROW_KEYS = frozenset({"alias_target", "architecture", "benchmarks", "canonical_slug", "context_length", "created", "default_parameters", "description", "expiration_date", "hugging_face_id", "id", "knowledge_cutoff", "links", "name", "per_request_limits", "pricing", "reasoning", "supported_parameters", "supported_voices", "top_provider"})
 CATALOG_TOP_LEVEL_KEYS = frozenset({"data", "links", "total_count"})
 ENDPOINT_DATA_KEYS = frozenset({"architecture", "created", "description", "endpoints", "id", "name"})
-ENDPOINT_ROW_KEYS = frozenset({"completion_tokens_last_30d", "context_length", "latency_last_30m", "max_completion_tokens", "max_prompt_tokens", "model_id", "model_name", "name", "pricing", "provider_name", "quantization", "status", "supported_parameters", "supports_implicit_caching", "supports_voice_cloning", "tag", "throughput_last_30m", "uptime_last_1d", "uptime_last_30d", "uptime_last_30m", "uptime_last_5m"})
+ENDPOINT_ROW_KEYS = frozenset({"completion_tokens_last_30d", "context_length", "latency_last_30m", "max_completion_tokens", "max_prompt_tokens", "model_id", "model_name", "name", "perf_last_30m_by_workload", "pricing", "provider_name", "quantization", "status", "supported_parameters", "supports_implicit_caching", "supports_tool_choice", "supports_voice_cloning", "tag", "throughput_last_30m", "uptime_last_1d", "uptime_last_30d", "uptime_last_30m", "uptime_last_5m"})
 ENDPOINT_PRICING_KEYS = frozenset({
     "audio", "completion", "discount", "image", "image_output", "image_token",
     "input_audio_cache", "input_cache_read", "input_cache_write", "input_cache_write_1h",
@@ -534,6 +535,8 @@ def resolve_rankings_to_catalog(
     rankings: list[dict[str, Any]],
     catalog: Mapping[str, Mapping[str, Any]],
     endpoint_documents: Mapping[str, Mapping[str, Any]] | None = None,
+    *,
+    skipped_sink: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Resolve ranking permaslugs to the catalog ID accepted by endpoints API.
 
@@ -544,6 +547,15 @@ def resolve_rankings_to_catalog(
     the endpoint response for the exact ranking permaslug may select one only
     if its returned ID is exactly one of those catalog candidates. All other
     ambiguity is a coverage failure, never a guess.
+
+    A ranked identity that is itself a ``:free`` variant and cannot be pinned to
+    a unique paid catalog row is dropped from the returned cohort (a ``:free``
+    endpoint has no paid price and no earning potential); each drop is recorded
+    in ``skipped_sink`` when supplied. The skip decision depends only on the
+    ranking permaslug and catalog, so it is identical whether or not
+    ``endpoint_documents`` is provided, keeping the two resolution phases and the
+    endpoint-fetch cohort in lockstep. Genuine (non-free) ambiguity and schema
+    errors still fail closed.
     """
     canonical_index: dict[str, list[str]] = {}
     for model_id, catalog_row in catalog.items():
@@ -570,6 +582,23 @@ def resolve_rankings_to_catalog(
                     catalog_id = paid_candidates[0]
                     identity_resolution = "catalog_paid_variant"
                 else:
+                    if is_free_variant(ranking_slug):
+                        # A :free ranked identity with no unique paid catalog row
+                        # cannot be priced (its endpoint is $0) and has no earning
+                        # potential. Drop it from the cohort with a logged reason
+                        # instead of aborting the whole fetch. This is decided
+                        # from ranking_slug + catalog only, so both resolution
+                        # passes drop the same rows and the endpoint-fetch set
+                        # stays exactly aligned.
+                        if skipped_sink is not None:
+                            skipped_sink.append(
+                                {
+                                    "ranking_model_permaslug": ranking_slug,
+                                    "reason": "dropped_free_variant",
+                                    "rank": demand["rank"],
+                                }
+                            )
+                        continue
                     if endpoint_documents is None:
                         # Fetch the ranking permaslug itself first.  It is a
                         # temporary request identity, not a selected catalog
@@ -631,25 +660,54 @@ def endpoint_set_is_empty(document: Mapping[str, Any], requested_model_id: str) 
     return not endpoints
 
 
-def weighted_median(
+def endpoint_request_activity(endpoint: Mapping[str, Any], model_id: str, index: int) -> int | None:
+    """Recent per-endpoint TEXT request activity from ``perf_last_30m_by_workload``.
+
+    OpenRouter removed the per-endpoint 30-day token volume
+    (``completion_tokens_last_30d``). The surviving per-endpoint activity signal
+    is ``perf_last_30m_by_workload.text_generation.request_count`` -- a 30-minute
+    request count. We read ONLY the ``text_generation`` workload: an endpoint's
+    non-text traffic (tool_use, embeddings, etc.) must not qualify it for the text
+    price. Returns ``None`` when no text ``request_count`` is reported (the
+    endpoint is treated as not text-serving and excluded); malformed values fail
+    closed. This is an ELIGIBILITY signal only -- it is never used as a price
+    weight (see ``endpoint_price_median``).
+    """
+    perf = endpoint.get("perf_last_30m_by_workload")
+    if perf is None:
+        return None
+    if not isinstance(perf, dict):
+        raise SchemaError(f"endpoints response for {model_id}: endpoints[{index}].perf_last_30m_by_workload must be an object")
+    stats = perf.get("text_generation")
+    if stats is None:
+        return None
+    if not isinstance(stats, dict):
+        raise SchemaError(f"endpoints response for {model_id}: endpoints[{index}].perf_last_30m_by_workload['text_generation'] must be an object")
+    count = stats.get("request_count")
+    if count is None:
+        return None
+    if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+        raise SchemaError(f"endpoints response for {model_id}: endpoints[{index}].perf_last_30m_by_workload['text_generation'].request_count is invalid")
+    return count
+
+
+def endpoint_price_median(
     priced: list[tuple[Decimal, Decimal, str, int, str]],
     value_index: int,
 ) -> tuple[Decimal, tuple[Decimal, Decimal, str, int, str]]:
-    ordered = sorted(priced, key=lambda item: item[value_index])
-    total = sum(item[3] for item in ordered)
-    cumulative = 0
-    for item in ordered:
-        cumulative += item[3]
-        if cumulative * 2 >= total:
-            return item[value_index], item
-    return ordered[-1][value_index], ordered[-1]
+    """UNWEIGHTED median price over the eligible (active, paid) endpoints.
+
+    Each eligible endpoint counts once, so no endpoint can move the pegged price
+    by inflating its API-reported ``request_count`` (that value gates eligibility,
+    it is not a weight). The deterministic LOWER median selects a real endpoint's
+    quote (never an average) -- conservative for a peg we then undercut -- tie
+    broken by provider then model id."""
+    ordered = sorted(priced, key=lambda item: (item[value_index], item[2], item[4]))
+    chosen = ordered[(len(ordered) - 1) // 2]
+    return chosen[value_index], chosen
 
 
-def liquidity_volume_floor(model_tokens_30d: int) -> int:
-    return max(1_000_000, (model_tokens_30d + 19) // 20)
-
-
-def cheapest_endpoint_pricing(document: Mapping[str, Any], model_id: str, *, model_tokens_30d: int = 0) -> dict[str, Any] | None:
+def cheapest_endpoint_pricing(document: Mapping[str, Any], model_id: str, *, min_request_count_30m: int = 1, min_distinct_providers: int = 1) -> dict[str, Any] | None:
     require_allowed_keys(document, frozenset({"data"}), f"endpoints response for {model_id}")
     data = document.get("data")
     if not isinstance(data, dict):
@@ -665,7 +723,6 @@ def cheapest_endpoint_pricing(document: Mapping[str, Any], model_id: str, *, mod
     if not endpoints:
         return None
     priced: list[tuple[Decimal, Decimal, str, int, str]] = []
-    volume_floor = liquidity_volume_floor(model_tokens_30d)
     for index, endpoint in enumerate(endpoints):
         if not isinstance(endpoint, dict):
             raise SchemaError(f"endpoints response for {model_id}: endpoints[{index}] must be an object")
@@ -687,31 +744,41 @@ def cheapest_endpoint_pricing(document: Mapping[str, Any], model_id: str, *, mod
             endpoint_model_id = model_id
         if not isinstance(endpoint_model_id, str) or not MODEL_ID_RE.fullmatch(endpoint_model_id):
             raise SchemaError(f"endpoints response for {model_id}: endpoints[{index}].model_id is invalid")
-        try:
-            completion_tokens = parse_nonnegative_integer(endpoint.get("completion_tokens_last_30d"), f"endpoints response for {model_id}: completion_tokens_last_30d")
-        except SchemaError:
+        activity = endpoint_request_activity(endpoint, model_id, index)
+        if activity is None:
             continue
-        if status != 0 or prompt == 0 or completion == 0 or completion_tokens < volume_floor:
+        if status != 0 or prompt == 0 or completion == 0 or activity < min_request_count_30m:
             continue
-        priced.append((completion, prompt, provider, completion_tokens, endpoint_model_id))
+        priced.append((completion, prompt, provider, activity, endpoint_model_id))
     if not priced:
         return None
-    completion, completion_endpoint = weighted_median(priced, 0)
-    prompt, prompt_endpoint = weighted_median(priced, 1)
-    _, _, provider, selected_tokens, _ = completion_endpoint
-    _, _, prompt_provider, prompt_tokens, _ = prompt_endpoint
+    # Collapse to ONE representative quote per distinct provider (the provider's
+    # lowest, deterministic) before the median. With an unweighted median this
+    # makes the peg one-vote-per-provider, so an attacker cannot steer it by
+    # adding many eligible endpoints under one provider; a distinct-provider
+    # quorum then blocks a thin (few-provider) market from setting a money price.
+    provider_reps: dict[str, tuple[Decimal, Decimal, str, int, str]] = {}
+    for item in priced:
+        current = provider_reps.get(item[2])
+        if current is None or item < current:
+            provider_reps[item[2]] = item
+    reps = list(provider_reps.values())
+    if len(reps) < min_distinct_providers:
+        return None
+    completion, completion_endpoint = endpoint_price_median(reps, 0)
+    prompt, prompt_endpoint = endpoint_price_median(reps, 1)
+    _, _, provider, selected_activity, _ = completion_endpoint
+    _, _, prompt_provider, prompt_activity, _ = prompt_endpoint
     liquidity_candidates = [
         {
-            "endpoint_status": status,
-            "endpoint_model_id": candidate_model_id,
-            "provider_name": candidate_provider,
-            "prompt_usd_per_mtok": decimal_string(candidate_prompt * Decimal("1000000")),
-            "completion_usd_per_mtok": decimal_string(candidate_completion * Decimal("1000000")),
-            "completion_tokens_last_30d": candidate_tokens,
+            "endpoint_status": 0,
+            "endpoint_model_id": item[4],
+            "provider_name": item[2],
+            "prompt_usd_per_mtok": decimal_string(item[1] * Decimal("1000000")),
+            "completion_usd_per_mtok": decimal_string(item[0] * Decimal("1000000")),
+            "request_count_last_30m": item[3],
         }
-        for status, candidate_model_id, candidate_provider, candidate_prompt, candidate_completion, candidate_tokens in (
-            (0, item[4], item[2], item[1], item[0], item[3]) for item in priced
-        )
+        for item in sorted(reps)
     ]
     return {
         "input_per_token": decimal_string(prompt),
@@ -723,11 +790,14 @@ def cheapest_endpoint_pricing(document: Mapping[str, Any], model_id: str, *, mod
         "liquidity_filter": {
             "endpoint_status": 0,
             "paid_prices": True,
-            "minimum_completion_tokens_last_30d": volume_floor,
-            "completion_tokens_last_30d": selected_tokens,
-            "volume_weighted_median": True,
+            "liquidity_signal": "openrouter_request_count_last_30m",
+            "minimum_request_count_last_30m": min_request_count_30m,
+            "request_count_last_30m": selected_activity,
+            "price_median_method": "unweighted_over_active_endpoints",
+            "min_distinct_providers": min_distinct_providers,
+            "distinct_provider_count": len(reps),
             "selected_prompt_provider": prompt_provider,
-            "selected_prompt_completion_tokens_last_30d": prompt_tokens,
+            "selected_prompt_request_count_last_30m": prompt_activity,
             "eligible_endpoint_liquidity": liquidity_candidates,
         },
     }
@@ -762,8 +832,48 @@ def validate_snapshot(snapshot: Mapping[str, Any]) -> None:
         raise SchemaError("snapshot source schema/generator provenance is invalid")
     fetch_metadata = source["fetch_metadata"]
     required_fetch_metadata = {"successful_source_count", "observed_model_count", "requested_top_n", "demand_window_days", "ranking_window_start_date", "ranking_window_end_date", "demand_metric"}
+    if schema_version == SNAPSHOT_SCHEMA_VERSION:
+        # Current snapshots record every :free row dropped from the requested
+        # top-N so the observed shortfall is auditable, not merely trusted.
+        required_fetch_metadata = required_fetch_metadata | {"skipped_free_ranked_models"}
     if not isinstance(fetch_metadata, dict) or set(fetch_metadata) != required_fetch_metadata:
         raise SchemaError("snapshot fetch_metadata has missing or unexpected fields")
+    if schema_version == SNAPSHOT_SCHEMA_VERSION:
+        skipped_free = fetch_metadata["skipped_free_ranked_models"]
+        if not isinstance(skipped_free, list):
+            raise SchemaError("snapshot fetch_metadata.skipped_free_ranked_models must be an array")
+        requested_top_n = fetch_metadata["requested_top_n"]
+        if isinstance(requested_top_n, bool) or not isinstance(requested_top_n, int) or not 1 <= requested_top_n <= 50:
+            raise SchemaError("snapshot fetch_metadata.requested_top_n is invalid")
+        skipped_ranks: set[int] = set()
+        skipped_permaslugs: set[str] = set()
+        for entry in skipped_free:
+            if not isinstance(entry, dict) or set(entry) != {"ranking_model_permaslug", "reason", "rank"}:
+                raise SchemaError("snapshot fetch_metadata.skipped_free_ranked_models entry has invalid fields")
+            if entry["reason"] != "dropped_free_variant" or not is_free_variant(entry["ranking_model_permaslug"]):
+                raise SchemaError("snapshot fetch_metadata.skipped_free_ranked_models entry is not a dropped free variant")
+            rank = entry["rank"]
+            if isinstance(rank, bool) or not isinstance(rank, int) or not 1 <= rank <= requested_top_n:
+                raise SchemaError("snapshot fetch_metadata.skipped_free_ranked_models entry has an invalid rank")
+            if rank in skipped_ranks or entry["ranking_model_permaslug"] in skipped_permaslugs:
+                raise SchemaError("snapshot fetch_metadata.skipped_free_ranked_models has a duplicate rank or permaslug")
+            skipped_ranks.add(rank)
+            skipped_permaslugs.add(entry["ranking_model_permaslug"])
+        # A skipped :free permaslug cannot also be an observed row -- disjointness
+        # prevents a duplicate/forged skip entry from masking a real truncation.
+        observed_permaslugs = {
+            row["source_metadata"]["ranking_model_permaslug"]
+            for row in rows
+            if isinstance(row, dict) and isinstance(row.get("source_metadata"), dict)
+            and isinstance(row["source_metadata"].get("ranking_model_permaslug"), str)
+        }
+        if skipped_permaslugs & observed_permaslugs:
+            raise SchemaError("snapshot fetch_metadata.skipped_free_ranked_models overlaps the observed cohort")
+        # Completeness: every requested top-N row is either observed or a recorded,
+        # unique free drop. This makes the market-peg coverage gate auditable --
+        # a truncated snapshot cannot pass by claiming an unexplained shortfall.
+        if fetch_metadata["observed_model_count"] + len(skipped_free) != requested_top_n:
+            raise SchemaError("snapshot fetch_metadata: observed_model_count + skipped_free_ranked_models must equal requested_top_n")
     for key in ("successful_source_count", "observed_model_count", "requested_top_n", "demand_window_days"):
         if isinstance(fetch_metadata[key], bool) or not isinstance(fetch_metadata[key], int) or fetch_metadata[key] < 1:
             raise SchemaError(f"snapshot fetch_metadata.{key} must be a positive integer")
@@ -831,18 +941,24 @@ def validate_snapshot(snapshot: Mapping[str, Any]) -> None:
             raise SchemaError(f"snapshot.rows[{index}] active pricing cannot derive from a free variant")
         if pricing_status == "active_priced" and schema_version != LEGACY_SNAPSHOT_SCHEMA_VERSION:
             liquidity = pricing.get("liquidity_filter")
-            required_liquidity = {"endpoint_status", "paid_prices", "minimum_completion_tokens_last_30d", "completion_tokens_last_30d", "volume_weighted_median", "selected_prompt_provider", "selected_prompt_completion_tokens_last_30d", "eligible_endpoint_liquidity"}
+            required_liquidity = {"endpoint_status", "paid_prices", "liquidity_signal", "minimum_request_count_last_30m", "request_count_last_30m", "price_median_method", "min_distinct_providers", "distinct_provider_count", "selected_prompt_provider", "selected_prompt_request_count_last_30m", "eligible_endpoint_liquidity"}
             if not isinstance(liquidity, dict) or set(liquidity) != required_liquidity:
                 raise SchemaError(f"snapshot.rows[{index}] has invalid liquidity filter")
-            if liquidity["endpoint_status"] != 0 or liquidity["paid_prices"] is not True or liquidity["volume_weighted_median"] is not True:
+            if liquidity["endpoint_status"] != 0 or liquidity["paid_prices"] is not True or liquidity["price_median_method"] != "unweighted_over_active_endpoints" or liquidity["liquidity_signal"] != "openrouter_request_count_last_30m":
                 raise SchemaError(f"snapshot.rows[{index}] liquidity filter does not match the policy thresholds")
+            min_distinct_providers = liquidity["min_distinct_providers"]
+            distinct_provider_count = liquidity["distinct_provider_count"]
+            if isinstance(min_distinct_providers, bool) or not isinstance(min_distinct_providers, int) or min_distinct_providers < 1:
+                raise SchemaError(f"snapshot.rows[{index}] liquidity min_distinct_providers is invalid")
+            if isinstance(distinct_provider_count, bool) or not isinstance(distinct_provider_count, int) or distinct_provider_count < min_distinct_providers:
+                raise SchemaError(f"snapshot.rows[{index}] liquidity distinct_provider_count is below the quorum")
             try:
                 selected_prompt = Decimal(pricing["input_per_mtok"])
                 selected_completion = Decimal(pricing["completion_per_mtok"])
                 candidates = liquidity.get("eligible_endpoint_liquidity")
                 if not isinstance(candidates, list) or not candidates:
                     raise SchemaError(f"snapshot.rows[{index}].liquidity_filter.eligible_endpoint_liquidity must be a non-empty array")
-                required_candidate = {"endpoint_status", "endpoint_model_id", "provider_name", "prompt_usd_per_mtok", "completion_usd_per_mtok", "completion_tokens_last_30d"}
+                required_candidate = {"endpoint_status", "endpoint_model_id", "provider_name", "prompt_usd_per_mtok", "completion_usd_per_mtok", "request_count_last_30m"}
                 weighted_candidates: list[tuple[Decimal, Decimal, str, int, str]] = []
                 for candidate_index, candidate in enumerate(candidates):
                     if not isinstance(candidate, dict) or set(candidate) != required_candidate:
@@ -858,37 +974,40 @@ def validate_snapshot(snapshot: Mapping[str, Any]) -> None:
                                 raise SchemaError
                         except (InvalidOperation, ValueError, TypeError, SchemaError):
                             raise SchemaError(f"snapshot.rows[{index}].liquidity_filter.eligible_endpoint_liquidity[{candidate_index}].{field} is invalid")
-                    candidate_tokens = candidate.get("completion_tokens_last_30d")
-                    if isinstance(candidate_tokens, bool) or not isinstance(candidate_tokens, int) or candidate_tokens < 0:
-                        raise SchemaError(f"snapshot.rows[{index}].liquidity_filter.eligible_endpoint_liquidity[{candidate_index}].completion_tokens_last_30d is invalid")
+                    candidate_activity = candidate.get("request_count_last_30m")
+                    if isinstance(candidate_activity, bool) or not isinstance(candidate_activity, int) or candidate_activity < 0:
+                        raise SchemaError(f"snapshot.rows[{index}].liquidity_filter.eligible_endpoint_liquidity[{candidate_index}].request_count_last_30m is invalid")
                     weighted_candidates.append(
                         (
                             Decimal(candidate["completion_usd_per_mtok"]),
                             Decimal(candidate["prompt_usd_per_mtok"]),
                             candidate["provider_name"],
-                            candidate_tokens,
+                            candidate_activity,
                             endpoint_model_id,
                         )
                     )
-                selected_completion_tokens = parse_nonnegative_integer(liquidity["completion_tokens_last_30d"], f"snapshot.rows[{index}].liquidity_filter.completion_tokens_last_30d")
-                minimum_completion_tokens = parse_nonnegative_integer(liquidity["minimum_completion_tokens_last_30d"], f"snapshot.rows[{index}].liquidity_filter.minimum_completion_tokens_last_30d")
-                selected_prompt_tokens = parse_nonnegative_integer(liquidity["selected_prompt_completion_tokens_last_30d"], f"snapshot.rows[{index}].liquidity_filter.selected_prompt_completion_tokens_last_30d")
+                selected_activity = parse_nonnegative_integer(liquidity["request_count_last_30m"], f"snapshot.rows[{index}].liquidity_filter.request_count_last_30m")
+                minimum_activity = parse_nonnegative_integer(liquidity["minimum_request_count_last_30m"], f"snapshot.rows[{index}].liquidity_filter.minimum_request_count_last_30m")
+                selected_prompt_activity = parse_nonnegative_integer(liquidity["selected_prompt_request_count_last_30m"], f"snapshot.rows[{index}].liquidity_filter.selected_prompt_request_count_last_30m")
             except (InvalidOperation, ValueError) as error:
                 raise SchemaError(f"snapshot.rows[{index}] liquidity/pricing values are invalid") from error
-            if not isinstance(liquidity["selected_prompt_provider"], str) or not liquidity["selected_prompt_provider"] or selected_prompt <= 0 or selected_completion <= 0 or minimum_completion_tokens < 1_000_000 or selected_completion_tokens < minimum_completion_tokens or selected_prompt_tokens < minimum_completion_tokens:
-                raise SchemaError(f"snapshot.rows[{index}] liquidity-selected endpoint is not paid and liquid")
-            expected_floor = liquidity_volume_floor(int(demand["total_token_volume"]))
-            if minimum_completion_tokens != expected_floor:
-                raise SchemaError(f"snapshot.rows[{index}] liquidity filter has invalid volume floor")
-            if any(candidate[3] < expected_floor for candidate in weighted_candidates):
-                raise SchemaError(f"snapshot.rows[{index}] liquidity filter includes an illiquid endpoint")
-            expected_completion, completion_endpoint = weighted_median(weighted_candidates, 0)
-            expected_prompt, prompt_endpoint = weighted_median(weighted_candidates, 1)
+            if not isinstance(liquidity["selected_prompt_provider"], str) or not liquidity["selected_prompt_provider"] or selected_prompt <= 0 or selected_completion <= 0 or minimum_activity < 1 or selected_activity < minimum_activity or selected_prompt_activity < minimum_activity:
+                raise SchemaError(f"snapshot.rows[{index}] liquidity-selected endpoint is not paid and active")
+            if any(candidate[3] < minimum_activity for candidate in weighted_candidates):
+                raise SchemaError(f"snapshot.rows[{index}] liquidity filter includes an inactive endpoint")
+            # The retained liquidity must be one representative per DISTINCT
+            # provider (Sybil resistance): duplicate providers would let one
+            # party cast multiple votes in the unweighted median.
+            provider_names = [candidate[2] for candidate in weighted_candidates]
+            if len(set(provider_names)) != len(provider_names) or len(provider_names) != distinct_provider_count:
+                raise SchemaError(f"snapshot.rows[{index}] liquidity filter does not hold one quote per distinct provider")
+            expected_completion, completion_endpoint = endpoint_price_median(weighted_candidates, 0)
+            expected_prompt, prompt_endpoint = endpoint_price_median(weighted_candidates, 1)
             if selected_completion != expected_completion or selected_prompt != expected_prompt:
                 raise SchemaError(f"snapshot.rows[{index}] liquidity-filtered median price is invalid")
-            if pricing["benchmark_provider"] != completion_endpoint[2] or selected_completion_tokens != completion_endpoint[3]:
+            if pricing["benchmark_provider"] != completion_endpoint[2] or selected_activity != completion_endpoint[3]:
                 raise SchemaError(f"snapshot.rows[{index}] liquidity-filtered completion endpoint is invalid")
-            if liquidity["selected_prompt_provider"] != prompt_endpoint[2] or selected_prompt_tokens != prompt_endpoint[3]:
+            if liquidity["selected_prompt_provider"] != prompt_endpoint[2] or selected_prompt_activity != prompt_endpoint[3]:
                 raise SchemaError(f"snapshot.rows[{index}] liquidity-filtered prompt endpoint is invalid")
         if not isinstance(row.get("source_metadata"), dict) or set(row["source_metadata"]) != {"ranking_model_permaslug", "catalog_canonical_slug", "catalog_name", "identity_resolution", "endpoint_set_confirmation"}:
             raise SchemaError(f"snapshot.rows[{index}] has invalid source metadata")
@@ -954,7 +1073,18 @@ def build_snapshot(
         raise SchemaError("endpoint confirmation set contains an unrequested model")
     if any(value not in {"confirmed_empty_second_fetch", "recovered_nonempty_on_confirmation"} for value in confirmations.values()):
         raise SchemaError("endpoint confirmation provenance is invalid")
-    rankings = resolve_rankings_to_catalog(rankings, catalog, endpoints_documents)
+    skipped_free_ranked_models: list[dict[str, Any]] = []
+    rankings = resolve_rankings_to_catalog(rankings, catalog, endpoints_documents, skipped_sink=skipped_free_ranked_models)
+    # Free-only ranked models are dropped by the resolver. Re-compact the
+    # surviving cohort to contiguous demand ranks (1..N) so the snapshot keeps
+    # its rank-contiguity invariant while preserving demand order and each
+    # model's absolute total_token_volume. This is a no-op when nothing dropped.
+    # The dropped rows (with their ORIGINAL rank) are recorded in fetch_metadata
+    # so the observed shortfall is auditable: `observed + skipped == requested`.
+    rankings.sort(key=lambda demand: demand["rank"])
+    for new_rank, demand in enumerate(rankings, start=1):
+        demand["rank"] = new_rank
+    skipped_free_ranked_models.sort(key=lambda entry: entry["rank"])
     resolved_endpoints: dict[str, Mapping[str, Any]] = {}
     for demand in rankings:
         request_id = (
@@ -967,6 +1097,8 @@ def build_snapshot(
             raise SchemaError(f"endpoint alias resolution produced duplicate model id {source_model_id!r}")
         resolved_endpoints[source_model_id] = endpoints_documents[request_id]
     policy_models = policy_model_index(policy)
+    min_request_count_30m = policy.get("min_endpoint_request_count_30m", 1)
+    min_distinct_providers = policy.get("min_distinct_providers", 1)
     normalized_rows: list[dict[str, Any]] = []
     for demand in rankings:
         source_model_id = demand["source_model_id"]
@@ -976,7 +1108,8 @@ def build_snapshot(
         endpoint_pricing = cheapest_endpoint_pricing(
             endpoint_document,
             source_model_id,
-            model_tokens_30d=int(demand["total_token_volume"]),
+            min_request_count_30m=min_request_count_30m,
+            min_distinct_providers=min_distinct_providers,
         )
         request_id = (
             demand["ranking_model_permaslug"]
@@ -1041,6 +1174,7 @@ def build_snapshot(
                 "ranking_window_start_date": ranking_meta["start_date"],
                 "ranking_window_end_date": ranking_meta["end_date"],
                 "demand_metric": "aggregated_daily_total_tokens",
+                "skipped_free_ranked_models": skipped_free_ranked_models,
             },
         },
         "rows": normalized_rows,
@@ -1147,6 +1281,17 @@ def validate_policy(policy: Mapping[str, Any]) -> None:
             raise SchemaError("policy cache_hit_fraction must be within 0-1")
     elif set(policy) == CURRENT_POLICY_KEYS:
         raise SchemaError("policy cache_hit_fraction is required")
+    # Minimum per-endpoint 30-minute request activity for an endpoint to enter
+    # the priced cohort. Replaces the removed 30-day token-volume liquidity
+    # floor; the unweighted median over collapsed distinct providers is the
+    # manipulation-resistant aggregator, and request_count is eligibility only.
+    min_requests = policy.get("min_endpoint_request_count_30m")
+    if isinstance(min_requests, bool) or not isinstance(min_requests, int) or min_requests < 1:
+        raise SchemaError("policy min_endpoint_request_count_30m must be an integer of at least 1")
+    # Minimum DISTINCT providers for a priced market (Sybil/thin-market floor).
+    min_providers = policy.get("min_distinct_providers")
+    if isinstance(min_providers, bool) or not isinstance(min_providers, int) or min_providers < 1:
+        raise SchemaError("policy min_distinct_providers must be an integer of at least 1")
     policy_model_index(policy)
 
 
@@ -1371,10 +1516,43 @@ def market_peg_eligibility(model: Mapping[str, Any], row: Mapping[str, Any]) -> 
 def validate_market_peg_snapshot_requirements(snapshot: Mapping[str, Any], policy: Mapping[str, Any], *, now: datetime) -> None:
     required_top_n = policy["demand_top_n"]
     coverage = snapshot["source"]["fetch_metadata"]
-    if coverage["requested_top_n"] < required_top_n or coverage["observed_model_count"] < required_top_n:
+    # Coverage is asserted on the REQUESTED cohort, not observed_model_count.
+    # The fetch requests the full top-N demand cohort; :free-variant ranked
+    # models are then dropped (they have no paid price), so observed_model_count
+    # is legitimately below required_top_n whenever the live top-N contains free
+    # variants. Every other reason a requested row would not be observed (partial
+    # endpoint pull, ambiguous identity, schema drift) already fails closed in
+    # build_snapshot before a snapshot exists, so requested_top_n >= required is
+    # a sufficient and honest coverage guarantee.
+    if coverage["requested_top_n"] < required_top_n:
         raise SchemaError("snapshot does not contain the policy-required top-demand coverage")
     if snapshot.get("schema_version") == LEGACY_SNAPSHOT_SCHEMA_VERSION:
         return
+    # Coverage on the requested cohort is only trustworthy because the snapshot
+    # is proven complete (validate_snapshot enforces observed + skipped == requested).
+    # Assert it explicitly here too: the OBSERVED cohort plus the recorded free
+    # drops must still cover the required top-N.
+    skipped_free = coverage.get("skipped_free_ranked_models")
+    if not isinstance(skipped_free, list):
+        raise SchemaError("snapshot fetch_metadata is missing the skipped_free_ranked_models provenance")
+    if coverage["observed_model_count"] + len(skipped_free) < required_top_n:
+        raise SchemaError("snapshot observed cohort plus recorded free drops does not cover the policy-required top-demand")
+    # Bind the snapshot's pricing basis to THIS compute policy: every active-priced
+    # row must have been priced under the current request-count floor AND the current
+    # distinct-provider quorum, so a snapshot produced under looser thresholds cannot
+    # be repriced under a stricter policy (both are money-path manipulation controls).
+    policy_floor = policy.get("min_endpoint_request_count_30m", 1)
+    policy_quorum = policy.get("min_distinct_providers", 1)
+    for index, row in enumerate(snapshot.get("rows", [])):
+        if not isinstance(row, dict) or row.get("pricing_status") != "active_priced":
+            continue
+        liquidity = (row.get("pricing") or {}).get("liquidity_filter") or {}
+        recorded_floor = liquidity.get("minimum_request_count_last_30m")
+        if recorded_floor != policy_floor:
+            raise SchemaError(f"snapshot.rows[{index}] priced under request-count floor {recorded_floor!r} but policy floor is {policy_floor!r}; re-fetch under the current policy")
+        recorded_quorum = liquidity.get("min_distinct_providers")
+        if recorded_quorum != policy_quorum:
+            raise SchemaError(f"snapshot.rows[{index}] priced under distinct-provider quorum {recorded_quorum!r} but policy quorum is {policy_quorum!r}; re-fetch under the current policy")
     ranking_end_date = coverage["ranking_window_end_date"]
     # ranking_window_end_date is date-typed, so reject at two calendar days
     # old to keep the accepted window within SPEC's 48-hour intent.
@@ -1972,7 +2150,16 @@ def fetch_live_snapshot(
     rankings = fetch_json(client, rankings_url, "daily rankings", retries=retries, timeout_seconds=timeout_seconds, sleeper=sleeper, deadline=deadline, clock=clock)
     catalog = fetch_json(client, MODELS_URL, "models catalog", retries=retries, timeout_seconds=timeout_seconds, sleeper=sleeper, deadline=deadline, clock=clock)
     catalog_index = validate_catalog(catalog)
-    ranking_rows = resolve_rankings_to_catalog(normalize_rankings(rankings, top_n), catalog_index)
+    skipped_ranked_models: list[dict[str, Any]] = []
+    ranking_rows = resolve_rankings_to_catalog(
+        normalize_rankings(rankings, top_n), catalog_index, skipped_sink=skipped_ranked_models
+    )
+    for entry in skipped_ranked_models:
+        print(
+            "openrouter pricing engine: skipped free-only ranked model "
+            f"{entry['ranking_model_permaslug']!r} ({entry['reason']})",
+            file=sys.stderr,
+        )
     endpoints: dict[str, Mapping[str, Any]] = {}
     endpoint_confirmations: dict[str, str] = {}
     for demand in ranking_rows:
@@ -2043,6 +2230,406 @@ def command_compute(args: argparse.Namespace) -> int:
     return 0
 
 
+# --- propose mode: build a best-in-class servable catalog proposal ------------
+#
+# The `fetch`/`compute` pipeline selects by OpenRouter top-50 demand rank, then
+# prices. Verified 2026-09-18, that is the wrong universe: the highest-yield
+# MLX-servable models (Qwen a3b/27B at $1-2.2/Mtok, GLM-4.5-Air, Mistral-Small,
+# Gemma-3-27B) sit OUTSIDE OpenRouter's top-50 demand rank, yet OpenRouter prices
+# them all by id. `propose` flips to a yield-first scan over an explicit
+# candidate universe: price each model by id (unweighted median over distinct providers), gauge
+# demand from 30m request_count, resolve MLX servability + residency, bucket by
+# Mac RAM tier, and rank by yield within tier. It emits a reviewable proposal;
+# it never applies, signs, or deploys.
+CATALOG_PROPOSAL_SCHEMA_VERSION = 1
+CATALOG_RAM_TIERS_GB = (32, 48, 64, 96, 128, 192, 256)
+CATALOG_SAFETY_MARGIN_GB = 4
+# Open-weight vendors that publish (or have community) MLX builds. Closed-weight
+# API vendors and closed model families are excluded from the default universe;
+# the HF servability resolver is the authoritative servability gate downstream.
+OPEN_WEIGHT_VENDORS = frozenset({
+    "qwen", "google", "meta-llama", "nvidia", "mistralai", "deepseek", "openai",
+    "microsoft", "z-ai", "zhipu", "01-ai", "allenai", "cohere", "ibm-granite",
+    "baidu", "moonshotai", "inclusionai", "stepfun", "nousresearch",
+})
+CLOSED_MODEL_MARKERS = ("gemini", "gpt-5", "gpt-6", "gpt-4", "grok", "claude", "o1-", "o3-", "o4-")
+
+
+def assign_ram_tier(required_gb: Decimal, tiers: Sequence[int] = CATALOG_RAM_TIERS_GB, safety_margin_gb: int = CATALOG_SAFETY_MARGIN_GB) -> int | None:
+    """Smallest RAM tier whose usable capacity holds the runtime residency."""
+    for tier in sorted(tiers):
+        if required_gb <= Decimal(tier - safety_margin_gb):
+            return int(tier)
+    return None
+
+
+def model_demand_activity(endpoints_document: Mapping[str, Any]) -> int:
+    """Model-level TEXT demand gauge: sum of 30m ``text_generation`` request_count
+    across endpoints. It must match the pricing eligibility signal (text only) --
+    counting non-text workloads (tool_use, embeddings) would let a model pass the
+    text-serving demand floor on non-text traffic. Lenient (skips malformed
+    telemetry): it is review context, not a money value.
+    """
+    data = endpoints_document.get("data")
+    endpoints = data.get("endpoints") if isinstance(data, dict) else None
+    if not isinstance(endpoints, list):
+        return 0
+    total = 0
+    for endpoint in endpoints:
+        if not isinstance(endpoint, dict):
+            continue
+        perf = endpoint.get("perf_last_30m_by_workload")
+        if not isinstance(perf, dict):
+            continue
+        stats = perf.get("text_generation")
+        if isinstance(stats, dict):
+            count = stats.get("request_count")
+            if isinstance(count, int) and not isinstance(count, bool) and count >= 0:
+                total += count
+    return total
+
+
+def select_open_weight_candidates(model_ids: Iterable[str]) -> list[str]:
+    """Filter an OpenRouter /models id list to the default open-weight universe."""
+    result: list[str] = []
+    for model_id in model_ids:
+        if not isinstance(model_id, str) or "/" not in model_id:
+            continue
+        lowered = model_id.lower()
+        if lowered.endswith(":free") or ":" in model_id.split("/", 1)[1]:
+            continue
+        vendor = model_id.split("/", 1)[0].lower()
+        if vendor not in OPEN_WEIGHT_VENDORS:
+            continue
+        if vendor == "openai" and not model_id.split("/", 1)[1].startswith("gpt-oss"):
+            continue
+        if any(marker in lowered for marker in CLOSED_MODEL_MARKERS):
+            continue
+        result.append(model_id)
+    return sorted(dict.fromkeys(result))
+
+
+def build_catalog_proposal(
+    records: list[Mapping[str, Any]],
+    policy: Mapping[str, Any],
+    *,
+    now: datetime,
+    yield_floor_completion_per_mtok: Decimal,
+    demand_floor_request_count_30m: int,
+    tiers: Sequence[int] = CATALOG_RAM_TIERS_GB,
+) -> dict[str, Any]:
+    """Pure core: gate priced+servable records by yield/demand/servability, bucket
+    by RAM tier, rank by yield within tier. Emits selected + an excluded audit
+    trail. Every input record was produced by the network stage below."""
+    undercut = parse_decimal(policy.get("undercut_fraction"), "policy undercut_fraction")
+    selected: list[dict[str, Any]] = []
+    excluded: list[dict[str, Any]] = []
+    for record in records:
+        model_id = record["model_id"]
+        pricing = record.get("pricing")
+        servability = record.get("servability") or {}
+        demand = int(record.get("demand_request_count_30m") or 0)
+        if pricing is None:
+            excluded.append({"model_id": model_id, "reason": "no active priced OpenRouter endpoint"})
+            continue
+        completion = parse_decimal(pricing["completion_per_mtok"], f"{model_id} completion price")
+        prompt = parse_decimal(pricing["input_per_mtok"], f"{model_id} prompt price")
+        if completion < yield_floor_completion_per_mtok:
+            excluded.append({"model_id": model_id, "reason": f"completion yield {completion}/Mtok below floor {yield_floor_completion_per_mtok}/Mtok"})
+            continue
+        if demand < demand_floor_request_count_30m:
+            excluded.append({"model_id": model_id, "reason": f"demand {demand} req/30m below floor {demand_floor_request_count_30m}"})
+            continue
+        verdict = servability.get("verdict")
+        # The resolver emits serving_class="multimodal_text" for known VLM-text
+        # families (image-text-to-text VLMs + conditional-generation allowlist);
+        # keying on it, not the raw pipeline_tag, avoids admitting an arbitrary
+        # image model that merely carries a vision tag.
+        is_multimodal_text = servability.get("serving_class") == "multimodal_text"
+        if verdict == "review":
+            serving_path = "text"
+            servability_note = (servability.get("reasons") or [""])[0]
+        elif verdict == "unresolved" and is_multimodal_text and servability.get("required_gb") is not None:
+            # Vision-language model served for TEXT (Qwen3-VL / Gemma-3 families):
+            # a top-yield earner in practice, not dropped for the VL pipeline tag.
+            # required_gb already counts the vision tower, so the tier fit stays
+            # conservative; the operator confirms the mlx-vlm text serving path.
+            serving_path = "vision_language_text"
+            servability_note = (servability.get("reasons") or ["vision-language model served for text via mlx-vlm; confirm the text serving path before pricing"])[0]
+        else:
+            excluded.append({"model_id": model_id, "reason": f"not servable ({verdict}): {(servability.get('reasons') or [''])[0]}"})
+            continue
+        try:
+            required_gb = Decimal(str(servability.get("required_gb")))
+        except (InvalidOperation, TypeError, ValueError):
+            excluded.append({"model_id": model_id, "reason": "servability record has no numeric required_gb"})
+            continue
+        if not required_gb.is_finite() or required_gb <= 0:
+            excluded.append({"model_id": model_id, "reason": f"servability required_gb is not a positive finite value ({required_gb})"})
+            continue
+        tier = assign_ram_tier(required_gb, tiers)
+        if tier is None:
+            excluded.append({"model_id": model_id, "reason": f"runtime residency {required_gb} GB exceeds largest tier {max(tiers)} GB"})
+            continue
+        selected.append({
+            "model_id": model_id,
+            "min_ram_gb_tier": tier,
+            "required_residency_gb": decimal_string(required_gb),
+            "serving_path": serving_path,
+            "mlx_repo": servability.get("mlx_repo"),
+            "quant": servability.get("quant"),
+            "market_completion_per_mtok": pricing["completion_per_mtok"],
+            "market_input_per_mtok": pricing["input_per_mtok"],
+            "proposed_completion_per_mtok": decimal_string(completion * (Decimal("1") - undercut)),
+            "proposed_input_per_mtok": decimal_string(prompt * (Decimal("1") - undercut)),
+            "benchmark_provider": pricing["benchmark_provider"],
+            "demand_request_count_30m": demand,
+            "endpoint_count": int(record.get("endpoint_count") or 0),
+            "servability_note": servability_note,
+            # A proposal never assigns a rate_class or promotes a row: SPEC-023
+            # §3.3.1 keeps the enum closed and §16 requires an explicit operator
+            # decision. These machine-readable gates say so.
+            "rate_class_required_before_promotion": True,
+            "manual_serving_verification_required": serving_path == "vision_language_text",
+        })
+    selected.sort(key=lambda row: (row["min_ram_gb_tier"], -Decimal(row["market_completion_per_mtok"]), row["model_id"]))
+    excluded.sort(key=lambda row: row["model_id"])
+    return {
+        "proposal_type": "openrouter-catalog-proposal",
+        "schema_version": CATALOG_PROPOSAL_SCHEMA_VERSION,
+        # Machine-readable: this artifact is a review input only. It is never a
+        # signed feed, is never applied, and every recommendable promotion still
+        # requires an explicit operator decision (SPEC-023 §16).
+        "status": "proposal_only_never_applied",
+        "generated_at": rfc3339(now),
+        "generator_version": TOOL_VERSION,
+        "policy_version": policy["policy_version"],
+        "selection": {
+            "undercut_fraction": decimal_string(undercut),
+            "yield_floor_completion_per_mtok": decimal_string(yield_floor_completion_per_mtok),
+            "demand_floor_request_count_30m": demand_floor_request_count_30m,
+            "ram_tiers_gb": [int(t) for t in sorted(tiers)],
+            "liquidity_signal": "openrouter_request_count_last_30m",
+        },
+        "selected": selected,
+        "excluded": excluded,
+    }
+
+
+def _finite_decimal(value: Any) -> Decimal | None:
+    """Parse a value to a FINITE Decimal, or None. Rejects NaN/Infinity, which
+    ``Decimal(str(...))`` would otherwise accept."""
+    try:
+        parsed = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+    return parsed if parsed.is_finite() else None
+
+
+CATALOG_PROPOSAL_TOP_KEYS = frozenset({
+    "proposal_type", "schema_version", "status", "generated_at", "generator_version",
+    "policy_version", "selection", "selected", "excluded",
+})
+CATALOG_PROPOSAL_SELECTED_KEYS = frozenset({
+    "model_id", "min_ram_gb_tier", "required_residency_gb", "serving_path", "mlx_repo",
+    "quant", "market_completion_per_mtok", "market_input_per_mtok",
+    "proposed_completion_per_mtok", "proposed_input_per_mtok", "benchmark_provider",
+    "demand_request_count_30m", "endpoint_count", "servability_note",
+    "rate_class_required_before_promotion", "manual_serving_verification_required",
+})
+
+
+def validate_catalog_proposal(proposal: Mapping[str, Any]) -> None:
+    """Closed-schema validation of a catalog proposal artifact (fail-closed).
+
+    A proposal is a review input, never a signed/applied feed. This rejects
+    unknown fields and malformed rows so downstream automation cannot mistake a
+    drifted artifact for a valid one."""
+    if not isinstance(proposal, dict) or set(proposal) != CATALOG_PROPOSAL_TOP_KEYS:
+        raise SchemaError("catalog proposal has missing or unexpected top-level fields")
+    if proposal["proposal_type"] != "openrouter-catalog-proposal" or proposal["schema_version"] != CATALOG_PROPOSAL_SCHEMA_VERSION:
+        raise SchemaError("catalog proposal type/schema_version is invalid")
+    if proposal["status"] != "proposal_only_never_applied":
+        raise SchemaError("catalog proposal status must be proposal_only_never_applied")
+    selection = proposal["selection"]
+    if not isinstance(selection, dict) or set(selection) != {"undercut_fraction", "yield_floor_completion_per_mtok", "demand_floor_request_count_30m", "ram_tiers_gb", "liquidity_signal"}:
+        raise SchemaError("catalog proposal selection has missing or unexpected fields")
+    if selection["liquidity_signal"] != "openrouter_request_count_last_30m":
+        raise SchemaError("catalog proposal selection.liquidity_signal is invalid")
+    if not isinstance(selection["ram_tiers_gb"], list) or not selection["ram_tiers_gb"] or not all(isinstance(t, int) and not isinstance(t, bool) and t >= 1 for t in selection["ram_tiers_gb"]):
+        raise SchemaError("catalog proposal selection.ram_tiers_gb is invalid")
+    if isinstance(selection["demand_floor_request_count_30m"], bool) or not isinstance(selection["demand_floor_request_count_30m"], int) or selection["demand_floor_request_count_30m"] < 0:
+        raise SchemaError("catalog proposal selection.demand_floor_request_count_30m is invalid")
+    for field in ("undercut_fraction", "yield_floor_completion_per_mtok"):
+        value = _finite_decimal(selection[field])
+        if value is None or value < 0:
+            raise SchemaError(f"catalog proposal selection.{field} is invalid")
+    if not isinstance(proposal["selected"], list) or not isinstance(proposal["excluded"], list):
+        raise SchemaError("catalog proposal selected/excluded must be arrays")
+    for index, row in enumerate(proposal["selected"]):
+        if not isinstance(row, dict) or set(row) != CATALOG_PROPOSAL_SELECTED_KEYS:
+            raise SchemaError(f"catalog proposal selected[{index}] has missing or unexpected fields")
+        if not isinstance(row["model_id"], str) or not MODEL_ID_RE.fullmatch(row["model_id"]):
+            raise SchemaError(f"catalog proposal selected[{index}].model_id is invalid")
+        if row["serving_path"] not in {"text", "vision_language_text"}:
+            raise SchemaError(f"catalog proposal selected[{index}].serving_path is invalid")
+        if row["rate_class_required_before_promotion"] is not True:
+            raise SchemaError(f"catalog proposal selected[{index}] must require a rate_class before promotion")
+        if not isinstance(row["manual_serving_verification_required"], bool):
+            raise SchemaError(f"catalog proposal selected[{index}].manual_serving_verification_required must be boolean")
+        if row["serving_path"] == "vision_language_text" and row["manual_serving_verification_required"] is not True:
+            raise SchemaError(f"catalog proposal selected[{index}] vision_language_text row must require manual serving verification")
+        # residency must be finite positive; every price finite non-negative.
+        residency = _finite_decimal(row["required_residency_gb"])
+        if residency is None or residency <= 0:
+            raise SchemaError(f"catalog proposal selected[{index}].required_residency_gb is invalid")
+        for field in ("market_completion_per_mtok", "market_input_per_mtok", "proposed_completion_per_mtok", "proposed_input_per_mtok"):
+            value = _finite_decimal(row[field])
+            if value is None or value < 0:
+                raise SchemaError(f"catalog proposal selected[{index}].{field} is invalid")
+        for field in ("demand_request_count_30m", "endpoint_count"):
+            if isinstance(row[field], bool) or not isinstance(row[field], int) or row[field] < 0:
+                raise SchemaError(f"catalog proposal selected[{index}].{field} is invalid")
+        if isinstance(row["min_ram_gb_tier"], bool) or not isinstance(row["min_ram_gb_tier"], int) or row["min_ram_gb_tier"] < 1:
+            raise SchemaError(f"catalog proposal selected[{index}].min_ram_gb_tier is invalid")
+        if not isinstance(row["benchmark_provider"], str) or not row["benchmark_provider"] or not isinstance(row["servability_note"], str) or not row["servability_note"]:
+            raise SchemaError(f"catalog proposal selected[{index}] provenance strings are invalid")
+        for field in ("mlx_repo", "quant"):
+            if row[field] is not None and not isinstance(row[field], str):
+                raise SchemaError(f"catalog proposal selected[{index}].{field} must be a string or null")
+    for index, row in enumerate(proposal["excluded"]):
+        if not isinstance(row, dict) or set(row) != {"model_id", "reason"}:
+            raise SchemaError(f"catalog proposal excluded[{index}] has missing or unexpected fields")
+        if not isinstance(row["model_id"], str) or not row["model_id"] or not isinstance(row["reason"], str) or not row["reason"]:
+            raise SchemaError(f"catalog proposal excluded[{index}] has invalid model_id/reason")
+
+
+def fetch_catalog_records(
+    candidate_ids: Sequence[str],
+    policy: Mapping[str, Any],
+    *,
+    or_client: HTTPClient,
+    servability_resolver: Callable[[str, Decimal], Mapping[str, Any]],
+    tiers: Sequence[int] = CATALOG_RAM_TIERS_GB,
+    retries: int = 2,
+    timeout_seconds: float = 15.0,
+    sleeper: Callable[[float], None] = time.sleep,
+    clock: Callable[[], float] = time.monotonic,
+    generation_timeout_seconds: float = 1800.0,
+) -> list[dict[str, Any]]:
+    """Network stage: per candidate, fetch OpenRouter endpoints -> unweighted
+    median price + demand gauge, and resolve MLX servability/residency. A per-candidate
+    error is recorded in the record (surfaced in the proposal's excluded trail),
+    never aborting the whole scan -- a proposal is reviewed by a human."""
+    min_endpoint_requests = policy.get("min_endpoint_request_count_30m", 1)
+    min_distinct_providers = policy.get("min_distinct_providers", 1)
+    max_residency = Decimal(str(max(tiers)))
+    deadline = clock() + generation_timeout_seconds
+    records: list[dict[str, Any]] = []
+    for model_id in candidate_ids:
+        record: dict[str, Any] = {"model_id": model_id, "pricing": None, "demand_request_count_30m": 0, "endpoint_count": 0, "servability": {}}
+        if clock() >= deadline:
+            # The wall-clock budget is exhausted; record the remaining candidates
+            # as skipped (surfaced in the proposal's excluded trail) rather than
+            # running unbounded OpenRouter + HuggingFace probes past the budget.
+            record["servability"] = {"verdict": "error", "reasons": ["scan budget exhausted before this candidate was probed"]}
+            records.append(record)
+            continue
+        url = ENDPOINTS_URL.format(model_id=quote(model_id, safe="/"))
+        try:
+            document = fetch_json(or_client, url, f"endpoints {model_id}", retries=retries, timeout_seconds=timeout_seconds, sleeper=sleeper, deadline=deadline, clock=clock)
+            record["demand_request_count_30m"] = model_demand_activity(document)
+            data = document.get("data") if isinstance(document, dict) else None
+            endpoints = data.get("endpoints") if isinstance(data, dict) else None
+            record["endpoint_count"] = len(endpoints) if isinstance(endpoints, list) else 0
+            record["pricing"] = cheapest_endpoint_pricing(document, model_id, min_request_count_30m=min_endpoint_requests, min_distinct_providers=min_distinct_providers)
+        except EngineError as error:
+            record["servability"] = {"verdict": "error", "reasons": [f"OpenRouter endpoint pricing failed: {error}"]}
+            records.append(record)
+            continue
+        if clock() >= deadline:
+            record["servability"] = {"verdict": "error", "reasons": ["scan budget exhausted before the servability probe"]}
+            records.append(record)
+            continue
+        try:
+            record["servability"] = dict(servability_resolver(model_id, max_residency))
+        except Exception as error:  # servability probe is best-effort; surface, don't abort
+            record["servability"] = {"verdict": "error", "reasons": [f"servability probe failed: {type(error).__name__}: {error}"]}
+        if clock() >= deadline:
+            # The resolver returned after the budget expired; discard its verdict
+            # so a late result cannot enter the proposal.
+            record["servability"] = {"verdict": "error", "reasons": ["scan budget exhausted during the servability probe"]}
+        records.append(record)
+    return records
+
+
+def command_propose(args: argparse.Namespace) -> int:
+    policy = load_json_file(Path(args.policy), "policy")
+    validate_policy(policy)
+    # Bound the scan before any network work (mirror fetch): a NaN generation
+    # timeout would disable the wall-clock budget; reject non-finite/out-of-range.
+    if not math.isfinite(args.generation_timeout_seconds) or not 1 <= args.generation_timeout_seconds <= 3600:
+        raise FetchError("propose generation timeout must be finite and within 1..3600 seconds")
+    if not math.isfinite(args.timeout_seconds) or not 0 < args.timeout_seconds <= 60:
+        raise FetchError("propose request timeout must be finite, positive, and no more than 60 seconds")
+    if not math.isfinite(args.hf_timeout_seconds) or not 0 < args.hf_timeout_seconds <= 60:
+        raise FetchError("propose HuggingFace timeout must be finite, positive, and no more than 60 seconds")
+    if isinstance(args.max_candidates, bool) or not 1 <= args.max_candidates <= 1000:
+        raise FetchError("propose --max-candidates must be within 1..1000")
+    if args.retries < 0:
+        raise FetchError("propose --retries must be non-negative")
+    if not os.environ.get("OPENROUTER_API_KEY"):
+        raise FetchError("OPENROUTER_API_KEY is required for the documented OpenRouter APIs")
+    # Always pull /models to build the id -> hugging_face_id map: the resolver
+    # uses the canonical HF id as its servability search stem (OpenRouter slugs
+    # and HF repo names diverge, e.g. mistral-small-2603 vs Mistral-Small-4-119B).
+    catalog = fetch_json(UrllibHTTPClient(), MODELS_URL, "models catalog", retries=args.retries, timeout_seconds=args.timeout_seconds, sleeper=time.sleep, deadline=time.monotonic() + 120, clock=time.monotonic)
+    catalog_rows = [row for row in catalog.get("data", []) if isinstance(row, dict) and isinstance(row.get("id"), str)]
+    hf_id_by_model = {row["id"]: row.get("hugging_face_id") for row in catalog_rows}
+    if args.candidates:
+        loaded = json.loads(Path(args.candidates).read_text(encoding="utf-8"))
+        candidate_ids = loaded["models"] if isinstance(loaded, dict) else loaded
+        if not isinstance(candidate_ids, list) or not all(isinstance(m, str) for m in candidate_ids):
+            raise SchemaError("candidates file must be a JSON list of model ids or {\"models\": [...]}")
+        candidate_ids = sorted(dict.fromkeys(candidate_ids))
+    else:
+        candidate_ids = select_open_weight_candidates(row["id"] for row in catalog_rows)
+    # Every candidate must be a well-formed OpenRouter model id BEFORE it reaches
+    # URL construction: the host stays pinned, but this also constrains the path
+    # to the documented {provider}/{model} shape (no extra-slash injection).
+    for model_id in candidate_ids:
+        if not MODEL_ID_RE.fullmatch(model_id):
+            raise SchemaError(f"candidate model id has unsafe shape: {model_id!r}")
+    if not candidate_ids:
+        raise SchemaError("no candidate models to propose")
+    if len(candidate_ids) > args.max_candidates:
+        raise SchemaError(f"candidate universe {len(candidate_ids)} exceeds --max-candidates {args.max_candidates}; narrow the candidate set")
+    import openrouter_mlx_candidates as mlx  # lazy: servability resolver, avoids import cycle
+    hf_client = mlx.real_client(args.hf_timeout_seconds)
+    def resolver(model_id: str, max_residency: Decimal) -> Mapping[str, Any]:
+        return mlx.resolve_row(model_id, max_residency, hf_client, hugging_face_id=hf_id_by_model.get(model_id))
+    records = fetch_catalog_records(
+        candidate_ids, policy,
+        or_client=UrllibHTTPClient(),
+        servability_resolver=resolver,
+        retries=args.retries,
+        timeout_seconds=args.timeout_seconds,
+        generation_timeout_seconds=args.generation_timeout_seconds,
+    )
+    proposal = build_catalog_proposal(
+        records, policy,
+        now=utc_now(),
+        yield_floor_completion_per_mtok=parse_decimal(args.yield_floor_per_mtok, "yield floor", allow_zero=True),
+        demand_floor_request_count_30m=args.demand_floor_request_count,
+    )
+    validate_catalog_proposal(proposal)
+    output_dir = Path(args.output_dir)
+    name = f"openrouter-catalog-proposal-{proposal['generated_at'].replace(':', '-')}.json"
+    atomic_publish_json_directory(output_dir, {name: proposal})
+    print(output_dir / name)
+    return 0
+
+
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description=__doc__)
     subcommands = result.add_subparsers(dest="command", required=True)
@@ -2063,6 +2650,18 @@ def parser() -> argparse.ArgumentParser:
     compute.add_argument("--min-provider-targets", required=True)
     compute.add_argument("--output-dir", required=True)
     compute.set_defaults(handler=command_compute)
+    propose = subcommands.add_parser("propose", help="propose a best-in-class servable catalog by yield-first by-id scan")
+    propose.add_argument("--policy", default=str(DEFAULT_POLICY_PATH))
+    propose.add_argument("--output-dir", required=True)
+    propose.add_argument("--candidates", default=None, help="JSON file of model ids to consider; omit to pull+filter the OpenRouter models catalog")
+    propose.add_argument("--yield-floor-per-mtok", default="0.30", help="minimum unweighted-median completion price ($/Mtok) to select")
+    propose.add_argument("--demand-floor-request-count", type=int, default=500, help="minimum summed 30m request_count to select")
+    propose.add_argument("--retries", type=int, default=2)
+    propose.add_argument("--timeout-seconds", type=float, default=15.0)
+    propose.add_argument("--hf-timeout-seconds", type=float, default=15.0)
+    propose.add_argument("--max-candidates", type=int, default=200, help="hard cap on candidates scanned (bounds OpenRouter+HF probes)")
+    propose.add_argument("--generation-timeout-seconds", type=float, default=1800.0, help="overall wall-clock budget for the scan")
+    propose.set_defaults(handler=command_propose)
     return result
 
 

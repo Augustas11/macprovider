@@ -20,7 +20,6 @@ import sys
 import tempfile
 import types
 from datetime import datetime, timezone
-from decimal import Decimal, InvalidOperation
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -48,7 +47,6 @@ def load_openrouter_pricing_engine():
 
 
 openrouter_pricing_engine, OPENROUTER_PRICING_ENGINE_SHA256 = load_openrouter_pricing_engine()
-liquidity_volume_floor = openrouter_pricing_engine.liquidity_volume_floor
 
 CATALOG_DIR = ROOT / "phase3-binary" / "catalog" / "autotune"
 STATIC_DIR = ROOT / "phase3-binary" / "dist" / "static"
@@ -753,26 +751,18 @@ def validate_market_peg_bind(data: bytes) -> dict:
     return value
 
 
-def market_decimal_string(value: Decimal) -> str:
-    rendered = format(value.normalize(), "f")
-    return "0" if rendered in {"-0", ""} else rendered
-
-
-def market_weighted_median(candidates: list[dict], field: str) -> tuple[str, dict]:
-    ordered = sorted(candidates, key=lambda item: Decimal(item[field]))
-    total = sum(int(item["completion_tokens_last_30d"]) for item in ordered)
-    cumulative = 0
-    for item in ordered:
-        cumulative += int(item["completion_tokens_last_30d"])
-        if cumulative * 2 >= total:
-            return market_decimal_string(Decimal(item[field])), item
-    selected = ordered[-1]
-    return market_decimal_string(Decimal(selected[field])), selected
-
-
 def validate_market_snapshot_liquidity_replay(snapshot: dict) -> None:
     if snapshot.get("schema_version") == 5:
         return
+    # The per-row liquidity/median re-derivation is owned by the pricing engine's
+    # authoritative validate_snapshot (single source of truth). Delegating here
+    # keeps this release-side replay from diverging from the engine's pricing
+    # basis (the engine switched from a 30d-token volume-weighted median to an
+    # unweighted median over active endpoints gated by 30m request_count).
+    try:
+        openrouter_pricing_engine.validate_snapshot(snapshot)
+    except openrouter_pricing_engine.EngineError as error:
+        fail(f"market-peg: snapshot failed engine liquidity validation: {error}")
     rows = snapshot.get("rows")
     if not isinstance(rows, list):
         fail("market-peg: snapshot rows must be an array")
@@ -791,47 +781,6 @@ def validate_market_snapshot_liquidity_replay(snapshot: dict) -> None:
             fail(f"market-peg: snapshot row {index} ranking_date is invalid: {error}")
         if row_date < ranking_start or row_date > ranking_end:
             fail(f"market-peg: snapshot row {index} ranking_date is outside the declared ranking window")
-        if row.get("pricing_status") != "active_priced":
-            continue
-        pricing = row.get("pricing")
-        liquidity = pricing.get("liquidity_filter") if isinstance(pricing, dict) else None
-        if not isinstance(liquidity, dict):
-            fail(f"market-peg: snapshot row {index} has no liquidity filter")
-        candidates = liquidity.get("eligible_endpoint_liquidity") if isinstance(liquidity, dict) else None
-        if not isinstance(candidates, list) or not candidates:
-            fail(f"market-peg: snapshot row {index} has no retained eligible endpoint liquidity")
-        try:
-            model_volume = int(row["demand"]["total_token_volume"])
-            volume_floor = liquidity_volume_floor(model_volume)
-            for candidate_index, candidate in enumerate(candidates):
-                endpoint_model_id = candidate["endpoint_model_id"]
-                prompt = Decimal(candidate["prompt_usd_per_mtok"])
-                completion = Decimal(candidate["completion_usd_per_mtok"])
-                tokens = int(candidate["completion_tokens_last_30d"])
-                if not isinstance(endpoint_model_id, str) or endpoint_model_id.endswith(":free"):
-                    fail(
-                        f"market-peg: snapshot row {index} retained endpoint {candidate_index} "
-                        "does not identify a paid endpoint"
-                    )
-                if candidate.get("endpoint_status") != 0 or prompt <= 0 or completion <= 0 or tokens < volume_floor:
-                    fail(
-                        f"market-peg: snapshot row {index} retained endpoint {candidate_index} "
-                        "does not satisfy the recomputed liquidity floor"
-                    )
-            completion_median, completion_endpoint = market_weighted_median(candidates, "completion_usd_per_mtok")
-            prompt_median, prompt_endpoint = market_weighted_median(candidates, "prompt_usd_per_mtok")
-        except (KeyError, TypeError, ValueError, InvalidOperation) as error:
-            fail(f"market-peg: snapshot row {index} retained liquidity is invalid: {error}")
-        if completion_median != pricing.get("completion_per_mtok"):
-            fail(f"market-peg: snapshot row {index} completion median does not match retained liquidity")
-        if prompt_median != pricing.get("input_per_mtok"):
-            fail(f"market-peg: snapshot row {index} prompt median does not match retained liquidity")
-        if liquidity.get("minimum_completion_tokens_last_30d") != volume_floor:
-            fail(f"market-peg: snapshot row {index} volume floor does not match retained liquidity")
-        if liquidity.get("completion_tokens_last_30d") != completion_endpoint["completion_tokens_last_30d"]:
-            fail(f"market-peg: snapshot row {index} completion median volume does not match retained liquidity")
-        if liquidity.get("selected_prompt_completion_tokens_last_30d") != prompt_endpoint["completion_tokens_last_30d"]:
-            fail(f"market-peg: snapshot row {index} prompt median volume does not match retained liquidity")
 
 
 def validate_market_snapshot_wall_clock_freshness(snapshot: dict) -> None:

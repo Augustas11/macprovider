@@ -74,6 +74,11 @@ PACKAGING_TOKENS = frozenset({
     "4bit", "5bit", "6bit", "8bit", "3bit", "2bit", "mxfp4", "nvfp4", "mixed",
     "bf16", "fp16", "fp32", "f16", "f32", "q4", "q5", "q6", "q8", "dwq", "gs",
     "it", "instruct", "chat", "mlx", "hf", "text",
+    # mtp = Multi-Token Prediction: a serving/decoding variant of the SAME base
+    # model, not a different derivative. It must not be penalised as an unknown
+    # token, or the clean text-generation `-MTP-4bit` build loses to the
+    # vision-language `-4bit` build for VL model families (Qwen3-VL, etc.).
+    "mtp",
 })
 TEXT_PIPELINE_TAGS = frozenset({"text-generation"})
 # Multimodal tags that DO emit text but are not a pure text serving path.
@@ -87,6 +92,20 @@ MULTIMODAL_ARCH_MARKERS = frozenset({"llava", "fuyu", "vision", "clip", "whisper
 # ...OmniForCausalLM, ...AudioForCausalLM).
 MULTIMODAL_ARCH_PATTERNS = ("vlfor", "omnifor", "audiofor", "visionfor", "speechfor", "imagefor")
 CAUSAL_LM_ARCH_SUFFIX = "forcausallm"
+# Known decoder-multimodal LLM families that ship as `...ForConditionalGeneration`
+# and are served for TEXT via mlx-vlm. Matched against architecture + model_type.
+# Deliberately an allowlist: an unrecognised `ForConditionalGeneration` model is
+# NOT admitted as text (fail closed), because the suffix is also used by
+# encoder-decoder seq2seq models.
+MULTIMODAL_TEXT_MODEL_FAMILIES = frozenset({
+    "mistral3", "gemma3", "gemma3n", "llava", "llava_next", "llava-next", "llavanext",
+    "qwen2_vl", "qwen2-vl", "qwen2vl", "qwen2_5_vl", "qwen2_5vl", "qwen3_vl", "qwen3vl",
+    "paligemma", "pixtral", "idefics2", "idefics3", "internvl", "minicpmv", "phi3_v",
+    "phi4_multimodal", "aya_vision", "llama4", "smolvlm",
+})
+# Encoder-decoder seq2seq families that also end in `ForConditionalGeneration` but
+# are a different (non-chat, non-mlx-vlm) serving path -- always excluded.
+SEQ2SEQ_MODEL_MARKERS = ("t5", "bart", "pegasus", "marian", "mbart", "mt5", "led", "bigbird_pegasus", "prophetnet", "blenderbot", "m2m")
 # Conservative multiplier over safetensors weight bytes to cover loader,
 # activation, and KV-cache residency (weight bytes are file size, not runtime RAM).
 RESIDENCY_OVERHEAD = Decimal("1.3")
@@ -96,6 +115,9 @@ class ResolveError(Exception):
     """Fail-closed condition while resolving a single candidate row."""
 
 
+MAX_HF_RESPONSE_BYTES = 8 * 1024 * 1024
+
+
 def real_client(timeout: float) -> Client:
     def fetch(url: str) -> object:
         request = urllib.request.Request(url, headers={"Accept": "application/json", "User-Agent": "macprovider-mlx-candidates"})
@@ -103,7 +125,19 @@ def real_client(timeout: float) -> Client:
             with urllib.request.urlopen(request, timeout=timeout) as response:
                 if response.status != 200:
                     raise ResolveError(f"HuggingFace returned HTTP {response.status}")
-                payload = response.read()
+                # Fail closed on an oversized response instead of reading it all
+                # into memory: cap by Content-Length and by a bounded read (a
+                # hostile/broken response could otherwise exhaust memory).
+                declared = response.headers.get("Content-Length")
+                if declared is not None:
+                    try:
+                        if int(declared) > MAX_HF_RESPONSE_BYTES:
+                            raise ResolveError(f"HuggingFace response too large ({declared} bytes)")
+                    except ValueError as error:
+                        raise ResolveError("HuggingFace Content-Length is not an integer") from error
+                payload = response.read(MAX_HF_RESPONSE_BYTES + 1)
+                if len(payload) > MAX_HF_RESPONSE_BYTES:
+                    raise ResolveError(f"HuggingFace response exceeds {MAX_HF_RESPONSE_BYTES} bytes")
         except (urllib.error.URLError, http.client.HTTPException, TimeoutError, OSError) as error:
             raise ResolveError(f"HuggingFace request failed: {error}") from error
         try:
@@ -208,6 +242,21 @@ def unrecognised_suffix_tokens(name: str, stem: str) -> list[str]:
     return [token for token in residual if not _is_packaging_token(token)]
 
 
+def hf_base_stem(hugging_face_id: object) -> str | None:
+    """The base-model name from an OpenRouter `hugging_face_id` (`org/Name`).
+
+    OpenRouter slugs and HuggingFace repo names use different versioning schemes
+    (e.g. slug `mistral-small-2603` vs repo `Mistral-Small-4-119B-2603`), so the
+    slug tail cannot always locate the mlx-community build. When OpenRouter
+    publishes the canonical `hugging_face_id`, its model portion is the reliable
+    stem for the mlx-community search.
+    """
+    if not isinstance(hugging_face_id, str) or not hugging_face_id.strip():
+        return None
+    stem = hugging_face_id.split("/", 1)[-1].strip()
+    return stem or None
+
+
 def pick_canonical_build(builds: list[dict], stem: str) -> tuple[dict | None, bool]:
     """Choose the most canonical fleet-quant build, or None with a matched flag.
 
@@ -237,6 +286,13 @@ def pick_canonical_build(builds: list[dict], stem: str) -> tuple[dict | None, bo
         scored.append((len(variant), MLX_QUANT_TAGS.index(quant), len(name), repo_id, quant, item.get("pipeline_tag"), variant))
     if not scored:
         return None, matched_any
+    # Order by fewest variant tokens, then fleet-quant preference, then shortest
+    # name -- which favours the complete base checkpoint (e.g. `-4bit`) over a
+    # partial serving-delta repo (e.g. an `-MTP-4bit` head-only build whose
+    # safetensors are a fraction of the model). Pipeline-tag is NOT a tiebreaker:
+    # preferring a text-generation build could pick such a partial repo and report
+    # a bogus tiny residency; VL base builds carry the full weights and are
+    # included downstream as a flagged text-serving class.
     scored.sort()
     _, _, _, repo_id, quant, list_pipeline_tag, variant = scored[0]
     return {"repo": repo_id, "quant": quant, "list_pipeline_tag": list_pipeline_tag, "variant_tokens": variant}, matched_any
@@ -300,15 +356,43 @@ def is_causal_lm(config: dict | None) -> bool:
     return any(isinstance(arch, str) and arch.lower().endswith(CAUSAL_LM_ARCH_SUFFIX) for arch in architectures)
 
 
+def is_conditional_generation_arch(config: dict | None) -> bool:
+    """True only for a `...ForConditionalGeneration` decoder that is a KNOWN
+    multimodal LLM served for text (Mistral3, Gemma3, Llava, ...), identified by
+    model_type/architecture family -- NOT for encoder-decoder seq2seq models that
+    share the `ForConditionalGeneration` suffix (T5/BART/Pegasus/...), which are a
+    different serving path and must not be admitted as text. Bare suffix matching
+    would false-positive on seq2seq; the allowlist keeps admission narrow and
+    fail-closed for unrecognised families."""
+    architectures = (config or {}).get("architectures")
+    if not isinstance(architectures, list):
+        return False
+    if not any(isinstance(arch, str) and arch.lower().endswith("forconditionalgeneration") for arch in architectures):
+        return False
+    blob = _arch_blob(config)
+    if any(marker in blob for marker in SEQ2SEQ_MODEL_MARKERS):
+        return False
+    return any(family in blob for family in MULTIMODAL_TEXT_MODEL_FAMILIES)
+
+
 def classify(repo_id: str, quant: str | None, residency_gb: Decimal, pipeline_tag: str | None, config: dict | None, max_residency: Decimal, variant_tokens: list[str] | tuple = ()) -> dict:
     required_gb = residency_gb * RESIDENCY_OVERHEAD
     evidence = {"mlx_repo": repo_id, "quant": quant, "residency_gb": f"{residency_gb:.1f}", "required_gb": f"{required_gb:.1f}", "pipeline_tag": pipeline_tag}
     architectures = (config or {}).get("architectures")
     if required_gb > max_residency:
         return {**evidence, "verdict": "not_servable", "reasons": [f"conservative runtime residency {required_gb:.1f} GB (weights {residency_gb:.1f} GB x {RESIDENCY_OVERHEAD} headroom) exceeds the {max_residency} GB fleet band"]}
+    # A multimodal LLM served for TEXT via mlx-vlm -- an image-text-to-text VLM,
+    # or a conditional-generation decoder in the known-family allowlist -- is
+    # nominated as `multimodal_text` BEFORE the generic multimodal veto below.
+    # Otherwise VLM families that also match the veto markers (llava, qwen*-vl,
+    # internvl, pixtral) would be dropped without a serving_class and excluded
+    # from the proposal. `any-to-any` (omni) is deliberately NOT included here.
+    if pipeline_tag == "image-text-to-text" or is_conditional_generation_arch(config):
+        return {**evidence, "verdict": "unresolved", "serving_class": "multimodal_text",
+                "reasons": [f"multimodal LLM (pipeline_tag {pipeline_tag!r}, architecture {architectures}) served for text via mlx-vlm; confirm the mlx-vlm text path before pricing"]}
     # Architecture evidence VETOES a clean text verdict: a multimodal-shaped
-    # architecture conflicts with a text-only serving path even when the HF
-    # pipeline_tag claims text-generation (stale/mistagged repositories exist).
+    # architecture (that is NOT a known text-servable VLM family above) conflicts
+    # with a text-only serving path even when the pipeline_tag claims text.
     if is_multimodal_arch(config):
         return {**evidence, "verdict": "unresolved", "reasons": [f"config architecture {architectures} is multimodal-shaped and conflicts with any text-only serving path (pipeline_tag {pipeline_tag!r})"]}
     # The strongest positive verdict this tool emits is "review": HuggingFace
@@ -341,11 +425,13 @@ def classify(repo_id: str, quant: str | None, residency_gb: Decimal, pipeline_ta
     return {**evidence, "verdict": "review", "reasons": [reason]}
 
 
-def resolve_row(source_model_id: str, max_residency: Decimal, client: Client) -> dict:
+def resolve_row(source_model_id: str, max_residency: Decimal, client: Client, *, hugging_face_id: object = None) -> dict:
     vendor = source_model_id.split("/", 1)[0].lower()
     if vendor in CLOSED_WEIGHT_VENDORS:
         return {"verdict": "not_servable", "reasons": [f"{vendor} publishes closed-weight API models; no local MLX build is possible"]}
-    stem = model_stem(source_model_id)
+    # Prefer OpenRouter's canonical hugging_face_id as the search stem; fall back
+    # to the slug tail. The slug and HF repo names can diverge (e.g. mistral).
+    stem = hf_base_stem(hugging_face_id) or model_stem(source_model_id)
     builds = search_builds(stem, client)
     picked, matched_any = pick_canonical_build(builds, stem)
     if picked is None:
