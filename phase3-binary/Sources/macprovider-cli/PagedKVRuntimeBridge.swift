@@ -431,14 +431,25 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         var state: LMOutput.State?
     }
 
+    private struct DecodeSession {
+        var requestIDs: [String]
+        var batchedCaches: [PagedKVBatchLayerCache]
+        var compiledCaches: [KVCache]
+        var compiledStep: CompiledDecodeStep?
+    }
+
     private let container: ModelContainer
     private let blockSizeTokens: Int
     private let maxPhysicalBlocks: Int
     private let poolEpoch: Int
     private let layerCount: Int
     private let contiguousCacheBridge: (any PagedKVRuntimeCacheBridge)?
+    /// When true, lockstep decode reuses a compiled `[B, 1]` graph over batched
+    /// contiguous KV. Tests keep the default off so fake models are not traced.
+    let compiledDecode: Bool
     private let lock = NSLock()
     private var rows: [String: RowState] = [:]
+    private var decodeSession: DecodeSession?
     private var activeOperations = 0
     private var cancelRequested = false
     private var cancellationWaiters: [CheckedContinuation<Void, Never>] = []
@@ -449,7 +460,8 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         maxPhysicalBlocks: Int,
         poolEpoch: Int,
         layerCount: Int,
-        contiguousCacheBridge: (any PagedKVRuntimeCacheBridge)? = nil
+        contiguousCacheBridge: (any PagedKVRuntimeCacheBridge)? = nil,
+        compiledDecode: Bool = false
     ) {
         self.container = container
         self.blockSizeTokens = blockSizeTokens
@@ -457,6 +469,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         self.poolEpoch = poolEpoch
         self.layerCount = max(1, layerCount)
         self.contiguousCacheBridge = contiguousCacheBridge
+        self.compiledDecode = compiledDecode
     }
 
     /// Descriptor-sourced convenience initializer. Kept for existing production and test
@@ -468,7 +481,8 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         container: ModelContainer,
         descriptor: PagedKVDescriptor,
         layerCount: Int,
-        contiguousCacheBridge: (any PagedKVRuntimeCacheBridge)? = nil
+        contiguousCacheBridge: (any PagedKVRuntimeCacheBridge)? = nil,
+        compiledDecode: Bool = false
     ) {
         self.init(
             container: container,
@@ -476,7 +490,8 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             maxPhysicalBlocks: descriptor.maxPhysicalBlocks,
             poolEpoch: descriptor.poolEpoch,
             layerCount: layerCount,
-            contiguousCacheBridge: contiguousCacheBridge
+            contiguousCacheBridge: contiguousCacheBridge,
+            compiledDecode: compiledDecode
         )
     }
 
@@ -502,6 +517,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                 try self.setRowState(state, for: input.requestID, binding: input.binding)
                 outputs.append(ContinuousBatchPrefillOutput(requestID: input.requestID))
             }
+            self.clearDecodeSession()
             return outputs
         }
     }
@@ -519,40 +535,51 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         }
 
         let decoded: [ContinuousBatchDecodeOutcome] = try await container.perform(nonSendable: supportedInputs) { context, supportedInputs in
-            var rowStates = supportedInputs.map {
-                self.rowState(
-                    for: $0.requestID,
-                    binding: $0.binding,
-                    initialOffset: $0.committedKVTokenCount
-                )
+            try self.performDecode(
+                model: context.model,
+                supportedInputs: supportedInputs,
+                steps: 1
+            )
+        }
+        for outcome in decoded {
+            if case .rowFailure(let requestID) = outcome {
+                rowFailures.insert(requestID)
             }
-            if supportedInputs.count > 1 && rowStates.contains(where: { $0.state != nil }) {
-                return supportedInputs.map { ContinuousBatchDecodeOutcome.rowFailure(requestID: $0.requestID) }
-            }
-            let batchedCaches = try Self.batchedCaches(from: rowStates.map(\.caches))
-            let tokenInput = MLXArray(supportedInputs.map { Int32($0.currentToken) }).reshaped([supportedInputs.count, 1])
-            let text = LMInput.Text(tokens: tokenInput)
-            let output = withPreparedCache(batchedCaches, lengths: text.sequenceLengths) {
-                context.model(text, cache: batchedCaches, state: supportedInputs.count == 1 ? rowStates[0].state : nil)
-            }
-            let sampled = argMax(output.logits[0..., -1, 0...], axis: -1).asArray(Int.self)
-            guard sampled.count == supportedInputs.count else {
-                throw ContinuousBatchSchedulerError.unsupported("continuous_batching_invalid_logits_shape")
-            }
-            if supportedInputs.count == 1 {
-                rowStates[0].state = output.state
-            } else if output.state != nil {
-                return supportedInputs.map { ContinuousBatchDecodeOutcome.rowFailure(requestID: $0.requestID) }
-            }
-            for (index, input) in supportedInputs.enumerated() {
-                try self.setRowState(rowStates[index], for: input.requestID, binding: input.binding)
-            }
-            return zip(supportedInputs, sampled).map { input, token in
-                ContinuousBatchDecodeOutcome.output(ContinuousBatchDecodeOutput(
-                    requestID: input.requestID,
-                    token: token
-                ))
-            }
+        }
+        let byID: [String: ContinuousBatchDecodeOutcome] = Dictionary(
+            uniqueKeysWithValues: decoded.map { ($0.requestID, $0) }
+        )
+        return inputs.map { input in
+            if rowFailures.contains(input.requestID) { return .rowFailure(requestID: input.requestID) }
+            if let outcome = byID[input.requestID] { return outcome }
+            return .rowFailure(requestID: input.requestID)
+        }
+    }
+
+    /// Greedy lockstep decode of `steps` tokens inside one `container.perform`.
+    /// The throughput harness uses this so the scheduler backend can prove
+    /// compiled contiguous scale without a per-token actor hop.
+    func decodeLockstepWindow(
+        rows inputs: [ContinuousBatchDecodeInput],
+        steps: Int
+    ) async throws -> [ContinuousBatchDecodeOutcome] {
+        guard steps >= 1 else { return [] }
+        guard !inputs.isEmpty else { return [] }
+        guard beginOperation() else {
+            throw ContinuousBatchSchedulerError.unsupported("continuous_batching_backend_cancelled")
+        }
+        defer { endOperation() }
+        let supportedInputs = inputs.filter(Self.supportsGreedySampling)
+        var rowFailures = Set(inputs.map(\.requestID)).subtracting(supportedInputs.map(\.requestID))
+        guard !supportedInputs.isEmpty else {
+            return inputs.map { .rowFailure(requestID: $0.requestID) }
+        }
+        let decoded: [ContinuousBatchDecodeOutcome] = try await container.perform(nonSendable: supportedInputs) { context, supportedInputs in
+            try self.performDecode(
+                model: context.model,
+                supportedInputs: supportedInputs,
+                steps: steps
+            )
         }
         for outcome in decoded {
             if case .rowFailure(let requestID) = outcome {
@@ -570,6 +597,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     }
 
     func finish(requestID: String) {
+        invalidateDecodeSession(containing: requestID)
         removeRowState(for: requestID, discardRecordedCache: false)
     }
 
@@ -601,6 +629,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             eval(output.logits)
             state.state = output.state
             try self.setRowState(state, for: input.requestID, binding: input.binding)
+            self.invalidateDecodeSession(containing: input.requestID)
         }
     }
 
@@ -608,6 +637,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         await withCheckedContinuation { continuation in
             lock.lock()
             cancelRequested = true
+            decodeSession = nil
             let handlesToDiscard = rows.compactMap { $0.value.caches.first?.binding.handle }
             rows.removeAll()
             if activeOperations == 0 {
@@ -703,6 +733,158 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         }
     }
 
+    private func performDecode(
+        model: any LanguageModel,
+        supportedInputs: [ContinuousBatchDecodeInput],
+        steps: Int
+    ) throws -> [ContinuousBatchDecodeOutcome] {
+        let decodeSteps = max(1, steps)
+        var rowStates = supportedInputs.map {
+            self.rowState(
+                for: $0.requestID,
+                binding: $0.binding,
+                initialOffset: $0.committedKVTokenCount
+            )
+        }
+        if supportedInputs.count > 1 && rowStates.contains(where: { $0.state != nil }) {
+            return supportedInputs.map { ContinuousBatchDecodeOutcome.rowFailure(requestID: $0.requestID) }
+        }
+
+        let requestIDs = supportedInputs.map(\.requestID)
+        var session = copyDecodeSession()
+        let batchedCaches: [PagedKVBatchLayerCache]
+        if let existing = session, existing.requestIDs == requestIDs {
+            batchedCaches = existing.batchedCaches
+        } else {
+            session?.batchedCaches.forEach { $0.syncRowsFromBatch() }
+            batchedCaches = try Self.batchedCaches(from: rowStates.map(\.caches))
+            session = DecodeSession(
+                requestIDs: requestIDs,
+                batchedCaches: batchedCaches,
+                compiledCaches: [],
+                compiledStep: nil
+            )
+        }
+        let cachesAsKV: [KVCache] = batchedCaches
+        let canCompile = compiledDecode
+            && rowStates.allSatisfy({ $0.state == nil })
+            && cachesAsKV.allSatisfy { !$0.innerState().isEmpty }
+
+        let sampled: [Int]
+        if canCompile {
+            var compiledCaches: [KVCache]
+            let step: CompiledDecodeStep
+            if let existingStep = session?.compiledStep,
+               let existing = session?.compiledCaches,
+               existing.count == batchedCaches.count,
+               !existing.isEmpty
+            {
+                compiledCaches = existing
+                step = existingStep
+            } else {
+                compiledCaches = model.newCache(parameters: nil)
+                guard compiledCaches.count == batchedCaches.count else {
+                    throw ContinuousBatchSchedulerError.unsupported("continuous_batching_invalid_cache_layout")
+                }
+                for index in compiledCaches.indices {
+                    let packed = batchedCaches[index].innerState()
+                    if packed.count == 2 {
+                        compiledCaches[index].state = packed
+                    }
+                }
+                eval(compiledCaches)
+                step = CompiledDecodeStep(model: model, cache: compiledCaches, enabled: true)
+                session?.compiledCaches = compiledCaches
+                session?.compiledStep = step
+            }
+            var current = MLXArray(supportedInputs.map { Int32($0.currentToken) }).reshaped([supportedInputs.count, 1])
+            eval(current)
+            for _ in 0 ..< decodeSteps {
+                let logits = step.step(current)
+                current = argMax(logits[0..., -1, 0...], axis: -1).reshaped([supportedInputs.count, 1])
+                eval(current)
+            }
+            Stream().synchronize()
+            sampled = current.asArray(Int.self)
+            for index in compiledCaches.indices {
+                let compiledState = compiledCaches[index].state
+                if compiledState.count == 2 {
+                    batchedCaches[index].state = compiledState
+                }
+            }
+            batchedCaches.forEach { $0.syncRowsFromBatch() }
+        } else {
+            session?.compiledStep = nil
+            var currentTokens = supportedInputs.map(\.currentToken)
+            for _ in 0 ..< decodeSteps {
+                let tokenInput = MLXArray(currentTokens.map(Int32.init)).reshaped([supportedInputs.count, 1])
+                let text = LMInput.Text(tokens: tokenInput)
+                let output = withPreparedCache(cachesAsKV, lengths: text.sequenceLengths) {
+                    model(text, cache: cachesAsKV, state: supportedInputs.count == 1 ? rowStates[0].state : nil)
+                }
+                let stepSampled = argMax(output.logits[0..., -1, 0...], axis: -1).asArray(Int.self)
+                guard stepSampled.count == supportedInputs.count else {
+                    throw ContinuousBatchSchedulerError.unsupported("continuous_batching_invalid_logits_shape")
+                }
+                if supportedInputs.count == 1 {
+                    rowStates[0].state = output.state
+                } else if output.state != nil {
+                    return supportedInputs.map { ContinuousBatchDecodeOutcome.rowFailure(requestID: $0.requestID) }
+                }
+                currentTokens = stepSampled
+            }
+            sampled = currentTokens
+            batchedCaches.forEach { $0.syncRowsFromBatch() }
+        }
+
+        guard sampled.count == supportedInputs.count else {
+            throw ContinuousBatchSchedulerError.unsupported("continuous_batching_invalid_logits_shape")
+        }
+        storeDecodeSession(session)
+        for (index, input) in supportedInputs.enumerated() {
+            try self.setRowState(rowStates[index], for: input.requestID, binding: input.binding)
+        }
+        return zip(supportedInputs, sampled).map { input, token in
+            ContinuousBatchDecodeOutcome.output(ContinuousBatchDecodeOutput(
+                requestID: input.requestID,
+                token: token
+            ))
+        }
+    }
+
+    private func copyDecodeSession() -> DecodeSession? {
+        lock.lock()
+        defer { lock.unlock() }
+        return decodeSession
+    }
+
+    private func storeDecodeSession(_ session: DecodeSession?) {
+        lock.lock()
+        decodeSession = session
+        lock.unlock()
+    }
+
+    private func clearDecodeSession() {
+        lock.lock()
+        let session = decodeSession
+        decodeSession = nil
+        lock.unlock()
+        session?.batchedCaches.forEach { $0.syncRowsFromBatch() }
+    }
+
+    private func invalidateDecodeSession(containing requestID: String) {
+        lock.lock()
+        let session: DecodeSession?
+        if decodeSession?.requestIDs.contains(requestID) == true {
+            session = decodeSession
+            decodeSession = nil
+        } else {
+            session = nil
+        }
+        lock.unlock()
+        session?.batchedCaches.forEach { $0.syncRowsFromBatch() }
+    }
+
     func retainedRowCountForTest() -> Int {
         lock.lock()
         defer { lock.unlock() }
@@ -717,6 +899,13 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         try setRowState(RowState(caches: caches, state: nil), for: requestID, binding: binding)
     }
 
+    func lockstepInnerStateNonEmptyForTest() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let session = decodeSession else { return false }
+        return session.batchedCaches.allSatisfy { !$0.innerState().isEmpty }
+    }
+
     private static func supportsGreedySampling(_ input: ContinuousBatchDecodeInput) -> Bool {
         input.temperature == 0.0
             && input.topP == 1.0
@@ -724,7 +913,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             && input.frequencyPenalty == 0.0
     }
 
-    private static func batchedCaches(from rowCaches: [[PagedKVCache]]) throws -> [KVCache] {
+    private static func batchedCaches(from rowCaches: [[PagedKVCache]]) throws -> [PagedKVBatchLayerCache] {
         guard let layerCount = rowCaches.first?.count,
               rowCaches.allSatisfy({ $0.count == layerCount })
         else {
@@ -739,17 +928,23 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
 private final class PagedKVBatchLayerCache: KVCache, @unchecked Sendable {
     private let rowCaches: [PagedKVCache]
     private var preparedLengths: [Int]?
+    private var keys: MLXArray?
+    private var values: MLXArray?
+    /// Live lockstep sequence length. When set, `update` concatenates on the
+    /// batch tensors instead of looping per row (required for `MLX.compile()`).
+    private var batchedOffset: Int?
 
     init(rowCaches: [PagedKVCache]) {
         self.rowCaches = rowCaches
+        packFromRows()
     }
 
     var offset: Int {
-        rowCaches.map(\.offset).min() ?? 0
+        batchedOffset ?? (rowCaches.map(\.offset).min() ?? 0)
     }
 
     var ropeOffset: RoPEOffset {
-        .batch(MLXArray(rowCaches.map { Int32($0.offset) }))
+        .batch(MLXArray(preUpdateOffsets.map(Int32.init)))
     }
 
     var maxSize: Int? {
@@ -757,37 +952,81 @@ private final class PagedKVBatchLayerCache: KVCache, @unchecked Sendable {
     }
 
     func innerState() -> [MLXArray] {
-        []
+        guard let keys, let values else { return [] }
+        return [keys, values]
     }
 
-    func update(keys: MLXArray, values: MLXArray) -> (MLXArray, MLXArray) {
-        guard keys.ndim == 4,
+    func syncRowsFromBatch() {
+        guard let keys, let values,
+              keys.ndim == 4,
               values.ndim == 4,
               keys.dim(0) == rowCaches.count,
               values.dim(0) == rowCaches.count
         else {
-            return (keys, values)
+            return
+        }
+        for (rowIndex, cache) in rowCaches.enumerated() {
+            cache.state = [
+                keys[rowIndex ..< rowIndex + 1, 0..., 0..., 0...],
+                values[rowIndex ..< rowIndex + 1, 0..., 0..., 0...]
+            ]
+        }
+        batchedOffset = nil
+    }
+
+    func update(keys incomingKeys: MLXArray, values incomingValues: MLXArray) -> (MLXArray, MLXArray) {
+        guard incomingKeys.ndim == 4,
+              incomingValues.ndim == 4,
+              incomingKeys.dim(0) == rowCaches.count,
+              incomingValues.dim(0) == rowCaches.count
+        else {
+            return (incomingKeys, incomingValues)
+        }
+        if allowsLockstepConcat,
+           let existingKeys = keys,
+           let existingValues = values,
+           existingKeys.dim(2) == offset
+        {
+            let newKeys = concatenated([existingKeys, incomingKeys], axis: 2)
+            let newValues = concatenated([existingValues, incomingValues], axis: 2)
+            keys = newKeys
+            values = newValues
+            batchedOffset = (batchedOffset ?? offset) + incomingKeys.dim(2)
+            return (newKeys, newValues)
+        }
+        if allowsLockstepConcat, keys == nil, values == nil {
+            keys = incomingKeys
+            values = incomingValues
+            batchedOffset = incomingKeys.dim(2)
+            return (incomingKeys, incomingValues)
         }
         var updatedKeys: [MLXArray] = []
         var updatedValues: [MLXArray] = []
         updatedKeys.reserveCapacity(rowCaches.count)
         updatedValues.reserveCapacity(rowCaches.count)
         for (rowIndex, cache) in rowCaches.enumerated() {
-            let keySlice = keys[rowIndex ..< rowIndex + 1, 0..., 0..., 0...]
-            let valueSlice = values[rowIndex ..< rowIndex + 1, 0..., 0..., 0...]
+            let keySlice = incomingKeys[rowIndex ..< rowIndex + 1, 0..., 0..., 0...]
+            let valueSlice = incomingValues[rowIndex ..< rowIndex + 1, 0..., 0..., 0...]
             let updated = cache.update(keys: keySlice, values: valueSlice)
             updatedKeys.append(updated.0)
             updatedValues.append(updated.1)
         }
-        return (
-            Self.concatenatePadded(updatedKeys, fallback: keys),
-            Self.concatenatePadded(updatedValues, fallback: values)
-        )
+        let mergedKeys = Self.concatenatePadded(updatedKeys, fallback: incomingKeys)
+        let mergedValues = Self.concatenatePadded(updatedValues, fallback: incomingValues)
+        keys = mergedKeys
+        values = mergedValues
+        batchedOffset = nil
+        return (mergedKeys, mergedValues)
     }
 
     var state: [MLXArray] {
-        get { [] }
-        set { _ = newValue }
+        get { innerState() }
+        set {
+            guard newValue.count == 2 else { return }
+            keys = newValue[0]
+            values = newValue[1]
+            batchedOffset = newValue[0].dim(2)
+        }
     }
 
     var metaState: [String] {
@@ -801,7 +1040,9 @@ private final class PagedKVBatchLayerCache: KVCache, @unchecked Sendable {
 
     @discardableResult
     func trim(_ n: Int) -> Int {
-        rowCaches.map { $0.trim(n) }.min() ?? 0
+        let trimmed = rowCaches.map { $0.trim(n) }.min() ?? 0
+        packFromRows()
+        return trimmed
     }
 
     func makeMask(
@@ -810,8 +1051,8 @@ private final class PagedKVBatchLayerCache: KVCache, @unchecked Sendable {
         returnArray: Bool
     ) -> MLXFast.ScaledDotProductAttentionMaskMode {
         // `makeMask` runs at the start of the forward, before any layer calls
-        // `update`, so `rowCaches.map(\.offset)` are PRE-update per-row token counts.
-        let preUpdateOffsets = rowCaches.map(\.offset)
+        // `update`, so these are PRE-update per-row token counts.
+        let preUpdateOffsets = self.preUpdateOffsets
         // Equal-length rows have no cross-row padding post-update, so a single query
         // token correctly attends every key (including itself) with no mask.
         if n == 1, Set(preUpdateOffsets).count <= 1 { return .none }
@@ -835,7 +1076,7 @@ private final class PagedKVBatchLayerCache: KVCache, @unchecked Sendable {
         // input-isolation probe catches. `offset` stays the pre-update max: it only
         // sets the query's absolute position for the causal check, which the per-row
         // `lengths` gate then restricts correctly.
-        let postUpdateLengths = rowCaches.map { $0.offset + n }
+        let postUpdateLengths = preUpdateOffsets.map { $0 + n }
         return .array(createCausalMask(
             n: n,
             offset: preUpdateOffsets.max() ?? offset,
@@ -858,6 +1099,42 @@ private final class PagedKVBatchLayerCache: KVCache, @unchecked Sendable {
 
     func copy() -> any KVCache {
         PagedKVBatchLayerCache(rowCaches: rowCaches.map { $0.concreteCopy() })
+    }
+
+    private var preUpdateOffsets: [Int] {
+        if let batchedOffset {
+            return Array(repeating: batchedOffset, count: rowCaches.count)
+        }
+        return rowCaches.map(\.offset)
+    }
+
+    private var allowsLockstepConcat: Bool {
+        rowCaches.allSatisfy { !$0.reconstructViaGather }
+            && Set(preUpdateOffsets).count <= 1
+    }
+
+    private func packFromRows() {
+        let keyArrays = rowCaches.compactMap { cache -> MLXArray? in
+            let state = cache.state
+            return state.count == 2 ? state[0] : nil
+        }
+        let valueArrays = rowCaches.compactMap { cache -> MLXArray? in
+            let state = cache.state
+            return state.count == 2 ? state[1] : nil
+        }
+        guard keyArrays.count == rowCaches.count,
+              valueArrays.count == rowCaches.count,
+              let firstKey = keyArrays.first,
+              let firstValue = valueArrays.first
+        else {
+            keys = nil
+            values = nil
+            batchedOffset = nil
+            return
+        }
+        keys = Self.concatenatePadded(keyArrays, fallback: firstKey)
+        values = Self.concatenatePadded(valueArrays, fallback: firstValue)
+        batchedOffset = rowCaches.map(\.offset).min()
     }
 
     private static func concatenatePadded(_ arrays: [MLXArray], fallback: MLXArray) -> MLXArray {

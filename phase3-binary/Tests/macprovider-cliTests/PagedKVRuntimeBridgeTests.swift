@@ -710,6 +710,101 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         XCTAssertEqual(Self.tokens(from: lone), ["lone": 4])
     }
 
+    func testLockstepSharedForwardDecodePopulatesBatchInnerState() async throws {
+        guard PagedKVMetallibGate.defaultMetallibExists() else {
+            throw XCTSkip("MLX default metallib is unavailable in this test host")
+        }
+
+        let descriptor = Self.bridgeDescriptor()
+        let container = ModelContainer(context: ModelContext(
+            configuration: ModelConfiguration(id: descriptor.modelID),
+            model: RuntimeBridgeFakeModel(nextTokenByInput: [
+                1: 4,
+                4: 5,
+                5: 6,
+                12: 7,
+                7: 8,
+            ]),
+            processor: StandInUserInputProcessor(),
+            tokenizer: RuntimeBridgeFakeTokenizer()
+        ))
+        let backend = PagedKVSharedForwardBackend(container: container, descriptor: descriptor, layerCount: 1)
+        let allocator = try PagedKVBlockAllocator(blockSizeTokens: descriptor.blockSizeTokens, maxPhysicalBlocks: 16)
+
+        let aHandle = try await allocator.allocate(conversationKey: "row-a", maxTokens: 8)
+        let bHandle = try await allocator.allocate(conversationKey: "row-b", maxTokens: 8)
+        _ = try await allocator.extend(aHandle, by: 1)
+        _ = try await allocator.extend(bHandle, by: 1)
+        let aPrefill = try await allocator.binding(for: aHandle)
+        let bPrefill = try await allocator.binding(for: bHandle)
+        _ = try await backend.prefill(rows: [
+            ContinuousBatchPrefillInput(
+                requestID: "row-a",
+                promptTokens: [10],
+                binding: aPrefill,
+                promptTokenOffset: 0,
+                committedKVTokenCount: 0,
+                targetKVTokenCount: 1,
+                isFinalChunk: true
+            ),
+            ContinuousBatchPrefillInput(
+                requestID: "row-b",
+                promptTokens: [11],
+                binding: bPrefill,
+                promptTokenOffset: 0,
+                committedKVTokenCount: 0,
+                targetKVTokenCount: 1,
+                isFinalChunk: true
+            ),
+        ])
+
+        let first = try await backend.decode(rows: [
+            try await Self.decodeInput(
+                requestID: "row-a",
+                currentToken: 1,
+                handle: aHandle,
+                allocator: allocator,
+                committedKVTokenCount: 1
+            ),
+            try await Self.decodeInput(
+                requestID: "row-b",
+                currentToken: 12,
+                handle: bHandle,
+                allocator: allocator,
+                committedKVTokenCount: 1
+            ),
+        ])
+        try await allocator.endDecodeStep(aHandle)
+        try await allocator.endDecodeStep(bHandle)
+        XCTAssertEqual(Self.tokens(from: first), ["row-a": 4, "row-b": 7])
+        XCTAssertTrue(backend.lockstepInnerStateNonEmptyForTest())
+
+        let second = try await backend.decode(rows: [
+            try await Self.decodeInput(
+                requestID: "row-a",
+                currentToken: 4,
+                handle: aHandle,
+                allocator: allocator,
+                committedKVTokenCount: 2
+            ),
+            try await Self.decodeInput(
+                requestID: "row-b",
+                currentToken: 7,
+                handle: bHandle,
+                allocator: allocator,
+                committedKVTokenCount: 2
+            ),
+        ])
+        try await allocator.endDecodeStep(aHandle)
+        try await allocator.endDecodeStep(bHandle)
+        XCTAssertEqual(Self.tokens(from: second), ["row-a": 5, "row-b": 8])
+        XCTAssertTrue(backend.lockstepInnerStateNonEmptyForTest())
+        backend.finish(requestID: "row-a")
+        backend.finish(requestID: "row-b")
+        XCTAssertEqual(backend.retainedRowCountForTest(), 0)
+        XCTAssertFalse(backend.lockstepInnerStateNonEmptyForTest())
+    }
+
     func testRealSharedForwardBackendCancelWaitsForActivePrefill() async throws {
         guard PagedKVMetallibGate.defaultMetallibExists() else {
             throw XCTSkip("MLX default metallib is unavailable in this test host")
