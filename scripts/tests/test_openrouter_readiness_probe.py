@@ -1535,11 +1535,14 @@ class OpenRouterReadinessProbeTests(unittest.TestCase):
                 probe, "check_healthz", return_value={"http_status": 200, "status": "ok", "version": "v1.8.153"}
             ), mock.patch.object(
                 probe, "check_chat", return_value={"ok": True}
+            ), mock.patch.object(
+                probe, "check_catalog_chat", return_value={"ok": True, "classification": "catalog_chat_passed"}
             ), mock.patch.object(probe, "run_benchmark", return_value=bench):
                 code = probe.main(argv)
             self.assertEqual(code, 1)
             report = json.loads(output.read_text(encoding="utf-8"))
             self.assertFalse(report["ok"])
+            self.assertIn("catalog_chat", report["checks"])
             self.assertIn("operator key file is not readable", report["checks"]["wholesale_statement"]["error"])
             self.assertIn("admin_healthz", report["checks"])
             self.assertIn("operator key file is not readable", report["checks"]["pool_topology"]["error"])
@@ -1739,7 +1742,7 @@ class OpenRouterReadinessProbeTests(unittest.TestCase):
                 code = probe.main(argv)
             self.assertEqual(code, 1)
             report = json.loads(output.read_text(encoding="utf-8"))
-            for name in ("chat", "chat_free", "benchmark", "load_ladder", "saturation"):
+            for name in ("chat", "chat_free", "catalog_chat", "benchmark", "load_ladder", "saturation"):
                 self.assertFalse(report["checks"][name]["ok"])
                 self.assertIn("API key file is not readable", report["checks"][name]["error"])
             self.assertTrue(any("api_key" in error for error in report["errors"]))
@@ -1812,6 +1815,8 @@ class OpenRouterReadinessProbeTests(unittest.TestCase):
             ), mock.patch.object(
                 probe, "check_chat", return_value={"ok": True}
             ), mock.patch.object(
+                probe, "check_catalog_chat", return_value={"ok": True, "classification": "catalog_chat_passed"}
+            ), mock.patch.object(
                 probe, "run_benchmark", side_effect=[bench_error, {"requests_sent": 8, "statuses": {"429": 8}, "ok": 0, "shed_429": 8}]
             ), mock.patch.object(
                 probe, "run_load_ladder", return_value={"steps": [], "first_blocker": "", "max_clean_concurrency": 4}
@@ -1826,6 +1831,7 @@ class OpenRouterReadinessProbeTests(unittest.TestCase):
             self.assertEqual(code, 1)
             report = json.loads(output.read_text(encoding="utf-8"))
             self.assertEqual(report["checks"]["benchmark"]["classification"], "upstream_provider_error")
+            self.assertIn("catalog_chat", report["checks"])
             self.assertIn("saturation", report["checks"])
             self.assertIn("load_ladder", report["checks"])
             self.assertIn("admin_healthz", report["checks"])

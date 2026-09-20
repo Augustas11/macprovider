@@ -1845,6 +1845,7 @@ def main(argv: list[str]) -> int:
             raise SystemExit(
                 f"--filing-mode requires --min-output-tokens-per-second >= {DEFAULT_MIN_OUTPUT_TOKENS_PER_SECOND}"
             )
+        args.catalog_chat = True
     if args.saturation_max_tokens < 0:
         raise SystemExit("--saturation-max-tokens must be >= 0")
     if args.saturation_max_tokens == 0:
