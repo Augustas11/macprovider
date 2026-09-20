@@ -58,27 +58,45 @@ Paged-KV continuous-batching aggregate decode throughput:
   (42.3 → 46.5 → 47.5 → 46.8); per-row throughput collapses (0.60 → 0.17). Batching never
   approaches the 106.4 tok/s serial rate at any tested concurrency.
 
-## Interpretation
+## Interpretation — an implementation-maturity gap, not a refutation of continuous batching
 
-At the production block size (16), the paged-KV engine's single-row decode (35.4 tok/s) is
-only ~33% of the production serial decode (105.9 tok/s): ~28 ms/token vs ~9 ms/token, an ~19
-ms/token **Metal paged-gather tax** (each 1280-token row spans ~80 physical blocks the gather
-kernel must reconstruct every step). Per-step block-allocator bookkeeping is a handful of
-in-process actor hops (microseconds in the single-threaded measurement window), so the gap is
-the gather cost, not harness overhead — confirmed by the saturating/declining aggregate curve
-(fixed CPU overhead would amortize toward linear scaling).
+Continuous batching is a well-established throughput win in mature runtimes (vLLM, TGI). This
+result does **not** contradict that; it shows macprovider's **current** paged-KV + MoE
+implementation cannot yet realize those gains on this model. The evidence for that is in the
+single-stream numbers, before any batching:
 
-MoE compounds this: the model's value is sparse expert activation, so batching distinct rows
-activates *more* total experts and yields little weight-reuse benefit — the batched uplift
-saturates at ~1.35× regardless of depth.
+- serial contiguous `KVCacheSimple` single-stream: **106 tok/s**
+- paged-KV single-stream (batch = 1): **~35 tok/s**
 
-Block size is a real lever: at a non-production `blockSizeTokens=256` the paging tax roughly
-halves (paged single-row 57 tok/s; aggregate reaches 0.89× serial at 8 rows), but production
-uses 16 for KV memory efficiency. Neither tuple beats serial.
+That ~3× slowdown is **pure paged-KV overhead and has nothing to do with batching**. A mature
+PagedAttention (e.g. vLLM) adds near-zero overhead vs contiguous — that is precisely why it is
+free to adopt. macprovider's MLX Metal gather instead reconstructs ~80 physical blocks/row every
+decode step at the production block size and cuts single-stream throughput to a third. Continuous
+batching therefore starts in a ~3× hole, and MoE batching (~1.3×) cannot climb out of it.
 
-**Net:** on the production tuple, continuous batching would roughly **halve** the box's token
-throughput (aggregate ≤ 0.45× serial) while adding concurrency/latency headroom. It is not a
-throughput or earnings win on Qwen3-Coder-30B-A3B here.
+Two implementation gaps explain the shortfall:
+
+1. **Expensive paged-KV gather.** A good paged-attention does not halve single-stream
+   throughput; this one does. That is an MLX kernel-efficiency problem, not a property of
+   continuous batching. Block size is a lever — at a non-production `blockSizeTokens=256` the tax
+   roughly halves (paged single-row 57 tok/s, aggregate reaches 0.89× serial at 8 rows) — but 16
+   is the production default (KV memory efficiency) and neither setting beats serial.
+2. **MoE without a fused grouped-expert GEMM.** Sparse expert activation is the model's whole
+   point, so batching distinct rows activates *more* total experts and yields little weight-reuse
+   — the source of continuous batching's win. vLLM's large MoE gains come from fused per-expert
+   token batching at batch 32–256; this MLX path runs experts per-row, so uplift saturates at
+   ~1.35× and aggregate peaks at ~6 rows then declines.
+
+**Measurement caveat:** the harness (like the real `ContinuousBatchScheduler`) drives decode one
+step at a time across the model-actor boundary, so a portion of the paged single-stream gap could
+be per-step orchestration rather than the Metal gather kernel itself. Splitting GPU-forward time
+from orchestration (instrumenting `backend.decode`) would attribute it precisely; not done here.
+
+**Net:** on the production tuple, macprovider's current continuous-batching path delivers ≤0.45×
+the serial serve rate — a throughput *loss* — on Qwen3-Coder-30B-A3B. This is a fixable
+kernel/MoE-batching maturity gap with a much higher ceiling, not evidence against continuous
+batching as a technique. Correctness (attach + FR-CB6 isolation) is proven; the engine is ready
+for capacity/latency use (many concurrent long-context streams within a flat ~32 GB RSS).
 
 - **MSB-03 (ragged prompts):** not run — harness uses equal-length prompts. Follow-up.
 - **MSB-05 (vs oMLX oracle):** not run — no pinned oMLX sidecar on this box. Follow-up.
@@ -98,9 +116,14 @@ capacity/latency use cases (many concurrent long-context streams within a flat ~
 but continuous batching is not a throughput/earnings win on this MoE model.
 
 **Follow-ups (do before any canary reconsideration):**
-1. Reduce the paged-gather per-token cost (kernel / larger effective block, streamed gather) —
-   the dominant tax; a ~2–3× gather speedup is the minimum needed to reach serial parity.
-2. Re-measure on a dense (non-MoE) catalog model, where batching weight-reuse is far higher.
-3. MSB-03 (ragged) and MSB-05 (oMLX oracle) for scheduler fairness and an upper-bound oracle.
-4. Measure current N-independent-serial-stream aggregate (MSB-05 Q1) to confirm the serial
-   baseline under real concurrency (contention may lower it, narrowing the gap).
+1. Instrument `backend.decode` to split GPU-forward time from per-step orchestration, so the ~3×
+   paged single-stream slowdown is attributed to the Metal gather kernel vs actor-boundary
+   overhead — this decides where the fix lives.
+2. Reduce the paged-gather per-token cost (kernel / larger effective block, streamed gather) —
+   the dominant tax; getting paged single-stream close to the 106 tok/s contiguous rate is the
+   prerequisite for any batched win.
+3. Add fused per-expert (grouped-GEMM) token batching for MoE, and sweep higher batch depths
+   (16/32/64) — vLLM's MoE gains appear only there.
+4. Re-measure on a dense (non-MoE) catalog model, where batching weight-reuse is far higher.
+5. MSB-03 (ragged) and MSB-05 (oMLX oracle) for scheduler fairness and an upper-bound oracle;
+   and measure N-independent-serial-stream aggregate (MSB-05 Q1) under real concurrency.
