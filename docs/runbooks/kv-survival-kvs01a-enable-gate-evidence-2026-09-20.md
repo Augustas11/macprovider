@@ -118,5 +118,6 @@ representation, so quality/restore gates for quantized KV are not the
 Therefore 01b needs a **spec-revision FR-KVP9 ceiling raise** (8k ×
 ~96 KiB/token ≈ 768 MiB, plus framing), not a `QuantizedKVCache` codec
 v2 allowlist. Configuration cannot raise the 256 MiB hard ceiling.
-Do not mark `SPEC-037-R013` conformant until that revision plus the 8k
-gate land.
+Write-side 8k can already use the existing 1 GiB `write_staging_max_bytes`
+hard cap; only the promotion ceiling is the spec-revision. Do not mark
+`SPEC-037-R013` conformant until that revision plus the 8k gate land.
