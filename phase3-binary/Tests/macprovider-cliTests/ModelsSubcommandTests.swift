@@ -477,7 +477,12 @@ final class ModelsSubcommandTests: XCTestCase {
 
         XCTAssertEqual(capture.error as? ExitCode, ExitCode(2))
         XCTAssertTrue(capture.stderr.contains("models prepare failed: insufficient_disk_space"), capture.stderr)
-        XCTAssertTrue(capture.stderr.contains("required_bytes=\(Int64(fixture.laneAArtifactSizeBytes) * 2)"), capture.stderr)
+        XCTAssertTrue(
+            capture.stderr.contains(
+                "required_bytes=\(Int64(fixture.laneAArtifactSizeBytes) * 2 + Build1LaneAArtifactStager.publicationReserveBytes)"
+            ),
+            capture.stderr
+        )
         let events = try decodePreparationEvents(capture.stdout)
         XCTAssertEqual(events.map(\.state), [.queued, .running, .failed])
         XCTAssertEqual(events.last?.errorCode, .insufficientDiskSpace)
@@ -1734,9 +1739,10 @@ final class ModelsSubcommandTests: XCTestCase {
         _ body: () async throws -> T
     ) async rethrows -> T {
         let original = Build1LaneAArtifactStager.makeStager
-        Build1LaneAArtifactStager.makeStager = { _, deadline in
+        Build1LaneAArtifactStager.makeStager = { _, deadline, reauthorize in
             Build1LaneAArtifactStager(
                 resolver: resolver,
+                reauthorize: reauthorize,
                 diskProbe: diskProbe ?? { try Build1LaneAArtifactStager.systemDiskProbe($0) },
                 deadline: deadline
             )

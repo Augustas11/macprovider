@@ -39,6 +39,55 @@ final class DurableModelArtifactStoreTests: XCTestCase {
         )
     }
 
+    func testFailedSwapRestoresPriorDestination() throws {
+        let root = try tempDir()
+        let revision = String(repeating: "b", count: 40)
+        let fresh = try tempDir()
+        try Data("fresh".utf8).write(to: fresh.appendingPathComponent("weights.bin"))
+        let freshSHA = try ModelArtifactVerifier.canonicalArtifactHash(directory: fresh)
+        // A corrupt tree already sits under the expected hash path.
+        let seed = DurableModelArtifactStore(root: root)
+        let destination = try seed.artifactURL(modelID: "namespace/model", revision: revision, sha256: freshSHA)
+        try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+        try Data("stale".utf8).write(to: destination.appendingPathComponent("weights.bin"))
+        let staleSHA = try ModelArtifactVerifier.canonicalArtifactHash(directory: destination)
+        XCTAssertNotEqual(staleSHA, freshSHA)
+
+        let failing = FailingMoveFileManager(failDestination: destination)
+        let store = DurableModelArtifactStore(root: root, fileManager: failing)
+
+        XCTAssertThrowsError(
+            try store.adoptVerifiedStaging(staging: fresh, modelID: "namespace/model", revision: revision, sha256: freshSHA)
+        )
+        XCTAssertEqual(try String(contentsOf: destination.appendingPathComponent("weights.bin")), "stale")
+        XCTAssertEqual(try ModelArtifactVerifier.canonicalArtifactHash(directory: destination), staleSHA)
+        let leftovers = try FileManager.default.contentsOfDirectory(atPath: destination.deletingLastPathComponent().path)
+            .filter { $0.hasPrefix(".tmp-") }
+        XCTAssertEqual(leftovers, [], "failed swap must not leave temp or backup trees behind")
+
+        // Once the swap can succeed, the verified tree replaces the corrupt one.
+        let adopted = try seed.adoptVerifiedStaging(staging: fresh, modelID: "namespace/model", revision: revision, sha256: freshSHA)
+        XCTAssertEqual(try String(contentsOf: adopted.appendingPathComponent("weights.bin")), "fresh")
+    }
+
+    func testCorruptedCopyIsRefusedBeforePublication() throws {
+        let root = try tempDir()
+        let revision = String(repeating: "c", count: 40)
+        let staging = try tempDir()
+        try Data("verified".utf8).write(to: staging.appendingPathComponent("weights.bin"))
+        let sha = try ModelArtifactVerifier.canonicalArtifactHash(directory: staging)
+        let store = DurableModelArtifactStore(root: root, fileManager: CorruptingCopyFileManager())
+
+        XCTAssertThrowsError(
+            try store.adoptVerifiedStaging(staging: staging, modelID: "namespace/model", revision: revision, sha256: sha)
+        ) { error in
+            XCTAssertTrue(String(describing: error).contains("durable copy hash mismatch"), "\(error)")
+        }
+        let destination = try store.artifactURL(modelID: "namespace/model", revision: revision, sha256: sha)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: destination.path), "unverified bytes must never be published")
+        XCTAssertFalse(store.isModelMaterialized(modelID: "namespace/model"))
+    }
+
     func testGCKeepsActiveArtifactAndRemovesSiblings() throws {
         let root = try tempDir()
         let store = DurableModelArtifactStore(root: root)
@@ -191,5 +240,45 @@ final class DurableModelArtifactStoreTests: XCTestCase {
             try? FileManager.default.removeItem(at: root)
         }
         return root
+    }
+}
+
+private final class FailingMoveFileManager: FileManager {
+    let failDestination: URL
+
+    init(failDestination: URL) {
+        self.failDestination = failDestination
+        super.init()
+    }
+
+    private func shouldFail(src: String, dst: String) -> Bool {
+        let srcLeaf = URL(fileURLWithPath: src).lastPathComponent
+        return URL(fileURLWithPath: dst).standardizedFileURL.path == failDestination.standardizedFileURL.path
+            && srcLeaf.hasPrefix(".tmp-")
+            && !srcLeaf.hasPrefix(".tmp-replaced-")
+    }
+
+    override func moveItem(at srcURL: URL, to dstURL: URL) throws {
+        if shouldFail(src: srcURL.path, dst: dstURL.path) {
+            throw CocoaError(.fileWriteUnknown)
+        }
+        try super.moveItem(at: srcURL, to: dstURL)
+    }
+
+    override func moveItem(atPath srcPath: String, toPath dstPath: String) throws {
+        if shouldFail(src: srcPath, dst: dstPath) {
+            throw CocoaError(.fileWriteUnknown)
+        }
+        try super.moveItem(atPath: srcPath, toPath: dstPath)
+    }
+}
+
+private final class CorruptingCopyFileManager: FileManager {
+    override func copyItem(at srcURL: URL, to dstURL: URL) throws {
+        try Data("corrupted".utf8).write(to: dstURL)
+    }
+
+    override func copyItem(atPath srcPath: String, toPath dstPath: String) throws {
+        try Data("corrupted".utf8).write(to: URL(fileURLWithPath: dstPath))
     }
 }

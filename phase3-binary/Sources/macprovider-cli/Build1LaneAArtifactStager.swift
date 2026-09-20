@@ -22,6 +22,8 @@ struct Build1LaneAStagedArtifact: Equatable, Sendable {
 
 enum Build1LaneAArtifactStagingError: Error, Equatable, Sendable {
     case rootUnavailable(String)
+    case authorityUnavailable(String)
+    case authorityMismatch
     case operationConflict
     case insufficientDiskSpace(requiredBytes: Int64, availableBytes: Int64)
     case transferFailed(String)
@@ -59,26 +61,41 @@ struct Build1LaneADiskProbe: Equatable, Sendable {
 /// - Adoption happens only after the staged bytes hash to the authority digest.
 struct Build1LaneAArtifactStager {
     typealias ProgressSink = (Build1LaneAStagingStage, _ bytesCompleted: Int64?, _ bytesExpected: Int64?) throws -> Void
+    typealias Reauthorize = @Sendable () async throws -> Build1LaneAArtifactAuthority
 
     static let prepareLockLeaf = ".build1-lane-a-prepare.lock"
+    /// SPEC-044 preparation reserve: `available >= 2 * estimated_bytes + 1 GiB`
+    /// on the bound root volume, before transfer and again before publication.
+    static let publicationReserveBytes: Int64 = 1_073_741_824
 
     /// Test seam mirroring `Build1LaneAArtifactAuthorityResolver.makeStaticInputs`.
     /// Production resolves the durable root from `model_artifact_root` exactly
     /// like `serve` preflight does, so the adopted copy is the one `serve` uses.
-    nonisolated(unsafe) static var makeStager: @Sendable (AppConfig?, Date?) -> Build1LaneAArtifactStager = { config, deadline in
-        Build1LaneAArtifactStager(resolver: CachedModelArtifactResolver.forConfig(config), deadline: deadline)
+    nonisolated(unsafe) static var makeStager: @Sendable (AppConfig?, Date?, @escaping Reauthorize) -> Build1LaneAArtifactStager = { config, deadline, reauthorize in
+        Build1LaneAArtifactStager(
+            resolver: CachedModelArtifactResolver.forConfig(config),
+            reauthorize: reauthorize,
+            deadline: deadline
+        )
     }
 
     var resolver: CachedModelArtifactResolver
+    /// Re-resolves the signed Lane A authority immediately before publication.
+    /// Adoption proceeds only when the fresh authority equals the one that
+    /// gated staging, so a feed that is revoked, re-signed, or rebound while
+    /// bytes are in flight cannot be adopted against the stale snapshot.
+    var reauthorize: Reauthorize
     var diskProbe: @Sendable (URL) throws -> Build1LaneADiskProbe
     var deadline: Date?
 
     init(
         resolver: CachedModelArtifactResolver,
+        reauthorize: @escaping Reauthorize,
         diskProbe: @escaping @Sendable (URL) throws -> Build1LaneADiskProbe = { try Build1LaneAArtifactStager.systemDiskProbe($0) },
         deadline: Date? = nil
     ) {
         self.resolver = resolver
+        self.reauthorize = reauthorize
         self.diskProbe = diskProbe
         self.deadline = deadline
     }
@@ -145,9 +162,10 @@ struct Build1LaneAArtifactStager {
 
         try checkDeadlineAndCancellation()
 
+        let expected = Int64(authority.sizeBytes)
+        let stagingRoot = staged.deletingLastPathComponent()
         if source == nil {
-            let expected = Int64(authority.sizeBytes)
-            try requireDiskSpace(stagingRoot: staged.deletingLastPathComponent(), durableRoot: store.root, expected: expected)
+            try requireDiskSpace(stagingRoot: stagingRoot, durableRoot: store.root, expected: expected)
             try progress(.staging, 0, expected)
             do {
                 try resolver.validateNoSymlinkCachePath(of: staged, requireComplete: false)
@@ -199,8 +217,31 @@ struct Build1LaneAArtifactStager {
 
         try checkDeadlineAndCancellation()
 
-        // 4. Adopt into the provider-owned durable store. The store copies into
-        //    a `.tmp-` sibling, re-hashes, and moves atomically.
+        // 4. Re-check the signed authority and the publication headroom
+        //    immediately before adoption. Both are fail-closed refusals that
+        //    happen before the durable store is touched.
+        let fresh: Build1LaneAArtifactAuthority
+        do {
+            fresh = try await reauthorize()
+        } catch {
+            if createdStaging { try? FileManager.default.removeItem(at: staged) }
+            throw Self.mapReauthorizeError(error)
+        }
+        guard fresh == authority else {
+            if createdStaging { try? FileManager.default.removeItem(at: staged) }
+            throw Build1LaneAArtifactStagingError.authorityMismatch
+        }
+        try checkDeadlineAndCancellation()
+        do {
+            try requireDiskSpace(stagingRoot: stagingRoot, durableRoot: store.root, expected: expected)
+        } catch {
+            if createdStaging { try? FileManager.default.removeItem(at: staged) }
+            throw error
+        }
+
+        // 5. Adopt into the provider-owned durable store. The store copies into
+        //    a `.tmp-` sibling, verifies the copy, and swaps atomically with
+        //    rollback of any prior destination.
         do {
             _ = try store.adoptVerifiedStaging(
                 staging: source,
@@ -213,7 +254,7 @@ struct Build1LaneAArtifactStager {
             throw Build1LaneAArtifactStagingError.publicationFailed(String(describing: error))
         }
 
-        // 5. The isolated staging copy is redundant once the durable copy is
+        // 6. The isolated staging copy is redundant once the durable copy is
         //    verified. Never remove the canonical Hugging Face snapshot.
         var stagingCleanupRequired = false
         if source == staged {
@@ -241,6 +282,16 @@ struct Build1LaneAArtifactStager {
         if let deadline, Date() >= deadline {
             throw Build1LaneAArtifactStagingError.timedOut
         }
+    }
+
+    private static func mapReauthorizeError(_ error: Error) -> Build1LaneAArtifactStagingError {
+        if error is CancellationError {
+            return .cancelled
+        }
+        if let staging = error as? Build1LaneAArtifactStagingError {
+            return staging
+        }
+        return .authorityUnavailable(String(describing: error))
     }
 
     private static func mapTransferError(_ error: Error) -> Build1LaneAArtifactStagingError {
@@ -302,33 +353,44 @@ struct Build1LaneAArtifactStager {
         return total
     }
 
+    /// SPEC-044 preparation headroom: the bound durable root volume must hold
+    /// `2 * expected + 1 GiB`; a distinct staging volume must additionally hold
+    /// `expected + 1 GiB`. Overflow refuses before any side effect.
     private func requireDiskSpace(stagingRoot: URL, durableRoot: URL, expected: Int64) throws {
         guard expected > 0 else {
             throw Build1LaneAArtifactStagingError.transferFailed("artifact authority size must be positive")
         }
-        let staging = try diskProbe(Self.nearestExistingAncestor(of: stagingRoot))
+        let durableRequired = try Self.checkedRequirement(expected, multiplier: 2)
         let durable = try diskProbe(Self.nearestExistingAncestor(of: durableRoot))
+        guard durable.availableBytes >= durableRequired else {
+            throw Build1LaneAArtifactStagingError.insufficientDiskSpace(
+                requiredBytes: durableRequired,
+                availableBytes: durable.availableBytes
+            )
+        }
+        let staging = try diskProbe(Self.nearestExistingAncestor(of: stagingRoot))
         if staging.deviceID == durable.deviceID {
-            // Download and durable copy share one volume: both copies must fit
-            // at the same time because adoption copies before it removes.
-            let required = expected.multipliedReportingOverflow(by: 2)
-            guard !required.overflow else {
-                throw Build1LaneAArtifactStagingError.insufficientDiskSpace(requiredBytes: .max, availableBytes: staging.availableBytes)
-            }
-            guard staging.availableBytes >= required.partialValue else {
-                throw Build1LaneAArtifactStagingError.insufficientDiskSpace(
-                    requiredBytes: required.partialValue,
-                    availableBytes: staging.availableBytes
-                )
-            }
             return
         }
-        guard staging.availableBytes >= expected else {
-            throw Build1LaneAArtifactStagingError.insufficientDiskSpace(requiredBytes: expected, availableBytes: staging.availableBytes)
+        let stagingRequired = try Self.checkedRequirement(expected, multiplier: 1)
+        guard staging.availableBytes >= stagingRequired else {
+            throw Build1LaneAArtifactStagingError.insufficientDiskSpace(
+                requiredBytes: stagingRequired,
+                availableBytes: staging.availableBytes
+            )
         }
-        guard durable.availableBytes >= expected else {
-            throw Build1LaneAArtifactStagingError.insufficientDiskSpace(requiredBytes: expected, availableBytes: durable.availableBytes)
+    }
+
+    static func checkedRequirement(_ expected: Int64, multiplier: Int64) throws -> Int64 {
+        let scaled = expected.multipliedReportingOverflow(by: multiplier)
+        guard !scaled.overflow else {
+            throw Build1LaneAArtifactStagingError.insufficientDiskSpace(requiredBytes: .max, availableBytes: 0)
         }
+        let total = scaled.partialValue.addingReportingOverflow(publicationReserveBytes)
+        guard !total.overflow else {
+            throw Build1LaneAArtifactStagingError.insufficientDiskSpace(requiredBytes: .max, availableBytes: 0)
+        }
+        return total.partialValue
     }
 
     static func nearestExistingAncestor(of url: URL) -> URL {

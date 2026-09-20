@@ -354,7 +354,10 @@ struct ModelsPrepareCommand: AsyncParsableCommand {
         writePrepareStderr(Self.disclosureLine(for: authority))
 
         let deadline = timeoutSeconds.map { Date().addingTimeInterval(TimeInterval($0)) }
-        let stager = Build1LaneAArtifactStager.makeStager(appConfig, deadline)
+        let coordinatorURL = self.coordinatorURL
+        let stager = Build1LaneAArtifactStager.makeStager(appConfig, deadline) {
+            try await Build1LaneAArtifactAuthorityResolver.resolve(coordinatorURL: coordinatorURL)
+        }
         let work = Task {
             try await stager.stageAndAdopt(authority: authority) { stage, bytesCompleted, bytesExpected in
                 try emitter.emit(
@@ -420,6 +423,8 @@ struct ModelsPrepareCommand: AsyncParsableCommand {
     private static func errorCode(for error: Build1LaneAArtifactStagingError) -> ModelPreparationEventErrorCode {
         switch error {
         case .rootUnavailable: return .rootUnavailable
+        case .authorityUnavailable: return .authorityUnavailable
+        case .authorityMismatch: return .artifactIdentityMismatch
         case .operationConflict: return .operationConflict
         case .insufficientDiskSpace: return .insufficientDiskSpace
         case .transferFailed: return .transferFailed
