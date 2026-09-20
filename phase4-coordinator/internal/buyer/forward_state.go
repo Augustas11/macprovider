@@ -1,6 +1,8 @@
 package buyer
 
 import (
+	"net/http"
+	"strings"
 	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/pool"
@@ -157,6 +159,13 @@ type forwardState struct {
 	stickyResult     string
 	stickyMissReason string
 
+	// conversationCacheOnly is true when the request carried
+	// X-MacProvider-Internal-Conv-Cache and no sticky
+	// X-MacProvider-Internal-Conv key. ConversationCache hits on that
+	// path are observed (OpenAI nested cached_tokens) but not
+	// sticky-creditable and MUST NOT quarantine ambiguous_cache.
+	conversationCacheOnly bool
+
 	// declaredFunctionNames is the buyer-declared tools[] function.name set.
 	// Used to recover Qwen function-XML that leaked into message.content when
 	// the provider CLI failed to close </tool_call> (Pi then never runs bash).
@@ -181,4 +190,17 @@ func newForwardState(startedAt time.Time) *forwardState {
 	}
 	state.phaseTiming.init(startedAt)
 	return state
+}
+
+func (state *forwardState) markConversationCacheOnly(headers http.Header) {
+	if state == nil {
+		return
+	}
+	sticky := strings.TrimSpace(headers.Get("X-MacProvider-Internal-Conv"))
+	if strings.HasPrefix(sticky, "conv:") {
+		state.conversationCacheOnly = false
+		return
+	}
+	cache := strings.TrimSpace(headers.Get("X-MacProvider-Internal-Conv-Cache"))
+	state.conversationCacheOnly = strings.HasPrefix(cache, "conv:")
 }

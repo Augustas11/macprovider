@@ -4466,6 +4466,29 @@ func TestNonStreamingSanitizesInvalidCachedPromptTokensWithoutRejectingUsage(t *
 	}
 }
 
+func TestNonStreamingForwardsPromptTokensDetailsCachedTokens(t *testing.T) {
+	body := `{"model":"llama","max_tokens":20,"messages":[{"role":"user","content":"cached"}]}`
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		responseBody := `{"id":"chatcmpl_nested_cache","usage":{"prompt_tokens":10,"cached_prompt_tokens":0,"completion_tokens":2,"total_tokens":12,"prompt_tokens_details":{"cached_tokens":8}},"choices":[{"message":{"content":"ok"}}]}`
+		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, responseBody), nil
+	})}
+	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+	}, WithHTTPClient(client))
+	fullKey := createAccountAndKey(t, store, cfg, "acct_nested_cache_nonstream")
+
+	resp := postChat(t, h, fullKey, body, nil)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	if !strings.Contains(resp.Body.String(), `"cached_prompt_tokens":0`) {
+		t.Fatalf("flat billed cache missing: %s", resp.Body.String())
+	}
+	if !strings.Contains(resp.Body.String(), `"cached_tokens":8`) {
+		t.Fatalf("nested observed cache missing: %s", resp.Body.String())
+	}
+}
+
 // TestNonStreamingOverCapUsageClampsInsteadOfRejecting is the non-streaming
 // analog of the over-cap clamp fix (2026-07-09 canary-probe finding): a prompt
 // whose provider-reported tokens exceed the reservation cap (completion within
@@ -4625,8 +4648,8 @@ func TestUsageBodyWithTokenUsageAddsBuyerVisibleField(t *testing.T) {
 	if err := json.Unmarshal(updated, &out); err != nil {
 		t.Fatal(err)
 	}
-	if out.Usage.CachedPromptTokens != 4 || out.Usage.TotalTokens != 12 {
-		t.Fatalf("updated usage = %+v, want cached 4 and total 12", out.Usage)
+	if out.Usage.CachedPromptTokens != 4 || out.Usage.TotalTokens != 12 || out.Usage.PromptTokensDetails.CachedTokens != 4 {
+		t.Fatalf("updated usage = %+v, want cached 4, nested 4, and total 12", out.Usage)
 	}
 }
 

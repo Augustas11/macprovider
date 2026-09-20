@@ -119,7 +119,7 @@
     {
       "spec_id": "SPEC-005",
       "title": "Billing, Settlement, and Provider Rewards",
-      "version": "0.6.7",
+      "version": "0.6.8",
       "path": "specs/SPEC-005-billing.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -151,7 +151,7 @@
     {
       "spec_id": "SPEC-006",
       "title": "Buyer API Gateway: Mac Provider's first public buyer surface",
-      "version": "0.9.29",
+      "version": "0.9.30",
       "path": "specs/SPEC-006-buyer-api.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -688,7 +688,7 @@
     {
       "spec_id": "SPEC-024",
       "title": "Prefix-cache billing and provider-local cache isolation",
-      "version": "0.2.2",
+      "version": "0.2.3",
       "path": "specs/SPEC-024-prefix-cache-billing.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -2507,6 +2507,29 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1633",
         "rationale": "Conversation-keyed serial serve allocated RotatingKVCache, which stops being trimmable at offset>=maxSize so FR-CI2 misses and re-prefills. Not promoted; no signed journey."
+      }
+    },
+    {
+      "requirement_id": "SPEC-024-R002",
+      "spec_id": "SPEC-024",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/buyer/server.go:observedCachedPromptTokensForBuyer",
+        "phase4-coordinator/internal/buyer/server.go:chatJSONWithCachedPromptTokens",
+        "phase4-coordinator/internal/billing/hotpath.go:normalizeCachedPromptTokens"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/buyer/server_test.go:TestNonStreamingBillingSurfacesObservedCachedTokensOnAutoPrefixWithoutQuarantine",
+        "phase4-coordinator/internal/buyer/cache_recovery_internal_test.go:TestRequestLogCacheRecoveryFieldsAutoPrefixDoesNotQuarantine",
+        "phase4-coordinator/internal/billing/store_test.go:TestWriteHotPath_ConversationCacheOnlyPositiveCacheDoesNotQuarantine"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "CODE_BUG",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1636",
+        "rationale": "Pi reads OpenAI prompt_tokens_details.cached_tokens; auto-prefix ConversationCache hits were buyer-invisible and would ambiguous_cache whole-row-zero. Not promoted; no signed journey."
       }
     },
     {
@@ -4589,6 +4612,26 @@
       }
     },
     {
+      "requirement_id": "SPEC-005-R012",
+      "spec_id": "SPEC-005",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/billing/hotpath.go:normalizeCachedPromptTokens"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/billing/store_test.go:TestWriteHotPath_ConversationCacheOnlyPositiveCacheDoesNotQuarantine",
+        "phase4-coordinator/internal/buyer/server_test.go:TestNonStreamingBillingSurfacesObservedCachedTokensOnAutoPrefixWithoutQuarantine"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "CODE_BUG",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1636",
+        "rationale": "Auto-prefix ConversationCache hits reported positive cached_prompt_tokens on a non-sticky route and SPEC-005 §5.3.1 gate 4 whole-row-zeroed payable credits. Carve-out re-prices cached=0 without quarantine. Not promoted; no signed journey."
+      }
+    },
+    {
       "requirement_id": "SPEC-006-R001",
       "spec_id": "SPEC-006",
       "state": "conformant",
@@ -4899,6 +4942,29 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1629",
         "rationale": "OpenAI-compat clients omit X-MacProvider-Conversation so ConversationCache never begins(); auto-prefix keys forward conv: without enabling sticky. Not promoted; no signed journey."
+      }
+    },
+    {
+      "requirement_id": "SPEC-006-R013",
+      "spec_id": "SPEC-006",
+      "state": "pending",
+      "implementation": [
+        "phase5-gateway/internal/router/chat_proxy.go:usageFromJSON",
+        "phase5-gateway/internal/router/chat_proxy.go:usageJSONWithCachedPromptTokens",
+        "phase4-coordinator/internal/buyer/server.go:chatJSONWithCachedPromptTokens"
+      ],
+      "tests": [
+        "phase5-gateway/internal/router/server_test.go:TestNonStreamingForwardsPromptTokensDetailsCachedTokens",
+        "phase4-coordinator/internal/buyer/server_test.go:TestNonStreamingBillingSurfacesObservedCachedTokensOnAutoPrefixWithoutQuarantine",
+        "phase4-coordinator/internal/buyer/cache_recovery_internal_test.go:TestSSELineWithCachedPromptTokensWritesNestedCachedTokens"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "CODE_BUG",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1636",
+        "rationale": "Chat-completions usage omitted OpenAI prompt_tokens_details.cached_tokens so Pi cacheRead stayed 0 on real ConversationCache hits. Not promoted; no signed journey."
       }
     },
     {
