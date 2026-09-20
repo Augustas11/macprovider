@@ -1063,6 +1063,25 @@ class OpenRouterReadinessProbeTests(unittest.TestCase):
         self.assertEqual(raised.exception.evidence["output_tokens_per_second"], 0.1)
         self.assertEqual(raised.exception.evidence["min_output_tokens_per_second"], 1.0)
 
+    def test_benchmark_uses_throughput_prompt(self):
+        captured = {}
+
+        def fake_chat_once(*_args, **kwargs):
+            captured["prompt"] = kwargs.get("prompt")
+            return {
+                "status": 200,
+                "ok": True,
+                "ttft_ms": 20,
+                "latency_ms": 120,
+                "generation_ms": 100,
+                "output_tokens": 16,
+            }
+
+        with mock.patch.object(probe, "chat_once", side_effect=fake_chat_once):
+            got = probe.run_benchmark("https://api.example.test", "secret", "model", 1, 1, 16, 1.0, 5000, 1.0)
+        self.assertEqual(captured["prompt"], probe.BENCHMARK_PROMPT)
+        self.assertGreaterEqual(got["output_tokens_per_second"], 10.0)
+
     def test_benchmark_rejects_unbounded_stress_inputs(self):
         with self.assertRaisesRegex(probe.ProbeError, "requests"):
             probe.run_benchmark(

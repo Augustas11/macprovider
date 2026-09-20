@@ -30,6 +30,15 @@ from pathlib import Path
 
 DEFAULT_MODEL = "mlx-community/Llama-3.2-3B-Instruct-4bit"
 DEFAULT_PROMPT = "OpenRouter provider readiness smoke. Reply with OK."
+# Benchmark/saturation need enough completion tokens that decode time, not the
+# one-token "OK" stop, dominates generated-token throughput. Llama 3B 4bit on
+# the current fleet is a few to tens of tokens/s; a 1-token reply over a ~1s
+# post-TTFT usage flush reports ~1 tok/s and fails the OpenRouter 10 tok/s gate.
+BENCHMARK_PROMPT = (
+    "OpenRouter provider readiness throughput probe. "
+    "Count from 1 to 200 as decimal integers separated by spaces. "
+    "Do not stop until you reach 200."
+)
 MAX_BENCHMARK_REQUESTS = 200
 MAX_BENCHMARK_CONCURRENCY = 8
 DEFAULT_MIN_SUCCESS_RATIO = 0.95
@@ -810,10 +819,11 @@ def chat_once(
     max_tokens: int,
     request_id: str = "",
     response_tracker: BenchmarkResponseTracker | None = None,
+    prompt: str = DEFAULT_PROMPT,
 ) -> dict:
     body = {
         "model": model,
-        "messages": [{"role": "user", "content": DEFAULT_PROMPT}],
+        "messages": [{"role": "user", "content": prompt}],
         "max_tokens": max_tokens,
         "stream": stream,
     }
@@ -1156,6 +1166,7 @@ def run_benchmark(
                     max_tokens=max_tokens,
                     request_id=str(uuid.uuid4()),
                     response_tracker=response_tracker,
+                    prompt=BENCHMARK_PROMPT,
                 )
                 for _ in range(batch_size)
             ]
