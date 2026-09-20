@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import MacProviderCore
 import MLX
 import MLXLMCommon
 import Security
@@ -1212,6 +1213,13 @@ final class KVDiskCacheStoreTests: XCTestCase {
         let result = try await store.write(snapshot, nowMillis: 1_000_000)
         guard case .skipped(let detail) = result else { return XCTFail("over-ceiling write must skip") }
         XCTAssertEqual(detail, .exceedsPromotionCeiling)
+    }
+
+    func testPromotionCeilingHardMaxTracksConfigOneGib() {
+        XCTAssertEqual(KVDiskCacheStoreConfig.promotionCeilingHardMax, 1024 * 1024 * 1024)
+        XCTAssertEqual(
+            KVDiskCacheStoreConfig.promotionCeilingHardMax,
+            KVDiskCacheConfig.hardStagingMaxBytes)
     }
 
     func testReadSideStagingBudgetMiss() async throws {

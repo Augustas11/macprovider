@@ -14,7 +14,7 @@ public struct KVDiskCacheConfig: Equatable, Sendable {
     public var maxEntries: Int
     public var maxEntryBytes: Int
     public var retentionMinutes: Int
-    /// Read/promotion staging ceiling (FR-KVP9): hard max 256 MiB.
+    /// Read/promotion staging ceiling (FR-KVP9): hard max 1 GiB; default 256 MiB.
     public var stagingMaxBytes: Int
     /// Write/snapshot staging ceiling (FR-KVP3): hard max 1 GiB.
     public var writeStagingMaxBytes: Int
@@ -72,7 +72,7 @@ public struct KVDiskCacheConfig: Equatable, Sendable {
     public static let defaultPromotionMaxSeconds = 5
     public static let defaultShutdownDrainSeconds = 5
 
-    static let hardStagingMaxBytes = 256 * 1024 * 1024                  // ≤ 256 MiB
+    public static let hardStagingMaxBytes = 1024 * 1024 * 1024          // ≤ 1 GiB
     static let hardWriteStagingMaxBytes = 1024 * 1024 * 1024           // ≤ 1 GiB
     static let minMinFreeBytes = 1024 * 1024 * 1024                    // ≥ 1 GiB
 }
@@ -211,11 +211,11 @@ public enum KVDiskCacheConfigResolver {
         resolvePositive(&config.promotionMaxSeconds, cli.promotionMaxSeconds,
                         rawInt("promotion_max_seconds", "MACPROVIDER_KV_DISK_CACHE_PROMOTION_MAX_S"), "promotion_max_seconds", ">0", fail)
 
-        // staging_max_bytes: >0 and ≤ 256 MiB hard.
+        // staging_max_bytes: >0 and ≤ 1 GiB hard (default remains 256 MiB).
         resolveBounded(&config.stagingMaxBytes, cli.stagingMaxBytes,
                        rawInt("staging_max_bytes", "MACPROVIDER_KV_DISK_CACHE_STAGING_MAX_BYTES"),
                        "staging_max_bytes", min: 1, max: KVDiskCacheConfig.hardStagingMaxBytes,
-                       expected: ">0 and ≤ 256 MiB", fail)
+                       expected: ">0 and ≤ 1 GiB", fail)
         // write_staging_max_bytes: >0 and ≤ 1 GiB hard.
         resolveBounded(&config.writeStagingMaxBytes, cli.writeStagingMaxBytes,
                        rawInt("write_staging_max_bytes", "MACPROVIDER_KV_DISK_CACHE_WRITE_STAGING_MAX_BYTES"),
