@@ -90,13 +90,11 @@ them. The next candidate can be cut off current `main` (includes #1612 and
 #1453 closes when a candidate that includes the **merged** rows is promoted to
 the fleet. #1569 is a later CLI. Spec promotion #1583 is not a CLI change.
 
-Coordinator/gateway on live Pearl is **v1.8.164** (includes #1601 Pi stream
-TTFT / concat-safe coalesce, #1599 coordinator XML rewrite, #1595 coordinator
-message-count drop). #1626's coordinator sanitizer, concat-safe prefix flush,
-and gateway `malformed_tool_call` pass-through are on `main` and need the next
-Pearl runtime before live follow-up/`stream_malformed` criteria go green.
-Fleet Macs still run **1.8.123** until this CLI is promoted. Mac Studio serving
-canary remains `v1.8.170` until a successor candidate that includes #1626.
+Coordinator/gateway on live Pearl is **v1.8.165** @ `3555bf9881ae5b80b137ab6b6161ce897e9c1029`
+(includes #1626 sanitizer, concat-safe prefix flush, and gateway
+`malformed_tool_call` pass-through, plus #1601/#1599/#1595). Fleet Macs still
+run **1.8.123** until this CLI is promoted. Mac Studio serving canary remains
+`v1.8.170` until a successor candidate that includes #1626.
 #1600 is the install.sh consumer-health alarm
 (scripts/CI), not the Mac binary. Curl-channel `get.malibu.tech/install.sh`
 was republished **from `main`** on 2026-09-19 after #1610 (SHA-256
