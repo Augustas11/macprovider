@@ -14,6 +14,7 @@ names = {
     "is_bootstrap_principal",
     "headless_acceptance_repair_mode",
     "ensure_provider_credentials", "submit_required_hardware_evidence",
+    "append_fresh_autotune_operator_bounds",
     "run_autotune_recommend_apply",
 }
 lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
