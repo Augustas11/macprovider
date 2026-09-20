@@ -566,6 +566,38 @@ buzz messages send --channel 7d5f1966-d036-431e-821e-3a4083f145fe --content "buz
         XCTAssertNil(parsed.cleanedContent)
     }
 
+    func testQwen3CoderHybridJSONMissingToolCallCloseRecoversEchoHello() throws {
+        let raw = """
+        <tool_call>
+        {"arguments": {"command": "echo hello"}, "name": "bash"}
+        """
+        let parsed = ToolCallParser.parseToolCalls(
+            rawOutput: raw,
+            modelID: "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
+            allowedFunctionNames: ["bash"]
+        )
+        let call = try XCTUnwrap(parsed.toolCalls.first)
+        XCTAssertEqual(call.functionName, "bash")
+        XCTAssertEqual(try argumentValue(call.arguments, key: "command") as? String, "echo hello")
+        XCTAssertFalse(call.arguments.contains("{}{"))
+        XCTAssertNotEqual(call.arguments, "{}")
+        XCTAssertNil(parsed.cleanedContent)
+    }
+
+    func testQwen3CoderHybridJSONUnclosedUndeclaredStillFailsClosed() {
+        let raw = """
+        <tool_call>
+        {"arguments": {"command": "rm -rf /"}, "name": "evil"}
+        """
+        let parsed = ToolCallParser.parseToolCalls(
+            rawOutput: raw,
+            modelID: "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
+            allowedFunctionNames: ["bash"]
+        )
+        XCTAssertTrue(parsed.toolCalls.isEmpty)
+        XCTAssertEqual(parsed.cleanedContent, raw)
+    }
+
     func testQwen3CoderUnclosedWrapperUndeclaredFunctionStillFailsClosed() {
         let raw = """
         <tool_call>

@@ -20,10 +20,13 @@ func maybeRecoverQwenXMLToolCalls(raw []byte, state *forwardState) []byte {
 		return raw
 	}
 	recovered, ok := recoverQwenFunctionXMLCompletion(raw, state.declaredFunctionNames)
-	if !ok {
-		return raw
+	if ok {
+		return recovered
 	}
-	return recovered
+	if stripped, ok := stripQwenLeakedToolMarkupCompletion(raw); ok {
+		return stripped
+	}
+	return raw
 }
 
 // buyerSSEFromProviderJSONCompletion converts a non-stream chat.completion JSON
@@ -68,10 +71,16 @@ func recoverQwenFunctionXMLCompletion(raw []byte, allowed map[string]struct{}) (
 		return nil, false
 	}
 	content, ok := jsonStringContent(choice["message"])
-	if !ok || !strings.Contains(content, "<function=") || !strings.Contains(content, "</function>") {
+	if !ok {
 		return nil, false
 	}
-	calls := parseBareQwenFunctionXML(content, allowed)
+	var calls []recoveredToolCall
+	if strings.Contains(content, "<function=") && strings.Contains(content, "</function>") {
+		calls = parseBareQwenFunctionXML(content, allowed)
+	}
+	if len(calls) == 0 {
+		calls = parseUnclosedQwenJSONToolCalls(content, allowed)
+	}
 	if len(calls) == 0 {
 		return nil, false
 	}
@@ -145,7 +154,7 @@ func rewriteAssistantMessage(message json.RawMessage, originalContent string, ca
 		return nil, err
 	}
 	obj["tool_calls"] = encodedCalls
-	cleaned := stripToolCallWrappers(bareFunctionXMLPreamble(originalContent))
+	cleaned := stripToolCallWrappers(leakedToolCallPreamble(originalContent))
 	if cleaned == "" {
 		obj["content"] = json.RawMessage("null")
 	} else {
@@ -350,12 +359,305 @@ func newProviderToolCallID() (string, error) {
 	return "call_" + hex.EncodeToString(buf[:]), nil
 }
 
+func leakedToolCallPreamble(raw string) string {
+	if idx := strings.Index(raw, "<tool_call>"); idx >= 0 {
+		return raw[:idx]
+	}
+	return bareFunctionXMLPreamble(raw)
+}
+
 func bareFunctionXMLPreamble(raw string) string {
 	idx := strings.Index(raw, "<function=")
 	if idx < 0 {
 		return raw
 	}
 	return raw[:idx]
+}
+
+func parseUnclosedQwenJSONToolCalls(raw string, allowed map[string]struct{}) []recoveredToolCall {
+	var calls []recoveredToolCall
+	search := raw
+	responseBytes := 0
+	for {
+		open := strings.Index(search, "<tool_call>")
+		if open < 0 {
+			break
+		}
+		body := search[open+len("<tool_call>"):]
+		obj, rest, ok := firstCompleteJSONObject(body)
+		if !ok {
+			return nil
+		}
+		call, ok := parseQwenJSONToolCall(obj, allowed)
+		if !ok {
+			return nil
+		}
+		n := len(call.Function.Arguments)
+		if n > maxToolCallArgumentsBytes || responseBytes+n > maxToolCallArgumentsResponseBytes {
+			return nil
+		}
+		responseBytes += n
+		calls = append(calls, call)
+		search = rest
+	}
+	return calls
+}
+
+func parseQwenJSONToolCall(raw string, allowed map[string]struct{}) (recoveredToolCall, bool) {
+	var obj struct {
+		Name       string          `json:"name"`
+		Arguments  json.RawMessage `json:"arguments"`
+		Parameters json.RawMessage `json:"parameters"`
+	}
+	if err := json.Unmarshal([]byte(raw), &obj); err != nil {
+		return recoveredToolCall{}, false
+	}
+	name := strings.TrimSpace(obj.Name)
+	if name == "" || !validToolFunctionName(name) {
+		return recoveredToolCall{}, false
+	}
+	if _, declared := allowed[name]; !declared {
+		return recoveredToolCall{}, false
+	}
+	argsRaw := obj.Arguments
+	if len(bytes.TrimSpace(argsRaw)) == 0 {
+		argsRaw = obj.Parameters
+	}
+	args, ok := normalizeRecoveredJSONArguments(argsRaw)
+	if !ok || !validToolCallArgumentsObject(args) {
+		return recoveredToolCall{}, false
+	}
+	id, err := newProviderToolCallID()
+	if err != nil {
+		return recoveredToolCall{}, false
+	}
+	return recoveredToolCall{
+		ID:   id,
+		Type: "function",
+		Function: recoveredToolCallFunction{
+			Name:      name,
+			Arguments: args,
+		},
+	}, true
+}
+
+func normalizeRecoveredJSONArguments(raw json.RawMessage) (string, bool) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return "{}", true
+	}
+	if len(trimmed) > 0 && trimmed[0] == '"' {
+		var asString string
+		if err := json.Unmarshal(trimmed, &asString); err != nil {
+			return "", false
+		}
+		trimmed = bytes.TrimSpace([]byte(asString))
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(trimmed, &obj); err != nil || obj == nil {
+		return "", false
+	}
+	return string(trimmed), true
+}
+
+func firstCompleteJSONObject(s string) (object string, rest string, ok bool) {
+	start := -1
+	for i, r := range s {
+		if unicode.IsSpace(r) {
+			continue
+		}
+		if r == '{' {
+			start = i
+			break
+		}
+		return "", s, false
+	}
+	if start < 0 {
+		return "", s, false
+	}
+	depth := 0
+	inString := false
+	escaped := false
+	for i := start; i < len(s); i++ {
+		ch := s[i]
+		if inString {
+			if escaped {
+				escaped = false
+				continue
+			}
+			if ch == '\\' {
+				escaped = true
+				continue
+			}
+			if ch == '"' {
+				inString = false
+			}
+			continue
+		}
+		switch ch {
+		case '"':
+			inString = true
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return s[start : i+1], s[i+1:], true
+			}
+		}
+	}
+	return "", s, false
+}
+
+func sanitizeQwenLeakedToolMarkupBlock(block []byte, state *forwardState) []byte {
+	if state == nil || len(state.declaredFunctionNames) == 0 || len(block) == 0 {
+		return block
+	}
+	var out bytes.Buffer
+	for _, line := range bytes.SplitAfter(block, []byte("\n")) {
+		out.Write(sanitizeQwenLeakedToolMarkupLine(line))
+	}
+	return out.Bytes()
+}
+
+func sanitizeQwenLeakedToolMarkupLine(line []byte) []byte {
+	trimmed := bytes.TrimRight(line, "\r\n")
+	newline := line[len(trimmed):]
+	payload := trimmed
+	prefix := []byte(nil)
+	if bytes.HasPrefix(trimmed, []byte("data:")) {
+		payload = bytes.TrimSpace(trimmed[len("data:"):])
+		prefix = trimmed[:len(trimmed)-len(payload)]
+	}
+	if len(payload) == 0 || bytes.Equal(payload, []byte("[DONE]")) || payload[0] != '{' {
+		return line
+	}
+	rewritten, ok := rewriteLeakedToolMarkupJSON(payload)
+	if !ok {
+		return line
+	}
+	out := append(append([]byte{}, prefix...), rewritten...)
+	return append(out, newline...)
+}
+
+func stripQwenLeakedToolMarkupCompletion(raw []byte) ([]byte, bool) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.HasPrefix(trimmed, []byte("data:")) || trimmed[0] != '{' {
+		return nil, false
+	}
+	rewritten, ok := rewriteLeakedToolMarkupJSON(trimmed)
+	if !ok {
+		return nil, false
+	}
+	return rewritten, true
+}
+
+func rewriteLeakedToolMarkupJSON(raw []byte) ([]byte, bool) {
+	var root map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &root); err != nil {
+		return nil, false
+	}
+	if model, ok := root["model"]; ok && len(bytes.TrimSpace(model)) > 0 && !qwenModelID(model) {
+		return nil, false
+	}
+	choicesRaw, ok := root["choices"]
+	if !ok {
+		return nil, false
+	}
+	var choices []map[string]json.RawMessage
+	if err := json.Unmarshal(choicesRaw, &choices); err != nil || len(choices) == 0 {
+		return nil, false
+	}
+	changed := false
+	for i, choice := range choices {
+		for _, key := range []string{"delta", "message"} {
+			objRaw, exists := choice[key]
+			if !exists {
+				continue
+			}
+			var obj map[string]json.RawMessage
+			if err := json.Unmarshal(objRaw, &obj); err != nil {
+				continue
+			}
+			content, ok := jsonStringFromRaw(obj["content"])
+			if !ok {
+				continue
+			}
+			stripped, hit := truncateLeakedQwenToolMarkup(content)
+			if !hit {
+				continue
+			}
+			if stripped == "" {
+				obj["content"] = json.RawMessage("null")
+			} else {
+				encoded, err := json.Marshal(stripped)
+				if err != nil {
+					return nil, false
+				}
+				obj["content"] = encoded
+			}
+			encodedObj, err := json.Marshal(obj)
+			if err != nil {
+				return nil, false
+			}
+			choice[key] = encodedObj
+			choices[i] = choice
+			changed = true
+		}
+	}
+	if !changed {
+		return nil, false
+	}
+	encodedChoices, err := json.Marshal(choices)
+	if err != nil {
+		return nil, false
+	}
+	root["choices"] = encodedChoices
+	out, err := json.Marshal(root)
+	if err != nil {
+		return nil, false
+	}
+	return out, true
+}
+
+func jsonStringFromRaw(raw json.RawMessage) (string, bool) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return "", false
+	}
+	var content string
+	if err := json.Unmarshal(trimmed, &content); err != nil {
+		return "", false
+	}
+	return content, content != ""
+}
+
+func truncateLeakedQwenToolMarkup(content string) (string, bool) {
+	cut := -1
+	for _, marker := range []string{"<tool_call>", "<function="} {
+		if idx := strings.Index(content, marker); idx >= 0 && (cut < 0 || idx < cut) {
+			cut = idx
+		}
+	}
+	if cut < 0 {
+		return content, false
+	}
+	if recoverableQwenToolSuffix(content[cut:]) {
+		return content, false
+	}
+	return strings.TrimRight(content[:cut], " \t\r\n"), true
+}
+
+func recoverableQwenToolSuffix(suffix string) bool {
+	if strings.Contains(suffix, "<function=") && strings.Contains(suffix, "</function>") {
+		return true
+	}
+	rest := suffix
+	if idx := strings.Index(suffix, "<tool_call>"); idx >= 0 {
+		rest = suffix[idx+len("<tool_call>"):]
+	}
+	_, _, ok := firstCompleteJSONObject(rest)
+	return ok
 }
 
 func stripToolCallWrappers(text string) string {

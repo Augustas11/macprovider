@@ -262,6 +262,31 @@ json.dump(payload, open(destination, "w", encoding="utf-8"), separators=(",", ":
 PY
 run_wait "$TMP/busy.json"
 
+python3 - "$TMP/coordinator.json" "$TMP/pool-ready-provisional.json" <<'PY'
+import json
+import sys
+source, destination = sys.argv[1:]
+payload = json.load(open(source, encoding="utf-8"))
+payload["buyer_serving"] = False
+payload["catalog_release_id"] = "published-2099-01-01-different"
+payload["catalog_admission_mode"] = "current"
+json.dump(payload, open(destination, "w", encoding="utf-8"), separators=(",", ":"))
+PY
+if run_wait "$TMP/pool-ready-provisional.json"; then
+  echo "pool-ready provisional admission unexpectedly passed exact buyer-serving admission" >&2
+  exit 1
+else
+  rc=$?
+  if [ "$rc" -ne 2 ]; then
+    echo "pool-ready provisional admission returned $rc, want 2" >&2
+    exit 1
+  fi
+fi
+if run_wait "$TMP/pool-ready-provisional.json" "$TMP/local.json" 1; then
+  echo "emergency rollback accepted pool-ready provisional admission" >&2
+  exit 1
+fi
+
 python3 - "$TMP/local.json" "$TMP/legacy-local.json" \
   "$TMP/coordinator.json" "$TMP/legacy-coordinator.json" <<'PY'
 import json
@@ -327,6 +352,19 @@ if 'model != key' not in text:
     raise SystemExit("normal admission does not bind the local served model to the catalog key")
 if 'response.get(field) != value for field, value in required_local.items()' not in text:
     raise SystemExit("normal admission does not bind coordinator readiness to the local session catalog envelope")
+if 'provisional_ready_seen=1' not in text or 'return 2' not in text:
+    raise SystemExit("normal admission does not preserve exact-session pool-ready as a nonfatal result")
+if 'coordinator_admission_rc' not in main:
+    raise SystemExit("main does not inspect coordinator admission result codes")
+if 'Coordinator reached pool-ready for this provider session' not in main:
+    raise SystemExit("main does not commit pool-ready provisional installs with operator-visible telemetry")
+provisional = main.index("Coordinator reached pool-ready for this provider session")
+rollback = main.index("Coordinator did not admit the exact local catalog envelope", provisional)
+commit_after_provisional = main.index("commit_install_transaction", provisional)
+if not provisional < rollback < commit_after_provisional:
+    raise SystemExit("pool-ready provisional admission is not committed through the normal no-rollback boundary")
+if "exit 6" in main[provisional:rollback]:
+    raise SystemExit("pool-ready provisional admission still exits through rollback")
 
 commit_start = text.index("commit_install_transaction() {")
 commit_end = text.index("\n}\n\nrun()", commit_start)

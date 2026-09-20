@@ -47,7 +47,8 @@ binary the Mac runs.
 
 All in-scope CLI rows are **merged**. Last built candidates `v1.8.163`,
 `v1.8.164`, `v1.8.167`, and `v1.8.168` are old or off-train — do not promote
-them. The next candidate can be cut off current `main` (includes #1612).
+them. The next candidate can be cut off current `main` (includes #1612 and
+#1626).
 
 | Net change in CLI / Malibu / installer | Status | PR |
 |---|---|---|
@@ -84,14 +85,19 @@ them. The next candidate can be cut off current `main` (includes #1612).
 | SPEC-038 on-device parity + MoE-isolation self-measurement | merged | #1591 |
 | Paged-KV attach gates so SPEC-038/039 can engage on real MoE hardware | merged | #1597 |
 | Opt-in empirical max_batch concurrency calibration | merged | #1590 |
+| Qwen hybrid JSON tool_call recovery, concat-safe prefixes, follow-up content deltas | merged | #1626 |
 
 #1453 closes when a candidate that includes the **merged** rows is promoted to
 the fleet. #1569 is a later CLI. Spec promotion #1583 is not a CLI change.
 
-Coordinator-only (already on Pearl `v1.8.162-29-gee089f0f`, **not** this CLI
-cut): #1601 Pi stream TTFT / concat-safe coalesce, #1599 coordinator XML
-rewrite, #1595 coordinator message-count drop. Fleet Macs still run **1.8.123**
-until this CLI is promoted. #1600 is the install.sh consumer-health alarm
+Coordinator/gateway on live Pearl is **v1.8.164** (includes #1601 Pi stream
+TTFT / concat-safe coalesce, #1599 coordinator XML rewrite, #1595 coordinator
+message-count drop). #1626's coordinator sanitizer, concat-safe prefix flush,
+and gateway `malformed_tool_call` pass-through are on `main` and need the next
+Pearl runtime before live follow-up/`stream_malformed` criteria go green.
+Fleet Macs still run **1.8.123** until this CLI is promoted. Mac Studio serving
+canary remains `v1.8.170` until a successor candidate that includes #1626.
+#1600 is the install.sh consumer-health alarm
 (scripts/CI), not the Mac binary. Curl-channel `get.malibu.tech/install.sh`
 was republished **from `main`** on 2026-09-19 after #1610 (SHA-256
 `c90fb44d9a780041233928f4376d7d92b71af087d034ae44c3a275fd9381d7c4`, pearl

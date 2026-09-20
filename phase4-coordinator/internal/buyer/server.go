@@ -3878,6 +3878,7 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 		if sse, ok := buyerSSEFromProviderJSONCompletion([]byte(data), state); ok {
 			data = string(sse)
 		}
+		data = string(sanitizeQwenLeakedToolMarkupBlock([]byte(data), state))
 		if data != "" && !ttftLogged {
 			ttftLogged = true
 			if state != nil {

@@ -43,16 +43,16 @@ func TestConcatSafeCoalesceReplacesEmptyObjectWithCompleteArgs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(bytes.TrimSpace(held)) != 0 {
-		t.Fatalf("complete arguments must be held until finish, got %s", held)
+	if concatSSEToolArguments(t, held) != `{"command":"echo hello"}` {
+		t.Fatalf("complete non-empty arguments must flush once they are concat-safe: %s", held)
 	}
 	finish, err := stream.observeBlock([]byte(`data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}` + "\n\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := concatSSEToolArguments(t, finish)
+	got := concatSSEToolArguments(t, append(held, finish...))
 	if got != `{"command":"echo hello"}` {
-		t.Fatalf("concatenated arguments = %q body=%s", got, finish)
+		t.Fatalf("concatenated arguments = %q body=%s", got, append(held, finish...))
 	}
 	if bytes.Contains(finish, []byte(`{}{"command"`)) {
 		t.Fatalf("buyer concat glued empty object onto arguments: %s", finish)
@@ -72,16 +72,16 @@ func TestConcatSafeCoalescePassThroughConcatSafeCLI(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(bytes.TrimSpace(held)) != 0 {
-		t.Fatalf("concat-safe complete object still waits for finish: %s", held)
+	if concatSSEToolArguments(t, held) != `{"command":"echo hello"}` {
+		t.Fatalf("concat-safe complete object must flush before finish: %s", held)
 	}
 	finish, err := stream.observeBlock([]byte(`data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}` + "\n\ndata: [DONE]\n\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := concatSSEToolArguments(t, finish)
+	got := concatSSEToolArguments(t, append(held, finish...))
 	if got != `{"command":"echo hello"}` {
-		t.Fatalf("concatenated arguments = %q body=%s", got, finish)
+		t.Fatalf("concatenated arguments = %q body=%s", got, append(held, finish...))
 	}
 	if !bytes.Contains(finish, []byte("data: [DONE]")) {
 		t.Fatalf("DONE must still be forwarded: %s", finish)
@@ -94,19 +94,24 @@ func TestConcatSafeCoalescePrefixFragmentsJoinIntoOneObject(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := stream.observeBlock([]byte(`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"command\":\""}}]}}]}` + "\n\n")); err != nil {
+	first, err := stream.observeBlock([]byte(`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"command\":\""}}]}}]}` + "\n\n"))
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := stream.observeBlock([]byte(`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"echo hello\"}"}}]}}]}` + "\n\n")); err != nil {
+	if concatSSEToolArguments(t, first) != `{"command":"` {
+		t.Fatalf("incomplete prefix must flush: %s", first)
+	}
+	second, err := stream.observeBlock([]byte(`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"echo hello\"}"}}]}}]}` + "\n\n"))
+	if err != nil {
 		t.Fatal(err)
 	}
 	finish, err := stream.observeBlock([]byte(`data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}` + "\n\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := concatSSEToolArguments(t, finish)
+	got := concatSSEToolArguments(t, append(append(first, second...), finish...))
 	if got != `{"command":"echo hello"}` {
-		t.Fatalf("prefix concat = %q body=%s", got, finish)
+		t.Fatalf("prefix concat = %q body=%s", got, append(append(first, second...), finish...))
 	}
 }
 
@@ -194,19 +199,41 @@ func TestConcatSafeRejectsArgumentsBeforeNameOpen(t *testing.T) {
 	}
 }
 
-func TestConcatSafeDoesNotFlushHeldArgsWithoutFinish(t *testing.T) {
+func TestConcatSafeDoesNotFlushEmptyObjectWithoutFinish(t *testing.T) {
 	stream := newConcatSafeToolStream()
-	if _, err := stream.observeBlock([]byte(`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_0123456789abcdef","type":"function","function":{"name":"bash","arguments":"{}"}}]}}]}` + "\n\n")); err != nil {
+	open, err := stream.observeBlock([]byte(`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_0123456789abcdef","type":"function","function":{"name":"bash","arguments":"{}"}}]}}]}` + "\n\n"))
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := stream.observeBlock([]byte(`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"command\":\"echo hello\"}"}}]}}]}` + "\n\n")); err != nil {
-		t.Fatal(err)
+	if bytes.Contains(open, []byte(`"arguments":"{}"`)) {
+		t.Fatalf("opening {} must not reach the buyer: %s", open)
 	}
 	out, err := stream.flush()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(bytes.TrimSpace(out)) != 0 {
-		t.Fatalf("held complete object must not reach the buyer without finish_reason: %s", out)
+		t.Fatalf("held {} must not reach the buyer without finish_reason: %s", out)
+	}
+}
+
+func TestConcatSafeFinishDoesNotEmitEmptyToolCallsAfterPrefixFlush(t *testing.T) {
+	stream := newConcatSafeToolStream()
+	if _, err := stream.observeBlock([]byte(`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_0123456789abcdef","type":"function","function":{"name":"bash","arguments":""}}]}}]}` + "\n\n")); err != nil {
+		t.Fatal(err)
+	}
+	args, err := stream.observeBlock([]byte(`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"command\":\"echo hello\"}"}}]}}]}` + "\n\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if concatSSEToolArguments(t, args) != `{"command":"echo hello"}` {
+		t.Fatalf("args=%s", args)
+	}
+	finish, err := stream.observeBlock([]byte(`data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}` + "\n\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(finish, []byte(`"tool_calls":[]`)) {
+		t.Fatalf("empty tool_calls delta after prefix flush: %s", finish)
 	}
 }
