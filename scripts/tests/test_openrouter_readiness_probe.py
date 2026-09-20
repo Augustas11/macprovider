@@ -178,6 +178,77 @@ class OpenRouterReadinessProbeTests(unittest.TestCase):
         got = probe.check_models_document(valid_doc(), "mlx-community/Llama-3.2-3B-Instruct-4bit")
         self.assertEqual(got["rows"], 1)
         self.assertEqual(got["ids"], ["mlx-community/Llama-3.2-3B-Instruct-4bit"])
+        self.assertEqual(got["catalog_paid_rows"], 17)
+        self.assertEqual(got["catalog_listed_ids"], ["mlx-community/Llama-3.2-3B-Instruct-4bit"])
+        self.assertEqual(len(got["catalog_unlisted_ids"]), 16)
+
+    def test_expected_openrouter_slugs_cover_current_catalog(self):
+        catalog = json.loads(probe.DEFAULT_CATALOG_PATH.read_text())
+        self.assertEqual(catalog["version"], "published-2026-09-19-openrouter-priced-v1")
+        recommendable = {
+            row["model_id"]
+            for row in catalog["rows"].values()
+            if row.get("runtime_status") == "recommendable"
+        }
+        self.assertEqual(len(recommendable), 17)
+        self.assertEqual(set(probe.catalog_paid_model_ids()), recommendable)
+        for catalog_key, row in catalog["rows"].items():
+            self.assertEqual(probe.CATALOG_KEY_TO_MODEL_ID[catalog_key], row["model_id"])
+            self.assertIn(row["model_id"], probe.EXPECTED_OPENROUTER_SLUGS)
+            slug = probe.EXPECTED_OPENROUTER_SLUGS[row["model_id"]]
+            self.assertTrue("/" in slug, msg=f"{row['model_id']} slug {slug!r} must be org-prefixed")
+            self.assertNotEqual(slug, row["model_id"])
+
+    def test_resolve_probe_model_accepts_catalog_keys_and_studio_rows(self):
+        self.assertEqual(
+            probe.resolve_probe_model("qwen3-coder-30b-a3b-instruct"),
+            "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
+        )
+        self.assertEqual(
+            probe.resolve_probe_model("z-ai/glm-4.5-air"),
+            "mlx-community/GLM-4.5-Air-4bit",
+        )
+        self.assertEqual(
+            probe.resolve_probe_model("openai/gpt-oss-120b"),
+            "mlx-community/gpt-oss-120b-4bit",
+        )
+        self.assertEqual(
+            probe.EXPECTED_OPENROUTER_SLUGS["mlx-community/Qwen3.5-27B-4bit"],
+            "qwen/qwen3.5-27b",
+        )
+        self.assertTrue(
+            probe.models_equivalent("qwen3-coder-30b-a3b-instruct", "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit")
+        )
+
+    def test_check_models_document_resolves_catalog_key(self):
+        got = probe.check_models_document(valid_doc(), "meta-llama/llama-3.2-3b-instruct")
+        self.assertEqual(got["ids"], ["mlx-community/Llama-3.2-3B-Instruct-4bit"])
+
+    def test_catalog_chat_treats_unserved_models_as_coverage_not_failure(self):
+        def fake_chat(_base, _token, model, **_kwargs):
+            if model == "mlx-community/Llama-3.2-3B-Instruct-4bit":
+                return {"status": 200, "ok": True, "latency_ms": 10, "error_code": ""}
+            return {"status": 503, "ok": False, "latency_ms": 5, "error_code": "no_provider_available"}
+
+        with mock.patch.object(probe, "chat_once", side_effect=fake_chat):
+            got = probe.check_catalog_chat("https://api.example.test", "token", 16)
+        self.assertTrue(got["ok"])
+        self.assertEqual(got["catalog_paid_rows"], 17)
+        self.assertEqual(got["passed"], ["mlx-community/Llama-3.2-3B-Instruct-4bit"])
+        self.assertEqual(len(got["not_served"]), 16)
+        self.assertEqual(got["failed"], [])
+
+    def test_catalog_chat_fails_closed_on_non_capacity_errors(self):
+        def fake_chat(_base, _token, model, **_kwargs):
+            if model == "mlx-community/Llama-3.2-3B-Instruct-4bit":
+                return {"status": 200, "ok": True, "latency_ms": 10, "error_code": ""}
+            if model == "mlx-community/GLM-4.5-Air-4bit":
+                return {"status": 502, "ok": False, "latency_ms": 5, "error_code": "upstream_provider_error"}
+            return {"status": 503, "ok": False, "latency_ms": 5, "error_code": "no_provider_available"}
+
+        with mock.patch.object(probe, "chat_once", side_effect=fake_chat):
+            with self.assertRaisesRegex(probe.EvidenceProbeError, "catalog chat failed"):
+                probe.check_catalog_chat("https://api.example.test", "token", 16)
 
     def test_models_document_rejects_duplicate_model_ids(self):
         doc = valid_doc()

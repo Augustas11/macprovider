@@ -46,26 +46,79 @@ FILING_MAX_TOKENS_PER_MINUTE_PER_SLOT = 120_000
 GATEWAY_KEEPALIVE_TICK_SECONDS = 15
 BENCHMARK_BATCH_TIMEOUT_SECONDS = 120
 LOCAL_AUTH_HOSTS = {"localhost", "127.0.0.1", "::1"}
-# Expected `openrouter.slug` for each served catalog model, keyed by the served
-# (paid) model id the gateway publishes in /v1/openrouter/models. These are the
-# priced-v1 catalog rows (published-2026-09-19-openrouter-priced-v1), whose
-# pricing/identity come from the OpenRouter engine. Slugs are org-prefixed to
-# match the gateway convention (cf. the shipped "qwen/qwen3-8b"). This pin only
-# fires for a model that is actually present in the models document, so listing
-# a model here is inert until the gateway's openRouterListings exposes it; when a
-# family is added there, its OpenRouterSlug must equal the value below.
-EXPECTED_OPENROUTER_SLUGS = {
-    "mlx-community/Llama-3.2-3B-Instruct-4bit": "meta-llama/llama-3.2-3b-instruct",
-    "mlx-community/Llama-3.2-3B-Instruct-4bit-free": "meta-llama/llama-3.2-3b-instruct:free",
-    "mlx-community/Meta-Llama-3.1-8B-Instruct-4bit": "meta-llama/llama-3.1-8b-instruct",
-    "mlx-community/Qwen3-8B-4bit": "qwen/qwen3-8b",
-    "mlx-community/Qwen3-32B-4bit": "qwen/qwen3-32b",
-    "mlx-community/Qwen2.5-Coder-32B-Instruct-4bit": "qwen/qwen2.5-coder-32b-instruct",
-    "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit": "qwen/qwen3-coder-30b-a3b-instruct",
-    "mlx-community/gemma-4-26b-a4b-it-4bit": "google/gemma-4-26b-a4b-it",
-    "mlx-community/gpt-oss-20b-MXFP4-Q8": "openai/gpt-oss-20b",
-    "mlx-community/NVIDIA-Nemotron-3-Nano-30B-A3B-4bit": "nvidia/nemotron-3-nano-30b-a3b",
-}
+# Canonical OpenRouter identity for every recommendable priced-v1 catalog row
+# (published-2026-09-19-openrouter-priced-v1, 17 rows). The Mac Studio 256GB
+# promotion (#1612) added the eight upper-RAM rows (gpt-oss-120b, GLM-4.5-Air,
+# Qwen3.5/3.6/3.8 27B + 35B-A3B, Qwen3-30B-Instruct-2507) on top of the nine
+# rows #1618 already pinned. Tuple: catalog_key, served pool id, OpenRouter
+# slug, dual-free SKU. Slugs are org-prefixed to match the gateway convention
+# (cf. the shipped "qwen/qwen3-8b"). The pin only fires for a model that is
+# actually present in /v1/openrouter/models, so listing a row here is inert
+# until openRouterListings exposes that family; when it does, OpenRouterSlug
+# must equal the value below.
+CATALOG_OPENROUTER_ROWS = (
+    ("meta-llama/llama-3.2-3b-instruct", "mlx-community/Llama-3.2-3B-Instruct-4bit", "meta-llama/llama-3.2-3b-instruct", True),
+    ("meta-llama/llama-3.1-8b-instruct", "mlx-community/Meta-Llama-3.1-8B-Instruct-4bit", "meta-llama/llama-3.1-8b-instruct", False),
+    ("qwen3-8b", "mlx-community/Qwen3-8B-4bit", "qwen/qwen3-8b", False),
+    ("qwen3-32b", "mlx-community/Qwen3-32B-4bit", "qwen/qwen3-32b", False),
+    ("qwen2.5-coder-32b-instruct", "mlx-community/Qwen2.5-Coder-32B-Instruct-4bit", "qwen/qwen2.5-coder-32b-instruct", False),
+    ("qwen3-coder-30b-a3b-instruct", "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit", "qwen/qwen3-coder-30b-a3b-instruct", False),
+    ("google-gemma-4-26b-a4b-it", "mlx-community/gemma-4-26b-a4b-it-4bit", "google/gemma-4-26b-a4b-it", False),
+    ("openai/gpt-oss-20b", "mlx-community/gpt-oss-20b-MXFP4-Q8", "openai/gpt-oss-20b", False),
+    ("nvidia/nemotron-3-nano-30b-a3b", "mlx-community/NVIDIA-Nemotron-3-Nano-30B-A3B-4bit", "nvidia/nemotron-3-nano-30b-a3b", False),
+    ("openai/gpt-oss-120b", "mlx-community/gpt-oss-120b-4bit", "openai/gpt-oss-120b", False),
+    ("qwen/qwen3-30b-a3b-instruct-2507", "mlx-community/Qwen3-30B-A3B-Instruct-2507-4bit", "qwen/qwen3-30b-a3b-instruct-2507", False),
+    ("qwen/qwen3.5-27b", "mlx-community/Qwen3.5-27B-4bit", "qwen/qwen3.5-27b", False),
+    ("qwen/qwen3.5-35b-a3b", "mlx-community/Qwen3.5-35B-A3B-4bit", "qwen/qwen3.5-35b-a3b", False),
+    ("qwen/qwen3.6-27b", "mlx-community/Qwen3.6-27B-4bit", "qwen/qwen3.6-27b", False),
+    ("qwen/qwen3.6-35b-a3b", "mlx-community/Qwen3.6-35B-A3B-4bit", "qwen/qwen3.6-35b-a3b", False),
+    ("qwen/qwen3.8-27b", "mlx-community/Qwen3.8-27B-4bit", "qwen/qwen3.8-27b", False),
+    ("z-ai/glm-4.5-air", "mlx-community/GLM-4.5-Air-4bit", "z-ai/glm-4.5-air", False),
+)
+DEFAULT_CATALOG_PATH = Path(__file__).resolve().parents[1] / "phase3-binary/catalog/autotune/autotune-candidates.json"
+
+
+def _catalog_key_to_model_id() -> dict[str, str]:
+    return {catalog_key: model_id for catalog_key, model_id, _slug, _dual_free in CATALOG_OPENROUTER_ROWS}
+
+
+def _expected_openrouter_slugs() -> dict[str, str]:
+    slugs = {}
+    for _catalog_key, model_id, slug, dual_free in CATALOG_OPENROUTER_ROWS:
+        slugs[model_id] = slug
+        if dual_free:
+            slugs[model_id + "-free"] = slug + ":free"
+    return slugs
+
+
+CATALOG_KEY_TO_MODEL_ID = _catalog_key_to_model_id()
+EXPECTED_OPENROUTER_SLUGS = _expected_openrouter_slugs()
+
+
+def catalog_paid_model_ids() -> tuple[str, ...]:
+    return tuple(model_id for _catalog_key, model_id, _slug, _dual_free in CATALOG_OPENROUTER_ROWS)
+
+
+def resolve_probe_model(model: str) -> str:
+    """Accept a served pool id, catalog key, or already-resolved id."""
+    if not isinstance(model, str) or not model:
+        return model
+    if model in EXPECTED_OPENROUTER_SLUGS:
+        return model
+    mapped = CATALOG_KEY_TO_MODEL_ID.get(model)
+    if mapped:
+        return mapped
+    if model.endswith("-free"):
+        paid = resolve_probe_model(model[: -len("-free")])
+        if paid != model[: -len("-free")]:
+            return expected_free_model_id(paid)
+    return model
+
+
+def models_equivalent(left: str, right: str) -> bool:
+    return resolve_probe_model(left) == resolve_probe_model(right)
+
+
 ROOT_FORBIDDEN_MODEL_KEYS = {
     "architecture",
     "context_length",
@@ -391,7 +444,20 @@ def sentence_refers_to_prompt_records(sentence: str, previous_sentence: str, pro
     return any(term in previous_sentence for term in prompt_terms) and any(ref in sentence for ref in record_references)
 
 
+def catalog_coverage(by_id: dict) -> dict:
+    paid_ids = catalog_paid_model_ids()
+    listed = [model_id for model_id in paid_ids if model_id in by_id]
+    unlisted = [model_id for model_id in paid_ids if model_id not in by_id]
+    return {
+        "catalog_paid_rows": len(paid_ids),
+        "catalog_listed_ids": listed,
+        "catalog_unlisted_ids": unlisted,
+        "catalog_listed_rows": len(listed),
+    }
+
+
 def check_models_document(doc: dict, expected_model: str = "", require_free_alias: bool = False) -> dict:
+    expected_model = resolve_probe_model(expected_model) if expected_model else expected_model
     rows = doc.get("data")
     if not isinstance(rows, list) or not rows:
         raise ProbeError("models document must contain non-empty data array")
@@ -481,6 +547,7 @@ def check_models_document(doc: dict, expected_model: str = "", require_free_alia
             raise ProbeError(f"requested model {expected_model} must be the paid row with is_free=false")
         if require_free_alias and paid.get("is_ready") is not True:
             raise ProbeError(f"requested model {expected_model} must be is_ready=true for filing mode")
+    coverage = catalog_coverage(by_id)
     if require_free_alias:
         free_id = expected_free_model_id(expected_model)
         free = by_id.get(free_id)
@@ -496,10 +563,13 @@ def check_models_document(doc: dict, expected_model: str = "", require_free_alia
         slug = free.get("openrouter", {}).get("slug") if isinstance(free.get("openrouter"), dict) else ""
         if not isinstance(slug, str) or not slug.endswith(":free"):
             raise ProbeError(f"free alias {free_id} openrouter.slug must end with :free")
-    return {"rows": len(rows), "ids": [row["id"] for row in rows], "capacities": capacities_by_id}
+    result = {"rows": len(rows), "ids": [row["id"] for row in rows], "capacities": capacities_by_id}
+    result.update(coverage)
+    return result
 
 
 def check_model_capacity_against_pool(models_check: dict, pool_check: dict, expected_model: str) -> dict:
+    expected_model = resolve_probe_model(expected_model)
     capacities = models_check.get("capacities") if isinstance(models_check, dict) else None
     if not isinstance(capacities, dict):
         raise ProbeError("models check missing normalized capacity evidence")
@@ -875,6 +945,61 @@ def check_chat(base_url: str, token: str, model: str, max_tokens: int) -> dict:
     if stream.get("keepalive_evidence") == "missing":
         raise ProbeError(f"stream lasted past keepalive tick without SSE comment keepalive: {stream}")
     return {"non_stream": non_stream, "stream": stream}
+
+
+def is_unserved_catalog_chat(result: dict) -> bool:
+    status = result.get("status")
+    error_code = result.get("error_code") or ""
+    if status in {404, 503}:
+        return True
+    if status == 429 and error_code == "no_provider_available":
+        return True
+    return error_code in {"no_provider_available", "model_not_found", "invalid_model"}
+
+
+def check_catalog_chat(base_url: str, token: str, max_tokens: int) -> dict:
+    rows = []
+    for model_id in catalog_paid_model_ids():
+        result = chat_once(base_url, token, model_id, stream=False, max_tokens=max_tokens)
+        if result.get("ok"):
+            classification = "passed"
+        elif is_unserved_catalog_chat(result):
+            classification = "not_served"
+        else:
+            classification = "failed"
+        rows.append(
+            {
+                "id": model_id,
+                "ok": classification == "passed",
+                "classification": classification,
+                "status": result.get("status"),
+                "error_code": result.get("error_code") or "",
+                "latency_ms": result.get("latency_ms"),
+            }
+        )
+    passed = [row["id"] for row in rows if row["classification"] == "passed"]
+    not_served = [row["id"] for row in rows if row["classification"] == "not_served"]
+    failed = [row["id"] for row in rows if row["classification"] == "failed"]
+    evidence = {
+        "catalog_paid_rows": len(rows),
+        "passed": passed,
+        "not_served": not_served,
+        "failed": failed,
+        "rows": rows,
+    }
+    if failed:
+        raise EvidenceProbeError(
+            f"catalog chat failed for {len(failed)} model(s): {failed}",
+            {**evidence, "classification": "catalog_chat_failed"},
+        )
+    if not passed:
+        raise EvidenceProbeError(
+            "catalog chat served no recommendable catalog model",
+            {**evidence, "classification": "catalog_chat_none_served"},
+        )
+    evidence["classification"] = "catalog_chat_passed"
+    evidence["ok"] = True
+    return evidence
 
 
 def percentile(values: list[int], pct: float) -> int:
@@ -1282,11 +1407,16 @@ def validate_pool_slots(entry: dict) -> None:
 
 
 def check_pool_topology(admin_url: str, token: str, expected_model: str, benchmark_concurrency: int = 0) -> dict:
+    expected_model = resolve_probe_model(expected_model)
     payload, status = read_json("GET", normalize_base_url(admin_url) + "/poolz", token=token)
     entries = normalize_pool_entries(payload)
     routable = [entry for entry in entries if poolz_entry_counts_toward_buyer_capacity(entry)]
     ready = [entry for entry in routable if entry.get("state") == "ready"]
-    matching = [entry for entry in ready if entry.get("model_id") == expected_model]
+    matching = [
+        entry
+        for entry in ready
+        if isinstance(entry.get("model_id"), str) and models_equivalent(entry.get("model_id"), expected_model)
+    ]
     for entry in entries:
         validate_pool_slots(entry)
     slots_total = sum(entry["slots_total"] for entry in matching)
@@ -1565,6 +1695,11 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--api-key-env", default="MACPROVIDER_SPEC015_API_KEY")
     parser.add_argument("--api-key-file", default="")
     parser.add_argument("--model", default=DEFAULT_MODEL)
+    parser.add_argument(
+        "--catalog-chat",
+        action="store_true",
+        help="smoke chat every recommendable catalog model; unserved rows are recorded as not_served, not failures",
+    )
     parser.add_argument("--expected-healthz-version", default="", help="fail if /healthz.version does not match this exact value")
     parser.add_argument("--max-tokens", type=int, default=16)
     parser.add_argument("--benchmark-requests", type=int, default=0)
@@ -1596,6 +1731,7 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--filing-mode", action="store_true", help="fail unless chat, benchmark, and statement evidence are all collected")
     parser.add_argument("--output", default="", help="write the JSON report to this path")
     args = parser.parse_args(argv)
+    args.model = resolve_probe_model(args.model)
     if not math.isfinite(args.min_success_ratio) or args.min_success_ratio < 0 or args.min_success_ratio > 1:
         raise SystemExit("--min-success-ratio must be in [0,1]")
     if not math.isfinite(args.min_output_tokens_per_second) or args.min_output_tokens_per_second < 0:
@@ -1699,7 +1835,7 @@ def main(argv: list[str]) -> int:
         else:
             token_error = "" if token else missing_token_error(args.api_key_env, args.api_key_file, "API key")
         if token_error and (
-            args.api_key_file or args.filing_mode or args.diagnostic_mode or args.benchmark_requests > 0 or args.saturation_requests > 0
+            args.api_key_file or args.filing_mode or args.diagnostic_mode or args.catalog_chat or args.benchmark_requests > 0 or args.saturation_requests > 0
         ):
             report["checks"]["api_key"] = {"ok": False, "error": token_error}
             report["checks"]["chat"] = {"ok": False, "error": token_error}
@@ -1716,6 +1852,11 @@ def main(argv: list[str]) -> int:
             record_check("chat", lambda: check_chat(args.base_url, token, args.model, args.max_tokens))
             if args.filing_mode:
                 record_check("chat_free", lambda: check_chat(args.base_url, token, expected_free_model_id(args.model), args.max_tokens))
+            if args.catalog_chat:
+                record_check(
+                    "catalog_chat",
+                    lambda: check_catalog_chat(args.base_url, token, args.max_tokens),
+                )
             if args.benchmark_requests > 0:
                 record_check(
                     "benchmark",
