@@ -178,6 +178,89 @@ class OpenRouterReadinessProbeTests(unittest.TestCase):
         got = probe.check_models_document(valid_doc(), "mlx-community/Llama-3.2-3B-Instruct-4bit")
         self.assertEqual(got["rows"], 1)
         self.assertEqual(got["ids"], ["mlx-community/Llama-3.2-3B-Instruct-4bit"])
+        self.assertEqual(got["catalog_paid_rows"], 17)
+        self.assertEqual(got["catalog_listed_ids"], ["mlx-community/Llama-3.2-3B-Instruct-4bit"])
+        self.assertEqual(len(got["catalog_unlisted_ids"]), 16)
+
+    def test_expected_openrouter_slugs_cover_current_catalog(self):
+        catalog = json.loads(probe.DEFAULT_CATALOG_PATH.read_text())
+        self.assertEqual(catalog["version"], "published-2026-09-19-openrouter-priced-v1")
+        recommendable = {
+            row["model_id"]
+            for row in catalog["rows"].values()
+            if row.get("runtime_status") == "recommendable"
+        }
+        self.assertEqual(len(recommendable), 17)
+        self.assertEqual(set(probe.catalog_paid_model_ids()), recommendable)
+        for catalog_key, row in catalog["rows"].items():
+            self.assertEqual(probe.CATALOG_KEY_TO_MODEL_ID[catalog_key], row["model_id"])
+            self.assertIn(row["model_id"], probe.EXPECTED_OPENROUTER_SLUGS)
+            slug = probe.EXPECTED_OPENROUTER_SLUGS[row["model_id"]]
+            self.assertTrue("/" in slug, msg=f"{row['model_id']} slug {slug!r} must be org-prefixed")
+            self.assertNotEqual(slug, row["model_id"])
+
+    def test_resolve_probe_model_accepts_catalog_keys_and_studio_rows(self):
+        self.assertEqual(
+            probe.resolve_probe_model("qwen3-coder-30b-a3b-instruct"),
+            "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
+        )
+        self.assertEqual(
+            probe.resolve_probe_model("z-ai/glm-4.5-air"),
+            "mlx-community/GLM-4.5-Air-4bit",
+        )
+        self.assertEqual(
+            probe.resolve_probe_model("openai/gpt-oss-120b"),
+            "mlx-community/gpt-oss-120b-4bit",
+        )
+        self.assertEqual(
+            probe.EXPECTED_OPENROUTER_SLUGS["mlx-community/Qwen3.5-27B-4bit"],
+            "qwen/qwen3.5-27b",
+        )
+        self.assertTrue(
+            probe.models_equivalent("qwen3-coder-30b-a3b-instruct", "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit")
+        )
+
+    def test_check_models_document_resolves_catalog_key(self):
+        got = probe.check_models_document(valid_doc(), "meta-llama/llama-3.2-3b-instruct")
+        self.assertEqual(got["ids"], ["mlx-community/Llama-3.2-3B-Instruct-4bit"])
+
+    def test_catalog_chat_treats_unserved_models_as_coverage_not_failure(self):
+        def fake_chat(_base, _token, model, **_kwargs):
+            if model == "mlx-community/Llama-3.2-3B-Instruct-4bit":
+                return {"status": 200, "ok": True, "latency_ms": 10, "error_code": ""}
+            return {"status": 503, "ok": False, "latency_ms": 5, "error_code": "no_provider_available"}
+
+        with mock.patch.object(probe, "chat_once", side_effect=fake_chat):
+            got = probe.check_catalog_chat("https://api.example.test", "token", 16)
+        self.assertTrue(got["ok"])
+        self.assertEqual(got["catalog_paid_rows"], 17)
+        self.assertEqual(got["passed"], ["mlx-community/Llama-3.2-3B-Instruct-4bit"])
+        self.assertEqual(len(got["not_served"]), 16)
+        self.assertEqual(got["failed"], [])
+
+    def test_catalog_chat_fails_closed_on_non_capacity_errors(self):
+        def fake_chat(_base, _token, model, **_kwargs):
+            if model == "mlx-community/Llama-3.2-3B-Instruct-4bit":
+                return {"status": 200, "ok": True, "latency_ms": 10, "error_code": ""}
+            if model == "mlx-community/GLM-4.5-Air-4bit":
+                return {"status": 502, "ok": False, "latency_ms": 5, "error_code": "upstream_provider_error"}
+            return {"status": 503, "ok": False, "latency_ms": 5, "error_code": "no_provider_available"}
+
+        with mock.patch.object(probe, "chat_once", side_effect=fake_chat):
+            with self.assertRaisesRegex(probe.EvidenceProbeError, "catalog chat failed"):
+                probe.check_catalog_chat("https://api.example.test", "token", 16)
+
+    def test_catalog_chat_fails_closed_on_502_capacity_error_code(self):
+        def fake_chat(_base, _token, model, **_kwargs):
+            if model == "mlx-community/Llama-3.2-3B-Instruct-4bit":
+                return {"status": 200, "ok": True, "latency_ms": 10, "error_code": ""}
+            if model == "mlx-community/GLM-4.5-Air-4bit":
+                return {"status": 502, "ok": False, "latency_ms": 5, "error_code": "no_provider_available"}
+            return {"status": 404, "ok": False, "latency_ms": 5, "error_code": "model_not_found"}
+
+        with mock.patch.object(probe, "chat_once", side_effect=fake_chat):
+            with self.assertRaisesRegex(probe.EvidenceProbeError, "catalog chat failed"):
+                probe.check_catalog_chat("https://api.example.test", "token", 16)
 
     def test_models_document_rejects_duplicate_model_ids(self):
         doc = valid_doc()
@@ -488,7 +571,21 @@ class OpenRouterReadinessProbeTests(unittest.TestCase):
         with mock.patch.object(probe, "http_request", return_value=after_done):
             got = probe.chat_once("https://api.example.test", "secret", "model", stream=True, max_tokens=16)
         self.assertFalse(got["ok"])
-        self.assertEqual(got["error_code"], "data_after_done")
+        self.assertEqual(got["error_code"], "late_error")
+
+    def test_chat_ignores_trailing_non_error_frames_after_done(self):
+        stream = sse_response(
+            [
+                'data: {"choices":[{"delta":{"content":"OK"}}]}\n\n',
+                'data: {"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2},"choices":[]}\n\n',
+                "data: [DONE]\n\n",
+                'data: {"choices":[{"delta":{"content":""}}]}\n\n',
+            ]
+        )
+        with mock.patch.object(probe, "http_request", return_value=stream):
+            got = probe.chat_once("https://api.example.test", "secret", "model", stream=True, max_tokens=16)
+        self.assertTrue(got["ok"])
+        self.assertEqual(got["error_code"], "")
 
     def test_non_stream_chat_rejects_top_level_error_object(self):
         payload = {
@@ -763,6 +860,107 @@ class OpenRouterReadinessProbeTests(unittest.TestCase):
         self.assertEqual(got["requests_sent"], 2)
         self.assertEqual(got["shed_429"], 1)
 
+    def test_saturation_does_not_fail_queued_ttft_after_clean_429(self):
+        slow_ok = {
+            "status": 200,
+            "ok": True,
+            "ttft_ms": 8000,
+            "latency_ms": 8500,
+            "generation_ms": 500,
+            "output_tokens": 8,
+        }
+        shed = {"status": 429, "ok": False, "error_code": "no_provider_available", "latency_ms": 1}
+        with mock.patch.object(probe, "chat_once", side_effect=[slow_ok, shed]):
+            got = probe.run_benchmark("https://api.example.test", "secret", "model", 2, 2, 16, 0.0, 5000, 0.0, True)
+        self.assertEqual(got["shed_429"], 1)
+        self.assertEqual(got["ok"], 1)
+        self.assertEqual(got["ttft_ms_p95"], 8000)
+
+    def test_idle_benchmark_retries_timeout_once(self):
+        ok = {
+            "status": 200,
+            "ok": True,
+            "ttft_ms": 20,
+            "latency_ms": 120,
+            "generation_ms": 100,
+            "output_tokens": 16,
+        }
+        with mock.patch.object(
+            probe,
+            "chat_once",
+            side_effect=[probe.ProbeError("request timed out: https://api.example.test/v1/chat/completions"), ok],
+        ) as mocked:
+            got = probe.run_benchmark("https://api.example.test", "secret", "model", 1, 1, 16, 1.0, 5000, 1.0)
+        self.assertEqual(mocked.call_count, 2)
+        self.assertEqual(got["ok"], 1)
+        self.assertEqual(got["statuses"], {"200": 1})
+
+    def test_idle_benchmark_does_not_retry_upstream_502(self):
+        upstream_error = {"status": 502, "ok": False, "error_code": "upstream_provider_error", "latency_ms": 1}
+        with mock.patch.object(probe, "chat_once", side_effect=[upstream_error]) as mocked:
+            with self.assertRaises(probe.ProbeError):
+                probe.run_benchmark("https://api.example.test", "secret", "model", 1, 1, 16, 1.0, 5000, 1.0)
+        self.assertEqual(mocked.call_count, 1)
+
+    def test_soak_skips_queued_ttft_when_latency_not_enforced(self):
+        slow = {
+            "status": 200,
+            "ok": True,
+            "ttft_ms": 9000,
+            "latency_ms": 9500,
+            "generation_ms": 500,
+            "output_tokens": 8,
+        }
+        with mock.patch.object(probe, "chat_once", side_effect=[slow, slow]):
+            got = probe.run_benchmark(
+                "https://api.example.test",
+                "secret",
+                "model",
+                2,
+                2,
+                16,
+                1.0,
+                5000,
+                1.0,
+                enforce_latency=False,
+            )
+        self.assertEqual(got["ok"], 2)
+        self.assertEqual(got["ttft_ms_p95"], 9000)
+
+    def test_idle_then_soak_uses_idle_ttft_not_queued_soak(self):
+        idle = {
+            "status": 200,
+            "ok": True,
+            "ttft_ms": 40,
+            "latency_ms": 140,
+            "generation_ms": 100,
+            "output_tokens": 16,
+        }
+        slow = {
+            "status": 200,
+            "ok": True,
+            "ttft_ms": 9000,
+            "latency_ms": 9500,
+            "generation_ms": 500,
+            "output_tokens": 8,
+        }
+        with mock.patch.object(probe, "chat_once", side_effect=[idle, slow, slow]):
+            got = probe.run_idle_then_soak_benchmark(
+                "https://api.example.test",
+                "secret",
+                "model",
+                2,
+                2,
+                16,
+                1.0,
+                5000,
+                1.0,
+                idle_requests=1,
+            )
+        self.assertEqual(got["ttft_ms_p95"], 40)
+        self.assertEqual(got["ok"], 2)
+        self.assertEqual(got["idle_latency"]["ok"], 1)
+
     def test_benchmark_stamps_unique_request_ids(self):
         result = {
             "status": 200,
@@ -810,6 +1008,54 @@ class OpenRouterReadinessProbeTests(unittest.TestCase):
             got = probe.run_load_ladder("https://api.example.test", "secret", "model", [1, 2], 16, 2, 5000)
         self.assertEqual(got["max_clean_concurrency"], 1)
         self.assertEqual(got["steps"][1]["classification"], "clean_capacity_shed")
+
+    def test_load_ladder_overflow_step_ignores_queued_ttft(self):
+        ok = {
+            "status": 200,
+            "ok": True,
+            "ttft_ms": 20,
+            "latency_ms": 60,
+            "generation_ms": 40,
+            "output_tokens": 4,
+        }
+        slow = {
+            "status": 200,
+            "ok": True,
+            "ttft_ms": 8000,
+            "latency_ms": 8500,
+            "generation_ms": 500,
+            "output_tokens": 8,
+        }
+        shed = {"status": 429, "ok": False, "error_code": "no_provider_available", "latency_ms": 1}
+        with mock.patch.object(probe, "chat_once", side_effect=[ok, slow, shed]):
+            got = probe.run_load_ladder("https://api.example.test", "secret", "model", [1, 2], 16, 1, 5000)
+        self.assertEqual(got["first_blocker"], "")
+        self.assertEqual(got["max_clean_concurrency"], 1)
+        self.assertEqual(got["steps"][1]["classification"], "clean_capacity_shed")
+
+    def test_load_ladder_queued_all_200_ignores_ttft(self):
+        ok = {
+            "status": 200,
+            "ok": True,
+            "ttft_ms": 20,
+            "latency_ms": 60,
+            "generation_ms": 40,
+            "output_tokens": 4,
+        }
+        slow = {
+            "status": 200,
+            "ok": True,
+            "ttft_ms": 8000,
+            "latency_ms": 8500,
+            "generation_ms": 500,
+            "output_tokens": 8,
+        }
+        with mock.patch.object(probe, "chat_once", side_effect=[ok, slow, slow]):
+            got = probe.run_load_ladder("https://api.example.test", "secret", "model", [1, 2], 16, 1, 5000)
+        self.assertEqual(got["first_blocker"], "")
+        self.assertEqual(got["max_clean_concurrency"], 2)
+        self.assertEqual(got["steps"][1]["classification"], "passed")
+        self.assertEqual(got["steps"][1]["ttft_ms_p95"], 8000)
 
     def test_load_ladder_fails_when_every_step_capacity_sheds(self):
         shed = {"status": 429, "ok": False, "error_code": "no_provider_available", "latency_ms": 1}
@@ -979,6 +1225,44 @@ class OpenRouterReadinessProbeTests(unittest.TestCase):
         self.assertEqual(raised.exception.evidence["statuses"], {"200": 1})
         self.assertEqual(raised.exception.evidence["output_tokens_per_second"], 0.1)
         self.assertEqual(raised.exception.evidence["min_output_tokens_per_second"], 1.0)
+        fast = {
+            "status": 200,
+            "ok": True,
+            "ttft_ms": 20,
+            "latency_ms": 120,
+            "generation_ms": 100,
+            "output_tokens": 16,
+        }
+        slow = {
+            "status": 200,
+            "ok": True,
+            "ttft_ms": 20,
+            "latency_ms": 5020,
+            "generation_ms": 5000,
+            "output_tokens": 16,
+        }
+        with mock.patch.object(probe, "chat_once", side_effect=[slow, fast]):
+            got = probe.run_benchmark("https://api.example.test", "secret", "model", 2, 1, 16, 1.0, 5000, 10.0)
+        self.assertGreaterEqual(got["output_tokens_per_second"], 10.0)
+
+    def test_benchmark_uses_throughput_prompt(self):
+        captured = {}
+
+        def fake_chat_once(*_args, **kwargs):
+            captured["prompt"] = kwargs.get("prompt")
+            return {
+                "status": 200,
+                "ok": True,
+                "ttft_ms": 20,
+                "latency_ms": 120,
+                "generation_ms": 100,
+                "output_tokens": 16,
+            }
+
+        with mock.patch.object(probe, "chat_once", side_effect=fake_chat_once):
+            got = probe.run_benchmark("https://api.example.test", "secret", "model", 1, 1, 16, 1.0, 5000, 1.0)
+        self.assertEqual(captured["prompt"], probe.BENCHMARK_PROMPT)
+        self.assertGreaterEqual(got["output_tokens_per_second"], 10.0)
 
     def test_benchmark_rejects_unbounded_stress_inputs(self):
         with self.assertRaisesRegex(probe.ProbeError, "requests"):
@@ -1329,11 +1613,14 @@ class OpenRouterReadinessProbeTests(unittest.TestCase):
                 probe, "check_healthz", return_value={"http_status": 200, "status": "ok", "version": "v1.8.153"}
             ), mock.patch.object(
                 probe, "check_chat", return_value={"ok": True}
+            ), mock.patch.object(
+                probe, "check_catalog_chat", return_value={"ok": True, "classification": "catalog_chat_passed"}
             ), mock.patch.object(probe, "run_benchmark", return_value=bench):
                 code = probe.main(argv)
             self.assertEqual(code, 1)
             report = json.loads(output.read_text(encoding="utf-8"))
             self.assertFalse(report["ok"])
+            self.assertIn("catalog_chat", report["checks"])
             self.assertIn("operator key file is not readable", report["checks"]["wholesale_statement"]["error"])
             self.assertIn("admin_healthz", report["checks"])
             self.assertIn("operator key file is not readable", report["checks"]["pool_topology"]["error"])
@@ -1410,6 +1697,8 @@ class OpenRouterReadinessProbeTests(unittest.TestCase):
             probe.main(loopback_admin)
         with self.assertRaisesRegex(SystemExit, "load-ladder-requests-per-step"):
             probe.main(base + ["--load-ladder-requests-per-step", "1"])
+        with self.assertRaisesRegex(SystemExit, "saturation-max-tokens"):
+            probe.main(base + ["--saturation-max-tokens", "16"])
 
     def test_filing_mode_records_absent_secret_evidence(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1531,7 +1820,7 @@ class OpenRouterReadinessProbeTests(unittest.TestCase):
                 code = probe.main(argv)
             self.assertEqual(code, 1)
             report = json.loads(output.read_text(encoding="utf-8"))
-            for name in ("chat", "chat_free", "benchmark", "load_ladder", "saturation"):
+            for name in ("chat", "chat_free", "catalog_chat", "benchmark", "load_ladder", "saturation"):
                 self.assertFalse(report["checks"][name]["ok"])
                 self.assertIn("API key file is not readable", report["checks"][name]["error"])
             self.assertTrue(any("api_key" in error for error in report["errors"]))
@@ -1604,6 +1893,8 @@ class OpenRouterReadinessProbeTests(unittest.TestCase):
             ), mock.patch.object(
                 probe, "check_chat", return_value={"ok": True}
             ), mock.patch.object(
+                probe, "check_catalog_chat", return_value={"ok": True, "classification": "catalog_chat_passed"}
+            ), mock.patch.object(
                 probe, "run_benchmark", side_effect=[bench_error, {"requests_sent": 8, "statuses": {"429": 8}, "ok": 0, "shed_429": 8}]
             ), mock.patch.object(
                 probe, "run_load_ladder", return_value={"steps": [], "first_blocker": "", "max_clean_concurrency": 4}
@@ -1618,6 +1909,7 @@ class OpenRouterReadinessProbeTests(unittest.TestCase):
             self.assertEqual(code, 1)
             report = json.loads(output.read_text(encoding="utf-8"))
             self.assertEqual(report["checks"]["benchmark"]["classification"], "upstream_provider_error")
+            self.assertIn("catalog_chat", report["checks"])
             self.assertIn("saturation", report["checks"])
             self.assertIn("load_ladder", report["checks"])
             self.assertIn("admin_healthz", report["checks"])
