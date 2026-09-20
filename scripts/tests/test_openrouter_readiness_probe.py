@@ -876,6 +876,32 @@ class OpenRouterReadinessProbeTests(unittest.TestCase):
         self.assertEqual(got["ok"], 1)
         self.assertEqual(got["ttft_ms_p95"], 8000)
 
+    def test_idle_benchmark_retries_timeout_once(self):
+        ok = {
+            "status": 200,
+            "ok": True,
+            "ttft_ms": 20,
+            "latency_ms": 120,
+            "generation_ms": 100,
+            "output_tokens": 16,
+        }
+        with mock.patch.object(
+            probe,
+            "chat_once",
+            side_effect=[probe.ProbeError("request timed out: https://api.example.test/v1/chat/completions"), ok],
+        ) as mocked:
+            got = probe.run_benchmark("https://api.example.test", "secret", "model", 1, 1, 16, 1.0, 5000, 1.0)
+        self.assertEqual(mocked.call_count, 2)
+        self.assertEqual(got["ok"], 1)
+        self.assertEqual(got["statuses"], {"200": 1})
+
+    def test_idle_benchmark_does_not_retry_upstream_502(self):
+        upstream_error = {"status": 502, "ok": False, "error_code": "upstream_provider_error", "latency_ms": 1}
+        with mock.patch.object(probe, "chat_once", side_effect=[upstream_error]) as mocked:
+            with self.assertRaises(probe.ProbeError):
+                probe.run_benchmark("https://api.example.test", "secret", "model", 1, 1, 16, 1.0, 5000, 1.0)
+        self.assertEqual(mocked.call_count, 1)
+
     def test_benchmark_stamps_unique_request_ids(self):
         result = {
             "status": 200,
@@ -947,6 +973,30 @@ class OpenRouterReadinessProbeTests(unittest.TestCase):
         self.assertEqual(got["first_blocker"], "")
         self.assertEqual(got["max_clean_concurrency"], 1)
         self.assertEqual(got["steps"][1]["classification"], "clean_capacity_shed")
+
+    def test_load_ladder_queued_all_200_ignores_ttft(self):
+        ok = {
+            "status": 200,
+            "ok": True,
+            "ttft_ms": 20,
+            "latency_ms": 60,
+            "generation_ms": 40,
+            "output_tokens": 4,
+        }
+        slow = {
+            "status": 200,
+            "ok": True,
+            "ttft_ms": 8000,
+            "latency_ms": 8500,
+            "generation_ms": 500,
+            "output_tokens": 8,
+        }
+        with mock.patch.object(probe, "chat_once", side_effect=[ok, slow, slow]):
+            got = probe.run_load_ladder("https://api.example.test", "secret", "model", [1, 2], 16, 1, 5000)
+        self.assertEqual(got["first_blocker"], "")
+        self.assertEqual(got["max_clean_concurrency"], 2)
+        self.assertEqual(got["steps"][1]["classification"], "passed")
+        self.assertEqual(got["steps"][1]["ttft_ms_p95"], 8000)
 
     def test_load_ladder_fails_when_every_step_capacity_sheds(self):
         shed = {"status": 429, "ok": False, "error_code": "no_provider_available", "latency_ms": 1}
@@ -1566,6 +1616,8 @@ class OpenRouterReadinessProbeTests(unittest.TestCase):
             probe.main(loopback_admin)
         with self.assertRaisesRegex(SystemExit, "load-ladder-requests-per-step"):
             probe.main(base + ["--load-ladder-requests-per-step", "1"])
+        with self.assertRaisesRegex(SystemExit, "saturation-max-tokens"):
+            probe.main(base + ["--saturation-max-tokens", "16"])
 
     def test_filing_mode_records_absent_secret_evidence(self):
         with tempfile.TemporaryDirectory() as tmp:

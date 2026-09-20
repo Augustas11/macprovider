@@ -44,7 +44,9 @@ MAX_BENCHMARK_CONCURRENCY = 8
 DEFAULT_MIN_SUCCESS_RATIO = 0.95
 DEFAULT_MAX_TTFT_P95_MS = 5000
 DEFAULT_MIN_OUTPUT_TOKENS_PER_SECOND = 10.0
+DEFAULT_SATURATION_MAX_TOKENS = 64
 DEFAULT_LOAD_LADDER_VALUES = (1, 2, 4, 8)
+RETRYABLE_IDLE_ERROR_CODES = frozenset({"benchmark_timeout", "ProbeError"})
 DEFAULT_LOAD_LADDER = ",".join(str(value) for value in DEFAULT_LOAD_LADDER_VALUES)
 DEFAULT_BENCHMARK_CONCURRENCY = 4
 DEFAULT_SATURATION_CONCURRENCY = 8
@@ -1092,6 +1094,15 @@ def benchmark_failure(
     return BenchmarkProbeError(f"{message}: {evidence}", evidence)
 
 
+def is_retryable_idle_failure(result: dict) -> bool:
+    if result.get("ok") or is_capacity_shed(result):
+        return False
+    code = str(result.get("error_code") or "")
+    if code in RETRYABLE_IDLE_ERROR_CODES:
+        return True
+    return "timed out" in str(result.get("error") or "").lower()
+
+
 def benchmark_metric_failure(
     message: str,
     requested: int,
@@ -1201,6 +1212,48 @@ def run_benchmark(
         remaining -= batch_size
         if require_429 and any(is_capacity_shed(result) for result in batch):
             break
+    if not require_429 and not allow_all_shed:
+        for index, result in enumerate(results):
+            if not is_retryable_idle_failure(result):
+                continue
+            tracker = BenchmarkResponseTracker()
+            executor = ThreadPoolExecutor(max_workers=1)
+            try:
+                future = executor.submit(
+                    chat_once,
+                    base_url,
+                    token,
+                    model,
+                    stream=True,
+                    max_tokens=max_tokens,
+                    request_id=str(uuid.uuid4()),
+                    response_tracker=tracker,
+                    prompt=BENCHMARK_PROMPT,
+                )
+                try:
+                    retry = future.result(timeout=BENCHMARK_BATCH_TIMEOUT_SECONDS)
+                except FuturesTimeout:
+                    tracker.cancel()
+                    future.cancel()
+                    retry = {
+                        "status": "exception",
+                        "ok": False,
+                        "error_code": "benchmark_timeout",
+                        "error": (
+                            "benchmark retry did not finish within "
+                            f"{BENCHMARK_BATCH_TIMEOUT_SECONDS}s batch timeout"
+                        ),
+                    }
+                except Exception as exc:
+                    retry = {
+                        "status": "exception",
+                        "ok": False,
+                        "error_code": type(exc).__name__,
+                        "error": str(exc),
+                    }
+            finally:
+                executor.shutdown(wait=False, cancel_futures=True)
+            results[index] = retry
     elapsed = max(time.perf_counter() - started, 0.001)
     statuses = {}
     ttfts = []
@@ -1271,8 +1324,9 @@ def run_benchmark(
             "output_tokens_per_second": None,
         }
     # Saturation and load-ladder overflow include slot-queue wait (up to 3s) on
-    # the requests that still land. TTFT/throughput stay benchmark gates.
-    skip_latency_gates = shed_count >= 1 and (require_429 or allow_all_shed)
+    # requests that still land as HTTP 200. Short completions can drain before
+    # the coordinator sheds, so TTFT/throughput stay idle-benchmark gates.
+    skip_latency_gates = require_429 or allow_all_shed
     ttft_p95 = percentile(ttfts, 95) if ttfts else None
     generated_tokens_per_second = output_tokens / max(generation_seconds, 0.001) if output_tokens else 0.0
     if not skip_latency_gates:
@@ -1725,6 +1779,12 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--min-output-tokens-per-second", type=float, default=DEFAULT_MIN_OUTPUT_TOKENS_PER_SECOND)
     parser.add_argument("--saturation-requests", type=int, default=0)
     parser.add_argument("--saturation-concurrency", type=int, default=DEFAULT_SATURATION_CONCURRENCY)
+    parser.add_argument(
+        "--saturation-max-tokens",
+        type=int,
+        default=0,
+        help="max_tokens for the saturation burst only; 0 uses --max-tokens, or 64 in --filing-mode",
+    )
     parser.add_argument("--admin-url", default="")
     parser.add_argument("--operator-key-env", default="OPERATOR_KEY")
     parser.add_argument("--operator-key-file", default="")
@@ -1785,6 +1845,17 @@ def main(argv: list[str]) -> int:
             raise SystemExit(
                 f"--filing-mode requires --min-output-tokens-per-second >= {DEFAULT_MIN_OUTPUT_TOKENS_PER_SECOND}"
             )
+    if args.saturation_max_tokens < 0:
+        raise SystemExit("--saturation-max-tokens must be >= 0")
+    if args.saturation_max_tokens == 0:
+        if args.filing_mode:
+            args.saturation_max_tokens = max(args.max_tokens, DEFAULT_SATURATION_MAX_TOKENS)
+        else:
+            args.saturation_max_tokens = args.max_tokens
+    if args.saturation_max_tokens < 1 or args.saturation_max_tokens > 128:
+        raise SystemExit("--saturation-max-tokens must be in [1,128]")
+    if args.filing_mode and args.saturation_max_tokens < DEFAULT_SATURATION_MAX_TOKENS:
+        raise SystemExit(f"--filing-mode requires --saturation-max-tokens >= {DEFAULT_SATURATION_MAX_TOKENS}")
     if args.load_ladder_requests_per_step < 1:
         raise SystemExit("--load-ladder-requests-per-step must be positive")
     if args.filing_mode and args.load_ladder_requests_per_step < 8:
@@ -1931,7 +2002,7 @@ def main(argv: list[str]) -> int:
                         args.model,
                         args.saturation_requests,
                         args.saturation_concurrency,
-                        args.max_tokens,
+                        args.saturation_max_tokens,
                         0.0,
                         args.max_ttft_p95_ms,
                         0.0,
