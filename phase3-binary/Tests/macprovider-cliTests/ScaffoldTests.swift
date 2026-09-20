@@ -90,6 +90,8 @@ final class DecodeBenchHelperTests: XCTestCase {
             ContiguousBatchedDecodeError.raggedPrompts
         )
     }
+
+    func testMSBAggregateThroughputUsesCommonWallClock() throws {
         let base = Date(timeIntervalSince1970: 100)
         let report = try msbAggregateThroughput([
             MSBAggregateThroughputInput(
