@@ -597,18 +597,11 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		_ = s.store.ReleaseConcurrency(context.Background(), subject.AccountID, requestID(r), s.now())
 	}()
 
-	internalConversation := ""
-	if s.cfg.Routing.StickyEnabled && !authn.Demo {
-		if tag := strings.TrimSpace(r.Header.Get("X-MacProvider-Conversation")); tag != "" {
-			if !validConversationTag(tag) {
-				s.refundWalletAwareReservation(subject, requestID(r))
-				writeError(w, http.StatusBadRequest, "invalid_request_error", "invalid_conversation_tag", "Invalid conversation tag")
-				return
-			}
-			if metadata, ok := s.coordinatorRoutingMetadata(upCtx); ok && metadata.Sticky.Enabled && metadata.Sticky.TTLSeconds == s.cfg.Routing.StickyTTLS {
-				internalConversation = s.deriveConversationKey(subject.AccountID, tag)
-			}
-		}
+	internalConversation, convIsAutoPrefix, invalidConvTag := s.chatConversationKey(upCtx, r, subject, authn.Demo, chat.Messages)
+	if invalidConvTag {
+		s.refundWalletAwareReservation(subject, requestID(r))
+		writeError(w, http.StatusBadRequest, "invalid_request_error", "invalid_conversation_tag", "Invalid conversation tag")
+		return
 	}
 	// Validation cap matches the reservation exposure so any accepted
 	// provider usage is already covered by the buyer's active quota hold.
@@ -671,9 +664,18 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 		if internalConversation != "" {
 			// Authorization + X-MacProvider-Account are set
-			// unconditionally above (SPEC-006 v0.9.1). The sticky
-			// path's distinguishing header is X-MacProvider-Internal-Conv.
-			upReq.Header.Set("X-MacProvider-Internal-Conv", internalConversation)
+			// unconditionally above (SPEC-006 v0.9.1).
+			// Sticky-path keys travel via X-MacProvider-Internal-Conv so
+			// the coordinator applySticky / stickyStore paths see them.
+			// SPEC-006-R012 auto-prefix keys travel via
+			// X-MacProvider-Internal-Conv-Cache instead — coordinator reads
+			// that header for provider cache context but MUST NOT pass it
+			// through applySticky / stickyStore (no sticky affinity side-effect).
+			if convIsAutoPrefix {
+				upReq.Header.Set("X-MacProvider-Internal-Conv-Cache", internalConversation)
+			} else {
+				upReq.Header.Set("X-MacProvider-Internal-Conv", internalConversation)
+			}
 		}
 		return upReq, nil
 	}
@@ -3064,6 +3066,89 @@ func (s *Server) deriveConversationKey(accountID, tag string) string {
 	_, _ = mac.Write([]byte("\n"))
 	_, _ = mac.Write([]byte(tag))
 	return "conv:" + base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+}
+
+// prefixConversationTag derives the reserved auto.prefix.* tag from a chat
+// messages slice. The prefix is defined as messages from the start through
+// and including the first role==user message (case-insensitive). Malformed
+// message objects (those that cannot be unmarshalled to extract a role) are
+// skipped. Returns "", false when no user message is found.
+//
+// The tag is: "auto.prefix." + hex(sha256(json.Marshal(prefixItems))[:16]).
+// Same first-user-message prefix across tool turns ⇒ identical tag ⇒ same
+// conv: key after deriveConversationKey, enabling provider ConversationCache
+// hits without buyer X-MacProvider-Conversation or sticky routing. SPEC-006-R012.
+func prefixConversationTag(messages []json.RawMessage) (string, bool) {
+	var prefix []json.RawMessage
+	foundUser := false
+	for _, msg := range messages {
+		var m struct {
+			Role string `json:"role"`
+		}
+		if err := json.Unmarshal(msg, &m); err != nil {
+			// Skip malformed message objects.
+			continue
+		}
+		prefix = append(prefix, msg)
+		if strings.EqualFold(m.Role, "user") {
+			foundUser = true
+			break
+		}
+	}
+	if !foundUser {
+		return "", false
+	}
+	b, err := json.Marshal(prefix)
+	if err != nil {
+		return "", false
+	}
+	sum := sha256.Sum256(b)
+	return "auto.prefix." + hex.EncodeToString(sum[:16]), true
+}
+
+// chatConversationKey returns the gateway-internal conversation key to forward
+// on the coordinator hop, isAutoPrefix indicating whether the key came from
+// the SPEC-006-R012 auto-prefix path (cache only; MUST NOT activate sticky
+// affinity), and invalidTag=true when the buyer supplied an invalid
+// X-MacProvider-Conversation that MUST 400.
+//
+// Priority:
+//  1. Sticky path (when routing.sticky_enabled=true): buyer tag wins when
+//     valid AND coordinator sticky metadata agrees; invalid tag → invalidTag=true
+//     (caller MUST 400, do NOT fall through to auto-prefix).
+//     isAutoPrefix=false; caller sets X-MacProvider-Internal-Conv.
+//  2. Auto-prefix (SPEC-006-R012): for authenticated non-demo requests, derive
+//     a prefix-cache key from messages through the first user turn so
+//     provider ConversationCache can populate across tool turns. Does NOT
+//     enable SPEC-004 sticky affinity; coordinator applySticky stays gated on
+//     routing.sticky_enabled. isAutoPrefix=true; caller sets
+//     X-MacProvider-Internal-Conv-Cache (coordinator reads for cache context,
+//     skips applySticky/stickyStore). Demo MUST NOT receive a key.
+func (s *Server) chatConversationKey(ctx context.Context, r *http.Request, subject usageSubject, demo bool, messages []json.RawMessage) (key string, isAutoPrefix bool, invalidTag bool) {
+	if s.cfg.Routing.StickyEnabled && !demo {
+		if raw := r.Header.Get("X-MacProvider-Conversation"); raw != "" {
+			tag := strings.TrimSpace(raw)
+			if !validConversationTag(tag) {
+				return "", false, true
+			}
+			if metadata, ok := s.coordinatorRoutingMetadata(ctx); ok && metadata.Sticky.Enabled && metadata.Sticky.TTLSeconds == s.cfg.Routing.StickyTTLS {
+				return s.deriveConversationKey(subject.AccountID, tag), false, false
+			}
+		}
+	}
+	// SPEC-006-R012: auto-prefix path. Applies when sticky did not produce a key
+	// (including when sticky_enabled=false, which is the production default).
+	// Demo traffic MUST NOT receive a prefix-cache key.
+	// isAutoPrefix=true: the coordinator MUST NOT use this key for sticky
+	// affinity (applySticky / stickyStore). It is forwarded via
+	// X-MacProvider-Internal-Conv-Cache (not X-MacProvider-Internal-Conv) so
+	// the coordinator sticky paths never see it.
+	if !demo && subject.AccountID != "" && strings.TrimSpace(s.cfg.Auth.KeyHashSecret) != "" {
+		if tag, ok := prefixConversationTag(messages); ok {
+			return s.deriveConversationKey(subject.AccountID, tag), true, false
+		}
+	}
+	return "", false, false
 }
 
 func (s *Server) settleRequest(r *http.Request, subject usageSubject, prompt, completion, maxTotal int64, source, outcome string) error {

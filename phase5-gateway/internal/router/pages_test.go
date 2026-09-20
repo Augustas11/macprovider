@@ -97,6 +97,7 @@ func TestPrivacyRouteRendersHonestRetention(t *testing.T) {
 		"us-east-1",
 		"90 days",
 		"storage.request_log_retention_days",
+		"opaque HMAC conversation identifier",
 	} {
 		if !strings.Contains(body, want) && !strings.Contains(lower, strings.ToLower(want)) {
 			t.Fatalf("privacy body missing %q: %s", want, body)

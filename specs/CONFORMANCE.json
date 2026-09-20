@@ -151,7 +151,7 @@
     {
       "spec_id": "SPEC-006",
       "title": "Buyer API Gateway: Mac Provider's first public buyer surface",
-      "version": "0.9.27",
+      "version": "0.9.28",
       "path": "specs/SPEC-006-buyer-api.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -4846,6 +4846,35 @@
       }
     },
     {
+      "requirement_id": "SPEC-006-R012",
+      "spec_id": "SPEC-006",
+      "state": "pending",
+      "implementation": [
+        "phase5-gateway/internal/router/chat_proxy.go:prefixConversationTag",
+        "phase5-gateway/internal/router/chat_proxy.go:chatConversationKey"
+      ],
+      "tests": [
+        "phase5-gateway/internal/router/server_test.go:TestStickyConversationIgnoredWhenDisabled",
+        "phase5-gateway/internal/router/server_test.go:TestPrefixCacheConversationForwardedWhenStickyDisabled",
+        "phase5-gateway/internal/router/server_test.go:TestPrefixCacheConversationStableAcrossToolTurn",
+        "phase5-gateway/internal/router/server_test.go:TestPrefixCacheConversationDivergesOnFirstUser",
+        "phase5-gateway/internal/router/server_test.go:TestPrefixCacheConversationNotForwardedForDemo",
+        "phase5-gateway/internal/router/server_test.go:TestPrefixCacheBuyerTagWinsWhenStickyEnabled",
+        "phase5-gateway/internal/router/server_test.go:TestPrefixConversationTagHelpers",
+        "phase5-gateway/internal/router/server_test.go:TestAutoPrefixKeyDoesNotActivateStickyWhenStickyEnabled",
+        "phase5-gateway/internal/router/server_test.go:TestWhitespaceConversationTagRejectedWhenStickyEnabled",
+        "phase5-gateway/internal/router/server_test.go:TestPrefixCacheTier1DisclosurePresent"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "CODE_BUG",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1629",
+        "rationale": "OpenAI-compat clients omit X-MacProvider-Conversation so ConversationCache never begins(); auto-prefix keys forward conv: without enabling sticky. Not promoted; no signed journey."
+      }
+    },
+    {
       "requirement_id": "SPEC-015-R001",
       "spec_id": "SPEC-015",
       "state": "conformant",
@@ -5248,7 +5277,7 @@
     {
       "requirement_id": "SPEC-022-R010",
       "spec_id": "SPEC-022",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
         "phase5-gateway/internal/router/disclosure.go:makeTier1Disclosure",
         "phase5-gateway/internal/router/disclosure.go:makeVerifiedModelSettlementDisclosure"
@@ -5260,21 +5289,13 @@
       "journeys": [
         "JOURNEY-BUYER-PAID-PATH"
       ],
-      "evidence": [
-        {
-          "artifact": "commit:160d0e2ff62b0e40c65dd3741a35de4be322ea8e",
-          "source": null,
-          "captured_at": "2026-09-18",
-          "expires_at": "2026-10-18"
-        },
-        {
-          "artifact": "sha256:3ff2a7603caa0a3a28d71f5eba4852b60efb56d850b085a77f6e0e1742bda0a7",
-          "source": "journeys/evidence/buyer-paid-path-20260918T034532Z.spec-005-r001-spec-005-r002-spec-006-r001-spec-006-r002-spec-022-r001-spec-022-r002-spec-022-r003-spec-022-r010.journey-result.signed.json",
-          "captured_at": "2026-09-18",
-          "expires_at": "2026-10-18"
-        }
-      ],
-      "gap": null
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/928",
+        "rationale": "PR 1630 (SPEC-006-R012) adds prefixCache field to makeTier1Disclosure, changing the disclosure selector. The existing signed journey evidence (captured at 160d0e2f) is no longer selector-valid because the function body changed. A fresh JOURNEY-BUYER-PAID-PATH signed evidence envelope at HEAD must be captured and consumed to restore conformant status. Implementation and tests remain as local coverage."
+      }
     },
     {
       "requirement_id": "SPEC-022-R011",

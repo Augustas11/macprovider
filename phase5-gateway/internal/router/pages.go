@@ -65,6 +65,10 @@ var tier1DisclosureText = []disclosureItem{
 		Key:  "tier2_milestone",
 		Text: "The product makes NO private-inference, hardware-attestation, runtime-binary-attestation, provider-private-prompt, untrusted-provider, malicious-output-prevention, or provider-falsified-model-measurement detection claims. Any buyer-facing language, including front-door copy, docs, error messages, API responses, marketing material, and this spec, MUST be consistent with these limitations.",
 	},
+	{
+		Key:  "prefix_cache",
+		Text: prefixCacheDisclosureText,
+	},
 }
 
 type accountPageData struct {

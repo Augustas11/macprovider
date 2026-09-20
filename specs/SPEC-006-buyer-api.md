@@ -1,7 +1,18 @@
 # SPEC-006 - Buyer API Gateway: Mac Provider's first public buyer surface
 
-**Version:** 0.9.27 (2026-09-18, OpenAI-compat tool_call_id rewrite)
+**Version:** 0.9.28 (2026-09-20, auto-derive prefix-cache conversation keys)
 **Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.5.4, SPEC-003 v0.7, SPEC-004 v0.3.2
+
+**Change log v0.9.28 (2026-09-20, auto-derive prefix-cache conversation keys):**
+- Authenticated non-demo `POST /v1/chat/completions` (including translated `/v1/messages` and `/v1/responses` paths that share `handleChat`) MUST derive a prefix-cache conversation tag when no sticky buyer tag produced a key. The tag is `auto.prefix.` + `hex(sha256(canonical_messages_prefix)[:16])` where the prefix is messages from the start through and including the first `role=="user"` message (case-insensitive).
+- Gateway derives the tag and calls the existing `deriveConversationKey` HMAC (same `spec006-v0.8-sticky-conversation-v1` scope from §1.3). Sticky-path keys (buyer `X-MacProvider-Conversation` when sticky is on) still travel as `X-MacProvider-Internal-Conv`. Auto-prefix keys travel as `X-MacProvider-Internal-Conv-Cache` so coordinator `applySticky` / `stickyStore` never see them.
+- This MUST NOT enable SPEC-004 sticky affinity by itself. Coordinator `applySticky` remains gated on `routing.sticky_enabled` **and** reads only `X-MacProvider-Internal-Conv`. The auto-prefix key flows through ConversationCache only; it does not pin a provider.
+- Buyer-facing disclosure: `/v1/models tier1_disclosure.prefix_cache`, `/privacy`, `/docs`, `/account`, and the front-door console MUST state that authenticated non-demo chat sends the serving Mac an opaque HMAC conversation identifier for KV reuse. This closes the v0.9.8 SPEC-024 FR-CI10a gap for auto-prefix traffic (provider receipt of the identifier and independent TTL). Cross-provider linkability of a sticky-path `conv:` key remains the tracked residual when sticky is later enabled.
+- Registers `SPEC-006-R012`.
+- Demo traffic MUST NOT receive a prefix-cache key (unchanged demo isolation).
+- When `routing.sticky_enabled=true` and the buyer sent a valid `X-MacProvider-Conversation` tag and coordinator sticky metadata agrees, the sticky key wins; auto-prefix is a fallback only when no sticky key is derived.
+- Narrows the v0.8 "gateway MUST NOT create a conversation key otherwise" sentence: that MUST NOT applies to **sticky-affinity keys** only. Prefix-cache auto keys (this version) MAY be created for authenticated non-demo chat without the buyer header and without `sticky_enabled`.
+- Explicitly carves the v0.8 sentence that rejected gateway-managed request-shape hashing: that rejection remains for sticky cookies / sticky identity. Prefix-cache auto tags (reserved `auto.prefix.*` namespace, MUST NOT mint cookies, HMAC keyed on authenticated `account_id`) are the v0.9.28 exception.
 
 **Change log v0.9.27 (2026-09-18, OpenAI-compat tool_call_id rewrite):**
 - `POST /v1/chat/completions` (and translated `/v1/messages` / `/v1/responses` bodies) rewrite inbound `messages[].tool_calls[].id` and `role:"tool".tool_call_id` values that do not already match SPEC-018 AC-31 `^call_[A-Za-z0-9]{16,64}$` to a deterministic `call_` + 32 lowercase hex SHA-256 prefix before coordinator validation. Empty or missing IDs still fail with `invalid_tool_call_id`. Matching assistant/tool IDs in the same request stay paired. Already-valid IDs MUST be forwarded unchanged.
@@ -252,8 +263,14 @@ changing them:
 - `SPEC-006-R009` — demo-token traffic isolation from paid quota (§3.6).
 - `SPEC-006-R010` — OpenRouter schema-2.4 models document, wholesale
   partner chat flags, dual SKU alias ids (§2.2, §5.3.2, §7.8, §17.9).
+- `SPEC-006-R011` — OpenAI-compat tool_call_id rewrite before coordinator
+  validation (§5, v0.9.27).
+- `SPEC-006-R012` — Auto-derive prefix-cache conversation key for authenticated
+  non-demo chat completions when no sticky buyer tag produced a key; forwarded
+  as `X-MacProvider-Internal-Conv` so SPEC-024 ConversationCache can populate
+  across tool turns without sticky routing (§5.4.1, v0.9.28).
 
-`requirement_id_migration` is `complete`. R004–R010 are not promoted from
+`requirement_id_migration` is `complete`. R004–R012 are not promoted from
 this close. Signed journey-result evidence is still required before any of
 those rows can become conformant.
 
@@ -371,7 +388,7 @@ The § 1.3 guard is satisfied for SPEC-004 v0.2 Pillar A only if all of the foll
 - The cache is buyer-owned, single-tenant, non-transferable across buyers. **(v0.9.8 precision:)** "buyer-owned" here is the **account-scoping** sense — a cache entry holds exactly one account's data and is non-transferable across buyers — **not** literal buyer custody or deletion-control: the option-(a) provider-local KV is provider-retained and not buyer-purgeable (see the deletion bullet below).
   - v0.8 satisfaction: `routing_internal.conversation_key` MUST be scoped to exactly one authenticated `account_id`. The gateway MUST refuse to derive or forward a conversation key when the request cannot be attributed to one account or when any input attempts to bind the key to more than one account. Cross-account spoofing MUST be structurally impossible at the gateway by deriving the `conv:` value from the authenticated `account_id`, not from buyer-trusted account claims.
 - The cache has explicit lifecycle: creation, eviction, and buyer-triggered deletion. **(v0.9.8 — provider-local prefix cache; honest limitation:)** this precondition is fully satisfied only for the **coordinator sticky map** (`DELETE /v1/sticky` purges it directly). It is **NOT** fully satisfied for the **provider-local KV cache**, and v0.2 does not pretend otherwise: because the derived `conv:` key is **deterministic** (same account + tag ⇒ same key, next bullet) and post-deletion **normal** selection (SPEC-004 FR-SR-3) MAY still route to the same provider, that provider can reuse and **re-populate** its entry under the same key after a delete. So buyer deletion is **neither a direct nor a reliable indirect** purge of provider-local state — the provider entry's **only** dependable bound is the provider's own TTL/LRU (SPEC-024 v0.2 §11 FR-CI4). This is a genuine **residual gap in the § 1.3 lifecycle guard under option (a)**, recorded (not papered over) as the SPEC-024 v0.2 §13 / FR-CI10a disclosure-completeness item; closing it would require a provider-side conv-key purge primitive (not shipped).
-  - v0.8 satisfaction: the gateway MUST create a conversation key on an authenticated buyer request that includes a valid `X-MacProvider-Conversation` tag when `routing.sticky_enabled: true`, and MUST NOT create one otherwise. Coordinator eviction is governed by SPEC-004 v0.2 `routing.sticky_ttl_s`, `routing.sticky_max_entries`, TTL expiry, and LRU behavior; the gateway MUST cite that coordinator TTL as the authoritative sticky retention window in buyer-facing disclosure. Buyers MUST be able to trigger account-scoped deletion with `DELETE /v1/sticky`, which is authenticated, idempotent, purges all sticky entries for the caller's account, and returns `{ "purged": true, "entries": N }`. **(v0.9.8 clarification:)** `DELETE /v1/sticky` purges the **coordinator sticky map** only. The **provider-local** prefix-cache entry keyed on the same `conv:` value is a separate store bounded by the provider's own TTL and LRU (SPEC-024 v0.2 §11 FR-CI4, shipped default 900 s); it is **not** buyer-purgeable and is not governed by the coordinator TTL — its reuse-eligibility ends when the provider TTL/eviction lapses, independent of the sticky-map deletion. This lifecycle split is a SPEC-024 v0.2 §13 disclosure-completeness item.
+  - v0.8 satisfaction: the gateway MUST create a conversation key on an authenticated buyer request that includes a valid `X-MacProvider-Conversation` tag when `routing.sticky_enabled: true`, and MUST NOT create a **sticky-affinity key** otherwise. **(v0.9.28 narrowing:)** That MUST NOT applies specifically to sticky-affinity keys. Prefix-cache auto keys (reserved `auto.prefix.*` namespace, SPEC-006-R012) MAY be created for authenticated non-demo chat completions without the buyer header and without `routing.sticky_enabled`; they do not pin a provider and do not enable SPEC-004 sticky affinity. Coordinator eviction is governed by SPEC-004 v0.2 `routing.sticky_ttl_s`, `routing.sticky_max_entries`, TTL expiry, and LRU behavior; the gateway MUST cite that coordinator TTL as the authoritative sticky retention window in buyer-facing disclosure. Buyers MUST be able to trigger account-scoped deletion with `DELETE /v1/sticky`, which is authenticated, idempotent, purges all sticky entries for the caller's account, and returns `{ "purged": true, "entries": N }`. **(v0.9.8 clarification:)** `DELETE /v1/sticky` purges the **coordinator sticky map** only. The **provider-local** prefix-cache entry keyed on the same `conv:` value is a separate store bounded by the provider's own TTL and LRU (SPEC-024 v0.2 §11 FR-CI4, shipped default 900 s); it is **not** buyer-purgeable and is not governed by the coordinator TTL — its reuse-eligibility ends when the provider TTL/eviction lapses, independent of the sticky-map deletion. This lifecycle split is a SPEC-024 v0.2 §13 disclosure-completeness item.
 - Tenant isolation is cryptographically enforced; cache keys include account ID plus per-request entropy.
   - v0.8 satisfaction: the gateway MUST derive the opaque suffix with HMAC-SHA256 over the authenticated `account_id` and buyer-supplied conversation tag; the tag is the buyer-provided per-request entropy for this guard. Two gateway instances MUST derive byte-identical keys for identical inputs and different keys across accounts. The normative algorithm is:
     1. Authenticate the request and obtain canonical `account_id`.
@@ -444,9 +461,10 @@ SPEC-006 is a Tier 1 cooperative inference product. The following properties hol
 8. **Buyer cancel, gateway timeout, provider error, or upstream disconnect can create a partial charge only when a settlement-capable receipt binds the delivered output prefix and partial usage.** Streaming failover is transparent only before response bytes are committed. After the first buyer-visible SSE event, a provider disconnect terminates the stream with `provider_disconnected` and the buyer may retry as a new request. That retry is a separate billable request with its own reservation and settlement; cross-request overlapping output is not deduplicated. Settlement remains limited to delivered, receipt-verified output prefixes and must not double-charge overlapping output if a future resume or failover protocol spans multiple provider attempts; verified here means receipt-bound under the provider-reported-hash caveat above.
 9. **Buyer receipt and status surfaces expose pending, verified, quarantined, and zero_settled labels without raw prompts or raw outputs.**
 10. **The product makes NO private-inference, hardware-attestation, runtime-binary-attestation, provider-private-prompt, untrusted-provider, malicious-output-prevention, or provider-falsified-model-measurement detection claims.** Any buyer-facing language, including front-door copy, docs, error messages, API responses, marketing material, and this spec, MUST be consistent with these limitations.
-11. **When sticky affinity is enabled for an account, related requests are preferentially routed to one provider for up to `routing.sticky_ttl_s`.** That provider can observe and correlate more of the buyer's traffic than under default round-robin routing. This disclosure is required only when `routing.sticky_enabled: true`; with the default `routing.sticky_enabled: false`, there is no sticky routing and no new sticky-specific privacy posture beyond properties 1-10.
+11. **When sticky affinity is enabled for an account, related requests are preferentially routed to one provider for up to `routing.sticky_ttl_s`.** That provider can observe and correlate more of the buyer's traffic than under default round-robin routing. This disclosure is required only when `routing.sticky_enabled: true`; with the default `routing.sticky_enabled: false`, there is no sticky routing and no new sticky-specific privacy posture beyond properties 1-10 and 12.
+12. **Authenticated non-demo chat completions send the serving Mac an opaque HMAC conversation identifier derived from the prompt prefix through the first user message. That identifier lets the Mac reuse KV cache across tool turns. It does not pin routing to one provider. The provider cannot recover your account id from it. DELETE /v1/sticky does not clear that Mac-local cache; it expires on the provider's own TTL.**
 
-These limitations are deliberate. Tier 2, a future SPEC-008 milestone and not in current Tier 1 scope, would add hardware attestation, provider-leg encryption, model catalog enforcement, and untrusted-provider safety. Until Tier 2 ships, all eleven limitations are normative and MUST be preserved in product language, with property 11 conditional on `routing.sticky_enabled: true`.
+These limitations are deliberate. Tier 2, a future SPEC-008 milestone and not in current Tier 1 scope, would add hardware attestation, provider-leg encryption, model catalog enforcement, and untrusted-provider safety. Until Tier 2 ships, properties 1-10 and 12 are always normative. Property 11 is conditional on `routing.sticky_enabled: true`.
 
 Production gate: this disclosure MUST appear in substantively equivalent language in:
 
@@ -1401,6 +1419,10 @@ compatibility requirements MUST carry their own schema/version fields.
     "enabled": false,
     "ttl_seconds": 0,
     "description": "Sticky affinity is disabled; related requests are not preferentially routed to the same provider."
+  },
+  "prefix_cache": {
+    "enabled": true,
+    "description": "Authenticated non-demo chat completions send the serving Mac an opaque HMAC conversation identifier derived from the prompt prefix through the first user message. That identifier lets the Mac reuse KV cache across tool turns. It does not pin routing to one provider. The provider cannot recover your account id from it. DELETE /v1/sticky does not clear that Mac-local cache; it expires on the provider's own TTL."
   }
 }
 ```
@@ -1417,17 +1439,16 @@ Gateway-owned disclosure and per-model status values are authoritative for this 
 
 The `sticky_affinity` sub-object MUST be present. When `routing.sticky_enabled: false`, implementations MUST return `enabled: false`, `ttl_seconds: 0`, and a description that states no sticky routing is active. When `routing.sticky_enabled: true`, implementations MUST return `enabled: true`, `ttl_seconds` equal to the coordinator's effective SPEC-004 v0.2 `routing.sticky_ttl_s`, and this plain-language privacy tradeoff in substantively equivalent form: "Related requests with the same conversation tag are preferentially routed to one provider for up to this many seconds, so that provider can observe and correlate more of your traffic than under default routing."
 
-**Disclosure-completeness item (v0.9.8, SPEC-024 v0.2 §13 — MUST close).** The
-shipped disclosure above describes preferential routing and correlation, but
-does **not** yet disclose two consequences of the SPEC-024 prefix-cache
-carve-out: (i) the provider **receives** the derived opaque conversation
-identifier and **retains** it in a provider-local KV cache under its own TTL
-that `DELETE /v1/sticky` does not clear; and (ii) because that identifier is
-forwarded on cache misses and re-routes, it MAY reach **more than one**
-provider over a conversation's life (cross-provider linkability). Extending the
-buyer-facing disclosure (this field, `/v1/models tier1_disclosure`, and
-`disclosure.go`) to cover (i)–(ii) is a tracked completeness follow-up; it is
-recorded here as a known gap, not silently omitted.
+The `prefix_cache` sub-object MUST be present. Implementations MUST return `enabled: true` and a description in substantively equivalent form to §1.6 property 12: authenticated non-demo chat forwards an opaque HMAC conversation identifier to the serving Mac for KV reuse; this does not pin routing; the provider cannot recover `account_id`; `DELETE /v1/sticky` does not clear that Mac-local cache.
+
+**(v0.9.28 — SPEC-024 FR-CI10a item (i) closed for auto-prefix traffic.)** The
+shipped `prefix_cache` disclosure states that the provider **receives** the
+derived opaque identifier and **retains** it under the provider TTL that
+`DELETE /v1/sticky` does not clear. **Residual (ii):** when sticky affinity is
+later enabled, a sticky-path `conv:` key MAY still reach more than one provider
+over a conversation's life (cross-provider linkability). That residual remains
+tracked; it is not opened by auto-prefix keys, which travel
+`X-MacProvider-Internal-Conv-Cache` and do not pin routing.
 
 ### 5.3.2 `GET /v1/openrouter/models`
 
@@ -1661,7 +1682,7 @@ Stripping MUST occur **before authentication** so a malicious buyer cannot influ
 
 The gateway MAY emit an audit event when an inbound request carried these headers.
 
-The gateway MUST forward the request to the selected coordinator backend without adding buyer-visible provider preference headers. When `routing.sticky_enabled: true` and the request includes a valid `X-MacProvider-Conversation` value, the gateway MUST derive `routing_internal.conversation_key` per § 1.3 and transport it on the gateway-to-coordinator hop using `X-MacProvider-Internal-Conv: conv:<opaque-id>`.
+The gateway MUST forward the request to the selected coordinator backend without adding buyer-visible provider preference headers. When `routing.sticky_enabled: true` and the request includes a valid `X-MacProvider-Conversation` value, the gateway MUST derive `routing_internal.conversation_key` per § 1.3 and transport it on the gateway-to-coordinator hop using `X-MacProvider-Internal-Conv: conv:<opaque-id>`. **(v0.9.28:)** Authenticated non-demo chat completions (including translated `/v1/messages` and `/v1/responses` bodies) MUST also forward a prefix-cache `X-MacProvider-Internal-Conv-Cache` when no sticky key was derived — the auto-prefix key is computed from messages through the first user turn (§ 5.4.1, SPEC-006-R012) and uses the same HMAC as § 1.3. Demo traffic MUST NOT receive a key.
 
 `X-MacProvider-Internal-Conv` is an internal deployment header, not a buyer API header. The coordinator's externally reachable nginx vhost, proxy layer, or equivalent edge boundary MUST strip `X-MacProvider-Internal-Conv` and any other `X-MacProvider-Internal-*` header from every path that could be reached outside the gateway. The coordinator MUST treat `X-MacProvider-Internal-Conv` as valid only on authenticated or network-restricted gateway-originated traffic; it MUST NEVER accept this header from direct buyer traffic. A deployment where buyer-reachable requests can supply or preserve this header is non-compliant with SPEC-006 v0.8 and SPEC-004 v0.2.
 
@@ -1720,14 +1741,16 @@ Buyer opt-in source:
 - Buyers MAY send `X-MacProvider-Conversation: <opaque-tag>` on `POST /v1/chat/completions`.
 - The tag is buyer-chosen and opaque. It is not an account identifier, provider identifier, session ID, or security credential.
 - The gateway MUST trim leading/trailing whitespace, reject empty tags, reject tags longer than 128 bytes, and reject tags containing characters outside `[A-Za-z0-9._:-]` with HTTP 400, `type: "invalid_request_error"`, and `code: "invalid_conversation_tag"`. **(v0.9.8:)** trimming is Go `strings.TrimSpace` **Unicode**-whitespace semantics (matching § 1.3 step 3 and shipped `chat_proxy.go`), not ASCII-only — a reimplementation that trims only ASCII whitespace diverges on Unicode-whitespace-wrapped tags.
-- The gateway MUST silently ignore the tag when `routing.sticky_enabled: false` (200 OK, no error); it MUST NOT derive or forward a sticky key in the default config. Silent ignore (rather than rejection) lets portable buyer SDKs always include the header without breaking against operators running the default-off posture.
-- The gateway MUST derive the internal `conv:` value with the HMAC-SHA256 algorithm in § 1.3. Gateway-managed deterministic request-shape hashing and gateway-managed sticky cookies are intentionally rejected for v0.8 because they are less explicit, harder to audit, and broaden the auth/session surface.
+- The gateway MUST silently ignore the tag when `routing.sticky_enabled: false` (200 OK, no error); it MUST NOT derive or forward a **sticky-affinity key** in the default config. Silent ignore (rather than rejection) lets portable buyer SDKs always include the header without breaking against operators running the default-off posture. **(v0.9.28:)** Even when `sticky_enabled: false` the gateway MUST still derive and forward an auto-prefix `X-MacProvider-Internal-Conv-Cache` for authenticated non-demo requests (see below), because this is a prefix-cache key, not a sticky-affinity key.
+- The gateway MUST derive the internal `conv:` value with the HMAC-SHA256 algorithm in § 1.3. Gateway-managed deterministic request-shape hashing and gateway-managed sticky cookies are intentionally rejected for v0.8 because they are less explicit, harder to audit, and broaden the auth/session surface. **(v0.9.28 carve-out:)** Prefix-cache auto tags are the v0.9.28 exception to that rejection. Auto tags MUST use the reserved `auto.prefix.*` namespace only, MUST NOT mint cookies, and MUST use the same HMAC keyed on the authenticated `account_id`. Hashing is applied to the canonical messages prefix (messages through the first `role=="user"` message, case-insensitive), not to arbitrary request shape. The v0.8 rejection of gateway-managed sticky cookies and sticky identity remains unconditional.
+- **(v0.9.28 auto-prefix algorithm — SPEC-006-R012:)** When no sticky key was derived for an authenticated non-demo chat completion request: (1) collect messages from the start of the `messages` array through and including the first object whose `"role"` value is `"user"` (case-insensitive); skip malformed objects that cannot be JSON-decoded to extract a role; (2) if no user message was found, do not derive a key; (3) compute `canonical_bytes = json.Marshal([]json.RawMessage(prefix_items))`; (4) `prefix_hash = sha256(canonical_bytes)[:16]` (first 16 bytes); (5) `tag = "auto.prefix." + hex.EncodeToString(prefix_hash)`; (6) derive the `conv:` key with the § 1.3 HMAC using `account_id` and `tag`; (7) forward it as `X-MacProvider-Internal-Conv-Cache` (not `X-MacProvider-Internal-Conv`). Same first-user prefix across tool turns ⇒ same tag ⇒ same `conv:` key, enabling provider ConversationCache hits. Different `account_id` ⇒ different key (HMAC includes `account_id`). This key MUST NOT activate SPEC-004 sticky affinity; coordinator `applySticky` / `stickyStore` MUST read only `X-MacProvider-Internal-Conv`.
 
 Gateway-to-coordinator transport:
 
-- The gateway MUST send the derived value to the coordinator only as `X-MacProvider-Internal-Conv: conv:<opaque-id>`.
+- The gateway MUST send a sticky-affinity key to the coordinator only as `X-MacProvider-Internal-Conv: conv:<opaque-id>`.
+- The gateway MUST send an auto-prefix cache key to the coordinator only as `X-MacProvider-Internal-Conv-Cache: conv:<opaque-id>`.
 - The gateway MUST NOT forward raw `X-MacProvider-Conversation`.
-- The gateway MUST NOT accept a buyer-supplied `X-MacProvider-Internal-Conv`; inbound buyer copies of that header MUST be stripped before auth/routing and SHOULD generate an audit event.
+- The gateway MUST NOT accept a buyer-supplied `X-MacProvider-Internal-Conv` or `X-MacProvider-Internal-Conv-Cache`; inbound buyer copies of those headers MUST be stripped before auth/routing and SHOULD generate an audit event.
 - The coordinator boundary MUST strip `X-MacProvider-Internal-*` headers on buyer-reachable paths and MUST reject or ignore values outside the `conv:` namespace for sticky purposes, matching SPEC-004 v0.2.
 
 Buyer-triggered deletion:
@@ -4142,7 +4165,7 @@ Audits MUST explicitly check configured and unconfigured branches for production
 
 This inherits the SPEC-002 v1.1.4 anti-pattern lesson: an always-non-nil gate can look tested while the configured branch is broken.
 
-When `routing.sticky_enabled: true`, audits MUST verify sticky disclosure parity everywhere the § 1.6 disclosure appears: the signup flow, single-page docs, `/v1/models tier1_disclosure.sticky_affinity`, and any operator-distributed SDK README. Audits MUST also verify the default branch: with `routing.sticky_enabled: false`, no sticky key is derived or forwarded, no sticky-specific buyer-visible privacy posture is implied, and v0.7 buyer-visible behavior is preserved.
+When `routing.sticky_enabled: true`, audits MUST verify sticky disclosure parity everywhere the § 1.6 disclosure appears: the signup flow, single-page docs, `/v1/models tier1_disclosure.sticky_affinity`, and any operator-distributed SDK README. Audits MUST also verify the default branch: with `routing.sticky_enabled: false`, no **sticky-affinity** key is derived or forwarded on `X-MacProvider-Internal-Conv`, no sticky-specific buyer-visible routing posture is implied, and v0.7 buyer-visible *routing* behavior is preserved. Auto-prefix `X-MacProvider-Internal-Conv-Cache` keys and `tier1_disclosure.prefix_cache` are the v0.9.28 exception and MUST be present on that default branch.
 
 ---
 

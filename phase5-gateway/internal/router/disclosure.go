@@ -17,6 +17,7 @@ type tier1Disclosure struct {
 	HardwareAttestation         string                                 `json:"hardware_attestation"`
 	Tier2Milestone              string                                 `json:"tier2_milestone"`
 	StickyAffinity              *stickyAffinityDisclosure              `json:"sticky_affinity"`
+	PrefixCache                 *prefixCacheDisclosure                 `json:"prefix_cache"`
 	RelayBlindRequestEncryption *relayBlindRequestEncryptionDisclosure `json:"relay_blind_request_encryption,omitempty"`
 	ModelVerificationLimit      string                                 `json:"model_verification_limit"`
 	VerifiedModelSettlement     verifiedModelSettlementDisclosure      `json:"verified_model_settlement"`
@@ -32,6 +33,17 @@ type stickyAffinityDisclosure struct {
 	TTLSeconds  int    `json:"ttl_seconds"`
 	Description string `json:"description"`
 }
+
+type prefixCacheDisclosure struct {
+	Enabled     bool   `json:"enabled"`
+	Description string `json:"description"`
+}
+
+// prefixCacheDisclosureText is SPEC-006 v0.9.28 §1.6 property 12. Keep this
+// string byte-identical across disclosure.go, pages.go, docs.md, the
+// front-door console, and SPEC-006 — TestTier1DisclosureMatchesSpecSection16
+// greps it.
+const prefixCacheDisclosureText = "Authenticated non-demo chat completions send the serving Mac an opaque HMAC conversation identifier derived from the prompt prefix through the first user message. That identifier lets the Mac reuse KV cache across tool turns. It does not pin routing to one provider. The provider cannot recover your account id from it. DELETE /v1/sticky does not clear that Mac-local cache; it expires on the provider's own TTL."
 
 type relayBlindRequestEncryptionDisclosure struct {
 	Version          string                                  `json:"version"`
@@ -453,6 +465,10 @@ func (s *Server) makeTier1Disclosure(ctxs ...context.Context) tier1Disclosure {
 		StickyAffinity: &stickyAffinityDisclosure{
 			Enabled: false, TTLSeconds: 0,
 			Description: "Sticky affinity is disabled; related requests are not preferentially routed to the same provider.",
+		},
+		PrefixCache: &prefixCacheDisclosure{
+			Enabled:     true,
+			Description: prefixCacheDisclosureText,
 		},
 	}
 	s.applyRelayBlindDisclosure(&disclosure)
