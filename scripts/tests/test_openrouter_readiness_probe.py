@@ -902,6 +902,65 @@ class OpenRouterReadinessProbeTests(unittest.TestCase):
                 probe.run_benchmark("https://api.example.test", "secret", "model", 1, 1, 16, 1.0, 5000, 1.0)
         self.assertEqual(mocked.call_count, 1)
 
+    def test_soak_skips_queued_ttft_when_latency_not_enforced(self):
+        slow = {
+            "status": 200,
+            "ok": True,
+            "ttft_ms": 9000,
+            "latency_ms": 9500,
+            "generation_ms": 500,
+            "output_tokens": 8,
+        }
+        with mock.patch.object(probe, "chat_once", side_effect=[slow, slow]):
+            got = probe.run_benchmark(
+                "https://api.example.test",
+                "secret",
+                "model",
+                2,
+                2,
+                16,
+                1.0,
+                5000,
+                1.0,
+                enforce_latency=False,
+            )
+        self.assertEqual(got["ok"], 2)
+        self.assertEqual(got["ttft_ms_p95"], 9000)
+
+    def test_idle_then_soak_uses_idle_ttft_not_queued_soak(self):
+        idle = {
+            "status": 200,
+            "ok": True,
+            "ttft_ms": 40,
+            "latency_ms": 140,
+            "generation_ms": 100,
+            "output_tokens": 16,
+        }
+        slow = {
+            "status": 200,
+            "ok": True,
+            "ttft_ms": 9000,
+            "latency_ms": 9500,
+            "generation_ms": 500,
+            "output_tokens": 8,
+        }
+        with mock.patch.object(probe, "chat_once", side_effect=[idle, slow, slow]):
+            got = probe.run_idle_then_soak_benchmark(
+                "https://api.example.test",
+                "secret",
+                "model",
+                2,
+                2,
+                16,
+                1.0,
+                5000,
+                1.0,
+                idle_requests=1,
+            )
+        self.assertEqual(got["ttft_ms_p95"], 40)
+        self.assertEqual(got["ok"], 2)
+        self.assertEqual(got["idle_latency"]["ok"], 1)
+
     def test_benchmark_stamps_unique_request_ids(self):
         result = {
             "status": 200,

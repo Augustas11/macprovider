@@ -50,6 +50,7 @@ RETRYABLE_IDLE_ERROR_CODES = frozenset({"benchmark_timeout", "ProbeError"})
 DEFAULT_LOAD_LADDER = ",".join(str(value) for value in DEFAULT_LOAD_LADDER_VALUES)
 DEFAULT_BENCHMARK_CONCURRENCY = 4
 DEFAULT_SATURATION_CONCURRENCY = 8
+DEFAULT_IDLE_LATENCY_REQUESTS = 16
 PRODUCTION_BASE_URL = "https://api.malibu.tech"
 PRODUCTION_ADMIN_URL = "https://coordinator.malibu.tech"
 FILING_MAX_REQUESTS_PER_MINUTE_PER_SLOT = 60
@@ -1146,6 +1147,7 @@ def run_benchmark(
     min_output_tokens_per_second: float,
     require_429: bool = False,
     allow_all_shed: bool = False,
+    enforce_latency: bool = True,
 ) -> dict:
     if requests < 1:
         raise ProbeError("benchmark requests must be positive")
@@ -1326,7 +1328,7 @@ def run_benchmark(
     # Saturation and load-ladder overflow include slot-queue wait (up to 3s) on
     # requests that still land as HTTP 200. Short completions can drain before
     # the coordinator sheds, so TTFT/throughput stay idle-benchmark gates.
-    skip_latency_gates = require_429 or allow_all_shed
+    skip_latency_gates = (not enforce_latency) or require_429 or allow_all_shed
     ttft_p95 = percentile(ttfts, 95) if ttfts else None
     generated_tokens_per_second = output_tokens / max(generation_seconds, 0.001) if output_tokens else 0.0
     if not skip_latency_gates:
@@ -1442,6 +1444,50 @@ def run_load_ladder(
     if blocker:
         raise EvidenceProbeError(f"load ladder observed blocker {blocker.get('classification')}", result)
     return result
+
+
+def run_idle_then_soak_benchmark(
+    base_url: str,
+    token: str,
+    model: str,
+    requests: int,
+    concurrency: int,
+    max_tokens: int,
+    min_success_ratio: float,
+    max_ttft_p95_ms: int,
+    min_output_tokens_per_second: float,
+    idle_requests: int = DEFAULT_IDLE_LATENCY_REQUESTS,
+) -> dict:
+    idle = run_benchmark(
+        base_url,
+        token,
+        model,
+        idle_requests,
+        1,
+        max_tokens,
+        min_success_ratio,
+        max_ttft_p95_ms,
+        min_output_tokens_per_second,
+    )
+    soak = run_benchmark(
+        base_url,
+        token,
+        model,
+        requests,
+        concurrency,
+        max_tokens,
+        min_success_ratio,
+        max_ttft_p95_ms,
+        min_output_tokens_per_second,
+        enforce_latency=False,
+    )
+    combined = dict(soak)
+    combined["ttft_ms_p50"] = idle.get("ttft_ms_p50")
+    combined["ttft_ms_p95"] = idle.get("ttft_ms_p95")
+    combined["ttft_ms_max"] = idle.get("ttft_ms_max")
+    combined["output_tokens_per_second"] = idle.get("output_tokens_per_second")
+    combined["idle_latency"] = idle
+    return combined
 
 
 def normalize_pool_entries(payload: object) -> list[dict]:
@@ -1967,20 +2013,36 @@ def main(argv: list[str]) -> int:
                     lambda: check_catalog_chat(args.base_url, token, args.max_tokens),
                 )
             if args.benchmark_requests > 0:
-                record_check(
-                    "benchmark",
-                    lambda: run_benchmark(
-                        args.base_url,
-                        token,
-                        args.model,
-                        args.benchmark_requests,
-                        args.benchmark_concurrency,
-                        args.max_tokens,
-                        args.min_success_ratio,
-                        args.max_ttft_p95_ms,
-                        args.min_output_tokens_per_second,
-                    ),
-                )
+                if args.benchmark_concurrency > 1 and (args.max_ttft_p95_ms > 0 or args.min_output_tokens_per_second > 0):
+                    record_check(
+                        "benchmark",
+                        lambda: run_idle_then_soak_benchmark(
+                            args.base_url,
+                            token,
+                            args.model,
+                            args.benchmark_requests,
+                            args.benchmark_concurrency,
+                            args.max_tokens,
+                            args.min_success_ratio,
+                            args.max_ttft_p95_ms,
+                            args.min_output_tokens_per_second,
+                        ),
+                    )
+                else:
+                    record_check(
+                        "benchmark",
+                        lambda: run_benchmark(
+                            args.base_url,
+                            token,
+                            args.model,
+                            args.benchmark_requests,
+                            args.benchmark_concurrency,
+                            args.max_tokens,
+                            args.min_success_ratio,
+                            args.max_ttft_p95_ms,
+                            args.min_output_tokens_per_second,
+                        ),
+                    )
             if load_ladder_concurrencies:
                 record_check(
                     "load_ladder",
