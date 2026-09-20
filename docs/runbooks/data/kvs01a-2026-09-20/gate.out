@@ -1,0 +1,133 @@
+started_utc=2026-09-20T11:10:51Z
+cli=/Users/a1/.local/state/kvs-01a/run/macprovider-cli
+1.8.123
+kvs-01a[c1]: persist turn key_hash=02ebc484
+kvs-01a[c1]: kill + relaunch (enabled)
+kvs-01a[c1]: PASS restored disk_hit cached=1616 (=1616) ttft=491ms
+kvs-01a[c1]: kill + relaunch (disabled)
+kvs-01a[c2]: persist turn key_hash=0959b641
+kvs-01a[c2]: kill + relaunch (enabled)
+kvs-01a[c2]: PASS restored disk_hit cached=1616 (=1616) ttft=462ms
+kvs-01a[c2]: kill + relaunch (disabled)
+kvs-01a[c3]: persist turn key_hash=133f7500
+kvs-01a[c3]: kill + relaunch (enabled)
+kvs-01a[c3]: PASS restored disk_hit cached=1616 (=1616) ttft=485ms
+kvs-01a[c3]: kill + relaunch (disabled)
+kvs-01a[c4]: persist turn key_hash=565f7bc1
+kvs-01a[c4]: kill + relaunch (enabled)
+kvs-01a[c4]: PASS restored disk_hit cached=1616 (=1616) ttft=445ms
+kvs-01a[c4]: kill + relaunch (disabled)
+kvs-01a[c5]: persist turn key_hash=16c676c8
+kvs-01a[c5]: kill + relaunch (enabled)
+kvs-01a[c5]: PASS restored disk_hit cached=1616 (=1616) ttft=459ms
+kvs-01a[c5]: kill + relaunch (disabled)
+kvs-01a[c6]: persist turn key_hash=f673a836
+kvs-01a[c6]: kill + relaunch (enabled)
+kvs-01a[c6]: PASS restored disk_hit cached=1616 (=1616) ttft=488ms
+kvs-01a[c6]: kill + relaunch (disabled)
+kvs-01a[c7]: persist turn key_hash=c0f969ac
+kvs-01a[c7]: kill + relaunch (enabled)
+kvs-01a[c7]: PASS restored disk_hit cached=1616 (=1616) ttft=492ms
+kvs-01a[c7]: kill + relaunch (disabled)
+kvs-01a[c8]: persist turn key_hash=bdaaa073
+kvs-01a[c8]: kill + relaunch (enabled)
+kvs-01a[c8]: PASS restored disk_hit cached=1616 (=1616) ttft=531ms
+kvs-01a[c8]: kill + relaunch (disabled)
+kvs-01a[c9]: persist turn key_hash=9b33a031
+kvs-01a[c9]: kill + relaunch (enabled)
+kvs-01a[c9]: PASS restored disk_hit cached=1616 (=1616) ttft=531ms
+kvs-01a[c9]: kill + relaunch (disabled)
+kvs-01a[c10]: persist turn key_hash=329bb622
+kvs-01a[c10]: kill + relaunch (enabled)
+kvs-01a[c10]: PASS restored disk_hit cached=1616 (=1616) ttft=504ms
+kvs-01a[c10]: kill + relaunch (disabled)
+kvs-01a[c11]: persist turn key_hash=223ce359
+kvs-01a[c11]: kill + relaunch (enabled)
+kvs-01a[c11]: PASS restored disk_hit cached=1616 (=1616) ttft=446ms
+kvs-01a[c11]: kill + relaunch (disabled)
+kvs-01a[c12]: persist turn key_hash=c0a81b2c
+kvs-01a[c12]: kill + relaunch (enabled)
+kvs-01a[c12]: PASS restored disk_hit cached=1616 (=1616) ttft=440ms
+kvs-01a[c12]: kill + relaunch (disabled)
+kvs-01a[c13]: persist turn key_hash=898ea2d0
+kvs-01a[c13]: kill + relaunch (enabled)
+kvs-01a[c13]: PASS restored disk_hit cached=1616 (=1616) ttft=455ms
+kvs-01a[c13]: kill + relaunch (disabled)
+kvs-01a[c14]: persist turn key_hash=c0345d7f
+kvs-01a[c14]: kill + relaunch (enabled)
+kvs-01a[c14]: PASS restored disk_hit cached=1616 (=1616) ttft=483ms
+kvs-01a[c14]: kill + relaunch (disabled)
+kvs-01a[c15]: persist turn key_hash=7a3c27dc
+kvs-01a[c15]: kill + relaunch (enabled)
+kvs-01a[c15]: PASS restored disk_hit cached=1616 (=1616) ttft=534ms
+kvs-01a[c15]: kill + relaunch (disabled)
+kvs-01a[c16]: persist turn key_hash=51e0d448
+kvs-01a[c16]: kill + relaunch (enabled)
+kvs-01a[c16]: PASS restored disk_hit cached=1616 (=1616) ttft=507ms
+kvs-01a[c16]: kill + relaunch (disabled)
+kvs-01a[c17]: persist turn key_hash=ef83164a
+kvs-01a[c17]: kill + relaunch (enabled)
+kvs-01a[c17]: PASS restored disk_hit cached=1616 (=1616) ttft=328ms
+kvs-01a[c17]: kill + relaunch (disabled)
+kvs-01a[c18]: persist turn key_hash=892bbb75
+kvs-01a[c18]: kill + relaunch (enabled)
+kvs-01a[c18]: PASS restored disk_hit cached=1616 (=1616) ttft=445ms
+kvs-01a[c18]: kill + relaunch (disabled)
+kvs-01a[c19]: persist turn key_hash=ccf7570b
+kvs-01a[c19]: kill + relaunch (enabled)
+kvs-01a[c19]: PASS restored disk_hit cached=1616 (=1616) ttft=517ms
+kvs-01a[c19]: kill + relaunch (disabled)
+kvs-01a[c20]: persist turn key_hash=188bedc1
+kvs-01a[c20]: kill + relaunch (enabled)
+kvs-01a[c20]: PASS restored disk_hit cached=1616 (=1616) ttft=526ms
+kvs-01a[c20]: kill + relaunch (disabled)
+kvs-01a[c21]: persist turn key_hash=66e23a72
+kvs-01a[c21]: kill + relaunch (enabled)
+kvs-01a[c21]: PASS restored disk_hit cached=1616 (=1616) ttft=548ms
+kvs-01a[c21]: kill + relaunch (disabled)
+kvs-01a[c22]: persist turn key_hash=57fea05f
+kvs-01a[c22]: kill + relaunch (enabled)
+kvs-01a[c22]: PASS restored disk_hit cached=1616 (=1616) ttft=493ms
+kvs-01a[c22]: kill + relaunch (disabled)
+kvs-01a[c23]: persist turn key_hash=e8bc8961
+kvs-01a[c23]: kill + relaunch (enabled)
+kvs-01a[c23]: PASS restored disk_hit cached=1616 (=1616) ttft=515ms
+kvs-01a[c23]: kill + relaunch (disabled)
+kvs-01a[c24]: persist turn key_hash=e5a5015d
+kvs-01a[c24]: kill + relaunch (enabled)
+kvs-01a[c24]: PASS restored disk_hit cached=1616 (=1616) ttft=507ms
+kvs-01a[c24]: kill + relaunch (disabled)
+kvs-01a[c25]: persist turn key_hash=e3842d88
+kvs-01a[c25]: kill + relaunch (enabled)
+kvs-01a[c25]: PASS restored disk_hit cached=1616 (=1616) ttft=438ms
+kvs-01a[c25]: kill + relaunch (disabled)
+kvs-01a[c26]: persist turn key_hash=d165c4e4
+kvs-01a[c26]: kill + relaunch (enabled)
+kvs-01a[c26]: PASS restored disk_hit cached=1616 (=1616) ttft=478ms
+kvs-01a[c26]: kill + relaunch (disabled)
+kvs-01a[c27]: persist turn key_hash=e95d3904
+kvs-01a[c27]: kill + relaunch (enabled)
+kvs-01a[c27]: PASS restored disk_hit cached=1616 (=1616) ttft=453ms
+kvs-01a[c27]: kill + relaunch (disabled)
+kvs-01a[c28]: persist turn key_hash=49cdd6a9
+kvs-01a[c28]: kill + relaunch (enabled)
+kvs-01a[c28]: PASS restored disk_hit cached=1616 (=1616) ttft=473ms
+kvs-01a[c28]: kill + relaunch (disabled)
+kvs-01a[c29]: persist turn key_hash=73dfe409
+kvs-01a[c29]: kill + relaunch (enabled)
+kvs-01a[c29]: PASS restored disk_hit cached=1616 (=1616) ttft=519ms
+kvs-01a[c29]: kill + relaunch (disabled)
+kvs-01a[c30]: persist turn key_hash=4af90718
+kvs-01a[c30]: kill + relaunch (enabled)
+kvs-01a[c30]: PASS restored disk_hit cached=1616 (=1616) ttft=466ms
+kvs-01a[c30]: kill + relaunch (disabled)
+kvs-01a: nearest-rank TTFT percentiles (ms):
+  restored  n=30 p50=485 p95=534 min=328 max=548
+  warm      n=30 p50=97 p95=118 min=91 max=179
+  miss      n=30 p50=883 p95=1052 min=871 max=1270
+  disabled  n=30 p50=875 p95=899 min=861 max=920
+kvs-01a: THRESHOLD ADVISORY restored p95 534 > warm p95 118 × 3
+kvs-01a: percentile thresholds are advisory for KVS-01a (pass --perf-gate to enforce)
+kvs-01a: all 30 cycle(s) passed → /Users/a1/.local/state/kvs-01a/evidence/gate-samples.ndjson
+exit=0
+finished_utc=2026-09-20T11:59:58Z
