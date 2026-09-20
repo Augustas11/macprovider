@@ -104,7 +104,19 @@ isolated lab serve** for `conv:kvs-synth:` direct-HTTP traffic.
 
 ## Next
 
-KVS-01b is the same scenario at an 8k prefix. That needs the Q6/Q7 format
-decision first: allowlist `QuantizedKVCache` (codec v2) if production KV is
-quantized, or a spec-revision ceiling raise if FP16. The ~96 KiB/token
-unquantized Qwen shape does not fit 8k under the 256 MiB promotion ceiling.
+KVS-01b is the same scenario at an 8k prefix.
+
+**Q6 (this tuple, measured):** live production KV is unquantized
+`KVCacheSimple` (`kv_bits=null`). The 30-cycle persist payload was
+~159 MiB for 1616 tokens (~98 KiB/token), matching the FP16 GQA estimate
+in RESEARCH_233 §3.4, not the hypothetical q4 ~30 KiB/token class.
+
+**Q7:** not applicable on this tuple. q4 KV is not the active
+representation, so quality/restore gates for quantized KV are not the
+01b path.
+
+Therefore 01b needs a **spec-revision FR-KVP9 ceiling raise** (8k ×
+~96 KiB/token ≈ 768 MiB, plus framing), not a `QuantizedKVCache` codec
+v2 allowlist. Configuration cannot raise the 256 MiB hard ceiling.
+Do not mark `SPEC-037-R013` conformant until that revision plus the 8k
+gate land.
