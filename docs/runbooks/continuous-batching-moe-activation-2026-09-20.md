@@ -37,3 +37,8 @@ recorded, not blockers for this gate. They do not leak across rows.
 
 Cut the next acceptance candidate off the merge (it will also include
 #1648), swap Studio onto it, then operator-canary CB on that package only.
+
+2026-09-20: 172 is live. Operator-canary on Studio entered the attached
+scheduler and 503'd `continuous_batching_prefill_failed`; config rolled back
+to off. See
+[`continuous-batching-canary-172-enable-2026-09-20.md`](continuous-batching-canary-172-enable-2026-09-20.md).
