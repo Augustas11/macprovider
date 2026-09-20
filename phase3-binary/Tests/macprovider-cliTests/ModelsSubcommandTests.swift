@@ -634,6 +634,54 @@ final class ModelsSubcommandTests: XCTestCase {
         XCTAssertEqual(events.last?.errorCode, .rootUnavailable)
     }
 
+    func testModelsPrepareRejectsSignedFeedWithOverLimitLaneAArtifactSize() async throws {
+        let fixture = try Self.laneAArtifactFeedFixture(
+            laneAArtifactSizeBytes: Build1LaneAPrepareProfile.maxArtifactSizeBytes + 1
+        )
+        let inputs = AutotuneStaticInputs(
+            fetch: { url in url.path.hasSuffix(".sig") ? fixture.sidecarBytes : fixture.feedBytes },
+            trustedPublicKeys: fixture.trustedPublicKeys,
+            now: { Self.prepareDate("2026-09-19T01:00:00Z") }
+        )
+        let roots = try makeLaneAStagingRoots()
+        let resolver = CachedModelArtifactResolver(
+            hubRoot: roots.hub,
+            durableRoot: roots.durable,
+            downloader: HuggingFaceSnapshotDownloader(
+                fetch: { _ in
+                    XCTFail("over-limit authority must fail before any transfer")
+                    throw URLError(.cannotConnectToHost)
+                },
+                download: { _ in
+                    XCTFail("over-limit authority must fail before any transfer")
+                    throw URLError(.cannotConnectToHost)
+                }
+            )
+        )
+        let capture = try await withPrepareStaticInputs(inputs) {
+            try await withPrepareResolver(resolver, diskProbe: { _ in
+                XCTFail("over-limit authority must fail before any disk probe")
+                return Build1LaneADiskProbe(availableBytes: .max, deviceID: 1)
+            }) {
+                let command = try ModelsPrepareCommand.parse([
+                    Build1LaneAPrepareProfile.catalogKey,
+                    "--json",
+                    "--yes",
+                    "--coordinator-url", "http://127.0.0.1:19090/ws/provider",
+                    "--config", roots.config.path,
+                ])
+                return await captureOutput { try await command.run() }
+            }
+        }
+
+        XCTAssertEqual(capture.error as? ExitCode, ExitCode(2))
+        XCTAssertTrue(capture.stderr.contains(Build1LaneAPrepareProfile.unsupportedReason), capture.stderr)
+        let events = try decodePreparationEvents(capture.stdout)
+        XCTAssertEqual(events.map(\.state), [.queued, .failed])
+        XCTAssertEqual(events.last?.errorCode, .authorityUnavailable)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: roots.durable.path))
+    }
+
     func testModelsPrepareRejectsSignedFeedWithWrongLaneAPrimaryArtifactID() async throws {
         let fixture = try Self.laneAArtifactFeedFixture(laneAArtifactID: "alternate")
         let inputs = AutotuneStaticInputs(
@@ -1801,13 +1849,13 @@ final class ModelsSubcommandTests: XCTestCase {
     }
 
     private static func laneAArtifactFeedFixture(
-        laneAArtifactID: String = Build1LaneAPrepareProfile.artifactID
+        laneAArtifactID: String = Build1LaneAPrepareProfile.artifactID,
+        laneAArtifactSizeBytes: Int = 2_345_678_901
     ) throws -> LaneAArtifactFeedFixture {
         let candidateBytes = Data(AutotuneStaticInputs.bakedCandidateCatalogJSON.utf8)
         let catalog = try AutotuneStaticInputs.decodeSignedStaticCandidateCatalog(candidateBytes)
         let generatedAt = try XCTUnwrap(ArtifactFeed.rawGeneratedAt(in: candidateBytes))
         let catalogSHA256 = AutotuneStaticInputs.candidateCatalogSHA256(bytes: candidateBytes)
-        let laneAArtifactSizeBytes = 2_345_678_901
         var models: [String: Any] = [:]
         for key in catalog.rows.keys.sorted() {
             let row = catalog.rows[key]!

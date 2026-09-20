@@ -11,6 +11,9 @@ enum Build1LaneAPrepareProfile {
     static let artifactRevision = "7f0dc925e0d0afb0322d96f9255cfddf2ba5636e"
     static let artifactHash = "e7e5bff4248768b4db7a53afb3b514ba5867b800f63d1abd0330eaf08e54aa90"
     static let runtimeSource = "mlx_cache"
+    /// SPEC-044 preparation precondition: `estimated_bytes` must be positive
+    /// and at most 1 TiB before Prepare can be available.
+    static let maxArtifactSizeBytes = Int(ModelPreparationContracts.maxEstimatedBytes)
     static let unsupportedReason = "artifact_authority_unavailable"
     static let configUnavailableReason = "config_unavailable"
     static let invalidTimeoutReason = "invalid_timeout"
@@ -170,7 +173,8 @@ enum Build1LaneAArtifactAuthorityResolver {
               artifact.hash == Build1LaneAPrepareProfile.artifactHash,
               artifact.allowedRuntimeSources == [Build1LaneAPrepareProfile.runtimeSource],
               artifact.verificationStatus == "verified",
-              artifact.sizeBytes > 0
+              artifact.sizeBytes > 0,
+              artifact.sizeBytes <= Build1LaneAPrepareProfile.maxArtifactSizeBytes
         else {
             throw Build1LaneAArtifactAuthorityError.artifactTupleMismatch
         }
