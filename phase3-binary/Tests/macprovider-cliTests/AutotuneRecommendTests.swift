@@ -1168,12 +1168,9 @@ final class AutotuneRecommendTests: XCTestCase {
         catalogMismatch.candidateCatalogSHA256 = "mismatch"
         XCTAssertFalse(AutotuneRecommendEngine.cachedBenchmarkAdmitted(catalogMismatch, request: request, modelKey: modelKey))
 
-        // binaryVersion is the independently-versioned CLI marketing release
-        // number, not a compatibility input — a version-only difference must
-        // not discard otherwise-valid cached benchmark evidence (#612).
         var binaryVersionOnlyChange = baseline
         binaryVersionOnlyChange.binaryVersion = "other"
-        XCTAssertTrue(AutotuneRecommendEngine.cachedBenchmarkAdmitted(binaryVersionOnlyChange, request: request, modelKey: modelKey))
+        XCTAssertFalse(AutotuneRecommendEngine.cachedBenchmarkAdmitted(binaryVersionOnlyChange, request: request, modelKey: modelKey))
 
         var modelMismatch = baseline
         modelMismatch.modelID = "other/model"
@@ -1192,15 +1189,12 @@ final class AutotuneRecommendTests: XCTestCase {
         XCTAssertFalse(AutotuneRecommendEngine.cachedBenchmarkAdmitted(stale, request: request, modelKey: modelKey))
     }
 
-    func testCachedBenchmarkAdmittedAcrossCLIVersionOnlyBump() throws {
+    func testCachedBenchmarkRejectsCLIVersionOnlyBump() throws {
         var request = try makeRequest()
         let modelKey = "qwen3-coder-30b-a3b-instruct"
         let benchmark = try XCTUnwrap(request.benchmarks[modelKey])
         XCTAssertEqual(benchmark.binaryVersion, request.hardware.binaryVersion)
 
-        // Simulate a CLI update: the running binary's marketing version moves
-        // forward while every compatibility input (catalog, model artifact,
-        // hardware identity) stays the same as when the benchmark was recorded.
         request.hardware = AutotuneRecommendHardware(
             machine: request.hardware.machine,
             chip: request.hardware.chip,
@@ -1213,13 +1207,13 @@ final class AutotuneRecommendTests: XCTestCase {
         )
 
         XCTAssertNotEqual(benchmark.binaryVersion, request.hardware.binaryVersion)
-        XCTAssertTrue(AutotuneRecommendEngine.cachedBenchmarkAdmitted(benchmark, request: request, modelKey: modelKey))
+        XCTAssertFalse(AutotuneRecommendEngine.cachedBenchmarkAdmitted(benchmark, request: request, modelKey: modelKey))
 
         let result = AutotuneRecommendEngine().recommend(request)
-        XCTAssertEqual(result.recommendedModel, modelKey)
+        XCTAssertNil(result.recommendedModel)
     }
 
-    func test8GBLlama32FeasibleFallbackSurvivesCLIVersionOnlyBump() throws {
+    func test8GBLlama32FeasibleFallbackRejectsCLIVersionOnlyBump() throws {
         let modelKey = "meta-llama/llama-3.2-3b-instruct"
         var request = try makeRequest(modelKey: modelKey)
         request.hardware = AutotuneRecommendHardware(
@@ -1232,15 +1226,12 @@ final class AutotuneRecommendTests: XCTestCase {
             diversificationID: request.hardware.diversificationID,
             hardwareIdentityHash: request.hardware.hardwareIdentityHash
         )
-        // The cached benchmark was recorded under the pre-update CLI version.
         // Keep swap false: #742 makes swap a paid hard veto; this test isolates
-        // CLI marketing-version independence of cached evidence admission.
+        // binary-version binding of cached evidence admission.
         var benchmark = try XCTUnwrap(request.benchmarks[modelKey])
         benchmark.swapDetected = false
         request.benchmarks[modelKey] = benchmark
 
-        // A CLI update alone advances the marketing version with every
-        // compatibility input (catalog, model artifact, hardware) unchanged.
         request.hardware = AutotuneRecommendHardware(
             machine: request.hardware.machine,
             chip: request.hardware.chip,
@@ -1254,9 +1245,7 @@ final class AutotuneRecommendTests: XCTestCase {
 
         let result = AutotuneRecommendEngine().recommend(request)
 
-        XCTAssertEqual(result.recommendedModel, modelKey)
-        XCTAssertNotEqual(result.recommendedModel, "none")
-        XCTAssertFalse(result.humanTranscript().contains("donor mode only"))
+        XCTAssertNil(result.recommendedModel)
         XCTAssertFalse(result.warnings.contains(.swapObservedUnderLoad))
     }
 
@@ -3529,6 +3518,42 @@ final class AutotuneRecommendTests: XCTestCase {
         XCTAssertEqual(secondOutcomes.benchmarks[modelKey]?.sustainedTPS, 88)
         XCTAssertTrue(progress.contains(where: { $0.contains("reused cached probe") }))
         XCTAssertFalse(progress.contains(where: { $0.contains("downloading+benchmarking") }))
+
+        progress.removeAll()
+        var bumpedRequest = request
+        bumpedRequest.hardware = AutotuneRecommendHardware(
+            machine: request.hardware.machine,
+            chip: request.hardware.chip,
+            memoryGB: request.hardware.memoryGB,
+            bandwidthTier: request.hardware.bandwidthTier,
+            osVersion: request.hardware.osVersion,
+            binaryVersion: "1.8.57",
+            diversificationID: request.hardware.diversificationID,
+            hardwareIdentityHash: request.hardware.hardwareIdentityHash
+        )
+        let bumpedProber = RecordingStage1Prober(results: [
+            artifactPath: .feasible(medianTPS: 77, p95TTFTMS: 950)
+        ])
+        let bumped = AutotuneRecommendationBenchmarker(
+            artifactResolver: CachedModelArtifactResolver(hubRoot: hub),
+            runnerFactory: { try CandidateProviderRunner(providerBinaryPath: "/bin/true") },
+            prober: bumpedProber,
+            safetySampler: StaticProbeSafetySampler(),
+            clock: { Self.date("2026-07-02T00:00:00Z") },
+            progress: { progress.append($0) },
+            probeCache: AutotuneProbeCacheStore(url: cacheURL, now: { Self.date("2026-07-02T00:00:00Z") })
+        )
+        let bumpedOutcomes = try await bumped.benchmarks(
+            request: bumpedRequest,
+            targetContext: 4_000,
+            gateTTFTMS: 3_000,
+            replicates: 1,
+            port: 18080
+        )
+        XCTAssertEqual(bumpedProber.probedModels, [artifactPath])
+        XCTAssertEqual(bumpedOutcomes.benchmarks[modelKey]?.sustainedTPS, 77)
+        XCTAssertFalse(progress.contains(where: { $0.contains("reused cached probe") }))
+        XCTAssertTrue(progress.contains(where: { $0.contains("downloading+benchmarking") }))
     }
 
     func testProbeCacheDoesNotReuseSwapOrThermalVetoes() async throws {
@@ -3947,7 +3972,7 @@ final class AutotuneRecommendTests: XCTestCase {
         XCTAssertEqual(staleSince, Optional(Self.date("2026-07-01T00:00:00Z")))
     }
 
-    func testIsStaleIgnoresCLIVersionOnlyChange() throws {
+    func testIsStaleDetectsCLIVersionOnlyChange() throws {
         let generatedAt = Self.date("2026-07-01T00:00:00Z")
         let stored = LastRecommendationState(
             generatedAt: generatedAt,
@@ -3961,13 +3986,10 @@ final class AutotuneRecommendTests: XCTestCase {
             hardwareIdentityHash: "hw-1",
             recommendedModel: "meta-llama/llama-3.2-3b-instruct"
         )
-        // Only the CLI marketing version advances; every compatibility input
-        // (rate card, demand rank, catalog identity/digest, hardware identity)
-        // and the cached benchmark stay the same.
         var current = stored
         current.binaryVersion = "1.8.56"
 
-        XCTAssertFalse(RecommendationStateStore.isStale(
+        XCTAssertTrue(RecommendationStateStore.isStale(
             stored: stored,
             current: current,
             now: generatedAt

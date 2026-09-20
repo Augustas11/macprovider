@@ -2624,11 +2624,10 @@ struct AutotuneRecommendEngine {
         } else {
             catalogEvidenceMatches = benchmark.candidateRowIdentity == request.candidateCatalog.rowIdentity(for: modelKey)
         }
-        // Evidence freshness binds to compatibility inputs (catalog row identity,
-        // model artifact, hardware identity) and an explicit evidence lifetime —
-        // never to the independently-versioned CLI marketing release number.
-        // A CLI version-only bump must not discard a known-good cached benchmark.
+        // SPEC-023 treats the CLI binary version as part of benchmark evidence
+        // compatibility; do not reuse probes across a changed runtime binary.
         guard catalogEvidenceMatches,
+              benchmark.binaryVersion == request.hardware.binaryVersion,
               benchmark.modelID == request.candidateCatalog.rows[modelKey]?.modelID,
               benchmark.artifactSHA256 == request.candidateCatalog.rows[modelKey]?.modelSHA256,
               benchmark.hardwareIdentityHash == request.hardware.hardwareIdentityHash,
@@ -3182,16 +3181,13 @@ enum RecommendationStateStore {
     }
 
     static func isStale(stored: LastRecommendationState, current: LastRecommendationState, now: Date) -> Bool {
-        // Staleness binds to compatibility inputs — rate card, demand rank, and
-        // candidate catalog identity/digest, plus hardware identity and evidence
-        // age. `binaryVersion` is the independently-versioned CLI marketing
-        // release number and intentionally does not participate here: a
-        // software-only version bump with unchanged compat inputs must not
-        // invalidate an otherwise-healthy recommendation.
+        // SPEC-023 binds recommendation freshness to the binary that produced
+        // the benchmark evidence; a version change requires fresh admission.
         if stored.rateCardVersion != current.rateCardVersion { return true }
         if stored.demandRankVersion != current.demandRankVersion { return true }
         if stored.candidateCatalogVersion != current.candidateCatalogVersion { return true }
         if stored.candidateCatalogSHA256 != current.candidateCatalogSHA256 { return true }
+        if stored.binaryVersion != current.binaryVersion { return true }
         if stored.hardwareIdentityHash != current.hardwareIdentityHash { return true }
         guard let benchmarkGeneratedAt = stored.benchmarkGeneratedAt else { return true }
         return now.timeIntervalSince(benchmarkGeneratedAt) > AutotuneRecommendEngine.maxBenchmarkAge
