@@ -27,7 +27,7 @@ public struct PagedKVDescriptor: Equatable, Sendable, Codable {
     public var parityLabel: String
     public var poolEpoch: Int
 
-    init(
+    public init(
         blockSizeTokens: Int,
         maxPhysicalBlocks: Int,
         modelID: String,

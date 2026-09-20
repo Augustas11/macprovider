@@ -2615,6 +2615,114 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         XCTAssertTrue(currentTokens.contains(["moe-a": 31, "moe-b": 40]))
     }
 
+    func testIdleDecodeUsesLockstepWindowAndAppliesEveryToken() async throws {
+        let backend = WindowRecordingBackend(scripts: [
+            "solo": [11, 12, 13, 14],
+        ])
+        let scheduler = try await makeScheduler(
+            maxActiveRows: 1,
+            maxDecodeLockstepWindow: 8,
+            backend: backend
+        )
+        let result = try await scheduler.submit(.init(
+            id: "solo",
+            conversationKey: "",
+            promptTokens: [1],
+            maxOutputTokens: 4,
+            temperature: 0.0,
+            topP: 1.0
+        ))
+        XCTAssertEqual(result.outputTokens, [11, 12, 13, 14])
+        XCTAssertEqual(result.terminalStatus, .length)
+        let windows = await backend.windowCalls()
+        XCTAssertEqual(windows.count, 1)
+        XCTAssertEqual(windows[0].ids, ["solo"])
+        XCTAssertEqual(windows[0].steps, 4)
+        let decodeCalls = await backend.decodeCallCount()
+        XCTAssertEqual(decodeCalls, 0)
+        let metrics = await scheduler.metrics()
+        XCTAssertEqual(metrics.sharedForwardCalls, 1)
+    }
+
+    func testQueuedJoinForcesOneTokenDecodeThenWindowResumes() async throws {
+        let decodeGate = AsyncGate()
+        let backend = WindowRecordingBackend(
+            scripts: [
+                "active": [11, 12, 13, 14],
+                "queued": [21, 22],
+            ],
+            decodeGate: decodeGate
+        )
+        let scheduler = try await makeScheduler(
+            maxActiveRows: 1,
+            maxDecodeLockstepWindow: 2,
+            backend: backend
+        )
+
+        let active = Task {
+            try await scheduler.submit(.init(
+                id: "active",
+                conversationKey: "",
+                promptTokens: [1],
+                maxOutputTokens: 4,
+                temperature: 0.0,
+                topP: 1.0
+            ))
+        }
+        try await eventually { await backend.windowCallCount() == 1 }
+        let queued = Task {
+            try await scheduler.submit(.init(
+                id: "queued",
+                conversationKey: "",
+                promptTokens: [2],
+                maxOutputTokens: 2,
+                temperature: 0.0,
+                topP: 1.0
+            ))
+        }
+        try await eventually { await scheduler.metrics().waitingCount == 1 }
+        await decodeGate.open()
+
+        let activeResult = try await active.value
+        let queuedResult = try await queued.value
+        XCTAssertEqual(activeResult.outputTokens, [11, 12, 13, 14])
+        XCTAssertEqual(queuedResult.outputTokens, [21, 22])
+
+        let windows = await backend.windowCalls()
+        XCTAssertGreaterThanOrEqual(windows.count, 3)
+        XCTAssertEqual(windows[0].ids, ["active"])
+        XCTAssertEqual(windows[0].steps, 2)
+        XCTAssertTrue(windows.dropFirst().contains { $0.ids == ["active"] && $0.steps == 1 })
+        XCTAssertEqual(windows.last?.ids, ["queued"])
+        XCTAssertEqual(windows.last?.steps, 2)
+    }
+
+    func testLockstepWindowStopSequenceAppliesTokensSequentially() async throws {
+        let backend = WindowRecordingBackend(scripts: [
+            "stopped": [1, 2, 5, 6, 9],
+        ])
+        let scheduler = try await makeScheduler(
+            maxActiveRows: 1,
+            maxDecodeLockstepWindow: 5,
+            backend: backend
+        )
+        let result = try await scheduler.submit(.init(
+            id: "stopped",
+            conversationKey: "",
+            promptTokens: [10],
+            maxOutputTokens: 5,
+            stopTokenSequences: [[5, 6]],
+            temperature: 0.0,
+            topP: 1.0
+        ))
+        XCTAssertEqual(result.terminalStatus, .stop)
+        XCTAssertEqual(result.outputTokens, [1, 2])
+        XCTAssertEqual(result.generatedTokens, [1, 2, 5, 6])
+        let windows = await backend.windowCalls()
+        XCTAssertEqual(windows.count, 1)
+        XCTAssertEqual(windows[0].steps, 5)
+    }
+
     private static let modelID = "mlx-community/Qwen-Test"
     private static let modelSHA = String(repeating: "a", count: 64)
     private static let tokenizerSHA = String(repeating: "b", count: 64)
@@ -2691,7 +2799,8 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         decodeHeadroomTokens: Int = 2,
         maxPromptChunkTokens: Int = 2,
         tokenDeliveryTimeoutNanoseconds: UInt64 = 5_000_000_000,
-        backend: ScriptedBackend,
+        maxDecodeLockstepWindow: Int = 1,
+        backend: any ContinuousBatchSchedulerBackend,
         allocator: PagedKVBlockAllocator? = nil,
         contiguousCacheBridge: (any ContinuousBatchRetainedCacheBridge)? = nil
     ) async throws -> ContinuousBatchScheduler {
@@ -2710,7 +2819,8 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
                 modelID: Self.modelID,
                 modelSHA256: Self.modelSHA,
                 weightsGeneration: 3
-            )
+            ),
+            maxDecodeLockstepWindow: maxDecodeLockstepWindow
         )
         return ContinuousBatchScheduler(
             configuration: config,
@@ -2915,6 +3025,64 @@ private actor SecondDecodeGateBackend: ContinuousBatchSchedulerBackend {
 
     func cancelInFlight() async {}
     func decodeCallCount() -> Int { decodeCalls }
+}
+
+private actor WindowRecordingBackend: ContinuousBatchSchedulerBackend {
+    private let scripts: [String: [Int]]
+    private let decodeGate: AsyncGate?
+    private var windowLog: [(ids: [String], steps: Int)] = []
+    private var decodeCalls = 0
+
+    init(scripts: [String: [Int]], decodeGate: AsyncGate? = nil) {
+        self.scripts = scripts
+        self.decodeGate = decodeGate
+    }
+
+    func prefill(rows: [ContinuousBatchPrefillInput]) async throws -> [ContinuousBatchPrefillOutput] {
+        rows.map { ContinuousBatchPrefillOutput(requestID: $0.requestID) }
+    }
+
+    func decode(rows: [ContinuousBatchDecodeInput]) async throws -> [ContinuousBatchDecodeOutcome] {
+        decodeCalls += 1
+        return rows.map { row in
+            .output(ContinuousBatchDecodeOutput(
+                requestID: row.requestID,
+                token: Self.nextToken(script: scripts[row.requestID] ?? [], generated: row.generatedTokens.count)
+            ))
+        }
+    }
+
+    func decodeLockstepWindow(
+        rows: [ContinuousBatchDecodeInput],
+        steps: Int
+    ) async throws -> [ContinuousBatchDecodeOutcome] {
+        windowLog.append((rows.map(\.requestID), steps))
+        if let decodeGate {
+            await decodeGate.wait()
+        }
+        return rows.map { row in
+            let script = scripts[row.requestID] ?? []
+            let start = row.generatedTokens.count
+            let end = min(start + steps, script.count)
+            let tokens = start < end ? Array(script[start..<end]) : []
+            if tokens.isEmpty {
+                return .rowFailure(requestID: row.requestID)
+            }
+            return .output(ContinuousBatchDecodeOutput(requestID: row.requestID, tokens: tokens))
+        }
+    }
+
+    func cancelInFlight() async {
+        await decodeGate?.open()
+    }
+
+    func windowCalls() -> [(ids: [String], steps: Int)] { windowLog }
+    func windowCallCount() -> Int { windowLog.count }
+    func decodeCallCount() -> Int { decodeCalls }
+
+    private static func nextToken(script: [Int], generated: Int) -> Int {
+        script[min(generated, max(0, script.count - 1))]
+    }
 }
 
 private struct HeadlessRetainedCacheBridge: ContinuousBatchRetainedCacheBridge {

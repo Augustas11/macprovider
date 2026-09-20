@@ -557,8 +557,9 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     }
 
     /// Greedy lockstep decode of `steps` tokens inside one `container.perform`.
-    /// The throughput harness uses this so the scheduler backend can prove
-    /// compiled contiguous scale without a per-token actor hop.
+    /// Returns every sampled token in generation order so the scheduler can
+    /// apply stop/stream/receipt without dropping intermediates. The throughput
+    /// harness uses the same seam.
     func decodeLockstepWindow(
         rows inputs: [ContinuousBatchDecodeInput],
         steps: Int
@@ -770,7 +771,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             && rowStates.allSatisfy({ $0.state == nil })
             && cachesAsKV.allSatisfy { !$0.innerState().isEmpty }
 
-        let sampled: [Int]
+        let sampledByRow: [[Int]]
         if canCompile {
             var compiledCaches: [KVCache]
             let step: CompiledDecodeStep
@@ -799,13 +800,21 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             }
             var current = MLXArray(supportedInputs.map { Int32($0.currentToken) }).reshaped([supportedInputs.count, 1])
             eval(current)
+            var collected: [[Int]] = supportedInputs.map { _ in [] }
             for _ in 0 ..< decodeSteps {
                 let logits = step.step(current)
                 current = argMax(logits[0..., -1, 0...], axis: -1).reshaped([supportedInputs.count, 1])
                 eval(current)
+                let stepTokens = current.asArray(Int.self)
+                guard stepTokens.count == supportedInputs.count else {
+                    throw ContinuousBatchSchedulerError.unsupported("continuous_batching_invalid_logits_shape")
+                }
+                for index in supportedInputs.indices {
+                    collected[index].append(stepTokens[index])
+                }
             }
             Stream().synchronize()
-            sampled = current.asArray(Int.self)
+            sampledByRow = collected
             for index in compiledCaches.indices {
                 let compiledState = compiledCaches[index].state
                 if compiledState.count == 2 {
@@ -816,6 +825,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         } else {
             session?.compiledStep = nil
             var currentTokens = supportedInputs.map(\.currentToken)
+            var collected: [[Int]] = supportedInputs.map { _ in [] }
             for _ in 0 ..< decodeSteps {
                 let tokenInput = MLXArray(currentTokens.map(Int32.init)).reshaped([supportedInputs.count, 1])
                 let text = LMInput.Text(tokens: tokenInput)
@@ -831,23 +841,27 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                 } else if output.state != nil {
                     return supportedInputs.map { ContinuousBatchDecodeOutcome.rowFailure(requestID: $0.requestID) }
                 }
+                for index in supportedInputs.indices {
+                    collected[index].append(stepSampled[index])
+                }
                 currentTokens = stepSampled
             }
-            sampled = currentTokens
+            sampledByRow = collected
             batchedCaches.forEach { $0.syncRowsFromBatch() }
         }
 
-        guard sampled.count == supportedInputs.count else {
+        guard sampledByRow.count == supportedInputs.count,
+              sampledByRow.allSatisfy({ $0.count == decodeSteps }) else {
             throw ContinuousBatchSchedulerError.unsupported("continuous_batching_invalid_logits_shape")
         }
         storeDecodeSession(session)
         for (index, input) in supportedInputs.enumerated() {
             try self.setRowState(rowStates[index], for: input.requestID, binding: input.binding)
         }
-        return zip(supportedInputs, sampled).map { input, token in
+        return zip(supportedInputs, sampledByRow).map { input, tokens in
             ContinuousBatchDecodeOutcome.output(ContinuousBatchDecodeOutput(
                 requestID: input.requestID,
-                token: token
+                tokens: tokens
             ))
         }
     }
