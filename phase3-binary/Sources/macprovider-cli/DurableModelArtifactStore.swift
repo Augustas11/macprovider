@@ -101,15 +101,25 @@ struct DurableModelArtifactStore {
             } catch {
                 existing = nil
             }
-            if existing != sha256 {
-                try fileManager.removeItem(at: destination)
-                try copyRegularTree(from: staging, to: destination)
+            if existing == sha256 {
+                return destination
             }
-        } else {
-            try copyRegularTree(from: staging, to: destination)
+            // A stale or corrupt destination is kept in place until a verified
+            // replacement is ready; `copyRegularTree` swaps it atomically and
+            // restores it if the swap fails.
         }
-        let actual = try ModelArtifactVerifier.canonicalArtifactHash(directory: destination)
+        try copyRegularTree(from: staging, to: destination, expectedSHA256: sha256)
+        let actual: String
+        do {
+            actual = try ModelArtifactVerifier.canonicalArtifactHash(directory: destination)
+        } catch {
+            try? fileManager.removeItem(at: destination)
+            throw error
+        }
         guard actual == sha256 else {
+            // Bytes changed between the verified temp swap and this readback;
+            // never leave a mismatched tree published under the expected hash.
+            try? fileManager.removeItem(at: destination)
             throw AutotuneRecommendError.invalidArtifact(
                 "durable artifact hash mismatch expected=\(sha256) actual=\(actual)"
             )
@@ -158,7 +168,8 @@ struct DurableModelArtifactStore {
         }
     }
 
-    private func ensureRoot() throws {
+    /// Create the durable root as a private (0700) real directory; fails on symlink roots.
+    func ensureRoot() throws {
         try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
         var st = stat()
         guard lstat(root.path, &st) == 0, (st.st_mode & S_IFMT) == S_IFDIR else {
@@ -198,7 +209,12 @@ struct DurableModelArtifactStore {
         }
     }
 
-    private func copyRegularTree(from source: URL, to destination: URL) throws {
+    /// Copy `source` into a private `.tmp-` sibling, verify the copy hashes to
+    /// `expectedSHA256`, then swap it into `destination`. Any existing
+    /// destination survives until the verified copy is ready and is restored
+    /// if the swap fails, so a failed publication never removes prior bytes and
+    /// never leaves unverified bytes under the expected hash path.
+    private func copyRegularTree(from source: URL, to destination: URL, expectedSHA256: String) throws {
         let destPath = destination.standardizedFileURL.path
         try validateNoSymlinkAncestors(of: destination.deletingLastPathComponent(), requireComplete: false)
         let rootPath = root.standardizedFileURL.path
@@ -242,11 +258,42 @@ struct DurableModelArtifactStore {
                 try fileManager.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
                 try fileManager.copyItem(at: url, to: target)
             }
-            try? fileManager.removeItem(at: destination)
-            try fileManager.moveItem(at: staging, to: destination)
+            let copied = try ModelArtifactVerifier.canonicalArtifactHash(directory: staging)
+            guard copied == expectedSHA256 else {
+                throw AutotuneRecommendError.invalidArtifact(
+                    "durable copy hash mismatch expected=\(expectedSHA256) actual=\(copied)"
+                )
+            }
+            try replaceDestination(destination, with: staging)
         } catch {
             try? fileManager.removeItem(at: staging)
             throw error
+        }
+    }
+
+    /// Atomically swap a verified temp tree into `destination`, parking any
+    /// existing destination in a `.tmp-` backup that is restored on failure and
+    /// removed only after the swap succeeds.
+    private func replaceDestination(_ destination: URL, with verified: URL) throws {
+        var backup: URL?
+        var st = stat()
+        if lstat(destination.path, &st) == 0 {
+            let parked = destination.deletingLastPathComponent()
+                .appendingPathComponent(".tmp-replaced-\(UUID().uuidString)", isDirectory: true)
+            try fileManager.moveItem(at: destination, to: parked)
+            backup = parked
+        }
+        do {
+            try fileManager.moveItem(at: verified, to: destination)
+        } catch {
+            if let backup {
+                try? fileManager.removeItem(at: destination)
+                try? fileManager.moveItem(at: backup, to: destination)
+            }
+            throw error
+        }
+        if let backup {
+            try? fileManager.removeItem(at: backup)
         }
     }
 

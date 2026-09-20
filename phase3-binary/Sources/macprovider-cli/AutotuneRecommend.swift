@@ -4032,7 +4032,7 @@ struct CachedModelArtifactResolver {
         )
     }
 
-    private func validateNoSymlinkCachePath(of url: URL, requireComplete: Bool) throws {
+    func validateNoSymlinkCachePath(of url: URL, requireComplete: Bool) throws {
         let root = hubRoot.standardizedFileURL
         let target = url.standardizedFileURL
         guard target.path == root.path || target.path.hasPrefix(root.path + "/") else {
