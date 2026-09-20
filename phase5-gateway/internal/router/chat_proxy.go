@@ -3144,7 +3144,11 @@ func prefixConversationTag(messages []json.RawMessage, tools json.RawMessage) (s
 
 func normalizeAutoPrefixTools(tools json.RawMessage) json.RawMessage {
 	trimmed := bytes.TrimSpace(tools)
-	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) || bytes.Equal(trimmed, []byte("[]")) {
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return nil
+	}
+	var arr []json.RawMessage
+	if err := json.Unmarshal(trimmed, &arr); err != nil || len(arr) == 0 {
 		return nil
 	}
 	return trimmed

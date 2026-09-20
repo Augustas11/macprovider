@@ -4431,6 +4431,24 @@ func TestPrefixConversationTagHelpers(t *testing.T) {
 		}
 	})
 
+	t.Run("whitespace_empty_tools_keep_first_user_hash", func(t *testing.T) {
+		msgsA := []json.RawMessage{json.RawMessage(`{"role":"user","content":"A"}`)}
+		msgsB := []json.RawMessage{json.RawMessage(`{"role":"user","content":"B"}`)}
+		nilTagA, okNil := prefixConversationTag(msgsA, nil)
+		wsTagA, okWS := prefixConversationTag(msgsA, json.RawMessage("[ ]"))
+		nlTagA, okNL := prefixConversationTag(msgsA, json.RawMessage("[\n]"))
+		if !okNil || !okWS || !okNL {
+			t.Fatal("user-only with empty tools should succeed")
+		}
+		if nilTagA != wsTagA || nilTagA != nlTagA {
+			t.Fatalf("empty tools must keep first-user hash: nil=%q ws=%q nl=%q", nilTagA, wsTagA, nlTagA)
+		}
+		nilTagB, _ := prefixConversationTag(msgsB, json.RawMessage("[ ]"))
+		if nilTagA == nilTagB {
+			t.Fatalf("whitespace-empty tools must not collapse distinct user-only questions: %q", nilTagA)
+		}
+	})
+
 	t.Run("skips_malformed_finds_user", func(t *testing.T) {
 		msgs := []json.RawMessage{
 			json.RawMessage(`not-json`),
