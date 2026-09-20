@@ -112,6 +112,40 @@ final class NativeToolCallStreamEmitterTests: XCTestCase {
         XCTAssertFalse(args.contains("{}{"), "concat must not glue an empty object onto the real payload")
     }
 
+    func testHybridJSONWithoutCloseEmitsOneObject() {
+        var emitter = NativeToolCallStreamEmitter(
+            modelID: "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
+            allowedFunctionNames: ["bash"]
+        )
+        let events = emitter.observe(
+            """
+            <tool_call>
+            {"arguments": {"command": "echo hello"}, "name": "bash"}
+            """
+        )
+        XCTAssertEqual(toolDeltaNames(events), ["bash"])
+        let args = argumentFragments(events).joined()
+        XCTAssertTrue(args.contains("echo hello"), args)
+        XCTAssertNotEqual(args, "{}")
+        XCTAssertFalse(args.contains("{}{"))
+    }
+
+    func testVisibleContentPrefixStreamsProseBeforeToolCall() {
+        let emitter = NativeToolCallStreamEmitter(
+            modelID: "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
+            allowedFunctionNames: ["bash"]
+        )
+        XCTAssertEqual(
+            emitter.visibleContentPrefix(of: "I'll run that next."),
+            "I'll run that next."
+        )
+        XCTAssertEqual(
+            emitter.visibleContentPrefix(of: "I'll run that next.\n<tool_call>"),
+            "I'll run that next.\n"
+        )
+        XCTAssertEqual(emitter.visibleContentPrefix(of: "Almost <tool_cal"), "Almost ")
+    }
+
     private func argumentFragments(_ events: [StreamChunk]) -> [String] {
         events.compactMap { chunk in
             if case let .toolCallDelta(delta) = chunk {

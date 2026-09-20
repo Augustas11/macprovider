@@ -4937,6 +4937,18 @@ actor ModelRuntime: ModelRuntimeServing {
                                     for event in toolStreamer.observe(candidate.text) {
                                         onChunk(event)
                                     }
+                                    if !toolStreamer.suppressesAssistantContent {
+                                        let safe = toolStreamer.visibleContentPrefix(of: candidate.text)
+                                        let delta = Self.delta(from: emittedText, to: safe)
+                                        if !delta.isEmpty {
+                                            if structuredAccumulator.append(delta) != nil {
+                                                return .stop
+                                            }
+                                            idleState.noteContent()
+                                            emittedText = safe
+                                            onChunk(.content(delta))
+                                        }
+                                    }
                                     if candidate.hitStop {
                                         stoppedByRequestStop = true
                                         return .stop
@@ -5007,12 +5019,18 @@ actor ModelRuntime: ModelRuntimeServing {
                             for event in toolStreamer.observe(final.text) {
                                 onChunk(event)
                             }
-                            if parsed.toolCalls.isEmpty, !parsed.content.isEmpty {
-                                if let error = structuredAccumulator.append(parsed.content) {
-                                    throw error
+                            if parsed.toolCalls.isEmpty,
+                               !parsed.content.isEmpty,
+                               !toolStreamer.suppressesAssistantContent
+                            {
+                                let contentDelta = Self.delta(from: emittedText, to: parsed.content)
+                                if !contentDelta.isEmpty {
+                                    if let error = structuredAccumulator.append(contentDelta) {
+                                        throw error
+                                    }
+                                    idleState.noteContent()
+                                    onChunk(.content(contentDelta))
                                 }
-                                idleState.noteContent()
-                                onChunk(.content(parsed.content))
                             }
                         } else if !finalDelta.isEmpty {
                             if let error = structuredAccumulator.append(finalDelta) {
@@ -6472,6 +6490,7 @@ struct NativeToolCallStreamEmitter {
     /// stream `<function=…>` tool-call deltas; other families fall through to JSON parsing (which
     /// yields nothing for XML), so no non-Qwen family can stream a function-XML delta.
     private let allowsFunctionXML: Bool
+    private var sawToolDelimiter = false
     private var opened = false
     private var closed = false
     private var emittedArguments = ""
@@ -6492,11 +6511,27 @@ struct NativeToolCallStreamEmitter {
         }
     }
 
+    var suppressesAssistantContent: Bool { opened || sawToolDelimiter }
+
+    func visibleContentPrefix(of text: String) -> String {
+        if suppressesAssistantContent {
+            return ""
+        }
+        if let start = text.range(of: startDelimiter) {
+            return String(text[..<start.lowerBound])
+        }
+        if allowsFunctionXML, let start = text.range(of: "<function=") {
+            return String(text[..<start.lowerBound])
+        }
+        return Self.stripIncompleteOpenDelimiter(from: text, delimiter: startDelimiter, extra: allowsFunctionXML ? "<function=" : nil)
+    }
+
     mutating func observe(_ text: String) -> [StreamChunk] {
         guard !closed else {
             return []
         }
         if let start = text.range(of: startDelimiter) {
+            sawToolDelimiter = true
             let afterStart = start.upperBound
             let bodyEnd = text.range(of: endDelimiter, range: afterStart..<text.endIndex)?.lowerBound ?? text.endIndex
             let body = String(text[afterStart..<bodyEnd])
@@ -6507,9 +6542,13 @@ struct NativeToolCallStreamEmitter {
                 }
                 return observeNemotronXML(body: body, isClosed: isClosed)
             }
+            if !isClosed, ToolCallParser.firstCompleteJSONObject(in: body) != nil {
+                isClosed = true
+            }
             return observeJSONToolCall(body: body, isClosed: isClosed)
         }
         if allowsFunctionXML, text.contains("<function=") {
+            sawToolDelimiter = true
             let isClosed = text.contains("</function>") || text.contains(endDelimiter)
             return observeNemotronXML(body: text, isClosed: isClosed)
         }
@@ -6517,10 +6556,21 @@ struct NativeToolCallStreamEmitter {
     }
 
     private mutating func observeJSONToolCall(body: String, isClosed: Bool) -> [StreamChunk] {
-        guard let name = stringField("name", in: body),
-              let arguments = argumentPrefix(in: body)
-        else {
-            return []
+        let name: String
+        let arguments: String
+        if let object = ToolCallParser.firstCompleteJSONObject(in: body),
+           let parsed = ToolCallParser.jsonToolCallNameAndArguments(in: object, argumentKey: argumentKey)
+        {
+            name = parsed.name
+            arguments = parsed.arguments
+        } else {
+            guard let parsedName = stringField("name", in: body),
+                  let prefix = ToolCallParser.jsonArgumentsPrefix(in: body, argumentKey: argumentKey)
+            else {
+                return []
+            }
+            name = parsedName
+            arguments = prefix
         }
         // Fail closed: never stream a tool-call delta for an undeclared function name.
         guard let allowed = allowedFunctionNames, allowed.contains(name) else {
@@ -6619,20 +6669,22 @@ struct NativeToolCallStreamEmitter {
         return nil
     }
 
-    private func argumentPrefix(in body: String) -> String? {
-        guard let keyRange = body.range(of: "\"\(argumentKey)\"") ?? body.range(of: #""arguments""#),
-              let colon = body.range(of: ":", range: keyRange.upperBound..<body.endIndex)
-        else {
-            return nil
+    private static func stripIncompleteOpenDelimiter(from text: String, delimiter: String, extra: String?) -> String {
+        var candidates = [delimiter]
+        if let extra {
+            candidates.append(extra)
         }
-        var index = colon.upperBound
-        while index < body.endIndex, body[index].isWhitespace {
-            index = body.index(after: index)
+        var longest = 0
+        for candidate in candidates {
+            let prefixes = (1..<candidate.count).map { String(candidate.prefix($0)) }
+            for prefix in prefixes where text.hasSuffix(prefix) {
+                longest = max(longest, prefix.count)
+            }
         }
-        guard index < body.endIndex else {
-            return nil
+        guard longest > 0 else {
+            return text
         }
-        return String(body[index..<body.endIndex]).trimmingCharacters(in: .whitespacesAndNewlines)
+        return String(text.dropLast(longest))
     }
 
     private static func delta(from old: String, to new: String) -> String {

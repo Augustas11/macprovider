@@ -14,14 +14,11 @@ import (
 // Fleet 1.8.123 emits "{}" on tool-call open, then a later non-prefix object.
 // Concatenating those is malformed (`{}{"command":...}`), and JSON.parse("{}")
 // is treated as a finished empty bash call. Concat-safe CLI already holds XML
-// arguments until </function>; this sanitizer still holds that one object
-// until finish_reason so Pi never sees a premature complete snapshot.
-//
-// Buyer-visible contract:
+// arguments until </function>. This sanitizer:
 //   - role / name-open flush immediately (opening arguments "{}" become "")
-//   - argument fragments are held until finish_reason
-//   - then one complete JSON object is emitted
-//   - [DONE] / EOF / WS complete do not flush held args by themselves
+//   - "{}" stays held until finish_reason so Pi never dispatches empty bash
+//   - concat-safe prefixes and a complete non-empty object flush as they arrive
+//   - [DONE] / EOF / WS complete do not flush held "{}" by themselves
 type concatSafeToolStream struct {
 	calls     map[int]*concatSafeCall
 	lastMeta  concatSafeMeta
@@ -35,6 +32,7 @@ type concatSafeCall struct {
 	typ     string
 	name    string
 	held    string
+	emitted string
 	opened  bool
 	flushed bool
 }
@@ -280,7 +278,16 @@ func (s *concatSafeToolStream) observeCall(call map[string]any) (forward map[str
 	if err := s.holdArguments(state, args); err != nil {
 		return nil, false, err
 	}
-	return nil, true, nil
+	delta := state.flushableArgumentDelta()
+	if delta == "" {
+		return nil, true, nil
+	}
+	return map[string]any{
+		"index": state.index,
+		"function": map[string]any{
+			"arguments": delta,
+		},
+	}, false, nil
 }
 
 func (s *concatSafeToolStream) holdArguments(state *concatSafeCall, fragment string) error {
@@ -298,6 +305,48 @@ func (s *concatSafeToolStream) holdArguments(state *concatSafeCall, fragment str
 	s.totalHeld = nextTotal
 	state.held = next
 	return nil
+}
+
+func (c *concatSafeCall) flushableArgumentDelta() string {
+	if c.held == "" || c.held == "{}" {
+		return ""
+	}
+	if !concatSafeArgumentSnapshot(c.held) {
+		return ""
+	}
+	var delta string
+	switch {
+	case c.emitted == "":
+		delta = c.held
+	case strings.HasPrefix(c.held, c.emitted):
+		delta = c.held[len(c.emitted):]
+	default:
+		return ""
+	}
+	if delta == "" {
+		return ""
+	}
+	c.emitted += delta
+	return delta
+}
+
+func concatSafeArgumentSnapshot(s string) bool {
+	if validToolCallArgumentsObject(s) {
+		return s != "{}"
+	}
+	return isTruncatedJSONObject(s)
+}
+
+func isTruncatedJSONObject(s string) bool {
+	trimmed := strings.TrimSpace(s)
+	if !strings.HasPrefix(trimmed, "{") {
+		return false
+	}
+	err := json.Unmarshal([]byte(s), new(json.RawMessage))
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "unexpected end of JSON input")
 }
 
 func (s *concatSafeToolStream) heldBytes() int {
@@ -326,13 +375,31 @@ func (s *concatSafeToolStream) flushHeld(newline []byte) ([]byte, error) {
 	toolCalls := make([]any, 0, len(indexes))
 	for _, index := range indexes {
 		call := s.calls[index]
+		remainder := call.held
+		if call.emitted != "" {
+			if call.emitted == call.held {
+				call.flushed = true
+				continue
+			}
+			if strings.HasPrefix(call.held, call.emitted) {
+				remainder = call.held[len(call.emitted):]
+			}
+		}
+		if remainder == "" {
+			call.flushed = true
+			continue
+		}
 		toolCalls = append(toolCalls, map[string]any{
 			"index": call.index,
 			"function": map[string]any{
-				"arguments": call.held,
+				"arguments": remainder,
 			},
 		})
+		call.emitted = call.held
 		call.flushed = true
+	}
+	if len(toolCalls) == 0 {
+		return nil, nil
 	}
 	event := map[string]any{
 		"choices": []any{map[string]any{

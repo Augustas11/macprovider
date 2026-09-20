@@ -29,7 +29,7 @@ enum ToolCallParser {
                 }
                 return parsed
             }
-            if let recovered = recoverBareFunctionXML(
+            if let recovered = recoverQwenUnclosedToolCall(
                 rawOutput,
                 format: format,
                 modelID: modelID,
@@ -40,11 +40,12 @@ enum ToolCallParser {
             return parsed
         } catch {
             fputs("warning: malformed tool-call output for \(modelID): \(error)\n", stderr)
-            // Qwen3-Coder often emits a complete inner <function=…></function> and then
-            // stops before </tool_call> (or opens a second <tool_call>). parseDelimited
-            // throws missingEndDelimiter and used to leak the XML as assistant text, so
-            // OpenAI clients never ran the tool. Recover the inner function-XML instead.
-            if let recovered = recoverBareFunctionXML(
+            // Qwen3-Coder often emits a complete inner call and then stops before
+            // </tool_call> (or opens a second <tool_call>). parseDelimited throws
+            // missingEndDelimiter and used to leak the markup as assistant text, so
+            // OpenAI clients never ran the tool. Recover JSON-in-<tool_call> first
+            // (SPEC-018 §3.1 order), then inner function-XML.
+            if let recovered = recoverQwenUnclosedToolCall(
                 rawOutput,
                 format: format,
                 modelID: modelID,
@@ -54,6 +55,83 @@ enum ToolCallParser {
             }
             return (nilIfBlank(rawOutput), [])
         }
+    }
+
+    private static func recoverQwenUnclosedToolCall(
+        _ rawOutput: String,
+        format: ToolCallFormat,
+        modelID: String,
+        allowedFunctionNames: Set<String>?
+    ) -> (cleanedContent: String?, toolCalls: [ToolCall])? {
+        if let recovered = recoverUnclosedJSONToolCall(
+            rawOutput,
+            format: format,
+            modelID: modelID,
+            allowedFunctionNames: allowedFunctionNames
+        ) {
+            return recovered
+        }
+        return recoverBareFunctionXML(
+            rawOutput,
+            format: format,
+            modelID: modelID,
+            allowedFunctionNames: allowedFunctionNames
+        )
+    }
+
+    /// Qwen3-Coder hybrid grammar: `<tool_call>` + a complete JSON object, often
+    /// without `</tool_call>`. Same missing-end recovery as function-XML.
+    private static func recoverUnclosedJSONToolCall(
+        _ rawOutput: String,
+        format: ToolCallFormat,
+        modelID: String,
+        allowedFunctionNames: Set<String>?
+    ) -> (cleanedContent: String?, toolCalls: [ToolCall])? {
+        guard format == .qwen25, rawOutput.contains(format.startDelimiter) else {
+            return nil
+        }
+        var searchStart = rawOutput.startIndex
+        var cleaned = ""
+        var calls: [ToolCall] = []
+        var responseArgumentBytes = 0
+
+        while let startRange = rawOutput.range(of: format.startDelimiter, range: searchStart..<rawOutput.endIndex) {
+            cleaned += rawOutput[searchStart..<startRange.lowerBound]
+            let bodyStart = startRange.upperBound
+            let endRange = rawOutput.range(of: format.endDelimiter, range: bodyStart..<rawOutput.endIndex)
+            let bodyLimit = endRange?.lowerBound ?? rawOutput.endIndex
+            let body = String(rawOutput[bodyStart..<bodyLimit])
+            guard let json = firstCompleteJSONObject(in: body),
+                  let call = try? parseJSONCall(json, argumentKey: format.argumentKey)
+            else {
+                return nil
+            }
+            if let allowedFunctionNames, !allowedFunctionNames.contains(call.functionName) {
+                fputs("warning: tool-call output contains undeclared function for \(modelID)\n", stderr)
+                return (nilIfBlank(rawOutput), [])
+            }
+            let argumentBytes = call.arguments.utf8.count
+            guard argumentBytes <= SPEC018_ARGUMENTS_PER_CALL_BYTE_CAP,
+                  responseArgumentBytes + argumentBytes <= SPEC018_ARGUMENTS_PER_RESPONSE_BYTE_CAP
+            else {
+                return nil
+            }
+            responseArgumentBytes += argumentBytes
+            calls.append(call)
+            if let jsonRange = body.range(of: json) {
+                cleaned += body[jsonRange.upperBound...]
+            }
+            if let endRange {
+                searchStart = endRange.upperBound
+            } else {
+                searchStart = rawOutput.endIndex
+            }
+        }
+
+        guard !calls.isEmpty else {
+            return nil
+        }
+        return (stripToolCallWrappers(nilIfBlank(cleaned)), calls)
     }
 
     private static func recoverBareFunctionXML(
@@ -216,6 +294,112 @@ enum ToolCallParser {
             return nil
         }
         return name
+    }
+
+    static func firstCompleteJSONObject(in text: String) -> String? {
+        var index = text.startIndex
+        while index < text.endIndex, text[index].isWhitespace {
+            index = text.index(after: index)
+        }
+        guard index < text.endIndex, text[index] == "{" else {
+            return nil
+        }
+        return scanJSONValue(in: text, from: index, allowIncomplete: false)
+    }
+
+    static func jsonToolCallNameAndArguments(
+        in jsonObject: String,
+        argumentKey: String
+    ) -> (name: String, arguments: String)? {
+        guard let call = try? parseJSONCall(jsonObject, argumentKey: argumentKey) else {
+            return nil
+        }
+        return (call.functionName, call.arguments)
+    }
+
+    static func jsonArgumentsPrefix(in body: String, argumentKey: String) -> String? {
+        let keys = argumentKey == "arguments" ? ["arguments"] : [argumentKey, "arguments"]
+        for key in keys {
+            guard let keyRange = body.range(of: "\"\(key)\""),
+                  let colon = body.range(of: ":", range: keyRange.upperBound..<body.endIndex)
+            else {
+                continue
+            }
+            var index = colon.upperBound
+            while index < body.endIndex, body[index].isWhitespace {
+                index = body.index(after: index)
+            }
+            guard index < body.endIndex else {
+                return nil
+            }
+            if let complete = scanJSONValue(in: body, from: index, allowIncomplete: false) {
+                return complete
+            }
+            return scanJSONValue(in: body, from: index, allowIncomplete: true)
+        }
+        return nil
+    }
+
+    private static func scanJSONValue(in text: String, from start: String.Index, allowIncomplete: Bool) -> String? {
+        guard start < text.endIndex else {
+            return nil
+        }
+        var index = start
+        var depth = 0
+        var inString = false
+        var escaped = false
+        var started = false
+        while index < text.endIndex {
+            let ch = text[index]
+            if inString {
+                if escaped {
+                    escaped = false
+                } else if ch == "\\" {
+                    escaped = true
+                } else if ch == "\"" {
+                    inString = false
+                    if depth == 0 {
+                        index = text.index(after: index)
+                        return String(text[start..<index])
+                    }
+                }
+                index = text.index(after: index)
+                continue
+            }
+            switch ch {
+            case "\"":
+                inString = true
+                started = true
+            case "{", "[":
+                depth += 1
+                started = true
+            case "}", "]":
+                if depth == 0 {
+                    return allowIncomplete ? String(text[start..<index]) : nil
+                }
+                depth -= 1
+                if depth == 0 {
+                    index = text.index(after: index)
+                    return String(text[start..<index])
+                }
+            default:
+                if !started, ch.isWhitespace {
+                    break
+                }
+                started = true
+                if depth == 0, !"0123456789-tfn".contains(ch) {
+                    return nil
+                }
+            }
+            index = text.index(after: index)
+        }
+        if allowIncomplete, started, depth > 0 || inString {
+            return String(text[start..<index])
+        }
+        if allowIncomplete, started, depth == 0, !inString {
+            return String(text[start..<index]).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return nil
     }
 
     static func nemotronArgumentsJSON(in raw: String, includeIncomplete: Bool) -> String? {

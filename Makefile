@@ -6,7 +6,7 @@
 # targets below to preserve parallel jobs and failure isolation.
 
 .PHONY: test test-coordinator test-coordinator-integration test-gateway test-integration test-dist \
-        test-byom-e2e test-byom-discovery-journey \
+        test-byom-e2e test-byom-discovery-journey test-openai-wire \
         vet vet-coordinator vet-gateway \
         lint-coordinator \
         build-linux check check-exceptions fmt verify-autotune-catalog
@@ -20,6 +20,9 @@ test: test-coordinator test-gateway test-integration test-dist
 # BYOM-affecting provider CLI/app release. See test/e2e/byom/README.md.
 test-byom-e2e:
 	test/e2e/byom/run-cli-onboarding-e2e.py
+
+test-openai-wire:
+	bash scripts/test-openai-wire-compat.sh
 
 # Hermetic JOURNEY-PROVIDER-BYOM-DISCOVERY gate (#1453 slice 1). Runs the
 # ten-step discovery-journey driver, then capture. While SPEC-046-R001..R008
@@ -71,6 +74,7 @@ test-integration:
 # that an env:NAME-indirected secret is deferred to runtime rather than
 # false-failing the gate (the 2026-06-17 regression that forced SKIP_C2_CHECK=1).
 test-dist:
+	bash scripts/test-openai-wire-compat.sh
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_upstream_watch
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_byom_contract_lock
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_byom_journey_evidence
