@@ -124,6 +124,36 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         XCTAssertEqual(decodeCalls, 1)
     }
 
+    func testPrefillBackendFailureFailsClosedWithReasonCodedTelemetry() async throws {
+        let backend = ScriptedBackend(
+            scripts: [:],
+            prefillError: ContinuousBatchSchedulerError.unsupported("continuous_batching_invalid_cache_layout")
+        )
+        let scheduler = try await makeScheduler(maxActiveRows: 1, backend: backend)
+
+        let result = try await scheduler.submit(.init(
+            id: "prefill-fail",
+            conversationKey: "",
+            promptTokens: [1, 2, 3, 4],
+            maxOutputTokens: 1,
+            temperature: 0.0,
+            topP: 1.0
+        ))
+
+        XCTAssertEqual(result.terminalStatus, .requestFailed)
+        XCTAssertEqual(result.errorCode, "continuous_batching_prefill_failed")
+        let metrics = await scheduler.metrics()
+        XCTAssertTrue(metrics.diagnostics.contains(.prefillFailed))
+        let decodeCalls = await backend.decodeCallCount()
+        XCTAssertEqual(decodeCalls, 0)
+        XCTAssertEqual(
+            ContinuousBatchingPolicy.prefillFailureTelemetryLine(
+                ContinuousBatchSchedulerError.unsupported("continuous_batching_invalid_cache_layout")
+            ),
+            "event=batching_prefill_failed action=fail_closed reason=continuous_batching_invalid_cache_layout\n"
+        )
+    }
+
     func testTerminalRetainFailureReleasesFreshHandleWithoutFailClosing() async throws {
         let bridge = PagedKVRuntimeContiguousCacheBridge()
         let allocator = try PagedKVBlockAllocator(
@@ -3119,6 +3149,7 @@ private actor ScriptedBackend: ContinuousBatchSchedulerBackend {
     private let prefillGate: AsyncGate?
     private let decodeGate: AsyncGate?
     private let failDecodeCall: Int?
+    private let prefillError: (any Error)?
     private let rowFailures: Set<String>
     private let terminalCommitBridge: PagedKVRuntimeContiguousCacheBridge?
     private let terminalCommitCaches: [PagedKVCache]
@@ -3143,6 +3174,7 @@ private actor ScriptedBackend: ContinuousBatchSchedulerBackend {
         prefillGate: AsyncGate? = nil,
         decodeGate: AsyncGate? = nil,
         failDecodeCall: Int? = nil,
+        prefillError: (any Error)? = nil,
         rowFailures: Set<String> = [],
         terminalCommitBridge: PagedKVRuntimeContiguousCacheBridge? = nil,
         terminalCommitCaches: [PagedKVCache] = []
@@ -3151,6 +3183,7 @@ private actor ScriptedBackend: ContinuousBatchSchedulerBackend {
         self.prefillGate = prefillGate
         self.decodeGate = decodeGate
         self.failDecodeCall = failDecodeCall
+        self.prefillError = prefillError
         self.rowFailures = rowFailures
         self.terminalCommitBridge = terminalCommitBridge
         self.terminalCommitCaches = terminalCommitCaches
@@ -3168,6 +3201,9 @@ private actor ScriptedBackend: ContinuousBatchSchedulerBackend {
         eventLog.append(contentsOf: rows.map { "prefill:\($0.requestID):\($0.promptTokens.count)" })
         if let prefillGate {
             await prefillGate.wait()
+        }
+        if let prefillError {
+            throw prefillError
         }
         return rows.map { ContinuousBatchPrefillOutput(requestID: $0.requestID) }
     }

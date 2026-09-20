@@ -327,4 +327,55 @@ enum ContinuousBatchingPolicy {
         guard capability.shouldUseSerialPath, let reason = capability.unsupportedReason else { return nil }
         return "event=batching_unsupported action=serial_routed reason=\(reason.rawValue)\n"
     }
+
+    /// Serve-path scheduler prefill currently fail-closes as a generic
+    /// `continuous_batching_prefill_failed` API code. Log the inner throw so an
+    /// operator canary can tell cache-layout / dtype / cancellation apart from
+    /// an opaque 503. Never include the error's localized description: MLX
+    /// dumps can carry prompt tokens.
+    static func logPrefillFailed(_ error: Error) {
+        FileHandle.standardError.write(Data(prefillFailureTelemetryLine(error).utf8))
+    }
+
+    static func prefillFailureTelemetryLine(_ error: Error) -> String {
+        "event=batching_prefill_failed action=fail_closed reason=\(prefillFailureReason(error))\n"
+    }
+
+    static func prefillFailureReason(_ error: Error) -> String {
+        sanitizeTelemetryReason(prefillFailureRawReason(error))
+    }
+
+    private static func prefillFailureRawReason(_ error: Error) -> String {
+        switch error {
+        case ContinuousBatchSchedulerError.unsupported(let code),
+             ContinuousBatchSchedulerError.requestFailed(let code):
+            return code
+        case PagedKVContiguousCacheBridgeError.noRecordedBlocks:
+            return "paged_kv_no_recorded_blocks"
+        case PagedKVContiguousCacheBridgeError.unsupportedDType:
+            return "paged_kv_unsupported_dtype"
+        case PagedKVContiguousCacheBridgeError.invalidLayerState:
+            return "paged_kv_invalid_layer_state"
+        case PagedKVContiguousCacheBridgeError.blockTableMismatch:
+            return "paged_kv_block_table_mismatch"
+        case PagedKVContiguousCacheBridgeError.trimShortfall:
+            return "paged_kv_trim_shortfall"
+        default:
+            return String(describing: type(of: error))
+        }
+    }
+
+    static func sanitizeTelemetryReason(_ raw: String) -> String {
+        let mapped = raw.lowercased().unicodeScalars.map { scalar -> Character in
+            if CharacterSet.alphanumerics.contains(scalar) || scalar == "_" || scalar == "-" || scalar == "." {
+                return Character(scalar)
+            }
+            return "_"
+        }
+        let collapsed = String(mapped)
+            .split(separator: "_", omittingEmptySubsequences: true)
+            .joined(separator: "_")
+        let bounded = String(collapsed.prefix(96))
+        return bounded.isEmpty ? "unrecognized_prefill_error" : bounded
+    }
 }
