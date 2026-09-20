@@ -91,6 +91,14 @@ func TestStreamingStructuredOutputCoordProviderTimeoutSSEPassesThrough(t *testin
 	assertCoordStructuredSSEPassesThrough(t, "provider_timeout")
 }
 
+func TestStreamingCoordinatorMalformedToolCallSSEPassesThrough(t *testing.T) {
+	assertCoordStructuredSSEPassesThrough(t, "malformed_tool_call")
+}
+
+func TestStreamingCoordinatorMalformedToolCallFinalJSONSSEPassesThrough(t *testing.T) {
+	assertCoordStructuredSSEPassesThrough(t, "malformed_tool_call_final_json")
+}
+
 func TestStreamingStructuredOutputGatewayTimeoutEmitsProviderTimeout(t *testing.T) {
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		<-r.Context().Done()

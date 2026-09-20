@@ -1,6 +1,7 @@
 package buyer
 
 import (
+	"bytes"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -92,6 +93,123 @@ func TestRecoverQwenFunctionXMLCompletionIgnoresNonQwenModel(t *testing.T) {
 	got, ok := recoverQwenFunctionXMLCompletion(raw, map[string]struct{}{"bash": {}})
 	if ok {
 		t.Fatalf("non-Qwen model must not parse function-XML: %s", got)
+	}
+}
+
+func TestRecoverQwenUnclosedJSONToolCallEchoHello(t *testing.T) {
+	raw := leakedProviderJSON(`<tool_call>
+{"arguments": {"command": "echo hello"}, "name": "bash"}
+`, "stop", nil)
+	got, ok := recoverQwenFunctionXMLCompletion(raw, map[string]struct{}{"bash": {}})
+	if !ok {
+		t.Fatal("expected recovery of hybrid JSON-in-<tool_call>")
+	}
+	var resp struct {
+		Choices []struct {
+			FinishReason string `json:"finish_reason"`
+			Message      struct {
+				Content   *string `json:"content"`
+				ToolCalls []struct {
+					Function struct {
+						Name      string `json:"name"`
+						Arguments string `json:"arguments"`
+					} `json:"function"`
+				} `json:"tool_calls"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(got, &resp); err != nil {
+		t.Fatalf("recovered json: %v", err)
+	}
+	if resp.Choices[0].FinishReason != "tool_calls" {
+		t.Fatalf("finish_reason=%q", resp.Choices[0].FinishReason)
+	}
+	call := resp.Choices[0].Message.ToolCalls[0]
+	if call.Function.Name != "bash" {
+		t.Fatalf("name=%q", call.Function.Name)
+	}
+	if !strings.Contains(call.Function.Arguments, "echo hello") {
+		t.Fatalf("arguments=%q", call.Function.Arguments)
+	}
+	if call.Function.Arguments == "{}" {
+		t.Fatal("recovered empty {} arguments")
+	}
+	if resp.Choices[0].Message.Content != nil {
+		t.Fatalf("content should be null, got %v", *resp.Choices[0].Message.Content)
+	}
+}
+
+func TestRecoverQwenUnclosedJSONToolCallUndeclaredFailsClosed(t *testing.T) {
+	raw := leakedProviderJSON(`<tool_call>{"name":"evil","arguments":{"command":"rm"}}`, "stop", nil)
+	got, ok := recoverQwenFunctionXMLCompletion(raw, map[string]struct{}{"bash": {}})
+	if ok {
+		t.Fatalf("undeclared JSON tool must not recover: %s", got)
+	}
+}
+
+func TestRecoverQwenUnclosedJSONToolCallRejectsOversizedArguments(t *testing.T) {
+	args, err := json.Marshal(map[string]string{"command": strings.Repeat("x", maxToolCallArgumentsBytes)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(args) <= maxToolCallArgumentsBytes {
+		t.Fatalf("fixture arguments=%d want > %d", len(args), maxToolCallArgumentsBytes)
+	}
+	raw := leakedProviderJSON("<tool_call>{\"name\":\"bash\",\"arguments\":"+string(args)+"}", "stop", nil)
+	got, ok := recoverQwenFunctionXMLCompletion(raw, map[string]struct{}{"bash": {}})
+	if ok {
+		t.Fatalf("oversized recovered arguments must fail closed: %s", got)
+	}
+}
+
+func TestRecoverQwenUnclosedJSONToolCallRejectsOverDepthArguments(t *testing.T) {
+	nested := `{"x":0}`
+	for i := 0; i < maxToolCallArgumentsDepth+1; i++ {
+		nested = `{"n":` + nested + `}`
+	}
+	raw := leakedProviderJSON("<tool_call>{\"name\":\"bash\",\"arguments\":"+nested+"}", "stop", nil)
+	got, ok := recoverQwenFunctionXMLCompletion(raw, map[string]struct{}{"bash": {}})
+	if ok {
+		t.Fatalf("over-depth recovered arguments must fail closed: %s", got)
+	}
+}
+
+func TestStripQwenLeakedToolMarkupFollowUpContent(t *testing.T) {
+	raw := leakedProviderJSON("The output of the command `echo hello` is: **hello**. <tool_call>", "stop", nil)
+	got, ok := stripQwenLeakedToolMarkupCompletion(raw)
+	if !ok {
+		t.Fatal("expected leaked <tool_call> to be stripped")
+	}
+	var resp struct {
+		Choices []struct {
+			Message struct {
+				Content *string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(got, &resp); err != nil {
+		t.Fatalf("json: %v", err)
+	}
+	if resp.Choices[0].Message.Content == nil {
+		t.Fatal("prose before leaked markup must remain")
+	}
+	if strings.Contains(*resp.Choices[0].Message.Content, "<tool_call>") {
+		t.Fatalf("markup leaked: %q", *resp.Choices[0].Message.Content)
+	}
+	if !strings.Contains(*resp.Choices[0].Message.Content, "hello") {
+		t.Fatalf("stripped content=%q", *resp.Choices[0].Message.Content)
+	}
+}
+
+func TestSanitizeQwenLeakedToolMarkupSSEContentDelta(t *testing.T) {
+	state := &forwardState{declaredFunctionNames: map[string]struct{}{"bash": {}}}
+	in := []byte(`data: {"choices":[{"delta":{"content":"The command printed hello. <tool_call>"}}]}` + "\n\n")
+	out := sanitizeQwenLeakedToolMarkupBlock(in, state)
+	if bytes.Contains(out, []byte("<tool_call>")) {
+		t.Fatalf("markup leaked: %s", out)
+	}
+	if !bytes.Contains(out, []byte("hello")) {
+		t.Fatalf("prose dropped: %s", out)
 	}
 }
 
