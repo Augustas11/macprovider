@@ -270,7 +270,7 @@ awk '
   in_main && /write_install_manifest / && NR > watchdog { manifest=NR }
   in_main && /start_manual_service / { start=NR }
   in_main && /if ! wait_for_local_model / { self_test=NR }
-  in_main && /if ! wait_for_coordinator / { coordinator=NR }
+  in_main && /wait_for_coordinator "\$provider_id" "\$coordinator_base"/ { coordinator=NR }
   in_main && /commit_install_transaction/ && NR > coordinator { commit=NR }
   END {
     exit !(begin < plist && plist < watchdog && watchdog < manifest &&
