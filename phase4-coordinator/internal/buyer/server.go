@@ -3828,20 +3828,6 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 			promptTok, cachedPromptTok, completionTok = mergeStreamUsagePointers(promptTok, cachedPromptTok, completionTok, p, cached, c)
 			checked = string(sanitized)
 		}
-		if err := settlementTracker.observeBlock([]byte(checked)); err != nil {
-			relay.Cancel("malformed_settlement_stream")
-			if s.streamingDowngrade != nil {
-				s.streamingDowngrade.recordMalformed(streamingBuyer, provider.ProviderID, s.now())
-			}
-			commit()
-			markProviderDone()
-			setStreamFailureAttempt(http.StatusOK, "Provider emitted malformed settlement stream", "malformed_settlement_stream")
-			writeSSEError(w, "Provider emitted malformed settlement stream", "malformed_settlement_stream")
-			if flusher != nil {
-				flusher.Flush()
-			}
-			return true, wsForwardFailed
-		}
 		rewritten, err := toolFinal.rewriteAndObserve(checked)
 		if err != nil {
 			relay.Cancel("malformed_tool_call_stream")
@@ -3852,6 +3838,20 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 			markProviderDone()
 			setStreamFailureAttempt(http.StatusOK, "Provider emitted malformed tool-call stream", "malformed_tool_call")
 			writeSSEError(w, "Provider emitted malformed tool-call stream", "malformed_tool_call")
+			if flusher != nil {
+				flusher.Flush()
+			}
+			return true, wsForwardFailed
+		}
+		if err := settlementTracker.observeBlock([]byte(rewritten)); err != nil {
+			relay.Cancel("malformed_settlement_stream")
+			if s.streamingDowngrade != nil {
+				s.streamingDowngrade.recordMalformed(streamingBuyer, provider.ProviderID, s.now())
+			}
+			commit()
+			markProviderDone()
+			setStreamFailureAttempt(http.StatusOK, "Provider emitted malformed settlement stream", "malformed_settlement_stream")
+			writeSSEError(w, "Provider emitted malformed settlement stream", "malformed_settlement_stream")
 			if flusher != nil {
 				flusher.Flush()
 			}

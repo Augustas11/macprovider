@@ -3086,15 +3086,16 @@ func (s *Server) deriveConversationKey(accountID, tag string) string {
 }
 
 // prefixConversationTag derives the reserved auto.prefix.* tag from a chat
-// messages slice. The prefix is defined as messages from the start through
-// and including the first role==user message (case-insensitive). Malformed
-// message objects (those that cannot be unmarshalled to extract a role) are
-// skipped. Returns "", false when no user message is found.
+// messages slice. When a system/developer scaffold or non-empty tools array
+// is present, the hash is that scaffold plus normalized tools (SPEC-006-R014)
+// so unique user questions still share ConversationCache. Otherwise it is
+// messages through the first role==user message (SPEC-006-R012). Malformed
+// message objects are skipped. Returns "", false when no user message is found.
 //
-// The tag is: "auto.prefix." + hex(sha256(json.Marshal(prefixItems))[:16]).
-// Same first-user-message prefix across tool turns ⇒ identical tag ⇒ same
+// The tag is: "auto.prefix." + hex(sha256(canonical)[:16]). Same scaffold+tools
+// (or same first-user prefix when neither is present) ⇒ identical tag ⇒ same
 // conv: key after deriveConversationKey, enabling provider ConversationCache
-// hits without buyer X-MacProvider-Conversation or sticky routing. SPEC-006-R012.
+// hits without buyer X-MacProvider-Conversation or sticky routing.
 func prefixConversationTag(messages []json.RawMessage, tools json.RawMessage) (string, bool) {
 	var scaffold []json.RawMessage
 	var prefixThroughUser []json.RawMessage
@@ -3160,9 +3161,10 @@ func normalizeAutoPrefixTools(tools json.RawMessage) json.RawMessage {
 //     valid AND coordinator sticky metadata agrees; invalid tag → invalidTag=true
 //     (caller MUST 400, do NOT fall through to auto-prefix).
 //     isAutoPrefix=false; caller sets X-MacProvider-Internal-Conv.
-//  2. Auto-prefix (SPEC-006-R012): for authenticated non-demo requests, derive
-//     a prefix-cache key from messages through the first user turn so
-//     provider ConversationCache can populate across tool turns. Does NOT
+//  2. Auto-prefix (SPEC-006-R012 / R014): for authenticated non-demo
+//     requests, derive a prefix-cache key from the system+tools scaffold
+//     when present, else messages through the first user turn, so provider
+//     ConversationCache can populate across unique questions. Does NOT
 //     enable SPEC-004 sticky affinity; coordinator applySticky stays gated on
 //     routing.sticky_enabled. isAutoPrefix=true; caller sets
 //     X-MacProvider-Internal-Conv-Cache (coordinator reads for cache context,
