@@ -1579,6 +1579,14 @@ actor KVDiskCacheStore {
         emit(.diskWriteSkipped, detail: .writeBudget, indexHashPrefix: identityPrefix(rawKey))
     }
 
+    /// Pre-copy skip when the geometry estimate exceeds the FR-KVP9 promotion
+    /// ceiling (`staging_max_bytes`). Same detail the store persist path uses
+    /// (`exceeds_promotion_ceiling`) so a too-big snapshot is never deep-copied
+    /// only to be discarded later.
+    func notePromotionCeilingSkipped(rawKey: String) {
+        emit(.diskWriteSkipped, detail: .exceedsPromotionCeiling, indexHashPrefix: identityPrefix(rawKey))
+    }
+
     /// MEDIUM-A/LOW/INFO (SPEC-037): emit `disk_write_skipped(detail=unsupported_cache_class)`
     /// for a tier-eligible commit whose live cache is not the v1-allowlisted
     /// `KVCacheSimple`. Carries the actual runtime cache class in `cache_class` so an

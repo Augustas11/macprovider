@@ -351,9 +351,14 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
             Task { [store] in await store.noteWriteBudgetSkipped(rawKey: conversationKey) }
             return nil
         }
-        // Promotion ceiling (stagingMaxBytes, 256 MiB) is a READ bound. Writes are
-        // capped by writeStagingMaxBytes / maxEntryBytes. Applying the promotion
-        // ceiling here silently dropped KVS-01a persists.
+        // FR-KVP9 / write-side budget: an entry that could never be promoted MUST
+        // NOT be written. Skip BEFORE the deep copy (SPEC-037 §3). The silent
+        // KVS-01a drops were oversize prompts, not this ceiling on the 1600-token class.
+        guard estimatedDecoded <= stagingMaxBytes else {
+            FileHandle.standardError.write(Data("event=kv_disk_cache action=capture_skipped reason=exceeds_promotion_ceiling decoded=\(estimatedDecoded) cap=\(stagingMaxBytes)\n".utf8))
+            Task { [store] in await store.notePromotionCeilingSkipped(rawKey: conversationKey) }
+            return nil
+        }
         let writeFootprint = estimatedDecoded + activeSealFootprint(decoded: estimatedDecoded)
         guard writeFootprint <= writeStagingMaxBytes else {
             FileHandle.standardError.write(Data("event=kv_disk_cache action=capture_skipped reason=write_staging decoded=\(estimatedDecoded) footprint=\(writeFootprint) cap=\(writeStagingMaxBytes)\n".utf8))
