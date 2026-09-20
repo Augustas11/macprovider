@@ -45,15 +45,15 @@ binary the Mac runs.
 
 ## Next CLI — net changes vs 1.8.123
 
-All in-scope CLI rows are **merged** except the MoE activation row below.
-Last built candidates `v1.8.163`, `v1.8.164`, `v1.8.167`, and `v1.8.168`
-are old or off-train — do not promote them. Studio serving canary is
-**`v1.8.171`** @ `12de7aea9e3ecf07df229682fc6defd225e4085f` (includes #1612,
-#1626, #1634, #1635, and #1640), live as `live.malibu.provider` on Mac
-Studio. **#1648 merged after that cut** (`b9d050d8`); 171 also does **not**
-include production `moePromotionEvidenceAvailable`. Do not promote the
-fleet. Buyer CB stays off; do not raise slots; do not canary 171. Next CLI
-cut after the MoE activation PR includes #1648 and the MoE flag.
+All in-scope CLI rows are **merged**. Last built candidates `v1.8.163`,
+`v1.8.164`, `v1.8.167`, and `v1.8.168` are old or off-train — do not promote
+them. Studio serving canary is **`v1.8.171`** @ `12de7aea9e3ecf07df229682fc6defd225e4085f`
+(includes #1612, #1626, #1634, #1635, and #1640), live as
+`live.malibu.provider` on Mac Studio. **#1648 and #1650 merged after that
+cut**; 171 does **not** include login-keychain KV DEKs or production
+`moePromotionEvidenceAvailable`. Do not promote the fleet. Buyer CB stays
+off; do not raise slots; do not canary 171. Next CLI cut includes #1648 and
+#1650.
 
 
 | Net change in CLI / Malibu / installer | Status | PR |
@@ -96,7 +96,7 @@ cut after the MoE activation PR includes #1648 and the MoE flag.
 | SPEC-038 scheduler uses compiled lockstep decode windows (buyer CB still off) | merged | #1635 |
 | FR-CB15 leftover harness (MSB-03/05, usage, isolation, drain, replay) + MoE promotion review (flag stays false) | merged | #1640 |
 | Login keychain for KV disk DEKs (naked CLI can persist KVS-01a) | merged | #1648 |
-| SPEC-038 AC-23 MoE promotion evidence available on production scheduler (buyer CB still off) | in progress | |
+| SPEC-038 AC-23 MoE promotion evidence available on production scheduler (buyer CB still off) | merged | #1650 |
 
 #1453 closes when a candidate that includes the **merged** rows is promoted to
 the fleet. #1569 is a later CLI. Spec promotion #1583 is not a CLI change.
@@ -140,7 +140,7 @@ confirm bytes are unchanged).
 | Off-train E2E candidate | `v1.8.167` @ `7f833a2f63ddee6b2e146c821341099d89aec169` ([run 35417249468](https://github.com/Augustas11/macprovider/actions/runs/35417249468)) — signed hold-branch CLI used for the 2026-09-19 Pearl Track B run |
 | Older | `v1.8.163` @ `8c0c51d2`; `v1.8.164` BYOM @ `cdbb0257`; CLI artifact `v1.8.166` @ `00ce3625` (not the Pearl runtime tag) |
 | Status | **Do not promote.** `v1.8.171` is the live Studio serving canary for continuous-batching testing. It predates #1648 and the MoE activation flag. Fleet stays on 1.8.123. Do not canary CB and do not raise slots. |
-| Next candidate | After the MoE activation PR merges, cut off `main` so the package includes #1648 and `productionMoEPromotionEvidenceAvailable`. Keep `v1.8.171` on Studio until that swap. |
+| Next candidate | After #1650, cut off `main` so the package includes #1648 and `productionMoEPromotionEvidenceAvailable`. Keep `v1.8.171` on Studio until that swap. |
 | Why the next cut | Login-keychain KV disk DEKs (#1648) plus AC-23 MoE promotion evidence on the production scheduler. Buyer CB stays off until that packaged RC canaries. |
 
 ## E2E tracks (independent gates)
