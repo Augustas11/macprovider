@@ -1208,17 +1208,16 @@ actor ModelRuntime: ModelRuntimeServing {
         )
     }
 
-    /// SPEC-037 FR-KVP1 — cold-tier persistence depends on the serve cache being a
-    /// `KVCacheSimple` (the only v1-allowlisted serializable class, KVDiskCacheFormat
-    /// `allowlistedCacheClasses`). `LanguageModel.newCache` builds a `RotatingKVCache`
-    /// whenever `maxKVSize != nil` and a `KVCacheSimple` only when it is nil (mlx-swift-lm
-    /// `LanguageModel.newCache`). `makeServeGenerateParameters` always sets
-    /// `maxKVSize = maxContextTokens`, so without this the disk tier's `captureSnapshot`
-    /// cast (`layers as? [KVCacheSimple]`) fails and `commit(cold:)` silently no-ops.
-    /// For tier-eligible requests we drop `maxKVSize` (→ `KVCacheSimple`); every other
-    /// request keeps the rotating cache unchanged. This affects ONLY the explicitly
-    /// allocated `newCache`; the `maxKVSize` carried by the `parameters` passed to
-    /// `TokenIterator` is ignored once the cache is explicit.
+    /// SPEC-037 FR-KVP1 / SPEC-024-R001 — `LanguageModel.newCache` builds a
+    /// `RotatingKVCache` whenever `maxKVSize != nil` and a `KVCacheSimple` only when it
+    /// is nil. `makeServeGenerateParameters` always sets `maxKVSize = maxContextTokens`.
+    /// Drop that cap for (1) SPEC-037 disk-tier eligible requests, so `captureSnapshot`
+    /// can serialize `KVCacheSimple`, and (2) conversation-keyed serial requests, so
+    /// FR-CI2 trim can succeed. mlx-swift-lm's `RotatingKVCache` is trimmable only while
+    /// `offset < maxSize`; a keyed hit after the serve cap fills otherwise misses with
+    /// `cache_not_trimmable` and re-prefills. This affects ONLY the explicitly allocated
+    /// `newCache`; the `maxKVSize` on `parameters` passed to `TokenIterator` is ignored
+    /// once the cache is explicit. Keyless traffic keeps the rotating cap.
     nonisolated static func cacheParameters(_ base: GenerateParameters, forceSimpleKV: Bool) -> GenerateParameters {
         guard forceSimpleKV else { return base }
         var p = base
@@ -1226,19 +1225,30 @@ actor ModelRuntime: ModelRuntimeServing {
         return p
     }
 
-    /// SPEC-037 FR-KVP1 (MEDIUM-B) — the single serve cache-allocation used at BOTH
-    /// serve sites (non-streaming + streaming). Builds the fresh serve `newCache`,
-    /// forcing a `KVCacheSimple` for tier-eligible requests (via `cacheParameters`) so
-    /// `captureSnapshot`'s `as? [KVCacheSimple]` cast can serialize it, and keeping the
-    /// rotating cache for every other request. Extracted so a serve-site regression that
-    /// drops the eligibility wrapper (reverting to `newCache(parameters:)`) must change
-    /// THIS helper — pinned by `testEligibleServeNewCacheProducesKVCacheSimple` — rather
-    /// than passing green via an inlined change at a call site. The serve sites are
-    /// one-line delegations; behavior is identical to the previous inline allocation.
+    /// True when ConversationCache will attempt reuse (trimmed non-empty key).
+    nonisolated static func hasReusableConversationKey(_ conversationKey: String?) -> Bool {
+        guard let key = conversationKey?.trimmingCharacters(in: .whitespacesAndNewlines), !key.isEmpty else {
+            return false
+        }
+        return true
+    }
+
+    /// SPEC-024-R001 — keyed serial serve and SPEC-037 eligible persist both need
+    /// `KVCacheSimple` on full-attention models. Sliding-window models that still
+    /// return `RotatingKVCache` with `maxKVSize = nil` stay non-simple and miss.
+    nonisolated static func forceSimpleKVCache(eligible: Bool, conversationKey: String?) -> Bool {
+        eligible || hasReusableConversationKey(conversationKey)
+    }
+
+    /// The single serve cache-allocation used at BOTH serve sites (non-streaming +
+    /// streaming). `forceSimpleKV` drops `maxKVSize` via `cacheParameters`. Extracted so
+    /// a serve-site regression that reverts to `newCache(parameters:)` must change THIS
+    /// helper — pinned by `testEligibleServeNewCacheProducesKVCacheSimple` and
+    /// `testConversationKeyedServeCacheProducesTrimmableKVCacheSimple`.
     nonisolated static func serveCache(
-        model: any LanguageModel, baseParameters: GenerateParameters, eligible: Bool
+        model: any LanguageModel, baseParameters: GenerateParameters, forceSimpleKV: Bool
     ) -> [KVCache] {
-        model.newCache(parameters: cacheParameters(baseParameters, forceSimpleKV: eligible))
+        model.newCache(parameters: cacheParameters(baseParameters, forceSimpleKV: forceSimpleKV))
     }
 
     nonisolated static func pagedKVAttachDecision(
@@ -4283,14 +4293,16 @@ actor ModelRuntime: ModelRuntimeServing {
                                 kvCache = reusableCache.layers
                                 iteratorInput = LMInput(tokens: MLXArray(Array(promptTokenIds[lcp...])))
                             } else {
-                                // SPEC-037 FR-KVP1: a tier-eligible request must run on a
-                                // KVCacheSimple so captureSnapshot can serialize it; keep the
-                                // rotating cache for everything else. TokenIterator still gets
-                                // the original `parameters` (its maxKVSize is ignored once the
+                                // SPEC-037 FR-KVP1 / SPEC-024-R001: eligible persist and
+                                // keyed serial reuse allocate KVCacheSimple; keyless traffic
+                                // keeps the rotating cap. TokenIterator still gets the
+                                // original `parameters` (its maxKVSize is ignored once the
                                 // cache is passed explicitly).
                                 kvCache = Self.serveCache(
                                     model: generationContext.model, baseParameters: parameters,
-                                    eligible: coldContext?.eligible == true)
+                                    forceSimpleKV: Self.forceSimpleKVCache(
+                                        eligible: coldContext?.eligible == true,
+                                        conversationKey: request.conversationKey))
                                 iteratorInput = lmInput
                             }
 
@@ -4834,12 +4846,13 @@ actor ModelRuntime: ModelRuntimeServing {
                         kvCache = reusableCache.layers
                         iteratorInput = LMInput(tokens: MLXArray(Array(promptTokenIds[lcp...])))
                     } else {
-                        // SPEC-037 FR-KVP1: same tier-eligible → KVCacheSimple selection as
-                        // the non-streaming path (see cacheParameters). TokenIterator below
-                        // keeps the original `parameters`.
+                        // SPEC-037 FR-KVP1 / SPEC-024-R001: same KVCacheSimple selector as
+                        // the non-streaming path (eligible persist or keyed serial reuse).
                         kvCache = Self.serveCache(
                             model: generationContext.model, baseParameters: parameters,
-                            eligible: coldContext?.eligible == true)
+                            forceSimpleKV: Self.forceSimpleKVCache(
+                                eligible: coldContext?.eligible == true,
+                                conversationKey: request.conversationKey))
                         iteratorInput = lmInput
                     }
 

@@ -132,6 +132,54 @@ final class ConversationCacheTests: XCTestCase {
         await cache.abort(serialLease!)
     }
 
+    func testRotatingKVCacheStopsBeingTrimmableOnceFilled() {
+        let rotating = RotatingKVCache(maxSize: 8, keep: 0)
+        rotating.offset = 7
+        XCTAssertTrue(rotating.isTrimmable, "below the serve cap the rotating cache still trims")
+        rotating.offset = 8
+        XCTAssertFalse(rotating.isTrimmable, "at maxSize FR-CI2 would miss with cache_not_trimmable")
+        let simple = KVCacheSimple()
+        simple.offset = 8
+        XCTAssertTrue(simple.isTrimmable, "KVCacheSimple stays trimmable after the same offset")
+    }
+
+    func testRotatingWindowCacheMissesEvenWhenTemporarilyTrimmable() async {
+        let cache = ConversationCache(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
+        let tokens = int32Range(0..<64)
+        let seed = await cache.begin(conversationKey: "conv:windowed", incomingTokens: tokens, modelID: "model-a", kvBits: nil)
+        let rotating = RotatingKVCache(maxSize: 256, keep: 0)
+        rotating.offset = tokens.count
+        XCTAssertTrue(rotating.isTrimmable)
+        await cache.commit(seed!, cache: ConversationCacheLayers([rotating]), fullTokens: tokens)
+
+        let hit = await cache.begin(
+            conversationKey: "conv:windowed",
+            incomingTokens: tokens + int32Range(100..<112),
+            modelID: "model-a",
+            kvBits: nil
+        )
+        XCTAssertEqual(hit?.cachedPromptTokens, 0, "sliding-window RotatingKVCache must miss, not reuse a temporary trim")
+        await cache.abort(hit!)
+    }
+
+    func testKeyedSerialSimpleCacheHitSkipsPrefillTokens() async {
+        let cache = ConversationCache(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
+        let seedTokens = int32Range(0..<64)
+        let seed = await cache.begin(conversationKey: "conv:auto.prefix.hit", incomingTokens: seedTokens, modelID: "model-a", kvBits: nil)
+        let layer = KVCacheSimple()
+        layer.offset = seedTokens.count
+        await cache.commit(seed!, cache: ConversationCacheLayers([layer]), fullTokens: seedTokens)
+
+        let incoming = int32Range(0..<64) + int32Range(100..<112)
+        let hit = await cache.begin(conversationKey: "conv:auto.prefix.hit", incomingTokens: incoming, modelID: "model-a", kvBits: nil)
+        XCTAssertEqual(hit?.cachedPromptTokens, 64)
+        XCTAssertEqual(hit?.lcp, 64)
+        XCTAssertEqual(hit?.trimBy, 0)
+        XCTAssertEqual(layer.offset, 64)
+        XCTAssertTrue(layer.isTrimmable)
+        await cache.abort(hit!)
+    }
+
     func testTTLSweepDoesNotRemoveEntryCommittedDuringRetainedDiscard() async throws {
         let cache = ConversationCache(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 60))
         let allocator = try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 16)

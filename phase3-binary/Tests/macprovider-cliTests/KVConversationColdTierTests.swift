@@ -758,20 +758,84 @@ final class KVConversationColdTierTests: XCTestCase {
             maxTokens: 128, maxKVSize: 4096, kvBits: nil,
             temperature: 0.0, topP: 1.0, prefillStepSize: 512)
 
-        // Eligible branch: serveCache(eligible:true) drops maxKVSize via cacheParameters
+        // Eligible branch: serveCache(forceSimpleKV:true) drops maxKVSize via cacheParameters
         // → the production serve allocation builds [KVCacheSimple].
-        let eligibleCaches = ModelRuntime.serveCache(model: model, baseParameters: base, eligible: true)
+        let eligibleCaches = ModelRuntime.serveCache(model: model, baseParameters: base, forceSimpleKV: true)
         XCTAssertNotNil(eligibleCaches as? [KVCacheSimple],
             "eligible serveCache must build [KVCacheSimple] so captureSnapshot's cast succeeds")
         XCTAssertEqual(eligibleCaches.count, 3, "one cache per layer")
 
-        // Non-eligible branch keeps maxKVSize → RotatingKVCache (non-simple): the cast
+        // Non-eligible keyless branch keeps maxKVSize → RotatingKVCache (non-simple): the cast
         // captureSnapshot rejects, which is exactly why the eligible branch must differ.
-        let buyerCaches = ModelRuntime.serveCache(model: model, baseParameters: base, eligible: false)
+        let buyerCaches = ModelRuntime.serveCache(model: model, baseParameters: base, forceSimpleKV: false)
         XCTAssertNil(buyerCaches as? [KVCacheSimple],
             "non-eligible serveCache keeps maxKVSize → a rotating (non-simple) cache")
         XCTAssertTrue(buyerCaches.allSatisfy { $0 is RotatingKVCache },
             "non-eligible params must select RotatingKVCache")
+    }
+
+    /// SPEC-024-R001 — a conversation key (Pi auto-prefix / sticky) must select the
+    /// same trimmable KVCacheSimple as disk-tier eligible, even when the request is
+    /// not cold-tier eligible. Whitespace and missing keys keep the rotating cap.
+    func testConversationKeyedServeCacheProducesTrimmableKVCacheSimple() {
+        XCTAssertTrue(ModelRuntime.forceSimpleKVCache(eligible: false, conversationKey: "conv:auto.prefix.deadbeef"))
+        XCTAssertTrue(ModelRuntime.forceSimpleKVCache(eligible: true, conversationKey: nil))
+        XCTAssertFalse(ModelRuntime.forceSimpleKVCache(eligible: false, conversationKey: nil))
+        XCTAssertFalse(ModelRuntime.forceSimpleKVCache(eligible: false, conversationKey: "   "))
+        XCTAssertFalse(ModelRuntime.hasReusableConversationKey(nil))
+        XCTAssertFalse(ModelRuntime.hasReusableConversationKey(" \n\t "))
+        XCTAssertTrue(ModelRuntime.hasReusableConversationKey("conv:x"))
+
+        let model = FakeDimensionModel(layers: 2)
+        let base = GenerateParameters(
+            maxTokens: 128, maxKVSize: 4096, kvBits: nil,
+            temperature: 0.0, topP: 1.0, prefillStepSize: 512)
+        let keyed = ModelRuntime.serveCache(
+            model: model,
+            baseParameters: base,
+            forceSimpleKV: ModelRuntime.forceSimpleKVCache(
+                eligible: false,
+                conversationKey: "conv:auto.prefix.deadbeef"))
+        XCTAssertNotNil(keyed as? [KVCacheSimple])
+        XCTAssertTrue(keyed.allSatisfy(\.isTrimmable))
+
+        let keyless = ModelRuntime.serveCache(
+            model: model,
+            baseParameters: base,
+            forceSimpleKV: ModelRuntime.forceSimpleKVCache(eligible: false, conversationKey: nil))
+        XCTAssertTrue(keyless.allSatisfy { $0 is RotatingKVCache })
+    }
+
+    /// SPEC-024-R001 fail-safe: a genuine sliding-window model still returns
+    /// RotatingKVCache after maxKVSize is dropped. ConversationCache must miss.
+    func testConversationKeyedWindowedModelDoesNotReuseRotatingCache() async {
+        let model = FakeWindowedModel(layers: 2)
+        let base = GenerateParameters(
+            maxTokens: 128, maxKVSize: 4096, kvBits: nil,
+            temperature: 0.0, topP: 1.0, prefillStepSize: 512)
+        let keyed = ModelRuntime.serveCache(
+            model: model,
+            baseParameters: base,
+            forceSimpleKV: ModelRuntime.forceSimpleKVCache(
+                eligible: false,
+                conversationKey: "conv:windowed"))
+        XCTAssertTrue(keyed.allSatisfy { $0 is RotatingKVCache })
+
+        let cache = ConversationCache(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
+        let tokens = int32Range(0..<64)
+        for layer in keyed {
+            (layer as? RotatingKVCache)?.offset = tokens.count
+        }
+        let seed = await cache.begin(
+            conversationKey: "conv:windowed", incomingTokens: tokens, modelID: "model-a", kvBits: nil)
+        await cache.commit(seed!, cache: ConversationCacheLayers(keyed), fullTokens: tokens)
+        let second = await cache.begin(
+            conversationKey: "conv:windowed",
+            incomingTokens: tokens + int32Range(200..<208),
+            modelID: "model-a",
+            kvBits: nil)
+        XCTAssertEqual(second?.cachedPromptTokens, 0)
+        await cache.abort(second!)
     }
 
     /// The paged/continuous-batching attach probe must classify the cache the BATCHED

@@ -260,6 +260,13 @@ actor ConversationCache {
         }
         let trimBy = entry.canonicalPromptTokens.count - lcp
         if !retainedPagedKV {
+            // SPEC-024-R001: RotatingKVCache is trimmable only while offset < maxSize,
+            // and even then trim is windowed — not full-prefix reuse. Reject the class
+            // rather than treating a temporarily-trimmable rotating cache as a hit.
+            if entry.kvCache.layers.contains(where: { $0 is RotatingKVCache }) {
+                log("event=conv_cache action=miss key_hash=\(keyHash) reason=rotating_window_cache")
+                return await predicateMiss("rotating_window_cache")
+            }
             guard entry.kvCache.layers.allSatisfy(\.isTrimmable) else {
                 log("event=conv_cache action=miss key_hash=\(keyHash) reason=cache_not_trimmable")
                 return await predicateMiss("cache_not_trimmable")

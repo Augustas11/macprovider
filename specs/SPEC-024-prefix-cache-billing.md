@@ -1,8 +1,21 @@
 # SPEC-024 - Prefix-cache billing and provider-local cache isolation
 
-**Version:** 0.2.1 (2026-07-12, billing arithmetic superseded by SPEC-005 v0.6)
+**Version:** 0.2.2 (2026-09-20, conversation-keyed serial trimmable KV — SPEC-024-R001)
 **Status:** **Billing arithmetic (§4 ledger / §5 rate card / §6 formula) MOVED to SPEC-005 v0.6** (canonical). SPEC-024 **retains** the `cached_prompt_tokens` **wire field** (§3, a SPEC-002 addendum), the **buyer-visible** mirror field (§8, a SPEC-006 addendum), the fraud model (§7), and the provider-local cache-**isolation** baseline (§11–§16) — none of which SPEC-005 **re-owns** (SPEC-005 §5.3.1 does fold in the §14 coordinator cross-check *gates* as billing-eligibility rules, but SPEC-024 remains their canonical home).
 **Depends on:** SPEC-002 v1.5.2 (coordinator-provider wire), SPEC-004 v0.3.2 (sticky affinity; FR-SR-2 provider-visibility carve-out), SPEC-005 v0.6 (billing — the canonical owner of prefix-cache billing arithmetic, formula, ledger columns, and rate-card keys), SPEC-006 v0.9.8 (buyer API; §1.3 conversation-key derivation + survivability (b) carve-out), SPEC-008 v0.4.1 (Tier-2 trust; §2.2 invariant (b) carve-out permitting the provider-visible derived conversation_key), SPEC-018 v0.2.4 (tool calling)
+
+**Change log v0.2.2 (2026-09-20, issue #1633 — conversation-keyed serial trimmable KV):**
+- **SPEC-024-R001 / FR-CI2 allocation.** Conversation-keyed serial serve (streaming and
+  non-streaming) MUST allocate a trimmable cache class for full-attention models so a
+  ConversationCache hit can skip prefill. The shipped memory-capped `RotatingKVCache`
+  (`maxKVSize = maxContextTokens`) is trimmable only while `offset < maxSize`; once a keyed
+  conversation fills that cap, FR-CI2 misses with `cache_not_trimmable` and re-prefills.
+  Keyed serial serve MUST drop `maxKVSize` so `LanguageModel.newCache` returns `KVCacheSimple`
+  (the same selector SPEC-037 uses for disk-tier eligible requests and SPEC-039 uses for the
+  attach-class probe). Keyless requests keep the rotating cap. A model that still returns
+  `RotatingKVCache` with `maxKVSize = nil` (genuine sliding-window) MUST miss rather than
+  reuse, even while `offset < maxSize` makes `isTrimmable` temporarily true. Continuous
+  batching, `max_concurrency`, and `conversation_key_rollout_unavailable` are unchanged.
 
 **Change log v0.2.1 (2026-07-12, billing ownership handoff to SPEC-005 v0.6):**
 - **SPEC-024 §4 (ledger schema), §5 (rate card), and §6 (formula) — the billing ARITHMETIC — are
@@ -287,7 +300,12 @@ layer MUST be *trimmable* and each `trim` MUST remove exactly the requested toke
 the request is a **miss** (enforced at runtime in `ConversationCache.swift`; the current
 `ConversationCacheTests` cover the fully-**non-trimmable** rejection path, **not** a
 partial/incorrect trim-count case — see the §16 coverage note; a partial-trim regression test
-is a MUST-add). Because reused KV corresponds to *identical
+is a MUST-add). **(v0.2.2 — SPEC-024-R001):** conversation-keyed serial serve MUST drop the
+memory-capped `RotatingKVCache` (`maxKVSize = maxContextTokens`) and allocate `KVCacheSimple`
+for full-attention models so this trim guard can succeed after the serve cap would have
+filled. Keyless traffic keeps the rotating cap. Genuine sliding-window models that remain
+`RotatingKVCache` with `maxKVSize = nil` MUST miss even while `isTrimmable` is temporarily
+true (`offset < maxSize`). Because reused KV corresponds to *identical
 tokens*, reuse preserves **model semantics conditional on identical sampler/RNG state** — the
 per-position logits/KV are equivalent to a cold prefill. It does **not** guarantee
 bit-for-bit identical *sampled output*: the shipped default is stochastic sampling
@@ -570,6 +588,12 @@ Prefix-cache reuse MUST NOT be enabled on a path where the conversation key is b
   identical completion output whether or not prefix-cache reuse occurred; equivalently, per-position
   logits/KV are equal with and without reuse. Under stochastic sampling the AC MUST assert
   *distributional* equivalence, not byte equality (FR-CI2).
+- **AC-CI-7 (keyed serial trimmable allocation, SPEC-024-R001).** A conversation-keyed serial
+  request on a full-attention model MUST allocate `KVCacheSimple` (or another class that
+  remains trimmable after `offset >= maxContextTokens`). A keyless request MUST keep the
+  memory-capped `RotatingKVCache`. A genuine sliding-window model that stays
+  `RotatingKVCache` with `maxKVSize = nil` MUST miss even while `offset < maxSize` makes
+  `isTrimmable` temporarily true.
 
 **Coverage note (v0.2 — reconciled to the actual shipped test suite).** *What is tested:* the
 shipped provider tests (`ConversationCacheTests`) lock reuse *correctness* — LCP,
