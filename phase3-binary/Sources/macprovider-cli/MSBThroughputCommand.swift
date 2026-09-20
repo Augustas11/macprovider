@@ -31,8 +31,9 @@ import MacProviderCore
 ///     one `container.perform` for the whole decode window, tokens kept as
 ///     GPU arrays, optional `MLX.compile()`. This is the throughput ceiling
 ///     for shared-forward batching on the pinned mlx-swift-lm tag.
-///   * `paged` — `PagedKVSharedForwardBackend` (per-step actor hop + gather).
-///     Reproduces the 2026-09-20 evidence that that path cannot beat serial.
+///   * `paged` — `PagedKVSharedForwardBackend`. Uncompiled: per-step actor hop
+///     (the 2026-09-20 0.53× path). `--compile`: lockstep window inside one
+///     `container.perform` with `MLX.compile()` over batched contiguous KV.
 ///
 /// TPS semantics (decode-only, TTFT excluded): after prefill, one UNTIMED warm
 /// decode step produces the first token (the TTFT-boundary step), then the timed
@@ -69,7 +70,7 @@ struct MSBThroughputCommand: AsyncParsableCommand {
     @Flag(
         name: .customLong("compile"),
         inversion: .prefixedNo,
-        help: "Wrap contiguous decode in MLX.compile(). Ignored for --engine paged. Default on."
+        help: "Wrap decode in MLX.compile(). Contiguous engine and compiled paged lockstep window. Default on."
     )
     var compile: Bool = true
 
@@ -187,7 +188,7 @@ struct MSBThroughputCommand: AsyncParsableCommand {
         // Same-engine single-row baseline, then N-row aggregate. Contiguous
         // uses stock KVCacheSimple in one perform(); paged uses the gather
         // backend (per-step actor hop) that PR 1623 measured.
-        let compiledThisRun = engine == .contiguous && compile
+        let compiledThisRun = compile
         var engineSingleRowTPS: [Double] = []
         var aggregateRunTPS: [Double] = []
         var perRowRunTPS: [Double] = []
@@ -208,7 +209,10 @@ struct MSBThroughputCommand: AsyncParsableCommand {
                 )
             case .paged:
                 return try await runBatchedDecode(
-                    container: container, prompts: prompts, decodeSteps: decodeTokens
+                    container: container,
+                    prompts: prompts,
+                    decodeSteps: decodeTokens,
+                    compiled: compiledThisRun
                 )
             }
         }
@@ -347,7 +351,8 @@ struct MSBThroughputCommand: AsyncParsableCommand {
     private func runBatchedDecode(
         container: ModelContainer,
         prompts: [[Int]],
-        decodeSteps: Int
+        decodeSteps: Int,
+        compiled: Bool
     ) async throws -> BatchedRunResult {
         let layers = await container.perform { $0.model.newCache(parameters: nil).count }
         let backend = PagedKVSharedForwardBackend(
@@ -355,7 +360,8 @@ struct MSBThroughputCommand: AsyncParsableCommand {
             blockSizeTokens: blockSizeTokens,
             maxPhysicalBlocks: maxPhysicalBlocks,
             poolEpoch: 1,
-            layerCount: layers
+            layerCount: layers,
+            compiledDecode: compiled
         )
         let allocator = try PagedKVBlockAllocator(
             blockSizeTokens: blockSizeTokens,
@@ -398,11 +404,27 @@ struct MSBThroughputCommand: AsyncParsableCommand {
         // the first generated token (the TTFT boundary decode-bench excludes).
         try await decodeOneStep(backend: backend, allocator: allocator, rows: &rowsState)
 
-        let decodeStart = Date()
-        for _ in 0..<decodeSteps {
-            try await decodeOneStep(backend: backend, allocator: allocator, rows: &rowsState)
+        let decodeStart: Date
+        let decodeEnd: Date
+        if compiled {
+            // Compiled lockstep window: one container.perform for the timed
+            // tokens, matching the contiguous engine that scaled on Studio.
+            try await extendRows(allocator: allocator, rows: rowsState, by: decodeSteps)
+            decodeStart = Date()
+            try await decodeWindow(
+                backend: backend,
+                allocator: allocator,
+                rows: &rowsState,
+                steps: decodeSteps
+            )
+            decodeEnd = Date()
+        } else {
+            decodeStart = Date()
+            for _ in 0..<decodeSteps {
+                try await decodeOneStep(backend: backend, allocator: allocator, rows: &rowsState)
+            }
+            decodeEnd = Date()
         }
-        let decodeEnd = Date()
 
         // Timed tokens per row = the steps in the timed window (generated.count
         // minus the one untimed warm token). All rows share the lockstep window.
@@ -471,6 +493,72 @@ struct MSBThroughputCommand: AsyncParsableCommand {
                 throw ExitCode(1)
             }
             rowsState[index].generated.append(token)
+            rowsState[index].currentToken = token
+        }
+    }
+
+    private func extendRows(
+        allocator: PagedKVBlockAllocator,
+        rows rowsState: [DecodeRow],
+        by tokens: Int
+    ) async throws {
+        for row in rowsState {
+            _ = try await allocator.extend(row.handle, by: tokens)
+        }
+    }
+
+    private func decodeWindow(
+        backend: PagedKVSharedForwardBackend,
+        allocator: PagedKVBlockAllocator,
+        rows rowsState: inout [DecodeRow],
+        steps: Int
+    ) async throws {
+        var decodeInputs: [ContinuousBatchDecodeInput] = []
+        decodeInputs.reserveCapacity(rowsState.count)
+        for row in rowsState {
+            let committed = row.prompt.count - 1 + row.generated.count
+            let target = committed + steps
+            try await allocator.beginDecodeStep(row.handle)
+            let binding = try await allocator.binding(for: row.handle)
+            decodeInputs.append(ContinuousBatchDecodeInput(
+                requestID: row.id,
+                currentToken: row.currentToken,
+                generatedTokens: row.generated,
+                promptTokens: row.prompt,
+                samplerSeed: 0,
+                temperature: 0,
+                topP: 1,
+                presencePenalty: 0,
+                frequencyPenalty: 0,
+                binding: binding,
+                blockTable: binding.currentTable,
+                committedKVTokenCount: committed,
+                targetKVTokenCount: target,
+                samplerStep: row.generated.count
+            ))
+        }
+        let outcomes = try await backend.decodeLockstepWindow(rows: decodeInputs, steps: steps)
+        for row in rowsState { try await allocator.endDecodeStep(row.handle) }
+
+        var tokenByID: [String: Int] = [:]
+        for outcome in outcomes {
+            switch outcome {
+            case .output(let output): tokenByID[output.requestID] = output.token
+            case .rowFailure(let requestID):
+                FileHandle.standardError.write(Data(
+                    "msb-throughput: row \(requestID) failed in compiled lockstep window\n".utf8
+                ))
+                throw ExitCode(1)
+            }
+        }
+        for index in rowsState.indices {
+            guard let token = tokenByID[rowsState[index].id] else {
+                FileHandle.standardError.write(Data(
+                    "msb-throughput: row \(rowsState[index].id) missing compiled-window output\n".utf8
+                ))
+                throw ExitCode(1)
+            }
+            rowsState[index].generated.append(contentsOf: Array(repeating: token, count: steps))
             rowsState[index].currentToken = token
         }
     }
