@@ -1,7 +1,7 @@
 # SPEC-033 — Hardware-Evidence Verifier (`hardware-verifier.v2`)
 
-**Status:** v0.6.2-draft
-**Date:** 2026-07-29
+**Status:** v0.6.3-draft
+**Date:** 2026-09-20
 **Depends on:** SPEC-023 (autotune — produces the benchmark/recommendation inputs the evidence document carries). **Consumed by:** SPEC-032 (autotune hardware-evidence admission "hello-gate") reads this spec's verdict via an **exact-`hardware-verifier.v2`** lookup and cross-references it as "the item-10 hardware-verifier verdict spec". This spec owns the `hardware-verifier.v2` decision semantics and the job/profile lifecycle; SPEC-032 owns how a `verified` profile gates admission.
 
 **Producer / enqueue boundary (see §3.1):** the provider **binary** builds the evidence envelope (`phase3-binary/Sources/macprovider-cli/AutotuneHardwareEvidence.swift`) and submits it over an **authenticated HTTP `POST /v1/providers/hardware-evidence`** (`phase4-coordinator/internal/onboarding/hardware_evidence.go` `HandleHardwareEvidence`), which enqueues a `hardware_verification_jobs` row. SPEC-023 owns the *content* (benchmarks, recommended model); the HTTP envelope + enqueue + replay state machine are owned here.
@@ -268,21 +268,27 @@ authenticated bearer identity; the handler (`HandleHardwareEvidence`) binds the 
 - applies **two rate limiters**: an **IP** limiter (`10/min`, HTTP `429` `Retry-After: 60`) and a
   **per-provider** limiter (HTTP `429` `Retry-After: 600`). The per-provider limit is **broader
   than a fixed window**: a new *distinct* evidence submission is rejected while the provider has
-  **any** non-terminal (`pending`/`waiting_trust`) job **OR** any job submitted within the last 10
-  minutes (`hardware_evidence.go`), so a provider cannot flood the queue while one job is
-  outstanding;
+  **any** non-terminal (`pending`/`waiting_trust`) job for a different hardware identity **OR** any
+  job submitted within the last 10 minutes (`hardware_evidence.go`), so a provider cannot flood the
+  queue while one job is outstanding. A same-provider resubmission with the same
+  `hardware_identity_hash` as an existing non-terminal job is accepted before this limiter as an
+  install/update idempotency replay;
 - computes a **canonical** SHA-256 of the evidence (`canonicalEvidenceSHA`) → `evidence_sha256`;
 - in the **same transaction**, upserts a **`source='cli_hello'` profile row** *before* inserting
   the job (the upsert **omits `verified`**, so trigger A governs it: `FALSE` on an initial insert or
   a chip/memory change, but **`OLD.verified` preserved** on an unchanged existing tuple — so a
   re-submitting already-verified provider keeps `verified=TRUE`), then inserts a `pending` job
   (unique on `evidence_sha256`);
-- returns a **replay state machine** result (`hardwareEvidenceResponseStatus`), **fail-closed**: a
-  duplicate is accepted (2xx) **only** while `pending`, while `waiting_trust`, or when already
-  `verified` **with `decision_reason == hardware-verifier.v2:verified_trusted_hardware` exactly**.
-  Every other finalized/unknown/legacy state (`rejected`, `v1:verified`, …) returns HTTP `409`
-  `evidence_replay_not_accepted` — a rejected or legacy decision cannot be laundered through a 2xx
-  replay; new evidence must be resubmitted.
+- returns a **replay state machine** result (`hardwareEvidenceResponseStatus`), **fail-closed**:
+  exact evidence-document replay is accepted (2xx) **only** while `pending`, while
+  `waiting_trust`, or when already `verified` **with
+  `decision_reason == hardware-verifier.v2:verified_trusted_hardware` exactly**. A changed
+  evidence document may also receive 2xx `existing` only when it belongs to the same authenticated
+  provider and the same `hardware_identity_hash` as an existing non-terminal job; this is an
+  install/update retry replay, not a new verifier verdict. Every other finalized/unknown/legacy
+  state (`rejected`, `v1:verified`, …) returns HTTP `409` `evidence_replay_not_accepted` — a
+  rejected or legacy decision cannot be laundered through a 2xx replay; new evidence must be
+  resubmitted.
 
 The pre-job `cli_hello` profile upsert is why a later app-registration (§10.4 R1) finds an existing
 row to convert.
@@ -463,11 +469,12 @@ the batch tally.
 - `evidence_sha256` is `UNIQUE` and computed by a **canonical** hash (`canonicalEvidenceSHA`); the
   enqueue path keys on it, so the **same evidence document creates at most one queue row** — a
   replay collides and is routed through the fail-closed replay state machine (§3.1).
-- A provider-authenticated install/update resubmission is replay-safe only when it repeats the
-  **same canonical evidence document** (`evidence_sha256`) for the same provider. A changed
-  document with the same `hardware_identity_hash` is not an admission-success replay: it goes
-  through the normal admission cap, rate limiting, and trust flow. This prevents a provider from
-  relabeling changed evidence as an already-accepted hardware-root replay.
+- A provider-authenticated install/update resubmission is replay-safe when it repeats the **same
+  canonical evidence document** (`evidence_sha256`) for the same provider, or when a changed
+  evidence document carries the same `hardware_identity_hash` as an existing non-terminal
+  (`pending`/`waiting_trust`) job for that provider. The same-hardware path returns `existing`
+  without inserting a new job and without changing the verifier verdict; genuinely new/changed
+  hardware still goes through the normal admission cap, rate limiting, and trust flow.
 - **One queue row does NOT mean one evaluation.** A `waiting_trust` job is re-`Evaluate`d on every
   batch run until it reaches a terminal state; this is by design (§6). Idempotency is preserved by
   the terminal-safe write `WHERE` + trigger B: a job cannot double-promote or be reopened.
@@ -622,8 +629,9 @@ issues; closing them is code follow-up, not a spec change:
   profile (`last_reported_at` guard, application + trigger A).
 - **AC-HV-6 (replay = one row, one verdict).** Two submissions of the same document MUST NOT create
   two jobs (`evidence_sha256` UNIQUE); a terminal **verdict** is committed at most once; a
-  `waiting_trust` job MAY be evaluated on many runs. HTTP replay MUST be fail-closed: only
-  `pending`/`waiting_trust`/exact-v2-`verified` yield a 2xx (§3.1).
+  `waiting_trust` job MAY be evaluated on many runs. HTTP replay MUST be fail-closed: exact-document
+  `pending`/`waiting_trust`/exact-v2-`verified`, plus same-provider/same-hardware non-terminal
+  install/update replay, yield a 2xx (§3.1).
 - **AC-HV-7 (batch isolation).** Concurrent verifier instances MUST NOT double-process a job
   (`FOR UPDATE SKIP LOCKED` + terminal-safe write `WHERE` + trigger B).
 - **AC-HV-8 (Smoke fail-closed).** A run whose `Smoke` preflight fails MUST abort before touching
@@ -653,6 +661,13 @@ issues; closing them is code follow-up, not a spec change:
 ---
 
 ## Change log
+
+**v0.6.3-draft (2026-09-20) — same-hardware active-job replay for install/update retries.**
+- **§3.1 / §9 / AC-HV-6**: same-provider evidence resubmission with the same
+  `hardware_identity_hash` as an existing `pending`/`waiting_trust` job is accepted as HTTP
+  `existing` before the per-provider limiter. This preserves one queue row / one verifier verdict
+  while preventing a stuck `waiting_trust` job from permanently 429-blocking reinstall or update.
+  Exact-document terminal replay remains fail-closed.
 
 **v0.6.2-draft (2026-07-29) — A2 migration-019 roster reconciliation.**
 SPEC-033's source-of-truth roster now includes migration 019, which added the durable

@@ -234,6 +234,30 @@ SELECT id, status, decision_reason
 	return record, true, nil
 }
 
+func (s *PGStore) ExistingActiveHardwareVerificationJobForHardwareIdentity(ctx context.Context, providerID, hardwareIdentityHash, responseEvidenceSHA string) (HardwareEvidenceJobRecord, bool, error) {
+	if s == nil || s.db == nil {
+		return HardwareEvidenceJobRecord{}, false, errors.New("onboarding postgres store is nil")
+	}
+	var record HardwareEvidenceJobRecord
+	err := s.db.QueryRowContext(ctx, `
+SELECT id, status, decision_reason
+  FROM hardware_verification_jobs
+ WHERE provider_id = $1
+   AND status IN ('pending', 'waiting_trust')
+   AND evidence #>> '{hardware,hardware_identity_hash}' = $2
+ ORDER BY submitted_at DESC, id DESC
+ LIMIT 1`, providerID, hardwareIdentityHash).Scan(&record.JobID, &record.Status, &record.DecisionReason)
+	if errors.Is(err, sql.ErrNoRows) {
+		return HardwareEvidenceJobRecord{}, false, nil
+	}
+	if err != nil {
+		return HardwareEvidenceJobRecord{}, false, err
+	}
+	record.EvidenceSHA = responseEvidenceSHA
+	record.Replay = true
+	return record, true, nil
+}
+
 func (h *Handler) HandleHardwareEvidence(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", http.MethodPost)
@@ -305,6 +329,24 @@ func (h *Handler) HandleHardwareEvidence(w http.ResponseWriter, r *http.Request)
 		}
 		if found {
 			status, accepted := hardwareEvidenceResponseStatus(existing, true, evidenceSHA)
+			if !accepted {
+				writeJSONError(w, http.StatusConflict, "evidence_replay_not_accepted", "existing hardware evidence is not in an accepted replay state")
+				return
+			}
+			writeHardwareEvidenceResponse(w, status, providerID, existing)
+			return
+		}
+	}
+	if identityStore, ok := h.StatsDB.(interface {
+		ExistingActiveHardwareVerificationJobForHardwareIdentity(context.Context, string, string, string) (HardwareEvidenceJobRecord, bool, error)
+	}); ok {
+		existing, found, lookupErr := identityStore.ExistingActiveHardwareVerificationJobForHardwareIdentity(ctx, providerID, req.Hardware.HardwareIdentityHash, evidenceSHA)
+		if lookupErr != nil {
+			writeJSONError(w, http.StatusServiceUnavailable, "unavailable", "hardware evidence queue unavailable")
+			return
+		}
+		if found {
+			status, accepted := hardwareEvidenceResponseStatus(existing, false, evidenceSHA)
 			if !accepted {
 				writeJSONError(w, http.StatusConflict, "evidence_replay_not_accepted", "existing hardware evidence is not in an accepted replay state")
 				return

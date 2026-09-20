@@ -1663,12 +1663,47 @@ actor ModelRuntime: ModelRuntimeServing {
         return "unknown"
     }
 
+    private nonisolated static func pagedKVModelFamily(
+        modelID: String?,
+        configJSONData: Data?
+    ) -> String {
+        guard let configJSONData else {
+            return Self.pagedKVModelFamily(modelID)
+        }
+        if let family = Self.pagedKVConfigModelFamily(configJSONData) {
+            return family
+        }
+        return "unknown"
+    }
+
+    private nonisolated static func pagedKVConfigModelFamily(_ data: Data) -> String? {
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        var labels: [String] = []
+        if let modelType = object["model_type"] as? String { labels.append(modelType) }
+        if let architectures = object["architectures"] as? [String] { labels.append(contentsOf: architectures) }
+
+        let normalizedLabels = labels.map { label in
+            label
+                .lowercased()
+                .filter { $0.isLetter || $0.isNumber }
+        }
+        if normalizedLabels.contains(where: { $0.contains("qwen") }) { return "qwen" }
+        if normalizedLabels.contains(where: { $0.contains("llama") }) { return "llama" }
+        if normalizedLabels.contains(where: { $0.contains("gptoss") }) { return "gpt_oss" }
+        if normalizedLabels.contains(where: { $0.contains("gemma4") }) { return "gemma4" }
+        if normalizedLabels.contains(where: { $0.contains("glm4moe") }) { return "glm4_moe" }
+        if normalizedLabels.contains(where: { $0.contains("nemotronh") }) { return "nemotron_h" }
+        return nil
+    }
+
     nonisolated static func pagedKVModelCapabilities(
         modelID: String?,
         configJSONData: Data?
     ) -> PagedKVRuntimeModelCapabilities {
         PagedKVRuntimeModelCapabilities(
-            modelFamily: Self.pagedKVModelFamily(modelID),
+            modelFamily: Self.pagedKVModelFamily(modelID: modelID, configJSONData: configJSONData),
             requiresMoEDispatch: (configJSONData.flatMap(Self.pagedKVConfigRequiresMoE) ?? false)
                 || Self.pagedKVModelIDLooksLikeExpertModel(modelID)
         )

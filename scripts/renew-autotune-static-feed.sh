@@ -312,7 +312,7 @@ CURRENT_TARGET="$(SSH "readlink '$REMOTE_AUTOTUNE_DIR/current'")" || fatal "cann
 CURRENT_TARGET="${CURRENT_TARGET#./}"
 [ -n "$CURRENT_TARGET" ] || fatal "empty current target"
 ORIG_PREVIOUS_TARGET="$(SSH "cat '$REMOTE_AUTOTUNE_DIR/.previous-target' 2>/dev/null || true")"
-ORIG_PREVIOUS_TARGET="${ORIG_PREVIOUS_TARGET//$'\n'/}"
+ORIG_PREVIOUS_TARGET="${ORIG_PREVIOUS_TARGET%"${ORIG_PREVIOUS_TARGET##*[![:space:]]}"}"
 
 # MED-1 (regression fix): CURRENT_TARGET and ORIG_PREVIOUS_TARGET are read from
 # the remote host and later passed through `ssh ... bash -s -- ...`, where the
@@ -335,8 +335,25 @@ validate_release_ref() {
     ""|*[!A-Za-z0-9._-]*) fatal "unsafe $label (single safe segment required): $value" ;;
   esac
 }
+validate_previous_target_window() {
+  local value="$1"
+  [ -z "$value" ] && return 0
+  local n=0 line
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+    [ -z "$line" ] && continue
+    n=$((n + 1))
+    if [ "$n" -gt 3 ]; then
+      fatal "previous-target has more than 3 releases"
+    fi
+    validate_release_ref "$line" "previous-target line" "no_empty"
+  done <<EOF
+$value
+EOF
+}
 validate_release_ref "$CURRENT_TARGET" "current target" "no_empty"
-validate_release_ref "$ORIG_PREVIOUS_TARGET" "previous-target" "empty_ok"
+validate_previous_target_window "$ORIG_PREVIOUS_TARGET"
 log "current live release: $CURRENT_TARGET (prior previous-target: ${ORIG_PREVIOUS_TARGET:-<none>})"
 
 # Refuse to publish a release id that already exists (idempotency / no clobber).
@@ -379,11 +396,14 @@ log "content continuity confirmed (dates-only delta)"
 # itself takes the same Pearl deploy locks; if they are held, skip mutation.
 rollback() {
   log "ROLLBACK: restoring current -> $CURRENT_TARGET, .previous-target -> ${ORIG_PREVIOUS_TARGET:-<none>}, re-HUPing"
-  PREV_ARG="${ORIG_PREVIOUS_TARGET:-__EMPTY__}"
+  PREV_ARG="__EMPTY__"
+  if [ -n "$ORIG_PREVIOUS_TARGET" ]; then
+    PREV_ARG="$(printf '%s' "$ORIG_PREVIOUS_TARGET" | base64 | tr -d '\n')"
+  fi
   SSH bash -s -- "$REMOTE_AUTOTUNE_DIR" "$CURRENT_TARGET" "$PREV_ARG" "$COORDINATOR_UNIT" "$LOCK_HELPER" "releases/$RELEASE_DIRNAME" <<'RB' || true
 set -euo pipefail
-root="$1"; cur="$2"; prev="$3"; unit="$4"; helper="$5"; expected="$6"
-[ "$prev" = "__EMPTY__" ] && prev=""
+root="$1"; cur="$2"; prev_b64="$3"; unit="$4"; helper="$5"; expected="$6"
+if [ "$prev_b64" = "__EMPTY__" ]; then prev=""; else prev="$(printf '%s' "$prev_b64" | base64 -d)"; fi
 python3 "$helper" validate || { echo "rollback: lock validation failed; not mutating" >&2; exit 1; }
 exec 8</run/lock/macprovider-pearl-updater.lock || { echo "rollback: cannot open updater lock; not mutating" >&2; exit 1; }
 flock -n 8 || { echo "rollback: Pearl updater lock held; not mutating" >&2; exit 1; }
@@ -495,9 +515,30 @@ mv "$incoming" "$final"
 # Persistent autotune metadata starts here. Set mutated before the first write so
 # a failure after .previous-target (and before current swap) still rollbacks.
 mutated=1
-# Record the outgoing release (verbatim; already prefixed) so the coordinator admits
-# it as `previous` and already-joined nodes on it stay routable across the swap.
-printf '%s\n' "$prev" > "$root/.previous-target"
+# Prepend the outgoing current onto the retained window (max 3 unique
+# releases/). A single-hop overwrite kicks every serve process still
+# advertising the hop before last. See docs/reports/2026-09-19-catalog-one-hop-admission-outage.md
+python3 - "$root/.previous-target" "$prev" <<'PY'
+import pathlib, sys
+path = pathlib.Path(sys.argv[1])
+outgoing = sys.argv[2].strip()
+if not outgoing.startswith("releases/") or "/" in outgoing[len("releases/"):]:
+    raise SystemExit(f"invalid outgoing previous {outgoing!r}")
+old = []
+if path.is_file() and not path.is_symlink():
+    old = [ln.strip() for ln in path.read_text().splitlines() if ln.strip() and not ln.strip().startswith("#")]
+seen = set()
+out = []
+for item in [outgoing, *old]:
+    if item in seen:
+        continue
+    seen.add(item)
+    out.append(item)
+    if len(out) == 3:
+        break
+path.write_text("".join(x + "\n" for x in out))
+print("previous-target window " + ",".join(out))
+PY
 # Atomic symlink swap: create the new link beside `current`, then rename over.
 ln -sfn "releases/$final" "$root/.current.next"
 mv -Tf "$root/.current.next" "$root/current"

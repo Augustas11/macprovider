@@ -31,6 +31,14 @@ const (
 	demandRankSource        = "openrouter_completion_token_rank_operator_curated"
 	demandSupplySource      = "macprovider_buyer_supply_deficit_v1"
 
+	// MaxCompatiblePreviousReleases is the deployer-recorded admission window
+	// in `<autotune-root>/.previous-target`. Hello catalog_release_id is frozen
+	// at serve boot (live fetch or the CLI's baked catalog). A one-line pointer
+	// is the wrong primitive: publishing current consumes that hop and kicks
+	// every process still advertising the hop before last. Three explicit
+	// signed releases is the cap; it is not a directory walk.
+	MaxCompatiblePreviousReleases = 3
+
 	staticV4SignerKeyID                         = "streamvc-autotune-static-v4"
 	transitionMissingProvenanceCandidateRelease = "published-2026-07-10-catalog-recovery-v1"
 	transitionMissingProvenanceCandidateSHA256  = "776182f6230eff098345b188322dba0c7fce47a6da46447432991ffdc37eabda"
@@ -206,26 +214,68 @@ func LoadAutotuneFeeds(cfg config.AutotuneFeedsConfig) (AutotuneFeeds, error) {
 	}, nil
 }
 
-// PreviousAutotuneReleaseTarget resolves the deployer-recorded compatible
-// previous release (`<root>/.previous-target` = "releases/<id>") to that
-// release's directory; "" when none is recorded or it is permanently
-// rejected. Mirrors the coordinator's compatible-catalog resolution.
+// PreviousAutotuneReleaseTarget returns the first deployer-recorded compatible
+// previous release directory. Prefer PreviousAutotuneReleaseTargets: hello
+// admission loads the whole window (current + up to three previous).
 func PreviousAutotuneReleaseTarget(cfg config.AutotuneFeedsConfig) (dir string, err error) {
+	dirs, err := PreviousAutotuneReleaseTargets(cfg)
+	if err != nil || len(dirs) == 0 {
+		return "", err
+	}
+	return dirs[0], nil
+}
+
+// PreviousAutotuneReleaseTargets resolves `<root>/.previous-target`. Each
+// non-empty line is `releases/<id>` (same charset as the one-line form). At
+// most MaxCompatiblePreviousReleases lines; a fourth is fail-closed, not a
+// silent trim. Permanently rejected IDs are omitted. Duplicates are skipped.
+func PreviousAutotuneReleaseTargets(cfg config.AutotuneFeedsConfig) ([]string, error) {
 	if cfg.AutotuneCandidatesPath == "" {
-		return "", nil
+		return nil, nil
 	}
 	root := filepath.Dir(filepath.Dir(cfg.AutotuneCandidatesPath))
 	targetBytes, err := os.ReadFile(filepath.Join(root, ".previous-target"))
 	if err != nil {
 		if os.IsNotExist(err) {
-			return "", nil
+			return nil, nil
 		}
-		return "", fmt.Errorf("read previous-target: %w", err)
+		return nil, fmt.Errorf("read previous-target: %w", err)
 	}
-	target := strings.TrimSpace(string(targetBytes))
-	if target == "" {
-		return "", nil
+	var lines []string
+	for _, raw := range strings.Split(string(targetBytes), "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		lines = append(lines, line)
 	}
+	if len(lines) == 0 {
+		return nil, nil
+	}
+	if len(lines) > MaxCompatiblePreviousReleases {
+		return nil, fmt.Errorf("previous-target has %d releases; max %d", len(lines), MaxCompatiblePreviousReleases)
+	}
+	seen := make(map[string]struct{}, len(lines))
+	out := make([]string, 0, len(lines))
+	for _, target := range lines {
+		releaseID, err := parsePreviousTargetLine(target)
+		if err != nil {
+			return nil, err
+		}
+		if autotune.IsPermanentlyRejectedReleaseID(releaseID) {
+			continue
+		}
+		dir := filepath.Join(root, target)
+		if _, dup := seen[dir]; dup {
+			continue
+		}
+		seen[dir] = struct{}{}
+		out = append(out, dir)
+	}
+	return out, nil
+}
+
+func parsePreviousTargetLine(target string) (string, error) {
 	releaseID := strings.TrimPrefix(target, "releases/")
 	if releaseID == target || releaseID == "" || strings.Contains(releaseID, "/") {
 		return "", fmt.Errorf("invalid previous-target %q", target)
@@ -235,52 +285,61 @@ func PreviousAutotuneReleaseTarget(cfg config.AutotuneFeedsConfig) (dir string, 
 			return "", fmt.Errorf("invalid previous-target %q", target)
 		}
 	}
-	if autotune.IsPermanentlyRejectedReleaseID(releaseID) {
-		return "", nil
-	}
-	return filepath.Join(root, target), nil
+	return releaseID, nil
 }
 
-// LoadPreviousAutotuneFeeds loads the retained compatible previous release's
-// candidate feed and, when that release directory carries its artifact feed
-// (an artifact-bound release keeps `autotune-artifacts.json` + `.sig`), the
-// artifact feed bound to it — the input of that release's identity set
-// (SPEC-010-R004 v1.8). A retained release without an artifact feed loads
-// with an empty artifact half (primary-row path only).
+// LoadPreviousAutotuneFeeds loads every deployer-recorded compatible previous
+// release's candidate feed and, when that release directory carries its
+// artifact feed (an artifact-bound release keeps `autotune-artifacts.json` +
+// `.sig`), the artifact feed bound to it — the input of that release's
+// identity set (SPEC-010-R004 v1.8). A retained release without an artifact
+// feed loads with an empty artifact half (primary-row path only).
 func LoadPreviousAutotuneFeeds(cfg config.AutotuneFeedsConfig) ([]AutotuneFeeds, error) {
-	dir, err := PreviousAutotuneReleaseTarget(cfg)
-	if err != nil || dir == "" {
+	dirs, err := PreviousAutotuneReleaseTargets(cfg)
+	if err != nil || len(dirs) == 0 {
 		return nil, err
 	}
+	out := make([]AutotuneFeeds, 0, len(dirs))
+	for _, dir := range dirs {
+		feeds, err := loadPreviousAutotuneFeedsFromDir(cfg, dir)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, feeds)
+	}
+	return out, nil
+}
+
+func loadPreviousAutotuneFeedsFromDir(cfg config.AutotuneFeedsConfig, dir string) (AutotuneFeeds, error) {
 	previousCfg := cfg
 	previousCfg.DemandRankPath, previousCfg.DemandRankSigPath = "", ""
 	previousCfg.AutotuneCandidatesPath = filepath.Join(dir, "autotune-candidates.json")
 	previousCfg.AutotuneCandidatesSigPath = previousCfg.AutotuneCandidatesPath + ".sig"
 	feeds, err := LoadPreviousAutotuneCandidateFeed(previousCfg)
 	if err != nil {
-		return nil, fmt.Errorf("verify %s: %w", dir, err)
+		return AutotuneFeeds{}, fmt.Errorf("verify %s: %w", dir, err)
 	}
 	artifactsPath := filepath.Join(dir, "autotune-artifacts.json")
 	if _, statErr := os.Stat(artifactsPath); statErr == nil {
 		keyring, err := cfg.DecodePublicKeyring()
 		if err != nil {
-			return nil, err
+			return AutotuneFeeds{}, err
 		}
 		candidates := loadedAutotuneFeed{jsonBytes: feeds.AutotuneCandidatesJSON, sigBytes: feeds.AutotuneCandidatesSig, verification: feeds.AutotuneCandidatesVerification}
 		artifacts, err := loadAutotuneFeedPair(artifactsPath, artifactsPath+".sig", "catalog_artifacts", keyring, validateCatalogArtifactsFeed)
 		if err != nil {
-			return nil, fmt.Errorf("verify %s artifact feed: %w", dir, err)
+			return AutotuneFeeds{}, fmt.Errorf("verify %s artifact feed: %w", dir, err)
 		}
 		if artifacts.enabled() {
 			if err := bindCatalogArtifactsFeed(artifacts, candidates); err != nil {
-				return nil, fmt.Errorf("bind %s artifact feed: %w", dir, err)
+				return AutotuneFeeds{}, fmt.Errorf("bind %s artifact feed: %w", dir, err)
 			}
 			feeds.CatalogArtifactsJSON = artifacts.jsonBytes
 			feeds.CatalogArtifactsSig = artifacts.sigBytes
 			feeds.CatalogArtifactsVerification = artifacts.verification
 		}
 	}
-	return []AutotuneFeeds{feeds}, nil
+	return feeds, nil
 }
 
 // LoadPreviousAutotuneCandidateFeed verifies the deployer-recorded previous

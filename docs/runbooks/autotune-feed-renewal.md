@@ -13,8 +13,25 @@ is correct.
 **The fix is to re-date + re-sign the feed on a schedule.** Since #1268 the
 coordinator hot-reloads the feed on `SIGHUP` (`reloadCoordinatorConfig` swaps
 the WS admission catalog and the buyer-served `/v1/*` bytes atomically,
-fail-closed), so renewal is now **zero-disruption**: no coordinator restart,
-every provider WebSocket stays connected.
+fail-closed). A **dates-only restamp** is zero-disruption for already-connected
+sockets. A **content catalog cut** is not: hello `catalog_release_id` is frozen
+at `serve` start (live fetch or the CLI baked catalog). One `.previous-target`
+hop is the wrong primitive for that — it used up listed-v1 on 2026-09-19 and
+kicked Llama-3.2-3B boxes still advertising inband-v1 or baked gpt-oss-v1.
+See `docs/reports/2026-09-19-catalog-one-hop-admission-outage.md`.
+
+`.previous-target` is a window of **at most three** `releases/<id>` lines.
+Publish prepends the outgoing current and keeps the next two unique retained
+releases. A fourth line is fail-closed. Do not replace the file with a single
+hop.
+
+This three-release window is a deploy/rollback mitigation, not the durable
+compatibility primitive. The durable primitive is SPEC-023-R010 row-continuity:
+for every provider-facing content cut, unchanged selected rows must stay
+admissible by row identity plus `PolicyEquivalent` even when a running provider
+is still advertising an older live or baked catalog document. A content publish
+that would depend solely on `.previous-target` depth to keep unchanged rows in
+the pool is not ready for production.
 
 ## Security model — signing stays off the production host
 
@@ -107,6 +124,35 @@ dry-run):
      this run already swapped `current`**, and only while holding the same
      locks. A lock-held or pre-swap failure does not rollback (that would be
      the first mutation and can clobber an in-flight coordinator deploy).
+
+## Content catalog cuts
+
+Freshness restamps are dates-only and MUST continue to use the continuity guard
+above. A content catalog cut is different: it may add rows, reprice rows, change
+status, or adjust serving policy. Before a content cut reaches Pearl, run a
+catalog-admission compatibility report against the intended current release and
+the fleet's known live/baked provider catalog distribution. For every current
+buyer-serving model key the report must classify one of:
+
+- `row_continuity_ok`: row identity is unchanged and `PolicyEquivalent` to the
+  intended current row. These providers must survive without restart under
+  SPEC-023-R010 once the row-continuity implementation is active.
+- `intentional_policy_change`: row identity or admission-authoritative policy
+  changed. The release notes must name the operational effect and the expected
+  provider restart/update path.
+- `stale_or_untrusted`: the old document, signer, tombstone status, or artifact
+  evidence cannot be authenticated. This remains fail-closed.
+
+The report must also identify any fleet share that is relying on a CLI baked
+catalog fallback. Baked fallback is a provenance/refresh diagnostic, not a
+hostile-catalog verdict, when the selected row is still row-continuity-ok.
+
+Do not use a broad `releases/` directory scan as an admission substitute. If a
+row needs compatibility beyond the bounded `.previous-target` window, publish or
+serve explicit row-continuity evidence with the fields named in SPEC-023-R010.
+Until that implementation is live, a content publish that would evict
+buyer-serving unchanged rows outside the retained window must be delayed or
+paired with a controlled provider restart/upgrade plan.
 
 ## Weekly schedule
 

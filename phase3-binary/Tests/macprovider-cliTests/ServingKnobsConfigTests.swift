@@ -384,6 +384,43 @@ final class ServingKnobsConfigTests: XCTestCase {
         XCTAssertFalse(dense.requiresMoEDispatch)
     }
 
+    func testPagedKVModelCapabilitiesDeriveAdmittedGPTOSSFamilyFromConfig() {
+        let gptOSS = ModelRuntime.pagedKVModelCapabilities(
+            modelID: "mlx-community/gpt-oss-20b-MXFP4-Q8",
+            configJSONData: Data("""
+            {
+              "model_type": "gpt_oss",
+              "architectures": ["GptOssForCausalLM"],
+              "num_local_experts": 32,
+              "num_experts_per_tok": 4
+            }
+            """.utf8)
+        )
+        XCTAssertEqual(gptOSS.modelFamily, "gpt_oss")
+        XCTAssertTrue(gptOSS.requiresMoEDispatch)
+
+        let gemma4 = ModelRuntime.pagedKVModelCapabilities(
+            modelID: "mlx-community/gemma-4-26b-a4b-it-4bit",
+            configJSONData: Data(#"{"model_type":"gemma4","architectures":["Gemma4ForConditionalGeneration"]}"#.utf8)
+        )
+        XCTAssertEqual(gemma4.modelFamily, "gemma4")
+        XCTAssertFalse(PagedKVAttachGate.recognizedModelFamilies.contains(gemma4.modelFamily))
+
+        let invalidJSONDoesNotFallBackToModelID = ModelRuntime.pagedKVModelCapabilities(
+            modelID: "mlx-community/Qwen3-8B-4bit",
+            configJSONData: Data(#"{"model_type": Infinity}"#.utf8)
+        )
+        XCTAssertEqual(invalidJSONDoesNotFallBackToModelID.modelFamily, "unknown")
+        XCTAssertFalse(PagedKVAttachGate.recognizedModelFamilies.contains(invalidJSONDoesNotFallBackToModelID.modelFamily))
+
+        let unknownConfigDoesNotFallBackToModelID = ModelRuntime.pagedKVModelCapabilities(
+            modelID: "mlx-community/Llama-3.2-3B-Instruct-4bit",
+            configJSONData: Data(#"{"model_type":"surprise","architectures":["SurpriseForCausalLM"]}"#.utf8)
+        )
+        XCTAssertEqual(unknownConfigDoesNotFallBackToModelID.modelFamily, "unknown")
+        XCTAssertFalse(PagedKVAttachGate.recognizedModelFamilies.contains(unknownConfigDoesNotFallBackToModelID.modelFamily))
+    }
+
     func testPagedKVAttachedDecisionPassesPreflightWhenRuntimeBridgeOwnsRequestReservation() throws {
         let proof = PagedKVHardwareSizingProof(
             modelID: "mlx-community/Qwen-Test",

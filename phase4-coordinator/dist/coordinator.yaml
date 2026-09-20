@@ -321,6 +321,34 @@ rewards:
       prompt_credits_per_mtok: 425000        # $0.425/M
       prompt_cache_hit_credits_per_mtok: 106250 # $0.10625/M prefix-cache hit
       completion_credits_per_mtok: 850000    # $0.850/M (RESEARCH_227 dev-coding premium, dense 32B UX painful on M-base)
+    qwen3-30b-a3b-instruct-2507:                      # 2026-09-19 OpenRouter priced cut — class-30b-moe; 20% undercut vs $0.3/Mtok completion
+      prompt_credits_per_mtok: 72000        # $0.072/M
+      prompt_cache_hit_credits_per_mtok: 18000 # $0.018/M prefix-cache hit
+      completion_credits_per_mtok: 240000    # $0.24/M
+    qwen3.5-27b:                      # 2026-09-19 OpenRouter priced cut — class-32b; 20% undercut vs $2.16/Mtok completion
+      prompt_credits_per_mtok: 208000        # $0.208/M
+      prompt_cache_hit_credits_per_mtok: 52000 # $0.052/M prefix-cache hit
+      completion_credits_per_mtok: 1728000    # $1.728/M
+    qwen3.5-35b-a3b:                      # 2026-09-19 OpenRouter priced cut — class-30b-moe; 20% undercut vs $1.25/Mtok completion
+      prompt_credits_per_mtok: 130000        # $0.13/M
+      prompt_cache_hit_credits_per_mtok: 32500 # $0.0325/M prefix-cache hit
+      completion_credits_per_mtok: 1000000    # $1/M
+    qwen3.6-27b:                      # 2026-09-19 OpenRouter priced cut — class-32b; 20% undercut vs $2.7/Mtok completion
+      prompt_credits_per_mtok: 240000        # $0.24/M
+      prompt_cache_hit_credits_per_mtok: 60000 # $0.06/M prefix-cache hit
+      completion_credits_per_mtok: 2160000    # $2.16/M
+    qwen3.6-35b-a3b:                      # 2026-09-19 OpenRouter priced cut — class-30b-moe; 20% undercut vs $1/Mtok completion
+      prompt_credits_per_mtok: 148800        # $0.1488/M
+      prompt_cache_hit_credits_per_mtok: 37200 # $0.0372/M prefix-cache hit
+      completion_credits_per_mtok: 800000    # $0.8/M
+    qwen3.8-27b:                      # 2026-09-19 OpenRouter priced cut — class-32b; 20% undercut vs $2.5/Mtok completion
+      prompt_credits_per_mtok: 192000        # $0.192/M
+      prompt_cache_hit_credits_per_mtok: 48000 # $0.048/M prefix-cache hit
+      completion_credits_per_mtok: 2000000    # $2/M
+    z-ai/glm-4.5-air:                      # 2026-09-19 OpenRouter priced cut — class-120b-moe; 20% undercut vs $0.86/Mtok completion
+      prompt_credits_per_mtok: 112000        # $0.112/M
+      prompt_cache_hit_credits_per_mtok: 28000 # $0.028/M prefix-cache hit
+      completion_credits_per_mtok: 688000    # $0.688/M
 
 # SPEC-015 / SPEC-022 settlement policy.
 #

@@ -70,6 +70,24 @@ func TestRateFor_NormalizesNemotronAliases(t *testing.T) {
 	}
 }
 
+func TestRateFor_NormalizesGLMAliases(t *testing.T) {
+	rateGLM := RateCardEntry{PromptCreditsPerMtok: 112000, PromptCacheHitCreditsPerMtok: 28000, CompletionCreditsPerMtok: 688000}
+	card := map[string]RateCardEntry{
+		"z-ai/glm-4.5-air": rateGLM,
+		"default":          {PromptCreditsPerMtok: 500000, CompletionCreditsPerMtok: 1000000},
+	}
+	for _, model := range []string{
+		"z-ai/glm-4.5-air",
+		"glm-4.5-air",
+		"mlx-community/GLM-4.5-Air-4bit",
+	} {
+		got := RateFor(card, model)
+		if got != rateGLM {
+			t.Fatalf("RateFor(%q) = %+v, want %+v", model, got, rateGLM)
+		}
+	}
+}
+
 func TestRateFor_FallsBackToDefault(t *testing.T) {
 	rateD := RateCardEntry{PromptCreditsPerMtok: 100, CompletionCreditsPerMtok: 200}
 	got := RateFor(map[string]RateCardEntry{"default": rateD}, "something-not-in-card")
@@ -98,6 +116,10 @@ func TestModelsEquivalent_CatalogKeyMatchesServedHFID(t *testing.T) {
 		{"qwen/meta-llama-3.1-8b-instruct-4bit", "meta-llama/Llama-3.1-8B-Instruct-4bit", false},
 		{"qwen/nvidia-nemotron-3-nano-30b-a3b", "nvidia/nemotron-3-nano-30b-a3b", false},
 		{"openai/nvidia-nemotron-3-nano-30b-a3b", "nvidia/nemotron-3-nano-30b-a3b", false},
+		{"z-ai/glm-4.5-air", "mlx-community/GLM-4.5-Air-4bit", true},
+		{"mlx-community/GLM-4.5-Air-4bit", "z-ai/glm-4.5-air", true},
+		{"glm-4.5-air", "z-ai/glm-4.5-air", true},
+		{"google/glm-4.5-air", "z-ai/glm-4.5-air", false},
 	}
 	for _, tc := range cases {
 		if got := ModelsEquivalent(tc.a, tc.b); got != tc.want {

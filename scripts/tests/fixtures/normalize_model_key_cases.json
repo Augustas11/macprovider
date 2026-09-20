@@ -28,6 +28,10 @@
     {"input": "mlx-community/Qwen2.5-Coder-32B-Instruct-4bit", "expected": "qwen2.5-coder-32b-instruct"},
     {"input": "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit", "expected": "qwen3-coder-30b-a3b-instruct"},
     {"input": "mlx-community/gpt-oss-120b-4bit", "expected": "openai/gpt-oss-120b"},
+    {"input": "z-ai/glm-4.5-air", "expected": "z-ai/glm-4.5-air"},
+    {"input": "mlx-community/GLM-4.5-Air-4bit", "expected": "z-ai/glm-4.5-air"},
+    {"input": "glm-4.5-air", "expected": "z-ai/glm-4.5-air"},
+    {"input": "google/glm-4.5-air", "expected": "glm-4.5-air"},
     {"input": "", "expected": ""}
   ]
 }

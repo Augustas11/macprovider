@@ -145,19 +145,6 @@ if run_wait "$TMP/coordinator.json" "$TMP/wrong-local-model.json"; then
   exit 1
 fi
 
-python3 - "$TMP/local.json" "$TMP/wrong-catalog-model-id.json" <<'PY'
-import json
-import sys
-source, destination = sys.argv[1:]
-payload = json.load(open(source, encoding="utf-8"))
-payload["catalog"]["model_id"] = "different/model-id"
-json.dump(payload, open(destination, "w", encoding="utf-8"), separators=(",", ":"))
-PY
-if run_wait "$TMP/coordinator.json" "$TMP/wrong-catalog-model-id.json"; then
-  echo "mismatched catalog model ID and signed row passed admission" >&2
-  exit 1
-fi
-
 python3 - "$TMP/local.json" "$TMP" <<'PY'
 import copy
 import json
@@ -226,6 +213,43 @@ payload["catalog_admission_mode"] = "previous"
 json.dump(payload, open(destination, "w", encoding="utf-8"), separators=(",", ":"))
 PY
 run_wait "$TMP/previous.json"
+
+python3 - "$TMP/local.json" "$TMP/advanced-local.json" \
+  "$TMP/coordinator.json" "$TMP/advanced-coordinator.json" <<'PY'
+import json
+import sys
+
+local_source, local_destination, coordinator_source, coordinator_destination = sys.argv[1:]
+local = json.load(open(local_source, encoding="utf-8"))
+coordinator = json.load(open(coordinator_source, encoding="utf-8"))
+advanced = {
+    "release_id": "published-2099-01-01-openrouter-priced-v99",
+    "policy_version": "policy-v99",
+    "digest": "a" * 64,
+    "signer_key_id": "autotune-static-v99",
+}
+local["catalog"].update(advanced)
+coordinator["catalog_release_id"] = advanced["release_id"]
+coordinator["catalog_policy_version"] = advanced["policy_version"]
+coordinator["catalog_candidate_sha256"] = advanced["digest"]
+coordinator["catalog_signer_key_id"] = advanced["signer_key_id"]
+json.dump(local, open(local_destination, "w", encoding="utf-8"), separators=(",", ":"))
+json.dump(coordinator, open(coordinator_destination, "w", encoding="utf-8"), separators=(",", ":"))
+PY
+run_wait "$TMP/advanced-coordinator.json" "$TMP/advanced-local.json"
+
+python3 - "$TMP/advanced-coordinator.json" "$TMP/advanced-coordinator-mismatch.json" <<'PY'
+import json
+import sys
+source, destination = sys.argv[1:]
+payload = json.load(open(source, encoding="utf-8"))
+payload["catalog_release_id"] = "published-2099-01-01-different"
+json.dump(payload, open(destination, "w", encoding="utf-8"), separators=(",", ":"))
+PY
+if run_wait "$TMP/advanced-coordinator-mismatch.json" "$TMP/advanced-local.json"; then
+  echo "mismatched local/coordinator catalog release passed coordinator admission" >&2
+  exit 1
+fi
 
 python3 - "$TMP/coordinator.json" "$TMP/busy.json" <<'PY'
 import json
@@ -301,8 +325,8 @@ if 'response.get("assigned_id") != assigned_id' not in text or 'response.get("bu
     raise SystemExit("emergency rollback is not bound to the exact buyer-serving coordinator session")
 if 'model != key' not in text:
     raise SystemExit("normal admission does not bind the local served model to the catalog key")
-if 'catalog_model_id != rows[key].get("model_id")' not in text:
-    raise SystemExit("normal admission does not bind the status catalog model ID to the signed row")
+if 'response.get(field) != value for field, value in required_local.items()' not in text:
+    raise SystemExit("normal admission does not bind coordinator readiness to the local session catalog envelope")
 
 commit_start = text.index("commit_install_transaction() {")
 commit_end = text.index("\n}\n\nrun()", commit_start)

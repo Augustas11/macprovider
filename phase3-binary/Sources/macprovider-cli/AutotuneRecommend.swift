@@ -1562,6 +1562,9 @@ enum AutotuneModelKeyNormalizer {
         if key.hasPrefix("gpt-oss-") {
             return "openai/\(key)"
         }
+        if key.hasPrefix("glm-") {
+            return "z-ai/\(key)"
+        }
         return key
     }
 
