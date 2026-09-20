@@ -26,6 +26,14 @@ import MacProviderCore
 /// isolation) is proven separately by `PagedKVParityTests` and the load-time
 /// `PagedKVRuntimeParityProbe`; this command measures only throughput.
 ///
+/// Two engines:
+///   * `contiguous` (default) — stock `KVCacheSimple` with batch dimension B,
+///     one `container.perform` for the whole decode window, tokens kept as
+///     GPU arrays, optional `MLX.compile()`. This is the throughput ceiling
+///     for shared-forward batching on the pinned mlx-swift-lm tag.
+///   * `paged` — `PagedKVSharedForwardBackend` (per-step actor hop + gather).
+///     Reproduces the 2026-09-20 evidence that that path cannot beat serial.
+///
 /// TPS semantics (decode-only, TTFT excluded): after prefill, one UNTIMED warm
 /// decode step produces the first token (the TTFT-boundary step), then the timed
 /// window spans exactly `--decode-tokens` further batched `decode(rows:)` steps.
@@ -41,18 +49,29 @@ struct MSBThroughputCommand: AsyncParsableCommand {
         commandName: "msb-throughput",
         abstract: "Measure continuous-batching aggregate decode throughput (FR-CB15 / MSB-01..05).",
         discussion: """
-            Drives the SPEC-039 paged-KV shared-forward backend directly (no
-            coordinator, no buyer traffic, no receipts) and reports aggregate
-            decode TG across N concurrent rows vs both the same engine's single-row
-            baseline and the production serial decode path. Produces the live
-            MSB-04 evidence the buyer-serve MoE gate requires before continuous
-            batching can serve real traffic.
+            Measures aggregate decode TG across N concurrent rows vs both the
+            same engine's single-row baseline and the production serial decode
+            path. Default engine is contiguous KVCacheSimple (compiled, one
+            perform). Pass --engine paged to drive the SPEC-039 gather backend.
             """,
         shouldDisplay: false
     )
 
     @Option(help: "HuggingFace model ID or local path. Falls back to MACPROVIDER_MODEL.")
     var model: String?
+
+    @Option(
+        name: .customLong("engine"),
+        help: "Decode engine: contiguous (KVCacheSimple shared forward) or paged (gather backend). Default contiguous."
+    )
+    var engine: MSBThroughputEngine = .contiguous
+
+    @Flag(
+        name: .customLong("compile"),
+        inversion: .prefixedNo,
+        help: "Wrap contiguous decode in MLX.compile(). Ignored for --engine paged. Default on."
+    )
+    var compile: Bool = true
 
     @Option(
         name: .customLong("rows"),
@@ -165,52 +184,69 @@ struct MSBThroughputCommand: AsyncParsableCommand {
             peakRSSMB = max(peakRSSMB, memoryRSSMB())
         }
 
-        // Single-row baseline through the SAME paged backend (state-carrying
-        // single-row path): isolates the batching effect from the paging tax.
-        var pagedSingleRowTPS: [Double] = []
-        _ = try await runBatchedDecode(
-            container: container, prompts: [baselinePrompt], decodeSteps: decodeTokens
-        ) // warmup
+        // Same-engine single-row baseline, then N-row aggregate. Contiguous
+        // uses stock KVCacheSimple in one perform(); paged uses the gather
+        // backend (per-step actor hop) that PR 1623 measured.
+        let compiledThisRun = engine == .contiguous && compile
+        var engineSingleRowTPS: [Double] = []
+        var aggregateRunTPS: [Double] = []
+        var perRowRunTPS: [Double] = []
+
+        func runEngineOnce(prompts: [[Int]]) async throws -> BatchedRunResult {
+            switch engine {
+            case .contiguous:
+                let result = try await ContiguousBatchedDecode.run(
+                    container: container,
+                    prompts: prompts,
+                    decodeSteps: decodeTokens,
+                    compiled: compiledThisRun
+                )
+                return BatchedRunResult(
+                    rowSamples: result.rowSamples,
+                    decodeStart: result.decodeStart,
+                    decodeEnd: result.decodeEnd
+                )
+            case .paged:
+                return try await runBatchedDecode(
+                    container: container, prompts: prompts, decodeSteps: decodeTokens
+                )
+            }
+        }
+
+        _ = try await runEngineOnce(prompts: [baselinePrompt]) // warmup
         for _ in 0..<runs {
-            let r = try await runBatchedDecode(
-                container: container, prompts: [baselinePrompt], decodeSteps: decodeTokens
-            )
-            try assertHealthy(r, expectedRows: 1, expectedTokens: decodeTokens, label: "paged-single-row")
-            pagedSingleRowTPS.append(r.perRowTokensPerSecond)
+            let r = try await runEngineOnce(prompts: [baselinePrompt])
+            try assertHealthy(r, expectedRows: 1, expectedTokens: decodeTokens, label: "\(engine.rawValue)-single-row")
+            engineSingleRowTPS.append(r.perRowTokensPerSecond)
             peakRSSMB = max(peakRSSMB, memoryRSSMB())
         }
 
-        // Batched N-row aggregate throughput.
-        var aggregateRunTPS: [Double] = []
-        var perRowRunTPS: [Double] = []
-        _ = try await runBatchedDecode(
-            container: container, prompts: batchedPrompts, decodeSteps: decodeTokens
-        ) // warmup
+        _ = try await runEngineOnce(prompts: batchedPrompts) // warmup
         for _ in 0..<runs {
-            let r = try await runBatchedDecode(
-                container: container, prompts: batchedPrompts, decodeSteps: decodeTokens
-            )
+            let r = try await runEngineOnce(prompts: batchedPrompts)
             try assertHealthy(r, expectedRows: rows, expectedTokens: decodeTokens, label: "batched")
-            let report = try msbAggregateThroughput(r.rowSamples)
-            aggregateRunTPS.append(report.aggregateTokensPerSecond)
+            let agg = try msbAggregateThroughput(r.rowSamples)
+            aggregateRunTPS.append(agg.aggregateTokensPerSecond)
             perRowRunTPS.append(r.perRowTokensPerSecond)
             peakRSSMB = max(peakRSSMB, memoryRSSMB())
         }
 
         let serialP50 = decodeBenchPercentileTPS(serialRunTPS, p: 0.5)
-        let pagedSingleP50 = decodeBenchPercentileTPS(pagedSingleRowTPS, p: 0.5)
+        let engineSingleP50 = decodeBenchPercentileTPS(engineSingleRowTPS, p: 0.5)
         let aggregateP50 = decodeBenchPercentileTPS(aggregateRunTPS, p: 0.5)
         let perRowP50 = decodeBenchPercentileTPS(perRowRunTPS, p: 0.5)
-        let upliftVsPaged = pagedSingleP50 > 0 ? aggregateP50 / pagedSingleP50 : 0
+        let upliftVsSingle = engineSingleP50 > 0 ? aggregateP50 / engineSingleP50 : 0
         let aggregateVsSerial = serialP50 > 0 ? aggregateP50 / serialP50 : 0
-        let perRowFraction = pagedSingleP50 > 0 ? perRowP50 / pagedSingleP50 : 0
+        let perRowFraction = engineSingleP50 > 0 ? perRowP50 / engineSingleP50 : 0
 
         let modelTag = modelID.split(separator: "/").last.map(String.init) ?? "model"
         let report = MSBThroughputReport(
-            schemaVersion: 2,
+            schemaVersion: 3,
             modelID: modelID,
             modelTag: modelTag,
             mlxSwiftLMPin: decodeBenchMLXPinTag(),
+            engine: engine.rawValue,
+            compiled: compiledThisRun,
             rows: rows,
             promptTokensPerRow: promptTokens,
             decodeTokensPerRow: decodeTokens,
@@ -222,14 +258,14 @@ struct MSBThroughputCommand: AsyncParsableCommand {
             productionSerialTPSRuns: serialRunTPS,
             productionSerialTPSp50: serialP50,
             productionSerialCVPct: coefficientOfVariationPct(serialRunTPS),
-            pagedSingleRowTPSRuns: pagedSingleRowTPS,
-            pagedSingleRowTPSp50: pagedSingleP50,
-            pagedSingleRowCVPct: coefficientOfVariationPct(pagedSingleRowTPS),
+            pagedSingleRowTPSRuns: engineSingleRowTPS,
+            pagedSingleRowTPSp50: engineSingleP50,
+            pagedSingleRowCVPct: coefficientOfVariationPct(engineSingleRowTPS),
             aggregateTPSRuns: aggregateRunTPS,
             aggregateTPSp50: aggregateP50,
             aggregateCVPct: coefficientOfVariationPct(aggregateRunTPS),
             perRowTPSp50: perRowP50,
-            aggregateUpliftVsPagedSingleRow: upliftVsPaged,
+            aggregateUpliftVsPagedSingleRow: upliftVsSingle,
             aggregateVsProductionSerial: aggregateVsSerial,
             perRowFractionOfPagedSingleRow: perRowFraction,
             peakRSSMB: peakRSSMB,
@@ -243,11 +279,12 @@ struct MSBThroughputCommand: AsyncParsableCommand {
         FileHandle.standardOutput.write(Data("\n".utf8))
 
         FileHandle.standardError.write(Data((
-            "msb-throughput: model=\(modelTag) rows=\(rows) block=\(blockSizeTokens) " +
+            "msb-throughput: model=\(modelTag) engine=\(engine.rawValue) compile=\(compiledThisRun) " +
+            "rows=\(rows) block=\(blockSizeTokens) " +
             "serial_tps_p50=\(decodeBenchFormatTPS(serialP50)) " +
-            "paged_1row_tps_p50=\(decodeBenchFormatTPS(pagedSingleP50)) " +
+            "engine_1row_tps_p50=\(decodeBenchFormatTPS(engineSingleP50)) " +
             "aggregate_tps_p50=\(decodeBenchFormatTPS(aggregateP50)) " +
-            "uplift_vs_paged=\(String(format: "%.2fx", upliftVsPaged)) " +
+            "uplift_vs_1row=\(String(format: "%.2fx", upliftVsSingle)) " +
             "aggregate_vs_serial=\(String(format: "%.2fx", aggregateVsSerial)) " +
             "peak_rss_mb=\(peakRSSMB)\n"
         ).utf8))
@@ -267,7 +304,9 @@ struct MSBThroughputCommand: AsyncParsableCommand {
             tsFormatter.formatOptions = [.withInternetDateTime, .withTimeZone]
             let ts = tsFormatter.string(from: Date()).replacingOccurrences(of: ":", with: "-")
             let safeModelTag = decodeBenchSanitizeFilenameComponent(modelTag)
-            fileURL = dir.appendingPathComponent("msb-\(rows)row-\(safeModelTag)-\(ts).json")
+            fileURL = dir.appendingPathComponent(
+                "msb-\(engine.rawValue)-\(rows)row-\(safeModelTag)-\(ts).json"
+            )
         }
         try json.write(to: fileURL, options: [.atomic])
         FileHandle.standardError.write(Data("msb-throughput: wrote \(fileURL.path)\n".utf8))
@@ -574,6 +613,8 @@ struct MSBThroughputReport: Codable, Sendable {
     let modelID: String
     let modelTag: String
     let mlxSwiftLMPin: String
+    let engine: String
+    let compiled: Bool
     let rows: Int
     let promptTokensPerRow: Int
     let decodeTokensPerRow: Int

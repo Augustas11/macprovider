@@ -71,6 +71,11 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
     let binding: PagedKVStorageBinding
 
     private let gatherKernel: PagedKVGatherKernel
+    /// When true, every `update()` reconstructs logical K/V through the Metal gather
+    /// over reversed physical blocks. Required by parity fixtures. Production shared
+    /// forward sets this false: gather is a lossless identity, and running it every
+    /// decode step is the ~3× single-stream tax measured on 2026-09-20.
+    let reconstructViaGather: Bool
     /// Lazily-registered Metal gather kernel. Created on first `update()` so mere
     /// construction of the seam (the SPEC-038-facing metadata surface) still runs no
     /// Metal — only driving the cache through a real forward pass executes the kernel.
@@ -102,13 +107,15 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
         poolEpoch: Int,
         binding: PagedKVStorageBinding,
         gatherKernel: PagedKVGatherKernel = PagedKVGatherKernel(),
-        initialOffset: Int? = nil
+        initialOffset: Int? = nil,
+        reconstructViaGather: Bool = true
     ) {
         self.blockSizeTokens = blockSizeTokens
         self.maxPhysicalBlocks = maxPhysicalBlocks
         self.poolEpoch = poolEpoch
         self.binding = binding
         self.gatherKernel = gatherKernel
+        self.reconstructViaGather = reconstructViaGather
         self.offset = initialOffset ?? binding.currentTable.logicalTokenCount
     }
 
@@ -127,7 +134,8 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
             poolEpoch: descriptor.poolEpoch,
             binding: binding,
             gatherKernel: gatherKernel,
-            initialOffset: initialOffset
+            initialOffset: initialOffset,
+            reconstructViaGather: true
         )
     }
 
@@ -155,6 +163,9 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
         offset += incomingTokens
         keyBlocks = splitIntoBlocks(mergedKeys)
         valueBlocks = splitIntoBlocks(mergedValues)
+        guard reconstructViaGather else {
+            return (mergedKeys, mergedValues)
+        }
         // Reconstruct the logical K/V through the REAL Metal gather over a non-identity
         // (reversed) physical block order. The gather is a lossless permutation round-trip,
         // so a correct paged reconstruction returns tensors identical to `mergedKeys/Values`
@@ -306,7 +317,8 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
             maxPhysicalBlocks: maxPhysicalBlocks,
             poolEpoch: poolEpoch,
             binding: binding,
-            gatherKernel: gatherKernel
+            gatherKernel: gatherKernel,
+            reconstructViaGather: reconstructViaGather
         )
         copied.state = state
         return copied

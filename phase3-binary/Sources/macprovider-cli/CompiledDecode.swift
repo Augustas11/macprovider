@@ -8,9 +8,10 @@ import MLXNN
 /// T2-01 of `docs/runbooks/PLAN_THROUGHPUT_ENGINEERING_RUNBOOK.md`.
 ///
 /// Compile-with-state correctness rules followed here:
-///   * Per-token input shape is fixed at `[1, 1]` (B=1). The compiler
-///     traces the graph for this shape; prefill (variable input length)
-///     is NOT wrapped.
+///   * Per-token input shape is fixed at `[B, 1]` for the lifetime of one
+///     `CompiledDecodeStep` (B=1 for serial decode-bench; B>1 for lockstep
+///     batched decode). The compiler traces that shape; prefill (variable
+///     input length) is NOT wrapped. Do not mix batch sizes on one step.
 ///   * `[KVCache]` is passed as `inputs:` AND `outputs:` to compile() so
 ///     the in-place mutations performed by `cache.update(keys:values:)`
 ///     are threaded through the compiled function rather than captured
@@ -99,9 +100,9 @@ final class CompiledDecodeStep {
         enabled: Bool
     ) {
         let forward: (MLXArray) -> MLXArray = { token in
-            // `[1,1]` shape: token IDs for B=1 decode. The model's
+            // Token IDs as `[B, 1]`. The model's
             // `callAsFunction(_ inputs: MLXArray, cache: [KVCache]?)`
-            // overload returns the next-step logits as `[1, 1, vocab]`.
+            // overload returns next-step logits as `[B, 1, vocab]`.
             model(token, cache: cache.isEmpty ? nil : cache)
         }
         self.uncompiled = forward
@@ -134,8 +135,8 @@ final class CompiledDecodeStep {
         }
     }
 
-    /// Run one decode step. `token` is the previous-token ID as a
-    /// `[1, 1]` MLXArray. Returns logits of shape `[1, 1, vocab]`.
+    /// Run one decode step. `token` is previous-token IDs as a `[B, 1]`
+    /// MLXArray (B=1 for serial). Returns logits of shape `[B, 1, vocab]`.
     func step(_ token: MLXArray) -> MLXArray {
         if let compiled {
             return compiled(token)

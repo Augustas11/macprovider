@@ -663,7 +663,8 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                     maxPhysicalBlocks: maxPhysicalBlocks,
                     poolEpoch: poolEpoch,
                     binding: binding,
-                    initialOffset: initialOffset
+                    initialOffset: initialOffset,
+                    reconstructViaGather: false
                 )
             },
             state: nil
