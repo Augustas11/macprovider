@@ -584,6 +584,17 @@ final class ServeCommandTests: XCTestCase {
         )
     }
 
+    func testNoJoinProtectedFileIsolatesLabServe() {
+        XCTAssertTrue(ServeCommand.isolatesNoJoinLabServe(
+            noJoin: true, credentialStore: .protectedFile, autotuneCandidate: false))
+        XCTAssertFalse(ServeCommand.isolatesNoJoinLabServe(
+            noJoin: false, credentialStore: .protectedFile, autotuneCandidate: false))
+        XCTAssertFalse(ServeCommand.isolatesNoJoinLabServe(
+            noJoin: true, credentialStore: .keychain, autotuneCandidate: false))
+        XCTAssertFalse(ServeCommand.isolatesNoJoinLabServe(
+            noJoin: true, credentialStore: .protectedFile, autotuneCandidate: true))
+    }
+
     func testAutotuneCandidateIsolationRootIsFreshAndOwnerOnly() throws {
         let temporaryDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent("serve-candidate-root-\(UUID().uuidString)", isDirectory: true)

@@ -1,10 +1,10 @@
 # SPEC-037 — KV survival across provider restarts (encrypted provider-local disk tier)
 
-Version: v0.1.1
+Version: v0.1.2
 Status: draft (normative design; IMPL landed behind a disabled-by-default flag)
 Owner: provider runtime / prefix-cache persistence
 Decision source: `docs/research/RESEARCH_233_KV_SURVIVAL_RESTART_MEMO.md` (landed decision memo, commit `d6881b14`)
-Audit history: R1+R2+R3 five-lane audits (codex code/security/architect + adversarial verificator + product critic) reconciled in this text. R2 forced: positive synthetic-key sub-namespace (the shipped `conv:` validator makes prefix-exclusion gating unsatisfiable), per-entry Keychain DEKs as the rollback-proof revocation anchor, purge-generation stamping at lease acquisition, rotation-intent journal, byte-level format grammar, write-side staging caps, and `allow_buyer_keys` rejected in v0.1. R3 forced: non-circular AAD projection (blob hash out of AAD), single-key purge lease fencing, lock inode outside the deletable tree, incoming-vs-served model identity split, DEK lifecycle on eviction, and control-plane state bounds.
+Audit history: R1+R2+R3 five-lane audits (codex code/security/architect + adversarial verificator + product critic) reconciled in this text. R2 forced: positive synthetic-key sub-namespace (the shipped `conv:` validator makes prefix-exclusion gating unsatisfiable), per-entry Keychain DEKs as the rollback-proof revocation anchor, purge-generation stamping at lease acquisition, rotation-intent journal, byte-level format grammar, write-side staging caps, and `allow_buyer_keys` rejected in v0.1. R3 forced: non-circular AAD projection (blob hash out of AAD), single-key purge lease fencing, lock inode outside the deletable tree, incoming-vs-served model identity split, DEK lifecycle on eviction, and control-plane state bounds. v0.1.2: Keychain mode for the shipped naked Developer ID CLI is the process-default / login keychain (same store as provider credentials); Data Protection Keychain is used only when a named access group is set on a profiled bundle.
 
 ## 1. Purpose and scope
 
@@ -382,16 +382,28 @@ block, fail, or corrupt the request being served.
     at tier activation; and the Keychain item count is bounded by live
     entries plus in-flight churn and is reported on the FR-KVP12
     inspection surface.
-- **Keychain mode (normative).** All items use the **Data Protection
-  Keychain**: `kSecUseDataProtectionKeychain = true`, an access group per
-  the shipped `SecureEnclaveIdentity` pattern (`keychain-access-groups`
-  entitlement; `MACPROVIDER_KEYCHAIN_ACCESS_GROUP` override),
-  `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`, non-synchronizable,
-  and non-interactive lookups (authentication UI forbidden; failure ⇒
-  dormant). If the entitlement/access group is unavailable (e.g. unsigned
-  dev build), the tier stays dormant and warns — it does not fall back to
-  the legacy login keychain (whose ACL model does not honor
-  `kSecAttrAccessible`).
+- **Keychain mode (normative).** Items are generic passwords, labeled
+  `MacProvider KV disk-cache`, non-synchronizable, and looked up
+  non-interactively (authentication UI forbidden; failure ⇒ dormant).
+  Two modes:
+  1. **Process-default / login keychain (default).** The shipped naked
+     Developer ID CLI has no `keychain-access-groups` entitlement (AMFI
+     SIGKILL if that entitlement is attached). This path MUST omit
+     `kSecUseDataProtectionKeychain`. It is the same store
+     `ProviderCredentialStore` uses. Enumeration MUST match the
+     MacProvider label and then filter by service prefix in-process; it
+     MUST NOT dump unlabeled login-keychain items. macOS does not honor
+     `kSecAttrAccessible` on this path, so do not claim
+     `AfterFirstUnlockThisDeviceOnly` here.
+  2. **Data Protection Keychain (named access group only).** When
+     `MACPROVIDER_KEYCHAIN_ACCESS_GROUP` is set (profiled bundle with
+     `keychain-access-groups`), items use
+     `kSecUseDataProtectionKeychain = true`, that access group, and
+     `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`. Missing
+     entitlement ⇒ dormant.
+  The default path MUST NOT stay dormant solely because Data Protection
+  Keychain is unavailable. Dormancy remains for locked / no-login /
+  interaction-required conditions.
 - **AEAD framing.** Chunked AES-256-GCM per §5a: every chunk uses a fresh
   CSPRNG 96-bit nonce (never derived from counters that can roll back);
   AAD binds the whole manifest (hence the full envelope, chunk table

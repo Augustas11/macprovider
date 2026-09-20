@@ -3,11 +3,11 @@
 /// Owns: the one canonical-key-bytes function (trim + NFC + UTF-8), the HMAC index
 /// (base16(HMAC-SHA256(index_key, canonical_key_bytes))), the HKDF-SHA256 index-key
 /// derivation with the spec's literal labels, the per-epoch master + per-entry DEK
-/// Keychain items (Data-Protection, AfterFirstUnlockThisDeviceOnly, non-interactive,
-/// non-synchronizable), the incarnation-tagged ownership model for abort-safe DEK
-/// cleanup, service-prefix enumeration for uninstall, epoch-rotation Keychain steps,
-/// and pre-unlock dormancy signaling. The AES-256-GCM chunk seal/open helpers live
-/// here too (they consume the entry DEK).
+/// Keychain items (process-default/login keychain on the naked CLI; Data Protection
+/// only when a named access group is set), the incarnation-tagged ownership model
+/// for abort-safe DEK cleanup, service-prefix enumeration for uninstall,
+/// epoch-rotation Keychain steps, and pre-unlock dormancy signaling. The AES-256-GCM
+/// chunk seal/open helpers live here too (they consume the entry DEK).
 ///
 /// The Keychain is abstracted behind `KVKeychain` so all logic is testable with an
 /// in-memory double; only the thin `KVSecItemKeychain` adapter touches `SecItem`.
@@ -319,30 +319,46 @@ enum KVChunkCrypto {
 
 // MARK: - SecItem adapter (thin; only this touches the Keychain)
 
-/// Data-Protection-Keychain adapter. All items are generic passwords with
-/// `kSecUseDataProtectionKeychain = true`, the process default keychain
-/// (no named access group unless `MACPROVIDER_KEYCHAIN_ACCESS_GROUP` is set),
-/// `AfterFirstUnlockThisDeviceOnly`, non-synchronizable, and non-interactive
-/// lookups. If a named group is requested without the entitlement, operations
-/// surface `.unavailable` and the tier stays dormant.
+/// Keychain adapter for KV DEKs. The shipped naked Developer ID CLI has no
+/// `keychain-access-groups` entitlement, so the default path uses the process
+/// default / login keychain (same store as `ProviderCredentialStore`) and MUST
+/// omit `kSecUseDataProtectionKeychain`. Data Protection + a named access group
+/// is used only when `MACPROVIDER_KEYCHAIN_ACCESS_GROUP` is set on a profiled
+/// bundle. All items are labeled so login-keychain enumerate cannot dump
+/// unrelated secrets. Lookups are non-interactive and non-synchronizable.
 struct KVSecItemKeychain: KVKeychain {
+    /// Distinguishes MacProvider KV items from other login-keychain passwords.
+    static let itemLabel = "MacProvider KV disk-cache"
+
     let accessGroup: String?
 
     init(accessGroup: String? = nil) {
         self.accessGroup = MacProviderKeychainAccessGroup.resolve(accessGroup)
     }
 
+    var usesDataProtectionKeychain: Bool { accessGroup != nil }
+
+    /// Test hook: the SecItem query for a named service (no account).
+    func queryDictionary(service: String) -> [String: Any] {
+        nonInteractiveBase(service: service)
+    }
+
+    private func applyKeychainMode(_ query: inout [String: Any]) {
+        if let accessGroup {
+            query[kSecUseDataProtectionKeychain as String] = true
+            query[kSecAttrAccessGroup as String] = accessGroup
+        }
+    }
+
     private func nonInteractiveBase(service: String) -> [String: Any] {
         var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
-            kSecUseDataProtectionKeychain as String: true,
+            kSecAttrLabel as String: Self.itemLabel,
             kSecAttrSynchronizable as String: false,
             kSecUseAuthenticationUI as String: kSecUseAuthenticationUIFail,
         ]
-        if let accessGroup {
-            query[kSecAttrAccessGroup as String] = accessGroup
-        }
+        applyKeychainMode(&query)
         return query
     }
 
@@ -350,9 +366,11 @@ struct KVSecItemKeychain: KVKeychain {
         var query = nonInteractiveBase(service: service)
         query[kSecAttrAccount as String] = account
         query[kSecValueData as String] = secret
-        query[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
         // Incarnation identifier for ownership-checked cleanup (FR-KVP6).
         query[kSecAttrGeneric as String] = Data(incarnation.utf8)
+        if usesDataProtectionKeychain {
+            query[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        }
         let status = SecItemAdd(query as CFDictionary, nil)
         switch status {
         case errSecSuccess: return
@@ -403,18 +421,17 @@ struct KVSecItemKeychain: KVKeychain {
     }
 
     func enumerate(servicePrefix: String) throws -> [KVKeychainItem] {
-        // Data-Protection generic passwords cannot be prefix-queried by service, so
-        // enumerate all items in the access group and filter in-process.
+        // Service names cannot be prefix-queried. Match the MacProvider label
+        // (never dump unlabeled login-keychain items) and filter by prefix.
         var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
-            kSecUseDataProtectionKeychain as String: true,
+            kSecAttrLabel as String: Self.itemLabel,
+            kSecAttrSynchronizable as String: false,
             kSecUseAuthenticationUI as String: kSecUseAuthenticationUIFail,
             kSecReturnAttributes as String: true,
             kSecMatchLimit as String: kSecMatchLimitAll,
         ]
-        if let accessGroup {
-            query[kSecAttrAccessGroup as String] = accessGroup
-        }
+        applyKeychainMode(&query)
         var result: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
         switch status {

@@ -615,10 +615,9 @@ actor KVDiskCacheStore {
             // re-acquires cleanly, do NOT set `activated`, do NOT quarantine. The serve
             // retry loop re-activates once the Keychain becomes available. Dormancy
             // telemetry is single-line (not per-request) so no log storm.
-            _ = e
             releaseLock()
             activationDormancy = .keychain
-            emit(.diskMissIO, detail: .keychainUnavailable, fields: ["phase": "activation_dormant"])
+            emit(.diskMissIO, detail: .keychainUnavailable, fields: keychainDormancyFields(e, phase: "activation_dormant"))
             return false
         } catch {
             releaseLock()
@@ -1580,6 +1579,14 @@ actor KVDiskCacheStore {
         emit(.diskWriteSkipped, detail: .writeBudget, indexHashPrefix: identityPrefix(rawKey))
     }
 
+    /// Pre-copy skip when the geometry estimate exceeds the FR-KVP9 promotion
+    /// ceiling (`staging_max_bytes`). Same detail the store persist path uses
+    /// (`exceeds_promotion_ceiling`) so a too-big snapshot is never deep-copied
+    /// only to be discarded later.
+    func notePromotionCeilingSkipped(rawKey: String) {
+        emit(.diskWriteSkipped, detail: .exceedsPromotionCeiling, indexHashPrefix: identityPrefix(rawKey))
+    }
+
     /// MEDIUM-A/LOW/INFO (SPEC-037): emit `disk_write_skipped(detail=unsupported_cache_class)`
     /// for a tier-eligible commit whose live cache is not the v1-allowlisted
     /// `KVCacheSimple`. Carries the actual runtime cache class in `cache_class` so an
@@ -2315,6 +2322,14 @@ actor KVDiskCacheStore {
     private func isUnavailable(_ e: KVKeychainError) -> Bool {
         if case .unavailable = e { return true }
         return false
+    }
+
+    private func keychainDormancyFields(_ e: KVKeychainError, phase: String) -> [String: String] {
+        var fields = ["phase": phase]
+        if case .unavailable(let status) = e {
+            fields["os_status"] = String(status)
+        }
+        return fields
     }
 
     // MARK: - Tombstone persistence

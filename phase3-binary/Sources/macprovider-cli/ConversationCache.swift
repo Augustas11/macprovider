@@ -351,6 +351,12 @@ actor ConversationCache {
             // FR-KVP12: a gated commit whose live identity is unavailable emits
             // disk_write_skipped(identity_unavailable) before failing safe to skip.
             await coldTier.noteWriteSkippedIdentityUnavailable(conversationKey: lease.key)
+        } else if coldTier == nil {
+            log("event=conv_cache action=cold_unattached key_hash=\(lease.keyHash)")
+        } else if let cold, !cold.eligible {
+            log("event=conv_cache action=cold_ineligible key_hash=\(lease.keyHash) gated_identity_missing=\(cold.identityUnavailableReason != nil)")
+        } else {
+            log("event=conv_cache action=cold_snapshot_skipped key_hash=\(lease.keyHash)")
         }
         releaseTurn(lease.key)
     }
