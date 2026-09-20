@@ -92,23 +92,17 @@ not treat Studio `v1.8.170` as that bakeoff binary.
 #1453 closes when a candidate that includes the **merged** rows is promoted to
 the fleet. #1569 is a later CLI. Spec promotion #1583 is not a CLI change.
 
-Coordinator/gateway on live Pearl is still **v1.8.166** @ `e1fd9e7c3449a73fa19dc613ffce8e580cc165cb`
-(#1630 auto-prefix + #1634-era gateway, plus #1626 sanitizer / `malformed_tool_call`
-pass-through). It does **not** yet include #1632 (OpenRouter 17-row listing),
-#1638 (nested `prompt_tokens_details.cached_tokens`), or #1639 (dist
-`min_provider_throughput_tps=1.0`). Those three are on current `main` (after
-#1639).
-
-**Pearl runtime next cut — one owner.** The Pi/cached-tokens session executes
-the single `pearl-runtime-release.yml` + `macprovider-pearl-update` of current
-`main`. The OpenRouter/#1570 session must **not** dispatch a second runtime
-release. Suggested tag **v1.8.169** (skip CLI artifact numbers 167/168/170).
-Sticky and CB stay off. After apply, update this live-version paragraph.
-
-#1632 / #1638 / #1639 are coordinator/gateway, not CLI rows. Fleet Macs still
+Coordinator/gateway on live Pearl is **v1.8.169** @ `51746ca05364d42e16a2a8ce3d38a8864c0bfb8b`
+([run 35499650509](https://github.com/Augustas11/macprovider/actions/runs/35499650509)).
+That runtime includes #1632 (OpenRouter 17-row listing; live `/v1/openrouter/models`
+returned 18 rows including the free Llama alias), #1638 (nested
+`prompt_tokens_details.cached_tokens`), and #1639 (dist
+`min_provider_throughput_tps=1.0`). Sticky and CB stay off. Fleet Macs still
 run **1.8.123** until the operator-cut CLI is promoted. Mac Studio serving
 canary remains `v1.8.170` until that successor candidate (it is still
 pre-#1626/#1634).
+
+#1632 / #1638 / #1639 are coordinator/gateway, not CLI rows.
 
 #1600 is the install.sh consumer-health alarm
 (scripts/CI), not the Mac binary. Curl-channel `get.malibu.tech/install.sh`
