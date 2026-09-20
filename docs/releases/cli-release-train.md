@@ -47,8 +47,8 @@ binary the Mac runs.
 
 All in-scope CLI rows are **merged**. Last built candidates `v1.8.163`,
 `v1.8.164`, `v1.8.167`, and `v1.8.168` are old or off-train — do not promote
-them. The next candidate can be cut off current `main` (includes #1612 and
-#1626).
+them. The next candidate can be cut off current `main` (includes #1612, #1626,
+and #1634).
 
 | Net change in CLI / Malibu / installer | Status | PR |
 |---|---|---|
@@ -86,15 +86,17 @@ them. The next candidate can be cut off current `main` (includes #1612 and
 | Paged-KV attach gates so SPEC-038/039 can engage on real MoE hardware | merged | #1597 |
 | Opt-in empirical max_batch concurrency calibration | merged | #1590 |
 | Qwen hybrid JSON tool_call recovery, concat-safe prefixes, follow-up content deltas | merged | #1626 |
+| Conversation-keyed serial serve allocates trimmable `KVCacheSimple` (FR-CI2 can skip prefill) | merged | #1634 |
 
 #1453 closes when a candidate that includes the **merged** rows is promoted to
 the fleet. #1569 is a later CLI. Spec promotion #1583 is not a CLI change.
 
-Coordinator/gateway on live Pearl is **v1.8.165** @ `3555bf9881ae5b80b137ab6b6161ce897e9c1029`
-(includes #1626 sanitizer, concat-safe prefix flush, and gateway
-`malformed_tool_call` pass-through, plus #1601/#1599/#1595). Fleet Macs still
-run **1.8.123** until this CLI is promoted. Mac Studio serving canary remains
-`v1.8.170` until a successor candidate that includes #1626.
+Coordinator/gateway on live Pearl is **v1.8.166** @ `e1fd9e7c3449a73fa19dc613ffce8e580cc165cb`
+(includes #1630 gateway auto-prefix `X-MacProvider-Internal-Conv-Cache`, plus
+#1626 sanitizer / concat-safe prefix flush / gateway `malformed_tool_call`
+pass-through, plus #1601/#1599/#1595). Fleet Macs still run **1.8.123** until
+this CLI is promoted. Mac Studio serving canary remains `v1.8.170` until a
+successor candidate that includes #1626 and #1634.
 #1600 is the install.sh consumer-health alarm
 (scripts/CI), not the Mac binary. Curl-channel `get.malibu.tech/install.sh`
 was republished **from `main`** on 2026-09-19 after #1610 (SHA-256
@@ -113,10 +115,10 @@ confirm bytes are unchanged).
 | Last built from `main` | `v1.8.168` @ `646f22f84984fd994151f3512c8432992cf9b36f` ([run 35425108016](https://github.com/Augustas11/macprovider/actions/runs/35425108016)), branch `release/candidate-1.8.168-spec038` |
 | Mac Studio serving canary | `v1.8.170` @ `b8faebae0cb144301de77b2f0b43b5864bfeb2fe` — signed, staged on Mac Studio at `/Users/a1/candidate-v1.8.170/` (serve not yet swapped in). It is current `main` **minus #1610** (dd55a5eb: install.sh + AutoUpdateMarker.swift) and one train-doc commit. Serving/runtime code is current; installer + autoupdate-marker are not. |
 | Off-train E2E candidate | `v1.8.167` @ `7f833a2f63ddee6b2e146c821341099d89aec169` ([run 35417249468](https://github.com/Augustas11/macprovider/actions/runs/35417249468)) — signed hold-branch CLI used for the 2026-09-19 Pearl Track B run |
-| Older | `v1.8.163` @ `8c0c51d2`; `v1.8.164` BYOM @ `cdbb0257`; `v1.8.166` @ `00ce3625` |
-| Status | **Do not promote any of the above.** The fleet-promote candidate must be cut off **current `main`** so it carries **#1610** (its own directive: the served `install.sh` must be republished from a release that includes it). `v1.8.170` is fine as a Mac Studio serving/SPEC-038 canary because #1610 is installer/autoupdate-only, but it is **not** the promote target. |
-| Next candidate | cut off current `main` (hold #1609 is merged) |
-| Why the next cut | Pi/Qwen tool-call correctness on the Mac, 256-cap gone, paged-KV attach, BYOM serve (#1576) **plus** the uncatalogued loopback hold (#1609) so Pearl Gemma serve stays on the wire. Curl-channel #1582/#1610 is already live from `main`; promoting this CLI is what turns the install.sh **parity** alarm green vs the new stable tag. |
+| Older | `v1.8.163` @ `8c0c51d2`; `v1.8.164` BYOM @ `cdbb0257`; CLI artifact `v1.8.166` @ `00ce3625` (not the Pearl runtime tag) |
+| Status | **Do not promote any of the above.** The fleet-promote candidate must be cut off **current `main`** so it carries **#1610** (its own directive: the served `install.sh` must be republished from a release that includes it) **and #1634**. `v1.8.170` is fine as a Mac Studio serving/SPEC-038 canary because #1610 is installer/autoupdate-only, but it is **not** the promote target and it is still pre-#1626/#1634. |
+| Next candidate | cut off current `main` (hold #1609 and keyed serial KV #1634 are merged) |
+| Why the next cut | Pi/Qwen tool-call correctness on the Mac, 256-cap gone, paged-KV attach, BYOM serve (#1576), the uncatalogued loopback hold (#1609), and conversation-keyed serial `KVCacheSimple` (#1634) so a prefix-cache hit can skip prefill. Curl-channel #1582/#1610 is already live from `main`; promoting this CLI is what turns the install.sh **parity** alarm green vs the new stable tag. |
 
 ## E2E tracks (independent gates)
 
