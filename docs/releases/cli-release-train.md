@@ -49,9 +49,10 @@ All in-scope CLI rows are **merged**. Last built candidates `v1.8.163`,
 `v1.8.164`, `v1.8.167`, and `v1.8.168` are old or off-train — do not promote
 them. Studio serving canary is **`v1.8.171`** @
 `12de7aea9e3ecf07df229682fc6defd225e4085f` (includes #1612, #1626, #1634,
-#1635, and #1640), live as `live.malibu.provider` on Mac Studio. Do not
-promote the fleet until the in-scope tracks are green on this build. Buyer CB
-stays off; do not raise slots.
+#1635, and #1640), live as `live.malibu.provider` on Mac Studio for
+continuous-batching testing. **#1648 merged after that cut** (`b9d050d8`);
+it is not in 171. Next CLI cut waits on operator green light and will
+include #1648. Buyer CB stays off; do not raise slots.
 
 | Net change in CLI / Malibu / installer | Status | PR |
 |---|---|---|
@@ -92,6 +93,7 @@ stays off; do not raise slots.
 | Conversation-keyed serial serve allocates trimmable `KVCacheSimple` (FR-CI2 can skip prefill) | merged | #1634 |
 | SPEC-038 scheduler uses compiled lockstep decode windows (buyer CB still off) | merged | #1635 |
 | FR-CB15 leftover harness (MSB-03/05, usage, isolation, drain, replay) + MoE promotion review (flag stays false) | merged | #1640 |
+| Login keychain for KV disk DEKs (naked CLI can persist KVS-01a) | merged | #1648 |
 
 #1453 closes when a candidate that includes the **merged** rows is promoted to
 the fleet. #1569 is a later CLI. Spec promotion #1583 is not a CLI change.
@@ -133,9 +135,9 @@ confirm bytes are unchanged).
 | Mac Studio serving canary | `v1.8.171` @ `12de7aea9e3ecf07df229682fc6defd225e4085f` — signed, live, Pearl session accepted (`serving_buyers`, slots 4, CB off). Previous canary `v1.8.170` @ `b8faebae0cb144301de77b2f0b43b5864bfeb2fe` remains staged at `/Users/a1/candidate-v1.8.170/`. Do not canary CB and do not raise slots. |
 | Off-train E2E candidate | `v1.8.167` @ `7f833a2f63ddee6b2e146c821341099d89aec169` ([run 35417249468](https://github.com/Augustas11/macprovider/actions/runs/35417249468)) — signed hold-branch CLI used for the 2026-09-19 Pearl Track B run |
 | Older | `v1.8.163` @ `8c0c51d2`; `v1.8.164` BYOM @ `cdbb0257`; CLI artifact `v1.8.166` @ `00ce3625` (not the Pearl runtime tag) |
-| Status | **Do not promote.** `v1.8.171` is the live Studio serving canary off current `main` (#1610, #1626, #1634, #1635, #1640). Fleet stays on 1.8.123. Do not canary CB and do not raise slots. |
-| Next candidate | **signed.** `v1.8.171` @ `12de7aea9e3ecf07df229682fc6defd225e4085f`, branch `release/candidate-1.8.171-spec038`, [run 35505282884](https://github.com/Augustas11/macprovider/actions/runs/35505282884) attempt 2. |
-| Why the next cut | Pi/Qwen tool-call correctness on the Mac (#1626 hybrid JSON + concat-safe prefixes), 256-cap gone, paged-KV attach, BYOM serve (#1576), the uncatalogued loopback hold (#1609), conversation-keyed serial `KVCacheSimple` (#1634), compiled lockstep decode in the serve-path scheduler (#1635), and the FR-CB15 leftover harness (#1640). Fair Pi vs OpenRouter 30B-A3B bakeoff needs this CLI plus Pearl with #1638. Curl-channel #1582/#1610 is already live from `main`; promoting this CLI is what turns the install.sh **parity** alarm green vs the new stable tag. Packaged leftover measurement on this candidate: [`continuous-batching-packaged-171-leftovers-evidence-2026-09-20.md`](../runbooks/continuous-batching-packaged-171-leftovers-evidence-2026-09-20.md). Buyer CB stays off. |
+| Status | **Do not promote.** `v1.8.171` is the live Studio serving canary for continuous-batching testing. It predates #1648. Fleet stays on 1.8.123. Do not canary CB and do not raise slots. |
+| Next candidate | **Paused — wait for operator green light.** Next cut off `main` (`b9d050d8` or later) will include #1648. Keep `v1.8.171` on Studio until then. |
+| Why the next cut | Login-keychain KV disk DEKs so a packaged naked CLI can persist KVS-01a (#1648). 171 stays the CB-testing binary until that cut. |
 
 ## E2E tracks (independent gates)
 
