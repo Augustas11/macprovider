@@ -331,7 +331,7 @@ def is_non_empty_text(value: object) -> bool:
     return isinstance(value, str) and value.strip() != ""
 
 
-def check_capacity(entries: object, label: str, expected_types: set[str]) -> dict[str, int]:
+def check_capacity(entries: object, label: str, expected_types: set[str], *, allow_zero: bool = False) -> dict[str, int]:
     if not isinstance(entries, list) or not entries:
         raise ProbeError(f"{label} must be a non-empty capacity array")
     observed_types = set()
@@ -345,9 +345,13 @@ def check_capacity(entries: object, label: str, expected_types: set[str]) -> dic
         if capacity_type in observed_types:
             raise ProbeError(f"{label} duplicate capacity type {capacity_type}")
         observed_types.add(capacity_type)
-        if not is_positive_int(entry.get("value")):
+        value = entry.get("value")
+        if allow_zero:
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                raise ProbeError(f"{label} value must be a non-negative integer")
+        elif not is_positive_int(value):
             raise ProbeError(f"{label} value must be a positive integer")
-        values[capacity_type] = entry["value"]
+        values[capacity_type] = value
         if capacity_type == "concurrency":
             if entry.get("unit") != "request":
                 raise ProbeError(f"{label} concurrency unit must be request")
@@ -468,7 +472,13 @@ def catalog_coverage(by_id: dict) -> dict:
     }
 
 
-def check_models_document(doc: dict, expected_model: str = "", require_free_alias: bool = False) -> dict:
+def check_models_document(
+    doc: dict,
+    expected_model: str = "",
+    require_free_alias: bool = False,
+    *,
+    require_catalog: bool | None = None,
+) -> dict:
     expected_model = resolve_probe_model(expected_model) if expected_model else expected_model
     rows = doc.get("data")
     if not isinstance(rows, list) or not rows:
@@ -531,9 +541,10 @@ def check_models_document(doc: dict, expected_model: str = "", require_free_alia
             if param not in text_out["supported_parameters"]:
                 raise ProbeError(f"{row['id']} missing supported parameter {param}")
         validate_supported_parameters(text_out["supported_parameters"], row["id"])
-        root_capacity = check_capacity(row.get("capacity"), f"{row['id']} root capacity", {"request", "concurrency"})
-        input_capacity = check_capacity(text_in.get("capacity"), f"{row['id']} input capacity", {"prompt"})
-        output_capacity = check_capacity(text_out.get("capacity"), f"{row['id']} output capacity", {"completion"})
+        allow_zero_capacity = row.get("is_ready") is False
+        root_capacity = check_capacity(row.get("capacity"), f"{row['id']} root capacity", {"request", "concurrency"}, allow_zero=allow_zero_capacity)
+        input_capacity = check_capacity(text_in.get("capacity"), f"{row['id']} input capacity", {"prompt"}, allow_zero=allow_zero_capacity)
+        output_capacity = check_capacity(text_out.get("capacity"), f"{row['id']} output capacity", {"completion"}, allow_zero=allow_zero_capacity)
         capacities_by_id[row["id"]] = {
             "root": root_capacity,
             "input": input_capacity,
@@ -560,6 +571,12 @@ def check_models_document(doc: dict, expected_model: str = "", require_free_alia
         if require_free_alias and paid.get("is_ready") is not True:
             raise ProbeError(f"requested model {expected_model} must be is_ready=true for filing mode")
     coverage = catalog_coverage(by_id)
+    if require_catalog is None:
+        require_catalog = True if require_free_alias else False
+    if require_catalog:
+        missing_catalog = coverage.get("catalog_unlisted_ids") or []
+        if missing_catalog:
+            raise ProbeError(f"models document missing catalog rows: {missing_catalog}")
     if require_free_alias:
         free_id = expected_free_model_id(expected_model)
         free = by_id.get(free_id)
@@ -1963,6 +1980,7 @@ def main(argv: list[str]) -> int:
                 read_json("GET", v1_url(args.base_url, "/openrouter/models"))[0],
                 args.model,
                 args.filing_mode,
+                require_catalog=True,
             ),
         )
         record_check("privacy", lambda: check_privacy(args.base_url))

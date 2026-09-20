@@ -160,8 +160,26 @@ def ready_pool(slots: int = 4) -> dict:
     }
 
 
+def with_catalog_paid_rows(doc: dict) -> dict:
+    by_id = {row["id"] for row in doc["data"]}
+    template = copy.deepcopy(doc["data"][0])
+    template["is_free"] = False
+    template["is_ready"] = False
+    for _catalog_key, model_id, slug, _dual_free in probe.CATALOG_OPENROUTER_ROWS:
+        if model_id in by_id:
+            continue
+        row = copy.deepcopy(template)
+        row["id"] = model_id
+        row["hugging_face_id"] = model_id
+        row["name"] = model_id
+        row["openrouter"] = {"slug": slug}
+        doc["data"].append(row)
+        by_id.add(model_id)
+    return doc
+
+
 def valid_filing_doc():
-    doc = valid_doc()
+    doc = with_catalog_paid_rows(valid_doc())
     free = copy.deepcopy(doc["data"][0])
     free["id"] += "-free"
     free["is_free"] = True
@@ -192,6 +210,9 @@ class OpenRouterReadinessProbeTests(unittest.TestCase):
         }
         self.assertEqual(len(recommendable), 17)
         self.assertEqual(set(probe.catalog_paid_model_ids()), recommendable)
+        gateway = (ROOT / "phase5-gateway/internal/router/openrouter_models.go").read_text()
+        for model_id in probe.catalog_paid_model_ids():
+            self.assertIn(f'"{model_id}"', gateway)
         for catalog_key, row in catalog["rows"].items():
             self.assertEqual(probe.CATALOG_KEY_TO_MODEL_ID[catalog_key], row["model_id"])
             self.assertIn(row["model_id"], probe.EXPECTED_OPENROUTER_SLUGS)
@@ -405,18 +426,16 @@ class OpenRouterReadinessProbeTests(unittest.TestCase):
 
     def test_filing_mode_requires_ready_zero_priced_free_alias(self):
         doc = valid_doc()
-        with self.assertRaisesRegex(probe.ProbeError, "missing free alias"):
+        with self.assertRaisesRegex(probe.ProbeError, "missing catalog rows"):
             probe.check_models_document(doc, "mlx-community/Llama-3.2-3B-Instruct-4bit", True)
-        free = copy.deepcopy(doc["data"][0])
-        free["id"] += "-free"
-        free["is_free"] = True
-        free["is_ready"] = True
-        free["openrouter"]["slug"] += ":free"
-        free["input_modalities"][0]["pricing"][0]["cost_usd"] = "0"
-        free["output_modalities"][0]["pricing"][0]["cost_usd"] = "0"
-        doc["data"].append(free)
+        catalog_only = with_catalog_paid_rows(valid_doc())
+        with self.assertRaisesRegex(probe.ProbeError, "missing free alias"):
+            probe.check_models_document(catalog_only, "mlx-community/Llama-3.2-3B-Instruct-4bit", True)
+        doc = valid_filing_doc()
         got = probe.check_models_document(doc, "mlx-community/Llama-3.2-3B-Instruct-4bit", True)
-        self.assertEqual(got["rows"], 2)
+        self.assertEqual(got["rows"], 18)
+        self.assertEqual(got["catalog_listed_rows"], 17)
+        self.assertEqual(got["catalog_unlisted_ids"], [])
         zero_paid = copy.deepcopy(doc)
         zero_paid["data"][0]["input_modalities"][0]["pricing"][0]["cost_usd"] = "0"
         zero_paid["data"][0]["output_modalities"][0]["pricing"][0]["cost_usd"] = "0"
@@ -426,9 +445,47 @@ class OpenRouterReadinessProbeTests(unittest.TestCase):
         missing_paid_flag["data"][0].pop("is_free")
         with self.assertRaisesRegex(probe.ProbeError, "is_free"):
             probe.check_models_document(missing_paid_flag, "mlx-community/Llama-3.2-3B-Instruct-4bit", True)
-        free["is_ready"] = False
+        for row in doc["data"]:
+            if row["id"] == "mlx-community/Llama-3.2-3B-Instruct-4bit-free":
+                row["is_ready"] = False
+                break
         with self.assertRaisesRegex(probe.ProbeError, "is_ready"):
             probe.check_models_document(doc, "mlx-community/Llama-3.2-3B-Instruct-4bit", True)
+
+    def test_live_models_check_requires_full_catalog(self):
+        doc = valid_doc()
+        with self.assertRaisesRegex(probe.ProbeError, "missing catalog rows"):
+            probe.check_models_document(doc, "mlx-community/Llama-3.2-3B-Instruct-4bit", require_catalog=True)
+        got = probe.check_models_document(
+            with_catalog_paid_rows(valid_doc()),
+            "mlx-community/Llama-3.2-3B-Instruct-4bit",
+            require_catalog=True,
+        )
+        self.assertEqual(got["catalog_listed_rows"], 17)
+        self.assertEqual(got["catalog_unlisted_ids"], [])
+
+    def test_not_ready_catalog_rows_may_advertise_zero_capacity(self):
+        doc = valid_doc()
+        row = copy.deepcopy(doc["data"][0])
+        row["id"] = "mlx-community/GLM-4.5-Air-4bit"
+        row["hugging_face_id"] = row["id"]
+        row["is_ready"] = False
+        row["openrouter"] = {"slug": "z-ai/glm-4.5-air"}
+        row["capacity"] = [
+            {"type": "request", "unit": "request", "per": "minute", "value": 0},
+            {"type": "concurrency", "unit": "request", "value": 0},
+        ]
+        row["input_modalities"][0]["capacity"] = [{"type": "prompt", "unit": "token", "per": "minute", "value": 0}]
+        row["output_modalities"][0]["capacity"] = [{"type": "completion", "unit": "token", "per": "minute", "value": 0}]
+        doc["data"].append(row)
+        got = probe.check_models_document(doc)
+        self.assertEqual(got["capacities"][row["id"]]["root"]["concurrency"], 0)
+
+    def test_ready_rows_still_require_positive_capacity(self):
+        doc = valid_doc()
+        doc["data"][0]["capacity"][1]["value"] = 0
+        with self.assertRaisesRegex(probe.ProbeError, "positive integer"):
+            probe.check_models_document(doc)
 
     def test_deployment_region_must_be_the_honest_volunteer_fleet_descriptor(self):
         doc = valid_doc()
@@ -1608,7 +1665,7 @@ class OpenRouterReadinessProbeTests(unittest.TestCase):
             ]
             bench = {"requests_sent": 8, "statuses": {"200": 8}, "ok": 8, "shed_429": 0}
             with mock.patch.dict(os.environ, {"MACPROVIDER_TEST_API_KEY": "buyer-secret"}, clear=False), mock.patch.object(
-                probe, "read_json", return_value=(valid_doc(), 200)
+                probe, "read_json", return_value=(with_catalog_paid_rows(valid_doc()), 200)
             ), mock.patch.object(probe, "check_privacy", return_value={"http_status": 200}), mock.patch.object(
                 probe, "check_healthz", return_value={"http_status": 200, "status": "ok", "version": "v1.8.153"}
             ), mock.patch.object(
@@ -1726,7 +1783,7 @@ class OpenRouterReadinessProbeTests(unittest.TestCase):
                 "--output",
                 str(output),
             ]
-            with mock.patch.object(probe, "read_json", return_value=(valid_doc(), 200)), mock.patch.object(
+            with mock.patch.object(probe, "read_json", return_value=(with_catalog_paid_rows(valid_doc()), 200)), mock.patch.object(
                 probe, "check_privacy", return_value={"http_status": 200}
             ), mock.patch.object(probe, "check_healthz", return_value={"http_status": 200, "status": "ok", "version": "v1.8.153"}):
                 code = probe.main(argv)
@@ -1758,7 +1815,7 @@ class OpenRouterReadinessProbeTests(unittest.TestCase):
                 os.environ,
                 {"MACPROVIDER_TEST_API_KEY": "buyer-secret", "MACPROVIDER_TEST_OPERATOR_KEY": "operator-secret"},
                 clear=False,
-            ), mock.patch.object(probe, "read_json", return_value=(valid_doc(), 200)), mock.patch.object(
+            ), mock.patch.object(probe, "read_json", return_value=(with_catalog_paid_rows(valid_doc()), 200)), mock.patch.object(
                 probe, "check_privacy", return_value={"http_status": 200}
             ), mock.patch.object(
                 probe, "check_healthz", return_value={"http_status": 200, "status": "ok", "version": "v1.8.153"}
@@ -1809,7 +1866,7 @@ class OpenRouterReadinessProbeTests(unittest.TestCase):
                 str(output),
             ]
             with mock.patch.dict(os.environ, {"MACPROVIDER_TEST_OPERATOR_KEY": "operator-secret"}, clear=False), mock.patch.object(
-                probe, "read_json", return_value=(valid_doc(), 200)
+                probe, "read_json", return_value=(with_catalog_paid_rows(valid_doc()), 200)
             ), mock.patch.object(probe, "check_privacy", return_value={"http_status": 200}), mock.patch.object(
                 probe, "check_healthz", return_value={"http_status": 200, "status": "ok", "version": "v1.8.153"}
             ), mock.patch.object(
@@ -1843,7 +1900,7 @@ class OpenRouterReadinessProbeTests(unittest.TestCase):
             with mock.patch.dict(os.environ, {"MACPROVIDER_TEST_API_KEY": "env-secret"}, clear=False), mock.patch.object(
                 probe, "check_healthz", return_value={"http_status": 200, "status": "ok", "version": "v1.8.153"}
             ), mock.patch.object(
-                probe, "read_json", return_value=(valid_doc(), 200)
+                probe, "read_json", return_value=(with_catalog_paid_rows(valid_doc()), 200)
             ), mock.patch.object(probe, "check_privacy", return_value={"http_status": 200}):
                 code = probe.main(argv)
             self.assertEqual(code, 1)
@@ -1886,7 +1943,7 @@ class OpenRouterReadinessProbeTests(unittest.TestCase):
                 os.environ,
                 {"MACPROVIDER_TEST_API_KEY": "buyer-secret", "MACPROVIDER_TEST_OPERATOR_KEY": "operator-secret"},
                 clear=False,
-            ), mock.patch.object(probe, "read_json", return_value=(valid_doc(), 200)), mock.patch.object(
+            ), mock.patch.object(probe, "read_json", return_value=(with_catalog_paid_rows(valid_doc()), 200)), mock.patch.object(
                 probe, "check_privacy", return_value={"http_status": 200}
             ), mock.patch.object(
                 probe, "check_healthz", return_value={"http_status": 200, "status": "ok", "version": "v1.8.153"}
@@ -1929,7 +1986,7 @@ class OpenRouterReadinessProbeTests(unittest.TestCase):
                 str(output),
             ]
             with mock.patch.object(probe, "check_healthz", side_effect=ValueError("malformed health payload")), mock.patch.object(
-                probe, "read_json", return_value=(valid_doc(), 200)
+                probe, "read_json", return_value=(with_catalog_paid_rows(valid_doc()), 200)
             ), mock.patch.object(probe, "check_privacy", return_value={"http_status": 200}):
                 code = probe.main(argv)
             self.assertEqual(code, 1)

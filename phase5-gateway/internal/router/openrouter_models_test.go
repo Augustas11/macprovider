@@ -20,28 +20,93 @@ func mustProjectOpenRouterModels(t *testing.T, pool []openRouterPoolSnapshot, ra
 	return doc
 }
 
+func listingRateCard() openRouterRateCard {
+	rows := make(map[string]openRouterRateCardRow, len(openRouterListings))
+	for _, listing := range openRouterListings {
+		rows[listing.CatalogKey] = openRouterRateCardRow{PromptRatePerMtok: 13500, CompletionRatePerMtok: 27000}
+	}
+	return openRouterRateCard{USDPerMillionCredits: 1, Rows: rows}
+}
+
+func listingRateCardJSON(t *testing.T) string {
+	t.Helper()
+	raw, err := json.Marshal(listingRateCard())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(raw)
+}
+
+func rowByID(t *testing.T, doc openRouterModelsDocument, id string) openRouterModelV24 {
+	t.Helper()
+	for _, row := range doc.Data {
+		if row.ID == id {
+			return row
+		}
+	}
+	t.Fatalf("missing row %q", id)
+	return openRouterModelV24{}
+}
+
+func expectedCatalogDocumentLen(llamaReadySlots int) int {
+	n := len(openRouterListings)
+	if llamaReadySlots >= 2 {
+		n++
+	}
+	return n
+}
+
+func TestOpenRouterListingsCoverLiveCatalog(t *testing.T) {
+	if len(openRouterListings) != 17 {
+		t.Fatalf("len(openRouterListings)=%d want 17 priced-v1 rows", len(openRouterListings))
+	}
+	seenPool := map[string]struct{}{}
+	seenCard := map[string]struct{}{}
+	dualFree := 0
+	for _, listing := range openRouterListings {
+		if listing.PoolID == "" || listing.CatalogKey == "" || listing.OpenRouterSlug == "" || listing.Name == "" {
+			t.Fatalf("incomplete listing: %+v", listing)
+		}
+		if _, ok := seenPool[listing.PoolID]; ok {
+			t.Fatalf("duplicate pool id %q", listing.PoolID)
+		}
+		if _, ok := seenCard[listing.CatalogKey]; ok {
+			t.Fatalf("duplicate rate-card key %q", listing.CatalogKey)
+		}
+		seenPool[listing.PoolID] = struct{}{}
+		seenCard[listing.CatalogKey] = struct{}{}
+		if listing.DualFree {
+			dualFree++
+			if listing.PoolID != openRouterLlama3BPaidID {
+				t.Fatalf("only Llama 3B may emit a free alias, got %q", listing.PoolID)
+			}
+		}
+	}
+	if dualFree != 1 {
+		t.Fatalf("dualFree listings=%d want 1", dualFree)
+	}
+}
+
 func TestProjectOpenRouterModelsDualLlamaSKU(t *testing.T) {
 	now := time.Date(2026, 9, 11, 12, 0, 0, 0, time.UTC)
 	doc := mustProjectOpenRouterModels(t, []openRouterPoolSnapshot{
 		{ID: openRouterLlama3BPaidID, ReadyProviderCount: 6, ReadySlotsTotal: 4, ReadySlotsFree: 4, MaxContextTokens: 131072},
 		{ID: openRouterQwen8BID, ReadyProviderCount: 1, ReadySlotsTotal: 1, ReadySlotsFree: 1, MaxContextTokens: 32768},
-	}, openRouterRateCard{
-		USDPerMillionCredits: 1,
-		Rows: map[string]openRouterRateCardRow{
-			openRouterLlama3BCatalogKey: {PromptRatePerMtok: 13500, CompletionRatePerMtok: 27000},
-			openRouterQwen8BCatalogKey:  {PromptRatePerMtok: 13500, CompletionRatePerMtok: 27000},
-		},
-	}, now)
-	if len(doc.Data) != 2 {
-		t.Fatalf("len(data)=%d want 2 (Qwen stays off until two warm nodes)", len(doc.Data))
+	}, listingRateCard(), now)
+	if len(doc.Data) != expectedCatalogDocumentLen(4) {
+		t.Fatalf("len(data)=%d want %d (full catalog plus Llama free alias)", len(doc.Data), expectedCatalogDocumentLen(4))
 	}
-	paid := doc.Data[0]
-	free := doc.Data[1]
-	if paid.ID != openRouterLlama3BPaidID || paid.IsFree || !paid.IsReady {
+	paid := rowByID(t, doc, openRouterLlama3BPaidID)
+	free := rowByID(t, doc, openRouterLlama3BFreeID)
+	qwen := rowByID(t, doc, openRouterQwen8BID)
+	if paid.IsFree || !paid.IsReady {
 		t.Fatalf("paid row: %+v", paid)
 	}
-	if free.ID != openRouterLlama3BFreeID || !free.IsFree || !free.IsReady {
+	if !free.IsFree || !free.IsReady {
 		t.Fatalf("free row: %+v", free)
+	}
+	if qwen.IsFree || !qwen.IsReady {
+		t.Fatalf("Qwen must list with one warm node: %+v", qwen)
 	}
 	if paid.SchemaVersion != "2.4" || free.SchemaVersion != "2.4" {
 		t.Fatalf("row schema versions paid=%q free=%q", paid.SchemaVersion, free.SchemaVersion)
@@ -116,20 +181,19 @@ func TestProjectOpenRouterModelsDualLlamaSKU(t *testing.T) {
 func TestProjectOpenRouterModelsCapacityTracksLiveSlots(t *testing.T) {
 	doc := mustProjectOpenRouterModels(t, []openRouterPoolSnapshot{
 		{ID: openRouterLlama3BPaidID, ReadyProviderCount: 6, ReadySlotsTotal: 4, ReadySlotsFree: 4, MaxContextTokens: 50000},
-	}, openRouterRateCard{USDPerMillionCredits: 1, Rows: map[string]openRouterRateCardRow{
-		openRouterLlama3BCatalogKey: {PromptRatePerMtok: 13500, CompletionRatePerMtok: 27000},
-	}}, time.Unix(1, 0).UTC())
-	if len(doc.Data) != 2 {
+	}, listingRateCard(), time.Unix(1, 0).UTC())
+	if len(doc.Data) != expectedCatalogDocumentLen(4) {
 		t.Fatalf("len(data)=%d", len(doc.Data))
 	}
-	got := doc.Data[0].Capacity
+	got := rowByID(t, doc, openRouterLlama3BPaidID).Capacity
 	if len(got) != 2 || got[0].Value != 2 || got[1].Value != 2 {
 		t.Fatalf("capacity=%+v want 2rpm/2 concurrency for paid half of shared pool", got)
 	}
-	if promptCap := doc.Data[0].InputModalities[0].Capacity[0].Value; promptCap != 2*openRouterTokensPerSecondPerSlot*60 {
+	paid := rowByID(t, doc, openRouterLlama3BPaidID)
+	if promptCap := paid.InputModalities[0].Capacity[0].Value; promptCap != 2*openRouterTokensPerSecondPerSlot*60 {
 		t.Fatalf("prompt capacity=%d", promptCap)
 	}
-	if completionCap := doc.Data[0].OutputModalities[0].Capacity[0].Value; completionCap != 2*openRouterTokensPerSecondPerSlot*60 {
+	if completionCap := paid.OutputModalities[0].Capacity[0].Value; completionCap != 2*openRouterTokensPerSecondPerSlot*60 {
 		t.Fatalf("completion capacity=%d", completionCap)
 	}
 }
@@ -137,10 +201,8 @@ func TestProjectOpenRouterModelsCapacityTracksLiveSlots(t *testing.T) {
 func TestProjectOpenRouterModelsRowsStaySchema24Native(t *testing.T) {
 	doc := mustProjectOpenRouterModels(t, []openRouterPoolSnapshot{
 		{ID: openRouterLlama3BPaidID, ReadyProviderCount: 1, ReadySlotsTotal: 1, ReadySlotsFree: 1, MaxContextTokens: 8192},
-	}, openRouterRateCard{USDPerMillionCredits: 1, Rows: map[string]openRouterRateCardRow{
-		openRouterLlama3BCatalogKey: {PromptRatePerMtok: 13500, CompletionRatePerMtok: 27000},
-	}}, time.Unix(1, 0).UTC())
-	raw, err := json.Marshal(doc.Data[0])
+	}, listingRateCard(), time.Unix(1, 0).UTC())
+	raw, err := json.Marshal(rowByID(t, doc, openRouterLlama3BPaidID))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -161,7 +223,7 @@ func TestProjectOpenRouterModelsRowsStaySchema24Native(t *testing.T) {
 	if string(row["schema_version"]) != `"2.4"` {
 		t.Fatalf("row schema_version=%s", row["schema_version"])
 	}
-	params := doc.Data[0].OutputModalities[0].SupportedParameters
+	params := rowByID(t, doc, openRouterLlama3BPaidID).OutputModalities[0].SupportedParameters
 	if params["max_tokens"].Type != "integer" || params["max_tokens"].Unit != "token" {
 		t.Fatalf("max_tokens descriptor=%+v", params["max_tokens"])
 	}
@@ -173,9 +235,7 @@ func TestProjectOpenRouterModelsRowsStaySchema24Native(t *testing.T) {
 func TestOpenRouterModelDocumentOmitsInventedAttestationRegionClaims(t *testing.T) {
 	doc := mustProjectOpenRouterModels(t, []openRouterPoolSnapshot{
 		{ID: openRouterLlama3BPaidID, ReadyProviderCount: 1, ReadySlotsTotal: 1, ReadySlotsFree: 1, MaxContextTokens: 8192},
-	}, openRouterRateCard{USDPerMillionCredits: 1, Rows: map[string]openRouterRateCardRow{
-		openRouterLlama3BCatalogKey: {PromptRatePerMtok: 13500, CompletionRatePerMtok: 27000},
-	}}, time.Unix(1, 0).UTC())
+	}, listingRateCard(), time.Unix(1, 0).UTC())
 	raw, _ := json.Marshal(doc)
 	if strings.Contains(string(raw), "compute_integrity") || strings.Contains(string(raw), "tier1_disclosure") || strings.Contains(string(raw), "us-east-1") {
 		t.Fatalf("document leaked forbidden fields: %s", raw)
@@ -185,39 +245,43 @@ func TestOpenRouterModelDocumentOmitsInventedAttestationRegionClaims(t *testing.
 func TestProjectOpenRouterModelsIsReadyRequiresWarmSlot(t *testing.T) {
 	doc := mustProjectOpenRouterModels(t, []openRouterPoolSnapshot{
 		{ID: openRouterLlama3BPaidID, ReadyProviderCount: 2, ReadySlotsTotal: 2, ReadySlotsFree: 0, MaxContextTokens: 8192},
-	}, openRouterRateCard{USDPerMillionCredits: 1, Rows: map[string]openRouterRateCardRow{
-		openRouterLlama3BCatalogKey: {PromptRatePerMtok: 13500, CompletionRatePerMtok: 27000},
-	}}, time.Unix(1, 0).UTC())
-	if len(doc.Data) != 2 {
+	}, listingRateCard(), time.Unix(1, 0).UTC())
+	if len(doc.Data) != expectedCatalogDocumentLen(2) {
 		t.Fatalf("len=%d", len(doc.Data))
 	}
-	if doc.Data[0].IsReady || doc.Data[1].IsReady {
+	if rowByID(t, doc, openRouterLlama3BPaidID).IsReady || rowByID(t, doc, openRouterLlama3BFreeID).IsReady {
 		t.Fatalf("is_ready must be false without a free slot: %+v", doc.Data)
 	}
 }
 
-func TestProjectOpenRouterModelsIncludesQwenWhenRedundant(t *testing.T) {
+func TestProjectOpenRouterModelsListsUnservedCatalogRows(t *testing.T) {
 	doc := mustProjectOpenRouterModels(t, []openRouterPoolSnapshot{
-		{ID: openRouterLlama3BPaidID, ReadyProviderCount: 2, ReadySlotsTotal: 2, ReadySlotsFree: 1, MaxContextTokens: 8192},
-		{ID: openRouterQwen8BID, ReadyProviderCount: 2, ReadySlotsTotal: 2, ReadySlotsFree: 1, MaxContextTokens: 32768},
-	}, openRouterRateCard{USDPerMillionCredits: 1, Rows: map[string]openRouterRateCardRow{
-		openRouterLlama3BCatalogKey: {PromptRatePerMtok: 13500, CompletionRatePerMtok: 27000},
-		openRouterQwen8BCatalogKey:  {PromptRatePerMtok: 13500, CompletionRatePerMtok: 27000},
-	}}, time.Unix(1, 0).UTC())
-	var sawQwen bool
-	for _, row := range doc.Data {
-		if row.ID == openRouterQwen8BID {
-			sawQwen = true
-			if row.IsFree {
-				t.Fatal("Qwen row must not be the free alias")
-			}
-			if row.OpenRouter.Slug != openRouterQwen8BSlug {
-				t.Fatalf("Qwen openrouter slug=%q want %q", row.OpenRouter.Slug, openRouterQwen8BSlug)
-			}
-		}
+		{ID: openRouterLlama3BPaidID, ReadyProviderCount: 1, ReadySlotsTotal: 1, ReadySlotsFree: 1, MaxContextTokens: 8192},
+		{ID: "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit", ReadyProviderCount: 1, ReadySlotsTotal: 4, ReadySlotsFree: 4, MaxContextTokens: 32768},
+	}, listingRateCard(), time.Unix(1, 0).UTC())
+	if len(doc.Data) != expectedCatalogDocumentLen(1) {
+		t.Fatalf("len(data)=%d want full catalog", len(doc.Data))
 	}
-	if !sawQwen {
-		t.Fatal("expected Qwen when two warm nodes")
+	qwen := rowByID(t, doc, openRouterQwen8BID)
+	if qwen.IsReady || qwen.IsFree {
+		t.Fatalf("unserved Qwen must stay listed and not ready: %+v", qwen)
+	}
+	if qwen.OpenRouter.Slug != openRouterQwen8BSlug {
+		t.Fatalf("Qwen openrouter slug=%q want %q", qwen.OpenRouter.Slug, openRouterQwen8BSlug)
+	}
+	coder := rowByID(t, doc, "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit")
+	if !coder.IsReady || coder.IsFree {
+		t.Fatalf("served catalog row must be ready: %+v", coder)
+	}
+	glm := rowByID(t, doc, "mlx-community/GLM-4.5-Air-4bit")
+	if glm.IsReady {
+		t.Fatalf("unserved catalog row must not invent is_ready true: %+v", glm)
+	}
+	if qwen.Capacity[1].Value != 0 || glm.Capacity[1].Value != 0 {
+		t.Fatalf("unserved rows must advertise 0 concurrency, qwen=%+v glm=%+v", qwen.Capacity, glm.Capacity)
+	}
+	if qwen.InputModalities[0].Capacity[0].Value != 0 || glm.OutputModalities[0].Capacity[0].Value != 0 {
+		t.Fatalf("unserved rows must advertise 0 token capacity")
 	}
 }
 
@@ -230,16 +294,15 @@ func TestProjectOpenRouterModelsIgnoresNonReadyCapacity(t *testing.T) {
 			ReadySlotsFree:     0,
 			MaxContextTokens:   8192,
 		},
-	}, openRouterRateCard{USDPerMillionCredits: 1, Rows: map[string]openRouterRateCardRow{
-		openRouterLlama3BCatalogKey: {PromptRatePerMtok: 13500, CompletionRatePerMtok: 27000},
-	}}, time.Unix(1, 0).UTC())
-	if len(doc.Data) != 1 {
+	}, listingRateCard(), time.Unix(1, 0).UTC())
+	if len(doc.Data) != expectedCatalogDocumentLen(1) {
 		t.Fatalf("len(data)=%d", len(doc.Data))
 	}
-	if doc.Data[0].IsReady {
+	paid := rowByID(t, doc, openRouterLlama3BPaidID)
+	if paid.IsReady {
 		t.Fatal("is_ready must use ready free slots, not aggregate free slots from unavailable providers")
 	}
-	if got := doc.Data[0].Capacity[1].Value; got != 1 {
+	if got := paid.Capacity[1].Value; got != 1 {
 		t.Fatalf("concurrency=%d want 1 ready slot", got)
 	}
 }
@@ -247,14 +310,18 @@ func TestProjectOpenRouterModelsIgnoresNonReadyCapacity(t *testing.T) {
 func TestProjectOpenRouterModelsOmitsFreeAliasWhenCapacityCannotBeShared(t *testing.T) {
 	doc := mustProjectOpenRouterModels(t, []openRouterPoolSnapshot{
 		{ID: openRouterLlama3BPaidID, ReadyProviderCount: 1, ReadySlotsTotal: 1, ReadySlotsFree: 1, MaxContextTokens: 8192},
-	}, openRouterRateCard{USDPerMillionCredits: 1, Rows: map[string]openRouterRateCardRow{
-		openRouterLlama3BCatalogKey: {PromptRatePerMtok: 13500, CompletionRatePerMtok: 27000},
-	}}, time.Unix(1, 0).UTC())
-	if len(doc.Data) != 1 {
-		t.Fatalf("len(data)=%d want 1 paid row until capacity can be split", len(doc.Data))
+	}, listingRateCard(), time.Unix(1, 0).UTC())
+	if len(doc.Data) != expectedCatalogDocumentLen(1) {
+		t.Fatalf("len(data)=%d want catalog without Llama free alias", len(doc.Data))
 	}
-	if doc.Data[0].ID != openRouterLlama3BPaidID || doc.Data[0].IsFree {
-		t.Fatalf("unexpected row: %+v", doc.Data[0])
+	paid := rowByID(t, doc, openRouterLlama3BPaidID)
+	if paid.IsFree {
+		t.Fatalf("unexpected row: %+v", paid)
+	}
+	for _, row := range doc.Data {
+		if row.ID == openRouterLlama3BFreeID {
+			t.Fatal("free alias must stay omitted until capacity can be split")
+		}
 	}
 }
 
@@ -282,6 +349,14 @@ func TestProjectOpenRouterModelsFailsClosedOnInvalidPaidRateCard(t *testing.T) {
 				openRouterLlama3BCatalogKey: {PromptRatePerMtok: 0, CompletionRatePerMtok: 27000},
 			}},
 		},
+		{
+			name: "missing non-llama catalog key",
+			card: func() openRouterRateCard {
+				card := listingRateCard()
+				delete(card.Rows, "z-ai/glm-4.5-air")
+				return card
+			}(),
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -294,7 +369,7 @@ func TestProjectOpenRouterModelsFailsClosedOnInvalidPaidRateCard(t *testing.T) {
 
 func TestOpenRouterModelsHandlerUnauthenticated(t *testing.T) {
 	poolz := `{"pool":[{"model_id":"mlx-community/Llama-3.2-3B-Instruct-4bit","state":"ready","slots_free":2,"slots_total":2,"max_context_tokens":8192,"auth_state":"bearer_validated"}]}`
-	rateCard := `{"usd_per_million_credits":1,"rows":{"meta-llama/llama-3.2-3b-instruct":{"prompt_rate_per_mtok":13500,"completion_rate_per_mtok":27000}}}`
+	rateCard := listingRateCardJSON(t)
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/poolz"):
@@ -319,11 +394,11 @@ func TestOpenRouterModelsHandlerUnauthenticated(t *testing.T) {
 	if err := json.Unmarshal(resp.Body.Bytes(), &doc); err != nil {
 		t.Fatalf("decode: %v body=%s", err, resp.Body.String())
 	}
-	if len(doc.Data) != 2 {
-		t.Fatalf("doc=%+v", doc)
+	if len(doc.Data) != expectedCatalogDocumentLen(2) {
+		t.Fatalf("doc rows=%d want %d", len(doc.Data), expectedCatalogDocumentLen(2))
 	}
-	if doc.Data[0].SchemaVersion != "2.4" || doc.Data[1].SchemaVersion != "2.4" {
-		t.Fatalf("row schema versions=%q/%q", doc.Data[0].SchemaVersion, doc.Data[1].SchemaVersion)
+	if rowByID(t, doc, openRouterLlama3BPaidID).SchemaVersion != "2.4" || rowByID(t, doc, openRouterLlama3BFreeID).SchemaVersion != "2.4" {
+		t.Fatalf("row schema versions=%q/%q", rowByID(t, doc, openRouterLlama3BPaidID).SchemaVersion, rowByID(t, doc, openRouterLlama3BFreeID).SchemaVersion)
 	}
 }
 

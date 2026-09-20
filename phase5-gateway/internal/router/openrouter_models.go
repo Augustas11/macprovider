@@ -15,7 +15,7 @@ const (
 	openRouterModelsPath               = "/v1/openrouter/models"
 	openRouterSchemaVersion            = "2.4"
 	openRouterLlama3BCreatedAt         = 1729728000
-	openRouterQwen8BCreatedAt          = 1748822400
+	openRouterCatalogCreatedAt         = 1789776000 // 2026-09-19 priced-v1 cut
 	openRouterLlama3BPaidID            = "mlx-community/Llama-3.2-3B-Instruct-4bit"
 	openRouterLlama3BFreeID            = "mlx-community/Llama-3.2-3B-Instruct-4bit-free"
 	openRouterLlama3BCatalogKey        = "meta-llama/llama-3.2-3b-instruct"
@@ -28,40 +28,174 @@ const (
 )
 
 type openRouterListingSpec struct {
-	PoolID           string
-	FreeID           string
-	CatalogKey       string
-	OpenRouterSlug   string
-	Name             string
-	HuggingFaceID    string
-	Tokenizer        string
-	Created          int64
-	MinWarmProviders int
-	DualFree         bool
+	PoolID         string
+	FreeID         string
+	CatalogKey     string
+	OpenRouterSlug string
+	Name           string
+	HuggingFaceID  string
+	Tokenizer      string
+	Quantization   string
+	Created        int64
+	DualFree       bool
 }
 
 var openRouterListings = []openRouterListingSpec{
 	{
-		PoolID:           openRouterLlama3BPaidID,
-		FreeID:           openRouterLlama3BFreeID,
-		CatalogKey:       openRouterLlama3BCatalogKey,
-		OpenRouterSlug:   openRouterLlama3BCatalogKey,
-		Name:             "Llama 3.2 3B Instruct (4-bit)",
-		HuggingFaceID:    openRouterLlama3BPaidID,
-		Tokenizer:        "Llama3",
-		Created:          openRouterLlama3BCreatedAt,
-		MinWarmProviders: 1,
-		DualFree:         true,
+		PoolID:         openRouterLlama3BPaidID,
+		FreeID:         openRouterLlama3BFreeID,
+		CatalogKey:     openRouterLlama3BCatalogKey,
+		OpenRouterSlug: openRouterLlama3BCatalogKey,
+		Name:           "Llama 3.2 3B Instruct (4-bit)",
+		HuggingFaceID:  openRouterLlama3BPaidID,
+		Tokenizer:      "Llama3",
+		Created:        openRouterLlama3BCreatedAt,
+		DualFree:       true,
 	},
 	{
-		PoolID:           openRouterQwen8BID,
-		CatalogKey:       openRouterQwen8BCatalogKey,
-		OpenRouterSlug:   openRouterQwen8BSlug,
-		Name:             "Qwen3 8B (4-bit)",
-		HuggingFaceID:    openRouterQwen8BID,
-		Tokenizer:        "Qwen",
-		Created:          openRouterQwen8BCreatedAt,
-		MinWarmProviders: 2,
+		PoolID:         "mlx-community/Meta-Llama-3.1-8B-Instruct-4bit",
+		CatalogKey:     "meta-llama/llama-3.1-8b-instruct",
+		OpenRouterSlug: "meta-llama/llama-3.1-8b-instruct",
+		Name:           "Llama 3.1 8B Instruct (4-bit)",
+		HuggingFaceID:  "mlx-community/Meta-Llama-3.1-8B-Instruct-4bit",
+		Tokenizer:      "Llama3",
+		Created:        openRouterCatalogCreatedAt,
+	},
+	{
+		PoolID:         openRouterQwen8BID,
+		CatalogKey:     openRouterQwen8BCatalogKey,
+		OpenRouterSlug: openRouterQwen8BSlug,
+		Name:           "Qwen3 8B (4-bit)",
+		HuggingFaceID:  openRouterQwen8BID,
+		Tokenizer:      "Qwen",
+		Created:        openRouterCatalogCreatedAt,
+	},
+	{
+		PoolID:         "mlx-community/Qwen3-32B-4bit",
+		CatalogKey:     "qwen3-32b",
+		OpenRouterSlug: "qwen/qwen3-32b",
+		Name:           "Qwen3 32B (4-bit)",
+		HuggingFaceID:  "mlx-community/Qwen3-32B-4bit",
+		Tokenizer:      "Qwen",
+		Created:        openRouterCatalogCreatedAt,
+	},
+	{
+		PoolID:         "mlx-community/Qwen2.5-Coder-32B-Instruct-4bit",
+		CatalogKey:     "qwen2.5-coder-32b-instruct",
+		OpenRouterSlug: "qwen/qwen2.5-coder-32b-instruct",
+		Name:           "Qwen2.5 Coder 32B Instruct (4-bit)",
+		HuggingFaceID:  "mlx-community/Qwen2.5-Coder-32B-Instruct-4bit",
+		Tokenizer:      "Qwen",
+		Created:        openRouterCatalogCreatedAt,
+	},
+	{
+		PoolID:         "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
+		CatalogKey:     "qwen3-coder-30b-a3b-instruct",
+		OpenRouterSlug: "qwen/qwen3-coder-30b-a3b-instruct",
+		Name:           "Qwen3 Coder 30B A3B Instruct (4-bit)",
+		HuggingFaceID:  "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
+		Tokenizer:      "Qwen",
+		Created:        openRouterCatalogCreatedAt,
+	},
+	{
+		PoolID:         "mlx-community/gemma-4-26b-a4b-it-4bit",
+		CatalogKey:     "gemma-4-26b-a4b-it",
+		OpenRouterSlug: "google/gemma-4-26b-a4b-it",
+		Name:           "Gemma 4 26B A4B IT (4-bit)",
+		HuggingFaceID:  "mlx-community/gemma-4-26b-a4b-it-4bit",
+		Tokenizer:      "Gemma",
+		Created:        openRouterCatalogCreatedAt,
+	},
+	{
+		PoolID:         "mlx-community/gpt-oss-20b-MXFP4-Q8",
+		CatalogKey:     "openai/gpt-oss-20b",
+		OpenRouterSlug: "openai/gpt-oss-20b",
+		Name:           "GPT OSS 20B (MXFP4 Q8)",
+		HuggingFaceID:  "mlx-community/gpt-oss-20b-MXFP4-Q8",
+		Tokenizer:      "Harmony",
+		Quantization:   "mxfp4",
+		Created:        openRouterCatalogCreatedAt,
+	},
+	{
+		PoolID:         "mlx-community/NVIDIA-Nemotron-3-Nano-30B-A3B-4bit",
+		CatalogKey:     "nemotron-3-nano-30b-a3b",
+		OpenRouterSlug: "nvidia/nemotron-3-nano-30b-a3b",
+		Name:           "Nemotron 3 Nano 30B A3B (4-bit)",
+		HuggingFaceID:  "mlx-community/NVIDIA-Nemotron-3-Nano-30B-A3B-4bit",
+		Tokenizer:      "Nemotron",
+		Created:        openRouterCatalogCreatedAt,
+	},
+	{
+		PoolID:         "mlx-community/gpt-oss-120b-4bit",
+		CatalogKey:     "openai/gpt-oss-120b",
+		OpenRouterSlug: "openai/gpt-oss-120b",
+		Name:           "GPT OSS 120B (4-bit)",
+		HuggingFaceID:  "mlx-community/gpt-oss-120b-4bit",
+		Tokenizer:      "Harmony",
+		Created:        openRouterCatalogCreatedAt,
+	},
+	{
+		PoolID:         "mlx-community/Qwen3-30B-A3B-Instruct-2507-4bit",
+		CatalogKey:     "qwen3-30b-a3b-instruct-2507",
+		OpenRouterSlug: "qwen/qwen3-30b-a3b-instruct-2507",
+		Name:           "Qwen3 30B A3B Instruct 2507 (4-bit)",
+		HuggingFaceID:  "mlx-community/Qwen3-30B-A3B-Instruct-2507-4bit",
+		Tokenizer:      "Qwen",
+		Created:        openRouterCatalogCreatedAt,
+	},
+	{
+		PoolID:         "mlx-community/Qwen3.5-27B-4bit",
+		CatalogKey:     "qwen3.5-27b",
+		OpenRouterSlug: "qwen/qwen3.5-27b",
+		Name:           "Qwen3.5 27B (4-bit)",
+		HuggingFaceID:  "mlx-community/Qwen3.5-27B-4bit",
+		Tokenizer:      "Qwen",
+		Created:        openRouterCatalogCreatedAt,
+	},
+	{
+		PoolID:         "mlx-community/Qwen3.5-35B-A3B-4bit",
+		CatalogKey:     "qwen3.5-35b-a3b",
+		OpenRouterSlug: "qwen/qwen3.5-35b-a3b",
+		Name:           "Qwen3.5 35B A3B (4-bit)",
+		HuggingFaceID:  "mlx-community/Qwen3.5-35B-A3B-4bit",
+		Tokenizer:      "Qwen",
+		Created:        openRouterCatalogCreatedAt,
+	},
+	{
+		PoolID:         "mlx-community/Qwen3.6-27B-4bit",
+		CatalogKey:     "qwen3.6-27b",
+		OpenRouterSlug: "qwen/qwen3.6-27b",
+		Name:           "Qwen3.6 27B (4-bit)",
+		HuggingFaceID:  "mlx-community/Qwen3.6-27B-4bit",
+		Tokenizer:      "Qwen",
+		Created:        openRouterCatalogCreatedAt,
+	},
+	{
+		PoolID:         "mlx-community/Qwen3.6-35B-A3B-4bit",
+		CatalogKey:     "qwen3.6-35b-a3b",
+		OpenRouterSlug: "qwen/qwen3.6-35b-a3b",
+		Name:           "Qwen3.6 35B A3B (4-bit)",
+		HuggingFaceID:  "mlx-community/Qwen3.6-35B-A3B-4bit",
+		Tokenizer:      "Qwen",
+		Created:        openRouterCatalogCreatedAt,
+	},
+	{
+		PoolID:         "mlx-community/Qwen3.8-27B-4bit",
+		CatalogKey:     "qwen3.8-27b",
+		OpenRouterSlug: "qwen/qwen3.8-27b",
+		Name:           "Qwen3.8 27B (4-bit)",
+		HuggingFaceID:  "mlx-community/Qwen3.8-27B-4bit",
+		Tokenizer:      "Qwen",
+		Created:        openRouterCatalogCreatedAt,
+	},
+	{
+		PoolID:         "mlx-community/GLM-4.5-Air-4bit",
+		CatalogKey:     "z-ai/glm-4.5-air",
+		OpenRouterSlug: "z-ai/glm-4.5-air",
+		Name:           "GLM 4.5 Air (4-bit)",
+		HuggingFaceID:  "mlx-community/GLM-4.5-Air-4bit",
+		Tokenizer:      "GLM",
+		Created:        openRouterCatalogCreatedAt,
 	},
 }
 
@@ -238,11 +372,11 @@ func projectOpenRouterModels(pool []openRouterPoolSnapshot, rateCard openRouterR
 		byID[model.ID] = model
 	}
 	created := now.UTC().Unix()
-	data := make([]openRouterModelV24, 0, 4)
+	data := make([]openRouterModelV24, 0, len(openRouterListings)+1)
 	for _, listing := range openRouterListings {
 		live, ok := byID[listing.PoolID]
-		if !ok || live.ReadyProviderCount < listing.MinWarmProviders {
-			continue
+		if !ok {
+			live = openRouterPoolSnapshot{ID: listing.PoolID}
 		}
 		ready := live.ReadySlotsFree > 0
 		contextLength := live.MaxContextTokens
@@ -274,6 +408,10 @@ func openRouterModelRow(listing openRouterListingSpec, id string, isFree, ready 
 	if listing.Created > 0 {
 		created = listing.Created
 	}
+	quantization := listing.Quantization
+	if quantization == "" {
+		quantization = "int4"
+	}
 	maxOutput := contextLength
 	if maxOutput > 4096 {
 		maxOutput = 4096
@@ -284,7 +422,7 @@ func openRouterModelRow(listing openRouterListingSpec, id string, isFree, ready 
 		ID:            id,
 		Name:          name,
 		Created:       created,
-		Quantization:  "int4",
+		Quantization:  quantization,
 		Tokenizer:     listing.Tokenizer,
 		HuggingFaceID: listing.HuggingFaceID,
 		InputModalities: []openRouterInputModality{{
@@ -325,7 +463,7 @@ func openRouterBaseConcurrency(live openRouterPoolSnapshot) int {
 		concurrency = live.ReadyProviderCount
 	}
 	if concurrency < 1 {
-		concurrency = 1
+		return 0
 	}
 	return concurrency
 }
@@ -347,7 +485,7 @@ func openRouterCapacityEntries(live openRouterPoolSnapshot, maxOutputTokens int,
 	return openRouterDerivedCapacity{
 		Concurrency:       concurrency,
 		RequestsPerMinute: requestsPerMinute,
-		TokensPerMinute:   max(1, concurrency*openRouterTokensPerSecondPerSlot*60),
+		TokensPerMinute:   concurrency * openRouterTokensPerSecondPerSlot * 60,
 	}
 }
 
