@@ -2,7 +2,7 @@
 
 Status: active control ledger
 Date: 2026-09-15
-Base evidence: `origin/main` at `68b90269`
+Base evidence: `origin/main` at `12de7aea` plus PR #1649
 Decision: freeze new Build 1 implementation slices unless they name one Build 1 lane from this document.
 
 ## Purpose
@@ -61,6 +61,8 @@ future sessions will keep interpreting stale handoffs as active work.
 | #1512 | `ab181787` | Narrow MVP evidence validation is guarded against overclaiming and the old dependency is merged. | Does not create the physical evidence bundle, provider execution path, or product acceptance. |
 | #1519 | `82e8f7c7` | Configured v2 storage budget groundwork is landed behind private boundaries. | No public v2 status, env/YAML runtime parser, preparation action, admission, settlement, payout, release, or production activation. |
 | #1525 | `68b90269` | Lane A `macprovider-cli models prepare` exists behind exact tuple, staging coordinator, `--json`, and `--yes` guards, and fails closed with transaction events. | No signed artifact authority, artifact download, staging, durable adoption, physical provider run, admission, settlement, payout, release, or production activation. |
+| #1530 | `4913590c` | The guarded `models prepare` path verifies the exact Lane A signed artifact authority tuple from the staging artifact feed before doing anything else. | No artifact download, staging, durable adoption, physical provider run, admission, settlement, payout, release, or production activation. |
+| #1649 | open, head `1971e7a6` | `models prepare` stages the exact MLX snapshot into an isolated hash-qualified directory, verifies the snapshot-manifest digest against the signed authority, and adopts it into the provider-owned durable store; failure, timeout, and cancellation leave the active model and durable store unchanged. | No private preparation-state record, `serve`/status evidence binding, staging admission, gateway request, receipt/audit correlation, settlement, payout, release, physical run, or production activation. |
 
 Current open PRs as of 2026-09-15 are not Build 1 control blockers:
 
@@ -89,10 +91,11 @@ Current open PRs as of 2026-09-15 are not Build 1 control blockers:
 
 Lane A blockers:
 
-- Wire signed artifact authority into the guarded `models prepare` path for the
-  exact Lane A tuple.
-- Stage and verify the exact MLX artifact before durable adoption, without
-  changing the active model on any failure or cancellation.
+- Record private preparation state for the adopted Lane A artifact through the
+  existing `ModelPreparationPrivateStore` contracts so `models catalog-economics`
+  can project it without touching public v1 output.
+- Bind `serve` local status evidence (`model_hash`, `weights_manifest_sha256`)
+  to the adopted Lane A artifact for the evidence validator.
 - Produce a measured, artifact-bound staging release or equivalent staging
   input for the selected Llama 3B tuple.
 - Run the physical Apple Silicon staging journey against staging
@@ -114,11 +117,12 @@ Lane B blockers:
 
 ## Next Authorized Action
 
-The next implementation work, if Build 1 continues, is the Lane A artifact
-authority slice for the guarded `models prepare` path. It should fetch or load
-only the staging signed artifact feed for the approved Llama 3B tuple, validate
-the signed authority fields needed for preparation, and preserve the current
-fail-closed behavior unless the exact authority is present.
+The next implementation work, if Build 1 continues, is the Lane A private
+preparation-state record for the adopted artifact: after `models prepare`
+adopts the verified Lane A tuple (#1649), write the private published-inventory
+record through the existing `ModelPreparationPrivateStore` envelope contracts
+and keep public `models catalog-economics` v1 output unchanged. After that, the
+`serve` local status evidence binding for the same artifact.
 
 That PR or handoff must state:
 
