@@ -14,6 +14,7 @@ names = {
     "is_bootstrap_principal",
     "headless_acceptance_repair_mode",
     "ensure_provider_credentials", "submit_required_hardware_evidence",
+    "append_fresh_autotune_operator_bounds",
     "run_autotune_recommend_apply",
 }
 lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
@@ -269,7 +270,7 @@ awk '
   in_main && /write_install_manifest / && NR > watchdog { manifest=NR }
   in_main && /start_manual_service / { start=NR }
   in_main && /if ! wait_for_local_model / { self_test=NR }
-  in_main && /if ! wait_for_coordinator / { coordinator=NR }
+  in_main && /wait_for_coordinator "\$provider_id" "\$coordinator_base"/ { coordinator=NR }
   in_main && /commit_install_transaction/ && NR > coordinator { commit=NR }
   END {
     exit !(begin < plist && plist < watchdog && watchdog < manifest &&
