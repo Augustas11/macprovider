@@ -13005,8 +13005,10 @@ wait_for_coordinator() {
   # Tier C M2). A flat 30s gate rolled back installs that had genuinely reached
   # buyer_serving. Give coordinator admission a generous deadline aligned with
   # the model-load reality (the local /v1/models waits above use 300s/1200s).
-  # The exact catalog-identity / legacy_bridge admission proofs below are
-  # unchanged; only the timeout widens. Overridable for tests; a malformed
+  # Exact buyer-serving admission remains the success proof. Normal installs
+  # also remember exact-session pool-ready as a nonfatal commit signal after the
+  # readiness window; signed emergency rollback stays strict. Overridable for
+  # tests; a malformed
   # override (empty, non-numeric, leading-zero octal, zero, or oversized) falls
   # back to 300 rather than aborting the arithmetic under `set -u` or making the
   # gate fail immediately, and a valid-but-huge value is clamped to 1800s (30
@@ -14339,10 +14341,10 @@ main() {
   fi
 
   # Keep rollback armed until coordinator admission proves the selected mode:
-  # exact current/previous catalog identity for normal upgrades, or exact
-  # session-bound buyer-serving legacy_bridge proof for an explicit signed
-  # emergency downgrade.
-  log "Waiting for exact coordinator admission and buyer-serving readiness (cold model load on low-RAM Macs can take minutes)."
+  # exact current/previous catalog identity for immediate normal-install commit,
+  # exact-session pool-ready after the readiness window, or exact session-bound
+  # buyer-serving legacy_bridge proof for an explicit signed emergency downgrade.
+  log "Waiting for coordinator admission; exact buyer-serving commits immediately, exact pool-ready can commit after the readiness window."
   coordinator_admission_rc=0
   wait_for_coordinator "$provider_id" "$coordinator_base" || coordinator_admission_rc=$?
   if [ "$coordinator_admission_rc" -ne 0 ]; then
