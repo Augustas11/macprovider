@@ -1,0 +1,65 @@
+{
+  "aggregateCVPct": 0,
+  "aggregateTPSRuns": [],
+  "aggregateTPSp50": 0,
+  "aggregateUpliftVsPagedSingleRow": 0,
+  "aggregateVsProductionSerial": 0,
+  "blockSizeTokens": 16,
+  "compiled": true,
+  "decodeTokensPerRow": 32,
+  "engine": "scheduler",
+  "layerCount": 48,
+  "leftovers": {
+    "replay": {
+      "firstDisposition": "eligible_owner",
+      "pass": true,
+      "replayDisposition": "non_settling_replay",
+      "requestID": "msb-replay-owner",
+      "tokensMatch": true
+    },
+    "usagePass": true,
+    "usageRows": [
+      {
+        "cachedPromptTokens": 0,
+        "completionTokens": 32,
+        "emittedTokens": 32,
+        "promptTokens": 1024,
+        "requestID": "msb-replay-owner",
+        "settlementDisposition": "eligible_owner",
+        "terminalStatus": "length"
+      },
+      {
+        "cachedPromptTokens": 0,
+        "completionTokens": 32,
+        "emittedTokens": 32,
+        "promptTokens": 1024,
+        "requestID": "msb-replay-owner",
+        "settlementDisposition": "non_settling_replay",
+        "terminalStatus": "length"
+      }
+    ]
+  },
+  "maxPhysicalBlocks": 1024,
+  "mlxSwiftLMPin": "mlxlm-3.31.4",
+  "modelID": "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
+  "modelTag": "Qwen3-Coder-30B-A3B-Instruct-4bit",
+  "pagedSingleRowCVPct": 0,
+  "pagedSingleRowTPSRuns": [],
+  "pagedSingleRowTPSp50": 0,
+  "peakRSSMB": 32999,
+  "perRowFractionOfPagedSingleRow": 0,
+  "perRowTPSp50": 0,
+  "productionSerialCVPct": 0,
+  "productionSerialPromptTokens": 1024,
+  "productionSerialTPSRuns": [],
+  "productionSerialTPSp50": 0,
+  "promptTokenLengths": [
+    1024
+  ],
+  "promptTokensPerRow": 1024,
+  "rows": 1,
+  "runs": 1,
+  "scenario": "replay",
+  "schemaVersion": 4,
+  "timestamp": "2026-09-20T07:46:18Z"
+}

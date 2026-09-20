@@ -1,0 +1,85 @@
+{
+  "aggregateCVPct": 0,
+  "aggregateTPSRuns": [],
+  "aggregateTPSp50": 0,
+  "aggregateUpliftVsPagedSingleRow": 0,
+  "aggregateVsProductionSerial": 0,
+  "blockSizeTokens": 16,
+  "compiled": true,
+  "decodeTokensPerRow": 32,
+  "engine": "scheduler",
+  "layerCount": 48,
+  "leftovers": {
+    "drain": {
+      "activeRowsCompleted": true,
+      "activeSettlements": [
+        "eligible_owner",
+        "eligible_owner"
+      ],
+      "activeStatuses": [
+        "length",
+        "length"
+      ],
+      "pass": true,
+      "permitIssued": true,
+      "permitValid": true,
+      "postDrainRejected": true,
+      "queuedRejected": true
+    },
+    "usagePass": true,
+    "usageRows": [
+      {
+        "cachedPromptTokens": 0,
+        "completionTokens": 0,
+        "emittedTokens": 0,
+        "promptTokens": 0,
+        "requestID": "msb-drain-queued",
+        "settlementDisposition": "not_eligible",
+        "terminalStatus": "rejected"
+      },
+      {
+        "cachedPromptTokens": 0,
+        "completionTokens": 32,
+        "emittedTokens": 32,
+        "promptTokens": 1024,
+        "requestID": "msb-drain-a",
+        "settlementDisposition": "eligible_owner",
+        "terminalStatus": "length"
+      },
+      {
+        "cachedPromptTokens": 0,
+        "completionTokens": 32,
+        "emittedTokens": 32,
+        "promptTokens": 1024,
+        "requestID": "msb-drain-b",
+        "settlementDisposition": "eligible_owner",
+        "terminalStatus": "length"
+      }
+    ]
+  },
+  "maxPhysicalBlocks": 1024,
+  "mlxSwiftLMPin": "mlxlm-3.31.4",
+  "modelID": "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
+  "modelTag": "Qwen3-Coder-30B-A3B-Instruct-4bit",
+  "pagedSingleRowCVPct": 0,
+  "pagedSingleRowTPSRuns": [],
+  "pagedSingleRowTPSp50": 0,
+  "peakRSSMB": 33001,
+  "perRowFractionOfPagedSingleRow": 0,
+  "perRowTPSp50": 0,
+  "productionSerialCVPct": 0,
+  "productionSerialPromptTokens": 1024,
+  "productionSerialTPSRuns": [],
+  "productionSerialTPSp50": 0,
+  "promptTokenLengths": [
+    1024,
+    1024,
+    1024
+  ],
+  "promptTokensPerRow": 1024,
+  "rows": 3,
+  "runs": 1,
+  "scenario": "drain",
+  "schemaVersion": 4,
+  "timestamp": "2026-09-20T07:59:23Z"
+}

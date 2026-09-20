@@ -1,0 +1,77 @@
+{
+  "aggregateCVPct": 0,
+  "aggregateTPSRuns": [
+    66.4599490574035
+  ],
+  "aggregateTPSp50": 66.4599490574035,
+  "aggregateUpliftVsPagedSingleRow": 0.7273053406538557,
+  "aggregateVsProductionSerial": 0.6307528293739922,
+  "blockSizeTokens": 16,
+  "compiled": true,
+  "decodeTokensPerRow": 32,
+  "engine": "scheduler",
+  "layerCount": 48,
+  "leftovers": {
+    "parity": {
+      "batchedRowMatches": [
+        false,
+        false
+      ],
+      "batchedTokenSHA256": "ca231ebb218d40ee7346d124d24d70bf5237a14d160293e99e306a557bec4898",
+      "comparedTokens": 32,
+      "firstDivergenceIndex": 9,
+      "oneRowMatch": false,
+      "pass": false,
+      "serialTokenSHA256": "6c79860eaec2bdcf3c22121da35c3af87ab64bd717a9a230ca7e59085adc0605"
+    },
+    "usagePass": true,
+    "usageRows": [
+      {
+        "cachedPromptTokens": 0,
+        "completionTokens": 32,
+        "emittedTokens": 32,
+        "promptTokens": 1024,
+        "requestID": "msb-sched-0-FDEC0BC4-5BC4-476D-88F9-5A39DA53C3C5",
+        "settlementDisposition": "eligible_owner",
+        "terminalStatus": "length"
+      },
+      {
+        "cachedPromptTokens": 0,
+        "completionTokens": 32,
+        "emittedTokens": 32,
+        "promptTokens": 1024,
+        "requestID": "msb-sched-1-46A1D437-E8E9-4898-96F2-B1EB7B1CB63F",
+        "settlementDisposition": "eligible_owner",
+        "terminalStatus": "length"
+      }
+    ]
+  },
+  "maxPhysicalBlocks": 1024,
+  "mlxSwiftLMPin": "mlxlm-3.31.4",
+  "modelID": "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
+  "modelTag": "Qwen3-Coder-30B-A3B-Instruct-4bit",
+  "pagedSingleRowCVPct": 0,
+  "pagedSingleRowTPSRuns": [
+    91.37833223891256
+  ],
+  "pagedSingleRowTPSp50": 91.37833223891256,
+  "peakRSSMB": 33000,
+  "perRowFractionOfPagedSingleRow": 0.7273053406538557,
+  "perRowTPSp50": 66.4599490574035,
+  "productionSerialCVPct": 0,
+  "productionSerialPromptTokens": 1024,
+  "productionSerialTPSRuns": [
+    105.36607362247345
+  ],
+  "productionSerialTPSp50": 105.36607362247345,
+  "promptTokenLengths": [
+    1024,
+    1024
+  ],
+  "promptTokensPerRow": 1024,
+  "rows": 2,
+  "runs": 1,
+  "scenario": "parity",
+  "schemaVersion": 4,
+  "timestamp": "2026-09-20T07:46:26Z"
+}

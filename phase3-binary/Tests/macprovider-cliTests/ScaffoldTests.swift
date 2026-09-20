@@ -81,8 +81,146 @@ final class DecodeBenchHelperTests: XCTestCase {
         XCTAssertEqual(MSBThroughputEngine(rawValue: "contiguous"), .contiguous)
         XCTAssertEqual(MSBThroughputEngine(rawValue: "paged"), .paged)
         XCTAssertEqual(MSBThroughputEngine(rawValue: "scheduler"), .scheduler)
+        XCTAssertEqual(MSBThroughputEngine(rawValue: "serial-parallel"), .serialParallel)
         XCTAssertNil(MSBThroughputEngine(rawValue: "fused"))
-        XCTAssertEqual(MSBThroughputEngine.allCases.count, 3)
+        XCTAssertEqual(MSBThroughputEngine.allCases.count, 4)
+    }
+
+    func testMSBThroughputScenarioParsesKnownValues() {
+        XCTAssertEqual(MSBThroughputScenario(rawValue: "throughput"), .throughput)
+        XCTAssertEqual(MSBThroughputScenario(rawValue: "msb03"), .msb03)
+        XCTAssertEqual(MSBThroughputScenario(rawValue: "msb05"), .msb05)
+        XCTAssertEqual(MSBThroughputScenario(rawValue: "parity"), .parity)
+        XCTAssertEqual(MSBThroughputScenario(rawValue: "isolation"), .isolation)
+        XCTAssertEqual(MSBThroughputScenario(rawValue: "replay"), .replay)
+        XCTAssertEqual(MSBThroughputScenario(rawValue: "drain"), .drain)
+        XCTAssertEqual(MSBThroughputScenario(rawValue: "leftovers"), .leftovers)
+        XCTAssertEqual(MSBThroughputScenario.allCases.count, 8)
+    }
+
+    func testMSB03PromptLengthsAndGates() {
+        XCTAssertEqual(msb03PromptLengths(), [512, 1024, 1536, 2048])
+        XCTAssertTrue(msb03AggregatePass(aggregateVsSerial: 1.21))
+        XCTAssertFalse(msb03AggregatePass(aggregateVsSerial: 1.2))
+        XCTAssertTrue(msb03ShortRequestTTFTPass(ratio: 2.0))
+        XCTAssertFalse(msb03ShortRequestTTFTPass(ratio: 2.01))
+        XCTAssertFalse(msb03ShortRequestTTFTPass(ratio: 0))
+    }
+
+    func testMSBTemp0ParityAndUsageAttribution() {
+        let match = msbTemp0ParityMatch(serial: [1, 2, 3, 4], batched: [1, 2, 3, 9], comparedTokens: 4)
+        XCTAssertFalse(match.match)
+        XCTAssertEqual(match.firstDivergence, 3)
+        XCTAssertTrue(msbTemp0ParityMatch(serial: [1, 2], batched: [1, 2, 3], comparedTokens: 2).match)
+        XCTAssertEqual(
+            msbTokenSequenceSHA256([1, 2]),
+            msbTokenSequenceSHA256([1, 2])
+        )
+        XCTAssertNotEqual(
+            msbTokenSequenceSHA256([1, 2]),
+            msbTokenSequenceSHA256([2, 1])
+        )
+        let usage = [
+            MSBUsageRow(
+                requestID: "a",
+                promptTokens: 512,
+                completionTokens: 256,
+                emittedTokens: 256,
+                cachedPromptTokens: 0,
+                terminalStatus: "length",
+                settlementDisposition: "eligible_owner"
+            ),
+            MSBUsageRow(
+                requestID: "b",
+                promptTokens: 1024,
+                completionTokens: 256,
+                emittedTokens: 256,
+                cachedPromptTokens: 0,
+                terminalStatus: "length",
+                settlementDisposition: "eligible_owner"
+            ),
+        ]
+        XCTAssertTrue(msbUsageAttributionPass(
+            rows: usage,
+            expectedPromptTokens: [512, 1024],
+            expectedCompletionTokens: 256
+        ))
+        XCTAssertFalse(msbUsageAttributionPass(
+            rows: usage,
+            expectedPromptTokens: [512, 512],
+            expectedCompletionTokens: 256
+        ))
+        var badSettlement = usage
+        badSettlement[0] = MSBUsageRow(
+            requestID: "a",
+            promptTokens: 512,
+            completionTokens: 256,
+            emittedTokens: 256,
+            cachedPromptTokens: 0,
+            terminalStatus: "length",
+            settlementDisposition: "not_eligible"
+        )
+        XCTAssertFalse(msbUsageAttributionPass(
+            rows: badSettlement,
+            expectedPromptTokens: [512, 1024],
+            expectedCompletionTokens: 256
+        ))
+    }
+
+    func testMSBIsolationReplayDrainPredicates() {
+        XCTAssertTrue(msbIsolationPass(MSBIsolationEvidence(
+            cancelledRequestID: "cancel",
+            healthyRequestID: "healthy",
+            cancelledStatus: "cancelled",
+            healthyStatus: "length",
+            cancelledCompletionTokens: 1,
+            healthyCompletionTokens: 32,
+            pass: false
+        )))
+        XCTAssertFalse(msbIsolationPass(MSBIsolationEvidence(
+            cancelledRequestID: "cancel",
+            healthyRequestID: "healthy",
+            cancelledStatus: "cancelled",
+            healthyStatus: "cancelled",
+            cancelledCompletionTokens: 1,
+            healthyCompletionTokens: 1,
+            pass: false
+        )))
+        XCTAssertTrue(msbReplayPass(MSBReplayEvidence(
+            requestID: "owner",
+            firstDisposition: "eligible_owner",
+            replayDisposition: "non_settling_replay",
+            tokensMatch: true,
+            pass: false
+        )))
+        XCTAssertFalse(msbReplayPass(MSBReplayEvidence(
+            requestID: "owner",
+            firstDisposition: "eligible_owner",
+            replayDisposition: "eligible_owner",
+            tokensMatch: true,
+            pass: false
+        )))
+        XCTAssertTrue(msbDrainPass(MSBDrainEvidence(
+            queuedRejected: true,
+            permitIssued: true,
+            permitValid: true,
+            postDrainRejected: true,
+            activeStatuses: ["length", "length"],
+            activeSettlements: ["eligible_owner", "eligible_owner"],
+            activeRowsCompleted: true,
+            pass: false
+        )))
+        XCTAssertFalse(msbDrainPass(MSBDrainEvidence(
+            queuedRejected: true,
+            permitIssued: true,
+            permitValid: true,
+            postDrainRejected: true,
+            activeStatuses: ["batch_failed", "length"],
+            activeSettlements: ["not_eligible", "eligible_owner"],
+            activeRowsCompleted: false,
+            pass: false
+        )))
+        XCTAssertFalse(msbOMLXSidecarUnavailableReason().isEmpty)
     }
 
     func testContiguousBatchedDecodeErrorCasesExist() {
