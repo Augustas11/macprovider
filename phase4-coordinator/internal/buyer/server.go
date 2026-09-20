@@ -3842,7 +3842,8 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 			}
 			return true, wsForwardFailed
 		}
-		if err := toolFinal.observeBlock(checked); err != nil {
+		rewritten, err := toolFinal.rewriteAndObserve(checked)
+		if err != nil {
 			relay.Cancel("malformed_tool_call_stream")
 			if s.streamingDowngrade != nil {
 				s.streamingDowngrade.recordMalformed(streamingBuyer, provider.ProviderID, s.now())
@@ -3862,13 +3863,13 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 			return true, wsForwardCancelled
 		}
 		commit()
-		if _, err := w.Write([]byte(checked)); err != nil {
+		if _, err := w.Write([]byte(rewritten)); err != nil {
 			relay.Cancel("buyer_disconnected")
 			s.log.Warn().Err(err).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("buyer ws stream write failed")
 			markProviderDone()
 			return true, wsForwardCancelled
 		}
-		bytesEmitted += len(checked)
+		bytesEmitted += len(rewritten)
 		if flusher != nil {
 			flusher.Flush()
 		}
@@ -4169,8 +4170,8 @@ func (s *Server) forwardWSStreamingBuffered(w http.ResponseWriter, r *http.Reque
 				promptTok, cachedPromptTok, completionTok = mergeStreamUsagePointers(promptTok, cachedPromptTok, completionTok, p, cached, c)
 				checked = string(sanitized)
 			}
-			raw.WriteString(checked)
-			if err := toolFinal.observeBlock(checked); err != nil {
+			rewritten, err := toolFinal.rewriteAndObserve(checked)
+			if err != nil {
 				relay.Cancel("malformed_tool_call_stream")
 				if s.streamingDowngrade != nil {
 					s.streamingDowngrade.recordMalformed(streamingBuyer, provider.ProviderID, s.now())
@@ -4178,6 +4179,7 @@ func (s *Server) forwardWSStreamingBuffered(w http.ResponseWriter, r *http.Reque
 				markProviderDone()
 				return wsForwardFailed, requestLogAttempt{Status: http.StatusBadGateway, Error: "Provider emitted malformed buffered tool-call stream", ErrorCode: "provider_stream_downgraded", FaultFlag: billing.FaultBreakerQualifying, SettlementOutput: settlementOutputUnavailableFor(billing.TerminalStateProviderError)}
 			}
+			raw.WriteString(rewritten)
 			if stop {
 				relay.Cancel("tier2_output_truncated")
 				markProviderDone()
@@ -4543,10 +4545,12 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 					contentEmittedBytes = projected
 				}
 			}
-			if err := toolFinal.observeBlock(string(line)); err != nil {
+			rewritten, err := toolFinal.rewriteAndObserve(string(line))
+			if err != nil {
 				s.log.Warn().Err(err).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("streaming provider emitted invalid pre-commit tool_calls stream")
 				return errPreCommitMalformedToolCalls
 			}
+			line = []byte(rewritten)
 			if err := settlementTracker.observeBlock(line); err != nil {
 				s.log.Warn().Err(err).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("streaming provider emitted malformed settlement data before commit")
 				return errPreCommitMalformedToolCalls
@@ -4665,7 +4669,8 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 				continue
 			}
 			line = coalesced
-			if observeErr := toolFinal.observeBlock(string(line)); observeErr != nil {
+			rewritten, observeErr := toolFinal.rewriteAndObserve(string(line))
+			if observeErr != nil {
 				s.log.Warn().Err(observeErr).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("streaming provider failed tool-call final-close validation")
 				if s.streamingDowngrade != nil {
 					s.streamingDowngrade.recordMalformed(streamingBuyer, provider.ProviderID, s.now())
@@ -4677,6 +4682,7 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 				markProviderDone()
 				return wsForwardProviderDisconnectedCommitted, http.StatusOK, progressUnavailableAttempt("Provider emitted malformed tool-call stream", "malformed_tool_call", billing.FaultBreakerQualifying)
 			}
+			line = []byte(rewritten)
 			if outputByteCeiling > 0 {
 				if deltaBytes := streamingOutputDeltaBytesFromSSEBlock(line); deltaBytes > 0 {
 					projected := contentEmittedBytes + deltaBytes
@@ -4749,7 +4755,8 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 						contentEmittedBytes = projected
 					}
 				}
-				if observeErr := toolFinal.observeBlock(string(flushed)); observeErr != nil {
+				rewritten, observeErr := toolFinal.rewriteAndObserve(string(flushed))
+				if observeErr != nil {
 					s.log.Warn().Err(observeErr).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("streaming provider failed tool-call final-close validation")
 					if s.streamingDowngrade != nil {
 						s.streamingDowngrade.recordMalformed(streamingBuyer, provider.ProviderID, s.now())
@@ -4761,6 +4768,7 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 					markProviderDone()
 					return wsForwardProviderDisconnectedCommitted, http.StatusOK, progressUnavailableAttempt("Provider emitted malformed tool-call stream", "malformed_tool_call", billing.FaultBreakerQualifying)
 				}
+				flushed = []byte(rewritten)
 				if settleErr := settlementTracker.observeBlock(flushed); settleErr != nil {
 					s.log.Warn().Err(settleErr).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("streaming provider emitted malformed settlement data")
 					if s.streamingDowngrade != nil {
@@ -4866,12 +4874,14 @@ func (s *Server) forwardStreamingBuffered(w http.ResponseWriter, r *http.Request
 	markProviderDone()
 	receiptValue := normalizeReceiptHeaderValue(resp.Trailer.Get("X-MacProvider-Receipt"))
 	validator := newStreamToolCallFinalValidator()
-	if err := validator.observeBlock(string(raw)); err != nil || !validator.finalCloseOK() {
+	rewrittenRaw, err := validator.rewriteAndObserve(string(raw))
+	if err != nil || !validator.finalCloseOK() {
 		if s.streamingDowngrade != nil {
 			s.streamingDowngrade.recordMalformed(streamingBuyer, provider.ProviderID, s.now())
 		}
 		return wsForwardProviderDisconnected, http.StatusBadGateway, requestLogAttempt{Status: http.StatusBadGateway, Error: "Provider emitted malformed buffered tool-call stream", ErrorCode: "provider_stream_downgraded", FaultFlag: billing.FaultBreakerQualifying, SettlementOutput: settlementOutputUnavailableFor(billing.TerminalStateProviderError)}
 	}
+	raw = []byte(rewrittenRaw)
 	out, err := consolidatedToolCallSSE(raw)
 	if err != nil {
 		if s.streamingDowngrade != nil {
@@ -5478,16 +5488,124 @@ func (v *streamToolCallFinalValidator) observeLine(line []byte) error {
 	return nil
 }
 
-func (v *streamToolCallFinalValidator) observeBlock(block string) error {
+func (v *streamToolCallFinalValidator) argsComplete() bool {
+	if !v.toolOpened || len(v.opened) == 0 {
+		return false
+	}
+	for index := range v.opened {
+		if !validToolCallArgumentsObject(v.arguments[index]) {
+			return false
+		}
+	}
+	return true
+}
+
+func ignorablePostToolContent(s string) bool {
+	t := strings.TrimSpace(s)
+	if t == "" {
+		return true
+	}
+	t = strings.ReplaceAll(t, "</tool_call>", "")
+	t = strings.ReplaceAll(t, "<tool_call>", "")
+	t = strings.ReplaceAll(t, "</function>", "")
+	for {
+		start := strings.Index(t, "<function=")
+		if start < 0 {
+			break
+		}
+		rest := t[start:]
+		end := strings.Index(rest, ">")
+		if end < 0 {
+			return strings.TrimSpace(t[:start]) == ""
+		}
+		t = t[:start] + rest[end+1:]
+	}
+	return strings.TrimSpace(t) == ""
+}
+
+func (v *streamToolCallFinalValidator) rewriteAndObserve(block string) (string, error) {
+	var out strings.Builder
 	for _, line := range bytes.SplitAfter([]byte(block), []byte("\n")) {
 		if len(line) == 0 {
 			continue
 		}
-		if err := v.observeLine(line); err != nil {
-			return err
+		rewritten, err := v.rewriteLine(line)
+		if err != nil {
+			return "", err
 		}
+		if err := v.observeLine(rewritten); err != nil {
+			return "", err
+		}
+		out.Write(rewritten)
 	}
-	return nil
+	return out.String(), nil
+}
+
+func (v *streamToolCallFinalValidator) rewriteLine(line []byte) ([]byte, error) {
+	trimmed := bytes.TrimRight(line, "\r\n")
+	newline := line[len(trimmed):]
+	payload := bytes.TrimPrefix(trimmed, []byte{0xEF, 0xBB, 0xBF})
+	if !bytes.HasPrefix(payload, []byte("data:")) {
+		return line, nil
+	}
+	content := bytes.TrimSpace(payload[len("data:"):])
+	if len(content) == 0 || bytes.Equal(content, []byte("[DONE]")) {
+		return line, nil
+	}
+	var event map[string]any
+	if err := json.Unmarshal(content, &event); err != nil {
+		return line, nil
+	}
+	choices, _ := event["choices"].([]any)
+	if len(choices) == 0 {
+		return line, nil
+	}
+	changed := false
+	for _, rawChoice := range choices {
+		choice, ok := rawChoice.(map[string]any)
+		if !ok {
+			continue
+		}
+		delta, _ := choice["delta"].(map[string]any)
+		if delta == nil {
+			continue
+		}
+		rawContent, hasContent := delta["content"]
+		if !hasContent {
+			continue
+		}
+		text, ok := rawContent.(string)
+		if !ok || text == "" {
+			continue
+		}
+		if !v.toolOpened {
+			continue
+		}
+		if ignorablePostToolContent(text) || v.argsComplete() {
+			delete(delta, "content")
+			changed = true
+			continue
+		}
+		return nil, errors.New("tool-call stream fell back to content")
+	}
+	if !changed {
+		return line, nil
+	}
+	encoded, err := json.Marshal(event)
+	if err != nil {
+		return nil, err
+	}
+	headEnd := bytes.Index(trimmed, content)
+	if headEnd < 0 {
+		return line, nil
+	}
+	out := append(append([]byte{}, trimmed[:headEnd]...), encoded...)
+	return append(out, newline...), nil
+}
+
+func (v *streamToolCallFinalValidator) observeBlock(block string) error {
+	_, err := v.rewriteAndObserve(block)
+	return err
 }
 
 func (v *streamToolCallFinalValidator) observeToolCall(raw json.RawMessage) error {

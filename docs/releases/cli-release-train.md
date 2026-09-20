@@ -45,7 +45,8 @@ binary the Mac runs.
 
 ## Next CLI — net changes vs 1.8.123
 
-All in-scope CLI rows are **merged**. Last built candidates `v1.8.163`,
+All in-scope CLI rows are **merged** except the in-progress leftover
+`</tool_call>` stream fix (#1652). Last built candidates `v1.8.163`,
 `v1.8.164`, `v1.8.167`, `v1.8.168`, and `v1.8.171` are old or off-train for
 promotion — do not promote them. Studio serving canary is **`v1.8.172`** @
 `c512d342b1df6c495afeabbe49eaca74a98107c4` (includes #1648 and #1650), live
@@ -92,6 +93,7 @@ stays off; do not raise slots; do not canary until the operator enable step.
 | Conversation-keyed serial serve allocates trimmable `KVCacheSimple` (FR-CI2 can skip prefill) | merged | #1634 |
 | SPEC-038 scheduler uses compiled lockstep decode windows (buyer CB still off) | merged | #1635 |
 | FR-CB15 leftover harness (MSB-03/05, usage, isolation, drain, replay) + MoE promotion review (flag stays false) | merged | #1640 |
+| Qwen leftover `</tool_call>` after a valid tool JSON must not kill the stream | in progress | #1652 |
 | Login keychain for KV disk DEKs (naked CLI can persist KVS-01a) | merged | #1648 |
 | SPEC-038 AC-23 MoE promotion evidence available on production scheduler (buyer CB still off) | merged | #1650 |
 

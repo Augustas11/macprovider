@@ -1018,6 +1018,10 @@ actor ModelRuntime: ModelRuntimeServing {
         return maxTokens < remaining - numDraftTokens
     }
 
+    // mlx-swift-lm #424: RotatingKVCache wrap makes speculative rollback a
+    // silent no-op. Keep production serve on ordinary decode until a tagged
+    // upstream fix and cache-wrap parity proof land. Tool-loop / auto-prefix
+    // traffic also cannot spec-decode (SPEC-028 FR-5, ConversationCache).
     static var productionSpeculativeCacheWrapValidated: Bool {
         false
     }

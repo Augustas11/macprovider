@@ -3947,7 +3947,7 @@ func TestStickyConversationIgnoredWhenDisabled(t *testing.T) {
 	// Auto-prefix keys travel via Internal-Conv-Cache (not Internal-Conv) to
 	// avoid activating coordinator sticky affinity.
 	msgs := []json.RawMessage{json.RawMessage(`{"role":"user","content":"hi"}`)}
-	prefixTag, ok := prefixConversationTag(msgs)
+	prefixTag, ok := prefixConversationTag(msgs, nil)
 	if !ok {
 		t.Fatal("prefixConversationTag should succeed for [{user:hi}]")
 	}
@@ -3996,7 +3996,7 @@ func TestPrefixCacheConversationForwardedWhenStickyDisabled(t *testing.T) {
 		t.Fatalf("Internal-Conv must be empty for auto-prefix path (sticky isolation); got %q", stickyHdr)
 	}
 	msgs := []json.RawMessage{json.RawMessage(`{"role":"user","content":"hello"}`)}
-	prefixTag, ok := prefixConversationTag(msgs)
+	prefixTag, ok := prefixConversationTag(msgs, nil)
 	if !ok {
 		t.Fatal("prefixConversationTag should succeed")
 	}
@@ -4111,6 +4111,45 @@ func TestPrefixCacheConversationDivergesOnFirstUser(t *testing.T) {
 	}
 }
 
+func TestPrefixCacheConversationSharesToolsAcrossUsers(t *testing.T) {
+	var capturedA, capturedB http.Header
+	callN := 0
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		callN++
+		if callN == 1 {
+			capturedA = r.Header.Clone()
+		} else {
+			capturedB = r.Header.Clone()
+		}
+		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, `{"id":"chatcmpl_1","object":"chat.completion","usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7},"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`), nil
+	})}
+	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+		cfg.Routing.StickyEnabled = false
+	}, WithHTTPClient(client))
+	fullKey := createAccountAndKey(t, store, cfg, "acct_prefix_share_tools")
+	tools := `[{"type":"function","function":{"name":"read","parameters":{"type":"object"}}}]`
+	for _, user := range []string{"question A", "question B"} {
+		body := fmt.Sprintf(`{"model":"llama","max_tokens":20,"tools":%s,"messages":[{"role":"system","content":"You are a coding agent."},{"role":"user","content":%q}]}`, tools, user)
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+fullKey)
+		req.Header.Set("Content-Type", "application/json")
+		resp := httptest.NewRecorder()
+		h.ServeHTTP(resp, req)
+		if resp.Code != http.StatusOK {
+			t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+		}
+	}
+	keyA := capturedA.Get("X-MacProvider-Internal-Conv-Cache")
+	keyB := capturedB.Get("X-MacProvider-Internal-Conv-Cache")
+	if keyA == "" || keyB == "" {
+		t.Fatalf("Internal-Conv-Cache must be set: keyA=%q keyB=%q", keyA, keyB)
+	}
+	if keyA != keyB {
+		t.Fatalf("same system+tools must share a prefix-cache key across users: %q vs %q", keyA, keyB)
+	}
+}
+
 // TestPrefixCacheConversationNotForwardedForDemo verifies that demo traffic
 // does not receive an Internal-Conv key (SPEC-006 demo isolation).
 func TestPrefixCacheConversationNotForwardedForDemo(t *testing.T) {
@@ -4179,7 +4218,7 @@ func TestPrefixCacheBuyerTagWinsWhenStickyEnabled(t *testing.T) {
 	}
 	// confirm it is NOT the auto-prefix key
 	msgs := []json.RawMessage{json.RawMessage(`{"role":"user","content":"hi"}`)}
-	prefixTag, _ := prefixConversationTag(msgs)
+	prefixTag, _ := prefixConversationTag(msgs, nil)
 	autoKey := expectedConversationKey("test-key-hash-secret", "acct_prefix_buyer_tag_wins", prefixTag)
 	if got == autoKey {
 		t.Fatalf("Internal-Conv matched auto-prefix key; buyer sticky tag should win: %q", got)
@@ -4231,7 +4270,7 @@ func TestAutoPrefixKeyDoesNotActivateStickyWhenStickyEnabled(t *testing.T) {
 	}
 	// Verify the key is the expected auto-prefix key.
 	msgs := []json.RawMessage{json.RawMessage(`{"role":"user","content":"no sticky tag"}`)}
-	prefixTag, ok := prefixConversationTag(msgs)
+	prefixTag, ok := prefixConversationTag(msgs, nil)
 	if !ok {
 		t.Fatal("prefixConversationTag must succeed")
 	}
@@ -4279,24 +4318,24 @@ func TestPrefixConversationTagHelpers(t *testing.T) {
 	tagRE := regexp.MustCompile(`^auto\.prefix\.[0-9a-f]{32}$`)
 
 	t.Run("no_messages_returns_false", func(t *testing.T) {
-		if _, ok := prefixConversationTag(nil); ok {
+		if _, ok := prefixConversationTag(nil, nil); ok {
 			t.Fatal("empty messages should return false")
 		}
-		if _, ok := prefixConversationTag([]json.RawMessage{}); ok {
+		if _, ok := prefixConversationTag([]json.RawMessage{}, nil); ok {
 			t.Fatal("empty slice should return false")
 		}
 	})
 
 	t.Run("system_only_returns_false", func(t *testing.T) {
 		msgs := []json.RawMessage{json.RawMessage(`{"role":"system","content":"you are helpful"}`)}
-		if _, ok := prefixConversationTag(msgs); ok {
+		if _, ok := prefixConversationTag(msgs, nil); ok {
 			t.Fatal("system-only messages should return false (no user message)")
 		}
 	})
 
 	t.Run("user_only_returns_valid_tag", func(t *testing.T) {
 		msgs := []json.RawMessage{json.RawMessage(`{"role":"user","content":"hello"}`)}
-		tag, ok := prefixConversationTag(msgs)
+		tag, ok := prefixConversationTag(msgs, nil)
 		if !ok {
 			t.Fatal("user-only messages should return true")
 		}
@@ -4310,7 +4349,7 @@ func TestPrefixConversationTagHelpers(t *testing.T) {
 			json.RawMessage(`{"role":"system","content":"sys"}`),
 			json.RawMessage(`{"role":"user","content":"hello"}`),
 		}
-		tag, ok := prefixConversationTag(msgs)
+		tag, ok := prefixConversationTag(msgs, nil)
 		if !ok {
 			t.Fatal("system+user should return true")
 		}
@@ -4330,8 +4369,8 @@ func TestPrefixConversationTagHelpers(t *testing.T) {
 			json.RawMessage(`{"role":"assistant","content":"a"}`),
 			json.RawMessage(`{"role":"tool","tool_call_id":"c","content":"r"}`),
 		}
-		tag1, ok1 := prefixConversationTag(msgs1)
-		tag2, ok2 := prefixConversationTag(msgs2)
+		tag1, ok1 := prefixConversationTag(msgs1, nil)
+		tag2, ok2 := prefixConversationTag(msgs2, nil)
 		if !ok1 || !ok2 {
 			t.Fatalf("both should succeed: ok1=%v ok2=%v", ok1, ok2)
 		}
@@ -4343,10 +4382,52 @@ func TestPrefixConversationTagHelpers(t *testing.T) {
 	t.Run("different_user_different_tag", func(t *testing.T) {
 		msgsA := []json.RawMessage{json.RawMessage(`{"role":"user","content":"A"}`)}
 		msgsB := []json.RawMessage{json.RawMessage(`{"role":"user","content":"B"}`)}
-		tagA, _ := prefixConversationTag(msgsA)
-		tagB, _ := prefixConversationTag(msgsB)
+		tagA, _ := prefixConversationTag(msgsA, nil)
+		tagB, _ := prefixConversationTag(msgsB, nil)
 		if tagA == tagB {
 			t.Fatalf("different user content should give different tags: %q", tagA)
+		}
+	})
+
+	t.Run("same_system_different_user_same_tag", func(t *testing.T) {
+		msgsA := []json.RawMessage{
+			json.RawMessage(`{"role":"system","content":"sys"}`),
+			json.RawMessage(`{"role":"user","content":"question A"}`),
+		}
+		msgsB := []json.RawMessage{
+			json.RawMessage(`{"role":"system","content":"sys"}`),
+			json.RawMessage(`{"role":"user","content":"question B"}`),
+		}
+		tagA, okA := prefixConversationTag(msgsA, nil)
+		tagB, okB := prefixConversationTag(msgsB, nil)
+		if !okA || !okB {
+			t.Fatal("system+user should succeed")
+		}
+		if tagA != tagB {
+			t.Fatalf("same system scaffold should share a tag across users: %q vs %q", tagA, tagB)
+		}
+	})
+
+	t.Run("same_tools_different_user_same_tag", func(t *testing.T) {
+		tools := json.RawMessage(`[{"type":"function","function":{"name":"read"}}]`)
+		msgsA := []json.RawMessage{json.RawMessage(`{"role":"user","content":"A"}`)}
+		msgsB := []json.RawMessage{json.RawMessage(`{"role":"user","content":"B"}`)}
+		tagA, okA := prefixConversationTag(msgsA, tools)
+		tagB, okB := prefixConversationTag(msgsB, tools)
+		if !okA || !okB {
+			t.Fatal("tools+user should succeed")
+		}
+		if tagA != tagB {
+			t.Fatalf("same tools[] should share a tag across users: %q vs %q", tagA, tagB)
+		}
+	})
+
+	t.Run("different_tools_different_tag", func(t *testing.T) {
+		msgs := []json.RawMessage{json.RawMessage(`{"role":"user","content":"A"}`)}
+		tagA, _ := prefixConversationTag(msgs, json.RawMessage(`[{"type":"function","function":{"name":"read"}}]`))
+		tagB, _ := prefixConversationTag(msgs, json.RawMessage(`[{"type":"function","function":{"name":"bash"}}]`))
+		if tagA == tagB {
+			t.Fatalf("different tools[] should give different tags: %q", tagA)
 		}
 	})
 
@@ -4355,7 +4436,7 @@ func TestPrefixConversationTagHelpers(t *testing.T) {
 			json.RawMessage(`not-json`),
 			json.RawMessage(`{"role":"user","content":"real"}`),
 		}
-		tag, ok := prefixConversationTag(msgs)
+		tag, ok := prefixConversationTag(msgs, nil)
 		if !ok {
 			t.Fatal("should find user after skipping malformed")
 		}
@@ -4366,7 +4447,7 @@ func TestPrefixConversationTagHelpers(t *testing.T) {
 
 	t.Run("role_case_insensitive", func(t *testing.T) {
 		msgs := []json.RawMessage{json.RawMessage(`{"role":"USER","content":"x"}`)}
-		_, ok := prefixConversationTag(msgs)
+		_, ok := prefixConversationTag(msgs, nil)
 		if !ok {
 			t.Fatal("role matching should be case-insensitive")
 		}
