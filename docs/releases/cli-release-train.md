@@ -47,12 +47,11 @@ binary the Mac runs.
 
 All in-scope CLI rows are **merged**. Last built candidates `v1.8.163`,
 `v1.8.164`, `v1.8.167`, and `v1.8.168` are old or off-train — do not promote
-them. Studio serving canary `v1.8.170` is live on Mac Studio but is still
-pre-#1626/#1634/#1635/#1640; do not promote it and do not treat it as the
-bakeoff binary. The next candidate is **signed**: `v1.8.171` @
+them. Studio serving canary is **`v1.8.171`** @
 `12de7aea9e3ecf07df229682fc6defd225e4085f` (includes #1612, #1626, #1634,
-#1635, and #1640). Do not promote until the in-scope tracks are green on this
-build. Buyer CB stays off.
+#1635, and #1640), live as `live.malibu.provider` on Mac Studio. Do not
+promote the fleet until the in-scope tracks are green on this build. Buyer CB
+stays off; do not raise slots.
 
 | Net change in CLI / Malibu / installer | Status | PR |
 |---|---|---|
@@ -104,10 +103,14 @@ returned 18 rows including the free Llama alias), #1638 (nested
 `prompt_tokens_details.cached_tokens`), and #1639 (dist
 `min_provider_throughput_tps=1.0`). Sticky and CB stay off. Fleet Macs still
 run **1.8.123** until the operator-cut CLI is promoted. Mac Studio serving
-canary remains `v1.8.170` until `v1.8.171` is swapped into `live.malibu.provider`.
-`v1.8.171` is signed and staged at `/Users/a1/candidate-v1.8.171/`; live serve
-is still 170. Buyer `continuous_batching` stays **off**; do not raise 170
-slots and do not canary 170.
+canary is `v1.8.171` (signed package extracted into `/Users/a1/macprovider/`;
+also staged at `/Users/a1/candidate-v1.8.171/`). Pearl
+`compatibility_set.target_id` stays `v1.8.123@37e2d232…`; `accepted_ids`
+includes `v1.8.171@12de7aea…` (8-entry cap; dropped unused `v1.8.109` to make
+room). First 171 join attempt failed with close 4001
+`compatibility_set_unaccepted` before that accept — CLI misreports that as
+`Expected auth_challenge v2`. Buyer `continuous_batching` stays **off**; do
+not raise slots and do not canary CB on 171 until the MoE activation PR.
 
 #1632 / #1638 / #1639 are coordinator/gateway, not CLI rows.
 
@@ -126,11 +129,11 @@ confirm bytes are unchanged).
 
 | Field | Value |
 |---|---|
-| Last built from `main` | `v1.8.171` **signed** @ `12de7aea9e3ecf07df229682fc6defd225e4085f`, branch `release/candidate-1.8.171-spec038`, [run 35505282884](https://github.com/Augustas11/macprovider/actions/runs/35505282884) attempt 2. Compat `Augustas11/macprovider:v1.8.171@12de7aea9e3ecf07df229682fc6defd225e4085f`. Staged on Mac Studio at `/Users/a1/candidate-v1.8.171/` (live serve still 170). |
-| Mac Studio serving canary | `v1.8.170` @ `b8faebae0cb144301de77b2f0b43b5864bfeb2fe` — signed, live as `live.malibu.provider` on Mac Studio (`/Users/a1/macprovider/macprovider-cli`, also staged at `/Users/a1/candidate-v1.8.170/`). It is current `main` **minus #1610** (dd55a5eb: install.sh + AutoUpdateMarker.swift), **#1626**, **#1634**, **#1635**, **#1640**, and later train-doc commits. Do not canary CB on 170. |
+| Last built from `main` | `v1.8.171` **signed** @ `12de7aea9e3ecf07df229682fc6defd225e4085f`, branch `release/candidate-1.8.171-spec038`, [run 35505282884](https://github.com/Augustas11/macprovider/actions/runs/35505282884) attempt 2. Compat `Augustas11/macprovider:v1.8.171@12de7aea9e3ecf07df229682fc6defd225e4085f`. Live as `live.malibu.provider` on Mac Studio (`/Users/a1/macprovider/macprovider-cli`); also staged at `/Users/a1/candidate-v1.8.171/`. |
+| Mac Studio serving canary | `v1.8.171` @ `12de7aea9e3ecf07df229682fc6defd225e4085f` — signed, live, Pearl session accepted (`serving_buyers`, slots 4, CB off). Previous canary `v1.8.170` @ `b8faebae0cb144301de77b2f0b43b5864bfeb2fe` remains staged at `/Users/a1/candidate-v1.8.170/`. Do not canary CB and do not raise slots. |
 | Off-train E2E candidate | `v1.8.167` @ `7f833a2f63ddee6b2e146c821341099d89aec169` ([run 35417249468](https://github.com/Augustas11/macprovider/actions/runs/35417249468)) — signed hold-branch CLI used for the 2026-09-19 Pearl Track B run |
 | Older | `v1.8.163` @ `8c0c51d2`; `v1.8.164` BYOM @ `cdbb0257`; CLI artifact `v1.8.166` @ `00ce3625` (not the Pearl runtime tag) |
-| Status | **Do not promote.** `v1.8.171` is the signed successor off current `main` (#1610, #1626, #1634, #1635, #1640). `v1.8.170` stays the live Studio serving process until 171 is swapped. Do not canary CB and do not raise slots. |
+| Status | **Do not promote.** `v1.8.171` is the live Studio serving canary off current `main` (#1610, #1626, #1634, #1635, #1640). Fleet stays on 1.8.123. Do not canary CB and do not raise slots. |
 | Next candidate | **signed.** `v1.8.171` @ `12de7aea9e3ecf07df229682fc6defd225e4085f`, branch `release/candidate-1.8.171-spec038`, [run 35505282884](https://github.com/Augustas11/macprovider/actions/runs/35505282884) attempt 2. |
 | Why the next cut | Pi/Qwen tool-call correctness on the Mac (#1626 hybrid JSON + concat-safe prefixes), 256-cap gone, paged-KV attach, BYOM serve (#1576), the uncatalogued loopback hold (#1609), conversation-keyed serial `KVCacheSimple` (#1634), compiled lockstep decode in the serve-path scheduler (#1635), and the FR-CB15 leftover harness (#1640). Fair Pi vs OpenRouter 30B-A3B bakeoff needs this CLI plus Pearl with #1638. Curl-channel #1582/#1610 is already live from `main`; promoting this CLI is what turns the install.sh **parity** alarm green vs the new stable tag. Packaged leftover measurement on this candidate: [`continuous-batching-packaged-171-leftovers-evidence-2026-09-20.md`](../runbooks/continuous-batching-packaged-171-leftovers-evidence-2026-09-20.md). Buyer CB stays off. |
 
@@ -224,7 +227,13 @@ combined candidate**.
   this file the same day (date, SHA-256, whether parity vs current stable is
   expected red).
 - Live-coordinator candidate test: add its `compatibility_set_id` to
-  `accepted_ids` (keep `target_id`), restart coordinator, revert after.
+  `accepted_ids` (keep `target_id`). The list is capped at 8 and must
+  include `target_id`; drop the oldest unused set if at cap. Restart the
+  coordinator (`s.cfg` is a value copy — SIGHUP does not reload
+  compatibility_set). Keep the id while it is the Studio serving canary;
+  revert after a throwaway test. An unaccepted set is closed 4001
+  `compatibility_set_unaccepted`; the CLI reports that as
+  `Expected auth_challenge v2`.
 - Pearl coordinator/gateway runtime: **one cut of current `main`**. Do not
   dual-dispatch `pearl-runtime-release.yml` from two sessions. Record owner +
   payload + live tag in the Pearl paragraph above before/after apply.
