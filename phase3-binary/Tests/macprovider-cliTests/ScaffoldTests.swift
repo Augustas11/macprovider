@@ -80,8 +80,9 @@ final class DecodeBenchHelperTests: XCTestCase {
     func testMSBThroughputEngineParsesKnownValues() {
         XCTAssertEqual(MSBThroughputEngine(rawValue: "contiguous"), .contiguous)
         XCTAssertEqual(MSBThroughputEngine(rawValue: "paged"), .paged)
+        XCTAssertEqual(MSBThroughputEngine(rawValue: "scheduler"), .scheduler)
         XCTAssertNil(MSBThroughputEngine(rawValue: "fused"))
-        XCTAssertEqual(MSBThroughputEngine.allCases.count, 2)
+        XCTAssertEqual(MSBThroughputEngine.allCases.count, 3)
     }
 
     func testContiguousBatchedDecodeErrorCasesExist() {

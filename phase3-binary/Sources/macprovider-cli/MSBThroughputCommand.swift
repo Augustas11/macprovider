@@ -26,7 +26,7 @@ import MacProviderCore
 /// isolation) is proven separately by `PagedKVParityTests` and the load-time
 /// `PagedKVRuntimeParityProbe`; this command measures only throughput.
 ///
-/// Two engines:
+/// Three engines:
 ///   * `contiguous` (default) — stock `KVCacheSimple` with batch dimension B,
 ///     one `container.perform` for the whole decode window, tokens kept as
 ///     GPU arrays, optional `MLX.compile()`. This is the throughput ceiling
@@ -34,6 +34,8 @@ import MacProviderCore
 ///   * `paged` — `PagedKVSharedForwardBackend`. Uncompiled: per-step actor hop
 ///     (the 2026-09-20 0.53× path). `--compile`: lockstep window inside one
 ///     `container.perform` with `MLX.compile()` over batched contiguous KV.
+///   * `scheduler` — `ContinuousBatchScheduler.submit` over the same compiled
+///     backend. Times `decodeLockstepWindow` (not prefill). Buyer CB stays off.
 ///
 /// TPS semantics (decode-only, TTFT excluded): after prefill, one UNTIMED warm
 /// decode step produces the first token (the TTFT-boundary step), then the timed
@@ -53,7 +55,9 @@ struct MSBThroughputCommand: AsyncParsableCommand {
             Measures aggregate decode TG across N concurrent rows vs both the
             same engine's single-row baseline and the production serial decode
             path. Default engine is contiguous KVCacheSimple (compiled, one
-            perform). Pass --engine paged to drive the SPEC-039 gather backend.
+            perform). Pass --engine paged to drive the SPEC-039 gather backend,
+            or --engine scheduler to drive ContinuousBatchScheduler.submit
+            (the production serve path, still with buyer CB off).
             """,
         shouldDisplay: false
     )
@@ -63,7 +67,7 @@ struct MSBThroughputCommand: AsyncParsableCommand {
 
     @Option(
         name: .customLong("engine"),
-        help: "Decode engine: contiguous (KVCacheSimple shared forward) or paged (gather backend). Default contiguous."
+        help: "Decode engine: contiguous (KVCacheSimple), paged (gather backend), or scheduler (ContinuousBatchScheduler.submit). Default contiguous."
     )
     var engine: MSBThroughputEngine = .contiguous
 
@@ -213,6 +217,14 @@ struct MSBThroughputCommand: AsyncParsableCommand {
                     prompts: prompts,
                     decodeSteps: decodeTokens,
                     compiled: compiledThisRun
+                )
+            case .scheduler:
+                return try await runSchedulerDecode(
+                    container: container,
+                    prompts: prompts,
+                    decodeSteps: decodeTokens,
+                    compiled: compiledThisRun,
+                    layerCount: layerCount
                 )
             }
         }
@@ -438,6 +450,133 @@ struct MSBThroughputCommand: AsyncParsableCommand {
         return BatchedRunResult(rowSamples: samples, decodeStart: decodeStart, decodeEnd: decodeEnd)
     }
 
+    /// Production serve path: concurrent `ContinuousBatchScheduler.submit`.
+    /// Times only `decodeLockstepWindow` so prefill is excluded. Buyer CB stays
+    /// off; this is a local harness, not a coordinator join.
+    private func runSchedulerDecode(
+        container: ModelContainer,
+        prompts: [[Int]],
+        decodeSteps: Int,
+        compiled: Bool,
+        layerCount: Int
+    ) async throws -> BatchedRunResult {
+        let sha = String(repeating: "a", count: 64)
+        let descriptor = PagedKVDescriptor(
+            blockSizeTokens: blockSizeTokens,
+            maxPhysicalBlocks: maxPhysicalBlocks,
+            modelID: "msb-scheduler-harness",
+            modelSHA256: sha,
+            tokenizerSHA256: sha,
+            chatTemplateSHA256: sha,
+            supportedModelFamilies: ["qwen", "llama"],
+            supportsMoEDispatch: true,
+            hardwareClass: "apple-silicon-harness",
+            metallibSHA256: sha,
+            kernelIdentifier: "msb_scheduler_lockstep_v1",
+            parityLabel: "harness-v1"
+        )
+        let tuple = ContinuousBatchingRequestedTuple(
+            modelID: descriptor.modelID,
+            modelSHA256: descriptor.modelSHA256,
+            tokenizerSHA256: descriptor.tokenizerSHA256,
+            chatTemplateSHA256: descriptor.chatTemplateSHA256,
+            cacheClass: "KVCacheSimple",
+            kvDType: .fp16,
+            requiresMoE: false,
+            hardwareClass: "apple-silicon-harness",
+            metallibSHA256: descriptor.metallibSHA256,
+            kernelIdentifier: descriptor.kernelIdentifier,
+            parityLabel: descriptor.parityLabel,
+            poolEpoch: 1
+        )
+        let inner = PagedKVSharedForwardBackend(
+            container: container,
+            blockSizeTokens: blockSizeTokens,
+            maxPhysicalBlocks: maxPhysicalBlocks,
+            poolEpoch: 1,
+            layerCount: layerCount,
+            compiledDecode: compiled
+        )
+        let backend = MSBSchedulerWindowTimingBackend(inner: inner)
+        let allocator = try PagedKVBlockAllocator(
+            blockSizeTokens: blockSizeTokens,
+            maxPhysicalBlocks: maxPhysicalBlocks
+        )
+        let scheduler = ContinuousBatchScheduler(
+            configuration: ContinuousBatchSchedulerConfiguration(
+                descriptor: descriptor,
+                tuple: tuple,
+                moePromotionEvidenceAvailable: true,
+                maxActiveRows: max(1, prompts.count),
+                decodeHeadroomTokens: 1,
+                maxPromptChunkTokens: max(1, promptTokens),
+                snapshot: ContinuousBatchSchedulerSnapshot(
+                    modelID: descriptor.modelID,
+                    modelSHA256: descriptor.modelSHA256,
+                    weightsGeneration: 1
+                ),
+                maxDecodeLockstepWindow: decodeSteps
+            ),
+            allocator: allocator,
+            backend: backend,
+            replayAuthority: MSBThroughputReplayAuthority()
+        )
+
+        func submitAll() async throws -> [ContinuousBatchSchedulerResult] {
+            try await withThrowingTaskGroup(of: ContinuousBatchSchedulerResult.self) { group in
+                for (index, prompt) in prompts.enumerated() {
+                    group.addTask {
+                        try await scheduler.submit(
+                            ContinuousBatchSchedulerRequest(
+                                id: "msb-sched-\(index)-\(UUID().uuidString)",
+                                conversationKey: "",
+                                promptTokens: prompt,
+                                maxOutputTokens: decodeSteps,
+                                temperature: 0.0,
+                                topP: 1.0
+                            )
+                        )
+                    }
+                }
+                var results: [ContinuousBatchSchedulerResult] = []
+                for try await result in group {
+                    results.append(result)
+                }
+                return results
+            }
+        }
+
+        _ = try await submitAll()
+        backend.resetTiming()
+
+        let results = try await submitAll()
+        guard results.count == prompts.count,
+              results.allSatisfy({
+                  $0.terminalStatus == .length && $0.generatedTokens.count == decodeSteps
+              }) else {
+            FileHandle.standardError.write(Data(
+                "msb-throughput: scheduler run produced incomplete or non-length terminals\n".utf8
+            ))
+            throw ExitCode(1)
+        }
+        let snapshot = backend.snapshot()
+        FileHandle.standardError.write(Data((
+            "msb-throughput: scheduler window_calls=\(snapshot.windowCalls) " +
+            "one_token_decode_calls=\(snapshot.decodeCalls)\n"
+        ).utf8))
+        let elapsed = Double(snapshot.windowNanoseconds) / 1_000_000_000
+        let decodeEnd = Date()
+        let decodeStart = decodeEnd.addingTimeInterval(-elapsed)
+        let samples = results.map { result in
+            MSBAggregateThroughputInput(
+                decodedTokens: result.generatedTokens.count,
+                decodeStartedAt: decodeStart,
+                decodeEndedAt: decodeEnd
+            )
+        }
+        return BatchedRunResult(rowSamples: samples, decodeStart: decodeStart, decodeEnd: decodeEnd)
+    }
+
     /// One batched `decode(rows:)` step across all rows, with the exact
     /// per-step allocator bookkeeping the scheduler uses. Fails fast on any
     /// row failure (the harness measures only healthy batched decode).
@@ -540,10 +679,12 @@ struct MSBThroughputCommand: AsyncParsableCommand {
         let outcomes = try await backend.decodeLockstepWindow(rows: decodeInputs, steps: steps)
         for row in rowsState { try await allocator.endDecodeStep(row.handle) }
 
-        var tokenByID: [String: Int] = [:]
+        var tokensByID: [String: [Int]] = [:]
         for outcome in outcomes {
             switch outcome {
-            case .output(let output): tokenByID[output.requestID] = output.token
+            case .output(let output):
+                let sampled = output.tokens.isEmpty ? [output.token] : output.tokens
+                tokensByID[output.requestID] = sampled
             case .rowFailure(let requestID):
                 FileHandle.standardError.write(Data(
                     "msb-throughput: row \(requestID) failed in compiled lockstep window\n".utf8
@@ -552,14 +693,16 @@ struct MSBThroughputCommand: AsyncParsableCommand {
             }
         }
         for index in rowsState.indices {
-            guard let token = tokenByID[rowsState[index].id] else {
+            guard let tokens = tokensByID[rowsState[index].id], tokens.count == steps else {
                 FileHandle.standardError.write(Data(
-                    "msb-throughput: row \(rowsState[index].id) missing compiled-window output\n".utf8
+                    "msb-throughput: row \(rowsState[index].id) missing compiled-window tokens\n".utf8
                 ))
                 throw ExitCode(1)
             }
-            rowsState[index].generated.append(contentsOf: Array(repeating: token, count: steps))
-            rowsState[index].currentToken = token
+            rowsState[index].generated.append(contentsOf: tokens)
+            if let last = tokens.last {
+                rowsState[index].currentToken = last
+            }
         }
     }
 
@@ -726,4 +869,112 @@ struct MSBThroughputReport: Codable, Sendable {
     let perRowFractionOfPagedSingleRow: Double
     let peakRSSMB: Int
     let timestamp: String
+}
+
+/// Times `decodeLockstepWindow` so scheduler-path MSB numbers exclude prefill.
+private final class MSBSchedulerWindowTimingBackend: ContinuousBatchSchedulerBackend, @unchecked Sendable {
+    private let inner: PagedKVSharedForwardBackend
+    private let lock = NSLock()
+    private var windowNanoseconds: UInt64 = 0
+    private var windowCalls = 0
+    private var decodeCalls = 0
+
+    init(inner: PagedKVSharedForwardBackend) {
+        self.inner = inner
+    }
+
+    struct Snapshot {
+        let windowNanoseconds: UInt64
+        let windowCalls: Int
+        let decodeCalls: Int
+    }
+
+    func resetTiming() {
+        lock.lock()
+        windowNanoseconds = 0
+        windowCalls = 0
+        decodeCalls = 0
+        lock.unlock()
+    }
+
+    func snapshot() -> Snapshot {
+        lock.lock()
+        defer { lock.unlock() }
+        return Snapshot(
+            windowNanoseconds: windowNanoseconds,
+            windowCalls: windowCalls,
+            decodeCalls: decodeCalls
+        )
+    }
+
+    func prefill(rows: [ContinuousBatchPrefillInput]) async throws -> [ContinuousBatchPrefillOutput] {
+        try await inner.prefill(rows: rows)
+    }
+
+    func decode(rows: [ContinuousBatchDecodeInput]) async throws -> [ContinuousBatchDecodeOutcome] {
+        recordDecodeCall()
+        return try await inner.decode(rows: rows)
+    }
+
+    func decodeLockstepWindow(
+        rows: [ContinuousBatchDecodeInput],
+        steps: Int
+    ) async throws -> [ContinuousBatchDecodeOutcome] {
+        let started = DispatchTime.now().uptimeNanoseconds
+        let result = try await inner.decodeLockstepWindow(rows: rows, steps: steps)
+        recordWindow(elapsed: DispatchTime.now().uptimeNanoseconds &- started)
+        return result
+    }
+
+    private func recordDecodeCall() {
+        lock.lock()
+        decodeCalls += 1
+        lock.unlock()
+    }
+
+    private func recordWindow(elapsed: UInt64) {
+        lock.lock()
+        windowNanoseconds += elapsed
+        windowCalls += 1
+        lock.unlock()
+    }
+
+    func installRetainedPagedKVCache(
+        requestID: String,
+        handoff: PagedKVPagedCacheHandoff,
+        binding: PagedKVStorageBinding
+    ) async throws {
+        try await inner.installRetainedPagedKVCache(
+            requestID: requestID,
+            handoff: handoff,
+            binding: binding
+        )
+    }
+
+    func commitTerminalKV(_ input: ContinuousBatchTerminalKVCommitInput) async throws {
+        try await inner.commitTerminalKV(input)
+    }
+
+    func finish(requestID: String) {
+        inner.finish(requestID: requestID)
+    }
+
+    func cancelInFlight() async {
+        await inner.cancelInFlight()
+    }
+}
+
+private final class MSBThroughputReplayAuthority: ContinuousBatchSchedulerReplayAuthority, @unchecked Sendable {
+    private let lock = NSLock()
+    private var fingerprints: [String: Data] = [:]
+
+    func claim(_ key: ContinuousBatchSchedulerReplayKey) throws -> ContinuousBatchSchedulerReplayClaim {
+        lock.lock()
+        defer { lock.unlock() }
+        if let existing = fingerprints[key.requestID] {
+            return existing == key.fingerprintSHA256 ? .duplicateSameRequest : .duplicateMismatchedRequest
+        }
+        fingerprints[key.requestID] = key.fingerprintSHA256
+        return .claimed
+    }
 }

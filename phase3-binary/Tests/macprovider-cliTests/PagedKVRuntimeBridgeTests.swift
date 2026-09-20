@@ -805,6 +805,74 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         XCTAssertFalse(backend.lockstepInnerStateNonEmptyForTest())
     }
 
+    func testLockstepWindowReturnsEverySampledTokenInOrder() async throws {
+        guard PagedKVMetallibGate.defaultMetallibExists() else {
+            throw XCTSkip("MLX default metallib is unavailable in this test host")
+        }
+
+        let descriptor = Self.bridgeDescriptor()
+        let container = ModelContainer(context: ModelContext(
+            configuration: ModelConfiguration(id: descriptor.modelID),
+            model: RuntimeBridgeFakeModel(nextTokenByInput: [
+                1: 4,
+                4: 5,
+                12: 7,
+                7: 8,
+            ]),
+            processor: StandInUserInputProcessor(),
+            tokenizer: RuntimeBridgeFakeTokenizer()
+        ))
+        let backend = PagedKVSharedForwardBackend(container: container, descriptor: descriptor, layerCount: 1)
+        let allocator = try PagedKVBlockAllocator(blockSizeTokens: descriptor.blockSizeTokens, maxPhysicalBlocks: 16)
+
+        let aHandle = try await allocator.allocate(conversationKey: "row-a", maxTokens: 8)
+        let bHandle = try await allocator.allocate(conversationKey: "row-b", maxTokens: 8)
+        _ = try await allocator.extend(aHandle, by: 2)
+        _ = try await allocator.extend(bHandle, by: 2)
+        try await allocator.beginDecodeStep(aHandle)
+        try await allocator.beginDecodeStep(bHandle)
+        let window = try await backend.decodeLockstepWindow(
+            rows: [
+                try await Self.decodeInput(
+                    requestID: "row-a",
+                    currentToken: 1,
+                    handle: aHandle,
+                    allocator: allocator,
+                    committedKVTokenCount: 0,
+                    extendBy: 0,
+                    beginDecode: false,
+                    targetOffset: 2
+                ),
+                try await Self.decodeInput(
+                    requestID: "row-b",
+                    currentToken: 12,
+                    handle: bHandle,
+                    allocator: allocator,
+                    committedKVTokenCount: 0,
+                    extendBy: 0,
+                    beginDecode: false,
+                    targetOffset: 2
+                ),
+            ],
+            steps: 2
+        )
+        try await allocator.endDecodeStep(aHandle)
+        try await allocator.endDecodeStep(bHandle)
+
+        var tokensByID: [String: [Int]] = [:]
+        for outcome in window {
+            guard case .output(let output) = outcome else {
+                XCTFail("expected window outputs, got \(outcome)")
+                return
+            }
+            tokensByID[output.requestID] = output.tokens
+        }
+        XCTAssertEqual(tokensByID["row-a"], [4, 5])
+        XCTAssertEqual(tokensByID["row-b"], [7, 8])
+        backend.finish(requestID: "row-a")
+        backend.finish(requestID: "row-b")
+    }
+
     func testRealSharedForwardBackendCancelWaitsForActivePrefill() async throws {
         guard PagedKVMetallibGate.defaultMetallibExists() else {
             throw XCTSkip("MLX default metallib is unavailable in this test host")
@@ -1328,11 +1396,18 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         currentToken: Int,
         handle: PagedKVBlockTableHandle,
         allocator: PagedKVBlockAllocator,
-        committedKVTokenCount: Int
+        committedKVTokenCount: Int,
+        extendBy: Int = 1,
+        beginDecode: Bool = true,
+        targetOffset: Int = 1
     ) async throws -> ContinuousBatchDecodeInput {
-        let targetKVTokenCount = committedKVTokenCount + 1
-        _ = try await allocator.extend(handle, by: 1)
-        try await allocator.beginDecodeStep(handle)
+        let targetKVTokenCount = committedKVTokenCount + targetOffset
+        if extendBy > 0 {
+            _ = try await allocator.extend(handle, by: extendBy)
+        }
+        if beginDecode {
+            try await allocator.beginDecodeStep(handle)
+        }
         let binding = try await allocator.binding(for: handle)
         return ContinuousBatchDecodeInput(
             requestID: requestID,

@@ -105,4 +105,5 @@ enum ContiguousBatchedDecodeError: Error, Equatable {
 enum MSBThroughputEngine: String, Codable, ExpressibleByArgument, CaseIterable {
     case contiguous
     case paged
+    case scheduler
 }
