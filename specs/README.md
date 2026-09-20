@@ -30,7 +30,7 @@ it can no longer drift. Do not hand-edit the table; edit each spec's
 | SPEC-019 | Structured output (`response_format: json_schema`) | 0.2.5 | normative | pending | pending corpus migration | [SPEC-019-structured-output.md](SPEC-019-structured-output.md) |
 | SPEC-020 | Provider autoupdate | v0.1.19 | normative | pending | pending: 5 | [SPEC-020-provider-autoupdate.md](SPEC-020-provider-autoupdate.md) |
 | SPEC-021 | MALIBU rewards emission ledger | 0.4.0 | draft | complete | pending: 10 | [SPEC-021-malibu-emission-ledger.md](SPEC-021-malibu-emission-ledger.md) |
-| SPEC-022 | Verified model settlement | v0.1.8 | draft | complete | conformant: 6, pending: 5 | [SPEC-022-verified-model-settlement.md](SPEC-022-verified-model-settlement.md) |
+| SPEC-022 | Verified model settlement | v0.1.8 | draft | complete | conformant: 5, pending: 6 | [SPEC-022-verified-model-settlement.md](SPEC-022-verified-model-settlement.md) |
 | SPEC-023 | Installer-Integrated Autotune Recommend | v0.14.1 | normative | pending | conformant: 2, pending: 8 | [SPEC-023-installer-autotune-recommend.md](SPEC-023-installer-autotune-recommend.md) |
 | SPEC-024 | Prefix-cache billing and provider-local cache isolation | 0.2.1 | normative | pending | pending corpus migration | [SPEC-024-prefix-cache-billing.md](SPEC-024-prefix-cache-billing.md) |
 | SPEC-025 | Native Mac App (signed `.dmg` + menu bar wrapper) | v0.29 | draft | pending | pending corpus migration | [SPEC-025-native-mac-app.md](SPEC-025-native-mac-app.md) |
