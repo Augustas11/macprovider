@@ -1,10 +1,10 @@
 # SPEC-037 — KV survival across provider restarts (encrypted provider-local disk tier)
 
-Version: v0.1.2
+Version: v0.1.3
 Status: draft (normative design; IMPL landed behind a disabled-by-default flag)
 Owner: provider runtime / prefix-cache persistence
 Decision source: `docs/research/RESEARCH_233_KV_SURVIVAL_RESTART_MEMO.md` (landed decision memo, commit `d6881b14`)
-Audit history: R1+R2+R3 five-lane audits (codex code/security/architect + adversarial verificator + product critic) reconciled in this text. R2 forced: positive synthetic-key sub-namespace (the shipped `conv:` validator makes prefix-exclusion gating unsatisfiable), per-entry Keychain DEKs as the rollback-proof revocation anchor, purge-generation stamping at lease acquisition, rotation-intent journal, byte-level format grammar, write-side staging caps, and `allow_buyer_keys` rejected in v0.1. R3 forced: non-circular AAD projection (blob hash out of AAD), single-key purge lease fencing, lock inode outside the deletable tree, incoming-vs-served model identity split, DEK lifecycle on eviction, and control-plane state bounds. v0.1.2: Keychain mode for the shipped naked Developer ID CLI is the process-default / login keychain (same store as provider credentials); Data Protection Keychain is used only when a named access group is set on a profiled bundle.
+Audit history: R1+R2+R3 five-lane audits (codex code/security/architect + adversarial verificator + product critic) reconciled in this text. R2 forced: positive synthetic-key sub-namespace (the shipped `conv:` validator makes prefix-exclusion gating unsatisfiable), per-entry Keychain DEKs as the rollback-proof revocation anchor, purge-generation stamping at lease acquisition, rotation-intent journal, byte-level format grammar, write-side staging caps, and `allow_buyer_keys` rejected in v0.1. R3 forced: non-circular AAD projection (blob hash out of AAD), single-key purge lease fencing, lock inode outside the deletable tree, incoming-vs-served model identity split, DEK lifecycle on eviction, and control-plane state bounds. v0.1.2: Keychain mode for the shipped naked Developer ID CLI is the process-default / login keychain (same store as provider credentials); Data Protection Keychain is used only when a named access group is set on a profiled bundle. v0.1.3: RESEARCH_233 Q6 on the live Qwen3-Coder-30B-A3B 4-bit tuple is unquantized `KVCacheSimple` (`kv_bits=null`, ~98 KiB/token; KVS-01a evidence). Q7 q4 KV is not the active representation. FR-KVP9 promotion hard ceiling rises to 1 GiB so the memo's 8k FP16 class is configurable; the default stays 256 MiB. Codec stays `kvsurv-codec-v1`. KVS-01b evidence is not claimed here.
 
 ## 1. Purpose and scope
 
@@ -72,13 +72,12 @@ Out of scope (recorded, not silently dropped):
   disabled and unenableable in v0.1** (FR-KVP11).
 - Long-context restore beyond the promotion ceiling. Under the v1
   allowlist (unquantized `KVCacheSimple`, ~96 KiB/token for the live Qwen
-  shape) the serviceable envelope is the **~2.5k-token prefix class**
-  (total decoded size ≤ the 256 MiB promotion ceiling). The memo's 8k
-  primary-gate class fits the ceiling only under quantized KV
-  (~30 KiB/token), whose cache class is not in the v1 allowlist — so the
-  8k performance gate is explicitly deferred behind the Q6/Q7-driven
-  format decision (§6), and the 32k–64k class behind KVS-04-class
-  evidence under a future format milestone.
+  shape) the **default** 256 MiB ceiling still services the **~2.5k-token
+  prefix class** (KVS-01a). Q6 on that tuple is FP16 `KVCacheSimple`, not
+  q4, so the memo's 8k class needs the v0.1.3 1 GiB hard ceiling (an
+  operator-raised `staging_max_bytes`, never the default). The 32k–64k
+  class still exceeds 1 GiB (~3–6 GiB FP16) and stays deferred to
+  KVS-04-class evidence under a future format milestone.
 - Defense against a hostile process running under the **same macOS user
   (euid)** as the provider, and against host-privileged actions (root, full
   system restore including the user Keychain, kernel/clock control beyond
@@ -599,19 +598,20 @@ block, fail, or corrupt the request being served.
   key with a valid cold entry, during request admission for that key, under
   the same per-key serialization as `begin()` (FR-CI4a). Eager whole-store
   restoration at startup is forbidden.
-- Restore staging MUST stay within a **hard ceiling of 256 MiB** above the
-  selected hot-cache state (v1 normative; configuration may lower it,
-  never raise it). Reads are chunked per §5a, verified-then-materialized
+- Restore staging MUST stay within a **hard ceiling of 1 GiB** above the
+  selected hot-cache state (v0.1.3 normative; configuration may lower it,
+  never raise it above the hard ceiling). The **default remains 256 MiB**.
+  Reads are chunked per §5a, verified-then-materialized
   per layer, and MUST NOT hold a second full copy of the restored tensors
   once promoted. The `disk_miss_budget` trigger is the entry's
   `decoded_length` (§5a — the same geometry formula as the FR-KVP3
   write-side estimate, so nothing writable is unpromotable) exceeding the
-  ceiling. Either answer to the active-`kvBits` question (memo Q6/Q7)
-  requires a format change before an 8k restored arm can exist on the
-  production model: quantized KV needs a `QuantizedKVCache` allowlist
-  extension (new codec ID + ABI epoch, §5a), FP16 needs a ceiling-raise
-  milestone. Both are spec-revision decisions, not configuration
-  tweaks.
+  configured ceiling. Q6 on the live Qwen tuple is unquantized
+  `KVCacheSimple` (~98 KiB/token); Q7 q4 is not the active representation,
+  so v0.1.3 raises this hard ceiling to 1 GiB to make the 8k FP16 class
+  configurable instead of adding a `QuantizedKVCache` codec. A further
+  raise, or a quantized-KV allowlist, remains a spec-revision decision,
+  not a configuration tweak.
 - Promoted entries count against the existing hot-tier budgets (200k
   tokens, entry cap); promotion MUST NOT raise any RAM ceiling. At most one
   promotion runs at a time namespace-wide (back-pressure; concurrent
@@ -685,7 +685,7 @@ YAML file → environment → CLI overrides. Exact surface (AC-9 fixtures):
 | `max_entries` | `MACPROVIDER_KV_DISK_CACHE_MAX_ENTRIES` | `--kv-disk-cache-max-entries` | 64 | > 0; invalid ⇒ tier disabled |
 | `max_entry_bytes` | `MACPROVIDER_KV_DISK_CACHE_MAX_ENTRY_BYTES` | `--kv-disk-cache-max-entry-bytes` | 2 GiB | > 0; invalid ⇒ tier disabled |
 | `retention_minutes` | `MACPROVIDER_KV_DISK_CACHE_RETENTION_MINUTES` | `--kv-disk-cache-retention-minutes` | 60 | > 0; **cleanup deadline only — does NOT extend reuse eligibility, which is fixed at the hot-tier TTL (default 900 s) and is not tunable here**; invalid ⇒ tier disabled |
-| `staging_max_bytes` | `MACPROVIDER_KV_DISK_CACHE_STAGING_MAX_BYTES` | `--kv-disk-cache-staging-max-bytes` | 256 MiB | read/promotion side; ≤ 256 MiB hard (FR-KVP9); invalid ⇒ tier disabled |
+| `staging_max_bytes` | `MACPROVIDER_KV_DISK_CACHE_STAGING_MAX_BYTES` | `--kv-disk-cache-staging-max-bytes` | 256 MiB | read/promotion side; ≤ 1 GiB hard (FR-KVP9); invalid ⇒ tier disabled |
 | `write_staging_max_bytes` | `MACPROVIDER_KV_DISK_CACHE_WRITE_STAGING_MAX_BYTES` | `--kv-disk-cache-write-staging-max-bytes` | 256 MiB | write/snapshot side; ≤ 1 GiB hard (FR-KVP3); invalid ⇒ tier disabled |
 | `min_free_bytes` | `MACPROVIDER_KV_DISK_CACHE_MIN_FREE_BYTES` | `--kv-disk-cache-min-free-bytes` | 8 GiB | ≥ 1 GiB; invalid ⇒ tier disabled |
 | `promotion_max_seconds` | `MACPROVIDER_KV_DISK_CACHE_PROMOTION_MAX_S` | `--kv-disk-cache-promotion-max-s` | 5 | > 0; invalid ⇒ tier disabled |
@@ -897,9 +897,10 @@ tombstones, or unsafe ownership/permissions → `disk_store_quarantined`
 - **Serialization allowlist (v1):** exactly `KVCacheSimple` (the pinned
   `mlx-swift-lm` standard **unquantized** cache class). If the live model
   runs a quantized KV cache (`QuantizedKVCache`), every write is skipped
-  and the harness cannot exercise the production cache class — resolving
-  memo Q6/Q7 is therefore the precondition for the KVS-01b 8k gate, and
-  under v1 the runnable gate is KVS-01a at ~2.5k tokens (FR-KVP9, §6). **Codec evolution rule (aligned with §8):** any payload-semantic
+  (`disk_write_skipped` / `unsupported_cache_class`). Q6 on the live Qwen
+  tuple is `KVCacheSimple`, so the KVS-01b 8k gate uses this allowlist
+  under the v0.1.3 1 GiB promotion ceiling rather than a codec v2
+  extension. **Codec evolution rule (aligned with §8):** any payload-semantic
   change, allowlist extension, or incompatible class/layout change
   requires a **new codec ID and an ABI-epoch bump**, with fixtures;
   existing codec IDs are immutable and never reinterpreted.
@@ -930,16 +931,17 @@ overhead), and correctness outcome.
 
 **KVS-01a (correctness, runnable under v1 defaults):** the gate scenario
 below at a **~2.5k-token prefix** — the largest class the v1 allowlist
-(unquantized `KVCacheSimple`) fits under the 256 MiB promotion ceiling.
-All correctness gates apply; performance numbers are recorded but the
-warm-relative thresholds are advisory at this size.
+(unquantized `KVCacheSimple`) fits under the **default** 256 MiB
+promotion ceiling. All correctness gates apply; performance numbers are
+recorded but the warm-relative thresholds are advisory at this size.
 
 **KVS-01b (performance, the memo's 8k target):** the same scenario at an
-8k prefix. Requires the Q6/Q7-driven format decision first (FR-KVP9):
-`QuantizedKVCache` allowlisting (codec v2) if production KV is quantized,
-or a ceiling-raise milestone if FP16. FR-KVP13 graduation past
-synthetic-key experiments requires KVS-01b; v0.1 lands the machinery and
-KVS-01a evidence.
+8k prefix. Q6 on the live Qwen tuple is FP16 `KVCacheSimple`, so v0.1.3
+makes this class configurable by raising the FR-KVP9 hard ceiling to
+1 GiB (operator must set `staging_max_bytes` and `write_staging_max_bytes`
+up to that hard cap; the default stays 256 MiB). FR-KVP13 graduation past
+synthetic-key experiments still requires KVS-01b evidence; this revision
+does not claim that gate.
 
 Scenario: persist (await `disk_write_committed`) → kill provider →
 relaunch exact build/model → matching suffix request within the
@@ -957,17 +959,19 @@ restored p50 ≤ `max(1.25 × warm p50, warm p50 + 1 s)`; restored p95 ≤
 ≥ 30% p95 TTFT reduction vs that control; and write-path overhead
 (commit-latency delta with the tier enabled) p95 ≤ 250 ms at the stage's
 gate prefix class (KVS-01a: ~2.5k; KVS-01b: 8k).
-**Scope honesty:** v0.1 gates validate the ~2.5k class under the v1
-allowlist (KVS-01a); the 8k class awaits the Q6/Q7 format decision
-(KVS-01b); the memo's highest-value 32k–64k workloads exceed the promotion
-ceiling and are explicitly deferred to KVS-04-class evidence under a
-future format milestone (raising the FR-KVP9 ceiling is a spec-revision
-decision, not a configuration change) — recorded in the gate's
-decision-log entry along with the single-conversation-restore limitation
-(no thundering-herd measurement) and the deferral of the memo's
-Approach-B token-replay control arm (correctness is instead anchored by
-the AC-1/AC-8 fixtures; the replay control may be added when a lab host
-exists).
+**Scope honesty:** v0.1.2 gates validated the ~2.5k class under the
+default 256 MiB ceiling (KVS-01a). v0.1.3 records the Q6 answer (FP16
+`KVCacheSimple`) and raises the hard ceiling to 1 GiB so KVS-01b at 8k
+is runnable when the operator raises both staging knobs; the 8k evidence
+itself is a later hardware run. The memo's highest-value 32k–64k
+workloads still exceed 1 GiB and are explicitly deferred to KVS-04-class
+evidence under a future format milestone (raising the FR-KVP9 ceiling
+further is a spec-revision decision, not a configuration change) —
+recorded in the gate's decision-log entry along with the
+single-conversation-restore limitation (no thundering-herd measurement)
+and the deferral of the memo's Approach-B token-replay control arm
+(correctness is instead anchored by the AC-1/AC-8 fixtures; the replay
+control may be added when a lab host exists).
 
 ### KVS-02 / KVS-03 — invalidation gates
 
@@ -1115,10 +1119,11 @@ treating oMLX marketing numbers as macprovider evidence.
 ## 10. Open questions carried (non-blocking for v0.1)
 
 Coordinator purge-propagation design (precondition for ever activating
-buyer-key persistence, FR-KVP11); per-SSD-class disk budgets; q4-KV
-quality gates and the active-`kvBits` question for the live Qwen model
-(memo Q6/Q7 — affects the per-entry cap and the 32k–64k deferral);
-concurrent post-restart promotion policy beyond one-at-a-time;
+buyer-key persistence, FR-KVP11); per-SSD-class disk budgets; Q6 on the
+live Qwen3-Coder-30B-A3B 4-bit tuple is answered (unquantized
+`KVCacheSimple`, `kv_bits=null`) and Q7 q4 is not the active
+representation — remaining kvBits work is other catalog entries plus the
+32k–64k deferral; concurrent post-restart promotion policy beyond one-at-a-time;
 copy-on-write snapshot handles to shrink the synchronous copy cost
 (FR-KVP3 bounds it by budget in v0.1); buyer-facing provenance (deferred
 to a future SPEC-015 v0.5 question). Tracked in RESEARCH_233 §11; none may

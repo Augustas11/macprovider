@@ -223,7 +223,7 @@ struct KVDiskCacheStoreConfig: Sendable {
     var maxEntries: Int
     var maxEntryBytes: Int
     var retentionSeconds: Int
-    var stagingMaxBytes: Int            // read/promotion ceiling (≤ 256 MiB)
+    var stagingMaxBytes: Int            // read/promotion ceiling (≤ 1 GiB)
     var writeStagingMaxBytes: Int       // write/snapshot ceiling (≤ 1 GiB)
     var minFreeBytes: Int
     var promotionMaxSeconds: Int
@@ -239,7 +239,7 @@ struct KVDiskCacheStoreConfig: Sendable {
     /// closed (skip write) rather than assuming headroom.
     var simulateStatvfsFailure: Bool = false
 
-    static let promotionCeilingHardMax = 256 * 1024 * 1024   // FR-KVP9
+    static let promotionCeilingHardMax = 1024 * 1024 * 1024  // FR-KVP9; keep equal to KVDiskCacheConfig.hardStagingMaxBytes
     static let writeStagingHardMax = 1024 * 1024 * 1024      // FR-KVP3
 }
 

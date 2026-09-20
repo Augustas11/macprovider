@@ -422,7 +422,7 @@ struct ServeCommand: AsyncParsableCommand {
     @Option(name: .customLong("kv-disk-cache-retention-minutes"), help: "KV disk-tier entry retention in minutes (>0). Overrides MACPROVIDER_KV_DISK_CACHE_RETENTION_MINUTES and config key kv_disk_cache.retention_minutes.")
     var kvDiskCacheRetentionMinutes: Int?
 
-    @Option(name: .customLong("kv-disk-cache-staging-max-bytes"), help: "KV disk-tier read/promotion staging ceiling (>0, ≤256 MiB). Overrides MACPROVIDER_KV_DISK_CACHE_STAGING_MAX_BYTES and config key kv_disk_cache.staging_max_bytes.")
+    @Option(name: .customLong("kv-disk-cache-staging-max-bytes"), help: "KV disk-tier read/promotion staging ceiling (>0, ≤1 GiB). Overrides MACPROVIDER_KV_DISK_CACHE_STAGING_MAX_BYTES and config key kv_disk_cache.staging_max_bytes.")
     var kvDiskCacheStagingMaxBytes: Int?
 
     @Option(name: .customLong("kv-disk-cache-write-staging-max-bytes"), help: "KV disk-tier write/snapshot staging ceiling (>0, ≤1 GiB). Overrides MACPROVIDER_KV_DISK_CACHE_WRITE_STAGING_MAX_BYTES and config key kv_disk_cache.write_staging_max_bytes.")
