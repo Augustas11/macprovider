@@ -1,0 +1,56 @@
+{
+  "aggregateCVPct": 0.213025376307022,
+  "aggregateTPSRuns": [
+    86.03247601468416,
+    85.87166261340668,
+    85.66753641985079
+  ],
+  "aggregateTPSp50": 85.87166261340668,
+  "aggregateUpliftVsPagedSingleRow": 0.8072208081558666,
+  "aggregateVsProductionSerial": 0.8072208081558666,
+  "blockSizeTokens": 16,
+  "compiled": true,
+  "decodeTokensPerRow": 256,
+  "engine": "serial-parallel",
+  "layerCount": 48,
+  "leftovers": {
+    "msb05": {
+      "nativeParallelRows": 2,
+      "nativeParallelVsSerial": 0.8072208081558666,
+      "omlxSidecarAvailable": false,
+      "omlxSidecarUnavailableReason": "no pinned oMLX v0.4.4 BatchGenerator sidecar on this host; MSB-05 Q2 is not measured"
+    }
+  },
+  "maxPhysicalBlocks": 1024,
+  "mlxSwiftLMPin": "mlxlm-3.31.4",
+  "modelID": "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
+  "modelTag": "Qwen3-Coder-30B-A3B-Instruct-4bit",
+  "pagedSingleRowCVPct": 0.17512966099157953,
+  "pagedSingleRowTPSRuns": [
+    106.09222233601389,
+    106.37939674719793,
+    106.441056236398
+  ],
+  "pagedSingleRowTPSp50": 106.37939674719793,
+  "peakRSSMB": 33016,
+  "perRowFractionOfPagedSingleRow": 0.4036104040779333,
+  "perRowTPSp50": 42.93583130670334,
+  "productionSerialCVPct": 0.17512966099157953,
+  "productionSerialPromptTokens": 1024,
+  "productionSerialTPSRuns": [
+    106.09222233601389,
+    106.37939674719793,
+    106.441056236398
+  ],
+  "productionSerialTPSp50": 106.37939674719793,
+  "promptTokenLengths": [
+    1024,
+    1024
+  ],
+  "promptTokensPerRow": 1024,
+  "rows": 2,
+  "runs": 3,
+  "scenario": "msb05",
+  "schemaVersion": 4,
+  "timestamp": "2026-09-20T07:47:10Z"
+}

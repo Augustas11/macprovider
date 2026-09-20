@@ -36,7 +36,7 @@ Engine-direct compiled paged window was 1.55× / 2.20×. The scheduler path is a
 
 `ContinuousBatchScheduler` now calls `decodeLockstepWindow` when the admission queue, in-flight binding checks, and active prefill set are empty, capped by `maxDecodeLockstepWindow` (production 16; this harness used 128 so the timed burst is one hop when rows start together). A queued row forces the next hop back to one token (FR-CB5). The backend returns every sampled token; the scheduler applies them sequentially for stop, stream, and receipt.
 
-Buyer `continuous_batching` still stays **off** until the remaining FR-CB15 items land on a packaged RC: usage/receipt under the serve path, MSB-03 ragged, MSB-05, temp-0 parity, failure isolation, warm-swap, durable replay, and a separately reviewed MoE promotion (`moePromotionEvidenceUnavailable` still fail-closes Qwen3-Coder). Do not raise `max_concurrency_override` on v1.8.170. Do not flip canary on 170.
+Buyer `continuous_batching` still stays **off** until a packaged RC canary. FR-CB15 leftover measurements (MSB-03, MSB-05 Q1, usage, isolation, drain, replay) are in [`continuous-batching-frcb15-leftovers-evidence-2026-09-20.md`](continuous-batching-frcb15-leftovers-evidence-2026-09-20.md). MoE promotion review (flag stays false): [`continuous-batching-moe-promotion-review-2026-09-20.md`](continuous-batching-moe-promotion-review-2026-09-20.md). Do not raise `max_concurrency_override` on v1.8.170. Do not flip canary on 170.
 
 ## Secrets redaction check
 

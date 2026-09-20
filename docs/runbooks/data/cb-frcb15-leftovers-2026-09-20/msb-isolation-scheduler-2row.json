@@ -1,0 +1,68 @@
+{
+  "aggregateCVPct": 0,
+  "aggregateTPSRuns": [],
+  "aggregateTPSp50": 0,
+  "aggregateUpliftVsPagedSingleRow": 0,
+  "aggregateVsProductionSerial": 0,
+  "blockSizeTokens": 16,
+  "compiled": true,
+  "decodeTokensPerRow": 32,
+  "engine": "scheduler",
+  "layerCount": 48,
+  "leftovers": {
+    "isolation": {
+      "cancelledCompletionTokens": 0,
+      "cancelledRequestID": "msb-cancel",
+      "cancelledStatus": "cancelled",
+      "healthyCompletionTokens": 32,
+      "healthyRequestID": "msb-healthy",
+      "healthyStatus": "length",
+      "pass": true
+    },
+    "usagePass": true,
+    "usageRows": [
+      {
+        "cachedPromptTokens": 0,
+        "completionTokens": 0,
+        "emittedTokens": 2,
+        "promptTokens": 1024,
+        "requestID": "msb-cancel",
+        "settlementDisposition": "not_eligible",
+        "terminalStatus": "cancelled"
+      },
+      {
+        "cachedPromptTokens": 0,
+        "completionTokens": 32,
+        "emittedTokens": 32,
+        "promptTokens": 1024,
+        "requestID": "msb-healthy",
+        "settlementDisposition": "eligible_owner",
+        "terminalStatus": "length"
+      }
+    ]
+  },
+  "maxPhysicalBlocks": 1024,
+  "mlxSwiftLMPin": "mlxlm-3.31.4",
+  "modelID": "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
+  "modelTag": "Qwen3-Coder-30B-A3B-Instruct-4bit",
+  "pagedSingleRowCVPct": 0,
+  "pagedSingleRowTPSRuns": [],
+  "pagedSingleRowTPSp50": 0,
+  "peakRSSMB": 32998,
+  "perRowFractionOfPagedSingleRow": 0,
+  "perRowTPSp50": 0,
+  "productionSerialCVPct": 0,
+  "productionSerialPromptTokens": 1024,
+  "productionSerialTPSRuns": [],
+  "productionSerialTPSp50": 0,
+  "promptTokenLengths": [
+    1024,
+    1024
+  ],
+  "promptTokensPerRow": 1024,
+  "rows": 2,
+  "runs": 1,
+  "scenario": "isolation",
+  "schemaVersion": 4,
+  "timestamp": "2026-09-20T07:46:17Z"
+}

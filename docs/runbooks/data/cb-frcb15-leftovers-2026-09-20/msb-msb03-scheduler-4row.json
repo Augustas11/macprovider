@@ -1,0 +1,106 @@
+{
+  "aggregateCVPct": 0.3539981534249517,
+  "aggregateTPSRuns": [
+    188.5134809233219,
+    188.78808668212764,
+    187.5211556036638
+  ],
+  "aggregateTPSp50": 188.5134809233219,
+  "aggregateUpliftVsPagedSingleRow": 1.8361803182263463,
+  "aggregateVsProductionSerial": 1.7305066249496395,
+  "blockSizeTokens": 16,
+  "compiled": true,
+  "decodeTokensPerRow": 256,
+  "engine": "scheduler",
+  "layerCount": 48,
+  "leftovers": {
+    "msb03": {
+      "aggregatePass": true,
+      "aggregateVsSerial": 1.7305066249496395,
+      "pass": true,
+      "promptTokenLengths": [
+        512,
+        1024,
+        1536,
+        2048
+      ],
+      "shortRequestBatchedTTFTp95": 0.31467902660369873,
+      "shortRequestSerialTTFTp95": 0.2965080738067627,
+      "shortRequestTTFTRatio": 1.0612831636037616,
+      "ttftPass": true
+    },
+    "usagePass": true,
+    "usageRows": [
+      {
+        "cachedPromptTokens": 0,
+        "completionTokens": 256,
+        "emittedTokens": 256,
+        "promptTokens": 512,
+        "requestID": "msb-sched-0-9A3369CE-8F59-43D8-8B94-961D3E55730B",
+        "settlementDisposition": "eligible_owner",
+        "terminalStatus": "length"
+      },
+      {
+        "cachedPromptTokens": 0,
+        "completionTokens": 256,
+        "emittedTokens": 256,
+        "promptTokens": 1024,
+        "requestID": "msb-sched-1-9C0EB47B-D58C-4A5C-B227-E58B2810D59D",
+        "settlementDisposition": "eligible_owner",
+        "terminalStatus": "length"
+      },
+      {
+        "cachedPromptTokens": 0,
+        "completionTokens": 256,
+        "emittedTokens": 256,
+        "promptTokens": 1536,
+        "requestID": "msb-sched-2-2341D816-89D0-4C3A-9A46-F09F0F472883",
+        "settlementDisposition": "eligible_owner",
+        "terminalStatus": "length"
+      },
+      {
+        "cachedPromptTokens": 0,
+        "completionTokens": 256,
+        "emittedTokens": 256,
+        "promptTokens": 2048,
+        "requestID": "msb-sched-3-F26FC260-E4E6-4E84-9C3B-A45AA413F4B3",
+        "settlementDisposition": "eligible_owner",
+        "terminalStatus": "length"
+      }
+    ]
+  },
+  "maxPhysicalBlocks": 1024,
+  "mlxSwiftLMPin": "mlxlm-3.31.4",
+  "modelID": "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
+  "modelTag": "Qwen3-Coder-30B-A3B-Instruct-4bit",
+  "pagedSingleRowCVPct": 0.3418738412075656,
+  "pagedSingleRowTPSRuns": [
+    102.06364266702433,
+    102.66610476764941,
+    102.67460651420475
+  ],
+  "pagedSingleRowTPSp50": 102.66610476764941,
+  "peakRSSMB": 33042,
+  "perRowFractionOfPagedSingleRow": 0.4590450795565866,
+  "perRowTPSp50": 47.12837023083048,
+  "productionSerialCVPct": 0.24922409752311933,
+  "productionSerialPromptTokens": 512,
+  "productionSerialTPSRuns": [
+    108.49981371741129,
+    108.93542862270634,
+    108.99744317205632
+  ],
+  "productionSerialTPSp50": 108.93542862270634,
+  "promptTokenLengths": [
+    512,
+    1024,
+    1536,
+    2048
+  ],
+  "promptTokensPerRow": 2048,
+  "rows": 4,
+  "runs": 3,
+  "scenario": "msb03",
+  "schemaVersion": 4,
+  "timestamp": "2026-09-20T07:49:00Z"
+}
