@@ -46,14 +46,13 @@ binary the Mac runs.
 ## Next CLI — net changes vs 1.8.123
 
 All in-scope CLI rows are **merged**. Last built candidates `v1.8.163`,
-`v1.8.164`, `v1.8.167`, and `v1.8.168` are old or off-train — do not promote
-them. Studio serving canary is **`v1.8.171`** @ `12de7aea9e3ecf07df229682fc6defd225e4085f`
-(includes #1612, #1626, #1634, #1635, and #1640), live as
-`live.malibu.provider` on Mac Studio. **#1648 and #1650 merged after that
-cut**; 171 does **not** include login-keychain KV DEKs or production
-`moePromotionEvidenceAvailable`. Do not promote the fleet. Buyer CB stays
-off; do not raise slots; do not canary 171. Next CLI cut includes #1648 and
-#1650.
+`v1.8.164`, `v1.8.167`, `v1.8.168`, and `v1.8.171` are old or off-train for
+promotion — do not promote them. Studio serving canary is still **`v1.8.171`**
+@ `12de7aea9e3ecf07df229682fc6defd225e4085f` until the `v1.8.172` swap.
+**Cutting `v1.8.172`** off current `main` so the package includes #1648
+(login-keychain KV DEKs) and #1650 (`productionMoEPromotionEvidenceAvailable`).
+Do not promote the fleet. Buyer CB stays off; do not raise slots; do not
+canary until 172 is live and joined.
 
 
 | Net change in CLI / Malibu / installer | Status | PR |
@@ -115,8 +114,7 @@ includes `v1.8.171@12de7aea…` (8-entry cap; dropped unused `v1.8.109` to make
 room). First 171 join attempt failed with close 4001
 `compatibility_set_unaccepted` before that accept — CLI misreports that as
 `Expected auth_challenge v2`. Buyer `continuous_batching` stays **off**; do
-not raise slots. Do not canary CB on 171: that package still fail-closes MoE
-promotion. Canary waits for the next candidate after the MoE activation PR.
+not raise slots. Cutting `v1.8.172` for #1648 + #1650. Do not canary on 171.
 
 #1632 / #1638 / #1639 are coordinator/gateway, not CLI rows.
 
@@ -135,13 +133,13 @@ confirm bytes are unchanged).
 
 | Field | Value |
 |---|---|
-| Last built from `main` | `v1.8.171` **signed** @ `12de7aea9e3ecf07df229682fc6defd225e4085f`, branch `release/candidate-1.8.171-spec038`, [run 35505282884](https://github.com/Augustas11/macprovider/actions/runs/35505282884) attempt 2. Compat `Augustas11/macprovider:v1.8.171@12de7aea9e3ecf07df229682fc6defd225e4085f`. Live as `live.malibu.provider` on Mac Studio (`/Users/a1/macprovider/macprovider-cli`); also staged at `/Users/a1/candidate-v1.8.171/`. |
-| Mac Studio serving canary | `v1.8.171` @ `12de7aea9e3ecf07df229682fc6defd225e4085f` — signed, live, Pearl session accepted (`serving_buyers`, slots 4, CB off). Previous canary `v1.8.170` @ `b8faebae0cb144301de77b2f0b43b5864bfeb2fe` remains staged at `/Users/a1/candidate-v1.8.170/`. Do not canary CB and do not raise slots. |
+| Last built from `main` | Cutting `v1.8.172` off current `main` (`7736c57286ad8c5adf3f76db1988b9859c0b7c0b`, #1650). Branch `release/candidate-1.8.172-spec038`. Previous signed: `v1.8.171` @ `12de7aea9e3ecf07df229682fc6defd225e4085f`. |
+| Mac Studio serving canary | `v1.8.171` @ `12de7aea9e3ecf07df229682fc6defd225e4085f` until the 172 swap. Signed, live, Pearl session accepted (`serving_buyers`, slots 4, CB off). Previous canary `v1.8.170` remains staged at `/Users/a1/candidate-v1.8.170/`. Do not canary CB and do not raise slots. |
 | Off-train E2E candidate | `v1.8.167` @ `7f833a2f63ddee6b2e146c821341099d89aec169` ([run 35417249468](https://github.com/Augustas11/macprovider/actions/runs/35417249468)) — signed hold-branch CLI used for the 2026-09-19 Pearl Track B run |
 | Older | `v1.8.163` @ `8c0c51d2`; `v1.8.164` BYOM @ `cdbb0257`; CLI artifact `v1.8.166` @ `00ce3625` (not the Pearl runtime tag) |
-| Status | **Do not promote.** `v1.8.171` is the live Studio serving canary for continuous-batching testing. It predates #1648 and the MoE activation flag. Fleet stays on 1.8.123. Do not canary CB and do not raise slots. |
-| Next candidate | After #1650, cut off `main` so the package includes #1648 and `productionMoEPromotionEvidenceAvailable`. Keep `v1.8.171` on Studio until that swap. |
-| Why the next cut | Login-keychain KV disk DEKs (#1648) plus AC-23 MoE promotion evidence on the production scheduler. Buyer CB stays off until that packaged RC canaries. |
+| Status | **Do not promote.** Cutting `v1.8.172` off `main` (#1648 + #1650). Keep 171 on Studio until that signed package joins Pearl. Fleet stays on 1.8.123. Do not canary CB and do not raise slots. |
+| Next candidate | **cutting.** `v1.8.172` off `7736c57286ad8c5adf3f76db1988b9859c0b7c0b`, branch `release/candidate-1.8.172-spec038`. |
+| Why the next cut | Login-keychain KV disk DEKs (#1648) plus AC-23 MoE promotion evidence on the production scheduler (#1650). Buyer CB stays off until that packaged RC canaries. |
 
 ## E2E tracks (independent gates)
 
