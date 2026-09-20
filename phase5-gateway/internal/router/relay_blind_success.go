@@ -380,6 +380,7 @@ func relayBlindBoundSettlementUsage(r *http.Request, usage tokenUsage) tokenUsag
 	usage.PromptTokens = min(usage.PromptTokens, execution.Metadata.InputTokenUpperBound)
 	usage.CompletionTokens = min(usage.CompletionTokens, execution.Metadata.MaxOutputTokens)
 	usage.CachedPromptTokens = min(usage.CachedPromptTokens, usage.PromptTokens)
+	usage.PromptTokensDetails.CachedTokens = min(usage.PromptTokensDetails.CachedTokens, usage.PromptTokens)
 	usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
 	return usage
 }

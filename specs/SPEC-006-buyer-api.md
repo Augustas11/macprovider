@@ -1,7 +1,11 @@
 # SPEC-006 - Buyer API Gateway: Mac Provider's first public buyer surface
 
-**Version:** 0.9.28 (2026-09-20, auto-derive prefix-cache conversation keys)
+**Version:** 0.9.29 (2026-09-20, OpenAI prompt_tokens_details.cached_tokens)
 **Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.5.4, SPEC-003 v0.7, SPEC-004 v0.3.2
+
+**Change log v0.9.29 (2026-09-20, OpenAI nested cached_tokens):**
+- Buyer `POST /v1/chat/completions` usage (streaming terminal chunk included) MUST include OpenAI `prompt_tokens_details.cached_tokens` reporting observed provider prefix reuse, including conversation-cache-only auto-prefix hits that are not sticky-creditable. Flat `cached_prompt_tokens` stays the billing-aligned SPEC-024 field (`0` unless sticky hit). Canonical rules live in SPEC-024 v0.2.3 §8 / SPEC-024-R002 and SPEC-005 v0.6.8 §5.3.1. Registers `SPEC-006-R013`.
+- `/v1/responses` `input_tokens_details.cached_tokens` MUST use the same observed value.
 
 **Change log v0.9.28 (2026-09-20, auto-derive prefix-cache conversation keys):**
 - Authenticated non-demo `POST /v1/chat/completions` (including translated `/v1/messages` and `/v1/responses` paths that share `handleChat`) MUST derive a prefix-cache conversation tag when no sticky buyer tag produced a key. The tag is `auto.prefix.` + `hex(sha256(canonical_messages_prefix)[:16])` where the prefix is messages from the start through and including the first `role=="user"` message (case-insensitive).
@@ -267,10 +271,13 @@ changing them:
   validation (§5, v0.9.27).
 - `SPEC-006-R012` — Auto-derive prefix-cache conversation key for authenticated
   non-demo chat completions when no sticky buyer tag produced a key; forwarded
-  as `X-MacProvider-Internal-Conv` so SPEC-024 ConversationCache can populate
+  as `X-MacProvider-Internal-Conv-Cache` so SPEC-024 ConversationCache can populate
   across tool turns without sticky routing (§5.4.1, v0.9.28).
+- `SPEC-006-R013` — Buyer chat-completions usage includes OpenAI
+  `prompt_tokens_details.cached_tokens` for observed prefix reuse (§5.4, v0.9.29;
+  SPEC-024 §8).
 
-`requirement_id_migration` is `complete`. R004–R012 are not promoted from
+`requirement_id_migration` is `complete`. R004–R013 are not promoted from
 this close. Signed journey-result evidence is still required before any of
 those rows can become conformant.
 
@@ -1572,6 +1579,8 @@ Supported request fields:
 `n` is accepted for OpenAI SDK compatibility and MUST be 1 in v1. Values greater than 1 MUST be rejected with HTTP 400, `type: "invalid_request_error"`, and `code: "n_must_be_1"`.
 
 `stream_options` MUST be accepted and forwarded to the provider. When `stream_options.include_usage = true`, the final SSE chunk MUST include a `usage` field so OpenAI SDK streaming token accounting works. `stream_options.include_usage = false` MUST be tolerated and MAY be ignored if the provider always emits usage.
+
+Completion `usage` MUST include OpenAI `prompt_tokens_details.cached_tokens` (observed provider prefix reuse, including auto-prefix ConversationCache hits) and the billing-aligned flat `cached_prompt_tokens` field per SPEC-024 §8. Nested `cached_tokens` MAY be positive when flat `cached_prompt_tokens` is `0`.
 
 Wholesale partner accounts MUST always receive a final stream `usage` chunk even when `stream_options.include_usage` is omitted. If the provider stream omitted usage, the gateway MUST inject a gateway-estimated usage chunk before `[DONE]`. Public accounts are unchanged.
 

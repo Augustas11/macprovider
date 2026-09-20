@@ -31,6 +31,17 @@ func TestRequestLogCacheRecoveryFieldsDropsNonHitZero(t *testing.T) {
 	}
 }
 
+func TestRequestLogCacheRecoveryFieldsAutoPrefixDoesNotQuarantine(t *testing.T) {
+	prompt, cached := int64(10), int64(4)
+	got, reason := requestLogCacheRecoveryFields(&cached, &prompt, &forwardState{stickyResult: "miss", conversationCacheOnly: true}, 0)
+	if reason != "" {
+		t.Fatalf("reason=%q want empty for auto-prefix cache hit", reason)
+	}
+	if got != nil {
+		t.Fatalf("cached=%v want nil (non-creditable, not quarantined)", got)
+	}
+}
+
 func TestCachedPromptTokensPointerTreatsExplicitNullAsInvalid(t *testing.T) {
 	got := cachedPromptTokensPointer(json.RawMessage("null"))
 	if got == nil || *got != -1 {
@@ -57,7 +68,7 @@ func TestMergeStreamUsagePointersPreservesPriorValidPromptOnPartialUsage(t *test
 
 func TestSSELineWithCachedPromptTokensStripsIncompleteUsage(t *testing.T) {
 	line := []byte("data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}],\"usage\":{\"cached_prompt_tokens\":null}}\n")
-	got := sseLineWithCachedPromptTokens(line, 0)
+	got := sseLineWithCachedPromptTokens(line, 0, 0)
 	if got == nil {
 		t.Fatalf("rewritten line was dropped, want choices preserved")
 	}
@@ -69,14 +80,14 @@ func TestSSELineWithCachedPromptTokensStripsIncompleteUsage(t *testing.T) {
 	}
 
 	usageOnly := []byte("data: {\"usage\":{\"cached_prompt_tokens\":null}}\n")
-	if got := sseLineWithCachedPromptTokens(usageOnly, 0); got != nil {
+	if got := sseLineWithCachedPromptTokens(usageOnly, 0, 0); got != nil {
 		t.Fatalf("usage-only partial line=%s, want dropped", string(got))
 	}
 }
 
 func TestSSELineWithCachedPromptTokensRewritesCompleteUsage(t *testing.T) {
 	line := []byte("data: {\"choices\":[{\"delta\":{}}],\"usage\":{\"prompt_tokens\":3,\"cached_prompt_tokens\":4,\"completion_tokens\":1,\"total_tokens\":4}}\n")
-	got := sseLineWithCachedPromptTokens(line, 0)
+	got := sseLineWithCachedPromptTokens(line, 0, 0)
 	if got == nil {
 		t.Fatalf("complete usage line was dropped")
 	}
@@ -85,6 +96,23 @@ func TestSSELineWithCachedPromptTokensRewritesCompleteUsage(t *testing.T) {
 	}
 	if bytes.Contains(got, []byte(`"cached_prompt_tokens":4`)) {
 		t.Fatalf("raw cached_prompt_tokens leaked: %s", string(got))
+	}
+	if !bytes.Contains(got, []byte(`"cached_tokens":0`)) {
+		t.Fatalf("nested cached_tokens was not written: %s", string(got))
+	}
+}
+
+func TestSSELineWithCachedPromptTokensWritesNestedCachedTokens(t *testing.T) {
+	line := []byte("data: {\"choices\":[{\"delta\":{}}],\"usage\":{\"prompt_tokens\":10,\"cached_prompt_tokens\":4,\"completion_tokens\":2,\"total_tokens\":12}}\n")
+	got := sseLineWithCachedPromptTokens(line, 0, 4)
+	if got == nil {
+		t.Fatalf("complete usage line was dropped")
+	}
+	if !bytes.Contains(got, []byte(`"cached_prompt_tokens":0`)) {
+		t.Fatalf("flat billed cache was not zeroed: %s", string(got))
+	}
+	if !bytes.Contains(got, []byte(`"cached_tokens":4`)) {
+		t.Fatalf("nested observed cache missing: %s", string(got))
 	}
 }
 
@@ -140,7 +168,7 @@ func TestLogCacheBillingRoutingDecisionEmitsSpec024Fields(t *testing.T) {
 
 func TestChatResponseWithCachedPromptTokensPreservesAbsentUsage(t *testing.T) {
 	body := []byte(`{"id":"cmpl","choices":[{"message":{"content":"ok"}}]}`)
-	updated := chatResponseWithCachedPromptTokens(body, 0)
+	updated := chatResponseWithCachedPromptTokens(body, 0, 0)
 	var out map[string]json.RawMessage
 	if err := json.Unmarshal(updated, &out); err != nil {
 		t.Fatal(err)

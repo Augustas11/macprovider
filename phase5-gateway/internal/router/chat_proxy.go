@@ -36,10 +36,26 @@ type chatRequest struct {
 }
 
 type tokenUsage struct {
-	PromptTokens       int64 `json:"prompt_tokens"`
-	CachedPromptTokens int64 `json:"cached_prompt_tokens"`
-	CompletionTokens   int64 `json:"completion_tokens"`
-	TotalTokens        int64 `json:"total_tokens"`
+	PromptTokens        int64               `json:"prompt_tokens"`
+	CachedPromptTokens  int64               `json:"cached_prompt_tokens"`
+	CompletionTokens    int64               `json:"completion_tokens"`
+	TotalTokens         int64               `json:"total_tokens"`
+	PromptTokensDetails promptTokensDetails `json:"prompt_tokens_details"`
+}
+
+type promptTokensDetails struct {
+	CachedTokens int64 `json:"cached_tokens"`
+}
+
+func (u tokenUsage) observedCachedTokens() int64 {
+	return observedCachedTokensFromCounts(u.CachedPromptTokens, u.PromptTokensDetails.CachedTokens)
+}
+
+func observedCachedTokensFromCounts(billed, nested int64) int64 {
+	if nested != 0 {
+		return nested
+	}
+	return billed
 }
 
 type usageSubject struct {
@@ -1496,7 +1512,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 					} else if !invalidReportedUsage {
 						usage = relayBlindBoundSettlementUsage(r, usage)
 						reported = &usage
-						line = sseDataLineWithCachedPromptTokens(line, usage.CachedPromptTokens)
+						line = sseDataLineWithCachedPromptTokens(line, usage.CachedPromptTokens, usage.observedCachedTokens())
 						forwardedUsage = true
 					} else {
 						line = nil
@@ -3787,10 +3803,11 @@ func usageFromJSON(body []byte, maxUsageTokens, maxCompletion int64, allowComple
 		return tokenUsage{}, false, nil
 	}
 	var rawUsage struct {
-		PromptTokens       *int64          `json:"prompt_tokens"`
-		CachedPromptTokens json.RawMessage `json:"cached_prompt_tokens"`
-		CompletionTokens   *int64          `json:"completion_tokens"`
-		TotalTokens        *int64          `json:"total_tokens"`
+		PromptTokens        *int64          `json:"prompt_tokens"`
+		CachedPromptTokens  json.RawMessage `json:"cached_prompt_tokens"`
+		CompletionTokens    *int64          `json:"completion_tokens"`
+		TotalTokens         *int64          `json:"total_tokens"`
+		PromptTokensDetails json.RawMessage `json:"prompt_tokens_details"`
 	}
 	if err := json.Unmarshal(envelope.Usage, &rawUsage); err != nil {
 		return tokenUsage{}, true, fmt.Errorf("usage object is malformed")
@@ -3808,6 +3825,7 @@ func usageFromJSON(body []byte, maxUsageTokens, maxCompletion int64, allowComple
 		return tokenUsage{}, true, fmt.Errorf("usage tokens must be non-negative")
 	}
 	usage.CachedPromptTokens = sanitizedCachedPromptTokens(rawUsage.CachedPromptTokens, usage.PromptTokens)
+	usage.PromptTokensDetails.CachedTokens = sanitizedNestedCachedTokens(rawUsage.PromptTokensDetails, usage.PromptTokens, usage.CachedPromptTokens)
 	if usage.PromptTokens > math.MaxInt64-usage.CompletionTokens {
 		return tokenUsage{}, true, fmt.Errorf("usage token total overflows int64")
 	}
@@ -3845,6 +3863,9 @@ func usageFromJSON(body []byte, maxUsageTokens, maxCompletion int64, allowComple
 		if usage.CachedPromptTokens > usage.PromptTokens {
 			usage.CachedPromptTokens = usage.PromptTokens
 		}
+		if usage.PromptTokensDetails.CachedTokens > usage.PromptTokens {
+			usage.PromptTokensDetails.CachedTokens = usage.PromptTokens
+		}
 		sum = usage.PromptTokens + usage.CompletionTokens
 	}
 	usage.TotalTokens = sum
@@ -3865,8 +3886,21 @@ func sanitizedCachedPromptTokens(raw json.RawMessage, promptTokens int64) int64 
 	return cached
 }
 
+func sanitizedNestedCachedTokens(raw json.RawMessage, promptTokens, billedCached int64) int64 {
+	if len(raw) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return billedCached
+	}
+	var details struct {
+		CachedTokens json.RawMessage `json:"cached_tokens"`
+	}
+	if err := json.Unmarshal(raw, &details); err != nil {
+		return billedCached
+	}
+	return sanitizedCachedPromptTokens(details.CachedTokens, promptTokens)
+}
+
 func usageBodyWithTokenUsage(body []byte, usage tokenUsage) []byte {
-	updated, ok := usageJSONWithCachedPromptTokens(body, usage.CachedPromptTokens)
+	updated, ok := usageJSONWithCachedPromptTokens(body, usage.CachedPromptTokens, usage.observedCachedTokens())
 	if ok {
 		return updated
 	}
@@ -3878,11 +3912,14 @@ func usageBodyWithTokenUsage(body []byte, usage tokenUsage) []byte {
 	if total == 0 {
 		total = usage.PromptTokens + usage.CompletionTokens
 	}
-	usageObject := map[string]int64{
+	usageObject := map[string]any{
 		"prompt_tokens":        usage.PromptTokens,
 		"completion_tokens":    usage.CompletionTokens,
 		"total_tokens":         total,
 		"cached_prompt_tokens": usage.CachedPromptTokens,
+		"prompt_tokens_details": map[string]int64{
+			"cached_tokens": usage.observedCachedTokens(),
+		},
 	}
 	rawUsage, err := json.Marshal(usageObject)
 	if err != nil {
@@ -3896,7 +3933,7 @@ func usageBodyWithTokenUsage(body []byte, usage tokenUsage) []byte {
 	return updated
 }
 
-func sseDataLineWithCachedPromptTokens(line []byte, cachedPromptTokens int64) []byte {
+func sseDataLineWithCachedPromptTokens(line []byte, billedCached, observedCached int64) []byte {
 	text := string(line)
 	trimmed := strings.TrimRight(text, "\r\n")
 	suffix := text[len(trimmed):]
@@ -3904,14 +3941,14 @@ func sseDataLineWithCachedPromptTokens(line []byte, cachedPromptTokens int64) []
 	if !ok || data == "[DONE]" {
 		return line
 	}
-	updated, ok := usageJSONWithCachedPromptTokens([]byte(data), cachedPromptTokens)
+	updated, ok := usageJSONWithCachedPromptTokens([]byte(data), billedCached, observedCached)
 	if !ok {
 		return line
 	}
 	return []byte("data: " + string(updated) + suffix)
 }
 
-func usageJSONWithCachedPromptTokens(body []byte, cachedPromptTokens int64) ([]byte, bool) {
+func usageJSONWithCachedPromptTokens(body []byte, billedCached, observedCached int64) ([]byte, bool) {
 	var envelope map[string]json.RawMessage
 	if err := json.Unmarshal(body, &envelope); err != nil {
 		return nil, false
@@ -3924,14 +3961,22 @@ func usageJSONWithCachedPromptTokens(body []byte, cachedPromptTokens int64) ([]b
 	if err := json.Unmarshal(rawUsage, &usage); err != nil {
 		return nil, false
 	}
-	if cachedPromptTokens < 0 {
-		cachedPromptTokens = 0
+	if billedCached < 0 {
+		billedCached = 0
 	}
-	encoded, err := json.Marshal(cachedPromptTokens)
+	if observedCached < 0 {
+		observedCached = 0
+	}
+	encoded, err := json.Marshal(billedCached)
 	if err != nil {
 		return nil, false
 	}
 	usage["cached_prompt_tokens"] = encoded
+	details, err := json.Marshal(map[string]int64{"cached_tokens": observedCached})
+	if err != nil {
+		return nil, false
+	}
+	usage["prompt_tokens_details"] = details
 	rawUsage, err = json.Marshal(usage)
 	if err != nil {
 		return nil, false

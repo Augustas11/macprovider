@@ -1,7 +1,10 @@
 # SPEC-005 - Billing, Settlement, and Provider Rewards
 
-**Version:** 0.6.7 (2026-09-11, #1484 signed rate-card is the only per-model money table)
-**Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.5.6, SPEC-003 v0.7, SPEC-004 v0.3.2, SPEC-006 v0.9.8, SPEC-024 v0.2.1 (prefix-cache cache-isolation; its billing sections are superseded by this spec). Lockstep with SPEC-023 v0.12.0 / SPEC-005-R011 is recorded in prose, not as a CONFORMANCE `depends_on` edge (avoids a cycle through SPEC-017/SPEC-047).
+**Version:** 0.6.8 (2026-09-20, auto-prefix cache reports re-price not quarantine)
+**Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.5.6, SPEC-003 v0.7, SPEC-004 v0.3.2, SPEC-006 v0.9.29, SPEC-024 v0.2.3 (prefix-cache cache-isolation; its billing sections are superseded by this spec). Lockstep with SPEC-023 v0.12.0 / SPEC-005-R011 is recorded in prose, not as a CONFORMANCE `depends_on` edge (avoids a cycle through SPEC-017/SPEC-047).
+
+**Change log v0.6.8 (2026-09-20, issue #1636 — auto-prefix cache reports):**
+- §5.3.1 gate 4 carve-out: a positive `cached_prompt_tokens` on a conversation-cache-only auto-prefix request (`X-MacProvider-Internal-Conv-Cache`, no sticky key) is **cleared** and priced at the full prompt rate. It MUST NOT quarantine `ambiguous_cache` / whole-row-zero. Sticky-miss and keyless positive reports keep gate 4 quarantine. The cache-hit **discount** remains sticky-hit only. Registers `SPEC-005-R012`. Buyer-visible OpenAI nested `cached_tokens` is SPEC-024-R002 / SPEC-006-R013.
 
 **Change log v0.6.7 (2026-09-11, issue #1484):** Per-model credits are authored from one OpenRouter snapshot (SPEC-023 §3.3.2) and published as signed `rate-card.json` (`SPEC-005-R011`). MoneyTable-A: yaml is a required byte-parity copy and `RateFor` still reads yaml. MoneyTable-B: `RateFor` reads verified signed-feed bytes; yaml `default`+globals only; missing signed feed fails closed rather than billing yaml. Formula, ledger columns, lookup **order**, and 90/10 split are unchanged. Operator reopens D3 **storage and authoring path**; arithmetic / multiplier / `default` fallback are not reopened; option C (live-fetch) stays rejected. `SPEC-005-R010` remains the D1a wholesale statement unit from v0.6.6 and is not reused. Do not promote R011 from this close.
 
@@ -1311,8 +1314,12 @@ applied in order:
 3. **Retry** (`attempt_n > 0`) — `cached` is cleared (set NULL); the row is priced **fully at the
    prompt rate** (cache reuse is trusted only on the first attempt). Not quarantined.
 4. **Non-sticky-hit route** (`sticky_result != "hit"`): a **positive** `cached` is **quarantined**
-   with `quarantine_reason = 'ambiguous_cache'` and credits **zeroed**; a zero `cached` is simply
-   cleared (no discount, not quarantined). Cache reuse is trusted only on a sticky **hit**.
+   with `quarantine_reason = 'ambiguous_cache'` and credits **zeroed**, **except** on a
+   conversation-cache-only auto-prefix request (coordinator saw
+   `X-MacProvider-Internal-Conv-Cache` and no sticky `X-MacProvider-Internal-Conv`): that
+   positive `cached` is **cleared** like a retry (full prompt rate, not quarantined). A zero
+   `cached` is simply cleared (no discount, not quarantined). Cache **discount** is trusted only
+   on a sticky **hit**.
 5. **Sticky hit, first attempt, valid** — `cached` is kept and the §5.3 cache split applies (the
    discount is earned).
 

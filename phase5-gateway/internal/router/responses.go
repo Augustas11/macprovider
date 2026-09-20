@@ -722,10 +722,13 @@ func (a *responsesAdapter) translateNonStreamingResponse(body []byte) ([]byte, e
 		Created int64  `json:"created"`
 		Model   string `json:"model"`
 		Usage   struct {
-			PromptTokens       int64 `json:"prompt_tokens"`
-			CachedPromptTokens int64 `json:"cached_prompt_tokens"`
-			CompletionTokens   int64 `json:"completion_tokens"`
-			TotalTokens        int64 `json:"total_tokens"`
+			PromptTokens        int64 `json:"prompt_tokens"`
+			CachedPromptTokens  int64 `json:"cached_prompt_tokens"`
+			CompletionTokens    int64 `json:"completion_tokens"`
+			TotalTokens         int64 `json:"total_tokens"`
+			PromptTokensDetails struct {
+				CachedTokens int64 `json:"cached_tokens"`
+			} `json:"prompt_tokens_details"`
 		} `json:"usage"`
 		Choices []struct {
 			Message      json.RawMessage `json:"message"`
@@ -817,7 +820,7 @@ func (a *responsesAdapter) translateNonStreamingResponse(body []byte) ([]byte, e
 	_, status, incompleteDetails = responsesTerminalFromFinishReason(chat.Choices[0].FinishReason)
 	resp := a.responseObjectWith(id, created, status, output, responsesUsageMap(
 		chat.Usage.PromptTokens,
-		chat.Usage.CachedPromptTokens,
+		observedCachedTokensFromCounts(chat.Usage.CachedPromptTokens, chat.Usage.PromptTokensDetails.CachedTokens),
 		chat.Usage.CompletionTokens,
 		chat.Usage.TotalTokens,
 	))
@@ -850,10 +853,13 @@ func (a *responsesAdapter) handleChatStreamLine(line string) {
 		Created int64  `json:"created"`
 		Model   string `json:"model"`
 		Usage   *struct {
-			PromptTokens       int64 `json:"prompt_tokens"`
-			CachedPromptTokens int64 `json:"cached_prompt_tokens"`
-			CompletionTokens   int64 `json:"completion_tokens"`
-			TotalTokens        int64 `json:"total_tokens"`
+			PromptTokens        int64 `json:"prompt_tokens"`
+			CachedPromptTokens  int64 `json:"cached_prompt_tokens"`
+			CompletionTokens    int64 `json:"completion_tokens"`
+			TotalTokens         int64 `json:"total_tokens"`
+			PromptTokensDetails struct {
+				CachedTokens int64 `json:"cached_tokens"`
+			} `json:"prompt_tokens_details"`
 		} `json:"usage"`
 		Choices []struct {
 			Delta struct {
@@ -888,7 +894,7 @@ func (a *responsesAdapter) handleChatStreamLine(line string) {
 		a.model = chunk.Model
 	}
 	if chunk.Usage != nil {
-		a.streamUsage = responsesUsageMap(chunk.Usage.PromptTokens, chunk.Usage.CachedPromptTokens, chunk.Usage.CompletionTokens, chunk.Usage.TotalTokens)
+		a.streamUsage = responsesUsageMap(chunk.Usage.PromptTokens, observedCachedTokensFromCounts(chunk.Usage.CachedPromptTokens, chunk.Usage.PromptTokensDetails.CachedTokens), chunk.Usage.CompletionTokens, chunk.Usage.TotalTokens)
 	}
 	if len(chunk.Choices) == 0 {
 		return

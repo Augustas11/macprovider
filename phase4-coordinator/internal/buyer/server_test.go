@@ -3655,6 +3655,61 @@ func TestNonStreamingBillingQuarantinesPositiveCachedPromptTokensWithoutStickyHi
 	}
 }
 
+func TestNonStreamingBillingSurfacesObservedCachedTokensOnAutoPrefixWithoutQuarantine(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"auto-prefix","choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":10,"cached_prompt_tokens":4,"completion_tokens":2,"total_tokens":12}}`))
+	}))
+	defer upstream.Close()
+
+	reqLog, dbPath := openBuyerRequestLog(t)
+	defer reqLog.Close()
+	billingStore, err := billing.NewStore(reqLog.DB())
+	if err != nil {
+		t.Fatalf("billing.NewStore: %v", err)
+	}
+	rewards := config.RewardsConfig{
+		GlobalMultiplier: 1.0,
+		ProviderShare:    0.90,
+		RateCard: map[string]config.RateCardEntry{
+			"model-a": {
+				PromptCreditsPerMtok:         1000000,
+				PromptCacheHitCreditsPerMtok: 250000,
+				CompletionCreditsPerMtok:     2000000,
+			},
+		},
+	}
+	registry := pool.NewRegistry([]config.ProviderConfig{{ProviderID: "p1", EndpointURL: upstream.URL}})
+	registerWithEndpoint(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, upstream.URL, 20)
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0),
+		buyer.WithGatewayServiceToken("operator-key"),
+		buyer.WithRequestLog(reqLog),
+		buyer.WithBilling(billingStore, rewards),
+	)
+
+	headers := http.Header{
+		"Authorization":                     []string{"Bearer operator-key"},
+		"X-MacProvider-Internal-Conv-Cache": []string{"conv:auto-prefix-hit"},
+		"X-MacProvider-Account":             []string{"acct_auto_prefix"},
+	}
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}]}`), headers)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	assertResponseCachedPromptTokens(t, rr.Body.Bytes(), 0)
+	assertResponseObservedCachedTokens(t, rr.Body.Bytes(), 4)
+	row := queryLatestBillingRow(t, dbPath)
+	if row.CachedPromptTokens.Valid {
+		t.Fatalf("ledger cached_prompt_tokens=%#v want NULL", row.CachedPromptTokens)
+	}
+	if row.Quarantined != 0 || row.QuarantineReason.Valid {
+		t.Fatalf("quarantine=%d reason=%#v want clean auto-prefix re-price", row.Quarantined, row.QuarantineReason)
+	}
+	if row.GrossCredits != 14 {
+		t.Fatalf("gross_credits=%d want 14 (full prompt rate, not cache discount, not zero)", row.GrossCredits)
+	}
+}
+
 func TestIdempotencyKeyRejectsReplayAndBodyMismatchBeforeProvider(t *testing.T) {
 	var calls int
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -7500,6 +7555,23 @@ func assertResponseCachedPromptTokens(t *testing.T, body []byte, want int64) {
 	}
 	if got.Usage.CachedPromptTokens != want {
 		t.Fatalf("response cached_prompt_tokens=%d want %d body=%s", got.Usage.CachedPromptTokens, want, string(body))
+	}
+}
+
+func assertResponseObservedCachedTokens(t *testing.T, body []byte, want int64) {
+	t.Helper()
+	var got struct {
+		Usage struct {
+			PromptTokensDetails struct {
+				CachedTokens int64 `json:"cached_tokens"`
+			} `json:"prompt_tokens_details"`
+		} `json:"usage"`
+	}
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("response json: %v body=%s", err, string(body))
+	}
+	if got.Usage.PromptTokensDetails.CachedTokens != want {
+		t.Fatalf("response prompt_tokens_details.cached_tokens=%d want %d body=%s", got.Usage.PromptTokensDetails.CachedTokens, want, string(body))
 	}
 }
 

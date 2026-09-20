@@ -566,6 +566,31 @@ func TestWriteHotPath_AmbiguousPositiveCacheQuarantinesCredit(t *testing.T) {
 	}
 }
 
+func TestWriteHotPath_ConversationCacheOnlyPositiveCacheDoesNotQuarantine(t *testing.T) {
+	reqStore, store := newRequestAndBillingStores(t)
+	baselineInput, baselineRow := testHotPathInput(t, store)
+	baselineRow.RequestID = "req-baseline"
+	baselineInput.RequestID = "req-baseline"
+	if err := store.WriteHotPath(context.Background(), reqStore, baselineRow, baselineInput); err != nil {
+		t.Fatal(err)
+	}
+	wantGross := scalar(t, store.db, `SELECT gross_credits FROM ledger_request_credits WHERE request_id = ?`, baselineRow.RequestID)
+
+	input, row := testHotPathInput(t, store)
+	row.RequestID = "req-auto-prefix"
+	input.RequestID = "req-auto-prefix"
+	cached := int64(400)
+	input.CachedPromptTokens = &cached
+	input.StickyResult = "miss"
+	input.ConversationCacheOnly = true
+	if err := store.WriteHotPath(context.Background(), reqStore, row, input); err != nil {
+		t.Fatal(err)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_request_credits WHERE request_id = ? AND quarantined = 0 AND cached_prompt_tokens IS NULL AND gross_credits = ?`, row.RequestID, wantGross); got != 1 {
+		t.Fatalf("auto-prefix cache rows=%d want 1 clean full-prompt-rate row matching baseline gross=%d", got, wantGross)
+	}
+}
+
 func TestWriteHotPath_EmitsCacheBillingRoutingDecisionForInvalidCache(t *testing.T) {
 	reqStore, store := newRequestAndBillingStores(t)
 	input, row := testHotPathInput(t, store)

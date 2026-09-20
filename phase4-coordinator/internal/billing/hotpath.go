@@ -29,6 +29,7 @@ type HotPathInput struct {
 	FaultFlag                    string
 	StickyResult                 string
 	StickyMissReason             string
+	ConversationCacheOnly        bool
 	ConfigSnapshotID             int64
 	RateEntry                    RateCardEntry
 	RateCard                     map[string]RateCardEntry
@@ -238,6 +239,9 @@ func normalizeCachedPromptTokens(in *HotPathInput) string {
 	if in.StickyResult != "hit" {
 		if cached > 0 {
 			in.CachedPromptTokens = nil
+			if in.ConversationCacheOnly {
+				return ""
+			}
 			return "ambiguous_cache"
 		}
 		in.CachedPromptTokens = nil

@@ -1,8 +1,24 @@
 # SPEC-024 - Prefix-cache billing and provider-local cache isolation
 
-**Version:** 0.2.2 (2026-09-20, conversation-keyed serial trimmable KV — SPEC-024-R001)
+**Version:** 0.2.3 (2026-09-20, OpenAI nested `cached_tokens` + auto-prefix no-quarantine — SPEC-024-R002)
 **Status:** **Billing arithmetic (§4 ledger / §5 rate card / §6 formula) MOVED to SPEC-005 v0.6** (canonical). SPEC-024 **retains** the `cached_prompt_tokens` **wire field** (§3, a SPEC-002 addendum), the **buyer-visible** mirror field (§8, a SPEC-006 addendum), the fraud model (§7), and the provider-local cache-**isolation** baseline (§11–§16) — none of which SPEC-005 **re-owns** (SPEC-005 §5.3.1 does fold in the §14 coordinator cross-check *gates* as billing-eligibility rules, but SPEC-024 remains their canonical home).
-**Depends on:** SPEC-002 v1.5.2 (coordinator-provider wire), SPEC-004 v0.3.2 (sticky affinity; FR-SR-2 provider-visibility carve-out), SPEC-005 v0.6 (billing — the canonical owner of prefix-cache billing arithmetic, formula, ledger columns, and rate-card keys), SPEC-006 v0.9.8 (buyer API; §1.3 conversation-key derivation + survivability (b) carve-out), SPEC-008 v0.4.1 (Tier-2 trust; §2.2 invariant (b) carve-out permitting the provider-visible derived conversation_key), SPEC-018 v0.2.4 (tool calling)
+**Depends on:** SPEC-002 v1.5.2 (coordinator-provider wire), SPEC-004 v0.3.2 (sticky affinity; FR-SR-2 provider-visibility carve-out), SPEC-005 v0.6.8 (billing — the canonical owner of prefix-cache billing arithmetic, formula, ledger columns, and rate-card keys), SPEC-006 v0.9.29 (buyer API; §1.3 conversation-key derivation + survivability (b) carve-out + OpenAI nested usage), SPEC-008 v0.4.1 (Tier-2 trust; §2.2 invariant (b) carve-out permitting the provider-visible derived conversation_key), SPEC-018 v0.2.4 (tool calling)
+
+**Change log v0.2.3 (2026-09-20, issue #1636 — OpenAI nested cached_tokens + auto-prefix no-quarantine):**
+- **SPEC-024-R002 / §8.** Buyer chat-completions `usage` MUST include OpenAI
+  `prompt_tokens_details.cached_tokens` reporting **observed** provider reuse
+  (the count Pi and other OpenAI-compat clients read as `cacheRead`). Flat
+  `cached_prompt_tokens` remains the **billing-aligned** field and stays `0`
+  unless `sticky_result == "hit"`. The two numbers MAY differ on
+  conversation-cache-only (auto-prefix) hits.
+- **Auto-prefix quarantine carve-out.** A positive provider `cached_prompt_tokens`
+  on a request that carried `X-MacProvider-Internal-Conv-Cache` and no sticky
+  key MUST be re-priced as `cached = 0` (full prompt rate) and MUST NOT
+  quarantine `ambiguous_cache`. Whole-row-zero would zero payable credits on
+  expected ConversationCache hits (SPEC-006-R012). Sticky-miss reports without
+  that cache-only header keep today's `ambiguous_cache` quarantine.
+- Registers `SPEC-024-R002`. Cache-hit **discount** remains sticky-hit only
+  (SPEC-005 §5.3.1). Do not enable sticky routing or continuous batching.
 
 **Change log v0.2.2 (2026-09-20, issue #1633 — conversation-keyed serial trimmable KV):**
 - **SPEC-024-R001 / FR-CI2 allocation.** Conversation-keyed serial serve (streaming and
@@ -107,8 +123,8 @@ Providers MAY report `cached_prompt_tokens` inside the standard completion-side 
 - Field absence is legal and has an effective cache value of `0` for arithmetic and buyer response shaping. Ledger storage still preserves absence as `NULL` per Section 4.
 - **Layering (v0.2, explicit).** `cached_prompt_tokens` is a **provider-reported** count of the KV reuse the provider actually performed (FR-CI3); the provider reports it **without** knowledge of the coordinator-internal `sticky_result` (SPEC-004 exposes only `conversation_key` to the provider, not the sticky outcome). `sticky_result` is **coordinator** routing state. The two rules below are therefore **coordinator-side billing-eligibility normalization**, not provider wire obligations — a positive provider report on a non-hit route is **legitimate** (see FR-CI10a: post-deletion normal selection can return to the same provider under the deterministic key and genuinely reuse KV), just **non-creditable**.
 - When `sticky_result = "hit"`, a positive provider-reported `cached_prompt_tokens` is **creditable** (discounted).
-- When `sticky_result != "hit"` (`miss`, `disabled`, `no_key`, `evicted`, or other non-hit values), the coordinator MUST treat `cached_prompt_tokens` as `0` for **all** credit/billing/buyer-visible purposes, **regardless of any positive raw value the provider reported** — the reuse is non-creditable because its provenance is not sticky-attributable.
-- A positive provider-reported `cached_prompt_tokens` on a non-hit route MUST quarantine the ledger write with `quarantined=1`, `quarantine_reason='ambiguous_cache'`, `cached_prompt_tokens=NULL`, and the `usage_source` value that would have applied absent the ambiguous-provenance normalization (`provider_reported` or `byte_estimated`). The row MUST set payable credit fields to 0 and MUST NOT produce provider-creditable credits. **This quarantine is a billing-eligibility decision (ambiguous provenance), not an assertion that the provider misreported** — the provider correctly reported actual reuse it could not attribute to a sticky outcome.
+- When `sticky_result != "hit"` (`miss`, `disabled`, `no_key`, `evicted`, or other non-hit values), the coordinator MUST treat `cached_prompt_tokens` as `0` for **credit/billing and the flat buyer field**, **regardless of any positive raw value the provider reported** — the reuse is non-creditable because its provenance is not sticky-attributable. **(v0.2.3:)** OpenAI nested `usage.prompt_tokens_details.cached_tokens` MAY still report the provider's observed reuse on a conversation-cache-only auto-prefix request (see §8).
+- A positive provider-reported `cached_prompt_tokens` on a non-hit route MUST quarantine the ledger write with `quarantined=1`, `quarantine_reason='ambiguous_cache'`, `cached_prompt_tokens=NULL`, and the `usage_source` value that would have applied absent the ambiguous-provenance normalization (`provider_reported` or `byte_estimated`), **except** on a conversation-cache-only auto-prefix request (`X-MacProvider-Internal-Conv-Cache` present and no sticky `X-MacProvider-Internal-Conv` key): that row MUST clear `cached_prompt_tokens` (full prompt-rate pricing) and MUST NOT quarantine. The exception exists so expected ConversationCache hits do not whole-row-zero payable credits. A sticky-miss or keyless positive report keeps `ambiguous_cache`. **This quarantine is a billing-eligibility decision (ambiguous provenance), not an assertion that the provider misreported** — the provider correctly reported actual reuse it could not attribute to a sticky outcome.
 - `cached_prompt_tokens > prompt_tokens`, negative `cached_prompt_tokens`, or non-integer `cached_prompt_tokens` is a genuinely **malformed** value (unlike the non-hit case above, which is legitimate-but-non-creditable) and MUST quarantine the ledger write with `quarantined=1`, `quarantine_reason='invalid_cached_prompt_tokens'`, `cached_prompt_tokens=NULL`, and the `usage_source` value that would have applied absent the invalid-value quarantine (`provider_reported` or `byte_estimated`). The row MUST set payable credit fields to 0 and MUST NOT produce provider-creditable credits.
 
 **(Shipped-behavior caveat, v0.2.1 — applies to BOTH quarantine bullets above.)** The "MUST set
@@ -239,20 +255,26 @@ Provider-reported cached tokens on a non-sticky-hit route are **non-creditable**
 
 ## 8. Buyer-Visible Usage Object (SPEC-006 Addendum)
 
-The buyer-visible response usage object gains exactly one flat field:
+The buyer-visible chat-completions usage object carries two cache counts:
 
 ```json
 "usage": {
   "prompt_tokens": 1500,
   "completion_tokens": 300,
   "total_tokens": 1800,
-  "cached_prompt_tokens": 1200
+  "cached_prompt_tokens": 0,
+  "prompt_tokens_details": {
+    "cached_tokens": 1200
+  }
 }
 ```
 
-`cached_prompt_tokens` matches OpenAI `prompt_tokens_details.cached_tokens` semantics but remains flat because SPEC-006 usage is flat today. SPEC-024 v0.1 locks the flat shape.
+- **Flat `cached_prompt_tokens`** is the billing-aligned SPEC-024 v0.1 field. It MUST equal `effective_cached_prompt_tokens` used for ledger arithmetic (sticky-hit first-attempt only; otherwise `0`).
+- **Nested `prompt_tokens_details.cached_tokens`** is the OpenAI Chat Completions field. It MUST report **observed** provider reuse on a valid first-attempt report: sticky-hit creditable reuse, **or** conversation-cache-only auto-prefix reuse (SPEC-006-R012). Invalid values, retries (`attempt_n > 0`), and `ambiguous_cache` quarantined reports MUST surface `0`.
 
-The field MUST be present on every completion response emitted by a SPEC-024-aware gateway. Non-hit routes, legacy providers, absent provider fields, and quarantined cache reports MUST surface sanitized `cached_prompt_tokens: 0` to buyers.
+SPEC-024 v0.1 locked a flat-only shape. v0.2.3 adds the nested OpenAI field so clients that read `prompt_tokens_details.cached_tokens` (Pi `cacheRead`) can see ConversationCache hits without enabling sticky routing or changing the cache-hit **discount** gate.
+
+The nested field MUST be present on every completion response emitted by a SPEC-024-aware gateway (streaming terminal usage chunk included). Responses API `input_tokens_details.cached_tokens` already mirrors the billed count and MUST use the same observed value as chat-completions `prompt_tokens_details.cached_tokens`.
 
 ## 9. Explorer Surface (SPEC-007 Follow-Up)
 

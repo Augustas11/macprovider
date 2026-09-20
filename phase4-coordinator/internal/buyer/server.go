@@ -2292,6 +2292,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// itself into *billingRecorder. The recorder still needs the live
 	// state values at log-write time, so it holds *forwardState.
 	state := newForwardState(startedAt)
+	state.markConversationCacheOnly(r.Header)
 	w = &phaseTimingResponseWriter{ResponseWriter: w, state: state, now: s.now}
 	// M3-10 (ARCH-6 close-out): the previously-inline logRowWithBilling
 	// closure now lives as *billingRecorder. setModel / setStream /
@@ -3133,16 +3134,16 @@ func (s *Server) forwardHTTPSequence(
 				respBody = checkedBody
 				estimatedCompletion := s.observedCompletionTokensFromBytes(len(respBody))
 				promptTok, cachedPromptTok, completionTok := tokenPointersFromChatResponse(respBody)
-				effectiveCached := effectiveCachedPromptTokensForBuyer(cachedPromptTok, promptTok, state, rec.attemptN)
+				billedCached, observedCached := buyerCachedPair(cachedPromptTok, promptTok, state, rec.attemptN)
 				if chatResponseHasIncompleteUsage(respBody) {
 					estimatedPrompt := int64(state.estimatedTokens)
 					completionEstimate := int64(0)
 					if estimatedCompletion != nil {
 						completionEstimate = *estimatedCompletion
 					}
-					respBody = chatResponseWithCompleteUsage(respBody, estimatedPrompt, effectiveCached, completionEstimate)
+					respBody = chatResponseWithCompleteUsage(respBody, estimatedPrompt, billedCached, observedCached, completionEstimate)
 				} else {
-					respBody = chatResponseWithCachedPromptTokens(respBody, effectiveCached)
+					respBody = chatResponseWithCachedPromptTokens(respBody, billedCached, observedCached)
 				}
 				receiptValue := normalizeReceiptHeaderValue(resp.Header.Get("X-MacProvider-Receipt"))
 				if bodyMutatedByGuard {
@@ -3505,6 +3506,9 @@ func (s *Server) forwardWS(w http.ResponseWriter, r *http.Request, requestID str
 		// applySticky / stickyStore only read X-MacProvider-Internal-Conv; this
 		// header is intentionally invisible to them (SPEC-006-R012, SPEC-004).
 		ctx = providerws.ContextWithConversationKey(ctx, key)
+		if state != nil {
+			state.conversationCacheOnly = true
+		}
 	}
 	var relay *providerws.RelayStream
 	var err error
@@ -3670,7 +3674,7 @@ func (s *Server) forwardWSNonStreaming(w http.ResponseWriter, r *http.Request, r
 			if promptTok == nil && completionTok == nil {
 				promptTok, cachedPromptTok, completionTok = tokenPointersFromChatResponse(checkedBody)
 			}
-			effectiveCached := effectiveCachedPromptTokensForBuyer(cachedPromptTok, promptTok, state, billingAttemptN)
+			effectiveCached, observedCached := buyerCachedPair(cachedPromptTok, promptTok, state, billingAttemptN)
 			estimatedCompletion := s.observedCompletionTokensFromBytes(body.Len())
 			if chatResponseHasIncompleteUsage(checkedBody) {
 				estimatedPrompt := int64(state.estimatedTokens)
@@ -3678,9 +3682,9 @@ func (s *Server) forwardWSNonStreaming(w http.ResponseWriter, r *http.Request, r
 				if estimatedCompletion != nil {
 					completionEstimate = *estimatedCompletion
 				}
-				checkedBody = chatResponseWithCompleteUsage(checkedBody, estimatedPrompt, effectiveCached, completionEstimate)
+				checkedBody = chatResponseWithCompleteUsage(checkedBody, estimatedPrompt, effectiveCached, observedCached, completionEstimate)
 			} else {
-				checkedBody = chatResponseWithCachedPromptTokens(checkedBody, effectiveCached)
+				checkedBody = chatResponseWithCachedPromptTokens(checkedBody, effectiveCached, observedCached)
 			}
 			terminalTS := time.Now().UTC().UnixMilli()
 			if providerTS, ok := trustedProviderTerminalStateTSInt(end.TerminalStateTSUnixMS, started, time.Now().UTC()); ok {
@@ -4503,7 +4507,8 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 			line := lineBuf.Bytes()
 			if p, cached, c := tokenPointersFromSSE(line); p != nil || cached != nil || c != nil {
 				promptTok, cachedPromptTok, completionTok = mergeStreamUsagePointers(promptTok, cachedPromptTok, completionTok, p, cached, c)
-				line = sseLineWithCachedPromptTokens(line, effectiveCachedPromptTokensForBuyer(cachedPromptTok, promptTok, state, billingAttemptN))
+				billed, observed := buyerCachedPair(cachedPromptTok, promptTok, state, billingAttemptN)
+				line = sseLineWithCachedPromptTokens(line, billed, observed)
 				if line == nil {
 					lineBuf.Reset()
 					continue
@@ -4634,7 +4639,8 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 		if len(line) > 0 {
 			if p, cached, c := tokenPointersFromSSE(line); p != nil || cached != nil || c != nil {
 				promptTok, cachedPromptTok, completionTok = mergeStreamUsagePointers(promptTok, cachedPromptTok, completionTok, p, cached, c)
-				line = sseLineWithCachedPromptTokens(line, effectiveCachedPromptTokensForBuyer(cachedPromptTok, promptTok, state, billingAttemptN))
+				billed, observed := buyerCachedPair(cachedPromptTok, promptTok, state, billingAttemptN)
+				line = sseLineWithCachedPromptTokens(line, billed, observed)
 				if line == nil {
 					continue
 				}
@@ -8779,6 +8785,25 @@ func effectiveCachedPromptTokensForBuyer(cachedPromptTokens, promptTokens *int64
 	return cached
 }
 
+func observedCachedPromptTokensForBuyer(cachedPromptTokens, promptTokens *int64, state *forwardState, attemptN int) int64 {
+	if cachedPromptTokens == nil || promptTokens == nil {
+		return 0
+	}
+	cached := *cachedPromptTokens
+	if cached < 0 || cached > *promptTokens || attemptN > 0 {
+		return 0
+	}
+	if state != nil && (state.stickyResult == "hit" || state.conversationCacheOnly) {
+		return cached
+	}
+	return 0
+}
+
+func buyerCachedPair(cachedPromptTokens, promptTokens *int64, state *forwardState, attemptN int) (billed, observed int64) {
+	return effectiveCachedPromptTokensForBuyer(cachedPromptTokens, promptTokens, state, attemptN),
+		observedCachedPromptTokensForBuyer(cachedPromptTokens, promptTokens, state, attemptN)
+}
+
 func requestLogCacheRecoveryFields(cachedPromptTokens, promptTokens *int64, state *forwardState, attemptN int) (*int64, string) {
 	if cachedPromptTokens == nil {
 		return nil, ""
@@ -8794,14 +8819,17 @@ func requestLogCacheRecoveryFields(cachedPromptTokens, promptTokens *int64, stat
 		if cached == 0 {
 			return nil, ""
 		}
+		if state != nil && state.conversationCacheOnly {
+			return nil, ""
+		}
 		return nil, "ambiguous_cache"
 	}
 	v := cached
 	return &v, ""
 }
 
-func chatResponseWithCachedPromptTokens(body []byte, cachedPromptTokens int64) []byte {
-	updated, ok := chatJSONWithCachedPromptTokens(body, cachedPromptTokens)
+func chatResponseWithCachedPromptTokens(body []byte, billedCached, observedCached int64) []byte {
+	updated, ok := chatJSONWithCachedPromptTokens(body, billedCached, observedCached)
 	if !ok {
 		return body
 	}
@@ -8829,19 +8857,25 @@ func chatResponseHasIncompleteUsage(body []byte) bool {
 	return usage.PromptTokens == nil || usage.CompletionTokens == nil || usage.TotalTokens == nil
 }
 
-func chatResponseWithCompleteUsage(body []byte, promptTokens, cachedPromptTokens, completionTokens int64) []byte {
+func chatResponseWithCompleteUsage(body []byte, promptTokens, billedCached, observedCached, completionTokens int64) []byte {
 	var envelope map[string]json.RawMessage
 	if err := json.Unmarshal(body, &envelope); err != nil {
 		return body
 	}
-	if cachedPromptTokens < 0 {
-		cachedPromptTokens = 0
+	if billedCached < 0 {
+		billedCached = 0
 	}
-	usage := map[string]int64{
+	if observedCached < 0 {
+		observedCached = 0
+	}
+	usage := map[string]any{
 		"prompt_tokens":        promptTokens,
-		"cached_prompt_tokens": cachedPromptTokens,
+		"cached_prompt_tokens": billedCached,
 		"completion_tokens":    completionTokens,
 		"total_tokens":         promptTokens + completionTokens,
+		"prompt_tokens_details": map[string]int64{
+			"cached_tokens": observedCached,
+		},
 	}
 	rawUsage, err := json.Marshal(usage)
 	if err != nil {
@@ -8855,7 +8889,7 @@ func chatResponseWithCompleteUsage(body []byte, promptTokens, cachedPromptTokens
 	return updated
 }
 
-func sseLineWithCachedPromptTokens(line []byte, cachedPromptTokens int64) []byte {
+func sseLineWithCachedPromptTokens(line []byte, billedCached, observedCached int64) []byte {
 	text := string(line)
 	trimmed := strings.TrimRight(text, "\r\n")
 	suffix := text[len(trimmed):]
@@ -8867,7 +8901,7 @@ func sseLineWithCachedPromptTokens(line []byte, cachedPromptTokens int64) []byte
 	if payload == "" || payload == "[DONE]" {
 		return line
 	}
-	updated, ok := streamingJSONWithCachedPromptTokens([]byte(payload), cachedPromptTokens)
+	updated, ok := streamingJSONWithCachedPromptTokens([]byte(payload), billedCached, observedCached)
 	if !ok {
 		return line
 	}
@@ -8887,7 +8921,8 @@ func sseBlockWithCachedPromptTokens(block []byte, state *forwardState, attemptN 
 		if len(line) > 0 {
 			if p, cached, c := tokenPointersFromSSE(line); p != nil || cached != nil || c != nil {
 				promptTok, cachedPromptTok, completionTok = mergeStreamUsagePointers(promptTok, cachedPromptTok, completionTok, p, cached, c)
-				rewritten := sseLineWithCachedPromptTokens(line, effectiveCachedPromptTokensForBuyer(cachedPromptTok, promptTok, state, attemptN))
+				billed, observed := buyerCachedPair(cachedPromptTok, promptTok, state, attemptN)
+				rewritten := sseLineWithCachedPromptTokens(line, billed, observed)
 				if rewritten == nil {
 					changed = true
 					continue
@@ -8909,9 +8944,9 @@ func sseBlockWithCachedPromptTokens(block []byte, state *forwardState, attemptN 
 	return out.Bytes(), promptTok, cachedPromptTok, completionTok
 }
 
-func streamingJSONWithCachedPromptTokens(body []byte, cachedPromptTokens int64) ([]byte, bool) {
+func streamingJSONWithCachedPromptTokens(body []byte, billedCached, observedCached int64) ([]byte, bool) {
 	if streamingUsageObjectComplete(body) {
-		return chatJSONWithCachedPromptTokens(body, cachedPromptTokens)
+		return chatJSONWithCachedPromptTokens(body, billedCached, observedCached)
 	}
 	var envelope map[string]json.RawMessage
 	if err := json.Unmarshal(body, &envelope); err != nil {
@@ -8956,7 +8991,7 @@ func streamingUsageObjectComplete(body []byte) bool {
 	return *usage.TotalTokens == *usage.PromptTokens+*usage.CompletionTokens
 }
 
-func chatJSONWithCachedPromptTokens(body []byte, cachedPromptTokens int64) ([]byte, bool) {
+func chatJSONWithCachedPromptTokens(body []byte, billedCached, observedCached int64) ([]byte, bool) {
 	var envelope map[string]json.RawMessage
 	if err := json.Unmarshal(body, &envelope); err != nil {
 		return nil, false
@@ -8969,14 +9004,22 @@ func chatJSONWithCachedPromptTokens(body []byte, cachedPromptTokens int64) ([]by
 	if err := json.Unmarshal(rawUsage, &usage); err != nil {
 		return nil, false
 	}
-	if cachedPromptTokens < 0 {
-		cachedPromptTokens = 0
+	if billedCached < 0 {
+		billedCached = 0
 	}
-	encoded, err := json.Marshal(cachedPromptTokens)
+	if observedCached < 0 {
+		observedCached = 0
+	}
+	encoded, err := json.Marshal(billedCached)
 	if err != nil {
 		return nil, false
 	}
 	usage["cached_prompt_tokens"] = encoded
+	details, err := json.Marshal(map[string]int64{"cached_tokens": observedCached})
+	if err != nil {
+		return nil, false
+	}
+	usage["prompt_tokens_details"] = details
 	rawUsage, err = json.Marshal(usage)
 	if err != nil {
 		return nil, false

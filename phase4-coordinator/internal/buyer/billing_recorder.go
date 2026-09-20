@@ -424,6 +424,7 @@ func (b *billingRecorder) recordRow(
 			FaultFlag:                    faultFlag,
 			StickyResult:                 b.state.stickyResult,
 			StickyMissReason:             b.state.stickyMissReason,
+			ConversationCacheOnly:        b.state.conversationCacheOnly,
 			ConfigSnapshotID:             billingSnapshotID,
 			RateEntry:                    billing.RateFor(billingCfg.RateCard, row.Model),
 			RateCard:                     billingCfg.RateCard,
