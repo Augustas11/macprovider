@@ -1271,54 +1271,58 @@ def run_benchmark(
             "output_tokens": output_tokens,
             "output_tokens_per_second": None,
         }
-    if not ttfts:
-        raise benchmark_metric_failure(
-            "benchmark produced no successful TTFT samples",
-            requests,
-            results,
-            statuses,
-            ok_count,
-            shed_count,
-            failed,
-            "no_successful_ttft_samples",
-            require_429=require_429,
-            min_success_ratio=min_success_ratio,
-            metrics={"ttft_sample_count": 0, "ttft_p95_ms": None, "max_ttft_p95_ms": max_ttft_p95_ms},
-        )
-    ttft_p95 = percentile(ttfts, 95)
-    if max_ttft_p95_ms > 0 and ttft_p95 > max_ttft_p95_ms:
-        raise benchmark_metric_failure(
-            f"benchmark TTFT p95 {ttft_p95}ms exceeds required {max_ttft_p95_ms}ms",
-            requests,
-            results,
-            statuses,
-            ok_count,
-            shed_count,
-            failed,
-            "ttft_p95_above_threshold",
-            require_429=require_429,
-            min_success_ratio=min_success_ratio,
-            metrics={"ttft_p95_ms": ttft_p95, "max_ttft_p95_ms": max_ttft_p95_ms},
-        )
-    generated_tokens_per_second = output_tokens / max(generation_seconds, 0.001)
-    if min_output_tokens_per_second > 0 and generated_tokens_per_second < min_output_tokens_per_second:
-        raise benchmark_metric_failure(
-            "benchmark generated-token throughput "
-            f"{generated_tokens_per_second:.3f} tokens/s below required {min_output_tokens_per_second:.3f} tokens/s",
-            requests,
-            results,
-            statuses,
-            ok_count,
-            shed_count,
-            failed,
-            "throughput_below_threshold",
-            require_429=require_429,
-            min_success_ratio=min_success_ratio,
-            metrics={
-                "output_tokens_per_second": round(generated_tokens_per_second, 3),
-                "min_output_tokens_per_second": min_output_tokens_per_second,
-            },
-        )
+    # Saturation and load-ladder overflow include slot-queue wait (up to 3s) on
+    # the requests that still land. TTFT/throughput stay benchmark gates.
+    skip_latency_gates = shed_count >= 1 and (require_429 or allow_all_shed)
+    ttft_p95 = percentile(ttfts, 95) if ttfts else None
+    generated_tokens_per_second = output_tokens / max(generation_seconds, 0.001) if output_tokens else 0.0
+    if not skip_latency_gates:
+        if not ttfts:
+            raise benchmark_metric_failure(
+                "benchmark produced no successful TTFT samples",
+                requests,
+                results,
+                statuses,
+                ok_count,
+                shed_count,
+                failed,
+                "no_successful_ttft_samples",
+                require_429=require_429,
+                min_success_ratio=min_success_ratio,
+                metrics={"ttft_sample_count": 0, "ttft_p95_ms": None, "max_ttft_p95_ms": max_ttft_p95_ms},
+            )
+        if max_ttft_p95_ms > 0 and ttft_p95 > max_ttft_p95_ms:
+            raise benchmark_metric_failure(
+                f"benchmark TTFT p95 {ttft_p95}ms exceeds required {max_ttft_p95_ms}ms",
+                requests,
+                results,
+                statuses,
+                ok_count,
+                shed_count,
+                failed,
+                "ttft_p95_above_threshold",
+                require_429=require_429,
+                min_success_ratio=min_success_ratio,
+                metrics={"ttft_p95_ms": ttft_p95, "max_ttft_p95_ms": max_ttft_p95_ms},
+            )
+        if min_output_tokens_per_second > 0 and generated_tokens_per_second < min_output_tokens_per_second:
+            raise benchmark_metric_failure(
+                "benchmark generated-token throughput "
+                f"{generated_tokens_per_second:.3f} tokens/s below required {min_output_tokens_per_second:.3f} tokens/s",
+                requests,
+                results,
+                statuses,
+                ok_count,
+                shed_count,
+                failed,
+                "throughput_below_threshold",
+                require_429=require_429,
+                min_success_ratio=min_success_ratio,
+                metrics={
+                    "output_tokens_per_second": round(generated_tokens_per_second, 3),
+                    "min_output_tokens_per_second": min_output_tokens_per_second,
+                },
+            )
     return {
         "requests": requests,
         "requests_sent": len(results),

@@ -846,6 +846,22 @@ class OpenRouterReadinessProbeTests(unittest.TestCase):
         self.assertEqual(got["requests_sent"], 2)
         self.assertEqual(got["shed_429"], 1)
 
+    def test_saturation_does_not_fail_queued_ttft_after_clean_429(self):
+        slow_ok = {
+            "status": 200,
+            "ok": True,
+            "ttft_ms": 8000,
+            "latency_ms": 8500,
+            "generation_ms": 500,
+            "output_tokens": 8,
+        }
+        shed = {"status": 429, "ok": False, "error_code": "no_provider_available", "latency_ms": 1}
+        with mock.patch.object(probe, "chat_once", side_effect=[slow_ok, shed]):
+            got = probe.run_benchmark("https://api.example.test", "secret", "model", 2, 2, 16, 0.0, 5000, 0.0, True)
+        self.assertEqual(got["shed_429"], 1)
+        self.assertEqual(got["ok"], 1)
+        self.assertEqual(got["ttft_ms_p95"], 8000)
+
     def test_benchmark_stamps_unique_request_ids(self):
         result = {
             "status": 200,
@@ -891,6 +907,30 @@ class OpenRouterReadinessProbeTests(unittest.TestCase):
         shed = {"status": 429, "ok": False, "error_code": "no_provider_available", "latency_ms": 1}
         with mock.patch.object(probe, "chat_once", side_effect=[ok, ok, shed, shed]):
             got = probe.run_load_ladder("https://api.example.test", "secret", "model", [1, 2], 16, 2, 5000)
+        self.assertEqual(got["max_clean_concurrency"], 1)
+        self.assertEqual(got["steps"][1]["classification"], "clean_capacity_shed")
+
+    def test_load_ladder_overflow_step_ignores_queued_ttft(self):
+        ok = {
+            "status": 200,
+            "ok": True,
+            "ttft_ms": 20,
+            "latency_ms": 60,
+            "generation_ms": 40,
+            "output_tokens": 4,
+        }
+        slow = {
+            "status": 200,
+            "ok": True,
+            "ttft_ms": 8000,
+            "latency_ms": 8500,
+            "generation_ms": 500,
+            "output_tokens": 8,
+        }
+        shed = {"status": 429, "ok": False, "error_code": "no_provider_available", "latency_ms": 1}
+        with mock.patch.object(probe, "chat_once", side_effect=[ok, slow, shed]):
+            got = probe.run_load_ladder("https://api.example.test", "secret", "model", [1, 2], 16, 1, 5000)
+        self.assertEqual(got["first_blocker"], "")
         self.assertEqual(got["max_clean_concurrency"], 1)
         self.assertEqual(got["steps"][1]["classification"], "clean_capacity_shed")
 
