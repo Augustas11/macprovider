@@ -2950,7 +2950,8 @@ actor ModelRuntime: ModelRuntimeServing {
                 container: container,
                 descriptor: descriptor,
                 layerCount: layerCount,
-                contiguousCacheBridge: contiguousCacheBridge
+                contiguousCacheBridge: contiguousCacheBridge,
+                compiledDecode: true
             ),
             maxBatch: maxBatch,
             queueLimit: queueLimit,

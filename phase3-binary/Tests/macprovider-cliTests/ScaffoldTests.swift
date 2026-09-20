@@ -77,6 +77,20 @@ final class DecodeBenchHelperTests: XCTestCase {
         XCTAssertEqual(decodeBenchSanitizeFilenameComponent(long).count, 80)
     }
 
+    func testMSBThroughputEngineParsesKnownValues() {
+        XCTAssertEqual(MSBThroughputEngine(rawValue: "contiguous"), .contiguous)
+        XCTAssertEqual(MSBThroughputEngine(rawValue: "paged"), .paged)
+        XCTAssertNil(MSBThroughputEngine(rawValue: "fused"))
+        XCTAssertEqual(MSBThroughputEngine.allCases.count, 2)
+    }
+
+    func testContiguousBatchedDecodeErrorCasesExist() {
+        XCTAssertNotEqual(
+            ContiguousBatchedDecodeError.invalidArguments,
+            ContiguousBatchedDecodeError.raggedPrompts
+        )
+    }
+
     func testMSBAggregateThroughputUsesCommonWallClock() throws {
         let base = Date(timeIntervalSince1970: 100)
         let report = try msbAggregateThroughput([
