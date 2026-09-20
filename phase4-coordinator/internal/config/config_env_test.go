@@ -243,6 +243,9 @@ func TestDeployCoordinatorYAMLLoadsWithStatsEnv(t *testing.T) {
 	if got, want := cfg.Stats.PartnerKeys.ProductionSignoffPath, "/opt/macprovider/spec017-signoff.txt"; got != want {
 		t.Fatalf("ProductionSignoffPath=%q want %q", got, want)
 	}
+	if cfg.Routing.MinProviderThroughputTPS != 1.0 {
+		t.Fatalf("MinProviderThroughputTPS=%v want 1.0 (Pearl live OpenRouter dispatch floor; dist must not revert to 0)", cfg.Routing.MinProviderThroughputTPS)
+	}
 	nemotron, ok := cfg.Rewards.RateCard["nemotron-3-nano-30b-a3b"]
 	if !ok {
 		t.Fatal("nemotron rate-card row missing")
