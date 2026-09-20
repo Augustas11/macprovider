@@ -950,11 +950,13 @@ def check_chat(base_url: str, token: str, model: str, max_tokens: int) -> dict:
 def is_unserved_catalog_chat(result: dict) -> bool:
     status = result.get("status")
     error_code = result.get("error_code") or ""
-    if status in {404, 503}:
+    if status == 404:
+        return True
+    if status == 503 and error_code in {"", "no_provider_available", "model_not_found", "invalid_model"}:
         return True
     if status == 429 and error_code == "no_provider_available":
         return True
-    return error_code in {"no_provider_available", "model_not_found", "invalid_model"}
+    return False
 
 
 def check_catalog_chat(base_url: str, token: str, max_tokens: int) -> dict:
@@ -1841,6 +1843,8 @@ def main(argv: list[str]) -> int:
             report["checks"]["chat"] = {"ok": False, "error": token_error}
             if args.filing_mode:
                 report["checks"]["chat_free"] = {"ok": False, "error": token_error}
+            if args.catalog_chat:
+                report["checks"]["catalog_chat"] = {"ok": False, "error": token_error}
             report["checks"]["benchmark"] = {"ok": False, "error": token_error}
             if load_ladder_concurrencies:
                 report["checks"]["load_ladder"] = {"ok": False, "error": token_error}

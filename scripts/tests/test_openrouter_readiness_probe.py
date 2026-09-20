@@ -250,6 +250,18 @@ class OpenRouterReadinessProbeTests(unittest.TestCase):
             with self.assertRaisesRegex(probe.EvidenceProbeError, "catalog chat failed"):
                 probe.check_catalog_chat("https://api.example.test", "token", 16)
 
+    def test_catalog_chat_fails_closed_on_502_capacity_error_code(self):
+        def fake_chat(_base, _token, model, **_kwargs):
+            if model == "mlx-community/Llama-3.2-3B-Instruct-4bit":
+                return {"status": 200, "ok": True, "latency_ms": 10, "error_code": ""}
+            if model == "mlx-community/GLM-4.5-Air-4bit":
+                return {"status": 502, "ok": False, "latency_ms": 5, "error_code": "no_provider_available"}
+            return {"status": 404, "ok": False, "latency_ms": 5, "error_code": "model_not_found"}
+
+        with mock.patch.object(probe, "chat_once", side_effect=fake_chat):
+            with self.assertRaisesRegex(probe.EvidenceProbeError, "catalog chat failed"):
+                probe.check_catalog_chat("https://api.example.test", "token", 16)
+
     def test_models_document_rejects_duplicate_model_ids(self):
         doc = valid_doc()
         doc["data"].append(copy.deepcopy(doc["data"][0]))
