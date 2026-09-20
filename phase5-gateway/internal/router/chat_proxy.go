@@ -1402,7 +1402,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 				}
 				terminalCode := terminalSSEErrorCode(data)
 				cleanLengthTerminalFrame := sseErrorDeliveredClean(w, terminalCode)
-				if isSpec019TerminalSSEErrorCode(terminalCode) && !cleanLengthTerminalFrame {
+				if isPassThroughTerminalSSEErrorCode(terminalCode) && !cleanLengthTerminalFrame {
 					terminalStructuredErrorCode = terminalCode
 					// #762: a 200 stream that ends in a SPEC-019 terminal
 					// error envelope is refunded, not an answer. Caching it
@@ -3367,6 +3367,21 @@ func isSpec019TerminalSSEErrorCode(code string) bool {
 	// allow-lists is a money-path violation.
 	switch code {
 	case "malformed_json_response", "json_schema_validation_failed", "response_byte_cap_exceeded", "provider_timeout":
+		return true
+	default:
+		return false
+	}
+}
+
+func isPassThroughTerminalSSEErrorCode(code string) bool {
+	if isSpec019TerminalSSEErrorCode(code) {
+		return true
+	}
+	// Coordinator tool-call final-close codes must keep their envelope.
+	// Rewriting them to stream_malformed made Pi/openai-python treat a
+	// structured parse failure as a generic malformed stream.
+	switch code {
+	case "malformed_tool_call", "malformed_tool_call_final_json":
 		return true
 	default:
 		return false
