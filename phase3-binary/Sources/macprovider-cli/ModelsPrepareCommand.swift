@@ -1,5 +1,7 @@
 import ArgumentParser
+import Darwin
 import Foundation
+import MacProviderCore
 
 enum Build1LaneAPrepareProfile {
     static let profile = "build1-lane-a"
@@ -10,7 +12,8 @@ enum Build1LaneAPrepareProfile {
     static let artifactHash = "e7e5bff4248768b4db7a53afb3b514ba5867b800f63d1abd0330eaf08e54aa90"
     static let runtimeSource = "mlx_cache"
     static let unsupportedReason = "artifact_authority_unavailable"
-    static let stagingUnavailableReason = "artifact_staging_not_implemented"
+    static let configUnavailableReason = "config_unavailable"
+    static let invalidTimeoutReason = "invalid_timeout"
 
     private static let stagingCoordinatorHosts: Set<String> = [
         "api-staging.malibu.tech",
@@ -208,6 +211,50 @@ enum Build1LaneAArtifactAuthorityResolver {
     }
 }
 
+/// Serializes `model_catalog_transaction_event.v1` frames for one prepare
+/// transaction with a monotonic sequence. Shared between the command and the
+/// staging task so cancellation and progress cannot interleave out of order.
+final class Build1LaneAPrepareEventEmitter: @unchecked Sendable {
+    private let lock = NSLock()
+    private let transactionID: String
+    private var nextSequence = 1
+
+    init(transactionID: String) {
+        self.transactionID = transactionID
+    }
+
+    var emittedCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return nextSequence - 1
+    }
+
+    func emit(
+        modelKey: String = Build1LaneAPrepareProfile.catalogKey,
+        state: ModelPreparationEventState,
+        progress: ModelPreparationTransactionEvent.Progress? = nil,
+        errorCode: ModelPreparationEventErrorCode? = nil,
+        warningCode: ModelPreparationEventWarningCode? = nil
+    ) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        let event = try ModelPreparationTransactionEvent(
+            transactionID: transactionID,
+            transactionKind: .prepareModel,
+            modelKey: modelKey,
+            eventSequence: nextSequence,
+            emittedAt: ModelSwitchingWireCodec.timestamp(),
+            state: state,
+            progress: progress,
+            errorCode: errorCode,
+            warningCode: warningCode
+        )
+        try ModelSwitchingWireCodec.printJSON(event)
+        fflush(stdout)
+        nextSequence += 1
+    }
+}
+
 struct ModelsPrepareCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "prepare",
@@ -229,92 +276,58 @@ struct ModelsPrepareCommand: AsyncParsableCommand {
     @Option(help: "Explicit staging coordinator URL. Only loopback and approved staging hosts are accepted.")
     var coordinatorURL: String?
 
+    @Option(help: "YAML config path used to resolve model_artifact_root. Overrides MACPROVIDER_CONFIG.")
+    var config: String?
+
+    @Option(help: "Abort staging after this many seconds and report timed_out. Unset means no deadline.")
+    var timeoutSeconds: Int?
+
     func run() async throws {
         guard emitJSON else {
             writePrepareStderr("models prepare is JSON-only in this release; pass --json")
             throw ExitCode(2)
         }
 
-        let transactionID = UUID().uuidString.lowercased()
+        let emitter = Build1LaneAPrepareEventEmitter(transactionID: UUID().uuidString.lowercased())
 
         func fail(
             reason: String,
+            modelKey: String,
             errorCode: ModelPreparationEventErrorCode = .actionUnavailable
         ) throws -> Never {
-            try emitFailedEvent(
-                transactionID: transactionID,
-                modelKey: normalizedModelKey(),
-                errorCode: errorCode
-            )
+            try emitter.emit(modelKey: modelKey, state: .failed, errorCode: errorCode)
             writePrepareStderr("models prepare refused: \(reason)")
             throw ExitCode(2)
         }
 
         guard yes else {
-            try fail(reason: "confirmation_required")
+            try fail(reason: "confirmation_required", modelKey: normalizedModelKey())
         }
         guard profile == Build1LaneAPrepareProfile.profile else {
-            try fail(reason: "unsupported_profile")
+            try fail(reason: "unsupported_profile", modelKey: normalizedModelKey())
         }
         guard Build1LaneAPrepareProfile.isApprovedCatalogKey(catalogKey) else {
-            try fail(reason: "unsupported_model_tuple")
+            try fail(reason: "unsupported_model_tuple", modelKey: normalizedModelKey())
         }
         guard Build1LaneAPrepareProfile.coordinatorIsAllowedForStaging(coordinatorURL) else {
-            try fail(reason: "staging_coordinator_required")
+            try fail(reason: "staging_coordinator_required", modelKey: normalizedModelKey())
+        }
+        if let timeoutSeconds, timeoutSeconds <= 0 {
+            try fail(reason: Build1LaneAPrepareProfile.invalidTimeoutReason, modelKey: normalizedModelKey())
         }
 
-        try emitQueuedEvent(transactionID: transactionID)
+        try emitter.emit(state: .queued)
         let authority: Build1LaneAArtifactAuthority
         do {
             authority = try await Build1LaneAArtifactAuthorityResolver.resolve(coordinatorURL: coordinatorURL)
         } catch {
-            try emitFailedEvent(
-                transactionID: transactionID,
+            try fail(
+                reason: Build1LaneAPrepareProfile.unsupportedReason,
                 modelKey: Build1LaneAPrepareProfile.catalogKey,
-                eventSequence: 2,
                 errorCode: .authorityUnavailable
             )
-            writePrepareStderr("models prepare refused: \(Build1LaneAPrepareProfile.unsupportedReason)")
-            throw ExitCode(2)
         }
-        try emitAuthorityVerifiedEvent(transactionID: transactionID, authority: authority)
-        try emitFailedEvent(
-            transactionID: transactionID,
-            modelKey: Build1LaneAPrepareProfile.catalogKey,
-            eventSequence: 3,
-            errorCode: .actionUnavailable
-        )
-        writePrepareStderr("models prepare refused: \(Build1LaneAPrepareProfile.stagingUnavailableReason)")
-        throw ExitCode(2)
-    }
-
-    private func normalizedModelKey() -> String {
-        Build1LaneAPrepareProfile.isApprovedCatalogKey(catalogKey)
-            ? Build1LaneAPrepareProfile.catalogKey
-            : "unsupported"
-    }
-
-    private func emitQueuedEvent(transactionID: String) throws {
-        try ModelSwitchingWireCodec.printJSON(ModelPreparationTransactionEvent(
-            transactionID: transactionID,
-            transactionKind: .prepareModel,
-            modelKey: Build1LaneAPrepareProfile.catalogKey,
-            eventSequence: 1,
-            emittedAt: ModelSwitchingWireCodec.timestamp(),
-            state: .queued,
-            progress: nil,
-            errorCode: nil,
-            warningCode: nil
-        ))
-    }
-
-    private func emitAuthorityVerifiedEvent(transactionID: String, authority: Build1LaneAArtifactAuthority) throws {
-        try ModelSwitchingWireCodec.printJSON(ModelPreparationTransactionEvent(
-            transactionID: transactionID,
-            transactionKind: .prepareModel,
-            modelKey: authority.catalogKey,
-            eventSequence: 2,
-            emittedAt: ModelSwitchingWireCodec.timestamp(),
+        try emitter.emit(
             state: .running,
             progress: try ModelPreparationTransactionEvent.Progress(
                 stageLabelKey: "artifact_authority_verified",
@@ -322,29 +335,144 @@ struct ModelsPrepareCommand: AsyncParsableCommand {
                 bytesExpected: Int64(authority.sizeBytes),
                 percentComplete: 0,
                 heartbeat: nil
-            ),
-            errorCode: nil,
-            warningCode: nil
-        ))
+            )
+        )
+
+        // Resolve the durable root the same way `serve` preflight does so the
+        // adopted copy is the one the provider runtime will load. Config is
+        // read only; nothing here changes the active model.
+        let appConfig: AppConfig
+        do {
+            appConfig = try ConfigLoader.load(cli: CLIOverrides(configPath: config))
+        } catch {
+            try fail(
+                reason: Build1LaneAPrepareProfile.configUnavailableReason,
+                modelKey: Build1LaneAPrepareProfile.catalogKey,
+                errorCode: .rootUnavailable
+            )
+        }
+        writePrepareStderr(Self.disclosureLine(for: authority))
+
+        let deadline = timeoutSeconds.map { Date().addingTimeInterval(TimeInterval($0)) }
+        let stager = Build1LaneAArtifactStager.makeStager(appConfig, deadline)
+        let work = Task {
+            try await stager.stageAndAdopt(authority: authority) { stage, bytesCompleted, bytesExpected in
+                try emitter.emit(
+                    state: .running,
+                    progress: try ModelPreparationTransactionEvent.Progress(
+                        stageLabelKey: stage.rawValue,
+                        bytesCompleted: bytesCompleted,
+                        bytesExpected: bytesExpected,
+                        percentComplete: Self.percent(completed: bytesCompleted, expected: bytesExpected),
+                        heartbeat: nil
+                    )
+                )
+            }
+        }
+        let signalSources = Self.installCancellationSources { work.cancel() }
+        defer { signalSources.forEach { $0.cancel() } }
+
+        let staged: Build1LaneAStagedArtifact
+        do {
+            staged = try await work.value
+        } catch let error as Build1LaneAArtifactStagingError {
+            try Self.emitStagingFailure(error, emitter: emitter)
+        } catch is CancellationError {
+            try Self.emitStagingFailure(.cancelled, emitter: emitter)
+        } catch {
+            try Self.emitStagingFailure(.transferFailed(String(describing: error)), emitter: emitter)
+        }
+
+        try emitter.emit(state: .succeeded)
+        if staged.stagingCleanupRequired {
+            writePrepareStderr("models prepare warning: \(ModelPreparationEventWarningCode.stagingCleanupRequired.rawValue)")
+        }
+        writePrepareStderr(
+            "models prepare adopted \(authority.modelID)@\(authority.revision) "
+                + "\(authority.hashAlgorithm)=\(staged.sha256) adopted_bytes=\(staged.adoptedBytes) "
+                + "reused_durable_artifact=\(staged.reusedDurableArtifact); "
+                + "preparation grants no admission, settlement, earnings, rewards, payouts, or production activation"
+        )
     }
 
-    private func emitFailedEvent(
-        transactionID: String,
-        modelKey: String,
-        eventSequence: Int = 1,
-        errorCode: ModelPreparationEventErrorCode
-    ) throws {
-        try ModelSwitchingWireCodec.printJSON(ModelPreparationTransactionEvent(
-            transactionID: transactionID,
-            transactionKind: .prepareModel,
-            modelKey: modelKey,
-            eventSequence: eventSequence,
-            emittedAt: ModelSwitchingWireCodec.timestamp(),
-            state: .failed,
-            progress: nil,
-            errorCode: errorCode,
-            warningCode: nil
-        ))
+    private static func emitStagingFailure(
+        _ error: Build1LaneAArtifactStagingError,
+        emitter: Build1LaneAPrepareEventEmitter
+    ) throws -> Never {
+        switch error {
+        case .cancelled:
+            try emitter.emit(state: .cancelRequested)
+            try emitter.emit(state: .cancelled)
+            writePrepareStderr("models prepare cancelled: active model unchanged; durable store left as found")
+            throw ExitCode(130)
+        case .timedOut:
+            try emitter.emit(state: .timedOut, errorCode: .timedOut)
+            writePrepareStderr("models prepare timed out: active model unchanged; durable store left as found")
+            throw ExitCode(2)
+        default:
+            let code = errorCode(for: error)
+            try emitter.emit(state: .failed, errorCode: code)
+            writePrepareStderr("models prepare failed: \(code.rawValue)\(detail(for: error))")
+            throw ExitCode(2)
+        }
+    }
+
+    private static func errorCode(for error: Build1LaneAArtifactStagingError) -> ModelPreparationEventErrorCode {
+        switch error {
+        case .rootUnavailable: return .rootUnavailable
+        case .operationConflict: return .operationConflict
+        case .insufficientDiskSpace: return .insufficientDiskSpace
+        case .transferFailed: return .transferFailed
+        case .verificationFailed: return .verificationFailed
+        case .publicationFailed: return .publicationFailed
+        case .timedOut: return .timedOut
+        case .cancelled: return .internalError
+        }
+    }
+
+    /// Operator-local diagnostics only. Never includes private paths, tokens,
+    /// or the durable root.
+    private static func detail(for error: Build1LaneAArtifactStagingError) -> String {
+        switch error {
+        case .insufficientDiskSpace(let required, let available):
+            return " required_bytes=\(required) available_bytes=\(available)"
+        case .verificationFailed(let expected, let actual):
+            return " expected=\(expected) actual=\(actual)"
+        default:
+            return ""
+        }
+    }
+
+    private static func disclosureLine(for authority: Build1LaneAArtifactAuthority) -> String {
+        "models prepare staging \(authority.modelID)@\(authority.revision) "
+            + "artifact=\(authority.artifactID) \(authority.hashAlgorithm)=\(authority.hash) "
+            + "size_bytes=\(authority.sizeBytes) runtime_source=\(Build1LaneAPrepareProfile.runtimeSource) "
+            + "release=\(authority.releaseID) signer=\(authority.feedSignerKeyID) feed_sha256=\(authority.feedSHA256); "
+            + "staging-only, no admission or earnings are granted"
+    }
+
+    private static func percent(completed: Int64?, expected: Int64?) -> Double? {
+        guard let completed, let expected, expected > 0 else { return nil }
+        return min(100, max(0, Double(completed) / Double(expected) * 100))
+    }
+
+    /// SIGINT/SIGTERM cancel the staging task so the downloader unwinds through
+    /// its own staging-directory cleanup and the command reports
+    /// `cancel_requested` then `cancelled` instead of dying mid-write.
+    private static func installCancellationSources(_ cancel: @escaping @Sendable () -> Void) -> [DispatchSourceSignal] {
+        [SIGINT, SIGTERM].map { signalNumber in
+            signal(signalNumber, SIG_IGN)
+            let source = DispatchSource.makeSignalSource(signal: signalNumber, queue: .global(qos: .userInitiated))
+            source.setEventHandler { cancel() }
+            source.resume()
+            return source
+        }
+    }
+
+    private func normalizedModelKey() -> String {
+        Build1LaneAPrepareProfile.isApprovedCatalogKey(catalogKey)
+            ? Build1LaneAPrepareProfile.catalogKey
+            : "unsupported"
     }
 }
 

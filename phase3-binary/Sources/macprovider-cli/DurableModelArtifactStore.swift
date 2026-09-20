@@ -158,7 +158,8 @@ struct DurableModelArtifactStore {
         }
     }
 
-    private func ensureRoot() throws {
+    /// Create the durable root as a private (0700) real directory; fails on symlink roots.
+    func ensureRoot() throws {
         try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
         var st = stat()
         guard lstat(root.path, &st) == 0, (st.st_mode & S_IFMT) == S_IFDIR else {
