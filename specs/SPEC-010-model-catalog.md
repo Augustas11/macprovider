@@ -1,7 +1,8 @@
 # SPEC-010 — Provider Model Catalog
 
-**Version:** 1.8
-**Status:** v1.8 R004 composite-proof clarification (BYOM v0.2 epic #1453,
+**Version:** 1.9
+**Status:** v1.9 row-continuity admission clarification (#1615,
+2026-09-20) over v1.8 R004 composite-proof clarification (BYOM v0.2 epic #1453,
 slice 4, 2026-09-10) over the v1.7 multi-artifact identity amendment (slice 3,
 2026-09-10) over the v1.6 canonical model-identity amendment proposed by issue #609
 (2026-07-18). The supported-model catalog contract remains **LOCKED** at
@@ -39,6 +40,16 @@ SPEC-023 owns candidate-catalog `bench_gate` provenance, including
   artifact-derived identity across a scheduled catalog re-stamp by resolving
   in its own release's set (slice-4 implementation). Bounded
   `model-catalog-identity` amendment.
+
+**Change log v1.9 (issue #1615 — row-continuity admission):**
+- R004 now distinguishes the signed catalog document a provider selected at
+  `serve` start from the model artifact identity it is serving. A provider may
+  be admitted across a catalog document rollover without restart when SPEC-023
+  R010 row-continuity evidence proves the selected older row and the current
+  row have the same row identity and admission-authoritative policy. This does
+  not authorize arbitrary release-directory walks, changed rows, changed policy,
+  untrusted signers, unavailable artifact evidence, or settlement against a
+  different release's identity set.
 
 **Change log v1.7 (issue #1453 slice 3 — multi-artifact identity, resolves SPEC-023 §13 Q14):**
 - Names `macprovider.gguf-file.v1` as a canonical wire pair under
@@ -1043,18 +1054,25 @@ algorithm.
   canonical catalog artifact identity.
 
 - **SPEC-010-R004 — Exact admitted-row authority and settlement binding.**
-  Admission MUST select the expected `model_sha256` from the provider's exact
-  signed current or explicitly compatible-previous catalog release and model
-  row. From v1.7 the expected identity MAY instead be a `verified` member of
-  that same exact release's artifact feed for that model row (R007), selected
-  from the feed release-bound to that release and never from an independently
-  loaded feed. The coordinator MUST retain, for every compatible-previous
-  release it retains, that release's own artifact identity set (built from
-  the retained release's artifact feed; v1.8), and a session resolves
-  artifact-derived identity only in the set of its own admitted release; a
-  release whose artifact feed the coordinator does not hold authorizes no
-  artifact-derived identity, and such a session keeps the primary-row path
-  only. That expected value remains session authority for later
+  Admission MUST select the expected `model_sha256` from one authenticated row
+  authority: the provider's exact signed current catalog release, an explicitly
+  compatible-previous retained release, or SPEC-023-R010 row-continuity
+  evidence for the older signed document the provider selected at `serve`
+  start. Row-continuity evidence is valid only when the active current catalog
+  contains the same selected row identity and the same admission-authoritative
+  policy; otherwise admission fails closed. From v1.7 the expected identity MAY
+  instead be a `verified` member of that same authenticated row authority's
+  artifact feed for that model row (R007), selected from the feed
+  release-bound to that authority and never from an independently loaded feed.
+  The coordinator MUST retain, for every compatible-previous release it
+  retains, that release's own artifact identity set (built from the retained
+  release's artifact feed; v1.8). A row-continuity admission whose evidence does
+  not include authenticated artifact-feed evidence for the older release
+  authorizes only the primary-row identity. A session resolves artifact-derived
+  identity only in the set of its own admitted row authority; a release whose
+  artifact feed the coordinator does not hold authorizes no artifact-derived
+  identity, and such a session keeps the primary-row path only. That expected
+  value remains session authority for later
   heartbeats. Coordinator/Tier-2 logic MUST compare only the named provider
   artifact identity with that same expected row or artifact-feed member; an
   independently selected catalog row, a second catalog fallback, or a feed of
