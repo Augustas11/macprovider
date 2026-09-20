@@ -4860,7 +4860,10 @@
         "phase5-gateway/internal/router/server_test.go:TestPrefixCacheConversationDivergesOnFirstUser",
         "phase5-gateway/internal/router/server_test.go:TestPrefixCacheConversationNotForwardedForDemo",
         "phase5-gateway/internal/router/server_test.go:TestPrefixCacheBuyerTagWinsWhenStickyEnabled",
-        "phase5-gateway/internal/router/server_test.go:TestPrefixConversationTagHelpers"
+        "phase5-gateway/internal/router/server_test.go:TestPrefixConversationTagHelpers",
+        "phase5-gateway/internal/router/server_test.go:TestAutoPrefixKeyDoesNotActivateStickyWhenStickyEnabled",
+        "phase5-gateway/internal/router/server_test.go:TestWhitespaceConversationTagRejectedWhenStickyEnabled",
+        "phase5-gateway/internal/router/server_test.go:TestPrefixCacheTier1DisclosurePresent"
       ],
       "journeys": [],
       "evidence": [],

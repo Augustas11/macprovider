@@ -2,6 +2,8 @@
 
 Mac Provider routes buyer prompts to volunteer Apple Silicon Macs. Prompts and completions are processed as **plaintext** on those machines. Providers can technically observe the traffic that lands on their hardware.
 
+Authenticated non-demo chat completions send the serving Mac an opaque HMAC conversation identifier derived from the prompt prefix through the first user message. That identifier lets the Mac reuse KV cache across tool turns. It does not pin routing to one provider. The provider cannot recover your account id from it. DELETE /v1/sticky does not clear that Mac-local cache; it expires on the provider's own TTL.
+
 ## Zero data retention
 
 There is **no zero-data-retention (ZDR) guarantee**. The OpenRouter ingest document sets `compliance.zdr` to `false` because that is the honest answer.

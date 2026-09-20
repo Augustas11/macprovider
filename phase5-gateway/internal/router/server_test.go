@@ -4241,6 +4241,39 @@ func TestAutoPrefixKeyDoesNotActivateStickyWhenStickyEnabled(t *testing.T) {
 	}
 }
 
+func TestWhitespaceConversationTagRejectedWhenStickyEnabled(t *testing.T) {
+	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+		cfg.Coordinator.OperatorURL = "http://operator.test"
+		cfg.Routing.StickyEnabled = true
+	})
+	fullKey := createAccountAndKey(t, store, cfg, "acct_whitespace_tag")
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"llama","max_tokens":20,"messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set("Authorization", "Bearer "+fullKey)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-MacProvider-Conversation", "   ")
+	resp := httptest.NewRecorder()
+	h.ServeHTTP(resp, req)
+	if resp.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s, want 400 for whitespace-only conversation tag", resp.Code, resp.Body.String())
+	}
+	assertErrorCode(t, resp.Body.String(), "invalid_conversation_tag")
+}
+
+func TestPrefixCacheTier1DisclosurePresent(t *testing.T) {
+	d := (&Server{cfg: config.Config{}}).makeTier1Disclosure()
+	if d.PrefixCache == nil || !d.PrefixCache.Enabled {
+		t.Fatalf("prefix_cache missing or disabled: %+v", d.PrefixCache)
+	}
+	if d.PrefixCache.Description != prefixCacheDisclosureText {
+		t.Fatalf("prefix_cache description=%q want %q", d.PrefixCache.Description, prefixCacheDisclosureText)
+	}
+	if d.StickyAffinity == nil || d.StickyAffinity.Enabled {
+		t.Fatalf("sticky_affinity should stay disabled by default: %+v", d.StickyAffinity)
+	}
+}
+
 // TestPrefixConversationTagHelpers unit-tests prefixConversationTag directly.
 func TestPrefixConversationTagHelpers(t *testing.T) {
 	tagRE := regexp.MustCompile(`^auto\.prefix\.[0-9a-f]{32}$`)
