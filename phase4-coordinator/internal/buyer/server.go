@@ -3484,11 +3484,26 @@ func (s *Server) forwardWS(w http.ResponseWriter, r *http.Request, requestID str
 	// (PR #332) made the cache architecturally incapable of ever populating —
 	// zero cached_prompt_tokens in production for any conversation. Security
 	// posture is unchanged: the key stays inside the AEAD-authenticated
-	// inference_request envelope (PR #332 relay/messages.go); gateway still
-	// gates the X-MacProvider-Internal-Conv header on !authn.Demo &&
-	// StickyEnabled && buyer set X-MacProvider-Conversation (phase5-gateway
-	// chat_proxy.go), so unauthenticated demo IPs cannot poison a bucket.
+	// inference_request envelope (PR #332 relay/messages.go); gateway gates the
+	// conversation key headers on authenticated non-demo requests
+	// (phase5-gateway chat_proxy.go chatConversationKey).
+	//
+	// Two headers carry conversation keys, with different sticky semantics:
+	//   X-MacProvider-Internal-Conv: sticky-path key (buyer sent
+	//     X-MacProvider-Conversation, routing.sticky_enabled=true, coordinator
+	//     sticky metadata agrees). applySticky / stickyStore read this header.
+	//   X-MacProvider-Internal-Conv-Cache: SPEC-006-R012 auto-prefix key
+	//     (derived from messages prefix through first user turn). Provides
+	//     provider ConversationCache keying WITHOUT activating SPEC-004 sticky
+	//     affinity. applySticky / stickyStore MUST NOT read this header.
+	// Demo traffic never receives either key (unauthenticated IPs cannot poison
+	// a bucket).
 	if key := strings.TrimSpace(r.Header.Get("X-MacProvider-Internal-Conv")); strings.HasPrefix(key, "conv:") {
+		ctx = providerws.ContextWithConversationKey(ctx, key)
+	} else if key := strings.TrimSpace(r.Header.Get("X-MacProvider-Internal-Conv-Cache")); strings.HasPrefix(key, "conv:") {
+		// Auto-prefix cache key: set provider context but do NOT activate sticky.
+		// applySticky / stickyStore only read X-MacProvider-Internal-Conv; this
+		// header is intentionally invisible to them (SPEC-006-R012, SPEC-004).
 		ctx = providerws.ContextWithConversationKey(ctx, key)
 	}
 	var relay *providerws.RelayStream

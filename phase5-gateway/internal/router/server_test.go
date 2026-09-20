@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -3932,6 +3933,7 @@ func TestStickyConversationIgnoredWhenDisabled(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"llama","max_tokens":20,"messages":[{"role":"user","content":"hi"}]}`))
 	req.Header.Set("Authorization", "Bearer "+fullKey)
+	// invalid tag (contains spaces) — sticky off, so MUST silently ignore (200, no 400)
 	req.Header.Set("X-MacProvider-Conversation", "bad tag with spaces")
 	resp := httptest.NewRecorder()
 	h.ServeHTTP(resp, req)
@@ -3939,9 +3941,403 @@ func TestStickyConversationIgnoredWhenDisabled(t *testing.T) {
 	if resp.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
 	}
-	if got := captured.Get("X-MacProvider-Internal-Conv"); got != "" {
-		t.Fatalf("internal conversation forwarded while disabled: %q", got)
+	// SPEC-006-R012: sticky off still derives an auto-prefix key so provider
+	// ConversationCache can populate. The buyer tag ("bad tag with spaces") is
+	// silently ignored; the forwarded key is from the messages prefix.
+	// Auto-prefix keys travel via Internal-Conv-Cache (not Internal-Conv) to
+	// avoid activating coordinator sticky affinity.
+	msgs := []json.RawMessage{json.RawMessage(`{"role":"user","content":"hi"}`)}
+	prefixTag, ok := prefixConversationTag(msgs)
+	if !ok {
+		t.Fatal("prefixConversationTag should succeed for [{user:hi}]")
 	}
+	want := expectedConversationKey("test-key-hash-secret", "acct_sticky_disabled", prefixTag)
+	if got := captured.Get("X-MacProvider-Internal-Conv-Cache"); got != want {
+		t.Fatalf("internal conversation cache key = %q, want %q (auto-prefix)", got, want)
+	}
+	if got := captured.Get("X-MacProvider-Internal-Conv"); got != "" {
+		t.Fatalf("Internal-Conv must be empty for auto-prefix path; got %q", got)
+	}
+}
+
+// TestPrefixCacheConversationForwardedWhenStickyDisabled verifies that an
+// authenticated non-demo request with no buyer conversation header still gets
+// an auto-derived prefix-cache key via X-MacProvider-Internal-Conv-Cache
+// (SPEC-006-R012). Auto-prefix keys MUST NOT travel via X-MacProvider-Internal-Conv
+// to avoid activating coordinator sticky affinity.
+func TestPrefixCacheConversationForwardedWhenStickyDisabled(t *testing.T) {
+	var captured http.Header
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		captured = r.Header.Clone()
+		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, `{"id":"chatcmpl_1","object":"chat.completion","usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7},"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`), nil
+	})}
+	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+		cfg.Routing.StickyEnabled = false
+	}, WithHTTPClient(client))
+	fullKey := createAccountAndKey(t, store, cfg, "acct_prefix_no_buyer_header")
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"llama","max_tokens":20,"messages":[{"role":"user","content":"hello"}]}`))
+	req.Header.Set("Authorization", "Bearer "+fullKey)
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+	h.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	// Auto-prefix keys travel via Internal-Conv-Cache (not Internal-Conv) so
+	// coordinator applySticky / stickyStore never see them.
+	got := captured.Get("X-MacProvider-Internal-Conv-Cache")
+	if got == "" {
+		t.Fatal("Internal-Conv-Cache should be set for authenticated non-demo request (SPEC-006-R012)")
+	}
+	if stickyHdr := captured.Get("X-MacProvider-Internal-Conv"); stickyHdr != "" {
+		t.Fatalf("Internal-Conv must be empty for auto-prefix path (sticky isolation); got %q", stickyHdr)
+	}
+	msgs := []json.RawMessage{json.RawMessage(`{"role":"user","content":"hello"}`)}
+	prefixTag, ok := prefixConversationTag(msgs)
+	if !ok {
+		t.Fatal("prefixConversationTag should succeed")
+	}
+	want := expectedConversationKey("test-key-hash-secret", "acct_prefix_no_buyer_header", prefixTag)
+	if got != want {
+		t.Fatalf("Internal-Conv-Cache = %q, want %q", got, want)
+	}
+}
+
+// TestPrefixCacheConversationStableAcrossToolTurn verifies that two requests
+// with the same system+user prefix but different tool-turn continuations get
+// the same Internal-Conv key (SPEC-006-R012 same-first-user-prefix invariant).
+func TestPrefixCacheConversationStableAcrossToolTurn(t *testing.T) {
+	var capturedTurn1, capturedTurn2 http.Header
+	callN := 0
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		callN++
+		if callN == 1 {
+			capturedTurn1 = r.Header.Clone()
+		} else {
+			capturedTurn2 = r.Header.Clone()
+		}
+		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, `{"id":"chatcmpl_1","object":"chat.completion","usage":{"prompt_tokens":5,"completion_tokens":4,"total_tokens":9},"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`), nil
+	})}
+	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+		cfg.Routing.StickyEnabled = false
+	}, WithHTTPClient(client))
+	fullKey := createAccountAndKey(t, store, cfg, "acct_prefix_tool_turn")
+
+	// Turn 1: [system, user]
+	body1 := `{"model":"llama","max_tokens":20,"messages":[{"role":"system","content":"you are helpful"},{"role":"user","content":"use a tool"}]}`
+	req1 := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body1))
+	req1.Header.Set("Authorization", "Bearer "+fullKey)
+	req1.Header.Set("Content-Type", "application/json")
+	resp1 := httptest.NewRecorder()
+	h.ServeHTTP(resp1, req1)
+	if resp1.Code != http.StatusOK {
+		t.Fatalf("turn1 status=%d body=%s", resp1.Code, resp1.Body.String())
+	}
+
+	// Turn 2: [system, user, assistant, tool] — same first-user prefix
+	body2 := `{"model":"llama","max_tokens":20,"messages":[{"role":"system","content":"you are helpful"},{"role":"user","content":"use a tool"},{"role":"assistant","content":"","tool_calls":[{"id":"call_abc123","type":"function","function":{"name":"my_tool","arguments":"{}"}}]},{"role":"tool","tool_call_id":"call_abc123","content":"result"}]}`
+	req2 := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body2))
+	req2.Header.Set("Authorization", "Bearer "+fullKey)
+	req2.Header.Set("Content-Type", "application/json")
+	resp2 := httptest.NewRecorder()
+	h.ServeHTTP(resp2, req2)
+	if resp2.Code != http.StatusOK {
+		t.Fatalf("turn2 status=%d body=%s", resp2.Code, resp2.Body.String())
+	}
+
+	// Auto-prefix keys travel via Internal-Conv-Cache (not Internal-Conv).
+	key1 := capturedTurn1.Get("X-MacProvider-Internal-Conv-Cache")
+	key2 := capturedTurn2.Get("X-MacProvider-Internal-Conv-Cache")
+	if key1 == "" {
+		t.Fatal("turn1 Internal-Conv-Cache must not be empty (SPEC-006-R012 auto-prefix)")
+	}
+	if capturedTurn1.Get("X-MacProvider-Internal-Conv") != "" {
+		t.Fatal("turn1 Internal-Conv must be empty for auto-prefix path (sticky isolation)")
+	}
+	if key1 != key2 {
+		t.Fatalf("prefix-cache key diverged across tool turn: turn1=%q turn2=%q", key1, key2)
+	}
+}
+
+// TestPrefixCacheConversationDivergesOnFirstUser verifies that different first
+// user message content produces different Internal-Conv keys (SPEC-006-R012).
+func TestPrefixCacheConversationDivergesOnFirstUser(t *testing.T) {
+	var capturedA, capturedB http.Header
+	callN := 0
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		callN++
+		if callN == 1 {
+			capturedA = r.Header.Clone()
+		} else {
+			capturedB = r.Header.Clone()
+		}
+		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, `{"id":"chatcmpl_1","object":"chat.completion","usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7},"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`), nil
+	})}
+	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+		cfg.Routing.StickyEnabled = false
+	}, WithHTTPClient(client))
+	fullKey := createAccountAndKey(t, store, cfg, "acct_prefix_diverge")
+
+	for _, body := range []string{
+		`{"model":"llama","max_tokens":20,"messages":[{"role":"user","content":"question A"}]}`,
+		`{"model":"llama","max_tokens":20,"messages":[{"role":"user","content":"question B"}]}`,
+	} {
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+fullKey)
+		req.Header.Set("Content-Type", "application/json")
+		resp := httptest.NewRecorder()
+		h.ServeHTTP(resp, req)
+		if resp.Code != http.StatusOK {
+			t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+		}
+	}
+
+	// Auto-prefix keys travel via Internal-Conv-Cache (not Internal-Conv).
+	keyA := capturedA.Get("X-MacProvider-Internal-Conv-Cache")
+	keyB := capturedB.Get("X-MacProvider-Internal-Conv-Cache")
+	if keyA == "" || keyB == "" {
+		t.Fatalf("Internal-Conv-Cache must be set: keyA=%q keyB=%q", keyA, keyB)
+	}
+	if capturedA.Get("X-MacProvider-Internal-Conv") != "" || capturedB.Get("X-MacProvider-Internal-Conv") != "" {
+		t.Fatal("Internal-Conv must be empty for auto-prefix path (sticky isolation)")
+	}
+	if keyA == keyB {
+		t.Fatalf("different first-user content must produce different keys, got same: %q", keyA)
+	}
+}
+
+// TestPrefixCacheConversationNotForwardedForDemo verifies that demo traffic
+// does not receive an Internal-Conv key (SPEC-006 demo isolation).
+func TestPrefixCacheConversationNotForwardedForDemo(t *testing.T) {
+	var captured http.Header
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		captured = r.Header.Clone()
+		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, `{"id":"chatcmpl_1","object":"chat.completion","usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7},"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`), nil
+	})}
+	h, _, _, _ := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+		cfg.Routing.StickyEnabled = false
+	}, WithHTTPClient(client))
+	demo := issueDemoToken(t, h, "10.0.0.1")
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"llama","max_tokens":20,"messages":[{"role":"user","content":"hi demo"}]}`))
+	req.Header.Set("X-Demo-Token", demo)
+	req.Header.Set("X-Real-IP", "10.0.0.1")
+	resp := httptest.NewRecorder()
+	h.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	if got := captured.Get("X-MacProvider-Internal-Conv"); got != "" {
+		t.Fatalf("demo Internal-Conv must be empty, got %q", got)
+	}
+	if got := captured.Get("X-MacProvider-Internal-Conv-Cache"); got != "" {
+		t.Fatalf("demo Internal-Conv-Cache must be empty, got %q", got)
+	}
+}
+
+// TestPrefixCacheBuyerTagWinsWhenStickyEnabled verifies that when sticky is on,
+// a valid buyer conversation tag with coordinator metadata agreement produces
+// the sticky key (NOT the auto-prefix key). SPEC-006-R012 auto-prefix is a
+// fallback only when no sticky key is derived.
+func TestPrefixCacheBuyerTagWinsWhenStickyEnabled(t *testing.T) {
+	var captured http.Header
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path == "/internal/routing" {
+			return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, `{"sticky":{"enabled":true,"ttl_seconds":1800}}`), nil
+		}
+		captured = r.Header.Clone()
+		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, `{"id":"chatcmpl_1","object":"chat.completion","usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7},"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`), nil
+	})}
+	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+		cfg.Coordinator.OperatorURL = "http://operator.test"
+		cfg.Routing.StickyEnabled = true
+	}, WithHTTPClient(client))
+	fullKey := createAccountAndKey(t, store, cfg, "acct_prefix_buyer_tag_wins")
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"llama","max_tokens":20,"messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set("Authorization", "Bearer "+fullKey)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-MacProvider-Conversation", "my-thread-99")
+	resp := httptest.NewRecorder()
+	h.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	got := captured.Get("X-MacProvider-Internal-Conv")
+	wantSticky := expectedConversationKey("test-key-hash-secret", "acct_prefix_buyer_tag_wins", "my-thread-99")
+	if got != wantSticky {
+		t.Fatalf("Internal-Conv = %q, want sticky key %q (buyer tag should win over auto-prefix)", got, wantSticky)
+	}
+	// confirm it is NOT the auto-prefix key
+	msgs := []json.RawMessage{json.RawMessage(`{"role":"user","content":"hi"}`)}
+	prefixTag, _ := prefixConversationTag(msgs)
+	autoKey := expectedConversationKey("test-key-hash-secret", "acct_prefix_buyer_tag_wins", prefixTag)
+	if got == autoKey {
+		t.Fatalf("Internal-Conv matched auto-prefix key; buyer sticky tag should win: %q", got)
+	}
+}
+
+// TestAutoPrefixKeyDoesNotActivateStickyWhenStickyEnabled verifies that when
+// routing.sticky_enabled=true but the buyer did NOT send X-MacProvider-Conversation,
+// the auto-prefix key travels via X-MacProvider-Internal-Conv-Cache (not
+// X-MacProvider-Internal-Conv). This ensures coordinator applySticky and
+// stickyStore never see the auto-prefix key, satisfying SPEC-006-R012's
+// "MUST NOT activate SPEC-004 sticky affinity" requirement.
+func TestAutoPrefixKeyDoesNotActivateStickyWhenStickyEnabled(t *testing.T) {
+	var captured http.Header
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path == "/internal/routing" {
+			// Coordinator reports sticky enabled — gateway would use sticky
+			// path only if buyer sent X-MacProvider-Conversation. Without it,
+			// auto-prefix path kicks in.
+			return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, `{"sticky":{"enabled":true,"ttl_seconds":1800}}`), nil
+		}
+		captured = r.Header.Clone()
+		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, `{"id":"chatcmpl_1","object":"chat.completion","usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7},"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`), nil
+	})}
+	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+		cfg.Coordinator.OperatorURL = "http://operator.test"
+		cfg.Routing.StickyEnabled = true
+	}, WithHTTPClient(client))
+	fullKey := createAccountAndKey(t, store, cfg, "acct_auto_prefix_sticky_isolation")
+
+	// No X-MacProvider-Conversation header → auto-prefix path.
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"llama","max_tokens":20,"messages":[{"role":"user","content":"no sticky tag"}]}`))
+	req.Header.Set("Authorization", "Bearer "+fullKey)
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+	h.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	// The auto-prefix key MUST be in Internal-Conv-Cache, NOT Internal-Conv.
+	cacheHdr := captured.Get("X-MacProvider-Internal-Conv-Cache")
+	if cacheHdr == "" {
+		t.Fatal("Internal-Conv-Cache must be set for auto-prefix path (SPEC-006-R012)")
+	}
+	if stickyHdr := captured.Get("X-MacProvider-Internal-Conv"); stickyHdr != "" {
+		t.Fatalf("Internal-Conv MUST be empty for auto-prefix path when sticky_enabled=true; got %q (sticky isolation violation)", stickyHdr)
+	}
+	// Verify the key is the expected auto-prefix key.
+	msgs := []json.RawMessage{json.RawMessage(`{"role":"user","content":"no sticky tag"}`)}
+	prefixTag, ok := prefixConversationTag(msgs)
+	if !ok {
+		t.Fatal("prefixConversationTag must succeed")
+	}
+	want := expectedConversationKey("test-key-hash-secret", "acct_auto_prefix_sticky_isolation", prefixTag)
+	if cacheHdr != want {
+		t.Fatalf("Internal-Conv-Cache = %q, want %q", cacheHdr, want)
+	}
+}
+
+// TestPrefixConversationTagHelpers unit-tests prefixConversationTag directly.
+func TestPrefixConversationTagHelpers(t *testing.T) {
+	tagRE := regexp.MustCompile(`^auto\.prefix\.[0-9a-f]{32}$`)
+
+	t.Run("no_messages_returns_false", func(t *testing.T) {
+		if _, ok := prefixConversationTag(nil); ok {
+			t.Fatal("empty messages should return false")
+		}
+		if _, ok := prefixConversationTag([]json.RawMessage{}); ok {
+			t.Fatal("empty slice should return false")
+		}
+	})
+
+	t.Run("system_only_returns_false", func(t *testing.T) {
+		msgs := []json.RawMessage{json.RawMessage(`{"role":"system","content":"you are helpful"}`)}
+		if _, ok := prefixConversationTag(msgs); ok {
+			t.Fatal("system-only messages should return false (no user message)")
+		}
+	})
+
+	t.Run("user_only_returns_valid_tag", func(t *testing.T) {
+		msgs := []json.RawMessage{json.RawMessage(`{"role":"user","content":"hello"}`)}
+		tag, ok := prefixConversationTag(msgs)
+		if !ok {
+			t.Fatal("user-only messages should return true")
+		}
+		if !tagRE.MatchString(tag) {
+			t.Fatalf("tag %q does not match expected pattern %s", tag, tagRE)
+		}
+	})
+
+	t.Run("system_user_returns_valid_tag", func(t *testing.T) {
+		msgs := []json.RawMessage{
+			json.RawMessage(`{"role":"system","content":"sys"}`),
+			json.RawMessage(`{"role":"user","content":"hello"}`),
+		}
+		tag, ok := prefixConversationTag(msgs)
+		if !ok {
+			t.Fatal("system+user should return true")
+		}
+		if !tagRE.MatchString(tag) {
+			t.Fatalf("tag %q does not match pattern", tag)
+		}
+	})
+
+	t.Run("same_prefix_same_tag", func(t *testing.T) {
+		msgs1 := []json.RawMessage{
+			json.RawMessage(`{"role":"system","content":"s"}`),
+			json.RawMessage(`{"role":"user","content":"q"}`),
+		}
+		msgs2 := []json.RawMessage{
+			json.RawMessage(`{"role":"system","content":"s"}`),
+			json.RawMessage(`{"role":"user","content":"q"}`),
+			json.RawMessage(`{"role":"assistant","content":"a"}`),
+			json.RawMessage(`{"role":"tool","tool_call_id":"c","content":"r"}`),
+		}
+		tag1, ok1 := prefixConversationTag(msgs1)
+		tag2, ok2 := prefixConversationTag(msgs2)
+		if !ok1 || !ok2 {
+			t.Fatalf("both should succeed: ok1=%v ok2=%v", ok1, ok2)
+		}
+		if tag1 != tag2 {
+			t.Fatalf("same prefix should give same tag: %q vs %q", tag1, tag2)
+		}
+	})
+
+	t.Run("different_user_different_tag", func(t *testing.T) {
+		msgsA := []json.RawMessage{json.RawMessage(`{"role":"user","content":"A"}`)}
+		msgsB := []json.RawMessage{json.RawMessage(`{"role":"user","content":"B"}`)}
+		tagA, _ := prefixConversationTag(msgsA)
+		tagB, _ := prefixConversationTag(msgsB)
+		if tagA == tagB {
+			t.Fatalf("different user content should give different tags: %q", tagA)
+		}
+	})
+
+	t.Run("skips_malformed_finds_user", func(t *testing.T) {
+		msgs := []json.RawMessage{
+			json.RawMessage(`not-json`),
+			json.RawMessage(`{"role":"user","content":"real"}`),
+		}
+		tag, ok := prefixConversationTag(msgs)
+		if !ok {
+			t.Fatal("should find user after skipping malformed")
+		}
+		if !tagRE.MatchString(tag) {
+			t.Fatalf("tag %q does not match pattern", tag)
+		}
+	})
+
+	t.Run("role_case_insensitive", func(t *testing.T) {
+		msgs := []json.RawMessage{json.RawMessage(`{"role":"USER","content":"x"}`)}
+		_, ok := prefixConversationTag(msgs)
+		if !ok {
+			t.Fatal("role matching should be case-insensitive")
+		}
+	})
 }
 
 func TestQuotaSettlement504ZeroCompletion(t *testing.T) {
