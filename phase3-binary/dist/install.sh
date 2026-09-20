@@ -10967,9 +10967,26 @@ ensure_headless_acceptance_credentials_before_cutover() {
 
 submit_required_hardware_evidence() {
   log "Submitting the exact stored autotune evidence before provider service start."
-  run_macprovider_cli_with_amfi_retry autotune --recommend --freshness-check \
-    --submit-hardware-evidence --require-hardware-evidence --config "$CONFIG_PATH" >/dev/null \
-    || die 6 "authenticated hardware evidence admission failed before service start"
+  set +e
+  evidence_detail="$(
+    run_macprovider_cli_with_amfi_retry autotune --recommend --freshness-check \
+    --submit-hardware-evidence --require-hardware-evidence --config "$CONFIG_PATH" \
+    2>&1 >/dev/null
+  )"
+  evidence_status="$?"
+  set -e
+  if [ "$evidence_status" -eq 0 ]; then
+    if [ -n "$evidence_detail" ]; then
+      printf '%s\n' "$evidence_detail" >&2
+    fi
+    return 0
+  fi
+  evidence_detail="$(printf '%s\n' "$evidence_detail" \
+    | awk 'NF { lines[++count] = $0 } END { start = count > 3 ? count - 2 : 1; for (i = start; i <= count; i++) { if (out != "") out = out "; "; out = out lines[i] } print out }')"
+  if [ -n "$evidence_detail" ]; then
+    die 6 "authenticated hardware evidence admission failed before service start: $evidence_detail"
+  fi
+  die 6 "authenticated hardware evidence admission failed before service start"
 }
 
 validate_autotune_model_size_flag() {

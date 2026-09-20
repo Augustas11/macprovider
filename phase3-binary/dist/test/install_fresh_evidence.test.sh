@@ -93,7 +93,7 @@ EOF
       AUTOTUNE_PREFETCH_RECEIPT_PATH="$CASE_ROOT/prefetch-receipt.json"
     fi
     log() { :; }
-    die() { exit "$1"; }
+    die() { rc="$1"; shift; [ "$#" -eq 0 ] || printf "%s\n" "$*" >&2; exit "$rc"; }
     prompt_yes_no() { return 0; }
     publish_bootstrap_identity_for_rollback() {
       printf "publish-bootstrap-identity\n" >> "$CASE_ROOT/calls"
@@ -132,7 +132,10 @@ EOF
               ;;
             *--require-hardware-evidence*)
               [ -f "$CASE_ROOT/credential" ]
-              [ "$CASE_MODE" != "evidence-fails" ] || return 11
+              if [ "$CASE_MODE" = "evidence-fails" ]; then
+                printf "hardware_evidence_unavailable: rate_limited: retry in 600 seconds (rate_limited: hardware evidence provider rate limit exceeded)\n" >&2
+                return 11
+              fi
               ;;
           esac
           ;;
@@ -141,7 +144,7 @@ EOF
     source "'$TMP'/functions.sh"
     run_autotune_recommend_apply
     printf "service-start\n" >> "$CASE_ROOT/calls"
-  '
+  ' >"$root/stdout" 2>"$root/stderr"
   rc=$?
   set -e
   case "$mode" in
@@ -177,6 +180,9 @@ EOF
       if grep -F "service-start" "$root/calls" >/dev/null; then
         echo "$mode started service before authenticated evidence" >&2
         exit 1
+      fi
+      if [ "$mode" = "evidence-fails" ]; then
+        grep -F "authenticated hardware evidence admission failed before service start: hardware_evidence_unavailable: rate_limited: retry in 600 seconds" "$root/stderr" >/dev/null
       fi
       ;;
     existing-mp|existing-legacy)
