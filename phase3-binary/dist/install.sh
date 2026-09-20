@@ -72,6 +72,7 @@ INSTALL_RECOVERY_PLIST_PATH="$LAUNCHD_MANAGED_DIR/${INSTALL_RECOVERY_LABEL}.plis
 HEADLESS_RECOVERY_TRUST_PATH="/Library/Application Support/macprovider/install-recovery.sha256"
 SUDO_BIN="/usr/bin/sudo"
 LAUNCHCTL_BIN="/bin/launchctl"
+SECURITY_BIN="/usr/bin/security"
 ROOT_PYTHON3_BIN="/usr/bin/python3"
 # Resolved interpreter after ensure_python3_usable. Empty until the gate runs.
 INSTALL_PYTHON3=""
@@ -253,7 +254,13 @@ validate_consumer_gui_session() {
   status=0
   "$LAUNCHCTL_BIN" print "gui/$UID" >/dev/null 2>&1 || status=$?
   if [ "$status" -eq 0 ]; then
-    return 0
+    keychain_status=0
+    "$SECURITY_BIN" show-keychain-info >/dev/null 2>&1 || keychain_status=$?
+    if [ "$keychain_status" -eq 0 ]; then
+      return 0
+    fi
+    user_name="$(id -un 2>/dev/null || printf '%s' "$UID")"
+    die 7 "plain SSH install cannot write the login Keychain from this security session; rerun with MACPROVIDER_HEADLESS=1 MACPROVIDER_HEADLESS_USER=$user_name to use protected-file headless credentials before benchmarking"
   fi
   user_name="$(id -un 2>/dev/null || printf '%s' "$UID")"
   die 7 "plain SSH install cannot access gui/$UID launchd or the login Keychain; rerun with MACPROVIDER_HEADLESS=1 MACPROVIDER_HEADLESS_USER=$user_name to use protected-file headless credentials before benchmarking"

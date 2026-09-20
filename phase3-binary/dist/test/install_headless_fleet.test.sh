@@ -156,6 +156,15 @@ fi
 exit 0
 EOF
 
+cat > "$TMP/bin/security" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+case "${1:-}" in
+  show-keychain-info) exit "${SECURITY_SHOW_KEYCHAIN_STATUS:-0}" ;;
+  *) exit 64 ;;
+esac
+EOF
+
 cat > "$TMP/bin/plutil" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -298,6 +307,7 @@ FUNCTION_PATH="$TMP/functions.sh" SYSTEM_DIR="$TMP/system" USERS_DIR="$TMP/users
   SUDO_BIN="$MOCK_BIN/sudo"
   ROOT_PYTHON3_BIN="$(command -v python3)"
   LAUNCHCTL_BIN="$MOCK_BIN/launchctl"
+  SECURITY_BIN="$MOCK_BIN/security"
   MACPROVIDER_CLI_EXECUTABLE="$MOCK_BIN/macprovider-cli"
   HEADLESS=1
   HEADLESS_USER="$(id -un)"
@@ -354,6 +364,11 @@ FUNCTION_PATH="$TMP/functions.sh" SYSTEM_DIR="$TMP/system" USERS_DIR="$TMP/users
     echo "consumer SSH install unexpectedly accepted an unverified GUI launchd session" >&2
     exit 1
   fi
+  if (HEADLESS=0; export SSH_CONNECTION="127.0.0.1 1 127.0.0.1 22"; export LAUNCHD_PRINT_STATUS=0; export SECURITY_SHOW_KEYCHAIN_STATUS=36; validate_consumer_gui_session); then
+    echo "consumer SSH install unexpectedly accepted an inaccessible login Keychain" >&2
+    exit 1
+  fi
+  (HEADLESS=0; unset SSH_CONNECTION SSH_TTY; export LAUNCHD_PRINT_STATUS=0; export SECURITY_SHOW_KEYCHAIN_STATUS=36; validate_consumer_gui_session)
   (HEADLESS=0; unset SSH_CONNECTION SSH_TTY; export LAUNCHD_PRINT_STATUS=125; validate_consumer_gui_session)
   (HEADLESS=0; export SSH_CONNECTION="127.0.0.1 1 127.0.0.1 22"; export LAUNCHD_PRINT_STATUS=0; validate_consumer_gui_session)
   (HEADLESS=1; export SSH_CONNECTION="127.0.0.1 1 127.0.0.1 22"; export LAUNCHD_PRINT_STATUS=125; validate_consumer_gui_session)
