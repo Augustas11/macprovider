@@ -571,7 +571,21 @@ class OpenRouterReadinessProbeTests(unittest.TestCase):
         with mock.patch.object(probe, "http_request", return_value=after_done):
             got = probe.chat_once("https://api.example.test", "secret", "model", stream=True, max_tokens=16)
         self.assertFalse(got["ok"])
-        self.assertEqual(got["error_code"], "data_after_done")
+        self.assertEqual(got["error_code"], "late_error")
+
+    def test_chat_ignores_trailing_non_error_frames_after_done(self):
+        stream = sse_response(
+            [
+                'data: {"choices":[{"delta":{"content":"OK"}}]}\n\n',
+                'data: {"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2},"choices":[]}\n\n',
+                "data: [DONE]\n\n",
+                'data: {"choices":[{"delta":{"content":""}}]}\n\n',
+            ]
+        )
+        with mock.patch.object(probe, "http_request", return_value=stream):
+            got = probe.chat_once("https://api.example.test", "secret", "model", stream=True, max_tokens=16)
+        self.assertTrue(got["ok"])
+        self.assertEqual(got["error_code"], "")
 
     def test_non_stream_chat_rejects_top_level_error_object(self):
         payload = {

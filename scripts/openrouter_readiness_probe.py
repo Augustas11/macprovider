@@ -893,9 +893,6 @@ def chat_once(
             if not line.startswith("data:"):
                 continue
             data = line[5:].strip()
-            if saw_done:
-                stream_error = stream_error or "data_after_done"
-                continue
             if data == "[DONE]":
                 saw_done = True
                 continue
@@ -903,6 +900,8 @@ def chat_once(
             error_code = payload_error_code(payload)
             if error_code:
                 stream_error = error_code
+                continue
+            if saw_done:
                 continue
             if saw_usage:
                 stream_error = stream_error or "data_after_usage"
@@ -1844,6 +1843,25 @@ def main(argv: list[str]) -> int:
             ),
         )
         record_check("privacy", lambda: check_privacy(args.base_url))
+        operator_token = ""
+        operator_token_error = ""
+        if args.admin_url and (args.filing_mode or args.diagnostic_mode):
+            try:
+                operator_token = load_token(args.operator_key_env, args.operator_key_file, "operator key")
+            except ProbeError as exc:
+                operator_token_error = str(exc)
+            else:
+                operator_token_error = "" if operator_token else missing_token_error(
+                    args.operator_key_env,
+                    args.operator_key_file,
+                    "operator key",
+                )
+            if operator_token:
+                record_check("admin_healthz", lambda: check_healthz(args.admin_url, args.expected_healthz_version))
+                record_check(
+                    "pool_topology",
+                    lambda: check_pool_topology(args.admin_url, operator_token, args.model, args.benchmark_concurrency),
+                )
         try:
             token = load_token(args.api_key_env, args.api_key_file, "API key")
         except ProbeError as exc:
@@ -1930,41 +1948,44 @@ def main(argv: list[str]) -> int:
                 report["checks"]["load_ladder"] = {"skipped": "missing API key"}
             if args.filing_mode:
                 errors.append("filing mode requires API key")
-        if args.admin_url and (args.filing_mode or args.diagnostic_mode):
+        if args.admin_url and (args.filing_mode or args.diagnostic_mode) and "admin_healthz" not in report["checks"]:
             record_check("admin_healthz", lambda: check_healthz(args.admin_url, args.expected_healthz_version))
-        try:
-            operator_token = load_token(args.operator_key_env, args.operator_key_file, "operator key")
-        except ProbeError as exc:
-            operator_token = ""
-            operator_token_error = str(exc)
-        else:
-            operator_token_error = "" if operator_token else missing_token_error(
-                args.operator_key_env,
-                args.operator_key_file,
-                "operator key",
-            )
+        if not operator_token and not operator_token_error:
+            try:
+                operator_token = load_token(args.operator_key_env, args.operator_key_file, "operator key")
+            except ProbeError as exc:
+                operator_token = ""
+                operator_token_error = str(exc)
+            else:
+                operator_token_error = "" if operator_token else missing_token_error(
+                    args.operator_key_env,
+                    args.operator_key_file,
+                    "operator key",
+                )
         if operator_token_error and (args.filing_mode or args.diagnostic_mode or args.admin_url):
             report["checks"]["operator_key"] = {"ok": False, "error": operator_token_error}
             report["checks"]["wholesale_statement"] = {"ok": False, "error": operator_token_error}
-            if args.admin_url and (args.filing_mode or args.diagnostic_mode):
+            if args.admin_url and (args.filing_mode or args.diagnostic_mode) and "pool_topology" not in report["checks"]:
                 report["checks"]["pool_topology"] = {"ok": False, "error": operator_token_error}
             errors.append(f"wholesale_statement: {operator_token_error}")
             if not continue_after_error:
                 raise ProbeError(operator_token_error)
         if args.admin_url and operator_token and (args.filing_mode or args.diagnostic_mode):
-            record_check(
-                "pool_topology",
-                lambda: check_pool_topology(args.admin_url, operator_token, args.model, args.benchmark_concurrency),
-            )
-            if args.filing_mode and report["checks"].get("models", {}).get("ids") and report["checks"].get("pool_topology", {}).get("classification"):
+            if "pool_topology" not in report["checks"]:
                 record_check(
-                    "model_capacity",
-                    lambda: check_model_capacity_against_pool(
-                        report["checks"]["models"],
-                        report["checks"]["pool_topology"],
-                        args.model,
-                    ),
+                    "pool_topology",
+                    lambda: check_pool_topology(args.admin_url, operator_token, args.model, args.benchmark_concurrency),
                 )
+            if args.filing_mode and report["checks"].get("models", {}).get("ids") and report["checks"].get("pool_topology", {}).get("classification"):
+                if "model_capacity" not in report["checks"]:
+                    record_check(
+                        "model_capacity",
+                        lambda: check_model_capacity_against_pool(
+                            report["checks"]["models"],
+                            report["checks"]["pool_topology"],
+                            args.model,
+                        ),
+                    )
         if args.admin_url and operator_token and args.statement_account_id and args.statement_period:
             record_check(
                 "wholesale_statement",
