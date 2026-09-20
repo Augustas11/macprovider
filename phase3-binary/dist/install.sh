@@ -13005,8 +13005,10 @@ wait_for_coordinator() {
   # Tier C M2). A flat 30s gate rolled back installs that had genuinely reached
   # buyer_serving. Give coordinator admission a generous deadline aligned with
   # the model-load reality (the local /v1/models waits above use 300s/1200s).
-  # The exact catalog-identity / legacy_bridge admission proofs below are
-  # unchanged; only the timeout widens. Overridable for tests; a malformed
+  # Exact buyer-serving admission remains the success proof. Normal installs
+  # also remember exact-session pool-ready as a nonfatal commit signal after the
+  # readiness window; signed emergency rollback stays strict. Overridable for
+  # tests; a malformed
   # override (empty, non-numeric, leading-zero octal, zero, or oversized) falls
   # back to 300 rather than aborting the arithmetic under `set -u` or making the
   # gate fail immediately, and a valid-but-huge value is clamped to 1800s (30
@@ -13026,6 +13028,7 @@ wait_for_coordinator() {
       ;;
   esac
   deadline=$(( $(date +%s) + coordinator_ready_timeout ))
+  provisional_ready_seen=0
   while [ "$(date +%s)" -lt "$deadline" ]; do
     local_status="$(curl -fsS --max-time 5 "http://127.0.0.1:${PORT}/v1/status" 2>/dev/null || true)"
     assigned_id="$(python3 - "$provider_id" "$local_status" <<'PY' 2>/dev/null || true
@@ -13123,8 +13126,35 @@ PY
     then
       return 0
     fi
+    if [ "${EMERGENCY_ROLLBACK:-0}" != "1" ]; then
+      if python3 - "$provider_id" "$assigned_id" "$response" "$local_status" <<'PY' 2>/dev/null
+import json
+import sys
+
+provider_id, assigned_id, response_raw, local_raw = sys.argv[1:]
+response = json.loads(response_raw)
+local = json.loads(local_raw)
+coordinator = local.get("coordinator")
+if not isinstance(coordinator, dict):
+    raise SystemExit(1)
+if local.get("provider_id") != provider_id:
+    raise SystemExit(1)
+if coordinator.get("connected") is not True or coordinator.get("session") != assigned_id:
+    raise SystemExit(1)
+if response.get("provider_id") != provider_id or response.get("assigned_id") != assigned_id:
+    raise SystemExit(1)
+if response.get("state") != "ready":
+    raise SystemExit(1)
+PY
+      then
+        provisional_ready_seen=1
+      fi
+    fi
     sleep 2
   done
+  if [ "$provisional_ready_seen" -eq 1 ]; then
+    return 2
+  fi
   return 1
 }
 
@@ -14311,16 +14341,20 @@ main() {
   fi
 
   # Keep rollback armed until coordinator admission proves the selected mode:
-  # exact current/previous catalog identity for normal upgrades, or exact
-  # session-bound buyer-serving legacy_bridge proof for an explicit signed
-  # emergency downgrade.
-  log "Waiting for exact coordinator admission and buyer-serving readiness (cold model load on low-RAM Macs can take minutes)."
-  if ! wait_for_coordinator "$provider_id" "$coordinator_base"; then
+  # exact current/previous catalog identity for immediate normal-install commit,
+  # exact-session pool-ready after the readiness window, or exact session-bound
+  # buyer-serving legacy_bridge proof for an explicit signed emergency downgrade.
+  log "Waiting for coordinator admission; exact buyer-serving commits immediately, exact pool-ready can commit after the readiness window."
+  coordinator_admission_rc=0
+  wait_for_coordinator "$provider_id" "$coordinator_base" || coordinator_admission_rc=$?
+  if [ "$coordinator_admission_rc" -ne 0 ]; then
     if [ "${REPAIR_EXISTING_INSTALL:-0}" -eq 1 ]; then
       log "Coordinator did not admit the repaired provider yet; committing local repair and leaving coordinator rejoin as telemetry."
     elif [ "$EMERGENCY_ROLLBACK" = "1" ]; then
       log "Coordinator did not admit the restored provider through active legacy_bridge; rolling back."
       exit 6
+    elif [ "$coordinator_admission_rc" -eq 2 ]; then
+      log "Coordinator reached pool-ready for this provider session but has not confirmed buyer-serving admission yet; committing the local install and leaving coordinator promotion as telemetry."
     else
       log "Coordinator did not admit the exact local catalog envelope for buyer traffic; rolling back."
       exit 6
