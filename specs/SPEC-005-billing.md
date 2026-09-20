@@ -1,7 +1,7 @@
 # SPEC-005 - Billing, Settlement, and Provider Rewards
 
 **Version:** 0.6.8 (2026-09-20, auto-prefix cache reports re-price not quarantine)
-**Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.5.6, SPEC-003 v0.7, SPEC-004 v0.3.2, SPEC-006 v0.9.29, SPEC-024 v0.2.3 (prefix-cache cache-isolation; its billing sections are superseded by this spec). Lockstep with SPEC-023 v0.12.0 / SPEC-005-R011 is recorded in prose, not as a CONFORMANCE `depends_on` edge (avoids a cycle through SPEC-017/SPEC-047).
+**Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.5.6, SPEC-003 v0.7, SPEC-004 v0.3.2, SPEC-006 v0.9.30, SPEC-024 v0.2.3 (prefix-cache cache-isolation; its billing sections are superseded by this spec). Lockstep with SPEC-023 v0.12.0 / SPEC-005-R011 is recorded in prose, not as a CONFORMANCE `depends_on` edge (avoids a cycle through SPEC-017/SPEC-047).
 
 **Change log v0.6.8 (2026-09-20, issue #1636 — auto-prefix cache reports):**
 - §5.3.1 gate 4 carve-out: a positive `cached_prompt_tokens` on a conversation-cache-only auto-prefix request (`X-MacProvider-Internal-Conv-Cache`, no sticky key) is **cleared** and priced at the full prompt rate. It MUST NOT quarantine `ambiguous_cache` / whole-row-zero. Sticky-miss and keyless positive reports keep gate 4 quarantine. The cache-hit **discount** remains sticky-hit only. Registers `SPEC-005-R012`. Buyer-visible OpenAI nested `cached_tokens` is SPEC-024-R002 / SPEC-006-R013.

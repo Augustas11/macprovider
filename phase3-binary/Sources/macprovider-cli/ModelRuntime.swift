@@ -2902,7 +2902,8 @@ actor ModelRuntime: ModelRuntimeServing {
                     modelID: modelID,
                     modelSHA256: modelSHA256,
                     weightsGeneration: weightsGeneration
-                )
+                ),
+                maxDecodeLockstepWindow: ContinuousBatchSchedulerConfiguration.defaultDecodeLockstepWindow
             ),
             allocator: allocator,
             backend: backend,

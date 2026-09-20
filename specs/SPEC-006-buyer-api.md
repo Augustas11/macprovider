@@ -1,11 +1,17 @@
 # SPEC-006 - Buyer API Gateway: Mac Provider's first public buyer surface
 
-**Version:** 0.9.29 (2026-09-20, OpenAI prompt_tokens_details.cached_tokens)
+**Version:** 0.9.30 (2026-09-20, OpenAI prompt_tokens_details.cached_tokens)
 **Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.5.4, SPEC-003 v0.7, SPEC-004 v0.3.2
 
-**Change log v0.9.29 (2026-09-20, OpenAI nested cached_tokens):**
+**Change log v0.9.30 (2026-09-20, OpenAI nested cached_tokens):**
 - Buyer `POST /v1/chat/completions` usage (streaming terminal chunk included) MUST include OpenAI `prompt_tokens_details.cached_tokens` reporting observed provider prefix reuse, including conversation-cache-only auto-prefix hits that are not sticky-creditable. Flat `cached_prompt_tokens` stays the billing-aligned SPEC-024 field (`0` unless sticky hit). Canonical rules live in SPEC-024 v0.2.3 §8 / SPEC-024-R002 and SPEC-005 v0.6.8 §5.3.1. Registers `SPEC-006-R013`.
 - `/v1/responses` `input_tokens_details.cached_tokens` MUST use the same observed value.
+
+**Change log v0.9.29 (2026-09-20, OpenRouter catalog listing):**
+- `GET /v1/openrouter/models` MUST publish one paid schema-2.4 row for every live recommendable catalog model that has a complete positive coordinator rate-card row. The current live catalog is the 17-row `published-2026-09-19-openrouter-priced-v1` cut.
+- Dual Llama 3B paid/free SKUs are unchanged: the free alias still emits only when that pool has enough ready-slot capacity to split without double-counting.
+- `is_ready` remains live free-slot truth. Catalog rows with zero current ready providers stay on the document with `is_ready: false` and MUST advertise 0 request/concurrency/token-per-minute capacity. The document MUST NOT invent `is_ready: true`. Warm-provider redundancy is not a listing gate.
+- Qwen3-8B and other priced catalog ids MUST no longer stay off this document until more than one warm ready provider.
 
 **Change log v0.9.28 (2026-09-20, auto-derive prefix-cache conversation keys):**
 - Authenticated non-demo `POST /v1/chat/completions` (including translated `/v1/messages` and `/v1/responses` paths that share `handleChat`) MUST derive a prefix-cache conversation tag when no sticky buyer tag produced a key. The tag is `auto.prefix.` + `hex(sha256(canonical_messages_prefix)[:16])` where the prefix is messages from the start through and including the first `role=="user"` message (case-insensitive).
@@ -274,7 +280,7 @@ changing them:
   as `X-MacProvider-Internal-Conv-Cache` so SPEC-024 ConversationCache can populate
   across tool turns without sticky routing (§5.4.1, v0.9.28).
 - `SPEC-006-R013` — Buyer chat-completions usage includes OpenAI
-  `prompt_tokens_details.cached_tokens` for observed prefix reuse (§5.4, v0.9.29;
+  `prompt_tokens_details.cached_tokens` for observed prefix reuse (§5.4, v0.9.30;
   SPEC-024 §8).
 
 `requirement_id_migration` is `complete`. R004–R013 are not promoted from
@@ -1538,7 +1544,7 @@ Normative rules:
 - `deployment_region` MUST be an honest volunteer-fleet descriptor. `datacenters` MUST be omitted unless the gateway has operator-verified country/region provenance for the live fleet. Neither field may invent a cloud datacenter region such as `us-east-1` or an unsupported country claim.
 - `compliance.zdr` MUST be `false`. Prompts are plaintext on provider Macs.
 - `openrouter.slug` MUST name the OpenRouter catalog slug for the row, not echo a Malibu pool id.
-- Qwen3-8B and other pool ids MUST stay off this document until the id has more than one warm ready provider.
+- The document MUST include one paid row for every live recommendable catalog model that has a complete positive coordinator rate-card row. Warm-provider count is not a listing gate. Rows with no current ready providers remain listed with `is_ready: false` and MUST advertise 0 request/concurrency/token-per-minute capacity. The document MUST NOT invent `is_ready: true`.
 - The document MUST NOT include legacy fields (`architecture`, `context_length`, root `cost_usd`, flat `supported_sampling_parameters`, `supported_features`, or `capacity_tpm`) and MUST NOT include `compute_integrity`, `tier1_disclosure`, provider ids, hostnames, or IPs.
 - Gateway sanitizer for `/v1/models` MUST NOT run on this path.
 

@@ -64,6 +64,11 @@ struct ContinuousBatchSchedulerConfiguration: Sendable, Equatable {
     let maxStopSequenceTokens: Int
     let maxTotalStopTokens: Int
     let snapshot: ContinuousBatchSchedulerSnapshot
+    /// Tokens generated inside one backend hop when nothing is waiting to join.
+    /// `1` preserves per-token decode (tests, join-pending). Production uses
+    /// `defaultDecodeLockstepWindow` so compiled contiguous decode can amortize
+    /// the model-container hop. FR-CB5 still inserts at the next hop boundary.
+    let maxDecodeLockstepWindow: Int
 
     init(
         descriptor: PagedKVDescriptor,
@@ -90,7 +95,8 @@ struct ContinuousBatchSchedulerConfiguration: Sendable, Equatable {
         maxStopSequences: Int = 16,
         maxStopSequenceTokens: Int = 64,
         maxTotalStopTokens: Int = 256,
-        snapshot: ContinuousBatchSchedulerSnapshot
+        snapshot: ContinuousBatchSchedulerSnapshot,
+        maxDecodeLockstepWindow: Int = 1
     ) {
         self.descriptor = descriptor
         self.tuple = tuple
@@ -134,7 +140,12 @@ struct ContinuousBatchSchedulerConfiguration: Sendable, Equatable {
         self.maxStopSequenceTokens = max(1, maxStopSequenceTokens)
         self.maxTotalStopTokens = max(1, maxTotalStopTokens)
         self.snapshot = snapshot
+        self.maxDecodeLockstepWindow = max(1, maxDecodeLockstepWindow)
     }
+
+    /// Production serve-path lockstep burst. Join/leave still happens between
+    /// hops (FR-CB5); a queued row forces the scheduler back to one token.
+    static let defaultDecodeLockstepWindow = 16
 }
 
 struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Encodable {
@@ -373,7 +384,25 @@ struct ContinuousBatchTerminalKVCommitInput: Sendable, Equatable {
 
 struct ContinuousBatchDecodeOutput: Sendable, Equatable {
     let requestID: String
+    /// Last sampled token. Equal to `tokens.last` when `tokens` is non-empty.
     let token: Int
+    /// Generation-order tokens for this backend call. One-token `decode(rows:)`
+    /// yields `[token]`. A lockstep window yields every sampled token so the
+    /// scheduler can apply stop/stream/receipt sequentially without dropping
+    /// intermediates.
+    let tokens: [Int]
+
+    init(requestID: String, token: Int) {
+        self.requestID = requestID
+        self.token = token
+        self.tokens = [token]
+    }
+
+    init(requestID: String, tokens: [Int]) {
+        self.requestID = requestID
+        self.tokens = tokens
+        self.token = tokens.last ?? 0
+    }
 }
 
 enum ContinuousBatchDecodeOutcome: Sendable, Equatable {
@@ -398,6 +427,13 @@ protocol ContinuousBatchSchedulerBackend: Sendable {
     /// writes `currentToken` at `committedKVTokenCount` and returns one sampled
     /// token without advancing any other row's cursor.
     func decode(rows: [ContinuousBatchDecodeInput]) async throws -> [ContinuousBatchDecodeOutcome]
+    /// Greedy lockstep decode of `steps` tokens. Implementations MAY keep the
+    /// work inside one model-container hop. Returned `tokens` MUST contain every
+    /// sampled token in generation order, not only the last.
+    func decodeLockstepWindow(
+        rows: [ContinuousBatchDecodeInput],
+        steps: Int
+    ) async throws -> [ContinuousBatchDecodeOutcome]
     /// Install a same-conversation retained paged-KV handoff before the row resumes
     /// prefill at its serial LCP. Backends that cannot consume FR-PKV10 must fail
     /// closed instead of accepting positive cached-token credit.
@@ -427,6 +463,70 @@ protocol ContinuousBatchRetainedCacheBridge: Sendable {
 }
 
 extension ContinuousBatchSchedulerBackend {
+    func decodeLockstepWindow(
+        rows: [ContinuousBatchDecodeInput],
+        steps: Int
+    ) async throws -> [ContinuousBatchDecodeOutcome] {
+        let window = max(1, steps)
+        var tokensByID: [String: [Int]] = [:]
+        var failed: Set<String> = []
+        var current = rows
+        for _ in 0..<window {
+            guard !current.isEmpty else { break }
+            let outcomes = try await decode(rows: current)
+            var byID: [String: ContinuousBatchDecodeOutcome] = [:]
+            for outcome in outcomes {
+                byID[outcome.requestID] = outcome
+            }
+            var next: [ContinuousBatchDecodeInput] = []
+            next.reserveCapacity(current.count)
+            for input in current {
+                guard let outcome = byID[input.requestID] else {
+                    failed.insert(input.requestID)
+                    continue
+                }
+                switch outcome {
+                case .rowFailure(let requestID):
+                    failed.insert(requestID)
+                case .output(let output):
+                    let sampled = output.tokens.isEmpty ? [output.token] : output.tokens
+                    guard let last = sampled.last else {
+                        failed.insert(input.requestID)
+                        continue
+                    }
+                    tokensByID[output.requestID, default: []].append(contentsOf: sampled)
+                    next.append(ContinuousBatchDecodeInput(
+                        requestID: input.requestID,
+                        currentToken: last,
+                        generatedTokens: input.generatedTokens + sampled,
+                        promptTokens: input.promptTokens,
+                        samplerSeed: input.samplerSeed,
+                        temperature: input.temperature,
+                        topP: input.topP,
+                        presencePenalty: input.presencePenalty,
+                        frequencyPenalty: input.frequencyPenalty,
+                        binding: input.binding,
+                        blockTable: input.blockTable,
+                        committedKVTokenCount: input.committedKVTokenCount + sampled.count,
+                        targetKVTokenCount: input.targetKVTokenCount + sampled.count,
+                        samplerStep: input.samplerStep + sampled.count
+                    ))
+                }
+            }
+            current = next
+        }
+        return rows.map { row in
+            if failed.contains(row.requestID) {
+                return .rowFailure(requestID: row.requestID)
+            }
+            let tokens = tokensByID[row.requestID] ?? []
+            guard !tokens.isEmpty else {
+                return .rowFailure(requestID: row.requestID)
+            }
+            return .output(ContinuousBatchDecodeOutput(requestID: row.requestID, tokens: tokens))
+        }
+    }
+
     func installRetainedPagedKVCache(
         requestID: String,
         handoff: PagedKVPagedCacheHandoff,
@@ -1426,15 +1526,38 @@ actor ContinuousBatchScheduler {
         cancelledIDs.subtract(terminalResults.keys)
     }
 
+    /// One-token decode when a row is queued or still prefilling (FR-CB5 join
+    /// at the next hop). Otherwise the compiled lockstep window, capped by the
+    /// shortest remaining `maxOutputTokens` in the batch.
+    private func lockstepDecodeWindowSteps(for rows: [Row]) -> Int {
+        let joinPending = !waiting.isEmpty
+            || pendingBindingChecks > 0
+            || !admittingRequests.isEmpty
+            || !activePrompt.isEmpty
+        guard !joinPending else { return 1 }
+        let configured = configuration.maxDecodeLockstepWindow
+        guard configured > 1 else { return 1 }
+        var window = configured
+        var bounded = false
+        for row in rows {
+            let remaining = row.request.maxOutputTokens - row.generatedTokens.count
+            guard remaining > 0 else { continue }
+            window = min(window, remaining)
+            bounded = true
+        }
+        return bounded ? max(1, window) : 1
+    }
+
     private func runDecodeStep() async {
         let rows = activeDecode.values.sorted {
             admissionPrecedes($0.request.id, $1.request.id)
         }
+        let windowSteps = lockstepDecodeWindowSteps(for: rows)
         var prepared: [(row: Row, input: ContinuousBatchDecodeInput)] = []
         prepared.reserveCapacity(rows.count)
         for row in rows {
             let committedKVTokenCount = row.request.promptTokens.count - 1 + row.generatedTokens.count
-            let (targetKVTokenCount, targetOverflow) = committedKVTokenCount.addingReportingOverflow(1)
+            let (targetKVTokenCount, targetOverflow) = committedKVTokenCount.addingReportingOverflow(windowSteps)
             guard !targetOverflow else {
                 if let removed = activeDecode.removeValue(forKey: row.request.id) {
                     let released = await release(removed.handle)
@@ -1450,7 +1573,7 @@ actor ContinuousBatchScheduler {
                 continue
             }
             do {
-                _ = try await allocator.extend(row.handle, by: 1)
+                _ = try await allocator.extend(row.handle, by: windowSteps)
             } catch {
                 record(.localExtensionFailed)
                 if let removed = activeDecode.removeValue(forKey: row.request.id) {
@@ -1526,7 +1649,10 @@ actor ContinuousBatchScheduler {
         maxObservedBatchDepth = max(maxObservedBatchDepth, prepared.count)
         let outcomes: [ContinuousBatchDecodeOutcome]
         do {
-            outcomes = try await backend.decode(rows: prepared.map(\.input))
+            outcomes = try await backend.decodeLockstepWindow(
+                rows: prepared.map(\.input),
+                steps: windowSteps
+            )
             try validateDecodeOutputStructure(outcomes, expectedRequestIDs: prepared.map { $0.row.request.id })
         } catch {
             for item in prepared {
@@ -1584,7 +1710,11 @@ actor ContinuousBatchScheduler {
             return output
         }
         var invalidOutputIDs: Set<String> = []
-        for output in outputs where !(0..<configuration.vocabularySize).contains(output.token) {
+        for output in outputs {
+            let sampled = output.tokens
+            let invalid = sampled.isEmpty
+                || sampled.contains { !(0..<configuration.vocabularySize).contains($0) }
+            guard invalid else { continue }
             invalidOutputIDs.insert(output.requestID)
             record(.localPreparationFailed)
             if let removed = activeDecode.removeValue(forKey: output.requestID) {
@@ -1612,10 +1742,19 @@ actor ContinuousBatchScheduler {
         for output in outputs {
             byID[output.requestID] = output
         }
-        for id in activeDecode.keys.sorted(by: admissionPrecedes) {
-            guard let row = activeDecode[id], let output = byID[id] else { continue }
-            await applyToken(output.token, to: row)
-            if cleanupFailedClosed { return }
+        var maxSteps = 1
+        for output in outputs {
+            let count = output.tokens.isEmpty ? 1 : output.tokens.count
+            maxSteps = max(maxSteps, count)
+        }
+        for step in 0..<maxSteps {
+            for id in activeDecode.keys.sorted(by: admissionPrecedes) {
+                guard let row = activeDecode[id], let output = byID[id] else { continue }
+                let sampled = output.tokens
+                guard step < sampled.count else { continue }
+                await applyToken(sampled[step], to: row)
+                if cleanupFailedClosed { return }
+            }
         }
     }
 
