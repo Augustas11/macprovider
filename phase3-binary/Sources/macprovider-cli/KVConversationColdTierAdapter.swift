@@ -342,20 +342,24 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
         // HIGH-5 — estimate the decoded size from GEOMETRY (no byte copy) and skip an
         // oversized snapshot BEFORE the deep copy, so a huge cache can never be copied
         // only to be rejected by the store.
-        guard let estimatedDecoded = KVCacheSerialization.estimatedDecodedLength(caches, tokenCount: fullTokens.count),
-              estimatedDecoded <= maxEntryBytes,
-              estimatedDecoded <= stagingMaxBytes else {
+        guard let estimatedDecoded = KVCacheSerialization.estimatedDecodedLength(caches, tokenCount: fullTokens.count) else {
+            FileHandle.standardError.write(Data("event=kv_disk_cache action=capture_skipped reason=estimate_unavailable token_count=\(fullTokens.count) layers=\(caches.count)\n".utf8))
             return nil
         }
-
-        // HIGH-3 — the write-live budget must cover the ACTIVE seal footprint, not just
-        // the decoded snapshot. During the store's streaming seal, on top of the deep copy
-        // one chunk plaintext + its sealed ciphertext(+tag) + one frame + the manifest
-        // buffer are simultaneously live. Reserve that worst-case footprint (not merely
-        // `estimatedDecoded`) so a near-ceiling snapshot cannot exceed write_staging_max
-        // during sealing — it is rejected up front instead.
+        guard estimatedDecoded <= maxEntryBytes else {
+            FileHandle.standardError.write(Data("event=kv_disk_cache action=capture_skipped reason=max_entry_bytes decoded=\(estimatedDecoded) cap=\(maxEntryBytes)\n".utf8))
+            Task { [store] in await store.noteWriteBudgetSkipped(rawKey: conversationKey) }
+            return nil
+        }
+        // Promotion ceiling (stagingMaxBytes, 256 MiB) is a READ bound. Writes are
+        // capped by writeStagingMaxBytes / maxEntryBytes. Applying the promotion
+        // ceiling here silently dropped KVS-01a persists.
         let writeFootprint = estimatedDecoded + activeSealFootprint(decoded: estimatedDecoded)
-        guard writeFootprint <= writeStagingMaxBytes else { return nil }
+        guard writeFootprint <= writeStagingMaxBytes else {
+            FileHandle.standardError.write(Data("event=kv_disk_cache action=capture_skipped reason=write_staging decoded=\(estimatedDecoded) footprint=\(writeFootprint) cap=\(writeStagingMaxBytes)\n".utf8))
+            Task { [store] in await store.noteWriteBudgetSkipped(rawKey: conversationKey) }
+            return nil
+        }
 
         // Item 3 (FR-KVP3): ONE aggregate write-live reservation held across the whole
         // persist lifetime. Reserve atomically BEFORE the deep copy; if it would exceed

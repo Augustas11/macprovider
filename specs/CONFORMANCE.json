@@ -1030,7 +1030,7 @@
     {
       "spec_id": "SPEC-037",
       "title": "KV survival across provider restarts (encrypted provider-local disk tier)",
-      "version": "v0.1.1",
+      "version": "v0.1.2",
       "path": "specs/SPEC-037-kv-survival-restart.md",
       "status": "draft",
       "owner": "@Augustas11",

@@ -154,7 +154,8 @@ fi
 
 mkdir -p "$(dirname "$KVS01A_STORE")"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/kvs-01a.XXXXXX")"
-trap 'rm -rf "$WORK"; [[ -n "${PROVIDER_PID:-}" ]] && kill -9 "$PROVIDER_PID" 2>/dev/null || true' EXIT
+KEEP_LOGS="${KVS01A_KEEP_LOGS:-}"
+trap 'if [[ -n "$KEEP_LOGS" ]]; then mkdir -p "$KEEP_LOGS"; cp -f "$WORK"/provider-*.log "$KEEP_LOGS"/ 2>/dev/null || true; fi; rm -rf "$WORK"; [[ -n "${PROVIDER_PID:-}" ]] && kill -9 "$PROVIDER_PID" 2>/dev/null || true' EXIT
 
 # Per-arm TTFT sample files (nearest-rank percentiles over the run).
 for arm in restored warm miss disabled; do : >"$WORK/ttft.$arm.txt"; done
@@ -165,13 +166,39 @@ start_provider() { # $1=cmd $2=log
 }
 
 stop_provider() {
-  [[ -n "${PROVIDER_PID:-}" ]] && { kill -9 "$PROVIDER_PID" 2>/dev/null || true; wait "$PROVIDER_PID" 2>/dev/null || true; PROVIDER_PID=""; }
+  # bash 3.2 + set -e: wait(1) after SIGKILL returns 137 and can abort the
+  # caller even when written as `wait || true` inside `{ ... }`. Disable -e
+  # for the reap, always return 0, and kill the bash -c child (the CLI) so
+  # the lab port is released.
+  set +e
+  if [[ -n "${PROVIDER_PID:-}" ]]; then
+    pkill -9 -P "$PROVIDER_PID" 2>/dev/null
+    kill -9 "$PROVIDER_PID" 2>/dev/null
+    wait "$PROVIDER_PID" 2>/dev/null
+    PROVIDER_PID=""
+  fi
+  set -e
+  return 0
 }
 
 await_ready() {
   local deadline=$(( $(date +%s) + KVS01A_READY_TIMEOUT ))
   while (( $(date +%s) < deadline )); do
-    if curl -fsS -m 5 "$KVS01A_BASE/v1/status" >/dev/null 2>&1; then return 0; fi
+    local body
+    body="$(curl -fsS -m 5 "$KVS01A_BASE/v1/status" 2>/dev/null || true)"
+    if [[ -n "$body" ]] && "$NODE_BIN" -e '
+      let s=""; process.stdin.on("data",d=>s+=d).on("end",()=>{
+        try {
+          const d=JSON.parse(s);
+          const loaded = d.model_loaded === true || d.model_loaded === "true";
+          const ready = String(d.status||"").toLowerCase()==="ready";
+          const model = d.model || d.model_id || d.currentModelID || (d.lifecycle&&d.lifecycle.model_id) || "";
+          process.exit(loaded && ready && String(model).length ? 0 : 1);
+        } catch { process.exit(1); }
+      })
+    ' <<<"$body"; then
+      return 0
+    fi
     if ! kill -0 "$PROVIDER_PID" 2>/dev/null; then echo "kvs-01a: provider exited during startup" >&2; return 1; fi
     sleep 1
   done
@@ -182,7 +209,7 @@ await_ready() {
 resolve_model() {
   if [[ -n "${KVS01A_MODEL:-}" ]]; then echo "$KVS01A_MODEL"; return; fi
   curl -fsS -m 5 "$KVS01A_BASE/v1/status" 2>/dev/null \
-    | "$NODE_BIN" -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{console.log(JSON.parse(s).model_id||JSON.parse(s).currentModelID||"")}catch{console.log("")}})' || echo ""
+    | "$NODE_BIN" -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const d=JSON.parse(s);console.log(d.model||d.model_id||d.currentModelID||(d.lifecycle&&d.lifecycle.model_id)||"")}catch{console.log("")}})' || echo ""
 }
 
 # Await a kv_disk_cache reason code in the provider stderr log; echoes the last match.
@@ -278,12 +305,14 @@ run_one_cycle() { # $1=cycle
   PERSIST_JSON="$("$NODE_BIN" "$HERE/kvs-01a-probe.mjs" \
     --base "$KVS01A_BASE" --conversation "$CONVERSATION" --model "$MODEL" \
     --regime kvs01a_persist --arm persist --prompt-tokens "$KVS01A_PROMPT_TOKENS" \
-    --response-out "$RESP")"
+    --response-out "$RESP" || true)"
   local P_PROMPT P_COMPLETION
   P_PROMPT="$(json_get prompt_tokens <<<"$PERSIST_JSON")"
   P_COMPLETION="$(json_get completion_tokens <<<"$PERSIST_JSON")"
   if [[ -z "$P_PROMPT" || -z "$P_COMPLETION" ]]; then
-    echo "kvs-01a[c$cycle]: persist turn returned no usage; aborting cycle" >&2; return 4
+    echo "kvs-01a[c$cycle]: persist turn returned no usage; aborting cycle" >&2
+    echo "kvs-01a[c$cycle]: persist record=${PERSIST_JSON:0:800}" >&2
+    return 4
   fi
   # The persisted canonical is prompt_token_ids ‖ generated; the restored render carries
   # both as an exact prefix, so the expected cached count is prompt + completion.
@@ -304,7 +333,7 @@ run_one_cycle() { # $1=cycle
   # (3) geometry-seed turn on a throwaway key (documented residual — see README).
   "$NODE_BIN" "$HERE/kvs-01a-probe.mjs" \
     --base "$KVS01A_BASE" --conversation "$SEED_CONVERSATION" --model "$MODEL" \
-    --regime kvs01a_seed --arm seed --prompt-tokens "$KVS01A_PROMPT_TOKENS" >/dev/null
+    --regime kvs01a_seed --arm seed --prompt-tokens "$KVS01A_PROMPT_TOKENS" >/dev/null || true
   await_log "$LOG2" 'code=disk_write_committed' "$KVS01A_WRITE_TIMEOUT" >/dev/null || true
 
   local ok=0
@@ -315,11 +344,11 @@ run_one_cycle() { # $1=cycle
   R_JSON="$("$NODE_BIN" "$HERE/kvs-01a-probe.mjs" \
     --base "$KVS01A_BASE" --conversation "$CONVERSATION" --model "$MODEL" \
     --regime kvs01a_restored --arm restored --prompt-tokens "$KVS01A_PROMPT_TOKENS" \
-    --assistant-file "$RESP" --suffix "$SUFFIX" --response-out "$RESP2")"
+    --assistant-file "$RESP" --suffix "$SUFFIX" --response-out "$RESP2" || true)"
   R_HIT="$(await_log "$LOG2" 'code=disk_(hit|promote_rejected|miss_[a-z_]+)' 30 || true)"
   # Merge the promotion (disk_hit) AND the persist (WRITE_LINE) §6 fields into one record.
-  R_MERGED="$(merge_record "$R_JSON" "$R_HIT" "$WRITE_LINE" "$cycle" "$KVS01A_PROMPT_TOKENS")"
-  printf '%s' "$R_MERGED" | tee -a "$KVS01A_STORE" >/dev/null
+  R_MERGED="$(merge_record "$R_JSON" "$R_HIT" "$WRITE_LINE" "$cycle" "$KVS01A_PROMPT_TOKENS" || true)"
+  printf '%s\n' "$R_MERGED" | tee -a "$KVS01A_STORE" >/dev/null || true
   R_TTFT="$(json_get ttft_ms <<<"$R_JSON")"
   R_CACHED="$(json_get cached_prompt_tokens <<<"$R_JSON")"
   R_CORRECT="$(json_get correctness <<<"$R_JSON")"
@@ -341,8 +370,8 @@ run_one_cycle() { # $1=cycle
   W_JSON="$("$NODE_BIN" "$HERE/kvs-01a-probe.mjs" \
     --base "$KVS01A_BASE" --conversation "$CONVERSATION" --model "$MODEL" \
     --regime kvs01a_warm --arm warm --prompt-tokens "$KVS01A_PROMPT_TOKENS" \
-    --assistant-file "$RESP" --suffix "$SUFFIX" --assistant-file2 "$RESP2" --suffix2 "$SUFFIX2")"
-  merge_record "$W_JSON" "" "" "$cycle" "$KVS01A_PROMPT_TOKENS" | tee -a "$KVS01A_STORE" >/dev/null
+    --assistant-file "$RESP" --suffix "$SUFFIX" --assistant-file2 "$RESP2" --suffix2 "$SUFFIX2" || true)"
+  merge_record "$W_JSON" "" "" "$cycle" "$KVS01A_PROMPT_TOKENS" | tee -a "$KVS01A_STORE" >/dev/null || true
   W_TTFT="$(json_get ttft_ms <<<"$W_JSON")"
   W_CACHED="$(json_get cached_prompt_tokens <<<"$W_JSON")"
   [[ -n "$W_TTFT" ]] && echo "$W_TTFT" >>"$WORK/ttft.warm.txt"
@@ -356,9 +385,9 @@ run_one_cycle() { # $1=cycle
   M_JSON="$("$NODE_BIN" "$HERE/kvs-01a-probe.mjs" \
     --base "$KVS01A_BASE" --conversation "$MISS_CONVERSATION" --model "$MODEL" \
     --regime kvs01a_miss --arm miss --prompt-tokens "$KVS01A_PROMPT_TOKENS" \
-    --assistant-file "$RESP" --suffix "$SUFFIX")"
+    --assistant-file "$RESP" --suffix "$SUFFIX" || true)"
   M_HIT="$(await_log "$LOG2" 'code=disk_(hit|miss_[a-z_]+)' 15 || true)"
-  merge_record "$M_JSON" "$M_HIT" "" "$cycle" "$KVS01A_PROMPT_TOKENS" | tee -a "$KVS01A_STORE" >/dev/null
+  merge_record "$M_JSON" "$M_HIT" "" "$cycle" "$KVS01A_PROMPT_TOKENS" | tee -a "$KVS01A_STORE" >/dev/null || true
   M_TTFT="$(json_get ttft_ms <<<"$M_JSON")"
   [[ -n "$M_TTFT" ]] && echo "$M_TTFT" >>"$WORK/ttft.miss.txt"
 
@@ -373,14 +402,19 @@ run_one_cycle() { # $1=cycle
     D_JSON="$("$NODE_BIN" "$HERE/kvs-01a-probe.mjs" \
       --base "$KVS01A_BASE" --conversation "$CONVERSATION" --model "$MODEL" \
       --regime kvs01a_disabled --arm disabled --prompt-tokens "$KVS01A_PROMPT_TOKENS" \
-      --assistant-file "$RESP" --suffix "$SUFFIX")"
-    merge_record "$D_JSON" "" "" "$cycle" "$KVS01A_PROMPT_TOKENS" | tee -a "$KVS01A_STORE" >/dev/null
+      --assistant-file "$RESP" --suffix "$SUFFIX" || true)"
+    merge_record "$D_JSON" "" "" "$cycle" "$KVS01A_PROMPT_TOKENS" | tee -a "$KVS01A_STORE" >/dev/null || true
     D_TTFT="$(json_get ttft_ms <<<"$D_JSON")"
     [[ -n "$D_TTFT" ]] && echo "$D_TTFT" >>"$WORK/ttft.disabled.txt"
   fi
 
   stop_provider
-  (( ok == 1 )) && return 0 || return 5
+  # bash 3.2 + set -e: `(( ok == 1 )) && return 0 || return 5` after SIGKILL
+  # wait can abort the whole script instead of returning from the function.
+  if (( ok == 1 )); then
+    return 0
+  fi
+  return 5
 }
 
 # ------------------------------------------------------------------- driver --------
@@ -391,33 +425,8 @@ for (( c = 1; c <= KVS01A_CYCLES; c++ )); do
 done
 
 # Nearest-rank percentile summary + warm-relative pass contract.
-"$NODE_BIN" -e '
-  const fs = require("fs");
-  const work = process.argv[1], ratioP95 = Number(process.argv[2]), smoke = process.argv[3] === "1", perfGate = process.argv[4] === "1";
-  const read = (arm) => { try { return fs.readFileSync(`${work}/ttft.${arm}.txt`, "utf8").split("\n").map(Number).filter(Number.isFinite).sort((a,b)=>a-b); } catch { return []; } };
-  const nr = (xs, p) => xs.length ? xs[Math.min(xs.length-1, Math.max(0, Math.ceil(p/100*xs.length)-1))] : null;
-  const arms = ["restored","warm","miss","disabled"];
-  const pct = {};
-  for (const a of arms) { const xs = read(a); pct[a] = { n: xs.length, p50: nr(xs,50), p95: nr(xs,95), min: xs[0] ?? null, max: xs[xs.length-1] ?? null }; }
-  process.stderr.write("kvs-01a: nearest-rank TTFT percentiles (ms):\n");
-  for (const a of arms) { const p = pct[a]; process.stderr.write(`  ${a.padEnd(9)} n=${p.n} p50=${p.p50 ?? "-"} p95=${p.p95 ?? "-"} min=${p.min ?? "-"} max=${p.max ?? "-"}\n`); }
-  if (smoke) { process.stderr.write("kvs-01a: smoke mode — percentile thresholds skipped (correctness only)\n"); process.exit(0); }
-  // MEDIUM-6: warm-relative thresholds are ADVISORY for KVS-01a (~2.5k) — recorded and
-  // reported, but they only FAIL the run under an explicit perf-gate mode. They are
-  // normative only for KVS-01b (8k). Correctness gates fail the run regardless (exit 5).
-  let fail = 0;
-  const r = pct.restored, w = pct.warm, m = pct.miss, d = pct.disabled;
-  const tag = perfGate ? "THRESHOLD FAIL" : "THRESHOLD ADVISORY";
-  const note = (msg) => { process.stderr.write(`kvs-01a: ${tag} ${msg}\n`); if (perfGate) fail = 1; };
-  // restored must skip prefill just like the in-RAM warm control.
-  if (r.p95 != null && w.p95 != null && r.p95 > w.p95 * ratioP95) { note(`restored p95 ${r.p95} > warm p95 ${w.p95} × ${ratioP95}`); }
-  // restored (disk survival) must beat a disk-enabled miss (cold prefill).
-  if (r.p95 != null && m.p50 != null && !(r.p95 < m.p50)) { note(`restored p95 ${r.p95} !< miss p50 ${m.p50}`); }
-  // ... and a clean disk-disabled restart.
-  if (r.p95 != null && d.p50 != null && !(r.p95 < d.p50)) { note(`restored p95 ${r.p95} !< disabled p50 ${d.p50}`); }
-  if (!perfGate) { process.stderr.write("kvs-01a: percentile thresholds are advisory for KVS-01a (pass --perf-gate to enforce)\n"); }
-  process.exit(fail);
-' "$WORK" "$KVS01A_WARM_RATIO_P95" "$KVS01A_SMOKE" "$KVS01A_PERF_GATE" || THRESHOLD_FAIL=1
+"$NODE_BIN" "$HERE/kvs-01a-summary.mjs" \
+  "$WORK" "$KVS01A_WARM_RATIO_P95" "$KVS01A_SMOKE" "$KVS01A_PERF_GATE" || THRESHOLD_FAIL=1
 
 if (( FAILS > 0 )); then
   echo "kvs-01a: $FAILS/$KVS01A_CYCLES cycle(s) FAILED the restored correctness contract" >&2
