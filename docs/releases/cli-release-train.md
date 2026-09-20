@@ -47,12 +47,14 @@ binary the Mac runs.
 
 All in-scope CLI rows are **merged**. Last built candidates `v1.8.163`,
 `v1.8.164`, `v1.8.167`, and `v1.8.168` are old or off-train — do not promote
-them. Studio serving canary is **`v1.8.171`** @
-`12de7aea9e3ecf07df229682fc6defd225e4085f` (includes #1612, #1626, #1634,
-#1635, and #1640), live as `live.malibu.provider` on Mac Studio for
-continuous-batching testing. **#1648 merged after that cut** (`b9d050d8`);
-it is not in 171. Next CLI cut waits on operator green light and will
-include #1648. Buyer CB stays off; do not raise slots.
+them. Studio serving canary is **`v1.8.171`** @ `12de7aea9e3ecf07df229682fc6defd225e4085f`
+(includes #1612, #1626, #1634, #1635, and #1640), live as
+`live.malibu.provider` on Mac Studio. **#1648 and #1650 merged after that
+cut**; 171 does **not** include login-keychain KV DEKs or production
+`moePromotionEvidenceAvailable`. Do not promote the fleet. Buyer CB stays
+off; do not raise slots; do not canary 171. Next CLI cut includes #1648 and
+#1650.
+
 
 | Net change in CLI / Malibu / installer | Status | PR |
 |---|---|---|
@@ -94,6 +96,7 @@ include #1648. Buyer CB stays off; do not raise slots.
 | SPEC-038 scheduler uses compiled lockstep decode windows (buyer CB still off) | merged | #1635 |
 | FR-CB15 leftover harness (MSB-03/05, usage, isolation, drain, replay) + MoE promotion review (flag stays false) | merged | #1640 |
 | Login keychain for KV disk DEKs (naked CLI can persist KVS-01a) | merged | #1648 |
+| SPEC-038 AC-23 MoE promotion evidence available on production scheduler (buyer CB still off) | merged | #1650 |
 
 #1453 closes when a candidate that includes the **merged** rows is promoted to
 the fleet. #1569 is a later CLI. Spec promotion #1583 is not a CLI change.
@@ -112,7 +115,8 @@ includes `v1.8.171@12de7aea…` (8-entry cap; dropped unused `v1.8.109` to make
 room). First 171 join attempt failed with close 4001
 `compatibility_set_unaccepted` before that accept — CLI misreports that as
 `Expected auth_challenge v2`. Buyer `continuous_batching` stays **off**; do
-not raise slots and do not canary CB on 171 until the MoE activation PR.
+not raise slots. Do not canary CB on 171: that package still fail-closes MoE
+promotion. Canary waits for the next candidate after the MoE activation PR.
 
 #1632 / #1638 / #1639 are coordinator/gateway, not CLI rows.
 
@@ -135,9 +139,9 @@ confirm bytes are unchanged).
 | Mac Studio serving canary | `v1.8.171` @ `12de7aea9e3ecf07df229682fc6defd225e4085f` — signed, live, Pearl session accepted (`serving_buyers`, slots 4, CB off). Previous canary `v1.8.170` @ `b8faebae0cb144301de77b2f0b43b5864bfeb2fe` remains staged at `/Users/a1/candidate-v1.8.170/`. Do not canary CB and do not raise slots. |
 | Off-train E2E candidate | `v1.8.167` @ `7f833a2f63ddee6b2e146c821341099d89aec169` ([run 35417249468](https://github.com/Augustas11/macprovider/actions/runs/35417249468)) — signed hold-branch CLI used for the 2026-09-19 Pearl Track B run |
 | Older | `v1.8.163` @ `8c0c51d2`; `v1.8.164` BYOM @ `cdbb0257`; CLI artifact `v1.8.166` @ `00ce3625` (not the Pearl runtime tag) |
-| Status | **Do not promote.** `v1.8.171` is the live Studio serving canary for continuous-batching testing. It predates #1648. Fleet stays on 1.8.123. Do not canary CB and do not raise slots. |
-| Next candidate | **Paused — wait for operator green light.** Next cut off `main` (`b9d050d8` or later) will include #1648. Keep `v1.8.171` on Studio until then. |
-| Why the next cut | Login-keychain KV disk DEKs so a packaged naked CLI can persist KVS-01a (#1648). 171 stays the CB-testing binary until that cut. |
+| Status | **Do not promote.** `v1.8.171` is the live Studio serving canary for continuous-batching testing. It predates #1648 and the MoE activation flag. Fleet stays on 1.8.123. Do not canary CB and do not raise slots. |
+| Next candidate | After #1650, cut off `main` so the package includes #1648 and `productionMoEPromotionEvidenceAvailable`. Keep `v1.8.171` on Studio until that swap. |
+| Why the next cut | Login-keychain KV disk DEKs (#1648) plus AC-23 MoE promotion evidence on the production scheduler. Buyer CB stays off until that packaged RC canaries. |
 
 ## E2E tracks (independent gates)
 

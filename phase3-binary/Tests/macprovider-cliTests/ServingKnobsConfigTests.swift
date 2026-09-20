@@ -1049,7 +1049,78 @@ final class ServingKnobsConfigTests: XCTestCase {
         XCTAssertEqual(missingLocalCapability.unsupportedReason, .pagedKVDisabled)
     }
 
-    func testMoETupleRemainsUnsupportedUntilCorrectnessAndMSB04EvidenceExist() {
+    func testMoETupleRemainsUnsupportedWhenPromotionEvidenceIsExplicitlyFalse() {
+        let descriptor = PagedKVDescriptor(
+            blockSizeTokens: 16,
+            maxPhysicalBlocks: 32,
+            modelID: "catalog/moe-model",
+            modelSHA256: String(repeating: "a", count: 64),
+            tokenizerSHA256: String(repeating: "b", count: 64),
+            chatTemplateSHA256: String(repeating: "c", count: 64),
+            supportedModelFamilies: ["qwen3_moe"],
+            supportsMoEDispatch: true,
+            hardwareClass: "m4-max-128gb",
+            metallibSHA256: String(repeating: "d", count: 64),
+            kernelIdentifier: "paged-attention-v1",
+            parityLabel: "moe-greedy-parity"
+        )
+        let tuple = ContinuousBatchingRequestedTuple(
+            modelID: descriptor.modelID,
+            modelSHA256: descriptor.modelSHA256,
+            tokenizerSHA256: descriptor.tokenizerSHA256,
+            chatTemplateSHA256: descriptor.chatTemplateSHA256,
+            cacheClass: "KVCacheSimple",
+            kvDType: .fp16,
+            requiresMoE: true,
+            hardwareClass: "m4-max-128gb",
+            metallibSHA256: String(repeating: "d", count: 64),
+            kernelIdentifier: "paged-attention-v1",
+            parityLabel: "moe-greedy-parity",
+            poolEpoch: 1
+        )
+
+        let canary = ContinuousBatchingPolicy.capability(
+            mode: .canary,
+            maxBatch: 2,
+            queueLimit: nil,
+            kvBits: nil,
+            draftConfigured: false,
+            schedulerBackendAvailable: true,
+            pagedKVDecision: .attached(descriptor),
+            requestedTuple: tuple,
+            moePromotionEvidenceAvailable: false
+        )
+        XCTAssertEqual(canary.unsupportedReason, .moePromotionEvidenceUnavailable)
+        XCTAssertTrue(canary.shouldUseSerialPath)
+        XCTAssertEqual(
+            ContinuousBatchingPolicy.serialRouteTelemetryLine(canary),
+            "event=batching_unsupported action=serial_routed reason=moe_promotion_evidence_unavailable\n"
+        )
+
+        let strict = ContinuousBatchingPolicy.capability(
+            mode: .on,
+            maxBatch: 2,
+            queueLimit: nil,
+            kvBits: nil,
+            draftConfigured: false,
+            schedulerBackendAvailable: true,
+            pagedKVDecision: .attached(descriptor),
+            requestedTuple: tuple,
+            moePromotionEvidenceAvailable: false
+        )
+        XCTAssertEqual(strict.unsupportedReason, .moePromotionEvidenceUnavailable)
+        XCTAssertFalse(strict.shouldUseSerialPath)
+        XCTAssertThrowsError(try ContinuousBatchingPolicy.validateStrictStartup(strict)) { error in
+            guard let apiError = error as? APIError else {
+                return XCTFail("expected APIError, got \(error)")
+            }
+            XCTAssertEqual(apiError.status, 400)
+            XCTAssertEqual(apiError.code, "continuous_batching_moe_promotion_evidence_unavailable")
+        }
+    }
+
+    func testProductionMoEPromotionEvidenceOpensDescriptorAdmittedTuple() {
+        XCTAssertTrue(ContinuousBatchingPolicy.productionMoEPromotionEvidenceAvailable)
         let descriptor = PagedKVDescriptor(
             blockSizeTokens: 16,
             maxPhysicalBlocks: 32,
@@ -1089,12 +1160,8 @@ final class ServingKnobsConfigTests: XCTestCase {
             pagedKVDecision: .attached(descriptor),
             requestedTuple: tuple
         )
-        XCTAssertEqual(canary.unsupportedReason, .moePromotionEvidenceUnavailable)
-        XCTAssertTrue(canary.shouldUseSerialPath)
-        XCTAssertEqual(
-            ContinuousBatchingPolicy.serialRouteTelemetryLine(canary),
-            "event=batching_unsupported action=serial_routed reason=moe_promotion_evidence_unavailable\n"
-        )
+        XCTAssertNil(canary.unsupportedReason)
+        XCTAssertFalse(canary.shouldUseSerialPath)
 
         let strict = ContinuousBatchingPolicy.capability(
             mode: .on,
@@ -1106,15 +1173,52 @@ final class ServingKnobsConfigTests: XCTestCase {
             pagedKVDecision: .attached(descriptor),
             requestedTuple: tuple
         )
-        XCTAssertEqual(strict.unsupportedReason, .moePromotionEvidenceUnavailable)
-        XCTAssertFalse(strict.shouldUseSerialPath)
-        XCTAssertThrowsError(try ContinuousBatchingPolicy.validateStrictStartup(strict)) { error in
-            guard let apiError = error as? APIError else {
-                return XCTFail("expected APIError, got \(error)")
-            }
-            XCTAssertEqual(apiError.status, 400)
-            XCTAssertEqual(apiError.code, "continuous_batching_moe_promotion_evidence_unavailable")
-        }
+        XCTAssertNil(strict.unsupportedReason)
+        XCTAssertNoThrow(try ContinuousBatchingPolicy.validateStrictStartup(strict))
+    }
+
+    func testDescriptorMembershipAloneDoesNotPromoteMoETuple() {
+        let descriptor = PagedKVDescriptor(
+            blockSizeTokens: 16,
+            maxPhysicalBlocks: 32,
+            modelID: "catalog/moe-model",
+            modelSHA256: String(repeating: "a", count: 64),
+            tokenizerSHA256: String(repeating: "b", count: 64),
+            chatTemplateSHA256: String(repeating: "c", count: 64),
+            supportedModelFamilies: ["qwen3_moe"],
+            supportsMoEDispatch: true,
+            hardwareClass: "m4-max-128gb",
+            metallibSHA256: String(repeating: "d", count: 64),
+            kernelIdentifier: "paged-attention-v1",
+            parityLabel: "moe-greedy-parity"
+        )
+        let tuple = ContinuousBatchingRequestedTuple(
+            modelID: descriptor.modelID,
+            modelSHA256: String(repeating: "f", count: 64),
+            tokenizerSHA256: descriptor.tokenizerSHA256,
+            chatTemplateSHA256: descriptor.chatTemplateSHA256,
+            cacheClass: "KVCacheSimple",
+            kvDType: .fp16,
+            requiresMoE: true,
+            hardwareClass: "m4-max-128gb",
+            metallibSHA256: String(repeating: "d", count: 64),
+            kernelIdentifier: "paged-attention-v1",
+            parityLabel: "moe-greedy-parity",
+            poolEpoch: 1
+        )
+
+        let canary = ContinuousBatchingPolicy.capability(
+            mode: .canary,
+            maxBatch: 2,
+            queueLimit: nil,
+            kvBits: nil,
+            draftConfigured: false,
+            schedulerBackendAvailable: true,
+            pagedKVDecision: .attached(descriptor),
+            requestedTuple: tuple
+        )
+        XCTAssertEqual(canary.unsupportedReason, .tupleNotAdvertised)
+        XCTAssertTrue(canary.shouldUseSerialPath)
     }
 
     func testStrictOnRejectsStickyRequestWhenPagedKVUnavailable() {
