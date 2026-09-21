@@ -71,10 +71,9 @@ Stop and roll back to `continuous_batching: off` if any item below is true:
 - the requested tuple is absent from the local SPEC-039 capability descriptor;
 - the first keyless serving-path request admitted by the scheduler does not
   return HTTP 200 / `finish_reason=stop` through the scheduler path;
-- any conversation-keyed request enters the batch during the first keyless
-  enablement scope, even when it reports zero cached-token credit;
-- any sticky-cache or cross-turn request reports positive cached-token credit
-  without a same-conversation FR-PKV10 retained paged-KV handoff;
+- any request with positive `cached_prompt_tokens` enters the batch before
+  AC-26 packaged sticky/cross-turn proof, even if a retained paged-KV
+  handoff exists;
 - any token, stop condition, cancellation, usage field, receipt field, or
   request-log terminal state is attributed to the wrong request;
 - a batch failure and serial retry produce stitched buyer-visible output or a
