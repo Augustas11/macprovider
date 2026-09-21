@@ -1232,6 +1232,38 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         )
     }
 
+    func testContiguousCacheBridgeRecordsBFloat16KV() async throws {
+        guard PagedKVMetallibGate.defaultMetallibExists() else {
+            throw XCTSkip("MLX default metallib is unavailable in this test host")
+        }
+
+        let descriptor = Self.bridgeDescriptor(blockSizeTokens: 2, maxPhysicalBlocks: 6)
+        let bridge = PagedKVRuntimeContiguousCacheBridge()
+        let allocator = try PagedKVBlockAllocator(
+            blockSizeTokens: descriptor.blockSizeTokens,
+            maxPhysicalBlocks: descriptor.maxPhysicalBlocks,
+            physicalBlockOrder: [4, 1, 3, 0, 2, 5],
+            contiguousCacheBridge: bridge
+        )
+        let handle = try await allocator.allocate(conversationKey: "conv:bf16", maxTokens: 6, initialTokens: 5)
+        let binding = try await allocator.binding(for: handle)
+        let keyBytes = Self.fp16Bytes([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
+        let valueBytes = Self.fp16Bytes([101, 102, 103, 104, 105, 106, 107, 108, 109, 110])
+        let paged = PagedKVCache(descriptor: descriptor, binding: binding)
+        paged.state = [
+            MLXArray(keyBytes, [1, 2, 5, 1], dtype: .bfloat16),
+            MLXArray(valueBytes, [1, 2, 5, 1], dtype: .bfloat16),
+        ]
+        try bridge.record(caches: [paged], binding: binding)
+        let materialized = try await allocator.materializeContiguousByteCache(handle)
+        XCTAssertEqual(materialized.layers[0].dtype, .bf16)
+        XCTAssertEqual(materialized.layers[0].keyBytes, keyBytes)
+        XCTAssertEqual(materialized.layers[0].valueBytes, valueBytes)
+        let handoff = try bridge.materializeContiguousKVCache(handle: handle, table: binding.currentTable)
+        XCTAssertEqual(handoff.caches[0].state[0].dtype, .bfloat16)
+        XCTAssertEqual(handoff.caches[0].state[0].asData(access: .copy).data, keyBytes)
+    }
+
     func testContiguousCacheBridgePreservesMidBlockTrimAcrossExtractAndRetainReattach() async throws {
         guard PagedKVMetallibGate.defaultMetallibExists() else {
             throw XCTSkip("MLX default metallib is unavailable in this test host")

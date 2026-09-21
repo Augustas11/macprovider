@@ -1152,6 +1152,12 @@ final class PagedKVEngineTests: XCTestCase {
             )
         )
     }
+
+    func testPagedKVDTypeBFloat16IsUnquantized16Bit() {
+        XCTAssertEqual(PagedKVDType.bf16.byteWidth, 2)
+        XCTAssertEqual(PagedKVDType.fp16.byteWidth, 2)
+        XCTAssertEqual(PagedKVDType.bf16.rawValue, "bf16")
+    }
 }
 
 private struct EmptyContiguousCacheBridge: PagedKVContiguousCacheBridge {

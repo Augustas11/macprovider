@@ -1,11 +1,15 @@
 import Foundation
 
 public enum PagedKVDType: String, Sendable, Equatable, Codable {
+    /// IEEE float16. The original SPEC-039 unquantized KV tag.
     case fp16
+    /// bfloat16. Same 16-bit unquantized path; mlx-swift models emit this
+    /// after the compile/bf16 upgrade. Distinct from quantized `kv_bits`.
+    case bf16
 
     public var byteWidth: Int {
         switch self {
-        case .fp16: return 2
+        case .fp16, .bf16: return 2
         }
     }
 }
@@ -1019,7 +1023,7 @@ enum PagedKVMaterializer {
             throw PagedKVAllocatorError.invalidBlockTable("duplicate materialized layer")
         }
         for layer in cache.layers {
-            guard layer.dtype == .fp16 else {
+            guard layer.dtype == .fp16 || layer.dtype == .bf16 else {
                 throw PagedKVAllocatorError.invalidBlockTable("unsupported materialized dtype")
             }
             guard layer.keyShape == layer.valueShape, layer.keyShape.count >= 3 else {
@@ -1071,7 +1075,7 @@ enum PagedKVMaterializer {
             throw PagedKVAllocatorError.invalidBlockTable("duplicate materialized layer")
         }
         return try layers.sorted(by: { $0.layerIndex < $1.layerIndex }).map { layer in
-            guard layer.dtype == .fp16 else {
+            guard layer.dtype == .fp16 || layer.dtype == .bf16 else {
                 throw PagedKVAllocatorError.invalidBlockTable("unsupported materialized dtype")
             }
             guard layer.keyShape == layer.valueShape, layer.keyShape.count >= 3 else {
