@@ -441,8 +441,28 @@ func TestModelAdmissionBindingRefreshRetriesAfterTransientListingFailure(t *test
 	s.modelAdmissions = flaky
 
 	priced := f.decide(t, offered, "catalog_priced")
-	if p, _ := s.pool.Resolve("p1", ""); p.ModelAdmissionCandidateID != "" {
-		t.Fatalf("failed synchronous refresh must clear the binding first, got %q", p.ModelAdmissionCandidateID)
+	if p, _ := s.pool.Resolve("p1", ""); p.ModelAdmissionCandidateID != offered.CandidateID || p.ModelAdmissionCoordinatorEventID != offered.CoordinatorEventID {
+		t.Fatalf("failed synchronous refresh must preserve prior binding, got candidate=%q head=%q want candidate=%q head=%q",
+			p.ModelAdmissionCandidateID, p.ModelAdmissionCoordinatorEventID, offered.CandidateID, offered.CoordinatorEventID)
+	} else if p.ModelAdmissionBindingGeneration >= s.ModelAdmissionBindingGeneration("p1") {
+		t.Fatalf("preserved binding must lag the provider section generation: provider=%d section=%d",
+			p.ModelAdmissionBindingGeneration, s.ModelAdmissionBindingGeneration("p1"))
+	} else {
+		dispatched := false
+		err := s.CompareAndInsertModelAdmissionRouteSnapshot(context.Background(), ModelAdmissionRouteExpectation{
+			ProviderID:              p.ProviderID,
+			CandidateID:             p.ModelAdmissionCandidateID,
+			CoordinatorEventID:      p.ModelAdmissionCoordinatorEventID,
+			BindingGeneration:       p.ModelAdmissionBindingGeneration,
+			SessionEpoch:            p.ModelAdmissionSessionEpoch,
+			ProviderRouteGeneration: 0,
+		}, func() error {
+			dispatched = true
+			return nil
+		})
+		if !errors.Is(err, ErrModelAdmissionRouteDrift) || dispatched {
+			t.Fatalf("stale preserved binding must fail route compare-and-insert closed: err=%v dispatched=%v", err, dispatched)
+		}
 	}
 
 	deadline := time.Now().Add(2 * time.Second)
@@ -470,8 +490,9 @@ func TestModelAdmissionBindingRetryStopsAfterSessionEpochDrift(t *testing.T) {
 
 	priced := f.decide(t, offered, "catalog_priced")
 	before, _ := s.pool.Resolve("p1", "")
-	if before.ModelAdmissionCandidateID != "" {
-		t.Fatalf("failed synchronous refresh must clear the binding first, got %q", before.ModelAdmissionCandidateID)
+	if before.ModelAdmissionCandidateID != offered.CandidateID || before.ModelAdmissionCoordinatorEventID != offered.CoordinatorEventID {
+		t.Fatalf("failed synchronous refresh must preserve prior binding, got candidate=%q head=%q want candidate=%q head=%q",
+			before.ModelAdmissionCandidateID, before.ModelAdmissionCoordinatorEventID, offered.CandidateID, offered.CoordinatorEventID)
 	}
 	startEpoch := before.ModelAdmissionSessionEpoch
 
@@ -489,8 +510,9 @@ func TestModelAdmissionBindingRetryStopsAfterSessionEpochDrift(t *testing.T) {
 
 	time.Sleep(500 * time.Millisecond)
 	afterRetry, _ := s.pool.Resolve("p1", "")
-	if afterRetry.ModelAdmissionCandidateID != "" || afterRetry.ModelAdmissionCoordinatorEventID != "" {
-		t.Fatalf("retry must not rebind after session epoch drift: %+v", afterRetry.ModelAdmissionBindingGeneration)
+	if afterRetry.ModelAdmissionCandidateID != offered.CandidateID || afterRetry.ModelAdmissionCoordinatorEventID != offered.CoordinatorEventID {
+		t.Fatalf("retry must preserve, not advance, the binding after session epoch drift: candidate=%q head=%q want candidate=%q head=%q",
+			afterRetry.ModelAdmissionCandidateID, afterRetry.ModelAdmissionCoordinatorEventID, offered.CandidateID, offered.CoordinatorEventID)
 	}
 	latest := f.latest(t, "p1", priced.CandidateID)
 	if latest.State != "catalog_priced" {

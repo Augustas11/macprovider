@@ -8108,7 +8108,7 @@
     {
       "requirement_id": "SPEC-047-R003",
       "spec_id": "SPEC-047",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
         "phase4-coordinator/internal/ws/model_admission.go:ModelAdmissionDefaultPaidRoutingEligible",
         "phase4-coordinator/internal/ws/model_admission.go:ModelAdmissionSettlementBindingForRouteSnapshot",
@@ -8131,6 +8131,8 @@
         "phase4-coordinator/internal/buyer/route_snapshot_test.go:TestBYOMCatalogKeyMismatchFailsClosed",
         "phase5-gateway/internal/router/server_test.go:TestBYOMNonSettlementCoordinatorUnavailableDoesNotChargeOrClaimVerified",
         "phase4-coordinator/internal/ws/model_admission_binding_test.go:TestModelAdmissionSessionBindingLifecycleAndDrift",
+        "phase4-coordinator/internal/ws/model_admission_binding_test.go:TestModelAdmissionBindingRefreshRetriesAfterTransientListingFailure",
+        "phase4-coordinator/internal/ws/model_admission_binding_test.go:TestModelAdmissionBindingRetryStopsAfterSessionEpochDrift",
         "phase4-coordinator/internal/ws/model_admission_operator_test.go:TestModelAdmissionOperatorDecisionPath",
         "phase4-coordinator/internal/buyer/artifact_settlement_test.go:TestBYOMArtifactMemberSettlesWithSixValueEvidence",
         "phase4-coordinator/internal/buyer/artifact_settlement_test.go:TestBYOMArtifactMemberRouteTimeGatesFailClosed"
@@ -8152,7 +8154,12 @@
           "expires_at": "2026-10-16"
         }
       ],
-      "gap": null
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1240",
+        "rationale": "Pearl admission binding recovery changes updated the mapped refreshModelAdmissionBindingLocked selector after the 2026-09-16 signed JOURNEY-NETWORK-MODEL-ADMISSION evidence was captured. Local regression coverage proves the transient-refresh fail-closed behavior, but the historical signed journey binds earlier selector bytes; fresh independently trusted network-model-admission evidence at HEAD is required before restoring conformant status. Historical evidence is retained without redating or replacement."
+      }
     },
     {
       "requirement_id": "SPEC-047-R004",
