@@ -49,12 +49,14 @@ All in-scope CLI rows are **merged**. Last built candidates `v1.8.163`,
 `v1.8.164`, `v1.8.167`, `v1.8.168`, and `v1.8.171` are old or off-train for
 promotion — do not promote them. Studio serving canary is **`v1.8.172`** @
 `c512d342b1df6c495afeabbe49eaca74a98107c4` (includes #1648 and #1650), live
-as `live.malibu.provider` on Mac Studio. The leftover `</tool_call>` CLI
-relay (#1653) is on `main` and is **not** in 172; include it in the next CLI
-cut after 172. Do not promote the fleet. Buyer CB stays **off** after the
-2026-09-20 Studio canary attempt rolled back
-(`continuous_batching_prefill_failed` on the attached serve path). Do not
-re-canary until that 503 is fixed on this package. Do not raise slots.
+as `live.malibu.provider` on Mac Studio. `#1653` leftover-stream CLI relay
+and `#1656` sanitized CB prefill-failure telemetry are on `main` and are
+**not** in 172. Cutting `v1.8.174` off current `main` for those rows (`v1.8.173`
+is the Pearl coordinator/gateway tag, not a CLI package). Do not promote the
+fleet. Buyer CB stays **off** after the 2026-09-20 Studio canary attempt
+rolled back (`continuous_batching_prefill_failed` on the attached serve
+path). Do not re-canary live until an isolated 174 loopback names the inner
+throw or returns 200. Do not raise slots.
 
 
 | Net change in CLI / Malibu / installer | Status | PR |
@@ -99,6 +101,7 @@ re-canary until that 503 is fixed on this package. Do not raise slots.
 | Qwen leftover `</tool_call>` after a valid tool JSON must not kill the stream | merged | #1653 |
 | Login keychain for KV disk DEKs (naked CLI can persist KVS-01a) | merged | #1648 |
 | SPEC-038 AC-23 MoE promotion evidence available on production scheduler (buyer CB still off) | merged | #1650 |
+| Sanitized reason-coded stderr on CB prefill fail-close (buyer API stays generic 503) | merged | #1656 |
 
 #1453 closes when a candidate that includes the **merged** rows is promoted to
 the fleet. #1569 is a later CLI. Spec promotion #1583 is not a CLI change.
@@ -116,8 +119,8 @@ includes `v1.8.172@c512d342…` (8-entry cap; dropped unused `v1.8.111` to make
 room; 171 remains accepted). Buyer `continuous_batching` stays **off** after
 the 2026-09-20 Studio canary rollback
 ([`continuous-batching-canary-172-enable-2026-09-20.md`](../runbooks/continuous-batching-canary-172-enable-2026-09-20.md)).
-Do not raise slots. Do not re-canary until serve-path prefill on 172 returns
-200.
+Do not raise slots. Do not re-canary live 172. Isolated loopback on 174 is
+the next CB proof (logging from #1656).
 
 #1632 / #1638 / #1639 / #1653 (coordinator leftover rewrite + gateway R014)
 are coordinator/gateway, not CLI rows. #1653 also has the CLI
@@ -138,13 +141,13 @@ confirm bytes are unchanged).
 
 | Field | Value |
 |---|---|
-| Last built from `main` | `v1.8.172` **signed** @ `c512d342b1df6c495afeabbe49eaca74a98107c4`, branch `release/candidate-1.8.172-spec038`, [run 35512582454](https://github.com/Augustas11/macprovider/actions/runs/35512582454) attempt 1. Compat `Augustas11/macprovider:v1.8.172@c512d342b1df6c495afeabbe49eaca74a98107c4`. Live as `live.malibu.provider` on Mac Studio (`/Users/a1/macprovider/macprovider-cli`); also staged at `/Users/a1/candidate-v1.8.172/`. |
-| Mac Studio serving canary | `v1.8.172` @ `c512d342b1df6c495afeabbe49eaca74a98107c4` — signed, live, Pearl session accepted (`serving_buyers`, slots 4, CB off after canary rollback). Previous canary `v1.8.171` @ `12de7aea9e3ecf07df229682fc6defd225e4085f` remains staged at `/Users/a1/candidate-v1.8.171/`. Do not re-canary CB and do not raise slots. |
+| Last built from `main` | Cutting `v1.8.174` off current `main` for #1653 + #1656. Branch `release/candidate-1.8.174-spec038`. Previous signed CLI: `v1.8.172` @ `c512d342b1df6c495afeabbe49eaca74a98107c4`. `v1.8.173` is Pearl runtime only. |
+| Mac Studio serving canary | `v1.8.172` @ `c512d342b1df6c495afeabbe49eaca74a98107c4` — signed, live, Pearl session accepted (`serving_buyers`, slots 4, CB off after canary rollback). Previous canary `v1.8.171` @ `12de7aea9e3ecf07df229682fc6defd225e4085f` remains staged at `/Users/a1/candidate-v1.8.171/`. Do not re-canary CB on 172 and do not raise slots. |
 | Off-train E2E candidate | `v1.8.167` @ `7f833a2f63ddee6b2e146c821341099d89aec169` ([run 35417249468](https://github.com/Augustas11/macprovider/actions/runs/35417249468)) — signed hold-branch CLI used for the 2026-09-19 Pearl Track B run |
 | Older | `v1.8.163` @ `8c0c51d2`; `v1.8.164` BYOM @ `cdbb0257`; CLI artifact `v1.8.166` @ `00ce3625` (not the Pearl runtime tag) |
-| Status | **Do not promote.** `v1.8.172` is the live Studio serving canary (#1648, #1650). Fleet stays on 1.8.123. Buyer CB stays off after the 2026-09-20 canary rollback. Do not raise slots. |
-| Next candidate | **not cut.** Next CLI after 172 must include leftover `</tool_call>` `InferenceRelay` (#1653). |
-| Why the next cut | 172 is live without #1653 CLI relay. Next cut off current `main` picks up leftover-stream drop after first tool delta. Do not promote; do not re-canary CB. |
+| Status | **Do not promote.** `v1.8.172` stays live until 174 is signed and swapped. Fleet stays on 1.8.123. Buyer CB stays off. Do not raise slots. |
+| Next candidate | Cutting `v1.8.174` (#1653 leftover-stream CLI + #1656 prefill-failure telemetry). |
+| Why the next cut | 172 cannot name the swallowed prefill throw. 174 is the isolated-loopback package. Do not promote; do not live-canary until that loopback names the throw or returns 200. |
 
 ## E2E tracks (independent gates)
 
