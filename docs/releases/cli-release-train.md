@@ -51,7 +51,9 @@ All in-scope CLI rows are **merged** except the in-progress leftover
 promotion — do not promote them. Studio serving canary is **`v1.8.172`** @
 `c512d342b1df6c495afeabbe49eaca74a98107c4` (includes #1648 and #1650), live
 as `live.malibu.provider` on Mac Studio. Do not promote the fleet. Buyer CB
-stays off; do not raise slots; do not canary until the operator enable step.
+stays **off** after the 2026-09-20 Studio canary attempt rolled back
+(`continuous_batching_prefill_failed` on the attached serve path). Do not
+re-canary until that 503 is fixed on this package. Do not raise slots.
 
 
 | Net change in CLI / Malibu / installer | Status | PR |
@@ -112,8 +114,11 @@ also staged at `/Users/a1/candidate-v1.8.172/`; CLI SHA-256
 `7bd43fe8582206043b70e95b8bc232eb0826511832fc43ff0ffe91555c92ac60`). Pearl
 `compatibility_set.target_id` stays `v1.8.123@37e2d232…`; `accepted_ids`
 includes `v1.8.172@c512d342…` (8-entry cap; dropped unused `v1.8.111` to make
-room; 171 remains accepted). Buyer `continuous_batching` stays **off**; do
-not raise slots. Do not canary until the operator enable step.
+room; 171 remains accepted). Buyer `continuous_batching` stays **off** after
+the 2026-09-20 Studio canary rollback
+([`continuous-batching-canary-172-enable-2026-09-20.md`](../runbooks/continuous-batching-canary-172-enable-2026-09-20.md)).
+Do not raise slots. Do not re-canary until serve-path prefill on 172 returns
+200.
 
 #1632 / #1638 / #1639 are coordinator/gateway, not CLI rows.
 
@@ -133,12 +138,12 @@ confirm bytes are unchanged).
 | Field | Value |
 |---|---|
 | Last built from `main` | `v1.8.172` **signed** @ `c512d342b1df6c495afeabbe49eaca74a98107c4`, branch `release/candidate-1.8.172-spec038`, [run 35512582454](https://github.com/Augustas11/macprovider/actions/runs/35512582454) attempt 1. Compat `Augustas11/macprovider:v1.8.172@c512d342b1df6c495afeabbe49eaca74a98107c4`. Live as `live.malibu.provider` on Mac Studio (`/Users/a1/macprovider/macprovider-cli`); also staged at `/Users/a1/candidate-v1.8.172/`. |
-| Mac Studio serving canary | `v1.8.172` @ `c512d342b1df6c495afeabbe49eaca74a98107c4` — signed, live, Pearl session accepted (`serving_buyers`, slots 4, CB off). Previous canary `v1.8.171` @ `12de7aea9e3ecf07df229682fc6defd225e4085f` remains staged at `/Users/a1/candidate-v1.8.171/`. Do not canary CB and do not raise slots. |
+| Mac Studio serving canary | `v1.8.172` @ `c512d342b1df6c495afeabbe49eaca74a98107c4` — signed, live, Pearl session accepted (`serving_buyers`, slots 4, CB off after canary rollback). Previous canary `v1.8.171` @ `12de7aea9e3ecf07df229682fc6defd225e4085f` remains staged at `/Users/a1/candidate-v1.8.171/`. Do not re-canary CB and do not raise slots. |
 | Off-train E2E candidate | `v1.8.167` @ `7f833a2f63ddee6b2e146c821341099d89aec169` ([run 35417249468](https://github.com/Augustas11/macprovider/actions/runs/35417249468)) — signed hold-branch CLI used for the 2026-09-19 Pearl Track B run |
 | Older | `v1.8.163` @ `8c0c51d2`; `v1.8.164` BYOM @ `cdbb0257`; CLI artifact `v1.8.166` @ `00ce3625` (not the Pearl runtime tag) |
-| Status | **Do not promote.** `v1.8.172` is the live Studio serving canary off current `main` (#1648, #1650). Fleet stays on 1.8.123. Do not canary CB and do not raise slots. |
+| Status | **Do not promote.** `v1.8.172` is the live Studio serving canary off current `main` (#1648, #1650). Fleet stays on 1.8.123. Buyer CB stays off after the 2026-09-20 canary rollback. Do not raise slots. |
 | Next candidate | **signed.** `v1.8.172` @ `c512d342b1df6c495afeabbe49eaca74a98107c4`, branch `release/candidate-1.8.172-spec038`, [run 35512582454](https://github.com/Augustas11/macprovider/actions/runs/35512582454) attempt 1. |
-| Why the next cut | Login-keychain KV disk DEKs (#1648) plus AC-23 MoE promotion evidence on the production scheduler (#1650). Buyer CB stays off until this packaged RC canaries. |
+| Why the next cut | Login-keychain KV disk DEKs (#1648) plus AC-23 MoE promotion evidence on the production scheduler (#1650). 172 is live; buyer CB canary on this package rolled back on serve-path prefill 503. |
 
 ## E2E tracks (independent gates)
 
