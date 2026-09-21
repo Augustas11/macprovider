@@ -339,9 +339,14 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
               let firstValue = valueBlocks.first,
               firstKey.shape == firstValue.shape,
               firstKey.ndim >= 3,
-              firstKey.dtype == firstValue.dtype,
-              try Self.pagedDType(for: firstKey.dtype) == .fp16
+              firstKey.dtype == firstValue.dtype
         else {
+            throw PagedKVContiguousCacheBridgeError.invalidLayerState
+        }
+        let dtype: PagedKVDType
+        do {
+            dtype = try Self.pagedDType(for: firstKey.dtype)
+        } catch {
             throw PagedKVContiguousCacheBridgeError.invalidLayerState
         }
         let sequenceAxis = firstKey.shape.count - 2
@@ -349,23 +354,23 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
         var fullValueShape = firstValue.shape
         fullKeyShape[sequenceAxis] = table.logicalTokenCount
         fullValueShape[sequenceAxis] = table.logicalTokenCount
-        let bytesPerToken = try Self.bytesPerToken(shape: fullKeyShape, dtype: .fp16)
+        let bytesPerToken = try Self.bytesPerToken(shape: fullKeyShape, dtype: dtype)
         return PagedKVRuntimePhysicalLayerBlocks(
             layerIndex: layerIndex,
             keyShape: fullKeyShape,
             valueShape: fullValueShape,
-            dtype: .fp16,
+            dtype: dtype,
             keyBlocks: try Self.physicalBlocks(
                 keyBlocks,
                 table: table,
                 fullShape: fullKeyShape,
-                dtype: .fp16
+                dtype: dtype
             ),
             valueBlocks: try Self.physicalBlocks(
                 valueBlocks,
                 table: table,
                 fullShape: fullValueShape,
-                dtype: .fp16
+                dtype: dtype
             ),
             bytesPerToken: bytesPerToken
         )
@@ -482,6 +487,8 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
         switch dtype {
         case .float16:
             return .fp16
+        case .bfloat16:
+            return .bf16
         default:
             throw PagedKVContiguousCacheBridgeError.unsupportedDType
         }

@@ -337,8 +337,16 @@ enum ContinuousBatchingPolicy {
         FileHandle.standardError.write(Data(prefillFailureTelemetryLine(error).utf8))
     }
 
+    static func logForwardFailed(_ error: Error) {
+        FileHandle.standardError.write(Data(forwardFailureTelemetryLine(error).utf8))
+    }
+
     static func prefillFailureTelemetryLine(_ error: Error) -> String {
         "event=batching_prefill_failed action=fail_closed reason=\(prefillFailureReason(error))\n"
+    }
+
+    static func forwardFailureTelemetryLine(_ error: Error) -> String {
+        "event=batching_forward_failed action=fail_closed reason=\(prefillFailureReason(error))\n"
     }
 
     static func prefillFailureReason(_ error: Error) -> String {
