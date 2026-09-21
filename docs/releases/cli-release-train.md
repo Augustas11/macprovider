@@ -164,16 +164,15 @@ combined candidate**.
   errors); chat (paid+free), models, privacy, health/provenance, wholesale
   statement all pass. `--filing-mode` for the final application (prod URLs +
   benchmark ≥ 100).
-- **Last run:** 2026-09-21 post-Pearl-recover against signed Studio
-  **v1.8.175** serving `mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit`
-  (not the Llama 3B fleet). Pearl **v1.8.174**. Artifact:
-  `~/.local/state/macprovider/openrouter-readiness/openrouter-readiness-20260921T085522Z-qwen30-studio-175-buyer-postdeploy.json`.
-  Chat **PASS** (stream TTFT 3417ms). Load-ladder conc=1 **8/8** (TTFT p95
-  5257ms, p50 3684ms, 27 tok/s). Soak 100@4 **FAIL** 53/100 HTTP 200, 47×
-  `503 no_provider_available`, 0 `429`. Saturation 16@8 **FAIL** 3/16 200,
-  13× 503, 0 shed 429. Pool advertised 4 Qwen slots / 1 provider. An earlier
-  same-day soak (`…T083417Z…`) overlapped Pearl apply and is not the
-  comparison baseline. Do not raise slots. Do not set CB `on`. Do not promote.
+- **Last run:** 2026-09-21 wholesale `acct_openrouter` `mp_` key against
+  signed Studio **v1.8.175** serving
+  `mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit` (not the Llama 3B fleet).
+  Pearl **v1.8.174**. Soak artifact:
+  `~/.local/state/macprovider/openrouter-readiness/openrouter-readiness-20260921T093143Z-qwen30-studio-175-wholesale-soak100.json`.
+  Soak 100@4 **FAIL** 49/100 HTTP 200, **51× 429** `no_provider_available`,
+  **0× 503**. A same-day buyer-key soak (`…T085522Z…`) is not comparable
+  (overflow stayed 503). Idle 16/16 200 but TTFT p95 7097ms. Sat 16@8:
+  2×200 + 6×429. Do not raise slots. Do not set CB `on`. Do not promote.
 
 ### Track B — BYOM Ollama / Gemma
 
