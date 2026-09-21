@@ -162,10 +162,12 @@ resolve_model() {
 }
 
 resolve_sha256() {
-  # Extract model_sha256 from /v1/status (provider may expose it in the status body).
-  # Fall back to model_artifact_sha256 or model_catalog_sha256 if the field name differs.
+  # Extract model_sha256 from /v1/status. Field name depends on CLI version:
+  #   v1.8.x:  model_hash (top-level) + model_hash_algorithm
+  #   earlier: model_sha256 / model_artifact_sha256 / model_catalog_sha256
+  #   catalog: catalog.artifact_sha256
   curl -fsS -m 5 "$KVS03_BASE/v1/status" 2>/dev/null \
-    | "$NODE_BIN" -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const d=JSON.parse(s);const v=d.model_sha256||d.model_artifact_sha256||d.model_catalog_sha256||(d.lifecycle&&(d.lifecycle.model_sha256||d.lifecycle.model_artifact_sha256))||"";process.stdout.write(v)}catch{process.stdout.write("")}})' || echo ""
+    | "$NODE_BIN" -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const d=JSON.parse(s);const v=d.model_hash||d.model_sha256||d.model_artifact_sha256||d.model_catalog_sha256||(d.catalog&&d.catalog.artifact_sha256)||(d.lifecycle&&(d.lifecycle.model_sha256||d.lifecycle.model_artifact_sha256))||"";process.stdout.write(v)}catch{process.stdout.write("")}})' || echo ""
 }
 
 await_log() { # $1=log $2=pattern $3=timeout
