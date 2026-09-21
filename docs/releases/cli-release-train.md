@@ -45,13 +45,14 @@ binary the Mac runs.
 
 ## Next CLI — net changes vs 1.8.123
 
-All in-scope CLI rows are **merged** except the in-progress leftover
-`</tool_call>` stream fix (#1652). Last built candidates `v1.8.163`,
+All in-scope CLI rows are **merged**. Last built candidates `v1.8.163`,
 `v1.8.164`, `v1.8.167`, `v1.8.168`, and `v1.8.171` are old or off-train for
 promotion — do not promote them. Studio serving canary is **`v1.8.172`** @
 `c512d342b1df6c495afeabbe49eaca74a98107c4` (includes #1648 and #1650), live
-as `live.malibu.provider` on Mac Studio. Do not promote the fleet. Buyer CB
-stays **off** after the 2026-09-20 Studio canary attempt rolled back
+as `live.malibu.provider` on Mac Studio. The leftover `</tool_call>` CLI
+relay (#1653) is on `main` and is **not** in 172; include it in the next CLI
+cut after 172. Do not promote the fleet. Buyer CB stays **off** after the
+2026-09-20 Studio canary attempt rolled back
 (`continuous_batching_prefill_failed` on the attached serve path). Do not
 re-canary until that 503 is fixed on this package. Do not raise slots.
 
@@ -95,24 +96,29 @@ re-canary until that 503 is fixed on this package. Do not raise slots.
 | Conversation-keyed serial serve allocates trimmable `KVCacheSimple` (FR-CI2 can skip prefill) | merged | #1634 |
 | SPEC-038 scheduler uses compiled lockstep decode windows (buyer CB still off) | merged | #1635 |
 | FR-CB15 leftover harness (MSB-03/05, usage, isolation, drain, replay) + MoE promotion review (flag stays false) | merged | #1640 |
-| Qwen leftover `</tool_call>` after a valid tool JSON must not kill the stream | in progress | #1652 |
+| Qwen leftover `</tool_call>` after a valid tool JSON must not kill the stream | merged | #1653 |
 | Login keychain for KV disk DEKs (naked CLI can persist KVS-01a) | merged | #1648 |
 | SPEC-038 AC-23 MoE promotion evidence available on production scheduler (buyer CB still off) | merged | #1650 |
 
 #1453 closes when a candidate that includes the **merged** rows is promoted to
 the fleet. #1569 is a later CLI. Spec promotion #1583 is not a CLI change.
 
-Coordinator/gateway on live Pearl is **v1.8.169** @ `51746ca05364d42e16a2a8ce3d38a8864c0bfb8b`
+Coordinator/gateway on live Pearl is still **v1.8.169** @ `51746ca05364d42e16a2a8ce3d38a8864c0bfb8b`
 ([run 35499650509](https://github.com/Augustas11/macprovider/actions/runs/35499650509)).
-That runtime includes #1632 (OpenRouter 17-row listing; live `/v1/openrouter/models`
-returned 18 rows including the free Llama alias), #1638 (nested
-`prompt_tokens_details.cached_tokens`), and #1639 (dist
-`min_provider_throughput_tps=1.0`). Sticky and CB stay off. Fleet Macs still
-run **1.8.123** until the operator-cut CLI is promoted. Mac Studio serving
-canary is `v1.8.172` (signed package extracted into `/Users/a1/macprovider/`;
-also staged at `/Users/a1/candidate-v1.8.172/`; CLI SHA-256
-`7bd43fe8582206043b70e95b8bc232eb0826511832fc43ff0ffe91555c92ac60`). Pearl
-`compatibility_set.target_id` stays `v1.8.123@37e2d232…`; `accepted_ids`
+That runtime includes #1632 / #1638 / #1639. Sticky and CB stay off.
+
+**Pearl runtime next cut — this session.** Bakeoff-followup executes one
+`pearl-runtime-release.yml` + `macprovider-pearl-update` of current `main`
+(`d86ddb12`, #1653 leftover-stream sanitizer + SPEC-006-R014 auto-prefix).
+Suggested tag **v1.8.173** (skip CLI artifact numbers 170/171/172). Other
+sessions must **not** dispatch a second runtime release. Sticky and CB stay
+off. After apply, replace this lock with the live tag + run.
+
+Fleet Macs still run **1.8.123** until the operator-cut CLI is promoted. Mac
+Studio serving canary is `v1.8.172` (signed package extracted into
+`/Users/a1/macprovider/`; also staged at `/Users/a1/candidate-v1.8.172/`; CLI
+SHA-256 `7bd43fe8582206043b70e95b8bc232eb0826511832fc43ff0ffe91555c92ac60`).
+Pearl `compatibility_set.target_id` stays `v1.8.123@37e2d232…`; `accepted_ids`
 includes `v1.8.172@c512d342…` (8-entry cap; dropped unused `v1.8.111` to make
 room; 171 remains accepted). Buyer `continuous_batching` stays **off** after
 the 2026-09-20 Studio canary rollback
@@ -120,7 +126,9 @@ the 2026-09-20 Studio canary rollback
 Do not raise slots. Do not re-canary until serve-path prefill on 172 returns
 200.
 
-#1632 / #1638 / #1639 are coordinator/gateway, not CLI rows.
+#1632 / #1638 / #1639 / #1653 (coordinator leftover rewrite + gateway R014)
+are coordinator/gateway, not CLI rows. #1653 also has the CLI
+`InferenceRelay` drop; that binary change waits for the next CLI cut.
 
 #1600 is the install.sh consumer-health alarm
 (scripts/CI), not the Mac binary. Curl-channel `get.malibu.tech/install.sh`
@@ -141,9 +149,9 @@ confirm bytes are unchanged).
 | Mac Studio serving canary | `v1.8.172` @ `c512d342b1df6c495afeabbe49eaca74a98107c4` — signed, live, Pearl session accepted (`serving_buyers`, slots 4, CB off after canary rollback). Previous canary `v1.8.171` @ `12de7aea9e3ecf07df229682fc6defd225e4085f` remains staged at `/Users/a1/candidate-v1.8.171/`. Do not re-canary CB and do not raise slots. |
 | Off-train E2E candidate | `v1.8.167` @ `7f833a2f63ddee6b2e146c821341099d89aec169` ([run 35417249468](https://github.com/Augustas11/macprovider/actions/runs/35417249468)) — signed hold-branch CLI used for the 2026-09-19 Pearl Track B run |
 | Older | `v1.8.163` @ `8c0c51d2`; `v1.8.164` BYOM @ `cdbb0257`; CLI artifact `v1.8.166` @ `00ce3625` (not the Pearl runtime tag) |
-| Status | **Do not promote.** `v1.8.172` is the live Studio serving canary off current `main` (#1648, #1650). Fleet stays on 1.8.123. Buyer CB stays off after the 2026-09-20 canary rollback. Do not raise slots. |
-| Next candidate | **signed.** `v1.8.172` @ `c512d342b1df6c495afeabbe49eaca74a98107c4`, branch `release/candidate-1.8.172-spec038`, [run 35512582454](https://github.com/Augustas11/macprovider/actions/runs/35512582454) attempt 1. |
-| Why the next cut | Login-keychain KV disk DEKs (#1648) plus AC-23 MoE promotion evidence on the production scheduler (#1650). 172 is live; buyer CB canary on this package rolled back on serve-path prefill 503. |
+| Status | **Do not promote.** `v1.8.172` is the live Studio serving canary (#1648, #1650). Fleet stays on 1.8.123. Buyer CB stays off after the 2026-09-20 canary rollback. Do not raise slots. |
+| Next candidate | **not cut.** Next CLI after 172 must include leftover `</tool_call>` `InferenceRelay` (#1653). |
+| Why the next cut | 172 is live without #1653 CLI relay. Next cut off current `main` picks up leftover-stream drop after first tool delta. Do not promote; do not re-canary CB. |
 
 ## E2E tracks (independent gates)
 
