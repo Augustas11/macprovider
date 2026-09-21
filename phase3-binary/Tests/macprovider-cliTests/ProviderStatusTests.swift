@@ -624,6 +624,68 @@ final class ProviderStatusTests: XCTestCase {
         XCTAssertEqual(catalog?["row_identity"] as? String, String(repeating: "e", count: 64))
     }
 
+    /// Issue #1616 — local status must reproduce the coordinator's own reason
+    /// for withholding buyer routing. The reason existed on the wire and was
+    /// discarded by the CLI, so operators had to read coordinator logs to
+    /// learn why a provider said `not_buyer_serving`.
+    func testStatusReportsCoordinatorBuyerServingHoldOnlyWhenNotServing() async {
+        let status = ProviderStatus(modelID: "model-key", modelLoaded: true, capacity: makeCapacity())
+        await status.setCoordinatorSession(connected: true, assignedID: "session-a")
+        let context = ProviderCatalogStatusContext(
+            trust: ServeCommand.CatalogRuntimeTrust(
+                state: "live_verified",
+                releaseID: "release-a",
+                digest: String(repeating: "a", count: 64),
+                signerKeyID: "streamvc-autotune-static-v5",
+                source: "coordinator",
+                policyVersion: "autotune-policy-v1",
+                rowIdentity: String(repeating: "e", count: 64)
+            ),
+            donorMode: false,
+            catalogKey: "model-key",
+            catalogModelID: "org/model",
+            modelRevision: String(repeating: "b", count: 40),
+            artifactSHA256: String(repeating: "c", count: 64),
+            configuredReleaseID: "release-a",
+            configuredCatalogDigest: String(repeating: "a", count: 64)
+        )
+        let snapshot = await status.snapshot()
+
+        let held = RouterHandler.statusResponse(
+            snapshot,
+            providerID: "provider-a",
+            coordinatorURL: "wss://coordinator.malibu.tech/provider/ws",
+            catalogStatus: context,
+            coordinatorBuyerServing: false,
+            coordinatorBuyerServingHold: .modelAdmissionPending
+        )
+        XCTAssertEqual(held["network_state"] as? String, "not_buyer_serving")
+        XCTAssertEqual(held["buyer_serving_hold"] as? String, "model_admission_pending")
+
+        // An authoritative not-serving with no coordinator reason is explicitly
+        // null, never a locally invented one.
+        let unexplained = RouterHandler.statusResponse(
+            snapshot,
+            providerID: "provider-a",
+            coordinatorURL: "wss://coordinator.malibu.tech/provider/ws",
+            catalogStatus: context,
+            coordinatorBuyerServing: false
+        )
+        XCTAssertEqual(unexplained["network_state"] as? String, "not_buyer_serving")
+        XCTAssertTrue(unexplained["buyer_serving_hold"] is NSNull)
+
+        // A serving provider has no hold to report.
+        let serving = RouterHandler.statusResponse(
+            snapshot,
+            providerID: "provider-a",
+            coordinatorURL: "wss://coordinator.malibu.tech/provider/ws",
+            catalogStatus: context,
+            coordinatorBuyerServing: true
+        )
+        XCTAssertEqual(serving["network_state"] as? String, "buyer_serving")
+        XCTAssertTrue(serving["buyer_serving_hold"] is NSNull)
+    }
+
     func testStatusDoesNotCallOfflineFallbackBuyerServing() async {
         let status = ProviderStatus(modelID: "m", modelLoaded: true, capacity: makeCapacity())
         await status.setCoordinatorSession(connected: true)

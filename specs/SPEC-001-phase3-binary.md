@@ -1,6 +1,13 @@
 # SPEC-001 — Phase 3 Binary: Mac Provider Inference CLI
 
-**Version:** 1.9.18 (2026-09-12, Build 1 branch authority alignment)
+**Version:** 1.9.19 (2026-09-21, provider recovery legibility)
+
+**Change log v1.9.19 (2026-09-21, provider recovery legibility):** Adds the
+advisory `buyer_serving_hold_v1` local-status capability and its
+`buyer_serving_hold` field, which reproduces the coordinator's machine-readable
+reason for withholding buyer routing so an operator can diagnose a
+`not_buyer_serving` provider without reading coordinator logs (issue #1616).
+`network_state` and `buyer_serving_authority` remain authoritative.
 
 **Change log v1.9.18 (2026-09-12, Build 1 branch authority alignment):**
 Aligns the current Malibu/CLI catalog-economics consumer contract with
@@ -1207,6 +1214,17 @@ supported version. An absent envelope is the legacy-reader path.
 `buyer_serving_unknown` only when the verdict is indeterminate **and** this
 process has never confirmed `true`. After a confirmed `true`, an indeterminate
 refresh MUST keep `buyer_serving` until an authoritative `false`.
+
+A build advertising `buyer_serving_hold_v1` additionally carries
+`buyer_serving_hold` alongside `network_state`. It reproduces the
+coordinator's own machine-readable reason for withholding buyer routing, as
+returned by `/v1/pool/check?details=readiness`, so a provider operator can see
+why the provider is not serving without reading coordinator logs. It MUST be
+`null` unless `network_state` is `not_buyer_serving`: a verdict held at
+`buyer_serving` through an indeterminate refresh has no live hold to report,
+and the field MUST NOT be synthesised locally. `buyer_serving_hold` is
+advisory diagnostics and carries no buyer-serving authority; `network_state`
+and `buyer_serving_authority` remain the authoritative fields.
 
 The capability names enumerated in this paragraph are only the subset owned by
 this section; a build also advertises other local-status and command capability

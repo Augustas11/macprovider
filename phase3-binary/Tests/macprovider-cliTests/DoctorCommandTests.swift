@@ -26,6 +26,99 @@ final class DoctorCommandTests: XCTestCase {
 
     private static let unreachable: @Sendable (URL) async -> DoctorHealthz? = { _ in nil }
 
+    private static let sampleIdentity = DoctorInstalledIdentity(
+        compatibilitySetID: "Augustas11/macprovider:v1.8.170@" + String(repeating: "a", count: 40),
+        envelopeSHA256: String(repeating: "b", count: 64),
+        releaseVersion: "1.8.170",
+        providerCLIVersion: "1.8.170",
+        catalogReleaseID: "2026-09-19-openrouter-listed-v1",
+        manifestPath: "/Users/op/macprovider/compatibility-set.json"
+    )
+
+    /// Issue #1616 finding B — the hardcoded `binaryVersion` constant every
+    /// build of a compatibility set shares cannot identify an install. Doctor
+    /// must report the signed set identity next to it, and must say plainly
+    /// when there is no signed set rather than implying the constant is the
+    /// identity.
+    func testInstalledIdentityIsReportedAlongsideTheSharedBinaryConstant() async {
+        var withIdentity = runner(binaryVersion: "1.8.123", offline: true, fetch: Self.unreachable)
+        withIdentity.installedIdentity = Self.sampleIdentity
+        let report = await withIdentity.run()
+        XCTAssertEqual(report.binaryVersion, "1.8.123")
+        XCTAssertEqual(report.installedIdentity, Self.sampleIdentity)
+        // The release version differs from the constant — that divergence is
+        // exactly what an operator could not see before.
+        XCTAssertNotEqual(report.installedIdentity?.releaseVersion, report.binaryVersion)
+
+        let withoutIdentity = await runner(binaryVersion: "1.8.123", offline: true, fetch: Self.unreachable).run()
+        XCTAssertNil(withoutIdentity.installedIdentity)
+    }
+
+    func testDoctorJSONCarriesInstalledIdentityAndOmitsItWhenAbsent() async throws {
+        var withIdentity = runner(binaryVersion: "1.8.123", offline: true, fetch: Self.unreachable)
+        withIdentity.installedIdentity = Self.sampleIdentity
+        let present = try Self.capturedJSON(DoctorReportPrinter.emitJSON, await withIdentity.run())
+        XCTAssertEqual(present["compatibility_set_id"] as? String, Self.sampleIdentity.compatibilitySetID)
+        XCTAssertEqual(present["compatibility_set_sha256"] as? String, Self.sampleIdentity.envelopeSHA256)
+        XCTAssertEqual(present["installed_release_version"] as? String, "1.8.170")
+        XCTAssertEqual(present["installed_provider_cli_version"] as? String, "1.8.170")
+        XCTAssertEqual(present["installed_catalog_release_id"] as? String, "2026-09-19-openrouter-listed-v1")
+        XCTAssertEqual(present["compatibility_set_manifest_path"] as? String, Self.sampleIdentity.manifestPath)
+        // binary_version stays exactly as install.sh/package.sh compare it.
+        XCTAssertEqual(present["binary_version"] as? String, "1.8.123")
+
+        let absent = try Self.capturedJSON(
+            DoctorReportPrinter.emitJSON,
+            await runner(binaryVersion: "1.8.123", offline: true, fetch: Self.unreachable).run()
+        )
+        XCTAssertNil(absent["compatibility_set_id"])
+        XCTAssertNil(absent["installed_release_version"])
+    }
+
+    /// Issue #1616 — the reason onboarding last failed must be answerable
+    /// afterwards, not only at the moment it scrolled past on stderr.
+    func testDoctorReportsLastHardwareEvidenceOutcome() async throws {
+        var runner = runner(binaryVersion: "1.8.123", offline: true, fetch: Self.unreachable)
+        runner.hardwareEvidence = HardwareEvidenceOutcome(
+            outcome: "failed",
+            reason: "rate_limited: retry in 420 seconds",
+            recordedAt: "2026-09-19T03:14:00Z"
+        )
+        let json = try Self.capturedJSON(DoctorReportPrinter.emitJSON, await runner.run())
+        XCTAssertEqual(json["hardware_evidence_outcome"] as? String, "failed")
+        XCTAssertEqual(json["hardware_evidence_reason"] as? String, "rate_limited: retry in 420 seconds")
+        XCTAssertEqual(json["hardware_evidence_recorded_at"] as? String, "2026-09-19T03:14:00Z")
+
+        // No record on this host reports nothing rather than a stale or
+        // invented outcome.
+        let absent = try Self.capturedJSON(
+            DoctorReportPrinter.emitJSON,
+            await self.runner(binaryVersion: "1.8.123", offline: true, fetch: Self.unreachable).run()
+        )
+        XCTAssertNil(absent["hardware_evidence_outcome"])
+        XCTAssertNil(absent["hardware_evidence_reason"])
+    }
+
+    /// Captures a printer's stdout so the emitted JSON can be decoded.
+    private static func capturedJSON(
+        _ emit: (DoctorReport) -> Void,
+        _ report: DoctorReport
+    ) throws -> [String: Any] {
+        let pipe = Pipe()
+        let savedStdout = dup(STDOUT_FILENO)
+        defer { close(savedStdout) }
+        dup2(pipe.fileHandleForWriting.fileDescriptor, STDOUT_FILENO)
+        emit(report)
+        fflush(stdout)
+        dup2(savedStdout, STDOUT_FILENO)
+        try pipe.fileHandleForWriting.close()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw XCTSkip("doctor JSON was not a JSON object")
+        }
+        return object
+    }
+
     private static let reportNow = Date(timeIntervalSince1970: 1_786_000_000)
 
     // MARK: - endpoint derivation

@@ -7337,6 +7337,26 @@ begin_install_transaction() {
   if [ "$INSTALL_TX_HAD_INSTALL_DIR" -eq 1 ] || [ "$INSTALL_TX_HAD_BINARY_PATH" -eq 1 ] || [ "$INSTALL_TX_HAD_MANIFEST" -eq 1 ]; then
     EXISTING_INSTALL_WAS_PRESENT=1
   fi
+  # #1616 finding E: release registrations whose plist file is gone BEFORE
+  # probing, so a partial prior state is repaired rather than dying 70. Each
+  # call is a no-op unless the plist is absent and the loaded job proves it is
+  # ours; anything it cannot repair still trips the fail-closed guards below.
+  dangling_repair_incumbent=""
+  if headless_acceptance_repair_mode; then
+    dangling_repair_incumbent="${HEADLESS_REPAIR_INCUMBENT_BINARY:-}"
+  fi
+  release_dangling_launchd_registration \
+    "$PROVIDER_LABEL" "$PLIST_PATH" "$PLIST_BOOTSTRAP_PATH" \
+    "$INSTALL_DIR/macprovider-cli" "$BINARY_PATH" "$dangling_repair_incumbent"
+  release_dangling_launchd_registration \
+    "$LEGACY_PROVIDER_LABEL" "$LEGACY_PLIST_PATH" "$LEGACY_PLIST_BOOTSTRAP_PATH" \
+    "$INSTALL_DIR/macprovider-cli" "$BINARY_PATH"
+  release_dangling_launchd_registration \
+    "$WATCHDOG_LABEL" "$WATCHDOG_PLIST_PATH" "$WATCHDOG_PLIST_BOOTSTRAP_PATH" \
+    "${WATCHDOG_BOOTSTRAP_PATH:-$WATCHDOG_PATH}" "$WATCHDOG_DIR/watchdog.sh"
+  release_dangling_launchd_registration \
+    "$LEGACY_WATCHDOG_LABEL" "$LEGACY_WATCHDOG_PLIST_PATH" "$LEGACY_WATCHDOG_PLIST_BOOTSTRAP_PATH" \
+    "${WATCHDOG_BOOTSTRAP_PATH:-$WATCHDOG_PATH}" "$WATCHDOG_DIR/watchdog.sh"
   if launchctl_service print "$LAUNCHD_DOMAIN/$PROVIDER_LABEL" >/dev/null 2>&1; then
     INSTALL_TX_SERVICE_WAS_ACTIVE=1
   fi
@@ -8737,6 +8757,85 @@ ensure_port_free() {
 }
 
 # Reclaim by launchd service target rather than plist path. A standalone
+# Issue #1616 finding E — a prior uninstall, or a hand-edited install, can
+# leave a launchd job registered under a managed label whose plist file is
+# gone. `begin_install_transaction` then finds a loaded service with no plist
+# to snapshot, correctly refuses to enter a transaction it could never roll
+# back, and reinstall dies 70 until an operator runs `launchctl bootout` by
+# hand. That is the partial state reinstall should repair itself.
+#
+# The guard is NOT relaxed: entering an unrecoverable transaction stays
+# forbidden. Instead the unrecoverable condition is removed beforehand. A
+# registration whose plist file does not exist preserves nothing restorable,
+# so unloading it strictly improves the pre-install state rather than
+# discarding recoverable state.
+#
+# It is only ever done when the loaded job proves it is ours, using the same
+# bounded identity checks as reclaim_launchd_service: launchd must report
+# exactly one plist path equal to the managed path just found absent, and
+# exactly one program, which must be an executable this installer emits.
+# Ambiguous, foreign, or still-loaded-after-bootout all fall through to the
+# existing fail-closed die 70 rather than being repaired.
+release_dangling_launchd_registration() {
+  local label="$1"
+  local plist_file="$2"
+  local expected_launchd_path="$3"
+  local expected_program="$4"
+  local legacy_program="$5"
+  local repair_program="${6:-}"
+  local service_target="$LAUNCHD_DOMAIN/$label"
+
+  # A plist on disk means the normal snapshot/reclaim path owns this label.
+  # Spelled as an `if` rather than `[ ... ] && return 0`: under `set -e` the
+  # AND-list form would make a present plist look like a failing command.
+  if [ -e "$plist_file" ]; then
+    return 0
+  fi
+
+  local service_details
+  local print_rc=0
+  service_details="$(launchctl_service print "$service_target" 2>/dev/null | head -c 65537)" || print_rc=$?
+  if [ "$print_rc" -ne 0 ]; then
+    # Not loaded: nothing dangling, nothing to repair.
+    return 0
+  fi
+  [ -n "$service_details" ] || return 0
+  if [ "${#service_details}" -gt 65536 ]; then
+    log "Not repairing dangling $label registration: launchd identity exceeded the inspection limit."
+    return 0
+  fi
+
+  local program_count plist_path_count program_line plist_path
+  program_count="$(printf '%s\n' "$service_details" | awk '/^[[:space:]]*program = / { count++ } END { print count + 0 }')"
+  plist_path_count="$(printf '%s\n' "$service_details" | awk '/^[[:space:]]*path = / { count++ } END { print count + 0 }')"
+  if [ "$program_count" -ne 1 ] || [ "$plist_path_count" -ne 1 ]; then
+    log "Not repairing dangling $label registration: launchd returned an ambiguous identity."
+    return 0
+  fi
+  program_line="$(printf '%s\n' "$service_details" | sed -n 's/^[[:space:]]*program = //p' | head -n 1)"
+  plist_path="$(printf '%s\n' "$service_details" | sed -n 's/^[[:space:]]*path = //p' | head -n 1)"
+  if [ "$plist_path" != "$expected_launchd_path" ]; then
+    log "Not repairing dangling $label registration: unexpected plist identity ${plist_path:-<missing>}"
+    return 0
+  fi
+  if [ "$program_line" != "$expected_program" ] \
+    && [ "$program_line" != "$legacy_program" ] \
+    && { [ -z "$repair_program" ] || [ "$program_line" != "$repair_program" ]; }; then
+    log "Not repairing dangling $label registration: unexpected executable $program_line"
+    return 0
+  fi
+
+  log "Repairing dangling $label launchd registration: its plist $plist_file is absent, so it cannot be snapshotted or restored."
+  launchctl_service bootout "$service_target" >/dev/null 2>&1 || true
+  if launchctl_service print "$service_target" >/dev/null 2>&1; then
+    # Still loaded. Say so, and let the existing transaction guard fail closed.
+    log "Dangling $label registration survived bootout; install will not enter an unrecoverable transaction."
+    return 0
+  fi
+  log "Dangling $label launchd registration released."
+  return 0
+}
+
 # install and Malibu share the provider label, so an older loaded job can
 # continue to own the label even after its plist path has been replaced.
 # A label-wide bootout is only allowed inside a durable install transaction

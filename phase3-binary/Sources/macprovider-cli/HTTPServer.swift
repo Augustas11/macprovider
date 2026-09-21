@@ -216,6 +216,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
     static let localStatusMinimumReaderVersion = 1
     static let localStatusCapabilities = [
         "buyer_serving_authority_v1",
+        "buyer_serving_hold_v1",
         "catalog_status_v1",
         "compatibility_set_v1",
         "credential_status_v1",
@@ -459,7 +460,12 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
             let credentialStatus = await credentialStatusRuntime.snapshot()
             let admissionIdentityStatus = await admissionIdentityStatusRuntime.snapshot()
             let checkedAssignedID = snapshot.coordinatorAssignedID
-            async let latestBuyerServing = CoordinatorReadinessClient.fetch(
+            // #1616: fetchReadiness keeps the coordinator's machine-readable
+            // reason for buyer_serving:false. `fetch` projects it away to a
+            // bare Bool?, which is why local status could only ever say
+            // "not_buyer_serving" and never why — forcing operators to SSH the
+            // coordinator for a reason the CLI had already been told.
+            async let latestReadiness = CoordinatorReadinessClient.fetchReadiness(
                 coordinatorURL: coordinatorURL,
                 providerID: providerID,
                 assignedID: checkedAssignedID
@@ -467,10 +473,22 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
             let runtimeSnapshot = warmSwapEnabled ? await modelRuntime.currentSnapshot() : nil
             let telemetryMatchesRuntime = runtimeSnapshot.map { $0.specDecodeGeneration == snapshot.specDecodeGeneration } ?? true
             let telemetryRuntimeEligible = runtimeSnapshot.map { $0.state == .ready && $0.hasTargetCompatibleDraft } ?? true
+            let readiness = await latestReadiness
+            // The hold-through state machine is unchanged: it still consumes
+            // the same three-valued verdict it always did.
             let coordinatorBuyerServing = await providerStatus.applyCoordinatorBuyerServing(
-                await latestBuyerServing,
+                readiness.buyerServing,
                 forAssignedID: checkedAssignedID
             )
+            // Only report a hold when the resolved verdict is an authoritative
+            // not-serving. A verdict held true through an indeterminate probe
+            // has no live hold to report.
+            let buyerServingHold: CoordinatorReadinessClient.BuyerServingHold?
+            if coordinatorBuyerServing == false, case .notServing(let hold) = readiness {
+                buyerServingHold = hold
+            } else {
+                buyerServingHold = nil
+            }
             writer.writeJSON(
                 status: .ok,
                 body: Self.statusResponse(
@@ -482,6 +500,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                     specDecodeTelemetryRuntimeEligible: telemetryRuntimeEligible,
                     catalogStatus: catalogStatus,
                     coordinatorBuyerServing: coordinatorBuyerServing,
+                    coordinatorBuyerServingHold: buyerServingHold,
                     credentialStatus: credentialStatus,
                     admissionIdentityStatus: admissionIdentityStatus,
                     lifecycleStateInspection: lifecycleStateStore.inspect(),
@@ -1547,6 +1566,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         specDecodeTelemetryRuntimeEligible: Bool = true,
         catalogStatus: ProviderCatalogStatusContext? = nil,
         coordinatorBuyerServing: Bool? = nil,
+        coordinatorBuyerServingHold: CoordinatorReadinessClient.BuyerServingHold? = nil,
         credentialStatus: ProviderCredentialStatus = .unconfigured,
         admissionIdentityStatus: ProviderAdmissionIdentityStatusContext? = nil,
         lifecycleStateInspection: ProviderLifecycleStateInspection = .missing,
@@ -1706,6 +1726,10 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                 networkState = trustState
             }
             body["network_state"] = networkState
+            // #1616 finding: the coordinator's own reason for withholding buyer
+            // routing, so `doctor`/`status` can answer "why am I not serving"
+            // without an operator reading coordinator logs.
+            body["buyer_serving_hold"] = jsonNullable(coordinatorBuyerServingHold?.rawValue)
             body["buyer_serving_authority"] = coordinatorBuyerServing == nil ? "unknown" : "coordinator"
             body["catalog"] = [
                 "state": trustState,

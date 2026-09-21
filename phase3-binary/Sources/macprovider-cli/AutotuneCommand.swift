@@ -1062,6 +1062,10 @@ struct AutotuneCommand: AsyncParsableCommand {
                 result: result,
                 benchmarks: request.benchmarks
             )
+            // #1616: the outcome below is printed once to stderr and lost. An
+            // operator recovering a box hours later needs to be able to ask
+            // what happened, so leave a durable local breadcrumb for `doctor`.
+            HardwareEvidenceOutcomeStore.record(submission)
             if let reason = Self.requiredHardwareEvidenceBlockReason(
                 submission: submission,
                 required: requireHardwareEvidence
@@ -1775,7 +1779,10 @@ struct AutotuneCommand: AsyncParsableCommand {
                 storedEvidence: storedEvidence,
                 submitEnabled: submitHardwareEvidence,
                 submit: { evidence in
-                    await AutotuneHardwareEvidenceSubmitter(config: resolvedConfig).submit(snapshot: evidence)
+                    let submission = await AutotuneHardwareEvidenceSubmitter(config: resolvedConfig)
+                        .submit(snapshot: evidence)
+                    HardwareEvidenceOutcomeStore.record(submission)
+                    return submission
                 }
             )
             switch evidenceOutcome {
