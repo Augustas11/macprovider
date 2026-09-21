@@ -43,6 +43,7 @@ class SpecPRDeclarationTests(unittest.TestCase):
             "AGENTS.md",
             "beta/DECISION_CRITERIA.md",
             "CLAUDE.md",
+            ".cursor/rules/**",
             "docs/spec-governance-foundation.md",
             "docs/spec-history/**",
             "schemas/spec-*",
@@ -84,6 +85,10 @@ class SpecPRDeclarationTests(unittest.TestCase):
                 changed_paths=[
                     "AGENTS.md",
                     "CLAUDE.md",
+                    ".cursor/rules/lab-campaign-loop.mdc",
+                    ".gitignore",
+                    "docs/runbooks/lab-campaign-loop.md",
+                    "docs/releases/cli-release-train.md",
                 ],
             ),
         )

@@ -1,0 +1,39 @@
+---
+description: Studio/hardware e2e uses one draft campaign PR and a local CLI build; do not merge-cut-retest per slice
+alwaysApply: true
+---
+
+# Lab campaign loop (Studio / real-hardware e2e)
+
+When the next fact comes from a real Mac (Studio, Mini, provider box) — continuous
+batching, KV survival, tool-call/streaming UX, TTFT, prefix cache, leftover
+markup, or any other runtime proof — follow
+`docs/runbooks/lab-campaign-loop.md`. Do **not** use the Pearl serial-ship loop.
+
+## Forbidden
+
+- Slice → three-lane audit → PR → wait CI → merge → cut signed CLI → install →
+  e2e → new branch. That wait loop is a house failure.
+- Fresh worktree from `origin/main` after every Studio finding.
+- Auto-merge a campaign because CI is green while lab e2e is unrun or red.
+- Cut a signed CLI because a CLI-row PR merged. Cut once after lab PASS (Loop
+  B), or when the operator asks.
+- Swap `live.malibu.provider` / buyer-serving 8080 with a worktree binary.
+- Flip buyer flags (`continuous_batching`, fleet `kv_disk_cache`, sticky, slots)
+  from a lab PASS.
+
+## Required
+
+1. One campaign = one worktree = one branch = one **draft** PR. Further e2e
+   findings are commits on that PR, not a new task/branch.
+2. `swift build -c release --product macprovider-cli` on the Studio from that
+   branch. Isolated loopback (`127.0.0.1`, not live 8080) unless the operator
+   named a live canary.
+3. Three-lane `omc ask codex` audit **once** on the freeze diff after lab e2e
+   PASSes. Not per commit.
+4. Mark ready, then one squash-merge. Then **one** signed candidate for
+   packaged confirmation / enable gates.
+5. A worktree binary is valid lab evidence. It is not an enable path.
+
+Pearl catalog T0 (#608 → #609), money-path billing/auth/receipts, fleet
+promote, and buyer canary enable stay on their existing serial gates.

@@ -303,10 +303,14 @@ That is SPEC-038/039 + a new codec ID (SPEC-037 §8).
 - CONFORMANCE row flips to `conformant`
 - Changing serve cache allocation / `newCache` / ModelRuntime except a
   **blocker fix** that smoke proves is still the Entry-199 no-op on this
-  packaged binary. If you must fix code: new worktree, flag stays default-off,
-  three-lane 0 C/H/M, then re-run smoke + 30-cycle on a **new packaged
-  candidate** — a worktree binary is not evidence. Prefer reporting the
-  blocker over shipping an unpackaged fix and calling KVS-01a green.
+  packaged binary. If you must fix code: stay on **one** campaign PR
+  (`docs/runbooks/lab-campaign-loop.md`). Iterate with a local
+  `swift build -c release` on isolated 18080. Flag stays default-off. Do
+  not merge-cut-retest per blocker. When local smoke + 30-cycle PASS, one
+  freeze audit, one merge, one packaged candidate — then re-run the
+  packaged confirmation. That packaged run is the KVS-01a evidence; a
+  worktree binary is not. Prefer reporting the blocker over calling
+  KVS-01a green on an unpackaged fix.
 
 ---
 

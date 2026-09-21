@@ -1,0 +1,32 @@
+---
+description: Serial Pearl #608/#609 — ship on 0C/0H/0M audits; do not wait for user OK
+alwaysApply: true
+---
+
+# Autonomous serial Pearl catalog chain
+
+For the ordered T0 Pearl/catalog path (#608 Llama → ledger → promote → dual-file → #609 enforce):
+
+**Do not gate merges or Pearl apply steps on user confirmation.**
+
+Ship rule (house audit loop):
+
+1. Implement the current step in a fresh worktree from `origin/main`
+2. Run three Codex audit lanes via `omc ask codex` (subscription CLI, not Cursor Task): **code**, **security**, **architect**
+3. Fix until **0 CRITICAL, 0 HIGH, 0 MEDIUM** (LOW/INFO may carry explicitly)
+4. Green CI → approve (antfleet-ops) → squash-merge (Augustas11)
+5. Sync canonical `main` to `origin/main`, then `git worktree remove --force` the
+   finished sibling checkout (that deletes the directory), `worktree prune`, and
+   `git branch -D` the squash-merged local branch
+6. Immediately start the next serial step from a **new** worktree on `origin/main`
+
+Pearl production mutations that are part of a sealed step proceed under the same bar (audits + evidence), without pausing for "OK to apply?"
+
+**Scope fence:** this loop is only the ordered T0 Pearl/catalog path above.
+Do **not** apply it to Mac Studio hardware campaigns, CLI runtime iteration,
+or e2e-driven feature work (continuous batching, KV survival, tool-call UX,
+TTFT). Those use `docs/runbooks/lab-campaign-loop.md` and
+`.cursor/rules/lab-campaign-loop.mdc`: one draft PR, local Studio CLI build,
+audit once at freeze.
+
+Still forbidden: canary enable, unrelated parallel T0/T1 launches, d-inference source inspection.

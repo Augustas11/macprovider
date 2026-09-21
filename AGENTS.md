@@ -102,6 +102,16 @@ cd ../macprovider-<topic>
 Use one branch per task. Before pushing or opening a PR, verify
 `git log origin/main..HEAD` contains only the current task.
 
+A **hardware campaign** (Studio / real-Mac e2e) is one task: one draft PR,
+local `swift build -c release` on the box, isolated loopback, iterate by
+commit, audit once at freeze, merge once, then one signed CLI cut. Do not
+open a new PR per e2e finding. Runbook:
+`docs/runbooks/lab-campaign-loop.md`. Cursor rule:
+`.cursor/rules/lab-campaign-loop.mdc`. The Pearl serial-ship rule does
+**not** apply to these campaigns. Auto-merge-when-CI-green does **not**
+apply until the campaign PR is ready and the lab e2e listed in its body
+PASSed.
+
 Money-path, auth, gateway, coordinator, release, CI, schema, and executable
 changes go through PR review. Docs-only narrative changes may go direct to
 `main` only when the working tree is clean, local `main` exactly mirrors

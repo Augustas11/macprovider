@@ -233,8 +233,13 @@ combined candidate**.
 
 ## Session protocol
 
+- **Lab campaigns** (Studio / real-Mac e2e): do **not** cut a candidate because
+  a CLI-row PR merged. Iterate on a draft campaign PR with a local
+  `swift build -c release` on the box. Cut **one** candidate after that
+  campaign lands, or when the operator asks. Runbook:
+  `docs/runbooks/lab-campaign-loop.md`.
 - Merge a CLI change, cut a candidate, or run an e2e track → update this file
-  in the same PR/commit.
+  in the same PR/commit. A merged CLI row is not by itself a cut trigger.
 - Republish `get.malibu.tech/install.sh` from `main` or from a tag → update
   this file the same day (date, SHA-256, whether parity vs current stable is
   expected red).

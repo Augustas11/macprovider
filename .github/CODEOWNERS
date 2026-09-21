@@ -12,6 +12,7 @@ phase5-gateway/internal/auth/** @Augustas11
 .github/workflows/spec-index.yml @Augustas11
 AGENTS.md @Augustas11
 CLAUDE.md @Augustas11
+.cursor/rules/** @Augustas11
 Makefile @Augustas11
 
 # SPEC governance controls are one review boundary; weakening code and its
