@@ -7351,12 +7351,16 @@ begin_install_transaction() {
   release_dangling_launchd_registration \
     "$LEGACY_PROVIDER_LABEL" "$LEGACY_PLIST_PATH" "$LEGACY_PLIST_BOOTSTRAP_PATH" \
     "$INSTALL_DIR/macprovider-cli" "$BINARY_PATH"
+  # The watchdog tuples must accept all three programs the snapshot/reclaim
+  # paths accept (install.sh stage_install_tx_plist call sites): the root
+  # bootstrap path, $WATCHDOG_PATH, and the watchdog.sh entrypoint. Omitting
+  # $WATCHDOG_PATH would leave a headless dangling watchdog unrepaired.
   release_dangling_launchd_registration \
     "$WATCHDOG_LABEL" "$WATCHDOG_PLIST_PATH" "$WATCHDOG_PLIST_BOOTSTRAP_PATH" \
-    "${WATCHDOG_BOOTSTRAP_PATH:-$WATCHDOG_PATH}" "$WATCHDOG_DIR/watchdog.sh"
+    "${WATCHDOG_BOOTSTRAP_PATH:-$WATCHDOG_PATH}" "$WATCHDOG_DIR/watchdog.sh" "$WATCHDOG_PATH"
   release_dangling_launchd_registration \
     "$LEGACY_WATCHDOG_LABEL" "$LEGACY_WATCHDOG_PLIST_PATH" "$LEGACY_WATCHDOG_PLIST_BOOTSTRAP_PATH" \
-    "${WATCHDOG_BOOTSTRAP_PATH:-$WATCHDOG_PATH}" "$WATCHDOG_DIR/watchdog.sh"
+    "${WATCHDOG_BOOTSTRAP_PATH:-$WATCHDOG_PATH}" "$WATCHDOG_DIR/watchdog.sh" "$WATCHDOG_PATH"
   if launchctl_service print "$LAUNCHD_DOMAIN/$PROVIDER_LABEL" >/dev/null 2>&1; then
     INSTALL_TX_SERVICE_WAS_ACTIVE=1
   fi
@@ -8782,7 +8786,9 @@ release_dangling_launchd_registration() {
   local expected_launchd_path="$3"
   local expected_program="$4"
   local legacy_program="$5"
-  local repair_program="${6:-}"
+  # A third accepted executable: the headless repair incumbent for the provider
+  # label, or $WATCHDOG_PATH for the watchdog labels. Empty means "no third".
+  local alternate_program="${6:-}"
   local service_target="$LAUNCHD_DOMAIN/$label"
 
   # A plist on disk means the normal snapshot/reclaim path owns this label.
@@ -8820,7 +8826,7 @@ release_dangling_launchd_registration() {
   fi
   if [ "$program_line" != "$expected_program" ] \
     && [ "$program_line" != "$legacy_program" ] \
-    && { [ -z "$repair_program" ] || [ "$program_line" != "$repair_program" ]; }; then
+    && { [ -z "$alternate_program" ] || [ "$program_line" != "$alternate_program" ]; }; then
     log "Not repairing dangling $label registration: unexpected executable $program_line"
     return 0
   fi

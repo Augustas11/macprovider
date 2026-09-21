@@ -48,8 +48,8 @@ case "${1:-}" in
     if [ ! -f "$LAUNCHD_STATE" ]; then
       exit 1
     fi
-    printf 'gui/%s/live.malibu.provider = {\n  program = %s\n  path = %s\n}\n' \
-      "$(id -u)" "$PRINTED_PROGRAM" "$PRINTED_PLIST_PATH"
+    printf 'gui/%s/%s = {\n  program = %s\n  path = %s\n}\n' \
+      "$(id -u)" "${2##*/}" "$PRINTED_PROGRAM" "$PRINTED_PLIST_PATH"
     ;;
   bootout)
     printf '%s\n' "$*" >> "$LAUNCHD_LOG"
@@ -157,5 +157,88 @@ reset_state
 touch "$TMP/launchd-state"
 BOOTOUT_FAIL=1 run_release
 [ -f "$TMP/launchd-state" ] || { echo "FAIL: service vanished despite bootout failure" >&2; exit 1; }
+
+# 7. Watchdog tuple — the repair must accept every executable the transaction
+#    snapshot/reclaim paths accept for the watchdog labels, including
+#    $WATCHDOG_PATH. Omitting it left a headless dangling watchdog unrepaired.
+WATCHDOG_PLIST_PATH="$TMP/home/Library/LaunchAgents/live.malibu.provider-watchdog.plist"
+WATCHDOG_DIR="$TMP/home/.local/share/macprovider-watchdog"
+WATCHDOG_PATH="$WATCHDOG_DIR/macprovider-health-monitor"
+WATCHDOG_BOOTSTRAP_PATH="/Library/Application Support/macprovider/macprovider-health-monitor"
+
+run_release_watchdog() {
+  LAUNCHD_LOG="$TMP/launchd.log"
+  FUNCTION_PATH="$TMP/functions.sh" \
+    PATH="$TMP/bin:$PATH" \
+    SUDO_BIN="$TMP/bin/sudo" \
+    LAUNCHCTL_BIN="$TMP/bin/launchctl" \
+    LAUNCHD_DOMAIN="gui/$UID" \
+    HEADLESS=0 \
+    HEADLESS_USER="" \
+    LAUNCHD_STATE="$TMP/launchd-state" \
+    LAUNCHD_LOG="$LAUNCHD_LOG" \
+    PRINTED_PROGRAM="${PRINTED_PROGRAM:-$WATCHDOG_BOOTSTRAP_PATH}" \
+    PRINTED_PLIST_PATH="${PRINTED_PLIST_PATH:-$WATCHDOG_PLIST_PATH}" \
+    BOOTOUT_FAIL=0 \
+    WATCHDOG_PLIST_PATH="$WATCHDOG_PLIST_PATH" \
+    WATCHDOG_DIR="$WATCHDOG_DIR" \
+    WATCHDOG_PATH="$WATCHDOG_PATH" \
+    WATCHDOG_BOOTSTRAP_PATH="$WATCHDOG_BOOTSTRAP_PATH" \
+    bash -c '
+      set -euo pipefail
+      log() { printf "%s\n" "$*" >> "$LAUNCHD_LOG.log"; }
+      run() { "$@"; }
+      source "$FUNCTION_PATH"
+      release_dangling_launchd_registration \
+        "live.malibu.provider-watchdog" "$WATCHDOG_PLIST_PATH" "$WATCHDOG_PLIST_PATH" \
+        "$WATCHDOG_BOOTSTRAP_PATH" "$WATCHDOG_DIR/watchdog.sh" "$WATCHDOG_PATH"
+    '
+}
+
+for watchdog_program in \
+  "$WATCHDOG_BOOTSTRAP_PATH" \
+  "$WATCHDOG_DIR/watchdog.sh" \
+  "$WATCHDOG_PATH"; do
+  reset_state
+  touch "$TMP/launchd-state"
+  PRINTED_PROGRAM="$watchdog_program" run_release_watchdog
+  grep -Fx "bootout gui/$(id -u)/live.malibu.provider-watchdog" "$TMP/launchd.log" >/dev/null \
+    || { echo "FAIL: dangling watchdog on $watchdog_program was not repaired" >&2; exit 1; }
+done
+
+# A foreign watchdog executable is still refused.
+reset_state
+touch "$TMP/launchd-state"
+PRINTED_PROGRAM="/opt/other/health-monitor" run_release_watchdog
+[ ! -s "$TMP/launchd.log" ] || { echo "FAIL: booted out a foreign watchdog" >&2; exit 1; }
+[ -f "$TMP/launchd-state" ] || { echo "FAIL: foreign watchdog was unloaded" >&2; exit 1; }
+
+# 8. Call-site tuple. The cases above drive the helper directly, so they pass
+#    whatever tuple they are handed — they cannot catch the real defect, which
+#    was `begin_install_transaction` passing an INCOMPLETE tuple. Assert on the
+#    call sites themselves: both watchdog labels must offer $WATCHDOG_PATH as
+#    the third accepted executable, matching what the transaction snapshot and
+#    reclaim paths accept.
+watchdog_call_sites="$(
+  awk '/^  release_dangling_launchd_registration \\$/ { collecting = 1; block = ""; }
+       collecting { block = block $0 "\n" }
+       collecting && !/\\$/ {
+         collecting = 0
+         if (block ~ /WATCHDOG_LABEL/) { printf "%s", block }
+       }' "$INSTALL_SH"
+)"
+watchdog_call_site_count="$(printf '%s' "$watchdog_call_sites" | grep -c 'release_dangling_launchd_registration' || true)"
+[ "$watchdog_call_site_count" -eq 2 ] || {
+  echo "FAIL: expected 2 watchdog dangling-repair call sites, found $watchdog_call_site_count" >&2
+  exit 1
+}
+printf '%s' "$watchdog_call_sites" | grep -c '"\$WATCHDOG_PATH"$' >/dev/null || {
+  echo "FAIL: watchdog dangling-repair call sites do not accept \$WATCHDOG_PATH" >&2
+  exit 1
+}
+[ "$(printf '%s' "$watchdog_call_sites" | grep -c '"\$WATCHDOG_PATH"$')" -eq 2 ] || {
+  echo "FAIL: both watchdog call sites must accept \$WATCHDOG_PATH" >&2
+  exit 1
+}
 
 echo "install_dangling_launchd_repair: OK"

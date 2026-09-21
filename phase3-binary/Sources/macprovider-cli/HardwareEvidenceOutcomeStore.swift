@@ -109,7 +109,10 @@ enum HardwareEvidenceOutcomeStore {
         guard fstat(fd, &st) == 0,
               (st.st_mode & S_IFMT) == S_IFREG,
               st.st_uid == getuid(),
-              (st.st_mode & 0o022) == 0,
+              // Exactly 0600, not merely "not group/world-writable": a record
+              // this process wrote is always 0600, so anything looser was
+              // created or altered by something else and is not trusted.
+              (st.st_mode & 0o777) == 0o600,
               st.st_size <= 8192
         else {
             try? handle.close()
@@ -137,7 +140,13 @@ enum HardwareEvidenceOutcomeStore {
             try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
             guard lstat(parent.path, &st) == 0 else { throw StoreError.ioFailure }
         }
-        guard (st.st_mode & S_IFMT) == S_IFDIR, st.st_uid == getuid() else {
+        guard (st.st_mode & S_IFMT) == S_IFDIR,
+              st.st_uid == getuid(),
+              // A group- or world-writable parent lets another user replace
+              // the record between write and read, so refuse it rather than
+              // trusting the file's own mode alone.
+              (st.st_mode & 0o022) == 0
+        else {
             throw StoreError.unsafePath
         }
     }
@@ -179,5 +188,13 @@ enum HardwareEvidenceOutcomeStore {
         guard close(fd) == 0 else { throw StoreError.ioFailure }
         closed = true
         guard rename(temporary.path, url.path) == 0 else { throw StoreError.ioFailure }
+        // fsync the directory too: without it the rename itself can be lost on
+        // a crash, leaving no record even though the data was synced.
+        let parent = url.deletingLastPathComponent()
+        let dirFD = parent.path.withCString { open($0, O_RDONLY | O_DIRECTORY | O_NOFOLLOW) }
+        if dirFD >= 0 {
+            _ = fsync(dirFD)
+            close(dirFD)
+        }
     }
 }

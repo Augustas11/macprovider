@@ -118,8 +118,20 @@ struct AutotuneHardwareEvidenceSubmitter {
                 retryAfterHeader: http.value(forHTTPHeaderField: "Retry-After")
             ))
         } catch {
-            return .failed("\(error)")
+            return .failed(Self.transportFailureReason(error))
         }
+    }
+
+    /// A transport error's description can embed the failing URL, and a URL can
+    /// embed userinfo. The endpoint builder already refuses a coordinator_url
+    /// with credentials, so this is defence in depth for anything else URLError
+    /// chooses to interpolate: report the stable error identity, never the
+    /// interpolated description (#1616 — this string is persisted and printed).
+    static func transportFailureReason(_ error: Error) -> String {
+        guard let urlError = error as? URLError else {
+            return "transport error (\(type(of: error)))"
+        }
+        return "transport error (URLError code \(urlError.errorCode))"
     }
 
     static func failureReason(statusCode: Int, responseData: Data, retryAfterHeader: String?) -> String {
@@ -194,6 +206,11 @@ struct AutotuneHardwareEvidenceSubmitter {
 
     static func hardwareEvidenceEndpoint(from raw: String) -> URL? {
         guard var components = URLComponents(string: raw) else { return nil }
+        // Match every other coordinator URL builder (CoordinatorReadinessClient,
+        // DoctorRunner.healthzURL): a coordinator_url carrying userinfo is
+        // refused outright rather than silently used. Credentials in a URL
+        // reach transport error descriptions, which #1616 now persists.
+        guard components.user == nil, components.password == nil else { return nil }
         switch components.scheme?.lowercased() {
         case "wss":
             components.scheme = "https"

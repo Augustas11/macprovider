@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import Darwin
 import ArgumentParser
@@ -54,10 +55,10 @@ final class DoctorCommandTests: XCTestCase {
         XCTAssertNil(withoutIdentity.installedIdentity)
     }
 
-    func testDoctorJSONCarriesInstalledIdentityAndOmitsItWhenAbsent() async throws {
+    func testDoctorJSONCarriesInstalledIdentityAndOmitsItWhenAbsent() async {
         var withIdentity = runner(binaryVersion: "1.8.123", offline: true, fetch: Self.unreachable)
         withIdentity.installedIdentity = Self.sampleIdentity
-        let present = try Self.capturedJSON(DoctorReportPrinter.emitJSON, await withIdentity.run())
+        let present = DoctorReportPrinter.jsonPayload(await withIdentity.run())
         XCTAssertEqual(present["compatibility_set_id"] as? String, Self.sampleIdentity.compatibilitySetID)
         XCTAssertEqual(present["compatibility_set_sha256"] as? String, Self.sampleIdentity.envelopeSHA256)
         XCTAssertEqual(present["installed_release_version"] as? String, "1.8.170")
@@ -67,8 +68,7 @@ final class DoctorCommandTests: XCTestCase {
         // binary_version stays exactly as install.sh/package.sh compare it.
         XCTAssertEqual(present["binary_version"] as? String, "1.8.123")
 
-        let absent = try Self.capturedJSON(
-            DoctorReportPrinter.emitJSON,
+        let absent = DoctorReportPrinter.jsonPayload(
             await runner(binaryVersion: "1.8.123", offline: true, fetch: Self.unreachable).run()
         )
         XCTAssertNil(absent["compatibility_set_id"])
@@ -77,49 +77,133 @@ final class DoctorCommandTests: XCTestCase {
 
     /// Issue #1616 — the reason onboarding last failed must be answerable
     /// afterwards, not only at the moment it scrolled past on stderr.
-    func testDoctorReportsLastHardwareEvidenceOutcome() async throws {
+    func testDoctorReportsLastHardwareEvidenceOutcome() async {
         var runner = runner(binaryVersion: "1.8.123", offline: true, fetch: Self.unreachable)
         runner.hardwareEvidence = HardwareEvidenceOutcome(
             outcome: "failed",
             reason: "rate_limited: retry in 420 seconds",
             recordedAt: "2026-09-19T03:14:00Z"
         )
-        let json = try Self.capturedJSON(DoctorReportPrinter.emitJSON, await runner.run())
+        let json = DoctorReportPrinter.jsonPayload(await runner.run())
         XCTAssertEqual(json["hardware_evidence_outcome"] as? String, "failed")
         XCTAssertEqual(json["hardware_evidence_reason"] as? String, "rate_limited: retry in 420 seconds")
         XCTAssertEqual(json["hardware_evidence_recorded_at"] as? String, "2026-09-19T03:14:00Z")
 
         // No record on this host reports nothing rather than a stale or
         // invented outcome.
-        let absent = try Self.capturedJSON(
-            DoctorReportPrinter.emitJSON,
+        let absent = DoctorReportPrinter.jsonPayload(
             await self.runner(binaryVersion: "1.8.123", offline: true, fetch: Self.unreachable).run()
         )
         XCTAssertNil(absent["hardware_evidence_outcome"])
         XCTAssertNil(absent["hardware_evidence_reason"])
     }
 
-    /// Captures a printer's stdout so the emitted JSON can be decoded.
-    private static func capturedJSON(
-        _ emit: (DoctorReport) -> Void,
-        _ report: DoctorReport
-    ) throws -> [String: Any] {
-        let pipe = Pipe()
-        let savedStdout = dup(STDOUT_FILENO)
-        defer { close(savedStdout) }
-        dup2(pipe.fileHandleForWriting.fileDescriptor, STDOUT_FILENO)
-        emit(report)
-        fflush(stdout)
-        dup2(savedStdout, STDOUT_FILENO)
-        try pipe.fileHandleForWriting.close()
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            throw XCTSkip("doctor JSON was not a JSON object")
-        }
-        return object
+    private static let reportNow = Date(timeIntervalSince1970: 1_786_000_000)
+
+    // MARK: - installed identity resolution (#1616 finding B)
+
+    /// R2 code-review MEDIUM — the identity tests above inject a
+    /// `DoctorInstalledIdentity`, so they cannot catch a resolver that returns
+    /// nil, picks the wrong candidate, or names the wrong manifest file. These
+    /// drive the resolver itself against real signed fixtures.
+    func testResolverReadsTheSignedSetBesideTheCanonicalBinary() throws {
+        let fixture = try CompatibilityManifestFixture()
+        let binary = fixture.root.appendingPathComponent("macprovider-cli")
+        try Data("binary".utf8).write(to: binary)
+
+        let identity = try XCTUnwrap(DoctorRunner.resolveInstalledIdentity(
+            launchedExecutableURL: nil,
+            canonicalBinaryURL: binary,
+            publicKeyPEM: fixture.privateKey.publicKey.pemRepresentation
+        ))
+        XCTAssertEqual(identity.compatibilitySetID, fixture.compatibilitySetID)
+        XCTAssertEqual(identity.releaseVersion, fixture.version)
+        XCTAssertEqual(identity.providerCLIVersion, fixture.providerCLIVersion)
+        XCTAssertEqual(
+            identity.manifestPath,
+            fixture.root.appendingPathComponent(CompatibilitySetManifest.fileName).path
+        )
+        XCTAssertEqual(identity.envelopeSHA256.count, 64)
+        // The set's release version is what `--version`'s shared constant
+        // cannot tell an operator; the resolver must not require them to match.
+        XCTAssertNotEqual(identity.releaseVersion, identity.providerCLIVersion)
     }
 
-    private static let reportNow = Date(timeIntervalSince1970: 1_786_000_000)
+    /// Install authority wins over a PATH copy that happens to carry its own
+    /// signed set, and the reported manifest path names the file actually read.
+    func testResolverPrefersInstallAuthorityOverTheLaunchedBinary() throws {
+        // One key for both, so precedence is what decides the result rather
+        // than one candidate simply failing signature verification.
+        let key = P256.Signing.PrivateKey()
+        let canonicalFixture = try CompatibilityManifestFixture(privateKey: key, version: "1.8.170")
+        let launchedFixture = try CompatibilityManifestFixture(privateKey: key, version: "1.8.99")
+        let canonicalBinary = canonicalFixture.root.appendingPathComponent("macprovider-cli")
+        let launchedBinary = launchedFixture.root.appendingPathComponent("macprovider-cli")
+        try Data("binary".utf8).write(to: canonicalBinary)
+        try Data("binary".utf8).write(to: launchedBinary)
+
+        let identity = try XCTUnwrap(DoctorRunner.resolveInstalledIdentity(
+            launchedExecutableURL: launchedBinary,
+            canonicalBinaryURL: canonicalBinary,
+            publicKeyPEM: canonicalFixture.privateKey.publicKey.pemRepresentation
+        ))
+        XCTAssertEqual(identity.releaseVersion, "1.8.170")
+        XCTAssertEqual(
+            identity.manifestPath,
+            canonicalFixture.root.appendingPathComponent(CompatibilitySetManifest.fileName).path
+        )
+    }
+
+    /// A canonical binary with no readable set falls through to the launched
+    /// one, and the reported path follows the candidate that answered.
+    func testResolverFallsBackToTheLaunchedBinaryWhenCanonicalHasNoSet() throws {
+        let fixture = try CompatibilityManifestFixture()
+        let launchedBinary = fixture.root.appendingPathComponent("macprovider-cli")
+        try Data("binary".utf8).write(to: launchedBinary)
+
+        let bare = FileManager.default.temporaryDirectory
+            .appendingPathComponent("doctor-bare-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: bare, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: bare) }
+        let canonicalBinary = bare.appendingPathComponent("macprovider-cli")
+        try Data("binary".utf8).write(to: canonicalBinary)
+
+        let identity = try XCTUnwrap(DoctorRunner.resolveInstalledIdentity(
+            launchedExecutableURL: launchedBinary,
+            canonicalBinaryURL: canonicalBinary,
+            publicKeyPEM: fixture.privateKey.publicKey.pemRepresentation
+        ))
+        XCTAssertEqual(
+            identity.manifestPath,
+            fixture.root.appendingPathComponent(CompatibilitySetManifest.fileName).path
+        )
+    }
+
+    /// No set at all (a `swift build` binary), and a set signed by a key this
+    /// build does not trust, both report no identity rather than an unverified
+    /// one. Doctor must never present unsigned text as the installed identity.
+    func testResolverReportsNoIdentityWhenAbsentOrUntrusted() throws {
+        let bare = FileManager.default.temporaryDirectory
+            .appendingPathComponent("doctor-bare-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: bare, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: bare) }
+        let bareBinary = bare.appendingPathComponent("macprovider-cli")
+        try Data("binary".utf8).write(to: bareBinary)
+        XCTAssertNil(DoctorRunner.resolveInstalledIdentity(
+            launchedExecutableURL: bareBinary,
+            canonicalBinaryURL: nil,
+            publicKeyPEM: P256.Signing.PrivateKey().publicKey.pemRepresentation
+        ))
+
+        let fixture = try CompatibilityManifestFixture()
+        let binary = fixture.root.appendingPathComponent("macprovider-cli")
+        try Data("binary".utf8).write(to: binary)
+        XCTAssertNil(DoctorRunner.resolveInstalledIdentity(
+            launchedExecutableURL: binary,
+            canonicalBinaryURL: nil,
+            publicKeyPEM: P256.Signing.PrivateKey().publicKey.pemRepresentation
+        ))
+    }
 
     // MARK: - endpoint derivation
 

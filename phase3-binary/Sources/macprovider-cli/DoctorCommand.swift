@@ -311,9 +311,24 @@ struct DoctorRunner: Sendable {
         launchedExecutableURL: URL? = Bundle.main.executableURL,
         markerStore: AutoUpdateMarkerStore = AutoUpdateMarkerStore()
     ) -> DoctorInstalledIdentity? {
-        let canonical = markerStore.resolveCanonicalInstallBinary(
-            launchedExecutableURL: launchedExecutableURL
+        resolveInstalledIdentity(
+            launchedExecutableURL: launchedExecutableURL,
+            canonicalBinaryURL: markerStore.resolveCanonicalInstallBinary(
+                launchedExecutableURL: launchedExecutableURL
+            ),
+            publicKeyPEM: markerStore.compatibilityManifestPublicKeyPEM
         )
+    }
+
+    /// Resolution proper, with the install authority and signing key supplied.
+    /// Split out so tests can drive it against signed fixtures without a real
+    /// launchd install or the production signing key.
+    static func resolveInstalledIdentity(
+        launchedExecutableURL: URL?,
+        canonicalBinaryURL: URL?,
+        publicKeyPEM: String
+    ) -> DoctorInstalledIdentity? {
+        let canonical = canonicalBinaryURL
         // Install authority first, then the launched binary — the same
         // precedence loadInstalledPreferringInstallAuthority uses. Candidates
         // are probed one at a time so the reported manifest path is the file
@@ -324,7 +339,7 @@ struct DoctorRunner: Sendable {
                 canonicalBinaryURL: nil,
                 expectedVersion: nil,
                 allowProviderVersionMismatch: true,
-                publicKeyPEM: markerStore.compatibilityManifestPublicKeyPEM
+                publicKeyPEM: publicKeyPEM
             ) else {
                 continue
             }
@@ -424,6 +439,22 @@ enum DoctorReportPrinter {
     }
 
     static func emitJSON(_ report: DoctorReport) {
+        let compacted = jsonPayload(report)
+        guard JSONSerialization.isValidJSONObject(compacted),
+              var data = try? JSONSerialization.data(
+                withJSONObject: compacted,
+                options: [.sortedKeys, .withoutEscapingSlashes]
+              ) else {
+            FileHandle.standardOutput.write(Data("{\"binary_version\":\"\(report.binaryVersion)\"}\n".utf8))
+            return
+        }
+        data.append(0x0A)
+        FileHandle.standardOutput.write(data)
+    }
+
+    /// The emitted object, separated from the write so tests can assert on it
+    /// without redirecting the process's stdout.
+    static func jsonPayload(_ report: DoctorReport) -> [String: Any] {
         var payload: [String: Any] = [
             "binary_version": report.binaryVersion,
             "config_path": report.configPath,
@@ -445,17 +476,7 @@ enum DoctorReportPrinter {
         payload["hardware_evidence_reason"] = report.hardwareEvidence?.reason
         payload["hardware_evidence_recorded_at"] = report.hardwareEvidence?.recordedAt
         payload["note"] = report.note
-        let compacted = payload.compactMapValues { $0 }
-        guard JSONSerialization.isValidJSONObject(compacted),
-              var data = try? JSONSerialization.data(
-                withJSONObject: compacted,
-                options: [.sortedKeys, .withoutEscapingSlashes]
-              ) else {
-            FileHandle.standardOutput.write(Data("{\"binary_version\":\"\(report.binaryVersion)\"}\n".utf8))
-            return
-        }
-        data.append(0x0A)
-        FileHandle.standardOutput.write(data)
+        return payload.compactMapValues { $0 }
     }
 }
 

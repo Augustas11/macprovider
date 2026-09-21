@@ -480,15 +480,10 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                 readiness.buyerServing,
                 forAssignedID: checkedAssignedID
             )
-            // Only report a hold when the resolved verdict is an authoritative
-            // not-serving. A verdict held true through an indeterminate probe
-            // has no live hold to report.
-            let buyerServingHold: CoordinatorReadinessClient.BuyerServingHold?
-            if coordinatorBuyerServing == false, case .notServing(let hold) = readiness {
-                buyerServingHold = hold
-            } else {
-                buyerServingHold = nil
-            }
+            let buyerServingHold = Self.reportableBuyerServingHold(
+                readiness: readiness,
+                resolvedBuyerServing: coordinatorBuyerServing
+            )
             writer.writeJSON(
                 status: .ok,
                 body: Self.statusResponse(
@@ -1557,6 +1552,25 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         ]
     }
 
+    /// Which coordinator hold, if any, local status may report (#1616).
+    ///
+    /// Taking `Readiness` rather than a `Bool?` is deliberate: it is what makes
+    /// `handleStatus` unable to compile against `CoordinatorReadinessClient.fetch`,
+    /// whose `Bool?` projection is exactly what used to discard the hold.
+    ///
+    /// Only an authoritative not-serving verdict has a live hold. A verdict
+    /// held true through an indeterminate probe, and an indeterminate verdict,
+    /// both report nothing rather than a stale reason.
+    static func reportableBuyerServingHold(
+        readiness: CoordinatorReadinessClient.Readiness,
+        resolvedBuyerServing: Bool?
+    ) -> CoordinatorReadinessClient.BuyerServingHold? {
+        guard resolvedBuyerServing == false, case .notServing(let hold) = readiness else {
+            return nil
+        }
+        return hold
+    }
+
     static func statusResponse(
         _ snapshot: ProviderSnapshot,
         providerID: String?,
@@ -1729,7 +1743,16 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
             // #1616 finding: the coordinator's own reason for withholding buyer
             // routing, so `doctor`/`status` can answer "why am I not serving"
             // without an operator reading coordinator logs.
-            body["buyer_serving_hold"] = jsonNullable(coordinatorBuyerServingHold?.rawValue)
+            //
+            // Clamped to `networkState` rather than to the caller's verdict.
+            // The coordinator's hold is only the reason once local state has
+            // actually resolved to `not_buyer_serving`; donor mode, an
+            // unverified catalog, or a not-yet-ready model each produce a
+            // different `network_state` whose reason is local, not the
+            // coordinator's. SPEC-001 requires null in those cases.
+            body["buyer_serving_hold"] = jsonNullable(
+                networkState == "not_buyer_serving" ? coordinatorBuyerServingHold?.rawValue : nil
+            )
             body["buyer_serving_authority"] = coordinatorBuyerServing == nil ? "unknown" : "coordinator"
             body["catalog"] = [
                 "state": trustState,
