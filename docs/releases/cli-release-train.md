@@ -103,19 +103,12 @@ re-canary until that 503 is fixed on this package. Do not raise slots.
 #1453 closes when a candidate that includes the **merged** rows is promoted to
 the fleet. #1569 is a later CLI. Spec promotion #1583 is not a CLI change.
 
-Coordinator/gateway on live Pearl is still **v1.8.169** @ `51746ca05364d42e16a2a8ce3d38a8864c0bfb8b`
-([run 35499650509](https://github.com/Augustas11/macprovider/actions/runs/35499650509)).
-That runtime includes #1632 / #1638 / #1639. Sticky and CB stay off.
-
-**Pearl runtime next cut — this session.** Bakeoff-followup executes one
-`pearl-runtime-release.yml` + `macprovider-pearl-update` of current `main`
-(`d86ddb12`, #1653 leftover-stream sanitizer + SPEC-006-R014 auto-prefix).
-Suggested tag **v1.8.173** (skip CLI artifact numbers 170/171/172). Other
-sessions must **not** dispatch a second runtime release. Sticky and CB stay
-off. After apply, replace this lock with the live tag + run.
-
-Fleet Macs still run **1.8.123** until the operator-cut CLI is promoted. Mac
-Studio serving canary is `v1.8.172` (signed package extracted into
+Coordinator/gateway on live Pearl is **v1.8.173** @ `18da0723ef9ebc829b3cddde829b1028e19853e4`
+([run 35548843512](https://github.com/Augustas11/macprovider/actions/runs/35548843512)).
+That runtime includes #1653 (leftover `</tool_call>` sanitizer + SPEC-006-R014
+system+tools auto-prefix) on top of #1632 / #1638 / #1639. Sticky and CB stay
+off. Fleet Macs still run **1.8.123** until the operator-cut CLI is promoted.
+Mac Studio serving canary is `v1.8.172` (signed package extracted into
 `/Users/a1/macprovider/`; also staged at `/Users/a1/candidate-v1.8.172/`; CLI
 SHA-256 `7bd43fe8582206043b70e95b8bc232eb0826511832fc43ff0ffe91555c92ac60`).
 Pearl `compatibility_set.target_id` stays `v1.8.123@37e2d232…`; `accepted_ids`
