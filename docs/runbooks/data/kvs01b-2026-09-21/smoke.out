@@ -1,0 +1,19 @@
+started_utc=2026-09-20T23:30:56Z
+cli=/Users/a1/.local/state/kvs-01a/run-v013/macprovider-cli
+1.8.123
+9be5e2f18f0c7db0a11253480f511b5ab2641f0df3ef6d872c2175a47c74d5f0  /Users/a1/.local/state/kvs-01a/run-v013/macprovider-cli
+staging=  staging_max_bytes: 1073741824
+  write_staging_max_bytes: 1073741824
+kvs-01a[c1]: persist turn key_hash=ce3b66ac
+kvs-01a[c1]: kill + relaunch (enabled)
+kvs-01a[c1]: PASS restored disk_hit cached=8016 (=8016) ttft=1158ms
+kvs-01a[c1]: kill + relaunch (disabled)
+kvs-01a: nearest-rank TTFT percentiles (ms):
+  restored  n=1 p50=1158 p95=1158 min=1158 max=1158
+  warm      n=1 p50=484 p95=484 min=484 max=484
+  miss      n=1 p50=5563 p95=5563 min=5563 max=5563
+  disabled  n=1 p50=5233 p95=5233 min=5233 max=5233
+kvs-01a: smoke mode — percentile thresholds skipped (correctness only)
+kvs-01a: all 1 cycle(s) passed → /Users/a1/.local/state/kvs-01a/evidence/01b-smoke-samples.ndjson
+exit=0
+finished_utc=2026-09-20T23:35:33Z
