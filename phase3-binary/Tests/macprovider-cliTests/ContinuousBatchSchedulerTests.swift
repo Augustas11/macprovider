@@ -2134,6 +2134,72 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         XCTAssertEqual(freeBlocks, 16)
     }
 
+    func testLockstepWindowOverflowsDefaultDeliveryBufferWhenSinkCannotDrain() async throws {
+        XCTAssertGreaterThan(
+            ContinuousBatchSchedulerConfiguration.productionTokenDeliveryBufferLimit,
+            ContinuousBatchSchedulerConfiguration.defaultDecodeLockstepWindow
+        )
+        let sinkGate = AsyncGate()
+        let tokens = Array(1...32)
+        let backend = ScriptedBackend(scripts: ["lockstep-stream": tokens])
+        let scheduler = try await makeScheduler(
+            maxActiveRows: 1,
+            tokenDeliveryTimeoutNanoseconds: 50_000_000,
+            tokenDeliveryBufferLimit: 16,
+            maxDecodeLockstepWindow: ContinuousBatchSchedulerConfiguration.defaultDecodeLockstepWindow,
+            backend: backend
+        )
+
+        let blocked = Task {
+            try await scheduler.submit(
+                .init(
+                    id: "lockstep-stream",
+                    conversationKey: "",
+                    promptTokens: [1],
+                    maxOutputTokens: tokens.count
+                ),
+                tokenSink: { _ in await sinkGate.wait() }
+            )
+        }
+        do {
+            _ = try await blocked.value
+            XCTFail("expected lockstep hop 2 to overflow a 16-token delivery buffer")
+        } catch ContinuousBatchSchedulerError.backpressure {
+            // Same fail-closed as live canary: first hop fills the buffer,
+            // the waiter is still in sink work, hop 2 cannot offer.
+        }
+        await sinkGate.open()
+        try await eventually { await scheduler.metrics().slotsFree == 1 }
+    }
+
+    func testProductionDeliveryBufferAbsorbsLockstepWhileSinkDrains() async throws {
+        let tokens = Array(1...32)
+        let backend = ScriptedBackend(scripts: ["lockstep-stream": tokens])
+        let scheduler = try await makeScheduler(
+            maxActiveRows: 1,
+            tokenDeliveryBufferLimit: ContinuousBatchSchedulerConfiguration.productionTokenDeliveryBufferLimit,
+            maxDecodeLockstepWindow: ContinuousBatchSchedulerConfiguration.defaultDecodeLockstepWindow,
+            backend: backend
+        )
+
+        let recorder = TokenEventRecorder()
+        let result = try await scheduler.submit(
+            .init(
+                id: "lockstep-stream",
+                conversationKey: "",
+                promptTokens: [1],
+                maxOutputTokens: tokens.count
+            ),
+            tokenSink: { event in
+                recorder.append(event)
+                try? await Task.sleep(nanoseconds: 2_000_000)
+            }
+        )
+        XCTAssertEqual(result.terminalStatus, .length)
+        XCTAssertEqual(result.outputTokens, tokens)
+        XCTAssertEqual(recorder.events().count, tokens.count)
+    }
+
     func testCancellingDrainKeepsSchedulerFailedClosedUntilOldWorkFinishes() async throws {
         let gate = AsyncGate()
         let backend = ScriptedBackend(scripts: ["active": [7]], prefillGate: gate)
@@ -2849,6 +2915,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         decodeHeadroomTokens: Int = 2,
         maxPromptChunkTokens: Int = 2,
         tokenDeliveryTimeoutNanoseconds: UInt64 = 5_000_000_000,
+        tokenDeliveryBufferLimit: Int = 16,
         maxDecodeLockstepWindow: Int = 1,
         backend: any ContinuousBatchSchedulerBackend,
         allocator: PagedKVBlockAllocator? = nil,
@@ -2864,6 +2931,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
             decodeHeadroomTokens: decodeHeadroomTokens,
             maxPrefillRowsPerIteration: 1,
             maxPromptChunkTokens: maxPromptChunkTokens,
+            tokenDeliveryBufferLimit: tokenDeliveryBufferLimit,
             tokenDeliveryTimeoutNanoseconds: tokenDeliveryTimeoutNanoseconds,
             snapshot: ContinuousBatchSchedulerSnapshot(
                 modelID: Self.modelID,
