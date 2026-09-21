@@ -100,6 +100,9 @@ final class DoctorCommandTests: XCTestCase {
 
     private static let reportNow = Date(timeIntervalSince1970: 1_786_000_000)
 
+    /// Single-byte C1 CSI, the control character a naive ESC filter misses.
+    private static let csi = "\u{9B}"
+
     // MARK: - installed identity resolution (#1616 finding B)
 
     /// R2 code-review MEDIUM — the identity tests above inject a
@@ -177,6 +180,36 @@ final class DoctorCommandTests: XCTestCase {
             identity.manifestPath,
             fixture.root.appendingPathComponent(CompatibilitySetManifest.fileName).path
         )
+    }
+
+    /// R2 security LOW — the manifest path is derived from wherever the binary
+    /// lives, not from this process's own text, and JSONSerialization emits C1
+    /// control bytes raw rather than escaping them. A hostile directory name
+    /// must not reach an operator's terminal.
+    func testResolverSanitizesTheReportedManifestPath() throws {
+        let hostile = FileManager.default.temporaryDirectory
+            .appendingPathComponent("doctor-csi-\(Self.csi)31m-\(UUID().uuidString)", isDirectory: true)
+        // The fixture only creates the root it chose itself, so an explicit
+        // root must exist before it populates.
+        try FileManager.default.createDirectory(
+            at: hostile,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        defer { try? FileManager.default.removeItem(at: hostile) }
+        let fixture = try CompatibilityManifestFixture(root: hostile)
+        let binary = hostile.appendingPathComponent("macprovider-cli")
+        try Data("binary".utf8).write(to: binary)
+
+        let identity = try XCTUnwrap(DoctorRunner.resolveInstalledIdentity(
+            launchedExecutableURL: binary,
+            canonicalBinaryURL: nil,
+            publicKeyPEM: fixture.privateKey.publicKey.pemRepresentation
+        ))
+        XCTAssertFalse(identity.manifestPath.unicodeScalars.contains { $0.value < 0x20 || $0.value >= 0x7F })
+        XCTAssertTrue(identity.manifestPath.hasSuffix(CompatibilitySetManifest.fileName))
+        // The surrounding path survives; only the control byte is dropped.
+        XCTAssertTrue(identity.manifestPath.contains("doctor-csi-31m-"))
     }
 
     /// No set at all (a `swift build` binary), and a set signed by a key this

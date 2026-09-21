@@ -1,7 +1,7 @@
 # Audit lane: SECURITY REVIEW — issue #1616 recovery hardening
 
 Repo: macprovider. Worktree: `/Users/augstar/macprovider-1616-recovery`,
-branch `fix/1616-install-recovery-hardening`, base `origin/main` (295a2d9e).
+branch `fix/1616-install-recovery-hardening`, base `origin/main` (32c78fe1), rebased.
 
 Review the FULL fix diff as it will land:
 
@@ -71,6 +71,30 @@ This is a SECURITY lane. Ignore style. Focus on:
   `buyer_serving_hold_v1` capability: does any existing strict decoder
   (Malibu app, journey harnesses, golden-frame fixtures) reject unknown
   fields or an unknown capability token?
+
+## Round 2 — what changed since your last pass
+
+Your previous pass on this branch reported MEDIUM findings. All of them were
+fixed; review the FULL fix diff again as it will land, not only the delta:
+
+- `buyer_serving_hold` is now clamped to the COMPUTED `networkState`, not the
+  caller's verdict, so donor/unverified/not-ready states report null.
+- `hardwareEvidenceEndpoint` rejects URLs with userinfo; transport failures
+  report `transport error (URLError code N)` instead of interpolating the
+  error, so a URL can no longer reach the persisted reason.
+- Both watchdog dangling-repair call sites now pass `$WATCHDOG_PATH` as a
+  third accepted executable; the installer test asserts on the CALL SITES.
+- The hold projection is a named static
+  `RouterHandler.reportableBuyerServingHold(readiness:resolvedBuyerServing:)`
+  taking `Readiness`, unit-tested across every verdict.
+- `DoctorRunner.resolveInstalledIdentity` takes the install authority and
+  public key explicitly and is tested against signed fixtures (canonical
+  precedence, launched fallback, manifest path, absent, untrusted signature).
+- Evidence store: parent must not be group/world-writable, record must be
+  exactly 0600 on read, parent directory fsynced after rename.
+
+Re-verify these specifically, and re-check the whole diff for anything the
+fixes introduced. Report only defects that remain.
 
 ## Bar
 

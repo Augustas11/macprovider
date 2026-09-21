@@ -42,24 +42,16 @@ enum HardwareEvidenceOutcomeStore {
 
     /// Maximum retained reason length. Bounded so an unexpectedly long
     /// coordinator or URLError string cannot flood doctor output or the file.
-    static let maximumReasonLength = 240
+    static let maximumReasonLength = OperatorDisplayText.defaultLimit
 
     static var defaultURL: URL {
         FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".config/macprovider/last-hardware-evidence.json")
     }
 
-    /// Keeps only printable ASCII. C0/C1 control bytes — including the U+009B
-    /// single-byte CSI that survives a naive ESC filter — are dropped rather
-    /// than escaped, so a reason rendered in a terminal cannot move the cursor
-    /// or set attributes.
+    /// Bounded printable-ASCII text, per `OperatorDisplayText`.
     static func sanitize(_ reason: String?) -> String? {
-        guard let reason else { return nil }
-        let kept = reason.unicodeScalars.filter { $0.value >= 0x20 && $0.value < 0x7F }
-        let collapsed = String(String.UnicodeScalarView(kept))
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        if collapsed.isEmpty { return nil }
-        return String(collapsed.prefix(maximumReasonLength))
+        OperatorDisplayText.sanitized(reason, limit: maximumReasonLength)
     }
 
     static func record(

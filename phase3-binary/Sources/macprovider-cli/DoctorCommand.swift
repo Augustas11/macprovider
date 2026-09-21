@@ -345,13 +345,21 @@ struct DoctorRunner: Sendable {
             }
             let manifestPath = CompatibilitySetManifest.payloadDirectory(for: candidate)
                 .map { $0.appendingPathComponent(CompatibilitySetManifest.fileName).path }
+            // Every field below is printed to an operator's terminal and
+            // serialized into JSON, so all of it is bounded printable ASCII.
+            // The manifest path especially: it is derived from wherever the
+            // binary happens to live, so it is not this process's own text,
+            // and JSONSerialization emits C1 control bytes raw.
             return DoctorInstalledIdentity(
-                compatibilitySetID: manifest.compatibilitySetID,
-                envelopeSHA256: manifest.envelopeSHA256,
-                releaseVersion: manifest.version,
-                providerCLIVersion: manifest.providerCLIVersion,
-                catalogReleaseID: manifest.catalogReleaseID,
-                manifestPath: manifestPath ?? "(unknown)"
+                compatibilitySetID: OperatorDisplayText.sanitized(manifest.compatibilitySetID) ?? "(unprintable)",
+                envelopeSHA256: OperatorDisplayText.sanitized(manifest.envelopeSHA256) ?? "(unprintable)",
+                releaseVersion: OperatorDisplayText.sanitized(manifest.version) ?? "(unprintable)",
+                providerCLIVersion: OperatorDisplayText.sanitized(manifest.providerCLIVersion) ?? "(unprintable)",
+                catalogReleaseID: OperatorDisplayText.sanitized(manifest.catalogReleaseID) ?? "(unprintable)",
+                manifestPath: OperatorDisplayText.sanitized(
+                    manifestPath,
+                    limit: OperatorDisplayText.pathLimit
+                ) ?? "(unknown)"
             )
         }
         return nil
