@@ -2903,6 +2903,7 @@ actor ModelRuntime: ModelRuntimeServing {
                 queueLimit: queueLimit,
                 decodeHeadroomTokens: 1,
                 maxPromptChunkTokens: max(1, prefillStepSize),
+                tokenDeliveryBufferLimit: ContinuousBatchSchedulerConfiguration.productionTokenDeliveryBufferLimit,
                 snapshot: ContinuousBatchSchedulerSnapshot(
                     modelID: modelID,
                     modelSHA256: modelSHA256,
@@ -3514,6 +3515,14 @@ actor ModelRuntime: ModelRuntimeServing {
         let stopTokenSequences: [[Int]]
     }
 
+    /// Tokenizer decode for CB streaming. Must not take `ModelContainer`:
+    /// compiled lockstep already holds that hop, and a per-token `perform`
+    /// behind the delivery buffer is what turned longer canary streams into
+    /// `internal_error` after the first content chunk.
+    private struct StreamingDetokenizer: @unchecked Sendable {
+        let decode: ([Int]) -> String
+    }
+
     private final class AttachedPagedKVStreamState: @unchecked Sendable {
         private let lock = NSLock()
         private var tokenIDs: [Int] = []
@@ -3808,7 +3817,7 @@ actor ModelRuntime: ModelRuntimeServing {
         let maxContextTokens = maxContextTokens
         let stopTokenFilter = stopTokenFilter
         let requestStops = request.stop
-        let prepared = try await container.perform { context -> ContinuousBatchPreparedRequest in
+        let (prepared, detokenizer) = try await container.perform { context -> (ContinuousBatchPreparedRequest, StreamingDetokenizer) in
             try drainCancelled.check()
             try Task.checkCancellation()
             let input = try Self.userInput(for: request)
@@ -3818,9 +3827,13 @@ actor ModelRuntime: ModelRuntimeServing {
             let stopTokenSequences = requestStops.map {
                 context.tokenizer.encode(text: $0, addSpecialTokens: false)
             }.filter { !$0.isEmpty }
-            return ContinuousBatchPreparedRequest(
-                promptTokens: promptTokens,
-                stopTokenSequences: stopTokenSequences
+            let tokenizer = context.tokenizer
+            return (
+                ContinuousBatchPreparedRequest(
+                    promptTokens: promptTokens,
+                    stopTokenSequences: stopTokenSequences
+                ),
+                StreamingDetokenizer { tokenizer.decode(tokenIds: $0) }
             )
         }
 
@@ -3863,13 +3876,11 @@ actor ModelRuntime: ModelRuntimeServing {
                     let eventTokens = event.replayTokens ?? [event.token]
                     guard !eventTokens.isEmpty else { return }
                     let allTokens = streamState.appendTokens(eventTokens)
-                    let candidate = await container.perform(nonSendable: allTokens) { context, allTokens in
-                        Self.streamingSafePrefix(
-                            context.tokenizer.decode(tokenIds: allTokens),
-                            stopTokenFilter: stopTokenFilter,
-                            requestStops: requestStops
-                        )
-                    }
+                    let candidate = Self.streamingSafePrefix(
+                        detokenizer.decode(allTokens),
+                        stopTokenFilter: stopTokenFilter,
+                        requestStops: requestStops
+                    )
                     let delta = streamState.delta(to: candidate.text)
                     guard !delta.isEmpty else { return }
                     if let error = structuredAccumulator.append(delta) {
@@ -3880,6 +3891,17 @@ actor ModelRuntime: ModelRuntimeServing {
                     onChunk(.content(delta))
                 })
             }
+        } catch ContinuousBatchSchedulerError.backpressure {
+            if let lease {
+                await conversationCache.abort(lease)
+            }
+            throw APIError(
+                status: 503,
+                message: "Inference engine unavailable",
+                type: "server_error",
+                code: "continuous_batching_stream_backpressure",
+                inferenceRan: true
+            )
         } catch {
             if let lease {
                 await conversationCache.abort(lease)

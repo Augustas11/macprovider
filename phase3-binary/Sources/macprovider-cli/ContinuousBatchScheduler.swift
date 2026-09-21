@@ -146,6 +146,13 @@ struct ContinuousBatchSchedulerConfiguration: Sendable, Equatable {
     /// Production serve-path lockstep burst. Join/leave still happens between
     /// hops (FR-CB5); a queued row forces the scheduler back to one token.
     static let defaultDecodeLockstepWindow = 16
+
+    /// Stream token delivery is non-blocking on the scheduler actor. Compiled
+    /// lockstep offers a full window per hop, and the next hop can start while
+    /// the waiter is still in tokenizer/SSE work, so production must absorb
+    /// more than one window. Tests that want fail-closed backpressure keep the
+    /// initializer default of 16.
+    static let productionTokenDeliveryBufferLimit = 8_192
 }
 
 struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Encodable {
