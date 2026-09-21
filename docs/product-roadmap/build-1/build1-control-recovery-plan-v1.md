@@ -4,6 +4,9 @@ Status: active control ledger
 Date: 2026-09-15
 Base evidence: `origin/main` at `7c2e4d97` plus PR #1658
 Decision: freeze new Build 1 implementation slices unless they name one Build 1 lane from this document.
+Execution overlay: `build1-single-pr-orchestrator-workflow-v1.md` keeps Lane A
+work in one orchestrator-owned PR (#1658) until the Lane A stop condition is
+met and the owner explicitly greenlights merge.
 
 ## Purpose
 
@@ -122,7 +125,11 @@ published-inventory record (receipt `artifact_sha256`, `artifact_identity_digest
 so the evidence validator can correlate a physical run with the exact adopted
 tuple. Public v1 `models catalog-economics` output stays unchanged until Lane B.
 
-That PR or handoff must state:
+Per `build1-single-pr-orchestrator-workflow-v1.md`, this work should continue
+inside PR #1658 as an internal milestone. #1658 should not merge merely because
+the private preparation-state record milestone has green CI.
+
+That PR milestone or handoff must state:
 
 - Selected lane: Lane A.
 - Requirement source: `SPEC-044`, `narrow-mvp-plan-v6.md`,
@@ -135,11 +142,12 @@ That PR or handoff must state:
 
 ## Future Session Gate
 
-Before opening any Build 1 PR, a session must:
+Before opening any Build 1 PR, or before adding a Build 1 milestone to PR
+#1658, a session must:
 
 1. Read this control recovery plan.
 2. Confirm no newer Build 1 control plan supersedes it.
-3. State the selected lane in the PR body or handoff.
+3. State the selected lane in the PR body, milestone note, or handoff.
 4. Cite the current requirement source.
 5. Explain how the diff reduces a named remaining blocker.
 6. Preserve the no-production-activation boundary unless the owner explicitly
