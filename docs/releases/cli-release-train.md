@@ -164,8 +164,15 @@ combined candidate**.
   errors); chat (paid+free), models, privacy, health/provenance, wholesale
   statement all pass. `--filing-mode` for the final application (prod URLs +
   benchmark ≥ 100).
-- **Last run:** 2026-09-18, candidate `v1.8.163`. Provider-side OK. TTFT p95 /
-  saturation still fleet-scale. Re-run on the next candidate.
+- **Last run:** 2026-09-21 against signed Studio **v1.8.175** serving
+  `mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit` (not the Llama 3B fleet).
+  Artifact:
+  `~/.local/state/macprovider/openrouter-readiness/openrouter-readiness-20260921T083417Z-qwen30-studio-175-buyer.json`.
+  Pearl `v1.8.173`. Chat **PASS** (stream TTFT 3732ms). Load-ladder conc=1
+  **PASS** (8/8, TTFT p95 3708ms, 28 tok/s). Soak 100@4 **FAIL** 38/100 HTTP
+  200, 62× `503 no_provider_available`, 0 `429`. Saturation 16@8 **FAIL** 4/16
+  200, 12× 503, 0 shed 429. Pool advertised 4 Qwen slots / 1 provider; overload
+  did not shed as 429. Do not raise slots. Do not set CB `on`. Do not promote.
 
 ### Track B — BYOM Ollama / Gemma
 
