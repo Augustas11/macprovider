@@ -247,8 +247,11 @@ func (s *Server) refreshModelAdmissionBindingLocked(ctx context.Context, provide
 	for attempt := 0; attempt < 2; attempt++ {
 		events, err := s.modelAdmissions.LatestModelAdmissionStatusesForProvider(ctx, providerID)
 		if err != nil {
-			s.log.Warn().Err(err).Str("provider_id", providerID).Msg("model admission binding refresh: listing failed; binding cleared")
-			s.setModelAdmissionBindingLocked(providerID, nil, section)
+			// Preserve the last verified binding on transient store failure.
+			// The append already advanced the provider section generation, so
+			// route compare-and-insert stays closed until a later successful
+			// refresh re-stamps the session at the current generation.
+			s.log.Warn().Err(err).Str("provider_id", providerID).Str("routing", "closed_until_refresh").Msg("model admission binding refresh: listing failed; binding preserved")
 			return
 		}
 		candidates := bindableCandidates(events, provider.ModelID)
@@ -290,6 +293,7 @@ func (s *Server) scheduleModelAdmissionAppendBindingRefreshRetry(providerID stri
 		return
 	}
 	go func() {
+		var exhaustedClosed bool
 		for attempt := 0; attempt < modelAdmissionBindingRefreshRetryAttempts; attempt++ {
 			time.Sleep(modelAdmissionBindingRefreshRetryDelay << attempt)
 			var stop bool
@@ -302,10 +306,20 @@ func (s *Server) scheduleModelAdmissionAppendBindingRefreshRetry(providerID stri
 					return
 				}
 				s.refreshModelAdmissionBindingLocked(ctx, providerID, section)
+				after, ok := s.pool.Resolve(providerID, "")
+				exhaustedClosed = ok && after.ModelAdmissionBindingGeneration < section.generation.Load()
 			})
 			if stop {
 				return
 			}
+		}
+		if exhaustedClosed {
+			s.log.Warn().
+				Str("provider_id", providerID).
+				Uint64("expected_session_epoch", expectedSessionEpoch).
+				Int("attempts", modelAdmissionBindingRefreshRetryAttempts).
+				Str("routing", "closed_until_refresh").
+				Msg("model admission binding refresh: retries exhausted; binding preserved")
 		}
 	}()
 }

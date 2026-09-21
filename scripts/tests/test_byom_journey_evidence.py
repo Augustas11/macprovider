@@ -49,6 +49,7 @@ ADMISSION_SIGNED_SOURCE = (
     "spec-047-r005-spec-047-r006-spec-047-r007-spec-047-r008."
     "journey-result.signed.json"
 )
+STALE_SELECTOR_PROMOTED_REQUIREMENT_IDS = frozenset({"SPEC-047-R003"})
 
 
 def load_module(name: str, filename: str):
@@ -1815,8 +1816,13 @@ class BYOMJourneyConformanceMappingTests(unittest.TestCase):
                 requirement_id = f"{prefix}-R{index:03d}"
                 row = rows[requirement_id]
                 self.assertIn(journey_id, row["journeys"], requirement_id)
-                self.assertEqual("conformant", row["state"], requirement_id)
-                self.assertIsNone(row["gap"], requirement_id)
+                if requirement_id in STALE_SELECTOR_PROMOTED_REQUIREMENT_IDS:
+                    self.assertEqual("pending", row["state"], requirement_id)
+                    self.assertIsNotNone(row["gap"], requirement_id)
+                    self.assertIn("fresh independently trusted", row["gap"]["rationale"], requirement_id)
+                else:
+                    self.assertEqual("conformant", row["state"], requirement_id)
+                    self.assertIsNone(row["gap"], requirement_id)
                 sha_items = [
                     item
                     for item in row["evidence"]
