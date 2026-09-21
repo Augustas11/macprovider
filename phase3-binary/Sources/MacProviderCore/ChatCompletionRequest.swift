@@ -86,6 +86,9 @@ public struct ChatCompletionRequest: Sendable {
         }
 
         let stream = try optionalBool(dict["stream"], key: "stream") ?? false
+        if dict["parallel_tool_calls"] is NSNull {
+            throw APIError(status: 400, message: "parallel_tool_calls must be a boolean", code: "invalid_request")
+        }
         let parallelToolCalls = try optionalBool(dict["parallel_tool_calls"], key: "parallel_tool_calls")
 
         if let streamOptions = dict["stream_options"], !(streamOptions is NSNull), !(streamOptions is [String: Any]) {

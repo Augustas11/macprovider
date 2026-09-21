@@ -34,6 +34,14 @@ final class ChatCompletionRequestTests: XCTestCase {
         )
     }
 
+    func testParallelToolCallsRejectsNull() {
+        XCTAssertAPIError(
+            try makeRequest(model: "m", extra: ["parallel_tool_calls": NSNull()]),
+            status: 400,
+            code: "invalid_request"
+        )
+    }
+
     func testModelMismatchStillReturnsNotFound() throws {
         let request = try makeRequest(model: "mlx-community/Other-Model")
 

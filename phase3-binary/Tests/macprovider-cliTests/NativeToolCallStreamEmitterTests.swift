@@ -213,6 +213,10 @@ final class NativeToolCallStreamEmitterTests: XCTestCase {
         )
         _ = emitter.observe(#"<tool_call>{"name":"read","arguments":{"path":"Makefile"}}</tool_call>"#)
         XCTAssertFalse(emitter.hasCompletedValidToolCall)
+        XCTAssertEqual(
+            emitter.visibleContentPrefix(of: #"<tool_call>{"name":"read","arguments":{"path":"Makefile"}}</tool_call>"#),
+            #"<tool_call>{"name":"read","arguments":{"path":"Makefile"}}</tool_call>"#
+        )
     }
 
     func testArgumentCapAfterOpenDoesNotComplete() {

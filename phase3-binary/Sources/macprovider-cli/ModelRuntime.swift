@@ -4331,7 +4331,8 @@ actor ModelRuntime: ModelRuntimeServing {
                                         return GenerateDisposition.stop
                                     }
                                     if request.stopsAfterFirstCompleteToolCall,
-                                       !HarmonyResponseParser.isHarmonyModelID(request.model)
+                                       !HarmonyResponseParser.isHarmonyModelID(request.model),
+                                       Self.hasEnabledTools(request.promptSource.tools)
                                     {
                                         let decoded = generationContext.tokenizer.decode(tokenIds: tokens)
                                         let candidate = Self.streamingSafePrefix(
@@ -6562,7 +6563,7 @@ struct NativeToolCallStreamEmitter {
         }
     }
 
-    var suppressesAssistantContent: Bool { opened || sawToolDelimiter }
+    var suppressesAssistantContent: Bool { enabled && (opened || sawToolDelimiter) }
 
     /// True once a declared tool has parser-valid, within-cap arguments (complete
     /// JSON object or closed function-XML). Wrapper-close, prefixes, and cap
@@ -6570,6 +6571,7 @@ struct NativeToolCallStreamEmitter {
     var hasCompletedValidToolCall: Bool { completedValidToolCall }
 
     func visibleContentPrefix(of text: String) -> String {
+        guard enabled else { return text }
         if suppressesAssistantContent {
             return ""
         }
