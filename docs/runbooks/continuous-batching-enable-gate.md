@@ -89,7 +89,7 @@ only.
 | Sticky/cross-turn scope | #1477 code is present but not enablement: first-scope buyer traffic stays keyless, and positive cached-token credit requires a same-conversation FR-PKV10 retained paged-KV handoff before any later keyed operator gate may admit it. |
 | Durable replay authority | Stable relay request identity is mapped into scheduler replay keys, settlement disposition is propagated through usage/receipt code, and duplicate inference or duplicate settlement is rejected after local terminal-result retention rolls. The in-process `ContinuousBatchRuntimeReplayAuthority` stub is not activation evidence. |
 | MSB-01..05 | Full harness output for MSB-01 single-stream baseline plus MSB-02, MSB-03, MSB-04, and MSB-05. Aggregate TG is total decoded tokens over common wall-clock, warm-up excluded; per-stream and aggregate TG stay separate. |
-| MoE promotion | Production `moePromotionEvidenceAvailable` is true after [`continuous-batching-moe-activation-2026-09-20.md`](continuous-batching-moe-activation-2026-09-20.md). Descriptor membership still does not promote a MoE tuple by itself. Buyer CB stays off after the 2026-09-20 172 canary rollback. |
+| MoE promotion | Production `moePromotionEvidenceAvailable` is true after [`continuous-batching-moe-activation-2026-09-20.md`](continuous-batching-moe-activation-2026-09-20.md). Descriptor membership still does not promote a MoE tuple by itself. Studio 175 is `canary`; fleet CB stays off. Do not set `on`. |
 | Usage/receipt attribution | Concurrent distinct requests prove correct `prompt_tokens`, `output_tokens`, `cached_prompt_tokens`, stop reason, cancellation state, request id, receipt model hash, and settlement inputs with zero cross-request attribution. |
 | Deterministic parity | Temperature-0 output for each tested request matches serial path both alone and as one row in a batch. |
 | Failure isolation | One-row cancellation, request-local block-extension failure, and whole-batch forward failure clean up rows/block tables without duplicate terminal output or stitched receipts. |
@@ -139,11 +139,15 @@ is rejected before provider readiness and `canary` serial-routes.
 keyless canary then 503'd `continuous_batching_prefill_failed` and was
 rolled back. See
 [`continuous-batching-canary-172-enable-2026-09-20.md`](continuous-batching-canary-172-enable-2026-09-20.md).
-Do not re-enable until that serve-path prefill returns 200.
 
-After that prerequisite lands, use `canary` only when every required proof
-above is present for the exact tuple. Leave `continuous_batch_queue_limit`
-unset unless the evidence bundle selects a lower bounded queue for that tuple:
+2026-09-21 Studio 175: same keyless live-8080 probe returned HTTP 200 after
+the serve-path prefill fix. Canary is on for that Studio tuple only. See
+[`continuous-batching-canary-175-enable-2026-09-21.md`](continuous-batching-canary-175-enable-2026-09-21.md).
+Do not promote `canary` to `on`. Do not canary other Macs.
+
+Use `canary` only when every required proof above is present for the exact
+tuple. Leave `continuous_batch_queue_limit` unset unless the evidence bundle
+selects a lower bounded queue for that tuple:
 
 ```yaml
 continuous_batching: canary
