@@ -66,7 +66,7 @@ future sessions will keep interpreting stale handoffs as active work.
 | #1525 | `68b90269` | Lane A `macprovider-cli models prepare` exists behind exact tuple, staging coordinator, `--json`, and `--yes` guards, and fails closed with transaction events. | No signed artifact authority, artifact download, staging, durable adoption, physical provider run, admission, settlement, payout, release, or production activation. |
 | #1530 | `4913590c` | The guarded `models prepare` path verifies the exact Lane A signed artifact authority tuple from the staging artifact feed before doing anything else. | No artifact download, staging, durable adoption, physical provider run, admission, settlement, payout, release, or production activation. |
 | #1649 | `4cf73a6f` | `models prepare` stages the exact MLX snapshot into an isolated hash-qualified directory, verifies the snapshot-manifest digest against the signed authority, and adopts it into the provider-owned durable store; failure, timeout, and cancellation leave the active model and durable store unchanged. | No private preparation-state record, `serve`/status evidence binding, staging admission, gateway request, receipt/audit correlation, settlement, payout, release, physical run, or production activation. |
-| #1658 | open | After durable adoption, `models prepare` writes the exact adopted Lane A tuple into the private published-inventory record through the existing `ModelPreparationPrivateStore` envelope contracts, with a persisted publication receipt under the managed-v3 namespace; the private state bootstraps before any transfer and fails closed; failure, timeout, and cancellation never write or mutate the record; public `models catalog-economics --json` v1 output is unchanged. The same PR now also correlates `GET /v1/status` diagnostic evidence for Lane A to the exact private receipt and configured release: the observed `model_hash` is matched to the receipt `artifact_sha256` and the configured artifact SHA; the receipt `artifact_identity_digest`, receipt digest, and root identity digest are published as digests only; `weights_manifest_sha256` is reported as observed (presence and algorithm only, not bound to the receipt). The correlation is path-observed and states `descriptor_pinned_runtime_custody=false`, while explicitly preserving no admission, settlement, payout, rewards, or production activation semantics. | No staging admission, descriptor-pinned runtime load custody, gateway request, receipt/audit correlation, settlement, payout, release, physical run, public v2 projection, cleanup transaction, or production activation. Local preparation/status evidence alone never implies admission, settlement, or earnings. |
+| #1658 | open | After durable adoption, `models prepare` writes the exact adopted Lane A tuple into the private published-inventory record through the existing `ModelPreparationPrivateStore` envelope contracts, with a persisted publication receipt under the managed-v3 namespace; the private state bootstraps before any transfer and fails closed; failure, timeout, and cancellation never write or mutate the record; public `models catalog-economics --json` v1 output is unchanged. The same PR now also correlates `GET /v1/status` diagnostic evidence for Lane A to the exact private receipt and configured release: the observed `model_hash` is matched to the receipt `artifact_sha256` and the configured artifact SHA; the receipt `artifact_identity_digest`, receipt digest, and root identity digest are published as digests only; `weights_manifest_sha256` is reported as observed (presence and algorithm only, not bound to the receipt). The correlation is path-observed and states `descriptor_pinned_runtime_custody=false`, while explicitly preserving no admission, settlement, payout, rewards, or production activation semantics. The same PR now also adds `models staging-input`, a read-only Lane A command that assembles one `build1_lane_a_staging_input.v1` handoff from the signed staging artifact authority (measured `size_bytes`, trusted signer, release binding), the private publication receipt for the adopted artifact, and the local `GET /v1/status` Lane A evidence; it is `staging_input_ready` only when all three name the same tuple, release, digest, declared size, and private record, and otherwise reports explicit blockers (`artifact_feed_not_served`, `artifact_feed_rejected`, `private_record_*`, `status_*`) with exit 2. | No signed measured artifact feed served by the staging coordinator yet (operator release action), no staging admission, descriptor-pinned runtime load custody, gateway request, receipt/audit correlation, settlement, payout, release, physical run, public v2 projection, cleanup transaction, or production activation. A `staging_input_ready` report is a staging input, not acceptance; local preparation/status evidence alone never implies admission, settlement, or earnings. |
 
 Current open PRs as of 2026-09-15 are not Build 1 control blockers:
 
@@ -95,8 +95,11 @@ Current open PRs as of 2026-09-15 are not Build 1 control blockers:
 
 Lane A blockers:
 
-- Produce a measured, artifact-bound staging release or equivalent staging
-  input for the selected Llama 3B tuple.
+- Publish a measured, artifact-bound staging release for the selected Llama
+  3B tuple: the staging coordinator must serve `/v1/catalog-artifacts` and its
+  detached signature for the Lane A release with positive measured
+  `size_bytes`. The consumer side (`models staging-input`) is in PR #1658 and
+  reports `artifact_feed_not_served` / `artifact_feed_rejected` until then.
 - Add descriptor-pinned runtime load custody if the physical staging journey
   needs more than path-observed local status correlation.
 - Run the physical Apple Silicon staging journey against staging
@@ -118,12 +121,13 @@ Lane B blockers:
 
 ## Next Authorized Action
 
-The next implementation work, if Build 1 continues, is the measured
-artifact-bound staging input for the selected Lane A Llama 3B tuple: prove the
-staging artifact authority, adopted artifact, and local status evidence can be
-used by the physical staging journey without expanding into production
-activation. Public v1 `models catalog-economics` output stays unchanged until
-Lane B.
+The next work, if Build 1 continues, is the operator-side measured
+artifact-bound staging release: sign and serve the Lane A artifact feed on the
+staging coordinator so `models staging-input` reports `staging_input_ready` on
+a prepared, serving Apple Silicon provider. After that the physical staging
+journey (milestone 4) can start. No repo code change is known to be required
+for the feed publication itself; if one is found, it stays inside PR #1658.
+Public v1 `models catalog-economics` output stays unchanged until Lane B.
 
 Per `build1-single-pr-orchestrator-workflow-v1.md`, this work should continue
 inside PR #1658 as an internal milestone. #1658 should not merge merely because

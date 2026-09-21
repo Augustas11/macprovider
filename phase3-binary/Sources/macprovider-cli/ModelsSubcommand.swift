@@ -18,6 +18,7 @@ struct ModelsCommand: AsyncParsableCommand {
             ModelsImportCommand.self,
             ModelsVerifyArtifactCommand.self,
             ModelsIdentityCommand.self,
+            ModelsStagingInputCommand.self,
             ModelsSwitchCommand.self,
             ModelsStatusCommand.self,
             ModelsBrowseCommand.self,
