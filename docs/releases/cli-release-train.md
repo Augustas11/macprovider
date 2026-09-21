@@ -102,7 +102,7 @@ buyer CB is **canary** (not `on`). Do not raise slots.
 | Studio CB serve-path: accept bfloat16 KV + per-row compiled writeback (isolated 18080 HTTP 200; buyer CB still off) | merged | #1661 |
 | Stop serial Qwen tool turns after the first complete valid call (omitted/`false` `parallel_tool_calls`; leftover markup must not hang) | merged | #1662 |
 | Keep CB canary streams alive past the first lockstep hop | merged | #1665 |
-| Pearl keyed first-turn chats enter Studio CB canary (cache-hit without paged handoff stays serial) | in progress | #1666 |
+| Pearl keyed first-turn chats enter Studio CB canary (positive cache hits stay serial until AC-26) | merged | #1666 |
 
 #1453 closes when a candidate that includes the **merged** rows is promoted to
 the fleet. #1569 is a later CLI. Spec promotion #1583 is not a CLI change.
