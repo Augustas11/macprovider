@@ -286,9 +286,9 @@ public struct ChatCompletionRequest: Sendable {
               presencePenalty == 0.0,
               frequencyPenalty == 0.0,
               stop.isEmpty,
-              conversationKey == nil,
+              conversationKey == nil, // ConversationCache and speculative KV must not share (SPEC-037 FR-KVP2.5; auto-prefix keys also force ordinary decode)
               isPlainTextResponseFormat,
-              !hasToolMessagesOrAssistantToolCalls,
+              !hasToolMessagesOrAssistantToolCalls, // Pi/Cline tool loops cannot spec-decode under SPEC-028 FR-5
               Self.hasNoToolEntries(promptSource.tools),
               Self.isAbsentOrNull(promptSource.toolChoice),
               Self.isAbsentNullOrFalse(promptSource.logprobs),

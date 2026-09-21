@@ -146,6 +146,24 @@ final class NativeToolCallStreamEmitterTests: XCTestCase {
         XCTAssertEqual(emitter.visibleContentPrefix(of: "Almost <tool_cal"), "Almost ")
     }
 
+    func testObserveDropsCloseTagAfterCompleteJSON() {
+        var emitter = NativeToolCallStreamEmitter(
+            modelID: "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
+            allowedFunctionNames: ["read"]
+        )
+        let events = emitter.observe(
+            """
+            I'll help you find the Makefile.
+
+            <tool_call>{"name":"read","arguments":{"path":"Makefile"}}</tool_call>
+            """
+        )
+        XCTAssertEqual(toolDeltaNames(events), ["read"])
+        XCTAssertTrue(emitter.suppressesAssistantContent)
+        XCTAssertEqual(emitter.visibleContentPrefix(of: "</tool_call>\n"), "")
+        XCTAssertTrue(emitter.observe("</tool_call>").isEmpty)
+    }
+
     private func argumentFragments(_ events: [StreamChunk]) -> [String] {
         events.compactMap { chunk in
             if case let .toolCallDelta(delta) = chunk {

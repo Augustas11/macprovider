@@ -39,6 +39,8 @@ func TestChatRequestRejectsAmbiguousAdmissionFields(t *testing.T) {
 		{"format_duplicate", `"response_format":{"type":"json_object"},"response_format":null`},
 		{"format_type_case", `"response_format":{"type":"json_object","Type":"text"}`},
 		{"format_type_duplicate", `"response_format":{"type":"json_object","type":"text"}`},
+		{"tools_case", `"Tools":[{"type":"function","function":{"name":"read"}}]`},
+		{"tools_duplicate", `"tools":[],"tools":[{"type":"function","function":{"name":"read"}}]`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			body := `{"model":"model-a","messages":[{"role":"user","content":"hi"}],` + tc.fields + `}`

@@ -33,6 +33,7 @@ type chatRequest struct {
 	N              *int              `json:"n"`
 	Stream         bool              `json:"stream"`
 	ResponseFormat json.RawMessage   `json:"response_format"`
+	Tools          json.RawMessage   `json:"tools"`
 }
 
 type tokenUsage struct {
@@ -613,7 +614,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		_ = s.store.ReleaseConcurrency(context.Background(), subject.AccountID, requestID(r), s.now())
 	}()
 
-	internalConversation, convIsAutoPrefix, invalidConvTag := s.chatConversationKey(upCtx, r, subject, authn.Demo, chat.Messages)
+	internalConversation, convIsAutoPrefix, invalidConvTag := s.chatConversationKey(upCtx, r, subject, authn.Demo, chat.Messages, chat.Tools)
 	if invalidConvTag {
 		s.refundWalletAwareReservation(subject, requestID(r))
 		writeError(w, http.StatusBadRequest, "invalid_request_error", "invalid_conversation_tag", "Invalid conversation tag")
@@ -3085,41 +3086,72 @@ func (s *Server) deriveConversationKey(accountID, tag string) string {
 }
 
 // prefixConversationTag derives the reserved auto.prefix.* tag from a chat
-// messages slice. The prefix is defined as messages from the start through
-// and including the first role==user message (case-insensitive). Malformed
-// message objects (those that cannot be unmarshalled to extract a role) are
-// skipped. Returns "", false when no user message is found.
+// messages slice. When a system/developer scaffold or non-empty tools array
+// is present, the hash is that scaffold plus normalized tools (SPEC-006-R014)
+// so unique user questions still share ConversationCache. Otherwise it is
+// messages through the first role==user message (SPEC-006-R012). Malformed
+// message objects are skipped. Returns "", false when no user message is found.
 //
-// The tag is: "auto.prefix." + hex(sha256(json.Marshal(prefixItems))[:16]).
-// Same first-user-message prefix across tool turns ⇒ identical tag ⇒ same
+// The tag is: "auto.prefix." + hex(sha256(canonical)[:16]). Same scaffold+tools
+// (or same first-user prefix when neither is present) ⇒ identical tag ⇒ same
 // conv: key after deriveConversationKey, enabling provider ConversationCache
-// hits without buyer X-MacProvider-Conversation or sticky routing. SPEC-006-R012.
-func prefixConversationTag(messages []json.RawMessage) (string, bool) {
-	var prefix []json.RawMessage
+// hits without buyer X-MacProvider-Conversation or sticky routing.
+func prefixConversationTag(messages []json.RawMessage, tools json.RawMessage) (string, bool) {
+	var scaffold []json.RawMessage
+	var prefixThroughUser []json.RawMessage
 	foundUser := false
 	for _, msg := range messages {
 		var m struct {
 			Role string `json:"role"`
 		}
 		if err := json.Unmarshal(msg, &m); err != nil {
-			// Skip malformed message objects.
 			continue
 		}
-		prefix = append(prefix, msg)
+		if !foundUser {
+			prefixThroughUser = append(prefixThroughUser, msg)
+		}
 		if strings.EqualFold(m.Role, "user") {
 			foundUser = true
-			break
+			continue
+		}
+		if !foundUser {
+			scaffold = append(scaffold, msg)
 		}
 	}
 	if !foundUser {
 		return "", false
 	}
-	b, err := json.Marshal(prefix)
+	normalizedTools := normalizeAutoPrefixTools(tools)
+	if len(scaffold) > 0 || len(normalizedTools) > 0 {
+		canonical := struct {
+			Scaffold []json.RawMessage `json:"scaffold"`
+			Tools    json.RawMessage   `json:"tools,omitempty"`
+		}{Scaffold: scaffold, Tools: normalizedTools}
+		b, err := json.Marshal(canonical)
+		if err != nil {
+			return "", false
+		}
+		sum := sha256.Sum256(b)
+		return "auto.prefix." + hex.EncodeToString(sum[:16]), true
+	}
+	b, err := json.Marshal(prefixThroughUser)
 	if err != nil {
 		return "", false
 	}
 	sum := sha256.Sum256(b)
 	return "auto.prefix." + hex.EncodeToString(sum[:16]), true
+}
+
+func normalizeAutoPrefixTools(tools json.RawMessage) json.RawMessage {
+	trimmed := bytes.TrimSpace(tools)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return nil
+	}
+	var arr []json.RawMessage
+	if err := json.Unmarshal(trimmed, &arr); err != nil || len(arr) == 0 {
+		return nil
+	}
+	return trimmed
 }
 
 // chatConversationKey returns the gateway-internal conversation key to forward
@@ -3133,14 +3165,15 @@ func prefixConversationTag(messages []json.RawMessage) (string, bool) {
 //     valid AND coordinator sticky metadata agrees; invalid tag → invalidTag=true
 //     (caller MUST 400, do NOT fall through to auto-prefix).
 //     isAutoPrefix=false; caller sets X-MacProvider-Internal-Conv.
-//  2. Auto-prefix (SPEC-006-R012): for authenticated non-demo requests, derive
-//     a prefix-cache key from messages through the first user turn so
-//     provider ConversationCache can populate across tool turns. Does NOT
+//  2. Auto-prefix (SPEC-006-R012 / R014): for authenticated non-demo
+//     requests, derive a prefix-cache key from the system+tools scaffold
+//     when present, else messages through the first user turn, so provider
+//     ConversationCache can populate across unique questions. Does NOT
 //     enable SPEC-004 sticky affinity; coordinator applySticky stays gated on
 //     routing.sticky_enabled. isAutoPrefix=true; caller sets
 //     X-MacProvider-Internal-Conv-Cache (coordinator reads for cache context,
 //     skips applySticky/stickyStore). Demo MUST NOT receive a key.
-func (s *Server) chatConversationKey(ctx context.Context, r *http.Request, subject usageSubject, demo bool, messages []json.RawMessage) (key string, isAutoPrefix bool, invalidTag bool) {
+func (s *Server) chatConversationKey(ctx context.Context, r *http.Request, subject usageSubject, demo bool, messages []json.RawMessage, tools json.RawMessage) (key string, isAutoPrefix bool, invalidTag bool) {
 	if s.cfg.Routing.StickyEnabled && !demo {
 		if raw := r.Header.Get("X-MacProvider-Conversation"); raw != "" {
 			tag := strings.TrimSpace(raw)
@@ -3160,7 +3193,7 @@ func (s *Server) chatConversationKey(ctx context.Context, r *http.Request, subje
 	// X-MacProvider-Internal-Conv-Cache (not X-MacProvider-Internal-Conv) so
 	// the coordinator sticky paths never see it.
 	if !demo && subject.AccountID != "" && strings.TrimSpace(s.cfg.Auth.KeyHashSecret) != "" {
-		if tag, ok := prefixConversationTag(messages); ok {
+		if tag, ok := prefixConversationTag(messages, tools); ok {
 			return s.deriveConversationKey(subject.AccountID, tag), true, false
 		}
 	}

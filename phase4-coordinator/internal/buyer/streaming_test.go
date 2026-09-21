@@ -112,6 +112,51 @@ func TestFinalCloseNoWithdrawalRejectsContentAfterToolOpen(t *testing.T) {
 	}
 }
 
+func TestRewriteDropsLeftoverToolMarkupAfterCompleteArgs(t *testing.T) {
+	validator := newStreamToolCallFinalValidator()
+	open := `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_0123456789abcdef","type":"function","function":{"name":"read","arguments":""}}]}}]}` + "\n"
+	args := `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"path\":\"Makefile\"}"}}]}}]}` + "\n"
+	leftover := `data: {"choices":[{"delta":{"content":"</tool_call>\n"}}]}` + "\n"
+	if _, err := validator.rewriteAndObserve(open + args); err != nil {
+		t.Fatalf("open+args: %v", err)
+	}
+	out, err := validator.rewriteAndObserve(leftover)
+	if err != nil {
+		t.Fatalf("leftover close tag after complete args must not kill the stream: %v", err)
+	}
+	if strings.Contains(out, "</tool_call>") {
+		t.Fatalf("leftover markup still forwarded: %s", out)
+	}
+	if strings.Contains(out, `"content"`) {
+		t.Fatalf("stripped content field should be absent: %s", out)
+	}
+}
+
+func TestRewriteDropsTrailingProseWhenArgsComplete(t *testing.T) {
+	validator := newStreamToolCallFinalValidator()
+	block := streamingToolDelta(0, "call_0123456789abcdef", "lookup", `{"ok":true}`)
+	if _, err := validator.rewriteAndObserve(block); err != nil {
+		t.Fatalf("complete args: %v", err)
+	}
+	out, err := validator.rewriteAndObserve(`data: {"choices":[{"delta":{"content":"Thanks!"}}]}` + "\n")
+	if err != nil {
+		t.Fatalf("complete-args trailing prose must be dropped, not fatal: %v", err)
+	}
+	if strings.Contains(out, "Thanks!") {
+		t.Fatalf("trailing prose still forwarded: %s", out)
+	}
+}
+
+func TestRewriteStillRejectsProseWithdrawalWhileArgsIncomplete(t *testing.T) {
+	validator := newStreamToolCallFinalValidator()
+	if _, err := validator.rewriteAndObserve(streamingToolDelta(0, "call_0123456789abcdef", "lookup", `{"ok":`)); err != nil {
+		t.Fatalf("opening: %v", err)
+	}
+	if _, err := validator.rewriteAndObserve(`data: {"choices":[{"delta":{"content":"fallback"}}]}` + "\n"); err == nil {
+		t.Fatal("incomplete args plus real prose must still fail")
+	}
+}
+
 func TestByteCapInclusiveBoundaryAndAggregateStreaming(t *testing.T) {
 	t.Run("per_call_inclusive", func(t *testing.T) {
 		arguments := `{"blob":"` + strings.Repeat("x", maxToolCallArgumentsBytes-len(`{"blob":""}`)) + `"}`
