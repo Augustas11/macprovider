@@ -2,7 +2,7 @@
 
 Status: active control ledger
 Date: 2026-09-15
-Base evidence: `origin/main` at `12de7aea` plus PR #1649
+Base evidence: `origin/main` at `7c2e4d97` plus the Lane A private preparation-state record PR
 Decision: freeze new Build 1 implementation slices unless they name one Build 1 lane from this document.
 
 ## Purpose
@@ -62,7 +62,8 @@ future sessions will keep interpreting stale handoffs as active work.
 | #1519 | `82e8f7c7` | Configured v2 storage budget groundwork is landed behind private boundaries. | No public v2 status, env/YAML runtime parser, preparation action, admission, settlement, payout, release, or production activation. |
 | #1525 | `68b90269` | Lane A `macprovider-cli models prepare` exists behind exact tuple, staging coordinator, `--json`, and `--yes` guards, and fails closed with transaction events. | No signed artifact authority, artifact download, staging, durable adoption, physical provider run, admission, settlement, payout, release, or production activation. |
 | #1530 | `4913590c` | The guarded `models prepare` path verifies the exact Lane A signed artifact authority tuple from the staging artifact feed before doing anything else. | No artifact download, staging, durable adoption, physical provider run, admission, settlement, payout, release, or production activation. |
-| #1649 | open, head `1971e7a6` | `models prepare` stages the exact MLX snapshot into an isolated hash-qualified directory, verifies the snapshot-manifest digest against the signed authority, and adopts it into the provider-owned durable store; failure, timeout, and cancellation leave the active model and durable store unchanged. | No private preparation-state record, `serve`/status evidence binding, staging admission, gateway request, receipt/audit correlation, settlement, payout, release, physical run, or production activation. |
+| #1649 | `4cf73a6f` | `models prepare` stages the exact MLX snapshot into an isolated hash-qualified directory, verifies the snapshot-manifest digest against the signed authority, and adopts it into the provider-owned durable store; failure, timeout, and cancellation leave the active model and durable store unchanged. | No private preparation-state record, `serve`/status evidence binding, staging admission, gateway request, receipt/audit correlation, settlement, payout, release, physical run, or production activation. |
+| PR-PENDING | open | After durable adoption, `models prepare` writes the exact adopted Lane A tuple into the private published-inventory record through the existing `ModelPreparationPrivateStore` envelope contracts, with a persisted publication receipt under the managed-v3 namespace; the private state bootstraps before any transfer and fails closed; failure, timeout, and cancellation never write or mutate the record; public `models catalog-economics --json` v1 output is unchanged. | No `serve`/status evidence binding, staging admission, gateway request, receipt/audit correlation, settlement, payout, release, physical run, public v2 projection, cleanup transaction, or production activation. Preparation alone never implies admission, settlement, or earnings. |
 
 Current open PRs as of 2026-09-15 are not Build 1 control blockers:
 
@@ -91,9 +92,6 @@ Current open PRs as of 2026-09-15 are not Build 1 control blockers:
 
 Lane A blockers:
 
-- Record private preparation state for the adopted Lane A artifact through the
-  existing `ModelPreparationPrivateStore` contracts so `models catalog-economics`
-  can project it without touching public v1 output.
 - Bind `serve` local status evidence (`model_hash`, `weights_manifest_sha256`)
   to the adopted Lane A artifact for the evidence validator.
 - Produce a measured, artifact-bound staging release or equivalent staging
@@ -117,12 +115,12 @@ Lane B blockers:
 
 ## Next Authorized Action
 
-The next implementation work, if Build 1 continues, is the Lane A private
-preparation-state record for the adopted artifact: after `models prepare`
-adopts the verified Lane A tuple (#1649), write the private published-inventory
-record through the existing `ModelPreparationPrivateStore` envelope contracts
-and keep public `models catalog-economics` v1 output unchanged. After that, the
-`serve` local status evidence binding for the same artifact.
+The next implementation work, if Build 1 continues, is the `serve` local status
+evidence binding for the adopted Lane A artifact: bind `GET /v1/status`
+`model_hash` / `weights_manifest_sha256` to the durable artifact and its private
+published-inventory record (receipt `artifact_sha256`, `artifact_identity_digest`)
+so the evidence validator can correlate a physical run with the exact adopted
+tuple. Public v1 `models catalog-economics` output stays unchanged until Lane B.
 
 That PR or handoff must state:
 

@@ -132,6 +132,26 @@ final class ModelPreparationRootTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: weak.appendingPathComponent("artifact", isDirectory: true).path))
     }
 
+    func testBootstrapToleratesDenyOnlyExtendedACLOnAncestorButRejectsItOnRoots() throws {
+        let root = try temporaryDirectory("model-prep-root-deny-ancestor")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let ancestor = root.appendingPathComponent("ancestor", isDirectory: true)
+        try FileManager.default.createDirectory(at: ancestor, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        try addDenyDeleteACLEntry(to: ancestor)
+        let store = ModelPreparationPrivateStore(
+            authorityRoot: ancestor.appendingPathComponent("authority", isDirectory: true),
+            artifactRoot: ancestor.appendingPathComponent("artifact", isDirectory: true)
+        )
+        let snapshot = try store.bootstrap()
+        XCTAssertTrue(FileManager.default.fileExists(atPath: snapshot.namespacePath))
+
+        // The private roots themselves still reject any extended entry.
+        try addDenyDeleteACLEntry(to: ancestor.appendingPathComponent("artifact", isDirectory: true))
+        XCTAssertThrowsError(try store.bootstrap()) { error in
+            XCTAssert(String(describing: error).contains("extended ACL"), String(describing: error))
+        }
+    }
+
     func testBootstrapRejectsExistingRootIdentityWithExtendedACL() throws {
         let fixture = try StoreFixture.make("model-prep-root-acl")
         defer { try? FileManager.default.removeItem(at: fixture.root) }
