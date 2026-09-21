@@ -1,9 +1,10 @@
 # macprovider research roadmap
 
 **Living doc — state drifts; verify against `origin/main` before acting.**
-Last synthesized: 2026-07-29 (SPEC-038 batching SPEC merged #799 — scaffolding IMPL in flight, land flag-off; throughput engine gated on upstream PR #263;
-SPEC-037 KV-survival shipped dormant #771; SPEC-036 compute-integrity SPEC merged
-#390, IMPL pending). Ranks research/e2e threads by expected impact on buyer UX
+Last synthesized: 2026-09-21 (SPEC-038 batching in flight unchanged; SPEC-037 KV-survival
+hardware gates PASS — KVS-01a/b/02/03 all PASS on isolated Mac Studio 18080, evidence
+#1654 #1657, PR #1660 closed; enable parked on ZDR/privacy strategy, not a missing
+gate; SPEC-036 compute-integrity SPEC merged #390, IMPL pending). Ranks research/e2e threads by expected impact on buyer UX
 (time-to-first-token, tokens/sec, reliability) and provider UX (model selection,
 earnings). Source: session synthesis of `docs/research/RESEARCH_2*`,
 `audits/_prompts/RESEARCH_2*`, `beta/DECISION_CRITERIA.md`.
@@ -15,7 +16,7 @@ earnings). Source: session synthesis of `docs/research/RESEARCH_2*`,
 | **236** P4 cache-reuse regression gate | **MERGED** (PR **#696**, 2026-07-22; 0 C/H/M, governance green) | B8 armed PASS≥0.60 / WARN[0.50,0.60) / FAIL<0.50 from measured **0.725** baseline; B9 record-only | wire the continuous/CI phase-C consumer (must treat WARN+SKIP non-green; run-salt the sticky tag) |
 | **235** P3 thermal-soak INSTRUMENT | **MERGED** (PR **#698**, 2026-07-22; B10 sustained-TPS retention) | instrument only; soak **campaign parked** for lab Mac | run campaign on lab Mac → safe-sustained-load envelope for #584 (Tier C) |
 | **234** cold/warm TTFT | harness merged (#668); campaign armed + accumulating | — | calibration PR / prewarm rec / cold-start SLO pend passive data; cold idle-evict cell = post-reboot-only (no lab Mac) |
-| **233 / SPEC-037** KV survival on restart | **SHIPPED DORMANT** — SPEC merged (PR **#702** v0.1.0, 2026-07-23) + IMPL merged (PR **#771** v0.1.1, `d53e8650`, 2026-07-27). Encrypted provider-local KV disk tier behind `ConversationCache`; default-off, synthetic-key-only, residency-only — merge enables nothing, worst-case defect = fallback to normal prefill. | **Approach A** delivered; no receipt change | **blind + real-hardware verification is the runtime-feature enable gate** (Entry **199**): a 5-lane R5 PASS + green CI + unit tests all passed while the feature was inert, so audits are *not* the enable gate — a real-Mac restart-persistence run is. Feature stays off until that passes. |
+| **233 / SPEC-037** KV survival on restart | **LAB GATES DONE — ENABLE PARKED** — SPEC merged (PR **#702** v0.1.0, 2026-07-23) + IMPL merged (PR **#771** v0.1.1, `d53e8650`, 2026-07-27). Machinery: login keychain #1648, 1 GiB ceiling #1655. Hardware gates on Mac Studio isolated 18080, fake keys, live Pearl 8080 not used: KVS-01a PASS 30/30 restart disk_hit (~1.6k), evidence #1654, Entry 244; KVS-01b PASS 30/30 at 8k disk_hit (cached=8016, restored ~1.1s vs miss ~5.5s, write p95 531ms over 250ms cap), evidence #1657, Entry 246; KVS-02 PASS smoke (same-family model switch → miss, Coder-30B vs Qwen3-8B), PR #1660 closed; KVS-03 PASS smoke (same model id, different artifact sha). | **All lab gates passed.** Enable is a **strategy hold**: saving KV on home Macs conflicts with ZDR/privacy promises and private-pool design. Malibu must decide ZDR/private-pool scope before turning this on. KVS-04 (24h soak) and KVS-05 (prewarm mix) are not the next research action. | **No remaining engineering gate.** Decision to enable (this Mac and/or all providers) is TBD on strategy, not on a missing hardware run. |
 | **232 / SPEC-038** continuous batching | **SPEC MERGED** (PR **#799**, `1d78778a`; 0 C/H/M). Scaffold PR **#804 HELD** (activation theory dead — see below). | **Build it in-house** — upstream will never deliver it (see addendum). SPEC-028 spec-decode mutually exclusive in v1. | **See `RESEARCH_232_ADDENDUM_PAGED_REDECISION_2026-07-29.md` (corrected).** Upstream #263 is structurally dead (Layr abandoned it for a private paged fork; competitor forked the whole MLX stack). **Batching — esp. PAGED / memory-servability — is strategic infrastructure for the network being built (attracts Ultra providers + big-model/long-context buyers; concurrency-independent), NOT gated on today's fleet occupancy.** **FEASIBILITY SETTLED — both spikes PASS (on prod-accurate `mlx-swift 0.31.4`).** Phase-0 (`e5ded571`): custom PagedAttention Metal kernel registers beside the pinned tag (`MLXFast.metalKernel`) → 3a, no `mlx` fork. **Phase-2 (`acc30b1e`): per-model injection PASS — a `PagedKVCache` on the public `KVCache` seam gives EXACT greedy parity (40/40 tokens) on Llama-3.2-3B AND Qwen2.5-7B, architecture-GENERAL (one cache, all dense models), on the production fp16 KV path, NO fork.** (A light `mlx-swift-lm` fork — not `mlx` core — is optional, only for a fully-fused max-perf op; already numerically de-risked.) **Phase-3 (`da21af53`): MoE PASS on the LIVE production model** — `Qwen3-Coder-30B-A3B` (48 layers, 128 experts) gives EXACT parity (40/40) with the SAME unchanged `PagedKVCache`; cache path is plain `{KVCacheSimple:48}` (no sliding-window/quantized/hybrid), so MoE routing is orthogonal to attention paging. **ALL 3 spikes PASS on dense + live MoE → every attention-side feasibility risk retired, no fork, no per-model work.** Remaining is pure engineering: the batching **scheduler** (incl. MoE expert-dispatch across batched seqs — scheduler-side, not attention) + paged **block allocator**, both Swift. Quantized `kvBits` KV = separate surface, NOT on prod path. **NEXT = write SPEC-038 v0.2 (reframe activation→locally-owned, keep serving-safety half) + new paged-KV/paged-attention engine spec, on verified ground → then build (allocator → PagedKVCache → scheduler).** #804 held; SPEC-038 v0.1 marked SUPERSEDED. |
 | **231** oMLX calibration | synthesized + refreshed | advisory-only, ~zero shipped impact, blocked on >32GB Mac; Entry 179 + `UPSTREAM_WATCH` refreshed (oMLX v0.5.3, board ~340k rows) | FB-02/03/04 benches (lab-Mac cluster); oMLX-seeded gates = issue #687 |
 
@@ -53,20 +54,23 @@ earnings). Source: session synthesis of `docs/research/RESEARCH_2*`,
      throughput + per-request-usage-correctness run is the enable gate, not green
      audits/CI), rebase on merged 037 KV, and confirm 038's batch-aware KV layout
      doesn't break 037's opaque serialization.
-2. **SPEC-037 real-hardware verification** (small, unblocks a shipped feature).
-   037 is merged but dormant; the enable gate per Entry 199 is a blind +
-   real-Mac restart-persistence run (deploy/crash/relaunch/reboot re-prefill hit
-   vs the in-RAM warm baseline, plus the buyer-purge primitive exercised). Until it
-   passes, the disk tier stays default-off. Blocked only on a controllable Mac to
-   run it — pairs with the Tier-C lab-Mac need.
+2. **SPEC-037 enable: strategy hold, not an engineering task.** Lab gates PASS:
+   KVS-01a–03 all PASS on isolated Mac Studio 18080 (evidence #1654, #1657; Entry
+   244, 246; PR #1660 closed without merge). The remaining block is a Malibu
+   ZDR/privacy strategy call — saving chat KV on home Macs conflicts with ZDR and
+   private-pool design. There is no missing hardware run. Skip this item until the
+   strategy decision lands. KVS-04 (24h soak) and KVS-05 (prewarm mix) are parked
+   for the same reason.
 
 ### Delivered SPECs (merged; IMPL/verification state noted)
 - **SPEC-038 — continuous batching** — **SPEC merged** (PR #799, `1d78778a`,
   2026-07-29; 0 C/H/M). **Scaffolding IMPL in flight** (Tier A item 1); land it
   flag-off as Path-A groundwork. Only the throughput *engine* is upstream-gated (no
   released mlx-swift-lm batch API; PR #263).
-- **SPEC-037 — KV survival** — SPEC #702 + IMPL #771 **merged, dormant**. Next:
-  the Entry-199 real-hardware enable gate (item 2 above).
+- **SPEC-037 — KV survival** — SPEC #702 + IMPL #771 **merged, dormant**. Hardware
+  gates PASS: KVS-01a–03 all PASS on isolated Mac Studio 18080 (evidence #1654,
+  #1657; Entry 244, 246; PR #1660 closed). Enable is a **strategy hold**
+  (ZDR/privacy — see Tier A item 2); not a missing gate.
 - **SPEC-036 — compute-integrity receipt companion** (settlement drift gate, from
   stale PR #390): **SPEC merged LOCK-ready** (PR **#390**, 2026-07-23,
   `specs/SPEC-036-compute-integrity-receipt.md`; 14-round audit converged). **IMPL
@@ -81,15 +85,15 @@ earnings). Source: session synthesis of `docs/research/RESEARCH_2*`,
 4. **RESEARCH_227 rate-card close-out** — Nemotron license + live OpenRouter
    re-pull; unblocks catalog pricing.
 
-### Tier C — the lab-Mac cluster (one M4 Max 64GB unblocks three + the 037 enable gate)
+### Tier C — the lab-Mac cluster (one M4 Max 64GB unblocks three; 037 enable is strategy-gated)
 5. Acquire one controllable lab Mac → unblocks simultaneously:
-   - **SPEC-037 KV-survival enable gate** — the Entry-199 blind + real-hardware
-     restart-persistence run that flips the shipped-dormant disk tier on.
    - **RESEARCH_235 P3 thermal-soak CAMPAIGN** — run the (now-merged #698) instrument
      to produce the "safe sustained-load envelope" #584's canary redesign consumes.
    - **RESEARCH_234 cold idle-evict cell** — the cold-TTFT measurement
      post-reboot-only can't cover.
    - **RESEARCH_231 FB-02/03/04** — catalog gate-loosening → provider availability.
+   *(SPEC-037 KV-survival enable is no longer lab-Mac-gated — hardware gates ran;
+   enable is now a strategy decision, not a hardware procurement dependency.)*
 
 ### Tier D — second wave / gated
 6. **SPEC-036 compute-integrity IMPL** — SPEC merged LOCK-ready (#390); the
@@ -153,10 +157,11 @@ stack?" question is **no longer the blocker**. The real gates are all
    settlement SPEC**, not the inference engine.
 
 ## Organizing insights
-- Shape as of 2026-07-27: e2e suite fully delivered (P1–P4). **SPEC-037/233 KV
-  survival SHIPPED dormant** (SPEC #702 + IMPL #771); **SPEC-036 compute-integrity
-  SPEC merged LOCK-ready** (#390) with IMPL still to build. The single top
-  unblocked lever is now **232/SPEC-038 continuous batching**.
+- Shape as of 2026-09-21: e2e suite fully delivered (P1–P4). **SPEC-037/233 KV
+  survival lab gates DONE** (SPEC #702 + IMPL #771 + KVS-01a–03 PASS on isolated
+  18080; enable parked on ZDR/privacy strategy); **SPEC-036 compute-integrity SPEC
+  merged LOCK-ready** (#390) with IMPL still to build. The single top unblocked
+  lever is now **232/SPEC-038 continuous batching**.
 - **"Unblocked" ≠ "implementable in full."** 233/037 was fully buildable and
   shipped; **232/038 is not** — its throughput engine depends on an unreleased
   upstream `mlx-swift-lm` batch API (PR #263), so only serial scaffolding builds
@@ -176,10 +181,12 @@ stack?" question is **no longer the blocker**. The real gates are all
   to 037's own pending enable gate.
 - The remaining backlog splits cleanly: **232/SPEC-038 batching (unblocked now)**,
   **036 compute-integrity IMPL (money-path, larger)**, **one hardware bottleneck
-  gating a cluster of four (037 enable gate / 235 campaign / 234 cold cell / 231 FB
-  → one lab Mac)**, and **demand-gated second-wave (237 Cluster-F, Goodhart)**.
-- The lab-Mac gap is a standalone procurement decision that now also unblocks the
-  037 enable gate, not just the three benches.
+  gating a cluster of three (235 campaign / 234 cold cell / 231 FB → one lab Mac)**,
+  **037 enable parked on ZDR/privacy strategy (not lab-Mac-gated)**, and
+  **demand-gated second-wave (237 Cluster-F, Goodhart)**.
+- The lab-Mac gap is a standalone procurement decision that unblocks 235/234/231.
+  **037 enable is no longer lab-Mac-gated — hardware ran; enable is
+  strategy-gated (ZDR/privacy).**
 - **Cluster-F sharding is now one thread, not two loose docs.** The shard track
   answered "can the engine work on MLX?" (yes, Spike 01) and the Mesh-LLM track
   answered "what really blocks it?" (billing/anonymity/availability/demand, not
