@@ -1039,6 +1039,66 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         ])
     }
 
+    func testAttachedServePathPrefillsChatPreparedMultiTokenPrompt() async throws {
+        guard PagedKVMetallibGate.defaultMetallibExists() else {
+            throw XCTSkip("MLX default metallib is unavailable in this test host")
+        }
+
+        let modelID = "mlx-community/Qwen-Test"
+        let backend = RuntimeBridgeScriptedBackend(scripts: [:])
+        let promptTokens = Array(repeating: Int32(3), count: 16)
+        let runtime = Self.attachedRuntime(
+            modelID: modelID,
+            backend: backend,
+            promptTokens: promptTokens
+        )
+        let request = try Self.chatRequest(modelID: modelID, maxTokens: 2)
+            .withRequestID("serve-path-prefill-16")
+
+        let completion = try await runtime.complete(request)
+        XCTAssertEqual(completion.promptTokens, 16)
+        XCTAssertEqual(completion.finishReason, "length")
+        let prefillCalls = await backend.prefillCallCount()
+        let prefillLengths = await backend.prefillPromptLengths()
+        let decodeCalls = await backend.decodeCallCount()
+        XCTAssertEqual(prefillCalls, 1)
+        XCTAssertEqual(prefillLengths, [15])
+        XCTAssertEqual(decodeCalls, 2)
+    }
+
+    func testAttachedServePathPrefillFailureReturnsReasonCoded503() async throws {
+        guard PagedKVMetallibGate.defaultMetallibExists() else {
+            throw XCTSkip("MLX default metallib is unavailable in this test host")
+        }
+
+        let modelID = "mlx-community/Qwen-Test"
+        let backend = RuntimeBridgeScriptedBackend(
+            scripts: [:],
+            prefillError: ContinuousBatchSchedulerError.unsupported("continuous_batching_invalid_cache_layout")
+        )
+        let runtime = Self.attachedRuntime(
+            modelID: modelID,
+            backend: backend,
+            promptTokens: Array(repeating: Int32(3), count: 16)
+        )
+        let request = try Self.chatRequest(modelID: modelID, maxTokens: 2)
+            .withRequestID("serve-path-prefill-fail")
+
+        do {
+            _ = try await runtime.complete(request)
+            XCTFail("expected serve-path prefill to fail closed")
+        } catch let error as APIError {
+            XCTAssertEqual(error.status, 503)
+            XCTAssertEqual(error.code, "continuous_batching_prefill_failed")
+            XCTAssertFalse(error.inferenceRan)
+            XCTAssertFalse(error.settlementRan)
+        }
+        let prefillCalls = await backend.prefillCallCount()
+        let decodeCalls = await backend.decodeCallCount()
+        XCTAssertEqual(prefillCalls, 1)
+        XCTAssertEqual(decodeCalls, 0)
+    }
+
     func testAttachedModelRuntimeCancelsBlockedCompletionSubmit() async throws {
         guard PagedKVMetallibGate.defaultMetallibExists() else {
             throw XCTSkip("MLX default metallib is unavailable in this test host")
@@ -1448,14 +1508,15 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
 
     private static func attachedRuntime(
         modelID: String,
-        backend: RuntimeBridgeScriptedBackend
+        backend: RuntimeBridgeScriptedBackend,
+        promptTokens: [Int32] = [3]
     ) -> ModelRuntime {
         let modelSHA = String(repeating: "a", count: 64)
         let proof = Self.sizingProof(modelID: modelID, modelSHA: modelSHA)
         let container = ModelContainer(context: ModelContext(
             configuration: ModelConfiguration(id: modelID),
             model: RuntimeBridgeFakeModel(nextTokenByInput: [:]),
-            processor: RuntimeBridgePromptProcessor(tokens: [3]),
+            processor: RuntimeBridgePromptProcessor(tokens: promptTokens),
             tokenizer: RuntimeBridgeFakeTokenizer()
         ))
         return ModelRuntime(
@@ -1746,16 +1807,29 @@ private struct RuntimeBridgePromptProcessor: UserInputProcessor {
 private actor RuntimeBridgeScriptedBackend: ContinuousBatchSchedulerBackend {
     private let scripts: [String: [Int]]
     private let decodeGate: RuntimeBridgeTestGate?
+    private let prefillError: (any Error)?
     private var decodeCalls = 0
+    private var prefillCalls = 0
+    private var prefillLengths: [Int] = []
     private var batches: [[String]] = []
 
-    init(scripts: [String: [Int]], decodeGate: RuntimeBridgeTestGate? = nil) {
+    init(
+        scripts: [String: [Int]],
+        decodeGate: RuntimeBridgeTestGate? = nil,
+        prefillError: (any Error)? = nil
+    ) {
         self.scripts = scripts
         self.decodeGate = decodeGate
+        self.prefillError = prefillError
     }
 
     func prefill(rows: [ContinuousBatchPrefillInput]) async throws -> [ContinuousBatchPrefillOutput] {
-        rows.map { ContinuousBatchPrefillOutput(requestID: $0.requestID) }
+        prefillCalls += 1
+        prefillLengths.append(contentsOf: rows.map(\.promptTokens.count))
+        if let prefillError {
+            throw prefillError
+        }
+        return rows.map { ContinuousBatchPrefillOutput(requestID: $0.requestID) }
     }
 
     func decode(rows: [ContinuousBatchDecodeInput]) async throws -> [ContinuousBatchDecodeOutcome] {
@@ -1778,6 +1852,14 @@ private actor RuntimeBridgeScriptedBackend: ContinuousBatchSchedulerBackend {
 
     func decodeCallCount() -> Int {
         decodeCalls
+    }
+
+    func prefillCallCount() -> Int {
+        prefillCalls
+    }
+
+    func prefillPromptLengths() -> [Int] {
+        prefillLengths
     }
 
     func decodeBatches() -> [[String]] {

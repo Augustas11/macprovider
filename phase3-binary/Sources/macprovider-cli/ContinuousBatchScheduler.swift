@@ -2036,6 +2036,7 @@ actor ContinuousBatchScheduler {
                 _ = try await allocator.extend(row.handle, by: chunk.count)
             } catch {
                 record(.localExtensionFailed)
+                ContinuousBatchingPolicy.logPrefillFailed(error)
                 _ = removePromptRow(id)
                 let released = await release(row.handle)
                 finish(
@@ -2064,6 +2065,7 @@ actor ContinuousBatchScheduler {
                 ))
             } catch {
                 record(.localPreparationFailed)
+                ContinuousBatchingPolicy.logPrefillFailed(error)
                 _ = removePromptRow(id)
                 let released = await release(row.handle)
                 finish(
@@ -2085,6 +2087,7 @@ actor ContinuousBatchScheduler {
             try validatePrefillOutputStructure(outputs, expectedRequestIDs: prepared.map { $0.row.request.id })
         } catch {
             record(.prefillFailed)
+            ContinuousBatchingPolicy.logPrefillFailed(error)
             for item in prepared {
                 guard let row = removePromptRow(item.row.request.id) else { continue }
                 let released = await release(row.handle)

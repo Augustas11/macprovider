@@ -647,6 +647,30 @@ final class ServingKnobsConfigTests: XCTestCase {
         )
     }
 
+    func testPrefillFailureTelemetryIsReasonCodedAndDoesNotEchoErrorText() {
+        XCTAssertEqual(
+            ContinuousBatchingPolicy.prefillFailureTelemetryLine(
+                ContinuousBatchSchedulerError.unsupported("continuous_batching_invalid_cache_layout")
+            ),
+            "event=batching_prefill_failed action=fail_closed reason=continuous_batching_invalid_cache_layout\n"
+        )
+        XCTAssertEqual(
+            ContinuousBatchingPolicy.prefillFailureReason(PagedKVContiguousCacheBridgeError.blockTableMismatch),
+            "paged_kv_block_table_mismatch"
+        )
+        XCTAssertEqual(
+            ContinuousBatchingPolicy.prefillFailureReason(PagedKVContiguousCacheBridgeError.invalidLayerState),
+            "paged_kv_invalid_layer_state"
+        )
+        struct PromptBearingError: Error, LocalizedError {
+            var errorDescription: String? { "prompt token dump sk-secret" }
+        }
+        let line = ContinuousBatchingPolicy.prefillFailureTelemetryLine(PromptBearingError())
+        XCTAssertTrue(line.hasPrefix("event=batching_prefill_failed action=fail_closed reason="))
+        XCTAssertFalse(line.contains("sk-secret"))
+        XCTAssertFalse(line.contains("prompt token dump"))
+    }
+
     func testRuntimePolicyKeepsConversationKeysOutOfCurrentBatchingRollout() {
         let canaryCapability = ContinuousBatchingPolicy.capability(
             mode: .canary,
