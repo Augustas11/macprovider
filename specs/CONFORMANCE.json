@@ -1937,7 +1937,7 @@
     {
       "requirement_id": "SPEC-018-R002",
       "spec_id": "SPEC-018",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/ToolCallParser.swift:enum ToolCallParser",
         "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:struct NativeToolCallStreamEmitter"
@@ -1947,15 +1947,13 @@
         "phase3-binary/Tests/macprovider-cliTests/NativeToolCallStreamEmitterTests.swift:final class NativeToolCallStreamEmitterTests"
       ],
       "journeys": [],
-      "evidence": [
-        {
-          "artifact": "commit:d86ddb123fdce7a030f1a0e593624b70f536ed57",
-          "source": null,
-          "captured_at": "2026-09-20",
-          "expires_at": "2027-09-20"
-        }
-      ],
-      "gap": null
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "SPEC-018 leftover-stream emitter (R002) still lives in NativeToolCallStreamEmitterTests, but commit evidence d86ddb12 no longer matches the serial-stop completion predicate on that struct. Re-record leftover-stream plus serial-stop evidence after PR #1662 lands a signed CLI."
+      }
     },
     {
       "requirement_id": "SPEC-018-R003",
@@ -1984,8 +1982,9 @@
       "state": "pending",
       "implementation": [
         "phase3-binary/Sources/MacProviderCore/ChatCompletionRequest.swift:parallelToolCalls",
+        "phase3-binary/Sources/MacProviderCore/ChatCompletionRequest.swift:stopsAfterFirstCompleteToolCall",
         "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:struct NativeToolCallStreamEmitter",
-        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:static func parseToolCallsIfRequested"
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:hasCompletedValidToolCall"
       ],
       "tests": [
         "phase3-binary/Tests/macprovider-cliTests/ChatCompletionRequestTests.swift:testOmittedParallelToolCallsIsSerial",

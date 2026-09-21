@@ -177,6 +177,40 @@ final class NativeToolCallStreamEmitterTests: XCTestCase {
         XCTAssertFalse(emitter.hasCompletedValidToolCall)
     }
 
+    func testIncompleteJSONWithCloseTagDoesNotComplete() {
+        var emitter = NativeToolCallStreamEmitter(
+            modelID: "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
+            allowedFunctionNames: ["read"]
+        )
+        _ = emitter.observe(#"<tool_call>{"name":"read","arguments":{"path":"Make</tool_call>"#)
+        XCTAssertFalse(emitter.hasCompletedValidToolCall)
+    }
+
+    func testXMLOuterCloseWithoutFunctionCloseDoesNotComplete() {
+        var emitter = NativeToolCallStreamEmitter(
+            modelID: "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
+            allowedFunctionNames: ["bash"]
+        )
+        _ = emitter.observe(#"<tool_call><function=bash><parameter=command>echo"#)
+        XCTAssertFalse(emitter.hasCompletedValidToolCall)
+        _ = emitter.observe(#"<tool_call><function=bash><parameter=command>echo</tool_call>"#)
+        XCTAssertFalse(emitter.hasCompletedValidToolCall)
+    }
+
+    func testArgumentCapAfterOpenDoesNotComplete() {
+        var emitter = NativeToolCallStreamEmitter(
+            modelID: "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
+            allowedFunctionNames: ["bash"]
+        )
+        _ = emitter.observe(#"<tool_call>{"name":"bash","arguments":{"command":"ok"}"#)
+        XCTAssertFalse(emitter.hasCompletedValidToolCall)
+        let big = String(repeating: "a", count: 1_100_000)
+        _ = emitter.observe(
+            #"<tool_call>{"name":"bash","arguments":{"command":"\#(big)"}}"#
+        )
+        XCTAssertFalse(emitter.hasCompletedValidToolCall)
+    }
+
     func testUndeclaredNameDoesNotComplete() {
         var emitter = NativeToolCallStreamEmitter(
             modelID: "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
@@ -212,5 +246,29 @@ final class NativeToolCallStreamEmitterTests: XCTestCase {
         let function = deltas[0][0]["function"] as? [String: Any]
         XCTAssertEqual(function?["arguments"] as? String, #"{"command":"echo hello"}"#)
         XCTAssertNil(deltas[0][0]["id"], "remainder must not reopen the tool call")
+    }
+
+    func testFallbackOpensUnstreamedSecondTool() {
+        let first = ToolCall(
+            id: "call_aaaaaaaaaaaaaaaa",
+            functionName: "read",
+            arguments: #"{"path":"Makefile"}"#
+        )
+        let second = ToolCall(
+            id: "call_bbbbbbbbbbbbbbbb",
+            functionName: "bash",
+            arguments: #"{"command":"gh pr view 1638"}"#
+        )
+        let deltas = ToolCall.openAIFallbackDeltas(
+            toolCalls: [first, second],
+            streamedArgumentsByIndex: [0: #"{"path":"Makefile"}"#]
+        )
+        XCTAssertGreaterThanOrEqual(deltas.count, 1)
+        let opener = deltas[0][0]
+        XCTAssertEqual(opener["index"] as? Int, 1)
+        XCTAssertEqual(opener["id"] as? String, "call_bbbbbbbbbbbbbbbb")
+        XCTAssertEqual(opener["type"] as? String, "function")
+        let function = opener["function"] as? [String: Any]
+        XCTAssertEqual(function?["name"] as? String, "bash")
     }
 }

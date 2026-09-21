@@ -4313,6 +4313,10 @@ actor ModelRuntime: ModelRuntimeServing {
                             }
 
                             let iterator = try TokenIterator(input: iteratorInput, model: generationContext.model, cache: kvCache, parameters: parameters)
+                            var serialToolObserver = NativeToolCallStreamEmitter(
+                                modelID: request.model,
+                                allowedFunctionNames: Self.toolFunctionNames(from: request.promptSource.tools)
+                            )
                             let result: BlockingGenerateResult = try await blockingInferenceExecutor.run { inferenceCancellation in
                                 BlockingGenerateResult(generate(input: iteratorInput, context: generationContext, iterator: iterator) { tokens in
                                     if !tokens.isEmpty {
@@ -4325,6 +4329,20 @@ actor ModelRuntime: ModelRuntimeServing {
                                     if HarmonyResponseParser.isHarmonyModelID(request.model),
                                        tokens.last.map(Self.isHarmonyTerminalToken) == true {
                                         return GenerateDisposition.stop
+                                    }
+                                    if request.stopsAfterFirstCompleteToolCall,
+                                       !HarmonyResponseParser.isHarmonyModelID(request.model)
+                                    {
+                                        let decoded = generationContext.tokenizer.decode(tokenIds: tokens)
+                                        let candidate = Self.streamingSafePrefix(
+                                            decoded,
+                                            stopTokenFilter: stopTokenFilter,
+                                            requestStops: request.stop
+                                        )
+                                        _ = serialToolObserver.observe(candidate.text)
+                                        if serialToolObserver.hasCompletedValidToolCall {
+                                            return GenerateDisposition.stop
+                                        }
                                     }
                                     return GenerateDisposition.more
                                 })
@@ -4954,7 +4972,7 @@ actor ModelRuntime: ModelRuntimeServing {
                                     requestStops: request.stop
                                 )
                                     if streamToolsIncrementally {
-                                    for event in toolStreamer.observe(candidate.text) {
+                                        for event in toolStreamer.observe(candidate.text) {
                                         onChunk(event)
                                     }
                                     if !toolStreamer.suppressesAssistantContent {
@@ -6519,6 +6537,7 @@ struct NativeToolCallStreamEmitter {
     private var sawToolDelimiter = false
     private var opened = false
     private var closed = false
+    private var completedValidToolCall = false
     private var emittedArguments = ""
     private var callID = "call_\(UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased())"
 
@@ -6539,9 +6558,10 @@ struct NativeToolCallStreamEmitter {
 
     var suppressesAssistantContent: Bool { opened || sawToolDelimiter }
 
-    /// True once a declared tool has complete arguments (closed JSON object or
-    /// closed function-XML). Used to stop serial turns without waiting for EOS.
-    var hasCompletedValidToolCall: Bool { opened && closed }
+    /// True once a declared tool has parser-valid, within-cap arguments (complete
+    /// JSON object or closed function-XML). Wrapper-close, prefixes, and cap
+    /// failures must not satisfy this; they must not stop a serial turn.
+    var hasCompletedValidToolCall: Bool { completedValidToolCall }
 
     func visibleContentPrefix(of text: String) -> String {
         if suppressesAssistantContent {
@@ -6567,10 +6587,8 @@ struct NativeToolCallStreamEmitter {
             let body = String(text[afterStart..<bodyEnd])
             var isClosed = text.range(of: endDelimiter, range: afterStart..<text.endIndex) != nil
             if allowsFunctionXML, body.contains("<function=") {
-                if body.contains("</function>") {
-                    isClosed = true
-                }
-                return observeNemotronXML(body: body, isClosed: isClosed)
+                // Outer </tool_call> is not a valid XML close; wait for </function>.
+                return observeNemotronXML(body: body, isClosed: body.contains("</function>"))
             }
             if !isClosed, ToolCallParser.firstCompleteJSONObject(in: body) != nil {
                 isClosed = true
@@ -6588,11 +6606,13 @@ struct NativeToolCallStreamEmitter {
     private mutating func observeJSONToolCall(body: String, isClosed: Bool) -> [StreamChunk] {
         let name: String
         let arguments: String
+        let parsedComplete: Bool
         if let object = ToolCallParser.firstCompleteJSONObject(in: body),
            let parsed = ToolCallParser.jsonToolCallNameAndArguments(in: object, argumentKey: argumentKey)
         {
             name = parsed.name
             arguments = parsed.arguments
+            parsedComplete = true
         } else {
             guard let parsedName = stringField("name", in: body),
                   let prefix = ToolCallParser.jsonArgumentsPrefix(in: body, argumentKey: argumentKey)
@@ -6601,6 +6621,7 @@ struct NativeToolCallStreamEmitter {
             }
             name = parsedName
             arguments = prefix
+            parsedComplete = false
         }
         // Fail closed: never stream a tool-call delta for an undeclared function name.
         guard let allowed = allowedFunctionNames, allowed.contains(name) else {
@@ -6625,6 +6646,9 @@ struct NativeToolCallStreamEmitter {
         }
         if isClosed {
             closed = true
+            if parsedComplete {
+                completedValidToolCall = true
+            }
         }
         return events
     }
@@ -6660,6 +6684,7 @@ struct NativeToolCallStreamEmitter {
                     emittedArguments = arguments
                     events.append(.toolCallDelta(StreamToolCallDelta(index: 0, id: nil, type: nil, functionName: nil, arguments: fragment)))
                 }
+                completedValidToolCall = true
             }
             closed = true
         }

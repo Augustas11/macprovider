@@ -14,8 +14,9 @@ token counts, PIDs. No buyer keys, no `settings.json` edits, no live
   `max_concurrency_override: 1`, `max_context_override: 16384`.
   SSH tunnel `localhost:18081` → Studio `127.0.0.1:18081` for Pi.
 - **Live processes left running:** 8080 PID **80741**
-  (`live.malibu.provider`, Qwen 30B); 18080 PID **93055**
-  (`macprovider-cb-serve-prefill`, CB canary, Qwen 30B).
+  (`live.malibu.provider`, Qwen 30B). 18080 (`macprovider-cb-serve-prefill`)
+  was PID 93055 during the Pi PASS; it was **not** killed by this
+  campaign. At the freeze-fix retest it was no longer listening.
 - **Model:** `qwen3-8b` /
   `mlx-community/Qwen3-8B-4bit` sha256
   `1f591f9c4fb38d05ea2d879d89a6eeab485c23a04eb75e3e0a289db9d95ec877`.
@@ -30,8 +31,8 @@ token counts, PIDs. No buyer keys, no `settings.json` edits, no live
 
 | Role | Path | SHA-256 | Identity |
 | --- | --- | --- | --- |
-| Isolated lab CLI | `/Users/a1/macprovider-serial-tool-stop/phase3-binary/.build/release/macprovider-cli` | `39a0b6fef0509c0641eb0fc3da618fc9ab308fda172bd6f8ab10aae2b651397a` | `swift build -c release` of `feat/serial-tool-turn-stop` `@88874f27`; `--version` still `1.8.123` |
-| Isolated serve | PID **99111** after 16k context restart (first serve was PID 98803 at 8k) | same SHA | `--port 18081 --no-join --no-idle-prewarm` |
+| Isolated lab CLI | `/Users/a1/macprovider-serial-tool-stop/phase3-binary/.build/release/macprovider-cli` | `725e8ef032bafafd7f9226a1c4af0a8026a338cbb6b60559bae6004462538e73` | `swift build -c release` after freeze-audit REVISE (`hasCompletedValidToolCall` parser-valid only; non-stream stop; parallel fallback opener); `--version` still `1.8.123` |
+| Isolated serve | PID **2635** (prior 99111 then 98803) | same SHA | `--port 18081 --no-join --no-idle-prewarm` |
 | Live 8080 | `/Users/a1/macprovider/macprovider-cli` | not used | PID 80741 throughout |
 | CB canary 18080 | worktree `macprovider-cb-serve-prefill` | not used | PID 93055 throughout |
 
@@ -42,6 +43,11 @@ token counts, PIDs. No buyer keys, no `settings.json` edits, no live
 - **Wire:** native `tool_calls` deltas for `read` with
   `arguments` `{"path":"Makefile"}`, then
   `finish_reason=tool_calls`, then `[DONE]`
+- **Retest after freeze REVISE** (parser-valid completion, non-stream
+  stop, parallel fallback opener): wall 1.47 s, `generation_ms=1008`,
+  `completion_tokens=120`, same `missingEndDelimiter` +
+  `finish_reason=tool_calls`. Binary SHA
+  `725e8ef032bafafd7f9226a1c4af0a8026a338cbb6b60559bae6004462538e73`.
 - **Log:** `malformed tool-call output … missingEndDelimiter` **and**
   `kv_cache_request_completed` `finish_reason=tool_calls`. Leftover
   close-tag did not hang and did not drop the stream.
@@ -73,6 +79,6 @@ enable, fleet promote, or signed-CLI cut.
 
 ## Not done here
 
-- Freeze three-lane `omc ask codex` (next, on this freeze diff)
+- Freeze three-lane `omc ask codex` (in progress on the REVISE follow-up)
 - Squash-merge / signed CLI cut (Loop B)
 - Sticky / CB / fleet flags
