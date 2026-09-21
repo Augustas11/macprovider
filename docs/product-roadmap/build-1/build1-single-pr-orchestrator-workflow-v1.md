@@ -81,13 +81,17 @@ Milestones stay inside PR #1658:
 1. Private preparation-state record after durable adoption.
    - Status: implemented in PR #1658 before this overlay.
    - Merge status: do not merge as a standalone slice.
-2. Serve/status evidence binding.
-   - Bind local `GET /v1/status` `model_hash` and
-     `weights_manifest_sha256` to the durable Lane A artifact and private
-     published-inventory receipt.
+2. Serve/status evidence correlation.
+   - Status: implemented in PR #1658 as an internal milestone.
+   - Correlate local `GET /v1/status` `model_hash` and
+     `weights_manifest_sha256` with the durable Lane A artifact, configured
+     release, and private published-inventory receipt.
+   - Do not claim descriptor-pinned runtime load custody until a later
+     implementation actually provides it.
    - Preserve public v1 `models catalog-economics --json` compatibility until
      Lane B.
 3. Measured artifact-bound staging input.
+   - Status: next internal milestone.
    - Prove the selected Llama 3B tuple has a measured, signed staging artifact
      authority or record the blocker without overclaiming.
 4. Physical Apple Silicon staging journey.

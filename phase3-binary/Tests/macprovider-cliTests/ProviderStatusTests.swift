@@ -1,4 +1,5 @@
 import Foundation
+import MacProviderCore
 import XCTest
 @testable import macprovider_cli
 
@@ -13,8 +14,96 @@ final class ProviderStatusTests: XCTestCase {
         func currentWorkloadTelemetry() -> ProviderWorkloadTelemetry { value }
     }
 
+    private struct Build1LaneAStatusFixture {
+        let durableRoot: URL
+        let binding: Build1LaneAStatusArtifactBinding
+    }
+
     private func makeCapacity(maxConcurrency: Int = 4) -> ProviderCapacity {
         ProviderCapacity(maxContextOverride: 50_000, maxConcurrencyOverride: maxConcurrency)
+    }
+
+    private func makeBuild1LaneAStatusFixture(payload: String) throws -> Build1LaneAStatusFixture {
+        let durableRoot = try tempDir()
+        let stagingRoot = try tempDir()
+        let weightURL = stagingRoot.appendingPathComponent("weights.bin")
+        try Data(payload.utf8).write(to: weightURL, options: .atomic)
+
+        let artifactSHA256 = try ModelArtifactVerifier.canonicalArtifactHash(directory: stagingRoot)
+        let durableStore = DurableModelArtifactStore(root: durableRoot)
+        _ = try durableStore.adoptVerifiedStaging(
+            staging: stagingRoot,
+            modelID: Build1LaneAPrepareProfile.artifactModelID,
+            revision: Build1LaneAPrepareProfile.artifactRevision,
+            sha256: artifactSHA256
+        )
+        let binding = try recordBuild1LaneAStatusBinding(
+            durableRoot: durableRoot,
+            artifactSHA256: artifactSHA256,
+            adoptedBytes: Int64(payload.utf8.count),
+            releaseID: "test-release"
+        )
+        return Build1LaneAStatusFixture(durableRoot: durableRoot, binding: binding)
+    }
+
+    private func recordBuild1LaneAStatusBinding(
+        durableRoot: URL,
+        artifactSHA256: String,
+        adoptedBytes: Int64,
+        releaseID: String,
+        declaredSizeBytes: Int? = nil
+    ) throws -> Build1LaneAStatusArtifactBinding {
+        let authority = Build1LaneAArtifactAuthority(
+            catalogKey: Build1LaneAPrepareProfile.catalogKey,
+            modelID: Build1LaneAPrepareProfile.artifactModelID,
+            revision: Build1LaneAPrepareProfile.artifactRevision,
+            artifactID: Build1LaneAPrepareProfile.artifactID,
+            hashAlgorithm: ModelArtifactIdentity.snapshotManifestV1,
+            hash: artifactSHA256,
+            sizeBytes: declaredSizeBytes ?? Int(adoptedBytes),
+            feedSHA256: String(repeating: "d", count: 64),
+            feedSignerKeyID: "test-signer",
+            releaseID: releaseID
+        )
+        let recorder = Build1LaneAPreparationRecorder(durableRoot: durableRoot)
+        let session = try recorder.open()
+        defer { session.close() }
+        _ = try session.record(
+            authority: authority,
+            adoptedSHA256: authority.hash,
+            adoptedBytes: adoptedBytes
+        )
+        return try XCTUnwrap(
+            recorder.readStatusArtifactBinding(
+                catalogKey: Build1LaneAPrepareProfile.catalogKey,
+                expectedArtifactSHA256: authority.hash,
+                expectedReleaseID: authority.releaseID
+            )
+        )
+    }
+
+    private func tempDir() throws -> URL {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("macprovider-provider-status-tests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        return root
+    }
+
+    private func removePublishedInventory(from durableRoot: URL) throws {
+        let inventory = durableRoot
+            .appendingPathComponent(Build1LaneAPreparationRecorder.authorityLeaf, isDirectory: true)
+            .appendingPathComponent(ModelPreparationSecureFilesystem.stateLeaf, isDirectory: true)
+            .appendingPathComponent("published-inventory.json")
+        try FileManager.default.removeItem(at: inventory)
+    }
+
+    private func removeReceipt(from durableRoot: URL, artifactIdentityDigest: String) throws {
+        let receipt = durableRoot
+            .appendingPathComponent(ModelPreparationSecureFilesystem.namespaceLeaf, isDirectory: true)
+            .appendingPathComponent(ModelPreparationSecureFilesystem.objectsLeaf, isDirectory: true)
+            .appendingPathComponent(artifactIdentityDigest, isDirectory: true)
+            .appendingPathComponent(Build1LaneAPreparationRecorder.receiptLeaf)
+        try FileManager.default.removeItem(at: receipt)
     }
 
     func testPausedAndDrainingStatesAtomicallyFenceNewRequests() async throws {
@@ -71,6 +160,7 @@ final class ProviderStatusTests: XCTestCase {
         let contract = try XCTUnwrap(body["local_status_contract"] as? [String: Any])
         let capabilities = try XCTUnwrap(contract["capabilities"] as? [String])
         XCTAssertTrue(capabilities.contains("model_liveness_token_v1"))
+        XCTAssertTrue(capabilities.contains("build1_lane_a_status_evidence.v1"))
 
         let liveness = try XCTUnwrap(body["model_liveness"] as? [String: Any])
         XCTAssertNotNil(liveness["token"] as? NSNumber, "token must be a number")
@@ -189,6 +279,661 @@ final class ProviderStatusTests: XCTestCase {
         XCTAssertEqual(identity["coordinator_key_role"] as? String, "previous")
         XCTAssertEqual(identity["transition_error"] as? String, "coordinator_previous_key_grace")
         XCTAssertEqual(identity["recovery_action"] as? String, "restore_current_key_or_run_recover_admission_identity")
+    }
+
+    func testStatusResponsePublishesCorrelatedBuild1LaneAStatusEvidence() async throws {
+        let fixture = try makeBuild1LaneAStatusFixture(payload: "status-bound-private-record")
+        let status = ProviderStatus(
+            modelID: Build1LaneAPrepareProfile.catalogKey,
+            modelLoaded: true,
+            capacity: makeCapacity(),
+            modelHash: fixture.binding.artifactSHA256,
+            modelHashAlgorithm: ModelArtifactIdentity.snapshotManifestV1,
+            weightsManifestSHA256: String(repeating: "f", count: 64)
+        )
+        let context = ProviderCatalogStatusContext(
+            trust: nil,
+            donorMode: false,
+            catalogKey: Build1LaneAPrepareProfile.catalogKey,
+            catalogModelID: Build1LaneAPrepareProfile.artifactModelID,
+            modelRevision: fixture.binding.modelRevision,
+            artifactSHA256: fixture.binding.artifactSHA256,
+            modelArtifactSHA256: fixture.binding.artifactSHA256,
+            configuredReleaseID: fixture.binding.releaseID,
+            configuredCatalogDigest: nil,
+            build1LaneA: ProviderBuild1LaneAStatusContext(
+                recordState: .recorded,
+                reason: "private_record_verified",
+                binding: fixture.binding
+            )
+        )
+
+        let body = RouterHandler.statusResponse(
+            await status.snapshot(),
+            providerID: "provider-a",
+            coordinatorURL: nil,
+            catalogStatus: context
+        )
+        let evidence = try XCTUnwrap(body["build1_lane_a"] as? [String: Any])
+        let record = try XCTUnwrap(evidence["private_record"] as? [String: Any])
+        let artifact = try XCTUnwrap(evidence["artifact"] as? [String: Any])
+        let runtimeCustody = try XCTUnwrap(evidence["runtime_custody"] as? [String: Any])
+        let boundary = try XCTUnwrap(evidence["proof_boundary"] as? [String: Any])
+
+        XCTAssertEqual(evidence["schema"] as? String, "build1_lane_a_status_evidence.v1")
+        XCTAssertEqual(evidence["state"] as? String, "correlated")
+        XCTAssertEqual(evidence["reason"] as? String, "status_matches_private_record_path_observed")
+        XCTAssertEqual(evidence["record_state"] as? String, "recorded")
+        XCTAssertEqual(evidence["model_hash"] as? String, fixture.binding.artifactSHA256)
+        XCTAssertEqual(evidence["model_hash_algorithm"] as? String, ModelArtifactIdentity.snapshotManifestV1)
+        XCTAssertEqual(evidence["model_hash_matches_private_record"] as? Bool, true)
+        XCTAssertEqual(evidence["model_hash_matches_config"] as? Bool, true)
+        XCTAssertEqual(evidence["model_hash_algorithm_matches_private_record"] as? Bool, true)
+        XCTAssertEqual(evidence["weights_manifest_sha256"] as? String, String(repeating: "f", count: 64))
+        XCTAssertEqual(evidence["weights_manifest_algorithm"] as? String, ModelArtifactIdentity.safetensorsManifestV1)
+        XCTAssertEqual(evidence["weights_manifest_present"] as? Bool, true)
+        XCTAssertEqual(evidence["weights_manifest_algorithm_matches_expected"] as? Bool, true)
+        XCTAssertEqual(runtimeCustody["descriptor_pinned_runtime_custody"] as? Bool, false)
+        XCTAssertEqual(runtimeCustody["observation_scope"] as? String, "path_observed")
+        XCTAssertEqual(record["artifact_identity_digest"] as? String, fixture.binding.artifactIdentityDigest)
+        XCTAssertEqual(record["receipt_sha256"] as? String, fixture.binding.receiptSHA256)
+        XCTAssertEqual(record["root_identity_digest"] as? String, fixture.binding.rootIdentityDigest)
+        XCTAssertEqual(record["inventory_generation"] as? Int, fixture.binding.inventoryGeneration)
+        XCTAssertEqual(artifact["model_id"] as? String, Build1LaneAPrepareProfile.artifactModelID)
+        XCTAssertEqual(artifact["artifact_sha256"] as? String, fixture.binding.artifactSHA256)
+        XCTAssertEqual(boundary["grants_admission"] as? Bool, false)
+        XCTAssertEqual(boundary["grants_settlement"] as? Bool, false)
+        XCTAssertEqual(boundary["production_activation"] as? Bool, false)
+        XCTAssertFalse(String(describing: evidence).contains(fixture.durableRoot.path))
+    }
+
+    func testStatusResponseDoesNotBindBuild1LaneAOnRuntimeHashMismatch() async throws {
+        let fixture = try makeBuild1LaneAStatusFixture(payload: "status-hash-mismatch")
+        let wrongHash = String(repeating: "0", count: 64)
+        let status = ProviderStatus(
+            modelID: Build1LaneAPrepareProfile.catalogKey,
+            modelLoaded: true,
+            capacity: makeCapacity(),
+            modelHash: wrongHash,
+            modelHashAlgorithm: ModelArtifactIdentity.snapshotManifestV1,
+            weightsManifestSHA256: String(repeating: "f", count: 64)
+        )
+        let context = ProviderCatalogStatusContext(
+            trust: nil,
+            donorMode: false,
+            catalogKey: Build1LaneAPrepareProfile.catalogKey,
+            catalogModelID: Build1LaneAPrepareProfile.artifactModelID,
+            modelRevision: fixture.binding.modelRevision,
+            artifactSHA256: fixture.binding.artifactSHA256,
+            modelArtifactSHA256: fixture.binding.artifactSHA256,
+            configuredReleaseID: fixture.binding.releaseID,
+            configuredCatalogDigest: nil,
+            build1LaneA: ProviderBuild1LaneAStatusContext(
+                recordState: .recorded,
+                reason: "private_record_verified",
+                binding: fixture.binding
+            )
+        )
+
+        let body = RouterHandler.statusResponse(
+            await status.snapshot(),
+            providerID: "provider-a",
+            coordinatorURL: nil,
+            catalogStatus: context
+        )
+        let evidence = try XCTUnwrap(body["build1_lane_a"] as? [String: Any])
+
+        XCTAssertEqual(evidence["state"] as? String, "unbound")
+        XCTAssertEqual(evidence["reason"] as? String, "model_hash_mismatch")
+        XCTAssertEqual(evidence["model_hash"] as? String, wrongHash)
+        XCTAssertEqual(evidence["model_hash_matches_private_record"] as? Bool, false)
+        XCTAssertEqual(evidence["model_hash_matches_config"] as? Bool, false)
+    }
+
+    func testStatusResponseDoesNotBindBuild1LaneAOnModelHashAlgorithmMismatch() async throws {
+        let fixture = try makeBuild1LaneAStatusFixture(payload: "status-hash-algorithm-mismatch")
+        let status = ProviderStatus(
+            modelID: Build1LaneAPrepareProfile.catalogKey,
+            modelLoaded: true,
+            capacity: makeCapacity(),
+            modelHash: fixture.binding.artifactSHA256,
+            modelHashAlgorithm: "sha256",
+            weightsManifestSHA256: String(repeating: "f", count: 64)
+        )
+        let context = ProviderCatalogStatusContext(
+            trust: nil,
+            donorMode: false,
+            catalogKey: Build1LaneAPrepareProfile.catalogKey,
+            catalogModelID: Build1LaneAPrepareProfile.artifactModelID,
+            modelRevision: fixture.binding.modelRevision,
+            artifactSHA256: fixture.binding.artifactSHA256,
+            modelArtifactSHA256: fixture.binding.artifactSHA256,
+            configuredReleaseID: fixture.binding.releaseID,
+            configuredCatalogDigest: nil,
+            build1LaneA: ProviderBuild1LaneAStatusContext(
+                recordState: .recorded,
+                reason: "private_record_verified",
+                binding: fixture.binding
+            )
+        )
+
+        let body = RouterHandler.statusResponse(
+            await status.snapshot(),
+            providerID: "provider-a",
+            coordinatorURL: nil,
+            catalogStatus: context
+        )
+        let evidence = try XCTUnwrap(body["build1_lane_a"] as? [String: Any])
+
+        XCTAssertEqual(evidence["state"] as? String, "unbound")
+        XCTAssertEqual(evidence["reason"] as? String, "model_hash_algorithm_mismatch")
+        XCTAssertEqual(evidence["model_hash_matches_private_record"] as? Bool, true)
+        XCTAssertEqual(evidence["model_hash_algorithm_matches_private_record"] as? Bool, false)
+    }
+
+    func testStatusResponseDoesNotBindBuild1LaneAOnWeightsManifestAlgorithmMismatch() async throws {
+        let fixture = try makeBuild1LaneAStatusFixture(payload: "status-weights-algorithm-mismatch")
+        let status = ProviderStatus(
+            modelID: Build1LaneAPrepareProfile.catalogKey,
+            modelLoaded: true,
+            capacity: makeCapacity()
+        )
+        let runtime = RuntimeSnapshot(
+            state: .ready,
+            container: nil,
+            modelID: Build1LaneAPrepareProfile.catalogKey,
+            modelHash: fixture.binding.artifactSHA256,
+            modelHashAlgorithm: ModelArtifactIdentity.snapshotManifestV1,
+            weightsManifestSHA256: String(repeating: "f", count: 64),
+            weightsManifestAlgorithm: "sha256"
+        )
+        let context = ProviderCatalogStatusContext(
+            trust: nil,
+            donorMode: false,
+            catalogKey: Build1LaneAPrepareProfile.catalogKey,
+            catalogModelID: Build1LaneAPrepareProfile.artifactModelID,
+            modelRevision: fixture.binding.modelRevision,
+            artifactSHA256: fixture.binding.artifactSHA256,
+            modelArtifactSHA256: fixture.binding.artifactSHA256,
+            configuredReleaseID: fixture.binding.releaseID,
+            configuredCatalogDigest: nil,
+            build1LaneA: ProviderBuild1LaneAStatusContext(
+                recordState: .recorded,
+                reason: "private_record_verified",
+                binding: fixture.binding
+            )
+        )
+
+        let body = RouterHandler.statusResponse(
+            await status.snapshot(),
+            providerID: "provider-a",
+            coordinatorURL: nil,
+            runtimeSnapshot: runtime,
+            catalogStatus: context
+        )
+        let evidence = try XCTUnwrap(body["build1_lane_a"] as? [String: Any])
+
+        XCTAssertEqual(evidence["state"] as? String, "unbound")
+        XCTAssertEqual(evidence["reason"] as? String, "weights_manifest_algorithm_mismatch")
+        XCTAssertEqual(evidence["model_hash_matches_private_record"] as? Bool, true)
+        XCTAssertEqual(evidence["model_hash_algorithm_matches_private_record"] as? Bool, true)
+        XCTAssertEqual(evidence["weights_manifest_present"] as? Bool, true)
+        XCTAssertEqual(evidence["weights_manifest_algorithm_matches_expected"] as? Bool, false)
+    }
+
+    func testStatusResponseRevalidatesBuild1LaneARecordEachObservation() async throws {
+        let fixture = try makeBuild1LaneAStatusFixture(payload: "status-refreshes-private-record")
+        let status = ProviderStatus(
+            modelID: Build1LaneAPrepareProfile.catalogKey,
+            modelLoaded: true,
+            capacity: makeCapacity(),
+            modelHash: fixture.binding.artifactSHA256,
+            modelHashAlgorithm: ModelArtifactIdentity.snapshotManifestV1,
+            weightsManifestSHA256: String(repeating: "f", count: 64)
+        )
+        let context = ProviderCatalogStatusContext(
+            trust: nil,
+            donorMode: false,
+            catalogKey: Build1LaneAPrepareProfile.catalogKey,
+            catalogModelID: Build1LaneAPrepareProfile.artifactModelID,
+            modelRevision: fixture.binding.modelRevision,
+            artifactSHA256: fixture.binding.artifactSHA256,
+            modelArtifactSHA256: fixture.binding.artifactSHA256,
+            configuredReleaseID: fixture.binding.releaseID,
+            configuredCatalogDigest: nil,
+            build1LaneAResolver: ProviderBuild1LaneAStatusResolver(
+                durableRoot: fixture.durableRoot,
+                expectedArtifactSHA256: fixture.binding.artifactSHA256,
+                expectedReleaseID: fixture.binding.releaseID
+            )
+        )
+
+        let first = RouterHandler.statusResponse(
+            await status.snapshot(),
+            providerID: "provider-a",
+            coordinatorURL: nil,
+            catalogStatus: context
+        )
+        XCTAssertEqual((first["build1_lane_a"] as? [String: Any])?["state"] as? String, "correlated")
+
+        try removePublishedInventory(from: fixture.durableRoot)
+        let second = RouterHandler.statusResponse(
+            await status.snapshot(),
+            providerID: "provider-a",
+            coordinatorURL: nil,
+            catalogStatus: context
+        )
+        let evidence = try XCTUnwrap(second["build1_lane_a"] as? [String: Any])
+        XCTAssertEqual(evidence["state"] as? String, "missing")
+        XCTAssertEqual(evidence["record_state"] as? String, "missing")
+        XCTAssertEqual(evidence["reason"] as? String, "private_record_missing")
+    }
+
+    func testStatusResponseDoesNotBindBuild1LaneAWhenExpectedArtifactDiffers() async throws {
+        let fixture = try makeBuild1LaneAStatusFixture(payload: "status-expected-hash-mismatch")
+        let status = ProviderStatus(
+            modelID: Build1LaneAPrepareProfile.catalogKey,
+            modelLoaded: true,
+            capacity: makeCapacity(),
+            modelHash: fixture.binding.artifactSHA256,
+            modelHashAlgorithm: ModelArtifactIdentity.snapshotManifestV1,
+            weightsManifestSHA256: String(repeating: "f", count: 64)
+        )
+        let context = ProviderCatalogStatusContext(
+            trust: nil,
+            donorMode: false,
+            catalogKey: Build1LaneAPrepareProfile.catalogKey,
+            catalogModelID: Build1LaneAPrepareProfile.artifactModelID,
+            modelRevision: fixture.binding.modelRevision,
+            artifactSHA256: fixture.binding.artifactSHA256,
+            modelArtifactSHA256: fixture.binding.artifactSHA256,
+            configuredReleaseID: fixture.binding.releaseID,
+            configuredCatalogDigest: nil,
+            build1LaneAResolver: ProviderBuild1LaneAStatusResolver(
+                durableRoot: fixture.durableRoot,
+                expectedArtifactSHA256: String(repeating: "1", count: 64),
+                expectedReleaseID: fixture.binding.releaseID
+            )
+        )
+
+        let body = RouterHandler.statusResponse(
+            await status.snapshot(),
+            providerID: "provider-a",
+            coordinatorURL: nil,
+            catalogStatus: context
+        )
+        let evidence = try XCTUnwrap(body["build1_lane_a"] as? [String: Any])
+        XCTAssertEqual(evidence["state"] as? String, "missing")
+        XCTAssertEqual(evidence["record_state"] as? String, "missing")
+        XCTAssertTrue(evidence["model_hash_matches_private_record"] is NSNull)
+    }
+
+    func testBuild1LaneAStatusReaderRequiresExpectedReleaseID() throws {
+        let fixture = try makeBuild1LaneAStatusFixture(payload: "status-release-mismatch")
+        let recorder = Build1LaneAPreparationRecorder(durableRoot: fixture.durableRoot)
+
+        let binding = try recorder.readStatusArtifactBinding(
+            catalogKey: Build1LaneAPrepareProfile.catalogKey,
+            expectedArtifactSHA256: fixture.binding.artifactSHA256,
+            expectedReleaseID: "other-release"
+        )
+
+        XCTAssertNil(binding)
+    }
+
+    func testBuild1LaneAStatusReaderValidatesAllReceiptsBeforeSelectingRelease() throws {
+        let fixture = try makeBuild1LaneAStatusFixture(payload: "status-corrupt-unselected-receipt")
+        let staleRelease = try recordBuild1LaneAStatusBinding(
+            durableRoot: fixture.durableRoot,
+            artifactSHA256: fixture.binding.artifactSHA256,
+            adoptedBytes: fixture.binding.estimatedBytes,
+            releaseID: "stale-release"
+        )
+        try removeReceipt(from: fixture.durableRoot, artifactIdentityDigest: staleRelease.artifactIdentityDigest)
+        let recorder = Build1LaneAPreparationRecorder(durableRoot: fixture.durableRoot)
+
+        XCTAssertThrowsError(try recorder.readStatusArtifactBinding(
+            catalogKey: Build1LaneAPrepareProfile.catalogKey,
+            expectedArtifactSHA256: fixture.binding.artifactSHA256,
+            expectedReleaseID: fixture.binding.releaseID
+        )) { error in
+            guard case Build1LaneAPreparationRecordError.inventoryInvalid = error else {
+                return XCTFail("expected inventoryInvalid, got \(error)")
+            }
+        }
+    }
+
+    func testStatusResponseDoesNotBindBuild1LaneAOnEffectiveModelMismatch() async throws {
+        let fixture = try makeBuild1LaneAStatusFixture(payload: "status-effective-model-mismatch")
+        // Same hash, algorithm, and weights manifest as the correlated case,
+        // but the runtime is serving a model id outside the Lane A identity set.
+        let status = ProviderStatus(
+            modelID: "mlx-community/Other-Model-4bit",
+            modelLoaded: true,
+            capacity: makeCapacity(),
+            modelHash: fixture.binding.artifactSHA256,
+            modelHashAlgorithm: ModelArtifactIdentity.snapshotManifestV1,
+            weightsManifestSHA256: String(repeating: "f", count: 64)
+        )
+        let context = ProviderCatalogStatusContext(
+            trust: nil,
+            donorMode: false,
+            catalogKey: Build1LaneAPrepareProfile.catalogKey,
+            catalogModelID: Build1LaneAPrepareProfile.artifactModelID,
+            modelRevision: fixture.binding.modelRevision,
+            artifactSHA256: fixture.binding.artifactSHA256,
+            modelArtifactSHA256: fixture.binding.artifactSHA256,
+            configuredReleaseID: fixture.binding.releaseID,
+            configuredCatalogDigest: nil,
+            build1LaneA: ProviderBuild1LaneAStatusContext(
+                recordState: .recorded,
+                reason: "private_record_verified",
+                binding: fixture.binding
+            )
+        )
+
+        let body = RouterHandler.statusResponse(
+            await status.snapshot(),
+            providerID: "provider-a",
+            coordinatorURL: nil,
+            catalogStatus: context
+        )
+        let evidence = try XCTUnwrap(body["build1_lane_a"] as? [String: Any])
+
+        XCTAssertEqual(evidence["state"] as? String, "unbound")
+        XCTAssertEqual(evidence["reason"] as? String, "effective_model_mismatch")
+        XCTAssertEqual(evidence["effective_model"] as? String, "mlx-community/Other-Model-4bit")
+        XCTAssertEqual(evidence["effective_model_matches_lane_a"] as? Bool, false)
+        XCTAssertEqual(evidence["model_hash_matches_private_record"] as? Bool, true, "hash agreement alone must not correlate")
+    }
+
+    func testStatusResponseCorrelatesBuild1LaneAForArtifactAliasEffectiveModel() async throws {
+        let fixture = try makeBuild1LaneAStatusFixture(payload: "status-effective-model-alias")
+        let status = ProviderStatus(
+            modelID: Build1LaneAPrepareProfile.artifactModelID,
+            modelLoaded: true,
+            capacity: makeCapacity(),
+            modelHash: fixture.binding.artifactSHA256,
+            modelHashAlgorithm: ModelArtifactIdentity.snapshotManifestV1,
+            weightsManifestSHA256: String(repeating: "f", count: 64)
+        )
+        let context = ProviderCatalogStatusContext(
+            trust: nil,
+            donorMode: false,
+            catalogKey: Build1LaneAPrepareProfile.catalogKey,
+            catalogModelID: Build1LaneAPrepareProfile.artifactModelID,
+            modelRevision: fixture.binding.modelRevision,
+            artifactSHA256: fixture.binding.artifactSHA256,
+            modelArtifactSHA256: fixture.binding.artifactSHA256,
+            configuredReleaseID: fixture.binding.releaseID,
+            configuredCatalogDigest: nil,
+            build1LaneA: ProviderBuild1LaneAStatusContext(
+                recordState: .recorded,
+                reason: "private_record_verified",
+                binding: fixture.binding
+            )
+        )
+
+        let body = RouterHandler.statusResponse(
+            await status.snapshot(),
+            providerID: "provider-a",
+            coordinatorURL: nil,
+            catalogStatus: context
+        )
+        let evidence = try XCTUnwrap(body["build1_lane_a"] as? [String: Any])
+
+        XCTAssertEqual(evidence["state"] as? String, "correlated")
+        XCTAssertEqual(evidence["effective_model_matches_lane_a"] as? Bool, true)
+    }
+
+    func testBuild1LaneAStatusReaderPublishesReceiptBoundDeclaredSizeNotMeasuredBytes() throws {
+        let durableRoot = try tempDir()
+        let stagingRoot = try tempDir()
+        let payload = "status-receipt-bound-size"
+        try Data(payload.utf8).write(to: stagingRoot.appendingPathComponent("weights.bin"), options: .atomic)
+        let artifactSHA256 = try ModelArtifactVerifier.canonicalArtifactHash(directory: stagingRoot)
+        _ = try DurableModelArtifactStore(root: durableRoot).adoptVerifiedStaging(
+            staging: stagingRoot,
+            modelID: Build1LaneAPrepareProfile.artifactModelID,
+            revision: Build1LaneAPrepareProfile.artifactRevision,
+            sha256: artifactSHA256
+        )
+        let measuredBytes = Int64(payload.utf8.count)
+        let declaredBytes = 4_096
+
+        let binding = try recordBuild1LaneAStatusBinding(
+            durableRoot: durableRoot,
+            artifactSHA256: artifactSHA256,
+            adoptedBytes: measuredBytes,
+            releaseID: "test-release",
+            declaredSizeBytes: declaredBytes
+        )
+
+        // The published size is the receipt tuple's signed-authority value,
+        // which validatedReceipt authenticates through the receipt digest.
+        // The inventory target's locally measured count is not authenticated
+        // and must never be what status publishes.
+        XCTAssertEqual(binding.estimatedBytes, Int64(declaredBytes))
+        XCTAssertNotEqual(binding.estimatedBytes, measuredBytes)
+        let inventory = try readPublishedInventory(from: durableRoot)
+        let target = try XCTUnwrap(inventory.targets.first { $0.artifactIdentityDigest == binding.artifactIdentityDigest })
+        XCTAssertEqual(target.estimatedBytes, measuredBytes)
+    }
+
+    func testBuild1LaneARecordReuseRefusesNoncanonicalTupleID() throws {
+        let fixture = try makeBuild1LaneAStatusFixture(payload: "status-noncanonical-tuple-reuse")
+        let adoptedBytes = Int64("status-noncanonical-tuple-reuse".utf8.count)
+        let releaseID = "noncanonical-release"
+        let legacyDigest = try writeLaneARecordWithTupleID(
+            "legacy:\(Build1LaneAPrepareProfile.catalogKey):\(Build1LaneAPrepareProfile.artifactID)@\(Build1LaneAPrepareProfile.artifactRevision)",
+            durableRoot: fixture.durableRoot,
+            artifactSHA256: fixture.binding.artifactSHA256,
+            estimatedBytes: adoptedBytes,
+            releaseID: releaseID
+        )
+        let recorder = Build1LaneAPreparationRecorder(durableRoot: fixture.durableRoot)
+
+        // The status reader already refuses the entry.
+        XCTAssertNil(try recorder.readStatusArtifactBinding(
+            catalogKey: Build1LaneAPrepareProfile.catalogKey,
+            expectedArtifactSHA256: fixture.binding.artifactSHA256,
+            expectedReleaseID: releaseID
+        ))
+
+        // Reuse must apply the same strict predicate: the receipt re-verifies
+        // at open(), but the entry describing this artifact carries a tuple id
+        // that is not the canonical Lane A one, so record() neither reuses it
+        // nor appends a duplicate.
+        let authority = Build1LaneAArtifactAuthority(
+            catalogKey: Build1LaneAPrepareProfile.catalogKey,
+            modelID: Build1LaneAPrepareProfile.artifactModelID,
+            revision: Build1LaneAPrepareProfile.artifactRevision,
+            artifactID: Build1LaneAPrepareProfile.artifactID,
+            hashAlgorithm: ModelArtifactIdentity.snapshotManifestV1,
+            hash: fixture.binding.artifactSHA256,
+            sizeBytes: Int(adoptedBytes),
+            feedSHA256: String(repeating: "d", count: 64),
+            feedSignerKeyID: "test-signer",
+            releaseID: releaseID
+        )
+        let session = try recorder.open()
+        defer { session.close() }
+        let before = try readPublishedInventory(from: fixture.durableRoot)
+        XCTAssertThrowsError(try session.record(
+            authority: authority,
+            adoptedSHA256: authority.hash,
+            adoptedBytes: adoptedBytes
+        )) { error in
+            guard case Build1LaneAPreparationRecordError.inventoryInvalid = error else {
+                return XCTFail("expected inventoryInvalid, got \(error)")
+            }
+        }
+        let after = try readPublishedInventory(from: fixture.durableRoot)
+        XCTAssertEqual(after, before, "a refused reuse must not rewrite the inventory")
+        XCTAssertEqual(after.targets.map(\.artifactIdentityDigest).sorted(), [fixture.binding.artifactIdentityDigest, legacyDigest].sorted())
+    }
+
+    /// Reads the published inventory through the store's validated path.
+    private func readPublishedInventory(from durableRoot: URL) throws -> ModelPreparationInventoryRecord {
+        let recorder = Build1LaneAPreparationRecorder(durableRoot: durableRoot)
+        let locator = try recorder.store.bootstrapExisting().rootLocator
+        let current = try XCTUnwrap(recorder.store.readRecordWithGeneration(kind: .publishedInventory, rootLocator: locator))
+        return try ModelPreparationContracts.decode(
+            ModelPreparationInventoryRecord.self,
+            from: current.payload,
+            maxBytes: ModelPreparationContracts.inventoryMaxBytes
+        )
+    }
+
+    /// Appends a Lane A-shaped inventory entry whose receipt carries an
+    /// arbitrary `tuple_id`, using the store's own write path so the receipt
+    /// digest, artifact identity digest, and root locator all re-verify.
+    private func writeLaneARecordWithTupleID(
+        _ tupleID: String,
+        durableRoot: URL,
+        artifactSHA256: String,
+        estimatedBytes: Int64,
+        releaseID: String
+    ) throws -> String {
+        let recorder = Build1LaneAPreparationRecorder(durableRoot: durableRoot)
+        let boot = try recorder.store.bootstrapWithLockCustody()
+        defer { boot.lockCustody.close() }
+        let locator = boot.snapshot.rootLocator
+        let tuple = try ModelPreparationTupleRecord(
+            tupleID: tupleID,
+            eventModelKey: Build1LaneAPrepareProfile.catalogKey,
+            displayModelID: Build1LaneAPrepareProfile.artifactModelID,
+            modelRevision: Build1LaneAPrepareProfile.artifactRevision,
+            artifactID: Build1LaneAPrepareProfile.artifactID,
+            releaseID: releaseID,
+            artifactSHA256: artifactSHA256,
+            estimatedBytes: estimatedBytes,
+            root: locator,
+            authorityOrder: 0
+        )
+        let receipt = try ModelPreparationPublicationReceipt(
+            eventModelKey: Build1LaneAPrepareProfile.catalogKey,
+            root: locator,
+            tuple: tuple,
+            tupleSHA256: try ModelPreparationContracts.tupleSHA256(tuple),
+            publishedAt: "2027-01-15T08:00:00Z"
+        )
+        let receiptBytes = try ModelPreparationContracts.encode(receipt, maxBytes: ModelPreparationContracts.publicationReceiptMaxBytes)
+        let receiptSHA256 = try ModelPreparationContracts.publicationReceiptSHA256(from: receiptBytes)
+        let digest = try ModelPreparationContracts.artifactIdentityDigest(
+            displayModelID: Build1LaneAPrepareProfile.artifactModelID,
+            modelRevision: Build1LaneAPrepareProfile.artifactRevision,
+            artifactID: Build1LaneAPrepareProfile.artifactID,
+            releaseID: releaseID,
+            rootIdentityDigest: locator.rootIdentityDigest,
+            receiptSHA256: receiptSHA256
+        )
+        let target = try ModelPreparationCleanupTarget(
+            artifactIdentityDigest: digest,
+            displayModelID: Build1LaneAPrepareProfile.artifactModelID,
+            modelRevision: Build1LaneAPrepareProfile.artifactRevision,
+            artifactID: Build1LaneAPrepareProfile.artifactID,
+            releaseID: releaseID,
+            modelKey: Build1LaneAPrepareProfile.catalogKey,
+            eventModelKey: Build1LaneAPrepareProfile.catalogKey,
+            rootIdentityDigest: locator.rootIdentityDigest,
+            receiptSHA256: receiptSHA256,
+            estimatedBytes: estimatedBytes,
+            keepSetStatus: .protected,
+            protectedReason: Build1LaneAPreparationRecorder.protectedReason,
+            cleanup: try ModelPreparationAction(
+                available: false,
+                requiresConfirmation: false,
+                transactionKind: nil,
+                transactionID: nil,
+                actionTimeoutSeconds: nil,
+                estimatedBytes: nil,
+                unavailableReason: Build1LaneAPreparationRecorder.protectedReason,
+                artifactIdentityDigest: nil
+            )
+        )
+        let objectDirectory = durableRoot
+            .appendingPathComponent(ModelPreparationSecureFilesystem.namespaceLeaf, isDirectory: true)
+            .appendingPathComponent(ModelPreparationSecureFilesystem.objectsLeaf, isDirectory: true)
+            .appendingPathComponent(digest, isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: objectDirectory,
+            withIntermediateDirectories: false,
+            attributes: [.posixPermissions: 0o700]
+        )
+        let receiptURL = objectDirectory.appendingPathComponent(Build1LaneAPreparationRecorder.receiptLeaf)
+        try receiptBytes.write(to: receiptURL, options: .atomic)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: receiptURL.path)
+
+        let current = try XCTUnwrap(recorder.store.readRecordWithGeneration(kind: .publishedInventory, rootLocator: locator))
+        let existing = try ModelPreparationContracts.decode(
+            ModelPreparationInventoryRecord.self,
+            from: current.payload,
+            maxBytes: ModelPreparationContracts.inventoryMaxBytes
+        )
+        var targets = existing.targets
+        targets.append(target)
+        targets.sort { $0.artifactIdentityDigest < $1.artifactIdentityDigest }
+        let inventory = try ModelPreparationInventoryRecord(root: locator, targets: targets, generatedAt: "2027-01-15T08:00:00Z")
+        try recorder.store.writeRecord(
+            kind: .publishedInventory,
+            payload: try ModelPreparationContracts.encode(inventory, maxBytes: ModelPreparationContracts.inventoryMaxBytes),
+            generation: current.generation + 1,
+            rootLocator: locator,
+            lockCustody: boot.lockCustody
+        )
+        return digest
+    }
+
+    private func makeLaneAStatusConfig() -> AppConfig {
+        var config = AppConfig.defaults()
+        config.model = Build1LaneAPrepareProfile.catalogKey
+        config.modelCatalogKey = Build1LaneAPrepareProfile.catalogKey
+        config.modelCatalogModelID = Build1LaneAPrepareProfile.artifactModelID
+        config.modelCatalogRevision = Build1LaneAPrepareProfile.artifactRevision
+        config.modelCatalogSHA256 = String(repeating: "a", count: 64)
+        config.modelArtifactSHA256 = String(repeating: "a", count: 64)
+        config.modelCatalogVersion = "test-release"
+        config.coordinatorURL = "http://127.0.0.1:8787"
+        return config
+    }
+
+    func testBuild1LaneAStatusResolverRequiresStagingCoordinator() {
+        var config = makeLaneAStatusConfig()
+        XCTAssertNotNil(ProviderBuild1LaneAStatusResolver.make(config: config))
+
+        config.coordinatorURL = "https://coordinator.malibu.tech"
+        XCTAssertNil(ProviderBuild1LaneAStatusResolver.make(config: config))
+
+        config.coordinatorURL = "http://127.0.0.1:8787"
+        config.modelCatalogVersion = nil
+        XCTAssertNil(ProviderBuild1LaneAStatusResolver.make(config: config))
+
+        config.modelCatalogVersion = "test-release"
+        config.modelArtifactSHA256 = nil
+        XCTAssertNil(ProviderBuild1LaneAStatusResolver.make(config: config))
+    }
+
+    func testBuild1LaneAStatusResolverRequiresExactCatalogTuple() {
+        var config = makeLaneAStatusConfig()
+        config.modelCatalogRevision = "0000000000000000000000000000000000000000"
+        XCTAssertNil(ProviderBuild1LaneAStatusResolver.make(config: config), "revision drift must not resolve")
+
+        config = makeLaneAStatusConfig()
+        config.modelCatalogModelID = "mlx-community/Other-Model-4bit"
+        XCTAssertNil(ProviderBuild1LaneAStatusResolver.make(config: config), "artifact model id drift must not resolve")
+
+        config = makeLaneAStatusConfig()
+        config.modelCatalogKey = nil
+        XCTAssertNil(ProviderBuild1LaneAStatusResolver.make(config: config), "model alias alone must not resolve")
+
+        config = makeLaneAStatusConfig()
+        config.modelCatalogSHA256 = String(repeating: "b", count: 64)
+        XCTAssertNil(ProviderBuild1LaneAStatusResolver.make(config: config), "catalog/artifact digest disagreement must not resolve")
+
+        config = makeLaneAStatusConfig()
+        config.modelCatalogSHA256 = nil
+        XCTAssertNotNil(ProviderBuild1LaneAStatusResolver.make(config: config))
     }
 
     func testStatusResponsePublishesFreshCompleteSafetyTelemetry() async throws {

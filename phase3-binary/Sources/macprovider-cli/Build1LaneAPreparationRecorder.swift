@@ -19,6 +19,26 @@ struct Build1LaneAPreparationRecord: Equatable, Sendable {
     var reusedExistingRecord: Bool
 }
 
+struct Build1LaneAStatusArtifactBinding: Equatable, Sendable {
+    var catalogKey: String
+    var displayModelID: String
+    var modelRevision: String
+    var artifactID: String
+    var releaseID: String
+    var artifactSHA256: String
+    /// The signed authority's declared `estimated_bytes`, read from the
+    /// receipt tuple. The receipt digest is bound into the target's
+    /// `artifact_identity_digest`, so this value is authenticated by
+    /// `validatedReceipt`; the inventory target's locally measured byte count
+    /// is not, and is never published.
+    var estimatedBytes: Int64
+    var artifactIdentityDigest: String
+    var receiptSHA256: String
+    var rootIdentityDigest: String
+    var inventoryGeneration: Int
+    var publishedAt: String
+}
+
 enum Build1LaneAPreparationRecordError: Error, Equatable, Sendable {
     /// The private state authority could not be bootstrapped or read.
     case stateUnavailable(String)
@@ -129,6 +149,105 @@ struct Build1LaneAPreparationRecorder: Sendable {
         return Session(recorder: self, lockCustody: boot.lockCustody, rootLocator: locator, existing: existing)
     }
 
+    func readStatusArtifactBinding(
+        catalogKey: String,
+        expectedArtifactSHA256: String,
+        expectedReleaseID: String
+    ) throws -> Build1LaneAStatusArtifactBinding? {
+        let snapshot: ModelPreparationPrivateStore.BootstrapSnapshot
+        do {
+            snapshot = try store.bootstrapExisting()
+        } catch {
+            throw Build1LaneAPreparationRecordError.stateUnavailable(String(describing: error))
+        }
+        do {
+            guard let current = try store.readRecordWithGeneration(
+                kind: .publishedInventory,
+                rootLocator: snapshot.rootLocator
+            ) else {
+                return nil
+            }
+            let record = try ModelPreparationContracts.decode(
+                ModelPreparationInventoryRecord.self,
+                from: current.payload,
+                maxBytes: ModelPreparationContracts.inventoryMaxBytes
+            )
+            guard record.root == snapshot.rootLocator else {
+                throw Build1LaneAPreparationRecordError.inventoryInvalid("root locator mismatch")
+            }
+            var matches: [(target: ModelPreparationCleanupTarget, receipt: ModelPreparationPublicationReceipt)] = []
+            for target in record.targets {
+                let receipt = try Session.validatedReceipt(
+                    for: target,
+                    rootLocator: snapshot.rootLocator,
+                    store: store
+                )
+                if Self.isExpectedLaneATarget(
+                    target,
+                    receipt: receipt,
+                    catalogKey: catalogKey,
+                    expectedArtifactSHA256: expectedArtifactSHA256,
+                    expectedReleaseID: expectedReleaseID
+                ) {
+                    matches.append((target, receipt))
+                }
+            }
+            guard matches.count <= 1 else {
+                throw Build1LaneAPreparationRecordError.inventoryInvalid("ambiguous Lane A status bindings")
+            }
+            guard let match = matches.first else { return nil }
+            return Build1LaneAStatusArtifactBinding(
+                catalogKey: catalogKey,
+                displayModelID: match.target.displayModelID,
+                modelRevision: match.target.modelRevision,
+                artifactID: match.target.artifactID,
+                releaseID: match.target.releaseID,
+                artifactSHA256: match.receipt.tuple.artifactSHA256,
+                estimatedBytes: match.receipt.tuple.estimatedBytes,
+                artifactIdentityDigest: match.target.artifactIdentityDigest,
+                receiptSHA256: match.target.receiptSHA256,
+                rootIdentityDigest: match.target.rootIdentityDigest,
+                inventoryGeneration: current.generation,
+                publishedAt: match.receipt.publishedAt
+            )
+        } catch let error as Build1LaneAPreparationRecordError {
+            throw error
+        } catch {
+            throw Build1LaneAPreparationRecordError.inventoryInvalid(String(describing: error))
+        }
+    }
+
+    /// Strict Lane A tuple predicate shared by status reading and record
+    /// reuse: profile identity, expected release and digest, and the
+    /// canonical `\(profile):\(catalogKey):\(artifactID)@\(revision)` tuple id.
+    fileprivate static func isExpectedLaneATarget(
+        _ target: ModelPreparationCleanupTarget,
+        receipt: ModelPreparationPublicationReceipt,
+        catalogKey: String,
+        expectedArtifactSHA256: String,
+        expectedReleaseID: String
+    ) -> Bool {
+        let tuple = receipt.tuple
+        let expectedTupleID = "\(tupleIDPrefix):\(catalogKey):\(Build1LaneAPrepareProfile.artifactID)@\(Build1LaneAPrepareProfile.artifactRevision)"
+        guard target.modelKey == catalogKey,
+              target.eventModelKey == catalogKey,
+              target.displayModelID == Build1LaneAPrepareProfile.artifactModelID,
+              target.modelRevision == Build1LaneAPrepareProfile.artifactRevision,
+              target.artifactID == Build1LaneAPrepareProfile.artifactID,
+              target.releaseID == expectedReleaseID,
+              tuple.tupleID == expectedTupleID,
+              tuple.eventModelKey == catalogKey,
+              tuple.displayModelID == Build1LaneAPrepareProfile.artifactModelID,
+              tuple.modelRevision == Build1LaneAPrepareProfile.artifactRevision,
+              tuple.artifactID == Build1LaneAPrepareProfile.artifactID,
+              tuple.releaseID == expectedReleaseID,
+              tuple.artifactSHA256 == expectedArtifactSHA256
+        else {
+            return false
+        }
+        return true
+    }
+
     /// Open private-state custody for one prepare run. `record` is called at
     /// most once, after durable adoption; `close` releases the locks.
     final class Session: @unchecked Sendable {
@@ -192,13 +311,22 @@ struct Build1LaneAPreparationRecorder: Sendable {
 
             if let existing, let match = existing.record.targets.first(where: { Self.describes($0, authority: authority) }) {
                 // Receipt binding was validated at open(); reuse additionally
-                // requires the recorded Lane A identity, feed size, and measured
-                // bytes to equal what this run adopted.
-                guard let receipt = existing.receipts[match.artifactIdentityDigest],
-                      match.modelKey == authority.catalogKey,
-                      match.eventModelKey == authority.catalogKey,
+                // requires the recorded entry to satisfy the same strict Lane A
+                // tuple predicate the status reader applies (canonical tuple
+                // id, profile identity, release, digest) plus the feed size and
+                // measured bytes this run adopted. An entry that describes the
+                // artifact but fails that predicate is never reused or
+                // silently duplicated.
+                guard existing.record.targets.filter({ Self.describes($0, authority: authority) }).count == 1,
+                      let receipt = existing.receipts[match.artifactIdentityDigest],
+                      Build1LaneAPreparationRecorder.isExpectedLaneATarget(
+                          match,
+                          receipt: receipt,
+                          catalogKey: authority.catalogKey,
+                          expectedArtifactSHA256: authority.hash,
+                          expectedReleaseID: authority.releaseID
+                      ),
                       match.estimatedBytes == adoptedBytes,
-                      receipt.tuple.artifactSHA256 == authority.hash,
                       receipt.tuple.estimatedBytes == Int64(authority.sizeBytes)
                 else {
                     throw Build1LaneAPreparationRecordError.inventoryInvalid("recorded tuple does not match the adopted Lane A authority")
