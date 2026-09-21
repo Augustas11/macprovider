@@ -200,9 +200,14 @@ combined candidate**.
   `</tool_call>` becomes `tool_calls` (Pi runs bash, no XML in chat); CLI no
   longer returns `messages_too_long` at 256. Prefill TTFT on Pi’s ~4.5k system
   prompt is **not** a gate — that is hardware, not this cut.
-- **Last run:** 2026-09-19 live on Pearl coordinator + fleet **1.8.123** —
-  coordinator path green; CLI path still the old binary. Re-run on the next
-  candidate after it is installed on a Mac.
+- **Last run:** 2026-09-21 Pi 0.85.1 json vs OpenRouter
+  `qwen/qwen3-coder-30b-a3b-instruct` on live `api.malibu.tech` + signed Studio
+  **v1.8.175**. Same prompt as 171/174: Makefile `test-dist` first command,
+  then `gh pr view 1638`. Malibu **PASS** (53.47s / 34.53s; `ls`/`read`/`bash`
+  executed; leftover `missingEndDelimiter` did not hang; answers
+  `bash scripts/test-openai-wire-compat.sh` and PR 1638 MERGED). OpenRouter
+  **PASS** 29.97s. `~/.pi/agent/settings.json` untouched. Do not promote. Do
+  not set CB `on`.
 
 ## Promotion gate (checklist)
 
