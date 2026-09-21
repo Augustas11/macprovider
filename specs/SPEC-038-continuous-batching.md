@@ -1,10 +1,14 @@
 # SPEC-038 — Continuous batching for concurrent provider inference
 
-Version: v0.2.1
+Version: v0.2.2
 Status: draft (normative design; no IMPL in this SPEC - implementation is a separate PR behind a disabled-by-default flag)
 Owner: provider runtime / inference scheduler
 Decision source: `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md` (original memo, commit `8d80f6c4`), `docs/research/RESEARCH_232_ADDENDUM_PAGED_REDECISION_2026-07-29.md`, `docs/research/SPIKE_PAGED_ATTN_PHASE0_RESULT_2026-07-29.md` (commit `e5ded571`), `docs/research/SPIKE_PAGED_ATTN_PHASE2_RESULT_2026-07-29.md` (commit `acc30b1e`), and `docs/research/SPIKE_PAGED_ATTN_PHASE3_MOE_RESULT_2026-07-29.md` (commit `da21af53`).
 Audit history: v0.2 is subject to three-lane codex SPEC audit (code / security / architect). Convergence and any carried LOW/INFO findings are recorded in the SPEC PR body and `audits/2026-07-29/SPEC-038-v0_2-rN-audit.md`.
+v0.2.2 clarifies the API-visible admission/replay/terminal contract, records
+decode-first scheduling as a conservative v0.2 choice rather than a claim of
+vLLM/SGLang-style unified-token scheduling, and tightens the real-serving
+evidence gate for retained paged-KV reuse.
 
 ## 1. Purpose and scope
 
@@ -79,6 +83,12 @@ In scope for v0.2:
   unless it was measured on real macprovider catalog models (FR-CB14).
 - The real-hardware enable gate (FR-CB15) and the scheduler/engine boundary
   with `SPEC-039` (FR-CB16).
+- The API-visible lifecycle mapping for queue-full, queue-timeout,
+  cancellation, duplicate request IDs, reconnect/replay, stream terminal
+  events, post-admission scheduler failure, usage finalization, and
+  `Retry-After` / retry guidance. These are scheduler/gateway boundary
+  obligations over existing SPEC-001/SPEC-006 error/streaming envelopes, not
+  new receipt or billing fields.
 
 Out of scope for v0.2:
 
@@ -95,9 +105,16 @@ Out of scope for v0.2:
   reason-coded serial-routed only when the operator explicitly selects
   permissive behavior (FR-CB8).
 - Mixed-phase (prefill-plus-decode in one heterogeneous model call) batching;
-  v0.2 keeps prompt and decode phases separate (FR-CB2).
+  v0.2 keeps prompt and decode phases separate (FR-CB2). This is a deliberate
+  conservative first-serving contract, not a claim that v0.2 matches
+  unified-token or mixed-phase schedulers in vLLM/SGLang/TensorRT-LLM under
+  highly mixed prompt lengths.
 - Priority, deadline, or buyer-class scheduling economics; v0.2 is FCFS
   (FR-CB1).
+- Disaggregated prefill/decode, preemptive KV eviction/recompute,
+  cross-request prefix-aware scheduling, and scheduler-owned prefix sharing.
+  These are future optimization surfaces that require their own SPEC updates
+  before serving real traffic.
 - Advertising capacity above the persisted Entry 110 recommendation
   (FR-CB11).
 
@@ -147,7 +164,12 @@ admission/scheduling contract, shared-forward per-request isolation
 invariants, scheduler-owned request-to-block-table lifecycle, support-matrix
 and rejection rules, Entry 110 capacity mapping for batched serving, MoE
 batching scheduler obligations, and the batching throughput-replication and
-enable gates.
+enable gates. It also owns the provider-side batching contribution to
+API-visible lifecycle semantics: admission backpressure, queue timeout,
+duplicate request handling, reconnect/replay, cancellation, stream terminal
+events, scheduler-failure boundaries, and usage/receipt finalization for
+batched requests. SPEC-006 remains the buyer API error-envelope authority and
+SPEC-001 remains the provider wire/streaming envelope authority.
 
 ## 3. Terms
 
@@ -160,6 +182,9 @@ enable gates.
 | Prompt-processing batch | The bounded set of newly admitted requests undergoing prefill before they become decode rows. |
 | Active rows | Requests currently consuming inference capacity (prefill or decode). Capped by Entry 110 (FR-CB11). |
 | Waiting queue | Received work not yet admitted to an active phase; entries are either pre-admission queued or accepted queued per FR-CB13. Only accepted queued work is snapshot-bound and drain-obligated. Bounded (FR-CB1); never counted as capacity. |
+| Queue-full rejection | A pre-admission outcome where no queue slot is available; it is client-visible backpressure, carries no settlement/receipt side effect, and MAY include `Retry-After` / retry guidance through the existing API error surface. |
+| Queue-timeout rejection | A pre-admission timeout while waiting for capacity. It is non-settling, emits no receipt, and MUST be distinguishable from a post-admission model/runtime failure in request logs and telemetry. |
+| Terminal stream event | The single terminal SSE/error/HTTP outcome for a request. Batching MUST NOT create duplicate terminal events, duplicate usage finalization, or a terminal success after a non-settling cancellation/failure. |
 | Paged engine | The locally owned `SPEC-039` capability that stores KV in blocks and provides the paged-attention execution surface consumed by this scheduler. |
 | Per-request block table | The scheduler-owned mapping from one request's logical token positions to `SPEC-039` KV blocks. It is request-private and leaves the batch only through explicit scheduler lifecycle transitions. |
 | Served snapshot | The `(model artifact, model hash, weights generation)` bound to a request when it is accepted, immutable across a later warm swap (FR-CB13). |
@@ -214,6 +239,14 @@ sampling and stop conditions, emits tokens, removes terminal rows, processes
 cancellation at a safe boundary, and only then admits and prefills new prompt
 work into free capacity. Prefill MUST be bounded or chunked so a long prompt
 cannot block existing decode rows for an unbounded interval.
+
+This decode-first split is a v0.2 safety choice. It preserves simple
+per-request accounting, cancellation, and receipt boundaries while the shared
+forward is first enabled. It MUST NOT be described as equivalent to a
+unified-token, mixed-phase, priority, or disaggregated-prefill scheduler: those
+may improve utilization under mixed prompt lengths, but they are future
+optimization work and require new correctness/evidence gates before serving
+real traffic.
 
 ### FR-CB3 - one shared forward for active decode rows (SPEC-038-R003)
 
@@ -556,6 +589,31 @@ Both the admission-time and the mid-decode paths MUST be observable and
 reason-coded, and MUST NOT emit a settlement receipt for output stitched across
 a failed and a retried path (mirroring FR-CB9).
 
+### API-visible lifecycle outcomes (overlay for SPEC-038-R001/R006/R009/R013/R015)
+
+The scheduler and its HTTP/relay integration MUST map every batched request to
+exactly one API-visible terminal outcome. This overlay does not create new
+requirement IDs; it binds existing admission, fallback, usage-isolation, and
+snapshot-binding requirements to buyer-visible behavior:
+
+| Lifecycle point | Required API-visible behavior | Settlement / receipt rule |
+|---|---|---|
+| Queue full before admission | Reject through the existing client-visible backpressure/error surface; include bounded retry guidance (`Retry-After` or equivalent) when the gateway surface supports it. No request state may be retained except non-receipt diagnostics. | Non-settling; no receipt. |
+| Queue wait timeout before admission | Reject as queue timeout, not model failure. The response/log MUST distinguish timeout from scheduler crash and from unsupported tuple. | Non-settling; no receipt. |
+| Unsupported tuple before admission | Strict mode fails preflight; explicit permissive/canary mode MAY serial-route with reason-coded telemetry. | Serial route settles only if the serial request succeeds; rejected path emits no receipt. |
+| Duplicate stable request ID before acceptance | Deterministically attach to the existing queued request or reject as duplicate; MUST NOT create a second accepted unit of work. | At most one settling owner. |
+| Duplicate stable request ID after acceptance | Deterministically reattach/replay the existing terminal result, or reject as non-settling replay when retention has rolled; MUST NOT duplicate inference or settlement. | At most one receipt. |
+| Client cancellation before first buyer-visible token | Cancel at a bounded scheduler boundary and clean up any block-table reservation. | Non-settling unless the serial path's existing contract would already have settled before cancellation. |
+| Client cancellation after buyer-visible output begins | Emit exactly one terminal cancellation/failure outcome through the existing stream envelope; do not continue emitting late tokens after terminal state. | No settlement receipt for an incomplete stitched output unless a later SPEC explicitly defines partial-output settlement. |
+| Scheduler failure before any buyer-visible token/SSE/receipt/request-log terminal state | MAY retry serial under the same served snapshot with no carried batched cache state, or fail closed. | Serial retry may settle only if it completes under one coherent path. |
+| Scheduler failure after any buyer-visible token/SSE/receipt/request-log terminal state | Fail closed through the existing terminal path; MUST NOT retry serial and stitch output. | Non-settling failure; no stitched receipt. |
+| Successful batched completion | Emit one terminal success, one usage finalization, and one receipt whose model hash and token fields match the request's served snapshot and per-row state. | Exactly one receipt. |
+| Warm-swap drain / operator disable | Active and accepted requests finish, cancel, or fail under the old snapshot before weights or path change; pre-admission queued work may be rejected. | Receipts, if any, bind to the old served snapshot only. |
+
+The enable gate MUST prove these cases through the packaged provider's real
+serving path, not only scheduler unit tests, before `canary` or `on` may serve
+buyer traffic.
+
 ## 5. Outcome table - mode matrix
 
 The flag has the three states carried by the PR #804 scaffold: **`off`**
@@ -766,6 +824,24 @@ hardware-capability run or a static-review obligation. Every
   stream, sampler, stop state, and block table stay intact — no healthy row's
   KV is evicted/recomputed (no preemption), and no settlement receipt is
   emitted for stitched failed+retried output.
+- **AC-25 API-visible lifecycle semantics (FR-CB1, FR-CB6, FR-CB9, FR-CB13,
+  FR-CB15):** through the real HTTP/relay serving surface, not only scheduler
+  units, prove queue-full backpressure, queue-timeout rejection, unsupported
+  tuple strict failure, permissive/canary serial-route telemetry, duplicate
+  stable request ID before and after acceptance, reconnect/replay after a
+  terminal result, client cancellation before and after first buyer-visible
+  output, post-admission scheduler failure before and after side effects,
+  successful usage finalization, and warm-swap/operator-disable drain. Each
+  case MUST have exactly one terminal outcome, the correct settling/non-settling
+  disposition, and no duplicate receipt.
+- **AC-26 retained paged-KV sticky serving path (FR-CB4, FR-CB6, FR-CB15,
+  SPEC-039 FR-PKV10):** before conversation-keyed batching or positive
+  `cached_prompt_tokens` can enter `canary`, a packaged real-serving proof MUST
+  drive a sticky/cross-turn request through the gateway/relay path, reattach or
+  materialize same-conversation paged KV via FR-PKV10, preserve a mid-block
+  token-granular LCP/trim boundary, and emit correct usage, billing, receipt,
+  and settlement fields. A harness that proves only the scheduler primitive
+  without the buyer-serving path is not enable evidence.
 
 ## 8. Go/no-go gates
 
@@ -788,6 +864,9 @@ hardware-capability run or a static-review obligation. Every
   reason-coded telemetry (FR-CB8, FR-CB10).
 - **G5 production economics** - `sku-econ` green, material provider upside,
   acceptable tail latency and rejection rate, OPoI false-positive rate < 5%.
+- **G6 API lifecycle readiness** - queue pressure, timeout, cancellation,
+  duplicate/replay, warm-swap, and post-admission failure semantics are proven
+  through the packaged serving path with correct settling and receipt behavior.
 
 ## 9. No-go list
 
@@ -824,11 +903,13 @@ this SPEC:
 3. Cancellation removal latency for a decode row.
 4. Which `kv_bits` configurations must initially be rejected vs serial-routed.
 5. Queue limit best matching coordinator retry behavior.
-6. Whether M-Ultra depth four outperforms depth three after tail-latency
+6. Whether a future unified-token or mixed-phase scheduler is worth the added
+   receipt/accounting risk after v0.2's decode-first path is production-proven.
+7. Whether M-Ultra depth four outperforms depth three after tail-latency
    penalties.
-7. How aggregate-TG baselines are versioned for OPoI drift.
-8. The first MoE **per-row input-isolation** fixture shape for
+8. How aggregate-TG baselines are versioned for OPoI drift.
+9. The first MoE **per-row input-isolation** fixture shape for
    `Qwen3-Coder-30B-A3B` (AC-23 defines the required correctness properties;
    the concrete fixture and the live-hardware MSB-04 run remain to be built).
-9. The promotion sequencing between the `SPEC-039` engine PR and the
+10. The promotion sequencing between the `SPEC-039` engine PR and the
    `SPEC-038` scheduler IMPL PR.

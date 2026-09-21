@@ -60,7 +60,12 @@ Stop and roll back to `continuous_batching: off` if any item below is true:
 - the provider is not running a packaged release-candidate install;
 - `serve` resolves to a worktree/debug binary or `default.metallib` is missing;
 - the SPEC-039 runtime bridge required for the tested path is unavailable;
+- the tested path relies on gather-every-step paged KV for real serving and
+  exceeds the SPEC-039 FR-PKV13 overhead ceiling; gather-feeds-SDPA parity is
+  correctness evidence, not sufficient production-throughput evidence;
 - the requested tuple is absent from the local SPEC-039 capability descriptor;
+- the first keyless serving-path request admitted by the scheduler does not
+  return HTTP 200 / `finish_reason=stop` through the scheduler path;
 - any conversation-keyed request enters the batch during the first keyless
   enablement scope, even when it reports zero cached-token credit;
 - any sticky-cache or cross-turn request reports positive cached-token credit
@@ -69,6 +74,9 @@ Stop and roll back to `continuous_batching: off` if any item below is true:
   request-log terminal state is attributed to the wrong request;
 - a batch failure and serial retry produce stitched buyer-visible output or a
   settlement receipt;
+- queue-full, queue-timeout, cancellation, duplicate request ID, reconnect, or
+  replay behavior produces duplicate inference, duplicate terminal events,
+  missing retry guidance where required, or duplicate settlement;
 - warm swap serves a request under one model hash and receipts it under another;
 - peak RSS exceeds the recorded bound or swap/thermal state invalidates the run;
 - any evidence collection would print provider tokens, buyer tokens, private
@@ -86,13 +94,17 @@ only.
 | Hardware tuple | Mac model, chip, RAM, macOS build, power state, thermal state, swap state, and Entry 110 `max_concurrency_override`. |
 | Model tuple | served model id, model SHA-256, tokenizer/template identity when present, cache class, KV dtype, `kv_bits` absence, MoE requirement, metallib SHA-256, kernel identifier, parity label, and pool epoch. |
 | Local descriptor | SPEC-039 descriptor showing the exact tuple is admitted; unsupported tuples must show fail-closed or reason-coded serial routing. |
+| Production serving path | The batched path that will serve real traffic is identified and measured. If gather-feeds-SDPA is used only as parity scaffold, record the actual shared-forward path; if gather-every-step is used, prove it meets the SPEC-039 overhead ceiling. |
+| Keyless scheduler 200 | A local loopback and relay-shaped keyless request with stable request ID enters the scheduler path and returns HTTP 200 / terminal success from batching, not serial fallback and not `continuous_batching_prefill_failed`. |
 | Sticky/cross-turn scope | #1477 code is present but not enablement: first-scope buyer traffic stays keyless, and positive cached-token credit requires a same-conversation FR-PKV10 retained paged-KV handoff before any later keyed operator gate may admit it. |
+| Sticky retained-KV proof | Before any conversation-keyed or positive `cached_prompt_tokens` can enter canary, drive a sticky/cross-turn request through the gateway/relay path, reattach or materialize same-conversation paged KV via FR-PKV10, prove mid-block LCP/trim correctness, and verify usage, billing, receipt, and settlement fields. |
 | Durable replay authority | Stable relay request identity is mapped into scheduler replay keys, settlement disposition is propagated through usage/receipt code, and duplicate inference or duplicate settlement is rejected after local terminal-result retention rolls. The in-process `ContinuousBatchRuntimeReplayAuthority` stub is not activation evidence. |
 | MSB-01..05 | Full harness output for MSB-01 single-stream baseline plus MSB-02, MSB-03, MSB-04, and MSB-05. Aggregate TG is total decoded tokens over common wall-clock, warm-up excluded; per-stream and aggregate TG stay separate. |
 | MoE promotion | Production `moePromotionEvidenceAvailable` is true after [`continuous-batching-moe-activation-2026-09-20.md`](continuous-batching-moe-activation-2026-09-20.md). Descriptor membership still does not promote a MoE tuple by itself. Studio 175 is `canary`; fleet CB stays off. Do not set `on`. |
 | Usage/receipt attribution | Concurrent distinct requests prove correct `prompt_tokens`, `output_tokens`, `cached_prompt_tokens`, stop reason, cancellation state, request id, receipt model hash, and settlement inputs with zero cross-request attribution. |
 | Deterministic parity | Temperature-0 output for each tested request matches serial path both alone and as one row in a batch. |
 | Failure isolation | One-row cancellation, request-local block-extension failure, and whole-batch forward failure clean up rows/block tables without duplicate terminal output or stitched receipts. |
+| API lifecycle | Through the packaged HTTP/relay serving surface, prove queue-full backpressure with retry guidance, queue-timeout rejection, duplicate request ID before/after acceptance, reconnect/replay after terminal result, cancellation before/after first token, post-admission scheduler failure before/after side effects, and exactly one terminal event per request. |
 | Warm swap | Active prompt rows, active decode rows, and accepted queued work drain, cancel, or fail under the old served snapshot before the model changes; no receipt is bound to the wrong model hash. |
 | Observability | Non-receipt telemetry records mode, reason-coded unsupported handling, active rows, waiting queue depth, batch fill, aggregate TG, per-stream TG, and local capability state without changing coordinator routing semantics. |
 
@@ -136,14 +148,16 @@ authority. Until those proofs exist for the exact keyless tuple, strict `on`
 is rejected before provider readiness and `canary` serial-routes.
 
 2026-09-20 Studio 172 attempt: paged-KV attach and MoE isolation passed;
-keyless canary then 503'd `continuous_batching_prefill_failed` and was
-rolled back. See
+keyless canary then 503'd `continuous_batching_prefill_failed` after scheduler
+admission and was rolled back. See
 [`continuous-batching-canary-172-enable-2026-09-20.md`](continuous-batching-canary-172-enable-2026-09-20.md).
 
 2026-09-21 Studio 175: same keyless live-8080 probe returned HTTP 200 after
 the serve-path prefill fix. Canary is on for that Studio tuple only. See
 [`continuous-batching-canary-175-enable-2026-09-21.md`](continuous-batching-canary-175-enable-2026-09-21.md).
 Do not promote `canary` to `on`. Do not canary other Macs.
+Any other tuple must still prove scheduler-path HTTP 200 on a packaged
+candidate and green API lifecycle evidence before canary traffic.
 
 Use `canary` only when every required proof above is present for the exact
 tuple. Leave `continuous_batch_queue_limit` unset unless the evidence bundle
@@ -196,10 +210,13 @@ Hardware tuple:
 Model tuple:
 Entry 110 slots_total:
 SPEC-039 descriptor hash / tuple admission:
+Production serving path and FR-PKV13 overhead ceiling:
 #887 FR-PKV10 primitive status (landed #1476; not an enable signal):
 #1477 sticky/AC-19 consumer status (landed #1489; not an enable signal):
 #1500 production observation / durable replay status:
 Fresh-conversation scope proof:
+Keyless scheduler HTTP 200 proof:
+Sticky retained-KV / mid-block trim proof:
 MSB-01:
 MSB-02:
 MSB-03:
@@ -208,6 +225,11 @@ MSB-05:
 Usage/receipt attribution proof:
 Deterministic parity proof:
 Failure isolation proof:
+API lifecycle proof:
+Queue-full / Retry-After proof:
+Queue-timeout proof:
+Cancellation proof:
+Duplicate request ID / reconnect replay proof:
 Warm-swap proof:
 Peak RSS / swap / thermal proof:
 Unsupported-mode telemetry proof:

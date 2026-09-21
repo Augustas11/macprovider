@@ -1,7 +1,19 @@
 # SPEC-039 — Paged KV / paged-attention engine
 
-Version: v0.1.2
-Status: draft (normative design). v0.1.2 admits `gpt_oss` as the first non-Qwen/Llama paged-KV family only through config-derived family identity plus the same per-model runtime exact-parity and batched-isolation measurement gates; other catalog families remain fail-closed until their own family fixtures are added. v0.1.1 clarified FR-PKV12 / AC-13: the attach-class probe evaluates the paged path's cache with the serve memory cap removed (`maxKVSize = nil`), so a full-context model that is `RotatingKVCache` only because the serve path caps KV for memory attaches to paged mode (the block pool bounds memory), while a genuine sliding-window model stays fail-safe. IMPL lands with this revision.
+Version: v0.1.3
+Status: draft (normative design). v0.1.3 clarifies that gather-feeds-SDPA is
+the parity/correctness scaffold and default fail-safe proof path, not by
+itself a production-throughput claim for continuous batching; real serving
+enablement must pass the FR-PKV13 overhead ceiling and SPEC-038 real-serving
+gate. v0.1.2 admits `gpt_oss` as the first non-Qwen/Llama paged-KV family only
+through config-derived family identity plus the same per-model runtime
+exact-parity and batched-isolation measurement gates; other catalog families
+remain fail-closed until their own family fixtures are added. v0.1.1 clarified
+FR-PKV12 / AC-13: the attach-class probe evaluates the paged path's cache with
+the serve memory cap removed (`maxKVSize = nil`), so a full-context model that
+is `RotatingKVCache` only because the serve path caps KV for memory attaches to
+paged mode (the block pool bounds memory), while a genuine sliding-window model
+stays fail-safe. IMPL lands with this revision.
 Owner: provider runtime / inference engine
 Decision source: `docs/research/RESEARCH_232_ADDENDUM_PAGED_REDECISION_2026-07-29.md` plus the verified spike sequence `SPIKE_PAGED_ATTN_PHASE0_RESULT_2026-07-29.md` (`e5ded571`), `SPIKE_PAGED_ATTN_PHASE2_RESULT_2026-07-29.md` (`acc30b1e`), and `SPIKE_PAGED_ATTN_PHASE3_MOE_RESULT_2026-07-29.md` (`da21af53`).
 Audit history: three-lane codex SPEC audit (code / security / architect). Convergence and any carried LOW/INFO findings are recorded in the SPEC PR body and `audits/2026-07-29/SPEC-039-rN-audit.md`.
@@ -31,6 +43,18 @@ path — which model/context sizes fit on the 32 GB live-30B envelope that stock
 cannot — is a normative define-and-record obligation (FR-PKV13), not a v0.1
 performance claim.
 
+**Serving-path honesty.** This SPEC deliberately separates three surfaces:
+(1) the **parity scaffold**, where gather-feeds-SDPA proves block tables,
+logical ordering, allocator invariants, descriptor admission, and exact fp16
+parity; (2) a **production serving path**, which may consume the same
+descriptor, allocator, block-table handle, and FR-PKV10 materialize/retain
+primitives but MUST pass the recorded overhead ceiling and SPEC-038 packaged
+serving gate before real traffic; and (3) a future **fully-fused or
+block-aware paged-attention path**, which is the performance class used by
+mature paged-attention systems but is explicitly out of scope until a later
+SPEC/IMPL revision. A gather-every-step path that is correct but too slow is
+valid proof evidence; it is not sufficient production enable evidence.
+
 The v0.1 engine is additive on macprovider's pinned production stack,
 `mlx-swift-lm 3.31.4` -> `mlx-swift 0.31.4`. It MUST NOT require a fork of
 `mlx` or `mlx-swift` for the default path. The verified non-forking injection
@@ -50,8 +74,9 @@ In scope for v0.1:
 - Fixed-size physical KV blocks, per-sequence block tables, and a Swift block
   allocator with allocation, free-list, eviction, and reclaim semantics.
 - A custom Metal kernel registered through public `MLXFast.metalKernel`,
-  used by default to gather paged, non-contiguous KV into logical order before
-  feeding stock `MLXFast.scaledDotProductAttention`.
+  used as the v0.1 parity/fail-safe scaffold to gather paged, non-contiguous
+  KV into logical order before feeding stock
+  `MLXFast.scaledDotProductAttention`.
 - Exact greedy-argmax parity gates against the stock contiguous fp16 path on
   dense and MoE models.
 - Default-off, provider-local activation with fail-safe fallback to the stock
@@ -80,9 +105,18 @@ Out of scope for v0.1:
   turns, nor materializing a sequence's own block table into a standalone
   contiguous cache: those are the normative FR-PKV10 consumer primitives that
   keep SPEC-024 cross-turn cache reuse eligible and are explicitly in scope.
+- Any cross-buyer, cross-account, global-prefix, salted-prefix, or
+  content-addressed prefix-sharing policy. A future broader sharing design MUST
+  specify tenant/account scope, salt/key derivation, privacy disclosure,
+  receipt/billing attribution, purge semantics, and cache-hit observability
+  before any implementation can serve real traffic.
 - Continuous-batching scheduling, admission, row lifecycle, per-request
   accounting under a shared forward, and MoE expert dispatch under batching
   (SPEC-038 territory).
+- Runtime offload to SSD/remote memory, LRU eviction policy under multi-request
+  pressure, priority-aware cache eviction, preemptive evict-and-recompute, and
+  disaggregated prefill/decode cache transfer. FR-PKV2 exposes the allocator
+  mechanism; these policies are future SPEC-038/SPEC-039 work.
 
 ## 2. Dependencies and authority
 
@@ -125,6 +159,8 @@ invariant.
 | Block table | Per-sequence logical-block-index to physical-block-id map, with a valid-token count for the tail block. |
 | Logical KV order | The token order the model would observe if all KV were contiguous. |
 | Gather-feeds-SDPA mode | The v0.1 default: a custom Metal gather restores logical KV order and stock SDPA computes attention. |
+| Parity scaffold | The gather-feeds-SDPA proof/fallback surface used to validate logical order, allocator invariants, descriptor admission, and exact fp16 parity. It can prove correctness even when its overhead is too high for production throughput. |
+| Production serving path | A measured path allowed to serve real traffic only after FR-PKV13 overhead evidence and SPEC-038 real-serving gates pass. It may consume SPEC-039 descriptors, handles, and FR-PKV10 primitives without claiming the parity scaffold itself is performant. |
 | Fully-fused mode | Optional future path where one paged-attention op gathers, masks, softmaxes, and accumulates values without feeding stock SDPA. |
 | fp16 KV path | The production/default provider KV dtype path when `kv_bits` is unset. |
 | Quantized KV path | A `kvBits` cache path using quantized weights/scales/biases and quantized SDPA. |
@@ -133,6 +169,8 @@ invariant.
 | Cache extraction | The engine operation that materializes one sequence's paged block table into a standalone contiguous `KVCache` in logical token order (FR-PKV10). |
 | Same-conversation retention | Retaining a sequence's own physical blocks between its turns and reattaching them to a new decode, preserving SPEC-024 token-granular LCP/trim, without sharing blocks across conversations (FR-PKV10). |
 | Block-table handle | The engine-issued reference a consumer holds for one sequence's block table; the engine allocates the physical blocks, the consumer binds/extends/releases through the handle (FR-PKV2, FR-PKV10). |
+| Broader prefix sharing | Any reuse beyond the same conversation's own blocks: cross-conversation, cross-buyer, cross-account, global content-addressed, or salted-prefix sharing. Not in v0.1. |
+| KV offload | Moving KV blocks outside the resident unified-memory pool (SSD, remote memory, or another process). Not in v0.1. |
 
 ## 4. Normative requirements
 
@@ -229,8 +267,8 @@ failure), not an engine mid-stream partial-response path.
 
 ### FR-PKV3 — paged-attention kernel modes (SPEC-039-R003)
 
-The v0.1 normative mode is **gather-feeds-SDPA**. The implementation MUST
-register a custom Metal kernel through public `MLXFast.metalKernel` that
+The v0.1 normative proof mode is **gather-feeds-SDPA**. The implementation
+MUST register a custom Metal kernel through public `MLXFast.metalKernel` that
 reads K/V from non-contiguous physical blocks via block tables and emits
 logical contiguous K/V tensors for stock
 `MLXFast.scaledDotProductAttention`. The kernel inputs MUST include enough
@@ -241,6 +279,17 @@ stock fp16 KV path.
 The gather kernel MUST NOT change attention math. It reorders storage only:
 RoPE'd keys, grouped heads, causal masking, scale, softmax, and value
 accumulation remain owned by the existing model/SDPA path.
+
+**Production-throughput boundary.** A gather-every-step path MAY satisfy
+correctness, descriptor, allocator, and fail-safe proof obligations, but it is
+not automatically production serving evidence. If measured gather overhead
+exceeds the FR-PKV13 recorded ceiling for a target tuple, paged mode MUST NOT
+serve real traffic on that tuple through that path. SPEC-038 MAY consume
+SPEC-039's descriptor, allocator, block-table handle, and FR-PKV10
+materialize/retain primitives through another measured production path (for
+example a compiled shared-forward path) only when that path preserves the same
+fp16 logical-order, request-isolation, and overhead gates. That serving path
+does not retroactively turn gather-feeds-SDPA into a performance claim.
 
 A **fully-fused paged-attention op** MAY be added later for maximum
 performance. That extension MAY require a light `mlx-swift-lm` fork because
@@ -451,6 +500,15 @@ reattach one conversation's blocks to a different conversation (the
 cross-conversation exclusion in §1 stands), and they grant no buyer-controlled
 residency.
 
+**No broader sharing by implication.** FR-PKV10 is not a salted-prefix,
+cross-buyer, cross-account, global content-addressed, or LRU prefix-cache
+sharing authority. A future broader prefix-sharing design MUST define, in a
+SPEC revision before implementation, the tenant/account scope, salt/key
+derivation, hit/miss attribution, purge propagation, privacy disclosure,
+receipt/billing effect, and diagnostic observability. Until that exists, any
+attempt to reattach or expose blocks outside the same conversation MUST fail
+closed before serving.
+
 ### FR-PKV11 — capability descriptor handshake (SPEC-039-R011)
 
 The engine MUST advertise a **machine-readable capability descriptor** that a
@@ -531,10 +589,13 @@ the values are IMPL-set**, exactly as FR-PKV2's capacity bound is:
   arrives with batching and quantized KV); the obligation is to record the
   measured value honestly, not to manufacture a positive envelope;
 - a **paged-attention overhead ceiling**: a bound on the per-op gather (and,
-  for the fused path when it exists, per-op attention) overhead versus the
-  stock contiguous path, enforced as an **IMPL gate** — paged mode that
-  exceeds the recorded ceiling fails the gate rather than shipping a
-  regression.
+  for the fused path or another measured production serving path when it
+  exists, per-op attention/shared-forward) overhead versus the stock contiguous
+  path, enforced as an **IMPL gate** — paged mode that exceeds the recorded
+  ceiling fails the gate rather than shipping a regression. A correct
+  gather-feeds-SDPA proof path whose overhead exceeds the ceiling MAY remain a
+  parity scaffold and fallback diagnostic, but it MUST NOT be used as the real
+  traffic enable path for that tuple.
 
 These are normative define-and-record obligations; the specific byte and
 percentage values are chosen by the IMPL against real evidence and recorded in
@@ -569,6 +630,8 @@ error, never a silent partial enable.
 | Paged flag on, allocator or block-table invalid | Reason-coded stock fallback or preflight failure before paged serving. |
 | Paged flag on, `kvBits` configured and no paged-quantized path exists | Reason-coded stock fallback or preflight failure; no silent quantization downgrade. |
 | Metal kernel or `default.metallib` unavailable | Reason-coded stock fallback or preflight failure before paged serving. |
+| Gather-feeds-SDPA exact parity passes, but overhead ceiling fails | Valid correctness/parity evidence only; paged mode MUST NOT serve real traffic through that path for the tuple. |
+| SPEC-038 consumes descriptor/handles/FR-PKV10 through another measured shared-forward path | Allowed only if that path preserves this spec's logical-order, descriptor, fallback, isolation, and overhead gates and passes SPEC-038 real-serving evidence. |
 | Fully-fused op configured | Explicit mode-gated extension; must pass all fp16 parity fixtures before use. |
 
 ## 6. Acceptance criteria (fixtures)
@@ -663,7 +726,10 @@ The implementation PR for this SPEC MUST include fixtures that prove:
   model/context envelope paged serves that stock cannot (which **MAY be recorded
   as null/negligible for the batch-1 fp16 path**), and enforces the
   paged-attention overhead ceiling as an IMPL gate (paged mode exceeding the
-  recorded ceiling fails the gate).
+  recorded ceiling fails the gate). The fixture MUST distinguish a
+  gather-feeds-SDPA parity pass from a production-serving pass: if gather
+  every step exceeds the ceiling, the evidence may satisfy FR-PKV4 but not a
+  real-traffic enable gate.
 - **AC-17 operator config surface (FR-PKV14):** the triple-source
   (YAML/env/CLI) precedence resolves `enabled` (default `false`),
   `block_size_tokens`, pool capacity, and `fallback_policy`
@@ -686,6 +752,12 @@ The implementation PR for this SPEC MUST include fixtures that prove:
   stock contiguous.
 - No global, cross-conversation, or buyer-visible KV block sharing
   (same-conversation retain/reattach is in scope, FR-PKV10).
+- No salted-prefix, cross-buyer, cross-account, or content-addressed prefix
+  sharing without a future SPEC revision defining scope, salts, purge,
+  attribution, privacy disclosure, and billing/receipt effects.
+- No KV offload, LRU eviction policy, priority cache eviction, or
+  evict-and-recompute preemption claim from v0.1. The engine exposes allocator
+  mechanism only; serving policy belongs to future SPEC-038/SPEC-039 work.
 
 ## 8. Open questions carried
 
@@ -698,6 +770,14 @@ The implementation PR for this SPEC MUST include fixtures that prove:
   `mlx-swift-lm` fork.
 - Paged quantized KV remains a future numerical surface if the provider later
   enables `kvBits` in production.
+- Sliding-window/hybrid cache support remains future work; v0.1 admits only
+  full-context, non-rotating `KVCacheSimple`-equivalent fp16 caches. The
+  existing uncapped attach probe prevents false rejection of full-context
+  models capped for memory, but it does not authorize genuine sliding-window
+  paged attention.
+- KV offload and LRU/priority eviction policy remain future work. v0.1 owns a
+  bounded resident pool and sequence-scoped reclaim mechanism, not an
+  offloaded or globally shared cache manager.
 - Catalog / autotune product-surface interaction: how the paged servability
   envelope (FR-PKV13 — the larger model/context classes a Mac can serve under
   paging) should surface in the SPEC-010 model catalog and the SPEC-023
