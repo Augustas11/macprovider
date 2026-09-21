@@ -29,14 +29,19 @@ Recommended current lane. Deliver one constrained physical staging proof for:
 
 - Canonical model: `meta-llama/llama-3.2-3b-instruct`
 - Provider artifact: `mlx-community/Llama-3.2-3B-Instruct-4bit`
-- Environment: staging coordinator/gateway only
-- Boundary: no production activation, rewards, payouts, public earnings claims,
-  or automatic paid-provider qualification
+- Environment: Pearl coordinator/gateway network when the currently deployed
+  binaries include the BYOM admission and verified-settlement path; local/mock
+  evidence is a fallback only if Pearl lacks that deployed path.
+- Boundary: no release publication, payout/reward enablement, public earnings
+  claims, or automatic paid-provider qualification. Any Pearl admission used
+  for the proof must be explicit, temporary, auditable, and scoped to the Lane A
+  tuple and provider.
 
 This lane stops when a schema-valid evidence bundle proves the selected model
-tuple ran through the intended provider path in staging, and a human can review
-the source captures. It does not stop on fixture-only, skipped, timed-out, or
-local-only evidence.
+tuple ran through the intended provider path on the real coordinator/gateway
+network, and a human can review the source captures. It does not stop on
+fixture-only, skipped, timed-out, or local-only evidence while Pearl has the
+required BYOM path deployed.
 
 ### Lane B - Full SPEC-044 v2 Experience
 
@@ -95,19 +100,25 @@ Current open PRs as of 2026-09-15 are not Build 1 control blockers:
 
 Lane A blockers:
 
-- Publish a measured, artifact-bound staging release for the selected Llama
-  3B tuple: the staging coordinator must serve `/v1/catalog-artifacts` and its
-  detached signature for the Lane A release with positive measured
-  `size_bytes`. The consumer side (`models staging-input`) is in PR #1658 and
-  reports `artifact_feed_not_served` / `artifact_feed_rejected` until then.
+- Produce measured artifact-feed authority for the selected Llama 3B tuple
+  without faking byte counts: the lab/staging path must measure every published
+  primary artifact from real artifact files or Hugging Face snapshots, sign the
+  full artifact feed with the trusted static-feed key, and serve
+  `/v1/catalog-artifacts` plus its detached signature on loopback or approved
+  staging authority. PR #1658 now owns the operator-local loopback helper for
+  this path; production release publication remains out of scope.
 - Add descriptor-pinned runtime load custody if the physical staging journey
   needs more than path-observed local status correlation.
-- Run the physical Apple Silicon staging journey against staging
-  coordinator/gateway.
+- Run the physical Apple Silicon journey against the Pearl coordinator/gateway
+  network when Pearl has the BYOM admission and settlement path deployed. Use
+  local/mock coordinator or gateway evidence only as an explicitly labeled
+  fallback if that deployed path is absent.
 - Collect validator-accepted evidence that is not fixture-only, skipped,
   timed out, or local-only.
 - Preserve the boundary that local preparation alone never grants paid
-  admission, settlement, earnings, rewards, payouts, or production activation.
+  admission, settlement, earnings, rewards, payouts, or production activation;
+  any Pearl admission/request proof must be temporary, auditable, and cleaned up
+  or withdrawn when the proof is complete.
 
 Lane B blockers:
 
@@ -121,13 +132,16 @@ Lane B blockers:
 
 ## Next Authorized Action
 
-The next work, if Build 1 continues, is the operator-side measured
-artifact-bound staging release: sign and serve the Lane A artifact feed on the
-staging coordinator so `models staging-input` reports `staging_input_ready` on
-a prepared, serving Apple Silicon provider. After that the physical staging
-journey (milestone 4) can start. No repo code change is known to be required
-for the feed publication itself; if one is found, it stays inside PR #1658.
-Public v1 `models catalog-economics` output stays unchanged until Lane B.
+The next work, if Build 1 continues, is to use the measured artifact-feed
+helper output as preflight evidence, then run the physical Apple Silicon journey
+against Pearl because Pearl has BYOM admission and verified-settlement code
+deployed: start a dedicated Lane A provider on MacStudio without disturbing the
+existing Qwen provider, submit the Lane A offer, perform the operator decision
+sequence through `settlement_capable`, route one non-streaming gateway request,
+capture receipt/audit and settlement evidence, and assemble the validator
+bundle. Local/mock coordinator or gateway evidence is acceptable only if Pearl
+is proven not to have the deployed BYOM path. Public v1
+`models catalog-economics` output stays unchanged until Lane B.
 
 Per `build1-single-pr-orchestrator-workflow-v1.md`, this work should continue
 inside PR #1658 as an internal milestone. #1658 should not merge merely because
@@ -156,7 +170,9 @@ Before opening any Build 1 PR, or before adding a Build 1 milestone to PR
 4. Cite the current requirement source.
 5. Explain how the diff reduces a named remaining blocker.
 6. Preserve the no-production-activation boundary unless the owner explicitly
-   approves production activation in that same session.
+   approves production activation in that same session. A scoped Pearl network
+   proof is not a release, payout, reward, or public earnings activation, but
+   it must remain temporary, auditable, and limited to Lane A.
 
 If these fields cannot be filled, stop and recover control instead of creating
 another slice.

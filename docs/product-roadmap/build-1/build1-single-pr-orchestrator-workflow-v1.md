@@ -91,7 +91,8 @@ Milestones stay inside PR #1658:
    - Preserve public v1 `models catalog-economics --json` compatibility until
      Lane B.
 3. Measured artifact-bound staging input.
-   - Status: implemented in PR #1658 as an internal milestone (consumer side).
+   - Status: implemented in PR #1658 as an internal milestone (consumer side);
+     operator-local lab feed production is now in progress in the same PR.
    - `macprovider-cli models staging-input <catalog-key> --profile
      build1-lane-a --coordinator-url <staging> --json [--config <yaml>]
      [--status-capture <status.json>]` emits one
@@ -104,20 +105,29 @@ Milestones stay inside PR #1658:
      `blocked` with explicit blocker codes and exit 2. It is read-only: it
      never bootstraps private state, transfers bytes, or touches the active
      model.
-   - Still unproved: the staging coordinator does not yet serve a signed
-     artifact feed with measured `size_bytes` for the Lane A release. That is
-     an operator release action (signing key, `/v1/catalog-artifacts` +
-     `.sig` on staging), not a repo change; until it lands the command reports
-     `artifact_feed_not_served` or `artifact_feed_rejected` and no physical
-     journey can start.
+   - Operator-local loopback feed production must measure every published
+     primary artifact from real artifact files or Hugging Face snapshots, sign
+     the resulting full feed with the trusted static-feed key, and serve it at
+     `/v1/catalog-artifacts` + `.sig` on loopback. It must not publish a
+     release, deploy Pearl, or touch production endpoints.
    - Runtime custody stays path-observed
      (`descriptor_pinned_runtime_custody=false`).
    - Dispatch record: the executor for this milestone was Claude Fable 5.1
      via the local Claude CLI invoked with `--model fable`, because local
      `omx ask claude --help` exposes no model selector.
-4. Physical Apple Silicon staging journey.
-   - Prepare, serve, admit, route one non-streaming staging gateway request,
-     and capture provider-side request-id-bearing receipt/audit correlation.
+4. Physical Apple Silicon Pearl-network journey.
+   - Use the measured loopback feed and `staging_input_ready` object as
+     preflight evidence, then run the acceptance proof against the real Pearl
+     coordinator/gateway network when Pearl has the BYOM admission and
+     verified-settlement path deployed.
+   - Start a dedicated Lane A provider on MacStudio without disturbing the
+     existing Qwen provider, submit the Lane A offer, perform the operator
+     admission sequence through `settlement_capable`, route one non-streaming
+     gateway request, and capture provider-side request-id-bearing
+     receipt/audit correlation.
+   - Use local/mock coordinator or gateway evidence only if Pearl is proven not
+     to have the deployed BYOM path, and label that evidence as fallback rather
+     than Pearl acceptance.
 5. Verified settlement and validator bundle.
    - Retrieve verified settlement output for the physical request and produce a
      schema-valid, redacted evidence bundle.
@@ -191,8 +201,11 @@ Milestone scope:
 Rules:
 - Keep all work inside PR #1658; do not create another branch or PR.
 - Do not merge, admin-merge, or bypass branch protection.
-- Preserve the no-production-activation boundary: no production admission,
-  rewards, payouts, public earnings, or automatic paid-provider qualification.
+- Preserve the no-production-activation boundary: no release publication,
+  payout/reward enablement, public earnings claim, or automatic paid-provider
+  qualification. Any Pearl admission used for the proof must be temporary,
+  auditable, scoped to Lane A, and cleaned up or withdrawn after evidence
+  capture.
 - Do not touch secrets or operator key material.
 - Do not broaden beyond Lane A's exact Llama 3B tuple unless the orchestrator
   explicitly updates this prompt.
@@ -204,6 +217,7 @@ Rules:
 ## Stop Condition
 
 This workflow is complete only when Build 1 Lane A has a physical
-validator-accepted staging evidence bundle for the selected tuple, final full
-PR audits pass, CI is green on the final head, #1642 is updated, and the owner
-explicitly greenlights merging #1658.
+validator-accepted Pearl-network evidence bundle for the selected tuple, or an
+explicitly labeled local/mock fallback bundle if Pearl is proven to lack the
+deployed BYOM path; final full PR audits pass; CI is green on the final head;
+#1642 is updated; and the owner explicitly greenlights merging #1658.
