@@ -333,9 +333,6 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
               keyBlocks.count == valueBlocks.count,
               keyBlocks.count == table.physicalBlocks.count
         else {
-            FileHandle.standardError.write(Data(
-                "event=paged_kv_record_mismatch offset=\(offset) table_tokens=\(table.logicalTokenCount) cache_blocks=\(keyBlocks.count) table_blocks=\(table.physicalBlocks.count) block_size=\(table.blockSizeTokens) tail=\(table.tailValidTokenCount)\n".utf8
-            ))
             throw PagedKVContiguousCacheBridgeError.blockTableMismatch
         }
         guard let firstKey = keyBlocks.first,
@@ -449,9 +446,6 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
             guard array.shape == expectedShape,
                   try pagedDType(for: array.dtype) == dtype
             else {
-                FileHandle.standardError.write(Data(
-                    "event=paged_kv_block_shape_mismatch block=\(blockIndex) have=\(array.shape.map(String.init).joined(separator: "x")) want=\(expectedShape.map(String.init).joined(separator: "x")) valid_tokens=\(validTokens)\n".utf8
-                ))
                 throw PagedKVContiguousCacheBridgeError.blockTableMismatch
             }
             let blockData = array.asData(access: .copy)
