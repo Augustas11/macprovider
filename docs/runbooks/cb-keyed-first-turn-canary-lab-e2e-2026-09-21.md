@@ -70,8 +70,15 @@ cache-miss requests enter Studio CB canary and share the decode batch.
 Not a live-8080 swap. Not `continuous_batching: on`. Not a slot raise.
 Not fleet promote. Worktree binary is lab evidence only.
 
+## Loop B (after merge)
+
+Signed **v1.8.176** is live as `live.malibu.provider` (PID **51670**,
+SHA `b0bb40342350f5d843db874bc7e0ec40648d3065754ac6ff109955136eca0075`,
+compat `Augustas11/macprovider:v1.8.176@bd75f86df829ec456a2cac7e1b23ffa4b08b4455`).
+Pearl accepted the set. 30B paged-KV attach eligible. Isolated 18084 stopped.
+Do not set CB `on`. Do not raise slots.
+
 ## Not done here
 
-- Signed CLI cut and live 8080 swap (Loop B, after merge)
 - Sticky/cross-turn positive `cached_prompt_tokens` batching (AC-26)
 - Wholesale Track A rerun on Qwen 30B
