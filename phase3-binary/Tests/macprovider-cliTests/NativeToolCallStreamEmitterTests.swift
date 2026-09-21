@@ -84,14 +84,17 @@ final class NativeToolCallStreamEmitterTests: XCTestCase {
         let open = emitter.observe("<function=bash>")
         XCTAssertEqual(toolDeltaNames(open), ["bash"])
         XCTAssertEqual(argumentFragments(open), [], "open tag must not stream empty {} arguments")
+        XCTAssertFalse(emitter.hasCompletedValidToolCall, "function-XML must not complete before </function>")
 
         let mid = emitter.observe("<function=bash><parameter=command>echo hello")
         XCTAssertEqual(argumentFragments(mid), [], "incomplete parameter must not stream arguments")
+        XCTAssertFalse(emitter.hasCompletedValidToolCall)
 
         let closed = emitter.observe(
             #"<function=bash><parameter=command>echo hello</parameter></function>"#
         )
         XCTAssertEqual(argumentFragments(closed).joined(), #"{"command":"echo hello"}"#)
+        XCTAssertTrue(emitter.hasCompletedValidToolCall)
     }
 
     func testFunctionXMLArgumentFragmentsConcatToValidJSON() {
@@ -128,6 +131,7 @@ final class NativeToolCallStreamEmitterTests: XCTestCase {
         XCTAssertTrue(args.contains("echo hello"), args)
         XCTAssertNotEqual(args, "{}")
         XCTAssertFalse(args.contains("{}{"))
+        XCTAssertTrue(emitter.hasCompletedValidToolCall)
     }
 
     func testVisibleContentPrefixStreamsProseBeforeToolCall() {
@@ -162,6 +166,25 @@ final class NativeToolCallStreamEmitterTests: XCTestCase {
         XCTAssertTrue(emitter.suppressesAssistantContent)
         XCTAssertEqual(emitter.visibleContentPrefix(of: "</tool_call>\n"), "")
         XCTAssertTrue(emitter.observe("</tool_call>").isEmpty)
+    }
+
+    func testIncompleteJSONDoesNotComplete() {
+        var emitter = NativeToolCallStreamEmitter(
+            modelID: "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
+            allowedFunctionNames: ["read"]
+        )
+        _ = emitter.observe(#"<tool_call>{"name":"read","arguments":{"path":"Make"#)
+        XCTAssertFalse(emitter.hasCompletedValidToolCall)
+    }
+
+    func testUndeclaredNameDoesNotComplete() {
+        var emitter = NativeToolCallStreamEmitter(
+            modelID: "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
+            allowedFunctionNames: ["read"]
+        )
+        _ = emitter.observe(#"<tool_call>{"name":"rm","arguments":{"path":"/"}}</tool_call>"#)
+        XCTAssertFalse(emitter.hasCompletedValidToolCall)
+        XCTAssertFalse(hasAnyToolDelta(emitter.observe("leftover")))
     }
 
     private func argumentFragments(_ events: [StreamChunk]) -> [String] {

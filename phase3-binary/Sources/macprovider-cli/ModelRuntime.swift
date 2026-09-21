@@ -4953,7 +4953,7 @@ actor ModelRuntime: ModelRuntimeServing {
                                     stopTokenFilter: stopTokenFilter,
                                     requestStops: request.stop
                                 )
-                                if streamToolsIncrementally {
+                                    if streamToolsIncrementally {
                                     for event in toolStreamer.observe(candidate.text) {
                                         onChunk(event)
                                     }
@@ -4968,6 +4968,9 @@ actor ModelRuntime: ModelRuntimeServing {
                                             emittedText = safe
                                             onChunk(.content(delta))
                                         }
+                                    }
+                                    if request.stopsAfterFirstCompleteToolCall, toolStreamer.hasCompletedValidToolCall {
+                                        return .stop
                                     }
                                     if candidate.hitStop {
                                         stoppedByRequestStop = true
@@ -6081,6 +6084,9 @@ actor ModelRuntime: ModelRuntimeServing {
         guard !parsed.toolCalls.isEmpty else {
             return (text, [])
         }
+        if request.stopsAfterFirstCompleteToolCall, parsed.toolCalls.count > 1 {
+            return ("", Array(parsed.toolCalls.prefix(1)))
+        }
         return ("", parsed.toolCalls)
     }
 
@@ -6532,6 +6538,10 @@ struct NativeToolCallStreamEmitter {
     }
 
     var suppressesAssistantContent: Bool { opened || sawToolDelimiter }
+
+    /// True once a declared tool has complete arguments (closed JSON object or
+    /// closed function-XML). Used to stop serial turns without waiting for EOS.
+    var hasCompletedValidToolCall: Bool { opened && closed }
 
     func visibleContentPrefix(of text: String) -> String {
         if suppressesAssistantContent {

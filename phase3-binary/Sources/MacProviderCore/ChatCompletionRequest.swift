@@ -20,6 +20,10 @@ public struct ChatCompletionRequest: Sendable {
     public let temperature: Double
     public let topP: Double
     public let stream: Bool
+    /// OpenAI `parallel_tool_calls`. `nil` (omitted) and `false` are serial:
+    /// stop generation after the first complete valid tool. `true` keeps
+    /// multi-call collection. Pi and most agent loops omit this field.
+    public let parallelToolCalls: Bool?
     public let stop: [String]
     public let presencePenalty: Double
     public let frequencyPenalty: Double
@@ -31,6 +35,11 @@ public struct ChatCompletionRequest: Sendable {
     // SPEC-037 FR-KVP11: the ingest boundary this request arrived on. Defaults
     // to `.unknown` (non-persisting) at parse; each boundary stamps its own.
     public let ingestProvenance: KVIngestProvenance
+
+    /// Serial agent turns (omitted/`false`) stop after the first complete tool.
+    public var stopsAfterFirstCompleteToolCall: Bool {
+        parallelToolCalls != true
+    }
 
     public static func parse(data: Data) throws -> ChatCompletionRequest {
         guard data.count <= RequestValidation.rawBodyByteCap else {
@@ -77,6 +86,7 @@ public struct ChatCompletionRequest: Sendable {
         }
 
         let stream = try optionalBool(dict["stream"], key: "stream") ?? false
+        let parallelToolCalls = try optionalBool(dict["parallel_tool_calls"], key: "parallel_tool_calls")
 
         if let streamOptions = dict["stream_options"], !(streamOptions is NSNull), !(streamOptions is [String: Any]) {
             throw APIError(status: 400, message: "stream_options must be an object", code: "invalid_request")
@@ -123,6 +133,7 @@ public struct ChatCompletionRequest: Sendable {
             temperature: temperature,
             topP: topP,
             stream: stream,
+            parallelToolCalls: parallelToolCalls,
             stop: stop,
             presencePenalty: presencePenalty,
             frequencyPenalty: frequencyPenalty,
@@ -143,6 +154,7 @@ public struct ChatCompletionRequest: Sendable {
             temperature: temperature,
             topP: topP,
             stream: stream,
+            parallelToolCalls: parallelToolCalls,
             stop: stop,
             presencePenalty: presencePenalty,
             frequencyPenalty: frequencyPenalty,
@@ -163,6 +175,7 @@ public struct ChatCompletionRequest: Sendable {
             temperature: temperature,
             topP: topP,
             stream: stream,
+            parallelToolCalls: parallelToolCalls,
             stop: stop,
             presencePenalty: presencePenalty,
             frequencyPenalty: frequencyPenalty,
@@ -185,6 +198,7 @@ public struct ChatCompletionRequest: Sendable {
             temperature: temperature,
             topP: topP,
             stream: stream,
+            parallelToolCalls: parallelToolCalls,
             stop: stop,
             presencePenalty: presencePenalty,
             frequencyPenalty: frequencyPenalty,
@@ -240,6 +254,7 @@ public struct ChatCompletionRequest: Sendable {
         temperature: Double,
         topP: Double,
         stream: Bool,
+        parallelToolCalls: Bool?,
         stop: [String],
         presencePenalty: Double,
         frequencyPenalty: Double,
@@ -256,6 +271,7 @@ public struct ChatCompletionRequest: Sendable {
         self.temperature = temperature
         self.topP = topP
         self.stream = stream
+        self.parallelToolCalls = parallelToolCalls
         self.stop = stop
         self.presencePenalty = presencePenalty
         self.frequencyPenalty = frequencyPenalty

@@ -502,7 +502,7 @@
     {
       "spec_id": "SPEC-018",
       "title": "Agentic tool calling (provider-side response synthesis)",
-      "version": "0.2.8",
+      "version": "0.2.9",
       "path": "specs/SPEC-018-agentic-tool-calling.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -1976,6 +1976,29 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1594",
         "rationale": "SPEC-018 v0.2.8 Amendment 3 removes the independent 256-entry messages[] count cap (AC-53). Implementation and tests land in this change; production activation requires the coordinator binary on Pearl plus provider CLI rollout. Conformance stays pending until that deploy evidence is recorded."
+      }
+    },
+    {
+      "requirement_id": "SPEC-018-R004",
+      "spec_id": "SPEC-018",
+      "state": "pending",
+      "implementation": [
+        "phase3-binary/Sources/MacProviderCore/ChatCompletionRequest.swift:parallelToolCalls",
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:struct NativeToolCallStreamEmitter",
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:static func parseToolCallsIfRequested"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/ChatCompletionRequestTests.swift:testOmittedParallelToolCallsIsSerial",
+        "phase3-binary/Tests/macprovider-cliTests/NativeToolCallStreamEmitterTests.swift:final class NativeToolCallStreamEmitterTests",
+        "phase3-binary/Tests/macprovider-cliTests/SerialToolTurnTests.swift:final class SerialToolTurnTests"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "SPEC-018 v0.2.9 Amendment 4 stops serial turns after the first complete valid tool when parallel_tool_calls is omitted or false. Unit tests land in this change; production activation requires a Studio loopback Pi json e2e on a locally built CLI, then a signed CLI cut. Conformance stays pending until that lab evidence is recorded."
       }
     },
     {
