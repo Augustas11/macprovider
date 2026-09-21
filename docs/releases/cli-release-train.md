@@ -46,17 +46,14 @@ binary the Mac runs.
 ## Next CLI — net changes vs 1.8.123
 
 Last built candidates `v1.8.163`, `v1.8.164`, `v1.8.167`, `v1.8.168`,
-`v1.8.171`, and `v1.8.172` are old or off-train for promotion — do not
-promote them. Studio serving canary is **`v1.8.174`** @
-`0c276ebb95ee672084a61ac1f9030f7de301ff36` (includes #1653 and #1656), live
-as `live.malibu.provider` on Mac Studio. `v1.8.173` is the Pearl
-coordinator/gateway tag, not a CLI package. Do not promote the fleet.
-Buyer CB stays **off**. Isolated Studio loopback on a local #1661 build
-returned HTTP 200; that proof is **not** in the live 174 package. Do not
-raise slots. **#1661 and #1662 are both on `main`.** Session
-`5987135e-f612-423b-aade-480f1d9d66ab` cuts the next signed candidate off
-current `main` (includes both). Live Studio stays on 174 until that
-package is confirmed.
+`v1.8.171`, `v1.8.172`, and `v1.8.174` are old or off-train for promotion —
+do not promote them. Signed **`v1.8.175`** is the current candidate
+([run 35569340744](https://github.com/Augustas11/macprovider/actions/runs/35569340744)
+attempt 1, `d02798dbe0482b4454cc25bf497959da59242faa`, includes #1661 and
+#1662). Studio serving canary is still **`v1.8.174`** live as
+`live.malibu.provider`. `v1.8.173` is the Pearl coordinator/gateway tag, not
+a CLI package. Do not promote the fleet. Buyer CB stays **off**. Do not
+raise slots. Do not swap Studio onto 175 until the operator asks.
 
 
 | Net change in CLI / Malibu / installer | Status | PR |
@@ -119,9 +116,8 @@ SHA-256 `4a5bb7ff76c96f0cf4f076e57e118f1ffafb0ecdfca0df9e733d5d0e16c9f98b`).
 Pearl `compatibility_set.target_id` stays `v1.8.123@37e2d232…`; `accepted_ids`
 includes `v1.8.174@0c276ebb…` (8-entry cap; dropped unused `v1.8.115` to make
 room; 172 and 171 remain accepted). Buyer `continuous_batching` stays **off**.
-Do not raise slots. #1661 and #1662 are on `main` (isolated lab PASS).
-Live Studio stays on signed 174 until session
-`5987135e-f612-423b-aade-480f1d9d66ab` lands the next signed candidate.
+Do not raise slots. Signed `v1.8.175` is cut (includes #1661 and #1662).
+Live Studio stays on signed 174 until the operator asks to swap.
 
 #1632 / #1638 / #1639 / #1653 (coordinator leftover rewrite + gateway R014)
 are coordinator/gateway, not CLI rows. #1653 also has the CLI
@@ -142,13 +138,13 @@ confirm bytes are unchanged).
 
 | Field | Value |
 |---|---|
-| Last built from `main` | `v1.8.174` **signed** @ `0c276ebb95ee672084a61ac1f9030f7de301ff36`, branch `release/candidate-1.8.174-spec038`, [run 35553895586](https://github.com/Augustas11/macprovider/actions/runs/35553895586) attempt 1. Compat `Augustas11/macprovider:v1.8.174@0c276ebb95ee672084a61ac1f9030f7de301ff36`. Live as `live.malibu.provider` on Mac Studio (`/Users/a1/macprovider/macprovider-cli`); also staged at `/Users/a1/candidate-v1.8.174/`. Recut after #1657 docs landed during the first signer (`c41c761e`). |
+| Last built from `main` | `v1.8.175` **signed** @ `d02798dbe0482b4454cc25bf497959da59242faa`, branch `release/candidate-1.8.175`, [run 35569340744](https://github.com/Augustas11/macprovider/actions/runs/35569340744) attempt 1. Compat `Augustas11/macprovider:v1.8.175@d02798dbe0482b4454cc25bf497959da59242faa`. Includes #1661 and #1662. Not live on Studio. |
 | Mac Studio serving canary | `v1.8.174` @ `0c276ebb95ee672084a61ac1f9030f7de301ff36` — signed, live, Pearl session accepted (`serving_buyers`, slots 4, CB off). Previous canary `v1.8.172` remains staged at `/Users/a1/candidate-v1.8.172/`. Do not raise slots. |
 | Off-train E2E candidate | `v1.8.167` @ `7f833a2f63ddee6b2e146c821341099d89aec169` ([run 35417249468](https://github.com/Augustas11/macprovider/actions/runs/35417249468)) — signed hold-branch CLI used for the 2026-09-19 Pearl Track B run |
-| Older | `v1.8.163` @ `8c0c51d2`; `v1.8.164` BYOM @ `cdbb0257`; CLI artifact `v1.8.166` @ `00ce3625` (not the Pearl runtime tag); CLI `v1.8.172` @ `c512d342` |
-| Status | **Do not promote.** `v1.8.174` is the live Studio serving canary (#1653, #1656). Fleet stays on 1.8.123. Buyer CB stays off. Do not raise slots. |
-| Next candidate | **cut now** off current `main` (`d1cf78db`, includes #1661 + #1662). Owner session `5987135e-f612-423b-aade-480f1d9d66ab`. Candidate tags still do not bump `binaryVersion` (stays 1.8.123). |
-| Why the next cut | Signed 174 predates #1661 (CB serve-path prefill) and #1662 (serial tool-turn stop). Combined cut; do not canary CB; do not promote the fleet. |
+| Older | `v1.8.163` @ `8c0c51d2`; `v1.8.164` BYOM @ `cdbb0257`; CLI artifact `v1.8.166` @ `00ce3625` (not the Pearl runtime tag); CLI `v1.8.172` @ `c512d342`; CLI `v1.8.174` @ `0c276ebb` |
+| Status | **Do not promote.** `v1.8.175` is signed and waiting. Fleet stays on 1.8.123. Studio stays on 174. Buyer CB stays off. Do not raise slots. |
+| Next candidate | **cut.** `v1.8.175` @ `d02798dbe0482b4454cc25bf497959da59242faa`. Candidate tags still do not bump `binaryVersion` (stays 1.8.123). |
+| Why the next cut | Combined #1661 (CB serve-path prefill) + #1662 (serial tool-turn stop). Do not canary CB. Do not promote the fleet. |
 
 ## E2E tracks (independent gates)
 
