@@ -4313,6 +4313,10 @@ actor ModelRuntime: ModelRuntimeServing {
                             }
 
                             let iterator = try TokenIterator(input: iteratorInput, model: generationContext.model, cache: kvCache, parameters: parameters)
+                            var serialToolObserver = NativeToolCallStreamEmitter(
+                                modelID: request.model,
+                                allowedFunctionNames: Self.toolFunctionNames(from: request.promptSource.tools)
+                            )
                             let result: BlockingGenerateResult = try await blockingInferenceExecutor.run { inferenceCancellation in
                                 BlockingGenerateResult(generate(input: iteratorInput, context: generationContext, iterator: iterator) { tokens in
                                     if !tokens.isEmpty {
@@ -4325,6 +4329,21 @@ actor ModelRuntime: ModelRuntimeServing {
                                     if HarmonyResponseParser.isHarmonyModelID(request.model),
                                        tokens.last.map(Self.isHarmonyTerminalToken) == true {
                                         return GenerateDisposition.stop
+                                    }
+                                    if request.stopsAfterFirstCompleteToolCall,
+                                       !HarmonyResponseParser.isHarmonyModelID(request.model),
+                                       Self.hasEnabledTools(request.promptSource.tools)
+                                    {
+                                        let decoded = generationContext.tokenizer.decode(tokenIds: tokens)
+                                        let candidate = Self.streamingSafePrefix(
+                                            decoded,
+                                            stopTokenFilter: stopTokenFilter,
+                                            requestStops: request.stop
+                                        )
+                                        _ = serialToolObserver.observe(candidate.text)
+                                        if serialToolObserver.hasCompletedValidToolCall {
+                                            return GenerateDisposition.stop
+                                        }
                                     }
                                     return GenerateDisposition.more
                                 })
@@ -4953,8 +4972,8 @@ actor ModelRuntime: ModelRuntimeServing {
                                     stopTokenFilter: stopTokenFilter,
                                     requestStops: request.stop
                                 )
-                                if streamToolsIncrementally {
-                                    for event in toolStreamer.observe(candidate.text) {
+                                    if streamToolsIncrementally {
+                                        for event in toolStreamer.observe(candidate.text) {
                                         onChunk(event)
                                     }
                                     if !toolStreamer.suppressesAssistantContent {
@@ -4968,6 +4987,9 @@ actor ModelRuntime: ModelRuntimeServing {
                                             emittedText = safe
                                             onChunk(.content(delta))
                                         }
+                                    }
+                                    if request.stopsAfterFirstCompleteToolCall, toolStreamer.hasCompletedValidToolCall {
+                                        return .stop
                                     }
                                     if candidate.hitStop {
                                         stoppedByRequestStop = true
@@ -6081,6 +6103,9 @@ actor ModelRuntime: ModelRuntimeServing {
         guard !parsed.toolCalls.isEmpty else {
             return (text, [])
         }
+        if request.stopsAfterFirstCompleteToolCall, parsed.toolCalls.count > 1 {
+            return ("", Array(parsed.toolCalls.prefix(1)))
+        }
         return ("", parsed.toolCalls)
     }
 
@@ -6510,17 +6535,24 @@ struct NativeToolCallStreamEmitter {
     /// stream `<function=…>` tool-call deltas; other families fall through to JSON parsing (which
     /// yields nothing for XML), so no non-Qwen family can stream a function-XML delta.
     private let allowsFunctionXML: Bool
+    /// SPEC-018 §3.2: only Qwen 2.5/3 and Llama 3.3 native grammars are recognized.
+    /// Unsupported families must not complete a serial stop on lookalike markup.
+    private let enabled: Bool
     private var sawToolDelimiter = false
     private var opened = false
     private var closed = false
+    private var completedValidToolCall = false
     private var emittedArguments = ""
     private var callID = "call_\(UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased())"
 
     init(modelID: String, allowedFunctionNames: Set<String>?) {
         self.allowedFunctionNames = allowedFunctionNames
-        self.allowsFunctionXML = modelID.localizedCaseInsensitiveContains("qwen2.5")
+        let isQwen = modelID.localizedCaseInsensitiveContains("qwen2.5")
             || modelID.localizedCaseInsensitiveContains("qwen3")
-        if modelID.localizedCaseInsensitiveContains("llama-3.3") {
+        let isLlama33 = modelID.localizedCaseInsensitiveContains("llama-3.3")
+        self.enabled = isQwen || isLlama33
+        self.allowsFunctionXML = isQwen
+        if isLlama33 {
             startDelimiter = "<|python_tag|>"
             endDelimiter = "<|eom_id|>"
             argumentKey = "parameters"
@@ -6531,9 +6563,15 @@ struct NativeToolCallStreamEmitter {
         }
     }
 
-    var suppressesAssistantContent: Bool { opened || sawToolDelimiter }
+    var suppressesAssistantContent: Bool { enabled && (opened || sawToolDelimiter) }
+
+    /// True once a declared tool has parser-valid, within-cap arguments (complete
+    /// JSON object or closed function-XML). Wrapper-close, prefixes, and cap
+    /// failures must not satisfy this; they must not stop a serial turn.
+    var hasCompletedValidToolCall: Bool { completedValidToolCall }
 
     func visibleContentPrefix(of text: String) -> String {
+        guard enabled else { return text }
         if suppressesAssistantContent {
             return ""
         }
@@ -6547,7 +6585,7 @@ struct NativeToolCallStreamEmitter {
     }
 
     mutating func observe(_ text: String) -> [StreamChunk] {
-        guard !closed else {
+        guard enabled, !closed else {
             return []
         }
         if let start = text.range(of: startDelimiter) {
@@ -6557,10 +6595,8 @@ struct NativeToolCallStreamEmitter {
             let body = String(text[afterStart..<bodyEnd])
             var isClosed = text.range(of: endDelimiter, range: afterStart..<text.endIndex) != nil
             if allowsFunctionXML, body.contains("<function=") {
-                if body.contains("</function>") {
-                    isClosed = true
-                }
-                return observeNemotronXML(body: body, isClosed: isClosed)
+                // Outer </tool_call> is not a valid XML close; wait for </function>.
+                return observeNemotronXML(body: body, isClosed: body.contains("</function>"))
             }
             if !isClosed, ToolCallParser.firstCompleteJSONObject(in: body) != nil {
                 isClosed = true
@@ -6569,7 +6605,7 @@ struct NativeToolCallStreamEmitter {
         }
         if allowsFunctionXML, text.contains("<function=") {
             sawToolDelimiter = true
-            let isClosed = text.contains("</function>") || text.contains(endDelimiter)
+            let isClosed = text.contains("</function>")
             return observeNemotronXML(body: text, isClosed: isClosed)
         }
         return []
@@ -6578,11 +6614,13 @@ struct NativeToolCallStreamEmitter {
     private mutating func observeJSONToolCall(body: String, isClosed: Bool) -> [StreamChunk] {
         let name: String
         let arguments: String
+        let parsedComplete: Bool
         if let object = ToolCallParser.firstCompleteJSONObject(in: body),
            let parsed = ToolCallParser.jsonToolCallNameAndArguments(in: object, argumentKey: argumentKey)
         {
             name = parsed.name
             arguments = parsed.arguments
+            parsedComplete = true
         } else {
             guard let parsedName = stringField("name", in: body),
                   let prefix = ToolCallParser.jsonArgumentsPrefix(in: body, argumentKey: argumentKey)
@@ -6591,6 +6629,7 @@ struct NativeToolCallStreamEmitter {
             }
             name = parsedName
             arguments = prefix
+            parsedComplete = false
         }
         // Fail closed: never stream a tool-call delta for an undeclared function name.
         guard let allowed = allowedFunctionNames, allowed.contains(name) else {
@@ -6615,6 +6654,9 @@ struct NativeToolCallStreamEmitter {
         }
         if isClosed {
             closed = true
+            if parsedComplete {
+                completedValidToolCall = true
+            }
         }
         return events
     }
@@ -6650,6 +6692,7 @@ struct NativeToolCallStreamEmitter {
                     emittedArguments = arguments
                     events.append(.toolCallDelta(StreamToolCallDelta(index: 0, id: nil, type: nil, functionName: nil, arguments: fragment)))
                 }
+                completedValidToolCall = true
             }
             closed = true
         }

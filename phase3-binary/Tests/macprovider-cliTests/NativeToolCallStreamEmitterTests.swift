@@ -84,14 +84,17 @@ final class NativeToolCallStreamEmitterTests: XCTestCase {
         let open = emitter.observe("<function=bash>")
         XCTAssertEqual(toolDeltaNames(open), ["bash"])
         XCTAssertEqual(argumentFragments(open), [], "open tag must not stream empty {} arguments")
+        XCTAssertFalse(emitter.hasCompletedValidToolCall, "function-XML must not complete before </function>")
 
         let mid = emitter.observe("<function=bash><parameter=command>echo hello")
         XCTAssertEqual(argumentFragments(mid), [], "incomplete parameter must not stream arguments")
+        XCTAssertFalse(emitter.hasCompletedValidToolCall)
 
         let closed = emitter.observe(
             #"<function=bash><parameter=command>echo hello</parameter></function>"#
         )
         XCTAssertEqual(argumentFragments(closed).joined(), #"{"command":"echo hello"}"#)
+        XCTAssertTrue(emitter.hasCompletedValidToolCall)
     }
 
     func testFunctionXMLArgumentFragmentsConcatToValidJSON() {
@@ -128,6 +131,7 @@ final class NativeToolCallStreamEmitterTests: XCTestCase {
         XCTAssertTrue(args.contains("echo hello"), args)
         XCTAssertNotEqual(args, "{}")
         XCTAssertFalse(args.contains("{}{"))
+        XCTAssertTrue(emitter.hasCompletedValidToolCall)
     }
 
     func testVisibleContentPrefixStreamsProseBeforeToolCall() {
@@ -164,6 +168,81 @@ final class NativeToolCallStreamEmitterTests: XCTestCase {
         XCTAssertTrue(emitter.observe("</tool_call>").isEmpty)
     }
 
+    func testIncompleteJSONDoesNotComplete() {
+        var emitter = NativeToolCallStreamEmitter(
+            modelID: "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
+            allowedFunctionNames: ["read"]
+        )
+        _ = emitter.observe(#"<tool_call>{"name":"read","arguments":{"path":"Make"#)
+        XCTAssertFalse(emitter.hasCompletedValidToolCall)
+    }
+
+    func testIncompleteJSONWithCloseTagDoesNotComplete() {
+        var emitter = NativeToolCallStreamEmitter(
+            modelID: "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
+            allowedFunctionNames: ["read"]
+        )
+        _ = emitter.observe(#"<tool_call>{"name":"read","arguments":{"path":"Make</tool_call>"#)
+        XCTAssertFalse(emitter.hasCompletedValidToolCall)
+    }
+
+    func testXMLOuterCloseWithoutFunctionCloseDoesNotComplete() {
+        var emitter = NativeToolCallStreamEmitter(
+            modelID: "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
+            allowedFunctionNames: ["bash"]
+        )
+        _ = emitter.observe(#"<tool_call><function=bash><parameter=command>echo"#)
+        XCTAssertFalse(emitter.hasCompletedValidToolCall)
+        _ = emitter.observe(#"<tool_call><function=bash><parameter=command>echo</tool_call>"#)
+        XCTAssertFalse(emitter.hasCompletedValidToolCall)
+    }
+
+    func testBareXMLWrapperCloseDoesNotComplete() {
+        var emitter = NativeToolCallStreamEmitter(
+            modelID: "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
+            allowedFunctionNames: ["bash"]
+        )
+        _ = emitter.observe(#"<function=bash><parameter=command>echo</tool_call>"#)
+        XCTAssertFalse(emitter.hasCompletedValidToolCall)
+    }
+
+    func testUnsupportedFamilyDoesNotComplete() {
+        var emitter = NativeToolCallStreamEmitter(
+            modelID: "mlx-community/Gemma-2-9B-Instruct-4bit",
+            allowedFunctionNames: ["read"]
+        )
+        _ = emitter.observe(#"<tool_call>{"name":"read","arguments":{"path":"Makefile"}}</tool_call>"#)
+        XCTAssertFalse(emitter.hasCompletedValidToolCall)
+        XCTAssertEqual(
+            emitter.visibleContentPrefix(of: #"<tool_call>{"name":"read","arguments":{"path":"Makefile"}}</tool_call>"#),
+            #"<tool_call>{"name":"read","arguments":{"path":"Makefile"}}</tool_call>"#
+        )
+    }
+
+    func testArgumentCapAfterOpenDoesNotComplete() {
+        var emitter = NativeToolCallStreamEmitter(
+            modelID: "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
+            allowedFunctionNames: ["bash"]
+        )
+        _ = emitter.observe(#"<tool_call>{"name":"bash","arguments":{"command":"ok"}"#)
+        XCTAssertFalse(emitter.hasCompletedValidToolCall)
+        let big = String(repeating: "a", count: 1_100_000)
+        _ = emitter.observe(
+            #"<tool_call>{"name":"bash","arguments":{"command":"\#(big)"}}"#
+        )
+        XCTAssertFalse(emitter.hasCompletedValidToolCall)
+    }
+
+    func testUndeclaredNameDoesNotComplete() {
+        var emitter = NativeToolCallStreamEmitter(
+            modelID: "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
+            allowedFunctionNames: ["read"]
+        )
+        _ = emitter.observe(#"<tool_call>{"name":"rm","arguments":{"path":"/"}}</tool_call>"#)
+        XCTAssertFalse(emitter.hasCompletedValidToolCall)
+        XCTAssertFalse(hasAnyToolDelta(emitter.observe("leftover")))
+    }
+
     private func argumentFragments(_ events: [StreamChunk]) -> [String] {
         events.compactMap { chunk in
             if case let .toolCallDelta(delta) = chunk {
@@ -189,5 +268,29 @@ final class NativeToolCallStreamEmitterTests: XCTestCase {
         let function = deltas[0][0]["function"] as? [String: Any]
         XCTAssertEqual(function?["arguments"] as? String, #"{"command":"echo hello"}"#)
         XCTAssertNil(deltas[0][0]["id"], "remainder must not reopen the tool call")
+    }
+
+    func testFallbackOpensUnstreamedSecondTool() {
+        let first = ToolCall(
+            id: "call_aaaaaaaaaaaaaaaa",
+            functionName: "read",
+            arguments: #"{"path":"Makefile"}"#
+        )
+        let second = ToolCall(
+            id: "call_bbbbbbbbbbbbbbbb",
+            functionName: "bash",
+            arguments: #"{"command":"gh pr view 1638"}"#
+        )
+        let deltas = ToolCall.openAIFallbackDeltas(
+            toolCalls: [first, second],
+            streamedArgumentsByIndex: [0: #"{"path":"Makefile"}"#]
+        )
+        XCTAssertGreaterThanOrEqual(deltas.count, 1)
+        let opener = deltas[0][0]
+        XCTAssertEqual(opener["index"] as? Int, 1)
+        XCTAssertEqual(opener["id"] as? String, "call_bbbbbbbbbbbbbbbb")
+        XCTAssertEqual(opener["type"] as? String, "function")
+        let function = opener["function"] as? [String: Any]
+        XCTAssertEqual(function?["name"] as? String, "bash")
     }
 }

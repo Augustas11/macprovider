@@ -56,19 +56,15 @@ extension ToolCall {
         toolCalls: [ToolCall],
         streamedArgumentsByIndex: [Int: String]
     ) -> [[[String: Any]]] {
-        if streamedArgumentsByIndex.isEmpty {
-            var chunks: [[[String: Any]]] = []
-            for (index, call) in toolCalls.enumerated() {
+        var chunks: [[[String: Any]]] = []
+        for (index, call) in toolCalls.enumerated() {
+            guard let already = streamedArgumentsByIndex[index] else {
                 chunks.append([call.openAIInitialDelta(index: index)])
                 if !call.arguments.isEmpty {
                     chunks.append([call.openAIArgumentsDelta(index: index, fragment: call.arguments)])
                 }
+                continue
             }
-            return chunks
-        }
-        var chunks: [[[String: Any]]] = []
-        for (index, call) in toolCalls.enumerated() {
-            let already = streamedArgumentsByIndex[index] ?? ""
             guard call.arguments.hasPrefix(already) else {
                 continue
             }

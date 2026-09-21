@@ -8,6 +8,40 @@ final class ChatCompletionRequestTests: XCTestCase {
         XCTAssertNoThrow(try request.validateModelMatches("mlx-community/Llama-3.2-3B-Instruct-4bit"))
     }
 
+    func testOmittedParallelToolCallsIsSerial() throws {
+        let request = try makeRequest(model: "m")
+        XCTAssertNil(request.parallelToolCalls)
+        XCTAssertTrue(request.stopsAfterFirstCompleteToolCall)
+    }
+
+    func testParallelToolCallsFalseIsSerial() throws {
+        let request = try makeRequest(model: "m", extra: ["parallel_tool_calls": false])
+        XCTAssertEqual(request.parallelToolCalls, false)
+        XCTAssertTrue(request.stopsAfterFirstCompleteToolCall)
+    }
+
+    func testParallelToolCallsTrueKeepsMultiCall() throws {
+        let request = try makeRequest(model: "m", extra: ["parallel_tool_calls": true])
+        XCTAssertEqual(request.parallelToolCalls, true)
+        XCTAssertFalse(request.stopsAfterFirstCompleteToolCall)
+    }
+
+    func testParallelToolCallsRejectsNonBoolean() {
+        XCTAssertAPIError(
+            try makeRequest(model: "m", extra: ["parallel_tool_calls": "yes"]),
+            status: 400,
+            code: "invalid_request"
+        )
+    }
+
+    func testParallelToolCallsRejectsNull() {
+        XCTAssertAPIError(
+            try makeRequest(model: "m", extra: ["parallel_tool_calls": NSNull()]),
+            status: 400,
+            code: "invalid_request"
+        )
+    }
+
     func testModelMismatchStillReturnsNotFound() throws {
         let request = try makeRequest(model: "mlx-community/Other-Model")
 
