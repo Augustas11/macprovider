@@ -32,8 +32,8 @@ tuple):**
   `kv-cache purge` of a synth key, then a miss).
 - Decision-log entry in `beta/DECISION_CRITERIA.md` stating the exact binary,
   model, hardware, cycle count, and the enable consequence below.
-- PR for the evidence + decision entry (docs/runbook + decision log; no
-  runtime default flip).
+- Evidence + decision entry pushed direct to `origin/main` (docs/runbook +
+  decision log; no runtime default flip; no PR).
 
 **FAIL:** harness exit 5 (correctness) or a stop-condition trip. Record numbers,
 do **not** enable anything, do **not** "fix the kernel / invent paged restore"
@@ -266,10 +266,11 @@ Write `docs/runbooks/kv-survival-kvs01a-enable-gate-evidence-YYYY-MM-DD.md`:
 Append one `beta/DECISION_CRITERIA.md` entry: KVS-01a ran on Studio; PASS or
 FAIL; enable consequence as in §0.
 
-Open the PR (Augustas11). Governance block if the checker requires it
-(docs + decision log: declare honestly). Three-lane `omc ask codex` only if
-the PR grows code; a docs/evidence PR does not need a fake audit theater, but
-do not sneak a default-on flag change into it.
+If this session only adds evidence markdown + a `DECISION_CRITERIA` entry,
+push direct to `origin/main`. Do not open a PR. Do not wait for CI. If the
+session also changed code, that code is a campaign PR
+(`docs/runbooks/lab-campaign-loop.md`); do not sneak a default-on flag
+change into a docs push.
 
 ---
 
@@ -303,10 +304,14 @@ That is SPEC-038/039 + a new codec ID (SPEC-037 §8).
 - CONFORMANCE row flips to `conformant`
 - Changing serve cache allocation / `newCache` / ModelRuntime except a
   **blocker fix** that smoke proves is still the Entry-199 no-op on this
-  packaged binary. If you must fix code: new worktree, flag stays default-off,
-  three-lane 0 C/H/M, then re-run smoke + 30-cycle on a **new packaged
-  candidate** — a worktree binary is not evidence. Prefer reporting the
-  blocker over shipping an unpackaged fix and calling KVS-01a green.
+  packaged binary. If you must fix code: stay on **one** campaign PR
+  (`docs/runbooks/lab-campaign-loop.md`). Iterate with a local
+  `swift build -c release` on isolated 18080. Flag stays default-off. Do
+  not merge-cut-retest per blocker. When local smoke + 30-cycle PASS, one
+  freeze audit, one merge, one packaged candidate — then re-run the
+  packaged confirmation. That packaged run is the KVS-01a evidence; a
+  worktree binary is not. Prefer reporting the blocker over calling
+  KVS-01a green on an unpackaged fix.
 
 ---
 

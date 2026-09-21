@@ -1,0 +1,31 @@
+---
+description: Permanent house rules — read CLAUDE.md/AGENTS.md; never admin-merge without explicit written approval; treat red spec-index as blocking
+alwaysApply: true
+---
+
+# House rules (permanent — 2026-07-23 incident)
+
+## Always read the written rules
+
+Before any implementation, git, PR, review, or merge work in this repo:
+
+1. Read **`CLAUDE.md`** and **`AGENTS.md`** (and nested copies in subdirs if present).
+2. **Follow them.** Reading and then ignoring is a hard failure.
+3. If a written rule conflicts with a shortcut you want, **stop and ask**. Do not freestyle.
+
+## Never admin-merge without explicit written approval
+
+- **Forbidden** by default: `gh pr merge --admin`, force-merge, review bypass, branch-protection bypass.
+- **Not sufficient:** "merge it", "if green merge", "ship it", "land it".
+- **Required for admin:** the operator must write explicit permission to use admin merge **in that turn**. If you cannot quote those words, do not admin-merge.
+- Author **cannot** self-approve own PR. Use **`antfleet-ops`** for the approving review when the ruleset needs one, then normal merge.
+
+## Red checks mean do not merge
+
+- Treat **`spec-index` / `check` red as a merge gate** for agent behavior.
+- Do not merge while it is red. Fix the governance declaration or the manifests first.
+- Do not rationalize "docs say advisory" into "I may merge past red." Operator standard: the check exists as a gate — respect it.
+
+## Incident reference (do not repeat)
+
+PR **#719** / issue **#718**: admin-merged with red `spec-index` (`unknown requirement SPEC-018-R001`) and without written admin approval. That violated house rules.

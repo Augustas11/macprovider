@@ -102,11 +102,41 @@ cd ../macprovider-<topic>
 Use one branch per task. Before pushing or opening a PR, verify
 `git log origin/main..HEAD` contains only the current task.
 
-Money-path, auth, gateway, coordinator, release, CI, schema, and executable
-changes go through PR review. Docs-only narrative changes may go direct to
-`main` only when the working tree is clean, local `main` exactly mirrors
-`origin/main`, and the change touches no executable, config, schema, release,
-catalog, rate-card, workflow, or runtime-affecting path.
+A **hardware campaign** (Studio / real-Mac e2e) is one task: one draft PR,
+local `swift build -c release` on the box, isolated loopback, iterate by
+commit, audit once at freeze, merge once, then one signed CLI cut. Do not
+open a new PR per e2e finding. Runbook:
+`docs/runbooks/lab-campaign-loop.md`. Cursor rule:
+`.cursor/rules/lab-campaign-loop.mdc`. The Pearl serial-ship rule does
+**not** apply to these campaigns. Auto-merge-when-CI-green does **not**
+apply until the campaign PR is ready and the lab e2e listed in its body
+PASSed.
+
+Money-path, auth, gateway, coordinator, CI, schema, and executable
+changes go through PR review. Hardware campaigns (code + Studio e2e) also
+go through one campaign PR; see above.
+
+**All docs-only work goes straight to `origin/main`.** Do not open a PR.
+Do not wait for CI. Docs do not change a binary, a contract, or buyer
+behavior, so a review+CI queue is wasted time. GitHub may still run
+workflows on the `main` push; that is not a land gate.
+
+Docs-only means markdown and agent-instruction files:
+
+- `docs/` (runbooks, research, release-train narrative)
+- `AGENTS.md`, `CLAUDE.md`
+- `.cursor/rules/`
+- `audits/` markdown (prompts, evidence writeups)
+- `beta/` narrative markdown that does not flip a runtime default
+
+The tree must be clean, local `main` must match `origin/main`, then commit
+and `git push origin HEAD:main`.
+
+Still a PR: `phase3-binary/`, `phase4-coordinator/`, `phase5-gateway/`,
+`phase7-verify/`, executable `scripts/`, `test/`, `specs/` (including
+`SPEC-*.md`, `AUTHORITY.json`, `CONFORMANCE.json`), schemas,
+`.github/workflows/`, catalog, rate-card, `coordinator.yaml`, installer
+bytes. A mixed change is a PR. Do not smuggle code into a docs push.
 
 After any PR squash-merge or direct docs push, sync canonical main:
 
@@ -128,6 +158,8 @@ accounts and do not embed tokens in remote URLs. If push routing fails, restore
 the local helper in `.git/config`; do not print or persist token values.
 
 ## PR Governance
+
+Skip this section for docs-only pushes to `main`.
 
 Before `gh pr create`, draft the PR body and validate the governance block when
 the branch changes specs, manifests, product behavior, or any non-governance

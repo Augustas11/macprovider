@@ -1,0 +1,22 @@
+---
+description: After a PR lands, remove the Cursor sibling worktree and its directory; do not leave stale ~/macprovider-* checkouts on disk
+alwaysApply: true
+---
+
+# Post-merge worktree cleanup
+
+When the current task's PR is squash-merged (or the user says the session is done):
+
+1. Sync canonical `/Users/augstar/macprovider-poc` `main` to `origin/main`.
+2. `git worktree remove --force` the sibling checkout used for this task.
+   That **deletes the directory**. Then `git worktree prune`.
+3. `git branch -D` the local task branch (squash-merge is not an ancestor of `main`).
+4. `git fetch origin --prune`.
+5. Confirm `ls ~/macprovider-<topic>` is gone. Do not leave install scratch,
+   CLI tarball trees, or dated `macprovider.backup-*` folders from that task.
+
+Do this without waiting for a second "clean up the folder" prompt.
+
+Keep checkouts that still have an **open** PR, or that the user said are still
+in use. Do not delete `macprovider-poc`. Do not mass-delete
+`~/.codex/worktrees/macprovider/*` unless this session created them.
