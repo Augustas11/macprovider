@@ -78,6 +78,27 @@ compat `Augustas11/macprovider:v1.8.176@bd75f86df829ec456a2cac7e1b23ffa4b08b4455
 Pearl accepted the set. 30B paged-KV attach eligible. Isolated 18084 stopped.
 Do not set CB `on`. Do not raise slots.
 
+## Live 176 confirmation (2026-09-21, Coder-30B)
+
+Same keyed 4-wide as lab, against live `127.0.0.1:8080` with unique
+`X-MacProvider-Provider-Conversation` keys. `max_tokens=32`.
+
+| i | HTTP | wall_s | prompt | completion | cached | finish |
+| ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| 0 | 200 | 2.898 | 14 | 32 | 0 | length |
+| 1 | 200 | 2.717 | 15 | 32 | 0 | length |
+| 2 | 200 | 3.022 | 15 | 32 | 0 | length |
+| 3 | 200 | 3.066 | 14 | 32 | 0 | length |
+
+Overlap wall **3.073 s** vs sum **11.703 s**. Request-path: four
+`kv_cache_request_completed`, **no** `conversation_key_rollout_unavailable`,
+**no** `batching_prefill_failed`. **PASS.**
+
+Wholesale `api.malibu.tech` 4-wide (acct_openrouter `mp_` key, unique first
+turns, same 30B): 2/4 HTTP 200 (`cached_prompt_tokens=0`, no serial-route on
+Studio) and 2/4 HTTP 429 `no_provider_available`. That shed is slots/routing,
+not the keyed-first-turn CLI fence.
+
 ## Not done here
 
 - Sticky/cross-turn positive `cached_prompt_tokens` batching (AC-26)
