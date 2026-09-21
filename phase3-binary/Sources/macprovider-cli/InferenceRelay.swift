@@ -924,10 +924,17 @@ actor InferenceRelay {
             // content immediately and are never batched.
             var pendingContent = ""
             var pendingCount = 0
+            var emittedToolCall = false
 
             let completion = try await modelRuntime.stream(request, with: handle, shouldCancel: { state.isCancelled }) { chunk in
                 switch chunk {
                 case .content(let text):
+                    if emittedToolCall {
+                        // Leftover </tool_call> or chatter after tool_calls opened
+                        // must not become a content delta (coordinator would kill
+                        // the stream as "fell back to content").
+                        break
+                    }
                     pendingContent += text
                     pendingCount += 1
                     if pendingCount >= streamInterval {
@@ -953,6 +960,7 @@ actor InferenceRelay {
                         pendingContent = ""
                         pendingCount = 0
                     }
+                    emittedToolCall = true
                     streamedToolArgs.note(index: toolDelta.index, fragment: toolDelta.arguments)
                     _ = buffer.enqueue(sseEvent(chatCompletionChunk(
                         id: id,
@@ -964,8 +972,9 @@ actor InferenceRelay {
                 }
             }
 
-            // Flush any remaining batched content before the finish frame.
-            if !pendingContent.isEmpty {
+            // Flush remaining batched content only if no tool call opened.
+            // Post-open leftovers (</tool_call>, chatter) must not go on the wire.
+            if !pendingContent.isEmpty, !emittedToolCall {
                 _ = buffer.enqueue(sseEvent(chatCompletionChunk(
                     id: id,
                     created: created,

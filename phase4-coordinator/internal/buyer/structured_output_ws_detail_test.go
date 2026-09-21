@@ -385,3 +385,65 @@ func assertForwardWSStreamingMapsDetailCodeToSSE(t *testing.T, code string) {
 		}
 	}
 }
+
+func TestForwardWSStreamingDropsLeftoverToolMarkupFromBuyerAndSettlement(t *testing.T) {
+	requestID := "req-ws-leftover-tool-markup"
+	chunks := make(chan providerws.InferenceResponseChunk)
+	done := make(chan providerws.InferenceResponseEnd)
+	errs := make(chan error, 1)
+	go func() {
+		chunks <- providerws.InferenceResponseChunk{
+			Type:      "inference_response_chunk",
+			RequestID: requestID,
+			Seq:       0,
+			Data:      `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_0123456789abcdef","type":"function","function":{"name":"read","arguments":"{\"path\":\"Makefile\"}"}}]}}]}` + "\n\n",
+		}
+		chunks <- providerws.InferenceResponseChunk{
+			Type:      "inference_response_chunk",
+			RequestID: requestID,
+			Seq:       1,
+			Data:      `data: {"choices":[{"delta":{"content":"</tool_call>\n"}}]}` + "\n\n",
+		}
+		chunks <- providerws.InferenceResponseChunk{
+			Type:      "inference_response_chunk",
+			RequestID: requestID,
+			Seq:       2,
+			Data:      `data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}` + "\n\n" + `data: [DONE]` + "\n\n",
+		}
+		close(chunks)
+		done <- providerws.InferenceResponseEnd{
+			Type:       "inference_response_end",
+			RequestID:  requestID,
+			Status:     "complete",
+			ChunksSent: 3,
+		}
+	}()
+
+	server := &Server{}
+	provider := pool.Provider{ProviderID: "provider-a", AssignedID: "session-a"}
+	relay := &providerws.RelayStream{RequestID: requestID, Chunks: chunks, Done: done, Errors: errs}
+	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	req.RemoteAddr = "127.0.0.1:12345"
+	rr := httptest.NewRecorder()
+
+	result, attempt := server.forwardWSStreaming(rr, req, requestID, provider, relay, &forwardState{}, 0)
+	if result != wsForwardComplete {
+		t.Fatalf("result=%q, want %q body=%s", result, wsForwardComplete, rr.Body.String())
+	}
+	if attempt.ErrorCode != "" {
+		t.Fatalf("attempt error=%q code=%q, want success", attempt.Error, attempt.ErrorCode)
+	}
+	body := rr.Body.String()
+	if strings.Contains(body, "</tool_call>") {
+		t.Fatalf("buyer SSE still contains leftover post-tool content: %s", body)
+	}
+	if attempt.SettlementOutput == nil || !attempt.SettlementOutput.Available {
+		t.Fatalf("settlement output unavailable: %+v", attempt.SettlementOutput)
+	}
+	if strings.Contains(attempt.SettlementOutput.Content, "</tool_call>") {
+		t.Fatalf("settlement content still contains leftover post-tool text: %q", attempt.SettlementOutput.Content)
+	}
+	if len(attempt.SettlementOutput.ToolCalls) != 1 || attempt.SettlementOutput.ToolCalls[0].Name != "read" {
+		t.Fatalf("settlement tool_calls=%+v, want one read call", attempt.SettlementOutput.ToolCalls)
+	}
+}

@@ -126,6 +126,40 @@ def followup_text_sse() -> str:
     )
 
 
+def run1_leftover_close_tag_sse() -> str:
+    """Bakeoff run-1 shape: prose, complete tool JSON, leftover </tool_call>.
+
+    Coordinator rewrite drops the leftover content delta. This stub is the
+    buyer-visible stream after that rewrite would succeed: no terminal
+    malformed_tool_call error, one reconstructable tool call.
+    The leftover frame is included so the client-oracle still reconstructs
+    if a content delta sneaks through.
+    """
+    return "".join(
+        [
+            _sse(
+                '{"id":"chatcmpl-run1","object":"chat.completion.chunk","created":1,"model":"qwen","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}'
+            ),
+            _sse(
+                '{"id":"chatcmpl-run1","choices":[{"index":0,"delta":{"content":"I will read the Makefile.\\n"},"finish_reason":null}]}'
+            ),
+            _sse(
+                '{"id":"chatcmpl-run1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_675e5317d10c46088a72423166ff6d68","type":"function","function":{"name":"bash","arguments":""}}]},"finish_reason":null}]}'
+            ),
+            _sse(
+                '{"id":"chatcmpl-run1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\\"command\\":\\"echo hello\\"}"}}]},"finish_reason":null}]}'
+            ),
+            _sse(
+                '{"id":"chatcmpl-run1","choices":[{"index":0,"delta":{"content":"</tool_call>\\n"},"finish_reason":null}]}'
+            ),
+            _sse(
+                '{"id":"chatcmpl-run1","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}'
+            ),
+            "data: [DONE]\n\n",
+        ]
+    )
+
+
 def malformed_tool_call_sse() -> str:
     return (
         _sse(
@@ -169,6 +203,8 @@ class _StubHandler(BaseHTTPRequestHandler):
             payload = followup_text_sse()
         elif "force_malformed_tool_call" in str(content):
             payload = malformed_tool_call_sse()
+        elif "force_run1_leftover" in str(content):
+            payload = run1_leftover_close_tag_sse()
         elif body.get("vendor") == "openrouter" or "openrouter" in str(body.get("model") or "").lower():
             payload = openrouter_echo_hello_sse()
         else:
@@ -302,6 +338,20 @@ class OpenAIWireHarnessTests(unittest.TestCase):
         else:
             self.assertIn("hello", got["content"].lower())
             self.assertGreaterEqual(len([p for p in [got["content"]] if p]), 1)
+
+    def test_run1_leftover_close_tag_still_reconstructs(self) -> None:
+        got = _reconstruct(
+            self.client,
+            model="qwen3-coder-30b-a3b-instruct",
+            messages=[{"role": "user", "content": "force_run1_leftover"}],
+        )
+        self.assertEqual(got["name"], "bash")
+        parsed = json.loads(got["arguments_concat"])
+        self.assertEqual(parsed, ECHO_HELLO_OBJECT)
+        self.assertNotEqual(parsed, {})
+        self.assertEqual(got["finish_reason"], "tool_calls")
+        pi = pi_first_complete_json(got["arguments_fragments"])
+        self.assertEqual(pi, ECHO_HELLO_OBJECT)
 
     def test_terminal_error_keeps_malformed_tool_call(self) -> None:
         try:
