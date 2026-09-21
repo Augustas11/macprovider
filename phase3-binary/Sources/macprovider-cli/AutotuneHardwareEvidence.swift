@@ -112,9 +112,79 @@ struct AutotuneHardwareEvidenceSubmitter {
                     expectedEvidenceSHA: payload.evidenceSHA
                 )
             }
-            return .failed("HTTP \(http.statusCode)")
+            return .failed(Self.failureReason(
+                statusCode: http.statusCode,
+                responseData: responseData,
+                retryAfterHeader: http.value(forHTTPHeaderField: "Retry-After")
+            ))
         } catch {
             return .failed("\(error)")
+        }
+    }
+
+    static func failureReason(statusCode: Int, responseData: Data, retryAfterHeader: String?) -> String {
+        if statusCode == 429 {
+            let retry = retryAfterSeconds(retryAfterHeader)
+            let detail = safeCoordinatorErrorSummary(responseData)
+            var reason = "rate_limited"
+            if let retry {
+                reason += ": retry in \(retry) seconds"
+            } else {
+                reason += ": retry later"
+            }
+            if let detail {
+                reason += " (\(detail))"
+            }
+            return reason
+        }
+        if let detail = safeCoordinatorErrorSummary(responseData) {
+            return "HTTP \(statusCode): \(detail)"
+        }
+        return "HTTP \(statusCode)"
+    }
+
+    private static func retryAfterSeconds(_ raw: String?) -> Int? {
+        guard let raw = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
+              let value = Int(raw),
+              value > 0
+        else {
+            return nil
+        }
+        return value
+    }
+
+    private static func safeCoordinatorErrorSummary(_ data: Data) -> String? {
+        guard !data.isEmpty,
+              let object = try? JSONSerialization.jsonObject(with: data),
+              let dictionary = object as? [String: Any],
+              let error = dictionary["error"] as? [String: Any]
+        else {
+            return nil
+        }
+        guard safeCoordinatorErrorCode(error["code"]) == "rate_limited" else { return nil }
+        let code = "rate_limited"
+        guard let message = safeKnownRateLimitMessage(error["message"]) else { return code }
+        return "\(code): \(message)"
+    }
+
+    private static func safeCoordinatorErrorCode(_ value: Any?) -> String? {
+        guard let raw = value as? String else { return nil }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed.count <= 64 else { return nil }
+        let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-")
+        guard trimmed.unicodeScalars.allSatisfy({ allowed.contains($0) }) else { return nil }
+        return trimmed
+    }
+
+    private static func safeKnownRateLimitMessage(_ value: Any?) -> String? {
+        guard let raw = value as? String else { return nil }
+        switch raw {
+        case "hardware evidence ip rate limit exceeded",
+             "hardware evidence provider rate limit exceeded",
+             "hardware evidence queue already has a recent job":
+            return raw
+        default:
+            return nil
         }
     }
 

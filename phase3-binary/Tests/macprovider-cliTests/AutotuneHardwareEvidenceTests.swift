@@ -277,6 +277,75 @@ final class AutotuneHardwareEvidenceTests: XCTestCase {
         try assertConfigRemainsTokenless(config, bearer: token)
     }
 
+    func testRateLimitedEvidenceSubmissionIncludesRetryAfterGuidance() async throws {
+        let providerID = "mp-cccccccccccccccccccccccccccccccc"
+        let token = "keychain-rate-limit-bearer"
+        let config = try makeTokenlessConfig(providerID: providerID)
+        let session = evidenceSession { request in
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: 429,
+                httpVersion: "HTTP/1.1",
+                headerFields: [
+                    "Content-Type": "application/json",
+                    "Retry-After": "600",
+                ]
+            )!
+            let data = Data(#"{"error":{"code":"rate_limited","message":"hardware evidence provider rate limit exceeded"}}"#.utf8)
+            return (response, data)
+        }
+        defer {
+            session.invalidateAndCancel()
+            AutotuneHardwareEvidenceMockURLProtocol.requestHandler = nil
+        }
+
+        let submission = await AutotuneHardwareEvidenceSubmitter(
+            config: config,
+            credentialStore: InMemoryProviderCredentialStore(values: [providerID: token]),
+            session: session
+        ).submit(snapshot: makeFixture().snapshot)
+
+        XCTAssertEqual(
+            submission,
+            .failed("rate_limited: retry in 600 seconds (rate_limited: hardware evidence provider rate limit exceeded)")
+        )
+    }
+
+    func testRateLimitedEvidenceSubmissionDoesNotReflectUntrustedCoordinatorText() {
+        let body = Data(
+            #"{"error":{"code":"rate_limited","message":"hardware evidence provider rate limit exceeded\u001B]0;pwned\u0007 Bearer SECRET provider_token: SECRET \u202E"}}"#.utf8
+        )
+
+        let reason = AutotuneHardwareEvidenceSubmitter.failureReason(
+            statusCode: 429,
+            responseData: body,
+            retryAfterHeader: "600"
+        )
+
+        XCTAssertEqual(reason, "rate_limited: retry in 600 seconds (rate_limited)")
+        XCTAssertFalse(reason.contains("Bearer"))
+        XCTAssertFalse(reason.contains("provider_token"))
+        XCTAssertFalse(reason.contains("\u{001B}"))
+        XCTAssertFalse(reason.contains("\u{202E}"))
+    }
+
+    func testRateLimitedEvidenceSubmissionDoesNotReflectUntrustedCoordinatorCode() {
+        let body = Data(
+            #"{"error":{"code":"provider_token_SECRET.Bearer.SECRET","message":"hardware evidence provider rate limit exceeded"}}"#.utf8
+        )
+
+        let reason = AutotuneHardwareEvidenceSubmitter.failureReason(
+            statusCode: 429,
+            responseData: body,
+            retryAfterHeader: "600"
+        )
+
+        XCTAssertEqual(reason, "rate_limited: retry in 600 seconds")
+        XCTAssertFalse(reason.contains("Bearer"))
+        XCTAssertFalse(reason.contains("provider_token"))
+        XCTAssertFalse(reason.contains("SECRET"))
+    }
+
     func testEvidenceSubmissionFailsClosedForLockedMissingAndConflictingKeychain() async throws {
         let providerID = "mp-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         let session = evidenceSession { request in
