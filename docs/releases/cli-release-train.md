@@ -46,17 +46,14 @@ binary the Mac runs.
 ## Next CLI — net changes vs 1.8.123
 
 All in-scope CLI rows are **merged**. Last built candidates `v1.8.163`,
-`v1.8.164`, `v1.8.167`, `v1.8.168`, and `v1.8.171` are old or off-train for
-promotion — do not promote them. Studio serving canary is **`v1.8.172`** @
-`c512d342b1df6c495afeabbe49eaca74a98107c4` (includes #1648 and #1650), live
-as `live.malibu.provider` on Mac Studio. `#1653` leftover-stream CLI relay
-and `#1656` sanitized CB prefill-failure telemetry are on `main` and are
-**not** in 172. Cutting `v1.8.174` off current `main` for those rows (`v1.8.173`
-is the Pearl coordinator/gateway tag, not a CLI package). Do not promote the
-fleet. Buyer CB stays **off** after the 2026-09-20 Studio canary attempt
-rolled back (`continuous_batching_prefill_failed` on the attached serve
-path). Do not re-canary live until an isolated 174 loopback names the inner
-throw or returns 200. Do not raise slots.
+`v1.8.164`, `v1.8.167`, `v1.8.168`, `v1.8.171`, and `v1.8.172` are old or
+off-train for promotion — do not promote them. Studio serving canary is
+**`v1.8.174`** @ `0c276ebb95ee672084a61ac1f9030f7de301ff36` (includes #1653
+and #1656), live as `live.malibu.provider` on Mac Studio. `v1.8.173` is the
+Pearl coordinator/gateway tag, not a CLI package. Do not promote the fleet.
+Buyer CB stays **off** after the 2026-09-20 Studio canary attempt rolled
+back. Next CB proof is a keyless loopback on 174 (stderr
+`event=batching_prefill_failed reason=…`). Do not raise slots.
 
 
 | Net change in CLI / Malibu / installer | Status | PR |
@@ -111,20 +108,17 @@ Coordinator/gateway on live Pearl is **v1.8.173** @ `18da0723ef9ebc829b3cddde829
 That runtime includes #1653 (leftover `</tool_call>` sanitizer + SPEC-006-R014
 system+tools auto-prefix) on top of #1632 / #1638 / #1639. Sticky and CB stay
 off. Fleet Macs still run **1.8.123** until the operator-cut CLI is promoted.
-Mac Studio serving canary is `v1.8.172` (signed package extracted into
-`/Users/a1/macprovider/`; also staged at `/Users/a1/candidate-v1.8.172/`; CLI
-SHA-256 `7bd43fe8582206043b70e95b8bc232eb0826511832fc43ff0ffe91555c92ac60`).
+Mac Studio serving canary is `v1.8.174` (signed package extracted into
+`/Users/a1/macprovider/`; also staged at `/Users/a1/candidate-v1.8.174/`; CLI
+SHA-256 `4a5bb7ff76c96f0cf4f076e57e118f1ffafb0ecdfca0df9e733d5d0e16c9f98b`).
 Pearl `compatibility_set.target_id` stays `v1.8.123@37e2d232…`; `accepted_ids`
-includes `v1.8.172@c512d342…` (8-entry cap; dropped unused `v1.8.111` to make
-room; 171 remains accepted). Buyer `continuous_batching` stays **off** after
-the 2026-09-20 Studio canary rollback
-([`continuous-batching-canary-172-enable-2026-09-20.md`](../runbooks/continuous-batching-canary-172-enable-2026-09-20.md)).
-Do not raise slots. Do not re-canary live 172. Isolated loopback on 174 is
-the next CB proof (logging from #1656).
+includes `v1.8.174@0c276ebb…` (8-entry cap; dropped unused `v1.8.115` to make
+room; 172 and 171 remain accepted). Buyer `continuous_batching` stays **off**.
+Do not raise slots. Next CB proof is a keyless loopback on this 174 package.
 
 #1632 / #1638 / #1639 / #1653 (coordinator leftover rewrite + gateway R014)
 are coordinator/gateway, not CLI rows. #1653 also has the CLI
-`InferenceRelay` drop; that binary change waits for the next CLI cut.
+`InferenceRelay` drop; that CLI change is in `v1.8.174`.
 
 #1600 is the install.sh consumer-health alarm
 (scripts/CI), not the Mac binary. Curl-channel `get.malibu.tech/install.sh`
@@ -141,13 +135,13 @@ confirm bytes are unchanged).
 
 | Field | Value |
 |---|---|
-| Last built from `main` | Cutting `v1.8.174` off current `main` for #1653 + #1656. Branch `release/candidate-1.8.174-spec038`. Previous signed CLI: `v1.8.172` @ `c512d342b1df6c495afeabbe49eaca74a98107c4`. `v1.8.173` is Pearl runtime only. |
-| Mac Studio serving canary | `v1.8.172` @ `c512d342b1df6c495afeabbe49eaca74a98107c4` — signed, live, Pearl session accepted (`serving_buyers`, slots 4, CB off after canary rollback). Previous canary `v1.8.171` @ `12de7aea9e3ecf07df229682fc6defd225e4085f` remains staged at `/Users/a1/candidate-v1.8.171/`. Do not re-canary CB on 172 and do not raise slots. |
+| Last built from `main` | `v1.8.174` **signed** @ `0c276ebb95ee672084a61ac1f9030f7de301ff36`, branch `release/candidate-1.8.174-spec038`, [run 35553895586](https://github.com/Augustas11/macprovider/actions/runs/35553895586) attempt 1. Compat `Augustas11/macprovider:v1.8.174@0c276ebb95ee672084a61ac1f9030f7de301ff36`. Live as `live.malibu.provider` on Mac Studio (`/Users/a1/macprovider/macprovider-cli`); also staged at `/Users/a1/candidate-v1.8.174/`. Recut after #1657 docs landed during the first signer (`c41c761e`). |
+| Mac Studio serving canary | `v1.8.174` @ `0c276ebb95ee672084a61ac1f9030f7de301ff36` — signed, live, Pearl session accepted (`serving_buyers`, slots 4, CB off). Previous canary `v1.8.172` remains staged at `/Users/a1/candidate-v1.8.172/`. Do not raise slots. |
 | Off-train E2E candidate | `v1.8.167` @ `7f833a2f63ddee6b2e146c821341099d89aec169` ([run 35417249468](https://github.com/Augustas11/macprovider/actions/runs/35417249468)) — signed hold-branch CLI used for the 2026-09-19 Pearl Track B run |
-| Older | `v1.8.163` @ `8c0c51d2`; `v1.8.164` BYOM @ `cdbb0257`; CLI artifact `v1.8.166` @ `00ce3625` (not the Pearl runtime tag) |
-| Status | **Do not promote.** `v1.8.172` stays live until 174 is signed and swapped. Fleet stays on 1.8.123. Buyer CB stays off. Do not raise slots. |
-| Next candidate | Cutting `v1.8.174` (#1653 leftover-stream CLI + #1656 prefill-failure telemetry). |
-| Why the next cut | 172 cannot name the swallowed prefill throw. 174 is the isolated-loopback package. Do not promote; do not live-canary until that loopback names the throw or returns 200. |
+| Older | `v1.8.163` @ `8c0c51d2`; `v1.8.164` BYOM @ `cdbb0257`; CLI artifact `v1.8.166` @ `00ce3625` (not the Pearl runtime tag); CLI `v1.8.172` @ `c512d342` |
+| Status | **Do not promote.** `v1.8.174` is the live Studio serving canary (#1653, #1656). Fleet stays on 1.8.123. Buyer CB stays off. Do not raise slots. |
+| Next candidate | **not cut.** Next cut only after a CB prefill fix, or another merged CLI row. |
+| Why the next cut | 174 can name a swallowed prefill throw. Do not canary until a keyless 174 loopback names that throw or returns 200. |
 
 ## E2E tracks (independent gates)
 
