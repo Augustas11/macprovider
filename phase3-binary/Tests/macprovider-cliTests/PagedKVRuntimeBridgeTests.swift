@@ -1264,6 +1264,62 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         XCTAssertEqual(handoff.caches[0].state[0].asData(access: .copy).data, keyBytes)
     }
 
+    func testCompiledWritebackKeepsEachRowsOwnTargetLength() throws {
+        guard PagedKVMetallibGate.defaultMetallibExists() else {
+            throw XCTSkip("MLX default metallib is unavailable in this test host")
+        }
+        let row0 = MLXArray((1...8).map(Float.init), [1, 1, 8, 1])
+        let row1 = MLXArray((11...18).map(Float.init), [1, 1, 8, 1])
+        let keys = concatenated([row0, row1], axis: 0)
+        let values = concatenated(
+            [
+                MLXArray((101...108).map(Float.init), [1, 1, 8, 1]),
+                MLXArray((111...118).map(Float.init), [1, 1, 8, 1]),
+            ],
+            axis: 0
+        )
+        eval(keys, values)
+        let slices = try PagedKVCompiledWriteback.rowSlices(
+            keysValues: [keys, values],
+            targets: [3, 6]
+        )
+        XCTAssertEqual(slices.count, 2)
+        XCTAssertEqual(slices[0].0.dim(0), 1)
+        XCTAssertEqual(slices[0].0.dim(2), 3)
+        XCTAssertEqual(slices[1].0.dim(2), 6)
+        eval(slices[0].0, slices[1].0)
+        XCTAssertEqual(slices[0].0.asArray(Float.self), [1, 2, 3])
+        XCTAssertEqual(slices[1].0.asArray(Float.self), [11, 12, 13, 14, 15, 16])
+    }
+
+    func testCompiledWritebackThrowsWhenCompiledShorterThanARowTarget() throws {
+        guard PagedKVMetallibGate.defaultMetallibExists() else {
+            throw XCTSkip("MLX default metallib is unavailable in this test host")
+        }
+        let keys = MLXArray((1...4).map(Float.init), [1, 1, 4, 1])
+        let values = MLXArray((101...104).map(Float.init), [1, 1, 4, 1])
+        eval(keys, values)
+        XCTAssertThrowsError(
+            try PagedKVCompiledWriteback.rowSlices(keysValues: [keys, values], targets: [5])
+        ) { error in
+            XCTAssertEqual(
+                error as? ContinuousBatchSchedulerError,
+                .unsupported("continuous_batching_invalid_cache_layout")
+            )
+        }
+    }
+
+    func testCompiledWritebackThrowsOnMalformedCompiledState() {
+        XCTAssertThrowsError(
+            try PagedKVCompiledWriteback.rowSlices(keysValues: [], targets: [2])
+        ) { error in
+            XCTAssertEqual(
+                error as? ContinuousBatchSchedulerError,
+                .unsupported("continuous_batching_invalid_cache_layout")
+            )
+        }
+    }
+
     func testContiguousCacheBridgePreservesMidBlockTrimAcrossExtractAndRetainReattach() async throws {
         guard PagedKVMetallibGate.defaultMetallibExists() else {
             throw XCTSkip("MLX default metallib is unavailable in this test host")
