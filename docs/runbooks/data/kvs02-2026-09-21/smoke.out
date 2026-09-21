@@ -1,0 +1,14 @@
+kvs02_smoke_started_utc=2026-09-21T02:51:04Z
+cli=/Users/a1/.local/state/kvs-01a/run-v013/macprovider-cli
+1.8.123
+9be5e2f18f0c7db0a11253480f511b5ab2641f0df3ef6d872c2175a47c74d5f0  /Users/a1/.local/state/kvs-01a/run-v013/macprovider-cli
+model_a_yaml=/Users/a1/.local/state/kvs-01a/enabled.yaml
+model_b_yaml=/Users/a1/.local/state/kvs-01a/kvs02-qwen3-8b-enabled.yaml
+kvs-02[c1]: ── (1) persist under model A ──
+kvs-02[c1]: disk_write_committed. kill model A → launch model B (same-family switch)
+kvs-02[c1]: PASS miss_envelope: code=disk_miss_envelope cached=0 correctness=ok modelA=mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit modelB=mlx-community/Qwen3-8B-4bit
+kvs-02[c1]: kill model B → relaunch model A (control arm — expect disk_hit)
+kvs-02[c1]: PASS control: code=disk_hit cached=528 correctness=ok (disk_hit expected=528)
+kvs-02: all 1 cycle(s) passed → /Users/a1/.local/state/kvs-02/evidence/kvs02-smoke-samples.ndjson
+exit=0
+kvs02_smoke_finished_utc=2026-09-21T02:52:17Z
