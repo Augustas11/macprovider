@@ -235,13 +235,27 @@ run_one_cycle() { # $1=cycle
   await_ready
   local MODEL_B; MODEL_B="$(resolve_model)"
 
-  local MISS_JSON MISS_LINE
-  MISS_JSON="$("$NODE_BIN" "$HERE/kvs-01a-probe.mjs" \
+  # SIGKILL model B as soon as the miss reason is logged, BEFORE its post-turn
+  # disk_write_committed. Index is HMAC(conversation key) only — B would otherwise
+  # last-writer-wins overwrite A's blob, and the control arm would false-FAIL.
+  local MISS_JSON MISS_LINE MISS_JSON_FILE="$WORK/miss-$cycle.json"
+  "$NODE_BIN" "$HERE/kvs-01a-probe.mjs" \
     --base "$KVS02_BASE" --conversation "$CONVERSATION" --model "$MODEL_B" \
     --regime kvs02_miss_envelope --arm miss_envelope \
     --prompt-tokens "$KVS02_PROMPT_TOKENS" \
-    --assistant-file "$RESP" --suffix "$SUFFIX" || true)"
-  MISS_LINE="$(await_log "$LOG_B" 'code=disk_(hit|promote_rejected|miss_[a-z_]+)' 30 || true)"
+    --assistant-file "$RESP" --suffix "$SUFFIX" \
+    >"$MISS_JSON_FILE" 2>/dev/null &
+  local MISS_PROBE_PID=$!
+  # Wait for the probe to exit (full streaming response received by the probe,
+  # i.e., kv_cache_request_completed has fired on model B's side), then
+  # SIGKILL model B before disk_write_committed fires (~62ms async after response).
+  # Using probe-exit as the kill signal avoids polling jitter and gives ~62ms margin.
+  set +e
+  wait "$MISS_PROBE_PID" 2>/dev/null
+  set -e
+  stop_provider
+  MISS_JSON="$(cat "$MISS_JSON_FILE" 2>/dev/null || true)"
+  MISS_LINE="$(grep -aE 'code=disk_(hit|promote_rejected|miss_[a-z_]+)' "$LOG_B" 2>/dev/null | tail -1 || true)"
 
   local MISS_CODE MISS_CACHED MISS_CORRECT
   MISS_CODE="$(sed -nE 's/.*code=([a-z_]+).*/\1/p' <<<"$MISS_LINE" | tail -1)"
