@@ -618,7 +618,7 @@ final class ServingKnobsConfigTests: XCTestCase {
             cachedPromptTokens: 32,
             hasRetainedPagedKVHandoff: false
         ))
-        XCTAssertFalse(ModelRuntime.canaryShouldSerialRouteCachedHitMissingRetainedHandoff(
+        XCTAssertTrue(ModelRuntime.canaryShouldSerialRouteCachedHitMissingRetainedHandoff(
             mode: .on,
             cachedPromptTokens: 32,
             hasRetainedPagedKVHandoff: false
@@ -632,6 +632,11 @@ final class ServingKnobsConfigTests: XCTestCase {
             mode: .canary,
             cachedPromptTokens: 32,
             hasRetainedPagedKVHandoff: true
+        ))
+        XCTAssertFalse(ModelRuntime.canaryShouldSerialRouteCachedHitMissingRetainedHandoff(
+            mode: .off,
+            cachedPromptTokens: 32,
+            hasRetainedPagedKVHandoff: false
         ))
 
         let capability = ContinuousBatchingCapability(
@@ -679,24 +684,20 @@ final class ServingKnobsConfigTests: XCTestCase {
         XCTAssertFalse(forwardLine.contains("sk-secret"))
     }
 
-    func testRuntimePolicyKeepsConversationKeysOutOfCurrentBatchingRollout() {
+    func testRuntimePolicyAdmitsKeyedFirstTurnWhenSchedulerIsAttached() {
         let canaryCapability = ContinuousBatchingPolicy.capability(
             mode: .canary,
             maxBatch: 2,
             queueLimit: nil,
             kvBits: nil,
             draftConfigured: false,
-            requestHasConversationKey: true,
             schedulerBackendAvailable: true,
             pagedKVDecision: .attached(Self.pagedKVDescriptor()),
             requestedTuple: Self.continuousBatchingTuple()
         )
-        XCTAssertEqual(canaryCapability.unsupportedReason, .conversationKeyRolloutUnavailable)
-        XCTAssertTrue(canaryCapability.shouldUseSerialPath)
-        XCTAssertEqual(
-            ContinuousBatchingPolicy.serialRouteTelemetryLine(canaryCapability),
-            "event=batching_unsupported action=serial_routed reason=conversation_key_rollout_unavailable\n"
-        )
+        XCTAssertNil(canaryCapability.unsupportedReason)
+        XCTAssertFalse(canaryCapability.shouldUseSerialPath)
+        XCTAssertNil(ContinuousBatchingPolicy.serialRouteTelemetryLine(canaryCapability))
 
         let strictCapability = ContinuousBatchingPolicy.capability(
             mode: .on,
@@ -704,17 +705,13 @@ final class ServingKnobsConfigTests: XCTestCase {
             queueLimit: nil,
             kvBits: nil,
             draftConfigured: false,
-            requestHasConversationKey: true,
             schedulerBackendAvailable: true,
             pagedKVDecision: .attached(Self.pagedKVDescriptor()),
             requestedTuple: Self.continuousBatchingTuple()
         )
-        XCTAssertEqual(strictCapability.unsupportedReason, .conversationKeyRolloutUnavailable)
-        XCTAssertThrowsError(try ContinuousBatchingPolicy.validateStrictStartup(strictCapability)) { error in
-            let apiError = error as? APIError
-            XCTAssertEqual(apiError?.status, 400)
-            XCTAssertEqual(apiError?.code, "continuous_batching_conversation_key_rollout_unavailable")
-        }
+        XCTAssertNil(strictCapability.unsupportedReason)
+        XCTAssertFalse(strictCapability.shouldUseSerialPath)
+        XCTAssertNoThrow(try ContinuousBatchingPolicy.validateStrictStartup(strictCapability))
     }
 
     func testContinuousBatchingPolicyReportsKvBitsBeforeLocalCapability() {
@@ -1377,7 +1374,7 @@ final class ServingKnobsConfigTests: XCTestCase {
         }
     }
 
-    func testRuntimeCanarySerialRoutesConversationKeyBeforeSchedulerAdmission() async throws {
+    func testRuntimeCanaryKeyedFirstTurnStillServesWhenSchedulerIsUnavailable() async throws {
         let runtime = ModelRuntime(
             modelID: "fixture-model",
             maxBatch: 2,
@@ -1399,7 +1396,7 @@ final class ServingKnobsConfigTests: XCTestCase {
         }
     }
 
-    func testRuntimeStrictRejectsConversationKeyBeforeSchedulerAdmission() async throws {
+    func testRuntimeStrictDoesNotRejectKeyedFirstTurnForRolloutScope() async throws {
         let runtime = ModelRuntime(
             modelID: "fixture-model",
             maxBatch: 2,
@@ -1416,11 +1413,11 @@ final class ServingKnobsConfigTests: XCTestCase {
         do {
             try await runtime.preflight(request, with: handle)
             await runtime.unregisterInFlight(handle.registrationID)
-            XCTFail("expected keyed continuous batching preflight rejection")
+            XCTFail("expected fail-closed local-capability rejection, not conversation-key rollout")
         } catch let error as APIError {
             await runtime.unregisterInFlight(handle.registrationID)
+            XCTAssertNotEqual(error.code, "continuous_batching_conversation_key_rollout_unavailable")
             XCTAssertEqual(error.status, 400)
-            XCTAssertEqual(error.code, "continuous_batching_conversation_key_rollout_unavailable")
         }
     }
 

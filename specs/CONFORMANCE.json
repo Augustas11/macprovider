@@ -688,7 +688,7 @@
     {
       "spec_id": "SPEC-024",
       "title": "Prefix-cache billing and provider-local cache isolation",
-      "version": "0.2.3",
+      "version": "0.2.4",
       "path": "specs/SPEC-024-prefix-cache-billing.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -1091,7 +1091,7 @@
     {
       "spec_id": "SPEC-038",
       "title": "Continuous batching for concurrent provider inference",
-      "version": "v0.2.2",
+      "version": "v0.2.3",
       "path": "specs/SPEC-038-continuous-batching.md",
       "status": "draft",
       "owner": "@Augustas11",

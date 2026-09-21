@@ -12,6 +12,10 @@ enum ContinuousBatchingUnsupportedReason: String, Sendable, Equatable {
     case kvBitsUnsupported = "kv_bits_unsupported"
     case draftSpecDecodeMutualExclusion = "draft_spec_decode_mutual_exclusion"
     case stickyCacheHandoffUnavailable = "sticky_cache_handoff_unavailable"
+    /// Kept for reason-coded API compatibility. Admission no longer serial-routes
+    /// merely because a conversation key is present; first-turn / cache-miss keyed
+    /// requests may enter the scheduler. Positive cached-token hits without a
+    /// retained paged-KV handoff still serial-route as `stickyCacheHandoffUnavailable`.
     case conversationKeyRolloutUnavailable = "conversation_key_rollout_unavailable"
     case durableReplayAuthorityUnavailable = "durable_replay_authority_unavailable"
     case stableRequestIDUnavailable = "stable_request_id_unavailable"
@@ -171,7 +175,6 @@ enum ContinuousBatchingPolicy {
         queueLimit configuredQueueLimit: Int?,
         kvBits: Int?,
         draftConfigured: Bool,
-        requestHasConversationKey: Bool = false,
         requestHasStableRequestID: Bool = true,
         requestStateRepresentable: Bool = true,
         schedulerBackendAvailable: Bool,
@@ -186,7 +189,6 @@ enum ContinuousBatchingPolicy {
             queueLimit: configuredQueueLimit,
             kvBits: kvBits,
             draftConfigured: draftConfigured,
-            requestHasConversationKey: requestHasConversationKey,
             requestHasStableRequestID: requestHasStableRequestID,
             requestStateRepresentable: requestStateRepresentable,
             descriptor: pagedKVDecision.descriptor,
@@ -205,7 +207,6 @@ enum ContinuousBatchingPolicy {
         queueLimit configuredQueueLimit: Int?,
         kvBits: Int?,
         draftConfigured: Bool,
-        requestHasConversationKey: Bool = false,
         requestHasStableRequestID: Bool = true,
         requestStateRepresentable: Bool = true,
         descriptor: PagedKVDescriptor?,
@@ -221,8 +222,6 @@ enum ContinuousBatchingPolicy {
         let reason: ContinuousBatchingUnsupportedReason?
         if mode == .off {
             reason = nil
-        } else if requestHasConversationKey {
-            reason = .conversationKeyRolloutUnavailable
         } else if !requestStateRepresentable {
             // The shared-forward backend contract carries only scalar sampling
             // parameters. A request needing row-local generation state the

@@ -2776,7 +2776,6 @@ actor ModelRuntime: ModelRuntimeServing {
 
     private func continuousBatchingCapability(
         draftConfigured: Bool,
-        requestHasConversationKey: Bool = false,
         requestHasStableRequestID: Bool = true,
         requestStateRepresentable: Bool = true
     ) -> ContinuousBatchingCapability {
@@ -2804,7 +2803,6 @@ actor ModelRuntime: ModelRuntimeServing {
             queueLimit: continuousBatchQueueLimit,
             kvBits: kvBitsOverride,
             draftConfigured: draftConfigured,
-            requestHasConversationKey: requestHasConversationKey,
             requestHasStableRequestID: requestHasStableRequestID,
             requestStateRepresentable: requestStateRepresentable,
             schedulerBackendAvailable: schedulerBackendAvailable,
@@ -3089,7 +3087,6 @@ actor ModelRuntime: ModelRuntimeServing {
     ) throws -> ContinuousBatchingCapability {
         let capability = continuousBatchingCapability(
             draftConfigured: snapshot.hasTargetCompatibleDraft || currentDraftModelID != nil,
-            requestHasConversationKey: Self.nonEmpty(request.conversationKey) != nil,
             requestHasStableRequestID: Self.requestHasStableRequestID(request),
             requestStateRepresentable: Self.requestStateRepresentable(request)
         )
@@ -3591,7 +3588,7 @@ actor ModelRuntime: ModelRuntimeServing {
         cachedPromptTokens: Int,
         hasRetainedPagedKVHandoff: Bool
     ) -> Bool {
-        mode == .canary && cachedPromptTokens > 0 && !hasRetainedPagedKVHandoff
+        mode != .off && cachedPromptTokens > 0 && !hasRetainedPagedKVHandoff
     }
 
     private func attachedContinuousBatchCompletion(
