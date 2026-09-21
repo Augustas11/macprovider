@@ -214,6 +214,18 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
 
     static let localStatusContractVersion = 1
     static let localStatusMinimumReaderVersion = 1
+    // SPEC-001 §local-status states this list is illustrative and
+    // non-exhaustive, and names this constant as the authoritative runtime
+    // capability set — so a new capability token is added here, not in the
+    // SPEC. `buyer_serving_hold_v1` (#1616) gates `buyer_serving_hold`, which
+    // MUST be null unless `network_state` is `not_buyer_serving` and MUST NOT
+    // be synthesised locally; it is advisory diagnostics with no buyer-serving
+    // authority. Promoting that MUST into SPEC-001 needs a version bump, and
+    // the bump is blocked: SPEC-001's version is pinned by the cross-spec lock
+    // in scripts/tests/test_byom_contract_lock.py, whose BYOMContractLockTests
+    // class is commit-attested evidence for SPEC-046-R001/R008 conformance.
+    // Editing it invalidates that attestation, and re-attesting needs a fresh
+    // signed BYOM discovery journey. Tracked on #1616.
     static let localStatusCapabilities = [
         "buyer_serving_authority_v1",
         "buyer_serving_hold_v1",
