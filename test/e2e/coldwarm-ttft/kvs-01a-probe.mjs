@@ -76,7 +76,9 @@ const sha256 = (s) => createHash('sha256').update(String(s)).digest('hex');
 // tokenizes close to 1 token each on the Qwen tokenizer; the exact count is recorded
 // from the response usage, not assumed.
 function buildBasePrompt() {
-  return Array.from({ length: PROMPT_TOKENS }, (_, i) => `w${i % 97}`).join(' ');
+  // One ASCII token per word on Qwen; `w0`/`w12` split into multiple tokens and
+  // blew the 256 MiB promotion ceiling (~7k tokens from a 2500-word prompt).
+  return Array.from({ length: PROMPT_TOKENS }, () => 'ok').join(' ');
 }
 
 // Assemble the request messages. The PERSIST arm is a single user turn; the RESTORED

@@ -43,7 +43,7 @@ protocol ConversationColdTier: Sendable {
     /// write is deferred to `persist`.
     /// - Parameter nowMillis: the EXACT hot-commit instant (integer ms), passed in so
     ///   created_at/eligible_until derive from the commit timestamp — never from a
-    ///   wall-clock read taken AFTER the up-to-256 MiB deep copy, which would extend
+    ///   wall-clock read taken AFTER the up-to-staging-ceiling deep copy, which would extend
     ///   disk eligibility past the hot TTL by the copy duration (M-B).
     func captureSnapshot(
         conversationKey: String,

@@ -103,7 +103,10 @@ final class KVDiskTier: @unchecked Sendable {
         }
         logEnableNotice()
         do {
-            if try await store.activate() { return .activated }
+            if try await store.activate() {
+                log("event=kv_disk_cache action=activated")
+                return .activated
+            }
             switch await store.activationDormancy {
             case .keychain:
                 log("event=kv_disk_cache action=dormant reason=keychain_unavailable retry=backoff")

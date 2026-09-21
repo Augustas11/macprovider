@@ -356,7 +356,7 @@ final class ModelsSubcommandTests: XCTestCase {
         XCTAssertEqual(events[1].errorCode, .authorityUnavailable)
     }
 
-    func testModelsPrepareVerifiesLaneAArtifactAuthorityBeforeStagingBlocker() async throws {
+    func testModelsPrepareVerifiesLaneAAuthorityThenFailsClosedOnArtifactDigestMismatch() async throws {
         let fixture = try Self.laneAArtifactFeedFixture()
         let inputs = AutotuneStaticInputs(
             fetch: { url in
@@ -374,32 +374,312 @@ final class ModelsSubcommandTests: XCTestCase {
             trustedPublicKeys: fixture.trustedPublicKeys,
             now: { Self.prepareDate("2026-09-19T01:00:00Z") }
         )
+        let roots = try makeLaneAStagingRoots()
+        // A canonical Hugging Face snapshot that does not match the signed
+        // digest must survive untouched: prepare never repairs or deletes it.
+        let canonical = CachedModelArtifactResolver(hubRoot: roots.hub)
+            .snapshotURL(modelID: Build1LaneAPrepareProfile.artifactModelID, revision: Build1LaneAPrepareProfile.artifactRevision)
+        try FileManager.default.createDirectory(at: canonical, withIntermediateDirectories: true)
+        try Data("incumbent".utf8).write(to: canonical.appendingPathComponent("weights.bin"))
+        let downloadCount = Build1LaneACounter()
+        let resolver = CachedModelArtifactResolver(
+            hubRoot: roots.hub,
+            durableRoot: roots.durable,
+            downloader: Self.laneAFakeDownloader(payload: "not-the-signed-bytes", counter: downloadCount)
+        )
+
+        let capture = try await withPrepareStaticInputs(inputs) {
+            try await withPrepareResolver(resolver) {
+                let command = try ModelsPrepareCommand.parse([
+                    Build1LaneAPrepareProfile.catalogKey,
+                    "--json",
+                    "--yes",
+                    "--profile", Build1LaneAPrepareProfile.profile,
+                    "--coordinator-url", "wss://api-staging.malibu.tech/ws/provider",
+                    "--config", roots.config.path,
+                ])
+                return await captureOutput { try await command.run() }
+            }
+        }
+
+        XCTAssertEqual(capture.error as? ExitCode, ExitCode(2))
+        XCTAssertTrue(capture.stderr.contains("models prepare failed: verification_failed"), capture.stderr)
+        XCTAssertTrue(capture.stderr.contains("expected=\(Build1LaneAPrepareProfile.artifactHash)"), capture.stderr)
+        XCTAssertFalse(capture.stdout.contains(roots.durable.path), "public JSON must not leak the durable root")
+        XCTAssertFalse(capture.stdout.contains(roots.hub.path), "public JSON must not leak the staging root")
+        XCTAssertEqual(downloadCount.value, 1)
+        let events = try decodePreparationEvents(capture.stdout)
+        XCTAssertEqual(events.count, 4)
+        XCTAssertEqual(Set(events.map(\.transactionID)).count, 1)
+        XCTAssertEqual(events.map(\.eventSequence), [1, 2, 3, 4])
+        XCTAssertEqual(events[0].state, .queued)
+        XCTAssertEqual(events[1].state, .running)
+        XCTAssertEqual(events[1].progress?.stageLabelKey, "artifact_authority_verified")
+        XCTAssertEqual(events[1].progress?.bytesExpected, Int64(fixture.laneAArtifactSizeBytes))
+        XCTAssertEqual(events[2].state, .running)
+        XCTAssertEqual(events[2].progress?.stageLabelKey, "artifact_staging")
+        XCTAssertEqual(events[2].progress?.bytesCompleted, 0)
+        XCTAssertEqual(events[2].progress?.bytesExpected, Int64(fixture.laneAArtifactSizeBytes))
+        XCTAssertEqual(events[3].state, .failed)
+        XCTAssertEqual(events[3].errorCode, .verificationFailed)
+        XCTAssertNil(events[3].progress)
+
+        // Nothing was adopted, the isolated staging directory was reclaimed,
+        // and the canonical snapshot is byte-for-byte as it was.
+        let durableStore = DurableModelArtifactStore(root: roots.durable)
+        XCTAssertFalse(durableStore.isModelMaterialized(modelID: Build1LaneAPrepareProfile.artifactModelID))
+        let staged = resolver.prefetchSnapshotURL(
+            modelID: Build1LaneAPrepareProfile.artifactModelID,
+            revision: Build1LaneAPrepareProfile.artifactRevision,
+            sha256: Build1LaneAPrepareProfile.artifactHash
+        )
+        XCTAssertFalse(FileManager.default.fileExists(atPath: staged.path))
+        XCTAssertEqual(try String(contentsOf: canonical.appendingPathComponent("weights.bin")), "incumbent")
+    }
+
+    func testModelsPrepareRefusesToStageWithoutDiskHeadroom() async throws {
+        let fixture = try Self.laneAArtifactFeedFixture()
+        let inputs = AutotuneStaticInputs(
+            fetch: { url in url.path.hasSuffix(".sig") ? fixture.sidecarBytes : fixture.feedBytes },
+            trustedPublicKeys: fixture.trustedPublicKeys,
+            now: { Self.prepareDate("2026-09-19T01:00:00Z") }
+        )
+        let roots = try makeLaneAStagingRoots()
+        let resolver = CachedModelArtifactResolver(
+            hubRoot: roots.hub,
+            durableRoot: roots.durable,
+            downloader: HuggingFaceSnapshotDownloader(
+                fetch: { _ in
+                    XCTFail("no network call may happen without disk headroom")
+                    throw URLError(.cannotConnectToHost)
+                },
+                download: { _ in
+                    XCTFail("no download may happen without disk headroom")
+                    throw URLError(.cannotConnectToHost)
+                }
+            )
+        )
+
+        let capture = try await withPrepareStaticInputs(inputs) {
+            try await withPrepareResolver(resolver, diskProbe: { _ in
+                Build1LaneADiskProbe(availableBytes: 1024, deviceID: 7)
+            }) {
+                let command = try ModelsPrepareCommand.parse([
+                    Build1LaneAPrepareProfile.catalogKey,
+                    "--json",
+                    "--yes",
+                    "--coordinator-url", "http://127.0.0.1:19090/ws/provider",
+                    "--config", roots.config.path,
+                ])
+                return await captureOutput { try await command.run() }
+            }
+        }
+
+        XCTAssertEqual(capture.error as? ExitCode, ExitCode(2))
+        XCTAssertTrue(capture.stderr.contains("models prepare failed: insufficient_disk_space"), capture.stderr)
+        XCTAssertTrue(
+            capture.stderr.contains(
+                "required_bytes=\(Int64(fixture.laneAArtifactSizeBytes) * 2 + Build1LaneAArtifactStager.publicationReserveBytes)"
+            ),
+            capture.stderr
+        )
+        let events = try decodePreparationEvents(capture.stdout)
+        XCTAssertEqual(events.map(\.state), [.queued, .running, .failed])
+        XCTAssertEqual(events.last?.errorCode, .insufficientDiskSpace)
+        XCTAssertFalse(DurableModelArtifactStore(root: roots.durable).isModelMaterialized(modelID: Build1LaneAPrepareProfile.artifactModelID))
+    }
+
+    func testModelsPrepareReportsCancellationWithoutAdoption() async throws {
+        let fixture = try Self.laneAArtifactFeedFixture()
+        let inputs = AutotuneStaticInputs(
+            fetch: { url in url.path.hasSuffix(".sig") ? fixture.sidecarBytes : fixture.feedBytes },
+            trustedPublicKeys: fixture.trustedPublicKeys,
+            now: { Self.prepareDate("2026-09-19T01:00:00Z") }
+        )
+        let roots = try makeLaneAStagingRoots()
+        let resolver = CachedModelArtifactResolver(
+            hubRoot: roots.hub,
+            durableRoot: roots.durable,
+            downloader: HuggingFaceSnapshotDownloader(
+                fetch: { request in
+                    let url = try XCTUnwrap(request.url)
+                    let response = try XCTUnwrap(HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil))
+                    return (Data(#"{"siblings":[{"rfilename":"weights.bin"}]}"#.utf8), response)
+                },
+                download: { _ in
+                    // Models SIGINT arriving mid-transfer: URLSession unwinds
+                    // the async download with a cancellation error.
+                    throw CancellationError()
+                }
+            )
+        )
+
+        let capture = try await withPrepareStaticInputs(inputs) {
+            try await withPrepareResolver(resolver) {
+                let command = try ModelsPrepareCommand.parse([
+                    Build1LaneAPrepareProfile.catalogKey,
+                    "--json",
+                    "--yes",
+                    "--coordinator-url", "http://127.0.0.1:19090/ws/provider",
+                    "--config", roots.config.path,
+                ])
+                return await captureOutput { try await command.run() }
+            }
+        }
+
+        XCTAssertEqual(capture.error as? ExitCode, ExitCode(130))
+        XCTAssertTrue(capture.stderr.contains("models prepare cancelled"), capture.stderr)
+        let events = try decodePreparationEvents(capture.stdout)
+        XCTAssertEqual(events.map(\.state), [.queued, .running, .running, .cancelRequested, .cancelled])
+        XCTAssertEqual(events.map(\.eventSequence), [1, 2, 3, 4, 5])
+        XCTAssertNil(events.last?.errorCode)
+        XCTAssertNil(events.last?.progress)
+        XCTAssertFalse(DurableModelArtifactStore(root: roots.durable).isModelMaterialized(modelID: Build1LaneAPrepareProfile.artifactModelID))
+        let hubContents = (try? FileManager.default.contentsOfDirectory(atPath: roots.hub.path)) ?? []
+        XCTAssertTrue(hubContents.allSatisfy { !$0.contains("macprovider-prefetch") }, "\(hubContents)")
+    }
+
+    func testModelsPrepareRejectsConcurrentPrepareOnSameDurableRoot() async throws {
+        let fixture = try Self.laneAArtifactFeedFixture()
+        let inputs = AutotuneStaticInputs(
+            fetch: { url in url.path.hasSuffix(".sig") ? fixture.sidecarBytes : fixture.feedBytes },
+            trustedPublicKeys: fixture.trustedPublicKeys,
+            now: { Self.prepareDate("2026-09-19T01:00:00Z") }
+        )
+        let roots = try makeLaneAStagingRoots()
+        let resolver = CachedModelArtifactResolver(
+            hubRoot: roots.hub,
+            durableRoot: roots.durable,
+            downloader: HuggingFaceSnapshotDownloader(
+                fetch: { _ in
+                    XCTFail("a conflicting prepare must not transfer")
+                    throw URLError(.cannotConnectToHost)
+                },
+                download: { _ in
+                    XCTFail("a conflicting prepare must not transfer")
+                    throw URLError(.cannotConnectToHost)
+                }
+            )
+        )
+        try FileManager.default.createDirectory(at: roots.durable, withIntermediateDirectories: true)
+        let lockPath = roots.durable.appendingPathComponent(Build1LaneAArtifactStager.prepareLockLeaf).path
+        let holder = open(lockPath, O_CREAT | O_RDWR, 0o600)
+        XCTAssertGreaterThanOrEqual(holder, 0)
+        XCTAssertEqual(flock(holder, LOCK_EX | LOCK_NB), 0)
+        defer { _ = flock(holder, LOCK_UN); _ = close(holder) }
+
+        let capture = try await withPrepareStaticInputs(inputs) {
+            try await withPrepareResolver(resolver) {
+                let command = try ModelsPrepareCommand.parse([
+                    Build1LaneAPrepareProfile.catalogKey,
+                    "--json",
+                    "--yes",
+                    "--coordinator-url", "http://127.0.0.1:19090/ws/provider",
+                    "--config", roots.config.path,
+                ])
+                return await captureOutput { try await command.run() }
+            }
+        }
+
+        XCTAssertEqual(capture.error as? ExitCode, ExitCode(2))
+        XCTAssertTrue(capture.stderr.contains("models prepare failed: operation_conflict"), capture.stderr)
+        let events = try decodePreparationEvents(capture.stdout)
+        XCTAssertEqual(events.map(\.state), [.queued, .running, .failed])
+        XCTAssertEqual(events.last?.errorCode, .operationConflict)
+    }
+
+    func testModelsPrepareRejectsNonPositiveTimeoutBeforeQueueing() async throws {
+        let command = try ModelsPrepareCommand.parse([
+            Build1LaneAPrepareProfile.catalogKey,
+            "--json",
+            "--yes",
+            "--coordinator-url", "http://127.0.0.1:19090/ws/provider",
+            "--timeout-seconds", "0",
+        ])
+
+        let capture = await captureOutput { try await command.run() }
+
+        XCTAssertEqual(capture.error as? ExitCode, ExitCode(2))
+        XCTAssertTrue(capture.stderr.contains(Build1LaneAPrepareProfile.invalidTimeoutReason))
+        let events = try decodePreparationEvents(capture.stdout)
+        XCTAssertEqual(events.map(\.state), [.failed])
+        XCTAssertEqual(events.first?.errorCode, .actionUnavailable)
+    }
+
+    func testModelsPrepareFailsClosedWhenExplicitConfigIsUnreadable() async throws {
+        let fixture = try Self.laneAArtifactFeedFixture()
+        let inputs = AutotuneStaticInputs(
+            fetch: { url in url.path.hasSuffix(".sig") ? fixture.sidecarBytes : fixture.feedBytes },
+            trustedPublicKeys: fixture.trustedPublicKeys,
+            now: { Self.prepareDate("2026-09-19T01:00:00Z") }
+        )
+        let missingConfig = FileManager.default.temporaryDirectory
+            .appendingPathComponent("macprovider-lane-a-missing-\(UUID().uuidString).yaml")
+
         let capture = try await withPrepareStaticInputs(inputs) {
             let command = try ModelsPrepareCommand.parse([
                 Build1LaneAPrepareProfile.catalogKey,
                 "--json",
                 "--yes",
-                "--profile", Build1LaneAPrepareProfile.profile,
-                "--coordinator-url", "wss://api-staging.malibu.tech/ws/provider",
+                "--coordinator-url", "http://127.0.0.1:19090/ws/provider",
+                "--config", missingConfig.path,
             ])
             return await captureOutput { try await command.run() }
         }
 
         XCTAssertEqual(capture.error as? ExitCode, ExitCode(2))
-        XCTAssertTrue(capture.stderr.contains(Build1LaneAPrepareProfile.stagingUnavailableReason))
+        XCTAssertTrue(capture.stderr.contains(Build1LaneAPrepareProfile.configUnavailableReason), capture.stderr)
         let events = try decodePreparationEvents(capture.stdout)
-        XCTAssertEqual(events.count, 3)
-        XCTAssertEqual(Set(events.map(\.transactionID)).count, 1)
-        XCTAssertEqual(events[0].state, .queued)
-        XCTAssertEqual(events[1].state, .running)
-        XCTAssertEqual(events[1].progress?.stageLabelKey, "artifact_authority_verified")
-        XCTAssertEqual(events[1].progress?.bytesCompleted, 0)
-        XCTAssertEqual(events[1].progress?.bytesExpected, Int64(fixture.laneAArtifactSizeBytes))
-        XCTAssertEqual(events[1].progress?.percentComplete, 0)
-        XCTAssertNil(events[1].errorCode)
-        XCTAssertEqual(events[2].eventSequence, 3)
-        XCTAssertEqual(events[2].state, .failed)
-        XCTAssertEqual(events[2].errorCode, .actionUnavailable)
+        XCTAssertEqual(events.map(\.state), [.queued, .running, .failed])
+        XCTAssertEqual(events.last?.errorCode, .rootUnavailable)
+    }
+
+    func testModelsPrepareRejectsSignedFeedWithOverLimitLaneAArtifactSize() async throws {
+        let fixture = try Self.laneAArtifactFeedFixture(
+            laneAArtifactSizeBytes: Build1LaneAPrepareProfile.maxArtifactSizeBytes + 1
+        )
+        let inputs = AutotuneStaticInputs(
+            fetch: { url in url.path.hasSuffix(".sig") ? fixture.sidecarBytes : fixture.feedBytes },
+            trustedPublicKeys: fixture.trustedPublicKeys,
+            now: { Self.prepareDate("2026-09-19T01:00:00Z") }
+        )
+        let roots = try makeLaneAStagingRoots()
+        let resolver = CachedModelArtifactResolver(
+            hubRoot: roots.hub,
+            durableRoot: roots.durable,
+            downloader: HuggingFaceSnapshotDownloader(
+                fetch: { _ in
+                    XCTFail("over-limit authority must fail before any transfer")
+                    throw URLError(.cannotConnectToHost)
+                },
+                download: { _ in
+                    XCTFail("over-limit authority must fail before any transfer")
+                    throw URLError(.cannotConnectToHost)
+                }
+            )
+        )
+        let capture = try await withPrepareStaticInputs(inputs) {
+            try await withPrepareResolver(resolver, diskProbe: { _ in
+                XCTFail("over-limit authority must fail before any disk probe")
+                return Build1LaneADiskProbe(availableBytes: .max, deviceID: 1)
+            }) {
+                let command = try ModelsPrepareCommand.parse([
+                    Build1LaneAPrepareProfile.catalogKey,
+                    "--json",
+                    "--yes",
+                    "--coordinator-url", "http://127.0.0.1:19090/ws/provider",
+                    "--config", roots.config.path,
+                ])
+                return await captureOutput { try await command.run() }
+            }
+        }
+
+        XCTAssertEqual(capture.error as? ExitCode, ExitCode(2))
+        XCTAssertTrue(capture.stderr.contains(Build1LaneAPrepareProfile.unsupportedReason), capture.stderr)
+        let events = try decodePreparationEvents(capture.stdout)
+        XCTAssertEqual(events.map(\.state), [.queued, .failed])
+        XCTAssertEqual(events.last?.errorCode, .authorityUnavailable)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: roots.durable.path))
     }
 
     func testModelsPrepareRejectsSignedFeedWithWrongLaneAPrimaryArtifactID() async throws {
@@ -1501,6 +1781,66 @@ final class ModelsSubcommandTests: XCTestCase {
         return try await body()
     }
 
+    private func withPrepareResolver<T>(
+        _ resolver: CachedModelArtifactResolver,
+        diskProbe: (@Sendable (URL) throws -> Build1LaneADiskProbe)? = nil,
+        _ body: () async throws -> T
+    ) async rethrows -> T {
+        let original = Build1LaneAArtifactStager.makeStager
+        Build1LaneAArtifactStager.makeStager = { _, deadline, reauthorize in
+            Build1LaneAArtifactStager(
+                resolver: resolver,
+                reauthorize: reauthorize,
+                diskProbe: diskProbe ?? { try Build1LaneAArtifactStager.systemDiskProbe($0) },
+                deadline: deadline
+            )
+        }
+        defer { Build1LaneAArtifactStager.makeStager = original }
+        return try await body()
+    }
+
+    private struct LaneAStagingRoots {
+        var hub: URL
+        var durable: URL
+        var config: URL
+    }
+
+    /// Isolated staging (Hugging Face cache) and durable roots plus a YAML
+    /// config that points `model_artifact_root` at the durable root, so the
+    /// command resolves storage exactly like `serve` would.
+    private func makeLaneAStagingRoots() throws -> LaneAStagingRoots {
+        let base = FileManager.default.temporaryDirectory
+            .appendingPathComponent("macprovider-lane-a-prepare-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: base) }
+        let hub = base.appendingPathComponent("hub", isDirectory: true)
+        try FileManager.default.createDirectory(at: hub, withIntermediateDirectories: true)
+        let durable = base.appendingPathComponent("durable", isDirectory: true)
+        let config = base.appendingPathComponent("config.yaml")
+        try Data("model_artifact_root: \(durable.path)\n".utf8).write(to: config)
+        return LaneAStagingRoots(hub: hub, durable: durable, config: config)
+    }
+
+    private static func laneAFakeDownloader(payload: String, counter: Build1LaneACounter) -> HuggingFaceSnapshotDownloader {
+        HuggingFaceSnapshotDownloader(
+            fetch: { request in
+                let url = try XCTUnwrap(request.url)
+                XCTAssertEqual(url.host, "huggingface.co")
+                XCTAssertTrue(url.path.contains(Build1LaneAPrepareProfile.artifactRevision), url.path)
+                let response = try XCTUnwrap(HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil))
+                return (Data(#"{"siblings":[{"rfilename":"weights.bin"}]}"#.utf8), response)
+            },
+            download: { request in
+                counter.increment()
+                let downloaded = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("lane-a-prepare-\(UUID().uuidString).bin")
+                try Data(payload.utf8).write(to: downloaded)
+                let url = try XCTUnwrap(request.url)
+                return (downloaded, URLResponse(url: url, mimeType: nil, expectedContentLength: payload.utf8.count, textEncodingName: nil))
+            }
+        )
+    }
+
     private struct LaneAArtifactFeedFixture {
         var feedBytes: Data
         var sidecarBytes: Data
@@ -1509,13 +1849,13 @@ final class ModelsSubcommandTests: XCTestCase {
     }
 
     private static func laneAArtifactFeedFixture(
-        laneAArtifactID: String = Build1LaneAPrepareProfile.artifactID
+        laneAArtifactID: String = Build1LaneAPrepareProfile.artifactID,
+        laneAArtifactSizeBytes: Int = 2_345_678_901
     ) throws -> LaneAArtifactFeedFixture {
         let candidateBytes = Data(AutotuneStaticInputs.bakedCandidateCatalogJSON.utf8)
         let catalog = try AutotuneStaticInputs.decodeSignedStaticCandidateCatalog(candidateBytes)
         let generatedAt = try XCTUnwrap(ArtifactFeed.rawGeneratedAt(in: candidateBytes))
         let catalogSHA256 = AutotuneStaticInputs.candidateCatalogSHA256(bytes: candidateBytes)
-        let laneAArtifactSizeBytes = 2_345_678_901
         var models: [String: Any] = [:]
         for key in catalog.rows.keys.sorted() {
             let row = catalog.rows[key]!
@@ -1779,6 +2119,23 @@ private struct AdoptionFixture {
           }
         }
         """.utf8).write(to: recommendation)
+    }
+}
+
+final class Build1LaneACounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+
+    var value: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return count
+    }
+
+    func increment() {
+        lock.lock()
+        count += 1
+        lock.unlock()
     }
 }
 

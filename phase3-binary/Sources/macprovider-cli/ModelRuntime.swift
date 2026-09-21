@@ -2894,6 +2894,7 @@ actor ModelRuntime: ModelRuntimeServing {
             configuration: ContinuousBatchSchedulerConfiguration(
                 descriptor: descriptor,
                 tuple: tuple,
+                moePromotionEvidenceAvailable: ContinuousBatchingPolicy.productionMoEPromotionEvidenceAvailable,
                 maxActiveRows: maxBatch,
                 queueLimit: queueLimit,
                 decodeHeadroomTokens: 1,

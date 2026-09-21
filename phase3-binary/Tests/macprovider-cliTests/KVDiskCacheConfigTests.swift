@@ -107,10 +107,26 @@ final class KVDiskCacheConfigTests: XCTestCase {
     }
 
     func testStagingCeilingHardMax() {
-        let over = 256 * 1024 * 1024 + 1
+        let over = 1024 * 1024 * 1024 + 1
         let c = resolve(cli: KVDiskCacheCLIOverrides(enabled: true, stagingMaxBytes: over))
         XCTAssertFalse(c.effectiveEnabled)
         XCTAssertTrue(c.errors.contains { $0.contains("staging_max_bytes") })
+    }
+
+    func testStagingCeilingAcceptsOneGib() {
+        let max = 1024 * 1024 * 1024
+        let c = resolve(cli: KVDiskCacheCLIOverrides(enabled: true, stagingMaxBytes: max))
+        XCTAssertTrue(c.effectiveEnabled)
+        XCTAssertEqual(c.stagingMaxBytes, max)
+        XCTAssertTrue(c.errors.isEmpty)
+    }
+
+    func testStagingCeilingAcceptsFormer256Bound() {
+        let formerOver = 256 * 1024 * 1024 + 1
+        let c = resolve(cli: KVDiskCacheCLIOverrides(enabled: true, stagingMaxBytes: formerOver))
+        XCTAssertTrue(c.effectiveEnabled)
+        XCTAssertEqual(c.stagingMaxBytes, formerOver)
+        XCTAssertTrue(c.errors.isEmpty)
     }
 
     func testWriteStagingCeilingHardMax() {

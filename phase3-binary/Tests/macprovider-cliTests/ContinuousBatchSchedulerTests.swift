@@ -56,6 +56,26 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         XCTAssertEqual(decodeCalls, 0)
     }
 
+    func testMoETupleAdmitsWhenPromotionEvidenceIsAvailable() {
+        let descriptor = Self.descriptor(supportsMoE: true)
+        let tuple = Self.tuple(requiresMoE: true)
+        XCTAssertNil(
+            ContinuousBatchScheduler.localCapabilityReason(
+                descriptor: descriptor,
+                tuple: tuple,
+                moePromotionEvidenceAvailable: true
+            )
+        )
+        XCTAssertEqual(
+            ContinuousBatchScheduler.localCapabilityReason(
+                descriptor: descriptor,
+                tuple: tuple,
+                moePromotionEvidenceAvailable: false
+            ),
+            "moe_promotion_evidence_unavailable"
+        )
+    }
+
     func testCachedPromptTokensRequireRetainedPagedKVHandoff() async throws {
         let backend = ScriptedBackend(scripts: [:])
         let scheduler = try await makeScheduler(maxActiveRows: 2, backend: backend)

@@ -16,15 +16,14 @@ import MacProviderCore
 /// rows against BOTH the same engine's single-row baseline AND the production
 /// serial decode path (`generate()`, the rate today's serve delivers).
 ///
-/// Why this bypasses the serve path: the buyer-serve gate
-/// (`ContinuousBatchingPolicy`) fail-closed-refuses every MoE tuple with
-/// `.moePromotionEvidenceUnavailable` UNTIL live MSB-04 evidence exists — so the
-/// evidence cannot be gathered through buyer traffic. This harness is the
-/// controlled, single-threaded, no-coordinator, no-receipt measurement seam that
-/// PRODUCES that evidence. It never joins a coordinator, serves a buyer, emits a
-/// receipt, or advertises capacity. Correctness (bit-exact gather + cross-row MoE
-/// isolation) is proven separately by `PagedKVParityTests` and the load-time
-/// `PagedKVRuntimeParityProbe`; this command measures only throughput.
+/// Why this bypasses the serve path: buyer `continuous_batching` stays off, so
+/// live traffic never enters the scheduler. The harness is the controlled,
+/// single-threaded, no-coordinator, no-receipt measurement seam. It never joins
+/// a coordinator, serves a buyer, emits a receipt, or advertises capacity.
+/// Correctness (bit-exact gather + cross-row MoE isolation) is proven separately
+/// by `PagedKVParityTests` and the load-time `PagedKVRuntimeParityProbe`; this
+/// command measures only throughput. Production
+/// `moePromotionEvidenceAvailable` does not open buyer CB.
 ///
 /// Four engines:
 ///   * `contiguous` (default) — stock `KVCacheSimple` with batch dimension B,

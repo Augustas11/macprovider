@@ -1,7 +1,9 @@
 import CryptoKit
 import Foundation
+import MacProviderCore
 import MLX
 import MLXLMCommon
+import Security
 @testable import macprovider_cli
 import XCTest
 
@@ -10,13 +12,13 @@ import XCTest
 /// + phase marks (FR-KVP8), namespace-copy fail-closed (AC-5), quota/floor/budget
 /// enforcement (FR-KVP7/9), and clock-rollback dormancy (FR-KVP10).
 ///
-/// All store logic runs against an in-memory Keychain double, so no Data-Protection
-/// entitlement is required, and against synthetic `KVLayerPayload` state so no MLX
-/// Metal runtime is required. `testKVCacheSimpleBridgeRoundTrip` covers the real
-/// KVCacheSimple (de)serialization bridge and is gated on `KV_ENABLE_MLX_TESTS`
-/// (MLX aborts the process when the Metal library is unavailable, e.g. headless CI).
-/// `testRealKeychainAdapterSkipsGracefully` demonstrates the XCTSkip path when the
-/// real Data-Protection keychain is unavailable.
+/// All store logic runs against an in-memory Keychain double so CI does not
+/// require a login keychain, and against synthetic `KVLayerPayload` state so no
+/// MLX Metal runtime is required. `testKVCacheSimpleBridgeRoundTrip` covers the
+/// real KVCacheSimple (de)serialization bridge and is gated on
+/// `KV_ENABLE_MLX_TESTS` (MLX aborts the process when the Metal library is
+/// unavailable, e.g. headless CI). `testRealKeychainAdapterRoundTrip` exercises
+/// the live SecItem adapter when the process-default keychain is available.
 final class KVDiskCacheStoreTests: XCTestCase {
 
     // MARK: - Fixtures
@@ -1213,6 +1215,13 @@ final class KVDiskCacheStoreTests: XCTestCase {
         XCTAssertEqual(detail, .exceedsPromotionCeiling)
     }
 
+    func testPromotionCeilingHardMaxTracksConfigOneGib() {
+        XCTAssertEqual(KVDiskCacheStoreConfig.promotionCeilingHardMax, 1024 * 1024 * 1024)
+        XCTAssertEqual(
+            KVDiskCacheStoreConfig.promotionCeilingHardMax,
+            KVDiskCacheConfig.hardStagingMaxBytes)
+    }
+
     func testReadSideStagingBudgetMiss() async throws {
         let root = makeRoot()
         let keychain = KVInMemoryKeychain()
@@ -1612,18 +1621,48 @@ final class KVDiskCacheStoreTests: XCTestCase {
         XCTAssertEqual(sink.codes(.diskMissIO), 0, "bounds violation must not classify as io")
     }
 
-    // MARK: - Real keychain adapter graceful skip
+    // MARK: - Real keychain adapter (process-default / login keychain)
 
-    func testRealKeychainAdapterSkipsGracefully() throws {
-        let keychain = KVSecItemKeychain()
+    func testDefaultKeychainQueryOmitsDataProtectionFlag() {
+        let keychain = KVSecItemKeychain(accessGroup: "")
+        let query = keychain.queryDictionary(service: "live.malibu.provider.kv-cache.v1.probe")
+        XCTAssertNil(query[kSecUseDataProtectionKeychain as String])
+        XCTAssertNil(query[kSecAttrAccessGroup as String])
+        XCTAssertEqual(query[kSecAttrLabel as String] as? String, KVSecItemKeychain.itemLabel)
+        XCTAssertEqual(query[kSecAttrSynchronizable as String] as? Bool, false)
+        XCTAssertFalse(keychain.usesDataProtectionKeychain)
+    }
+
+    func testNamedAccessGroupQueryUsesDataProtectionFlag() {
+        let group = "YF7XNRJUG4.live.malibu.provider.kv-cache.test"
+        let keychain = KVSecItemKeychain(accessGroup: group)
+        let query = keychain.queryDictionary(service: "live.malibu.provider.kv-cache.v1.probe")
+        XCTAssertEqual(query[kSecUseDataProtectionKeychain as String] as? Bool, true)
+        XCTAssertEqual(query[kSecAttrAccessGroup as String] as? String, group)
+        XCTAssertTrue(keychain.usesDataProtectionKeychain)
+    }
+
+    func testRealKeychainAdapterRoundTrip() throws {
+        let keychain = KVSecItemKeychain(accessGroup: "")
+        let service = "live.malibu.provider.kv-cache.v1.probe.\(UUID().uuidString)"
+        let account = "roundtrip"
+        let secret = Data((0..<32).map { _ in UInt8.random(in: 0...255) })
         do {
-            _ = try keychain.enumerate(servicePrefix: "live.malibu.provider.kv-cache.v1.probe.")
+            try keychain.add(service: service, account: account, secret: secret, incarnation: "probe")
         } catch let e as KVKeychainError {
             if case .unavailable = e {
-                throw XCTSkip("Data-Protection keychain/entitlement unavailable in this environment")
+                throw XCTSkip("login keychain unavailable in this environment: \(e)")
             }
-            throw XCTSkip("keychain adapter failed: \(e)")
+            throw e
         }
+        defer { try? keychain.delete(service: service, account: account) }
+
+        XCTAssertEqual(try keychain.copySecret(service: service, account: account), secret)
+        XCTAssertEqual(try keychain.copyIncarnation(service: service, account: account), "probe")
+        let items = try keychain.enumerate(servicePrefix: "live.malibu.provider.kv-cache.v1.probe.")
+        XCTAssertTrue(items.contains { $0.service == service && $0.account == account && $0.incarnation == "probe" })
+        try keychain.delete(service: service, account: account)
+        XCTAssertNil(try keychain.copySecret(service: service, account: account))
     }
 
     // MARK: - Helpers

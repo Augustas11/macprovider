@@ -114,6 +114,14 @@ struct ContinuousBatchingCapability: Sendable, Equatable {
 }
 
 enum ContinuousBatchingPolicy {
+    /// SPEC-038 AC-23 / FR-CB16. Descriptor membership still does not promote a
+    /// MoE tuple. This production constant is the explicit activation signal
+    /// after the representative correctness fixture, live MSB-04, leftover
+    /// bundle, and the 2026-09-20 promotion review. Buyer `continuous_batching`
+    /// stays off until a later packaged-RC canary; this flag only stops the
+    /// capability gate from fail-closing Qwen3-Coder.
+    static let productionMoEPromotionEvidenceAvailable = true
+
     static func maximumQueueLimit(maxActiveRows: Int) -> Int {
         let normalizedRows = max(1, maxActiveRows)
         let (limit, overflow) = normalizedRows.multipliedReportingOverflow(by: 8)
@@ -169,7 +177,8 @@ enum ContinuousBatchingPolicy {
         schedulerBackendAvailable: Bool,
         durableReplayAuthorityAvailable: Bool = true,
         pagedKVDecision: PagedKVAttachDecision,
-        requestedTuple: ContinuousBatchingRequestedTuple?
+        requestedTuple: ContinuousBatchingRequestedTuple?,
+        moePromotionEvidenceAvailable: Bool = productionMoEPromotionEvidenceAvailable
     ) -> ContinuousBatchingCapability {
         makeCapability(
             mode: mode,
@@ -185,7 +194,8 @@ enum ContinuousBatchingPolicy {
             schedulerBackendAvailable: schedulerBackendAvailable,
             durableReplayAuthorityAvailable: durableReplayAuthorityAvailable,
             checkLocalCapability: true,
-            pagedKVDecision: pagedKVDecision
+            pagedKVDecision: pagedKVDecision,
+            moePromotionEvidenceAvailable: moePromotionEvidenceAvailable
         )
     }
 
@@ -203,7 +213,8 @@ enum ContinuousBatchingPolicy {
         schedulerBackendAvailable: Bool = false,
         durableReplayAuthorityAvailable: Bool = true,
         checkLocalCapability: Bool,
-        pagedKVDecision: PagedKVAttachDecision
+        pagedKVDecision: PagedKVAttachDecision,
+        moePromotionEvidenceAvailable: Bool = productionMoEPromotionEvidenceAvailable
     ) -> ContinuousBatchingCapability {
         let maxActiveRows = max(1, maxBatch)
         let queueLimit = queueLimit(configured: configuredQueueLimit, maxActiveRows: maxActiveRows)
@@ -240,11 +251,8 @@ enum ContinuousBatchingPolicy {
                 }
                 if !tuple.isAdmitted(by: advertised) {
                     reason = .tupleNotAdvertised
-                } else if tuple.requiresMoE {
-                    // AC-23 keeps every MoE tuple unsupported until the
-                    // representative correctness fixture and live MSB-04
-                    // evidence exist. Descriptor membership alone is not a
-                    // promotion signal.
+                } else if tuple.requiresMoE && !moePromotionEvidenceAvailable {
+                    // AC-23: descriptor membership is not a promotion signal.
                     reason = .moePromotionEvidenceUnavailable
                 } else if !schedulerBackendAvailable {
                     reason = .localCapabilityUnavailable

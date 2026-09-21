@@ -8,6 +8,11 @@ not canary 170.
 
 ## Decision
 
+**Superseded 2026-09-20:** production activation is
+[`continuous-batching-moe-activation-2026-09-20.md`](continuous-batching-moe-activation-2026-09-20.md).
+This review kept the flag false until leftovers and packaged 171 evidence
+landed.
+
 **Do not set `moePromotionEvidenceAvailable = true` on the production
 `ModelRuntime` scheduler in this change.**
 
