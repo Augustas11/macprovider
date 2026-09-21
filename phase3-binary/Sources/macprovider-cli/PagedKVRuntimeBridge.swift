@@ -44,8 +44,12 @@ struct PagedKVContiguousCacheHandoff {
     private static func restoreCaches(from cache: PagedKVMaterializedByteCache) throws -> [KVCacheSimple] {
         var restored: [KVCacheSimple] = []
         for layer in cache.layers.sorted(by: { $0.layerIndex < $1.layerIndex }) {
-            guard layer.dtype == .fp16 else {
-                throw PagedKVContiguousCacheBridgeError.unsupportedDType
+            let mlxDType: DType
+            switch layer.dtype {
+            case .fp16:
+                mlxDType = .float16
+            case .bf16:
+                mlxDType = .bfloat16
             }
             guard layer.keyShape == layer.valueShape,
                   layer.keyShape.count >= 3,
@@ -58,8 +62,8 @@ struct PagedKVContiguousCacheHandoff {
             guard layer.keyBytes.count == expectedBytes, layer.valueBytes.count == expectedBytes else {
                 throw PagedKVContiguousCacheBridgeError.blockTableMismatch
             }
-            let key = MLXArray(layer.keyBytes, layer.keyShape, dtype: .float16)
-            let value = MLXArray(layer.valueBytes, layer.valueShape, dtype: .float16)
+            let key = MLXArray(layer.keyBytes, layer.keyShape, dtype: mlxDType)
+            let value = MLXArray(layer.valueBytes, layer.valueShape, dtype: mlxDType)
             let contiguous = KVCacheSimple()
             contiguous.state = [key, value]
             guard contiguous.offset == cache.blockTable.logicalTokenCount else {
@@ -312,6 +316,8 @@ final class PagedKVRuntimeContiguousCacheBridge: PagedKVContiguousCacheBridge, P
         switch dtype {
         case .float16:
             return .fp16
+        case .bfloat16:
+            return .bf16
         default:
             throw PagedKVContiguousCacheBridgeError.unsupportedDType
         }
@@ -815,13 +821,13 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             }
             Stream().synchronize()
             sampledByRow = collected
+            let targets = supportedInputs.map(\.targetKVTokenCount)
             for index in compiledCaches.indices {
-                let compiledState = compiledCaches[index].state
-                if compiledState.count == 2 {
-                    batchedCaches[index].state = compiledState
-                }
+                try batchedCaches[index].writebackCompiledInnerState(
+                    compiledCaches[index].innerState(),
+                    targets: targets
+                )
             }
-            batchedCaches.forEach { $0.syncRowsFromBatch() }
         } else {
             session?.compiledStep = nil
             var currentTokens = supportedInputs.map(\.currentToken)
@@ -939,6 +945,41 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     }
 }
 
+/// Per-row compiled-decode writeback. Compile-with-state can grow the batched
+/// KV past each row's committed target; slicing must keep each row's own
+/// prefix, not a batch-wide minimum.
+enum PagedKVCompiledWriteback {
+    static func rowSlices(
+        keysValues compiledState: [MLXArray],
+        targets: [Int]
+    ) throws -> [(MLXArray, MLXArray)] {
+        guard compiledState.count == 2 else {
+            throw ContinuousBatchSchedulerError.unsupported("continuous_batching_invalid_cache_layout")
+        }
+        let keys = compiledState[0]
+        let values = compiledState[1]
+        guard keys.ndim == 4,
+              values.ndim == 4,
+              keys.dim(0) == targets.count,
+              values.dim(0) == targets.count,
+              keys.dim(2) == values.dim(2),
+              !targets.isEmpty
+        else {
+            throw ContinuousBatchSchedulerError.unsupported("continuous_batching_invalid_cache_layout")
+        }
+        let compiledSequence = keys.dim(2)
+        return try targets.enumerated().map { rowIndex, target in
+            guard target > 0, compiledSequence >= target else {
+                throw ContinuousBatchSchedulerError.unsupported("continuous_batching_invalid_cache_layout")
+            }
+            return (
+                keys[rowIndex ..< rowIndex + 1, 0..., 0..<target, 0...],
+                values[rowIndex ..< rowIndex + 1, 0..., 0..<target, 0...]
+            )
+        }
+    }
+}
+
 private final class PagedKVBatchLayerCache: KVCache, @unchecked Sendable {
     private let rowCaches: [PagedKVCache]
     private var preparedLengths: [Int]?
@@ -986,6 +1027,17 @@ private final class PagedKVBatchLayerCache: KVCache, @unchecked Sendable {
             ]
         }
         batchedOffset = nil
+    }
+
+    func writebackCompiledInnerState(_ compiledState: [MLXArray], targets: [Int]) throws {
+        let slices = try PagedKVCompiledWriteback.rowSlices(
+            keysValues: compiledState,
+            targets: targets
+        )
+        for (rowIndex, cache) in rowCaches.enumerated() {
+            cache.state = [slices[rowIndex].0, slices[rowIndex].1]
+        }
+        packFromRows()
     }
 
     func update(keys incomingKeys: MLXArray, values incomingValues: MLXArray) -> (MLXArray, MLXArray) {

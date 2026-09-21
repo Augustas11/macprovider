@@ -1629,6 +1629,7 @@ actor ContinuousBatchScheduler {
                     }
                 }
                 record(.localPreparationFailed)
+                ContinuousBatchingPolicy.logForwardFailed(error)
                 if let removed = activeDecode.removeValue(forKey: row.request.id) {
                     let released = await release(removed.handle)
                     finish(
@@ -1660,6 +1661,7 @@ actor ContinuousBatchScheduler {
             }
             if backendCancellationPending { return }
             record(.batchForwardFailed)
+            ContinuousBatchingPolicy.logForwardFailed(error)
             for item in prepared {
                 if let removed = activeDecode.removeValue(forKey: item.row.request.id) {
                     let released = await release(removed.handle)

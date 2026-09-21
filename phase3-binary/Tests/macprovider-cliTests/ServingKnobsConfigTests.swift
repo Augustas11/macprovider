@@ -669,6 +669,14 @@ final class ServingKnobsConfigTests: XCTestCase {
         XCTAssertTrue(line.hasPrefix("event=batching_prefill_failed action=fail_closed reason="))
         XCTAssertFalse(line.contains("sk-secret"))
         XCTAssertFalse(line.contains("prompt token dump"))
+        let forwardLine = ContinuousBatchingPolicy.forwardFailureTelemetryLine(
+            PagedKVContiguousCacheBridgeError.unsupportedDType
+        )
+        XCTAssertEqual(
+            forwardLine,
+            "event=batching_forward_failed action=fail_closed reason=paged_kv_unsupported_dtype\n"
+        )
+        XCTAssertFalse(forwardLine.contains("sk-secret"))
     }
 
     func testRuntimePolicyKeepsConversationKeysOutOfCurrentBatchingRollout() {
