@@ -150,6 +150,70 @@ final class ModelsSubcommandTests: XCTestCase {
         XCTAssertNil(object["cleanup_targets"])
     }
 
+    func testModelsCatalogEconomicsV1OutputIgnoresPrivateLaneAPreparationRecord() async throws {
+        // A Lane A prepare that adopted and recorded an artifact under the
+        // configured durable root must not change the public v1 projection or
+        // leak any private digest, receipt, or path into it.
+        let roots = try makeLaneAStagingRoots()
+        let seed = roots.hub.appendingPathComponent("seed", isDirectory: true)
+        try FileManager.default.createDirectory(at: seed, withIntermediateDirectories: true)
+        try Data("recorded-lane-a-bytes".utf8).write(to: seed.appendingPathComponent("weights.bin"))
+        let hash = try ModelArtifactVerifier.canonicalArtifactHash(directory: seed)
+        let authority = Build1LaneAArtifactAuthority(
+            catalogKey: Build1LaneAPrepareProfile.catalogKey,
+            modelID: Build1LaneAPrepareProfile.artifactModelID,
+            revision: Build1LaneAPrepareProfile.artifactRevision,
+            artifactID: Build1LaneAPrepareProfile.artifactID,
+            hashAlgorithm: ModelArtifactIdentity.snapshotManifestV1,
+            hash: hash,
+            sizeBytes: 21,
+            feedSHA256: String(repeating: "f", count: 64),
+            feedSignerKeyID: "test-signer",
+            releaseID: "test-release"
+        )
+        let stager = Build1LaneAArtifactStager(
+            resolver: CachedModelArtifactResolver(
+                hubRoot: roots.hub,
+                durableRoot: roots.durable,
+                downloader: Self.laneAFakeDownloader(payload: "recorded-lane-a-bytes", counter: Build1LaneACounter())
+            ),
+            reauthorize: { authority },
+            diskProbe: { _ in Build1LaneADiskProbe(availableBytes: .max, deviceID: 1) }
+        )
+        let staged = try await stager.stageAndAdopt(authority: authority) { _, _, _ in }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: Self.privateInventoryURL(durable: roots.durable).path))
+
+        let previous = ProcessInfo.processInfo.environment["MACPROVIDER_MODEL_ARTIFACT_ROOT"]
+        setenv("MACPROVIDER_MODEL_ARTIFACT_ROOT", roots.durable.path, 1)
+        defer {
+            if let previous { setenv("MACPROVIDER_MODEL_ARTIFACT_ROOT", previous, 1) } else { unsetenv("MACPROVIDER_MODEL_ARTIFACT_ROOT") }
+        }
+        let command = try ModelsCatalogEconomicsCommand.parse([
+            "--json",
+            "--skip-coordinator-status",
+            "--skip-ollama",
+            "--skip-lmstudio",
+            "--skip-llamacpp",
+        ])
+
+        let capture = await captureOutput { try await command.run() }
+
+        XCTAssertNil(capture.error)
+        let line = try XCTUnwrap(capture.stdout.split(whereSeparator: \.isNewline).first)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any])
+        XCTAssertEqual(object["schema"] as? String, "model_catalog_economics.v1")
+        let source = try XCTUnwrap(object["source"] as? [String: Any])
+        XCTAssertEqual(source["projection_protocol_version"] as? String, "1")
+        XCTAssertNil(object["storage"])
+        XCTAssertNil(object["cleanup_targets"])
+        XCTAssertFalse(capture.stdout.contains(staged.privateRecord.artifactIdentityDigest))
+        XCTAssertFalse(capture.stdout.contains(staged.privateRecord.receiptSHA256))
+        XCTAssertFalse(capture.stdout.contains(staged.privateRecord.rootIdentityDigest))
+        XCTAssertFalse(capture.stdout.contains(roots.durable.path))
+        XCTAssertFalse(capture.stdout.contains(Build1LaneAPreparationRecorder.authorityLeaf))
+        XCTAssertFalse(capture.stdout.contains(ModelPreparationSecureFilesystem.namespaceLeaf))
+    }
+
     func testModelsCatalogEconomicsRejectsUnlandedActionFlagsAtParseTime() throws {
         XCTAssertThrowsError(try ModelsCatalogEconomicsCommand.parse([
             "--json",
@@ -537,6 +601,10 @@ final class ModelsSubcommandTests: XCTestCase {
         XCTAssertFalse(DurableModelArtifactStore(root: roots.durable).isModelMaterialized(modelID: Build1LaneAPrepareProfile.artifactModelID))
         let hubContents = (try? FileManager.default.contentsOfDirectory(atPath: roots.hub.path)) ?? []
         XCTAssertTrue(hubContents.allSatisfy { !$0.contains("macprovider-prefetch") }, "\(hubContents)")
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: Self.privateInventoryURL(durable: roots.durable).path),
+            "cancellation must not write the private preparation record"
+        )
     }
 
     func testModelsPrepareRejectsConcurrentPrepareOnSameDurableRoot() async throws {
@@ -2032,6 +2100,13 @@ final class ModelsSubcommandTests: XCTestCase {
         var hub: URL
         var durable: URL
         var config: URL
+    }
+
+    private static func privateInventoryURL(durable: URL) -> URL {
+        durable
+            .appendingPathComponent(Build1LaneAPreparationRecorder.authorityLeaf, isDirectory: true)
+            .appendingPathComponent(ModelPreparationSecureFilesystem.stateLeaf, isDirectory: true)
+            .appendingPathComponent(ModelPreparationPrivateStateEnvelope.expectedTargetLeaf(for: .publishedInventory))
     }
 
     /// Isolated staging (Hugging Face cache) and durable roots plus a YAML

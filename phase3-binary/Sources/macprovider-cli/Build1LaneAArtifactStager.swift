@@ -18,6 +18,8 @@ struct Build1LaneAStagedArtifact: Equatable, Sendable {
     /// `true` when the redundant staging copy could not be removed after a
     /// successful adoption. The adopted artifact is still valid.
     var stagingCleanupRequired: Bool
+    /// Private preparation-state evidence for the adopted tuple (digests only).
+    var privateRecord: Build1LaneAPreparationRecord
 }
 
 enum Build1LaneAArtifactStagingError: Error, Equatable, Sendable {
@@ -29,8 +31,23 @@ enum Build1LaneAArtifactStagingError: Error, Equatable, Sendable {
     case transferFailed(String)
     case verificationFailed(expected: String, actual: String)
     case publicationFailed(String)
+    /// The private preparation-state authority could not be bootstrapped or
+    /// read before transfer; nothing was staged.
+    case privateStateUnavailable(String)
+    /// The existing private published inventory (or a receipt it references)
+    /// is invalid; nothing was staged.
+    case privateInventoryInvalid(String)
+    /// The durable adoption succeeded but the private record could not be
+    /// written. The durable copy is retained; re-running prepare retries the
+    /// record without transferring again.
+    case privateRecordFailed(String)
     case timedOut
     case cancelled
+    /// Cancellation or deadline expiry observed after durable adoption and
+    /// before the private record. The durable copy is retained, the private
+    /// record is not written; the next run reuses the copy and records it.
+    case cancelledAfterAdoption
+    case timedOutAfterAdoption
 }
 
 /// Stage labels emitted through `model_catalog_transaction_event.v1` progress
@@ -59,6 +76,12 @@ struct Build1LaneADiskProbe: Equatable, Sendable {
 /// - Failure or cancellation before adoption leaves the durable store as found
 ///   and removes the isolated staging directory it created.
 /// - Adoption happens only after the staged bytes hash to the authority digest.
+/// - The private published-inventory record is written only after durable
+///   adoption, under the same prepare lock, for the exact adopted tuple.
+///   Cancellation or deadline expiry observed at the commit boundary (after
+///   the `artifact_adopted` frame, before the record) leaves the durable copy
+///   and skips the record; failure or cancellation never writes or mutates it.
+///   Once the record is written the only remaining step is returning.
 struct Build1LaneAArtifactStager {
     typealias ProgressSink = (Build1LaneAStagingStage, _ bytesCompleted: Int64?, _ bytesExpected: Int64?) throws -> Void
     typealias Reauthorize = @Sendable () async throws -> Build1LaneAArtifactAuthority
@@ -80,6 +103,9 @@ struct Build1LaneAArtifactStager {
     }
 
     var resolver: CachedModelArtifactResolver
+    /// Writes the private preparation-state record for the adopted tuple into
+    /// the private store bound to the same durable root.
+    var recorder: Build1LaneAPreparationRecorder
     /// Re-resolves the signed Lane A authority immediately before publication.
     /// Adoption proceeds only when the fresh authority equals the one that
     /// gated staging, so a feed that is revoked, re-signed, or rebound while
@@ -92,12 +118,14 @@ struct Build1LaneAArtifactStager {
         resolver: CachedModelArtifactResolver,
         reauthorize: @escaping Reauthorize,
         diskProbe: @escaping @Sendable (URL) throws -> Build1LaneADiskProbe = { try Build1LaneAArtifactStager.systemDiskProbe($0) },
-        deadline: Date? = nil
+        deadline: Date? = nil,
+        recorder: Build1LaneAPreparationRecorder? = nil
     ) {
         self.resolver = resolver
         self.reauthorize = reauthorize
         self.diskProbe = diskProbe
         self.deadline = deadline
+        self.recorder = recorder ?? Build1LaneAPreparationRecorder(durableRoot: resolver.durableStore.root)
     }
 
     func stageAndAdopt(
@@ -122,17 +150,34 @@ struct Build1LaneAArtifactStager {
 
         try checkDeadlineAndCancellation()
 
+        // 0. Bootstrap the private preparation-state authority before any
+        //    transfer so an unusable or locked state root, or an invalid
+        //    existing inventory, refuses closed with nothing staged.
+        let stateSession: Build1LaneAPreparationRecorder.Session
+        do {
+            stateSession = try recorder.open()
+        } catch {
+            throw Self.mapRecordError(error)
+        }
+        defer { stateSession.close() }
+
+        try checkDeadlineAndCancellation()
+
         // 1. A verified durable copy already exists: reuse it without touching
         //    anything on disk. Re-running prepare must be idempotent so the
-        //    physical journey never re-downloads gigabytes.
+        //    physical journey never re-downloads gigabytes. The private record
+        //    is still ensured so an earlier record failure is repaired.
         if let reused = try verifiedDurableArtifact(at: durable, store: store, expected: authority.hash) {
             try progress(.verified, reused, reused)
             try progress(.adopted, reused, reused)
+            try checkCommitBoundary()
+            let record = try recordPrivateState(stateSession, authority: authority, adoptedBytes: reused)
             return Build1LaneAStagedArtifact(
                 sha256: authority.hash,
                 adoptedBytes: reused,
                 reusedDurableArtifact: true,
-                stagingCleanupRequired: false
+                stagingCleanupRequired: false,
+                privateRecord: record
             )
         }
 
@@ -264,13 +309,58 @@ struct Build1LaneAArtifactStager {
                 stagingCleanupRequired = true
             }
         }
+
+        // 7. Commit boundary, then record the adopted tuple in the private
+        //    published inventory. The durable copy is already verified; a
+        //    cancellation or deadline observed here skips the record, and a
+        //    record failure is reported as publication_failed. Either way the
+        //    next run reuses the durable copy and records it.
         try progress(.adopted, stagedBytes, stagedBytes)
+        try checkCommitBoundary()
+        let record = try recordPrivateState(stateSession, authority: authority, adoptedBytes: stagedBytes)
         return Build1LaneAStagedArtifact(
             sha256: authority.hash,
             adoptedBytes: stagedBytes,
             reusedDurableArtifact: false,
-            stagingCleanupRequired: stagingCleanupRequired
+            stagingCleanupRequired: stagingCleanupRequired,
+            privateRecord: record
         )
+    }
+
+    private func recordPrivateState(
+        _ session: Build1LaneAPreparationRecorder.Session,
+        authority: Build1LaneAArtifactAuthority,
+        adoptedBytes: Int64
+    ) throws -> Build1LaneAPreparationRecord {
+        do {
+            return try session.record(authority: authority, adoptedSHA256: authority.hash, adoptedBytes: adoptedBytes)
+        } catch {
+            throw Self.mapRecordError(error)
+        }
+    }
+
+    /// Same checks as `checkDeadlineAndCancellation`, reported as the
+    /// post-adoption variants so the command can say the durable copy stayed.
+    private func checkCommitBoundary() throws {
+        if Task.isCancelled {
+            throw Build1LaneAArtifactStagingError.cancelledAfterAdoption
+        }
+        if let deadline, Date() >= deadline {
+            throw Build1LaneAArtifactStagingError.timedOutAfterAdoption
+        }
+    }
+
+    private static func mapRecordError(_ error: Error) -> Build1LaneAArtifactStagingError {
+        guard let recordError = error as? Build1LaneAPreparationRecordError else {
+            return .privateRecordFailed(String(describing: error))
+        }
+        switch recordError {
+        case .stateUnavailable(let detail): return .privateStateUnavailable(detail)
+        case .stateLocked: return .operationConflict
+        case .inventoryInvalid(let detail): return .privateInventoryInvalid(detail)
+        case .adoptedArtifactMismatch: return .privateRecordFailed("adopted artifact mismatch")
+        case .writeFailed(let detail): return .privateRecordFailed(detail)
+        }
     }
 
     // MARK: - Helpers

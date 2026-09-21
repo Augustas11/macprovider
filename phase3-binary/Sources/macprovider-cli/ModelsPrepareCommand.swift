@@ -422,7 +422,9 @@ struct ModelsPrepareCommand: AsyncParsableCommand {
         writePrepareStderr(
             "models prepare adopted \(authority.modelID)@\(authority.revision) "
                 + "\(authority.hashAlgorithm)=\(staged.sha256) adopted_bytes=\(staged.adoptedBytes) "
-                + "reused_durable_artifact=\(staged.reusedDurableArtifact); "
+                + "reused_durable_artifact=\(staged.reusedDurableArtifact) "
+                + "artifact_identity_digest=\(staged.privateRecord.artifactIdentityDigest) "
+                + "private_record=\(staged.privateRecord.reusedExistingRecord ? "reused" : "written"); "
                 + "preparation grants no admission, settlement, earnings, rewards, payouts, or production activation"
         )
     }
@@ -440,6 +442,15 @@ struct ModelsPrepareCommand: AsyncParsableCommand {
         case .timedOut:
             try emitter.emit(state: .timedOut, errorCode: .timedOut)
             writePrepareStderr("models prepare timed out: active model unchanged; durable store left as found")
+            throw ExitCode(2)
+        case .cancelledAfterAdoption:
+            try emitter.emit(state: .cancelRequested)
+            try emitter.emit(state: .cancelled)
+            writePrepareStderr("models prepare cancelled: active model unchanged; durable artifact retained; private record not written; re-run prepare to record it")
+            throw ExitCode(130)
+        case .timedOutAfterAdoption:
+            try emitter.emit(state: .timedOut, errorCode: .timedOut)
+            writePrepareStderr("models prepare timed out: active model unchanged; durable artifact retained; private record not written; re-run prepare to record it")
             throw ExitCode(2)
         default:
             let code = errorCode(for: error)
@@ -459,8 +470,11 @@ struct ModelsPrepareCommand: AsyncParsableCommand {
         case .transferFailed: return .transferFailed
         case .verificationFailed: return .verificationFailed
         case .publicationFailed: return .publicationFailed
-        case .timedOut: return .timedOut
-        case .cancelled: return .internalError
+        case .privateStateUnavailable: return .rootUnavailable
+        case .privateInventoryInvalid: return .managedInventoryInvalid
+        case .privateRecordFailed: return .publicationFailed
+        case .timedOut, .timedOutAfterAdoption: return .timedOut
+        case .cancelled, .cancelledAfterAdoption: return .internalError
         }
     }
 
@@ -472,6 +486,8 @@ struct ModelsPrepareCommand: AsyncParsableCommand {
             return " required_bytes=\(required) available_bytes=\(available)"
         case .verificationFailed(let expected, let actual):
             return " expected=\(expected) actual=\(actual)"
+        case .privateRecordFailed:
+            return " durable artifact retained; re-run prepare to retry the private record"
         default:
             return ""
         }

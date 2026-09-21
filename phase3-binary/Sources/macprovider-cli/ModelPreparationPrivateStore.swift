@@ -194,6 +194,15 @@ struct ModelPreparationPrivateStore: Sendable {
     }
 
     func readRecord(kind: ModelPreparationPrivateStateEnvelopeKind, rootLocator: ModelPreparationRootLocator) throws -> Data? {
+        try readRecordWithGeneration(kind: kind, rootLocator: rootLocator)?.payload
+    }
+
+    /// Reads the durable record and the envelope generation a writer must
+    /// exceed to replace it. Same validation as `readRecord`.
+    func readRecordWithGeneration(
+        kind: ModelPreparationPrivateStateEnvelopeKind,
+        rootLocator: ModelPreparationRootLocator
+    ) throws -> (payload: Data, generation: Int)? {
         let authority = try ModelPreparationSecureFilesystem.openExistingPrivateDirectory(at: authorityRoot)
         defer { authority.close() }
         let artifact = try ModelPreparationSecureFilesystem.openExistingPrivateDirectory(at: artifactRoot)
@@ -224,7 +233,7 @@ struct ModelPreparationPrivateStore: Sendable {
             throw ModelPreparationSecureFilesystemError.unsafe(path: file.path, reason: "wrong envelope kind")
         }
         try validateEnvelope(envelope, leaf: leaf, rootLocator: rootLocator)
-        return envelope.payload
+        return (envelope.payload, envelope.generation)
     }
 
     @discardableResult
