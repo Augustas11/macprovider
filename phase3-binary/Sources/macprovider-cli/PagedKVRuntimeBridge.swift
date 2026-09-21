@@ -822,7 +822,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             Stream().synchronize()
             sampledByRow = collected
             for index in compiledCaches.indices {
-                let compiledState = compiledCaches[index].state
+                let compiledState = compiledCaches[index].innerState()
                 if compiledState.count == 2 {
                     batchedCaches[index].state = compiledState
                 }
