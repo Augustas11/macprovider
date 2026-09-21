@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/artifactidentity"
 	"github.com/augstar/macprovider-coordinator/internal/autotune"
@@ -136,11 +137,20 @@ func (s *Server) appendModelAdmissionDecisionInSection(ctx context.Context, deci
 	return stored, err
 }
 
+const (
+	modelAdmissionBindingRefreshRetryAttempts = 3
+	modelAdmissionBindingRefreshRetryDelay    = 100 * time.Millisecond
+	modelAdmissionBindingRefreshRetryTimeout  = 30 * time.Second
+)
+
 // afterModelAdmissionAppendLocked: caller holds the section and has just
 // appended an event for one of the provider's candidates.
 func (s *Server) afterModelAdmissionAppendLocked(ctx context.Context, providerID string, section *providerSection) {
 	section.generation.Add(1)
 	s.refreshModelAdmissionBindingLocked(ctx, providerID, section)
+	if provider, ok := s.pool.Resolve(providerID, ""); ok {
+		s.scheduleModelAdmissionAppendBindingRefreshRetry(providerID, provider.ModelAdmissionSessionEpoch)
+	}
 }
 
 // ---- session-to-candidate binding (R003)
@@ -273,6 +283,31 @@ func (s *Server) refreshModelAdmissionBindingLocked(ctx context.Context, provide
 		}
 	}
 	s.setModelAdmissionBindingLocked(providerID, nil, section)
+}
+
+func (s *Server) scheduleModelAdmissionAppendBindingRefreshRetry(providerID string, expectedSessionEpoch uint64) {
+	if s.modelAdmissions == nil || s.pool == nil {
+		return
+	}
+	go func() {
+		for attempt := 0; attempt < modelAdmissionBindingRefreshRetryAttempts; attempt++ {
+			time.Sleep(modelAdmissionBindingRefreshRetryDelay << attempt)
+			var stop bool
+			s.withProviderSection(providerID, func(section *providerSection) {
+				ctx, cancel := context.WithTimeout(context.Background(), modelAdmissionBindingRefreshRetryTimeout)
+				defer cancel()
+				provider, ok := s.pool.Resolve(providerID, "")
+				if !ok || provider.ModelAdmissionSessionEpoch != expectedSessionEpoch {
+					stop = true
+					return
+				}
+				s.refreshModelAdmissionBindingLocked(ctx, providerID, section)
+			})
+			if stop {
+				return
+			}
+		}
+	}()
 }
 
 // modelAdmissionBindingFor derives the binding record for one candidate under

@@ -6,9 +6,11 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -425,6 +427,91 @@ func TestModelAdmissionSessionBindingLifecycleAndDrift(t *testing.T) {
 	s.bindModelAdmissionSessionAtHello("p3", priorP3, true)
 	if latest := f.latest(t, "p3", d.CandidateID); latest.State != modelAdmissionRevoked || latest.ReasonCode != "runtime_identity_drift" {
 		t.Fatalf("session pinned to a member the candidate never recorded must be drift: %+v", latest)
+	}
+}
+
+func TestModelAdmissionBindingRefreshRetriesAfterTransientListingFailure(t *testing.T) {
+	f := newBindingFixture(t)
+	s := f.server
+	f.registerSession(t, "p1", "s1", "model-a", true)
+	offered := f.offer(t, "p1", "a", "mlx_cache", map[string]string{modelidentity.SnapshotManifestV1: bindingRowHash})
+
+	flaky := &flakyLatestModelAdmissionStore{ModelAdmissionStore: s.modelAdmissions}
+	flaky.failures.Store(1)
+	s.modelAdmissions = flaky
+
+	priced := f.decide(t, offered, "catalog_priced")
+	if p, _ := s.pool.Resolve("p1", ""); p.ModelAdmissionCandidateID != "" {
+		t.Fatalf("failed synchronous refresh must clear the binding first, got %q", p.ModelAdmissionCandidateID)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		p, _ := s.pool.Resolve("p1", "")
+		if p.ModelAdmissionCandidateID == priced.CandidateID && p.ModelAdmissionCoordinatorEventID == priced.CoordinatorEventID {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	p, _ := s.pool.Resolve("p1", "")
+	t.Fatalf("retry did not restore binding to the latest head: candidate=%q head=%q want candidate=%q head=%q",
+		p.ModelAdmissionCandidateID, p.ModelAdmissionCoordinatorEventID, priced.CandidateID, priced.CoordinatorEventID)
+}
+
+func TestModelAdmissionBindingRetryStopsAfterSessionEpochDrift(t *testing.T) {
+	f := newBindingFixture(t)
+	s := f.server
+	f.registerSession(t, "p1", "s1", "model-a", true)
+	offered := f.offer(t, "p1", "a", "mlx_cache", map[string]string{modelidentity.SnapshotManifestV1: bindingRowHash})
+
+	flaky := &flakyLatestModelAdmissionStore{ModelAdmissionStore: s.modelAdmissions}
+	flaky.failures.Store(1)
+	s.modelAdmissions = flaky
+
+	priced := f.decide(t, offered, "catalog_priced")
+	before, _ := s.pool.Resolve("p1", "")
+	if before.ModelAdmissionCandidateID != "" {
+		t.Fatalf("failed synchronous refresh must clear the binding first, got %q", before.ModelAdmissionCandidateID)
+	}
+	startEpoch := before.ModelAdmissionSessionEpoch
+
+	hb := pool.HeartbeatUpdate{Status: pool.StateReady, ModelID: "model-a", ModelHash: bindingOtherHash, ModelHashPresent: true,
+		ModelHashAlgorithm: modelidentity.SnapshotManifestV1, ModelHashAlgorithmPresent: true, ExpectedModelHash: bindingRowHash,
+		MaxContextTokens: 8192, MaxConcurrency: 1, SlotsFree: 1, SlotsTotal: 1, At: f.now.Add(time.Minute)}
+	result := s.pool.ApplyHeartbeatDetailed("p1", "s1", hb)
+	if !result.OK {
+		t.Fatalf("heartbeat: %+v", result)
+	}
+	afterHeartbeat, _ := s.pool.Resolve("p1", "")
+	if afterHeartbeat.ModelAdmissionSessionEpoch == startEpoch {
+		t.Fatalf("heartbeat must advance the session epoch before retry: before=%d after=%d", startEpoch, afterHeartbeat.ModelAdmissionSessionEpoch)
+	}
+
+	time.Sleep(500 * time.Millisecond)
+	afterRetry, _ := s.pool.Resolve("p1", "")
+	if afterRetry.ModelAdmissionCandidateID != "" || afterRetry.ModelAdmissionCoordinatorEventID != "" {
+		t.Fatalf("retry must not rebind after session epoch drift: %+v", afterRetry.ModelAdmissionBindingGeneration)
+	}
+	latest := f.latest(t, "p1", priced.CandidateID)
+	if latest.State != "catalog_priced" {
+		t.Fatalf("epoch guard should stop retry without inventing a drift event: %+v", latest)
+	}
+}
+
+type flakyLatestModelAdmissionStore struct {
+	ModelAdmissionStore
+	failures atomic.Int32
+}
+
+func (s *flakyLatestModelAdmissionStore) LatestModelAdmissionStatusesForProvider(ctx context.Context, providerID string) ([]ModelAdmissionEvent, error) {
+	for {
+		current := s.failures.Load()
+		if current <= 0 {
+			return s.ModelAdmissionStore.LatestModelAdmissionStatusesForProvider(ctx, providerID)
+		}
+		if s.failures.CompareAndSwap(current, current-1) {
+			return nil, errors.New("transient listing failure")
+		}
 	}
 }
 
