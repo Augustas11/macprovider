@@ -821,11 +821,23 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             }
             Stream().synchronize()
             sampledByRow = collected
+            let targetSequence = supportedInputs.map(\.targetKVTokenCount).min() ?? 0
             for index in compiledCaches.indices {
                 let compiledState = compiledCaches[index].innerState()
-                if compiledState.count == 2 {
-                    batchedCaches[index].state = compiledState
+                guard compiledState.count == 2 else { continue }
+                var keys = compiledState[0]
+                var values = compiledState[1]
+                if keys.ndim == 4, values.ndim == 4, targetSequence > 0 {
+                    let compiledSequence = min(keys.dim(2), values.dim(2))
+                    guard compiledSequence >= targetSequence else {
+                        throw ContinuousBatchSchedulerError.unsupported("continuous_batching_invalid_cache_layout")
+                    }
+                    if compiledSequence > targetSequence {
+                        keys = keys[0..., 0..., 0..<targetSequence, 0...]
+                        values = values[0..., 0..., 0..<targetSequence, 0...]
+                    }
                 }
+                batchedCaches[index].state = [keys, values]
             }
             batchedCaches.forEach { $0.syncRowsFromBatch() }
         } else {
