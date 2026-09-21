@@ -19,7 +19,8 @@ auto-prefix / buyer conversation keys on a cache miss:
 - conversation-keyed **first-turn / cache-miss** requests (`cached_prompt_tokens
   = 0`) may enter the batch; a conversation key alone is not a serial-route;
 - keyed requests with **positive** cached-token credit still serial-route
-  until a same-conversation FR-PKV10 retained paged-KV handoff exists (AC-26);
+  until AC-26 packaged sticky/cross-turn proof, even if retained paged KV
+  exists;
 - #1477 sticky paths remain present as code, not as permission to credit
   sticky cache hits in canary;
 - the SPEC-039 contiguous-cache primitive (FR-PKV10) already landed in
@@ -101,7 +102,7 @@ only.
 | Production serving path | The batched path that will serve real traffic is identified and measured. If gather-feeds-SDPA is used only as parity scaffold, record the actual shared-forward path; if gather-every-step is used, prove it meets the SPEC-039 overhead ceiling. |
 | Keyless scheduler 200 | A local loopback and relay-shaped keyless request with stable request ID enters the scheduler path and returns HTTP 200 / terminal success from batching, not serial fallback and not `continuous_batching_prefill_failed`. |
 | Keyed first-turn scheduler 200 | A Pearl-shaped request with a conversation key, stable request ID, and `cached_prompt_tokens = 0` enters the scheduler (no `serial_routed reason=conversation_key_rollout_unavailable`) and returns HTTP 200. Keyless loopback is not a substitute. |
-| Sticky/cross-turn scope | First-turn keyed traffic may batch. Positive cached-token credit still requires a same-conversation FR-PKV10 retained paged-KV handoff before AC-26 may admit it. |
+| Sticky/cross-turn scope | First-turn keyed traffic may batch. Any positive `cached_prompt_tokens` stays serial until AC-26 packaged proof, even with a retained FR-PKV10 handoff. |
 | Sticky retained-KV proof | Before sticky/cross-turn batching with positive `cached_prompt_tokens` can enter canary, drive a sticky/cross-turn request through the gateway/relay path, reattach or materialize same-conversation paged KV via FR-PKV10, prove mid-block LCP/trim correctness, and verify usage, billing, receipt, and settlement fields. |
 | Durable replay authority | Stable relay request identity is mapped into scheduler replay keys, settlement disposition is propagated through usage/receipt code, and duplicate inference or duplicate settlement is rejected after local terminal-result retention rolls. The in-process `ContinuousBatchRuntimeReplayAuthority` stub is not activation evidence. |
 | MSB-01..05 | Full harness output for MSB-01 single-stream baseline plus MSB-02, MSB-03, MSB-04, and MSB-05. Aggregate TG is total decoded tokens over common wall-clock, warm-up excluded; per-stream and aggregate TG stay separate. |

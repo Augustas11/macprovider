@@ -628,8 +628,13 @@ final class ServingKnobsConfigTests: XCTestCase {
             cachedPromptTokens: 0,
             hasRetainedPagedKVHandoff: false
         ))
-        XCTAssertFalse(ModelRuntime.canaryShouldSerialRouteCachedHitMissingRetainedHandoff(
+        XCTAssertTrue(ModelRuntime.canaryShouldSerialRouteCachedHitMissingRetainedHandoff(
             mode: .canary,
+            cachedPromptTokens: 32,
+            hasRetainedPagedKVHandoff: true
+        ))
+        XCTAssertTrue(ModelRuntime.canaryShouldSerialRouteCachedHitMissingRetainedHandoff(
+            mode: .on,
             cachedPromptTokens: 32,
             hasRetainedPagedKVHandoff: true
         ))
@@ -650,6 +655,23 @@ final class ServingKnobsConfigTests: XCTestCase {
             ContinuousBatchingPolicy.serialRouteTelemetryLine(capability),
             "event=batching_unsupported action=serial_routed reason=sticky_cache_handoff_unavailable\n"
         )
+
+        let strictBlocked = ContinuousBatchingCapability(
+            mode: .on,
+            maxActiveRows: 2,
+            queueLimit: 4,
+            descriptor: nil,
+            unsupportedReason: .stickyCacheHandoffUnavailable
+        )
+        XCTAssertNil(ContinuousBatchingPolicy.serialRouteTelemetryLine(strictBlocked))
+        XCTAssertThrowsError(try ContinuousBatchingPolicy.validateStrictStartup(strictBlocked)) { error in
+            guard let api = error as? APIError else {
+                XCTFail("expected APIError")
+                return
+            }
+            XCTAssertEqual(api.code, "continuous_batching_paged_kv_handoff_unavailable")
+            XCTAssertEqual(api.status, 400)
+        }
     }
 
     func testPrefillFailureTelemetryIsReasonCodedAndDoesNotEchoErrorText() {

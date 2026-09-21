@@ -7,10 +7,10 @@
 **Change log v0.2.4 (2026-09-21, keyed first-turn continuous batching):**
 - Conversation-keyed **first-turn / cache-miss** requests MAY enter the
   SPEC-038 scheduler under `canary`/`on`. A conversation key alone is not
-  `conversation_key_rollout_unavailable`. Positive `cached_prompt_tokens`
-  without a retained FR-PKV10 paged-KV handoff still serial-routes.
-  `max_concurrency` is unchanged. Sticky cached-token **credit** stays behind
-  SPEC-038 AC-26.
+  `conversation_key_rollout_unavailable`. Any positive `cached_prompt_tokens`
+  still serial-routes (canary) or fail-closes (`.on`) until SPEC-038 AC-26,
+  even when a retained FR-PKV10 paged-KV handoff exists. `max_concurrency` is
+  unchanged.
 
 **Change log v0.2.3 (2026-09-20, issue #1636 — OpenAI nested cached_tokens + auto-prefix no-quarantine):**
 - **SPEC-024-R002 / §8.** Buyer chat-completions `usage` MUST include OpenAI

@@ -14,8 +14,9 @@ enum ContinuousBatchingUnsupportedReason: String, Sendable, Equatable {
     case stickyCacheHandoffUnavailable = "sticky_cache_handoff_unavailable"
     /// Kept for reason-coded API compatibility. Admission no longer serial-routes
     /// merely because a conversation key is present; first-turn / cache-miss keyed
-    /// requests may enter the scheduler. Positive cached-token hits without a
-    /// retained paged-KV handoff still serial-route as `stickyCacheHandoffUnavailable`.
+    /// requests may enter the scheduler. Any positive cached-token hit still
+    /// serial-routes (canary) or fail-closes (`.on`) as `stickyCacheHandoffUnavailable`
+    /// until AC-26 packaged sticky/cross-turn proof.
     case conversationKeyRolloutUnavailable = "conversation_key_rollout_unavailable"
     case durableReplayAuthorityUnavailable = "durable_replay_authority_unavailable"
     case stableRequestIDUnavailable = "stable_request_id_unavailable"
