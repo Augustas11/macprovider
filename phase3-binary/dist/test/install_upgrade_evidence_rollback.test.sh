@@ -70,7 +70,7 @@ names = {
     "launchd_label_is_disabled", "capture_manual_provider_for_recovery",
     "pid_is_live_non_zombie", "stop_owned_manual_provider",
     "validate_port_value", "ensure_port_free", "reclaim_launchd_service",
-    "reclaim_legacy_launchd_service",
+    "reclaim_legacy_launchd_service", "release_dangling_launchd_registration",
 }
 lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
 i = 0
@@ -610,9 +610,15 @@ case "$1" in
           "$CASE_ROOT/home/Library/LaunchAgents/live.streamvc.macprovider-watchdog.plist"
         ;;
       *macprovider-watchdog*|*malibu.provider-watchdog*)
-        printf 'program = %s\npath = %s\n' \
-          "$CASE_ROOT/home/.local/share/macprovider-watchdog/macprovider-health-monitor" \
-          "$CASE_ROOT/home/Library/LaunchAgents/live.malibu.provider-watchdog.plist"
+        if [ -f "$CASE_ROOT/foreign-watchdog-program" ]; then
+          printf 'program = %s\npath = %s\n' \
+            "/opt/somebody-else/bin/health-monitor" \
+            "$CASE_ROOT/home/Library/LaunchAgents/live.malibu.provider-watchdog.plist"
+        else
+          printf 'program = %s\npath = %s\n' \
+            "$CASE_ROOT/home/.local/share/macprovider-watchdog/macprovider-health-monitor" \
+            "$CASE_ROOT/home/Library/LaunchAgents/live.malibu.provider-watchdog.plist"
+        fi
         ;;
       *streamvc.macprovider*)
         printf 'program = %s\npath = %s\n' \
@@ -620,9 +626,15 @@ case "$1" in
           "$CASE_ROOT/home/Library/LaunchAgents/live.streamvc.macprovider.plist"
         ;;
       *)
-        printf 'program = %s\npath = %s\n' \
-          "$CASE_ROOT/home/macprovider/macprovider-cli" \
-          "$CASE_ROOT/home/Library/LaunchAgents/live.malibu.provider.plist"
+        if [ -f "$CASE_ROOT/foreign-provider-program" ]; then
+          printf 'program = %s\npath = %s\n' \
+            "/opt/somebody-else/bin/other" \
+            "$CASE_ROOT/home/Library/LaunchAgents/live.malibu.provider.plist"
+        else
+          printf 'program = %s\npath = %s\n' \
+            "$CASE_ROOT/home/macprovider/macprovider-cli" \
+            "$CASE_ROOT/home/Library/LaunchAgents/live.malibu.provider.plist"
+        fi
         ;;
     esac
     ;;
@@ -913,13 +925,25 @@ run_case() {
       chmod 600 "$lifecycle_state_file"
       ;;
     missing-provider-plist)
-      # A loaded provider without a recoverable plist must fail before durable
-      # recovery is published; rollback cannot safely recreate that service.
+      # #1616 finding E: a loaded provider whose plist file is gone preserves
+      # nothing restorable, so the transaction repairs it (boots it out) rather
+      # than refusing an install it could never have rolled back.
       rm -f "$root/home/Library/LaunchAgents/live.malibu.provider.plist"
       ;;
     missing-watchdog-plist)
-      # Apply the same pre-publication invariant to a loaded watchdog.
+      # Same repair for a loaded watchdog.
       rm -f "$root/home/Library/LaunchAgents/live.malibu.provider-watchdog.plist"
+      ;;
+    missing-provider-plist-foreign)
+      # The plist is gone AND the loaded job is not ours. The repair must
+      # refuse it, so the original fail-closed guard still aborts the
+      # transaction pre-mutation.
+      rm -f "$root/home/Library/LaunchAgents/live.malibu.provider.plist"
+      : > "$root/foreign-provider-program"
+      ;;
+    missing-watchdog-plist-foreign)
+      rm -f "$root/home/Library/LaunchAgents/live.malibu.provider-watchdog.plist"
+      : > "$root/foreign-watchdog-program"
       ;;
     serve-snapshot)
       # A-01: a serve-written snapshot restores byte-exact (serve can always
@@ -1572,17 +1596,34 @@ assert_snapshot_aborted_pre_mutation "$TMP/lifecycle_wrong_mode" lifecycle_state
 run_case lifecycle_oversized "" "" "" self-test active bind oversized
 assert_snapshot_aborted_pre_mutation "$TMP/lifecycle_oversized" lifecycle_state_oversized
 
-# A loaded service without its owner-safe plist cannot be reclaimed and cannot
-# be restored by recovery. The transaction must reject both variants before
-# publishing or arming any durable recovery state, leaving the incumbent live.
+# Issue #1616 finding E. A loaded service whose plist FILE is gone preserves
+# nothing that rollback could restore, so refusing the install left operators
+# with a die 70 they could only clear by running `launchctl bootout` by hand.
+# The transaction now releases such a registration first — but only when the
+# loaded job proves it is ours. The foreign variants below keep the original
+# fail-closed guard honest.
 run_case loaded_provider_without_plist "" "" "" self-test active bind missing-provider-plist
 root="$TMP/loaded_provider_without_plist"
+# Repaired, not aborted: the transaction proceeded past the snapshot instead of
+# dying 70 on an unrecoverable precondition.
+[ "$(cat "$root/rc")" -ne 70 ]
+grep -F 'Repairing dangling live.malibu.provider launchd registration' "$root/stderr.log" >/dev/null   || grep -F 'Repairing dangling live.malibu.provider launchd registration' "$root/stdout.log" >/dev/null
+grep -F 'bootout gui/' "$root/launchctl.log" | grep -F 'live.malibu.provider' >/dev/null
+
+run_case loaded_watchdog_without_plist "" "" "" self-test active bind missing-watchdog-plist
+root="$TMP/loaded_watchdog_without_plist"
+[ "$(cat "$root/rc")" -ne 70 ]
+
+# A dangling registration this installer does not own is still fatal: the
+# repair refuses it, so the pre-publication guard aborts before any mutation.
+run_case loaded_provider_without_plist_foreign "" "" "" self-test active bind missing-provider-plist-foreign
+root="$TMP/loaded_provider_without_plist_foreign"
 assert_snapshot_aborted_pre_mutation "$root" 'loaded provider has no recoverable launchd plist'
 [ ! -e "$root/home/Library/LaunchAgents/live.malibu.provider.plist" ]
 [ -z "$(find "$root/home/.config/macprovider" -maxdepth 1 -type d -name 'install-recovery-*.staging' -print -quit)" ]
 
-run_case loaded_watchdog_without_plist "" "" "" self-test active bind missing-watchdog-plist
-root="$TMP/loaded_watchdog_without_plist"
+run_case loaded_watchdog_without_plist_foreign "" "" "" self-test active bind missing-watchdog-plist-foreign
+root="$TMP/loaded_watchdog_without_plist_foreign"
 assert_snapshot_aborted_pre_mutation "$root" 'loaded watchdog has no recoverable launchd plist'
 [ ! -e "$root/home/Library/LaunchAgents/live.malibu.provider-watchdog.plist" ]
 [ -z "$(find "$root/home/.config/macprovider" -maxdepth 1 -type d -name 'install-recovery-*.staging' -print -quit)" ]
