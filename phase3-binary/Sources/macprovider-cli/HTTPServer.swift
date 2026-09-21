@@ -44,6 +44,13 @@ struct ProviderCatalogStatusContext: Sendable {
     }
 }
 
+/// Wire constants for the `build1_lane_a` block of `GET /v1/status`, shared
+/// with the `models staging-input` consumer so both sides name one contract.
+enum ProviderBuild1LaneAStatusEvidence {
+    static let schema = "build1_lane_a_status_evidence.v1"
+    static let correlatedState = "correlated"
+}
+
 struct ProviderBuild1LaneAStatusResolver: Sendable {
     let durableRoot: URL
     let expectedArtifactSHA256: String
@@ -67,18 +74,21 @@ struct ProviderBuild1LaneAStatusResolver: Sendable {
         if let catalogSHA256 = nonEmpty(config.modelCatalogSHA256), catalogSHA256 != expectedArtifactSHA256 {
             return nil
         }
-        let durableRoot: URL
-        if let root = config.modelArtifactRoot?.trimmingCharacters(in: .whitespacesAndNewlines),
-           root.hasPrefix("/") {
-            durableRoot = URL(fileURLWithPath: root, isDirectory: true).standardizedFileURL
-        } else {
-            durableRoot = DurableModelArtifactStore.defaultRoot
-        }
         return ProviderBuild1LaneAStatusResolver(
-            durableRoot: durableRoot,
+            durableRoot: durableRoot(config: config),
             expectedArtifactSHA256: expectedArtifactSHA256,
             expectedReleaseID: expectedReleaseID
         )
+    }
+
+    /// The durable root `serve` preflight binds to: an absolute configured
+    /// `model_artifact_root`, else the provider-owned default store.
+    static func durableRoot(config: AppConfig) -> URL {
+        if let root = config.modelArtifactRoot?.trimmingCharacters(in: .whitespacesAndNewlines),
+           root.hasPrefix("/") {
+            return URL(fileURLWithPath: root, isDirectory: true).standardizedFileURL
+        }
+        return DurableModelArtifactStore.defaultRoot
     }
 
     func resolve() -> ProviderBuild1LaneAStatusContext {
@@ -414,7 +424,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         "legacy_reader_fallback_v1",
         "service_instance_v1",
         "model_liveness_token_v1",
-        "build1_lane_a_status_evidence.v1",
+        ProviderBuild1LaneAStatusEvidence.schema,
         "status_observation_v1",
         "provider_safety_telemetry_v1",
         "referral_bootstrap_v1",
@@ -2359,11 +2369,11 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
             state = "unbound"
             reason = "weights_manifest_algorithm_mismatch"
         } else {
-            state = "correlated"
+            state = ProviderBuild1LaneAStatusEvidence.correlatedState
             reason = "status_matches_private_record_path_observed"
         }
         return [
-            "schema": "build1_lane_a_status_evidence.v1",
+            "schema": ProviderBuild1LaneAStatusEvidence.schema,
             "state": state,
             "reason": reason,
             "record_state": context.recordState.rawValue,

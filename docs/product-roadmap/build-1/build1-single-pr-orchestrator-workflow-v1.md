@@ -91,9 +91,30 @@ Milestones stay inside PR #1658:
    - Preserve public v1 `models catalog-economics --json` compatibility until
      Lane B.
 3. Measured artifact-bound staging input.
-   - Status: next internal milestone.
-   - Prove the selected Llama 3B tuple has a measured, signed staging artifact
-     authority or record the blocker without overclaiming.
+   - Status: implemented in PR #1658 as an internal milestone (consumer side).
+   - `macprovider-cli models staging-input <catalog-key> --profile
+     build1-lane-a --coordinator-url <staging> --json [--config <yaml>]
+     [--status-capture <status.json>]` emits one
+     `build1_lane_a_staging_input.v1` object that ties the signed staging
+     artifact authority (measured `size_bytes`, trusted signer, release
+     binding), the private published-inventory receipt for the adopted
+     artifact, and the local `GET /v1/status` Lane A evidence into one
+     handoff. It is `staging_input_ready` only when all three agree on tuple,
+     release, digest, declared size, and private record; otherwise it is
+     `blocked` with explicit blocker codes and exit 2. It is read-only: it
+     never bootstraps private state, transfers bytes, or touches the active
+     model.
+   - Still unproved: the staging coordinator does not yet serve a signed
+     artifact feed with measured `size_bytes` for the Lane A release. That is
+     an operator release action (signing key, `/v1/catalog-artifacts` +
+     `.sig` on staging), not a repo change; until it lands the command reports
+     `artifact_feed_not_served` or `artifact_feed_rejected` and no physical
+     journey can start.
+   - Runtime custody stays path-observed
+     (`descriptor_pinned_runtime_custody=false`).
+   - Dispatch record: the executor for this milestone was Claude Fable 5.1
+     via the local Claude CLI invoked with `--model fable`, because local
+     `omx ask claude --help` exposes no model selector.
 4. Physical Apple Silicon staging journey.
    - Prepare, serve, admit, route one non-streaming staging gateway request,
      and capture provider-side request-id-bearing receipt/audit correlation.
