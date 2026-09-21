@@ -113,6 +113,43 @@ struct ModelPreparationPrivateStore: Sendable {
         return result.snapshot
     }
 
+    func bootstrapExisting() throws -> BootstrapSnapshot {
+        let authority = try ModelPreparationSecureFilesystem.openExistingPrivateDirectory(at: authorityRoot)
+        defer { authority.close() }
+        let artifact = try ModelPreparationSecureFilesystem.openExistingPrivateDirectory(at: artifactRoot)
+        defer { artifact.close() }
+        let namespace = try ModelPreparationSecureFilesystem.openPrivateChildDirectory(
+            parent: artifact,
+            name: ModelPreparationSecureFilesystem.namespaceLeaf,
+            create: false
+        )
+        defer { namespace.close() }
+        guard let identity = try loadRootIdentityIfValid(namespace: namespace, root: artifact) else {
+            throw ModelPreparationSecureFilesystemError.unsafe(
+                path: namespace.path + "/" + Self.rootIdentityLeaf,
+                reason: "missing root identity"
+            )
+        }
+        let state = try ModelPreparationSecureFilesystem.openPrivateChildDirectory(
+            parent: authority,
+            name: ModelPreparationSecureFilesystem.stateLeaf,
+            create: false
+        )
+        state.close()
+        let locator = try ModelPreparationRootLocator(
+            canonicalPath: artifact.path,
+            stDev: identity.stDev,
+            stIno: identity.stIno,
+            identityVersion: identity.version,
+            rootIdentityDigest: identity.digest
+        )
+        return BootstrapSnapshot(
+            authorityRootPath: authority.path,
+            namespacePath: namespace.path,
+            rootLocator: locator
+        )
+    }
+
     func bootstrapWithLockCustody() throws -> (snapshot: BootstrapSnapshot, lockCustody: LockCustody) {
         let authority = try ModelPreparationSecureFilesystem.openOrCreatePrivateDirectory(at: authorityRoot)
         defer { authority.close() }
