@@ -197,6 +197,24 @@ final class NativeToolCallStreamEmitterTests: XCTestCase {
         XCTAssertFalse(emitter.hasCompletedValidToolCall)
     }
 
+    func testBareXMLWrapperCloseDoesNotComplete() {
+        var emitter = NativeToolCallStreamEmitter(
+            modelID: "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
+            allowedFunctionNames: ["bash"]
+        )
+        _ = emitter.observe(#"<function=bash><parameter=command>echo</tool_call>"#)
+        XCTAssertFalse(emitter.hasCompletedValidToolCall)
+    }
+
+    func testUnsupportedFamilyDoesNotComplete() {
+        var emitter = NativeToolCallStreamEmitter(
+            modelID: "mlx-community/Gemma-2-9B-Instruct-4bit",
+            allowedFunctionNames: ["read"]
+        )
+        _ = emitter.observe(#"<tool_call>{"name":"read","arguments":{"path":"Makefile"}}</tool_call>"#)
+        XCTAssertFalse(emitter.hasCompletedValidToolCall)
+    }
+
     func testArgumentCapAfterOpenDoesNotComplete() {
         var emitter = NativeToolCallStreamEmitter(
             modelID: "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",

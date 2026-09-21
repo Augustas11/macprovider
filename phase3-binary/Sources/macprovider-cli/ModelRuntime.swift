@@ -6534,6 +6534,9 @@ struct NativeToolCallStreamEmitter {
     /// stream `<function=…>` tool-call deltas; other families fall through to JSON parsing (which
     /// yields nothing for XML), so no non-Qwen family can stream a function-XML delta.
     private let allowsFunctionXML: Bool
+    /// SPEC-018 §3.2: only Qwen 2.5/3 and Llama 3.3 native grammars are recognized.
+    /// Unsupported families must not complete a serial stop on lookalike markup.
+    private let enabled: Bool
     private var sawToolDelimiter = false
     private var opened = false
     private var closed = false
@@ -6543,9 +6546,12 @@ struct NativeToolCallStreamEmitter {
 
     init(modelID: String, allowedFunctionNames: Set<String>?) {
         self.allowedFunctionNames = allowedFunctionNames
-        self.allowsFunctionXML = modelID.localizedCaseInsensitiveContains("qwen2.5")
+        let isQwen = modelID.localizedCaseInsensitiveContains("qwen2.5")
             || modelID.localizedCaseInsensitiveContains("qwen3")
-        if modelID.localizedCaseInsensitiveContains("llama-3.3") {
+        let isLlama33 = modelID.localizedCaseInsensitiveContains("llama-3.3")
+        self.enabled = isQwen || isLlama33
+        self.allowsFunctionXML = isQwen
+        if isLlama33 {
             startDelimiter = "<|python_tag|>"
             endDelimiter = "<|eom_id|>"
             argumentKey = "parameters"
@@ -6577,7 +6583,7 @@ struct NativeToolCallStreamEmitter {
     }
 
     mutating func observe(_ text: String) -> [StreamChunk] {
-        guard !closed else {
+        guard enabled, !closed else {
             return []
         }
         if let start = text.range(of: startDelimiter) {
@@ -6597,7 +6603,7 @@ struct NativeToolCallStreamEmitter {
         }
         if allowsFunctionXML, text.contains("<function=") {
             sawToolDelimiter = true
-            let isClosed = text.contains("</function>") || text.contains(endDelimiter)
+            let isClosed = text.contains("</function>")
             return observeNemotronXML(body: text, isClosed: isClosed)
         }
         return []
