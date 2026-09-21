@@ -167,14 +167,17 @@ combined candidate**.
   statement all pass. `--filing-mode` for the final application (prod URLs +
   benchmark ≥ 100).
 - **Last run:** 2026-09-21 wholesale `acct_openrouter` `mp_` key against
-  signed Studio **v1.8.175** serving
+  signed Studio **v1.8.176** serving
   `mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit` (not the Llama 3B fleet).
-  Pearl **v1.8.174**. Soak artifact:
-  `~/.local/state/macprovider/openrouter-readiness/openrouter-readiness-20260921T093143Z-qwen30-studio-175-wholesale-soak100.json`.
-  Soak 100@4 **FAIL** 49/100 HTTP 200, **51× 429** `no_provider_available`,
-  **0× 503**. A same-day buyer-key soak (`…T085522Z…`) is not comparable
-  (overflow stayed 503). Idle 16/16 200 but TTFT p95 7097ms. Sat 16@8:
-  2×200 + 6×429. Do not raise slots. Do not set CB `on`. Do not promote.
+  Pearl **v1.8.174**. Artifacts:
+  `~/.local/state/macprovider/openrouter-readiness/openrouter-readiness-20260921T130140Z-qwen30-studio-176-wholesale.json`
+  (idle + ladder + sat) and
+  `…T130616Z-qwen30-studio-176-wholesale-soak100.json`.
+  Soak 100@4 **FAIL** 45/100 HTTP 200, **55× 429** `no_provider_available`,
+  **0× 503**. Idle 16/16 200 but TTFT p95 6362ms (gate ≤5000). Sat 16@8:
+  2×200 + 6×429. Ladder clean only through conc=2; conc=4 sheds 5/8.
+  Same shape as 175 (49/100). Keyed first-turn CB did not lift Pearl 4-wide
+  success. Do not raise slots. Do not set CB `on`. Do not promote.
 
 ### Track B — BYOM Ollama / Gemma
 
