@@ -12,15 +12,20 @@ serve real traffic with continuous batching for that tuple.
 
 ## Scope
 
-The first enableable scope remains keyless until a later operator gate:
+The first enableable canary scope is first-turn traffic, including Pearl
+auto-prefix / buyer conversation keys on a cache miss:
 
 - keyless requests may enter the batch after the runtime bridge gate opens;
-- keyed requests and sticky/cross-turn cached-token credit are landed by #1477
-  as runtime-inert code paths, not as permission to canary buyer traffic;
-- positive sticky/cross-turn cached-token credit remains invalid without a
-  same-conversation FR-PKV10 retained paged-KV handoff;
+- conversation-keyed **first-turn / cache-miss** requests (`cached_prompt_tokens
+  = 0`) may enter the batch; a conversation key alone is not a serial-route;
+- keyed requests with **positive** cached-token credit still serial-route
+  until AC-26 packaged sticky/cross-turn proof, even if retained paged KV
+  exists;
+- #1477 sticky paths remain present as code, not as permission to credit
+  sticky cache hits in canary;
 - the SPEC-039 contiguous-cache primitive (FR-PKV10) already landed in
-  #887 / #1476; that merge did **not** lift keyed serving or enable canary;
+  #887 / #1476; that merge did **not** lift sticky cached-token credit;
+- a keyless loopback 200 is not proof that Pearl-routed keyed traffic batched;
 - no buyer receipt, usage, billing, model identity, settlement, or API schema
   field may change.
 
@@ -66,10 +71,9 @@ Stop and roll back to `continuous_batching: off` if any item below is true:
 - the requested tuple is absent from the local SPEC-039 capability descriptor;
 - the first keyless serving-path request admitted by the scheduler does not
   return HTTP 200 / `finish_reason=stop` through the scheduler path;
-- any conversation-keyed request enters the batch during the first keyless
-  enablement scope, even when it reports zero cached-token credit;
-- any sticky-cache or cross-turn request reports positive cached-token credit
-  without a same-conversation FR-PKV10 retained paged-KV handoff;
+- any request with positive `cached_prompt_tokens` enters the batch before
+  AC-26 packaged sticky/cross-turn proof, even if a retained paged-KV
+  handoff exists;
 - any token, stop condition, cancellation, usage field, receipt field, or
   request-log terminal state is attributed to the wrong request;
 - a batch failure and serial retry produce stitched buyer-visible output or a
@@ -96,8 +100,9 @@ only.
 | Local descriptor | SPEC-039 descriptor showing the exact tuple is admitted; unsupported tuples must show fail-closed or reason-coded serial routing. |
 | Production serving path | The batched path that will serve real traffic is identified and measured. If gather-feeds-SDPA is used only as parity scaffold, record the actual shared-forward path; if gather-every-step is used, prove it meets the SPEC-039 overhead ceiling. |
 | Keyless scheduler 200 | A local loopback and relay-shaped keyless request with stable request ID enters the scheduler path and returns HTTP 200 / terminal success from batching, not serial fallback and not `continuous_batching_prefill_failed`. |
-| Sticky/cross-turn scope | #1477 code is present but not enablement: first-scope buyer traffic stays keyless, and positive cached-token credit requires a same-conversation FR-PKV10 retained paged-KV handoff before any later keyed operator gate may admit it. |
-| Sticky retained-KV proof | Before any conversation-keyed or positive `cached_prompt_tokens` can enter canary, drive a sticky/cross-turn request through the gateway/relay path, reattach or materialize same-conversation paged KV via FR-PKV10, prove mid-block LCP/trim correctness, and verify usage, billing, receipt, and settlement fields. |
+| Keyed first-turn scheduler 200 | A Pearl-shaped request with a conversation key, stable request ID, and `cached_prompt_tokens = 0` enters the scheduler (no `serial_routed reason=conversation_key_rollout_unavailable`) and returns HTTP 200. Keyless loopback is not a substitute. |
+| Sticky/cross-turn scope | First-turn keyed traffic may batch. Any positive `cached_prompt_tokens` stays serial until AC-26 packaged proof, even with a retained FR-PKV10 handoff. |
+| Sticky retained-KV proof | Before sticky/cross-turn batching with positive `cached_prompt_tokens` can enter canary, drive a sticky/cross-turn request through the gateway/relay path, reattach or materialize same-conversation paged KV via FR-PKV10, prove mid-block LCP/trim correctness, and verify usage, billing, receipt, and settlement fields. |
 | Durable replay authority | Stable relay request identity is mapped into scheduler replay keys, settlement disposition is propagated through usage/receipt code, and duplicate inference or duplicate settlement is rejected after local terminal-result retention rolls. The in-process `ContinuousBatchRuntimeReplayAuthority` stub is not activation evidence. |
 | MSB-01..05 | Full harness output for MSB-01 single-stream baseline plus MSB-02, MSB-03, MSB-04, and MSB-05. Aggregate TG is total decoded tokens over common wall-clock, warm-up excluded; per-stream and aggregate TG stay separate. |
 | MoE promotion | Production `moePromotionEvidenceAvailable` is true after [`continuous-batching-moe-activation-2026-09-20.md`](continuous-batching-moe-activation-2026-09-20.md). Descriptor membership still does not promote a MoE tuple by itself. Studio 175 is `canary`; fleet CB stays off. Do not set `on`. |

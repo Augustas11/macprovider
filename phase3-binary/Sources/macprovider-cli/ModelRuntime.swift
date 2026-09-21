@@ -2776,7 +2776,6 @@ actor ModelRuntime: ModelRuntimeServing {
 
     private func continuousBatchingCapability(
         draftConfigured: Bool,
-        requestHasConversationKey: Bool = false,
         requestHasStableRequestID: Bool = true,
         requestStateRepresentable: Bool = true
     ) -> ContinuousBatchingCapability {
@@ -2804,7 +2803,6 @@ actor ModelRuntime: ModelRuntimeServing {
             queueLimit: continuousBatchQueueLimit,
             kvBits: kvBitsOverride,
             draftConfigured: draftConfigured,
-            requestHasConversationKey: requestHasConversationKey,
             requestHasStableRequestID: requestHasStableRequestID,
             requestStateRepresentable: requestStateRepresentable,
             schedulerBackendAvailable: schedulerBackendAvailable,
@@ -3089,7 +3087,6 @@ actor ModelRuntime: ModelRuntimeServing {
     ) throws -> ContinuousBatchingCapability {
         let capability = continuousBatchingCapability(
             draftConfigured: snapshot.hasTargetCompatibleDraft || currentDraftModelID != nil,
-            requestHasConversationKey: Self.nonEmpty(request.conversationKey) != nil,
             requestHasStableRequestID: Self.requestHasStableRequestID(request),
             requestStateRepresentable: Self.requestStateRepresentable(request)
         )
@@ -3565,7 +3562,7 @@ actor ModelRuntime: ModelRuntimeServing {
     private func serialRouteCanaryCachedHitMissingRetainedHandoff(
         _ lease: ConversationCacheLease?,
         capability: ContinuousBatchingCapability
-    ) async -> Bool {
+    ) async throws -> Bool {
         guard let lease,
               Self.canaryShouldSerialRouteCachedHitMissingRetainedHandoff(
                   mode: capability.mode,
@@ -3576,13 +3573,17 @@ actor ModelRuntime: ModelRuntimeServing {
             return false
         }
         await conversationCache.abortForSerialFallback(lease)
-        ContinuousBatchingPolicy.logSerialRouteIfNeeded(ContinuousBatchingCapability(
+        let blocked = ContinuousBatchingCapability(
             mode: capability.mode,
             maxActiveRows: capability.maxActiveRows,
             queueLimit: capability.queueLimit,
             descriptor: capability.descriptor,
             unsupportedReason: .stickyCacheHandoffUnavailable
-        ))
+        )
+        // Strict `.on` must fail closed with the named reason (FR-CB8). Canary
+        // serial-routes the same AC-26 fence with reason-coded telemetry.
+        try ContinuousBatchingPolicy.validateStrictStartup(blocked)
+        ContinuousBatchingPolicy.logSerialRouteIfNeeded(blocked)
         return true
     }
 
@@ -3591,7 +3592,11 @@ actor ModelRuntime: ModelRuntimeServing {
         cachedPromptTokens: Int,
         hasRetainedPagedKVHandoff: Bool
     ) -> Bool {
-        mode == .canary && cachedPromptTokens > 0 && !hasRetainedPagedKVHandoff
+        // AC-26: any positive cached-token hit stays out of the scheduler until
+        // packaged sticky/cross-turn proof. A retained paged-KV handoff is
+        // capability, not authorization.
+        _ = hasRetainedPagedKVHandoff
+        return mode != .off && cachedPromptTokens > 0
     }
 
     private func attachedContinuousBatchCompletion(
@@ -3653,7 +3658,7 @@ actor ModelRuntime: ModelRuntimeServing {
             kvBits: batchKVBits,
             allowRetainedPagedKVHandoff: true
         )
-        if await serialRouteCanaryCachedHitMissingRetainedHandoff(lease, capability: capability) {
+        if try await serialRouteCanaryCachedHitMissingRetainedHandoff(lease, capability: capability) {
             return nil
         }
         let result: ContinuousBatchSchedulerResult
@@ -3854,7 +3859,7 @@ actor ModelRuntime: ModelRuntimeServing {
             kvBits: batchKVBits,
             allowRetainedPagedKVHandoff: true
         )
-        if await serialRouteCanaryCachedHitMissingRetainedHandoff(lease, capability: capability) {
+        if try await serialRouteCanaryCachedHitMissingRetainedHandoff(lease, capability: capability) {
             return nil
         }
         let result: ContinuousBatchSchedulerResult

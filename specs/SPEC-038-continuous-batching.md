@@ -1,14 +1,27 @@
 # SPEC-038 — Continuous batching for concurrent provider inference
 
-Version: v0.2.2
+Version: v0.2.3
 Status: draft (normative design; no IMPL in this SPEC - implementation is a separate PR behind a disabled-by-default flag)
 Owner: provider runtime / inference scheduler
 Decision source: `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md` (original memo, commit `8d80f6c4`), `docs/research/RESEARCH_232_ADDENDUM_PAGED_REDECISION_2026-07-29.md`, `docs/research/SPIKE_PAGED_ATTN_PHASE0_RESULT_2026-07-29.md` (commit `e5ded571`), `docs/research/SPIKE_PAGED_ATTN_PHASE2_RESULT_2026-07-29.md` (commit `acc30b1e`), and `docs/research/SPIKE_PAGED_ATTN_PHASE3_MOE_RESULT_2026-07-29.md` (commit `da21af53`).
 Audit history: v0.2 is subject to three-lane codex SPEC audit (code / security / architect). Convergence and any carried LOW/INFO findings are recorded in the SPEC PR body and `audits/2026-07-29/SPEC-038-v0_2-rN-audit.md`.
-v0.2.2 clarifies the API-visible admission/replay/terminal contract, records
+v0.2.3 lets canary admit conversation-keyed first-turn / cache-miss requests
+into the scheduler. Any positive `cached_prompt_tokens` still serial-routes
+until AC-26, even when a retained FR-PKV10 paged-KV handoff exists. v0.2.2
+clarifies the API-visible admission/replay/terminal contract, records
 decode-first scheduling as a conservative v0.2 choice rather than a claim of
 vLLM/SGLang-style unified-token scheduling, and tightens the real-serving
 evidence gate for retained paged-KV reuse.
+
+**Change log v0.2.3 (2026-09-21, keyed first-turn canary):**
+- A conversation key alone MUST NOT keep a request out of canary/`on`
+  scheduler admission. Pearl auto-prefix and buyer conversation keys on a
+  cache-miss (`cached_prompt_tokens = 0`) MAY share the decode batch.
+- Any positive `cached_prompt_tokens` MUST stay out of the scheduler until
+  AC-26 packaged sticky/cross-turn proof, even when retained paged KV exists.
+  Canary serial-routes with `sticky_cache_handoff_unavailable`. Strict `.on`
+  MUST fail closed with that named reason (FR-CB8), not silently serial-route.
+- Keyless loopback 200 is not buyer-enable evidence.
 
 ## 1. Purpose and scope
 
@@ -835,13 +848,19 @@ hardware-capability run or a static-review obligation. Every
   case MUST have exactly one terminal outcome, the correct settling/non-settling
   disposition, and no duplicate receipt.
 - **AC-26 retained paged-KV sticky serving path (FR-CB4, FR-CB6, FR-CB15,
-  SPEC-039 FR-PKV10):** before conversation-keyed batching or positive
+  SPEC-039 FR-PKV10):** before sticky/cross-turn batching with positive
   `cached_prompt_tokens` can enter `canary`, a packaged real-serving proof MUST
   drive a sticky/cross-turn request through the gateway/relay path, reattach or
   materialize same-conversation paged KV via FR-PKV10, preserve a mid-block
   token-granular LCP/trim boundary, and emit correct usage, billing, receipt,
   and settlement fields. A harness that proves only the scheduler primitive
-  without the buyer-serving path is not enable evidence.
+  without the buyer-serving path is not enable evidence. Conversation-keyed
+  **first-turn / cache-miss** serving (auto-prefix or buyer `conv:` key with
+  zero cached tokens) MAY enter canary without AC-26; those requests MUST NOT
+  emit sticky cached-token credit. A retained paged-KV handoff produced by a
+  first-turn MUST NOT admit a later positive-`cached_prompt_tokens` turn until
+  this AC is satisfied. A keyless loopback 200 is not proof that Pearl-routed
+  keyed traffic entered the batch.
 
 ## 8. Go/no-go gates
 
