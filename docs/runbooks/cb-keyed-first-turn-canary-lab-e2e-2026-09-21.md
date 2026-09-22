@@ -80,6 +80,13 @@ Do not set CB `on`. Do not raise slots.
 
 ## Live 176 confirmation (2026-09-21, Coder-30B)
 
+**Evidence class: packaged.** This section and Loop C are the packaged-RC
+proofs for keyed first-turn admission — signed `v1.8.176`,
+`live.malibu.provider`, port 8080. The 18084 tables above are an isolated
+worktree `swift build` and are lab evidence only; do not cite them as enable
+evidence, and do not read them as meaning keyed first-turn lacks packaged
+proof.
+
 Same keyed 4-wide as lab, against live `127.0.0.1:8080` with unique
 `X-MacProvider-Provider-Conversation` keys. `max_tokens=32`.
 

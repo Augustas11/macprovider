@@ -103,6 +103,7 @@ buyer CB is **canary** (not `on`). Do not raise slots.
 | Stop serial Qwen tool turns after the first complete valid call (omitted/`false` `parallel_tool_calls`; leftover markup must not hang) | merged | #1662 |
 | Keep CB canary streams alive past the first lockstep hop | merged | #1665 |
 | Pearl keyed first-turn chats enter Studio CB canary (positive cache hits stay serial until AC-26) | merged | #1666 |
+| SPEC-038 FR-CB10 per-tuple acceptance coverage enforced fail-closed (see precondition below before cutting) | merged | #1672 |
 
 #1453 closes when a candidate that includes the **merged** rows is promoted to
 the fleet. #1569 is a later CLI. Spec promotion #1583 is not a CLI change.
@@ -139,6 +140,34 @@ the latest **stable tag** (v1.8.123) and stays red until this CLI is promoted
 and the tag's `install.sh` matches served (re-publish from that tag, or
 confirm bytes are unchanged).
 
+### Precondition for any candidate cut after #1672
+
+`v1.8.176` predates #1672 and is unaffected. Any candidate cut from `main` at
+`b61f081c` or later enforces SPEC-038 FR-CB10 per-tuple acceptance coverage
+**fail-closed**: descriptor membership alone no longer permits batching, and a
+provider will not batch until its operator declares the exact tuple in
+`continuous_batching_accepted_tuples`.
+
+On such a candidate a provider left as-is serial-routes with reason
+`tuple_acceptance_coverage_unavailable`; strict `continuous_batching: on`
+fails at startup rather than serving unbatched. Declare the tuple on the
+Studio canary **before** deploying such a candidate, or CB there goes serial
+with no other symptom:
+
+```yaml
+continuous_batching_accepted_tuples:
+  - model_id: <served model id>
+    model_sha256: <64-char lowercase hex, must equal the runtime value exactly>
+    cache_class: <runtime cache class>
+    kv_dtype: bf16
+    requires_moe: true
+    hardware_class: <hardware class>
+```
+
+Config load rejects a whitespace-padded field or a non-canonical SHA, so a
+declaration that could never have matched fails at startup instead of loading
+and silently never matching.
+
 ## Active candidate
 
 | Field | Value |
@@ -149,6 +178,7 @@ confirm bytes are unchanged).
 | Older | `v1.8.163` @ `8c0c51d2`; `v1.8.164` BYOM @ `cdbb0257`; CLI artifact `v1.8.166` @ `00ce3625` (not the Pearl runtime tag); CLI `v1.8.172` @ `c512d342`; CLI `v1.8.174` @ `0c276ebb`; CLI `v1.8.175` @ `d02798db` |
 | Status | **Do not promote.** Fleet stays on 1.8.123. Studio is on signed 176 with CB **canary**. Do not set `on`. Do not raise slots. |
 | Next candidate | **cut.** `v1.8.176` @ `bd75f86df829ec456a2cac7e1b23ffa4b08b4455`. Candidate tags still do not bump `binaryVersion` (stays 1.8.123). |
+| Pending on `main`, not cut | #1672 (FR-CB10 per-tuple acceptance coverage). A merged CLI row is **not** a cut trigger; recorded here so the precondition above is not missed when a cut does happen. |
 | Why the next cut | Combined #1665 (keep CB canary streams past first lockstep hop) + #1666 (Pearl keyed first-turn enters CB canary). Studio canary is on. Do not set `on`. Do not promote the fleet. |
 
 ## E2E tracks (independent gates)
