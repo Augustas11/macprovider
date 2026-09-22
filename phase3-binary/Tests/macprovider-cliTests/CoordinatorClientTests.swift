@@ -2983,7 +2983,7 @@ final class CoordinatorClientTests: XCTestCase {
         let socket = FakeProviderWebSocketTask(
             receiveResults: [
                 .success(.string("""
-                {"type":"hello_ack","assigned_id":"session-1","heartbeat_interval_s":1,"tier":"pinned"}
+                {"type":"hello_ack","assigned_id":"session-1","heartbeat_interval_s":1,"tier":"pinned","compatibility_policy":"unconfigured"}
                 """)),
                 .failure(CancellationError()),
             ],
@@ -3334,6 +3334,7 @@ final class CoordinatorClientTests: XCTestCase {
                 "assigned_id": "assigned-a",
                 "heartbeat_interval_s": 30,
                 "assigned_provider_token": "minted-provisional-token",
+                "compatibility_policy": "unconfigured",
             ])
             XCTFail("expected CoordinatorAuthUpgradeReconnect")
         } catch is CoordinatorAuthUpgradeReconnect {
@@ -3386,6 +3387,7 @@ final class CoordinatorClientTests: XCTestCase {
                 "assigned_id": "assigned-a",
                 "heartbeat_interval_s": 30,
                 "assigned_provider_token": "fallback-token",
+                "compatibility_policy": "unconfigured",
             ])
             XCTFail("expected credential commit failure")
         } catch let error as CoordinatorAuthError {
@@ -3438,6 +3440,7 @@ final class CoordinatorClientTests: XCTestCase {
                 "assigned_id": "assigned-a",
                 "heartbeat_interval_s": 30,
                 "assigned_provider_token": "must-not-be-adopted",
+                "compatibility_policy": "unconfigured",
             ])
         } catch let error as CoordinatorAuthError {
             guard case .invalidMessage(let message) = error else {
@@ -3494,6 +3497,7 @@ final class CoordinatorClientTests: XCTestCase {
             "type": "hello_ack",
             "assigned_id": "assigned-a",
             "heartbeat_interval_s": 3_600,
+            "compatibility_policy": "unconfigured",
         ])
         await client.stop()
 
@@ -4210,7 +4214,7 @@ final class CoordinatorClientTests: XCTestCase {
         // received frame is fine since the bump happens before the
         // switch on type. We use a malformed frame, which produces
         // a NAK send to the recorder but still trips the bump first.
-        try await client.handleForTest(.string("{\"type\":\"hello_ack\",\"interval\":5}"))
+        try await client.handleForTest(.string("{\"type\":\"hello_ack\",\"interval\":5,\"compatibility_policy\":\"unconfigured\"}"))
         let freshAge = await client.nanosecondsSinceLastHeartbeatSuccessForTest()
         XCTAssertLessThan(freshAge, 5 * 1_000_000_000, "inbound message did not bump heartbeat clock; age=\(freshAge)ns")
     }
@@ -7538,7 +7542,7 @@ final class CoordinatorClientTests: XCTestCase {
             catalogSignerKeyID: catalogSignerKeyID,
             catalogRowIdentity: catalogRowIdentity,
             compatibilitySetIDOverride: compatibilitySetIDOverride,
-            installedCompatibilityManifest: installedCompatibilityManifest,
+            installedCompatibilityManifest: installedCompatibilityManifest ?? { _, _ in nil },
             catalogModelSHA256: catalogModelSHA256,
             catalogArtifactIdentity: catalogArtifactIdentity,
             coordinatorReadiness: coordinatorReadiness,
@@ -7940,6 +7944,7 @@ private actor FakeTier2AuthResponder {
                     "assigned_id": assignedID,
                     "heartbeat_interval_s": 30,
                     "tier": "pinned",
+                    "compatibility_policy": "unconfigured",
                     "tier2_session": [
                         "encrypted_leg": [
                             "enabled": true,

@@ -560,8 +560,8 @@ private struct MatrixSignedRateCardFixture {
 
     private static func freshnessAlignedClock(_ raw: String) -> String {
         switch raw {
-        case "2026-09-02T12:00:00Z": return "2026-09-19T12:00:00Z"
-        case "2026-09-03T00:00:00Z": return "2026-09-20T00:00:00Z"
+        case "2026-09-02T12:00:00Z": return "2026-09-22T12:00:00Z"
+        case "2026-09-03T00:00:00Z": return "2026-09-23T00:00:00Z"
         default: return raw
         }
     }

@@ -231,7 +231,7 @@
           "allowed_runtime_sources": [
             "mlx_cache"
           ],
-          "hash": "d196dce06a23caca7b08818c3aec9e222d7a94cf5ab1488bfd3eb75f98e57372",
+          "hash": "518ef47c298783d8547b50406e84548e5bf7705b82355a38f9eaef1368817931",
           "hash_algorithm": "macprovider.snapshot-manifest.v1",
           "min_ram_gb": 24,
           "notes": "Primary MLX artifact; identity mirrors this release's signed candidate row. size_bytes unmeasured (artifact feed pre-activation).",

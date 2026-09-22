@@ -2302,7 +2302,7 @@ class HermeticReleaseTest(unittest.TestCase):
         source-presence trigger made them fail on `size_bytes: null`."""
         with self.harness() as harness:
             self.assertTrue((harness.catalog / "autotune-artifacts-source.json").exists())
-            harness.bump("published-2026-09-20-renewal-v1", "2026-09-20T00:00:00Z")
+            harness.bump("published-2026-09-23-renewal-v1", "2026-09-23T00:00:00Z")
             harness.cut()
             self.assertFalse((harness.catalog / "autotune-artifacts.json").exists())
             self.assertEqual(
@@ -2321,7 +2321,7 @@ class HermeticReleaseTest(unittest.TestCase):
                 "engine_sha256": "c" * 64,
                 "ranking_window_end_date": "2026-09-20",
             }))
-            harness.bump("published-2026-09-20-market-v1", "2026-09-20T00:00:00Z")
+            harness.bump("published-2026-09-23-market-v1", "2026-09-23T00:00:00Z")
             with self.assertRaisesRegex(catalog_release.CatalogError, "market-pegged releases require all four"):
                 catalog_release.generate(harness.KEY_ID)
 
@@ -2351,7 +2351,7 @@ class HermeticReleaseTest(unittest.TestCase):
         """Without the bind or --market-pegged flag, non-market authoring stays
         on the normal release gates instead of forcing OpenRouter replay."""
         with self.harness() as harness:
-            harness.bump("published-2026-09-20-manual-v1", "2026-09-20T00:00:00Z")
+            harness.bump("published-2026-09-23-manual-v1", "2026-09-23T00:00:00Z")
             original = catalog_release.validate_market_peg
             catalog_release.validate_market_peg = Mock(side_effect=catalog_release.CatalogError("unexpected market replay"))
             try:
@@ -2368,7 +2368,7 @@ class HermeticReleaseTest(unittest.TestCase):
             "openrouter_pricing_policy.json",
         )
         with self.harness() as harness:
-            harness.bump("published-2026-09-20-market-v1", "2026-09-20T00:00:00Z")
+            harness.bump("published-2026-09-23-market-v1", "2026-09-23T00:00:00Z")
             harness.cut()
             (harness.catalog / "market-peg-bind.json").write_bytes(canonical({
                 "schema_version": catalog_release.MARKET_PEG_BIND_SCHEMA,
@@ -2405,7 +2405,7 @@ class HermeticReleaseTest(unittest.TestCase):
     def test_activation_requires_the_explicit_flag(self):
         with self.harness() as harness:
             harness.measure_sizes()
-            harness.bump("published-2026-09-20-activation-v1", "2026-09-20T00:00:00Z")
+            harness.bump("published-2026-09-23-activation-v1", "2026-09-23T00:00:00Z")
             # A fully measured source still does not activate on its own.
             catalog_release.generate(harness.KEY_ID)
             self.assertFalse((harness.catalog / "autotune-artifacts.json").exists())
@@ -2415,7 +2415,7 @@ class HermeticReleaseTest(unittest.TestCase):
 
     def test_activation_is_refused_while_a_prerequisite_is_unmet(self):
         with self.harness() as harness:
-            harness.bump("published-2026-09-20-activation-v1", "2026-09-20T00:00:00Z")
+            harness.bump("published-2026-09-23-activation-v1", "2026-09-23T00:00:00Z")
             with self.assertRaises(catalog_release.CatalogError) as caught:
                 catalog_release.generate(harness.KEY_ID, activate_artifact_feed=True)
             message = str(caught.exception)
@@ -2430,9 +2430,9 @@ class HermeticReleaseTest(unittest.TestCase):
             self.assertIn("requires a NEW release_id", str(caught.exception))
 
     def activate(self, harness) -> str:
-        release_id = "published-2026-09-20-activation-v1"
+        release_id = "published-2026-09-23-activation-v1"
         harness.measure_sizes()
-        harness.bump(release_id, "2026-09-20T00:00:00Z")
+        harness.bump(release_id, "2026-09-23T00:00:00Z")
         harness.cut(activate_artifact_feed=True)
         return release_id
 
@@ -2457,7 +2457,7 @@ class HermeticReleaseTest(unittest.TestCase):
         recorded rate-card version."""
         with self.harness() as harness:
             harness.measure_sizes()
-            harness.bump("published-2026-09-20-activation-v1", "2026-09-20T00:00:00Z")
+            harness.bump("published-2026-09-23-activation-v1", "2026-09-23T00:00:00Z")
             source_path = harness.catalog / "rate-card-source.json"
             source = json.loads(source_path.read_text())
             source["rows"]["qwen3-8b"]["completion_rate_per_mtok"] += 1
@@ -2603,7 +2603,7 @@ class HermeticReleaseTest(unittest.TestCase):
     def test_post_activation_generate_without_a_previous_release_fails_closed(self):
         with self.harness() as harness:
             self.activate(harness)
-            harness.bump("published-2026-09-21-next-v1", "2026-09-21T00:00:00Z")
+            harness.bump("published-2026-09-24-next-v1", "2026-09-24T00:00:00Z")
             with self.assertRaises(catalog_release.CatalogError) as caught:
                 catalog_release.generate(harness.KEY_ID)
             self.assertIn("--previous-release-dir is required", str(caught.exception))
@@ -2612,18 +2612,18 @@ class HermeticReleaseTest(unittest.TestCase):
         with self.harness() as harness:
             self.activate(harness)
             previous = harness.stage(harness.root / "previous")
-            harness.bump("published-2026-09-21-next-v1", "2026-09-21T00:00:00Z")
+            harness.bump("published-2026-09-24-next-v1", "2026-09-24T00:00:00Z")
             harness.cut(previous_release_dir=previous)
             ledger = harness.ledger()
             self.assertEqual(
-                set(ledger["releases"]["published-2026-09-21-next-v1"]["feeds"]),
+                set(ledger["releases"]["published-2026-09-24-next-v1"]["feeds"]),
                 catalog_release.ARTIFACT_BOUND_LEDGER_FEEDS,
             )
 
     def test_activate_flag_is_refused_once_an_earlier_release_activated(self):
         with self.harness() as harness:
             self.activate(harness)
-            harness.bump("published-2026-09-21-next-v1", "2026-09-21T00:00:00Z")
+            harness.bump("published-2026-09-24-next-v1", "2026-09-24T00:00:00Z")
             with self.assertRaises(catalog_release.CatalogError) as caught:
                 catalog_release.generate(harness.KEY_ID, activate_artifact_feed=True)
             self.assertIn("only to the FIRST artifact-bound release", str(caught.exception))
@@ -2631,7 +2631,7 @@ class HermeticReleaseTest(unittest.TestCase):
     def test_a_stale_published_feed_never_activates_implicitly(self):
         with self.harness() as harness:
             harness.measure_sizes()
-            harness.bump("published-2026-09-20-stale-v1", "2026-09-20T00:00:00Z")
+            harness.bump("published-2026-09-23-stale-v1", "2026-09-23T00:00:00Z")
             (harness.catalog / "autotune-artifacts.json").write_bytes(b"{}")
             with self.assertRaises(catalog_release.CatalogError) as caught:
                 catalog_release.generate(harness.KEY_ID)
@@ -2709,9 +2709,9 @@ class HermeticReleaseTest(unittest.TestCase):
             candidate = json.loads(path.read_text())
             candidate["rows"]["qwen3-8b"]["min_ram_gb"] += 1
             path.write_bytes(catalog_release.canonical_bytes(candidate))
-            harness.bump("published-2026-09-20-drift-v1", "2026-09-20T00:00:00Z")
+            harness.bump("published-2026-09-23-drift-v1", "2026-09-23T00:00:00Z")
             harness.cut()
-            row = harness.ledger()["releases"]["published-2026-09-20-drift-v1"]
+            row = harness.ledger()["releases"]["published-2026-09-23-drift-v1"]
             self.assertEqual(set(row["feeds"]), catalog_release.RATE_CARD_BOUND_LEDGER_FEEDS)
             # The same drift IS an activation-time prerequisite failure.
             unmet = [
@@ -2741,16 +2741,16 @@ class HermeticReleaseTest(unittest.TestCase):
             previous = harness.stage(harness.root / "previous")
 
             # Release N+1 DEMOTES a row to listed: no intake decision is required.
-            harness.bump("published-2026-09-21-demote-v1", "2026-09-21T00:00:00Z")
+            harness.bump("published-2026-09-24-demote-v1", "2026-09-24T00:00:00Z")
             self.set_status(harness, "qwen3-8b", "listed")
             harness.cut(previous_release_dir=previous)
             self.assertIsNone(
-                harness.ledger()["releases"]["published-2026-09-21-demote-v1"]["intake_decision_sha256"]
+                harness.ledger()["releases"]["published-2026-09-24-demote-v1"]["intake_decision_sha256"]
             )
             demoted = harness.stage(harness.root / "demoted")
 
             # Release N+2 PROMOTES it back: null now fails the release closed.
-            harness.bump("published-2026-09-22-promote-v1", "2026-09-22T00:00:00Z")
+            harness.bump("published-2026-09-25-promote-v1", "2026-09-25T00:00:00Z")
             self.set_status(harness, "qwen3-8b", "recommendable")
             with self.assertRaises(catalog_release.CatalogError) as caught:
                 catalog_release.generate(harness.KEY_ID, previous_release_dir=demoted)
@@ -2764,10 +2764,10 @@ class HermeticReleaseTest(unittest.TestCase):
                 catalog_release.generate(harness.KEY_ID, previous_release_dir=demoted)
             self.assertIn("intake-decision: unknown key(s)", str(caught.exception))
             (harness.catalog / "intake-decision.json").write_bytes(
-                promotion_manifest_bytes(harness, "qwen3-8b", "published-2026-09-22-promote-v1", "2026-09-22T00:00:00Z")
+                promotion_manifest_bytes(harness, "qwen3-8b", "published-2026-09-25-promote-v1", "2026-09-25T00:00:00Z")
             )
             harness.cut(previous_release_dir=demoted)
-            row = harness.ledger()["releases"]["published-2026-09-22-promote-v1"]
+            row = harness.ledger()["releases"]["published-2026-09-25-promote-v1"]
             self.assertEqual(len(row["intake_decision_sha256"]), 64)
 
     def test_verify_re_derives_the_intake_transition_with_the_previous_release(self):
@@ -2785,16 +2785,16 @@ class HermeticReleaseTest(unittest.TestCase):
             self.activate(harness)
             previous = harness.stage(harness.root / "previous")
 
-            harness.bump("published-2026-09-21-demote-v1", "2026-09-21T00:00:00Z")
+            harness.bump("published-2026-09-24-demote-v1", "2026-09-24T00:00:00Z")
             self.set_status(harness, "qwen3-8b", "listed")
             harness.cut(previous_release_dir=previous)
             demoted = harness.stage(harness.root / "demoted")
 
-            promoted_id = "published-2026-09-22-promote-v1"
-            harness.bump(promoted_id, "2026-09-22T00:00:00Z")
+            promoted_id = "published-2026-09-25-promote-v1"
+            harness.bump(promoted_id, "2026-09-25T00:00:00Z")
             self.set_status(harness, "qwen3-8b", "recommendable")
             (harness.catalog / "intake-decision.json").write_bytes(
-                promotion_manifest_bytes(harness, "qwen3-8b", promoted_id, "2026-09-22T00:00:00Z")
+                promotion_manifest_bytes(harness, "qwen3-8b", promoted_id, "2026-09-25T00:00:00Z")
             )
             harness.cut(previous_release_dir=demoted)
             catalog_release.verify(previous_release_dir=demoted)
@@ -2871,7 +2871,7 @@ class HermeticReleaseTest(unittest.TestCase):
         """
         with self.harness() as harness:
             harness.measure_sizes()
-            harness.bump("published-2026-09-20-activation-v1", "2026-09-20T00:00:00Z")
+            harness.bump("published-2026-09-23-activation-v1", "2026-09-23T00:00:00Z")
             harness.cut(activate_artifact_feed=True)
             published = catalog_release.published_feed_rate_classes(harness.catalog / "autotune-artifacts.json")
             self.assertEqual(published["qwen3-8b"], "class-8b")
@@ -2952,7 +2952,7 @@ class HermeticReleaseTest(unittest.TestCase):
         for leftover in ("autotune-artifacts.json", "autotune-artifacts.json.sig"):
             with self.subTest(leftover=leftover):
                 with self.harness() as harness:
-                    harness.bump("published-2026-09-20-leftover-v1", "2026-09-20T00:00:00Z")
+                    harness.bump("published-2026-09-23-leftover-v1", "2026-09-23T00:00:00Z")
                     harness.cut()
                     self.assertFalse((harness.catalog / "autotune-artifacts.json").exists())
                     (harness.static / leftover).write_bytes(b"{}")
@@ -3086,7 +3086,7 @@ class RenewalFlowTest(unittest.TestCase):
     def test_post_activation_renewal_restamps_generates_and_verifies(self):
         with self.harness() as harness:
             harness.measure_sizes()
-            harness.bump("published-2026-09-20-activation-v1", "2026-09-20T00:00:00Z")
+            harness.bump("published-2026-09-23-activation-v1", "2026-09-23T00:00:00Z")
             harness.cut(activate_artifact_feed=True)
             previous = harness.stage(harness.root / "previous")
 
@@ -3107,7 +3107,7 @@ class RenewalFlowTest(unittest.TestCase):
         restamped = "published-2026-10-05-inband-provenance-v1"
         with self.harness() as harness:
             harness.measure_sizes()
-            harness.bump("published-2026-09-20-activation-v1", "2026-09-20T00:00:00Z")
+            harness.bump("published-2026-09-23-activation-v1", "2026-09-23T00:00:00Z")
             harness.cut(activate_artifact_feed=True)
             live = harness.stage(harness.root / "live")
             incoming = harness.stage(harness.root / "incoming")
@@ -3213,7 +3213,7 @@ class PreviousReleaseDirectoryTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             with HermeticRelease(pathlib.Path(raw) / "repo", self.openssl) as harness:
                 harness.measure_sizes()
-                harness.bump("published-2026-09-20-activation-v1", "2026-09-20T00:00:00Z")
+                harness.bump("published-2026-09-23-activation-v1", "2026-09-23T00:00:00Z")
                 harness.cut(activate_artifact_feed=True)
                 previous = harness.stage(harness.root / "previous")
                 ledger = catalog_release.validate_release_ledger(
@@ -3224,7 +3224,7 @@ class PreviousReleaseDirectoryTest(unittest.TestCase):
     def test_a_conforming_previous_release_loads(self):
         with self.activated() as (harness, previous, releases):
             loaded = catalog_release.load_previous_release(previous, releases)
-            self.assertEqual(loaded["release_id"], "published-2026-09-20-activation-v1")
+            self.assertEqual(loaded["release_id"], "published-2026-09-23-activation-v1")
 
     def test_tampered_feed_bytes_fail_the_release_json_binding(self):
         """Changing the staged feed and re-signing it with the trusted key is not
@@ -3243,7 +3243,7 @@ class PreviousReleaseDirectoryTest(unittest.TestCase):
         """Missing pair, extra pair, or a differing identity: the previous
         release's ledger row and its signed feed must agree element for element,
         or the rebinding check is comparing against unproven history."""
-        release_id = "published-2026-09-20-activation-v1"
+        release_id = "published-2026-09-23-activation-v1"
         extra = {
             "artifact_id": "mlx-4bit-extra",
             "hash": "5" * 64,
@@ -3299,7 +3299,7 @@ class PreviousReleaseDirectoryTest(unittest.TestCase):
                 json.dumps(manifest, indent=2, sort_keys=True).encode() + b"\n"
             )
             rotated = copy.deepcopy(releases)
-            release_id = "published-2026-09-20-activation-v1"
+            release_id = "published-2026-09-23-activation-v1"
             rotated[release_id]["feeds"]["autotune-artifacts.json"]["signer_key_id"] = harness.ALT_KEY_ID
             with self.assertRaises(catalog_release.CatalogError) as caught:
                 catalog_release.load_previous_release(previous, rotated)

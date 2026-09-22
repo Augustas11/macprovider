@@ -281,6 +281,7 @@ final class EndToEndAcceptanceTests: XCTestCase {
             "attestation",
             "endpoint_url",
             "model_hash",
+            "compatibility_set_id",
         ]
 
         XCTAssertEqual(Set(hello.keys), Set(hello.keys).intersection(allowedKeys))

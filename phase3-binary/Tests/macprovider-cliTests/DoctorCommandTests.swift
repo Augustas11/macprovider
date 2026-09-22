@@ -402,7 +402,7 @@ final class DoctorCommandTests: XCTestCase {
         XCTAssertFalse(stdout.contains("/Users/alice"))
         XCTAssertFalse(stdout.contains("provider_id"))
         XCTAssertFalse(stdout.contains("192.168.1.20"))
-        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(stdout.utf8)) as? [String: Any])
+        let object = try jsonObject(fromCapturedStdout: stdout)
         let doctor = try XCTUnwrap(object["doctor"] as? [String: Any])
         let status = try XCTUnwrap(doctor["status_observation"] as? [String: Any])
         XCTAssertTrue(status["network_state"] is NSNull)
@@ -457,7 +457,7 @@ final class DoctorCommandTests: XCTestCase {
         let stdout = captureStdout {
             DoctorDiagnosticsReportPrinter.emitJSON(report)
         }
-        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(stdout.utf8)) as? [String: Any])
+        let object = try jsonObject(fromCapturedStdout: stdout)
         XCTAssertEqual(object["schema"] as? String, DoctorDiagnosticsReportRunner.schema)
         XCTAssertEqual(object["schema_version"] as? Int, 2)
         XCTAssertEqual(object["minimum_reader_version"] as? Int, 1)
@@ -481,7 +481,7 @@ final class DoctorCommandTests: XCTestCase {
         XCTAssertEqual(capture.error as? ExitCode, ExitCode(Int32(DoctorDiagnosticsReportExit.unknown.rawValue)))
         XCTAssertFalse(capture.stdout.contains(badPath))
         XCTAssertFalse(capture.stdout.contains("config_path"))
-        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(capture.stdout.utf8)) as? [String: Any])
+        let object = try jsonObject(fromCapturedStdout: capture.stdout)
         XCTAssertEqual(object["schema"] as? String, DoctorDiagnosticsReportRunner.schema)
         XCTAssertEqual(object["minimum_reader_version"] as? Int, 1)
         let doctor = try XCTUnwrap(object["doctor"] as? [String: Any])
@@ -595,7 +595,7 @@ final class DoctorCommandTests: XCTestCase {
         }
         XCTAssertFalse(stdout.contains("label\""))
         XCTAssertFalse(stdout.contains("/Users/alice"))
-        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(stdout.utf8)) as? [String: Any])
+        let object = try jsonObject(fromCapturedStdout: stdout)
         let doctor = try XCTUnwrap(object["doctor"] as? [String: Any])
         let launchd = try XCTUnwrap(doctor["launchd"] as? [String: Any])
         let plist = try XCTUnwrap(launchd["provider_plist"] as? [String: Any])
@@ -782,5 +782,46 @@ final class DoctorCommandTests: XCTestCase {
         pipe.fileHandleForWriting.closeFile()
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         return (String(decoding: data, as: UTF8.self), caught)
+    }
+
+    private func jsonObject(
+        fromCapturedStdout stdout: String,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) throws -> [String: Any] {
+        let data = try XCTUnwrap(firstJSONObjectData(in: stdout), file: file, line: line)
+        return try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any], file: file, line: line)
+    }
+
+    private func firstJSONObjectData(in stdout: String) -> Data? {
+        guard let start = stdout.firstIndex(of: "{") else { return nil }
+        var depth = 0
+        var inString = false
+        var escaped = false
+        var index = start
+
+        while index < stdout.endIndex {
+            let character = stdout[index]
+            if inString {
+                if escaped {
+                    escaped = false
+                } else if character == "\\" {
+                    escaped = true
+                } else if character == "\"" {
+                    inString = false
+                }
+            } else if character == "\"" {
+                inString = true
+            } else if character == "{" {
+                depth += 1
+            } else if character == "}" {
+                depth -= 1
+                if depth == 0 {
+                    return String(stdout[start...index]).data(using: .utf8)
+                }
+            }
+            index = stdout.index(after: index)
+        }
+        return nil
     }
 }

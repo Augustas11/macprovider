@@ -24,6 +24,7 @@ import (
 
 const autotuneV4PublicKeyBase64 = "zTKDIdMmKKkO1Cgf5OdTzMOytVqW7U8SGsJ9XrzAltU="
 const autotuneV5PublicKeyBase64 = "vpTgWfvvrnbc1QhdTAxULFisoDU7jQ4mB1yZIHIGjBA="
+const currentAutotuneReleaseID = "published-2026-09-22-qwen36-27b-hash-fix-v1"
 
 func TestAutotuneFeedsServeLiteralSignedBytes(t *testing.T) {
 	t.Parallel()
@@ -76,7 +77,7 @@ func TestAutotuneFeedsServeLiteralSignedBytes(t *testing.T) {
 		if verification.KeyID != "streamvc-autotune-static-v4" {
 			t.Fatalf("%s key ID=%q", name, verification.KeyID)
 		}
-		if name != "rate_card" && verification.Version != "published-2026-09-19-openrouter-priced-v1" {
+		if name != "rate_card" && verification.Version != currentAutotuneReleaseID {
 			t.Fatalf("%s version=%q", name, verification.Version)
 		}
 		if name == "rate_card" && verification.Version != "bab7acfb9d1b40b7bbfc3da90bb40689ab8e7c7f6c53065c07143c1e5ed32bd4" {
@@ -157,7 +158,7 @@ func TestAutotuneFeedsServeLiteralSignedBytes(t *testing.T) {
 	if err := json.Unmarshal(rr.Body.Bytes(), &release); err != nil {
 		t.Fatalf("decode autotune release: %v", err)
 	}
-	if release.Status != "live_verified" || release.ReleaseID != "published-2026-09-19-openrouter-priced-v1" || release.PolicyVersion != "autotune-policy-v1" {
+	if release.Status != "live_verified" || release.ReleaseID != currentAutotuneReleaseID || release.PolicyVersion != "autotune-policy-v1" {
 		t.Fatalf("autotune release metadata=%+v", release)
 	}
 	if release.Feeds["autotune_candidates"].SHA256 != feeds.AutotuneCandidatesVerification.SHA256 || release.Feeds["demand_rank"].SignerKeyID != "streamvc-autotune-static-v4" {
