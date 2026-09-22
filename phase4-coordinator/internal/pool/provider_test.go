@@ -252,6 +252,42 @@ func TestThermalHeartbeatZerosSeatsImmediatelyAndSurvivesRestore(t *testing.T) {
 	}
 }
 
+func TestThermalReportPreservesNonServingState(t *testing.T) {
+	for _, state := range []State{StateDegraded, StateDraining, StateUnavailable} {
+		for _, ingress := range []string{"heartbeat", "state_update"} {
+			t.Run(string(state)+"/"+ingress, func(t *testing.T) {
+				registry := NewRegistry(nil)
+				registry.Register(&Provider{ProviderID: "p1", AssignedID: "s1", State: StateReady, SlotsTotal: 4, SlotsFree: 4}, nil)
+				if ingress == "heartbeat" {
+					registry.ApplyHeartbeat("p1", "s1", HeartbeatUpdate{
+						Status: state, SlotsTotal: 4, SlotsFree: 0,
+						SafetyTelemetry: &ProviderSafetyTelemetry{ThermallyThrottled: true},
+						At:              time.Now().UTC(),
+					})
+				} else {
+					zero := 0
+					four := 4
+					registry.ApplyStateUpdate("p1", "s1", StateUpdate{
+						State: state, Reason: "thermal_throttled", SlotsTotal: &four, SlotsFree: &zero,
+					})
+				}
+				got, ok := registry.Resolve("p1", "s1")
+				if !ok || got.State != state || got.SlotsFree != 0 || got.RoutingEligible() || got.SlotQueueEligible() {
+					t.Fatalf("thermal %s report: state=%q slots_free=%d found=%v, want %s/0 and closed", ingress, got.State, got.SlotsFree, ok, state)
+				}
+				if state == StateUnavailable {
+					four := 4
+					registry.ApplyStateUpdate("p1", "s1", StateUpdate{State: StateReady, SlotsFree: &four})
+					got, _ = registry.Resolve("p1", "s1")
+					if got.State != StateUnavailable || got.RoutingEligible() || got.SlotQueueEligible() {
+						t.Fatalf("ready/free revived unavailable session after thermal %s report: state=%q", ingress, got.State)
+					}
+				}
+			})
+		}
+	}
+}
+
 func TestInFlightBusyHeartbeatAfterSettleWindowDoesNotZeroRestoredSeat(t *testing.T) {
 	registry := NewRegistry(nil)
 	provider := &Provider{

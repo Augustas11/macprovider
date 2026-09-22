@@ -2760,9 +2760,11 @@ func (r *Registry) applyHeartbeatLocked(providerID, assignedID string, hb Heartb
 	// carry supported_models, so p.SupportedModels (populated at
 	// registration) is the authoritative declared set.
 	r.recordSeenModelsUnionLocked(p.ProviderID, hb.ModelID, p.SupportedModels)
-	if thermal && (p.State == StateReady || p.State == StateBusy) && r.canApplyProviderStateLocked(p, StateBusy) {
+	if hb.Status != "" && hb.Status != StateReady && hb.Status != StateBusy && hb.Status != p.State && r.canApplyProviderStateLocked(p, hb.Status) {
+		r.setStateLocked(p, hb.Status)
+	} else if thermal && (p.State == StateReady || p.State == StateBusy) && r.canApplyProviderStateLocked(p, StateBusy) {
 		r.setStateLocked(p, StateBusy)
-	} else if hb.Status != "" && hb.Status != p.State {
+	} else if !thermal && hb.Status != "" && hb.Status != p.State {
 		staleBusy := ignoreOccupancy && (hb.Status == StateReady || hb.Status == StateBusy)
 		if !staleBusy && r.canApplyProviderStateLocked(p, hb.Status) {
 			r.setStateLocked(p, hb.Status)
@@ -2957,9 +2959,11 @@ func (r *Registry) ApplyStateUpdate(providerID, assignedID string, update StateU
 	thermal := update.Reason == "thermal_throttled"
 	staleCapacity := p.ignoreProviderOccupancy(update.State, slotsFree, thermal)
 	if r.canApplyProviderStateLocked(p, update.State) {
-		if thermal && (p.State == StateReady || p.State == StateBusy) {
+		if update.State != "" && update.State != StateReady && update.State != StateBusy {
+			r.setStateLocked(p, update.State)
+		} else if thermal && (p.State == StateReady || p.State == StateBusy) {
 			r.setStateLocked(p, StateBusy)
-		} else if !(staleCapacity && (update.State == StateReady || update.State == StateBusy)) {
+		} else if !thermal && !staleCapacity {
 			r.setStateLocked(p, update.State)
 		}
 	}
