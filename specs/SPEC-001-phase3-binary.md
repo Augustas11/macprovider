@@ -1,6 +1,14 @@
 # SPEC-001 — Phase 3 Binary: Mac Provider Inference CLI
 
-**Version:** 1.9.18 (2026-09-12, Build 1 branch authority alignment)
+**Version:** 1.9.19 (2026-09-22, WS relay capacity authority alignment)
+
+**Change log v1.9.19 (2026-09-22, WS relay capacity authority alignment):**
+Aligns WS-tunneled relay admission with the provider's advertised current
+capacity instead of the former fixed-one relay cap. The relay admits up to the
+current `ProviderStatus.capacity.maxConcurrency` / `slots_total` seat count
+(default 1; e.g. 8 after an 8-seat advertisement or warm-swap capacity update)
+and rejects only overflow with `error_queue_full`; there is still no WS queue or
+`Retry-After`.
 
 **Change log v1.9.18 (2026-09-12, Build 1 branch authority alignment):**
 Aligns the current Malibu/CLI catalog-economics consumer contract with
@@ -232,8 +240,9 @@ plus the additive wire surface that accumulated in between. No code change.
   `429` + `Retry-After`, `rate_limit_exceeded`" contract was **never implemented**
   and is retired. Shipped: a **blocking `AsyncSemaphore(max(1, max_concurrency))`**
   serializes the HTTP inference path (excess requests await a permit, never
-  rejected); the WS-tunneled path instead hard-rejects at capacity=1 with
-  `error_queue_full` (FR-27). The §status-code `429` row is struck.
+  rejected); the WS-tunneled path instead hard-rejects overflow beyond the
+  advertised current relay capacity with `error_queue_full` (FR-25/FR-27). The
+  §status-code `429` row is struck.
 - **FR-16 (rewritten).** No wake-event detection exists (no IOKit power / wall-clock
   jump). The coordinator `warm_up` command is a **no-op** (`degraded`→`ready`, no
   inference). The real warm-up is an **idle-triggered `IdlePrewarmer`** with six
@@ -847,10 +856,13 @@ v1.7 spec claim.
 relay bounds in-flight requests differently: `InferenceRelay` hard-**rejects**
 at capacity — `guard active.count < maxActiveRequests` else it emits
 `status: "error_queue_full"` (FR-27), with **no** queue and **no** `Retry-After`.
-`maxActiveRequests` is fixed to **1** (`InferenceRelay.swift`,
-`CoordinatorClient.swift`). So the tunneled path admits one request and
-immediately rejects a concurrent second with `error_queue_full`, whereas the
-local HTTP path blocks on the semaphore.
+Admission is derived from the provider's live status snapshot:
+`InferenceRelay.currentAdmissionLimit()` reads
+`ProviderStatus.snapshot().capacity.maxConcurrency` and falls back to the startup
+limit only if the snapshot is non-positive. So the tunneled path admits up to the
+currently advertised seat count, including capacity changes applied by
+warm-swap, and immediately rejects the next concurrent request with
+`error_queue_full`, whereas the local HTTP path blocks on the semaphore.
 
 **FR-12. Graceful SIGTERM drain.**
 On receiving SIGTERM, the binary:
@@ -1044,14 +1056,18 @@ Every `inference_response_chunk` and `inference_response_end` MUST
 carry the `request_id` from the originating `inference_request`. The
 provider MUST NOT reuse or reassign `request_id` values.
 
-**FR-25. Multiplexing — fixed WS capacity 1 (reconciled v1.7).**
-On the WS-tunneled path the relay capacity is **hardcoded to 1**
-(`InferenceRelay.maxActiveRequests = 1`, `CoordinatorClient.swift`); it does
-**not** track `max_concurrency`. The relay admits one in-flight
-`inference_request` and hard-rejects a concurrent second with
-`inference_response_end status: "error_queue_full"` (FR-27) — there is no WS
-queue and no `Retry-After`. `max_concurrency` > 1 governs only the *local HTTP*
-semaphore (FR-11), not the tunnel. Each admitted request is tracked by its
+**FR-25. Multiplexing — advertised relay capacity (reconciled v1.9.19).**
+On the WS-tunneled path the relay capacity MUST equal the provider's advertised
+current inference capacity for the running process:
+`InferenceRelay.currentAdmissionLimit()` reads the live
+`ProviderStatus.snapshot().capacity.maxConcurrency` before admitting a request.
+The startup `maxActiveRequests` argument is a fallback, not the continuing
+authority after status capacity changes. The relay admits up to the live
+capacity (default 1; for example, 8 advertised seats admit 8 concurrent WS
+requests; a warm-swap capacity update can expand or contract that limit) and
+hard-rejects only overflow with `inference_response_end status:
+"error_queue_full"` (FR-27). There is no WS queue and no `Retry-After`. Each
+admitted request is tracked by its
 `request_id`; the `slots_free` heartbeat field reflects WS-tunneled requests as
 well as local HTTP requests.
 
@@ -1076,7 +1092,7 @@ Inference errors map to `status` values in `inference_response_end`:
 | Client cancelled | `"cancelled"` |
 | Model not loaded | `"error_model_not_loaded"` |
 | Context length exceeded | `"error_context_exceeded"` |
-| WS capacity-1 rejection (concurrent 2nd request; no queue exists — FR-25) | `"error_queue_full"` |
+| WS capacity overflow (active requests already equal advertised relay capacity; no queue exists — FR-25) | `"error_queue_full"` |
 | Internal inference error | `"error_internal"` |
 
 **FR-28. Provider-side write buffer backpressure.**
@@ -2085,7 +2101,7 @@ preflight rejection) and are struck:
 | `draining` | — | Provider is shutting down |
 | `model_not_loaded` | — | Model failed to load or is loading |
 | `unhealthy` | — | Provider in unavailable state |
-| ~~`queue_full`~~ | ~~`estimated_wait_ms`~~ | **not shipped (v1.7)** — no WS queue; capacity-1 relay rejects at dispatch with `error_queue_full`, not at preflight |
+| ~~`queue_full`~~ | ~~`estimated_wait_ms`~~ | **not shipped (v1.7)** — no WS queue; advertised-capacity relay rejects overflow at dispatch with `error_queue_full`, not at preflight |
 | ~~`tier_mismatch`~~ | ~~`provider_tier`~~ | **not shipped (v1.7)** — no tier-mismatch preflight path |
 
 Example rejection:
@@ -2327,7 +2343,7 @@ times out.
 | `request_id` | string | Yes | The `request_id` of the inference to cancel |
 | `reason` | string | Yes | One of: `"buyer_disconnected"`, `"timeout"`, `"coordinator_shutdown"` |
 
-**Provider behavior on receipt (reconciled v1.7 — capacity-1 relay, no queue):**
+**Provider behavior on receipt (reconciled v1.9.19 — advertised-capacity relay, no queue):**
 1. If the `request_id` is currently being processed: abort inference,
    release the slot, send `inference_response_end` with
    `status: "cancelled"`.
@@ -2337,8 +2353,9 @@ times out.
    on the Tier-2 path an unknown ID **silently returns** with no ack. The ≤ v1.6
    "always send a cancelled ack for unknown IDs" contract does not hold uniformly.
 3. There is **no case-3 queue removal** — the relay has only an *active* request
-   map (capacity 1) and no pending queue (FR-25), so a not-yet-started queued
-   request cannot exist. The ≤ v1.6 "remove from queue" step is struck.
+   map bounded by advertised relay capacity and no pending queue (FR-25), so a
+   not-yet-started queued request cannot exist. The ≤ v1.6 "remove from queue"
+   step is struck.
 
 #### Request ID lifecycle and error handling
 
@@ -2379,24 +2396,22 @@ coordinator treats it as a provider error, sends `cancel_request`, and
 returns HTTP 502 to the buyer.
 
 **Across `request_id` values:** No cross-request ordering guarantee, and the
-`request_id` is the demultiplexing key. In practice, however, the shipped WS
-relay is **capacity 1** (§6.6 Multiplexing / FR-25), so on a single WebSocket
-only one request is in flight at a time and cross-request chunk interleaving
-does not actually occur; the "may interleave freely" allowance is a protocol
-statement for a hypothetical multi-capacity relay, not current behavior.
+`request_id` is the demultiplexing key. When advertised relay capacity is greater
+than 1, chunks for different admitted requests MAY interleave on the same
+WebSocket; the coordinator MUST demultiplex by `request_id` and preserve ordering
+only within each request.
 
 #### Multiplexing
 
-A single provider WebSocket carries at most **one** in-flight inference
-request (reconciled v1.7): the shipped `InferenceRelay` fixes capacity to
-**1** (`maxActiveRequests = 1`) regardless of advertised `max_concurrency`, and
-hard-rejects a concurrent second with `error_queue_full` (FR-25/FR-27). The
-`max_concurrency` advertisement governs only the *local HTTP* semaphore (FR-11),
-not the tunnel; a coordinator MUST NOT send a second concurrent
-`inference_request` on one WS while the first is in flight. Each WS text frame is
-one complete JSON message — no multi-frame messages, no application-layer
-fragmentation. (The ≤ v1.6 "up to N = `max_concurrency`" multiplexing contract
-was never shipped for the tunnel.)
+A single provider WebSocket carries up to the provider's advertised current
+relay capacity in in-flight inference requests (reconciled v1.9.19). The shipped
+`InferenceRelay` reads live `ProviderStatus` capacity at admission time and uses
+its startup `maxActiveRequests` only as a non-positive-snapshot fallback; a
+coordinator MAY send concurrent `inference_request` frames on one WS up to that
+advertised capacity, and the provider hard-rejects only overflow with
+`error_queue_full` (FR-25/FR-27). Each WS text frame is one complete JSON message
+— no multi-frame messages, no application-layer fragmentation. There is still no
+pending queue.
 
 #### Retransmission policy
 
@@ -3696,7 +3711,8 @@ These extend the §6.5 outbound set (`auth_request`, `hello`, `heartbeat`,
 
 The rekey exchange is control traffic on the existing WebSocket. It does not
 retransmit an inference request/response and does not alter §6.6's application
-retransmission policy, capacity-1 relay, or request-ID lifecycle.
+retransmission policy, advertised-capacity relay admission, or request-ID
+lifecycle.
 
 ---
 
@@ -4057,16 +4073,28 @@ The request slot is freed (verifiable via `/v1/health`).
 
 **Run by:** `phase3-binary/scripts/test-ws-cancellation.sh`
 
-**AC-14. WS capacity-1 rejection (reconciled v1.7).**
-A mock coordinator sends a second `inference_request` on a WebSocket while the
-first is still in flight. The relay (fixed capacity 1) accepts the first and
-rejects the second with `inference_response_end status: "error_queue_full"`
-(FR-25/FR-27); the first completes normally with correct `request_id`
-correlation. (The ≤ v1.6 "3 concurrent requests all succeed with
-`max_concurrency_override: 3`" test does not hold — the tunnel is fixed at 1
-regardless of `max_concurrency`.)
+**AC-14. WS advertised-capacity admission and overflow rejection (reconciled v1.9.19).**
+A mock coordinator runs two relay-capacity cases. With the default advertised
+capacity of 1, it sends a second `inference_request` on a WebSocket while the
+first is still in flight; the relay accepts the first and rejects the second
+with `inference_response_end status: "error_queue_full"` (FR-25/FR-27), and the
+first completes normally with correct `request_id` correlation. With
+`max_concurrency_override: 8` advertised, it sends eight concurrent
+`inference_request` frames on the same WebSocket and all eight are admitted; a
+ninth concurrent request is rejected with `error_queue_full`, and none of the
+eight admitted requests is incorrectly rejected.
 
-**Run by:** `phase3-binary/scripts/test-ws-multiplexing.sh`
+**Run by:** focused relay admission tests in
+`phase3-binary/Tests/macprovider-cliTests/InferenceRelayTests.swift`:
+`testOneAdvertisedSeatRejectsSecondRelayRequest`,
+`testEightAdvertisedSeatsAdmitEightRelayRequestsAndRejectNinth`,
+`testRelayAdmissionExpandsAfterProviderStatusCapacityWarmSwap`,
+`testRelayAdmissionContractsAfterProviderStatusCapacityWarmSwap`, and
+`testCoordinatorRelayAdmissionFollowsConfiguredSeats`. The legacy
+`phase3-binary/scripts/test-ws-multiplexing.sh` harness is not current
+acceptance evidence for this AC until it is updated for the Tier-2
+`auth_request` handshake. A signed live Tier-2 WS relay E2E remains pending
+production evidence for full coordinator/binary integration.
 
 **AC-15. Backward compatibility — unknown message type.**
 A mock coordinator sends `{"type": "inference_request", ...}` to a
@@ -4409,8 +4437,9 @@ Implement FR-11 (blocking `AsyncSemaphore`, value = `max(1, max_concurrency)`;
 excess requests await a permit via an **unbounded FIFO waiter list** — not a
 depth-capped queue — and no 429). Deliverable: requests beyond max concurrency
 block on the semaphore until a permit frees (FIFO); the WS-tunneled relay
-(capacity 1) rejects a concurrent second with `error_queue_full`. **Carried
-follow-up (not shipped):** FR-10 mid-stream disconnect detection →
+(advertised-capacity, no queue) admits up to the advertised seat count and
+rejects overflow with `error_queue_full`. **Carried follow-up (not shipped):**
+FR-10 mid-stream disconnect detection →
 `Task.cancel` and 5-second slot release is *not* wired in the shipped binary
 (detached tasks, `shouldCancel: false`); implementers should treat it as
 outstanding, not done. (The ≤ v1.6 "bounded queue + HTTP 429" plan was

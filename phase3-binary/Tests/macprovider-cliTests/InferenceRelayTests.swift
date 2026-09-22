@@ -13,6 +13,14 @@ final class InferenceRelayTests: XCTestCase {
         try await assertRelayCapacity(seats: 1)
     }
 
+    func testRelayAdmissionExpandsAfterProviderStatusCapacityWarmSwap() async throws {
+        try await assertRelayCapacityAfterWarmSwap(startupSeats: 1, currentSeats: 8)
+    }
+
+    func testRelayAdmissionContractsAfterProviderStatusCapacityWarmSwap() async throws {
+        try await assertRelayCapacityAfterWarmSwap(startupSeats: 8, currentSeats: 1)
+    }
+
     func testCoordinatorRelayAdmissionFollowsConfiguredSeats() async throws {
         let cases: [(override: Int?, expectedSeats: Int)] = [(nil, 1), (8, 8)]
         for testCase in cases {
@@ -51,6 +59,38 @@ final class InferenceRelayTests: XCTestCase {
             maxBodyBytes: 4096,
             sendFrame: { frame in await recorder.append(frame) }
         )
+        try await assertRelayCapacity(seats: seats, status: status, relay: relay, recorder: recorder)
+    }
+
+    private func assertRelayCapacityAfterWarmSwap(startupSeats: Int, currentSeats: Int) async throws {
+        let status = ProviderStatus(
+            modelID: "mlx-community/Test-Model",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: startupSeats)
+        )
+        let recorder = FrameRecorder()
+        let relay = InferenceRelay(
+            modelRuntime: FakeStreamingRuntime(),
+            providerStatus: status,
+            loadedModelID: "mlx-community/Test-Model",
+            maxActiveRequests: startupSeats,
+            maxBodyBytes: 4096,
+            sendFrame: { frame in await recorder.append(frame) }
+        )
+        await status.completeTargetSwap(
+            modelID: "mlx-community/Test-Model",
+            modelHash: nil,
+            maxConcurrency: currentSeats
+        )
+        try await assertRelayCapacity(seats: currentSeats, status: status, relay: relay, recorder: recorder)
+    }
+
+    private func assertRelayCapacity(
+        seats: Int,
+        status: ProviderStatus,
+        relay: InferenceRelay,
+        recorder: FrameRecorder
+    ) async throws {
         let body = #"{"model":"mlx-community/Test-Model","messages":[{"role":"user","content":"hello"}],"max_tokens":20,"stream":true}"#
 
         for index in 1...seats {

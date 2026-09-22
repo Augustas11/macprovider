@@ -26,7 +26,7 @@ actor InferenceRelay {
     private let loadedModelID: String?
     private let catalogModelIDAlias: String?
     private let warmSwapEnabled: Bool
-    private let maxActiveRequests: Int
+    private let fallbackMaxActiveRequests: Int
     private let maxBodyBytes: Int
     private let sendFrame: SendFrame
     private let tier2Session: Tier2ProviderSession?
@@ -60,7 +60,7 @@ actor InferenceRelay {
         self.loadedModelID = loadedModelID
         self.catalogModelIDAlias = catalogModelIDAlias
         self.warmSwapEnabled = warmSwapEnabled
-        self.maxActiveRequests = max(1, maxActiveRequests)
+        self.fallbackMaxActiveRequests = max(1, maxActiveRequests)
         self.maxBodyBytes = max(1, maxBodyBytes)
         self.tier2Session = tier2Session
         self.receiptBuilder = receiptBuilder
@@ -168,7 +168,8 @@ actor InferenceRelay {
             return
         }
 
-        guard active.count < maxActiveRequests else {
+        let admissionLimit = await currentAdmissionLimit()
+        guard active.count < admissionLimit else {
             if let relayBlindOpened {
                 try await terminateClaimedRelay(
                     relayBlindOpened, requestID: requestID, stream: stream, error: .providerUnsupported
@@ -275,6 +276,13 @@ actor InferenceRelay {
             await self?.removeActive(requestID)
         }
         active[requestID] = ActiveRequest(task: task, state: state)
+    }
+
+    private func currentAdmissionLimit() async -> Int {
+        let snapshot = await providerStatus.snapshot()
+        let current = snapshot.capacity.maxConcurrency
+        guard current > 0 else { return fallbackMaxActiveRequests }
+        return current
     }
 
     func handleCancelRequest(_ message: [String: Any]) async throws {
