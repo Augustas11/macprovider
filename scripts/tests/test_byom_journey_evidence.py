@@ -49,7 +49,11 @@ ADMISSION_SIGNED_SOURCE = (
     "spec-047-r005-spec-047-r006-spec-047-r007-spec-047-r008."
     "journey-result.signed.json"
 )
-STALE_SELECTOR_PROMOTED_REQUIREMENT_IDS = frozenset({"SPEC-047-R003"})
+STALE_SELECTOR_PROMOTED_REQUIREMENT_IDS = frozenset({
+    "SPEC-046-R001",
+    "SPEC-046-R008",
+    "SPEC-047-R003",
+})
 
 
 def load_module(name: str, filename: str):
