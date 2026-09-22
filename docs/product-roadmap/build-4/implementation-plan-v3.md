@@ -1,0 +1,494 @@
+# Product Build 4 implementation plan v3
+
+Status: planning and contract assessment only  
+Repository base: `1d2c930bad81704dd0acc0322226725d8b64aceb` (`origin/main`, inspected 2026-09-11)  
+Historical roadmap baseline: `422fc2f13fc62c1ff8987522f822d9ef856e4a96`  
+Implementation gate: **closed** pending accepted Product Build 2 and Product Build 3 contracts
+Prior review disposition: v1 failed with 0 Critical/3 High/5 Medium; v2 failed with 0 Critical/2 High/2 Medium. This revision incorporates every remaining correction.
+
+## 1. Product outcome
+
+An authorized buyer can select an eligible provider in a Trusted Pool before encryption, submit one relay-blind request bound to that provider, model, pool policy, and pool generation, and receive a settlement result only when the request has both a compatible cryptographic receipt and independently valid evidence required by the covered Product Build 3 observation profile.
+
+The selected provider reads plaintext. The gateway and coordinator do not read request content, but they continue to see authentication, routing bindings, ciphertext size, response content, usage, settlement metadata, and pool identity. The product must describe this as relay-blind request encryption within a Trusted Pool. It must not call the result confidential compute, anonymity, unlinkable settlement, end-to-end encryption, or privacy from the provider.
+
+There is a normative wording conflict that must be resolved before implementation. SPEC-041 defines Layer 3 relay-blind scope as hiding request content from gateway/coordinator while the selected provider reads it and response content remains visible to relays. SPEC-042 R009 currently requires language saying both prompt and response content are visible to coordinator and provider even under Layer 3. The SPEC-042 amendment must align its Layer 3 disclosure with SPEC-041: request content hidden from gateway/coordinator; selected provider reads request plaintext; relays may see response content and metadata. No amendment may broaden the privacy claim beyond that boundary.
+
+This plan does not authorize production activation, pool promotion, settlement enforcement, rewards, payouts, or economic policy changes.
+
+## 2. Current implementation classification
+
+The table classifies the requested outcomes against the exact base above. “Landed” means source and tests exist on this base; it does not mean deployed or production-qualified.
+
+| Requested outcome | State | Code-grounded evidence | Remaining work |
+|---|---|---|---|
+| Trusted Pool membership, buyer authorization, route isolation, policy gates, and generation fencing for plaintext requests | **Partial** | `trustpool.Registry.AuthorizeAndSnapshot`, `Snapshot`, `BeginPoolDeliveryAtGeneration`, and `WatchProviderRevoked` in `phase4-coordinator/internal/trustpool/registry.go`; ordinary request selection in `phase4-coordinator/internal/buyer/server.go`; route-path tests in `spec042_pool_isolation_test.go`, `spec042_pool_model_allowlist_test.go`, and `spec042_pool_predicate_errors_test.go` | The hot snapshot contains `PoolID`, members, predicates, and numeric generation, but not the accepted `manifest_version`, `manifest_core_digest`, or a cryptographic `pool_state_epoch_hash`. Relay-blind paths do not consume it. Production qualification remains absent. |
+| Relay-blind provider selection, reservation, encrypted dispatch, at-most-once execution, and ordinary usage settlement in the global pool | **Partial** | `handleRelayBlindReservation`, `handleRelayBlindConsume`, and `handleRelayBlindChat` in `phase4-coordinator/internal/buyer/relay_blind.go`; `relayblind.Reservation`, `Envelope`, and durable state in `phase4-coordinator/internal/relayblind`; gateway flow in `phase5-gateway/internal/router/relay_blind*.go`; cross-service tests in `test/integration/relay_blind_integration_test.go` | Product Build 2 must first finish the buyer-approved acceptable-provider-identity selection contract and supported buyer journey. Current request/reservation/AAD schemas have no pool or settlement-contract binding. Real-model encrypted qualification is not credited here. |
+| Rejection of pool-scoped relay-blind intent | **Landed deliberate restriction** | `relayBlindPoolSelected` and reservation/consume rejection in `phase5-gateway/internal/router/relay_blind_success.go`; pool-header rejection in `handleRelayBlindReservation` and `handleRelayBlindConsume`; `TestRelayBlindReservationRejectsPoolSelectionBeforeQuota` | Preserve until the successor contracts, capability negotiation, migrations, tests, and gates described here are complete. Do not delete the guard as an implementation shortcut. |
+| Rejection of relay-blind plus verified-settlement enforce mode | **Landed deliberate restriction** | `Config.Validate` rejects `relay_blind.enabled` with `settlement.verified_model_settlement_mode=enforce` in `phase4-coordinator/internal/config/config.go` | Replace only with a new, explicitly supported request-scoped contract. Do not weaken the global settlement gate. |
+| Positive verification and useful-work rewards excluded for relay-blind traffic | **Landed deliberate restriction** | `billingRecorder.logProviderRowWithEstimateAndOutput` sets `PositiveVerificationExcluded` and `RewardsExcluded`; billing schema persists both; `rewards/useful_work.go` filters excluded rows | A future private-settlement path may clear positive-verification exclusion only after all receipt and independent-observation gates pass. Reward eligibility remains a separate governed mapping owned by Product Build 3 and must stay excluded unless that mapping explicitly covers the request. |
+| Existing SPEC-015 v0.4 verified settlement | **Landed for plaintext; incompatible with relay-blind** | Exact 23-field v0.4 parser and `VerifySettlementReceipt` in `phase4-coordinator/internal/billing/settlement_verifier.go`; route snapshot in `route_snapshot.go`; receipts in `settlement_receipts.go` | SPEC-015 v0.4 binds plaintext `prompt_hash` and has a closed tuple. It cannot gain optional pool or encrypted-request fields and cannot be relabeled as private-request evidence. A successor receipt version is required. |
+| Pool identity in ordinary route snapshots and request logs | **Partial** | `billing.RouteSnapshot.PoolID`, conditional digest binding, settlement reload, and `requestlog.Row.PoolID` | SPEC-042 also requires `manifest_version` and `manifest_core_digest`; the current hot route snapshot and settlement record bind only `pool_id`. The private contract additionally needs generation/epoch and encrypted-request bindings. |
+| Receipt/version/digest contract for private pool settlement | **Missing** | SPEC-041 explicitly excludes v0.4 positive settlement; SPEC-042 R009 blocks non-default privacy mode until SPEC-041/SPEC-040 amendments | Establish the normative successor described in section 6 before runtime edits. |
+| Independently valid compute evidence for private positive settlement | **Blocked** | Current settlement verifier has a `ComputeIntegrityCapture` gate, while the roadmap records production observation scope as unknown | Product Build 3 must publish an accepted covered-key/profile/generation contract and governed settlement mapping. Provider signatures and relay-blind validation are insufficient. |
+| Correctly settled authorized private-pool real-model request | **Blocked** | No composed runtime path or acceptance evidence exists | Depends on accepted Build 2 identity selection, Build 3 observation scope, the new receipt contract, real MLX inference, and representative Mac evidence. |
+
+No relevant open pull request was found during this inspection. Changes after the historical roadmap baseline affect BYOM settlement identity, not the SPEC-041/SPEC-042 composition contract.
+
+## 3. User journeys
+
+### 3.1 Supported success journey
+
+1. An authenticated buyer credential or wallet session is provisioned for pool `P` and an acceptable provider-identity set defined by Product Build 2.
+2. The buyer client fetches fresh pool policy/status and the applicable provider pin set through authenticated channels. It displays that the provider reads plaintext and responses remain visible to relays.
+3. The client asks for a pool-scoped reservation, naming canonical model `M`, endpoint, stream mode, caps, and the authenticated acceptable-provider object from Build 2: either the actual sorted fingerprint set or an authenticated coordinator-resolvable handle. No request content is sent.
+4. The gateway authenticates the buyer and narrows pool selection to a pool in the credential scope. It requires positive successor-capability advertisement from gateway, coordinator, and provider.
+5. The coordinator atomically reads current buyer authorization, routeable policy, membership, revocation state, predicates, generation, and accepted manifest identity. It selects provider `A` only if `A` is both pool-eligible and buyer-acceptable.
+6. The reservation response commits to `A`'s relay-blind identity/key record and to pool `P`, manifest version/digest, generation/epoch, model mapping, caps, and receipt contract. The public response need expose only the buyer-approved relay identity, never an unrelated stable provider identifier.
+7. The buyer verifies all bindings before encryption, then creates a fresh ephemeral key, nonce, request ID, and ciphertext. The successor AEAD transcript binds the complete reservation context.
+8. Consume burns the reservation before quota or dispatch. Coordinator-owned reservation, pool, provider, key, model/admission, and settlement prerequisites are rechecked; consumption cannot dispatch.
+9. The gateway atomically rechecks its account/session authorization, replay, quota, and caps, creates the quota/session reservations, and records `dispatch_armed`. This SPEC-040 transaction is the gateway authorization cutoff and produces an authenticated arm token bound to the consumed attempt.
+10. The coordinator verifies the arm token, prepares a durable outbox, and at the final coordinator fence rechecks pool lifecycle/policy/generation, provider membership/session/encryption key, receipt key, model/admission, and observation authority before a single committed enqueue. A stale result burns the transaction and cannot be re-encrypted or failed over.
+11. The provider claims the bound execution, validates the successor transcript, decrypts, validates the inner request, pins the model runtime handle, and executes once.
+12. The provider returns bound validation/terminal evidence and the successor receipt. The coordinator independently checks the response/output material, route snapshot, request-envelope digest, pool binding, model/artifact identity, terminal state, receipt version, and the Build 3 observation evidence required for the exact covered key.
+13. The gateway finalizes the existing buyer quota journal and coordinator settlement row exactly once. The app reports independently: encryption outcome, pool-authorization outcome, receipt verification, observation coverage, settlement state, and reward eligibility.
+
+### 3.2 Safe pre-dispatch recovery
+
+If reservation, consume, or final authorization fails before dispatch, the system burns the old single-use material, releases or refunds any hold according to the existing journal, and returns a typed action to create a new reservation and new ciphertext. The client must not reuse a prior envelope.
+
+### 3.3 Safe post-dispatch recovery
+
+Once dispatch is possible, cancellation, disconnect, timeout, restart, or uncertain terminal evidence must never trigger provider substitution or ciphertext replay. Durable status lookup and existing settlement reconciliation return the final result or an unknown/quarantined state with `do_not_resubmit`.
+
+### 3.4 Unsupported-version journey
+
+An old client, gateway, coordinator settlement backend, or provider that lacks the successor private-pool capability fails before quota. An incompatible offline verifier cannot authorize settlement and makes coordinator settlement readiness false. Existing global relay-blind v1, plaintext global, plaintext Trusted Pool, and SPEC-015 v0.4 settlement journeys continue unchanged.
+
+## 4. Ownership boundaries
+
+| Authority | Owns in this build | Must not be overridden here |
+|---|---|---|
+| SPEC-040 | Credential/wallet authorization and semantic signature over pool and private-request transaction | Build 4 cannot invent unauthenticated pool intent or widen wallet scope. |
+| Product Build 2 / SPEC-041 successor | Buyer-approved acceptable-provider identities, pin rotation/revocation, reservation and AEAD transcript, typed private-client recovery | Build 4 consumes the accepted identity contract; it does not define a conflicting pin format. |
+| SPEC-042 | Pool identity, manifest, buyer authorization, membership, lifecycle, predicates, generation fence, pool disclosures | A `pool_id` is never a capability. |
+| SPEC-002 | Provider assignment, capacity, dispatch lifecycle, cancellation, request logs | No parallel dispatcher or cross-provider ciphertext failover. |
+| SPEC-010/SPEC-023/SPEC-047 | Canonical model and authoritative artifact/admission identity | Provider assertions cannot mint settlement identity. |
+| SPEC-015 successor | Closed receipt version, canonical signing preimage, verifier behavior, compatibility | The v0.4 tuple remains immutable. |
+| SPEC-022 | Settlement outcomes, finality, quarantine, debit/provider-credit control | Build 4 must not make “valid signature” synonymous with payable. |
+| Product Build 3 / SPEC-036 successor | Covered compute observation key, generation, reference/calibration, expiry/revocation, independently accepted stable provider identity/Sybil-resistance authority and cost model, and governed reward mapping | Provider terminal evidence cannot substitute for independent observation. |
+| SPEC-005 | Usage arithmetic and ordinary accounting | No formula or economic-policy changes. |
+| SPEC-021/rewards | Useful-work reward eligibility | Remains excluded unless Build 3 explicitly authorizes the exact covered private request. |
+
+## 5. Dependency graph and implementation gate
+
+```text
+Build 2 accepted acceptable-identity contract
+  -> coordinator receives the actual authenticated acceptable-fingerprint set, or an authenticated handle it can resolve authoritatively
+  -> pool-scoped reservation can filter and select before encryption
+  -> client can verify provider/pool binding
+
+Build 3 accepted covered observation contract
+  -> stable provider identity/Sybil-resistance authority and economics assumptions are accepted
+  -> successor receipt can reference exact observation scope
+  -> settlement verifier can distinguish signature validity from payable evidence
+  -> reward mapping can remain excluded or become explicitly covered
+
+SPEC-040 + SPEC-041 + SPEC-042 normative amendments
+  -> closed successor reservation/AAD and lifecycle contract
+
+SPEC-015 + SPEC-022 + SPEC-036 normative amendments
+  -> closed receipt and verification/settlement contract
+
+All above approved
+  -> runtime implementation slices
+  -> local integration
+  -> real MLX/hardware acceptance
+  -> separate Trusted Pool production qualification
+```
+
+The runtime implementation gate opens only when the exact accepted Build 2 acceptable-identity fields, Build 2 supported-client artifact/API contract, Build 3 covered-observation fields, and Build 3 stable-identity/economics prerequisites are copied into a revised plan and the adversarial plan review again reports zero Critical, High, and Medium findings. Phase A normative edits and source implementation remain blocked until then; review of this provisional contract can proceed now.
+
+## 6. Proposed normative contracts for review
+
+These identifiers are provisional until the owning SPEC amendments land. Field sets are intentionally explicit so review can challenge them before code exists.
+
+### 6.1 Protocol generation and capability negotiation
+
+Keep all global relay-blind v1 objects byte-for-byte compatible. Introduce a separate generation for pool-scoped private requests:
+
+- reservation: `relay-blind-pool-reservation-v1`;
+- envelope/body encoding: `relay-blind-pool-request-v1`;
+- consume/status: matching `relay-blind-pool-*-v1` objects;
+- receipt contract: a new SPEC-015 receipt version, provisionally `receipt_version: "5"`;
+- positive capabilities advertised by the buyer client, gateway, coordinator settlement backend, and the authenticated provider session.
+
+An object from one generation cannot be parsed or normalized into the other. A v1 global reservation cannot accept pool fields. A pool request cannot fall back to global v1.
+
+The supported-version intersection is computed before reservation issuance and repeated before quota. The client sends its supported closed protocol and receipt versions. The gateway uses its local version set plus a fresh, authenticated coordinator capability response. The coordinator response is derived from the exact loaded reservation parser, migrated store schema, receipt parser/key registry, accepted observation-profile registry, and settlement implementation; this is the runtime settlement-backend/verifier readiness capability. The standalone `phase7-verify` tool is an offline consumer and is not treated as a request-path capability hop. The provider capability is bound to its authenticated WebSocket session and release/admission generation.
+
+Each capability record includes producer identity, protocol set, receipt-version set, schema generation, issued time, expiry, and monotonic connection/config generation. Hop authentication uses the existing authenticated channel or a contract-approved signature. Gateway caches expire no later than the record expiry and are invalidated on coordinator reconnect, provider reconnect, config reload, downgrade, or store migration-generation change. An empty intersection, stale record, unknown future version, unmigrated store, or unavailable settlement backend returns a typed unsupported result before reservation consumption, quota hold, provider bytes, inference, or settlement/reward mutation.
+
+### 6.2 Authoritative pool-policy snapshot
+
+Add one immutable `PrivatePoolRouteAuthorityV1` record captured at request start under the dispatch-fence serialization boundary described in section 6.6. Its canonical `route_basis_digest` covers every field below except `observation_capture_digest`; the final `route_snapshot_digest` covers the canonical route basis plus the coordinator-owned `observation_capture_digest`. This two-stage construction avoids a circular digest while linking both records.
+
+- `pool_id`;
+- `manifest_version`;
+- `manifest_core_digest`;
+- `pool_generation`;
+- `pool_state_epoch_hash`;
+- `policy_not_before_unix` and `policy_expires_at_unix`;
+- `buyer_authorization_generation` and a non-secret authorization-record digest;
+- acceptable-provider authorization source/handle, set generation, canonical acceptable-set digest, and selected relay-identity fingerprint; the complete set is resolved for selection but is not copied into this settlement snapshot;
+- selected provider relay-identity fingerprint and stable internal provider/session binding;
+- `model_allowlist_digest`;
+- effective settlement mode and receipt contract;
+- required Build 3 observation profile id/version/generation;
+- accepted SPEC-015 receipt-key authority/source, key id, canonical authenticated key-record digest, raw public verification key bytes, key generation, validity interval, and revocation high-water mark;
+- accepted pool retention-policy id/version and canonical resolved field-matrix digest;
+- provider membership/admission record digest;
+- policy predicate digest;
+- observation capture digest;
+- capture timestamp and bounded freshness deadline.
+
+The hot registry projection must carry all fields from the accepted durable manifest/lifecycle record. Recomputing part of the record from a newer policy at settlement is forbidden. `pool_state_epoch_hash` must be a domain-separated digest of the stable pool id, accepted manifest digest, lifecycle state, generation, and the exact membership/revocation high-water mark. It cannot be a hash of a mutable in-memory map iteration.
+
+### 6.3 Pool-scoped reservation
+
+The closed reservation request must include the normal endpoint/model/stream/cap/size fields plus:
+
+- canonical `pool_id` selected from authenticated credential scope;
+- the final Build 2 authenticated acceptable-provider object: either the sorted unique relay-identity fingerprint set and its generation, or an authenticated opaque handle that the coordinator resolves to that complete set before filtering; a client-supplied digest alone is never selection authority;
+- supported private-pool protocol and receipt-contract versions;
+- the buyer-observed pool-policy digest when the client has one.
+
+The successful reservation must bind:
+
+- every existing global v1 reservation field;
+- the complete `PrivatePoolRouteAuthorityV1` digest and its buyer-safe constituent fields;
+- accepted retention-policy id/version/matrix digest and the buyer-facing retention disclosure derived from it;
+- selected provider relay identity fingerprint and signed request-encryption key record;
+- acceptable-set digest/generation and proof that the selected relay identity is in the actual coordinator-authorized set;
+- canonical requested model, provider model selector, and authoritative model/artifact admission digest;
+- receipt contract, accepted receipt-key source/id/digest/generation/validity/revocation snapshot, and Build 3 observation requirement;
+- `failover_policy: disabled`.
+
+Reservation creation must happen only after buyer authorization and selection against one consistent pool snapshot. The public response identifies only the selected relay identity and accepted receipt-key identity needed for buyer verification; it must not expose unrelated candidates, stable internal provider ids, or pool membership. Internally, the route snapshot binds the selected relay identity to the stable provider/session authority used by dispatch and settlement.
+
+### 6.4 Successor AEAD transcript and wallet signature
+
+Create a new domain tag; never append fields to the existing v1 transcript. The successor AAD must encode, in fixed order and fixed binary types:
+
+1. protocol/version/mode/endpoint;
+2. requested and provider model;
+3. stream flag, request id, caps;
+4. provider and buyer one-time bindings;
+5. key record digest and key id;
+6. buyer ephemeral public key and replay nonce;
+7. issued time and algorithm;
+8. pool id, manifest version, manifest digest;
+9. pool generation, state-epoch hash, and retention-policy id/version/matrix digest;
+10. private-pool route-authority digest;
+11. acceptable-set digest/generation and selected relay-identity fingerprint;
+12. model/artifact admission digest;
+13. receipt contract and accepted receipt-key source/id/digest/generation/validity/revocation high-water mark;
+14. required observation profile id/version/generation and coordinator-owned observation-capture digest.
+
+The SPEC-040 semantic signature must cover the exact same authority fields plus the canonical envelope digest and route. The gateway must strip buyer-supplied internal authority headers and regenerate them only from authenticated state.
+
+### 6.5 Coordinator-owned observation capture and audit artifact
+
+After Product Build 3 accepts one production observation scope, the coordinator captures one immutable `ComputeObservationCaptureV1` at request start, before quota and dispatch, from the authoritative Build 3 observation store. This is the exact accepted SPEC-036 closed request-start capture, wrapped with Build 4 attempt/route linkage; Build 4 does not define a reduced parallel observation schema. The provider cannot submit or select this record. Its canonical content includes every accepted load-bearing field, grouped here for review:
+
+- account scope, request id, attempt id, selected internal provider/session binding, and selected relay identity;
+- `route_basis_digest`, canonical model id, model hash, artifact/admission digest, runtime/profile id and version;
+- full covered key: stable provider identity, provider/assigned id, model and target hash, tokenizer identity, sampler stage/profile/coverage-set digest, corpus, threshold, hardware-runtime class/digest, target generation, and signed-catalog digest;
+- complete composite SPEC-022 and SPEC-036 policy versions/modes/digests/coverage/effective-enforce binding and linked route-basis digest;
+- captured state/expiry/adjudication origin, window id, circuit-breaker state/scope, capture time, observation expiry and revocation high-water mark;
+- complete reference-set admissibility record/digest/status/quorum/fault-check version, every sorted reference event/source/failure-domain identity, source-independence evidence, runtime-build provenance, golden-fixture validation, and refresh timestamp;
+- accepted calibration record/digest and stable provider identity/Sybil-resistance authority generation/cost-model version required by the Build 3 activation contract;
+- a closed availability/outcome code that decides whether positive-verification-required dispatch is allowed. Missing or unreadable load-bearing fields fail closed.
+
+The capture is persisted transactionally with the route snapshot before dispatch. Its domain-separated digest becomes `observation_capture_digest` in the final route snapshot, reservation, AAD, wallet signature, durable consume state, and authenticated provider dispatch. The provider only echoes and signs this coordinator-supplied digest. Settlement compares the receipt reference to the persisted capture and never substitutes current observation state, a provider-chosen value, or a later looser profile.
+
+After the provider receipt arrives, the coordinator creates a separate canonical `ComputeSettlementAuditArtifactV1` binding account/request/attempt/provider, final route-snapshot digest, observation-capture digest, receipt-tuple digest, verifier version, and outcome/reason. This coordinator-owned artifact is the authoritative audit object. A provider signature over an observation-capture or audit-artifact reference proves only that it signed the reference; it does not prove that the referenced observation is true. If the owning SPEC later requires the provider receipt to reference a complete audit artifact, that artifact must be frozen before signing without a circular digest.
+
+### 6.6 Lifecycle authorization rechecks
+
+Perform coherent rechecks at reservation and consume. Gateway-owned account/session authorization, replay, quota, and wallet cap state are rechecked atomically at the gateway `dispatch_armed` transaction. Coordinator-owned pool/provider/key/model/observation authorities are rechecked at durable outbox preparation and the final fenced committed enqueue defined in section 6.7. Each owner checks:
+
+- buyer credential/session validity and pool authorization generation;
+- acceptable provider identity and pin validity;
+- pool routeability, policy validity, manifest identity, generation, and epoch;
+- provider membership/revocation and required pool capability;
+- provider authenticated session and relay-blind key validity/revocation;
+- accepted receipt-key id/digest/generation/validity and revocation high-water mark;
+- canonical model allowlist and authoritative model/artifact admission;
+- settlement mode/receipt-key capability;
+- Build 3 observation profile availability when policy requires positive verified settlement.
+
+Any mismatch before the applicable owner's dispatch cutoff burns the reservation and releases/refunds a held quota reservation. The client creates a fresh transaction. After committed enqueue, no mismatch authorizes rerouting or re-encryption. Receipt verification loads the immutable accepted request-start public verification key from the durable authority archive even if routine rotation/expiry or live-registry eviction occurs later. Receipt-key emergency revocation follows the closed table in section 6.8. A policy update cannot retroactively weaken or rewrite the captured settlement contract. Restrictive pool revocation may cancel according to existing SPEC-042 semantics, but settlement still uses the immutable request-start authority.
+
+### 6.7 Cross-service admission cutoffs and coordinator dispatch linearization
+
+This build preserves the established SPEC-041 ordering and SPEC-040 authority boundary rather than pretending one in-process lock spans gateway and coordinator:
+
+1. The gateway proves a fresh capability intersection. Reservation issuance creates no quota or dispatch authority.
+2. Before quota or dispatch, the gateway calls coordinator consume. Consume atomically burns the envelope and persists coordinator state, then returns a one-use execution authorization. Consumption cannot dispatch.
+3. The gateway performs its existing serialized account/wallet admission transaction: recheck account/session authorization and expiry, replay, model/caps, account quota and session exposure; create the account/session quota reservations; and durably move the provisional journal to `dispatch_armed`. This transaction is the final gateway-owned authorization cutoff. It binds request/attempt, account/session, envelope digest, execution-authorization digest, coordinator consume generation, route/pool intent, caps, and expiry into an authenticated `GatewayDispatchArmV1` token.
+4. The internal dispatch request carries that token over the authenticated gateway/coordinator channel. The coordinator verifies its MAC/signature, expiry, exact bindings, single-use id, and equality with consumed state before outbox preparation. It cannot create, widen, or refresh gateway authorization.
+5. Coordinator storage compare-and-swaps `consumed_predispatch` to `dispatch_prepared` and writes a durable outbox containing the gateway-arm digest, all coordinator-owned authority epochs, and the complete authenticated first provider frame.
+6. Coordinator-owned pool buyer authorization/acceptable-set generation, pool lifecycle/manifest/membership, provider session/encryption key, receipt-key archive/revocation, model/admission, and observation mutations enter the coordinator `private_dispatch_fence` before publication. Under that fence, final dispatch rereads those authorities, verifies the outbox epochs, registers a one-use `PrivateDispatchLease`, and performs a bounded nonblocking enqueue to the exact provider session.
+7. Successful enqueue is `dispatch_committed`, the first point at which request bytes are eligible to leave the coordinator. Coordinator-owned revocation and enqueue serialize: if revocation wins, state becomes `predispatch_rejected` and zero provider bytes leave; if enqueue wins, the mutation is postcommit. After enqueue the coordinator marks `dispatched`; a crash in between becomes `dispatch_uncertain` and never re-enqueues.
+
+Gateway authorization/session revocation serializes with step 3, exactly as SPEC-040 requires. A request already `dispatch_armed` may proceed after a later gateway revocation; no later `claimed` request may arm. Gateway cancellation or quota refund after arm is forbidden until authenticated coordinator status proves `predispatch_rejected`/expired with zero commit, or settlement/reconciliation determines the terminal effect. This avoids a refund racing a valid enqueue. The coordinator fence claim applies only to coordinator-owned authorities; no test injects gateway mutation inside it.
+
+Failure rules are exact. If consume response is lost, the gateway does not retry consume; authenticated status resolves the burned envelope, and no quota exists yet. If gateway admission/arm fails after consume, the envelope remains burned and no quota remains. If the dispatch request or response is lost after `dispatch_armed`, the gateway does not retry dispatch automatically; it holds quota and queries status until the coordinator durably fences the consumed attempt predispatch or reports committed/uncertain/terminal state. A coordinator crash before outbox preparation can atomically reject/expire the consumed attempt; a crash at or after enqueue is uncertain/postdispatch and cannot refund without reconciliation. Provider at-most-once claims remain the final execution duplicate fence.
+
+No network I/O may block while holding the coordinator fence: the per-session queue accepts the already bounded frame immediately or rejects it. The transport writes only frames carrying a committed lease id/MAC bound to provider session, request, attempt, envelope, route snapshot, gateway-arm digest, and authority epochs. It cannot synthesize or retry a frame from `dispatch_prepared`. Queue rejection or final coordinator validation failure marks `predispatch_rejected`; the gateway then releases/refunds through its durable journal. Failure or uncertainty after commit never permits ciphertext reuse or provider substitution.
+
+The authenticated outer dispatch context must carry digests for the envelope, selected provider/session, private-pool route authority, model/artifact admission, receipt contract, accepted receipt-key snapshot, observation capture, and required observation profile. These fields live inside SPEC-008 protection when that leg is enabled and otherwise rely on the authenticated WebSocket session. HTTP transport remains forbidden.
+
+The provider journal execution identity must add the private-pool authority digest and receipt contract to its domain-separated filename/preimage. A global v1 claim and pool v1 claim must never collide. The provider validates every clear binding before decryption and validates inner request/model/caps after decryption. It must pin one runtime handle for tokenization, inference, and receipt production.
+
+### 6.8 Successor receipt and verifier
+
+SPEC-015 v0.4 remains exact and unchanged. Define a new closed receipt tuple for pool-scoped relay-blind settlement. At minimum it must bind:
+
+- `receipt_version`, signature algorithm, and the exact accepted request-start receipt-key source/id/authenticated-record digest/generation/validity/revocation snapshot; the receipt does not carry verifier-trusted public-key authority;
+- account scope, request id, and attempt number;
+- selected relay-identity fingerprint and internal stable provider/session binding checked from the private route snapshot; no unrelated candidate identity is disclosed;
+- canonical model id, loaded model hash, and artifact/admission digest;
+- route snapshot digest and private-pool route-authority digest;
+- pool id, manifest version/digest, generation, and state-epoch hash;
+- accepted retention-policy id/version/matrix digest;
+- envelope digest and AEAD transcript digest, not a fabricated relay-visible plaintext prompt hash;
+- provider validation digest and terminal-evidence digest;
+- output hash/prefix range and terminal state/timestamps;
+- strict usage object;
+- Build 3 observation profile id/version/generation and coordinator-owned request-start observation-capture digest.
+
+Whether a buyer-only plaintext-content digest is included must be decided by the owning SPEC after privacy analysis. Relays must not require or persist a plaintext prompt hash merely to reproduce v0.4 semantics.
+
+Verifier outcomes remain `pending`, `verified`, `quarantined`, and `zero_settled`. Cryptographic validity is necessary but not sufficient. `verified` additionally requires:
+
+- exact route, pool, envelope, provider, model/artifact, terminal, output, and usage matches;
+- no replay, overlap, version, or timing failure;
+- signature verification against the exact accepted request-start receipt key and provenance, with no settlement-time key substitution;
+- independently valid Build 3 observation evidence for the exact covered model/runtime/profile/generation and request window;
+- policy mapping that permits positive settlement.
+
+Provider validation, a provider signature, an artifact assertion, or observation availability alone cannot produce `verified` or reward eligibility. Missing, expired, revoked, mismatched, or otherwise untrusted observation evidence yields `pending` only until the bounded evidence deadline and then **must become `quarantined`**. The buyer reservation is released/refunded, provider credit stays zero, rewards stay excluded, and payout readiness stays false. `zero_settled` is reserved for a fully verified, non-creditable terminal outcome; it is never used for receipt or observation trust failure. No later receipt or evidence can change a terminal quarantine.
+
+The coordinator persists an `AcceptedReceiptKeySnapshotV1` transactionally with the route snapshot. It contains the authority/source identity, key id, exact raw Ed25519 public verification-key bytes, canonical authenticated source record and signature/proof, record digest, key generation, validity interval, revocation high-water mark, capture time, and archive retention deadline. The verifier loads it only by internal attempt/route linkage, authenticates the source record, rederives key id and digest from the raw bytes, and compares every receipt reference. Receipt input, provider reconnect state, and the current live registry are never verification-key sources. The archive survives coordinator restart, routine rotation, expiry, and live-registry eviction for the full pending/reconciliation/dispute horizon; corruption or unavailability is a trust failure and cannot fall back to another key.
+
+Receipt-key lifecycle outcomes are closed:
+
+| Ordering | Admission/verification result | Buyer/provider/reward/payout/finality |
+|---|---|---|
+| Routine rotation or expiry before `dispatch_committed` | Final coordinator recheck rejects old key; no provider bytes | Buyer reservation released/refunded; provider credit zero; rewards excluded; payout false; predispatch terminal |
+| Emergency revocation published before `dispatch_committed` | Final coordinator fence rejects | Same predispatch terminal effects |
+| Routine rotation/expiry after `dispatch_committed` | Verify only with archived request-start key if it was valid at commit | Normal receipt/observation terminal table; never substitute current key |
+| Emergency compromise revocation published after commit while settlement is nonterminal | Receipt trust fails immediately; terminal `quarantined` | Buyer reservation released/refunded; provider credit zero; rewards excluded; payout false; no later evidence changes outcome |
+| Emergency compromise revocation effective at or before commit but discovered before terminal settlement | Terminal `quarantined` | Same quarantine effects; the claimed signing timestamp cannot override authority revocation |
+| Emergency revocation after an already terminal verified/zero-settled/quarantined row | SPEC-022 first-terminal-wins; no retroactive mutation in this build | Existing debit/refund/credit/reward/payout/finality remain unchanged; incident recovery is separately governed and out of scope |
+
+The accepted SPEC amendment must distinguish routine rotation from emergency compromise revocation and make publication/effective timestamps monotonic and authenticated. Deleting archived verification material is never a revocation mechanism.
+
+### 6.9 Settlement and rewards
+
+Use the existing gateway quota journal, coordinator settlement tables, request log, and reconciliation flow. Add immutable private-pool fields and a supported receipt-version discriminator. Do not create another ledger.
+
+`PositiveVerificationExcluded` may become false only on the dedicated successor path after successful verification. `RewardsExcluded` remains true by default. Clearing it requires the Build 3 governed reward-state mapping to name the exact covered request profile; it is not implied by settlement verification. Payout execution remains disabled and out of scope.
+
+### 6.10 Compatibility rules
+
+| Producer | Consumer | Required result |
+|---|---|---|
+| Existing global relay-blind v1 | Existing or successor stack | Existing behavior unchanged; still observe-only and positive-verification/reward excluded. |
+| Successor pool request | Old gateway/coordinator/provider | Fail before quota from absent positive capability; no field stripping or global fallback. |
+| Global or pool plaintext request | Successor stack | Existing plaintext routing, receipts, and pool protections unchanged. |
+| SPEC-015 v0.4 receipt | Successor verifier | Verify only under existing plaintext contract. Reject it as a private-pool settlement receipt. |
+| Successor receipt | Old verifier | `inconclusive: unknown_receipt_version`; no debit/provider-positive settlement/reward. |
+| Successor receipt with missing/extra/null/wrong-type fields | Successor verifier | Invalid/quarantined; closed schema, no normalization. |
+| Successor receipt with unknown observation profile generation | Successor verifier | Pending until deadline, then governed fail-closed outcome; never verified. |
+| In-flight request during config rollback | Successor stack | No new private-pool admission; durable dispatched work reconciles without replay; global traffic continues. |
+
+Compatibility is proved by a generated monotone intersection invariant, not a hand-picked rollout list. Let `C = {client, gateway, coordinator_settlement_backend, provider_session}` and `S = {gateway_quota, coordinator_relayblind_outbox, coordinator_settlement_receipt, request_audit, provider_journal}`. Generate every `2^|C| * 2^|S| = 512` supported/ready bit-vector row, then cross each row with fresh, expired, reconnect-invalidated, and downgrade-invalidated capability-cache state for 2,048 bounded property rows. Admission succeeds only when every required component bit and every store-readiness bit is true and the exact version intersection is nonempty/fresh; flipping any one true required bit to false can only change success to the same prequota unsupported terminal, never the reverse. Unknown-future versions and settlement-backend/key/observation unavailability are additional false-readiness cases. Every rejected row has zero reservation consumption, quota, provider bytes/inference, settlement, and reward mutation. Representative all-new, all-old, nonadjacent old pairs, three-old, mixed-store, reconnect, and downgrade cases also run through multi-service integration. The offline verifier is represented by coordinator settlement-backend readiness, not as a dispatch hop.
+
+### 6.11 Component and store migration/rollback matrix
+
+| Component/store | New binary with old store | Old binary with migrated store | Disabled-mode read/write | In-flight and rollback rule |
+|---|---|---|---|---|
+| Gateway quota/reservation database | Startup applies additive migration transactionally before advertising support; no private admission until complete | Fail startup closed after any successor row or irreversible schema generation exists; snapshot restore allowed only if no post-snapshot traffic occurred | May read/reconcile known rows; cannot create successor rows | Post-traffic rollback drains/reconciles with the new binary; old binary is not started against successor traffic |
+| Coordinator relay-blind/outbox store | Add closed protocol, authority, observation, lease, and dispatch state columns/tables idempotently | Fail startup closed if successor rows exist or schema is not explicitly legacy-readable | New admissions off; status/reconciliation remain on | `dispatch_prepared`, `dispatch_committed`, `dispatch_uncertain`, and terminal rows are preserved; uncertain rows never redispatch |
+| Coordinator settlement/receipt stores | Add receipt-version, accepted-key, observation-capture/audit, pool authority, and finality fields without backfill invention | Fail startup closed for successor rows; never parse v5 as v4 | Parse/reconcile existing successor rows, no new private admission | Pending rows reach exact deadline outcome; verified/quarantined/zero-settled finality is immutable |
+| Request logs/audit artifacts | Add versioned bounded metadata and linked attempt ids | Old readers ignore only fields whose omission cannot change authorization or money; otherwise startup/export fails closed | Read-only export allowed with redaction | Records required by active reconciliation/dispute cannot be pruned during rollback |
+| Provider journal | New provider creates a separate generation namespace; legacy entries remain legacy | Old provider must refuse a journal containing successor namespace/marker | May recover/finish existing successor claims; cannot accept new claims | Claim and terminal evidence survive restart; no conversion to global v1 and no second execution |
+| Offline verifier inputs/tools | New parser rejects unknown old/new mismatches explicitly | Old parser returns unknown version and cannot authorize settlement | Read-only | Coordinator readiness remains false until the deployed settlement parser supports the version |
+
+Every migration has a schema marker, precondition check, transactional application, idempotent rerun, and postcondition. A zero-traffic rollback may restore a pre-deploy snapshot only when gateway and coordinator attest no post-snapshot reservation, quota, dispatch, settlement, or journal activity. After any traffic, rollback means disable admission, drain/reconcile with compatible binaries, preserve evidence, and roll forward if an old binary cannot safely open the stores. The reconciliation owner is coordinator settlement for receipt/outbox state, gateway quota reconciliation for buyer reservations, and provider recovery for journal claims.
+
+### 6.12 Retention and pruning contract
+
+All stores share a non-secret canonical `attempt_id`, and every admitted route binds the accepted SPEC-042 retention-policy id, version, and canonical resolved matrix digest. Policy rotation affects only new attempts. Before routeability, the coordinator resolves the field-level pool matrix and computes `required_min(field)` from replay/key expiry, active execution, pending, reconciliation, dispute, accounting, and audit authorities. Admission is allowed only when `required_min(field) <= pool_privacy_max(field)` for every retained field and every required viewer. An unsatisfiable promise makes the pool unrouteable with the same non-enumerating `pool_policy_unsatisfied` class; the implementation may neither retain past the signed maximum nor delete before the safety minimum. Numeric windows and the canonical field taxonomy must be frozen by the owning SPEC before Phase A.
+
+The minimum field taxonomy and transitions are:
+
+| Field group | Allowed viewers | Minimum/recovery form | Privacy-bound transition and tombstone |
+|---|---|---|---|
+| Request plaintext, tools, schemas, keys, ciphertext | Selected provider for plaintext; relays only the opaque frame in flight | No relay persistence beyond bounded transport buffers; provider follows its separately disclosed policy | Delete at transport/journal boundary; tombstone contains none of these fields |
+| Actual acceptable fingerprint set | Coordinator selector only during reservation | Resolve from authenticated Build 2 authority; persist only source handle/generation, set digest, and selected relay identity | Erase expanded candidate set immediately after selection; never expose it in logs/status/tombstones |
+| Account/session/buyer authorization references | Gateway admission and coordinator settlement roles; owning buyer view where authorized | HMAC/digest or stable internal join sufficient for quota/replay/reconciliation | Redact raw bearer/signature immediately; later tombstone contains only domain-separated join digest and terminal expiry |
+| Pool/manifest/retention-policy ids and digests | Owning buyer, authorized pool operator, coordinator settlement | Route snapshot through pending/reconciliation/dispute | At pool maximum, retain only the accounting-authorized attempt/terminal linkage if the matrix permits; otherwise pool is inadmissible |
+| Selected relay identity and internal provider/session binding | Owning buyer sees selected relay fingerprint; provider self sees own binding; coordinator/pool operator see only policy-authorized fields | Required through dispatch, receipt verification, reconciliation, and dispute | Replace internal session with a nonreversible attempt-scoped digest at the earliest permitted boundary; no unrelated identities in tombstone |
+| Receipt public key snapshot and authenticated key record | Coordinator verifier/auditor; buyer only approved key identity/digest | Raw public verification key and authenticated record through pending/reconciliation/dispute | Delete raw key at policy maximum only after terminal/dispute minima; tombstone may retain key-record digest if permitted |
+| Observation capture/reference/calibration and compute audit | Coordinator verifier/auditor; provider/buyer/pool operator receive only sanitized approved status | Complete immutable evidence through settlement/reconciliation/dispute and Build 3 audit minimum | Redact source-level metadata to approved digests/aggregate, then delete by pool maximum; tombstone contains only permitted artifact digest/outcome |
+| Dispatch outbox, lease, replay nonce, provider journal | Coordinator/provider recovery roles | Full bounded frame only until commit/terminal; replay digest and state through replay/recovery minimum | Delete frame/ciphertext metadata first; retain only domain-separated replay/claim digest, terminal class, and expiry if policy permits |
+| Receipt, usage, quota, debit/credit, settlement finality | Owning buyer/provider views plus accounting/settlement roles according to SPEC-005/022 | Authoritative accounting record and joined receipt fields through statutory/governed accounting/dispute minimum | Pool policy must explicitly permit mandatory accounting fields for that minimum or admission is rejected; public view is aggregate only |
+| Sanitized logs, metrics, reasons, timestamps | Role-scoped operator views; public aggregate only | No authorization dependency; bounded operational window | Aggregate/redact at configured transition, delete row-level values by pool maximum; no identity-bearing tombstone |
+
+Viewer classes are closed: owning buyer, selected provider self, authorized pool operator, coordinator settlement/audit role, global operator security role, and public aggregate. Default deny applies to an unlisted field/viewer pair. Tombstones contain only the exact fields named above and only when the pool matrix permits them; a generic tombstone cannot bypass a pool maximum.
+
+Dependency-aware pruning removes transport/frame material first, then applies field-level redaction, then deletes authority/evidence after all minima, and finally expires permitted tombstones. Partial purge, clock movement, restart, delayed receipts, policy rotation, configuration cycling, and disputes cannot change the captured matrix or delete a required field early. After every minimum and dependency ends, each field is redacted/deleted no later than its captured privacy maximum.
+
+## 7. Phased changes after dependencies land
+
+### Phase A: normative amendments and vectors
+
+Amend SPEC-040, SPEC-041, SPEC-042, SPEC-015, SPEC-022, and the applicable SPEC-036/Build 3 contract. Update `AUTHORITY.json`, `CONFORMANCE.json`, generated indexes, and requirement mappings. Freeze closed schemas, binary framing, digest domains, error mapping, capability versions, and cross-language positive/negative golden vectors.
+
+Acceptance for this phase: the dependency contracts have landed, their exact fields have replaced the provisional fields here, and an independent adversarial plan/contract review has zero Critical, High, or Medium findings. No Phase A normative edit or runtime feature flag may begin before that gate.
+
+### Phase B: authoritative snapshot and durable migrations
+
+Extend durable trust-pool reconstruction and hot registry projection with manifest identity and epoch binding. Add immutable pool/private fields to relay-blind reservation state, route snapshots, settlement receipts, request logs, gateway reservation/replay metadata, and provider journal records. Migrations follow the exact component/store matrix in section 6.11, are transactional and idempotent, and retain old rows with an explicit protocol generation. Unsafe downgrade is fail-closed rather than best effort.
+
+Old rows must never be upgraded by inference. A missing protocol generation means legacy global v1/plaintext semantics.
+
+### Phase C: reservation and client binding
+
+Consume Build 2's accepted identity selection contract. Implement pool-scoped authenticated reservation before encryption, successor client verification, pin rotation/revocation handling, and SPEC-040 wallet/API authorization. Retain the existing pool-rejection guard for global v1 objects.
+
+### Phase D: lifecycle-safe opaque dispatch
+
+Implement coherent rechecks, successor opaque dispatch, provider journal namespace, decryption/inner validation, cancellation, and crash recovery. Keep cross-provider failover impossible.
+
+### Phase E: receipt verification and settlement
+
+Implement the successor receipt producer/parser/verifier, Build 3 evidence lookup, bounded pending deadline, immutable outcome finality, and exactly-once quota/settlement reconciliation. Preserve reward exclusion unless separately governed.
+
+### Phase F: product surfaces and observability
+
+Expose separate encryption, pool authorization, receipt, observation, settlement, and rewards states with last-updated/freshness. Add operator metrics and bounded audit reason codes without content, keys, raw pins, raw account/session credentials, candidate membership, or per-provider pool health leakage.
+
+The accepted Product Build 2 handoff must name the supported client artifact, repository, commit/version, and response/status schema. Repository-local CLI fixtures prove only that client. The deployed buyer console in `MalibuAI/malibu` is a separate integration owner and qualification surface; the historical local frontdoor is not accepted as its substitute. Owner-approved client/UI fixtures must cover every independent state, stale/last-known timestamps, privacy wording, and recovery action.
+
+### Phase G: qualification
+
+Run local services, deterministic cross-language fixtures, actual MLX inference on at least one physical supported Mac, protected journey capture, and the complete independent code/security/architecture/adversarial/product review gate. Deterministic tests exercise two independently pinned provider identities; a second physical provider is stronger evidence but is not required to prove the one-real-model Build 4 journey. Production qualification and activation remain a later explicit decision.
+
+## 8. Migration, rollout, and rollback
+
+- Use new protocol/version discriminators and the per-store schema markers in section 6.11. Nullable columns are permitted only when loaders require an explicit legacy protocol generation; absence never implies successor authority.
+- Backfill nothing that would invent pool, observation, or receipt authority. Legacy rows remain legacy.
+- Deploy read support and capability reporting before write/admission support.
+- Enable successor admission only when the buyer, gateway, coordinator settlement backend, and authenticated provider session establish a fresh compatible intersection and stores are migrated.
+- Keep the feature default off. Pool-scoped relay-blind requests continue to fail closed during partial rollout.
+- Rollback follows section 6.11: disable admission first; use snapshot restore only with a proved zero-traffic boundary; otherwise drain/reconcile on compatible binaries and roll forward when old binaries cannot safely read the stores. It does not delete state or reopen burned reservations. Dispatched/uncertain rows continue through status/reconciliation and never redispatch.
+- Never roll back by accepting a private request as global, accepting a v5 receipt as v4, clearing exclusion flags, or relaxing coordinator-wide enforce policy.
+
+## 9. Observability contract
+
+Metrics must separate these stages and outcomes:
+
+- reservation requests by protocol generation and safe failure class;
+- buyer/pool authorization denial without pool-existence labels;
+- acceptable-identity no-candidate decisions;
+- lifecycle recheck failures by stage;
+- generation/epoch/policy drift;
+- envelope/route/model/artifact/receipt/observation digest mismatch;
+- predispatch burns, dispatch commits, cancellations, uncertain recovery;
+- receipt parse/verification outcomes and pending age;
+- settlement finality and duplicate suppression;
+- reward exclusion reason.
+
+Logs and audit rows may contain bounded digests, versions, generations, timestamps, and closed reason codes. They must not contain plaintext request content, ciphertext, provider private keys, identity-pin material beyond approved fingerprints, credentials, wallet signatures, or unredacted candidate membership. Unauthorized errors and timing remain non-enumerating.
+
+The public observable set for unknown/unauthorized/disabled pools and unapproved identities is exactly HTTP status, closed error code, response byte-length class, retryability, and recovery action. The implementation uses the same authentication work, bounded dummy lookup, response serializer, and deterministic minimum response floor for those cases; tests use a fake clock to prove identical floor behavior. Local microbenchmarks additionally compare warmed p50/p95/p99 over at least 1,000 samples per class with fixed CPU/load and require each quantile difference to stay within the larger of 10% or 250 microseconds. Network measurements are qualification evidence only and use separately stated topology and thresholds; noisy CI timing does not gate correctness when the deterministic floor invariant passes.
+
+### 9.1 Protected journey evidence contract
+
+Local physical-hardware qualification requires a protected `private_pool_journey_v1` artifact; conformance promotion requires the same schema signed by a separately governed conformance signer. The canonical artifact is strict canonical JSON with a domain-separated Ed25519 signature over all bytes except the signature field. The trusted signer registry, signer purpose, custody, rotation, and revocation are operator-governed and never sourced from the provider under test.
+
+The artifact includes repository remote, commit, required ancestry to the reviewed implementation commit, submodule/package locks, dirty-tree status and patch digest when an explicitly approved instrumented tree is used; capture start/end and expiry; host hardware/OS/runtime; exact commands and exit statuses; component versions; sanitized raw-output file hashes; and immutable joins for account scope, request id, attempt id, acceptable-set digest, selected relay identity, internal provider/session binding, route basis/snapshot, observation capture, envelope/transcript, dispatch lease/outbox, provider claim/runtime/model/artifact, receipt tuple/signature, compute audit artifact, coordinator settlement row, gateway quota row, and buyer response/status.
+
+A semantic validator checks canonical bytes, signer trust/purpose/time, artifact expiry, commit ancestry, dirty-tree declaration, command allowlist, successful fresh execution, every join/digest, raw-output hashes, distinct request ids, expected physical MLX runtime evidence, and absence of secrets/plaintext. It rejects missing joins, mismatched hashes, reused attempts/evidence, untrusted/revoked signers, expired captures, unexplained dirty state, fixture backend substitution, or a separate MLX selftest that is not joined to the settled request. Protected evidence proves only the stated local run; deployment and Trusted Pool production qualification remain separate.
+
+## 10. Acceptance criteria
+
+Implementation acceptance requires all of the following:
+
+1. One authorized private-pool nonstream request and one streaming request complete through actual MLX inference on a supported physical Mac and settle under the successor verified contract.
+2. Evidence records exact model id/hash, artifact/admission digest, runtime/profile, observation generation, Mac hardware/OS/runtime, selected relay identity, internal provider/session binding, accepted receipt-key source/id/digest/generation, pool manifest/generation, and receipt version without recording request plaintext or secrets.
+3. An unauthorized buyer, nonmember provider, disallowed model, stale policy, stale generation, revoked member, revoked buyer authorization, revoked/expired pin/encryption key/receipt key, unsupported observation profile, and incompatible receipt all fail closed.
+4. Digest substitution for pool, manifest, generation/epoch, model/artifact, envelope/transcript, provider identity, output, usage, observation, or receipt is detected and cannot settle.
+5. Concurrent consume/replay dispatches at most once. No existing ciphertext is sent to a second provider.
+6. Gateway-owned revocation is tested around the atomic `dispatch_armed` cutoff; revocation after arm may proceed under the existing reservation. Coordinator-owned revocation is tested around the final `dispatch_committed` fence. When a revocation wins its applicable cutoff, provider bytes/inference are zero, the attempt is burned, and any hold is released/refunded. Postcommit revocation follows the closed receipt-key/pool settlement rules without replay.
+7. Existing plaintext global, plaintext Trusted Pool, global relay-blind v1, wallet, SPEC-008, and v0.4 settlement regression suites remain green.
+8. Reward eligibility remains excluded unless the Build 3 governed mapping explicitly covers and accepts the request. No payout or production flag changes occur.
+9. Local success is reported separately from physical-Mac qualification, signed evidence, deployed-service evidence, and Trusted Pool production qualification.
+
+## 11. Hardware and external prerequisites
+
+- A supported physical Apple Silicon Mac capable of running the chosen covered MLX model/runtime/profile.
+- The exact trusted model artifact and Build 1 network admission identity.
+- Product Build 2 supported client/pin provisioning and two independently pinned provider identities for deterministic selection coverage. The physical journey requires at least one actual supported Mac; a second physical Mac is optional stronger evidence.
+- Product Build 3 reference/calibration inputs, active covered observation profile, generation-aware evidence, expiry/revocation controls, independently accepted stable provider identity/Sybil-resistance authority and cost model, and governed settlement mapping.
+- Local Docker runtime for Docker-dependent cross-service/PostgreSQL tests.
+- A trusted local qualification signer for physical-run evidence. Conformance promotion later requires its separately governed signer/environment.
+- Production operator credentials/configuration are not needed and must not be placed in the worktree.
+
+## 12. Explicit non-goals
+
+- Product Build 2 client implementation or buyer-identity contract invention.
+- Product Build 3 observation/calibration implementation or provider-wide compute-integrity claims.
+- Changes to billing arithmetic, epoch policy, rewards issuance, withdrawals, payouts, or economic activation.
+- Creator revenue split execution.
+- Confidential-compute, anonymity, unlinkability, provider blindness, or no-retention claims.
+- Cross-provider ciphertext failover, automatic replay, split inference, or HTTP private dispatch.
+- Production Trusted Pool promotion, release, deploy, or feature enablement.
+- Treating a provider signature, status adapter, one probe, deterministic fixture, or local integration test as proof of physical computation or production qualification.
+
+## 13. Roadmap-outcome traceability
+
+| Roadmap outcome | Plan step | Verification |
+|---|---|---|
+| Establish receipt versions and digest binding before runtime work | Phase A; sections 6.1, 6.4, 6.8 | Closed-schema/golden-vector tests T01-T10 in the Build 4 test spec; governance checks; independent plan audit |
+| Pool-scoped reservations and lifecycle authorization rechecks | Phases B-D; sections 6.2, 6.3, 6.6-6.7 | T11-T27 and T67, with gateway-arm and coordinator-fence barriers at their actual owners |
+| Encrypted dispatch bound to request/provider/model/pool | Sections 6.4 and 6.7 | T28-T38; digest-substitution matrix; no-next-provider assertions |
+| Explicitly supported verification/settlement | Phase E; sections 6.5 and 6.8-6.9 | T39-T55; real settlement journey; replay/finality tests |
+| Preserve plaintext and protected evidence | Compatibility matrix and Phase G | T56-T63 broad regressions and protected evidence validation |
+| Do not infer physical compute from signatures | Sections 6.5 and 6.8-6.9 | T39-T51 observation negative matrix |
+| Authorized private pool request settles correctly | Acceptance criteria 1-2 | T64 physical MLX protected journey, reported as hardware-qualified only when actually run |
+| Production qualification remains separate | Sections 8, 11, 12 | Acceptance report explicitly marks deployment/activation blocked |
+
+## 14. Prior finding resolutions
+
+| Finding | Resolution in v3 |
+|---|---|
+| H1 observation trust failure could become `zero_settled` | Section 6.8 now mandates pending-to-quarantined, buyer release/refund, zero provider credit/reward/payout readiness, and reserves `zero_settled` for fully verified non-creditable terminals. |
+| H2 receipt key material/finality incomplete | Section 6.8 adds the durable authenticated raw public-key archive, resolver verification/retention, and exhaustive routine/emergency rotation-revocation money/finality table. |
+| H3 dispatch race and cross-service cutoff incomplete | Section 6.7 preserves consume-before-quota, makes the gateway `dispatch_armed` transaction its authorization cutoff, authenticates its arm into coordinator state, narrows the coordinator fence to coordinator-owned authorities, and closes lost-message/crash/refund behavior. |
+| M1 observation digest producer undefined | Section 6.5 defines the coordinator-owned two-stage route/capture construction, authenticated provider delivery, immutable settlement lookup, and separate audit artifact. |
+| M2 migration/rollback vague | Sections 6.11 and 8 define component/store startup, read/write, snapshot, drain, reconciliation, downgrade, and roll-forward rules. |
+| M3 physical evidence contract absent | Section 9.1 defines canonical signed artifact fields, joins, custody, freshness, dirty-tree handling, and semantic rejection rules. |
+| M4 mixed-version matrix incomplete | Section 6.10 defines a generated 2,048-row monotone component/store/cache property matrix plus representative multi-service cases. |
+| M5 retention/pool-policy conflict incomplete | Sections 6.2 and 6.12 bind the pool policy id/version/matrix digest, define field/viewer/redaction/tombstone rules, and reject any recovery-minimum/privacy-maximum conflict before admission. |
+| L1 timing oracle unmeasurable | Section 9 defines a deterministic response-floor invariant and a reproducible local distribution check. |
+| L2 buyer-visible owner ambiguous | Phase F names the Build 2 handoff fields and separates repository-local client evidence from `MalibuAI/malibu` deployed-console qualification. |
+
+## 15. Current disposition
+
+This plan is reviewable now, but runtime implementation is blocked. The exact Build 2 acceptable-identity contract and Build 3 observation covered-key/generation contract are not accepted on this branch. When they land, revise sections 6.3-6.8 with their exact normative fields and digests, re-run the independent plan gate, and only then begin Phase A or source implementation.
