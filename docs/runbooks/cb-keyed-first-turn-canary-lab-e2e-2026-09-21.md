@@ -80,6 +80,12 @@ Do not set CB `on`. Do not raise slots.
 
 ## Live 176 confirmation (2026-09-21, Coder-30B)
 
+**Evidence class: packaged.** This section is the packaged-RC proof for keyed
+first-turn admission — signed `v1.8.176`, `live.malibu.provider`, port 8080.
+The 18084 tables above are an isolated worktree `swift build` and are lab
+evidence only; do not cite them as enable evidence, and do not conclude from
+them that keyed first-turn lacks packaged proof.
+
 Same keyed 4-wide as lab, against live `127.0.0.1:8080` with unique
 `X-MacProvider-Provider-Conversation` keys. `max_tokens=32`.
 
@@ -113,3 +119,10 @@ Do not set CB `on`. Do not promote the fleet.
 
 - Sticky/cross-turn positive `cached_prompt_tokens` batching (AC-26)
 - Wholesale Track A rerun on Qwen 30B
+- SPEC-038 AC-25 API lifecycle on the packaged 176 surface (queue-full,
+  queue-timeout, unsupported-tuple strict failure, duplicate request ID,
+  reconnect/replay, cancellation, post-admission scheduler failure, usage
+  finalization, warm-swap drain)
+- FR-PKV13 overhead-ceiling and sizing-table re-record on the packaged binary
+- Any prompt-heavy 8-wide measurement. `slots_total` stays 4 on the validated
+  Entry 110 value; no 8-wide result is recorded here or in any other bundle.

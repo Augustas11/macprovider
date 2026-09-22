@@ -53,8 +53,7 @@ Studio serving canary
 `bd75f86df829ec456a2cac7e1b23ffa4b08b4455`, includes #1665 and #1666),
 live as `live.malibu.provider`. `v1.8.173` is the Pearl
 coordinator/gateway tag, not a CLI package. Do not promote the fleet. Studio
-buyer CB is **canary** (not `on`). Studio slots are **8** (keyed 8-wide
-proved 2026-09-22). Do not set `on`. Do not promote the fleet.
+buyer CB is **canary** (not `on`). Do not raise slots.
 
 
 | Net change in CLI / Malibu / installer | Status | PR |
@@ -104,7 +103,6 @@ proved 2026-09-22). Do not set `on`. Do not promote the fleet.
 | Stop serial Qwen tool turns after the first complete valid call (omitted/`false` `parallel_tool_calls`; leftover markup must not hang) | merged | #1662 |
 | Keep CB canary streams alive past the first lockstep hop | merged | #1665 |
 | Pearl keyed first-turn chats enter Studio CB canary (positive cache hits stay serial until AC-26) | merged | #1666 |
-| Ultra ≥256 GB default max batch is 8; coordinator drops slot reservation on accept; wholesale queue waits 10s | in progress | #1670 |
 
 #1453 closes when a candidate that includes the **merged** rows is promoted to
 the fleet. #1569 is a later CLI. Spec promotion #1583 is not a CLI change.
@@ -124,7 +122,7 @@ includes `v1.8.176@bd75f86d…` (8-entry cap; dropped unused `v1.8.121` to make
 room; 175, 174, 172, 171, 170, 123, and 122 remain accepted). Studio
 `continuous_batching` is **canary** (see
 [`continuous-batching-canary-175-enable-2026-09-21.md`](../runbooks/continuous-batching-canary-175-enable-2026-09-21.md)).
-Do not set `on`. Studio slots are **8**. Do not promote the fleet.
+Do not set `on`. Do not raise slots. Do not promote the fleet.
 
 #1632 / #1638 / #1639 / #1653 (coordinator leftover rewrite + gateway R014)
 are coordinator/gateway, not CLI rows. #1653 also has the CLI
@@ -146,10 +144,10 @@ confirm bytes are unchanged).
 | Field | Value |
 |---|---|
 | Last built from `main` | `v1.8.176` **signed** @ `bd75f86df829ec456a2cac7e1b23ffa4b08b4455`, branch `release/candidate-1.8.176`, [run 35592782834](https://github.com/Augustas11/macprovider/actions/runs/35592782834). Compat `Augustas11/macprovider:v1.8.176@bd75f86df829ec456a2cac7e1b23ffa4b08b4455`. Includes #1665 and #1666. Live on Studio. |
-| Mac Studio serving canary | `v1.8.176` @ `bd75f86df829ec456a2cac7e1b23ffa4b08b4455` — signed, live, Pearl session accepted (`serving_buyers`, slots **8**, CB **canary**). Previous canary `v1.8.175` remains staged at `/Users/a1/candidate-v1.8.175/`. Do not set `on`. |
+| Mac Studio serving canary | `v1.8.176` @ `bd75f86df829ec456a2cac7e1b23ffa4b08b4455` — signed, live, Pearl session accepted (`serving_buyers`, slots 4, CB **canary**). Previous canary `v1.8.175` remains staged at `/Users/a1/candidate-v1.8.175/`. Do not raise slots — `slots_total: 4` is the validated Entry 110 value, and no prompt-heavy 8-wide measurement is recorded in any evidence bundle, so 8-wide cannot be cited as a reason to move slots in either direction until it is re-run and written down. |
 | Off-train E2E candidate | `v1.8.167` @ `7f833a2f63ddee6b2e146c821341099d89aec169` ([run 35417249468](https://github.com/Augustas11/macprovider/actions/runs/35417249468)) — signed hold-branch CLI used for the 2026-09-19 Pearl Track B run |
 | Older | `v1.8.163` @ `8c0c51d2`; `v1.8.164` BYOM @ `cdbb0257`; CLI artifact `v1.8.166` @ `00ce3625` (not the Pearl runtime tag); CLI `v1.8.172` @ `c512d342`; CLI `v1.8.174` @ `0c276ebb`; CLI `v1.8.175` @ `d02798db` |
-| Status | **Do not promote.** Fleet stays on 1.8.123. Studio is on signed 176 with CB **canary** and **8** slots. Do not set `on`. |
+| Status | **Do not promote.** Fleet stays on 1.8.123. Studio is on signed 176 with CB **canary**. Do not set `on`. Do not raise slots. |
 | Next candidate | **cut.** `v1.8.176` @ `bd75f86df829ec456a2cac7e1b23ffa4b08b4455`. Candidate tags still do not bump `binaryVersion` (stays 1.8.123). |
 | Why the next cut | Combined #1665 (keep CB canary streams past first lockstep hop) + #1666 (Pearl keyed first-turn enters CB canary). Studio canary is on. Do not set `on`. Do not promote the fleet. |
 
@@ -179,10 +177,7 @@ combined candidate**.
   **0× 503**. Idle 16/16 200 but TTFT p95 6362ms (gate ≤5000). Sat 16@8:
   2×200 + 6×429. Ladder clean only through conc=2; conc=4 sheds 5/8.
   Same shape as 175 (49/100). Keyed first-turn CB did not lift Pearl 4-wide
-  success. 2026-09-22 Studio local keyed **8-wide PASS** on live 8080
-  (8/8 HTTP 200, overlap 5.9s vs serial 41s, pressure normal). Wholesale
-  100@4 still waits on coordinator accept-release + 10s queue (#1669)
-  after Pearl apply. Do not set CB `on`. Do not promote.
+  success. Do not raise slots. Do not set CB `on`. Do not promote.
 
 ### Track B — BYOM Ollama / Gemma
 
