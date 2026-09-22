@@ -591,7 +591,7 @@ func (b *billingRecorder) writeProviderHotPath(ctx context.Context, store *billi
 	b.server.log.Warn().Err(err).Str("request_id", b.requestID).Msg("billing hot-path insert failed; retrying provider credit")
 	retryCtx, retryCancel := context.WithTimeout(context.Background(), requestLogWriteTimeout)
 	defer retryCancel()
-	exists, lookErr := store.LedgerCreditExists(retryCtx, in.RequestID, in.ProviderID)
+	exists, lookErr := store.LedgerCreditExists(retryCtx, in.RequestID, in.AttemptN, in.ProviderID)
 	if lookErr != nil {
 		b.server.log.Warn().Err(lookErr).Str("request_id", b.requestID).Msg("billing hot-path credit lookup failed; not retrying")
 		return err
@@ -624,9 +624,10 @@ func (b *billingRecorder) persistSettlementAttemptOutput(store *billing.Store, i
 	if err == nil || !settlementOutputPersistFailedAfterCredit(err) {
 		return err
 	}
+	accountScope, evidenceAttemptN := b.settlementEvidenceIdentity(in)
 	retryCtx, retryCancel := context.WithTimeout(context.Background(), requestLogWriteTimeout)
 	defer retryCancel()
-	exists, lookErr := store.SettlementAttemptOutputExists(retryCtx, in.RequestID, in.ProviderID)
+	exists, lookErr := store.SettlementAttemptOutputExists(retryCtx, accountScope, in.RequestID, evidenceAttemptN, in.ProviderID)
 	if lookErr != nil {
 		b.server.log.Warn().Err(lookErr).Str("request_id", b.requestID).Msg("settlement attempt output lookup failed; not retrying")
 	} else if exists {
@@ -638,7 +639,9 @@ func (b *billingRecorder) persistSettlementAttemptOutput(store *billing.Store, i
 	} else {
 		err = retryErr
 	}
-	if markErr := store.MarkSettlementOutputMissing(retryCtx, in.RequestID, in.ProviderID); markErr != nil {
+	markCtx, markCancel := context.WithTimeout(context.Background(), requestLogWriteTimeout)
+	defer markCancel()
+	if markErr := store.MarkSettlementOutputMissing(markCtx, in.RequestID, in.AttemptN, in.ProviderID); markErr != nil {
 		b.server.log.Warn().Err(markErr).Str("request_id", b.requestID).Msg("settlement attempt output missing mark failed")
 	}
 	b.settlementOutputMissingAfterCredit = true
@@ -676,6 +679,14 @@ func boundedTokenPointer(value *int64, limit int64) *int64 {
 		bounded = limit
 	}
 	return &bounded
+}
+
+func (b *billingRecorder) settlementEvidenceIdentity(in billing.HotPathInput) (string, int64) {
+	attemptN := int64(in.AttemptN)
+	if b.hasSettlementAttemptN {
+		attemptN = int64(b.settlementAttemptN)
+	}
+	return accountScopeForSettlement(b.accountID), attemptN
 }
 
 func (b *billingRecorder) settlementPolicyForLedger() (string, string) {
@@ -765,14 +776,11 @@ func (b *billingRecorder) recordSettlementAttemptOutput(ctx context.Context, sto
 	if terminalTS <= 0 {
 		terminalTS = time.Now().UTC().UnixMilli()
 	}
-	settlementAttemptN := in.AttemptN
-	if b.hasSettlementAttemptN {
-		settlementAttemptN = b.settlementAttemptN
-	}
+	accountScope, settlementAttemptN := b.settlementEvidenceIdentity(in)
 	attempt := billing.SettlementAttemptOutput{
-		AccountScope:          accountScopeForSettlement(b.accountID),
+		AccountScope:          accountScope,
 		RequestID:             in.RequestID,
-		AttemptN:              int64(settlementAttemptN),
+		AttemptN:              settlementAttemptN,
 		ProviderID:            in.ProviderID,
 		Output:                out,
 		OutputAvailable:       outputAvailable,

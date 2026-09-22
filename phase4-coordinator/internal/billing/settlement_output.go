@@ -232,18 +232,19 @@ func nullableOutputString(value string, valid bool) any {
 	return value
 }
 
-// SettlementAttemptOutputExists reports whether any evidence row was stored
-// for this request and provider. A deadline retry uses it so a commit the
-// caller observed as a timeout is not written again with a new timestamp.
-func (s *Store) SettlementAttemptOutputExists(ctx context.Context, requestID, providerID string) (bool, error) {
-	if s == nil || requestID == "" || providerID == "" {
+// SettlementAttemptOutputExists reports whether this attempt already stored
+// evidence. A deadline retry uses it so a commit the caller observed as a
+// timeout is not written again with a new timestamp. The lookup matches the
+// evidence unique key so another attempt or account cannot hide a missing row.
+func (s *Store) SettlementAttemptOutputExists(ctx context.Context, accountScope, requestID string, attemptN int64, providerID string) (bool, error) {
+	if s == nil || accountScope == "" || requestID == "" || providerID == "" || attemptN < 0 {
 		return false, nil
 	}
 	var one int
 	err := s.db.QueryRowContext(ctx, `
 SELECT 1 FROM settlement_attempt_outputs
-WHERE request_id = ? AND provider_id = ?
-LIMIT 1`, requestID, providerID).Scan(&one)
+WHERE account_scope = ? AND request_id = ? AND attempt_n = ? AND provider_id = ?
+LIMIT 1`, accountScope, requestID, attemptN, providerID).Scan(&one)
 	if err == sql.ErrNoRows {
 		return false, nil
 	}
@@ -257,19 +258,19 @@ LIMIT 1`, requestID, providerID).Scan(&one)
 // settlement evidence. The credit amount is left unchanged and the row stays
 // unquarantined so a later evidence write can still settle it. Callers filter
 // on this reason when measuring provider revenue.
-func (s *Store) MarkSettlementOutputMissing(ctx context.Context, requestID, providerID string) error {
-	if s == nil || requestID == "" || providerID == "" {
+func (s *Store) MarkSettlementOutputMissing(ctx context.Context, requestID string, attemptN int, providerID string) error {
+	if s == nil || requestID == "" || providerID == "" || attemptN < 0 {
 		return nil
 	}
 	_, err := s.db.ExecContext(ctx, `
 UPDATE ledger_request_credits
 SET quarantine_reason = 'settlement_attempt_output_missing'
-WHERE request_id = ? AND provider_id = ?
+WHERE request_id = ? AND attempt_n = ? AND provider_id = ?
   AND status = 200
   AND provider_credits > 0
   AND quarantined = 0
   AND (quarantine_reason IS NULL OR quarantine_reason = '')`,
-		requestID, providerID)
+		requestID, attemptN, providerID)
 	return err
 }
 

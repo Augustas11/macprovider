@@ -56,18 +56,19 @@ type CacheBillingRoutingDecision struct {
 	ValidationReason   string
 }
 
-// LedgerCreditExists reports whether this request already has a provider
+// LedgerCreditExists reports whether this attempt already has a provider
 // credit. A hot-path retry uses it so a commit that the caller observed as
-// a deadline is not paid a second time.
-func (s *Store) LedgerCreditExists(ctx context.Context, requestID, providerID string) (bool, error) {
-	if s == nil || requestID == "" || providerID == "" {
+// a deadline is not paid a second time. The lookup matches the ledger
+// unique key so an earlier attempt cannot hide a missing current credit.
+func (s *Store) LedgerCreditExists(ctx context.Context, requestID string, attemptN int, providerID string) (bool, error) {
+	if s == nil || requestID == "" || providerID == "" || attemptN < 0 {
 		return false, nil
 	}
 	var one int
 	err := s.db.QueryRowContext(ctx, `
 SELECT 1 FROM ledger_request_credits
-WHERE request_id = ? AND provider_id = ?
-LIMIT 1`, requestID, providerID).Scan(&one)
+WHERE request_id = ? AND attempt_n = ? AND provider_id = ?
+LIMIT 1`, requestID, attemptN, providerID).Scan(&one)
 	if err == sql.ErrNoRows {
 		return false, nil
 	}
