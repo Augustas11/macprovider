@@ -14,9 +14,9 @@ import (
 )
 
 // settlementOutputWriteContextForTest, when set, replaces the detached
-// context used for the post-credit settlement-output write. Tests use it
-// to force a deadline without waiting on SQLite. Production leaves it nil.
-var settlementOutputWriteContextForTest func(context.Context) context.Context
+// context used for the post-credit settlement-output write. attempt is 1
+// for the first try and 2 for the deadline retry. Production leaves it nil.
+var settlementOutputWriteContextForTest func(attempt int, ctx context.Context) context.Context
 
 // hotPathWriteContextForTest replaces the context for a provider-credit
 // write. attempt is 1 for the first try and 2 for the deadline retry.
@@ -609,19 +609,37 @@ func (b *billingRecorder) writeProviderHotPath(ctx context.Context, store *billi
 // is logged and does not fail the buyer. Any other error still fails the
 // request.
 func (b *billingRecorder) persistSettlementAttemptOutput(store *billing.Store, in billing.HotPathInput, output *billing.SettlementOutput) error {
-	outputCtx, outputCancel := context.WithTimeout(context.Background(), requestLogWriteTimeout)
-	defer outputCancel()
-	if settlementOutputWriteContextForTest != nil {
-		outputCtx = settlementOutputWriteContextForTest(outputCtx)
+	call := func(attempt int) error {
+		if attempt == 1 && settlementOutputWriteErrForTest != nil {
+			return settlementOutputWriteErrForTest
+		}
+		outputCtx, outputCancel := context.WithTimeout(context.Background(), requestLogWriteTimeout)
+		defer outputCancel()
+		if settlementOutputWriteContextForTest != nil {
+			outputCtx = settlementOutputWriteContextForTest(attempt, outputCtx)
+		}
+		return b.recordSettlementAttemptOutput(outputCtx, store, in, output)
 	}
-	var err error
-	if settlementOutputWriteErrForTest != nil {
-		err = settlementOutputWriteErrForTest
-	} else {
-		err = b.recordSettlementAttemptOutput(outputCtx, store, in, output)
-	}
+	err := call(1)
 	if err == nil || !settlementOutputPersistFailedAfterCredit(err) {
 		return err
+	}
+	retryCtx, retryCancel := context.WithTimeout(context.Background(), requestLogWriteTimeout)
+	defer retryCancel()
+	exists, lookErr := store.SettlementAttemptOutputExists(retryCtx, in.RequestID, in.ProviderID)
+	if lookErr != nil {
+		b.server.log.Warn().Err(lookErr).Str("request_id", b.requestID).Msg("settlement attempt output lookup failed; not retrying")
+	} else if exists {
+		return nil
+	} else if retryErr := call(2); retryErr == nil {
+		return nil
+	} else if !settlementOutputPersistFailedAfterCredit(retryErr) {
+		return retryErr
+	} else {
+		err = retryErr
+	}
+	if markErr := store.MarkSettlementOutputMissing(retryCtx, in.RequestID, in.ProviderID); markErr != nil {
+		b.server.log.Warn().Err(markErr).Str("request_id", b.requestID).Msg("settlement attempt output missing mark failed")
 	}
 	b.settlementOutputMissingAfterCredit = true
 	b.server.log.Warn().

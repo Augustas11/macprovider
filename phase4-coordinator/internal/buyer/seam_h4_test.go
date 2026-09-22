@@ -362,7 +362,7 @@ func TestSeamH4_CreditedWhileBuyerToldFailedIsAConflict(t *testing.T) {
 // prompt-only while the ledger keeps the completion credit.
 func TestSeamH4_SettlementOutputDeadlineAfterCreditKeepsBuyerSuccess(t *testing.T) {
 	prev := settlementOutputWriteContextForTest
-	settlementOutputWriteContextForTest = func(context.Context) context.Context {
+	settlementOutputWriteContextForTest = func(int, context.Context) context.Context {
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
 		return ctx
@@ -411,6 +411,54 @@ func TestSeamH4_SettlementOutputDeadlineAfterCreditKeepsBuyerSuccess(t *testing.
 	}
 	if outputs != 0 {
 		t.Fatalf("settlement outputs = %d, want 0 — the deadline dropped the evidence row", outputs)
+	}
+	var quarantined int
+	var reason sql.NullString
+	if err := db.QueryRow(`SELECT quarantined, quarantine_reason FROM ledger_request_credits`).Scan(&quarantined, &reason); err != nil {
+		t.Fatalf("read credit mark: %v", err)
+	}
+	if quarantined != 0 || !reason.Valid || reason.String != "settlement_attempt_output_missing" {
+		t.Fatalf("quarantined=%d reason=%v, want the credit kept and marked settlement_attempt_output_missing", quarantined, reason)
+	}
+}
+
+func TestSeamH4_SettlementOutputDeadlineRetriesEvidence(t *testing.T) {
+	prev := settlementOutputWriteContextForTest
+	settlementOutputWriteContextForTest = func(attempt int, ctx context.Context) context.Context {
+		if attempt == 1 {
+			dead, cancel := context.WithCancel(context.Background())
+			cancel()
+			return dead
+		}
+		return ctx
+	}
+	t.Cleanup(func() { settlementOutputWriteContextForTest = prev })
+
+	reqLog, dbPath := h4OpenRequestLog(t)
+	var observed *requestTerminal
+	s := h4Server(t, reqLog, h4RelaySuccess(), &observed)
+	rr := h4PostChat(t, s, []byte(h4ChatBody))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("buyer status = %d, want 200; body=%s", rr.Code, rr.Body.String())
+	}
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+	var outputs int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM settlement_attempt_outputs`).Scan(&outputs); err != nil {
+		t.Fatalf("count settlement outputs: %v", err)
+	}
+	if outputs != 1 {
+		t.Fatalf("settlement outputs = %d, want 1 after the evidence retry", outputs)
+	}
+	var marked int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM ledger_request_credits WHERE quarantine_reason = 'settlement_attempt_output_missing'`).Scan(&marked); err != nil {
+		t.Fatalf("count marks: %v", err)
+	}
+	if marked != 0 {
+		t.Fatalf("marked credits = %d, want 0 when the evidence retry landed", marked)
 	}
 }
 
