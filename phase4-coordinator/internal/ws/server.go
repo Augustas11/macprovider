@@ -13,6 +13,8 @@ import (
 	"math/big"
 	"net"
 	"net/http"
+	"net/netip"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -3241,7 +3243,14 @@ func (s *Server) prepareProviderAdmissionWithQuotaCheck(conn net.Conn, auth prov
 			inferencePath = pool.InferencePathHTTPForwarding
 		}
 	} else if hello.EndpointURL != nil && strings.TrimSpace(*hello.EndpointURL) != "" {
-		s.log.Warn().Str("provider_id", hello.ProviderID).Str("endpoint_url", *hello.EndpointURL).Msg("provisional provider sent endpoint_url; ignoring and forcing ws-tunneled mode")
+		// Unpinned providers stay WS-tunneled unless this coordinator is tokenless
+		// lab mode (auth.require_provider_tokens=false) AND the URL parses as loopback HTTP.
+		if loopback, ok := admitProvisionalLoopbackHTTP(!s.cfg.Auth.RequireProviderTokens, *hello.EndpointURL); ok {
+			endpointURL = loopback
+			inferencePath = pool.InferencePathHTTPForwarding
+		} else {
+			s.log.Warn().Str("provider_id", hello.ProviderID).Str("endpoint_url", *hello.EndpointURL).Msg("provisional provider sent endpoint_url; ignoring and forcing ws-tunneled mode")
+		}
 	}
 
 	assignedID := s.newUUID()
@@ -6304,6 +6313,31 @@ func poolHardwareCapacity(summary *HardwareSummary) *pool.ProviderHardwareCapaci
 // ceiling is the fallback reference when the provider is unknown. Absent
 // (nil) fields stay absent — the clamp never materializes a value the
 // provider did not send.
+func admitProvisionalLoopbackHTTP(allow bool, raw string) (string, bool) {
+	if !allow {
+		return "", false
+	}
+	return provisionalLoopbackHTTPEndpoint(raw)
+}
+
+func provisionalLoopbackHTTPEndpoint(raw string) (string, bool) {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Scheme != "http" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		return "", false
+	}
+	if u.Port() == "" || (u.Path != "" && u.Path != "/") {
+		return "", false
+	}
+	host := strings.ToLower(u.Hostname())
+	if host != "localhost" {
+		addr, err := netip.ParseAddr(host)
+		if err != nil || !addr.IsLoopback() {
+			return "", false
+		}
+	}
+	return "http://" + u.Host, true
+}
+
 func (s *Server) clampStateUpdateSlots(providerID string, slotsTotal, slotsFree *int) (*int, *int) {
 	ceiling := s.maxConcurrencyCeiling()
 	if ceiling <= 0 || (slotsTotal == nil && slotsFree == nil) {

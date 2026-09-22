@@ -185,7 +185,8 @@ func (s *Server) forwardWithFailover(
 			s.pool.MarkState(state.provider.ProviderID, state.provider.AssignedID, pool.StateBusy)
 			// Queue-full / still-busy terminals keep the consumed occupancy.
 			// Restoring here would republish a free slot while the Mac is full.
-			s.dropConsumedForwardedSlot(state)
+			// Drop the in-flight ignore counter so later ready/thermal reports apply.
+			s.dropForwardedInFlight(state)
 		}
 
 		// Failover branch — the unified failover state machine. The

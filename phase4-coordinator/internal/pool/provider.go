@@ -147,7 +147,18 @@ type Provider struct {
 	// uses this — not LastHeartbeatAt — so a provider actively streaming a
 	// long generation is not closed for "missing" heartbeats it cannot send
 	// while its single inference slot is busy.
-	LastActivityAt        time.Time  `json:"last_activity_at"`
+	LastActivityAt time.Time `json:"last_activity_at"`
+	// lastCoordinatorSlotRestoreAt is when RestoreForwardedSlot last wrote
+	// occupancy. Provider occupancy frames received at or before that time,
+	// or within OccupancySettleWindow after it, are the previous wave's
+	// in-flight snapshot and must not zero restored seats. Production WS
+	// stamps At at receive time, so a delayed slots_free=0 handled after
+	// restore looks newer than the restore itself.
+	lastCoordinatorSlotRestoreAt time.Time
+	// forwardedInFlight is ConsumeForwardedSlot minus RestoreForwardedSlot.
+	// While it is >0 the coordinator owns occupancy; a Mac slots_free=0 from
+	// the still-running wave must not wipe a seat that just opened.
+	forwardedInFlight     int
 	ConnectedAt           time.Time  `json:"connected_at"`
 	BinaryVersion         string     `json:"binary_version"`
 	ModelHash             string     `json:"model_hash,omitempty"`
@@ -748,6 +759,14 @@ const maxLifetimeContribPerProvider = 128
 // ReceiptRotationGrace is the SPEC-015 overlap window during which buyers may
 // validate receipts signed by the previous provider receipt key.
 const ReceiptRotationGrace = 7 * 24 * time.Hour
+
+// OccupancySettleWindow is how long after RestoreForwardedSlot provider
+// occupancy frames are ignored once no forwarded chats remain. Production WS
+// stamps heartbeat/state_update At with coordinator receive time, so a
+// delayed slots_free=0 handled after restore would otherwise look newer
+// than the restore and zero the next wave. While forwardedInFlight > 0,
+// occupancy is ignored regardless of this window.
+const OccupancySettleWindow = 2 * time.Second
 
 type recoveryHold struct {
 	assignedID string
@@ -1542,6 +1561,7 @@ func (r *Registry) ConsumeForwardedSlot(providerID, assignedID string) bool {
 	if p == nil || p.AssignedID != assignedID {
 		return false
 	}
+	p.forwardedInFlight++
 	if p.SlotsFree > 0 {
 		p.SlotsFree--
 	}
@@ -1555,7 +1575,8 @@ func (r *Registry) ConsumeForwardedSlot(providerID, assignedID string) bool {
 // ends (success, cancel, disconnect, or failover). It increments by one
 // and never republishes a route-time slots_free snapshot. If a later
 // heartbeat already raised occupancy to SlotsTotal, this is a no-op on
-// the count.
+// the count. Provider occupancy is ignored while forwarded chats are still
+// in flight, and for OccupancySettleWindow after the last restore.
 func (r *Registry) RestoreForwardedSlot(providerID, assignedID string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -1563,11 +1584,32 @@ func (r *Registry) RestoreForwardedSlot(providerID, assignedID string) bool {
 	if p == nil || p.AssignedID != assignedID || p.SlotsTotal <= 0 {
 		return false
 	}
+	if p.forwardedInFlight > 0 {
+		p.forwardedInFlight--
+	}
 	if p.SlotsFree < p.SlotsTotal {
 		p.SlotsFree++
 	}
+	p.lastCoordinatorSlotRestoreAt = time.Now().UTC()
 	if p.SlotsFree > 0 && p.ServingCapable() {
 		r.setStateLocked(p, StateReady)
+	}
+	return true
+}
+
+// DropForwardedInFlight decrements the in-flight occupancy ignore counter
+// without restoring SlotsFree. Queue-full / still-busy terminals keep the
+// consumed seat because the Mac is full, but must not leak the ignore lock
+// so a later ready or thermal heartbeat can apply.
+func (r *Registry) DropForwardedInFlight(providerID, assignedID string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	p := r.providers[providerID]
+	if p == nil || p.AssignedID != assignedID {
+		return false
+	}
+	if p.forwardedInFlight > 0 {
+		p.forwardedInFlight--
 	}
 	return true
 }
@@ -2570,6 +2612,26 @@ type HeartbeatResult struct {
 	PriorModelID   string
 }
 
+func (p *Provider) staleProviderCapacityAt(at time.Time) bool {
+	if p == nil || p.lastCoordinatorSlotRestoreAt.IsZero() {
+		return false
+	}
+	if at.IsZero() {
+		at = time.Now().UTC()
+	}
+	return !at.After(p.lastCoordinatorSlotRestoreAt.Add(OccupancySettleWindow))
+}
+
+func (p *Provider) ignoreProviderOccupancyAt(at time.Time) bool {
+	if p == nil {
+		return false
+	}
+	if p.forwardedInFlight > 0 {
+		return true
+	}
+	return p.staleProviderCapacityAt(at)
+}
+
 func (r *Registry) ApplyHeartbeatDetailed(providerID, assignedID string, hb HeartbeatUpdate) HeartbeatResult {
 	cp, gap, ok, modelIDChanged, priorModelID, swap, hasSwap := r.applyHeartbeatLocked(providerID, assignedID, hb)
 	// M2-2 / ARCH-2: emit AFTER releasing r.mu. The audit SQLite write
@@ -2663,7 +2725,9 @@ func (r *Registry) applyHeartbeatLocked(providerID, assignedID string, hb Heartb
 	p.RAMGB = hb.RAMGB
 	p.MaxContextTokens = hb.MaxContextTokens
 	p.MaxConcurrency = hb.MaxConcurrency
-	p.SlotsFree = hb.SlotsFree
+	if !p.ignoreProviderOccupancyAt(hb.At) {
+		p.SlotsFree = hb.SlotsFree
+	}
 	p.SlotsTotal = hb.SlotsTotal
 	p.ThroughputTPSEstimate = hb.ThroughputTPSEstimate
 	p.RequestsServedSinceLast = hb.RequestsServedSinceLast
@@ -2689,7 +2753,8 @@ func (r *Registry) applyHeartbeatLocked(providerID, assignedID string, hb Heartb
 	// registration) is the authoritative declared set.
 	r.recordSeenModelsUnionLocked(p.ProviderID, hb.ModelID, p.SupportedModels)
 	if hb.Status != "" && hb.Status != p.State {
-		if r.canApplyProviderStateLocked(p, hb.Status) {
+		staleBusy := p.ignoreProviderOccupancyAt(hb.At) && (hb.Status == StateReady || hb.Status == StateBusy)
+		if !staleBusy && r.canApplyProviderStateLocked(p, hb.Status) {
 			r.setStateLocked(p, hb.Status)
 		}
 	}
@@ -2874,10 +2939,13 @@ func (r *Registry) ApplyStateUpdate(providerID, assignedID string, update StateU
 		r.mu.Unlock()
 		return nil, false
 	}
+	staleCapacity := p.ignoreProviderOccupancyAt(update.At)
 	if r.canApplyProviderStateLocked(p, update.State) {
-		r.setStateLocked(p, update.State)
+		if !(staleCapacity && (update.State == StateReady || update.State == StateBusy)) {
+			r.setStateLocked(p, update.State)
+		}
 	}
-	if update.SlotsFree != nil {
+	if update.SlotsFree != nil && !staleCapacity {
 		p.SlotsFree = *update.SlotsFree
 	}
 	if update.SlotsTotal != nil {
