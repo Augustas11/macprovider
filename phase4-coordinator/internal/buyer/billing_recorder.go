@@ -134,13 +134,14 @@ type billingRecorder struct {
 	// committed write and records every credited row, then asserts the two
 	// agree. It NEVER gates a billing row. May be nil on recorders built by
 	// direct struct construction in tests — every call site nil-guards.
-	terminal                *requestTerminal
-	outputCursorByte        int64
-	settlementAttemptN      int
-	hasSettlementAttemptN   bool
-	settlementPolicyMode    string
-	settlementPolicyVersion string
-	relayBlind              *relayBlindAuditFields
+	terminal                   *requestTerminal
+	outputCursorByte           int64
+	settlementAttemptN         int
+	hasSettlementAttemptN      bool
+	settlementPolicyMode       string
+	settlementPolicyVersion    string
+	routeSnapshotStorePressure bool
+	relayBlind                 *relayBlindAuditFields
 	// lastRecordedSettlementSubject latches whether the MOST RECENTLY recorded
 	// row was a leg the coordinator settles at all. It is the single expression
 	// that recordRow's two billing branches gate on: a settlement attempt
@@ -479,6 +480,7 @@ func (b *billingRecorder) recordRow(
 			SettlementAccountScopeHash:   billing.SettlementAccountScopeHash(accountScope),
 			SettlementPolicyMode:         settlementMode,
 			SettlementPolicyVersion:      settlementVersion,
+			SettlementEvidenceGapReason:  routeSnapshotGapReason(b.routeSnapshotStorePressure),
 			RoutingDecisionLog:           s.logCacheBillingRoutingDecision,
 			RequestedPrivacyMode:         row.RequestedPrivacyMode,
 			EffectivePrivacyOutcome:      row.EffectivePrivacyOutcome,
@@ -690,7 +692,7 @@ func (b *billingRecorder) settlementEvidenceIdentity(in billing.HotPathInput) (s
 }
 
 func (b *billingRecorder) settlementPolicyForLedger() (string, string) {
-	if !b.hasSettlementAttemptN {
+	if !b.hasSettlementAttemptN && !b.routeSnapshotStorePressure {
 		return "legacy", ""
 	}
 	mode := b.settlementPolicyMode
@@ -702,6 +704,13 @@ func (b *billingRecorder) settlementPolicyForLedger() (string, string) {
 		version = billing.RouteSnapshotPolicyVersion
 	}
 	return mode, version
+}
+
+func routeSnapshotGapReason(pressure bool) string {
+	if pressure {
+		return "route_snapshot_store_pressure"
+	}
+	return ""
 }
 
 func (b *billingRecorder) recordSettlementAttemptOutput(ctx context.Context, store *billing.Store, in billing.HotPathInput, output *billing.SettlementOutput) error {

@@ -2374,8 +2374,9 @@ func (s *Server) settleBeforeResponseWithCoordinatorFinalityPolicy(w http.Respon
 	case settlementFinalityDebit:
 		holdCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		if !s.boundStreamingSettlementHoldWithCandidate(holdCtx, r, subject, finality, h,
-			prompt, completion, maxTotal, source, outcome, "") {
+		holdBoundForReconcile, candidateSaved := s.boundStreamingSettlementHoldWithCandidateState(holdCtx, r, subject, finality, h,
+			prompt, completion, maxTotal, source, outcome, "")
+		if !holdBoundForReconcile {
 			writeError(w, http.StatusInternalServerError, "server_error", "settlement_failed", "Could not settle usage")
 			return false
 		}
@@ -2386,6 +2387,17 @@ func (s *Server) settleBeforeResponseWithCoordinatorFinalityPolicy(w http.Respon
 			"settlement_reason", finality.Reason,
 			"settlement_hold_bound", boundHold,
 		)
+		if candidateSaved && strings.TrimSpace(h.Get(coordinatorInternalRequestIDHeader)) != "" {
+			s.nudgeSettlementReconciler(storage.ActiveReservation{
+				AccountID:       subject.AccountID,
+				RequestID:       requestID(r),
+				WalletSessionID: subject.WalletSessionID,
+				WindowDate:      subject.ReservationCreatedAt.UTC().Format("2006-01-02"),
+				ReservedTokens:  maxTotal,
+				CreatedAt:       subject.ReservationCreatedAt,
+				RelayBlind:      relayBlindMetadataFor(r),
+			})
+		}
 		return true
 	case settlementFinalityRefund:
 		if err := s.refundWalletAwareReservation(subject, requestID(r)); err != nil && !errors.Is(err, storage.ErrReservationNotFound) {
@@ -2528,7 +2540,7 @@ func (s *Server) markStreamingSettlementHoldForReconciliation(r *http.Request, s
 ) {
 	holdCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	s.persistSettlementReconcileCandidate(holdCtx, r, subject, finality, h,
+	candidateSaved := s.persistSettlementReconcileCandidate(holdCtx, r, subject, finality, h,
 		prompt, completion, maxTotal, source, outcome, reservationWindow)
 	if err := s.holdWalletAwareReservation(holdCtx, subject, requestID(r)); err != nil {
 		if errors.Is(err, storage.ErrReservationNotFound) || errors.Is(err, storage.ErrReservationTerminal) {
@@ -2579,19 +2591,41 @@ func (s *Server) markStreamingSettlementHoldForReconciliation(r *http.Request, s
 		"settlement_outcome", finality.Outcome,
 		"settlement_reason", finality.Reason,
 	)
+	if candidateSaved && strings.TrimSpace(h.Get(coordinatorInternalRequestIDHeader)) != "" {
+		if reservationWindow == "" && !subject.ReservationCreatedAt.IsZero() {
+			reservationWindow = subject.ReservationCreatedAt.UTC().Format("2006-01-02")
+		}
+		s.nudgeSettlementReconciler(storage.ActiveReservation{
+			AccountID:       subject.AccountID,
+			RequestID:       requestID(r),
+			WalletSessionID: subject.WalletSessionID,
+			WindowDate:      reservationWindow,
+			ReservedTokens:  maxTotal,
+			CreatedAt:       subject.ReservationCreatedAt,
+			RelayBlind:      relayBlindMetadataFor(r),
+		})
+	}
 }
 
 func (s *Server) boundStreamingSettlementHoldWithCandidate(ctx context.Context, r *http.Request, subject usageSubject,
 	finality coordinatorSettlementFinality, h http.Header, prompt, completion, maxTotal int64, source, outcome, reservationWindow string,
 ) bool {
-	s.persistSettlementReconcileCandidate(ctx, r, subject, finality, h,
+	holdBound, _ := s.boundStreamingSettlementHoldWithCandidateState(ctx, r, subject, finality, h,
 		prompt, completion, maxTotal, source, outcome, reservationWindow)
-	return s.boundStreamingSettlementHold(ctx, r, subject, finality)
+	return holdBound
+}
+
+func (s *Server) boundStreamingSettlementHoldWithCandidateState(ctx context.Context, r *http.Request, subject usageSubject,
+	finality coordinatorSettlementFinality, h http.Header, prompt, completion, maxTotal int64, source, outcome, reservationWindow string,
+) (bool, bool) {
+	candidateSaved := s.persistSettlementReconcileCandidate(ctx, r, subject, finality, h,
+		prompt, completion, maxTotal, source, outcome, reservationWindow)
+	return s.boundStreamingSettlementHold(ctx, r, subject, finality), candidateSaved
 }
 
 func (s *Server) persistSettlementReconcileCandidate(ctx context.Context, r *http.Request, subject usageSubject,
 	finality coordinatorSettlementFinality, h http.Header, prompt, completion, maxTotal int64, source, outcome, reservationWindow string,
-) {
+) bool {
 	if subject.ReservationCreatedAt.IsZero() {
 		slog.Error("gateway could not persist current-attempt settlement binding",
 			"request_id", requestID(r),
@@ -2600,7 +2634,7 @@ func (s *Server) persistSettlementReconcileCandidate(ctx context.Context, r *htt
 			"settlement_reason", finality.Reason,
 			"error", "reservation creation time is unavailable",
 		)
-		return
+		return false
 	}
 	if reservationWindow == "" && !subject.ReservationCreatedAt.IsZero() {
 		reservationWindow = subject.ReservationCreatedAt.UTC().Format("2006-01-02")
@@ -2628,7 +2662,9 @@ func (s *Server) persistSettlementReconcileCandidate(ctx context.Context, r *htt
 			"settlement_reason", finality.Reason,
 			"error", err,
 		)
+		return false
 	}
+	return true
 }
 
 func (s *Server) boundStreamingSettlementHold(ctx context.Context, r *http.Request, subject usageSubject, finality coordinatorSettlementFinality) bool {

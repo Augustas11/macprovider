@@ -1490,6 +1490,16 @@ func TestRouteSnapshotObserveStorePressureStillDispatches(t *testing.T) {
 	if verdicts := querySettlementReceiptVerdicts(t, dbPath); len(verdicts) != 0 {
 		t.Fatalf("receipt verdict rows=%d want 0 without route snapshot metadata: %#v", len(verdicts), verdicts)
 	}
+	var gapReason, policyMode, policyVersion string
+	if err := reqLog.DB().QueryRow(`SELECT quarantine_reason, settlement_policy_mode, settlement_policy_version FROM ledger_request_credits WHERE status = 200 LIMIT 1`).Scan(&gapReason, &policyMode, &policyVersion); err != nil {
+		t.Fatalf("read credited evidence gap: %v", err)
+	}
+	if gapReason != "route_snapshot_store_pressure" {
+		t.Fatalf("credited evidence gap=%q want route_snapshot_store_pressure", gapReason)
+	}
+	if policyMode != billing.RouteSnapshotModeObserve || policyVersion != billing.RouteSnapshotPolicyVersion {
+		t.Fatalf("credited policy=%q/%q want observe/%q", policyMode, policyVersion, billing.RouteSnapshotPolicyVersion)
+	}
 }
 
 func TestRouteSnapshotEnforceStorePressureStillDispatches(t *testing.T) {
@@ -1562,6 +1572,23 @@ func TestRouteSnapshotEnforceStorePressureStillDispatches(t *testing.T) {
 	}
 	if verdicts := querySettlementReceiptVerdicts(t, dbPath); len(verdicts) != 0 {
 		t.Fatalf("receipt verdict rows=%d want 0 without route snapshot metadata: %#v", len(verdicts), verdicts)
+	}
+	var gapReason, policyMode, policyVersion string
+	if err := reqLog.DB().QueryRow(`SELECT quarantine_reason, settlement_policy_mode, settlement_policy_version FROM ledger_request_credits WHERE status = 200 LIMIT 1`).Scan(&gapReason, &policyMode, &policyVersion); err != nil {
+		t.Fatalf("read credited evidence gap: %v", err)
+	}
+	if gapReason != "route_snapshot_store_pressure" {
+		t.Fatalf("credited evidence gap=%q want route_snapshot_store_pressure", gapReason)
+	}
+	if policyMode != billing.RouteSnapshotModeEnforce || policyVersion != billing.RouteSnapshotPolicyVersion {
+		t.Fatalf("credited policy=%q/%q want enforce/%q", policyMode, policyVersion, billing.RouteSnapshotPolicyVersion)
+	}
+	var payable int
+	if err := reqLog.DB().QueryRow(`SELECT COUNT(*) FROM spec022_payable_request_credits WHERE status = 200`).Scan(&payable); err != nil {
+		t.Fatalf("query payable credits: %v", err)
+	}
+	if payable != 0 {
+		t.Fatalf("payable credits=%d want 0 without enforce evidence", payable)
 	}
 }
 

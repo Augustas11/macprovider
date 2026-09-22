@@ -61,6 +61,43 @@ func seedRelayBlindAPIHold(t *testing.T, store *sqlite.Store, accountID, request
 	}
 }
 
+func TestRelayBlindSettlementNudgeUsesStatusRecovery(t *testing.T) {
+	var statusCalls, finalityCalls atomic.Int32
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		switch r.URL.Path {
+		case "/v1/relay-blind/status":
+			statusCalls.Add(1)
+			return responseWithBody(http.StatusOK, http.Header{"Content-Type": {"application/json"}},
+				`{"version":"relay-blind-status-v1","state":"unknown_postdispatch","effective_privacy_outcome":"relay_blind_unavailable","retry_action":"do_not_resubmit"}`), nil
+		case "/internal/settlement/finality":
+			finalityCalls.Add(1)
+			return responseWithBody(http.StatusOK, nil, `{}`), nil
+		default:
+			return responseWithBody(http.StatusNotFound, nil, `{}`), nil
+		}
+	})}
+	_, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(c *config.Config) {
+		c.Features.RelayBlindRequests.Enabled = true
+		c.Settlement.ReconcileEnabled = true
+	}, WithHTTPClient(client))
+	reservation, _ := pilotReservationFixture(t, false)
+	raw := pilotEnvelopeFixture(t, reservation)
+	metadata := relayBlindRecoveryMetadata(t, reservation, raw)
+	const accountID, requestID = "acct_relay_nudge", "req_relay_nudge"
+	seedRelayBlindAPIHold(t, store, accountID, requestID, metadata)
+	server := New(cfg, store, fakeOAuth{}, WithNow(fixedNow), WithHTTPClient(client))
+	server.nudgeSettlementReconciler(storage.ActiveReservation{
+		AccountID: accountID, RequestID: requestID, CreatedAt: fixedNow(), RelayBlind: metadata,
+	})
+	deadline := time.Now().Add(2 * time.Second)
+	for statusCalls.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if statusCalls.Load() != 1 || finalityCalls.Load() != 0 {
+		t.Fatalf("status calls=%d finality calls=%d, want 1/0", statusCalls.Load(), finalityCalls.Load())
+	}
+}
+
 func TestRelayBlindRecoveryStatusEdges(t *testing.T) {
 	inputSix := int64(6)
 	completionSeven := int64(7)

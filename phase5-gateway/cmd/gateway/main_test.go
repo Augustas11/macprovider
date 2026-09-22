@@ -31,7 +31,8 @@ func TestNewHTTPServerAppliesTimeouts(t *testing.T) {
 }
 
 type fakeSettlementReconciler struct {
-	calls chan int
+	calls        chan int
+	catchupCalls chan int
 }
 
 func (f *fakeSettlementReconciler) ReconcileSettlementHolds(ctx context.Context, limit int) (router.SettlementReconcileSummary, error) {
@@ -39,6 +40,15 @@ func (f *fakeSettlementReconciler) ReconcileSettlementHolds(ctx context.Context,
 	case <-ctx.Done():
 		return router.SettlementReconcileSummary{}, ctx.Err()
 	case f.calls <- limit:
+		return router.SettlementReconcileSummary{Scanned: 1, Verified: 1}, nil
+	}
+}
+
+func (f *fakeSettlementReconciler) CatchUpSettlementHolds(ctx context.Context, limit int) (router.SettlementReconcileSummary, error) {
+	select {
+	case <-ctx.Done():
+		return router.SettlementReconcileSummary{}, ctx.Err()
+	case f.catchupCalls <- limit:
 		return router.SettlementReconcileSummary{Scanned: 1, Verified: 1}, nil
 	}
 }
@@ -96,7 +106,7 @@ func TestRunOAuthStatePrunerRunsAndStops(t *testing.T) {
 
 func TestRunSettlementReconcilerRunsImmediately(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
-	fake := &fakeSettlementReconciler{calls: make(chan int, 2)}
+	fake := &fakeSettlementReconciler{calls: make(chan int, 2), catchupCalls: make(chan int, 2)}
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -104,12 +114,12 @@ func TestRunSettlementReconcilerRunsImmediately(t *testing.T) {
 	}()
 
 	select {
-	case got := <-fake.calls:
-		if got != 17 {
-			t.Fatalf("reconcile limit=%d want 17", got)
+	case got := <-fake.catchupCalls:
+		if got != 500 {
+			t.Fatalf("startup catch-up limit=%d want 500", got)
 		}
 	case <-time.After(time.Second):
-		t.Fatal("settlement reconciler did not run immediately")
+		t.Fatal("settlement startup catch-up did not run immediately")
 	}
 
 	cancel()
@@ -123,13 +133,21 @@ func TestRunSettlementReconcilerRunsImmediately(t *testing.T) {
 func TestRunSettlementReconcilerRunsOnInterval(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	fake := &fakeSettlementReconciler{calls: make(chan int, 4)}
+	fake := &fakeSettlementReconciler{calls: make(chan int, 4), catchupCalls: make(chan int, 2)}
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		runSettlementReconciler(ctx, fake, 10*time.Millisecond, 23, time.Second)
 	}()
 
+	select {
+	case got := <-fake.catchupCalls:
+		if got != 500 {
+			t.Fatalf("startup catch-up limit=%d want 500", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("settlement startup catch-up did not arrive")
+	}
 	for i := 0; i < 2; i++ {
 		select {
 		case got := <-fake.calls:

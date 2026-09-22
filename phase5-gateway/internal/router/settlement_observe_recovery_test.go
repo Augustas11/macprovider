@@ -644,3 +644,530 @@ func TestObserveFallbackReconciliationRotatesPastBatchLimitAcrossRestarts(t *tes
 		t.Fatalf("terminal requests retried: observe=%d enforce=%d", attempts["recover_observe"], attempts["recover_enforce"])
 	}
 }
+
+func TestSettlementReconcileNudgeCoalescesConcurrentRequests(t *testing.T) {
+	const (
+		accountID          = "acct_nudge_coalesce"
+		requestID          = "req_nudge_coalesce"
+		internalRequestID  = "internal_nudge_coalesce"
+		accountID2         = "acct_nudge_distinct"
+		requestID2         = "req_nudge_distinct"
+		internalRequestID2 = "internal_nudge_distinct"
+	)
+	createdAt := fixedNow()
+	createdAt2 := createdAt.Add(time.Millisecond)
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	var calls atomic.Int32
+	coordinator := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		select {
+		case entered <- struct{}{}:
+		default:
+		}
+		<-release
+		request := r.URL.Query().Get("request_id")
+		expectedAccount := map[string]string{requestID: accountID, requestID2: accountID2}[request]
+		expectedInternal := map[string]string{requestID: internalRequestID, requestID2: internalRequestID2}[request]
+		expectedCreatedAt := map[string]time.Time{requestID: createdAt, requestID2: createdAt2}[request]
+		if r.URL.Path != "/internal/settlement/finality" || r.Header.Get("Authorization") != "Bearer service-token" ||
+			expectedAccount == "" || r.URL.Query().Get("account_id") != expectedAccount ||
+			r.URL.Query().Get("required_internal_request_id") != expectedInternal ||
+			r.URL.Query().Get("reservation_created_at_unix_ms") != strconv.FormatInt(expectedCreatedAt.UnixMilli(), 10) {
+			t.Errorf("finality lookup missing authenticated current-attempt scope: %s", r.URL.RawQuery)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(coordinatorRequestSettlementFinality{
+			RequestID:                 request,
+			RequiredInternalRequestID: expectedInternal,
+			Mode:                      "enforce",
+			ModeScopeComplete:         true,
+			PolicyVersion:             settlementPolicyVersion,
+			Outcome:                   "verified",
+			ReceiptResult:             "valid",
+			Reason:                    "verified_settlement",
+			Closed:                    true,
+			PromptTokens:              7,
+			CompletionTokens:          5,
+			TotalTokens:               12,
+			TokenSource:               "coordinator_observed",
+			VerifiedAttempts:          1,
+		})
+	}))
+	defer coordinator.Close()
+
+	cfg := config.Default()
+	cfg.Auth.KeyHashSecret = "test-key-hash-secret"
+	cfg.Auth.Demo.SigningSecret = "test-demo-secret"
+	cfg.Coordinator.OperatorURL = coordinator.URL
+	cfg.Coordinator.ServiceToken = "service-token"
+	cfg.Storage.DBPath = filepath.Join(t.TempDir(), "gateway.db")
+	cfg.Settlement.ReconcileEnabled = true
+	cfg.Settlement.ReconcileBatchLimit = 1
+	cfg.Settlement.ReconcileRequestTimeoutSeconds = 5
+	store, err := sqlite.Open(context.Background(), cfg.Storage.DBPath)
+	if err != nil {
+		t.Fatalf("sqlite.Open: %v", err)
+	}
+	defer store.Close()
+	oldCreatedAt := createdAt.Add(-time.Hour)
+	if _, err := store.ReserveQuota(context.Background(), storage.ReservationRequest{
+		AccountID:       "acct_nudge_backlog",
+		RequestID:       "req_nudge_backlog",
+		WindowDate:      oldCreatedAt.UTC().Format("2006-01-02"),
+		RequestedTokens: 32,
+		DailyQuota:      cfg.Quotas.AccountDailyTokens,
+		CreatedAt:       oldCreatedAt,
+		ExpiresAt:       oldCreatedAt.Add(time.Minute),
+	}); err != nil {
+		t.Fatalf("ReserveQuota backlog: %v", err)
+	}
+	if err := store.MarkReservationSettlementHold(context.Background(), "acct_nudge_backlog", "req_nudge_backlog"); err != nil {
+		t.Fatalf("MarkReservationSettlementHold backlog: %v", err)
+	}
+	seedBoundSettlementCandidate(t, store, "acct_nudge_backlog", "req_nudge_backlog", "internal_nudge_backlog", oldCreatedAt, 32, "")
+	if _, err := store.ReserveQuota(context.Background(), storage.ReservationRequest{
+		AccountID:       accountID,
+		RequestID:       requestID,
+		WindowDate:      createdAt.UTC().Format("2006-01-02"),
+		RequestedTokens: 32,
+		DailyQuota:      cfg.Quotas.AccountDailyTokens,
+		CreatedAt:       createdAt,
+		ExpiresAt:       createdAt.Add(time.Minute),
+	}); err != nil {
+		t.Fatalf("ReserveQuota: %v", err)
+	}
+	if err := store.MarkReservationSettlementHold(context.Background(), accountID, requestID); err != nil {
+		t.Fatalf("MarkReservationSettlementHold: %v", err)
+	}
+	seedBoundSettlementCandidate(t, store, accountID, requestID, internalRequestID, createdAt, 32, "")
+	if _, err := store.ReserveQuota(context.Background(), storage.ReservationRequest{
+		AccountID:       accountID2,
+		RequestID:       requestID2,
+		WindowDate:      createdAt2.UTC().Format("2006-01-02"),
+		RequestedTokens: 32,
+		DailyQuota:      cfg.Quotas.AccountDailyTokens,
+		CreatedAt:       createdAt2,
+		ExpiresAt:       createdAt2.Add(time.Minute),
+	}); err != nil {
+		t.Fatalf("ReserveQuota distinct: %v", err)
+	}
+	if err := store.MarkReservationSettlementHold(context.Background(), accountID2, requestID2); err != nil {
+		t.Fatalf("MarkReservationSettlementHold distinct: %v", err)
+	}
+	seedBoundSettlementCandidate(t, store, accountID2, requestID2, internalRequestID2, createdAt2, 32, "")
+	server := New(cfg, store, fakeOAuth{}, WithHTTPClient(coordinator.Client()), WithNow(func() time.Time { return createdAt }))
+	reservation := storage.ActiveReservation{
+		AccountID:      accountID,
+		RequestID:      requestID,
+		WindowDate:     createdAt.UTC().Format("2006-01-02"),
+		ReservedTokens: 32,
+		CreatedAt:      createdAt,
+	}
+	reservation2 := storage.ActiveReservation{
+		AccountID:      accountID2,
+		RequestID:      requestID2,
+		WindowDate:     createdAt2.UTC().Format("2006-01-02"),
+		ReservedTokens: 32,
+		CreatedAt:      createdAt2,
+	}
+
+	server.nudgeSettlementReconciler(reservation)
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first nudge did not start coordinator lookup")
+	}
+	for i := 0; i < 5; i++ {
+		server.nudgeSettlementReconciler(reservation)
+	}
+	server.nudgeSettlementReconciler(reservation2)
+	time.Sleep(150 * time.Millisecond)
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("coordinator calls while first nudge in flight=%d want 2 distinct in-flight nudges", got)
+	}
+	close(release)
+	deadline := time.After(2 * time.Second)
+	for {
+		state := gatewaySettlementSnapshot(t, cfg.Storage.DBPath, accountID)
+		state2 := gatewaySettlementSnapshot(t, cfg.Storage.DBPath, accountID2)
+		if state.usageRows == 1 && state.settledRows == 1 && state.activeRows == 0 && state.heldRows == 0 &&
+			state2.usageRows == 1 && state2.settledRows == 1 && state2.activeRows == 0 && state2.heldRows == 0 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("nudge did not settle reservations; state=%+v state2=%+v", state, state2)
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("coordinator calls after coalesced distinct nudges=%d want 2", got)
+	}
+	if hold := quotaReservationSettlementHold(t, cfg.Storage.DBPath, accountID, requestID); hold != 0 {
+		t.Fatalf("settled quota settlement_hold=%d want 0", hold)
+	}
+	if hold := quotaReservationSettlementHold(t, cfg.Storage.DBPath, accountID2, requestID2); hold != 0 {
+		t.Fatalf("settled distinct quota settlement_hold=%d want 0", hold)
+	}
+}
+
+func quotaReservationSettlementHold(t *testing.T, dbPath, accountID, requestID string) int64 {
+	t.Helper()
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	defer db.Close()
+	var hold int64
+	if err := db.QueryRow(`SELECT settlement_hold FROM quota_reservations WHERE account_id = ? AND request_id = ?`, accountID, requestID).Scan(&hold); err != nil {
+		t.Fatalf("query settlement_hold: %v", err)
+	}
+	return hold
+}
+
+func TestSettlementReconcileNudgeOverflowRequestsCatchup(t *testing.T) {
+	const (
+		accountID         = "acct_nudge_overflow"
+		requestID         = "req_nudge_overflow"
+		internalRequestID = "internal_nudge_overflow"
+	)
+	createdAt := fixedNow()
+	var calls atomic.Int32
+	coordinator := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		if r.URL.Path != "/internal/settlement/finality" || r.Header.Get("Authorization") != "Bearer service-token" ||
+			r.URL.Query().Get("account_id") != accountID || r.URL.Query().Get("request_id") != requestID ||
+			r.URL.Query().Get("required_internal_request_id") != internalRequestID ||
+			r.URL.Query().Get("reservation_created_at_unix_ms") != strconv.FormatInt(createdAt.UnixMilli(), 10) {
+			t.Errorf("catch-up finality lookup missing authenticated current-attempt scope: %s", r.URL.RawQuery)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(coordinatorRequestSettlementFinality{
+			RequestID:                 requestID,
+			RequiredInternalRequestID: internalRequestID,
+			Mode:                      "enforce",
+			ModeScopeComplete:         true,
+			PolicyVersion:             settlementPolicyVersion,
+			Outcome:                   "verified",
+			ReceiptResult:             "valid",
+			Reason:                    "verified_settlement",
+			Closed:                    true,
+			PromptTokens:              7,
+			CompletionTokens:          5,
+			TotalTokens:               12,
+			TokenSource:               "coordinator_observed",
+			VerifiedAttempts:          1,
+		})
+	}))
+	defer coordinator.Close()
+
+	cfg := config.Default()
+	cfg.Auth.KeyHashSecret = "test-key-hash-secret"
+	cfg.Auth.Demo.SigningSecret = "test-demo-secret"
+	cfg.Coordinator.OperatorURL = coordinator.URL
+	cfg.Coordinator.ServiceToken = "service-token"
+	cfg.Storage.DBPath = filepath.Join(t.TempDir(), "gateway.db")
+	cfg.Settlement.ReconcileEnabled = true
+	cfg.Settlement.ReconcileBatchLimit = 1
+	cfg.Settlement.ReconcileRequestTimeoutSeconds = 5
+	store, err := sqlite.Open(context.Background(), cfg.Storage.DBPath)
+	if err != nil {
+		t.Fatalf("sqlite.Open: %v", err)
+	}
+	defer store.Close()
+	if _, err := store.ReserveQuota(context.Background(), storage.ReservationRequest{
+		AccountID:       accountID,
+		RequestID:       requestID,
+		WindowDate:      createdAt.UTC().Format("2006-01-02"),
+		RequestedTokens: 32,
+		DailyQuota:      cfg.Quotas.AccountDailyTokens,
+		CreatedAt:       createdAt,
+		ExpiresAt:       createdAt.Add(time.Minute),
+	}); err != nil {
+		t.Fatalf("ReserveQuota: %v", err)
+	}
+	if err := store.MarkReservationSettlementHold(context.Background(), accountID, requestID); err != nil {
+		t.Fatalf("MarkReservationSettlementHold: %v", err)
+	}
+	seedBoundSettlementCandidate(t, store, accountID, requestID, internalRequestID, createdAt, 32, "")
+	server := New(cfg, store, fakeOAuth{}, WithHTTPClient(coordinator.Client()), WithNow(func() time.Time { return createdAt }))
+	server.settlementReconcileNudgeKeys = make(map[string]struct{}, maxSettlementReconcileNudgeQueue)
+	server.settlementReconcileNudgePending = make([]storage.ActiveReservation, maxSettlementReconcileNudgeQueue)
+	for i := 0; i < maxSettlementReconcileNudgeQueue; i++ {
+		dummy := storage.ActiveReservation{AccountID: "acct_full", RequestID: "req_full_" + strconv.Itoa(i), CreatedAt: createdAt.Add(time.Duration(i) * time.Nanosecond)}
+		server.settlementReconcileNudgePending[i] = dummy
+		server.settlementReconcileNudgeKeys[settlementReconcileNudgeKey(dummy)] = struct{}{}
+	}
+
+	server.nudgeSettlementReconciler(storage.ActiveReservation{
+		AccountID:      accountID,
+		RequestID:      requestID,
+		WindowDate:     createdAt.UTC().Format("2006-01-02"),
+		ReservedTokens: 32,
+		CreatedAt:      createdAt,
+	})
+
+	deadline := time.After(2 * time.Second)
+	for {
+		state := gatewaySettlementSnapshot(t, cfg.Storage.DBPath, accountID)
+		if state.usageRows == 1 && state.settledRows == 1 && state.activeRows == 0 && state.heldRows == 0 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("overflow catch-up did not settle reservation; state=%+v calls=%d", state, calls.Load())
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("coordinator calls after overflow catch-up=%d want 1", got)
+	}
+	if hold := quotaReservationSettlementHold(t, cfg.Storage.DBPath, accountID, requestID); hold != 0 {
+		t.Fatalf("overflow settled quota settlement_hold=%d want 0", hold)
+	}
+}
+
+func TestSettlementReconcileOverflowCatchupUsesPerReservationTimeout(t *testing.T) {
+	const (
+		slowAccountID     = "acct_nudge_slow"
+		slowRequestID     = "req_nudge_slow"
+		slowInternalID    = "internal_nudge_slow"
+		accountID         = "acct_nudge_overflow_after_slow"
+		requestID         = "req_nudge_overflow_after_slow"
+		internalRequestID = "internal_nudge_overflow_after_slow"
+	)
+	createdAt := fixedNow()
+	slowCreatedAt := createdAt.Add(-time.Hour)
+	var targetCalls atomic.Int32
+	var slowCalls atomic.Int32
+	coordinator := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		request := r.URL.Query().Get("request_id")
+		switch request {
+		case slowRequestID:
+			slowCalls.Add(1)
+			if r.URL.Query().Get("account_id") != slowAccountID || r.URL.Query().Get("required_internal_request_id") != slowInternalID {
+				t.Errorf("slow finality lookup missing scope: %s", r.URL.RawQuery)
+			}
+			<-r.Context().Done()
+			return
+		case requestID:
+			targetCalls.Add(1)
+			if r.URL.Path != "/internal/settlement/finality" || r.Header.Get("Authorization") != "Bearer service-token" ||
+				r.URL.Query().Get("account_id") != accountID || r.URL.Query().Get("required_internal_request_id") != internalRequestID ||
+				r.URL.Query().Get("reservation_created_at_unix_ms") != strconv.FormatInt(createdAt.UnixMilli(), 10) {
+				t.Errorf("target finality lookup missing authenticated current-attempt scope: %s", r.URL.RawQuery)
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(coordinatorRequestSettlementFinality{
+				RequestID:                 requestID,
+				RequiredInternalRequestID: internalRequestID,
+				Mode:                      "enforce",
+				ModeScopeComplete:         true,
+				PolicyVersion:             settlementPolicyVersion,
+				Outcome:                   "verified",
+				ReceiptResult:             "valid",
+				Reason:                    "verified_settlement",
+				Closed:                    true,
+				PromptTokens:              7,
+				CompletionTokens:          5,
+				TotalTokens:               12,
+				TokenSource:               "coordinator_observed",
+				VerifiedAttempts:          1,
+			})
+		default:
+			t.Errorf("unexpected finality request: %s", r.URL.RawQuery)
+			w.WriteHeader(http.StatusBadRequest)
+		}
+	}))
+	defer coordinator.Close()
+
+	cfg := config.Default()
+	cfg.Auth.KeyHashSecret = "test-key-hash-secret"
+	cfg.Auth.Demo.SigningSecret = "test-demo-secret"
+	cfg.Coordinator.OperatorURL = coordinator.URL
+	cfg.Coordinator.ServiceToken = "service-token"
+	cfg.Storage.DBPath = filepath.Join(t.TempDir(), "gateway.db")
+	cfg.Settlement.ReconcileEnabled = true
+	cfg.Settlement.ReconcileRequestTimeoutSeconds = 1
+	store, err := sqlite.Open(context.Background(), cfg.Storage.DBPath)
+	if err != nil {
+		t.Fatalf("sqlite.Open: %v", err)
+	}
+	defer store.Close()
+	for _, row := range []struct {
+		accountID string
+		requestID string
+		internal  string
+		createdAt time.Time
+	}{
+		{slowAccountID, slowRequestID, slowInternalID, slowCreatedAt},
+		{accountID, requestID, internalRequestID, createdAt},
+	} {
+		if _, err := store.ReserveQuota(context.Background(), storage.ReservationRequest{
+			AccountID:       row.accountID,
+			RequestID:       row.requestID,
+			WindowDate:      row.createdAt.UTC().Format("2006-01-02"),
+			RequestedTokens: 32,
+			DailyQuota:      cfg.Quotas.AccountDailyTokens,
+			CreatedAt:       row.createdAt,
+			ExpiresAt:       row.createdAt.Add(time.Minute),
+		}); err != nil {
+			t.Fatalf("ReserveQuota %s: %v", row.requestID, err)
+		}
+		if err := store.MarkReservationSettlementHold(context.Background(), row.accountID, row.requestID); err != nil {
+			t.Fatalf("MarkReservationSettlementHold %s: %v", row.requestID, err)
+		}
+		seedBoundSettlementCandidate(t, store, row.accountID, row.requestID, row.internal, row.createdAt, 32, "")
+	}
+	server := New(cfg, store, fakeOAuth{}, WithHTTPClient(coordinator.Client()), WithNow(func() time.Time { return createdAt }))
+	server.settlementReconcileNudgeKeys = make(map[string]struct{}, maxSettlementReconcileNudgeQueue)
+	server.settlementReconcileNudgePending = make([]storage.ActiveReservation, maxSettlementReconcileNudgeQueue)
+	for i := 0; i < maxSettlementReconcileNudgeQueue; i++ {
+		dummy := storage.ActiveReservation{AccountID: "acct_full_slow", RequestID: "req_full_slow_" + strconv.Itoa(i), CreatedAt: createdAt.Add(time.Duration(i) * time.Nanosecond)}
+		server.settlementReconcileNudgePending[i] = dummy
+		server.settlementReconcileNudgeKeys[settlementReconcileNudgeKey(dummy)] = struct{}{}
+	}
+
+	server.nudgeSettlementReconciler(storage.ActiveReservation{
+		AccountID:      accountID,
+		RequestID:      requestID,
+		WindowDate:     createdAt.UTC().Format("2006-01-02"),
+		ReservedTokens: 32,
+		CreatedAt:      createdAt,
+	})
+
+	deadline := time.After(3 * time.Second)
+	for {
+		state := gatewaySettlementSnapshot(t, cfg.Storage.DBPath, accountID)
+		if state.usageRows == 1 && state.settledRows == 1 && state.activeRows == 0 && state.heldRows == 0 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("overflow catch-up target starved behind slow hold; state=%+v slow_calls=%d target_calls=%d", state, slowCalls.Load(), targetCalls.Load())
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+	if slowCalls.Load() == 0 || targetCalls.Load() != 1 {
+		t.Fatalf("catch-up calls slow=%d target=%d, want slow>=1 target=1", slowCalls.Load(), targetCalls.Load())
+	}
+	if hold := quotaReservationSettlementHold(t, cfg.Storage.DBPath, accountID, requestID); hold != 0 {
+		t.Fatalf("overflow target settlement_hold=%d want 0", hold)
+	}
+}
+
+func TestSettlementStartupCatchupUsesPerReservationTimeout(t *testing.T) {
+	const (
+		slowAccountID     = "acct_startup_slow"
+		slowRequestID     = "req_startup_slow"
+		slowInternalID    = "internal_startup_slow"
+		accountID         = "acct_startup_target"
+		requestID         = "req_startup_target"
+		internalRequestID = "internal_startup_target"
+	)
+	createdAt := fixedNow()
+	slowCreatedAt := createdAt.Add(-time.Hour)
+	var targetCalls atomic.Int32
+	var slowCalls atomic.Int32
+	coordinator := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch request := r.URL.Query().Get("request_id"); request {
+		case slowRequestID:
+			slowCalls.Add(1)
+			<-r.Context().Done()
+		case requestID:
+			targetCalls.Add(1)
+			if r.URL.Query().Get("account_id") != accountID || r.URL.Query().Get("required_internal_request_id") != internalRequestID ||
+				r.URL.Query().Get("reservation_created_at_unix_ms") != strconv.FormatInt(createdAt.UnixMilli(), 10) {
+				t.Errorf("startup catch-up target lookup missing scope: %s", r.URL.RawQuery)
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(coordinatorRequestSettlementFinality{
+				RequestID:                 requestID,
+				RequiredInternalRequestID: internalRequestID,
+				Mode:                      "enforce",
+				ModeScopeComplete:         true,
+				PolicyVersion:             settlementPolicyVersion,
+				Outcome:                   "verified",
+				ReceiptResult:             "valid",
+				Reason:                    "verified_settlement",
+				Closed:                    true,
+				PromptTokens:              7,
+				CompletionTokens:          5,
+				TotalTokens:               12,
+				TokenSource:               "coordinator_observed",
+				VerifiedAttempts:          1,
+			})
+		default:
+			t.Errorf("unexpected startup catch-up request: %s", r.URL.RawQuery)
+			w.WriteHeader(http.StatusBadRequest)
+		}
+	}))
+	defer coordinator.Close()
+
+	cfg := config.Default()
+	cfg.Auth.KeyHashSecret = "test-key-hash-secret"
+	cfg.Auth.Demo.SigningSecret = "test-demo-secret"
+	cfg.Coordinator.OperatorURL = coordinator.URL
+	cfg.Coordinator.ServiceToken = "service-token"
+	cfg.Storage.DBPath = filepath.Join(t.TempDir(), "gateway.db")
+	cfg.Settlement.ReconcileEnabled = true
+	cfg.Settlement.ReconcileBatchLimit = 1
+	cfg.Settlement.ReconcileRequestTimeoutSeconds = 1
+	store, err := sqlite.Open(context.Background(), cfg.Storage.DBPath)
+	if err != nil {
+		t.Fatalf("sqlite.Open: %v", err)
+	}
+	defer store.Close()
+	for _, row := range []struct {
+		accountID string
+		requestID string
+		internal  string
+		createdAt time.Time
+	}{
+		{slowAccountID, slowRequestID, slowInternalID, slowCreatedAt},
+		{accountID, requestID, internalRequestID, createdAt},
+	} {
+		if _, err := store.ReserveQuota(context.Background(), storage.ReservationRequest{
+			AccountID:       row.accountID,
+			RequestID:       row.requestID,
+			WindowDate:      row.createdAt.UTC().Format("2006-01-02"),
+			RequestedTokens: 32,
+			DailyQuota:      cfg.Quotas.AccountDailyTokens,
+			CreatedAt:       row.createdAt,
+			ExpiresAt:       row.createdAt.Add(time.Minute),
+		}); err != nil {
+			t.Fatalf("ReserveQuota %s: %v", row.requestID, err)
+		}
+		if err := store.MarkReservationSettlementHold(context.Background(), row.accountID, row.requestID); err != nil {
+			t.Fatalf("MarkReservationSettlementHold %s: %v", row.requestID, err)
+		}
+		seedBoundSettlementCandidate(t, store, row.accountID, row.requestID, row.internal, row.createdAt, 32, "")
+	}
+	server := New(cfg, store, fakeOAuth{}, WithHTTPClient(coordinator.Client()), WithNow(func() time.Time { return createdAt }))
+	summary, err := server.CatchUpSettlementHolds(context.Background(), 500)
+	if err != nil {
+		t.Fatalf("CatchUpSettlementHolds: %v", err)
+	}
+	if summary.Scanned != 2 || summary.Errors != 1 || summary.Verified != 1 {
+		t.Fatalf("startup catch-up summary=%+v, want scanned=2 errors=1 verified=1", summary)
+	}
+	state := gatewaySettlementSnapshot(t, cfg.Storage.DBPath, accountID)
+	if state.usageRows != 1 || state.settledRows != 1 || state.activeRows != 0 || state.heldRows != 0 {
+		t.Fatalf("startup catch-up target state=%+v, want settled without active hold", state)
+	}
+	slowState := gatewaySettlementSnapshot(t, cfg.Storage.DBPath, slowAccountID)
+	if slowState.usageRows != 0 || slowState.settledRows != 0 || slowState.activeRows != 1 || slowState.heldRows != 1 {
+		t.Fatalf("startup catch-up slow state=%+v, want still held after timeout", slowState)
+	}
+	if slowCalls.Load() == 0 || targetCalls.Load() != 1 {
+		t.Fatalf("startup catch-up calls slow=%d target=%d, want slow>=1 target=1", slowCalls.Load(), targetCalls.Load())
+	}
+	if hold := quotaReservationSettlementHold(t, cfg.Storage.DBPath, accountID, requestID); hold != 0 {
+		t.Fatalf("startup target settlement_hold=%d want 0", hold)
+	}
+}

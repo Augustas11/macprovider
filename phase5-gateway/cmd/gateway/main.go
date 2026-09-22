@@ -290,6 +290,7 @@ func runSettlementJournalRecovery(ctx context.Context, recoverer settlementJourn
 
 type settlementReconciler interface {
 	ReconcileSettlementHolds(context.Context, int) (router.SettlementReconcileSummary, error)
+	CatchUpSettlementHolds(context.Context, int) (router.SettlementReconcileSummary, error)
 }
 
 func runSettlementReconciler(ctx context.Context, reconciler settlementReconciler, interval time.Duration, limit int, requestTimeout time.Duration) {
@@ -302,14 +303,7 @@ func runSettlementReconciler(ctx context.Context, reconciler settlementReconcile
 	if requestTimeout <= 0 {
 		requestTimeout = 10 * time.Second
 	}
-	reconcile := func() {
-		runCtx, cancel := context.WithTimeout(ctx, requestTimeout)
-		defer cancel()
-		summary, err := reconciler.ReconcileSettlementHolds(runCtx, limit)
-		if err != nil {
-			slog.Warn("SPEC-022 settlement reconciler failed", "error", err)
-			return
-		}
+	logSummary := func(summary router.SettlementReconcileSummary) {
 		if summary.Scanned > 0 || summary.Errors > 0 {
 			slog.Info("SPEC-022 settlement reconciler completed",
 				"scanned", summary.Scanned,
@@ -322,7 +316,25 @@ func runSettlementReconciler(ctx context.Context, reconciler settlementReconcile
 			)
 		}
 	}
-	reconcile()
+	startupCatchup := func() {
+		summary, err := reconciler.CatchUpSettlementHolds(ctx, 500)
+		if err != nil {
+			slog.Warn("SPEC-022 settlement startup catch-up failed", "error", err)
+			return
+		}
+		logSummary(summary)
+	}
+	reconcile := func() {
+		runCtx, cancel := context.WithTimeout(ctx, requestTimeout)
+		defer cancel()
+		summary, err := reconciler.ReconcileSettlementHolds(runCtx, limit)
+		if err != nil {
+			slog.Warn("SPEC-022 settlement reconciler failed", "error", err)
+			return
+		}
+		logSummary(summary)
+	}
+	go startupCatchup()
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
