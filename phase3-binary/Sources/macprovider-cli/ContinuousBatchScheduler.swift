@@ -578,6 +578,14 @@ struct ContinuousBatchSchedulerReplayKey: Sendable, Equatable {
 /// are an optimization, never the authority that permits re-execution.
 protocol ContinuousBatchSchedulerReplayAuthority: Sendable {
     func claim(_ key: ContinuousBatchSchedulerReplayKey) throws -> ContinuousBatchSchedulerReplayClaim
+    /// Drops a claim taken for a request that never reached admission, so the
+    /// same request ID can be re-sent. Only the pre-admission queue-wait
+    /// expiry calls this: the request owns no slot, no result and no receipt,
+    /// so releasing cannot permit a re-execution of work that already ran.
+    /// Must be a no-op when the stored fingerprint no longer matches `key`,
+    /// so a re-claim by a different body is never deleted. Best-effort: a
+    /// release that fails leaves the claim standing, which is the safe side.
+    func release(_ key: ContinuousBatchSchedulerReplayKey)
 }
 
 private final class ContinuousBatchTokenDeliveryCapacity: @unchecked Sendable {
@@ -917,22 +925,38 @@ extension ContinuousBatchSchedulerError {
     /// convention by shape: 400 when the rejection is a property of the
     /// request, 503 when it is a property of the provider's capability or
     /// availability. Unknown codes fail to 503 — an unrecognised scheduler
-    /// rejection is a provider-side condition, not buyer error.
+    /// rejection is a provider-side condition, not buyer error — but the
+    /// fallback is a runtime safety net, not the classification: every code
+    /// the scheduler can carry is listed in `carriedCodeStatuses`, and
+    /// `ContinuousBatchSchedulerTests
+    /// .testEveryCarriedSchedulerCodeIsClassified` fails on any new literal
+    /// that is not, so a future serve-path code cannot silently inherit 503.
+    static let carriedCodeStatuses: [String: Int] = [
+        // 400 — a property of the request.
+        ContinuousBatchingUnsupportedReason.stickyCacheHandoffUnavailable.apiCode: 400,
+        // Mirrors `.tupleNotAdvertised` / `.moePromotionEvidenceUnavailable`,
+        // which `localCapabilityReason` reports without the API prefix.
+        "local_paged_kv_descriptor_mismatch": 400,
+        "moe_promotion_evidence_unavailable": 400,
+        "continuous_batching_cached_tokens_require_conversation_key": 400,
+        "continuous_batching_invalid_cached_prompt_tokens": 400,
+        "continuous_batching_invalid_request": 400,
+        "continuous_batching_request_fingerprint_failed": 400,
+        // 503 — a property of the provider's capability or availability.
+        "continuous_batching_scheduler_failed_closed": 503,
+        "continuous_batching_admission_sequence_exhausted": 503,
+        "continuous_batching_local_binding_mismatch": 503,
+        "continuous_batching_terminal_kv_commit_unavailable": 503,
+        "continuous_batching_terminal_kv_commit_missing_token": 503,
+        "continuous_batching_decode_row_mismatch": 503,
+        "continuous_batching_duplicate_decode_row": 503,
+        "continuous_batching_duplicate_prefill_row": 503,
+        "continuous_batching_prefill_row_mismatch": 503,
+        "continuous_batching_reservation_overflow": 503,
+    ]
+
     private static func carriedCodeStatus(_ code: String) -> Int {
-        switch code {
-        case ContinuousBatchingUnsupportedReason.stickyCacheHandoffUnavailable.apiCode,
-             // Mirrors `.tupleNotAdvertised` / `.moePromotionEvidenceUnavailable`,
-             // which `localCapabilityReason` reports without the API prefix.
-             "local_paged_kv_descriptor_mismatch",
-             "moe_promotion_evidence_unavailable",
-             "continuous_batching_cached_tokens_require_conversation_key",
-             "continuous_batching_invalid_cached_prompt_tokens",
-             "continuous_batching_invalid_request",
-             "continuous_batching_request_fingerprint_failed":
-            return 400
-        default:
-            return 503
-        }
+        carriedCodeStatuses[code] ?? 503
     }
 }
 
@@ -1518,11 +1542,38 @@ actor ContinuousBatchScheduler {
     /// owns no row, no block-table handle and no terminal result: the only
     /// state it leaves behind is the non-receipt diagnostic. It can never be
     /// settlement-eligible because no result is produced for it at all.
-    private func expireQueueWait(requestID: String) async {
-        endQueueWait(requestID: requestID)
-        guard let index = waiting.firstIndex(where: { $0.id == requestID }) else { return }
+    ///
+    /// Internal rather than private so a `@testable` test can drive the stale
+    /// wake directly: it happens only when the timeout task reaches the actor
+    /// in the same turn the pump pulls the request into admission, which
+    /// cannot be forced from outside the actor.
+    func expireQueueWait(requestID: String) async {
+        // A timeout task can reach here after `suspendQueueWaitTimeout`
+        // cancelled it: cancellation does not unschedule a task that already
+        // woke. Do not touch `queueWaitDeadlines` until the request is
+        // confirmed still queued and actually past its deadline. Clearing it
+        // for a request that is mid-admission would strip the absolute
+        // deadline, and a `capacityExceeded` bounce would then re-arm with no
+        // deadline at all — the unbounded wait this bound exists to remove.
+        guard let deadline = queueWaitDeadlines[requestID],
+              DispatchTime.now().uptimeNanoseconds >= deadline,
+              let index = waiting.firstIndex(where: { $0.id == requestID }) else { return }
         let request = waiting.remove(at: index)
+        endQueueWait(requestID: requestID)
         record(.queueWaitTimedOut)
+        // SPEC-038 AC-25: the durable replay claim was taken at submit, before
+        // this request ever reached a slot. Nothing ran, nothing was cached,
+        // nothing can settle, so the claim guards no execution — holding it
+        // would answer a same-ID retry of a 503 this provider itself marked
+        // `retryable: true` with a 409 instead, and churn a claim file for
+        // work that never happened. Released before the waiters are resumed
+        // so a retry cannot race ahead of the release.
+        if let fingerprint = knownRequests[requestID] {
+            replayAuthority.release(ContinuousBatchSchedulerReplayKey(
+                requestID: requestID,
+                fingerprintSHA256: fingerprint.sha256
+            ))
+        }
         knownRequests.removeValue(forKey: requestID)
         requestAdmissionSequences.removeValue(forKey: requestID)
         cancelledIDs.remove(requestID)

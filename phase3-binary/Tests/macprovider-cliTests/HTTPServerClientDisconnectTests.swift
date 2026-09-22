@@ -117,6 +117,129 @@ final class HTTPServerClientDisconnectTests: XCTestCase {
         XCTAssertFalse(response.body.contains("\"finish_reason\": \"stop\""), response.body)
         XCTAssertFalse(response.body.contains("\"usage\""), response.body)
     }
+
+    // MARK: - Pipelining cannot orphan an in-flight request's disconnect state
+
+    /// A client that pipelines a second request must not be able to orphan the
+    /// first request's cancellation state. The handler keeps every armed
+    /// state, not just the newest, so a close still reaches the inference that
+    /// is actually running.
+    ///
+    /// Note for the reader: NIO's `HTTPServerPipelineHandler`, which
+    /// `configureHTTPServerPipeline()` installs by default, buffers the second
+    /// request until the first response's `.end` is written — so in the
+    /// shipping configuration `RouterHandler` never sees two overlapping
+    /// `.head`s at all. This test therefore turns that assistance off, which
+    /// is the only way to produce the overlap, and pins the handler's own
+    /// behaviour so the guarantee does not rest on an upstream default.
+    func testPipelinedRequestsEachKeepTheirOwnDisconnectState() async throws {
+        let probe = DisconnectProbe()
+        let runtime = DisconnectProbeRuntime(mode: .awaitDisconnect, probe: probe)
+
+        try await withDisconnectHTTPServer(
+            runtime: runtime,
+            pipeliningAssistance: false,
+            maxConcurrency: 2
+        ) { port in
+            let descriptor = try connectAndSend(port: port, stream: false, keepAlive: true)
+            // Pipelined before the first response is written: two inferences
+            // are now in flight on one channel.
+            try sendRequestBytes(descriptor: descriptor, port: port, stream: false, keepAlive: true)
+            try await eventuallyTrue { probe.observedInferenceCount == 2 }
+            close(descriptor)
+            // Both must be cancelled. Keeping only the newest state leaves the
+            // first running against a socket that is already gone.
+            try await eventuallyTrue { probe.observedDisconnectCount == 2 }
+        }
+        XCTAssertEqual(probe.observedDisconnectCount, 2)
+    }
+
+    // MARK: - SPEC-038 `:614` bounded retry guidance
+
+    /// A `retryable: true` 503 with no bound invites a client to hot-loop on a
+    /// provider that is already saturated. The direct-HTTP JSON error path
+    /// carries `Retry-After`, derived from the configured admission wait.
+    func testQueuePressureErrorCarriesRetryAfterDerivedFromTheConfiguredWait() async throws {
+        let probe = DisconnectProbe()
+        let runtime = DisconnectProbeRuntime(mode: .schedulerBackpressure, probe: probe)
+
+        let response = try await withDisconnectHTTPServer(
+            runtime: runtime,
+            continuousBatchQueueWaitTimeoutMS: 4_500
+        ) { port in
+            try sendChatCompletionAndRead(port: port, stream: false)
+        }
+
+        XCTAssertEqual(response.statusCode, 503, response.body)
+        let error = try errorObject(fromJSONBody: response.body)
+        XCTAssertEqual(error["code"] as? String, "continuous_batching_stream_backpressure")
+        XCTAssertEqual(error["retryable"] as? Bool, true)
+        // 4500 ms of admission wait rounds up to a 5 second bound.
+        XCTAssertEqual(response.headers["retry-after"], "5", response.headers.description)
+    }
+
+    /// On a streaming request the scheduler rejects after the SSE head is
+    /// already committed, so the bound cannot ride a response header. It goes
+    /// out as a trailer instead — SPEC-038 `:614`'s "or equivalent", on the
+    /// same channel the receipt header already uses.
+    func testStreamingQueuePressureErrorCarriesRetryAfterAsATrailer() async throws {
+        let probe = DisconnectProbe()
+        let runtime = DisconnectProbeRuntime(mode: .schedulerBackpressure, probe: probe)
+
+        let response = try await withDisconnectHTTPServer(
+            runtime: runtime,
+            continuousBatchQueueWaitTimeoutMS: 4_500
+        ) { port in
+            try sendChatCompletionAndRead(port: port, stream: true)
+        }
+
+        XCTAssertEqual(response.statusCode, 200, response.body)
+        XCTAssertTrue(
+            response.body.contains("continuous_batching_stream_backpressure"),
+            response.body
+        )
+        XCTAssertTrue(response.body.contains("Retry-After: 5"), response.body)
+    }
+
+    /// Only the queue-pressure codes get the header: a 409 duplicate is not
+    /// something a client should re-send on a timer.
+    func testNonQueuePressureErrorCarriesNoRetryAfter() async throws {
+        let probe = DisconnectProbe()
+        let runtime = DisconnectProbeRuntime(mode: .schedulerDuplicateMismatch, probe: probe)
+
+        let response = try await withDisconnectHTTPServer(runtime: runtime) { port in
+            try sendChatCompletionAndRead(port: port, stream: false)
+        }
+
+        XCTAssertEqual(response.statusCode, 409, response.body)
+        XCTAssertNil(response.headers["retry-after"], response.headers.description)
+    }
+
+    func testRetryAfterSecondsResolutionMatchesTheSchedulerDefault() {
+        // Unset and non-positive both mean the scheduler default, not
+        // "unbounded" — the same rule `ModelRuntime` applies.
+        XCTAssertEqual(RouterHandler.queueWaitRetryAfterSeconds(nil), 30)
+        XCTAssertEqual(RouterHandler.queueWaitRetryAfterSeconds(0), 30)
+        XCTAssertEqual(RouterHandler.queueWaitRetryAfterSeconds(-1), 30)
+        XCTAssertEqual(RouterHandler.queueWaitRetryAfterSeconds(1), 1)
+        XCTAssertEqual(RouterHandler.queueWaitRetryAfterSeconds(1_000), 1)
+        XCTAssertEqual(RouterHandler.queueWaitRetryAfterSeconds(1_001), 2)
+        XCTAssertEqual(
+            RouterHandler.queueWaitRetryAfterSeconds(nil),
+            Int(ContinuousBatchSchedulerConfiguration.defaultQueueWaitTimeoutNanoseconds / 1_000_000_000)
+        )
+        XCTAssertEqual(
+            RouterHandler.retryGuidanceHeaders(code: "continuous_batching_queue_wait_timeout", seconds: 7).map(\.0),
+            ["Retry-After"]
+        )
+        XCTAssertTrue(RouterHandler.retryGuidanceHeaders(code: "model_not_loaded", seconds: 7).isEmpty)
+        // The header set and the retryable set must stay the same two codes.
+        for code in RouterHandler.queueWaitRetryGuidanceCodes {
+            let envelope = APIError(status: 503, message: "m", type: "server_error", code: code)
+                .envelope["error"] as? [String: Any]
+            XCTAssertEqual(envelope?["retryable"] as? Bool, true, code)
+        }
+    }
 }
 
 // MARK: - Fixtures
@@ -124,6 +247,9 @@ final class HTTPServerClientDisconnectTests: XCTestCase {
 private final class DisconnectProbe: @unchecked Sendable {
     private let lock = NSLock()
     private var disconnected = false
+    private var disconnectCount = 0
+    private var inferenceCount = 0
+    private var inferenceEntered = false
 
     var observedDisconnect: Bool {
         lock.lock()
@@ -131,9 +257,39 @@ private final class DisconnectProbe: @unchecked Sendable {
         return disconnected
     }
 
+    /// How many in-flight requests saw the close. One per request, so a
+    /// dropped cancellation state shows up as a missing count.
+    var observedDisconnectCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return disconnectCount
+    }
+
+    var observedInferenceCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return inferenceCount
+    }
+
+    /// True once the fixture engine is inside the request, so a test can close
+    /// the socket at a point where cancellation is meaningful.
+    var observedInference: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return inferenceEntered
+    }
+
+    func noteInference() {
+        lock.lock()
+        inferenceEntered = true
+        inferenceCount += 1
+        lock.unlock()
+    }
+
     func noteDisconnect() {
         lock.lock()
         disconnected = true
+        disconnectCount += 1
         lock.unlock()
     }
 }
@@ -145,6 +301,10 @@ private enum DisconnectProbeMode: Sendable {
     case cancelInPreflight
     case cancelBeforeFirstToken
     case cancelAfterTokens(Int)
+    /// Rejects the way a saturated scheduler does, through the shared AC-25
+    /// error map, so the response the buyer sees is the real one.
+    case schedulerBackpressure
+    case schedulerDuplicateMismatch
 }
 
 private actor DisconnectProbeRuntime: ModelRuntimeServing {
@@ -184,6 +344,10 @@ private actor DisconnectProbeRuntime: ModelRuntimeServing {
         switch mode {
         case .awaitDisconnect:
             try await waitForCancel(shouldCancel)
+        case .schedulerBackpressure:
+            throw try XCTUnwrap(ContinuousBatchSchedulerError.backpressure.asAPIError())
+        case .schedulerDuplicateMismatch:
+            throw try XCTUnwrap(ContinuousBatchSchedulerError.duplicateRequestMismatch.asAPIError())
         case .cancelInPreflight, .cancelBeforeFirstToken, .cancelAfterTokens:
             throw CancellationError()
         }
@@ -203,6 +367,10 @@ private actor DisconnectProbeRuntime: ModelRuntimeServing {
                 onChunk(.content("t\(index)"))
             }
             throw CancellationError()
+        case .schedulerBackpressure:
+            throw try XCTUnwrap(ContinuousBatchSchedulerError.backpressure.asAPIError())
+        case .schedulerDuplicateMismatch:
+            throw try XCTUnwrap(ContinuousBatchSchedulerError.duplicateRequestMismatch.asAPIError())
         case .cancelInPreflight, .cancelBeforeFirstToken:
             throw CancellationError()
         }
@@ -213,6 +381,7 @@ private actor DisconnectProbeRuntime: ModelRuntimeServing {
     private func waitForCancel(
         _ shouldCancel: @escaping @Sendable () -> Bool
     ) async throws -> CompletionResult {
+        probe.noteInference()
         let deadline = DispatchTime.now().uptimeNanoseconds + 5_000_000_000
         while DispatchTime.now().uptimeNanoseconds < deadline {
             if shouldCancel() {
@@ -250,24 +419,32 @@ private final class ReceiptAuditCaptureSink: @unchecked Sendable {
 
 private struct RawHTTPResponse {
     let statusCode: Int
+    /// Response header names lowercased, so a test asserts on the value and
+    /// not on NIO's casing.
+    let headers: [String: String]
     let body: String
 }
 
 private func withDisconnectHTTPServer<T>(
     runtime: any ModelRuntimeServing,
+    continuousBatchQueueWaitTimeoutMS: Int? = nil,
+    pipeliningAssistance: Bool = true,
+    maxConcurrency: Int? = nil,
     operation: (Int) async throws -> T
 ) async throws -> T {
     let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
     let providerStatus = ProviderStatus(
         modelID: "fixture-model",
         modelLoaded: true,
-        capacity: ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: nil)
+        capacity: ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: maxConcurrency)
     )
     let bootstrap = ServerBootstrap(group: group)
         .serverChannelOption(ChannelOptions.backlog, value: 16)
         .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
         .childChannelInitializer { channel in
-            channel.pipeline.configureHTTPServerPipeline().flatMap {
+            channel.pipeline.configureHTTPServerPipeline(
+                withPipeliningAssistance: pipeliningAssistance
+            ).flatMap {
                 channel.pipeline.addHandler(RouterHandler(
                     modelID: "fixture-model",
                     providerID: "provider-a",
@@ -276,7 +453,8 @@ private func withDisconnectHTTPServer<T>(
                     providerStatus: providerStatus,
                     warmSwapEnabled: false,
                     maxBodyBytes: 1_000_000,
-                    receiptBuilder: nil
+                    receiptBuilder: nil,
+                    continuousBatchQueueWaitTimeoutMS: continuousBatchQueueWaitTimeoutMS
                 ))
             }
         }
@@ -295,7 +473,7 @@ private func withDisconnectHTTPServer<T>(
     }
 }
 
-private func chatCompletionRequestBytes(port: Int, stream: Bool) throws -> Data {
+private func chatCompletionRequestBytes(port: Int, stream: Bool, keepAlive: Bool = false) throws -> Data {
     let body: [String: Any] = [
         "model": "fixture-model",
         "messages": [["role": "user", "content": "hello"]],
@@ -307,15 +485,38 @@ private func chatCompletionRequestBytes(port: Int, stream: Bool) throws -> Data 
         + "Content-Type: application/json\r\n"
         + "Content-Length: \(bodyData.count)\r\n"
         + "X-Request-ID: req-disconnect\r\n"
-        + "Connection: close\r\n"
+        // A pipelining test must not announce `close`: the decoder stops
+        // parsing further requests on this connection once it sees it.
+        + (keepAlive ? "" : "Connection: close\r\n")
         + "\r\n"
     var request = Data(head.utf8)
     request.append(bodyData)
     return request
 }
 
-private func connectAndSend(port: Int, stream: Bool) throws -> Int32 {
-    let request = try chatCompletionRequestBytes(port: port, stream: stream)
+/// Writes one more complete request onto an already-open connection, without
+/// reading the previous response first — HTTP/1.1 pipelining.
+private func sendRequestBytes(descriptor: Int32, port: Int, stream: Bool, keepAlive: Bool = false) throws {
+    try sendAll(
+        descriptor: descriptor,
+        data: try chatCompletionRequestBytes(port: port, stream: stream, keepAlive: keepAlive)
+    )
+}
+
+private func sendAll(descriptor: Int32, data: Data) throws {
+    try data.withUnsafeBytes { rawBuffer in
+        guard let base = rawBuffer.baseAddress else { return }
+        var sent = 0
+        while sent < data.count {
+            let count = Darwin.send(descriptor, base.advanced(by: sent), data.count - sent, 0)
+            if count <= 0 { throw POSIXError(.EIO) }
+            sent += count
+        }
+    }
+}
+
+private func connectAndSend(port: Int, stream: Bool, keepAlive: Bool = false) throws -> Int32 {
+    let request = try chatCompletionRequestBytes(port: port, stream: stream, keepAlive: keepAlive)
     let descriptor = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)
     XCTAssertGreaterThanOrEqual(descriptor, 0)
     var timeout = timeval(tv_sec: 10, tv_usec: 0)
@@ -333,15 +534,7 @@ private func connectAndSend(port: Int, stream: Bool) throws -> Int32 {
     }
     XCTAssertEqual(connected, 0)
 
-    try request.withUnsafeBytes { rawBuffer in
-        guard let base = rawBuffer.baseAddress else { return }
-        var sent = 0
-        while sent < request.count {
-            let count = Darwin.send(descriptor, base.advanced(by: sent), request.count - sent, 0)
-            if count <= 0 { throw POSIXError(.EIO) }
-            sent += count
-        }
-    }
+    try sendAll(descriptor: descriptor, data: request)
     return descriptor
 }
 
@@ -353,7 +546,10 @@ private func sendChatCompletionAndClose(port: Int, stream: Bool) throws {
 private func sendChatCompletionAndRead(port: Int, stream: Bool) throws -> RawHTTPResponse {
     let descriptor = try connectAndSend(port: port, stream: stream)
     defer { close(descriptor) }
+    return try readRawResponse(descriptor: descriptor)
+}
 
+private func readRawResponse(descriptor: Int32) throws -> RawHTTPResponse {
     var raw = Data()
     var scratch = [UInt8](repeating: 0, count: 4096)
     while true {
@@ -370,12 +566,18 @@ private func sendChatCompletionAndRead(port: Int, stream: Bool) throws -> RawHTT
     let statusLine = text.split(separator: "\r\n", maxSplits: 1).first.map(String.init) ?? ""
     let statusCode = Int(statusLine.split(separator: " ").dropFirst().first.map(String.init) ?? "") ?? 0
     let body: String
+    var headers: [String: String] = [:]
     if let range = text.range(of: "\r\n\r\n") {
         body = String(text[range.upperBound...])
+        for line in text[..<range.lowerBound].components(separatedBy: "\r\n").dropFirst() {
+            guard let separator = line.firstIndex(of: ":") else { continue }
+            headers[line[..<separator].lowercased()] =
+                line[line.index(after: separator)...].trimmingCharacters(in: .whitespaces)
+        }
     } else {
         body = ""
     }
-    return RawHTTPResponse(statusCode: statusCode, body: body)
+    return RawHTTPResponse(statusCode: statusCode, headers: headers, body: body)
 }
 
 private func eventuallyTrue(

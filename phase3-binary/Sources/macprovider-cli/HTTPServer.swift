@@ -189,7 +189,8 @@ struct HTTPServer: Sendable {
                             admissionIdentityStatusRuntime: admissionIdentityStatusRuntime,
                             compatibilitySetManifest: compatibilitySetManifest,
                             lifecycleStateStore: lifecycleStateStore,
-                            lifecycleLeaseStore: lifecycleLeaseStore
+                            lifecycleLeaseStore: lifecycleLeaseStore,
+                            continuousBatchQueueWaitTimeoutMS: config.continuousBatchQueueWaitTimeoutMS
                         )
                     )
                 }
@@ -333,11 +334,25 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
     private var requestHead: HTTPRequestHead?
     private var bodyBuffer: ByteBuffer?
     private var bodyTooLarge = false
-    // SPEC-038 AC-25: disconnect flag for the inference currently running on
-    // this channel. Written and read only on the channel's event loop
-    // (`channelRead` / `channelInactive`); the inference task reads the flag
+    // SPEC-038 AC-25: disconnect flags for the inferences running on this
+    // channel. Written and read only on the channel's event loop
+    // (`channelRead` / `channelInactive`); each inference task reads the flag
     // it captured, not this property.
-    private var inflightDisconnect: ClientDisconnectState?
+    //
+    // Every request handed to inference on this channel, not just the latest:
+    // HTTP/1.1 lets a client pipeline a second request, and a single pointer
+    // reset per `.head` would drop the first request's state on the floor, so
+    // `channelInactive` would cancel only the newest and the older inference
+    // would run on — through success and receipt handling — against a buyer
+    // socket that is already gone. `channelInactive` marks all of them.
+    // Entries are appended once per request handed to inference and dropped
+    // with the channel; every response path writes `connection: close`, so in
+    // practice this holds a single state.
+    private var inflightDisconnects: [ClientDisconnectState] = []
+    // SPEC-038 `:614`: bounded retry guidance for the queue-pressure codes,
+    // in seconds. Derived from the configured admission wait so the hint the
+    // buyer is handed is the bound this provider actually enforces.
+    private let queueWaitRetryAfterSeconds: Int
 
     init(
         modelID: String?,
@@ -355,8 +370,10 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         admissionIdentityStatusRuntime: ProviderAdmissionIdentityStatusRuntime = ProviderAdmissionIdentityStatusRuntime(),
         compatibilitySetManifest: CompatibilitySetManifest? = nil,
         lifecycleStateStore: ProviderLifecycleStateStore = ProviderLifecycleStateStore(),
-        lifecycleLeaseStore: ProviderLifecycleLeaseStore = ProviderLifecycleLeaseStore()
+        lifecycleLeaseStore: ProviderLifecycleLeaseStore = ProviderLifecycleLeaseStore(),
+        continuousBatchQueueWaitTimeoutMS: Int? = nil
     ) {
+        self.queueWaitRetryAfterSeconds = Self.queueWaitRetryAfterSeconds(continuousBatchQueueWaitTimeoutMS)
         self.modelID = modelID
         self.providerID = providerID
         self.coordinatorURL = coordinatorURL
@@ -380,10 +397,12 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
 
         switch part {
         case .head(let head):
+            // Deliberately does not reset `inflightDisconnects`: a request
+            // already handed to inference keeps its cancellation state until
+            // the channel goes away, whatever arrives after it.
             requestHead = head
             bodyBuffer = context.channel.allocator.buffer(capacity: 0)
             bodyTooLarge = false
-            inflightDisconnect = nil
         case .body(var chunk):
             guard !bodyTooLarge else { return }
             let currentBytes = bodyBuffer?.readableBytes ?? 0
@@ -403,16 +422,19 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
 
     // SPEC-038 AC-25 (`:620-621`): the only disconnect signal this pipeline
     // has. Every response path writes `connection: close` and closes the
-    // channel itself, so a channel carries exactly one request and channel
-    // inactivity means "this buyer can no longer be answered". The bootstrap
+    // channel itself, so channel inactivity means "this buyer can no longer
+    // be answered" — for every request still running on it, which is why all
+    // of the armed states are marked and not just the newest. The bootstrap
     // does not set `allowRemoteHalfClosure`, so a client FIN closes the
     // channel too — a half-closing client could not receive the response
     // either way, so treating it as a disconnect is not a false positive.
     // Inactivity after the response has been written is harmless: the
     // inference task has already stopped reading the flag.
     func channelInactive(context: ChannelHandlerContext) {
-        inflightDisconnect?.markDisconnected()
-        inflightDisconnect = nil
+        for disconnect in inflightDisconnects {
+            disconnect.markDisconnected()
+        }
+        inflightDisconnects.removeAll()
         context.fireChannelInactive()
     }
 
@@ -580,7 +602,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
 
         var body = bodyBuffer ?? context.channel.allocator.buffer(capacity: 0)
         let data = Data(body.readBytes(length: body.readableBytes) ?? [])
-        let writer = ResponseWriter(context: context)
+        let writer = ResponseWriter(context: context, retryAfterSeconds: queueWaitRetryAfterSeconds)
         let modelRuntime = modelRuntime
         let warmSwapEnabled = warmSwapEnabled
         let receiptBuilder = receiptBuilder
@@ -613,7 +635,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
             // SPEC-038 AC-25: arm the disconnect flag before either inference
             // path starts, so a close that races the handoff is still seen.
             let disconnect = ClientDisconnectState()
-            inflightDisconnect = disconnect
+            inflightDisconnects.append(disconnect)
 
             if request.stream {
                 if settlementMetadata == nil {
@@ -830,7 +852,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                 await providerStatus.recordError()
             }
             if let request = parsedRequest, !request.stream {
-                let writer = ResponseWriter(context: context)
+                let writer = ResponseWriter(context: context, retryAfterSeconds: queueWaitRetryAfterSeconds)
                 do {
                     // Parse-error path: the request failed to validate
                     // before any runtime snapshot was taken, so no
@@ -1141,8 +1163,16 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                     await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: true)
                 }
                 if sseStarted {
+                    // SPEC-038 `:614` "or equivalent": the SSE head is
+                    // already on the wire when the scheduler rejects, so the
+                    // bound rides the trailer channel the receipt header
+                    // already uses rather than a response header that can no
+                    // longer be written.
                     writer.writeSSEJSON(error.envelope)
-                    writer.writeSSEDone()
+                    writer.writeSSEDone(trailers: RouterHandler.retryGuidanceHeaders(
+                        code: error.code,
+                        seconds: writer.retryAfterSeconds
+                    ))
                 } else {
                     writer.writeAPIError(error)
                 }
@@ -1194,6 +1224,34 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
 
     static func modelIDForValidation(warmSwapEnabled: Bool, bootModelID: String?, runtimeSnapshot: RuntimeSnapshot) -> String? {
         warmSwapEnabled ? runtimeSnapshot.modelID : bootModelID
+    }
+
+    /// SPEC-038 `:614`: the queue-pressure codes that MUST carry bounded
+    /// retry guidance. Exactly the two `APIError` marks `retryable: true`
+    /// for; a retryable code with no bound is an invitation to hot-loop on a
+    /// provider that is already saturated.
+    static let queueWaitRetryGuidanceCodes: Set<String> = [
+        "continuous_batching_stream_backpressure",
+        "continuous_batching_queue_wait_timeout",
+    ]
+
+    /// The bound itself: the configured admission wait, rounded up to whole
+    /// seconds. A request rejected under queue pressure cannot be served
+    /// before the batch in front of it drains, and that wait is capped by the
+    /// same timeout, so it is the honest hint. Clamped to at least one second
+    /// (`Retry-After: 0` is guidance a client can ignore for free).
+    static func queueWaitRetryAfterSeconds(_ milliseconds: Int?) -> Int {
+        let defaultMS = Int(ContinuousBatchSchedulerConfiguration.defaultQueueWaitTimeoutNanoseconds / 1_000_000)
+        // Mirrors `ModelRuntime.queueWaitTimeoutNanoseconds`: absent or
+        // non-positive means the scheduler default, not "unbounded".
+        let resolved = milliseconds.flatMap { $0 > 0 ? $0 : nil } ?? defaultMS
+        return max(1, resolved / 1_000 + (resolved % 1_000 == 0 ? 0 : 1))
+    }
+
+    /// `Retry-After` for a queue-pressure rejection, empty for anything else.
+    static func retryGuidanceHeaders(code: String, seconds: Int) -> [(String, String)] {
+        guard queueWaitRetryGuidanceCodes.contains(code) else { return [] }
+        return [("Retry-After", "\(seconds)")]
     }
 
     /// SPEC-038 AC-25 (`:620-621`) terminal outcome for a direct-HTTP client
@@ -2162,6 +2220,18 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
 
 private struct ResponseWriter: @unchecked Sendable {
     let context: ChannelHandlerContext
+    /// SPEC-038 `:614` bounded retry guidance, in seconds. Applied by
+    /// `writeAPIError` to the queue-pressure codes only, so every direct-HTTP
+    /// JSON error path carries the bound without each call site remembering.
+    let retryAfterSeconds: Int
+
+    init(
+        context: ChannelHandlerContext,
+        retryAfterSeconds: Int = RouterHandler.queueWaitRetryAfterSeconds(nil)
+    ) {
+        self.context = context
+        self.retryAfterSeconds = retryAfterSeconds
+    }
 
     func writeJSON(
         status: HTTPResponseStatus,
@@ -2190,7 +2260,10 @@ private struct ResponseWriter: @unchecked Sendable {
         writeJSON(
             status: HTTPResponseStatus(statusCode: error.status),
             body: error.envelope,
-            extraHeaders: extraHeaders,
+            extraHeaders: RouterHandler.retryGuidanceHeaders(
+                code: error.code,
+                seconds: retryAfterSeconds
+            ) + extraHeaders,
             completion: completion
         )
     }

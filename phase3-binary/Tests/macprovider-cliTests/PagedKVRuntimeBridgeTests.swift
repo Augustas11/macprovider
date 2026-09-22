@@ -2022,4 +2022,10 @@ private final class RuntimeBridgeReplayAuthority: ContinuousBatchSchedulerReplay
         let storageKey = "\(key.requestID):\(key.fingerprintSHA256.base64EncodedString())"
         return keys.insert(storageKey).inserted ? .claimed : .duplicateSameRequest
     }
+
+    func release(_ key: ContinuousBatchSchedulerReplayKey) {
+        lock.lock()
+        defer { lock.unlock() }
+        keys.remove("\(key.requestID):\(key.fingerprintSHA256.base64EncodedString())")
+    }
 }

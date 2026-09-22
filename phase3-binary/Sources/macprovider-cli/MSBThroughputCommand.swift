@@ -1826,6 +1826,13 @@ private final class MSBThroughputReplayAuthority: ContinuousBatchSchedulerReplay
         fingerprints[key.requestID] = key.fingerprintSHA256
         return .claimed
     }
+
+    func release(_ key: ContinuousBatchSchedulerReplayKey) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard fingerprints[key.requestID] == key.fingerprintSHA256 else { return }
+        fingerprints.removeValue(forKey: key.requestID)
+    }
 }
 
 private final class FirstTokenBox: @unchecked Sendable {

@@ -582,6 +582,30 @@ final class ContinuousBatchRuntimeReplayAuthority: ContinuousBatchSchedulerRepla
         return .claimed
     }
 
+    /// SPEC-038 AC-25: drop a claim whose request never reached admission.
+    /// Fingerprint-guarded so a concurrent re-claim of the same ID with a
+    /// different body is left alone, and best-effort on the durable tier — a
+    /// store error leaves the claim in place, which fails toward the
+    /// pre-existing 409 rather than toward permitting a second execution.
+    func release(_ key: ContinuousBatchSchedulerReplayKey) {
+        let requestIDHash = Self.requestIDHash(key.requestID)
+        lock.lock()
+        defer { lock.unlock() }
+        if let storeURL {
+            try? Self.withStoreLock(for: storeURL) {
+                let claimURL = try Self.claimURL(for: requestIDHash, in: storeURL)
+                guard let existing = try? readClaim(at: claimURL, requestIDHash: requestIDHash),
+                      existing == key.fingerprintSHA256 else { return }
+                try FileManager.default.removeItem(at: claimURL)
+                try Self.syncDirectory(claimURL.deletingLastPathComponent())
+                fingerprintsByRequestIDHash.removeValue(forKey: requestIDHash)
+            }
+            return
+        }
+        guard fingerprintsByRequestIDHash[requestIDHash] == key.fingerprintSHA256 else { return }
+        fingerprintsByRequestIDHash.removeValue(forKey: requestIDHash)
+    }
+
     private static func defaultStoreURL(home: URL = FileManager.default.homeDirectoryForCurrentUser) -> URL {
         home
             .appendingPathComponent("Library/Application Support/macprovider/continuous-batching", isDirectory: true)
