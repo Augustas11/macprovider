@@ -6258,7 +6258,7 @@ final class CoordinatorClientTests: XCTestCase {
     // verdict; the client holds through it and promotes on confirmation.
     private actor ReadinessScript {
         private var verdicts: [CoordinatorReadinessClient.Readiness]
-        private let final: CoordinatorReadinessClient.Readiness
+        private var final: CoordinatorReadinessClient.Readiness
         private(set) var calls = 0
 
         init(_ verdicts: [CoordinatorReadinessClient.Readiness], then final: CoordinatorReadinessClient.Readiness) {
@@ -6270,6 +6270,10 @@ final class CoordinatorClientTests: XCTestCase {
             calls += 1
             if verdicts.isEmpty { return final }
             return verdicts.removeFirst()
+        }
+
+        func setFinal(_ verdict: CoordinatorReadinessClient.Readiness) {
+            final = verdict
         }
     }
 
@@ -6530,7 +6534,7 @@ final class CoordinatorClientTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: fixture.root) }
         let script = ReadinessScript(
             [.confirmed, .notServing(hold: .modelAdmissionPending)],
-            then: .confirmed
+            then: .notServing(hold: .modelAdmissionPending)
         )
         let client = try await makeHeldSessionClient(fixture: fixture, script: script)
 
@@ -6545,6 +6549,7 @@ final class CoordinatorClientTests: XCTestCase {
         let held = try await waitForLifecycleReason(fixture, CoordinatorClient.admissionPendingLifecycleReasonCode)
         XCTAssertEqual(held.state, .locallyReadyConnecting)
 
+        await script.setFinal(.confirmed)
         let promoted = try await waitForLifecycleReason(fixture, CoordinatorClient.admissionConfirmedLifecycleReasonCode)
         XCTAssertEqual(promoted.state, .servingBuyers)
         await client.cleanupConnectionForTest()
