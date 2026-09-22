@@ -624,6 +624,134 @@ final class ProviderStatusTests: XCTestCase {
         XCTAssertEqual(catalog?["row_identity"] as? String, String(repeating: "e", count: 64))
     }
 
+    /// Issue #1616 — local status must reproduce the coordinator's own reason
+    /// for withholding buyer routing. The reason existed on the wire and was
+    /// discarded by the CLI, so operators had to read coordinator logs to
+    /// learn why a provider said `not_buyer_serving`.
+    func testStatusReportsCoordinatorBuyerServingHoldOnlyWhenNotServing() async {
+        let status = ProviderStatus(modelID: "model-key", modelLoaded: true, capacity: makeCapacity())
+        await status.setCoordinatorSession(connected: true, assignedID: "session-a")
+        let context = ProviderCatalogStatusContext(
+            trust: ServeCommand.CatalogRuntimeTrust(
+                state: "live_verified",
+                releaseID: "release-a",
+                digest: String(repeating: "a", count: 64),
+                signerKeyID: "streamvc-autotune-static-v5",
+                source: "coordinator",
+                policyVersion: "autotune-policy-v1",
+                rowIdentity: String(repeating: "e", count: 64)
+            ),
+            donorMode: false,
+            catalogKey: "model-key",
+            catalogModelID: "org/model",
+            modelRevision: String(repeating: "b", count: 40),
+            artifactSHA256: String(repeating: "c", count: 64),
+            configuredReleaseID: "release-a",
+            configuredCatalogDigest: String(repeating: "a", count: 64)
+        )
+        let snapshot = await status.snapshot()
+
+        let held = RouterHandler.statusResponse(
+            snapshot,
+            providerID: "provider-a",
+            coordinatorURL: "wss://coordinator.malibu.tech/provider/ws",
+            catalogStatus: context,
+            coordinatorBuyerServing: false,
+            coordinatorBuyerServingHold: .modelAdmissionPending
+        )
+        XCTAssertEqual(held["network_state"] as? String, "not_buyer_serving")
+        XCTAssertEqual(held["buyer_serving_hold"] as? String, "model_admission_pending")
+
+        // An authoritative not-serving with no coordinator reason is explicitly
+        // null, never a locally invented one.
+        let unexplained = RouterHandler.statusResponse(
+            snapshot,
+            providerID: "provider-a",
+            coordinatorURL: "wss://coordinator.malibu.tech/provider/ws",
+            catalogStatus: context,
+            coordinatorBuyerServing: false
+        )
+        XCTAssertEqual(unexplained["network_state"] as? String, "not_buyer_serving")
+        XCTAssertTrue(unexplained["buyer_serving_hold"] is NSNull)
+
+        // A serving provider has no hold to report.
+        let serving = RouterHandler.statusResponse(
+            snapshot,
+            providerID: "provider-a",
+            coordinatorURL: "wss://coordinator.malibu.tech/provider/ws",
+            catalogStatus: context,
+            coordinatorBuyerServing: true
+        )
+        XCTAssertEqual(serving["network_state"] as? String, "buyer_serving")
+        XCTAssertTrue(serving["buyer_serving_hold"] is NSNull)
+    }
+
+    /// R2 architecture MEDIUM — `network_state` is computed from local
+    /// readiness and catalog trust, not from the coordinator verdict alone. A
+    /// donor-mode or not-yet-verified provider is not `not_buyer_serving`, so
+    /// the coordinator's hold is not the reason and SPEC-001 requires null.
+    func testBuyerServingHoldIsSuppressedWhenNetworkStateIsNotNotBuyerServing() async {
+        let status = ProviderStatus(modelID: "model-key", modelLoaded: true, capacity: makeCapacity())
+        await status.setCoordinatorSession(connected: true, assignedID: "session-a")
+        let snapshot = await status.snapshot()
+        let donor = ProviderCatalogStatusContext(
+            trust: nil,
+            donorMode: true,
+            catalogKey: "model-key",
+            catalogModelID: "org/model",
+            modelRevision: String(repeating: "b", count: 40),
+            artifactSHA256: String(repeating: "c", count: 64),
+            configuredReleaseID: nil,
+            configuredCatalogDigest: nil
+        )
+        let body = RouterHandler.statusResponse(
+            snapshot,
+            providerID: "provider-a",
+            coordinatorURL: "wss://coordinator.malibu.tech/provider/ws",
+            catalogStatus: donor,
+            coordinatorBuyerServing: false,
+            coordinatorBuyerServingHold: .modelAdmissionPending
+        )
+        XCTAssertEqual(body["network_state"] as? String, "local_donor")
+        XCTAssertTrue(body["buyer_serving_hold"] is NSNull)
+    }
+
+    /// R2 code-review MEDIUM — pins the projection the status handler uses, so
+    /// a regression that discards the coordinator's reason cannot pass. The
+    /// signature itself is the stronger guard: it does not accept the `Bool?`
+    /// that `CoordinatorReadinessClient.fetch` returns.
+    func testReportableBuyerServingHoldOnlyForAuthoritativeNotServing() {
+        XCTAssertEqual(
+            RouterHandler.reportableBuyerServingHold(
+                readiness: .notServing(hold: .modelAdmissionPending),
+                resolvedBuyerServing: false
+            ),
+            .modelAdmissionPending
+        )
+        XCTAssertNil(RouterHandler.reportableBuyerServingHold(
+            readiness: .notServing(hold: nil),
+            resolvedBuyerServing: false
+        ))
+        // Held true through an indeterminate probe: the coordinator said
+        // nothing this round, so there is no live hold to report.
+        XCTAssertNil(RouterHandler.reportableBuyerServingHold(
+            readiness: .notServing(hold: .modelAdmissionPending),
+            resolvedBuyerServing: true
+        ))
+        XCTAssertNil(RouterHandler.reportableBuyerServingHold(
+            readiness: .indeterminate,
+            resolvedBuyerServing: nil
+        ))
+        XCTAssertNil(RouterHandler.reportableBuyerServingHold(
+            readiness: .confirmed,
+            resolvedBuyerServing: true
+        ))
+    }
+
+    func testBuyerServingHoldCapabilityIsAdvertised() {
+        XCTAssertTrue(RouterHandler.localStatusCapabilities.contains("buyer_serving_hold_v1"))
+    }
+
     func testStatusDoesNotCallOfflineFallbackBuyerServing() async {
         let status = ProviderStatus(modelID: "m", modelLoaded: true, capacity: makeCapacity())
         await status.setCoordinatorSession(connected: true)

@@ -54,7 +54,9 @@ struct DoctorCommand: AsyncParsableCommand {
             providerID: resolved.providerID,
             configPath: resolved.configPath,
             offline: offline,
-            fetch: DoctorRunner.liveFetch(timeout: timeoutSeconds)
+            fetch: DoctorRunner.liveFetch(timeout: timeoutSeconds),
+            installedIdentity: DoctorRunner.resolveInstalledIdentity(),
+            hardwareEvidence: try? HardwareEvidenceOutcomeStore.read()
         ).run()
         if json {
             DoctorReportPrinter.emitJSON(report)
@@ -122,6 +124,30 @@ enum DoctorFloorStanding: String, Equatable, Sendable {
     case indeterminate
 }
 
+/// Issue #1616 finding B — the signed, on-disk identity of what is actually
+/// installed.
+///
+/// `--version` prints `CoordinatorClient.binaryVersion`, a compile-time
+/// constant that every build of a compatibility set shares, and install.sh /
+/// package.sh compare that string by exact equality — so it cannot be made to
+/// carry the release identity. The real identity is the signed
+/// `compatibility-set.json` sitting next to the installed binary. Doctor is
+/// the offline-first place to surface it: an operator recovering a box needs
+/// to answer "what is actually installed here" without SSH-ing anywhere.
+struct DoctorInstalledIdentity: Equatable, Sendable {
+    /// `Augustas11/macprovider:vX.Y.Z@<40hex>` — the signed release identity.
+    let compatibilitySetID: String
+    /// SHA-256 of the signed envelope, for byte-level comparison against a release.
+    let envelopeSHA256: String
+    /// The compatibility set's release version (what `--version` cannot tell you).
+    let releaseVersion: String
+    let providerCLIVersion: String
+    let catalogReleaseID: String
+
+    /// Where the manifest was read from, so an operator can `cat` it themselves.
+    let manifestPath: String
+}
+
 struct DoctorReport: Equatable, Sendable {
     let binaryVersion: String
     let configPath: String
@@ -132,6 +158,10 @@ struct DoctorReport: Equatable, Sendable {
     let requiredBinaryVersion: String?
     let recommendedBinaryVersion: String?
     let floorStanding: DoctorFloorStanding
+    let installedIdentity: DoctorInstalledIdentity?
+    /// Last recorded hardware-evidence submission outcome (#1616). Nil when no
+    /// submission has been recorded on this box, or the record is unreadable.
+    let hardwareEvidence: HardwareEvidenceOutcome?
     let note: String?
 }
 
@@ -151,6 +181,13 @@ struct DoctorRunner: Sendable {
     let offline: Bool
     /// Returns nil when the coordinator is unreachable or answers unusably.
     let fetch: @Sendable (URL) async -> DoctorHealthz?
+    /// Signed on-disk release identity, or nil when no readable signed
+    /// compatibility set sits beside the installed binary (#1616 finding B).
+    /// Injected so the runner stays hermetic and testable with no filesystem.
+    var installedIdentity: DoctorInstalledIdentity?
+    /// Last recorded hardware-evidence submission outcome, injected for the
+    /// same reason (#1616).
+    var hardwareEvidence: HardwareEvidenceOutcome?
 
     /// Derives the `/healthz` URL from the configured coordinator WebSocket URL.
     /// Copied from CoordinatorReadinessClient.readinessURL: reject embedded
@@ -255,8 +292,77 @@ struct DoctorRunner: Sendable {
             requiredBinaryVersion: healthz?.requiredBinaryVersion,
             recommendedBinaryVersion: healthz?.recommendedBinaryVersion,
             floorStanding: standing,
+            installedIdentity: installedIdentity,
+            hardwareEvidence: hardwareEvidence,
             note: note
         )
+    }
+
+    /// Reads the signed compatibility set that sits next to the installed
+    /// binary (#1616 finding B). Offline, read-only, and best-effort: a box
+    /// with no signed set — a `swift build` binary, a hand-copied one — simply
+    /// reports no identity rather than failing the whole doctor run.
+    ///
+    /// `expectedVersion` is deliberately nil and provider-version mismatch is
+    /// allowed: the whole point is to read the identity of a set whose release
+    /// version differs from the hardcoded `binaryVersion` constant. Nothing is
+    /// admitted or trusted off this value — it is displayed to an operator.
+    static func resolveInstalledIdentity(
+        launchedExecutableURL: URL? = Bundle.main.executableURL,
+        markerStore: AutoUpdateMarkerStore = AutoUpdateMarkerStore()
+    ) -> DoctorInstalledIdentity? {
+        resolveInstalledIdentity(
+            launchedExecutableURL: launchedExecutableURL,
+            canonicalBinaryURL: markerStore.resolveCanonicalInstallBinary(
+                launchedExecutableURL: launchedExecutableURL
+            ),
+            publicKeyPEM: markerStore.compatibilityManifestPublicKeyPEM
+        )
+    }
+
+    /// Resolution proper, with the install authority and signing key supplied.
+    /// Split out so tests can drive it against signed fixtures without a real
+    /// launchd install or the production signing key.
+    static func resolveInstalledIdentity(
+        launchedExecutableURL: URL?,
+        canonicalBinaryURL: URL?,
+        publicKeyPEM: String
+    ) -> DoctorInstalledIdentity? {
+        let canonical = canonicalBinaryURL
+        // Install authority first, then the launched binary — the same
+        // precedence loadInstalledPreferringInstallAuthority uses. Candidates
+        // are probed one at a time so the reported manifest path is the file
+        // the identity was actually read from, not a guess.
+        for candidate in [canonical, launchedExecutableURL].compactMap({ $0 }) {
+            guard let manifest = CompatibilitySetManifest.loadInstalledPreferringInstallAuthority(
+                launchedExecutableURL: candidate,
+                canonicalBinaryURL: nil,
+                expectedVersion: nil,
+                allowProviderVersionMismatch: true,
+                publicKeyPEM: publicKeyPEM
+            ) else {
+                continue
+            }
+            let manifestPath = CompatibilitySetManifest.payloadDirectory(for: candidate)
+                .map { $0.appendingPathComponent(CompatibilitySetManifest.fileName).path }
+            // Every field below is printed to an operator's terminal and
+            // serialized into JSON, so all of it is bounded printable ASCII.
+            // The manifest path especially: it is derived from wherever the
+            // binary happens to live, so it is not this process's own text,
+            // and JSONSerialization emits C1 control bytes raw.
+            return DoctorInstalledIdentity(
+                compatibilitySetID: OperatorDisplayText.sanitized(manifest.compatibilitySetID) ?? "(unprintable)",
+                envelopeSHA256: OperatorDisplayText.sanitized(manifest.envelopeSHA256) ?? "(unprintable)",
+                releaseVersion: OperatorDisplayText.sanitized(manifest.version) ?? "(unprintable)",
+                providerCLIVersion: OperatorDisplayText.sanitized(manifest.providerCLIVersion) ?? "(unprintable)",
+                catalogReleaseID: OperatorDisplayText.sanitized(manifest.catalogReleaseID) ?? "(unprintable)",
+                manifestPath: OperatorDisplayText.sanitized(
+                    manifestPath,
+                    limit: OperatorDisplayText.pathLimit
+                ) ?? "(unknown)"
+            )
+        }
+        return nil
     }
 
     static func liveFetch(timeout: TimeInterval) -> @Sendable (URL) async -> DoctorHealthz? {
@@ -308,6 +414,32 @@ enum DoctorReportPrinter {
             "  recommended_binary_version:  \(report.recommendedBinaryVersion ?? "(none published)")",
             "  version_floor_standing:      \(report.floorStanding.rawValue)",
         ]
+        // #1616 finding B: binary_version above is a compile-time constant
+        // shared by every build of a compatibility set. The lines below are
+        // what actually identifies this install.
+        if let identity = report.installedIdentity {
+            lines.append(contentsOf: [
+                "  compatibility_set_id:        \(identity.compatibilitySetID)",
+                "  compatibility_set_sha256:    \(identity.envelopeSHA256)",
+                "  installed_release_version:   \(identity.releaseVersion)",
+                "  installed_provider_cli:      \(identity.providerCLIVersion)",
+                "  installed_catalog_release:   \(identity.catalogReleaseID)",
+                "  compatibility_set_manifest:  \(identity.manifestPath)",
+            ])
+        } else {
+            lines.append(
+                "  compatibility_set_id:        (no signed compatibility set found next to the installed binary)"
+            )
+        }
+        // #1616: why onboarding last failed, without SSH-ing the coordinator.
+        if let evidence = report.hardwareEvidence {
+            lines.append("  hardware_evidence:           \(evidence.outcome) at \(evidence.recordedAt)")
+            if let reason = evidence.reason {
+                lines.append("  hardware_evidence_reason:    \(reason)")
+            }
+        } else {
+            lines.append("  hardware_evidence:           (no submission recorded on this host)")
+        }
         if let note = report.note {
             lines.append("  note:                        \(note)")
         }
@@ -315,6 +447,22 @@ enum DoctorReportPrinter {
     }
 
     static func emitJSON(_ report: DoctorReport) {
+        let compacted = jsonPayload(report)
+        guard JSONSerialization.isValidJSONObject(compacted),
+              var data = try? JSONSerialization.data(
+                withJSONObject: compacted,
+                options: [.sortedKeys, .withoutEscapingSlashes]
+              ) else {
+            FileHandle.standardOutput.write(Data("{\"binary_version\":\"\(report.binaryVersion)\"}\n".utf8))
+            return
+        }
+        data.append(0x0A)
+        FileHandle.standardOutput.write(data)
+    }
+
+    /// The emitted object, separated from the write so tests can assert on it
+    /// without redirecting the process's stdout.
+    static func jsonPayload(_ report: DoctorReport) -> [String: Any] {
         var payload: [String: Any] = [
             "binary_version": report.binaryVersion,
             "config_path": report.configPath,
@@ -326,18 +474,17 @@ enum DoctorReportPrinter {
         payload["coordinator_version"] = report.coordinatorVersion
         payload["required_binary_version"] = report.requiredBinaryVersion
         payload["recommended_binary_version"] = report.recommendedBinaryVersion
+        payload["compatibility_set_id"] = report.installedIdentity?.compatibilitySetID
+        payload["compatibility_set_sha256"] = report.installedIdentity?.envelopeSHA256
+        payload["installed_release_version"] = report.installedIdentity?.releaseVersion
+        payload["installed_provider_cli_version"] = report.installedIdentity?.providerCLIVersion
+        payload["installed_catalog_release_id"] = report.installedIdentity?.catalogReleaseID
+        payload["compatibility_set_manifest_path"] = report.installedIdentity?.manifestPath
+        payload["hardware_evidence_outcome"] = report.hardwareEvidence?.outcome
+        payload["hardware_evidence_reason"] = report.hardwareEvidence?.reason
+        payload["hardware_evidence_recorded_at"] = report.hardwareEvidence?.recordedAt
         payload["note"] = report.note
-        let compacted = payload.compactMapValues { $0 }
-        guard JSONSerialization.isValidJSONObject(compacted),
-              var data = try? JSONSerialization.data(
-                withJSONObject: compacted,
-                options: [.sortedKeys, .withoutEscapingSlashes]
-              ) else {
-            FileHandle.standardOutput.write(Data("{\"binary_version\":\"\(report.binaryVersion)\"}\n".utf8))
-            return
-        }
-        data.append(0x0A)
-        FileHandle.standardOutput.write(data)
+        return payload.compactMapValues { $0 }
     }
 }
 

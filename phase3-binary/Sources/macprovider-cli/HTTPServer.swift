@@ -214,8 +214,21 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
 
     static let localStatusContractVersion = 1
     static let localStatusMinimumReaderVersion = 1
+    // SPEC-001 §local-status states this list is illustrative and
+    // non-exhaustive, and names this constant as the authoritative runtime
+    // capability set — so a new capability token is added here, not in the
+    // SPEC. `buyer_serving_hold_v1` (#1616) gates `buyer_serving_hold`, which
+    // MUST be null unless `network_state` is `not_buyer_serving` and MUST NOT
+    // be synthesised locally; it is advisory diagnostics with no buyer-serving
+    // authority. Promoting that MUST into SPEC-001 needs a version bump, and
+    // the bump is blocked: SPEC-001's version is pinned by the cross-spec lock
+    // in scripts/tests/test_byom_contract_lock.py, whose BYOMContractLockTests
+    // class is commit-attested evidence for SPEC-046-R001/R008 conformance.
+    // Editing it invalidates that attestation, and re-attesting needs a fresh
+    // signed BYOM discovery journey. Tracked on #1616.
     static let localStatusCapabilities = [
         "buyer_serving_authority_v1",
+        "buyer_serving_hold_v1",
         "catalog_status_v1",
         "compatibility_set_v1",
         "credential_status_v1",
@@ -459,7 +472,12 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
             let credentialStatus = await credentialStatusRuntime.snapshot()
             let admissionIdentityStatus = await admissionIdentityStatusRuntime.snapshot()
             let checkedAssignedID = snapshot.coordinatorAssignedID
-            async let latestBuyerServing = CoordinatorReadinessClient.fetch(
+            // #1616: fetchReadiness keeps the coordinator's machine-readable
+            // reason for buyer_serving:false. `fetch` projects it away to a
+            // bare Bool?, which is why local status could only ever say
+            // "not_buyer_serving" and never why — forcing operators to SSH the
+            // coordinator for a reason the CLI had already been told.
+            async let latestReadiness = CoordinatorReadinessClient.fetchReadiness(
                 coordinatorURL: coordinatorURL,
                 providerID: providerID,
                 assignedID: checkedAssignedID
@@ -467,9 +485,16 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
             let runtimeSnapshot = warmSwapEnabled ? await modelRuntime.currentSnapshot() : nil
             let telemetryMatchesRuntime = runtimeSnapshot.map { $0.specDecodeGeneration == snapshot.specDecodeGeneration } ?? true
             let telemetryRuntimeEligible = runtimeSnapshot.map { $0.state == .ready && $0.hasTargetCompatibleDraft } ?? true
+            let readiness = await latestReadiness
+            // The hold-through state machine is unchanged: it still consumes
+            // the same three-valued verdict it always did.
             let coordinatorBuyerServing = await providerStatus.applyCoordinatorBuyerServing(
-                await latestBuyerServing,
+                readiness.buyerServing,
                 forAssignedID: checkedAssignedID
+            )
+            let buyerServingHold = Self.reportableBuyerServingHold(
+                readiness: readiness,
+                resolvedBuyerServing: coordinatorBuyerServing
             )
             writer.writeJSON(
                 status: .ok,
@@ -482,6 +507,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                     specDecodeTelemetryRuntimeEligible: telemetryRuntimeEligible,
                     catalogStatus: catalogStatus,
                     coordinatorBuyerServing: coordinatorBuyerServing,
+                    coordinatorBuyerServingHold: buyerServingHold,
                     credentialStatus: credentialStatus,
                     admissionIdentityStatus: admissionIdentityStatus,
                     lifecycleStateInspection: lifecycleStateStore.inspect(),
@@ -1538,6 +1564,25 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         ]
     }
 
+    /// Which coordinator hold, if any, local status may report (#1616).
+    ///
+    /// Taking `Readiness` rather than a `Bool?` is deliberate: it is what makes
+    /// `handleStatus` unable to compile against `CoordinatorReadinessClient.fetch`,
+    /// whose `Bool?` projection is exactly what used to discard the hold.
+    ///
+    /// Only an authoritative not-serving verdict has a live hold. A verdict
+    /// held true through an indeterminate probe, and an indeterminate verdict,
+    /// both report nothing rather than a stale reason.
+    static func reportableBuyerServingHold(
+        readiness: CoordinatorReadinessClient.Readiness,
+        resolvedBuyerServing: Bool?
+    ) -> CoordinatorReadinessClient.BuyerServingHold? {
+        guard resolvedBuyerServing == false, case .notServing(let hold) = readiness else {
+            return nil
+        }
+        return hold
+    }
+
     static func statusResponse(
         _ snapshot: ProviderSnapshot,
         providerID: String?,
@@ -1547,6 +1592,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         specDecodeTelemetryRuntimeEligible: Bool = true,
         catalogStatus: ProviderCatalogStatusContext? = nil,
         coordinatorBuyerServing: Bool? = nil,
+        coordinatorBuyerServingHold: CoordinatorReadinessClient.BuyerServingHold? = nil,
         credentialStatus: ProviderCredentialStatus = .unconfigured,
         admissionIdentityStatus: ProviderAdmissionIdentityStatusContext? = nil,
         lifecycleStateInspection: ProviderLifecycleStateInspection = .missing,
@@ -1706,6 +1752,19 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                 networkState = trustState
             }
             body["network_state"] = networkState
+            // #1616 finding: the coordinator's own reason for withholding buyer
+            // routing, so `doctor`/`status` can answer "why am I not serving"
+            // without an operator reading coordinator logs.
+            //
+            // Clamped to `networkState` rather than to the caller's verdict.
+            // The coordinator's hold is only the reason once local state has
+            // actually resolved to `not_buyer_serving`; donor mode, an
+            // unverified catalog, or a not-yet-ready model each produce a
+            // different `network_state` whose reason is local, not the
+            // coordinator's. SPEC-001 requires null in those cases.
+            body["buyer_serving_hold"] = jsonNullable(
+                networkState == "not_buyer_serving" ? coordinatorBuyerServingHold?.rawValue : nil
+            )
             body["buyer_serving_authority"] = coordinatorBuyerServing == nil ? "unknown" : "coordinator"
             body["catalog"] = [
                 "state": trustState,

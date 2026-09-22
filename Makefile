@@ -207,6 +207,7 @@ test-dist:
 	bash phase3-binary/dist/test/install_upgrade_evidence_rollback.test.sh
 	bash phase3-binary/dist/test/install_recovery_bootout_settle.test.sh
 	bash phase3-binary/dist/test/install_launchd_migration.test.sh
+	bash phase3-binary/dist/test/install_dangling_launchd_repair.test.sh
 	bash phase3-binary/dist/test/install_lifecycle_state.test.sh
 	bash phase3-binary/dist/test/install_transaction_lock.test.sh
 	bash phase3-binary/dist/test/install_coordinator_admission.test.sh

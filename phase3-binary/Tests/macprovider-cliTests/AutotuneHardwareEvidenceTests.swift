@@ -18,6 +18,36 @@ final class AutotuneHardwareEvidenceTests: XCTestCase {
         XCTAssertNil(AutotuneHardwareEvidenceSubmitter.hardwareEvidenceEndpoint(from: "ws://coordinator.malibu.tech/v2/provider"))
     }
 
+    /// R2 security MEDIUM (#1616) — a coordinator_url carrying userinfo is
+    /// refused, matching every other coordinator URL builder. Credentials in a
+    /// URL reach transport error descriptions, and those are now persisted.
+    func testEndpointRejectsCoordinatorURLWithEmbeddedCredentials() {
+        XCTAssertNil(AutotuneHardwareEvidenceSubmitter.hardwareEvidenceEndpoint(
+            from: "wss://user:pass@coordinator.malibu.tech/v2/provider"
+        ))
+        XCTAssertNil(AutotuneHardwareEvidenceSubmitter.hardwareEvidenceEndpoint(
+            from: "https://user@coordinator.malibu.tech/v2/provider"
+        ))
+    }
+
+    /// Defence in depth for the same finding: a transport failure reports the
+    /// error's stable identity, never its interpolated description, which can
+    /// embed the failing URL.
+    func testTransportFailureReasonNeverInterpolatesTheError() {
+        let reason = AutotuneHardwareEvidenceSubmitter.transportFailureReason(
+            URLError(.cannotFindHost, userInfo: [
+                NSURLErrorFailingURLStringErrorKey: "https://user:hunter2@coordinator.malibu.tech/x",
+            ])
+        )
+        XCTAssertEqual(reason, "transport error (URLError code \(URLError.Code.cannotFindHost.rawValue))")
+        XCTAssertFalse(reason.contains("hunter2"))
+        XCTAssertFalse(reason.contains("coordinator.malibu.tech"))
+
+        struct Opaque: Error {}
+        let other = AutotuneHardwareEvidenceSubmitter.transportFailureReason(Opaque())
+        XCTAssertEqual(other, "transport error (Opaque)")
+    }
+
     func testPayloadIncludesHardwareAndBenchmarks() throws {
         let fixture = makeFixture()
         let generatedAt = fixture.result.generatedAt
