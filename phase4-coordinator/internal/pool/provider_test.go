@@ -108,6 +108,83 @@ func TestRestoreForwardedSlotIncrementsAndMarksReady(t *testing.T) {
 	}
 }
 
+func TestDelayedReceiveTimeBusyHeartbeatDoesNotZeroRestoredSeats(t *testing.T) {
+	registry := NewRegistry(nil)
+	provider := &Provider{
+		ProviderID:       "p1",
+		AssignedID:       "s1",
+		State:            StateBusy,
+		SlotsTotal:       4,
+		SlotsFree:        0,
+		MaxConcurrency:   4,
+		MaxContextTokens: 8192,
+	}
+	registry.Register(provider, nil)
+	for i := 0; i < 4; i++ {
+		if !registry.RestoreForwardedSlot("p1", "s1") {
+			t.Fatal("RestoreForwardedSlot returned false")
+		}
+	}
+	// Production WS stamps At with receive time. A delayed slots_free=0
+	// handled just after restore therefore looks newer than the restore.
+	registry.ApplyHeartbeat("p1", "s1", HeartbeatUpdate{
+		Status:           StateBusy,
+		ModelID:          "model-a",
+		MaxContextTokens: 8192,
+		MaxConcurrency:   4,
+		SlotsFree:        0,
+		SlotsTotal:       4,
+		At:               time.Now().UTC(),
+	})
+	got, ok := registry.Resolve("p1", "s1")
+	if !ok {
+		t.Fatal("provider missing")
+	}
+	if got.SlotsFree != 4 || got.State != StateReady {
+		t.Fatalf("after delayed busy heartbeat = state %q slots_free %d, want ready/4", got.State, got.SlotsFree)
+	}
+}
+
+func TestThermalBusyAfterSettleWindowZerosSeats(t *testing.T) {
+	registry := NewRegistry(nil)
+	provider := &Provider{
+		ProviderID:       "p1",
+		AssignedID:       "s1",
+		State:            StateBusy,
+		SlotsTotal:       4,
+		SlotsFree:        0,
+		MaxConcurrency:   4,
+		MaxContextTokens: 8192,
+	}
+	registry.Register(provider, nil)
+	if !registry.RestoreForwardedSlot("p1", "s1") {
+		t.Fatal("RestoreForwardedSlot returned false")
+	}
+	got, ok := registry.Resolve("p1", "s1")
+	if !ok {
+		t.Fatal("provider missing after restore")
+	}
+	if got.SlotsFree != 1 {
+		t.Fatalf("after restore slots_free=%d, want 1", got.SlotsFree)
+	}
+	registry.ApplyHeartbeat("p1", "s1", HeartbeatUpdate{
+		Status:           StateBusy,
+		ModelID:          "model-a",
+		MaxContextTokens: 8192,
+		MaxConcurrency:   4,
+		SlotsFree:        0,
+		SlotsTotal:       4,
+		At:               time.Now().UTC().Add(OccupancySettleWindow + time.Second),
+	})
+	got, ok = registry.Resolve("p1", "s1")
+	if !ok {
+		t.Fatal("provider missing after thermal heartbeat")
+	}
+	if got.SlotsFree != 0 || got.State != StateBusy {
+		t.Fatalf("after thermal heartbeat = state %q slots_free %d, want busy/0", got.State, got.SlotsFree)
+	}
+}
+
 func TestMarkForwardedSlotAvailableRefusesNonRoutableStates(t *testing.T) {
 	for _, state := range []State{StateDraining, StateDegraded, StateUnavailable} {
 		t.Run(string(state), func(t *testing.T) {

@@ -481,6 +481,9 @@ struct ServeCommand: AsyncParsableCommand {
     @Flag(help: "Run only the local HTTP server; do not establish a coordinator WebSocket session.")
     var noJoin = false
 
+    @Flag(name: .customLong("isolate-lifecycle"), help: "Keep launchd/lease/control files off the live 8080 incumbent while still joining a coordinator. Requires --credential-store protected_file. Lab only.")
+    var isolateLifecycle = false
+
     // Internal marker for CandidateProviderRunner. Stage 1 owns warmup and
     // throughput measurement for these non-joining subprocesses.
     @Flag(name: .customLong("autotune-candidate"), help: .private)
@@ -489,6 +492,9 @@ struct ServeCommand: AsyncParsableCommand {
     mutating func validate() throws {
         guard !autotuneCandidate || noJoin else {
             throw ValidationError("--autotune-candidate requires --no-join")
+        }
+        if isolateLifecycle && autotuneCandidate {
+            throw ValidationError("--isolate-lifecycle is incompatible with --autotune-candidate")
         }
     }
 
@@ -807,6 +813,7 @@ struct ServeCommand: AsyncParsableCommand {
     static func runModelArtifactPreflight(
         _ resolved: inout AppConfig,
         joiningCoordinator: Bool = true,
+        isolateLifecycle: Bool = false,
         staticInputs: AutotuneStaticInputs = AutotuneStaticInputs(),
         artifactResolver: CachedModelArtifactResolver = CachedModelArtifactResolver(),
         persistConfigMigration: Bool = false
@@ -880,7 +887,7 @@ struct ServeCommand: AsyncParsableCommand {
             throw ExitCode(2)
         }
         resolved.modelArtifactPath = loadPath
-        if resolved.donorMode || joiningCoordinator {
+        if resolved.donorMode || (joiningCoordinator && !isolateLifecycle) {
             return try await runModelCatalogPreflight(
                 &resolved,
                 modelPath: loadPath,
@@ -1358,8 +1365,10 @@ struct ServeCommand: AsyncParsableCommand {
     static func makeCandidateIsolationRoot(
         // macOS AF_UNIX paths are capped at 104 bytes. The system temporary
         // directory is often nested under a long per-user path, so use the
-        // short system temp root for the fresh random leaf.
-        temporaryDirectory: URL = URL(fileURLWithPath: "/tmp", isDirectory: true)
+        // short real temp root. `/tmp` is a symlink to `/private/tmp` and
+        // protected-file credential custody rejects symlink ancestors, which
+        // blocked isolated lab join from persisting a minted coordinator token.
+        temporaryDirectory: URL = URL(fileURLWithPath: "/private/tmp", isDirectory: true)
     ) throws -> URL {
         let root = temporaryDirectory.appendingPathComponent(
             "macprovider-autotune-" + UUID().uuidString.lowercased(),
@@ -1424,15 +1433,17 @@ struct ServeCommand: AsyncParsableCommand {
         rootDirectory.appendingPathComponent("switch.ts").path
     }
 
-    /// `--no-join` + `credential_store=protected_file` is the isolated lab
-    /// serve: skip PATH-repair re-exec and keep provider identity, but do not
-    /// share launchd lifecycle/lease/control files with the incumbent.
+    /// Isolated lab serve: skip PATH-repair re-exec and keep provider identity,
+    /// but do not share launchd lifecycle/lease/control files with the incumbent.
+    /// `--no-join` + protected-file is the local-HTTP form.
+    /// `--isolate-lifecycle` + protected-file is the joined-coordinator form.
     static func isolatesNoJoinLabServe(
         noJoin: Bool,
+        isolateLifecycle: Bool = false,
         credentialStore: ProviderCredentialStoreKind,
         autotuneCandidate: Bool
     ) -> Bool {
-        noJoin && credentialStore == .protectedFile && !autotuneCandidate
+        (noJoin || isolateLifecycle) && credentialStore == .protectedFile && !autotuneCandidate
     }
 
     func run() async throws {
@@ -1526,8 +1537,12 @@ struct ServeCommand: AsyncParsableCommand {
         // share the incumbent launchd lifecycle/lease/control paths, or it
         // displaces live 8080. Unlike `--autotune-candidate`, this path keeps
         // provider_id so the KV disk tier can namespace DEKs.
+        if isolateLifecycle && resolved.credentialStore != .protectedFile {
+            throw ValidationError("--isolate-lifecycle requires --credential-store protected_file")
+        }
         let isolateNoJoinLab = Self.isolatesNoJoinLabServe(
             noJoin: noJoin,
+            isolateLifecycle: isolateLifecycle,
             credentialStore: resolved.credentialStore,
             autotuneCandidate: autotuneCandidate
         )
@@ -1710,7 +1725,8 @@ struct ServeCommand: AsyncParsableCommand {
         try Self.validateCoordinatorCredential(
             config: resolved,
             credentialStatus: credentialStatus,
-            noJoin: noJoin
+            noJoin: noJoin,
+            isolateLifecycle: isolateLifecycle
         )
         let credentialStatusRuntime = ProviderCredentialStatusRuntime(credentialStatus)
 
@@ -1738,6 +1754,7 @@ struct ServeCommand: AsyncParsableCommand {
             startupPreflight = try await Self.runServeStartupPreflights(
                 &resolved,
                 joiningCoordinator: !noJoin,
+                isolateLifecycle: isolateLifecycle,
                 acquireServeLock: { candidateConfig in
                     try Self.acquireProviderServeLock(
                         candidateConfig,
@@ -2095,7 +2112,8 @@ struct ServeCommand: AsyncParsableCommand {
                 try Self.validateProtectedFileAdmissionIdentityForServe(
                     config: resolved,
                     providerID: providerID,
-                    recoveryMarker: recoveryMarker
+                    recoveryMarker: recoveryMarker,
+                    isolateLifecycle: isolateLifecycle
                 )
                 appendCandidate(pendingRecovery)
                 appendCandidate(try receiptKeyStore.loadPreviousAdmissionIdentity(providerId: providerID))
@@ -2871,9 +2889,10 @@ struct ServeCommand: AsyncParsableCommand {
     static func validateCoordinatorCredential(
         config: AppConfig,
         credentialStatus: ProviderCredentialStatus,
-        noJoin: Bool
+        noJoin: Bool,
+        isolateLifecycle: Bool = false
     ) throws {
-        guard !noJoin, !config.donorMode else { return }
+        guard !noJoin, !config.donorMode, !isolateLifecycle else { return }
         guard config.providerToken?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false,
               let configuredProviderID = config.providerID?.trimmingCharacters(in: .whitespacesAndNewlines),
               !configuredProviderID.isEmpty else {
@@ -2893,6 +2912,7 @@ struct ServeCommand: AsyncParsableCommand {
     static func runServeStartupPreflights(
         _ resolved: inout AppConfig,
         joiningCoordinator: Bool,
+        isolateLifecycle: Bool = false,
         coordinatorAcceptsSpecDecodeTelemetry: Bool = Self.bundledCoordinatorAcceptsSpecDecodeTelemetry,
         portIsOpen: (Int) -> Bool = MacProviderPortProbe.isOpen,
         acquireServeLock: (AppConfig) throws -> ProviderServeLock = { config in
@@ -2915,6 +2935,7 @@ struct ServeCommand: AsyncParsableCommand {
                 catalogTrust = try await Self.runModelArtifactPreflight(
                     &resolved,
                     joiningCoordinator: joiningCoordinator,
+                    isolateLifecycle: isolateLifecycle,
                     staticInputs: staticInputs,
                     artifactResolver: artifactResolver,
                     persistConfigMigration: true
@@ -3012,8 +3033,10 @@ struct ServeCommand: AsyncParsableCommand {
     static func validateProtectedFileAdmissionIdentityForServe(
         config: AppConfig,
         providerID: String,
-        recoveryMarker: Data?
+        recoveryMarker: Data?,
+        isolateLifecycle: Bool = false
     ) throws {
+        guard !isolateLifecycle else { return }
         guard config.credentialStore == .protectedFile, recoveryMarker == nil else { return }
         throw ReceiptKeyStoreError.missingAdmissionIdentity(providerId: providerID)
     }

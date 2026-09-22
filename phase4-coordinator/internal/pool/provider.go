@@ -149,8 +149,11 @@ type Provider struct {
 	// while its single inference slot is busy.
 	LastActivityAt time.Time `json:"last_activity_at"`
 	// lastCoordinatorSlotRestoreAt is when RestoreForwardedSlot last wrote
-	// occupancy. Provider heartbeats stamped at or before that time are the
-	// previous wave's in-flight snapshot and must not zero restored seats.
+	// occupancy. Provider occupancy frames received at or before that time,
+	// or within OccupancySettleWindow after it, are the previous wave's
+	// in-flight snapshot and must not zero restored seats. Production WS
+	// stamps At at receive time, so a delayed slots_free=0 handled after
+	// restore looks newer than the restore itself.
 	lastCoordinatorSlotRestoreAt time.Time
 	ConnectedAt                  time.Time  `json:"connected_at"`
 	BinaryVersion                string     `json:"binary_version"`
@@ -752,6 +755,12 @@ const maxLifetimeContribPerProvider = 128
 // ReceiptRotationGrace is the SPEC-015 overlap window during which buyers may
 // validate receipts signed by the previous provider receipt key.
 const ReceiptRotationGrace = 7 * 24 * time.Hour
+
+// OccupancySettleWindow is how long after RestoreForwardedSlot provider
+// occupancy frames are ignored. Production WS stamps heartbeat/state_update
+// At with coordinator receive time, so a delayed slots_free=0 handled after
+// restore would otherwise look newer than the restore and zero the next wave.
+const OccupancySettleWindow = 2 * time.Second
 
 type recoveryHold struct {
 	assignedID string
@@ -1559,7 +1568,8 @@ func (r *Registry) ConsumeForwardedSlot(providerID, assignedID string) bool {
 // ends (success, cancel, disconnect, or failover). It increments by one
 // and never republishes a route-time slots_free snapshot. If a later
 // heartbeat already raised occupancy to SlotsTotal, this is a no-op on
-// the count.
+// the count. Provider occupancy frames received within OccupancySettleWindow
+// after this write are treated as the previous wave's delayed snapshot.
 func (r *Registry) RestoreForwardedSlot(providerID, assignedID string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -2576,10 +2586,13 @@ type HeartbeatResult struct {
 }
 
 func (p *Provider) staleProviderCapacityAt(at time.Time) bool {
-	return p != nil &&
-		!at.IsZero() &&
-		!p.lastCoordinatorSlotRestoreAt.IsZero() &&
-		!at.After(p.lastCoordinatorSlotRestoreAt)
+	if p == nil || p.lastCoordinatorSlotRestoreAt.IsZero() {
+		return false
+	}
+	if at.IsZero() {
+		at = time.Now().UTC()
+	}
+	return !at.After(p.lastCoordinatorSlotRestoreAt.Add(OccupancySettleWindow))
 }
 
 func (r *Registry) ApplyHeartbeatDetailed(providerID, assignedID string, hb HeartbeatUpdate) HeartbeatResult {

@@ -3241,7 +3241,13 @@ func (s *Server) prepareProviderAdmissionWithQuotaCheck(conn net.Conn, auth prov
 			inferencePath = pool.InferencePathHTTPForwarding
 		}
 	} else if hello.EndpointURL != nil && strings.TrimSpace(*hello.EndpointURL) != "" {
-		s.log.Warn().Str("provider_id", hello.ProviderID).Str("endpoint_url", *hello.EndpointURL).Msg("provisional provider sent endpoint_url; ignoring and forcing ws-tunneled mode")
+		ep := strings.TrimSpace(*hello.EndpointURL)
+		if strings.HasPrefix(ep, "http://127.0.0.1:") || strings.HasPrefix(ep, "http://localhost:") {
+			endpointURL = ep
+			inferencePath = pool.InferencePathHTTPForwarding
+		} else {
+			s.log.Warn().Str("provider_id", hello.ProviderID).Str("endpoint_url", *hello.EndpointURL).Msg("provisional provider sent endpoint_url; ignoring and forcing ws-tunneled mode")
+		}
 	}
 
 	assignedID := s.newUUID()

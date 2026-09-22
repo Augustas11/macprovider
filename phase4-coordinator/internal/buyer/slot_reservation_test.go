@@ -659,16 +659,14 @@ func TestFourWideStaleBusyHeartbeatMustNotBlockNextWave(t *testing.T) {
 		s.noteProviderAcceptedRequest(states[i])
 		macReportsSlots(t, registry, provider, 3-i)
 	}
-	busyAt := time.Now().UTC()
-	macReportsSlotsAt(t, registry, provider, 0, busyAt)
 	for i := range states {
 		s.reconcileForwardedSlotAvailable(states[i])
 	}
 	s.slotQueueDeadline = time.Millisecond
 	s.slotQueuePollInterval = time.Millisecond
-	// Late copy of the in-wave busy snapshot. Stamp it with the wave time so
-	// it cannot beat the restore write.
-	macReportsSlotsAt(t, registry, provider, 0, busyAt)
+	// Late copy of the in-wave busy snapshot, stamped at receive time the
+	// way production WS does. Must not beat the restore write.
+	macReportsSlots(t, registry, provider, 0)
 	admitted := 0
 	for i := 0; i < 4; i++ {
 		state := &forwardState{slotReservationsEnabled: true}
@@ -683,5 +681,38 @@ func TestFourWideStaleBusyHeartbeatMustNotBlockNextWave(t *testing.T) {
 	}
 	if admitted != 4 {
 		t.Fatalf("next wave after stale busy heartbeat admitted %d, want 4", admitted)
+	}
+}
+
+func TestFourWideThermalBusyAfterSettleWindowBlocksNextWave(t *testing.T) {
+	s, registry, provider := fourSlotStudio(t)
+	states := make([]*forwardState, 4)
+	for i := 0; i < 4; i++ {
+		states[i] = &forwardState{slotReservationsEnabled: true}
+		if _, routeErr := s.selectProviderExcluding(context.Background(), "rid-thermal-"+string(rune('a'+i)), poolChatReq(""), http.Header{}, nil, "2026-09-22", states[i]); routeErr != nil {
+			t.Fatalf("seat %d rejected: %+v", i+1, routeErr)
+		}
+		s.noteProviderAcceptedRequest(states[i])
+	}
+	for i := range states {
+		s.reconcileForwardedSlotAvailable(states[i])
+	}
+	s.slotQueueDeadline = time.Millisecond
+	s.slotQueuePollInterval = time.Millisecond
+	macReportsSlotsAt(t, registry, provider, 0, time.Now().UTC().Add(pool.OccupancySettleWindow+time.Second))
+	admitted := 0
+	for i := 0; i < 4; i++ {
+		state := &forwardState{slotReservationsEnabled: true}
+		if _, routeErr := s.selectProviderExcluding(context.Background(), "rid-blocked-"+string(rune('a'+i)), poolChatReq(""), http.Header{}, nil, "2026-09-22", state); routeErr != nil {
+			continue
+		}
+		admitted++
+		s.releaseQueuedSlotReservation(state)
+		if state.slotConsumedOnAccept {
+			s.restoreConsumedForwardedSlot(state)
+		}
+	}
+	if admitted != 0 {
+		t.Fatalf("next wave after thermal busy admitted %d, want 0", admitted)
 	}
 }

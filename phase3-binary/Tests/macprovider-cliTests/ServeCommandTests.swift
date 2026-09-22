@@ -589,10 +589,14 @@ final class ServeCommandTests: XCTestCase {
             noJoin: true, credentialStore: .protectedFile, autotuneCandidate: false))
         XCTAssertFalse(ServeCommand.isolatesNoJoinLabServe(
             noJoin: false, credentialStore: .protectedFile, autotuneCandidate: false))
+        XCTAssertTrue(ServeCommand.isolatesNoJoinLabServe(
+            noJoin: false, isolateLifecycle: true, credentialStore: .protectedFile, autotuneCandidate: false))
         XCTAssertFalse(ServeCommand.isolatesNoJoinLabServe(
             noJoin: true, credentialStore: .keychain, autotuneCandidate: false))
         XCTAssertFalse(ServeCommand.isolatesNoJoinLabServe(
             noJoin: true, credentialStore: .protectedFile, autotuneCandidate: true))
+        XCTAssertFalse(ServeCommand.isolatesNoJoinLabServe(
+            noJoin: false, isolateLifecycle: true, credentialStore: .protectedFile, autotuneCandidate: true))
     }
 
     func testAutotuneCandidateIsolationRootIsFreshAndOwnerOnly() throws {
@@ -741,6 +745,13 @@ final class ServeCommandTests: XCTestCase {
             config: config,
             credentialStatus: missing,
             noJoin: false
+        ))
+        config.donorMode = false
+        XCTAssertNoThrow(try ServeCommand.validateCoordinatorCredential(
+            config: config,
+            credentialStatus: missing,
+            noJoin: false,
+            isolateLifecycle: true
         ))
     }
 
@@ -920,6 +931,13 @@ final class ServeCommandTests: XCTestCase {
             config: config,
             providerID: "provider-a",
             recoveryMarker: nil
+        ))
+        config.credentialStore = .protectedFile
+        XCTAssertNoThrow(try ServeCommand.validateProtectedFileAdmissionIdentityForServe(
+            config: config,
+            providerID: "provider-a",
+            recoveryMarker: nil,
+            isolateLifecycle: true
         ))
     }
 

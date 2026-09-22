@@ -64,7 +64,6 @@ func TestFourWideHTTPSoak100AdmitsWithStaleBusyHeartbeat(t *testing.T) {
 	body := []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}],"stream":false}`)
 
 	for wave := 0; wave < waves; wave++ {
-		busyAt := time.Now().UTC()
 		var wg sync.WaitGroup
 		codes := make([]int, width)
 		wg.Add(width)
@@ -79,7 +78,8 @@ func TestFourWideHTTPSoak100AdmitsWithStaleBusyHeartbeat(t *testing.T) {
 			}()
 		}
 		wg.Wait()
-		// Delayed in-wave "I'm full" snapshot, as the Mac can emit after restore.
+		// Delayed in-wave "I'm full" snapshot, stamped at receive time the
+		// way production WS does after RestoreForwardedSlot.
 		registry.ApplyHeartbeat("p-studio", "s-studio", pool.HeartbeatUpdate{
 			Status:           pool.StateBusy,
 			ModelID:          "model-a",
@@ -87,7 +87,7 @@ func TestFourWideHTTPSoak100AdmitsWithStaleBusyHeartbeat(t *testing.T) {
 			MaxConcurrency:   4,
 			SlotsFree:        0,
 			SlotsTotal:       4,
-			At:               busyAt,
+			At:               time.Now().UTC(),
 		})
 		for _, code := range codes {
 			mu.Lock()
