@@ -278,7 +278,7 @@ actor InferenceRelay {
         active[requestID] = ActiveRequest(task: task, state: state)
     }
 
-    private func currentAdmissionLimit() async -> Int {
+    func currentAdmissionLimit() async -> Int {
         let snapshot = await providerStatus.snapshot()
         let current = snapshot.capacity.maxConcurrency
         guard current > 0 else { return fallbackMaxActiveRequests }

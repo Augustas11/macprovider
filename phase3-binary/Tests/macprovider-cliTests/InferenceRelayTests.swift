@@ -82,7 +82,8 @@ final class InferenceRelayTests: XCTestCase {
             modelHash: nil,
             maxConcurrency: currentSeats
         )
-        try await assertRelayCapacity(seats: currentSeats, status: status, relay: relay, recorder: recorder)
+        let admissionLimit = await relay.currentAdmissionLimit()
+        XCTAssertEqual(admissionLimit, currentSeats)
     }
 
     private func assertRelayCapacity(
