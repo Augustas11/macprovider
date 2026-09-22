@@ -431,7 +431,7 @@ jobs:
       - name: Run Swift tests
         working-directory: phase3-binary
         timeout-minutes: 25
-        run: swift test --parallel --jobs 2
+        run: swift test --parallel
 
       - name: Run BYOM CLI onboarding E2E (hermetic)
         # #1381 F8: this hermetic harness (fake Ollama loopback + in-process
