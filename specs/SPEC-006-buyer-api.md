@@ -1,7 +1,12 @@
 # SPEC-006 - Buyer API Gateway: Mac Provider's first public buyer surface
 
-**Version:** 0.9.31 (2026-09-20, auto-prefix scaffold = system+tools)
+**Version:** 0.9.32 (2026-09-22, slot reservation release + 10s queue)
 **Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.5.4, SPEC-003 v0.7, SPEC-004 v0.3.2
+
+**Change log v0.9.32 (2026-09-22, issue #1669 — accept-release + one-decode queue):**
+- Coordinator-local reservation of advertised `slots_free` MUST be released once the selected provider has accepted the request (successful WS relay start, or HTTP response headers). In-flight occupancy after accept is the provider heartbeat, not a second coordinator lease held for the rest of the stream. Failover/retry still MUST release before selecting the next route.
+- The bounded pre-dispatch slot queue deadline MUST be no longer than 10 seconds (one 30B decode). The v0.9.26 3-second cap shed OpenRouter soak while the Mac was still decoding. Immediate overflow shed for non-wholesale reservation pressure is unchanged.
+- Registers `SPEC-006-R015`.
 
 **Change log v0.9.31 (2026-09-20, auto-prefix system+tools scaffold):**
 - Auto-prefix conversation tags (SPEC-006-R012) now hash the **stable scaffold** when one exists: messages before the first `role=="user"` turn, plus a non-empty `tools[]` array. Unique first-user questions that share that scaffold MUST mint the same `auto.prefix.*` tag so provider ConversationCache LCP can skip-prefill the shared system+tools prefix. This MUST NOT enable SPEC-004 sticky affinity. HMAC, `account_id` scoping, demo exclusion, and `X-MacProvider-Internal-Conv-Cache` transport are unchanged.
@@ -289,8 +294,11 @@ changing them:
   SPEC-024 §8).
 - `SPEC-006-R014` — Auto-prefix tags hash the stable system+tools scaffold when
   present so unique user questions share a ConversationCache key (§5.4.1, v0.9.31).
+- `SPEC-006-R015` — Coordinator slot reservation is released on provider accept;
+  occupancy after accept is the consumed pool snapshot plus heartbeat; bounded
+  slot-queue deadline is at most 10 seconds (§7.8, v0.9.32).
 
-`requirement_id_migration` is `complete`. R004–R014 are not promoted from
+`requirement_id_migration` is `complete`. R004–R015 are not promoted from
 this close. Signed journey-result evidence is still required before any of
 those rows can become conformant.
 
@@ -2504,7 +2512,9 @@ The response MUST include `X-RateLimit-Reset`.
 
 The gateway MUST NOT queue requests indefinitely waiting for provider slots.
 
-For non-pinned requests, the coordinator MAY hold a request in a bounded pre-dispatch slot queue when at least one otherwise eligible `ready` provider for the model reports `slots_free=0`, or while that provider is draining waiters already admitted during a zero-slot observation. The queue MUST be FIFO per `provider_id`, MUST cap pending waiters at 4 per `provider_id`, and MUST use a total deadline no longer than 3 seconds. The coordinator MUST NOT use this queue to park requests that are blocked only because the coordinator has already reserved the provider's positive `slots_free` capacity for other in-flight selections and there is no existing zero-slot queue for that provider; those same-moment overflow requests MUST shed immediately as retryable `no_provider_available`.
+For non-pinned requests, the coordinator MAY hold a request in a bounded pre-dispatch slot queue when at least one otherwise eligible `ready` provider for the model reports `slots_free=0`, or while that provider is draining waiters already admitted during a zero-slot observation. The queue MUST be FIFO per `provider_id`, MUST cap pending waiters at 4 per `provider_id`, and MUST use a total deadline no longer than 10 seconds. The coordinator MUST NOT use this queue to park requests that are blocked only because the coordinator has already reserved the provider's positive `slots_free` capacity for other in-flight selections and there is no existing zero-slot queue for that provider; those same-moment overflow requests MUST shed immediately as retryable `no_provider_available`.
+
+A coordinator-local reservation of advertised `slots_free` MUST be released once the selected provider has accepted the request (successful WebSocket relay start, or HTTP response headers from the provider). In-flight occupancy after accept is the provider heartbeat `slots_free`, not a coordinator lease held for the remainder of the stream. Failover and retry MUST release before selecting the next route.
 
 If no slot becomes available before the bounded queue deadline, or if the candidate provider leaves `ready` state, return 503.
 

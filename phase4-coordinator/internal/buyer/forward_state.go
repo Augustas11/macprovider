@@ -88,9 +88,21 @@ type forwardState struct {
 
 	// queuedSlotProviderID is set when routing reserves a provider slot for
 	// this request, either directly at selection time or after the slot queue
-	// observes a recovered provider slot. It is released when the request
-	// leaves that active route.
+	// observes a recovered provider slot. It is released when the provider
+	// has accepted the request (WS relay start / HTTP headers), so in-flight
+	// occupancy comes from the Mac heartbeat instead of double-counting a
+	// coordinator lease against slots_free. Failover/retry also releases
+	// before selecting the next route.
 	queuedSlotProviderID string
+
+	// slotConsumedOnAccept is set when noteProviderAcceptedRequest decrements
+	// the pool snapshot. Reconcile/defer restore that one slot (+1) and MUST
+	// NOT republish the route-time slots_free hint. consumedProviderID /
+	// consumedAssignedID survive failover so the prior Mac is restored
+	// before the next route is selected.
+	slotConsumedOnAccept bool
+	consumedProviderID   string
+	consumedAssignedID   string
 
 	// explicitRetries is the retry counter the request_log.retried
 	// column and the shouldRetry caps key off. Incremented by

@@ -334,6 +334,11 @@ func TestRoutingSlotQueueValidation(t *testing.T) {
 			wantErr: "routing.slot_queue_deadline_s",
 		},
 		{
+			name:    "deadline above 10s spec max",
+			mutate:  func(cfg *Config) { cfg.Routing.SlotQueueDeadlineS = 11 },
+			wantErr: "routing.slot_queue_deadline_s",
+		},
+		{
 			name:    "poll interval",
 			mutate:  func(cfg *Config) { cfg.Routing.SlotQueuePollIntervalMS = 0 },
 			wantErr: "routing.slot_queue_poll_interval_ms",

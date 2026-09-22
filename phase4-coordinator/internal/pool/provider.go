@@ -1531,6 +1531,47 @@ func (r *Registry) MarkState(providerID, assignedID string, state State) bool {
 	return true
 }
 
+// ConsumeForwardedSlot decrements advertised slots_free when a reserved
+// request is accepted by the provider. Heartbeat/state_update remains the
+// later occupancy writer; this only closes the race between accept-release
+// and the next provider capacity update.
+func (r *Registry) ConsumeForwardedSlot(providerID, assignedID string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	p := r.providers[providerID]
+	if p == nil || p.AssignedID != assignedID {
+		return false
+	}
+	if p.SlotsFree > 0 {
+		p.SlotsFree--
+	}
+	if p.SlotsFree == 0 && p.ServingCapable() {
+		r.setStateLocked(p, StateBusy)
+	}
+	return true
+}
+
+// RestoreForwardedSlot returns one consumed accept-slot after the attempt
+// ends (success, cancel, disconnect, or failover). It increments by one
+// and never republishes a route-time slots_free snapshot. If a later
+// heartbeat already raised occupancy to SlotsTotal, this is a no-op on
+// the count.
+func (r *Registry) RestoreForwardedSlot(providerID, assignedID string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	p := r.providers[providerID]
+	if p == nil || p.AssignedID != assignedID || p.SlotsTotal <= 0 {
+		return false
+	}
+	if p.SlotsFree < p.SlotsTotal {
+		p.SlotsFree++
+	}
+	if p.SlotsFree > 0 && p.ServingCapable() {
+		r.setStateLocked(p, StateReady)
+	}
+	return true
+}
+
 func (r *Registry) MarkForwardedSlotAvailable(providerID, assignedID string, slotsFreeHint int) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()

@@ -40,6 +40,74 @@ func TestMarkForwardedSlotAvailablePromotesOnlyServingBusySession(t *testing.T) 
 	}
 }
 
+func TestConsumeForwardedSlotDecrementsAndMarksBusy(t *testing.T) {
+	registry := NewRegistry(nil)
+	provider := &Provider{
+		ProviderID:       "p1",
+		AssignedID:       "s1",
+		State:            StateReady,
+		SlotsTotal:       1,
+		SlotsFree:        1,
+		MaxConcurrency:   1,
+		MaxContextTokens: 8192,
+	}
+	registry.Register(provider, nil)
+	if !registry.ConsumeForwardedSlot("p1", "s1") {
+		t.Fatal("ConsumeForwardedSlot returned false")
+	}
+	got, ok := registry.Resolve("p1", "s1")
+	if !ok {
+		t.Fatal("provider missing after consume")
+	}
+	if got.State != StateBusy || got.SlotsFree != 0 {
+		t.Fatalf("after consume = state %q slots_free %d, want busy/0", got.State, got.SlotsFree)
+	}
+}
+
+func TestRestoreForwardedSlotIncrementsAndMarksReady(t *testing.T) {
+	registry := NewRegistry(nil)
+	provider := &Provider{
+		ProviderID:       "p1",
+		AssignedID:       "s1",
+		State:            StateBusy,
+		SlotsTotal:       2,
+		SlotsFree:        0,
+		MaxConcurrency:   2,
+		MaxContextTokens: 8192,
+	}
+	registry.Register(provider, nil)
+	if !registry.RestoreForwardedSlot("p1", "s1") {
+		t.Fatal("RestoreForwardedSlot returned false")
+	}
+	got, ok := registry.Resolve("p1", "s1")
+	if !ok {
+		t.Fatal("provider missing after restore")
+	}
+	if got.State != StateReady || got.SlotsFree != 1 {
+		t.Fatalf("after restore = state %q slots_free %d, want ready/1", got.State, got.SlotsFree)
+	}
+	if !registry.RestoreForwardedSlot("p1", "s1") {
+		t.Fatal("second RestoreForwardedSlot returned false")
+	}
+	got, ok = registry.Resolve("p1", "s1")
+	if !ok {
+		t.Fatal("provider missing after second restore")
+	}
+	if got.State != StateReady || got.SlotsFree != 2 {
+		t.Fatalf("after second restore = state %q slots_free %d, want ready/2", got.State, got.SlotsFree)
+	}
+	if !registry.RestoreForwardedSlot("p1", "s1") {
+		t.Fatal("capped RestoreForwardedSlot returned false")
+	}
+	got, ok = registry.Resolve("p1", "s1")
+	if !ok {
+		t.Fatal("provider missing after capped restore")
+	}
+	if got.State != StateReady || got.SlotsFree != 2 {
+		t.Fatalf("after capped restore = state %q slots_free %d, want ready/2", got.State, got.SlotsFree)
+	}
+}
+
 func TestMarkForwardedSlotAvailableRefusesNonRoutableStates(t *testing.T) {
 	for _, state := range []State{StateDraining, StateDegraded, StateUnavailable} {
 		t.Run(string(state), func(t *testing.T) {

@@ -1,13 +1,17 @@
 # SPEC-023 — Installer-Integrated Autotune Recommend
 
-version: v0.14.1
+version: v0.14.2
 status: LOCKED
 owner: operator (a11)
-last-locked: 2026-09-19
+last-locked: 2026-09-22
 lockstep: SPEC-005 v0.6.7 (SPEC-005-R011 money-table owner). CONFORMANCE `depends_on` does not list SPEC-005; the lockstep is recorded in prose only, avoiding a dependency cycle (SPEC-005 likewise does not list SPEC-023 in its `depends_on`).
 
 ## Change log
 
+- **v0.14.2 (2026-09-22)** — Ultra ≥256 GB default `recommendedMaxBatch` is 8
+  (#1669). Studio M3 Ultra 256 GB proved keyed 8-wide Coder-30B on live 8080
+  (8/8 HTTP 200, overlap ~6s vs serial ~41s, memory pressure normal). Ultra
+  128–255 GB stays 4. The served hard cap remains 8. Registers `SPEC-023-R011`.
 - **v0.14.1 (2026-09-20)** — Row-continuity admission design for content-only
   catalog cuts (#1615). A provider's hello `catalog_release_id` is the signed
   candidate-catalog document selected at `serve` start, not proof that the Mac is
@@ -763,6 +767,14 @@ hostile merely because it is not the newest document; it is admitted only throug
 the same row-continuity rule, and diagnostics SHOULD report it as
 `baked_fallback` / refresh-recommended provenance rather than as
 `catalog_incompatible` when the selected row is still current-equivalent.
+
+**SPEC-023-R011 — Ultra ≥256 GB default max batch is 8.** For chips whose
+normalized name contains `ultra` and `memoryGB >= 256`,
+`AutotuneRecommendHardware.recommendedMaxBatch` MUST return 8, still
+clamped by `ProviderCapacity.maxConcurrencyOverrideLimit`. Ultra 128–255 GB
+stays 4. This is the uncalibrated hardware-tier constant after Studio M3
+Ultra 256 GB Coder-30B keyed 8-wide proof. `--calibrate-concurrency` MAY
+still emit a lower value in `[1, 8]`.
 
 ### 3.7 Catalog artifact feed (v0.10.0)
 
@@ -1547,6 +1559,8 @@ AC-42 (`SPEC-023-R007`, hard-gate carve-out and 8 GB path): When every eligible 
 AC-43 (`SPEC-023-R009`, concurrency calibration measures aggregate throughput under bounds): An explicit `--calibrate-concurrency` run measures the selected already-verified artifact by driving `B` genuinely concurrent uncached streams at each swept batch depth `B` (never serialized single-stream replicates), records per-depth aggregate tokens/sec and per-stream p95 TTFT, and selects the feasible depth with the highest aggregate tokens/sec — tie-broken toward the lower depth within the aggregate-gain fraction. The selected `recommended_max_batch` never exceeds `min(memory_fit_cap, max_concurrency_override_limit = 8)` and is never below `1`. A depth is feasible only when all `B` streams succeed with measurable throughput, no stop-token leak occurs, its per-stream p95 TTFT is within the buyer-facing ceiling, and it does not regress the `B = 1` p95 TTFT beyond the bounded factor; `B = 1` is measured first and must pass. Sustained memory-pressure/thermal vetoes, malformed/non-finite metrics, timeout, interruption, or a serve/process failure fail closed before recommendation-state or config mutation, leaving the tier-constant recommendation intact. JSON and stored state carry the policy, the tier-constant comparison value, the per-depth measurements, and the selected value; with `--apply`, the applied `max_concurrency_override` equals `recommended_max_batch`. When a draft model is configured, the run emits `recommended_max_batch = 1` with `draft_pinned = true` and performs no sweep (SPEC-028 FR-4).
 
 AC-44 (`SPEC-023-R009`, opt-in and byte-shape preservation): The same recommendation command without `--calibrate-concurrency` preserves the pre-v0.13.0 output shape exactly — the `concurrency_calibration` field is absent — and emits and applies the `AutotuneRecommendHardware.recommendedMaxBatch` chip/RAM tier constant as `max_concurrency_override` unchanged. `--calibrate-concurrency` MAY be combined with `--calibrate-context`; when both are requested, context calibration completes first and its selected context is the calibration context the concurrency sweep measures against, and both optional fields appear in the fixed §6 order (`context_calibration` then `concurrency_calibration`).
+
+AC-45 (`SPEC-023-R011`, Ultra ≥256 GB default 8): `AutotuneRecommendHardware` for an Ultra chip with 256 GB or more returns `recommendedMaxBatch = 8`. The same Ultra chip with 128 GB or 192 GB still returns 4. The served hard cap remains 8. A `--calibrate-concurrency` run MAY still emit a lower value.
 
 AC-OMLX-1: A row with `bench_gate.provenance.source == "omlx_seeded"` and `runtime_status == "recommendable"` is rejected by catalog validation.
 

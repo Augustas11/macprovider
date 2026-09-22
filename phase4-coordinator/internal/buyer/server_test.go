@@ -8165,7 +8165,7 @@ func TestSPEC004DefaultConfigRegression_AllReadyButCapacityZero(t *testing.T) {
 		registry,
 		zerolog.Nop(),
 		time.Unix(1716768000, 0),
-		buyer.WithRoutingConfig(config.RoutingConfig{PreflightTimeoutS: 5, RequestTimeoutS: 280, FailoverTimeoutS: 5}),
+		buyer.WithRoutingConfig(config.RoutingConfig{PreflightTimeoutS: 5, RequestTimeoutS: 280, FailoverTimeoutS: 5, SlotQueueDeadlineS: 1, SlotQueuePollIntervalMS: 5}),
 	)
 	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`), http.Header{})
 	if rr.Code != http.StatusServiceUnavailable {

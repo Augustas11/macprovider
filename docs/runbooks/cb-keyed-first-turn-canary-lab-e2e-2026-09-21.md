@@ -99,6 +99,16 @@ turns, same 30B): 2/4 HTTP 200 (`cached_prompt_tokens=0`, no serial-route on
 Studio) and 2/4 HTTP 429 `no_provider_available`. That shed is slots/routing,
 not the keyed-first-turn CLI fence.
 
+## Loop C (2026-09-22, slots 8)
+
+Live 8080 `max_concurrency_override: 8`, CB still **canary**, signed 176.
+Keyed 8-wide first-turn against `127.0.0.1:8080`, unique conversation keys,
+`max_tokens=32`. 8/8 HTTP 200. Overlap **5.902 s** vs sum **41.216 s**.
+RSS 49612→50321 MB, memory pressure **normal**, thermal **nominal**, same
+PID, no `serial_routed`, no `batching_prefill_failed`. **PASS.**
+
+Do not set CB `on`. Do not promote the fleet.
+
 ## Not done here
 
 - Sticky/cross-turn positive `cached_prompt_tokens` batching (AC-26)
