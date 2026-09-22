@@ -86,15 +86,17 @@ python3 scripts/capture-byom-journey-evidence.py \
 
 # Build + preflight are the unsigned promotion path: they require the eight
 # SPEC-046 rows to still be pending. After signed promotion those rows are
-# conformant, so the same commands fail closed on purpose. In that case the
-# gate still runs driver + capture, then validates the landed signed envelope
-# instead of attempting a second promotion.
+# conformant, so the same commands fail closed on purpose. If only the
+# explicitly documented stale-selector rows are pending, the gate still runs
+# driver + capture, then validates the retained signed envelope instead of
+# attempting a second promotion.
 DISCOVERY_LEDGER_STATE="$(python3 - "$REQUIREMENT_IDS" <<'PY'
 import json
 import sys
 from pathlib import Path
 
 ids = [item.strip() for item in sys.argv[1].split(",") if item.strip()]
+stale_selector_ids = {"SPEC-046-R001", "SPEC-046-R008"}
 conformance = json.loads(Path("specs/CONFORMANCE.json").read_text(encoding="utf-8"))
 rows = {
     row["requirement_id"]: row
@@ -102,6 +104,7 @@ rows = {
     if isinstance(row, dict) and isinstance(row.get("requirement_id"), str)
 }
 states = []
+pending_ids = []
 sources = set()
 for requirement_id in ids:
     row = rows.get(requirement_id)
@@ -109,6 +112,8 @@ for requirement_id in ids:
         raise SystemExit(f"missing requirement {requirement_id}")
     state = row.get("state")
     states.append(state)
+    if state == "pending":
+        pending_ids.append(requirement_id)
     for item in row.get("evidence") or []:
         if isinstance(item, dict) and str(item.get("artifact", "")).startswith("sha256:"):
             source = item.get("source")
@@ -120,10 +125,18 @@ if all(state == "pending" for state in states):
 elif all(state == "conformant" for state in states) and len(sources) == 1:
     print("conformant")
     print(next(iter(sources)))
+elif (
+    set(pending_ids) == stale_selector_ids
+    and all(state in {"pending", "conformant"} for state in states)
+    and len(sources) == 1
+):
+    print("retained")
+    print(next(iter(sources)))
 else:
     raise SystemExit(
-        "SPEC-046 discovery rows must be uniformly pending or uniformly "
-        f"conformant with one signed source, not {states!r} / {sorted(sources)!r}"
+        "SPEC-046 discovery rows must be uniformly pending, uniformly "
+        "conformant, or only stale-selector rows pending with one signed "
+        f"source, not {states!r} / {sorted(sources)!r}"
     )
 PY
 )"
@@ -157,6 +170,11 @@ elif [[ "$LEDGER_STATE" == "conformant" && -n "$SIGNED_SOURCE" ]]; then
     "$SIGNED_SOURCE" \
     --requirement-ids "$REQUIREMENT_IDS"
   echo "test-byom-discovery-journey: driver, capture, and signed envelope validation passed"
+elif [[ "$LEDGER_STATE" == "retained" && -n "$SIGNED_SOURCE" ]]; then
+  python3 scripts/validate-signed-journey-result.py \
+    "$SIGNED_SOURCE" \
+    --requirement-ids "$REQUIREMENT_IDS"
+  echo "test-byom-discovery-journey: driver, capture, and retained signed envelope validation passed"
 else
   echo "test-byom-discovery-journey: unexpected SPEC-046 ledger state" >&2
   exit 1
