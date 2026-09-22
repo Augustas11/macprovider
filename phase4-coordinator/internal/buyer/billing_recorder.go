@@ -18,6 +18,14 @@ import (
 // to force a deadline without waiting on SQLite. Production leaves it nil.
 var settlementOutputWriteContextForTest func(context.Context) context.Context
 
+// hotPathWriteContextForTest replaces the context for a provider-credit
+// write. attempt is 1 for the first try and 2 for the deadline retry.
+var hotPathWriteContextForTest func(attempt int, ctx context.Context) context.Context
+
+// settlementOutputWriteErrForTest, when set, fails the settlement-output
+// write after the credit is stored. A non-deadline error still fails the buyer.
+var settlementOutputWriteErrForTest error
+
 // billingRecorder is the typed extraction of the previously-inline
 // logRowWithBilling closure from handleChatCompletions. M3-10
 // (audits/2026-06-10/REPO_AUDIT.md ARCH-6) hoisted the closure into
@@ -477,13 +485,7 @@ func (b *billingRecorder) recordRow(
 			PositiveVerificationExcluded: row.PositiveVerificationExcluded,
 			RewardsExcluded:              row.RewardsExcluded,
 		}
-		var err error
-		if b.hasAuthenticatedAccount {
-			err = billingStore.WriteHotPathForAccount(ctx, s.reqLogStore, b.authenticatedAccount, row, billingInput)
-		} else {
-			err = billingStore.WriteHotPath(ctx, s.reqLogStore, row, billingInput)
-		}
-		if err != nil {
+		if err := b.writeProviderHotPath(ctx, billingStore, row, billingInput); err != nil {
 			s.log.Warn().Err(err).Str("request_id", b.requestID).Msg("billing hot-path insert failed")
 			fallbackCtx, fallbackCancel := context.WithTimeout(context.Background(), requestLogWriteTimeout)
 			defer fallbackCancel()
@@ -497,6 +499,9 @@ func (b *billingRecorder) recordRow(
 				s.log.Warn().Err(fallbackErr).Str("request_id", b.requestID).Msg("request_log identity fallback insert failed")
 				return fmt.Errorf("billing hot-path insert failed: %w; fallback failed: %v", err, fallbackErr)
 			}
+			// The fallback saves the request log only. It does not pay the
+			// provider. Do not mark this leg credited.
+			return err
 		}
 		// A provider-bound, billable (status != 503) row is now durably
 		// persisted — the provider has been credited. Mark BEFORE the
@@ -564,6 +569,40 @@ func (b *billingRecorder) recordRow(
 	return nil
 }
 
+// writeProviderHotPath writes the request log and the provider credit
+// together. A database deadline gets one fresh retry. If the first try
+// actually committed, the retry is skipped so the provider is not paid
+// twice. If both tries fail, the caller must not treat the provider as paid.
+func (b *billingRecorder) writeProviderHotPath(ctx context.Context, store *billing.Store, row requestlog.Row, in billing.HotPathInput) error {
+	call := func(attempt int, parent context.Context) error {
+		writeCtx := parent
+		if hotPathWriteContextForTest != nil {
+			writeCtx = hotPathWriteContextForTest(attempt, parent)
+		}
+		if b.hasAuthenticatedAccount {
+			return store.WriteHotPathForAccount(writeCtx, b.server.reqLogStore, b.authenticatedAccount, row, in)
+		}
+		return store.WriteHotPath(writeCtx, b.server.reqLogStore, row, in)
+	}
+	err := call(1, ctx)
+	if err == nil || !settlementOutputPersistFailedAfterCredit(err) {
+		return err
+	}
+	b.server.log.Warn().Err(err).Str("request_id", b.requestID).Msg("billing hot-path insert failed; retrying provider credit")
+	retryCtx, retryCancel := context.WithTimeout(context.Background(), requestLogWriteTimeout)
+	defer retryCancel()
+	exists, lookErr := store.LedgerCreditExists(retryCtx, in.RequestID, in.ProviderID)
+	if lookErr != nil {
+		b.server.log.Warn().Err(lookErr).Str("request_id", b.requestID).Msg("billing hot-path credit lookup failed; not retrying")
+		return err
+	}
+	if exists {
+		b.server.log.Warn().Str("request_id", b.requestID).Msg("billing hot-path credit already stored after deadline")
+		return nil
+	}
+	return call(2, retryCtx)
+}
+
 // persistSettlementAttemptOutput writes the settlement evidence after the
 // credit row has committed. It uses its own timeout so a slow credit insert
 // cannot eat the budget for this write. A deadline or lock after the credit
@@ -575,7 +614,12 @@ func (b *billingRecorder) persistSettlementAttemptOutput(store *billing.Store, i
 	if settlementOutputWriteContextForTest != nil {
 		outputCtx = settlementOutputWriteContextForTest(outputCtx)
 	}
-	err := b.recordSettlementAttemptOutput(outputCtx, store, in, output)
+	var err error
+	if settlementOutputWriteErrForTest != nil {
+		err = settlementOutputWriteErrForTest
+	} else {
+		err = b.recordSettlementAttemptOutput(outputCtx, store, in, output)
+	}
 	if err == nil || !settlementOutputPersistFailedAfterCredit(err) {
 		return err
 	}

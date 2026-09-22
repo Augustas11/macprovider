@@ -56,6 +56,27 @@ type CacheBillingRoutingDecision struct {
 	ValidationReason   string
 }
 
+// LedgerCreditExists reports whether this request already has a provider
+// credit. A hot-path retry uses it so a commit that the caller observed as
+// a deadline is not paid a second time.
+func (s *Store) LedgerCreditExists(ctx context.Context, requestID, providerID string) (bool, error) {
+	if s == nil || requestID == "" || providerID == "" {
+		return false, nil
+	}
+	var one int
+	err := s.db.QueryRowContext(ctx, `
+SELECT 1 FROM ledger_request_credits
+WHERE request_id = ? AND provider_id = ?
+LIMIT 1`, requestID, providerID).Scan(&one)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 func (s *Store) WriteHotPath(ctx context.Context, reqLogStore *requestlog.Store, reqRow requestlog.Row, in HotPathInput) error {
 	return s.writeHotPath(ctx, reqLogStore, nil, reqRow, in)
 }
