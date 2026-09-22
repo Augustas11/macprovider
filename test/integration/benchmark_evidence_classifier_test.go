@@ -48,7 +48,8 @@ func classifyBenchmarkEvidenceE2E(t *testing.T, s *scenario, requestID string) b
 		"--gateway-db", s.gatewayDB,
 		"--route-journal-db", s.coordinatorDB+".route-snapshots",
 		"--account-id", s.accountID,
-		"--request-id", requestID)
+		"--request-id", requestID,
+		"--expected-provider-id", s.providerID)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("classify benchmark evidence: %v: %s", err, output)

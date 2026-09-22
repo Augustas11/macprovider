@@ -5486,8 +5486,7 @@
         "phase4-coordinator/internal/billing/settlement_receipts.go:insertSettlementReceiptVerdictAuditConn"
       ],
       "tests": [
-        "phase4-coordinator/internal/billing/settlement_receipts_test.go:TestIngestSettlementReceiptPersistsVerifiedStateAndRedactedAudit",
-        "test/integration/buyer_enforce_journey_test.go:TestJourneyBuyerEnforceIsolatedCandidate"
+        "phase4-coordinator/internal/billing/settlement_receipts_test.go:TestIngestSettlementReceiptPersistsVerifiedStateAndRedactedAudit"
       ],
       "journeys": [
         "JOURNEY-BUYER-ENFORCE"
@@ -8370,7 +8369,7 @@
       "implementation": [
         "phase4-coordinator/internal/ws/model_admission.go:type ModelAdmissionStore",
         "phase4-coordinator/internal/routing/filter.go:func EligibleCandidates",
-        "phase4-coordinator/internal/buyer/route_snapshot.go:func (b *billingRecorder) recordRouteSnapshot",
+        "phase4-coordinator/internal/buyer/model_admission.go:func (s *Server) insertBYOMRouteSnapshot",
         "phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:struct BYOMDiscoveryWire",
         "test/e2e/byom/run-cli-onboarding-e2e.py:assert_catalog_offer_dry_run"
       ],

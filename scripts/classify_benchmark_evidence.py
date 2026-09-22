@@ -40,7 +40,7 @@ def evidence_scopes(account_id):
     return account_scope, receipt_scope
 
 
-def classify(coordinator, gateway, account_id, external_request_id, journal=None, now=None):
+def classify(coordinator, gateway, account_id, external_request_id, journal=None, now=None, expected_provider_id=None):
     now = now or datetime.now(timezone.utc)
     account_scope, receipt_scope = evidence_scopes(account_id)
     requests = coordinator.execute(
@@ -78,8 +78,14 @@ def classify(coordinator, gateway, account_id, external_request_id, journal=None
             reasons.append("provider_credit_quarantined:" + (credit["quarantine_reason"] or "unspecified"))
         elif credit["provider_assigned_id"] != request["provider_assigned_id"]:
             reasons.append("provider_assignment_mismatch")
-        if credit and request["provider_header"] and credit["provider_id"] != request["provider_header"]:
+        if not expected_provider_id and not request["provider_header"]:
+            reasons.append("expected_provider_missing")
+        if expected_provider_id and credit and credit["provider_id"] != expected_provider_id:
+            reasons.append("expected_provider_mismatch")
+        if request["provider_header"] and credit and credit["provider_id"] != request["provider_header"]:
             reasons.append("provider_pin_mismatch")
+        if expected_provider_id and request["provider_header"] and request["provider_header"] != expected_provider_id:
+            reasons.append("expected_provider_pin_mismatch")
         route = one(coordinator, """SELECT pending_deadline_seconds, request_start_ts_unix_ms, route_snapshot_digest,
                                             provider_reported_model_hash, expected_catalog_model_hash, model_id, spec008_hash_status
                                      FROM settlement_route_snapshots
@@ -194,13 +200,14 @@ def main():
     parser.add_argument("--route-journal-db")
     parser.add_argument("--account-id", required=True)
     parser.add_argument("--request-id", required=True, help="buyer-visible X-Request-ID")
+    parser.add_argument("--expected-provider-id", help="benchmark target provider ID; required for complete classification when the coordinator has no provider pin header")
     args = parser.parse_args()
     with closing(open_readonly(args.coordinator_db)) as coordinator, closing(open_readonly(args.gateway_db)) as gateway:
         if args.route_journal_db:
             with closing(open_readonly(args.route_journal_db)) as journal:
-                result = classify(coordinator, gateway, args.account_id, args.request_id, journal)
+                result = classify(coordinator, gateway, args.account_id, args.request_id, journal, expected_provider_id=args.expected_provider_id)
         else:
-            result = classify(coordinator, gateway, args.account_id, args.request_id)
+            result = classify(coordinator, gateway, args.account_id, args.request_id, expected_provider_id=args.expected_provider_id)
     print(json.dumps(result, sort_keys=True))
 
 

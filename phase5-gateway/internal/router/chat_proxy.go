@@ -2395,6 +2395,7 @@ func (s *Server) settleBeforeResponseWithCoordinatorFinalityPolicy(w http.Respon
 				WindowDate:      subject.ReservationCreatedAt.UTC().Format("2006-01-02"),
 				ReservedTokens:  maxTotal,
 				CreatedAt:       subject.ReservationCreatedAt,
+				RelayBlind:      relayBlindMetadataFor(r),
 			})
 		}
 		return true
@@ -2601,6 +2602,7 @@ func (s *Server) markStreamingSettlementHoldForReconciliation(r *http.Request, s
 			WindowDate:      reservationWindow,
 			ReservedTokens:  maxTotal,
 			CreatedAt:       subject.ReservationCreatedAt,
+			RelayBlind:      relayBlindMetadataFor(r),
 		})
 	}
 }

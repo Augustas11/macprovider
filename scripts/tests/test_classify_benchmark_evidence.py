@@ -98,6 +98,21 @@ class BenchmarkEvidenceTests(unittest.TestCase):
         self.assertEqual(result["classification"], "incomplete")
         self.assertIn("provider_pin_mismatch", result["missing"])
 
+    def test_unpinned_provider_cannot_complete_benchmark_evidence(self):
+        self.coord.execute("UPDATE request_log SET provider_header=NULL")
+        result = self.result()
+        self.assertEqual(result["classification"], "incomplete")
+        self.assertIn("expected_provider_missing", result["missing"])
+
+    def test_expected_provider_identifies_unpinned_gateway_benchmark(self):
+        self.coord.execute("UPDATE request_log SET provider_header=NULL")
+        self.assertEqual(classifier.classify(self.coord, self.gateway, "acct", "external", now=self.now,
+                                             expected_provider_id="provider")["classification"], "complete")
+        result = classifier.classify(self.coord, self.gateway, "acct", "external", now=self.now,
+                                     expected_provider_id="other-provider")
+        self.assertEqual(result["classification"], "incomplete")
+        self.assertIn("expected_provider_mismatch", result["missing"])
+
     def test_other_account_evidence_cannot_complete_same_internal_request(self):
         other_scope, other_receipt_scope = classifier.evidence_scopes("other")
         self.coord.execute("UPDATE settlement_route_snapshots SET account_scope=?", (other_scope,))
