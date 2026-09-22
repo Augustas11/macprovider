@@ -8695,7 +8695,7 @@ func TestSlotQueueFallsThroughAfterQueuedPreflightReject(t *testing.T) {
 		}),
 	)
 	go func() {
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(50 * time.Millisecond)
 		one := 1
 		registry.ApplyStateUpdate("p1", "s1", pool.StateUpdate{State: pool.StateReady, SlotsFree: &one, At: time.Now().UTC()})
 		registry.ApplyStateUpdate("p2", "s2", pool.StateUpdate{State: pool.StateReady, SlotsFree: &one, At: time.Now().UTC()})

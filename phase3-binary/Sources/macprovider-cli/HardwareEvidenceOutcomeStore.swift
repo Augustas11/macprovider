@@ -129,7 +129,11 @@ enum HardwareEvidenceOutcomeStore {
         var st = stat()
         if lstat(parent.path, &st) != 0 {
             guard create else { throw StoreError.unsafePath }
-            try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(
+                at: parent,
+                withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o700]
+            )
             guard lstat(parent.path, &st) == 0 else { throw StoreError.ioFailure }
         }
         guard (st.st_mode & S_IFMT) == S_IFDIR,
@@ -140,6 +144,16 @@ enum HardwareEvidenceOutcomeStore {
               (st.st_mode & 0o022) == 0
         else {
             throw StoreError.unsafePath
+        }
+        if (st.st_mode & 0o777) != 0o700 {
+            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: parent.path)
+            guard lstat(parent.path, &st) == 0,
+                  (st.st_mode & S_IFMT) == S_IFDIR,
+                  st.st_uid == getuid(),
+                  (st.st_mode & 0o777) == 0o700
+            else {
+                throw StoreError.unsafePath
+            }
         }
     }
 

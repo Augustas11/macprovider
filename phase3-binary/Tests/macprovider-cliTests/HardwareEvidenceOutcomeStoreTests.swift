@@ -55,6 +55,14 @@ final class HardwareEvidenceOutcomeStoreTests: XCTestCase {
         XCTAssertEqual(st.st_mode & 0o777, 0o600)
     }
 
+    func testRecordParentDirectoryIsPrivate() throws {
+        XCTAssertEqual(chmod(directory.path, 0o755), 0)
+        HardwareEvidenceOutcomeStore.record(.submitted, to: storeURL)
+        var st = stat()
+        XCTAssertEqual(lstat(directory.path, &st), 0)
+        XCTAssertEqual(st.st_mode & 0o777, 0o700)
+    }
+
     /// Doctor prints the reason to a terminal. C0 and C1 control bytes are
     /// dropped, including the single-byte CSI (U+009B) that a naive ESC filter
     /// misses, so a coordinator- or error-derived string cannot emit escape
