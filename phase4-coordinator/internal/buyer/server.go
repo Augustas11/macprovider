@@ -8286,6 +8286,24 @@ func (s *Server) dropConsumedForwardedSlot(state *forwardState) {
 	state.consumedAssignedID = ""
 }
 
+func (s *Server) dropForwardedInFlight(state *forwardState) {
+	if s == nil || state == nil {
+		return
+	}
+	if s.pool != nil && state.slotConsumedOnAccept {
+		providerID := state.consumedProviderID
+		assignedID := state.consumedAssignedID
+		if providerID == "" {
+			providerID = state.provider.ProviderID
+			assignedID = state.provider.AssignedID
+		}
+		if providerID != "" && assignedID != "" {
+			s.pool.DropForwardedInFlight(providerID, assignedID)
+		}
+	}
+	s.dropConsumedForwardedSlot(state)
+}
+
 func (s *Server) reconcileForwardedSlotAvailable(state *forwardState) {
 	if s == nil || s.pool == nil || state == nil {
 		return

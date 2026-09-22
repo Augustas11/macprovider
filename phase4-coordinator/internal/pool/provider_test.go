@@ -230,6 +230,78 @@ func TestInFlightBusyHeartbeatAfterSettleWindowDoesNotZeroRestoredSeat(t *testin
 	}
 }
 
+func TestDropForwardedInFlightLetsLaterReadyHeartbeatApply(t *testing.T) {
+	registry := NewRegistry(nil)
+	provider := &Provider{
+		ProviderID:       "p1",
+		AssignedID:       "s1",
+		State:            StateReady,
+		SlotsTotal:       8,
+		SlotsFree:        8,
+		MaxConcurrency:   8,
+		MaxContextTokens: 8192,
+	}
+	registry.Register(provider, nil)
+	if !registry.ConsumeForwardedSlot("p1", "s1") {
+		t.Fatal("ConsumeForwardedSlot returned false")
+	}
+	registry.MarkState("p1", "s1", StateBusy)
+	if !registry.DropForwardedInFlight("p1", "s1") {
+		t.Fatal("DropForwardedInFlight returned false")
+	}
+	got, ok := registry.Resolve("p1", "s1")
+	if !ok {
+		t.Fatal("provider missing after drop")
+	}
+	if got.SlotsFree != 7 {
+		t.Fatalf("after drop slots_free=%d, want 7 (seat stays consumed)", got.SlotsFree)
+	}
+	registry.ApplyHeartbeat("p1", "s1", HeartbeatUpdate{
+		Status:           StateReady,
+		ModelID:          "model-a",
+		MaxContextTokens: 8192,
+		MaxConcurrency:   8,
+		SlotsFree:        8,
+		SlotsTotal:       8,
+		At:               time.Now().UTC().Add(OccupancySettleWindow + time.Second),
+	})
+	got, ok = registry.Resolve("p1", "s1")
+	if !ok {
+		t.Fatal("provider missing after ready heartbeat")
+	}
+	if got.SlotsFree != 8 || got.State != StateReady {
+		t.Fatalf("after ready heartbeat = state %q slots_free %d, want ready/8", got.State, got.SlotsFree)
+	}
+}
+
+func TestMetricsFreeBusyStateUpdateDoesNotFlipRestoredSeat(t *testing.T) {
+	registry := NewRegistry(nil)
+	provider := &Provider{
+		ProviderID:       "p1",
+		AssignedID:       "s1",
+		State:            StateBusy,
+		SlotsTotal:       4,
+		SlotsFree:        0,
+		MaxConcurrency:   4,
+		MaxContextTokens: 8192,
+	}
+	registry.Register(provider, nil)
+	if !registry.RestoreForwardedSlot("p1", "s1") {
+		t.Fatal("RestoreForwardedSlot returned false")
+	}
+	registry.ApplyStateUpdate("p1", "s1", StateUpdate{
+		State: StateBusy,
+		At:    time.Now().UTC(),
+	})
+	got, ok := registry.Resolve("p1", "s1")
+	if !ok {
+		t.Fatal("provider missing")
+	}
+	if got.SlotsFree != 1 || got.State != StateReady {
+		t.Fatalf("after metrics-free busy state_update = state %q slots_free %d, want ready/1", got.State, got.SlotsFree)
+	}
+}
+
 func TestMarkForwardedSlotAvailableRefusesNonRoutableStates(t *testing.T) {
 	for _, state := range []State{StateDraining, StateDegraded, StateUnavailable} {
 		t.Run(string(state), func(t *testing.T) {

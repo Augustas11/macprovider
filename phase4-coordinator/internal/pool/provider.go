@@ -1597,6 +1597,23 @@ func (r *Registry) RestoreForwardedSlot(providerID, assignedID string) bool {
 	return true
 }
 
+// DropForwardedInFlight decrements the in-flight occupancy ignore counter
+// without restoring SlotsFree. Queue-full / still-busy terminals keep the
+// consumed seat because the Mac is full, but must not leak the ignore lock
+// so a later ready or thermal heartbeat can apply.
+func (r *Registry) DropForwardedInFlight(providerID, assignedID string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	p := r.providers[providerID]
+	if p == nil || p.AssignedID != assignedID {
+		return false
+	}
+	if p.forwardedInFlight > 0 {
+		p.forwardedInFlight--
+	}
+	return true
+}
+
 func (r *Registry) MarkForwardedSlotAvailable(providerID, assignedID string, slotsFreeHint int) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -2922,7 +2939,7 @@ func (r *Registry) ApplyStateUpdate(providerID, assignedID string, update StateU
 		r.mu.Unlock()
 		return nil, false
 	}
-	staleCapacity := p.ignoreProviderOccupancyAt(update.At) && update.SlotsFree != nil
+	staleCapacity := p.ignoreProviderOccupancyAt(update.At)
 	if r.canApplyProviderStateLocked(p, update.State) {
 		if !(staleCapacity && (update.State == StateReady || update.State == StateBusy)) {
 			r.setStateLocked(p, update.State)

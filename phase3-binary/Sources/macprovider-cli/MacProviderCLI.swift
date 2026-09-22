@@ -887,7 +887,10 @@ struct ServeCommand: AsyncParsableCommand {
             throw ExitCode(2)
         }
         resolved.modelArtifactPath = loadPath
-        if resolved.donorMode || (joiningCoordinator && !isolateLifecycle) {
+        if resolved.donorMode || (joiningCoordinator && !relaxesJoinAdmissionForLab(
+            isolateLifecycle: isolateLifecycle,
+            coordinatorURL: resolved.coordinatorURL
+        )) {
             return try await runModelCatalogPreflight(
                 &resolved,
                 modelPath: loadPath,
@@ -1444,6 +1447,23 @@ struct ServeCommand: AsyncParsableCommand {
         autotuneCandidate: Bool
     ) -> Bool {
         (noJoin || isolateLifecycle) && credentialStore == .protectedFile && !autotuneCandidate
+    }
+
+    /// Catalog/credential/admission identity may relax only for an isolated
+    /// join against a loopback coordinator. Production coordinator URLs keep
+    /// those checks even with `--isolate-lifecycle`.
+    static func relaxesJoinAdmissionForLab(
+        isolateLifecycle: Bool,
+        coordinatorURL: String?
+    ) -> Bool {
+        isolateLifecycle && isLoopbackCoordinatorURL(coordinatorURL)
+    }
+
+    static func isLoopbackCoordinatorURL(_ raw: String?) -> Bool {
+        guard let raw, let url = URL(string: raw), let host = url.host?.lowercased(), !host.isEmpty else {
+            return false
+        }
+        return host == "localhost" || host == "127.0.0.1" || host == "::1"
     }
 
     func run() async throws {
@@ -2892,7 +2912,11 @@ struct ServeCommand: AsyncParsableCommand {
         noJoin: Bool,
         isolateLifecycle: Bool = false
     ) throws {
-        guard !noJoin, !config.donorMode, !isolateLifecycle else { return }
+        guard !noJoin, !config.donorMode else { return }
+        guard !relaxesJoinAdmissionForLab(
+            isolateLifecycle: isolateLifecycle,
+            coordinatorURL: config.coordinatorURL
+        ) else { return }
         guard config.providerToken?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false,
               let configuredProviderID = config.providerID?.trimmingCharacters(in: .whitespacesAndNewlines),
               !configuredProviderID.isEmpty else {
@@ -3036,7 +3060,10 @@ struct ServeCommand: AsyncParsableCommand {
         recoveryMarker: Data?,
         isolateLifecycle: Bool = false
     ) throws {
-        guard !isolateLifecycle else { return }
+        guard !relaxesJoinAdmissionForLab(
+            isolateLifecycle: isolateLifecycle,
+            coordinatorURL: config.coordinatorURL
+        ) else { return }
         guard config.credentialStore == .protectedFile, recoveryMarker == nil else { return }
         throw ReceiptKeyStoreError.missingAdmissionIdentity(providerId: providerID)
     }

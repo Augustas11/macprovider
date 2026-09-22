@@ -597,6 +597,18 @@ final class ServeCommandTests: XCTestCase {
             noJoin: true, credentialStore: .protectedFile, autotuneCandidate: true))
         XCTAssertFalse(ServeCommand.isolatesNoJoinLabServe(
             noJoin: false, isolateLifecycle: true, credentialStore: .protectedFile, autotuneCandidate: true))
+        XCTAssertTrue(ServeCommand.relaxesJoinAdmissionForLab(
+            isolateLifecycle: true,
+            coordinatorURL: "wss://127.0.0.1:18444/ws/provider"
+        ))
+        XCTAssertFalse(ServeCommand.relaxesJoinAdmissionForLab(
+            isolateLifecycle: true,
+            coordinatorURL: "wss://coordinator.malibu.tech/provider/ws"
+        ))
+        XCTAssertFalse(ServeCommand.relaxesJoinAdmissionForLab(
+            isolateLifecycle: false,
+            coordinatorURL: "wss://127.0.0.1:18444/ws/provider"
+        ))
     }
 
     func testAutotuneCandidateIsolationRootIsFreshAndOwnerOnly() throws {
@@ -747,7 +759,15 @@ final class ServeCommandTests: XCTestCase {
             noJoin: false
         ))
         config.donorMode = false
+        config.coordinatorURL = "wss://127.0.0.1:18444/ws/provider"
         XCTAssertNoThrow(try ServeCommand.validateCoordinatorCredential(
+            config: config,
+            credentialStatus: missing,
+            noJoin: false,
+            isolateLifecycle: true
+        ))
+        config.coordinatorURL = "wss://coordinator.malibu.tech/provider/ws"
+        XCTAssertThrowsError(try ServeCommand.validateCoordinatorCredential(
             config: config,
             credentialStatus: missing,
             noJoin: false,
@@ -933,12 +953,22 @@ final class ServeCommandTests: XCTestCase {
             recoveryMarker: nil
         ))
         config.credentialStore = .protectedFile
+        config.coordinatorURL = "wss://127.0.0.1:18444/ws/provider"
         XCTAssertNoThrow(try ServeCommand.validateProtectedFileAdmissionIdentityForServe(
             config: config,
             providerID: "provider-a",
             recoveryMarker: nil,
             isolateLifecycle: true
         ))
+        config.coordinatorURL = "wss://coordinator.malibu.tech/provider/ws"
+        XCTAssertThrowsError(try ServeCommand.validateProtectedFileAdmissionIdentityForServe(
+            config: config,
+            providerID: "provider-a",
+            recoveryMarker: nil,
+            isolateLifecycle: true
+        )) { error in
+            XCTAssertEqual(error as? ReceiptKeyStoreError, .missingAdmissionIdentity(providerId: "provider-a"))
+        }
     }
 
     func testReceiptRuntimePublishesCurrentKeyPublicBytes() throws {
