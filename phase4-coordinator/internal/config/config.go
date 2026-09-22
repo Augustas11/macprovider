@@ -1494,7 +1494,7 @@ func Default() Config {
 			FailoverEnabled:                true,
 			FailoverTimeoutS:               5,
 			SlotQueueMaxPendingPerProvider: 4,
-			SlotQueueDeadlineS:             3,
+			SlotQueueDeadlineS:             10,
 			SlotQueuePollIntervalMS:        25,
 			MinProviderThroughputTPS:       0,
 			DefaultObjective:               "default",

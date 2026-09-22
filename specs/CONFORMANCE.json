@@ -151,7 +151,7 @@
     {
       "spec_id": "SPEC-006",
       "title": "Buyer API Gateway: Mac Provider's first public buyer surface",
-      "version": "0.9.31",
+      "version": "0.9.32",
       "path": "specs/SPEC-006-buyer-api.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -660,7 +660,7 @@
     {
       "spec_id": "SPEC-023",
       "title": "Installer-Integrated Autotune Recommend",
-      "version": "v0.14.1",
+      "version": "v0.14.2",
       "path": "specs/SPEC-023-installer-autotune-recommend.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -2504,6 +2504,25 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1615",
         "rationale": "SPEC-023 v0.14.1 defines row-continuity admission for content-only catalog document rollover: an older provider hello catalog document may remain admissible without restart only when authenticated A-side evidence proves the older selected row and current C-side catalog row share the same row identity plus PolicyEquivalent structured policy, while tombstoned releases, untrusted signer/key lineage, arbitrary releases/ walks, changed rows/policy, and missing artifact evidence remain fail-closed. Implementation remains pending: coordinator admission currently admits only exact current or bounded previous releases loaded from .previous-target, and no signed row-continuity record/ledger or compatibility-report gate exists yet. AC-CAT-22 is the required implementation/test matrix."
+      }
+    },
+    {
+      "requirement_id": "SPEC-023-R011",
+      "spec_id": "SPEC-023",
+      "state": "pending",
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/AutotuneRecommend.swift:recommendedMaxBatch"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/AutotuneRecommendTests.swift:testRecommendedMaxBatchBumpsMaxAndUltraTiers"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "CODE_BUG",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1669",
+        "rationale": "Ultra >=256 GB default recommendedMaxBatch is 8 after Studio M3 Ultra 256 GB proved keyed 8-wide Coder-30B. 128-255 GB Ultra stays 4. Hard cap remains 8. Not a fleet promote and not continuous_batching on."
       }
     },
     {
@@ -5009,6 +5028,29 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1651",
         "rationale": "R012 hashed through the first user message so unique coding-agent questions paid a cold system+tools prefill. Scaffold hash shares a ConversationCache key without enabling sticky. Not promoted; no signed journey."
+      }
+    },
+    {
+      "requirement_id": "SPEC-006-R015",
+      "spec_id": "SPEC-006",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/buyer/server.go:noteProviderAcceptedRequest",
+        "phase4-coordinator/internal/buyer/server.go:slotQueueDefaultDeadline",
+        "phase4-coordinator/internal/config/config.go:SlotQueueDeadlineS"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/buyer/slot_reservation_test.go:TestFourSlotProviderAdmitsFourReservations",
+        "phase4-coordinator/internal/buyer/slot_reservation_test.go:TestAcceptedRequestReleasesReservationAllowsSiblingSelect",
+        "phase4-coordinator/internal/buyer/slot_reservation_test.go:TestDefaultSlotQueueDeadlineCoversOneThirtyBDecode"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "CODE_BUG",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1669",
+        "rationale": "Coordinator held a slots_free reservation for the whole stream while the CLI also decremented occupancy, so a 4-slot Mac admitted about 2 wholesale chats. Release on provider accept and wait 10s (one 30B decode). Not promoted; Pearl apply is after merge."
       }
     },
     {

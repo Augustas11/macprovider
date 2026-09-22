@@ -1741,6 +1741,8 @@ final class AutotuneRecommendTests: XCTestCase {
         XCTAssertEqual(Self.hardware(chip: "Apple M4 Ultra", memoryGB: 96, bandwidthTier: .s).recommendedMaxBatch, 3)
         XCTAssertEqual(Self.hardware(chip: "Apple M4 Ultra", memoryGB: 128, bandwidthTier: .s).recommendedMaxBatch, 4)
         XCTAssertEqual(Self.hardware(chip: "Apple M4 Ultra", memoryGB: 192, bandwidthTier: .s).recommendedMaxBatch, 4)
+        XCTAssertEqual(Self.hardware(chip: "Apple M3 Ultra", memoryGB: 256, bandwidthTier: .s).recommendedMaxBatch, 8)
+        XCTAssertEqual(Self.hardware(chip: "Apple M4 Ultra", memoryGB: 256, bandwidthTier: .s).recommendedMaxBatch, 8)
     }
 
     func testRecommendedMaxBatchDoesNotBumpLowRamMaxOrUltra() {

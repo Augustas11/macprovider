@@ -1,13 +1,17 @@
 # SPEC-023 — Installer-Integrated Autotune Recommend
 
-version: v0.14.1
+version: v0.14.2
 status: LOCKED
 owner: operator (a11)
-last-locked: 2026-09-19
+last-locked: 2026-09-22
 lockstep: SPEC-005 v0.6.7 (SPEC-005-R011 money-table owner). CONFORMANCE `depends_on` does not list SPEC-005; the lockstep is recorded in prose only, avoiding a dependency cycle (SPEC-005 likewise does not list SPEC-023 in its `depends_on`).
 
 ## Change log
 
+- **v0.14.2 (2026-09-22)** — Ultra ≥256 GB default `recommendedMaxBatch` is 8
+  (#1669). Studio M3 Ultra 256 GB proved keyed 8-wide Coder-30B on live 8080
+  (8/8 HTTP 200, overlap ~6s vs serial ~41s, memory pressure normal). Ultra
+  128–255 GB stays 4. The served hard cap remains 8. Registers `SPEC-023-R011`.
 - **v0.14.1 (2026-09-20)** — Row-continuity admission design for content-only
   catalog cuts (#1615). A provider's hello `catalog_release_id` is the signed
   candidate-catalog document selected at `serve` start, not proof that the Mac is

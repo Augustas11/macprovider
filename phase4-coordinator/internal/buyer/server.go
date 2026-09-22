@@ -365,7 +365,9 @@ const (
 	// the gateway to return OpenRouter-facing capacity sheds inside the TTFT SLO.
 	routeSnapshotDispatchTimeout = 1400 * time.Millisecond
 	slotQueueDefaultMaxPending   = 4
-	slotQueueDefaultDeadline     = 3 * time.Second
+	// One 30B decode is ~3–10s. A 3s deadline sheds wholesale while the Mac
+	// is still working; 10s covers one decode after dispatch-release.
+	slotQueueDefaultDeadline     = 10 * time.Second
 	slotQueueDefaultPollInterval = 25 * time.Millisecond
 )
 
@@ -2523,7 +2525,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// SPEC-042 R005 generation fence is enforced centrally at the top of the
 	// forwardWithFailover dispatch loop (covering initial, retry, and failover
 	// dispatches) — see forward_with_failover.go.
-	defer s.releaseQueuedSlotReservation(state)
+	defer s.releaseQueuedSlotReservation(state) // safety net; accept-path releases earlier
 	// M2-1c: the three transport loops (streaming, WS-non-streaming, HTTP)
 	// previously duplicated the retry/failover/busy-marking decision tree.
 	// They now share three thin helpers (forwardStreamSequence,
@@ -3084,6 +3086,9 @@ func (s *Server) forwardHTTPSequence(
 			setSettlementMetadataHeader(upReq.Header, settlementMetadata)
 			state.phaseTiming.markProviderDispatchStart(phaseTimingNow(s), state.provider.AssignedID)
 			resp, doErr := providerhttp.Client.Do(upReq)
+			if doErr == nil && resp != nil {
+				s.noteProviderAcceptedRequest(state)
+			}
 			dispatchDone := phaseTimingNow(s)
 			state.phaseTiming.markProviderDispatchDone(dispatchDone)
 			if doErr != nil || resp == nil {
@@ -3554,6 +3559,7 @@ func (s *Server) forwardWS(w http.ResponseWriter, r *http.Request, requestID str
 		writeError(w, http.StatusBadGateway, "provider_failed", "Selected provider failed; buyer should retry")
 		return wsForwardFailed, requestLogAttempt{Status: http.StatusBadGateway, Error: "Selected provider failed; buyer should retry"}
 	}
+	s.noteProviderAcceptedRequest(state)
 	if stream {
 		result, attempt := s.forwardWSStreaming(w, r, requestID, provider, relay, state, billingAttemptN)
 		if reserved && (result == wsForwardQueueFull || result == wsForwardProviderDisconnected) {
@@ -4352,6 +4358,9 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 		state.phaseTiming.markProviderDispatchStart(phaseTimingNow(s), provider.AssignedID)
 	}
 	resp, err := providerhttp.Client.Do(upReq)
+	if err == nil && resp != nil {
+		s.noteProviderAcceptedRequest(state)
+	}
 	dispatchDone := phaseTimingNow(s)
 	if state != nil {
 		state.phaseTiming.markProviderDispatchDone(dispatchDone)
@@ -8214,6 +8223,14 @@ func (s *Server) releaseQueuedSlotReservation(state *forwardState) {
 	}
 	s.slotQueue.releaseReservation(state.queuedSlotProviderID)
 	state.queuedSlotProviderID = ""
+}
+
+// noteProviderAcceptedRequest drops the coordinator-local slot lease once
+// the selected Mac has the chat (WS relay started, or HTTP headers returned).
+// In-flight occupancy after this is the provider heartbeat, not a second
+// coordinator count against the same slots_free.
+func (s *Server) noteProviderAcceptedRequest(state *forwardState) {
+	s.releaseQueuedSlotReservation(state)
 }
 
 func (s *Server) reconcileForwardedSlotAvailable(state *forwardState) {

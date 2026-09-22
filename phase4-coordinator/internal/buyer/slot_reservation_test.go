@@ -163,6 +163,64 @@ func TestWholesaleReservedSlotOverflowUsesBoundedQueue(t *testing.T) {
 	s.releaseQueuedSlotReservation(state2)
 }
 
+func TestDefaultSlotQueueDeadlineCoversOneThirtyBDecode(t *testing.T) {
+	s, _, _ := poolIsolationServer(t)
+	if s.slotQueueDeadline != 10*time.Second {
+		t.Fatalf("default slotQueueDeadline = %s, want 10s", s.slotQueueDeadline)
+	}
+}
+
+func TestFourSlotProviderAdmitsFourReservations(t *testing.T) {
+	s, registry, _ := poolIsolationServer(t)
+	provider := poolProvider("p-four")
+	provider.MaxConcurrency = 4
+	provider.SlotsTotal = 4
+	provider.SlotsFree = 4
+	registry.Register(&provider, nil)
+
+	ids := []string{"rid-four-1", "rid-four-2", "rid-four-3", "rid-four-4"}
+	states := make([]*forwardState, 4)
+	for i := 0; i < 4; i++ {
+		states[i] = &forwardState{slotReservationsEnabled: true}
+		got, routeErr := s.selectProviderExcluding(context.Background(), ids[i], poolChatReq(""), http.Header{}, nil, "2026-09-14", states[i])
+		if routeErr != nil {
+			t.Fatalf("selection %d rejected: %+v", i+1, routeErr)
+		}
+		if got.ProviderID != provider.ProviderID {
+			t.Fatalf("selection %d provider %q, want %q", i+1, got.ProviderID, provider.ProviderID)
+		}
+		if states[i].queuedSlotProviderID != provider.ProviderID {
+			t.Fatalf("selection %d reservation %q, want %q", i+1, states[i].queuedSlotProviderID, provider.ProviderID)
+		}
+	}
+	_, routeErr := s.selectProviderExcluding(context.Background(), "rid-four-5", poolChatReq(""), http.Header{}, nil, "2026-09-14", &forwardState{slotReservationsEnabled: true})
+	if routeErr == nil || routeErr.status != http.StatusServiceUnavailable || routeErr.code != "no_provider_available" {
+		t.Fatalf("fifth selection with four slots reserved: want 503 no_provider_available, got %+v", routeErr)
+	}
+}
+
+func TestAcceptedRequestReleasesReservationAllowsSiblingSelect(t *testing.T) {
+	s, registry, _ := poolIsolationServer(t)
+	provider := poolProvider("p-one")
+	registry.Register(&provider, nil)
+
+	state := &forwardState{slotReservationsEnabled: true}
+	if _, routeErr := s.selectProviderExcluding(context.Background(), "rid-accept-1", poolChatReq(""), http.Header{}, nil, "2026-09-14", state); routeErr != nil {
+		t.Fatalf("first selection rejected: %+v", routeErr)
+	}
+	s.noteProviderAcceptedRequest(state)
+	if state.queuedSlotProviderID != "" {
+		t.Fatalf("reservation still held after provider accept: %q", state.queuedSlotProviderID)
+	}
+	if s.slotQueue.blocksProvider(provider.ProviderID, provider.SlotsFree) {
+		t.Fatal("slot queue still blocks provider after accept-release")
+	}
+	got, routeErr := s.selectProviderExcluding(context.Background(), "rid-accept-2", poolChatReq(""), http.Header{}, nil, "2026-09-14", &forwardState{slotReservationsEnabled: true})
+	if routeErr != nil || got.ProviderID != provider.ProviderID {
+		t.Fatalf("sibling after accept provider=%q err=%+v, want %q nil", got.ProviderID, routeErr, provider.ProviderID)
+	}
+}
+
 func TestSpoofedWholesaleHeaderRejectedBeforeReservationOverflowQueue(t *testing.T) {
 	s, registry, _ := poolIsolationServer(t)
 	provider := poolProvider("p-one")

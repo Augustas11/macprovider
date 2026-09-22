@@ -198,6 +198,9 @@ extension AutotuneRecommendHardware {
     var recommendedMaxBatch: Int {
         let normalizedChip = chip.lowercased()
         if normalizedChip.contains("ultra") {
+            if memoryGB >= 256 {
+                return 8
+            }
             if memoryGB >= 128 {
                 return 4
             }
