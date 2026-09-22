@@ -660,7 +660,7 @@
     {
       "spec_id": "SPEC-023",
       "title": "Installer-Integrated Autotune Recommend",
-      "version": "v0.14.2",
+      "version": "v0.14.3",
       "path": "specs/SPEC-023-installer-autotune-recommend.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -2523,6 +2523,28 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1669",
         "rationale": "Ultra >=256 GB default recommendedMaxBatch is 8 after Studio M3 Ultra 256 GB proved keyed 8-wide Coder-30B. 128-255 GB Ultra stays 4. Hard cap remains 8. Not a fleet promote and not continuous_batching on."
+      }
+    },
+    {
+      "requirement_id": "SPEC-023-R012",
+      "spec_id": "SPEC-023",
+      "state": "pending",
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/AutotuneRecommend.swift:internalRawScore",
+        "phase3-binary/Sources/macprovider-cli/AutotuneRecommend.swift:providerCompletionPayoutScore"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/AutotuneRecommendTests.swift::testRecommendScoreAppliesGlobalMultiplierBeforeSorting",
+        "phase3-binary/Tests/macprovider-cliTests/AutotuneRecommendTests.swift::testRecommendSortsOnUnroundedInternalScore",
+        "phase3-binary/Tests/macprovider-cliTests/AutotuneRecommendTests.swift::testRecommendBreaksScoreTiesOnUnroundedTPS"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1673",
+        "rationale": "SPEC-023 v0.14.3 fixes the fixture-testable Score-A provider-payout multiplier and internal precision path in the CLI: global_multiplier_ppm now participates in provider earning potential, public JSON remains rounded/stable, and unrounded internal score/TPS decide provider-owner ordering. This is not a live model-switch recommendation and does not add prompt/cache workload constants. Promotion remains pending signed journey evidence under the installer-autotune-policy authority and a post-Pearl-deploy measured revenue sweep for eligible catalog candidates."
       }
     },
     {

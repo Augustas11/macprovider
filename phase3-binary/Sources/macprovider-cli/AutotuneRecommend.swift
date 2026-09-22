@@ -2089,6 +2089,8 @@ struct AutotuneCandidateScore: Equatable {
     var confidence: String
     var why: String
     var rawScore: Double
+    var internalRawScore: Double
+    var internalTokensPerSecond: Double
     var benchGateProvenance: CandidateCatalog.BenchGate.Provenance
     var benchGateDrift: [String]
     var buyerTTFTCeilingExceeded: Bool
@@ -2285,7 +2287,7 @@ struct AutotuneRecommendEngine {
             let completionUSD = rateRow?.usdPerMillionCompletionTokens(creditsPerMillion: request.rateCard.usdPerMillionCredits) ?? 0
             let providerShareBPS = rateRow?.providerShareBPS ?? 0
             let providerShare = Double(providerShareBPS) / 10_000.0
-            let payoutScore = Double(rateRow?.completionRatePerMtok ?? 0) * providerShare
+            let payoutScore = Self.providerCompletionPayoutScore(rateRow)
             let demandScore = demandAvailable ? max(demand.demandWeight, request.demandRank.coldStartFloor) : 0
             let shortageScore = demandAvailable ? demand.effectiveSupplyDeficitMultiplier : 0
             let expectedEarningsScore = payoutScore * max(tps, 0) * demandScore * shortageScore
@@ -2344,6 +2346,8 @@ struct AutotuneRecommendEngine {
                     buyerTTFTCeilingMS: request.buyerTTFTCeilingMS
                 ),
                 rawScore: expectedEarningsScore.rounded6,
+                internalRawScore: expectedEarningsScore,
+                internalTokensPerSecond: tps,
                 benchGateProvenance: candidate.benchGate.provenance,
                 benchGateDrift: benchGateDrift,
                 buyerTTFTCeilingExceeded: buyerTTFTCeilingExceeded,
@@ -2397,8 +2401,8 @@ struct AutotuneRecommendEngine {
         // The earning-potential tiebreakers shared by the sort and, below, the
         // §6 transcript. Kept identical so the two never diverge.
         func rawScoreOrdering(_ a: AutotuneCandidateScore, _ b: AutotuneCandidateScore) -> Bool {
-            if a.rawScore != b.rawScore { return a.rawScore > b.rawScore }
-            if a.tokensPerSecond != b.tokensPerSecond { return a.tokensPerSecond > b.tokensPerSecond }
+            if a.internalRawScore != b.internalRawScore { return a.internalRawScore > b.internalRawScore }
+            if a.internalTokensPerSecond != b.internalTokensPerSecond { return a.internalTokensPerSecond > b.internalTokensPerSecond }
             let demandA = max(request.demandRank.rows[a.catalogKey]?.demandWeight ?? 0, request.demandRank.coldStartFloor)
             let demandB = max(request.demandRank.rows[b.catalogKey]?.demandWeight ?? 0, request.demandRank.coldStartFloor)
             if demandA != demandB { return demandA > demandB }
@@ -2517,6 +2521,13 @@ struct AutotuneRecommendEngine {
             donorFallbackCandidate: donorFallback,
             warnings: warnings.map(\.rawValue).sorted().compactMap(AutotuneRecommendWarning.init(rawValue:))
         )
+    }
+
+    private static func providerCompletionPayoutScore(_ row: RateCardProjection.Row?) -> Double {
+        guard let row else { return 0 }
+        let providerShare = Double(row.providerShareBPS) / 10_000.0
+        let globalMultiplier = Double(row.globalMultiplierPPM) / 1_000_000.0
+        return Double(row.completionRatePerMtok) * globalMultiplier * providerShare
     }
 
     func isEligible(

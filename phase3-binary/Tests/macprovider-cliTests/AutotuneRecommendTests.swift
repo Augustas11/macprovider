@@ -5080,6 +5080,192 @@ final class AutotuneRecommendTests: XCTestCase {
         }
     }
 
+    func testRecommendScoreAppliesGlobalMultiplierBeforeSorting() throws {
+        let highCompletionZeroMultiplier = "qwen3-coder-30b-a3b-instruct"
+        let lowerCompletionActiveMultiplier = "google-gemma-4-26b-a4b-it"
+        var request = try makeMultiCandidateRequest(modelKeys: [
+            highCompletionZeroMultiplier,
+            lowerCompletionActiveMultiplier,
+        ])
+        request.demandRank.rows[highCompletionZeroMultiplier] = DemandRank.Row(
+            demandWeight: 1,
+            rank: 1,
+            recommendable: true,
+            minProviderTarget: 1,
+            readyProviderCount: 1,
+            supplyDeficitMultiplier: 1
+        )
+        request.demandRank.rows[lowerCompletionActiveMultiplier] = DemandRank.Row(
+            demandWeight: 1,
+            rank: 2,
+            recommendable: true,
+            minProviderTarget: 1,
+            readyProviderCount: 1,
+            supplyDeficitMultiplier: 1
+        )
+        request.rateCard.rows[highCompletionZeroMultiplier] = RateCardProjection.Row(
+            promptRatePerMtok: 1_000_000,
+            completionRatePerMtok: 2_000_000,
+            providerShareBPS: 10_000,
+            globalMultiplierPPM: 0
+        )
+        request.rateCard.rows[lowerCompletionActiveMultiplier] = RateCardProjection.Row(
+            promptRatePerMtok: 1_000_000,
+            completionRatePerMtok: 1_000_000,
+            providerShareBPS: 10_000,
+            globalMultiplierPPM: 1_000_000
+        )
+
+        let result = AutotuneRecommendEngine().recommend(request)
+
+        XCTAssertEqual(result.recommendedModel, lowerCompletionActiveMultiplier)
+        let selected = try XCTUnwrap(result.selectedCandidate)
+        XCTAssertEqual(selected.catalogKey, lowerCompletionActiveMultiplier)
+        XCTAssertGreaterThan(selected.rawScore, 0)
+        let zeroed = try XCTUnwrap(result.allCandidates.first { $0.catalogKey == highCompletionZeroMultiplier })
+        XCTAssertEqual(zeroed.rawScore, 0)
+    }
+
+    func testRecommendSortsOnUnroundedInternalScore() throws {
+        let slightlyHigher = "qwen3-coder-30b-a3b-instruct"
+        let slightlyLowerLexicographicWinner = "google-gemma-4-26b-a4b-it"
+        var request = try makeMultiCandidateRequest(modelKeys: [
+            slightlyHigher,
+            slightlyLowerLexicographicWinner,
+        ])
+        request.demandRank.rows[slightlyHigher] = DemandRank.Row(
+            demandWeight: 1,
+            rank: 1,
+            recommendable: true,
+            minProviderTarget: 1,
+            readyProviderCount: 1,
+            supplyDeficitMultiplier: 1
+        )
+        request.demandRank.rows[slightlyLowerLexicographicWinner] = DemandRank.Row(
+            demandWeight: 1,
+            rank: 2,
+            recommendable: true,
+            minProviderTarget: 1,
+            readyProviderCount: 1,
+            supplyDeficitMultiplier: 1
+        )
+        request.rateCard.rows[slightlyHigher] = RateCardProjection.Row(
+            promptRatePerMtok: 1,
+            completionRatePerMtok: 1,
+            providerShareBPS: 10_000,
+            globalMultiplierPPM: 1_000_000
+        )
+        request.rateCard.rows[slightlyLowerLexicographicWinner] = RateCardProjection.Row(
+            promptRatePerMtok: 1,
+            completionRatePerMtok: 1,
+            providerShareBPS: 10_000,
+            globalMultiplierPPM: 1_000_000
+        )
+        request.benchmarks[slightlyHigher] = try fixtureBenchmark(
+            modelKey: slightlyHigher,
+            request: request,
+            sustainedTPS: 1.00000049,
+            ttftMS: 100,
+            swapDetected: false,
+            generatedAt: request.generatedAt
+        )
+        request.benchmarks[slightlyLowerLexicographicWinner] = try fixtureBenchmark(
+            modelKey: slightlyLowerLexicographicWinner,
+            request: request,
+            sustainedTPS: 1.00000044,
+            ttftMS: 100,
+            swapDetected: false,
+            generatedAt: request.generatedAt
+        )
+
+        let result = AutotuneRecommendEngine().recommend(request)
+
+        let higher = try XCTUnwrap(result.allCandidates.first { $0.catalogKey == slightlyHigher })
+        let lower = try XCTUnwrap(result.allCandidates.first { $0.catalogKey == slightlyLowerLexicographicWinner })
+        XCTAssertEqual(higher.rawScore, lower.rawScore)
+        XCTAssertEqual(result.recommendedModel, slightlyHigher)
+
+        let json = result.jsonString()
+        XCTAssertFalse(json.contains("internalRawScore"))
+        XCTAssertFalse(json.contains("internal_raw_score"))
+        let root = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
+        let candidates = try XCTUnwrap(root["candidates"] as? [[String: Any]])
+        let higherJSON = try XCTUnwrap(candidates.first { $0["model"] as? String == slightlyHigher })
+        let lowerJSON = try XCTUnwrap(candidates.first { $0["model"] as? String == slightlyLowerLexicographicWinner })
+        XCTAssertEqual(higherJSON["raw_score"] as? Double, lowerJSON["raw_score"] as? Double)
+        let higherExplanation = try XCTUnwrap(higherJSON["explanation"] as? [String: Any])
+        let lowerExplanation = try XCTUnwrap(lowerJSON["explanation"] as? [String: Any])
+        let higherEarning = try XCTUnwrap(higherExplanation["earning_potential"] as? [String: Any])
+        let lowerEarning = try XCTUnwrap(lowerExplanation["earning_potential"] as? [String: Any])
+        XCTAssertEqual(higherEarning["score"] as? Double, higherJSON["raw_score"] as? Double)
+        XCTAssertEqual(lowerEarning["score"] as? Double, lowerJSON["raw_score"] as? Double)
+    }
+
+    func testRecommendBreaksScoreTiesOnUnroundedTPS() throws {
+        let slightlyHigherTPS = "qwen3-coder-30b-a3b-instruct"
+        let slightlyLowerTPSLexicographicWinner = "google-gemma-4-26b-a4b-it"
+        var request = try makeMultiCandidateRequest(modelKeys: [
+            slightlyHigherTPS,
+            slightlyLowerTPSLexicographicWinner,
+        ])
+        request.demandRank.rows[slightlyHigherTPS] = DemandRank.Row(
+            demandWeight: 1,
+            rank: 1,
+            recommendable: true,
+            minProviderTarget: 1,
+            readyProviderCount: 1,
+            supplyDeficitMultiplier: 1
+        )
+        request.demandRank.rows[slightlyLowerTPSLexicographicWinner] = DemandRank.Row(
+            demandWeight: 1,
+            rank: 2,
+            recommendable: true,
+            minProviderTarget: 1,
+            readyProviderCount: 1,
+            supplyDeficitMultiplier: 1
+        )
+        request.rateCard.rows[slightlyHigherTPS] = RateCardProjection.Row(
+            promptRatePerMtok: 1,
+            completionRatePerMtok: 0,
+            providerShareBPS: 10_000,
+            globalMultiplierPPM: 1_000_000
+        )
+        request.rateCard.rows[slightlyLowerTPSLexicographicWinner] = RateCardProjection.Row(
+            promptRatePerMtok: 1,
+            completionRatePerMtok: 0,
+            providerShareBPS: 10_000,
+            globalMultiplierPPM: 1_000_000
+        )
+        request.benchmarks[slightlyHigherTPS] = try fixtureBenchmark(
+            modelKey: slightlyHigherTPS,
+            request: request,
+            sustainedTPS: 1.00000049,
+            ttftMS: 100,
+            swapDetected: false,
+            generatedAt: request.generatedAt
+        )
+        request.benchmarks[slightlyLowerTPSLexicographicWinner] = try fixtureBenchmark(
+            modelKey: slightlyLowerTPSLexicographicWinner,
+            request: request,
+            sustainedTPS: 1.00000044,
+            ttftMS: 100,
+            swapDetected: false,
+            generatedAt: request.generatedAt
+        )
+
+        let result = AutotuneRecommendEngine().recommend(request)
+
+        let higher = try XCTUnwrap(result.allCandidates.first { $0.catalogKey == slightlyHigherTPS })
+        let lower = try XCTUnwrap(result.allCandidates.first { $0.catalogKey == slightlyLowerTPSLexicographicWinner })
+        XCTAssertEqual(higher.rawScore, lower.rawScore)
+        XCTAssertEqual(higher.tokensPerSecond, lower.tokensPerSecond)
+        XCTAssertEqual(result.recommendedModel, slightlyHigherTPS)
+
+        let json = result.jsonString()
+        XCTAssertFalse(json.contains("internalTokensPerSecond"))
+        XCTAssertFalse(json.contains("internal_tokens_per_second"))
+    }
+
     func testRecommendFallsToDonorWhenNoRowFitsRAM() throws {
         var request = try makeRequest()
         request.hardware.memoryGB = 4

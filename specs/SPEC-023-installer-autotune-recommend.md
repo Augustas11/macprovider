@@ -1,6 +1,6 @@
 # SPEC-023 — Installer-Integrated Autotune Recommend
 
-version: v0.14.2
+version: v0.14.3
 status: LOCKED
 owner: operator (a11)
 last-locked: 2026-09-22
@@ -8,6 +8,13 @@ lockstep: SPEC-005 v0.6.7 (SPEC-005-R011 money-table owner). CONFORMANCE `depend
 
 ## Change log
 
+- **v0.14.3 (2026-09-22)** — Score-A recommendation ordering now applies the
+  signed `global_multiplier_ppm` before provider share and sorts on the
+  unrounded internal score while preserving the rounded six-decimal JSON
+  `raw_score` display contract. This is a provider-owner revenue ranking
+  correction only: no catalog/feed schema change, no BYOM path change, no
+  prompt/cache workload-mix constant, no model-switch decision, and no
+  concurrency revenue projection. Registers `SPEC-023-R012` and AC-46.
 - **v0.14.2 (2026-09-22)** — Ultra ≥256 GB default `recommendedMaxBatch` is 8
   (#1669). Studio M3 Ultra 256 GB proved keyed 8-wide Coder-30B on live 8080
   (8/8 HTTP 200, overlap ~6s vs serial ~41s, memory pressure normal). Ultra
@@ -167,7 +174,7 @@ lockstep: SPEC-005 v0.6.7 (SPEC-005-R011 money-table owner). CONFORMANCE `depend
   5. **Buyer-serving state.** Local readiness or coordinator transport alone is insufficient. `buyer_serving` requires a locally ready paid model, a live-verified signed catalog, and an active coordinator admission. Offline fallback and donor modes remain explicitly local/non-buyer-serving.
 
 - **v0.5 (2026-07-06)** — Payout-first scoring for beta supply growth.
-  1. **Rank by provider payout, not buyer throughput.** `raw_score` becomes `completion_rate_per_mtok × provider_share` (credits per million completion tokens after the provider split). `demand_weight` and `measured_sustained_tps` are tiebreakers only, in that order, after payout score.
+  1. **Rank by provider payout, not buyer throughput.** `raw_score` becomes `completion_rate_per_mtok × provider_share` (credits per million completion tokens after the provider split; historical shorthand amended by v0.14.3 to include `global_multiplier_ppm`). `demand_weight` and `measured_sustained_tps` are tiebreakers only, in that order, after payout score.
   2. **Remove diversification pool for beta.** v0.4's 85% band + `stable_hash(diversification_id) % len(pool)` pick is deferred until supply exceeds demand. `recommended_model` is the strict highest `raw_score` eligible row; `diversification_id` remains for cache identity only.
   3. **§5 eligibility unchanged.** RAM, bandwidth, thermal, rate-card, catalog, and benchmark gates still run before scoring.
   4. **Transcript copy.** Eligible-row `why` strings describe payout-per-token leadership, not demand-weighted throughput.
@@ -776,6 +783,17 @@ stays 4. This is the uncalibrated hardware-tier constant after Studio M3
 Ultra 256 GB Coder-30B keyed 8-wide proof. `--calibrate-concurrency` MAY
 still emit a lower value in `[1, 8]`.
 
+**SPEC-023-R012 — Score-A provider payout multiplier and sort precision.**
+Score-A MUST apply each rate-card row's signed `global_multiplier_ppm` when
+computing provider earning potential:
+`completion_rate_per_mtok × global_multiplier × provider_share`. Selection and
+candidate ordering MUST use the unrounded internal score. JSON/display fields
+MUST keep the existing six-decimal rounded `raw_score` and
+`explanation.earning_potential.score` contract, and consumers MUST NOT treat
+the rounded display value as the sort key. This revision does not introduce
+prompt/cache workload-mix constants or any measured-revenue switch decision;
+those remain blocked on real evidence and policy.
+
 ### 3.7 Catalog artifact feed (v0.10.0)
 
 A catalog model key is one priced identity that MAY be served from more than one verified binary artifact. The `mlx-community/*-4bit` safetensors snapshot is one artifact; a GGUF blob served by a local Ollama or llama.cpp runtime under SPEC-046 is a different artifact of the same model. They have different bytes and different hashes, so a single `model_sha256` per row can never match both, and SPEC-047-R003's catalog binding is unreachable for every non-MLX BYOM candidate. §3.7 fixes that by giving each model key a SET of verified artifacts.
@@ -983,15 +1001,33 @@ AC-CAT-19 asserts this concrete representation — field set, types, ordering, u
 
 Stage A is a weaker binding than Stage B **for the compatibility-set manifest only**. It is not weaker for the feed itself: §3.7.2 signature verification, §3.7.4 release binding, §3.7.5 primary-artifact consistency, and the §3.7.6 failure classes all apply in full at Stage A, and every artifact-derived capability still fails closed on any of them.
 
-## 4. Formula (updated v0.12.0)
+## 4. Formula (updated v0.14.3)
 
-**Score-A (shipped CLI, through v0.10.3):** unchanged:
+**Score-A (shipped CLI):**
 
 ```text
-raw_score = completion_rate_per_mtok × provider_share × measured_sustained_tps
-          × max(demand_weight, cold_start_floor)
-          × effective_supply_deficit_multiplier
+provider_share(row) = provider_share_bps(row) / 10_000
+global_multiplier(row) = global_multiplier_ppm(row) / 1_000_000
+
+raw_score_internal =
+  completion_rate_per_mtok(row)
+  × global_multiplier(row)
+  × provider_share(row)
+  × measured_sustained_tps(row, mac)
+  × max(demand_weight(row), cold_start_floor)
+  × effective_supply_deficit_multiplier(row)
+
+recommended_model =
+  subject to §4.1, eligible row with highest raw_score_internal,
+  breaking exact internal ties by:
+    1. measured_sustained_tps DESC
+    2. max(demand_weight, cold_start_floor) DESC
+    3. emitted `model` ASC
 ```
+
+`raw_score` emitted in JSON is `raw_score_internal` rounded to six decimals.
+Selection and ordering use `raw_score_internal`; the rounded display value is
+not the sort key.
 
 Rewriting published `demand_weight` is **not** a 16 GB guarantee: `cold_start_floor = 0.15` lifts any global max-norm `< 0.15` back to 0.15, so Llama 8B and 3B can flatten again. #1483 is the Score-A belt.
 
@@ -1005,6 +1041,7 @@ eligible_rows = rows where:
   local_autotune_passes(model, mac)
 
 provider_share(row) = provider_share_bps(row) / 10_000
+global_multiplier(row) = global_multiplier_ppm(row) / 1_000_000
 tokens_30d(row) = or_completion_tokens_30d(row)   # required published integer under FeedSchema-B
 
 positive = { j in eligible_rows | tokens_30d(j) > 0 }
@@ -1019,6 +1056,7 @@ demand_share(row | mac) =
 
 raw_score(row | mac) =
   completion_rate_per_mtok(row)
+  × global_multiplier(row)
   × provider_share(row)
   × measured_sustained_tps(row, mac)
   × demand_share(row | mac)
@@ -1059,7 +1097,7 @@ Displayed candidate capacity is a per-token throughput estimate:
 
 ### 4.1 RAM-class recommendation rule (v0.11.0 / #1483)
 
-The §4 `raw_score` is `completion_rate_per_mtok × provider_share × measured_sustained_tps × max(demand_weight, cold_start_floor) × effective_supply_deficit_multiplier` — throughput is a first-order multiplicative term (§4). The small-dense onboarding lane is priced at a single `$0.027/M` completion parity across RAM classes on purpose: Llama 3.2 3B (Entry 116, the 8 GB onboarding SKU), Llama 3.1 8B (RESEARCH_227), and Qwen3-8B (P2-02) all pay `completion_rate_per_mtok = 27000`. With payout equal and the supply-deficit multiplier at its `1.0` default for rows with no supply data, the score reduces to `tps × demand_weight`. On a 16 GB Mac the 3 GB SKU runs roughly twice the tokens/s of a dense 8B row, and that throughput advantage dominates even the 8B row's *higher* buyer demand weight (Llama 3.1 8B `demand_weight = 0.45` vs Llama 3.2 3B `0.42`), so a pure argmax hands a 16 GB Mac the 8 GB onboarding SKU. That is wrong: the 8 GB SKU exists so 8 GB Macs receive a paid recommendation (Entry 116 / SPEC-003), not as the default for a Mac with headroom for a full dense 8B row.
+The §4 `raw_score_internal` is `completion_rate_per_mtok × global_multiplier × provider_share × measured_sustained_tps × max(demand_weight, cold_start_floor) × effective_supply_deficit_multiplier` — throughput is a first-order multiplicative term (§4). The small-dense onboarding lane is priced at a single `$0.027/M` completion parity across RAM classes on purpose: Llama 3.2 3B (Entry 116, the 8 GB onboarding SKU), Llama 3.1 8B (RESEARCH_227), and Qwen3-8B (P2-02) all pay `completion_rate_per_mtok = 27000`. With payout equal and the supply-deficit multiplier at its `1.0` default for rows with no supply data, the score reduces to `tps × demand_weight` when those rows share the same global multiplier. On a 16 GB Mac the 3 GB SKU runs roughly twice the tokens/s of a dense 8B row, and that throughput advantage dominates even the 8B row's *higher* buyer demand weight (Llama 3.1 8B `demand_weight = 0.45` vs Llama 3.2 3B `0.42`), so a pure argmax hands a 16 GB Mac the 8 GB onboarding SKU. That is wrong: the 8 GB SKU exists so 8 GB Macs receive a paid recommendation (Entry 116 / SPEC-003), not as the default for a Mac with headroom for a full dense 8B row.
 
 This is a selector-policy rule, not a rate-card or catalog change. It reprices nothing and admits no new model; it only constrains which already-eligible, already-priced row becomes the paid default on 16 GB-class hardware.
 
@@ -1246,7 +1284,7 @@ Schema rules:
 - `recommended_model` is a model key string when at least one eligible row exists; otherwise `null`.
 - `prompt_rate_usd_per_million_tokens` and `completion_rate_usd_per_million_tokens` are USD/M rates for the selected recommendation, derived from rate-card credits and `usd_per_million_credits`. Both are `null` when `recommended_model` is `null`.
 - `serve_config` is `null` in recommendation-only output when no apply-ready serving configuration has been attached. When present, it is the exact model/knob payload the installer can apply for the selected recommendation; donor outcomes keep `donor_mode = true`.
-- `candidates[]` default length is at most 5. It is sorted by eligibility first, then `raw_score` descending, then `model` lexicographically for deterministic ties. It MAY contain one additional donor fallback candidate when `donor_fallback_explanation` is present and the fallback is outside the default 5 rows.
+- `candidates[]` default length is at most 5. Subject to the §4.1 RAM-class ordering override, it is sorted by eligibility first, then §4's unrounded internal score descending, then measured TPS descending, then demand score descending, then emitted `model` lexicographically for deterministic exact ties. The emitted `raw_score` is display evidence, not the ordering key. It MAY contain one additional donor fallback candidate when `donor_fallback_explanation` is present and the fallback is outside the default 5 rows.
 - Candidate `prompt_rate_usd_per_million_tokens` and `completion_rate_usd_per_million_tokens` are USD display rates from the rate-card row used for that candidate.
 - Top-level `prompt_rate_usd_per_million_tokens` and `completion_rate_usd_per_million_tokens` MUST be finite, non-negative, and equal to the selected candidate's candidate-level rates. When `selected_explanation` is present, they MUST also equal `selected_explanation.rate_signal.prompt_rate_usd_per_million_tokens` and `selected_explanation.rate_signal.completion_rate_usd_per_million_tokens`.
 - `raw_score` is rounded to 6 decimal places in JSON.
@@ -1561,6 +1599,16 @@ AC-43 (`SPEC-023-R009`, concurrency calibration measures aggregate throughput un
 AC-44 (`SPEC-023-R009`, opt-in and byte-shape preservation): The same recommendation command without `--calibrate-concurrency` preserves the pre-v0.13.0 output shape exactly — the `concurrency_calibration` field is absent — and emits and applies the `AutotuneRecommendHardware.recommendedMaxBatch` chip/RAM tier constant as `max_concurrency_override` unchanged. `--calibrate-concurrency` MAY be combined with `--calibrate-context`; when both are requested, context calibration completes first and its selected context is the calibration context the concurrency sweep measures against, and both optional fields appear in the fixed §6 order (`context_calibration` then `concurrency_calibration`).
 
 AC-45 (`SPEC-023-R011`, Ultra ≥256 GB default 8): `AutotuneRecommendHardware` for an Ultra chip with 256 GB or more returns `recommendedMaxBatch = 8`. The same Ultra chip with 128 GB or 192 GB still returns 4. The served hard cap remains 8. A `--calibrate-concurrency` run MAY still emit a lower value.
+
+AC-46 (`SPEC-023-R012`, Score-A multiplier and precision): Given two eligible
+rows where one has higher `completion_rate_per_mtok` but
+`global_multiplier_ppm = 0` and the other has lower completion rate but a
+positive global multiplier, `autotune --recommend` selects the positive
+provider-payout row and assigns the zero-multiplier row a zero `raw_score`.
+Given two eligible rows whose internal scores differ only below six displayed
+decimals, the higher internal score wins even when the emitted `raw_score`
+values are equal. JSON still rounds `raw_score` and
+`explanation.earning_potential.score` to six decimals and adds no new fields.
 
 AC-OMLX-1: A row with `bench_gate.provenance.source == "omlx_seeded"` and `runtime_status == "recommendable"` is rejected by catalog validation.
 
