@@ -579,7 +579,7 @@ actor CoordinatorClient {
         self.runtimeSource = runtimeSource
         self.loadedModelID = config.model
         self.maxBodyBytes = config.maxRequestBodyBytes
-        self.maxActiveRequests = 1
+        self.maxActiveRequests = config.maxConcurrencyOverride ?? 1
         self.supportedModels = config.supportedModels
         self.catalogModelIDForCoordinator = config.modelCatalogModelID.flatMap { value in
             let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2473,6 +2473,10 @@ actor CoordinatorClient {
     func handleCoordinatorPayloadForTest(_ payload: [String: Any]) async throws {
         let data = try JSONSerialization.data(withJSONObject: payload)
         try await handle(.string(String(decoding: data, as: UTF8.self)))
+    }
+
+    func relayAdmissionLimitForTest() -> Int {
+        maxActiveRequests
     }
 
     func acceptAuthResponseForTest(_ response: [String: Any], session: Tier2ProviderSession) async throws {

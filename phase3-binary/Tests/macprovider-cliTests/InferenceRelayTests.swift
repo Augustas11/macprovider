@@ -5,6 +5,111 @@ import MacProviderCore
 @testable import macprovider_cli
 
 final class InferenceRelayTests: XCTestCase {
+    func testEightAdvertisedSeatsAdmitEightRelayRequestsAndRejectNinth() async throws {
+        try await assertRelayCapacity(seats: 8)
+    }
+
+    func testOneAdvertisedSeatRejectsSecondRelayRequest() async throws {
+        try await assertRelayCapacity(seats: 1)
+    }
+
+    func testCoordinatorRelayAdmissionFollowsConfiguredSeats() async throws {
+        let cases: [(override: Int?, expectedSeats: Int)] = [(nil, 1), (8, 8)]
+        for testCase in cases {
+            var config = AppConfig.defaults(configPath: "/tmp/macprovider-relay-capacity-test.yaml")
+            config.coordinatorURL = "wss://127.0.0.1:8444/ws/provider"
+            config.providerID = "provider-relay-capacity-test"
+            config.model = "mlx-community/Test-Model"
+            config.maxConcurrencyOverride = testCase.override
+            let status = ProviderStatus(
+                modelID: config.model,
+                modelLoaded: true,
+                capacity: ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: testCase.expectedSeats)
+            )
+            let client = try XCTUnwrap(CoordinatorClient(
+                config: config,
+                modelRuntime: FakeStreamingRuntime(),
+                providerStatus: status
+            ))
+            let relayLimit = await client.relayAdmissionLimitForTest()
+            XCTAssertEqual(relayLimit, testCase.expectedSeats)
+        }
+    }
+
+    private func assertRelayCapacity(seats: Int) async throws {
+        let status = ProviderStatus(
+            modelID: "mlx-community/Test-Model",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: seats)
+        )
+        let recorder = FrameRecorder()
+        let relay = InferenceRelay(
+            modelRuntime: FakeStreamingRuntime(),
+            providerStatus: status,
+            loadedModelID: "mlx-community/Test-Model",
+            maxActiveRequests: seats,
+            maxBodyBytes: 4096,
+            sendFrame: { frame in await recorder.append(frame) }
+        )
+        let body = #"{"model":"mlx-community/Test-Model","messages":[{"role":"user","content":"hello"}],"max_tokens":20,"stream":true}"#
+
+        for index in 1...seats {
+            try await relay.handleInferenceRequest([
+                "type": "inference_request",
+                "request_id": "req-capacity-\(index)",
+                "stream": true,
+                "body": body,
+            ])
+        }
+        try await waitUntil {
+            let frames = await recorder.frames
+            return (1...seats).allSatisfy { index in
+                frames.contains {
+                    $0["type"] as? String == "inference_response_chunk" &&
+                        $0["request_id"] as? String == "req-capacity-\(index)"
+                }
+            }
+        }
+
+        let overflowID = "req-capacity-overflow"
+        try await relay.handleInferenceRequest([
+            "type": "inference_request",
+            "request_id": overflowID,
+            "stream": true,
+            "body": body,
+        ])
+        let fullFrames = await recorder.frames
+        let overflow = try XCTUnwrap(fullFrames.first {
+            $0["type"] as? String == "inference_response_end" && $0["request_id"] as? String == overflowID
+        })
+        XCTAssertEqual(overflow["status"] as? String, "error_queue_full")
+        XCTAssertFalse(fullFrames.contains {
+            $0["type"] as? String == "inference_response_end" &&
+                $0["status"] as? String == "error_queue_full" &&
+                $0["request_id"] as? String != overflowID
+        })
+
+        for index in 1...seats {
+            try await relay.handleCancelRequest([
+                "type": "cancel_request",
+                "request_id": "req-capacity-\(index)",
+                "reason": "test_cleanup",
+            ])
+        }
+        let drained = await relay.waitUntilIdle(timeoutSeconds: 2)
+        XCTAssertTrue(drained)
+        let finalFrames = await recorder.frames
+        for index in 1...seats {
+            let terminal = try XCTUnwrap(finalFrames.first {
+                $0["type"] as? String == "inference_response_end" &&
+                    $0["request_id"] as? String == "req-capacity-\(index)"
+            })
+            XCTAssertEqual(terminal["status"] as? String, "cancelled")
+        }
+        let snapshot = await status.snapshot()
+        XCTAssertEqual(snapshot.requestsInFlight, 0)
+    }
+
     func testCancelActiveStreamingRequestReportsUsage() async throws {
         let telemetry = KVCacheTelemetryCapture()
         let runtime = FakeStreamingRuntime()
