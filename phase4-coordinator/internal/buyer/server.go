@@ -7294,6 +7294,9 @@ func (s *Server) SetSlotQueueConfig(maxPendingPerProvider int, deadline, pollInt
 	if maxPendingPerProvider > 0 {
 		s.slotQueue = newSlotQueue(maxPendingPerProvider)
 	}
+	if deadline > 10*time.Second {
+		deadline = 10 * time.Second
+	}
 	if deadline > 0 {
 		s.slotQueueDeadline = deadline
 	}
@@ -8227,9 +8230,28 @@ func (s *Server) releaseQueuedSlotReservation(state *forwardState) {
 
 // noteProviderAcceptedRequest drops the coordinator-local slot lease once
 // the selected Mac has the chat (WS relay started, or HTTP headers returned).
-// In-flight occupancy after this is the provider heartbeat, not a second
-// coordinator count against the same slots_free.
+// It also consumes one slot on the pool snapshot so a sibling select cannot
+// reuse stale slots_free before the next heartbeat. Occupancy after this is
+// the consumed snapshot plus provider state_update, not a second coordinator
+// lease held for the rest of the stream.
 func (s *Server) noteProviderAcceptedRequest(state *forwardState) {
+	if state == nil {
+		return
+	}
+	if s.pool != nil {
+		provider := state.provider
+		if provider.ProviderID == "" && state.queuedSlotProviderID != "" {
+			if got, ok := s.pool.Resolve(state.queuedSlotProviderID, ""); ok {
+				provider = got
+				state.provider = got
+			}
+		}
+		if provider.ProviderID != "" && provider.AssignedID != "" {
+			if s.pool.ConsumeForwardedSlot(provider.ProviderID, provider.AssignedID) {
+				state.slotConsumedOnAccept = true
+			}
+		}
+	}
 	s.releaseQueuedSlotReservation(state)
 }
 
@@ -8239,6 +8261,11 @@ func (s *Server) reconcileForwardedSlotAvailable(state *forwardState) {
 	}
 	if state.slotReservationsEnabled && state.queuedSlotProviderID != "" {
 		defer s.releaseQueuedSlotReservation(state)
+	}
+	if state.slotConsumedOnAccept {
+		// Provider-origin capacity is the post-accept writer. Do not
+		// republish the route-time slots_free snapshot.
+		return
 	}
 	provider := state.provider
 	if provider.ProviderID == "" || provider.AssignedID == "" || provider.SlotsTotal <= 0 {

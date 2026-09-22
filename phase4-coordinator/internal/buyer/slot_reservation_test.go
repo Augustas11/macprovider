@@ -15,15 +15,15 @@ func TestRoutingConfigAppliesSlotQueueConfig(t *testing.T) {
 
 	WithRoutingConfig(config.RoutingConfig{
 		SlotQueueMaxPendingPerProvider: 7,
-		SlotQueueDeadlineS:             11,
+		SlotQueueDeadlineS:             10,
 		SlotQueuePollIntervalMS:        50,
 	})(s)
 
 	if s.slotQueue == nil || s.slotQueue.maxPending != 7 {
 		t.Fatalf("slot queue maxPending = %v, want 7", s.slotQueue)
 	}
-	if s.slotQueueDeadline != 11*time.Second {
-		t.Fatalf("slotQueueDeadline = %s, want 11s", s.slotQueueDeadline)
+	if s.slotQueueDeadline != 10*time.Second {
+		t.Fatalf("slotQueueDeadline = %s, want 10s", s.slotQueueDeadline)
 	}
 	if s.slotQueuePollInterval != 50*time.Millisecond {
 		t.Fatalf("slotQueuePollInterval = %s, want 50ms", s.slotQueuePollInterval)
@@ -212,12 +212,16 @@ func TestAcceptedRequestReleasesReservationAllowsSiblingSelect(t *testing.T) {
 	if state.queuedSlotProviderID != "" {
 		t.Fatalf("reservation still held after provider accept: %q", state.queuedSlotProviderID)
 	}
-	if s.slotQueue.blocksProvider(provider.ProviderID, provider.SlotsFree) {
-		t.Fatal("slot queue still blocks provider after accept-release")
+	got, ok := registry.Resolve(provider.ProviderID, provider.AssignedID)
+	if !ok {
+		t.Fatal("provider missing after accept")
 	}
-	got, routeErr := s.selectProviderExcluding(context.Background(), "rid-accept-2", poolChatReq(""), http.Header{}, nil, "2026-09-14", &forwardState{slotReservationsEnabled: true})
-	if routeErr != nil || got.ProviderID != provider.ProviderID {
-		t.Fatalf("sibling after accept provider=%q err=%+v, want %q nil", got.ProviderID, routeErr, provider.ProviderID)
+	if got.SlotsFree != 0 || got.State != pool.StateBusy {
+		t.Fatalf("after accept occupancy = state %q slots_free %d, want busy/0", got.State, got.SlotsFree)
+	}
+	_, routeErr := s.selectProviderExcluding(context.Background(), "rid-accept-2", poolChatReq(""), http.Header{}, nil, "2026-09-14", &forwardState{slotReservationsEnabled: true})
+	if routeErr == nil || routeErr.status != http.StatusServiceUnavailable || routeErr.code != "no_provider_available" {
+		t.Fatalf("sibling after accept: want 503 no_provider_available, got provider=%v err=%+v", routeErr == nil, routeErr)
 	}
 }
 

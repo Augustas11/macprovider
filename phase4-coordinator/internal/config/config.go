@@ -2520,8 +2520,8 @@ func (c Config) Validate() error {
 	if c.Routing.SlotQueueMaxPendingPerProvider <= 0 {
 		return fmt.Errorf("routing.slot_queue_max_pending_per_provider must be > 0")
 	}
-	if c.Routing.SlotQueueDeadlineS <= 0 {
-		return fmt.Errorf("routing.slot_queue_deadline_s must be > 0")
+	if c.Routing.SlotQueueDeadlineS <= 0 || c.Routing.SlotQueueDeadlineS > 10 {
+		return fmt.Errorf("routing.slot_queue_deadline_s must be in 1..10")
 	}
 	if c.Routing.SlotQueuePollIntervalMS <= 0 {
 		return fmt.Errorf("routing.slot_queue_poll_interval_ms must be > 0")

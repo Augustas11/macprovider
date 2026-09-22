@@ -294,8 +294,11 @@ changing them:
   SPEC-024 §8).
 - `SPEC-006-R014` — Auto-prefix tags hash the stable system+tools scaffold when
   present so unique user questions share a ConversationCache key (§5.4.1, v0.9.31).
+- `SPEC-006-R015` — Coordinator slot reservation is released on provider accept;
+  occupancy after accept is the consumed pool snapshot plus heartbeat; bounded
+  slot-queue deadline is at most 10 seconds (§7.8, v0.9.32).
 
-`requirement_id_migration` is `complete`. R004–R014 are not promoted from
+`requirement_id_migration` is `complete`. R004–R015 are not promoted from
 this close. Signed journey-result evidence is still required before any of
 those rows can become conformant.
 

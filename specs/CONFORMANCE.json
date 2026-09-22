@@ -5037,12 +5037,15 @@
       "implementation": [
         "phase4-coordinator/internal/buyer/server.go:noteProviderAcceptedRequest",
         "phase4-coordinator/internal/buyer/server.go:slotQueueDefaultDeadline",
-        "phase4-coordinator/internal/config/config.go:SlotQueueDeadlineS"
+        "phase4-coordinator/internal/config/config.go:SlotQueueDeadlineS",
+        "phase4-coordinator/internal/pool/provider.go:ConsumeForwardedSlot"
       ],
       "tests": [
         "phase4-coordinator/internal/buyer/slot_reservation_test.go:TestFourSlotProviderAdmitsFourReservations",
         "phase4-coordinator/internal/buyer/slot_reservation_test.go:TestAcceptedRequestReleasesReservationAllowsSiblingSelect",
-        "phase4-coordinator/internal/buyer/slot_reservation_test.go:TestDefaultSlotQueueDeadlineCoversOneThirtyBDecode"
+        "phase4-coordinator/internal/buyer/slot_reservation_test.go:TestDefaultSlotQueueDeadlineCoversOneThirtyBDecode",
+        "phase4-coordinator/internal/pool/provider_test.go:TestConsumeForwardedSlotDecrementsAndMarksBusy",
+        "phase4-coordinator/internal/config/config_test.go:TestRoutingSlotQueueValidation"
       ],
       "journeys": [],
       "evidence": [],
