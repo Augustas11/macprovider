@@ -2,14 +2,29 @@ package buyer
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/billing"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
 	"github.com/augstar/macprovider-coordinator/internal/requestlog"
 )
+
+// settlementOutputWriteContextForTest, when set, replaces the detached
+// context used for the post-credit settlement-output write. attempt is 1
+// for the first try and 2 for the deadline retry. Production leaves it nil.
+var settlementOutputWriteContextForTest func(attempt int, ctx context.Context) context.Context
+
+// hotPathWriteContextForTest replaces the context for a provider-credit
+// write. attempt is 1 for the first try and 2 for the deadline retry.
+var hotPathWriteContextForTest func(attempt int, ctx context.Context) context.Context
+
+// settlementOutputWriteErrForTest, when set, fails the settlement-output
+// write after the credit is stored. A non-deadline error still fails the buyer.
+var settlementOutputWriteErrForTest error
 
 // billingRecorder is the typed extraction of the previously-inline
 // logRowWithBilling closure from handleChatCompletions. M3-10
@@ -139,7 +154,14 @@ type billingRecorder struct {
 	// attempt-output write succeeded": a billable leg whose attempt output
 	// failed to persist must stay loud, because that is a real evidence gap
 	// that makes the request non-payable under SPEC-022. Issue #1578.
-	lastRecordedSettlementSubject bool
+	//
+	// settlementOutputMissingAfterCredit is the one exception. The credit
+	// row is already committed. A SQLite deadline or lock on the output
+	// write must not turn the buyer response into a 500: the gateway then
+	// settles prompt-only while the ledger keeps the completion credit
+	// (issue #1675). Hard failures (missing table, constraint) still return.
+	lastRecordedSettlementSubject      bool
+	settlementOutputMissingAfterCredit bool
 }
 
 type relayBlindAuditFields struct {
@@ -463,13 +485,7 @@ func (b *billingRecorder) recordRow(
 			PositiveVerificationExcluded: row.PositiveVerificationExcluded,
 			RewardsExcluded:              row.RewardsExcluded,
 		}
-		var err error
-		if b.hasAuthenticatedAccount {
-			err = billingStore.WriteHotPathForAccount(ctx, s.reqLogStore, b.authenticatedAccount, row, billingInput)
-		} else {
-			err = billingStore.WriteHotPath(ctx, s.reqLogStore, row, billingInput)
-		}
-		if err != nil {
+		if err := b.writeProviderHotPath(ctx, billingStore, row, billingInput); err != nil {
 			s.log.Warn().Err(err).Str("request_id", b.requestID).Msg("billing hot-path insert failed")
 			fallbackCtx, fallbackCancel := context.WithTimeout(context.Background(), requestLogWriteTimeout)
 			defer fallbackCancel()
@@ -483,6 +499,9 @@ func (b *billingRecorder) recordRow(
 				s.log.Warn().Err(fallbackErr).Str("request_id", b.requestID).Msg("request_log identity fallback insert failed")
 				return fmt.Errorf("billing hot-path insert failed: %w; fallback failed: %v", err, fallbackErr)
 			}
+			// The fallback saves the request log only. It does not pay the
+			// provider. Do not mark this leg credited.
+			return err
 		}
 		// A provider-bound, billable (status != 503) row is now durably
 		// persisted — the provider has been credited. Mark BEFORE the
@@ -493,10 +512,9 @@ func (b *billingRecorder) recordRow(
 		// #766 observe-only: publish the credited row to the request arbiter
 		// so the buyer terminal / ledger agreement is checkable. Placed with
 		// providerCredited (i.e. BEFORE the settlement-output bookkeeping) so
-		// the arbiter sees exactly what the ledger credited, including when a
-		// settlement-persist failure later turns the buyer terminal into a 500.
+		// the arbiter sees exactly what the ledger credited.
 		b.noteBillableRow(status, attemptN, faultFlag)
-		if err := b.recordSettlementAttemptOutput(ctx, billingStore, billingInput, settlementOutput); err != nil {
+		if err := b.persistSettlementAttemptOutput(billingStore, billingInput, settlementOutput); err != nil {
 			return err
 		}
 		return nil
@@ -544,11 +562,109 @@ func (b *billingRecorder) recordRow(
 			PositiveVerificationExcluded: row.PositiveVerificationExcluded,
 			RewardsExcluded:              row.RewardsExcluded,
 		}
-		if err := b.recordSettlementAttemptOutput(ctx, billingStore, billingInput, settlementOutput); err != nil {
+		if err := b.persistSettlementAttemptOutput(billingStore, billingInput, settlementOutput); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// writeProviderHotPath writes the request log and the provider credit
+// together. A database deadline gets one fresh retry. If the first try
+// actually committed, the retry is skipped so the provider is not paid
+// twice. If both tries fail, the caller must not treat the provider as paid.
+func (b *billingRecorder) writeProviderHotPath(ctx context.Context, store *billing.Store, row requestlog.Row, in billing.HotPathInput) error {
+	call := func(attempt int, parent context.Context) error {
+		writeCtx := parent
+		if hotPathWriteContextForTest != nil {
+			writeCtx = hotPathWriteContextForTest(attempt, parent)
+		}
+		if b.hasAuthenticatedAccount {
+			return store.WriteHotPathForAccount(writeCtx, b.server.reqLogStore, b.authenticatedAccount, row, in)
+		}
+		return store.WriteHotPath(writeCtx, b.server.reqLogStore, row, in)
+	}
+	err := call(1, ctx)
+	if err == nil || !settlementOutputPersistFailedAfterCredit(err) {
+		return err
+	}
+	b.server.log.Warn().Err(err).Str("request_id", b.requestID).Msg("billing hot-path insert failed; retrying provider credit")
+	retryCtx, retryCancel := context.WithTimeout(context.Background(), requestLogWriteTimeout)
+	defer retryCancel()
+	exists, lookErr := store.LedgerCreditExists(retryCtx, in.RequestID, in.AttemptN, in.ProviderID)
+	if lookErr != nil {
+		b.server.log.Warn().Err(lookErr).Str("request_id", b.requestID).Msg("billing hot-path credit lookup failed; not retrying")
+		return err
+	}
+	if exists {
+		b.server.log.Warn().Str("request_id", b.requestID).Msg("billing hot-path credit already stored after deadline")
+		return nil
+	}
+	return call(2, retryCtx)
+}
+
+// persistSettlementAttemptOutput writes the settlement evidence after the
+// credit row has committed. It uses its own timeout so a slow credit insert
+// cannot eat the budget for this write. A deadline or lock after the credit
+// is logged and does not fail the buyer. Any other error still fails the
+// request.
+func (b *billingRecorder) persistSettlementAttemptOutput(store *billing.Store, in billing.HotPathInput, output *billing.SettlementOutput) error {
+	call := func(attempt int) error {
+		if attempt == 1 && settlementOutputWriteErrForTest != nil {
+			return settlementOutputWriteErrForTest
+		}
+		outputCtx, outputCancel := context.WithTimeout(context.Background(), requestLogWriteTimeout)
+		defer outputCancel()
+		if settlementOutputWriteContextForTest != nil {
+			outputCtx = settlementOutputWriteContextForTest(attempt, outputCtx)
+		}
+		return b.recordSettlementAttemptOutput(outputCtx, store, in, output)
+	}
+	err := call(1)
+	if err == nil || !settlementOutputPersistFailedAfterCredit(err) {
+		return err
+	}
+	accountScope, evidenceAttemptN := b.settlementEvidenceIdentity(in)
+	retryCtx, retryCancel := context.WithTimeout(context.Background(), requestLogWriteTimeout)
+	defer retryCancel()
+	exists, lookErr := store.SettlementAttemptOutputExists(retryCtx, accountScope, in.RequestID, evidenceAttemptN, in.ProviderID)
+	if lookErr != nil {
+		b.server.log.Warn().Err(lookErr).Str("request_id", b.requestID).Msg("settlement attempt output lookup failed; not retrying")
+	} else if exists {
+		return nil
+	} else if retryErr := call(2); retryErr == nil {
+		return nil
+	} else if !settlementOutputPersistFailedAfterCredit(retryErr) {
+		return retryErr
+	} else {
+		err = retryErr
+	}
+	markCtx, markCancel := context.WithTimeout(context.Background(), requestLogWriteTimeout)
+	defer markCancel()
+	if markErr := store.MarkSettlementOutputMissing(markCtx, in.RequestID, in.AttemptN, in.ProviderID); markErr != nil {
+		b.server.log.Warn().Err(markErr).Str("request_id", b.requestID).Msg("settlement attempt output missing mark failed")
+	}
+	b.settlementOutputMissingAfterCredit = true
+	b.server.log.Warn().
+		Err(err).
+		Str("request_id", b.requestID).
+		Str("event", "settlement_output_persist_failed_after_credit").
+		Msg("settlement attempt output missing after provider credit; buyer response kept")
+	return nil
+}
+
+func settlementOutputPersistFailedAfterCredit(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) || errors.Is(err, billing.ErrRouteSnapshotStorePressure) {
+		return true
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "context deadline exceeded") ||
+		strings.Contains(msg, "SQLITE_BUSY") ||
+		strings.Contains(msg, "SQLITE_LOCKED") ||
+		strings.Contains(msg, "database is locked")
 }
 
 func boundedTokenPointer(value *int64, limit int64) *int64 {
@@ -563,6 +679,14 @@ func boundedTokenPointer(value *int64, limit int64) *int64 {
 		bounded = limit
 	}
 	return &bounded
+}
+
+func (b *billingRecorder) settlementEvidenceIdentity(in billing.HotPathInput) (string, int64) {
+	attemptN := int64(in.AttemptN)
+	if b.hasSettlementAttemptN {
+		attemptN = int64(b.settlementAttemptN)
+	}
+	return accountScopeForSettlement(b.accountID), attemptN
 }
 
 func (b *billingRecorder) settlementPolicyForLedger() (string, string) {
@@ -652,14 +776,11 @@ func (b *billingRecorder) recordSettlementAttemptOutput(ctx context.Context, sto
 	if terminalTS <= 0 {
 		terminalTS = time.Now().UTC().UnixMilli()
 	}
-	settlementAttemptN := in.AttemptN
-	if b.hasSettlementAttemptN {
-		settlementAttemptN = b.settlementAttemptN
-	}
+	accountScope, settlementAttemptN := b.settlementEvidenceIdentity(in)
 	attempt := billing.SettlementAttemptOutput{
-		AccountScope:          accountScopeForSettlement(b.accountID),
+		AccountScope:          accountScope,
 		RequestID:             in.RequestID,
-		AttemptN:              int64(settlementAttemptN),
+		AttemptN:              settlementAttemptN,
 		ProviderID:            in.ProviderID,
 		Output:                out,
 		OutputAvailable:       outputAvailable,

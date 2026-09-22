@@ -300,6 +300,72 @@ func TestInsertSettlementAttemptOutputOverlapIsAccountScoped(t *testing.T) {
 	}
 }
 
+func TestDeadlineRetryIdentityStaysOnOneAttempt(t *testing.T) {
+	reqStore, store := newRequestAndBillingStores(t)
+	ctx := context.Background()
+	input, row := testHotPathInput(t, store)
+	if err := store.WriteHotPath(ctx, reqStore, row, input); err != nil {
+		t.Fatal(err)
+	}
+	exists, err := store.LedgerCreditExists(ctx, input.RequestID, 0, input.ProviderID)
+	if err != nil || !exists {
+		t.Fatalf("attempt 0 credit exists=%v err=%v", exists, err)
+	}
+	exists, err = store.LedgerCreditExists(ctx, input.RequestID, 1, input.ProviderID)
+	if err != nil || exists {
+		t.Fatalf("attempt 1 credit exists=%v err=%v, want absent", exists, err)
+	}
+	input.AttemptN = 1
+	row.Retried = 1
+	if err := store.WriteHotPath(ctx, reqStore, row, input); err != nil {
+		t.Fatal(err)
+	}
+
+	first := SettlementAttemptOutput{
+		AccountScope:          "acct-a",
+		RequestID:             input.RequestID,
+		AttemptN:              0,
+		ProviderID:            input.ProviderID,
+		Output:                testSettlementOutput(),
+		OutputAvailable:       true,
+		Usage:                 testSettlementUsage(),
+		UsageSource:           UsageSourceByteEstimated,
+		TerminalStateTSUnixMS: 1716768000000,
+	}
+	if _, err := store.InsertSettlementAttemptOutput(ctx, first); err != nil {
+		t.Fatal(err)
+	}
+	exists, err = store.SettlementAttemptOutputExists(ctx, "acct-a", input.RequestID, 0, input.ProviderID)
+	if err != nil || !exists {
+		t.Fatalf("attempt 0 evidence exists=%v err=%v", exists, err)
+	}
+	exists, err = store.SettlementAttemptOutputExists(ctx, "acct-a", input.RequestID, 1, input.ProviderID)
+	if err != nil || exists {
+		t.Fatalf("attempt 1 evidence exists=%v err=%v, want absent", exists, err)
+	}
+	exists, err = store.SettlementAttemptOutputExists(ctx, "acct-b", input.RequestID, 0, input.ProviderID)
+	if err != nil || exists {
+		t.Fatalf("other account evidence exists=%v err=%v, want absent", exists, err)
+	}
+
+	if err := store.MarkSettlementOutputMissing(ctx, input.RequestID, 1, input.ProviderID); err != nil {
+		t.Fatal(err)
+	}
+	var attempt0, attempt1 sql.NullString
+	if err := store.db.QueryRow(`SELECT quarantine_reason FROM ledger_request_credits WHERE request_id = ? AND attempt_n = 0`, input.RequestID).Scan(&attempt0); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.db.QueryRow(`SELECT quarantine_reason FROM ledger_request_credits WHERE request_id = ? AND attempt_n = 1`, input.RequestID).Scan(&attempt1); err != nil {
+		t.Fatal(err)
+	}
+	if attempt0.Valid {
+		t.Fatalf("attempt 0 reason=%q, want unmarked", attempt0.String)
+	}
+	if !attempt1.Valid || attempt1.String != "settlement_attempt_output_missing" {
+		t.Fatalf("attempt 1 reason=%v, want settlement_attempt_output_missing", attempt1)
+	}
+}
+
 func testSettlementOutput() SettlementOutput {
 	finish := "stop"
 	toolCalls := []SettlementToolCall{{

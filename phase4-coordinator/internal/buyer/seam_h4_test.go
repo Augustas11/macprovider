@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -292,12 +293,11 @@ func TestSeamH4_PostTerminalBillingRowIsOrderedAndAgrees(t *testing.T) {
 // H4-3 · THE TRIPWIRE: provider credited while the buyer was told the request
 // failed (INV-6 / I-1).
 //
-// Forced deterministically without touching production code: drop
-// settlement_attempt_outputs after the stores are built. The WS success path
-// then runs logSuccess → recordRow → WriteHotPath SUCCEEDS (the provider is
-// credited, providerCredited=true, row status 200) → recordSettlementAttemptOutput
-// fails on the missing table → logSuccess returns an error → forwardWSNonStreaming
-// writes 500 request_log_failed to the buyer.
+// Forced deterministically without touching production code: the credit write
+// succeeds, then the settlement-output write returns a hard error. The WS
+// success path runs logSuccess → recordRow → WriteHotPath SUCCEEDS (the
+// provider is credited) → the output write fails → logSuccess returns an
+// error → forwardWSNonStreaming writes 500 request_log_failed to the buyer.
 //
 // Result: the ledger says a provider earned a 200-status credit with no
 // breaker-qualifying fault flag (so neither of the two accidental zeroing
@@ -306,15 +306,13 @@ func TestSeamH4_PostTerminalBillingRowIsOrderedAndAgrees(t *testing.T) {
 // conflicts, the arbiter has stopped observing the money seam it exists for.
 // ---------------------------------------------------------------------------
 func TestSeamH4_CreditedWhileBuyerToldFailedIsAConflict(t *testing.T) {
+	prev := settlementOutputWriteErrForTest
+	settlementOutputWriteErrForTest = errors.New("settlement attempt output table missing")
+	t.Cleanup(func() { settlementOutputWriteErrForTest = prev })
+
 	reqLog, dbPath := h4OpenRequestLog(t)
 	var observed *requestTerminal
 	s := h4Server(t, reqLog, h4RelaySuccess(), &observed)
-
-	// After billing.NewStore has migrated the schema: remove the settlement
-	// attempt-output table so the post-credit bookkeeping fails.
-	if _, err := reqLog.DB().Exec(`DROP TABLE settlement_attempt_outputs`); err != nil {
-		t.Fatalf("drop settlement_attempt_outputs: %v", err)
-	}
 
 	before := buyerTerminalConflictTotal.Load()
 	rr := h4PostChat(t, s, []byte(h4ChatBody))
@@ -355,6 +353,188 @@ func TestSeamH4_CreditedWhileBuyerToldFailedIsAConflict(t *testing.T) {
 	// arbiter. Suppressing it would erase a real provider credit.
 	if !observed.Rows()[0].Conflicted {
 		t.Fatal("conflicting row not marked Conflicted")
+	}
+}
+
+// TestSeamH4_SettlementOutputDeadlineAfterCreditKeepsBuyerSuccess is issue
+// #1675. A SQLite deadline after the credit row commits must not tell the
+// buyer the request failed. That 500 is what the gateway settles as
+// prompt-only while the ledger keeps the completion credit.
+func TestSeamH4_SettlementOutputDeadlineAfterCreditKeepsBuyerSuccess(t *testing.T) {
+	prev := settlementOutputWriteContextForTest
+	settlementOutputWriteContextForTest = func(int, context.Context) context.Context {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		return ctx
+	}
+	t.Cleanup(func() { settlementOutputWriteContextForTest = prev })
+
+	reqLog, dbPath := h4OpenRequestLog(t)
+	var observed *requestTerminal
+	s := h4Server(t, reqLog, h4RelaySuccess(), &observed)
+
+	rr := h4PostChat(t, s, []byte(h4ChatBody))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("buyer status = %d, want 200; body=%s", rr.Code, rr.Body.String())
+	}
+	if strings.Contains(rr.Body.String(), "request_log_failed") {
+		t.Fatalf("buyer body = %s, want the served completion", rr.Body.String())
+	}
+	if statuses := h4RequestLogStatuses(t, dbPath); len(statuses) != 1 || statuses[0] != http.StatusOK {
+		t.Fatalf("request_log statuses = %v, want exactly [200]", statuses)
+	}
+	if observed == nil {
+		t.Fatal("terminal arbiter was never evaluated")
+	}
+	claim, ok := observed.claimedBuyer()
+	if !ok || claim.Status != http.StatusOK {
+		t.Fatalf("claimed buyer terminal = %+v (ok=%v), want status 200", claim, ok)
+	}
+	if got := observed.Conflicts(); got != 0 {
+		t.Fatalf("conflicts = %d, want 0 — the buyer was given the served completion", got)
+	}
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+	var credits int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM ledger_request_credits WHERE status = 200 AND provider_credits > 0`).Scan(&credits); err != nil {
+		t.Fatalf("count credits: %v", err)
+	}
+	if credits != 1 {
+		t.Fatalf("credited rows = %d, want 1", credits)
+	}
+	var outputs int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM settlement_attempt_outputs`).Scan(&outputs); err != nil {
+		t.Fatalf("count settlement outputs: %v", err)
+	}
+	if outputs != 0 {
+		t.Fatalf("settlement outputs = %d, want 0 — the deadline dropped the evidence row", outputs)
+	}
+	var quarantined int
+	var reason sql.NullString
+	if err := db.QueryRow(`SELECT quarantined, quarantine_reason FROM ledger_request_credits`).Scan(&quarantined, &reason); err != nil {
+		t.Fatalf("read credit mark: %v", err)
+	}
+	if quarantined != 0 || !reason.Valid || reason.String != "settlement_attempt_output_missing" {
+		t.Fatalf("quarantined=%d reason=%v, want the credit kept and marked settlement_attempt_output_missing", quarantined, reason)
+	}
+}
+
+func TestSeamH4_SettlementOutputDeadlineRetriesEvidence(t *testing.T) {
+	prev := settlementOutputWriteContextForTest
+	settlementOutputWriteContextForTest = func(attempt int, ctx context.Context) context.Context {
+		if attempt == 1 {
+			dead, cancel := context.WithCancel(context.Background())
+			cancel()
+			return dead
+		}
+		return ctx
+	}
+	t.Cleanup(func() { settlementOutputWriteContextForTest = prev })
+
+	reqLog, dbPath := h4OpenRequestLog(t)
+	var observed *requestTerminal
+	s := h4Server(t, reqLog, h4RelaySuccess(), &observed)
+	rr := h4PostChat(t, s, []byte(h4ChatBody))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("buyer status = %d, want 200; body=%s", rr.Code, rr.Body.String())
+	}
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+	var outputs int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM settlement_attempt_outputs`).Scan(&outputs); err != nil {
+		t.Fatalf("count settlement outputs: %v", err)
+	}
+	if outputs != 1 {
+		t.Fatalf("settlement outputs = %d, want 1 after the evidence retry", outputs)
+	}
+	var marked int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM ledger_request_credits WHERE quarantine_reason = 'settlement_attempt_output_missing'`).Scan(&marked); err != nil {
+		t.Fatalf("count marks: %v", err)
+	}
+	if marked != 0 {
+		t.Fatalf("marked credits = %d, want 0 when the evidence retry landed", marked)
+	}
+}
+
+// TestSeamH4_HotPathDeadlineRetriesProviderCredit is the other #1675 hole.
+// A deadline on the payment write used to fall through to a request-log-only
+// save and leave the served request unpaid. One fresh retry must land the credit.
+func TestSeamH4_HotPathDeadlineRetriesProviderCredit(t *testing.T) {
+	prev := hotPathWriteContextForTest
+	hotPathWriteContextForTest = func(attempt int, ctx context.Context) context.Context {
+		if attempt == 1 {
+			dead, cancel := context.WithCancel(context.Background())
+			cancel()
+			return dead
+		}
+		return ctx
+	}
+	t.Cleanup(func() { hotPathWriteContextForTest = prev })
+
+	reqLog, dbPath := h4OpenRequestLog(t)
+	var observed *requestTerminal
+	s := h4Server(t, reqLog, h4RelaySuccess(), &observed)
+	rr := h4PostChat(t, s, []byte(h4ChatBody))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("buyer status = %d, want 200; body=%s", rr.Code, rr.Body.String())
+	}
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+	var credits int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM ledger_request_credits WHERE status = 200 AND provider_credits > 0`).Scan(&credits); err != nil {
+		t.Fatalf("count credits: %v", err)
+	}
+	if credits != 1 {
+		t.Fatalf("credited rows = %d, want 1 after the credit retry", credits)
+	}
+}
+
+// TestSeamH4_HotPathDeadlineDoesNotPretendPaid proves a failed credit retry
+// is not reported as a provider payment.
+func TestSeamH4_HotPathDeadlineDoesNotPretendPaid(t *testing.T) {
+	prev := hotPathWriteContextForTest
+	hotPathWriteContextForTest = func(int, context.Context) context.Context {
+		dead, cancel := context.WithCancel(context.Background())
+		cancel()
+		return dead
+	}
+	t.Cleanup(func() { hotPathWriteContextForTest = prev })
+
+	reqLog, dbPath := h4OpenRequestLog(t)
+	var observed *requestTerminal
+	s := h4Server(t, reqLog, h4RelaySuccess(), &observed)
+	rr := h4PostChat(t, s, []byte(h4ChatBody))
+	if rr.Code == http.StatusOK {
+		t.Fatalf("buyer status = 200, want a failure when the credit write did not land; body=%s", rr.Body.String())
+	}
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+	var credits int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM ledger_request_credits`).Scan(&credits); err != nil {
+		t.Fatalf("count credits: %v", err)
+	}
+	if credits != 0 {
+		t.Fatalf("credited rows = %d, want 0", credits)
+	}
+	if observed != nil {
+		if got := observed.Conflicts(); got != 0 {
+			t.Fatalf("conflicts = %d, want 0 — no credit was recorded", got)
+		}
+		for _, row := range observed.Rows() {
+			t.Fatalf("credited row was noted without a ledger credit: %+v", row)
+		}
 	}
 }
 
