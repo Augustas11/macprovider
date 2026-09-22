@@ -2526,6 +2526,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// forwardWithFailover dispatch loop (covering initial, retry, and failover
 	// dispatches) — see forward_with_failover.go.
 	defer s.releaseQueuedSlotReservation(state) // safety net; accept-path releases earlier
+	defer s.restoreConsumedForwardedSlot(state) // safety net; success-path restores earlier
 	// M2-1c: the three transport loops (streaming, WS-non-streaming, HTTP)
 	// previously duplicated the retry/failover/busy-marking decision tree.
 	// They now share three thin helpers (forwardStreamSequence,
@@ -3437,6 +3438,7 @@ func (s *Server) advanceToNextProvider(
 	rec *billingRecorder,
 ) (nextRouteID string, ok bool) {
 	nextRouteID = uuid.NewString()
+	s.restoreConsumedForwardedSlot(state)
 	s.releaseQueuedSlotReservation(state)
 	state.queueWait = 0
 	picked, routeErr := s.selectProviderExcluding(r.Context(), nextRouteID, req, r.Header, excluded, state.dailyKey, state)
@@ -8233,11 +8235,13 @@ func (s *Server) releaseQueuedSlotReservation(state *forwardState) {
 // It also consumes one slot on the pool snapshot so a sibling select cannot
 // reuse stale slots_free before the next heartbeat. Occupancy after this is
 // the consumed snapshot plus provider state_update, not a second coordinator
-// lease held for the rest of the stream.
+// lease held for the rest of the stream. A prior attempt's consumed slot is
+// restored first so failover/retry cannot leave the last Mac busy.
 func (s *Server) noteProviderAcceptedRequest(state *forwardState) {
 	if state == nil {
 		return
 	}
+	s.restoreConsumedForwardedSlot(state)
 	if s.pool != nil {
 		provider := state.provider
 		if provider.ProviderID == "" && state.queuedSlotProviderID != "" {
@@ -8249,10 +8253,37 @@ func (s *Server) noteProviderAcceptedRequest(state *forwardState) {
 		if provider.ProviderID != "" && provider.AssignedID != "" {
 			if s.pool.ConsumeForwardedSlot(provider.ProviderID, provider.AssignedID) {
 				state.slotConsumedOnAccept = true
+				state.consumedProviderID = provider.ProviderID
+				state.consumedAssignedID = provider.AssignedID
 			}
 		}
 	}
 	s.releaseQueuedSlotReservation(state)
+}
+
+func (s *Server) restoreConsumedForwardedSlot(state *forwardState) {
+	if s == nil || s.pool == nil || state == nil || !state.slotConsumedOnAccept {
+		return
+	}
+	providerID := state.consumedProviderID
+	assignedID := state.consumedAssignedID
+	if providerID == "" {
+		providerID = state.provider.ProviderID
+		assignedID = state.provider.AssignedID
+	}
+	if providerID != "" && assignedID != "" {
+		s.pool.RestoreForwardedSlot(providerID, assignedID)
+	}
+	s.dropConsumedForwardedSlot(state)
+}
+
+func (s *Server) dropConsumedForwardedSlot(state *forwardState) {
+	if state == nil {
+		return
+	}
+	state.slotConsumedOnAccept = false
+	state.consumedProviderID = ""
+	state.consumedAssignedID = ""
 }
 
 func (s *Server) reconcileForwardedSlotAvailable(state *forwardState) {
@@ -8263,8 +8294,10 @@ func (s *Server) reconcileForwardedSlotAvailable(state *forwardState) {
 		defer s.releaseQueuedSlotReservation(state)
 	}
 	if state.slotConsumedOnAccept {
-		// Provider-origin capacity is the post-accept writer. Do not
-		// republish the route-time slots_free snapshot.
+		// Restore the one consumed slot. Do not republish the route-time
+		// slots_free snapshot — that over-admits when the Mac already
+		// decremented occupancy.
+		s.restoreConsumedForwardedSlot(state)
 		return
 	}
 	provider := state.provider

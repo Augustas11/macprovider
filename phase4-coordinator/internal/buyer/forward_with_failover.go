@@ -183,6 +183,9 @@ func (s *Server) forwardWithFailover(
 		state.faultedRoutes[state.provider.SortKey()] = struct{}{}
 		if tr.markBusy {
 			s.pool.MarkState(state.provider.ProviderID, state.provider.AssignedID, pool.StateBusy)
+			// Queue-full / still-busy terminals keep the consumed occupancy.
+			// Restoring here would republish a free slot while the Mac is full.
+			s.dropConsumedForwardedSlot(state)
 		}
 
 		// Failover branch — the unified failover state machine. The
@@ -198,6 +201,7 @@ func (s *Server) forwardWithFailover(
 		if tr.failoverEligible && tx.onFailoverHit != nil && tx.onFailoverMiss != nil {
 			if !failoverAttempted && !hasPinnedRoute(r.Header) {
 				priorQueueWait := state.queueWait
+				s.restoreConsumedForwardedSlot(state)
 				s.releaseQueuedSlotReservation(state)
 				next, hit := s.failoverCandidate(r.Context(), uuid.NewString(), req, r.Header, state.provider, excluded, state.dailyKey, state)
 				if hit {

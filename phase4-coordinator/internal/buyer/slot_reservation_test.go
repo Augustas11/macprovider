@@ -225,6 +225,33 @@ func TestAcceptedRequestReleasesReservationAllowsSiblingSelect(t *testing.T) {
 	}
 }
 
+func TestReconcileAfterAcceptRestoresOccupancy(t *testing.T) {
+	s, registry, _ := poolIsolationServer(t)
+	provider := poolProvider("p-one")
+	registry.Register(&provider, nil)
+
+	state := &forwardState{slotReservationsEnabled: true}
+	if _, routeErr := s.selectProviderExcluding(context.Background(), "rid-restore-1", poolChatReq(""), http.Header{}, nil, "2026-09-14", state); routeErr != nil {
+		t.Fatalf("first selection rejected: %+v", routeErr)
+	}
+	s.noteProviderAcceptedRequest(state)
+	s.reconcileForwardedSlotAvailable(state)
+	if state.slotConsumedOnAccept {
+		t.Fatal("consumed flag still set after reconcile")
+	}
+	got, ok := registry.Resolve(provider.ProviderID, provider.AssignedID)
+	if !ok {
+		t.Fatal("provider missing after reconcile")
+	}
+	if got.SlotsFree != 1 || got.State != pool.StateReady {
+		t.Fatalf("after reconcile occupancy = state %q slots_free %d, want ready/1", got.State, got.SlotsFree)
+	}
+	selected, routeErr := s.selectProviderExcluding(context.Background(), "rid-restore-2", poolChatReq(""), http.Header{}, nil, "2026-09-14", &forwardState{slotReservationsEnabled: true})
+	if routeErr != nil || selected.ProviderID != provider.ProviderID {
+		t.Fatalf("sibling after reconcile provider=%q err=%+v, want %q", selected.ProviderID, routeErr, provider.ProviderID)
+	}
+}
+
 func TestSpoofedWholesaleHeaderRejectedBeforeReservationOverflowQueue(t *testing.T) {
 	s, registry, _ := poolIsolationServer(t)
 	provider := poolProvider("p-one")

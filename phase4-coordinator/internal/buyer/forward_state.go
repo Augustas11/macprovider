@@ -96,9 +96,13 @@ type forwardState struct {
 	queuedSlotProviderID string
 
 	// slotConsumedOnAccept is set when noteProviderAcceptedRequest decrements
-	// the pool snapshot. After that, heartbeat/state_update is the occupancy
-	// writer; reconcile MUST NOT republish the route-time slots_free hint.
+	// the pool snapshot. Reconcile/defer restore that one slot (+1) and MUST
+	// NOT republish the route-time slots_free hint. consumedProviderID /
+	// consumedAssignedID survive failover so the prior Mac is restored
+	// before the next route is selected.
 	slotConsumedOnAccept bool
+	consumedProviderID   string
+	consumedAssignedID   string
 
 	// explicitRetries is the retry counter the request_log.retried
 	// column and the shouldRetry caps key off. Incremented by
